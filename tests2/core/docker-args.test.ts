@@ -113,7 +113,7 @@ describe("buildDockerRunArgs", () => {
 		assert.ok(args.some(a => a.includes("metadata.internal")));
 	});
 
-	it("mounts named workspace and worktrees volumes when projectId is set", () => {
+	it("mounts named workspace, worktrees, and private SDK-state volumes when projectId is set", () => {
 		const projectId = "test-project-abc";
 		const args = buildDockerRunArgs({
 			image: "test", workspaceDir: "/tmp/test",
@@ -127,6 +127,8 @@ describe("buildDockerRunArgs", () => {
 			args.includes(`bobbit-worktrees-${projectId}:/workspace-wt`),
 			"should mount worktrees named volume",
 		);
+		assert.ok(args.includes(`bobbit-claude-agent-sdk-${projectId}:/bobbit-state/claude-agent-sdk`));
+		assert.ok(!args.some(arg => arg.includes(".bobbit/state/claude-agent-sdk")));
 	});
 
 	it("names and labels sandbox volumes by validated legacy E2E run ID without changing production names", () => {
@@ -137,6 +139,7 @@ describe("buildDockerRunArgs", () => {
 			assert.deepEqual(projectSandboxVolumeNames(projectId), {
 				workspace: `bobbit-workspace-${projectId}`,
 				worktrees: `bobbit-worktrees-${projectId}`,
+				claudeAgentSdkState: `bobbit-claude-agent-sdk-${projectId}`,
 			});
 			assert.deepEqual(e2eSandboxVolumeCreateArgs(projectId), []);
 
@@ -144,20 +147,24 @@ describe("buildDockerRunArgs", () => {
 			let args = buildDockerRunArgs({ image: "test", workspaceDir: "/tmp/test", projectId }, NOOP_COMMAND_RUNNER);
 			assert.ok(args.includes(`bobbit-workspace-${projectId}-e2e-legacy-run_123:/workspace`));
 			assert.ok(args.includes(`bobbit-worktrees-${projectId}-e2e-legacy-run_123:/workspace-wt`));
+			assert.ok(args.includes(`bobbit-claude-agent-sdk-${projectId}-e2e-legacy-run_123:/bobbit-state/claude-agent-sdk`));
 			assert.deepEqual(e2eSandboxVolumeCreateArgs(projectId), [
 				["volume", "create", "--label", `bobbit-project=${projectId}`, "--label", "bobbit-e2e-run=legacy-run_123", `bobbit-workspace-${projectId}-e2e-legacy-run_123`],
 				["volume", "create", "--label", `bobbit-project=${projectId}`, "--label", "bobbit-e2e-run=legacy-run_123", `bobbit-worktrees-${projectId}-e2e-legacy-run_123`],
+				["volume", "create", "--label", `bobbit-project=${projectId}`, "--label", "bobbit-e2e-run=legacy-run_123", `bobbit-claude-agent-sdk-${projectId}-e2e-legacy-run_123`],
 			]);
 
 			process.env.BOBBIT_E2E_RUN_ID = "bad/run-id";
 			args = buildDockerRunArgs({ image: "test", workspaceDir: "/tmp/test", projectId }, NOOP_COMMAND_RUNNER);
 			assert.ok(args.includes(`bobbit-workspace-${projectId}:/workspace`));
 			assert.ok(args.includes(`bobbit-worktrees-${projectId}:/workspace-wt`));
+			assert.ok(args.includes(`bobbit-claude-agent-sdk-${projectId}:/bobbit-state/claude-agent-sdk`));
 			assert.ok(!args.some(arg => arg.includes("bad/run-id")));
 			assert.deepEqual(e2eSandboxVolumeCreateArgs(projectId), []);
 			assert.deepEqual(projectSandboxVolumeNames(projectId, "bad/run-id"), {
 				workspace: `bobbit-workspace-${projectId}`,
 				worktrees: `bobbit-worktrees-${projectId}`,
+				claudeAgentSdkState: `bobbit-claude-agent-sdk-${projectId}`,
 			});
 
 			// Lifecycle callers capture their owner before an awaited Docker lookup.
@@ -167,9 +174,11 @@ describe("buildDockerRunArgs", () => {
 			args = buildDockerRunArgs({ image: "test", workspaceDir: "/tmp/test", projectId, e2eRunId: "captured-run" }, NOOP_COMMAND_RUNNER);
 			assert.ok(args.includes(`bobbit-workspace-${projectId}-e2e-captured-run:/workspace`));
 			assert.ok(args.includes(`bobbit-worktrees-${projectId}-e2e-captured-run:/workspace-wt`));
+			assert.ok(args.includes(`bobbit-claude-agent-sdk-${projectId}-e2e-captured-run:/bobbit-state/claude-agent-sdk`));
 			assert.deepEqual(e2eSandboxVolumeCreateArgs(projectId, "captured-run"), [
 				["volume", "create", "--label", `bobbit-project=${projectId}`, "--label", "bobbit-e2e-run=captured-run", `bobbit-workspace-${projectId}-e2e-captured-run`],
 				["volume", "create", "--label", `bobbit-project=${projectId}`, "--label", "bobbit-e2e-run=captured-run", `bobbit-worktrees-${projectId}-e2e-captured-run`],
+				["volume", "create", "--label", `bobbit-project=${projectId}`, "--label", "bobbit-e2e-run=captured-run", `bobbit-claude-agent-sdk-${projectId}-e2e-captured-run`],
 			]);
 		} finally {
 			if (prior === undefined) delete process.env.BOBBIT_E2E_RUN_ID;
@@ -206,6 +215,7 @@ describe("buildDockerRunArgs", () => {
 				["rm", "-f", "captured-container"],
 				["volume", "rm", "-f", `bobbit-workspace-${projectId}-e2e-${capturedRunId}`],
 				["volume", "rm", "-f", `bobbit-worktrees-${projectId}-e2e-${capturedRunId}`],
+				["volume", "rm", "-f", `bobbit-claude-agent-sdk-${projectId}-e2e-${capturedRunId}`],
 			]);
 		} finally {
 			if (prior === undefined) delete process.env.BOBBIT_E2E_RUN_ID;

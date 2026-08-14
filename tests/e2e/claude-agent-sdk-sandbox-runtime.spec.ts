@@ -7,8 +7,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "./gateway-harness.js";
 import { apiFetch, connectWs, defaultProjectId, gitCwd, nonGitCwd, waitForSessionStatus } from "./e2e-setup.js";
@@ -353,7 +352,7 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 		}
 	});
 
-	test("migrates legacy SDK state under a locked bind-mounted parent and rejects replacement", async () => {
+	test("migrates legacy SDK state in a private named volume and rejects replacement", async () => {
 		const imageHasSdkUser = isDockerSandboxAvailable() && (() => {
 			try {
 				execFileSync("docker", ["run", "--rm", SANDBOX_IMAGE, "id", "-u", "bobbit-sdk"], { stdio: "ignore", timeout: 10_000 });
@@ -361,40 +360,46 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 			} catch { return false; }
 		})();
 		test.skip(!imageHasSdkUser, "requires a locally rebuilt bobbit-agent image with the SDK user");
-		const stateRoot = mkdtempSync(join(tmpdir(), "bobbit-sdk-state-"));
+		const stateVolume = `bobbit-sdk-state-${randomUUID().slice(0, 8)}`;
 		const name = `bobbit-sdk-state-${randomUUID().slice(0, 8)}`;
+		const replacement = `${name}-replacement`;
 		const docker = (args: string[]): string => execFileSync("docker", args, { encoding: "utf8", timeout: 20_000 });
 		try {
-			docker(["run", "-d", "--name", name, "-v", `${stateRoot}:/bobbit-state/claude-agent-sdk`, SANDBOX_IMAGE, "sleep", "infinity"]);
-			docker(["exec", "-u", "node", name, "sh", "-c", "mkdir -p /bobbit-state/claude-agent-sdk/legacy-session/nested; printf legacy-history > /bobbit-state/claude-agent-sdk/legacy-session/history; printf nested > /bobbit-state/claude-agent-sdk/legacy-session/nested/entry; chmod 755 /bobbit-state/claude-agent-sdk/legacy-session/nested; chmod 644 /bobbit-state/claude-agent-sdk/legacy-session/history"]);
-			// Linux bind mounts retain the legacy node UID. Docker Desktop's host
-			// virtualization may coerce every bind-mounted file to root; production
-			// correctly fails closed there rather than claiming a writable SDK root.
-			test.skip(docker(["exec", "-u", "root", name, "stat", "-c", "%u", "/bobbit-state/claude-agent-sdk/legacy-session"]).trim() !== "1000", "Docker bind mount does not preserve container uid ownership");
-			const sandbox = new ProjectSandbox({ projectId: "sdk-state-e2e", projectDir: stateRoot, repoUrl: "https://example.test/repo.git", image: SANDBOX_IMAGE });
+			docker(["volume", "create", stateVolume]);
+			docker(["run", "-d", "--name", name, "-v", `${stateVolume}:/bobbit-state/claude-agent-sdk`, SANDBOX_IMAGE, "sleep", "infinity"]);
+			expect(docker(["inspect", "--format", "{{range .Mounts}}{{.Type}}:{{.Name}}:{{.Destination}}{{end}}", name])).toContain(`volume:${stateVolume}:/bobbit-state/claude-agent-sdk`);
+			// Simulate state written by the pre-lock UID-1000 container without
+			// weakening the fresh named volume's root-owned mountpoint.
+			docker(["exec", "-u", "root", name, "sh", "-c", "install -d -o node -g node -m 755 /bobbit-state/claude-agent-sdk/legacy-session/nested; printf legacy-history > /bobbit-state/claude-agent-sdk/legacy-session/history; printf nested > /bobbit-state/claude-agent-sdk/legacy-session/nested/entry; chown -R node:node /bobbit-state/claude-agent-sdk/legacy-session; chmod 755 /bobbit-state/claude-agent-sdk/legacy-session/nested; chmod 644 /bobbit-state/claude-agent-sdk/legacy-session/history"]);
+			const sandbox = new ProjectSandbox({ projectId: "sdk-state-e2e", projectDir: gitCwd(), repoUrl: "https://example.test/repo.git", image: SANDBOX_IMAGE });
 			(sandbox as any).containerId = name;
 
-			// This is the creation/reconnect lifecycle gate: once the state parent is
-			// exposed to a container, node cannot open another legacy config file.
-			await (sandbox as any)._prepareClaudeAgentSdkStateParent(name);
-			expect(() => docker(["exec", "-u", "node", name, "cat", "/bobbit-state/claude-agent-sdk/legacy-session/history"])).toThrow();
-
-			// A legacy hard link could retain an attacker-openable alias. Migration
-			// rejects it before the linked regular file receives SDK ownership.
+			// A legacy hard link could retain an attacker-openable alias. The
+			// pre-exposure lifecycle gate rejects it before changing the file.
 			docker(["exec", "-u", "root", name, "ln", "/bobbit-state/claude-agent-sdk/legacy-session/history", "/bobbit-state/claude-agent-sdk/legacy-session/history-alias"]);
-			await expect(sandbox.prepareClaudeAgentSdkSession("/workspace", "legacy-session")).rejects.toThrow();
+			await expect((sandbox as any)._prepareClaudeAgentSdkStateParent(name)).rejects.toThrow();
 			expect(docker(["exec", "-u", "root", name, "stat", "-c", "%h:%u:%a", "/bobbit-state/claude-agent-sdk/legacy-session/history"])).toBe("2:1000:644\n");
 			docker(["exec", "-u", "root", name, "rm", "/bobbit-state/claude-agent-sdk/legacy-session/history-alias"]);
 
+			// This is the creation/reconnect lifecycle gate: it migrates every
+			// dormant legacy child before node can open the known history path.
+			await (sandbox as any)._prepareClaudeAgentSdkStateParent(name);
+			expect(() => docker(["exec", "-u", "node", name, "cat", "/bobbit-state/claude-agent-sdk/legacy-session/history"])).toThrow();
 			await sandbox.prepareClaudeAgentSdkSession("/workspace", "legacy-session");
 			expect(docker(["exec", "-u", "root", name, "stat", "-c", "%u:%a", "/bobbit-state/claude-agent-sdk", "/bobbit-state/claude-agent-sdk/legacy-session", "/bobbit-state/claude-agent-sdk/legacy-session/nested", "/bobbit-state/claude-agent-sdk/legacy-session/history", "/bobbit-state/claude-agent-sdk/legacy-session/nested/entry"])).toBe("0:711\n1001:700\n1001:700\n1001:600\n1001:600\n");
 			expect(docker(["exec", "-u", "bobbit-sdk", name, "cat", "/bobbit-state/claude-agent-sdk/legacy-session/history"])).toBe("legacy-history");
 			expect(() => docker(["exec", "-u", "node", name, "sh", "-c", "mv /bobbit-state/claude-agent-sdk/legacy-session /tmp/replaced; ln -s /tmp/replaced /bobbit-state/claude-agent-sdk/legacy-session"])).toThrow();
-			docker(["restart", name]);
-			expect(docker(["exec", "-u", "bobbit-sdk", name, "cat", "/bobbit-state/claude-agent-sdk/legacy-session/history"])).toBe("legacy-history");
+			// A replacement container reuses the private named volume, preserving
+			// dormant history without leaving root-owned host project state behind.
+			docker(["rm", "-f", name]);
+			docker(["run", "-d", "--name", replacement, "-v", `${stateVolume}:/bobbit-state/claude-agent-sdk`, SANDBOX_IMAGE, "sleep", "infinity"]);
+			expect(docker(["exec", "-u", "bobbit-sdk", replacement, "cat", "/bobbit-state/claude-agent-sdk/legacy-session/history"])).toBe("legacy-history");
+			docker(["restart", replacement]);
+			expect(docker(["exec", "-u", "bobbit-sdk", replacement, "cat", "/bobbit-state/claude-agent-sdk/legacy-session/history"])).toBe("legacy-history");
 		} finally {
 			try { docker(["rm", "-f", name]); } catch { /* test cleanup */ }
-			rmSync(stateRoot, { recursive: true, force: true });
+			try { docker(["rm", "-f", replacement]); } catch { /* test cleanup */ }
+			try { docker(["volume", "rm", "-f", stateVolume]); } catch { /* test cleanup */ }
 		}
 	});
 

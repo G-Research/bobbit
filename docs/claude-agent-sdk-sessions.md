@@ -126,11 +126,16 @@ the image capability label and launcher before the SDK query starts. Rebuild the
 `bobbit-agent` image after an SDK/server upgrade; a host or globally installed
 `claude` binary is never a substitute.
 
-Each Bobbit session uses a deterministic SDK config/state directory under the
-existing `/bobbit-state` mount. SDK history remains SDK-owned: Bobbit reads it
-with bounded, read-only SDK calls in the same pooled container. Those history
-calls have no OAuth or Bobbit gateway authority, and Bobbit does not create a Pi
-JSONL fallback or a second transcript store.
+Each Bobbit project uses a deterministic private Docker named volume at
+`/bobbit-state/claude-agent-sdk`, separate from the host project state bind
+mount. The volume survives ordinary container replacement and restart, while an
+explicit sandbox destroy removes it. Its root is locked before node/Pi/tool
+processes are exposed; legacy per-session state is accepted only after a bounded
+physical migration rejects links and aliases and applies SDK-private ownership
+and modes. SDK history remains SDK-owned: Bobbit reads it with bounded,
+read-only SDK calls in the same pooled container. Those history calls have no
+OAuth or Bobbit gateway authority, and Bobbit does not create a Pi JSONL
+fallback or a second transcript store.
 
 ## Persistence, history, and recovery
 

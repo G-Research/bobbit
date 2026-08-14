@@ -10,8 +10,8 @@ import { SandboxManager } from "../../src/server/agent/sandbox-manager.js";
 
 type Call = string | [string, string];
 
-function mount(source: string, destination: string, rw = true, mode = ""): { Source: string; Destination: string; RW: boolean; Mode: string } {
-	return { Source: source, Destination: destination, RW: rw, Mode: mode };
+function mount(source: string, destination: string, rw = true, mode = "", type?: string, name?: string): { Source: string; Destination: string; RW: boolean; Mode: string; Type?: string; Name?: string } {
+	return { Source: source, Destination: destination, RW: rw, Mode: mode, ...(type ? { Type: type } : {}), ...(name ? { Name: name } : {}) };
 }
 
 function makeSandbox(): ProjectSandbox {
@@ -23,9 +23,9 @@ function makeSandbox(): ProjectSandbox {
 	});
 }
 
-function requiredStateMounts(stateDir: string) {
+function requiredStateMounts(stateDir: string, sdkStateVolume = "bobbit-claude-agent-sdk-test") {
 	return [
-		mount(path.join(stateDir, "claude-agent-sdk"), "/bobbit-state/claude-agent-sdk"),
+		mount("", "/bobbit-state/claude-agent-sdk", true, "", "volume", sdkStateVolume),
 		mount(path.join(stateDir, "sessions"), "/bobbit-state/sessions"),
 		mount(path.join(stateDir, "tool-guard"), "/bobbit-state/tool-guard"),
 		mount(path.join(stateDir, "html-snapshots"), "/bobbit-state/html-snapshots"),
@@ -225,29 +225,40 @@ describe("SandboxManager atomic model refresh", () => {
 });
 
 describe("ProjectSandbox state mount staleness", () => {
-	it("accepts the current required state mounts including read-only generated extension dirs", () => {
+	const sdkStateVolume = "bobbit-claude-agent-sdk-test";
+	const stateExpectation = (stateDir: string) => ({ stateDir, claudeAgentSdkStateVolume: sdkStateVolume });
+
+	it("accepts the current required state mounts including private SDK volume", () => {
 		const stateDir = path.resolve("/project/.bobbit/state");
 
-		const result = getStateDirMountStaleness(requiredStateMounts(stateDir), { stateDir });
+		const result = getStateDirMountStaleness(requiredStateMounts(stateDir, sdkStateVolume), stateExpectation(stateDir));
 
 		assert.equal(result.stale, false, result.reason);
 	});
 
 	it("marks pre-upgrade containers stale when the Claude Agent SDK state mount is missing", () => {
 		const stateDir = path.resolve("/project/.bobbit/state");
-		const mounts = requiredStateMounts(stateDir).filter((m) => m.Destination !== "/bobbit-state/claude-agent-sdk");
+		const mounts = requiredStateMounts(stateDir, sdkStateVolume).filter((m) => m.Destination !== "/bobbit-state/claude-agent-sdk");
 
-		const result = getStateDirMountStaleness(mounts, { stateDir });
+		const result = getStateDirMountStaleness(mounts, stateExpectation(stateDir));
 
 		assert.equal(result.stale, true);
-		assert.match(result.reason ?? "", /claude-agent-sdk/);
+		assert.match(result.reason ?? "", /SDK state volume/);
+	});
+
+	it("marks a host bind or another project's SDK volume stale", () => {
+		const stateDir = path.resolve("/project/.bobbit/state");
+		const wrongVolume = requiredStateMounts(stateDir, "bobbit-claude-agent-sdk-other");
+		const result = getStateDirMountStaleness(wrongVolume, stateExpectation(stateDir));
+		assert.equal(result.stale, true);
+		assert.match(result.reason ?? "", /private named volume/);
 	});
 
 	it("marks pre-upgrade containers stale when the tool-result-error bridge mount is missing", () => {
 		const stateDir = path.resolve("/project/.bobbit/state");
-		const mounts = requiredStateMounts(stateDir).filter((m) => m.Destination !== "/bobbit-state/tool-result-error-bridge");
+		const mounts = requiredStateMounts(stateDir, sdkStateVolume).filter((m) => m.Destination !== "/bobbit-state/tool-result-error-bridge");
 
-		const result = getStateDirMountStaleness(mounts, { stateDir });
+		const result = getStateDirMountStaleness(mounts, stateExpectation(stateDir));
 
 		assert.equal(result.stale, true);
 		assert.match(result.reason ?? "", /tool-result-error-bridge/);
@@ -255,11 +266,11 @@ describe("ProjectSandbox state mount staleness", () => {
 
 	it("marks generated extension state mounts stale unless they are read-only", () => {
 		const stateDir = path.resolve("/project/.bobbit/state");
-		const mounts = requiredStateMounts(stateDir).map((m) => m.Destination === "/bobbit-state/tool-result-error-bridge"
+		const mounts = requiredStateMounts(stateDir, sdkStateVolume).map((m) => m.Destination === "/bobbit-state/tool-result-error-bridge"
 			? mount(path.join(stateDir, "tool-result-error-bridge"), "/bobbit-state/tool-result-error-bridge")
 			: m);
 
-		const result = getStateDirMountStaleness(mounts, { stateDir });
+		const result = getStateDirMountStaleness(mounts, stateExpectation(stateDir));
 
 		assert.equal(result.stale, true);
 		assert.match(result.reason ?? "", /tool-result-error-bridge/);
@@ -267,8 +278,8 @@ describe("ProjectSandbox state mount staleness", () => {
 
 	it("marks pre-upgrade containers stale when the AIGW DNS guard mount is missing", () => {
 		const stateDir = path.resolve("/project/.bobbit/state");
-		const mounts = requiredStateMounts(stateDir).filter((m) => m.Destination !== "/bobbit-state/aigw-dns-guard");
-		const result = getStateDirMountStaleness(mounts, { stateDir });
+		const mounts = requiredStateMounts(stateDir, sdkStateVolume).filter((m) => m.Destination !== "/bobbit-state/aigw-dns-guard");
+		const result = getStateDirMountStaleness(mounts, stateExpectation(stateDir));
 		assert.equal(result.stale, true);
 		assert.match(result.reason ?? "", /aigw-dns-guard/);
 	});
@@ -302,6 +313,7 @@ describe("ProjectSandbox state mount staleness", () => {
 		assert.deepEqual(commands.map(args => args.slice(0, 5)), [
 			["exec", "-i", "-u", "root", "container-sdk"],
 			["exec", "-i", "-u", "node", "-w"],
+			["exec", "-i", "-u", "bobbit-sdk", "-w"],
 		]);
 		assert.equal(commands[0][5], "sh");
 		assert.match(commands[0][7], /chown -h root:root/);
@@ -311,6 +323,7 @@ describe("ProjectSandbox state mount staleness", () => {
 		assert.match(commands[0][7], /chmod 0600/);
 		assert.match(commands[0][7], /chown -h bobbit-sdk:bobbit-sdk/);
 		assert.match(commands[1].at(-1) ?? "", /test -O/);
+		assert.match(commands[2].at(-1) ?? "", /test -r/);
 		await assert.rejects(sandbox.prepareClaudeAgentSdkSession("/host/project", "sdk-session"), /session path is invalid/);
 		await assert.rejects(sandbox.prepareClaudeAgentSdkSession("/workspace", "../sdk"), /session path is invalid/);
 	});

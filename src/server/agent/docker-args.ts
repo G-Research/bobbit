@@ -37,8 +37,6 @@ import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 // ── Config ─────────────────────────────────────────────────────────────────
 
 export const SANDBOX_STATE_MOUNTS: Array<{ sub: string; readOnly?: boolean }> = [
-	// SDK-owned conversations/config survive bridge and container replacement.
-	{ sub: "claude-agent-sdk" },
 	{ sub: "sessions" },
 	{ sub: "tool-guard" },
 	{ sub: "html-snapshots" },
@@ -58,12 +56,14 @@ export function validatedE2ERunId(value = process.env.BOBBIT_E2E_RUN_ID): string
  * run suffix so concurrent coordinators cannot attach the same workspace.
  * Normal production callers retain the longstanding names exactly.
  */
-export function projectSandboxVolumeNames(projectId: string, runId = process.env.BOBBIT_E2E_RUN_ID): { workspace: string; worktrees: string } {
+export function projectSandboxVolumeNames(projectId: string, runId = process.env.BOBBIT_E2E_RUN_ID): { workspace: string; worktrees: string; claudeAgentSdkState: string } {
 	const validatedRunId = validatedE2ERunId(runId);
 	const suffix = validatedRunId ? `-e2e-${validatedRunId}` : "";
 	return {
 		workspace: `bobbit-workspace-${projectId}${suffix}`,
 		worktrees: `bobbit-worktrees-${projectId}${suffix}`,
+		// OAuth-bearing SDK history must never be a root-chowned host bind mount.
+		claudeAgentSdkState: `bobbit-claude-agent-sdk-${projectId}${suffix}`,
 	};
 }
 
@@ -222,6 +222,7 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 		const volumes = projectSandboxVolumeNames(projectId, e2eRunId);
 		args.push("-v", `${volumes.workspace}:/workspace`);
 		args.push("-v", `${volumes.worktrees}:/workspace-wt`);
+		args.push("-v", `${volumes.claudeAgentSdkState}:/bobbit-state/claude-agent-sdk`);
 	} else if (workspaceDir) {
 		// Legacy pool mode: bind-mount host directory as /workspace
 		args.push("-v", `${toDockerPath(workspaceDir)}:/workspace`);

@@ -67,7 +67,6 @@ export const GATEWAY_OWNED_FILES: readonly string[] = [
 	"state/pr-walkthrough/",      // src/server/pr-walkthrough/routes.ts persisted walkthrough payloads
 	"state/model-name-*",         // src/server/agent/session-manager.ts per-session model-name files
 	"state/claude-sdk-*",         // src/server/agent/claude-agent-sdk-bridge.ts isolated live SDK config
-	"state/claude-agent-sdk/",    // per-session SDK config and transcripts (sandbox state mount)
 	"state/sessions/",            // per-session JSONL transcripts (rpc-bridge.ts container mount)
 	"state/session-prompts/",     // per-session prompt scratch (rpc-bridge.ts)
 	// NOTE: sandbox-agent-auth is a live server secret and now lives under

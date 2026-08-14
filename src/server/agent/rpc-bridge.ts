@@ -1213,7 +1213,6 @@ function buildMountTable(opts: MountTableOptions = {}): MountMapping[] {
 		// Mount only specific state subdirectories — never the full state dir
 		// (which contains the host gateway token, TLS keys, etc.)
 		{ containerPrefix: "/bobbit-state/sessions", hostPath: path.join(stateDir, "sessions") },
-		{ containerPrefix: "/bobbit-state/claude-agent-sdk", hostPath: path.join(stateDir, "claude-agent-sdk") },
 		{ containerPrefix: "/bobbit-state/tool-guard", hostPath: path.join(stateDir, "tool-guard") },
 		{ containerPrefix: "/bobbit-state/html-snapshots", hostPath: path.join(stateDir, "html-snapshots") },
 		// Generated pi-coding-agent extensions — bind-mounted by docker-args.ts so

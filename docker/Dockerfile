@@ -79,12 +79,8 @@ RUN npm install -g typescript --no-audit --no-fund 2>/dev/null
 # Keep subscription-bearing Claude SDK processes on a distinct, fixed
 # unprivileged UID. Model-invocable Pi/tool processes remain `node`; Linux
 # same-UID /proc access must not expose the SDK process environment to them.
-# The shared group is only for session workspace collaboration. The SDK config
-# directory stays SDK-user-only (0700), so group membership grants no credential
-# or transcript access.
 RUN groupadd --gid 1001 bobbit-sdk \
-    && useradd --uid 1001 --gid bobbit-sdk --create-home --shell /usr/sbin/nologin bobbit-sdk \
-    && usermod --append --groups bobbit-sdk node
+    && useradd --uid 1001 --gid bobbit-sdk --create-home --shell /usr/sbin/nologin bobbit-sdk
 
 # The SDK runs as bobbit-sdk with a separate HOME, so give that user the same
 # fixed repository trust scope as node without copying any user config/credentials.

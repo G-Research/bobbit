@@ -44,14 +44,44 @@ const SDK_STATE_ENTRY_LIMIT = 10_000;
 // Lock the mounted parent before any node/Pi/tool process is exposed. It stays
 // root-owned and traversal-only, so a model cannot replace a legacy child while
 // root migrates it later.
+// Runs as root while the container is not yet exposed to node/Pi/tool
+// processes. It migrates every existing per-session root, rather than merely
+// hiding the parent: a known legacy child path would otherwise stay readable.
 const PREPARE_CLAUDE_SDK_STATE_PARENT = `
 set -eu
 parent=/bobbit-state/claude-agent-sdk
-marker="$parent/.bobbit-sdk-state-parent-lock-v1"
+marker="$parent/.bobbit-sdk-state-parent-lock-v2"
+prepare_session() {
+  session="$1"
+  case "$session" in *[!A-Za-z0-9_-]*|"") exit 64 ;; esac
+  dir="$parent/$session"
+  if [ -L "$dir" ]; then exit 65; fi
+  if [ -e "$dir" ]; then
+    [ -d "$dir" ] && [ ! -L "$dir" ] || exit 65
+  else
+    install -d -o ${CLAUDE_AGENT_SDK_DOCKER_USER} -g ${CLAUDE_AGENT_SDK_DOCKER_USER} -m 0700 "$dir"
+  fi
+  chown -h ${CLAUDE_AGENT_SDK_DOCKER_USER}:${CLAUDE_AGENT_SDK_DOCKER_USER} "$dir"
+  chmod 0700 "$dir"
+  [ "$(stat -c '%u:%a' "$dir")" = "${CLAUDE_AGENT_SDK_DOCKER_UID}:700" ]
+  [ -z "$(find -P "$dir" -xdev -type l -print -quit)" ]
+  [ -z "$(find -P "$dir" -xdev ! \\( -type d -o -type f \\) -print -quit)" ]
+  [ -z "$(find -P "$dir" -xdev -type f -links +1 -print -quit)" ]
+  entries="$(find -P "$dir" -xdev -printf . | dd bs=1 count=${SDK_STATE_ENTRY_LIMIT + 1} status=none | wc -c)"
+  [ "$entries" -le ${SDK_STATE_ENTRY_LIMIT} ]
+  find -P "$dir" -xdev -type d -exec chown -h ${CLAUDE_AGENT_SDK_DOCKER_USER}:${CLAUDE_AGENT_SDK_DOCKER_USER} {} + -exec chmod 0700 {} +
+  find -P "$dir" -xdev -type f -exec chown -h ${CLAUDE_AGENT_SDK_DOCKER_USER}:${CLAUDE_AGENT_SDK_DOCKER_USER} {} + -exec chmod 0600 {} +
+  [ -z "$(find -P "$dir" -xdev -type d \\( ! -user ${CLAUDE_AGENT_SDK_DOCKER_UID} -o ! -group ${CLAUDE_AGENT_SDK_DOCKER_UID} -o ! -perm 0700 \\) -print -quit)" ]
+  [ -z "$(find -P "$dir" -xdev -type f \\( ! -user ${CLAUDE_AGENT_SDK_DOCKER_UID} -o ! -group ${CLAUDE_AGENT_SDK_DOCKER_UID} -o ! -perm 0600 -o -links +1 \\) -print -quit)" ]
+}
 [ -d "$parent" ] && [ ! -L "$parent" ]
 chown -h root:root "$parent"
 chmod 0711 "$parent"
 [ "$(stat -c '%u:%a' "$parent")" = "0:711" ]
+for dir in "$parent"/*; do
+  [ -e "$dir" ] || continue
+  prepare_session "$(basename "$dir")"
+done
 if [ -e "$marker" ] || [ -L "$marker" ]; then
   [ -f "$marker" ] && [ ! -L "$marker" ] || exit 65
 else
@@ -68,48 +98,23 @@ chmod 0600 "$marker"
 const VERIFY_CLAUDE_SDK_STATE_PARENT = `
 set -eu
 parent=/bobbit-state/claude-agent-sdk
-marker="$parent/.bobbit-sdk-state-parent-lock-v1"
+marker="$parent/.bobbit-sdk-state-parent-lock-v2"
 [ -d "$parent" ] && [ ! -L "$parent" ]
 [ "$(stat -c '%u:%a' "$parent")" = "0:711" ]
 [ -f "$marker" ] && [ ! -L "$marker" ]
 [ "$(stat -c '%u:%a' "$marker")" = "0:600" ]
 `;
 
-// Runs as root with a validated session id passed as $1. The bounded physical
-// walk rejects links, non-file entries, and hard links before changing legacy
-// ownership. Directories and files receive exact private modes before OAuth is
-// ever passed to the SDK process.
+// Runs as root with a validated session id passed as $1. The lifecycle script
+// above also migrates dormant histories before node can access them; rerunning
+// it here safely handles an individual new or archived session.
 const PREPARE_CLAUDE_SDK_STATE = `${PREPARE_CLAUDE_SDK_STATE_PARENT}
-session="$1"
-case "$session" in
-  *[!A-Za-z0-9_-]*|"") exit 64 ;;
-esac
-dir="$parent/$session"
-if [ -L "$dir" ]; then exit 65; fi
-if [ -e "$dir" ]; then
-  [ -d "$dir" ] && [ ! -L "$dir" ] || exit 65
-else
-  install -d -o ${CLAUDE_AGENT_SDK_DOCKER_USER} -g ${CLAUDE_AGENT_SDK_DOCKER_USER} -m 0700 "$dir"
-fi
-# Lock the root before walking old node-owned descendants.
-chown -h ${CLAUDE_AGENT_SDK_DOCKER_USER}:${CLAUDE_AGENT_SDK_DOCKER_USER} "$dir"
-chmod 0700 "$dir"
-[ "$(stat -c '%u:%a' "$dir")" = "${CLAUDE_AGENT_SDK_DOCKER_UID}:700" ]
-[ -z "$(find -P "$dir" -xdev -type l -print -quit)" ]
-[ -z "$(find -P "$dir" -xdev ! \( -type d -o -type f \) -print -quit)" ]
-[ -z "$(find -P "$dir" -xdev -type f -links +1 -print -quit)" ]
-entries="$(find -P "$dir" -xdev -printf . | dd bs=1 count=${SDK_STATE_ENTRY_LIMIT + 1} status=none | wc -c)"
-[ "$entries" -le ${SDK_STATE_ENTRY_LIMIT} ]
-find -P "$dir" -xdev -type d -exec chown -h ${CLAUDE_AGENT_SDK_DOCKER_USER}:${CLAUDE_AGENT_SDK_DOCKER_USER} {} + -exec chmod 0700 {} +
-find -P "$dir" -xdev -type f -exec chown -h ${CLAUDE_AGENT_SDK_DOCKER_USER}:${CLAUDE_AGENT_SDK_DOCKER_USER} {} + -exec chmod 0600 {} +
-[ -z "$(find -P "$dir" -xdev -type d \( ! -user ${CLAUDE_AGENT_SDK_DOCKER_UID} -o ! -group ${CLAUDE_AGENT_SDK_DOCKER_UID} -o ! -perm 0700 \) -print -quit)" ]
-[ -z "$(find -P "$dir" -xdev -type f \( ! -user ${CLAUDE_AGENT_SDK_DOCKER_UID} -o ! -group ${CLAUDE_AGENT_SDK_DOCKER_UID} -o ! -perm 0600 -o -links +1 \) -print -quit)" ]
-[ "$(stat -c '%u:%a' "$parent")" = "0:711" ]
-[ "$(stat -c '%u:%a' "$dir")" = "${CLAUDE_AGENT_SDK_DOCKER_UID}:700" ]
+prepare_session "$1"
 `;
 
 interface DockerMountInfo {
 	Type?: string;
+	Name?: string;
 	Source?: string;
 	Destination?: string;
 	RW?: boolean;
@@ -129,6 +134,7 @@ export interface AgentDirMountStalenessResult {
 
 export interface StateDirMountExpectation {
 	stateDir: string;
+	claudeAgentSdkStateVolume: string;
 }
 
 export function getModelsJsonContentStaleness(hostContent: string, containerContent: string): AgentDirMountStalenessResult {
@@ -230,6 +236,11 @@ export function getStateDirMountStaleness(
 	expected: StateDirMountExpectation,
 ): AgentDirMountStalenessResult {
 	if (!Array.isArray(mounts)) return { stale: true, reason: "container mount metadata is not an array" };
+	const sdkStateMounts = mounts.filter((mount) => normalizeContainerMountDestination(mount?.Destination) === "/bobbit-state/claude-agent-sdk");
+	if (sdkStateMounts.length === 0) return { stale: true, reason: "missing Claude Agent SDK state volume" };
+	if (sdkStateMounts.some((mount) => mount.Type !== "volume" || mount.Name !== expected.claudeAgentSdkStateVolume || isMountReadOnly(mount))) {
+		return { stale: true, reason: "Claude Agent SDK state mount does not match the private named volume" };
+	}
 	for (const { sub, readOnly } of SANDBOX_STATE_MOUNTS) {
 		const destination = `/bobbit-state/${sub}`;
 		const hostPath = path.join(expected.stateDir, sub);
@@ -706,6 +717,12 @@ export class ProjectSandbox {
 			"exec", "-i", "-u", "node", "-w", cwd, containerId,
 			"sh", "-ceu", "test -O . && test -r . && test -x .",
 		], { timeout: 10_000, env: DOCKER_ENV });
+		// The SDK uses its own UID; prove it can enter/read the chosen workspace
+		// before OAuth is injected into its closed launch environment.
+		await this.execDocker([
+			"exec", "-i", "-u", CLAUDE_AGENT_SDK_DOCKER_USER, "-w", cwd, containerId,
+			"sh", "-ceu", "test -r . && test -x .",
+		], { timeout: 10_000, env: DOCKER_ENV });
 	}
 
 	/** Exact image and wrapper probe for the SDK-only sandbox launch path. */
@@ -1086,10 +1103,10 @@ export class ProjectSandbox {
 	async destroy(): Promise<void> {
 		this.stopHealthMonitor();
 		const volumes = projectSandboxVolumeNames(this.options.projectId, this.e2eRunId);
-		// Production retains its historic workspace-only destroy behavior. Legacy
-		// E2E owns both run-namespaced volumes and must remove both even when a
-		// spec destroys the container before global teardown can inspect it.
-		const volumeNames = this.e2eRunId ? Object.values(volumes) : [volumes.workspace];
+		// Removing a container for replacement keeps every volume. An explicit
+		// destroy removes the SDK state volume too; E2E owns all run-namespaced
+		// volumes even after a spec has removed its container.
+		const volumeNames = this.e2eRunId ? Object.values(volumes) : [volumes.workspace, volumes.claudeAgentSdkState];
 		if (this.containerId) {
 			try {
 				await this.execDocker(["rm", "-f", this.containerId], {
@@ -1562,6 +1579,7 @@ export class ProjectSandbox {
 	private async _hasStaleStateDirMounts(containerId: string): Promise<boolean> {
 		const expected = {
 			stateDir: path.join(this.options.projectDir, ".bobbit", "state"),
+			claudeAgentSdkStateVolume: projectSandboxVolumeNames(this.options.projectId, this.e2eRunId).claudeAgentSdkState,
 		};
 		try {
 			const { stdout } = await this.execDocker([
