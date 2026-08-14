@@ -330,11 +330,16 @@ describe("ProjectSandbox state mount staleness", () => {
 			["exec", "-i", "-u", "bobbit-sdk", "-w"],
 		]);
 		assert.equal(commands[0][5], "sh");
-		assert.match(commands[0][7], /mkdir -m 0700 "\$pending"/);
-		assert.match(commands[0][7], /mkdir "\$lock"/);
-		assert.match(commands[0][7], /rm -f "\$marker"/);
-		assert.match(commands[0][7], /rmdir "\$pending"/);
-		assert.match(commands[0][7], /trap cleanup EXIT/);
+		const prepare = commands[0][7];
+		assert.match(prepare, /boot="\$\(awk '\{print \$22\}' \/proc\/1\/stat\)"/);
+		assert.match(prepare, /started="\$\(awk '\{print \$22\}' "\/proc\/\$\$\/stat"\)"/);
+		assert.match(prepare, /trap cleanup EXIT/);
+		assert.ok(prepare.indexOf("trap cleanup EXIT") < prepare.indexOf('mkdir -m 0700 "$pending"'), "cleanup must be installed before publishing pending");
+		assert.match(prepare, /kill -0 "\$owner_pid"/);
+		assert.match(prepare, /migration-intent-v2-\$boot-\$pid-\$started-\$token/);
+		assert.match(prepare, /ln "\$intent" "\$lock"/);
+		assert.match(prepare, /rm -f "\$marker"/);
+		assert.match(prepare, /rmdir "\$pending"/);
 		assert.match(commands[0][7], /chown -h root:root/);
 		assert.match(commands[0][7], /find -P/);
 		assert.match(commands[0][7], /-links \+1/);
@@ -343,9 +348,10 @@ describe("ProjectSandbox state mount staleness", () => {
 		assert.match(commands[0][7], /chown -h bobbit-sdk:bobbit-sdk/);
 		assert.match(commands[1].at(-1) ?? "", /test -O/);
 		assert.match(commands[2].at(-1) ?? "", /test -r/);
-		assert.equal(await (sandbox as any)._hasSecureClaudeAgentSdkStateParent("container-sdk"), true);
-		assert.match(commands[3][7], /\[ ! -e "\$lock" \]/);
-		assert.match(commands[3][7], /migration-pending-\*/);
+		assert.equal(await (sandbox as any)._getClaudeAgentSdkStateParentStatus("container-sdk"), "secure");
+		assert.match(commands[3][7], /migration-pending-v2-\*/);
+		assert.match(commands[3][7], /kill -0 "\$2"/);
+		assert.match(commands[3][7], /exit 75/);
 		await assert.rejects(sandbox.prepareClaudeAgentSdkSession("/host/project", "sdk-session"), /session path is invalid/);
 		await assert.rejects(sandbox.prepareClaudeAgentSdkSession("/workspace", "../sdk"), /session identity is invalid/);
 	});
@@ -358,7 +364,7 @@ describe("ProjectSandbox state mount staleness", () => {
 		(sandbox as any)._hasStaleStateDirMounts = async () => false;
 		(sandbox as any)._isContainerImageStale = async () => false;
 		(sandbox as any)._isContainerRunning = async () => true;
-		(sandbox as any)._hasSecureClaudeAgentSdkStateParent = async (id: string) => { calls.push(`verify:${id}`); return true; };
+		(sandbox as any)._waitForClaudeAgentSdkStateParent = async (id: string) => { calls.push(`verify:${id}`); return "secure"; };
 		(sandbox as any)._dockerExec = async (_id: string, args: string[]) => { calls.push(`exec:${args[0]}`); return ""; };
 
 		await (sandbox as any)._initContainer();
@@ -376,7 +382,7 @@ describe("ProjectSandbox state mount staleness", () => {
 		(sandbox as any)._hasStaleStateDirMounts = async () => false;
 		(sandbox as any)._isContainerImageStale = async () => false;
 		(sandbox as any)._isContainerRunning = async () => true;
-		(sandbox as any)._hasSecureClaudeAgentSdkStateParent = async () => false;
+		(sandbox as any)._waitForClaudeAgentSdkStateParent = async () => "invalid";
 		(sandbox as any)._removeContainer = async (id: string) => { calls.push(["remove", id]); };
 		(sandbox as any)._createContainer = async () => { calls.push("create"); (sandbox as any).containerId = "replacement-sdk-container"; };
 		(sandbox as any)._runInitSequence = async () => { calls.push("init"); };
@@ -385,6 +391,30 @@ describe("ProjectSandbox state mount staleness", () => {
 
 		assert.deepEqual(calls, [["remove", "legacy-sdk-container"], "create", "init"]);
 		assert.equal((sandbox as any).containerId, "replacement-sdk-container");
+	});
+
+	it("does not remove a running container while a valid migration is still live", async () => {
+		const sandbox = makeSandbox();
+		const calls: Call[] = [];
+		(sandbox as any)._findContainerByLabel = async () => "live-migration-container";
+		(sandbox as any)._hasStaleAgentDirMounts = async () => false;
+		(sandbox as any)._hasStaleStateDirMounts = async () => false;
+		(sandbox as any)._isContainerImageStale = async () => false;
+		(sandbox as any)._isContainerRunning = async () => true;
+		(sandbox as any)._waitForClaudeAgentSdkStateParent = async () => "busy";
+		(sandbox as any)._removeContainer = async (id: string) => { calls.push(["remove", id]); };
+
+		await assert.rejects((sandbox as any)._initContainer(), /migration is still active/);
+		assert.deepEqual(calls, []);
+	});
+
+	it("gives the root migration exec more time than its ten-second acquisition ceiling", async () => {
+		const sandbox = makeSandbox();
+		const calls: Array<{ args: string[]; options: any }> = [];
+		(sandbox as any).execDocker = async (args: string[], options: any) => { calls.push({ args, options }); return { stdout: "", stderr: "" }; };
+
+		await (sandbox as any)._prepareClaudeAgentSdkStateParent("container-sdk");
+		assert.equal(calls[0].options.timeout > 10_000, true);
 	});
 
 	it("fails closed before chmod when the unprivileged workspace preparation is incompatible", async () => {

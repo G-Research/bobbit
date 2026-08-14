@@ -51,30 +51,131 @@ const PREPARE_CLAUDE_SDK_STATE_PARENT = `
 set -eu
 parent=/bobbit-state/claude-agent-sdk
 marker="$parent/.bobbit-sdk-state-parent-lock-v2"
-lock="$parent/.bobbit-sdk-state-migration-lock-v1"
-pending="$parent/.bobbit-sdk-state-migration-pending-$$"
-# Every caller advertises itself before waiting. This keeps verification false
-# across lock handoff, so a queued failing preparation cannot trust a marker
-# briefly recreated by the preceding successful preparation.
+lock="$parent/.bobbit-sdk-state-migration-lock-v2"
+legacy_lock="$parent/.bobbit-sdk-state-migration-lock-v1"
+boot="$(awk '{print $22}' /proc/1/stat)"
+pid=$$
+started="$(awk '{print $22}' "/proc/$$/stat")"
+token="$(od -An -N16 -tx1 /dev/urandom | tr -d '[:space:]')"
+owner="$boot $pid $started $token"
+pending="$parent/.bobbit-sdk-state-migration-pending-v2-$boot-$pid-$started-$token"
+intent="$parent/.bobbit-sdk-state-migration-intent-v2-$boot-$pid-$started-$token"
+owned_lock=0
+marker_invalidated=0
+succeeded=0
+
+# The lock is an atomically linked, fully populated file.  Its owner identity
+# exists before the fixed-name coordination lock becomes visible, so SIGKILL
+# cannot leave an ownerless same-boot lock that cannot be recovered safely.
+cleanup() {
+  if [ "$owned_lock" -eq 1 ] && [ -f "$lock" ] && [ ! -L "$lock" ] && [ "$(cat "$lock" 2>/dev/null || :)" = "$owner" ]; then rm -f "$lock"; fi
+  rm -f "$intent"
+  rmdir "$pending" 2>/dev/null || :
+  if [ "$marker_invalidated" -eq 1 ] && [ "$succeeded" -ne 1 ]; then rm -f "$marker"; fi
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+valid_owner() (
+  owner_value="$1"
+  set -- $owner_value
+  [ "$#" -eq 4 ] || return 1
+  case "$1:$2:$3:$4" in *[!0-9A-Fa-f:]*|*::*|:*) return 1 ;; esac
+  return 0
+)
+owner_state() (
+  owner_value="$1"
+  valid_owner "$owner_value" || return 2
+  set -- $owner_value
+  owner_boot=$1 owner_pid=$2 owner_started=$3
+  [ "$owner_boot" = "$boot" ] || return 0
+  kill -0 "$owner_pid" 2>/dev/null || return 0
+  [ -r "/proc/$owner_pid/stat" ] || return 2
+  [ "$(awk '{print $22}' "/proc/$owner_pid/stat")" = "$owner_started" ] || return 0
+  return 1
+)
+name_owner() (
+  name="$1" prefix="$2"
+  value="\${name#"$prefix"}"
+  [ "$value" != "$name" ] || return 1
+  old_ifs=$IFS; IFS=-; set -- $value; IFS=$old_ifs
+  [ "$#" -eq 4 ] || return 1
+  printf '%s %s %s %s\n' "$1" "$2" "$3" "$4"
+)
+legacy_owner_state() {
+  legacy_pid="$1"
+  case "$legacy_pid" in ''|*[!0-9]*) return 2 ;; esac
+  kill -0 "$legacy_pid" 2>/dev/null && return 1
+  return 0
+}
+
+# Reap only a previous container boot or a demonstrably dead process. A live
+# or queued owner remains visible to VERIFY; malformed artifacts fail closed.
+live_artifact=0
+reap_artifacts() {
+  live_artifact=0
+  for artifact in "$parent"/.bobbit-sdk-state-migration-pending-v2-*; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    [ -d "$artifact" ] && [ ! -L "$artifact" ] || exit 65
+    artifact_owner="$(name_owner "\${artifact##*/}" '.bobbit-sdk-state-migration-pending-v2-')" || exit 65
+    if owner_state "$artifact_owner"; then state=0; else state=$?; fi
+    case "$state" in 0) rmdir "$artifact" 2>/dev/null || exit 65 ;; 1) live_artifact=1 ;; *) exit 65 ;; esac
+  done
+  for artifact in "$parent"/.bobbit-sdk-state-migration-intent-v2-*; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    [ -f "$artifact" ] && [ ! -L "$artifact" ] || exit 65
+    artifact_owner="$(name_owner "\${artifact##*/}" '.bobbit-sdk-state-migration-intent-v2-')" || exit 65
+    if owner_state "$artifact_owner"; then state=0; else state=$?; fi
+    case "$state" in 0) rm -f "$artifact" ;; 1) live_artifact=1 ;; *) exit 65 ;; esac
+  done
+  if [ -e "$lock" ] || [ -L "$lock" ]; then
+    [ -f "$lock" ] && [ ! -L "$lock" ] || exit 65
+    lock_owner="$(cat "$lock" 2>/dev/null || :)"
+    if owner_state "$lock_owner"; then state=0; else state=$?; fi
+    case "$state" in 0) rm -f "$lock" ;; 1) live_artifact=1 ;; *) exit 65 ;; esac
+  fi
+  if [ -e "$legacy_lock" ] || [ -L "$legacy_lock" ]; then
+    [ -d "$legacy_lock" ] && [ ! -L "$legacy_lock" ] && [ -f "$legacy_lock/pid" ] && [ ! -L "$legacy_lock/pid" ] || exit 65
+    if legacy_owner_state "$(cat "$legacy_lock/pid" 2>/dev/null || :)"; then state=0; else state=$?; fi
+    case "$state" in 0) rm -f "$legacy_lock/pid" && rmdir "$legacy_lock" ;; 1) live_artifact=1 ;; *) exit 65 ;; esac
+  fi
+  for artifact in "$parent"/.bobbit-sdk-state-migration-pending-[0-9]*; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    [ -d "$artifact" ] && [ ! -L "$artifact" ] || exit 65
+    legacy_pid="\${artifact##*-}"
+    if legacy_owner_state "$legacy_pid"; then state=0; else state=$?; fi
+    case "$state" in 0) rmdir "$artifact" 2>/dev/null || exit 65 ;; 1) live_artifact=1 ;; *) exit 65 ;; esac
+  done
+}
+
+[ -d "$parent" ] && [ ! -L "$parent" ]
+chown -h root:root "$parent"
+chmod 0711 "$parent"
+[ "$(stat -c '%u:%a' "$parent")" = "0:711" ]
+reap_artifacts
 mkdir -m 0700 "$pending"
-# Atomic mkdir serializes every root-only state migration on the private volume.
-# A contended or stale lock fails closed rather than trusting a partial state.
+chown -h root:root "$pending"
+[ "$(stat -c '%u:%a' "$pending")" = "0:700" ]
 attempt=0
-while ! mkdir "$lock" 2>/dev/null; do
+while :; do
+  reap_artifacts
+  umask 077
+  set -C
+  : > "$intent"
+  set +C
+  printf '%s\n' "$owner" > "$intent"
+  chmod 0600 "$intent"
+  if ln "$intent" "$lock" 2>/dev/null; then
+    owned_lock=1
+    rm -f "$intent"
+    break
+  fi
+  rm -f "$intent"
   attempt=$((attempt + 1))
   [ "$attempt" -lt 100 ] || exit 75
   sleep 0.1
 done
-succeeded=0
-cleanup() {
-  if [ "$succeeded" -ne 1 ]; then rm -f "$marker"; fi
-  rmdir "$lock" 2>/dev/null || :
-  rmdir "$pending" 2>/dev/null || :
-}
-trap cleanup EXIT
-trap 'exit 1' HUP INT TERM
-# Invalidate the attestation before validating or changing any state. A failed
-# or interrupted migration must never leave a prior marker trusted.
+marker_invalidated=1
 rm -f "$marker"
 prepare_session() {
   session="$1"
@@ -99,31 +200,19 @@ prepare_session() {
   [ -z "$(find -P "$dir" -xdev -type d \\( ! -user ${CLAUDE_AGENT_SDK_DOCKER_UID} -o ! -group ${CLAUDE_AGENT_SDK_DOCKER_UID} -o ! -perm 0700 \\) -print -quit)" ]
   [ -z "$(find -P "$dir" -xdev -type f \\( ! -user ${CLAUDE_AGENT_SDK_DOCKER_UID} -o ! -group ${CLAUDE_AGENT_SDK_DOCKER_UID} -o ! -perm 0600 -o -links +1 \\) -print -quit)" ]
 }
-[ -d "$parent" ] && [ ! -L "$parent" ]
-[ -d "$lock" ] && [ ! -L "$lock" ]
-[ -d "$pending" ] && [ ! -L "$pending" ]
-chown -h root:root "$parent" "$lock" "$pending"
-chmod 0711 "$parent"
-chmod 0700 "$lock" "$pending"
-[ "$(stat -c '%u:%a' "$parent")" = "0:711" ]
-[ "$(stat -c '%u:%a' "$lock")" = "0:700" ]
-[ "$(stat -c '%u:%a' "$pending")" = "0:700" ]
-# No positional session means pre-exposure whole-volume migration. The word all
-# is a valid session id, so never reserve it as a sentinel.
 case "\${1-}" in
   "")
-    for dir in "$parent"/*; do
-      [ -e "$dir" ] || continue
-      case "$(basename "$dir")" in
-        .bobbit-sdk-state-migration-lock-v1|.bobbit-sdk-state-migration-pending-*) continue ;;
+    for entry in "$parent"/* "$parent"/.*; do
+      [ -e "$entry" ] || [ -L "$entry" ] || continue
+      name="\${entry##*/}"
+      case "$name" in
+        .|..|.bobbit-sdk-state-parent-lock-v2|.bobbit-sdk-state-migration-lock-v1|.bobbit-sdk-state-migration-lock-v2|.bobbit-sdk-state-migration-pending-v2-*|.bobbit-sdk-state-migration-intent-v2-*|.bobbit-sdk-state-migration-pending-[0-9]*) continue ;;
+        *) prepare_session "$name" ;;
       esac
-      prepare_session "$(basename "$dir")"
     done
     ;;
   *) prepare_session "$1" ;;
 esac
-# This marker is the final attestation: failed or interrupted migration must
-# leave no trust signal for a later reconnect.
 if [ -e "$marker" ] || [ -L "$marker" ]; then
   [ -f "$marker" ] && [ ! -L "$marker" ] || exit 65
 else
@@ -135,22 +224,72 @@ chmod 0600 "$marker"
 succeeded=1
 `;
 
-// A running container without this marker may have exposed node to legacy
-// state before this lifecycle gate existed. Replace it rather than merely
-// locking paths after an untrusted process may already hold an open descriptor.
 const VERIFY_CLAUDE_SDK_STATE_PARENT = `
 set -eu
 parent=/bobbit-state/claude-agent-sdk
 marker="$parent/.bobbit-sdk-state-parent-lock-v2"
-lock="$parent/.bobbit-sdk-state-migration-lock-v1"
+lock="$parent/.bobbit-sdk-state-migration-lock-v2"
+legacy_lock="$parent/.bobbit-sdk-state-migration-lock-v1"
+boot="$(awk '{print $22}' /proc/1/stat)"
+valid_owner() (
+  set -- $1
+  [ "$#" -eq 4 ] || return 1
+  case "$1:$2:$3:$4" in *[!0-9A-Fa-f:]*|*::*|:*) return 1 ;; esac
+)
+owner_state() (
+  valid_owner "$1" || return 2
+  set -- $1
+  [ "$1" = "$boot" ] || return 0
+  kill -0 "$2" 2>/dev/null || return 0
+  [ -r "/proc/$2/stat" ] || return 2
+  [ "$(awk '{print $22}' "/proc/$2/stat")" = "$3" ] || return 0
+  return 1
+)
+name_owner() (
+  value="\${1#"$2"}"; [ "$value" != "$1" ] || return 1
+  old_ifs=$IFS; IFS=-; set -- $value; IFS=$old_ifs
+  [ "$#" -eq 4 ] || return 1
+  printf '%s %s %s %s\n' "$1" "$2" "$3" "$4"
+)
+legacy_owner_state() { case "$1" in ''|*[!0-9]*) return 2 ;; esac; kill -0 "$1" 2>/dev/null && return 1; return 0; }
+live=0
+reap_artifacts() {
+  live=0
+  for artifact in "$parent"/.bobbit-sdk-state-migration-pending-v2-*; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    [ -d "$artifact" ] && [ ! -L "$artifact" ] || exit 65
+    owner="$(name_owner "\${artifact##*/}" '.bobbit-sdk-state-migration-pending-v2-')" || exit 65
+    if owner_state "$owner"; then state=0; else state=$?; fi
+    case "$state" in 0) rmdir "$artifact" 2>/dev/null || exit 65 ;; 1) live=1 ;; *) exit 65 ;; esac
+  done
+  for artifact in "$parent"/.bobbit-sdk-state-migration-intent-v2-*; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    [ -f "$artifact" ] && [ ! -L "$artifact" ] || exit 65
+    owner="$(name_owner "\${artifact##*/}" '.bobbit-sdk-state-migration-intent-v2-')" || exit 65
+    if owner_state "$owner"; then state=0; else state=$?; fi
+    case "$state" in 0) rm -f "$artifact" ;; 1) live=1 ;; *) exit 65 ;; esac
+  done
+  if [ -e "$lock" ] || [ -L "$lock" ]; then
+    [ -f "$lock" ] && [ ! -L "$lock" ] || exit 65
+    if owner_state "$(cat "$lock" 2>/dev/null || :)"; then state=0; else state=$?; fi
+    case "$state" in 0) rm -f "$lock" ;; 1) live=1 ;; *) exit 65 ;; esac
+  fi
+  if [ -e "$legacy_lock" ] || [ -L "$legacy_lock" ]; then
+    [ -d "$legacy_lock" ] && [ ! -L "$legacy_lock" ] && [ -f "$legacy_lock/pid" ] && [ ! -L "$legacy_lock/pid" ] || exit 65
+    if legacy_owner_state "$(cat "$legacy_lock/pid" 2>/dev/null || :)"; then state=0; else state=$?; fi
+    case "$state" in 0) rm -f "$legacy_lock/pid" && rmdir "$legacy_lock" ;; 1) live=1 ;; *) exit 65 ;; esac
+  fi
+  for artifact in "$parent"/.bobbit-sdk-state-migration-pending-[0-9]*; do
+    [ -e "$artifact" ] || [ -L "$artifact" ] || continue
+    [ -d "$artifact" ] && [ ! -L "$artifact" ] || exit 65
+    if legacy_owner_state "\${artifact##*-}"; then state=0; else state=$?; fi
+    case "$state" in 0) rmdir "$artifact" 2>/dev/null || exit 65 ;; 1) live=1 ;; *) exit 65 ;; esac
+  done
+}
 [ -d "$parent" ] && [ ! -L "$parent" ]
-# A valid marker is only trusted when no root migration owns or awaits the lock.
-[ ! -e "$lock" ] && [ ! -L "$lock" ]
-for pending in "$parent"/.bobbit-sdk-state-migration-pending-*; do
-  [ -e "$pending" ] || [ -L "$pending" ] || continue
-  exit 1
-done
 [ "$(stat -c '%u:%a' "$parent")" = "0:711" ]
+reap_artifacts
+[ "$live" -eq 0 ] || exit 75
 [ -f "$marker" ] && [ ! -L "$marker" ]
 [ "$(stat -c '%u:%a' "$marker")" = "0:600" ]
 `;
@@ -1193,18 +1332,30 @@ export class ProjectSandbox {
 		await this.execDocker([
 			"exec", "-i", "-u", "root", containerId, "sh", "-ceu",
 			PREPARE_CLAUDE_SDK_STATE_PARENT,
-		], { timeout: 10_000, env: DOCKER_ENV });
+		], { timeout: 35_000, env: DOCKER_ENV });
 	}
 
-	private async _hasSecureClaudeAgentSdkStateParent(containerId: string): Promise<boolean> {
+	private async _getClaudeAgentSdkStateParentStatus(containerId: string): Promise<"secure" | "busy" | "invalid"> {
 		try {
 			await this.execDocker([
 				"exec", "-i", "-u", "root", containerId, "sh", "-ceu",
 				VERIFY_CLAUDE_SDK_STATE_PARENT,
 			], { timeout: 10_000, env: DOCKER_ENV });
-			return true;
-		} catch {
-			return false;
+			return "secure";
+		} catch (error) {
+			// VERIFY uses a distinct exit status for a valid, live migration. This
+			// must not be treated as an unattested state and trigger container removal.
+			return childErrorCode(error) === "75" ? "busy" : "invalid";
+		}
+	}
+
+
+	private async _waitForClaudeAgentSdkStateParent(containerId: string): Promise<"secure" | "busy" | "invalid"> {
+		const deadline = Date.now() + 30_000;
+		while (true) {
+			const status = await this._getClaudeAgentSdkStateParentStatus(containerId);
+			if (status !== "busy" || Date.now() >= deadline) return status;
+			await new Promise<void>(resolve => setTimeout(resolve, 100));
 		}
 	}
 
@@ -1269,7 +1420,13 @@ export class ProjectSandbox {
 				// Never retrofit a live container's lock: an old node process could
 				// already hold a legacy file descriptor. Only reconnect when the
 				// root-owned lifecycle marker attests it was locked before exposure.
-				if (!await this._hasSecureClaudeAgentSdkStateParent(existingId)) {
+				const sdkState = await this._waitForClaudeAgentSdkStateParent(existingId);
+				if (sdkState === "busy") {
+					// A concurrent root-only prepare is legitimate. Keep the running
+					// container intact and fail closed rather than killing its owner.
+					throw new Error(`[project-sandbox] SDK state migration is still active for container ${existingId.substring(0, 12)}`);
+				}
+				if (sdkState === "invalid") {
 					console.warn(`[project-sandbox] Container ${existingId.substring(0, 12)} has unlocked SDK state; recreating`);
 					await this._removeContainer(existingId);
 				} else try {

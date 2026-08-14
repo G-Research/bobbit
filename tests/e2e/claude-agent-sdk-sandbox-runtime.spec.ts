@@ -379,21 +379,46 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 			// Establish an existing trusted marker first. A later failed migration
 			// must revoke it rather than letting reconnect trust stale state.
 			await (sandbox as any)._prepareClaudeAgentSdkStateParent(name);
-			expect(await (sandbox as any)._hasSecureClaudeAgentSdkStateParent(name)).toBe(true);
+			expect(await (sandbox as any)._getClaudeAgentSdkStateParentStatus(name)).toBe("secure");
 			// A legacy hard link could retain an attacker-openable alias. The
 			// lifecycle gate rejects it and invalidates the prior attestation.
 			docker(["exec", "-u", "root", name, "ln", "/bobbit-state/claude-agent-sdk/legacy-session/history", "/bobbit-state/claude-agent-sdk/legacy-session/history-alias"]);
 			await expect((sandbox as any)._prepareClaudeAgentSdkStateParent(name)).rejects.toThrow();
-			expect(await (sandbox as any)._hasSecureClaudeAgentSdkStateParent(name)).toBe(false);
+			expect(await (sandbox as any)._getClaudeAgentSdkStateParentStatus(name)).toBe("invalid");
 			expect(docker(["exec", "-u", "root", name, "stat", "-c", "%h:%u:%a", "/bobbit-state/claude-agent-sdk/legacy-session/history"])).toBe("2:1001:600\n");
 			docker(["exec", "-u", "root", name, "rm", "/bobbit-state/claude-agent-sdk/legacy-session/history-alias"]);
 
 			// This retry attests every dormant child only after successful migration.
 			await (sandbox as any)._prepareClaudeAgentSdkStateParent(name);
-			expect(await (sandbox as any)._hasSecureClaudeAgentSdkStateParent(name)).toBe(true);
+			expect(await (sandbox as any)._getClaudeAgentSdkStateParentStatus(name)).toBe("secure");
 			expect(() => docker(["exec", "-u", "node", name, "cat", "/bobbit-state/claude-agent-sdk/legacy-session/history"])).toThrow();
 			await sandbox.prepareClaudeAgentSdkSession("/workspace", "legacy-session");
 			expect(docker(["exec", "-u", "root", name, "stat", "-c", "%u:%a", "/bobbit-state/claude-agent-sdk", "/bobbit-state/claude-agent-sdk/legacy-session", "/bobbit-state/claude-agent-sdk/legacy-session/nested", "/bobbit-state/claude-agent-sdk/legacy-session/history", "/bobbit-state/claude-agent-sdk/legacy-session/nested/entry"])).toBe("0:711\n1001:700\n1001:700\n1001:600\n1001:600\n");
+
+			// Persistent volumes retain root lifecycle artifacts across daemon and
+			// container restarts. Dead legacy owners, prior-boot v2 owners, and a
+			// reused PID with a different process-start token are all provably stale.
+			const lifecycle = "/bobbit-state/claude-agent-sdk";
+			docker(["exec", "-u", "root", name, "sh", "-ceu", `mkdir ${lifecycle}/.bobbit-sdk-state-migration-lock-v1; printf 999999 > ${lifecycle}/.bobbit-sdk-state-migration-lock-v1/pid; mkdir ${lifecycle}/.bobbit-sdk-state-migration-pending-999999; printf '1 999999 1 deadbeef\\n' > ${lifecycle}/.bobbit-sdk-state-migration-lock-v2; mkdir ${lifecycle}/.bobbit-sdk-state-migration-pending-v2-1-999999-1-deadbeef`]);
+			docker(["restart", name]);
+			await (sandbox as any)._prepareClaudeAgentSdkStateParent(name);
+			expect(docker(["exec", "-u", "root", name, "sh", "-ceu", `test ! -e ${lifecycle}/.bobbit-sdk-state-migration-lock-v1; test ! -e ${lifecycle}/.bobbit-sdk-state-migration-pending-999999; test ! -e ${lifecycle}/.bobbit-sdk-state-migration-lock-v2; test ! -e ${lifecycle}/.bobbit-sdk-state-migration-pending-v2-1-999999-1-deadbeef`])).toBe("");
+
+			// PID 1 remains alive, but its mismatched /proc start time proves this
+			// is not its artifact. Do not let PID reuse turn into a permanent lock.
+			docker(["exec", "-u", "root", name, "sh", "-ceu", `boot=$(awk '{print $22}' /proc/1/stat); start=$(awk '{print $22}' /proc/1/stat); mkdir ${lifecycle}/.bobbit-sdk-state-migration-pending-v2-$boot-1-$((start + 1))-deadbeef`]);
+			await (sandbox as any)._prepareClaudeAgentSdkStateParent(name);
+			expect(docker(["exec", "-u", "root", name, "sh", "-ceu", `test -z "$(find ${lifecycle} -maxdepth 1 -name '.bobbit-sdk-state-migration-*' -print -quit)"`])).toBe("");
+
+			// A legitimate in-flight migration suppresses the attestation rather
+			// than looking corrupt. A contending prepare reaches its defined exit
+			// ceiling and cleans its own pending artifact without removing the live
+			// lock owner or trusting the existing marker in the handoff window.
+			docker(["exec", "-d", "-u", "root", name, "sh", "-ceu", `boot=$(awk '{print $22}' /proc/1/stat); started=$(awk '{print $22}' /proc/$$/stat); printf '%s %s %s deadbeef\\n' "$boot" "$$" "$started" > ${lifecycle}/.bobbit-sdk-state-migration-lock-v2; sleep 12`]);
+			docker(["exec", "-u", "root", name, "sh", "-ceu", `for _ in $(seq 1 50); do test -f ${lifecycle}/.bobbit-sdk-state-migration-lock-v2 && exit 0; sleep 0.1; done; exit 1`]);
+			expect(await (sandbox as any)._getClaudeAgentSdkStateParentStatus(name)).toBe("busy");
+			await expect((sandbox as any)._prepareClaudeAgentSdkStateParent(name)).rejects.toThrow();
+			expect(docker(["exec", "-u", "root", name, "sh", "-ceu", `test -f ${lifecycle}/.bobbit-sdk-state-migration-lock-v2; test -z "$(find ${lifecycle} -maxdepth 1 -name '.bobbit-sdk-state-migration-pending-v2-*' -print -quit)"`])).toBe("");
 			expect(docker(["exec", "-u", "bobbit-sdk", name, "cat", "/bobbit-state/claude-agent-sdk/legacy-session/history"])).toBe("legacy-history");
 			expect(() => docker(["exec", "-u", "node", name, "sh", "-c", "mv /bobbit-state/claude-agent-sdk/legacy-session /tmp/replaced; ln -s /tmp/replaced /bobbit-state/claude-agent-sdk/legacy-session"])).toThrow();
 			// A replacement container reuses the private named volume, preserving
