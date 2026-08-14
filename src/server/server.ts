@@ -645,7 +645,7 @@ import { getAvailableModels, peekCachedAvailableModels, discoverModelsForConfig,
 import { isClaudeAgentSdkSessionId } from "./agent/claude-agent-sdk-bridge.js";
 import {
 	ClaudeAgentSdkUnavailableError,
-	claudeAgentSdkUnavailableDiagnostic,
+	claudeAgentSdkUnavailableRouteDiagnostic,
 	claudeAgentSdkUnavailablePayload,
 	isClaudeAgentSdkUnavailableError,
 } from "./agent/claude-agent-sdk-error.js";
@@ -8309,10 +8309,7 @@ async function handleApiRoute(
 			}, 201);
 		} catch (err) {
 			if (isClaudeAgentSdkUnavailableError(err)) {
-				console.error(
-					`[POST /api/sessions] SDK unavailable cwd=${cwd ?? "(none)"} project=${resolvedProjectId ?? "(none)"}: ` +
-					claudeAgentSdkUnavailableDiagnostic(err),
-				);
+				console.error(`[POST /api/sessions] SDK unavailable: ${claudeAgentSdkUnavailableRouteDiagnostic(err)}`);
 				json(claudeAgentSdkUnavailablePayload(), 503);
 				return;
 			}
@@ -15181,7 +15178,7 @@ async function handleApiRoute(
 			try {
 				await sessionManager.readSdkSessionInfo(ps);
 			} catch (err) {
-				console.error(`[POST /api/sessions/${archivedId}/continue] SDK unavailable: ${claudeAgentSdkUnavailableDiagnostic(err)}`);
+				console.error(`[POST /api/sessions/continue] SDK unavailable: ${claudeAgentSdkUnavailableRouteDiagnostic(err)}`);
 				json(claudeAgentSdkUnavailablePayload(), 503);
 				return;
 			}
@@ -15241,7 +15238,7 @@ async function handleApiRoute(
 				});
 			} catch (err) {
 				if (isClaudeAgentSdkUnavailableError(err)) {
-					console.error(`[POST /api/sessions/${archivedId}/continue] SDK unavailable: ${claudeAgentSdkUnavailableDiagnostic(err)}`);
+					console.error(`[POST /api/sessions/continue] SDK unavailable: ${claudeAgentSdkUnavailableRouteDiagnostic(err)}`);
 					json(claudeAgentSdkUnavailablePayload(), 503);
 				} else {
 					// SDK failures can include provider diagnostics and opaque resume
@@ -16547,7 +16544,7 @@ async function handleApiRoute(
 			}
 		} catch (err) {
 			if (err instanceof ClaudeAgentSdkUnavailableError) {
-				console.error(`[GET /api/sessions/${targetId}/transcript] SDK unavailable: ${claudeAgentSdkUnavailableDiagnostic(err)}`);
+				console.error(`[GET /api/sessions/transcript] SDK unavailable: ${claudeAgentSdkUnavailableRouteDiagnostic(err)}`);
 				json(claudeAgentSdkUnavailablePayload(), 503);
 			} else if (err instanceof TranscriptReaderError) {
 				const status = err.code === "transcript_unavailable" ? 404 : 400;

@@ -15,6 +15,7 @@ import { ToolManager } from "../../src/server/agent/tool-manager.js";
 import {
 	ClaudeAgentSdkUnavailableError,
 	claudeAgentSdkUnavailableDiagnostic,
+	claudeAgentSdkUnavailableRouteDiagnostic,
 	SDK_SESSION_UNAVAILABLE,
 } from "../../src/server/agent/claude-agent-sdk-error.js";
 import {
@@ -93,6 +94,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 		assert.equal(error.code, SDK_SESSION_UNAVAILABLE);
 		assert.equal(error.message, SDK_SESSION_UNAVAILABLE);
 		assert.match(diagnostic, new RegExp(`\\b${category}\\b`));
+		assert.equal(claudeAgentSdkUnavailableRouteDiagnostic(error), `${SDK_SESSION_UNAVAILABLE}: ${category}`);
 		assert.doesNotMatch(diagnostic, new RegExp(secret));
 		assert.doesNotMatch(diagnostic, new RegExp(configPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 	});

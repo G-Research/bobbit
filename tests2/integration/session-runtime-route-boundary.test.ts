@@ -208,15 +208,29 @@ test.describe("session runtime route boundary", () => {
 		}
 	});
 
-	test("returns only the stable unavailable category when SDK session creation fails", async ({ gateway }) => {
+	test("logs only a stable unavailable category when SDK session creation fails", async ({ gateway }) => {
 		await registerSdkCatalogFixture(gateway);
-		const providerFailure = new Error("Authorization: Bearer sk-create-secret abcdefgh.abcdefgh.ijklmnop /Users/aj/.claude/credentials.json opaque_12345678901234567890123456789012");
+		const privateCwd = join(gateway.bobbitDir, "default-project", "private-sdk-cwd");
+		const privateSessionId = "00000000-0000-4000-8000-000000000099";
+		const privateResumeId = "00000000-0000-4000-8000-000000000098";
+		const privatePrompt = "PRIVATE_SDK_PROMPT";
+		const privateOutput = "PRIVATE_SDK_MODEL_OUTPUT";
+		const privateProviderBody = JSON.stringify({
+			project: gateway.defaultProjectId,
+			cwd: privateCwd,
+			session_id: privateSessionId,
+			resume: privateResumeId,
+			prompt: privatePrompt,
+			output: privateOutput,
+		});
+		const providerFailure = new Error(`provider body=${privateProviderBody} Authorization: Bearer sk-create-secret abcdefgh.abcdefgh.ijklmnop /Users/aj/.claude/credentials.json opaque_12345678901234567890123456789012`);
 		const sdk = installReadySdkBridgeFixture(gateway, [], providerFailure);
 		const beforePreferences = await localApiFetch(gateway, "/api/preferences");
 		expect(beforePreferences.status).toBe(200);
 		const beforeDefault = (await beforePreferences.json())["default.sessionModel"];
 		const logged: unknown[][] = [];
 		const errorSpy = vi.spyOn(console, "error").mockImplementation((...args) => { logged.push(args); });
+		mkdirSync(privateCwd, { recursive: true });
 		try {
 			const setDefault = await localApiFetch(gateway, "/api/preferences", {
 				method: "PUT",
@@ -225,17 +239,25 @@ test.describe("session runtime route boundary", () => {
 			expect(setDefault.status).toBe(200);
 			const response = await localApiFetch(gateway, "/api/sessions", {
 				method: "POST",
-				body: JSON.stringify({ cwd: join(gateway.bobbitDir, "default-project"), projectId: gateway.defaultProjectId, worktree: false }),
+				body: JSON.stringify({ cwd: privateCwd, projectId: gateway.defaultProjectId, worktree: false }),
 			});
 			expect(response.status, await response.clone().text()).toBe(503);
 			const body = await response.json();
 			expect(body).toEqual({ error: "SDK_SESSION_UNAVAILABLE", code: "SDK_SESSION_UNAVAILABLE" });
-			for (const secret of ["sk-create-secret", "abcdefgh.abcdefgh.ijklmnop", "/Users/aj/.claude/credentials.json", "opaque_12345678901234567890123456789012"]) {
-				expect(JSON.stringify(body)).not.toContain(secret);
-				expect(JSON.stringify(logged)).not.toContain(secret);
+			const responseText = JSON.stringify(body);
+			const logText = JSON.stringify(logged);
+			for (const privateValue of [
+				privateCwd, gateway.defaultProjectId, privateSessionId, privateResumeId,
+				privatePrompt, privateOutput, privateProviderBody,
+				"sk-create-secret", "abcdefgh.abcdefgh.ijklmnop", "/Users/aj/.claude/credentials.json", "opaque_12345678901234567890123456789012",
+			]) {
+				expect(responseText).not.toContain(privateValue);
+				expect(logText).not.toContain(privateValue);
 			}
+			expect(logText).toContain("SDK_SESSION_UNAVAILABLE");
 		} finally {
 			errorSpy.mockRestore();
+			rmSync(privateCwd, { recursive: true, force: true });
 			await localApiFetch(gateway, "/api/preferences", {
 				method: "PUT",
 				body: JSON.stringify({ "default.sessionModel": beforeDefault }),
@@ -250,6 +272,8 @@ test.describe("session runtime route boundary", () => {
 		const sourceSdkSessionId = "00000000-0000-4000-8000-000000000006";
 		const sdk = installReadySdkBridgeFixture(gateway, [sourceSdkSessionId]);
 		const stateDir = join(gateway.bobbitDir, "state");
+		const logged: unknown[][] = [];
+		const errorSpy = vi.spyOn(console, "error").mockImplementation((...args) => { logged.push(args); });
 		try {
 			const sourceId = sessions.add(seedArchivedSession(gateway, {
 				runtime: "claude-agent-sdk",
@@ -279,7 +303,11 @@ test.describe("session runtime route boundary", () => {
 			expect(existsSync(join(gateway.bobbitDir, "must-not-create-worktree"))).toBe(false);
 			expect(readdirSync(promptDir).filter(file => file.endsWith(".jsonl")).sort()).toEqual(piFilesBefore);
 			expect(sidecarRoots.map(root => existsSync(root) ? readdirSync(root).sort() : [])).toEqual(piSidecarsBefore);
+			const logText = JSON.stringify(logged);
+			expect(logText).toContain("[POST /api/sessions/continue] SDK unavailable: SDK_SESSION_UNAVAILABLE");
+			for (const privateId of [sourceId, sourceSdkSessionId]) expect(logText).not.toContain(privateId);
 		} finally {
+			errorSpy.mockRestore();
 			sdk.restore();
 			await removeSdkCatalogFixture(gateway);
 		}
@@ -326,10 +354,12 @@ test.describe("session runtime route boundary", () => {
 			expect(response.status).toBe(503);
 			const body = await response.json();
 			expect(body).toEqual({ error: "SDK_SESSION_UNAVAILABLE", code: "SDK_SESSION_UNAVAILABLE" });
-			for (const secret of ["sk-route-secret", "abcdefgh.abcdefgh.ijklmnop", "/Users/aj/.claude/credentials.json", "opaque_12345678901234567890123456789012"]) {
+			const logText = JSON.stringify(logged);
+			for (const secret of ["sk-route-secret", "abcdefgh.abcdefgh.ijklmnop", "/Users/aj/.claude/credentials.json", "opaque_12345678901234567890123456789012", sessionId, sdkSessionId]) {
 				expect(JSON.stringify(body)).not.toContain(secret);
-				expect(JSON.stringify(logged)).not.toContain(secret);
+				expect(logText).not.toContain(secret);
 			}
+			expect(logText).toContain("[GET /api/sessions/transcript] SDK unavailable: SDK_SESSION_UNAVAILABLE");
 		} finally {
 			errorSpy.mockRestore();
 			manager.getSdkSessionAccessDeps = original;

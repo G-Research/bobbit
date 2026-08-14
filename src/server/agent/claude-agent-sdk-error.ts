@@ -54,6 +54,16 @@ export function claudeAgentSdkUnavailableDiagnostic(error: unknown): string {
 		: sanitizeClaudeAgentSdkErrorForLog(error);
 }
 
+/**
+ * API route logs must not retain provider-controlled diagnostics. Preserve the
+ * stable unavailable category and, when present, an actionable sandbox category.
+ */
+export function claudeAgentSdkUnavailableRouteDiagnostic(error: unknown): string {
+	const diagnostic = claudeAgentSdkUnavailableDiagnostic(error);
+	const category = diagnostic.match(safeSandboxDiagnosticCategoryPattern)?.[0];
+	return category ? `${SDK_SESSION_UNAVAILABLE}: ${category}` : SDK_SESSION_UNAVAILABLE;
+}
+
 /** Stable HTTP/event payload: never spread an Error or upstream diagnostic. */
 export function claudeAgentSdkUnavailablePayload(): { error: typeof SDK_SESSION_UNAVAILABLE; code: typeof SDK_SESSION_UNAVAILABLE } {
 	return { error: SDK_SESSION_UNAVAILABLE, code: SDK_SESSION_UNAVAILABLE };
