@@ -127,6 +127,23 @@ const queries: FixtureSdkQuery[] = [];
 /** Official SDK history seam: reload reads the same mixed root/child history
  * that the live bridge emitted, so recovery uses the production partitioner. */
 const sdkHistory: Record<string, unknown>[] = [];
+let nativeSdkLoadCalls = 0;
+const directSdk = {
+	getSessionInfo: async (sessionId: string) =>
+		sessionId === SDK_SESSION_ID
+			? { sessionId: SDK_SESSION_ID, summary: "embedded card fixture", lastModified: sdkHistory.length }
+			: undefined,
+	getSessionMessages: async (sessionId: string) =>
+		sessionId === SDK_SESSION_ID ? sdkHistory.map((row) => ({ ...row })) : [],
+	listSubagents: async (sessionId: string) =>
+		sessionId === SDK_SESSION_ID && sdkHistory.some((row) => row.parent_agent_id === CHILD_AGENT_ID)
+			? [CHILD_AGENT_ID]
+			: [],
+	getSubagentMessages: async (sessionId: string, agentId: string) =>
+		sessionId === SDK_SESSION_ID && agentId === CHILD_AGENT_ID
+			? sdkHistory.filter((row) => row.parent_agent_id === CHILD_AGENT_ID).map((row) => ({ ...row }))
+			: [],
+};
 test.use({
 	claudeAgentSdkBridgeDepsFactory: {
 		create: () => ({
@@ -136,10 +153,11 @@ test.use({
 				return query;
 			}) as any,
 			sessionAccess: {
-				loadSdk: async () => ({
-					getSessionInfo: async () => ({ sessionId: SDK_SESSION_ID, summary: "embedded card fixture", lastModified: 1 }),
-					getSessionMessages: async () => sdkHistory.map((row) => ({ ...row })),
-				}),
+				directSdk,
+				loadSdk: async () => {
+					nativeSdkLoadCalls++;
+					throw new Error("subagent card journey must not use the native SDK fallback");
+				},
 			},
 			clock: {
 				now: () => Date.now(),
@@ -185,6 +203,7 @@ test.describe("Claude SDK embedded subagent card", () => {
 		test.setTimeout(60_000);
 		queries.length = 0;
 		sdkHistory.length = 0;
+		nativeSdkLoadCalls = 0;
 		const originalPreferences = await installSdkModel();
 		let sessionId = "";
 		try {
@@ -213,6 +232,7 @@ test.describe("Claude SDK embedded subagent card", () => {
 			await expect(reloadedParent).toBeVisible({ timeout: 20_000 });
 			await expect(reloadedParent.locator(`[data-subagent-agent-id="${CHILD_AGENT_ID}"]`)).toContainText(CHILD_TEXT);
 			await expectNoRootChildProse(page);
+			expect(nativeSdkLoadCalls).toBe(0);
 
 			// Send a late child event through the existing query after the new socket
 			// has resumed; it must update the recovered parent partition in place.
@@ -242,6 +262,7 @@ test.describe("Claude SDK embedded subagent card", () => {
 			await expect(terminalReloadedParent).toContainText(SAFE_CHILD_FAILURE);
 			await expect(terminalReloadedParent).not.toContainText(CHILD_FAILURE);
 			await expectNoRootChildProse(page);
+			expect(nativeSdkLoadCalls).toBe(0);
 
 			// Child lifecycle never creates a Bobbit child session, sidebar row, task,
 			// route, or a second standalone card outside its admitted root Agent call.
