@@ -1640,7 +1640,11 @@ function projectReliableDeliveryOutbox(
 			kind: record.kind ?? "steer",
 			targetTurn: record.targetTurn ?? "continuation",
 			sequence: record.sequence,
-			deliveryState: record.state === "uncertain" ? "uncertain" : "dispatching",
+			deliveryState: record.state === "uncertain"
+				? "uncertain"
+				: record.state === "received"
+					? "received"
+					: "dispatching",
 			deliveryReason: record.deliveryReason,
 			retryable: record.retryable ?? false,
 			attemptId: record.attemptId,
@@ -1677,6 +1681,21 @@ function batchPromptId(prefix: string, rows: QueuedMessage[]): string {
 
 function promptAttemptId(prefix: string): string {
 	return `${prefix}:${randomUUID()}`;
+}
+
+const PI_COMPACTION_ACTIVE_REJECTION =
+	"Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.";
+
+/** Match only Pi's canonical pre-admission manual-compaction rejection. */
+function isPiCompactionActiveRejection(value: unknown): boolean {
+	const message = value instanceof Error
+		? value.message
+		: typeof value === "string"
+			? value
+			: value && typeof value === "object" && typeof (value as { error?: unknown }).error === "string"
+				? (value as { error: string }).error
+				: undefined;
+	return message === PI_COMPACTION_ACTIVE_REJECTION;
 }
 
 /** Helper: extract the exact model text used by author-sidecar correlation. */
@@ -1972,7 +1991,8 @@ export function prepareVisibleAgentEvent(
 				.find((candidate) => ledger.some((record) =>
 					record.intentId === candidate.intentId
 						&& record.attemptId === candidate.attemptId
-						&& record.dispatchEpoch === candidate.dispatchEpoch));
+						&& record.dispatchEpoch === candidate.dispatchEpoch
+						&& record.state !== "received"));
 			if (pending) {
 				// The correlated Pi user start is stronger delivery evidence than the
 				// RPC response and makes a later stale rejection inert.
@@ -6453,6 +6473,24 @@ export class SessionManager {
 				} catch (error) {
 					if (activityBoundary?.state === "committed") return;
 					const index = (session.inFlightSteerTexts as ReliableInFlightRecord[]).indexOf(ledgerRecord);
+					if (isPiCompactionActiveRejection(error)
+						&& index !== -1
+						&& ledgerRecord.state !== "received"
+						&& this.cancelPromptAuthorDispatch(session, prepared)) {
+						session.inFlightSteerTexts!.splice(index, 1);
+						this.enqueueReliableIntent(session, {
+							...row,
+							deliveryState: "queued",
+							deliveryReason: "compaction-active",
+							deliveryError: undefined,
+							retryable: false,
+							attemptId: prepared.attemptId,
+							dispatchEpoch: prepared.dispatchEpoch,
+						}, { front: true });
+						this.broadcastQueue(session);
+						console.warn(`[session-manager] intent dispatch restored session=${session.id} intent=${row.id} attempt=${prepared.attemptId} outcome=compaction-active`);
+						return;
+					}
 					if (definiteRejection) {
 						if (index !== -1) session.inFlightSteerTexts!.splice(index, 1);
 						this.cancelPromptAuthorDispatch(session, prepared);
@@ -6479,9 +6517,9 @@ export class SessionManager {
 	}
 
 	/**
-	 * Splice an entry from the shadow ledger when its user-role echo arrives.
-	 * The echo is the durable settlement boundary: it proves Pi accepted and
-	 * executed the steer, so Stop must never redispatch it.
+	 * Advance one exact attempt through Pi's user-message lifecycle. A modern
+	 * message_start is receipt evidence, not terminal durability: keep the ledger
+	 * reservation until message_end has an fsynced exact sidecar settlement.
 	 */
 	private _consumeSteerEcho(session: SessionInfo, event: any): void {
 		if (event.type !== "message_start" && event.type !== "message_end") return;
@@ -6506,21 +6544,41 @@ export class SessionManager {
 				&& record.text === text
 				&& (!authorBinding || record.promptId === authorBinding.promptId));
 		}
-		let changed = false;
-		if (idx !== -1) {
+		if (idx === -1) return;
+		const record = ledger[idx];
+		if (record.intentId && record.attemptId) {
+			if (event.type === "message_start") {
+				if (record.state !== "received" || record.retryable !== false) {
+					record.state = "received";
+					record.retryable = false;
+					this.broadcastQueue(session);
+				}
+				return;
+			}
+			const terminal = readAuthorSidecar(session.id).some((binding) =>
+				binding.intentId === record.intentId
+				&& binding.attemptId === record.attemptId
+				&& binding.settlement?.outcome === "echoed");
+			// Sidecar persistence is the terminal authority. Fail closed on append/read
+			// failure by retaining the received carrier and its id reservation.
+			if (!terminal) {
+				if (record.state !== "received" || record.retryable !== false) {
+					record.state = "received";
+					record.retryable = false;
+					this.broadcastQueue(session);
+				}
+				return;
+			}
 			ledger.splice(idx, 1);
-			changed = true;
+			session.promptQueue.remove(record.intentId);
+			this.broadcastQueue(session);
+			return;
 		}
-		if (idx !== -1 && typeof intentId === "string") {
-			changed = session.promptQueue.remove(intentId) || changed;
-		}
-		if (changed) {
-			// Modern occurrences need an outbox projection transition. Legacy replay
-			// records have no stable intent id and are staged without attached clients;
-			// persist their ledger removal directly instead of fabricating a queue row.
-			if (typeof intentId === "string") this.broadcastQueue(session);
-			else this.persistInFlightSteerLedger(session);
-		}
+
+		// Legacy ledgers have no occurrence tuple and retain terminal text fallback.
+		if (event.type !== "message_end") return;
+		ledger.splice(idx, 1);
+		this.persistInFlightSteerLedger(session);
 	}
 
 	/**
@@ -6571,7 +6629,10 @@ export class SessionManager {
 			return;
 		}
 
-		const recoverable = [...ledger];
+		// A received attempt has positive Pi-start evidence. Replay can prove that an
+		// unreceived handoff never started, but it cannot negate a start Bobbit already
+		// persisted merely because Pi crashed before its terminal message append.
+		const recoverable = ledger.filter((record) => record.state !== "received");
 		if (process.env.BOBBIT_DEBUG && recoverable.length > 0) {
 			console.log(`[reliable-turn] reconcile session=${session.id} outcome=proven-no-start attempts=${recoverable.map((record) => record.intentId ?? record.promptId).join(",")}`);
 		}
@@ -7042,6 +7103,27 @@ export class SessionManager {
 			} catch (error) {
 				if (activityBoundary?.state === "committed") return;
 				const index = (session.inFlightSteerTexts as ReliableInFlightRecord[]).indexOf(attempt);
+				if (isPiCompactionActiveRejection(error)
+					&& index !== -1
+					&& attempt.state !== "received"
+					&& this.cancelPromptAuthorDispatch(session, prepared)) {
+					session.inFlightSteerTexts!.splice(index, 1);
+					this.enqueueReliableIntent(session, {
+						...reliableRow,
+						deliveryState: "queued",
+						deliveryReason: "compaction-active",
+						deliveryError: undefined,
+						retryable: false,
+						attemptId: prepared.attemptId,
+						dispatchEpoch: prepared.dispatchEpoch,
+					}, { front: true });
+					this.broadcastQueue(session);
+					// Pi rejected before opening a turn; undo the optimistic idle dispatch
+					// status so the matching compaction finisher can own the sole redrain.
+					broadcastStatus(session, "idle");
+					console.warn(`[session-manager] intent dispatch restored session=${session.id} intent=${reliableRow.id} attempt=${prepared.attemptId} outcome=compaction-active`);
+					return;
+				}
 				if (definiteRejection) {
 					if (index !== -1) session.inFlightSteerTexts!.splice(index, 1);
 					this.cancelPromptAuthorDispatch(session, prepared);
@@ -15224,15 +15306,20 @@ export class SessionManager {
 	private async _forceAbortOwned(id: string, gracePeriodMs: number, token: SessionReplacementToken): Promise<void> {
 		const session = this.sessions.get(id);
 		if (!session) return;
-		if (session.status !== "streaming" && !session.isCompacting) {
-			// Stop may have cancelled a staged role bridge before the old idle bridge
-			// was touched. Restore that canonical bridge's visible idle state; the
-			// coordinator terminal fence intentionally suppresses its final release.
-			if (token.coordinator.terminalRequest === "stop" && session.status === "starting" && !session.lifecycleFenced) {
-				broadcastStatus(session, "idle");
-			}
+		// Stop may cancel a staged role while its untouched canonical bridge is
+		// nominally starting or was transiently marked streaming by queued ownership.
+		// The active replacement token proves Stop is cancelling staging, not an old
+		// bridge turn; restore that canonical bridge to idle without aborting it.
+		if (token.coordinator.terminalRequest === "stop"
+			&& token.coordinator.promptOwner === session
+			&& token.coordinator.active?.kind === "force-abort"
+			&& !session.lifecycleFenced
+			&& session.rpcClient.running !== false
+			&& session.streamingStartedAt === undefined) {
+			broadcastStatus(session, "idle");
 			return;
 		}
+		if (session.status !== "streaming" && !session.isCompacting) return;
 		if (!this._replacementTokenIsCurrent(id, token)) {
 			throw new Error(`Session ${id} force-abort was superseded before start`);
 		}
