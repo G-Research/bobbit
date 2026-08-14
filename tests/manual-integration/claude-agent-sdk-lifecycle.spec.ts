@@ -252,11 +252,16 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			const goal = await goalResponse.json() as { id: string };
 			// Configure an isolated role before session setup: one harmless tool must
 			// ask so the real SessionManager permission-card lifecycle is exercised,
-			// while the read-only gate query remains non-interactive.
-			const roleResponse = await api("/api/roles/general");
+			// while the read-only gate query remains non-interactive. Role reads and
+			// mutations require an explicit scope; customize first so this never
+			// changes the headquarters/server configuration.
+			const roleScope = `projectId=${encodeURIComponent(project.id)}`;
+			const roleCustomize = await api(`/api/roles/general/customize?scope=project&${roleScope}`, { method: "POST" });
+			expect(roleCustomize.status).toBe(201);
+			const roleResponse = await api(`/api/roles/general?${roleScope}`);
 			expect(roleResponse.status).toBe(200);
 			const role = await roleResponse.json() as { toolPolicies?: Record<string, string> };
-			const roleUpdate = await api("/api/roles/general", {
+			const roleUpdate = await api(`/api/roles/general?${roleScope}`, {
 				method: "PUT",
 				body: JSON.stringify({ toolPolicies: { ...(role.toolPolicies ?? {}), Gates: "allow", ask_user_choices: "ask" } }),
 			});
@@ -513,10 +518,15 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			});
 			expect(goalResponse.status).toBe(201);
 			const goal = await goalResponse.json() as { id: string };
-			const roleResponse = await api("/api/roles/general");
+			// Keep the permission-card role override inside this temporary project.
+			// The role API requires an explicit scope for both reads and mutations.
+			const roleScope = `projectId=${encodeURIComponent(project.id)}`;
+			const roleCustomize = await api(`/api/roles/general/customize?scope=project&${roleScope}`, { method: "POST" });
+			expect(roleCustomize.status).toBe(201);
+			const roleResponse = await api(`/api/roles/general?${roleScope}`);
 			expect(roleResponse.status).toBe(200);
 			const role = await roleResponse.json() as { toolPolicies?: Record<string, string> };
-			const roleUpdate = await api("/api/roles/general", {
+			const roleUpdate = await api(`/api/roles/general?${roleScope}`, {
 				method: "PUT",
 				body: JSON.stringify({ toolPolicies: { ...(role.toolPolicies ?? {}), Gates: "allow", ask_user_choices: "ask" } }),
 			});
