@@ -378,6 +378,40 @@ test.describe("Journey: Reliable Agent Turns", () => {
 		}
 	});
 
+	test("pre-admission rejection survives reload and exposes local Retry and Dismiss", async ({ page, gateway }) => {
+		const scenario = await createScenario(page, gateway);
+		const session = gateway.sessionManager.getSession(scenario.sessionId) as any;
+		try {
+			const text = "RAT_PRE_ADMISSION_REJECTION";
+			session.condition = {
+				code: "MODEL_SELECTION_REQUIRED",
+				provider: "retired-provider",
+				modelId: "retired-model",
+			};
+			await submit(page, text);
+			const [id] = await captureIntentIds(page, text);
+			await expectIntentState(page, id, "failed", /Not delivered/);
+			const failed = intentRow(page, id);
+			await expect(failed.getByRole("button", { name: "Retry" })).toBeVisible();
+			await expect(failed.getByRole("button", { name: "Dismiss" })).toBeVisible();
+
+			await page.reload({ waitUntil: "domcontentloaded" });
+			await expect(editor(page)).toBeVisible({ timeout: 20_000 });
+			await expectIntentState(page, id, "failed", /Not delivered/);
+
+			delete session.condition;
+			const echo = scenario.runtime.holdEcho(text);
+			await intentRow(page, id).getByRole("button", { name: "Retry" }).click();
+			await echo.entered;
+			echo.release();
+			await expectOneCarrier(page, id, "transcript");
+			await expectTranscriptText(page, id, text);
+		} finally {
+			delete session?.condition;
+			await scenario.cleanup();
+		}
+	});
+
 	test("definite delivery failure retains an actionable row and Retry reuses the occurrence id", async ({ page, gateway }) => {
 		const scenario = await createScenario(page, gateway);
 		try {

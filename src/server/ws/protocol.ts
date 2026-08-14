@@ -305,8 +305,10 @@ export type ServerMessage =
 	| { type: "resume_gap"; lastSeq: number }
 	| { type: "client_joined"; clientId: string }
 	| { type: "client_left"; clientId: string }
-	/** A pre-auth gateway state error may include a bounded retry hint. */
-	| { type: "error"; message: string; code: string; retryAfterMs?: number }
+	/** Gateway errors may correlate a prompt/steer occurrence that was rejected
+	 * before durable server admission. The client keeps that local occurrence
+	 * actionable; an uncorrelated error must never settle an outbox row. */
+	| { type: "error"; message: string; code: string; retryAfterMs?: number; intentId?: string; retryable?: boolean }
 	| {
 		type: "session_status";
 		status: "idle" | "streaming" | "aborting" | "preparing" | "archived" | "starting" | "terminated";

@@ -66,6 +66,7 @@ export interface QueuedMessage {
 	targetTurn?: IntentTargetTurn;
 	deliveryState?: IntentDeliveryState;
 	deliveryError?: string;
+	retryable?: boolean;
 	/** Legacy pre-acceptance marker; normalized to the local delivery state. */
 	unsent?: boolean;
 	source?: PromptSource;
@@ -1634,6 +1635,7 @@ export class MessageEditor extends LitElement {
 							const isFailed = deliveryState === "failed";
 							const isCancelled = deliveryState === "cancelled";
 							const isUncertain = deliveryState === "uncertain";
+							const canRetry = (isFailed || isCancelled) && msg.retryable !== false;
 							return html`
 							<div
 								class="queue-pill intent-row flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg ${kind === "steer" ? "bg-amber-500/10 border border-amber-500/30" : "bg-muted/50 border border-border/50"} text-xs text-muted-foreground${this._draggedPillId === msg.id ? " opacity-50" : ""}"
@@ -1663,7 +1665,7 @@ export class MessageEditor extends LitElement {
 								${isUncertain ? html`
 									<button type="button" draggable="false" @click=${() => this.onRemoveQueued?.(msg.id)} class="remove-btn shrink-0 px-1.5 py-0.5 rounded text-[0.65rem] font-medium hover:bg-destructive/10 hover:text-destructive cursor-pointer" aria-label="Dismiss unconfirmed delivery">Dismiss</button>
 								` : isFailed || isCancelled ? html`
-									<button type="button" draggable="false" @click=${() => this.onRetryQueued?.(msg)} class="retry-btn shrink-0 px-1.5 py-0.5 rounded text-[0.65rem] font-medium hover:bg-primary/10 hover:text-primary cursor-pointer" aria-label="Retry">Retry</button>
+									${canRetry ? html`<button type="button" draggable="false" @click=${() => this.onRetryQueued?.(msg)} class="retry-btn shrink-0 px-1.5 py-0.5 rounded text-[0.65rem] font-medium hover:bg-primary/10 hover:text-primary cursor-pointer" aria-label="Retry">Retry</button>` : nothing}
 									${isFailed ? html`<button type="button" draggable="false" @click=${() => this.onEditQueued?.(msg)} class="edit-btn shrink-0 px-1.5 py-0.5 rounded text-[0.65rem] font-medium hover:bg-primary/10 hover:text-primary cursor-pointer" aria-label="Edit">Edit</button>` : nothing}
 									<button type="button" draggable="false" @click=${() => this.onRemoveQueued?.(msg.id)} class="remove-btn shrink-0 px-1.5 py-0.5 rounded text-[0.65rem] font-medium hover:bg-destructive/10 hover:text-destructive cursor-pointer" aria-label="Dismiss">Dismiss</button>
 								` : deliveryState === "queued" && kind === "prompt" ? html`

@@ -415,6 +415,9 @@ interface PendingOutboxEntry {
 	row?: QueuedMessage;
 	persisted?: boolean;
 	lastSentEpoch?: number;
+	/** A correlated pre-admission rejection requires an explicit user Retry.
+	 * It must not be flushed automatically on this or a later connection. */
+	retryRequired?: boolean;
 }
 
 function createIntentId(): string {
@@ -1392,11 +1395,15 @@ export class RemoteAgent {
 		// server projection explicitly marks this exact occurrence retryable.
 		if (projected && (projected.deliveryState === "cancelled" || projected.retryable === false)) return;
 		const local = this._pendingOutbox.find((entry) => entry.row?.id === intentId);
-		if (local?.row && !local.persisted) {
+		if (local?.row && !projected && local.row.retryable === false) return;
+		if (local?.row && !projected && (local.row.deliveryState === "failed" || !local.persisted)) {
 			local.row.deliveryState = "local";
 			local.row.unsent = true;
-			local.row.retryable = false;
+			delete local.row.deliveryReason;
 			delete local.row.deliveryError;
+			delete local.row.retryable;
+			local.lastSentEpoch = undefined;
+			local.retryRequired = false;
 			this.onQueueUpdate?.(this.getQueue());
 			void storage.deliveryIntents.put(this._sessionId, intentId, local.frame, persistedOutboxRow(local.row))
 				.then((result) => {
@@ -1407,10 +1414,13 @@ export class RemoteAgent {
 					if (result.ok) {
 						local.persisted = true;
 						this._sendOutboxEntry(local);
+						this.onQueueUpdate?.(this.getQueue());
 						return;
 					}
+					local.retryRequired = true;
 					local.row!.deliveryState = "failed";
 					local.row!.unsent = false;
+					local.row!.retryable = false;
 					local.row!.deliveryError = "This message could not be saved for reliable delivery.";
 					this.onQueueUpdate?.(this.getQueue());
 				});
@@ -1777,11 +1787,15 @@ export class RemoteAgent {
 		this.send({ type: "steer_queued", messageId });
 	}
 
-	/** Remove a never-sent local occurrence immediately. Once a frame may have
-	 * reached the server, retain its carrier until durable cancellation receipt. */
+	/** Remove a never-sent or definitively pre-admission-rejected local occurrence.
+	 * Once a frame may have reached server admission, retain its carrier until a
+	 * durable cancellation receipt. */
 	removeQueued(messageId: string): void {
 		const idx = this._pendingOutbox.findIndex((e) => e.row?.id === messageId);
-		if (idx !== -1 && this._pendingOutbox[idx].lastSentEpoch === undefined) {
+		const hasServerProjection = this._deliveryProjection.has(messageId)
+			|| this._serverQueue.some((row) => row.id === messageId);
+		const local = idx === -1 ? undefined : this._pendingOutbox[idx];
+		if (local && !hasServerProjection && (local.lastSentEpoch === undefined || local.retryRequired === true)) {
 			this._pendingOutbox.splice(idx, 1);
 			void storage.deliveryIntents.delete(this._sessionId, messageId);
 			this.onQueueUpdate?.(this.getQueue());
@@ -1948,10 +1962,17 @@ export class RemoteAgent {
 				|| deliveryIntentId(record.frame) !== record.intentId
 			) continue;
 			if (this._pendingOutbox.some((entry) => entry.row?.id === record.intentId)) continue;
+			const restoredState = (record.row as any).deliveryState;
+			const retryRequired = restoredState === "failed";
 			this._pendingOutbox.push({
 				frame: record.frame,
-				row: { ...(record.row as any), deliveryState: "local", unsent: true },
+				row: {
+					...(record.row as any),
+					deliveryState: retryRequired ? "failed" : "local",
+					unsent: !retryRequired,
+				},
 				persisted: true,
+				retryRequired,
 			});
 		}
 	}
@@ -1989,7 +2010,7 @@ export class RemoteAgent {
 	}
 
 	private _sendOutboxEntry(entry: PendingOutboxEntry): boolean {
-		if (!entry.persisted || entry.lastSentEpoch === this._connectionEpoch) return false;
+		if (!entry.persisted || entry.retryRequired || entry.lastSentEpoch === this._connectionEpoch) return false;
 		if (this._sessionId && this._connectionStatus !== "connected") return false;
 		if (this.ws?.readyState !== WebSocket.OPEN) return false;
 		try {
@@ -2000,6 +2021,43 @@ export class RemoteAgent {
 		} catch {
 			return false;
 		}
+	}
+
+	/** Move only an exclusively local occurrence into an actionable failed state.
+	 * A server projection means ownership has already transferred and a late error
+	 * from another socket generation must not regress it. */
+	private async _markLocalIntentRejected(msg: any): Promise<boolean> {
+		const intentId = deliveryIntentId(msg);
+		if (!intentId || this._deliveryProjection.has(intentId)
+			|| this._serverQueue.some((row) => row.id === intentId)) return false;
+		const entry = this._pendingOutbox.find((candidate) => candidate.row?.id === intentId);
+		if (!entry?.row) return false;
+
+		entry.row.deliveryState = "failed";
+		entry.row.unsent = false;
+		entry.row.retryable = msg.retryable !== false;
+		entry.row.deliveryReason = typeof msg.code === "string" ? msg.code.slice(0, 128) : "PRE_ADMISSION_REJECTED";
+		entry.row.deliveryError = typeof msg.message === "string" && msg.message
+			? msg.message.slice(0, 1_000)
+			: "This message was not accepted by the server.";
+		entry.lastSentEpoch = undefined;
+		entry.retryRequired = true;
+		this.onQueueUpdate?.(this.getQueue());
+
+		if (entry.persisted && this._sessionId) {
+			const result = await storage.deliveryIntents.put(
+				this._sessionId,
+				intentId,
+				entry.frame,
+				persistedOutboxRow(entry.row),
+			);
+			if (!result.ok) {
+				entry.row.retryable = false;
+				entry.row.deliveryError = "The server rejected this message, but its failed state could not be saved. Dismiss it or copy the text before reloading.";
+				this.onQueueUpdate?.(this.getQueue());
+			}
+		}
+		return true;
 	}
 
 	private _rememberSettledIntent(intentId: string): void {
@@ -2817,6 +2875,7 @@ export class RemoteAgent {
 
 			case "error":
 				console.error(`[RemoteAgent] Server error: ${msg.message} (${msg.code})`);
+				await this._markLocalIntentRejected(msg);
 				if (this._state.modelSelectionPending) {
 					this._state.modelSelectionPending = null;
 					this._state.modelSelectionError = typeof msg.message === "string" && msg.message
