@@ -238,9 +238,32 @@ describe("Claude Agent SDK sandbox runtime", () => {
 		await expect(access.getSessionMessages(SDK_ID)).resolves.toHaveLength(1);
 		expect(executions).toHaveLength(2);
 		for (const args of executions) {
-			expect(args).toEqual(expect.arrayContaining(["exec", "-i", "-u", "bobbit-sdk", "-w", "/workspace-wt/history", "container-history", "node", "--input-type=module"]));
+			expect(args).toEqual(expect.arrayContaining(["exec", "-i", "-u", "bobbit-sdk", "-w", "/", "container-history", "node", "--input-type=module"]));
 			expect(args.join(" ")).toContain("CLAUDE_CONFIG_DIR=/bobbit-state/claude-agent-sdk/history-session");
 			expect(args.join(" ")).not.toMatch(/OAUTH|BOBBIT_TOKEN|ANTHROPIC_API_KEY/);
+		}
+	});
+
+	it("reads archived history after its worktree has been removed", async () => {
+		const executions: string[][] = [];
+		const access = createSandboxClaudeAgentSdkSessionAccess({
+			containerId: "container-archived",
+			cwd: "/workspace-wt/session/terminated",
+			bobbitSessionId: "terminated-session",
+			prepare: async () => undefined,
+			exec: async (args) => {
+				executions.push(args);
+				return args.includes("info")
+					? JSON.stringify({ sessionId: SDK_ID, summary: "archived", lastModified: 1 })
+					: JSON.stringify([{ type: "user", uuid: "archived-message", session_id: SDK_ID, message: { role: "user", content: "retained" }, parent_tool_use_id: null, parent_agent_id: null }]);
+			},
+		});
+		await expect(access.getSessionMessages(SDK_ID)).resolves.toHaveLength(1);
+		expect(executions).toHaveLength(1);
+		for (const args of executions) {
+			expect(args).toEqual(expect.arrayContaining(["-w", "/"]));
+			expect(args).not.toContain("/workspace-wt/session/terminated");
+			expect(args.at(-4)).toBe("");
 		}
 	});
 

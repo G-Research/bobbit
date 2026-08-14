@@ -13005,7 +13005,7 @@ export class SessionManager {
 				containerId,
 				cwd: ps.cwd,
 				bobbitSessionId: ps.id,
-				prepare: () => sandbox.prepareClaudeAgentSdkSession(ps.cwd, ps.id),
+				prepare: () => sandbox.prepareClaudeAgentSdkState(ps.id),
 			}),
 		};
 	}

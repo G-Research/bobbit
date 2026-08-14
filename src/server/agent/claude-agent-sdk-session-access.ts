@@ -198,11 +198,14 @@ export function createSandboxClaudeAgentSdkSessionAccess(input: {
 	}): Promise<T> => {
 		await prepare();
 		const output = await execute([
-			"exec", "-i", "-u", CLAUDE_AGENT_SDK_DOCKER_USER, "-w", input.cwd,
+			// Archive readers must not depend on a terminated worktree. SDK session
+			// IDs are unique inside this per-Bobbit-session config root, so omit the
+			// optional project-dir filter and let the official API search this root.
+			"exec", "-i", "-u", CLAUDE_AGENT_SDK_DOCKER_USER, "-w", "/",
 			"-e", `HOME=${CLAUDE_AGENT_SDK_DOCKER_HOME}`, "-e", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 			"-e", `CLAUDE_CONFIG_DIR=${dir}`,
 			input.containerId, "node", "--input-type=module", "-e", SANDBOX_SDK_READER,
-			request.agentId ?? "", request.operation, request.sessionId, input.cwd,
+			request.agentId ?? "", request.operation, request.sessionId, "",
 			String(request.limit ?? 0), String(request.offset ?? 0), String(request.includeSystemMessages === true),
 		]);
 		if (Buffer.byteLength(output) > MAX_SANDBOX_SDK_HISTORY_PAGE_BYTES) throw new Error("sandbox SDK response page exceeds limit");

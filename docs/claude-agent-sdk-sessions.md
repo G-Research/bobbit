@@ -123,19 +123,23 @@ The sandbox image must contain the exact Agent SDK version expected by the
 server (currently `0.3.222`), its architecture-appropriate bundled binary, and
 the fixed `/usr/local/bin/bobbit-claude-agent-sdk` launcher. Bobbit checks both
 the image capability label and launcher before the SDK query starts. Rebuild the
-`bobbit-agent` image after an SDK/server upgrade; a host or globally installed
-`claude` binary is never a substitute.
+`bobbit-agent` image after an SDK/server upgrade or any Dockerfile UID/launcher
+change; a host or globally installed `claude` binary is never a substitute.
 
 Each Bobbit project uses a deterministic private Docker named volume at
 `/bobbit-state/claude-agent-sdk`, separate from the host project state bind
 mount. The volume survives ordinary container replacement and restart, while an
-explicit sandbox destroy removes it. Its root is locked before node/Pi/tool
-processes are exposed; legacy per-session state is accepted only after a bounded
-physical migration rejects links and aliases and applies SDK-private ownership
-and modes. SDK history remains SDK-owned: Bobbit reads it with bounded,
-read-only SDK calls in the same pooled container. Those history calls have no
-OAuth or Bobbit gateway authority, and Bobbit does not create a Pi JSONL
-fallback or a second transcript store.
+explicit sandbox destroy removes it. The SDK process runs as fixed UID 1001,
+which is distinct from the model-invocable `node` UID. Its root is locked before
+node/Pi/tool processes are exposed; legacy per-session state is accepted only
+after a bounded physical migration rejects links and aliases and applies
+SDK-private ownership and modes. A pre-volume host bind is intentionally not
+reused or archived as sandbox SDK state; archived SDK history stays in the
+private volume. SDK history remains SDK-owned: Bobbit reads it with bounded,
+read-only SDK calls in the same pooled container, without requiring a terminated
+worktree to still exist. Those history calls have no OAuth or Bobbit gateway
+authority, and Bobbit does not create a Pi JSONL fallback or a second transcript
+store.
 
 ## Persistence, history, and recovery
 

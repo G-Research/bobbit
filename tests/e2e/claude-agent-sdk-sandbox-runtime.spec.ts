@@ -365,7 +365,9 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 		const replacement = `${name}-replacement`;
 		const docker = (args: string[]): string => execFileSync("docker", args, { encoding: "utf8", timeout: 20_000 });
 		try {
-			docker(["volume", "create", stateVolume]);
+			// Match ProjectSandbox's ownership labels so interrupted E2E cleanup can
+			// discover this direct-volume security fixture after a crash.
+			docker(["volume", "create", "--label", "bobbit-project=sdk-state-e2e", "--label", `bobbit-e2e-run=${process.env.BOBBIT_E2E_RUN_ID ?? "manual"}`, stateVolume]);
 			docker(["run", "-d", "--name", name, "-v", `${stateVolume}:/bobbit-state/claude-agent-sdk`, SANDBOX_IMAGE, "sleep", "infinity"]);
 			expect(docker(["inspect", "--format", "{{range .Mounts}}{{.Type}}:{{.Name}}:{{.Destination}}{{end}}", name])).toContain(`volume:${stateVolume}:/bobbit-state/claude-agent-sdk`);
 			// Simulate state written by the pre-lock UID-1000 container without

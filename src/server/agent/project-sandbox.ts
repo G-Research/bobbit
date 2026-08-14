@@ -78,10 +78,6 @@ prepare_session() {
 chown -h root:root "$parent"
 chmod 0711 "$parent"
 [ "$(stat -c '%u:%a' "$parent")" = "0:711" ]
-for dir in "$parent"/*; do
-  [ -e "$dir" ] || continue
-  prepare_session "$(basename "$dir")"
-done
 if [ -e "$marker" ] || [ -L "$marker" ]; then
   [ -f "$marker" ] && [ ! -L "$marker" ] || exit 65
 else
@@ -90,6 +86,15 @@ fi
 chown -h root:root "$marker"
 chmod 0600 "$marker"
 [ "$(stat -c '%u:%a' "$marker")" = "0:600" ]
+case "\${1:-all}" in
+  all)
+    for dir in "$parent"/*; do
+      [ -e "$dir" ] || continue
+      prepare_session "$(basename "$dir")"
+    done
+    ;;
+  *) prepare_session "$1" ;;
+esac
 `;
 
 // A running container without this marker may have exposed node to legacy
@@ -105,12 +110,9 @@ marker="$parent/.bobbit-sdk-state-parent-lock-v2"
 [ "$(stat -c '%u:%a' "$marker")" = "0:600" ]
 `;
 
-// Runs as root with a validated session id passed as $1. The lifecycle script
-// above also migrates dormant histories before node can access them; rerunning
-// it here safely handles an individual new or archived session.
-const PREPARE_CLAUDE_SDK_STATE = `${PREPARE_CLAUDE_SDK_STATE_PARENT}
-prepare_session "$1"
-`;
+// The lifecycle script performs a whole-volume migration only before exposure.
+// Later per-session preparation invokes the validated session branch directly.
+const PREPARE_CLAUDE_SDK_STATE = PREPARE_CLAUDE_SDK_STATE_PARENT;
 
 interface DockerMountInfo {
 	Type?: string;
@@ -694,15 +696,10 @@ export class ProjectSandbox {
 		return this._dockerExec(containerId, args, opts);
 	}
 
-	/**
-	 * Secure one SDK config root before OAuth is injected. Legacy SDK state was
-	 * node-owned; migrate it only after the mounted parent is root-owned and no
-	 * longer writable by node. Workspace access is a fixed node-side probe, not
-	 * a recursive permission sweep over model-controlled files.
-	 */
-	async prepareClaudeAgentSdkSession(cwd: string, sessionId: string): Promise<void> {
-		if (!isSandboxContainerCwd(cwd) || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(sessionId)) {
-			throw new Error("Claude Agent SDK sandbox session path is invalid");
+	/** Prepare one private SDK state root without inspecting its former workspace. */
+	async prepareClaudeAgentSdkState(sessionId: string): Promise<void> {
+		if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(sessionId)) {
+			throw new Error("Claude Agent SDK sandbox session identity is invalid");
 		}
 		const containerId = await this.getContainerId();
 		await this.execDocker([
@@ -710,6 +707,18 @@ export class ProjectSandbox {
 			PREPARE_CLAUDE_SDK_STATE,
 			"bobbit-sdk-state", sessionId,
 		], { timeout: 30_000, env: DOCKER_ENV });
+	}
+
+	/**
+	 * Prepare private SDK state and validate the launch workspace before OAuth is
+	 * injected. Archive/history reads must call `prepareClaudeAgentSdkState`.
+	 */
+	async prepareClaudeAgentSdkSession(cwd: string, sessionId: string): Promise<void> {
+		if (!isSandboxContainerCwd(cwd)) {
+			throw new Error("Claude Agent SDK sandbox session path is invalid");
+		}
+		await this.prepareClaudeAgentSdkState(sessionId);
+		const containerId = await this.getContainerId();
 		// Docker resolves `-w` before executing the fixed node probe. A CWD swapped
 		// to a private 0700 SDK directory therefore fails without mutating either
 		// the workspace or config history.

@@ -302,6 +302,20 @@ describe("ProjectSandbox state mount staleness", () => {
 		assert.equal((sandbox as any).containerId, "new-container-id");
 	});
 
+	it("prepares archived SDK state without probing a removed workspace", async () => {
+		const sandbox = makeSandbox();
+		const commands: string[][] = [];
+		(sandbox as any).containerId = "container-sdk";
+		(sandbox as any).execDocker = async (args: string[]) => { commands.push(args); return { stdout: "", stderr: "" }; };
+
+		await sandbox.prepareClaudeAgentSdkState("archived-session");
+
+		assert.equal(commands.length, 1);
+		assert.deepEqual(commands[0].slice(0, 5), ["exec", "-i", "-u", "root", "container-sdk"]);
+		assert.match(commands[0][7], /prepare_session/);
+		await assert.rejects(sandbox.prepareClaudeAgentSdkState("../archived"), /session identity is invalid/);
+	});
+
 	it("prepares only the SDK session config and validated workspace for the fixed SDK user", async () => {
 		const sandbox = makeSandbox();
 		const commands: string[][] = [];
@@ -325,7 +339,7 @@ describe("ProjectSandbox state mount staleness", () => {
 		assert.match(commands[1].at(-1) ?? "", /test -O/);
 		assert.match(commands[2].at(-1) ?? "", /test -r/);
 		await assert.rejects(sandbox.prepareClaudeAgentSdkSession("/host/project", "sdk-session"), /session path is invalid/);
-		await assert.rejects(sandbox.prepareClaudeAgentSdkSession("/workspace", "../sdk"), /session path is invalid/);
+		await assert.rejects(sandbox.prepareClaudeAgentSdkSession("/workspace", "../sdk"), /session identity is invalid/);
 	});
 
 	it("locks SDK state before reconnecting an existing container", async () => {
