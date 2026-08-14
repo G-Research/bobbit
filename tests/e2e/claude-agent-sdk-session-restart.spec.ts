@@ -106,6 +106,7 @@ class FakeOfficialSdk {
 	readonly queries: FakeOfficialQuery[] = [];
 	readonly history: OfficialSessionMessage[] = [];
 	readonly sessionAccessCalls: Array<{ method: "info" | "messages"; sessionId: string; dir: string | undefined }> = [];
+	nativeSdkLoadCalls = 0;
 	preCompactRuns = 0;
 	private turn = 0;
 
@@ -216,7 +217,13 @@ class FakeOfficialSdk {
 			this.queries.push(query);
 			return query;
 		}) as any,
-		sessionAccess: { loadSdk: async () => this },
+		sessionAccess: {
+			directSdk: this,
+			loadSdk: async () => {
+				this.nativeSdkLoadCalls++;
+				throw new Error("restart journey must not use the native SDK fallback");
+			},
+		},
 		clock: {
 			now: () => Date.now(),
 			setTimeout: (handler: () => void, ms: number) => setTimeout(handler, ms),
@@ -413,6 +420,7 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 			});
 			expect(fakeSdk.sessionAccessCalls).toContainEqual({ method: "info", sessionId: SDK_SESSION_ID, dir: sdkLive!.cwd });
 			expect(fakeSdk.sessionAccessCalls).toContainEqual({ method: "messages", sessionId: SDK_SESSION_ID, dir: sdkLive!.cwd });
+			expect(fakeSdk.nativeSdkLoadCalls).toBe(0);
 
 			const historyBeforeCompact = structuredClone(fakeSdk.history);
 			const compactionConnection = await connectWs(sdkId);
@@ -523,6 +531,7 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 			const messagesBeforeRestartPrompt = afterCompact.data as Array<unknown>;
 			const messagesAfterRestartPrompt = afterRestartPrompt.data as Array<unknown>;
 			expect(messagesAfterRestartPrompt.slice(0, messagesBeforeRestartPrompt.length)).toEqual(messagesBeforeRestartPrompt);
+			expect(fakeSdk.nativeSdkLoadCalls).toBe(0);
 
 			const resumedPiConnection = await connectWs(piId);
 			try {
