@@ -12,6 +12,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { installConfirmedSessionModelPersistence } from "../../src/app/session-manager.js";
 import { RemoteAgent } from "../../src/app/remote-agent.js";
 import { storage } from "../../src/app/storage.js";
+import { DeliveryIntentStore, type PersistedDeliveryIntent } from "../../src/ui/storage/app-storage.js";
+import type { StorageBackend } from "../../src/ui/storage/types.js";
 import "../../src/ui/components/MessageEditor.js";
 import "../../src/ui/lazy/safe-markdown-block.js";
 import { setRenderApp, state } from "../../src/app/state.js";
@@ -441,80 +443,129 @@ describe("RemoteAgent send outbox (S2)", () => {
 		expect(r.sent).toHaveLength(0); // no remove_queued sent to server for a never-sent row
 	});
 
-	it("persists a correlated pre-admission rejection until explicit Retry or local Dismiss", async () => {
+	it("keeps a newer retry carrier when a stale tab dismisses the failed revision", async () => {
 		const sessionId = `pre-admission-${Date.now()}-${Math.random()}`;
-		const records = new Map<string, any>();
+		const records = new Map<string, PersistedDeliveryIntent>();
+		let releaseRetry!: () => void;
+		let signalRetryPersisted!: () => void;
+		const retryPersisted = new Promise<void>((resolve) => { signalRetryPersisted = resolve; });
+		const retryRelease = new Promise<void>((resolve) => { releaseRetry = resolve; });
 		vi.spyOn(storage.deliveryIntents, "put").mockImplementation(async (sid, intentId, frame, row) => {
-			records.set(`${sid}:${intentId}`, { sessionId: sid, intentId, frame, row });
-			return { ok: true };
+			const key = `${sid}:${intentId}`;
+			const existing = records.get(key);
+			if (existing) return { ok: true, revision: existing.revision };
+			records.set(key, { key, sessionId: sid, intentId, frame, row, revision: 0, createdAt: Date.now(), updatedAt: Date.now() });
+			return { ok: true, revision: 0 };
 		});
 		vi.spyOn(storage.deliveryIntents, "list").mockImplementation(async (sid) =>
 			[...records.values()].filter((record) => record.sessionId === sid));
+		vi.spyOn(storage.deliveryIntents, "replaceIfRevision").mockImplementation(async (sid, intentId, revision, frame, row) => {
+			const key = `${sid}:${intentId}`;
+			const current = records.get(key);
+			if (!current || current.revision !== revision) return { ok: true, applied: false, ...(current ? { current } : {}) };
+			const next = { ...current, frame, row, revision: revision + 1, updatedAt: Date.now() };
+			records.set(key, next);
+			if ((row as any).deliveryState === "local") {
+				signalRetryPersisted();
+				await retryRelease;
+			}
+			return { ok: true, applied: true, current: next };
+		});
+		vi.spyOn(storage.deliveryIntents, "deleteIfRevision").mockImplementation(async (sid, intentId, revision) => {
+			const key = `${sid}:${intentId}`;
+			const current = records.get(key);
+			if (!current || current.revision !== revision) return { ok: true, applied: false, ...(current ? { current } : {}) };
+			records.delete(key);
+			return { ok: true, applied: true };
+		});
 		vi.spyOn(storage.deliveryIntents, "delete").mockImplementation(async (sid, intentId) => {
 			records.delete(`${sid}:${intentId}`);
 		});
 
-		const ra = makeAgent(OPEN);
-		ra._sessionId = sessionId;
-		ra._connectionStatus = "connected";
-		await ra.prompt("choose a model then retry");
-		const originalFrame = snapshot(ra).sent[0];
+		const staleTab = makeAgent(OPEN);
+		staleTab._sessionId = sessionId;
+		staleTab._connectionStatus = "connected";
+		await staleTab.prompt("choose a model then retry");
+		const originalFrame = snapshot(staleTab).sent[0];
 		const intentId = originalFrame.intentId;
-
-		await ra.handleServerMessage({
-			type: "error",
-			code: "MODEL_SELECTION_REQUIRED",
-			message: "A different tab was rejected.",
-			intentId: "different-occurrence",
-			retryable: true,
-		});
-		await ra.handleServerMessage({ type: "error", code: "GENERIC", message: "Uncorrelated failure." });
-		expect(snapshot(ra).queue[0]).toMatchObject({ id: intentId, deliveryState: "local" });
-
-		await ra.handleServerMessage({
+		await staleTab.handleServerMessage({
 			type: "error",
 			code: "MODEL_SELECTION_REQUIRED",
 			message: "Choose a replacement model before sending.",
 			intentId,
 			retryable: true,
 		});
-		expect(snapshot(ra).queue).toEqual([
-			expect.objectContaining({
-				id: intentId,
-				deliveryState: "failed",
-				retryable: true,
-				deliveryError: "Choose a replacement model before sending.",
-			}),
-		]);
 
-		const restored = makeAgent(OPEN);
-		restored._sessionId = sessionId;
-		restored._connectionStatus = "connected";
-		await restored._restoreDeliveryOutbox();
-		restored._flushOutbox();
-		expect(snapshot(restored).sent).toHaveLength(0);
-		expect(snapshot(restored).queue[0]).toMatchObject({ id: intentId, deliveryState: "failed" });
+		const retryingTab = makeAgent(OPEN);
+		retryingTab._sessionId = sessionId;
+		retryingTab._connectionStatus = "connected";
+		await retryingTab._restoreDeliveryOutbox();
+		expect(snapshot(retryingTab).queue[0]).toMatchObject({ id: intentId, deliveryState: "failed" });
 
-		const editor = document.createElement("message-editor") as any;
-		editor.queuedMessages = restored.getQueue();
-		document.body.appendChild(editor);
-		await editor.updateComplete;
-		const intentRow = editor.querySelector(`[data-intent-id="${intentId}"]`)!;
-		expect(intentRow.querySelector('[aria-label="Retry"]')).not.toBeNull();
-		expect(intentRow.querySelector('[aria-label="Dismiss"]')).not.toBeNull();
-		editor.remove();
+		retryingTab.retryIntent(intentId);
+		await retryPersisted;
+		expect(records.get(`${sessionId}:${intentId}`)).toMatchObject({ revision: 2, row: { deliveryState: "local" } });
 
-		restored.retryIntent(intentId);
-		await vi.waitFor(() => expect(snapshot(restored).sent).toHaveLength(1));
-		expect(snapshot(restored).sent[0]).toEqual(originalFrame);
-		restored._flushOutbox();
-		expect(snapshot(restored).sent).toHaveLength(1);
+		// Tab A rendered failed revision 1. Its dismissal must lose the CAS to
+		// Tab B's persisted retry revision 2 and adopt, not delete, that carrier.
+		staleTab.removeQueued(intentId);
+		await vi.waitFor(() => expect(snapshot(staleTab).queue[0]).toMatchObject({ id: intentId, deliveryState: "local" }));
+		expect(records.has(`${sessionId}:${intentId}`)).toBe(true);
 
-		// The originating tab still has an exclusively local failed carrier. Its
-		// Dismiss must not ask a server that never admitted this occurrence.
-		ra.removeQueued(intentId);
-		expect(snapshot(ra).queue).toHaveLength(0);
-		expect(snapshot(ra).sent).toEqual([originalFrame]);
+		// Simulate Tab B closing after persistence but before socket admission.
+		retryingTab._pendingOutbox = [];
+		releaseRetry();
+		await Promise.resolve();
+		expect(snapshot(retryingTab).sent).toHaveLength(0);
+
+		const reloadedTab = makeAgent(OPEN);
+		reloadedTab._sessionId = sessionId;
+		reloadedTab._connectionStatus = "connected";
+		await reloadedTab._restoreDeliveryOutbox();
+		reloadedTab._flushOutbox();
+		expect(snapshot(reloadedTab).sent).toEqual([originalFrame]);
+		reloadedTab._flushOutbox();
+		expect(snapshot(reloadedTab).sent).toHaveLength(1);
+
+		await reloadedTab.handleServerMessage({
+			type: "delivery_outbox",
+			outbox: [{ id: intentId, text: "choose a model then retry", isSteered: false, deliveryState: "dispatching", createdAt: 1 }],
+		});
+		expect(snapshot(reloadedTab).queue).toHaveLength(1);
 		expect(records.has(`${sessionId}:${intentId}`)).toBe(false);
+		reloadedTab.handleAgentEvent({
+			type: "message_start",
+			message: { id: "pi-retry", role: "user", content: [{ type: "text", text: "choose a model then retry" }], deliveryIntentId: intentId },
+		});
+		expect(snapshot(reloadedTab).queue).toHaveLength(0);
+		expect(reloadedTab._state.messages).toEqual([expect.objectContaining({ deliveryIntentId: intentId })]);
+	});
+
+	it("atomically refuses deletion after the persisted revision advances", async () => {
+		const rows = new Map<string, PersistedDeliveryIntent>();
+		const backend = {
+			async get(_store: string, key: string) { return rows.get(key) ?? null; },
+			async set(_store: string, key: string, value: PersistedDeliveryIntent) { rows.set(key, value); },
+			async delete(_store: string, key: string) { rows.delete(key); },
+			async getAllFromIndex() { return [...rows.values()]; },
+			async transaction(_stores: string[], _mode: string, operation: any) {
+				return operation({
+					get: async (_store: string, key: string) => rows.get(key) ?? null,
+					set: async (_store: string, key: string, value: PersistedDeliveryIntent) => { rows.set(key, value); },
+					delete: async (_store: string, key: string) => { rows.delete(key); },
+				});
+			},
+		} as unknown as StorageBackend;
+		const store = new DeliveryIntentStore(backend);
+		await store.put("session", "intent", { type: "prompt", intentId: "intent", text: "x" }, {
+			id: "intent", text: "x", deliveryState: "failed", createdAt: 1,
+		});
+		const retry = await store.replaceIfRevision("session", "intent", 0,
+			{ type: "prompt", intentId: "intent", text: "x" },
+			{ id: "intent", text: "x", deliveryState: "local", createdAt: 1 });
+		expect(retry).toMatchObject({ ok: true, applied: true, current: { revision: 1 } });
+		const staleDismiss = await store.deleteIfRevision("session", "intent", 0);
+		expect(staleDismiss).toMatchObject({ ok: true, applied: false, current: { revision: 1 } });
+		expect((await store.list("session"))[0]).toMatchObject({ revision: 1, row: { deliveryState: "local" } });
 	});
 });

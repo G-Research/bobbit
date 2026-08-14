@@ -18,13 +18,23 @@ export interface PersistedDeliveryIntent {
 	intentId: string;
 	frame: Record<string, unknown>;
 	row: Record<string, unknown>;
+	/** Monotonic local-attempt revision. Legacy records are revision zero. */
+	revision: number;
 	createdAt: number;
 	updatedAt: number;
 }
 
 export interface DeliveryIntentWriteResult {
 	ok: boolean;
+	revision?: number;
 	reason?: "entry-too-large" | "session-full" | "storage-full" | "unavailable";
+}
+
+export interface DeliveryIntentConditionalResult {
+	ok: boolean;
+	applied: boolean;
+	current?: PersistedDeliveryIntent;
+	reason?: "entry-too-large" | "unavailable";
 }
 
 function deliveryIntentKey(sessionId: string, intentId: string): string {
@@ -38,6 +48,10 @@ function serializedBytes(value: unknown): number {
 	} catch {
 		return Number.POSITIVE_INFINITY;
 	}
+}
+
+function normalizedRevision(record: Partial<PersistedDeliveryIntent>): number {
+	return Number.isSafeInteger(record.revision) && (record.revision ?? -1) >= 0 ? record.revision! : 0;
 }
 
 /**
@@ -89,6 +103,7 @@ export class DeliveryIntentStore {
 			intentId,
 			frame,
 			row,
+			revision: 0,
 			createdAt: typeof row.createdAt === "number" ? row.createdAt : now,
 			updatedAt: now,
 		};
@@ -97,22 +112,79 @@ export class DeliveryIntentStore {
 
 		try {
 			const existing = await this.backend.get<PersistedDeliveryIntent>(DELIVERY_INTENT_STORE, key);
+			// A duplicate local admission must never overwrite a newer retry written by
+			// another tab. The stable occurrence already has its durable carrier.
+			if (existing) return { ok: true, revision: normalizedRevision(existing) };
 			const all = await this.backend.getAllFromIndex<PersistedDeliveryIntent>(
 				DELIVERY_INTENT_STORE,
 				"createdAt",
 				"asc",
 			);
-			if (!existing && all.filter((entry) => entry?.sessionId === sessionId).length >= DELIVERY_INTENT_MAX_PER_SESSION) {
+			if (all.filter((entry) => entry?.sessionId === sessionId).length >= DELIVERY_INTENT_MAX_PER_SESSION) {
 				return { ok: false, reason: "session-full" };
 			}
-			const totalBytes = all.reduce((sum, entry) => sum + serializedBytes(entry), 0)
-				- (existing ? serializedBytes(existing) : 0)
-				+ bytes;
+			const totalBytes = all.reduce((sum, entry) => sum + serializedBytes(entry), 0) + bytes;
 			if (totalBytes > DELIVERY_INTENT_MAX_TOTAL_BYTES) return { ok: false, reason: "storage-full" };
 			await this.backend.set(DELIVERY_INTENT_STORE, key, record);
-			return { ok: true };
+			return { ok: true, revision: record.revision };
 		} catch {
 			return { ok: false, reason: "unavailable" };
+		}
+	}
+
+	/** Atomically replace one exact rendered revision and advance it. */
+	async replaceIfRevision(
+		sessionId: string,
+		intentId: string,
+		expectedRevision: number,
+		frame: Record<string, unknown>,
+		row: Record<string, unknown>,
+	): Promise<DeliveryIntentConditionalResult> {
+		if (!sessionId || !intentId) return { ok: false, applied: false, reason: "unavailable" };
+		const key = deliveryIntentKey(sessionId, intentId);
+		try {
+			return await this.backend.transaction([DELIVERY_INTENT_STORE], "readwrite", async (tx) => {
+				const current = await tx.get<PersistedDeliveryIntent>(DELIVERY_INTENT_STORE, key);
+				if (!current || normalizedRevision(current) !== expectedRevision) {
+					return { ok: true, applied: false, ...(current ? { current } : {}) };
+				}
+				const next: PersistedDeliveryIntent = {
+					...current,
+					frame,
+					row,
+					revision: expectedRevision + 1,
+					updatedAt: Date.now(),
+				};
+				if (serializedBytes(next) > DELIVERY_INTENT_MAX_ENTRY_BYTES) {
+					return { ok: false, applied: false, current, reason: "entry-too-large" };
+				}
+				await tx.set(DELIVERY_INTENT_STORE, key, next);
+				return { ok: true, applied: true, current: next };
+			});
+		} catch {
+			return { ok: false, applied: false, reason: "unavailable" };
+		}
+	}
+
+	/** Delete only the exact revision displayed by the calling tab. */
+	async deleteIfRevision(
+		sessionId: string,
+		intentId: string,
+		expectedRevision: number,
+	): Promise<DeliveryIntentConditionalResult> {
+		if (!sessionId || !intentId) return { ok: false, applied: false, reason: "unavailable" };
+		const key = deliveryIntentKey(sessionId, intentId);
+		try {
+			return await this.backend.transaction([DELIVERY_INTENT_STORE], "readwrite", async (tx) => {
+				const current = await tx.get<PersistedDeliveryIntent>(DELIVERY_INTENT_STORE, key);
+				if (!current || normalizedRevision(current) !== expectedRevision) {
+					return { ok: true, applied: false, ...(current ? { current } : {}) };
+				}
+				await tx.delete(DELIVERY_INTENT_STORE, key);
+				return { ok: true, applied: true };
+			});
+		} catch {
+			return { ok: false, applied: false, reason: "unavailable" };
 		}
 	}
 
