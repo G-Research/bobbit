@@ -113,6 +113,41 @@ describe("reliable compaction admission fences", () => {
 	);
 });
 
+describe("failed automatic compaction release", () => {
+	it.each([
+		{ reason: "threshold" as const, willRetry: false, failure: { error: "fixture threshold failure", result: undefined } },
+		{ reason: "overflow" as const, willRetry: true, failure: { success: false, errorMessage: "fixture overflow failure", result: undefined } },
+	])("retains a $reason continuation until the final safe turn boundary", async ({ reason, willRetry, failure }) => {
+		const { manager, session, prompt, steer } = useHarness({ status: "streaming" });
+		manager.handleAgentLifecycle(session, { type: "compaction_start", reason });
+		const compactionId = session._pendingCompactionStart?.compactionId;
+		await manager.deliverLiveSteer(session.id, `${reason} continuation`, { intentId: `S-failed-${reason}` });
+
+		const end: any = compactionEnd(reason, { ...failure, willRetry });
+		manager.handleAgentLifecycle(session, end);
+		manager.handleAgentLifecycle(session, { ...end });
+		await flushMicrotasks();
+
+		expect(session._reliableFinishedCompactionIds).toContain(compactionId);
+		expect(steer, "failed compaction must not release continuation back into the interrupted turn").not.toHaveBeenCalled();
+		expect(prompt).not.toHaveBeenCalled();
+		expect(session.isCompacting).toBe(false);
+		expect(session.promptQueue.toArray()).toMatchObject([{
+			id: `S-failed-${reason}`,
+			kind: "steer",
+			targetTurn: "continuation",
+			deliveryState: "queued",
+		}]);
+
+		successfulTerminal(manager, session);
+		await flushMicrotasks();
+		expect(steer).not.toHaveBeenCalled();
+		expect(prompt).toHaveBeenCalledTimes(1);
+		expect(prompt.mock.calls[0]?.[0]).toBe(`${reason} continuation`);
+		expect(session.promptQueue.toArray()).toEqual([]);
+	});
+});
+
 describe("Pi compaction-active proven-no-start restoration", () => {
 	const rejection = "Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.";
 

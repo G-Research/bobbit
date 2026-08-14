@@ -102,6 +102,68 @@ test.describe("Reliable intent recovery protocol", () => {
 		}
 	});
 
+	for (const reason of ["threshold", "overflow"] as const) {
+		test(`${reason} compaction failure retains a continuation until the final safe boundary`, async ({ gateway }) => {
+			const sessionId = await createSession();
+			const conn = await connectWs(sessionId);
+			const core = reliableMockCore(gateway, sessionId);
+			const continuationId = `intent-failed-${reason}-continuation`;
+			const continuationText = `FAILED_${reason.toUpperCase()}_CONTINUATION`;
+			try {
+				core.configureReliableScenario({
+					compaction: { [reason]: { outcome: "failure", error: `fixture ${reason} failure` } },
+				});
+				core.armBarrier(`${reason}:compaction-start`);
+				core.armBarrier(`${reason}:compaction-failed`);
+				const cursor = conn.messageCount();
+				conn.send({ type: "prompt", text: `RELIABLE_COMPACTION:${reason}` });
+				if (reason === "overflow") await core.waitForBarrier("overflow:length-tail");
+				await core.waitForBarrier(`${reason}:compaction-start`);
+
+				conn.send({ type: "steer", text: continuationText, intentId: continuationId });
+				const queued = await conn.waitForFrom(cursor, (frame) => frameHasIntentIds(frame, [continuationId]));
+				expect(intentRows(queued)).toEqual([
+					expect.objectContaining({
+						id: continuationId,
+						deliveryState: "queued",
+						targetTurn: "continuation",
+					}),
+				]);
+				expect(core.commandJournal.filter((entry) => entry.text === continuationText)).toHaveLength(0);
+
+				core.releaseBarrier(`${reason}:compaction-start`);
+				await core.waitForBarrier(`${reason}:compaction-failed`);
+				const failedEnd = await conn.waitForFrom(cursor, (frame) =>
+					frame.type === "event"
+						&& (frame.data?.type === "auto_compaction_end" || frame.data?.type === "compaction_end")
+						&& frame.data?.reason === reason,
+				);
+				expect(failedEnd.data).toMatchObject({
+					aborted: false,
+					error: `fixture ${reason} failure`,
+					willRetry: false,
+				});
+				expect(core.commandJournal.filter((entry) => entry.text === continuationText),
+					"failed compaction_end must not dispatch into the interrupted turn").toHaveLength(0);
+				expect(intentRows(latestIntentProjection(conn.messages))).toEqual([
+					expect.objectContaining({ id: continuationId, deliveryState: "queued", targetTurn: "continuation" }),
+				]);
+
+				core.releaseBarrier(`${reason}:compaction-failed`);
+				await conn.waitFor((frame) => frame.type === "event"
+					&& frame.data?.type === "message_end"
+					&& deliveryIntentId(frame) === continuationId);
+				expect(core.commandJournal.filter((entry) => entry.text === continuationText)).toHaveLength(1);
+				expect(userMessageEnds(conn.messages, continuationText).map(deliveryIntentId)).toEqual([continuationId]);
+				expect(intentRows(latestIntentProjection(conn.messages))).toEqual([]);
+			} finally {
+				core.releaseAllBarriers();
+				await closeConnection(conn);
+				await deleteSession(sessionId);
+			}
+		});
+	}
+
 	test("manual compaction accepts prompt and steer into one durable ID-keyed outbox before any Pi RPC", async ({ gateway }) => {
 		const sessionId = await createSession();
 		const conn = await connectWs(sessionId);
