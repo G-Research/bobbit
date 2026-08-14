@@ -284,7 +284,7 @@ The optional field preserves compatibility with older clients. When it is
 absent, the gateway reuses the previous durable effective level when available,
 otherwise the current authoritative level, and clamps it against the exact new
 model. It does not infer `max`: that level is selectable only when the model's
-`thinkingLevelMap` explicitly contains a non-null `max` entry. Pi `0.82.1`'s
+`thinkingLevelMap` explicitly contains a non-null `max` entry. Pi `0.84.1`'s
 direct Anthropic and supported Amazon Bedrock Opus 5 rows publish
 `{ xhigh: "xhigh", max: "max" }`, so both levels—and the ordinary
 `off` through `high` levels retained by the map rules—are available for those

@@ -1419,9 +1419,9 @@ interface AgentDirApiState {
 
 `GET /api/models` returns the current Bobbit session catalog. Each `ApiModel` includes provider, ID, API, limits, input modes, reasoning capability, authentication state, and `cost` in Pi's per-million-token shape: `{ input, output, cacheRead, cacheWrite }`; optional fields include `baseUrl`, `thinkingLevelMap`, `compat`, `sessionSelectable`, `upstreamProvider`, and tiered `cost.tiers[]`.
 
-#### Pi 0.82.1 Claude Opus 5 catalog
+#### Pi 0.84.1 Claude Opus 5 catalog
 
-Pi's published `0.82.1` catalog is authoritative for the direct Anthropic row and all five supported Amazon Bedrock profiles:
+Pi's published `0.84.1` catalog is authoritative for the direct Anthropic row and all five supported Amazon Bedrock profiles:
 
 | Exact provider/model | Published name | API | Base URL | Cost `{input, output, cacheRead, cacheWrite}` |
 |---|---|---|---|---|
