@@ -1020,7 +1020,11 @@ test.describe("WebSocket frame size routing", () => {
 				steerDispatched,
 				"live steer dispatch while prompt mention preprocessing is still pending",
 			);
-			expect(steerSpy).toHaveBeenCalledWith(sessionId, "LIVE_STEER");
+			expect(steerSpy).toHaveBeenCalledWith(
+				sessionId,
+				"LIVE_STEER",
+				expect.objectContaining({ intentId: expect.any(String), source: "user" }),
+			);
 			expect(probeReleased).toBe(false);
 
 			releasePendingProbe();

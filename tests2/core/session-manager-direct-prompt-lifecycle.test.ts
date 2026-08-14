@@ -1246,7 +1246,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(session.promptQueue.length, 1);
 	});
 
-	it("redrains a rejected steer when abort already settled idle", async () => {
+	it("retains a rejected legacy steer visibly when abort already settled idle", async () => {
 		const manager = makeManager();
 		const pending = deferred<any>();
 		const steer = vi.fn(() => pending.promise);
@@ -1269,9 +1269,10 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		pending.resolve({ success: false, error: "steer rejected after idle" });
 		await assert.rejects(steerPromise, /steer rejected after idle/);
 
-		assert.equal(prompt.mock.calls.length, 1, "recovered steer should redrain without a fresh user prompt");
-		assert.equal((prompt.mock.calls[0] as any[])[0], "redrain rejected steer");
-		assert.equal(session.promptQueue.length, 0);
+		assert.equal(prompt.mock.calls.length, 0, "the recovered occurrence stays visibly queued until the next safe drain");
+		assert.equal(session.promptQueue.length, 1);
+		assert.equal(session.promptQueue.peek()?.text, "redrain rejected steer");
+		assert.equal(session.promptQueue.peek()?.isSteered, true);
 	});
 
 	it("does not replay a queued steered task notification after its prompt has started", async () => {
