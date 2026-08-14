@@ -380,12 +380,14 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 			// pre-exposure lifecycle gate rejects it before changing the file.
 			docker(["exec", "-u", "root", name, "ln", "/bobbit-state/claude-agent-sdk/legacy-session/history", "/bobbit-state/claude-agent-sdk/legacy-session/history-alias"]);
 			await expect((sandbox as any)._prepareClaudeAgentSdkStateParent(name)).rejects.toThrow();
+			expect(await (sandbox as any)._hasSecureClaudeAgentSdkStateParent(name)).toBe(false);
 			expect(docker(["exec", "-u", "root", name, "stat", "-c", "%h:%u:%a", "/bobbit-state/claude-agent-sdk/legacy-session/history"])).toBe("2:1000:644\n");
 			docker(["exec", "-u", "root", name, "rm", "/bobbit-state/claude-agent-sdk/legacy-session/history-alias"]);
 
 			// This is the creation/reconnect lifecycle gate: it migrates every
 			// dormant legacy child before node can open the known history path.
 			await (sandbox as any)._prepareClaudeAgentSdkStateParent(name);
+			expect(await (sandbox as any)._hasSecureClaudeAgentSdkStateParent(name)).toBe(true);
 			expect(() => docker(["exec", "-u", "node", name, "cat", "/bobbit-state/claude-agent-sdk/legacy-session/history"])).toThrow();
 			await sandbox.prepareClaudeAgentSdkSession("/workspace", "legacy-session");
 			expect(docker(["exec", "-u", "root", name, "stat", "-c", "%u:%a", "/bobbit-state/claude-agent-sdk", "/bobbit-state/claude-agent-sdk/legacy-session", "/bobbit-state/claude-agent-sdk/legacy-session/nested", "/bobbit-state/claude-agent-sdk/legacy-session/history", "/bobbit-state/claude-agent-sdk/legacy-session/nested/entry"])).toBe("0:711\n1001:700\n1001:700\n1001:600\n1001:600\n");

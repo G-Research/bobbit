@@ -78,6 +78,19 @@ prepare_session() {
 chown -h root:root "$parent"
 chmod 0711 "$parent"
 [ "$(stat -c '%u:%a' "$parent")" = "0:711" ]
+# No positional session means pre-exposure whole-volume migration. The word all
+# is a valid session id, so never reserve it as a sentinel.
+case "\${1-}" in
+  "")
+    for dir in "$parent"/*; do
+      [ -e "$dir" ] || continue
+      prepare_session "$(basename "$dir")"
+    done
+    ;;
+  *) prepare_session "$1" ;;
+esac
+# This marker is the final attestation: failed or interrupted migration must
+# leave no trust signal for a later reconnect.
 if [ -e "$marker" ] || [ -L "$marker" ]; then
   [ -f "$marker" ] && [ ! -L "$marker" ] || exit 65
 else
@@ -86,15 +99,6 @@ fi
 chown -h root:root "$marker"
 chmod 0600 "$marker"
 [ "$(stat -c '%u:%a' "$marker")" = "0:600" ]
-case "\${1:-all}" in
-  all)
-    for dir in "$parent"/*; do
-      [ -e "$dir" ] || continue
-      prepare_session "$(basename "$dir")"
-    done
-    ;;
-  *) prepare_session "$1" ;;
-esac
 `;
 
 // A running container without this marker may have exposed node to legacy

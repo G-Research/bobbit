@@ -135,18 +135,21 @@ export const SANDBOX_SDK_HISTORY_PAGE_SIZE = 100;
 export const MAX_SANDBOX_SDK_HISTORY_MESSAGES = 1_000;
 export const MAX_SANDBOX_SDK_HISTORY_PAGE_BYTES = 4 * 1024 * 1024;
 export const MAX_SANDBOX_SDK_HISTORY_TOTAL_BYTES = 16 * 1024 * 1024;
-const SANDBOX_SDK_READER = `
+export const SANDBOX_SDK_READER = `
 // Keep operation at the historical argv position: deterministic Docker seams
 // inspect it while the child-only agent id remains an explicit extra input.
 const [agentId, operation, sessionId, cwd, limitText, offsetText, includeSystemText] = process.argv.slice(1);
 const sdk = await import("@anthropic-ai/claude-agent-sdk");
 const limit = Number(limitText);
 const offset = Number(offsetText);
-const options = { dir: cwd, ...((operation === "messages" || operation === "subagentMessages") ? {
-  limit,
-  offset,
-  ...(includeSystemText === "true" ? { includeSystemMessages: true } : {}),
-} : {}) };
+const options = {
+  ...(cwd ? { dir: cwd } : {}),
+  ...((operation === "messages" || operation === "subagentMessages") ? {
+    limit,
+    offset,
+    ...(includeSystemText === "true" ? { includeSystemMessages: true } : {}),
+  } : {}),
+};
 const value = operation === "info"
   ? await sdk.getSessionInfo(sessionId, options)
   : operation === "messages"

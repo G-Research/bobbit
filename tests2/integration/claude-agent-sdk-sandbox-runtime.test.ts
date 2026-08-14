@@ -4,7 +4,7 @@ import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ClaudeAgentSdkBridge, type ClaudeAgentSdkBridgeDeps } from "../../src/server/agent/claude-agent-sdk-bridge.ts";
-import { createSandboxClaudeAgentSdkSessionAccess } from "../../src/server/agent/claude-agent-sdk-session-access.ts";
+import { createSandboxClaudeAgentSdkSessionAccess, SANDBOX_SDK_READER } from "../../src/server/agent/claude-agent-sdk-session-access.ts";
 
 const dockerSpawn = vi.fn<NonNullable<ClaudeAgentSdkBridgeDeps["createDockerSpawn"]>>();
 type DockerSpawnOptions = Parameters<ReturnType<NonNullable<ClaudeAgentSdkBridgeDeps["createDockerSpawn"]>>>[0];
@@ -265,6 +265,9 @@ describe("Claude Agent SDK sandbox runtime", () => {
 			expect(args).not.toContain("/workspace-wt/session/terminated");
 			expect(args.at(-4)).toBe("");
 		}
+		// Empty cwd must omit `dir`, not pass an undocumented `dir: ""` filter.
+		expect(SANDBOX_SDK_READER).toContain("...(cwd ? { dir: cwd } : {})");
+		expect(SANDBOX_SDK_READER).not.toContain("{ dir: cwd,");
 	});
 
 	it("prepares migrated private state once before dormant SDK history access", async () => {
