@@ -31,6 +31,11 @@ const { sendDelegatePrompt } = await import("../../src/server/agent/session-setu
 const { PromptQueue } = await import("../../src/server/agent/prompt-queue.ts");
 const { EventBuffer } = await import("../../src/server/agent/event-buffer.ts");
 const {
+	isTransientVerifierReviewError,
+	isVerifierBusyTransportError,
+	shouldRetryVerificationStep,
+} = await import("../../src/server/agent/verification-logic.ts");
+const {
 	appendPromptAuthorDispatch,
 	appendPromptAuthorSettlement,
 	initAuthorSidecarDir,
@@ -172,6 +177,8 @@ function makeManager(): any {
 	manager._testStore = {
 		update: vi.fn(() => {}),
 		get: vi.fn(() => undefined),
+		getLive: vi.fn(() => []),
+		archiveAsync: vi.fn(async () => true),
 	};
 	managers.push(manager);
 	return manager;
@@ -1313,6 +1320,29 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.equal(session.promptQueue.length, 0);
 	});
 
+	it("tick-zero redrains an ordinary busy rejection without auto or manual retry", async () => {
+		const manager = makeManager();
+		let attempts = 0;
+		const prompt = vi.fn(async () => {
+			attempts += 1;
+			return attempts === 1
+				? { success: false, error: "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message." }
+				: { success: true };
+		});
+		const { session } = putSession(manager, { rpcClient: { prompt } });
+
+		await assert.rejects(manager.enqueuePrompt(session.id, "ordinary busy prompt"), /already processing/);
+		assert.equal(autoRetryPendingEvents(session).length, 0, "ordinary contention must not schedule provider auto-retry");
+		assert.equal(session.manualRetryRequired, undefined, "ordinary contention must not expose manual retry before the queue redrain");
+
+		manager._testClock.advance(0);
+		await flushAsyncWork();
+		assert.equal(prompt.mock.calls.length, 2, "tick-zero redrain should deliver the original durable row once the transport settles");
+		assert.equal(session.promptQueue.length, 0);
+		assert.equal(autoRetryPendingEvents(session).length, 0);
+		assert.notEqual(session.manualRetryRequired, true);
+	});
+
 	it("recovers a queued prompt when local abort status changes before prompt rejection", async () => {
 		const manager = makeManager();
 		const pending = deferred<any>();
@@ -1633,6 +1663,517 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.deepEqual(
 			client.sent.filter((msg: any) => msg.type === "session_status").map((msg: any) => msg.status),
 			["terminated"],
+		);
+	});
+
+	it("VERIFIER_BUSY_RACE_REPRO sends one verifier intent as an atomic Pi followUp command", async () => {
+		const manager = makeManager();
+		const commands: Array<{ text: string; images: unknown; third: unknown; streamingBehavior: unknown }> = [];
+		const prompt = vi.fn(async (text: string, images: unknown, third: unknown, streamingBehavior: unknown) => {
+			commands.push({ text, images, third, streamingBehavior });
+			// This is the real Pi contention boundary: a healthy transport is already
+			// processing, and accepts only the atomic followUp form of this exact RPC.
+			if (streamingBehavior !== "followUp") {
+				return { success: false, error: "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message." };
+			}
+			return { success: true };
+		});
+		const { session } = putSession(manager, {
+			id: "s-verifier-atomic-follow-up",
+			rpcClient: { prompt },
+		});
+
+		const result = await manager.enqueuePrompt(session.id, "submit the review verdict", {
+			source: "verification",
+			streamingBehavior: "followUp",
+			suppressTitleGen: true,
+		});
+
+		assert.deepEqual(result, { status: "dispatched" });
+		assert.equal(commands.length, 1, "VERIFIER_BUSY_RACE_REPRO: a busy verifier must receive one logical provider command, never a raw retry");
+		assert.deepEqual(commands[0], {
+			text: "[System]: submit the review verdict",
+			images: undefined,
+			third: undefined,
+			streamingBehavior: "followUp",
+		});
+		assert.equal(session.promptQueue.length, 0, "VERIFIER_BUSY_RACE_REPRO: accepted atomic followUp must not leave a replayable duplicate queue row");
+		assert.equal(session.status, "streaming");
+		const binding = readAuthorSidecar(session.id)[0];
+		assert.equal(binding?.source, "verification");
+		assert.deepEqual(binding?.author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
+	});
+
+	it("preserves source:verification title suppression through direct busy recovery", async () => {
+		const manager = makeManager();
+		const busy = "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.";
+		let calls = 0;
+		const prompt = vi.fn(async () => {
+			calls += 1;
+			return calls === 1 ? { success: false, error: busy } : { success: true };
+		});
+		const { session } = putSession(manager, {
+			id: "s-direct-verification-title-suppression",
+			titleGenerated: false,
+			rpcClient: { prompt },
+		});
+		const titleGeneration = vi.spyOn(manager, "tryGenerateTitleFromPrompt").mockImplementation(() => {});
+
+		await assert.rejects(
+			() => manager.enqueuePrompt(session.id, "continue the reviewer check", {
+				source: "verification",
+				streamingBehavior: "followUp",
+				suppressTitleGen: true,
+			}),
+			/Agent is already processing/,
+		);
+		assert.equal(session.promptQueue.peek()?.suppressTitleGen, true,
+			"direct recovery must preserve suppression when it re-enqueues the rejected prompt");
+
+		manager._testClock.advance(0);
+		await flushAsyncWork();
+		assert.equal(prompt.mock.calls.length, 2);
+		assert.equal(titleGeneration.mock.calls.length, 0, "direct busy redrive must not generate a title");
+	});
+
+	it("VERIFIER_BUSY_RACE_REPRO preserves an exact verifier row's title suppression through busy redrain", async () => {
+		const manager = makeManager();
+		const busy = "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.";
+		let calls = 0;
+		const prompt = vi.fn(async () => {
+			calls += 1;
+			return calls === 1 ? { success: false, error: busy } : { success: true };
+		});
+		const { session } = putSession(manager, {
+			id: "s-verifier-title-suppression-redrive",
+			title: "Stable reviewer title",
+			titleGenerated: false,
+			rpcClient: { prompt },
+		});
+		const titleGeneration = vi.spyOn(manager, "tryGenerateTitleFromPrompt").mockImplementation(() => {});
+
+		const receipt = manager.enqueueVerifierPrompt(session.id, "submit the reviewer verdict exactly once");
+		await flushAsyncWork();
+		assert.deepEqual(
+			session.promptQueue.toArray().map((row: any) => [row.id, row.suppressTitleGen, row.verifierOwned]),
+			[[receipt.rowId, true, true]],
+			"VERIFIER_BUSY_RACE_REPRO: busy recovery must restore the same verifier row with title suppression intact",
+		);
+		assert.equal(titleGeneration.mock.calls.length, 0, "the rejected verifier dispatch must not name its ephemeral reviewer");
+
+		manager._testClock.advance(0);
+		await flushAsyncWork();
+		await receipt.dispatched;
+
+		assert.equal(prompt.mock.calls.length, 2, "VERIFIER_BUSY_RACE_REPRO: one busy rejection redrives the exact row once");
+		assert.equal(session.promptQueue.length, 0, "the accepted redrive consumes the original verifier row");
+		assert.equal(titleGeneration.mock.calls.length, 0, "busy redrive must not generate or replace the reviewer title");
+		assert.equal(session.title, "Stable reviewer title");
+	});
+
+	it("VERIFIER_BUSY_RACE_REPRO parks one verifier row after three busy drain rejections without duplicate delivery", async () => {
+		const manager = makeManager();
+		const busy = "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.";
+		const prompt = vi.fn(async () => ({ success: false, error: busy }));
+		const { session } = putSession(manager, {
+			id: "s-verifier-busy-drain-cap",
+			rpcClient: { prompt },
+		});
+
+		const receipt = manager.enqueueVerifierPrompt(session.id, "deliver exactly one contention-bound verifier turn");
+		const parkedOutcome = receipt.dispatched.then(
+			() => assert.fail("VERIFIER_BUSY_RACE_REPRO: bounded busy recovery must park rather than falsely acknowledge the verifier row"),
+			(error: Error) => error,
+		);
+		await flushAsyncWork();
+		assert.deepEqual(session.promptQueue.toArray().map((row: any) => row.id), [receipt.rowId],
+			"VERIFIER_BUSY_RACE_REPRO: first rejection restores the original durable row");
+		manager._testClock.advance(0);
+		await flushAsyncWork();
+		assert.deepEqual(session.promptQueue.toArray().map((row: any) => row.id), [receipt.rowId],
+			"VERIFIER_BUSY_RACE_REPRO: second rejection reuses rather than duplicates the durable row");
+		manager._testClock.advance(0);
+		await flushAsyncWork();
+
+		const parkedError = await parkedOutcome;
+		const verifierOutput = `LLM review failed: ${parkedError.message}`;
+		assert.equal(prompt.mock.calls.length, 3, "VERIFIER_BUSY_RACE_REPRO: initial dispatch plus two bounded redrains only");
+		assert.equal(session.promptQueue.length, 0,
+			"VERIFIER_BUSY_RACE_REPRO: terminal parking hands the one rejected row to the verifier retry loop without stale replay");
+		assert.equal(readAuthorSidecar(session.id).filter((binding) => binding.promptId === receipt.rowId).length, 1,
+			"VERIFIER_BUSY_RACE_REPRO: repeated redrains retain one author binding for the exact row");
+		assert.equal(isVerifierBusyTransportError(verifierOutput), true);
+		assert.equal(isTransientVerifierReviewError(verifierOutput), true);
+		assert.equal(shouldRetryVerificationStep({
+			passed: false,
+			output: verifierOutput,
+			attempt: 1,
+			maxBoundedAttempts: 3,
+			isTransient: isTransientVerifierReviewError,
+		}), "retry", "VERIFIER_BUSY_RACE_REPRO: parked contention returns to the verifier's bounded retry loop");
+	});
+
+	it("rejects a verifier receipt immediately for provider authentication failure without parking its row", async () => {
+		const manager = makeManager();
+		const prompt = vi.fn(async () => ({ success: false, error: AUTH_ERROR }));
+		const { session, client } = putSession(manager, {
+			id: "s-verifier-auth-terminal",
+			rpcClient: { prompt },
+		});
+
+		const receipt = manager.enqueueVerifierPrompt(session.id, "submit the protected review verdict");
+		const outcome = receipt.dispatched.then(
+			() => assert.fail("provider authentication failure must reject the verifier receipt"),
+			(error: Error) => error,
+		);
+		await flushAsyncWork();
+
+		const error = await outcome;
+		assert.match(error.message, /OpenRouter provider authentication failure \(missing-api-key\)/);
+		assert.doesNotMatch(error.message, new RegExp(AUTH_SECRET));
+		assert.equal(prompt.mock.calls.length, 1, "VERIFIER_BUSY_RACE_REPRO: provider auth is terminal and must not retry");
+		assert.equal(session.promptQueue.length, 0, "the failed verifier row must not wait for a manual retry or receipt timeout");
+		assert.equal(session.pendingAutoRetryTimer, undefined);
+		assert.doesNotMatch(JSON.stringify(client.sent), new RegExp(AUTH_SECRET));
+	});
+
+	it("rejects a verifier receipt when bounded non-busy delivery retries exhaust", async () => {
+		const manager = makeManager();
+		const prompt = vi.fn(async () => { throw new TypeError("fetch failed"); });
+		const { session } = putSession(manager, {
+			id: "s-verifier-generic-terminal",
+			rpcClient: { prompt },
+		});
+
+		const receipt = manager.enqueueVerifierPrompt(session.id, "deliver one generic-failure review verdict");
+		const outcome = receipt.dispatched.then(
+			() => assert.fail("exhausted verifier delivery must reject its receipt"),
+			(error: Error) => error,
+		);
+		await flushAsyncWork();
+		for (let attempt = 0; attempt < 3; attempt += 1) {
+			const pending = autoRetryPendingEvents(session).at(-1);
+			assert.ok(pending, `expected bounded retry ${attempt + 1}`);
+			manager._testClock.advance(pending.retryDelayMs);
+			await flushAsyncWork();
+		}
+
+		const error = await outcome;
+		assert.match(error.message, /fetch failed/);
+		assert.equal(prompt.mock.calls.length, 4, "one verifier intent gets only the bounded provider attempts");
+		assert.equal(session.promptQueue.length, 0, "exhausted verifier work cannot remain parked for manual Retry");
+		assert.equal(session.pendingAutoRetryTimer, undefined);
+	});
+
+	it("retains one verifier session and settles the same receipt after a transient redrive", async () => {
+		const manager = makeManager();
+		let calls = 0;
+		const prompt = vi.fn(async () => {
+			calls += 1;
+			if (calls === 1) throw new TypeError("fetch failed");
+			return { success: true };
+		});
+		const { session } = putSession(manager, {
+			id: "s-verifier-one-session-redrive",
+			rpcClient: { prompt },
+		});
+		const createSession = vi.spyOn(manager, "createSession");
+
+		const receipt = manager.enqueueVerifierPrompt(session.id, "redrive this exact verifier intent");
+		await flushAsyncWork();
+		const pending = autoRetryPendingEvents(session).at(-1);
+		assert.ok(pending, "the first transient failure must schedule the bounded retry");
+		manager._testClock.advance(pending.retryDelayMs);
+		await receipt.dispatched;
+
+		assert.equal(prompt.mock.calls.length, 2, "VERIFIER_BUSY_RACE_REPRO: one intent is retried, not duplicated");
+		assert.equal(createSession.mock.calls.length, 0, "a healthy verifier is redriven in its original session");
+		assert.equal(session.promptQueue.length, 0, "acceptance consumes the original durable verifier row");
+		assert.equal(session.id, "s-verifier-one-session-redrive");
+	});
+
+	it("rejects an in-flight verifier receipt after process exit without a replacement dispatch", async () => {
+		const manager = makeManager();
+		const pending = deferred<any>();
+		const prompt = vi.fn(() => pending.promise);
+		const { session } = putSession(manager, {
+			id: "s-verifier-process-exit-terminal",
+			rpcClient: { prompt },
+		});
+
+		const receipt = manager.enqueueVerifierPrompt(session.id, "do not respawn this dead reviewer");
+		const outcome = receipt.dispatched.then(
+			() => assert.fail("process exit must reject the verifier receipt"),
+			(error: Error) => error,
+		);
+		assert.equal(prompt.mock.calls.length, 1);
+		manager.handleAgentLifecycle(session, { type: "process_exit", code: 17, signal: null });
+		pending.reject(new Error("Agent process exited with code 17"));
+		const error = await outcome;
+
+		assert.match(error.message, /Agent process exited with code 17/);
+		assert.equal(session.status, "terminated");
+		assert.equal(session.promptQueue.length, 0, "the dead verifier's exact row must be removed");
+		manager._testClock.advance(0);
+		await flushAsyncWork();
+		assert.equal(prompt.mock.calls.length, 1, "VERIFIER_BUSY_RACE_REPRO: terminal recovery cannot spawn a replacement delivery");
+	});
+
+	it("VERIFIER_BUSY_RACE_REPRO keeps a verifier receipt queued behind a real streaming turn until agent_end drains its exact row", async () => {
+		const manager = makeManager();
+		const prompt = vi.fn(async () => ({ success: true }));
+		const { session } = putSession(manager, {
+			id: "s-verifier-receipt-behind-stream",
+			status: "streaming",
+			rpcClient: { prompt },
+		});
+		const receipt = manager.enqueueVerifierPrompt(session.id, "deliver the queued verifier verdict");
+		session.promptQueue.enqueue("ordinary durable work");
+		let settlement = "pending";
+		void receipt.dispatched.then(() => { settlement = "dispatched"; }, () => { settlement = "rejected"; });
+
+		await flushAsyncWork();
+		assert.equal(prompt.mock.calls.length, 0, "VERIFIER_BUSY_RACE_REPRO: a streaming session must not dispatch a second verifier turn");
+		assert.equal(settlement, "pending", "the receipt must not borrow the preceding turn's streaming state");
+		assert.deepEqual(
+			session.promptQueue.toArray().map((row: any) => [row.text, row.source]),
+			[["deliver the queued verifier verdict", "verification"], ["ordinary durable work", undefined]],
+		);
+
+		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false });
+		await receipt.dispatched;
+
+		assert.equal(settlement, "dispatched", "only the dequeued verifier row may settle this receipt");
+		assert.equal(prompt.mock.calls.length, 1, "VERIFIER_BUSY_RACE_REPRO: agent_end drains exactly one queued provider command");
+		assert.deepEqual(prompt.mock.calls[0], ["[System]: deliver the queued verifier verdict", undefined, undefined, "followUp"]);
+		assert.deepEqual(
+			session.promptQueue.toArray().map((row: any) => row.text),
+			["ordinary durable work"],
+			"the unrelated row stays durable and cannot settle the verifier receipt",
+		);
+	});
+
+	it("VERIFIER_BUSY_RACE_REPRO cancels the exact queued verifier row without removing ordinary work", async () => {
+		const manager = makeManager();
+		const { session } = putSession(manager, {
+			id: "s-verifier-receipt-cancel",
+			status: "streaming",
+		});
+		const receipt = manager.enqueueVerifierPrompt(session.id, "expire before a reviewer becomes idle");
+		session.promptQueue.enqueue("ordinary work survives verifier timeout");
+
+		assert.equal(receipt.cancel(), true, "the verifier timeout owner must be able to cancel its exact durable row");
+		await assert.rejects(receipt.dispatched, /cancelled before dispatch/);
+		assert.deepEqual(
+			session.promptQueue.toArray().map((row: any) => [row.text, row.source]),
+			[["ordinary work survives verifier timeout", undefined]],
+			"VERIFIER_BUSY_RACE_REPRO: cancellation must not delete neighbouring ordinary work",
+		);
+		assert.equal(receipt.cancel(), false, "cancellation is idempotent after the receipt has settled");
+	});
+
+	it("VERIFIER_BUSY_RACE_REPRO cancels and terminates verifier rows owned by an in-flight replacement", async () => {
+		const manager = makeManager();
+		const sessionId = "s-replacement-owned-verifier";
+		const { session: promptOwner } = putSession(manager, {
+			id: sessionId,
+			status: "streaming",
+		});
+		const replacement = {
+			...promptOwner,
+			promptQueue: new PromptQueue(),
+			rpcClient: {
+				prompt: vi.fn(async () => ({ success: true })),
+				getState: vi.fn(async () => ({})),
+				stop: vi.fn(async () => {}),
+			},
+			unsubscribe: vi.fn(),
+		};
+		manager.sessions.set(sessionId, replacement);
+		manager._sessionReplacementCoordinators.set(sessionId, {
+			tail: Promise.resolve(), pending: 0, coalesced: new Map(), promptOwner, drainOnRelease: false,
+		});
+
+		const cancelled = manager.enqueueVerifierPrompt(sessionId, "cancel on the replacement-owned queue");
+		// Keep the expected rejection observed even when this failing-first
+		// assertion exposes an ownership regression before await assert.rejects.
+		void cancelled.dispatched.catch(() => {});
+		assert.equal(promptOwner.promptQueue.peek()?.id, cancelled.rowId);
+		assert.equal(cancelled.cancel(), true, "VERIFIER_BUSY_RACE_REPRO: cancellation must target the replacement promptOwner, not an empty successor queue");
+		await assert.rejects(cancelled.dispatched, /cancelled before dispatch/);
+		assert.equal(promptOwner.promptQueue.length, 0, "the cancelled verifier row cannot survive on the replaced owner");
+
+		const terminated = manager.enqueueVerifierPrompt(sessionId, "remove on reviewer termination");
+		const terminatedOutcome = terminated.dispatched.then(() => "resolved", (error: Error) => error.message);
+		assert.equal(promptOwner.promptQueue.peek()?.id, terminated.rowId);
+		await manager.terminateSession(sessionId);
+		assert.match(await terminatedOutcome, /terminated before dispatch/);
+		assert.equal(promptOwner.promptQueue.length, 0, "termination must purge verifier work from the replacement promptOwner too");
+	});
+
+	it("redrives the exact verifier-owned steer without batching a source:verification notification", async () => {
+		const manager = makeManager();
+		let calls = 0;
+		const prompt = vi.fn(async () => {
+			calls += 1;
+			if (calls === 1) throw new TypeError("fetch failed");
+			return { success: true };
+		});
+		const { session } = putSession(manager, {
+			id: "s-mixed-steered-verifier-retry",
+			rpcClient: { prompt },
+		});
+		const verifier = session.promptQueue.enqueue("exact verifier steer", {
+			isSteered: true,
+			source: "verification",
+			verifierOwned: true,
+			author: { kind: "system", id: "system:bobbit", label: "Bobbit" },
+			streamingBehavior: "followUp",
+		});
+		const notification = session.promptQueue.enqueue("team lead notification must not hitchhike", {
+			isSteered: true,
+			source: "verification",
+			author: { kind: "system", id: "system:bobbit", label: "Bobbit" },
+		});
+
+		manager.drainQueue(session);
+		await flushAsyncWork();
+		assert.equal(session.lastPromptText, verifier.text, "the verifier retry anchor must be its exact row, not mixed batch text");
+		assert.deepEqual(
+			session.promptQueue.toArray().map((row: any) => row.id),
+			[verifier.id, notification.id],
+			"the failed verifier row restores ahead of, but never absorbs, the ordinary notification",
+		);
+		const retry = autoRetryPendingEvents(session).at(-1);
+		assert.ok(retry, "the failed verifier delivery schedules its bounded retry");
+		manager._testClock.advance(retry.retryDelayMs);
+		await flushAsyncWork();
+
+		assert.deepEqual(
+			prompt.mock.calls.map((call: any[]) => call[0]),
+			["[System]: exact verifier steer", "[System]: exact verifier steer"],
+			"retryLastPrompt must select the flagged verifier row by durable ID, never replay its source:verification neighbour",
+		);
+		assert.deepEqual(
+			session.promptQueue.toArray().map((row: any) => [row.id, row.text, row.verifierOwned]),
+			[[notification.id, notification.text, undefined]],
+			"only the accepted verifier row is consumed; the notification remains queued exactly once",
+		);
+	});
+
+	it("restartAgent carries source:verification notifications but purges verifier-owned rows", async () => {
+		const manager = makeManager();
+		const sessionId = "s-restart-verifier-ownership";
+		const { session } = putSession(manager, {
+			id: sessionId,
+			status: "streaming",
+			unsubscribe: vi.fn(),
+			rpcClient: { stop: vi.fn(async () => {}) },
+		});
+		const notification = session.promptQueue.enqueue("team lead notification survives restart", {
+			source: "verification",
+			author: { kind: "system", id: "system:bobbit", label: "Bobbit" },
+		});
+		const receipt = manager.enqueueVerifierPrompt(sessionId, "verifier-owned row is purged at restart");
+		const receiptOutcome = receipt.dispatched.then(
+			() => assert.fail("restart must settle the discarded verifier receipt"),
+			(error: Error) => error,
+		);
+		const persisted = {
+			id: sessionId,
+			title: session.title,
+			cwd: session.cwd,
+			agentSessionFile: "/virtual/project/reviewer.jsonl",
+			createdAt: session.createdAt,
+			lastActivity: session.lastActivity,
+		};
+		manager._testStore.get.mockReturnValue(persisted);
+		manager.restoreSession = vi.fn(async () => {
+			manager.sessions.set(sessionId, {
+				...session,
+				promptQueue: new PromptQueue(session.promptQueue.toArray()),
+				status: "idle",
+			});
+		});
+
+		await manager.restartAgent(sessionId);
+		assert.match((await receiptOutcome).message, /restarted before dispatch/);
+		assert.deepEqual(
+			manager.sessions.get(sessionId)?.promptQueue.toArray().map((row: any) => [row.id, row.source, row.verifierOwned]),
+			[[notification.id, "verification", undefined]],
+			"restartAgent must retain durable team-lead work while fencing only harness-owned verifier rows",
+		);
+	});
+
+	it("separates verifier lifecycle ownership from verification attribution on restore", () => {
+		const manager = makeManager();
+		const persisted = new PromptQueue();
+		persisted.enqueue("ordinary restored work");
+		// Team-lead gate notifications share the verification source for UI and
+		// authorship, but were never admitted by enqueueVerifierPrompt.
+		persisted.enqueue("team lead gate notification", {
+			source: "verification",
+			author: { kind: "system", id: "system:bobbit", label: "Bobbit" },
+		});
+		persisted.enqueue("stale verifier reminder", {
+			source: "verification",
+			verifierOwned: true,
+			author: { kind: "system", id: "system:bobbit", label: "Bobbit" },
+			streamingBehavior: "followUp",
+		});
+
+		manager.addDormantSession({
+			id: "s-restored-verifier-rows",
+			title: "Restored reviewer",
+			cwd: "/virtual/project",
+			agentSessionFile: "/virtual/project/reviewer.jsonl",
+			createdAt: 1,
+			lastActivity: 1,
+			messageQueue: persisted.toArray(),
+		});
+
+		assert.deepEqual(
+			manager.sessions.get("s-restored-verifier-rows")?.promptQueue.toArray().map((row: any) => [row.text, row.source, row.verifierOwned]),
+			[
+				["ordinary restored work", undefined, undefined],
+				["team lead gate notification", "verification", undefined],
+			],
+			"VERIFIER_BUSY_RACE_REPRO: restore prunes only explicitly verifier-owned rows; legacy source:verification work remains durable",
+		);
+	});
+
+	it("keeps source:verification work through auth and manual-retry recovery while settling verifier-owned receipts", async () => {
+		const manager = makeManager();
+		const prompt = vi.fn(async () => ({ success: false, error: AUTH_ERROR }));
+		const { session } = putSession(manager, {
+			id: "s-verifier-ownership-auth",
+			status: "streaming",
+			rpcClient: { prompt },
+		});
+		const notification = session.promptQueue.enqueue("team lead notification survives recovery", {
+			source: "verification",
+			author: { kind: "system", id: "system:bobbit", label: "Bobbit" },
+		});
+		const receipt = manager.enqueueVerifierPrompt(session.id, "owned verifier row is abandoned");
+		const receiptOutcome = receipt.dispatched.then(
+			() => assert.fail("verifier-owned auth failure must reject its receipt"),
+			(error: Error) => error,
+		);
+
+		// A real provider-auth recovery sees both dequeued/recovered kinds. The
+		// ordinary source:verification row remains, while the exact verifier row
+		// is abandoned so the harness cannot time out waiting for manual Retry.
+		(manager as any).recoverPromptDispatch(session, [
+			{ id: notification.id, text: notification.text, source: notification.source },
+			{ id: receipt.rowId, text: "owned verifier row is abandoned", source: "verification", verifierOwned: true },
+		], AUTH_ERROR, "ownership test", [notification.id, receipt.rowId], true);
+
+		const error = await receiptOutcome;
+		assert.match(error.message, /OpenRouter provider authentication failure \(missing-api-key\)/);
+		assert.deepEqual(
+			session.promptQueue.toArray().map((row: any) => [row.id, row.source, row.verifierOwned]),
+			[[notification.id, "verification", undefined]],
+			"manual/provider-auth recovery must not abandon durable team-lead notifications",
 		);
 	});
 });

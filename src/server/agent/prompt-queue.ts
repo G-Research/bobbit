@@ -9,7 +9,10 @@ interface PromptQueueEnqueueOptions {
 	isSteered?: boolean;
 	suppressTitleGen?: boolean;
 	source?: PromptSource;
+	verifierOwned?: boolean;
 	author?: MessageAuthor;
+	streamingBehavior?: QueuedMessage["streamingBehavior"];
+	coldStart?: boolean;
 }
 
 function normalizeQueuedMessage(message: QueuedMessage): QueuedMessage {
@@ -20,6 +23,9 @@ function normalizeQueuedMessage(message: QueuedMessage): QueuedMessage {
 	if (normalized.source !== undefined && !isPromptSource(normalized.source)) {
 		delete normalized.source;
 	}
+	// Only explicit true grants verifier lifecycle ownership. This keeps old
+	// source:"verification" persisted rows as ordinary durable work.
+	if (normalized.verifierOwned !== true) delete normalized.verifierOwned;
 	// Older partial records may carry the accountable author without source.
 	// Recover the coarser source rather than defaulting an agent/system row to user.
 	if (normalized.source === undefined && isMessageAuthor(normalized.author)) {
@@ -54,7 +60,10 @@ export class PromptQueue {
 		if (opts?.attachments?.length) msg.attachments = opts.attachments;
 		if (opts?.suppressTitleGen) msg.suppressTitleGen = true;
 		if (opts?.source) msg.source = opts.source;
+		if (opts?.verifierOwned) msg.verifierOwned = true;
 		if (opts?.author && isMessageAuthor(opts.author)) msg.author = opts.author;
+		if (opts?.streamingBehavior) msg.streamingBehavior = opts.streamingBehavior;
+		if (opts?.coldStart) msg.coldStart = true;
 
 		this.queue.push(msg);
 		if (msg.isSteered) this.reorder();
@@ -113,7 +122,21 @@ export class PromptQueue {
 		if (opts?.attachments?.length) msg.attachments = opts.attachments;
 		if (opts?.suppressTitleGen) msg.suppressTitleGen = true;
 		if (opts?.source) msg.source = opts.source;
+		if (opts?.verifierOwned) msg.verifierOwned = true;
 		if (opts?.author && isMessageAuthor(opts.author)) msg.author = opts.author;
+		if (opts?.streamingBehavior) msg.streamingBehavior = opts.streamingBehavior;
+		if (opts?.coldStart) msg.coldStart = true;
+		this.queue.unshift(msg);
+		this.reorder();
+		return msg;
+	}
+
+	/**
+	 * Restore an already-admitted row at the front without allocating a new ID.
+	 * Receipts correlate dispatch/recovery/cancellation to this durable identity.
+	 */
+	restoreAtFront(message: QueuedMessage): QueuedMessage {
+		const msg = normalizeQueuedMessage(message);
 		this.queue.unshift(msg);
 		this.reorder();
 		return msg;

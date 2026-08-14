@@ -897,6 +897,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(roleBridge.promptWhenReady).toHaveBeenCalledWith(
 			expect.stringMatching(/server restarted while you were mid-turn/i),
 			undefined,
+			{ streamingBehavior: "followUp" },
 		);
 		expect(roleBridge.prompt).not.toHaveBeenCalled();
 		const canonical = manager.sessions.get(ps.id);
