@@ -2,9 +2,9 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1140,
+  "censusTotal": 1141,
   "buckets": {
-    "daily": 66,
+    "daily": 67,
     "v2-browser": 216,
     "v2-core": 512,
     "v2-dom": 144,
@@ -15,7 +15,7 @@
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
-    "relocate": 51,
+    "relocate": 52,
     "rewrite": 145,
     "vitest-e2e": 2
   },
@@ -18232,6 +18232,13 @@
       "method": "relocate",
       "replacement": [],
       "rationale": "Authenticated production-gateway coverage for live pin, archive retention, archived list projection, archived unpin, and durable tag state across two real gateway restarts."
+    },
+    {
+      "file": "tests/manual-integration/reliable-agent-context-pressure.spec.ts",
+      "bucket": "daily",
+      "method": "relocate",
+      "replacement": [],
+      "rationale": "Opt-in real Pi/real-model context-pressure smoke for exact-once steer and follow-up delivery through automatic compaction; manual/daily only, with explicit credentials, no provider fallback, and bounded request/token/cost/time guards."
     }
   ]
 }
