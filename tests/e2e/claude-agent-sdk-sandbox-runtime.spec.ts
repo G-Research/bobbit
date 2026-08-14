@@ -107,8 +107,11 @@ class ControlledQuery implements AsyncIterable<unknown> {
 	private readonly readers: Array<(value: IteratorResult<unknown>) => void> = [];
 	private closed = false;
 
-	constructor(readonly args: QueryArgs, private readonly sdk: ControlledSdk) { void this.consume(); }
-	async initializationResult(): Promise<{ session_id: string }> { return { session_id: SDK_SESSION_ID }; }
+	constructor(readonly args: QueryArgs, private readonly sdk: ControlledSdk) {
+		this.queued.push({ type: "system", subtype: "init", session_id: SDK_SESSION_ID });
+		void this.consume();
+	}
+	async initializationResult(): Promise<Record<string, never>> { return {}; }
 	async interrupt(): Promise<void> {}
 	async setModel(): Promise<void> {}
 	async setMaxThinkingTokens(): Promise<void> {}

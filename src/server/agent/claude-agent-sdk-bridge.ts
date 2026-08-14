@@ -1,7 +1,5 @@
 import fs from "node:fs";
-import path from "node:path";
 import type { Clock } from "../gateway-deps.js";
-import { bobbitStateDir } from "../bobbit-dir.js";
 import { realClock } from "../gateway-deps.js";
 import {
 	COLD_REPROMPT_PROMPT_TIMEOUT_MS,
@@ -42,6 +40,13 @@ export interface ClaudeAgentSdkSandboxLaunch {
 	oauthAccessToken: string;
 }
 
+/** Ephemeral direct SDK authority; its private config root belongs to the Bobbit session. */
+export interface ClaudeAgentSdkDirectLaunch {
+	sessionId: string;
+	configDir: string;
+	oauthAccessToken: string;
+}
+
 /** A provider-owned compaction boundary for the SessionManager coordinator. */
 export interface ClaudeSdkPreCompactObservation {
 	readonly source: "claude-agent-sdk";
@@ -54,6 +59,8 @@ export interface ClaudeAgentSdkBridgeOptions extends RpcBridgeOptions {
 	runtime: "claude-agent-sdk";
 	/** Created after sandbox setup; contains only the current per-process OAuth access token. */
 	claudeSdkSandboxLaunch?: ClaudeAgentSdkSandboxLaunch;
+	/** Created through Bobbit's OAuth resolver for a direct SDK process only. */
+	claudeSdkDirectLaunch?: ClaudeAgentSdkDirectLaunch;
 	claudeAgentSdkSessionId?: string;
 	onBeforeCompact?: (input: ClaudeSdkPreCompactObservation) => Promise<void>;
 	/** Session-local Bobbit MCP surface. Direct bridge tests receive an equally strict empty surface. */
@@ -158,10 +165,12 @@ export function isClaudeAgentSdkSessionId(value: unknown): value is string {
 
 /**
  * The SDK replaces its child environment, so never inherit the gateway's
- * credentials wholesale. Subscription discovery uses the user's HOME store.
+ * credentials wholesale. Production direct and sandbox sessions receive only a
+ * current Bobbit OAuth access token and a Bobbit-owned private config root.
  */
-export function buildClaudeAgentSdkEnv(options: Pick<ClaudeAgentSdkBridgeOptions, "env" | "claudeSdkSandboxLaunch">): Record<string, string> {
+export function buildClaudeAgentSdkEnv(options: Pick<ClaudeAgentSdkBridgeOptions, "env" | "claudeSdkSandboxLaunch" | "claudeSdkDirectLaunch">): Record<string, string> {
 	const launch = options.claudeSdkSandboxLaunch;
+	const directLaunch = options.claudeSdkDirectLaunch;
 	if (launch) {
 		// A closed container environment: do not inherit host config or credentials.
 		return {
@@ -174,6 +183,21 @@ export function buildClaudeAgentSdkEnv(options: Pick<ClaudeAgentSdkBridgeOptions
 			CLAUDE_CONFIG_DIR: `/bobbit-state/claude-agent-sdk/${launch.sessionId}`,
 			CLAUDE_AGENT_SDK_CLIENT_APP: "bobbit",
 			// Keep foreground helpers bounded to one level in the container too.
+			CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1",
+		};
+	}
+	if (directLaunch) {
+		// Never consult the native Claude CLI config. The config root is durable for
+		// this Bobbit session, while the access token exists only in this child env.
+		return {
+			HOME: directLaunch.configDir,
+			PATH: process.env.PATH || "/usr/local/bin:/usr/bin:/bin",
+			TMPDIR: process.env.TMPDIR || process.env.TMP || process.env.TEMP || "/tmp",
+			LANG: process.env.LANG || "C.UTF-8",
+			BOBBIT_SESSION_ID: directLaunch.sessionId,
+			CLAUDE_CONFIG_DIR: directLaunch.configDir,
+			CLAUDE_CODE_OAUTH_TOKEN: directLaunch.oauthAccessToken,
+			CLAUDE_AGENT_SDK_CLIENT_APP: "bobbit",
 			CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "1",
 		};
 	}
@@ -261,6 +285,14 @@ function isPromise<T>(value: T | Promise<T>): value is Promise<T> {
 	return typeof (value as Promise<T>)?.then === "function";
 }
 
+type Deferred<T> = { promise: Promise<T>; resolve(value: T): void; reject(error: Error): void };
+function deferred<T>(): Deferred<T> {
+	let resolve!: (value: T) => void;
+	let reject!: (error: Error) => void;
+	const promise = new Promise<T>((resolvePromise, rejectPromise) => { resolve = resolvePromise; reject = rejectPromise; });
+	return { promise, resolve, reject };
+}
+
 function unsupported(error: string): { success: false; error: string } { return { success: false, error }; }
 
 export class ClaudeAgentSdkBridge implements IRpcBridge {
@@ -268,6 +300,10 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 	private readonly abortController = new AbortController();
 	private readonly input = new AsyncInputQueue();
 	private readonly ready: Promise<void>;
+	/** The official Query initialization result has controls, not the resume UUID.
+	 * The UUID is authoritative only on the streamed `system:init` event. */
+	private readonly initializationIdentity = deferred<string>();
+	private identityObserved = false;
 	private readonly terminal: Promise<never>;
 	private resolveReady!: () => void;
 	private rejectReady!: (error: Error) => void;
@@ -296,7 +332,6 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 	/** A locally-running turn becomes observable only after SDK input acceptance. */
 	private pendingTurnStart?: symbol;
 	private diagnosticsRemaining = 20;
-	private isolatedConfigDir?: string;
 
 	constructor(private readonly options: ClaudeAgentSdkBridgeOptions, private readonly deps: ClaudeAgentSdkBridgeDeps) {
 		this.modelId = options.initialModel?.startsWith("claude-agent-sdk/") ? options.initialModel.slice("claude-agent-sdk/".length) : undefined;
@@ -306,6 +341,7 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		// A failed start is normally observed through start(); retain waitForReady's rejection semantics without process-wide noise.
 		void this.ready.catch(() => undefined);
 		void this.terminal.catch(() => undefined);
+		void this.initializationIdentity.promise.catch(() => undefined);
 	}
 
 	get running(): boolean { return this.queryHandle !== undefined && this.state !== "failed" && this.state !== "stopped"; }
@@ -340,11 +376,15 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 				throw new ClaudeAgentSdkUnavailableError("Claude Agent SDK does not accept extension arguments");
 			}
 			const sandboxLaunch = this.options.claudeSdkSandboxLaunch;
+			const directLaunch = this.options.claudeSdkDirectLaunch;
 			if ((this.options.sandboxed || this.options.containerId) && !sandboxLaunch) {
 				throw new ClaudeAgentSdkUnavailableError("CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE: Docker sandbox launch is unavailable; rebuild the Docker sandbox image and retry");
 			}
 			if (sandboxLaunch && (!sandboxLaunch.containerId || !sandboxLaunch.oauthAccessToken || !sandboxLaunch.gatewayToken || !sandboxLaunch.gatewayUrl || !isSandboxContainerCwd(sandboxLaunch.cwd))) {
 				throw new ClaudeAgentSdkUnavailableError("CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE: Docker sandbox launch is invalid; rebuild the Docker sandbox image and retry");
+			}
+			if (!sandboxLaunch && this.options.env?.BOBBIT_SESSION_ID && (!directLaunch || !directLaunch.sessionId || !directLaunch.configDir || !directLaunch.oauthAccessToken)) {
+				throw new ClaudeAgentSdkUnavailableError("CLAUDE_AGENT_SDK_AUTH_UNAVAILABLE: connect Anthropic OAuth in Bobbit and retry");
 			}
 			const systemPrompt = this.options.systemPromptPath ? fs.readFileSync(this.options.systemPromptPath, "utf8") : undefined;
 			const initialModel = this.options.initialModel?.startsWith("claude-agent-sdk/")
@@ -363,14 +403,9 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 				});
 				return {};
 			}] }] : undefined;
+			// Both production paths use a Bobbit-owned config root. Query options below
+			// independently prohibit settings, plugins, MCP, and memory leakage.
 			const env = buildClaudeAgentSdkEnv(this.options);
-			if (!sandboxLaunch) {
-				const sdkStateDir = bobbitStateDir();
-				fs.mkdirSync(sdkStateDir, { recursive: true, mode: 0o700 });
-				this.isolatedConfigDir = fs.mkdtempSync(path.join(sdkStateDir, "claude-sdk-"));
-				fs.chmodSync(this.isolatedConfigDir, 0o700);
-				env.CLAUDE_CONFIG_DIR = this.isolatedConfigDir;
-			}
 			if (this.abortController.signal.aborted || this.closed) throw new Error("Claude Agent SDK startup cancelled");
 			// Bounded SDK definitions plus this process-local depth ceiling prevent
 			// approved foreground helpers from creating grandchildren.
@@ -416,15 +451,13 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 			}
 			this.queryHandle = isPromise(query) ? await this.withinStartupWindow(query) : query;
 			void this.consume(this.queryHandle);
-			const initialized = await this.withinStartupWindow(this.queryHandle.initializationResult());
-			const sessionId = (initialized as { session_id?: unknown }).session_id;
-			if (!isClaudeAgentSdkSessionId(sessionId)) {
-				// Never mark a query ready without the opaque identity required to resume it.
-				// Do not include the SDK value in this error: initialization payloads are
-				// provider-controlled and errors must remain safe to expose to clients.
-				throw new ClaudeAgentSdkUnavailableError("Claude Agent SDK did not provide a valid resumable session id");
-			}
-			this.initializedSessionId = sessionId;
+			// The streamed init and initializationResult are independently ordered by
+			// the SDK. Require both: controls from initializationResult and a validated
+			// resume identity from system:init. Never read identity from the result.
+			const [initialized] = await this.withinStartupWindow(Promise.all([
+				this.queryHandle.initializationResult(),
+				this.initializationIdentity.promise,
+			]));
 			await this.captureModelCapabilities(initialized);
 			if (this.terminalError || this.closed) throw this.terminalError ?? new Error("Claude Agent SDK stopped during initialization");
 			this.state = "ready";
@@ -564,12 +597,31 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		this.subagentLifecycleGeneration++;
 	}
 
+	private observeInitializationIdentity(sdkEvent: unknown): void {
+		const event = sdkEvent as { type?: unknown; subtype?: unknown; session_id?: unknown };
+		if (event.type !== "system" || event.subtype !== "init") return;
+		if (this.identityObserved) {
+			// The SDK contract emits exactly one init. A second event could otherwise
+			// replace the durable identity after readiness.
+			this.fail(new ClaudeAgentSdkUnavailableError("Claude Agent SDK emitted duplicate initialization identity"));
+			return;
+		}
+		this.identityObserved = true;
+		if (!isClaudeAgentSdkSessionId(event.session_id)) {
+			// Never include provider-controlled identity data in an exposed error.
+			this.fail(new ClaudeAgentSdkUnavailableError("Claude Agent SDK did not provide a valid resumable session id"));
+			return;
+		}
+		this.initializedSessionId = event.session_id;
+		this.initializationIdentity.resolve(event.session_id);
+	}
+
 	private async consume(query: Query): Promise<void> {
 		try {
 			for await (const sdkEvent of query) {
 				if (this.closed || this.state === "failed") return;
-				const sessionId = (sdkEvent as { session_id?: unknown }).session_id;
-				if (isClaudeAgentSdkSessionId(sessionId)) this.initializedSessionId = sessionId;
+				this.observeInitializationIdentity(sdkEvent);
+				if (this.closed || this.state === "failed") return;
 				const translated = translateClaudeSdkEvent(this.translatorState, sdkEvent as unknown as Record<string, unknown>);
 				this.reportDiagnostics(translated.diagnostics);
 				const events = this.canonicalizeToolNames(translated.events);
@@ -622,8 +674,6 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 			.catch(() => undefined)
 			.then(() => {
 				if (this.allocatedToolSurface === surface) this.allocatedToolSurface = undefined;
-				if (this.isolatedConfigDir) fs.rmSync(this.isolatedConfigDir, { recursive: true, force: true });
-				this.isolatedConfigDir = undefined;
 			})
 			.catch(() => undefined)
 			.then(() => undefined);
@@ -636,6 +686,7 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		this.terminalError = wrapped;
 		this.state = "failed";
 		this.rejectTerminal(wrapped);
+		this.initializationIdentity.reject(wrapped);
 		this.input.fail(wrapped);
 		this.rejectReady(wrapped);
 		void this.cleanupTerminal();
@@ -713,6 +764,7 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		this.state = "stopped";
 		this.terminalError ??= new Error("Claude Agent SDK bridge stopped");
 		this.rejectTerminal(this.terminalError);
+		this.initializationIdentity.reject(this.terminalError);
 		this.rejectReady(this.terminalError);
 		await this.cleanupTerminal();
 		this.listeners.clear();

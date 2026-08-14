@@ -8,7 +8,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildClaudeAgentSdkEnv } from "../../src/server/agent/claude-agent-sdk-bridge.ts";
 import { createClaudeSdkDockerSpawn, redactDockerArgs, spawnDockerExec } from "../../src/server/agent/docker-exec-spawn.ts";
 import {
+	ClaudeAgentSdkDirectAuthUnavailableError,
 	ClaudeAgentSdkSandboxAuthUnavailableError,
+	resolveDirectClaudeAgentSdkOAuthAccessToken,
 	resolveSandboxClaudeAgentSdkOAuthAccessToken,
 } from "../../src/server/agent/host-tokens.ts";
 import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.ts";
@@ -223,13 +225,14 @@ describe("Claude Agent SDK sandbox spawn", () => {
 		expect(log.mock.calls.join(" ")).not.toContain("oauth-secret");
 	});
 
-	it("requires explicit OAuth policy, rejects API-key credentials, and returns only a current refreshed access token", async () => {
+	it("requires Bobbit OAuth for direct sessions and explicit policy for Docker", async () => {
 		await expect(resolveSandboxClaudeAgentSdkOAuthAccessToken({ entries: [] })).rejects.toBeInstanceOf(ClaudeAgentSdkSandboxAuthUnavailableError);
 		await expect(resolveSandboxClaudeAgentSdkOAuthAccessToken({
 			entries: [{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: true, value: "project-api-key" }],
 		})).rejects.toMatchObject({ code: "CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE" });
 
 		installHostAuth({ type: "api_key", key: "host-api-key" });
+		await expect(resolveDirectClaudeAgentSdkOAuthAccessToken()).rejects.toBeInstanceOf(ClaudeAgentSdkDirectAuthUnavailableError);
 		await expect(resolveSandboxClaudeAgentSdkOAuthAccessToken({
 			entries: [{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: true }],
 		})).rejects.toMatchObject({
@@ -238,6 +241,7 @@ describe("Claude Agent SDK sandbox spawn", () => {
 		});
 
 		installHostAuth({ type: "oauth", access: "current-access-only", refresh: "renewable-host-secret", expires: Date.now() + 60_000 });
+		await expect(resolveDirectClaudeAgentSdkOAuthAccessToken()).resolves.toBe("current-access-only");
 		await expect(resolveSandboxClaudeAgentSdkOAuthAccessToken({
 			entries: [{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: true }],
 		})).resolves.toBe("current-access-only");

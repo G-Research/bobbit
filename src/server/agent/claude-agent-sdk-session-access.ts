@@ -34,6 +34,8 @@ export interface ClaudeAgentSdkSessionAccessDeps {
 	loadSdk: () => Promise<ClaudeAgentSdkSessionApi>;
 	/** Read-only SDK API backed by the existing sandbox container, when applicable. */
 	sandboxSdk?: ClaudeAgentSdkSessionApi;
+	/** Read-only SDK API in a Bobbit-owned direct config root, when applicable. */
+	directSdk?: ClaudeAgentSdkSessionApi;
 }
 
 export interface SdkSessionAccessInput {
@@ -59,7 +61,7 @@ async function withSdk<T>(
 ): Promise<T> {
 	validate(input);
 	try {
-		return await work(deps.sandboxSdk ?? await deps.loadSdk());
+		return await work(deps.directSdk ?? deps.sandboxSdk ?? await deps.loadSdk());
 	} catch (error) {
 		throw unavailable(operation, error);
 	}
@@ -250,6 +252,85 @@ export function createSandboxClaudeAgentSdkSessionAccess(input: {
 		},
 		getSubagentMessages: async (sessionId, agentId, options) => {
 			if (!isSubagentId(agentId)) throw new Error("sandbox SDK subagent identity is invalid");
+			return readMessages("subagentMessages", sessionId, agentId, options);
+		},
+	};
+}
+
+/**
+ * Read direct SDK history in a separate process with the session's private
+ * config root. This avoids mutating gateway-wide `CLAUDE_CONFIG_DIR` while two
+ * sessions are active, and deliberately supplies no OAuth credential.
+ */
+export function createDirectClaudeAgentSdkSessionAccess(input: {
+	configDir: string;
+	exec?: (args: string[]) => Promise<string>;
+}): ClaudeAgentSdkSessionApi {
+	if (!input.configDir) throw unavailable("direct session access is unavailable");
+	const execute = input.exec ?? (async (args: string[]) => {
+		const { stdout } = await execFileAsync(process.execPath, args, {
+			cwd: process.cwd(),
+			maxBuffer: MAX_SANDBOX_SDK_HISTORY_PAGE_BYTES,
+			env: {
+				HOME: input.configDir,
+				PATH: process.env.PATH || "/usr/local/bin:/usr/bin:/bin",
+				CLAUDE_CONFIG_DIR: input.configDir,
+				LANG: process.env.LANG || "C.UTF-8",
+			},
+		});
+		return stdout;
+	});
+	const read = async <T>(request: {
+		operation: "info" | "messages" | "subagents" | "subagentMessages";
+		sessionId: string;
+		agentId?: string;
+		limit?: number;
+		offset?: number;
+		includeSystemMessages?: boolean;
+	}): Promise<T> => {
+		const output = await execute([
+			"--input-type=module", "-e", SANDBOX_SDK_READER,
+			request.agentId ?? "", request.operation, request.sessionId, "",
+			String(request.limit ?? 0), String(request.offset ?? 0), String(request.includeSystemMessages === true),
+		]);
+		if (Buffer.byteLength(output) > MAX_SANDBOX_SDK_HISTORY_PAGE_BYTES) throw new Error("direct SDK response page exceeds limit");
+		try { return JSON.parse(output) as T; }
+		catch { throw new Error("direct SDK returned invalid JSON"); }
+	};
+	const readMessages = async (
+		operation: "messages" | "subagentMessages",
+		sessionId: string,
+		agentId: string | undefined,
+		options: { limit?: number; offset?: number; includeSystemMessages?: boolean } | undefined,
+	): Promise<SdkSessionMessage[]> => {
+		const requested = boundedNonNegativeInteger(options?.limit, MAX_SANDBOX_SDK_HISTORY_MESSAGES);
+		const target = Math.min(requested, MAX_SANDBOX_SDK_HISTORY_MESSAGES);
+		let offset = boundedNonNegativeInteger(options?.offset, 0);
+		let bytes = 0;
+		const messages: SdkSessionMessage[] = [];
+		while (messages.length < target) {
+			const limit = Math.min(SANDBOX_SDK_HISTORY_PAGE_SIZE, target - messages.length);
+			const page = await read<unknown>({ operation, sessionId, agentId, limit, offset, includeSystemMessages: options?.includeSystemMessages });
+			if (!Array.isArray(page) || page.length > limit) throw new Error("direct SDK messages are invalid");
+			const pageBytes = Buffer.byteLength(JSON.stringify(page));
+			if (bytes + pageBytes > MAX_SANDBOX_SDK_HISTORY_TOTAL_BYTES) throw new Error("direct SDK history exceeds cumulative byte limit");
+			bytes += pageBytes;
+			messages.push(...page as SdkSessionMessage[]);
+			if (page.length < limit) break;
+			offset += page.length;
+		}
+		return messages;
+	};
+	return {
+		getSessionInfo: async (sessionId) => (await read<SdkSessionInfo | null>({ operation: "info", sessionId })) ?? undefined,
+		getSessionMessages: async (sessionId, options) => readMessages("messages", sessionId, undefined, options),
+		listSubagents: async (sessionId) => {
+			const ids = await read<unknown>({ operation: "subagents", sessionId });
+			if (!Array.isArray(ids) || ids.some((id) => !isSubagentId(id))) throw new Error("direct SDK subagent identities are invalid");
+			return ids;
+		},
+		getSubagentMessages: async (sessionId, agentId, options) => {
+			if (!isSubagentId(agentId)) throw new Error("direct SDK subagent identity is invalid");
 			return readMessages("subagentMessages", sessionId, agentId, options);
 		},
 	};

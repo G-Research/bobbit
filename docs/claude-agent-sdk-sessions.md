@@ -680,19 +680,27 @@ three permission layers. No project/user/local Claude settings, `.mcp.json`,
 plugin configuration, unmanaged MCP server, or auto-memory state is merged into
 the Bobbit surface.
 
-Each bridge uses a restrictive `CLAUDE_CONFIG_DIR` under Bobbit state. A direct
-bridge creates a temporary directory and removes it at terminal cleanup. A
-sandbox bridge uses its deterministic per-session directory in `/bobbit-state`.
-Both receive a closed environment rather than inherited host or project
-settings.
+Each bridge uses a restrictive Bobbit-owned `CLAUDE_CONFIG_DIR`. A direct
+bridge uses a deterministic directory keyed by its Bobbit session, which survives
+bridge replacement, restart, archive, and resume and is removed only when that
+session is permanently purged. A sandbox bridge uses its deterministic
+per-session directory in `/bobbit-state`. Both receive a closed environment
+rather than inherited host or project settings.
+
+Direct sessions require an active Anthropic OAuth connection in Bobbit. Bobbit
+refreshes it under its existing lock and passes only the current access token to
+the one SDK child process; it never copies a refresh token or native Claude CLI
+configuration. A native Claude CLI login alone is insufficient. The same private
+direct config root is used by the read-only official-history accessor, so a
+replacement cannot silently switch to host CLI history.
 
 ### Sandbox subscription handoff
 
 A sandboxed SDK session has one supported subscription path. The project must
 explicitly enable an empty `ANTHROPIC_OAUTH_TOKEN` sandbox-token policy entry,
-and the host must have a usable local Anthropic OAuth subscription. Under the
-project auth lock, Bobbit refreshes that host credential if needed and passes
-only its current short-lived access token to the SDK child as
+and Bobbit must have a usable Anthropic OAuth connection. Under the project auth
+lock, Bobbit refreshes that connection if needed and passes only its current
+short-lived access token to the SDK child as
 `CLAUDE_CODE_OAUTH_TOKEN`. The token is in memory only for that `docker exec`;
 it is not persisted, included in diagnostics, or passed to history reads.
 
@@ -707,9 +715,10 @@ substitute. Existing Pi sessions retain their separate credential behavior.
 Two sanitized startup errors are actionable:
 
 - `CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE` means the explicit OAuth policy is
-  absent or conflicts with a project credential, or the local OAuth subscription
-  is absent, expired, or cannot refresh. Enable the policy and sign in again;
-  do not add an API key as a workaround.
+  absent or conflicts with a project credential, or the Bobbit OAuth connection
+  is absent, expired, or cannot refresh. Enable the policy and connect Anthropic
+  in Bobbit again; do not add an API key as a workaround. A native Claude CLI
+  login is not a substitute.
 - `CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE` means the Docker launch prerequisites
   are incomplete, such as a stale/missing SDK image capability or launcher, an
   invalid container cwd, or unavailable scoped gateway authority. Rebuild the
@@ -745,9 +754,11 @@ old MCP server in place. Pi's proxy/guard-extension path remains separate and
 is not generated for SDK sessions.
 
 Stopping or failed startup aborts pending input and permission work, closes the
-SDK query, disposes the MCP surface and trusted worker, clears one-time approval
-state, and removes the isolated config directory. This prevents old handlers,
-grant approvals, or config state from surviving into a replacement bridge.
+SDK query, disposes the MCP surface and trusted worker, and clears one-time
+approval state. Direct SDK config/history remains until the final session purge;
+this preserves official history across replacement and resume without retaining
+any OAuth token. This prevents old handlers or grant approvals from surviving
+into a replacement bridge.
 
 ## Validation
 
@@ -912,7 +923,7 @@ the user's browser workflow.
 | Evidence | Deterministic automated coverage | Direct subscription session | Docker subscription session |
 | --- | --- | --- | --- |
 | Runtime routing, official-history projection, root-only usage, unavailable-provider recovery, tool/permission ceilings, slash ownership, helpers, and tuple transaction | Required before a live run; credential-free | Pending a user-run session | Pending a user-run session |
-| Local subscription discovery and one real SDK conversation | Cannot prove | Required and pending until recorded | Does not replace direct evidence |
+| Bobbit OAuth discovery and one real SDK conversation | Cannot prove | Required and pending until recorded | Does not replace direct evidence |
 | Docker image capability, private volume/UID boundary, explicit OAuth-policy handoff, and sandbox resume | Can prove isolated branches, not a host credential handoff | Not applicable | Required and pending until recorded |
 | User-visible tool card, nested helper card, controls, restart/resume, reload, transcript, cost, and usage observation | Can prove fixtures and projections | Required and pending until recorded | Required and pending until recorded |
 | Release readiness | Cannot establish | Requires user sign-off | Requires user sign-off |
@@ -932,7 +943,7 @@ scenario, record only:
 | --- | --- |
 | Run identity | Date, Bobbit commit, command, and unprefixed model ID. |
 | Versions | Installed SDK package and bundled Claude binary version; for Docker, matching image label/version. |
-| Auth and prerequisites | `local OAuth available` or a sanitized failure category; Docker policy present with an empty value, image capability, and Docker availability. Never record tokens, account data, opaque IDs or UUIDs, config/session paths, environment dumps, provider bodies, prompts, or model output. |
+| Auth and prerequisites | `Bobbit OAuth available` or a sanitized failure category; Docker policy present with an empty value, image capability, and Docker availability. A native Claude CLI login alone is insufficient. Never record tokens, account data, opaque IDs or UUIDs, config/session paths, environment dumps, provider bodies, prompts, or model output. |
 | Lifecycle outcomes | Start/readiness; canonical Bobbit tool and permission-card request/settlement; read-only gate action; Bobbit-owned slash; local SDK `/compact` rejection; one admitted helper beneath its root `Agent` card; advertised control's verified tuple or the accurate unsupported result; automatic compaction only if observed; restart/resume and reload. |
 | Durable observations | Stable official transcript projection; `costBasis`, nullable billed total, nullable notional value, usage totals, and current/high-water context. Record field presence and outcome, not raw transcript rows, opaque IDs, prompts, tool arguments, or model output. |
 | Failure and approval | Sanitized category, remediation and rerun result; provider-unavailable deterministic-check reference; user confirmation that the real session was run. UI artifacts may show only redacted labels and outcomes. |

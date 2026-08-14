@@ -41,14 +41,15 @@ class FakeOfficialQuery implements AsyncIterable<unknown> {
 	private closed = false;
 
 	constructor(readonly args: SdkQueryArgs, private readonly sdk: FakeOfficialSdk) {
+		this.emitSdkEvent({ type: "system", subtype: "init", session_id: SDK_SESSION_ID });
 		void this.consumePrompts();
 	}
 
-	async initializationResult(): Promise<{ session_id: string }> {
+	async initializationResult(): Promise<Record<string, never>> {
 		if (this.sdk.unavailableModels.has(String(this.args.options.model))) {
 			throw new Error("DETERMINISTIC_SDK_PROVIDER_UNAVAILABLE");
 		}
-		return { session_id: SDK_SESSION_ID };
+		return {};
 	}
 
 	private async consumePrompts(): Promise<void> {

@@ -498,7 +498,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 							}),
 							initializationResult: async () => {
 								if (failCandidate) throw new Error("candidate startup failed");
-								return { session_id: resumeId, models: [{ value: "sandbox-sonnet" }] };
+								return { models: [{ value: "sandbox-sonnet" }] };
 							},
 							async *[Symbol.asyncIterator]() {
 								yield { type: "system", subtype: "init", session_id: resumeId };

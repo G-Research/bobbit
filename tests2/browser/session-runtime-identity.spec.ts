@@ -17,13 +17,12 @@ type SdkQueryArgs = { prompt: AsyncIterable<unknown>; options: Record<string, un
 /** Minimal deterministic implementation of the official SDK Query interface. */
 class FakeSdkQuery implements AsyncIterable<unknown> {
 	private closed = false;
+	private initialized = false;
 	private reader?: (value: IteratorResult<unknown>) => void;
 
 	constructor(readonly args: SdkQueryArgs) {}
 
-	async initializationResult(): Promise<{ session_id: string }> {
-		return { session_id: SDK_SESSION_ID };
-	}
+	async initializationResult(): Promise<Record<string, never>> { return {}; }
 	async interrupt(): Promise<void> {}
 	async setModel(): Promise<void> {}
 	async setMaxThinkingTokens(): Promise<void> {}
@@ -34,9 +33,15 @@ class FakeSdkQuery implements AsyncIterable<unknown> {
 	}
 	[Symbol.asyncIterator](): AsyncIterator<unknown> {
 		return {
-			next: () => this.closed
-				? Promise.resolve({ done: true, value: undefined })
-				: new Promise<IteratorResult<unknown>>((resolve) => { this.reader = resolve; }),
+			next: () => {
+				if (!this.initialized) {
+					this.initialized = true;
+					return Promise.resolve({ done: false, value: { type: "system", subtype: "init", session_id: SDK_SESSION_ID } });
+				}
+				return this.closed
+					? Promise.resolve({ done: true, value: undefined })
+					: new Promise<IteratorResult<unknown>>((resolve) => { this.reader = resolve; });
+			},
 		};
 	}
 }

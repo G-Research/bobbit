@@ -24,12 +24,13 @@ class LiveControlsQuery implements AsyncIterable<unknown> {
 	readonly effortSettings: Array<{ effortLevel?: string | null }> = [];
 	readonly thinkingBudgets: Array<number | null> = [];
 	private closed = false;
+	private initialized = false;
 	private reader?: (result: IteratorResult<unknown>) => void;
 
 	constructor(readonly args: SdkQueryArgs) {}
 
-	async initializationResult(): Promise<{ session_id: string; models: SdkModel[] }> {
-		return { session_id: SDK_SESSION_ID, models: Object.values(CLAUDE_LIVE_MODELS) };
+	async initializationResult(): Promise<{ models: SdkModel[] }> {
+		return { models: Object.values(CLAUDE_LIVE_MODELS) };
 	}
 
 	supportedModels(): SdkModel[] {
@@ -59,6 +60,10 @@ class LiveControlsQuery implements AsyncIterable<unknown> {
 	[Symbol.asyncIterator](): AsyncIterator<unknown> {
 		return {
 			next: () => {
+				if (!this.initialized) {
+					this.initialized = true;
+					return Promise.resolve({ done: false, value: { type: "system", subtype: "init", session_id: SDK_SESSION_ID } });
+				}
 				if (this.closed) return Promise.resolve({ done: true, value: undefined });
 				return new Promise<IteratorResult<unknown>>(resolve => { this.reader = resolve; });
 			},

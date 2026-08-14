@@ -43,13 +43,13 @@ contain the following durable sections.
 | Section | Exact source of truth / seam | Required operator content |
 | --- | --- | --- |
 | Runtime selection and persistence | `src/server/agent/session-runtime.ts::{runtimeFromProvider,resolveSessionRuntime,createSessionBridge}`, `session-store.ts` | Register the exact `claude-agent-sdk` Custom Provider and select `claude-agent-sdk/<model-id>` through normal default/role configuration. Explain that `anthropic/*` remains Pi, runtime is persisted/derived rather than a per-request switch, and crossing runtimes requires a new session. Explain opaque UUID resume and no Pi `switch_session`. |
-| Subscription authentication and settings isolation | `claude-agent-sdk-bridge.ts::buildClaudeAgentSdkEnv`, query-option builder | Direct SDK sessions discover the local subscription without copying auth into test/config; `settingSources: []`, strict MCP, isolated config directory, disabled auto-memory, only the Bobbit MCP server. State that API key/cloud/unmanaged settings/plugin/MCP fallback is not supported. |
+| Subscription authentication and settings isolation | `claude-agent-sdk-bridge.ts::buildClaudeAgentSdkEnv`, query-option builder | Direct SDK sessions use Bobbit's locked OAuth resolver and a durable Bobbit-owned config/history root without copying native CLI auth/config; `settingSources: []`, strict MCP, disabled auto-memory, only the Bobbit MCP server. State that API key/cloud/unmanaged settings/plugin/MCP fallback is not supported. |
 | Native tools, Bobbit tools, and permissions | `claude-agent-sdk-tool-surface.ts::{buildClaudeSdkToolSurface,normalizeClaudeSdkMcpToolName}`, `claude-sdk-tool-dispatcher.ts`, `SessionManager.requestToolGrant` | List Bobbit ownership and native suppression; distinguish canonical `read` from SDK raw `mcp__bobbit__read`. Explain allow/ask/never, visible permission cards, one-time/session/persistent grants, and that `PreToolUse` is final enforcement. Never advise bypass mode. |
 | Slash and skill ownership | Composer registry and `resolveSkillExpansions()` | Exact Bobbit skills win; bundled Claude commands are not autocomplete/launchers; unknown slashes pass through. SDK `/compact` is locally consumed, retains the draft, and is unsupported; only SDK-managed automatic compaction exists. |
 | Skills and subagents | `CLAUDE_BUNDLED_SKILLS_0_3_222`, `buildClaudeSdkSubagentPolicy`, `claude-sdk-subagent-work.ts` | Publish the reviewed bundled-skill list/version pin. Describe the only three foreground `bobbit-*` helper projections, one-child/depth-one limit, read/find/grep ceiling, no task/team/worktree/cost account, exact-parent rendering, and safe failure display. |
 | Transcript, cost, usage, and compaction | `cost-tracker.ts::recordAuthoritativeUsage`, history adapter, SDK compaction coordinator | Explain official SDK history authority, server projection, root-result-only exactly-once accounting, subscription-notional versus billed cost, unknown versus zero, context high-water, nested child usage exclusion, and unsupported manual compact. |
 | Live controls and resume | `ws/runtime-model-selection.ts`, bridge model/thinking calls, `session-manager.ts` recovery | Controls are constrained by the live Query capability; only verified tuple read-back persists/broadcasts. Unsupported requests are rejected, not clamped. Describe restart/replacement resume and reload snapshot behavior. |
-| Docker prerequisites and recovery | `SessionManager.applySandboxWiring`, sandbox launch/credential helpers, `docker/Dockerfile` | Require Docker, current `bobbit-agent` image with matching SDK/binary/launcher, explicit enabled empty `ANTHROPIC_OAUTH_TOKEN` sandbox policy, and an active local OAuth subscription. Document no host auth mount/API-key workaround; map sandbox auth/image errors to re-login/policy/image rebuild. |
+| Docker prerequisites and recovery | `SessionManager.applySandboxWiring`, sandbox launch/credential helpers, `docker/Dockerfile` | Require Docker, current `bobbit-agent` image with matching SDK/binary/launcher, explicit enabled empty `ANTHROPIC_OAUTH_TOKEN` sandbox policy, and an active Bobbit Anthropic OAuth connection. Document no host auth mount/API-key workaround; map sandbox auth/image errors to re-connect/policy/image rebuild. |
 | SDK upgrade inventory check | literal real-init inventory test | Every SDK or bundled Claude version change requires declaration review, image rebuild, literal expected-inventory review, native policy/bundled-skill/agent review, and successful inventory test. Never regenerate or accept the snapshot blindly. |
 | Failure recovery | `claude-agent-sdk-error.ts`, REST transcript/session routes | For `SDK_SESSION_UNAVAILABLE`, retain the wrapper/queue, verify the original subscription/project context and UUID source, repair auth/image/config then retry. Do not start a replacement conversation, copy SDK files, expose paths/IDs/credentials, or fall back to Pi. |
 
@@ -168,8 +168,8 @@ record. Manual test success alone is insufficient.
 
 - Explicit `BOBBIT_RUN_CLAUDE_AGENT_SDK_SMOKE=1` and a non-empty, unprefixed
   `MANUAL_CLAUDE_AGENT_SDK_MODEL` selected from a reviewed Custom Provider.
-- A locally authenticated active Anthropic OAuth subscription discoverable by the
-  official SDK in its normal location.
+- An active Anthropic OAuth connection in Bobbit. A native Claude CLI login
+  alone is insufficient.
 - Built server/test artifacts and an isolated temporary Bobbit state.
 - No `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` as a workaround; no auth-file
   copy, environment dump, or credential logging.
@@ -183,14 +183,14 @@ All direct prerequisites, plus:
   `/usr/local/bin/bobbit-claude-agent-sdk` launcher match the server pin.
 - A project Docker sandbox with an explicit enabled empty
   `ANTHROPIC_OAUTH_TOKEN` sandbox-token policy entry.
-- The normal local OAuth subscription is refreshable; only the current short-lived
-  access token may be passed to the one `docker exec` process.
+- The Bobbit Anthropic OAuth connection is refreshable; only the current
+  short-lived access token may be passed to the one `docker exec` process.
 - No project API key/conflicting Anthropic credential, host auth/config mount,
   generic sandbox credential reuse, host SDK fallback, or persistent token.
 
 If the prerequisites fail, record the sanitized error and remediation:
-`CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE` means enable the policy or refresh
-local OAuth; `CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE` means rebuild/repair the
+`CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE` means enable the policy or reconnect
+Bobbit OAuth; `CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE` means rebuild/repair the
 image, container CWD, or scoped authority. Do not weaken isolation to make a
 smoke pass.
 

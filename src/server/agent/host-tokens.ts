@@ -323,6 +323,15 @@ export class ClaudeAgentSdkSandboxAuthUnavailableError extends Error {
 	}
 }
 
+/** Stable, credential-free failure for a direct SDK subscription handoff. */
+export class ClaudeAgentSdkDirectAuthUnavailableError extends Error {
+	readonly code = "CLAUDE_AGENT_SDK_AUTH_UNAVAILABLE";
+	constructor() {
+		super("CLAUDE_AGENT_SDK_AUTH_UNAVAILABLE: connect Anthropic OAuth in Bobbit and retry");
+		this.name = "ClaudeAgentSdkDirectAuthUnavailableError";
+	}
+}
+
 /**
  * Resolve only the current host subscription access token for one SDK
  * `docker exec`. The caller holds `withSandboxAgentAuthFileLock`; no API key,
@@ -335,12 +344,26 @@ export async function resolveSandboxClaudeAgentSdkOAuthAccessToken(input: {
 }): Promise<string> {
 	if (!sandboxTokenPolicyAllowsAnthropicAuth(input.entries)) throw new ClaudeAgentSdkSandboxAuthUnavailableError();
 	if (hasExplicitSandboxAnthropicCredential(input.entries, input.secrets)) throw new ClaudeAgentSdkSandboxAuthUnavailableError();
+	return resolveClaudeAgentSdkOAuthAccessToken(() => new ClaudeAgentSdkSandboxAuthUnavailableError());
+}
+
+/**
+ * Direct SDK sessions use Bobbit's authenticated OAuth store too. A native
+ * Claude CLI login, API key, or arbitrary environment variable is never read.
+ * The caller serializes refresh with the existing auth-file lock and passes the
+ * returned access value only to the new SDK child environment.
+ */
+export async function resolveDirectClaudeAgentSdkOAuthAccessToken(): Promise<string> {
+	return resolveClaudeAgentSdkOAuthAccessToken(() => new ClaudeAgentSdkDirectAuthUnavailableError());
+}
+
+async function resolveClaudeAgentSdkOAuthAccessToken(unavailable: () => Error): Promise<string> {
 	const before = readHostAuthJson()?.anthropic;
 	// An API-key host row must never be silently converted into the SDK path.
-	if (isAnthropicApiKeyCredential(before)) throw new ClaudeAgentSdkSandboxAuthUnavailableError();
-	if (!(await refreshSandboxAnthropicOAuthCredential())) throw new ClaudeAgentSdkSandboxAuthUnavailableError();
+	if (isAnthropicApiKeyCredential(before)) throw unavailable();
+	if (!(await refreshSandboxAnthropicOAuthCredential())) throw unavailable();
 	const credential = readHostAuthJson()?.anthropic;
-	if (!hasCurrentOAuthAccess(credential) || isAnthropicApiKeyCredential(credential)) throw new ClaudeAgentSdkSandboxAuthUnavailableError();
+	if (!hasCurrentOAuthAccess(credential) || isAnthropicApiKeyCredential(credential)) throw unavailable();
 	return credential.access;
 }
 

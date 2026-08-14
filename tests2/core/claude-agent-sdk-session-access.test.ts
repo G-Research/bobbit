@@ -40,6 +40,17 @@ describe("Claude Agent SDK session access", () => {
 		expect(fixture.sdk.getSessionMessages).toHaveBeenCalledWith(SESSION_ID, { dir: CWD });
 	});
 
+	it("uses the injected private direct config accessor instead of the gateway SDK environment", async () => {
+		const direct = sdkFixture();
+		const fallback = sdkFixture();
+		await expect(readSdkSessionMessages({ sessionId: SESSION_ID, cwd: CWD }, {
+			loadSdk: fallback.deps.loadSdk,
+			directSdk: direct.sdk,
+		})).resolves.toEqual([]);
+		expect(direct.sdk.getSessionInfo).toHaveBeenCalledWith(SESSION_ID, { dir: CWD });
+		expect(fallback.deps.loadSdk).not.toHaveBeenCalled();
+	});
+
 	it("reads pinned child APIs without inferring parent identity from agent ids", async () => {
 		const fixture = sdkFixture({ listSubagents: vi.fn(async () => ["child-1"]), getSubagentMessages: vi.fn(async () => []) });
 

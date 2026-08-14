@@ -43,13 +43,11 @@ class FakeQuery implements AsyncIterable<unknown> {
 	private closed = false;
 
 	constructor(readonly prompt: AsyncIterable<unknown>, readonly options: any) {
+		this.events.push({ type: "system", subtype: "init", session_id: SDK_ID });
 		void this.collectInputs();
 	}
 	async initializationResult() {
-		return {
-			session_id: SDK_ID,
-			models: [{ value: "sandbox-sonnet", supportsEffort: true, supportedEffortLevels: ["high"] }],
-		};
+		return { models: [{ value: "sandbox-sonnet", supportsEffort: true, supportedEffortLevels: ["high"] }] };
 	}
 	async collectInputs() {
 		for await (const input of this.prompt) this.inputs.push(input);

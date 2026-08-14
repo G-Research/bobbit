@@ -1,12 +1,13 @@
 /**
  * Opt-in smoke for the official Claude Agent SDK runtime.
  *
- * This deliberately runs against the user's locally authenticated Claude
+ * This deliberately runs against the user's Bobbit Anthropic OAuth
  * subscription. It never copies auth files or credential values into the test
- * gateway, SDK options, assertions, or logs; the SDK must discover its normal
- * local subscription itself through the bridge's allowlisted environment.
+ * gateway, SDK options, assertions, or logs. The SDK receives only a current
+ * access token from Bobbit's OAuth resolver and a Bobbit-owned config root.
+ * A native Claude CLI login alone is insufficient.
  *
- * Run only when a local subscription is available:
+ * Run only when Bobbit Anthropic OAuth is connected:
  *   BOBBIT_RUN_CLAUDE_AGENT_SDK_SMOKE=1 npm run test:manual -- --grep "Claude Agent SDK lifecycle"
  */
 import { test, expect } from "@playwright/test";
@@ -159,7 +160,7 @@ test("Claude Agent SDK provider-unavailable failure is bounded and sanitized wit
 });
 
 test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
-	test("discovers a local subscription and supports ready, prompt, steer, soft interrupt, and termination", async () => {
+	test("uses Bobbit OAuth and supports ready, prompt, steer, soft interrupt, and termination", async () => {
 		test.skip(
 			process.env.BOBBIT_RUN_CLAUDE_AGENT_SDK_SMOKE !== "1",
 			"Set BOBBIT_RUN_CLAUDE_AGENT_SDK_SMOKE=1 to use a local Claude subscription.",
@@ -184,10 +185,14 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 
 			// Do not use seedManualTestModelPreferences: that helper can explicitly
 			// copy authentication/config files for Pi manual tests. The SDK bridge
-			// must instead discover the normal local subscription on its own.
+			// must instead use Bobbit's locked OAuth resolver without copying config.
 			process.env.BOBBIT_DIR = bobbitDir;
 			process.env.BOBBIT_SECRETS_DIR = secretsDir;
-			process.env.BOBBIT_AGENT_DIR = join(bobbitDir, "agent");
+			// Keep the user's existing Bobbit OAuth connection discoverable; do not
+			// copy it into this isolated gateway or SDK config root.
+			const existingAgentDir = originalEnvironment.get("BOBBIT_AGENT_DIR");
+			if (existingAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;
+			else process.env.BOBBIT_AGENT_DIR = existingAgentDir;
 			process.env.BOBBIT_SKIP_MCP = "1";
 			process.env.BOBBIT_SKIP_AIGW_DISCOVERY = "1";
 			process.env.BOBBIT_SKIP_TITLE_GEN = "1";
@@ -469,9 +474,11 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			writeFileSync(join(bobbitDir, "state", "setup-complete"), "manual-sdk-sandbox-smoke\n");
 			process.env.BOBBIT_DIR = bobbitDir;
 			process.env.BOBBIT_SECRETS_DIR = join(root, ".secrets");
-			// Do not set BOBBIT_AGENT_DIR: production resolves the current local
-			// subscription itself. This test never reads, copies, or logs its contents.
-			delete process.env.BOBBIT_AGENT_DIR;
+			// Keep the user's Bobbit OAuth connection discoverable without copying it
+			// into the isolated gateway, sandbox volume, or SDK config root.
+			const existingAgentDir = originalEnvironment.get("BOBBIT_AGENT_DIR");
+			if (existingAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;
+			else process.env.BOBBIT_AGENT_DIR = existingAgentDir;
 			delete process.env.ANTHROPIC_API_KEY;
 			delete process.env.ANTHROPIC_AUTH_TOKEN;
 			process.env.BOBBIT_SKIP_MCP = "1";

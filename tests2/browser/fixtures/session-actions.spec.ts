@@ -34,11 +34,10 @@ const SDK_MODEL = "session-actions-sdk";
 /** Deterministic official SDK Query seam; the production bridge remains in use. */
 class FakeSdkQuery implements AsyncIterable<unknown> {
 	private closed = false;
+	private initialized = false;
 	private reader?: (value: IteratorResult<unknown>) => void;
 
-	async initializationResult(): Promise<{ session_id: string }> {
-		return { session_id: "33333333-3333-4333-8333-333333333333" };
-	}
+	async initializationResult(): Promise<Record<string, never>> { return {}; }
 	async interrupt(): Promise<void> {}
 	async setModel(): Promise<void> {}
 	async setMaxThinkingTokens(): Promise<void> {}
@@ -49,9 +48,15 @@ class FakeSdkQuery implements AsyncIterable<unknown> {
 	}
 	[Symbol.asyncIterator](): AsyncIterator<unknown> {
 		return {
-			next: () => this.closed
-				? Promise.resolve({ done: true, value: undefined })
-				: new Promise<IteratorResult<unknown>>((resolve) => { this.reader = resolve; }),
+			next: () => {
+				if (!this.initialized) {
+					this.initialized = true;
+					return Promise.resolve({ done: false, value: { type: "system", subtype: "init", session_id: "33333333-3333-4333-8333-333333333333" } });
+				}
+				return this.closed
+					? Promise.resolve({ done: true, value: undefined })
+					: new Promise<IteratorResult<unknown>>((resolve) => { this.reader = resolve; });
+			},
 		};
 	}
 }

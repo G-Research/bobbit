@@ -10772,6 +10772,19 @@ export class SessionManager {
 			options.sandboxed === true || !!options.containerId,
 			effectiveModel.slice(0, slash),
 		);
+		if (effectiveModel.startsWith("claude-agent-sdk/") && options.sandboxed !== true && !options.containerId
+			&& !(options as SessionBridgeOptions).claudeAgentSdkBridgeDepsFactory) {
+			const sessionId = options.env?.BOBBIT_SESSION_ID;
+			if (!isClaudeAgentSdkSessionId(sessionId)) throw new ClaudeAgentSdkDirectAuthUnavailableError();
+			// Serialize refresh through the existing Bobbit OAuth lock. The returned
+			// value is passed only to this bridge's child environment, never persisted.
+			const oauthAccessToken = await withSandboxAgentAuthFileLock("claude-agent-sdk-direct", () =>
+				resolveDirectClaudeAgentSdkOAuthAccessToken());
+			const configDir = path.join(bobbitStateDir(), "claude-agent-sdk", sessionId);
+			fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
+			fs.chmodSync(configDir, 0o700);
+			(options as SessionBridgeOptions).claudeSdkDirectLaunch = { sessionId, configDir, oauthAccessToken };
+		}
 	}
 
 	/** Require one exact provider/model tuple to remain in Bobbit's current catalog. */
@@ -14027,6 +14040,20 @@ export class SessionManager {
 			console.warn(`[session-manager] proposal-drafts purge failed for ${ps.id}:`, err);
 		}
 
+		// Direct SDK history/config is session-private and must survive archive,
+		// resume, and bridge replacement. Purge is its sole destructive owner.
+		if (!ps.sandboxed && resolveSessionRuntime({
+			modelProvider: ps.modelProvider,
+			initialModel: ps.modelProvider && ps.modelId ? `${ps.modelProvider}/${ps.modelId}` : undefined,
+			persistedRuntime: ps.runtime,
+		}) === "claude-agent-sdk" && isClaudeAgentSdkSessionId(ps.id)) {
+			try {
+				await removeTree(path.join(bobbitStateDir(), "claude-agent-sdk", ps.id));
+			} catch (err) {
+				console.warn(`[session-manager] Claude SDK direct state purge failed for ${ps.id}:`, err);
+			}
+		}
+
 		// Delete the prompt and mount while holding the same per-session preview
 		// operation queue used by POST, restore, snapshot, SSE bootstrap, and
 		// artifact cleanup. The production queue terminally fences ordinary work
@@ -15098,7 +15125,7 @@ export class SessionManager {
 
 // ── Sandbox credential auto-resolution ─────────────────────────────
 
-import { ClaudeAgentSdkSandboxAuthUnavailableError, ensureSandboxAgentAuthFile, fallbackProviderAllowlistFromPrefs, hasExplicitSandboxAnthropicCredential, mergeHostAgentProviderEnv, recoverAnthropicApiKeyRuntime, refreshSandboxAnthropicOAuthCredential, resolveHostTokenValue, resolveSandboxAgentAuthPolicy, resolveSandboxClaudeAgentSdkOAuthAccessToken, sandboxTokenPolicyAllowsAnthropicAuth, withSandboxAgentAuthFileLock, type HostTokenResolutionOptions } from "./host-tokens.js";
+import { ClaudeAgentSdkDirectAuthUnavailableError, ClaudeAgentSdkSandboxAuthUnavailableError, ensureSandboxAgentAuthFile, fallbackProviderAllowlistFromPrefs, hasExplicitSandboxAnthropicCredential, mergeHostAgentProviderEnv, recoverAnthropicApiKeyRuntime, refreshSandboxAnthropicOAuthCredential, resolveDirectClaudeAgentSdkOAuthAccessToken, resolveHostTokenValue, resolveSandboxAgentAuthPolicy, resolveSandboxClaudeAgentSdkOAuthAccessToken, sandboxTokenPolicyAllowsAnthropicAuth, withSandboxAgentAuthFileLock, type HostTokenResolutionOptions } from "./host-tokens.js";
 
 /**
  * Map of auth.json provider keys → env vars that pi-coding-agent checks.

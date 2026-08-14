@@ -57,7 +57,8 @@ type SdkModel = {
 	supportsAdaptiveThinking?: boolean;
 };
 class FakeQuery implements AsyncIterable<unknown> {
-	readonly initialization = deferred<{ session_id?: unknown; models?: SdkModel[] }>();
+	/** Official SDK controls arrive here; resumable identity arrives on system:init. */
+	readonly initialization = deferred<{ models?: SdkModel[] }>();
 	readonly events: unknown[] = [];
 	readonly waiters: Array<(result: IteratorResult<unknown>) => void> = [];
 	readonly inputs: unknown[] = [];
@@ -78,7 +79,8 @@ class FakeQuery implements AsyncIterable<unknown> {
 	constructor(readonly prompt: AsyncIterable<unknown>, readonly options: Record<string, unknown>, autoPullInputs = true) {
 		if (autoPullInputs) void this.pullInputs();
 	}
-	initializationResult(): Promise<{ session_id?: unknown; models?: SdkModel[] }> { return this.initialization.promise; }
+	initializationResult(): Promise<{ models?: SdkModel[] }> { return this.initialization.promise; }
+	emitSystemInit(sessionId: unknown): void { this.emit({ type: "system", subtype: "init", session_id: sessionId }); }
 	async supportedModels(): Promise<SdkModel[] | undefined> { return this.supportedModelsData; }
 	async pullInputs(): Promise<void> {
 		try {
@@ -160,7 +162,8 @@ async function flushMicrotasks(count = 6): Promise<void> {
 async function startReady(fixture: ReturnType<typeof bridgeFixture>, sessionId = "00000000-0000-4000-8000-000000000001"): Promise<FakeQuery> {
 	const started = fixture.bridge.start();
 	await Promise.resolve();
-	fixture.query.initialization.resolve({ session_id: sessionId, models: fixture.models });
+	fixture.query.initialization.resolve({ models: fixture.models });
+	fixture.query.emitSystemInit(sessionId);
 	await started;
 	return fixture.query;
 }
@@ -181,9 +184,9 @@ function subagentSurfaceFixture() {
 }
 
 describe("ClaudeAgentSdkBridge", () => {
-	const invalidInitializationIdentities: ReadonlyArray<[string, { session_id?: unknown }]> = [
-		["missing", {}],
-		["malformed", { session_id: "not-an-sdk-uuid" }],
+	const invalidInitializationIdentities: ReadonlyArray<[string, unknown]> = [
+		["missing", undefined],
+		["malformed", "not-an-sdk-uuid"],
 	];
 
 	it("keeps a viable cold bridge running after a steer-specific readiness deadline", async () => {
@@ -204,7 +207,8 @@ describe("ClaudeAgentSdkBridge", () => {
 		expect(fixture.query.closeCalls).toBe(0);
 		expect(fixture.clock.pending()).toBe(1);
 
-		fixture.query.initialization.resolve({ session_id: "00000000-0000-4000-8000-000000000001" });
+		fixture.query.initialization.resolve({});
+		fixture.query.emitSystemInit("00000000-0000-4000-8000-000000000001");
 		await started;
 		await expect(fixture.bridge.waitForReady(1)).resolves.toBeUndefined();
 		expect((fixture.bridge as any).state).toBe("ready");
@@ -241,14 +245,15 @@ describe("ClaudeAgentSdkBridge", () => {
 		]);
 	});
 
-	it.each(invalidInitializationIdentities)("fails %s initialization identity once before becoming ready", async (_kind, initialization) => {
+	it.each(invalidInitializationIdentities)("fails %s streamed initialization identity once before becoming ready", async (_kind, sessionId) => {
 		const fixture = bridgeFixture();
 		const observed: any[] = [];
 		fixture.bridge.onEvent(event => observed.push(event));
 		const started = fixture.bridge.start();
 		const pendingPrompt = fixture.bridge.promptWhenReady("must not be accepted");
 		await flushMicrotasks();
-		fixture.query.initialization.resolve(initialization);
+		fixture.query.initialization.resolve({});
+		fixture.query.emitSystemInit(sessionId);
 
 		await expect(started).rejects.toMatchObject({
 			code: "SDK_SESSION_UNAVAILABLE",
@@ -263,7 +268,7 @@ describe("ClaudeAgentSdkBridge", () => {
 		expect(observed.filter(event => event.type === "process_exit")).toHaveLength(1);
 	});
 
-	it("becomes ready with the valid initialization UUID as its only resumable identity", async () => {
+	it("becomes ready with the valid streamed system:init UUID as its only resumable identity", async () => {
 		const fixture = bridgeFixture();
 		await startReady(fixture);
 		expect((await fixture.bridge.getState()).data).toMatchObject({
@@ -271,6 +276,42 @@ describe("ClaudeAgentSdkBridge", () => {
 			sessionId: "00000000-0000-4000-8000-000000000001",
 		});
 		expect((fixture.bridge as any).state).toBe("ready");
+	});
+
+	it("awaits controls and streamed identity in either official startup order", async () => {
+		const fixture = bridgeFixture();
+		const started = fixture.bridge.start();
+		await flushMicrotasks();
+		fixture.query.emitSystemInit("00000000-0000-4000-8000-000000000001");
+		await flushMicrotasks();
+		expect((fixture.bridge as any).state).toBe("starting");
+		fixture.query.initialization.resolve({});
+		await expect(started).resolves.toBeUndefined();
+
+		const controlsFirst = bridgeFixture();
+		const controlsFirstStart = controlsFirst.bridge.start();
+		await flushMicrotasks();
+		controlsFirst.query.initialization.resolve({});
+		await flushMicrotasks();
+		expect((controlsFirst.bridge as any).state).toBe("starting");
+		controlsFirst.query.emitSystemInit("00000000-0000-4000-8000-000000000002");
+		await expect(controlsFirstStart).resolves.toBeUndefined();
+	});
+
+	it("rejects initializationResult identity, duplicate init, and missing streamed init", async () => {
+		const resultOnly = bridgeFixture();
+		const resultOnlyStart = resultOnly.bridge.start();
+		await flushMicrotasks();
+		resultOnly.query.initialization.resolve({ session_id: "00000000-0000-4000-8000-000000000001" } as any);
+		resultOnly.clock.advance(90_000);
+		await expect(resultOnlyStart).rejects.toBeInstanceOf(ClaudeAgentSdkUnavailableError);
+
+		const duplicate = bridgeFixture();
+		await startReady(duplicate);
+		duplicate.query.emitSystemInit("00000000-0000-4000-8000-000000000002");
+		await flushMicrotasks();
+		expect((duplicate.bridge as any).state).toBe("failed");
+		expect(duplicate.query.closeCalls).toBe(1);
 	});
 
 	it("reads visible history through the SDK session API with the initialized UUID and cwd", async () => {
@@ -695,6 +736,20 @@ describe("ClaudeAgentSdkBridge", () => {
 		const clock = new FakeClock();
 		let queryCalls = 0;
 		const bridge = new ClaudeAgentSdkBridge({ runtime: "claude-agent-sdk", sandboxed: true }, {
+			query: (() => { queryCalls++; throw new Error("must not run"); }) as never,
+			clock,
+		});
+		await expect(bridge.start()).rejects.toMatchObject({ code: "SDK_SESSION_UNAVAILABLE", message: "SDK_SESSION_UNAVAILABLE" });
+		expect(queryCalls).toBe(0);
+	});
+
+	it("fails missing direct OAuth launch authority before spawning a query", async () => {
+		const clock = new FakeClock();
+		let queryCalls = 0;
+		const bridge = new ClaudeAgentSdkBridge({
+			runtime: "claude-agent-sdk",
+			env: { BOBBIT_SESSION_ID: "00000000-0000-4000-8000-000000000001" },
+		}, {
 			query: (() => { queryCalls++; throw new Error("must not run"); }) as never,
 			clock,
 		});

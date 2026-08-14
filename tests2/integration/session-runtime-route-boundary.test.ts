@@ -66,13 +66,16 @@ function installReadySdkBridgeFixture(
 			return {
 				initializationResult: async () => {
 					if (initializationError) throw initializationError;
-					return { session_id: "00000000-0000-4000-8000-000000000005" };
+					return {};
 				},
 				interrupt: async () => {},
 				setModel: async () => {},
 				setMaxThinkingTokens: async () => {},
 				close: async () => { finish(); },
-				async *[Symbol.asyncIterator]() { await done; },
+				async *[Symbol.asyncIterator]() {
+					yield { type: "system", subtype: "init", session_id: "00000000-0000-4000-8000-000000000005" };
+					await done;
+				},
 			};
 		},
 		sessionAccess: {
