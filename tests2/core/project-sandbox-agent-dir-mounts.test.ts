@@ -330,6 +330,11 @@ describe("ProjectSandbox state mount staleness", () => {
 			["exec", "-i", "-u", "bobbit-sdk", "-w"],
 		]);
 		assert.equal(commands[0][5], "sh");
+		assert.match(commands[0][7], /mkdir -m 0700 "\$pending"/);
+		assert.match(commands[0][7], /mkdir "\$lock"/);
+		assert.match(commands[0][7], /rm -f "\$marker"/);
+		assert.match(commands[0][7], /rmdir "\$pending"/);
+		assert.match(commands[0][7], /trap cleanup EXIT/);
 		assert.match(commands[0][7], /chown -h root:root/);
 		assert.match(commands[0][7], /find -P/);
 		assert.match(commands[0][7], /-links \+1/);
@@ -338,6 +343,9 @@ describe("ProjectSandbox state mount staleness", () => {
 		assert.match(commands[0][7], /chown -h bobbit-sdk:bobbit-sdk/);
 		assert.match(commands[1].at(-1) ?? "", /test -O/);
 		assert.match(commands[2].at(-1) ?? "", /test -r/);
+		assert.equal(await (sandbox as any)._hasSecureClaudeAgentSdkStateParent("container-sdk"), true);
+		assert.match(commands[3][7], /\[ ! -e "\$lock" \]/);
+		assert.match(commands[3][7], /migration-pending-\*/);
 		await assert.rejects(sandbox.prepareClaudeAgentSdkSession("/host/project", "sdk-session"), /session path is invalid/);
 		await assert.rejects(sandbox.prepareClaudeAgentSdkSession("/workspace", "../sdk"), /session identity is invalid/);
 	});

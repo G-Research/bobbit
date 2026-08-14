@@ -376,16 +376,19 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 			const sandbox = new ProjectSandbox({ projectId: "sdk-state-e2e", projectDir: gitCwd(), repoUrl: "https://example.test/repo.git", image: SANDBOX_IMAGE });
 			(sandbox as any).containerId = name;
 
+			// Establish an existing trusted marker first. A later failed migration
+			// must revoke it rather than letting reconnect trust stale state.
+			await (sandbox as any)._prepareClaudeAgentSdkStateParent(name);
+			expect(await (sandbox as any)._hasSecureClaudeAgentSdkStateParent(name)).toBe(true);
 			// A legacy hard link could retain an attacker-openable alias. The
-			// pre-exposure lifecycle gate rejects it before changing the file.
+			// lifecycle gate rejects it and invalidates the prior attestation.
 			docker(["exec", "-u", "root", name, "ln", "/bobbit-state/claude-agent-sdk/legacy-session/history", "/bobbit-state/claude-agent-sdk/legacy-session/history-alias"]);
 			await expect((sandbox as any)._prepareClaudeAgentSdkStateParent(name)).rejects.toThrow();
 			expect(await (sandbox as any)._hasSecureClaudeAgentSdkStateParent(name)).toBe(false);
-			expect(docker(["exec", "-u", "root", name, "stat", "-c", "%h:%u:%a", "/bobbit-state/claude-agent-sdk/legacy-session/history"])).toBe("2:1000:644\n");
+			expect(docker(["exec", "-u", "root", name, "stat", "-c", "%h:%u:%a", "/bobbit-state/claude-agent-sdk/legacy-session/history"])).toBe("2:1001:600\n");
 			docker(["exec", "-u", "root", name, "rm", "/bobbit-state/claude-agent-sdk/legacy-session/history-alias"]);
 
-			// This is the creation/reconnect lifecycle gate: it migrates every
-			// dormant legacy child before node can open the known history path.
+			// This retry attests every dormant child only after successful migration.
 			await (sandbox as any)._prepareClaudeAgentSdkStateParent(name);
 			expect(await (sandbox as any)._hasSecureClaudeAgentSdkStateParent(name)).toBe(true);
 			expect(() => docker(["exec", "-u", "node", name, "cat", "/bobbit-state/claude-agent-sdk/legacy-session/history"])).toThrow();

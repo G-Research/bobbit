@@ -51,6 +51,31 @@ const PREPARE_CLAUDE_SDK_STATE_PARENT = `
 set -eu
 parent=/bobbit-state/claude-agent-sdk
 marker="$parent/.bobbit-sdk-state-parent-lock-v2"
+lock="$parent/.bobbit-sdk-state-migration-lock-v1"
+pending="$parent/.bobbit-sdk-state-migration-pending-$$"
+# Every caller advertises itself before waiting. This keeps verification false
+# across lock handoff, so a queued failing preparation cannot trust a marker
+# briefly recreated by the preceding successful preparation.
+mkdir -m 0700 "$pending"
+# Atomic mkdir serializes every root-only state migration on the private volume.
+# A contended or stale lock fails closed rather than trusting a partial state.
+attempt=0
+while ! mkdir "$lock" 2>/dev/null; do
+  attempt=$((attempt + 1))
+  [ "$attempt" -lt 100 ] || exit 75
+  sleep 0.1
+done
+succeeded=0
+cleanup() {
+  if [ "$succeeded" -ne 1 ]; then rm -f "$marker"; fi
+  rmdir "$lock" 2>/dev/null || :
+  rmdir "$pending" 2>/dev/null || :
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+# Invalidate the attestation before validating or changing any state. A failed
+# or interrupted migration must never leave a prior marker trusted.
+rm -f "$marker"
 prepare_session() {
   session="$1"
   case "$session" in *[!A-Za-z0-9_-]*|"") exit 64 ;; esac
@@ -75,15 +100,23 @@ prepare_session() {
   [ -z "$(find -P "$dir" -xdev -type f \\( ! -user ${CLAUDE_AGENT_SDK_DOCKER_UID} -o ! -group ${CLAUDE_AGENT_SDK_DOCKER_UID} -o ! -perm 0600 -o -links +1 \\) -print -quit)" ]
 }
 [ -d "$parent" ] && [ ! -L "$parent" ]
-chown -h root:root "$parent"
+[ -d "$lock" ] && [ ! -L "$lock" ]
+[ -d "$pending" ] && [ ! -L "$pending" ]
+chown -h root:root "$parent" "$lock" "$pending"
 chmod 0711 "$parent"
+chmod 0700 "$lock" "$pending"
 [ "$(stat -c '%u:%a' "$parent")" = "0:711" ]
+[ "$(stat -c '%u:%a' "$lock")" = "0:700" ]
+[ "$(stat -c '%u:%a' "$pending")" = "0:700" ]
 # No positional session means pre-exposure whole-volume migration. The word all
 # is a valid session id, so never reserve it as a sentinel.
 case "\${1-}" in
   "")
     for dir in "$parent"/*; do
       [ -e "$dir" ] || continue
+      case "$(basename "$dir")" in
+        .bobbit-sdk-state-migration-lock-v1|.bobbit-sdk-state-migration-pending-*) continue ;;
+      esac
       prepare_session "$(basename "$dir")"
     done
     ;;
@@ -99,6 +132,7 @@ fi
 chown -h root:root "$marker"
 chmod 0600 "$marker"
 [ "$(stat -c '%u:%a' "$marker")" = "0:600" ]
+succeeded=1
 `;
 
 // A running container without this marker may have exposed node to legacy
@@ -108,7 +142,14 @@ const VERIFY_CLAUDE_SDK_STATE_PARENT = `
 set -eu
 parent=/bobbit-state/claude-agent-sdk
 marker="$parent/.bobbit-sdk-state-parent-lock-v2"
+lock="$parent/.bobbit-sdk-state-migration-lock-v1"
 [ -d "$parent" ] && [ ! -L "$parent" ]
+# A valid marker is only trusted when no root migration owns or awaits the lock.
+[ ! -e "$lock" ] && [ ! -L "$lock" ]
+for pending in "$parent"/.bobbit-sdk-state-migration-pending-*; do
+  [ -e "$pending" ] || [ -L "$pending" ] || continue
+  exit 1
+done
 [ "$(stat -c '%u:%a' "$parent")" = "0:711" ]
 [ -f "$marker" ] && [ ! -L "$marker" ]
 [ "$(stat -c '%u:%a' "$marker")" = "0:600" ]
