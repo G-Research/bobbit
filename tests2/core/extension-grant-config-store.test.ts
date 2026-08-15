@@ -16,7 +16,7 @@ let tmpDir: string;
 const grantedAt = "2025-02-03T04:05:06.000Z";
 const packCapabilities = [
 	"service.manage", "memory.read", "memory.write", "memory.reflect",
-	"memory.invalidate", "memory.read.all",
+	"memory.invalidate", "memory.read.all", "sandbox:build",
 ] as const;
 
 function hookGrant(overrides: Partial<ExtensionHookGrant> = {}): ExtensionHookGrant {
@@ -87,7 +87,7 @@ describe("ProjectConfigStore extension_grants", () => {
 		expect(Object.hasOwn(onDisk.extension_grants[0], "retiredMetadata")).toBe(false);
 	});
 
-	it("accepts exactly the six platform-owned pack capabilities and keeps them pack-scoped", () => {
+	it("accepts exactly the seven platform-owned pack capabilities and keeps them pack-scoped", () => {
 		const store = new ProjectConfigStore(tmpDir);
 		store.setExtensionGrants(packCapabilities.map((capability, index) =>
 			packGrant({ packId: `pack-${index}`, capability }),

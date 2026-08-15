@@ -93,7 +93,7 @@ export function validateManifest(
 			return fail("pack.yaml: schema must be a positive integer");
 		}
 		schema = d.schema;
-		if (schema > 2) problems?.push(`pack.yaml: schema ${schema} is newer than supported (2)`);
+		if (schema > 3) problems?.push(`pack.yaml: schema ${schema} is newer than supported (3)`);
 	}
 
 	const parseCapabilities = (key: "provides" | "requires"): string[] | undefined | null => {
@@ -123,6 +123,9 @@ export function validateManifest(
 	// catalogue key only; no MCP loader is introduced in this PR.
 	if (schema < 2 && "mcp" in c) {
 		return fail("pack.yaml: contents.mcp is not allowed (MCP installs are out of scope in MVP)");
+	}
+	if (schema < 3 && "sandboxRequirements" in c) {
+		return fail("pack.yaml: contents.sandboxRequirements requires schema 3");
 	}
 	const roles = asStringArray(c.roles);
 	const tools = asStringArray(c.tools);
@@ -157,6 +160,7 @@ export function validateManifest(
 	let runtimes: string[] = [];
 	let workflows: string[] = [];
 	let systemPrompts: string[] = [];
+	let sandboxRequirements: string[] = [];
 	if (schemaSupportsExtensionKeys) {
 		const parsedProviders = parseContentsBasenames("providers", c.providers);
 		if (parsedProviders === null) return null;
@@ -187,12 +191,17 @@ export function validateManifest(
 		if (parsedSystemPrompts === null) return null;
 		systemPrompts = parsedSystemPrompts;
 	}
+	if (schema >= 3) {
+		const parsedSandboxRequirements = parseContentsBasenames("sandboxRequirements", c.sandboxRequirements);
+		if (parsedSandboxRequirements === null) return null;
+		sandboxRequirements = parsedSandboxRequirements;
+	}
 
 	const manifest: PackManifest = {
 		name: d.name as string,
 		description: (d.description as string).trim(),
 		version: (d.version as string).trim(),
-		contents: { roles, tools, skills, entrypoints, providers, channels, hooks, mcp, piExtensions, runtimes, workflows, systemPrompts },
+		contents: { roles, tools, skills, entrypoints, providers, channels, hooks, mcp, piExtensions, runtimes, workflows, systemPrompts, sandboxRequirements },
 	};
 	if (d.schema !== undefined) manifest.schema = schema;
 	// Ships-disabled-by-default flag (built-in first-party packs). Only `true`

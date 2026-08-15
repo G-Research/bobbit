@@ -10,9 +10,13 @@ import {
 
 /** Values admitted by the flat, schema-2 extension-settings contract. */
 export type ExtensionSettingValue = string | boolean | number;
-export type ExtensionSettingsTargetKind = "provider" | "hook" | "runtime";
-export interface ExtensionSettingsTargetRef extends ExtensionSettingsSecretTargetRef {
+export type ExtensionSettingsTargetKind = "provider" | "hook" | "runtime" | "sandboxRequirement";
+/** Server-derived public settings target. Sandbox requirements intentionally have
+ * no secret fields and are never passed to the secret-store as a mutation. */
+export interface ExtensionSettingsTargetRef {
+  packId: string;
   kind: ExtensionSettingsTargetKind;
+  id: string;
 }
 
 /** Public per-target overlay. Secret bytes are owned by ExtensionSettingsSecretStore. */
@@ -136,7 +140,7 @@ function cloneState(state: ExtensionSettingsState): ExtensionSettingsState {
 
 function assertRef(ref: ExtensionSettingsTargetRef): void {
   if (!ref || typeof ref.packId !== "string" || ref.packId.length === 0 || ref.packId.includes("\0")
-    || (ref.kind !== "provider" && ref.kind !== "hook" && ref.kind !== "runtime")
+    || (ref.kind !== "provider" && ref.kind !== "hook" && ref.kind !== "runtime" && ref.kind !== "sandboxRequirement")
     || typeof ref.id !== "string" || ref.id.length === 0 || ref.id.includes("\0")) {
     throw new ExtensionSettingsMutationError();
   }
@@ -173,10 +177,10 @@ function assertMutation(mutation: ExtensionSettingsMutation): void {
     }
   }
   if (mutation.secrets !== undefined) {
-    if (!isPlainObject(mutation.secrets)) throw new ExtensionSettingsMutationError();
+    if (!isPlainObject(mutation.secrets) || mutation.ref.kind === "sandboxRequirement") throw new ExtensionSettingsMutationError();
     // Validate all secret values before publishing the public revision. The
     // secret owner repeats this defense at its persistence boundary.
-    validateExtensionSettingsSecretChanges(mutation.ref, mutation.secrets);
+    validateExtensionSettingsSecretChanges(mutation.ref as ExtensionSettingsSecretTargetRef, mutation.secrets);
   }
 }
 
@@ -251,7 +255,7 @@ export class ExtensionSettingsStore {
     }
 
     const secretSet: Record<string, boolean> = {};
-    for (const field of secretFields) secretSet[field] = this.secretStore.has(ref, field);
+    for (const field of secretFields) secretSet[field] = this.secretStore.has(ref as ExtensionSettingsSecretTargetRef, field);
     return { ...(record?.enabled !== undefined ? { enabled: record.enabled } : {}), hasProjectRecord, values, sources, secretSet };
   }
 
@@ -270,7 +274,7 @@ export class ExtensionSettingsStore {
     const effective = this.getEffective(ref, defaults, options);
     const values = { ...effective.values };
     for (const field of options.secretFields ?? []) {
-      const value = this.secretStore.getForRuntime(ref, field);
+      const value = this.secretStore.getForRuntime(ref as ExtensionSettingsSecretTargetRef, field);
       if (value !== undefined) values[field] = value;
     }
     return values;
@@ -300,7 +304,7 @@ export class ExtensionSettingsStore {
     // This is a value-free probe; a later owner-only persistence failure attempts
     // durable compensation of the already-published public candidate below.
     for (const mutation of mutations) {
-      for (const field of Object.keys(mutation.secrets ?? {})) this.secretStore.has(mutation.ref, field);
+      for (const field of Object.keys(mutation.secrets ?? {})) this.secretStore.has(mutation.ref as ExtensionSettingsSecretTargetRef, field);
     }
 
     const current = this.getPublicState();
@@ -333,7 +337,7 @@ export class ExtensionSettingsStore {
 
     const secretMutations = mutations.flatMap(mutation =>
       mutation.secrets && Object.keys(mutation.secrets).length > 0
-        ? [{ ref: mutation.ref, changes: mutation.secrets }]
+        ? [{ ref: mutation.ref as ExtensionSettingsSecretTargetRef, changes: mutation.secrets }]
         : [],
     );
     try {
