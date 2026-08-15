@@ -9,9 +9,10 @@
  *
  * See the H3 design doc on the goal.
  */
-import { describe, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import assert from "node:assert/strict";
 
+import { reconcilePersistedIntentRestore } from "../../src/server/agent/session-manager.ts";
 import { spliceInFlightMessage, spliceInFlightSteers } from "../../src/server/agent/splice-inflight-message.ts";
 
 describe("spliceInFlightMessage (H3 server splice)", () => {
@@ -188,5 +189,76 @@ describe("spliceInFlightSteers (steer continuity splice)", () => {
 		assert.strictEqual(out.length, 2);
 		const synthetic = out.filter((m: any) => m._inFlightSteer);
 		assert.strictEqual(synthetic.length, 1);
+	});
+
+	it("does not leave duplicate bare-string recovery carriers as transcript-owned rows", () => {
+		const out = spliceInFlightSteers([], ["same legacy notification", "same legacy notification"]);
+
+		expect(out).toHaveLength(2);
+		expect(out.map((row: any) => row.id)).toEqual([
+			"inflight-steer:0:same legacy notification",
+			"inflight-steer:1:same legacy notification",
+		]);
+		expect(out.map((row: any) => row.deliveryIntentId)).toEqual([
+			"legacy-inflight-steer:0",
+			"legacy-inflight-steer:1",
+		]);
+		expect(out.every((row: any) => row._deliveryRecoveryProjection === true)).toBe(true);
+	});
+});
+
+describe("restored steer terminal evidence", () => {
+	it("retires a terminal ledger attempt while retaining one restart-stable proven-no-start queue carrier", () => {
+		const attempt = {
+			text: "recover only after no-start proof",
+			promptId: "intent:no-start",
+			intentId: "intent:no-start",
+			attemptId: "attempt:no-start",
+			dispatchEpoch: 12,
+			state: "dispatching" as const,
+		};
+		const terminalBinding = {
+			schemaVersion: 2 as const,
+			type: "prompt-author" as const,
+			promptId: attempt.promptId,
+			intentId: attempt.intentId,
+			attemptId: attempt.attemptId,
+			dispatchEpoch: attempt.dispatchEpoch,
+			dispatchedAt: 12,
+			modelTextDigest: "A".repeat(43),
+			source: "system" as const,
+			author: { kind: "system" as const, id: "system:bobbit", label: "Bobbit" },
+			settlement: {
+				schemaVersion: 2 as const,
+				type: "prompt-author-settlement" as const,
+				promptId: attempt.promptId,
+				intentId: attempt.intentId,
+				attemptId: attempt.attemptId,
+				settledAt: 13,
+				outcome: "cancelled" as const,
+			},
+		};
+		const queueCarrier = {
+			id: attempt.intentId,
+			text: attempt.text,
+			isSteered: true,
+			createdAt: 12,
+			deliveryState: "queued" as const,
+			attemptId: attempt.attemptId,
+		};
+
+		const recovered = reconcilePersistedIntentRestore([queueCarrier] as any, [attempt], [terminalBinding]);
+		expect(recovered).toEqual({
+			messageQueue: [queueCarrier],
+			inFlightSteerTexts: undefined,
+			changed: true,
+		});
+
+		const restarted = reconcilePersistedIntentRestore(recovered.messageQueue, recovered.inFlightSteerTexts, [terminalBinding]);
+		expect(restarted).toEqual({
+			messageQueue: [queueCarrier],
+			inFlightSteerTexts: undefined,
+			changed: false,
+		});
 	});
 });

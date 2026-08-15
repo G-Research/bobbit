@@ -177,17 +177,42 @@ describe("spliceInFlightSteers occurrence correlation", () => {
 		expect(result[1].author).toEqual(SYSTEM_AUTHOR);
 	});
 
-	it("retains occurrence-unaware multiset compatibility for legacy string records", () => {
-		const messages = [userRow("legacy-echo", "legacy")];
+	it("routes a pre-intent structured recovery carrier to delivery ownership using its durable prompt id", () => {
+		const result = spliceInFlightSteers([], [{
+			text: "pre-intent task notification",
+			promptId: "legacy-task-notification:42",
+			source: "task-notification",
+			author: SYSTEM_AUTHOR,
+		}]);
 
-		const result = spliceInFlightSteers(messages, ["legacy", "legacy"]);
+		expect(result).toEqual([expect.objectContaining({
+			id: "inflight-steer:legacy-task-notification:42",
+			author: SYSTEM_AUTHOR,
+			deliveryIntentId: "legacy-task-notification:42",
+			_deliveryRecoveryProjection: true,
+			_inFlightSteer: true,
+		})]);
+	});
+
+	it("routes duplicate bare-string recovery carriers to distinct delivery identities", () => {
+		const result = spliceInFlightSteers([], ["legacy", "legacy"]);
 
 		expect(result).toHaveLength(2);
-		expect(result[1]).toMatchObject({
-			id: "inflight-steer:1:legacy",
-			author: LOCAL_USER_AUTHOR,
-			_inFlightSteer: true,
-		});
-		expect(result[1]._deliveryRecoveryProjection).toBeUndefined();
+		expect(result).toEqual([
+			expect.objectContaining({
+				id: "inflight-steer:0:legacy",
+				author: LOCAL_USER_AUTHOR,
+				deliveryIntentId: "legacy-inflight-steer:0",
+				_deliveryRecoveryProjection: true,
+				_inFlightSteer: true,
+			}),
+			expect.objectContaining({
+				id: "inflight-steer:1:legacy",
+				author: LOCAL_USER_AUTHOR,
+				deliveryIntentId: "legacy-inflight-steer:1",
+				_deliveryRecoveryProjection: true,
+				_inFlightSteer: true,
+			}),
+		]);
 	});
 });
