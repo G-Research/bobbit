@@ -4221,6 +4221,15 @@
     {
       "path": "tests2/browser/journeys/scheduler-recovery.journey.spec.ts",
       "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/core/sandbox-plan-recreation.test.ts",
+      "reason": "Transactional project sandbox plan replacement coverage for strict removal, rollback, identity commit, and project isolation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
     }
   ],
   "entries": [
