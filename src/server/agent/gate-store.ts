@@ -1038,6 +1038,33 @@ export class GateStore {
 		this.onStatusChange?.(goalId, gateId);
 	}
 
+	/**
+	 * Durably publish a gate status for lifecycle transactions. The mutation is
+	 * rolled back only when this exact write still owns the in-memory fields, so
+	 * an overlapping gate update cannot be clobbered after a rejected write.
+	 */
+	async updateGateStatusStrict(goalId: string, gateId: string, status: GateStatus): Promise<void> {
+		this.assertAcceptingMutations();
+		const key = compositeKey(goalId, gateId);
+		const gate = this.gates.get(key);
+		if (!gate) return;
+		const previousStatus = gate.status;
+		const previousUpdatedAt = gate.updatedAt;
+		const mutationUpdatedAt = Date.now();
+		gate.status = status;
+		gate.updatedAt = mutationUpdatedAt;
+		try {
+			await this.saveStrict([key]);
+		} catch (error) {
+			if (this.gates.get(key) === gate && gate.status === status && gate.updatedAt === mutationUpdatedAt) {
+				gate.status = previousStatus;
+				gate.updatedAt = previousUpdatedAt;
+			}
+			throw error;
+		}
+		this.onStatusChange?.(goalId, gateId);
+	}
+
 	updateGateContent(goalId: string, gateId: string, content: string, version: number): void {
 		this.assertAcceptingMutations();
 		const key = compositeKey(goalId, gateId);

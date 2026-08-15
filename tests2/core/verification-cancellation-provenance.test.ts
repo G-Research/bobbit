@@ -220,7 +220,7 @@ test("failed supersession fence restores state without interrupting verifier wai
 test("exact sidecar and checkout retries suppress terminal cancellation publication until both settle", async () => {
 	const fixture = makeExactResourceFixture("exact-resource-retry");
 	const strict = vi.spyOn(fixture.gateStore, "updateSignalVerificationStrict");
-	const gateStatus = vi.spyOn(fixture.gateStore, "updateGateStatus");
+	const gateStatus = vi.spyOn(fixture.gateStore, "updateGateStatusStrict");
 
 	await fixture.harness._finalizeCancelledVerification(fixture.active);
 	expect(fixture.order).toEqual(["sidecar:1"]);
@@ -258,6 +258,53 @@ test("exact sidecar and checkout retries suppress terminal cancellation publicat
 		"EXACT_RESOURCE_BARRIER_MUST_REMOVE_OWNER_ONLY_AFTER_PUBLICATION_AND_RELEASE").toBe(false);
 });
 
+test("release-owner finalization does not self-join and concurrent cancellation callers settle", async () => {
+	const fixture = makeExactResourceFixture("release-owner-reentrancy", "manual");
+	(fixture.harness as any).sessionManager.getSandboxManager().get().removeVerificationSidecar = async () => {
+		fixture.order.push("sidecar:reentrant");
+	};
+	fixture.checkoutManager.release = async (signalId, projectId) => {
+		fixture.order.push("checkout:reentrant");
+		await FakePinnedCheckoutManager.prototype.release.call(fixture.checkoutManager, signalId, projectId);
+	};
+
+	const outerRelease = (fixture.harness as any)._releaseTerminalVerificationResources(fixture.active);
+	const secondCancellation = fixture.harness.cancelAllVerifications(GOAL_ID, "manual");
+	await expect(Promise.all([outerRelease, secondCancellation])).resolves.toHaveLength(2);
+	expect((fixture.harness as any)._terminalCleanupPromises.size,
+		"RELEASE_OWNER_FINALIZER_MUST_NOT_LEAVE_A_SELF_JOINED_PROMISE").toBe(0);
+	expect((fixture.harness as any)._cancelledCleanupPromises.size,
+		"CONCURRENT_CANCEL_CALLERS_MUST_RELEASE_THEIR_CLEANUP_OWNER").toBe(0);
+	expect(fixture.harness.activeVerifications.has(fixture.active.signalId)).toBe(false);
+});
+
+test("stale terminal release cannot evict a replacement active object or its retry timer", async () => {
+	const fixture = makeExactResourceFixture("stale-release-owner", "manual");
+	fixture.active.cancelled = false;
+	fixture.active.overallStatus = "passed";
+	fixture.active.terminalVerdictPublished = true;
+	(fixture.harness as any).sessionManager.getSandboxManager().get().removeVerificationSidecar = async () => {};
+	let releaseOld!: () => void;
+	fixture.checkoutManager.release = async () => await new Promise<void>(resolve => { releaseOld = resolve; });
+	(fixture.harness as any)._scheduleTerminalCleanupRetry(fixture.active.signalId);
+	const release = (fixture.harness as any)._releaseTerminalVerificationResources(fixture.active);
+	for (let turn = 0; turn < 4 && !releaseOld; turn++) await new Promise<void>(resolve => setImmediate(resolve));
+	const replacement: ActiveVerification = {
+		...structuredClone(fixture.active),
+		overallStatus: "running",
+		terminalVerdictPublished: undefined,
+		cancelled: undefined,
+		startedAt: fixture.active.startedAt + 1,
+	};
+	fixture.harness.activeVerifications.set(fixture.active.signalId, replacement);
+	releaseOld();
+	await expect(release).resolves.toBe(false);
+	expect(fixture.harness.activeVerifications.get(fixture.active.signalId),
+		"STALE_RELEASE_MUST_NOT_DELETE_REPLACEMENT_ACTIVE_OWNER").toBe(replacement);
+	expect((fixture.harness as any)._terminalCleanupRetryTimers.has(fixture.active.signalId),
+		"STALE_RELEASE_MUST_NOT_CLEAR_REPLACEMENT_RETRY_TIMER").toBe(true);
+});
+
 test("gate durable-write failure after strict signal publication retains the owner and publishes exactly once on retry", async () => {
 	const fixture = makeExactResourceFixture("strict-signal-gate-failure", "gateway-restart-recovery");
 	(fixture.harness as any).sessionManager.getSandboxManager().get().removeVerificationSidecar = async () => {
@@ -268,8 +315,8 @@ test("gate durable-write failure after strict signal publication retains the own
 		await FakePinnedCheckoutManager.prototype.release.call(fixture.checkoutManager, signalId, projectId);
 	};
 	const strict = vi.spyOn(fixture.gateStore, "updateSignalVerificationStrict");
-	const updateGate = vi.spyOn(fixture.gateStore, "updateGateStatus");
-	updateGate.mockImplementationOnce(() => { throw new Error("gate durable write interrupted after strict signal write"); });
+	const updateGate = vi.spyOn(fixture.gateStore, "updateGateStatusStrict");
+	updateGate.mockRejectedValueOnce(new Error("gate durable write interrupted after strict signal write"));
 
 	await expect(fixture.harness._finalizeCancelledVerification(fixture.active))
 		.rejects.toThrow(/gate durable write interrupted/i);
@@ -308,7 +355,7 @@ test("legacy terminal publication retains exact cleanup ownership without republ
 		await FakePinnedCheckoutManager.prototype.release.call(fixture.checkoutManager, signalId, projectId);
 	};
 	const strict = vi.spyOn(fixture.gateStore, "updateSignalVerificationStrict");
-	const gateStatus = vi.spyOn(fixture.gateStore, "updateGateStatus");
+	const gateStatus = vi.spyOn(fixture.gateStore, "updateGateStatusStrict");
 
 	await fixture.harness._finalizeCancelledVerification(fixture.active);
 

@@ -5146,8 +5146,17 @@ export class VerificationHarness {
 				&& !terminalLifecycleCancellation
 				&& !legacyTerminalGoal
 				&& currentGate?.status !== "bypassed"
-				&& !!store?.updateGateStatus;
-			if (resetCurrentGate) store!.updateGateStatus(active.goalId, active.gateId, "pending");
+				&& !!store;
+			if (resetCurrentGate) {
+				// The publication marker is meaningful only after both the historical
+				// signal and current gate write have crossed a strict durability barrier.
+				if (typeof (store as Partial<GateStore>).updateGateStatusStrict === "function") {
+					await store!.updateGateStatusStrict(active.goalId, active.gateId, "pending");
+				} else {
+					// Lightweight legacy unit seams do not expose strict persistence.
+					store!.updateGateStatus(active.goalId, active.gateId, "pending");
+				}
+			}
 
 			// This marker means the whole durable product outcome is committed: the
 			// historical signal is cancelled and (when still current) its gate is

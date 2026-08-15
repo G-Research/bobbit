@@ -723,6 +723,44 @@ describe("GateStore SQLite persistence", () => {
 		await store.close();
 	});
 
+	it("rolls back a rejected strict gate status publication and notifies only after retry", async () => {
+		const memfs = createMemFs();
+		const stateDir = path.resolve("/memfs/gate-strict-status-rollback");
+		memfs.mkdirSync(stateDir, { recursive: true });
+		const store = new GateStore(stateDir, memfs, { persistence: "json" });
+		store.initGatesForGoal("goal-status", ["design"]);
+		await store.flush();
+		const previous = store.getGate("goal-status", "design")!;
+		const previousUpdatedAt = previous.updatedAt;
+		const statusChanged = vi.fn();
+		store.onStatusChange = statusChanged;
+		const originalRename = memfs.promises.rename.bind(memfs.promises);
+		let failNextRename = true;
+		(memfs.promises as any).rename = async (from: string, to: string) => {
+			if (failNextRename && String(to).endsWith("gates.json")) {
+				failNextRename = false;
+				throw new Error("injected strict gate status rename failure");
+			}
+			return originalRename(from, to);
+		};
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await expect(store.updateGateStatusStrict("goal-status", "design", "passed"))
+			.rejects.toThrow(/injected strict gate status rename failure/);
+		expect(store.getGate("goal-status", "design")).toMatchObject({ status: "pending", updatedAt: previousUpdatedAt });
+		expect(statusChanged, "STRICT_GATE_STATUS_MUST_NOT_NOTIFY_ON_REJECTED_WRITE").not.toHaveBeenCalled();
+
+		await expect(store.updateGateStatusStrict("goal-status", "design", "passed")).resolves.toBeUndefined();
+		expect(store.getGate("goal-status", "design")?.status).toBe("passed");
+		expect(statusChanged, "STRICT_GATE_STATUS_MUST_NOTIFY_AFTER_DURABLE_RETRY").toHaveBeenCalledTimes(1);
+		const reader = new GateStore(stateDir, memfs, { persistence: "json" });
+		expect(reader.getGate("goal-status", "design")?.status).toBe("passed");
+		reader.dispose();
+		errorSpy.mockRestore();
+		(memfs.promises as any).rename = originalRename;
+		await store.close();
+	});
+
 	it("rolls back a rejected SQLite strict verification publication", async () => {
 		const stateDir = tempRoot();
 		const store = openStore(stateDir);
