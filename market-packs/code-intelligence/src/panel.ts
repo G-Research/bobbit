@@ -75,6 +75,22 @@ function aggregateState(statuses: readonly RecordValue[]): string {
 	return "Not current";
 }
 
+/** The status route validates this exact state/label pair. Keep local aggregation
+ * only for legacy envelopes that predate the declared aggregate projection. */
+function declaredAggregateLabel(status: unknown): string | undefined {
+	const aggregate = asRecord(asRecord(status)?.aggregate);
+	const state = typeof aggregate?.state === "string" ? aggregate.state : undefined;
+	const label = typeof aggregate?.label === "string" ? aggregate.label : undefined;
+	const labels: Record<string, string> = {
+		current: "Current",
+		updating: "Updating",
+		limited: "Limited",
+		"not-current": "Not current",
+		"no-graph-published": "No graph published",
+	};
+	return state && labels[state] === label ? label : undefined;
+}
+
 function graphConsequence(status: RecordValue): string | undefined {
 	const state = stateOf(status);
 	if (state === "base-fallback") {
@@ -209,7 +225,7 @@ export default function createCodeIntelligencePanel({ html, nothing }: any) {
 			const capabilities = capabilityRows(state.status);
 			const availability = rebuildAvailability(manualRebuild(state.status, state.config));
 			const busy = state.loading || state.rebuilding;
-			const summary = state.loading ? "Checking language support…" : state.rebuilding ? "Checking manual rebuild availability…" : aggregateState(statuses);
+			const summary = state.loading ? "Checking language support…" : state.rebuilding ? "Checking manual rebuild availability…" : declaredAggregateLabel(state.status) ?? aggregateState(statuses);
 			return html`
 				<section class="h-full overflow-auto p-4 space-y-4 text-sm" data-testid="code-intelligence-status-panel" aria-busy=${busy ? "true" : "false"}>
 					<header>

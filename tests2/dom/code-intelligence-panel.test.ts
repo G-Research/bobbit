@@ -88,6 +88,21 @@ describe("Code Intelligence status panel", () => {
 		});
 	});
 
+	it("prefers the declared no-graph aggregate for an unpublished component", async () => {
+		const panel = mount({
+			state: "no-graph-published",
+			aggregate: { state: "no-graph-published", label: "No graph published" },
+			components: [{ component: { name: "fixture", repo: "." }, state: "unpublished" }],
+			manualRebuild: { available: false, reason: "GRAPH_REBUILD_UNAVAILABLE_PENDING_EP8" },
+		}, "panel-unpublished-declared-aggregate");
+
+		await panel.load();
+		await waitFor(() => {
+			expect(panel.root.querySelector('[data-testid="code-intelligence-freshness"]')?.textContent).toContain("No graph published");
+			expect(panel.root.querySelector('[data-testid="graph-status-component-label"]')?.textContent).toContain("fixture · .");
+		});
+	});
+
 	it("aggregates mixed component graph states conservatively and explains stale/base fallback consequences", async () => {
 		const panel = mount({
 			components: [
