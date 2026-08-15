@@ -205,12 +205,19 @@ test.describe("Journey: Reliable Agent Turns", () => {
 		});
 	}
 
-	test("overflow compaction releases continuation steers during willRetry but holds next-turn prompts until agent_settled", async ({ page, gateway }) => {
+	test("overflow compaction hides the superseded provider error and releases each delivery lane once", async ({ page, gateway }) => {
 		const scenario = await createScenario(page, gateway);
 		try {
-			const overflow = scenario.runtime.holdNextCompaction({ reason: "overflow", willRetry: true });
+			const providerError = "Codex error: Your input exceeds the context window of this model. Please adjust your input and try again.";
+			const overflow = scenario.runtime.holdNextCompaction({
+				reason: "overflow",
+				willRetry: true,
+				preCompactionError: providerError,
+			});
 			await submit(page, "RELIABLE_COMPACTION:overflow RAT_OVERFLOW");
 			await overflow.compaction.entered;
+			await expect(page.getByTestId("compaction-summary-card").first()).toBeVisible({ timeout: 15_000 });
+			await expect(page.getByText(providerError, { exact: true })).toHaveCount(0);
 
 			const promptText = "RAT_OVERFLOW_NEXT_TURN";
 			const steerText = "RAT_OVERFLOW_CONTINUATION";
@@ -224,6 +231,9 @@ test.describe("Journey: Reliable Agent Turns", () => {
 
 			overflow.compaction.release();
 			await overflow.retry!.entered;
+			await expect(page.getByTestId("compaction-summary-card").first())
+				.toHaveAttribute("data-state", "complete", { timeout: 15_000 });
+			await expect(page.getByText(providerError, { exact: true })).toHaveCount(0);
 			await expectOneCarrier(page, steerId, "transcript");
 			await expectOneCarrier(page, promptId, "outbox");
 			await expectIntentState(page, promptId, "queued", /Queued for next turn/);

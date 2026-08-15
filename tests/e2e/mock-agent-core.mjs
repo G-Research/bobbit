@@ -1135,6 +1135,18 @@ export class MockAgentCore {
 				};
 				this.emit({ type: "message_end", message: truncated });
 				await this._crossBarrier("overflow:length-tail", { reason });
+				const preCompactionError = this._reliableScenario.compaction?.overflow?.preCompactionError;
+				if (typeof preCompactionError === "string" && preCompactionError.length > 0) {
+					this.emit({
+						type: "message_end",
+						message: {
+							role: "assistant",
+							content: [],
+							stopReason: "error",
+							errorMessage: preCompactionError,
+						},
+					});
+				}
 			}
 			const completed = await this._handleAutoCompaction(3, reason);
 			if (!completed || !this.currentAbortController || this.currentAbortController.signal.aborted) {
@@ -1473,9 +1485,13 @@ export class MockAgentCore {
 		const startType = isManual ? "compaction_start" : "auto_compaction_start";
 		const endType = isManual ? "compaction_end" : "auto_compaction_end";
 		const scenario = this._reliableScenario.compaction?.[reason] || {};
+		const retainedErrorMessage = typeof scenario.preCompactionError === "string"
+			? scenario.preCompactionError
+			: null;
 		this.ensureSessionFile();
 		const ts = new Date().toISOString();
-		const firstKeptEntryId = "kept-0";
+		const firstKeptEntryId = retainedErrorMessage ? "retained-overflow-error" : "kept-0";
+		const keptEntryId = "kept-0";
 		const tokensBefore = 50_000;
 		const entries = [];
 		for (let i = 0; i < preCount; i++) {
@@ -1502,24 +1518,43 @@ export class MockAgentCore {
 			firstKeptEntryId,
 			tokensBefore,
 		});
+		// Codex can retain the overflow error at the active-branch boundary even
+		// after compaction succeeds. This reproduces the snapshot that used to
+		// replace the live row and lose its client-only suppression marker.
+		const retainedErrorMsg = retainedErrorMessage
+			? { role: "assistant", content: [], stopReason: "error", errorMessage: retainedErrorMessage }
+			: null;
+		if (retainedErrorMsg) {
+			entries.push({
+				type: "message",
+				id: firstKeptEntryId,
+				parentId: null,
+				timestamp: ts,
+				ts,
+				message: retainedErrorMsg,
+			});
+		}
 		// Kept active-branch tail. Text deliberately avoids the "Context
 		// compacted" prefix so it is NOT mistaken for a legacy text-marker by
 		// the client reducer's compaction dedup.
 		const keptMsg = { role: "assistant", content: [{ type: "text", text: "Resuming work after the summary." }] };
 		entries.push({
 			type: "message",
-			id: firstKeptEntryId,
-			parentId: null,
+			id: keptEntryId,
+			parentId: retainedErrorMsg ? firstKeptEntryId : null,
 			timestamp: ts,
 			ts,
 			message: keptMsg,
 		});
 		// Persist the full transcript (with ids) and pin it so get_state keeps it.
 		this._postCompactionEntries = entries;
-		this._lastTranscriptEntryId = firstKeptEntryId;
+		this._lastTranscriptEntryId = keptEntryId;
 		this._persistTranscript();
 		// getMessages() returns only the active branch post-compaction.
-		this.conversationMessages = [{ id: firstKeptEntryId, ...keptMsg }];
+		this.conversationMessages = [
+			...(retainedErrorMsg ? [{ id: firstKeptEntryId, ...retainedErrorMsg }] : []),
+			{ id: keptEntryId, ...keptMsg },
+		];
 
 		// Lifecycle: start → deterministic hold → end. Legacy tests retain the
 		// short tick when no named barrier is armed.

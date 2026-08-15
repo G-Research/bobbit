@@ -157,6 +157,7 @@ export class ReliableTurnRuntime {
 		reason: CompactionHold["reason"];
 		outcome?: CompactionHold["outcome"];
 		willRetry?: boolean;
+		preCompactionError?: string;
 	}): CompactionHold {
 		if (this.nextCompaction) throw new Error("A compaction barrier is already armed");
 		const hold: CompactionHold = {
@@ -171,6 +172,7 @@ export class ReliableTurnRuntime {
 				[options.reason]: {
 					outcome: hold.outcome,
 					willRetry: options.willRetry,
+					preCompactionError: options.preCompactionError,
 				},
 			},
 		});

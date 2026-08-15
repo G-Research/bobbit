@@ -813,6 +813,67 @@ describe("message-reducer", () => {
 		assert.strictEqual(payload.tokensBefore, PARSED);
 	});
 
+	it("(12e-recovery) overflow start suppresses a preceding Codex context error only", () => {
+		const providerError = "Codex error: Your input exceeds the context window of this model. Please adjust your input and try again.";
+		const overflow = {
+			id: "overflow-error",
+			role: "assistant",
+			content: [],
+			stopReason: "error",
+			errorMessage: providerError,
+		};
+		const recovered = applyAll([
+			liveMessageEnd(1, overflow),
+			{ type: "suppress-latest-context-overflow-error" },
+		]);
+		assert.strictEqual(
+			(recovered.messages.find((message) => message.id === "overflow-error") as any)?._suppressedByOverflowRecovery,
+			true,
+		);
+		const refreshed = reduce(recovered, {
+			type: "snapshot",
+			messages: [
+				{ ...overflow, id: "retained-overflow-error" },
+				assistantMsg("kept-assistant", "Resuming work after the summary."),
+			],
+		});
+		assert.strictEqual(
+			(refreshed.messages.find((message) => message.id === "retained-overflow-error") as any)?._suppressedByOverflowRecovery,
+			true,
+			"post-compaction snapshots must not resurrect the hidden provider error",
+		);
+		const repeatedLive = reduce(recovered, liveMessageEnd(2, { ...overflow, id: "later-identical-error" }));
+		const repeatedSnapshot = reduce(repeatedLive, {
+			type: "snapshot",
+			messages: [
+				{ ...overflow, id: "retained-overflow-error" },
+				{ ...overflow, id: "later-identical-error" },
+			],
+		});
+		assert.strictEqual(
+			(repeatedSnapshot.messages.find((message) => message.id === "retained-overflow-error") as any)?._suppressedByOverflowRecovery,
+			true,
+		);
+		assert.strictEqual(
+			(repeatedSnapshot.messages.find((message) => message.id === "later-identical-error") as any)?._suppressedByOverflowRecovery,
+			undefined,
+			"a later identical error must remain visible until its own compaction starts",
+		);
+
+		const unrelated = {
+			id: "rate-limit-error",
+			role: "assistant",
+			content: [],
+			stopReason: "error",
+			errorMessage: "rate limited while opening a context window",
+		};
+		const untouched = applyAll([
+			liveMessageEnd(1, unrelated),
+			{ type: "suppress-latest-context-overflow-error" },
+		]);
+		assert.strictEqual((untouched.messages[0] as any)._suppressedByOverflowRecovery, undefined);
+	});
+
 	it("(12c-replacement) sidecar synthetic in snapshot is rendered as rich card", () => {
 		// With the compaction sidecar (docs/design/persist-compaction-history.md
 		// §A), the server splices the rich synthetic into snapshots directly.
