@@ -1202,6 +1202,111 @@ test.describe("Cancel Verification API", () => {
 		}
 	});
 
+	for (const scenario of [
+		{ name: "ordinary replacement", cause: "superseded", makeZombie: false },
+		{ name: "inactive zombie replacement", cause: "zombie-recovery", makeZombie: true },
+	]) {
+		test(`${scenario.name} fails closed when its gate-scoped cancellation fence cannot persist`, async ({ gateway }) => {
+		let setup: SlowWorkflowGoal | undefined;
+		const runner = new PendingExactCleanupRunner();
+		const harness = gateway.teamManager.verificationHarness! as any;
+		let persistSpy: ReturnType<typeof vi.spyOn> | undefined;
+		let cleanupSpy: ReturnType<typeof vi.spyOn> | undefined;
+		let aliveSpy: ReturnType<typeof vi.spyOn> | undefined;
+		try {
+			harness.commandStepRunner = runner;
+			setup = await createSlowWorkflowGoal(`Fence Failure ${scenario.name}`);
+			const first = await signalSlowVerification(setup.goalId, "original durable content");
+			expect(first.status).toBe(201);
+			const firstSignalId = (await first.json() as SlowGateSignal).signal.id;
+			await runner.waitForSpawn(0);
+
+			const context = gateway.projectContextManager.getContextForGoal(setup.goalId)!;
+			if (!scenario.makeZombie) {
+				// A regular explicit re-signal reaches the new admission fence when its
+				// predecessor belongs to a different commit. The zombie path below uses
+				// the same commit and its inactive-owner branch instead.
+				context.gateStore.getGate(setup.goalId, "slow-gate")!.signals.find((signal: any) => signal.id === firstSignalId)!.commitSha = "old-commit";
+			} else {
+				aliveSpy = vi.spyOn(harness, "areVerificationSessionsAlive").mockReturnValue(false);
+			}
+			const beforeGate = await getGateState(setup.goalId);
+			const oldOwner = getCancellationOwnershipRecord(gateway, firstSignalId);
+			const beforeOwner = structuredClone(oldOwner);
+			const beforePersisted = fs.readFileSync(harness._persistPath, "utf8");
+			cleanupSpy = vi.spyOn(harness, "_startCancelledVerificationCleanup");
+			persistSpy = vi.spyOn(harness, "_persistActive").mockReturnValue(false);
+
+			const rejected = await signalSlowVerification(setup.goalId, "replacement must not be recorded");
+			expect(rejected.status).toBe(503);
+			expect(await rejected.json()).toMatchObject({ code: "VERIFICATION_CANCELLATION_FENCE_FAILED", retryable: true });
+
+			expect(getCancellationOwnershipRecord(gateway, firstSignalId),
+				"FAILED_REPLACEMENT_FENCE_MUST_RESTORE_OLD_OWNER_AND_KILL_INTENTS").toEqual(beforeOwner);
+			expect(fs.readFileSync(harness._persistPath, "utf8"),
+				"FAILED_REPLACEMENT_FENCE_MUST_NOT_REWRITE_DURABLE_OLD_STATE").toBe(beforePersisted);
+			expect(await getGateState(setup.goalId),
+				"FAILED_REPLACEMENT_FENCE_MUST_NOT_MUTATE_SIGNAL_CONTENT_OR_GATE").toEqual(beforeGate);
+			expect(runner.children[0]?.killed,
+				"FAILED_REPLACEMENT_FENCE_MUST_NOT_START_EXACT_COMMAND_CLEANUP").toBe(false);
+			expect(cleanupSpy, "FAILED_REPLACEMENT_FENCE_MUST_NOT_START_BACKGROUND_CLEANUP").not.toHaveBeenCalled();
+			expect(runner.children, "FAILED_REPLACEMENT_FENCE_MUST_NOT_DISPATCH_A_REPLACEMENT").toHaveLength(1);
+		} finally {
+			persistSpy?.mockRestore();
+			cleanupSpy?.mockRestore();
+			aliveSpy?.mockRestore();
+			runner.settleAll();
+			await cleanupSlowWorkflowGoal(setup);
+		}
+		});
+	}
+
+	test("replacement dispatches once after its old supersession cause is durably observable", async ({ gateway }) => {
+		let setup: SlowWorkflowGoal | undefined;
+		const runner = new PendingExactCleanupRunner();
+		const harness = gateway.teamManager.verificationHarness! as any;
+		let beginSpy: ReturnType<typeof vi.spyOn> | undefined;
+		try {
+			harness.commandStepRunner = runner;
+			setup = await createSlowWorkflowGoal("Durable Replacement Fence");
+			const first = await signalSlowVerification(setup.goalId, "old generation");
+			expect(first.status).toBe(201);
+			const firstSignalId = (await first.json() as SlowGateSignal).signal.id;
+			await runner.waitForSpawn(0);
+			const context = gateway.projectContextManager.getContextForGoal(setup.goalId)!;
+			context.gateStore.getGate(setup.goalId, "slow-gate")!.signals.find((signal: any) => signal.id === firstSignalId)!.commitSha = "old-commit";
+
+			const originalBegin = harness.beginVerification.bind(harness);
+			const persistedCauses: any[] = [];
+			beginSpy = vi.spyOn(harness, "beginVerification").mockImplementation((signal: any, gate: any) => {
+				const persisted = JSON.parse(fs.readFileSync(harness._persistPath, "utf8"));
+				persistedCauses.push(persisted.verifications.find((record: any) => record.signalId === firstSignalId)?.cancellation);
+				return originalBegin(signal, gate);
+			});
+
+			const replacement = signalSlowVerification(setup.goalId, "replacement generation");
+			await runner.waitForKill(0);
+			await runner.waitForSpawn(1);
+			expect((await replacement).status).toBe(201);
+			expect(persistedCauses, "REPLACEMENT_MUST_NOT_DISPATCH_BEFORE_OLD_CAUSE_IS_DURABLE").toEqual([
+				expect.objectContaining({ cause: "superseded", requestedAt: expect.any(Number) }),
+			]);
+			expect(getCancellationOwnershipRecord(gateway, firstSignalId),
+				"OLD_OWNER_MUST_REMAIN_UNTIL_HELD_EXACT_CLEANUP_SETTLES").toMatchObject({
+					cancellation: { cause: "superseded" },
+				});
+			expect(runner.children, "REPLACEMENT_MUST_DISPATCH_EXACTLY_ONCE").toHaveLength(2);
+
+			runner.settle(0);
+			await observeUntil(gateway.clock, () => getGateState(setup!.goalId), state =>
+				state.signals.find(signal => signal.id === firstSignalId)?.verification.status === "cancelled", 5_000);
+		} finally {
+			beginSpy?.mockRestore();
+			runner.settleAll();
+			await cleanupSlowWorkflowGoal(setup);
+		}
+	});
+
 	test("double cancel is idempotent", async ({ gateway }) => {
 		let setup: SlowWorkflowGoal | undefined;
 		try {
