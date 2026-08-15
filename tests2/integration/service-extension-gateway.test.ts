@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { test } from "./_e2e/in-process-harness.js";
-import { apiFetch, defaultProject } from "./_e2e/e2e-setup.js";
+import { apiFetch, defaultProject, projectStateDirForRoot } from "./_e2e/e2e-setup.js";
 import { WorktreeServiceCoordinator } from "../../src/server/extension-host/worktree-service-coordinator.ts";
 
 const temporaryRoots: string[] = [];
@@ -17,10 +17,23 @@ test.describe("managed-service gateway wiring", () => {
 		temporaryRoots.push(replacement);
 
 		const contexts = gateway.sessionManager.getProjectContextManager();
+		const serviceDataSegments = ["managed-services", "v1", ".", "fixture-worktree", "fixture-pack", "fixture-service", "default"];
+		const oldData = path.join(projectStateDirForRoot(project.rootPath), ...serviceDataSegments);
+		const newData = path.join(projectStateDirForRoot(replacement), ...serviceDataSegments);
+		fs.mkdirSync(oldData, { recursive: true });
+		fs.mkdirSync(newData, { recursive: true });
 		const calls: string[] = [];
 		const originalSuspend = WorktreeServiceCoordinator.prototype.suspendProject;
 		const originalStop = WorktreeServiceCoordinator.prototype.stopProject;
 		WorktreeServiceCoordinator.prototype.suspendProject = async function (this: WorktreeServiceCoordinator, id: string) {
+			// The gateway normally learns this record during reconciliation. Seed one
+			// here to exercise the successful PUT transaction with a real owned tree.
+			const ref = {
+				projectId: id, component: ".", canonicalWorktreeRoot: project.rootPath,
+				worktreeKey: "fixture-worktree", packId: "fixture-pack", serviceId: "fixture-service", discriminator: "default",
+			};
+			const key = [ref.projectId, ref.component, ref.canonicalWorktreeRoot, ref.packId, ref.serviceId, ref.discriminator].join("\0");
+			(this as unknown as { knownInstances: Map<string, unknown> }).knownInstances.set(key, { ref, dataBase: oldData });
 			calls.push(`suspend:${id}`);
 			return originalSuspend.call(this, id);
 		};
@@ -41,6 +54,8 @@ test.describe("managed-service gateway wiring", () => {
 			WorktreeServiceCoordinator.prototype.stopProject = originalStop;
 		}
 		assert.deepEqual(calls, [`suspend:${project.id}`, `stop:${project.id}`]);
+		assert.equal(fs.existsSync(oldData), false, "the old root's owned managed-services tree is removed");
+		assert.equal(fs.existsSync(newData), true, "the replacement root's managed-services tree remains untouched");
 		assert.ok(contexts.getOrCreate(project.id));
 
 		// A second settings-like edit proves the replacement did not retain an old

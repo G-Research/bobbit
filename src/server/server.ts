@@ -87,7 +87,7 @@ import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaEr
 import { createServerHostApi } from "./extension-host/server-host-api.js";
 import { ServiceExtensionRuntimeManager } from "./extension-host/service-extension-runtime.js";
 import { ServiceExtensionRegistry } from "./extension-host/service-extension-registry.js";
-import { WorktreeServiceCoordinator } from "./extension-host/worktree-service-coordinator.js";
+import { WorktreeServiceCoordinator, type ServiceInstanceRef } from "./extension-host/worktree-service-coordinator.js";
 import { ServiceToolAdapterRegistry, ServiceToolOperationScheduler } from "./extension-host/service-extension-tool-rpc.js";
 import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./extension-host/contract-adapter.js";
 import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
@@ -3141,8 +3141,12 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 		return packs;
 	};
-	const extensionSettingsRuntimeLookup = (projectId: string | undefined, packId: string, kind: "pack" | "provider" | "hook" | "runtime" | "sandboxRequirement", id?: string) => {
-		const context = projectId ? projectContextManager.getOrCreate(projectId) : undefined;
+	const extensionSettingsRuntimeLookup = (projectId: string | undefined, packId: string, kind: "pack" | "provider" | "hook" | "runtime" | "sandboxRequirement", id?: string, existingContextOnly = false) => {
+		const context = projectId
+			? existingContextOnly
+				? [...projectContextManager.all()].find(candidate => candidate.project.id === projectId)
+				: projectContextManager.getOrCreate(projectId)
+			: undefined;
 		if (!context) return { state: "absent" as const };
 		const pack = extensionSettingsCatalogue(projectId).find(candidate => candidate.packId === packId);
 		if (kind === "pack") {
@@ -3282,9 +3286,21 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		grantsForProject: (projectId, grants) => projectRegistry.authorizedExtensionGrants(projectId, grants),
 	});
 	const servicePortOwners = new Map<number, string>();
+	const listActiveManagedServices = (projectId: string) => {
+		// A service cannot have valid state/settings ownership without its existing
+		// project context. Avoid lazy creation while lifecycle work is fenced.
+		if (![...projectContextManager.all()].some(context => context.project.id === projectId)) return [];
+		return serviceExtensionRegistry.list(projectId);
+	};
+	const managedServiceSettings = (ref: ServiceInstanceRef) => {
+		// Service authorization is a liveness check. It must never open a project
+		// context merely to make missing settings appear readable.
+		if (![...projectContextManager.all()].some(context => context.project.id === ref.projectId)) return undefined;
+		return extensionSettingsRuntimeLookup(ref.projectId, ref.packId, "runtime", ref.serviceId, true);
+	};
 	let worktreeServices!: WorktreeServiceCoordinator;
 	const managedServiceRuntime = new ServiceExtensionRuntimeManager({
-		listActive: (projectId) => serviceExtensionRegistry.list(projectId),
+		listActive: listActiveManagedServices,
 		authorize: managedServiceAuthorization,
 		launchers: {
 			local: async () => { throw new Error("Managed service launch adapter is unavailable"); },
@@ -3307,8 +3323,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		},
 		resolveDataDir: (ref, declaredPath) => worktreeServices.resolveDataDir(ref, declaredPath),
 		resolveSettings: (ref) => {
-			const settings = extensionSettingsRuntimeLookup(ref.projectId, ref.packId, "runtime", ref.serviceId);
-			if (settings.state === "error" || settings.state === "present" && !settings.enabled) throw new Error("Managed service settings are unavailable");
+			const settings = managedServiceSettings(ref);
+			if (!settings || settings.state === "error" || settings.state === "present" && !settings.enabled) throw new Error("Managed service settings are unavailable");
 			return settings.state === "present" ? settings.values : {};
 		},
 	});
@@ -3337,11 +3353,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			isDirectory: async (target) => (await fs.promises.stat(target)).isDirectory(),
 			removeDirectory: async (target) => { await fs.promises.rm(target, { recursive: true, force: true }); },
 		},
-		listActive: (projectId) => serviceExtensionRegistry.list(projectId),
+		listActive: listActiveManagedServices,
 		authorize: managedServiceAuthorization,
 		settingsReadable: (ref) => {
-			const settings = extensionSettingsRuntimeLookup(ref.projectId, ref.packId, "runtime", ref.serviceId);
-			return settings.state !== "error" && !(settings.state === "present" && !settings.enabled);
+			const settings = managedServiceSettings(ref);
+			return !!settings && settings.state !== "error" && !(settings.state === "present" && !settings.enabled);
 		},
 		runtime: managedServiceRuntime,
 		operations: serviceToolOperations,

@@ -20,6 +20,7 @@ function fixture(overrides: Partial<WorktreeServiceCoordinatorDeps> = {}) {
 	const stopped: ServiceInstanceRef[] = [];
 	const removed: string[] = [];
 	let activeCalls = 0;
+	let stateDir: string | undefined = "/state/project-a";
 	let declarations: readonly typeof declaration[] = [declaration];
 	const operations = new ServiceToolAdapterRegistry();
 	const queryOperation = {
@@ -36,7 +37,7 @@ function fixture(overrides: Partial<WorktreeServiceCoordinatorDeps> = {}) {
 	const deps: WorktreeServiceCoordinatorDeps = {
 		sessions: { get: id => id === session.id ? session : undefined, list: id => id === projectId ? [session] : [] },
 		components: () => [{ name: "default", repo: "." }],
-		stateDir: () => "/state/project-a",
+		stateDir: () => stateDir,
 		git: { topLevel: async cwd => cwd },
 		filesystem: { realpath: async target => target, isDirectory: async () => true, removeDirectory: async target => { removed.push(target); } },
 		listActive: async () => { activeCalls++; return declarations; },
@@ -54,6 +55,7 @@ function fixture(overrides: Partial<WorktreeServiceCoordinatorDeps> = {}) {
 		setDeclarations: (value: readonly typeof declaration[]) => { declarations = value; },
 		setAllowed: (value: boolean) => { allowed = value; },
 		setSettingsReadable: (value: boolean) => { settingsReadable = value; },
+		setStateDir: (value: string | undefined) => { stateDir = value; },
 	};
 }
 
@@ -226,6 +228,44 @@ describe("worktree service coordinator", () => {
 		expect(f.reconciled).toHaveLength(2);
 		await f.coordinator.stopProject(projectId);
 		expect(f.removed).toHaveLength(1);
+	});
+
+	it("removes a committed replacement's old state root, never the live new root", async () => {
+		const f = fixture();
+		await f.coordinator.reconcileProject(projectId);
+		f.setStateDir("/state/project-b");
+
+		await f.coordinator.suspendProject(projectId);
+		await f.coordinator.stopProject(projectId);
+
+		expect(f.removed).toHaveLength(1);
+		expect(f.removed[0]).toMatch(/^\/state\/project-a\/managed-services\/v1\//);
+		expect(f.removed[0]).not.toContain("/state/project-b/");
+	});
+
+	it("does not delete an incoming A root during an A-to-B-to-A replacement", async () => {
+		const f = fixture();
+		await f.coordinator.reconcileProject(projectId);
+		f.setStateDir("/state/project-b");
+		await f.coordinator.suspendProject(projectId);
+		await f.coordinator.stopProject(projectId);
+
+		await f.coordinator.reconcileProject(projectId);
+		f.setStateDir("/state/project-a");
+		await f.coordinator.suspendProject(projectId);
+		await f.coordinator.stopProject(projectId);
+
+		expect(f.removed).toHaveLength(2);
+		expect(f.removed[0]).toMatch(/^\/state\/project-a\/managed-services\/v1\//);
+		expect(f.removed[1]).toMatch(/^\/state\/project-b\/managed-services\/v1\//);
+	});
+
+	it("fails closed when a new instance has no state authority", async () => {
+		const f = fixture();
+		f.setStateDir(undefined);
+		await f.coordinator.reconcileProject(projectId);
+		expect(f.reconciled).toHaveLength(0);
+		await expect(f.coordinator.request(request())).rejects.toMatchObject({ code: "SERVICE_UNAVAILABLE" });
 	});
 
 	it("prunes purged shared-root owners before final cleanup", async () => {

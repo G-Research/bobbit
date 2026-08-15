@@ -106,6 +106,16 @@ interface ReconcileState {
 	running?: Promise<void>;
 }
 
+/**
+ * The state root is mutable during project-root replacement. Persist the
+ * derived base with the ref so destructive cleanup can never resolve it from
+ * the replacement context.
+ */
+interface KnownInstance {
+	ref: ServiceInstanceRef;
+	dataBase: string;
+}
+
 function safeIdentifier(value: unknown): value is string {
 	return typeof value === "string" && SAFE_ID.test(value);
 }
@@ -156,8 +166,8 @@ function isRelativeDataDir(value: string): boolean {
  */
 export class WorktreeServiceCoordinator implements ServiceExtensionToolRpc {
 	private readonly instances = new Map<string, ServiceInstanceRef>();
-	/** Retained after a non-destructive stop so final worktree cleanup knows its exact owned directory. */
-	private readonly knownInstances = new Map<string, ServiceInstanceRef>();
+	/** Retained after a non-destructive stop so final worktree cleanup knows its exact owned directory and state authority. */
+	private readonly knownInstances = new Map<string, KnownInstance>();
 	/** Cleanup coordinates survive archive until a confirmed worktree removal. */
 	private readonly sessionRoots = new Map<string, Map<string, Set<string>>>();
 	/** Active owners keep an instance running; archived owners intentionally do not. */
@@ -324,12 +334,10 @@ export class WorktreeServiceCoordinator implements ServiceExtensionToolRpc {
 
 	/** Runtime dependency seam: only a coordinator-discovered ref gets a data path. */
 	resolveDataDir(ref: ServiceInstanceRef, declaredPath: string): string {
-		if (this.knownInstances.get(instanceKey(ref))?.canonicalWorktreeRoot !== ref.canonicalWorktreeRoot || !isRelativeDataDir(declaredPath)) {
-			throw new Error("Managed service data directory is unavailable");
-		}
-		const base = this.dataBase(ref);
-		const resolved = path.resolve(base, declaredPath);
-		if (!contains(base, resolved)) throw new Error("Managed service data directory is unavailable");
+		const known = this.knownInstances.get(instanceKey(ref));
+		if (!known || !isRelativeDataDir(declaredPath)) throw new Error("Managed service data directory is unavailable");
+		const resolved = path.resolve(known.dataBase, declaredPath);
+		if (!contains(known.dataBase, resolved)) throw new Error("Managed service data directory is unavailable");
 		return resolved;
 	}
 
@@ -385,8 +393,8 @@ export class WorktreeServiceCoordinator implements ServiceExtensionToolRpc {
 		if (!this.isCurrent(generation, projectId)) return;
 		for (const [key, ref] of wanted) {
 			if (!this.isCurrent(generation, projectId)) return;
+			if (!this.recordKnownInstance(ref)) continue;
 			this.instances.set(key, ref);
-			this.knownInstances.set(key, ref);
 			try { await this.deps.runtime.reconcile(ref); } catch { /* runtime fails closed internally */ }
 			if (!this.isCurrent(generation, projectId)) return;
 		}
@@ -449,8 +457,8 @@ export class WorktreeServiceCoordinator implements ServiceExtensionToolRpc {
 		const ref = this.makeRef(scope, packId, serviceId, discriminator);
 		if (!this.isAuthorized(ref) || !await this.isSettingsReadable(ref) || !this.isAuthorized(ref)) return undefined;
 		if (generation !== undefined && !this.isCurrent(generation, scope.projectId)) return undefined;
+		if (!this.recordKnownInstance(ref)) return undefined;
 		this.instances.set(instanceKey(ref), ref);
-		this.knownInstances.set(instanceKey(ref), ref);
 		return ref;
 	}
 
@@ -513,7 +521,8 @@ export class WorktreeServiceCoordinator implements ServiceExtensionToolRpc {
 	}
 
 	private refsFor(projectId: string, canonicalWorktreeRoot?: string): ServiceInstanceRef[] {
-		const refs = new Map(this.knownInstances);
+		const refs = new Map<string, ServiceInstanceRef>();
+		for (const [key, known] of this.knownInstances) refs.set(key, known.ref);
 		for (const [key, ref] of this.instances) refs.set(key, ref);
 		return [...refs.values()].filter(ref => ref.projectId === projectId && (canonicalWorktreeRoot === undefined || ref.canonicalWorktreeRoot === canonicalWorktreeRoot));
 	}
@@ -526,8 +535,11 @@ export class WorktreeServiceCoordinator implements ServiceExtensionToolRpc {
 			try { await this.deps.runtime.stop(ref); } catch { /* cleanup is best effort */ }
 		}
 		if (removeData) {
-			this.knownInstances.delete(key);
-			await this.removeDataDir(ref);
+			const known = this.knownInstances.get(key);
+			// An instance without a captured state authority is never destructively
+			// cleaned via the current project context.
+			if (!known) return;
+			if (await this.removeDataDir(known.dataBase)) this.knownInstances.delete(key);
 		}
 	}
 
@@ -585,13 +597,25 @@ export class WorktreeServiceCoordinator implements ServiceExtensionToolRpc {
 		return false;
 	}
 
-	private dataBase(ref: ServiceInstanceRef): string {
+	private recordKnownInstance(ref: ServiceInstanceRef): boolean {
+		const key = instanceKey(ref);
+		// A non-destructive suspension retains the old root's authority. Never
+		// overwrite it from a replacement context; only confirmed removal clears it.
+		if (this.knownInstances.has(key)) return true;
 		const stateDir = this.deps.stateDir(ref.projectId);
-		if (!stateDir) throw new Error("Managed service state directory is unavailable");
-		return path.join(stateDir, "managed-services", "v1", ref.component, ref.worktreeKey, ref.packId, ref.serviceId, ref.discriminator);
+		if (!stateDir || !path.isAbsolute(stateDir)) return false;
+		const dataBase = path.join(stateDir, "managed-services", "v1", ref.component, ref.worktreeKey, ref.packId, ref.serviceId, ref.discriminator);
+		this.knownInstances.set(key, { ref, dataBase });
+		return true;
 	}
 
-	private async removeDataDir(ref: ServiceInstanceRef): Promise<void> {
-		try { await this.deps.filesystem.removeDirectory(this.dataBase(ref)); } catch { /* removal remains retriable on the next cleanup */ }
+	private async removeDataDir(dataBase: string): Promise<boolean> {
+		try {
+			await this.deps.filesystem.removeDirectory(dataBase);
+			return true;
+		} catch {
+			// Keep the exact authority so a later confirmed cleanup can retry it.
+			return false;
+		}
 	}
 }
