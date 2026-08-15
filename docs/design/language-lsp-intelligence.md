@@ -1,7 +1,7 @@
 # Language LSP Intelligence
 
 **Status:** implementation design. **Owner:** Language LSP Intelligence child.  
-**Parent authority:** `docs/design/code-intelligence-extension.md` at verified commit `85189bfdc`.  
+**Parent authority:** `docs/design/code-intelligence-extension.md` at design-authority commit `85189bfdc`.
 **Platform source reviewed:** `goal/extension-plat-03a877d8`; this document proposes no cherry-pick and no private replacement for an Extension Platform surface.
 
 ## 1. Outcome and non-negotiable boundaries
@@ -37,61 +37,73 @@ The pack must never call an unavailable LSP an “AST capability,” claim that 
 
 `GoalProvisionedCtx` carries `{ goalId, projectId?, worktreePath, cwd, branch?, metadata }`; ordinary lifecycle calls carry the immutable advisory `scopeContext`. Treat both as server-owned input and preserve their non-fatal behavior.
 
-## 3. Verified platform contracts and adoption ledger
+## 3. Platform-contract blockers and Pearl-verified adoption evidence
 
-The platform branch is ahead of this child’s base. The SHAs below are **proposed evidence only**, not dependencies currently applied here. The parent must approve the ordered clean-base adoption, record the resulting commit/PR in the persistent evidence ledger below, and only then may an EP-dependent implementation use the contract. Merge commits, design-only commits, and dirty-parent state are deliberately excluded.
+Pearl verified stable oracle `80b9e1affed8603552d575e90045de2c40265da0` and the canonical EP series in §3.2; the parent independently verified that all 22 revised EP SHAs are ancestors of that oracle. **Waiting is mandatory:** packet branches are blocked/preparing and unstable. Apply no EP commits. The current EP worktree is dirty/staged and forbidden as an adoption source.
 
-### 3.1 Contracts to compose after verified adoption
+After completion, use only root-published integration PR references—not packet branches or individual EP SHAs—to establish platform availability. The required sequence is current `origin/main` → EP-6 → EP-7 → EP-11 + EP-13 → EP-8 → LSP, but no step begins until its completed root-published integration PR proves the relevant public contract.
 
-| Platform concern | Verified contract | Language-LSP composition |
+The superseded historical evidence must not be used: `561085371`, `c82dac854`, `6219ccd`, `97254c916`, `66c10c90`, and `f173ed516` are not ancestors of oracle `80b9e1affed8603552d575e90045de2c40265da0`; `f173ed516` is downstream/non-platform and remains forbidden from adoption. No partial historical row is a substitute for a completed root-published integration PR.
+
+### 3.1 Required public contracts, pending stable integration proof
+
+The following identifies required ownership and target contracts only; it does not assert that an unstable packet branch exposes a usable public contract.
+
+| Platform concern | Required public contract | Language-LSP composition |
 |---|---|---|
 | Project settings (EP-7) | `src/server/agent/extension-settings-schema.ts::{ExtensionSettingsTargetRef,ExtensionSettingsSchema,normalizeExtensionSettingsSchema}`; `GET /api/projects/:projectId/extension-settings`; revisioned `PATCH /api/projects/:projectId/extension-settings/:packId/:kind/:id` | Declare a typed, per-project **runtime** target. Use the platform CAS revision and redacted projection; never persist `code_intelligence` in project YAML or a custom settings endpoint. |
 | Exact grants (EP-6) | `src/server/agent/extension-grant-policy.ts::createExtensionCapabilityGrantResolver()` with server-derived `{ kind: "pack", packId }` and closed `"service.manage"` | The platform service consumer re-checks `service.manage` before every start/reconcile and after every await before publishing usable. LSP does not create `lsp.manage` or cache an allow. |
 | Decisions (EP-11) | `src/shared/extension-host/decision-request-contract.ts`; `src/server/agent/decision-request-manager.ts`; active `mode: decide` hook with exact `decide` grant | Reuse only a typed, durable decision request for an operator offer when the platform supplies an import-compatible hook/event. Do not synthesize `ask_user_choices`, a transcript row, or an agent wake. A current lifecycle decision is asynchronous and cannot be used as a synchronous import callback. |
 | Static prompt (EP-13) | `system-prompts/<name>.yaml` listed in `contents.system-prompts`, `SystemPromptSectionContribution`, static section integration in `system-prompt.ts` | A literal, bounded “language intelligence is optional; inspect status before relying on it” section may be proposed through the static contribution approval/grant path. It contains no detected-language results and must not be an enablement offer. |
-| Managed service lifecycle (EP-8) | `src/server/extension-host/service-extension-runtime.ts::{ServiceExtensionRuntimeManager,ServiceExtensionRuntimeDeps,ServiceExtensionRuntime}`; active declarative runtimes and `ServiceExtensionAuthorizationResolver` | The eventual core-owned worktree LSP consumer owns live instances. It must compose this lifecycle family or a reviewed additive extension of it; the pack submits a declared request and never owns a process table. The verified contract is currently dormant: no gateway consumer calls `reconcile()`. |
+| Managed service lifecycle (EP-8) | `src/server/extension-host/service-extension-runtime.ts::{ServiceExtensionRuntimeManager,ServiceExtensionRuntimeDeps,ServiceExtensionRuntime}`; active declarative runtimes and `ServiceExtensionAuthorizationResolver` | The eventual core-owned worktree LSP consumer owns live instances. It must compose this lifecycle family or a reviewed additive extension of it; the pack submits a declared request and never owns a process table. The referenced contract is currently dormant: no gateway consumer calls `reconcile()`. |
 
-The service contract currently keys processes by `{ projectId, packId, serviceId }`, while LSP requires `{ projectId, component, worktree identity, languageId }`. Therefore the LSP child **must not** pretend that a single declared service is already sufficient. The implementation dependency is a reviewed, public additive worktree-instance extension of the service contract (or a platform-provided equivalent) that retains the same grant/fence/stop ownership. Until it exists, only the bounded read-only adapters in §7 ship.
+Canonical platform owners are fixed as follows; LSP contributes data, configuration, and implementation only, never a substitute platform surface:
+
+- **EP-7:** settings schema, store, secret-store, and paired runtime read.
+- **EP-6:** grants policy and audit.
+- **EP-11:** decision hook, manager, store, trusted operation, and Ask/Inbox/Proposal integration.
+- **EP-13:** prompt overrides, diff, audit, config, and assembly.
+- **EP-8:** service contract, registry, runtime, and host API.
+
+The service contract currently keys processes by `{ projectId, packId, serviceId }`, while LSP requires `{ projectId, component, worktree identity, languageId }`. Therefore the LSP child **must not** pretend that a single declared service is already sufficient. The implementation dependency is a reviewed, public additive worktree-instance extension of the service contract (or a platform-provided equivalent) that retains the same grant/fence/stop ownership. Until a stable root-published integration PR proves it, only the bounded read-only adapters in §7 ship.
+
+The following three platform-contract gaps remain explicit and block implementation beyond those adapters until a stable root-published integration PR proves their public contract:
+
+1. A reviewed typed collection/per-worktree service declaration in extension settings; the primitive-only EP-7 shape cannot store language selection safely.
+2. An import-compatible EP-11 `mode: decide` event carrying detected-language payload for the explicit operator offer.
+3. A public EP-8 worktree-instance service lifecycle that preserves grant checks, fencing, ownership, caps, and cleanup.
+
+No private settings key, decision flow, import UI hook, prompt injection, sandbox build path, or process lifecycle fallback may substitute for any blocker.
 
 Likewise, no reviewed import lifecycle currently invokes a `mode: decide` hook with detected-language payload. Detection may run as a bounded query after import, but automatic import offer/decision integration is deferred until that explicit platform event exists. It must not be smuggled through `src/app/dialogs.ts` or `src/server/agent/project-assistant.ts`.
 
-### 3.2 Proposed ordered SHA ledger — send before application
+### 3.2 Pearl-verified canonical series — reference only; do not apply
 
-| Order | Candidate additive SHA | Acceptance criterion enabled | Excluded work |
+These SHAs establish ancestry evidence only. They are not adoption instructions; use only a completed root-published integration PR reference after it proves the public contract.
+
+| Order | Series | Pearl-verified canonical commits | Application status |
 |---:|---|---|---|
-| 1 | `7f85418fbf825a891ec224115168ef1961fd8852` | Server-resolved extension-settings target identity and schema normalization. | No merge/design commit. |
-| 2 | `d135fb7ca34a1bf19de1e797ea9b95ea861c2835` | Strict typed field declaration and schema storage for language runtime configuration. | No hand-written project YAML key. |
-| 3 | `2bcc07099a0bb54a3b196fc3210539d70faaaa4e` | Project settings/secret stores and redaction boundary. | No pack-owned secret reader. |
-| 4 | `b9e5705b0a4540f770e09190103adbdc1452f416` | Revisioned project settings API and Market projection. | No custom LSP route. |
-| 5 | `561085371aa7ec0aacd3768a9f9f7c85c2da8f03` | Active-registry settings filtering/reconciliation. | No activation bypass. |
-| 6 | `da4fb487c1372556d685ff3654d9abbd859da6c6` | Exact pack-grant persistence union. | No LSP-specific grant. |
-| 7 | `21abb0ec5eceba8aa0bde8e53304238c3b7e4755` | Public, live `createExtensionCapabilityGrantResolver` handoff. | No cached allow decision. |
-| 8 | `35df5879a2221b24bb0f26de520c3f2209792d49` | Generic administrative grant surface. | No new authorization pipeline. |
-| 9 | `c82dac8547b1aa774aba7d7df45f6fd9c8bfaa38` | Closed non-hook `service.manage` eligibility. | No manifest-defined capability. |
-| 10 | `8f198c08979e5bdc3c7b19236df7eddae64b9b6c` | Durable server-owned decision manager. | No custom decision store. |
-| 11 | `60ddbfea2b705e053d898409b33e8b37dfa63e2a` | Gateway decision projection/answer dispatch. | No transcript/agent imitation. |
-| 12 | `6ddda7b968366fb4ceb772a5485548e898e69322` | Static prompt contribution runtime. | No dynamic prompt injection. |
-| 13 | `3edba87eb4208f227fd5ca9c6dbc81c3e80ac648` | Declarative managed-service contract. | No pack process launcher. |
-| 14 | `6219ccd7313bbec238bbb022dae8499239d3f637` | Durable service runtime state. | No LSP process map. |
-| 15 | `97254c916e99162652c3aee4eb8c94d6368ed87d` | Core launcher adapters. | No command shell strings in matrix. |
-| 16 | `66c10c90b2e68fb751691958f3390cf0a3cbd2c5` | Core supervisor and cleanup primitives. | No `BgProcessManager` reuse. |
-| 17 | `f173ed516bcdc834ae85ed09b6d2c6f3f1e863f6` | Lifecycle boundary hardening. | No unfenced completion. |
-| 18 | `03e44688e57eca7560846360cc8c3a09dd72a4a1` | Grant-gated service lifecycle. | No stale grant permit. |
-| 19 | `ea0f3255ba64ca05ceb4f5e2ed0ed47c12c26f55` | Fresh-read service grant fencing. | No direct runtime start. |
+| 0 | Stable oracle / current base | `80b9e1affed8603552d575e90045de2c40265da0` | Reference only; use the completed root-published PR's clean `origin/main` handoff, never the dirty/staged EP worktree. |
+| 1 | EP-6 | `48b40fc7344457562bc8544198b42bbbad44e082` *(merge commit)*, `f40d25e54453974d2aadf409831dfe492ce22950` | Do not apply; await completed root-published integration PR proof. |
+| 2 | EP-7 | `628d209fe564f168008143aa188975b50af0e485` *(merge commit)*, `5f525cebf3e2f59426895b383fa4e06401d228fc`, `b607e2362a4f59ec6d7c2e950e9f9ca55200b68a`, `0d196aaf36ac0a8bacc725aede99e8151475cdc2`, `e3bba70b7ba25960f8d034b5806af86563ae3d17` | Do not apply; await completed root-published integration PR proof. |
+| 3 | EP-11 | `dd177ab2971bf568d9aff11a91a898ef0b292c7a` *(merge commit)*, `0fadd85a50faf9c2161822265f2d0ca5186c5240`, `dc44122ce1912aabf6a699da327e64b606cc9e86`, `b3cccec23c7f5175dbce5e56e2459e431529d13d` | Do not apply; await completed root-published integration PR proof with EP-13. |
+| 3 | EP-13 | `0763554eda4a2af8d86bda75752e571019cf412a` *(merge commit)*, `79bc883cc9d7c324ab777b1ffce7b5c208a0cbd0`, `131fe91798ba404cd8462bcb7ecf7bc864494825`, `d4f29e2b26b12790f78cb71d4426a77a4d793613`, `ff61887a83a689874537c62a96c4230ccff4ce61`, `cf1ef9849c1c3392334c3fb9fb2f0c4828abe34c`, `5067c3f0c3e1739819a90c7749f336f5e19ee6f2` | Do not apply; await completed root-published integration PR proof with EP-11. |
+| 4 | EP-8 | `3edba87eb4208f227fd5ca9c6dbc81c3e80ac648`, `03e44688e57eca7560846360cc8c3a09dd72a4a1`, `ea0f3255ba64ca05ceb4f5e2ed0ed47c12c26f55`, `41898dc7ee173a1386209c100937d291ae570a6f` | Do not apply; await completed root-published integration PR proof. |
+| 5 | LSP | This language-LSP work follows only after EP-8. | Data/config/implementation only; no platform substitute. |
 
-Before adopting an entry, the integration owner must verify its parent/ordering against a clean base, inspect its diff and pinned tests, and capture the landed SHA. `0763554ed` and all EP merge commits are explicitly not candidates; `85189bfdc` is design authority, not a code adoption candidate.
+`48b40fc`, `628d209`, `dd177ab`, and `0763554` are merge commits. This is ancestry evidence only: never blind-cherry-pick or replay them; use only the completed root-published integration PR reference.
 
-### 3.3 Persistent PR evidence ledger
+### 3.3 Pending PR evidence ledger
 
-Keep this table in the final integration PR description and update it when a candidate is adopted; retain it on follow-up PRs if no adoption occurs.
+This is a record template, not evidence of application. Keep it in the final integration PR description and update it only after a completed root-published integration PR proves the relevant public contract and closes the applicable §3.1 gap.
 
-| Candidate | Base clean? | Diff/test verified | Landed SHA/PR | LSP consumer enabled |
-|---|---|---|---|---|
-| EP-7 rows 1–5 | Pending | Pending | Not applied | Settings only |
-| EP-6 rows 6–9 | Pending | Pending | Not applied | `service.manage` fence |
-| EP-11 rows 10–11 | Pending | Pending | Not applied | Durable offer only with import event |
-| EP-13 row 12 | Pending | Pending | Not applied | Static truthful guidance |
-| EP-8 rows 13–19 | Pending | Pending | Not applied | Core-owned lifecycle only after worktree instance extension |
+| Canonical series | Completed root-published integration PR | Public contract and applicable gap proven | LSP consumer enabled |
+|---|---|---|---|
+| EP-6 | Pending | Pending | `service.manage` fence |
+| EP-7 | Pending | Pending | Settings only |
+| EP-11 + EP-13 | Pending | Pending | Durable offer and static truthful guidance |
+| EP-8 | Pending | Pending | Core-owned lifecycle only after worktree-instance extension |
+| LSP | Pending | Pending | Pack-local data/config/implementation only |
 
 ## 4. Pack layout and data-only language matrix
 
