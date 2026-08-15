@@ -561,10 +561,12 @@ function drainPartition(
 }
 
 function drain(state: ClaudeSdkTranslatorState, events: ClaudeSdkTranslatedEvent[], source: Record<string, unknown>): ClaudeSdkTranslatorState {
+	// A root result is authoritative only for the root request. Native Agent
+	// partitions can arrive after it and must remain independently drainable.
+	// They are still structurally unable to emit a second root terminal.
 	let next: ClaudeSdkTranslatorState = { ...state, partitions: new Map(state.partitions), terminated: true };
-	for (const [partitionKey, partition] of state.partitions) {
-		next = updatePartition(next, partitionKey, drainPartition(partition, partitionKey, events, source));
-	}
+	const root = state.partitions.get(ROOT);
+	if (root) next = updatePartition(next, ROOT, drainPartition(root, ROOT, events, source));
 	const error = terminalIsError(source);
 	const terminalReason = nonEmptyString(source.terminal_reason);
 	const errorText = error ? terminalError(source) : undefined;
@@ -607,7 +609,9 @@ export function translateClaudeSdkEvent(state: ClaudeSdkTranslatorState, input: 
 	}
 
 	const partitionKey = partitionFor(input);
-	if (state.terminated) {
+	// The root terminal closes only root traffic. Forwarded child traffic carries
+	// a nonempty parent identity and has an independently terminal partition.
+	if (state.terminated && partitionKey === ROOT) {
 		return { state: { ...state, partitions: new Map(state.partitions) }, events, diagnostics: [diagnostic("late_event", partitionKey, "event arrived after terminal result")] };
 	}
 	let partition = state.partitions.get(partitionKey) ?? EMPTY_PARTITION;

@@ -578,7 +578,7 @@ describe("ClaudeAgentSdkBridge", () => {
 		expect(steerInput.priority).toBe("now");
 	});
 
-	it("uses the shared attachment-only text, forwards translated events, and ignores no translator state", async () => {
+	it("uses the shared attachment-only text, forwards root events, and ignores unverified child partitions", async () => {
 		const fixture = bridgeFixture();
 		const query = await startReady(fixture);
 		const observed: any[] = [];
@@ -594,9 +594,9 @@ describe("ClaudeAgentSdkBridge", () => {
 		await flushMicrotasks();
 		expect(observed).toEqual(expect.arrayContaining([
 			expect.objectContaining({ type: "message_end", message: expect.objectContaining({ role: "assistant" }) }),
-			expect.objectContaining({ type: "claude_sdk_subagent_work", parentToolUseId: "child", kind: "message" }),
 			expect.objectContaining({ type: "agent_end" }),
 		]));
+		expect(observed.some(event => event.type === "claude_sdk_subagent_work")).toBe(false);
 		expect(observed.some(event => event.type === "message_end" && event.parentToolUseId === "child")).toBe(false);
 		expect(observed.filter(event => event.type === "agent_end")).toHaveLength(1);
 	});
@@ -635,6 +635,68 @@ describe("ClaudeAgentSdkBridge", () => {
 		await fixture.bridge.stop();
 	});
 
+	it("projects verified child tool completion after the root terminal and ignores settled or unrelated frames", async () => {
+		const { policy, surface } = subagentSurfaceFixture();
+		const fixture = bridgeFixture({ claudeSdkToolSurface: surface });
+		const query = await startReady(fixture);
+		const nextTurn = fixture.bridge.prompt("run child work");
+		await query.nextInput();
+		await nextTurn;
+		const observed: any[] = [];
+		fixture.bridge.onEvent(event => observed.push(event));
+		const child = { agent_id: "child-1", agent_type: "bobbit-backend-parity-reviewer" };
+		expect(policy.admit("Agent", {
+			subagent_type: child.agent_type, prompt: "Inspect the bounded change", run_in_background: false,
+		}, { toolUseId: "agent-use-1", permissionMode: "default" })).toBe(true);
+		await (query.options.hooks as any).SubagentStart[0].hooks[0](child);
+
+		// The root terminal is final for root traffic, but this active child drains
+		// its own partition afterward without producing a second root terminal.
+		query.emit({ type: "result", subtype: "success" });
+		await flushMicrotasks();
+		const beforeUnverified = observed.length;
+		query.emit({
+			type: "assistant", uuid: "unverified-child", parent_tool_use_id: "agent-use-1", parent_agent_id: "other-child",
+			message: { content: [{ type: "text", text: "ignored" }] },
+		});
+		await flushMicrotasks();
+		expect(observed).toHaveLength(beforeUnverified);
+		query.emit({
+			type: "assistant", uuid: "child-read-call", parent_tool_use_id: "agent-use-1", parent_agent_id: child.agent_id,
+			message: { content: [{ type: "tool_use", id: "child-read", name: "Read", input: { path: "fixture.md" } }], stop_reason: "tool_use" },
+		});
+		query.emit({
+			type: "user", uuid: "child-read-result", parent_tool_use_id: "agent-use-1", parent_agent_id: child.agent_id,
+			message: { content: [{ type: "tool_result", tool_use_id: "child-read", content: "read result" }] },
+		});
+		query.emit({ type: "result", parent_tool_use_id: "agent-use-1", parent_agent_id: child.agent_id, subtype: "success" });
+		await flushMicrotasks();
+
+		const childFrames = observed.filter(event => event.type === "claude_sdk_subagent_work");
+		expect(childFrames).toEqual(expect.arrayContaining([
+			expect.objectContaining({ kind: "tool_start", parentToolUseId: "agent-use-1", toolEvent: expect.objectContaining({ toolCallId: "child-read" }) }),
+			expect.objectContaining({ kind: "tool_end", parentToolUseId: "agent-use-1", toolEvent: expect.objectContaining({ toolCallId: "child-read" }) }),
+			expect.objectContaining({ kind: "terminal", parentToolUseId: "agent-use-1", terminal: { phase: "completed" } }),
+		]));
+		expect(observed.filter(event => event.type === "agent_end")).toHaveLength(1);
+
+		query.emit({ type: "system", subtype: "task_notification", tool_use_id: "agent-use-1", status: "completed" });
+		await flushMicrotasks();
+		expect(policy.active.size).toBe(0);
+		const afterSettlement = observed.length;
+		query.emit({
+			type: "assistant", uuid: "after-settlement", parent_tool_use_id: "agent-use-1", parent_agent_id: child.agent_id,
+			message: { content: [{ type: "text", text: "ignored" }] },
+		});
+		query.emit({
+			type: "assistant", uuid: "unrelated-child", parent_tool_use_id: "other-agent-root", parent_agent_id: "other-child",
+			message: { content: [{ type: "text", text: "ignored" }] },
+		});
+		await flushMicrotasks();
+		expect(observed).toHaveLength(afterSettlement);
+		await fixture.bridge.stop();
+	});
+
 	it("accepts the verified native task completion that arrives after its root result", async () => {
 		const { policy, surface } = subagentSurfaceFixture();
 		const fixture = bridgeFixture({ claudeSdkToolSurface: surface });
@@ -667,8 +729,14 @@ describe("ClaudeAgentSdkBridge", () => {
 	});
 
 	it("uses a fixed failure detail for provider-controlled child terminal errors", async () => {
-		const fixture = bridgeFixture();
+		const { policy, surface } = subagentSurfaceFixture();
+		const fixture = bridgeFixture({ claudeSdkToolSurface: surface });
 		const query = await startReady(fixture);
+		const child = { agent_id: "child-1", agent_type: "bobbit-backend-parity-reviewer" };
+		expect(policy.admit("Agent", {
+			subagent_type: child.agent_type, prompt: "Inspect the bounded change", run_in_background: false,
+		}, { toolUseId: "agent-use-1", permissionMode: "default" })).toBe(true);
+		await (query.options.hooks as any).SubagentStart[0].hooks[0](child);
 		const observed: any[] = [];
 		fixture.bridge.onEvent(event => observed.push(event));
 		const providerError = "Authorization: Bearer sensitive-bearer-token sk-ant-api03-sensitive-key /home/node/.claude/credentials.json";

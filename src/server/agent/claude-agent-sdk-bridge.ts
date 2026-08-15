@@ -585,10 +585,22 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 	/** Provider error bodies may contain credentials or local paths. Never put them on a UI-bound frame. */
 	private static readonly SUBAGENT_FAILURE_DETAIL = "Subagent failed";
 
+	/** An SDK child frame is displayable only while its exact root Agent call is active. */
+	private verifiedSubagentEntry(source: Record<string, unknown>) {
+		const parentToolUseId = typeof source.parent_tool_use_id === "string" && source.parent_tool_use_id ? source.parent_tool_use_id : undefined;
+		if (!parentToolUseId) return undefined;
+		const agentId = typeof source.parent_agent_id === "string" && source.parent_agent_id ? source.parent_agent_id : undefined;
+		const entry = [...(this.activeToolSurface?.subagentPolicy?.active.values() ?? [])]
+			.find(candidate => candidate.toolUseId === parentToolUseId);
+		// Some SDK terminal frames omit parent_agent_id. When it is present, it
+		// must still be the exact admitted child, not merely the same root Agent.
+		return entry && (!agentId || agentId === entry.agentId) ? entry : undefined;
+	}
+
 	/** Preserve the raw child source identity only inside the semantic projection. */
-	private subagentProjectionEvent(event: any, source: Record<string, unknown>): Record<string, unknown> {
+	private subagentProjectionEvent(event: any, source: Record<string, unknown>, verified?: { agentId: string }): Record<string, unknown> {
 		const sourceId = typeof source.uuid === "string" ? source.uuid : undefined;
-		const agentId = typeof source.parent_agent_id === "string" ? source.parent_agent_id : undefined;
+		const agentId = verified?.agentId ?? (typeof source.parent_agent_id === "string" ? source.parent_agent_id : undefined);
 		const message = event.message && typeof event.message === "object" && agentId
 			? { ...event.message, parentAgentId: agentId } : event.message;
 		// Translator terminal rows intentionally remain root-lifecycle-neutral.
@@ -614,19 +626,18 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 	/** Child terminal results are intentionally not root `agent_end` events in the
 	 * translator. Project them only into the already-admitted child partition. */
 	private emitSubagentTerminalFromSource(source: Record<string, unknown>): void {
-		const parentToolUseId = typeof source.parent_tool_use_id === "string" && source.parent_tool_use_id ? source.parent_tool_use_id : undefined;
+		const entry = this.verifiedSubagentEntry(source);
 		const type = source.type;
 		const terminal = type === "result" || (type === "assistant" && (source.aborted === true || typeof source.error === "string"));
-		if (!parentToolUseId || !terminal) return;
-		const agentId = typeof source.parent_agent_id === "string" && source.parent_agent_id ? source.parent_agent_id : undefined;
+		if (!entry || !terminal) return;
 		const sourceError = typeof source.error === "string" && source.error.length > 0;
 		const phase = source.aborted === true ? "aborted"
 			: source.is_error === true || sourceError || /^error/.test(String(source.subtype ?? "")) ? "error"
 			: "completed";
 		this.emitSubagentWork(this.subagentWork.ingestTerminal(
-			parentToolUseId,
+			entry.toolUseId,
 			{ phase, ...(phase === "error" ? { error: ClaudeAgentSdkBridge.SUBAGENT_FAILURE_DETAIL } : {}) },
-			agentId ? { parentToolUseId, agentId } : undefined,
+			{ parentToolUseId: entry.toolUseId, agentId: entry.agentId, agentType: entry.agentType },
 		));
 	}
 
@@ -747,10 +758,12 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 				// accepted; publish its start before every event in that turn.
 				if (events.length > 0) this.emitPendingTurnStart();
 				for (const event of events) {
-					// The translator already owns partition ordering. A child partition is
-					// never emitted as a root transcript/lifecycle event.
+					// The translator owns child ordering, while the bridge owns admission:
+					// only a currently verified Agent root may project a child partition.
 					if (event.parentToolUseId !== undefined) {
-						this.emitSubagentWork(this.subagentWork.ingestLiveEvent(this.subagentProjectionEvent(event, sdkEvent as Record<string, unknown>)));
+						const source = sdkEvent as Record<string, unknown>;
+						const entry = this.verifiedSubagentEntry(source);
+						if (entry) this.emitSubagentWork(this.subagentWork.ingestLiveEvent(this.subagentProjectionEvent(event, source, entry)));
 					} else this.emit(event);
 				}
 				this.emitSubagentTerminalFromSource(sdkEvent as Record<string, unknown>);
