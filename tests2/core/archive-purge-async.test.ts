@@ -87,6 +87,9 @@ function makeManager(options: {
 	const context = {
 		project: { id: "project-archive", name: "Archive test" },
 		sessionStore: store,
+		goalStore: { getAll: () => [] },
+		teamStore: { getAll: () => [] },
+		staffStore: { getAll: () => [] },
 		searchIndex: {
 			removeMessagesForSession: () => undefined,
 			removeSession: () => undefined,
@@ -94,6 +97,7 @@ function makeManager(options: {
 	};
 	const projectContextManager = {
 		all: () => [context],
+		visible: () => [context],
 		getOrCreate: () => context,
 		getAllSessions: () => [...records.values()],
 		getAllLiveSessions: () => [...records.values()].filter(record => !record.archived),
