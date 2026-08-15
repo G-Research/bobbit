@@ -2319,7 +2319,9 @@ function validateField(field: ExtensionSettingField, value: ExtensionSettingDraf
 		if (field.required && (!selected || selected.length === 0)) return "Select at least one option.";
 		return undefined;
 	}
-	if (field.required && (value === undefined || value === null || value === "")) return "This setting is required.";
+	// A cleared draft means "Use default". It remains valid when that declared
+	// default supplies the required effective value.
+	if (field.required && field.default === undefined && (value === undefined || value === null || value === "")) return "This setting is required.";
 	if (field.type === "number" && value !== undefined && value !== null && value !== "") {
 		const number = typeof value === "number" ? value : Number(value);
 		if (!Number.isFinite(number)) return "Enter a valid number.";
