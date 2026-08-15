@@ -24,6 +24,48 @@ Scannable checklists for common issues. Each entry: symptom → where to look �
 - **Secret persistence failure**: 500 `SANDBOX_SECRET_PERSIST_FAILED` means `project.yaml` was already published but its secret-value update failed. The published value-free token descriptors remain; `SecretsStore` bytes and getters retain their prior values. Fix state-directory permissions and retry the request; this two-file sequence cannot roll back the published descriptor.
 - **Response safety**: persistence responses deliberately exclude YAML contents, token values, and raw filesystem errors. See [Project Config](rest-api.md#project-config) and [Durable publication and repair](internals.md#durable-publication-and-repair).
 
+## Child scheduler stopped work or shows a recovery action
+
+- **Symptom**: a child or root dashboard shows **Scheduler recovery**, a Plan
+  node has a retry action, or logs contain a terminal child-start failure / root
+  retry circuit-breaker message. This is an intentional bounded stop: it keeps
+  a failing child from starving the gateway or disappearing silently.
+- **First look**: open the affected root or child dashboard and read the
+  recovery reason. The record is persisted and broadcast, so it remains visible
+  across reloads and restart. A child record identifies a terminal start failure
+  or exhausted transient retries; a root record identifies an immediate
+  re-drive storm contained for that root only.
+- **Repair**: resolve the stated prerequisite, then use **Scheduler recovery:
+  retry**. Resume paused work; let dependency integration clear unresolved
+  dependencies; enable or reopen work when applicable. The dashboard indicates
+  that retry is unavailable while the goal is paused, blocked, complete, or
+  shelved, and the route rejects it until that condition is resolved. It goes
+  through the scheduler and therefore preserves root concurrency limits.
+- **Do not use retry as a lifecycle bypass**: a paused child with tracked
+  scheduler intent wakes on resume. Dependency-blocked work is re-requested
+  when its final dependency integrates. Resume does not create starts for
+  children configured for manual start, torn-down teams, unresolved dependencies, or children
+  behind a still-paused ancestor.
+- **Expected automatic repair**: an already-live non-terminated team lead is
+  adopted by the scheduled start. A stale terminated lead is torn down and gets
+  exactly one retry; failure after that is surfaced as an operator action.
+  Transient setup/worktree failures back off on real timers for no more than
+  eight start attempts before surfacing the same action.
+- **If the root breaker reappears**: capture the scheduler error record and
+  inspect the failing child/start adapter. The breaker is inline because an
+  event-loop-starving microtask loop cannot rely on a timer watchdog; it counts
+  only unproductive immediate re-drives, not normal scheduling volume. Delayed
+  retries are retained and the record clears after progress or a later
+  scheduler entry outside the breaker window.
+- **Reference**: [Nested sub-goals — Bounded scheduled-start recovery](nested-goals.md#bounded-scheduled-start-recovery) and [Scheduled child-start recovery](rest-api.md#scheduled-child-start-recovery).
+
+## Resource update returns `400` for request body fields
+
+- **Symptom**: a finite-shape resource update returns `400` with `Unknown request body field` and one or more field names instead of `{ ok: true }`.
+- **Cause**: the body includes a key outside that route's documented update contract. The server lists every offending key and applies none of the body, so an accidental field cannot create a false-success no-op.
+- **Repair**: remove the unsupported fields or use the owning route. For goal policy fields (`subgoalsAllowed`, `maxNestingDepth`, `divergencePolicy`, `maxConcurrentChildren`), use `PATCH /api/goals/:id/policy`; its existing operator versus orchestration authorization still applies. `team` remains accepted by goal `PUT` clients for compatibility, but cannot disable always-on team mode. `repoPath`, `prUrl`, and immutable staff `sandboxed` are not update fields and must be omitted.
+- **Reference**: [Goals](rest-api.md#goals) and [Staff Agents](rest-api.md#staff-agents).
+
 ## Unit `node-logic` runner timed out with no assertion failure
 
 - **Symptom**: the `unit:` gate fails with `[run-unit] node-logic timed out after 1050000ms`; `browser-fixtures` passed; no test reported an assertion failure. The retained tail shows whatever printed last, not the culprit file.
@@ -1354,7 +1396,7 @@ Check the WS `proposal_update` frame fired by the `edit_proposal` handler and th
 
 **Symptom:** an agent or external script PUTs `{prUrl: "..."}` to `/api/goals/:id` and the field doesn't appear on the next `GET`.
 
-**Resolution:** that's expected — `Goal.prUrl` remains removed, and `PUT /api/goals/:id` silently ignores it. Live goal, session, and sidebar PR status is owned by the [remote-state coordinator](remote-state-coordinator.md). Read live goal status from `GET /api/goals/:id/pr-status` using the [snapshot envelope and absence semantics](rest-api.md#coordinated-remote-state-status), not directly from the durable cache.
+**Resolution:** `Goal.prUrl` remains removed, and `PUT /api/goals/:id` returns `400` naming `prUrl`; callers must omit it. Live goal, session, and sidebar PR status is owned by the [remote-state coordinator](remote-state-coordinator.md). Read live goal status from `GET /api/goals/:id/pr-status` using the [snapshot envelope and absence semantics](rest-api.md#coordinated-remote-state-status), not directly from the durable cache.
 
 **Re-attempt context missing PR URL:** a successful goal-associated PR snapshot is projected into `PrStatusStore` (`src/server/agent/pr-status-store.ts`) so historical and re-attempt contexts retain the last-known URL across restarts. `buildReattemptContext(goal, prStatusStore)` in `src/server/agent/goal-assistant.ts` reads `prStatusStore.get(goal.id)?.url`. If the `**PR URL:**` line is absent, check that `<stateDir>/pr-status-cache.json` has an entry for the original goal id; do not treat the store as live freshness authority.
 

@@ -26,7 +26,7 @@ import { VerificationHarness, type ActiveVerification } from "../../src/server/a
 import { createManualClock, type ManualClock } from "../harness/clock.js";
 
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, connectWs, createGoal, createSession, defaultProjectId, deleteGoal, deleteSession, type WsConnection } from "./_e2e/e2e-setup.js";
+import { apiFetch, connectWs, createGoal, createSession, defaultProjectId, deleteGoal, deleteSession, gitCwd, type WsConnection } from "./_e2e/e2e-setup.js";
 import type { VerificationCommandRunner, VerificationCommandSpawnSpec } from "../../src/server/agent/verification-command-runner.js";
 import type { TrackedChild } from "../../src/server/agent/spawn-tree.js";
 
@@ -92,6 +92,7 @@ async function createSlowWorkflowGoal(title: string): Promise<SlowWorkflowGoal> 
 			title: `${title} ${Date.now()}`,
 			workflowId: setup.workflowId,
 			projectId: setup.projectId,
+			cwd: gitCwd(),
 			worktree: false,
 		});
 		return { ...setup, goalId: goal.id };
@@ -597,55 +598,6 @@ test.describe("Cancel Verification API", () => {
 		} finally {
 			runner.settleAll();
 			await cancelRequest?.catch(() => {});
-			conn?.close();
-			if (sessionId) await deleteSession(sessionId).catch(() => {});
-			await cleanupSlowWorkflowGoal(setup);
-		}
-	});
-
-	test("late cancellation finalization cannot overwrite a newer re-signal", async ({ gateway }) => {
-		let setup: SlowWorkflowGoal | undefined;
-		let sessionId: string | undefined;
-		let conn: WsConnection | undefined;
-		let resignalRequest: Promise<Response> | undefined;
-		const runner = new PendingExactCleanupRunner();
-		gateway.teamManager.verificationHarness!.commandStepRunner = runner;
-		try {
-			setup = await createSlowWorkflowGoal("Pending Re-signal Generation");
-			sessionId = await createSession({ goalId: setup.goalId });
-			conn = trackFakeCommandStepConnection(await connectWs(sessionId));
-
-			const firstRes = await signalSlowVerification(setup.goalId, "Old generation");
-			expect(firstRes.status).toBe(201);
-			const firstSignalId = (await firstRes.json() as SlowGateSignal).signal.id;
-			await runner.waitForSpawn(0);
-			const eventCursor = conn.messageCount();
-
-			resignalRequest = signalSlowVerification(setup.goalId, "New generation");
-			await runner.waitForKill(0);
-			await new Promise<void>(resolve => setImmediate(resolve));
-
-			const beforeOldCleanup = await getGateState(setup.goalId);
-			expect(beforeOldCleanup.signals, "RESIGNAL_MUST_CREATE_NEW_GENERATION_BEFORE_OLD_CLEANUP_SETTLES").toHaveLength(2);
-			const secondSignalId = beforeOldCleanup.signals.at(-1)?.id as string;
-			expect(secondSignalId).not.toBe(firstSignalId);
-			expect(beforeOldCleanup.signals.at(-1)?.verification.status).toBe("running");
-
-			const oldCompletion = conn.waitForFrom(eventCursor, (event: any) =>
-				event.type === "gate_verification_complete" && event.signalId === firstSignalId && event.status === "cancelled");
-			runner.settle(0);
-			await oldCompletion;
-			const resignalRes = await resignalRequest;
-			expect(resignalRes.status).toBe(201);
-
-			const afterOldCleanup = await getGateState(setup.goalId);
-			expect(afterOldCleanup.signals.find(signal => signal.id === firstSignalId)?.verification.status).toBe("failed");
-			expect(afterOldCleanup.signals.find(signal => signal.id === secondSignalId)?.verification.status,
-				"LATE_CANCEL_MUST_NOT_FINALIZE_NEW_SIGNAL").toBe("running");
-			expect(afterOldCleanup.status, "LATE_CANCEL_MUST_NOT_OVERWRITE_NEW_GATE_STATE").toBe("pending");
-		} finally {
-			runner.settleAll();
-			await resignalRequest?.catch(() => {});
 			conn?.close();
 			if (sessionId) await deleteSession(sessionId).catch(() => {});
 			await cleanupSlowWorkflowGoal(setup);

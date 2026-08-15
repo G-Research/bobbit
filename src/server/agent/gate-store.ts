@@ -8,6 +8,7 @@ import type Database from "better-sqlite3";
 import type { Workflow } from "./workflow-store.js";
 import type { GateStepDiagnostics } from "../gate-diagnostics.js";
 import { CoalescedJsonWriter } from "./coalesced-json-writer.js";
+import type { VerificationContentDigest, VerificationContentDigestErrorSummary } from "./verification-content-digest.js";
 
 export type GateStatus = "pending" | "passed" | "failed" | "bypassed";
 
@@ -47,6 +48,35 @@ export interface GateSignalStep {
 	phase?: number;
 }
 
+export type PinnedCheckoutAttestation = {
+	/** Existing single-root representation; preserve it byte-for-byte. */
+	version: 1;
+	commitSha: string;
+	contentDigest: VerificationContentDigest;
+} | {
+	/** A branch-container layout with independently pinned Git repositories. */
+	version: 2;
+	layout: "multi-repo";
+	contentDigest: VerificationContentDigest;
+	repositories: readonly {
+		repoKey: string;
+		commitSha: string;
+		contentDigest: VerificationContentDigest;
+	}[];
+};
+
+export type PinnedCheckoutErrorCode =
+	| "PINNED_CHECKOUT_ACQUIRE_FAILED"
+	| "PINNED_CHECKOUT_MUTATED"
+	| "PINNED_CHECKOUT_UNREADABLE"
+	| "PINNED_CHECKOUT_UNSUPPORTED_LAYOUT";
+
+export interface PinnedCheckoutError {
+	code: PinnedCheckoutErrorCode;
+	/** Fixed, sanitized operator-facing diagnosis; never a filesystem or Git error. */
+	message: string;
+}
+
 export interface GateSignal {
 	id: string;
 	gateId: string;
@@ -57,6 +87,14 @@ export interface GateSignal {
 	metadata?: Record<string, string>;
 	content?: string;
 	contentVersion?: number;
+	/** Source-byte witness used for cache eligibility; absent on legacy signals. */
+	contentDigest?: VerificationContentDigest;
+	/** Sanitized durable reason when the source-byte witness could not be computed. */
+	contentDigestError?: VerificationContentDigestErrorSummary;
+	/** Durable proof that this signal ran from materialized, pinned source bytes. */
+	pinnedCheckout?: PinnedCheckoutAttestation;
+	/** Sanitized durable reason why a pinned checkout could not attest this signal. */
+	pinnedCheckoutError?: PinnedCheckoutError;
 	verification: {
 		status: "running" | "passed" | "failed";
 		steps: GateSignalStep[];
@@ -941,6 +979,76 @@ export class GateStore {
 		gate.currentMetadata = metadata;
 		gate.updatedAt = Date.now();
 		this.save([key]);
+	}
+
+	/**
+	 * Atomically repin a running signal after an ancestry-safe remote sync.
+	 *
+	 * This must commit before a pinned checkout is acquired: the checkout manager
+	 * treats the signal SHA as its expected immutable base. Roll back in-memory
+	 * state if publication fails so later writes cannot accidentally persist an
+	 * unacknowledged ref movement.
+	 */
+	async updateSignalCommitSha(signalId: string, commitSha: string): Promise<void> {
+		if (!/^[0-9a-f]{40}$/i.test(commitSha)) throw new Error("Invalid gate signal commit SHA");
+		for (const [key, gate] of this.gates) {
+			const signal = gate.signals.find(s => s.id === signalId);
+			if (!signal) continue;
+			if (signal.verification.status !== "running") throw new Error("Cannot repin a finalized gate signal");
+			const previousCommitSha = signal.commitSha;
+			signal.commitSha = commitSha;
+			gate.updatedAt = Date.now();
+			try {
+				await this.saveStrict([key]);
+			} catch (error) {
+				signal.commitSha = previousCommitSha;
+				throw error;
+			}
+			return;
+		}
+		throw new Error(`Unknown gate signal: ${signalId}`);
+	}
+
+	/** Persist the authoritative source-byte witness without changing verification state. */
+	updateSignalContentDigest(
+		signalId: string,
+		result: VerificationContentDigest | VerificationContentDigestErrorSummary,
+	): void {
+		for (const [key, gate] of this.gates) {
+			const signal = gate.signals.find(s => s.id === signalId);
+			if (!signal) continue;
+			if ("digest" in result) {
+				signal.contentDigest = result;
+				delete signal.contentDigestError;
+			} else {
+				signal.contentDigestError = result;
+				delete signal.contentDigest;
+			}
+			gate.updatedAt = Date.now();
+			this.save([key]);
+			return;
+		}
+	}
+
+	/** Persist a pinned-checkout attestation or its sanitized operational failure. */
+	updateSignalPinnedCheckout(
+		signalId: string,
+		result: PinnedCheckoutAttestation | PinnedCheckoutError,
+	): void {
+		for (const [key, gate] of this.gates) {
+			const signal = gate.signals.find(s => s.id === signalId);
+			if (!signal) continue;
+			if ("code" in result) {
+				signal.pinnedCheckoutError = result;
+				delete signal.pinnedCheckout;
+			} else {
+				signal.pinnedCheckout = result;
+				delete signal.pinnedCheckoutError;
+			}
+			gate.updatedAt = Date.now();
+			this.save([key]);
+			return;
+		}
 	}
 
 	/** Update a signal's verification results by signal ID. */
