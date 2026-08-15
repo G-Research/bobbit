@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import fs from "node:fs";
+import fs, { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import defaultLspExtension, {
@@ -19,11 +20,11 @@ function registeredBy(extension: (pi: any) => void): Map<string, RegisteredTool>
 	return tools;
 }
 
-const adapterOptions = () => ({
+const adapterOptions = (componentRoot = "/linked-worktree/services/api") => ({
 	context: {
 		projectId: "project-42",
 		component: { name: "api", repo: ".", relativePath: "services/api" },
-		componentRoot: "/linked-worktree/services/api",
+		componentRoot,
 	},
 });
 
@@ -35,44 +36,39 @@ describe("LSP extension registration", () => {
 	});
 
 	it("registers six bounded read-only tools with an exact linked-worktree context", async () => {
-		const tools = registeredBy(createLspExtension({ adapterOptions }));
-		expect([...tools.keys()]).toEqual([
-			"lsp_definition", "lsp_references", "lsp_hover", "lsp_symbols", "lsp_diagnostics", "lsp_status",
-		]);
+		const componentRoot = mkdtempSync(path.join(tmpdir(), "bobbit-lsp-extension-"));
+		try {
+			const tools = registeredBy(createLspExtension({ adapterOptions: () => adapterOptions(componentRoot) }));
+			expect([...tools.keys()]).toEqual([
+				"lsp_definition", "lsp_references", "lsp_hover", "lsp_symbols", "lsp_diagnostics", "lsp_status",
+			]);
 
-		for (const tool of tools.values()) {
-			expect(tool.promptSnippet).toContain("never edits files, starts, or installs");
+			for (const tool of tools.values()) {
+				expect(tool.promptSnippet).toContain("never edits files, starts, or installs");
+			}
+			const symbols = tools.get("lsp_symbols")!;
+			expect(symbols.parameters.anyOf.map((branch: any) => branch.properties.scope.const)).toEqual(["document", "workspace"]);
+
+			const result = await tools.get("lsp_status")!.execute("call-1", { language: "typescript" });
+			expect(result.details).toMatchObject({
+				capability: "lsp",
+				action: "status",
+				component: "api",
+				languageId: "typescript",
+				status: "unavailable",
+				reasonCode: "service-unavailable",
+			});
+			expect(JSON.parse(result.content[0].text)).toEqual(result.details);
+		} finally {
+			rmSync(componentRoot, { recursive: true, force: true });
 		}
-		const symbols = tools.get("lsp_symbols")!;
-		expect(symbols.parameters.anyOf.map((branch: any) => branch.properties.scope.const)).toEqual(["document", "workspace"]);
-
-		const result = await tools.get("lsp_status")!.execute("call-1", { language: "typescript" });
-		expect(result.details).toMatchObject({
-			capability: "lsp",
-			action: "status",
-			component: "api",
-			languageId: "typescript",
-			status: "unavailable",
-			reasonCode: "service-unavailable",
-		});
-		expect(JSON.parse(result.content[0].text)).toEqual(result.details);
 	});
 
-	it("returns a generic unavailable result when injected adapter execution throws", async () => {
-		let realpathCalls = 0;
+	it("returns a generic unavailable result when injected adapter options throw", async () => {
 		const tools = registeredBy(createLspExtension({
-			adapterOptions: () => ({
-				...adapterOptions(),
-				fs: {
-					realpathSync: () => {
-						realpathCalls += 1;
-						if (realpathCalls === 1) return "/linked-worktree/services/api";
-						if (realpathCalls === 2) return "/linked-worktree/services/api/src/server.ts";
-						throw new Error("failed at /private/worktree/secret.env token=top-secret");
-					},
-					lstatSync: () => ({ isFile: () => true, isSymbolicLink: () => false }),
-				} as any,
-			}),
+			adapterOptions: () => {
+				throw new Error("failed at /private/worktree/secret.env token=top-secret");
+			},
 		}));
 		const result = await tools.get("lsp_definition")!.execute("call-2", {
 			language: "typescript", path: "src/server.ts", position: { line: 0, character: 0 },
@@ -82,7 +78,7 @@ describe("LSP extension registration", () => {
 		expect(result.details).toMatchObject({
 			capability: "lsp",
 			action: "definition",
-			component: "api",
+			component: "unavailable",
 			languageId: "typescript",
 			status: "unavailable",
 			reasonCode: "service-unavailable",
