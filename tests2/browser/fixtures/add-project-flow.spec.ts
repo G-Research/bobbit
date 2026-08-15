@@ -55,7 +55,8 @@ export default { decide(ctx) {
     requestedClass: "consent-required", scope: "project", deadlineAt: deadline(),
     effect: { kind: "proposal", proposals: {
       safe: { proposalType: "role", args: { name: "browser-import-role", label: "Browser import role", prompt: "A role applied after import review." } },
-    }, noEffectValues: ["fast", "other"] },
+      fast: { proposalType: "role", args: { name: "browser-rejected-import-role", label: "Rejected browser import role", prompt: "A role rejected after import review." } },
+    }, noEffectValues: ["other"] },
   } };
 } };
 `);
@@ -231,6 +232,10 @@ test.describe("Add Project flow (UI)", () => {
 			await expect(decisions).toBeVisible({ timeout: 10_000 });
 			await expect(decisions).toContainText(REAL_IMPORT_QUESTION);
 			await expect(decisions.locator("ask-user-choices-widget")).toHaveCount(1);
+			// The audit is rendered from the same durable import projection, not a
+			// test-only transcript or mocked activity endpoint.
+			await expect(decisions.locator('[data-testid="project-import-decision-activity"]')).toBeVisible();
+			await expect(decisions.locator('[data-testid="project-import-decision-activity"]')).toContainText(REAL_IMPORT_HOOK);
 			expect(sessionPosts).toBe(0);
 			expect(askPosts).toBe(0);
 
@@ -267,6 +272,58 @@ test.describe("Add Project flow (UI)", () => {
 				.filter((request: any) => request.request?.question === REAL_IMPORT_QUESTION)).toHaveLength(1);
 			expect(sessionPosts).toBe(0);
 			expect(askPosts).toBe(0);
+		} finally {
+			releaseProjection?.();
+			await page.unroute(/\/import-decision-requests\?state=pending$/).catch(() => {});
+			if (projectId) await apiFetch(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => {});
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("Add Project rejects a real project-owned proposal without applying it", async ({ page }) => {
+		const dir = uniqueDir("real-import-proposal-reject");
+		mkdirSync(join(dir, ".bobbit", "config"), { recursive: true });
+		writeFileSync(join(dir, ".bobbit", "config", "project.yaml"), "name: real-import-reject\n");
+		let projectId = "";
+		let releaseProjection: (() => void) | undefined;
+		const projectionPaused = new Promise<void>(resolve => { releaseProjection = resolve; });
+		try {
+			// This only delays the actual projection until the real, authenticated
+			// grant replay is stored. It never manufactures a decision response.
+			await page.route(/\/import-decision-requests\?state=pending$/, async route => {
+				await projectionPaused;
+				await route.continue();
+			});
+			await openApp(page);
+			await page.locator("button").filter({ hasText: "Add Project" }).first().click();
+			const pathInput = page.locator('input[placeholder="/path/to/project"]');
+			await pathInput.fill(dir);
+			const registered = page.waitForResponse(response => response.request().method() === "POST" && /\/api\/projects$/.test(new URL(response.url()).pathname));
+			await page.locator("button").filter({ hasText: "Continue" }).first().click();
+			const projectResponse = await registered;
+			expect(projectResponse.status(), await projectResponse.clone().text()).toBe(201);
+			projectId = (await projectResponse.json()).id;
+			const grant = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/extension-grants`, {
+				method: "PUT", body: JSON.stringify({ packId: REAL_IMPORT_PACK, hookId: REAL_IMPORT_HOOK, capability: "decide" }),
+			});
+			expect(grant.status, await grant.clone().text()).toBe(200);
+			releaseProjection!();
+
+			const decisions = page.locator('[data-testid="project-import-decisions"]');
+			await expect(decisions).toContainText(REAL_IMPORT_QUESTION, { timeout: 10_000 });
+			await decisions.locator("label.ask-option").filter({ hasText: "Fast mode" }).click();
+			const proposal = decisions.locator('[data-testid="project-import-proposal"]');
+			await expect(proposal).toContainText("browser-rejected-import-role", { timeout: 10_000 });
+			await proposal.getByRole("button", { name: "Reject" }).click();
+			await expect(proposal).toHaveCount(0, { timeout: 10_000 });
+			const roles = await apiFetch(`/api/roles?projectId=${encodeURIComponent(projectId)}`);
+			expect((await roles.json()).roles).not.toEqual(expect.arrayContaining([
+				expect.objectContaining({ name: "browser-rejected-import-role" }),
+			]));
+			const audit = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-decision-requests`);
+			expect((await audit.json()).requests).toEqual(expect.arrayContaining([
+				expect.objectContaining({ status: "resolved", resolution: { value: { kind: "option", value: "fast" } } }),
+			]));
 		} finally {
 			releaseProjection?.();
 			await page.unroute(/\/import-decision-requests\?state=pending$/).catch(() => {});
