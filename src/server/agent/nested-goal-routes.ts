@@ -368,7 +368,13 @@ export async function tryHandleNestedGoalRoute(
 		const pausedIds = new Set<string>(targets.map(g => g.id));
 		let count = 0;
 		for (const g of targets) {
-			if (g.paused) continue;
+			if (g.paused) {
+				// A repeated pause is idempotent for goal state/count, but cancellation
+				// may still be settling exact process cleanup or a restart retry.
+				// Re-drive it so an already-paused goal cannot strand verification work.
+				await cancelAllVerifications(g.id);
+				continue;
+			}
 			await applyOperatorPause(getGoalManagerForGoal(g.id), g.id);
 			count++;
 		}

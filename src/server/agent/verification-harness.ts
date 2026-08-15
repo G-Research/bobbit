@@ -1707,6 +1707,8 @@ export interface ActiveVerification {
 		humanPrompt?: string;
 		/** Human-readable label rendered on the sign-off card (human-signoff). */
 		humanLabel?: string;
+		/** Set only after `spawnTracked` returns a live command child; phase-0 `running` alone is display state. */
+		commandSpawnedAt?: number;
 		/** OS process id of the spawned command (Layer 1). */
 		pid?: number;
 		/** Date.now() at spawn — tie-breaker against pid reuse. */
@@ -2806,6 +2808,13 @@ export class VerificationHarness {
 				const key = `${v.signalId}::${step.name}`;
 				const { promise, resolve: resolver } = deferred<SignoffOutcome>();
 				this.pendingSignoffs.set(key, resolver);
+				// Cancellation drains parked resolvers once. If it fenced this
+				// generation immediately before registration, drain ourselves so
+				// this restart-resumed signoff cannot park forever.
+				if (!this._isResumeStillActive(v) && this.pendingSignoffs.get(key) === resolver) {
+					this.pendingSignoffs.delete(key);
+					resolver({ cancelled: true });
+				}
 				const outcome = await promise;
 				this.pendingSignoffs.delete(key);
 				if (!this._isResumeStillActive(v)) return;
@@ -3889,9 +3898,20 @@ export class VerificationHarness {
 		);
 	}
 
+	/** A seeded phase-0 `running` row has no process ownership until spawn succeeds. */
+	private _commandStepHasSpawnOwnership(step: ActiveVerification["steps"][number]): boolean {
+		return step.commandSpawnedAt !== undefined
+			// Legacy/recovered rows predate `commandSpawnedAt`; their durable exact
+			// identity records still prove that a command was actually admitted.
+			|| step.pid !== undefined
+			|| step.pidFile !== undefined
+			|| step.sentinelFile !== undefined
+			|| step.containerOwnershipWitness !== undefined;
+	}
+
 	private _commandStepRequiresKillCleanup(step: ActiveVerification["steps"][number]): boolean {
 		return step.type === "command" && (
-			step.status === "running" ||
+			(step.status === "running" && this._commandStepHasSpawnOwnership(step)) ||
 			(!!step.killRequestedAt && !step.killCompletedAt) ||
 			!!step.sentinelCleanupPending ||
 			!!step.containerPayloadCleanupPending ||
@@ -3906,10 +3926,28 @@ export class VerificationHarness {
 		for (const step of active.steps) {
 			if (step.type !== "command") continue;
 			if (step.status !== "running" && !step.killRequestedAt) continue;
+			// A phase starts as `running` before its command acquires a permit.
+			// Cancellation may land in that display-only window; never manufacture
+			// an exact-cleanup obligation for a command that never spawned.
+			if (!step.killRequestedAt && !this._commandStepHasSpawnOwnership(step)) continue;
 			step.killRequestedAt ??= now;
 			step.killReason = reason;
 			step.killSignal = signal;
 		}
+	}
+
+	/** Recheck cancellation/generation at command admission boundaries. */
+	private _canAdmitCommandStep(streamCtx?: { goalId: string; gateId: string; signalId: string; stepIndex: number }): boolean {
+		if (!streamCtx) return true;
+		const active = this.activeVerifications.get(streamCtx.signalId);
+		return !!active
+			&& active.goalId === streamCtx.goalId
+			&& active.gateId === streamCtx.gateId
+			&& !active.cancelled
+			&& active.overallStatus !== "cancelled"
+			&& !this.cancelledVerificationSignals.has(streamCtx.signalId)
+			&& this._isCurrentGateSignal(active)
+			&& active.steps[streamCtx.stepIndex]?.type === "command";
 	}
 
 	private async _waitForPidToExit(pid: number, timeoutMs = 1_500): Promise<boolean> {
@@ -5085,7 +5123,12 @@ export class VerificationHarness {
 									}
 									await this.commandSemaphore.acquire();
 									try {
-										result = await this.runCommandStep(cmd, commandCwd, resolveCommandStepTimeoutSec(step), expectFailure, streamCtx, errorPattern, commandContainerId);
+										// The phase-0 row is deliberately shown as running while it
+										// waits for capacity. Cancellation can land during acquire;
+										// do not turn that display state into a command spawn.
+										result = this._canAdmitCommandStep(streamCtx)
+											? await this.runCommandStep(cmd, commandCwd, resolveCommandStepTimeoutSec(step), expectFailure, streamCtx, errorPattern, commandContainerId)
+											: { passed: false, output: "Command admission cancelled before spawn." };
 									} finally {
 										this.commandSemaphore.release();
 									}
@@ -5209,6 +5252,14 @@ export class VerificationHarness {
 								const key = `${signal.id}::${step.name}`;
 								const { promise, resolve: resolver } = deferred<SignoffOutcome>();
 								this.pendingSignoffs.set(key, resolver);
+								// Register first, then synchronously recheck: cancellation may
+								// already have completed its one-time drain before this phase
+								// reached the signoff branch.
+								if ((active.cancelled || this.activeVerifications.get(signal.id) !== active)
+									&& this.pendingSignoffs.get(key) === resolver) {
+									this.pendingSignoffs.delete(key);
+									resolver({ cancelled: true });
+								}
 								const outcome = await promise;
 								this.pendingSignoffs.delete(key);
 								if ("decision" in outcome) {
@@ -7099,6 +7150,14 @@ export class VerificationHarness {
 					// spawning misses the first event on a cold client connection.
 					await dockerExecWatcher.start();
 				}
+				// The semaphore admission check above covers capacity wait; this second
+				// fence covers command setup (including the async Docker watcher) and
+				// must be immediately before the only command spawn path.
+				if (!this._canAdmitCommandStep(streamCtx)) {
+					await dockerExecWatcher?.stop();
+					resolve({ passed: false, output: "Command admission cancelled before spawn." });
+					return;
+				}
 				if (containerId) {
 					// Container execution uses a daemon-bound sentinel; container-visible
 					// PID, heartbeat, and exit artifacts are deliberately not created.
@@ -7210,6 +7269,11 @@ export class VerificationHarness {
 				})();
 				return;
 			}
+
+			// Spawn ownership now exists. This durable marker distinguishes a real
+			// child from the phase's optimistic `running` display state, so later
+			// cancellation preserves exact cleanup only for commands that started.
+			stampActiveCommandStep({ commandSpawnedAt: Date.now() });
 
 			// Register so cancellation / shutdown can tree-kill the live child.
 			const trackedKey = streamCtx ? `${streamCtx.signalId}:${streamCtx.stepIndex}` : `__no_ctx_${child.pid ?? Date.now()}`;
