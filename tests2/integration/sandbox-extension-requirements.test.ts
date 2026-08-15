@@ -157,11 +157,12 @@ async function grant(fixture: Fixture, projectId = fixture.projectA, packId = PA
 	expect(response.status, await response.clone().text()).toBe(200);
 }
 
-async function revoke(fixture: Fixture, projectId = fixture.projectA, packId = PACK_ID): Promise<void> {
+async function revoke(fixture: Fixture, projectId = fixture.projectA, packId = PACK_ID, tolerateMissing = false): Promise<void> {
 	const response = await api(fixture, `/api/projects/${encodeURIComponent(projectId)}/extension-grants/${encodeURIComponent(packId)}/principals/pack/sandbox%3Abuild`, {
 		method: "DELETE", headers: fixture.operatorHeaders,
 	});
-	expect(response.status, await response.clone().text()).toBe(200);
+	if (tolerateMissing) expect([200, 404], await response.clone().text()).toContain(response.status);
+	else expect(response.status, await response.clone().text()).toBe(200);
 }
 
 async function addSourceIdempotently(fixture: Fixture, sourceRoot: string): Promise<string> {
@@ -454,7 +455,7 @@ describe.sequential("sandbox extension requirements integration", () => {
 		} finally {
 			fixture.runner.failBuild = false;
 			for (const projectId of [fixture.projectA, fixture.projectB]) {
-				for (const packId of temporaryPackIds) await revoke(fixture, projectId, packId);
+				for (const packId of temporaryPackIds) await revoke(fixture, projectId, packId, true);
 			}
 			for (const packId of temporaryPackIds) {
 				await clearPackActivationIfPresent(fixture, packId);

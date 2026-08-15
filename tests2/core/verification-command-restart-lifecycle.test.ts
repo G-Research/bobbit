@@ -8,6 +8,7 @@ import path from "node:path";
 
 import { makeTmpDir } from "../../tests/helpers/tmp.ts";
 import { VerificationHarness, type ActiveVerification } from "../../src/server/agent/verification-harness.js";
+import { SandboxManager } from "../../src/server/agent/sandbox-manager.js";
 import { createFakeVerificationCommandRunner } from "../harness/fake-verification-command-runner.js";
 import { FakePinnedCheckoutManager, pinnedCheckoutReference } from "../harness/fake-pinned-checkout-manager.js";
 
@@ -206,6 +207,31 @@ test("terminal cleanup rows are private and cancellation retries resources witho
 	assert.equal((harness as any).activeVerifications.has(signalId), false, `${MARKER}: successful retry must release the exact terminal row`);
 	assert.deepEqual({ gateStoreCalls: gateStoreCalls.length, broadcasts: broadcasts.length }, publication, `${MARKER}: cancellation must not overwrite or re-broadcast a published pass`);
 	assert.deepEqual(pinnedCheckoutManager.releasedSignalIds, [signalId]);
+});
+
+test("unavailable exact verification bootstrap retains the terminal sidecar reference and checkout pin", async () => {
+	const { harness, pinnedCheckoutManager } = makeHarnessForStateDir();
+	const signalId = "sig-bootstrap-unavailable";
+	const manager = new SandboxManager({
+		bootstrap: async () => { throw new Error("prepared verifier image unavailable"); },
+	});
+	(harness as any).sessionManager = { getSandboxManager: () => manager };
+	const verification = activeVerification(signalId, [], Date.now());
+	seedActivePinnedCheckout(harness, verification);
+	verification.projectId = "test-project-id";
+	verification.overallStatus = "passed";
+	verification.terminalVerdictPublished = true;
+	verification.verificationContainer = {
+		projectId: "test-project-id", signalId, containerId: "a".repeat(64),
+		cwd: `/bobbit-state/verification-checkouts/${signalId}`, ignoredOutputDirs: [],
+	};
+	(harness as any).activeVerifications.set(signalId, verification);
+
+	assert.equal(await (harness as any)._releaseTerminalVerificationResources(verification), false);
+	assert.ok(verification.verificationContainer, `${MARKER}: unavailable bootstrap must retain the exact sidecar reference`);
+	assert.ok(verification.cleanupPending, `${MARKER}: unavailable bootstrap must leave terminal cleanup pending`);
+	assert.equal((harness as any).activeVerifications.get(signalId), verification, `${MARKER}: retry authority must retain the active terminal row`);
+	assert.deepEqual(pinnedCheckoutManager.releasedSignalIds, [], `${MARKER}: checkout pin must not release before exact sidecar cleanup`);
 });
 
 test("branch dependency remap preserves the default link when its target is absent", async () => {

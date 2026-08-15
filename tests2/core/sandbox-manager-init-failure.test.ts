@@ -141,6 +141,63 @@ describe("SandboxManager.ensureForProject failure isolation", () => {
 		}
 	});
 
+	it("retains A's exact validator after B becomes current, then reaps both without destroying a live project volume", async () => {
+		const projectId = "superseded-verification-project";
+		let image = "image-a";
+		const manager = new SandboxManager({
+			bootstrap: async () => ({ projectId, projectDir: process.cwd(), repoUrl: "", image, sandboxImageFingerprint: image }),
+		});
+		const originalAcquire = ProjectSandbox.prototype.getVerificationSidecar;
+		const originalRemove = ProjectSandbox.prototype.removeVerificationSidecar;
+		const originalRecover = ProjectSandbox.prototype.recoverVerificationSidecars;
+		const originalDestroy = ProjectSandbox.prototype.destroy;
+		const removals: string[] = [];
+		const reaped: string[] = [];
+		ProjectSandbox.prototype.getVerificationSidecar = async function(request) {
+			const options = (this as any).options;
+			return { containerId: "a".repeat(64), projectId: options.projectId, signalId: request.signalId, checkoutPath: request.checkoutPath, cwd: "/verified" };
+		};
+		ProjectSandbox.prototype.removeVerificationSidecar = async function() {
+			const candidateImage = (this as any).options.image;
+			removals.push(candidateImage);
+			if (candidateImage !== "image-a") throw new Error("strict image validation rejected A-owned sidecar");
+		};
+		ProjectSandbox.prototype.recoverVerificationSidecars = async function() {
+			reaped.push((this as any).options.image);
+			return [];
+		};
+		ProjectSandbox.prototype.destroy = async function() {
+			throw new Error("verification backend teardown must not destroy a project volume");
+		};
+		try {
+			await manager.getVerificationSidecar(projectId, { signalId: "signal-a", checkoutPath: process.cwd(), ignoredOutputDirs: [] });
+			image = "image-b";
+			await manager.getVerificationSidecar(projectId, { signalId: "signal-b", checkoutPath: process.cwd(), ignoredOutputDirs: [] });
+			await manager.removeVerificationSidecar(projectId, { signalId: "signal-a", checkoutPath: process.cwd(), containerId: "a".repeat(64), ignoredOutputDirs: [] });
+			assert.deepEqual(removals, ["image-b", "image-a"], "cleanup tries only strict current and retained exact validators");
+
+			await manager.destroy(projectId);
+			assert.deepEqual(reaped, ["image-b", "image-a"], "teardown reaps each bounded backend exactly once");
+			assert.equal((manager as any)._verificationBackends.has(projectId), false);
+			assert.equal((manager as any)._supersededVerificationBackends.has(projectId), false);
+		} finally {
+			ProjectSandbox.prototype.getVerificationSidecar = originalAcquire;
+			ProjectSandbox.prototype.removeVerificationSidecar = originalRemove;
+			ProjectSandbox.prototype.recoverVerificationSidecars = originalRecover;
+			ProjectSandbox.prototype.destroy = originalDestroy;
+		}
+	});
+
+	it("rejects sidecar removal when the exact verification bootstrap is unavailable", async () => {
+		const manager = new SandboxManager({
+			bootstrap: async () => { throw new Error("verification bootstrap unavailable"); },
+		});
+		await assert.rejects(
+			() => manager.removeVerificationSidecar("unavailable-project", { signalId: "signal-a", checkoutPath: process.cwd(), containerId: "a".repeat(64), ignoredOutputDirs: [] }),
+			/verification bootstrap unavailable/,
+		);
+	});
+
 	it("runs verification bootstrap and B while A session initialization is in flight", async () => {
 		const projectId = "concurrent-plan-change-project";
 		const purposes: string[] = [];

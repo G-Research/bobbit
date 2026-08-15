@@ -52,6 +52,11 @@ export type SandboxBootstrap = (projectId: string, purpose?: SandboxBootstrapPur
 export type SandboxPlanIdentity = { readonly image: string; readonly fingerprint?: string };
 export type SandboxPlanIdentityResolver = (projectId: string) => SandboxPlanIdentity | null;
 
+type VerificationBackend = {
+	sandbox: ProjectSandbox;
+	identity: { image: string; fingerprint?: string };
+};
+
 export interface SandboxManagerOptions {
 	/**
 	 * Called by `ensureForProject(projectId)` the first time a project's sandbox
@@ -77,10 +82,14 @@ export class SandboxManager {
 	 * for the exact ready image, so a requirements change cannot make a sidecar
 	 * inherit A's credentials or image after B was verified.
 	 */
-	private _verificationBackends = new Map<string, {
-		sandbox: ProjectSandbox;
-		identity: { image: string; fingerprint?: string };
-	}>();
+	private _verificationBackends = new Map<string, VerificationBackend>();
+	/**
+	 * Exact-image sidecars can outlive a requirements transition. Keep their
+	 * credential-free validator until terminal cleanup proves the recorded ID is
+	 * gone; routing an A-owned sidecar through B would correctly reject it, but
+	 * would leave the durable checkout pinned forever.
+	 */
+	private _supersededVerificationBackends = new Map<string, Map<string, VerificationBackend>>();
 	private _recoveryListeners: Array<(projectId: string, containerId: string) => void> = [];
 	private _healthUnsubscribes = new Map<string, () => void>();
 	/**
@@ -195,11 +204,19 @@ export class SandboxManager {
 				if (current?.identity.image === identity.image && current.identity.fingerprint === identity.fingerprint) return;
 				// Do not recreate or replace the live session sandbox. The new backend
 				// retains B's exact options for the subsequent Docker run; any failure
-				// leaves A untouched and verification fails closed at its caller.
-				this._verificationBackends.set(projectId, {
+				// leaves A untouched and verification fails closed at its caller. Keep A
+				// as an exact cleanup validator: a persisted A sidecar must never be
+				// authorized by B's image/mount contract.
+				if (current) this._retainVerificationBackend(projectId, current);
+				const retained = this._supersededVerificationBackends.get(projectId);
+				const retainedKey = this._verificationBackendIdentityKey(identity);
+				const next = retained?.get(retainedKey) ?? {
 					sandbox: new ProjectSandbox(sidecarOptions, this.deps),
 					identity,
-				});
+				};
+				retained?.delete(retainedKey);
+				if (retained?.size === 0) this._supersededVerificationBackends.delete(projectId);
+				this._verificationBackends.set(projectId, next);
 				return;
 			}
 			const current = this.sandboxes.get(projectId);
@@ -305,14 +322,61 @@ export class SandboxManager {
 	}
 
 	async removeVerificationSidecar(projectId: string, request: VerificationSidecarRemovalRequest): Promise<void> {
-		const backend = this._verificationBackends.get(projectId);
-		if (!backend) return;
-		await backend.sandbox.removeVerificationSidecar(request);
+		// Terminal cleanup must pass the same no-build exact-image fence as sidecar
+		// acquisition. A missing in-memory backend after restart is not evidence
+		// that the persisted container is gone.
+		await this.ensureVerificationBackend(projectId);
+		const failures: unknown[] = [];
+		for (const backend of this._verificationBackendCandidates(projectId)) {
+			try {
+				// Each backend validates the exact ID, labels, image and mounts before it
+				// removes anything (or proves that exact ID absent). Do not widen this to
+				// project-level discovery when an identity transition races terminal work.
+				await backend.sandbox.removeVerificationSidecar(request);
+				return;
+			} catch (error) {
+				failures.push(error);
+			}
+		}
+		throw new Error(`[sandbox-manager] immutable verification sidecar cleanup could not confirm the exact owner for project ${projectId}${failures.length ? "" : " (no backend)"}`);
 	}
 
 	async recoverVerificationSidecars(projectId: string, activeSignalIds: ReadonlySet<string>): Promise<string[]> {
-		const backend = this._verificationBackends.get(projectId);
-		return backend ? backend.sandbox.recoverVerificationSidecars(activeSignalIds) : [];
+		const removed = new Set<string>();
+		const failures: unknown[] = [];
+		for (const backend of this._verificationBackendCandidates(projectId)) {
+			try {
+				for (const signalId of await backend.sandbox.recoverVerificationSidecars(activeSignalIds)) removed.add(signalId);
+			} catch (error) {
+				failures.push(error);
+			}
+		}
+		if (failures.length > 0) throw new Error(`[sandbox-manager] immutable verification sidecar recovery could not complete for project ${projectId}`);
+		return [...removed];
+	}
+
+	private _verificationBackendIdentityKey(identity: VerificationBackend["identity"]): string {
+		return `${identity.image}\u0000${identity.fingerprint ?? ""}`;
+	}
+
+	private _retainVerificationBackend(projectId: string, backend: VerificationBackend): void {
+		let retained = this._supersededVerificationBackends.get(projectId);
+		if (!retained) this._supersededVerificationBackends.set(projectId, retained = new Map());
+		retained.set(this._verificationBackendIdentityKey(backend.identity), backend);
+	}
+
+	/** Current first, then only exact superseded validators. */
+	private _verificationBackendCandidates(projectId: string): VerificationBackend[] {
+		const current = this._verificationBackends.get(projectId);
+		const retained = this._supersededVerificationBackends.get(projectId);
+		return [...(current ? [current] : []), ...(retained?.values() ?? [])];
+	}
+
+	private async _reapVerificationBackends(projectId: string): Promise<void> {
+		const backends = this._verificationBackendCandidates(projectId);
+		await Promise.allSettled(backends.map(backend => backend.sandbox.recoverVerificationSidecars(new Set())));
+		this._verificationBackends.delete(projectId);
+		this._supersededVerificationBackends.delete(projectId);
 	}
 
 	/** Check if a project has a sandbox registered (regardless of state). */
@@ -373,33 +437,34 @@ export class SandboxManager {
 	/** Destroy sandbox for a project (remove container AND volume). */
 	async destroy(projectId: string): Promise<void> {
 		const sandbox = this.sandboxes.get(projectId);
-		const verificationBackend = this._verificationBackends.get(projectId);
-		if (!sandbox && !verificationBackend) return;
+		const verificationBackends = this._verificationBackendCandidates(projectId);
+		if (!sandbox && verificationBackends.length === 0) return;
 
 		sandbox?.stopHealthMonitor();
 		const unsub = this._healthUnsubscribes.get(projectId);
 		if (unsub) { try { unsub(); } catch { /* ignore */ } this._healthUnsubscribes.delete(projectId); }
 
-		// B owns the sidecar's image authority. Reap it through B before A's
-		// project teardown so the latter can never misclassify B as foreign.
-		if (verificationBackend) await verificationBackend.sandbox.recoverVerificationSidecars(new Set());
+		// Verification backends never own a live project container or its volumes.
+		// Reap their sidecars and discard every current/superseded validator without
+		// invoking ProjectSandbox.destroy() on one of them, which could mutate a
+		// live session's shared project volume during teardown.
+		await this._reapVerificationBackends(projectId);
 		if (sandbox) await sandbox.destroy();
-		else await verificationBackend!.sandbox.destroy();
 		this.sandboxes.delete(projectId);
-		this._verificationBackends.delete(projectId);
 		this._appliedImagePlans.delete(projectId);
 		console.log(`[sandbox-manager] Destroyed sandbox for project ${projectId}`);
 	}
 
 	/** Destroy all sandboxes. */
 	async destroyAll(): Promise<void> {
-		const projectIds = new Set([...this.sandboxes.keys(), ...this._verificationBackends.keys()]);
+		const projectIds = new Set([...this.sandboxes.keys(), ...this._verificationBackends.keys(), ...this._supersededVerificationBackends.keys()]);
 		const destroyPromises = [...projectIds].map(projectId => this.destroy(projectId).catch(err => {
 			console.warn(`[sandbox-manager] Destroy error for project ${projectId}:`, err?.message || err);
 		}));
 		await Promise.allSettled(destroyPromises);
 		this.sandboxes.clear();
 		this._verificationBackends.clear();
+		this._supersededVerificationBackends.clear();
 		this._healthUnsubscribes.clear();
 		this._appliedImagePlans.clear();
 	}
