@@ -177,7 +177,7 @@ describe("SandboxManager.ensureForProject failure isolation", () => {
 			assert.deepEqual(removals, ["image-b", "image-a"], "cleanup tries only strict current and retained exact validators");
 
 			await manager.destroy(projectId);
-			assert.deepEqual(reaped, ["image-b", "image-a"], "teardown reaps each bounded backend exactly once");
+			assert.deepEqual(reaped, ["image-b"], "teardown runs one project-scoped sweep on the current backend");
 			assert.equal((manager as any)._verificationBackends.has(projectId), false);
 			assert.equal((manager as any)._supersededVerificationBackends.has(projectId), false);
 		} finally {
@@ -238,6 +238,118 @@ describe("SandboxManager.ensureForProject failure isolation", () => {
 			await sessionInit;
 		} finally {
 			ProjectSandbox.prototype.getVerificationSidecar = original;
+		}
+	});
+
+	it("does not retain validators across A→B→C transitions without acquired sidecars", async () => {
+		const projectId = "empty-transition-project";
+		let image = "image-a";
+		const manager = new SandboxManager({
+			bootstrap: async () => ({ projectId, projectDir: process.cwd(), repoUrl: "", image, sandboxImageFingerprint: image }),
+		});
+
+		await manager.ensureVerificationBackend(projectId);
+		image = "image-b";
+		await manager.ensureVerificationBackend(projectId);
+		image = "image-c";
+		await manager.ensureVerificationBackend(projectId);
+
+		assert.equal((manager as any)._supersededVerificationBackends.has(projectId), false);
+	});
+
+	it("keeps A until its final owned sidecar is removed and runs recovery only through B", async () => {
+		const projectId = "owned-transition-project";
+		let image = "image-a";
+		const manager = new SandboxManager({
+			bootstrap: async () => ({ projectId, projectDir: process.cwd(), repoUrl: "", image, sandboxImageFingerprint: image }),
+		});
+		const originalAcquire = ProjectSandbox.prototype.getVerificationSidecar;
+		const originalRemove = ProjectSandbox.prototype.removeVerificationSidecar;
+		const originalRecover = ProjectSandbox.prototype.recoverVerificationSidecars;
+		const recoveries: string[] = [];
+		ProjectSandbox.prototype.getVerificationSidecar = async function(request) {
+			const options = (this as any).options;
+			return { containerId: "a".repeat(64), projectId: options.projectId, signalId: request.signalId, checkoutPath: request.checkoutPath, cwd: "/verified" };
+		};
+		ProjectSandbox.prototype.removeVerificationSidecar = async function(request) {
+			if ((this as any).options.image !== "image-a") throw new Error("wrong exact image");
+			assert.match(request.signalId, /^signal-a[12]$/);
+		};
+		ProjectSandbox.prototype.recoverVerificationSidecars = async function() {
+			const backendImage = (this as any).options.image;
+			recoveries.push(backendImage);
+			if (backendImage === "image-a") throw new Error("retained backend must not recover");
+			return ["signal-a1"];
+		};
+		try {
+			await manager.getVerificationSidecar(projectId, { signalId: "signal-a1", checkoutPath: process.cwd(), ignoredOutputDirs: [] });
+			await manager.getVerificationSidecar(projectId, { signalId: "signal-a2", checkoutPath: process.cwd(), ignoredOutputDirs: [] });
+			image = "image-b";
+			await manager.ensureVerificationBackend(projectId);
+			const retained = (manager as any)._supersededVerificationBackends.get(projectId);
+			assert.deepEqual([...retained.values()][0].outstanding, new Set(["signal-a1", "signal-a2"]));
+
+			await manager.removeVerificationSidecar(projectId, { signalId: "signal-a1", checkoutPath: process.cwd(), containerId: "a".repeat(64), ignoredOutputDirs: [] });
+			assert.equal((manager as any)._supersededVerificationBackends.get(projectId).size, 1, "A remains while it owns signal-a2");
+			await manager.removeVerificationSidecar(projectId, { signalId: "signal-a2", checkoutPath: process.cwd(), containerId: "a".repeat(64), ignoredOutputDirs: [] });
+			assert.equal((manager as any)._supersededVerificationBackends.has(projectId), false, "A prunes after its last owned sidecar");
+
+			// Recreate retained A, then prove discovery is intentionally only B-scoped.
+			image = "image-a";
+			await manager.getVerificationSidecar(projectId, { signalId: "signal-a1", checkoutPath: process.cwd(), ignoredOutputDirs: [] });
+			image = "image-b";
+			await manager.ensureVerificationBackend(projectId);
+			assert.deepEqual(await manager.recoverVerificationSidecars(projectId, new Set()), ["signal-a1"]);
+			assert.deepEqual(recoveries, ["image-b"], "retained A is never a second recovery sweep");
+			assert.equal((manager as any)._supersededVerificationBackends.has(projectId), false, "recovery clears returned ownership and prunes A");
+		} finally {
+			ProjectSandbox.prototype.getVerificationSidecar = originalAcquire;
+			ProjectSandbox.prototype.removeVerificationSidecar = originalRemove;
+			ProjectSandbox.prototype.recoverVerificationSidecars = originalRecover;
+		}
+	});
+
+	it("fails closed when recovery has no in-memory verification backend", async () => {
+		const manager = new SandboxManager({ bootstrap: async () => null });
+		await assert.rejects(
+			() => manager.recoverVerificationSidecars("restart-with-persisted-sidecars", new Set()),
+			/recovery is unavailable/,
+		);
+	});
+
+	it("uses a retained exact backend for terminal cleanup when the next bootstrap fails", async () => {
+		const projectId = "retained-cleanup-after-bootstrap-failure";
+		let image = "image-a";
+		let unavailable = false;
+		const manager = new SandboxManager({
+			bootstrap: async () => {
+				if (unavailable) throw new Error("verification bootstrap unavailable");
+				return { projectId, projectDir: process.cwd(), repoUrl: "", image, sandboxImageFingerprint: image };
+			},
+		});
+		const originalAcquire = ProjectSandbox.prototype.getVerificationSidecar;
+		const originalRemove = ProjectSandbox.prototype.removeVerificationSidecar;
+		const removedBy: string[] = [];
+		ProjectSandbox.prototype.getVerificationSidecar = async function(request) {
+			const options = (this as any).options;
+			return { containerId: "a".repeat(64), projectId: options.projectId, signalId: request.signalId, checkoutPath: request.checkoutPath, cwd: "/verified" };
+		};
+		ProjectSandbox.prototype.removeVerificationSidecar = async function() {
+			const backendImage = (this as any).options.image;
+			removedBy.push(backendImage);
+			if (backendImage !== "image-a") throw new Error("wrong exact image");
+		};
+		try {
+			await manager.getVerificationSidecar(projectId, { signalId: "signal-a", checkoutPath: process.cwd(), ignoredOutputDirs: [] });
+			image = "image-b";
+			await manager.ensureVerificationBackend(projectId);
+			unavailable = true;
+			await manager.removeVerificationSidecar(projectId, { signalId: "signal-a", checkoutPath: process.cwd(), containerId: "a".repeat(64), ignoredOutputDirs: [] });
+			assert.deepEqual(removedBy, ["image-b", "image-a"]);
+			assert.equal((manager as any)._supersededVerificationBackends.has(projectId), false);
+		} finally {
+			ProjectSandbox.prototype.getVerificationSidecar = originalAcquire;
+			ProjectSandbox.prototype.removeVerificationSidecar = originalRemove;
 		}
 	});
 });
