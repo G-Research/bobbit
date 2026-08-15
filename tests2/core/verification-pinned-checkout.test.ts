@@ -640,7 +640,13 @@ describe("VerificationPinnedCheckoutManager", () => {
 		const manager = new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner });
 		await assert.rejects(
 			manager.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" }),
-			isPinnedError("PINNED_CHECKOUT_ACQUIRE_FAILED"),
+			(error: unknown) => error instanceof PinnedCheckoutError
+				&& error.code === "PINNED_CHECKOUT_ACQUIRE_FAILED"
+				&& error.message === "Pinned checkout could not be prepared"
+				&& error.name === "PinnedCheckoutError[worktree-add:EIO]"
+				&& error.internalDiagnostic?.stage === "worktree-add"
+				&& error.internalDiagnostic.causeCode === "EIO",
+			"the direct error retains only closed stage/cause enums while its public text stays sanitized",
 		);
 		assert.deepEqual(manager.getDiagnostics(), { leaseCount: 0, cleanupPending: 0 });
 		assert.deepEqual(JSON.parse(await readFile(path.join(source.state, "verification-checkouts.json"), "utf8")), []);

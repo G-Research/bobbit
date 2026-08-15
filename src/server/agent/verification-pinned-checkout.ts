@@ -142,10 +142,56 @@ export interface PinnedCheckoutLease {
 	lastCleanupErrorCode?: CleanupErrorCode;
 }
 
+/** Closed, credential-safe evidence for failures inside frozen checkout acquisition. */
+export type PinnedCheckoutAcquisitionStage =
+	| "worktree-add"
+	| "materialize-worktree"
+	| "derive-ignored-outputs"
+	| "persist-ignored-outputs"
+	| "materialize-candidate"
+	| "expose-ignored-setup"
+	| "install-git-barrier"
+	| "compute-content-digest"
+	| "make-public-tree"
+	| "capture-root-identity"
+	| "persist-root-identity"
+	| "publish-candidate"
+	| "persist-ready-lease";
+
+export type PinnedCheckoutInternalCauseCode =
+	| "EACCES" | "EAGAIN" | "EBUSY" | "EEXIST" | "EIO" | "EMFILE"
+	| "ENFILE" | "ENOENT" | "ENOSPC" | "ENOTEMPTY" | "EPERM" | "EXDEV"
+	| "COMMAND_FAILED" | "TYPE_ERROR" | "UNKNOWN";
+
+export interface PinnedCheckoutInternalDiagnostic {
+	stage: PinnedCheckoutAcquisitionStage;
+	causeCode: PinnedCheckoutInternalCauseCode;
+}
+
+const SAFE_INTERNAL_CAUSE_CODES = new Set<PinnedCheckoutInternalCauseCode>([
+	"EACCES", "EAGAIN", "EBUSY", "EEXIST", "EIO", "EMFILE", "ENFILE", "ENOENT", "ENOSPC", "ENOTEMPTY", "EPERM", "EXDEV",
+]);
+
+function acquisitionDiagnostic(stage: PinnedCheckoutAcquisitionStage, error: unknown): PinnedCheckoutInternalDiagnostic {
+	const rawCode = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
+	const causeCode = typeof rawCode === "string" && SAFE_INTERNAL_CAUSE_CODES.has(rawCode as PinnedCheckoutInternalCauseCode)
+		? rawCode as PinnedCheckoutInternalCauseCode
+		: typeof rawCode === "number" ? "COMMAND_FAILED"
+			: error instanceof TypeError ? "TYPE_ERROR" : "UNKNOWN";
+	return { stage, causeCode };
+}
+
 export class PinnedCheckoutError extends Error {
-	constructor(readonly code: PinnedCheckoutErrorCode, message: string) {
+	constructor(
+		readonly code: PinnedCheckoutErrorCode,
+		message: string,
+		/** Internal-only closed enums. Public gate projections deliberately ignore this field. */
+		readonly internalDiagnostic?: PinnedCheckoutInternalDiagnostic,
+	) {
 		super(message);
-		this.name = "PinnedCheckoutError";
+		this.name = internalDiagnostic
+			? `PinnedCheckoutError[${internalDiagnostic.stage}:${internalDiagnostic.causeCode}]`
+			: "PinnedCheckoutError";
 	}
 }
 
@@ -467,41 +513,55 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 				this.leases.delete(lease.signalId);
 				throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
 			}
+			let acquisitionStage: PinnedCheckoutAcquisitionStage = "worktree-add";
 			try {
 				// Git and raw-byte copying only ever touch the private worktree. The public
 				// bind mount receives a finished source-only candidate by one rename.
 				await this.execGit(["-c", "core.hooksPath=", "-C", repoRoot, "worktree", "add", "--detach", "--no-checkout", worktree, lease.commitSha]);
+				acquisitionStage = "materialize-worktree";
 				await this.materialize(sourceRoot, worktree, sourceInventory);
 				// Derive once from raw-byte materialized ignore files, then let only
 				// the detached private worktree's Git engine confirm each candidate.
+				acquisitionStage = "derive-ignored-outputs";
 				const writableIgnoredDirectories = await this.deriveWritableIgnoredDirectories(lease, sourceInventory);
 				lease.writableIgnoredDirectories = writableIgnoredDirectories;
+				acquisitionStage = "persist-ignored-outputs";
 				await this.persist();
+				acquisitionStage = "materialize-candidate";
 				await this.materialize(worktree, candidate, sourceInventory);
+				acquisitionStage = "expose-ignored-setup";
 				await this.exposeIgnoredSetupDirectories(sourceRoot, candidate);
 				// An empty root `.git` file stops Git's upward repository discovery
 				// in the sandbox-visible candidate. It contains no metadata and is checked
 				// as part of every quarantine audit before the tree is republished.
+				acquisitionStage = "install-git-barrier";
 				await this.installPublicGitBarrier(candidate);
+				acquisitionStage = "compute-content-digest";
 				const contentDigest = await computeVerificationContentDigestFromInventory(candidate, sourceInventory);
+				acquisitionStage = "make-public-tree";
 				await this.makePublicExecutionTree(candidate);
 				lease.digest = contentDigest;
+				acquisitionStage = "capture-root-identity";
 				lease.publishedRootIdentity = rootIdentity(await lstat(candidate));
 				// Persist identity before the candidate is renamed into the sandbox
 				// namespace, so crash recovery never authorizes a replacement root.
+				acquisitionStage = "persist-root-identity";
 				await this.persist();
+				acquisitionStage = "publish-candidate";
 				await this.publishCandidate(lease, candidate);
 				lease.state = "ready";
 				lease.publicationState = "public";
+				acquisitionStage = "persist-ready-lease";
 				await this.persist();
 				return {
 					id: lease.signalId, projectId: lease.projectId, sourceRoot, repoRoot, path: target, trustedGitCwd: worktree,
 					commitSha: lease.commitSha, contentDigest, writableIgnoredDirectories: Object.freeze([...writableIgnoredDirectories]),
 				};
 			} catch (error) {
+				const diagnostic = acquisitionDiagnostic(acquisitionStage, error);
 				await this.releaseInternal(lease);
 				if (error instanceof PinnedCheckoutError) throw error;
-				throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared");
+				throw new PinnedCheckoutError("PINNED_CHECKOUT_ACQUIRE_FAILED", "Pinned checkout could not be prepared", diagnostic);
 			}
 		});
 	}
