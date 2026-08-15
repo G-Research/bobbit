@@ -39,6 +39,7 @@ export const TEST_DEFAULT_COMPONENT: TestComponent = {
 		check: "echo ok",
 		unit: "echo ok",
 		e2e: "echo ok",
+		test: "node -e \"console.error('expected reproduction failure');process.exit(1)\"",
 	},
 };
 
@@ -116,11 +117,10 @@ export function testWorkflows(): TestWorkflowsBlock {
 				{ id: "issue-analysis", name: "Issue Analysis", content: true, inject_downstream: true,
 					verify: [reviewStep("Analysis quality")] },
 				{ id: "reproducing-test", name: "Reproducing Test", depends_on: ["issue-analysis"],
-					metadata: { test_command: "string", error_pattern: "string" },
+					metadata: { error_pattern: "string" },
 					verify: [
-						// `expect: failure` makes the gate pass when the command exits non-zero.
-						{ name: "Test fails (bug exists)", type: "command",
-							run: "{{agent.test_command}}", expect: "failure" },
+						// `expect: failure` makes the gate pass when the component test command exits non-zero.
+						{ name: "Test fails (bug exists)", type: "command", component: "test", command: "test", expect: "failure" },
 					] },
 				{ id: "implementation", name: "Implementation", depends_on: ["reproducing-test"],
 					verify: implementationVerify() },

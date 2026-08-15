@@ -1,5 +1,6 @@
 import { normalizeWorkflow, type Workflow } from "./workflow-store.js";
 import { validateCommandEnvironment } from "./command-environment.js";
+import { unsafeCommandTemplateFailure } from "./verification-logic.js";
 
 /**
  * Workflow validation shared by project workflow mutations, goal creation, and
@@ -200,6 +201,10 @@ function validateWorkflowSteps(
 			}
 
 			if (stepType === "command") {
+				if (typeof step.run === "string") {
+					const templateFailure = unsafeCommandTemplateFailure(step.run);
+					if (templateFailure) fail(templateFailure.replace(/^Failed — /, ""));
+				}
 				const hasCommand = isNonEmptyString(step.command);
 				const hasRun = isNonEmptyString(step.run);
 				if (hasCommand && hasRun) {

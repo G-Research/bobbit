@@ -1390,6 +1390,15 @@
       }
     },
     {
+      "path": "tests2/integration/verification-command-template-security.test.ts",
+      "reason": "Integration coverage that malicious gate metadata in a legacy command template fails before spawn and cannot create a marker file.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
       "path": "tests2/browser/workflow-failure-guidance.spec.ts",
       "reason": "Chromium workflow journey for authoring, type-switch preservation, saving, reloading, clearing, goal customisation, and default-closed Markdown inspection of verification failure guidance.",
       "execution": {

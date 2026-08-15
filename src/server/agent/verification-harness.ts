@@ -982,6 +982,8 @@ import type { ProjectContextManager } from "./project-context-manager.js";
 import { generateTeamName } from "./team-names.js";
 import {
 	substituteVars as _substituteVars,
+	substituteCommandVars,
+	unsafeCommandTemplateFailure,
 	isTransientVerifierReviewError,
 	isTransientVerifierQaError,
 	matchExpectFailure,
@@ -4881,16 +4883,18 @@ export class VerificationHarness {
 								const duration_ms = Date.now() - startTime;
 								return { index, stepResult: { name: step.name, type: step.type, passed: false, status: "failed" as const, phase, output: msg, duration_ms, expect: step.expect } };
 							}
-							const cmd = this.substituteVars(resolvedRun, builtinVars, projectVars, agentVars, allGateStates);
-							// Auto-skip command steps whose run string is empty or contains
-							// unresolved template vars (e.g. {{project.build_command}} when the
-							// project has no build_command configured). Skipped-as-passed so
-							// optional infrastructure steps (build, custom commands) don't fail
-							// the gate for projects that don't define them.
+							// Shell commands deliberately resolve only fixed, locally-derived
+							// execution identifiers. In particular, do not pass signal or
+							// upstream metadata into this boundary: prompt substitution remains
+							// metadata-aware, command substitution must not be.
+							const cmd = substituteCommandVars(resolvedRun, builtinVars);
 							const requiredBuiltinFailure = readyToMergeUnresolvedBuiltinFailure(signal.gateId, cmd);
-							const skipReason = requiredBuiltinFailure ? null : isCommandStepSkippable(cmd);
-							if (requiredBuiltinFailure) {
-								result = { passed: false, output: requiredBuiltinFailure };
+							const unresolvedTemplate = cmd.match(/\{\{([^}]+)\}\}/);
+							const templateFailure = requiredBuiltinFailure ?? unsafeCommandTemplateFailure(cmd)
+								?? (unresolvedTemplate ? `Failed — command template variable {{${unresolvedTemplate[1].trim()}}} could not be resolved.` : null);
+							const skipReason = templateFailure ? null : isCommandStepSkippable(cmd);
+							if (templateFailure) {
+								result = { passed: false, output: templateFailure };
 							} else if (skipReason) {
 								result = { passed: true, skipped: true, output: skipReason };
 							} else {
