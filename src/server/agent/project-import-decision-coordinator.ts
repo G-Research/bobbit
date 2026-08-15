@@ -2,6 +2,10 @@ import type { ContextTraceStore, TraceDecisionOutcomeRow } from "./context-trace
 import type { ProjectContextManager } from "./project-context-manager.js";
 import type { ProjectRegistry, RegisteredProject } from "./project-registry.js";
 import type { Component } from "./project-config-store.js";
+import {
+  canonicalProjectImportRoot,
+  validateProjectImportDecisionContext,
+} from "./project-import-decision-context.js";
 
 /**
  * Minimal context shape retained here to keep this lifecycle owner independent
@@ -32,7 +36,8 @@ interface ImportRunStore {
 }
 
 interface ProjectImportDispatcher {
-  dispatchProjectImport(projectId: string, importId: string): Promise<readonly TraceDecisionOutcomeRow[]>;
+  /** The coordinator supplies the freshly registry-validated snapshot. */
+  dispatchProjectImport(projectId: string, importId: string, context: ProjectImportDecisionContextSnapshot): Promise<readonly TraceDecisionOutcomeRow[]>;
 }
 
 export interface ProjectImportDecisionCoordinatorDeps {
@@ -40,6 +45,8 @@ export interface ProjectImportDecisionCoordinatorDeps {
   projectContextManager: Pick<ProjectContextManager, "getOrCreate">;
   dispatcher: ProjectImportDispatcher;
   buildContext(input: { project: Pick<RegisteredProject, "id" | "rootPath">; importId: string; components: readonly Component[] }): ProjectImportDecisionContextSnapshot;
+  /** Test seam; production resolves the registered root through realpath. */
+  canonicalProjectRoot?: (project: Pick<RegisteredProject, "id" | "rootPath">) => string;
   now?: () => number;
   /** Project/import-run diagnostics use a separate redacted stream, never a session id. */
   trace?: Pick<ContextTraceStore, "appendProjectImportTrace">;
@@ -102,21 +109,35 @@ export class ProjectImportDecisionCoordinator {
 
     // Never rebuild an already durable context. An import retry/restart must
     // dispatch against the exact snapshot originally admitted, not current FS.
-    if (!store.getImportRun?.(importId)) {
+    let run = store.getImportRun?.(importId);
+    if (!run) {
       const snapshot = this.deps.buildContext({
         project,
         importId,
         components: context.projectConfigStore.getComponents(),
       });
-      store.ensureImportRun({
+      const ensured = store.ensureImportRun({
         id: importId,
         projectId,
         context: snapshot,
         createdAt: new Date(marker.createdAt || this.now()).toISOString(),
         hooks: {},
       });
+      run = ensured?.run;
     }
-    const outcomes = await this.deps.dispatcher.dispatchProjectImport(projectId, importId);
+    if (!run) return [];
+
+    // The durable file is untrusted on every restart. Match the snapshot to
+    // the current registry identity/root immediately before any dispatcher can
+    // select a hook or derive ModuleHost.workingDir from it.
+    let snapshot: ProjectImportDecisionContextSnapshot;
+    try {
+      const projectRoot = this.deps.canonicalProjectRoot?.(project) ?? canonicalProjectImportRoot(project.rootPath);
+      snapshot = validateProjectImportDecisionContext(run.context, { projectId, importId, projectRoot });
+    } catch {
+      return [];
+    }
+    const outcomes = await this.deps.dispatcher.dispatchProjectImport(projectId, importId, snapshot);
     // Hook completion is already durable before the dispatcher returns. Trace
     // failures are diagnostic only and cannot cause a registration/replay retry
     // to duplicate a request, default, memory, proposal, or continuation.

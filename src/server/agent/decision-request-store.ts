@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { FsLike } from "../gateway-deps.js";
 import { realFs } from "../gateway-deps.js";
+import { validateProjectImportDecisionContext } from "./project-import-decision-context.js";
 
 /** Terminal deferrable records remain available for semantic deduplication. */
 export const DECISION_REQUEST_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -629,30 +630,19 @@ function isLegacyStoredRequest(value: unknown): value is Omit<StoredDecisionRequ
 	return isStoredRequest({ ...value, delivery: { kind: "session", sessionId: value.sessionId } });
 }
 
-const IMPORT_LANGUAGES = new Set([
-	"c", "cpp", "csharp", "dart", "elixir", "go", "haskell", "java", "javascript", "kotlin", "lua", "php", "python", "ruby", "rust", "scala", "shell", "sql", "swift", "typescript",
-]);
-
 function isDelivery(value: unknown): value is DecisionDelivery {
 	return isRecord(value) && (value.kind === "session" && isSafeIdentifier(value.sessionId)
 		|| value.kind === "project-import" && isSafeIdentifier(value.importId));
 }
 
 function isImportRun(value: unknown): value is StoredProjectImportRun {
-	if (!isRecord(value) || !isSafeIdentifier(value.id) || !isSafeIdentifier(value.projectId) || !isImportContext(value.context)
-		|| value.context.projectId !== value.projectId || value.context.importId !== value.id || !isIsoInstant(value.createdAt)
+	if (!isRecord(value) || !isSafeIdentifier(value.id) || !isSafeIdentifier(value.projectId) || !isIsoInstant(value.createdAt)
 		|| (value.completedAt !== undefined && !isIsoInstant(value.completedAt)) || !isRecord(value.hooks)) return false;
+	try {
+		const context = validateProjectImportDecisionContext(value.context);
+		if (context.projectId !== value.projectId || context.importId !== value.id) return false;
+	} catch { return false; }
 	return Object.entries(value.hooks).every(([key, hook]) => isBoundedString(key, 256) && isImportHook(hook));
-}
-
-function isImportContext(value: unknown): value is StoredProjectImportContext {
-	if (!isRecord(value) || value.event !== "projectImported" || !isSafeIdentifier(value.projectId) || !isSafeIdentifier(value.importId)
-		|| !isCanonicalPath(value.projectRoot) || !Array.isArray(value.ownedRoots) || value.ownedRoots.length === 0 || value.ownedRoots.length > 31
-		|| !value.ownedRoots.every(isCanonicalPath) || !Array.isArray(value.components) || value.components.length > 30) return false;
-	if (new Set(value.ownedRoots).size !== value.ownedRoots.length || !value.ownedRoots.includes(value.projectRoot)) return false;
-	return value.components.every(component => isRecord(component) && isSafeIdentifier(component.id) && isCanonicalPath(component.root)
-		&& Array.isArray(component.languages) && component.languages.length <= 12 && component.languages.every(language => typeof language === "string" && IMPORT_LANGUAGES.has(language))
-		&& new Set(component.languages).size === component.languages.length);
 }
 
 function isImportHook(value: unknown): boolean {
@@ -664,10 +654,6 @@ function isImportHook(value: unknown): boolean {
 
 function isImportOutcome(value: unknown): value is ImportDecisionOutcomeCode {
 	return value === "applied" || value === "superseded" || value === "denied" || value === "dropped" || value === "error";
-}
-
-function isCanonicalPath(value: unknown): value is string {
-	return isString(value) && value.length > 0 && value.length <= 4096 && path.isAbsolute(value) && path.normalize(value) === value;
 }
 
 function isSafeIdentifier(value: unknown): value is string {

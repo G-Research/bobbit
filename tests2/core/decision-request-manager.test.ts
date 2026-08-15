@@ -6,6 +6,7 @@ import {
 	DECISION_ADVISORY_PENDING_LIMIT,
 	DECISION_GOAL_PENDING_LIMIT,
 	DECISION_SESSION_PENDING_LIMIT,
+	DecisionHookDispatcher,
 	DecisionRequestManager,
 	type DecisionRequestOrigin,
 } from "../../src/server/agent/decision-request-manager.ts";
@@ -83,6 +84,27 @@ function request(clock: Clock, overrides: Partial<ValidatedExtensionDecisionRequ
 }
 
 describe("DecisionRequestManager", () => {
+	it("does not invoke a hook from a forged durable import context", async () => {
+		const { manager } = fixture();
+		let invocations = 0;
+		const dispatcher = new DecisionHookDispatcher({
+			manager,
+			registry: { list: () => [] } as any,
+			moduleHost: { invoke: async () => { invocations++; return null; } } as any,
+			grantsForProject: () => [],
+		});
+		(manager as unknown as { getImportRun: () => unknown }).getImportRun = () => ({
+			id: "import-1", projectId: "project-1", createdAt: "2026-01-01T00:00:00.000Z", hooks: {},
+			context: {
+				event: "projectImported", projectId: "project-1", importId: "import-1", projectRoot: "/project",
+				ownedRoots: ["/project", "/project-escape"], components: [],
+			},
+		});
+
+		await dispatcher.dispatchProjectImport("project-1", "import-1", { projectId: "project-1", importId: "import-1", projectRoot: "/project" });
+		assert.equal(invocations, 0);
+	});
+
 	it("deduplicates semantic requests despite title, labels, event, and deadline changes", async () => {
 		const { manager, clock, store } = fixture();
 		const first = await manager.create(origin(), request(clock));

@@ -142,6 +142,27 @@ describe("DecisionRequestStore", () => {
 		assert.equal(store.getImportRun("import-1")?.completedAt, "2026-01-01T00:01:00.000Z");
 	});
 
+	it("fails closed at load for a forged import context but restores an exact snapshot", () => {
+		const dir = stateDir("import-load-validation");
+		const run = {
+			id: "import-1", projectId: "project-1", createdAt: "2026-01-01T00:00:00.000Z", hooks: {},
+			context: {
+				event: "projectImported" as const, projectId: "project-1", importId: "import-1", projectRoot: importFixtureRoot,
+				ownedRoots: [importFixtureRoot, path.join(importFixtureRoot, "api")],
+				components: [{ id: "component-1", root: path.join(importFixtureRoot, "api"), languages: ["typescript"] }],
+			},
+		};
+		const store = new DecisionRequestStore(dir, memfs);
+		assert.equal(store.ensureImportRun(run)?.created, true);
+		assert.equal(new DecisionRequestStore(dir, memfs).isHealthy(), true);
+
+		const file = path.join(dir, "extension-decision-requests.json");
+		const forged = JSON.parse(memfs.readFileSync(file, "utf-8"));
+		forged.importRuns["import-1"].context.ownedRoots = [importFixtureRoot, `${importFixtureRoot}-escape`];
+		memfs.writeFileSync(file, JSON.stringify(forged), "utf-8");
+		assert.equal(new DecisionRequestStore(dir, memfs).isHealthy(), false);
+	});
+
 	it("persists a consent pause once, excludes it from retention, and CASes exact resume", () => {
 		const dir = stateDir("consent-pause");
 		const store = new DecisionRequestStore(dir, memfs);

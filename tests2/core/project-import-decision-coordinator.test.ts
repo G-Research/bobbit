@@ -24,6 +24,7 @@ describe("ProjectImportDecisionCoordinator", () => {
 			buildContext: ({ project, importId }) => ({
 				event: "projectImported" as const, projectId: project.id, importId, projectRoot: "/project", ownedRoots: ["/project"], components: [],
 			}),
+			canonicalProjectRoot: project => project.rootPath,
 			dispatcher: {
 				dispatchProjectImport: async () => {
 					dispatches++;
@@ -73,6 +74,7 @@ describe("ProjectImportDecisionCoordinator", () => {
 			buildContext: ({ project, importId }) => ({
 				event: "projectImported" as const, projectId: project.id, importId, projectRoot: project.rootPath, ownedRoots: [project.rootPath], components: [],
 			}),
+			canonicalProjectRoot: project => project.rootPath,
 			dispatcher: {
 				dispatchProjectImport: async (projectId) => {
 					if (projectId === "project-1") {
@@ -108,5 +110,34 @@ describe("ProjectImportDecisionCoordinator", () => {
 		const mutationsAtResolution = [...mutations];
 		await Promise.resolve();
 		expect(mutations).toEqual(mutationsAtResolution);
+	});
+
+	it("fails closed before dispatching a stale durable project root", async () => {
+		const run = { version: 1 as const, id: "import-1", createdAt: Date.now(), state: "ready" as const };
+		let dispatched = 0;
+		const coordinator = new ProjectImportDecisionCoordinator({
+			registry: {
+				get: () => ({ id: "project-1", rootPath: "/registered-project", importDecisionRun: run }),
+				list: () => [],
+			} as any,
+			projectContextManager: {
+				getOrCreate: () => ({
+					decisionRequestStore: {
+						getImportRun: () => ({
+							id: "import-1", projectId: "project-1", createdAt: new Date().toISOString(), hooks: {},
+							context: { event: "projectImported", projectId: "project-1", importId: "import-1", projectRoot: "/forged-project", ownedRoots: ["/forged-project"], components: [] },
+						}),
+						ensureImportRun: () => { throw new Error("must not replace a durable run"); },
+					},
+					projectConfigStore: { getComponents: () => [] },
+				}),
+			} as any,
+			buildContext: () => { throw new Error("must not rebuild a durable run"); },
+			canonicalProjectRoot: project => project.rootPath,
+			dispatcher: { dispatchProjectImport: async () => { dispatched++; return []; } },
+		});
+
+		await coordinator.dispatch("project-1", "import-1");
+		expect(dispatched).toBe(0);
 	});
 });
