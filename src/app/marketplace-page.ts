@@ -1478,6 +1478,13 @@ function builtinRowShadowed(packName: string): boolean {
 	);
 }
 
+/** Built-in packs resolve at server scope. Code Intelligence needs an explicit
+ * scope disclosure because its default-off master switch is post-import server
+ * setup, not a per-project activation choice. */
+function isCodeIntelligenceBuiltin(pack: InstalledPackWire): boolean {
+	return pack.builtin === true && pack.packName === "code-intelligence";
+}
+
 function renderInstalledPanel(): TemplateResult {
 	const builtinPacks = installed.filter((p) => p.builtin);
 	const scopesWithPacks = SCOPE_ORDER.filter((s) => packsForScope(s).length > 0);
@@ -1535,6 +1542,9 @@ function renderBuiltinPackCard(pack: InstalledPackWire): TemplateResult {
 						${isCorrupt ? html`<span class="market-corrupt" data-testid="market-pack-corrupt">${icon(AlertTriangle, "xs")} corrupt</span>` : ""}
 					</div>
 					${pack.manifest?.description ? html`<div class="text-xs text-muted-foreground mt-0.5">${pack.manifest.description}</div>` : ""}
+					${!shadowed && isCodeIntelligenceBuiltin(pack)
+						? html`<div class="market-activation-help text-[11px] text-muted-foreground/70 mt-1" id="code-intelligence-server-scope" data-testid="code-intelligence-server-scope">This enables Code Intelligence tools and panels for every project on this server.</div>`
+						: ""}
 					<div class="mt-1.5">${entityChips(pack)}</div>
 				</div>
 				${shadowed ? "" : renderPackActivationSummary(pack)}
@@ -1648,13 +1658,16 @@ function renderPackActivationSummary(pack: InstalledPackWire): TemplateResult {
 	const label = !packOn ? "Disabled" : enabled === total ? "Enabled" : enabled === 0 ? "Disabled" : "Partially enabled";
 	const cacheKey = `${pack.scope}:${pack.packName}`;
 	const busyKey = `activation:${cacheKey}:all`;
+	const isCodeIntelligence = isCodeIntelligenceBuiltin(pack);
 	return html`
-		<label class="market-pack-activation-toggle" title="Enable or disable all pack entries">
+		<label class="market-pack-activation-toggle" title=${isCodeIntelligence ? "Enable or disable Code Intelligence for this Bobbit server" : "Enable or disable all pack entries"}>
 			<span>${label}</span>
 			<span class="market-toggle-switch market-toggle-switch--master">
 				<input
 					type="checkbox"
 					data-testid="market-toggle-pack-${pack.packName}"
+					aria-label=${isCodeIntelligence ? "Enable Code Intelligence for this Bobbit server" : undefined}
+					aria-describedby=${isCodeIntelligence ? "code-intelligence-server-scope" : undefined}
 					.checked=${masterChecked}
 					?disabled=${busy.has(busyKey)}
 					@change=${(e: Event) => handleToggleAllActivation(pack, (e.target as HTMLInputElement).checked)}
