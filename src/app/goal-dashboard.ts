@@ -3087,9 +3087,9 @@ function renderSignalEntry(signal: GateSignal): TemplateResult {
 	const cancellation = vStatus === "cancelled" ? signal.verification.cancellation : undefined;
 	const causeLabel = cancellationCauseLabel(cancellation);
 	const gate = gates.find(candidate => candidate.gateId === signal.gateId);
-	const latestCancelledSignal = [...(gate?.signals ?? [])].reverse().find(candidate => candidate.verification.status === "cancelled");
+	const latestSignal = gate?.signals.at(-1);
 	const canResignal = vStatus === "cancelled"
-		&& latestCancelledSignal?.id === signal.id
+		&& latestSignal?.id === signal.id
 		&& gate?.status === "pending"
 		&& !currentGoal?.paused
 		&& !currentGoal?.archived;

@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/dom/goal-dashboard-resignal.test.ts",
+      "reason": "Real dashboard DOM regression coverage that restricts re-signal to the current cancelled generation and preserves the action for the latest pending cancellation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
       "path": "tests2/integration/strict-update-body-routes.test.ts",
       "reason": "Regression contract for strict finite-shape update bodies: exact route allow-lists, accepted representative updates, unknown-key rejection, no mutation, goal policy guidance, and immutable staff sandboxing.",
       "execution": {
