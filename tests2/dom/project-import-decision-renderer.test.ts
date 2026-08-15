@@ -5,6 +5,7 @@ __syncBeforeAll(() => __syncCE());
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "lit";
 import { ProjectImportDecisionRenderer } from "../../src/ui/tools/renderers/ProjectImportDecisionRenderer.js";
+import { showProjectDialog } from "../../src/app/dialogs.js";
 import {
 	__resetProjectImportDecisionRequestsForTests,
 	activateProjectImportDecisionRequests,
@@ -53,6 +54,34 @@ afterEach(() => {
 });
 
 describe("ProjectImportDecisionRenderer", () => {
+	it("renders a pending import request when its activity projection is empty", async () => {
+		vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = new URL(String(input), "http://localhost");
+			if (url.pathname === "/api/projects/detect" && init?.method === "POST") {
+				return new Response(JSON.stringify({ exists: true, hasBobbit: true, isEmpty: false, hasPackageJson: false, name: "Imported" }));
+			}
+			if (url.pathname === "/api/projects" && init?.method === "POST") {
+				return new Response(JSON.stringify({ id: PROJECT_ID, name: "Imported", rootPath: "/tmp/imported", colorLight: "", colorDark: "" }));
+			}
+			if (url.pathname === "/api/projects") return new Response(JSON.stringify({ projects: [] }));
+			if (url.pathname === `/api/projects/${PROJECT_ID}/import-decision-requests`) {
+				return new Response(JSON.stringify({ requests: [{ id: PENDING.id, status: "pending", decisionClass: "deferrable", request: PENDING }], activity: [] }));
+			}
+			if (url.pathname === `/api/projects/${PROJECT_ID}/import-proposals`) return new Response(JSON.stringify({ proposals: [] }));
+			if (url.pathname === "/api/projects/preflight") return new Response(JSON.stringify({ checks: [] }));
+			throw new Error(`unexpected request: ${url.pathname}`);
+		});
+
+		showProjectDialog();
+		const picker = document.querySelector("directory-picker")!;
+		picker.dispatchEvent(new CustomEvent("directory-select", { detail: { path: "/tmp/imported" } }));
+		await vi.waitFor(() => expect(Array.from(document.querySelectorAll("button")).find(button => button.textContent?.includes("Continue"))).toBeDefined());
+		Array.from(document.querySelectorAll("button")).find(button => button.textContent?.includes("Continue"))!.click();
+
+		await vi.waitFor(() => expect(document.querySelector("ask-user-choices-widget")).not.toBeNull());
+		expect(document.querySelector('[data-testid="project-import-decision-activity"]')).toBeNull();
+		Array.from(document.querySelectorAll("button")).find(button => button.textContent?.includes("Cancel"))!.click();
+	});
 	it("reuses the existing Other-choice widget and posts only to the project import route", async () => {
 		const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify(terminal({ kind: "other", text: "A custom safe mode" })), { status: 200 }));
 		const { container, widget } = await renderDecision();

@@ -261,6 +261,7 @@ test.describe("Add Project flow (UI)", () => {
 
 			// Startup reconciliation and an HTTP retry use the same completed run;
 			// neither may ask again after the durable answer and review are recorded.
+			await gateway.crash();
 			await gateway.restart();
 			const recovered = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-decision-requests`);
 			expect(recovered.status).toBe(200);
