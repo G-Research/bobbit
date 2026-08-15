@@ -428,7 +428,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 				const sourceStats = await lstat(sourceRoot);
 				if (!sourceStats.isDirectory() || sourceStats.isSymbolicLink()) throw new Error("unsafe source root");
 				repoRoot = await this.gitTopLevel(sourceRoot);
-				if (sourceRoot !== repoRoot) throw new PinnedCheckoutError("PINNED_CHECKOUT_UNSUPPORTED_LAYOUT", "Pinned checkout requires a single repository root");
+				if (!samePath(sourceRoot, repoRoot)) throw new PinnedCheckoutError("PINNED_CHECKOUT_UNSUPPORTED_LAYOUT", "Pinned checkout requires a single repository root");
 				await this.assertCommit(repoRoot, signal.commitSha);
 				await this.ensureCheckoutRoot(sourceRoot);
 			} catch (error) {
@@ -555,10 +555,10 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 				if (!rawInfo.isDirectory() || rawInfo.isSymbolicLink()) throw new Error("unsafe repository");
 				const sourceRoot = await realpath(source.sourceRoot);
 				const info = await lstat(sourceRoot);
-				if (!info.isDirectory() || info.isSymbolicLink() || sourceRoot !== expected
+				if (!info.isDirectory() || info.isSymbolicLink() || !samePath(sourceRoot, expected)
 					|| seenRoots.some(root => root.repoKey !== "." && repoKey !== "." && (isWithin(root.sourceRoot, sourceRoot) || isWithin(sourceRoot, root.sourceRoot)))) throw new Error("unsafe repository");
 				const repoRoot = await this.gitTopLevel(sourceRoot);
-				if (repoRoot !== sourceRoot) throw new Error("not repository root");
+				if (!samePath(repoRoot, sourceRoot)) throw new Error("not repository root");
 				await this.assertCommit(repoRoot, source.commitSha);
 				const scope = verificationCheckoutRepositoryScope(repoKey);
 				if (!scope) throw new Error("invalid repository");
@@ -613,7 +613,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 			const source = layout.repositories[index];
 			return source !== undefined
 				&& verificationRepositoryKey(source.repoKey) === repository.repoKey
-				&& source.sourceRoot === repository.sourceRoot
+				&& samePath(source.sourceRoot, repository.sourceRoot)
 				&& source.commitSha.toLowerCase() === repository.commitSha;
 		});
 	}
@@ -768,7 +768,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		if (!lease || lease.state !== "ready") throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Pinned checkout is unavailable");
 		try {
 			const restored = await this.checkoutFromLease(lease);
-			if (restored.path !== checkout.path || restored.projectId !== checkout.projectId || restored.commitSha !== checkout.commitSha
+			if (!samePath(restored.path, checkout.path) || restored.projectId !== checkout.projectId || restored.commitSha !== checkout.commitSha
 				|| !sameWritableIgnoredDirectories(restored.writableIgnoredDirectories, checkout.writableIgnoredDirectories)) throw new Error("mismatched checkout");
 			const sourceInventory = restoreInventory(lease.sourceInventory);
 			restoreWritableIgnoredDirectories(lease.writableIgnoredDirectories, sourceInventory);
@@ -828,7 +828,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 	private async assertMultiUnchanged(lease: PinnedCheckoutLease, checkout: PinnedCheckout): Promise<void> {
 		try {
 			const restored = await this.checkoutMultiFromLease(lease);
-			if (restored.path !== checkout.path || restored.projectId !== checkout.projectId || restored.commitSha !== checkout.commitSha
+			if (!samePath(restored.path, checkout.path) || restored.projectId !== checkout.projectId || restored.commitSha !== checkout.commitSha
 				|| restored.contentDigest.digest !== checkout.contentDigest.digest || restored.contentDigest.fileCount !== checkout.contentDigest.fileCount
 				|| !sameWritableIgnoredDirectories(restored.writableIgnoredDirectories, checkout.writableIgnoredDirectories)) throw new Error("mismatched checkout");
 			const audit = await this.quarantinePublic(lease);
@@ -1201,7 +1201,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 			try {
 				await symlink(canonicalSource, target, process.platform === "win32" ? "junction" : "dir");
 				const [linkedTarget, after] = await Promise.all([realpath(target), lstat(source)]);
-				if (linkedTarget !== canonicalSource || !after.isDirectory() || after.isSymbolicLink() || !sameIdentity(before, after)) {
+				if (!samePath(linkedTarget, canonicalSource) || !after.isDirectory() || after.isSymbolicLink() || !sameIdentity(before, after)) {
 					throw new Error("ignored setup directory changed during exposure");
 				}
 				// stat follows the just-created link and binds it to the directory checked above.
