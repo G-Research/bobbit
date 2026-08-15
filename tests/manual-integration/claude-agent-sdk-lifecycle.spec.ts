@@ -1127,7 +1127,8 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 
 			const terminated = await gateway.sessionManager.terminateSession(created.id);
 			expect(terminated).toBe(true);
-			expect(gateway.sessionManager.getSession(created.id)?.status).toBe("terminated");
+			expect(gateway.sessionManager.getSession(created.id)).toBeUndefined();
+			expect(gateway.sessionManager.getPersistedSession(created.id)?.archived).toBe(true);
 		} finally {
 			if (gateway) await gateway.shutdown().catch(() => {});
 			restoreSmokeEnvironment(originalEnvironment);
@@ -1453,8 +1454,10 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			expect(beforeReplacement.success && afterRestart.success).toBe(true);
 			assertManualTranscriptPrefixProjection(beforeReplacement.data, afterRestart.data);
 			expect(hasDurableSubscriptionUsage(gateway.sessionManager.getSessionCost(created.id))).toBe(true);
-			await gateway.sessionManager.terminateSession(created.id);
-			expect(gateway.sessionManager.getSession(created.id)?.status).toBe("terminated");
+			const terminated = await gateway.sessionManager.terminateSession(created.id);
+			expect(terminated).toBe(true);
+			expect(gateway.sessionManager.getSession(created.id)).toBeUndefined();
+			expect(gateway.sessionManager.getPersistedSession(created.id)?.archived).toBe(true);
 		} finally {
 			if (gateway) await gateway.shutdown().catch(() => {});
 			restoreSmokeEnvironment(originalEnvironment);
