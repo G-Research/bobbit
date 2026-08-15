@@ -205,25 +205,69 @@ describe("Claude Agent SDK sandbox spawn", () => {
 		expect(pipeFailure.kill).toHaveBeenCalledWith("SIGTERM");
 	});
 
-	it("redacts every supported credential form from docker diagnostics", () => {
+	it("redacts credentials and private Docker execution coordinates while retaining safe diagnostics", () => {
+		const privateValues = [
+			"oauth-secret", "api-secret", "gateway-secret", "cloud-secret",
+			"session-correlation-id", "goal-correlation-id", "staff-correlation-id", "/private/bobbit-cwd", "/private/claude-config",
+			"https://private-gateway.test", "/workspace-wt/private-worktree", "container-correlation-id",
+			"sdk-resume-uuid-equals", "sdk-resume-uuid-split",
+		];
 		const secretArgs = [
-			"exec", "-e", "CLAUDE_CODE_OAUTH_TOKEN=oauth-secret", "-e", "ANTHROPIC_API_KEY=api-secret",
+			"exec", "-i", "-u", "bobbit-sdk",
+			"-e", "CLAUDE_CODE_OAUTH_TOKEN=oauth-secret", "-e", "ANTHROPIC_API_KEY=api-secret",
 			"-e", "BOBBIT_TOKEN", "gateway-secret", "-e", "AWS_SECRET=cloud-secret",
+			"-e", "BOBBIT_SESSION_ID", "session-correlation-id", "-e", "BOBBIT_GOAL_ID=goal-correlation-id",
+			"-e", "BOBBIT_STAFF_ID=staff-correlation-id", "-e", "BOBBIT_CWD", "/private/bobbit-cwd",
+			"--env", "CLAUDE_CONFIG_DIR=/private/claude-config", "-e", "BOBBIT_GATEWAY_URL", "https://private-gateway.test",
+			"-w", "/workspace-wt/private-worktree", "container-correlation-id",
+			"/usr/local/bin/bobbit-claude-agent-sdk", "--resume=sdk-resume-uuid-equals", "--resume", "sdk-resume-uuid-split",
+			"--model", "claude-safe-model", "--allowedTools", "read,workflow_gate",
 		];
 		const rendered = redactDockerArgs(secretArgs);
 		expect(rendered).toContain("CLAUDE_CODE_OAUTH_TOKEN=<REDACTED>");
 		expect(rendered).toContain("ANTHROPIC_API_KEY=<REDACTED>");
 		expect(rendered).toContain("BOBBIT_TOKEN <REDACTED>");
-		expect(rendered).not.toMatch(/oauth-secret|api-secret|gateway-secret|cloud-secret/);
+		expect(rendered).toContain("BOBBIT_SESSION_ID <REDACTED>");
+		expect(rendered).toContain("BOBBIT_GOAL_ID=<REDACTED>");
+		expect(rendered).toContain("BOBBIT_STAFF_ID=<REDACTED>");
+		expect(rendered).toContain("BOBBIT_CWD <REDACTED>");
+		expect(rendered).toContain("CLAUDE_CONFIG_DIR=<REDACTED>");
+		expect(rendered).toContain("BOBBIT_GATEWAY_URL <REDACTED>");
+		expect(rendered).toContain("-w <REDACTED> <REDACTED>");
+		expect(rendered).toContain("--resume=<REDACTED>");
+		expect(rendered).toContain("--resume <REDACTED>");
+		expect(rendered).toContain("-u bobbit-sdk");
+		expect(rendered).toContain("/usr/local/bin/bobbit-claude-agent-sdk --resume=<REDACTED>");
+		expect(rendered).toContain("--model claude-safe-model --allowedTools read,workflow_gate");
+		for (const value of privateValues) expect(rendered).not.toContain(value);
 
 		const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
 		let toolArgs: string[] = [];
 		spawnDockerExec({
-			containerId: "sandbox", cwd: "/workspace", env: { CLAUDE_CODE_OAUTH_TOKEN: "oauth-secret" }, command: ["command"],
+			containerId: "container-correlation-id", cwd: "/workspace-wt/private-worktree",
+			env: { BOBBIT_SESSION_ID: "session-correlation-id", CLAUDE_CODE_OAUTH_TOKEN: "oauth-secret" }, command: ["command"],
 			spawn: ((_command: string, args: string[]) => { toolArgs = args; return dockerChild(); }) as any,
-		});
+		}, ["--resume", "sdk-resume-uuid-split"]);
+		expect(toolArgs).toEqual(expect.arrayContaining([
+			"BOBBIT_SESSION_ID=session-correlation-id", "CLAUDE_CODE_OAUTH_TOKEN=oauth-secret",
+			"/workspace-wt/private-worktree", "container-correlation-id", "sdk-resume-uuid-split",
+		]));
 		expect(toolArgs).not.toContain("-u");
-		expect(log.mock.calls.join(" ")).not.toContain("oauth-secret");
+		const logged = log.mock.calls.join(" ");
+		for (const value of ["session-correlation-id", "oauth-secret", "/workspace-wt/private-worktree", "container-correlation-id", "sdk-resume-uuid-split"]) {
+			expect(logged).not.toContain(value);
+		}
+	});
+
+	it("does not consume later flags as missing private option values", () => {
+		const rendered = redactDockerArgs([
+			"exec", "-e", "BOBBIT_TOKEN", "-w", "/workspace-wt/private", "container-correlation-id",
+			"/usr/local/bin/bobbit-claude-agent-sdk", "--resume", "--model", "claude-safe-model",
+		]);
+		expect(rendered).toContain("-e BOBBIT_TOKEN -w <REDACTED> <REDACTED>");
+		expect(rendered).toContain("--resume --model claude-safe-model");
+		expect(rendered).not.toContain("/workspace-wt/private");
+		expect(rendered).not.toContain("container-correlation-id");
 	});
 
 	it("requires Bobbit OAuth for direct sessions and explicit policy for Docker", async () => {

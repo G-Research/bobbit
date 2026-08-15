@@ -9,9 +9,9 @@
  * capability secret BOBBIT_SESSION_SECRET into `docker exec -e` and then logs
  * the exec args via console.log. The redactor must scrub the VALUE of
  * BOBBIT_SESSION_SECRET, BOBBIT_TOKEN, and any `*_SECRET` / `*_TOKEN` env var
- * (in both `-e NAME=VALUE` and `-e NAME VALUE` forms) while keeping NAMEs and
- * non-sensitive vars (e.g. BOBBIT_SESSION_ID) visible — so the secret can never
- * leak in cleartext and be replayed as X-Bobbit-Session-Secret.
+ * (in both `-e NAME=VALUE` and `-e NAME VALUE` forms), as well as private
+ * correlation identifiers. Names remain visible while values cannot leak in
+ * cleartext and be replayed as X-Bobbit-Session-Secret.
  *
  * Run with:
  *   npx tsx --test --test-force-exit tests/rpc-bridge-redact-args.test.ts
@@ -23,7 +23,7 @@ import assert from "node:assert/strict";
 import { redactDockerArgs } from "../../src/server/agent/rpc-bridge.ts";
 
 describe("redactDockerArgs", () => {
-	it("redacts BOBBIT_SESSION_SECRET, BOBBIT_TOKEN, and sample *_SECRET/*_TOKEN while leaving BOBBIT_SESSION_ID visible", () => {
+	it("redacts credentials and BOBBIT_SESSION_ID while retaining environment names", () => {
 		const args = [
 			"exec", "-i",
 			"-e", "BOBBIT_SESSION_ID=sess-123",
@@ -51,8 +51,9 @@ describe("redactDockerArgs", () => {
 		assert.ok(out.includes("MY_CUSTOM_SECRET=<REDACTED>"), out);
 		assert.ok(out.includes("SOME_TOKEN=<REDACTED>"), out);
 
-		// Non-sensitive var fully visible
-		assert.ok(out.includes("BOBBIT_SESSION_ID=sess-123"), out);
+		// Correlation identifiers redact their values but retain their names.
+		assert.ok(out.includes("BOBBIT_SESSION_ID=<REDACTED>"), out);
+		assert.ok(!out.includes("sess-123"), `session identifier leaked: ${out}`);
 	});
 
 	it("redacts the VALUE in the separated `-e NAME VALUE` form", () => {
@@ -60,14 +61,14 @@ describe("redactDockerArgs", () => {
 		const out = redactDockerArgs(args);
 		assert.ok(!out.includes("cap-secret-split"), `secret leaked: ${out}`);
 		assert.ok(out.includes("BOBBIT_SESSION_SECRET <REDACTED>"), out);
-		// Non-sensitive split var keeps its value
-		assert.ok(out.includes("BOBBIT_SESSION_ID sess-456"), out);
+		assert.ok(out.includes("BOBBIT_SESSION_ID <REDACTED>"), out);
+		assert.ok(!out.includes("sess-456"), `session identifier leaked: ${out}`);
 	});
 
 	it("does not redact values that merely contain a sensitive substring in their value", () => {
-		const args = ["-e", "BOBBIT_SESSION_ID=secret-looking-but-fine"];
+		const args = ["-e", "NON_SENSITIVE_VAR=secret-looking-but-fine"];
 		const out = redactDockerArgs(args);
 		// Name is not sensitive, so the value is preserved verbatim.
-		assert.ok(out.includes("BOBBIT_SESSION_ID=secret-looking-but-fine"), out);
+		assert.ok(out.includes("NON_SENSITIVE_VAR=secret-looking-but-fine"), out);
 	});
 });
