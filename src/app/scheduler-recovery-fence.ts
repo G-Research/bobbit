@@ -6,19 +6,25 @@ import type { Goal } from "./state.js";
  * recovery record; requests begun afterwards remain server-authoritative.
  */
 let generation = 0;
-const consumedAt = new Map<string, number>();
+
+type SchedulerRecovery = NonNullable<Goal["schedulerRecovery"]>;
+interface ConsumedRecovery {
+	generation: number;
+	recovery: SchedulerRecovery;
+}
+const consumedAt = new Map<string, ConsumedRecovery>();
 
 /** Capture the fence before starting a goals snapshot request. */
 export function beginSchedulerRecoverySnapshot(): number {
 	return generation;
 }
 
-/** Record a server-confirmed scheduler-recovery consume. */
-export function consumeSchedulerRecovery(goalId: string): void {
-	consumedAt.set(goalId, ++generation);
+/** Record the exact server-confirmed scheduler-recovery record that was consumed. */
+export function consumeSchedulerRecovery(goalId: string, recovery: SchedulerRecovery): void {
+	consumedAt.set(goalId, { generation: ++generation, recovery });
 }
 
-/** Remove only recovery records consumed after this snapshot began. */
+/** Remove only recoveries consumed after this snapshot began, never a newer replacement. */
 export interface SchedulerRecoveryFenceResult<T> {
 	goals: T[];
 	stripped: boolean;
@@ -28,16 +34,18 @@ export function fenceStaleSchedulerRecovery<T extends Pick<Goal, "id" | "schedul
 	goals: readonly T[],
 	snapshotGeneration: number,
 ): SchedulerRecoveryFenceResult<T> {
-	const staleGoalIds = new Set(
-		[...consumedAt]
-			.filter(([, consumedGeneration]) => consumedGeneration > snapshotGeneration)
-			.map(([goalId]) => goalId),
+	const staleRecoveries = new Map(
+		[...consumedAt].filter(([, consumed]) => consumed.generation > snapshotGeneration),
 	);
-	if (staleGoalIds.size === 0) return { goals: goals as T[], stripped: false };
+	if (staleRecoveries.size === 0) return { goals: goals as T[], stripped: false };
 
 	let stripped = false;
 	const fencedGoals = goals.map(goal => {
-		if (!staleGoalIds.has(goal.id) || goal.schedulerRecovery === undefined) return goal;
+		const consumed = staleRecoveries.get(goal.id);
+		// A response that started before the consume can nevertheless contain a
+		// post-consume recovery for the same goal. The persisted updatedAt is the
+		// record identity available to this snapshot, so preserve a later record.
+		if (!consumed || goal.schedulerRecovery === undefined || goal.schedulerRecovery.updatedAt > consumed.recovery.updatedAt) return goal;
 		stripped = true;
 		const { schedulerRecovery: _schedulerRecovery, ...withoutRecovery } = goal;
 		return withoutRecovery as T;

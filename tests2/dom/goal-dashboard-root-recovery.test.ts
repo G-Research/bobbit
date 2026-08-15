@@ -29,7 +29,6 @@ let resolveGoalsResponse: ((response: Response) => void) | undefined;
 let goalsSnapshot: Goal[] = [];
 let goalsResponseForRequest: ((url: URL) => Response) | undefined;
 let goalsRequestPaths: string[] = [];
-let conditionalUnchangedGoalsResponses: number;
 let retryGoalId: string;
 
 const now = 1_783_682_557_000;
@@ -136,7 +135,6 @@ beforeEach(async () => {
 	goalsSnapshot = [activeGoal];
 	goalsResponseForRequest = undefined;
 	goalsRequestPaths = [];
-	conditionalUnchangedGoalsResponses = 0;
 	retryGoalId = activeGoal.id;
 	installFetchStub();
 	vi.stubGlobal("WebSocket", class extends EventTarget {
@@ -241,7 +239,7 @@ describe("root scheduler recovery retry", () => {
 		expect(host.querySelector("[data-testid='goal-scheduler-recovery-retry']")).toBeTruthy();
 	});
 
-	it("refetches a fenced generation so a post-consume recovery cannot be hidden by changed:false", async () => {
+	it("keeps a fresh root recovery from a held pre-consume goals response visible immediately", async () => {
 		state.goalsGeneration = 7;
 		goalsRequestPaths = [];
 		holdGoalsResponse = true;
@@ -254,27 +252,13 @@ describe("root scheduler recovery retry", () => {
 
 		const newerRecovery = { ...activeGoal.schedulerRecovery!, code: "NEW_GENERATION", updatedAt: now + 2 };
 		const newerGoals = [{ ...activeGoal, schedulerRecovery: newerRecovery }];
-		// Although this request began before the consume, the server's response
-		// contains a newer recovery at generation 11. Fencing it must not make
-		// the client acknowledge generation 11 before reading it authoritatively.
+		// The request started before the consume, but its response is a fresh
+		// recovery created afterwards. Do not fence it by goal ID alone.
 		resolveGoalsResponse!(jsonResponse({ goals: newerGoals, generation: 11 }));
 		await staleRefresh;
-		expect(state.goalsGeneration).toBe(7);
-		expect(state.goals[0]?.schedulerRecovery).toBeUndefined();
-
-		holdGoalsResponse = false;
-		goalsResponseForRequest = url => {
-			if (url.searchParams.get("since") === "11") {
-				conditionalUnchangedGoalsResponses++;
-				return jsonResponse({ changed: false, generation: 11 });
-			}
-			return jsonResponse({ goals: newerGoals, generation: 11 });
-		};
-		await refreshSessions();
 		await nextFrame();
 
-		expect(goalsRequestPaths.at(-1)).toBe("/api/goals?since=7");
-		expect(conditionalUnchangedGoalsResponses).toBe(0);
+		expect(state.goalsGeneration).toBe(11);
 		expect(state.goals[0]?.schedulerRecovery).toEqual(newerRecovery);
 		expect(host.querySelector("[data-testid='goal-scheduler-recovery-retry']")).toBeTruthy();
 	});
@@ -310,5 +294,40 @@ describe("root scheduler recovery retry", () => {
 		expect(state.goals.find(goal => goal.id === childGoal.id)?.schedulerRecovery).toBeUndefined();
 		expect(state.goals.find(goal => goal.id === activeGoal.id)?.schedulerRecovery).toEqual(activeGoal.schedulerRecovery);
 		expect(host.querySelector("[data-testid='plan-node-scheduler-retry']")).toBeNull();
+	});
+
+	it("keeps a fresh Plan recovery from a held pre-consume goals response visible immediately", async () => {
+		const childGoal: Goal = {
+			...makeGoal(),
+			id: "plan-fresh-recovery-child",
+			title: "Plan fresh recovery child",
+			parentGoalId: activeGoal.id,
+			rootGoalId: activeGoal.id,
+			spawnedFromPlanId: "plan-step",
+			schedulerRecovery: { kind: "child", code: "RETRY_EXHAUSTED", reason: "worktree busy", retryable: true, updatedAt: now },
+		};
+		state.goals = [activeGoal, childGoal];
+		goalsSnapshot = [activeGoal, childGoal];
+		retryGoalId = childGoal.id;
+		render(renderGoalDashboard(), host);
+		host.querySelector<HTMLElement>("[data-testid='tab-plan']")!.click();
+		await nextFrame();
+
+		holdGoalsResponse = true;
+		const staleRefresh = refreshSessions();
+		await Promise.resolve();
+		expect(resolveGoalsResponse).toBeTypeOf("function");
+
+		host.querySelector<HTMLButtonElement>("[data-testid='plan-node-scheduler-retry']")!.click();
+		await waitFor(() => state.goals.find(goal => goal.id === childGoal.id)?.schedulerRecovery === undefined);
+
+		const freshRecovery = { ...childGoal.schedulerRecovery!, code: "NEW_PLAN_RECOVERY", updatedAt: now + 3 };
+		resolveGoalsResponse!(jsonResponse({ goals: [activeGoal, { ...childGoal, schedulerRecovery: freshRecovery }], generation: 12 }));
+		await staleRefresh;
+		await nextFrame();
+
+		expect(state.goalsGeneration).toBe(12);
+		expect(state.goals.find(goal => goal.id === childGoal.id)?.schedulerRecovery).toEqual(freshRecovery);
+		expect(host.querySelector("[data-testid='plan-node-scheduler-retry']")).toBeTruthy();
 	});
 });

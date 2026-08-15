@@ -17,12 +17,16 @@ export { computePlanStepsForGoal } from "./goal-plan-steps.js";
 const svgPlan = html`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M3 12h18"/><path d="M3 18h18"/></svg>`;
 
 /** Remove a consumed scheduler-recovery record without mutating cached goals. */
-export function clearSchedulerRecoveryForGoal<T extends { id: string; schedulerRecovery?: unknown }>(
+type SchedulerRecovery = NonNullable<Goal["schedulerRecovery"]>;
+
+/** Remove a consumed recovery without erasing a newer replacement for that goal. */
+export function clearSchedulerRecoveryForGoal<T extends { id: string; schedulerRecovery?: SchedulerRecovery }>(
 	goals: readonly T[],
 	goalId: string,
+	consumedRecovery: SchedulerRecovery,
 ): T[] {
 	return goals.map(goal => {
-		if (goal.id !== goalId || goal.schedulerRecovery === undefined) return goal;
+		if (goal.id !== goalId || goal.schedulerRecovery === undefined || goal.schedulerRecovery.updatedAt > consumedRecovery.updatedAt) return goal;
 		const { schedulerRecovery: _schedulerRecovery, ...withoutRecovery } = goal;
 		return withoutRecovery as T;
 	});
@@ -36,13 +40,14 @@ type SchedulerRetryRequest = (url: string, init: RequestInit) => Promise<{ ok: b
  */
 export async function retryPlanNodeSchedulerStart(
 	childGoalId: string,
+	recovery: SchedulerRecovery,
 	request: SchedulerRetryRequest,
-	onSuccess: (goalId: string) => void,
+	onSuccess: (goalId: string, consumedRecovery: SchedulerRecovery) => void,
 ): Promise<boolean> {
 	try {
 		const response = await request(`/api/goals/${encodeURIComponent(childGoalId)}/retry-scheduled-start`, { method: "POST" });
 		if (!response.ok) return false;
-		onSuccess(childGoalId);
+		onSuccess(childGoalId, recovery);
 		return true;
 	} catch {
 		return false;
@@ -94,7 +99,7 @@ interface PlanLayoutNode extends PlanEdgeNode {
 	/** Resolved child hit a merge conflict preserved for manual recovery. */
 	mergeConflict?: boolean;
 	/** Bounded scheduler stop; retry routes through the scheduler. */
-	schedulerRecovery?: { code: string; reason: string; retryable: boolean };
+	schedulerRecovery?: SchedulerRecovery;
 }
 
 const PLAN_NODE_W = 200;
@@ -224,7 +229,7 @@ function renderPlanLevel(
 	depth: number,
 	ownerGoalId: string,
 	liveOnly: boolean,
-	onSchedulerRecoveryRetrySucceeded: (goalId: string) => void,
+	onSchedulerRecoveryRetrySucceeded: (goalId: string, consumedRecovery: SchedulerRecovery) => void,
 ): TemplateResult | typeof nothing {
 	if (steps.length === 0 || depth > PLAN_RENDER_DEPTH_CAP) return nothing;
 	const { nodes, edges, width, height } = layoutPlanLevel(steps, allGoals, 0, ownerGoalId, liveOnly);
@@ -264,7 +269,7 @@ function renderPlanLevel(
 								</span>` : nothing}
 								<span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;" title="${n.step.title}">${n.step.title}</span>
 								${hasConflict ? html`<span data-testid="plan-node-conflict-pill" title="Merge conflict — child preserved for manual recovery" style="flex-shrink:0;font-size:9px;font-weight:600;padding:1px 5px;border-radius:8px;background:color-mix(in oklch, var(--negative) 16%, transparent);color:var(--negative);text-transform:uppercase;letter-spacing:0.04em;">conflict</span>` : nothing}
-								${recovery ? html`<button data-testid="plan-node-scheduler-retry" title="${recovery.reason}" ?disabled=${!recovery.retryable} style="flex-shrink:0;font-size:9px;font-weight:600;padding:1px 5px;border:0;border-radius:8px;background:color-mix(in oklch, var(--warning) 16%, transparent);color:var(--warning);cursor:pointer;" @click=${async (e: Event) => { e.stopPropagation(); if (!n.childGoal || !recovery.retryable) return; await retryPlanNodeSchedulerStart(n.childGoal.id, gatewayFetch, onSchedulerRecoveryRetrySucceeded); }}>retry</button>` : nothing}
+								${recovery ? html`<button data-testid="plan-node-scheduler-retry" title="${recovery.reason}" ?disabled=${!recovery.retryable} style="flex-shrink:0;font-size:9px;font-weight:600;padding:1px 5px;border:0;border-radius:8px;background:color-mix(in oklch, var(--warning) 16%, transparent);color:var(--warning);cursor:pointer;" @click=${async (e: Event) => { e.stopPropagation(); if (!n.childGoal || !recovery.retryable) return; await retryPlanNodeSchedulerStart(n.childGoal.id, recovery, gatewayFetch, onSchedulerRecoveryRetrySucceeded); }}>retry</button>` : nothing}
 								${isArchived ? html`<span data-testid="plan-node-archived-pill" style="flex-shrink:0;font-size:9px;font-weight:500;padding:1px 5px;border-radius:8px;background:var(--muted);color:var(--muted-foreground);text-transform:uppercase;letter-spacing:0.04em;">archived</span>` : nothing}
 							</div>
 							<div style="display:flex;justify-content:space-between;align-items:center;font-size:10px;color:var(--muted-foreground);">
@@ -302,7 +307,7 @@ function renderPlanLevel(
 export function renderPlanTab(args: {
 	currentGoal: Goal;
 	allGoals: Goal[];
-	onSchedulerRecoveryRetrySucceeded: (goalId: string) => void;
+	onSchedulerRecoveryRetrySucceeded: (goalId: string, consumedRecovery: SchedulerRecovery) => void;
 }): TemplateResult {
 	const { currentGoal, allGoals, onSchedulerRecoveryRetrySucceeded } = args;
 	const liveOnly = _isPlanLiveOnly(currentGoal.id);

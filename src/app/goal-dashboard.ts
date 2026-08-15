@@ -603,13 +603,13 @@ function dashboardGoalPool(): Goal[] {
  * successful retry from both sources so descendant enrichment cannot restore
  * the already-cleared recovery pill before the next fetch.
  */
-function reconcilePlanSchedulerRecoveryRetry(goalId: string): void {
+function reconcilePlanSchedulerRecoveryRetry(goalId: string, consumedRecovery: NonNullable<Goal["schedulerRecovery"]>): void {
 	// The root badge and Plan-node actions share this success callback.
-	consumeSchedulerRecovery(goalId);
-	state.goals = clearSchedulerRecoveryForGoal(state.goals, goalId);
-	dashboardDescendants = clearSchedulerRecoveryForGoal(dashboardDescendants, goalId);
+	consumeSchedulerRecovery(goalId, consumedRecovery);
+	state.goals = clearSchedulerRecoveryForGoal(state.goals, goalId, consumedRecovery);
+	dashboardDescendants = clearSchedulerRecoveryForGoal(dashboardDescendants, goalId, consumedRecovery);
 	if (currentGoal?.id === goalId) {
-		currentGoal = clearSchedulerRecoveryForGoal([currentGoal], goalId)[0];
+		currentGoal = clearSchedulerRecoveryForGoal([currentGoal], goalId, consumedRecovery)[0];
 	}
 	renderApp();
 }
@@ -2126,7 +2126,7 @@ function renderNavBar(goal: Goal): TemplateResult {
 						style="margin-left:8px;font-size:0.75em;padding:2px 8px;border-radius:9999px;background:color-mix(in oklch, var(--warning) 16%, transparent);color:var(--warning);border:0;cursor:pointer;"
 						@click=${async () => {
 							if (!goal.schedulerRecovery?.retryable || lifecycleBlocked) return;
-							await retryPlanNodeSchedulerStart(goal.id, gatewayFetch, reconcilePlanSchedulerRecoveryRetry);
+							await retryPlanNodeSchedulerStart(goal.id, goal.schedulerRecovery, gatewayFetch, reconcilePlanSchedulerRecoveryRetry);
 						}}
 					>Scheduler recovery: ${lifecycleBlocked ? "resolve lifecycle" : "retry"}</button>`;
 				})() : nothing}

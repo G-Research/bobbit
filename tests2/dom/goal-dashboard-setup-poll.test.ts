@@ -92,7 +92,7 @@ afterEach(() => { model?.stopAllPolling(); model = null; document.body.innerHTML
 
 describe("Plan scheduler recovery retry reconciliation", () => {
 	it("clears the retried child from both Plan sources only after a successful POST", async () => {
-		const recovery = { code: "RETRY_EXHAUSTED", reason: "worktree busy", retryable: true };
+		const recovery = { kind: "child" as const, code: "RETRY_EXHAUSTED", reason: "worktree busy", retryable: true, updatedAt: 1 };
 		const liveGoals = [
 			{ id: "child", schedulerRecovery: recovery },
 			{ id: "sibling", schedulerRecovery: recovery },
@@ -103,6 +103,7 @@ describe("Plan scheduler recovery retry reconciliation", () => {
 
 		const succeeded = await retryPlanNodeSchedulerStart(
 			"child",
+			recovery,
 			async (url, init) => { requests.push({ url, init }); return { ok: true }; },
 			goalId => completed.push(goalId),
 		);
@@ -110,8 +111,8 @@ describe("Plan scheduler recovery retry reconciliation", () => {
 		expect(succeeded).toBe(true);
 		expect(requests).toEqual([{ url: "/api/goals/child/retry-scheduled-start", init: { method: "POST" } }]);
 		expect(completed).toEqual(["child"]);
-		const reconciledLive = clearSchedulerRecoveryForGoal(liveGoals, completed[0]);
-		const reconciledDescendants = clearSchedulerRecoveryForGoal(descendants, completed[0]);
+		const reconciledLive = clearSchedulerRecoveryForGoal(liveGoals, completed[0], recovery);
+		const reconciledDescendants = clearSchedulerRecoveryForGoal(descendants, completed[0], recovery);
 		expect("schedulerRecovery" in reconciledLive[0]).toBe(false);
 		expect("schedulerRecovery" in reconciledDescendants[0]).toBe(false);
 		expect(reconciledLive[1]).toBe(liveGoals[1]);
@@ -122,6 +123,7 @@ describe("Plan scheduler recovery retry reconciliation", () => {
 		const completed: string[] = [];
 		const failed = await retryPlanNodeSchedulerStart(
 			"child",
+			{ kind: "child", code: "RETRY_EXHAUSTED", reason: "worktree busy", retryable: true, updatedAt: 1 },
 			async () => ({ ok: false }),
 			goalId => completed.push(goalId),
 		);

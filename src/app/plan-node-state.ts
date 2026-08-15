@@ -62,7 +62,7 @@ export interface PlanNodeChild {
 	 *  to the tier-based `state` resolution. */
 	gateStatus?: PlanNodeGateStatus;
 	/** Scheduler-owned visible recovery stop for this child/root. */
-	schedulerRecovery?: { code: string; reason: string; retryable: boolean };
+	schedulerRecovery?: { kind: "child" | "root"; code: string; reason: string; retryable: boolean; updatedAt: number };
 }
 
 export interface PlanNodeResolution {
