@@ -444,15 +444,23 @@ export class ClaudeSdkSubagentWorkAssembler {
  * ordering. A non-empty parent id is the only partition key, even before its
  * root Agent card has appeared.
  */
-function rootAgentParentToolUseIds(messages: readonly ClaudeAgentSdkHistoryMessage[]): Set<string> {
-	const parents = new Set<string>();
-	for (const message of messages) {
-		if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+function rootAgentParentBoundaries(messages: readonly ClaudeAgentSdkHistoryMessage[]): Map<string, number> {
+	const boundaries = new Map<string, number>();
+	for (const [index, message] of messages.entries()) {
+		// A child can itself issue an Agent-shaped call. It is not a root parent
+		// and must not make a grandchild recoverable into the root snapshot.
+		if (message.parentToolUseId !== undefined || message.role !== "assistant" || !Array.isArray(message.content)) continue;
 		for (const block of message.content) {
-			if (isRecord(block) && block.type === "toolCall" && (block.name === "Agent" || block.name === "Task") && boundedId(block.id)) parents.add(block.id);
+			if (isRecord(block) && block.type === "toolCall" && (block.name === "Agent" || block.name === "Task") && boundedId(block.id) && !boundaries.has(block.id)) {
+				boundaries.set(block.id, index);
+			}
 		}
 	}
-	return parents;
+	return boundaries;
+}
+
+function rootAgentParentToolUseIds(messages: readonly ClaudeAgentSdkHistoryMessage[]): Set<string> {
+	return new Set(rootAgentParentBoundaries(messages).keys());
 }
 
 /**
@@ -476,22 +484,45 @@ export async function recoverClaudeSdkEmbeddedWork(
 	messages: readonly ClaudeAgentSdkHistoryMessage[],
 	recovery: ClaudeSdkSubagentRecoveryOptions,
 ): Promise<ClaudeAgentSdkHistoryMessage[]> {
-	const parents = rootAgentParentToolUseIds(messages);
-	if (parents.size === 0) return [...messages];
+	const invocationBoundaries = rootAgentParentBoundaries(messages);
+	if (invocationBoundaries.size === 0) return [...messages];
+	const parents = new Set(invocationBoundaries.keys());
+	const terminalBoundaries = new Map<string, number>();
+	for (const [index, message] of messages.entries()) {
+		const terminal = rootSubagentTerminal(message, parents);
+		if (terminal && !terminalBoundaries.has(terminal.parentToolUseId)) terminalBoundaries.set(terminal.parentToolUseId, index);
+	}
 	const existing = new Set(messages.flatMap((message) => {
 		const parent = boundedId(message.parentToolUseId) ? message.parentToolUseId : undefined;
 		const id = sourceId(message);
 		return parent && id ? [`${parent}:${id}`] : [];
 	}));
 	const recovered = await recoverSubagentRows(parents, recovery);
-	const combined = [...messages];
-	for (const parent of parents) {
-		for (const message of recovered.rowsByParent.get(parent) ?? []) {
+	const recoveredAtBoundary = new Map<number, ClaudeAgentSdkHistoryMessage[]>();
+	for (const [parent, invocationBoundary] of invocationBoundaries) {
+		const boundary = terminalBoundaries.get(parent) ?? invocationBoundary;
+		const accepted = (recovered.rowsByParent.get(parent) ?? []).filter((message) => {
 			const id = sourceId(message);
-			if (!id || existing.has(`${parent}:${id}`)) continue;
+			if (!id || existing.has(`${parent}:${id}`)) return false;
 			existing.add(`${parent}:${id}`);
-			combined.push(message);
+			return true;
+		});
+		if (accepted.length > 0) {
+			const atBoundary = recoveredAtBoundary.get(boundary) ?? [];
+			atBoundary.push(...accepted);
+			recoveredAtBoundary.set(boundary, atBoundary);
 		}
+	}
+
+	const combined: ClaudeAgentSdkHistoryMessage[] = [];
+	for (const [index, message] of messages.entries()) {
+		combined.push(message);
+		// A finalized parent uses its exact root Agent/Task result boundary. A live
+		// parent has no terminal authority yet, so its immutable invocation boundary
+		// is the conservative fallback. Both preserve root ordering after projection
+		// and keep every parent's recovered rows in official child-source order,
+		// rather than appending a global child tail.
+		combined.push(...(recoveredAtBoundary.get(index) ?? []));
 	}
 	return combined;
 }
