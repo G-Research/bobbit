@@ -250,16 +250,66 @@ function hasDurableSubscriptionUsage(cost: unknown): boolean {
 		&& has(contextValue, "currentTokens") && isNullableNumber(contextValue.currentTokens);
 }
 
-function sameTranscriptProjection(before: unknown, after: unknown): boolean {
-	const rows = (value: unknown): Array<{ id: unknown; role: unknown }> | undefined => {
-		if (Array.isArray(value)) return value.map(row => ({ id: (row as any)?.id, role: (row as any)?.role }));
-		if (value && typeof value === "object" && Array.isArray((value as any).messages)) return rows((value as any).messages);
+type ManualTranscriptPrefixFacts = {
+	beforeArray: boolean;
+	afterArray: boolean;
+	beforeCount: number;
+	afterCount: number;
+	beforeNonempty: boolean;
+	afterHasAtLeastBeforeRows: boolean;
+	beforeRowsHaveNonemptySdkIdAndRole: boolean;
+	prefixIdsAndRolesPreserved: boolean;
+};
+
+/** Preserve finalized history while allowing the SDK to append shutdown-tail rows. */
+function manualTranscriptPrefixFacts(before: unknown, after: unknown): ManualTranscriptPrefixFacts {
+	const rows = (value: unknown): Array<Record<string, unknown> | undefined> | undefined => {
+		if (Array.isArray(value)) {
+			return value.map(row => row && typeof row === "object" && !Array.isArray(row)
+				? row as Record<string, unknown>
+				: undefined);
+		}
+		if (value && typeof value === "object" && Array.isArray((value as { messages?: unknown }).messages)) {
+			return rows((value as { messages: unknown }).messages);
+		}
 		return undefined;
 	};
 	const left = rows(before);
 	const right = rows(after);
-	return !!left && !!right && left.length === right.length
-		&& left.every((row, index) => typeof row.id === "string" && row.id === right[index]?.id && row.role === right[index]?.role);
+	const beforeCount = left?.length ?? 0;
+	const afterCount = right?.length ?? 0;
+	const hasNonemptySdkIdAndRole = (row: Record<string, unknown> | undefined): boolean =>
+		typeof row?.id === "string" && row.id.length > 0 && typeof row.role === "string" && row.role.length > 0;
+	const beforeRowsHaveNonemptySdkIdAndRole = !!left && left.every(hasNonemptySdkIdAndRole);
+	const prefixIdsAndRolesPreserved = !!left && !!right
+		&& left.every((row, index) => hasNonemptySdkIdAndRole(row)
+			&& hasNonemptySdkIdAndRole(right[index])
+			&& row?.id === right[index]?.id
+			&& row?.role === right[index]?.role);
+	return {
+		beforeArray: !!left,
+		afterArray: !!right,
+		beforeCount,
+		afterCount,
+		beforeNonempty: beforeCount > 0,
+		afterHasAtLeastBeforeRows: afterCount >= beforeCount,
+		beforeRowsHaveNonemptySdkIdAndRole,
+		prefixIdsAndRolesPreserved,
+	};
+}
+
+/** Emit only counts and fixed booleans if restart/reload violates prefix preservation. */
+function assertManualTranscriptPrefixProjection(before: unknown, after: unknown): void {
+	const facts = manualTranscriptPrefixFacts(before, after);
+	if (
+		facts.beforeArray
+		&& facts.afterArray
+		&& facts.beforeNonempty
+		&& facts.afterHasAtLeastBeforeRows
+		&& facts.beforeRowsHaveNonemptySdkIdAndRole
+		&& facts.prefixIdsAndRolesPreserved
+	) return;
+	throw new Error(JSON.stringify(facts));
 }
 
 function manualSdkModel(): string {
@@ -547,6 +597,79 @@ test("Claude Agent SDK manual live controls choose a distinct SDK wire alias", (
 		aliasHaiku: alternateManualSdkModel("HaIkU"),
 		sonnet: alternateManualSdkModel("claude-sonnet-4-5"),
 	}).toEqual({ fullHaiku: "sonnet", aliasHaiku: "sonnet", sonnet: "haiku" });
+});
+
+test("Claude Agent SDK manual restart transcript oracle preserves a nonempty finalized prefix and permits an additive tail", () => {
+	const before = {
+		messages: [
+			{ id: "private-user-id", role: "user" },
+			{ id: "private-assistant-id", role: "assistant" },
+		],
+	};
+	const exact = {
+		messages: [
+			{ id: "private-user-id", role: "user" },
+			{ id: "private-assistant-id", role: "assistant" },
+		],
+	};
+	const additiveTail = {
+		messages: [
+			...exact.messages,
+			{ id: "private-finalized-tail-id", role: "toolResult" },
+		],
+	};
+	expect(() => assertManualTranscriptPrefixProjection(before, exact)).not.toThrow();
+	expect(() => assertManualTranscriptPrefixProjection(before, additiveTail)).not.toThrow();
+	expect(manualTranscriptPrefixFacts(before, additiveTail)).toEqual({
+		beforeArray: true,
+		afterArray: true,
+		beforeCount: 2,
+		afterCount: 3,
+		beforeNonempty: true,
+		afterHasAtLeastBeforeRows: true,
+		beforeRowsHaveNonemptySdkIdAndRole: true,
+		prefixIdsAndRolesPreserved: true,
+	});
+});
+
+test("Claude Agent SDK manual restart transcript oracle rejects removed, reordered, changed, and empty history", () => {
+	const before = {
+		messages: [
+			{ id: "private-user-id", role: "user" },
+			{ id: "private-assistant-id", role: "assistant" },
+		],
+	};
+	const invalidSnapshots = [
+		{ messages: [{ id: "private-user-id", role: "user" }] },
+		{ messages: [{ id: "private-assistant-id", role: "assistant" }, { id: "private-user-id", role: "user" }] },
+		{ messages: [{ id: "private-changed-id", role: "user" }, { id: "private-assistant-id", role: "assistant" }] },
+		{ messages: [{ id: "private-user-id", role: "toolResult" }, { id: "private-assistant-id", role: "assistant" }] },
+		{ messages: [] },
+		{ messages: [{ id: "", role: "user" }, { id: "private-assistant-id", role: "assistant" }] },
+	];
+	for (const after of invalidSnapshots) {
+		let diagnostic = "";
+		try {
+			assertManualTranscriptPrefixProjection(before, after);
+		} catch (error) {
+			diagnostic = error instanceof Error ? error.message : "";
+		}
+		expect(diagnostic).not.toBe("");
+		const facts = JSON.parse(diagnostic) as ManualTranscriptPrefixFacts;
+		expect(Object.keys(facts)).toEqual([
+			"beforeArray", "afterArray", "beforeCount", "afterCount", "beforeNonempty", "afterHasAtLeastBeforeRows",
+			"beforeRowsHaveNonemptySdkIdAndRole", "prefixIdsAndRolesPreserved",
+		]);
+		expect(
+			facts.beforeNonempty
+			&& facts.afterHasAtLeastBeforeRows
+			&& facts.beforeRowsHaveNonemptySdkIdAndRole
+			&& facts.prefixIdsAndRolesPreserved,
+		).toBe(false);
+		for (const privateValue of ["private-user-id", "private-assistant-id", "private-changed-id"]) {
+			expect(diagnostic).not.toContain(privateValue);
+		}
+	}
 });
 
 test("Claude Agent SDK manual transcript reload scopes and encodes its project", () => {
@@ -982,7 +1105,8 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			const reloaded = await api(manualTranscriptReloadPath(created.id, project.id));
 			expect(reloaded.status).toBe(200);
 			const afterRestart = await gateway.sessionManager.getMessagesSnapshotBase(session);
-			expect(beforeRestart.success && afterRestart.success && sameTranscriptProjection(beforeRestart.data, afterRestart.data)).toBe(true);
+			expect(beforeRestart.success && afterRestart.success).toBe(true);
+			assertManualTranscriptPrefixProjection(beforeRestart.data, afterRestart.data);
 			expect(hasDurableSubscriptionUsage(gateway.sessionManager.getSessionCost(created.id))).toBe(true);
 
 			const interruptedTurnLifecycle = observeManualRootTurnLifecycle(session.rpcClient);
@@ -1326,7 +1450,8 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			const sandboxReload = await api(manualTranscriptReloadPath(created.id, project.id));
 			expect(sandboxReload.status).toBe(200);
 			const afterRestart = await gateway.sessionManager.getMessagesSnapshotBase(session);
-			expect(beforeReplacement.success && afterRestart.success && sameTranscriptProjection(beforeReplacement.data, afterRestart.data)).toBe(true);
+			expect(beforeReplacement.success && afterRestart.success).toBe(true);
+			assertManualTranscriptPrefixProjection(beforeReplacement.data, afterRestart.data);
 			expect(hasDurableSubscriptionUsage(gateway.sessionManager.getSessionCost(created.id))).toBe(true);
 			await gateway.sessionManager.terminateSession(created.id);
 			expect(gateway.sessionManager.getSession(created.id)?.status).toBe("terminated");
