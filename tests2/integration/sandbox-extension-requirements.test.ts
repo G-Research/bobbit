@@ -21,6 +21,7 @@ import { ProjectSandbox } from "../../src/server/agent/project-sandbox.js";
 
 const TOKEN = "sandbox-extension-requirements-token";
 const PACK_ID = "sandbox-requirements-integration-fixture";
+const SECOND_PACK_ID = "sandbox-requirements-same-profile-fixture";
 const REQUIREMENT_ID = "python-analysis";
 
 const ENV_KEYS = ["BOBBIT_DIR", "BOBBIT_SECRETS_DIR", "BOBBIT_AGENT_DIR", "BOBBIT_SKIP_AIGW_DISCOVERY", "BOBBIT_TEST_NO_EXTERNAL", "NODE_ENV"] as const;
@@ -67,15 +68,14 @@ function activateFixtureRoot(root: string): void {
 	resetAgentDirStateForTests();
 }
 
-function writeFixturePack(root: string): string {
-	const packDir = path.join(root, "config", "market-packs", PACK_ID);
+function writeFixturePack(packDir: string, packId = PACK_ID): string {
 	fs.mkdirSync(path.join(packDir, "sandbox-requirements"), { recursive: true });
 	fs.writeFileSync(path.join(packDir, ".pack-meta.yaml"), [
-		"sourceUrl: test", "sourceRef: local", "commit: fixture", `packName: ${PACK_ID}`,
+		"sourceUrl: test", "sourceRef: local", "commit: fixture", `packName: ${packId}`,
 		"version: 1.0.0", "installedAt: '2026-01-01T00:00:00.000Z'", "updatedAt: '2026-01-01T00:00:00.000Z'", "scope: server",
 	].join("\n") + "\n");
 	fs.writeFileSync(path.join(packDir, "pack.yaml"), [
-		"schema: 3", `name: ${PACK_ID}`, "description: Inert sandbox requirement fixture", "version: 1.0.0",
+		"schema: 3", `name: ${packId}`, "description: Inert sandbox requirement fixture", "version: 1.0.0",
 		"contents:", "  roles: []", "  tools: []", "  skills: []", "  entrypoints: []", "  providers: []", "  hooks: []", "  mcp: []", "  pi-extensions: []", "  runtimes: []", "  workflows: []", `  sandboxRequirements: [${REQUIREMENT_ID}]`,
 	].join("\n") + "\n");
 	fs.writeFileSync(path.join(packDir, "sandbox-requirements", `${REQUIREMENT_ID}.yaml`), [
@@ -143,15 +143,15 @@ function requirementStatus(body: any): any {
 	return body.requirements;
 }
 
-async function setPackActivation(fixture: Fixture, disabled: Record<string, unknown>): Promise<void> {
-	const response = await api(fixture, "/api/marketplace/pack-activation", { method: "PUT", body: JSON.stringify({ scope: "server", packName: PACK_ID, disabled }) });
+async function setPackActivation(fixture: Fixture, disabled: Record<string, unknown>, packId = PACK_ID): Promise<void> {
+	const response = await api(fixture, "/api/marketplace/pack-activation", { method: "PUT", body: JSON.stringify({ scope: "server", packName: packId, disabled }) });
 	expect(response.status, await response.clone().text()).toBe(200);
 }
 
-async function grant(fixture: Fixture): Promise<void> {
-	const response = await api(fixture, `/api/projects/${encodeURIComponent(fixture.projectA)}/extension-grants`, {
+async function grant(fixture: Fixture, projectId = fixture.projectA, packId = PACK_ID): Promise<void> {
+	const response = await api(fixture, `/api/projects/${encodeURIComponent(projectId)}/extension-grants`, {
 		method: "PUT", headers: fixture.operatorHeaders,
-		body: JSON.stringify({ packId: PACK_ID, principal: "pack", capability: "sandbox:build" }),
+		body: JSON.stringify({ packId, principal: "pack", capability: "sandbox:build" }),
 	});
 	expect(response.status, await response.clone().text()).toBe(200);
 }
@@ -188,7 +188,7 @@ async function bootFixture(): Promise<Fixture> {
 		fs.writeFileSync(path.join(root, "state", "projects.json"), "[]");
 		fs.writeFileSync(path.join(root, "state", "setup-complete"), "test\n");
 		scaffoldBobbitDir(root);
-		const packDir = writeFixturePack(root);
+		const packDir = writeFixturePack(path.join(root, "config", "market-packs", PACK_ID));
 		const runner = fakeDockerRunner();
 		const deps: GatewayDeps = { clock: realClock, commandRunner: runner, fetchImpl: async () => new Response("network fenced", { status: 503 }), agentBridgeFactory: () => null, fsImpl: realFs };
 		gateway = createGateway({ host: "127.0.0.1", port: 0, portExplicit: true, authToken: TOKEN, defaultCwd: root, forceAuth: true, skipMcp: true, skipWorktreePool: true, skipTitleGeneration: true, skipRemotePush: true, skipNonLocalRemoteGit: true, builtinsDir: path.resolve("defaults"), builtinPacksDir: path.resolve("market-packs") }, deps);
@@ -313,6 +313,84 @@ describe.sequential("sandbox extension requirements integration", () => {
 		const reordered = await api(fixture, "/api/marketplace/pack-order", { method: "PUT", body: JSON.stringify({ scope: "server", order: (await responseJson(order)).order ?? [] }) });
 		expect(reordered.status, await reordered.clone().text()).toBe(200);
 		expect(requirementStatus(await status(fixture, fixture.projectA))).toMatchObject({ profiles: [], entries: [] });
+	});
+
+	it("clears same-profile failures after marketplace mutations without crossing project scope", async () => {
+		const sourceRoot = path.join(fixture.root, "same-profile-source");
+		writeFixturePack(path.join(sourceRoot, PACK_ID), PACK_ID);
+		writeFixturePack(path.join(sourceRoot, SECOND_PACK_ID), SECOND_PACK_ID);
+		const sourceResponse = await api(fixture, "/api/marketplace/sources", {
+			method: "POST", body: JSON.stringify({ url: sourceRoot }),
+		});
+		expect(sourceResponse.status, await sourceResponse.clone().text()).toBe(201);
+		const sourceId = (await responseJson(sourceResponse)).source.id as string;
+		const install = async (packName: string) => {
+			const response = await api(fixture, "/api/marketplace/install", {
+				method: "POST", body: JSON.stringify({ sourceId, dirName: packName, scope: "server" }),
+			});
+			expect(response.status, await response.clone().text()).toBe(201);
+		};
+		await install(PACK_ID);
+		await install(SECOND_PACK_ID);
+		await setPackActivation(fixture, { enabled: true, sandboxRequirements: [] }, PACK_ID);
+		await setPackActivation(fixture, { enabled: true, sandboxRequirements: [] }, SECOND_PACK_ID);
+		for (const projectId of [fixture.projectA, fixture.projectB]) {
+			await grant(fixture, projectId, PACK_ID);
+			await grant(fixture, projectId, SECOND_PACK_ID);
+			// Earlier cases may have built the same profile under this project's base
+			// image. Remove it so this test records a visible pending-plan failure.
+			fixture.runner.images.delete((await status(fixture, projectId)).imageName);
+		}
+
+		const recordFailures = async () => {
+			fixture.runner.failBuild = true;
+			for (const projectId of [fixture.projectA, fixture.projectB]) {
+				const response = await api(fixture, "/api/sandbox-image/build", { method: "POST", body: JSON.stringify({ projectId }) });
+				expect(response.status, await response.clone().text()).toBe(500);
+				expect(requirementStatus(await status(fixture, projectId))).toMatchObject({ entries: [{ state: "failed", code: "build-failed" }] });
+			}
+		};
+		const expectPending = async (projectId: string) => {
+			expect(requirementStatus(await status(fixture, projectId))).toMatchObject({ profiles: ["python"], entries: [{ state: "pending" }] });
+		};
+
+		await recordFailures();
+		const update = await api(fixture, "/api/marketplace/update", { method: "POST", body: JSON.stringify({ scope: "server", packName: PACK_ID }) });
+		expect(update.status, await update.clone().text()).toBe(200);
+		await expectPending(fixture.projectA);
+		await expectPending(fixture.projectB);
+
+		await recordFailures();
+		const currentOrder = await api(fixture, "/api/marketplace/pack-order?scope=server");
+		expect(currentOrder.status, await currentOrder.clone().text()).toBe(200);
+		const ordered = (await responseJson(currentOrder)).order as string[];
+		const reorder = await api(fixture, "/api/marketplace/pack-order", {
+			method: "PUT", body: JSON.stringify({ scope: "server", order: [...ordered].reverse() }),
+		});
+		expect(reorder.status, await reorder.clone().text()).toBe(200);
+		await expectPending(fixture.projectA);
+		await expectPending(fixture.projectB);
+
+		await recordFailures();
+		const projectOrder = await api(fixture, "/api/marketplace/pack-order", {
+			method: "PUT", body: JSON.stringify({ scope: "project", projectId: fixture.projectA, order: [] }),
+		});
+		expect(projectOrder.status, await projectOrder.clone().text()).toBe(200);
+		await expectPending(fixture.projectA);
+		expect(requirementStatus(await status(fixture, fixture.projectB))).toMatchObject({ entries: [{ state: "failed", code: "build-failed" }] });
+
+		const uninstall = await api(fixture, "/api/marketplace/installed", {
+			method: "DELETE", body: JSON.stringify({ scope: "server", packName: PACK_ID }),
+		});
+		expect(uninstall.status, await uninstall.clone().text()).toBe(204);
+		await expectPending(fixture.projectA);
+		await expectPending(fixture.projectB);
+
+		await recordFailures();
+		await install(PACK_ID);
+		await expectPending(fixture.projectA);
+		await expectPending(fixture.projectB);
+		fixture.runner.failBuild = false;
 	});
 
 	it("skips heavyweight bootstrap for an unchanged identity and recreates once when it changes", async () => {

@@ -12736,6 +12736,19 @@ async function handleApiRoute(
 			return ctxs;
 		};
 
+		// A plan fingerprint represents the selected toolchain profiles, not the
+		// pack identity or precedence that selected them. A successful pack mutation
+		// can therefore replace an already-failed requirement with an identical
+		// fingerprint. Clear the failure epoch for every project the mutated scope
+		// can resolve into, without disturbing unrelated project-scope failures.
+		const invalidateSandboxRequirementFailuresForMarketplaceMutation = (scope: InstallScope, projectId?: string): void => {
+			if (scope === "project") {
+				if (projectId) sandboxImageRequirements.invalidateProject(projectId);
+				return;
+			}
+			for (const project of projectRegistry.list()) sandboxImageRequirements.invalidateProject(project.id);
+		};
+
 		// ── Vanilla extension adoption (EP-9) ───────────────────────
 		type AdoptionTarget = { scope: AdoptionScope; store: ProjectConfigStore; projectId?: string };
 		const adoptionTarget = (scope: AdoptionScope, rawProjectId: unknown): { ok: true; target: AdoptionTarget } | { ok: false; status: number; error: string } => {
@@ -13098,6 +13111,7 @@ async function handleApiRoute(
 				const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
 				const installed = await installer.installMarketplacePack({ sourceId: body.sourceId, dirName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
 				invalidateResolverCaches();
+				invalidateSandboxRequirementFailuresForMarketplaceMutation(targetScope, targetProjectId);
 				const mcpReload = installed.manifest.contents.mcp?.length ? await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId) : undefined;
 				json({ installed, ...(mcpReload ? { mcpReload } : {}) }, 201);
 			} catch (err) { handleMarketErr(err); }
@@ -13125,6 +13139,7 @@ async function handleApiRoute(
 				const hadMcp = (prior?.manifest.contents.mcp?.length ?? 0) > 0;
 				const installed = await installer.updateMarketplacePack({ packName: body.packName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
 				invalidateResolverCaches();
+				invalidateSandboxRequirementFailuresForMarketplaceMutation(targetScope, targetProjectId);
 				const hasMcp = (installed.manifest.contents.mcp?.length ?? 0) > 0;
 				const mcpReload = hadMcp || hasMcp ? await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId) : undefined;
 				json({ installed, ...(mcpReload ? { mcpReload } : {}) });
@@ -13152,6 +13167,7 @@ async function handleApiRoute(
 				const prior = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }]).find((p) => p.scope === targetScope && p.packName === body.packName);
 				installer.uninstallPack({ packName: body.packName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
 				invalidateResolverCaches();
+				invalidateSandboxRequirementFailuresForMarketplaceMutation(targetScope, targetProjectId);
 				if (prior?.manifest.contents.mcp?.length) await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId);
 				res.writeHead(204); res.end();
 			} catch (err) { handleMarketErr(err, 404); }
@@ -13212,6 +13228,7 @@ async function handleApiRoute(
 			const normalized = [...missing, ...filtered];
 			st.target.store.setPackOrder(targetScope, normalized);
 			invalidateResolverCaches();
+			invalidateSandboxRequirementFailuresForMarketplaceMutation(targetScope, targetProjectId);
 			const hasMcp = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }]).some((p) => p.scope === targetScope && (p.manifest.contents.mcp?.length ?? 0) > 0);
 			const mcpReload = hasMcp ? await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId) : undefined;
 			json({ scope: targetScope, order: normalized, ...(mcpReload ? { mcpReload } : {}) });
