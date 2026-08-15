@@ -131,7 +131,7 @@ async function expectCancelledAudit(fixture: Fixture): Promise<any> {
 	return result.verification;
 }
 
-async function expectCauseAcrossSurfaces(page: any, goalId: string): Promise<void> {
+async function expectCauseAcrossSurfaces(page: any, goalId: string, teamLeadId: string): Promise<void> {
 	const cancelledCause = /cancelled[\s\S]*goal[ -]?pause|goal[ -]?pause[\s\S]*cancelled/i;
 	const failed = /failed/i;
 	const dashboardRow = page.locator(`[data-testid="goal-dashboard-gate-row"][data-gate-id="${GATE_ID}"]`).first();
@@ -142,6 +142,9 @@ async function expectCauseAcrossSurfaces(page: any, goalId: string): Promise<voi
 	const sidebar = page.locator(`[data-nav-id="goal:${goalId}"]`).first();
 	await expect(sidebar, "sidebar renders the cancellation cause without a failed badge").toContainText(cancelledCause);
 	await expect(sidebar).not.toContainText(failed);
+
+	await navigateToHash(page, `#/session/${teamLeadId}`);
+	await expect(page.locator("message-editor textarea").first()).toBeVisible({ timeout: 20_000 });
 
 	const pill = page.locator("[data-testid='goal-status-widget-pill']").first();
 	await expect(pill).toBeVisible({ timeout: 15_000 });
@@ -184,10 +187,10 @@ test.describe("Journey: pause cancels verification without failing the gate", ()
 
 			await navigateToHash(page, `#/goal/${fixture.goalId}?tab=gates`);
 			await expect(page.locator(`[data-testid="goal-dashboard-gate-row"][data-gate-id="${GATE_ID}"]`).first()).toBeVisible({ timeout: 20_000 });
-			await expectCauseAcrossSurfaces(page, fixture.goalId);
+			await expectCauseAcrossSurfaces(page, fixture.goalId, teamLeadId);
 			await page.reload({ waitUntil: "domcontentloaded" });
 			await navigateToHash(page, `#/goal/${fixture.goalId}?tab=gates`);
-			await expectCauseAcrossSurfaces(page, fixture.goalId);
+			await expectCauseAcrossSurfaces(page, fixture.goalId, teamLeadId);
 
 			const resume = await apiFetch(`/api/goals/${fixture.goalId}/resume`, { method: "POST", body: JSON.stringify({ cascade: false }) });
 			expect(resume.status, `resume request failed: ${await resume.clone().text()}`).toBe(200);
