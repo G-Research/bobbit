@@ -870,7 +870,7 @@ Branch names are never interpolated into a shell command; PR lookup and remote r
 
 ### Cancel verification endpoint
 
-`POST /api/goals/:goalId/gates/:gateId/cancel-verification` requests cancellation of the gate's running verification. It is idempotent and always returns `200` in one of these shapes:
+`POST /api/goals/:goalId/gates/:gateId/cancel-verification` requests a manual cancellation of the gate's running verification. It is idempotent and always returns `200`.
 
 ```json
 { "cancelled": false, "message": "No running verification to cancel" }
@@ -879,16 +879,29 @@ Branch names are never interpolated into a shell command; PR lookup and remote r
 No running verification existed.
 
 ```json
-{ "cancelled": true, "pending": false }
+{
+  "cancelled": true,
+  "outcome": "cancelled",
+  "cause": "manual",
+  "signalId": "sig-22",
+  "pending": false
+}
 ```
 
-Cancellation is terminal: exact cleanup settled.
+Exact cleanup settled. The historical signal has the terminal verification outcome `"cancelled"`; the gate remains eligible/pending rather than failed.
 
 ```json
-{ "cancelled": true, "pending": true, "message": "Cancellation is waiting for exact process cleanup" }
+{
+  "cancelled": true,
+  "outcome": "cancelled",
+  "cause": "manual",
+  "signalId": "sig-22",
+  "pending": true,
+  "message": "Cancellation is waiting for exact process cleanup"
+}
 ```
 
-Cancellation intent is durable, but this is **not** terminal. Exact command payload cleanup — and, for Docker command steps, host `docker exec` transport cleanup — must settle before the old signal receives its terminal cancellation result. Clients can inspect `GET /api/goals/:goalId/verifications/active` while `pending` is `true`.
+Cancellation intent and its typed cause are durable, but this response is **not** terminal. Exact command payload cleanup — and, for Docker command steps, host `docker exec` transport cleanup — must settle before the old signal receives its terminal cancellation result. The public `GET /api/goals/:goalId/verifications/active` endpoint intentionally hides cleanup-only ownership records; inspect the signal history or gate detail for the durable result after it settles. See [Verification cancellation lifecycle](verification-cancellation.md) for all causes, generation rules, and recovery semantics.
 
 ### Goal Team
 

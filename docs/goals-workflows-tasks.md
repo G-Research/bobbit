@@ -563,7 +563,9 @@ Gates can define automated verification that runs when signaled:
 - **Human sign-off** — parks the gate on a deferred resolver until a person approves or rejects via the UI (see [Human sign-off steps](#human-sign-off-steps))
 - **Combined** — mechanical + qualitative steps across phases
 
-Verification is async. On signal, the verification status is `"running"`. On completion: the gate transitions to `"passed"` (all steps pass) or `"failed"` (any step fails, with details). A WebSocket event `gate_verification_complete` is emitted. If no verification is defined, the gate auto-passes.
+Verification is async. On signal, the verification status is `"running"`. On completion, a real step verdict transitions the gate to `"passed"` (all steps pass) or `"failed"` (any step fails, with details). A WebSocket event `gate_verification_complete` is emitted. If no verification is defined, the gate auto-passes.
+
+An operator or lifecycle interruption is different from a step verdict: its signal verification becomes `"cancelled"`, the gate remains `pending` and eligible for an explicit re-signal, and completed step evidence is retained. Cancellation does not manufacture a failed gate or a synthetic failed step. See [Verification cancellation lifecycle](verification-cancellation.md) for causes, cleanup and publication fencing, recovery, and UI/API behavior.
 
 `llm-review` and `agent-qa` prompts use a verifier-owned durable queue row and Pi's atomic follow-up delivery rather than treating a busy reviewer as a content failure. The row receipt, cancellation/re-signal fence, same-session recovery, and diagnostic contract are described in [Verifier Recovery](llm-review-recovery.md#verifier-prompt-dispatch-and-contention).
 
