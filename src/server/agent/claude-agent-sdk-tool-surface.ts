@@ -20,6 +20,11 @@ const RETAINED_NATIVE_TOOLS = ["Skill", "Agent"] as const;
 const RESERVED_NATIVE_TOOLS = ["Agent"] as const;
 const SUPPRESSED_NATIVE_TOOLS = CLAUDE_NATIVE_TOOL_FLOOR.filter((name) => name !== "Skill");
 
+/** True only for the native tools retained by the Claude SDK root surface. */
+export function isClaudeSdkRetainedNativeTool(name: unknown): boolean {
+	return typeof name === "string" && RETAINED_NATIVE_TOOLS.some((retained) => retained.toLowerCase() === name.toLowerCase());
+}
+
 /** Immutable policy consumed by both SDK option assembly and permission checks. */
 export const CLAUDE_NATIVE_TOOL_POLICY = Object.freeze({
 	floor: CLAUDE_NATIVE_TOOL_FLOOR,
@@ -624,9 +629,10 @@ export function buildClaudeAgentSdkQueryOptions(
 		...base,
 		tools: [...RETAINED_NATIVE_TOOLS],
 		disallowedTools: [...surface.sdkDisallowNames],
-		// The SDK auto-approves bare allowlist entries before canUseTool. Agent
-		// must therefore reach its bounded admission callback rather than bypass it.
-		allowedTools: [...surface.sdkAllowNames],
+		// Agent is an SDK 0.3.222 programmatic-agent contract requirement. Its
+		// bare allowlist entry shadows canUseTool, so PreToolUse remains the sole
+		// bounded admission authority for every root Agent request.
+		allowedTools: ["Agent", ...surface.sdkAllowNames],
 		agents: surface.subagentPolicy?.definitions ?? {},
 		skills: [...CLAUDE_BUNDLED_SKILLS_0_3_222],
 		mcpServers: { bobbit: surface.server },

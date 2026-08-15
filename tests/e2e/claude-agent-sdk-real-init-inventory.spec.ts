@@ -142,6 +142,14 @@ test.describe("Claude Agent SDK real initialization inventory", () => {
 				"bobbit-backend-parity-reviewer", "bobbit-billing-safety-auditor", "bobbit-protocol-scout",
 			]);
 			expect(options.allowedTools).toEqual(["Agent", "mcp__bobbit__find", "mcp__bobbit__grep", "mcp__bobbit__read"]);
+			// Agent's official bare allow entry shadows canUseTool, so invalid
+			// helper requests must still be stopped by the independent hook gate.
+			const preToolUse = (options.hooks?.PreToolUse as any)[0].hooks[0];
+			expect((await preToolUse({
+				tool_name: "Agent", tool_use_id: "invalid-agent", tool_input: {
+					subagent_type: "general-purpose", prompt: "must not escape", run_in_background: false,
+				},
+			})).hookSpecificOutput.permissionDecision).toBe("deny");
 			expect(options.allowedTools).not.toContain("Task");
 			expect(options.disallowedTools).toContain("Task");
 			for (const forbidden of [gatewaySecret, projectSecret, providerSecret]) {

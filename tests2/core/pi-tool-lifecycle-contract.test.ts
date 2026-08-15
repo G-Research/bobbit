@@ -267,6 +267,20 @@ describe("Pi 0.81 tool lifecycle contract", () => {
 		expect(persistedResult.message.addedToolNames).toEqual(["dynamic_search"]);
 	});
 
+	it("classifies retained Claude SDK native tools separately from Pi guard escapes", () => {
+		const manager = makeManager();
+		const session = makeSession(manager, {});
+		session.runtime = "claude-agent-sdk";
+		const policyError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		for (const toolName of ["Agent", "Skill", "Task"]) {
+			manager.handleAgentLifecycle(session, { type: "tool_execution_start", toolName });
+		}
+
+		expect(policyError).toHaveBeenCalledTimes(1);
+		expect(policyError.mock.calls[0][0]).toContain('executed disallowed tool "Task"');
+	});
+
 	it("forwards partial/final payloads unchanged while policy and steer side effects stay on their boundaries", async () => {
 		const manager = makeManager();
 		let listener: ((event: any) => void) | undefined;

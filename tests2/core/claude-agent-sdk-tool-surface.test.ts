@@ -5,6 +5,7 @@ import {
 	CLAUDE_NATIVE_TOOL_FLOOR,
 	CLAUDE_NATIVE_TOOL_POLICY,
 	ClaudeSdkToolSurfaceError,
+	isClaudeSdkRetainedNativeTool,
 	buildClaudeAgentSdkQueryOptions,
 	buildClaudeSdkToolSurface,
 	normalizeClaudeSdkMcpToolName,
@@ -207,12 +208,15 @@ describe("Claude Agent SDK tool surface", () => {
 		expect(options.disallowedTools).toEqual(SUPPRESSED_NATIVE_0_3_222);
 		expect(options.disallowedTools).toContain("Task");
 		expect(options.disallowedTools).not.toContain("Agent");
-		// Bare allowedTools bypass the SDK permission callback. The allow entry is
-		// safe there, but ask/never entries and Agent must use their callbacks.
-		expect(options.allowedTools).toEqual(["mcp__bobbit__read"]);
-		for (const name of ["mcp__bobbit__ask_tool", "mcp__bobbit__never_tool", "Agent"]) {
+		// Agent is required by the official SDK programmatic-agent contract. Its
+		// bare allow shadows canUseTool, so its strict PreToolUse gate is pinned below.
+		expect(options.allowedTools).toEqual(["Agent", "mcp__bobbit__read"]);
+		for (const name of ["mcp__bobbit__ask_tool", "mcp__bobbit__never_tool", "Task", "Skill"]) {
 			expect(options.allowedTools).not.toContain(name);
 		}
+		expect(isClaudeSdkRetainedNativeTool("Agent")).toBe(true);
+		expect(isClaudeSdkRetainedNativeTool("Skill")).toBe(true);
+		expect(isClaudeSdkRetainedNativeTool("Task")).toBe(false);
 		expect(options.agents).toEqual({});
 		expect(options.mcpServers).toEqual({ bobbit: surface.server });
 		expect(options.settingSources).toEqual([]);
@@ -224,7 +228,7 @@ describe("Claude Agent SDK tool surface", () => {
 		expect(options.allowDangerouslySkipPermissions).toBeUndefined();
 	});
 
-	it("keeps Agent callback-reachable for the bounded subagent policy", async () => {
+	it("keeps the literal Agent allow entry behind the strict PreToolUse policy", async () => {
 		const calls: Array<{ rawName: unknown; input: unknown; context: unknown }> = [];
 		const surface = build({
 			subagentPolicy: {
@@ -242,12 +246,19 @@ describe("Claude Agent SDK tool surface", () => {
 		} as any) as any;
 		const input = opaqueInput();
 
-		expect(options.allowedTools).not.toContain("Agent");
+		expect(options.allowedTools).toContain("Agent");
 		const result = await options.canUseTool("Agent", input, permissionContext());
 		expect(result).toMatchObject({ behavior: "allow" });
 		expect(result.updatedInput).toBe(input);
 		expect(calls).toHaveLength(1);
 		expect(calls[0]!.rawName).toBe("Agent");
 		expect(calls[0]!.input).toBe(input);
+		// SDK bare allowlists can bypass canUseTool; a root without an admitted
+		// policy is still denied at PreToolUse rather than becoming a native escape.
+		const noPolicy = buildClaudeAgentSdkQueryOptions(build(), {
+			cwd: "/workspace/project", env: { PATH: "/bin" }, abortController: new AbortController(),
+		} as any) as any;
+		const preToolUse = noPolicy.hooks.PreToolUse[0].hooks[0];
+		expect((await preToolUse({ tool_name: "Agent", tool_use_id: "unadmitted", tool_input: input })).hookSpecificOutput.permissionDecision).toBe("deny");
 	});
 });

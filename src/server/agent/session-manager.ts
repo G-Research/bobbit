@@ -29,6 +29,7 @@ import { SearchService } from "../search/search-service.js";
 import { hostPathToContainer, resolveEffectivePiSelection, synthesizeAttachmentText, ATTACHMENT_ONLY_TEXT, type IRpcBridge, type RpcBridgeOptions, type RuntimePiExtensionInfo, type RuntimePiExtensionDiagnostic } from "./rpc-bridge.js";
 import { createSessionBridge, resolveSessionRuntime, type SessionBridgeOptions, type SessionRuntime } from "./session-runtime.js";
 import { ClaudeAgentSdkUnavailableError, isClaudeAgentSdkSessionId, type ClaudeAgentSdkBridgeOptions } from "./claude-agent-sdk-bridge.js";
+import { isClaudeSdkRetainedNativeTool } from "./claude-agent-sdk-tool-surface.js";
 import { sanitizeClaudeAgentSdkErrorForLog } from "./claude-agent-sdk-error.js";
 import { claudeAgentSdkDirectConfigDir, createDirectClaudeAgentSdkSessionAccess, createSandboxClaudeAgentSdkSessionAccess, defaultClaudeAgentSdkSessionAccessDeps, readSdkSessionInfo, readSdkSessionMessages, type ClaudeAgentSdkSessionAccessDeps, type ClaudeAgentSdkSessionApi, type SdkSessionInfo } from "./claude-agent-sdk-session-access.js";
 import { isSandboxContainerCwd } from "./docker-exec-spawn.js";
@@ -6495,7 +6496,12 @@ export class SessionManager {
 			// this log line the guard is misconfigured or missing for this session.
 			if (session.allowedTools && session.allowedTools.length > 0 && event.toolName) {
 				const toolLower = event.toolName.toLowerCase();
-				if (!session.allowedTools.some((t: string) => t.toLowerCase() === toolLower)) {
+				// Claude SDK's official programmatic Agent contract requires the root
+				// native Agent allow entry; Skill is likewise retained by that isolated
+				// surface. Both remain bounded by its SDK callbacks, not this Pi guard.
+				const retainedSdkNativeTool = session.runtime === "claude-agent-sdk"
+					&& isClaudeSdkRetainedNativeTool(event.toolName);
+				if (!retainedSdkNativeTool && !session.allowedTools.some((t: string) => t.toLowerCase() === toolLower)) {
 					console.error(
 						`[session-manager] Session ${session.id} executed disallowed tool "${event.toolName}" — guard extension did not block it.`
 					);

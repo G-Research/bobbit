@@ -143,9 +143,10 @@ describe("Claude Agent SDK D3/D4 skills and subagents", () => {
 		expect(options.tools).toEqual(["Skill", "Agent"]);
 		expect(options.skills).toEqual(BUNDLED_SKILLS_0_3_222);
 		expect(options.agents).toEqual(policy.definitions);
-		// Bare allowedTools bypass canUseTool; Agent must reach its bounded admission policy.
-		expect(options.allowedTools).toEqual(["mcp__bobbit__find", "mcp__bobbit__grep", "mcp__bobbit__read"]);
-		expect(options.allowedTools).not.toContain("Agent");
+		// Agent is required by the official programmatic-agent contract. Its bare
+		// allow is still constrained by the strict PreToolUse admissions below.
+		expect(options.allowedTools).toEqual(["Agent", "mcp__bobbit__find", "mcp__bobbit__grep", "mcp__bobbit__read"]);
+		expect(options.allowedTools).toContain("Agent");
 		expect(options.disallowedTools).toEqual(ROOT_NATIVE_DISALLOWED);
 		expect(options.settingSources).toEqual([]);
 		expect(options.strictMcpConfig).toBe(true);

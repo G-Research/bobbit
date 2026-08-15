@@ -1008,7 +1008,7 @@ describe("ClaudeAgentSdkBridge", () => {
 			settingSources: [],
 			strictMcpConfig: true,
 			tools: ["Skill", "Agent"],
-			allowedTools: [],
+			allowedTools: ["Agent"],
 			agents: {},
 			skills: [
 				"batch", "claude-api", "code-review", "dataviz", "debug", "deep-research", "design-sync",

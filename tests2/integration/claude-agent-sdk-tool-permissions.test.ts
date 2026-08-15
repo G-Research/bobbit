@@ -6,7 +6,7 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { buildClaudeSdkToolSurface, sdkZodShape } from "../../src/server/agent/claude-agent-sdk-tool-surface.ts";
+import { buildClaudeAgentSdkQueryOptions, buildClaudeSdkToolSurface, sdkZodShape } from "../../src/server/agent/claude-agent-sdk-tool-surface.ts";
 import { buildClaudeSdkExtensionManifest, buildClaudeSdkWorkerEnv, ClaudeSdkExtensionDispatcher, createMcpMetaToolHandler } from "../../src/server/agent/claude-sdk-tool-dispatcher.ts";
 import { buildMetaToolInputSchema } from "../../src/server/mcp/mcp-meta.ts";
 import { ToolManager } from "../../src/server/agent/tool-manager.ts";
@@ -103,6 +103,15 @@ describe("Claude SDK Bobbit tool permission integration", () => {
 	it("applies registration, canUseTool, and PreToolUse ceilings independently", async () => {
 		const { surface } = fixture();
 		expect(surface.sdkAllowNames).toEqual(["mcp__bobbit__read"]);
+		const options = buildClaudeAgentSdkQueryOptions(surface, {
+			cwd: "/workspace", env: {}, abortController: new AbortController(),
+		} as any) as any;
+		// Agent is a required SDK programmatic-agent allow entry. The independent
+		// PreToolUse policy remains authoritative when the bare allow skips canUseTool.
+		expect(options.allowedTools).toEqual(["Agent", "mcp__bobbit__read"]);
+		expect((await options.hooks.PreToolUse[0].hooks[0]({
+			tool_name: "Agent", tool_use_id: "unadmitted-agent", tool_input: {},
+		})).hookSpecificOutput.permissionDecision).toBe("deny");
 		expect(surface.entriesByCanonicalLower.has("bash")).toBe(true);
 		for (const name of ["mcp__bobbit__bash", "Bash", "mcp__foreign__read", "mcp__bobbit__", "mcp__bobbit__missing"]) {
 			await expect(canUse(surface, name)).resolves.toMatchObject({ behavior: "deny" });
