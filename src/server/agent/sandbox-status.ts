@@ -21,7 +21,7 @@ let _building = false;
  * intentionally carries no provider or dependency-version data.
  */
 export const SANDBOX_RUNTIME_SCHEMA_LABEL = "bobbit.runtime-schema";
-export const SANDBOX_RUNTIME_SCHEMA_VERSION = "1";
+export const SANDBOX_RUNTIME_SCHEMA_VERSION = "2";
 
 export function isBuildingImage(): boolean {
 	return _building;
