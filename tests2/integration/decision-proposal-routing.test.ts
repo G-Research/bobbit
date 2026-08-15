@@ -69,6 +69,10 @@ describe("decision proposal routing", () => {
 		assert.equal(store.get(created.requestId!)?.proposal?.status, "failed");
 	});
 
+	it("keeps session proposal draft owner ids unchanged", () => {
+		assert.equal(proposalDraftOwnerId({ kind: "session", sessionId: "session_123" }), "session_123");
+	});
+
 	it("seeds a project-owned draft and projection without accessing a session", async () => {
 		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "proposal-import-owner-"));
 		const owner = { kind: "project-import" as const, projectId: "project-123", importId: "import-123", requestId: "request-123" };
@@ -93,7 +97,7 @@ describe("decision proposal routing", () => {
 			});
 			assert.equal(result.ok, true);
 			if (!result.ok) return;
-			assert.equal(proposalDraftOwnerId(owner), "project-import-import-123");
+			assert.match(proposalDraftOwnerId(owner), /^project-import-v1-[a-f0-9]{64}$/);
 			assert.deepEqual(result.fields, {
 				name: "import-role", label: "Import role", prompt: "Only a draft.", projectId: owner.projectId,
 			});
@@ -103,6 +107,51 @@ describe("decision proposal routing", () => {
 			assert.deepEqual(workspaces, [{
 				owner, draftId: proposalDraftOwnerId(owner), proposalType: "role", fields: result.fields, rev: result.rev,
 			}]);
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps same-type drafts from separate import requests distinct", async () => {
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "proposal-import-collision-"));
+		const first = { kind: "project-import" as const, projectId: "project-123", importId: "import-123", requestId: "request-one" };
+		const second = { ...first, requestId: "request-two" };
+		const service = new ProposalSeedService({
+			stateDir,
+			sessionManager: {} as any,
+			projectRegistry: { get: (id: string) => id === first.projectId ? { id, hidden: false } : undefined } as any,
+			projectContextManager: {} as any,
+			configCascade: {} as any,
+			getGoal: () => undefined,
+			getPreference: () => undefined,
+			systemProjectId: "system",
+			headquartersProjectId: "headquarters",
+			readBody: async () => ({}),
+		} satisfies ProposalSeedServiceDeps);
+		try {
+			const firstResult = await service.seedFromDecision(first, "role", {
+				name: "first-import-role", label: "First import role", prompt: "First draft.",
+			});
+			const secondResult = await service.seedFromDecision(second, "role", {
+				name: "second-import-role", label: "Second import role", prompt: "Second draft.",
+			});
+			assert.equal(firstResult.ok, true);
+			assert.equal(secondResult.ok, true);
+
+			const firstDraftId = proposalDraftOwnerId(first);
+			const secondDraftId = proposalDraftOwnerId(second);
+			assert.equal(proposalDraftOwnerId({ ...first }), firstDraftId);
+			assert.notEqual(firstDraftId, secondDraftId);
+			assert.notEqual(firstDraftId, proposalDraftOwnerId({ ...first, projectId: "project-456" }));
+			assert.equal(firstDraftId.length, "project-import-v1-".length + 64);
+			assert.deepEqual(await parseProposalFile(stateDir, firstDraftId, "role"), {
+				ok: true,
+				value: { type: "role", fields: { name: "first-import-role", label: "First import role", prompt: "First draft.", projectId: first.projectId } },
+			});
+			assert.deepEqual(await parseProposalFile(stateDir, secondDraftId, "role"), {
+				ok: true,
+				value: { type: "role", fields: { name: "second-import-role", label: "Second import role", prompt: "Second draft.", projectId: second.projectId } },
+			});
 		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });
 		}
