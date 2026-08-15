@@ -112,6 +112,7 @@ describe("sandbox Docker context resolution", () => {
 		};
 		const available = await checkDockerAvailability(desiredPlan, root, matchingRunner);
 		assert.equal(available.imageName, desiredPlan.imageName);
+		assert.equal(available.imageReady, true);
 		assert.equal(available.requirements?.entries[0]?.state, "available");
 
 		const staleRunner = {
@@ -123,8 +124,47 @@ describe("sandbox Docker context resolution", () => {
 		};
 		const pending = await checkDockerAvailability(desiredPlan, root, staleRunner);
 		assert.equal(pending.imageName, desiredPlan.imageName);
+		assert.equal(pending.imageReady, false);
 		assert.equal(pending.requirements?.entries[0]?.state, "pending");
 		assert.ok(calls.some((args) => args[0] === "inspect"));
+	});
+
+	it("reports exact-plan readiness for empty and nonempty requirement lists", async () => {
+		const desiredPlan = resolveSandboxImagePlan({ baseImageName: "bobbit-agent", requirements: [], piAgentVersion: getHostAgentVersion() });
+		const runner = {
+			execFile: async (_file: string, args: readonly string[]) => {
+				if (args[0] === "info" || args[0] === "image") return { stdout: Buffer.from("25.0"), stderr: Buffer.alloc(0) };
+				return { stdout: Buffer.from("<no value>"), stderr: Buffer.alloc(0) };
+			},
+		};
+		const stale = await checkDockerAvailability(desiredPlan, root, runner);
+		assert.deepEqual(stale.requirements?.entries, [], "empty entries do not imply an available image");
+		assert.equal(stale.imageReady, false);
+
+		const readyRunner = {
+			execFile: async (_file: string, args: readonly string[]) => {
+				if (args[0] === "info" || args[0] === "image") return { stdout: Buffer.from("25.0"), stderr: Buffer.alloc(0) };
+				if (String(args[2]).includes("pi-agent")) return { stdout: Buffer.from(getHostAgentVersion()!), stderr: Buffer.alloc(0) };
+				return { stdout: Buffer.from(desiredPlan.fingerprint), stderr: Buffer.alloc(0) };
+			},
+		};
+		assert.equal((await checkDockerAvailability(desiredPlan, root, readyRunner)).imageReady, true);
+	});
+
+	it("never tags a digest-pinned baseline during a build", async () => {
+		const pinned = resolveSandboxImagePlan({
+			baseImageName: `registry.example/team/agent@sha256:${"a".repeat(64)}`,
+			requirements: [],
+			piAgentVersion: getHostAgentVersion(),
+		});
+		const calls: Array<readonly string[]> = [];
+		const result = await buildSandboxImage(pinned, root, { execFile: async (_file: string, args: readonly string[]) => {
+			calls.push(args);
+			return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+		} });
+		assert.equal(result.success, false);
+		assert.match(result.error ?? "", /build-not-applicable/);
+		assert.deepEqual(calls, []);
 	});
 
 	it("rebuilds through its injected runner when either plan label is stale", async () => {

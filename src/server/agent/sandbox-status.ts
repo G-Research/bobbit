@@ -16,6 +16,10 @@ export interface SandboxStatus {
 	/** Exact core-resolved image whose availability was checked. */
 	imageName?: string;
 	imageExists?: boolean;
+	/** True only when this exact resolved plan is present with both required labels. */
+	imageReady?: boolean;
+	/** False when this exact plan is a digest baseline that Docker cannot tag. */
+	imageBuildable?: boolean;
 	dockerfileExists?: boolean;
 	buildCommand?: string;
 	requirements?: SandboxRequirementsStatus;
@@ -69,6 +73,10 @@ export function resolveSandboxDockerContext(preferredRoot?: string): string | nu
 
 /** Build only a core-resolved plan using Bobbit's one fixed Docker context. */
 export async function buildSandboxImage(plan: SandboxImagePlan, dockerContextRoot?: string, commandRunner: CommandRunner = realCommandRunner): Promise<{ success: boolean; error?: string }> {
+	// `docker build -t repo@sha256:...` is invalid. Do not substitute a mutable
+	// tag: the configured digest is the authority, so this plan is unsupported
+	// for building until an operator configures a separately buildable image.
+	if (!plan.buildable) return { success: false, error: "Configured digest sandbox image is build-not-applicable" };
 	const contextRoot = resolveSandboxDockerContext(dockerContextRoot);
 	if (!contextRoot) {
 		const error = "Dockerfile not found at docker/Dockerfile";
@@ -151,10 +159,16 @@ export async function ensureImageAgentVersion(plan: SandboxImagePlan, dockerCont
 		getImageAgentVersion(plan.imageName, commandRunner),
 		getImageRequirementsFingerprint(plan.imageName, commandRunner),
 	]);
-	const piMatches = hostVersion === null || imageVersion === hostVersion;
+	// A missing host version or image label is never readiness. We cannot prove
+	// an exact Pi match without both values, so fail closed before Docker runs.
+	const piMatches = hostVersion !== null && imageVersion === hostVersion;
 	if (piMatches && imageFingerprint === plan.fingerprint) {
 		console.log("[sandbox] Core sandbox image labels match the desired plan");
 		return true;
+	}
+	if (!plan.buildable) {
+		console.warn(`[sandbox] Exact image "${plan.imageName}" is stale but is build-not-applicable`);
+		return false;
 	}
 
 	const reasons = [
@@ -176,7 +190,7 @@ export async function checkDockerAvailability(plan?: SandboxImagePlan, dockerCon
 		const status: SandboxStatus = {
 			available: true,
 			dockerVersion: stdout.toString().trim(),
-			...(plan ? { imageName: plan.imageName } : {}),
+			...(plan ? { imageName: plan.imageName, imageBuildable: plan.buildable } : {}),
 		};
 		if (!plan) return status;
 
@@ -189,9 +203,10 @@ export async function checkDockerAvailability(plan?: SandboxImagePlan, dockerCon
 		const contextRoot = resolveSandboxDockerContext(dockerContextRoot);
 		if (contextRoot) {
 			status.dockerfileExists = true;
-			status.buildCommand = `docker build -t ${plan.imageName} ${path.join(contextRoot, "docker")}`;
+			if (plan.buildable) status.buildCommand = `docker build -t ${plan.imageName} ${path.join(contextRoot, "docker")}`;
 		}
 		if (!status.imageExists) {
+			status.imageReady = false;
 			status.requirements = sandboxRequirementsStatus(plan, "pending");
 			return status;
 		}
@@ -201,8 +216,13 @@ export async function checkDockerAvailability(plan?: SandboxImagePlan, dockerCon
 			getImageRequirementsFingerprint(plan.imageName, commandRunner),
 		]);
 		const hostVersion = getHostAgentVersion();
-		const piMatches = hostVersion === null || imageVersion === hostVersion;
-		status.requirements = sandboxRequirementsStatus(plan, piMatches && imageFingerprint === plan.fingerprint ? "available" : "pending");
+		const piMatches = hostVersion !== null && imageVersion === hostVersion;
+		// This is the sole readiness projection for every exact plan, including
+		// plans whose requirement rows are empty. Never derive readiness from
+		// `entries.every(...)`: an empty requirement list proves nothing about an
+		// image's Pi or exact-plan fingerprint labels.
+		status.imageReady = piMatches && imageFingerprint === plan.fingerprint;
+		status.requirements = sandboxRequirementsStatus(plan, status.imageReady ? "available" : "pending");
 		return status;
 	} catch (err) {
 		return {
@@ -210,6 +230,8 @@ export async function checkDockerAvailability(plan?: SandboxImagePlan, dockerCon
 			error: String(err),
 			...(plan ? {
 				imageName: plan.imageName,
+				imageReady: false,
+				imageBuildable: plan.buildable,
 				requirements: sandboxRequirementsStatus(plan, "unsupported"),
 			} : {}),
 		};

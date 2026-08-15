@@ -140,10 +140,9 @@ export class SandboxManager {
 		if (isSandboxExemptProject(projectId)) return;
 
 		const existing = this.sandboxes.get(projectId);
-		// A full ready session sandbox can serve verification sidecars directly;
-		// a sidecar-only backend is sufficient for a subsequent verification.
-		if (existing && purpose === "verification"
-			&& (existing.getStatus().status === "ready" || this._verificationOnlyProjects.has(projectId))) return;
+		// Verification intentionally does not return early for a ready project
+		// sandbox. Its bootstrap is the authoritative no-build exact-image
+		// readiness fence; every sidecar request must pass it before Docker run.
 
 		// A ready session sandbox can skip all bootstrap work only when its exact
 		// server-owned plan remains unchanged. Missing identities deliberately
@@ -164,7 +163,7 @@ export class SandboxManager {
 				// A failed/null session bootstrap must not suppress an independent
 				// verification backend attempt; only its ownership is serialized.
 				await sessionInFlight.catch(() => {});
-				if (this.sandboxes.has(projectId)) return;
+				if (this.sandboxes.get(projectId)?.getStatus().status === "ready") return;
 			}
 		}
 

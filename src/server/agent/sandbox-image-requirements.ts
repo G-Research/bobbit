@@ -27,6 +27,8 @@ export interface SandboxImagePlan {
 	readonly baseImageName: string;
 	/** The only image reference supplied to Docker by the core builder. */
 	readonly imageName: string;
+	/** A digest-only baseline is exact but cannot legally be a Docker build tag. */
+	readonly buildable: boolean;
 	readonly profiles: readonly SandboxToolchainId[];
 	readonly fingerprint: string;
 	/** Deterministically ordered, authorization-projected requirement metadata. */
@@ -59,7 +61,10 @@ const FINGERPRINT_LENGTH = 16;
 /** Bounds the derived plan and every status projection from all active packs. */
 export const MAX_SANDBOX_IMAGE_PLAN_REQUIREMENT_ROWS = 256;
 const SHA256_DIGEST = /^[a-f0-9]{64}$/;
-const REPOSITORY_COMPONENT = /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
+// Docker permits repeated separators in repository path components (for
+// example `team/bobbit--agent` and `team/bobbit__agent`). Keep this validation
+// strict enough to reject Docker syntax injection without narrowing legal names.
+const REPOSITORY_COMPONENT = /^[a-z0-9]+(?:[._-]+[a-z0-9]+)*$/;
 const TAG = /^[\w][\w.-]{0,127}$/;
 
 /**
@@ -164,6 +169,9 @@ export function resolveSandboxImagePlan(input: SandboxImagePlanInput): SandboxIm
 	return Object.freeze({
 		baseImageName: input.baseImageName,
 		imageName,
+		// Docker's `-t` accepts a named tag, never an immutable digest reference.
+		// Profile plans always derive their own tag from the parsed repository.
+		buildable: profiles.length > 0 || !base.normalized.includes("@sha256:"),
 		profiles: Object.freeze(profiles),
 		fingerprint,
 		requirements: Object.freeze(requirements),

@@ -700,8 +700,8 @@ import {
 import { SecretsStorePersistenceError } from "./agent/secrets-store.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
-import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion, getHostAgentVersion, resolveSandboxDockerContext } from "./agent/sandbox-status.js";
-import { resolveSandboxImagePlan, sandboxImageRequirements, sandboxRequirementsStatus, UnsupportedSandboxImagePlanError, type SandboxImagePlan } from "./agent/sandbox-image-requirements.js";
+import { checkDockerAvailability, buildSandboxImage, isBuildingImage, getHostAgentVersion, resolveSandboxDockerContext } from "./agent/sandbox-status.js";
+import { parseSandboxBaseImageReference, resolveSandboxImagePlan, sandboxImageRequirements, sandboxRequirementsStatus, UnsupportedSandboxImagePlanError, type SandboxImagePlan } from "./agent/sandbox-image-requirements.js";
 import { SandboxManager, type SandboxBootstrap, type SandboxPlanIdentityResolver } from "./agent/sandbox-manager.js";
 import { prepareSanitizedSandboxCloneSource, resolveSandboxCloneSource, type SandboxCloneSource } from "./agent/sandbox-clone-source.js";
 import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
@@ -5021,15 +5021,21 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				const cfg = ctx.projectConfigStore;
 				const sandboxCfg = cfg.get("sandbox") || "none";
 				const projectDir = project.rootPath;
-				const plan = resolveProjectSandboxImagePlan(packContributionRegistry, cfg, projectId);
+				let plan: SandboxImagePlan;
+				try {
+					plan = resolveProjectSandboxImagePlan(packContributionRegistry, cfg, projectId);
+				} catch (error) {
+					if (!(error instanceof UnsupportedSandboxImagePlanError)) throw error;
+					throw new Error(`[sandbox] bootstrap for project ${projectId} has an unsupported sandbox_image configuration`);
+				}
 				const dockerContextRoot = resolveSandboxDockerContext(config.defaultCwd);
 
 				if (purpose === "verification") {
 					// Frozen verification needs a prepared exact plan but must never build,
 					// clone, or inject project credentials as a side effect of a gate signal.
 					const imageStatus = await checkDockerAvailability(plan, dockerContextRoot ?? undefined, gatewayDeps.commandRunner);
-					if (!imageStatus.available || imageStatus.imageExists !== true) {
-						throw new Error("Frozen verification requires Docker and a prepared Bobbit sandbox image. Install Docker and build the configured sandbox image before signalling this gate.");
+					if (!imageStatus.available || imageStatus.imageReady !== true) {
+						throw new Error(`Frozen verification requires the ready exact sandbox image "${plan.imageName}" (matching Pi and requirements-fingerprint labels). Build or replace it before signalling this gate.`);
 					}
 					return {
 						projectId, projectDir, repoUrl: "", image: plan.imageName,
@@ -5040,30 +5046,32 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 
 				if (sandboxCfg !== "docker") return null;
 
-				// Session sandboxes retain their existing image provisioning lifecycle.
+				// Session sandboxes may provision their image, but only after the same
+				// exact-plan readiness check verification uses. A digest baseline remains
+				// fail-closed: Docker cannot receive it as `-t`, so never invent a tag.
 				const imageStatus = await checkDockerAvailability(plan, dockerContextRoot ?? undefined, gatewayDeps.commandRunner);
-				if (imageStatus.imageExists === false) {
+				if (!imageStatus.available) {
+					throw new Error(`[sandbox] Docker is unavailable for project ${projectId}`);
+				}
+				if (imageStatus.imageReady !== true) {
+					if (!plan.buildable) {
+						throw new Error(`[sandbox] Exact sandbox image "${plan.imageName}" is not ready and is build-not-applicable because it is digest-pinned`);
+					}
 					if (!dockerContextRoot) {
-						throw new Error(`[sandbox] Docker image "${plan.imageName}" is missing and docker/Dockerfile could not be found`);
+						throw new Error(`[sandbox] Exact sandbox image "${plan.imageName}" is not ready and docker/Dockerfile could not be found`);
 					}
 					const buildResult = await buildSandboxImage(plan, dockerContextRoot, gatewayDeps.commandRunner);
 					if (!buildResult.success) {
 						sandboxImageRequirements.recordBuildFailure(projectId, plan.fingerprint);
 						throw new Error(`[sandbox] Auto-build failed for project ${projectId}`);
 					}
-					sandboxImageRequirements.recordBuildSuccess(projectId, plan.fingerprint);
-				} else if (imageStatus.imageExists === true) {
-					const imageReady = await ensureImageAgentVersion(plan, dockerContextRoot ?? undefined, gatewayDeps.commandRunner);
-					if (!imageReady) {
+					const rebuiltStatus = await checkDockerAvailability(plan, dockerContextRoot, gatewayDeps.commandRunner);
+					if (rebuiltStatus.imageReady !== true) {
 						sandboxImageRequirements.recordBuildFailure(projectId, plan.fingerprint);
-						throw new Error(`[sandbox] Docker image "${plan.imageName}" is stale and could not be rebuilt`);
+						throw new Error(`[sandbox] Auto-build for "${plan.imageName}" did not produce the required exact-plan labels`);
 					}
-					sandboxImageRequirements.recordBuildSuccess(projectId, plan.fingerprint);
-				} else {
-					// Docker was unavailable before a build could start. This is unsupported,
-					// not a failed exact plan, so retain no failure record.
-					throw new Error(`[sandbox] Docker is unavailable for project ${projectId}`);
 				}
+				sandboxImageRequirements.recordBuildSuccess(projectId, plan.fingerprint);
 
 				const isRepo = await isGitRepo(projectDir, serverCommandRunner);
 				if (!isRepo) {
@@ -6846,7 +6854,9 @@ async function handleApiRoute(
 		// fence host commands through that seam rather than allowing direct spawns.
 		const status = await checkDockerAvailability(configured ? plan : undefined, dockerContextRoot ?? undefined, commandRunner);
 		const failure = sandboxImageRequirements.getBuildFailure(resolved.projectId, plan.fingerprint);
-		if (configured && status.available && failure && status.requirements) {
+		// A recorded failure describes a pending attempt, never a currently ready
+		// exact image. In particular, it must not hide a later successful build.
+		if (configured && status.available && status.imageReady === false && failure && status.requirements) {
 			status.requirements = sandboxRequirementsStatus(plan, "failed", failure.code);
 		}
 		if (!configured && plan.requirements.length > 0) {
@@ -6875,6 +6885,10 @@ async function handleApiRoute(
 		} catch (error) {
 			if (!(error instanceof UnsupportedSandboxImagePlanError)) throw error;
 			json({ success: false, error: "Unsupported sandbox image configuration", code: "SANDBOX_IMAGE_UNSUPPORTED" }, 422);
+			return;
+		}
+		if (!plan.buildable) {
+			json({ success: false, error: "Configured digest sandbox image is build-not-applicable", code: "SANDBOX_IMAGE_BUILD_NOT_APPLICABLE" }, 422);
 			return;
 		}
 		const dockerContextRoot = resolveSandboxDockerContext(resolved.project.rootPath);
@@ -7845,6 +7859,17 @@ async function handleApiRoute(
 				}
 			}
 
+			// Validate this Docker argument boundary before persisting. The resolver
+			// repeats the check for legacy on-disk config, but writes get a precise
+			// field error rather than leaving a future sandbox bootstrap ambiguous.
+			if ("sandbox_image" in (body as Record<string, unknown>)) {
+				const sandboxImage = (body as Record<string, unknown>).sandbox_image;
+				if (sandboxImage !== null && sandboxImage !== "" && (typeof sandboxImage !== "string" || !parseSandboxBaseImageReference(sandboxImage))) {
+					json({ field: "sandbox_image", error: "sandbox_image must be a valid Docker image reference" }, 400);
+					return;
+				}
+			}
+
 			// Validate components[].config eagerly (mirrors propose_project tool).
 			{
 				const err = validateComponentsConfig((body as Record<string, unknown>).components);
@@ -8095,6 +8120,11 @@ async function handleApiRoute(
 				const failure = projectConfigPersistenceFailure(error);
 				json(failure.body, failure.status);
 				return;
+			}
+			// A changed image authority must never inherit a bounded failed-build
+			// marker for a previous configured image. This is project-local.
+			if ("sandbox_image" in (body as Record<string, unknown>) || "sandbox" in (body as Record<string, unknown>)) {
+				sandboxImageRequirements.invalidateProject(resolved.projectId);
 			}
 			if (Object.keys(pendingTokenSecretUpdates).length > 0) {
 				try {
@@ -11166,6 +11196,10 @@ async function handleApiRoute(
 			}
 			try {
 				const result = context.extensionSettingsStore.compareAndSwap(ref, input.expectedRevision, { ...(input.enabled !== undefined ? { enabled: input.enabled as boolean } : {}), ...(Object.keys(publicValues).length ? { values: publicValues } : {}), ...(Object.keys(secrets).length ? { secrets } : {}) });
+				// Settings can alter a granted requirement's effective authority. Clear
+				// only this project so a revoke/regrant or disable/enable epoch cannot
+				// resurrect an old exact-plan failure.
+				sandboxImageRequirements.invalidateProject(resolved.projectId);
 				emitMutation(result, [ref]);
 			} catch (error) {
 				broadcastCommittedExtensionSettingsInvalidation(resolved.projectId, error);
@@ -11184,6 +11218,7 @@ async function handleApiRoute(
 		try {
 			const refs = packTargets.map(target => target.ref);
 			const result = context.extensionSettingsStore.compareAndSwapMany(refs.map(ref => ({ ref, enabled: input.enabled as boolean })), input.expectedRevision);
+			sandboxImageRequirements.invalidateProject(resolved.projectId);
 			emitMutation(result, refs);
 		} catch (error) {
 			broadcastCommittedExtensionSettingsInvalidation(resolved.projectId, error);
@@ -11298,6 +11333,7 @@ async function handleApiRoute(
 			auditAvailable = false;
 			console.warn(`[extension-grants] audit unavailable action=granted project=${resolved.projectId} pack=${packId} principal=${isPackPrincipal ? "pack" : validHookId} capability=${capability}`);
 		}
+		sandboxImageRequirements.invalidateProject(resolved.projectId);
 		broadcastExtensionGrantInvalidation(resolved.projectId);
 		// An explicit operator grant may admit hooks that were deliberately kept
 		// pending during registration. Replay only the durable ready marker.
@@ -11372,6 +11408,7 @@ async function handleApiRoute(
 				auditAvailable = false;
 				console.warn(`[extension-grants] audit unavailable action=revoked project=${resolved.projectId} pack=${packId} principal=${isPackPrincipal ? "pack" : hookId} capability=${capability}`);
 			}
+			sandboxImageRequirements.invalidateProject(resolved.projectId);
 			broadcastExtensionGrantInvalidation(resolved.projectId);
 			const projection = extensionGrantProjection(resolved.projectId, store);
 			if (!auditAvailable) {
@@ -13236,8 +13273,29 @@ async function handleApiRoute(
 			};
 			const before = beforeActivation.mcp ?? [];
 			const beforeOps = beforeActivation.mcpOperations ?? {};
+			// Activation is shared across scope, but a failed image marker belongs
+			// only to a project whose effective exact plan actually changes. Snapshot
+			// the projected fingerprints so unrelated projects retain their retries.
+			const sandboxPlanFingerprints = (): Map<string, string | undefined> => {
+				const fingerprints = new Map<string, string | undefined>();
+				for (const project of projectRegistry.list()) {
+					const projectContext = projectContextManager.getOrCreate(project.id);
+					if (!projectContext) continue;
+					try {
+						fingerprints.set(project.id, resolveProjectSandboxImagePlan(packContributionRegistry, projectContext.projectConfigStore, project.id).fingerprint);
+					} catch {
+						// Invalid legacy project config cannot establish a new authority epoch.
+					}
+				}
+				return fingerprints;
+			};
+			const sandboxPlansBeforeActivation = sandboxPlanFingerprints();
 			cfgStore.setPackActivation(targetScope as PackOrderScope, packName, normalized);
 			invalidateResolverCaches();
+			const sandboxPlansAfterActivation = sandboxPlanFingerprints();
+			for (const [projectId, beforeFingerprint] of sandboxPlansBeforeActivation) {
+				if (sandboxPlansAfterActivation.get(projectId) !== beforeFingerprint) sandboxImageRequirements.invalidateProject(projectId);
+			}
 			const mcpChanged = JSON.stringify([...before].sort()) !== JSON.stringify([...normalized.mcp].sort()) || JSON.stringify(beforeOps) !== JSON.stringify(normalized.mcpOperations ?? {});
 			const mcpReload = mcpChanged ? await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId) : undefined;
 			const refreshedCatalogue = mcpChanged ? buildActivationCatalogue(targetScope, st.target.projectBase, st.target.store, packName, targetProjectId) ?? catalogue : catalogue;
