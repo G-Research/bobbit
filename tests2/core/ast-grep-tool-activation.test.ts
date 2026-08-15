@@ -3,7 +3,7 @@ import path from "node:path";
 import { preflightConfigExtensionFile } from "../../src/server/agent/tool-extension-preflight.ts";
 import { createAstGrepExtension, resolveAstGrepBinary } from "../../market-packs/code-intelligence/tools/ast/extension.ts";
 
-type Registered = { name: string; description: string; parameters: unknown; execute: Function };
+type Registered = { name: string; description: string; promptSnippet: string; promptGuidelines: string[]; parameters: unknown; execute: Function };
 const priorCwd = process.env.BOBBIT_CWD;
 const priorAstGrepPath = process.env.BOBBIT_AST_GREP_PATH;
 
@@ -26,8 +26,11 @@ describe("ast-grep tool activation", () => {
 		const tools = load(true, ["typescript", "python"]);
 		expect(tools).toHaveLength(1);
 		expect(tools[0]).toMatchObject({ name: "ast_grep" });
-		expect(tools[0].description).toContain("grep");
-		expect(tools[0].description).toContain("read");
+		expect(tools[0].description).toContain("structural search");
+		expect(tools[0].description).toContain("read cited source and callers");
+		expect(tools[0].promptSnippet).toContain("structural leads");
+		expect(tools[0].promptSnippet.length).toBeLessThanOrEqual(160);
+		expect(tools[0].promptGuidelines.join("\n")).toContain("Before a finding or approval, use read on every cited source and caller");
 		const schema = tools[0].parameters as any;
 		expect(Object.keys(schema.properties)).toEqual(["paths", "pattern", "language", "strictness"]);
 	});

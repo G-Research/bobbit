@@ -1,7 +1,7 @@
 name: graph_path
 group: Graph
 summary: Find bounded graph paths between two nodes.
-description: Read-only Graphify path lookup within each eligible component; it never creates cross-repository edges.
+description: Read-only Graphify breadth leads for bounded component paths; read cited source and callers before review findings.
 params: [from, to, component, maxDepth]
 provider:
   type: bobbit-extension

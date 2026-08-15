@@ -1,5 +1,5 @@
 name: lsp_hover
-description: "Read hover information through an enabled language service."
+description: "Read-only precise hover navigation through a ready LSP; read cited source before review findings."
 summary: "Read-only LSP hover information"
 params: ["component?", "language?", path, position]
 provider:

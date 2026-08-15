@@ -1,7 +1,7 @@
 name: graph_query
 group: Graph
 summary: Search component-scoped graph nodes and relationships.
-description: Read-only Graphify text or semantic query. Code-tier results are the default; set includeDocs=true only when documentation results are needed.
+description: Read-only Graphify breadth search; read cited source and callers before review findings. Code-tier results are the default.
 params: [query, component, components, includeDocs, maxResults]
 provider:
   type: bobbit-extension

@@ -9,7 +9,9 @@ import defaultLspExtension, {
 
 type RegisteredTool = {
 	name: string;
+	description?: string;
 	promptSnippet?: string;
+	promptGuidelines?: string[];
 	parameters?: any;
 	execute: (toolCallId: string, params: unknown) => Promise<any>;
 };
@@ -44,7 +46,11 @@ describe("LSP extension registration", () => {
 			]);
 
 			for (const tool of tools.values()) {
-				expect(tool.promptSnippet).toContain("never edits files, starts, or installs");
+				expect(tool.description).toContain("Read-only");
+				expect(tool.promptSnippet).toContain("precise navigation only when ready");
+				expect(tool.promptSnippet!.length).toBeLessThanOrEqual(160);
+				expect(tool.promptGuidelines!.join("\n")).toContain("LSP is read-only: it never edits files, starts, or installs a language server.");
+				expect(tool.promptGuidelines!.join("\n")).toContain("Before a finding or approval, use read on every cited definition, reference, source, and caller.");
 			}
 			const symbols = tools.get("lsp_symbols")!;
 			expect(symbols.parameters.anyOf.map((branch: any) => branch.properties.scope.const)).toEqual(["document", "workspace"]);

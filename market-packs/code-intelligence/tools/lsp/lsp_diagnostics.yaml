@@ -1,5 +1,5 @@
 name: lsp_diagnostics
-description: "Read the last published diagnostics for one file through an enabled language service."
+description: "Read-only diagnostics from a ready LSP; read cited source before review findings."
 summary: "Read-only LSP diagnostics"
 params: ["component?", "language?", path]
 provider:
