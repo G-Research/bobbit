@@ -27,7 +27,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createMemFs } from "../harness/mem-fs.js";
 import { validateManifest } from "../../src/server/agent/pack-manifest.ts";
-import { loadHooks, loadPackContributions, loadSystemPromptSections, packIdFromRoot, PackContributionError } from "../../src/server/agent/pack-contributions.ts";
+import { loadHooks, loadPackContributions, loadSandboxRequirements, loadSystemPromptSections, packIdFromRoot, PackContributionError } from "../../src/server/agent/pack-contributions.ts";
 import { DYNAMIC_CONTEXT_END, DYNAMIC_CONTEXT_START } from "../../src/server/agent/prompt-delimiters.ts";
 import { HOST_API_VERSION, HOST_CONTRACT_VERSION, type HostChannelFrame, type HostChannelsApi, type HostApi } from "../../src/shared/extension-host/host-api.ts";
 import { PackContributionRegistry } from "../../src/server/extension-host/pack-contribution-registry.ts";
@@ -201,18 +201,28 @@ describe("validateManifest (§1.2)", () => {
 		}
 	});
 
-	it("rejects bad capability names and warns on newer schemas without failing", () => {
+	it("accepts schema-3 sandbox requirement catalogues only with safe basenames", () => {
+		const schema2Problems: string[] = [];
+		assert.equal(validateManifest({ ...ok, schema: 2, contents: { ...ok.contents, sandboxRequirements: ["python"] } }, schema2Problems), null);
+		assert.match(schema2Problems.join("\n"), /requires schema 3/);
+		const problems: string[] = [];
+		const m = validateManifest({ ...ok, schema: 3, contents: { ...ok.contents, sandboxRequirements: ["python-analysis"] } }, problems);
+		assert.ok(m);
+		assert.deepEqual(m.contents.sandboxRequirements, ["python-analysis"]);
+		assert.deepEqual(problems, []);
+		assert.equal(validateManifest({ ...ok, schema: 3, contents: { ...ok.contents, sandboxRequirements: ["../escape"] } }), null);
+	});
+
+	it("rejects bad capability names and warns on schemas newer than schema 3", () => {
 		const badProblems: string[] = [];
 		assert.equal(validateManifest({ ...ok, schema: 2, provides: ["Bad_Name"] }, badProblems), null);
 		assert.equal(badProblems[0], 'pack.yaml: provides entry "Bad_Name" must match /^[a-z0-9][a-z0-9-]*$/');
 
 		const problems: string[] = [];
-		const m = validateManifest({ ...ok, schema: 3, contents: { ...ok.contents, providers: ["memory"], channels: ["terminal"] } }, problems);
+		const m = validateManifest({ ...ok, schema: 4, contents: { ...ok.contents, providers: ["memory"], channels: ["terminal"] } }, problems);
 		assert.ok(m);
-		assert.equal(m.schema, 3);
-		assert.deepEqual(m.contents.providers, ["memory"]);
-		assert.deepEqual(m.contents.channels, ["terminal"]);
-		assert.deepEqual(problems, ["pack.yaml: schema 3 is newer than supported (2)"]);
+		assert.equal(m.schema, 4);
+		assert.deepEqual(problems, ["pack.yaml: schema 4 is newer than supported (3)"]);
 	});
 });
 
@@ -265,6 +275,34 @@ function manifest(name: string, opts: Partial<PackManifest["contents"]> & { rout
 		...(opts.routes ? { routes: opts.routes } : {}),
 	};
 }
+
+describe("schema-3 sandbox requirement declarations", () => {
+	it("loads only the closed, approved public-profile declaration shape", () => {
+		const root = packRoot("sandbox-requirements", "safe-tools");
+		w(path.join(root, "sandbox-requirements", "python.yaml"), "id: python-analysis\nprofiles: [python]\nconfig:\n  enabled: { type: boolean, default: true }\nactivation:\n  requiresConfig: [enabled]\n");
+		w(path.join(root, "sandbox-requirements", "injected.yaml"), "id: injected\nprofiles: [python, python]\ncommand: apt install anything\n");
+		const m = { ...manifest("safe-tools", { sandboxRequirements: ["python", "injected"] }), schema: 3 };
+		const requirements = loadSandboxRequirements(root, m);
+		assert.deepEqual(requirements.map(requirement => ({ id: requirement.id, profiles: requirement.profiles, activation: requirement.activation })), [
+			{ id: "python-analysis", profiles: ["python"], activation: { requiresConfig: ["enabled"] } },
+		]);
+	});
+
+	it("fails closed unless activation, settings, and exact pack authorization all permit the request", () => {
+		const root = packRoot("sandbox-requirements-registry", "safe-tools");
+		w(path.join(root, "sandbox-requirements", "python.yaml"), "id: python-analysis\nprofiles: [python]\nconfig:\n  enabled: { type: boolean, default: true }\nactivation:\n  requiresConfig: [enabled]\n");
+		const m = { ...manifest("safe-tools", { sandboxRequirements: ["python"] }), schema: 3 };
+		const registry = new PackContributionRegistry(
+			() => [entry(root, "server", m)],
+			undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+			(_projectId, packId) => packId === "safe-tools",
+		);
+		assert.deepEqual(registry.listSandboxRequirements(undefined), [{ packId: "safe-tools", requirementId: "python-analysis", profiles: ["python"] }]);
+
+		const denied = new PackContributionRegistry(() => [entry(root, "server", m)]);
+		assert.deepEqual(denied.listSandboxRequirements(undefined), []);
+	});
+});
 
 describe("loadPackContributions (§5.1) + pack-root containment (§2)", () => {
 	it("parses panels + entrypoints (filtered by contents.entrypoints, listName carried) + routes", () => {

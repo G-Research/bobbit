@@ -36,6 +36,7 @@ const packOnlyCapabilities = [
 	"memory.reflect",
 	"memory.invalidate",
 	"memory.read.all",
+	"sandbox:build",
 ] as const;
 
 function grant(overrides: Partial<ExtensionHookGrant> = {}): ExtensionHookGrant {

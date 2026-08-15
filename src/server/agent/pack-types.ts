@@ -89,6 +89,8 @@ export interface PackManifest {
 		workflows?: string[]; // workflow contribution basenames (accepted, loader later)
 		/** YAML `system-prompts`: static prompt-section declaration basenames (schema 2). */
 		systemPrompts?: string[];
+		/** Schema-3 inert sandbox requirement declaration basenames. */
+		sandboxRequirements?: string[];
 	};
 	/** Optional top-level pack-level routes (module + allowlist). Support surface,
 	 *  not toggleable. Absent ⇒ the pack contributes no server routes. */
