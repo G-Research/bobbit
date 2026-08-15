@@ -5,6 +5,8 @@ import {
 	claudeAgentSdkDirectConfigDir,
 	claudeAgentSdkModuleUrl,
 	createDirectClaudeAgentSdkSessionAccess,
+	SANDBOX_SDK_MODULE_PATH,
+	SANDBOX_SDK_MODULE_URL,
 	SDK_HISTORY_READER_EXEC_OPTIONS,
 	readSdkSessionInfo,
 	readSdkSessionMessages,
@@ -77,6 +79,11 @@ describe("Claude Agent SDK session access", () => {
 		expect(executions[0].at(-1)).toBe(claudeAgentSdkModuleUrl());
 		expect(executions[0].at(-1)).toMatch(/^file:\/\//);
 		expect(executionOptions).toEqual([SDK_HISTORY_READER_EXEC_OPTIONS]);
+	});
+
+	it("pins the sandbox reader to its POSIX container module URL across host platforms", () => {
+		expect(SANDBOX_SDK_MODULE_PATH).toBe("/usr/local/lib/bobbit/claude-agent-sdk.mjs");
+		expect(SANDBOX_SDK_MODULE_URL).toBe("file:///usr/local/lib/bobbit/claude-agent-sdk.mjs");
 	});
 
 	it("prefers sandbox history access when both runtime-specific accessors are supplied", async () => {

@@ -153,7 +153,9 @@ export const SDK_HISTORY_READER_TIMEOUT_MS = 10_000;
 export const SDK_HISTORY_READER_EXEC_OPTIONS = { timeout: SDK_HISTORY_READER_TIMEOUT_MS, killSignal: "SIGKILL" } as const;
 /** Image-pinned wrapper resolves its package from /usr/local/lib/node_modules. */
 export const SANDBOX_SDK_MODULE_PATH = "/usr/local/lib/bobbit/claude-agent-sdk.mjs";
-export const SANDBOX_SDK_MODULE_URL = pathToFileURL(SANDBOX_SDK_MODULE_PATH).href;
+// This URL is evaluated by Node inside the Linux container. Do not derive it
+// through host pathToFileURL: Windows would incorrectly add its drive prefix.
+export const SANDBOX_SDK_MODULE_URL = `file://${SANDBOX_SDK_MODULE_PATH}`;
 
 /** Resolve from Bobbit's module location, never the user project CWD. */
 export function claudeAgentSdkModuleUrl(): string {
