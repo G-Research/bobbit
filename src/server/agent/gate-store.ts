@@ -1165,16 +1165,17 @@ export class GateStore {
 			gate.updatedAt = mutationUpdatedAt;
 			return this.saveStrict([key]).catch(error => {
 				// A queued writer or lifecycle operation may have advanced this exact
-				// signal while the strict write was in flight. Compensate only our own
-				// still-current mutation; never roll a newer state backwards.
+				// signal while the strict write was in flight. Verification object
+				// identity owns this mutation; a newer timestamp alone must not leave
+				// an unacknowledged terminal result visible. Preserve any unrelated
+				// same-gate mutation by restoring only its timestamp conditionally.
 				if (
 					this.gates.get(key) === gate
 					&& gate.signals.includes(signal)
 					&& signal.verification === verification
-					&& gate.updatedAt === mutationUpdatedAt
 				) {
 					signal.verification = previousVerification;
-					gate.updatedAt = previousUpdatedAt;
+					if (gate.updatedAt === mutationUpdatedAt) gate.updatedAt = previousUpdatedAt;
 				}
 				throw error;
 			});

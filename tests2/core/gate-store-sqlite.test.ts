@@ -644,7 +644,7 @@ describe("GateStore SQLite persistence", () => {
 		await reloaded.close();
 	});
 
-	it("rolls back a rejected strict verification publication so cancellation can retry", async () => {
+	it("rolls back a rejected strict verification publication while preserving a concurrent same-gate mutation", async () => {
 		const memfs = createMemFs();
 		const stateDir = path.resolve("/memfs/gate-strict-verification-rollback");
 		memfs.mkdirSync(stateDir, { recursive: true });
@@ -677,29 +677,84 @@ describe("GateStore SQLite persistence", () => {
 		};
 		const originalRename = memfs.promises.rename.bind(memfs.promises);
 		let failNextRename = true;
+		let markRenameStarted!: () => void;
+		let releaseRename!: () => void;
+		const renameStarted = new Promise<void>(resolve => { markRenameStarted = resolve; });
+		const renameReleased = new Promise<void>(resolve => { releaseRename = resolve; });
 		(memfs.promises as any).rename = async (from: string, to: string) => {
 			if (failNextRename && String(to).endsWith("gates.json")) {
 				failNextRename = false;
+				markRenameStarted();
+				await renameReleased;
 				throw new Error("injected strict verification rename failure");
 			}
 			return originalRename(from, to);
 		};
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const clock = vi.spyOn(Date, "now")
+			.mockReturnValueOnce(runningUpdatedAt + 1)
+			.mockReturnValueOnce(runningUpdatedAt + 2);
 
-		await expect(store.updateSignalVerificationStrict(signal.id, terminal)).rejects.toThrow(/injected strict verification rename failure/);
-		expect(store.getGate("goal-1", "design")?.signals[0]?.verification).toEqual(runningVerification);
-		expect(store.getGate("goal-1", "design")?.updatedAt).toBe(runningUpdatedAt);
+		const publication = store.updateSignalVerificationStrict(signal.id, terminal);
+		await renameStarted;
+		store.updateGateMetadata("goal-1", "design", { concurrent: "mutation" });
+		releaseRename();
+		await expect(publication).rejects.toThrow(/injected strict verification rename failure/);
+		await store.flush();
+
+		const afterFailure = store.getGate("goal-1", "design")!;
+		expect(afterFailure.signals[0]?.verification.status).toBe("running");
+		expect(afterFailure.signals[0]?.verification).toEqual(runningVerification);
+		expect(afterFailure.currentMetadata).toEqual({ concurrent: "mutation" });
+		expect(afterFailure.updatedAt).toBe(runningUpdatedAt + 2);
 		const failedWriteReader = new GateStore(stateDir, memfs, { persistence: "json" });
 		expect(failedWriteReader.getGate("goal-1", "design")?.signals[0]?.verification).toEqual(runningVerification);
+		expect(failedWriteReader.getGate("goal-1", "design")?.currentMetadata).toEqual({ concurrent: "mutation" });
 		failedWriteReader.dispose();
 
+		clock.mockRestore();
 		(memfs.promises as any).rename = originalRename;
 		await expect(store.updateSignalVerificationStrict(signal.id, terminal)).resolves.toBeUndefined();
 		const durableReader = new GateStore(stateDir, memfs, { persistence: "json" });
 		expect(durableReader.getGate("goal-1", "design")?.signals[0]?.verification).toEqual(terminal);
+		expect(durableReader.getGate("goal-1", "design")?.currentMetadata).toEqual({ concurrent: "mutation" });
 		durableReader.dispose();
 		errorSpy.mockRestore();
 		await store.close();
+	});
+
+	it("rolls back a rejected SQLite strict verification publication", async () => {
+		const stateDir = tempRoot();
+		const store = openStore(stateDir);
+		store.initGatesForGoal("goal-sqlite-strict", ["design"]);
+		const signal: GateSignal = {
+			id: "sqlite-running-signal",
+			goalId: "goal-sqlite-strict",
+			gateId: "design",
+			sessionId: "session-1",
+			timestamp: 1,
+			commitSha: "abc123",
+			verification: { status: "running", steps: [] },
+		};
+		store.recordSignal(signal);
+		await store.flush();
+		const runningVerification = structuredClone(signal.verification);
+		const terminal: GateSignal["verification"] & { injectedFailure?: { toJSON(): never } } = {
+			status: "cancelled",
+			cancellation: { cause: "manual", requestedAt: 2, finalizedAt: 3 },
+			steps: [],
+			injectedFailure: { toJSON: () => { throw new Error("injected SQLite strict serialization failure"); } },
+		};
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await expect(store.updateSignalVerificationStrict(signal.id, terminal)).rejects.toThrow(/injected SQLite strict serialization failure/);
+		expect(store.getGate("goal-sqlite-strict", "design")?.signals[0]?.verification).toEqual(runningVerification);
+
+		delete terminal.injectedFailure;
+		await expect(store.updateSignalVerificationStrict(signal.id, terminal)).resolves.toBeUndefined();
+		const durableReader = openStore(stateDir);
+		expect(durableReader.getGate("goal-sqlite-strict", "design")?.signals[0]?.verification).toEqual(terminal);
+		errorSpy.mockRestore();
 	});
 
 	it("retries a transient final flush failure and restores the exact mutation after restart", async () => {
