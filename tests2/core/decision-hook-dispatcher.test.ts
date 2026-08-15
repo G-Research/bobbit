@@ -45,6 +45,46 @@ describe("decision hook dispatcher selections", () => {
 		expect(imports).toBe(1);
 	});
 
+	it("keeps an import hook pending until an operator grant can replay its durable run", async () => {
+		const imported = hook("import-hook", "/packs/import");
+		imported.events = ["projectImported"];
+		const run: any = {
+			id: "import-1", projectId: "project-a", createdAt: "2026-01-01T00:00:00.000Z",
+			context: { event: "projectImported", projectId: "project-a", importId: "import-1", projectRoot: "/project", ownedRoots: ["/project"], components: [] },
+			hooks: {},
+		};
+		let granted = false;
+		let imports = 0;
+		const manager: any = {
+			setContinuation: () => {}, registerProject: () => {}, getImportRun: () => run,
+			ensureImportHooks: (_projectId: string, _importId: string, keys: string[]) => {
+				for (const key of keys) run.hooks[key] ??= { state: "pending" };
+				return structuredClone(run);
+			},
+			completeImportHook: (_projectId: string, _importId: string, key: string, outcome: string) => {
+				if (run.hooks[key]?.state !== "pending") return false;
+				run.hooks[key] = { state: "completed", outcome };
+				return true;
+			},
+		};
+		const dispatcher = new DecisionHookDispatcher({
+			manager,
+			registry: { list: () => [{ packId: "import", hooks: [imported] }], listHooks: () => [imported] } as any,
+			moduleHost: { invoke: async () => { imports++; return undefined; } } as any,
+			grantsForProject: () => granted
+				? [{ packId: "import", hookId: "import-hook", capability: "decide", grantedAt: "2026-01-01T00:00:00.000Z", grantedBy: "admin" }] as any
+				: [],
+		});
+
+		await expect(dispatcher.dispatchProjectImport("project-a", "import-1")).resolves.toEqual([expect.objectContaining({ outcome: "denied", reason: "Grant required" })]);
+		expect(run.hooks["import:import-hook"]).toEqual({ state: "pending" });
+		expect(imports).toBe(0);
+
+		granted = true;
+		await expect(dispatcher.dispatchProjectImport("project-a", "import-1")).resolves.toEqual([expect.objectContaining({ outcome: "applied" })]);
+		expect(imports).toBe(1);
+	});
+
 	it("reduces concurrently completed selection hooks in deterministic active-pack order", async () => {
 		const hooks = [hook("z-hook", "/packs/low"), hook("a-hook", "/packs/high")];
 		const registry: any = {

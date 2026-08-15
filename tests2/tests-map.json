@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/extension-grant-provenance.test.ts",
+      "reason": "Fail-closed operator provenance coverage for checkout-supplied extension grants.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/large-write-stream-bounds.test.ts",
       "reason": "Core regression coverage proving cumulative large write snapshots remain bounded in retained events and capable-client wire frames.",
       "execution": {
