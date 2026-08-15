@@ -221,7 +221,7 @@ export class ServiceExtensionRuntimeManager implements ServiceExtensionRuntime {
 			if (!this.isCurrent(fence, key)) return;
 			const running = this.running.get(key);
 			const desired = this.desired.get(key);
-			// Re-read the deny-wins grant after waiting for this instance queue.
+			// Re-read the deny-wins authorization after waiting for this instance queue.
 			if (desired && !this.isAuthorized(ref)) {
 				this.desired.delete(key);
 				if (running) await this.stopRunning(key, running);

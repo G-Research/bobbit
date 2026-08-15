@@ -90,8 +90,8 @@ describe("createServerHostApi — closure-bound managed services", () => {
 	it("fails closed without an exact gateway broker or a ready result", async () => {
 		const unavailable = createServerHostApi({ sessionId: "s", packId: "p", contributionId: "g/t" });
 		assert.equal(unavailable.capabilities.services, false);
-		await assert.rejects(
-			unavailable.services.call({ component: ".", serviceId: "language", operation: "search" }),
+		assert.throws(
+			() => unavailable.services.call({ component: ".", serviceId: "language", operation: "search" }),
 			/host\.services capability is not available/,
 		);
 		const notReady = createServerHostApi({
