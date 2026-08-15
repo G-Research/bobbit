@@ -3362,6 +3362,15 @@
       }
     },
     {
+      "path": "tests2/core/code-intelligence-provider.test.ts",
+      "reason": "Lifecycle provider fails closed for unscoped dispatches, retains bounded review guidance, delegates injected runtimes, and propagates runtime hook failures.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/graph-query-tools.test.ts",
       "reason": "Caps, tier defaults, component-labelled fan-out, freshness banners, and the six read-only graph tool operations.",
       "execution": {

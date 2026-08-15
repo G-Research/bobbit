@@ -29,22 +29,35 @@ export function createGraphProvider(runtime: GraphProviderRuntime): GraphProvide
 	};
 }
 
-function runtimeFrom(context: GraphProviderContext): GraphProviderRuntime {
-	// `scopeContext` is injected by LifecycleHub's server-owned resolver. The
-	// facade rejects legacy component fields and absent verified scope/identity.
-	return context?.graphRuntime ?? context?.host?.graphRuntime ?? getGraphRuntime(context);
+function runtimeFrom(context: GraphProviderContext): GraphProviderRuntime | undefined {
+	const injected = context?.graphRuntime ?? context?.host?.graphRuntime;
+	if (injected) return injected;
+	// `scopeContext` is injected by LifecycleHub's server-owned resolver. Do not
+	// resolve a host facade for hidden, system, or unscoped lifecycle dispatches.
+	return hasVerifiedProjectScope(context) ? getGraphRuntime(context) : undefined;
+}
+
+function hasVerifiedProjectScope(context: GraphProviderContext): boolean {
+	const projectId = nonEmpty(context?.projectId);
+	return Boolean(projectId && projectId === nonEmpty(context?.scopeContext?.project?.id));
+}
+
+function nonEmpty(value: unknown): string | undefined {
+	return typeof value === "string" && value.trim() ? value : undefined;
 }
 
 /** Default module contribution. Pack-level defaultDisabled activation omits this
  * provider entirely until opted in. Hooks use the host-only status facade and no
  * hook receives a graph path or starts a rebuild. */
 const provider: GraphProvider = {
-	goalProvisioned: async context => runtimeFrom(context).goalProvisioned(context),
+	goalProvisioned: async context => (await runtimeFrom(context)?.goalProvisioned(context)) ?? emptyResult(),
 	// Keep reviewer guidance available even before a graph is published. The
 	// runtime contributes its bounded declared status block when one exists.
-	sessionSetup: async context => withReviewGuidance(await runtimeFrom(context).sessionSetup(context)),
-	afterTurn: async context => runtimeFrom(context).afterTurn(context),
+	sessionSetup: async context => withReviewGuidance((await runtimeFrom(context)?.sessionSetup(context)) ?? emptyResult()),
+	afterTurn: async context => (await runtimeFrom(context)?.afterTurn(context)) ?? emptyResult(),
 };
+
+function emptyResult(): GraphHookResult { return { blocks: [] }; }
 
 function withReviewGuidance(result: GraphHookResult): GraphHookResult {
 	if (result.blocks.some(block => block.id === "code-intelligence-orientation")) return result;
