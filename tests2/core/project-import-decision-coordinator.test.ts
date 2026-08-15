@@ -43,4 +43,48 @@ describe("ProjectImportDecisionCoordinator", () => {
 			outcomes: [expect.objectContaining({ event: "projectImported", packId: "extension-pack", hookId: "import-hook" })],
 		}]);
 	});
+
+	it("contains a startup replay timeout and still traces a later project", async () => {
+		const runs = new Map<string, any>();
+		const dispatched: string[] = [];
+		const errors: string[] = [];
+		const traces: string[] = [];
+		const ready = (id: string) => ({ version: 1 as const, id: `import-${id}`, createdAt: Date.now(), state: "ready" as const });
+		const coordinator = new ProjectImportDecisionCoordinator({
+			registry: {
+				get: (projectId: string) => projectId === "project-1" || projectId === "project-2"
+					? { id: projectId, rootPath: `/${projectId}`, importDecisionRun: ready(projectId) }
+					: undefined,
+				list: () => ["project-1", "project-2"].map(id => ({ id, rootPath: `/${id}`, importDecisionRun: ready(id) })),
+			} as any,
+			projectContextManager: {
+				getOrCreate: () => ({
+					decisionRequestStore: {
+						getImportRun: (id: string) => runs.get(id),
+						ensureImportRun: (run: any) => { runs.set(run.id, run); return { created: true, run }; },
+					},
+					projectConfigStore: { getComponents: () => [] },
+				}),
+			} as any,
+			buildContext: ({ project, importId }) => ({
+				event: "projectImported" as const, projectId: project.id, importId, projectRoot: project.rootPath, ownedRoots: [project.rootPath], components: [],
+			}),
+			dispatcher: {
+				dispatchProjectImport: async (projectId) => {
+					dispatched.push(projectId);
+					if (projectId === "project-1") return await new Promise<never>(() => {});
+					return [{ kind: "decision" as const, packId: "extension-pack", hookId: "import-hook", event: "projectImported" as const, outcome: "applied" as const }];
+				},
+			},
+			reconcileTimeoutMs: 5,
+			onError: projectId => errors.push(projectId),
+			trace: { appendProjectImportTrace: projectId => traces.push(projectId) },
+		});
+
+		await coordinator.reconcileAll();
+
+		expect(dispatched).toEqual(["project-1", "project-2"]);
+		expect(errors).toEqual(["project-1"]);
+		expect(traces).toEqual(["project-2"]);
+	});
 });
