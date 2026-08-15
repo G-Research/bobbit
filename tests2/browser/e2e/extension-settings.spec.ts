@@ -296,6 +296,8 @@ test.describe("Market extension settings", () => {
 		const emptyJavascript = emptyLanguages.locator('[data-testid="market-settings-multi-enum-option"][data-option-value="javascript"]');
 		await emptyJavascript.focus();
 		await page.keyboard.press("Space");
+		await expect(emptyJavascript).not.toBeChecked();
+		await expect(emptyLanguages.getByTestId("market-settings-multi-enum-summary")).toHaveText("1 selected");
 		await emptyTypescript.focus();
 		await page.keyboard.press("Space");
 		await expect(emptyTypescript).not.toBeChecked();
@@ -362,8 +364,12 @@ test.describe("Market extension settings", () => {
 		const reconfigureRust = reconfigureLanguages.locator('[data-testid="market-settings-multi-enum-option"][data-option-value="rust"]');
 		await reconfigurePython.focus();
 		await page.keyboard.press("Space");
+		await expect(reconfigurePython).not.toBeChecked();
+		await expect(reconfigureLanguages.getByTestId("market-settings-multi-enum-summary")).toHaveText("1 selected");
 		await reconfigureRust.focus();
 		await page.keyboard.press("Space");
+		await expect(reconfigureRust).toBeChecked();
+		await expect(reconfigureLanguages.getByTestId("market-settings-multi-enum-summary")).toHaveText("2 selected");
 		const reconfigureResponse = page.waitForResponse(response => response.url().endsWith(patchPath) && response.request().method() === "PATCH");
 		await reconfigureForm.getByTestId("market-settings-save").click();
 		const reconfigured = await reconfigureResponse;
