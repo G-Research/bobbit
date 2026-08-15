@@ -8,7 +8,7 @@
     "v2-browser": 216,
     "v2-core": 512,
     "v2-dom": 144,
-    "v2-integration": 202
+    "v2-integration": 203
   },
   "methods": {
     "adapter": 275,
@@ -20,6 +20,15 @@
     "vitest-e2e": 2
   },
   "v2Native": [
+    {
+      "path": "tests2/integration/strict-update-body-routes.test.ts",
+      "reason": "Regression contract for strict finite-shape update bodies: exact route allow-lists, accepted representative updates, unknown-key rejection, no mutation, goal policy guidance, and immutable staff sandboxing.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
     {
       "path": "tests2/core/large-write-stream-bounds.test.ts",
       "reason": "Core regression coverage proving cumulative large write snapshots remain bounded in retained events and capable-client wire frames.",
