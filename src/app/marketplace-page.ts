@@ -2266,10 +2266,12 @@ function sameSettingValue(left: ExtensionSettingDraftValue | undefined, right: E
 
 function draftFor(owner: string, field: ExtensionSettingField): ExtensionSettingDraftValue | undefined {
 	const draft = settingsDrafts.get(owner);
-	// An explicit undefined draft means "Use default": render the inherited
-	// value while retaining the undefined sentinel for PATCH null serialization.
+	// Only multi-enum previews its inherited selections for an explicit
+	// "Use default" draft. Primitive controls retain their established cleared
+	// state until the PATCH null mutation is saved.
+	const staged = draft?.has(field.key) ? draft.get(field.key) : undefined;
 	const value = draft?.has(field.key)
-		? draft.get(field.key) === undefined ? field.default : draft.get(field.key)
+		? staged === undefined && field.type === "multi-enum" ? field.default : staged
 		: field.value;
 	return cloneSettingValue(value);
 }
