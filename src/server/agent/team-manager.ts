@@ -3127,9 +3127,10 @@ export class TeamManager {
 			throw new Error(`No active team for goal: ${goalId}`);
 		}
 
-		// Cancel any in-flight verifications before completing — prevents zombie reviewers
+		// Cancel any in-flight verifications before completing — prevents zombie reviewers.
+		// Completion is orchestration, not a product-verification failure.
 		if (this.verificationHarness) {
-			await this.verificationHarness.cancelAllVerifications(goalId);
+			await this.verificationHarness.cancelAllVerifications(goalId, "goal-complete");
 		}
 
 		// Enforce gate requirements before allowing completion.
@@ -3213,9 +3214,10 @@ export class TeamManager {
 			throw new Error(`No active team for goal: ${goalId}`);
 		}
 
-		// Cancel any in-flight verifications before teardown — prevents zombie reviewers
+		// Cancel any in-flight verifications before teardown — prevents zombie reviewers.
+		// A subsequent archive cannot overwrite this first durable cancellation cause.
 		if (this.verificationHarness) {
-			await this.verificationHarness.cancelAllVerifications(goalId);
+			await this.verificationHarness.cancelAllVerifications(goalId, "team-teardown");
 		}
 
 		// Cancel idle-nudge timer and unsubscribe from team lead events

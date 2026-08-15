@@ -327,14 +327,12 @@ export async function tryHandleNestedGoalRoute(
 		return true;
 	}
 
-	/** Cancel any in-flight verifications for a goal (best-effort). */
+	/** Cancel any in-flight verifications for a paused goal (best-effort). */
 	async function cancelAllVerifications(goalId: string): Promise<void> {
-		for (const active of verificationHarness.getActiveVerifications(goalId)) {
-			try {
-				await verificationHarness.cancelStaleVerifications(goalId, active.gateId);
-			} catch (err) {
-				console.error(`[api] cancelAllVerifications: error cancelling verification for ${goalId}/${active.gateId}:`, err);
-			}
+		try {
+			await verificationHarness.cancelAllVerifications(goalId, "goal-pause");
+		} catch (err) {
+			console.error(`[api] cancelAllVerifications: error cancelling verifications for ${goalId}:`, err);
 		}
 	}
 

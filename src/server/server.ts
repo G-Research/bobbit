@@ -9091,12 +9091,10 @@ async function handleApiRoute(
 			if (mergedManually && g.id === id && g.state !== "complete") {
 				await getGoalManagerForGoal(g.id).updateGoal(g.id, { state: "complete" });
 			}
-			for (const active of verificationHarness.getActiveVerifications(g.id)) {
-				try {
-					await verificationHarness.cancelStaleVerifications(g.id, active.gateId);
-				} catch (err) {
-					console.error(`[api] archive: error cancelling verification for ${g.id}/${active.gateId}:`, err);
-				}
+			try {
+				await verificationHarness.cancelAllVerifications(g.id, "archive");
+			} catch (err) {
+				console.error(`[api] archive: error cancelling verifications for ${g.id}:`, err);
 			}
 			const goalProjectCtx = projectContextManager.getContextForGoal(g.id);
 			const teamEntry = goalProjectCtx?.teamStore.get(g.id);
@@ -12506,7 +12504,7 @@ async function handleApiRoute(
 
 		const affectedGateIds = getGateAndTransitiveDependents(initialGoal.workflow, gateId);
 		try {
-			await verificationHarness.cancelStaleVerificationsForGates(goalId, affectedGateIds);
+			await verificationHarness.cancelStaleVerificationsForGates(goalId, affectedGateIds, "gate-reset");
 		} catch (err) {
 			console.error(`[api] Error cancelling verifications for reset gates ${affectedGateIds.join(", ")}:`, err);
 		}
@@ -12759,7 +12757,7 @@ async function handleApiRoute(
 		if (typeof whoAmI !== "string" || !whoAmI.trim()) { json({ error: "whoAmI is required" }, 400); return; }
 
 		try {
-			await verificationHarness.cancelStaleVerificationsForGates(goalId, [gateId]);
+			await verificationHarness.cancelStaleVerificationsForGates(goalId, [gateId], "bypass");
 		} catch (err) {
 			console.error(`[api] Error cancelling verifications for bypassed gate ${gateId}:`, err);
 		}
@@ -12886,7 +12884,7 @@ async function handleApiRoute(
 				const alive = verificationHarness.areVerificationSessionsAlive(runningDup.signalId);
 				if (!alive) {
 					console.log(`[api] Auto-cancelling zombie verification ${runningDup.signalId} for gate ${gateId}`);
-					await verificationHarness.cancelStaleVerifications(goalId, gateId);
+					await verificationHarness.cancelStaleVerifications(goalId, gateId, "zombie-recovery");
 					// Fall through to create new signal
 				} else {
 					// Surface the step states so a future 409 is diagnosable from
@@ -12953,7 +12951,7 @@ async function handleApiRoute(
 		// await its exact cleanup: re-signal creates a fresh generation while the
 		// old one remains durably pending. The harness finalizer may update only
 		// that old signal and is forbidden from overwriting this gate's new state.
-		void verificationHarness.cancelStaleVerifications(goalId, gateId).catch(error => {
+		void verificationHarness.cancelStaleVerifications(goalId, gateId, "superseded").catch(error => {
 			console.error(`[api] Error cancelling stale verification for re-signal ${goalId}/${gateId}:`, error);
 		});
 
@@ -13084,12 +13082,19 @@ async function handleApiRoute(
 		}
 
 		// Explicit cancellation is non-terminal until exact cleanup settles. The
-		// harness owns the generation-safe failed-gate publication; this route must
+		// harness owns the generation-safe cancelled publication; this route must
 		// never overwrite a newer re-signal while an old tree is still pending.
-		const settled = await verificationHarness.cancelStaleVerifications(goalId, gateId);
+		const settled = await verificationHarness.cancelStaleVerifications(goalId, gateId, "manual");
 		json(settled
-			? { cancelled: true, pending: false }
-			: { cancelled: true, pending: true, message: "Cancellation is waiting for exact process cleanup" },
+			? { cancelled: true, outcome: "cancelled", cause: "manual", signalId: running.signalId, pending: false }
+			: {
+				cancelled: true,
+				outcome: "cancelled",
+				cause: "manual",
+				signalId: running.signalId,
+				pending: true,
+				message: "Cancellation is waiting for exact process cleanup",
+			},
 		200);
 		return;
 	}
