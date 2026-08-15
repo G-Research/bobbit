@@ -1,9 +1,9 @@
 schema: 2
 name: code-intelligence
 description: >-
-  Dormant Code Intelligence pack. This correctness-foundation slice contributes
-  only the isolated Graphify adapter and harness contract; it registers no
-  hooks, tools, routes, providers, settings, panels, or runtime services.
+  Dormant Code Intelligence pack. Its source stages Graphify, structural-search,
+  and bounded LSP adapters and tool contracts, while all manifest contributions
+  and runtime services remain disabled pending public Extension Platform integration.
 version: 0.1.0
 contents:
   roles: []
