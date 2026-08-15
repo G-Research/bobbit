@@ -67,8 +67,8 @@ test.describe("Journey: BG Wait Steer", () => {
 			// Make the agent busy for a few seconds via the STAY_BUSY mock trigger.
 			await sendMessage(page, "STAY_BUSY:4000 working");
 
-			// Wait until the agent is streaming (Stop button becomes visible).
-			await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 20_000 });
+			// Wait until the lifecycle-aware Stop control confirms an active turn.
+			await expect(page.getByRole("button", { name: "Stop current turn" })).toBeVisible({ timeout: 20_000 });
 
 			// Queue a second message while the agent is busy.
 			await textarea.fill("queued follow-up");
@@ -78,9 +78,11 @@ test.describe("Journey: BG Wait Steer", () => {
 			await expect(page.locator(".queue-pill").first()).toBeVisible({ timeout: 15_000 });
 			await expect(page.locator(".steer-btn")).toHaveCount(1, { timeout: 15_000 });
 
-			// Click Steer — the queued row is dispatched immediately and the pill vanishes.
+			// Click Steer. The row remains owned by the outbox until its correlated
+			// transcript message surfaces, then transitions without duplication.
 			await page.locator(".steer-btn").first().evaluate((el: HTMLElement) => el.click());
-			await expect(page.locator(".queue-pill")).toHaveCount(0, { timeout: 15_000 });
+			await expect(page.locator("user-message").filter({ hasText: "queued follow-up" })).toHaveCount(1, { timeout: 15_000 });
+			await expect(page.locator(".queue-pill").filter({ hasText: "queued follow-up" })).toHaveCount(0, { timeout: 15_000 });
 		} finally {
 			await deleteSession(sessionId);
 		}

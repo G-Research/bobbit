@@ -240,6 +240,37 @@ describe("truncateLargeToolContent", () => {
 		assert.strictEqual(result.message.content[1].arguments, undefined);
 	});
 
+	it("projects every message_end snapshot without mutating either Pi tool shape", () => {
+		const largeToolCall = "C".repeat(LARGE_CONTENT_THRESHOLD + 1);
+		const largeToolUse = "D".repeat(LARGE_CONTENT_THRESHOLD + 2);
+		const message = {
+			role: "assistant",
+			content: [
+				{ type: "toolCall", name: "write", arguments: { path: "a.txt", content: largeToolCall } },
+				{ type: "tool_use", name: "write", input: { path: "b.txt", content: largeToolUse } },
+			],
+		};
+		const event = {
+			type: "message_end",
+			message,
+			assistantMessageEvent: { type: "toolcall_end", partial: structuredClone(message) },
+		};
+
+		const result = truncateLargeToolContent(event);
+
+		assert.notStrictEqual(result, event);
+		assert.notStrictEqual(result.message, event.message);
+		assert.notStrictEqual(result.assistantMessageEvent, event.assistantMessageEvent);
+		for (const snapshot of [result.message, result.assistantMessageEvent.partial]) {
+			assert.strictEqual(snapshot.content[0].arguments.content._truncated, true);
+			assert.strictEqual(snapshot.content[1].input.content._truncated, true);
+		}
+		assert.strictEqual((event.message.content[0] as any).arguments.content, largeToolCall);
+		assert.strictEqual((event.message.content[1] as any).input.content, largeToolUse);
+		assert.strictEqual((event.assistantMessageEvent.partial.content[0] as any).arguments.content, largeToolCall);
+		assert.strictEqual((event.assistantMessageEvent.partial.content[1] as any).input.content, largeToolUse);
+	});
+
 	it("returns same object for small toolCall content", () => {
 		const event = {
 			type: "message_update",

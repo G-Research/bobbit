@@ -50,6 +50,7 @@ export type WorktreeInventoryReason =
 	| "branch-referenced-by-archived-record"
 	| "git-worktree-metadata-missing"
 	| "filesystem-only-needs-attention"
+	| "ownership-unverified"
 	| "sandbox-container-path"
 	| "delegate-shared-worktree"
 	| "primary-worktree"
@@ -191,6 +192,7 @@ interface Candidate {
 	pathExists: boolean;
 	gitWorktreeMetadataExists: boolean;
 	legacyArchived?: ArchivedSessionWorktreeItem;
+	archivedRecordMatchesGitIdentity?: boolean;
 	primary?: boolean;
 	scanError?: { reason: WorktreeInventoryReason; detail: string };
 }
@@ -235,11 +237,7 @@ export function isBobbitPoolBranch(branch: string | undefined): boolean {
 	return !!branch && (branch.startsWith("pool/_pool-") || branch.startsWith("session/_pool-"));
 }
 
-function isLegacySessionOrphanBranch(branch: string | undefined): boolean {
-	return !!branch && branch.startsWith("session/") && !isBobbitPoolBranch(branch);
-}
-
-function isBobbitOwnedBranch(branch: string | undefined): boolean {
+function isBobbitShapedBranch(branch: string | undefined): boolean {
 	return !!branch && (branch.startsWith("session/") || branch.startsWith("goal/") || branch.startsWith("staff-") || isBobbitPoolBranch(branch));
 }
 
@@ -327,7 +325,7 @@ export class WorktreeInventoryService {
 		const repos = await this.discoverRepos();
 		const candidates = new Map<string, Candidate>();
 		const addCandidate = (repo: RepoDescriptor, wtPath: string, source: WorktreeInventorySource, branch?: string, extra?: Partial<Candidate>) => {
-			const key = `${repo.projectId}|${repo.repo}|${norm(wtPath) ?? wtPath}`;
+			const key = `${repo.projectId}|${repo.repo}|${repoKey(repo.repoPath)}|${norm(wtPath) ?? wtPath}`;
 			let c = candidates.get(key);
 			if (!c) {
 				c = { projectId: repo.projectId, projectName: repo.projectName, componentName: repo.componentName, repo: repo.repo, repoPath: repo.repoPath, worktreeRoot: repo.worktreeRoot, path: wtPath, branch, sources: new Set(), owners: [], pathExists: false, gitWorktreeMetadataExists: false };
@@ -466,6 +464,14 @@ export class WorktreeInventoryService {
 		const report = await revalidator.scan({ include: "all" });
 		const current = report.items.find(candidate => candidate.id === item.id);
 		if (!current) {
+			const archivedSelection = item.legacy?.archivedSession;
+			const changedArchivedTarget = archivedSelection && report.items.find(candidate =>
+				candidate.legacy?.archivedSession?.sessionId === archivedSelection.sessionId
+				&& candidate.legacy.archivedSession.repo === archivedSelection.repo,
+			);
+			if (changedArchivedTarget) {
+				return { itemId: item.id, path: changedArchivedTarget.path, repoPath: changedArchivedTarget.repoPath, branch: changedArchivedTarget.branch, status: "skipped", reason: "invalid-selection", detail: "Candidate repository, worktree path, or branch changed during cleanup revalidation.", worktreeRemoved: false, branchDeleted: false };
+			}
 			const sameTarget = report.items.find(candidate => norm(candidate.repoPath) === norm(item.repoPath) && norm(candidate.path) === norm(item.path));
 			if (sameTarget) {
 				return { itemId: item.id, path: sameTarget.path, repoPath: sameTarget.repoPath, branch: sameTarget.branch, status: "skipped", reason: sameTarget.actionable ? "invalid-selection" : sameTarget.reason, detail: sameTarget.actionable ? "Candidate ownership changed during cleanup revalidation." : sameTarget.detail, worktreeRemoved: false, branchDeleted: false };
@@ -475,6 +481,9 @@ export class WorktreeInventoryService {
 				return { itemId: item.id, path: item.path, repoPath: item.repoPath, branch: item.branch, status: "failed", reason: repoScanError.reason, detail: repoScanError.detail, error: repoScanError.detail, worktreeRemoved: false, branchDeleted: false };
 			}
 			return { itemId: item.id, path: item.path, repoPath: item.repoPath, branch: item.branch, status: "already-cleaned", reason: "git-worktree-metadata-missing", detail: "Worktree is already absent from the current inventory.", worktreeRemoved: false, branchDeleted: false };
+		}
+		if (norm(current.repoPath) !== norm(item.repoPath) || norm(current.path) !== norm(item.path) || current.branch !== item.branch) {
+			return { itemId: item.id, path: current.path, repoPath: current.repoPath, branch: current.branch, status: "skipped", reason: "invalid-selection", detail: "Candidate repository, worktree path, or branch changed during cleanup revalidation.", worktreeRemoved: false, branchDeleted: false };
 		}
 		if (current.classification === "already-cleaned") {
 			return { itemId: item.id, path: current.path, repoPath: current.repoPath, branch: current.branch, status: "already-cleaned", reason: current.reason, detail: current.detail, worktreeRemoved: false, branchDeleted: false };
@@ -657,6 +666,7 @@ export class WorktreeInventoryService {
 			case "primary-worktree":
 			case "branch-referenced-by-archived-record":
 			case "safe-unowned-session-worktree":
+			case "ownership-unverified":
 			case "git-scan-error":
 			case "fs-scan-error": return "scan-error";
 			default: return fallback?.reason ?? "scan-error";
@@ -931,9 +941,9 @@ export class WorktreeInventoryService {
 			for (const session of ctx.sessionStore.getArchived() as PersistedSession[]) {
 				const projectName = ctx.project.name;
 				for (const item of this.archivedItemsForSession(session, projectName)) {
-					const repo = repos.find(candidate => norm(candidate.repoPath) === norm(item.repoPath) || (candidate.projectId === item.projectId && candidate.repo === item.repo))
+					const repo = repos.find(candidate => norm(candidate.repoPath) === norm(item.repoPath))
 						?? { projectId: item.projectId ?? ctx.project.id, projectName: item.projectName ?? projectName, repo: item.repo, repoPath: item.repoPath, worktreeRoot: item.path ? path.dirname(item.path) : undefined, components: [], primary: item.repo === "." } as RepoDescriptor;
-					const key = item.path ? `${repo.projectId}|${repo.repo}|${norm(item.path) ?? item.path}` : `archived|${item.key}`;
+					const key = item.path ? `${repo.projectId}|${repo.repo}|${repoKey(item.repoPath)}|${norm(item.path) ?? item.path}` : `archived|${item.key}`;
 					let c = candidates.get(key);
 					if (!c) {
 						c = { projectId: repo.projectId, projectName: item.projectName ?? projectName, repo: repo.repo, repoPath: item.repoPath, worktreeRoot: repo.worktreeRoot, path: item.path, branch: item.branch, sources: new Set(), owners: [], pathExists: false, gitWorktreeMetadataExists: false };
@@ -941,9 +951,14 @@ export class WorktreeInventoryService {
 					}
 					c.sources.add("archived-session");
 					c.owners.push({ type: "archived-session", id: item.sessionId, archived: true, title: item.title });
-					const gitMetadataMatchesArchivedRecord = c.gitWorktreeMetadataExists && (!item.branch || c.branch === item.branch);
+					const gitMetadataMatchesArchivedRecord = c.gitWorktreeMetadataExists
+						&& !!item.branch
+						&& !!c.branch
+						&& norm(c.repoPath) === norm(item.repoPath)
+						&& norm(c.path) === norm(item.path)
+						&& c.branch === item.branch;
 					c.branch = c.branch ?? item.branch;
-					c.gitWorktreeMetadataExists = gitMetadataMatchesArchivedRecord;
+					c.archivedRecordMatchesGitIdentity = gitMetadataMatchesArchivedRecord;
 					c.legacyArchived = { ...item, gitWorktreeMetadataExists: gitMetadataMatchesArchivedRecord };
 				}
 			}
@@ -1107,10 +1122,13 @@ export class WorktreeInventoryService {
 		if (candidate.primary || norm(candidate.path) === norm(candidate.repoPath)) return { ...item, classification: "protected-in-use", disposition: "protected", reason: "primary-worktree", detail: "Primary repository worktrees are never cleanup targets." };
 		if (this.isArchivedDelegateSharedCandidate(candidate)) return { ...item, classification: "protected-in-use", disposition: "protected", reason: "delegate-shared-worktree", detail: "Archived delegate appears to share its parent worktree." };
 		if (liveOwner) return { ...item, classification: "protected-in-use", disposition: "protected", reason: this.ownerReason(liveOwner.type), detail: "A live Bobbit record still references this worktree." };
-		if (candidate.sources.has("pool") || isBobbitPoolBranch(candidate.branch)) return { ...item, classification: "pool-entry", disposition: "needs-attention", reason: "safe-pool-entry", detail: "Pool entries are inventoried for troubleshooting and reclaimed by the worktree pool, not selected by maintenance cleanup." };
-		if (archivedOwner && candidate.gitWorktreeMetadataExists) return { ...item, classification: "archived-owned", disposition: "ready-to-clean", reason: "safe-archived-session-worktree", detail: item.branchDeleteBlockedReason === "branch-referenced-by-archived-record" ? "Archived-owned worktree is safe to remove; branch deletion is blocked because another archived record still references the branch." : item.branchDeleteBlockedReason ? "Archived-owned worktree is safe to remove; branch deletion is blocked because another live record still references the branch." : "Archived-owned worktree is safe to remove.", actionable: true, selectable: true, defaultSelected: true, willDeleteBranch: !!candidate.branch && !!item.localBranchExists && !item.branchDeleteBlockedReason };
+		if (candidate.sources.has("pool")) return { ...item, classification: "pool-entry", disposition: "needs-attention", reason: "safe-pool-entry", detail: "Pool entries are inventoried for troubleshooting and reclaimed by the worktree pool, not selected by maintenance cleanup." };
+		if (archivedOwner && candidate.archivedRecordMatchesGitIdentity) return { ...item, classification: "archived-owned", disposition: "ready-to-clean", reason: "safe-archived-session-worktree", detail: item.branchDeleteBlockedReason === "branch-referenced-by-archived-record" ? "Archived-owned worktree is safe to remove; branch deletion is blocked because another archived record still references the branch." : item.branchDeleteBlockedReason ? "Archived-owned worktree is safe to remove; branch deletion is blocked because another live record still references the branch." : "Archived-owned worktree is safe to remove.", actionable: true, selectable: true, defaultSelected: true, willDeleteBranch: !!candidate.branch && !!item.localBranchExists && !item.branchDeleteBlockedReason };
+		if (candidate.gitWorktreeMetadataExists) {
+			const shaped = isBobbitShapedBranch(candidate.branch);
+			return { ...item, classification: "unowned-git-worktree", disposition: "needs-attention", reason: "ownership-unverified", detail: `${shaped ? "Bobbit-shaped" : "Git"} worktree ownership is unverified; branch naming and worktree-root placement are not ownership proof.` };
+		}
 		if (candidate.branch && guards.liveBranches.get(repoKey(candidate.repoPath))?.has(candidate.branch)) return { ...item, classification: "protected-in-use", disposition: "protected", reason: "branch-referenced-by-live-record", detail: "A live Bobbit record still references this branch." };
-		if (candidate.gitWorktreeMetadataExists && isBobbitOwnedBranch(candidate.branch)) return { ...item, classification: "unowned-git-worktree", disposition: "ready-to-clean", reason: "safe-unowned-session-worktree", detail: "Unowned Bobbit git worktree is safe to remove.", actionable: true, selectable: true, defaultSelected: true, willDeleteBranch: !!candidate.branch && !!item.localBranchExists && !item.branchDeleteBlockedReason, legacy: isLegacySessionOrphanBranch(candidate.branch) ? { ...item.legacy, orphanedWorktree: true } : item.legacy };
 		if (archivedOwner && !candidate.pathExists && !candidate.gitWorktreeMetadataExists) return { ...item, classification: "already-cleaned", disposition: "already-cleaned", reason: "git-worktree-metadata-missing", detail: "Archived-owned worktree is already absent." };
 		return { ...item, classification: "stale-filesystem-only", disposition: "needs-attention", reason: "filesystem-only-needs-attention", detail: archivedOwner ? "Recorded path exists but no matching git worktree metadata remains; archived-session cleanup will not remove stale directories." : "Filesystem-only directory under a Bobbit worktree root requires manual attention." };
 	}

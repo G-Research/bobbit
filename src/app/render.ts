@@ -1,7 +1,6 @@
 import "@mariozechner/mini-lit/dist/ThemeToggle.js";
 import "../ui/components/BellToggle.js";
 import "../ui/components/CommentableMarkdown.js";
-import { renderFiltersButton } from "../ui/components/sidebar-filters.js";
 import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { html, render, nothing } from "lit";
@@ -24,7 +23,8 @@ import {
 import { fetchAppInfo, fetchProjects, gatewayFetch, retryLoadSessions, resumeGoalWithDialog, isGoalPauseResumeActionPending, type AppInfo } from "./api.js";
 import { headerToast, showHeaderToast } from "./header-toast.js";
 export { showHeaderToast } from "./header-toast.js";
-import { clearAllAnnotations, getDocumentAnnotationCount, markReviewSubmitted, flushPendingWrites } from "../ui/components/review/AnnotationStore.js";
+import { getDocumentAnnotationCount, getReviewAnnotationCount } from "../ui/components/review/AnnotationStore.js";
+import type { ReviewGroupModel } from "../ui/components/review/review-types.js";
 import { loadReviewSources } from "./review-sources-lazy.js";
 import { backToSessions, createAndConnectSession } from "./session-manager.js";
 import { buildArchivedSessionActions, buildSessionActions, isArchivedSessionActionSource, resetSessionForkNewWorktree, type SessionActionDescriptor } from "./session-actions.js";
@@ -46,12 +46,12 @@ export { setSelectedWorkflowId } from "./proposal-panels-lazy.js";
 import { openGatewayDialog, showQrCodeDialog, showSupportDialog, showGoalDialog, showProjectDialog } from "./dialogs-lazy.js";
 import { startNewGoalFlow } from "./goal-entry.js";
 import { HEADQUARTERS_ACCENT_COLOR, HEADQUARTERS_HELPER_TEXT, HEADQUARTERS_PROJECT_ID, defaultCwdForProjectSession, isHeadquartersProject, projectIconComponent, projectIconKind, projectIconTestId } from "./headquarters.js";
-import { renderSidebar, toggleRolePicker, renderRolePickerDropdown, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion, handleSidebarSearchInput, handleSidebarSearchClear, renderArchivedSearchControls, filterSidebarTreeModelGoalsForSearch, collectSidebarSearchSessionRetention } from "./sidebar.js";
+import { renderSidebar, renderSidebarViewControls, renderSidebarStatusContent, buildSidebarStatusSections, toggleRolePicker, renderRolePickerDropdown, filterStaffByQuery, renderStaffSidebarSection, isProjectReordering, projectOrderForRender, renderProjectReorderHandle, renderProjectReorderLiveRegion, handleSidebarSearchInput, handleSidebarSearchClear, renderArchivedSearchControls, renderArchivedPaginationControls, filterSidebarTreeModelGoalsForSearch, collectSidebarSearchSessionRetention } from "./sidebar.js";
 import { buildSidebarTree, type GoalContext, type SidebarProjectTree, type SidebarTreeNode } from "./sidebar-tree-builder.js";
 import { loadSidebarTreeLayoutPreference, sidebarTreeBaseIndentStyle, sidebarTreeHalfIndentStyle, sidebarTreeNodeIndentStyle } from "./sidebar-tree-layout.js";
 import { isClientDebugEnabled, dumpClientDebugToComposer, registerDebugSection } from "./client-debug.js";
-import { fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated } from "./api.js";
 import { setArchivedSectionExpanded, setUngroupedExpanded, sidebarTreeExpansionInput, toggleProjectExpanded } from "./sidebar-tree-state.js";
+import { animateSidebarStatusChanges, captureSidebarStatusMotion, installSidebarStatusMotionClickGuard } from "./sidebar-status-motion.js";
 // Register search web components
 // <search-box> + <search-results> appear in the mobile landing + search
 // route. Lazy-load via the shared widgets registrar so their combined
@@ -66,7 +66,11 @@ void ensureSearchBox();
 // lazy-loads <review-document> + <annotation-popover> + the
 // @recogito/text-annotator chain. Keep this import static so the
 // shell elements upgrade synchronously on first render.
-import "../ui/components/review/ReviewPane.js";
+import {
+	discardReviewFinalComment,
+	reviewFinalComment,
+	reviewFinalCommentCount,
+} from "../ui/components/review/ReviewPane.js";
 // Register inbox panel web components
 import "../ui/inbox/InboxPanel.js";
 
@@ -88,12 +92,13 @@ import {
 	panelContentTabs,
 	panelTabsForSession,
 	panelWorkspaceSessionKey,
+	previewArtifactIdFromTab,
 	previewContentHashFromTab,
 	previewTabDisplayTitle,
 	previewTabVersion,
 	previewVersionRecordFor,
 	reviewDocumentIdFromPanelTab,
-	reviewPanelTabId,
+	reviewIdFromPanelTab,
 	reviewTitleFromPanelTab,
 	setActivePanelTabIdForSession,
 	setPanelTabsForSession,
@@ -101,7 +106,7 @@ import {
 	type PanelWorkspaceTab,
 } from "./panel-workspace.js";
 import { openInboxPanel } from "./inbox-panel.js";
-import { renderPackPanelContent } from "./pack-panels.js";
+import { packPanelCanRefresh, packPanelTitle, refreshPackPanel, renderPackPanelContent } from "./pack-panels.js";
 import {
 	closeSidePanelTab as closeServerSidePanelTab,
 	getSidePanelWorkspace,
@@ -507,7 +512,7 @@ function renderMobileGoalForest(nodes: readonly SidebarTreeNode<GoalContext>[], 
 }
 
 function renderMobileArchivedTreeSection(projectTree: SidebarProjectTree): ReturnType<typeof html> | string {
-	if (!state.showArchived || !projectTree.archivedSectionNode) return "";
+	if (!(state.showArchived || state.archivedSearchDemand) || !projectTree.archivedSectionNode) return "";
 	const project = projectTree.project;
 	const expanded = projectTree.archivedSectionNode.expanded;
 	const archHeaderNavId = `archived-header:${project.id}`;
@@ -575,8 +580,8 @@ function renderMobileLanding() {
 	return html`
 		<div class="flex-1 flex flex-col overflow-y-auto sidebar-root" data-project-reordering=${isProjectReordering() ? "true" : "false"}>
 			${renderProjectReorderLiveRegion()}
-			<div class="w-full max-w-xl mx-auto px-2 py-2 pb-16 flex flex-col gap-0.5">
-				<div class="flex flex-col gap-1 px-1 pb-2 mb-1 border-b border-border/30">
+			<div class="w-full max-w-xl mx-auto px-2 pt-1 pb-16 flex flex-col gap-0.5">
+				<div class="flex flex-col gap-0.5 px-1 pb-1 mb-0.5 border-b border-border/30">
 					${(() => {
 						const isRolesActive = isRouteActive("roles", "role-edit");
 						const isToolsActive = isRouteActive("tools", "tool-edit");
@@ -642,7 +647,14 @@ function renderMobileLanding() {
 					@search-clear=${() => { handleSidebarSearchClear(); }}
 					@full-search-click=${(e: CustomEvent) => { setHashRoute("search", e.detail.query); }}
 				></search-box>
-				${state.sessionsLoading
+				${renderSidebarViewControls("mobile")}
+				${state.sidebarSessionView === "status"
+					? (state.sessionsLoading
+						? html`<div class="text-center py-12 text-muted-foreground">Loading…</div>`
+						: state.sessionsError
+							? html`<div class="text-center py-12"><p class="text-red-500 mb-3">${state.sessionsError}</p><button class="text-muted-foreground underline" title="Retry" @click=${retryLoadSessions}>Retry</button></div>`
+							: renderSidebarStatusContent(buildSidebarStatusSections(sidebarData, "mobile")))
+					: state.sessionsLoading
 					? html`<div class="text-center py-12 text-muted-foreground">Loading…</div>`
 					: state.sessionsError
 						? html`<div class="text-center py-12">
@@ -688,7 +700,8 @@ function renderMobileLanding() {
 										if (owningGoalId) return visibleSearchGoalIds!.has(owningGoalId);
 										return sessionMatchesQuery(session);
 									});
-									const archivedSessionInput = state.showArchived
+									const showArchivedForProject = state.showArchived || state.archivedSearchDemand;
+									const archivedSessionInput = showArchivedForProject
 										? state.archivedSessions.filter(session => {
 											if (!query) return true;
 											if (retainedSearchSessionIds!.has(session.id)) return true;
@@ -704,7 +717,7 @@ function renderMobileLanding() {
 										sessions: liveSessionInput,
 										archivedSessions: archivedSessionInput,
 										staff: staffList,
-										showArchived: state.showArchived,
+										showArchived: showArchivedForProject,
 										filters: {
 											searchQuery: state.searchQuery,
 											bypassBusyReadFilters: bypassFilters,
@@ -807,13 +820,7 @@ function renderMobileLanding() {
 											`;
 										})}
 										${renderArchivedSearchControls()}
-										${state.showArchived && !state.searchQuery && (state.archivedGoalsHasMore || state.archivedSessionsHasMore) ? html`
-											<div class="border-t border-border/30 my-0.5 mx-2"></div>
-											<div class="flex flex-col gap-0.5 px-2">
-												${state.archivedGoalsHasMore ? html`<button class="text-primary hover:underline text-left py-1" @click=${() => { fetchArchivedGoalsPaginated(50, state.archivedGoalsCursor ?? undefined); }}>Load more archived goals…</button>` : ""}
-												${state.archivedSessionsHasMore ? html`<button class="text-primary hover:underline text-left py-1" @click=${() => { fetchArchivedSessionsPaginated(50, state.archivedSessionsCursor ?? undefined); }}>Load more archived sessions…</button>` : ""}
-											</div>
-										` : ""}</div>`;
+										${renderArchivedPaginationControls(state.showArchived, true)}</div>`;
 								})()}
 							`}
 			</div>
@@ -831,7 +838,6 @@ function renderMobileLanding() {
 				${icon(FolderPlus, "sm")}
 				<span>Add Project</span>
 			</button>` : ""}
-			${renderFiltersButton("mobile")}
 		</div>
 	`;
 }
@@ -859,20 +865,26 @@ function partitionHeaderSessionActions(actions: SessionActionDescriptor[], mobil
 	directActions: SessionActionDescriptor[];
 	overflowActions: SessionActionDescriptor[];
 } {
-	const firstTrailingActionIndex = actions.findIndex((action) => !!action.trailingToggle);
-	const directLimit = firstTrailingActionIndex >= 0
-		? Math.min(headerDirectSessionActionLimit(), firstTrailingActionIndex)
-		: headerDirectSessionActionLimit();
 	if (mobile) {
 		return {
 			directActions: actions.filter((action) => action.quick),
 			overflowActions: actions,
 		};
 	}
-	const directCount = Math.min(actions.length, directLimit);
+
+	// Pin/Unpin is menu-only on every desktop header. Exclude it before applying
+	// the existing width and trailing-toggle limits so it cannot displace the
+	// pre-feature direct action set, while retaining it in the full overflow list.
+	const directCandidates = actions.filter((action) => action.id !== "pin");
+	const firstTrailingActionIndex = directCandidates.findIndex((action) => !!action.trailingToggle);
+	const directLimit = firstTrailingActionIndex >= 0
+		? Math.min(headerDirectSessionActionLimit(), firstTrailingActionIndex)
+		: headerDirectSessionActionLimit();
+	const directActions = directCandidates.slice(0, directLimit);
+	const directActionSet = new Set(directActions);
 	return {
-		directActions: actions.slice(0, directCount),
-		overflowActions: actions.slice(directCount),
+		directActions,
+		overflowActions: actions.filter((action) => !directActionSet.has(action)),
 	};
 }
 
@@ -1205,6 +1217,148 @@ let panelSortableStartIds: string[] = [];
 // its original vertical position (Chrome-style tab drag).
 let panelDragLockRaf = 0;
 
+// Desktop panel tabs remain readable down to this width. Once the strip cannot
+// provide it, excess tabs move into the More-tabs popover instead of collapsing
+// to a close button plus a few ambiguous characters.
+const PANEL_TAB_MIN_READABLE_WIDTH = 104;
+const PANEL_TAB_GAP = 4;
+const PANEL_TAB_OVERFLOW_TRIGGER_WIDTH = 36;
+const PANEL_TAB_OVERFLOW_MENU_ID = "side-panel-tab-overflow-menu";
+let panelTabVisibleCapacity = Number.POSITIVE_INFINITY;
+let panelTabOverflowHost: HTMLElement | null = null;
+let panelTabOverflowObserver: ResizeObserver | null = null;
+let panelTabOverflowHostWidth = 0;
+const panelTabNaturalWidths = new Map<string, number>();
+
+function readablePanelTabWidth(naturalWidth: number): number {
+	return Math.max(1, Math.min(PANEL_TAB_MIN_READABLE_WIDTH, naturalWidth || PANEL_TAB_MIN_READABLE_WIDTH));
+}
+
+function fittingPanelTabCount(widths: number[], budget: number, start: number, direction: 1 | -1): number {
+	let used = 0;
+	let count = 0;
+	for (let index = start; index >= 0 && index < widths.length; index += direction) {
+		const next = readablePanelTabWidth(widths[index]);
+		const required = next + (count > 0 ? PANEL_TAB_GAP : 0);
+		if (count > 0 && used + required > budget) break;
+		used += required;
+		count++;
+	}
+	return Math.max(1, count);
+}
+
+function panelTabCapacityForWidth(width: number, naturalWidths: number[], activeIndex: number): number {
+	const tabCount = naturalWidths.length;
+	if (tabCount <= 0) return 0;
+	const allReadableWidth = naturalWidths.reduce((sum, tabWidth) => sum + readablePanelTabWidth(tabWidth), 0)
+		+ Math.max(0, tabCount - 1) * PANEL_TAB_GAP;
+	if (allReadableWidth <= width) return tabCount;
+	const availableForTabs = Math.max(1, width - PANEL_TAB_OVERFLOW_TRIGGER_WIDTH - PANEL_TAB_GAP);
+	const prefixCount = fittingPanelTabCount(naturalWidths, availableForTabs, 0, 1);
+	if (activeIndex < prefixCount) return Math.min(tabCount - 1, prefixCount);
+	return Math.min(tabCount - 1, fittingPanelTabCount(naturalWidths, availableForTabs, activeIndex, -1));
+}
+
+/**
+ * Start every constrained tab at its readable floor, then share the remaining
+ * row width evenly between truncated titles (without exceeding natural width).
+ * This avoids both proportional flex crushing and an unused remainder before
+ * the More/actions controls.
+ */
+function allocatedPanelTabWidths(ids: string[], overflowing: boolean): Map<string, number> {
+	const result = new Map<string, number>();
+	if (!overflowing || ids.length === 0 || panelTabOverflowHostWidth <= 0) return result;
+	const natural = ids.map((id) => panelTabNaturalWidths.get(id) || PANEL_TAB_MIN_READABLE_WIDTH);
+	const widths = natural.map(readablePanelTabWidth);
+	const triggerAndGaps = PANEL_TAB_OVERFLOW_TRIGGER_WIDTH + ids.length * PANEL_TAB_GAP;
+	let remaining = Math.max(0, panelTabOverflowHostWidth - triggerAndGaps - widths.reduce((sum, value) => sum + value, 0));
+	let expandable = widths.map((width, index) => natural[index] > width + 0.01 ? index : -1).filter((index) => index >= 0);
+	while (remaining > 0.01 && expandable.length > 0) {
+		const share = remaining / expandable.length;
+		let used = 0;
+		const nextExpandable: number[] = [];
+		for (const index of expandable) {
+			const addition = Math.min(share, natural[index] - widths[index]);
+			widths[index] += addition;
+			used += addition;
+			if (natural[index] - widths[index] > 0.01) nextExpandable.push(index);
+		}
+		if (used <= 0.01) break;
+		remaining -= used;
+		expandable = nextExpandable;
+	}
+	ids.forEach((id, index) => result.set(id, widths[index]));
+	return result;
+}
+
+function syncPanelTabOverflowCapacity(host: HTMLElement): void {
+	const measurements = [...host.querySelectorAll<HTMLElement>(".panel-tab-measure")];
+	const naturalWidths = measurements.map((measurement) => measurement.getBoundingClientRect().width || measurement.offsetWidth);
+	let widthsChanged = false;
+	measurements.forEach((measurement, index) => {
+		const id = measurement.dataset.panelTabMeasureId || "";
+		const measuredWidth = naturalWidths[index] || PANEL_TAB_MIN_READABLE_WIDTH;
+		if (id && panelTabNaturalWidths.get(id) !== measuredWidth) {
+			panelTabNaturalWidths.set(id, measuredWidth);
+			widthsChanged = true;
+		}
+	});
+	const activeId = host.dataset.activePanelTabId || "";
+	const activeIndex = Math.max(0, measurements.findIndex((measurement) => measurement.dataset.panelTabMeasureId === activeId));
+	const width = host.getBoundingClientRect().width || host.clientWidth;
+	if (width <= 0 || naturalWidths.length === 0) return;
+	const hostWidthChanged = Math.abs(width - panelTabOverflowHostWidth) > 0.25;
+	panelTabOverflowHostWidth = width;
+	const next = panelTabCapacityForWidth(width, naturalWidths, activeIndex);
+	if (next === panelTabVisibleCapacity && !widthsChanged && !hostWidthChanged) return;
+	panelTabVisibleCapacity = next;
+	renderApp();
+}
+
+function ensurePanelTabOverflowObserver(host: HTMLElement | null): void {
+	if (host !== panelTabOverflowHost) {
+		panelTabOverflowObserver?.disconnect();
+		panelTabOverflowObserver = null;
+		panelTabOverflowHost = host;
+		panelTabVisibleCapacity = Number.POSITIVE_INFINITY;
+		if (host && typeof ResizeObserver !== "undefined") {
+			panelTabOverflowObserver = new ResizeObserver(() => syncPanelTabOverflowCapacity(host));
+			panelTabOverflowObserver.observe(host);
+		}
+	}
+	if (host) syncPanelTabOverflowCapacity(host);
+}
+
+function togglePanelTabOverflow(event: Event): void {
+	event.stopPropagation();
+	const trigger = event.currentTarget as HTMLButtonElement | null;
+	const menu = document.getElementById(PANEL_TAB_OVERFLOW_MENU_ID) as HTMLElement | null;
+	if (!trigger || !menu) return;
+	if (menu.matches(":popover-open")) {
+		menu.hidePopover();
+		trigger.setAttribute("aria-expanded", "false");
+		return;
+	}
+	const rect = trigger.getBoundingClientRect();
+	const menuWidth = Math.min(260, Math.max(180, window.innerWidth - 16));
+	menu.style.setProperty("--panel-tab-menu-width", `${menuWidth}px`);
+	menu.style.setProperty("--panel-tab-menu-left", `${Math.max(8, Math.min(window.innerWidth - menuWidth - 8, rect.right - menuWidth))}px`);
+	menu.style.setProperty("--panel-tab-menu-top", `${Math.min(window.innerHeight - 8, rect.bottom + 4)}px`);
+	menu.showPopover();
+	trigger.setAttribute("aria-expanded", "true");
+}
+
+function syncPanelTabOverflowExpanded(event: Event): void {
+	const menu = event.currentTarget as HTMLElement | null;
+	const trigger = document.querySelector<HTMLButtonElement>(".panel-tab-overflow-trigger");
+	if (menu && trigger) trigger.setAttribute("aria-expanded", menu.matches(":popover-open") ? "true" : "false");
+}
+
+function dismissPanelTabOverflowFromBackdrop(event: MouseEvent): void {
+	if (event.target !== event.currentTarget) return;
+	(event.currentTarget as HTMLElement).hidePopover();
+}
+
 // Chrome-style axis lock: while the user drags a tab, SortableJS positions the
 // floating clone (Sortable.ghost) via `transform: matrix(a,b,c,d,e,f)` where
 // `e` is translateX and `f` is translateY. We run a requestAnimationFrame loop
@@ -1334,16 +1488,13 @@ function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 	const source = tab.source as Record<string, unknown>;
 	const entry = previewEntryFromTab(tab) || state.previewPanelEntry || "inline.html";
 	const contentHash = normalizePreviewContentHash(recordValue(tabState, "contentHash") || recordValue(source, "contentHash"));
-	const tabArtifactIdEarly = recordValue(tabState, "artifactId") || recordValue(source, "artifactId");
+	const tabArtifactIdEarly = previewArtifactIdFromTab(tab);
 
 	// Fast path: any preview tab that has a persisted artifact is served
-	// directly from `/preview/<sid>/_artifact/<artifactId>/...`. This bypasses
-	// the single-slot live mount entirely so switching between artifact-backed
-	// preview tabs is instant (no POST restore round-trip, no iframe blanking).
-	// We skip this only for the canonical live tab id, which intentionally
-	// follows the live mount slot's changing bytes.
-	const isLiveTab = isLivePreviewTab(tab);
-	if (!isLiveTab && tabArtifactIdEarly) {
+	// directly from `/preview/<sid>/_artifact/<artifactId>/...`. "Live" is the
+	// tab's update identity, not its transport: using the immutable bytes avoids
+	// racing a later preview_open that replaces the session's mutable mount.
+	if (tabArtifactIdEarly) {
 		if (state.previewPanelEntry === entry && state.previewPanelArtifactId === tabArtifactIdEarly && currentMountedPreviewTabId() === tab.id) {
 			clearPreviewTabRestoreError(sessionId, tab.id);
 			markPreviewTabMounted(tab);
@@ -1360,6 +1511,7 @@ function restoreHistoricalPreviewTab(tab: PanelWorkspaceTab): void {
 		return;
 	}
 
+	const isLiveTab = isLivePreviewTab(tab);
 	if (isLiveTab || !isHistoricalPreviewTab(tab)) {
 		const liveEntry = previewEntryFromTab(tab);
 		const liveHash = previewContentHashFromTab(tab);
@@ -1532,12 +1684,40 @@ function reviewDocumentKeyFromPanelTab(tab: PanelWorkspaceTab | undefined | null
 	return reviewTitleFromPanelTab(tab) || documentId;
 }
 
+function reviewDocumentsForGroup(group: ReviewGroupModel) {
+	return new Map(group.files.map((file) => [file.fileId, {
+		title: file.title,
+		markdown: file.markdown,
+		source: group.source,
+		documentId: file.fileId,
+		fileId: file.fileId,
+		reviewId: group.reviewId,
+	}]));
+}
+
+function selectVisibleReviewGroup(reviewId: string): boolean {
+	const group = state.reviewGroups.get(reviewId);
+	if (!group) return false;
+	state.reviewActiveReviewId = group.reviewId;
+	state.reviewDocuments = reviewDocumentsForGroup(group);
+	state.reviewActiveTab = group.activeFileId;
+	state.reviewPanelOpen = true;
+	return true;
+}
+
 export function setUnifiedActiveTab(tab: PanelWorkspaceTab): void {
 	if ((tab as any).kind === "chat" || tab.id === CHAT_PANEL_TAB_ID) return;
 	const sid = workspaceSessionId();
-	setActivePanelTabIdForSession(state, sid, tab.id);
 	const workspace = getSidePanelWorkspace(sid);
-	if (sid !== "__no-session__" && workspace.tabs.some((candidate) => candidate.id === tab.id) && workspace.activeTabId !== tab.id) {
+	// Capture the authoritative comparison before updating compatibility mirrors:
+	// `state.panelWorkspace` aliases this workspace object, so the legacy setter
+	// mutates `workspace.activeTabId` in place and would otherwise suppress every
+	// user-driven `/active` persistence request.
+	const shouldPersistSelection = sid !== "__no-session__"
+		&& workspace.tabs.some((candidate) => candidate.id === tab.id)
+		&& workspace.activeTabId !== tab.id;
+	setActivePanelTabIdForSession(state, sid, tab.id);
+	if (shouldPersistSelection) {
 		void setServerActiveSidePanelTab(tab.id, { sessionId: sid });
 	}
 	(state as any).previewPanelTab = tab.legacyTab;
@@ -1548,7 +1728,8 @@ export function setUnifiedActiveTab(tab: PanelWorkspaceTab): void {
 		restoreHistoricalPreviewTab(tab);
 	}
 	if (tab.kind === "review") {
-		state.reviewActiveTab = reviewDocumentKeyFromPanelTab(tab);
+		const reviewId = reviewIdFromPanelTab(tab);
+		if (!selectVisibleReviewGroup(reviewId)) state.reviewActiveTab = reviewDocumentKeyFromPanelTab(tab);
 	}
 }
 
@@ -1596,6 +1777,7 @@ export function unifiedPanelTabs(): UnifiedPanelTab[] {
 		activeProposalTypes: activeProposalTypes(),
 		assistantProposalType: currentAssistantProposalType(),
 		reviewTitles: [...state.reviewDocuments.keys()],
+		reviewGroups: [...state.reviewGroups.values()],
 		reviewPanelOpen: state.reviewPanelOpen,
 		inboxPanelOpen: state.inboxPanelOpen,
 		inboxHasPending: state.inboxEntries.some((e) => e.state === "pending"),
@@ -1606,17 +1788,16 @@ export function unifiedPanelTabs(): UnifiedPanelTab[] {
 	return tabs;
 }
 
-function findReviewPanelTabByTitle(title: string): UnifiedPanelTab | undefined {
-	const doc = state.reviewDocuments.get(title);
-	const candidateIds = [doc?.documentId, title]
-		.filter((value): value is string => typeof value === "string" && value.length > 0)
-		.map((documentId) => reviewPanelTabId(documentId));
+function findReviewPanelTab(identity: string): UnifiedPanelTab | undefined {
 	const tabs = unifiedPanelTabs();
-	for (const id of candidateIds) {
-		const tab = findPanelTab(tabs, id);
-		if (tab?.kind === "review") return tab;
+	const direct = tabs.find((tab) => tab.kind === "review" && reviewIdFromPanelTab(tab) === identity);
+	if (direct) return direct;
+	for (const group of state.reviewGroups.values()) {
+		if (group.reviewId !== identity && group.title !== identity && !group.files.some((file) => file.fileId === identity)) continue;
+		const tab = tabs.find((candidate) => candidate.kind === "review" && reviewIdFromPanelTab(candidate) === group.reviewId);
+		if (tab) return tab;
 	}
-	return tabs.find((tab) => tab.kind === "review" && reviewTitleFromPanelTab(tab) === title);
+	return tabs.find((tab) => tab.kind === "review" && reviewTitleFromPanelTab(tab) === identity);
 }
 
 function unifiedPanelContentTabs(): UnifiedContentTab[] {
@@ -1950,20 +2131,20 @@ function ensurePanelSortable(container: HTMLElement | null): void {
 					return;
 				}
 
-				// Read the new tab id order directly off the DOM children.
+				// Read the visible tab order directly off the DOM. Overflowed tabs are
+				// absent from this strip; preserve their canonical slots while applying
+				// the dragged order to visible slots only.
 				const newIds = Array.from(host.querySelectorAll<HTMLElement>(".goal-tab-pill"))
 					.map((el) => el.getAttribute("data-panel-tab-id") || "")
 					.filter((id) => id.length > 0);
 				const byId = new Map(currentTabs.map((tab) => [tab.id, tab]));
-				const reordered: PanelWorkspaceTab[] = [];
-				for (const id of newIds) {
-					const tab = byId.get(id);
-					if (tab) reordered.push(tab);
-				}
-				// Append any tabs that weren't in the DOM order (defensive).
-				for (const tab of currentTabs) {
-					if (!newIds.includes(tab.id)) reordered.push(tab);
-				}
+				const visibleIds = new Set(newIds);
+				let visibleIndex = 0;
+				const reordered = currentTabs.map((tab) => {
+					if (!visibleIds.has(tab.id)) return tab;
+					const replacement = byId.get(newIds[visibleIndex++]);
+					return replacement || tab;
+				});
 
 				// Defense-in-depth: refuse to commit a reordering that places any
 				// non-pinned tab before any pinned tab. onMove should already have
@@ -2054,6 +2235,8 @@ function renderArchivedBanner() {
 export function doRenderApp(): void {
 	const app = document.getElementById("app");
 	if (!app) return;
+	installSidebarStatusMotionClickGuard();
+	const sidebarStatusMotion = captureSidebarStatusMotion(app);
 
 	// Dynamic page title.
 	// In a regular browser tab, suffix with " · Bobbit" so the tab tells you which app.
@@ -2264,9 +2447,14 @@ export function doRenderApp(): void {
 			const deskGoalTitle = deskGoalId ? state.goals.find(g => g.id === deskGoalId)?.title : undefined;
 			return html`
 				<div class="flex items-center gap-2 px-3 min-w-0 flex-1">
-					<div class="flex flex-col min-w-0 py-1">
-						<span class="text-sm font-medium text-foreground inline-flex items-center gap-1 min-w-0" title=${headerTitle}><span class="truncate">${headerTitle}</span>${deskSession?.sandboxed ? renderSandboxIndicator(deskSession.status) : ""}${(deskSession?.status === "preparing" || deskSession?.status === "starting") ? html`<span class="shrink-0 text-muted-foreground/70 italic" style="font-size:0.85em;">preparing…</span>` : ""}</span>
-						${deskGoalTitle ? html`<span class="text-[10px] text-muted-foreground/60 truncate uppercase tracking-wider">${deskGoalTitle}</span>` : ""}
+					<div class="flex items-center gap-1 min-w-0 py-1" data-testid="desktop-session-header-title-line">
+						<span class="text-sm font-medium text-foreground inline-flex items-center gap-1 min-w-0" data-testid="desktop-session-header-title" title=${headerTitle}><span class="truncate">${headerTitle}</span>${deskSession?.sandboxed ? renderSandboxIndicator(deskSession.status) : ""}${(deskSession?.status === "preparing" || deskSession?.status === "starting") ? html`<span class="shrink-0 text-muted-foreground/70 italic" style="font-size:0.85em;">preparing…</span>` : ""}</span>
+						${deskGoalTitle ? html`
+							<span class="inline-flex items-center gap-1 min-w-0 leading-none" style="position:relative;top:1px;">
+								<span class="shrink-0 text-muted-foreground/40" style="margin-inline:2px;position:relative;top:-2px;" aria-hidden="true" data-testid="desktop-session-header-goal-separator">·</span>
+								<span class="min-w-0 text-[10px] text-muted-foreground/60 truncate uppercase tracking-wider" data-testid="desktop-session-header-goal-title" title=${deskGoalTitle}>${deskGoalTitle}</span>
+							</span>
+						` : ""}
 					</div>
 				</div>
 			`;
@@ -2355,13 +2543,14 @@ export function doRenderApp(): void {
 		`;
 	};
 
-	const reviewPaneUnsentCountForDocument = (sessionId: string, title: string): number => {
-		const pane = document.querySelector("review-pane") as (HTMLElement & { _unsentCommentCountForDocument?: (title: string) => number }) | null;
-		if (pane && typeof pane._unsentCommentCountForDocument === "function") {
-			const count = Number(pane._unsentCommentCountForDocument(title));
-			if (Number.isFinite(count)) return count;
-		}
-		return getDocumentAnnotationCount(sessionId, title);
+	const reviewPaneUnsentCountForGroup = (sessionId: string, group: ReviewGroupModel | undefined, reviewId: string): number => {
+		const annotationCount = group
+			? getReviewAnnotationCount(sessionId, group)
+			: getDocumentAnnotationCount(sessionId, reviewId);
+		return annotationCount + reviewFinalCommentCount(sessionId, reviewId);
+	};
+	const discardReviewPaneFinalDraft = (sessionId: string, reviewId: string): void => {
+		discardReviewFinalComment(sessionId, reviewId);
 	};
 
 	const closeUnifiedPanelTab = (tab: UnifiedPanelTab, event?: Event): void => {
@@ -2400,18 +2589,23 @@ export function doRenderApp(): void {
 			return;
 		}
 		if (tab.kind === "review") {
-			const title = reviewTitleFromPanelTab(tab);
-			const key = reviewDocumentKeyFromPanelTab(tab);
-			if (key) {
-				const sid = activeSessionId() || "";
-				if (event?.type !== "review-close-tab") {
-					const count = reviewPaneUnsentCountForDocument(sid, key);
-					if (count > 0 && !confirm(`Close "${title || key}"? ${count} unsent comment${count !== 1 ? "s" : ""} will be hidden until reopened.`)) return;
-				}
-				if (state.reviewActiveTab === key) {
-					const nextReview = nextCandidate?.kind === "review" ? reviewDocumentKeyFromPanelTab(nextCandidate) : "";
-					if (nextReview) state.reviewActiveTab = nextReview;
-				}
+			const reviewId = reviewIdFromPanelTab(tab);
+			const group = state.reviewGroups.get(reviewId);
+			const title = group?.title || reviewTitleFromPanelTab(tab) || reviewId;
+			const count = reviewPaneUnsentCountForGroup(sid, group, reviewId);
+			const alreadyConfirmed = event?.type === "review-close-tab"
+				|| event?.type === "review-dismiss"
+				|| (event as CustomEvent | undefined)?.detail?.confirmed === true;
+			if (!alreadyConfirmed && count > 0 && !confirm(`Close "${title}"? ${count} unsent comment${count !== 1 ? "s" : ""} will be discarded.`)) return;
+			if (group) {
+				void (async () => {
+					const { cleanupReviewGroup } = await loadReviewSources();
+					const removed = await cleanupReviewGroup(sid, reviewId);
+					if (removed) discardReviewPaneFinalDraft(sid, reviewId);
+					if (wasActive && nextCandidate?.kind === "review") selectVisibleReviewGroup(reviewIdFromPanelTab(nextCandidate));
+					renderApp();
+				})().catch((err) => showHeaderToast(err instanceof Error ? err.message : "Could not close review"));
+				return;
 			}
 		}
 		if (tab.kind === "inbox") {
@@ -2461,10 +2655,15 @@ export function doRenderApp(): void {
 
 	const panelTabButtonLabel = (tab: UnifiedPanelTab): string => {
 		if (tab.kind === "review") return tab.title || tab.label || "Review";
+		if (tab.kind === "pack") {
+			const ref = packPanelRefFromTabId(tab.id);
+			const currentTitle = ref ? packPanelTitle(ref.packId, ref.panelId) : undefined;
+			if (currentTitle) return currentTitle;
+		}
 		return tab.label || tab.title || (tab.kind === "preview" ? "Preview" : "");
 	};
 
-	const panelTabButton = (tab: UnifiedPanelTab, testId: string) => {
+	const panelTabButton = (tab: UnifiedPanelTab, testId: string, constrainedWidth?: number) => {
 		const label = panelTabButtonLabel(tab);
 		const sourceTitle = tab.kind === "preview" ? previewSourceTitle(tab) : "";
 		const tooltip = sourceTitle || label;
@@ -2476,44 +2675,49 @@ export function doRenderApp(): void {
 		// should be highlighted — the pinned chat pill owns the active state.
 		const mobileChatActive = !isDesktop() && mobileSelectedPaneIndex === 0;
 		const tabIsActive = !mobileChatActive && activeId === tab.id;
+		const selectTab = () => { setUnifiedMobileTab(tab); renderApp(); };
 		return html`
 		<div
-			role="button"
-			tabindex="0"
-			class="goal-tab-pill ${tabIsActive ? "goal-tab-pill--active" : ""} ${draggable ? "goal-tab-pill--draggable" : "goal-tab-pill--pinned"} ${draggingPanelTabId === tab.id ? "goal-tab-pill--dragging" : ""}"
+			class="goal-tab-pill ${tabIsActive ? "goal-tab-pill--active" : ""} ${draggable ? "goal-tab-pill--draggable" : "goal-tab-pill--pinned"} ${constrainedWidth ? "goal-tab-pill--constrained" : ""} ${draggingPanelTabId === tab.id ? "goal-tab-pill--dragging" : ""}"
+			style=${constrainedWidth ? `--panel-tab-readable-width:${constrainedWidth}px` : ""}
 			title=${tooltip}
 			data-panel-tab-id=${tab.id}
 			data-panel-tab-kind=${tab.kind}
 			data-panel-tab-title=${dataTitle}
 			data-panel-tab-pinned=${isPinnedPanelTab(tab) ? "true" : "false"}
 			data-testid="side-panel-tab"
-			@mousedown=${(e: MouseEvent) => { if ((e.target as Element | null)?.closest?.(".goal-tab-close")) return; setUnifiedMobileTab(tab); }}
-			@pointerup=${(e: PointerEvent) => { if ((e.target as Element | null)?.closest?.(".goal-tab-close")) return; setUnifiedMobileTab(tab); }}
-			@click=${() => { setUnifiedMobileTab(tab); renderApp(); }}
-			@keydown=${(e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setUnifiedMobileTab(tab); renderApp(); } }}
-		>${testId ? html`<span class="goal-tab-pill-label" data-testid=${testId}>${label}</span>` : html`<span class="goal-tab-pill-label">${label}</span>`}${panelTabHasDot(tab) ? html`<span class="goal-tab-dot"></span>` : ""}${closable ? html`<span
+			@click=${(event: MouseEvent) => { if (!(event.target as Element | null)?.closest?.("button")) selectTab(); }}
+		>
+			<button class="goal-tab-select" type="button" aria-label=${`Open ${label}`} @click=${selectTab}>
+				${testId ? html`<span class="goal-tab-pill-label" data-testid=${testId}>${label}</span>` : html`<span class="goal-tab-pill-label">${label}</span>`}
+				${panelTabHasDot(tab) ? html`<span class="goal-tab-dot"></span>` : ""}
+			</button>
+			${closable ? html`<button
 				class="goal-tab-close"
-				role="button"
+				type="button"
 				aria-label=${`Dismiss ${label}`}
 				title=${`Dismiss ${label}`}
 				data-testid="side-panel-close"
 				@click=${(event: Event) => closeUnifiedPanelTab(tab, event)}
-			>${icon(X, "xs")}</span>` : ""}</div>
+			>${icon(X, "xs")}</button>` : ""}
+		</div>
 	`;
 	};
 
-	const unifiedMobileTabButton = (tab: UnifiedPanelTab) => panelTabButton(
+	const unifiedMobileTabButton = (tab: UnifiedPanelTab, constrainedWidth?: number) => panelTabButton(
 		tab,
 		tab.kind === "inbox" ? "inbox-tab-pill" : "",
+		constrainedWidth,
 	);
 
-	const mobileChatTabPill = () => {
+	const mobileChatTabPill = (constrainedWidth?: number) => {
 		const isChatActive = mobileSelectedPaneIndex === 0;
 		return html`
 			<div
 				role="button"
 				tabindex="0"
-				class="goal-tab-pill goal-tab-pill--pinned ${isChatActive ? "goal-tab-pill--active" : ""}"
+				class="goal-tab-pill goal-tab-pill--pinned ${constrainedWidth ? "goal-tab-pill--constrained" : ""} ${isChatActive ? "goal-tab-pill--active" : ""}"
+				style=${constrainedWidth ? `--panel-tab-readable-width:${constrainedWidth}px` : ""}
 				title="Chat"
 				data-panel-tab-id="__mobile_chat_pane__"
 				data-panel-tab-kind="chat"
@@ -2524,6 +2728,18 @@ export function doRenderApp(): void {
 		`;
 	};
 
+	const partitionPanelTabs = <T extends UnifiedPanelTab>(tabs: T[], capacity: number, activeId: string): { visibleTabs: T[]; overflowTabs: T[] } => {
+		const boundedCapacity = Math.max(1, Math.min(tabs.length, capacity));
+		if (boundedCapacity >= tabs.length) return { visibleTabs: tabs, overflowTabs: [] };
+		const activeIndex = Math.max(0, tabs.findIndex((tab) => tab.id === activeId));
+		const start = activeIndex < boundedCapacity
+			? 0
+			: Math.min(tabs.length - boundedCapacity, activeIndex - boundedCapacity + 1);
+		const visibleTabs = tabs.slice(start, start + boundedCapacity);
+		const visibleIds = new Set(visibleTabs.map((tab) => tab.id));
+		return { visibleTabs, overflowTabs: tabs.filter((tab) => !visibleIds.has(tab.id)) };
+	};
+
 	const unifiedTabBar = () => {
 		if (!hasUnifiedPanel()) return "";
 		// Refresh mobileSelectedPaneIndex BEFORE rendering the tab bar so both
@@ -2532,20 +2748,66 @@ export function doRenderApp(): void {
 		// the slider then advances to the active panel tab — leaving both
 		// visually highlighted until the next render.
 		void unifiedMobilePaneIndex();
-		// Mirror the desktop tab strip: muted background, tabs flush at the
-		// bottom via items-end + pt-1 (no bottom padding), no border-b. The
-		// active tab's background matches the content panel below so the two
-		// merge seamlessly (Chrome-style), with the curve pseudo-elements
-		// providing the outward flare at the bottom corners.
+		const tabs = unifiedPanelTabs();
+		const measuredCapacity = Number.isFinite(panelTabVisibleCapacity) ? panelTabVisibleCapacity : tabs.length + 1;
+		const panelCapacity = Math.max(1, measuredCapacity - 1); // Chat remains pinned and visible.
+		const activePanelId = mobileSelectedPaneIndex === 0
+			? tabs[0]?.id || ""
+			: activeSidePanelTabIdForSession(state, workspaceSessionId());
+		const { visibleTabs, overflowTabs } = partitionPanelTabs(tabs, panelCapacity, activePanelId);
+		const measuredActiveId = mobileSelectedPaneIndex === 0 ? "__mobile_chat_pane__" : activePanelId;
+		const activeContentTab = mobileSelectedPaneIndex === 0
+			? null
+			: tabs.find((tab): tab is UnifiedContentTab => tab.id === activePanelId && tab.kind !== "chat") || null;
+		const visibleMobileIds = ["__mobile_chat_pane__", ...visibleTabs.map((tab) => tab.id)];
+		const allocatedWidths = allocatedPanelTabWidths(visibleMobileIds, overflowTabs.length > 0);
+
+		// Mobile uses the same title-sized tabs, active curves, three surface
+		// shades, and More-tabs overflow as desktop. Chat stays pinned so the
+		// conversation is always one tap away.
 		return html`
-			<div class="goal-tab-bar goal-tab-bar--mobile shrink-0 overflow-x-auto" style="scrollbar-width:thin; background: var(--muted, var(--color-muted));">
-				<div
-					class="flex items-end gap-1 px-3 pt-1 min-w-max"
-					data-panel-tab-bar="true"
-				>
-					${mobileChatTabPill()}
-					${repeat(unifiedPanelTabs(), (tab) => tab.id, (tab) => unifiedMobileTabButton(tab))}
+			<div class="goal-tab-bar goal-tab-bar--mobile shrink-0 flex items-end px-3 pt-1" style="background: var(--muted, var(--color-muted));">
+				<div class="relative flex-1 min-w-0" data-panel-tab-overflow-host="true" data-panel-tab-count=${tabs.length + 1} data-active-panel-tab-id=${measuredActiveId}>
+					<div class="flex items-end gap-1" data-panel-tab-bar="true">
+						${mobileChatTabPill(allocatedWidths.get("__mobile_chat_pane__"))}
+						${repeat(visibleTabs, (tab) => tab.id, (tab) => unifiedMobileTabButton(tab, allocatedWidths.get(tab.id)))}
+						${overflowTabs.length > 0 ? html`
+							<button type="button" class="panel-tab-overflow-trigger" aria-label="More tabs" title="More tabs" aria-haspopup="menu" aria-expanded="false" aria-controls=${PANEL_TAB_OVERFLOW_MENU_ID} @click=${togglePanelTabOverflow}>…</button>
+						` : ""}
+					</div>
+					${overflowTabs.length > 0 ? html`
+						<div id=${PANEL_TAB_OVERFLOW_MENU_ID} class="panel-tab-overflow-menu" popover="auto" @toggle=${syncPanelTabOverflowExpanded} @click=${dismissPanelTabOverflowFromBackdrop}>
+							<div class="panel-tab-overflow-menu-card" role="menu" aria-label="More side-panel tabs">
+								${overflowTabs.map((tab) => html`
+									<button type="button" role="menuitem" class="panel-tab-overflow-item" data-panel-tab-id=${tab.id} @click=${() => {
+										(document.getElementById(PANEL_TAB_OVERFLOW_MENU_ID) as HTMLElement | null)?.hidePopover();
+										(state as any).__lastSidePanelUserActiveSelection = { sessionId: workspaceSessionId(), tabId: tab.id, at: Date.now() };
+										setUnifiedMobileTab(tab);
+										renderApp();
+									}}>
+										<span class="panel-tab-overflow-label">${panelTabButtonLabel(tab)}</span>
+										${panelTabHasDot(tab) ? html`<span class="goal-tab-dot"></span>` : ""}
+									</button>
+								`)}
+							</div>
+						</div>
+					` : ""}
+					<div class="panel-tab-measurements" aria-hidden="true">
+						<span class="panel-tab-measure panel-tab-measure--direct-label" data-panel-tab-measure-id="__mobile_chat_pane__"><span class="panel-tab-measure-label">Chat</span></span>
+						${tabs.map((tab) => html`
+							<span class="panel-tab-measure" data-panel-tab-measure-id=${tab.id}>
+								<span class="panel-tab-measure-label">${panelTabButtonLabel(tab)}</span>
+								${panelTabHasDot(tab) ? html`<span class="goal-tab-dot"></span>` : ""}
+								${isPinnedPanelTab(tab) ? "" : html`<span class="panel-tab-measure-close"></span>`}
+							</span>
+						`)}
+					</div>
 				</div>
+				${activeContentTab ? html`
+					<div class="side-panel-mobile-actions flex items-center gap-0.5 shrink-0 pl-2 pb-1" aria-label="Active tab actions">
+						${sidePanelActionButtons(activeContentTab)}
+					</div>
+				` : ""}
 			</div>
 		`;
 	};
@@ -2581,11 +2843,10 @@ export function doRenderApp(): void {
 
 	/** Render the HTML preview iframe content (no header — unified panel provides it). */
 	//
-	// WP-E: single iframe pointing at the per-session preview mount. The agent
-	// writes into <stateDir>/preview/<sid>/, the gateway serves from
-	// `/preview/<sid>/<rel-path>` with cookie auth + theme-bridge injection on
-	// text/html responses. Hot reloads come via SSE bumping `previewPanelMtime`,
-	// which forces the iframe to reload via the `#mtime=<n>` hash.
+	// WP-E: one iframe for the active preview tab. Artifact-backed tabs use the
+	// immutable per-artifact route; only legacy/unpersisted tabs fall back to the
+	// mutable per-session mount. Both routes apply cookie auth + theme injection.
+	// SSE bumps `previewPanelMtime`, forcing the active iframe to reload.
 	const htmlPreviewContent = () => {
 		const sid = activeSessionId() || "";
 		// Derive artifactId, entry, and mtime from the active panel tab rather than
@@ -2600,12 +2861,10 @@ export function doRenderApp(): void {
 		let tabMtime = 0;
 		if (activeTab && activeTab.kind === "preview") {
 			const tabState = (activeTab.state || {}) as Record<string, unknown>;
-			const source = activeTab.source as Record<string, unknown>;
 			const tabEntry = previewEntryFromTab(activeTab);
 			if (tabEntry) entry = tabEntry;
 			if (typeof tabState.mtime === "number" && Number.isFinite(tabState.mtime)) tabMtime = tabState.mtime;
-			const isLiveTab = isLivePreviewTab(activeTab);
-			if (!isLiveTab) artifactId = recordValue(tabState, "artifactId") || recordValue(source, "artifactId");
+			artifactId = previewArtifactIdFromTab(activeTab);
 		}
 		const v = state.previewPanelMtime || tabMtime || 0;
 		if (!sid || !entry) {
@@ -2645,119 +2904,92 @@ export function doRenderApp(): void {
 
 	/** Unified preview panel with tab header + content dispatch.
 	 *  Used on desktop for non-assistant sessions that have preview or goal proposal. */
-	const reviewPaneContent = () => html`
+	const reviewPaneContent = (reviewId: string) => {
+		const renderedGroup = state.reviewGroups.get(reviewId);
+		const renderedDocuments = renderedGroup
+			? reviewDocumentsForGroup(renderedGroup)
+			: reviewId === state.reviewActiveReviewId ? state.reviewDocuments : new Map();
+		const renderedActiveFileId = renderedGroup?.activeFileId
+			|| (reviewId === state.reviewActiveReviewId ? state.reviewActiveTab : "");
+		const paneSessionId = activeSessionId() || "";
+		return html`
 		<div class="flex-1 min-h-0 overflow-auto">
 			<review-pane
-				.documents=${state.reviewDocuments}
-				.activeTab=${state.reviewActiveTab}
-				.sessionId=${activeSessionId() || ""}
-				@review-tab-change=${(e: CustomEvent) => {
-					const title = e.detail.title as string;
-					state.reviewActiveTab = title;
-					const tab = findReviewPanelTabByTitle(title);
-					if (tab) setUnifiedActiveTab(tab);
-					renderApp();
+				.documents=${renderedDocuments}
+				.activeTab=${renderedActiveFileId}
+				.review=${renderedGroup}
+				.sessionId=${paneSessionId}
+				@review-file-change=${async (e: CustomEvent) => {
+					const targetReviewId = typeof e.detail?.reviewId === "string" ? e.detail.reviewId : reviewId;
+					// documentId/title support is limited to legacy single-document callers;
+					// grouped ReviewPane events always identify the secondary file by fileId.
+					const fileId = typeof e.detail?.fileId === "string" ? e.detail.fileId
+						: typeof e.detail?.documentId === "string" ? e.detail.documentId
+						: typeof e.detail?.title === "string" ? e.detail.title : "";
+					if (!targetReviewId || !fileId) return;
+					const { setReviewActiveFile } = await loadReviewSources();
+					await setReviewActiveFile(paneSessionId, targetReviewId, fileId);
 				}}
 				@review-submit=${async (e: CustomEvent) => {
+					// Compatibility path for older review panes. Current panes cancel this
+					// bridge and route the same decision through review-decision below.
+					const group = state.reviewGroups.get(reviewId) || renderedGroup;
 					const agent = state.remoteAgent;
-					if (agent) {
-						agent.prompt(e.detail.feedback);
-						const sid = activeSessionId() || "";
-						const reviewTabIds = [...new Set([
-							...unifiedPanelTabs().filter((tab) => tab.kind === "review").map((tab) => tab.id),
-							...getSidePanelWorkspace(sid).tabs.filter((tab) => tab.kind === "review").map((tab) => tab.id),
-						])];
-						const remainingLegacyTabs = panelTabsForSession(state, sid).filter((tab) => tab.kind !== "review");
-						setPanelTabsForSession(state, sid, remainingLegacyTabs);
-						setActivePanelTabIdForSession(state, sid, remainingLegacyTabs[0]?.id || "");
-						const { clearPersistedReviewDocuments } = await loadReviewSources();
-						clearAllAnnotations(sid);
-						clearPersistedReviewDocuments(sid);
-						markReviewSubmitted(sid);
-						await gatewayFetch(`/api/sessions/${encodeURIComponent(sid)}/review/submitted`, {
-							method: "PUT",
-							body: JSON.stringify({ submitted: true }),
-						}).catch(() => undefined);
-						await flushPendingWrites();
-						state.reviewDocuments = new Map();
-						state.reviewPanelOpen = false;
-						state.reviewActiveTab = "";
-						for (const tabId of reviewTabIds) {
-							try { await closeServerSidePanelTab(tabId, { sessionId: sid }); }
-							catch { /* best-effort */ }
-						}
-						renderApp();
-					}
+					if (!group || !agent || typeof e.detail?.feedback !== "string") return;
+					agent.prompt(e.detail.feedback);
+					const { cleanupReviewGroup } = await loadReviewSources();
+					const removed = await cleanupReviewGroup(paneSessionId, group.reviewId);
+					if (removed) discardReviewPaneFinalDraft(paneSessionId, group.reviewId);
 				}}
 				@review-decision=${async (e: CustomEvent) => {
 					e.preventDefault();
-					const sid = activeSessionId() || "";
 					try {
 						const {
 							reviewDecisionPayloadFromDetail,
-							reviewDocumentFromDecisionDetail,
-							submitReviewDecision,
+							reviewGroupFromDecisionDetail,
+							submitReviewGroupDecision,
 						} = await loadReviewSources();
-						const doc = reviewDocumentFromDecisionDetail(e.detail);
-						const payload = reviewDecisionPayloadFromDetail(e.detail, sid, doc);
-						if (!doc || !payload) {
+						const group = reviewGroupFromDecisionDetail(e.detail);
+						const payload = group ? reviewDecisionPayloadFromDetail(e.detail, paneSessionId, undefined, group) : undefined;
+						if (!group || !payload) {
 							showHeaderToast("Could not submit review decision");
 							return;
 						}
-						await submitReviewDecision(doc, payload, {
-							sessionId: sid,
+						const submittedDraft = reviewFinalComment(paneSessionId, group.reviewId);
+						const outcome = await submitReviewGroupDecision(group, payload, {
+							sessionId: paneSessionId,
 							prompt: async (feedback) => {
 								const agent = state.remoteAgent;
 								if (!agent) throw new Error("No active agent is available for this review.");
 								agent.prompt(feedback);
 							},
 						});
+						const replacementExists = state.reviewGroupsBySession[paneSessionId]
+							?.some((candidate) => candidate.reviewId === outcome.reviewId) === true;
+						if (outcome.submitted
+							&& !replacementExists
+							&& reviewFinalComment(paneSessionId, outcome.reviewId) === submittedDraft) {
+							discardReviewPaneFinalDraft(paneSessionId, outcome.reviewId);
+						}
 					} catch (err) {
 						showHeaderToast(err instanceof Error ? err.message : "Review decision failed");
 					}
 				}}
 				@review-close-tab=${(e: CustomEvent) => {
-					const title = e.detail.title as string;
-					const tab = findReviewPanelTabByTitle(title);
+					const identity = typeof e.detail?.reviewId === "string" ? e.detail.reviewId
+						: typeof e.detail?.title === "string" ? e.detail.title : reviewId;
+					const tab = findReviewPanelTab(identity);
 					if (tab) closeUnifiedPanelTab(tab, e);
-					else {
-						const keys = [...state.reviewDocuments.keys()].filter((key) => key !== title);
-						if (state.reviewActiveTab === title) state.reviewActiveTab = keys[0] || title;
-						renderApp();
-					}
 				}}
-				@review-dismiss=${async () => {
-					const sid = activeSessionId() || "";
-					const reviewTabIds = [...new Set([
-						...unifiedPanelTabs().filter((tab) => tab.kind === "review").map((tab) => tab.id),
-						...getSidePanelWorkspace(sid).tabs.filter((tab) => tab.kind === "review").map((tab) => tab.id),
-					])];
-					const hasMarkdownReview = [...state.reviewDocuments.values()].some((doc) => !doc.source || doc.source.kind === "markdown-review");
-					const remainingLegacyTabs = panelTabsForSession(state, sid).filter((tab) => tab.kind !== "review");
-					setPanelTabsForSession(state, sid, remainingLegacyTabs);
-					setActivePanelTabIdForSession(state, sid, remainingLegacyTabs[0]?.id || "");
-					const { clearPersistedReviewDocuments } = await loadReviewSources();
-					clearAllAnnotations(sid);
-					clearPersistedReviewDocuments(sid);
-					if (hasMarkdownReview) {
-						markReviewSubmitted(sid);
-						await gatewayFetch(`/api/sessions/${encodeURIComponent(sid)}/review/submitted`, {
-							method: "PUT",
-							body: JSON.stringify({ submitted: true }),
-						}).catch(() => undefined);
-					}
-					state.reviewDocuments = new Map();
-					state.reviewPanelOpen = false;
-					state.reviewActiveTab = "";
-					for (const tabId of reviewTabIds) {
-						try { await closeServerSidePanelTab(tabId, { sessionId: sid }); }
-						catch { /* best-effort */ }
-					}
-					renderApp();
+				@review-dismiss=${(e: CustomEvent) => {
+					const identity = typeof e.detail?.reviewId === "string" ? e.detail.reviewId : reviewId;
+					const tab = findReviewPanelTab(identity);
+					if (tab) closeUnifiedPanelTab(tab, e);
 				}}
 			></review-pane>
 		</div>
 	`;
+	};
 
 	const sidePanelChromeButtonClass = "text-muted-foreground hover:text-foreground";
 	const sidePanelChromeButtonStyle = "background:none;border:none;cursor:pointer;padding:2px;flex-shrink:0;display:inline-flex;align-items:center;";
@@ -2767,11 +2999,9 @@ export function doRenderApp(): void {
 		let entry = state.previewPanelEntry || "inline.html";
 		let artifactId = "";
 		if (tab?.kind === "preview") {
-			const tabState = (tab.state || {}) as Record<string, unknown>;
-			const source = tab.source as Record<string, unknown>;
 			const tabEntry = previewEntryFromTab(tab);
 			if (tabEntry) entry = tabEntry;
-			if (!isLivePreviewTab(tab)) artifactId = recordValue(tabState, "artifactId") || recordValue(source, "artifactId");
+			artifactId = previewArtifactIdFromTab(tab);
 		}
 		if (!gatewayNativeTransportSupport().supported) return "";
 		const route = gatewayRoute(artifactId
@@ -2812,14 +3042,34 @@ export function doRenderApp(): void {
 			data-testid="side-panel-popout"
 		>${icon(ExternalLink, "sm")}</a>`;
 
-	const sidePanelActionButtons = (tab: UnifiedContentTab) => html`
-		${tab.kind === "preview" && (previewEntryFromTab(tab) || state.previewPanelEntry) ? html`
-			<button @click=${() => { state.previewPanelMtime = Date.now(); renderApp(); }} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title="Refresh preview">
-				${icon(RotateCw, "sm")}
-			</button>
-		` : ""}
-		${tab.kind === "preview" && !(previewEntryFromTab(tab) || state.previewPanelEntry) ? "" : sidePanelPopoutButton(tab)}
-	`;
+	const packPanelDetails = (tab: UnifiedContentTab) => {
+		if (tab.kind !== "pack") return undefined;
+		const source = (tab.source || {}) as Record<string, unknown>;
+		const tabState = (tab.state || {}) as Record<string, unknown>;
+		const ref = packPanelRefFromTabId(tab.id);
+		const packId = ref?.packId || (typeof source.packId === "string" ? source.packId : "") || (typeof tabState.packId === "string" ? tabState.packId : "");
+		const panelId = ref?.panelId || (typeof source.panelId === "string" ? source.panelId : "") || (typeof tabState.panelId === "string" ? tabState.panelId : "");
+		const params = (source.params as Record<string, unknown> | undefined) || (tabState.params as Record<string, unknown> | undefined);
+		const sessionId = (typeof source.sessionId === "string" ? source.sessionId : "") || (typeof tabState.sessionId === "string" ? tabState.sessionId : "") || undefined;
+		return packId && panelId ? { packId, panelId, params, sessionId } : undefined;
+	};
+
+	const sidePanelActionButtons = (tab: UnifiedContentTab) => {
+		const pack = packPanelDetails(tab);
+		return html`
+			${tab.kind === "preview" && (previewEntryFromTab(tab) || state.previewPanelEntry) ? html`
+				<button @click=${() => { state.previewPanelMtime = Date.now(); renderApp(); }} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title="Refresh preview">
+					${icon(RotateCw, "sm")}
+				</button>
+			` : ""}
+			${pack && packPanelCanRefresh(pack.packId, pack.panelId) ? html`
+				<button @click=${() => refreshPackPanel(pack.packId, pack.panelId, pack.params, pack.sessionId)} class=${sidePanelChromeButtonClass} style=${sidePanelChromeButtonStyle} title="Refresh panel" data-testid="pack-panel-refresh">
+					${icon(RotateCw, "sm")}
+				</button>
+			` : ""}
+			${tab.kind === "preview" && !(previewEntryFromTab(tab) || state.previewPanelEntry) ? "" : sidePanelPopoutButton(tab)}
+		`;
+	};
 
 	const sidePanelWindowControls = (tab: UnifiedContentTab, mode: SidePanelSizeMode) => {
 		const fullscreenTitle = tab.kind === "preview"
@@ -2907,11 +3157,7 @@ export function doRenderApp(): void {
 	const unifiedPanelContent = (tab: UnifiedContentTab) => {
 		if (tab.kind === "preview") return previewRestoreError(tab) ? previewRestoreErrorContent(tab) : htmlPreviewContent();
 		if (tab.kind === "review" && state.reviewPanelOpen) {
-			const reviewKey = reviewDocumentKeyFromPanelTab(tab);
-			if (reviewKey && state.reviewActiveTab !== reviewKey) {
-				state.reviewActiveTab = reviewKey;
-			}
-			return reviewPaneContent();
+			return reviewPaneContent(reviewIdFromPanelTab(tab));
 		}
 		if (tab.kind === "inbox" && state.inboxPanelOpen) return inboxPaneContent();
 		if (tab.kind === "proposal" && tab.source.type === "proposal") {
@@ -2921,9 +3167,10 @@ export function doRenderApp(): void {
 		return "";
 	};
 
-	const unifiedDesktopTabButton = (tab: UnifiedContentTab) => panelTabButton(
+	const unifiedDesktopTabButton = (tab: UnifiedContentTab, constrainedWidth?: number) => panelTabButton(
 		tab,
 		tab.kind === "inbox" ? "inbox-tab-unified" : "",
+		constrainedWidth,
 	);
 
 	const activeSidePanelContentTab = (): UnifiedContentTab | null => {
@@ -2945,6 +3192,9 @@ export function doRenderApp(): void {
 		const activeTab = activeSidePanelContentTab();
 		if (!activeTab) return "";
 
+		const { visibleTabs, overflowTabs } = partitionPanelTabs(contentTabs, panelTabVisibleCapacity, activeTab.id);
+		const allocatedWidths = allocatedPanelTabWidths(visibleTabs.map((tab) => tab.id), overflowTabs.length > 0);
+
 		return html`
 			<div class="side-panel-workspace goal-preview-panel flex-1 flex flex-col ${mode === "split" ? "border-l border-border" : ""} min-h-0" data-panel-workspace="content" data-side-panel-mode=${mode}>
 				<!-- Chrome-style tab strip: muted bg distinct from the panel below.
@@ -2953,9 +3203,60 @@ export function doRenderApp(): void {
 				     bridges the color boundary (curve pseudo-elements in CSS do
 				     the outward-curve flourish at the bottom corners). -->
 				<div class="flex items-end justify-between px-3 pt-1 shrink-0 min-w-0" style="background: var(--muted, var(--color-muted));">
-					<div class="flex-1 min-w-0">
+					<div class="flex-1 min-w-0 relative" data-panel-tab-overflow-host="true" data-panel-tab-count=${contentTabs.length} data-active-panel-tab-id=${activeTab.id}>
 						<div class="flex items-end gap-1" data-panel-tab-bar="true">
-							${repeat(contentTabs, (tab) => tab.id, (tab) => unifiedDesktopTabButton(tab))}
+							${repeat(visibleTabs, (tab) => tab.id, (tab) => unifiedDesktopTabButton(tab, allocatedWidths.get(tab.id)))}
+							${overflowTabs.length > 0 ? html`
+								<button
+									type="button"
+									class="panel-tab-overflow-trigger"
+									aria-label="More tabs"
+									title="More tabs"
+									aria-haspopup="menu"
+									aria-expanded="false"
+									aria-controls=${PANEL_TAB_OVERFLOW_MENU_ID}
+									@click=${togglePanelTabOverflow}
+								>…</button>
+							` : ""}
+						</div>
+						${overflowTabs.length > 0 ? html`
+							<div id=${PANEL_TAB_OVERFLOW_MENU_ID} class="panel-tab-overflow-menu" popover="auto" @toggle=${syncPanelTabOverflowExpanded} @click=${dismissPanelTabOverflowFromBackdrop}>
+								<div class="panel-tab-overflow-menu-card" role="menu" aria-label="More side-panel tabs">
+									${overflowTabs.map((tab) => html`
+										<button
+											type="button"
+											role="menuitem"
+											class="panel-tab-overflow-item"
+											data-panel-tab-id=${tab.id}
+											@click=${() => {
+												(document.getElementById(PANEL_TAB_OVERFLOW_MENU_ID) as HTMLElement | null)?.hidePopover();
+												// The delegated pointerdown guard in main.ts only sees visible
+												// `.goal-tab-pill` elements. Overflow menu items need the same
+												// user-selection marker so an in-flight workspace payload cannot
+												// immediately pull focus back to the previously active tab.
+												(state as any).__lastSidePanelUserActiveSelection = {
+													sessionId: workspaceSessionId(),
+													tabId: tab.id,
+													at: Date.now(),
+												};
+												setUnifiedDesktopTab(tab);
+											}}
+										>
+											<span class="panel-tab-overflow-label">${panelTabButtonLabel(tab)}</span>
+											${panelTabHasDot(tab) ? html`<span class="goal-tab-dot"></span>` : ""}
+										</button>
+									`)}
+								</div>
+							</div>
+						` : ""}
+						<div class="panel-tab-measurements" aria-hidden="true">
+							${contentTabs.map((tab) => html`
+								<span class="panel-tab-measure" data-panel-tab-measure-id=${tab.id}>
+									<span class="panel-tab-measure-label">${panelTabButtonLabel(tab)}</span>
+									${panelTabHasDot(tab) ? html`<span class="goal-tab-dot"></span>` : ""}
+									${isPinnedPanelTab(tab) ? "" : html`<span class="panel-tab-measure-close"></span>`}
+								</span>
+							`)}
 						</div>
 					</div>
 					<div class="flex items-center gap-0.5 shrink-0 pl-2 pb-1">
@@ -3222,6 +3523,8 @@ export function doRenderApp(): void {
 		`, app);
 	}
 
+	animateSidebarStatusChanges(sidebarStatusMotion, app);
+
 	// Attach SortableJS to the panel tab bar (if present). We look up the
 	// element after each render rather than relying on lit's ref directive
 	// (which proved unreliable with the no-name attribute placement on a
@@ -3229,4 +3532,5 @@ export function doRenderApp(): void {
 	// container is unchanged.
 	const tabBar = document.querySelector<HTMLElement>("[data-panel-tab-bar]");
 	ensurePanelSortable(tabBar);
+	ensurePanelTabOverflowObserver(document.querySelector<HTMLElement>("[data-panel-tab-overflow-host]"));
 }

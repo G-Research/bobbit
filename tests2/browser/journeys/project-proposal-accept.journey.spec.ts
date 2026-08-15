@@ -26,6 +26,7 @@ import {
 	waitForSessionStatus,
 } from "../_helpers/journey-fixture.js";
 import { rawApiFetch } from "../e2e-setup.js";
+import { awaitableRm } from "../../../tests/e2e/test-utils/cleanup.js";
 
 // Deterministic bug repro — a failure here is the bug, not a flake budget.
 test.describe.configure({ retries: 0 });
@@ -761,7 +762,8 @@ test.describe("Journey: project proposal accept/apply no-op regression", () => {
 		} finally {
 			await deleteSession(sessionId);
 			await deleteProject(projectId);
-			rmSync(rootPath, { recursive: true, force: true });
+			const cleanup = await awaitableRm(rootPath);
+			expect(cleanup.removed, `provisional config failure fixture cleanup failed after ${cleanup.attempts} attempts: ${String(cleanup.lastError ?? "unknown error")}`).toBe(true);
 		}
 	});
 

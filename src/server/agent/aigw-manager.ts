@@ -20,9 +20,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { fileURLToPath } from "node:url";
+import { parse as parseJsonc } from "jsonc-parser";
 import { bobbitStateDir, globalAgentDir } from "../bobbit-dir.js";
 import { BOBBIT_AIGW_USER_AGENT, aigwUserAgentHeaders } from "./aigw-user-agent.js";
+import { publishManagedAigwProvider, removeManagedAigwProvider } from "./aigw-models-json.js";
 import type { PreferencesStore } from "./preferences-store.js";
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -130,8 +131,8 @@ export function normalizeAigwPricing(pricing: unknown): AigwModelCost {
 	return {
 		input: normalizeCostValue(prompt * 1_000_000),
 		output: normalizeCostValue(completion * 1_000_000),
-		cacheRead: normalizeCostValue(prompt * 0.1 * 1_000_000),
-		cacheWrite: normalizeCostValue(prompt * 1.25 * 1_000_000),
+		cacheRead: 0,
+		cacheWrite: 0,
 	};
 }
 
@@ -142,8 +143,8 @@ export function normalizeAigwPricing(pricing: unknown): AigwModelCost {
  * and needs the *1M scale-up done by `normalizeAigwPricing`), opencode well-known
  * `cost` is already denominated in USD per 1M tokens under
  * {input,output,cache_read,cache_write} — so we map the fields straight across.
- * cache_read/cache_write are honoured when present (falling back to the same
- * heuristic ratios `normalizeAigwPricing` uses when the gateway omits them).
+ * cache_read/cache_write are honoured when present. Missing prices remain
+ * unknown and are represented conservatively as zero rather than inferred.
  */
 export function normalizeWellKnownCost(cost: unknown): AigwModelCost {
 	if (!cost || typeof cost !== "object") return zeroAigwCost();
@@ -155,8 +156,8 @@ export function normalizeWellKnownCost(cost: unknown): AigwModelCost {
 	return {
 		input: normalizeCostValue(input),
 		output: normalizeCostValue(output),
-		cacheRead: normalizeCostValue(num(c.cache_read) ?? input * 0.1),
-		cacheWrite: normalizeCostValue(num(c.cache_write) ?? input * 1.25),
+		cacheRead: normalizeCostValue(num(c.cache_read) ?? 0),
+		cacheWrite: normalizeCostValue(num(c.cache_write) ?? 0),
 	};
 }
 
@@ -180,16 +181,16 @@ const GATEWAY_COMPAT: Record<string, unknown> = {
 };
 
 /**
- * Table-driven matcher for `inferMeta`. Rules are evaluated in order and the
+ * Table-driven matcher for `inferLegacyAigwMeta`. Rules are evaluated in order and the
  * first match wins, so order from most-specific (e.g. `gpt-5.5-pro`) to
  * least-specific (e.g. `gpt-4`).
  *
  * Each rule's `meta` is returned with `compat: GATEWAY_COMPAT` spliced in by
- * `inferMeta` so individual rows don't have to repeat it.
+ * `inferLegacyAigwMeta` so individual rows don't have to repeat it.
  */
 type InferRule = {
 	test: RegExp | ((id: string) => boolean);
-	// `meta.compat`, when present, is a *partial* override that `inferMeta` merges
+	// `meta.compat`, when present, is a *partial* override that legacy inference merges
 	// on top of GATEWAY_COMPAT (so a rule only names the flags it flips and keeps
 	// the conservative gateway defaults for the rest). Used by GPT 5.6 to opt into
 	// `supportsReasoningEffort` so Pi's openai-completions actually sends the
@@ -244,7 +245,7 @@ const INFER_RULES: InferRule[] = [
 	{ test: /qwen/, meta: { contextWindow: 1_000_000, maxTokens: 32_768, reasoning: false, input: ["text"] } },
 ];
 
-export function inferMeta(modelId: string): ModelMeta {
+export function inferLegacyAigwMeta(modelId: string): ModelMeta {
 	const id = modelId.toLowerCase();
 	for (const rule of INFER_RULES) {
 		const matched = typeof rule.test === "function" ? rule.test(id) : rule.test.test(id);
@@ -293,7 +294,7 @@ function readModelsJson(): Record<string, any> {
 	const p = getModelsJsonPath();
 	try {
 		if (fs.existsSync(p)) {
-			return JSON.parse(fs.readFileSync(p, "utf-8"));
+			return parseJsonc(fs.readFileSync(p, "utf-8")) as Record<string, any>;
 		}
 	} catch (err) {
 		console.error("[aigw-manager] Failed to read models.json:", err);
@@ -301,14 +302,14 @@ function readModelsJson(): Record<string, any> {
 	return { providers: {} };
 }
 
-function writeModelsJson(data: Record<string, any>): void {
+function writeModelsJsonText(text: string): void {
 	const p = getModelsJsonPath();
 	let tmp = "";
 	try {
 		const dir = path.dirname(p);
 		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 		tmp = `${p}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
-		fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf-8");
+		fs.writeFileSync(tmp, text, "utf-8");
 		fs.renameSync(tmp, p);
 		console.log(`[aigw-manager] Wrote models.json to ${p}`);
 	} catch (err) {
@@ -371,241 +372,6 @@ export function normalizeAigwModelPreferences(prefs: PreferencesStore): void {
 	}
 }
 
-function unescapeGeneratedString(raw: string): string {
-	try {
-		return JSON.parse(`"${raw}"`);
-	} catch {
-		return raw.replace(/\\(["'\\])/g, "$1");
-	}
-}
-
-function findMatchingBrace(source: string, openBraceIndex: number): number {
-	let depth = 0;
-	let quote: string | null = null;
-	let escaped = false;
-	let lineComment = false;
-	let blockComment = false;
-
-	for (let i = openBraceIndex; i < source.length; i++) {
-		const ch = source[i];
-		const next = source[i + 1];
-
-		if (lineComment) {
-			if (ch === "\n" || ch === "\r") lineComment = false;
-			continue;
-		}
-		if (blockComment) {
-			if (ch === "*" && next === "/") {
-				blockComment = false;
-				i++;
-			}
-			continue;
-		}
-		if (quote) {
-			if (escaped) {
-				escaped = false;
-			} else if (ch === "\\") {
-				escaped = true;
-			} else if (ch === quote) {
-				quote = null;
-			}
-			continue;
-		}
-
-		if (ch === "/" && next === "/") {
-			lineComment = true;
-			i++;
-			continue;
-		}
-		if (ch === "/" && next === "*") {
-			blockComment = true;
-			i++;
-			continue;
-		}
-		if (ch === '"' || ch === "'" || ch === "`") {
-			quote = ch;
-			continue;
-		}
-		if (ch === "{") depth++;
-		else if (ch === "}") {
-			depth--;
-			if (depth === 0) return i;
-		}
-	}
-	return -1;
-}
-
-function topLevelDepthAt(source: string, targetIndex: number): number {
-	let depth = 0;
-	let quote: string | null = null;
-	let escaped = false;
-	let lineComment = false;
-	let blockComment = false;
-
-	for (let i = 0; i < targetIndex; i++) {
-		const ch = source[i];
-		const next = source[i + 1];
-
-		if (lineComment) {
-			if (ch === "\n" || ch === "\r") lineComment = false;
-			continue;
-		}
-		if (blockComment) {
-			if (ch === "*" && next === "/") {
-				blockComment = false;
-				i++;
-			}
-			continue;
-		}
-		if (quote) {
-			if (escaped) escaped = false;
-			else if (ch === "\\") escaped = true;
-			else if (ch === quote) quote = null;
-			continue;
-		}
-
-		if (ch === "/" && next === "/") {
-			lineComment = true;
-			i++;
-			continue;
-		}
-		if (ch === "/" && next === "*") {
-			blockComment = true;
-			i++;
-			continue;
-		}
-		if (ch === '"' || ch === "'" || ch === "`") {
-			quote = ch;
-			continue;
-		}
-		if (ch === "{") depth++;
-		else if (ch === "}") depth = Math.max(0, depth - 1);
-	}
-	return depth;
-}
-
-function topLevelStringProperty(objectBody: string, property: string): string | undefined {
-	const quoted = property.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-	const propertyRegex = new RegExp(`(?:^|[,\\s])(?:"${quoted}"|${quoted})\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`, "g");
-	let match: RegExpExecArray | null;
-	while ((match = propertyRegex.exec(objectBody)) !== null) {
-		if (topLevelDepthAt(objectBody, match.index) === 0) {
-			return unescapeGeneratedString(match[1]);
-		}
-	}
-	return undefined;
-}
-
-function addProviderModel(providerModels: Map<string, string[]>, provider: string, modelId: string): void {
-	if (!provider || !modelId) return;
-	const models = providerModels.get(provider) ?? [];
-	if (!models.includes(modelId)) models.push(modelId);
-	providerModels.set(provider, models);
-}
-
-/**
- * Parse model IDs from pi-ai's models.generated.js text, grouped by provider.
- * Supports both the older flat shape and the current provider-nested shape.
- */
-export function parseModelsGeneratedText(text: string): Map<string, string[]> {
-	const providerModels = new Map<string, string[]>();
-	const entryRegex = /"((?:\\.|[^"\\])+)"\s*:\s*\{/g;
-	let match: RegExpExecArray | null;
-
-	while ((match = entryRegex.exec(text)) !== null) {
-		const key = unescapeGeneratedString(match[1]);
-		const openBraceIndex = entryRegex.lastIndex - 1;
-		const closeBraceIndex = findMatchingBrace(text, openBraceIndex);
-		if (closeBraceIndex < 0) continue;
-
-		const objectBody = text.slice(openBraceIndex + 1, closeBraceIndex);
-		const provider = topLevelStringProperty(objectBody, "provider");
-		if (!provider) continue;
-
-		addProviderModel(providerModels, provider, topLevelStringProperty(objectBody, "id") ?? key);
-		entryRegex.lastIndex = closeBraceIndex + 1;
-	}
-
-	return providerModels;
-}
-
-/**
- * Parse model IDs from pi-ai's models.generated.js, grouped by provider.
- */
-function parseModelsGenerated(): Map<string, string[]> {
-	try {
-		const pkgUrl = import.meta.resolve("@earendil-works/pi-ai");
-		const pkgDir = path.dirname(fileURLToPath(pkgUrl));
-		const modelsPath = path.join(pkgDir, "models.generated.js");
-		return parseModelsGeneratedText(fs.readFileSync(modelsPath, "utf-8"));
-	} catch (err) {
-		console.error("[aigw-manager] Failed to parse models.generated.js:", err);
-		return new Map<string, string[]>();
-	}
-}
-
-/**
- * Write contextWindow overrides to models.json for all Claude models where
- * inferMeta() returns a larger context window than the built-in 200k.
- *
- * This fixes the 200k compaction bug: pi-ai hardcodes contextWindow: 200000
- * for all Claude models, but Sonnet/Opus actually support 1M tokens.
- * The modelOverrides in models.json tell pi-coding-agent to use the correct value.
- *
- * Preserves existing user modelOverrides — only sets contextWindow if the user
- * hasn't already overridden it for that model.
- */
-const CONTEXT_WINDOW_OVERRIDE_PROVIDERS = ["amazon-bedrock", "anthropic"] as const;
-
-export function applyContextWindowOverrides(data: Record<string, any>, providerModels: Map<string, string[]>): number {
-	if (!data.providers) data.providers = {};
-
-	let overridesWritten = 0;
-
-	for (const provider of CONTEXT_WINDOW_OVERRIDE_PROVIDERS) {
-		const modelIds = providerModels.get(provider) || [];
-		const claudeIds = modelIds.filter(id => id.toLowerCase().includes("claude"));
-
-		if (claudeIds.length === 0) continue;
-
-		if (!data.providers[provider]) data.providers[provider] = {};
-		if (!data.providers[provider].modelOverrides) data.providers[provider].modelOverrides = {};
-
-		const overrides = data.providers[provider].modelOverrides;
-
-		for (const modelId of claudeIds) {
-			const meta = inferMeta(modelId);
-			if (meta.contextWindow > 200_000) {
-				// Don't clobber existing user contextWindow override
-				if (overrides[modelId]?.contextWindow !== undefined) continue;
-
-				if (!overrides[modelId]) overrides[modelId] = {};
-				overrides[modelId].contextWindow = meta.contextWindow;
-				overridesWritten++;
-			}
-		}
-	}
-
-	return overridesWritten;
-}
-
-export function writeContextWindowOverrides(): void {
-	const providerModels = parseModelsGenerated();
-	const data = readModelsJson();
-	const overridesWritten = applyContextWindowOverrides(data, providerModels);
-
-	if (overridesWritten > 0) {
-		writeModelsJson(data);
-		console.log(`[aigw-manager] Wrote ${overridesWritten} contextWindow overrides to models.json`);
-	} else {
-		console.log("[aigw-manager] No contextWindow overrides needed");
-	}
-}
-
-/**
- * Write aigw models into ~/.bobbit/agent/models.json, merging with existing
- * providers (preserving non-aigw entries).
- */
 /**
  * Set env vars so agent subprocesses route Bedrock calls through the gateway.
  * Called both on fresh configuration and on startup when aigw is already configured.
@@ -622,128 +388,40 @@ function setBedrockEnvVars(aigwUrl: string): void {
 }
 
 export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void {
-	const data = readModelsJson();
-	if (!data.providers) data.providers = {};
-
-	// AI gateways typically expose both OpenAI-compatible and Bedrock endpoints.
-	// Route Claude models through the Bedrock Converse API (same path as Claude
-	// Code) for full feature parity — native tool use, images, streaming.
-	// Non-Claude models use OpenAI completions with conservative compat.
+	const modelsPath = getModelsJsonPath();
+	const source = fs.existsSync(modelsPath) ? fs.readFileSync(modelsPath, "utf-8") : undefined;
 	const normalizedUrl = aigwUrl.replace(/\/+$/, "");
-	// Bedrock Converse traffic goes to <gateway>/aws/model/<id>/converse-stream;
-	// the provider's normalized baseUrl ends in /v1 for the OpenAI-compatible path
-	// and is wrong for Bedrock. pi-ai uses `model.baseUrl` directly as the
-	// `BedrockRuntimeClient` endpoint, so emit a per-model override on Claude
-	// entries pointing at the /aws sub-tree. Mirrors the env var written by
-	// setBedrockEnvVars() but survives across subprocess/env-strip boundaries.
-	const bedrockBaseUrl = normalizedUrl.replace(/\/v1$/, "") + "/aws";
-
-	const openaiCompat: Record<string, unknown> = {
-		supportsDeveloperRole: false,
-		supportsStore: false,
-		supportsUsageInStreaming: false,
-		supportsReasoningEffort: false,
-		supportsStrictMode: false,
-		maxTokensField: "max_tokens",
-	};
-
-	const isClaudeModel = (id: string) => id.toLowerCase().includes("claude");
-
-	// Strip provider prefix for Bedrock (e.g. "aws/us.anthropic.claude-..." → "us.anthropic.claude-...")
-	const bedrockModelId = (id: string) => {
-		const slash = id.indexOf("/");
-		return slash >= 0 ? id.slice(slash + 1) : id;
-	};
-
-	data.providers.aigw = {
+	const provider = {
 		baseUrl: normalizedUrl,
 		apiKey: "none",
 		api: "openai-completions",
-		// Provider-level header. pi-coding-agent's `resolveConfigValue` runs the
-		// `!cmd` form via `child_process.exec` (shell-interpreted) and drops the
-		// header entirely when stdout is empty — so when BOBBIT_SESSION_ID is
-		// unset, no `x-opencode-session` header is sent (no fallback constant).
-		// The literal here JSON-encodes to:
-		//   "!node -e \"process.stdout.write(process.env.BOBBIT_SESSION_ID || '')\""
 		headers: {
 			"User-Agent": BOBBIT_AIGW_USER_AGENT,
 			"x-opencode-session": `!node -e "process.stdout.write(process.env.BOBBIT_SESSION_ID || '')"`,
 		},
-		models: models.map(m => {
-			const cost = m.cost ?? zeroAigwCost();
-			// AUTHORITATIVE path: a model carrying both `api` and `baseUrl` came from
-			// well-known discovery (or the fallback option-1 OpenAI-responses fix).
-			// Emit those verbatim with the BARE wire id the per-provider subpath
-			// expects (pi-ai uses `model.baseUrl` as the SDK baseURL and `model.id`
-			// as the wire model). This is how `@ai-sdk/openai` models reach
-			// openai-responses on `…/openai/v1` instead of the chat/completions root.
-			if (m.api && m.baseUrl) {
-				return {
-					id: m.wireId ?? m.id,
-					...(m.upstreamProvider ? { upstreamProvider: m.upstreamProvider } : {}),
-					name: m.name,
-					contextWindow: m.contextWindow,
-					maxTokens: m.maxTokens,
-					reasoning: m.reasoning,
-					input: m.input,
-					cost,
-					api: m.api,
-					baseUrl: m.baseUrl,
-					...(m.thinkingLevelMap ? { thinkingLevelMap: m.thinkingLevelMap } : {}),
-					...(m.compat ? { compat: m.compat } : {}),
-				};
-			}
-			// ── Fallback heuristic path (no authoritative api/baseUrl) ──
-			if (isClaudeModel(m.id)) {
-				return {
-					id: bedrockModelId(m.id),
-					...(m.upstreamProvider ? { upstreamProvider: m.upstreamProvider } : {}),
-					name: m.name,
-					contextWindow: m.contextWindow,
-					maxTokens: m.maxTokens,
-					reasoning: m.reasoning,
-					input: m.input,
-					cost,
-					api: "bedrock-converse-stream",
-					// Per-model Bedrock endpoint override — provider baseUrl is the
-					// OpenAI-compatible /v1 root; Bedrock Converse lives under /aws.
-					baseUrl: bedrockBaseUrl,
-					// Only forward a thinkingLevelMap when the input model carries one —
-					// never fabricate one for Claude/Bedrock entries.
-					...(m.thinkingLevelMap ? { thinkingLevelMap: m.thinkingLevelMap } : {}),
-					...(m.compat ? { compat: m.compat } : {}),
-				};
+		models: models.map((model) => {
+			if (!model.baseUrl) {
+				throw new Error(`AIGW model ${model.id} has no authoritative baseUrl; refusing heuristic publication`);
 			}
 			return {
-				id: m.id,
-				...(m.upstreamProvider ? { upstreamProvider: m.upstreamProvider } : {}),
-				name: m.name,
-				contextWindow: m.contextWindow,
-				maxTokens: m.maxTokens,
-				reasoning: m.reasoning,
-				input: m.input,
-				cost,
-				// Persist per-model effort metadata (e.g. AIGW-routed GPT 5.6
-				// Luna/Sol/Terra `{ xhigh, max }`) so spawned Pi agents honor the
-				// selected `max` thinking level instead of collapsing to the generic
-				// family fallback. Omitted when the input model carries no map.
-				...(m.thinkingLevelMap ? { thinkingLevelMap: m.thinkingLevelMap } : {}),
-				// Merge the discovered per-model compat over the conservative gateway
-				// defaults. This is what carries `supportsReasoningEffort: true` for the
-				// GPT 5.6 family (inferMeta's compat override) so Pi's openai-completions
-				// sends the selected reasoning_effort for the advertised `max` tier;
-				// other non-Claude models keep the conservative `false` default.
-				compat: { ...openaiCompat, ...(m.compat || {}) },
+				id: model.wireId ?? model.id,
+				...(model.upstreamProvider ? { upstreamProvider: model.upstreamProvider } : {}),
+				name: model.name,
+				contextWindow: model.contextWindow,
+				maxTokens: model.maxTokens,
+				reasoning: model.reasoning,
+				input: model.input,
+				cost: model.cost ?? zeroAigwCost(),
+				api: model.api,
+				baseUrl: model.baseUrl,
+				...(model.thinkingLevelMap ? { thinkingLevelMap: model.thinkingLevelMap } : {}),
+				...(model.compat ? { compat: model.compat } : {}),
 			};
 		}),
 	};
-
-	writeModelsJson(data);
-	// The atomically persisted provider is now the active routing authority. Keep
-	// its admitted host set in memory so every later session activation can decide
-	// whether it needs the guard without re-reading models.json. Failed writes never
-	// reach this point and therefore cannot change active DNS behavior.
-	replaceAigwProviderDnsGuardHosts(collectAigwProviderDnsHosts(data.providers.aigw));
+	const updated = publishManagedAigwProvider(source, provider);
+	if (updated !== source) writeModelsJsonText(updated);
+	replaceAigwProviderDnsGuardHosts(collectAigwProviderDnsHosts(provider));
 	setBedrockEnvVars(aigwUrl);
 }
 
@@ -846,18 +524,19 @@ export default function aigwDnsGuard() {}
 	}
 }
 
-/**
- * Remove the "aigw" provider from models.json.
- */
+/** Remove only Bobbit's explicitly marked AIGW provider from models.json. */
 export function removeAigwModelsJson(): void {
-	const data = readModelsJson();
-	if (data.providers?.aigw) {
-		delete data.providers.aigw;
-		writeModelsJson(data);
+	const modelsPath = getModelsJsonPath();
+	if (!fs.existsSync(modelsPath)) {
+		replaceAigwProviderDnsGuardHosts([]);
+		return;
 	}
-	// Keep the in-memory activation decision aligned even when this lower-level
-	// helper is called directly. A failed persistence above throws before clearing.
-	replaceAigwProviderDnsGuardHosts([]);
+	const source = fs.readFileSync(modelsPath, "utf-8");
+	const result = removeManagedAigwProvider(source);
+	if (result.removed) writeModelsJsonText(result.text);
+	// An unmarked provider is user-owned and remains active configuration.
+	const persisted = result.removed ? parseJsonc(result.text) : readModelsJson();
+	replaceAigwProviderDnsGuardHosts(collectAigwProviderDnsHosts(persisted?.providers?.aigw));
 }
 
 // ── Startup internet check ─────────────────────────────────────────
@@ -1399,7 +1078,7 @@ export function proxyRequest(
 // AUTHORITATIVE config (not a bare model list): per provider it names the npm
 // adapter, a dedicated `options.baseURL` subpath, a `whitelist`, and full
 // per-model metadata. We consume it as the source of truth so we stop guessing
-// endpoints via `inferMeta`.
+// endpoints via legacy model-name inference.
 //
 // WHY `openai` → responses: on this gateway the `openai` provider uses
 // `@ai-sdk/openai`, whose SDK appends `/responses` to `options.baseURL`
@@ -1440,8 +1119,8 @@ export interface WellKnownConfig {
 	remote_config?: RemoteConfig;
 }
 
-// Provider npm adapter → pi-ai `api`. Unknown adapters fall back to
-// `openai-completions` (the conservative chat/completions default).
+// Provider npm adapter → wire-tested pi-ai `api`. Unknown adapters are omitted:
+// an authoritative document does not license Bobbit to guess a transport.
 const PROVIDER_NPM_TO_API: Record<string, string> = {
 	"@ai-sdk/openai": "openai-responses",
 	"@ai-sdk/amazon-bedrock": "bedrock-converse-stream",
@@ -1452,26 +1131,24 @@ const RECOGNIZED_EFFORT_KEYS = ["minimal", "none", "low", "medium", "high", "xhi
 
 /**
  * Build a pi-ai `thinkingLevelMap` from a well-known model's `variants` keys.
- * Each advertised effort tier maps to itself (identity); `off:"none"` is added
- * for reasoning models so the responses/completions adapters emit
- * `reasoning_effort:"none"` in the no-effort case (the tool-compatible path the
- * gateway wants). Returns undefined when no recognized tiers are advertised.
+ * Each advertised effort tier maps to itself (identity). An advertised `none`
+ * also maps Bobbit/Pi's `off` level to `none`; no unadvertised tier is added.
  */
-function buildThinkingLevelMap(variants: Record<string, unknown> | undefined, reasoning: boolean): Record<string, string | null> | undefined {
+function buildThinkingLevelMap(variants: Record<string, unknown> | undefined): Record<string, string | null> | undefined {
 	if (!variants) return undefined;
 	const map: Record<string, string | null> = {};
 	for (const key of Object.keys(variants)) {
 		if (RECOGNIZED_EFFORT_KEYS.includes(key)) map[key] = key;
 	}
 	if (Object.keys(map).length === 0) return undefined;
-	if (reasoning) map.off = "none";
+	if (Object.prototype.hasOwnProperty.call(map, "none")) map.off = "none";
 	return map;
 }
 
 /**
  * Pure translator: well-known config → Bobbit `AigwModel[]`. Applies
  * `disabled_providers` + per-provider `whitelist` as HARD filters and never
- * runs `inferMeta` guessing. Unit-tested against a captured fixture.
+ * runs legacy model-name inference. Unit-tested against a captured fixture.
  */
 export function translateWellKnown(config: WellKnownConfig, gatewayBaseUrl: string): AigwModel[] {
 	const disabled = new Set(Array.isArray(config.disabled_providers) ? config.disabled_providers : []);
@@ -1486,7 +1163,8 @@ export function translateWellKnown(config: WellKnownConfig, gatewayBaseUrl: stri
 
 	for (const [providerName, provider] of Object.entries(config.provider ?? {})) {
 		if (!provider || typeof provider !== "object" || disabled.has(providerName)) continue;
-		const api = PROVIDER_NPM_TO_API[provider.npm ?? ""] ?? "openai-completions";
+		const api = PROVIDER_NPM_TO_API[provider.npm ?? ""];
+		if (!api) continue;
 		const validatedBase = typeof provider.options?.baseURL === "string"
 			? validateProviderBaseTarget(provider.options.baseURL, configuredOrigin)
 			: null;
@@ -1498,15 +1176,21 @@ export function translateWellKnown(config: WellKnownConfig, gatewayBaseUrl: stri
 
 		for (const [bareId, wk] of Object.entries(provider.models ?? {})) {
 			if (!bareId || !wk || typeof wk !== "object" || (whitelist && !whitelist.has(bareId))) continue;
-			const reasoning = wk.reasoning === true;
-			const input = (Array.isArray(wk.modalities?.input) ? wk.modalities!.input! : ["text"])
+			const contextWindow = wk.limit?.context;
+			const maxTokens = wk.limit?.output;
+			if (
+				typeof contextWindow !== "number" || !Number.isFinite(contextWindow) || contextWindow <= 0 ||
+				typeof maxTokens !== "number" || !Number.isFinite(maxTokens) || maxTokens <= 0 ||
+				typeof wk.reasoning !== "boolean" || !Array.isArray(wk.modalities?.input)
+			) continue;
+			const input = wk.modalities.input
 				.filter((m): m is "text" | "image" => m === "text" || m === "image");
-			const thinkingLevelMap = buildThinkingLevelMap(wk.variants, reasoning);
+			if (input.length === 0) continue;
+			const reasoning = wk.reasoning;
+			const thinkingLevelMap = buildThinkingLevelMap(wk.variants);
 			const compat = api === "bedrock-converse-stream"
 				? undefined
 				: { ...GATEWAY_COMPAT, supportsReasoningEffort: true };
-			const positive = (value: unknown, fallback: number) =>
-				typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
 			const model: AigwModel = {
 				id: bareId,
 				wireId: bareId,
@@ -1515,9 +1199,9 @@ export function translateWellKnown(config: WellKnownConfig, gatewayBaseUrl: stri
 				api,
 				baseUrl,
 				reasoning,
-				input: input.length > 0 ? input : ["text"],
-				contextWindow: positive(wk.limit?.context, DEFAULT_META.contextWindow),
-				maxTokens: positive(wk.limit?.output, DEFAULT_META.maxTokens),
+				input,
+				contextWindow,
+				maxTokens,
 				cost: normalizeWellKnownCost(wk.cost),
 				...(thinkingLevelMap ? { thinkingLevelMap } : {}),
 				...(compat ? { compat } : {}),
@@ -1577,7 +1261,7 @@ export function readOpencodeWellKnownToken(gatewayUrl: string): string | undefin
 /**
  * Fetch `{origin}/.well-known/opencode`. Returns the resolved config, or null on
  * 404 / non-JSON / network error / blocked-in-tests so callers fall back to the
- * `/v1/models` + `inferMeta` heuristic.
+ * `/v1/models` + `inferLegacyAigwMeta` heuristic.
  *
  * - The well-known doc lives at the ORIGIN ROOT, not under `/v1` — the gateway
  *   URL may be `http://host/v1`, so we resolve `/.well-known/opencode` against
@@ -1710,7 +1394,7 @@ export function seedDefaultModelsFromWellKnown(config: WellKnownConfig, models: 
 /**
  * Discover aigw models. WELL-KNOWN-FIRST: consult `{origin}/.well-known/opencode`
  * (authoritative per-provider routing) and, when present, translate it directly.
- * Otherwise fall back to the legacy `/v1/models` + `inferMeta` heuristic — plus
+ * Otherwise fall back to the legacy `/v1/models` + `inferLegacyAigwMeta` heuristic — plus
  * a minimal fix that routes OpenAI-family reasoning models to `openai-responses`
  * so tools+reasoning don't 400 on the chat/completions root.
  */
@@ -1751,7 +1435,7 @@ async function discoverAigwResult(baseUrl: string): Promise<AigwDiscoveryResult>
 		if (!item || typeof item.id !== "string" || !item.id) {
 			throw new Error("Unexpected response format from /v1/models — each model requires a string id");
 		}
-		const meta = inferMeta(item.id);
+		const meta = inferLegacyAigwMeta(item.id);
 		const slash = item.id.indexOf("/");
 		const upstreamProvider = slash > 0 ? item.id.slice(0, slash) : undefined;
 		const ctxFromGw = item.context_length || item.context_window;

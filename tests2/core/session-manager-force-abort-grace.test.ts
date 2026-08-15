@@ -91,6 +91,69 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 		assert.ok(elapsed >= GRACE - 20, `did not force-kill before the grace period (${elapsed}ms)`);
 	});
 
+	it("does not remain aborting while a wedged bridge blocks the pre-kill state snapshot", async () => {
+		// Observed live-session shape: Escape sends the same abort command as Stop
+		// while Pi is streaming a partial edit call. Abort emits no agent_end, and
+		// other RPCs on the same bridge also stop answering. forceAbort correctly
+		// races abort() against its grace timer,
+		// but then asks that same bridge for getState() before calling stop(). A
+		// blocked state snapshot therefore leaves the visible status at "aborting"
+		// instead of force-killing at the grace boundary.
+		registerRpcBridgeFactory(() => { throw new Error("no respawn in test"); });
+
+		const manager: any = new SessionManager();
+		manager._testStore = { update: vi.fn(() => {}), get: vi.fn(() => undefined) };
+		managers.push(manager);
+
+		let releaseState!: () => void;
+		const stateGate = new Promise<void>((resolve) => { releaseState = resolve; });
+		const stop = vi.fn(async () => {});
+		const session: any = {
+			id: "s-wedged-state-snapshot",
+			title: "Wedged during tool call",
+			titleGenerated: true,
+			cwd: tmpRoot,
+			status: "streaming",
+			statusVersion: 1,
+			streamingStartedAt: Date.now(),
+			createdAt: Date.now(),
+			lastActivity: Date.now(),
+			clients: new Set([{ readyState: 1, send: () => {} }]),
+			promptQueue: new PromptQueue(),
+			eventBuffer: new EventBuffer(),
+			inFlightSteerTexts: [],
+			unsubscribe: () => {},
+			rpcClient: {
+				abort: () => new Promise<void>(() => {}),
+				onEvent: () => () => {},
+				getState: async () => {
+					await stateGate;
+					return { success: false };
+				},
+				stop,
+			},
+		};
+		manager.sessions.set(session.id, session);
+
+		const GRACE = 30;
+		const aborting = manager.forceAbort(session.id, GRACE).catch(() => {});
+		await new Promise((resolve) => setTimeout(resolve, GRACE + 50));
+		const stopStartedAtGraceBoundary = stop.mock.calls.length > 0;
+		const statusAfterGrace = session.status;
+
+		// Release the intentionally wedged RPC so cleanup always completes before
+		// the assertion fails; the test must not leak a replacement coordinator.
+		releaseState();
+		await aborting;
+
+		assert.equal(
+			stopStartedAtGraceBoundary,
+			true,
+			`force-kill did not start after ${GRACE}ms; session remained ${statusAfterGrace}`,
+		);
+		assert.notEqual(statusAfterGrace, "aborting", "the grace boundary must end the visible aborting state");
+	});
+
 	/**
 	 * Force-abort respawn must derive its tool allowlist from the session/persisted
 	 * allowedTools, NOT recompute it from the role alone. A restricted child/delegate
@@ -202,6 +265,9 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 			status: "streaming",
 			statusVersion: 1,
 			streamingStartedAt: Date.now(),
+			isCompacting: true,
+			_reliableCompactionId: "graceful-stop-compaction",
+			_reliableCompactionReason: "threshold",
 			createdAt: Date.now(),
 			lastActivity: Date.now(),
 			clients: new Set(),
@@ -216,10 +282,20 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 			rpcClient: {
 				abort: async () => {
 					emit({
+						type: "compaction_end",
+						reason: "threshold",
+						compactionId: "graceful-stop-compaction",
+						aborted: true,
+						success: false,
+						error: "aborted",
+					});
+					emit({
 						type: "message_end",
 						message: { role: "assistant", content: [{ type: "text", text: "stopped" }], stopReason: "error", errorMessage: "aborted" },
 					});
 					emit({ type: "agent_end", messages: [] });
+					assert.equal(drainQueue.mock.calls.length, 0, "agent_end cannot release queued work before Pi settles");
+					emit({ type: "agent_settled" });
 				},
 				onEvent: (listener: (event: any) => void) => {
 					listeners.add(listener);
@@ -241,6 +317,7 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 		assert.equal(session.lastTurnErrored, false, "user Stop clears the synthetic abort error");
 		assert.equal(session.lastTurnErrorMessage, undefined);
 		assert.equal(session.streamingStartedAt, undefined);
+		assert.equal(session.isCompacting, false, "graceful Stop replays compaction_end before release");
 		assert.equal(session.status, "idle");
 		assert.equal(resolveIdleWaiters.mock.calls.length, 1, "idle waiters settle exactly once");
 		assert.equal(drainQueue.mock.calls.length, 1, "only coordinator release drains");
@@ -248,6 +325,118 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 		assert.ok(update.mock.calls.some(([, patch]: any[]) =>
 			patch.wasStreaming === false && patch.streamingStartedAt === undefined
 		), "durable restart bookkeeping records an idle session");
+	});
+
+	it("releases one exact FIFO occurrence after hard Stop kills post-terminal compaction", async () => {
+		const replacementPrompt = vi.fn(async (_text: string) => ({ success: true }));
+		const replacement = {
+			running: true,
+			start: vi.fn(async () => {}),
+			stop: vi.fn(async () => {}),
+			onEvent: vi.fn(() => () => {}),
+			prompt: replacementPrompt,
+		};
+		registerRpcBridgeFactory(() => replacement as any);
+
+		const manager: any = new SessionManager();
+		const persisted: any = {
+			id: "s-post-terminal-hard-stop",
+			modelProvider: "anthropic",
+			modelId: "fixture-model",
+			effectiveThinkingLevel: "medium",
+			wasStreaming: true,
+		};
+		manager._testStore = {
+			get: vi.fn(() => persisted),
+			update: vi.fn((_id: string, patch: any) => Object.assign(persisted, patch)),
+		};
+		manager.lifecycleHub = { dispatch: vi.fn(async () => {}) };
+		manager.resolveIdleWaiters = vi.fn();
+		manager.readCompactionTranscriptEntries = vi.fn(async () => undefined);
+		manager.finalizeCompactionSidecar = vi.fn(async () => undefined);
+		manager.requireCurrentCatalogSpawnModel = vi.fn(async (model: string) => model);
+		manager.resolveCurrentCatalogPreferredThinkingLevel = vi.fn(async () => "medium");
+		manager.ensureMcpManagerForContext = vi.fn(async () => {});
+		manager.buildToolActivationArgs = vi.fn(() => ({ args: [], env: {}, runtimeExtensions: [] }));
+		manager.applyDirectProviderEnv = vi.fn(async () => {});
+		manager.finalizeSpawnOptions = vi.fn(async () => {});
+		manager.tryAutoSelectModel = vi.fn(async () => {});
+		manager.tryApplyDefaultThinkingLevel = vi.fn(async () => {});
+		managers.push(manager);
+
+		const oldPrompt = vi.fn(async () => ({ success: true }));
+		const oldStop = vi.fn(async () => {});
+		const session: any = {
+			id: persisted.id,
+			title: "Post-terminal hard Stop",
+			titleGenerated: true,
+			cwd: tmpRoot,
+			status: "idle",
+			statusVersion: 1,
+			createdAt: Date.now(),
+			lastActivity: Date.now(),
+			clients: new Set(),
+			promptQueue: new PromptQueue(),
+			eventBuffer: new EventBuffer(),
+			inFlightSteerTexts: [],
+			completedTurnCount: 0,
+			setupComplete: true,
+			unsubscribe: vi.fn(),
+			rpcClient: {
+				abort: () => new Promise<void>(() => {}),
+				onEvent: () => () => {},
+				getState: async () => ({ success: false }),
+				stop: oldStop,
+				prompt: oldPrompt,
+			},
+		};
+		manager.sessions.set(session.id, session);
+
+		manager.handleAgentLifecycle(session, { type: "agent_start" });
+		await manager.enqueuePrompt(session.id, "first durable replacement turn", {
+			intentId: "intent-hard-stop-first",
+		});
+		await manager.enqueuePrompt(session.id, "second durable replacement turn", {
+			intentId: "intent-hard-stop-second",
+		});
+		const [first, second] = session.promptQueue.toArray();
+		manager.handleAgentLifecycle(session, {
+			type: "message_end",
+			message: { id: "assistant-before-compaction", role: "assistant", stopReason: "stop", content: "done" },
+		});
+		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false, messages: [] });
+		manager.handleAgentLifecycle(session, {
+			type: "compaction_start",
+			reason: "threshold",
+			compactionId: "post-terminal-hard-stop-compaction",
+		});
+
+		assert.equal(session._piAgentRunSettled, false);
+		assert.equal(session.turnTerminalHandled, true);
+		assert.equal(session.completedTurnCount, 1);
+		assert.equal(manager.lifecycleHub.dispatch.mock.calls.length, 1);
+		assert.equal(manager.resolveIdleWaiters.mock.calls.length, 1);
+		assert.deepEqual(session.promptQueue.toArray().map((row: any) => row.id), [first.id, second.id]);
+
+		await manager.forceAbort(session.id, 10);
+		await vi.waitFor(() => assert.equal(replacementPrompt.mock.calls.length, 1));
+
+		assert.equal(oldStop.mock.calls.length, 1, "the unsettled old bridge is hard-killed");
+		assert.equal(oldPrompt.mock.calls.length, 0, "the old bridge never receives replacement work");
+		assert.equal(session._piAgentRunSettled, true, "hard kill synthesizes the missing settlement boundary");
+		assert.equal(session.isCompacting, false, "hard kill finalizes post-terminal compaction as aborted");
+		assert.equal(session._reliableFinishedCompactionIds.has("post-terminal-hard-stop-compaction"), true);
+		assert.equal(session.completedTurnCount, 1, "duplicate synthetic terminal cannot repeat turn bookkeeping");
+		assert.equal(manager.lifecycleHub.dispatch.mock.calls.length, 1);
+		assert.equal(manager.resolveIdleWaiters.mock.calls.length, 1);
+		assert.equal(replacementPrompt.mock.calls[0]?.[0], first.text);
+		assert.deepEqual(session.promptQueue.toArray().map((row: any) => row.id), [second.id]);
+		assert.equal(session.inFlightSteerTexts.length, 1);
+		assert.equal(session.inFlightSteerTexts[0]?.intentId, first.id);
+		assert.equal(session.inFlightSteerTexts[0]?.state, "dispatching");
+		assert.equal(session.inFlightSteerTexts[0]?.sequence, first.sequence);
+		assert.equal(manager._sessionReplacementCoordinators.has(session.id), false, "only coordinator release drains");
+		assert.equal(session.lifecycleGeneration, 1, "replacement generation remains canonical");
 	});
 
 	it("performs hard-abort terminal bookkeeping before replacement grant derivation", async () => {
@@ -279,6 +468,9 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 			status: "streaming",
 			statusVersion: 1,
 			streamingStartedAt: Date.now(),
+			isCompacting: true,
+			_reliableCompactionId: "hard-stop-compaction",
+			_reliableCompactionReason: "threshold",
 			createdAt: Date.now(),
 			lastActivity: Date.now(),
 			clients: new Set(),
@@ -316,6 +508,7 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 		assert.equal(session.lastTurnErrorMessage, undefined);
 		assert.equal(session.consecutiveErrorTurns, 0);
 		assert.equal(session.streamingStartedAt, undefined);
+		assert.equal(session.isCompacting, false, "hard Stop synthesizes an aborted compaction end");
 		assert.equal(resolveIdleWaiters.mock.calls.length, 1);
 		assert.ok(update.mock.calls.some(([, patch]: any[]) =>
 			patch.wasStreaming === false && patch.streamingStartedAt === undefined

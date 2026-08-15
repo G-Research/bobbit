@@ -160,6 +160,7 @@ test.describe("Add Project flow (UI)", () => {
 	test("creates a typed nonexistent directory and continues to scaffolding assistant", async ({ page }) => {
 		const parent = uniqueDir("create-parent");
 		const target = join(parent, "new-project");
+		let provisionalProjectId: string | undefined;
 
 		try {
 			await openApp(page);
@@ -206,12 +207,19 @@ test.describe("Add Project flow (UI)", () => {
 				}
 			});
 			await continueButton.click();
-			await sessionPost;
+			const sessionResponse = await sessionPost;
+			const session = await sessionResponse.json() as { provisionalProjectId?: string };
+			expect(session.provisionalProjectId).toBeTruthy();
+			provisionalProjectId = session.provisionalProjectId;
 			await expect(pathInput).not.toBeVisible({ timeout: 10_000 });
 
 			await page.reload();
 			await expect(page.locator(ADD_PROJECT.dialog)).not.toBeVisible({ timeout: 5_000 });
 		} finally {
+			if (provisionalProjectId) {
+				const removed = await apiFetch(`/api/projects/${provisionalProjectId}`, { method: "DELETE" });
+				expect(removed.ok).toBe(true);
+			}
 			rmSync(parent, { recursive: true, force: true });
 		}
 	});

@@ -79,9 +79,9 @@ workflows:
               include an E2E test plan that validates the user journey
               end-to-end.
 
-              Treat this as a revision-ready content review. A FAIL is valid only
-              for an explicit unmet goal requirement or concrete regression and
-              is invalid without a complete author-ready revision packet for
+              Treat this as a revision-ready content review. A FAIL is valid
+              only for an explicit unmet goal requirement or concrete regression
+              and is invalid without a complete author-ready revision packet for
               every blocker. For each blocker, identify the exact artifact
               location; explain the goal-linked gap and practical consequence;
               provide concrete replacement wording, an outline, contract,
@@ -131,9 +131,9 @@ workflows:
               Use your tools to read the design document content from the
               signal.
 
-              Treat this as a revision-ready content review. A FAIL is valid only
-              for an explicit unmet goal requirement or concrete regression and
-              is invalid without a complete author-ready revision packet for
+              Treat this as a revision-ready content review. A FAIL is valid
+              only for an explicit unmet goal requirement or concrete regression
+              and is invalid without a complete author-ready revision packet for
               every blocker. For each blocker, identify the exact artifact
               location; explain the goal-linked gap and practical consequence;
               provide concrete replacement wording, an outline, contract,
@@ -167,20 +167,20 @@ workflows:
             command: unit
           - name: Browser tests
             type: command
-            phase: 1
+            phase: 2
             timeout: 900
             component: bobbit
             command: browser
           - name: E2E tests
             type: command
-            phase: 1
+            phase: 3
             timeout: 900
             component: bobbit
             command: e2e
           - name: Spec and regression conformance
             type: llm-review
             role: spec-auditor
-            phase: 2
+            phase: 3
             prompt: >-
               Compare the goal specification below, available upstream design or
               issue analysis, implementation, and tests on branch {{branch}}
@@ -190,23 +190,24 @@ workflows:
 
               Ignore documentation-only gaps. Identify unmet behavior,
               acceptance criteria, regressions, contradictions, and missing
-              regression coverage. Every blocker must include implementation-ready
-              remediation and focused tests that prove the fix.
+              regression coverage. Every blocker must include
+              implementation-ready remediation and focused tests that prove the
+              fix.
 
-              This phase-2 implementation review does not own optional phase-3 QA
-              or the downstream Ready-to-Merge gate. Defer QA when configured,
-              branch push, base synchronization, and PR creation to those stages.
-              Concrete implementation defects remain in scope.
+              This phase-3 implementation review does not own optional phase-4
+              QA or the downstream Ready-to-Merge gate. Defer QA when
+              configured, branch push, base synchronization, and PR creation to
+              those stages. Concrete implementation defects remain in scope.
           - name: Integrated implementation review
             type: llm-review
             role: code-reviewer
-            phase: 2
+            phase: 3
             prompt: >-
               Review the implementation on branch {{branch}} versus
-              origin/{{baseBranch}}. Cover correctness, error handling,
-              edge and mixed states, concurrency and lifecycle, cross-layer
-              interactions, maintainability, regression coverage, and
-              independently verifiable bugs.
+              origin/{{baseBranch}}. Cover correctness, error handling, edge and
+              mixed states, concurrency and lifecycle, cross-layer interactions,
+              maintainability, regression coverage, and independently verifiable
+              bugs.
 
               This review runs before the downstream Documentation gate. Ignore
               documentation-only gaps — including missing or outdated docs,
@@ -218,7 +219,7 @@ workflows:
           - name: Security review
             type: llm-review
             role: security-reviewer
-            phase: 2
+            phase: 3
             prompt: >-
               Review changed trust boundaries, authentication and authorization,
               validation and injection, secrets, destructive or resource
@@ -226,9 +227,9 @@ workflows:
               {{branch}} versus origin/{{baseBranch}}.
 
               This review runs before the downstream Documentation gate. Defer
-              documentation-only gaps — including missing or outdated docs, README
-              or design-document updates, and code comments — to that gate.
-              Concrete in-scope security defects remain in scope.
+              documentation-only gaps — including missing or outdated docs,
+              README or design-document updates, and code comments — to that
+              gate. Concrete in-scope security defects remain in scope.
 
               For each blocker, provide minimal remediation plus abuse and
               regression tests that verify the fix.
@@ -256,15 +257,15 @@ workflows:
 
               Treat this as a revision-ready documentation review. A FAIL is
               valid only for an explicit unmet goal requirement or concrete
-              change-introduced regression and is invalid without an author-ready
-              revision packet for every blocker. For each blocker, name exact
-              documentation paths and sections; identify the stale or missing
-              claim and its goal-linked consequence; give proposed replacement
-              wording or outline with relevant examples or links; state related
-              cross-section edits and constraints; include credible alternatives
-              with tradeoffs only when they exist; separate required edits from
-              bounded improvements; and explain how to verify the documented
-              behavior against the implementation.
+              change-introduced regression and is invalid without an
+              author-ready revision packet for every blocker. For each blocker,
+              name exact documentation paths and sections; identify the stale or
+              missing claim and its goal-linked consequence; give proposed
+              replacement wording or outline with relevant examples or links;
+              state related cross-section edits and constraints; include
+              credible alternatives with tradeoffs only when they exist;
+              separate required edits from bounded improvements; and explain how
+              to verify the documented behavior against the implementation.
 
               This review is limited to documentation. Defer branch push, base
               synchronization, and PR creation to the downstream Ready-to-Merge
@@ -286,6 +287,21 @@ workflows:
             type: command
             run: gh pr list --head {{branch}} --base {{baseBranch}} --state open --json url
               -q ".[0].url" | grep -q .
+          - name: PR checks pass
+            type: command
+            phase: 1
+            timeout: 3600
+            run: gh pr checks "{{branch}}" --watch --interval 10
+            failureGuidance: >-
+              Inspect the failed checks before acting. If the failure was transient and
+              no repository change is required, retry and re-signal this gate. If changes
+              are required, fix them and re-signal the earliest passed gate whose
+              verified work is affected: Implementation for source code, tests, build
+              configuration, or runtime behaviour; Documentation for documentation-only
+              changes where that gate exists; or Design/Issue Analysis when accepted
+              assumptions change. Re-signalling a passed gate invalidates its downstream
+              gates. Choose based on the planned remediation, not merely the check
+              failure.
   pr-review:
     id: pr-review
     name: PR Review
@@ -468,9 +484,9 @@ workflows:
               include an E2E test plan that validates the user journey
               end-to-end.
 
-              Treat this as a revision-ready content review. A FAIL is valid only
-              for an explicit unmet goal requirement or concrete regression and
-              is invalid without a complete author-ready revision packet for
+              Treat this as a revision-ready content review. A FAIL is valid
+              only for an explicit unmet goal requirement or concrete regression
+              and is invalid without a complete author-ready revision packet for
               every blocker. For each blocker, identify the exact artifact
               location; explain the goal-linked gap and practical consequence;
               provide concrete replacement wording, an outline, contract,
@@ -500,9 +516,9 @@ workflows:
               to justify an abstraction or possible future reuse. Use your tools
               to read the design document content from the signal.
 
-              Treat this as a revision-ready content review. A FAIL is valid only
-              for an explicit unmet goal requirement or concrete regression and
-              is invalid without a complete author-ready revision packet for
+              Treat this as a revision-ready content review. A FAIL is valid
+              only for an explicit unmet goal requirement or concrete regression
+              and is invalid without a complete author-ready revision packet for
               every blocker. For each blocker, identify the exact artifact
               location; explain the goal-linked gap and practical consequence;
               provide concrete replacement wording, an outline, contract,
@@ -536,20 +552,20 @@ workflows:
             command: unit
           - name: Browser tests
             type: command
-            phase: 1
+            phase: 2
             timeout: 900
             component: bobbit
             command: browser
           - name: E2E tests
             type: command
-            phase: 1
+            phase: 3
             timeout: 900
             component: bobbit
             command: e2e
           - name: Spec and regression conformance
             type: llm-review
             role: spec-auditor
-            phase: 2
+            phase: 3
             prompt: >-
               Compare the goal specification below, available upstream design or
               issue analysis, implementation, and tests on branch {{branch}}
@@ -559,23 +575,24 @@ workflows:
 
               Ignore documentation-only gaps. Identify unmet behavior,
               acceptance criteria, regressions, contradictions, and missing
-              regression coverage. Every blocker must include implementation-ready
-              remediation and focused tests that prove the fix.
+              regression coverage. Every blocker must include
+              implementation-ready remediation and focused tests that prove the
+              fix.
 
-              This phase-2 implementation review does not own optional phase-3 QA
-              or the downstream Ready-to-Merge gate. Defer QA when configured,
-              branch push, base synchronization, and PR creation to those stages.
-              Concrete implementation defects remain in scope.
+              This phase-3 implementation review does not own optional phase-4
+              QA or the downstream Ready-to-Merge gate. Defer QA when
+              configured, branch push, base synchronization, and PR creation to
+              those stages. Concrete implementation defects remain in scope.
           - name: Integrated implementation review
             type: llm-review
             role: code-reviewer
-            phase: 2
+            phase: 3
             prompt: >-
               Review the implementation on branch {{branch}} versus
-              origin/{{baseBranch}}. Cover correctness, error handling,
-              edge and mixed states, concurrency and lifecycle, cross-layer
-              interactions, maintainability, regression coverage, and
-              independently verifiable bugs.
+              origin/{{baseBranch}}. Cover correctness, error handling, edge and
+              mixed states, concurrency and lifecycle, cross-layer interactions,
+              maintainability, regression coverage, and independently verifiable
+              bugs.
 
               This review runs before the downstream Documentation gate. Ignore
               documentation-only gaps — including missing or outdated docs,
@@ -587,7 +604,7 @@ workflows:
           - name: Security review
             type: llm-review
             role: security-reviewer
-            phase: 2
+            phase: 3
             prompt: >-
               Review changed trust boundaries, authentication and authorization,
               validation and injection, secrets, destructive or resource
@@ -595,16 +612,16 @@ workflows:
               {{branch}} versus origin/{{baseBranch}}.
 
               This review runs before the downstream Documentation gate. Defer
-              documentation-only gaps — including missing or outdated docs, README
-              or design-document updates, and code comments — to that gate.
-              Concrete in-scope security defects remain in scope.
+              documentation-only gaps — including missing or outdated docs,
+              README or design-document updates, and code comments — to that
+              gate. Concrete in-scope security defects remain in scope.
 
               For each blocker, provide minimal remediation plus abuse and
               regression tests that verify the fix.
           - name: QA testing
             type: agent-qa
             role: qa-tester
-            phase: 3
+            phase: 4
             optional: true
             optionalLabel: Enable QA Testing
             description: Spawn a QA agent that builds the project, starts an ephemeral
@@ -622,7 +639,8 @@ workflows:
         verify:
           - name: Documentation coverage
             type: llm-review
-            prompt: Review documentation for the changes on branch {{branch}} vs
+            prompt: >-
+              Review documentation for the changes on branch {{branch}} vs
               origin/{{baseBranch}}. Verify user-facing
               features/API/config/behavior changes are documented, existing docs
               are updated, placement is appropriate, and documentation quality
@@ -630,15 +648,15 @@ workflows:
 
               Treat this as a revision-ready documentation review. A FAIL is
               valid only for an explicit unmet goal requirement or concrete
-              change-introduced regression and is invalid without an author-ready
-              revision packet for every blocker. For each blocker, name exact
-              documentation paths and sections; identify the stale or missing
-              claim and its goal-linked consequence; give proposed replacement
-              wording or outline with relevant examples or links; state related
-              cross-section edits and constraints; include credible alternatives
-              with tradeoffs only when they exist; separate required edits from
-              bounded improvements; and explain how to verify the documented
-              behavior against the implementation.
+              change-introduced regression and is invalid without an
+              author-ready revision packet for every blocker. For each blocker,
+              name exact documentation paths and sections; identify the stale or
+              missing claim and its goal-linked consequence; give proposed
+              replacement wording or outline with relevant examples or links;
+              state related cross-section edits and constraints; include
+              credible alternatives with tradeoffs only when they exist;
+              separate required edits from bounded improvements; and explain how
+              to verify the documented behavior against the implementation.
 
               This review is limited to documentation. Defer branch push, base
               synchronization, and PR creation to the downstream Ready-to-Merge
@@ -660,6 +678,21 @@ workflows:
             type: command
             run: gh pr list --head {{branch}} --base {{baseBranch}} --state open --json url
               -q ".[0].url" | grep -q .
+          - name: PR checks pass
+            type: command
+            phase: 1
+            timeout: 3600
+            run: gh pr checks "{{branch}}" --watch --interval 10
+            failureGuidance: >-
+              Inspect the failed checks before acting. If the failure was transient and
+              no repository change is required, retry and re-signal this gate. If changes
+              are required, fix them and re-signal the earliest passed gate whose
+              verified work is affected: Implementation for source code, tests, build
+              configuration, or runtime behaviour; Documentation for documentation-only
+              changes where that gate exists; or Design/Issue Analysis when accepted
+              assumptions change. Re-signalling a passed gate invalidates its downstream
+              gates. Choose based on the planned remediation, not merely the check
+              failure.
   bug-fix:
     id: bug-fix
     name: Bug Fix
@@ -678,9 +711,9 @@ workflows:
 
               This review is limited to the Issue Analysis artifact. Defer
               reproducing-test execution, implementation fixes, executed tests,
-              documentation, and publication — branch push, base synchronization,
-              and PR creation — to their downstream gates. Concrete analysis
-              defects remain in scope.
+              documentation, and publication — branch push, base
+              synchronization, and PR creation — to their downstream gates.
+              Concrete analysis defects remain in scope.
 
               Treat this as a revision-ready content review. A FAIL is valid
               only for an explicit unmet goal requirement or concrete regression
@@ -760,20 +793,20 @@ workflows:
             command: unit
           - name: Browser tests
             type: command
-            phase: 1
+            phase: 2
             timeout: 900
             component: bobbit
             command: browser
           - name: E2E tests
             type: command
-            phase: 1
+            phase: 3
             timeout: 900
             component: bobbit
             command: e2e
           - name: Spec and regression conformance
             type: llm-review
             role: spec-auditor
-            phase: 2
+            phase: 3
             prompt: >-
               Compare the goal specification below, available upstream design or
               issue analysis, implementation, and tests on branch {{branch}}
@@ -783,23 +816,24 @@ workflows:
 
               Ignore documentation-only gaps. Identify unmet behavior,
               acceptance criteria, regressions, contradictions, and missing
-              regression coverage. Every blocker must include implementation-ready
-              remediation and focused tests that prove the fix.
+              regression coverage. Every blocker must include
+              implementation-ready remediation and focused tests that prove the
+              fix.
 
-              This phase-2 implementation review does not own optional phase-3 QA
-              or the downstream Ready-to-Merge gate. Defer QA when configured,
-              branch push, base synchronization, and PR creation to those stages.
-              Concrete implementation defects remain in scope.
+              This phase-3 implementation review does not own optional phase-4
+              QA or the downstream Ready-to-Merge gate. Defer QA when
+              configured, branch push, base synchronization, and PR creation to
+              those stages. Concrete implementation defects remain in scope.
           - name: Integrated implementation review
             type: llm-review
             role: code-reviewer
-            phase: 2
+            phase: 3
             prompt: >-
               Review the implementation on branch {{branch}} versus
-              origin/{{baseBranch}}. Cover correctness, error handling,
-              edge and mixed states, concurrency and lifecycle, cross-layer
-              interactions, maintainability, regression coverage, and
-              independently verifiable bugs.
+              origin/{{baseBranch}}. Cover correctness, error handling, edge and
+              mixed states, concurrency and lifecycle, cross-layer interactions,
+              maintainability, regression coverage, and independently verifiable
+              bugs.
 
               This review runs before the downstream Documentation gate. Ignore
               documentation-only gaps — including missing or outdated docs,
@@ -811,7 +845,7 @@ workflows:
           - name: Security review
             type: llm-review
             role: security-reviewer
-            phase: 2
+            phase: 3
             prompt: >-
               Review changed trust boundaries, authentication and authorization,
               validation and injection, secrets, destructive or resource
@@ -819,16 +853,16 @@ workflows:
               {{branch}} versus origin/{{baseBranch}}.
 
               This review runs before the downstream Documentation gate. Defer
-              documentation-only gaps — including missing or outdated docs, README
-              or design-document updates, and code comments — to that gate.
-              Concrete in-scope security defects remain in scope.
+              documentation-only gaps — including missing or outdated docs,
+              README or design-document updates, and code comments — to that
+              gate. Concrete in-scope security defects remain in scope.
 
               For each blocker, provide minimal remediation plus abuse and
               regression tests that verify the fix.
           - name: QA testing
             type: agent-qa
             role: qa-tester
-            phase: 3
+            phase: 4
             optional: true
             optionalLabel: Enable QA Testing
             description: Spawn a QA agent that builds the project, starts an ephemeral
@@ -847,22 +881,23 @@ workflows:
         verify:
           - name: Documentation coverage
             type: llm-review
-            prompt: Review documentation for the changes on branch {{branch}} vs
+            prompt: >-
+              Review documentation for the changes on branch {{branch}} vs
               {{baseBranch}}. Verify user-facing features/API/config/behavior
               changes are documented, existing docs are updated, placement is
               appropriate, and documentation quality standards are met.
 
               Treat this as a revision-ready documentation review. A FAIL is
               valid only for an explicit unmet goal requirement or concrete
-              change-introduced regression and is invalid without an author-ready
-              revision packet for every blocker. For each blocker, name exact
-              documentation paths and sections; identify the stale or missing
-              claim and its goal-linked consequence; give proposed replacement
-              wording or outline with relevant examples or links; state related
-              cross-section edits and constraints; include credible alternatives
-              with tradeoffs only when they exist; separate required edits from
-              bounded improvements; and explain how to verify the documented
-              behavior against the implementation.
+              change-introduced regression and is invalid without an
+              author-ready revision packet for every blocker. For each blocker,
+              name exact documentation paths and sections; identify the stale or
+              missing claim and its goal-linked consequence; give proposed
+              replacement wording or outline with relevant examples or links;
+              state related cross-section edits and constraints; include
+              credible alternatives with tradeoffs only when they exist;
+              separate required edits from bounded improvements; and explain how
+              to verify the documented behavior against the implementation.
 
               This review is limited to documentation. Defer branch push, base
               synchronization, and PR creation to the downstream Ready-to-Merge
@@ -884,6 +919,21 @@ workflows:
             type: command
             run: gh pr list --head {{branch}} --base {{baseBranch}} --state open --json url
               -q ".[0].url" | grep -q .
+          - name: PR checks pass
+            type: command
+            phase: 1
+            timeout: 3600
+            run: gh pr checks "{{branch}}" --watch --interval 10
+            failureGuidance: >-
+              Inspect the failed checks before acting. If the failure was transient and
+              no repository change is required, retry and re-signal this gate. If changes
+              are required, fix them and re-signal the earliest passed gate whose
+              verified work is affected: Implementation for source code, tests, build
+              configuration, or runtime behaviour; Documentation for documentation-only
+              changes where that gate exists; or Design/Issue Analysis when accepted
+              assumptions change. Re-signalling a passed gate invalidates its downstream
+              gates. Choose based on the planned remediation, not merely the check
+              failure.
   quick-fix:
     id: quick-fix
     name: Quick Fix
@@ -911,20 +961,20 @@ workflows:
             command: unit
           - name: Browser tests
             type: command
-            phase: 1
+            phase: 2
             timeout: 900
             component: bobbit
             command: browser
           - name: E2E tests
             type: command
-            phase: 1
+            phase: 3
             timeout: 900
             component: bobbit
             command: e2e
           - name: Spec and regression conformance
             type: llm-review
             role: spec-auditor
-            phase: 2
+            phase: 3
             prompt: >-
               Compare the goal specification below, available upstream design or
               issue analysis, implementation, and tests on branch {{branch}}
@@ -934,30 +984,31 @@ workflows:
 
               Ignore documentation-only gaps. Identify unmet behavior,
               acceptance criteria, regressions, contradictions, and missing
-              regression coverage. Every blocker must include implementation-ready
-              remediation and focused tests that prove the fix.
+              regression coverage. Every blocker must include
+              implementation-ready remediation and focused tests that prove the
+              fix.
 
-              This phase-2 implementation review does not own optional phase-3 QA
-              or the downstream Ready-to-Merge gate. Defer QA when configured,
-              branch push, base synchronization, and PR creation to those stages.
-              Concrete implementation defects remain in scope.
+              This phase-3 implementation review does not own optional phase-4
+              QA or the downstream Ready-to-Merge gate. Defer QA when
+              configured, branch push, base synchronization, and PR creation to
+              those stages. Concrete implementation defects remain in scope.
           - name: Integrated implementation review
             type: llm-review
             role: code-reviewer
-            phase: 2
+            phase: 3
             prompt: >-
               Review the implementation on branch {{branch}} versus
-              origin/{{baseBranch}}. Cover correctness, error handling,
-              edge and mixed states, concurrency and lifecycle, cross-layer
-              interactions, maintainability, regression coverage, and
-              independently verifiable bugs.
+              origin/{{baseBranch}}. Cover correctness, error handling, edge and
+              mixed states, concurrency and lifecycle, cross-layer interactions,
+              maintainability, regression coverage, and independently verifiable
+              bugs.
 
               Deduplicate findings by root cause. For each blocker, provide an
               exact minimal fix and focused tests that independently verify it.
           - name: Security review
             type: llm-review
             role: security-reviewer
-            phase: 2
+            phase: 3
             prompt: >-
               Review changed trust boundaries, authentication and authorization,
               validation and injection, secrets, destructive or resource
@@ -983,6 +1034,21 @@ workflows:
             type: command
             run: gh pr list --head {{branch}} --base {{baseBranch}} --state open --json url
               -q ".[0].url" | grep -q .
+          - name: PR checks pass
+            type: command
+            phase: 1
+            timeout: 3600
+            run: gh pr checks "{{branch}}" --watch --interval 10
+            failureGuidance: >-
+              Inspect the failed checks before acting. If the failure was transient and
+              no repository change is required, retry and re-signal this gate. If changes
+              are required, fix them and re-signal the earliest passed gate whose
+              verified work is affected: Implementation for source code, tests, build
+              configuration, or runtime behaviour; Documentation for documentation-only
+              changes where that gate exists; or Design/Issue Analysis when accepted
+              assumptions change. Re-signalling a passed gate invalidates its downstream
+              gates. Choose based on the planned remediation, not merely the check
+              failure.
     createdAt: 1774734770196
     updatedAt: 1774734770196
   human-signoff-test:
@@ -1040,8 +1106,7 @@ workflows:
             type: llm-review
             role: systems-reviewer
             phase: 1
-            prompt: >-
-              Perform the complete Systems Interaction Review defined by the
+            prompt: Perform the complete Systems Interaction Review defined by the
               systems-reviewer role for branch {{branch}} versus {{baseBranch}}.
               Inspect every changed cross-layer state and action path, continue
               after the first finding, and submit the verification result.

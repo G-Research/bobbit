@@ -367,6 +367,18 @@ code. Re-attach, liveness, and kill all go through `docker exec` against the
 in-container `processPid`; the dead `hostPid` (docker-exec handle) is never used
 after a restart.
 
+## Wait interruption versus intent delivery
+
+A dispatched, identified reliable continuation steer interrupts any in-flight `bash_bg wait` for the session so Pi can leave the tool boundary promptly. The wait response reports `aborted: true`; the background process itself remains alive and can be queried again. Internal/REST/tool steers that omit occurrence identity still use the legacy dispatch path and currently do not interrupt the wait.
+
+This interruption is deliberately separate from reliable intent settlement:
+
+- a steer waiting in the delivery outbox behind compaction, Stop, or bridge replacement has not reached the wait-interruption boundary;
+- aborting the wait does not prove Pi received the steer; and
+- Pi RPC acknowledgement still does not settle the occurrence.
+
+The steer remains visible until its correlated Pi user message is surfaced, or it enters an actionable failed/uncertain state. See [Reliable prompt and steer delivery](prompt-queue.md#bash_bg-wait-interaction) and [Steer-interruptible `bash_bg wait`](internals.md#steer-interruptible-bash_bg-wait).
+
 ## Related
 
 - [docs/design/persistent-bg-processes.md](design/persistent-bg-processes.md) — full design record (wrapper scripts, every edge case, test matrix).

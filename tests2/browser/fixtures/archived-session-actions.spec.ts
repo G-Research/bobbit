@@ -17,13 +17,15 @@ test.describe.configure({ mode: "serial" });
 const ARCHIVED_SAFE_ACTION_IDS = [
 	"continue-archived",
 	"copy-link",
+	"pin",
 	"view-system-prompt",
 	"open-new-window",
 ] as const;
 const ARCHIVED_ACTION_LABELS: Record<typeof ARCHIVED_SAFE_ACTION_IDS[number], string> = {
 	"continue-archived": "Continue in new session",
 	"copy-link": "Copy link",
-	"view-system-prompt": "View System Prompt",
+	"pin": "Pin session",
+	"view-system-prompt": "View system prompt",
 	"open-new-window": "Open in new window",
 };
 const ARCHIVED_READ_ONLY_ACTION_IDS = ARCHIVED_SAFE_ACTION_IDS.filter((id) => id !== "continue-archived");
@@ -33,8 +35,8 @@ const FORBIDDEN_LABELS = [
 	"End team",
 	"Refresh agent",
 	"Fork",
-	"PR Walkthrough",
-	"Open Terminal",
+	"PR walkthrough",
+	"Open terminal",
 ] as const;
 
 function sessionRow(page: Page, sessionId: string): Locator {
@@ -256,8 +258,20 @@ test.describe("archived session actions", () => {
 			return s?.selectedSessionId === id && s?.chatPanel?.agentInterface?.readOnly === true;
 		}, archivedId), { timeout: 15_000 }).toBe(true);
 
+		const headerPin = page.locator('[data-session-action-surface="header"][data-session-action-id="pin"]');
+		await expect(headerPin, "Pin must not leak into the archived desktop header").toHaveCount(0);
 		await openHeaderMenu(page);
 		await expectArchivedSafeMenu(page);
+		await menuItem(page, "pin").click();
+		await expect.poll(() => page.evaluate((id) => {
+			const session = (window as any).bobbitState?.archivedSessions?.find((candidate: { id?: string }) => candidate.id === id);
+			return session?.user_tags?.includes("pinned=true") === true;
+		}, archivedId), { message: "archived Pin action should update the loaded session" }).toBe(true);
+		await expect(headerPin, "Unpin must also remain absent from the archived desktop header").toHaveCount(0);
+		await openHeaderMenu(page);
+		expect(await popoverActionIds(page), "archived menu order should remain unchanged after pinning").toEqual([...ARCHIVED_SAFE_ACTION_IDS]);
+		await expect(menuItem(page, "pin"), "archived Pin item should become Unpin in-place").toContainText("Unpin session");
+		await closePopover(page);
 	});
 
 	test("mobile archived header menu exposes the same safe actions", async ({ page }) => {
@@ -281,7 +295,12 @@ test.describe("archived session actions", () => {
 
 		await showArchivedInSidebar(page);
 		if (!(await sessionRow(page, ineligibleId).isVisible().catch(() => false))) {
-			await page.locator(`[data-nav-id="goal:${goalId}"]`).first().click();
+			const goalRow = page.locator(`[data-nav-id="goal:${goalId}"]`).first();
+			await expect(goalRow, "goal-linked archive fixture should remain in the project hierarchy").toBeVisible({ timeout: 10_000 });
+			// The compact controls row is sticky and can cover a tree row after
+			// Playwright scrolls it into view; dispatching the row's click keeps
+			// this setup focused on contextual Continue eligibility.
+			await goalRow.evaluate((element) => (element as HTMLElement).click());
 		}
 		await openArchivedSidebarMenu(page, ineligibleId);
 		await expectArchivedSafeMenu(page, ARCHIVED_READ_ONLY_ACTION_IDS);

@@ -4,6 +4,7 @@ export const SUPPORTED_ENTRYPOINT_ICON_IDS = [
 	DEFAULT_ENTRYPOINT_ICON_ID,
 	"terminal",
 	"git-pull-request",
+	"folder-tree",
 ] as const;
 
 export type EntrypointIconId = typeof SUPPORTED_ENTRYPOINT_ICON_IDS[number];

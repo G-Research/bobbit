@@ -11,6 +11,33 @@ export interface GateResetReopenOutcome {
 	state: GoalState;
 }
 
+export const MODEL_SELECTION_REQUIRED = "MODEL_SELECTION_REQUIRED" as const;
+export const MODEL_SELECTION_RECOVERY_FAILED = "MODEL_SELECTION_RECOVERY_FAILED" as const;
+
+/** A processless session whose exact persisted text model is no longer selectable. */
+export interface ModelSelectionRequiredCondition {
+	code: typeof MODEL_SELECTION_REQUIRED;
+	provider: string;
+	modelId: string;
+}
+
+/** Orthogonal session conditions; these do not replace the lifecycle status. */
+export type SessionCondition = ModelSelectionRequiredCondition;
+
+export function isModelSelectionRequiredCondition(value: unknown): value is ModelSelectionRequiredCondition {
+	if (!value || typeof value !== "object") return false;
+	const condition = value as Partial<ModelSelectionRequiredCondition>;
+	return condition.code === MODEL_SELECTION_REQUIRED
+		&& typeof condition.provider === "string"
+		&& condition.provider.length > 0
+		&& typeof condition.modelId === "string"
+		&& condition.modelId.length > 0;
+}
+
+export function modelSelectionRequiredMessage(condition: ModelSelectionRequiredCondition): string {
+	return `Model ${condition.provider}/${condition.modelId} is unavailable for this session. Choose a replacement model to continue.`;
+}
+
 /** Grant policy for tool access (self-contained — not imported from role-store for protocol independence). */
 export type GrantPolicy = 'allow' | 'ask' | 'never';
 
@@ -65,7 +92,16 @@ export type SessionRecoveryEvent = AutoRetryPendingEvent | AutoRetryCancelledEve
 
 export type StaffChangedReason = "created" | "updated" | "reassigned" | "deleted";
 
-/** A message waiting in the server-side prompt queue */
+export type DeliveryIntentKind = "prompt" | "steer";
+export type DeliveryTargetTurn = "continuation" | "next-turn";
+export type DeliveryState = "queued" | "dispatching" | "received" | "uncertain" | "failed" | "cancelled";
+
+/**
+ * One accepted user-intent occurrence. `id` is the durable intent identity;
+ * message text is never an identity or settlement key. Delivery fields remain
+ * optional at the wire/persistence boundary solely for legacy clients/rows and
+ * are normalized by PromptQueue before runtime use.
+ */
 export interface QueuedMessage {
 	id: string;
 	text: string;
@@ -73,16 +109,45 @@ export interface QueuedMessage {
 	attachments?: unknown[];
 	isSteered: boolean;
 	createdAt: number;
+	kind?: DeliveryIntentKind;
+	targetTurn?: DeliveryTargetTurn;
+	/** FIFO position within `targetTurn`; sequences from different lanes may overlap. */
+	sequence?: number;
+	deliveryState?: DeliveryState;
+	/** Body-free lifecycle reason, e.g. `continuation-aborted`. */
+	deliveryReason?: string;
+	/** Bounded, redacted delivery failure suitable for an actionable row. */
+	deliveryError?: string;
+	retryable?: boolean;
 	/** Internal prompt provenance; absent on legacy persisted queue rows. */
 	source?: PromptSource;
+	/**
+	 * Explicit lifecycle ownership for prompts admitted by enqueueVerifierPrompt.
+	 * Source remains attribution/UI metadata: legacy source:"verification" rows
+	 * are ordinary durable work unless this flag is true.
+	 */
+	verifierOwned?: boolean;
 	/** Accountable author resolved by the server; absent on legacy rows. */
 	author?: MessageAuthor;
+	/**
+	 * Preserve the SDK delivery semantics across durable queue admission. A
+	 * verifier follow-up must remain a follow-up when drainQueue sends it.
+	 */
+	streamingBehavior?: "steer" | "followUp";
+	/** Wait for a restored agent to accept commands before delivery. */
+	coldStart?: boolean;
 	/**
 	 * When true, this prompt must NOT trigger first-message auto-title
 	 * generation (used for assistant auto-kickoff prompts so naming fires on
 	 * the first genuine user message instead of the kickoff text).
 	 */
 	suppressTitleGen?: boolean;
+}
+
+/** Server projection of one accepted occurrence or its terminal disposition. */
+export interface DeliveryIntentUpdate {
+	intent: QueuedMessage;
+	settlement?: "surfaced" | "failed" | "cancelled";
 }
 
 export interface SessionCostSnapshot {
@@ -116,14 +181,19 @@ export interface ChannelInfo {
 	closeReason?: string;
 }
 
+export interface SessionStreamCapabilities {
+	assistantStreamDelta?: 1;
+}
+
 /** Client → Server messages over WebSocket */
 export type ClientMessage =
 	// `clientKind` is routing/product metadata for connection setup. It is not an
 	// unspoofable browser authority signal; endpoint auth still comes from the bearer
 	// token plus server-side session/surface/capability checks.
-	| { type: "auth"; token: string; clientKind?: "app" | "extension-channel" }
-	| { type: "prompt"; text: string; images?: Array<{ type: "image"; data: string; mimeType: string }>; attachments?: unknown[]; suppressTitleGen?: boolean }
-	| { type: "steer"; text: string }
+	| { type: "auth"; token: string; clientKind?: "app" | "extension-channel"; capabilities?: SessionStreamCapabilities }
+	| { type: "prompt"; text: string; intentId?: string; images?: Array<{ type: "image"; data: string; mimeType: string }>; attachments?: unknown[]; suppressTitleGen?: boolean }
+	| { type: "steer"; text: string; intentId?: string }
+	| { type: "retry_intent"; intentId: string }
 	| { type: "steer_queued"; messageId: string }
 	| { type: "remove_queued"; messageId: string }
 	| { type: "abort" }
@@ -228,7 +298,7 @@ export interface RemoteStateSnapshotMessage {
 
 /** Server → Client messages over WebSocket */
 export type ServerMessage =
-	| { type: "auth_ok"; surfaceTokenKey?: string }
+	| { type: "auth_ok"; surfaceTokenKey?: string; capabilities?: SessionStreamCapabilities }
 	| { type: "ext_surface_token_result"; requestId: string; ok: boolean; token?: string; error?: string }
 	| { type: "ext_channel_open_grant_result"; requestId: string; ok: boolean; openGrant?: string; error?: string }
 	| { type: "ext_channel_result"; requestId: string; ok: boolean; channel?: ChannelInfo; channels?: ChannelInfo[]; error?: string; message?: string; status?: number }
@@ -248,8 +318,10 @@ export type ServerMessage =
 	| { type: "resume_gap"; lastSeq: number }
 	| { type: "client_joined"; clientId: string }
 	| { type: "client_left"; clientId: string }
-	/** A pre-auth gateway state error may include a bounded retry hint. */
-	| { type: "error"; message: string; code: string; retryAfterMs?: number }
+	/** Gateway errors may correlate a prompt/steer occurrence that was rejected
+	 * before durable server admission. The client keeps that local occurrence
+	 * actionable; an uncorrelated error must never settle an outbox row. */
+	| { type: "error"; message: string; code: string; retryAfterMs?: number; intentId?: string; retryable?: boolean }
 	| {
 		type: "session_status";
 		status: "idle" | "streaming" | "aborting" | "preparing" | "archived" | "starting" | "terminated";
@@ -271,14 +343,17 @@ export type ServerMessage =
 	/** Sent to ALL authenticated clients when a visible session is created so
 	 * session navigation can refresh immediately instead of waiting for polling. */
 	| { type: "session_created"; sessionId: string; projectId?: string }
-	/** Broad invalidation fallback for session-list changes. */
-	| { type: "sessions_changed"; projectId?: string }
+	/** Broad invalidation fallback for session-list changes. Optional fields let
+	 * clients patch a known row immediately while retaining refresh authority. */
+	| { type: "sessions_changed"; projectId?: string; sessionId?: string; user_tags?: string[] }
 	/** Sent to ALL authenticated clients when staff records change so staff and session sidebars can invalidate together. */
 	| { type: "staff_changed"; reason: StaffChangedReason; staffId: string; projectId: string; previousProjectId?: string; sessionId?: string }
 	| { type: "session_title"; sessionId: string; title: string }
 	| { type: "pong" }
 	| { type: "cost_update"; sessionId: string; goalId?: string; taskId?: string; cost: SessionCostSnapshot }
 	| { type: "queue_update"; sessionId: string; queue: QueuedMessage[] }
+	| { type: "intent_update"; sessionId: string; intent: QueuedMessage; settlement?: DeliveryIntentUpdate["settlement"] }
+	| { type: "delivery_outbox"; sessionId: string; outbox: QueuedMessage[] }
 	| { type: "side_panel_workspace"; sessionId: string; workspace: SidePanelWorkspace }
 	| { type: "task_changed"; task: unknown }
 	| { type: "tasks_list"; tasks: unknown[] }

@@ -11,7 +11,17 @@ import { redactSensitive } from "../auth/redact.js";
 import { validateToken } from "../auth/token.js";
 import type { SandboxTokenStore } from "../auth/sandbox-token.js";
 import type { ProjectContextManager } from "../agent/project-context-manager.js";
-import type { ChannelInfo, ClientMessage, HostChannelFrame, ServerMessage } from "./protocol.js";
+import {
+	MODEL_SELECTION_RECOVERY_FAILED,
+	MODEL_SELECTION_REQUIRED,
+	isModelSelectionRequiredCondition,
+	modelSelectionRequiredMessage,
+	type ChannelInfo,
+	type ClientMessage,
+	type HostChannelFrame,
+	type ModelSelectionRequiredCondition,
+	type ServerMessage,
+} from "./protocol.js";
 import type { TaskState } from "../agent/task-store.js";
 import { TaskManager } from "../agent/task-manager.js";
 import { resolveSkillExpansions } from "../skills/resolve-skill-expansions.js";
@@ -46,6 +56,7 @@ import {
 	SessionCommandQueueFullError,
 	SessionCommandSerialiser,
 } from "./session-command-serialiser.js";
+import { isSocketSendable } from "./socket-sendability.js";
 
 /**
  * Stamp `_order` on every message in a snapshot for the unified message
@@ -73,58 +84,125 @@ function stampSnapshotOrder(data: unknown): unknown {
 	}
 	return data;
 }
-// patchModelContextWindow removed — live model-state frames now resolve context
-// windows, reasoning, and thinkingLevelMap via resolveModelStateMeta() (registry
-// cache → pi-ai catalog → inferMeta), matching the ModelSelector dropdown.
-
 const isPositiveNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
+const isThinkingLevelMap = (v: unknown): v is Record<string, string | null> => !!v && typeof v === "object" && !Array.isArray(v);
+const isInputModalityList = (v: unknown): v is ("text" | "image")[] => Array.isArray(v)
+	&& v.length > 0
+	&& v.every((entry) => entry === "text" || entry === "image");
+
+type OptionalResolvedModelStateMeta = {
+	contextWindow?: unknown;
+	maxTokens?: unknown;
+	reasoning?: unknown;
+	thinkingLevelMap?: unknown;
+	input?: unknown;
+	source?: string;
+	available?: boolean;
+};
+
+function isExactResolvedMeta(meta: OptionalResolvedModelStateMeta | undefined): meta is OptionalResolvedModelStateMeta {
+	if (!meta || meta.available === false || meta.source === "inferred" || meta.source === "unavailable") return false;
+	return isPositiveNumber(meta.contextWindow)
+		|| isPositiveNumber(meta.maxTokens)
+		|| typeof meta.reasoning === "boolean"
+		|| isThinkingLevelMap(meta.thinkingLevelMap)
+		|| isInputModalityList(meta.input);
+}
 
 /**
- * Build the `state.model` payload for a live/rehydrated frame.
- *
- * Authoritative metadata (registry cache / pi-ai catalog) always wins so stale
- * or incorrect live frames get corrected — e.g. Claude Fable 5's 1M context,
- * `reasoning:true`, and `thinkingLevelMap {..., max:"max"}`.
- *
- * When the resolver only produced INFERRED defaults (custom / aigw / unknown
- * providers that legitimately fall through to `inferMeta`), those defaults must
- * NOT clobber more-accurate live fields already present on `base` (the agent's
- * live `state.model`). Inferred values are used only as a fallback for fields
- * the live frame does not already carry.
+ * Build a `state.model` payload from exact registry metadata when available.
+ * During a temporary registry miss, only a live frame whose provider/id exactly
+ * matches the requested identity may supply capability fields. Missing fields
+ * remain missing; Bobbit does not manufacture defaults from the model name.
  */
 export function buildResolvedModelStateModel(provider: string, id: string, base?: Record<string, unknown>): Record<string, unknown> {
-	const meta = resolveModelStateMeta(provider, id);
+	const resolved = resolveModelStateMeta(provider, id) as OptionalResolvedModelStateMeta | undefined;
+	const matchingLive = base?.provider === provider && base?.id === id ? base : undefined;
+	const source = isExactResolvedMeta(resolved) ? resolved : matchingLive;
 	const model: Record<string, unknown> = {
-		...(base ?? {}),
+		...(matchingLive ?? {}),
 		provider,
 		id,
 	};
-	const inferredFallback = meta.source === "inferred";
 
-	// contextWindow / maxTokens: authoritative overwrites; inferred only fills gaps.
-	model.contextWindow = inferredFallback && isPositiveNumber(base?.contextWindow)
-		? base!.contextWindow
-		: meta.contextWindow;
-	model.maxTokens = inferredFallback && isPositiveNumber(base?.maxTokens)
-		? base!.maxTokens
-		: meta.maxTokens;
+	if (isPositiveNumber(source?.contextWindow)) model.contextWindow = source.contextWindow;
+	else delete model.contextWindow;
+	if (isPositiveNumber(source?.maxTokens)) model.maxTokens = source.maxTokens;
+	else delete model.maxTokens;
+	if (typeof source?.reasoning === "boolean") model.reasoning = source.reasoning;
+	else delete model.reasoning;
+	if (isThinkingLevelMap(source?.thinkingLevelMap)) model.thinkingLevelMap = source.thinkingLevelMap;
+	else delete model.thinkingLevelMap;
+	if (isInputModalityList(source?.input)) model.input = source.input;
+	else delete model.input;
 
-	// reasoning: authoritative overwrites; inferred keeps a live boolean when present.
-	model.reasoning = inferredFallback && typeof base?.reasoning === "boolean"
-		? base!.reasoning
-		: meta.reasoning;
-
-	// thinkingLevelMap: authoritative source is the sole owner. On inferred
-	// fallback keep a live map when present (else drop it so the client applies
-	// its family heuristic).
-	if (meta.thinkingLevelMap) {
-		model.thinkingLevelMap = meta.thinkingLevelMap;
-	} else if (inferredFallback && base?.thinkingLevelMap && typeof base.thinkingLevelMap === "object") {
-		model.thinkingLevelMap = base.thinkingLevelMap;
-	} else {
-		delete model.thinkingLevelMap;
-	}
 	return model;
+}
+
+type ReliableIntentClientMessage =
+	| ClientMessage
+	| { type: "prompt"; text: string; intentId?: string; images?: Array<{ type: "image"; data: string; mimeType: string }>; attachments?: unknown[]; suppressTitleGen?: boolean }
+	| { type: "steer"; text: string; intentId?: string }
+	| { type: "retry_intent"; intentId: string };
+
+type ModelSelectionRecoveryManager = SessionManager & {
+	recoverModelSelectionRequired(
+		sessionId: string,
+		provider: string,
+		modelId: string,
+		thinkingLevel?: string,
+	): Promise<unknown>;
+	getModelSelectionRecoveryAdmission?(sessionId: string): {
+		condition?: ModelSelectionRequiredCondition;
+		activationInProgress: boolean;
+	};
+	/** Reliable-turn APIs are implemented by SessionManager; kept optional here so
+	 * this transport remains rolling-upgrade compatible with restored sessions. */
+	retryIntent?(sessionId: string, intentId: string): Promise<unknown> | unknown;
+};
+
+function acceptedIntentId(msg: unknown): string {
+	const intentId = (msg as { intentId?: unknown } | null)?.intentId;
+	return typeof intentId === "string" && intentId.length > 0 && intentId.length <= 256
+		? intentId
+		: randomUUID();
+}
+
+/** Return only a client-supplied, already validated occurrence identity. */
+function rejectionIntentId(msg: unknown): string | undefined {
+	const candidate = msg as { type?: unknown; intentId?: unknown } | null;
+	if (candidate?.type !== "prompt" && candidate?.type !== "steer") return undefined;
+	return typeof candidate.intentId === "string" && candidate.intentId.length > 0 && candidate.intentId.length <= 256
+		? candidate.intentId
+		: undefined;
+}
+
+function intentProjection(
+	sessionManager: SessionManager,
+	sessionId: string,
+	intentId: string,
+): Record<string, unknown> | undefined {
+	const project = (sessionManager as any).projectDeliveryOutbox;
+	if (typeof project !== "function") return undefined;
+	return project.call(sessionManager, sessionId)
+		.find((row: { id: string }) => row.id === intentId) as unknown as Record<string, unknown> | undefined;
+}
+
+function sessionModelSelectionRequired(
+	session: unknown,
+): ModelSelectionRequiredCondition | undefined {
+	const condition = (session as { condition?: unknown } | null | undefined)?.condition;
+	return isModelSelectionRequiredCondition(condition) ? condition : undefined;
+}
+
+function modelSelectionRecoveryAdmission(
+	sessionManager: SessionManager,
+	sessionId: string,
+	session: unknown,
+): { condition?: ModelSelectionRequiredCondition; activationInProgress: boolean } {
+	const query = (sessionManager as ModelSelectionRecoveryManager).getModelSelectionRecoveryAdmission;
+	if (typeof query === "function") return query.call(sessionManager, sessionId);
+	return { condition: sessionModelSelectionRequired(session), activationInProgress: false };
 }
 
 function normalizeStateModelSnapshot(
@@ -148,7 +226,9 @@ function normalizeStateModelSnapshot(
 /** Send persisted model info as fallback when getState() is unavailable. */
 function sendFallbackModelState(ws: WebSocket, sessionManager: SessionManager, sessionId: string): void {
 	const persisted = sessionManager.getPersistedSession(sessionId);
-	const data: Record<string, unknown> = {};
+	const session = sessionManager.getSession(sessionId);
+	const condition = modelSelectionRecoveryAdmission(sessionManager, sessionId, session).condition;
+	const data: Record<string, unknown> = { condition: condition ?? null };
 	if (persisted?.modelProvider && persisted?.modelId) {
 		data.model = buildResolvedModelStateModel(persisted.modelProvider, persisted.modelId);
 		if (persisted.effectiveThinkingLevel !== undefined) {
@@ -224,6 +304,12 @@ function sendLiveStateSnapshot(
 		normalized = { ...normalized, thinkingLevel: persisted.effectiveThinkingLevel };
 	}
 
+	const condition = modelSelectionRecoveryAdmission(
+		sessionManager,
+		sessionId,
+		sessionManager.getSession(sessionId),
+	).condition;
+	normalized = { ...normalized, condition: condition ?? null };
 	sendStateWithCost(ws, sessionManager, sessionId, normalized);
 	sendImageModelState(ws, sessionManager, sessionId);
 	if (!hadLiveModel && !rebuiltFromDurableTuple) sendFallbackModelState(ws, sessionManager, sessionId);
@@ -326,7 +412,7 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 	if (!cpuDiagnosticsEnabled()) {
 		const data = JSON.stringify(msg);
 		for (const client of clients) {
-			if (client.readyState === 1) {
+			if (isSocketSendable(client)) {
 				client.send(data);
 			}
 		}
@@ -342,7 +428,7 @@ function broadcast(clients: Set<WebSocket>, msg: ServerMessage): void {
 	let skipped = 0;
 	for (const client of clients) {
 		scanned++;
-		if (client.readyState === 1) {
+		if (isSocketSendable(client)) {
 			client.send(data);
 			recipients++;
 		} else {
@@ -393,13 +479,20 @@ function replayManualRetryRequiredOnAttach(
 }
 
 function send(ws: WebSocket, msg: ServerMessage): void {
-	if (ws.readyState === 1) {
-		ws.send(JSON.stringify(msg));
+	if (!isSocketSendable(ws)) return;
+	ws.send(JSON.stringify(msg));
+	if (msg.type === "messages" && (ws as any).assistantStreamDeltaCapable === true) {
+		(ws as any).assistantStreamDeltaNeedsBaseline = true;
 	}
 }
 
 function sendAsync(ws: WebSocket, msg: ServerMessage): Promise<void> {
-	if (ws.readyState !== 1) return Promise.reject(new Error("websocket is not open"));
+	if (!isSocketSendable(ws)) {
+		const reason = (ws as any).streamBackpressureCutover === true
+			? "websocket was cut over for stream backpressure"
+			: "websocket is not open";
+		return Promise.reject(new Error(reason));
+	}
 	return new Promise((resolve, reject) => {
 		ws.send(JSON.stringify(msg), (err) => {
 			if (err) reject(err);
@@ -416,7 +509,7 @@ function getViewerGoalIds(ws: WebSocket): Set<string> {
 	return next;
 }
 
-function handleViewerMessage(ws: WebSocket, msg: ClientMessage): void {
+function handleViewerMessage(ws: WebSocket, msg: ReliableIntentClientMessage): void {
 	const viewerMsg = msg as unknown as { type?: string; goalId?: unknown };
 	if (viewerMsg.type === "subscribe_goal") {
 		if (typeof viewerMsg.goalId === "string" && viewerMsg.goalId.trim()) {
@@ -482,6 +575,7 @@ const EXTENSION_CHANNEL_WS_ENVELOPE_TOO_LARGE_MESSAGE = `Extension channel frame
 const SESSION_WORK_MESSAGE_TYPES = [
 	"prompt",
 	"steer",
+	"retry_intent",
 	"steer_queued",
 	"remove_queued",
 	"reorder_queue",
@@ -500,15 +594,15 @@ const SESSION_WORK_MESSAGE_TYPES = [
 	"grant_tool_permission",
 	"ext_session_write_permit",
 	"ext_session_post",
-] as const satisfies readonly ClientMessage["type"][];
+] as const satisfies readonly ReliableIntentClientMessage["type"][];
 
-type SessionWorkMessage = Extract<ClientMessage, {
+type SessionWorkMessage = Extract<ReliableIntentClientMessage, {
 	type: typeof SESSION_WORK_MESSAGE_TYPES[number];
 }>;
 
-const SESSION_WORK_MESSAGE_TYPE_SET: ReadonlySet<ClientMessage["type"]> = new Set(SESSION_WORK_MESSAGE_TYPES);
+const SESSION_WORK_MESSAGE_TYPE_SET: ReadonlySet<ReliableIntentClientMessage["type"]> = new Set(SESSION_WORK_MESSAGE_TYPES);
 
-function isSessionWorkMessage(msg: ClientMessage): msg is SessionWorkMessage {
+function isSessionWorkMessage(msg: ReliableIntentClientMessage): msg is SessionWorkMessage {
 	return SESSION_WORK_MESSAGE_TYPE_SET.has(msg.type);
 }
 
@@ -530,7 +624,13 @@ function sendSessionWorkPolicyError(
 		send(ws, { type: "ext_session_post_result", requestId, ok: false, error: code });
 		return;
 	}
-	send(ws, { type: "error", message, code });
+	const intentId = rejectionIntentId(msg);
+	send(ws, {
+		type: "error",
+		message,
+		code,
+		...(intentId ? { intentId, retryable: true } : {}),
+	});
 }
 
 /**
@@ -678,11 +778,92 @@ export function handleWebSocketConnection(
 	let surfaceTokenAuthorityKey: string | undefined;
 	const attachedExtChannels = new Map<string, { sessionId: string; packId: string }>();
 
-	const sendCommandFailure = (err: unknown): void => {
+	const sendIntentRejection = (
+		msg: ReliableIntentClientMessage,
+		message: string,
+		code: string,
+		retryable = true,
+	): void => {
+		const intentId = rejectionIntentId(msg);
+		send(ws, {
+			type: "error",
+			message,
+			code,
+			...(intentId ? { intentId, retryable } : {}),
+		});
+	};
+
+	const sendCommandFailure = (err: unknown, msg?: ReliableIntentClientMessage): void => {
+		if (msg) {
+			sendIntentRejection(msg, String(err), "COMMAND_ERROR");
+			return;
+		}
 		send(ws, { type: "error", message: String(err), code: "COMMAND_ERROR" });
 	};
 
-	const rejectInvalidPromptText = (msg: ClientMessage): boolean => {
+	const sendIntentUpdate = (
+		intent: Record<string, unknown>,
+		settlement?: "surfaced" | "failed" | "cancelled",
+	): void => {
+		send(ws, {
+			type: "intent_update",
+			sessionId,
+			intent,
+			...(settlement ? { settlement } : {}),
+		} as unknown as ServerMessage);
+	};
+
+	const launchAcceptedDelivery = (
+		intentId: string,
+		delivery: Promise<unknown> | unknown,
+	): void => {
+		// SessionManager admission is synchronous up to its first await: by this
+		// point the exact occurrence is persisted and projected, while Pi delivery
+		// continues independently. A duplicate frame resolves to the same row.
+		const accepted = intentProjection(sessionManager, sessionId, intentId);
+		let receiptSent = false;
+		if (accepted) {
+			sendIntentUpdate(accepted);
+			receiptSent = true;
+		}
+		void Promise.resolve(delivery).then(() => {
+			// Cold restore/replacement admission may cross an await before persistence.
+			// Emit its receipt when the authoritative manager finally exposes the row.
+			if (receiptSent) return;
+			const admitted = intentProjection(sessionManager, sessionId, intentId);
+			if (admitted) {
+				sendIntentUpdate(admitted);
+				return;
+			}
+			// A delayed duplicate may arrive after the occurrence was surfaced or
+			// explicitly dismissed. Return its durable body-free disposition so the
+			// originating tab clears its pre-acceptance spool without resurrection.
+			const settlement = sessionManager.intentSettlement(sessionId, intentId);
+			if (settlement) {
+				sendIntentUpdate({
+					id: intentId,
+					deliveryState: settlement === "cancelled" ? "cancelled" : "received",
+					deliveryReason: settlement === "cancelled" ? "dismissed" : "already-settled",
+				}, settlement);
+			}
+		}, (error) => {
+			const failed = intentProjection(sessionManager, sessionId, intentId);
+			if (failed) sendIntentUpdate(failed, failed.deliveryState === "failed" ? "failed" : undefined);
+			console.warn(`[ws-handler] intent delivery did not settle session=${sessionId} intent=${intentId} outcome=${failed?.deliveryState ?? "retained"}`);
+			void error;
+		});
+	};
+
+	const rejectInvalidIntentId = (msg: ReliableIntentClientMessage): boolean => {
+		if (msg.type !== "prompt" && msg.type !== "steer" && msg.type !== "retry_intent") return false;
+		const intentId = (msg as { intentId?: unknown }).intentId;
+		if (intentId === undefined && msg.type !== "retry_intent") return false;
+		if (typeof intentId === "string" && intentId.length > 0 && intentId.length <= 256) return false;
+		send(ws, { type: "error", message: "Intent ID must be a non-empty string of at most 256 characters", code: "INVALID_INTENT_ID" });
+		return true;
+	};
+
+	const rejectInvalidPromptText = (msg: ReliableIntentClientMessage): boolean => {
 		if (msg.type !== "prompt" && msg.type !== "steer" && msg.type !== "ext_session_post") {
 			return false;
 		}
@@ -699,7 +880,7 @@ export function handleWebSocketConnection(
 			const requestId = typeof msg.requestId === "string" ? msg.requestId : "";
 			send(ws, { type: "ext_session_post_result", requestId, ok: false, error: code });
 		} else {
-			send(ws, { type: "error", message, code });
+			sendIntentRejection(msg, message, code);
 		}
 		return true;
 	};
@@ -738,7 +919,7 @@ export function handleWebSocketConnection(
 		}
 	}, 5000);
 
-	const handleMessage = async (msg: ClientMessage, frameBytes: number, commandSignal?: AbortSignal): Promise<void> => {
+	const handleMessage = async (msg: ReliableIntentClientMessage, frameBytes: number, commandSignal?: AbortSignal): Promise<void> => {
 		// First message must be auth
 		if (!authenticated) {
 			if (msg.type !== "auth") {
@@ -782,6 +963,11 @@ export function handleWebSocketConnection(
 			(ws as any).authenticated = true;
 			(ws as PrincipalTaggedWebSocket).authPrincipal = authPrincipal;
 
+			const authMsg = msg as Extract<ClientMessage, { type: "auth" }>;
+			const assistantStreamDeltaCapable = authMsg.capabilities?.assistantStreamDelta === 1;
+			(ws as any).assistantStreamDeltaCapable = assistantStreamDeltaCapable;
+			(ws as any).assistantStreamDeltaNeedsBaseline = assistantStreamDeltaCapable;
+
 			// Viewer-only connection (no session) — used by goal dashboard for live events
 			if (sessionId === "__viewer__") {
 				(ws as any).isViewer = true;
@@ -790,7 +976,7 @@ export function handleWebSocketConnection(
 				if (typeof initialGoalId === "string" && initialGoalId.trim()) {
 					getViewerGoalIds(ws).add(initialGoalId);
 				}
-				send(ws, { type: "auth_ok" });
+				send(ws, { type: "auth_ok", ...(assistantStreamDeltaCapable ? { capabilities: { assistantStreamDelta: 1 as const } } : {}) });
 				// Do NOT set (ws as any).sessionId — goal broadcasts identify viewer sockets explicitly.
 				// Viewer sockets are read-only except for explicit goal subscription messages.
 				return;
@@ -803,7 +989,7 @@ export function handleWebSocketConnection(
 				if (archived) {
 					(ws as any).sessionId = sessionId;
 					(ws as any).isArchived = true;
-					send(ws, { type: "auth_ok" });
+					send(ws, { type: "auth_ok", ...(assistantStreamDeltaCapable ? { capabilities: { assistantStreamDelta: 1 as const } } : {}) });
 					sendSessionCostUpdate(ws, sessionManager, sessionId);
 					send(ws, { type: "session_status", status: "archived", statusVersion: 0, archivedAt: archived.archivedAt });
 					send(ws, { type: "session_title", sessionId, title: archived.title });
@@ -832,7 +1018,6 @@ export function handleWebSocketConnection(
 			// security boundary against same-origin code that already has the bearer token.
 			// Authority is per app connection, not singleton per session, so multiple tabs
 			// can each mint scoped pack surface tokens without stealing lifecycle state.
-			const authMsg = msg as Extract<ClientMessage, { type: "auth" }>;
 			if (authMsg.clientKind === "app") {
 				surfaceTokenAuthorityKey = randomUUID();
 			}
@@ -842,7 +1027,11 @@ export function handleWebSocketConnection(
 			// session binding, surface-token resolution, and one-time content-bound permits
 			// are the authorization/provenance checks; the WS client kind is not a durable
 			// same-origin security boundary.
-			send(ws, { type: "auth_ok", ...(surfaceTokenAuthorityKey ? { surfaceTokenKey: surfaceTokenAuthorityKey } : {}) });
+			send(ws, {
+				type: "auth_ok",
+				...(surfaceTokenAuthorityKey ? { surfaceTokenKey: surfaceTokenAuthorityKey } : {}),
+				...(assistantStreamDeltaCapable ? { capabilities: { assistantStreamDelta: 1 as const } } : {}),
+			});
 			sendSessionCostUpdate(ws, sessionManager, sessionId);
 
 			// Notify about compaction immediately (before any awaits) so the
@@ -867,14 +1056,28 @@ export function handleWebSocketConnection(
 			const joinMsg: ServerMessage = { type: "client_joined", clientId };
 			const joinData = JSON.stringify(joinMsg);
 			for (const client of session.clients) {
-				if (client !== ws && client.readyState === 1) {
+				if (client !== ws && isSocketSendable(client)) {
 					client.send(joinData);
 				}
 			}
 
 			send(ws, { type: "session_status", status: session.status, statusVersion: session.statusVersion ?? 0, ...(session.streamingStartedAt ? { streamingStartedAt: session.streamingStartedAt } : {}) });
 			send(ws, { type: "session_title", sessionId, title: session.title });
-			send(ws, { type: "queue_update", sessionId, queue: session.promptQueue.toArray() });
+			const deliveryOutbox = typeof (sessionManager as any).projectDeliveryOutbox === "function"
+				? sessionManager.projectDeliveryOutbox(sessionId)
+				: session.promptQueue?.toArray?.() ?? [];
+			send(ws, { type: "queue_update", sessionId, queue: deliveryOutbox } as unknown as ServerMessage);
+			send(ws, { type: "delivery_outbox", sessionId, outbox: deliveryOutbox } as unknown as ServerMessage);
+			const cancelledIntentIds = typeof (sessionManager as any).cancelledIntentIds === "function"
+				? sessionManager.cancelledIntentIds(sessionId)
+				: [];
+			for (const intentId of cancelledIntentIds) {
+				sendIntentUpdate({
+					id: intentId,
+					deliveryState: "cancelled",
+					deliveryReason: "dismissed",
+				}, "cancelled");
+			}
 			replayManualRetryRequiredOnAttach(ws, session);
 
 			// Rehydrate any on-disk proposal drafts for this session so the
@@ -950,7 +1153,7 @@ export function handleWebSocketConnection(
 					send(ws, { type: "pong" });
 					break;
 				default:
-					send(ws, { type: "error", message: "This session is archived (read-only)", code: "SESSION_ARCHIVED" });
+					sendIntentRejection(msg, "This session is archived (read-only)", "SESSION_ARCHIVED");
 			}
 			return;
 		}
@@ -958,7 +1161,7 @@ export function handleWebSocketConnection(
 		// Authenticated — route commands to agent
 		const session = sessionManager.getSession(sessionId);
 		if (!session) {
-			send(ws, { type: "error", message: "Session not found", code: "SESSION_NOT_FOUND" });
+			sendIntentRejection(msg, "Session not found", "SESSION_NOT_FOUND");
 			return;
 		}
 
@@ -1005,7 +1208,7 @@ export function handleWebSocketConnection(
 					// ext_surface_token_result that never arrives.
 					break;
 				default:
-					send(ws, { type: "error", message: "Session is still being set up", code: "SESSION_PREPARING" });
+					sendIntentRejection(msg, "Session is still being set up", "SESSION_PREPARING");
 					return;
 			}
 		}
@@ -1057,6 +1260,34 @@ export function handleWebSocketConnection(
 					break;
 				}
 				case "prompt": {
+					const intentId = acceptedIntentId(msg);
+					let preprocessingCancellationSent = false;
+					const rejectCancelledPreprocessing = (): void => {
+						if (preprocessingCancellationSent) return;
+						preprocessingCancellationSent = true;
+						sendIntentRejection(
+							msg,
+							"Message preparation was cancelled by Stop. Retry when you are ready.",
+							"INTENT_PREPARATION_CANCELLED",
+						);
+					};
+					const existingIntent = intentProjection(sessionManager, sessionId, intentId);
+					if (existingIntent) {
+						sendIntentUpdate(existingIntent);
+						break;
+					}
+					// Fence unavailable-model capsules before mention/skill/attachment
+					// preprocessing or SessionManager's authoritative acceptance boundary.
+					const modelSelectionCondition = modelSelectionRecoveryAdmission(sessionManager, sessionId, session).condition;
+					if (modelSelectionCondition) {
+						sendIntentRejection(
+							msg,
+							modelSelectionRequiredMessage(modelSelectionCondition),
+							MODEL_SELECTION_REQUIRED,
+						);
+						return;
+					}
+
 					// The prompt text is rendered in the UI transcript — debug-only here.
 					if (process.env.BOBBIT_DEBUG) console.log(`[ws-handler] Prompt received: text="${msg.text?.substring(0, 50)}...", images=${msg.images?.length ?? 0}`);
 
@@ -1070,14 +1301,20 @@ export function handleWebSocketConnection(
 						// @ts-ignore — public signal options land in the resolver sibling change.
 						await preflightFileMentionAdmission(msg.text, fileMentionCwd, { signal: commandSignal });
 					} catch (error) {
-						if (commandSignal?.aborted) return;
+						if (commandSignal?.aborted) {
+							rejectCancelledPreprocessing();
+							return;
+						}
 						if (error instanceof FileMentionBudgetError) {
-							send(ws, { type: "error", message: error.message, code: error.code });
+							sendIntentRejection(msg, error.message, error.code);
 							return;
 						}
 						throw error;
 					}
-					if (commandSignal?.aborted) return;
+					if (commandSignal?.aborted) {
+						rejectCancelledPreprocessing();
+						return;
+					}
 
 					// Resolve per-project config store and host-side cwd for skill lookup.
 					// For sandbox sessions, session.cwd is a container-internal path
@@ -1140,14 +1377,20 @@ export function handleWebSocketConnection(
 					// worktreePath is required to reach the real files.
 					// @ts-ignore — public signal options land in the resolver sibling change.
 					const fileMentionResult = await resolveFileMentions(msg.text, fileMentionCwd, { signal: commandSignal }).catch((error: unknown) => {
-						if (commandSignal?.aborted) return undefined;
+						if (commandSignal?.aborted) {
+							rejectCancelledPreprocessing();
+							return undefined;
+						}
 						if (error instanceof FileMentionBudgetError) {
-							send(ws, { type: "error", message: error.message, code: error.code });
+							sendIntentRejection(msg, error.message, error.code);
 							return undefined;
 						}
 						throw error;
 					});
-					if (!fileMentionResult || commandSignal?.aborted) return;
+					if (!fileMentionResult || commandSignal?.aborted) {
+						if (commandSignal?.aborted) rejectCancelledPreprocessing();
+						return;
+					}
 					for (const w of fileMentionResult.warnings) {
 						console.warn(`[ws-handler] File mention ${w} (session ${sessionId}, cwd=${fileMentionCwd})`);
 					}
@@ -1197,8 +1440,11 @@ export function handleWebSocketConnection(
 						? fileMentionResult.mentions.map(toWireMention)
 						: undefined;
 
-					if (commandSignal?.aborted) return;
-					await sessionManager.enqueuePrompt(sessionId, originalText, {
+					if (commandSignal?.aborted) {
+						rejectCancelledPreprocessing();
+						return;
+					}
+					const delivery = (sessionManager.enqueuePrompt as any)(sessionId, originalText, {
 						images: sendImages.length ? sendImages : undefined,
 						attachments: sendAttachments.length ? sendAttachments : undefined,
 						skillExpansions: expansions.length ? expansions : undefined,
@@ -1209,30 +1455,66 @@ export function handleWebSocketConnection(
 						author: LOCAL_USER_AUTHOR,
 						// Assistant auto-kickoff prompts opt out of first-message title-gen.
 						suppressTitleGen: msg.suppressTitleGen === true,
+						intentId,
 					});
+					launchAcceptedDelivery(intentId, delivery);
 					break;
 				}
-				case "steer":
-					// Live steer: if agent is streaming, send directly via RPC
-					// (real-time interrupt, bypasses queue intentionally).
-					// Otherwise enqueue as a steered message and drain if idle.
-					if (session.status === "streaming") {
-						// The live-steer boundary defaults to Bobbit's trusted local-user identity;
-						// keep the transport call shape compatible with the low-latency WS path.
-						await sessionManager.deliverLiveSteer(sessionId, msg.text);
-					} else {
-						await sessionManager.enqueuePrompt(sessionId, msg.text, {
+				case "steer": {
+					const intentId = acceptedIntentId(msg);
+					const existingIntent = intentProjection(sessionManager, sessionId, intentId);
+					if (existingIntent) {
+						sendIntentUpdate(existingIntent);
+						break;
+					}
+					const modelSelectionCondition = modelSelectionRecoveryAdmission(sessionManager, sessionId, session).condition;
+					if (modelSelectionCondition) {
+						sendIntentRejection(
+							msg,
+							modelSelectionRequiredMessage(modelSelectionCondition),
+							MODEL_SELECTION_REQUIRED,
+						);
+						break;
+					}
+					// Admission always lands in SessionManager's durable outbox before its
+					// asynchronous Pi delivery. Compaction is an active turn, so a steer
+					// submitted during automatic compaction retains continuation targeting.
+					const delivery = session.status === "streaming" || session.isCompacting
+						? (sessionManager.deliverLiveSteer as any)(sessionId, msg.text, {
+							source: "user",
+							author: LOCAL_USER_AUTHOR,
+							intentId,
+						})
+						: (sessionManager.enqueuePrompt as any)(sessionId, msg.text, {
 							isSteered: true,
 							source: "user",
 							author: LOCAL_USER_AUTHOR,
+							intentId,
 						});
-					}
+					launchAcceptedDelivery(intentId, delivery);
 					break;
+				}
+				case "retry_intent": {
+					const manager = sessionManager as ModelSelectionRecoveryManager;
+					if (!manager.retryIntent) {
+						send(ws, { type: "error", message: "Intent retry is unavailable", code: "INTENT_RETRY_UNAVAILABLE" });
+						break;
+					}
+					const retry = manager.retryIntent(sessionId, msg.intentId);
+					if (retry === false && !intentProjection(sessionManager, sessionId, msg.intentId)) {
+						send(ws, { type: "error", message: "Intent is unknown or not retryable", code: "INTENT_NOT_RETRYABLE" });
+						break;
+					}
+					launchAcceptedDelivery(msg.intentId, retry);
+					break;
+				}
 				case "steer_queued":
 					sessionManager.steerQueued(sessionId, msg.messageId);
 					break;
 				case "remove_queued":
-					sessionManager.removeQueued(sessionId, msg.messageId);
+					if (!sessionManager.removeQueued(sessionId, msg.messageId)) {
+						send(ws, { type: "error", message: "Intent could not be dismissed", code: "INTENT_DISMISS_FAILED" });
+					}
 					break;
 				case "reorder_queue":
 					sessionManager.reorderQueue(sessionId, msg.messageIds);
@@ -1273,16 +1555,55 @@ export function handleWebSocketConnection(
 					}
 					break;
 				}
-				case "retry":
+				case "retry": {
+					const modelSelectionCondition = modelSelectionRecoveryAdmission(sessionManager, sessionId, session).condition;
+					if (modelSelectionCondition) {
+						send(ws, { type: "error", message: modelSelectionRequiredMessage(modelSelectionCondition), code: MODEL_SELECTION_REQUIRED });
+						break;
+					}
 					try {
 						await sessionManager.retryLastPrompt(sessionId);
 					} catch (err) {
 						send(ws, { type: "error", message: `Retry failed: ${err}`, code: "RETRY_ERROR" });
 					}
 					break;
-				case "set_model":
+				}
+				case "set_model": {
+					const combined = msg as typeof msg & { thinkingLevel?: string };
+					const recoveryAdmission = modelSelectionRecoveryAdmission(sessionManager, sessionId, session);
+					if (recoveryAdmission.activationInProgress) {
+						send(ws, {
+							type: "error",
+							message: "Replacement model activation is already in progress. Wait for it to finish before choosing another model.",
+							code: MODEL_SELECTION_RECOVERY_FAILED,
+						});
+						break;
+					}
+					const modelSelectionCondition = recoveryAdmission.condition;
+					if (modelSelectionCondition) {
+						try {
+							await (sessionManager as ModelSelectionRecoveryManager).recoverModelSelectionRequired(
+								sessionId,
+								msg.provider,
+								msg.modelId,
+								combined.thinkingLevel,
+							);
+						} catch (err: any) {
+							const safeError = redactSensitive(String(err?.message || err));
+							console.error(`[ws-handler] replacement model activation failed for session ${session.id} (${msg.provider}/${msg.modelId}):`, safeError);
+							const retryable = err?.retryable !== false;
+							send(ws, {
+								type: "error",
+								message: retryable
+									? `Failed to activate the replacement model. Choose another available model or retry: ${safeError}`
+									: safeError,
+								code: MODEL_SELECTION_RECOVERY_FAILED,
+							});
+						}
+						break;
+					}
+
 					try {
-						const combined = msg as typeof msg & { thinkingLevel?: string };
 						await applyRuntimeSessionModelSelection(
 							sessionManager,
 							session,
@@ -1300,6 +1621,7 @@ export function handleWebSocketConnection(
 						send(ws, { type: "error", message: `Failed to switch model: ${safeError}`, code: "SET_MODEL_FAILED" });
 					}
 					break;
+				}
 				case "set_image_model": {
 					const provider = typeof msg.provider === "string" ? msg.provider : "";
 					const modelId = typeof msg.modelId === "string" ? msg.modelId : "";
@@ -1318,8 +1640,17 @@ export function handleWebSocketConnection(
 					break;
 				}
 				case "set_thinking_level": {
+					const recoveryAdmission = modelSelectionRecoveryAdmission(sessionManager, sessionId, session);
+					if (recoveryAdmission.condition) {
+						send(ws, { type: "error", message: modelSelectionRequiredMessage(recoveryAdmission.condition), code: MODEL_SELECTION_REQUIRED });
+						break;
+					}
+					if (recoveryAdmission.activationInProgress) {
+						send(ws, { type: "error", message: "Replacement model activation is already in progress.", code: MODEL_SELECTION_RECOVERY_FAILED });
+						break;
+					}
 					try {
-						await applyRuntimeSessionThinkingSelection(sessionManager, session, msg.level, broadcast);
+						await applyRuntimeSessionThinkingSelection(sessionManager, session, msg.level, broadcast, preferencesStore);
 					} catch (err: any) {
 						const safeError = redactSensitive(String(err?.message || err));
 						console.error(`[ws-handler] set_thinking_level failed for session ${session.id} (${msg.level}):`, safeError);
@@ -1332,6 +1663,10 @@ export function handleWebSocketConnection(
 					break;
 				}
 				case "compact": {
+					if (session.isCompacting || session.status === "aborting") {
+						send(ws, { type: "error", message: "Compaction is already active or the turn is stopping", code: "COMPACTION_ACTIVE" });
+						break;
+					}
 					// Fire-and-forget: don't block the WS message loop.
 					//
 					// pi-coding-agent 0.74.0+ emits its OWN `compaction_start` and
@@ -1346,13 +1681,18 @@ export function handleWebSocketConnection(
 					// card to "complete" twice and (because the agent's lands
 					// before this handler finishes) showing the finished render
 					// during the still-in-flight compaction. So we DO NOT
-					// broadcast wrapper events here — we only need to:
-					//   1. Flip `session.isCompacting` so server-side state matches.
-					//   2. Append the manual sidecar row (session-manager skips
-					//      manual on its own compaction_end branch).
+					// broadcast wrapper events here. We mark admission compacting before
+					// the RPC and delegate every clear/release outcome to SessionManager's
+					// idempotent finisher. This handler retains only the legacy sidecar
+					// fallback for runtimes that omit the manual compaction_end payload.
 					const startedAtMs = Date.now();
 					const compactionId = makeCompactionId(startedAtMs);
 					session.isCompacting = true;
+					// Fence admission synchronously, before Pi can emit compaction_start.
+					// SessionManager uses this reason to target manual-compaction steers
+					// at the next turn rather than the interrupted continuation lane.
+					(session as any)._reliableCompactionId = compactionId;
+					(session as any)._reliableCompactionReason = "manual";
 					// Stash the shared compactionId on the session BEFORE awaiting the
 					// RPC so session-manager's manual `compaction_end` branch can stamp
 					// the broadcast event with it. That lets the client's live
@@ -1360,26 +1700,44 @@ export function handleWebSocketConnection(
 					// same session (it polls the sidecar, written below once the RPC
 					// resolves).
 					(session as any)._manualCompactionId = compactionId;
+					const compactionRpcClient = session.rpcClient;
+					(session as any)._manualCompactionRpcClient = compactionRpcClient;
+					(session as any)._manualCompactionBaselinePromise = typeof compactionRpcClient.getTranscriptEntries === "function"
+						? compactionRpcClient.getTranscriptEntries()
+							.then((response: any) => response?.success ? response.data : undefined)
+							.catch(() => undefined)
+						: Promise.resolve(undefined);
 					(async () => {
 						try {
 							console.log(`[ws-handler] Starting manual compact for session ${sessionId}`);
-							const compactResult = await session.rpcClient.compact(120_000);
+							const compactResult = await compactionRpcClient.compact(120_000);
 							console.log(`[ws-handler] Compact RPC resolved for session ${sessionId}`);
 							const endedAtMs = Date.now();
-							session.isCompacting = false;
-							// session-manager's manual `compaction_end` branch writes
-							// the SUCCESS sidecar row synchronously BEFORE its
-							// refreshAfterCompaction() so the post-compaction snapshot
-							// carries the orphan-boundary anchor (otherwise the live
-							// card stays positive-ordered and sorts after the preserved
-							// tail). The agent emits that event before this RPC promise
-							// resolves, so by here the row is already persisted. Skip our
-							// own success append to avoid a duplicate sidecar line. We
-							// only write here as a fallback when session-manager did NOT
+							const finalization = (session as any)._compactionFinalization as Promise<void> | undefined;
+							if (finalization) await finalization;
+							const finishCompaction = (sessionManager as any).finishCompactionAndRelease as
+								| ((target: typeof session, id: string, opts?: { reason?: string }) => Promise<unknown> | unknown)
+								| undefined;
+							if (finishCompaction) {
+								await finishCompaction.call(sessionManager, session, compactionId, { reason: "manual" });
+							} else {
+								// Fail closed: no competing handler-owned clear/drain boundary.
+								console.error(`[ws-handler] compaction finisher unavailable session=${sessionId} compaction=${compactionId}`);
+							}
+							if (sessionManager.getSession(sessionId) !== session || session.rpcClient !== compactionRpcClient) return;
+							// session-manager's manual `compaction_end` branch owns the
+							// authoritative Pi lookup and sidecar append before its
+							// refreshAfterCompaction(). Await that finalization above so
+							// the snapshot sees the orphan-boundary anchor and this handler
+							// cannot race a duplicate fallback append. We only write here
+							// when session-manager did NOT
 							// (e.g. the agent emitted no successful manual compaction_end
 							// with a result payload).
 							const alreadyWritten = (session as any)._manualSidecarWritten === compactionId;
 							(session as any)._manualSidecarWritten = undefined;
+							(session as any)._manualCompactionId = undefined;
+							(session as any)._manualCompactionRpcClient = undefined;
+							(session as any)._manualCompactionBaselinePromise = undefined;
 							if (!alreadyWritten) {
 								const tokensBefore = compactResult?.data?.tokensBefore ?? null;
 								const firstKeptEntryId = compactResult?.data?.firstKeptEntryId ?? null;
@@ -1400,7 +1758,18 @@ export function handleWebSocketConnection(
 						} catch (err: any) {
 							console.error(`[ws-handler] Compact failed for session ${sessionId}:`, err.message);
 							const endedAtMs = Date.now();
-							session.isCompacting = false;
+							const finishCompaction = (sessionManager as any).finishCompactionAndRelease as
+								| ((target: typeof session, id: string, opts?: { reason?: string }) => Promise<unknown> | unknown)
+								| undefined;
+							if (finishCompaction) {
+								await finishCompaction.call(sessionManager, session, compactionId, { reason: "manual" });
+							} else {
+								console.error(`[ws-handler] compaction finisher unavailable session=${sessionId} compaction=${compactionId}`);
+							}
+							(session as any)._manualCompactionId = undefined;
+							(session as any)._manualCompactionRpcClient = undefined;
+							(session as any)._manualCompactionBaselinePromise = undefined;
+							if (sessionManager.getSession(sessionId) !== session || session.rpcClient !== compactionRpcClient) return;
 							// RPC rejected: own the failure append. session-manager only
 							// writes the success row, so clear the dedup marker defensively.
 							(session as any)._manualSidecarWritten = undefined;
@@ -1553,7 +1922,12 @@ export function handleWebSocketConnection(
 					sessionManager.denyToolPermission(sessionId, msg.toolName, msg.permissionId);
 					break;
 				}
-				case "restart_agent":
+				case "restart_agent": {
+					const modelSelectionCondition = modelSelectionRecoveryAdmission(sessionManager, sessionId, session).condition;
+					if (modelSelectionCondition) {
+						send(ws, { type: "error", message: modelSelectionRequiredMessage(modelSelectionCondition), code: MODEL_SELECTION_REQUIRED });
+						break;
+					}
 					sessionManager.restartAgent(sessionId).then(() => {
 						// Refresh messages after restart so the client sees the full history
 						const restored = sessionManager.getSession(sessionId);
@@ -1570,6 +1944,7 @@ export function handleWebSocketConnection(
 						send(ws, { type: "error", message: `Restart failed: ${err}`, code: "RESTART_ERROR" });
 					});
 					break;
+				}
 				case "ping":
 					send(ws, { type: "pong" });
 					break;
@@ -1585,7 +1960,9 @@ export function handleWebSocketConnection(
 					const diagEnabled = cpuDiagnosticsEnabled();
 					const diagStart = diagEnabled ? performance.now() : 0;
 					let replayed = 0;
+					let replayedBytes = 0;
 					const fromSeq = typeof msg.fromSeq === "number" ? msg.fromSeq : 0;
+					if (!isSocketSendable(ws)) break;
 					const sendResumeGap = (_reason: string, bytes = 0) => {
 						send(ws, { type: "resume_gap", lastSeq: session.eventBuffer.lastSeq });
 						if (diagEnabled) {
@@ -1617,16 +1994,19 @@ export function handleWebSocketConnection(
 						Date.now() + RESUME_REPLAY_DRAIN_TIMEOUT_MS,
 					);
 					if (!drained) {
+						if (!isSocketSendable(ws)) break;
 						sendResumeGap("backpressure", decision.bytes);
 						break;
 					}
 					const deadline = Date.now() + PACE_TIMEOUT_MS;
 					for (const frame of frames) {
-						await paceAndSend(ws as any, frame.data, deadline);
+						const sent = await paceAndSend(ws as any, frame.data, deadline);
+						if (!sent) break;
 						replayed++;
+						replayedBytes += frame.bytes;
 					}
 					if (diagEnabled) {
-						getCpuDiagnostics().recordWsBroadcast("ws-handler:resume", "event", { frames: replayed, recipients: replayed, bytes: decision.bytes, replayed, sendMs: performance.now() - diagStart });
+						getCpuDiagnostics().recordWsBroadcast("ws-handler:resume", "event", { frames: replayed, recipients: replayed, bytes: replayedBytes, replayed, sendMs: performance.now() - diagStart });
 					}
 					break;
 				}
@@ -1995,7 +2375,7 @@ export function handleWebSocketConnection(
 					send(ws, { type: "error", message: "Unknown message type", code: "UNKNOWN_TYPE" });
 			}
 		} catch (err) {
-			sendCommandFailure(err);
+			sendCommandFailure(err, msg);
 		}
 	};
 
@@ -2026,19 +2406,54 @@ export function handleWebSocketConnection(
 			});
 			return;
 		}
-		const msg = parsed as ClientMessage;
+		const msg = parsed as ReliableIntentClientMessage;
 
-		// Validate text-bearing commands before they enter Markdown parsing, a
-		// session queue, or the extension-post permit flow.
-		if (authenticated && rejectInvalidPromptText(msg)) return;
+		// Validate occurrence identity and text-bearing commands before they enter
+		// Markdown parsing, a session queue, or the extension-post permit flow.
+		if (authenticated && (rejectInvalidIntentId(msg) || rejectInvalidPromptText(msg))) return;
 
 		const dispatch = (signal?: AbortSignal) => handleMessage(msg, frameBytes, signal);
 		const liveSession = authenticated && sessionId !== "__viewer__"
 			? sessionManager.getSession(sessionId)
 			: undefined;
 		const liveStreamingSteer = msg.type === "steer" && liveSession?.status === "streaming";
+		const recoveryAdmissionAtFrame = authenticated
+			? modelSelectionRecoveryAdmission(sessionManager, sessionId, liveSession)
+			: { condition: undefined, activationInProgress: false };
+		// Condition admission happens before the per-session serializer: a command
+		// submitted during activation must not wait for recovery to clear and then run.
+		if (
+			recoveryAdmissionAtFrame.condition
+			&& (msg.type === "prompt"
+				|| msg.type === "steer"
+				|| msg.type === "retry"
+				|| msg.type === "retry_intent"
+				|| msg.type === "restart_agent"
+				|| msg.type === "set_thinking_level")
+		) {
+			sendIntentRejection(
+				msg,
+				modelSelectionRequiredMessage(recoveryAdmissionAtFrame.condition),
+				MODEL_SELECTION_REQUIRED,
+			);
+			return;
+		}
+		// Reject a second model/thinking choice before it can wait behind the first
+		// activation and later fall through to ordinary runtime mutation.
+		if (
+			recoveryAdmissionAtFrame.activationInProgress
+			&& (msg.type === "set_model" || msg.type === "set_thinking_level")
+		) {
+			send(ws, {
+				type: "error",
+				message: "Replacement model activation is already in progress. Wait for it to finish before changing model settings.",
+				code: MODEL_SELECTION_RECOVERY_FAILED,
+			});
+			return;
+		}
 		const serialisedSessionCommand = msg.type === "prompt" ||
 			msg.type === "retry" ||
+			msg.type === "retry_intent" ||
 			msg.type === "set_model" ||
 			msg.type === "set_thinking_level" ||
 			(msg.type === "steer" && !liveStreamingSteer);
@@ -2051,25 +2466,25 @@ export function handleWebSocketConnection(
 			// Admission is synchronous and atomic: a rejected parsed frame is never
 			// attached to the FIFO tail, so its closure becomes collectible now.
 			if (err instanceof SessionCommandQueueFullError) {
-				send(ws, { type: "error", message: err.message, code: SESSION_COMMAND_QUEUE_FULL });
+				sendIntentRejection(msg, err.message, SESSION_COMMAND_QUEUE_FULL);
 				return;
 			}
 			console.error(`[ws-handler] Command admission failure for ${sessionId}:`, err);
-			sendCommandFailure(err);
+			sendCommandFailure(err, msg);
 			return;
 		}
 		void result.catch((err) => {
 			// Queue admission rejects without linking the parsed-message closure to
 			// the FIFO tail. Surface the stable code and isolate later commands.
 			if (err instanceof SessionCommandQueueFullError) {
-				send(ws, { type: "error", message: err.message, code: err.code });
+				sendIntentRejection(msg, err.message, err.code);
 				return;
 			}
 			// Covers authentication/archive branches and any future routing added
 			// outside the command-level try/catch. The serialiser's fulfilled tail
 			// still permits the next same-session ordered delivery to run.
 			console.error(`[ws-handler] Unhandled command failure for ${sessionId}:`, err);
-			sendCommandFailure(err);
+			sendCommandFailure(err, msg);
 		});
 	});
 
@@ -2092,7 +2507,7 @@ export function handleWebSocketConnection(
 				const leaveMsg: ServerMessage = { type: "client_left", clientId };
 				const leaveData = JSON.stringify(leaveMsg);
 				for (const client of session.clients) {
-					if (client.readyState === 1) {
+					if (isSocketSendable(client)) {
 						client.send(leaveData);
 					}
 				}

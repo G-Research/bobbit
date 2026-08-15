@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { parse, parseDocument } from "yaml";
@@ -259,44 +260,55 @@ function scanToolsDir(toolsDir: string, baseDir: string): BaseToolInfo[] {
 	return tools;
 }
 
-// ── mtime-keyed cache for scanToolsDir ────────────────────────────────────
+// ── content-keyed cache for scanToolsDir ──────────────────────────────────
 //
-// Tool YAMLs almost never change at runtime. Re-reading 51 builtin YAMLs +
-// any project overlays on every session create burns 100–800ms per worker
-// under FS contention (Defender, parallel workers competing for the same
-// inodes). We hash the directory tree's structural mtimes (cheap stat()
-// calls) and reuse the parsed result while the tree is unchanged.
+// Tool YAMLs almost never change at runtime. Parsing 51 builtin YAMLs plus
+// project overlays on every session creates significant CPU/FS contention.
+// Hash the exact YAML names and bytes so upgrades are observable even when a
+// coarse filesystem preserves parent and same-size file metadata.
 //
 // Invalidation is conservative: if anything looks off we re-scan. The cost
 // of a false miss is one full scan; the cost of a false hit would be a
 // stale tool list, so we err on the side of re-scanning.
 const _scanCache = new Map<string, { fingerprint: string; tools: BaseToolInfo[] }>();
 
-function directoryFingerprint(dir: string): string {
+function directoryFingerprint(dir: string): string | undefined {
 	try {
-		const rootStat = fs.statSync(dir);
-		const parts: string[] = [`${dir}:${rootStat.mtimeMs}`];
-		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-			const p = path.join(dir, entry.name);
-			try {
-				const st = fs.statSync(p);
-				parts.push(`${entry.name}:${st.mtimeMs}:${st.size}`);
-			} catch {
-				parts.push(`${entry.name}:miss`);
+		const hash = createHash("sha256");
+		const entries = fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+		for (const entry of entries) {
+			hash.update(`${entry.name}\0${entry.isDirectory() ? "d" : entry.isFile() ? "f" : "o"}\0`);
+			if (entry.isFile() && entry.name.endsWith(".yaml")) {
+				const bytes = fs.readFileSync(path.join(dir, entry.name));
+				hash.update(`${bytes.length}\0`).update(bytes);
+				continue;
+			}
+			if (!entry.isDirectory() || isIgnoredToolGroupDir(entry.name)) continue;
+			const groupDir = path.join(dir, entry.name);
+			const files = fs.readdirSync(groupDir, { withFileTypes: true }).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+			for (const file of files) {
+				hash.update(`${file.name}\0${file.isFile() ? "f" : file.isDirectory() ? "d" : "o"}\0`);
+				if (!file.isFile() || !file.name.endsWith(".yaml")) continue;
+				const bytes = fs.readFileSync(path.join(groupDir, file.name));
+				hash.update(`${bytes.length}\0`).update(bytes);
 			}
 		}
-		return parts.join("|");
-	} catch {
-		return "missing";
+		return hash.digest("hex");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return "missing";
+		// Do not cache partial/unreadable trees. A later read may succeed without
+		// any observable directory metadata change.
+		return undefined;
 	}
 }
 
 function scanToolsDirCached(toolsDir: string, baseDir: string): BaseToolInfo[] {
 	const fp = directoryFingerprint(toolsDir);
-	const hit = _scanCache.get(toolsDir);
+	const hit = fp === undefined ? undefined : _scanCache.get(toolsDir);
 	if (hit && hit.fingerprint === fp) return hit.tools;
 	const tools = scanToolsDir(toolsDir, baseDir);
-	_scanCache.set(toolsDir, { fingerprint: fp, tools });
+	if (fp === undefined) _scanCache.delete(toolsDir);
+	else _scanCache.set(toolsDir, { fingerprint: fp, tools });
 	return tools;
 }
 
@@ -407,6 +419,34 @@ function loadToolDefinitions(toolsDir: string, builtinToolsDir?: string, marketR
 	return profile("loadToolDefinitions", () => _loadToolDefinitions(toolsDir, builtinToolsDir, marketRoots));
 }
 
+// Exact shipped Agent-group snapshots that metadata customization copied into
+// config before focused transcript reads landed. They have no custom delta, so
+// letting them shadow upgraded builtins permanently preserves a stale runtime.
+const HISTORICAL_UNMODIFIED_AGENT_MANIFESTS = new Set([
+	"a962948546d78bf3baecb3e7f2f602d45e0d3fc371964f76464c789cb7285c88", // 70e148cf3
+	"5d5585e5ea778b43adc275a0d3f07ccb14aaabb8bbf1a83a63d2805d4477e3fa", // cf51caae0
+	"d9282f6936a45499cb21cc76a1b6ff36b0cfe5ea070c71b684ec5d2d60f48bc9", // 8afca54a2
+]);
+
+function isHistoricalUnmodifiedAgentGroup(toolsDir: string): boolean {
+	const group = path.join(toolsDir, "agent");
+	try {
+		const entries = fs.readdirSync(group, { withFileTypes: true }).sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+		const hash = createHash("sha256");
+		for (const entry of entries) {
+			// Known snapshots contain only this exact flat regular-file set. Reject
+			// symlinks, subdirectories, special entries, extras, and read failures.
+			const file = path.join(group, entry.name);
+			const stat = fs.lstatSync(file);
+			if (!entry.isFile() || !stat.isFile() || stat.isSymbolicLink()) return false;
+			const bytes = fs.readFileSync(file);
+			hash.update(entry.name).update("\0").update(String(bytes.length)).update("\0").update(bytes);
+		}
+		return HISTORICAL_UNMODIFIED_AGENT_MANIFESTS.has(hash.digest("hex"));
+	} catch {
+		return false;
+	}
+}
 
 function _loadToolDefinitions(toolsDir: string, builtinToolsDir?: string, marketRoots: MarketToolRoot[] = []): BaseToolInfo[] {
 	// Ordered layers, low→high priority. The builtin layer is lowest, the
@@ -436,9 +476,11 @@ function _loadToolDefinitions(toolsDir: string, builtinToolsDir?: string, market
 		invalidUserGroupExtensions.add(diagnostic.groupDir);
 	}
 	const invalidUserToolGroups = new Set<string>(invalidUserGroupExtensions);
+	const ignoreHistoricalAgentGroup = isHistoricalUnmodifiedAgentGroup(toolsDir);
 	const scanned = layers.map((l, idx) => {
-		const tools = scanToolsDirCached(l.dir, l.dir);
+		let tools = scanToolsDirCached(l.dir, l.dir);
 		if (idx !== userIdx) return tools;
+		if (ignoreHistoricalAgentGroup) tools = tools.filter((tool) => tool.groupDir !== "agent");
 		for (const diagnostic of collectInvalidConfigToolDiagnostics(tools)) invalidUserToolGroups.add(diagnostic.groupDir);
 		return filterInvalidConfigTools(tools, invalidUserGroupExtensions);
 	});
@@ -618,11 +660,13 @@ export class ToolManager {
 	 * Config-level (toolsDir) takes priority over builtins.
 	 */
 	getToolGroupBaseDir(groupDir: string): string {
-		// Check config-level first. Archived/disabled groups and groups with broken
-		// config-level bobbit-extension providers must not shadow bundled tools.
+		// Check config-level first. Archived/disabled groups, exact unmodified
+		// historical Agent snapshots, and groups with broken config-level
+		// bobbit-extension providers must not shadow bundled tools.
 		const configGroup = path.join(this.toolsDir, groupDir);
 		try {
-			if (!isIgnoredToolGroupDir(groupDir) && fs.statSync(configGroup).isDirectory() && !this.configGroupHasInvalidExtension(groupDir)) return this.toolsDir;
+			const historicalAgentSnapshot = groupDir === "agent" && isHistoricalUnmodifiedAgentGroup(this.toolsDir);
+			if (!isIgnoredToolGroupDir(groupDir) && !historicalAgentSnapshot && fs.statSync(configGroup).isDirectory() && !this.configGroupHasInvalidExtension(groupDir)) return this.toolsDir;
 		} catch { /* not found */ }
 
 		// Check builtins
@@ -798,7 +842,10 @@ export class ToolManager {
 		// Scan only the config-level tools dir — no builtins. Apply the same
 		// invalid direct group-extension filtering as runtime resolution so the
 		// config cascade and /api/tools do not advertise overrides that launch will skip.
-		const scanned = scanToolsDir(this.toolsDir, this.toolsDir);
+		let scanned = scanToolsDir(this.toolsDir, this.toolsDir);
+		if (isHistoricalUnmodifiedAgentGroup(this.toolsDir)) {
+			scanned = scanned.filter((tool) => tool.groupDir !== "agent");
+		}
 		const invalidGroupExtensions = new Set<string>();
 		for (const diagnostic of collectInvalidConfigGroupExtensionDiagnostics(this.toolsDir, scanned)) {
 			logToolExtensionDiagnostic(diagnostic);
@@ -914,13 +961,16 @@ export class ToolManager {
 	/**
 	 * Generate per-group detail docs markdown files in the state directory.
 	 * These are the full reference docs that the system prompt footer links to.
-	 * Call once at startup (or when tool definitions change).
+	 * Called at startup and rematerialized alongside prompt docs when definitions change.
 	 */
 	generateDetailDocs(stateDir: string): void {
+		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
+		this.materializeDetailDocs(stateDir, tools);
+	}
+
+	private materializeDetailDocs(stateDir: string, tools: BaseToolInfo[]): void {
 		const dir = path.join(stateDir, 'tool-docs');
 		fs.mkdirSync(dir, { recursive: true });
-
-		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
 
 		// Group tools by groupDir
 		const grouped = new Map<string, Array<{ name: string; docs?: string; detail_docs?: string; description: string }>>();
@@ -940,7 +990,9 @@ export class ToolManager {
 				if (detail) parts.push(detail + '\n');
 				if (!docs && !detail) parts.push(tool.description + '\n');
 			}
-			fs.writeFileSync(path.join(dir, `${groupDir}.md`), parts.join('\n'));
+			const file = path.join(dir, `${groupDir}.md`);
+			const content = parts.join('\n');
+			if (!fs.existsSync(file) || fs.readFileSync(file, "utf8") !== content) fs.writeFileSync(file, content);
 		}
 	}
 
@@ -953,6 +1005,7 @@ export class ToolManager {
 	 */
 	getToolDocsForPrompt(toolNames?: string[], stateDir?: string, scopedContext?: ScopedToolContext): string {
 		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
+		if (stateDir) this.materializeDetailDocs(stateDir, tools);
 
 		type Entry = { name: string; summary: string; params?: string[] };
 		const grouped = new Map<string, { groupDir: string; entries: Entry[] }>();

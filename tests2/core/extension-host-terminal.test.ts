@@ -34,7 +34,7 @@ describe("built-in terminal pack", () => {
 		const contributions = loadPackContributions(root, manifest);
 		assert.equal(contributions.panels[0]?.id, "terminal.panel");
 		const sessionMenu = contributions.entrypoints.find((e) => e.kind === "session-menu");
-		assert.equal(sessionMenu?.label, "Open Terminal");
+		assert.equal(sessionMenu?.label, "Open terminal");
 		assert.equal((sessionMenu as any)?.icon, "terminal");
 		assert.deepEqual(sessionMenu?.target, {
 			action: "channel-panel",

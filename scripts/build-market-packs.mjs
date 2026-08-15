@@ -142,6 +142,13 @@ const PACKS = [
 			{ in: "terminal-channel.ts", out: "lib/terminal-channel.mjs", platform: "node" },
 		],
 	},
+	{
+		pack: "file-explorer",
+		entries: [
+			{ in: "file-explorer-panel.ts", out: "lib/file-explorer-panel.js" },
+			{ in: "explorer-routes.ts", out: "lib/explorer-routes.mjs", platform: "node" },
+		],
+	},
 ];
 
 async function main() {

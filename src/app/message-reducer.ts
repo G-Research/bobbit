@@ -16,6 +16,7 @@
  */
 
 import type { MessageAuthor } from "../shared/message-author.js";
+import { isContextOverflowError } from "./compaction-types.js";
 
 export type MessageOrigin = "server" | "optimistic" | "synthetic" | "permission";
 
@@ -69,6 +70,7 @@ export type Action =
 	| { type: "permission-reconciled"; current: any | null; reason?: string }
 	| { type: "blocked-tool-call-placeholder"; message: any; seq?: number }
 	| { type: "compaction-placeholder"; message: any }
+	| { type: "suppress-latest-context-overflow-error" }
 	| { type: "compaction-result"; message: any; success: boolean; toolResult?: any }
 	| { type: "system-notification"; message: any }
 	| { type: "mutation-pending"; message: any }
@@ -77,6 +79,7 @@ export type Action =
 	| { type: "settle-optimistic" }
 	| { type: "deny-permission-filter"; messageId: string }
 	| { type: "replace-messages"; messages: any[] }
+	| { type: "assistant-stream-invalidated"; assistantStreamId: string }
 	| { type: "reset" };
 
 export const SNAPSHOT_ORDER_FLOOR = -1_000_000_000;
@@ -87,6 +90,34 @@ const SETTLE_EPSILON = 0.5;
 
 export function initialState(): ReducerState {
 	return { messages: [], nextTick: 1, highestSeq: 0 };
+}
+
+const DELIVERY_INTENT_ID_MAX_LENGTH = 256;
+
+function deliveryIntentId(message: any): string | undefined {
+	const id = message?.deliveryIntentId ?? message?.intentId;
+	return typeof id === "string" && id.length > 0 && id.length <= DELIVERY_INTENT_ID_MAX_LENGTH
+		? id
+		: undefined;
+}
+
+/**
+ * A durable delivery identity names one user-message occurrence. Defensive
+ * recovery snapshots can briefly contain both the authoritative transcript row
+ * and a splice/fallback copy, so retain only the first occurrence at its
+ * original position. Legacy rows and invalid IDs deliberately remain distinct;
+ * message text is never part of this correlation boundary.
+ */
+function deduplicateSnapshotUserDeliveryIntents(messages: any[]): any[] {
+	const seen = new Set<string>();
+	return messages.filter((message) => {
+		if (message?.role !== "user" && message?.role !== "user-with-attachments") return true;
+		const intentId = deliveryIntentId(message);
+		if (!intentId) return true;
+		if (seen.has(intentId)) return false;
+		seen.add(intentId);
+		return true;
+	});
 }
 
 function extractText(message: any): string {
@@ -344,13 +375,24 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 		case "reset":
 			return initialState();
 
+		case "assistant-stream-invalidated":
+			return {
+				...state,
+				messages: state.messages.filter((message: any) => message.assistantStreamId !== action.assistantStreamId),
+			};
+
 		case "live-event": {
 			const { frame, seq } = action;
 			const tick = state.nextTick;
 			const nextHighest = Math.max(state.highestSeq, seq);
-			// frame is an event payload — we only care about message_end here;
-			// other event types don't mutate the message list.
-			if (frame?.type !== "message_end" || !frame.message) {
+			// Correlated user message_start is the outbox acknowledgement boundary.
+			// It enters the transcript immediately; message_end later replaces it
+			// with the exact terminal payload. Other starts remain non-mutating.
+			const isTerminal = frame?.type === "message_end";
+			const isCorrelatedUserStart = frame?.type === "message_start"
+				&& !!deliveryIntentId(frame.message)
+				&& (frame.message?.role === "user" || frame.message?.role === "user-with-attachments");
+			if ((!isTerminal && !isCorrelatedUserStart) || !frame.message) {
 				return { ...state, highestSeq: nextHighest };
 			}
 			// Enrich on the LIVE path too (not just snapshots): a role:"user" echo
@@ -384,6 +426,12 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 				}
 			}
 
+			// Terminal content is authoritative. Replace the provisional start by
+			// occurrence identity even when Pi changes/omits its own message id.
+			const incomingIntentId = deliveryIntentId(incoming);
+			if (incomingIntentId) {
+				messages = messages.filter((message) => deliveryIntentId(message) !== incomingIntentId);
+			}
 			// Drop any prior server entry with the same id (replace-by-id).
 			if (typeof incoming.id === "string" && incoming.id.length > 0) {
 				const idx = messages.findIndex((m) => m.id === incoming.id);
@@ -454,7 +502,43 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 
 		case "snapshot": {
 			const tick = state.nextTick;
-			const enriched = action.messages.map(enrichUserMessage);
+			let enriched = deduplicateSnapshotUserDeliveryIntents(
+				action.messages.map(enrichUserMessage),
+			);
+			// A post-compaction snapshot can retain the provider's context-limit
+			// boundary row. Preserve the suppression established by the live
+			// auto_compaction_start instead of replacing it with an untagged copy.
+			// Match reverse occurrence ordinals per exact provider message: the
+			// compacted snapshot may omit older history, while a later identical
+			// error must not inherit suppression from this recovered occurrence.
+			const suppressedOrdinals = new Map<string, Set<number>>();
+			const stateOrdinals = new Map<string, number>();
+			for (let i = state.messages.length - 1; i >= 0; i--) {
+				const message = state.messages[i] as any;
+				if (message.role !== "assistant" || message.stopReason !== "error" || !isContextOverflowError(message.errorMessage)) continue;
+				const key = message.errorMessage as string;
+				const ordinal = stateOrdinals.get(key) ?? 0;
+				stateOrdinals.set(key, ordinal + 1);
+				if (message._suppressedByOverflowRecovery === true) {
+					const ordinals = suppressedOrdinals.get(key) ?? new Set<number>();
+					ordinals.add(ordinal);
+					suppressedOrdinals.set(key, ordinals);
+				}
+			}
+			if (suppressedOrdinals.size > 0) {
+				const snapshotOrdinals = new Map<string, number>();
+				for (let i = enriched.length - 1; i >= 0; i--) {
+					const message = enriched[i] as any;
+					if (message.role !== "assistant" || message.stopReason !== "error" || !isContextOverflowError(message.errorMessage)) continue;
+					const key = message.errorMessage as string;
+					const ordinal = snapshotOrdinals.get(key) ?? 0;
+					snapshotOrdinals.set(key, ordinal + 1);
+					if (suppressedOrdinals.get(key)?.has(ordinal)) {
+						enriched = enriched.slice();
+						enriched[i] = { ...message, _suppressedByOverflowRecovery: true };
+					}
+				}
+			}
 			// Two-way compaction dedup:
 			//   (a) State has a rich synthetic (`__compaction_summary` toolCall) —
 			//       drop the server's plain-text marker from this snapshot. Rich
@@ -598,6 +682,7 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			}
 
 			const serverIds = new Set<string>();
+			const serverDeliveryIntentIds = new Set<string>();
 			// Equivalence sets keyed on toolCallId — the snapshot is authoritative
 			// for any toolCall it contains, even when the live row landed without
 			// a string id (e.g. mock-agent toolResult message_ends, real LLM
@@ -608,6 +693,8 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			const serverAssistantToolCallIds = new Set<string>();
 			for (const m of snapshotRows) {
 				if (typeof m.id === "string" && m.id.length > 0) serverIds.add(m.id);
+				const intentId = deliveryIntentId(m);
+				if (intentId) serverDeliveryIntentIds.add(intentId);
 				if (m.role === "toolResult") {
 					const tcid = (m as any).toolCallId;
 					if (typeof tcid === "string" && tcid.length > 0) {
@@ -656,6 +743,8 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 			// Survivors: client-side rows that the snapshot doesn't already represent.
 			const survivors: OrderedMessage[] = [];
 			for (const m of state.messages) {
+				const intentId = deliveryIntentId(m);
+				if (intentId && serverDeliveryIntentIds.has(intentId)) continue;
 				if (m._origin === "server") {
 					// 1) Identity-based drops (structural, correct).
 					// Live-event server rows: drop if snapshot has matching id.
@@ -997,6 +1086,24 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 				nextTick: tick + 1,
 				highestSeq: state.highestSeq,
 			};
+		}
+
+		case "suppress-latest-context-overflow-error": {
+			// Providers may emit the recoverable error before auto_compaction_start,
+			// so the later compaction event must retroactively hide that live row.
+			let target = -1;
+			for (let i = state.messages.length - 1; i >= 0; i--) {
+				const message = state.messages[i] as any;
+				if (message.role !== "assistant") continue;
+				if (message.stopReason === "error" && isContextOverflowError(message.errorMessage)) {
+					target = i;
+				}
+				break;
+			}
+			if (target < 0 || (state.messages[target] as any)._suppressedByOverflowRecovery === true) return state;
+			const messages = state.messages.slice();
+			messages[target] = { ...messages[target], _suppressedByOverflowRecovery: true };
+			return { ...state, messages };
 		}
 
 		case "compaction-placeholder": {

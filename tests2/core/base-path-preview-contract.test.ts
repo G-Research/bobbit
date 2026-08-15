@@ -182,6 +182,14 @@ describe("historical preview URL-only recovery", () => {
 		assert.equal(parse(compact, "path\\secret.html"), null);
 	});
 
+	it("accepts the 255-character compact-entry boundary", async () => {
+		installBrowser("/bobbit", "https://gateway.example/team/gw");
+		const parse = await historicalParser();
+		const entry = "x".repeat(250) + ".html";
+		assert.equal(entry.length, 255);
+		assert.equal(parse(`/preview/${SID}/`, entry), `/preview/${SID}/${entry}`);
+	});
+
 	it.each([
 		["empty", ""],
 		["current directory", "."],
@@ -190,7 +198,9 @@ describe("historical preview URL-only recovery", () => {
 		["backslash", "nested\\secret.html"],
 		["NUL control", "unsafe\0.html"],
 		["unit-separator control", "unsafe\u001f.html"],
-		["over-length", `${"x".repeat(256)}.html`],
+		["DEL control", "unsafe\u007f.html"],
+		["malformed control-prefixed compact encoding", "\u0001not-a-valid-preview-entry-codec"],
+		["over-length", "x".repeat(256)],
 	] as const)("rejects unsafe compact entry: %s", async (_name, entry) => {
 		installBrowser("/bobbit", "https://gateway.example/team/gw");
 		const parse = await historicalParser();
@@ -230,40 +240,54 @@ describe("historical preview URL-only recovery", () => {
 		assert.equal(await readGeneratedPreview(decodedName.path), "<h1>A</h1>");
 	});
 
-	it("round-trips every compact and fallback payload shape emitted by the v3 writer", async () => {
+	it("writes a canonical compact v3 payload without redundant path or compatibility aliases", async () => {
 		installBrowser("/bobbit", "https://gateway.example/team/gw");
 		const parse = await historicalParser();
+		const entry = "roadmap.html";
 		const hash = "a".repeat(64);
 		const artifactId = "pa_abc123xyz";
-		// These boundary-sized names pin candidate order: the writer must first
-		// retain all valid identity, then shorten only redundant fields/alias keys.
-		const cases = [
-			{ name: "compact content hash and artifact id", entry: "x.html", hash, artifactId, compact: true, fallbackEntry: undefined, payloadKeys: ["kind", "url", "path", "entry", "contentHash", "artifactId"] },
-			{ name: "compact content hash and aid alias", entry: `${"x".repeat(7)}.html`, hash, artifactId, compact: true, fallbackEntry: undefined, payloadKeys: ["kind", "url", "path", "entry", "contentHash", "aid"] },
-			{ name: "compact content hash and artifact id without redundant path", entry: `${"x".repeat(20)}.html`, hash, artifactId, compact: true, fallbackEntry: undefined, payloadKeys: ["kind", "url", "entry", "contentHash", "artifactId"] },
-			{ name: "compact trusted-entry fallback retains both identities", entry: `${"x".repeat(47)}.html`, hash, artifactId, compact: true, fallbackEntry: `${"x".repeat(47)}.html`, payloadKeys: ["kind", "url", "contentHash", "artifactId"] },
-			{ name: "missing hash compacts with artifact id", entry: `${"x".repeat(20)}.html`, hash: undefined, artifactId, compact: true, fallbackEntry: undefined, payloadKeys: ["kind", "url", "path", "entry", "artifactId"] },
-			{ name: "missing hash compact aid fallback", entry: `${"x".repeat(47)}.html`, hash: undefined, artifactId, compact: true, fallbackEntry: undefined, payloadKeys: ["kind", "url", "path", "entry", "aid"] },
-			{ name: "full URL fallback without optional metadata", entry: "report.html", hash: undefined, artifactId: undefined, compact: false, fallbackEntry: undefined, payloadKeys: ["kind", "url", "path", "entry"] },
-		] as const;
+		const url = `/preview/${SID}/${entry}`;
+		const block = buildPreviewSnapshotV3Block(url, `${SID}/${entry}`, hash, { artifactId, entry });
+		assert.ok(Buffer.byteLength(block, "utf8") <= 250, "canonical marker must respect the byte cap");
+		const payload = JSON.parse(block.slice("__preview_snapshot_v3__\n".length));
+		assert.deepEqual(payload, {
+			kind: "preview",
+			url: `/preview/${SID}/`,
+			entry,
+			contentHash: hash,
+			artifactId,
+		});
+		assert.equal(decodeV3Snapshot(block, parse), url);
+	});
 
-		for (const fixture of cases) {
-			const url = `/preview/${SID}/${fixture.entry}`;
-			const block = buildPreviewSnapshotV3Block(url, `${SID}/${fixture.entry}`, fixture.hash, {
-				artifactId: fixture.artifactId,
-				entry: fixture.entry,
-			});
-			assert.ok(Buffer.byteLength(block, "utf8") <= 250, `${fixture.name} must respect the marker cap`);
-			const snapshot = parseSnapshot(block);
-			assert.ok(snapshot && snapshot.kind === "preview");
-			if (!snapshot || snapshot.kind !== "preview") continue;
-			const payload = JSON.parse(block.slice("__preview_snapshot_v3__\n".length));
-			assert.equal(snapshot.url.endsWith("/"), fixture.compact, fixture.name);
-			assert.deepEqual(Object.keys(payload), fixture.payloadKeys, `${fixture.name} must preserve payload variant order`);
-			assert.equal(snapshot.contentHash, fixture.hash, fixture.name);
-			assert.equal(snapshot.artifactId, fixture.artifactId, fixture.name);
-			assert.equal(decodeV3Snapshot(block, parse, fixture.fallbackEntry), url, fixture.name);
-		}
+	it.each(["artifact_id", "aid", "a"] as const)("reads historical %s artifact aliases without emitting them", async (artifactKey) => {
+		installBrowser("/bobbit", "https://gateway.example/team/gw");
+		const parse = await historicalParser();
+		const entry = "legacy-report.html";
+		const artifactId = "pa_abc123xyz";
+		const block = "__preview_snapshot_v3__\n" + JSON.stringify({
+			kind: "preview",
+			url: `/preview/${SID}/`,
+			path: entry,
+			e: entry,
+			contentHash: "a".repeat(64),
+			[artifactKey]: artifactId,
+		}) + "\n";
+		const snapshot = parseSnapshot(block);
+		assert.ok(snapshot && snapshot.kind === "preview");
+		if (!snapshot || snapshot.kind !== "preview") return;
+		assert.equal(snapshot.entry, entry);
+		assert.equal(snapshot.artifactId, artifactId);
+		assert.equal(parse(snapshot.url, snapshot.entry), `/preview/${SID}/${entry}`);
+	});
+
+	it("keeps #1113 entry-omitted compact markers readable only with their trusted params entry", async () => {
+		installBrowser("/bobbit", "https://gateway.example/team/gw");
+		const parse = await historicalParser();
+		const entry = "historical-100%-日本語.html";
+		const compact = `/preview/${SID}/`;
+		assert.equal(parse(compact), null);
+		assert.equal(parse(compact, entry), `/preview/${SID}/${encodeURIComponent(entry)}`);
 	});
 
 	it.each([

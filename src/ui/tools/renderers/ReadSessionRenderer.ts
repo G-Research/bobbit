@@ -16,17 +16,38 @@ import { renderCollapsibleHeader, getToolState } from "../renderer-registry.js";
 import type { ToolRenderer, ToolRenderResult } from "../types.js";
 import { renderSessionLink } from "./delegate-cards.js";
 
-interface ReadSessionParams {
+interface ReadSessionListParams {
+	operation?: "list"; // Optional for historical tool calls recorded before the discriminated API.
 	session_id: string;
 	offset?: number;
 	limit?: number;
 	pattern?: string;
 	case_sensitive?: boolean;
 	context?: number;
-	verbose?: boolean;
+}
+
+interface ReadSessionInspectParams {
+	operation: "inspect";
+	session_id: string;
+	message_index: number;
+	result_index?: number;
+	offset?: number;
+	limit?: number;
+}
+
+type ReadSessionParams = ReadSessionListParams | ReadSessionInspectParams;
+
+interface CompactToolUse {
+	name: string;
+	argumentSummary?: string;
+	argumentsTruncated?: boolean;
+	inputPreview?: string; // Legacy compact transcript shape.
+	inputTruncated?: boolean;
+	arguments?: unknown;
 }
 
 interface CompactToolResult {
+	resultIndex?: number;
 	name?: string;
 	preview?: string;
 	omitted?: boolean;
@@ -39,11 +60,13 @@ interface CompactMessage {
 	role: string;
 	ts: string | null;
 	text: string;
-	toolUses?: Array<{ name: string; inputPreview: string }>;
+	textTruncated?: boolean;
+	toolUses?: CompactToolUse[];
 	toolResults?: CompactToolResult[];
 }
 
-interface ReadSessionDetails {
+interface ReadSessionListDetails {
+	operation?: "list"; // Legacy responses have no operation discriminant.
 	session_id?: string;
 	total?: number;
 	matchCount?: number;
@@ -52,6 +75,26 @@ interface ReadSessionDetails {
 	offsetEnd?: number;
 	messages?: CompactMessage[];
 }
+
+interface InspectedResult extends CompactToolResult {
+	messageIndex: number;
+	resultIndex: number;
+	excerpt: string;
+	offset: number;
+	returned: number;
+	totalChars: number;
+	nextOffset: number | null;
+	truncated: boolean;
+}
+
+interface ReadSessionInspectDetails {
+	operation: "inspect";
+	session_id?: string;
+	message?: CompactMessage;
+	result?: InspectedResult;
+}
+
+type ReadSessionDetails = ReadSessionListDetails | ReadSessionInspectDetails;
 
 function fmtTs(ts: string | null | undefined): string {
 	if (!ts) return "";
@@ -70,10 +113,25 @@ function roleBadgeClass(role: string): string {
 	}
 }
 
+function formatToolArguments(t: CompactToolUse): string {
+	if (typeof t.argumentSummary === "string") return t.argumentSummary;
+	if (typeof t.inputPreview === "string") return t.inputPreview;
+	if (t.arguments === undefined) return "";
+	try { return JSON.stringify(t.arguments); } catch { return String(t.arguments); }
+}
+
 function formatToolResult(t: CompactToolResult): string {
+	const size = t.size;
+	if (typeof t.resultIndex === "number" || (size && !size.type)) {
+		const parts = ["body redacted"];
+		parts.push(`status=${t.status ?? "unknown"}`);
+		if (typeof size?.chars === "number") parts.push(`${size.chars} chars`);
+		if (typeof size?.lines === "number") parts.push(`${size.lines} lines`);
+		if (typeof size?.bytes === "number") parts.push(`${size.bytes} bytes`);
+		return `[${parts.join("; ")}]`;
+	}
 	if (typeof t.preview === "string") return t.preview;
 	if (!t.omitted) return "";
-	const size = t.size;
 	const parts: string[] = ["omitted"];
 	if (t.status && t.status !== "unknown") parts.push(t.status);
 	if (size?.type) {
@@ -97,14 +155,31 @@ function renderCompactMessage(m: CompactMessage): TemplateResult {
 			${m.text ? html`<div class="mt-1 text-sm whitespace-pre-wrap break-words">${m.text}</div>` : ""}
 			${m.toolUses?.length
 				? html`<div class="mt-1 text-xs text-muted-foreground">
-					${m.toolUses.map(t => html`<div class="font-mono">→ ${t.name}(${t.inputPreview})</div>`)}
+					${m.toolUses.map(t => html`<div class="font-mono">→ ${t.name}(${formatToolArguments(t)})</div>`)}
 				</div>`
 				: ""}
 			${m.toolResults?.length
 				? html`<div class="mt-1 text-xs text-muted-foreground">
-					${m.toolResults.map(t => html`<div class="font-mono">← ${t.name ?? "result"}: ${formatToolResult(t)}</div>`)}
+					${m.toolResults.map(t => html`<div class="font-mono">← ${t.name ?? "result"}${typeof t.resultIndex === "number" ? ` #${t.resultIndex}` : ""}: ${formatToolResult(t)}</div>`)}
 				</div>`
 				: ""}
+		</div>
+	`;
+}
+
+function renderInspectedResult(result: InspectedResult): TemplateResult {
+	const end = result.offset + result.returned;
+	return html`
+		<div class="border-l-2 border-border pl-2 py-1">
+			<div class="text-xs text-muted-foreground font-mono">
+				message #${result.messageIndex} · result #${result.resultIndex} · ${result.name ?? "result"}
+			</div>
+			<div class="mt-1 text-xs text-muted-foreground">${formatToolResult(result)}</div>
+			<pre class="mt-2 text-sm whitespace-pre-wrap break-words font-mono">${result.excerpt}</pre>
+			<div class="mt-1 text-xs text-muted-foreground">
+				Characters ${result.offset}–${end} of ${result.totalChars}.
+				${result.nextOffset !== null ? html` Continue at offset ${result.nextOffset}.` : " End of result."}
+			</div>
 		</div>
 	`;
 }
@@ -185,7 +260,7 @@ function openTranscriptModal(sessionId: string): void {
 				</div>`;
 				const text = m.text ? `<div style="margin-top:0.25rem;font-size:0.875rem;white-space:pre-wrap;word-break:break-word;">${escapeHtml(m.text)}</div>` : "";
 				const tu = m.toolUses?.length
-					? `<div style="margin-top:0.25rem;font-size:0.75rem;color:var(--muted-foreground);font-family:monospace;">${m.toolUses.map(t => `→ ${escapeHtml(t.name)}(${escapeHtml(t.inputPreview)})`).join("<br/>")}</div>`
+					? `<div style="margin-top:0.25rem;font-size:0.75rem;color:var(--muted-foreground);font-family:monospace;">${m.toolUses.map(t => `→ ${escapeHtml(t.name)}(${escapeHtml(formatToolArguments(t))})`).join("<br/>")}</div>`
 					: "";
 				const tr = m.toolResults?.length
 					? `<div style="margin-top:0.25rem;font-size:0.75rem;color:var(--muted-foreground);font-family:monospace;">${m.toolResults.map(t => `← ${escapeHtml(t.name ?? "result")}: ${escapeHtml(formatToolResult(t))}`).join("<br/>")}</div>`
@@ -240,9 +315,14 @@ export class ReadSessionRenderer implements ToolRenderer<ReadSessionParams, Read
 		// Streaming
 		if (!result) {
 			const target = params?.session_id ? params.session_id.slice(0, 12) : "?";
-			const summary = params?.pattern
-				? `pattern="${params.pattern}" offset=${params.offset ?? 0} limit=${params.limit ?? 20}`
-				: `offset=${params?.offset ?? 0} limit=${params?.limit ?? 20}`;
+			let summary: string;
+			if (params?.operation === "inspect") {
+				summary = `message #${params.message_index}${params.result_index !== undefined ? ` result #${params.result_index}` : ""}`;
+			} else {
+				summary = params?.pattern
+					? `pattern="${params.pattern}" offset=${params.offset ?? 0} limit=${params.limit ?? 20}`
+					: `offset=${params?.offset ?? 0} limit=${params?.limit ?? 20}`;
+			}
 			return {
 				content: html`
 					<div>
@@ -266,6 +346,31 @@ export class ReadSessionRenderer implements ToolRenderer<ReadSessionParams, Read
 							contentRef, chevronRef, true)}
 						<div ${ref(contentRef)} class="max-h-[2000px] mt-3 overflow-hidden transition-all duration-300">
 							<div class="text-xs font-mono text-destructive whitespace-pre-wrap">${txt}</div>
+						</div>
+					</div>
+				`,
+				isCustom: false,
+			};
+		}
+
+		if (details?.operation === "inspect") {
+			const inspected = details.result
+				? html`<span class="text-xs text-muted-foreground">result #${details.result.resultIndex} from message #${details.result.messageIndex}</span>`
+				: details.message
+					? html`<span class="text-xs text-muted-foreground">message #${details.message.index}</span>`
+					: html`<span class="text-xs text-muted-foreground">inspection unavailable</span>`;
+			return {
+				content: html`
+					<div>
+						${renderCollapsibleHeader(state, History,
+							html`read_session <span class="font-mono text-xs">${sidShort}</span> — ${inspected} ${sid ? renderSessionLink(sid) : ""}`,
+							contentRef, chevronRef, false)}
+						<div ${ref(contentRef)} class="max-h-0 overflow-hidden transition-all duration-300">
+							${details.result
+								? renderInspectedResult(details.result)
+								: details.message
+									? renderCompactMessage(details.message)
+									: html`<div class="text-xs text-muted-foreground italic">Inspection details unavailable.</div>`}
 						</div>
 					</div>
 				`,

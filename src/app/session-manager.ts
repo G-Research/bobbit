@@ -9,6 +9,7 @@ import {
 	renderApp,
 	activeSessionId,
 	isDesktop,
+	getGoalSetupUiState,
 	GW_SESSION_KEY,
 	type GatewaySession,
 	type Project,
@@ -29,6 +30,7 @@ import { reconcilePackRenderersForProject } from "./pack-renderers.js";
 import { reconcilePackPanelsForProject, setSessionSwitcher } from "./pack-panels.js";
 import { hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
 import { reconcilePackEntrypointsForProject } from "./pack-entrypoints.js";
+import { remoteStateRequestKey, remoteStateRequestOrder } from "./remote-state-request-order.js";
 import { runWidgetGitRefresh, abortableSleep, GIT_STATUS_BACKOFF_MS, type GitWidgetLike } from "./git-status-refresh.js";
 import { computeConnectGitState, setCachedRepoState, pruneGitRepoCache } from "./git-repo-cache.js";
 import { startTimeRefresh } from "./render-helpers.js";
@@ -183,6 +185,13 @@ type InteractionModeTarget = {
 	nonInteractive?: boolean;
 };
 
+function isModelSelectionRequiredRecord(record: Partial<GatewaySession> | undefined): boolean {
+	const condition = (record as any)?.condition;
+	return condition?.code === "MODEL_SELECTION_REQUIRED"
+		&& typeof condition.provider === "string"
+		&& typeof condition.modelId === "string";
+}
+
 /** Apply every interaction restriction already known without ever clearing one. */
 function applyKnownSessionInteractionMode(
 	target: InteractionModeTarget,
@@ -198,7 +207,7 @@ function applyKnownSessionInteractionMode(
 		|| records.some((record) => record?.readOnly === true
 			|| record?.archived === true
 			|| record?.status === "archived"
-			|| record?.status === "terminated")
+			|| (record?.status === "terminated" && !isModelSelectionRequiredRecord(record)))
 	) {
 		target.readOnly = true;
 	}
@@ -1348,6 +1357,8 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 
 	const outgoingPanel = transferActiveSessionToCache(state.selectedSessionId, sessionId);
 	state.selectedSessionId = sessionId;
+	// A new canonical selection supersedes any prior explicit sidebar reveal.
+	state.sidebarRevealSessionId = null;
 
 	// Proposals are scoped to the session that emitted them. Clear stale slots
 	// the moment the user navigates away so they never bleed into other sessions.
@@ -1535,6 +1546,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.previewPanelMtime = 0;
 		state.previewPanelEntry = "";
 		state.previewPanelContentHash = "";
+		state.reviewGroups = new Map();
+		state.reviewActiveReviewId = "";
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
@@ -1712,8 +1725,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		// Keep selection UX optimistic, but only persist server-confirmed model state.
 		const originalSetModel = remote.setModel.bind(remote);
-		remote.setModel = (model: any) => {
-			originalSetModel(model);
+		remote.setModel = (model: any, thinkingLevel?: string) => {
+			originalSetModel(model, thinkingLevel);
 			renderApp();
 		};
 
@@ -1841,12 +1854,12 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			}
 		};
 
-		remote.onGoalSetupEvent = async () => {
-			// Refresh sessions and goals to pick up setupStatus changes
-			refreshSessions();
-			// Also refresh the goal dashboard's local state so the banner dismisses
+		remote.onGoalSetupEvent = async (goalId?: string) => {
+			// A session-scoped broadcast still changes the shared goal list. Refresh
+			// it for sidebar/landing consumers, then refresh any visible dashboard.
+			void refreshSessions();
 			const { refreshDashboardGoal } = await import("./goal-dashboard.js");
-			refreshDashboardGoal();
+			void refreshDashboardGoal(goalId);
 		};
 
 		remote.onBgProcessEvent = (msg) => {
@@ -2413,6 +2426,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.previewPanelMtime = 0;
 		state.previewPanelEntry = "";
 		state.previewPanelContentHash = "";
+		state.reviewGroups = new Map();
+		state.reviewActiveReviewId = "";
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
@@ -2427,6 +2442,12 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// a direct-record fetch remains a best-effort fallback after hydration.
 		let sessionDataAny: any = sessionData
 			|| state.archivedSessions?.find((s: any) => s.id === sessionId);
+		// Seed the cold-restore condition from the authoritative listing before the
+		// first editor render. The WS state snapshot will subsequently own updates
+		// and must explicitly publish null after verified recovery.
+		if (isModelSelectionRequiredRecord(sessionDataAny) && !remote.conditionSnapshotReceived) {
+			remote.state.condition = { ...sessionDataAny.condition };
+		}
 
 		// Bind draft autosave before setAgent can render an interactive editor.
 		_bindPromptDraftSession(sessionId);
@@ -2451,14 +2472,13 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// Initial workspace hydration has one owner and starts only after the
 		// transcript-bearing agent is bound, so REST latency cannot delay paint.
 		await hydrateSidePanelWorkspace(sessionId);
-		// Transcript replay may have observed the submitted-review marker before
-		// any server tabs existed locally. Replay that cleanup after hydration,
-		// including for a now-cached session, before stale-invocation teardown.
+		// Reconcile artifact content only after authoritative tabs are available.
+		// An exact primary wins over passive-replay tombstones; absence plus a
+		// tombstone remains suppressed by the restore below.
 		await remote.reconcileSubmittedReviewWorkspace();
 		if (isStale()) { cleanupRemote(remote); return; }
 		// The earlier restore runs before hydration so it cannot see cold-loaded
-		// review tabs. Restore again only after submitted tabs have been removed;
-		// unsubmitted persisted documents now have authoritative tabs to bind to.
+		// review tabs. Restore again now that authoritative presence is known.
 		reviewSources.restorePersistedReviewDocuments(sessionId, { select: true });
 
 		// Listen for suggest-goal events from assistant messages
@@ -2877,6 +2897,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 export async function createAndConnectSession(goalId?: string, roleId?: string, cwd?: string, worktree?: boolean, sandboxed?: boolean, projectId?: string): Promise<void> {
 	if (state.creatingSession) return;
+	const goal = goalId ? state.goals.find((item) => item.id === goalId) : undefined;
+	if (goal && !getGoalSetupUiState(goal).canStart) return;
 	state.creatingSession = true;
 	state.creatingSessionForGoalId = goalId || null;
 	renderApp();
@@ -2939,15 +2961,22 @@ export type ForkSessionResponse = {
  * session and either spins up a fresh worktree (`newWorktree: true`, default)
  * or reuses the source session's existing worktree (`newWorktree: false`).
  */
-export async function forkSession(source: GatewaySession, opts: { newWorktree: boolean }): Promise<void> {
+export async function forkSession(
+	source: GatewaySession,
+	opts: { newWorktree: boolean; entryId?: string },
+): Promise<void> {
 	if (state.creatingSession) return;
 	state.creatingSession = true;
 	state.creatingSessionForGoalId = source.goalId || null;
 	renderApp();
 	try {
+		const body: { newWorktree: boolean; entryId?: string } = {
+			newWorktree: opts.newWorktree,
+		};
+		if (opts.entryId !== undefined) body.entryId = opts.entryId;
 		const res = await gatewayFetch(`/api/sessions/${encodeURIComponent(source.id)}/fork`, {
 			method: "POST",
-			body: JSON.stringify({ newWorktree: opts.newWorktree }),
+			body: JSON.stringify(body),
 		});
 		if (!res.ok) {
 			const data = await res.json().catch(() => ({} as any));
@@ -3119,6 +3148,8 @@ export function backToSessions(): void {
 	state.assistantHasProposal = false;
 	state.isPreviewSession = false;
 	state.previewPanelFullscreen = false;
+	state.reviewGroups = new Map();
+	state.reviewActiveReviewId = "";
 	state.reviewDocuments = new Map();
 	state.reviewActiveTab = "";
 	state.reviewPanelOpen = false;
@@ -3145,6 +3176,8 @@ export function disconnectGateway(): void {
 	state.assistantHasProposal = false;
 	state.isPreviewSession = false;
 	state.previewPanelFullscreen = false;
+	state.reviewGroups = new Map();
+	state.reviewActiveReviewId = "";
 	state.reviewDocuments = new Map();
 	state.reviewActiveTab = "";
 	state.reviewPanelOpen = false;
@@ -3367,6 +3400,7 @@ function applyRemoteStateSnapshotForSession(sessionId: string, message: RemoteSt
 	const snapshot = message.snapshot;
 	const widget = ai as typeof ai & RemoteSnapshotWidgetState;
 	if (snapshot.source === "repository") {
+		remoteStateRequestOrder.supersede(remoteStateRequestKey("session", sessionId, "git"));
 		widget.remoteGitSnapshot = copyRemoteStateMetadata(snapshot);
 		// This frame is the completion corresponding to any cold REST envelope.
 		// Stop the provisional loading indicator even when failure retained no data.
@@ -3389,6 +3423,10 @@ function applyRemoteStateSnapshotForSession(sessionId: string, message: RemoteSt
 			if (!gitStatusPollTimer) startGitStatusPoll(sessionId);
 		}
 	} else {
+		remoteStateRequestOrder.supersede(remoteStateRequestKey("session", sessionId, "pr"));
+		const session = state.gatewaySessions.find((candidate) => candidate.id === sessionId);
+		const goalId = session?.teamGoalId ?? session?.goalId;
+		if (goalId) remoteStateRequestOrder.supersede(remoteStateRequestKey("sidebar", goalId, "pr"));
 		widget.remotePrSnapshot = copyRemoteStateMetadata(snapshot);
 		// A successful, explicit no-PR projection is represented as `data: null`.
 		// Failed/cold snapshots omit data and must preserve the last-good display.
@@ -3414,8 +3452,6 @@ function applyRemoteStateSnapshotForSession(sessionId: string, message: RemoteSt
 				ai.viewerCanMergeAsAdmin = data.viewerCanMergeAsAdmin === true;
 				ai.reviewDecision = typeof data.reviewDecision === "string" ? data.reviewDecision : undefined;
 				ai.headRefName = typeof data.headRefName === "string" ? data.headRefName : undefined;
-				const session = state.gatewaySessions.find((candidate) => candidate.id === sessionId);
-				const goalId = session?.teamGoalId ?? session?.goalId;
 				if (goalId) {
 					state.prStatusCache.set(goalId, {
 						state: data.state,
@@ -3507,6 +3543,7 @@ async function refreshGitStatusForSession(
 	if (prev) prev.abort();
 	const ctl = new AbortController();
 	_gitStatusAborts.set(sessionId, ctl);
+	const ticket = remoteStateRequestOrder.begin(remoteStateRequestKey("session", sessionId, "git"));
 
 	// Quiet recheck: for a session cached as git-less/empty (gitRepoKnown ===
 	// 'no' or 'hidden'), run the refresh silently in the background — do NOT flip
@@ -3531,7 +3568,7 @@ async function refreshGitStatusForSession(
 			return result;
 		},
 		sleep: abortableSleep,
-		isStale: () => activeSessionId() !== sessionId,
+		isStale: () => activeSessionId() !== sessionId || !remoteStateRequestOrder.isCurrent(ticket),
 		applyOk: (widget, data) => {
 			const next = withUntrackedStatusPreserved(widget.gitStatus as ClientGitStatus | undefined, data as ClientGitStatus, !!opts?.untracked);
 			widget.gitStatus = next;
@@ -3586,6 +3623,10 @@ async function refreshPrStatusForSession(sessionId: string, intent: "automatic" 
 
 	const ai = state.chatPanel?.agentInterface;
 	if (!ai) return;
+	const ticket = remoteStateRequestOrder.begin(remoteStateRequestKey("session", sessionId, "pr"));
+	const sidebarTicket = goalId
+		? remoteStateRequestOrder.begin(remoteStateRequestKey("sidebar", goalId, "pr"))
+		: undefined;
 	const clearPr = () => {
 		ai.prState = undefined;
 		ai.prUrl = undefined;
@@ -3603,10 +3644,12 @@ async function refreshPrStatusForSession(sessionId: string, intent: "automatic" 
 		// 204 is the established explicit no-PR result. Transport/HTTP failures
 		// retain the last-good PR display while the coordinator retries remotely.
 		if (!res) return;
+		const applySession = activeSessionId() === sessionId && remoteStateRequestOrder.isCurrent(ticket);
+		const applySidebar = !!goalId && !!sidebarTicket && remoteStateRequestOrder.isCurrent(sidebarTicket);
 		if (res.status === 204) {
-			if (activeSessionId() === sessionId) clearPr();
-			if (goalId) state.prStatusCache.delete(goalId);
-			renderApp();
+			if (applySession) clearPr();
+			if (applySidebar) state.prStatusCache.delete(goalId);
+			if (applySession || applySidebar) renderApp();
 			return;
 		}
 		if (!res.ok) return;
@@ -3614,7 +3657,7 @@ async function refreshPrStatusForSession(sessionId: string, intent: "automatic" 
 		const snapshot = parseRemoteStateSnapshot<Record<string, unknown>>(await res.json());
 		const data = snapshot.data;
 		let changed = false;
-		if (activeSessionId() === sessionId) {
+		if (activeSessionId() === sessionId && remoteStateRequestOrder.isCurrent(ticket)) {
 			const widget = ai as typeof ai & RemoteSnapshotWidgetState;
 			widget.remotePrSnapshot = copyRemoteStateMetadata(snapshot);
 			changed = true;
@@ -3632,8 +3675,10 @@ async function refreshPrStatusForSession(sessionId: string, intent: "automatic" 
 				ai.headRefName = typeof data.headRefName === "string" ? data.headRefName : undefined;
 			}
 		}
-		// Update goal grouping cache so sidebar reflects the new PR state immediately.
-		if (goalId && isRecord(data) && typeof data.state === "string") {
+		// Update goal grouping cache only while this REST result still owns the
+		// independent sidebar projection.
+		if (goalId && sidebarTicket && remoteStateRequestOrder.isCurrent(sidebarTicket)
+			&& isRecord(data) && typeof data.state === "string") {
 			state.prStatusCache.set(goalId, {
 				state: data.state,
 				...(sanitizePullRequestUrl(data.url) ? { url: sanitizePullRequestUrl(data.url) } : {}),
@@ -3644,7 +3689,8 @@ async function refreshPrStatusForSession(sessionId: string, intent: "automatic" 
 				...copyRemoteStateMetadata(snapshot),
 			});
 			changed = true;
-		} else if (goalId && data === null && !snapshot.stale && !snapshot.lastError) {
+		} else if (goalId && sidebarTicket && remoteStateRequestOrder.isCurrent(sidebarTicket)
+			&& data === null && !snapshot.stale && !snapshot.lastError) {
 			changed = state.prStatusCache.delete(goalId) || changed;
 		}
 		if (changed) renderApp();
