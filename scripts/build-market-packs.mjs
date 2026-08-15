@@ -127,12 +127,22 @@ const PACKS = [
 		],
 	},
 	{
-		// Graph Correctness Foundation: a dormant, process-free adapter contract.
-		// It has no graph store/runtime contributions; Graph Extension Runtime owns
-		// those later. The server-side bundle is pack-local for future consumers.
+		// Graph Extension Runtime: every host-side graph module is bundled into a
+		// self-contained pack asset. Provider hooks and pack routes import only
+		// these assets in their confined Node workers; graph artifacts remain in
+		// the pack-owned external host store rather than a checkout or sandbox.
 		pack: "code-intelligence",
 		entries: [
+			{ in: "graphify-harness.ts", out: "lib/graphify-harness.mjs", platform: "node" },
 			{ in: "graphify-runner.ts", out: "lib/graphify-runner.mjs", platform: "node" },
+			{ in: "graph-store.ts", out: "lib/graph-store.mjs", platform: "node" },
+			{ in: "graph-runtime.ts", out: "lib/graph-runtime.mjs", platform: "node" },
+			{ in: "graph-query.ts", out: "lib/graph-query.mjs", platform: "node" },
+			{ in: "graph-tools.ts", out: "lib/graph-tools.mjs", platform: "node" },
+			{ in: "graph-version.ts", out: "lib/graph-version.mjs", platform: "node" },
+			{ in: "provider.ts", out: "lib/provider.mjs", platform: "node" },
+			{ in: "routes.ts", out: "lib/routes.mjs", platform: "node" },
+			{ in: "panel.ts", out: "lib/panel.js" },
 		],
 	},
 	{

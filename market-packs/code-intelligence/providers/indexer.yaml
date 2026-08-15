@@ -1,0 +1,7 @@
+id: indexer
+kind: generic
+# Bundled from src/provider.ts. Hooks are declarative no-ops until EP-8 owns
+# service lifecycle execution; they never queue or start Graphify work.
+module: ../lib/provider.mjs
+hooks: [sessionSetup, afterTurn, goalProvisioned]
+budget: { maxTokens: 384, timeoutMs: 1000 }

@@ -1,0 +1,8 @@
+id: code-intelligence.route
+kind: route
+routeId: code-intelligence
+target:
+  panelId: code-intelligence-status
+# Enables the declared pack panel at #/ext/code-intelligence without creating a
+# bespoke core route. No user-supplied path, store identity, or rebuild setting
+# survives the deep link; the panel resolves all status through pack routes.
