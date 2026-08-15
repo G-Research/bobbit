@@ -1149,9 +1149,35 @@ export class GateStore {
 			const signal = gate.signals.find(s => s.id === signalId);
 			if (!signal) continue;
 			if (signal.verification.status !== "running") return; // already finalized
+			if (!strict) {
+				signal.verification = verification;
+				gate.updatedAt = Date.now();
+				return this.save([key]);
+			}
+
+			// A strict publication is an all-or-nothing lifecycle fence. Do not
+			// leave the terminal result visible in memory when its barrier rejects:
+			// callers retry only while this signal remains running.
+			const previousVerification = signal.verification;
+			const previousUpdatedAt = gate.updatedAt;
+			const mutationUpdatedAt = Date.now();
 			signal.verification = verification;
-			gate.updatedAt = Date.now();
-			return strict ? this.saveStrict([key]) : this.save([key]);
+			gate.updatedAt = mutationUpdatedAt;
+			return this.saveStrict([key]).catch(error => {
+				// A queued writer or lifecycle operation may have advanced this exact
+				// signal while the strict write was in flight. Compensate only our own
+				// still-current mutation; never roll a newer state backwards.
+				if (
+					this.gates.get(key) === gate
+					&& gate.signals.includes(signal)
+					&& signal.verification === verification
+					&& gate.updatedAt === mutationUpdatedAt
+				) {
+					signal.verification = previousVerification;
+					gate.updatedAt = previousUpdatedAt;
+				}
+				throw error;
+			});
 		}
 	}
 
