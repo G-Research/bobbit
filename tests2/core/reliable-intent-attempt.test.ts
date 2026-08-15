@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { normalizePersistedInFlightSteers } from "../../src/server/agent/session-store.js";
 import { PromptQueue } from "../../src/server/agent/prompt-queue.js";
 import { reconcilePersistedIntentRestore } from "../../src/server/agent/session-manager.js";
-import { foldAuthorSidecarRecords, initAuthorSidecarDir } from "../../src/server/agent/author-sidecar.js";
+import { foldAuthorSidecarRecords, initAuthorSidecarDir, readAuthorSidecar } from "../../src/server/agent/author-sidecar.js";
 import { LOCAL_USER_AUTHOR } from "../../src/shared/message-author.js";
 import {
 	barrier,
@@ -354,6 +354,128 @@ describe("reliable intent dispatch attempt settlement", () => {
 			state: "uncertain",
 			retryable: false,
 		});
+	});
+
+	it("keeps a queued task notification uncertain after an ambiguous prompt transport failure", async () => {
+		const prompt = vi.fn(async () => { throw new Error("socket closed after write"); });
+		const { manager, session, clock, storeUpdates } = useHarness({
+			rpcClient: {
+				prompt,
+				steer: vi.fn(async () => ({ success: true })),
+				getState: vi.fn(async () => ({ success: true, data: {} })),
+			},
+		});
+		const cancel = vi.spyOn(manager, "cancelPromptAuthorDispatch");
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const intentId = "task-complete:ambiguous";
+
+		await manager.enqueuePrompt(session.id, "Task T completed.", { source: "system", intentId });
+		expect(session.promptQueue.peek()).toMatchObject({ id: intentId, deliveryState: "queued" });
+		session.status = "idle";
+		manager.drainQueue(session);
+		await flushMicrotasks();
+
+		expect(prompt).toHaveBeenCalledTimes(1);
+		expect(session.promptQueue.toArray()).toEqual([]);
+		expect(ledgerFor(session, intentId)).toMatchObject({ intentId, state: "uncertain", retryable: false });
+		expect(manager.projectDeliveryOutbox(session.id)).toEqual([
+			expect.objectContaining({ id: intentId, deliveryState: "uncertain", retryable: false }),
+		]);
+		expect(cancel).not.toHaveBeenCalled();
+		expect(readAuthorSidecar(session.id).at(-1)?.settlement).toBeUndefined();
+		expect(storeUpdates.at(-1)).toMatchObject({
+			inFlightSteerTexts: [expect.objectContaining({ intentId, state: "uncertain", retryable: false })],
+		});
+
+		clock.advance(60_000);
+		await flushMicrotasks();
+		expect(prompt).toHaveBeenCalledTimes(1);
+	});
+
+	it("releases an ambiguous queued verifier receipt without retiring its prompt carrier", async () => {
+		const prompt = vi.fn(async () => { throw new Error("transport lost after write"); });
+		const { manager, session } = useHarness({
+			status: "idle",
+			rpcClient: {
+				prompt,
+				steer: vi.fn(async () => ({ success: true })),
+				getState: vi.fn(async () => ({ success: true, data: {} })),
+			},
+		});
+		const cancel = vi.spyOn(manager, "cancelPromptAuthorDispatch");
+		vi.spyOn(console, "error").mockImplementation(() => {});
+
+		const first = manager.enqueueVerifierPrompt(session.id, "Run verification.");
+		await expect(first.dispatched).rejects.toThrow(/transport outcome is uncertain/);
+		expect(prompt).toHaveBeenCalledTimes(1);
+		expect(ledgerFor(session, first.rowId)).toMatchObject({
+			intentId: first.rowId,
+			state: "uncertain",
+			retryable: false,
+		});
+		expect(session.promptQueue.toArray()).toEqual([]);
+		expect(cancel).not.toHaveBeenCalled();
+		expect(readAuthorSidecar(session.id).at(-1)?.settlement).toBeUndefined();
+
+		// The receipt is independent from the uncertain carrier: the verifier can
+		// start a new lifecycle occurrence while the original remains outbox-owned.
+		prompt.mockResolvedValueOnce({ success: true });
+		session.status = "idle";
+		const second = manager.enqueueVerifierPrompt(session.id, "Run verification again.");
+		await expect(second.dispatched).resolves.toBeUndefined();
+		expect(second.rowId).not.toBe(first.rowId);
+		expect(ledgerFor(session, first.rowId)).toMatchObject({ state: "uncertain", retryable: false });
+		expect(prompt).toHaveBeenCalledTimes(2);
+	});
+
+	it("cancels and marks a queued task notification failed only on success false", async () => {
+		const prompt = vi.fn(async () => ({ success: false, error: "preflight rejected" }));
+		const { manager, session } = useHarness({
+			rpcClient: {
+				prompt,
+				steer: vi.fn(async () => ({ success: true })),
+				getState: vi.fn(async () => ({ success: true, data: {} })),
+			},
+		});
+		const intentId = "task-complete:no-start";
+
+		await manager.enqueuePrompt(session.id, "Task T could not start.", { source: "system", intentId });
+		session.status = "idle";
+		manager.drainQueue(session);
+		await flushMicrotasks();
+
+		expect(prompt).toHaveBeenCalledTimes(1);
+		expect(ledgerFor(session, intentId)).toBeUndefined();
+		expect(session.promptQueue.toArray()).toEqual([
+			expect.objectContaining({ id: intentId, deliveryState: "failed", retryable: true }),
+		]);
+		expect(readAuthorSidecar(session.id).at(-1)?.settlement?.outcome).toBe("cancelled");
+	});
+
+	it("hard-stops a queued success false response when its author binding is already consumed", async () => {
+		const prompt = vi.fn(async () => ({ success: false, error: "preflight rejected" }));
+		const { manager, session, clock } = useHarness({
+			rpcClient: {
+				prompt,
+				steer: vi.fn(async () => ({ success: true })),
+				getState: vi.fn(async () => ({ success: true, data: {} })),
+			},
+		});
+		const intentId = "task-complete:consumed";
+		vi.spyOn(manager, "cancelPromptAuthorDispatch").mockReturnValue(false);
+
+		await manager.enqueuePrompt(session.id, "Task T may already have started.", { source: "system", intentId });
+		session.status = "idle";
+		manager.drainQueue(session);
+		await flushMicrotasks();
+
+		expect(prompt).toHaveBeenCalledTimes(1);
+		expect(session.promptQueue.toArray()).toEqual([]);
+		expect(ledgerFor(session, intentId)).toMatchObject({ state: "dispatching" });
+		expect(readAuthorSidecar(session.id).at(-1)?.settlement).toBeUndefined();
+		clock.advance(60_000);
+		await flushMicrotasks();
+		expect(prompt).toHaveBeenCalledTimes(1);
 	});
 });
 

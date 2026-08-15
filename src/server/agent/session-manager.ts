@@ -7763,8 +7763,11 @@ export class SessionManager {
 				const index = (session.inFlightSteerTexts as ReliableInFlightRecord[]).indexOf(attempt);
 				if (isPiCompactionActiveRejection(error)
 					&& index !== -1
-					&& attempt.state !== "received"
-					&& this.cancelPromptAuthorDispatch(session, prepared)) {
+					&& attempt.state !== "received") {
+					// Compaction is a proven no-start only while this exact author
+					// binding remains cancellable. A false result may mean Pi consumed
+					// the evidence concurrently, so it must not be redriven.
+					if (!this.cancelPromptAuthorDispatch(session, prepared)) return;
 					session.inFlightSteerTexts!.splice(index, 1);
 					this.enqueueReliableIntent(session, {
 						...reliableRow,
@@ -7783,53 +7786,12 @@ export class SessionManager {
 					return;
 				}
 
-				// Server-owned automatic rows retain the established direct recovery
-				// contract. Poison repair is stricter: its accepted user action must stop
-				// after an unobserved rejection until a later canonical turn releases its
-				// exact row. Verifier receipts likewise cannot be left uncertain because
-				// their receipt has a bounded retry lifecycle.
-				const poisonOwned = session.poisonRecoveryPromptDispatchQueueIds?.includes(reliableRow.id) === true;
-				const retainDirectRecovery = poisonOwned
-					|| reliableRow.verifierOwned === true
-					|| reliableRow.source !== "user";
-				if (retainDirectRecovery) {
-					if (index !== -1) session.inFlightSteerTexts!.splice(index, 1);
-					this.cancelPromptAuthorDispatch(session, prepared);
-					this.enqueueReliableIntent(session, {
-						...reliableRow,
-						deliveryState: "queued",
-						deliveryReason: undefined,
-						deliveryError: undefined,
-						retryable: false,
-						attemptId: prepared.attemptId,
-						dispatchEpoch: prepared.dispatchEpoch,
-					}, { front: true });
-					this.recoverPromptDispatch(
-						session,
-						[{
-							id: reliableRow.id,
-							text: reliableRow.text,
-							images: reliableRow.images,
-							attachments: reliableRow.attachments,
-							isSteered: reliableRow.isSteered,
-							source: reliableRow.source,
-							verifierOwned: reliableRow.verifierOwned,
-							author: reliableRow.author,
-							streamingBehavior: reliableRow.streamingBehavior,
-							coldStart: reliableRow.coldStart,
-							suppressTitleGen: reliableRow.suppressTitleGen,
-						}],
-						error instanceof Error ? error.message : String(error),
-						reliableRow.verifierOwned === true ? "reliable verifier prompt" : "reliable poison prompt",
-						[reliableRow.id],
-						poisonOwned,
-					);
-					throw error;
-				}
-
 				if (definiteRejection) {
+					// `success:false` is the bridge's authoritative no-start signal. Do
+					// not retire the carrier until its author binding is cancelled too:
+					// a false result means a concurrent Pi echo already owns it.
+					if (!this.cancelPromptAuthorDispatch(session, prepared)) return;
 					if (index !== -1) session.inFlightSteerTexts!.splice(index, 1);
-					this.cancelPromptAuthorDispatch(session, prepared);
 					this.enqueueReliableIntent(session, {
 						...reliableRow,
 						deliveryState: "failed",
@@ -7846,12 +7808,25 @@ export class SessionManager {
 					// apply their own bounded recovery policy.
 					if (reliableRow.source !== "user") throw error;
 					return;
-				} else if (index !== -1) {
+				}
+
+				// A thrown RPC error is ambiguous: Pi may have consumed the exact
+				// occurrence before transport failed. Keep that exact carrier durable
+				// and outbox-owned; never cancel, requeue, recover, or redrain it.
+				if (index !== -1) {
 					attempt.state = "uncertain";
 					attempt.retryable = false;
 				}
 				this.broadcastQueue(session);
-				console.error(`[session-manager] intent dispatch failed session=${session.id} intent=${reliableRow.id} attempt=${prepared.attemptId} outcome=${definiteRejection ? "failed" : "uncertain"}`);
+				// Verifier receipt completion is distinct from prompt occurrence
+				// settlement. Reject this receipt so the harness may create a fresh
+				// lifecycle row, while the old ambiguous carrier remains intact.
+				if (reliableRow.verifierOwned === true) {
+					this.settleVerifierPromptReceipt(session.id, reliableRow.id, new Error(
+						`Verifier prompt ${reliableRow.id} transport outcome is uncertain`,
+					));
+				}
+				console.error(`[session-manager] intent dispatch failed session=${session.id} intent=${reliableRow.id} attempt=${prepared.attemptId} outcome=uncertain`);
 				throw error;
 			}
 		}
