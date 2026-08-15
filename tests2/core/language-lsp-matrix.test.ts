@@ -102,7 +102,14 @@ describe("Language LSP capability matrix", () => {
 		};
 		const options = {
 			enabledLanguageIds: ["typescript"], runtime: "host" as const,
-			availableToolchainIds: ["node", "typescript-language-server", "typescript"], serviceKey,
+			toolchainProbeFacts: {
+				host: [
+					{ id: "node", reportedVersion: "22.0.0", compatible: true },
+					{ id: "typescript-language-server", reportedVersion: "4.3.0", compatible: true },
+					{ id: "typescript", reportedVersion: "5.0.0", compatible: true },
+				],
+			},
+			serviceKey,
 		};
 
 		expect(deriveLanguageCapabilityStatus(detection, options).lsp.state).toBe("unavailable");

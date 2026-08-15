@@ -6,6 +6,7 @@ import {
 	type CapabilityStatusOptions,
 	type LspServiceInstanceKey,
 	type LspServiceReadinessSnapshot,
+	type ToolchainProbeFact,
 } from "../../market-packs/code-intelligence/lib/capability-status.ts";
 import type { LanguageDetection } from "../../market-packs/code-intelligence/lib/language-detection.ts";
 
@@ -40,13 +41,21 @@ const readySnapshot: LspServiceReadinessSnapshot = {
 	versionCompatible: true,
 };
 
-function options(runtime: CapabilityRuntime, overrides: Partial<CapabilityStatusOptions> = {}): CapabilityStatusOptions {
+function compatibleProbeFacts(runtime: CapabilityRuntime): readonly ToolchainProbeFact[] {
 	const language = languageForId("typescript");
 	if (!language?.lsp) throw new Error("TypeScript LSP declaration is required for this test.");
+	return language.lsp[runtime].map((requirement) => ({
+		id: requirement.id,
+		reportedVersion: requirement.version ? "test-compatible-version" : undefined,
+		compatible: true,
+	}));
+}
+
+function options(runtime: CapabilityRuntime, overrides: Partial<CapabilityStatusOptions> = {}): CapabilityStatusOptions {
 	return {
 		enabledLanguageIds: ["typescript"],
 		runtime,
-		availableToolchainIds: language.lsp[runtime].map((requirement) => requirement.id),
+		toolchainProbeFacts: { [runtime]: compatibleProbeFacts(runtime) },
 		serviceKey,
 		serviceSnapshot: readySnapshot,
 		...overrides,
@@ -70,7 +79,7 @@ describe("LSP capability status", () => {
 	it("requires explicit enablement before evaluating toolchains or service readiness", () => {
 		const status = deriveLanguageCapabilityStatus(typescriptDetection, options("host", {
 			enabledLanguageIds: [],
-			availableToolchainIds: [],
+			toolchainProbeFacts: { host: [] },
 			serviceSnapshot: { ...readySnapshot, state: "failed" },
 		}));
 
@@ -83,7 +92,7 @@ describe("LSP capability status", () => {
 	});
 
 	it.each(["host", "sandbox"] as const)("reports each missing %s toolchain requirement", (runtime) => {
-		const status = deriveLanguageCapabilityStatus(typescriptDetection, options(runtime, { availableToolchainIds: [] }));
+		const status = deriveLanguageCapabilityStatus(typescriptDetection, options(runtime, { toolchainProbeFacts: { [runtime]: [] } }));
 		const language = languageForId("typescript");
 		if (!language?.lsp) throw new Error("TypeScript LSP declaration is required for this test.");
 
@@ -91,6 +100,50 @@ describe("LSP capability status", () => {
 		expect(status.lsp.requirements).toEqual(language.lsp[runtime]);
 		expect(status.lsp.missing).toEqual(language.lsp[runtime]);
 		expect(status.lsp.reason).toBe(language.lsp[runtime].map((requirement) => requirement.installHint).join(" "));
+	});
+
+	it.each(["host", "sandbox"] as const)("rejects %s probe facts whose IDs do not exactly match", (runtime) => {
+		const status = deriveLanguageCapabilityStatus(typescriptDetection, options(runtime, {
+			toolchainProbeFacts: {
+				[runtime]: compatibleProbeFacts(runtime).map((fact) => ({ ...fact, id: `${fact.id}-other` })),
+			},
+		}));
+
+		expect(status.lsp).toMatchObject({ state: "requires-toolchain" });
+		expect(status.lsp.missing).toEqual(status.lsp.requirements);
+	});
+
+	it.each(["host", "sandbox"] as const)("requires reported version evidence for constrained %s requirements", (runtime) => {
+		const status = deriveLanguageCapabilityStatus(typescriptDetection, options(runtime, {
+			toolchainProbeFacts: {
+				[runtime]: compatibleProbeFacts(runtime).map((fact) => ({ ...fact, reportedVersion: undefined })),
+			},
+		}));
+
+		expect(status.lsp).toMatchObject({ state: "requires-toolchain" });
+		expect(status.lsp.missing).toEqual(status.lsp.requirements);
+		expect(status.lsp.reason).toContain("has no reported version evidence");
+	});
+
+	it.each(["host", "sandbox"] as const)("requires compatible %s probe facts before checking the service", (runtime) => {
+		const status = deriveLanguageCapabilityStatus(typescriptDetection, options(runtime, {
+			toolchainProbeFacts: {
+				[runtime]: compatibleProbeFacts(runtime).map((fact) => ({ ...fact, compatible: false })),
+			},
+			serviceSnapshot: { ...readySnapshot, state: "failed" },
+		}));
+
+		expect(status.lsp).toMatchObject({ state: "requires-toolchain" });
+		expect(status.lsp.reason).toContain("is not compatible with");
+	});
+
+	it("does not use host probe facts to establish sandbox readiness", () => {
+		const status = deriveLanguageCapabilityStatus(typescriptDetection, options("sandbox", {
+			toolchainProbeFacts: { host: compatibleProbeFacts("host") },
+		}));
+
+		expect(status.lsp).toMatchObject({ state: "requires-toolchain" });
+		expect(status.lsp.missing).toEqual(status.lsp.requirements);
 	});
 
 	it.each([
@@ -155,7 +208,7 @@ describe("LSP capability status", () => {
 	});
 
 	function assertEmptyRequirementsAreUnavailable(runtime: CapabilityRuntime): void {
-		const status = deriveLanguageCapabilityStatus(typescriptDetection, options(runtime, { availableToolchainIds: [] }));
+		const status = deriveLanguageCapabilityStatus(typescriptDetection, options(runtime, { toolchainProbeFacts: { [runtime]: [] } }));
 		expect(status.lsp).toMatchObject({
 			state: "unavailable",
 			requirements: [],
@@ -164,8 +217,8 @@ describe("LSP capability status", () => {
 		});
 	}
 
-	it("reports ready only with enabled requirements and an exact compatible service", () => {
-		const status = deriveLanguageCapabilityStatus(typescriptDetection, options("sandbox"));
+	it.each(["host", "sandbox"] as const)("reports ready only with all compatible %s probe facts and an exact compatible service", (runtime) => {
+		const status = deriveLanguageCapabilityStatus(typescriptDetection, options(runtime));
 
 		expect(status.lsp).toMatchObject({
 			state: "ready",

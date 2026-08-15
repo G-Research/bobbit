@@ -27,16 +27,30 @@ export interface LspServiceReadinessSnapshot {
 	versionCompatible: boolean;
 }
 
+/**
+ * A platform-owned probe fact for one named runtime prerequisite. The pack
+ * never probes an executable or evaluates a version range itself.
+ */
+export interface ToolchainProbeFact {
+	/** Must exactly match the matrix requirement ID; aliases are not accepted. */
+	id: string;
+	/** Platform-reported version evidence, required for a constrained requirement. */
+	reportedVersion?: string;
+	/** Platform-owned compatibility evaluation for this exact requirement. */
+	compatible: boolean;
+}
+
 export interface CapabilityStatusOptions {
 	/** Explicit language enablement from the future platform settings contract. */
 	enabledLanguageIds: readonly string[];
 	/** Host and sandbox capability are never inferred from one another. */
 	runtime: CapabilityRuntime;
 	/**
-	 * Bounded, externally supplied probe results. This adapter performs no probe;
-	 * omitted IDs are honestly treated as unavailable.
+	 * Bounded, platform-owned probe facts keyed by their runtime. This adapter
+	 * performs no probing; missing, unversioned constrained, or incompatible
+	 * facts honestly require the named toolchain.
 	 */
-	availableToolchainIds?: readonly string[];
+	toolchainProbeFacts?: Readonly<Partial<Record<CapabilityRuntime, readonly ToolchainProbeFact[]>>>;
 	/**
 	 * The instance this status surface is about. A ready result requires this
 	 * exact key and a matching, compatible platform-owned readiness snapshot.
@@ -115,9 +129,12 @@ export function deriveLanguageCapabilityStatus(
 		);
 	}
 
-	const available = new Set((options.availableToolchainIds ?? []).map(normalizeLanguageId));
-	const missing = requirements.filter((requirement) => !available.has(normalizeLanguageId(requirement.id)));
-	if (missing.length > 0) {
+	const probeFailures = requirements.flatMap((requirement) => {
+		const probe = options.toolchainProbeFacts?.[options.runtime]?.find((fact) => fact.id === requirement.id);
+		const failure = toolchainProbeFailure(requirement, probe);
+		return failure ? [failure] : [];
+	});
+	if (probeFailures.length > 0) {
 		return {
 			component: detection.component,
 			languageId: language.id,
@@ -126,8 +143,8 @@ export function deriveLanguageCapabilityStatus(
 				state: "requires-toolchain",
 				actions: language.lsp.actions,
 				requirements,
-				missing,
-				reason: missing.map((requirement) => requirement.installHint).join(" "),
+				missing: probeFailures.map(({ requirement }) => requirement),
+				reason: probeFailures.map(({ reason }) => reason).join(" "),
 			},
 		};
 	}
@@ -152,6 +169,29 @@ export function deriveLanguageCapabilityStatus(
 }
 
 export const deriveCapabilityStatus = deriveLanguageCapabilityStatus;
+
+function toolchainProbeFailure(
+	requirement: ToolchainRequirement | SandboxLayerRequirement,
+	probe: ToolchainProbeFact | undefined,
+): { requirement: ToolchainRequirement | SandboxLayerRequirement; reason: string } | undefined {
+	if (!probe) {
+		return { requirement, reason: requirement.installHint };
+	}
+	if (requirement.version && (!probe.reportedVersion || !probe.reportedVersion.trim())) {
+		return {
+			requirement,
+			reason: `${requirement.label} has no reported version evidence for ${requirement.version.range}. ${requirement.installHint}`,
+		};
+	}
+	if (!probe.compatible) {
+		return {
+			requirement,
+			reason: requirement.version
+				? `${requirement.label} is not compatible with ${requirement.version.range}. ${requirement.installHint}`
+				: `${requirement.label} is not compatible with this LSP declaration. ${requirement.installHint}`,
+		};
+	}
+}
 
 function unavailableStatus(
 	detection: LanguageDetection,
