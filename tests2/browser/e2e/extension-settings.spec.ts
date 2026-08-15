@@ -226,7 +226,7 @@ test.describe("Market extension settings", () => {
 		const languageOptions = languages.getByTestId("market-settings-multi-enum-option");
 		await expect(languageOptions).toHaveCount(4);
 		expect(await languageOptions.evaluateAll(options => options.map(option => option.getAttribute("data-option-value")))).toEqual(["typescript", "javascript", "python", "rust"]);
-		await expect(languageOptions).toHaveAttribute("type", "checkbox");
+		expect(await languageOptions.evaluateAll(options => options.map(option => option.getAttribute("type")))).toEqual(["checkbox", "checkbox", "checkbox", "checkbox"]);
 		const typescript = languages.locator('[data-testid="market-settings-multi-enum-option"][data-option-value="typescript"]');
 		const javascript = languages.locator('[data-testid="market-settings-multi-enum-option"][data-option-value="javascript"]');
 		const python = languages.locator('[data-testid="market-settings-multi-enum-option"][data-option-value="python"]');
