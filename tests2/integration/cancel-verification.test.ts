@@ -136,6 +136,16 @@ async function getActiveVerifications(goalId: string): Promise<any[]> {
 	return data.verifications || [];
 }
 
+/**
+ * Cancelled rows remain in the harness ownership map until exact cleanup
+ * settles, but are deliberately hidden by the public live-verifications API.
+ */
+function getCancellationOwnershipRecord(gateway: any, signalId: string): ActiveVerification {
+	const record = gateway.teamManager.verificationHarness!.activeVerifications.get(signalId) as ActiveVerification | undefined;
+	expect(record, "CANCELLATION_OWNERSHIP_RECORD_MUST_SURVIVE_UNTIL_EXACT_CLEANUP").toBeTruthy();
+	return record!;
+}
+
 async function cancelSlowVerification(goalId: string): Promise<Response> {
 	return apiFetch(`/api/goals/${goalId}/gates/slow-gate/cancel-verification`, { method: "POST" });
 }
@@ -533,6 +543,7 @@ test.describe("Cancel Verification API", () => {
 			setup = await createSlowWorkflowGoal("Shelve Running Verification");
 			const signalRes = await signalSlowVerification(setup.goalId, "shelve while running");
 			expect(signalRes.status).toBe(201);
+			const signalId = (await signalRes.json() as SlowGateSignal).signal.id;
 			await runner.waitForSpawn(0);
 
 			const shelveRequest = apiFetch(`/api/goals/${setup.goalId}`, {
@@ -547,10 +558,11 @@ test.describe("Cancel Verification API", () => {
 			expect(shelvedGoalBody.state).toBe("shelved");
 			const beforeCleanup = await getGateState(setup.goalId);
 			expect(beforeCleanup.status, "SHELVE_MUST_NOT_MANUFACTURE_A_FAILED_GATE_WHILE_EXACT_CLEANUP_IS_PENDING").toBe("pending");
-			expect(beforeCleanup.signals.at(-1)?.verification.status, "SHELVE_MUST_NOT_PUBLISH_CANCELLED_BEFORE_EXACT_CLEANUP").toBe("running");
-			expect((await getActiveVerifications(setup.goalId))[0]).toMatchObject({
+			expect(beforeCleanup.signals.find(signal => signal.id === signalId)?.verification.status, "SHELVE_MUST_NOT_PUBLISH_CANCELLED_BEFORE_EXACT_CLEANUP").toBe("running");
+			expect(getCancellationOwnershipRecord(gateway, signalId)).toMatchObject({
 				cancellation: { cause: "shelved", requestedAt: expect.any(Number) },
 			});
+			expect(await getActiveVerifications(setup.goalId), "CANCELLED_OWNERSHIP_MUST_BE_EXCLUDED_FROM_PUBLIC_LIVE_API").toEqual([]);
 
 			runner.settle(0);
 			const gate = await observeUntil(
@@ -575,7 +587,9 @@ test.describe("Cancel Verification API", () => {
 		gateway.teamManager.verificationHarness!.commandStepRunner = runner;
 		try {
 			setup = await createSlowWorkflowGoal("Complete Running Verification");
-			expect((await signalSlowVerification(setup.goalId, "complete while running")).status).toBe(201);
+			const signalRes = await signalSlowVerification(setup.goalId, "complete while running");
+			expect(signalRes.status).toBe(201);
+			const signalId = (await signalRes.json() as SlowGateSignal).signal.id;
 			await runner.waitForSpawn(0);
 
 			const completeRequest = apiFetch(`/api/goals/${setup.goalId}`, {
@@ -590,10 +604,11 @@ test.describe("Cancel Verification API", () => {
 			expect(completedGoalBody.state).toBe("complete");
 			const beforeCleanup = await getGateState(setup.goalId);
 			expect(beforeCleanup.status).toBe("pending");
-			expect(beforeCleanup.signals.at(-1)?.verification.status).toBe("running");
-			expect((await getActiveVerifications(setup.goalId))[0]).toMatchObject({
+			expect(beforeCleanup.signals.find(signal => signal.id === signalId)?.verification.status).toBe("running");
+			expect(getCancellationOwnershipRecord(gateway, signalId)).toMatchObject({
 				cancellation: { cause: "goal-complete", requestedAt: expect.any(Number) },
 			});
+			expect(await getActiveVerifications(setup.goalId), "CANCELLED_OWNERSHIP_MUST_BE_EXCLUDED_FROM_PUBLIC_LIVE_API").toEqual([]);
 
 			runner.settle(0);
 			const gate = await observeUntil(
