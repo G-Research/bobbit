@@ -2,9 +2,9 @@
 
 ## Status
 
-The Code Intelligence pack contains a **dormant**, disabled-by-default language-LSP slice. It supplies pack-local declarations, bounded detection, status derivation, request validation, sandbox-requirement derivation, and six read-only tool *contracts*. The pack manifest currently contributes no runtime, tools, or UI, so it does **not** start a language server, install a toolchain, display an import offer, or expose a live LSP client.
+The Code Intelligence pack contains a **dormant**, disabled-by-default language-LSP slice. It supplies pack-local declarations, bounded detection, status derivation, request validation, sandbox-requirement derivation, and six read-only tool *contracts*. When the Code Intelligence pack is enabled, its existing structural-search and graph tools plus status panel are live; this does **not** make the LSP contracts live. The LSP slice does not start a language server, install a toolchain, create an import offer, or expose a live LSP client.
 
-This separation preserves truthful capability reporting while the Extension Platform adds the public settings, decision, and managed-service contracts that own activation and lifecycle. For the implementation design and ownership history, see [the design document](design/language-lsp-intelligence.md).
+The current post-import enablement is a server-scoped Marketplace switch, not a per-project or per-language decision. The enabled panel can display bounded language evidence and the derived LSP state, but it cannot turn detection into consent or readiness. This separation preserves truthful capability reporting while the Extension Platform adds the public settings, decision, and managed-service contracts that own activation and lifecycle. See [Code Intelligence](code-intelligence.md) for the user-facing status and review workflow, or [the design document](design/language-lsp-intelligence.md) for implementation ownership.
 
 ## Capability model
 
@@ -50,7 +50,7 @@ For explicitly enabled, detected languages, the sandbox adapter derives generic,
 
 A future integration may pass these declarations through the existing generic `buildSandboxImage` path after the platform accepts a general image-requirement contract. There is no LSP-specific sandbox build or toolchain installation path today.
 
-## Why activation remains blocked
+## Why live LSP activation remains blocked
 
 Runtime and UI activation waits for three public Extension Platform contracts:
 
@@ -58,7 +58,7 @@ Runtime and UI activation waits for three public Extension Platform contracts:
 2. **Import decision:** an import-compatible EP-11 decision event that carries detected-language data for an explicit operator offer.
 3. **Managed worktree service:** an EP-8 lifecycle keyed by project, component, worktree, and language, with platform-owned caps, idle shutdown, cleanup, and fresh `service.manage` fencing.
 
-Until those contracts are root-published and adopted, the pack must not create private settings, grants, decisions, prompt injections, import UI hooks, sandbox builders, process tables, detached children, or `BgProcessManager` fallbacks. In particular, there is no browser enablement offer, saved enablement choice, live client, server process, or automatic install to document as available.
+Until those contracts are root-published and adopted, the pack must not create private settings, grants, decisions, prompt injections, import UI hooks, sandbox builders, process tables, detached children, or `BgProcessManager` fallbacks. In particular, there is no per-project browser enablement offer, saved per-language choice, live client, server process, or automatic install to document as available.
 
 ## Adding a language
 
@@ -73,5 +73,6 @@ The registered Test Suite v2 coverage validates the dormant slice rather than si
 - Core tests validate matrix data, structural-search/LSP asymmetry, bounded and truncation-aware component detection, runtime-specific compatible probe facts, exact readiness identity, inert tool registration, request containment and reason sanitization, and pure sandbox-layer derivation.
 - Linked-worktree E2E coverage creates a real Git worktree, verifies that detection and serialized URIs use its component root rather than the primary checkout, rejects an escape attempt, and removes the worktree without LSP-owned state.
 - Docker-gated E2E coverage uses the ordinary project sandbox and linked worktree. It verifies that Go remains structurally searchable while named Go and `gopls` sandbox requirements degrade honestly, with no LSP process, private state, or checkout mutation.
+- The integrated browser journey activates the pack at server scope after a normal import, displays TypeScript and Go as non-ready declared capabilities, performs a real structural query and source read, reloads, then disables and cleans up. It does not simulate a live LSP or a per-language enablement choice.
 
-Run the unit suite with `npm run test:unit` and the real worktree/Docker coverage with `npm run test:e2e`. There is no browser journey for this slice yet because the required import decision and UI activation contracts are not available.
+Run the unit suite with `npm run test:unit`, the browser journey with `npm run test:browser`, and real worktree/Docker coverage with `npm run test:e2e`.

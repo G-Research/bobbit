@@ -1,8 +1,8 @@
 # Graphify correctness foundation guide
 
-Phase 0 is a test-only correctness contract for a future Graph Extension Runtime. It prevents a linked-worktree invocation from publishing a graph built from the wrong checkout or an incomplete corpus. It is not an installed Graphify integration, graph store, scheduler, or user-facing indexing feature.
+This foundation is the checked-in correctness contract behind Code Intelligence graph integration. It prevents a linked-worktree invocation from publishing a graph built from the wrong checkout or an incomplete corpus. The pack now has an optional status panel and bounded graph-query surfaces, but the foundation is not evidence that installed Graphify executed or that an automatic indexer/service exists.
 
-For the ownership boundary and rationale, see the [design contract](design/graphify-correctness-foundation.md). This guide describes the checked-in adapter, fixtures, and evidence developers maintain.
+For activation, status meanings, reviewer guidance, and the explicit `v1 has no cross-repo edges` limitation, see [Code Intelligence](code-intelligence.md). For the ownership boundary and rationale, see the [design contract](design/graphify-correctness-foundation.md). This guide describes the checked-in adapter, fixtures, and evidence developers maintain.
 
 ## What the contract pins
 
@@ -18,7 +18,7 @@ The in-memory harness pins logical metadata and promotion rules:
 - A child derives from its immediate parent-derived base. Advancing a parent makes that snapshot and all descendants stale; stale snapshots are never current.
 - Deltas do not cluster. At the supplied measured threshold, derived labels remain `base-derived`; only a changed-node count above it reclusters.
 
-Production publication, durable metadata, lifecycle hooks, queues, UI, and Graphify installation/version resolution remain outside this package.
+Automatic lifecycle processing and a Graphify installation/service owner remain outside this foundation. Code Intelligence's existing host-side store, declared status route, read-only graph tools, and panel consume the same containment and currentness rules without starting work. A manual rebuild is explicitly unavailable until the platform supplies its lifecycle owner.
 
 ## Evidence locations
 
@@ -61,12 +61,14 @@ The E2E proof requires local `git` and `python3`. It creates and removes a tempo
 
 ## Interpret and refresh measurements
 
-The checked-in record separates two facts:
+The checked-in record separates two facts. This distinction is essential because the current capture does **not** prove Graphify performance:
 
 1. `graphify.available: false` and the `measurement.status: "unavailable"` entry record that `python3 -c 'import graphify'` failed in the environment that captured the file.
 2. `contractFixture` and its five rows are real timings from the Python contract fixture. They measure fixture base/clone copies, the injected no-cluster delta, size scan, and TypeScript `export` query scan.
 
 Therefore these rows are reproducible contract-fixture evidence, not Graphify performance or proof that a Graphify package executed. Do not replace the unavailable status with fixture output or describe the row values as Graphify benchmarks.
+
+The companion linked-worktree record measures code-only and code-plus-docs contract-fixture scenarios with base, clone, no-cluster delta, query p50/p95, graph size, and a zero worktree-guard count. See [Code Intelligence](code-intelligence.md#graph-storage-and-graphify-availability) for the recorded values and interpretation.
 
 To emit a fresh fixture measurement for review, run:
 
