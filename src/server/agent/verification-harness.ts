@@ -4759,9 +4759,16 @@ export class VerificationHarness {
 		);
 	}
 
-	/** A seeded phase-0 `running` row has no process ownership until spawn succeeds. */
+	/**
+	 * Explicit spawn lifecycle state is authoritative: once a row says spawning
+	 * or spawned, a process may exist even if a crash occurred before its exact
+	 * identity was persisted. Only an explicit queued state proves no spawn was
+	 * attempted. Legacy rows retain their identity-evidence compatibility.
+	 */
 	private _commandStepHasSpawnOwnership(step: ActiveVerification["steps"][number]): boolean {
-		return step.commandSpawnedAt !== undefined
+		return step.commandSpawnState === "spawning"
+			|| step.commandSpawnState === "spawned"
+			|| step.commandSpawnedAt !== undefined
 			// Legacy/recovered rows predate `commandSpawnedAt`; their durable exact
 			// identity records still prove that a command was actually admitted.
 			|| step.pid !== undefined
@@ -4771,8 +4778,9 @@ export class VerificationHarness {
 	}
 
 	private _commandStepRequiresKillCleanup(step: ActiveVerification["steps"][number]): boolean {
+		const explicitSpawnAttempt = step.commandSpawnState === "spawning" || step.commandSpawnState === "spawned";
 		return !this._commandStepIsQueued(step) && step.type === "command" && (
-			(step.status === "running" && this._commandStepHasSpawnOwnership(step)) ||
+			((step.status === "running" || explicitSpawnAttempt) && this._commandStepHasSpawnOwnership(step)) ||
 			(!!step.killRequestedAt && !step.killCompletedAt) ||
 			!!step.sentinelCleanupPending ||
 			!!step.containerPayloadCleanupPending ||
@@ -4786,10 +4794,13 @@ export class VerificationHarness {
 		active.cancelReason ??= reason;
 		for (const step of active.steps) {
 			if (step.type !== "command" || this._commandStepIsQueued(step)) continue;
-			if (step.status !== "running" && !step.killRequestedAt) continue;
+			const explicitSpawnAttempt = step.commandSpawnState === "spawning" || step.commandSpawnState === "spawned";
+			if (step.status !== "running" && !step.killRequestedAt && !explicitSpawnAttempt) continue;
 			// A phase starts as `running` before its command acquires a permit.
 			// Cancellation may land in that display-only window; never manufacture
-			// an exact-cleanup obligation for a command that never spawned.
+			// an exact-cleanup obligation for a command that never spawned. Explicit
+			// spawning/spawned state is the exception: it records that this boundary
+			// was crossed even if the exact identity was not persisted before a crash.
 			if (!step.killRequestedAt && !this._commandStepHasSpawnOwnership(step)) continue;
 			step.killRequestedAt ??= now;
 			step.killReason = reason;
