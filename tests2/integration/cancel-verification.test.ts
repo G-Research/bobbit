@@ -1262,7 +1262,7 @@ test.describe("Cancel Verification API", () => {
 			const beforeGate = await getGateState(setup.goalId);
 			const oldOwner = getCancellationOwnershipRecord(gateway, firstSignalId);
 			const beforeOwner = structuredClone(oldOwner);
-			const beforePersisted = fs.readFileSync(harness._persistPath, "utf8");
+			const beforePersisted = structuredClone(harness._loadActive());
 			cleanupSpy = vi.spyOn(harness, "_startCancelledVerificationCleanup");
 			persistSpy = vi.spyOn(harness, "_persistActive").mockReturnValue(false);
 
@@ -1272,8 +1272,8 @@ test.describe("Cancel Verification API", () => {
 
 			expect(getCancellationOwnershipRecord(gateway, firstSignalId),
 				"FAILED_REPLACEMENT_FENCE_MUST_RESTORE_OLD_OWNER_AND_KILL_INTENTS").toEqual(beforeOwner);
-			expect(fs.readFileSync(harness._persistPath, "utf8"),
-				"FAILED_REPLACEMENT_FENCE_MUST_NOT_REWRITE_DURABLE_OLD_STATE").toBe(beforePersisted);
+			expect(harness._loadActive(),
+				"FAILED_REPLACEMENT_FENCE_MUST_NOT_REWRITE_DURABLE_OLD_STATE").toEqual(beforePersisted);
 			expect(await getGateState(setup.goalId),
 				"FAILED_REPLACEMENT_FENCE_MUST_NOT_MUTATE_SIGNAL_CONTENT_OR_GATE").toEqual(beforeGate);
 			expect(runner.children[0]?.killed,
@@ -1308,8 +1308,8 @@ test.describe("Cancel Verification API", () => {
 			const originalBegin = harness.beginVerification.bind(harness);
 			const persistedCauses: any[] = [];
 			beginSpy = vi.spyOn(harness, "beginVerification").mockImplementation((signal: any, gate: any) => {
-				const persisted = JSON.parse(fs.readFileSync(harness._persistPath, "utf8"));
-				persistedCauses.push(persisted.verifications.find((record: any) => record.signalId === firstSignalId)?.cancellation);
+				const persisted = harness._loadActive();
+				persistedCauses.push(persisted.find((record: any) => record.signalId === firstSignalId)?.cancellation);
 				return originalBegin(signal, gate);
 			});
 
