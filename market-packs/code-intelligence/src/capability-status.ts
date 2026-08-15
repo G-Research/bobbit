@@ -7,7 +7,25 @@ import {
 import type { LanguageDetection } from "./language-detection.ts";
 
 export type CapabilityRuntime = "host" | "sandbox";
-export type LspCapabilityState = "disabled" | "requires-toolchain" | "ready" | "unsupported";
+export type LspCapabilityState = "disabled" | "requires-toolchain" | "ready" | "unavailable" | "unsupported";
+
+/** Exact EP-8 instance identity. The pack only compares this read-only data. */
+export interface LspServiceInstanceKey {
+	projectId: string;
+	component: string;
+	worktreePath: string;
+	languageId: string;
+}
+
+/** Read-only platform service state; this adapter never creates or updates it. */
+export interface LspServiceReadinessSnapshot {
+	key: LspServiceInstanceKey;
+	state: "ready" | "starting" | "failed" | "stopped";
+	serverId: string;
+	serverVersion: string;
+	/** Platform-owned evaluation of the matrix server version constraint. */
+	versionCompatible: boolean;
+}
 
 export interface CapabilityStatusOptions {
 	/** Explicit language enablement from the future platform settings contract. */
@@ -19,6 +37,12 @@ export interface CapabilityStatusOptions {
 	 * omitted IDs are honestly treated as unavailable.
 	 */
 	availableToolchainIds?: readonly string[];
+	/**
+	 * The instance this status surface is about. A ready result requires this
+	 * exact key and a matching, compatible platform-owned readiness snapshot.
+	 */
+	serviceKey?: LspServiceInstanceKey;
+	serviceSnapshot?: LspServiceReadinessSnapshot;
 }
 
 export interface LspCapabilityStatus {
@@ -95,6 +119,22 @@ export function deriveLanguageCapabilityStatus(
 		};
 	}
 
+	const readiness = matchingReadyService(options, detection.component, language.id, language.lsp.server.id);
+	if (!readiness.ready) {
+		return {
+			component: detection.component,
+			languageId: language.id,
+			structuralSearch: detection.structuralSearch,
+			lsp: {
+				state: "unavailable",
+				actions: language.lsp.actions,
+				requirements,
+				missing: [],
+				reason: readiness.reason,
+			},
+		};
+	}
+
 	return {
 		component: detection.component,
 		languageId: language.id,
@@ -104,12 +144,46 @@ export function deriveLanguageCapabilityStatus(
 			actions: language.lsp.actions,
 			requirements,
 			missing: [],
-			reason: `${language.lsp.server.id} requirements are available in the selected ${options.runtime} runtime.`,
+			reason: `${language.lsp.server.id} is ready for this linked-worktree component.`,
 		},
 	};
 }
 
 export const deriveCapabilityStatus = deriveLanguageCapabilityStatus;
+
+function matchingReadyService(
+	options: CapabilityStatusOptions,
+	component: string,
+	languageId: string,
+	serverId: string,
+): { ready: true } | { ready: false; reason: string } {
+	const key = options.serviceKey;
+	const snapshot = options.serviceSnapshot;
+	if (!key || !snapshot) {
+		return { ready: false, reason: "The managed LSP service has no readiness snapshot for this linked-worktree component." };
+	}
+	if (!validServiceKey(key) || !validServiceKey(snapshot.key)
+		|| key.component !== component || normalizeLanguageId(key.languageId) !== languageId
+		|| snapshot.key.projectId !== key.projectId || snapshot.key.component !== key.component
+		|| snapshot.key.worktreePath !== key.worktreePath || normalizeLanguageId(snapshot.key.languageId) !== languageId) {
+		return { ready: false, reason: "The managed LSP service snapshot is not bound to this exact project, component, worktree, and language." };
+	}
+	if (snapshot.state !== "ready") {
+		return { ready: false, reason: "The managed LSP service is not ready for this linked-worktree component." };
+	}
+	if (typeof snapshot.serverId !== "string" || typeof snapshot.serverVersion !== "string"
+		|| normalizeLanguageId(snapshot.serverId) !== normalizeLanguageId(serverId) || !snapshot.serverVersion.trim() || !snapshot.versionCompatible) {
+		return { ready: false, reason: "The managed LSP service is not version-compatible with this language declaration." };
+	}
+	return { ready: true };
+}
+
+function validServiceKey(key: LspServiceInstanceKey): boolean {
+	return typeof key.projectId === "string" && Boolean(key.projectId.trim())
+		&& typeof key.component === "string" && Boolean(key.component.trim())
+		&& typeof key.worktreePath === "string" && Boolean(key.worktreePath.trim())
+		&& typeof key.languageId === "string" && Boolean(key.languageId.trim());
+}
 
 function normalizeLanguageId(value: string): string {
 	return value.trim().toLowerCase();
