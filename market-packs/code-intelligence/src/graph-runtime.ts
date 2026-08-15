@@ -1,7 +1,10 @@
 import * as fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { GraphQueryService, type GraphComponentGraph, type GraphComponentSnapshot, type GraphNode, type GraphQueryOptions, type GraphQueryResponse } from "./graph-query.js";
+import { deriveLanguageCapabilityStatus, type CapabilityRuntime, type LspServiceReadinessSnapshot, type ToolchainProbeFact } from "../lib/capability-status.ts";
+import { detectComponentLanguages, type LanguageDetectionEvidence } from "../lib/language-detection.ts";
+import { languageForId } from "../lib/language-matrix.ts";
+import { GraphQueryService, type GraphComponentGraph, type GraphComponentSnapshot, type GraphNode, type GraphQueryOptions, type GraphQueryResponse, type GraphState } from "./graph-query.js";
 import { GraphStore, type GraphComponent, type GraphMeta, type GraphSlot, type GraphSnapshot } from "./graph-store.js";
 
 /**
@@ -58,6 +61,12 @@ export interface GraphManualRebuildResult {
 const DEFAULT_ORIENTATION_CHARS = 800;
 const AUTOMATION_UNAVAILABLE = "Automatic lifecycle processing is unavailable pending EP-8.";
 
+/** These are guidance, not capability evidence. Component state stays authoritative. */
+export const REVIEW_GUIDANCE = [
+	"Graph relationships are breadth-first leads; LSP locations are precise only when ready in the active worktree.",
+	"Open and read every cited source or caller before changing or approving code.",
+] as const;
+
 /** Lifecycle adapter with no autonomous execution capability. */
 export class GraphRuntime<Context = GraphContext> {
 	private readonly orientationChars: number;
@@ -85,7 +94,7 @@ export class GraphRuntime<Context = GraphContext> {
 					authority: "generic",
 					priority: 10,
 					reason: `${state} graph index available`,
-					content: truncate(`${state}: ${detail || "graph index available"}. ${AUTOMATION_UNAVAILABLE} Results are leads; verify source before acting.`, this.orientationChars),
+					content: truncate(`${state}: ${detail || "graph index available"}. ${AUTOMATION_UNAVAILABLE} ${REVIEW_GUIDANCE.join(" ")}`, this.orientationChars),
 				});
 			}
 			return { blocks };
@@ -117,7 +126,19 @@ function truncate(value: string, cap: number): string { return value.length <= c
 // Providers, routes, and tools use only this host-side facade. The GraphStore
 // is durable; no lifecycle state is held in a queue or background worker.
 
+export interface GraphRuntimeCapabilityContext {
+	/** Platform-selected runtime facts. Detection never selects this implicitly. */
+	runtime?: CapabilityRuntime;
+	/** Explicit platform language enablement; an absent value remains disabled. */
+	enabledLanguageIds?: readonly string[];
+	/** Read-only, platform-owned prerequisite facts. No executable is probed here. */
+	toolchainProbeFacts?: Readonly<Partial<Record<CapabilityRuntime, readonly ToolchainProbeFact[]>>>;
+	/** Read-only exact-service facts. No service is started or retained here. */
+	serviceSnapshots?: readonly LspServiceReadinessSnapshot[];
+}
+
 export interface GraphRuntimeFacadeContext extends GraphContext {
+	/** Server-owned selected session directory; never supplied in a pack request. */
 	workingDir?: string;
 	worktreePath?: string;
 	worktreeId?: string;
@@ -133,6 +154,8 @@ export interface GraphRuntimeFacadeContext extends GraphContext {
 		/** Reserved for server-declared configured-component fan-out. */
 		components?: readonly GraphComponent[];
 	};
+	/** Optional server-owned platform facts; absent facts never imply LSP readiness. */
+	codeIntelligenceCapabilities?: GraphRuntimeCapabilityContext;
 }
 
 export interface GraphRuntimeRequest {
@@ -152,9 +175,39 @@ export interface GraphRuntimeRequest {
 	maxSnippets?: number;
 }
 
+export type GraphAggregateState = "current" | "updating" | "limited" | "not-current" | "no-graph-published";
+
+export interface CodeIntelligenceLanguageStatus {
+	languageId: string;
+	label: string;
+	evidence: LanguageDetectionEvidence;
+	structuralSearch: "available" | "unsupported";
+	lsp: ReturnType<typeof deriveLanguageCapabilityStatus>["lsp"];
+}
+
+/** Serializable, path-free component projection shared by status and orientation. */
+export interface CodeIntelligenceComponentStatus {
+	component: GraphComponent;
+	state: GraphState | "unpublished";
+	/** Kept for established graph status consumers. */
+	revision?: string;
+	revisions?: { baseRef: string; baseRev: string; headRev: string };
+	staleReason?: GraphStaleReason;
+	roots: readonly { path: string; tier: "code" | "docs" }[];
+	counts?: { nodes: number; edges: number; bytes: number };
+	timing?: { buildMs: number; cloneMs?: number; deltaMs?: number; codeMs?: number; codeDocsMs?: number };
+	languages: readonly CodeIntelligenceLanguageStatus[];
+}
+
 export interface GraphRuntimeStatus {
-	state: "fresh" | "building" | "stale" | "failed" | "base-fallback";
-	components: GraphQueryResponse["components"];
+	/** Conservative aggregate state; component state remains authoritative. */
+	state: GraphAggregateState;
+	aggregate: { state: GraphAggregateState; label: "Current" | "Updating" | "Limited" | "Not current" | "No graph published" };
+	components: CodeIntelligenceComponentStatus[];
+	/** Flat capability rows are convenient for a one-component session panel. */
+	languages: readonly CodeIntelligenceLanguageStatus[];
+	runtime: CapabilityRuntime;
+	guidance: readonly string[];
 	lifecycle: { automaticProcessing: "unavailable"; pending: "EP-8"; message: string };
 	noCrossRepoEdges: true;
 	warning: "v1 has no cross-repo edges";
@@ -174,7 +227,13 @@ export class GraphRuntimeFacade {
 	}
 
 	goalProvisioned(context: GraphRuntimeFacadeContext): Promise<GraphHookResult> { return this.lifecycle.goalProvisioned(context); }
-	sessionSetup(context: GraphRuntimeFacadeContext): Promise<GraphHookResult> { return this.lifecycle.sessionSetup(context); }
+	/** Reads the same declared status projection used by the route; it starts nothing. */
+	async sessionSetup(context: GraphRuntimeFacadeContext): Promise<GraphHookResult> {
+		try {
+			const status = await this.status(context);
+			return orientationFromStatus(status);
+		} catch { return emptyResult(); }
+	}
 	afterTurn(context: GraphRuntimeFacadeContext): Promise<GraphHookResult> { return this.lifecycle.afterTurn(context); }
 
 	async query(context: GraphRuntimeFacadeContext, request: GraphRuntimeRequest): Promise<GraphQueryResponse> {
@@ -192,14 +251,23 @@ export class GraphRuntimeFacade {
 	}
 
 	async status(context: GraphRuntimeFacadeContext, request: GraphRuntimeRequest = {}): Promise<GraphRuntimeStatus> {
-		const response = await this.query(context, { ...request, op: "status" });
+		// Query status remains available through `query`; this richer projection is
+		// intentionally route-facing and uses only server-derived target identities.
+		const targets = selectedTargets(this.targets(context), request);
+		const components = await Promise.all(targets.map(target => this.componentStatus(context, target)));
+		const aggregate = aggregateGraphState(components);
+		const runtime = capabilityFacts(context).runtime;
 		return {
-			state: response.components[0]?.state ?? "stale",
-			components: response.components,
+			state: aggregate.state,
+			aggregate,
+			components,
+			languages: components.flatMap(component => component.languages),
+			runtime,
+			guidance: REVIEW_GUIDANCE,
 			lifecycle: { automaticProcessing: "unavailable", pending: "EP-8", message: AUTOMATION_UNAVAILABLE },
 			noCrossRepoEdges: true,
 			warning: "v1 has no cross-repo edges",
-			warnings: [AUTOMATION_UNAVAILABLE, "No graph rebuild is started automatically."],
+			warnings: [AUTOMATION_UNAVAILABLE, "No graph rebuild is started automatically.", "v1 has no cross-repo edges"],
 		};
 	}
 
@@ -231,6 +299,56 @@ export class GraphRuntimeFacade {
 		const snapshot = await this.authorizedSnapshot(target);
 		if (!snapshot) return { state: "stale", component: target.component, staleReason: "missing-runtime" };
 		return { state: snapshot.meta.state, component: target.component, headRev: snapshot.meta.revisions.headRev, staleReason: snapshot.meta.staleReason };
+	}
+
+	private async componentStatus(context: GraphRuntimeFacadeContext, target: GraphTarget): Promise<CodeIntelligenceComponentStatus> {
+		const snapshot = await this.authorizedSnapshot(target);
+		const languages = this.detectLanguages(context, target);
+		if (!snapshot) {
+			return {
+				component: componentForTarget(target), state: "unpublished", roots: [], languages,
+			};
+		}
+		const { meta } = snapshot;
+		return {
+			component: { ...meta.component }, state: meta.state, revision: meta.revisions.headRev,
+			revisions: { ...meta.revisions }, ...(meta.staleReason ? { staleReason: meta.staleReason } : {}),
+			roots: meta.corpus.roots.map(root => ({ path: root.path, tier: root.tier })),
+			counts: { nodes: meta.build.nodes, edges: meta.build.edges, bytes: meta.build.bytes },
+			timing: {
+				buildMs: meta.build.buildMs, ...(meta.build.cloneMs === undefined ? {} : { cloneMs: meta.build.cloneMs }),
+				...(meta.build.deltaMs === undefined ? {} : { deltaMs: meta.build.deltaMs }),
+				...(meta.build.tierLatencyMs.code === undefined ? {} : { codeMs: meta.build.tierLatencyMs.code }),
+				...(meta.build.tierLatencyMs.codeDocs === undefined ? {} : { codeDocsMs: meta.build.tierLatencyMs.codeDocs }),
+			},
+			languages,
+		};
+	}
+
+	private detectLanguages(context: GraphRuntimeFacadeContext, target: GraphTarget): readonly CodeIntelligenceLanguageStatus[] {
+		const root = componentRoot(context, target);
+		if (!root) return [];
+		const facts = capabilityFacts(context);
+		try {
+			return detectComponentLanguages({ component: target.component, root }).map((detection) => {
+				const serviceKey = {
+					projectId: target.projectId, component: target.component, worktreePath: root, languageId: detection.languageId,
+				};
+				const serviceSnapshot = facts.serviceSnapshots.find(snapshot =>
+					snapshot.key.projectId === serviceKey.projectId && snapshot.key.component === serviceKey.component
+						&& snapshot.key.worktreePath === serviceKey.worktreePath && snapshot.key.languageId === serviceKey.languageId,
+				);
+				const capability = deriveLanguageCapabilityStatus(detection, {
+					enabledLanguageIds: facts.enabledLanguageIds, runtime: facts.runtime,
+					...(facts.toolchainProbeFacts ? { toolchainProbeFacts: facts.toolchainProbeFacts } : {}),
+					serviceKey, ...(serviceSnapshot ? { serviceSnapshot } : {}),
+				});
+				return {
+					languageId: capability.languageId, label: languageForId(capability.languageId)?.label ?? capability.languageId,
+					evidence: detection.evidence, structuralSearch: capability.structuralSearch, lsp: capability.lsp,
+				};
+			});
+		} catch { return []; }
 	}
 
 	/**
@@ -350,6 +468,64 @@ function requiredRequestText(value: unknown, label: string): string {
 	if (typeof value !== "string" || !value.trim()) throw new Error(`graph ${label} is required`);
 	return value.trim().slice(0, 2_000);
 }
+function selectedTargets(targets: readonly GraphTarget[], request: GraphRuntimeRequest): readonly GraphTarget[] {
+	const requested = request.components?.length ? request.components : request.component ? [request.component] : undefined;
+	return requested ? targets.filter(target => requested.includes(target.component)) : targets;
+}
+
+function capabilityFacts(context: GraphRuntimeFacadeContext): Required<Pick<GraphRuntimeCapabilityContext, "runtime" | "enabledLanguageIds" | "serviceSnapshots">> & Pick<GraphRuntimeCapabilityContext, "toolchainProbeFacts"> {
+	const declared = context.codeIntelligenceCapabilities;
+	return {
+		runtime: declared?.runtime === "sandbox" ? "sandbox" : "host",
+		enabledLanguageIds: Array.isArray(declared?.enabledLanguageIds) ? declared.enabledLanguageIds.filter((id): id is string => typeof id === "string").slice(0, 64) : [],
+		serviceSnapshots: Array.isArray(declared?.serviceSnapshots) ? declared.serviceSnapshots.slice(0, 64) : [],
+		...(declared?.toolchainProbeFacts ? { toolchainProbeFacts: declared.toolchainProbeFacts } : {}),
+	};
+}
+
+/** Builds an internal scan root only from the server-selected working directory. */
+function componentRoot(context: GraphRuntimeFacadeContext, target: GraphTarget): string | undefined {
+	const workingDir = nonEmpty(context.workingDir);
+	if (!workingDir || !path.isAbsolute(workingDir)) return undefined;
+	const relativePath = target.componentLabel?.relativePath;
+	if (!relativePath || relativePath === ".") return path.resolve(workingDir);
+	const normalized = safeRelative(relativePath);
+	return normalized ? path.resolve(workingDir, ...normalized.split("/")) : undefined;
+}
+
+function aggregateGraphState(components: readonly CodeIntelligenceComponentStatus[]): GraphRuntimeStatus["aggregate"] {
+	const states = components.map(component => component.state);
+	if (states.length === 0 || states.every(state => state === "unpublished")) return { state: "no-graph-published", label: "No graph published" };
+	if (states.some(state => state === "failed" || state === "stale" || state === "unpublished")) return { state: "not-current", label: "Not current" };
+	if (states.some(state => state === "base-fallback")) return { state: "limited", label: "Limited" };
+	if (states.some(state => state === "building")) return { state: "updating", label: "Updating" };
+	return { state: "current", label: "Current" };
+}
+
+function orientationFromStatus(status: GraphRuntimeStatus): GraphHookResult {
+	const graph = status.components.find(component => component.state !== "unpublished");
+	if (!graph) return emptyResult();
+	const graphDetail = orientationGraphDetail(graph);
+	const languageDetail = graph.languages.slice(0, 3).map(language => `${language.label}: structural ${language.structuralSearch}; LSP ${language.lsp.state}`).join("; ");
+	const content = truncate(`${status.aggregate.label}. ${graphDetail} ${languageDetail ? `Detected capabilities — ${languageDetail}. ` : ""}${REVIEW_GUIDANCE.join(" ")}`, DEFAULT_ORIENTATION_CHARS);
+	return {
+		blocks: [{
+			id: "code-intelligence-orientation", title: "Code Intelligence orientation", authority: "generic", priority: 10,
+			reason: `${status.aggregate.label} declared code intelligence status`, content,
+		}],
+	};
+}
+
+function orientationGraphDetail(component: CodeIntelligenceComponentStatus): string {
+	const revision = component.revisions?.headRev ?? component.revision ?? "unknown revision";
+	if (component.state === "base-fallback") return `Base fallback — this branch has no current graph. Queries use the accepted base graph at ${component.revisions?.baseRev ?? revision} and may omit branch-only changes.`;
+	if (component.state === "stale" && component.staleReason === "parent-advanced") return `Stale — the parent changed. Showing the last accepted graph at ${revision} until this branch is rebuilt.`;
+	if (component.state === "stale") return `Stale (${component.staleReason ?? "unknown reason"}) at ${revision}; it is a discovery lead, not current impact.`;
+	if (component.state === "failed") return `Graph publication failed; do not treat ${revision} as current impact.`;
+	if (component.state === "building") return `Graph update is in progress; ${revision} may not reflect the active branch.`;
+	return `Current graph for ${component.component.name} at ${revision}.`;
+}
+
 function queryOptions(request: GraphRuntimeRequest): GraphQueryOptions {
 	// Component selection is authorization, not a query option. The request body
 	// cannot widen the server-declared component scope; snapshots applies a

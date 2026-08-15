@@ -9,7 +9,7 @@ import {
 	type GraphRuntimePort,
 	type GraphTarget,
 } from "../../market-packs/code-intelligence/src/graph-runtime.ts";
-import { GraphStore } from "../../market-packs/code-intelligence/src/graph-store.ts";
+import { GraphStore, type GraphMeta, type GraphSlot } from "../../market-packs/code-intelligence/src/graph-store.ts";
 
 const target = (component = "api"): GraphTarget => ({ projectId: "project", component, goalId: "goal", worktreeId: "worktree", primaryRef: "main" });
 
@@ -63,6 +63,41 @@ describe("GraphRuntime — EP-8 lifecycle boundary", () => {
 		assert.deepEqual(await unavailable.rebuild({}), { accepted: false, reason: "GRAPH_REBUILD_UNAVAILABLE_PENDING_EP8" });
 	});
 
+	it("projects bounded language facts, conservative graph state, and honest fallback orientation", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "graph-runtime-projection-"));
+		try {
+			fs.mkdirSync(path.join(root, "src"), { recursive: true });
+			fs.writeFileSync(path.join(root, "src", "entry.ts"), "export const entry = true;\n");
+			fs.writeFileSync(path.join(root, "tsconfig.json"), "{}\n");
+			const store = new GraphStore(root, "project");
+			const slot: GraphSlot = { kind: "branch", goalId: "goal", worktreeId: "worktree", branch: "feature/status" };
+			await publishStatusGraph(store, { name: "api", repo: "." }, slot, "fresh", "api-rev");
+			await publishStatusGraph(store, { name: "web", repo: "packages/web" }, slot, "stale", "web-rev", "parent-advanced");
+			const facade = new GraphRuntimeFacade(store, "project");
+			const context = {
+				projectId: "project", worktreeId: "worktree", branch: "feature/status", workingDir: root,
+				scopeContext: {
+					project: { id: "project" }, goal: { id: "goal", ancestry: [{ id: "goal" }] },
+					components: [{ name: "api", repo: "." }, { name: "web", repo: "packages/web" }],
+				},
+			};
+			const status = await facade.status(context);
+			assert.deepEqual(status.aggregate, { state: "not-current", label: "Not current" });
+			assert.equal(status.state, "not-current");
+			assert.equal(status.components.find(component => component.component.name === "web")?.staleReason, "parent-advanced");
+			assert.equal(status.languages.find(language => language.languageId === "typescript")?.lsp.state, "disabled");
+			assert.match(status.guidance.join(" "), /breadth-first leads/);
+			assert.doesNotMatch(JSON.stringify(status), new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+			await publishStatusGraph(store, { name: "api", repo: "." }, slot, "base-fallback", "base-rev", "base-rebuilt");
+			const fallback = await facade.status({ ...context, scopeContext: { ...context.scopeContext, components: [{ name: "api", repo: "." }] } });
+			assert.deepEqual(fallback.aggregate, { state: "limited", label: "Limited" });
+			assert.match((await facade.sessionSetup(context)).blocks[0]?.content ?? "", /last accepted graph at base-rev/i);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("declares automatic lifecycle processing unavailable in durable runtime status and config", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "graph-runtime-status-"));
 		try {
@@ -87,3 +122,29 @@ describe("GraphRuntime — EP-8 lifecycle boundary", () => {
 		}
 	});
 });
+
+async function publishStatusGraph(
+	store: GraphStore,
+	component: { name: string; repo: string },
+	slot: GraphSlot,
+	state: GraphMeta["state"],
+	revision: string,
+	staleReason?: GraphMeta["staleReason"],
+): Promise<void> {
+	const candidate = await store.createCandidate(component);
+	fs.mkdirSync(path.join(candidate.root, "data"), { recursive: true });
+	fs.writeFileSync(path.join(candidate.root, "data", "graph.json"), JSON.stringify({ nodes: [], edges: [] }));
+	await store.publishCandidate(candidate, {
+		schema: 1,
+		component,
+		kind: slot.kind,
+		anchor: { cwdMode: "component-root-relative", scanRoots: ["src"] },
+		corpus: { roots: [{ path: "src", tier: "code" }], trackedOnly: true },
+		graphify: { resolvedVersion: "test", resolvedAt: "2026-01-01T00:00:00.000Z", requiredCapability: "incremental-delta" },
+		revisions: { baseRef: "main", baseRev: "base-rev", headRev: revision },
+		build: { startedAt: "2026-01-01T00:00:00.000Z", completedAt: "2026-01-01T00:00:01.000Z", buildMs: 1, nodes: 0, edges: 0, bytes: 0, clustered: false, tierLatencyMs: {} },
+		state,
+		...(staleReason ? { staleReason } : {}),
+		applied: { changedPaths: [], dirtyPaths: [], deltaNodeCount: 0 },
+	}, { slot });
+}
