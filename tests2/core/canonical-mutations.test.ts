@@ -38,9 +38,29 @@ test("canonical goal stamps a server key, overrides caller metadata, and replays
 	expect(replay.replayed).toBe(true);
 	expect(goals).toHaveLength(1);
 	expect(goals[0].metadata).toEqual({ [CANONICAL_MUTATION_KEY]: "server-key-1", "example.keep": true });
-	expect(gates).toEqual([["design"]);
+	expect(gates).toEqual([["design"]]);
 	expect(flushed).toBe(1);
 	expect(lifecycle).toBe(1);
+
+	const unkeyed = await createCanonicalGoal({
+		title: "Unkeyed", cwd: "/project", autoStartTeam: false,
+		options: { metadata: { [CANONICAL_MUTATION_KEY]: "forged" } },
+	}, deps);
+	expect(unkeyed.goal.metadata).toBeUndefined();
+});
+
+test("canonical goal rejects invalid creation input before persistence", async () => {
+	const create = async () => ({ id: "goal", workflow: { gates: [] } });
+	const deps = {
+		findByApplicationKey: () => undefined,
+		create,
+		update: () => undefined,
+		initGates: () => undefined,
+		flush: async () => undefined,
+		afterCreate: () => undefined,
+	};
+	await expect(createCanonicalGoal({ title: "", cwd: "/project", autoStartTeam: false, options: {} }, deps)).rejects.toThrow("title");
+	await expect(createCanonicalGoal({ title: "Goal", cwd: "relative", autoStartTeam: false, options: {} }, deps)).rejects.toThrow("absolute");
 });
 
 test("canonical goal reports lifecycle scheduling failures instead of leaking an unhandled microtask", async () => {
@@ -68,7 +88,7 @@ test("canonical project registration replays by server key and rolls back reject
 		get: (id: string) => projects.find(project => project.id === id),
 		update: (id: string, updates: any) => Object.assign(projects.find(project => project.id === id), updates),
 		promote: (id: string) => projects.find(project => project.id === id),
-		configure: () => undefined,
+		applyConfiguration: () => undefined,
 		removeRegistered: (project: any) => { removed++; projects.splice(projects.indexOf(project), 1); },
 		removeContext: async () => undefined,
 		openContext: async () => true,
@@ -76,12 +96,13 @@ test("canonical project registration replays by server key and rolls back reject
 		stopServices: async () => undefined,
 		reconcileServices: async () => undefined,
 	};
-	const input = { mode: "register" as const, applicationKey: "project-key" };
+	const input = { mode: "register" as const, name: "Project", rootPath: "/project", applicationKey: "project-key" };
 	expect((await mutateCanonicalProject(input, deps)).replayed).toBe(false);
 	expect((await mutateCanonicalProject(input, deps)).replayed).toBe(true);
 	expect(projects).toHaveLength(1);
-	await expect(mutateCanonicalProject({ mode: "register" }, { ...deps, configure: () => { throw new Error("invalid config"); } })).rejects.toThrow("invalid config");
+	await expect(mutateCanonicalProject({ mode: "register", name: "Project", rootPath: "/project" }, { ...deps, applyConfiguration: () => { throw new Error("invalid config"); } })).rejects.toThrow("invalid config");
 	expect(removed).toBe(1);
+	await expect(mutateCanonicalProject({ mode: "register", name: "Project", rootPath: "relative" }, deps)).rejects.toThrow("absolute");
 });
 
 test("project registry persists and reloads only a valid server-owned canonical mutation key", () => {
@@ -108,7 +129,7 @@ test("canonical root replacement restores the immutable old root after a service
 		get: () => project,
 		update: (_id: string, updates: any) => Object.assign(project, updates),
 		promote: () => project,
-		configure: () => undefined,
+		applyConfiguration: () => undefined,
 		removeRegistered: () => undefined,
 		removeContext: async () => undefined,
 		openContext: async () => true,

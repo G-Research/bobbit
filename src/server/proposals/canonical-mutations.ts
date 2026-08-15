@@ -296,6 +296,7 @@ export async function createCanonicalGoal<T extends { id: string; workflow?: { g
 		projectId?: string;
 		reattemptOf?: string;
 		autoStartTeam: boolean;
+		/** Assigned by a trusted application, never copied from proposal metadata. */
 		applicationKey?: string;
 	},
 	deps: {
@@ -308,6 +309,15 @@ export async function createCanonicalGoal<T extends { id: string; workflow?: { g
 		onAfterCreateError?(error: unknown, goal: T): void;
 	},
 ): Promise<{ goal: T; replayed: boolean }> {
+	if (typeof input.title !== "string" || !input.title.trim()) {
+		throw new CanonicalMutationError(400, "Goal title is required");
+	}
+	if (typeof input.cwd !== "string" || !(path.posix.isAbsolute(input.cwd) || path.win32.isAbsolute(input.cwd))) {
+		throw new CanonicalMutationError(400, "Goal cwd must be an absolute path");
+	}
+	if (!input.options || typeof input.options !== "object" || Array.isArray(input.options)) {
+		throw new CanonicalMutationError(400, "Goal options must be an object");
+	}
 	assertCanonicalApplicationKey(input.applicationKey);
 	if (input.applicationKey) {
 		const existing = deps.findByApplicationKey(input.applicationKey);
@@ -316,8 +326,9 @@ export async function createCanonicalGoal<T extends { id: string; workflow?: { g
 	const metadata = input.options.metadata && typeof input.options.metadata === "object" && !Array.isArray(input.options.metadata)
 		? { ...(input.options.metadata as Record<string, unknown>) }
 		: {};
-	// Always overwrite the reserved field. A proposal cannot claim an operation
-	// identity by placing this key in its arbitrary metadata bag.
+	// Never copy a caller-supplied marker from arbitrary proposal metadata. Only
+	// a trusted application may attach the durable replay identity.
+	delete metadata[CANONICAL_MUTATION_KEY];
 	if (input.applicationKey) metadata[CANONICAL_MUTATION_KEY] = input.applicationKey;
 	const goal = await deps.create(input.title, input.cwd, {
 		...input.options,
@@ -350,10 +361,11 @@ export async function createCanonicalGoal<T extends { id: string; workflow?: { g
 export type CanonicalProjectMode = "register" | "update" | "promote";
 
 /**
- * Canonical project mutation transaction. Configuration is supplied as one
- * already-validated callback because ProjectConfigStore owns the complex
- * atomic config/secrets format; registration, replacement rollback and the
- * durable idempotency marker stay in one reusable operation.
+ * Canonical project mutation transaction. The configuration application is an
+ * explicit persistence primitive: callers must validate and atomically publish
+ * the complete candidate before it returns. Registration, root replacement,
+ * promotion and replay ownership live here so proposal application never has
+ * to recreate route lifecycle semantics.
  */
 export async function mutateCanonicalProject<T extends { id: string; rootPath: string; importDecisionRun?: { id: string; state: "configuring" | "ready" } }>(
 	input: {
@@ -370,7 +382,7 @@ export async function mutateCanonicalProject<T extends { id: string; rootPath: s
 		get(id: string): T | undefined;
 		update(id: string, updates: Record<string, unknown>): T;
 		promote(id: string, updates: { name?: string }): T;
-		configure(project: T): Promise<void> | void;
+		applyConfiguration(project: T): Promise<void> | void;
 		/** Clear transient context/config state when registration config rejects. */
 		rollbackRegistration?(project: T): Promise<void> | void;
 		removeRegistered(project: T): void;
@@ -381,6 +393,18 @@ export async function mutateCanonicalProject<T extends { id: string; rootPath: s
 		reconcileServices(projectId: string): Promise<void>;
 	},
 ): Promise<{ project: T; replayed: boolean }> {
+	if (input.mode === "register") {
+		if (typeof input.name !== "string" || !input.name.trim()) {
+			throw new CanonicalMutationError(400, "Project name is required");
+		}
+		if (typeof input.rootPath !== "string" || !(path.posix.isAbsolute(input.rootPath) || path.win32.isAbsolute(input.rootPath))) {
+			throw new CanonicalMutationError(400, "Project rootPath must be an absolute path");
+		}
+	}
+	if (input.mode === "update" && input.updates?.rootPath !== undefined
+		&& (typeof input.updates.rootPath !== "string" || !(path.posix.isAbsolute(input.updates.rootPath) || path.win32.isAbsolute(input.updates.rootPath)))) {
+		throw new CanonicalMutationError(400, "Project rootPath must be an absolute path");
+	}
 	assertCanonicalApplicationKey(input.applicationKey);
 	if (input.mode === "register") {
 		if (input.applicationKey) {
@@ -389,7 +413,7 @@ export async function mutateCanonicalProject<T extends { id: string; rootPath: s
 		}
 		const project = deps.register(input.applicationKey);
 		try {
-			await deps.configure(project);
+			await deps.applyConfiguration(project);
 			return { project, replayed: false };
 		} catch (error) {
 			// A rejected initial config must never leave a half-registered project.
@@ -409,7 +433,7 @@ export async function mutateCanonicalProject<T extends { id: string; rootPath: s
 	const previousRootPath = existing.rootPath;
 	if (input.mode === "promote") {
 		const project = deps.promote(projectId, { name: input.name });
-		await deps.configure(project);
+		await deps.applyConfiguration(project);
 		return { project, replayed: false };
 	}
 	const updates = { ...input.updates };
@@ -432,7 +456,7 @@ export async function mutateCanonicalProject<T extends { id: string; rootPath: s
 			await deps.stopServices(projectId);
 			await deps.reconcileServices(projectId);
 		}
-		await deps.configure(project);
+		await deps.applyConfiguration(project);
 		return { project, replayed: false };
 	} catch (error) {
 		if (replacingRoot && removed) {

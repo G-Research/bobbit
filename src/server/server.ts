@@ -7538,7 +7538,7 @@ async function handleApiRoute(
 					get: (id) => projectRegistry.get(id),
 					update: (id, updates) => projectRegistry.update(id, updates as Parameters<typeof projectRegistry.update>[1]),
 					promote: (id, updates) => projectRegistry.promote(id, updates),
-					configure: async (project) => {
+					applyConfiguration: async (project) => {
 			// Initialize project context for the new project
 			const newCtx = projectContextManager.getOrCreate(project.id);
 			if (newCtx) {
@@ -7552,16 +7552,14 @@ async function handleApiRoute(
 			if (newCtx) {
 				if (configuredComponents) {
 					if (createWorkflows) {
-						try {
-							const { validateAllWorkflows } = await import("./agent/workflow-validator.js");
-							const errors = validateAllWorkflows(
-								createWorkflows as Parameters<typeof validateAllWorkflows>[0],
-								configuredComponents,
-							);
-							if (errors.length > 0) {
-								throw new CanonicalMutationError(400, "Workflow validation failed", "WORKFLOW_VALIDATION_FAILED", errors);
-							}
-						} catch { /* best-effort */ }
+						const { validateAllWorkflows } = await import("./agent/workflow-validator.js");
+						const errors = validateAllWorkflows(
+							createWorkflows as Parameters<typeof validateAllWorkflows>[0],
+							configuredComponents,
+						);
+						if (errors.length > 0) {
+							throw new CanonicalMutationError(400, "Workflow validation failed", "WORKFLOW_VALIDATION_FAILED", errors);
+						}
 					}
 					newCtx.projectConfigStore.setComponents(configuredComponents);
 					if (createWorkflows) newCtx.projectConfigStore.setWorkflows(createWorkflows);
@@ -7768,7 +7766,7 @@ async function handleApiRoute(
 				get: (id) => projectRegistry.get(id),
 				update: (id, next) => projectRegistry.update(id, next as Parameters<typeof projectRegistry.update>[1]),
 				promote: (id, next) => projectRegistry.promote(id, next),
-				configure: () => undefined,
+				applyConfiguration: () => undefined,
 				removeRegistered: (project) => projectRegistry.remove(project.id),
 				removeContext: (id) => projectContextManager.remove(id),
 				openContext: (id) => Promise.resolve(!!projectContextManager.getOrCreate(id)),
@@ -7871,7 +7869,7 @@ async function handleApiRoute(
 				get: (id) => projectRegistry.get(id),
 				update: (id, updates) => projectRegistry.update(id, updates as Parameters<typeof projectRegistry.update>[1]),
 				promote: (id, updates) => projectRegistry.promote(id, updates),
-				configure: async (promoted) => {
+				applyConfiguration: async (promoted) => {
 			// A provisional project deliberately has no run until its proposal
 			// configuration is complete. The acceptance client writes that config
 			// before this request; retain a defensive default for direct API users
