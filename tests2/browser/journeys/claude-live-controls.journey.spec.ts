@@ -1,5 +1,5 @@
 import type { Page } from "@playwright/test";
-import { test, expect, apiFetch, createSession, deleteSession, navigateToHash, openApp, waitForSessionStatus } from "../_helpers/journey-fixture.js";
+import { test, expect, apiFetch, createSession, deleteSession, navigateToHash, openApp, sendMessage, waitForSessionStatus } from "../_helpers/journey-fixture.js";
 import { CLAUDE_LIVE_MODELS, claudeLiveControlsDepsFactory, claudeLiveControlsSdk } from "../_helpers/claude-live-controls-sdk-fixture.js";
 
 const PROVIDER = "claude-agent-sdk";
@@ -83,6 +83,12 @@ test.describe.serial("Journey: Claude Agent SDK live controls", () => {
 			await navigateToHash(page, `#/session/${sessionId}`);
 
 			await expect(page.getByTestId("footer-model-id")).toHaveText(INITIAL_MODEL, { timeout: 20_000 });
+			// SDK capabilities become authoritative only once the production bridge
+			// accepts its first genuine prompt. Initializing here avoids exercising
+			// live controls against the intentionally pre-initialization tuple.
+			await sendMessage(page, "Initialize Claude SDK live controls");
+			await page.reload({ waitUntil: "domcontentloaded" });
+			await navigateToHash(page, `#/session/${sessionId}`);
 			await expect.poll(() => readRuntimeTuple(page), { timeout: 20_000 }).toEqual({
 				provider: PROVIDER,
 				id: INITIAL_MODEL,
