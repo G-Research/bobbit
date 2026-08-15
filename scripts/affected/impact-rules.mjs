@@ -1253,7 +1253,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 			{ expression: "path.join(outside, \"sentinel\")", count: 3 },
 			{ expression: "path.join(outside, \"outside-canary\")", count: 1 },
 			{ expression: "path.join(beta, \"foreign-canary\")", count: 1 },
-			{ expression: "path.join(source.state, \"verification-checkouts.json\")", count: 2 },
+			{ expression: "path.join(source.state, \"verification-checkouts.json\")", count: 3 },
 			{ expression: "path.join(checkout.path, \"replacement-canary\")", count: 1 },
 			{ expression: "path.join(displaced, \"raw.txt\")", count: 1 },
 			{ expression: "path.join(checkout.path, \"services\", \"api\", \"raw.txt\")", count: 1 },
