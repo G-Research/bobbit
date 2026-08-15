@@ -20,9 +20,15 @@ import {
 import { startTeam, teardownTeam } from "../e2e-setup.js";
 
 const GATE_ID = "multi-phase-cancellation";
-const SLOW_COMMAND = `node -e "setTimeout(() => process.exit(0), 30000)"`;
+const HUMAN_SIGNOFF_LABEL = "Review paused verification";
 
-type Fixture = { workflowId: string; projectId: string; goalId: string };
+type Fixture = { workflowId: string; projectId: string; goalId: string; commandReadyMarker: string };
+
+function slowCommand(readyMarker: string): string {
+	// The marker is observed through the command's live log before pausing, so
+	// the journey cannot mistake its seeded phase-0 state for process ownership.
+	return `node -e "console.log('${readyMarker}'); setInterval(() => {}, 1000)"`;
+}
 
 function workflowId(): string {
 	return `gate-cancellation-journey-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -32,6 +38,7 @@ async function createFixture(): Promise<Fixture> {
 	const projectId = await defaultProjectId();
 	if (!projectId) throw new Error("gate-cancellation journey requires a default project");
 	const id = workflowId();
+	const commandReadyMarker = `gate-cancellation-command-ready-${id}`;
 	const createWorkflow = await apiFetch("/api/workflows", {
 		method: "POST",
 		body: JSON.stringify({
@@ -43,8 +50,8 @@ async function createFixture(): Promise<Fixture> {
 				name: "Multi-phase verification",
 				dependsOn: [],
 				verify: [
-					{ name: "Long running command", type: "command", run: SLOW_COMMAND, phase: 0 },
-					{ name: "Operator review", type: "human-signoff", label: "Review paused verification", prompt: "Review while command runs", phase: 0 },
+					{ name: "Long running command", type: "command", run: slowCommand(commandReadyMarker), phase: 0 },
+					{ name: "Operator review", type: "human-signoff", label: HUMAN_SIGNOFF_LABEL, prompt: "Review while command runs", phase: 0 },
 				],
 			}],
 		}),
@@ -59,7 +66,7 @@ async function createFixture(): Promise<Fixture> {
 			autoStartTeam: false,
 			worktree: false,
 		});
-		return { workflowId: id, projectId, goalId: goal.id as string };
+		return { workflowId: id, projectId, goalId: goal.id as string, commandReadyMarker };
 	} catch (error) {
 		await apiFetch(`/api/workflows/${encodeURIComponent(id)}?projectId=${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => {});
 		throw error;
@@ -79,15 +86,29 @@ async function signal(fixture: Fixture, content: string): Promise<Response> {
 	});
 }
 
-async function waitForBothLiveSteps(fixture: Fixture): Promise<void> {
+async function waitForOwnedCommandAndAwaitingHuman(fixture: Fixture): Promise<void> {
 	await expect.poll(async () => {
-		const response = await apiFetch(`/api/goals/${fixture.goalId}/verifications/active`);
-		if (!response.ok) return false;
-		const active = (await response.json()).verifications?.find((entry: any) => entry.gateId === GATE_ID);
+		const activeResponse = await apiFetch(`/api/goals/${fixture.goalId}/verifications/active`);
+		const inspectResponse = await apiFetch(`/api/goals/${fixture.goalId}/gates/${GATE_ID}/inspect?section=verification`);
+		if (!activeResponse.ok || !inspectResponse.ok) return false;
+
+		const active = (await activeResponse.json()).verifications?.find((entry: any) => entry.gateId === GATE_ID);
+		const inspected = await inspectResponse.json();
+		const command = active?.steps?.find((step: any) => step.name === "Long running command");
+		const operatorReview = active?.steps?.find((step: any) => step.name === "Operator review");
+		const inspectedCommand = inspected.steps?.find((step: any) => step.name === "Long running command");
+
 		return active?.overallStatus === "running"
-			&& active.steps?.some((step: any) => step.name === "Long running command" && step.status === "running")
-			&& active.steps?.some((step: any) => step.name === "Operator review" && (step.status === "running" || step.awaitingHuman));
-	}, { timeout: 20_000, message: "command and human review must both be live before pause" }).toBe(true);
+			&& command?.status === "running"
+			// The active record supplies durable command ownership while the
+			// inspection snapshot reads its live stdout marker.
+			&& typeof command.pid === "number" && command.pid > 0
+			&& typeof command.outFile === "string" && command.outFile.length > 0
+			&& inspectedCommand?.status === "running"
+			&& inspectedCommand?.output?.includes(fixture.commandReadyMarker)
+			&& operatorReview?.awaitingHuman === true
+			&& operatorReview?.humanLabel === HUMAN_SIGNOFF_LABEL;
+	}, { timeout: 20_000, message: "command must own a live process and the operator review must await human input before pause" }).toBe(true);
 }
 
 async function expectCancelledAudit(fixture: Fixture): Promise<any> {
@@ -136,6 +157,10 @@ async function expectCauseAcrossSurfaces(page: any, goalId: string): Promise<voi
 test.describe("Journey: pause cancels verification without failing the gate", () => {
 	test("pause, reload, resume, and explicitly re-signal exactly once across dashboard/sidebar/widget/transcript", async ({ page }) => {
 		test.setTimeout(90_000);
+		const priorHumanSignoffSkip = process.env.BOBBIT_HUMAN_SIGNOFF_SKIP;
+		// `human-signoff` reads this live when the step executes; force the
+		// required operator-review ownership state instead of accepting a skip.
+		process.env.BOBBIT_HUMAN_SIGNOFF_SKIP = "0";
 		let fixture: Fixture | undefined;
 		let teamLeadId: string | undefined;
 		try {
@@ -148,7 +173,7 @@ test.describe("Journey: pause cancels verification without failing the gate", ()
 
 			const first = await signal(fixture, "Start the command and human review.");
 			expect(first.status).toBe(201);
-			await waitForBothLiveSteps(fixture);
+			await waitForOwnedCommandAndAwaitingHuman(fixture);
 
 			const pause = await apiFetch(`/api/goals/${fixture.goalId}/pause`, {
 				method: "POST",
@@ -177,13 +202,15 @@ test.describe("Journey: pause cancels verification without failing the gate", ()
 				timeout: 15_000,
 				message: "explicit resume action creates exactly one new signal generation",
 			}).toBe(2);
-			await waitForBothLiveSteps(reSignalledFixture);
+			await waitForOwnedCommandAndAwaitingHuman(reSignalledFixture);
 		} finally {
 			if (fixture) await apiFetch(`/api/goals/${fixture.goalId}/gates/${GATE_ID}/cancel-verification`, { method: "POST" }).catch(() => {});
 			if (fixture) await teardownTeam(fixture.goalId).catch(() => {});
 			if (teamLeadId) await deleteSession(teamLeadId).catch(() => {});
 			if (fixture) await deleteGoal(fixture.goalId, true).catch(() => {});
 			if (fixture) await apiFetch(`/api/workflows/${encodeURIComponent(fixture.workflowId)}?projectId=${encodeURIComponent(fixture.projectId)}`, { method: "DELETE" }).catch(() => {});
+			if (priorHumanSignoffSkip === undefined) delete process.env.BOBBIT_HUMAN_SIGNOFF_SKIP;
+			else process.env.BOBBIT_HUMAN_SIGNOFF_SKIP = priorHumanSignoffSkip;
 		}
 	});
 });
