@@ -44,6 +44,8 @@ Pi emits `compaction_start` before compaction and `compaction_end` after releasi
 
 `compaction_end.willRetry` describes the interrupted agent turn, not another compaction operation. Bobbit completes the compaction boundary and preserves continuation affinity while waiting for the final non-retry `agent_end`.
 
+Pi `0.84.1` emits that final `agent_end` before clearing its active-run guard. The event completes Bobbit's terminal turn bookkeeping, but it does not admit a fresh prompt. Pi may still compact or process queued continuation work before `_emitAgentSettled()` clears the guard and emits `agent_settled`; Bobbit drains next-turn work only at that later boundary. Graceful Stop waits for and replays settlement, while hard Stop synthesizes it after killing the old process and marks interrupted compaction aborted. See [Context compaction](compaction.md#reliable-turn-fence-and-release).
+
 For a recoverable assistant `stopReason: "length"`, Pi removes the first truncated tail, performs overflow compaction, and retries the input at most once. Bobbit assigns `assistantStreamId` values and emits `assistant_stream_invalidated` before retry output so the browser and snapshots mirror Pi's rewritten branch. Only the retry's final non-retrying terminal is canonical. See [Context compaction](compaction.md#recoverable-length-overflow).
 
 ### Steer acknowledgement boundary

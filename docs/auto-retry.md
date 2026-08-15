@@ -68,9 +68,9 @@ If a bounded retry budget is exhausted, the server clears the stale countdown wi
 
 ## Pi internal retry events
 
-Current Pi runtimes, including the selected `0.84.1` line, can emit `agent_end` with `willRetry: true` before its own retry loop has produced the final turn outcome. Bobbit treats that event as non-final: the session stays streaming, one-time tool grants remain active, queued prompts are not drained, and `waitForIdle()` keeps waiting. Only a later `agent_end` where `willRetry !== true` completes the Bobbit turn lifecycle.
+Current Pi runtimes, including the selected `0.84.1` line, can emit `agent_end` with `willRetry: true` before its own retry loop has produced the final turn outcome. Bobbit treats that event as non-final: the session stays streaming, one-time tool grants remain active, queued prompts are not drained, and `waitForIdle()` keeps waiting. A later `agent_end` where `willRetry !== true` completes terminal turn bookkeeping, but next-turn dispatch remains fenced until Pi emits `agent_settled` after clearing its active-run guard.
 
-This keeps Pi's internal retry attempts from looking like separate user-visible turns or opening a queue window before the retry settles. The contract is pinned by `tests2/core/pi-rpc-agent-end-retry.test.ts`.
+This keeps Pi's internal retry attempts from looking like separate user-visible turns and prevents a final terminal event from opening a prompt window during Pi's post-run processing. The retry contract is pinned by `tests2/core/pi-rpc-agent-end-retry.test.ts`; the settlement fence is pinned by `tests2/core/reliable-compaction-release.test.ts`.
 
 ## Dispatch-time prompt failures
 
@@ -78,7 +78,7 @@ A prompt can fail before the agent starts a turn and before any assistant `messa
 
 - `recoverPromptDispatch()` re-enqueues the failed prompt row at the front of the queue as the durable copy.
 - The session is restored to `idle`, enough error state is synthesized for retry bookkeeping, and `auto_retry_pending` is emitted through the same scheduler used by `message_end` errors.
-- The auto timer still calls `retryLastPrompt(..., { auto: true })`; that method consumes the recovered queue row before dispatching, so a later `agent_end` drain cannot replay the same prompt a second time.
+- The auto timer still calls `retryLastPrompt(..., { auto: true })`; that method consumes the recovered queue row before dispatching, so a later settlement-driven queue drain cannot replay the same prompt a second time.
 - If stale `turnHadToolCalls` state exists from a previous turn, dispatch-time recovery clears it because this failed prompt never reached `agent_start` and therefore cannot have run tools.
 
 A fresh user prompt supersedes a recovered dispatch-failure row. The new prompt cancels the pending retry, emits `auto_retry_cancelled`, drops the recovered stale row, and dispatches the user's new intent so old work cannot replay after the follow-up succeeds.

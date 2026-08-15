@@ -1,19 +1,38 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	initAuthorSidecarDir,
+	promptAuthorBindingMatchesText,
+	readAuthorSidecar,
+} from "../../src/server/agent/author-sidecar.js";
+import {
+	barrier,
 	flushMicrotasks,
 	makeReliableIntentHarness,
 	type ReliableIntentHarness,
 } from "./helpers/reliable-intent-fixture.js";
 
 const harnesses: ReliableIntentHarness[] = [];
+let authorStateDir = "";
 const useHarness = (overrides: Record<string, any> = {}) => {
 	const harness = makeReliableIntentHarness(overrides);
 	harnesses.push(harness);
 	return harness;
 };
 
+beforeEach(() => {
+	authorStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "reliable-compaction-release-"));
+	initAuthorSidecarDir(authorStateDir, {
+		secretsDir: path.join(authorStateDir, "private-secrets"),
+		hmacKey: Buffer.alloc(32, 0x52),
+	});
+});
+
 afterEach(() => {
 	while (harnesses.length > 0) harnesses.pop()!.cleanup();
+	fs.rmSync(authorStateDir, { recursive: true, force: true });
 	vi.restoreAllMocks();
 });
 
@@ -111,6 +130,211 @@ describe("reliable compaction admission fences", () => {
 			expect(session.promptQueue.toArray().map((row: any) => row.id)).toEqual(["P2"]);
 		},
 	);
+});
+
+describe("post-terminal reliable drain settlement", () => {
+	it("waits through post-agent compaction and dispatches next-turn work only after agent_settled", async () => {
+		const promptRpc = barrier<any>();
+		const prompt = vi.fn(() => promptRpc.hold());
+		const { manager, session, steer, storeUpdates } = useHarness({
+			id: "post-terminal-settled-drain",
+			status: "streaming",
+			prompt,
+		});
+
+		manager.handleAgentLifecycle(session, { type: "agent_start" });
+
+		// Prove that the preceding same-run steer is not a stale carrier: Pi echoes
+		// it and the exact attempt settles in the fsynced author sidecar.
+		await manager.deliverLiveSteer(session.id, "prior live steer", { intentId: "steer-before-terminal" });
+		await flushMicrotasks();
+		expect(steer).toHaveBeenCalledTimes(1);
+		const piSteerText = steer.mock.calls[0]![0];
+		for (const type of ["message_start", "message_end"] as const) {
+			const event = manager.prepareVisibleAgentEvent(session, {
+				type,
+				message: { id: "pi-user-steer-before-terminal", role: "user", content: piSteerText, timestamp: 1_700_000_000_010 },
+			});
+			manager.handleAgentLifecycle(session, event);
+		}
+		const settledSteer = readAuthorSidecar(session.id).find((row) => row.intentId === "steer-before-terminal");
+		expect(settledSteer?.settlement?.outcome).toBe("echoed");
+		expect(promptAuthorBindingMatchesText(settledSteer!, piSteerText)).toBe(true);
+		expect(session.inFlightSteerTexts).toEqual([]);
+
+		await manager.enqueuePrompt(session.id, "queued after current turn", { intentId: "prompt-after-turn" });
+		expect(session.promptQueue.toArray()).toMatchObject([{
+			id: "prompt-after-turn",
+			kind: "prompt",
+			targetTurn: "next-turn",
+			deliveryState: "queued",
+		}]);
+
+		manager.handleAgentLifecycle(session, {
+			type: "message_end",
+			message: { id: "assistant-final", role: "assistant", stopReason: "stop", content: "done" },
+		});
+		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false, messages: [] });
+		await flushMicrotasks();
+
+		// agent_end is user-visible terminal bookkeeping, but Pi's run remains active.
+		expect(session.completedTurnCount).toBe(1);
+		expect(session.status).toBe("idle");
+		expect(prompt, "POST_TERMINAL_PROMPT_DISPATCHED_BEFORE_PI_SETTLED").not.toHaveBeenCalled();
+		expect(session.promptQueue.toArray().map((row: any) => row.id)).toEqual(["prompt-after-turn"]);
+		expect(session.inFlightSteerTexts).toEqual([]);
+		expect(storeUpdates.at(-1)).toMatchObject({ wasStreaming: false, streamingStartedAt: undefined });
+
+		manager.handleAgentLifecycle(session, {
+			type: "compaction_start",
+			reason: "threshold",
+			compactionId: "compact-post-terminal",
+		});
+		manager.handleAgentLifecycle(session, compactionEnd("threshold", {
+			compactionId: "compact-post-terminal",
+			willRetry: false,
+		}));
+		await flushMicrotasks();
+		expect(session.isCompacting).toBe(false);
+		expect(prompt, "POST_COMPACTION_PROMPT_DISPATCHED_BEFORE_PI_SETTLED").not.toHaveBeenCalled();
+
+		manager.handleAgentLifecycle(session, { type: "agent_settled" });
+		await promptRpc.entered;
+		expect(prompt).toHaveBeenCalledTimes(1);
+		expect(session.status).toBe("streaming");
+		expect(session.promptQueue.toArray()).toEqual([]);
+		expect(session.inFlightSteerTexts).toMatchObject([{ intentId: "prompt-after-turn", state: "dispatching" }]);
+
+		// The next real Pi turn correlates and settles the exact occurrence normally.
+		manager.handleAgentLifecycle(session, { type: "agent_start" });
+		const piPromptText = (prompt.mock.calls as any[][])[0]![0];
+		for (const type of ["message_start", "message_end"] as const) {
+			const event = manager.prepareVisibleAgentEvent(session, {
+				type,
+				message: { id: "pi-user-prompt-after-turn", role: "user", content: piPromptText, timestamp: 1_700_000_000_020 },
+			});
+			manager.handleAgentLifecycle(session, event);
+		}
+		promptRpc.release({ success: true });
+		await flushMicrotasks();
+		expect(session.inFlightSteerTexts).toEqual([]);
+		expect(readAuthorSidecar(session.id).find((row) => row.intentId === "prompt-after-turn")?.settlement?.outcome)
+			.toBe("echoed");
+	});
+
+	it.each([
+		{ label: "stable occurrence", intentId: "post-error-follow-up" },
+		{ label: "legacy occurrence", intentId: undefined },
+	])("fences a $label accepted after error agent_end until agent_settled", async ({ intentId }) => {
+		const prompt = vi.fn(async (
+			_text: string,
+			_images?: unknown,
+			_options?: unknown,
+			_streamingBehavior?: unknown,
+		) => ({ success: true }));
+		const { manager, session, storeUpdates } = useHarness({
+			id: `post-error-settlement-${intentId ?? "legacy"}`,
+			status: "streaming",
+			prompt,
+		});
+		manager.handleAgentLifecycle(session, { type: "agent_start" });
+		manager.handleAgentLifecycle(session, {
+			type: "message_end",
+			message: { id: "assistant-error", role: "assistant", stopReason: "error", errorMessage: "terminal model failure" },
+		});
+		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false, messages: [] });
+
+		const modelText = "expanded recovery payload";
+		const images = [{ type: "image", data: "cGl4ZWw=", mimeType: "image/png" }];
+		const attachments = [{ name: "recovery.txt", mimeType: "text/plain", size: 8 }];
+		const admission = await manager.enqueuePrompt(session.id, "recover after error", {
+			...(intentId ? { intentId } : {}),
+			modelText,
+			images,
+			attachments,
+			streamingBehavior: "followUp",
+			suppressTitleGen: true,
+		});
+		await flushMicrotasks();
+		expect(admission).toEqual({ status: "queued" });
+		expect(prompt, "POST_ERROR_PROMPT_DISPATCHED_BEFORE_PI_SETTLED").not.toHaveBeenCalled();
+		expect(session.promptQueue.toArray()).toHaveLength(1);
+		const deferred = session.promptQueue.peek()!;
+		expect(deferred.text).toContain("terminal model failure");
+		expect(deferred.text).toContain(modelText);
+		expect(deferred.text).not.toBe(modelText);
+		expect(deferred).toMatchObject({
+			images,
+			attachments,
+			streamingBehavior: "followUp",
+			suppressTitleGen: true,
+		});
+		expect(session.lastTurnErrored).toBe(false);
+
+		if (intentId) {
+			const persistedRows = storeUpdates
+				.map((update: any) => update.messageQueue?.find((row: any) => row.id === intentId))
+				.filter(Boolean);
+			expect(persistedRows[0]?.text).toBe(modelText);
+			expect(persistedRows.at(-1)?.text).toBe(deferred.text);
+			for (const field of ["id", "kind", "targetTurn", "sequence", "createdAt", "deliveryState"] as const) {
+				expect(persistedRows.at(-1)?.[field], `${field} changed while preserving the deferred payload`)
+					.toEqual(persistedRows[0]?.[field]);
+			}
+		}
+
+		const later = session.promptQueue.enqueue("later FIFO occurrence");
+		expect(session.promptQueue.toArray().map((row: any) => row.id)).toEqual([deferred.id, later.id]);
+
+		manager.handleAgentLifecycle(session, { type: "agent_settled" });
+		await flushMicrotasks();
+		expect(prompt).toHaveBeenCalledTimes(1);
+		expect(prompt.mock.calls[0]?.[0]).toBe(deferred.text);
+		expect(prompt.mock.calls[0]?.[1]).toEqual(images);
+		expect(prompt.mock.calls[0]?.[3]).toBe("followUp");
+		expect(session.promptQueue.toArray().map((row: any) => row.id)).toEqual([later.id]);
+
+		manager.handleAgentLifecycle(session, { type: "agent_start" });
+		const piPromptText = prompt.mock.calls[0]![0];
+		for (const type of ["message_start", "message_end"] as const) {
+			const event = manager.prepareVisibleAgentEvent(session, {
+				type,
+				message: { id: `pi-user-${intentId ?? "legacy"}`, role: "user", content: piPromptText, timestamp: 1_700_000_000_030 },
+			});
+			manager.handleAgentLifecycle(session, event);
+		}
+		const settled = readAuthorSidecar(session.id).find((row) =>
+			intentId ? row.intentId === intentId : promptAuthorBindingMatchesText(row, piPromptText));
+		expect(settled?.settlement?.outcome).toBe("echoed");
+		expect(promptAuthorBindingMatchesText(settled!, piPromptText)).toBe(true);
+	});
+
+	it("rolls every status plane back to idle after a definite no-start rejection", async () => {
+		const prompt = vi.fn(async () => ({ success: false, error: "Agent is already processing." }));
+		const { manager, session, storeUpdates } = useHarness({
+			id: "definite-prompt-rejection-rollback",
+			status: "idle",
+			prompt,
+		});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await manager.enqueuePrompt(session.id, "rejected occurrence", { intentId: "rejected-prompt" });
+		await flushMicrotasks();
+
+		expect(session.promptQueue.toArray()).toMatchObject([{
+			id: "rejected-prompt",
+			deliveryState: "failed",
+			retryable: true,
+			deliveryError: "bridge-rejected",
+		}]);
+		expect(session.inFlightSteerTexts).toEqual([]);
+		expect(readAuthorSidecar(session.id).find((row) => row.intentId === "rejected-prompt")?.settlement?.outcome)
+			.toBe("cancelled");
+		expect(session.status, "POST_TERMINAL_REJECTION_LEFT_FALSE_STREAMING_STATUS").toBe("idle");
+		expect(session.streamingStartedAt).toBeUndefined();
+		expect(storeUpdates.filter((update) => update.wasStreaming === false).at(-1))
+			.toMatchObject({ wasStreaming: false, streamingStartedAt: undefined });
+	});
 });
 
 describe("failed automatic compaction release", () => {

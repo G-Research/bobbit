@@ -700,6 +700,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 				message: { role: "assistant", content: [{ type: "text", text: "queued done" }], stopReason: "stop" },
 			});
 			listener?.({ type: "agent_end", messages: [] });
+			listener?.({ type: "agent_settled" });
 			return { success: true };
 		});
 		const ps = persisted("boot-continuation-dispatch-fence", file, { wasStreaming: true });
@@ -719,11 +720,14 @@ describe("executable SessionManager rehydration boundaries", () => {
 			message: { role: "assistant", content: [{ type: "text", text: "continued" }], stopReason: "stop" },
 		});
 		listener?.({ type: "agent_end", messages: [] });
-		const canonicalBeforeAck = manager.sessions.get(ps.id);
-		expect(canonicalBeforeAck?.status).toBe("idle");
-		expect(canonicalBeforeAck?.completedTurnCount).toBe(1);
-		expect(canonicalBeforeAck?.promptQueue.toArray().map((row: any) => row.text))
+		const canonicalBeforeSettlement = manager.sessions.get(ps.id);
+		expect(canonicalBeforeSettlement?.status).toBe("idle");
+		expect(canonicalBeforeSettlement?.completedTurnCount).toBe(1);
+		expect(canonicalBeforeSettlement?.promptQueue.toArray().map((row: any) => row.text))
 			.toEqual(["accepted while boot prompt is pending"]);
+		expect(bridge.prompt).not.toHaveBeenCalled();
+
+		listener?.({ type: "agent_settled" });
 		expect(bridge.prompt).not.toHaveBeenCalled();
 
 		bootAccepted.resolve();

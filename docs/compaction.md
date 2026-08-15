@@ -50,7 +50,14 @@ Input affinity depends on the compaction type:
 
 - during **manual** compaction, prompts and steers target the next turn;
 - during **threshold** or **overflow** compaction, steers target the continuing turn while prompts target the next turn; and
-- when Pi reports `willRetry: true`, only continuation steers may re-enter the interrupted turn. Next-turn work waits for its final `agent_end`.
+- when Pi reports `willRetry: true`, only continuation steers may re-enter the interrupted turn. Next-turn work waits for `agent_settled` after the final `agent_end`.
+
+Pi's final `agent_end` is not a fresh-prompt admission boundary. In Pi `0.84.1`, it is emitted before the run's `finally` path clears `_isAgentRunActive`; threshold compaction and queued-continuation processing may still follow. Pi clears that guard immediately before `agent_settled`. Bobbit therefore uses the two events for different purposes:
+
+- final `agent_end` completes user-visible terminal bookkeeping, retargets undispatched continuation work, persists idle state, and resolves turn waiters;
+- `agent_settled` proves that Pi can start a fresh prompt, clears Bobbit's active-run admission fence, and owns the next-turn queue drain.
+
+A definite no-start signal, including Pi's canonical compaction-active rejection, reverses optimistic dispatch state: the exact occurrence returns to its durable queue state, `streamingStartedAt` is cleared, persisted `wasStreaming` becomes false, and the server broadcasts `idle`. This status rollback runs only while the session is still `streaming`. If Stop, replacement, or a newer lifecycle transition already owns another status, the late rejection may reconcile its exact attempt but cannot overwrite that owner or settle its waiters.
 
 Every occurrence remains in the visible delivery outbox while fenced. See [Reliable prompt and steer delivery](prompt-queue.md) for identity, settlement, and recovery.
 
@@ -62,11 +69,33 @@ Every occurrence remains in the visible delivery outbox while fenced. See [Relia
 | --- | --- |
 | Manual success | Clear the fence once. If the session is safely idle, drain next-turn work normally. |
 | Threshold/overflow continues, or `willRetry: true` | Clear once and release queued continuation steers in FIFO order. Keep next-turn work parked. |
-| Final non-retry turn boundary | Retarget any remaining continuation rows once with `continuation-ended`, then drain next-turn work. |
+| Final non-retry `agent_end` | Retarget any remaining continuation rows once with `continuation-ended`; keep next-turn work parked while Pi performs post-run work. |
+| `agent_settled` | Clear the active-run admission fence and drain next-turn work. |
 | Automatic compaction failure | Clear the compaction epoch but do not inject continuation work into a possibly failed/interrupted turn. The final safe turn boundary owns later release. |
 | Stop near compaction end | Record the compaction finish, defer release to Stop/replacement ownership, reconcile the in-flight attempt, and retarget undispatched continuation work. |
 
 No lock spans an RPC acknowledgement. Queue and ledger persistence happens before handoff, and stale lifecycle generations cannot drain after a replacement.
+
+### Stop across the settlement boundary
+
+Stop owns the release boundary so terminal or compaction callbacks cannot race a queued prompt onto a bridge that is about to be stopped.
+
+- **Graceful Stop** waits for the old Pi run's `agent_settled`, not merely `agent_end`. While the shared replacement fence is active, Bobbit captures `message_end`, `compaction_end`, final `agent_end`, and `agent_settled`; it then replays that sequence through normal lifecycle bookkeeping with queue draining deferred. The Stop coordinator performs one drain only after replay is complete.
+- **Hard Stop** is used when the grace period expires. Because the killed process cannot emit `agent_settled`, Bobbit synthesizes settlement. If compaction was active—even if its `compaction_start` followed an already handled `agent_end`—Bobbit first finalizes that epoch as an aborted `compaction_end`. It then runs idempotent synthetic terminal bookkeeping, replaces and rehydrates the bridge, reconciles exact transcript evidence, and lets the coordinator release remaining FIFO work once against the canonical replacement.
+
+Finalizing interrupted compaction matters for liveness: leaving `isCompacting` set would strand every durable prompt after replacement. Idempotent terminal and compaction finishers prevent the synthetic path from counting the turn, resolving waiters, or releasing the same occurrence twice.
+
+### Deferred error-recovery occurrence
+
+A new prompt can implicitly recover an ordinary errored turn after its final `agent_end`. If Pi has not emitted `agent_settled`, Bobbit reports the admission as queued and stores the exact model-facing recovery payload instead of attempting the RPC early:
+
+```text
+[SYSTEM: previous turn failed with: <first 200 characters of the error>. Your previous turn was interrupted. Pick up where you left off — re-check state first and avoid redoing completed work.]
+
+<model-facing prompt text>
+```
+
+For a stable-ID prompt, Bobbit updates the already admitted durable row rather than creating a second occurrence. The row keeps its `intentId`, lane, sequence, creation time, and delivery state while the recovery payload, images, attachments, author/source, streaming behavior, cold-start flag, and title-generation flag are preserved for dispatch. Legacy admission creates one equivalent deferred row. `agent_settled` dispatches that row once, ahead of later FIFO work, and prompt-author settlement correlates the Pi echo against the same recovery payload.
 
 ### Recoverable `length` overflow
 
@@ -252,7 +281,8 @@ Reducer invariants are pinned in `tests2/core/message-reducer.test.ts` and `mess
 
 Deterministic CI coverage uses named runtime barriers rather than timing sleeps:
 
-- `tests2/core/reliable-compaction-release.test.ts` pins admission fencing and the single release owner across manual, threshold, overflow, failure, and Stop outcomes.
+- `tests2/core/reliable-compaction-release.test.ts` pins admission fencing, deferred error-recovery payload identity, guarded rejection rollback, and the single release owner across manual, threshold, overflow, failure, and Stop outcomes.
+- `tests2/core/session-manager-force-abort-grace.test.ts` pins graceful settlement replay plus hard-Stop settlement synthesis and interrupted-compaction finalization.
 - `tests2/core/pi-installed-contract.test.ts` pins Pi event order, `willRetry`, direct-prompt rejection during compaction, recoverable-length tail removal, and the one-retry cap.
 - `tests2/core/assistant-stream-session-broadcast.test.ts` pins invalidation-before-release ordering and one invalidation for the first recoverable tail.
 - `tests2/integration/reliable-intent-recovery.test.ts` exercises held compaction boundaries and visible outbox continuity through failure and recovery.

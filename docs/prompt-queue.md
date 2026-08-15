@@ -72,9 +72,9 @@ A steer targets `continuation` only while a turn is streaming, including thresho
 Release rules are lane-aware:
 
 - live continuation steers dispatch serially while the current turn can accept them;
-- next-turn work waits for the final non-retry `agent_end` and drains by lane sequence;
+- final non-retry `agent_end` retargets undispatched continuation rows once with `continuation-ended`, but next-turn work remains parked;
 - `agent_end(willRetry: true)` is not a turn boundary;
-- final turn completion retargets undispatched continuation rows once with `continuation-ended`;
+- `agent_settled` proves Pi's active run has ended and drains next-turn work by lane sequence;
 - Stop retargets queued continuation rows with `continuation-aborted`; and
 - a proven-no-start in-flight occurrence may be restored once, retaining its ID and relative priority.
 
@@ -102,11 +102,11 @@ Stop never silently deletes accepted work.
 - If administrative abort recovery cannot preserve or prove an attempt, Bobbit retains a non-retryable `cancelled` row with `abort-recovery-failed`; it does not claim the model did not see it.
 - Explicit Dismiss writes a cancellation tombstone before removing a queued or uncertain carrier. A stale second tab cannot delete a newer Retry because IndexedDB mutations use revision checks.
 
-The `aborting` session status is broadcast immediately while graceful Stop or force replacement owns the lifecycle. Queue and compaction callbacks do not drain around that owner.
+The `aborting` session status is broadcast immediately while graceful Stop or force replacement owns the lifecycle. Queue and compaction callbacks do not drain around that owner. Graceful Stop waits through `agent_settled` and replays the captured terminal sequence before its coordinator drains once. A hard Stop synthesizes the missing settlement, finalizes any interrupted compaction as aborted, rehydrates a replacement, and releases only after exact transcript reconciliation. See [Stop across the settlement boundary](compaction.md#stop-across-the-settlement-boundary).
 
 ### Definite rejection versus ambiguity
 
-A `{ success: false }` Pi response is a definite pre-receipt rejection. Bobbit restores the exact row at the queue front as retryable `failed`. **Retry** keeps the same `intentId` and creates a new attempt only when dispatch resumes.
+A `{ success: false }` Pi response is a definite pre-receipt rejection. Bobbit restores the exact row at the queue front as retryable `failed`. **Retry** keeps the same `intentId` and creates a new attempt only when dispatch resumes. Bobbit also reverses its optimistic live and persisted streaming state, but only while that attempt still owns `streaming`; a late rejection cannot overwrite `aborting`, replacement, or a newer lifecycle owner.
 
 A thrown call or transport loss is ambiguous: Pi may have received it even though Bobbit missed the acknowledgement. Bobbit keeps the ledger row as `uncertain`, disables Retry, and waits for exact transcript evidence or explicit Dismiss. This fail-closed rule prefers visible uncertainty over duplicate model input.
 
@@ -123,7 +123,9 @@ Reload, reconnect, and a second tab combine the IndexedDB local spool with the s
 
 ### Errored turns
 
-A genuine model/provider error parks accepted work while Bobbit applies its bounded auto-retry and manual-retry policies. A new prompt can implicitly unstick ordinary errors below the consecutive-error cap; at the cap the visible queue remains parked until explicit Retry. See [Auto-Retry](auto-retry.md) and [Session wedged after errored turn](debugging.md#session-wedged-after-errored-turn).
+A genuine model/provider error parks accepted work while Bobbit applies its bounded auto-retry and manual-retry policies. A new prompt can implicitly unstick ordinary errors below the consecutive-error cap; at the cap the visible queue remains parked until explicit Retry.
+
+If that prompt arrives after final `agent_end` but before `agent_settled`, Bobbit does not call Pi. It keeps one durable occurrence in place and replaces only its model-facing payload and dispatch metadata with the error-recovery envelope. Stable identity and FIFO fields remain unchanged; images, attachments, source/author, and dispatch flags travel with the deferred payload. Settlement dispatches that exact row once before later FIFO work. See [Deferred error-recovery occurrence](compaction.md#deferred-error-recovery-occurrence), [Auto-Retry](auto-retry.md), and [Session wedged after errored turn](debugging.md#session-wedged-after-errored-turn).
 
 ## `bash_bg wait` interaction
 

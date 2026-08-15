@@ -205,7 +205,7 @@ test.describe("Journey: Reliable Agent Turns", () => {
 		});
 	}
 
-	test("overflow compaction releases continuation steers during willRetry but holds next-turn prompts until final agent_end", async ({ page, gateway }) => {
+	test("overflow compaction releases continuation steers during willRetry but holds next-turn prompts until agent_settled", async ({ page, gateway }) => {
 		const scenario = await createScenario(page, gateway);
 		try {
 			const overflow = scenario.runtime.holdNextCompaction({ reason: "overflow", willRetry: true });

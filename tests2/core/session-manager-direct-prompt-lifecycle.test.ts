@@ -774,7 +774,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		);
 	});
 
-	it("surfaces durable work when an explicit Retry dispatch is rejected", async () => {
+	it("surfaces durable work and rolls back optimistic streaming when an explicit Retry is rejected", async () => {
 		const manager = makeManager();
 		const prompt = vi.fn(async () => ({ success: false, error: "invalid request schema" }));
 		const { session, client } = putSession(manager, {
@@ -786,9 +786,25 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 
 		await assert.rejects(() => manager.retryLastPrompt(session.id), /invalid request schema/);
 
+		const retryRowId = session.explicitRetryQueueRowId;
+		assert.ok(retryRowId, "explicit Retry retains its accepted durable row identity");
+		assert.equal(session.status, "idle");
+		assert.equal(session.streamingStartedAt, undefined, "definite rejection clears the optimistic timestamp");
+		assert.deepEqual(
+			manager._testStore.update.mock.calls
+				.map(([, update]: any[]) => update)
+				.filter((update: any) => Object.hasOwn(update, "wasStreaming")),
+			[
+				{ wasStreaming: true, streamingStartedAt: manager._testClock.now() },
+				{ wasStreaming: false, streamingStartedAt: undefined },
+			],
+			"persisted streaming state rolls back after the optimistic write",
+		);
 		assert.equal(session.pendingAutoRetryTimer, undefined, "a rejected explicit Retry has no automatic owner");
 		assert.equal(session.manualRetryRequired, true, "rejected Retry must leave its durable row visibly parked");
 		assert.equal(session.promptQueue.length, 1, "the explicit Retry row remains durable");
+		assert.equal(session.promptQueue.peek()?.id, retryRowId, "the exact Retry row remains first");
+		assert.equal(readAuthorSidecar(session.id).at(-1)?.settlement?.outcome, "cancelled", "the rejected attempt settles its sidecar");
 		assert.equal(
 			client.sent.some((msg: any) => msg.type === "event" && msg.data?.type === "manual_retry_required"),
 			true,
@@ -798,6 +814,61 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 			manager._testStore.update.mock.calls.some(([, update]: any[]) => update.manualRetryRequired === true),
 			"the rejected explicit Retry must persist the parked-state marker",
 		);
+
+		manager._testClock.advance(0);
+		await flushAsyncWork();
+		assert.equal(prompt.mock.calls.length, 1, "manual recovery cannot redrain the rejected Retry");
+	});
+
+	it("does not let a late explicit Retry rejection overwrite Stop ownership", async () => {
+		const manager = makeManager();
+		const pending = deferred<any>();
+		const prompt = vi.fn(() => pending.promise);
+		const abort = vi.fn(async () => ({ success: true }));
+		const { session, client } = putSession(manager, {
+			lastTurnErrored: true,
+			lastTurnErrorMessage: "invalid request schema",
+			lastPromptText: "retry while Stop interleaves",
+			rpcClient: { prompt, abort },
+		});
+
+		const retryPromise = manager.retryLastPrompt(session.id);
+		assert.equal(prompt.mock.calls.length, 1);
+		assert.equal(session.status, "streaming");
+		const optimisticStartedAt = session.streamingStartedAt;
+		const retryRowId = session.explicitRetryQueueRowId;
+		assert.ok(retryRowId, "explicit Retry owns one durable row before the RPC settles");
+
+		await manager.abortSessionTurn(session.id);
+		assert.equal(abort.mock.calls.length, 1);
+		assert.equal(session.status, "aborting");
+
+		pending.resolve({ success: false, error: "invalid request schema" });
+		await assert.rejects(retryPromise, /invalid request schema/);
+
+		assert.equal(session.status, "aborting", "late rejection must not steal Stop's status ownership");
+		assert.equal(session.streamingStartedAt, optimisticStartedAt, "late rejection must not clear Stop-owned lifecycle state");
+		assert.deepEqual(
+			client.sent.filter((msg: any) => msg.type === "session_status").map((msg: any) => msg.status),
+			["streaming", "aborting"],
+			"the rejection cannot emit a later idle frame",
+		);
+		assert.equal(
+			manager._testStore.update.mock.calls
+				.map(([, update]: any[]) => update)
+				.filter((update: any) => Object.hasOwn(update, "wasStreaming") && update.wasStreaming === false)
+				.length,
+			0,
+			"the late rejection cannot persist idle over Stop ownership",
+		);
+		assert.equal(session.manualRetryRequired, true, "the failed Retry remains manual despite Stop ownership");
+		assert.equal(session.promptQueue.length, 1);
+		assert.equal(session.promptQueue.peek()?.id, retryRowId, "the same Retry row remains parked at the front");
+		assert.equal(readAuthorSidecar(session.id).at(-1)?.settlement?.outcome, "cancelled", "the rejected attempt still settles its sidecar");
+
+		manager._testClock.advance(0);
+		await flushAsyncWork();
+		assert.equal(prompt.mock.calls.length, 1, "the Stop-interleaved Retry cannot redrain automatically");
 	});
 
 	it("retryLastPrompt routes mid-work provider-auth prompt failures through recovery", async () => {
@@ -1406,12 +1477,12 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		await Promise.resolve();
 		await Promise.resolve();
 
-		assert.equal(session.status, "idle");
+		assert.equal(session.status, "aborting", "late prompt rejection must not steal Stop's status ownership");
 		assert.equal(session.promptQueue.length, 1);
 		assert.equal(session.promptQueue.peek()?.text, "recover after abort-before-acceptance");
 		assert.deepEqual(
 			client.sent.filter((msg: any) => msg.type === "session_status").map((msg: any) => msg.status),
-			["streaming", "aborting", "idle"],
+			["streaming", "aborting"],
 		);
 	});
 
