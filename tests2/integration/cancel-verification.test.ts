@@ -27,7 +27,7 @@ import { VerificationHarness, type ActiveVerification } from "../../src/server/a
 import { createManualClock, type ManualClock } from "../harness/clock.js";
 
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, connectWs, createGoal, createSession, defaultProjectId, deleteGoal, deleteSession, type WsConnection } from "./_e2e/e2e-setup.js";
+import { apiFetch, connectWs, createGoal, createSession, defaultProjectId, deleteGoal, deleteSession, startTeam, teardownTeam, type WsConnection } from "./_e2e/e2e-setup.js";
 import type { VerificationCommandRunner, VerificationCommandSpawnSpec } from "../../src/server/agent/verification-command-runner.js";
 import type { TrackedChild } from "../../src/server/agent/spawn-tree.js";
 
@@ -782,6 +782,125 @@ test.describe("Cancel Verification API", () => {
 			(harness as any).fenceAndCancelAllVerifications = originalFence;
 			await cleanupSlowWorkflowGoal(terminal);
 			await cleanupSlowWorkflowGoal(archive);
+		}
+	});
+
+	test("team completion fences signal admission through its authoritative completion write", async ({ gateway }) => {
+		let setup: SlowWorkflowGoal | undefined;
+		let releaseUpdate: (() => void) | undefined;
+		let updateSpy: ReturnType<typeof vi.spyOn> | undefined;
+		try {
+			setup = await createSlowWorkflowGoal("Team Complete Lifecycle Admission Race");
+			const context = gateway.projectContextManager.getContextForGoal(setup.goalId)!;
+			const bypass = await apiFetch(`/api/goals/${setup.goalId}/gates/slow-gate/bypass`, {
+				method: "POST",
+				body: JSON.stringify({ whyBypassed: "exercise lifecycle fence", whoAmI: "test@example.com", isInitiatedByHuman: true }),
+			});
+			expect(bypass.status).toBe(200);
+			// This deliberately makes completion workflow-exempt: the race asserts the
+			// lifecycle fence, not final gate validation.
+			context.goalStore.update(setup.goalId, { skipGateRequirements: ["workflow"] });
+			await startTeam(setup.goalId);
+			const before = await getGateState(setup.goalId);
+			expect(before.status).toBe("bypassed");
+
+			const originalUpdate = context.goalManager.updateGoal.bind(context.goalManager);
+			const entered = deferred();
+			const release = deferred();
+			releaseUpdate = release.resolve;
+			let blocked = false;
+			updateSpy = vi.spyOn(context.goalManager, "updateGoal").mockImplementation(async (goalId, updates) => {
+				if (goalId === setup!.goalId && (updates as { state?: string }).state === "complete" && !blocked) {
+					blocked = true;
+					entered.resolve();
+					await release.promise;
+				}
+				return originalUpdate(goalId, updates);
+			});
+
+			const completing = apiFetch(`/api/goals/${setup.goalId}/team/complete`, { method: "POST", body: JSON.stringify({}) });
+			await entered.promise;
+			expect(gateway.teamManager.verificationHarness!.isGoalLifecycleFenced(setup.goalId)).toBe(true);
+			const rejected = await signalSlowVerification(setup.goalId, "must not escape team completion");
+			expect(rejected.status).toBe(409);
+			expect(await rejected.json()).toMatchObject({ code: "GOAL_LIFECYCLE_IN_PROGRESS", retryable: true });
+			await expectNoSignalAdmission(gateway, setup.goalId, before.signals.length);
+			expect((await getGateState(setup.goalId)).status).toBe("bypassed");
+
+			release.resolve();
+			releaseUpdate = undefined;
+			expect((await completing).status).toBe(200);
+			expect(await (await apiFetch(`/api/goals/${setup.goalId}`)).json()).toMatchObject({ state: "complete" });
+		} finally {
+			releaseUpdate?.();
+			updateSpy?.mockRestore();
+			if (setup) await teardownTeam(setup.goalId).catch(() => {});
+			await cleanupSlowWorkflowGoal(setup);
+		}
+	});
+
+	test("team teardown fences signal admission until lead termination and tracking removal finish", async ({ gateway }) => {
+		let setup: SlowWorkflowGoal | undefined;
+		let releaseTermination: (() => void) | undefined;
+		let terminateSpy: ReturnType<typeof vi.spyOn> | undefined;
+		try {
+			setup = await createSlowWorkflowGoal("Team Teardown Lifecycle Admission Race");
+			const leadId = await startTeam(setup.goalId);
+			const originalTerminate = gateway.sessionManager.terminateSession.bind(gateway.sessionManager);
+			const entered = deferred();
+			const release = deferred();
+			releaseTermination = release.resolve;
+			terminateSpy = vi.spyOn(gateway.sessionManager, "terminateSession").mockImplementation(async sessionId => {
+				if (sessionId === leadId) {
+					entered.resolve();
+					await release.promise;
+				}
+				return originalTerminate(sessionId);
+			});
+
+			const tearingDown = apiFetch(`/api/goals/${setup.goalId}/team/teardown?cascade=false`, { method: "POST" });
+			await entered.promise;
+			expect(gateway.teamManager.verificationHarness!.isGoalLifecycleFenced(setup.goalId)).toBe(true);
+			const rejected = await signalSlowVerification(setup.goalId, "must not escape team teardown");
+			expect(rejected.status).toBe(409);
+			expect(await rejected.json()).toMatchObject({ code: "GOAL_LIFECYCLE_IN_PROGRESS", retryable: true });
+			await expectNoSignalAdmission(gateway, setup.goalId);
+
+			release.resolve();
+			releaseTermination = undefined;
+			expect((await tearingDown).status).toBe(200);
+			expect(gateway.teamManager.getTeamState(setup.goalId)).toBeUndefined();
+		} finally {
+			releaseTermination?.();
+			terminateSpy?.mockRestore();
+			await cleanupSlowWorkflowGoal(setup);
+		}
+	});
+
+	test("team completion and teardown fail closed when their durable cancellation fence fails", async ({ gateway }) => {
+		let setup: SlowWorkflowGoal | undefined;
+		const harness = gateway.teamManager.verificationHarness!;
+		const originalFence = harness.fenceAndCancelAllVerifications.bind(harness);
+		try {
+			setup = await createSlowWorkflowGoal("Team Lifecycle Fence Persistence Failure");
+			const leadId = await startTeam(setup.goalId);
+			(harness as any).fenceAndCancelAllVerifications = () => { throw new Error("simulated durable fence failure"); };
+
+			const complete = await apiFetch(`/api/goals/${setup.goalId}/team/complete`, { method: "POST", body: JSON.stringify({}) });
+			expect(complete.status).toBe(503);
+			expect(await complete.json()).toMatchObject({ code: "VERIFICATION_CANCELLATION_FENCE_FAILED", retryable: true });
+			expect(gateway.teamManager.getTeamState(setup.goalId)?.teamLeadSessionId).toBe(leadId);
+			expect(gateway.sessionManager.getSession(leadId)).toBeTruthy();
+
+			const teardown = await apiFetch(`/api/goals/${setup.goalId}/team/teardown?cascade=false`, { method: "POST" });
+			expect(teardown.status).toBe(503);
+			expect(await teardown.json()).toMatchObject({ code: "VERIFICATION_CANCELLATION_FENCE_FAILED", retryable: true });
+			expect(gateway.teamManager.getTeamState(setup.goalId)?.teamLeadSessionId).toBe(leadId);
+			expect(gateway.sessionManager.getSession(leadId)).toBeTruthy();
+		} finally {
+			(harness as any).fenceAndCancelAllVerifications = originalFence;
+			if (setup) await teardownTeam(setup.goalId).catch(() => {});
+			await cleanupSlowWorkflowGoal(setup);
 		}
 	});
 

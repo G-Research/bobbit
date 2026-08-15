@@ -57,7 +57,7 @@ import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { DEFAULT_OVERFLOW_GUARD, describeWsPayload, guardWebSocketOverflow } from "./ws-overflow-guard.js";
 import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
 import { enumerateFiles } from "./skills/file-enumeration.js";
-import { TeamManager, GateDependencyError, TeamStartError } from "./agent/team-manager.js";
+import { TeamManager, GateDependencyError, TeamStartError, VerificationCancellationFenceError } from "./agent/team-manager.js";
 import { OrchestrationCore, OrchestrationCoreError, dismissHttpStatus, isSettledStatus, type WaitResult } from "./agent/orchestration-core.js";
 import { tryHandleNestedGoalRoute, listDescendants } from "./agent/nested-goal-routes.js";
 import { walkGoalSubtree, cascadeSubtree as cascadeGoalSubtree } from "./agent/goal-subtree.js";
@@ -14252,7 +14252,11 @@ async function handleApiRoute(
 			await teamManager.completeTeam(goalId, { allowBypassedGates: confirmBypassedGates });
 			json({ ok: true });
 		} catch (err) {
-			jsonError(400, err);
+			if (err instanceof VerificationCancellationFenceError) {
+				json({ error: err.message, code: err.code, retryable: true }, 503);
+			} else {
+				jsonError(400, err);
+			}
 		}
 		return;
 	}
@@ -14305,6 +14309,18 @@ async function handleApiRoute(
 				},
 			},
 		);
+		const fenceFailure = result.errors.find(error =>
+			error.error instanceof VerificationCancellationFenceError
+			|| (error.error as { code?: string })?.code === "VERIFICATION_CANCELLATION_FENCE_FAILED",
+		);
+		if (fenceFailure) {
+			json({
+				error: fenceFailure.error.message,
+				code: "VERIFICATION_CANCELLATION_FENCE_FAILED",
+				retryable: true,
+			}, 503);
+			return;
+		}
 		const toreDown = result.processed.filter(p => p.result === true).length;
 		json({
 			ok: true,

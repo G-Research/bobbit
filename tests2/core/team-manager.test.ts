@@ -840,6 +840,72 @@ describe("TeamManager", () => {
 			assert.equal(goal.state, "complete");
 		});
 
+		it("acquires and releases the lifecycle fence around completion, including nested ownership", async () => {
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal({ state: "in-progress" });
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const team = createTeamManager(sm);
+			await team.startTeam(goal.id);
+
+			let fenceDepth = 0;
+			const harness = {
+				acquireGoalLifecycleFence: vi.fn((_goalId: string) => {
+					fenceDepth++;
+					let released = false;
+					return () => {
+						if (released) return;
+						released = true;
+						fenceDepth--;
+					};
+				}),
+				fenceAndCancelAllVerifications: vi.fn((_goalId: string, _cause: string) => {}),
+			};
+			team.setVerificationHarness(harness as any);
+
+			const releaseOuter = harness.acquireGoalLifecycleFence(goal.id);
+			await team.completeTeam(goal.id);
+
+			assert.equal(goal.state, "complete");
+			assert.equal(harness.fenceAndCancelAllVerifications.mock.calls[0][1], "goal-complete");
+			assert.equal(fenceDepth, 1, "completeTeam must release only its nested lifecycle fence");
+			releaseOuter();
+			assert.equal(fenceDepth, 0);
+		});
+
+		it("fails closed and releases the lifecycle fence when durable cancellation cannot be recorded", async () => {
+			for (const [operation, cause] of [
+				["complete", "goal-complete"],
+				["teardown", "team-teardown"],
+			] as const) {
+				const goals = new Map<string, MockGoal>();
+				const goal = createMockGoal({ state: "in-progress" });
+				goals.set(goal.id, goal);
+				const sm = createMockSessionManager(goals);
+				const team = createTeamManager(sm);
+				const lead = await team.startTeam(goal.id);
+				let fenceDepth = 0;
+				const harness = {
+					acquireGoalLifecycleFence: vi.fn((_goalId: string) => {
+						fenceDepth++;
+						return () => { fenceDepth--; };
+					}),
+					fenceAndCancelAllVerifications: vi.fn((_goalId: string, _cause: string) => { throw new Error("disk unavailable"); }),
+				};
+				team.setVerificationHarness(harness as any);
+
+				await assert.rejects(
+					() => operation === "complete" ? team.completeTeam(goal.id) : team.teardownTeam(goal.id),
+					{ name: "VerificationCancellationFenceError" },
+				);
+				assert.equal(harness.fenceAndCancelAllVerifications.mock.calls[0][1], cause);
+				assert.equal(fenceDepth, 0, `${operation} must release its lifecycle fence after failure`);
+				assert.equal(goal.state, "in-progress", `${operation} must not mutate the goal after fence failure`);
+				assert.ok(team.getTeamState(goal.id), `${operation} must retain team tracking after fence failure`);
+				assert.equal(sm._sessions.has(lead.id), true, `${operation} must not terminate the lead after fence failure`);
+			}
+		});
+
 		it("revalidates gates after awaited dismissals and rearms instead of completing after an interleaved reset", async () => {
 			const clock = createManualClock();
 			const goals = new Map<string, MockGoal>();

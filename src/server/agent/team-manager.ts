@@ -265,6 +265,17 @@ export class TeamStartError extends Error {
 	}
 }
 
+/** A terminal team lifecycle cannot proceed until verification cancellation is durable. */
+export class VerificationCancellationFenceError extends Error {
+	readonly code = "VERIFICATION_CANCELLATION_FENCE_FAILED";
+	readonly retryable = true;
+
+	constructor(cause?: unknown) {
+		super("Could not durably cancel active verifications before changing team lifecycle", { cause });
+		this.name = "VerificationCancellationFenceError";
+	}
+}
+
 /**
  * Format elapsed time since a timestamp as a human-readable string.
  * Exported for testing.
@@ -3127,81 +3138,93 @@ export class TeamManager {
 			throw new Error(`No active team for goal: ${goalId}`);
 		}
 
-		// Cancel any in-flight verifications before completing — prevents zombie reviewers.
-		// Completion is orchestration, not a product-verification failure.
-		if (this.verificationHarness) {
-			await this.verificationHarness.cancelAllVerifications(goalId, "goal-complete");
-		}
-
-		// Enforce gate requirements before allowing completion.
-		let goal = this.validateCompletionGates(goalId, opts);
-
-		// Cancel idle-nudge timer and unsubscribe from team lead events. A new
-		// completion attempt invalidates any earlier reopen idempotency marker.
-		this.rearmedCompletedTeams.delete(goalId);
-		this.clearIdleNudgeTimer(goalId);
-		entry.unsubscribeTeamLeadEvents?.();
-		entry.unsubscribeTeamLeadEvents = undefined;
-
-		// Dismiss all role agents
-		const agentSessionIds = entry.agents.map((a) => a.sessionId);
-		for (const sessionId of agentSessionIds) {
+		// Keep signal admission closed from target selection until the authoritative
+		// completion write. Nested archive teardown may already hold this same
+		// ref-counted fence, so this remains safe under cascade lifecycle calls.
+		const harness = this.verificationHarness;
+		const releaseLifecycleFence = harness?.acquireGoalLifecycleFence(goalId);
+		try {
+			// This synchronous durable fence must run before dismissals or any team/goal
+			// mutation. Exact reviewer/process/Docker cleanup stays detached and owned by
+			// VerificationHarness, which publishes only after it settles.
 			try {
-				await this.dismissRole(sessionId);
+				harness?.fenceAndCancelAllVerifications(goalId, "goal-complete");
 			} catch (err) {
-				console.error(`[team-manager] Error dismissing agent ${sessionId} during team completion:`, err);
+				throw new VerificationCancellationFenceError(err);
 			}
-		}
 
-		// Keep the team lead session alive — do NOT terminate it.
-		// The team lead will await further instructions.
+			// Enforce gate requirements before allowing completion.
+			let goal = this.validateCompletionGates(goalId, opts);
 
-		// Worker dismissal awaits above allow a gate reset to interleave after the
-		// first validation. Re-read workflow truth immediately before committing the
-		// completed state. If reset won the race, restore the lead runtime and leave
-		// the goal in progress rather than persisting complete with unresolved gates.
-		try {
-			goal = this.validateCompletionGates(goalId, opts);
-		} catch (err) {
-			const rearmed = this.reopenCompletedTeam(goalId);
-			if (!rearmed) {
-				console.warn(`[team-manager] Completion aborted for goal ${goalId}, but its team lead runtime could not be rearmed; a later reopen may retry`);
-			}
-			throw err;
-		}
-		await this.resolveGoalManager(goalId).updateGoal(goalId, { state: "complete" });
-		this.rearmedCompletedTeams.delete(goalId);
+			// Cancel idle-nudge timer and unsubscribe from team lead events. A new
+			// completion attempt invalidates any earlier reopen idempotency marker.
+			this.rearmedCompletedTeams.delete(goalId);
+			this.clearIdleNudgeTimer(goalId);
+			entry.unsubscribeTeamLeadEvents?.();
+			entry.unsubscribeTeamLeadEvents = undefined;
 
-		// Notify parent team lead when a child goal completes, regardless of workflow shape.
-		// This ensures the parent is woken up even if the child's workflow has no
-		// ready-to-merge gate (which is the only prior notification path).
-		try {
-			const parentNotify = buildParentCompletionNotification(goal ?? undefined);
-			if (parentNotify) {
-				const parentEntry = this.teams.get(parentNotify.parentGoalId);
-				if (parentEntry?.teamLeadSessionId) {
-					const parentLeadSession = this.sessionManager.getSession(parentEntry.teamLeadSessionId);
-					if (parentLeadSession && parentLeadSession.status !== "terminated") {
-						if (parentLeadSession.status === "streaming") {
-							this.sessionManager.deliverLiveSteer(parentEntry.teamLeadSessionId, parentNotify.message, { source: "child-complete" }).catch((e: any) => {
-								console.error("[team-manager] Failed to steer parent team-lead on child completion:", e);
-							});
-						} else {
-							this.sessionManager.enqueuePrompt(parentEntry.teamLeadSessionId, parentNotify.message, { isSteered: true, source: "child-complete" });
-						}
-						console.log(`[team-manager] Notified parent team-lead (goal ${parentNotify.parentGoalId}) that child ${goalId} completed`);
-					}
+			// Dismiss all role agents
+			const agentSessionIds = entry.agents.map((a) => a.sessionId);
+			for (const sessionId of agentSessionIds) {
+				try {
+					await this.dismissRole(sessionId);
+				} catch (err) {
+					console.error(`[team-manager] Error dismissing agent ${sessionId} during team completion:`, err);
 				}
 			}
-		} catch (err) {
-			console.warn("[team-manager] Failed to notify parent team-lead on child goal completion:", err);
+
+			// Keep the team lead session alive — do NOT terminate it.
+			// The team lead will await further instructions.
+
+			// Worker dismissal awaits above allow a gate reset to interleave after the
+			// first validation. Re-read workflow truth immediately before committing the
+			// completed state. If reset won the race, restore the lead runtime and leave
+			// the goal in progress rather than persisting complete with unresolved gates.
+			try {
+				goal = this.validateCompletionGates(goalId, opts);
+			} catch (err) {
+				const rearmed = this.reopenCompletedTeam(goalId);
+				if (!rearmed) {
+					console.warn(`[team-manager] Completion aborted for goal ${goalId}, but its team lead runtime could not be rearmed; a later reopen may retry`);
+				}
+				throw err;
+			}
+			await this.resolveGoalManager(goalId).updateGoal(goalId, { state: "complete" });
+			this.rearmedCompletedTeams.delete(goalId);
+
+			// Notify parent team lead when a child goal completes, regardless of workflow shape.
+			// This ensures the parent is woken up even if the child's workflow has no
+			// ready-to-merge gate (which is the only prior notification path).
+			try {
+				const parentNotify = buildParentCompletionNotification(goal ?? undefined);
+				if (parentNotify) {
+					const parentEntry = this.teams.get(parentNotify.parentGoalId);
+					if (parentEntry?.teamLeadSessionId) {
+						const parentLeadSession = this.sessionManager.getSession(parentEntry.teamLeadSessionId);
+						if (parentLeadSession && parentLeadSession.status !== "terminated") {
+							if (parentLeadSession.status === "streaming") {
+								this.sessionManager.deliverLiveSteer(parentEntry.teamLeadSessionId, parentNotify.message, { source: "child-complete" }).catch((e: any) => {
+									console.error("[team-manager] Failed to steer parent team-lead on child completion:", e);
+								});
+							} else {
+								this.sessionManager.enqueuePrompt(parentEntry.teamLeadSessionId, parentNotify.message, { isSteered: true, source: "child-complete" });
+							}
+							console.log(`[team-manager] Notified parent team-lead (goal ${parentNotify.parentGoalId}) that child ${goalId} completed`);
+						}
+					}
+				}
+			} catch (err) {
+				console.warn("[team-manager] Failed to notify parent team-lead on child goal completion:", err);
+			}
+
+			// Keep team tracking alive so the team lead can still be found
+			// but persist the updated state (agents cleared)
+			this.persistEntry(goalId);
+
+			console.log(`[team-manager] Completed team for goal ${goalId} — team lead remains active: ${entry.teamLeadSessionId}`);
+		} finally {
+			releaseLifecycleFence?.();
 		}
-
-		// Keep team tracking alive so the team lead can still be found
-		// but persist the updated state (agents cleared)
-		this.persistEntry(goalId);
-
-		console.log(`[team-manager] Completed team for goal ${goalId} — team lead remains active: ${entry.teamLeadSessionId}`);
 	}
 
 	/**
@@ -3214,57 +3237,65 @@ export class TeamManager {
 			throw new Error(`No active team for goal: ${goalId}`);
 		}
 
-		// Cancel any in-flight verifications before teardown — prevents zombie reviewers.
-		// A subsequent archive cannot overwrite this first durable cancellation cause.
-		if (this.verificationHarness) {
-			await this.verificationHarness.cancelAllVerifications(goalId, "team-teardown");
-		}
-
-		// Cancel idle-nudge timer and unsubscribe from team lead events
-		this.clearIdleNudgeTimer(goalId);
-		entry.unsubscribeTeamLeadEvents?.();
-
-		// Dismiss all role agents
-		const agentSessionIds = entry.agents.map((a) => a.sessionId);
-		for (const sessionId of agentSessionIds) {
+		// Acquire before verification target selection and retain through tracking
+		// removal. This composes with an archive caller's fence by reference count.
+		const harness = this.verificationHarness;
+		const releaseLifecycleFence = harness?.acquireGoalLifecycleFence(goalId);
+		try {
 			try {
-				await this.dismissRole(sessionId);
+				harness?.fenceAndCancelAllVerifications(goalId, "team-teardown");
 			} catch (err) {
-				console.error(`[team-manager] Error dismissing agent ${sessionId} during team teardown:`, err);
+				throw new VerificationCancellationFenceError(err);
 			}
-		}
 
-		// Terminate the team lead session — persist worktree info first so purge can clean up
-		if (entry.teamLeadSessionId) {
-			const goal = this.resolveGoal(goalId);
-			if (goal?.repoPath) {
-				const projectCtx = this.config.projectContextManager
-					? this.config.projectContextManager.getContextForGoal(goalId)
-					: null;
-				if (projectCtx) {
-					projectCtx.sessionStore.update(entry.teamLeadSessionId, {
-						repoPath: goal.repoPath,
-						branch: goal.branch,
-						worktreePath: goal.worktreePath,
-					});
+			// Cancel idle-nudge timer and unsubscribe from team lead events
+			this.clearIdleNudgeTimer(goalId);
+			entry.unsubscribeTeamLeadEvents?.();
+
+			// Dismiss all role agents
+			const agentSessionIds = entry.agents.map((a) => a.sessionId);
+			for (const sessionId of agentSessionIds) {
+				try {
+					await this.dismissRole(sessionId);
+				} catch (err) {
+					console.error(`[team-manager] Error dismissing agent ${sessionId} during team teardown:`, err);
 				}
 			}
-			try {
-				await this.sessionManager.terminateSession(entry.teamLeadSessionId);
-			} catch (err) {
-				console.error(`[team-manager] Error terminating team lead ${entry.teamLeadSessionId}:`, err);
+
+			// Terminate the team lead session — persist worktree info first so purge can clean up
+			if (entry.teamLeadSessionId) {
+				const goal = this.resolveGoal(goalId);
+				if (goal?.repoPath) {
+					const projectCtx = this.config.projectContextManager
+						? this.config.projectContextManager.getContextForGoal(goalId)
+						: null;
+					if (projectCtx) {
+						projectCtx.sessionStore.update(entry.teamLeadSessionId, {
+							repoPath: goal.repoPath,
+							branch: goal.branch,
+							worktreePath: goal.worktreePath,
+						});
+					}
+				}
+				try {
+					await this.sessionManager.terminateSession(entry.teamLeadSessionId);
+				} catch (err) {
+					console.error(`[team-manager] Error terminating team lead ${entry.teamLeadSessionId}:`, err);
+				}
+				this.sessionToGoal.delete(entry.teamLeadSessionId);
 			}
-			this.sessionToGoal.delete(entry.teamLeadSessionId);
+
+			// Remove team tracking entirely
+			this.teams.delete(goalId);
+			this.leadIdleSinceByGoal.delete(goalId);
+			this.lastNudgeAtPerGoal.delete(goalId);
+			this.rearmedCompletedTeams.delete(goalId);
+			this.resolveTeamStore(goalId).remove(goalId);
+
+			console.log(`[team-manager] Tore down team for goal ${goalId}`);
+		} finally {
+			releaseLifecycleFence?.();
 		}
-
-		// Remove team tracking entirely
-		this.teams.delete(goalId);
-		this.leadIdleSinceByGoal.delete(goalId);
-		this.lastNudgeAtPerGoal.delete(goalId);
-		this.rearmedCompletedTeams.delete(goalId);
-		this.resolveTeamStore(goalId).remove(goalId);
-
-		console.log(`[team-manager] Tore down team for goal ${goalId}`);
 	}
 
 	/**
