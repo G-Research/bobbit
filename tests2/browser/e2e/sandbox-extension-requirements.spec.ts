@@ -37,6 +37,14 @@ function json<T>(response: BrowserResponse): T {
 	catch { throw new Error(`Expected JSON from ${response.status}: ${response.text}`); }
 }
 
+function expectUnbuiltPythonRequirement(response: BrowserResponse): void {
+	const requirements = json<{ requirements: { profiles: string[]; entries: Array<{ packId: string; requirementId: string; state: string }> } }>(response).requirements;
+	expect(requirements.profiles).toEqual(["python"]);
+	expect(requirements.entries).toHaveLength(1);
+	expect(requirements.entries[0]).toMatchObject({ packId: PACK_ID, requirementId: REQUIREMENT_ID });
+	expect(["pending", "unsupported"]).toContain(requirements.entries[0].state);
+}
+
 function writeFixturePack(bobbitDir: string): string {
 	const packDir = path.join(bobbitDir, "config", "market-packs", PACK_ID);
 	fs.rmSync(packDir, { recursive: true, force: true });
@@ -110,15 +118,15 @@ test.describe("sandbox extension requirements browser API journey", () => {
 
 		response = await browserApi(page, { path: statusPath });
 		expect(response.status, response.text).toBe(200);
-		// Docker is intentionally unavailable in this browser harness; authorization
-		// must still project the exact server-owned profile, never client data.
-		expect(json<any>(response).requirements).toMatchObject({ profiles: ["python"], entries: [{ packId: PACK_ID, requirementId: REQUIREMENT_ID, state: "unsupported" }] });
+		// The environment may be able to build Docker images or may lack support,
+		// but a newly authorized requirement cannot be available before a build.
+		expectUnbuiltPythonRequirement(response);
 
 		await page.reload({ waitUntil: "domcontentloaded" });
 		await expect(page.locator("body[data-shortcuts-ready='1']")).toBeVisible({ timeout: 20_000 });
 		response = await browserApi(page, { path: statusPath });
 		expect(response.status, response.text).toBe(200);
-		expect(json<any>(response).requirements).toMatchObject({ profiles: ["python"], entries: [{ state: "unsupported" }] });
+		expectUnbuiltPythonRequirement(response);
 
 		response = await browserApi(page, { path: revokePath, method: "DELETE" });
 		expect(response.status, response.text).toBe(200);
