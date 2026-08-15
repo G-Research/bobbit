@@ -120,6 +120,8 @@ function writeFixturePack(headquartersDir: string): void {
 		"  externalUrl: { type: string, optional: true }",
 		"  apiKey: { type: secret, optional: true }",
 		"  recallScope: { type: enum, values: [project, all], default: all }",
+		"  languages: { type: multi-enum, values: [typescript, javascript, python], default: [typescript] }",
+		"  optionalLanguages: { type: multi-enum, values: [typescript, javascript, python], optional: true }",
 		"  autoRecall: { type: boolean, default: true }",
 		"  recallBudget: { type: number, min: 1, max: 4096, default: 1200 }",
 		"  requiredName: { type: string }",
@@ -300,6 +302,8 @@ test.describe("extension settings API", () => {
 		});
 		const defaulted = target(initial).fields.find((field: any) => field.key === "recallScope");
 		expect(defaulted).toMatchObject({ value: "all", default: "all", source: "default" });
+		expect(target(initial).fields.find((field: any) => field.key === "languages"))
+			.toMatchObject({ type: "multi-enum", value: ["typescript"], default: ["typescript"], source: "default" });
 		expect(target(initial).fields.find((field: any) => field.key === "apiKey")).not.toHaveProperty("default");
 
 		const bearerOnly = await apiFetch(targetPath(project.id), {
@@ -344,6 +348,42 @@ test.describe("extension settings API", () => {
 		const stale = await patchTarget(project.id, initial.revision, { externalUrl: "https://stale.example.test" });
 		expect(stale.status).toBe(409);
 		expect(await readJson(stale)).toMatchObject({ code: "EXTENSION_SETTINGS_REVISION_CONFLICT" });
+	});
+
+	test("canonicalizes multi-enum arrays, rejects invalid sets, and restores project values after reload", async ({ gateway }) => {
+		const project = await createProject(gateway, "multi-enum");
+		const initial = await settings(project.id);
+
+		for (const languages of ["typescript", ["unknown"], ["typescript", "typescript"], []] as const) {
+			const response = await patchTarget(project.id, initial.revision, { languages });
+			expect(response.status).toBe(422);
+			expect(await readJson(response)).toMatchObject({ code: "EXTENSION_SETTINGS_INVALID_FIELD_VALUE" });
+		}
+
+		const saved = await patchTarget(project.id, initial.revision, {
+			externalUrl: "https://multi-enum-hindsight.example.test",
+			languages: ["typescript", "javascript"],
+			optionalLanguages: [],
+			apiKey: SECRET_A,
+		});
+		expect(saved.status).toBe(200);
+		const savedText = await saved.text();
+		expect(savedText).not.toContain(SECRET_A);
+		const savedTarget = JSON.parse(savedText).target;
+		expect(savedTarget.fields.find((field: any) => field.key === "languages"))
+			.toMatchObject({ value: ["javascript", "typescript"], source: "project" });
+		expect(savedTarget.fields.find((field: any) => field.key === "optionalLanguages"))
+			.toMatchObject({ value: [], source: "project" });
+		expect(runtimeProviders(gateway, project.id).find((provider: any) => provider.id === PROVIDER_ID)?.config)
+			.toMatchObject({ languages: ["javascript", "typescript"], optionalLanguages: [] });
+
+		await gateway.projectContextManager.remove(project.id);
+		const reloaded = target(await settings(project.id));
+		expect(reloaded.fields.find((field: any) => field.key === "languages"))
+			.toMatchObject({ value: ["javascript", "typescript"], source: "project" });
+		expect(reloaded.fields.find((field: any) => field.key === "optionalLanguages"))
+			.toMatchObject({ value: [], source: "project" });
+		expect(JSON.stringify(reloaded)).not.toContain(SECRET_A);
 	});
 
 	test("clears defaulted overrides back to their declared source but rejects clearing required no-default fields", async ({ gateway }) => {
@@ -419,9 +459,11 @@ test.describe("extension settings API", () => {
 		const grantsBefore = await readJson(await apiFetch(`/api/projects/${encodeURIComponent(projectA.id)}/extension-grants`));
 
 		const legacyUrl = "https://legacy-hindsight.example.test";
-		await getPackStore().put(PACK_ID, providerConfigStoreKey(PROVIDER_ID), { externalUrl: legacyUrl, mode: "managed" });
+		await getPackStore().put(PACK_ID, providerConfigStoreKey(PROVIDER_ID), { externalUrl: legacyUrl, languages: ["python"], mode: "managed" });
 		const beforeRecord = target(await settings(projectB.id));
 		expect(beforeRecord.fields.find((field: any) => field.key === "externalUrl")).toMatchObject({ value: legacyUrl, source: "legacy" });
+		expect(beforeRecord.fields.find((field: any) => field.key === "languages"))
+			.toMatchObject({ value: ["typescript"], source: "default" });
 		expect(beforeRecord.fields.find((field: any) => field.key === "mode")).toBeUndefined();
 		expect(JSON.stringify(beforeRecord)).not.toContain("managed");
 		expect(runtimeProviders(gateway, projectB.id).find((provider: any) => provider.id === PROVIDER_ID)?.config)
