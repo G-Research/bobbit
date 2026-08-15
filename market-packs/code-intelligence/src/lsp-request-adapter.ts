@@ -51,6 +51,10 @@ export interface LspRequestContext {
 export interface LspRuntimeSnapshot {
 	enabled?: boolean;
 	toolchain?: "available" | "missing";
+	/** The runtime whose matrix requirements were checked by the platform. */
+	runtime?: "host" | "sandbox";
+	/** Matrix requirement IDs validated missing by the platform in the selected runtime. */
+	missingToolchainIds?: readonly string[];
 	service?: "ready" | "starting" | "failed" | "stopped";
 	reason?: string;
 }
@@ -130,12 +134,54 @@ function isInside(root: string, candidate: string): boolean {
 
 function boundedReason(reason: unknown, fallback: string): string {
 	const text = typeof reason === "string" ? reason.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim() : "";
-	// Service output must already be sanitized by the platform. Preserve a short
-	// operator reason while defensively removing common topology and secret forms.
-	return (text || fallback)
-		.replace(/(?:[A-Za-z]:[\\/]|\/)[^\s:]+/g, "[redacted path]")
-		.replace(/\b(token|secret|password|api[_-]?key)\s*[=:]\s*\S+/gi, "$1=[redacted]")
-		.slice(0, MAX_REASON_LENGTH);
+	return redactRuntimeDetails(text || fallback).slice(0, MAX_REASON_LENGTH);
+}
+
+function redactRuntimeDetails(text: string): string {
+	// Runtime output is untrusted. Keep the surrounding operator message, but
+	// remove credentials before paths so a bearer value cannot survive a path match.
+	const withoutSecrets = text
+		.replace(/\b(?:proxy-)?authorization\s*[=:]\s*(?:bearer|basic|token)\s+(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, "authorization=[redacted]")
+		.replace(/\bbearer\s+(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, "bearer [redacted]")
+		.replace(/\b(token|secret|password|api[_-]?key|access[_-]?token|refresh[_-]?token|credential|authorization)\s*[=:]\s*(?:"[^"]*"|'[^']*'|\S+)/gi, "$1=[redacted]");
+	// Windows drive paths and UNC paths can contain spaces. Stop at a known
+	// delimiter or a structured credential field; otherwise prefer redacting the
+	// remainder over risking a topology leak.
+	const withoutWindowsPaths = withoutSecrets.replace(
+		/(^|[\s("'`])(?:[A-Za-z]:[\\/]|\\\\)[^<>:"|?*]*?(?=\s+(?:token|secret|password|api[_-]?key|access[_-]?token|refresh[_-]?token|credential|authorization)\b\s*[=:]|[,:;]|$)/gi,
+		"$1[redacted path]",
+	);
+	// Unix paths with a spaced directory retain text following the path unless it
+	// is clearly another path segment. This preserves safe structured reasons.
+	return withoutWindowsPaths.replace(
+		/(^|[\s("'`])\/(?:[^/\s:]+\/)+[^\s:]+(?:\s+[^/\s:]+\/[^:;,]*)?/g,
+		"$1[redacted path]",
+	);
+}
+
+function normalizeRequirementId(value: string): string {
+	return value.trim().toLowerCase();
+}
+
+function missingToolchainGuidance(language: NonNullable<LspLanguageDeclaration["lsp"]>, runtime: LspRuntimeSnapshot): string {
+	if ((runtime.runtime !== "host" && runtime.runtime !== "sandbox") || !Array.isArray(runtime.missingToolchainIds)) {
+		return "The LSP toolchain is unavailable, but the platform did not report validated missing requirement IDs and runtime.";
+	}
+	const reportedIds = new Set(runtime.missingToolchainIds
+		.filter((id): id is string => typeof id === "string" && Boolean(id.trim()))
+		.map(normalizeRequirementId));
+	if (runtime.runtime === "host") {
+		const missing = language.host.filter((requirement) => reportedIds.has(normalizeRequirementId(requirement.id)));
+		if (missing.length === 0) {
+			return "The host LSP toolchain is unavailable, but no reported missing ID matches a matrix-declared requirement.";
+		}
+		return `The host runtime is missing host requirement IDs: ${missing.map((requirement) => requirement.id).join(", ")}. ${missing.map((requirement) => requirement.installHint).join(" ")}`;
+	}
+	const missing = language.sandbox.filter((requirement) => reportedIds.has(normalizeRequirementId(requirement.id)));
+	if (missing.length === 0) {
+		return "The sandbox LSP toolchain is unavailable, but no reported missing ID matches a matrix-declared requirement.";
+	}
+	return `The sandbox runtime is missing sandbox requirement IDs: ${missing.map((requirement) => `${requirement.id} (layer ${requirement.layerId})`).join(", ")}. ${missing.map((requirement) => requirement.installHint).join(" ")}`;
 }
 
 function result(action: LspToolAction, component: string, status: LspResultStatus, reasonCode: LspReasonCode, reason: string, languageId?: string): LspResult {
@@ -167,8 +213,9 @@ function extensionCandidates(file: string, languages: readonly LspLanguageDeclar
 }
 
 function resolveLanguage(input: LspToolRequest, languages: readonly LspLanguageDeclaration[]): LspLanguageDeclaration | undefined {
-	if (typeof input.language === "string" && input.language.trim()) {
-		return languages.find((language) => language.id === input.language.trim().toLowerCase());
+	const requestedLanguage = typeof input.language === "string" ? input.language.trim() : "";
+	if (requestedLanguage) {
+		return languages.find((language) => language.id === requestedLanguage.toLowerCase());
 	}
 	if (!input.path) return undefined;
 	const candidates = extensionCandidates(input.path, languages);
@@ -247,9 +294,7 @@ export function serializeLspRequest(input: LspToolRequest, options: LspRequestAd
 		return { result: result(action, componentName, "disabled", "disabled", "LSP is disabled for this language. Enable it through the project language settings.", language.id), request };
 	}
 	if (runtime?.toolchain === "missing") {
-		const requirement = language.lsp.host[0] ?? language.lsp.sandbox[0];
-		const guidance = requirement ? `${requirement.label} is required. ${requirement.installHint}` : "The matrix-declared LSP toolchain is unavailable.";
-		return { result: result(action, componentName, "requires-toolchain", "requires-toolchain", guidance, language.id), request };
+		return { result: result(action, componentName, "requires-toolchain", "requires-toolchain", missingToolchainGuidance(language.lsp, runtime), language.id), request };
 	}
 	if (runtime?.service === "failed") {
 		return { result: result(action, componentName, "failed", "service-failed", boundedReason(runtime.reason, `${language.lsp.server.id} failed to initialize.`), language.id), request };
