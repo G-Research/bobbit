@@ -3344,6 +3344,24 @@
       }
     },
     {
+      "path": "tests2/browser/journeys/code-intelligence-integration.journey.spec.ts",
+      "reason": "Integrated browser journey covers normal import without a pack decision, explicit server-scoped enablement, TypeScript/Go declared capability honesty, a real AST query followed by source read, graph/review boundaries, reload, disablement, and finally cleanup.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/dom/code-intelligence-activation.test.ts",
+      "reason": "DOM contract for the built-in Code Intelligence activation surface: manifest exposes AST but no inert LSP group, and the existing server sentinel retains its explicit server-wide accessible disclosure and request shape.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
       "path": "tests2/core/graph-query-tools.test.ts",
       "reason": "Caps, tier defaults, component-labelled fan-out, freshness banners, and the six read-only graph tool operations.",
       "execution": {
