@@ -61,6 +61,7 @@ function createPauseRouteFixture(options: { goals?: GoalWithPauseSource[] } = {}
 	let fenceDepth = 0;
 	let failFence: { error: Error; goalId?: string } | undefined;
 	let updateCalls = 0;
+	const updateArguments: Array<{ goalId: string; updates: Parameters<GoalManager["updateGoal"]>[1] }> = [];
 	const fenceCalls: Array<{ goalId: string; cause: string; depth: number }> = [];
 	const broadcasts: any[] = [];
 	const broadcastFenceDepths: number[] = [];
@@ -90,6 +91,7 @@ function createPauseRouteFixture(options: { goals?: GoalWithPauseSource[] } = {}
 	let stallWrite: { started: ReturnType<typeof deferred>; release: ReturnType<typeof deferred> } | undefined;
 	(goalManager as any).updateGoal = async (...args: Parameters<GoalManager["updateGoal"]>) => {
 		updateCalls++;
+		updateArguments.push({ goalId: args[0], updates: args[1] });
 		if (stallWrite) {
 			stallWrite.started.resolve();
 			await stallWrite.release.promise;
@@ -146,6 +148,7 @@ function createPauseRouteFixture(options: { goals?: GoalWithPauseSource[] } = {}
 		abortCalls,
 		get fenceDepth() { return fenceDepth; },
 		get updateCalls() { return updateCalls; },
+		get updateArguments() { return updateArguments; },
 		failCancellationFence(error = new Error("simulated durable fence failure"), goalId?: string) {
 			failFence = { error, goalId };
 		},
@@ -328,6 +331,8 @@ describe("canonical operator pause lifecycle", () => {
 			retryable: true,
 		});
 		assert.notEqual(fx.goalStore.get(fx.goal.id)!.paused, true, "a failed fence must not persist pause state");
+		assert.notEqual(fx.goalStore.get(fx.goal.id)!.pauseSource, "operator", "a failed fence must not stamp operator provenance");
+		assert.deepEqual(fx.updateArguments, [], "a failed fence must not attempt a pause/provenance write");
 		assert.equal(fx.broadcasts.length, 0, "a failed fence must not publish a successful pause");
 		assert.deepEqual(fx.abortCalls, [], "a failed fence must not abort goal sessions");
 		assert.equal(fx.fenceDepth, 0, "the lifecycle admission fence must release after failure");
@@ -343,7 +348,9 @@ describe("canonical operator pause lifecycle", () => {
 
 		assert.equal(result.status, 503);
 		assert.equal(fx.goalStore.get(parent.id)!.paused, true, "the earlier parent remains durably paused");
+		assert.equal(fx.goalStore.get(parent.id)!.pauseSource, "operator", "the committed parent retains operator provenance");
 		assert.notEqual(fx.goalStore.get(child.id)!.paused, true, "the failed child remains unpaused");
+		assert.notEqual(fx.goalStore.get(child.id)!.pauseSource, "operator", "the failed child is never stamped as operator-paused");
 		assert.deepEqual(fx.broadcasts, [{ type: "goal_state_changed", goalId: parent.id }]);
 		assert.deepEqual(fx.abortCalls, ["streaming-session-cascade-parent"], "only the committed parent may be aborted");
 		assert.deepEqual(fx.fenceCalls.map(call => call.goalId), [parent.id, child.id]);
@@ -370,6 +377,12 @@ describe("canonical operator pause lifecycle", () => {
 		assert.equal(result.status, 200);
 		assert.deepEqual(result.payload, { paused: 1 });
 		assert.equal(fx.goalStore.get(fx.goal.id)!.paused, true);
+		assert.equal(fx.goalStore.get(fx.goal.id)!.pauseSource, "operator", "the first pause durably records operator provenance");
+		assert.deepEqual(
+			fx.updateArguments,
+			[{ goalId: fx.goal.id, updates: { paused: true, pauseSource: "operator" } }],
+			"pause state and provenance must share one authoritative write",
+		);
 		assert.equal(fx.fenceDepth, 0, "admission reopens only after the paused write and broadcast settle");
 		assert.deepEqual(fx.fenceCalls, [{ goalId: fx.goal.id, cause: "goal-pause", depth: 1 }]);
 		assert.deepEqual(fx.broadcastFenceDepths, [1], "the paused broadcast must remain inside the lifecycle fence");
@@ -381,6 +394,12 @@ describe("canonical operator pause lifecycle", () => {
 		assert.deepEqual(await fx.post(), { handled: true, status: 200, payload: { paused: 0 } });
 
 		assert.equal(fx.updateCalls, 1, "repeated pause must not rewrite already-paused state");
+		assert.deepEqual(
+			fx.updateArguments,
+			[{ goalId: fx.goal.id, updates: { paused: true, pauseSource: "operator" } }],
+			"only the first pause may write operator provenance",
+		);
+		assert.equal(fx.goalStore.get(fx.goal.id)!.pauseSource, "operator", "the first pause's provenance remains durable");
 		assert.equal(fx.broadcasts.length, 1, "repeated pause must not publish another state transition");
 		assert.deepEqual(fx.fenceCalls.map(call => call.cause), ["goal-pause", "goal-pause"]);
 		assert.equal(fx.fenceDepth, 0);
