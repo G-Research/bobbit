@@ -12,6 +12,15 @@ export interface ProjectImportDecisionRequestProjection extends DecisionRequestW
 	projectId: string;
 }
 
+/** A bounded parsed proposal draft owned by a durable import request. */
+export type ProjectImportProposalProjection = {
+	projectId: string;
+	requestId: string;
+	proposalType: "goal" | "project" | "role" | "tool" | "staff";
+	rev: number;
+	fields: Record<string, unknown>;
+};
+
 type Listener = () => void;
 
 type ProjectionState = "loading" | "loaded" | "error";
@@ -31,6 +40,7 @@ export type ProjectImportDecisionActivity = {
 type ActiveProjection = {
 	projectId: string;
 	requests: ProjectImportDecisionRequestProjection[];
+	proposals: ProjectImportProposalProjection[];
 	activity: ProjectImportDecisionActivity[];
 	listeners: Set<Listener>;
 	generation: number;
@@ -170,11 +180,12 @@ function notify(current: ActiveProjection): void {
 
 function setProjectionState(
 	current: ActiveProjection,
-	next: { state: ProjectionState; requests?: ProjectImportDecisionRequestProjection[]; activity?: ProjectImportDecisionActivity[]; error?: ProjectImportDecisionProjectionError | null },
+	next: { state: ProjectionState; requests?: ProjectImportDecisionRequestProjection[]; proposals?: ProjectImportProposalProjection[]; activity?: ProjectImportDecisionActivity[]; error?: ProjectImportDecisionProjectionError | null },
 ): void {
 	if (active !== current) return;
 	current.state = next.state;
 	if (next.requests) current.requests = next.requests;
+	if (next.proposals) current.proposals = next.proposals;
 	if (next.activity) current.activity = next.activity;
 	current.error = next.error ?? null;
 	notify(current);
@@ -202,6 +213,11 @@ export function projectImportDecisionActivityForProject(projectId: string): read
 	return active?.projectId === projectId ? active.activity : [];
 }
 
+/** Parsed, project-owned proposal drafts awaiting explicit review. */
+export function projectImportProposalsForProject(projectId: string): readonly ProjectImportProposalProjection[] {
+	return active?.projectId === projectId ? active.proposals : [];
+}
+
 /** A projection error is distinct from an authoritative empty projection. */
 export function projectImportDecisionProjectionError(projectId: string): ProjectImportDecisionProjectionError | null {
 	return active?.projectId === projectId ? active.error : null;
@@ -212,7 +228,7 @@ export function activateProjectImportDecisionRequests(projectId: string, listene
 	if (!projectId) return () => {};
 	if (!active || active.projectId !== projectId) {
 		active?.controller?.abort();
-		active = { projectId, requests: [], activity: [], listeners: new Set(), generation: 0, state: "loading", error: null };
+		active = { projectId, requests: [], proposals: [], activity: [], listeners: new Set(), generation: 0, state: "loading", error: null };
 		void refreshProjectImportDecisionRequests(projectId);
 	}
 	const current = active;
@@ -241,22 +257,42 @@ export async function refreshProjectImportDecisionRequests(projectId: string): P
 	const generation = ++current.generation;
 	setProjectionState(current, { state: "loading" });
 	try {
-		const response = await gatewayFetch(
-			gatewayRoute(`/api/projects/${encodeURIComponent(projectId)}/import-decision-requests?state=pending`),
-			{ signal: controller.signal },
-		);
-		if (!response.ok) {
+		const [response, proposalsResponse] = await Promise.all([
+			gatewayFetch(
+				gatewayRoute(`/api/projects/${encodeURIComponent(projectId)}/import-decision-requests?state=pending`),
+				{ signal: controller.signal },
+			),
+			gatewayFetch(
+				gatewayRoute(`/api/projects/${encodeURIComponent(projectId)}/import-proposals`),
+				{ signal: controller.signal },
+			),
+		]);
+		if (!response.ok || !proposalsResponse.ok) {
 			finishFailedProjection(current, generation);
 			return;
 		}
-		const payload: unknown = await response.json();
+		const [payload, proposalsPayload]: [unknown, unknown] = await Promise.all([response.json(), proposalsResponse.json()]);
 		if (active !== current || current.generation !== generation) return;
+		const rawProposals = record(proposalsPayload)?.proposals;
+		const proposals: ProjectImportProposalProjection[] = [];
+		if (Array.isArray(rawProposals)) for (const raw of rawProposals.slice(0, 20)) {
+			const candidate = record(raw);
+			const requestId = string(candidate?.requestId, 128);
+			const proposalType = candidate?.proposalType;
+			const rev = candidate?.rev;
+			const fields = record(candidate?.fields);
+			if (requestId && (proposalType === "goal" || proposalType === "project" || proposalType === "role" || proposalType === "tool" || proposalType === "staff")
+				&& typeof rev === "number" && Number.isInteger(rev) && rev > 0 && fields) {
+				proposals.push({ projectId, requestId, proposalType, rev, fields });
+			}
+		}
 		// One project-owned response is the complete decision projection. Keeping
 		// its optional trace rows on that response avoids a second GET racing the
 		// pending snapshot or consuming a settlement refresh.
 		setProjectionState(current, {
 			state: "loaded",
 			requests: actionableFromPayload(payload, projectId),
+			proposals,
 			activity: importActivityFromPayload(payload),
 		});
 	} catch {
@@ -265,6 +301,25 @@ export async function refreshProjectImportDecisionRequests(projectId: string): P
 }
 
 /** Submit one validated widget answer through the project-owned decision route only. */
+export async function acceptProjectImportProposal(proposal: ProjectImportProposalProjection): Promise<void> {
+	await decideProjectImportProposal(proposal, "accept");
+}
+
+export async function rejectProjectImportProposal(proposal: ProjectImportProposalProjection): Promise<void> {
+	await decideProjectImportProposal(proposal, "reject");
+}
+
+async function decideProjectImportProposal(proposal: ProjectImportProposalProjection, action: "accept" | "reject"): Promise<void> {
+	const response = await gatewayFetch(gatewayRoute(
+		`/api/projects/${encodeURIComponent(proposal.projectId)}/import-proposals/${encodeURIComponent(proposal.requestId)}/${encodeURIComponent(proposal.proposalType)}/${action}`,
+	), { method: "POST", body: JSON.stringify({ rev: proposal.rev }) });
+	if (!response.ok) {
+		const body = await response.json().catch(() => null);
+		throw new Error(typeof body?.error === "string" ? body.error : `HTTP ${response.status}`);
+	}
+	await refreshProjectImportDecisionRequests(proposal.projectId);
+}
+
 export async function answerProjectImportDecisionRequest(
 	projectId: string,
 	requestId: string,
