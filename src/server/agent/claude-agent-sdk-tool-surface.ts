@@ -633,7 +633,9 @@ export function buildClaudeAgentSdkQueryOptions(
 		...base,
 		tools: [...RETAINED_NATIVE_TOOLS],
 		disallowedTools: [...surface.sdkDisallowNames],
-		allowedTools: ["Agent", ...surface.sdkAllowNames],
+		// The SDK auto-approves bare allowlist entries before canUseTool. Agent
+		// must therefore reach its bounded admission callback rather than bypass it.
+		allowedTools: [...surface.sdkAllowNames],
 		agents: surface.subagentPolicy?.definitions ?? {},
 		skills: [...CLAUDE_BUNDLED_SKILLS_0_3_222],
 		mcpServers: { bobbit: surface.server },

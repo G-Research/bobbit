@@ -121,8 +121,8 @@ describe("Claude Agent SDK tool surface", () => {
 		expect((await hook({ tool_name: "mcp__bobbit__read", tool_use_id: "allow" })).hookSpecificOutput.permissionDecision).toBe("allow");
 	});
 
-	it("builds the sole strict isolated SDK query with root Agent admission, native Task denial, and no unmanaged settings", () => {
-		const surface = build({ entries: [entries[0]] });
+	it("projects only always-allow tools into the strict isolated SDK query", () => {
+		const surface = build();
 		const options = buildClaudeAgentSdkQueryOptions(surface, {
 			cwd: "/workspace/project",
 			env: { PATH: "/bin", CLAUDE_CONFIG_DIR: "/isolated/claude" },
@@ -132,7 +132,12 @@ describe("Claude Agent SDK tool surface", () => {
 		expect(options.disallowedTools).toEqual(SUPPRESSED_NATIVE_0_3_222);
 		expect(options.disallowedTools).toContain("Task");
 		expect(options.disallowedTools).not.toContain("Agent");
-		expect(options.allowedTools).toEqual(["Agent", "mcp__bobbit__read"]);
+		// Bare allowedTools bypass the SDK permission callback. The allow entry is
+		// safe there, but ask/never entries and Agent must use their callbacks.
+		expect(options.allowedTools).toEqual(["mcp__bobbit__read"]);
+		for (const name of ["mcp__bobbit__ask_tool", "mcp__bobbit__never_tool", "Agent"]) {
+			expect(options.allowedTools).not.toContain(name);
+		}
 		expect(options.agents).toEqual({});
 		expect(options.mcpServers).toEqual({ bobbit: surface.server });
 		expect(options.settingSources).toEqual([]);
@@ -142,5 +147,28 @@ describe("Claude Agent SDK tool surface", () => {
 		expect(options.toolAliases).toBeUndefined();
 		expect(options.bypassPermissions).toBeUndefined();
 		expect(options.allowDangerouslySkipPermissions).toBeUndefined();
+	});
+
+	it("keeps Agent callback-reachable for the bounded subagent policy", async () => {
+		const calls: Array<{ rawName: unknown; input: unknown; context: unknown }> = [];
+		const surface = build({
+			subagentPolicy: {
+				definitions: {},
+				admit: (rawName: unknown, input: unknown, context: unknown) => {
+					calls.push({ rawName, input, context });
+					return true;
+				},
+			} as any,
+		});
+		const options = buildClaudeAgentSdkQueryOptions(surface, {
+			cwd: "/workspace/project",
+			env: { PATH: "/bin" },
+			abortController: new AbortController(),
+		} as any) as any;
+		const input = { subagent_type: "bobbit-backend-parity-reviewer", prompt: "Inspect", run_in_background: false };
+
+		expect(options.allowedTools).not.toContain("Agent");
+		await expect(options.canUseTool("Agent", input, permissionContext())).resolves.toMatchObject({ behavior: "allow" });
+		expect(calls).toEqual([expect.objectContaining({ rawName: "Agent", input })]);
 	});
 });
