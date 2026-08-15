@@ -19,6 +19,52 @@ import { manualTmpRoot } from "./manual-test-paths.ts";
 // This project-local role directive makes the native helper journey unambiguous
 // without modifying a shared/default role or exposing any private session data.
 const manualNativeAgentDirective = "When the user explicitly requests native `Agent`, call the retained native `Agent` tool exactly as requested. Never substitute an MCP or Bobbit helper and never claim completion without that tool.";
+const manualHelperRoleName = "backend-parity-reviewer";
+const manualHelperRolePrompt = "You are a read-only helper. Execute the assigned task exactly. When asked, use Bobbit read on README.md. Use no other tool. Then report completion.";
+
+type ManualRole = {
+	name?: string;
+	label?: string;
+	accessory?: string;
+	promptTemplate?: string;
+	toolPolicies?: Record<string, string>;
+};
+
+/** Isolate the constrained native helper from its normal gate-review prompt. */
+async function configureManualHelperRole(
+	api: (path: string, init?: RequestInit) => Promise<Response>,
+	projectId: string,
+): Promise<void> {
+	const roleScope = `projectId=${encodeURIComponent(projectId)}`;
+	const rolePath = `/api/roles/${manualHelperRoleName}?${roleScope}`;
+	const customize = await api(`/api/roles/${manualHelperRoleName}/customize?scope=project&${roleScope}`, { method: "POST" });
+	expect(customize.status).toBe(201);
+	const beforeResponse = await api(rolePath);
+	expect(beforeResponse.status).toBe(200);
+	const before = await beforeResponse.json() as ManualRole;
+	expect(before.name).toBe(manualHelperRoleName);
+	const update = await api(rolePath, {
+		method: "PUT",
+		body: JSON.stringify({ promptTemplate: manualHelperRolePrompt, toolPolicies: before.toolPolicies }),
+	});
+	expect(update.status).toBe(200);
+	const afterResponse = await api(rolePath);
+	expect(afterResponse.status).toBe(200);
+	const after = await afterResponse.json() as ManualRole;
+	// Persisted configuration only: do not surface role text in test diagnostics.
+	expect(after.promptTemplate).toBe(manualHelperRolePrompt);
+	expect({
+		name: after.name,
+		label: after.label,
+		accessory: after.accessory,
+		toolPolicies: after.toolPolicies,
+	}).toEqual({
+		name: before.name,
+		label: before.label,
+		accessory: before.accessory,
+		toolPolicies: before.toolPolicies,
+	});
+}
 
 const smokeEnvironmentKeys = [
 	"BOBBIT_DIR",
@@ -671,6 +717,11 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 				teamDelegate: "never",
 			});
 
+			// Keep the normal role override above separate from the constrained helper
+			// role. Its production gate-review prompt invokes tools not exposed to the
+			// native child, so replace it only in this temporary project.
+			await configureManualHelperRole(api, project.id);
+
 			const configuredModel = manualSdkModel();
 			const alternateModel = alternateManualSdkModel(configuredModel);
 			expect(alternateModel).not.toBe(configuredModel);
@@ -1054,6 +1105,11 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 				grep: "ask",
 				teamDelegate: "never",
 			});
+
+			// Keep the normal role override above separate from the constrained helper
+			// role. Its production gate-review prompt invokes tools not exposed to the
+			// native child, so replace it only in this temporary project.
+			await configureManualHelperRole(api, project.id);
 			const config = await api(`/api/projects/${project.id}/config`, {
 				method: "PUT",
 				body: JSON.stringify({ sandbox: "docker", sandbox_tokens: [{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: true }] }),
