@@ -503,8 +503,60 @@ describe("ClaudeAgentSdkBridge", () => {
 		mismatch.query.initialization.resolve({});
 		mismatch.query.emitSystemInit("00000000-0000-4000-8000-000000000010");
 		await expect(firstPrompt).rejects.toBeInstanceOf(ClaudeAgentSdkUnavailableError);
-		expect((await mismatch.bridge.getState()).data.sessionId).toBeUndefined();
+		// The persisted id remains authoritative for a lazy restored bridge even
+		// after the mismatched streamed identity has failed the query closed.
+		expect((await mismatch.bridge.getState()).data.sessionId).toBe(resumeId);
 		expect(mismatch.query.closeCalls).toBe(1);
+	});
+
+	it("reads restored SDK history before the lazy resumed query receives input", async () => {
+		const resumeId = "00000000-0000-4000-8000-000000000012";
+		const calls: Array<[string, string, unknown]> = [];
+		const fixture = bridgeFixture({
+			claudeAgentSdkSessionId: resumeId,
+			sessionAccess: {
+				loadSdk: async () => ({
+					getSessionInfo: async (id: string, options: unknown) => {
+						calls.push(["info", id, options]);
+						return { sessionId: id, summary: "restored", lastModified: 1 };
+					},
+					getSessionMessages: async (id: string, options: unknown) => {
+						calls.push(["messages", id, options]);
+						return [{
+							type: "user", uuid: "restored-user", session_id: id,
+							message: { role: "user", content: "persisted SDK history" },
+							parent_tool_use_id: null, parent_agent_id: null,
+						}];
+					},
+					forkSession: async () => ({ sessionId: resumeId }),
+				}),
+			},
+		});
+		await fixture.bridge.start();
+
+		await expect(fixture.bridge.getMessages()).resolves.toEqual({
+			success: true,
+			data: [expect.objectContaining({ id: "restored-user", role: "user", content: "persisted SDK history" })],
+		});
+		expect((await fixture.bridge.getState()).data.sessionId).toBe(resumeId);
+		expect(fixture.query.inputs).toEqual([]);
+		expect(calls).toEqual([
+			["info", resumeId, { dir: "/workspace/project" }],
+			["messages", resumeId, { dir: "/workspace/project" }],
+		]);
+		await fixture.bridge.stop();
+	});
+
+	it("keeps a new SDK bridge unavailable for history before its first init", async () => {
+		const fixture = bridgeFixture();
+		await fixture.bridge.start();
+
+		await expect(fixture.bridge.getMessages()).resolves.toEqual({
+			success: false,
+			error: "SDK_SESSION_UNAVAILABLE: Claude Agent SDK has no valid resumable session id",
+		});
+		expect((await fixture.bridge.getState()).data.sessionId).toBeUndefined();
+		await fixture.bridge.stop();
 	});
 
 	it("retries a first prompt after unpulled delivery times out without yielding bootstrap input", async () => {

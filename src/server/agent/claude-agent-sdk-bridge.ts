@@ -716,6 +716,18 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		return true;
 	}
 
+	/**
+	 * An idle restored bridge has not streamed its next system:init yet, but its
+	 * validated persisted resume id remains the authoritative history identity.
+	 * A fresh bridge deliberately has neither identity until its first init.
+	 */
+	private resolvedHistorySessionId(): string | undefined {
+		if (isClaudeAgentSdkSessionId(this.initializedSessionId)) return this.initializedSessionId;
+		return isClaudeAgentSdkSessionId(this.options.claudeAgentSdkSessionId)
+			? this.options.claudeAgentSdkSessionId
+			: undefined;
+	}
+
 	private isClosedOrFailed(): boolean {
 		return this.closed || this.state === "failed";
 	}
@@ -920,11 +932,12 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 			provider: "claude-agent-sdk",
 			model: this.modelState(),
 			thinkingLevel: this.thinkingLevel,
-			sessionId: this.initializedSessionId,
+			sessionId: this.resolvedHistorySessionId(),
 		} };
 	}
 	async getMessages(): Promise<any> {
-		if (!isClaudeAgentSdkSessionId(this.initializedSessionId)) {
+		const sessionId = this.resolvedHistorySessionId();
+		if (!sessionId) {
 			return unsupported("SDK_SESSION_UNAVAILABLE: Claude Agent SDK has no valid resumable session id");
 		}
 		try {
@@ -932,14 +945,14 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 			// official SDK session store remains the only transcript authority.
 			const { readSdkSessionMessages } = await import("./claude-agent-sdk-session-access.js");
 			const messages = await readSdkSessionMessages({
-				sessionId: this.initializedSessionId,
+				sessionId,
 				cwd: this.options.cwd,
 			}, this.deps.sessionAccess);
 			const adapted = adaptSdkSessionMessages(messages);
 			// Official history may omit archived child rows. Recovery is bounded by
 			// real root Agent/Task IDs and still rejects agent-id-only joins.
 			const recovered = await recoverClaudeSdkEmbeddedWork(adapted, {
-				sessionId: this.initializedSessionId,
+				sessionId,
 				cwd: this.options.cwd,
 				access: this.deps.sessionAccess ?? defaultClaudeAgentSdkSessionAccessDeps,
 			});
