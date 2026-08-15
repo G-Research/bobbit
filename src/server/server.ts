@@ -12954,23 +12954,6 @@ async function handleApiRoute(
 			}
 		}
 
-		// Gov-2: an ACCEPTED signal of the `goal-plan` gate on a parent-workflow
-		// goal FREEZES the execution gate's verify[] (sets
-		// execution.metadata.frozen = "true" durably on the goal's workflow
-		// snapshot). Applied here — after dependency/metadata validation has
-		// passed (so a rejected signal never freezes) but before the
-		// cache/dup early-return branches (so the freeze is durable even when
-		// the signal short-circuits to a cached pass). Idempotent: re-signal is
-		// a harmless no-op write. After this, GET /api/goals/:id/plan reports
-		// frozen:true. See src/server/agent/parent-workflow-freeze.ts.
-		const freezeResult = computePlanFreezeUpdate(goal, gateId);
-		if (freezeResult.freeze && freezeResult.workflow) {
-			// Persist via the goal store's `update` (same path applyPlanSteps
-			// uses) — `updateGoal`'s partial type does not expose `workflow`.
-			gateSignalCtx.goalManager.getGoalStore().update(goalId, { workflow: freezeResult.workflow });
-			goal.workflow = freezeResult.workflow;
-		}
-
 		// The un-offset branch container is the cache witness root and command root.
 		const branchContainer = goalBranchContainer(goal);
 
@@ -13000,9 +12983,6 @@ async function handleApiRoute(
 					// This request is an explicit replacement generation. Fence the old
 					// generation now, but never make the new signal wait for its exact
 					// process/Docker cleanup or let a later broad sweep cancel the new row.
-					void verificationHarness.cancelStaleVerifications(goalId, gateId, "zombie-recovery").catch(error => {
-						console.error(`[api] Error cancelling inactive verification for re-signal ${goalId}/${gateId}:`, error);
-					});
 					staleCancellationStarted = true;
 					// Fall through to create new signal
 				} else {
@@ -13081,6 +13061,29 @@ async function handleApiRoute(
 			return;
 		}
 
+		// The old generation must be durably fenced at the last admission boundary.
+		// No cache, cascade, signal, or verification dispatch may occur if this write
+		// fails; exact process cleanup remains detached after the fence succeeds.
+		try {
+			verificationHarness.fenceStaleVerificationsForGates(
+				goalId,
+				[gateId],
+				staleCancellationStarted ? "zombie-recovery" : "superseded",
+			);
+		} catch (err) {
+			console.error(`[api] Could not durably fence replacement verification ${goalId}/${gateId}:`, err);
+			json({ error: "Could not durably cancel active verification before re-signal", code: "VERIFICATION_CANCELLATION_FENCE_FAILED", retryable: true }, 503);
+			return;
+		}
+
+		// Gov-2 freezes only after the replacement fence is durable, so a failed
+		// fence leaves every goal/gate mutation untouched.
+		const freezeResult = computePlanFreezeUpdate(goal, gateId);
+		if (freezeResult.freeze && freezeResult.workflow) {
+			gateSignalCtx.goalManager.getGoalStore().update(goalId, { workflow: freezeResult.workflow });
+			goal.workflow = freezeResult.workflow;
+		}
+
 		// Auto-pass only if commit and live content/layout witnesses match. The extracted
 		// decision core owns cache-boundary and response semantics.
 		const cacheDecision = reuseCachedGateSignal({
@@ -13128,16 +13131,6 @@ async function handleApiRoute(
 					}
 				}
 			}
-		}
-
-		// Mark any old generation cancelled before seeding the new one, but do not
-		// await its exact cleanup: re-signal creates a fresh generation while the
-		// old one remains durably pending. The harness finalizer may update only
-		// that old signal and is forbidden from overwriting this gate's new state.
-		if (!staleCancellationStarted) {
-			void verificationHarness.cancelStaleVerifications(goalId, gateId, "superseded").catch(error => {
-				console.error(`[api] Error cancelling stale verification for re-signal ${goalId}/${gateId}:`, error);
-			});
 		}
 
 		// Create signal record. Step enumeration is performed synchronously

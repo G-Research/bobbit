@@ -1872,6 +1872,8 @@ export interface ActiveVerification {
 	};
 	/** Terminal store/broadcast publication completed; resource cleanup may still retry. */
 	terminalVerdictPublished?: boolean;
+	/** Exact sidecar removal and pinned checkout release completed before cancellation publication. */
+	terminalResourcesSettledAt?: number;
 	steps: Array<{
 		name: string;
 		type: string;
@@ -4314,10 +4316,17 @@ export class VerificationHarness {
 		}
 	}
 
-	/** Performs one strict release attempt; failures retain durable retry ownership. */
-	private async _releaseTerminalVerificationResourcesOnce(active: ActiveVerification): Promise<boolean> {
+	/** Settle exact sidecar and checkout ownership without publishing a verdict. */
+	private async _settleTerminalVerificationResources(active: ActiveVerification): Promise<boolean> {
 		if (this._hasPendingCommandKillCleanup(active)) return false;
 		if (this.activeVerifications.get(active.signalId) !== active) return true;
+		// A sidecar/checkout release cannot be undone, so require its durable
+		// checkpoint to be readable before allowing terminal publication.
+		if (active.terminalResourcesSettledAt) {
+			if (this._persistActive()) return true;
+			this._scheduleTerminalCleanupRetry(active.signalId);
+			return false;
+		}
 		try {
 			await this._removeVerificationSidecar(active);
 		} catch {
@@ -4346,6 +4355,20 @@ export class VerificationHarness {
 			}
 		}
 		delete active.cleanupPending;
+		active.terminalResourcesSettledAt = Date.now();
+		if (!this._persistActive()) {
+			this._scheduleTerminalCleanupRetry(active.signalId);
+			return false;
+		}
+		return true;
+	}
+
+	private async _releaseTerminalVerificationResourcesOnce(active: ActiveVerification): Promise<boolean> {
+		if (active.cancelled && !active.terminalVerdictPublished) {
+			await this._finalizeCancelledVerification(active);
+			return this.activeVerifications.get(active.signalId) !== active;
+		}
+		if (!await this._settleTerminalVerificationResources(active)) return false;
 		const timer = this._terminalCleanupRetryTimers.get(active.signalId);
 		if (timer) {
 			this.clock.clearTimeout(timer);
@@ -4364,7 +4387,12 @@ export class VerificationHarness {
 		const timer = this.clock.setTimeout(async () => {
 			this._terminalCleanupRetryTimers.delete(signalId);
 			const pending = this.activeVerifications.get(signalId);
-			if (!pending || pending.overallStatus === "running" || this._hasPendingCommandKillCleanup(pending)) return;
+			if (!pending || this._hasPendingCommandKillCleanup(pending)) return;
+			if (pending.cancelled && !pending.terminalVerdictPublished) {
+				await this._finalizeCancelledVerification(pending);
+				return;
+			}
+			if (pending.overallStatus === "running") return;
 			await this._releaseTerminalVerificationResources(pending);
 		}, delayMs);
 		timer.unref?.();
@@ -4848,6 +4876,26 @@ export class VerificationHarness {
 	}
 
 	/**
+	 * Final product verdicts are allowed only for the exact live generation.
+	 * A final checkout audit yields, so cancellation or a replacement may own the
+	 * row by the time it returns. Start the existing cleanup owner instead of
+	 * letting stale pass/fail writes mutate the replacement gate generation.
+	 */
+	private _cancellationOwnsTerminalPublication(active: ActiveVerification): boolean {
+		if (this.activeVerifications.get(active.signalId) !== active
+			|| active.terminalVerdictPublished
+			|| active.overallStatus === "passed"
+			|| active.overallStatus === "failed") return true;
+		if (!active.cancelled && !this._isCurrentGateSignal(active)) {
+			this._markVerificationCancelled(active, "superseded");
+			if (!this._persistActive()) throw new Error(`Could not persist supersession fence for ${active.signalId}`);
+		}
+		if (!active.cancelled) return false;
+		void this._startCancelledVerificationCleanup(active);
+		return true;
+	}
+
+	/**
 	 * Fence an active generation synchronously. The cause is written before any
 	 * reviewer/process cleanup can yield, and first writer wins across retries,
 	 * restart recovery, and supersession.
@@ -5000,12 +5048,26 @@ export class VerificationHarness {
 		// A reset/re-signal may have replaced this active object while delayed exact
 		// cleanup was settling. The obsolete generation must not publish anything.
 		if (this.activeVerifications.get(active.signalId) !== active) return;
+		// Older persisted rows may already have a terminal publication but retain
+		// exact resource ownership. They must converge cleanup without emitting a
+		// second cancellation verdict after restart.
+		if (active.terminalVerdictPublished) {
+			await this._releaseTerminalVerificationResources(active);
+			return;
+		}
 
 		active.cancellationFinalizing = true;
 		try {
+			// Cancellation publication is deliberately behind every exact resource
+			// barrier. A failed sidecar removal or checkout release leaves this durable
+			// owner retryable and must not expose a terminal cancelled verdict yet.
+			if (!await this._settleTerminalVerificationResources(active)) {
+				delete active.cancellationFinalizing;
+				this._persistActive();
+				return;
+			}
 			const verification = this._cancelledVerificationResult(active);
 			// Persist the final timestamp and full audit before terminal publication.
-			// Exact process/reviewer cleanup is already settled at this point.
 			if (!this._persistActive()) throw new Error(`Could not persist cancellation finalization for ${active.signalId}`);
 			const store = this.resolveGateStore(active.goalId);
 			if (store) {
@@ -5021,7 +5083,7 @@ export class VerificationHarness {
 			// resources settle; retry ownership survives a restart.
 			active.terminalVerdictPublished = true;
 			delete active.cancellationFinalizing;
-			this._persistActive();
+			if (!this._persistActive()) throw new Error(`Could not persist cancellation publication for ${active.signalId}`);
 			// Cancellation leaves the current, non-terminal generation eligible for a
 			// deterministic explicit re-signal. Historical superseded signals must not
 			// touch a newer gate generation, and terminal lifecycle routes retain their
@@ -5062,6 +5124,8 @@ export class VerificationHarness {
 					console.error(`[verification] Failed to notify team lead about recovery cancellation ${active.signalId}:`, err);
 				}
 			}
+			// Resources were settled before publication; this only removes the durable
+			// owner after the exactly-once signal/gate/WS transaction completed.
 			await this._releaseTerminalVerificationResources(active);
 		} catch (error) {
 			delete active.cancellationFinalizing;
@@ -5513,6 +5577,55 @@ export class VerificationHarness {
 	}
 
 	/**
+	 * Durably fence matching active generations before a replacement signal is
+	 * recorded. This is synchronous by design: callers can make the replacement
+	 * admission atomic while exact cleanup remains detached behind its one owner.
+	 */
+	fenceStaleVerificationsForGates(
+		goalId: string,
+		gateIds: readonly string[],
+		cause: VerificationCancellationCause = "superseded",
+	): ActiveVerification[] {
+		const gateIdSet = new Set(gateIds);
+		this._mergePersistedActiveVerifications(v => v.goalId === goalId && gateIdSet.has(v.gateId));
+		const matches = Array.from(this.activeVerifications.values())
+			.filter(active => active.goalId === goalId && gateIdSet.has(active.gateId));
+		const terminalResourceCleanups: ActiveVerification[] = [];
+		const cancellations: ActiveVerification[] = [];
+		for (const active of matches) {
+			if (this._isTerminalResourceCleanup(active)) terminalResourceCleanups.push(active);
+			else cancellations.push(active);
+		}
+		// _markVerificationCancelled also updates step kill intent, the in-process
+		// generation fence, and verifier-admission waiters. Restore every mutable
+		// owner if persistence cannot make that fence durable; cleanup must not run.
+		const before = cancellations.map(active => ({ active, value: structuredClone(active) }));
+		const cancelledSignalsBefore = new Set(this.cancelledVerificationSignals);
+		const waiterBefore = new Map<string, Set<(reason: string) => void> | undefined>();
+		for (const active of cancellations) waiterBefore.set(active.signalId, this.verifierDispatchCancellationWaiters.get(active.signalId));
+		for (const active of cancellations) this._markVerificationCancelled(active, cause);
+		if (cancellations.length > 0 && !this._persistActive()) {
+			for (const snapshot of before) {
+				for (const key of Object.keys(snapshot.active)) delete (snapshot.active as any)[key];
+				Object.assign(snapshot.active, snapshot.value);
+			}
+			this.cancelledVerificationSignals = cancelledSignalsBefore;
+			for (const active of cancellations) {
+				const waiters = waiterBefore.get(active.signalId);
+				if (waiters) this.verifierDispatchCancellationWaiters.set(active.signalId, waiters);
+				else this.verifierDispatchCancellationWaiters.delete(active.signalId);
+			}
+			throw new Error(`Could not persist cancellation fence for goal ${goalId}`);
+		}
+		for (const active of terminalResourceCleanups) void this._releaseTerminalVerificationResources(active);
+		for (const active of cancellations) {
+			this._drainPendingSignoffsForSignal(active.signalId);
+			void this._startCancelledVerificationCleanup(active);
+		}
+		return [...terminalResourceCleanups, ...cancellations];
+	}
+
+	/**
 	 * Cancel any in-flight verifications for the same (goalId, gateId).
 	 * Terminates reviewer sessions and removes from activeVerifications.
 	 */
@@ -5536,51 +5649,10 @@ export class VerificationHarness {
 		cause: VerificationCancellationCause = "superseded",
 	): Promise<boolean> {
 		const gateIdSet = new Set(gateIds);
-		this._mergePersistedActiveVerifications(v => v.goalId === goalId && gateIdSet.has(v.gateId));
-		const forGates = Array.from(this.activeVerifications.values())
-			.filter(active => active.goalId === goalId && gateIdSet.has(active.gateId));
-		// Published pass/fail/cancelled rows remain private resource-cleanup
-		// obligations. Stale invalidation must never rewrite their verdicts.
-		const terminalResourceCleanups: ActiveVerification[] = [];
-		const targets: ActiveVerification[] = [];
-		for (const active of forGates) {
-			if (this._isTerminalResourceCleanup(active)) terminalResourceCleanups.push(active);
-			else targets.push(active);
-		}
-		for (const active of targets) this._markVerificationCancelled(active, cause);
-		// Cancellation must fence verifier admission and stop every reviewer before
-		// a held command cleanup yields to an old agent_end or late tool result.
-		if (targets.length > 0 && !this._persistActive()) {
-			throw new Error(`Could not persist cancellation fence for goal ${goalId}`);
-		}
-		await this._terminateCancelledReviewersFor(targets);
-
-		for (const active of terminalResourceCleanups) {
-			await this._releaseTerminalVerificationResources(active);
-		}
-
-		const cancellations: ActiveVerification[] = [];
-		for (const active of targets) {
-			const { signalId } = active;
-			const liveHostCleanupSettled = await this._killTrackedForSignal(signalId, step => !step?.containerId);
-			const persistedCleanupSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { markIntent: false });
-			const liveTransportCleanupSettled = persistedCleanupSettled
-				? await this._killTrackedForSignal(signalId, step => !!step?.containerId)
-				: !Array.from(this._trackedCommandChildren.keys()).some(key => key.startsWith(`${signalId}:`));
-			const commandKillsSettled = liveHostCleanupSettled && persistedCleanupSettled && liveTransportCleanupSettled;
-			this._drainPendingSignoffsForSignal(signalId);
-			if (commandKillsSettled) {
-				cancellations.push(active);
-			} else {
-				this._scheduleCommandKillCleanupRetry(signalId);
-			}
-		}
-
-		if (cancellations.length > 0) this._persistActive();
-		for (const active of cancellations) {
-			await this._finalizeCancelledVerification(active);
-			console.log(`[verification] Cancelled stale verification ${active.signalId} for gate ${active.gateId}`);
-		}
+		const cleanupOwners = this.fenceStaleVerificationsForGates(goalId, gateIds, cause);
+		await Promise.all(cleanupOwners.map(active => this._isTerminalResourceCleanup(active)
+			? this._releaseTerminalVerificationResources(active)
+			: this._startCancelledVerificationCleanup(active)));
 		return !Array.from(this.activeVerifications.values()).some(active =>
 			active.goalId === goalId && gateIdSet.has(active.gateId) && active.cancelled,
 		);
@@ -6017,6 +6089,7 @@ export class VerificationHarness {
 					const cachedStatus = terminalStatusForStep(cached);
 					return { ...cached, status: cachedStatus as GateSignalStep["status"], ...(cachedStatus === "skipped" ? { skipped: true } : {}), phase: cached.phase ?? s.phase ?? 0, output: `[cached from prior signal] ${cached.output}` };
 				});
+				if (this._cancellationOwnsTerminalPublication(active)) return;
 				const allPassed = computeAllPassed(results);
 				const status = allPassed ? "passed" as const : "failed" as const;
 				this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, { status, steps: results });
@@ -6589,6 +6662,7 @@ export class VerificationHarness {
 			});
 
 			await this._auditPinnedCheckout(active, pinnedCheckout);
+			if (this._cancellationOwnsTerminalPublication(active)) return;
 			const allPassed = computeAllPassed(results);
 			const status = allPassed ? "passed" : "failed";
 
@@ -6608,6 +6682,7 @@ export class VerificationHarness {
 			broadcastGateStatusChanged(this.broadcastFn, signal.goalId, signal.gateId, status);
 			this.notifyTeamLead(signal.goalId, signal.gateId, status, { steps: results, goalBranch });
 		} catch (err: any) {
+			if (this._cancellationOwnsTerminalPublication(active)) return;
 			const errorCode = typeof err === "object" && err !== null ? (err as { code?: unknown }).code : undefined;
 			const publicError = err instanceof PinnedCheckoutError || isPinnedCheckoutErrorCode(errorCode)
 				? publicPinnedCheckoutError(err)
