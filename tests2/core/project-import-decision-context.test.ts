@@ -141,6 +141,40 @@ describe("project import decision context", () => {
 		expect(failingTrace.closed).toEqual([appRoot]);
 	});
 
+	it("rejects forged replay snapshots while accepting an exact canonical identity", () => {
+		const componentRoot = path.join(projectRoot, "apps", "api");
+		const valid = {
+			event: "projectImported" as const, projectId: "project-1", importId: "import-1", projectRoot,
+			ownedRoots: [projectRoot, componentRoot],
+			components: [{ id: "component-0-test", root: componentRoot, languages: ["typescript"] }],
+		};
+		expect(validateProjectImportDecisionContext(valid, { projectId: "project-1", importId: "import-1", projectRoot })).toMatchObject(valid);
+		expect(() => validateProjectImportDecisionContext(valid, { projectId: "other-project", importId: "import-1", projectRoot })).toThrow(ProjectImportDecisionContextError);
+		expect(() => validateProjectImportDecisionContext(valid, { projectId: "project-1", importId: "other-import", projectRoot })).toThrow(ProjectImportDecisionContextError);
+		expect(() => validateProjectImportDecisionContext(valid, { projectId: "project-1", importId: "import-1", projectRoot: `${projectRoot}-repointed` })).toThrow(ProjectImportDecisionContextError);
+
+		const ownedEscape = structuredClone(valid);
+		ownedEscape.ownedRoots = [projectRoot, `${projectRoot}-escape`];
+		expect(() => validateProjectImportDecisionContext(ownedEscape)).toThrow(ProjectImportDecisionContextError);
+		const componentEscape = structuredClone(valid);
+		componentEscape.components[0]!.root = `${projectRoot}-escape`;
+		componentEscape.ownedRoots = [projectRoot, `${projectRoot}-escape`];
+		expect(() => validateProjectImportDecisionContext(componentEscape)).toThrow(ProjectImportDecisionContextError);
+
+		const duplicateRoots = structuredClone(valid);
+		duplicateRoots.ownedRoots = [projectRoot, projectRoot];
+		expect(() => validateProjectImportDecisionContext(duplicateRoots)).toThrow(ProjectImportDecisionContextError);
+		const unorderedRoots = structuredClone(valid);
+		unorderedRoots.ownedRoots.reverse();
+		expect(() => validateProjectImportDecisionContext(unorderedRoots)).toThrow(ProjectImportDecisionContextError);
+		const duplicateComponentRoot = structuredClone(valid);
+		duplicateComponentRoot.components.push({ id: "component-1-test", root: componentRoot, languages: [] });
+		expect(() => validateProjectImportDecisionContext(duplicateComponentRoot)).toThrow(ProjectImportDecisionContextError);
+		const forgedLanguages = structuredClone(valid);
+		forgedLanguages.components[0]!.languages = ["typescript", "typescript"];
+		expect(() => validateProjectImportDecisionContext(forgedLanguages)).toThrow(ProjectImportDecisionContextError);
+	});
+
 	it("fails closed for unavailable roots and corrupt stored snapshots", () => {
 		expect(() => buildProjectImportDecisionContext({
 			project, importId: "import-1", components: [], fs: fakeFs({}),

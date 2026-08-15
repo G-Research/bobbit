@@ -21,6 +21,7 @@ export interface ProjectImportComponent {
 export interface ProjectImportDecisionContext extends ProjectImportDecisionHookContext {}
 
 export const MAX_PROJECT_IMPORT_COMPONENTS = 30;
+export const MAX_PROJECT_IMPORT_OWNED_ROOTS = MAX_PROJECT_IMPORT_COMPONENTS + 1;
 export const MAX_PROJECT_IMPORT_ROOT_ENTRIES = 256;
 export const MAX_PROJECT_IMPORT_LANGUAGES = 12;
 export const MAX_PROJECT_IMPORT_PATH_LENGTH = 4_096;
@@ -60,7 +61,7 @@ export function buildProjectImportDecisionContext(input: {
 	// component order is stable, while this ensures configuration-controlled
 	// input can never cause unbounded filesystem work.
 	const selectedComponents = selectComponents(input.components);
-	const projectRoot = canonicalPath(fileSystem, input.project?.rootPath);
+	const projectRoot = canonicalProjectImportRoot(input.project?.rootPath, fileSystem);
 
 	const components: ProjectImportComponent[] = [];
 	for (const { component, index } of selectedComponents) {
@@ -74,7 +75,9 @@ export function buildProjectImportDecisionContext(input: {
 	}
 
 	components.sort(compareComponents);
-	const boundedComponents = Object.freeze(components.slice(0, MAX_PROJECT_IMPORT_COMPONENTS));
+	const boundedComponents = Object.freeze(components
+		.filter((component, index) => index === 0 || components[index - 1]!.root !== component.root)
+		.slice(0, MAX_PROJECT_IMPORT_COMPONENTS));
 	const ownedRoots = Object.freeze([...new Set([projectRoot, ...boundedComponents.map(component => component.root)])].sort(compareText));
 	return Object.freeze({
 		event: "projectImported" as const,
@@ -90,18 +93,25 @@ export function buildProjectImportDecisionContext(input: {
  * Strictly revalidate a context read from durable storage. This does not rescan
  * the filesystem: replay must receive the immutable snapshot admitted at import.
  */
-export function validateProjectImportDecisionContext(raw: unknown): ProjectImportDecisionContext {
+export function validateProjectImportDecisionContext(
+	raw: unknown,
+	expected?: { projectId: string; importId: string; projectRoot: string },
+): ProjectImportDecisionContext {
 	if (!isRecord(raw) || !onlyKeys(raw, ["event", "projectId", "importId", "projectRoot", "ownedRoots", "components"])
 		|| raw.event !== "projectImported") throw unavailable();
 	const projectId = requireIdentifier(raw.projectId);
 	const importId = requireIdentifier(raw.importId);
-	const projectRoot = requireAbsolutePath(raw.projectRoot);
-	if (!Array.isArray(raw.ownedRoots) || raw.ownedRoots.length < 1) throw unavailable();
-	const ownedRoots = raw.ownedRoots.map(requireAbsolutePath);
-	if (!isSortedUnique(ownedRoots) || ownedRoots[0] !== projectRoot) throw unavailable();
+	const projectRoot = requireCanonicalAbsolutePath(raw.projectRoot);
+	if (expected && (projectId !== requireIdentifier(expected.projectId)
+		|| importId !== requireIdentifier(expected.importId)
+		|| projectRoot !== requireCanonicalAbsolutePath(expected.projectRoot))) throw unavailable();
+	if (!Array.isArray(raw.ownedRoots) || raw.ownedRoots.length < 1 || raw.ownedRoots.length > MAX_PROJECT_IMPORT_OWNED_ROOTS) throw unavailable();
+	const ownedRoots = raw.ownedRoots.map(requireCanonicalAbsolutePath);
+	if (!isSortedUnique(ownedRoots) || ownedRoots[0] !== projectRoot || ownedRoots.some(root => !isWithin(root, projectRoot))) throw unavailable();
 	if (!Array.isArray(raw.components) || raw.components.length > MAX_PROJECT_IMPORT_COMPONENTS) throw unavailable();
 	const components = raw.components.map(validateComponentSnapshot);
-	if (!isSorted(components, compareComponents) || components.some(component => !ownedRoots.includes(component.root))) throw unavailable();
+	if (!isSorted(components, compareComponents) || !isSortedUnique(components.map(component => component.root))
+		|| components.some(component => !ownedRoots.includes(component.root) || !isWithin(component.root, projectRoot))) throw unavailable();
 	return Object.freeze({
 		event: "projectImported" as const,
 		projectId,
@@ -110,6 +120,14 @@ export function validateProjectImportDecisionContext(raw: unknown): ProjectImpor
 		ownedRoots: Object.freeze([...ownedRoots]),
 		components: Object.freeze(components),
 	});
+}
+
+/** Resolve the current registered root before matching it to a durable snapshot. */
+export function canonicalProjectImportRoot(
+	candidate: unknown,
+	fileSystem: Pick<typeof fs, "realpathSync" | "opendirSync"> = fs,
+): string {
+	return canonicalPath(fileSystem, candidate);
 }
 
 function canonicalComponentRoot(
@@ -214,7 +232,7 @@ function base32(bytes: Uint8Array): string {
 function validateComponentSnapshot(raw: unknown): ProjectImportComponent {
 	if (!isRecord(raw) || !onlyKeys(raw, ["id", "root", "languages"])) throw unavailable();
 	const id = requireIdentifier(raw.id);
-	const root = requireAbsolutePath(raw.root);
+	const root = requireCanonicalAbsolutePath(raw.root);
 	if (!Array.isArray(raw.languages) || raw.languages.length > MAX_PROJECT_IMPORT_LANGUAGES) throw unavailable();
 	const languages = raw.languages.map(language => {
 		if (!isDetectedProjectLanguage(language)) throw unavailable();
@@ -251,8 +269,9 @@ function requireIdentifier(value: unknown): string {
 	return value;
 }
 
-function requireAbsolutePath(value: unknown): string {
-	if (typeof value !== "string" || value.length === 0 || value.length > MAX_PROJECT_IMPORT_PATH_LENGTH || !path.isAbsolute(value)) throw unavailable();
+function requireCanonicalAbsolutePath(value: unknown): string {
+	if (typeof value !== "string" || value.length === 0 || value.length > MAX_PROJECT_IMPORT_PATH_LENGTH
+		|| !path.isAbsolute(value) || path.normalize(value) !== value) throw unavailable();
 	return value;
 }
 

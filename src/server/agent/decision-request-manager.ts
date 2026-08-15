@@ -41,6 +41,7 @@ import { resolveExtensionGrant, type ResolvedHook } from "./extension-grant-poli
 import type { InboxManager } from "./inbox-manager.js";
 import type { ContextTraceStore, TraceDecisionOutcomeRow } from "./context-trace-store.js";
 import { trustedOperationForExtensionDecision } from "./trusted-decision-operation.js";
+import { validateProjectImportDecisionContext } from "./project-import-decision-context.js";
 import { snapshotStaffImprovementSignals } from "./staff-improvement-signals.js";
 import {
 	admitAdvisorySelection,
@@ -800,10 +801,17 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 	 * the coordinator, so restart/retry never reads the filesystem or invents a
 	 * session. Pending hook records are written before code is invoked.
 	 */
-	async dispatchProjectImport(projectId: string, importId: string): Promise<readonly TraceDecisionOutcomeRow[]> {
+	async dispatchProjectImport(
+		projectId: string,
+		importId: string,
+		expected?: { projectId: string; importId: string; projectRoot: string },
+	): Promise<readonly TraceDecisionOutcomeRow[]> {
 		this.deps.manager.registerProject(projectId);
 		const run = this.deps.manager.getImportRun(projectId, importId);
 		if (!run || run.completedAt) return [];
+		let context: ProjectImportDecisionHookContext;
+		try { context = importContext(run, expected); }
+		catch { return []; }
 		const hooks = this.projectImportHooks(projectId);
 		const keyed = hooks.map(candidate => ({ ...candidate, origin: { ...candidate.origin, importId }, key: `${candidate.origin.packId}:${candidate.origin.hookId}` }));
 		const admitted = this.deps.manager.ensureImportHooks(projectId, importId, keyed.map(candidate => candidate.key));
@@ -830,7 +838,7 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 				if (!this.isStillProjectImportDispatchable(projectId, candidate.origin)) {
 					row = outcome(candidate.origin, "denied", "Grant required", elapsed(started));
 				} else {
-					const value = await this.invoke(candidate.hook, "decide", importContext(run));
+					const value = await this.invoke(candidate.hook, "decide", context);
 					const parsed = validateProjectImportDecisionHookOutput(value);
 					const ms = elapsed(started);
 					if (!parsed) row = outcome(candidate.origin, "applied", undefined, ms);
@@ -1193,10 +1201,14 @@ function canonical(value: unknown): string {
 	return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonical(record[key])}`).join(",")}}`;
 }
 function cloneValue(value: Readonly<DecisionValue>): DecisionValue { return value.kind === "option" ? { kind: "option", value: value.value } : { kind: "other", text: value.text }; }
-function importContext(run: StoredProjectImportRun): ProjectImportDecisionHookContext {
-	// The store validates this snapshot on every load; defensive JSON copying
-	// prevents a module from mutating a shared durable object in-process.
-	return Object.freeze(JSON.parse(JSON.stringify(run.context))) as ProjectImportDecisionHookContext;
+function importContext(
+	run: StoredProjectImportRun,
+	expected?: { projectId: string; importId: string; projectRoot: string },
+): ProjectImportDecisionHookContext {
+	// Revalidate at the final working-directory boundary. The store validates
+	// on load, but a caller must never turn an untrusted durable snapshot into a
+	// ModuleHost workingDir merely because it reached this in-process cache.
+	return validateProjectImportDecisionContext(run.context, expected);
 }
 
 function hookContext(
