@@ -194,7 +194,7 @@ test.describe("extension capability grants API", () => {
 		expect(packTargetBefore, `${REPRO}: the existing Market Pack target must expose the server-owned pack grant projection`).toMatchObject({
 			ref: { packId: PACK_NAME, kind: "pack", id: PACK_NAME },
 			packGrant: {
-				requestedCapabilities: ["service.manage", "memory.read", "memory.write", "memory.reflect", "memory.invalidate", "memory.read.all"],
+				requestedCapabilities: ["service.manage", "memory.read", "memory.write", "memory.reflect", "memory.invalidate", "memory.read.all", "sandbox:build"],
 				grants: [],
 			},
 		});

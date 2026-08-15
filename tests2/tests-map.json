@@ -3880,7 +3880,8 @@
       "execution": {
         "runner": "vitest",
         "tier": "unit",
-        "project": "integration"
+        "project": "isolated",
+        "reason": "Mutates process environment, agent-directory singleton, and module-global server command runner; it must own an isolated Vitest fork to prevent cross-suite leakage."
       }
     },
     {
