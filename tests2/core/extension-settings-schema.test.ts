@@ -145,6 +145,7 @@ describe("extension settings schema", () => {
 		expect(isExtensionSettingValue(input)).toBe(true);
 		expect(isExtensionSettingValue(["python", "python"])).toBe(false);
 		expect(isExtensionSettingValue(["\ud800"])).toBe(false);
+		expect(isExtensionSettingValue(["\udc00"])).toBe(false);
 		expect(isExtensionSettingValue(["x".repeat(257)])).toBe(false);
 	});
 
