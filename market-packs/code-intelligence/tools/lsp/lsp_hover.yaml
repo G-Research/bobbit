@@ -1,0 +1,11 @@
+name: lsp_hover
+description: "Read hover information through an enabled language service."
+summary: "Read-only LSP hover information"
+params: ["component?", "language?", path, position]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Code Intelligence
+docs: |-
+  Reads hover information only through an enabled, ready LSP service rooted at
+  the current linked-worktree component. It never starts a server.

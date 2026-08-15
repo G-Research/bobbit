@@ -1,0 +1,11 @@
+name: lsp_diagnostics
+description: "Read the last published diagnostics for one file through an enabled language service."
+summary: "Read-only LSP diagnostics"
+params: ["component?", "language?", path]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Code Intelligence
+docs: |-
+  Returns only diagnostics published by an enabled, ready LSP service for the
+  selected file. It never starts a server or invents a clean result.

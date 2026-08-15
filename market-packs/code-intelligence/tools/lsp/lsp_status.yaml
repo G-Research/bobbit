@@ -1,0 +1,12 @@
+name: lsp_status
+description: "Report the truthful language-service status for a component and language."
+summary: "Read-only LSP capability status"
+params: ["component?", language]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Code Intelligence
+docs: |-
+  Reports whether the selected language is unsupported, disabled, missing its
+  named toolchain, starting, failed, or unavailable. It never starts or installs
+  a language server.
