@@ -554,6 +554,42 @@ test("spawning and spawned commands fail closed while queued commands finalize i
 	assert.deepEqual(persisted.map((verification: any) => verification.signalId).sort(), [spawning.signalId, spawned.signalId].sort(), `${MARKER}: later supersession must not discard ambiguous cleanup owners`);
 });
 
+test("completed spawned rows preserve history without acquiring cancellation cleanup", async () => {
+	const { harness, gateStoreCalls, broadcasts, pinnedCheckoutManager } = makeHarnessForStateDir();
+	const signalId = "sig-completed-spawned";
+	const startedAt = Date.now();
+	const verification = activeVerification(signalId, [
+		{
+			...commandStepFixture({ name: "Completed command", startedAt }),
+			status: "passed",
+			durationMs: 12,
+			output: "already passed",
+			commandSpawnState: "spawned",
+		},
+		{
+			...commandStepFixture({ name: "Queued command", startedAt }),
+			commandSpawnState: "queued",
+		},
+	], startedAt);
+	trackVerification(harness, verification);
+
+	assert.equal(await harness.cancelAllVerifications(GOAL_ID, "manual"), true);
+
+	const update = latestSignalUpdate(gateStoreCalls);
+	const completed = stepByName(update, "Completed command");
+	const queued = stepByName(update, "Queued command");
+	assert.equal(completed?.status, "passed", `${MARKER}: completed command history must remain authoritative`);
+	assert.equal(completed?.output, "already passed");
+	assert.equal(verification.steps[0].killRequestedAt, undefined, `${MARKER}: stale spawned state must not create a new kill intent for a completed row`);
+	assert.equal(verification.steps[0].killCompletedAt, undefined);
+	assert.equal(queued?.status, "cancelled");
+	assert.equal(latestGateStatus(gateStoreCalls), "pending");
+	assert.equal(update?.status, "cancelled");
+	assert.equal((harness as any).activeVerifications.has(signalId), false, `${MARKER}: completed row must not leak a cleanup owner`);
+	assert.deepEqual(pinnedCheckoutManager.releasedSignalIds, [signalId]);
+	assert.equal(broadcasts.filter(entry => entry.event?.type === "gate_verification_complete" && entry.event?.signalId === signalId).length, 1, `${MARKER}: cancellation must publish exactly once`);
+});
+
 test("resume reads bounded tails instead of whole retained logs", async () => {
 	const { stateDir, harness, gateStoreCalls } = makeHarnessForStateDir();
 	const startedAt = Date.now() - 100;

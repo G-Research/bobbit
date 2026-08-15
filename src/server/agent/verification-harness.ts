@@ -4778,9 +4778,8 @@ export class VerificationHarness {
 	}
 
 	private _commandStepRequiresKillCleanup(step: ActiveVerification["steps"][number]): boolean {
-		const explicitSpawnAttempt = step.commandSpawnState === "spawning" || step.commandSpawnState === "spawned";
 		return !this._commandStepIsQueued(step) && step.type === "command" && (
-			((step.status === "running" || explicitSpawnAttempt) && this._commandStepHasSpawnOwnership(step)) ||
+			(step.status === "running" && this._commandStepHasSpawnOwnership(step)) ||
 			(!!step.killRequestedAt && !step.killCompletedAt) ||
 			!!step.sentinelCleanupPending ||
 			!!step.containerPayloadCleanupPending ||
@@ -4794,13 +4793,12 @@ export class VerificationHarness {
 		active.cancelReason ??= reason;
 		for (const step of active.steps) {
 			if (step.type !== "command" || this._commandStepIsQueued(step)) continue;
-			const explicitSpawnAttempt = step.commandSpawnState === "spawning" || step.commandSpawnState === "spawned";
-			if (step.status !== "running" && !step.killRequestedAt && !explicitSpawnAttempt) continue;
+			if (step.status !== "running" && !step.killRequestedAt) continue;
 			// A phase starts as `running` before its command acquires a permit.
 			// Cancellation may land in that display-only window; never manufacture
-			// an exact-cleanup obligation for a command that never spawned. Explicit
-			// spawning/spawned state is the exception: it records that this boundary
-			// was crossed even if the exact identity was not persisted before a crash.
+			// an exact-cleanup obligation for a completed command. Explicit
+			// spawning/spawned state is authoritative only while the row is running,
+			// when it records a crossed spawn boundary before identity persistence.
 			if (!step.killRequestedAt && !this._commandStepHasSpawnOwnership(step)) continue;
 			step.killRequestedAt ??= now;
 			step.killReason = reason;
