@@ -54,6 +54,28 @@ function configureDirectSmokeEnvironment(environment: Map<string, string | undef
 	process.env.BOBBIT_NO_OPEN = "1";
 }
 
+/** Reduce OAuth status to diagnostic-safe booleans for manual smoke assertions. */
+function classifyAnthropicOAuthStatus(status: unknown): {
+	authenticated: boolean;
+	stored: boolean;
+	rejected: boolean;
+	refreshable: boolean;
+	expiresFinite: boolean;
+	providerExact: boolean;
+} {
+	const value = status && typeof status === "object" && !Array.isArray(status)
+		? status as Record<string, unknown>
+		: {};
+	return {
+		authenticated: value.authenticated === true,
+		stored: value.stored === true,
+		rejected: value.rejected === true,
+		refreshable: value.refreshable === true,
+		expiresFinite: typeof value.expires === "number" && Number.isFinite(value.expires),
+		providerExact: value.provider === "anthropic",
+	};
+}
+
 /** Keep assertions diagnostic-safe: never stringify SDK-owned transcript rows. */
 function rootMessages(snapshot: unknown): Record<string, unknown>[] {
 	const messages = Array.isArray(snapshot)
@@ -275,16 +297,35 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			};
 
 			// Fail before session creation when the isolated gateway cannot see a
-			// current Bobbit OAuth login. Read and assert only non-secret status fields.
-			const oauthStatusResponse = await api("/api/oauth/status?provider=anthropic");
-			expect(oauthStatusResponse.status).toBe(200);
-			const oauthStatus = await oauthStatusResponse.json() as { authenticated?: unknown; provider?: unknown };
-			expect({
-				authenticated: oauthStatus.authenticated === true,
-				anthropicProvider: oauthStatus.provider === "anthropic",
-			}).toEqual({ authenticated: true, anthropicProvider: true });
+			// current Bobbit OAuth login. Compare the route with its production source
+			// module and retain only boolean diagnostics; never expose auth details.
+			const { oauthStatus } = await import("../../dist/server/auth/oauth.js");
 			const { resolveDirectClaudeAgentSdkOAuthAccessToken } = await import("../../dist/server/agent/host-tokens.js");
-			await resolveDirectClaudeAgentSdkOAuthAccessToken();
+			const resolverSucceeded = await resolveDirectClaudeAgentSdkOAuthAccessToken()
+				.then(() => true)
+				.catch(() => false);
+			const directOAuthStatus = classifyAnthropicOAuthStatus(oauthStatus("anthropic"));
+			const oauthStatusResponse = await api("/api/oauth/status?provider=anthropic");
+			const httpOAuthStatus = classifyAnthropicOAuthStatus(await oauthStatusResponse.json());
+			const healthyOAuthStatus = {
+				authenticated: true,
+				stored: false,
+				rejected: false,
+				refreshable: false,
+				expiresFinite: true,
+				providerExact: true,
+			};
+			expect({
+				resolverSucceeded,
+				httpStatusOk: oauthStatusResponse.status === 200,
+				direct: directOAuthStatus,
+				http: httpOAuthStatus,
+			}).toEqual({
+				resolverSucceeded: true,
+				httpStatusOk: true,
+				direct: healthyOAuthStatus,
+				http: healthyOAuthStatus,
+			});
 
 			const projectResponse = await api("/api/projects", {
 				method: "POST",
