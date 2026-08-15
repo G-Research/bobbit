@@ -31,8 +31,12 @@ function fixture(grant: (name: string, group: string, options?: { signal: AbortS
 	return { surface, dispatched };
 }
 
-function canUse(surface: ReturnType<typeof fixture>["surface"], name: string, overrides: Record<string, unknown> = {}) {
-	return (surface.canUseTool as any)(name, {}, { signal: new AbortController().signal, toolUseID: "tool-use-1", ...overrides });
+function opaqueInput(): Record<string, unknown> {
+	return Object.freeze(Object.create(null));
+}
+
+function canUse(surface: ReturnType<typeof fixture>["surface"], name: string, overrides: Record<string, unknown> = {}, input: Record<string, unknown> = opaqueInput()) {
+	return (surface.canUseTool as any)(name, input, { signal: new AbortController().signal, toolUseID: "tool-use-1", ...overrides });
 }
 
 function preUse(surface: ReturnType<typeof fixture>["surface"], name: string, toolUseId = "tool-use-1") {
@@ -104,14 +108,20 @@ describe("Claude SDK Bobbit tool permission integration", () => {
 			await expect(canUse(surface, name)).resolves.toMatchObject({ behavior: "deny" });
 			expect((await preUse(surface, name)).hookSpecificOutput.permissionDecision).toBe("deny");
 		}
-		await expect(canUse(surface, "mcp__bobbit__read")).resolves.toMatchObject({ behavior: "allow" });
+		const input = opaqueInput();
+		const allowed = await canUse(surface, "mcp__bobbit__read", {}, input);
+		expect(allowed).toMatchObject({ behavior: "allow" });
+		expect(allowed.updatedInput).toBe(input);
 		expect((await preUse(surface, "mcp__bobbit__read")).hookSpecificOutput.permissionDecision).toBe("allow");
 	});
 
 	it("requires a current exact grant and never caches one-time approval", async () => {
 		let calls = 0;
 		const { surface } = fixture(async () => { calls++; return { granted: true, tools: ["ask_user_choices"], group: "Ask", mode: "one-time" }; });
-		await expect(canUse(surface, "mcp__bobbit__ask_user_choices", { toolUseID: "one" })).resolves.toMatchObject({ behavior: "allow" });
+		const firstInput = opaqueInput();
+		const first = await canUse(surface, "mcp__bobbit__ask_user_choices", { toolUseID: "one" }, firstInput);
+		expect(first).toMatchObject({ behavior: "allow" });
+		expect(first.updatedInput).toBe(firstInput);
 		expect(await preUse(surface, "mcp__bobbit__ask_user_choices", "one")).toEqual({ continue: true });
 		await expect(canUse(surface, "mcp__bobbit__ask_user_choices", { toolUseID: "two" })).resolves.toMatchObject({ behavior: "allow" });
 		expect(calls).toBe(2);
@@ -135,9 +145,11 @@ describe("Claude SDK Bobbit tool permission integration", () => {
 			return new Promise(resolve => options?.signal.addEventListener("abort", () => resolve({ granted: false, reason: "cancelled" }), { once: true }));
 		});
 		const controller = new AbortController();
-		const pending = (surface.canUseTool as any)("mcp__bobbit__ask_user_choices", {}, { signal: controller.signal, toolUseID: "cancelled" });
+		const pending = (surface.canUseTool as any)("mcp__bobbit__ask_user_choices", opaqueInput(), { signal: controller.signal, toolUseID: "cancelled" });
 		controller.abort();
-		await expect(pending).resolves.toMatchObject({ behavior: "deny" });
+		const denied = await pending;
+		expect(denied).toMatchObject({ behavior: "deny" });
+		expect(denied).not.toHaveProperty("updatedInput");
 		expect(captured?.aborted).toBe(true);
 	});
 

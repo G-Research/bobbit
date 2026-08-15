@@ -66,11 +66,14 @@ function surfaceFor(harness: ReturnType<typeof makeHarness>, transform?: (resolu
 	return { resolutions, surface };
 }
 
-function canUse(surface: ReturnType<typeof surfaceFor>["surface"], toolUseID: string, overrides: Record<string, unknown> = {}) {
-	return (surface.canUseTool as any)("mcp__bobbit__ask_user_choices", {}, {
+function opaqueInput(): Record<string, unknown> {
+	return Object.freeze(Object.create(null));
+}
+
+function canUse(surface: ReturnType<typeof surfaceFor>["surface"], toolUseID: string, input: Record<string, unknown> = opaqueInput()) {
+	return (surface.canUseTool as any)("mcp__bobbit__ask_user_choices", input, {
 		signal: new AbortController().signal,
 		toolUseID,
-		...overrides,
 	});
 }
 
@@ -95,7 +98,8 @@ describe("Claude SDK permission-card journey", () => {
 	it("routes canonical ask calls through the existing card and consumes a one-time approval exactly once", async () => {
 		const harness = makeHarness();
 		const { surface, resolutions } = surfaceFor(harness);
-		const blocked = canUse(surface, "one-time-call");
+		const input = opaqueInput();
+		const blocked = canUse(surface, "one-time-call", input);
 		const request = pending(harness);
 		expect(request).toMatchObject({ id: "perm_41_ask_user_choices", toolName: "ask_user_choices", toolGroup: "Ask" });
 		expect(harness.client.sent).toContainEqual(expect.objectContaining({
@@ -108,16 +112,21 @@ describe("Claude SDK permission-card journey", () => {
 		}));
 
 		await harness.manager.grantToolPermission(harness.session.id, "ask_user_choices", "tool", "Ask", "one-time", request.id);
-		await expect(blocked).resolves.toMatchObject({ behavior: "allow" });
+		const granted = await blocked;
+		expect(granted).toMatchObject({ behavior: "allow" });
+		expect(granted.updatedInput).toBe(input);
 		expect(resolutions).toContainEqual(expect.objectContaining({ granted: true, tools: ["ask_user_choices"], group: "Ask", mode: "one-time" }));
 		expect(harness.client.sent).toContainEqual(expect.objectContaining({ type: "tool_permission_settled", status: "granted" }));
 		expect(await preUse(surface, "mcp__bobbit__ask_user_choices", "one-time-call")).toEqual({ continue: true });
 		expect(await preUse(surface, "mcp__bobbit__ask_user_choices", "one-time-call")).toEqual({ continue: true });
 
-		const nextCall = canUse(surface, "requires-another-card");
+		const deniedInput = opaqueInput();
+		const nextCall = canUse(surface, "requires-another-card", deniedInput);
 		expect(pending(harness).id).not.toBe(request.id);
 		harness.manager.denyToolPermission(harness.session.id, "ask_user_choices", harness.session.pendingGrantRequest.id);
-		await expect(nextCall).resolves.toMatchObject({ behavior: "deny" });
+		const denied = await nextCall;
+		expect(denied).toMatchObject({ behavior: "deny" });
+		expect(denied).not.toHaveProperty("updatedInput");
 	});
 
 	it("keeps session and persistent duration ownership in SessionManager instead of the immutable SDK surface", async () => {
@@ -150,10 +159,12 @@ describe("Claude SDK permission-card journey", () => {
 		const abortHarness = makeHarness();
 		const { surface: abortSurface } = surfaceFor(abortHarness);
 		const controller = new AbortController();
-		const aborted = (abortSurface.canUseTool as any)("mcp__bobbit__ask_user_choices", {}, { signal: controller.signal, toolUseID: "abort" });
+		const aborted = (abortSurface.canUseTool as any)("mcp__bobbit__ask_user_choices", opaqueInput(), { signal: controller.signal, toolUseID: "abort" });
 		pending(abortHarness);
 		controller.abort();
-		await expect(aborted).resolves.toMatchObject({ behavior: "deny" });
+		const abortResult = await aborted;
+		expect(abortResult).toMatchObject({ behavior: "deny" });
+		expect(abortResult).not.toHaveProperty("updatedInput");
 		expect(abortHarness.session.pendingGrantRequest).toBeUndefined();
 		expect(abortHarness.client.sent).toContainEqual(expect.objectContaining({ type: "tool_permission_settled", status: "cancelled" }));
 

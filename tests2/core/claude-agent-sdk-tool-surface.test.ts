@@ -44,6 +44,10 @@ function permissionContext(overrides: Record<string, unknown> = {}) {
 	return { signal: new AbortController().signal, toolUseID: "use-1", ...overrides };
 }
 
+function opaqueInput(): Record<string, unknown> {
+	return Object.freeze(Object.create(null));
+}
+
 describe("Claude Agent SDK tool surface", () => {
 	it("pins the complete 0.3.222 native floor, retaining only approved Skill and Agent while denying Task", () => {
 		expect(CLAUDE_NATIVE_TOOL_FLOOR).toEqual(NATIVE_FLOOR_0_3_222);
@@ -121,6 +125,34 @@ describe("Claude Agent SDK tool surface", () => {
 		expect((await hook({ tool_name: "mcp__bobbit__read", tool_use_id: "allow" })).hookSpecificOutput.permissionDecision).toBe("allow");
 	});
 
+	it("returns the exact current SDK input for every admitted callback path", async () => {
+		const surface = build({
+			subagentPolicy: {
+				definitions: {},
+				admit: () => true,
+				authorizeChild: () => true,
+			} as any,
+		});
+		const admitted = [
+			["mcp__bobbit__read", permissionContext()],
+			["mcp__bobbit__ask_tool", permissionContext({ toolUseID: "ask" })],
+			["Agent", permissionContext({ toolUseID: "agent" })],
+			["Skill", permissionContext({ toolUseID: "skill" })],
+			["mcp__bobbit__read", permissionContext({ toolUseID: "child", agentID: "child" })],
+		] as const;
+		for (const [name, context] of admitted) {
+			const input = opaqueInput();
+			const result = await (surface.canUseTool as any)(name, input, context);
+			expect(result).toMatchObject({ behavior: "allow" });
+			expect(result.updatedInput).toBe(input);
+		}
+
+		const deniedInput = opaqueInput();
+		const denied = await (surface.canUseTool as any)("mcp__bobbit__never_tool", deniedInput, permissionContext());
+		expect(denied).toMatchObject({ behavior: "deny" });
+		expect(denied).not.toHaveProperty("updatedInput");
+	});
+
 	it("leaves root ask hooks neutral and makes canUseTool the sole current-grant authority", async () => {
 		const resolutions = [
 			{ granted: false },
@@ -139,16 +171,28 @@ describe("Claude Agent SDK tool surface", () => {
 		expect(surface.sdkAllowNames).toEqual(["mcp__bobbit__read"]);
 		expect(surface.sdkAllowNames).not.toContain("mcp__bobbit__ask_tool");
 		expect(await hook({ tool_name: "mcp__bobbit__ask_tool", tool_use_id: "ask" })).toEqual({ continue: true });
-		await expect((surface.canUseTool as any)("mcp__bobbit__ask_tool", {}, permissionContext({ toolUseID: "denied" }))).resolves.toMatchObject({ behavior: "deny" });
-		await expect((surface.canUseTool as any)("mcp__bobbit__ask_tool", {}, permissionContext({ toolUseID: "granted" }))).resolves.toMatchObject({ behavior: "allow" });
-		await expect((surface.canUseTool as any)("mcp__bobbit__ask_tool", {}, permissionContext({ toolUseID: "wrong-scope" }))).resolves.toMatchObject({ behavior: "deny" });
+		const deniedInput = opaqueInput();
+		const denied = await (surface.canUseTool as any)("mcp__bobbit__ask_tool", deniedInput, permissionContext({ toolUseID: "denied" }));
+		expect(denied).toMatchObject({ behavior: "deny" });
+		expect(denied).not.toHaveProperty("updatedInput");
+		const grantedInput = opaqueInput();
+		const granted = await (surface.canUseTool as any)("mcp__bobbit__ask_tool", grantedInput, permissionContext({ toolUseID: "granted" }));
+		expect(granted).toMatchObject({ behavior: "allow" });
+		expect(granted.updatedInput).toBe(grantedInput);
+		const wrongScopeInput = opaqueInput();
+		const wrongScope = await (surface.canUseTool as any)("mcp__bobbit__ask_tool", wrongScopeInput, permissionContext({ toolUseID: "wrong-scope" }));
+		expect(wrongScope).toMatchObject({ behavior: "deny" });
+		expect(wrongScope).not.toHaveProperty("updatedInput");
 		expect(requested).toEqual([["ask_tool", "Browser"], ["ask_tool", "Browser"], ["ask_tool", "Browser"]]);
 		// A neutral hook stays neutral after a grant; no replay or re-entry state exists.
 		expect(await hook({ tool_name: "mcp__bobbit__ask_tool", tool_use_id: "granted" })).toEqual({ continue: true });
 
 		const controller = new AbortController();
 		controller.abort();
-		await expect((surface.canUseTool as any)("mcp__bobbit__ask_tool", {}, permissionContext({ signal: controller.signal, toolUseID: "aborted" }))).resolves.toMatchObject({ behavior: "deny" });
+		const abortedInput = opaqueInput();
+		const aborted = await (surface.canUseTool as any)("mcp__bobbit__ask_tool", abortedInput, permissionContext({ signal: controller.signal, toolUseID: "aborted" }));
+		expect(aborted).toMatchObject({ behavior: "deny" });
+		expect(aborted).not.toHaveProperty("updatedInput");
 		expect(requested).toHaveLength(3);
 	});
 
@@ -196,10 +240,14 @@ describe("Claude Agent SDK tool surface", () => {
 			env: { PATH: "/bin" },
 			abortController: new AbortController(),
 		} as any) as any;
-		const input = { subagent_type: "bobbit-backend-parity-reviewer", prompt: "Inspect", run_in_background: false };
+		const input = opaqueInput();
 
 		expect(options.allowedTools).not.toContain("Agent");
-		await expect(options.canUseTool("Agent", input, permissionContext())).resolves.toMatchObject({ behavior: "allow" });
-		expect(calls).toEqual([expect.objectContaining({ rawName: "Agent", input })]);
+		const result = await options.canUseTool("Agent", input, permissionContext());
+		expect(result).toMatchObject({ behavior: "allow" });
+		expect(result.updatedInput).toBe(input);
+		expect(calls).toHaveLength(1);
+		expect(calls[0]!.rawName).toBe("Agent");
+		expect(calls[0]!.input).toBe(input);
 	});
 });

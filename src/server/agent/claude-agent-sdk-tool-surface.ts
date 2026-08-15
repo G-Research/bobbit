@@ -186,7 +186,11 @@ function isCurrentGrant(grant: ClaudeSdkGrantResolution, entry: ClaudeSdkToolEnt
 }
 
 function deny(message: string): PermissionResult { return { behavior: "deny", message: message.slice(0, 300) }; }
-function allow(): PermissionResult { return { behavior: "allow", updatedInput: undefined }; }
+/**
+ * The SDK resumes a permitted call from this exact callback payload. Never
+ * clone, inspect, persist, or otherwise transform it at this boundary.
+ */
+function allow(input: Record<string, unknown>): PermissionResult { return { behavior: "allow", updatedInput: input }; }
 
 const APPROVED_SUBAGENTS = [
 	{ type: "bobbit-protocol-scout", role: "claude-protocol-scout", description: "Investigate the installed Claude Agent SDK protocol with bounded empirical evidence.", effort: "high", maxTurns: 6 },
@@ -495,17 +499,17 @@ export function buildClaudeSdkToolSurface(options: ClaudeSdkToolSurfaceOptions):
 		if (context.signal.aborted || disposed) return deny("Tool request was cancelled or unavailable.");
 		const agentId = context.agentID;
 		if (agentId) {
-			return options.subagentPolicy?.authorizeChild(rawName, agentId) ? allow() : deny(SUBAGENT_DENIAL);
+			return options.subagentPolicy?.authorizeChild(rawName, agentId) ? allow(input) : deny(SUBAGENT_DENIAL);
 		}
 		if (typeof rawName === "string" && rawName.toLowerCase() === "agent") {
 			// Query options fix the root permission mode to default; the pinned
 			// CanUseTool context does not expose it, so never infer caller input.
-			return options.subagentPolicy?.admit(rawName, input, { toolUseId: context.toolUseID, permissionMode: "default" }) ? allow() : deny(SUBAGENT_DENIAL);
+			return options.subagentPolicy?.admit(rawName, input, { toolUseId: context.toolUseID, permissionMode: "default" }) ? allow(input) : deny(SUBAGENT_DENIAL);
 		}
-		if (typeof rawName === "string" && rawName.toLowerCase() === "skill") return allow();
+		if (typeof rawName === "string" && rawName.toLowerCase() === "skill") return allow(input);
 		const normalizedTool = normalized(rawName);
 		if (!eligible(normalizedTool?.definition)) return deny("Tool is not available in this Bobbit session.");
-		if (normalizedTool!.definition.policy === "allow") return allow();
+		if (normalizedTool!.definition.policy === "allow") return allow(input);
 		let grant: ClaudeSdkGrantResolution;
 		try {
 			grant = await options.requestToolGrant(normalizedTool!.canonicalName, normalizedTool!.definition.group, {
@@ -516,7 +520,7 @@ export function buildClaudeSdkToolSurface(options: ClaudeSdkToolSurfaceOptions):
 			return deny("Tool permission was not granted.");
 		}
 		if (disposed || context.signal.aborted || !isCurrentGrant(grant, normalizedTool!.definition)) return deny("Tool permission was not granted.");
-		return allow();
+		return allow(input);
 	};
 
 	const preToolUse = async (input: PreToolUseHookInput): Promise<SyncHookJSONOutput> => {
