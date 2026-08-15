@@ -7,8 +7,6 @@ import { createManualClock } from "../harness/clock.js";
 
 const VIRTUAL_ROOT_DIR = path.resolve("/.bobbit-test");
 const VIRTUAL_STATE_DIR = path.join(VIRTUAL_ROOT_DIR, "session-direct-prompt");
-const VIRTUAL_SIDECAR_DIR = path.join(VIRTUAL_STATE_DIR, "author-sidecar");
-const VIRTUAL_SKILL_SIDECAR_DIR = path.join(VIRTUAL_STATE_DIR, "skill-sidecar");
 const VIRTUAL_HMAC_KEY = Buffer.alloc(32, 0x36);
 const virtualDirectories = new Set([VIRTUAL_ROOT_DIR, VIRTUAL_STATE_DIR]);
 const virtualSidecarFiles = new Map<string, string>();
