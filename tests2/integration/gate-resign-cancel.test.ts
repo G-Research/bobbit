@@ -182,6 +182,11 @@ function holdPinnedCheckoutAcquire(manager: FakePinnedCheckoutManager): {
 	};
 }
 
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+	let resolve!: () => void;
+	return { promise: new Promise<void>(done => { resolve = done; }), resolve };
+}
+
 function activeVerifications() {
 	return harness.getActiveVerifications(GOAL_ID);
 }
@@ -321,6 +326,51 @@ test.describe("Gate Re-signal Cancellation", () => {
 		expect(events.filter(event => event.type === "gate_verification_complete" && event.signalId === oldSignal.id && event.status === "cancelled")).toHaveLength(1);
 
 		await harness.cancelStaleVerifications(GOAL_ID, GATE_ID);
+	});
+
+	test("a pause and replacement during the final pinned-checkout audit cannot publish an old pass or failure", async () => {
+		const oldSignal = declareSignal("Old final-audit generation");
+		const originalAudit = (harness as any)._auditPinnedCheckout.bind(harness);
+		const enteredFinalAudit = deferred();
+		const releaseFinalAudit = deferred();
+		let audits = 0;
+		(harness as any)._auditPinnedCheckout = async (...args: any[]) => {
+			audits++;
+			// The fixture has one active phase, therefore its third audit is the
+			// final post-results audit directly before terminal pass/fail publication.
+			if (audits === 3) {
+				enteredFinalAudit.resolve();
+				await releaseFinalAudit.promise;
+			}
+			return originalAudit(...args);
+		};
+
+		const oldRun = completeSignal(oldSignal);
+		await enteredFinalAudit.promise;
+		expect(audits, "FINAL_AUDIT_RACE_MUST_HOLD_ONLY_THE_LAST_PINNED_CHECKOUT_AUDIT").toBe(3);
+
+		await harness.cancelAllVerifications(GOAL_ID, "goal-pause");
+		const replacement = declareSignal("Replacement while old final audit is held");
+		expect(allActiveVerifications(), "FINAL_AUDIT_RACE_MUST_RETAIN_ONLY_THE_NEW_GENERATION_OWNER").toEqual([
+			expect.objectContaining({ signalId: replacement.id, overallStatus: "running" }),
+		]);
+
+		releaseFinalAudit.resolve();
+		await oldRun;
+		const oldHistory = signals().find(signal => signal.id === oldSignal.id)!;
+		const replacementHistory = signals().find(signal => signal.id === replacement.id)!;
+		expect(oldHistory.verification, "FINAL_AUDIT_RACE_MUST_PRESERVE_PAUSE_CANCELLATION_AUDIT").toMatchObject({
+			status: "cancelled", cancellation: { cause: "goal-pause", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
+		});
+		expect(events.filter(event => event.type === "gate_verification_complete" && event.signalId === oldSignal.id),
+			"FINAL_AUDIT_RACE_MUST_NOT_ALLOW_OLD_GENERATION_PASS_OR_FAIL_PUBLICATION").toEqual([
+				expect.objectContaining({ status: "cancelled", cancellation: expect.objectContaining({ cause: "goal-pause" }) }),
+			]);
+		expect(replacementHistory.verification, "FINAL_AUDIT_RACE_MUST_NOT_MUTATE_REPLACEMENT_SIGNAL").toMatchObject({ status: "running" });
+		expect(gateStore.getGate(GOAL_ID, GATE_ID)?.status,
+			"FINAL_AUDIT_RACE_MUST_LEAVE_THE_PAUSED_GATE_ELIGIBLE_AND_PENDING").toBe("pending");
+
+		await harness.cancelStaleVerifications(GOAL_ID, GATE_ID, "manual");
 	});
 
 	test("re-signaling a gate cancels the previous verification", async () => {
