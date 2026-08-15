@@ -1526,14 +1526,15 @@ export class ProjectSandbox {
 			throw error;
 		}
 
-		// Create /workspace-wt for agent worktrees (needs root since / is root-owned)
+		// Explicitly created named volumes mount as root-owned directories. Bootstrap
+		// only their roots before init: clone and worktree creation run as node, while
+		// persisted descendants must retain their existing ownership.
 		try {
-			await this.execDocker([
-				"exec", "-u", "root", containerId, "sh", "-c",
-				"mkdir -p /workspace-wt && chown node:node /workspace-wt",
-			], { timeout: 10_000, env: DOCKER_ENV });
-		} catch {
-			// Non-fatal — createWorktree will retry
+			await this._prepareWorkspaceVolumeRoots(containerId);
+		} catch (error) {
+			this.containerId = null;
+			await this._removeContainer(containerId).catch(() => undefined);
+			throw error;
 		}
 
 		// Defense-in-depth: mask /proc/1/environ
@@ -1824,6 +1825,18 @@ export class ProjectSandbox {
 				env: DOCKER_ENV,
 			});
 		} catch { /* already gone */ }
+	}
+
+	/**
+	 * Named volumes supplied by Docker are root-owned even when the image has
+	 * node-owned mountpoints. Do not recurse here: persisted repositories and
+	 * worktrees are model-visible state whose ownership must not be rewritten.
+	 */
+	private async _prepareWorkspaceVolumeRoots(containerId: string): Promise<void> {
+		await this.execDocker([
+			"exec", "-u", "root", containerId, "sh", "-ceu",
+			"mkdir -p /workspace /workspace-wt && chown node:node /workspace /workspace-wt",
+		], { timeout: 10_000, env: DOCKER_ENV });
 	}
 
 	private async _dockerExec(

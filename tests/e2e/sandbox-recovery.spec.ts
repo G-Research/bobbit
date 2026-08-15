@@ -152,9 +152,17 @@ test.describe("atomic models.json bind mount", () => {
 				image: "bobbit-agent",
 			});
 			process.env.BOBBIT_E2E_RUN_ID = runA;
+			const seededVolumes = projectSandboxVolumeNames(projectId, runA);
+			for (const volume of [seededVolumes.workspace, seededVolumes.worktrees]) {
+				docker(["volume", "create", "--label", `bobbit-project=${projectId}`, "--label", `bobbit-e2e-run=${runA}`, volume]);
+			}
 			const sandboxA = createSandbox();
 			await sandboxA.init();
 			const initialA = await sandboxA.getContainerId();
+			expect(docker(["exec", "-u", "root", initialA, "stat", "-c", "%n:%u:%g", "/workspace", "/workspace-wt"]).split("\n")).toEqual([
+				"/workspace:1000:1000",
+				"/workspace-wt:1000:1000",
+			]);
 
 			process.env.BOBBIT_E2E_RUN_ID = runB;
 			const sandboxB = createSandbox();
@@ -171,6 +179,10 @@ test.describe("atomic models.json bind mount", () => {
 				}
 			}
 			expect(mountedModels(initialA)).toBe(publishedV1);
+			// Model remount recreates the container while retaining its named volumes.
+			// Root bootstrap may claim the volume roots but must never recursively
+			// rewrite persisted repository or worktree contents.
+			docker(["exec", "-u", "root", initialA, "sh", "-ceu", "mkdir -p /workspace/persisted-root /workspace-wt/persisted-root; touch /workspace/persisted-root/entry /workspace-wt/persisted-root/entry; chown root:root /workspace/persisted-root /workspace/persisted-root/entry /workspace-wt/persisted-root /workspace-wt/persisted-root/entry"]);
 
 			writeFileSync(replacement, `${publishedV2}\n`);
 			renameSync(replacement, modelsJson);
@@ -191,6 +203,14 @@ test.describe("atomic models.json bind mount", () => {
 				reasoning: false,
 				input: ["text", "image"],
 			});
+			expect(docker(["exec", "-u", "root", recreatedA, "stat", "-c", "%n:%u:%g", "/workspace", "/workspace/persisted-root", "/workspace/persisted-root/entry", "/workspace-wt", "/workspace-wt/persisted-root", "/workspace-wt/persisted-root/entry"]).split("\n")).toEqual([
+				"/workspace:1000:1000",
+				"/workspace/persisted-root:0:0",
+				"/workspace/persisted-root/entry:0:0",
+				"/workspace-wt:1000:1000",
+				"/workspace-wt/persisted-root:0:0",
+				"/workspace-wt/persisted-root/entry:0:0",
+			]);
 
 			// Run B has the same project ID but a distinct E2E ownership label.
 			// Its container and its independently labelled named volumes must survive.

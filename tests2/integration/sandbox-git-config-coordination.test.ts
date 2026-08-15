@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
-import { ProjectSandbox } from "../../src/server/agent/project-sandbox.js";
+import { _resetDockerLimitsCache, ProjectSandbox } from "../../src/server/agent/project-sandbox.js";
 import { repositoryMutationCoordinator } from "../../src/server/skills/repository-mutation-coordinator.js";
 
 type Deferred<T = void> = { promise: Promise<T>; resolve(value: T): void };
@@ -104,6 +107,50 @@ function makeSandbox(): ProjectSandbox {
 }
 
 afterEach(() => vi.restoreAllMocks());
+
+describe("ProjectSandbox container workspace bootstrap", () => {
+	it("fails container creation rather than running init after root-volume bootstrap fails", async () => {
+		_resetDockerLimitsCache();
+		const projectDir = mkdtempSync(path.join(tmpdir(), "bobbit-workspace-bootstrap-"));
+		const sandbox = new ProjectSandbox({
+			projectId: "workspace-bootstrap",
+			projectDir,
+			repoUrl: "https://example.invalid/repo.git",
+			image: "bobbit-test-image",
+		}, {
+			commandRunner: {
+				async execFile(_file: string, args: readonly string[]) {
+					return { stdout: args[0] === "info" ? "4 8589934592\n" : "", stderr: "" };
+				},
+				execFileSync() { return ""; },
+			},
+		});
+		const calls: string[][] = [];
+		(sandbox as any)._prepareClaudeAgentSdkStateParent = async () => undefined;
+		(sandbox as any).execDocker = async (args: string[]) => {
+			calls.push(args);
+			if (args[0] === "run") return { stdout: "workspace-container\n", stderr: "" };
+			if (args.at(-1) === "mkdir -p /workspace /workspace-wt && chown node:node /workspace /workspace-wt") {
+				throw new Error("workspace root bootstrap failed");
+			}
+			return { stdout: "", stderr: "" };
+		};
+
+		try {
+			await expect((sandbox as any)._createContainer(undefined)).rejects.toThrow("workspace root bootstrap failed");
+			const bootstrap = calls.find((args) => args.at(-1) === "mkdir -p /workspace /workspace-wt && chown node:node /workspace /workspace-wt");
+			expect(bootstrap).toEqual([
+				"exec", "-u", "root", "workspace-container", "sh", "-ceu",
+				"mkdir -p /workspace /workspace-wt && chown node:node /workspace /workspace-wt",
+			]);
+			expect(calls).toContainEqual(["rm", "-f", "workspace-container"]);
+			expect((sandbox as any).containerId).toBeNull();
+		} finally {
+			_resetDockerLimitsCache();
+			rmSync(projectDir, { recursive: true, force: true });
+		}
+	});
+});
 
 describe("ProjectSandbox Git config coordination", () => {
 	it("serializes root and child-like single-repo setup through the shared Git common directory", async () => {

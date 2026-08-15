@@ -23,6 +23,28 @@ function makeSandbox(): ProjectSandbox {
 	});
 }
 
+describe("ProjectSandbox workspace volume bootstrap", () => {
+	it("uses a strict root-only ownership command for named volume roots", async () => {
+		const sandbox = makeSandbox();
+		const calls: Array<{ args: string[]; options: any }> = [];
+		(sandbox as any).execDocker = async (args: string[], options: any) => {
+			calls.push({ args, options });
+			return { stdout: "", stderr: "" };
+		};
+
+		await (sandbox as any)._prepareWorkspaceVolumeRoots("container-workspace");
+
+		assert.equal(calls.length, 1);
+		assert.deepEqual(calls[0].args, [
+			"exec", "-u", "root", "container-workspace", "sh", "-ceu",
+			"mkdir -p /workspace /workspace-wt && chown node:node /workspace /workspace-wt",
+		]);
+		assert.equal(calls[0].options.timeout, 10_000);
+		assert.deepEqual(calls[0].options.env.MSYS_NO_PATHCONV, "1");
+		assert.doesNotMatch(calls[0].args.at(-1) ?? "", /chown\s+-R/);
+	});
+});
+
 function requiredStateMounts(stateDir: string, sdkStateVolume = "bobbit-claude-agent-sdk-test") {
 	return [
 		mount("", "/bobbit-state/claude-agent-sdk", true, "", "volume", sdkStateVolume),
