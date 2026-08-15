@@ -638,11 +638,12 @@ Step `status` is explicit:
 | `failed` | Step completed unsuccessfully. |
 | `timeout` | A review-agent active turn exhausted its resolved allowance. The step and overall gate fail. |
 | `skipped` | Step was intentionally skipped, such as a disabled optional step or a later phase skipped after an earlier phase failed. |
+| `cancelled` | Step was interrupted by orchestration. Its cancellation metadata records the cause and timestamps; this is not a failed verdict. |
 | `running` | Step is executing now; duration is elapsed time so far. |
 | `waiting` | Step has not started yet. This is also the API representation for "yet to run". |
 | `blocked` | Active-snapshot derived state for a not-yet-run step blocked by an earlier phase failure; terminal persisted rows use `skipped`. |
 
-For non-final `running`, `waiting`, and `blocked` states, callers should use `status` instead of treating `passed: false` as failure. Terminal rows preserve explicit `status` as `passed`, `failed`, `timeout`, or `skipped`; `skipped: true` rows are ignored by aggregate pass calculation and should not be rendered as ordinary passes or failures.
+For non-final `running`, `waiting`, and `blocked` states, callers should use `status` instead of treating `passed: false` as failure. Terminal rows preserve explicit `status` as `passed`, `failed`, `timeout`, `skipped`, or `cancelled`; a cancelled row is interrupted rather than failed. `skipped: true` rows are ignored by aggregate pass calculation and should not be rendered as ordinary passes or failures.
 
 Verification log output is bounded by default: `gate_status` and `gate_inspect section=verification` return the last 20 lines per step, not full logs. Agents that need deeper evidence should call `gate_inspect` with a targeted selection mode:
 
@@ -775,9 +776,14 @@ interface GateSignalStep {
   name: string;
   type: string;
   passed: boolean;
-  status?: "waiting" | "running" | "passed" | "failed" | "timeout" | "skipped";
+  status?: "waiting" | "running" | "passed" | "failed" | "timeout" | "skipped" | "cancelled";
   phase?: number;            // Workflow phase used for grouping and execution order
   skipped?: boolean;         // true when step was skipped (optional not enabled, or earlier phase failed)
+  cancellation?: {           // Present when orchestration interrupted this step; not a failed verdict
+    cause: VerificationCancellationCause;
+    requestedAt: number;
+    finalizedAt?: number;
+  };
   output: string;            // Short summary
   duration_ms: number;       // Total step elapsed time
   timeout?: {                // Present only when a review-agent active turn expires
@@ -876,7 +882,7 @@ Both `label` and `prompt` are required (the validator rejects the step on load o
 **Resume / cancellation.**
 
 - Server restart re-broadcasts `gate_verification_awaiting_human` from the resume path; the persisted `humanPrompt` / `humanLabel` survive intact. No data loss, no duplicate UI prompt — the widget reconciles by `(signalId, stepName)`.
-- Re-signaling the gate while a sign-off is pending drains the resolver with `{ cancelled: true }`; the failed step result is suppressed and the fresh signal opens a new request.
+- Re-signaling the gate while a sign-off is pending drains the resolver with `{ cancelled: true }`; the superseded step result is suppressed and the fresh signal opens a new request.
 - `POST /signoff` is idempotent — already-resolved or cancelled steps respond `409 { error: "step is no longer awaiting human input", status }`.
 
 **Authz (v1).** Trusts the gateway token — anyone with UI access can sign off. Bobbit has no user-identity model today; submission records only a server-side timestamp. Sandboxed sub-agents are blocked from POSTing to `/signoff` at the `sandbox-guard` layer so a sandboxed agent cannot self-approve a sign-off step that gates its own work.
@@ -899,8 +905,8 @@ This prevents reviewer proliferation without treating an unverified or still-own
 **Manual cancellation:** `POST /api/goals/:goalId/gates/:gateId/cancel-verification` is idempotent; the dashboard exposes it for a running signal. Its `200` response is one of these exact shapes:
 
 - `{ "cancelled": false, "message": "No running verification to cancel" }` — nothing is running.
-- `{ "cancelled": true, "pending": false }` — exact cleanup settled and cancellation is terminal.
-- `{ "cancelled": true, "pending": true, "message": "Cancellation is waiting for exact process cleanup" }` — cancellation intent is durable but cleanup is still pending/retryable. This is not terminal; inspect `GET /api/goals/:goalId/verifications/active` to observe the active cleanup record.
+- `{ "cancelled": true, "outcome": "cancelled", "cause": "manual", "signalId": "sig-22", "pending": false }` — exact cleanup settled and the affected historical signal is terminal.
+- `{ "cancelled": true, "outcome": "cancelled", "cause": "manual", "signalId": "sig-22", "pending": true, "message": "Cancellation is waiting for exact process cleanup" }` — cancellation intent is durable but cleanup is still pending/retryable. Wait for settlement, then inspect the signal history or gate detail for the terminal cancelled record; the gate remains eligible/pending rather than failed. See [Verification cancellation lifecycle](verification-cancellation.md).
 
 ### Tasks
 
