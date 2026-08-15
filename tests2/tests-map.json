@@ -3353,6 +3353,15 @@
       }
     },
     {
+      "path": "tests2/core/project-import-decision-context.test.ts",
+      "reason": "Bounded canonical project-import context rejects escapes and invalid snapshots while exposing only fixed language identifiers.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/inbox-nudger-advisory.test.ts",
       "reason": "Extension advisory inbox entries persist as non-waking, remain actionable, survive reload, and never nudge staff beside ordinary wakeable work.",
       "execution": {
@@ -3364,6 +3373,15 @@
     {
       "path": "tests2/dom/decision-request-renderer.test.ts",
       "reason": "Existing ask-user-choices adapter transports durable decision answers without ask envelopes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/dom/project-import-decision-renderer.test.ts",
+      "reason": "Project-owned durable decision cards use the shared choice widget and typed answer route without an agent envelope.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

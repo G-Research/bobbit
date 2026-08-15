@@ -17,7 +17,7 @@ export type TraceOutcome = typeof TRACE_OUTCOMES[number];
 export const TRACE_OUTCOME_KINDS = ["decision", "advisory", "audit"] as const;
 export type TraceOutcomeKind = typeof TRACE_OUTCOME_KINDS[number];
 
-export const TRACE_OUTCOME_EVENTS = ["sessionSetup", "beforePrompt", "beforeToolCall", "afterToolResult", "afterTurn", "beforeCompact", "sessionShutdown", "decisionResolved"] as const;
+export const TRACE_OUTCOME_EVENTS = ["sessionSetup", "beforePrompt", "beforeToolCall", "afterToolResult", "afterTurn", "beforeCompact", "sessionShutdown", "projectImported", "decisionResolved"] as const;
 export type TraceOutcomeEvent = typeof TRACE_OUTCOME_EVENTS[number];
 
 /** Fixed startup capability-selection stages. Candidate names never enter the trace. */

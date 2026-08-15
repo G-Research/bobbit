@@ -292,6 +292,24 @@ export class DecisionRequestStore {
 		return result;
 	}
 
+	/**
+	 * Add newly discovered active hooks without disturbing an immutable context or
+	 * a completed hook. This is the crash boundary between hook enumeration and
+	 * invocation: a replay sees the durable pending entry before calling code.
+	 */
+	ensureImportHooks(runId: string, hookKeys: readonly string[]): StoredProjectImportRun | undefined {
+		if (!hookKeys.every(key => isBoundedString(key, 256))) return undefined;
+		return this.commit(next => {
+			const run = next.importRuns[runId];
+			if (!run || run.completedAt) return run ? clone(run) : undefined;
+			for (const key of new Set(hookKeys)) run.hooks[key] ??= { state: "pending" };
+			// An import with no active hooks is still a completed one-shot run; it
+			// must not acquire hooks installed only after registration.
+			if (Object.values(run.hooks).every(entry => entry.state === "completed")) run.completedAt = run.createdAt;
+			return clone(run);
+		});
+	}
+
 	/** First durable completion for one hook wins; completed hooks never replay. */
 	completeImportHook(runId: string, hookKey: string, outcome: ImportDecisionOutcomeCode, at: string): boolean {
 		return this.commit(next => {
@@ -569,7 +587,7 @@ function migrateState(value: unknown): DecisionRequestStoreState | undefined {
 		requests[id] = { ...clone(request), delivery: { kind: "session", sessionId: request.sessionId } };
 	}
 	if (!Object.values(value.memories).every(isMemory)) return undefined;
-	return { version: DECISION_REQUEST_STORE_VERSION, requests, memories: clone(value.memories), importRuns: {} };
+	return { version: DECISION_REQUEST_STORE_VERSION, requests, memories: clone(value.memories) as Record<string, DecisionMemory>, importRuns: {} };
 }
 
 function isState(value: unknown): value is DecisionRequestStoreState {
@@ -597,7 +615,7 @@ function isStoredRequest(value: unknown): value is StoredDecisionRequest {
 		|| (value.resolvedAt !== undefined && !isIsoInstant(value.resolvedAt))
 		|| (value.resolution !== undefined && !isResolution(value.resolution))
 		|| !isContinuationState(value.continuationState) || !isNonNegativeInteger(value.continuationAttempts)) return false;
-	if (value.delivery.kind === "session" && value.sessionId !== value.delivery.sessionId) return false;
+	if (value.delivery.kind === "session" && (value.sessionId !== value.delivery.sessionId || !isLifecycleEvent(value.asker.event))) return false;
 	if (value.delivery.kind === "project-import" && (value.sessionId !== undefined || value.goalId !== undefined || value.request.scope !== "project" || value.asker.event !== "projectImported")) return false;
 	if (value.decisionClass === "consent-required" && value.request.default !== undefined) return false;
 	if ((value.decisionClass ?? "deferrable") === "deferrable" && value.request.default === undefined) return false;

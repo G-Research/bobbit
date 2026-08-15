@@ -3383,12 +3383,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		invalidateSession: (sessionId) => broadcastToSession(sessionId, {
 			type: "decision_requests_updated", sessionId, ts: gatewayDeps.clock.now(),
 		}),
-		// Kept as a spread until the decision-manager slice lands. This preserves
-		// current source compatibility while passing the additive projection seam
-		// at runtime without fabricating a session-owned invalidation.
-		...({ invalidateProject: (projectId: string) => broadcastToProject(projectId, {
+		invalidateProjectImport: (projectId: string) => broadcastToProject(projectId, {
 			type: "project_import_decision_requests_updated", projectId, ts: gatewayDeps.clock.now(),
-		} as any) } as {}),
+		}),
 	});
 	const advisoryThinkingConsumer = new AdvisoryThinkingConsumer({
 		sessionManager,
@@ -3425,11 +3422,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	projectImportDecisionCoordinator = new ProjectImportDecisionCoordinator({
 		registry: projectRegistry,
 		projectContextManager,
-		dispatcher: decisionHookDispatcher as unknown as { dispatchProjectImport(projectId: string, importId: string): Promise<readonly import("./agent/context-trace-store.js").TraceDecisionOutcomeRow[]> },
-		buildContext: ({ project, importId, components }) => Object.freeze({
-			...buildProjectImportDecisionContext({ project, components }),
-			importId,
-		}),
+		dispatcher: decisionHookDispatcher,
+		buildContext: ({ project, importId, components }) => buildProjectImportDecisionContext({ project, importId, components }),
 		now: gatewayDeps.clock.now,
 		onError: (projectId, error) => console.warn(`[project-import-decisions] reconciliation failed project=${projectId}:`, error),
 	});

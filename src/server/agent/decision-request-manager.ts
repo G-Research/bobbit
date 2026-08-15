@@ -7,11 +7,14 @@ import type { PackContributionRegistry } from "../extension-host/pack-contributi
 import { ModuleHost, type InvokeRequest } from "../extension-host/module-host-worker.js";
 import type { Clock } from "../gateway-deps.js";
 import { realClock } from "../gateway-deps.js";
-import type { ProposalSeedService } from "../proposals/proposal-seed-service.js";
+import type { ProposalDraftOwner, ProposalSeedService } from "../proposals/proposal-seed-service.js";
 import { packIdFromRoot, type HookContribution } from "./pack-contributions.js";
 import {
 	DecisionHookContractError,
 	validateDecisionHookOutput,
+	validateProjectImportDecisionHookOutput,
+	type ProjectImportDecisionHookContext,
+	type ProjectImportDecisionResolutionContext,
 	validateDecisionValue,
 	type DecisionHookContext,
 	type DecisionLifecycleEvent,
@@ -24,6 +27,8 @@ import {
 } from "./decision-hook-contract.js";
 import {
 	DecisionRequestStore,
+	type StoredProjectImportRun,
+	type ImportDecisionOutcomeCode,
 	type ConsentTimeoutAction,
 	type DecisionActor,
 	type DecisionClassificationReason,
@@ -325,6 +330,19 @@ export class DecisionRequestManager {
 		return this.deps.storeForProject(projectId)?.listPendingImportRequests(importId) ?? [];
 	}
 
+	/** Import-run state remains in the same project-owned atomic snapshot as requests. */
+	getImportRun(projectId: string, importId: string): StoredProjectImportRun | undefined {
+		return this.deps.storeForProject(projectId)?.getImportRun(importId);
+	}
+
+	ensureImportHooks(projectId: string, importId: string, hookKeys: readonly string[]): StoredProjectImportRun | undefined {
+		return this.deps.storeForProject(projectId)?.ensureImportHooks(importId, hookKeys);
+	}
+
+	completeImportHook(projectId: string, importId: string, hookKey: string, outcome: ImportDecisionOutcomeCode): boolean {
+		return this.deps.storeForProject(projectId)?.completeImportHook(importId, hookKey, outcome, new Date(this.clock.now()).toISOString()) ?? false;
+	}
+
 	/** Actionable session records include a durable consent pause awaiting its one answer. */
 	listActionable(projectId: string, sessionId: string): StoredDecisionRequest[] {
 		return (this.deps.storeForProject(projectId)?.list() ?? []).filter(request =>
@@ -345,7 +363,7 @@ export class DecisionRequestManager {
 	}
 
 	/** Advisories reuse the durable inbox but do not create an immediate staff wake. */
-	advisory(origin: Pick<DecisionRequestOrigin, "packId" | "hookId" | "sessionId">, advisory: ExtensionAdvisory): DecisionAdvisoryStatus {
+	advisory(origin: Pick<AnyDecisionRequestOrigin, "packId" | "hookId">, advisory: ExtensionAdvisory): DecisionAdvisoryStatus {
 		const inbox = this.deps.inboxManager;
 		if (!inbox || !inbox.hasStaff(advisory.staffId)) return "unavailable";
 		try {
@@ -354,7 +372,7 @@ export class DecisionRequestManager {
 			const extensionPending = pending.filter(entry => entry.source.type === "extension_advisory");
 			if (extensionPending.some(entry => entry.source.packId === origin.packId && entry.source.hookId === origin.hookId && entry.context === marker)) return "deduplicated";
 			if (extensionPending.length >= DECISION_ADVISORY_PENDING_LIMIT) {
-				console.warn("[decision-requests] advisory budget exhausted pack=%s hook=%s session=%s", origin.packId, origin.hookId, origin.sessionId);
+				console.warn("[decision-requests] advisory budget exhausted pack=%s hook=%s", origin.packId, origin.hookId);
 				return "rejected";
 			}
 			inbox.enqueue(advisory.staffId, {
@@ -590,12 +608,12 @@ export class DecisionRequestManager {
 		const key = record.resolution.value.kind === "option" ? record.resolution.value.value : "other";
 		const seed = record.request.effect.proposals[key];
 		if (!seed || !this.deps.proposalSeedService) return;
-		const owner = record.delivery.kind === "session"
+		const owner: string | ProposalDraftOwner = record.delivery.kind === "session"
 			? record.delivery.sessionId
-			: { kind: "project-import" as const, projectId: record.projectId, importId: record.delivery.importId, requestId: record.id };
+			: { kind: "project-import", projectId: record.projectId, importId: record.delivery.importId, requestId: record.id };
 		try {
 			const proposalService = this.deps.proposalSeedService as unknown as {
-				seedFromDecision(owner: string | typeof owner, type: ProposalType, args: Record<string, unknown>): ReturnType<ProposalSeedService["seedFromDecision"]>;
+				seedFromDecision(owner: string | ProposalDraftOwner, type: ProposalType, args: Record<string, unknown>): ReturnType<ProposalSeedService["seedFromDecision"]>;
 			};
 			const result = await proposalService.seedFromDecision(
 				owner,
@@ -778,6 +796,62 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 		return { outcomes: result.outcomes, ...(thinking?.kind === "thinking" ? { thinkingLevel: thinking.thinkingLevel } : {}) };
 	}
 
+	/**
+	 * Registration-only dispatch. The context was already atomically persisted by
+	 * the coordinator, so restart/retry never reads the filesystem or invents a
+	 * session. Pending hook records are written before code is invoked.
+	 */
+	async dispatchProjectImport(projectId: string, importId: string): Promise<readonly TraceDecisionOutcomeRow[]> {
+		this.deps.manager.registerProject(projectId);
+		const run = this.deps.manager.getImportRun(projectId, importId);
+		if (!run || run.completedAt) return [];
+		const hooks = this.projectImportHooks(projectId);
+		const keyed = hooks.map(candidate => ({ ...candidate, origin: { ...candidate.origin, importId }, key: `${candidate.origin.packId}:${candidate.origin.hookId}` }));
+		const admitted = this.deps.manager.ensureImportHooks(projectId, importId, keyed.map(candidate => candidate.key));
+		if (!admitted) return [];
+
+		const outcomes: TraceDecisionOutcomeRow[] = [];
+		const currentKeys = new Set(keyed.map(candidate => candidate.key));
+		// A declaration disabled between a crash and replay is explicitly denied;
+		// it cannot remain an unbounded pending import hook.
+		for (const [key, entry] of Object.entries(admitted.hooks)) {
+			if (entry.state === "pending" && !currentKeys.has(key)
+				&& this.deps.manager.completeImportHook(projectId, importId, key, "denied")) {
+				const [packId, hookId] = key.split(":", 2);
+				outcomes.push(outcome({ packId: packId!, hookId: hookId!, event: "projectImported" }, "denied", "Grant required"));
+			}
+		}
+
+		for (const candidate of keyed) {
+			const latest = this.deps.manager.getImportRun(projectId, importId);
+			if (latest?.hooks[candidate.key]?.state !== "pending") continue;
+			const started = Date.now();
+			let row: TraceDecisionOutcomeRow;
+			try {
+				if (!this.isStillProjectImportDispatchable(projectId, candidate.origin)) {
+					row = outcome(candidate.origin, "denied", "Grant required", elapsed(started));
+				} else {
+					const value = await this.invoke(candidate.hook, "decide", importContext(run));
+					const parsed = validateProjectImportDecisionHookOutput(value);
+					const ms = elapsed(started);
+					if (!parsed) row = outcome(candidate.origin, "applied", undefined, ms);
+					else if (parsed.kind === "selection" || parsed.kind === "request-mutation") row = outcome(candidate.origin, "dropped", "Unavailable value", ms);
+					else if (!this.isStillProjectImportDispatchable(projectId, candidate.origin)) row = outcome(candidate.origin, "denied", "Grant required", ms);
+					else row = await this.apply(candidate.origin, parsed, ms, false);
+				}
+			} catch (error) {
+				const ms = elapsed(started);
+				row = isTimeout(error) ? outcome(candidate.origin, "dropped", "Timed out", ms)
+					: error instanceof DecisionHookContractError ? outcome(candidate.origin, "dropped", "Malformed result", ms)
+					: outcome(candidate.origin, "error", undefined, ms);
+			}
+			const completion = row.outcome === "error" ? "error" : row.outcome === "denied" ? "denied"
+				: row.outcome === "dropped" ? "dropped" : row.outcome === "superseded" ? "superseded" : "applied";
+			if (this.deps.manager.completeImportHook(projectId, importId, candidate.key, completion)) outcomes.push(row);
+		}
+		return outcomes;
+	}
+
 	private async dispatchInternal(
 		event: DecisionLifecycleEvent,
 		context: Omit<DecisionRequestOrigin, "event" | "packId" | "hookId"> & {
@@ -947,6 +1021,19 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 		);
 	}
 
+	private projectImportHooks(projectId: string): Array<{ hook: HookContribution; origin: ProjectImportDecisionRequestOrigin }> {
+		return activePacks(this.deps.registry, projectId).flatMap(pack => pack.hooks
+			.filter(hook => hook.mode === "decide" && hook.events.includes("projectImported"))
+			.map(hook => ({ hook, origin: { projectId, importId: "", event: "projectImported" as const, packId: pack.packId, hookId: hook.id } }))
+			.sort((a, b) => a.origin.hookId.localeCompare(b.origin.hookId) || (a.hook.listName ?? "").localeCompare(b.hook.listName ?? "")),
+		);
+	}
+
+	private isStillProjectImportDispatchable(projectId: string, origin: Pick<ProjectImportDecisionRequestOrigin, "packId" | "hookId">): boolean {
+		return this.projectImportHooks(projectId).some(candidate => candidate.origin.packId === origin.packId && candidate.origin.hookId === origin.hookId)
+			&& resolveExtensionGrant(resolvedHooks(this.deps.registry, projectId), this.deps.grantsForProject(projectId), origin, "decide").allowed;
+	}
+
 	private isStillDispatchable(
 		event: DecisionLifecycleEvent,
 		context: Omit<DecisionRequestOrigin, "event" | "packId" | "hookId"> & { turnIndex?: number; cadenceTurnIndex?: number },
@@ -978,12 +1065,26 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 	}
 
 	async deliver(record: StoredDecisionRequest): Promise<"delivered" | "skipped"> {
-		// Import delivery uses the coordinator's context-aware continuation; this
-		// legacy session dispatcher must never synthesize a session or cwd for it.
-		if (record.delivery.kind !== "session" || record.asker.event === "projectImported") return "skipped";
+		if (record.delivery.kind === "project-import") {
+			const origin: ProjectImportDecisionRequestOrigin = {
+				projectId: record.projectId, importId: record.delivery.importId, event: "projectImported",
+				packId: record.asker.packId, hookId: record.asker.hookId,
+			};
+			if (!this.isStillProjectImportDispatchable(record.projectId, origin)) return "skipped";
+			const hook = this.projectImportHooks(record.projectId).find(candidate => candidate.origin.packId === origin.packId && candidate.origin.hookId === origin.hookId)?.hook;
+			const run = this.deps.manager.getImportRun(record.projectId, record.delivery.importId);
+			if (!hook || !run) return "skipped";
+			try {
+				await this.invoke(hook, "onDecision", { ...importContext(run), requestId: record.id, resolution: record.resolution! });
+				return "delivered";
+			} catch (error) {
+				if (error instanceof ActionError && error.status === 404) return "skipped";
+				throw error;
+			}
+		}
 		const origin = this.contexts.get(record.id) ?? {
 			projectId: record.projectId, sessionId: record.delivery.sessionId, goalId: record.goalId,
-			cwd: process.cwd(), event: record.asker.event, packId: record.asker.packId, hookId: record.asker.hookId,
+			cwd: process.cwd(), event: record.asker.event as DecisionLifecycleEvent, packId: record.asker.packId, hookId: record.asker.hookId,
 		};
 		const hook = this.deps.registry.listHooks(record.projectId).find(candidate =>
 			candidate.id === record.asker.hookId && packIdFromRoot(candidate.packRoot) === record.asker.packId && candidate.mode === "decide",
@@ -1002,7 +1103,7 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 		this.contexts.delete(record.id);
 	}
 
-	private async apply(origin: DecisionRequestOrigin, parsed: Exclude<ValidatedDecisionHookOutput, { kind: "selection" } | { kind: "request-mutation" }>, ms: number, scheduledDecision: boolean): Promise<TraceDecisionOutcomeRow> {
+	private async apply(origin: AnyDecisionRequestOrigin, parsed: Exclude<ValidatedDecisionHookOutput, { kind: "selection" } | { kind: "request-mutation" }>, ms: number, scheduledDecision: boolean): Promise<TraceDecisionOutcomeRow> {
 		if (parsed.kind === "advisory") {
 			const advised = this.deps.manager.advisory(origin, parsed.advisory);
 			return outcome(origin, advised === "enqueued" ? "advised" : advised === "deduplicated" ? "superseded" : "dropped", advised === "deduplicated" ? "Duplicate" : advised === "rejected" ? "Budget exhausted" : undefined, ms, "advisory");
@@ -1017,15 +1118,16 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 		// router. Reject misleading or inverted mappings before they become durable.
 		if (!request) return outcome(origin, "dropped", "Malformed result", ms);
 		const created = await this.deps.manager.create(origin, request, trustedOperationForExtensionDecision(request));
-		if (created.requestId) this.contexts.set(created.requestId, origin);
+		if (created.requestId && isSessionOrigin(origin)) this.contexts.set(created.requestId, origin);
 		if (created.status === "rejected") return outcome(origin, "dropped", created.code === "DECISION_SCOPE_UNAVAILABLE" ? "Unavailable value" : "Budget exhausted", ms);
 		if (created.status === "store_unavailable") return outcome(origin, "dropped", "Unavailable value", ms);
 		return { ...outcome(origin, created.status === "deduplicated" ? "superseded" : "applied", created.status === "deduplicated" ? "Duplicate" : undefined, ms), requestId: created.requestId, questionId: created.request?.questionId };
 	}
 
-	private invoke(hook: HookContribution, member: "decide" | "onDecision" | "selectSkills" | "selectMcp", ctx: DecisionHookContext | import("./decision-hook-contract.js").DecisionResolutionContext | CapabilitySelectionContext): Promise<unknown> {
+	private invoke(hook: HookContribution, member: "decide" | "onDecision" | "selectSkills" | "selectMcp", ctx: DecisionHookContext | import("./decision-hook-contract.js").DecisionResolutionContext | ProjectImportDecisionHookContext | ProjectImportDecisionResolutionContext | CapabilitySelectionContext): Promise<unknown> {
 		const url = pathToFileURL(path.resolve(path.dirname(hook.sourceFile), hook.module)).href;
-		return this.deps.moduleHost.invoke({ url, packRoot: hook.packRoot, epoch: 0, exportKind: "hooks", member, ctx, arg: undefined, workingDir: ctx.cwd } as InvokeRequest<DecisionHookContext>, hook.budget.timeoutMs);
+		const workingDir = "cwd" in ctx ? ctx.cwd : ctx.projectRoot;
+		return this.deps.moduleHost.invoke({ url, packRoot: hook.packRoot, epoch: 0, exportKind: "hooks", member, ctx, arg: undefined, workingDir } as InvokeRequest<DecisionHookContext>, hook.budget.timeoutMs);
 	}
 }
 
@@ -1072,8 +1174,10 @@ function withinBudgets(store: DecisionRequestStore, origin: AnyDecisionRequestOr
 	// same caps, but must never be treated as a deadline-timer candidate.
 	const active = records.filter(request => request.status === "pending" || request.status === "paused-awaiting-consent");
 	const delivery = deliveryFor(origin);
-	const sameDelivery = (request: StoredDecisionRequest) => request.delivery.kind === delivery.kind
-		&& (delivery.kind === "session" ? request.delivery.sessionId === delivery.sessionId : request.delivery.importId === delivery.importId);
+	const sameDelivery = (request: StoredDecisionRequest) => {
+		if (delivery.kind === "session") return request.delivery.kind === "session" && request.delivery.sessionId === delivery.sessionId;
+		return request.delivery.kind === "project-import" && request.delivery.importId === delivery.importId;
+	};
 	if (active.filter(sameDelivery).length >= DECISION_SESSION_PENDING_LIMIT) return false;
 	if (recent.filter(sameDelivery).length >= DECISION_SESSION_24H_LIMIT) return false;
 	if (isSessionOrigin(origin) && origin.goalId) {
@@ -1090,6 +1194,12 @@ function canonical(value: unknown): string {
 	return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonical(record[key])}`).join(",")}}`;
 }
 function cloneValue(value: Readonly<DecisionValue>): DecisionValue { return value.kind === "option" ? { kind: "option", value: value.value } : { kind: "other", text: value.text }; }
+function importContext(run: StoredProjectImportRun): ProjectImportDecisionHookContext {
+	// The store validates this snapshot on every load; defensive JSON copying
+	// prevents a module from mutating a shared durable object in-process.
+	return Object.freeze(JSON.parse(JSON.stringify(run.context))) as ProjectImportDecisionHookContext;
+}
+
 function hookContext(
 	origin: DecisionRequestOrigin,
 	usage?: import("./lifecycle-hub.js").TurnUsageSnapshot,
@@ -1151,7 +1261,7 @@ function resolvedHooks(registry: PackContributionRegistry, projectId: string): R
 		pack.hooks.map(hook => ({ packId: pack.packId, hookId: hook.id, mode: hook.mode, capabilities: hook.capabilities, priority })),
 	);
 }
-function outcome(origin: Pick<DecisionRequestOrigin, "packId" | "hookId" | "event">, state: TraceDecisionOutcomeRow["outcome"], reason?: TraceDecisionOutcomeRow["reason"], ms?: number, kind: "decision" | "advisory" = "decision"): TraceDecisionOutcomeRow {
+function outcome(origin: Pick<AnyDecisionRequestOrigin, "packId" | "hookId" | "event">, state: TraceDecisionOutcomeRow["outcome"], reason?: TraceDecisionOutcomeRow["reason"], ms?: number, kind: "decision" | "advisory" = "decision"): TraceDecisionOutcomeRow {
 	return { kind, packId: origin.packId, hookId: origin.hookId, event: origin.event, outcome: state, ...(reason ? { reason } : {}), ...(ms === undefined ? {} : { ms }) };
 }
 function emptyCapabilityStageResult(): CapabilityStageResult {
