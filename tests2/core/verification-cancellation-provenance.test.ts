@@ -107,14 +107,51 @@ test.each(CAUSES)("%s is durable, typed, and never becomes a failed gate", async
 	]);
 });
 
-test("reset and bypass admission fences reject a generation until the durable mutation releases", () => {
+test("reset, bypass, and terminal lifecycle admission fences reject a generation until released", () => {
 	const { harness, signal } = makeFixture("mutation-fence");
-	const release = harness.acquireGateMutationFence(GOAL_ID, [GATE_ID]);
+	const releaseGate = harness.acquireGateMutationFence(GOAL_ID, [GATE_ID]);
 	expect(harness.isGateMutationFenced(GOAL_ID, GATE_ID)).toBe(true);
-	expect(() => harness.beginVerification({ ...signal, id: "blocked-generation" }, GATE)).toThrow(/reset or bypassed/i);
-	release();
-	expect(harness.isGateMutationFenced(GOAL_ID, GATE_ID)).toBe(false);
+	expect(() => harness.beginVerification({ ...signal, id: "blocked-gate-generation" }, GATE)).toThrow(/reset or bypassed/i);
+	releaseGate();
+
+	const releaseGoal = harness.acquireGoalLifecycleFence(GOAL_ID);
+	expect(harness.isGoalLifecycleFenced(GOAL_ID)).toBe(true);
+	expect(harness.isSignalAdmissionFenced(GOAL_ID, GATE_ID)).toBe(true);
+	expect(() => harness.beginVerification({ ...signal, id: "blocked-goal-generation" }, GATE)).toThrow(/completing, shelving, or archiving/i);
+	releaseGoal();
+	expect(harness.isSignalAdmissionFenced(GOAL_ID, GATE_ID)).toBe(false);
 	expect(harness.beginVerification({ ...signal, id: "admitted-generation" }, GATE)).toHaveLength(1);
+});
+
+test("failed terminal fence rolls back in-memory cancellation so lifecycle requests can retry", () => {
+	const { harness, signal } = makeFixture("terminal-fence-persistence-failure");
+	const active = (harness as any).activeVerifications.get(signal.id) as ActiveVerification;
+	const persist = (harness as any)._persistActive;
+	(harness as any)._persistActive = () => false;
+	try {
+		expect(() => harness.fenceAndCancelAllVerifications(GOAL_ID, "archive")).toThrow(/persist cancellation fence/i);
+	} finally {
+		(harness as any)._persistActive = persist;
+	}
+	expect(active).toMatchObject({ overallStatus: "running" });
+	expect(active.cancelled).toBeUndefined();
+	expect(active.cancellation).toBeUndefined();
+	expect(harness.getActiveVerification(signal.id)).toBe(active);
+});
+
+test("cancelled result coerces any residual live step to cancelled audit state", () => {
+	const { harness, signal } = makeFixture("residual-live-step");
+	const active = (harness as any).activeVerifications.get(signal.id) as ActiveVerification;
+	// Model a crash/late callback that left a live status without the normal
+	// cancellation stamp. Terminal cancelled history must still contain no live row.
+	active.cancellation = { cause: "manual", requestedAt: Date.now() };
+	active.steps[0].status = "running";
+	delete active.steps[0].cancellation;
+	const result = (harness as any)._cancelledVerificationResult(active);
+	expect(result.steps[0]).toMatchObject({
+		status: "cancelled",
+		cancellation: { cause: "manual", finalizedAt: expect.any(Number) },
+	});
 });
 
 test("first cancellation writer is persisted before cleanup and cannot be overwritten by a later lifecycle event", () => {
@@ -203,13 +240,29 @@ test("restart preserves an already completed output and the persisted cause unti
 	expect(gateStore.getGate(GOAL_ID, GATE_ID)!.status).toBe("pending");
 });
 
-test("only restart and zombie recovery wake the team lead after cancelled publication", async () => {
-	for (const cause of ["gateway-restart-recovery", "zombie-recovery", "goal-pause"] as const) {
-		const fixture = makeFixture(`recovery-notification-${cause}`);
-		const notifications: string[] = [];
-		fixture.harness.setTeamLeadNotifier((_goalId, message) => notifications.push(message));
-		await fixture.harness.cancelStaleVerifications(GOAL_ID, GATE_ID, cause);
-		expect(notifications).toHaveLength(cause === "goal-pause" ? 0 : 1);
-		if (notifications.length) expect(notifications[0]).toMatch(/did not fail.*re-signal/i);
-	}
+test("only current-generation gateway restart recovery nudges the team lead once", async () => {
+	const current = makeFixture("current-restart-recovery");
+	const currentNotifications: string[] = [];
+	current.harness.setTeamLeadNotifier((_goalId, message) => currentNotifications.push(message));
+	await current.harness.cancelStaleVerifications(GOAL_ID, GATE_ID, "gateway-restart-recovery");
+	expect(currentNotifications).toHaveLength(1);
+	expect(currentNotifications[0]).toMatch(/did not fail.*re-signal/i);
+
+	const zombie = makeFixture("zombie-recovery");
+	const zombieNotifications: string[] = [];
+	zombie.harness.setTeamLeadNotifier((_goalId, message) => zombieNotifications.push(message));
+	await zombie.harness.cancelStaleVerifications(GOAL_ID, GATE_ID, "zombie-recovery");
+	expect(zombieNotifications, "zombie recovery is created by a replacement request and must not nudge").toHaveLength(0);
+
+	const historical = makeFixture("historical-restart-recovery");
+	const historicalNotifications: string[] = [];
+	historical.harness.setTeamLeadNotifier((_goalId, message) => historicalNotifications.push(message));
+	historical.gateStore.recordSignal({
+		...historical.signal,
+		id: "newer-generation",
+		timestamp: historical.signal.timestamp + 1,
+		verification: { status: "running", steps: [] },
+	});
+	await historical.harness.cancelStaleVerifications(GOAL_ID, GATE_ID, "gateway-restart-recovery");
+	expect(historicalNotifications, "historical recovery must not nudge after a newer signal exists").toHaveLength(0);
 });

@@ -468,6 +468,10 @@ test.describe("Cancel Verification API", () => {
 				5000,
 			);
 			const gate = await getGateState(goalId);
+			const summaryRes = await apiFetch(`/api/goals/${goalId}/gates/slow-gate?view=summary`);
+			expect(summaryRes.status).toBe(200);
+			expect((await summaryRes.json()).latestSignal?.verification?.cancellation,
+				"GATE_DETAIL_SUMMARY_MUST_EXPOSE_DURABLE_CANCELLATION_CAUSE").toMatchObject({ cause: "manual" });
 			expect(gate.status, "MANUAL_CANCEL_MUST_LEAVE_GATE_ELIGIBLE_TO_RUN_AGAIN").toBe("pending");
 			expect(gate.signals.at(-1)?.verification, "MANUAL_CANCEL_MUST_BE_DURABLE_AND_NEVER_A_PRODUCT_FAILURE").toMatchObject({
 				status: "cancelled",
@@ -624,6 +628,36 @@ test.describe("Cancel Verification API", () => {
 		} finally {
 			runner.settleAll();
 			await cleanupSlowWorkflowGoal(setup);
+		}
+	});
+
+	test("terminal lifecycle and archive fail closed when the durable cancellation fence cannot persist", async ({ gateway }) => {
+		let terminal: SlowWorkflowGoal | undefined;
+		let archive: SlowWorkflowGoal | undefined;
+		const harness = gateway.teamManager.verificationHarness!;
+		const originalFence = harness.fenceAndCancelAllVerifications.bind(harness);
+		(harness as any).fenceAndCancelAllVerifications = () => {
+			throw new Error("simulated durable fence failure");
+		};
+		try {
+			terminal = await createSlowWorkflowGoal("Terminal Fence Persistence Failure");
+			const terminalRes = await apiFetch(`/api/goals/${terminal.goalId}`, {
+				method: "PUT", body: JSON.stringify({ state: "shelved" }),
+			});
+			expect(terminalRes.status).toBe(503);
+			expect(await terminalRes.json()).toMatchObject({ code: "VERIFICATION_CANCELLATION_FENCE_FAILED", retryable: true });
+			expect((await (await apiFetch(`/api/goals/${terminal.goalId}`)).json()).state).not.toBe("shelved");
+
+			archive = await createSlowWorkflowGoal("Archive Fence Persistence Failure");
+			const archiveRes = await apiFetch(`/api/goals/${archive.goalId}?cascade=false`, { method: "DELETE" });
+			expect(archiveRes.status).toBe(503);
+			expect(await archiveRes.json()).toMatchObject({ code: "VERIFICATION_CANCELLATION_FENCE_FAILED", retryable: true });
+			const stillLive = await (await apiFetch(`/api/goals/${archive.goalId}`)).json();
+			expect(stillLive.archived).not.toBe(true);
+		} finally {
+			(harness as any).fenceAndCancelAllVerifications = originalFence;
+			await cleanupSlowWorkflowGoal(terminal);
+			await cleanupSlowWorkflowGoal(archive);
 		}
 	});
 

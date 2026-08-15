@@ -2225,6 +2225,15 @@ export class VerificationHarness {
 	 * cancellation snapshot but before the durable gate mutation commits.
 	 */
 	private gateMutationFences = new Map<string, number>();
+	/**
+	 * Goal lifecycle transitions (complete, shelve, archive) fence every gate
+	 * before their cancellation snapshot is taken. Unlike a gate mutation fence,
+	 * this closes admission for the entire goal while its authoritative lifecycle
+	 * write is in progress.
+	 */
+	private goalLifecycleFences = new Map<string, number>();
+	/** Recovery advice is emitted at most once for a current signal generation. */
+	private recoveryCancellationNotifiedSignals = new Set<string>();
 	/** Exact prompt admissions waiting to learn that their signal generation was cancelled. */
 	private verifierDispatchCancellationWaiters = new Map<string, Set<(reason: string) => void>>();
 	/** Random UUID generated once per server process. Steps stamped with this bootEpoch were started by this process. */
@@ -2338,6 +2347,28 @@ export class VerificationHarness {
 		return (this.gateMutationFences.get(this._gateMutationKey(goalId, gateId)) ?? 0) > 0;
 	}
 
+	/** Block every gate's signal admission during a terminal goal lifecycle write. */
+	acquireGoalLifecycleFence(goalId: string): () => void {
+		this.goalLifecycleFences.set(goalId, (this.goalLifecycleFences.get(goalId) ?? 0) + 1);
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			const count = (this.goalLifecycleFences.get(goalId) ?? 1) - 1;
+			if (count > 0) this.goalLifecycleFences.set(goalId, count);
+			else this.goalLifecycleFences.delete(goalId);
+		};
+	}
+
+	isGoalLifecycleFenced(goalId: string): boolean {
+		return (this.goalLifecycleFences.get(goalId) ?? 0) > 0;
+	}
+
+	/** True when either exact-gate or goal-wide lifecycle mutation closes admission. */
+	isSignalAdmissionFenced(goalId: string, gateId: string): boolean {
+		return this.isGoalLifecycleFenced(goalId) || this.isGateMutationFenced(goalId, gateId);
+	}
+
 	/**
 	 * Synchronously enumerate verification steps and seed the activeVerifications
 	 * map for `signal.id`. Returns the `GateSignalStep[]` shaped exactly for the
@@ -2366,6 +2397,9 @@ export class VerificationHarness {
 	 * must precede verification_started".
 	 */
 	beginVerification(signal: GateSignal, gate: WorkflowGate): GateSignalStep[] {
+		if (this.isGoalLifecycleFenced(signal.goalId)) {
+			throw new Error(`Goal ${signal.goalId} is completing, shelving, or archiving; retry signalling after that operation completes`);
+		}
 		if (this.isGateMutationFenced(signal.goalId, signal.gateId)) {
 			throw new Error(`Gate ${signal.gateId} is being reset or bypassed; retry signalling after that operation completes`);
 		}
@@ -4121,7 +4155,10 @@ export class VerificationHarness {
 			// failed result after cancellation was requested; it is not a product
 			// verification failure and must remain neutral in the audit.
 			const interrupted = interruption !== undefined
-				|| (!live && (persisted?.status === "waiting" || persisted?.status === "running"));
+				// A cancelled terminal record must never retain a live row, even if a
+				// crash or late callback left the active/persisted status un-fenced.
+				|| live?.status === "waiting" || live?.status === "running"
+				|| persisted?.status === "waiting" || persisted?.status === "running";
 			const stepCancellation = interrupted
 				? { ...(interruption ?? cancellation), finalizedAt: interruption?.finalizedAt ?? cancellation.finalizedAt }
 				: undefined;
@@ -4202,7 +4239,9 @@ export class VerificationHarness {
 			// orchestration causes (pause, teardown, archive, etc.) deliberately do
 			// not wake a team lead.
 			if (verification.cancellation?.cause === "gateway-restart-recovery"
-				|| verification.cancellation?.cause === "zombie-recovery") {
+				&& this._isCurrentGateSignal(active)
+				&& !this.recoveryCancellationNotifiedSignals.has(active.signalId)) {
+				this.recoveryCancellationNotifiedSignals.add(active.signalId);
 				try {
 					this.notifyTeamLead(active.goalId, active.gateId, "cancelled");
 				} catch (err) {
@@ -4541,8 +4580,18 @@ export class VerificationHarness {
 	): ActiveVerification[] {
 		this._mergePersistedActiveVerifications(v => v.goalId === goalId);
 		const cancellations = Array.from(this.activeVerifications.values()).filter(active => active.goalId === goalId);
+		// A terminal route may safely retry a failed durable fence. Restore the
+		// in-memory records if its write fails so an unpersisted cancellation does
+		// not become a phantom terminal state after the goal lifecycle rolls back.
+		const before = cancellations.map(active => ({ active, value: structuredClone(active), wasFenced: this.cancelledVerificationSignals.has(active.signalId) }));
 		for (const active of cancellations) this._markVerificationCancelled(active, cause);
 		if (cancellations.length > 0 && !this._persistActive()) {
+			for (const snapshot of before) {
+				for (const key of Object.keys(snapshot.active)) delete (snapshot.active as any)[key];
+				Object.assign(snapshot.active, snapshot.value);
+				if (snapshot.wasFenced) this.cancelledVerificationSignals.add(snapshot.active.signalId);
+				else this.cancelledVerificationSignals.delete(snapshot.active.signalId);
+			}
 			throw new Error(`Could not persist cancellation fence for goal ${goalId}`);
 		}
 		// Drain parked signoffs synchronously after the durable fence, then hand
