@@ -6368,6 +6368,19 @@ export class SessionManager {
 		// Stable-ID admission has one durable boundary: persist the exact occurrence
 		// before any Pi RPC, even when the session currently appears idle.
 		if (reliableIntentId) {
+			// A failed poison repair leaves its initiating occurrence on the rollback
+			// capsule. Reattach that exact ownership before accepting this later
+			// follow-up: it must remain a separate durable row, not be replaced by
+			// this fresh occurrence or inferred from matching text.
+			if (recoveredPoisonDuringRevive) {
+				if (revivedPoisonQueueIds?.length) {
+					session.recoveredPromptDispatchQueueIds = revivedPoisonQueueIds;
+				}
+				if (revivedPoisonOwnedQueueIds?.length) {
+					session.poisonRecoveryPromptDispatchQueueIds = revivedPoisonOwnedQueueIds;
+				}
+				if (revivedPoisonQueueIds?.length) this.consumeRecoveredPromptDispatchRows(session);
+			}
 			const kind = opts?.isSteered ? "steer" : "prompt";
 			const targetTurn: DeliveryTargetTurn = kind === "steer"
 				&& session.status === "streaming"
@@ -6449,6 +6462,31 @@ export class SessionManager {
 				return { status: settlementFenced ? "queued" : "dispatched" };
 			}
 			if (session.status === "idle") {
+				// A later follow-up reviving a failed poison repair has its own accepted
+				// occurrence. Dispatch it by ID, leaving the failed repair occurrence
+				// durably queued for its later, independent lifecycle. Generic queue
+				// draining would choose the older row and silently make this call appear
+				// to have replaced it.
+				if (recoveredPoisonDuringRevive && session._piAgentRunSettled !== false) {
+					if (!opts?.suppressTitleGen) this.tryGenerateTitleFromPrompt(sessionId, text);
+					await this.dispatchDirectPrompt(
+						session,
+						dispatchText,
+						opts?.images,
+						opts?.attachments,
+						!!opts?.isSteered,
+						!!opts?.coldStart,
+						source,
+						author,
+						accepted.id,
+						accepted.id,
+						opts?.streamingBehavior,
+						false,
+						false,
+						opts?.suppressTitleGen,
+					);
+					return { status: "dispatched" };
+				}
 				// Preserve the historical direct-call contract when this accepted
 				// occurrence is the sole idle item: callers receive a definite
 				// pre-admission rejection while the exact reliable row still owns

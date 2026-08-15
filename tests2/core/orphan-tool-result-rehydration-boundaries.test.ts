@@ -3241,6 +3241,13 @@ describe("executable SessionManager rehydration boundaries", () => {
 			: ["parked queue intent"];
 		expect(rollback.promptQueue.toArray().map((message: any) => message.text)).toEqual(expectedAfterFailure);
 		expect(ps.messageQueue.map((message: any) => message.text)).toEqual(expectedAfterFailure);
+		const preservedFailedFollowUpId = firstAction === "follow-up"
+			? rollback.promptQueue.toArray().find((message: any) => message.text === "preserved failed follow-up")?.id
+			: undefined;
+		if (firstAction === "follow-up") {
+			expect(preservedFailedFollowUpId).toEqual(expect.any(String));
+			expect(rollback.poisonRecoveryPromptDispatchQueueIds).toContain(preservedFailedFollowUpId);
+		}
 		expect(rollback.lastPromptText).toBe("original user intent");
 		expect(rollback.modelId).toBe("claude-sonnet-4-5");
 		expect(rollback.thinkingLevel).toBe("high");
@@ -3274,6 +3281,17 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(restored.clients.has(client)).toBe(true);
 		expect(restored.promptQueue.toArray().map((message: any) => message.text)).toEqual(expectedAfterSuccess);
 		expect(ps.messageQueue.map((message: any) => message.text)).toEqual(expectedAfterSuccess);
+		if (firstAction === "follow-up") {
+			// The failed repair and new follow-up are distinct accepted occurrences:
+			// dispatching the latter must not text-correlate away, replace, or duplicate
+			// the former during rollback revival.
+			expect(restored.promptQueue.toArray().find((message: any) => message.id === preservedFailedFollowUpId)?.text)
+				.toBe("preserved failed follow-up");
+			expect(restored.poisonRecoveryPromptDispatchQueueIds).toContain(preservedFailedFollowUpId);
+			const laterAttempt = restored.inFlightSteerTexts.find((message: any) => message.text === "later follow-up intent");
+			expect(laterAttempt.intentId).toEqual(expect.any(String));
+			expect(laterAttempt.intentId).not.toBe(preservedFailedFollowUpId);
+		}
 		expect(restored.spawnPinnedModel).toBe("anthropic/claude-sonnet-4-5");
 		expect(restored.spawnPinnedThinkingLevel).toBe("high");
 		expect(restored.allowedTools).toEqual(["read", "grep", "bash"]);
