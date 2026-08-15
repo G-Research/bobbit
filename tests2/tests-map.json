@@ -3189,6 +3189,15 @@
         "tier": "browser",
         "project": "browser"
       }
+    },
+    {
+      "path": "tests2/core/verification-cancellation-outcome-repro.test.ts",
+      "reason": "Focused durable cancellation regression: a superseded verification keeps its typed orchestration cause distinct from command-kill mechanics, persists cancelled rather than failed, preserves completed output while cancelling unfinished steps, and leaves the gate pending and eligible to run again.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
     }
   ],
   "journeys": [
