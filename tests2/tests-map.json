@@ -2493,8 +2493,8 @@
       "reason": "Isolated linked-Git-worktree integration coverage for component-local detection, exact worktree-root request identity, primary-checkout escape rejection, named missing-toolchain degradation, and cleanup.",
       "execution": {
         "runner": "vitest",
-        "tier": "unit",
-        "project": "integration"
+        "tier": "e2e",
+        "project": "e2e"
       }
     },
     {
