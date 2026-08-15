@@ -870,19 +870,19 @@ export class ProjectSandbox {
 	/** Exact image and wrapper probe for the SDK-only sandbox launch path. */
 	async hasClaudeAgentSdkCapability(): Promise<boolean> {
 		try {
-			const { stdout } = await this.execDocker([
+			const { stdout: labelStdout } = await this.execDocker([
 				"image", "inspect", "--format", "{{index .Config.Labels \"bobbit.claude-agent-sdk-version\"}}", this.options.image,
 			], { timeout: 5_000, env: DOCKER_ENV });
-			if (stdout.trim() !== CLAUDE_AGENT_SDK_SANDBOX_VERSION) return false;
+			if (labelStdout.trim() !== CLAUDE_AGENT_SDK_SANDBOX_VERSION) return false;
 			const containerId = await this.getContainerId();
 			await this._dockerExec(containerId, ["test", "-x", "/usr/local/bin/bobbit-claude-agent-sdk"], { timeout: 5_000 });
 			// The wrapper is the launch contract, not merely an executable bit. Probe
 			// it under the SDK UID with its non-network version command; never expose
 			// its raw output in capability diagnostics.
-			const { stdout } = await this.execDocker([
+			const { stdout: versionStdout } = await this.execDocker([
 				"exec", "-i", "-u", CLAUDE_AGENT_SDK_DOCKER_USER, containerId, "/usr/local/bin/bobbit-claude-agent-sdk", "--version",
 			], { timeout: 5_000, env: DOCKER_ENV });
-			if (stdout.trim() !== CLAUDE_AGENT_SDK_SANDBOX_VERSION_OUTPUT) return false;
+			if (versionStdout.trim() !== CLAUDE_AGENT_SDK_SANDBOX_VERSION_OUTPUT) return false;
 			await this.execDocker([
 				"exec", "-i", "-u", CLAUDE_AGENT_SDK_DOCKER_USER, containerId, "test", "-r", SANDBOX_SDK_MODULE_PATH,
 			], { timeout: 5_000, env: DOCKER_ENV });
