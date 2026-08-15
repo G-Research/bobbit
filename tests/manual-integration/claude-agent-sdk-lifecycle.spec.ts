@@ -170,6 +170,66 @@ function manualSdkAuthDir(): string {
 	return authDir;
 }
 
+const manualTurnEventTypes = [
+	"agent_start",
+	"message_start",
+	"message_update",
+	"message_end",
+	"tool_execution_start",
+	"tool_execution_end",
+	"agent_end",
+	"process_exit",
+	"subagent_work",
+	"compaction_start",
+	"compaction_end",
+	"auto_compaction_start",
+	"auto_compaction_end",
+	"other",
+] as const;
+type ManualTurnEventType = typeof manualTurnEventTypes[number];
+
+function createManualTurnEventCounts(): Record<ManualTurnEventType, number> {
+	return Object.fromEntries(manualTurnEventTypes.map(type => [type, 0])) as Record<ManualTurnEventType, number>;
+}
+
+/** Record only fixed event categories; never include an event payload in smoke output. */
+function countManualTurnEvent(counts: Record<ManualTurnEventType, number>, event: unknown): void {
+	const rawType = event && typeof event === "object" ? (event as { type?: unknown }).type : undefined;
+	const type = typeof rawType === "string" && (manualTurnEventTypes as readonly string[]).includes(rawType)
+		? rawType as ManualTurnEventType
+		: "other";
+	counts[type] = Math.min(counts[type] + 1, 1_000_000);
+}
+
+function diagnosticBoolean(read: () => unknown): boolean {
+	try { return read() === true; } catch { return false; }
+}
+
+function diagnosticValue(read: () => unknown): unknown {
+	try { return read(); } catch { return undefined; }
+}
+
+function normalizeManualSessionStatus(value: unknown): "starting" | "preparing" | "idle" | "streaming" | "aborting" | "terminated" | "other" {
+	return ["starting", "preparing", "idle", "streaming", "aborting", "terminated"].includes(value as string)
+		? value as "starting" | "preparing" | "idle" | "streaming" | "aborting" | "terminated"
+		: "other";
+}
+
+function normalizeManualBridgeState(value: unknown): "new" | "starting" | "ready" | "running" | "interrupting" | "failed" | "stopped" | "other" {
+	return ["new", "starting", "ready", "running", "interrupting", "failed", "stopped"].includes(value as string)
+		? value as "new" | "starting" | "ready" | "running" | "interrupting" | "failed" | "stopped"
+		: "other";
+}
+
+test("Claude Agent SDK manual timeout event diagnostics retain only fixed event categories", () => {
+	const counts = createManualTurnEventCounts();
+	countManualTurnEvent(counts, { type: "agent_start", privatePayload: "must-not-appear" });
+	countManualTurnEvent(counts, { type: "provider_detail", privatePayload: "must-not-appear" });
+	expect(Object.keys(counts)).toEqual(manualTurnEventTypes);
+	expect(counts.agent_start).toBe(1);
+	expect(counts.other).toBe(1);
+});
+
 test("Claude Agent SDK provider-unavailable failure is bounded and sanitized without an alternative runtime", async () => {
 	test.setTimeout(15_000);
 	const nonce = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -400,9 +460,39 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			expect(gateway.sessionManager.getPersistedSession(created.id)?.claudeAgentSdkSessionId).toBeUndefined();
 			const runTurn = async (text: string, label: string, options: Record<string, unknown> = {}) => {
 				const before = session.agentObservedTurnVersion ?? 0;
-				await gateway!.sessionManager.enqueuePrompt(created.id, text, { source: "user", ...options });
-				await waitFor(() => (session.agentObservedTurnVersion ?? 0) > before ? true : undefined, label, 120_000);
-				await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined, `${label} to settle`, 120_000);
+				const eventTypeCounts = createManualTurnEventCounts();
+				const unsubscribe = session.rpcClient.onEvent(event => countManualTurnEvent(eventTypeCounts, event));
+				try {
+					await gateway!.sessionManager.enqueuePrompt(created.id, text, { source: "user", ...options });
+					await waitFor(() => (session.agentObservedTurnVersion ?? 0) > before ? true : undefined, label, 120_000);
+					await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined, `${label} to settle`, 120_000);
+				} catch (error) {
+					if (error instanceof Error && (
+						error.message === `Timed out waiting for ${label}`
+						|| error.message === `Timed out waiting for ${label} to settle`
+					)) {
+						const bridge = session.rpcClient as unknown as Record<string, unknown>;
+						const input = diagnosticValue(() => bridge.input) as Record<string, unknown> | undefined;
+						throw new Error(JSON.stringify({
+							label,
+							eventTypeCounts,
+							agentObservedTurnVersionAdvanced: (session.agentObservedTurnVersion ?? 0) > before,
+							sessionManagerStatus: normalizeManualSessionStatus(diagnosticValue(() => gateway!.sessionManager.getSession(created.id)?.status)),
+							bridgeRunning: diagnosticBoolean(() => session.rpcClient.running),
+							bridgeLifecycleState: normalizeManualBridgeState(diagnosticValue(() => bridge.state)),
+							pendingToolPermission: diagnosticBoolean(() => gateway!.sessionManager.getPendingToolPermission(created.id) !== undefined),
+							bridgeInputQueue: {
+								hasQueuedRows: diagnosticBoolean(() => Array.isArray(input?.rows) && input.rows.length > 0),
+								hasWaitingReader: diagnosticBoolean(() => input?.reader !== undefined),
+							},
+							initializationComplete: diagnosticBoolean(() => bridge.initializationComplete),
+							queryHandlePresent: diagnosticBoolean(() => bridge.queryHandle !== undefined),
+						}));
+					}
+					throw error;
+				} finally {
+					unsubscribe();
+				}
 			};
 
 			// Use the same SessionManager queue/steer path as the gateway. This keeps
