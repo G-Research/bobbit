@@ -442,7 +442,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 		const dispatcherRoot = mkdtempSync(path.join(tmpdir(), "bobbit-sdk-replacement-dispatch-"));
 		const configRoot = path.join(dispatcherRoot, "config");
 		mkdirSync(path.join(configRoot, "tools"), { recursive: true });
-		const dockerExecs: Array<{ args: string[]; options: any }> = [];
+		const dockerExecs: Array<{ args: string[]; options: any; child: any }> = [];
 		const sdkLaunches: any[] = [];
 		const sdkQueryOptions: any[] = [];
 		const queries: Array<{ close: ReturnType<typeof vi.fn> }> = [];
@@ -468,7 +468,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 		};
 		const dispatcherSpawn = vi.fn((_command: string, args: string[], options: any) => {
 			const child = fakeChild();
-			dockerExecs.push({ args: [...args], options });
+			dockerExecs.push({ args: [...args], options, child });
 			child.stdin.on("data", (chunk: Buffer) => {
 				const line = chunk.toString();
 				if (!line.startsWith("BOBBIT_SDK_DISPATCH:")) return;
@@ -537,6 +537,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 						return child;
 					},
 					query: (request: any) => {
+						if (failCandidate) throw new Error("candidate startup failed");
 						sdkQueryOptions.push(request.options);
 						request.options.spawnClaudeCodeProcess({ args: ["--sdk-protocol"], env: {}, signal: new AbortController().signal });
 						let finishIterator!: () => void;
@@ -546,10 +547,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 								finishIterator();
 								for (const child of ownedChildren.splice(0)) child.kill("SIGTERM");
 							}),
-							initializationResult: async () => {
-								if (failCandidate) throw new Error("candidate startup failed");
-								return { models: [{ value: "sandbox-sonnet" }] };
-							},
+							initializationResult: async () => ({ models: [{ value: "sandbox-sonnet" }] }),
 							async *[Symbol.asyncIterator]() {
 								yield { type: "system", subtype: "init", session_id: resumeId };
 								await iteratorFinished;
@@ -647,18 +645,21 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 			manager.sessions.set(failedId, live(failedId, failedOld));
 			failCandidate = true;
 			const queryCount = queries.length;
+			const queryOptionsCount = sdkQueryOptions.length;
+			const sdkLaunchCount = sdkLaunches.length;
 			await assert.rejects(
 				() => manager.assignRole(failedId, { name: "sandbox-role", promptTemplate: "role", accessory: "none" }),
 				(error: any) => error?.code === "SDK_SESSION_UNAVAILABLE"
 					&& error?.message === "SDK_SESSION_UNAVAILABLE"
 					&& /candidate startup failed/.test(claudeAgentSdkUnavailableDiagnostic(error)),
 			);
-			assert.ok(queries[queryCount]?.close.mock.calls.length, "failed SDK candidate must be disposed");
-			const failedSdk = sdkLaunches.find(candidate => candidate.input.containerId === `container-${failedId}`);
 			const failedDispatcher = dockerExecs.find(candidate => candidate.args.includes(`container-${failedId}`));
-			assert.equal(failedSdk?.child.killed, true, "failed SDK subprocess must be killed");
-			assert.ok(failedDispatcher, "failed candidate must have completed real dispatcher preflight");
-			assert.equal(failedOld.stop.mock.calls.length, 0);
+			assert.equal(queries.length, queryCount, "failed candidate must not construct an SDK Query");
+			assert.equal(sdkQueryOptions.length, queryOptionsCount, "failed candidate must not configure an SDK Query");
+			assert.equal(sdkLaunches.length, sdkLaunchCount, "failed candidate must not launch an SDK process");
+			assert.ok(failedDispatcher, "failed candidate must complete dispatcher preflight before SDK construction");
+			assert.equal(failedDispatcher.child.killed, true, "failed candidate must dispose its preflight dispatcher child");
+			assert.equal(failedOld.stop.mock.calls.length, 0, "failed candidate must leave the original bridge active");
 			assert.equal(manager.sessions.get(failedId)?.rpcClient, failedOld);
 		} finally {
 			rmSync(dispatcherRoot, { recursive: true, force: true });
