@@ -227,13 +227,26 @@ function countManualCanonicalToolExecution(counts: ManualCanonicalToolExecutionC
 	counts[category][boundary] = Math.min(counts[category][boundary] + 1, 1_000_000);
 }
 
-function assertManualCanonicalToolExecution(counts: ManualCanonicalToolExecutionCounts): void {
+/**
+ * Durable visible history is the execution oracle. Stream boundaries are only
+ * fixed-category diagnostics because official SDK frames may arrive late.
+ */
+function assertManualDurableCanonicalToolExecution(snapshot: unknown, counts: ManualCanonicalToolExecutionCounts): void {
+	const readHasRootCanonicalToolCall = hasRootCanonicalToolCall(snapshot, "read");
+	const readHasSuccessfulRootToolResult = hasSuccessfulRootToolResult(snapshot, "read");
+	const grepHasRootCanonicalToolCall = hasRootCanonicalToolCall(snapshot, "grep");
+	const grepHasSuccessfulRootToolResult = hasSuccessfulRootToolResult(snapshot, "grep");
 	if (
-		counts.read.starts < 1 || counts.read.ends < 1
-		|| counts.grep.starts < 1 || counts.grep.ends < 1
+		!readHasRootCanonicalToolCall
+		|| !readHasSuccessfulRootToolResult
+		|| !grepHasRootCanonicalToolCall
+		|| !grepHasSuccessfulRootToolResult
 	) {
 		throw new Error(JSON.stringify({
-			code: "MANUAL_CANONICAL_TOOL_EXECUTION_INCOMPLETE",
+			readHasRootCanonicalToolCall,
+			readHasSuccessfulRootToolResult,
+			grepHasRootCanonicalToolCall,
+			grepHasSuccessfulRootToolResult,
 			counts,
 		}));
 	}
@@ -268,7 +281,7 @@ test("Claude Agent SDK manual timeout event diagnostics retain only fixed event 
 	expect(counts.other).toBe(1);
 });
 
-test("Claude Agent SDK manual canonical tool diagnostics retain fixed categories and counts", () => {
+test("Claude Agent SDK manual durable tool oracle retains only fixed booleans and event counts", () => {
 	const counts = createManualCanonicalToolExecutionCounts();
 	countManualCanonicalToolExecution(counts, { type: "tool_execution_start", toolName: "read", args: { private: "must-not-appear" } });
 	countManualCanonicalToolExecution(counts, { type: "tool_execution_end", toolName: "read", result: { private: "must-not-appear" } });
@@ -279,6 +292,28 @@ test("Claude Agent SDK manual canonical tool diagnostics retain fixed categories
 		grep: { starts: 1, ends: 0 },
 		other: { starts: 0, ends: 1 },
 	});
+	const successfulVisibleHistory = {
+		messages: [
+			{ content: [{ type: "toolCall", name: "read", id: "read-call" }, { type: "toolCall", name: "grep", id: "grep-call" }] },
+			{ role: "toolResult", toolName: "read", toolCallId: "read-call", isError: false },
+			{ role: "toolResult", toolName: "grep", toolCallId: "grep-call", isError: false },
+		],
+	};
+	expect(() => assertManualDurableCanonicalToolExecution(successfulVisibleHistory, counts)).not.toThrow();
+	let diagnostic = "";
+	try {
+		assertManualDurableCanonicalToolExecution(undefined, counts);
+	} catch (error) {
+		diagnostic = error instanceof Error ? error.message : "";
+	}
+	expect(JSON.parse(diagnostic)).toEqual({
+		readHasRootCanonicalToolCall: false,
+		readHasSuccessfulRootToolResult: false,
+		grepHasRootCanonicalToolCall: false,
+		grepHasSuccessfulRootToolResult: false,
+		counts,
+	});
+	expect(diagnostic).not.toContain("must-not-appear");
 });
 
 test("Claude Agent SDK manual terminal diagnostics expose only route-safe categories", async () => {
@@ -631,10 +666,12 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			} finally {
 				unsubscribeCanonicalToolExecution();
 			}
-			assertManualCanonicalToolExecution(canonicalToolExecution);
+			// Fetch durable visible history before evaluating boundary diagnostics.
 			let transcript = await gateway.sessionManager.getMessagesSnapshotBase(session);
-			expect(transcript.success && hasRootCanonicalToolCall(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, transcript.data), "read")).toBe(true);
-			expect(transcript.success && hasRootCanonicalToolCall(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, transcript.data), "grep")).toBe(true);
+			const visibleCanonicalToolTranscript = transcript.success
+				? gateway.sessionManager.buildVisibleMessageSnapshot(created.id, transcript.data)
+				: undefined;
+			assertManualDurableCanonicalToolExecution(visibleCanonicalToolTranscript, canonicalToolExecution);
 
 			// This is read-only: it observes workflow state without signaling a real gate.
 			await runTurn("Use only Bobbit gate_list to inspect the current workflow state; do not signal or modify any gate.", "read-only workflow-gate tool action");
@@ -883,10 +920,12 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			} finally {
 				unsubscribeSandboxCanonicalToolExecution();
 			}
-			assertManualCanonicalToolExecution(sandboxCanonicalToolExecution);
+			// Fetch durable visible history before evaluating boundary diagnostics.
 			let sandboxTranscript = await gateway.sessionManager.getMessagesSnapshotBase(session);
-			expect(sandboxTranscript.success && hasRootCanonicalToolCall(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data), "read")).toBe(true);
-			expect(sandboxTranscript.success && hasRootCanonicalToolCall(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data), "grep")).toBe(true);
+			const visibleSandboxCanonicalToolTranscript = sandboxTranscript.success
+				? gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data)
+				: undefined;
+			assertManualDurableCanonicalToolExecution(visibleSandboxCanonicalToolTranscript, sandboxCanonicalToolExecution);
 			await runSandboxTurn("Use only Bobbit gate_list to inspect current workflow state. Do not signal or modify any gate.", "sandbox read-only workflow-gate tool action");
 			sandboxTranscript = await gateway.sessionManager.getMessagesSnapshotBase(session);
 			const visibleSandboxTranscript = sandboxTranscript.success
