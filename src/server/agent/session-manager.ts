@@ -1527,10 +1527,28 @@ export async function dispatchTrackedPrompt(
 ): Promise<unknown> {
 	const source = opts.source ?? "system";
 	const now = opts.now ?? Date.now;
-	const promptId = `prompt:${randomUUID()}`;
+	// Direct server prompts bypass PromptQueue, but still need the exact same
+	// occurrence reservation as queued work before their RPC is issued.
+	const intentId = `prompt:${randomUUID()}`;
+	const promptId = intentId;
 	const author = resolveAcceptedPromptAuthor(source, opts.author);
 	session.lastPromptSource = source;
-	const prepared = preparePromptAuthorDispatch(session, promptId, text, source, author, now());
+	const prepared = preparePromptAuthorDispatch(session, promptId, text, source, author, now(), { intentId });
+	const ledgerRecord: ReliableInFlightRecord = {
+		text,
+		promptId,
+		intentId,
+		attemptId: prepared.attemptId,
+		dispatchEpoch: prepared.dispatchEpoch,
+		state: "dispatching",
+		targetTurn: "next-turn",
+		kind: "prompt",
+		createdAt: prepared.dispatchEpoch,
+		retryable: false,
+		source,
+		author,
+	};
+	(session.inFlightSteerTexts ??= []).push(ledgerRecord);
 	const activityBoundary = beginPreparedPromptActivity(session, prepared);
 
 	try {
@@ -1547,6 +1565,16 @@ export async function dispatchTrackedPrompt(
 		if (!acceptPreparedPromptDispatch(session, prepared, activityBoundary)) {
 			throw new Error("prompt dispatch was superseded before acknowledgement");
 		}
+		// A buffered correlated end may have settled while the RPC acknowledgement
+		// was in flight. Its exact sidecar tuple, never body text, permits pruning.
+		const terminal = readAuthorSidecar(session.id).some((binding) =>
+			binding.intentId === intentId
+			&& binding.attemptId === prepared.attemptId
+			&& binding.settlement?.outcome === "echoed");
+		if (terminal) {
+			session.inFlightSteerTexts = session.inFlightSteerTexts?.filter((record) =>
+				record.intentId !== intentId || record.attemptId !== prepared.attemptId);
+		}
 		return response;
 	} catch (error) {
 		if (activityBoundary?.state === "committed") {
@@ -1555,6 +1583,8 @@ export async function dispatchTrackedPrompt(
 		}
 		cancelSessionPromptActivity(session, activityBoundary);
 		cancelPromptAuthorBinding(session, prepared, now());
+		session.inFlightSteerTexts = session.inFlightSteerTexts?.filter((record) =>
+			record.intentId !== intentId || record.attemptId !== prepared.attemptId);
 		throw error;
 	}
 }
@@ -1635,6 +1665,10 @@ export function reconcilePersistedIntentRestore(
 	inFlightSteerTexts: readonly InFlightSteerRecord[] | undefined,
 	bindings: readonly PromptAuthorBinding[],
 ): PersistedIntentRestoreState {
+	// This function is also called by restore tests and older integrations that
+	// bypass SessionStore's load migration. Normalize again at the trusted restore
+	// boundary so no pre-intent row can fall through to text-based recovery.
+	const normalizedLedger = normalizePersistedInFlightSteers(inFlightSteerTexts) ?? [];
 	const latestByIntent = new Map<string, PromptAuthorBinding>();
 	const terminalAttempts = new Set<string>();
 	const modernIntentIds = new Set(bindings.flatMap((binding) => binding.intentId ? [binding.intentId] : []));
@@ -1662,12 +1696,23 @@ export function reconcilePersistedIntentRestore(
 			&& recovered.attemptId !== undefined
 			&& recovered.attemptId === latest.attemptId;
 	});
-	const ledger = inFlightSteerTexts?.filter((record) => {
-		if (!record.intentId || !record.attemptId) return true;
-		return !terminalAttempts.has(`${record.intentId}\0${record.attemptId}`);
+	const terminalLegacyPromptIds = new Set(bindings
+		.filter((binding) => binding.intentId === undefined && binding.settlement !== undefined)
+		.map((binding) => binding.promptId));
+	const ledger = normalizedLedger.filter((record) => {
+		if (record.intentId && record.attemptId
+			&& terminalAttempts.has(`${record.intentId}\0${record.attemptId}`)) return false;
+		// A pre-intent structured row can be retired only by its own sidecar
+		// prompt id. Bare string rows have generated IDs and therefore fail closed.
+		return !terminalLegacyPromptIds.has(record.promptId);
 	});
 	const queueChanged = (queue?.length ?? 0) !== (messageQueue?.length ?? 0);
-	const ledgerChanged = (ledger?.length ?? 0) !== (inFlightSteerTexts?.length ?? 0);
+	const ledgerChanged = (ledger?.length ?? 0) !== (inFlightSteerTexts?.length ?? 0)
+		|| normalizedLedger.some((record, index) => {
+			const original = inFlightSteerTexts?.[index];
+			return typeof original !== "object" || original === null || original.intentId !== record.intentId
+				|| original.attemptId !== record.attemptId || original.dispatchEpoch !== record.dispatchEpoch;
+		});
 	return {
 		messageQueue: queue && queue.length > 0 ? [...queue] : undefined,
 		inFlightSteerTexts: ledger && ledger.length > 0 ? [...ledger] : undefined,
@@ -1897,6 +1942,35 @@ export function restorePromptAuthorBindings(session: SessionInfo, entries: Promp
 			source,
 			author,
 		}));
+	// Direct tracked prompts have their durable tuple in the author sidecar even
+	// if the process died before its queue/ledger transaction. Rebuild an
+	// uncertain carrier from that exact evidence; never infer one from text.
+	let restoredDirectAttempts = 0;
+	for (const entry of entries) {
+		if (entry.settlement !== undefined || !entry.intentId || !entry.attemptId
+			|| entry.dispatchEpoch === undefined || typeof entry.modelText !== "string") continue;
+		const existing = (session.inFlightSteerTexts ?? []).some((record) =>
+			record.intentId === entry.intentId && record.attemptId === entry.attemptId);
+		if (existing) continue;
+		const text = entry.modelPrefix && entry.modelText.startsWith(entry.modelPrefix)
+			? entry.modelText.slice(entry.modelPrefix.length)
+			: entry.modelText;
+		(session.inFlightSteerTexts ??= []).push({
+			text,
+			promptId: entry.promptId,
+			intentId: entry.intentId,
+			attemptId: entry.attemptId,
+			dispatchEpoch: entry.dispatchEpoch,
+			state: "uncertain",
+			targetTurn: "next-turn",
+			kind: "prompt",
+			createdAt: entry.dispatchEpoch,
+			retryable: false,
+			source: entry.source,
+			author: entry.author,
+		});
+		restoredDirectAttempts += 1;
+	}
 	const messageBindings = new Map<string, LivePromptAuthorMessageBinding>();
 	for (const entry of entries) {
 		if (entry.settlement?.outcome !== "echoed") continue;
@@ -1998,7 +2072,7 @@ export function restorePromptAuthorBindings(session: SessionInfo, entries: Promp
 			return !echoedLegacyPromptIds.has(record.promptId);
 		});
 	}
-	return before - (session.inFlightSteerTexts?.length ?? 0);
+	return before - (session.inFlightSteerTexts?.length ?? 0) + restoredDirectAttempts;
 }
 
 /** Helper: rewrite the text body of a user message in place (returns a new object). */
@@ -5800,9 +5874,11 @@ export class SessionManager {
 		// before author/skill envelopes or queue persistence are mutated. The live
 		// sessions map may already point at a staged successor, so deduping there
 		// would miss an occurrence still owned by promptOwner.
-		if (opts?.intentId) {
-			const existing = this.reliableIntentById(session, opts.intentId);
-			if (existing || this.reliableIntentWasSettled(session, opts.intentId)) {
+		const source = opts?.source ?? "user";
+		const reliableIntentId = opts?.intentId ?? (source === "user" ? undefined : randomUUID());
+		if (reliableIntentId) {
+			const existing = this.reliableIntentById(session, reliableIntentId);
+			if (existing || this.reliableIntentWasSettled(session, reliableIntentId)) {
 				return {
 					status: existing && (existing as ReliableQueuedMessage).deliveryState === "queued"
 						? "queued"
@@ -5810,7 +5886,6 @@ export class SessionManager {
 				};
 			}
 		}
-		const source = opts?.source ?? "user";
 		const author = resolveAcceptedPromptAuthor(source, opts?.author);
 		session.lastPromptSource = source;
 		const dispatchText = synthesizeAttachmentText(opts?.modelText ?? text, opts?.images, opts?.attachments);
@@ -5833,10 +5908,12 @@ export class SessionManager {
 				...(recordId ? { recordId } : {}),
 			});
 		}
-		if (opts?.intentId) {
+		// Server-generated work entered the occurrence lifecycle before any sidecar
+		// persistence above; now persist the delivery carrier itself.
+		if (reliableIntentId) {
 			this.enqueueReliableIntent(session, this.makeReliableIntentRow(
 				session,
-				opts.intentId,
+				reliableIntentId,
 				dispatchText,
 				opts.isSteered ? "steer" : "prompt",
 				"next-turn",
@@ -5910,14 +5987,18 @@ export class SessionManager {
 			&& session.promptQueue.isEmpty
 			&& !session.isCompacting
 			&& !this._sessionReplacementCoordinators.has(sessionId);
-		const row = session.promptQueue.enqueue(text, {
+		// Verification is server-owned work: mint its occurrence before the queue
+		// reaches persistence so restart/reconnect cannot turn it into a transcript
+		// fallback.
+		const row = this.makeReliableIntentRow(session, randomUUID(), text, "prompt", "next-turn", {
 			source: "verification",
-			verifierOwned: true,
 			author: BOBBIT_SYSTEM_AUTHOR,
 			streamingBehavior: opts?.streamingBehavior ?? "followUp",
 			coldStart: opts?.coldStart,
 			suppressTitleGen: opts?.suppressTitleGen ?? true,
 		});
+		row.verifierOwned = true;
+		this.enqueueReliableIntent(session, row);
 		const receipt = this.createVerifierPromptReceipt(sessionId, row.id, direct ? "direct" : "queued");
 		this.broadcastQueue(session);
 
@@ -6176,6 +6257,15 @@ export class SessionManager {
 		// no-attachment prompts pass through unchanged. See
 		// synthesizeAttachmentText for the exact rule.
 		const dispatchText = synthesizeAttachmentText(opts?.modelText ?? text, opts?.images, opts?.attachments);
+		// Mint and dedupe server work before any sidecar/queue persistence. Its
+		// occurrence identity, not model text, owns all subsequent projections.
+		const reliableIntentId = opts?.intentId ?? (source !== "user" || session.isCompacting ? randomUUID() : undefined);
+		if (reliableIntentId) {
+			const duplicate = this.reliableIntentById(session, reliableIntentId);
+			if (duplicate || this.reliableIntentWasSettled(session, reliableIntentId)) {
+				return { status: duplicate && (duplicate as ReliableQueuedMessage).deliveryState === "queued" ? "queued" : "dispatched" };
+			}
+		}
 		const hasSkillExpansions = !!(opts?.skillExpansions && opts.skillExpansions.length > 0);
 		const hasFileMentions = !!(opts?.fileMentions && opts.fileMentions.length > 0);
 		if (hasSkillExpansions || hasFileMentions) {
@@ -6200,14 +6290,8 @@ export class SessionManager {
 		}
 
 		// Stable-ID admission has one durable boundary: persist the exact occurrence
-		// before any Pi RPC, even when the session currently appears idle. Legacy
-		// callers admitted during compaction receive a server-minted occurrence ID.
-		const reliableIntentId = opts?.intentId ?? (session.isCompacting ? randomUUID() : undefined);
+		// before any Pi RPC, even when the session currently appears idle.
 		if (reliableIntentId) {
-			const duplicate = this.reliableIntentById(session, reliableIntentId);
-			if (duplicate || this.reliableIntentWasSettled(session, reliableIntentId)) {
-				return { status: duplicate && (duplicate as ReliableQueuedMessage).deliveryState === "queued" ? "queued" : "dispatched" };
-			}
 			const kind = opts?.isSteered ? "steer" : "prompt";
 			const targetTurn: DeliveryTargetTurn = kind === "steer"
 				&& session.status === "streaming"
@@ -6548,7 +6632,9 @@ export class SessionManager {
 		const author = resolveAcceptedPromptAuthor(source, opts?.author);
 		session.lastPromptSource = source;
 
-		const reliableIntentId = opts?.intentId ?? (session.isCompacting ? randomUUID() : undefined);
+		// Live server steers must carry a durable occurrence before their RPC can
+		// create an in-flight recovery record.
+		const reliableIntentId = opts?.intentId ?? (source !== "user" || session.isCompacting ? randomUUID() : undefined);
 		if (reliableIntentId) {
 			const duplicate = this.reliableIntentById(session, reliableIntentId);
 			if (duplicate || this.reliableIntentWasSettled(session, reliableIntentId)) {
@@ -8239,6 +8325,9 @@ export class SessionManager {
 				});
 			}
 		} else if (event.type === "agent_settled") {
+			// Pi settling its run is not an echo. Any handoff without a correlated
+			// user start remains an uncertain outbox carrier, never settled/replayed.
+			if (this._markModernInFlightAttemptsUncertain(session)) this.broadcastQueue(session);
 			// Pi sets its internal active-run flag false immediately before this event,
 			// after all retry/compaction/queued-continuation post-processing. New-turn
 			// work must enter Pi here, never synchronously from agent_end.
