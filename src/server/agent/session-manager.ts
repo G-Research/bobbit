@@ -5949,7 +5949,9 @@ export class SessionManager {
 		// sessions map may already point at a staged successor, so deduping there
 		// would miss an occurrence still owned by promptOwner.
 		const source = opts?.source ?? "user";
-		const reliableIntentId = opts?.intentId ?? (source === "user" ? undefined : randomUUID());
+		// Server admissions always identify their source. Retain the historical
+		// no-options path solely for pre-reliable local callers and restored rows.
+		const reliableIntentId = opts?.intentId ?? (opts?.source === undefined ? undefined : randomUUID());
 		if (reliableIntentId) {
 			const existing = this.reliableIntentById(session, reliableIntentId);
 			if (existing || this.reliableIntentWasSettled(session, reliableIntentId)) {
@@ -6331,9 +6333,9 @@ export class SessionManager {
 		// no-attachment prompts pass through unchanged. See
 		// synthesizeAttachmentText for the exact rule.
 		const dispatchText = synthesizeAttachmentText(opts?.modelText ?? text, opts?.images, opts?.attachments);
-		// Mint and dedupe server work before any sidecar/queue persistence. Its
-		// occurrence identity, not model text, owns all subsequent projections.
-		const reliableIntentId = opts?.intentId ?? (source !== "user" || session.isCompacting ? randomUUID() : undefined);
+		// A caller-provided ID always owns its occurrence. Server-originated calls
+		// identify their source; retain only the historical no-options local path.
+		const reliableIntentId = opts?.intentId ?? (opts?.source === undefined ? undefined : randomUUID());
 		if (reliableIntentId) {
 			const duplicate = this.reliableIntentById(session, reliableIntentId);
 			if (duplicate || this.reliableIntentWasSettled(session, reliableIntentId)) {
@@ -6732,9 +6734,10 @@ export class SessionManager {
 		const author = resolveAcceptedPromptAuthor(source, opts?.author);
 		session.lastPromptSource = source;
 
-		// Live server steers must carry a durable occurrence before their RPC can
-		// create an in-flight recovery record.
-		const reliableIntentId = opts?.intentId ?? (source !== "user" || session.isCompacting ? randomUUID() : undefined);
+		// Every source-identified live steer carries a durable occurrence before
+		// its RPC can create an in-flight recovery record. The no-options branch is
+		// retained only for historical local callers.
+		const reliableIntentId = opts?.intentId ?? (opts?.source === undefined ? undefined : randomUUID());
 		if (reliableIntentId) {
 			const duplicate = this.reliableIntentById(session, reliableIntentId);
 			if (duplicate || this.reliableIntentWasSettled(session, reliableIntentId)) {
@@ -6777,7 +6780,7 @@ export class SessionManager {
 			);
 			// enqueuePrompt handles its own state-clear + pending-timer cancel +
 			// prefix application; we just route through it with the raw message.
-			return this.enqueuePrompt(sessionId, message, { isSteered: true, source, author });
+			return this.enqueuePrompt(sessionId, message, { isSteered: true, source, author, intentId: reliableIntentId });
 		}
 
 		// Happy path: enqueue then dispatch via the single _dispatchSteer site.
@@ -9105,6 +9108,7 @@ export class SessionManager {
 		suppressTitleGen?: boolean;
 		source?: PromptSource;
 		author?: MessageAuthor;
+		intentId?: string;
 	}): { status: "queued"; queuedId?: string } {
 		const session = this.sessions.get(sessionId);
 		if (!session) return { status: "queued" };
@@ -9112,14 +9116,21 @@ export class SessionManager {
 		const author = resolveAcceptedPromptAuthor(source, opts?.author);
 		session.lastPromptSource = source;
 		const dispatchText = synthesizeAttachmentText(opts?.modelText ?? text, opts?.images, opts?.attachments);
-		const queued = session.promptQueue.enqueue(dispatchText, {
-			images: opts?.images,
-			attachments: opts?.attachments,
-			isSteered: opts?.isSteered,
-			suppressTitleGen: opts?.suppressTitleGen,
-			source,
-			author,
-		});
+		const intentId = opts?.intentId ?? randomUUID();
+		const queued = this.enqueueReliableIntent(session, this.makeReliableIntentRow(
+			session,
+			intentId,
+			dispatchText,
+			opts?.isSteered ? "steer" : "prompt",
+			"next-turn",
+			{
+				images: opts?.images,
+				attachments: opts?.attachments,
+				suppressTitleGen: opts?.suppressTitleGen,
+				source,
+				author,
+			},
+		));
 		this.broadcastQueue(session);
 		return { status: "queued", queuedId: queued.id };
 	}

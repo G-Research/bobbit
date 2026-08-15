@@ -144,6 +144,110 @@ describe("reliable intent dispatch attempt settlement", () => {
 		await dispatch;
 	});
 
+	it("gives a caller-intent-less live user steer one authoritative carrier that exact Pi echo settles", async () => {
+		const ack = barrier<any>();
+		const steer = vi.fn(() => ack.hold());
+		const { manager, session } = useHarness({
+			rpcClient: {
+				steer,
+				prompt: vi.fn(async () => ({ success: true })),
+				getState: vi.fn(async () => ({ success: true, data: {} })),
+			},
+		});
+
+		const dispatch = manager.deliverLiveSteer(session.id, "local live steer", { source: "user" });
+		await ack.entered;
+		const [carrier] = session.inFlightSteerTexts;
+		expect(carrier).toMatchObject({
+			intentId: expect.any(String),
+			attemptId: expect.stringMatching(/^attempt:/),
+			promptId: expect.any(String),
+			state: "dispatching",
+			source: "user",
+		});
+		expect(carrier.promptId).toBe(carrier.intentId);
+		expect(manager.projectDeliveryOutbox(session.id)).toEqual([
+			expect.objectContaining({ id: carrier.intentId, deliveryState: "dispatching" }),
+		]);
+		expect(session.inFlightSteerTexts.some((row: any) => !row.intentId)).toBe(false);
+
+		ack.release({ success: true });
+		await dispatch;
+		const start = manager.prepareVisibleAgentEvent(session, userStart("local live steer", "pi-local-live"));
+		manager.handleAgentLifecycle(session, start);
+		expect(start.deliveryIntentId).toBe(carrier.intentId);
+		const end = manager.prepareVisibleAgentEvent(session, userEnd("local live steer", "pi-local-live"));
+		manager.handleAgentLifecycle(session, end);
+		expect(session.inFlightSteerTexts).toEqual([]);
+		expect(manager.projectDeliveryOutbox(session.id)).toEqual([]);
+	});
+
+	it("keeps same-text local and team steers distinct while deduping a replayed occurrence", async () => {
+		const ack = barrier<any>();
+		const steer = vi.fn(() => ack.hold());
+		const { manager, session } = useHarness({
+			rpcClient: {
+				steer,
+				prompt: vi.fn(async () => ({ success: true })),
+				getState: vi.fn(async () => ({ success: true, data: {} })),
+			},
+		});
+
+		const first = manager.deliverLiveSteer(session.id, "same local-team text", { source: "user" });
+		await ack.entered;
+		const firstId = session.inFlightSteerTexts[0].intentId;
+		const replay = await manager.deliverLiveSteer(session.id, "same local-team text", {
+			source: "user",
+			intentId: firstId,
+		});
+		const second = manager.deliverLiveSteer(session.id, "same local-team text", { source: "agent" });
+		await flushMicrotasks();
+
+		expect(replay).toMatchObject({ duplicate: true, id: firstId });
+		expect(steer).toHaveBeenCalledTimes(1);
+		ack.release({ success: true });
+		await first;
+		await vi.waitFor(() => expect(steer).toHaveBeenCalledTimes(2));
+		expect(session.inFlightSteerTexts.map((row: any) => row.intentId)).toEqual([
+			firstId,
+			expect.any(String),
+		]);
+		expect(session.inFlightSteerTexts[1].intentId).not.toBe(firstId);
+		await second;
+	});
+
+	it("retries a minted local occurrence without collapsing a same-text team steer", async () => {
+		const steer = vi.fn()
+			.mockResolvedValueOnce({ success: false, error: "rejected before start" })
+			.mockResolvedValueOnce({ success: true })
+			.mockResolvedValueOnce({ success: true });
+		const { manager, session } = useHarness({
+			rpcClient: {
+				steer,
+				prompt: vi.fn(async () => ({ success: true })),
+				getState: vi.fn(async () => ({ success: true, data: {} })),
+			},
+		});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await expect(manager.deliverLiveSteer(session.id, "same local-team retry text", { source: "user" }))
+			.rejects.toThrow(/rejected before start/i);
+		const localId = session.promptQueue.peek()?.id;
+		expect(localId).toEqual(expect.any(String));
+		expect(session.promptQueue.peek()).toMatchObject({ id: localId, deliveryState: "failed" });
+
+		await manager.deliverLiveSteer(session.id, "same local-team retry text", { source: "agent" });
+		const teamId = session.inFlightSteerTexts.find((row: any) => row.intentId !== localId)?.intentId;
+		expect(teamId).toEqual(expect.any(String));
+		expect(teamId).not.toBe(localId);
+
+		expect(manager.retryIntent(session.id, localId)).toBe(true);
+		await vi.waitFor(() => expect(steer).toHaveBeenCalledTimes(3));
+		expect(session.inFlightSteerTexts.map((row: any) => row.intentId)).toEqual(
+			expect.arrayContaining([localId, teamId]),
+		);
+	});
+
 	it("collapses a restored stale queue row and unresolved sidecar tuple into one uncertain owner", () => {
 		const intentId = "automatic:restored-ambiguous";
 		const attemptId = "attempt:restored-ambiguous";

@@ -262,6 +262,35 @@ describe("RemoteAgent recovery snapshot delivery", () => {
 		expect(ra._state.messages.map((message: any) => message.deliveryIntentId)).toEqual(["intent-a", "intent-b"]);
 	});
 
+	it("keeps a recovery carrier out of the transcript and clears it when its live Pi echo arrives", async () => {
+		const ra = makeAgent(OPEN);
+		await ra.handleServerMessage({
+			type: "messages",
+			data: [recoveryRow("intent-recovery-live", "attempt-recovery-live", 1)],
+		});
+
+		expect(ra._state.messages).toEqual([]);
+		expect(ra.getQueue()).toEqual([
+			expect.objectContaining({ id: "intent-recovery-live", deliveryState: "dispatching" }),
+		]);
+
+		ra.handleAgentEvent({
+			type: "message_start",
+			message: {
+				id: "pi-recovery-live",
+				role: "user",
+				content: [{ type: "text", text: "same steer" }],
+				deliveryIntentId: "intent-recovery-live",
+				deliveryAttemptId: "attempt-recovery-live",
+			},
+		});
+
+		expect(ra.getQueue()).toEqual([]);
+		expect(ra._state.messages).toEqual([
+			expect.objectContaining({ id: "pi-recovery-live", deliveryIntentId: "intent-recovery-live" }),
+		]);
+	});
+
 	it("keeps hard-abort cancellation visible in both tabs and refuses stale-tab Retry", async () => {
 		const tabs = [makeAgent(OPEN), makeAgent(OPEN)];
 		for (const ra of tabs) {
