@@ -31,7 +31,7 @@ BOBBIT_V2_RETRY_FREE=1 npm run test:unit
 
 The unit configuration consumes that flag and resolves every unit project to zero retries; a qualification record must show zero observed retries. Direct Vitest retry flags are diagnostic only, not qualification authority.
 
-Pull requests receive an additive affected-feedback job with full Git history, an explicit validated PR base, and `--no-cache`. The cross-platform branch job still runs the standard full `npm run test:unit` once, retaining Vitest's normal retry policy, and pushes to the primary branch run the same full job. Result files under `.profiles/test-cache/` are local only and are never uploaded or restored in CI. Browser and E2E gates remain separate authoritative phases.
+Affected testing is local developer feedback only and does not run in CI. Pull requests and pushes to the primary branch run the cross-platform full `npm run test:unit` job with Vitest's normal retry policy. Result files under `.profiles/test-cache/` are local only and are never uploaded or restored in CI. Browser and E2E gates remain separate authoritative phases.
 
 The broader reliability proof may run retry-free coordinators from separate worktrees; see the cross-OS authoring guide.
 

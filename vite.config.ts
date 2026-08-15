@@ -20,6 +20,32 @@ function headquartersDir(): string {
 function headquartersStateDir(): string {
 	return path.join(headquartersDir(), "state");
 }
+
+function normalizeDnsHostname(value: unknown): string | null {
+	if (typeof value !== "string") return null;
+	const hostname = value.trim().toLowerCase().replace(/\.$/, "");
+	if (!hostname || hostname.length > 253 || !hostname.includes(".")) return null;
+	const labels = hostname.split(".");
+	if (labels.some((label) => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) return null;
+	return hostname;
+}
+
+/**
+ * Read only the public deSEC hostname from state. Vite validates HMR WebSocket
+ * Host headers separately from normal HTTPS requests; without this allow-list
+ * a DNS-mounted mobile client receives HTTP 400 and can remain on bundled
+ * dev's "Bundling in progress" fallback forever.
+ */
+export function configuredPublicViteHosts(stateDir = headquartersStateDir()): string[] {
+	try {
+		const raw = JSON.parse(fs.readFileSync(path.join(stateDir, "desec.json"), "utf8")) as { domain?: unknown };
+		const hostname = normalizeDnsHostname(raw.domain);
+		return hostname ? [hostname] : [];
+	} catch {
+		return [];
+	}
+}
+
 /** OS-level server secrets dir (TLS material lives under <secretsDir>/tls). */
 function serverSecretsDir(): string {
 	if (process.env.BOBBIT_SECRETS_DIR) return path.resolve(process.env.BOBBIT_SECRETS_DIR);
@@ -60,6 +86,7 @@ function findNordLynxIp(): string | null {
 const nordMode = process.env.BOBBIT_NORD === "1";
 const host = process.env.VITE_HOST || (nordMode ? findNordLynxIp() || "localhost" : "localhost");
 const proto = host === "localhost" ? "http" : "https";
+const publicViteHosts = configuredPublicViteHosts();
 
 /**
  * Read the gateway URL from .bobbit/state/gateway-url. Called on every
@@ -263,6 +290,25 @@ function blockDangerousGlobs(): Plugin {
 			return null;
 		},
 	};
+}
+
+/**
+ * Tailwind 4.3.3 assumes Vite always supplies `server` to hotUpdate, while
+ * bundled dev intentionally supplies only type/file/modules. Mirror Tailwind's
+ * merged (but unreleased) fix until the next package release lands.
+ * https://github.com/tailwindlabs/tailwindcss/pull/20379
+ */
+function tailwindcssWithBundledDevGuard(): Plugin[] {
+	const plugins = tailwindcss();
+	const generator = plugins.find((plugin) => plugin.name === "@tailwindcss/vite:generate:serve");
+	const hotUpdate = generator?.hotUpdate;
+	if (generator && typeof hotUpdate === "function") {
+		generator.hotUpdate = function guardedTailwindHotUpdate(options) {
+			if (!options.server) return;
+			return hotUpdate.call(this, options);
+		};
+	}
+	return plugins;
 }
 
 /**
@@ -566,7 +612,13 @@ function dynamicGatewayProxy(): Plugin {
 }
 
 export default defineConfig(({ command, mode }) => ({
-	plugins: [tailwindcss(), blockDangerousGlobs(), localhostGuard(), bobbitSwVersion(), dynamicGatewayProxy()],
+	plugins: [
+		tailwindcssWithBundledDevGuard(),
+		blockDangerousGlobs(),
+		localhostGuard(),
+		bobbitSwVersion(),
+		dynamicGatewayProxy(),
+	],
 	// Expose a dev-mode boolean via globalThis so code that needs to gate
 	// dev-only behaviour can read `(globalThis as any).__BOBBIT_DEV__` without
 	// touching `import.meta.env` — important for test fixtures that bundle
@@ -574,8 +626,12 @@ export default defineConfig(({ command, mode }) => ({
 	define: {
 		"globalThis.__BOBBIT_DEV__": JSON.stringify(mode !== "production"),
 	},
-	// Runtime URL expressions are a production-build concern only. The Vite
-	// development UI, HMR client, and source modules remain rooted at `/`.
+	// Bundle the browser graph during development. Bobbit's large eager graph
+	// takes tens of seconds to traverse as one request per source module; Vite's
+	// bundled mode keeps HMR while serving a small set of in-memory chunks.
+	// Production retains its mount-aware runtime URL rewriting instead. The
+	// source-runtime E2E owns an explicit opt-out because it verifies the actual
+	// source module graph rather than the normal bundled development runtime.
 	experimental: command === "build"
 		? {
 			renderBuiltUrl(filename, { hostType }) {
@@ -591,7 +647,9 @@ export default defineConfig(({ command, mode }) => ({
 				return { relative: hostType === "css" };
 			},
 		}
-		: undefined,
+		: process.env.BOBBIT_VITE_SOURCE_GRAPH === "1"
+			? undefined
+			: { bundledDev: true },
 	build: {
 		outDir: "dist/ui",
 		// Emit modern JS — the supported browser matrix (iOS 17+, modern Chrome/Edge/Firefox)
@@ -676,6 +734,10 @@ export default defineConfig(({ command, mode }) => ({
 	},
 	server: {
 		host,
+		// IP literals and localhost are allowed by Vite automatically. DNS-mounted
+		// mobile clients need the configured public hostname explicitly allowed so
+		// the HMR WebSocket upgrade is not rejected with HTTP 400.
+		allowedHosts: publicViteHosts,
 		watch: {
 			// Keep Vite's watcher scoped to source files. Bobbit's runtime writes
 			// heavily under these generated/state directories; watching them causes

@@ -22,22 +22,8 @@ const ANNOTATION_STORE_SRC = path.resolve("src/ui/components/review/AnnotationSt
 const PANEL_TAB_SELECTOR = ".goal-tab-pill";
 const GOAL_TAB_RE = /^Goal( Proposal)?$/i;
 const PREVIEW_TAB_RE = /\.html(?:\s*\(v\d+\))?$/i;
-const REVIEW_DOCS = [
-	{ title: "Document A", markdown: "# Document A\n\nFirst document content." },
-	{ title: "Document B", markdown: "# Document B\n\nSecond document content." },
-	{ title: "Document C", markdown: "# Document C\n\nThird document content." },
-] as const;
-
 function hashOf(char: string): string {
 	return char.repeat(64);
-}
-
-function reviewTabRe(title: string): RegExp {
-	return new RegExp(`^(Review:\\s*)?${escapeRegExp(title)}$`, "i");
-}
-
-function escapeRegExp(value: string): string {
-	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 test.beforeAll(() => {
@@ -184,11 +170,6 @@ async function expectGoalProposalAccessible(page: Page, errorPrefix: string): Pr
 	await expect(page.locator('[data-panel="goal-proposal"] input[placeholder="Goal title"]').first(), `${errorPrefix}: goal title input`).toHaveValue("Fixture Dynamic Goal", { timeout: 10_000 });
 }
 
-async function expectReviewDocumentAccessible(page: Page, title: string, body: string, errorPrefix: string): Promise<void> {
-	await selectTopLevelTab(page, reviewTabRe(title), `${errorPrefix}: review tab ${title} should be selectable`);
-	await expect(page.locator("review-document").getByText(body).first(), `${errorPrefix}: review body for ${title}`).toBeVisible({ timeout: 10_000 });
-}
-
 async function setGoalProposal(page: Page): Promise<void> {
 	await page.evaluate(() => (window as any).__setDynamicGoalProposal({
 		title: "Fixture Dynamic Goal",
@@ -203,10 +184,6 @@ async function setLivePreview(page: Page, entry: string, contentHash: string, bo
 
 async function setHistoricalPreviews(page: Page, sessionId: string, previews: Array<{ toolId: string; entry: string; bodyText: string; contentHash: string }>): Promise<void> {
 	await page.evaluate(({ sessionId, previews }) => (window as any).__setDynamicHistoricalPreviews(sessionId, previews), { sessionId, previews });
-}
-
-async function setReviewDocs(page: Page, docs: readonly { title: string; markdown: string }[]): Promise<void> {
-	await page.evaluate((docs) => (window as any).__setDynamicReviewDocs(docs), docs);
 }
 
 async function visiblePreviewTabPresentations(page: Page): Promise<Array<{ text: string; tooltip: string; dataTitle: string; id: string }>> {
@@ -226,56 +203,6 @@ async function visiblePreviewTabPresentations(page: Page): Promise<Array<{ text:
 			};
 		})
 		.filter(Boolean) as Array<{ text: string; tooltip: string; dataTitle: string; id: string }>);
-}
-
-async function mobileTabBarDiagnostics(page: Page): Promise<{ labels: string[]; scrollWidth: number; clientWidth: number; hasHorizontalAccess: boolean; reason: string }> {
-	return page.evaluate(() => {
-		const normalize = (value: string | null | undefined) => (value || "").replace(/\s+/g, " ").trim();
-		const bars = [...document.querySelectorAll(".goal-tab-bar")].map((bar) => {
-			const labels = [...bar.querySelectorAll(".goal-tab-pill")].map((button) => normalize(button.getAttribute("title") || button.textContent));
-			const hasGoal = labels.some((label) => /^Goal( Proposal)?$/i.test(label));
-			const hasPreview = labels.some((label) => /\.html(?:\s*\(v\d+\))?$/i.test(label));
-			const reviewCount = labels.filter((label) => /^(Review:\s*)?Document [ABC]$/i.test(label)).length;
-			return {
-				labels,
-				scrollWidth: (bar as HTMLElement).scrollWidth,
-				clientWidth: (bar as HTMLElement).clientWidth,
-				matchesMixedTabs: hasGoal && hasPreview && reviewCount >= 3,
-			};
-		});
-		const selected = bars.find((bar) => bar.matchesMixedTabs) ?? bars.sort((a, b) => b.labels.length - a.labels.length)[0];
-		if (!selected) return { labels: [], scrollWidth: 0, clientWidth: 0, hasHorizontalAccess: false, reason: "no .goal-tab-bar found" };
-		return {
-			labels: selected.labels,
-			scrollWidth: selected.scrollWidth,
-			clientWidth: selected.clientWidth,
-			hasHorizontalAccess: selected.matchesMixedTabs && selected.scrollWidth > selected.clientWidth + 1,
-			reason: selected.matchesMixedTabs ? "mixed tab bar selected" : "no tab bar contained the full mixed tab set",
-		};
-	});
-}
-
-async function mobileGoalFormTopGap(page: Page): Promise<{ ready: boolean; gap: number; headerHeight: number; formTop: number; headerBottom: number }> {
-	return page.evaluate(() => {
-		const header = document.getElementById("app-header");
-		const forms = [...document.querySelectorAll(
-			'[data-panel="goal-proposal"] > .overflow-y-auto, .goal-preview-panel[data-panel-tab-id] > .overflow-y-auto',
-		)] as HTMLElement[];
-		const form = forms.find((el) => {
-			const rect = el.getBoundingClientRect();
-			return rect.width > 0 && rect.height > 0 && rect.right > 0 && rect.left < window.innerWidth;
-		}) ?? null;
-		if (!header || !form) return { ready: false, gap: 9999, headerHeight: 0, formTop: 0, headerBottom: 0 };
-		const headerRect = header.getBoundingClientRect();
-		const formRect = form.getBoundingClientRect();
-		return {
-			ready: true,
-			gap: Math.round(formRect.top - headerRect.bottom),
-			headerHeight: Math.round(headerRect.height),
-			formTop: Math.round(formRect.top),
-			headerBottom: Math.round(headerRect.bottom),
-		};
-	});
 }
 
 test.describe("Dynamic panel workspace lightweight fixture", () => {
@@ -337,85 +264,6 @@ test.describe("Dynamic panel workspace lightweight fixture", () => {
 		await expectPreviewEntry(page, "multipreview-a.html", hashOf("a"), "DYNAMIC_CHAT_TABS_MULTIPREVIEW_BUG: reopened first preview");
 	});
 
-	test("per-session workspaces isolate historical preview and review tabs", async ({ page }) => {
-		const { a, b } = await sessions(page);
-		await setHistoricalPreviews(page, a, [
-			{ toolId: "session-a-preview-a", entry: "session-a-preview-a.html", bodyText: "Session A Preview A Content", contentHash: hashOf("c") },
-			{ toolId: "session-a-preview-b", entry: "session-a-preview-b.html", bodyText: "Session A Preview B Content", contentHash: hashOf("d") },
-		]);
-		await page.evaluate(({ sessionId, docs }) => (window as any).__setDynamicReviewDocsForSession(sessionId, docs), {
-			sessionId: b,
-			docs: [{ title: "Test Document", markdown: "# Test Document\n\nSome important text" }],
-		});
-
-		await page.evaluate((sessionId) => (window as any).__selectDynamicWorkspaceSession(sessionId), a);
-		await waitForTopLevelTabCounts(page, [{ name: "HTML Preview", match: PREVIEW_TAB_RE, min: 2 }], "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG: session A previews");
-		await expectPreviewEntry(page, "session-a-preview-a.html", hashOf("c"), "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG: session A first preview settled");
-		expect((await visiblePanelTabLabels(page)).some((label) => reviewTabRe("Test Document").test(label))).toBe(false);
-
-		await page.evaluate((sessionId) => (window as any).__selectDynamicWorkspaceSession(sessionId), b);
-		await expect.poll(async () => (await visiblePanelTabLabels(page)).filter((label) => PREVIEW_TAB_RE.test(label)).length, {
-			timeout: 5_000,
-			message: "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG: session B must not inherit session A preview tabs",
-		}).toBe(0);
-		await expectReviewDocumentAccessible(page, "Test Document", "Some important text", "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG: session B review");
-
-		await page.evaluate((sessionId) => (window as any).__selectDynamicWorkspaceSession(sessionId), a);
-		await waitForTopLevelTabCounts(page, [{ name: "HTML Preview", match: PREVIEW_TAB_RE, min: 2 }], "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG: switch back to session A");
-		await expectPreviewEntry(page, "session-a-preview-a.html", hashOf("c"), "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG: restored session A first preview settled");
-		expect((await visiblePanelTabLabels(page)).some((label) => reviewTabRe("Test Document").test(label))).toBe(false);
-
-		await page.evaluate((sessionId) => (window as any).__selectDynamicWorkspaceSession(sessionId), b);
-		await expectReviewDocumentAccessible(page, "Test Document", "Some important text", "DYNAMIC_CHAT_TABS_SESSION_ISOLATION_BUG: switch back to session B");
-	});
-
-	test("duplicate review titles use distinct document-id tabs", async ({ page }) => {
-		await page.evaluate(() => {
-			(window as any).__openDynamicReviewDoc({ documentId: "review-doc:dup:a", title: "Duplicate Review", markdown: "# Duplicate Review\n\nFirst duplicate body." });
-			(window as any).__openDynamicReviewDoc({ documentId: "review-doc:dup:b", title: "Duplicate Review", markdown: "# Duplicate Review\n\nSecond duplicate body." });
-		});
-		await expect.poll(async () => (await visiblePanelTabs(page)).filter((tab) => tab.kind === "review" && /Duplicate Review/.test(tab.label)).length, {
-			timeout: 5_000,
-			message: "DYNAMIC_CHAT_TABS_DUPLICATE_REVIEW_TITLE_BUG: duplicate titles should render as distinct top-level tabs",
-		}).toBe(2);
-		await clickTopLevelTabById(page, "review:review-doc%3Adup%3Aa", "DYNAMIC_CHAT_TABS_DUPLICATE_REVIEW_TITLE_BUG: first duplicate");
-		await expect(page.locator("review-document").getByText("First duplicate body.").first()).toBeVisible({ timeout: 5_000 });
-		await clickTopLevelTabById(page, "review:review-doc%3Adup%3Ab", "DYNAMIC_CHAT_TABS_DUPLICATE_REVIEW_TITLE_BUG: second duplicate");
-		await expect(page.locator("review-document").getByText("Second duplicate body.").first()).toBeVisible({ timeout: 5_000 });
-	});
-
-	test("review document titles with reserved characters stay selectable after close and reopen", async ({ page }) => {
-		const reservedTitle = "Doc / A?x#y%";
-		await setReviewDocs(page, [
-			{ title: reservedTitle, markdown: `# ${reservedTitle}\n\nReserved title body.` },
-			{ title: "Plain Doc", markdown: "# Plain Doc\n\nPlain body." },
-		]);
-
-		await waitForTopLevelTabCounts(
-			page,
-			[
-				{ name: "Reserved review", match: reviewTabRe(reservedTitle), min: 1 },
-				{ name: "Plain review", match: reviewTabRe("Plain Doc"), min: 1 },
-			],
-			"DYNAMIC_CHAT_TABS_REVIEW_RESERVED_BUG",
-		);
-		await expectReviewDocumentAccessible(page, reservedTitle, "Reserved title body.", "DYNAMIC_CHAT_TABS_REVIEW_RESERVED_BUG");
-		await expectReviewDocumentAccessible(page, "Plain Doc", "Plain body.", "DYNAMIC_CHAT_TABS_REVIEW_RESERVED_BUG");
-
-		await expectReviewDocumentAccessible(page, reservedTitle, "Reserved title body.", "DYNAMIC_CHAT_TABS_REVIEW_RESERVED_BUG: before close");
-		await page.locator("review-pane button.review-tab", { hasText: reservedTitle }).locator(".review-tab-close").click();
-		await expect.poll(async () => (await visiblePanelTabLabels(page)).filter((label) => reviewTabRe(reservedTitle).test(label)).length, {
-			timeout: 5_000,
-			message: "DYNAMIC_CHAT_TABS_REVIEW_RESERVED_BUG: closing the reserved title should remove its top-level tab",
-		}).toBe(0);
-
-		await page.evaluate((doc) => (window as any).__openDynamicReviewDoc(doc), {
-			title: reservedTitle,
-			markdown: `# ${reservedTitle}\n\nReserved title body reopened.`,
-		});
-		await waitForTopLevelTabCounts(page, [{ name: "Reserved review", match: reviewTabRe(reservedTitle), min: 1 }], "DYNAMIC_CHAT_TABS_REVIEW_RESERVED_BUG: reopened");
-		await expectReviewDocumentAccessible(page, reservedTitle, "Reserved title body reopened.", "DYNAMIC_CHAT_TABS_REVIEW_RESERVED_BUG: reopened");
-	});
 
 	test("different-content historical v3 previews remain separately restorable across reload", async ({ page }) => {
 		const { a } = await sessions(page);
@@ -464,68 +312,4 @@ test.describe("Dynamic panel workspace lightweight fixture", () => {
 		await expectPreviewEntry(page, "v3-b.html", hashOf("3"), "DYNAMIC_CHAT_TABS_V3_REOPEN_BUG: preview B");
 	});
 
-	test("multiple review documents coexist as top-level tabs with a proposal and preview", async ({ page }) => {
-		await setGoalProposal(page);
-		await setLivePreview(page, "mixed-preview.html", hashOf("5"), "Mixed Preview Content");
-		await setReviewDocs(page, REVIEW_DOCS);
-
-		await waitForTopLevelTabCounts(
-			page,
-			[
-				{ name: "Goal proposal", match: GOAL_TAB_RE, min: 1 },
-				{ name: "HTML Preview", match: PREVIEW_TAB_RE, min: 1 },
-				...REVIEW_DOCS.map((doc) => ({ name: `Review ${doc.title}`, match: reviewTabRe(doc.title), min: 1 })),
-			],
-			"DYNAMIC_CHAT_TABS_REVIEW_MIX_BUG",
-		);
-
-		await expectGoalProposalAccessible(page, "DYNAMIC_CHAT_TABS_REVIEW_MIX_BUG");
-		await selectTopLevelTab(page, PREVIEW_TAB_RE, "DYNAMIC_CHAT_TABS_REVIEW_MIX_BUG: preview");
-		await expectPreviewEntry(page, "mixed-preview.html", hashOf("5"), "DYNAMIC_CHAT_TABS_REVIEW_MIX_BUG: preview");
-		for (const doc of REVIEW_DOCS) {
-			await expectReviewDocumentAccessible(page, doc.title, doc.markdown.split("\n\n")[1], "DYNAMIC_CHAT_TABS_REVIEW_MIX_BUG");
-		}
-	});
-
-	test("mobile mixed proposal, review, and preview tabs stay horizontally accessible without double-padding", async ({ page }) => {
-		await page.setViewportSize({ width: 360, height: 740 });
-		await loadFixture(page);
-		await setGoalProposal(page);
-		await setLivePreview(page, "mobile-mixed-preview.html", hashOf("6"), "Mobile Mixed Preview Content");
-		await setReviewDocs(page, REVIEW_DOCS);
-
-		await waitForTopLevelTabCounts(
-			page,
-			[
-				{ name: "Goal proposal", match: GOAL_TAB_RE, min: 1 },
-				{ name: "HTML Preview", match: PREVIEW_TAB_RE, min: 1 },
-				...REVIEW_DOCS.map((doc) => ({ name: `Review ${doc.title}`, match: reviewTabRe(doc.title), min: 1 })),
-			],
-			"DYNAMIC_CHAT_TABS_MOBILE_BUG",
-		);
-		try {
-			await expect.poll(async () => (await mobileTabBarDiagnostics(page)).hasHorizontalAccess, {
-				timeout: 5_000,
-				message: "DYNAMIC_CHAT_TABS_MOBILE_BUG: mobile mixed tabs should be reachable through horizontal tab-bar overflow",
-			}).toBe(true);
-		} catch {
-			throw new Error(`DYNAMIC_CHAT_TABS_MOBILE_BUG: diagnostics=${JSON.stringify(await mobileTabBarDiagnostics(page))}`);
-		}
-
-		await expectGoalProposalAccessible(page, "DYNAMIC_CHAT_TABS_MOBILE_BUG");
-		await expect.poll(async () => (await mobileGoalFormTopGap(page)).ready, {
-			timeout: 5_000,
-			message: "DYNAMIC_CHAT_TABS_MOBILE_BUG: mobile goal proposal form should be mounted",
-		}).toBe(true);
-		await expect.poll(async () => (await mobileGoalFormTopGap(page)).gap, {
-			timeout: 5_000,
-			message: "DYNAMIC_CHAT_TABS_MOBILE_BUG: mobile goal proposal form should not be double-padded below the fixed header",
-		}).toBeLessThan(48);
-		expect((await mobileGoalFormTopGap(page)).gap).toBeGreaterThanOrEqual(-2);
-		await selectTopLevelTab(page, PREVIEW_TAB_RE, "DYNAMIC_CHAT_TABS_MOBILE_BUG: preview");
-		await expectPreviewEntry(page, "mobile-mixed-preview.html", hashOf("6"), "DYNAMIC_CHAT_TABS_MOBILE_BUG: preview");
-		for (const doc of REVIEW_DOCS) {
-			await expectReviewDocumentAccessible(page, doc.title, doc.markdown.split("\n\n")[1], "DYNAMIC_CHAT_TABS_MOBILE_BUG");
-		}
-	});
 });

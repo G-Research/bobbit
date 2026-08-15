@@ -8,6 +8,10 @@ import {
 import {
 	addAnnotation,
 	clearAllAnnotations,
+	clearReviewTombstone,
+	getReviewTombstone,
+	isReviewSubmitted,
+	setReviewTombstone,
 } from "../../src/ui/components/review/AnnotationStore.js";
 
 const MOUNTED_SESSION = "mounted-session";
@@ -43,6 +47,31 @@ afterEach(async () => {
 	localStorage.clear();
 	vi.restoreAllMocks();
 	vi.unstubAllGlobals();
+});
+
+describe("AnnotationStore per-review tombstones", () => {
+	it("persists and clears exact review identities without mutating siblings", async () => {
+		commitGatewayConnection("https://ui.example/team/bobbit", "real-token");
+		await setReviewTombstone(MOUNTED_SESSION, "review/a", "submitted");
+		await setReviewTombstone(MOUNTED_SESSION, "review-b", "closed");
+
+		expect(isReviewSubmitted(MOUNTED_SESSION, "review/a")).toBe(true);
+		expect(getReviewTombstone(MOUNTED_SESSION, "review-b")).toBe("closed");
+		expect(fetchMock.mock.calls.slice(0, 2).map((call) => [call[0], call[1]?.method])).toEqual([
+			["https://ui.example/team/bobbit/api/sessions/mounted-session/review/tombstones/review%2Fa", "PUT"],
+			["https://ui.example/team/bobbit/api/sessions/mounted-session/review/tombstones/review-b", "PUT"],
+		]);
+
+		await clearReviewTombstone(MOUNTED_SESSION, "review/a");
+		expect(getReviewTombstone(MOUNTED_SESSION, "review/a")).toBeUndefined();
+		expect(getReviewTombstone(MOUNTED_SESSION, "review-b")).toBe("closed");
+		expect(fetchMock.mock.calls[2]?.[0]).toBe(
+			"https://ui.example/team/bobbit/api/sessions/mounted-session/review/tombstones/review%2Fa",
+		);
+		expect(fetchMock.mock.calls[2]?.[1]?.method).toBe("DELETE");
+
+		await clearReviewTombstone(MOUNTED_SESSION, "review-b");
+	});
 });
 
 describe("AnnotationStore unload beacon", () => {

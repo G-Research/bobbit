@@ -45,6 +45,7 @@ Treat every new branch, state owner, transformation, API, or abstraction as defe
 - **New tests land in `tests2/`** (or the guard fails). `*.test.ts`⇒Vitest (`core`/`dom`/`integration`, with explicit isolated exceptions); `*.spec.ts`⇒Playwright (`tests2/browser`). Register in `tests2/tests-map.json`. Three sequential gate phases: `test:unit` → `test:browser` → `test:e2e`; worktree/Docker/MCP/restart coverage belongs to E2E or `test:manual`.
 - **Test isolation** — every automated coordinator owns its run root; qualify retry-free. See [docs/testing-v2/cross-os-test-authoring.md](docs/testing-v2/cross-os-test-authoring.md).
 - Isolate only via the harness temp dir — never touch `.bobbit/`. **Never bg-server from bash** — use `bash_bg`. Run tests before committing.
+- **Never junction/symlink a worktree's `node_modules` into a shared or primary tree.** See [docs/testing-v2/node-modules-corruption-rca.md](docs/testing-v2/node-modules-corruption-rca.md).
 - Every user-facing feature needs a `tests2/browser` journey (nav, happy path, reload, cleanup). See [docs/testing-v2/](docs/testing-v2/).
 
 ## Git conventions

@@ -402,7 +402,7 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		expect(packMeta, "the built-in pr-walkthrough pack must be resolved with NO install once enabled").toBeTruthy();
 		expect(packMeta?.panels?.some((p) => p.id === PANEL_ID)).toBe(true);
 		expect(packMeta?.routeNames).toEqual(expect.arrayContaining(["bundle", "publish"]));
-		expect(packMeta?.entrypoints?.some((e) => e.kind === "session-menu" && e.label === "PR Walkthrough")).toBe(true);
+		expect(packMeta?.entrypoints?.some((e) => e.kind === "session-menu" && e.label === "PR walkthrough")).toBe(true);
 		expect((packMeta?.entrypoints ?? []).map((e) => e.listName)).not.toEqual(expect.arrayContaining(["pr-walkthrough-git-widget", "pr-walkthrough-palette"]));
 		const builtinRow = (await listInstalled()).find((p) => p.packName === PACK && p.builtin);
 		expect(builtinRow, "the built-in pack must appear in the Installed list flagged builtin").toBeTruthy();
@@ -462,7 +462,7 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		const metaAfterToolDisable = (await listContributions()).find((p) => p.packId === PACK);
 		expect(metaAfterToolDisable?.panels?.some((p) => p.id === PANEL_ID), "tool disable must not remove the pack panel").toBe(true);
 		expect(metaAfterToolDisable?.routeNames, "tool disable must not remove pack routes").toEqual(expect.arrayContaining(["bundle", "publish"]));
-		expect(metaAfterToolDisable?.entrypoints?.some((e) => e.kind === "session-menu" && e.label === "PR Walkthrough"), "tool disable must not remove entrypoints").toBe(true);
+		expect(metaAfterToolDisable?.entrypoints?.some((e) => e.kind === "session-menu" && e.label === "PR walkthrough"), "tool disable must not remove entrypoints").toBe(true);
 
 		put = page.waitForResponse((r) => r.url().includes("/api/marketplace/pack-activation") && r.request().method() === "PUT");
 		await toolToggle.click();
@@ -553,7 +553,7 @@ test.describe("Built-in first-party pack — pr-walkthrough served by the built-
 		await expectRuntimePrwTools(PRW_TOOL_NAMES);
 		await expect.poll(async () => {
 			const meta = (await listContributions()).find((p) => p.packId === PACK);
-			return meta?.entrypoints?.some((e) => e.kind === "session-menu" && e.label === "PR Walkthrough") ? "ok" : "no";
+			return meta?.entrypoints?.some((e) => e.kind === "session-menu" && e.label === "PR walkthrough") ? "ok" : "no";
 		}, { timeout: 10_000 }).toBe("ok");
 		// The deep-link resolves again from a CLEAN context (re-open the session, then
 		// navigate the bare deep-link → the panel mounts via the re-registered route).
@@ -670,7 +670,7 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 		await expect(trigger, "chat header session-actions menu must be available").toBeVisible({ timeout: 10_000 });
 		await trigger.click();
 		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
-		const launcher = page.locator('sidebar-actions-popover [role="menuitem"]', { hasText: "PR Walkthrough" }).first();
+		const launcher = page.locator('sidebar-actions-popover [role="menuitem"]', { hasText: "PR walkthrough" }).first();
 		await expect(launcher, "the PR Walkthrough launcher must render in the session menu").toBeVisible({ timeout: 10_000 });
 
 		const runResp = page.waitForResponse(
@@ -710,7 +710,7 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 		await expect(trigger, "inactive row session-actions trigger must be available").toBeVisible({ timeout: 10_000 });
 		await trigger.click();
 		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
-		const launcher = page.locator('sidebar-actions-popover [role="menuitem"]', { hasText: "PR Walkthrough" }).first();
+		const launcher = page.locator('sidebar-actions-popover [role="menuitem"]', { hasText: "PR walkthrough" }).first();
 		await expect(launcher, "the PR Walkthrough launcher must render for inactive rows").toBeVisible({ timeout: 10_000 });
 
 		const runResp = page.waitForResponse(

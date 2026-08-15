@@ -1,6 +1,6 @@
 name: review_close
-description: "Close one tab by title or all tabs"
-summary: "Close review document tabs"
+description: "Close matching Markdown reviews or all reviews"
+summary: "Close matching Markdown reviews or all reviews"
 params: [title?]
 provider:
   type: bobbit-extension
@@ -10,8 +10,10 @@ detail_docs: |-
   ## Parameters
   | Name | Type | Required | Description |
   |------|------|----------|-------------|
-  | title | string | No | Close specific tab. Omit to close all tabs. |
-  
+  | title | string | No | Close every review whose review title matches, including the whole review and all its files. Omit to close all reviews in the calling session. |
+
+  If review titles are duplicated, every match closes. Use distinct titles when a later close must select only one review.
+
   ## Examples
   ```
   review_close(title="Architecture")

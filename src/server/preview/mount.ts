@@ -30,6 +30,7 @@ import {
 	type AsyncTreeStats,
 } from "../agent/bounded-async-work.js";
 import { realClock, type Clock, type TimerHandle } from "../gateway-deps.js";
+import { isValidPreviewEntry } from "../../shared/preview-entry-codec.js";
 
 const VALID_SESSION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const HASH_READ_BUFFER_BYTES = 64 * 1024;
@@ -134,10 +135,7 @@ function validateSessionId(sessionId: string): void {
 }
 
 function validateEntry(entry: string): string {
-	if (!entry || typeof entry !== "string") throw new PreviewMountError(400, "Invalid entry");
-	if (entry.includes("\0") || entry === "." || entry === ".." || entry.includes("/") || entry.includes("\\") || entry.includes("..")) {
-		throw new PreviewMountError(400, "Invalid entry");
-	}
+	if (!isValidPreviewEntry(entry)) throw new PreviewMountError(400, "Invalid entry");
 	return entry;
 }
 

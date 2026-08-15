@@ -187,7 +187,7 @@ describe("worktree-sweeper.sweepOrphanedWorktrees", () => {
 		return execFileSync("git", args, { cwd: repo, encoding: "utf8" });
 	}
 
-	it("removes archived-owned orphan worktrees without deleting durable archived branches", async () => {
+	it("preserves archived-owned orphan worktrees and durable archived branches", async () => {
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "sweeper-archived-branch-"));
 		const repo = path.join(tmp, "repo");
 		const wt = path.join(tmp, "repo-wt", "session-arch");
@@ -208,8 +208,10 @@ describe("worktree-sweeper.sweepOrphanedWorktrees", () => {
 				staff: [],
 			});
 
-			assert.equal(result.cleaned, 1);
-			assert.equal(fs.existsSync(wt), false, "archived worktree should be removed");
+			assert.equal(result.cleaned, 0);
+			assert.equal(result.repaired, 0);
+			assert.equal(fs.existsSync(wt), true, "archived worktree must remain");
+			assert.equal(git(repo, ["worktree", "list", "--porcelain"]).replaceAll("\\", "/").includes(wt.replaceAll("\\", "/")), true, "archived worktree metadata must remain");
 			assert.doesNotThrow(() => git(repo, ["show-ref", "--verify", "--quiet", "refs/heads/session/arch"]), "durable archived branch must remain");
 		} finally {
 			fs.rmSync(tmp, { recursive: true, force: true });

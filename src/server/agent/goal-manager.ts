@@ -103,8 +103,12 @@ export function deriveNestingFields(
 export class GoalManager {
 	private store: GoalStore;
 	private workflowStore?: WorkflowStore;
-	/** Track in-flight worktree setups to prevent concurrent calls for the same goal. */
-	private _setupsInFlight = new Set<string>();
+	/**
+	 * Authoritative per-goal setup transactions. Initial setup and retry callers
+	 * join the same promise, so no caller can observe an in-progress setup as a
+	 * reason to start a team early.
+	 */
+	private _setupsInFlight = new Map<string, Promise<void>>();
 	/**
 	 * Resolver that looks up the worktree pool for this goal's project.
 	 * Wired by the server at startup once SessionManager owns the pools.
@@ -216,10 +220,12 @@ export class GoalManager {
 		delete live.repoWorktrees;
 		delete live.repoPath;
 		delete live.branch;
-		delete live.setupError;
 		live.cwd = goal.projectId && this.projectRootResolver
 			? this.projectRootResolver(goal.projectId) ?? live.cwd
 			: live.cwd;
+		// Field removals and ready are published in one whole-record update. GoalStore
+		// enforces the canonical setup transition invariant for `put`, including
+		// removal of a stale active setupError.
 		live.setupStatus = "ready";
 		this.store.put(live);
 	}
@@ -244,13 +250,14 @@ export class GoalManager {
 
 	/**
 	 * Boot migration: legacy `paused: true` goals whose deps are still unmet
-	 * become `state: 'blocked', paused: false`. Operator-paused goals (no
-	 * dependsOnPlanIds or all resolved) keep `paused: true`.
+	 * become `state: 'blocked', paused: false`. Explicit operator pauses carry
+	 * provenance and are preserved regardless of dependency state. Records without
+	 * provenance retain the prior inference for backwards compatibility.
 	 */
 	private _migratePausedDepsToBlocked(): void {
 		const all = this.store.getAll();
 		for (const goal of all) {
-			if (!goal.paused || goal.archived) continue;
+			if (!goal.paused || goal.archived || goal.pauseSource === "operator") continue;
 			const deps = goal.dependsOnPlanIds;
 			if (!deps || deps.length === 0) continue;
 			const allResolved = deps.every(depPid => {
@@ -259,7 +266,7 @@ export class GoalManager {
 					g.spawnedFromPlanId === depPid);
 				return !!depSib && depSib.state === "complete";
 			});
-			if (allResolved) continue; // operator-paused — preserve
+			if (allResolved) continue;
 			this.store.update(goal.id, { state: "blocked", paused: false });
 			console.log(`[goal-manager] Migrated goal ${goal.id} ("${goal.title}") from paused=true to state='blocked' (unresolved deps)`);
 		}
@@ -305,12 +312,12 @@ export class GoalManager {
 	}
 
 	/**
-	 * On startup, scan for goals stuck in setupStatus === "preparing"
-	 * and mark them as "error" (setup was interrupted by server restart).
+	 * On startup, scan for goals stuck in setupStatus === "preparing" or
+	 * "retrying" and mark them as "error" (setup was interrupted by restart).
 	 */
 	private _recoverStuckSetups(): void {
 		for (const goal of this.store.getAll()) {
-			if (goal.setupStatus === "preparing") {
+			if (goal.setupStatus === "preparing" || goal.setupStatus === "retrying") {
 				if (isHeadquartersProject(goal.projectId)) {
 					this.forceHeadquartersNoWorktree(goal);
 					continue;
@@ -319,10 +326,7 @@ export class GoalManager {
 				// setupStatus='preparing' while waiting for deps to merge.
 				// Their setup will begin when integrate-child auto-unblocks them.
 				if (goal.state === "blocked") continue;
-				this.store.update(goal.id, {
-					setupStatus: "error",
-					setupError: "Setup interrupted by server restart",
-				});
+				this.store.transitionSetup(goal.id, "error", "Setup interrupted by server restart");
 				console.warn(`[goal-manager] Marked goal "${goal.title}" (${goal.id}) as error — setup was interrupted by server restart`);
 			}
 		}
@@ -499,10 +503,27 @@ export class GoalManager {
 	}
 
 	/**
-	 * Async worktree setup — called after createGoal() returns.
-	 * Retries once on failure. Updates setupStatus accordingly.
+	 * Async worktree setup — called after createGoal() returns. Every caller for
+	 * a goal joins the same transaction, including retry callers, and receives
+	 * its real success/failure rather than a premature no-op.
 	 */
-	async setupWorktree(goalId: string): Promise<void> {
+	setupWorktree(goalId: string): Promise<void> {
+		const active = this._setupsInFlight.get(goalId);
+		if (active) return active;
+
+		// Install the promise before executing setup. Promise.resolve().then()
+		// defers execution one microtask so a same-turn duplicate joins even if a
+		// setup implementation performs synchronous work before its first await.
+		const setup = Promise.resolve().then(() => this._runSetupWorktree(goalId));
+		this._setupsInFlight.set(goalId, setup);
+		void setup.then(
+			() => { if (this._setupsInFlight.get(goalId) === setup) this._setupsInFlight.delete(goalId); },
+			() => { if (this._setupsInFlight.get(goalId) === setup) this._setupsInFlight.delete(goalId); },
+		);
+		return setup;
+	}
+
+	private async _runSetupWorktree(goalId: string): Promise<void> {
 		const goal = this.store.get(goalId);
 		if (!goal) {
 			throw new Error(`Goal ${goalId} not found or missing repo/branch info`);
@@ -511,20 +532,22 @@ export class GoalManager {
 			this.forceHeadquartersNoWorktree(goal);
 			return;
 		}
-		if (!goal.repoPath || !goal.branch) {
-			throw new Error(`Goal ${goalId} not found or missing repo/branch info`);
+		if (goal.setupStatus === "ready") return;
+		if (goal.setupStatus === "error") {
+			throw new Error(`Goal ${goalId} setup is in error; retry it before starting a team`);
 		}
-
-		// Prevent concurrent setup calls for the same goal
-		if (this._setupsInFlight.has(goalId)) {
-			return;
-		}
-		this._setupsInFlight.add(goalId);
 
 		try {
+			if (!goal.repoPath || !goal.branch) {
+				throw new Error(`Goal ${goalId} not found or missing repo/branch info`);
+			}
 			await this._doSetupWorktree(goal);
-		} finally {
-			this._setupsInFlight.delete(goalId);
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			// A setup transaction owns the active diagnostic. This overwrites any
+			// stale failure only when the current transaction actually failed.
+			await this.store.transitionSetupStrict(goalId, "error", message || "Worktree setup failed");
+			throw err;
 		}
 	}
 
@@ -565,12 +588,13 @@ export class GoalManager {
 		// land on every worktree in the subtree. Non-fatal — never blocks start.
 		await this._dispatchGoalProvisioned(goal, provisioned.worktreePath, provisioned.cwd);
 
-		this.store.update(goal.id, {
+		// This is the sole ready publication for a provisioned worktree. Strict
+		// persistence makes the verified state durable before a caller may start a
+		// Team Lead, and transitionSetupStrict atomically removes any stale error.
+		await this.store.transitionSetupStrict(goal.id, "ready", {
 			worktreePath: provisioned.worktreePath,
 			cwd: provisioned.cwd,
 			repoWorktrees: provisioned.repoWorktrees,
-			setupStatus: "ready",
-			setupError: undefined,
 		});
 		console.log(`[goal-manager] Worktree ready for goal "${goal.title}": ${provisioned.worktreePath} (branch: ${goal.branch})`);
 	}
@@ -593,7 +617,8 @@ export class GoalManager {
 	 * creation. Returns the final paths WITHOUT flipping setupStatus to "ready"
 	 * (the caller does that after the goalProvisioned hook). Returns "no-worktree" when
 	 * no worktree-able repo remained (already restored to the no-worktree
-	 * state). Throws after recording setupStatus:"error" when all attempts fail.
+	 * state). Throws after all attempts fail; the authoritative transaction
+	 * records setupStatus:"error" at its outer boundary.
 	 */
 	private async _provisionGoalWorktree(goal: PersistedGoal, preliminaryOffset: string): Promise<ProvisionedWorktree | "no-worktree"> {
 		if (isHeadquartersProject(goal.projectId)) {
@@ -729,11 +754,8 @@ export class GoalManager {
 			}
 		}
 
-		// Both attempts failed
-		this.store.update(goal.id, {
-			setupStatus: "error",
-			setupError: String(lastError),
-		});
+		// Both attempts failed. `_runSetupWorktree` records the single current
+		// diagnostic so all failure paths use the same canonical transition.
 		throw lastError;
 	}
 
@@ -762,7 +784,7 @@ export class GoalManager {
 			delete live.worktreePath;
 			delete live.repoWorktrees;
 		}
-		this.store.update(goal.id, { cwd: originalCwd, setupStatus: "ready", setupError: undefined });
+		this.store.transitionSetup(goal.id, "ready", { cwd: originalCwd });
 	}
 
 	/**
@@ -770,26 +792,30 @@ export class GoalManager {
 	 * Uses a callback to avoid circular dependency with TeamManager.
 	 */
 	async setupWorktreeAndStartTeam(goalId: string, startTeamFn: () => Promise<any>): Promise<void> {
-		const goal = this.store.get(goalId);
-		if (goal && isHeadquartersProject(goal.projectId)) {
-			this.forceHeadquartersNoWorktree(goal);
-			await startTeamFn();
-			return;
-		}
 		await this.setupWorktree(goalId);
+		// Do not trust the object read before setup — another lifecycle operation
+		// may have archived, paused, or failed it while provisioning was awaited.
+		// The ready transition itself is a strict persistence boundary.
+		const verified = this.store.get(goalId);
+		if (!verified || verified.setupStatus !== "ready") {
+			throw new Error(`Goal ${goalId} setup did not reach verified ready; refusing to start team`);
+		}
 		await startTeamFn();
 	}
 
-	/** Retry setup for a goal in error state. */
+	/**
+	 * Enter retrying state for a failed setup. Concurrent retry requests are
+	 * accepted while retrying/preparing so each route invocation joins the
+	 * per-goal setup promise instead of reporting a misleading conflict.
+	 */
 	retrySetup(goalId: string): boolean {
 		const goal = this.store.get(goalId);
-		if (!goal || goal.setupStatus !== "error") {
-			return false;
+		if (!goal) return false;
+		if (goal.setupStatus === "retrying" || (goal.setupStatus === "preparing" && this._setupsInFlight.has(goalId))) {
+			return true;
 		}
-		this.store.update(goalId, {
-			setupStatus: "preparing",
-			setupError: undefined,
-		});
+		if (goal.setupStatus !== "error") return false;
+		this.store.transitionSetup(goalId, "retrying");
 		return true;
 	}
 
@@ -1063,6 +1089,7 @@ export class GoalManager {
 		// after createGoal (no awaits between) — see runSubgoalStep.
 		spawnedFromPlanId?: string;
 		paused?: boolean;
+		pauseSource?: "operator" | "legacy-deps";
 		replanCount?: number;
 		divergencePolicy?: "strict" | "balanced" | "autonomous";
 		maxConcurrentChildren?: number;

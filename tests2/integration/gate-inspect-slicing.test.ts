@@ -512,11 +512,11 @@ test.describe("gate inspect slicing", () => {
 			// project state directory on Defender-backed Windows filesystems.
 			const memfs = createMemFs();
 			const gateStoreDir = path.resolve("/memfs/gate-inspect-reload");
-			const persistedGateStore = new GateStore(gateStoreDir, memfs);
+			const persistedGateStore = new GateStore(gateStoreDir, memfs, { persistence: "json" });
 			persistedGateStore.initGatesForGoal(goalId, ["failed-retained-diagnostics-gate"]);
 			persistedGateStore.recordSignal(structuredClone(liveSignal));
 			await persistedGateStore.flush();
-			const reloadedGateStore = new GateStore(gateStoreDir, memfs);
+			const reloadedGateStore = new GateStore(gateStoreDir, memfs, { persistence: "json" });
 			const reloadedGate = reloadedGateStore.getGate(goalId, "failed-retained-diagnostics-gate");
 			const reloadedSignal = reloadedGate?.signals.find((signal: any) => signal.id === post.signal.id);
 			expect(reloadedSignal, "RETAINED_GATE_DIAGNOSTICS_RELOAD_MISSING: failed signal must survive gate-store reconstruction").toBeTruthy();

@@ -25,7 +25,7 @@ presence of the others:
 
 User-facing docs:
 [goals-workflows-tasks.md — Human sign-off steps](../goals-workflows-tasks.md#human-sign-off-steps)
-· [review-pane-signoff.md](../review-pane-signoff.md)
+· [review-pane-signoff.md — Review hierarchy and identity](../review-pane-signoff.md#review-hierarchy-and-identity)
 · [workflow-authoring-guide.md §4.4](../../defaults/workflow-authoring-guide.md)
 · [rest-api.md — Sign-off endpoint](../rest-api.md#sign-off-endpoint).
 
@@ -92,8 +92,10 @@ agent context-window pressure, and would need its own UI surface anyway.
    resolver.
 4. `<goal-status-widget>` receives the WS event, refreshes the awaiting
    list, and pulses the badge.
-5. User clicks **View content** — the widget fetches the gate signal content
-   and opens a `verification-signoff-markdown` review document.
+5. User clicks **Start Review** in the widget or an eligible active gate card —
+   the shared launcher fetches the gate signal content and opens or focuses the
+   primary workspace tab for one `verification-signoff-markdown` review.
+   Sign-off content is one file, so it does not add a redundant secondary row.
 6. User approves or rejects in the review pane — `POST /api/goals/:id/gates/:gateId/signoff`
    invokes `verificationHarness.resolveSignoff()` with any composed final/inline feedback.
 7. Step result is built → standard `gate_verification_step_complete`
@@ -148,7 +150,8 @@ Without both, the policy data path is dead — rule 2 stays dormant indefinitely
 | `src/server/agent/workflow-store.ts` · `project-config-store.ts` · `gate-store.ts` | `VerifyStep.type` / `GateSignalStep.type` discriminant additions |
 | `src/server/server.ts` · `src/server/gate-status-summary.ts` | `POST /api/goals/:id/gates/:gateId/signoff` handler; authoritative summary aggregation for `?view=summary` |
 | `src/server/auth/sandbox-guard.ts` | Blocks sandboxed agents from POSTing to `/signoff` |
-| `src/ui/components/GoalStatusWidget.ts` | The pill + popover + pending sign-off launcher that opens submitted content in the review pane |
+| `src/ui/components/GoalStatusWidget.ts` | The pill + popover that hosts a pending sign-off launcher |
+| `src/ui/components/SignoffReviewLauncher.ts` · `src/app/signoff-review-launch.ts` | Shared **Start Review** action and one-file review handoff used by the widget and eligible active gate cards |
 | `src/app/lazy-widgets.ts` | `ensureGoalStatusWidget()` lazy loader |
 | `src/ui/components/AgentInterface.ts` | Mounts `<goal-status-widget>` next to `<git-status-widget>` for any session with a `goalId` / `teamGoalId` |
 | `src/app/render-helpers.ts` | `renderGateProgressBadge` and `renderGateStatusIcon` — shared visual vocabulary between sidebar, widget, and dashboard |
@@ -166,5 +169,5 @@ Without both, the policy data path is dead — rule 2 stays dormant indefinitely
   `awaitingHuman: true` → POST `/signoff` pass and fail paths → idempotent
   409 on repeat.
 - `tests/e2e/ui/goal-status-widget.spec.ts` — pill visibility, popover,
-  View content handoff, review-pane Approve / Reject flow, reload persistence,
+  **Start Review** handoff, review-pane Approve / Reject flow, reload persistence,
   and cleanup.

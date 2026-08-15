@@ -15,6 +15,7 @@ import {
 	projectCorrelatedPromptMessage,
 	promptAuthorBindingMatchesText,
 	purgeAuthorSidecar,
+	selectLatestPromptAuthorBinding,
 	readAuthorSidecar,
 	type PromptAuthorBinding,
 	type PromptAuthorDispatchInput,
@@ -99,6 +100,54 @@ function echoedBinding(
 		},
 	};
 }
+
+describe("author sidecar lifecycle evidence", () => {
+	it("selects the newest modern attempt by dispatch epoch before accepted time", () => {
+		const digest = digestPromptModelText("identical text")!;
+		const bindings = foldAuthorSidecarRecords([{
+			schemaVersion: 2,
+			type: "prompt-author",
+			promptId: "intent-order",
+			intentId: "intent-order",
+			attemptId: "attempt:old",
+			dispatchEpoch: 10,
+			dispatchedAt: 9_000,
+			modelTextDigest: digest,
+			source: "user",
+			author: LOCAL_USER_AUTHOR,
+		}, {
+			schemaVersion: 2,
+			type: "prompt-author-settlement",
+			promptId: "intent-order",
+			intentId: "intent-order",
+			attemptId: "attempt:old",
+			settledAt: 11,
+			outcome: "cancelled",
+		}, {
+			schemaVersion: 2,
+			type: "prompt-author",
+			promptId: "intent-order",
+			intentId: "intent-order",
+			attemptId: "dismiss:new",
+			dispatchEpoch: 20,
+			dispatchedAt: 20,
+			modelTextDigest: digest,
+			source: "user",
+			author: LOCAL_USER_AUTHOR,
+		}, {
+			schemaVersion: 2,
+			type: "prompt-author-settlement",
+			promptId: "intent-order",
+			intentId: "intent-order",
+			attemptId: "dismiss:new",
+			settledAt: 20,
+			outcome: "cancelled",
+		}]);
+
+		expect(selectLatestPromptAuthorBinding(bindings, (binding) => binding.intentId === "intent-order"))
+			.toMatchObject({ attemptId: "dismiss:new", settlement: { outcome: "cancelled" } });
+	});
+});
 
 describe("author sidecar v2 persistence", () => {
 	it("stores v2 digest rows in private secrets without prompt plaintext", () => {
@@ -509,6 +558,67 @@ describe("author sidecar v2 persistence", () => {
 		expect(copyAuthorSidecar(source, destination, { transcript })).toBe(true);
 		expect(readAuthorSidecar(destination)).toEqual([]);
 		expect(fs.existsSync(sidecarPath(destination))).toBe(false);
+	});
+
+	it("strict history copies only an exact retained duplicate and drops selected-only weak identity", () => {
+		const source = "strict-duplicate-source";
+		const destination = "strict-duplicate-destination";
+		const text = `${systemPrefix}same prompt on both sides of the cut`;
+		appendPromptAuthorDispatch(source, {
+			...dispatch("retained-exact", text, systemAuthor, 100),
+			modelPrefix: systemPrefix,
+		});
+		appendPromptAuthorSettlement(source, {
+			promptId: "retained-exact",
+			settledAt: 110,
+			outcome: "echoed",
+			messageId: "retained-user",
+		});
+		appendPromptAuthorDispatch(source, {
+			...dispatch("selected-weak", text, agentAuthor, 200),
+			modelPrefix: systemPrefix,
+		});
+		appendPromptAuthorSettlement(source, {
+			promptId: "selected-weak",
+			settledAt: 210,
+			outcome: "echoed",
+		});
+
+		const transcript = transcriptRow(text, { id: "retained-user" });
+		expect(copyAuthorSidecar(source, destination, {
+			transcript,
+			strictExactIdentity: true,
+		})).toBe(true);
+		expect(readAuthorSidecar(destination)).toEqual([
+			expect.objectContaining({
+				promptId: "retained-exact",
+				author: systemAuthor,
+				settlement: expect.objectContaining({ messageId: "retained-user" }),
+			}),
+		]);
+		expect(JSON.stringify(readAuthorSidecar(destination))).not.toContain("selected-weak");
+	});
+
+	it("strict history consumes a duplicate exact transcript identity at most once", () => {
+		const source = "strict-duplicate-id-source";
+		const destination = "strict-duplicate-id-destination";
+		const text = "same exact id and text";
+		for (const [index, author] of [systemAuthor, agentAuthor].entries()) {
+			const promptId = `duplicate-${index}`;
+			appendPromptAuthorDispatch(source, dispatch(promptId, text, author, 100 + index));
+			appendPromptAuthorSettlement(source, {
+				promptId,
+				settledAt: 110 + index,
+				outcome: "echoed",
+				messageId: "one-retained-row",
+			});
+		}
+
+		expect(copyAuthorSidecar(source, destination, {
+			transcript: transcriptRow(text, { id: "one-retained-row" }),
+			strictExactIdentity: true,
+		})).toBe(true);
+		expect(readAuthorSidecar(destination).map(binding => binding.promptId)).toEqual(["duplicate-0"]);
 	});
 
 	it("copies only echoed bindings confirmed by the cloned transcript, preserving prefixes, then purges", () => {

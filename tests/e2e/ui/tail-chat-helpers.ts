@@ -262,9 +262,14 @@ export async function startTailPhaseTracker(page: Page, key: string, markers: st
 		const originalHandleServerMessage = remote?.handleServerMessage;
 		const wrappedHandleServerMessage = typeof originalHandleServerMessage === "function"
 			? function(this: unknown, message: any) {
-				const event = message?.data ?? message;
-				const eventId = typeof event?.message?.id === "string" ? event.message.id : undefined;
-				detectMarkers(JSON.stringify(message), false, eventId);
+				// A settled full snapshot replaces reducer state; it is not another stream
+				// occurrence. Let the strict DOM observer validate its rendered geometry,
+				// while retaining duplicate detection for every real event frame.
+				if (message?.type !== "messages") {
+					const event = message?.data ?? message;
+					const eventId = typeof event?.message?.id === "string" ? event.message.id : undefined;
+					detectMarkers(JSON.stringify(message), false, eventId);
+				}
 				return originalHandleServerMessage.call(this, message);
 			}
 			: null;

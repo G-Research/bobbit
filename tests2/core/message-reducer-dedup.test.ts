@@ -59,6 +59,41 @@ test("S18 non-regression: two id'd snapshot same-text rows stay TWO; two distinc
 	assert.equal(pairs.messages.length, 2, "two distinct prompts of the same text both survive");
 });
 
+test("snapshot collapses duplicate modern user rows by validated delivery occurrence id", () => {
+	const duplicateIntentId = "intent-snapshot-duplicate";
+	const s = applyAll([snapshot([
+		{ id: "assistant-before", role: "assistant", content: txt("before") },
+		{ id: "user-authoritative", ...userRow("authoritative"), deliveryIntentId: duplicateIntentId },
+		{ id: "assistant-between", role: "assistant", content: txt("between") },
+		{ id: "user-recovery-copy", ...userRow("recovery copy"), intentId: duplicateIntentId },
+		{ id: "assistant-after", role: "assistant", content: txt("after") },
+	])]);
+
+	assert.deepEqual(
+		s.messages.map((message) => message.id),
+		["assistant-before", "user-authoritative", "assistant-between", "assistant-after"],
+		"the first authoritative occurrence keeps its position and later copies are removed",
+	);
+	assert.deepEqual(s.messages[1].content, txt("authoritative"));
+});
+
+test("snapshot intent dedup never uses text and preserves legacy or invalid-id occurrences", () => {
+	const invalidIntentId = "x".repeat(257);
+	const s = applyAll([snapshot([
+		{ id: "modern-a", ...userRow("same"), deliveryIntentId: "intent-a" },
+		{ id: "modern-b", ...userRow("same"), deliveryIntentId: "intent-b" },
+		{ id: "legacy-a", ...userRow("same") },
+		{ id: "legacy-b", ...userRow("same") },
+		{ id: "invalid-a", ...userRow("same"), deliveryIntentId: invalidIntentId },
+		{ id: "invalid-b", ...userRow("same"), deliveryIntentId: invalidIntentId },
+	])]);
+
+	assert.deepEqual(
+		s.messages.map((message) => message.id),
+		["modern-a", "modern-b", "legacy-a", "legacy-b", "invalid-a", "invalid-b"],
+	);
+});
+
 test("step-4b over-dedup guard: prior-snapshot assistant 'OK' + a DISTINCT new live assistant 'OK' stay TWO", () => {
 	const s = applyAll([
 		snapshot([{ role: "assistant", content: txt("OK") }]),

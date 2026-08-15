@@ -1,5 +1,7 @@
 # Bobbit Real-Time Comms Stack — Step-2 Evidenced Analysis
 
+> Pre-remediation evidence snapshot. Text batching/matching and transport-delivery statements below are historical; see [Reliable prompt and steer delivery](../../prompt-queue.md) for the current contract.
+
 > Adversarial verification of the 46 risk seams (S1..S46) catalogued in
 > [01-understanding.md](01-understanding.md). Every seam was either **CONFIRMED** with an exact
 > trigger sequence + file:line + user-visible symptom, **REFUTED** by citing the specific

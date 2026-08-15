@@ -203,7 +203,7 @@ Every consumer that can expose or derive user-visible text must project before d
 | Session title generation | Project full-history Pi rows before passing them to the naming model. First-prompt title generation already uses unprefixed accepted base text. |
 | Search | Resolve and project raw transcript rows before extraction, snippets, weights, and content hashes. Author kind/ID/label remain metadata only. |
 | Extension transcript/tool-call APIs | Project an in-memory JSONL copy before filtering or host-contract conversion, then remove private author/correlation fields. On-disk Pi JSONL is unchanged. |
-| Fork and continue | Copy only echoed, transcript-confirmed sidecar bindings, preserving both raw digest and exact `modelPrefix`; destination replay uses the same projection. Failed setup purges the destination copy. |
+| Fork and continue | Copy only echoed, transcript-confirmed sidecar bindings, preserving both raw digest and exact `modelPrefix`; destination replay uses the same projection. History cuts require an exact retained Pi message ID plus matching model text, consume each retained row once, and do not use timestamp/text fallback, so identical text beyond the cut cannot transfer its author backward. Failed setup purges the destination copy. |
 
 The browser bubble, transcript APIs, pre-compaction history, archived reads, copied visible text, search snippets, search weights, and content hashes therefore use the original base text. Prefixes exist intentionally in raw Pi JSONL and provider-visible input only.
 
@@ -261,7 +261,7 @@ The authoritative registration and rationale live in `tests2/tests-map.json`.
 | Selector, exact strings, label/ID normalization, no human prefix | `tests2/core/message-author-surfacing.test.ts` |
 | Loaded-state hue/accessory resolution and safe fallback | `tests2/core/message-author-appearance.test.ts` |
 | Final dispatch, write-before-prefix, batching, recovery base text, replay/title projection | `tests2/core/message-author-dispatch.test.ts` |
-| Sidecar plaintext exclusion, semantic `modelPrefix` validation, raw-digest idempotence, structured blocks, corruption, copy/purge | `tests2/core/author-sidecar.test.ts` |
+| Sidecar plaintext exclusion, semantic `modelPrefix` validation, raw-digest idempotence, structured blocks, corruption, exact-ID history filtering, copy/purge | `tests2/core/author-sidecar.test.ts` |
 | Prompt-only DOM labels and transcript-wide main/pre-compaction mode | `tests2/dom/message-author-labels.test.ts` |
 | Canonical open-eye sprite pixels, shared hue/accessory registries, and no timers/animation | `tests2/dom/message-author-sprite.test.ts` |
 | Pi versus live/snapshot/transcript/title/search text, mixed batches, and append-failure degradation | `tests2/integration/message-author-ws-server.test.ts` |

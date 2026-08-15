@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { decodePreviewEntry, encodePreviewEntry, isValidPreviewEntry } from "./preview-entry-codec.js";
 
 /**
  * Shared sentinels and helpers for the `preview_open` snapshot block.
@@ -19,22 +20,14 @@ import { Buffer } from "node:buffer";
  *
  *   v3 (current — per-session preview mount; entire block is at most 250 UTF-8
  *   bytes; valid `artifactId` and `contentHash` are never dropped to fit it):
- *     __preview_snapshot_v3__\n{"kind":"preview","url":"/preview/<sid>/<entry>","path":"<sid>/<entry>","entry":"<entry>","contentHash":"<sha256>","artifactId":"<id>"}\n
+ *     __preview_snapshot_v3__\n{"kind":"preview","url":"/preview/<sid>/","entry":"<entry>","contentHash":"<sha256>","artifactId":"<id>"}\n
  *
- *   `entry` is always the raw single filename from the mount, never a
- *   percent-encoded segment. Full marker routes encode that raw value exactly
- *   once; compacting compares the URL suffix in its raw or encoded form, so
- *   literal percent sequences and non-ASCII filenames round-trip unchanged.
- *
- *   The `path` field normally carries the project-root-relative identifier
- *   (`<sessionId>/<entry>`, forward slashes on every OS) rather than the
- *   host-absolute path. To retain validated hash and artifact identity within
- *   the cap, the builder can use `/preview/<sid>/`, artifact-id aliases (`aid`
- *   or `a`), and omit duplicated `path`. For a long filename it can omit
- *   `entry` only when both identities survive: the renderer may then recover
- *   the raw filename from the trusted parameters of that same `preview_open`
- *   call. Other stored markers require their own safe entry; a compact
- *   directory URL never independently becomes a valid preview route.
+ *   `entry` is a standalone raw filename unless a bounded reversible compact
+ *   envelope is needed. It is never a percent-encoded segment. The reader
+ *   decodes that envelope and encodes the raw value exactly once while
+ *   reconstructing compact routes, so literal percent sequences and non-ASCII
+ *   filenames round-trip unchanged. Historical `path`, identity-key aliases,
+ *   and entry-omitted markers remain read-compatible only.
  *
  *   If no lossless form fits, the builder throws `PREVIEW_SNAPSHOT_CAP` rather
  *   than writing a truncated marker or silently dropping replay identity.
@@ -106,11 +99,8 @@ function normalizeArtifactId(value: unknown): string | undefined {
 }
 
 function normalizeEntry(value: unknown): string | undefined {
-	if (typeof value !== "string") return undefined;
-	const entry = value;
-	if (!entry || entry.length > 255 || entry === "." || entry === "..") return undefined;
-	if (/[\\/\u0000-\u001f\u007f]/u.test(entry)) return undefined;
-	return entry;
+	const entry = decodePreviewEntry(value);
+	return isValidPreviewEntry(entry) ? entry : undefined;
 }
 
 export function parseSnapshot(text: unknown): ParsedSnapshot | null {
@@ -148,6 +138,7 @@ export function parseSnapshot(text: unknown): ParsedSnapshot | null {
 					url: parsed.url,
 				};
 				if (typeof parsed.path === "string") result.path = parsed.path;
+				else if (entry) result.path = entry; // compatibility for callers that read parsed.path
 				if (entry) result.entry = entry;
 				if (contentHash) result.contentHash = contentHash;
 				if (artifactId) result.artifactId = artifactId;
@@ -179,84 +170,56 @@ export function buildPreviewSnapshotV3Block(
 	contentHash?: string,
 	options?: { artifactId?: string; entry?: string },
 ): string {
+	if (options?.entry !== undefined && !isValidPreviewEntry(options.entry)) {
+		throw new Error(`PREVIEW_SNAPSHOT_ENTRY: invalid preview filename ${JSON.stringify(options.entry)}`);
+	}
+
 	const hash = normalizeContentHash(contentHash);
 	const artifactId = normalizeArtifactId(options?.artifactId);
-	const entry = normalizeEntry(options?.entry);
+	const entry = options?.entry;
 	const shortUrl = entry ? compactPreviewUrl(url, entry) : undefined;
-	// Mount responses contain the raw filename in `url`, while marker `entry`
-	// deliberately remains raw. Encode that filename exactly once for every full
-	// route stored in the marker so literal percent sequences cannot be decoded
-	// into a different file when the route is later served.
 	const storedUrl = shortUrl && entry ? `${shortUrl}${encodeURIComponent(entry)}` : url;
-	const payloads: Array<Record<string, string>> = [];
-	const addPayload = (payload: Record<string, string>) => {
-		const key = JSON.stringify(payload);
-		if (!payloads.some(candidate => JSON.stringify(candidate) === key)) payloads.push(payload);
+	const blockFor = (payload: Record<string, string>): string | undefined => {
+		const block = PREVIEW_SNAPSHOT_MARKER_V3 + JSON.stringify(payload) + "\n";
+		return Buffer.byteLength(block, "utf8") <= 250 ? block : undefined;
 	};
-
-	const withMetadata = (base: Record<string, string>) => hash ? { ...base, contentHash: hash } : base;
-	const addArtifact = (base: Record<string, string>, key: "artifactId" | "aid" | "a") => {
-		if (artifactId) addPayload({ ...base, [key]: artifactId });
-	};
-	const addArtifactAliases = (base: Record<string, string>) => {
-		if (!artifactId) {
-			addPayload(base);
-			return;
-		}
-		addArtifact(base, "artifactId");
-		addArtifact(base, "aid");
-		addArtifact(base, "a");
-	};
-	const fullRoute = withMetadata({
-		kind: "preview",
-		url: storedUrl,
-		path: entryPath,
-		...(entry ? { entry } : {}),
+	const withMetadata = (base: Record<string, string>): Record<string, string> => ({
+		...base,
+		...(hash ? { contentHash: hash } : {}),
+		...(artifactId ? { artifactId } : {}),
 	});
 
-	// The original full route with the canonical artifactId key remains first for
-	// backwards-compatible payload selection. When it does not fit, a compact
-	// route is more valuable than a shorter full-route artifact-key alias: the
-	// compact route protects preview reopen and preserves the raw entry.
-	if (artifactId) addArtifact(fullRoute, "artifactId");
-	else addPayload(fullRoute);
-
-	if (shortUrl && entry) {
-		// The compact URL and raw entry are an intentional writer/reader pair: the
-		// reader encodes the raw entry exactly once when reconstructing the route.
-		const compactRoute = withMetadata({ kind: "preview", url: shortUrl, path: entry, entry });
-		addArtifactAliases(compactRoute);
-
-		// Try the full route's shorter artifact-key aliases only after every compact
-		// shape that carries an explicit entry. This ordering avoids selecting a
-		// barely-fitting full route over a robust compact snapshot.
-		if (artifactId) {
-			addArtifact(fullRoute, "aid");
-			addArtifact(fullRoute, "a");
+	if (entry) {
+		// New markers are standalone and canonical: compact directory URL, raw (or
+		// losslessly encoded) entry, and never an identity-key alias or duplicate path.
+		const markerUrl = shortUrl ?? storedUrl;
+		const raw = blockFor(withMetadata({ kind: "preview", url: markerUrl, entry }));
+		if (raw) return raw;
+		if (shortUrl) {
+			const compactEntry = encodePreviewEntry(entry);
+			if (compactEntry !== entry) {
+				const compressed = blockFor(withMetadata({ kind: "preview", url: shortUrl, entry: compactEntry }));
+				if (compressed) return compressed;
+			}
 		}
-
-		// `path` duplicates `entry` in a compact marker, so remove it before
-		// removing entry. This is essential for non-ASCII names under the byte cap.
-		addArtifactAliases(withMetadata({ kind: "preview", url: shortUrl, entry }));
-		// The final lossless compact form relies on preview_open's trusted entry
-		// parameter. It is safe only when both identities survive for artifact
-		// replay; otherwise a missing entry would create an unrecoverable preview.
-		if (hash && artifactId) addArtifactAliases(withMetadata({ kind: "preview", url: shortUrl }));
-	} else if (artifactId) {
-		// No safe compact route exists, so the full route aliases are the only
-		// lossless alternatives to an explicit cap failure.
-		addArtifact(fullRoute, "aid");
-		addArtifact(fullRoute, "a");
+		// The renderer may recover this entry only from the trusted params of the
+		// same preview_open call. Keep both canonical replay identities; without
+		// either, an omitted entry would create an unreopenable marker.
+		if (shortUrl && hash && artifactId) {
+			const omitted = blockFor({ kind: "preview", url: shortUrl, contentHash: hash, artifactId });
+			if (omitted) return omitted;
+		}
+		throw new Error(
+			`PREVIEW_SNAPSHOT_CAP: cannot preserve preview identity for ${JSON.stringify(entry)} within the 250 UTF-8 byte snapshot cap`,
+		);
 	}
 
-	for (const payload of payloads) {
-		const block = PREVIEW_SNAPSHOT_MARKER_V3 + JSON.stringify(payload) + "\n";
-		if (Buffer.byteLength(block, "utf8") <= 250) return block;
-	}
-
-	const subject = entry ?? entryPath;
+	// Older callers may not have supplied an entry. Preserve their historical
+	// full-route/path marker shape, but never use it for new preview_open calls.
+	const legacy = blockFor(withMetadata({ kind: "preview", url: storedUrl, path: entryPath }));
+	if (legacy) return legacy;
 	throw new Error(
-		`PREVIEW_SNAPSHOT_CAP: cannot preserve preview identity for ${JSON.stringify(subject)} within the 250 UTF-8 byte snapshot cap`,
+		`PREVIEW_SNAPSHOT_CAP: cannot preserve preview identity for ${JSON.stringify(entryPath)} within the 250 UTF-8 byte snapshot cap`,
 	);
 }
 

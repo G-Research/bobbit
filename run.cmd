@@ -88,4 +88,9 @@ if exist "%BOBBIT_HOME%\dist\ui\index.html" (
 
 :launch
 rem 4. Launch with implicit --cwd as current directory, forwarding all args
-node "%BOBBIT_HOME%\dist\server\cli.js" --cwd "%CD%" %*
+rem Heap ceiling: Node caps old-space at ~4 GB regardless of host RAM. The gateway
+rem starves its event loop when pegged against that ceiling. The flag MUST precede
+rem the script path or V8 never sees it. Do not add --max-semi-space-size: it cuts
+rem scavenge count but raises max GC pause ~4x, the wrong trade for latency.
+if not defined BOBBIT_MAX_OLD_SPACE_MB set BOBBIT_MAX_OLD_SPACE_MB=8192
+node "--max-old-space-size=%BOBBIT_MAX_OLD_SPACE_MB%" "%BOBBIT_HOME%\dist\server\cli.js" --cwd "%CD%" %*
