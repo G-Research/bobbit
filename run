@@ -42,4 +42,12 @@ if [ -f "$BOBBIT_HOME/dist/ui/index.html" ] && \
 fi
 
 # 4. Launch, forwarding all args after implicit --cwd
-exec node "$BOBBIT_HOME/dist/server/cli.js" --cwd "$(pwd)" "$@"
+#
+# Heap ceiling: Node caps old-space at ~4 GB regardless of host RAM. The gateway
+# has been observed pegged against that ceiling (3.35 GB RSS on a 128 GB host),
+# where V8 collects ever more aggressively and starves the event loop — which
+# surfaces as multi-second UI stalls. The flag MUST precede the script path or
+# V8 never sees it (it silently lands in process.argv instead).
+# Do not raise --max-semi-space-size here: it cuts scavenge count but increases
+# max pause ~4x, which is the wrong trade for event-loop latency.
+exec node "--max-old-space-size=${BOBBIT_MAX_OLD_SPACE_MB:-8192}" "$BOBBIT_HOME/dist/server/cli.js" --cwd "$(pwd)" "$@"

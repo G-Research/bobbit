@@ -168,8 +168,8 @@ describe("default team-lead review judgment policy", () => {
 		expect(policy, message).toMatch(/(?:reject|rejected).{0,180}(?:re[- ]?signal|signal again|re-run).{0,140}(?:stage[- ]scope|documentation|gate)|(?:re[- ]?signal|signal again|re-run).{0,180}(?:stage[- ]scope|documentation|gate).{0,140}(?:reject|rejected)/i);
 		expect(policy, message).toMatch(/(?:not|rather than).{0,100}(?:work|start|spawn|assign).{0,100}(?:it |the finding |documentation )?early/i);
 		expect(policy, message).toMatch(/(?:not|rather than).{0,100}escalat.{0,100}(?:to )?(?:the )?user/i);
-		expect(policy, message).toMatch(/two[- ]consecutive[- ]failures?.{0,180}(?:only|appl(?:y|ies)).{0,160}(?:content|artifact).{0,120}(?:review|loop)/i);
-		expect(policy, message).toMatch(/implementation[- ]verification.{0,180}(?:solely|only).{0,180}downstream documentation|downstream documentation.{0,180}implementation[- ]verification.{0,180}(?:solely|only)/i);
+		expect(policy, message).toMatch(/gate[- ]failure counts?.{0,80}diagnostic only.{0,180}(?:never|do not).{0,120}(?:pause|stop|ask the user)/i);
+		expect(policy, message).toMatch(/wrong[- ]stage.{0,160}do not implement.{0,160}(?:scope|stage).{0,120}(?:re[- ]?signal|signal)/i);
 	});
 
 	it("rejects artifacts demanded by a later phase or gate without doing them early or escalating scope", () => {
@@ -211,6 +211,9 @@ describe("default team-lead review judgment policy", () => {
 		// The lead converges rather than accepting verifier-driven scope creep.
 		expect(policy, message).toMatch(/do not silently amend the goal spec.{0,100}(?:add acceptance criteria|reviewer suggestions? into requirements?)/i);
 		expect(policy, message).toMatch(/(?:never merge|do not.{0,80}(?:merge|revise)).{0,100}documentation[- ]only.{0,100}(?:appease|appeasement)/i);
-		expect(policy, message).toMatch(/two consecutive failures?.{0,100}(?:same )?content gate.{0,100}(?:stop|do not create another rewrite task)/i);
+		expect(policy, message).toMatch(/gate[- ]failure counts?.{0,80}diagnostic only.{0,160}(?:never|do not).{0,100}(?:pause|stop).{0,160}(?:twice|fixed number)/i);
+		expect(policy, message).toMatch(/keep going until every required gate passes.{0,180}concrete.{0,180}approved goal.{0,180}safely fixable/i);
+		expect(policy, message).toMatch(/ask the user only when.{0,180}(?:scope amendment|product choice|destructive|external action|credential|dependency|no safe in[- ]scope fix)/i);
+		expect(policy, message).toMatch(/previously discoverable.{0,100}out[- ]of[- ]scope.{0,100}wrong[- ]stage.{0,160}do not implement/i);
 	});
 });

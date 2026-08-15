@@ -1,6 +1,8 @@
-# Per-Role Model & Thinking Level Overrides — Design Doc
+# Per-Role Model & Thinking Level Overrides — Historical Design
 
-Goal: add two optional fields — `model` and `thinkingLevel` — to every Role,
+> **Historical implementation plan:** The role-override feature described here remains shipped, including its role-over-global precedence and its separation from the naming model. However, the source references and implementation pseudocode below predate the authoritative-metadata retirement and are not current implementation guidance. Use [Per-role model and thinking-level overrides](../internals.md#per-role-model--thinking-level-overrides) for the current feature mechanics, [Live-state metadata](../thinking-levels.md#live-state-metadata) for state authority, and [Spawn-time model pinning](../internals.md#spawn-time-model-pinning) for final selection and verification.
+
+The design goal was to add two optional fields — `model` and `thinkingLevel` — to every Role,
 editable from a new "Model" tab in the role manager page. When set on a role,
 they override the global `default.sessionModel` / `default.sessionThinkingLevel`
 (and `default.reviewModel` / `default.reviewThinkingLevel` for verification
@@ -145,56 +147,13 @@ have already been resolved to a string by the caller — they should not flow
 through `prefs.get`. Mixing the two would force a synthetic prefs object and
 muddy the error messages.
 
-### 2.2 Resolution order at session start — `src/server/agent/session-manager.ts:2814` (`tryAutoSelectModel`)
+### 2.2 Resolution order at session start — historical plan and current authority
 
-The pipeline already calls `tryAutoSelectModel(session)` from `session-setup.ts:734-746`
-unless `skipAutoModel` is set. Today the function (lines 2814-2879) reads
-`default.sessionModel`, then falls back to the AI-Gateway best-ranked model.
+The precedence rationale remains current: an explicit session selection wins, then the resolved role override, then global defaults. The shipped startup path now resolves that candidate before Pi starts and sends the fully assembled options through the exact [spawn-time model pinning](../internals.md#spawn-time-model-pinning) boundary.
 
-Insert role-level resolution **before** the existing pref read. Sessions know
-their role via `session.role` (set by `session-setup.ts:687`,
-`SessionInfo.role`).
+A role override may request only a provider/model tuple; it does not author capability metadata. The final spawn boundary requires that exact tuple in the current target-realm session catalog, clamps thinking against that exact row, canonicalizes Pi's arguments, and verifies the runtime tuple before it becomes durable. State publication uses the exact resolver and verified state contract in [Live-state metadata](../thinking-levels.md#live-state-metadata): last exact assembled row, then exact direct Pi row, otherwise unavailable. If metadata is unavailable, it remains unavailable; no role-selection, state-frame, or thinking path infers capabilities from the model ID.
 
-```ts
-private async tryAutoSelectModel(session: SessionInfo): Promise<void> {
-    if (!this.preferencesStore) return;
-
-    // 0. Role override (NEW). Skipped if no role or role unresolved.
-    const roleModel = this.resolveRoleModel(session);
-    if (roleModel) {
-        try {
-            await applyModelString(session.rpcClient, roleModel, {
-                sessionManager: this,
-                sessionId: session.id,
-                contextLabel: `role.${session.role}.model`,
-            });
-            this._writeModelNameFile(session.id, roleModel);
-            const [provider, modelId] = roleModel.split("/", 2);
-            broadcast(session.clients, {
-                type: "state",
-                data: { model: { provider, id: modelId, reasoning: inferMeta(modelId).reasoning } },
-            });
-            console.log(`[session-manager] Set role-override model "${roleModel}" for session ${session.id}`);
-            return;
-        } catch (err) {
-            // Role override is a hard contract — surface the same red Unavailable
-            // pattern the user sees in Settings → Models. Throwing here matches
-            // the behaviour of applyReviewModelOverrides for review sessions.
-            console.error(`[session-manager] Role model "${roleModel}" failed for ${session.id}:`, err);
-            throw err;
-        }
-    }
-
-    // 1. Explicit pref (existing behaviour, lines 2818-2839)
-    const sessionModelPref = this.preferencesStore.get("default.sessionModel") as string | undefined;
-    /* unchanged */
-
-    // 2. aigw fallback (existing behaviour, lines 2843-2877)
-    /* unchanged */
-}
-```
-
-Add the helper:
+The following helper was part of the historical role-resolution plan:
 
 ```ts
 private resolveRoleModel(session: SessionInfo): string | undefined {

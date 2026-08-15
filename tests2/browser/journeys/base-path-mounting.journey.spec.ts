@@ -297,6 +297,7 @@ test.describe("Journey: production gateway mounted below a nested base path", ()
 			});
 			expect(mounted.response.status, mounted.text).toBe(200);
 			expect(mounted.body?.url).toBe(`/preview/${sessionId}/${ENTRY}`);
+			expect(mounted.body?.artifactId).toBeTruthy();
 
 			const snapshot = await adminRequest(gateway, `/api/preview/mount?sessionId=${sessionId}`);
 			expect(snapshot.response.status, snapshot.text).toBe(200);
@@ -313,9 +314,10 @@ test.describe("Journey: production gateway mounted below a nested base path", ()
 			expectExactlyOneMount(iframeSrc!, gateway, "/preview");
 			await expect(page.frameLocator(".goal-preview-panel iframe").locator("body")).toContainText(PREVIEW_TEXT, { timeout: 20_000 });
 			await expect(page.frameLocator(".goal-preview-panel iframe").locator("#sibling")).toHaveCSS("color", "rgb(12, 34, 56)");
+			const artifactBasePath = `${BASE_PATH}/preview/${sessionId}/_artifact/${encodeURIComponent(mounted.body.artifactId)}/`;
 			const injectedBase = await page.frameLocator(".goal-preview-panel iframe").locator("base[data-bobbit-preview-base]").getAttribute("href");
-			expect(injectedBase).toBe(`${BASE_PATH}/preview/${sessionId}/`);
-			const siblingRequest = requests.find(record => new URL(record.url).pathname === `${BASE_PATH}/preview/${sessionId}/sibling.css`);
+			expect(injectedBase).toBe(artifactBasePath);
+			const siblingRequest = requests.find(record => new URL(record.url).pathname === `${artifactBasePath}sibling.css`);
 			expect(siblingRequest, "preview sibling asset should resolve through the injected mounted base").toBeTruthy();
 
 			const newTabLink = page.locator('a[title="Open preview in new tab"]').first();

@@ -5,6 +5,7 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
+import * as Value from "typebox/value";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
 	BOBBIT_COMPACT_PROJECTIONS,
@@ -12,10 +13,6 @@ import {
 	COMPACT_TRUNCATION_SUFFIX,
 	projectBobbitResponse,
 } from "../../defaults/tools/bobbit/compact-projection.ts";
-import {
-	CONTEXT_HEAVY_ERROR_CODE,
-	CONTEXT_HEAVY_LIMIT,
-} from "../../defaults/tools/_shared/context-heavy-guard.ts";
 import {
 	BOBBIT_OPERATIONS,
 	loadBobbitTools,
@@ -31,49 +28,27 @@ beforeAll(() => {
 	tools = loadBobbitTools();
 });
 
-function resultText(result: any): string {
-	return result?.content?.[0]?.text ?? "";
-}
-
-function resultJson(result: any): any {
-	expect(result.isError).toBeFalsy();
-	return JSON.parse(resultText(result));
-}
-
-function errorJson(result: any): { error: string; code: string } {
-	expect(result.isError).toBe(true);
-	expect(result.details).toBeUndefined();
-	return JSON.parse(resultText(result));
-}
-
-function longText(prefix: string): string {
-	return `${prefix}${"x".repeat(COMPACT_TEXT_PREVIEW_CHARS + 40)}`;
-}
-
-function preview(value: string): string {
-	const chars = Array.from(value);
-	return chars.length <= COMPACT_TEXT_PREVIEW_CHARS
-		? value
-		: `${chars.slice(0, COMPACT_TEXT_PREVIEW_CHARS).join("")}${COMPACT_TRUNCATION_SUFFIX}`;
-}
+function resultText(result: any): string { return result?.content?.[0]?.text ?? ""; }
+function resultJson(result: any): any { expect(result.isError).toBeFalsy(); return JSON.parse(resultText(result)); }
+function longText(prefix: string): string { return `${prefix}${"x".repeat(COMPACT_TEXT_PREVIEW_CHARS + 40)}`; }
+function preview(value: string): string { const chars = Array.from(value); return chars.length <= COMPACT_TEXT_PREVIEW_CHARS ? value : `${chars.slice(0, COMPACT_TEXT_PREVIEW_CHARS).join("")}${COMPACT_TRUNCATION_SUFFIX}`; }
 
 describe("bobbit compact projections", () => {
+	it("closes bobbit_read without removed flags", () => { const schema = tools.get("bobbit_read")!.parameters; expect(schema.additionalProperties).toBe(false);
+		for (const flag of ["verbose", "include_tool_results", "includeToolResults", "raw_results", "rawResults"]) expect([schema.properties?.[flag], Value.Check(schema, { operation: "health", [flag]: true })]).toEqual([undefined, false]); });
 	it("compacts list_goals while preserving identity, state, recency, and pagination", async () => {
 		const spec = longText("goal spec: ");
 		const goal = {
 			id: "goal-1",
 			title: "Ship compact output",
 			state: "in-progress",
-			projectId: "project-1",
-			workflowId: "workflow-1",
+			projectId: "project-1", parentGoalId: "goal-parent", workflowId: "workflow-1",
+			createdAt: "2026-07-16T10:00:00.000Z", updatedAt: "2026-07-17T10:00:00.000Z", spec,
 			branch: "goal/compact",
-			mergeTarget: "master",
+			mergeTarget: "main",
 			setupStatus: "ready",
 			team: { status: "running", activeCount: 2 },
 			paused: false,
-			createdAt: "2026-07-16T10:00:00.000Z",
-			updatedAt: "2026-07-17T10:00:00.000Z",
-			spec,
 			workflow: { id: "workflow-1", gates: [{ id: "design", verify: { prompt: longText("verify ") } }] },
 			worktreePath: "/private/worktree",
 			repoPath: "/private/repo",
@@ -81,7 +56,6 @@ describe("bobbit compact projections", () => {
 			sandboxed: true,
 			subgoalsAllowed: true,
 			autoStartTeam: true,
-			rootGoalId: "goal-1",
 			generation: 9,
 			colorIndex: 3,
 		};
@@ -101,6 +75,7 @@ describe("bobbit compact projections", () => {
 				total: 25,
 				hasMore: true,
 				nextCursor: "goal-cursor-1",
+				providerMetadata: { requestId: "provider-only" }, filesystemPath: "/private/envelope", workflowSnapshot: { raw: "large snapshot" },
 			},
 		}));
 
@@ -111,27 +86,11 @@ describe("bobbit compact projections", () => {
 		}));
 
 		expect(data.goals).toHaveLength(1);
-		expect(data.goals[0]).toMatchObject({
-			id: goal.id,
-			title: goal.title,
-			state: goal.state,
-			projectId: goal.projectId,
-			workflowId: goal.workflowId,
-			branch: goal.branch,
-			mergeTarget: goal.mergeTarget,
-			setupStatus: goal.setupStatus,
-			team: goal.team,
-			paused: false,
-			createdAt: goal.createdAt,
-			updatedAt: goal.updatedAt,
-			spec: preview(spec),
-		});
-		for (const dropped of [
-			"workflow", "worktreePath", "repoPath", "cwd", "sandboxed",
-			"subgoalsAllowed", "autoStartTeam", "rootGoalId", "generation", "colorIndex",
-		]) {
-			expect(data.goals[0][dropped], dropped).toBeUndefined();
-		}
+		expect(data.goals[0]).toMatchObject({ id: goal.id, title: goal.title, state: goal.state, projectId: goal.projectId,
+			parentGoalId: goal.parentGoalId, workflowId: goal.workflowId, createdAt: goal.createdAt, updatedAt: goal.updatedAt });
+		for (const dropped of ["spec", "branch", "mergeTarget", "setupStatus", "team", "paused", "workflow", "worktreePath", "repoPath", "cwd",
+			"sandboxed", "subgoalsAllowed", "autoStartTeam", "generation", "colorIndex"]) expect(data.goals[0][dropped], dropped === "spec" ? "BOBBIT_READ_LIST_GOALS_MUST_OMIT_SPEC" : dropped).toBeUndefined();
+		for (const dropped of ["providerMetadata", "filesystemPath", "workflowSnapshot"]) expect(data[dropped]).toBeUndefined();
 		expect(data.archivedSessions[0]).toMatchObject({
 			id: archivedSession.id,
 			title: archivedSession.title,
@@ -151,13 +110,15 @@ describe("bobbit compact projections", () => {
 		});
 	});
 
-	it("uses the goal profile for get_goal and derives workflowId before dropping the snapshot", async () => {
+	it("gives get_goal untruncated semantic detail and derives workflowId before dropping internals", async () => {
+		const spec = longText("complete goal spec: ");
 		stubFetch(() => ({
 			body: {
 				id: "goal-detail",
 				title: "Goal detail",
 				state: "todo",
 				projectId: "project-1",
+				spec,
 				workflow: { id: "derived-workflow", gates: [{ id: "implementation", verify: { prompt: "hidden" } }] },
 				cwd: "/hidden",
 			},
@@ -168,12 +129,13 @@ describe("bobbit compact projections", () => {
 			goalId: "goal-detail",
 		}));
 
-		expect(data).toMatchObject({ id: "goal-detail", workflowId: "derived-workflow" });
+		expect(data).toMatchObject({ id: "goal-detail", workflowId: "derived-workflow", spec });
+		expect(data.spec).not.toContain(COMPACT_TRUNCATION_SUFFIX);
 		expect(data.workflow).toBeUndefined();
 		expect(data.cwd).toBeUndefined();
 	});
 
-	it("compacts sessions and archived delegates while retaining diagnostic counters and cursor pagination", async () => {
+	it("keeps session lists discovery-only with concise error indicators and cursor pagination", async () => {
 		const session = {
 			id: "session-1",
 			title: "Implement compact output",
@@ -186,6 +148,7 @@ describe("bobbit compact projections", () => {
 			lastActivity: "2026-07-17T11:00:00.000Z",
 			lastTurnErrored: true,
 			consecutiveErrorTurns: 2,
+			restoreError: "Bearer LIST_SESSION_SECRET_SENTINEL",
 			completedTurnCount: 17,
 			cwd: "/hidden",
 			clientCount: 4,
@@ -222,20 +185,11 @@ describe("bobbit compact projections", () => {
 			limit: 1,
 		}));
 
-		expect(data.sessions[0]).toMatchObject({
-			id: session.id,
-			title: session.title,
-			status: session.status,
-			assistantType: session.assistantType,
-			role: session.role,
-			projectId: session.projectId,
-			lastTurnErrored: true,
-			consecutiveErrorTurns: 2,
-			completedTurnCount: 17,
-		});
-		expect(data.sessions[0].cwd).toBeUndefined();
-		expect(data.sessions[0].clientCount).toBeUndefined();
-		expect(data.sessions[0].goalAssistant).toBeUndefined();
+		expect(data.sessions[0]).toMatchObject({ id: session.id, title: session.title, status: session.status, assistantType: session.assistantType,
+			role: session.role, projectId: session.projectId, goalId: session.goalId, createdAt: session.createdAt, lastActivity: session.lastActivity,
+			lastTurnErrored: true, consecutiveErrorTurns: 2, restoreFailed: true });
+		expect(data.sessions[0].restoreError).toBeUndefined(); expect(JSON.stringify(data.sessions[0])).not.toContain("LIST_SESSION_SECRET_SENTINEL");
+		for (const dropped of ["completedTurnCount", "cwd", "clientCount", "lastReadAt", "isCompacting", "spawnPinnedModel", "spawnPinnedThinkingLevel", "imageGenerationModel", "goalAssistant", "roleAssistant", "toolAssistant"]) expect(data.sessions[0][dropped], dropped).toBeUndefined();
 		expect(data.archivedDelegates[0]).toMatchObject({
 			id: "delegate-archived",
 			archived: true,
@@ -249,6 +203,20 @@ describe("bobbit compact projections", () => {
 			nextCursor: "session-cursor-1",
 			mode: "cursor",
 		});
+	});
+	it("gives get_session useful links and safe diagnostics without disclosing raw errors", async () => {
+		const safe = { id: "session-detail", title: "Detailed session", status: "idle", assistantType: "goal", role: "tester", projectId: "project-1", goalId: "goal-1", teamGoalId: "team-goal-1", teamLeadSessionId: "lead-1", taskId: "task-1", staffId: "staff-1", parentSessionId: "parent-1", delegateOf: "delegator-1", createdAt: "2026-07-16T10:00:00Z", lastActivity: "2026-07-17T11:00:00Z", completedTurnCount: 17, lastTurnErrored: true, consecutiveErrorTurns: 3, manualRetryRequired: true, transientRetryAttempts: 2, recoverDrainAttempts: 1, condition: { kind: "model-selection-required", message: "Choose a supported model" } }, secret = String.raw`Bearer SECRET_SENTINEL at C:\private\session.ts`, omitted = ["restoreError", "lastTurnErrorMessage", "cwd", "worktreePath", "repoWorktrees", "draft", "preview", "sidePanelWorkspace", "storagePath", "model", "providerMetadata", "workflow"];
+		stubFetch(() => ({ body: { ...safe, restoreError: { code: "PRIVATE_CODE", message: secret }, lastTurnErrorMessage: secret, ...Object.fromEntries(omitted.slice(2).map((field) => [field, "private"])) } }));
+		const data = resultJson(await tools.get("bobbit_read")!.execute("id", { operation: "get_session", sessionId: safe.id }));
+		expect(data).toMatchObject({ ...safe, restoreFailed: true }); for (const field of omitted) expect(data[field], field).toBeUndefined();
+		expect(JSON.stringify(data)).not.toContain("SECRET_SENTINEL"); expect(typeof data.restoreFailed).toBe("boolean");
+	});
+
+	it("gives get_project semantic detail without filesystem or internal configuration", async () => {
+		const safe = { id: "project-detail", name: "Detailed project", status: "active", primaryBranch: "main", description: "Useful project detail" }, omitted = ["rootPath", "config", "providerMetadata", "workflowSnapshot"];
+		stubFetch(() => ({ body: { ...safe, ...Object.fromEntries(omitted.map((field) => [field, `PROJECT_SENTINEL_${field}`])) } }));
+		const data = resultJson(await tools.get("bobbit_read")!.execute("id", { operation: "get_project", projectId: safe.id }));
+		expect(data).toMatchObject(safe); for (const field of omitted) expect(data[field], field).toBeUndefined(); expect(JSON.stringify(data)).not.toContain("PROJECT_SENTINEL");
 	});
 
 	it("compacts search hits and truncates snippets without losing ranking or pagination", async () => {
@@ -292,7 +260,7 @@ describe("bobbit compact projections", () => {
 		expect(data.pagination).toMatchObject({ total: 12, hasMore: true, nextOffset: 6 });
 	});
 
-	it("compacts tasks while retaining action fields and truncating prose", async () => {
+	it("keeps task lists discovery-only while retaining identity and action fields", async () => {
 		const spec = longText("task spec: ");
 		const resultSummary = longText("task result: ");
 		stubFetch(() => ({
@@ -331,14 +299,13 @@ describe("bobbit compact projections", () => {
 			dependsOn: ["task-0"],
 			assignedTo: "session-1",
 			workflowGateId: "implementation",
-			spec: preview(spec),
-			resultSummary: preview(resultSummary),
 		});
+		for (const field of ["spec", "resultSummary"]) expect(data.tasks[0][field]).toBeUndefined();
 		expect(data.tasks[0].verify).toBeUndefined();
 		expect(data.pagination).toMatchObject({ itemKey: "tasks", limit: 10, total: 1 });
 	});
 
-	it("compacts gates while retaining action and count fields and dropping verifier/output bodies", async () => {
+	it("compacts gates while retaining action and count fields and dropping content/output bodies", async () => {
 		const content = longText("gate content: ");
 		stubFetch(() => ({
 			body: {
@@ -382,8 +349,8 @@ describe("bobbit compact projections", () => {
 			signalCount: 2,
 			hasContent: true,
 			contentLength: content.length,
-			currentContent: preview(content),
 		});
+		for (const field of ["currentContent", "content"]) expect(data.gates[0][field]).toBeUndefined();
 		expect(data.gates[0].verify).toBeUndefined();
 		expect(data.gates[0].verification).toBeUndefined();
 		expect(data.gates[0].signals).toBeUndefined();
@@ -462,81 +429,7 @@ describe("bobbit compact projections", () => {
 	});
 });
 
-describe("bobbit verbose behavior and conservative limit guard", () => {
-	function expectGuidance(error: { error: string; code: string }): void {
-		expect(Object.keys(error).sort()).toEqual(["code", "error"]);
-		expect(error.code).toBe(CONTEXT_HEAVY_ERROR_CODE);
-		expect(error.error).toContain("You should not typically pull this much data from the API");
-		expect(error.error).toContain("`verbose`");
-		expect(error.error).toContain(`explicit limit at or below ${CONTEXT_HEAVY_LIMIT}`);
-		expect(error.error).toContain(`limit <= ${CONTEXT_HEAVY_LIMIT}`);
-		expect(error.error).toContain("fetch in smaller batches");
-		expect(error.error).toContain("REALLY need full verbosity");
-		expect(error.error).toContain("Keep an eye on token consumption");
-	}
-
-	it.each([
-		["missing", undefined],
-		["over cap", CONTEXT_HEAVY_LIMIT + 1],
-	] as const)("rejects paged verbose reads with %s limit before fetch", async (_case, limit) => {
-		const calls = stubFetch(() => ({ body: { goals: [] } }));
-		const params: Record<string, unknown> = { operation: "list_goals", verbose: true };
-		if (limit !== undefined) params.limit = limit;
-
-		const result = await tools.get("bobbit_read")!.execute("id", params);
-
-		expect(calls).toHaveLength(0);
-		expectGuidance(errorJson(result));
-	});
-
-	it("allows a paged verbose read at limit 10 and returns the full gateway item", async () => {
-		const spec = longText("full goal spec: ");
-		const goal = {
-			id: "goal-full",
-			title: "Full goal",
-			state: "in-progress",
-			spec,
-			workflow: { id: "workflow-full", gates: [{ id: "gate-1", verify: { prompt: longText("full verify: ") } }] },
-			cwd: "/full/cwd",
-			generation: 8,
-		};
-		const calls = stubFetch(() => ({ body: { goals: [goal], total: 11 } }));
-
-		const data = resultJson(await tools.get("bobbit_read")!.execute("id", {
-			operation: "list_goals",
-			verbose: true,
-			limit: CONTEXT_HEAVY_LIMIT,
-		}));
-
-		expect(calls).toHaveLength(1);
-		expect(data.goals[0]).toEqual(goal);
-		expect(data.pagination).toMatchObject({
-			limit: CONTEXT_HEAVY_LIMIT,
-			total: 11,
-			hasMore: true,
-		});
-	});
-
-	it("allows a nonpaged verbose read without limit and returns full gateway JSON", async () => {
-		const goal = {
-			id: "goal-nonpaged",
-			title: "Full nonpaged goal",
-			spec: longText("untruncated: "),
-			workflow: { id: "workflow-1", gates: [{ id: "gate-1", verify: { prompt: "full prompt" } }] },
-			cwd: "/full/path",
-		};
-		const calls = stubFetch(() => ({ body: goal }));
-
-		const data = resultJson(await tools.get("bobbit_read")!.execute("id", {
-			operation: "get_goal",
-			goalId: goal.id,
-			verbose: true,
-		}));
-
-		expect(calls).toHaveLength(1);
-		expect(data).toEqual(goal);
-	});
-
+describe("unaffected Bobbit mutation-tool verbose behavior", () => {
 	it("projects orchestrate responses by default and permits full verbose JSON without limit", async () => {
 		const spec = longText("created goal spec: ");
 		const response = {
@@ -608,10 +501,8 @@ describe("bobbit verbose behavior and conservative limit guard", () => {
 });
 
 describe("bobbit compact projection catalogue", () => {
-	it("pins the shared preview contract", () => {
+	it("pins the shared preview length", () => {
 		expect(COMPACT_TEXT_PREVIEW_CHARS).toBe(200);
-		expect(COMPACT_TRUNCATION_SUFFIX).toBe("…(truncated; pass verbose:true)");
-		expect(CONTEXT_HEAVY_LIMIT).toBe(10);
 	});
 
 	for (const toolName of Object.keys(BOBBIT_OPERATIONS) as Array<keyof typeof BOBBIT_OPERATIONS>) {

@@ -2,19 +2,24 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { html, type TemplateResult } from "lit";
-import { ArrowLeft, Eye, Play, Pause, Trash2, UserCheck, Zap } from "lucide";
-import { fetchStaff, updateStaffAgent, deleteStaffAgent, enqueueInboxManual, refreshSessions, fetchRoles, type StaffAgent, type RoleData } from "./api.js";
+import { ArrowLeft, Play, Pause, Trash2, UserCheck } from "lucide";
+import { fetchStaff, updateStaffAgent, deleteStaffAgent, refreshSessions, fetchRoles, gatewayFetch, type StaffAgent, type RoleData } from "./api.js";
 import { state, renderApp } from "./state.js";
 import { setHashRoute } from "./routing.js";
-import { connectToSession } from "./session-manager.js";
-import { BOBBIT_HUE_ROTATIONS, ACCESSORY_IDS, sessionColorMap, setSessionColor, statusBobbit, getAccessory } from "./session-colors.js";
+import { BOBBIT_HUE_ROTATIONS, ACCESSORY_IDS, sessionColorMap, setSessionColor, getAccessory } from "./session-colors.js";
 import { ensureMarkdownBlock } from "../ui/lazy/markdown-block.js";
+import { renderIdleBlobCanvas, renderStaticSidebarBobbitCanvas } from "../ui/bobbit-render.js";
 
 // ============================================================================
 // STATE
 // ============================================================================
 
 type View = "list" | "edit";
+
+const BOBBIT_COLOR_NAMES = [
+	"Rose", "Coral", "Orange", "Gold", "Lime", "Green", "Leaf",
+	"Jade", "Emerald", "Mint", "Seafoam", "Teal", "Cyan", "Blue",
+] as const;
 
 let currentView: View = "list";
 let staffList: StaffAgent[] = [];
@@ -28,23 +33,90 @@ let editName = "";
 let editDescription = "";
 let editPrompt = "";
 let editPromptEditMode = false;
-let editCwd = "";
+let editRuntimeCwd = "";
 let editTriggers: TriggerDef[] = [];
 let editMemory = "";
 let editContextPolicy: "preserve" | "compact" = "compact";
-let editWakePrompt = "Manual wake";
-let wakeFeedback: string | null = null;
+let editTab: "prompt" | "triggers" = "prompt";
 
 // Session appearance state
 let editColorIndex = -1;
 let editAccessory = "none";
+let colorUserTouched = false;
 // True once the user manually picks an accessory this edit session. Gates the
 // role-driven accessory pre-fill so a manual choice is never overridden.
 let accessoryUserTouched = false;
 
-// Role picker state
+// Role/accessory picker state
 let editRoleId: string | null = null;
 let roles: RoleData[] = [];
+let roleDropdownOpen = false;
+let accessoryDropdownOpen = false;
+let colorDropdownOpen = false;
+
+type PickerKind = "role" | "accessory" | "color";
+
+const pickerSelectors: Record<PickerKind, { trigger: string; options: string }> = {
+	role: { trigger: "[data-testid='staff-role-select']", options: "[data-picker='role'] [role='option']" },
+	accessory: { trigger: "[data-testid='staff-accessory-select']", options: "[data-picker='accessory'] [role='option']" },
+	color: { trigger: "[data-testid='staff-color-select']", options: "[data-picker='color'] [role='option']" },
+};
+
+function focusAfterRender(selector: string, index?: number): void {
+	requestAnimationFrame(() => {
+		const matches = Array.from(document.querySelectorAll<HTMLElement>(selector));
+		const target = index === undefined ? matches[0] : matches[Math.max(0, Math.min(index, matches.length - 1))];
+		target?.focus();
+	});
+}
+
+function setOpenPicker(kind: PickerKind | null, focusIndex?: number): void {
+	roleDropdownOpen = kind === "role";
+	accessoryDropdownOpen = kind === "accessory";
+	colorDropdownOpen = kind === "color";
+	renderApp();
+	if (kind) focusAfterRender(pickerSelectors[kind].options, focusIndex);
+}
+
+function closePicker(kind: PickerKind, restoreFocus = false): void {
+	setOpenPicker(null);
+	if (restoreFocus) focusAfterRender(pickerSelectors[kind].trigger);
+}
+
+function handlePickerTriggerKeydown(event: KeyboardEvent, kind: PickerKind, selectedIndex: number, optionCount: number): void {
+	if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Home" && event.key !== "End" && event.key !== "Escape") return;
+	event.preventDefault();
+	if (event.key === "Escape") {
+		closePicker(kind, true);
+		return;
+	}
+	const index = event.key === "End"
+		? optionCount - 1
+		: event.key === "Home"
+			? 0
+			: Math.max(0, selectedIndex);
+	setOpenPicker(kind, index);
+}
+
+function handlePickerOptionKeydown(event: KeyboardEvent, kind: PickerKind, index: number, optionCount: number): void {
+	let nextIndex: number | undefined;
+	if (event.key === "ArrowDown") nextIndex = (index + 1) % optionCount;
+	else if (event.key === "ArrowUp") nextIndex = (index - 1 + optionCount) % optionCount;
+	else if (event.key === "Home") nextIndex = 0;
+	else if (event.key === "End") nextIndex = optionCount - 1;
+	else if (event.key === "Escape") {
+		event.preventDefault();
+		closePicker(kind, true);
+		return;
+	} else if (event.key === "Tab") {
+		requestAnimationFrame(() => setOpenPicker(null));
+		return;
+	} else {
+		return;
+	}
+	event.preventDefault();
+	focusAfterRender(pickerSelectors[kind].options, nextIndex);
+}
 
 interface TriggerDef {
 	type: string;
@@ -98,13 +170,17 @@ function showEdit(agent: StaffAgent): void {
 	editDescription = agent.description;
 	editPrompt = agent.systemPrompt;
 	editPromptEditMode = false;
-	editCwd = agent.cwd;
+	editRuntimeCwd = "";
 	editTriggers = parseTriggers(JSON.stringify(agent.triggers));
 	editMemory = agent.memory || "";
 	editContextPolicy = agent.contextPolicy === "preserve" ? "preserve" : "compact";
 	editRoleId = agent.roleId || null;
+	colorUserTouched = false;
+	roleDropdownOpen = false;
+	accessoryDropdownOpen = false;
+	colorDropdownOpen = false;
 	accessoryUserTouched = false;
-	wakeFeedback = null;
+	editTab = "prompt";
 	saving = false;
 	deleting = false;
 	loadSessionAppearance(agent);
@@ -121,13 +197,17 @@ export function navigateToStaffEdit(staffId: string): void {
 		editDescription = agent.description;
 		editPrompt = agent.systemPrompt;
 		editPromptEditMode = false;
-		editCwd = agent.cwd;
+		editRuntimeCwd = "";
 		editTriggers = parseTriggers(JSON.stringify(agent.triggers));
 		editMemory = agent.memory || "";
 		editContextPolicy = agent.contextPolicy === "preserve" ? "preserve" : "compact";
 		editRoleId = agent.roleId || null;
+		colorUserTouched = false;
+		roleDropdownOpen = false;
+		accessoryDropdownOpen = false;
+		colorDropdownOpen = false;
 		accessoryUserTouched = false;
-		wakeFeedback = null;
+		editTab = "prompt";
 		saving = false;
 		deleting = false;
 		loadSessionAppearance(agent);
@@ -145,11 +225,32 @@ export function navigateToStaffEdit(staffId: string): void {
 }
 
 async function loadSessionAppearance(agent: StaffAgent): Promise<void> {
-	const session = agent.currentSessionId
-		? state.gatewaySessions.find((s) => s.id === agent.currentSessionId)
+	const sessionId = agent.currentSessionId;
+	const cachedSession = sessionId
+		? state.gatewaySessions.find((s) => s.id === sessionId)
 		: undefined;
-	editColorIndex = session ? (sessionColorMap.get(session.id) ?? -1) : -1;
+	editColorIndex = cachedSession ? (sessionColorMap.get(cachedSession.id) ?? -1) : -1;
 	editAccessory = agent.accessory || "none";
+	editRuntimeCwd = cachedSession?.cwd || (sessionId ? "Loading…" : "No active session");
+	renderApp();
+
+	if (!sessionId) return;
+	try {
+		const response = await gatewayFetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
+		if (!response.ok) throw new Error(`Failed to load session: ${response.status}`);
+		const currentSession = await response.json() as { id?: string; cwd?: string; colorIndex?: number };
+		// Ignore a late response after navigation switched to another staff record.
+		if (selectedStaff?.id !== agent.id || selectedStaff.currentSessionId !== sessionId) return;
+		editRuntimeCwd = typeof currentSession.cwd === "string" && currentSession.cwd.length > 0
+			? currentSession.cwd
+			: "Runtime directory unavailable";
+		if (!colorUserTouched && typeof currentSession.colorIndex === "number") editColorIndex = currentSession.colorIndex;
+		renderApp();
+	} catch {
+		if (selectedStaff?.id !== agent.id || selectedStaff.currentSessionId !== sessionId) return;
+		if (!cachedSession?.cwd) editRuntimeCwd = "Runtime directory unavailable";
+		renderApp();
+	}
 }
 
 // ============================================================================
@@ -174,7 +275,6 @@ async function handleSave(): Promise<void> {
 		name: editName,
 		description: editDescription,
 		systemPrompt: editPrompt,
-		cwd: editCwd,
 		triggers: editTriggers,
 		memory: editMemory,
 		contextPolicy: editContextPolicy,
@@ -219,16 +319,28 @@ async function handleDelete(): Promise<void> {
 	renderApp();
 }
 
-function onRoleChange(e: Event): void {
-	const value = (e.target as HTMLSelectElement).value;
+function selectRole(value: string): void {
 	editRoleId = value || null;
+	roleDropdownOpen = false;
 	// Pre-fill the accessory from the selected role, but only as a default —
 	// never override an accessory the user has manually chosen this session.
 	if (editRoleId && !accessoryUserTouched) {
 		const role = roles.find((r) => r.name === editRoleId);
 		if (role) editAccessory = role.accessory || "none";
 	}
-	renderApp();
+	closePicker("role", true);
+}
+
+function selectAccessory(value: string): void {
+	editAccessory = value;
+	accessoryUserTouched = true;
+	closePicker("accessory", true);
+}
+
+function selectColor(index: number): void {
+	editColorIndex = index;
+	colorUserTouched = true;
+	closePicker("color", true);
 }
 
 async function handleTogglePause(): Promise<void> {
@@ -239,22 +351,6 @@ async function handleTogglePause(): Promise<void> {
 		staffList = await fetchStaff();
 		const updated = staffList.find((s) => s.id === selectedStaff!.id);
 		if (updated) selectedStaff = updated;
-	}
-	renderApp();
-}
-
-async function handleWake(): Promise<void> {
-	if (!selectedStaff) return;
-	const prompt = editWakePrompt.trim() || "Manual wake";
-	const result = await enqueueInboxManual(selectedStaff.id, {
-		title: "Manual wake",
-		prompt,
-		source: { type: "manual_ui" },
-	});
-	if (result?.entry) {
-		wakeFeedback = "Enqueued. The agent will process when idle.";
-	} else {
-		wakeFeedback = "Failed to enqueue. Check connection.";
 	}
 	renderApp();
 }
@@ -469,6 +565,123 @@ function triggerSummary(triggers: any[]): string {
 	}).join(", ");
 }
 
+function blobAccessoryClass(accessory: string): string {
+	return accessory !== "none"
+		? `bobbit-${accessory === "crown" ? "crowned" : accessory}`
+		: "";
+}
+
+function normalizedColorIndex(hueIndex: number): number {
+	return hueIndex >= 0 ? hueIndex : BOBBIT_HUE_ROTATIONS.indexOf(0);
+}
+
+/** One fixed sprite slot shared by every identity dropdown. */
+function renderPickerSprite(accessory: string, hueIndex: number): TemplateResult {
+	return html`
+		<span class="inline-flex items-center justify-center w-5 h-5 shrink-0" data-testid="staff-picker-sprite">
+			<span class="inline-flex relative" style="left:2px;top:1px;">
+				${renderStaticSidebarBobbitCanvas({
+					hueRotate: BOBBIT_HUE_ROTATIONS[normalizedColorIndex(hueIndex)],
+					accessory: getAccessory(accessory),
+				})}
+			</span>
+		</span>
+	`;
+}
+
+/** Render the staff identity at its full, unscaled in-chat size. */
+function renderEditAvatar(): TemplateResult {
+	return renderIdleBlobCanvas({
+		accId: editAccessory,
+		accClass: blobAccessoryClass(editAccessory),
+		size: 76,
+		hueIndex: normalizedColorIndex(editColorIndex),
+		clip: false,
+	});
+}
+
+function renderPromptTab(): TemplateResult {
+	return html`
+		<div class="flex flex-col gap-4" data-testid="staff-prompt-tab-panel" role="tabpanel">
+			<div>
+				<div class="flex items-center justify-between mb-1.5">
+					<label class="text-xs text-muted-foreground font-medium">System Prompt</label>
+					<button
+						class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+						title="Toggle prompt edit mode"
+						@click=${() => { editPromptEditMode = !editPromptEditMode; renderApp(); }}
+					>
+						${editPromptEditMode ? "Preview" : "Edit"}
+					</button>
+				</div>
+				${editPromptEditMode
+					? html`<textarea
+							class="p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
+							style="min-height:150px; max-height:400px; width:100%"
+							.value=${editPrompt}
+							@input=${(e: Event) => { editPrompt = (e.target as HTMLTextAreaElement).value; }}
+						></textarea>`
+					: html`<div class="p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm" style="min-height:150px; max-height:400px">
+							<markdown-block .content=${editPrompt || "_No prompt content yet_"}></markdown-block>
+						</div>`
+				}
+			</div>
+			<div>
+				<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Pinned Context (optional)</label>
+				<p class="text-[10px] text-muted-foreground mb-1">Injected when the agent session starts or restarts. Survives conversation compaction.</p>
+				<textarea
+					class="w-full p-2 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
+					rows="4"
+					.value=${editMemory}
+					@input=${(e: Event) => { editMemory = (e.target as HTMLTextAreaElement).value; }}
+				></textarea>
+			</div>
+			<div class="context-policy-group" data-testid="context-policy">
+				<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Context Policy</label>
+				<p class="text-[10px] text-muted-foreground mb-1">What happens before a wake digest is sent when the inbox has pending entries.</p>
+				<div class="flex gap-3">
+					<label class="flex items-center gap-1.5 text-sm cursor-pointer">
+						<input
+							type="radio"
+							name="contextPolicy"
+							value="compact"
+							.checked=${editContextPolicy === "compact"}
+							@change=${() => { editContextPolicy = "compact"; renderApp(); }}
+						/>
+						<span>Compact <span class="text-[10px] text-muted-foreground">(default)</span></span>
+					</label>
+					<label class="flex items-center gap-1.5 text-sm cursor-pointer">
+						<input
+							type="radio"
+							name="contextPolicy"
+							value="preserve"
+							.checked=${editContextPolicy === "preserve"}
+							@change=${() => { editContextPolicy = "preserve"; renderApp(); }}
+						/>
+						<span>Preserve</span>
+					</label>
+				</div>
+			</div>
+		</div>
+	`;
+}
+
+function renderTriggersTab(): TemplateResult {
+	return html`
+		<div data-testid="staff-triggers-tab-panel" role="tabpanel">
+			<div class="flex items-center justify-between mb-1.5">
+				<label class="text-xs text-muted-foreground font-medium">Triggers</label>
+				<button
+					class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+					title="Add trigger"
+					@click=${addTrigger}
+				>+ Add trigger</button>
+			</div>
+			${renderTriggersEditor()}
+		</div>
+	`;
+}
+
 // ============================================================================
 // LIST VIEW
 // ============================================================================
@@ -542,14 +755,14 @@ function renderListView(): TemplateResult {
 function renderEditView(): TemplateResult {
 	if (!selectedStaff) return html`<div class="p-4">Staff agent not found</div>`;
 
-	const acc = getAccessory(editAccessory);
-	const hasAccessory = acc.id !== "none" && acc.shadow !== "";
-	const ROW_SIZE = Math.ceil(BOBBIT_HUE_ROTATIONS.length / 2);
+	const displayColorIndex = editColorIndex >= 0 ? editColorIndex : BOBBIT_HUE_ROTATIONS.indexOf(0);
+	const roleOptionIndex = editRoleId ? Math.max(0, roles.findIndex((role) => role.name === editRoleId) + 1) : 0;
+	const accessoryOptionIndex = Math.max(0, ACCESSORY_IDS.indexOf(editAccessory));
 
 	return html`
 		<div class="flex-1 flex flex-col overflow-hidden">
-			<div class="flex items-center justify-between p-4 border-b border-border shrink-0">
-				<div class="flex items-center gap-2">
+			<div class="flex flex-wrap items-center justify-between gap-2 p-4 border-b border-border shrink-0">
+				<div class="flex min-w-0 items-center gap-2">
 					${Button({
 						variant: "ghost",
 						size: "sm",
@@ -559,7 +772,7 @@ function renderEditView(): TemplateResult {
 					<h1 class="text-lg font-semibold">${selectedStaff.name}</h1>
 					${stateBadge(selectedStaff.state)}
 				</div>
-				<div class="flex items-center gap-2">
+				<div class="flex flex-wrap items-center justify-end gap-2" data-testid="staff-edit-header-actions">
 					${Button({
 						variant: "ghost",
 						size: "sm",
@@ -567,37 +780,60 @@ function renderEditView(): TemplateResult {
 						children: html`<span class="inline-flex items-center gap-1">${icon(selectedStaff.state === "paused" ? Play : Pause, "sm")} ${selectedStaff.state === "paused" ? "Resume" : "Pause"}</span>`,
 					})}
 					${Button({
-						variant: "default",
-						size: "sm",
-						onClick: handleWake,
-						children: html`<span class="inline-flex items-center gap-1">${icon(Zap, "sm")} Wake Now</span>`,
-					})}
-					${selectedStaff.currentSessionId ? Button({
-						variant: "outline",
-						size: "sm",
-						onClick: () => connectToSession(selectedStaff!.currentSessionId!, true),
-						children: html`<span class="inline-flex items-center gap-1">${icon(Eye, "sm")} View Session</span>`,
-					}) : ""}
-					${Button({
 						variant: "ghost",
 						size: "sm",
 						onClick: handleDelete,
 						disabled: deleting,
 						children: html`<span class="inline-flex items-center gap-1 text-destructive">${icon(Trash2, "sm")} Delete</span>`,
 					})}
+					${Button({
+						variant: "ghost",
+						size: "sm",
+						onClick: showList,
+						children: "Cancel",
+					})}
+					${Button({
+						variant: "default",
+						size: "sm",
+						onClick: handleSave,
+						disabled: saving || hasInvalidGoalTriggers(editTriggers),
+						children: saving ? "Saving..." : "Save Changes",
+					})}
 				</div>
 			</div>
 			<div class="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
-				<div>
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Name</label>
-					${Input({
-						type: "text",
-						value: editName,
-						placeholder: "Staff agent name",
-						onInput: (e: Event) => { editName = (e.target as HTMLInputElement).value; renderApp(); },
-					})}
+				<div class="flex items-center gap-3">
+					<div class="w-[124px] h-[124px] shrink-0 flex items-center justify-center" data-testid="staff-edit-avatar">
+						<div class="relative" style="left:44px" data-testid="staff-edit-avatar-sprite">${renderEditAvatar()}</div>
+					</div>
+					<div class="min-w-0 flex-1 flex flex-col gap-2">
+						<div class="grid grid-cols-[8rem_minmax(0,1fr)] items-center gap-3" data-testid="staff-edit-name-field">
+							<label class="text-right text-xs text-muted-foreground font-medium">Name</label>
+							${Input({
+								type: "text",
+								value: editName,
+								placeholder: "Staff agent name",
+								onInput: (e: Event) => { editName = (e.target as HTMLInputElement).value; renderApp(); },
+							})}
+						</div>
+						<div class="grid grid-cols-[8rem_minmax(0,1fr)] items-center gap-3" data-testid="staff-edit-cwd-field">
+							<label class="text-right text-xs text-muted-foreground font-medium">Working Directory</label>
+							<input
+								type="text"
+								class="w-full h-9 px-3 text-sm rounded-md border border-border bg-muted text-muted-foreground"
+								.value=${editRuntimeCwd}
+								readonly
+								aria-readonly="true"
+								title="Current agent runtime directory"
+							/>
+						</div>
+						<div class="grid grid-cols-[8rem_minmax(0,1fr)] items-center gap-3" data-testid="staff-edit-sandbox-field">
+							<label class="text-right text-xs text-muted-foreground font-medium">Sandbox</label>
+							<div class="h-9 px-3 flex items-center text-sm text-foreground">${selectedStaff.sandboxed ? "Enabled" : "Disabled"}</div>
+						</div>
+					</div>
 				</div>
-				<div>
+				<div data-testid="staff-edit-description-field">
 					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Description</label>
 					<textarea
 						class="w-full p-2 text-sm rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
@@ -607,177 +843,147 @@ function renderEditView(): TemplateResult {
 						@input=${(e: Event) => { editDescription = (e.target as HTMLTextAreaElement).value; renderApp(); }}
 					></textarea>
 				</div>
-				<div>
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Working Directory</label>
-					${Input({
-						type: "text",
-						value: editCwd,
-						placeholder: state.defaultCwd || "(server default)",
-						onInput: (e: Event) => { editCwd = (e.target as HTMLInputElement).value; renderApp(); },
-					})}
-				</div>
-				<!-- Sandbox indicator (read-only; chosen at creation, immutable) -->
-				<div>
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Sandbox</label>
-					<div class="text-sm text-foreground">
-						${selectedStaff.sandboxed ? "Enabled" : "Disabled"}
-					</div>
-				</div>
-				<!-- Colour picker -->
-				<div>
-					<div class="text-xs text-muted-foreground mb-2 font-medium">Colour</div>
-					<div class="flex flex-col gap-2">
-						${[0, ROW_SIZE].map((start) => html`
-							<div class="flex gap-2 justify-center">
-								${BOBBIT_HUE_ROTATIONS.slice(start, start + ROW_SIZE).map((rot: number, j: number) => {
-									const i = start + j;
-									const isSelected = editColorIndex === i;
-									const accShadow = hasAccessory ? acc.shadow : "";
-									const accCounterFilter = acc.id !== "flask" ? `filter:hue-rotate(${-rot}deg);` : "";
-									return html`
+				<div class="grid grid-cols-1 sm:grid-cols-3 gap-3" data-testid="staff-identity-selects">
+					<div>
+						<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Role</label>
+						<div class="relative" data-testid="staff-role-picker" data-picker="role">
+							<button
+								data-testid="staff-role-select"
+								class="w-full h-9 text-left px-2 text-sm rounded-md border border-border bg-background hover:bg-secondary/50 transition-colors flex items-center gap-1.5"
+								aria-label="Select role"
+								aria-haspopup="listbox"
+								aria-controls="staff-role-options"
+								aria-expanded=${roleDropdownOpen ? "true" : "false"}
+								@keydown=${(event: KeyboardEvent) => handlePickerTriggerKeydown(event, "role", roleOptionIndex, roles.length + 1)}
+								@click=${() => roleDropdownOpen ? closePicker("role") : setOpenPicker("role", roleOptionIndex)}
+							>
+								${renderPickerSprite(roles.find((role) => role.name === editRoleId)?.accessory || "none", displayColorIndex)}
+								<span class="flex-1 truncate ${editRoleId ? "text-foreground" : "text-muted-foreground"}">${roles.find((role) => role.name === editRoleId)?.label || "No role"}</span>
+								<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="shrink-0 text-muted-foreground transition-transform ${roleDropdownOpen ? "rotate-180" : ""}"><path d="m6 9 6 6 6-6"/></svg>
+							</button>
+							${roleDropdownOpen ? html`
+								<div id="staff-role-options" class="absolute z-50 mt-1 w-full rounded-md border border-border bg-popover text-popover-foreground shadow-lg py-1 max-h-[240px] overflow-y-auto" role="listbox" aria-label="Role options">
+									<button
+										class="w-full text-left px-3 py-2 text-sm hover:bg-accent hover:text-accent-foreground transition-colors flex items-center gap-2 ${!editRoleId ? "bg-accent/50" : ""}"
+										role="option"
+										aria-selected=${!editRoleId ? "true" : "false"}
+										tabindex=${roleOptionIndex === 0 ? "0" : "-1"}
+										@keydown=${(event: KeyboardEvent) => handlePickerOptionKeydown(event, "role", 0, roles.length + 1)}
+										@click=${() => selectRole("")}
+									>
+										${renderPickerSprite("none", displayColorIndex)}
+										<span>No role</span>
+									</button>
+									${roles.map((role, index) => html`
 										<button
-											class="relative transition-all rounded-lg flex items-center justify-center
-												${isSelected ? "ring-2 ring-primary ring-offset-1 ring-offset-background" : "hover:bg-secondary/50"}"
-											style="width:${hasAccessory ? 34 : 28}px;height:24px;"
-											title="Colour ${i + 1}"
-											@click=${() => { editColorIndex = i; renderApp(); }}
+											class="w-full text-left px-3 py-2 text-sm hover:bg-accent hover:text-accent-foreground transition-colors flex items-center gap-2 ${editRoleId === role.name ? "bg-accent/50" : ""}"
+											role="option"
+											aria-selected=${editRoleId === role.name ? "true" : "false"}
+											tabindex=${roleOptionIndex === index + 1 ? "0" : "-1"}
+											data-value=${role.name}
+											@keydown=${(event: KeyboardEvent) => handlePickerOptionKeydown(event, "role", index + 1, roles.length + 1)}
+											@click=${() => selectRole(role.name)}
 										>
-											<span style="position:absolute;left:${hasAccessory ? 3 : 4}px;top:3px;filter:hue-rotate(${rot}deg);">
-												<span style="position:absolute;left:0;top:0;display:block;width:1px;height:1px;image-rendering:pixelated;transform:scale(2);transform-origin:0 0;box-shadow:3px 0px 0 #000,4px 0px 0 #000,5px 0px 0 #000,6px 0px 0 #000,7px 0px 0 #000,2px 1px 0 #000,3px 1px 0 #8ec63f,4px 1px 0 #8ec63f,5px 1px 0 #8ec63f,6px 1px 0 #b5d98a,7px 1px 0 #b5d98a,8px 1px 0 #000,1px 2px 0 #000,2px 2px 0 #8ec63f,3px 2px 0 #8ec63f,4px 2px 0 #8ec63f,5px 2px 0 #8ec63f,6px 2px 0 #8ec63f,7px 2px 0 #b5d98a,8px 2px 0 #8ec63f,9px 2px 0 #000,0px 3px 0 #000,1px 3px 0 #8ec63f,2px 3px 0 #8ec63f,3px 3px 0 #8ec63f,4px 3px 0 #8ec63f,5px 3px 0 #8ec63f,6px 3px 0 #8ec63f,7px 3px 0 #8ec63f,8px 3px 0 #8ec63f,9px 3px 0 #000,0px 4px 0 #000,1px 4px 0 #8ec63f,2px 4px 0 #8ec63f,3px 4px 0 #1a3010,4px 4px 0 #8ec63f,5px 4px 0 #8ec63f,6px 4px 0 #1a3010,7px 4px 0 #8ec63f,8px 4px 0 #8ec63f,9px 4px 0 #000,0px 5px 0 #000,1px 5px 0 #8ec63f,2px 5px 0 #8ec63f,3px 5px 0 #1a3010,4px 5px 0 #8ec63f,5px 5px 0 #8ec63f,6px 5px 0 #1a3010,7px 5px 0 #8ec63f,8px 5px 0 #8ec63f,9px 5px 0 #000,0px 6px 0 #000,1px 6px 0 #6b9930,2px 6px 0 #8ec63f,3px 6px 0 #8ec63f,4px 6px 0 #8ec63f,5px 6px 0 #8ec63f,6px 6px 0 #8ec63f,7px 6px 0 #8ec63f,8px 6px 0 #8ec63f,9px 6px 0 #000,1px 7px 0 #000,2px 7px 0 #6b9930,3px 7px 0 #8ec63f,4px 7px 0 #8ec63f,5px 7px 0 #8ec63f,6px 7px 0 #8ec63f,7px 7px 0 #8ec63f,8px 7px 0 #000,2px 8px 0 #000,3px 8px 0 #000,4px 8px 0 #000,5px 8px 0 #000,6px 8px 0 #000,7px 8px 0 #000;"></span>
-												${hasAccessory ? html`<span style="position:absolute;left:0;top:0;display:block;width:1px;height:1px;image-rendering:pixelated;transform:scale(2);transform-origin:0 0;box-shadow:${accShadow};${accCounterFilter}"></span>` : ""}
-											</span>
+											${renderPickerSprite(role.accessory || "none", displayColorIndex)}
+											<span class="truncate">${role.label || role.name}</span>
 										</button>
-									`;
-								})}
-							</div>
-						`)}
+									`)}
+								</div>
+							` : ""}
+						</div>
+					</div>
+					<div>
+						<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Accessory</label>
+						<div class="relative" data-testid="staff-accessory-picker" data-picker="accessory">
+							<button
+								data-testid="staff-accessory-select"
+								data-value=${editAccessory}
+								class="w-full h-9 text-left px-2 text-sm rounded-md border border-border bg-background hover:bg-secondary/50 transition-colors flex items-center gap-1.5"
+								aria-label="Select accessory"
+								aria-haspopup="listbox"
+								aria-controls="staff-accessory-options"
+								aria-expanded=${accessoryDropdownOpen ? "true" : "false"}
+								@keydown=${(event: KeyboardEvent) => handlePickerTriggerKeydown(event, "accessory", accessoryOptionIndex, ACCESSORY_IDS.length)}
+								@click=${() => accessoryDropdownOpen ? closePicker("accessory") : setOpenPicker("accessory", accessoryOptionIndex)}
+							>
+								${renderPickerSprite(editAccessory, displayColorIndex)}
+								<span class="flex-1 truncate">${getAccessory(editAccessory).label}</span>
+								<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="shrink-0 text-muted-foreground transition-transform ${accessoryDropdownOpen ? "rotate-180" : ""}"><path d="m6 9 6 6 6-6"/></svg>
+							</button>
+							${accessoryDropdownOpen ? html`
+								<div id="staff-accessory-options" class="absolute z-50 mt-1 w-full rounded-md border border-border bg-popover text-popover-foreground shadow-lg py-1 max-h-[240px] overflow-y-auto" role="listbox" aria-label="Accessory options">
+									${ACCESSORY_IDS.map((accId: string, index: number) => html`
+										<button
+											class="w-full text-left px-3 py-2 text-sm hover:bg-accent hover:text-accent-foreground transition-colors flex items-center gap-2 ${editAccessory === accId ? "bg-accent/50" : ""}"
+											role="option"
+											aria-selected=${editAccessory === accId ? "true" : "false"}
+											tabindex=${accessoryOptionIndex === index ? "0" : "-1"}
+											data-value=${accId}
+											title=${getAccessory(accId).label}
+											@keydown=${(event: KeyboardEvent) => handlePickerOptionKeydown(event, "accessory", index, ACCESSORY_IDS.length)}
+											@click=${() => selectAccessory(accId)}
+										>
+											${renderPickerSprite(accId, displayColorIndex)}
+											<span class="truncate">${getAccessory(accId).label}</span>
+										</button>
+									`)}
+								</div>
+							` : ""}
+						</div>
+					</div>
+					<div>
+						<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Colour</label>
+						<div class="relative" data-testid="staff-color-picker" data-picker="color">
+							<button
+								data-testid="staff-color-select"
+								data-value=${String(displayColorIndex)}
+								class="w-full h-9 text-left px-2 text-sm rounded-md border border-border bg-background hover:bg-secondary/50 transition-colors flex items-center gap-1.5"
+								aria-label="Select colour"
+								aria-haspopup="listbox"
+								aria-controls="staff-color-options"
+								aria-expanded=${colorDropdownOpen ? "true" : "false"}
+								@keydown=${(event: KeyboardEvent) => handlePickerTriggerKeydown(event, "color", displayColorIndex, BOBBIT_HUE_ROTATIONS.length)}
+								@click=${() => colorDropdownOpen ? closePicker("color") : setOpenPicker("color", displayColorIndex)}
+							>
+								${renderPickerSprite(editAccessory, displayColorIndex)}
+								<span class="flex-1 truncate">${BOBBIT_COLOR_NAMES[displayColorIndex]}</span>
+								<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="shrink-0 text-muted-foreground transition-transform ${colorDropdownOpen ? "rotate-180" : ""}"><path d="m6 9 6 6 6-6"/></svg>
+							</button>
+							${colorDropdownOpen ? html`
+								<div id="staff-color-options" class="absolute z-50 mt-1 w-full rounded-md border border-border bg-popover text-popover-foreground shadow-lg py-1 max-h-[240px] overflow-y-auto" role="listbox" aria-label="Colour options">
+									${BOBBIT_HUE_ROTATIONS.map((_rotation: number, index: number) => html`
+										<button
+											class="w-full text-left px-3 py-2 text-sm hover:bg-accent hover:text-accent-foreground transition-colors flex items-center gap-2 ${displayColorIndex === index ? "bg-accent/50" : ""}"
+											role="option"
+											aria-selected=${displayColorIndex === index ? "true" : "false"}
+											tabindex=${displayColorIndex === index ? "0" : "-1"}
+											data-value=${String(index)}
+											@keydown=${(event: KeyboardEvent) => handlePickerOptionKeydown(event, "color", index, BOBBIT_HUE_ROTATIONS.length)}
+											@click=${() => selectColor(index)}
+										>
+											${renderPickerSprite(editAccessory, index)}
+											<span class="truncate">${BOBBIT_COLOR_NAMES[index]}</span>
+										</button>
+									`)}
+								</div>
+							` : ""}
+						</div>
 					</div>
 				</div>
-				<!-- Role picker -->
-				<div data-testid="staff-role-picker">
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Role</label>
-					<p class="text-[10px] text-muted-foreground mb-1">Optional. Prepends the role's prompt context and pre-fills the accessory.</p>
-					<select
-						data-testid="staff-role-select"
-						class="w-full h-9 px-2 text-sm rounded-md border border-border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-						.value=${editRoleId ?? ""}
-						@change=${onRoleChange}
-					>
-						<option value="" ?selected=${!editRoleId}>No role</option>
-						${roles.map((r) => html`<option value=${r.name} ?selected=${editRoleId === r.name}>${r.label || r.name}</option>`)}
-					</select>
+				<div class="flex items-center gap-1 border-b border-border" role="group" aria-label="Staff configuration" data-testid="staff-edit-tabs">
+					<button
+						class="px-3 py-2 text-sm font-medium border-b-2 transition-colors ${editTab === "prompt" ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"}"
+						aria-pressed=${editTab === "prompt" ? "true" : "false"}
+						@click=${() => { editTab = "prompt"; renderApp(); }}
+					>Prompt</button>
+					<button
+						class="px-3 py-2 text-sm font-medium border-b-2 transition-colors ${editTab === "triggers" ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"}"
+						aria-pressed=${editTab === "triggers" ? "true" : "false"}
+						@click=${() => { editTab = "triggers"; renderApp(); }}
+					>Triggers</button>
 				</div>
-				<!-- Accessory picker -->
-				<div>
-					<div class="text-xs text-muted-foreground mb-2 font-medium">Accessory</div>
-					<div class="flex flex-wrap gap-2 justify-center">
-						${ACCESSORY_IDS.map((accId: string) => {
-							const a = getAccessory(accId);
-							const isSelected = editAccessory === accId;
-							return html`
-								<button
-									class="relative transition-all rounded-lg flex flex-col items-center gap-0.5 px-1 py-1
-										${isSelected ? "ring-2 ring-primary ring-offset-1 ring-offset-background" : "hover:bg-secondary/50"}"
-									style="width:40px;"
-									title="${a.label}"
-									@click=${() => { editAccessory = accId; accessoryUserTouched = true; renderApp(); }}
-								>
-									<span class="block" style="width:20px;height:18px;position:relative;">
-										${statusBobbit("idle", false, undefined, false, false, false, false, accId, true)}
-									</span>
-									<span class="text-[9px] text-muted-foreground truncate w-full text-center">${a.label}</span>
-								</button>
-							`;
-						})}
-					</div>
-				</div>
-				<div>
-					<div class="flex items-center justify-between mb-1.5">
-						<label class="text-xs text-muted-foreground font-medium">Triggers</label>
-						<button
-							class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
-							title="Add trigger"
-							@click=${addTrigger}
-						>+ Add trigger</button>
-					</div>
-					${renderTriggersEditor()}
-				</div>
-				<div>
-					<div class="flex items-center justify-between mb-1.5">
-						<label class="text-xs text-muted-foreground font-medium">System Prompt</label>
-						<button
-							class="text-[10px] px-2 py-0.5 rounded border border-border text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
-							title="Toggle prompt edit mode"
-							@click=${() => { editPromptEditMode = !editPromptEditMode; renderApp(); }}
-						>
-							${editPromptEditMode ? "Preview" : "Edit"}
-						</button>
-					</div>
-					${editPromptEditMode
-						? html`<textarea
-								class="p-3 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
-								style="min-height:150px; max-height:400px; width:100%"
-								.value=${editPrompt}
-								@input=${(e: Event) => { editPrompt = (e.target as HTMLTextAreaElement).value; }}
-							></textarea>`
-						: html`<div class="p-3 rounded-md border border-border bg-secondary/30 overflow-y-auto text-sm" style="min-height:150px; max-height:400px">
-								<markdown-block .content=${editPrompt || "_No prompt content yet_"}></markdown-block>
-							</div>`
-					}
-				</div>
-				<div>
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Pinned Context (optional)</label>
-					<p class="text-[10px] text-muted-foreground mb-1">Injected into the system prompt. Survives conversation compaction.</p>
-					<textarea
-						class="w-full p-2 text-sm font-mono rounded-md border border-border bg-background text-foreground resize-y focus:outline-none focus:ring-1 focus:ring-ring"
-						rows="4"
-						.value=${editMemory}
-						@input=${(e: Event) => { editMemory = (e.target as HTMLTextAreaElement).value; }}
-					></textarea>
-				</div>
+				${editTab === "prompt" ? renderPromptTab() : renderTriggersTab()}
 
-				<div class="context-policy-group" data-testid="context-policy">
-					<label class="text-xs text-muted-foreground mb-1.5 block font-medium">Context Policy</label>
-					<p class="text-[10px] text-muted-foreground mb-1">What happens before a wake digest is sent when the inbox has pending entries.</p>
-					<div class="flex gap-3">
-						<label class="flex items-center gap-1.5 text-sm cursor-pointer">
-							<input
-								type="radio"
-								name="contextPolicy"
-								value="compact"
-								.checked=${editContextPolicy === "compact"}
-								@change=${() => { editContextPolicy = "compact"; renderApp(); }}
-							/>
-							<span>Compact <span class="text-[10px] text-muted-foreground">(default)</span></span>
-						</label>
-						<label class="flex items-center gap-1.5 text-sm cursor-pointer">
-							<input
-								type="radio"
-								name="contextPolicy"
-								value="preserve"
-								.checked=${editContextPolicy === "preserve"}
-								@change=${() => { editContextPolicy = "preserve"; renderApp(); }}
-							/>
-							<span>Preserve</span>
-						</label>
-					</div>
-				</div>
-
-				${wakeFeedback ? html`<div class="text-xs text-muted-foreground border border-border rounded p-2 bg-secondary/30" data-testid="wake-feedback">${wakeFeedback}</div>` : ""}
-
-				<div class="flex items-center justify-end gap-2 pt-2 border-t border-border">
-					${Button({
-						variant: "ghost",
-						onClick: showList,
-						children: "Cancel",
-					})}
-					${Button({
-						variant: "default",
-						onClick: handleSave,
-						disabled: saving || hasInvalidGoalTriggers(editTriggers),
-						children: saving ? "Saving..." : "Save Changes",
-					})}
-				</div>
 			</div>
 		</div>
 	`;

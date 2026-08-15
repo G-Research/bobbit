@@ -77,21 +77,58 @@ function readDisabledDirs(store?: ProjectConfigReader): Set<string> {
 	return out;
 }
 
+// ── Market-pack scan cache ───────────────────────────────────────────
+//
+// `scanMarketPacks` reads + YAML-parses every `pack.yaml` and `.pack-meta.yaml`
+// under a scope's `market-packs/` on every call. The roles/tools cascade
+// (`scopeMarketPackEntries` → `ConfigCascade.resolveEntities`) and `buildPackList`
+// call it during EVERY resolution, and resolution happens per session / per
+// connected client. On a busy gateway that is hundreds of full disk re-scans +
+// manifest parses per second for a manifest set that only changes on a
+// marketplace install/update/uninstall — a CPU-pegging hot loop (the entries are
+// immutable between mutations). Cache the parsed result per
+// (marketPacksRoot, scope, orderHint) and drop the whole cache on any pack
+// mutation via `invalidateMarketPackScanCache()`, which the host already fans
+// out from `invalidateResolverCaches()` on install/update/uninstall/pack-order.
+//
+// Pinned by tests2/core/pack-list-scan-cache.test.ts (N resolutions ⇒ 1 scan;
+// invalidation forces a re-scan). Never widen the key without updating that test.
+const __scanCache = new Map<string, PackEntry[]>();
+
+/** Drop the market-pack scan cache. MUST be called on any pack install /
+ *  update / uninstall / pack-order change so the next scan re-reads disk.
+ *  Wired into the host's `invalidateResolverCaches()`. */
+export function invalidateMarketPackScanCache(): void {
+	__scanCache.clear();
+}
+
 /**
  * Scan a scope's `market-packs/` for installed packs. A dir counts as a pack
  * only if it has BOTH a valid `pack.yaml` AND a valid `.pack-meta.yaml`
  * (corrupt-guard, §8.1). `.tmp-*` staging dirs are skipped. Ordered by
  * `orderHint` (highest priority LAST); unlisted-on-disk dirs sort first.
+ *
+ * Cached per (root, scope, orderHint) — see the cache note above. The cached
+ * array is treated as immutable by callers (they only read + concat it), so
+ * returning the shared reference is safe and avoids a per-call copy.
  */
 function scanMarketPacks(
 	marketPacksRoot: string,
 	scope: PackScope,
 	orderHint: string[],
 ): PackEntry[] {
+	const cacheKey = `${scope}\0${marketPacksRoot}\0${orderHint.join(",")}`;
+	const cached = __scanCache.get(cacheKey);
+	if (cached) return cached;
+
 	let dirents: fs.Dirent[];
 	try {
 		dirents = fs.readdirSync(marketPacksRoot, { withFileTypes: true });
 	} catch {
+		// Cache the empty result too: a missing market-packs/ dir is the common
+		// case (most scopes have none) and re-statting it every resolution is the
+		// same hot-loop waste. Invalidation on install re-scans when a dir appears.
+		__scanCache.set(cacheKey, []);
 		return [];
 	}
 	const found = new Map<string, PackEntry>();
@@ -119,7 +156,9 @@ function scanMarketPacks(
 	const listed = new Set(orderHint);
 	const unlisted = [...found.keys()].filter((n) => !listed.has(n));
 	const ordered = [...unlisted, ...orderHint.filter((n) => found.has(n))];
-	return ordered.map((n) => found.get(n)!).filter(Boolean);
+	const result = ordered.map((n) => found.get(n)!).filter(Boolean);
+	__scanCache.set(cacheKey, result);
+	return result;
 }
 
 /**

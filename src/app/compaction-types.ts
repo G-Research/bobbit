@@ -18,6 +18,15 @@
 /** "manual" → /compact slash; "auto" → threshold-driven; "overflow" → context-limit error. */
 export type CompactionTrigger = "manual" | "auto" | "overflow";
 
+/** Provider-neutral recognition for context-limit failures that auto-compaction
+ * can recover from. Keep this shared by live-event suppression and transcript
+ * rendering: some runtimes emit the error before `auto_compaction_start`, while
+ * others emit a failed retry after it. */
+export function isContextOverflowError(message: unknown): boolean {
+	if (typeof message !== "string" || message.length === 0) return false;
+	return /prompt is too long|tokens?\s*>\s*\d|(?:input|request|prompt)[^\n]{0,100}(?:exceeds?|exceeded)[^\n]{0,100}context window|context (?:window|length)[^\n]{0,100}(?:exceeds?|exceeded)/i.test(message);
+}
+
 /** Three lifecycle states the renderer branches on. */
 export type CompactionState = "in-progress" | "complete" | "error";
 

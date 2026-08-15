@@ -21,8 +21,7 @@
  */
 
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
-import { Type } from "@sinclair/typebox";
-import { contextHeavyLimitError } from "../_shared/context-heavy-guard.js";
+import { Type } from "typebox";
 import { readGatewayCreds, apiCall, apiCallDetailed } from "./gateway.js";
 
 // ── Types ──
@@ -138,16 +137,24 @@ const SETTLED_STATUSES = new Set<ChildStatus>(["idle", "terminated", "timeout", 
 
 // ── read_session helpers ──
 
-interface ReadSessionParams {
-	session_id: string;
-	offset?: number;
-	limit?: number;
-	pattern?: string;
-	case_sensitive?: boolean;
-	context?: number;
-	verbose?: boolean;
-	include_tool_results?: boolean;
-}
+type ReadSessionParams =
+	| {
+		operation: "list";
+		session_id: string;
+		offset?: number;
+		limit?: number;
+		pattern?: string;
+		case_sensitive?: boolean;
+		context?: number;
+	}
+	| {
+		operation: "inspect";
+		session_id: string;
+		message_index: number;
+		result_index?: number;
+		offset?: number;
+		limit?: number;
+	};
 
 type SessionPromptMode = "prompt" | "steer";
 
@@ -166,13 +173,17 @@ async function callReadSessionEndpoint(
 	}
 	const { token, baseUrl } = credsResult;
 	const qs = new URLSearchParams();
+	qs.set("operation", params.operation);
 	if (params.offset !== undefined) qs.set("offset", String(params.offset));
 	if (params.limit !== undefined) qs.set("limit", String(params.limit));
-	if (params.pattern !== undefined && params.pattern !== "") qs.set("pattern", params.pattern);
-	if (params.case_sensitive) qs.set("case_sensitive", "1");
-	if (params.context !== undefined) qs.set("context", String(params.context));
-	if (params.verbose) qs.set("verbose", "1");
-	qs.set("include_tool_results", params.include_tool_results ? "1" : "0");
+	if (params.operation === "list") {
+		if (params.pattern !== undefined && params.pattern !== "") qs.set("pattern", params.pattern);
+		if (params.case_sensitive) qs.set("case_sensitive", "1");
+		if (params.context !== undefined) qs.set("context", String(params.context));
+	} else {
+		qs.set("message_index", String(params.message_index));
+		if (params.result_index !== undefined) qs.set("result_index", String(params.result_index));
+	}
 	const suffix = qs.toString() ? `?${qs.toString()}` : "";
 	const headers: Record<string, string> = {
 		"Authorization": `Bearer ${token}`,
@@ -306,35 +317,40 @@ const extension: ExtensionFactory = (pi) => {
 	pi.registerTool({
 		name: "read_session",
 		label: "Read Session",
-		description: "Read another session's transcript. Paginated, regex-filterable.",
+		description: "List compact session messages, then inspect one exact message or result.",
 		promptSnippet:
-			"read_session - Read another session's transcript with pagination and regex filtering.",
+			"read_session - List compact message diagnostics, choose an index, then inspect that exact message or result.",
 		promptGuidelines: [
-			"Default omits tool result bodies; use include_tool_results:true only for narrow, deliberate raw-output reads",
-			"verbose:true or include_tool_results:true requires an explicit limit <= 10; fetch additional raw content in smaller batches and watch token use",
-			"Use verbose:true for full message blocks; it still omits tool results unless include_tool_results:true is also set",
-			"Tail with offset:-N, limit:N (e.g. -20, 20 for the last 20 messages)",
-			"Find specific events with pattern (regex), then use context:1..5 to expand matches by ±N neighbours",
+			"Use operation:'list' to find a relevant message and result index",
+			"Use operation:'inspect' with one message_index for semantic message detail",
+			"Add one result_index only when you need that exact result excerpt; continue with offset and limit",
 		],
-		parameters: Type.Object({
-			session_id: Type.String(),
-			offset: Type.Optional(Type.Number({ description: "Default 0. Negative indexes from end." })),
-			limit: Type.Optional(Type.Number({ description: "Default 20; heavy flags require explicit 1..10." })),
-			pattern: Type.Optional(Type.String({ description: "Regex filter on message text and tool blocks." })),
-			case_sensitive: Type.Optional(Type.Boolean()),
-			context: Type.Optional(Type.Number({ description: "Expand each match by ±N neighbours (0..5)." })),
-			verbose: Type.Optional(Type.Boolean({ description: "Full content blocks; requires explicit limit <= 10." })),
-			include_tool_results: Type.Optional(Type.Boolean({ description: "Raw tool results; default false. Requires explicit limit <= 10." })),
-		}),
+		parameters: Type.Union([
+			Type.Object({
+				operation: Type.Literal("list"),
+				session_id: Type.String(),
+				offset: Type.Optional(Type.Integer({ description: "Default 0. Negative indexes from end." })),
+				limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200, description: "Default 20." })),
+				pattern: Type.Optional(Type.String({ description: "Regex filter on message text and tool diagnostics." })),
+				case_sensitive: Type.Optional(Type.Boolean()),
+				context: Type.Optional(Type.Integer({ minimum: 0, maximum: 5, description: "Expand each match by ±N neighbours." })),
+			}, { additionalProperties: false }),
+			Type.Object({
+				operation: Type.Literal("inspect"),
+				session_id: Type.String(),
+				message_index: Type.Integer({ minimum: 0 }),
+			}, { additionalProperties: false }),
+			Type.Object({
+				operation: Type.Literal("inspect"),
+				session_id: Type.String(),
+				message_index: Type.Integer({ minimum: 0 }),
+				result_index: Type.Integer({ minimum: 0 }),
+				offset: Type.Optional(Type.Integer({ minimum: 0, description: "Character offset. Default 0." })),
+				limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 8_000, description: "Excerpt characters. Default 2000." })),
+			}, { additionalProperties: false }),
+		]),
 
 		async execute(_toolCallId, params) {
-			const guardError = contextHeavyLimitError(
-				"read_session",
-				params as Record<string, unknown>,
-				true,
-			);
-			if (guardError) return fail(JSON.stringify(guardError));
-
 			let result: { ok: boolean; status: number; body: any };
 			try {
 				result = await callReadSessionEndpoint(params as ReadSessionParams);
@@ -359,12 +375,7 @@ const extension: ExtensionFactory = (pi) => {
 				content: [{ type: "text", text: JSON.stringify(envelope) }],
 				details: {
 					session_id: (params as ReadSessionParams).session_id,
-					total: envelope?.total,
-					matchCount: envelope?.matchCount,
-					returned: envelope?.returned,
-					offsetStart: envelope?.offsetStart,
-					offsetEnd: envelope?.offsetEnd,
-					messages: envelope?.messages,
+					...envelope,
 				},
 			};
 		},
@@ -542,7 +553,7 @@ const extension: ExtensionFactory = (pi) => {
 		promptGuidelines: [
 			"Returns as soon as ONE awaited child becomes idle (or settles) — process it, then call team_wait again for the rest",
 			"Omit child_session_ids to await all your live children",
-			"Use read_session on the returned child to read its full transcript",
+			"List a returned child's compact message diagnostics, then inspect one exact message or result",
 		],
 		parameters: Type.Object({
 			child_session_ids: Type.Optional(Type.Array(Type.String(), { description: "Children to await. Default: all your live children." })),

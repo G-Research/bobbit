@@ -2760,7 +2760,7 @@ function renderGeneralTab() {
 					<span class="text-sm font-medium text-foreground">Show message timestamps</span>
 				</label>
 				<p class="text-xs text-muted-foreground ml-6">
-					Display timestamps next to user and assistant messages.
+					Display timestamps with user and assistant messages.
 				</p>
 			</div>
 			<div class="flex flex-col gap-1.5">

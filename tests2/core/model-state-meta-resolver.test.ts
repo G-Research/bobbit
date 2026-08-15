@@ -3,25 +3,9 @@
 // Bucket: v2-core | Method: codemod | Classification: clean
 
 /**
- * Unit tests for `resolveModelStateMeta` in `src/server/agent/model-registry.ts`
- * — the single source of truth for the metadata embedded in live per-session
- * `state.model` frames.
- *
- * The resolver must return the SAME merged metadata the ModelSelector dropdown
- * shows (built from `getAvailableModels` / `assembleModels`), so selecting a
- * model never clobbers the correct pi-ai values with `inferMeta`'s heuristic
- * catch-all. Regression target: Claude Fable 5 (1M context, `reasoning:true`,
- * `thinkingLevelMap {off:null, xhigh:"xhigh", max:"max"}`) rendered as a 200k
- * non-reasoning model because live frames derived from `inferMeta` alone.
- *
- * Tiers exercised:
- *   1. Registry cache (populate via getAvailableModels, then resolve).
- *   2. pi-ai catalog via getModel (empty cache, known upstream provider).
- *   3. inferMeta fallback (empty cache, unknown provider+id).
- *
- * node:test runs `it`s within a file sequentially, so the shared module-level
- * cache is deterministic across tiers as long as each test sets up its own
- * cache state (getAvailableModels to populate; invalidateModelCache to clear).
+ * Unit tests for the exact metadata boundary used by live model-state frames.
+ * The resolver may return only an assembled registry row, an exact direct Pi
+ * row, or an explicit unavailable result with no fabricated capabilities.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -37,42 +21,67 @@ const { getAvailableModels, invalidateModelCache, resolveModelStateMeta } = awai
 const prefs = new PreferencesStore(stateDir, memfs);
 
 describe("resolveModelStateMeta", () => {
-	it("tier 1 (registry cache): returns Fable's merged pi-ai metadata after getAvailableModels", async () => {
+	it("returns the exact assembled cache row", async () => {
 		invalidateModelCache();
-		// No aigw.url set → built-in providers (incl. anthropic) are assembled and cached.
 		const models = await getAvailableModels(prefs);
-		const fable = models.find(m => m.provider === "anthropic" && m.id === "claude-fable-5");
-		assert.ok(fable, "expected anthropic/claude-fable-5 in the assembled model list");
+		const row = models.find(m => m.provider === "anthropic" && m.id === "claude-opus-4-5");
+		assert.ok(row);
 
-		const meta = resolveModelStateMeta("anthropic", "claude-fable-5");
-		assert.equal(meta.contextWindow, 1_000_000, "Fable context window must be 1M");
-		assert.equal(meta.reasoning, true, "Fable must be reasoning:true");
-		assert.deepEqual(meta.thinkingLevelMap, { off: null, xhigh: "xhigh", max: "max" }, "Fable thinkingLevelMap must be preserved");
-		assert.equal(meta.maxTokens, 128_000, "Fable maxTokens must be 128k");
-		assert.deepEqual(meta.input, ["text", "image"]);
+		assert.deepEqual(resolveModelStateMeta(row.provider, row.id), {
+			contextWindow: row.contextWindow,
+			maxTokens: row.maxTokens,
+			reasoning: row.reasoning,
+			...(row.thinkingLevelMap ? { thinkingLevelMap: row.thinkingLevelMap } : {}),
+			input: row.input,
+			source: "cache",
+		});
 	});
 
-	it("tier 2 (pi-ai catalog): resolves Fable with an EMPTY cache via getModel", () => {
-		invalidateModelCache();
-		const meta = resolveModelStateMeta("anthropic", "claude-fable-5");
-		assert.equal(meta.contextWindow, 1_000_000);
-		assert.equal(meta.reasoning, true);
-		assert.deepEqual(meta.thinkingLevelMap, { off: null, xhigh: "xhigh", max: "max" });
+	it("returns exact composed custom metadata from the cache", async () => {
+		try {
+			prefs.set("customProviders", [{
+				id: "private",
+				name: "Private Provider",
+				type: "manual",
+				baseUrl: "http://127.0.0.1:9999",
+				models: [{ id: "model-o1-lookalike", name: "Private Exact Model" }],
+			}]);
+			invalidateModelCache();
+			const models = await getAvailableModels(prefs);
+			const row = models.find(m => m.provider === "Private Provider" && m.id === "model-o1-lookalike");
+			assert.ok(row);
+			const meta = resolveModelStateMeta(row.provider, row.id);
+			assert.deepEqual(meta, {
+				contextWindow: row.contextWindow,
+				maxTokens: row.maxTokens,
+				reasoning: row.reasoning,
+				input: row.input,
+				source: "cache",
+			});
+		} finally {
+			prefs.remove("customProviders");
+			invalidateModelCache();
+		}
 	});
 
-	it("tier 3 (inferMeta fallback): unknown provider+id with empty cache carries no thinkingLevelMap", () => {
+	it("returns the exact direct Pi row when the cache is empty", () => {
 		invalidateModelCache();
-		// provider "custom" skips the pi-ai catalog tier; the id is not in any catalog.
-		const meta = resolveModelStateMeta("custom", "totally-unknown-model-xyz-123");
-		assert.equal(meta.thinkingLevelMap, undefined, "inferMeta fallback must not fabricate a thinkingLevelMap");
-		assert.equal(meta.reasoning, false, "unknown id defaults to non-reasoning via inferMeta DEFAULT_META");
-		assert.equal(meta.contextWindow, 128_000, "unknown id uses inferMeta DEFAULT_META context window");
+		assert.deepEqual(resolveModelStateMeta("anthropic", "claude-opus-4-5"), {
+			contextWindow: 200_000,
+			maxTokens: 64_000,
+			reasoning: true,
+			input: ["text", "image"],
+			source: "catalog",
+		});
 	});
 
-	it("tier 3 (inferMeta fallback): empty provider also skips the catalog tier", () => {
-		invalidateModelCache();
-		const meta = resolveModelStateMeta("", "totally-unknown-model-xyz-123");
-		assert.equal(meta.thinkingLevelMap, undefined);
-		assert.equal(meta.reasoning, false);
+	it("returns unavailable without fabricated family metadata", () => {
+		for (const provider of ["custom", "aigw", "", undefined]) {
+			invalidateModelCache();
+			assert.deepEqual(
+				resolveModelStateMeta(provider, "totally-unknown-o1-claude-model"),
+				{ source: "unavailable" },
+			);
+		}
 	});
 });

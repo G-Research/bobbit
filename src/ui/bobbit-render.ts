@@ -185,6 +185,8 @@ export interface IdleBlobOptions {
 	size?: number;
 	hueIndex?: number;
 	phaseIndex?: number;
+	/** Keep sprite pixels visible when they animate beyond the preview box. */
+	clip?: boolean;
 }
 
 // ============================================================================
@@ -623,6 +625,7 @@ export function renderChatBlobCanvas(opts: ChatBlobOptions): TemplateResult {
 			<div class="bobbit-blob__stamp"></div>
 			<div class="bobbit-blob__clipboard"></div>
 			<div class="bobbit-blob__headset"></div>
+			<div class="bobbit-blob__ponytail"></div>
 			<div class="bobbit-blob__shadow"></div>
 		</div>
 	</div>`;
@@ -637,7 +640,7 @@ export function renderChatBlobCanvas(opts: ChatBlobOptions): TemplateResult {
  * Only the sprite body is canvas-rendered; accessories use CSS box-shadow.
  */
 export function renderIdleBlobCanvas(opts: IdleBlobOptions): TemplateResult {
-	const { accId: _accId, accClass, size = 40, hueIndex = 0, phaseIndex = 0 } = opts;
+	const { accId: _accId, accClass, size = 40, hueIndex = 0, phaseIndex = 0, clip = true } = opts;
 	const cls = `bobbit-blob bobbit-blob--idle bobbit-blob--inline ${accClass}`.trim();
 	const naturalSize = 76;
 	const s = size / naturalSize;
@@ -661,7 +664,7 @@ export function renderIdleBlobCanvas(opts: IdleBlobOptions): TemplateResult {
 
 	return html`
 		<div style="width:${size}px;height:${size}px;flex-shrink:0;">
-			<div style="width:${naturalSize}px;height:${naturalSize}px;position:relative;overflow:hidden;transform:scale(${s.toFixed(3)});transform-origin:top left;">
+			<div style="width:${naturalSize}px;height:${naturalSize}px;position:relative;overflow:${clip ? "hidden" : "visible"};transform:scale(${s.toFixed(3)});transform-origin:top left;">
 				<div class="${cls}" style="--bobbit-hue-rotate:${hue}deg;--bobbit-idle-phase:${idlePhaseSec.toFixed(2)}s;">
 					<canvas ${ref(onRef)} class="bobbit-blob__sprite"></canvas>
 					<div class="bobbit-blob__crown"></div>
@@ -678,6 +681,7 @@ export function renderIdleBlobCanvas(opts: IdleBlobOptions): TemplateResult {
 					<div class="bobbit-blob__stamp"></div>
 					<div class="bobbit-blob__clipboard"></div>
 					<div class="bobbit-blob__headset"></div>
+					<div class="bobbit-blob__ponytail"></div>
 				</div>
 			</div>
 		</div>
@@ -759,6 +763,7 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 	else p = CANONICAL_PALETTE;
 
 	const isBusy = status === "streaming" || status === "busy" || isCompacting;
+	const isCancelling = isAborting && (status === "streaming" || isBusy);
 	// Idle / not-currently-viewed sessions render with sleeping eyes (closed)
 	// to match the chat blob's sleeping pose. noDesaturate previews (role
 	// manager etc.) keep awake eyes so the bobbit looks alive in selection UI.
@@ -859,67 +864,90 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 		eyeUrl = cached;
 	}
 
-	// Accessory at HI× scale
+	// Accessory at HI× scale. Headset/ponytail provide a smaller right-facing
+	// sidebar frame. Selected rows swap between two cached bitmaps using a
+	// step-end CSS opacity animation; unread rows render only the right-facing
+	// bitmap. No JS timer or per-frame canvas work is involved.
 	let accUrl = "";
 	let accCssW = 0;
 	let accCssH = 0;
 	let accLeft = 0;
+	let rightAccUrl = "";
+	let rightAccCssW = 0;
+	let rightAccCssH = 0;
+	let rightAccLeft = 0;
+	let animateSidebarTurn = false;
 	const sidebarContainerWidth = 20;
 	let sidebarOriginX = centerInContainer ? (sidebarContainerWidth - cssW) / 2 : 0;
 	if (hasAccessory) {
 		const spriteData = SPRITE_ACCESSORIES[acc.id];
 		if (spriteData && spriteData.pixels.length > 0) {
-			let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-			for (const [x, y] of spriteData.pixels) {
-				if (x < minX) minX = x;
-				if (y < minY) minY = y;
-				if (x > maxX) maxX = x;
-				if (y > maxY) maxY = y;
-			}
-			const xShift = Math.min(0, minX);
-			const yShift = Math.min(0, minY);
-			const srcW = maxX - xShift + 1;
-			const srcH = maxY - yShift + 1;
+			const boundsFor = (pixels: SpritePixel[]) => {
+				let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+				for (const [x, y] of pixels) {
+					if (x < minX) minX = x;
+					if (y < minY) minY = y;
+					if (x > maxX) maxX = x;
+					if (y > maxY) maxY = y;
+				}
+				const xShift = Math.min(0, minX);
+				const yShift = Math.min(0, minY);
+				return { xShift, yShift, maxX, srcW: maxX - xShift + 1, srcH: maxY - yShift + 1 };
+			};
+			const rasterize = (pixels: SpritePixel[], cacheKey: string, bounds: ReturnType<typeof boundsFor>) => {
+				let cached = sidebarAccessoryUrlCache.get(cacheKey);
+				if (cached === undefined) {
+					const canvas = document.createElement("canvas");
+					canvas.width = bounds.srcW * HI;
+					canvas.height = bounds.srcH * HI;
+					const ctx = canvas.getContext("2d")!;
+					ctx.imageSmoothingEnabled = false;
+					for (const [x, y, color] of pixels) {
+						ctx.fillStyle = color;
+						ctx.fillRect((x - bounds.xShift) * HI, (y - bounds.yShift) * HI, HI, HI);
+					}
+					cached = canvas.toDataURL();
+					sidebarAccessoryUrlCache.set(cacheKey, cached);
+				}
+				return cached;
+			};
 
+			const frontBounds = boundsFor(spriteData.pixels);
 			// Preserve coordinate alignment between body + accessory. Static author
 			// avatars center the complete group; sidebar rows retain their historical
 			// left alignment except for accessories with left-of-body pixels.
-			if (centerInContainer || xShift < 0) {
-				const groupRight = Math.max(BODY_WIDTH, maxX + 1);
-				const groupWidth = (groupRight - xShift) * S;
+			if (centerInContainer || frontBounds.xShift < 0) {
+				const groupRight = Math.max(BODY_WIDTH, frontBounds.maxX + 1);
+				const groupWidth = (groupRight - frontBounds.xShift) * S;
 				const groupLeft = groupWidth <= sidebarContainerWidth
 					? (sidebarContainerWidth - groupWidth) / 2
 					: 0;
-				sidebarOriginX = groupLeft - xShift * S;
+				sidebarOriginX = groupLeft - frontBounds.xShift * S;
 			}
-			accLeft = sidebarOriginX + xShift * S;
 
-			// CSS geometry is derived from the (static) pixel bounds — cheap to
-			// recompute. Only the data-URL encode is cached, keyed by accessory
-			// id alone since each accessory's pixels are immutable.
-			accCssW = srcW * S;
-			accCssH = srcH * S;
-			let cached = sidebarAccessoryUrlCache.get(acc.id);
-			if (cached === undefined) {
-				const accCanvas = document.createElement("canvas");
-				accCanvas.width = srcW * HI;
-				accCanvas.height = srcH * HI;
-				const accCtx = accCanvas.getContext("2d")!;
-				accCtx.imageSmoothingEnabled = false;
-				for (const [x, y, color] of spriteData.pixels) {
-					accCtx.fillStyle = color;
-					accCtx.fillRect((x - xShift) * HI, (y - yShift) * HI, HI, HI);
-				}
-				cached = accCanvas.toDataURL();
-				sidebarAccessoryUrlCache.set(acc.id, cached);
+			const rightPixels = spriteData.sidebarRightFacingPixels;
+			// Normal compaction squishes without a gaze cycle. Cancelling compaction
+			// still uses bobbit-eyes-squash-s, so its right-facing beat must swap too.
+			animateSidebarTurn = !!rightPixels?.length && isSelected && (!isCompacting || isCancelling);
+			const showRightOnly = !!rightPixels?.length && unread && !isSelected;
+			if (!showRightOnly) {
+				accLeft = sidebarOriginX + frontBounds.xShift * S;
+				accCssW = frontBounds.srcW * S;
+				accCssH = frontBounds.srcH * S;
+				accUrl = rasterize(spriteData.pixels, acc.id, frontBounds);
 			}
-			accUrl = cached;
+			if (rightPixels?.length && (showRightOnly || animateSidebarTurn)) {
+				const rightBounds = boundsFor(rightPixels);
+				rightAccLeft = sidebarOriginX + rightBounds.xShift * S;
+				rightAccCssW = rightBounds.srcW * S;
+				rightAccCssH = rightBounds.srcH * S;
+				rightAccUrl = rasterize(rightPixels, `${acc.id}|right`, rightBounds);
+			}
 		}
 	}
 
 	// Animation styles (same logic as before)
 	const isIdle = status === "idle" && !isCompacting && !isSelected && !noDesaturate;
-	const isCancelling = isAborting && (status === "streaming" || isBusy);
 	const filters: string[] = [];
 	if (hueRotate && status !== "starting" && status !== "terminated") filters.push(`hue-rotate(${hueRotate}deg)`);
 	if (isCancelling) filters.push("saturate(0.3)");
@@ -985,10 +1013,14 @@ export function renderSidebarBobbitCanvas(opts: SidebarBobbitOptions): TemplateR
 		? html`<img src="${eyeUrl}" width="${BODY_WIDTH * HI}" height="${BODY_HEIGHT * HI}" style="position:absolute;left:${sidebarOriginX}px;top:${eyeTop};width:${cssW}px;height:${cssH}px;will-change:transform;${eyeAnim}">`
 		: "";
 
-	// Accessory layer
+	// Accessory layers. The optional second bitmap is opacity-swapped in lockstep
+	// with bobbit-eyes-s; static unread rows use only that right-facing bitmap.
 	const accessoryLayer = accUrl
-		? html`<img src="${accUrl}" style="position:absolute;left:${accLeft}px;top:${accTop};width:${accCssW}px;height:${accCssH}px;will-change:transform;${accTransform}${accFilter}">`
+		? html`<img src="${accUrl}" class="bobbit-sidebar-accessory--front${animateSidebarTurn ? " bobbit-sidebar-accessory-turn-front" : ""}" style="position:absolute;left:${accLeft}px;top:${accTop};width:${accCssW}px;height:${accCssH}px;will-change:transform;${accTransform}${accFilter}">`
+		: "";
+	const rightAccessoryLayer = rightAccUrl
+		? html`<img src="${rightAccUrl}" class="bobbit-sidebar-accessory--right${animateSidebarTurn ? " bobbit-sidebar-accessory-turn-right" : ""}" style="position:absolute;left:${rightAccLeft}px;top:${accTop};width:${rightAccCssW}px;height:${rightAccCssH}px;will-change:transform${animateSidebarTurn ? ",opacity" : ""};${accTransform}${accFilter}">`
 		: "";
 
-	return html`<span style="display:inline-flex;align-items:center;justify-content:center;width:${containerWidth};height:${containerHeight};flex-shrink:0;position:relative;overflow:hidden;margin-top:1px;${filterStyle}${bobAnim}${cancelAnim}${idleAnim}">${bodyLayer}${blinkLayer}${eyeLayer}${accessoryLayer}</span>`;
+	return html`<span style="display:inline-flex;align-items:center;justify-content:center;width:${containerWidth};height:${containerHeight};flex-shrink:0;position:relative;overflow:hidden;margin-top:1px;${filterStyle}${bobAnim}${cancelAnim}${idleAnim}">${bodyLayer}${blinkLayer}${eyeLayer}${accessoryLayer}${rightAccessoryLayer}</span>`;
 }

@@ -63,6 +63,7 @@ export interface FsLike extends Pick<typeof fs,
 	| "readdirSync"
 	| "statSync"
 	| "lstatSync"
+	| "linkSync"
 	| "renameSync"
 	| "rmSync"
 	| "unlinkSync"

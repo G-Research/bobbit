@@ -17,13 +17,13 @@ Each session is a running `pi-coding-agent` child process with its own conversat
 - **Persistence**: Session metadata (id, title, cwd, agent session file, restart re-drive marker stored in `wasStreaming`) persists to `.bobbit/state/sessions.json`. On server restart, sessions restore by re-spawning agents and using `switch_session` RPC to resume from the agent's `.jsonl` file. Active interactive sessions are automatically re-prompted; non-interactive verification reviewers are re-driven by the verification harness.
 - **Auto-titles**: When the user sends their first prompt, `tryGenerateTitleFromPrompt()` fires **immediately** (before the agent replies) and calls Claude Haiku for a 2–3 word summary. The explicit `generate_title` command uses the full conversation history instead.
 - **Multi-device**: Multiple browser tabs/devices can connect to the same session. Events are broadcast to all clients.
-- **Session actions**: Sidebar rows and open-session headers share one canonical action model for rename/edit staff, terminate/end team, refresh, fork, copy link, system prompt inspection, and opening sessions in new windows. See [session-actions.md](session-actions.md).
+- **Session actions**: Sidebar rows and open-session headers share one canonical action model for rename/edit staff, terminate/end team, refresh, fork, copy link, system prompt inspection, and opening sessions in new windows. Eligible durable user prompts use the same popover component for exact-text copy and cut-before history forks. See [session-actions.md](session-actions.md).
 - **Sidebar tree**: Projects, goals, sessions, staff, delegates, team leads, and archived sections share one tree model for hierarchy, expansion persistence, and indentation. See [sidebar-tree-state.md](sidebar-tree-state.md) and [sidebar-tree-indentation.md](sidebar-tree-indentation.md).
-- **Force abort**: If a graceful abort doesn't make the agent idle within 3 seconds, the process is killed, a synthetic `agent_end` is emitted, and a fresh agent is spawned to resume the session. An `"aborting"` status is broadcast immediately so the UI shows feedback during the grace period. After force-kill, any in-flight steers that the SDK accepted but never echoed are pulled off the per-session shadow ledger and re-enqueued at the front of `promptQueue`; `drainQueue()` then redispatches them as a single steered batch. See [prompt-queue.md](prompt-queue.md#abort-and-force-kill-recovery) for details.
+- **Force abort**: If graceful Stop does not settle, Bobbit replaces the agent process and broadcasts `aborting` during ownership transfer. Accepted queued work remains visible and retargets to the next turn. A dispatched occurrence is never blindly replayed: exact receipt settles it, proven no-start may restore it once, and unresolved delivery remains visibly uncertain. See [Stop, failure, and recovery](prompt-queue.md#stop-failure-and-recovery).
 
 ## Maintenance
 
-Settings → Maintenance provides preview-first cleanup for durable resources that may outlive their active session. Worktree Cleanup is the canonical surface for safe Bobbit worktree removal across archived sessions, orphaned git worktrees, pool entries, and filesystem-only diagnostics while preserving archives, transcripts, proposals, and protected live/durable references. Related cards cover orphaned sessions, expired archives, and search index rows. See [maintenance.md](maintenance.md).
+Settings → Maintenance provides preview-first cleanup for durable resources that may outlive their active session. Worktree Cleanup can remove an archived session worktree only when its durable repository, current Git worktree path, and non-empty branch match exactly and remain unchanged on the immediate re-scan. Unverified ordinary, Bobbit-shaped, pool-shaped, and filesystem-only candidates are diagnostic-only; naming or root placement never proves ownership. Archives, transcripts, proposals, and protected live/durable references remain intact. Related cards cover orphaned sessions, expired archives, and search index rows. See [maintenance.md](maintenance.md) and [design/preserve-user-worktrees.md](design/preserve-user-worktrees.md).
 
 ## Goals
 
@@ -102,19 +102,20 @@ Per-session token usage and cost tracking, aggregated to goal and task level.
 See [docs/cache-hit-rate.md](cache-hit-rate.md) for formula details, null semantics, and implementation notes.
 See [session-cost.md](session-cost.md) for source-of-truth, hydration, and compaction behavior.
 
-## Prompt Queue
+## Reliable Prompt and Steer Delivery
 
-Server-side queuing of user messages when the agent is busy.
+Every composer submission has a stable occurrence ID and remains visible in either the delivery outbox or transcript.
 
-- Steered messages sort before non-steered (priority interrupt).
-- Queue auto-drains when the agent finishes a turn (suppressed on error — user must retry first).
-- Client can promote queued messages to steered (`steer_queued`), remove them (`remove_queued`), edit them (remove + populate textarea), or drag-reorder them (`reorder_queue`).
-- Queue pills show drag handle, edit (pencil), steer, and remove buttons. Steered pills that remain queued show a "Sent" badge; rows promoted while streaming are removed from the queue as they dispatch.
-- Steered messages are batched — they reorder to the front of the queue and are delivered as a single combined prompt. Streaming `steer_queued` promotions dispatch immediately through `_dispatchSteer()`; idle or recovered steered rows drain first when the agent becomes idle.
-- `follow_up` flag is preserved through the queue: messages enqueued with `isFollowUp: true` dispatch via `followUp()` RPC on drain.
-- Queue state broadcast to clients via `queue_update` events.
+- The browser persists local unsent work in IndexedDB before transport; socket send never settles it.
+- The server persists accepted queue/attempt ownership before Pi dispatch and admits replay idempotently by ID.
+- Prompts and steers use `next-turn` and `continuation` lanes with FIFO sequence inside each lane.
+- Reliable steers dispatch serially as distinct occurrences, including identical text.
+- Queue pills show actionable lifecycle states such as **Waiting for connection**, **Sending…**, **Awaiting delivery confirmation**, and **Not delivered**.
+- Compaction, Stop, and bridge replacement keep admission open but fence dispatch until their release owner decides the safe lane.
+- A correlated Pi user event transfers the visible carrier into chat; Pi/socket acknowledgement alone does not.
+- Definite failures can Retry with the same occurrence ID. Ambiguous delivery remains visible and is never automatically replayed.
 
-See [prompt-queue.md](prompt-queue.md) for the full architecture.
+See [Reliable prompt and steer delivery](prompt-queue.md) for the full contract.
 
 ## Workflows
 
@@ -123,6 +124,10 @@ Workflows define the gates a goal must pass, their dependency relationships (a D
 ## Git status rich diff viewer
 
 The Git status widget's diff modal renders raw session/goal `git-diff` responses with `<rich-git-diff-viewer>`. Users get collapsible per-file sections, rename paths, `+/-` counts, split/inline controls, folded context expansion, truncation warnings, and accessible modal controls without changing the raw `{ diff }` endpoint contract. The parser seam is framework-neutral under `src/shared/git-diff/unified.ts`; the PR Walkthrough pack remains separate and may only share `src/shared/**` modules, not core UI. See [git-status-diff-viewer.md](git-status-diff-viewer.md) for behavior, integration, boundaries, and tests.
+
+## Built-in file explorer
+
+The file explorer is a read-only, session-rooted tree and preview surface shipped as the default-enabled `file-explorer` first-party pack. Open it from **Open File Explorer** in session actions or `/files` in the composer; both focus one restored singleton panel per session. It browses non-Git directories normally and adds staged/unstaged working-tree badges plus complete working-tree-versus-`HEAD` diffs inside Git repositories. See [file-explorer.md](file-explorer.md) for navigation, Git semantics, trusted-pack boundaries, and responsiveness limits.
 
 ## PR Walkthrough Panel
 
@@ -141,10 +146,15 @@ Sessions created with an `assistantType` get the corresponding system prompt aut
 
 ## Compaction
 
-Context compaction reduces token usage by summarising the conversation.
+Context compaction reduces token usage while remaining part of the active turn lifecycle.
 
-- **Manual**: User triggers via `compact` WebSocket command. Server calls `rpcClient.compact()` (120s timeout), then refreshes messages and state.
-- **Auto**: Triggered by the agent subprocess when context grows too large. Events flow through the event system and the UI refreshes automatically.
+- **Manual**: User triggers via `/compact`; input accepted during it targets the next turn.
+- **Threshold/overflow**: Pi triggers compaction under context pressure; continuation steers can remain attached to the interrupted turn.
+- All user input remains visible, but no Pi prompt/steer RPC is attempted while the compaction fence is active.
+- One idempotent finisher releases eligible work exactly once.
+- Recoverable `length` overflow invalidates the first truncated assistant stream before Pi retries once.
+
+See [Context compaction](compaction.md#reliable-turn-fence-and-release).
 
 ## System Prompt Assembly
 

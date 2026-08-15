@@ -1,6 +1,6 @@
 import { icon } from "@mariozechner/mini-lit";
 import { html, nothing, type TemplateResult } from "lit";
-import { Archive, Bot, ChevronDown, Goal as GoalIcon, GripVertical, List, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings, Store, Users, Workflow, Wrench, Zap } from "lucide";
+import { Archive, Bot, ChevronDown, Crosshair, FolderTree, Goal as GoalIcon, GripVertical, List, ListFilter, Mail, MailOpen, MessagesSquare, PanelLeftClose, PanelLeftOpen, Pin, Plus, Settings, Store, Users, Workflow, Wrench, Zap } from "lucide";
 // Register search web components (self-registering via @customElement)
 // Lazy-load via the shared widgets registrar; see render.ts for
 // rationale. Both modules ship in one shared chunk fetched in parallel
@@ -26,10 +26,10 @@ import { createAndConnectSession, connectToSession } from "./session-manager.js"
 import { cwdCombobox } from "./cwd-combobox.js";
 import { showGoalDialog, showProjectDialog, showConnectionError } from "./dialogs-lazy.js";
 import { startNewGoalFlow, showProjectPickerPopover } from "./goal-entry.js";
-import { refreshSessions, retryLoadSessions, fetchRoles, reassignStaffProject, enqueueInboxManual, fetchArchivedSessions, archivedSessionsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, fetchArchivedSearchGoalsPaginated, fetchArchivedSearchSessionsPaginated, gatewayFetch, clearArchivedSessionsState, clearArchivedSearchState, scheduleArchivedRemoteSearch, fetchProjects, saveProjectOrder, refreshStaffStateFromApi } from "./api.js";
+import { refreshSessions, retryLoadSessions, fetchRoles, reassignStaffProject, enqueueInboxManual, fetchArchivedSessions, archivedSessionsLoaded, archivedGoalsLoaded, fetchSandboxStatus, fetchArchivedGoalsPaginated, fetchArchivedSessionsPaginated, fetchArchivedSearchGoalsPaginated, fetchArchivedSearchSessionsPaginated, gatewayFetch, clearArchivedSessionsState, clearArchivedSearchState, scheduleArchivedRemoteSearch, fetchProjects, saveProjectOrder, refreshStaffStateFromApi } from "./api.js";
 import { errorFromResponse, errorDetails } from "./error-helpers.js";
 import { statusBobbit, sessionAcronym } from "./session-colors.js";
-import { renderGoalGroup, renderTreeSessionNode, SESSION_ROW_PY, terseRelativeTime, hasUnseenActivity, formatSessionAge, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, archivedDivider, bucketActiveArchived, passesSidebarFilters, isChildSession, isStandaloneArchivedSession, effectiveArchivedTeamGoalId } from "./render-helpers.js";
+import { renderGoalGroup, renderTreeSessionNode, renderSessionRow, renderArchivedSessionRow, renderStaffSidebarActions, renderSessionTime, SESSION_ROW_PY, hasUnseenActivity, renderSessionTitle, getProjectAccentColor, filterArchivedGoalsByQuery, filterArchivedSessionsByQuery, archivedDivider, bucketActiveArchived, passesSidebarFilters, isChildSession, isStandaloneArchivedSession, effectiveArchivedTeamGoalId } from "./render-helpers.js";
 import { renderFiltersButton } from "../ui/components/sidebar-filters.js";
 import { shortcutHint } from "./shortcut-registry.js";
 import type { GatewaySession } from "./state.js";
@@ -49,8 +49,13 @@ import {
 	setFirstClassParentExpanded,
 	setArchivedParentExpanded,
 	sidebarTreeExpansionInput,
+	getSidebarExplicitRevealDepth,
+	setSidebarExplicitRevealDepth,
 } from "./sidebar-tree-state.js";
 import { loadSidebarTreeLayoutPreference, sidebarTreeBaseIndentStyle, sidebarTreeCollapsedIndentStyle, sidebarTreeHalfIndentStyle, sidebarTreeNodeIndentStyle, sidebarTreeTruncationIndentStyle } from "./sidebar-tree-layout.js";
+import { collectEligibleStatusSessions, selectSidebarStatusSections, type SidebarStatusSections, type StatusCandidate } from "./sidebar-status.js";
+import { getSidebarViewFilters, setSidebarStatusSectionExpanded, setSidebarView, sidebarNeedsArchivedSessions, type SidebarSessionView, type SidebarStatusSectionKey, type SidebarViewFilters } from "./sidebar-view-preferences.js";
+import { isPinned, isSessionBusy, sessionShowsLastActivity, sessionTeamKind } from "../shared/session-tags.js";
 
 export { isProjectExpanded, toggleProjectExpanded };
 
@@ -1054,40 +1059,27 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 				const isAborting = session?.isAborting || false;
 				const accessory = session?.accessory;
 				const rowPy = SESSION_ROW_PY;
-				const btnPad = mobile ? "p-1" : "p-0.5";
-				const editBtn = html`<button class="${btnPad} rounded ${mobile ? "text-muted-foreground active:bg-secondary/80" : "hover:bg-secondary/80 text-muted-foreground hover:text-foreground"}"
-					@click=${(e: Event) => { e.stopPropagation(); window.location.hash = `#/staff/${agent.id}`; }}
-					title="Edit">${icon(Pencil, "xs")}</button>`;
+				const buttons = renderStaffSidebarActions(agent.id, agent.name, session);
 				const staffSessionNavId = agent.currentSessionId ? `session:${agent.currentSessionId}` : "";
 				return html`
 				<div class="${mobile ? "" : "group relative"} flex items-center gap-1 pr-1 ${rowPy} rounded-md cursor-pointer transition-colors
 					${active ? "bg-secondary text-foreground sidebar-session-active" : mobile ? "text-muted-foreground active:bg-secondary/50" : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground"}"
+					data-sidebar-actions-row-root
 					data-nav-id=${staffSessionNavId}
 					data-nav-active=${active ? "true" : "false"}
 					style="padding-left:var(--sidebar-chevron-w);"
 					@click=${() => handleStaffClick(agent)}>
 					<span class="shrink-0 inline-flex items-center justify-center ${!active && session && hasUnseenActivity(session) ? "bobbit-unread-pulse" : ""}">${statusBobbit(sessionStatus, isCompacting, agent.currentSessionId, active, isAborting, false, false, accessory, false, !active && !!session && hasUnseenActivity(session), true)}</span>
-					<div class="flex-1 min-w-0 ${mobile ? "flex items-center gap-1" : "truncate"} font-normal"><span class="block min-w-0 max-w-full truncate" style="${mobile ? "font-size: 1.3333em;" : ""}">${renderSessionTitle(agent.name, sessionStatus === "streaming" || sessionStatus === "busy" || isCompacting, state.searchQuery)}</span>${mobile && session ? (() => {
-							const isActiveSession = sessionStatus === "streaming" || sessionStatus === "busy" || isCompacting;
-							if (isActiveSession) { const _d = (agent.id.charCodeAt(0) % 5) * 1.8; return html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span><span class="sidebar-active-dot" style="--dot-delay:${_d}s"></span>`; }
-							const time = terseRelativeTime(session.lastActivity);
-							if (!time) return "";
-							const unseen = hasUnseenActivity(session);
-							return html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span><span class="shrink-0 inline-flex items-center gap-0.5 tabular-nums ${unseen ? "text-foreground/70 font-medium" : "text-muted-foreground/50"}" style="vertical-align:middle;font-size: 0.9167em;" title="${formatSessionAge(session.lastActivity)}">${time}${unseen ? html`<span class="unseen-dot" aria-label="unread"></span>` : ""}</span>`;
-						})() : ""}</div>
+					<div class="flex-1 min-w-0 flex flex-col justify-center">
+						<div class="flex items-center gap-1 min-w-0 font-normal"><span class="flex-1 min-w-0 truncate" data-testid="sidebar-session-title-text" style="${mobile ? "font-size: 1.3333em;" : ""}">${renderSessionTitle(agent.name, sessionStatus === "streaming" || sessionStatus === "busy" || isCompacting, state.searchQuery)}</span>${mobile && session ? html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span>${renderSessionTime(session)}` : ""}</div>
+					</div>
 					${mobile
-						? editBtn
-						: html`<div class="absolute right-0 top-0 bottom-0 flex items-center pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
-							<span class="group-hover:hidden flex items-center">${session ? (() => {
-								const time = terseRelativeTime(session.lastActivity);
-								if (!time) return "";
-								const unseen = hasUnseenActivity(session);
-								return html`<span class="shrink-0 flex items-center gap-0.5 tabular-nums ${unseen ? "text-foreground/70 font-medium" : "text-muted-foreground/50"}" style="font-size: 0.75em;" title="${formatSessionAge(session.lastActivity)}">${time}${unseen ? html`<span class="unseen-dot" aria-label="unread"></span>` : ""}</span>`;
-							})() : ""}</span>
-							<div class="sidebar-actions sidebar-action-cluster hidden group-hover:flex items-center">
-								${editBtn}
-							</div>
-						</div>`}
+						? buttons
+						: html`
+							<span class="group-hover:hidden group-focus-within:hidden absolute right-0 top-0 bottom-0 flex items-center pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">${session ? renderSessionTime(session, active) : ""}</span>
+							<div class="sidebar-actions sidebar-action-cluster absolute right-0 top-0 bottom-0 flex opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto items-center pr-1 pl-8 rounded-r-md" style="background:linear-gradient(to right, transparent 0%, var(--sidebar) 50%);">
+								${buttons}
+							</div>`}
 				</div>
 			`; })}</div>` : ""}
 	`;
@@ -1103,38 +1095,33 @@ export function renderStaffSidebarSection(filteredList?: typeof state.staffList,
 // SEARCH HANDLERS
 // ============================================================================
 
-/** Tracks whether archived section was auto-opened by search (vs manual toggle).
- *  Exported so that a manual toggle from the Filters popover (or its keyboard shortcut)
- *  can take precedence and prevent search-clear from undoing the user's choice. */
-export function clearArchivedBySearch(): void { _archivedBySearch = false; }
-let _archivedBySearch = false;
-
-/** Ensure archived is visible for search without loading unfiltered archived pages. */
+/** Search archive demand is ephemeral and never mutates either view preference. */
 function _ensureArchivedForSearch(query: string): void {
-	if (!state.showArchived) {
-		state.showArchived = true;
-		_archivedBySearch = true;
-	}
+	state.archivedSearchDemand = true;
 	scheduleArchivedRemoteSearch(query);
 }
 
-/** If archived was auto-opened by search, close it. */
-function _revertArchivedIfSearchOpened(): void {
-	if (_archivedBySearch) {
-		state.showArchived = false;
-		_archivedBySearch = false;
-		// Search auto-open is ephemeral. Clearing it may unload fetched archived
-		// records, but it must never delete the user's persisted archived tree
-		// expansion choices.
+function _clearArchivedSearchDemand(): void {
+	if (!state.archivedSearchDemand) return;
+	state.archivedSearchDemand = false;
+	// Keep the shared archive cache while either independent view still requests
+	// it; tree expansion preferences remain owned by the existing archive state.
+	if (!sidebarNeedsArchivedSessions(state, false)) {
 		clearArchivedSessionsState();
+		return;
 	}
+	// A Show Archived toggle made during search was deliberately routed to the
+	// remote query loader. Once search ends, fulfil that same shared demand from
+	// the normal paginated caches without duplicating an existing normal load.
+	if (!archivedSessionsLoaded()) void fetchArchivedSessions();
+	if (!archivedGoalsLoaded()) void fetchArchivedGoalsPaginated();
 }
 
 export function handleSidebarSearchInput(query: string): void {
 	state.searchQuery = query;
 	if (!query.trim()) {
 		clearArchivedSearchState();
-		_revertArchivedIfSearchOpened();
+		_clearArchivedSearchDemand();
 		renderApp();
 		return;
 	}
@@ -1142,16 +1129,16 @@ export function handleSidebarSearchInput(query: string): void {
 	renderApp();
 }
 
-export function handleSidebarSearchClear(): void {
+export function handleSidebarSearchClear(shouldRender = true): void {
 	state.searchQuery = "";
 	clearArchivedSearchState();
-	_revertArchivedIfSearchOpened();
-	renderApp();
+	_clearArchivedSearchDemand();
+	if (shouldRender) renderApp();
 }
 
 export function renderArchivedSearchControls(): TemplateResult | string {
 	const queryActive = !!state.searchQuery.trim();
-	if (!state.showArchived || !queryActive) return "";
+	if (!state.archivedSearchDemand || !queryActive) return "";
 	const loading = state.archivedSearchGoalsLoading || state.archivedSearchSessionsLoading;
 	const hasMore = state.archivedSearchGoalsHasMore || state.archivedSearchSessionsHasMore;
 	if (!loading && !hasMore) return "";
@@ -1165,6 +1152,22 @@ export function renderArchivedSearchControls(): TemplateResult | string {
 			` : ""}
 			${state.archivedSearchSessionsHasMore ? html`
 				<button class="text-primary hover:underline text-left py-1 disabled:opacity-60 disabled:no-underline" ?disabled=${state.archivedSearchSessionsLoading} @click=${() => { fetchArchivedSearchSessionsPaginated(50, state.archivedSearchSessionsCursor ?? undefined); }}>Load more matching archived sessions…</button>
+			` : ""}
+		</div>
+	`;
+}
+
+/** Shared normal archive pagination for Project and Status on desktop/mobile. */
+export function renderArchivedPaginationControls(showArchived: boolean, mobile = !isDesktop()): TemplateResult | string {
+	if (!showArchived || state.searchQuery.trim() || (!state.archivedGoalsHasMore && !state.archivedSessionsHasMore)) return "";
+	return html`
+		<div class="border-t border-border/30 ${mobile ? "my-0.5" : "my-1"} mx-2"></div>
+		<div class="flex flex-col gap-0.5 px-2">
+			${state.archivedGoalsHasMore ? html`
+				<button class="text-primary hover:underline text-left py-1" @click=${() => { fetchArchivedGoalsPaginated(50, state.archivedGoalsCursor ?? undefined); }}>Load more archived goals…</button>
+			` : ""}
+			${state.archivedSessionsHasMore ? html`
+				<button class="text-primary hover:underline text-left py-1" @click=${() => { fetchArchivedSessionsPaginated(50, state.archivedSessionsCursor ?? undefined); }}>Load more archived sessions…</button>
 			` : ""}
 		</div>
 	`;
@@ -1486,7 +1489,9 @@ function nestedGoalChildren(node: GoalTreeNode, archived: boolean): GoalTreeNode
 
 /** Render the collapsible per-project Archived subsection (desktop variant). */
 function renderProjectArchivedSection(projectTree: SidebarProjectTree) {
-	if (!state.showArchived || !projectTree.archivedSectionNode) return "";
+	// The canonical model only creates this section when archived content is
+	// eligible. That includes the exact target of an explicit reveal action.
+	if (!projectTree.archivedSectionNode) return "";
 	const project = projectTree.project as Project;
 	const expanded = projectTree.archivedSectionNode.expanded;
 	const archHeaderNavId = `archived-header:${project.id}`;
@@ -1525,23 +1530,112 @@ function renderProjectArchivedSection(projectTree: SidebarProjectTree) {
 
 /**
  * Per-project key for the "Show N more child goals" expansion state.
- * When the user clicks the truncation row, we bump the depth cap by 5 to
- * surface the next layer of nesting. Persists in module memory for the
- * lifetime of the SPA — losing this on reload is fine, the cap default of
- * 5 is the documented limit anyway.
+ * Ordinary truncation-row expansion remains in memory; only the depth needed
+ * by an explicit session reveal is durable in the unified tree-state record.
  */
 const _expandedNestedDepthByProject: Map<string, number> = new Map();
 const DEFAULT_NESTED_DEPTH_CAP = 5;
 const NESTED_DEPTH_INCREMENT = 5;
 
 function _getNestedDepthCap(projectId: string): number {
-	return _expandedNestedDepthByProject.get(projectId) ?? DEFAULT_NESTED_DEPTH_CAP;
+	return Math.max(
+		DEFAULT_NESTED_DEPTH_CAP,
+		_expandedNestedDepthByProject.get(projectId) ?? 0,
+		getSidebarExplicitRevealDepth(projectId) ?? 0,
+	);
 }
 
 function _expandNestedDepth(projectId: string): void {
 	const cur = _getNestedDepthCap(projectId);
 	_expandedNestedDepthByProject.set(projectId, cur + NESTED_DEPTH_INCREMENT);
 	renderApp();
+}
+
+/**
+ * Materialize the hydrated goal ancestry for one explicit session reveal.
+ * This only raises the existing cap for the target's canonical project and
+ * leaves automatic route reveals and every unrelated project unchanged.
+ */
+export function materializeExplicitSidebarSessionDepth(sessionId: string): boolean {
+	const sessionsById = new Map(state.archivedSessions.map(session => [session.id, session]));
+	for (const session of state.gatewaySessions) sessionsById.set(session.id, session);
+	const target = sessionsById.get(sessionId);
+	if (!target) return false;
+
+	const goalsById = new Map(state.goals.map(goal => [goal.id, goal]));
+	const projectIds = new Set(state.projects.map(project => project.id));
+	const fallbackProjectId = state.projects[0]?.id;
+	const resolveGoalProjectId = (goalId: string): string | undefined => {
+		let goal = goalsById.get(goalId);
+		let resolved: string | undefined;
+		const seen = new Set<string>();
+		while (goal && !seen.has(goal.id)) {
+			seen.add(goal.id);
+			if (goal.projectId) {
+				if (!projectIds.has(goal.projectId)) return undefined;
+				resolved ??= goal.projectId;
+			}
+			goal = goal.parentGoalId ? goalsById.get(goal.parentGoalId) : undefined;
+		}
+		return resolved ?? fallbackProjectId;
+	};
+
+	// Placement can be inherited through a delegate/team/child parent, so walk
+	// those canonical references only. Hydration has already loaded this chain.
+	const relatedGoalIds: string[] = [];
+	const seenGoalIds = new Set<string>();
+	const sessionQueue = [sessionId];
+	const seenSessionIds = new Set<string>();
+	while (sessionQueue.length > 0) {
+		const relatedId = sessionQueue.shift()!;
+		if (seenSessionIds.has(relatedId)) continue;
+		seenSessionIds.add(relatedId);
+		const session = sessionsById.get(relatedId);
+		if (!session) continue;
+		for (const goalId of [session.goalId, session.teamGoalId]) {
+			if (goalId && !seenGoalIds.has(goalId)) {
+				seenGoalIds.add(goalId);
+				relatedGoalIds.push(goalId);
+			}
+		}
+		for (const parentId of [session.parentSessionId, session.delegateOf, session.teamLeadSessionId]) {
+			if (parentId && !seenSessionIds.has(parentId)) sessionQueue.push(parentId);
+		}
+	}
+	if (relatedGoalIds.length === 0) return false;
+
+	const preferredProjectId = projectIds.has(target.projectId ?? "")
+		? target.projectId
+		: relatedGoalIds.map(resolveGoalProjectId).find((id): id is string => Boolean(id));
+	if (!preferredProjectId) return false;
+
+	let requiredDepth = 0;
+	for (const goalId of relatedGoalIds) {
+		if (resolveGoalProjectId(goalId) !== preferredProjectId) continue;
+		let cursor = goalsById.get(goalId);
+		let depth = 0;
+		const seen = new Set<string>();
+		while (cursor && !seen.has(cursor.id)) {
+			seen.add(cursor.id);
+			if (!cursor.parentGoalId) break;
+			const parent = goalsById.get(cursor.parentGoalId);
+			if (!parent || resolveGoalProjectId(parent.id) !== preferredProjectId) break;
+			depth++;
+			cursor = parent;
+		}
+		requiredDepth = Math.max(requiredDepth, depth);
+	}
+
+	// Persist only the target path's required bucket. A larger in-memory cap may
+	// have come from ordinary Show More clicks and must not become durable merely
+	// because the explicit target happens to fit within it.
+	let explicitCap = Math.max(
+		DEFAULT_NESTED_DEPTH_CAP,
+		getSidebarExplicitRevealDepth(preferredProjectId) ?? 0,
+	);
+	if (requiredDepth <= explicitCap) return false;
+	while (explicitCap < requiredDepth) explicitCap += NESTED_DEPTH_INCREMENT;
+	return setSidebarExplicitRevealDepth(preferredProjectId, explicitCap);
 }
 
 /** Render the "Show N more child goals…" affordance when the depth cap clipped. */
@@ -1604,7 +1698,58 @@ export function buildSidebarTreeModel(sidebarData = getSidebarData()): SidebarTr
 	return buildSidebarTreeModelWithSearch(sidebarData).model;
 }
 
-function buildSidebarTreeModelWithSearch(sidebarData = getSidebarData()): { model: SidebarTreeModel; visibleSearchGoalIds: Set<string> | null } {
+function revealedArchivedTreePopulation(sessionId: string): { sessions: GatewaySession[]; goalIds: Set<string> } {
+	const archivedById = new Map(state.archivedSessions.map(session => [session.id, session]));
+	const goalsById = new Map(state.goals.map(goal => [goal.id, goal]));
+	const sessionIds = new Set<string>();
+	const goalIds = new Set<string>();
+	const sessionQueue = [sessionId];
+	const goalQueue: string[] = [];
+
+	while (sessionQueue.length > 0 || goalQueue.length > 0) {
+		while (sessionQueue.length > 0) {
+			const sessionId = sessionQueue.pop()!;
+			if (sessionIds.has(sessionId)) continue;
+			const session = archivedById.get(sessionId);
+			if (!session) continue;
+			sessionIds.add(sessionId);
+			for (const parentId of [session.parentSessionId, session.delegateOf, session.teamLeadSessionId]) {
+				if (parentId && !sessionIds.has(parentId)) sessionQueue.push(parentId);
+			}
+			for (const goalId of [session.goalId, session.teamGoalId]) {
+				if (goalId && !goalIds.has(goalId)) goalQueue.push(goalId);
+			}
+		}
+		while (goalQueue.length > 0) {
+			const goalId = goalQueue.pop()!;
+			if (goalIds.has(goalId)) continue;
+			goalIds.add(goalId);
+			const goal = goalsById.get(goalId);
+			if (!goal) continue;
+			if (goal.parentGoalId && !goalIds.has(goal.parentGoalId)) goalQueue.push(goal.parentGoalId);
+			if (goal.spawnedBySessionId && !sessionIds.has(goal.spawnedBySessionId)) sessionQueue.push(goal.spawnedBySessionId);
+		}
+	}
+
+	return {
+		sessions: state.archivedSessions.filter(session => sessionIds.has(session.id)),
+		goalIds,
+	};
+}
+
+export interface SidebarTreeVisibilityInput {
+	view?: SidebarSessionView;
+	filters?: SidebarViewFilters;
+	viewport?: "desktop" | "mobile" | "collapsed";
+}
+
+/** Shared production search/eligibility pipeline for both sidebar views. */
+export function buildSidebarTreeModelWithSearch(
+	sidebarData = getSidebarData(),
+	visibility: SidebarTreeVisibilityInput = {},
+): { model: SidebarTreeModel; visibleSearchGoalIds: Set<string> | null } {
+	const view = visibility.view ?? "project";
+	const filters = visibility.filters ?? getSidebarViewFilters(state, view);
 	const query = state.searchQuery.trim();
 	const q = query.toLowerCase();
 	const bypassFilters = Boolean(query);
@@ -1613,9 +1758,21 @@ function buildSidebarTreeModelWithSearch(sidebarData = getSidebarData()): { mode
 		? filterStaffByQuery(staffList.filter(s => s.state !== "retired"), q)
 		: staffList.filter(s => s.state !== "retired");
 	const liveSessionsNoStaff = state.gatewaySessions.filter(s => !sidebarData.staffSessionIds.has(s.id));
-	const goalsForTree: Goal[] = state.goals;
+	const activeId = activeSessionId();
+	if (state.sidebarRevealSessionId && state.sidebarRevealSessionId !== activeId) {
+		state.sidebarRevealSessionId = null;
+	}
+	const revealSessionId = state.sidebarRevealSessionId === activeId ? activeId : undefined;
+	const revealedArchived = revealSessionId
+		? state.archivedSessions.find(session => session.id === revealSessionId)
+		: undefined;
+	const narrowRevealArchive = Boolean(revealedArchived && !filters.showArchived && !bypassFilters);
+	const revealArchivePopulation = narrowRevealArchive && revealSessionId ? revealedArchivedTreePopulation(revealSessionId) : null;
+	const goalsForTree: Goal[] = revealArchivePopulation
+		? state.goals.filter(goal => !goal.archived || revealArchivePopulation.goalIds.has(goal.id))
+		: state.goals;
 	let sessionsForTree: GatewaySession[] = liveSessionsNoStaff;
-	let archivedSessionsForTree: GatewaySession[] = state.archivedSessions;
+	let archivedSessionsForTree: GatewaySession[] = revealArchivePopulation?.sessions ?? state.archivedSessions;
 	let visibleSearchGoalIds: Set<string> | null = null;
 
 	let retainedSearchSessionIds: Set<string> | null = null;
@@ -1667,18 +1824,20 @@ function buildSidebarTreeModelWithSearch(sidebarData = getSidebarData()): { mode
 		sessions: sessionsForTree,
 		archivedSessions: archivedSessionsForTree,
 		staff: filteredStaff,
-		showArchived: state.showArchived,
+		showArchived: filters.showArchived || bypassFilters || narrowRevealArchive,
 		projectOrder: projects.map(p => p.id),
 		nestedDepthByProject: new Map(projects.map(p => [p.id, _getNestedDepthCap(p.id)])),
 		defaultNestedDepth: DEFAULT_NESTED_DEPTH_CAP,
-		viewport: state.sidebarCollapsed ? "collapsed" : "desktop",
+		viewport: visibility.viewport ?? (state.sidebarCollapsed ? "collapsed" : "desktop"),
 		layout: loadSidebarTreeLayoutPreference(),
 		filters: {
 			searchQuery: state.searchQuery,
 			activeSessionId: activeSessionId(),
-			passesSessionFilters: (session, active, bypass) => retainedSearchSessionIds?.has((session as GatewaySession).id) || passesSidebarFilters(session as GatewaySession, active, bypass),
-			bypassBusyReadFilters: bypassFilters,
-			includeArchived: state.showArchived,
+			passesSessionFilters: (session, active, bypass) => retainedSearchSessionIds?.has((session as GatewaySession).id)
+				|| view === "status"
+				|| passesSidebarFilters(session as GatewaySession, active, bypass),
+			bypassBusyReadFilters: bypassFilters || view === "status",
+			includeArchived: filters.showArchived || bypassFilters || narrowRevealArchive,
 		},
 		expansion: sidebarTreeExpansionInput(),
 	});
@@ -1686,7 +1845,7 @@ function buildSidebarTreeModelWithSearch(sidebarData = getSidebarData()): { mode
 }
 
 function buildDesktopSidebarTree(sidebarData = getSidebarData()): SidebarTreeModel {
-	const { model, visibleSearchGoalIds } = buildSidebarTreeModelWithSearch(sidebarData);
+	const { model, visibleSearchGoalIds } = buildSidebarTreeModelWithSearch(sidebarData, { view: "project" });
 	return visibleSearchGoalIds ? filterSidebarTreeModelGoalsForSearch(model, visibleSearchGoalIds) : model;
 }
 
@@ -1732,7 +1891,7 @@ function renderProjectContent(projectTree: SidebarProjectTree) {
 						<span class="sidebar-compound-icon" data-testid="sidebar-add-session-icon">
 							${icon(MessagesSquare, "xs", "sidebar-compound-base")}
 							<svg data-testid="sidebar-add-session-plus" class="sidebar-compound-plus" viewBox="0 0 10 10">
-								<path d="M5 1V9M1 5H9" stroke="var(--primary)" stroke-width="2.5" stroke-linecap="round"/>
+								<path d="M5 1V9M1 5H9" stroke="${getProjectAccentColor(project)}" stroke-width="2.5" stroke-linecap="round"/>
 							</svg>
 						</span>
 					</button>
@@ -1758,12 +1917,207 @@ function renderProjectContent(projectTree: SidebarProjectTree) {
 	`;
 }
 
+export function buildSidebarStatusSections(
+	sidebarData = getSidebarData(),
+	viewport: "desktop" | "mobile" | "collapsed" = "desktop",
+): SidebarStatusSections {
+	// Status can be the persisted startup view, so no Project staff section may
+	// render first. Reuse the guarded canonical loader before collecting staff.
+	ensureStaffLoaded();
+	const filters = getSidebarViewFilters(state, "status");
+	const { model } = buildSidebarTreeModelWithSearch(sidebarData, { view: "status", filters, viewport });
+	const query = state.searchQuery.trim().toLowerCase();
+	const staff = (state.staffList || []).filter(agent => agent.state !== "retired");
+	const eligibleStaff = query ? filterStaffByQuery(staff, query) : staff;
+	const candidates = collectEligibleStatusSessions(model, eligibleStaff, synthStaffSessionRow);
+	return selectSidebarStatusSections({
+		candidates,
+		filters,
+		searchQuery: state.searchQuery,
+		activeSessionId: activeSessionId(),
+		revealSessionId: state.sidebarRevealSessionId,
+		isPinned: session => isPinned(session.user_tags),
+		isUnread: session => hasUnseenActivity(session),
+		isBusy: session => isSessionBusy(session),
+		isTeamMember: session => sessionTeamKind(session) === "member",
+	});
+}
+
+function switchSidebarView(view: SidebarSessionView): void {
+	if (state.sidebarSessionView === view) return;
+	setSidebarView(state, view);
+	const filters = getSidebarViewFilters(state, view);
+	if (filters.showArchived || state.searchQuery.trim()) {
+		// Project and Status share one normal archive cache. Switching views may
+		// cold-load it, but must not reset pagination already fetched by either view.
+		if (!archivedSessionsLoaded()) void fetchArchivedSessions();
+		if (!archivedGoalsLoaded()) void fetchArchivedGoalsPaginated();
+	}
+	renderApp();
+}
+
+/** Shared compact selector/filter row used by desktop and mobile. */
+export function renderSidebarViewControls(variant: "desktop" | "mobile" = "desktop"): TemplateResult {
+	const revealSessionId = activeSessionId();
+	const revealTooltip = revealSessionId
+		? "Reveal current session in sidebar"
+		: "Open a session to reveal it in the sidebar.";
+	return html`
+		<div class="sidebar-view-controls ${variant === "mobile" ? "sidebar-view-controls--mobile" : ""}">
+			<div class="sidebar-session-mode-switch" role="group" aria-label="Session grouping">
+				<button
+					type="button"
+					data-testid="sidebar-view-project"
+					data-active=${state.sidebarSessionView === "project" ? "true" : "false"}
+					aria-pressed=${state.sidebarSessionView === "project" ? "true" : "false"}
+					@click=${() => switchSidebarView("project")}
+				><span class="sidebar-view-control-icon">${icon(FolderTree, "xs")}</span><span>By Project</span></button>
+				<button
+					type="button"
+					data-testid="sidebar-view-status"
+					data-active=${state.sidebarSessionView === "status" ? "true" : "false"}
+					aria-pressed=${state.sidebarSessionView === "status" ? "true" : "false"}
+					@click=${() => switchSidebarView("status")}
+				><span class="sidebar-view-control-icon">${icon(ListFilter, "xs")}</span><span>By Status</span></button>
+			</div>
+			${renderFiltersButton(variant)}
+			${variant === "desktop" ? html`
+				<span class="sidebar-reveal-current-control" title=${revealTooltip}>
+					<button
+						type="button"
+						class="sidebar-reveal-current-button"
+						data-testid="sidebar-reveal-current-button"
+						aria-label="Reveal current session in sidebar"
+						title=${revealTooltip}
+						?disabled=${!revealSessionId}
+						@click=${() => {
+							if (!activeSessionId()) return;
+							void import("./sidebar-reveal.js").then(module => module.revealCurrentSidebarSession());
+						}}
+					><span class="sidebar-view-control-icon">${icon(Crosshair, "xs")}</span></button>
+				</span>
+			` : nothing}
+		</div>
+	`;
+}
+
+function renderStatusHeading(key: SidebarStatusSectionKey, count: number, expanded: boolean): TemplateResult {
+	const { label, headingIcon } = key === "pinned"
+		? { label: "Pinned", headingIcon: Pin }
+		: key === "unread"
+			? { label: "Unread", headingIcon: Mail }
+			: { label: "Read", headingIcon: MailOpen };
+	const headingId = `sidebar-status-${key}-heading`;
+	const rowsId = `sidebar-status-${key}-rows`;
+	const desktop = isDesktop();
+	const headingLayout = desktop
+		? "gap-1 pr-1 py-0.5 hover:bg-secondary/30"
+		: "gap-1.5 pl-0.5 pr-2 py-0.5 active:bg-secondary/50";
+	const toggle = () => {
+		setSidebarStatusSectionExpanded(state, key, !expanded);
+		renderApp();
+	};
+	return html`
+		<div
+			class="sidebar-status-heading ${key === "pinned" ? "" : "sidebar-status-heading--lower-padding"} relative flex items-center ${headingLayout} rounded-md cursor-pointer transition-colors"
+			style=${desktop ? "padding-left:var(--sidebar-header-chevron-w);" : ""}
+			id=${headingId}
+			role="button"
+			tabindex="0"
+			aria-controls=${rowsId}
+			aria-expanded=${expanded ? "true" : "false"}
+			@click=${toggle}
+			@keydown=${(event: KeyboardEvent) => {
+				if (event.key !== "Enter" && event.key !== " ") return;
+				event.preventDefault();
+				toggle();
+			}}
+		>
+			<span class="sidebar-chevron-slot ${desktop ? "sidebar-chevron-slot--header sidebar-chevron-slot--absolute" : "sidebar-chevron-slot--inline"} text-muted-foreground shrink-0 select-none"><span class="sidebar-chevron-glyph">${expanded ? "▾" : "▸"}</span></span>
+			<span class="sidebar-status-heading-icon shrink-0 text-muted-foreground">${icon(headingIcon, desktop ? "xs" : "sm")}</span>
+			<span class="sidebar-status-heading-label flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style=${`font-size:${desktop ? "0.75em" : "1.1667em"};`}>${label}</span>
+			<span class="sidebar-status-count">${count}</span>
+		</div>
+	`;
+}
+
+function statusCandidateMotionSignature(candidate: StatusCandidate, goalTitle: string | undefined): string {
+	const session = candidate.session;
+	return JSON.stringify([
+		session.title,
+		session.status,
+		sessionShowsLastActivity(session) ? session.lastActivity : 0,
+		sessionShowsLastActivity(session) ? session.lastReadAt ?? 0 : 0,
+		session.isCompacting === true,
+		session.isAborting === true,
+		session.lastTurnErrored === true,
+		session.consecutiveErrorTurns ?? 0,
+		session.archived === true,
+		session.archivedAt ?? 0,
+		candidate.staff,
+		goalTitle || "",
+		session.server_tags || [],
+		session.user_tags || [],
+	]);
+}
+
+function renderStatusCandidate(candidate: StatusCandidate): TemplateResult {
+	const goal = candidate.goalId ? state.goals.find(item => item.id === candidate.goalId) : undefined;
+	const projectId = goal?.projectId || candidate.session.projectId;
+	const project = projectId ? state.projects.find(item => item.id === projectId) : undefined;
+	const rowOptions = {
+		flat: true,
+		goalTitle: goal?.title,
+		projectColor: project ? getProjectAccentColor(project) : undefined,
+		statusIdentity: candidate.staff ? "staff" : "session",
+		statusMotionSignature: statusCandidateMotionSignature(candidate, goal?.title),
+	} as const;
+	return candidate.archived
+		? renderArchivedSessionRow(candidate.session, false, rowOptions)
+		: renderSessionRow(candidate.session, rowOptions);
+}
+
+/** Canonical flat rows grouped into the three exact Status sections. */
+export function renderSidebarStatusContent(
+	sections = buildSidebarStatusSections(undefined, isDesktop() ? "desktop" : "mobile"),
+): TemplateResult {
+	const entries = [
+		["pinned", sections.pinned],
+		["unread", sections.unread],
+		["read", sections.read],
+	] as const;
+	const count = sections.pinned.length + sections.unread.length + sections.read.length;
+	const archiveControls = html`${renderArchivedSearchControls()}${renderArchivedPaginationControls(
+		getSidebarViewFilters(state, "status").showArchived,
+	)}`;
+	if (count === 0) {
+		return html`<div class="sidebar-status-empty">No sessions match this search and filter.</div>${archiveControls}`;
+	}
+	const visibleEntries = entries.filter((entry) => entry[1].length > 0);
+	return html`${visibleEntries.map(([key, rows], index) => {
+		const expanded = !state.statusCollapsedSections.has(key);
+		return html`
+			${index > 0 ? html`<div class="sidebar-status-separator border-t border-border/30 ${isDesktop() ? "my-1" : "my-0.5"} mx-2"></div>` : nothing}
+			<section
+				class="sidebar-status-section ${index === 0 ? "sidebar-status-section--first" : ""}"
+				aria-labelledby=${`sidebar-status-${key}-heading`}
+				data-status-section=${key}
+			>
+				${renderStatusHeading(key, rows.length, expanded)}
+				${expanded ? html`<div class="sidebar-status-rows" id=${`sidebar-status-${key}-rows`}>${rows.map(renderStatusCandidate)}</div>` : nothing}
+			</section>
+		`;
+	})}${archiveControls}`;
+}
+
 export function renderSidebar() {
 	const sidebarData = getSidebarData();
 	const sidebarTree = buildDesktopSidebarTree(sidebarData);
 
 	if (state.sidebarCollapsed) {
-		return renderCollapsedSidebar(sidebarTree);
+		return state.sidebarSessionView === "status"
+			? renderCollapsedStatusSidebar(buildSidebarStatusSections(sidebarData, "collapsed"))
+			: renderCollapsedSidebar(sidebarTree);
 	}
 
 	const isRolesActive = isRouteActive("roles", "role-edit");
@@ -1846,7 +2200,13 @@ export function renderSidebar() {
 				></search-box>
 				<search-status-dot></search-status-dot>
 			</div>
+			${renderSidebarViewControls("desktop")}
 			<div class="flex-1 overflow-y-auto flex flex-col gap-0.5 pt-0 pb-2 px-0.5" data-project-reorder-list>
+				${state.sidebarSessionView === "status" ? (state.sessionsLoading
+					? html`<div class="text-center py-6 text-muted-foreground">Loading…</div>`
+					: state.sessionsError
+						? html`<div class="text-center py-6"><p class="text-red-500 mb-2">${state.sessionsError}</p><button class="text-muted-foreground hover:text-foreground underline" title="Retry loading sessions" @click=${retryLoadSessions}>Retry</button></div>`
+						: renderSidebarStatusContent(buildSidebarStatusSections(sidebarData))) : html`
 				${renderOrphanedStaffBanner()}
 				${state.sessionsLoading
 					? html`<div class="text-center py-6 text-muted-foreground">Loading…</div>`
@@ -1872,17 +2232,7 @@ export function renderSidebar() {
 							})}
 
 							${renderArchivedSearchControls()}
-							${state.showArchived && !state.searchQuery && (state.archivedGoalsHasMore || state.archivedSessionsHasMore) ? html`
-								<div class="border-t border-border/30 my-1 mx-2"></div>
-								<div class="flex flex-col gap-0.5 px-2">
-									${state.archivedGoalsHasMore ? html`
-										<button class="text-primary hover:underline text-left py-1" @click=${() => { fetchArchivedGoalsPaginated(50, state.archivedGoalsCursor ?? undefined); }}>Load more archived goals…</button>
-									` : ""}
-									${state.archivedSessionsHasMore ? html`
-										<button class="text-primary hover:underline text-left py-1" @click=${() => { fetchArchivedSessionsPaginated(50, state.archivedSessionsCursor ?? undefined); }}>Load more archived sessions…</button>
-									` : ""}
-								</div>
-							` : ""}
+							${renderArchivedPaginationControls(state.showArchived, false)}
 						`}
 				${state.projects.length === 0 ? html`
 					${headquartersHiddenWithNoVisibleProjects() ? renderHiddenHeadquartersSidebarFallback() : html`
@@ -1908,6 +2258,7 @@ export function renderSidebar() {
 						<span>Add Project</span>
 					</button>
 				`}
+				`}
 			</div>
 			<div class="sidebar-bottom-actions flex items-center border-t border-border/50">
 				${(() => { const isSettings = isRouteActive("settings"); return html`<button
@@ -1918,7 +2269,6 @@ export function renderSidebar() {
 					${icon(Settings, "sm")}
 					<span class="sidebar-bottom-action-text">Settings</span>
 				</button>`; })()}
-				${renderFiltersButton("desktop")}
 				<span class="flex-1"></span>
 				<button
 					class="flex items-center gap-1.5 px-2 py-2 text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
@@ -1935,6 +2285,44 @@ export function renderSidebar() {
 // ============================================================================
 // COLLAPSED SIDEBAR
 // ============================================================================
+
+function renderCollapsedStatusSidebar(sections: SidebarStatusSections): TemplateResult {
+	const renderCompactCandidate = (candidate: StatusCandidate) => {
+		const session = candidate.session;
+		const active = activeSessionId() === session.id;
+		const displayTitle = active && state.remoteAgent ? state.remoteAgent.title : session.title;
+		return html`
+			<button
+				data-session-id=${session.id}
+				data-nav-id=${`session:${session.id}`}
+				data-nav-active=${active ? "true" : "false"}
+				class="flex items-center gap-1 ${SESSION_ROW_PY} px-1 rounded-md transition-colors w-full ${active ? "bg-secondary sidebar-session-active" : "hover:bg-secondary/50"} ${candidate.archived ? "opacity-60" : ""}"
+				title=${displayTitle}
+				@click=${() => { if (!active) connectToSession(session.id, true, candidate.archived ? { readOnly: true } : undefined); }}
+			>
+				<span class="shrink-0 inline-flex items-center justify-center ${!active && hasUnseenActivity(session) ? "bobbit-unread-pulse" : ""}">${statusBobbit(candidate.archived ? "terminated" : session.status, session.isCompacting, session.id, active, session.isAborting, session.role === "team-lead", session.role === "coder", session.accessory, false, !active && hasUnseenActivity(session), true)}</span>
+				<span class="font-bold tracking-wide ${active ? "text-foreground" : "text-muted-foreground"}" style="font-family:ui-monospace,monospace;line-height:1;font-size:.6667em;">${sessionAcronym(displayTitle)}</span>
+			</button>
+		`;
+	};
+	const groups = [
+		["Pinned", sections.pinned],
+		["Unread", sections.unread],
+		["Read", sections.read],
+	] as const;
+	return html`
+		<div class="w-14 shrink-0 h-full flex flex-col items-center sidebar-edge sidebar-root" data-testid="sidebar-collapsed" style="background:var(--sidebar);">
+			<div class="sidebar-collapsed-scroll flex-1 overflow-y-auto flex flex-col items-center gap-0.5 py-2 px-0.5">
+				${groups.map(([label, rows], index) => rows.length === 0 ? nothing : html`
+					${index > 0 ? html`<div class="w-7 border-t border-border/50 my-1.5" role="separator" aria-label=${label}></div>` : html`<span class="sr-only">${label}</span>`}
+					<div role="group" aria-label=${`${label}, ${rows.length} sessions`}>${rows.map(renderCompactCandidate)}</div>
+				`)}
+				${sections.pinned.length + sections.unread.length + sections.read.length === 0 ? html`<span class="text-muted-foreground text-center" style="font-size:.6667em;">None</span>` : nothing}
+			</div>
+			<button class="p-2 mb-2 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors" @click=${toggleSidebar} title=${`Expand sidebar${shortcutHint("toggle-sidebar")}`}>${icon(PanelLeftOpen, "sm")}</button>
+		</div>
+	`;
+}
 
 function renderCollapsedSidebar(sidebarTree: SidebarTreeModel) {
 	// Trigger the staff fetch (no-op after first call) so the collapsed STAFF
@@ -2100,7 +2488,7 @@ function renderCollapsedSidebar(sidebarTree: SidebarTreeModel) {
 						` : ""}
 					`;
 				})}
-				${state.showArchived && sidebarTree.projects.some(project => project.archivedGoalForest.length > 0) ? html`
+				${(state.showArchived || state.archivedSearchDemand) && sidebarTree.projects.some(project => project.archivedGoalForest.length > 0) ? html`
 					<div class="w-7 border-t border-border/50 my-1.5"></div>
 					${sidebarTree.projects.flatMap(project => project.archivedGoalForest).map(node => renderCollapsedGoalNode(node, true))}
 				` : ""}

@@ -89,11 +89,21 @@ function hasStructuredSteerOccurrence(
 	record: InFlightSteerRecord,
 	bindings: readonly PromptAuthorBinding[],
 ): boolean {
-	const syntheticId = `inflight-steer:${record.promptId}`;
-	if (messages.some((message) => message?._inFlightSteer === true && message.id === syntheticId)) return true;
+	const occurrenceId = record.intentId ?? record.promptId;
+	const syntheticId = `inflight-steer:${occurrenceId}`;
+	if (messages.some((message) => message?._inFlightSteer === true && (
+		message.deliveryIntentId === occurrenceId
+		|| (record.attemptId !== undefined && message.deliveryAttemptId === record.attemptId)
+		|| message.id === syntheticId
+	))) return true;
 
 	const binding = bindings.find((candidate) =>
-		candidate.promptId === record.promptId && candidate.settlement?.outcome === "echoed",
+		(record.attemptId !== undefined
+			? candidate.attemptId === record.attemptId
+			: record.intentId !== undefined
+				? candidate.intentId === record.intentId
+				: candidate.promptId === record.promptId)
+		&& candidate.settlement?.outcome === "echoed",
 	);
 	if (!binding?.settlement) return false;
 
@@ -124,22 +134,19 @@ function hasStructuredSteerOccurrence(
  * Companion to `spliceInFlightMessage` (which handles in-flight assistant
  * `message_update`). Solves a steer-specific continuity race:
  *
- *   `_dispatchSteer()` removes the queue row and broadcasts the empty
- *   queue *before* awaiting `rpcClient.steer()`. The SDK only echoes the
- *   text back as `message_end(role:user)` after a roundtrip, and the
- *   agent only flushes that echo to `.jsonl` at that point. Between
- *   queue-removal and echo, a client `get_messages` (visibility resync,
- *   WS reconnect resume-fallback, second tab) sees a snapshot with
- *   neither the pill nor the transcript row — the steer text appears
- *   to vanish, only to reappear seconds later when the echo lands.
+ *   `_dispatchSteer()` moves an accepted row from the prompt queue into the
+ *   durable dispatch ledger before calling Pi. Pi's real user-message echo is
+ *   absent from `.jsonl` until its correlated start/end arrives. A client
+ *   `get_messages` during that window therefore needs ledger evidence to
+ *   recover the accepted occurrence without treating it as delivered.
  *
- * The ledger is the in-process record of "steer texts the SDK has but
- * `.jsonl` doesn't yet". Splicing them into snapshot responses closes
- * the gap. Synthetic rows carry a stable id prefix `inflight-steer:` so
- * the client reducer can route them through the normal server-snapshot
- * dedup paths (multiset plain-text match against the real echo when a
- * later snapshot arrives, plus the `_origin: "server" && _order <= 0`
- * prior-snapshot drop for any leftover).
+ * The ledger is the record of "accepted steers dispatched toward Pi but not
+ * yet correlated to Pi user-message start". Splicing it into snapshots closes
+ * the gap. Synthetic rows carry a stable id prefix `inflight-steer:`.
+ * Modern structured rows are explicitly marked as recovery projections so
+ * the client keeps their durable intent in the outbox rather than mistaking
+ * the synthetic user-shaped row for Pi's correlated user-message echo.
+ * Legacy string rows retain their historical transcript projection.
  *
  * Bounded by construction: the ledger only ever contains entries that
  * are paired with a future echo (which clears them) or an abort-drain
@@ -196,16 +203,28 @@ export function spliceInFlightSteers(
 		}
 
 		const author: MessageAuthor | undefined = isMessageAuthor(record.author) ? record.author : undefined;
+		const occurrenceId = record.intentId ?? record.promptId;
 		additions.push({
-			// New structured entries use their stable prompt identity. Keep the
-			// legacy content-derived shape so reconnect behaviour is unchanged for
-			// old persisted string ledgers.
+			// Modern structured entries use accepted occurrence identity. Keep the
+			// legacy content-derived shape for string ledgers and prompt-id shape for
+			// pre-intent structured rows.
 			id: legacy
 				? `inflight-steer:${i}:${text.slice(0, 32)}`
-				: `inflight-steer:${record.promptId}`,
+				: `inflight-steer:${occurrenceId}`,
 			role: "user",
 			content: [{ type: "text", text }],
 			...(author ? { author } : {}),
+			...(record.intentId === undefined ? {} : { deliveryIntentId: record.intentId }),
+			...(record.attemptId === undefined ? {} : { deliveryAttemptId: record.attemptId }),
+			...(record.state === undefined ? {} : { deliveryState: record.state }),
+			...(record.targetTurn === undefined ? {} : { targetTurn: record.targetTurn }),
+			...(record.sequence === undefined ? {} : { sequence: record.sequence }),
+			...(record.retryable === undefined ? {} : { retryable: record.retryable }),
+			...(legacy ? {} : {
+				kind: "steer",
+				isSteered: true,
+				_deliveryRecoveryProjection: true,
+			}),
 			_inFlightSteer: true,
 		});
 		i++;

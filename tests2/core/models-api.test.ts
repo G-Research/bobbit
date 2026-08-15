@@ -11,6 +11,7 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
+import { getBuiltinModel, getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { createMemFs } from "../harness/mem-fs.js";
 
 const memfs = createMemFs();
@@ -50,21 +51,38 @@ describe("Model registry", () => {
 		}
 	});
 
-	it("Claude Sonnet/Opus models report >= 1M context window", () => {
-		const claudeModels = models.filter(
-			(m) => m.id.toLowerCase().includes("claude-sonnet") || m.id.toLowerCase().includes("claude-opus"),
-		);
-		assert.ok(claudeModels.length > 0, "should have at least one Claude Sonnet or Opus model");
+	it("passes representative direct Pi rows through byte-for-byte except authentication presentation", () => {
+		const cases = [
+			["anthropic", "claude-opus-4-5"], // authoritative 200K Claude row
+			["anthropic", "claude-sonnet-4-5"], // authoritative 1M Claude row
+			["openrouter", "openai/gpt-5.2-chat"], // Pi says non-reasoning
+			["openai", "gpt-4"], // text-only GPT-4
+			["openai", "gpt-4o"], // multimodal GPT-4
+			["openrouter", "sao10k/l3.1-euryale-70b"], // `o1` substring is not a reasoning family
+		] as const;
 
-		for (const m of claudeModels) {
-			assert.ok(
-				m.contextWindow >= 1_000_000,
-				`${m.id} contextWindow ${m.contextWindow} should be >= 1M`,
-			);
+		for (const [provider, id] of cases) {
+			const pi = getBuiltinModel(provider as any, id as any);
+			assert.ok(pi, `Pi should contain ${provider}/${id}`);
+			const registry = models.find(model => model.provider === provider && model.id === id);
+			assert.ok(registry, `registry should contain ${provider}/${id}`);
+			const { authenticated, ...authoritativeFields } = registry;
+			assert.equal(typeof authenticated, "boolean");
+			assert.deepEqual(authoritativeFields, pi, `${provider}/${id} must remain exact`);
 		}
 	});
 
-	it("preserves exact Pi 0.82.1 Anthropic and Bedrock Claude Opus 5 catalog metadata", () => {
+	it("does not add any direct OpenAI rows beyond Pi's current catalogs", () => {
+		for (const provider of ["openai", "openai-codex"] as const) {
+			const registryIds = models
+				.filter(model => model.provider === provider)
+				.map(model => model.id);
+			const piIds = getBuiltinModels(provider).map(model => model.id);
+			assert.deepEqual(registryIds, piIds, `${provider} must not restore removed or historical addition rows`);
+		}
+	});
+
+	it("preserves exact Pi 0.84.1 Anthropic and Bedrock Claude Opus 5 catalog metadata", () => {
 		const cases = [
 			{ provider: "anthropic", id: "claude-opus-5", name: "Claude Opus 5", api: "anthropic-messages", baseUrl: "https://api.anthropic.com", cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 } },
 			{ provider: "amazon-bedrock", id: "au.anthropic.claude-opus-5", name: "Claude Opus 5 (AU)", api: "bedrock-converse-stream", baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com", cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 } },
@@ -125,7 +143,7 @@ describe("Model registry", () => {
 		assert.equal(model.contextWindow, 272_000);
 	});
 
-	it("retains Pi 0.82.1 GPT-5.6 catalog entries including corrected Codex metadata", () => {
+	it("retains Pi 0.84.1 GPT-5.6 catalog entries including corrected Codex metadata", () => {
 		const requireModel = (provider: string, id: string) => {
 			const model = models.find((m) => m.provider === provider && m.id === id);
 			assert.ok(model, `${provider}/${id} should be available`);
@@ -163,7 +181,7 @@ describe("Model registry", () => {
 		}
 	});
 
-	it("retains supported Pi 0.82.1 catalog and routing fixes through the synchronous registry", () => {
+	it("retains supported Pi 0.84.1 catalog and routing fixes through the synchronous registry", () => {
 		const requireModel = (provider: string, id: string) => {
 			const model = models.find((m) => m.provider === provider && m.id === id);
 			assert.ok(model, `${provider}/${id} should be available`);

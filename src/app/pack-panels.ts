@@ -65,6 +65,8 @@ export interface PackPanel {
 	 *  in a non-DOM/unit context or when no session is active; a panel MUST tolerate
 	 *  that and MUST NOT auto-invoke on mount. */
 	render(params?: Record<string, unknown>, host?: HostApi): TemplateResult | unknown;
+	/** Optional user-initiated reload hook surfaced by Bobbit's tab controls. */
+	refresh?(params?: Record<string, unknown>, host?: HostApi): void | Promise<void>;
 }
 
 /** A host-API factory the app wires once (host-api.ts self-registers it), so a
@@ -524,6 +526,34 @@ function removePackPanelTab(packId: string, panelId: string): void {
  * fall back to `currentSessionIdForPanel()` only when it is absent (legacy tabs /
  * unit fixtures).
  */
+function panelInvocationContext(packId: string, panelId: string, params?: Record<string, unknown>, boundSessionId?: string) {
+	const sessionId = boundSessionId || currentSessionIdForPanel();
+	const host = panelHostFactory
+		? panelHostFactory(sessionId, packId, panelId)
+		: undefined;
+	const renderParams = sessionId ? { ...(params ?? {}), __sessionId: sessionId } : params;
+	return { host, renderParams };
+}
+
+export function refreshPackPanel(packId: string, panelId: string, params?: Record<string, unknown>, boundSessionId?: string): void {
+	const panel = loadedPanels.get(panelKey(packId, panelId));
+	if (!panel?.refresh) return;
+	const { host, renderParams } = panelInvocationContext(packId, panelId, params, boundSessionId);
+	void Promise.resolve(panel.refresh(renderParams, host)).catch((err) => {
+		// eslint-disable-next-line no-console
+		console.error(`[pack-panels] refresh failed for "${packId}/${panelId}":`, err);
+	});
+}
+
+export function packPanelCanRefresh(packId: string, panelId: string): boolean {
+	return typeof loadedPanels.get(panelKey(packId, panelId))?.refresh === "function";
+}
+
+/** Current contribution title, used instead of stale persisted workspace labels. */
+export function packPanelTitle(packId: string, panelId: string): string | undefined {
+	return panels.get(panelKey(packId, panelId))?.title;
+}
+
 export function renderPackPanelContent(packId: string, panelId: string, params?: Record<string, unknown>, boundSessionId?: string): TemplateResult | unknown {
 	const key = panelKey(packId, panelId);
 	const panel = loadedPanels.get(key);
@@ -535,16 +565,12 @@ export function renderPackPanelContent(packId: string, panelId: string, params?:
 			// import cycle; when unset (unit fixtures) the panel renders with
 			// host === undefined. Prefer the TAB's bound session so a reviewer-child pane
 			// binds to its OWN child session even when the parent is currently selected.
-			const sessionId = boundSessionId || currentSessionIdForPanel();
-			const host = panelHostFactory
-				? panelHostFactory(sessionId, packId, panelId)
-				: undefined;
 			// Thread the BOUND session id into the render params under a reserved key so
 			// a panel can scope its module-level state PER SESSION (the panel module is a
 			// single page-lived instance shared across sessions). This is the SAME bound
 			// session the host is scoped to, so recover/status/publish and the panel's
 			// per-session `byJob` key stay consistent. Panels that ignore it are unaffected.
-			const renderParams = sessionId ? { ...(params ?? {}), __sessionId: sessionId } : params;
+			const { host, renderParams } = panelInvocationContext(packId, panelId, params, boundSessionId);
 			return panel.render(renderParams, host);
 		} catch (err) {
 			// eslint-disable-next-line no-console

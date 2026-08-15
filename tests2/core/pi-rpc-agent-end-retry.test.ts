@@ -111,10 +111,15 @@ describe("Pi RPC agent_end retry contract", () => {
 		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false, messages: [] });
 		await flush();
 
-		// Only the final (willRetry:false) agent_end increments the counter — exactly once.
+		// Only the final (willRetry:false) agent_end increments the counter — exactly once,
+		// but Pi still owns post-run work until agent_settled.
 		assert.equal(session.completedTurnCount, 1);
 		assert.deepEqual(session.allowedTools, ["write"]);
 		assert.deepEqual(session.oneTimeGrantedTools, []);
+		expect(prompt).not.toHaveBeenCalled();
+
+		manager.handleAgentLifecycle(session, { type: "agent_settled" });
+		await flush();
 		expect(prompt).toHaveBeenCalledTimes(1);
 		expect(prompt.mock.calls[0][0]).toBe("queued until Pi settles");
 	});
@@ -189,6 +194,25 @@ describe("Pi RPC agent_end retry contract", () => {
 		const listeners = new Set<(event: any) => void>();
 		const prompt = vi.fn(async () => ({ success: true }));
 		const recordUsage = vi.fn(() => ({ inputTokens: 11, outputTokens: 13, cacheReadTokens: 17, cacheWriteTokens: 19, totalCost: 1 }));
+		const getTranscriptEntries = vi.fn()
+			.mockResolvedValueOnce({ success: true, data: {
+				entries: [{ id: "entry-kept", parentId: null, type: "message" }],
+				leafId: "entry-kept",
+			} })
+			.mockResolvedValueOnce({ success: true, data: {
+				entries: [
+					{ id: "entry-kept", parentId: null, type: "message" },
+					{
+						id: "pi-compaction",
+						parentId: "entry-kept",
+						type: "compaction",
+						summary: "compacted after summarizer retry",
+						firstKeptEntryId: "entry-kept",
+						tokensBefore: 1_000,
+					},
+				],
+				leafId: "pi-compaction",
+			} });
 		manager._testCostTracker = { recordUsage };
 		const session = putSession(manager, {
 			isCompacting: false,
@@ -201,6 +225,7 @@ describe("Pi RPC agent_end retry contract", () => {
 				},
 				prompt,
 				getState: vi.fn(async () => ({ success: true, data: {} })),
+				getTranscriptEntries,
 			},
 		});
 		session.promptQueue.enqueue("dispatch only after terminal settlement");
@@ -272,7 +297,9 @@ describe("Pi RPC agent_end retry contract", () => {
 			id: pendingId,
 			success: true,
 			firstKeptEntryId: "entry-kept",
+			transcriptCompactionEntryId: "pi-compaction",
 		}]);
+		expect(getTranscriptEntries).toHaveBeenCalledTimes(2);
 		expect(manager.refreshAfterCompaction).toHaveBeenCalledTimes(1);
 		const compactionEvents = session.eventBuffer.getAll().map((entry: any) => entry.event);
 		expect(compactionEvents.map((event: any) => event.type)).toEqual([
@@ -309,12 +336,13 @@ describe("Pi RPC agent_end retry contract", () => {
 		// second compaction_end; the next agent_end is the terminal turn boundary.
 		emit({ type: "agent_start" });
 		emit({ type: "agent_end", messages: [], willRetry: false });
+		emit({ type: "agent_settled" });
 		await wait;
 		await flush();
 
 		expect(idleResolved).toBe(true);
 		expect(session.eventBuffer.getAll().filter((entry: any) => entry.event.type === "compaction_end")).toHaveLength(1);
-		// The terminal turn boundary briefly settles idle and then drains the
+		// The terminal turn boundary settles idle; agent_settled then drains the
 		// queued prompt, whose optimistic dispatch makes the session streaming.
 		expect(session.status).toBe("streaming");
 		expect(session.completedTurnCount).toBe(1);
@@ -324,6 +352,65 @@ describe("Pi RPC agent_end retry contract", () => {
 		expect(prompt).toHaveBeenCalledWith("dispatch only after terminal settlement", undefined);
 
 		unsub();
+	});
+
+	it("appends one unbound compaction and refreshes after it when authoritative reads fail", async () => {
+		const manager = makeManager();
+		manager.refreshAfterCompaction = vi.fn(async () => undefined);
+		const session = putSession(manager, {
+			rpcClient: {
+				getTranscriptEntries: vi.fn(async () => { throw new Error("rpc unavailable"); }),
+			},
+		});
+		manager.handleAgentLifecycle(session, { type: "compaction_start", reason: "auto" });
+		const id = session._pendingCompactionStart.compactionId;
+		manager.handleAgentLifecycle(session, {
+			type: "compaction_end",
+			reason: "auto",
+			result: { summary: "summary", firstKeptEntryId: "kept", tokensBefore: 10 },
+			aborted: false,
+		});
+		await session._compactionFinalization;
+
+		expect(readCompactionSidecarEntries(session.id)).toEqual([
+			expect.objectContaining({ id, success: true }),
+		]);
+		expect(readCompactionSidecarEntries(session.id)[0]).not.toHaveProperty("transcriptCompactionEntryId");
+		expect(manager.refreshAfterCompaction).toHaveBeenCalledTimes(1);
+	});
+
+	it("rejects a stale compaction callback without writing through a replacement session", async () => {
+		const manager = makeManager();
+		let resolvePost!: (value: any) => void;
+		const post = new Promise((resolve) => { resolvePost = resolve; });
+		const rpcClient = {
+			getTranscriptEntries: vi.fn()
+				.mockResolvedValueOnce({ success: true, data: {
+					entries: [{ id: "kept", parentId: null, type: "message" }], leafId: "kept",
+				} })
+				.mockImplementationOnce(() => post),
+		};
+		const session = putSession(manager, { rpcClient });
+		manager.refreshAfterCompaction = vi.fn(async () => undefined);
+		manager.handleAgentLifecycle(session, { type: "compaction_start", reason: "auto" });
+		manager.handleAgentLifecycle(session, {
+			type: "compaction_end",
+			reason: "auto",
+			result: { summary: "summary", firstKeptEntryId: "kept", tokensBefore: 10 },
+			aborted: false,
+		});
+		manager.sessions.set(session.id, { ...session, rpcClient: {} });
+		resolvePost({ success: true, data: {
+			entries: [
+				{ id: "kept", parentId: null, type: "message" },
+				{ id: "compaction", parentId: "kept", type: "compaction", summary: "summary", firstKeptEntryId: "kept", tokensBefore: 10 },
+			],
+			leafId: "compaction",
+		} });
+		await session._compactionFinalization;
+
+		expect(readCompactionSidecarEntries(session.id)).toEqual([]);
+		expect(manager.refreshAfterCompaction).not.toHaveBeenCalled();
 	});
 
 	it("waitForIdle ignores retryable Pi agent_end and resolves on the final agent_end", async () => {

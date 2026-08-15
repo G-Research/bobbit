@@ -21,6 +21,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { WebSocket } from "ws";
 import type { ServerMessage } from "../ws/protocol.js";
+import { isSocketSendable } from "../ws/socket-sendability.js";
 import { getShellConfig, GIT_BASH } from "./shell-util.js";
 import type { BgProcessStore, PersistedBgProcess } from "./bg-process-store.js";
 import { bgRunnerHelperPath } from "./bg-runner.js";
@@ -569,7 +570,7 @@ export class BgProcessManager {
 		if (!clients) return;
 		const data = JSON.stringify(msg);
 		for (const client of clients) {
-			if (client.readyState === 1) client.send(data);
+			if (isSocketSendable(client)) client.send(data);
 		}
 	}
 
