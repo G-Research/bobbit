@@ -383,7 +383,7 @@ describe("ClaudeAgentSdkBridge", () => {
 		await expect(controlsFirstPrompt).resolves.toBeUndefined();
 	});
 
-	it("rejects initializationResult identity, duplicate init, and missing streamed init", async () => {
+	it("requires streamed system:init rather than accepting an initializationResult identity", async () => {
 		const resultOnly = bridgeFixture();
 		await resultOnly.bridge.start();
 		const resultOnlyPrompt = resultOnly.bridge.prompt("first user prompt");
@@ -391,13 +391,46 @@ describe("ClaudeAgentSdkBridge", () => {
 		resultOnly.query.initialization.resolve({ session_id: "00000000-0000-4000-8000-000000000001" } as any);
 		resultOnly.clock.advance(90_000);
 		await expect(resultOnlyPrompt).rejects.toBeInstanceOf(ClaudeAgentSdkUnavailableError);
+	});
 
-		const duplicate = bridgeFixture();
-		await startReady(duplicate);
-		duplicate.query.emitSystemInit("00000000-0000-4000-8000-000000000002");
+	it("accepts the stable system:init repeated before a second SDK turn", async () => {
+		const sessionId = "00000000-0000-4000-8000-000000000002";
+		const fixture = bridgeFixture();
+		const query = await startReady(fixture, sessionId);
+		const observed: any[] = [];
+		fixture.bridge.onEvent(event => observed.push(event));
+
+		const secondTurn = fixture.bridge.prompt("second user prompt");
+		await query.nextInput();
+		query.emitSystemInit(sessionId);
+		query.emit({ type: "result", subtype: "success" });
+		await expect(secondTurn).resolves.toBeUndefined();
 		await flushMicrotasks();
-		expect((duplicate.bridge as any).state).toBe("failed");
-		expect(duplicate.query.closeCalls).toBe(1);
+
+		expect((fixture.bridge as any).state).toBe("ready");
+		expect((await fixture.bridge.getState()).data.sessionId).toBe(sessionId);
+		expect(observed.map(event => event.type)).toEqual(["agent_start", "agent_end"]);
+		expect(observed.some(event => event.type === "process_exit")).toBe(false);
+	});
+
+	it("fails closed when a repeated SDK init changes or invalidates the established identity", async () => {
+		const establishedId = "00000000-0000-4000-8000-000000000002";
+		const changedId = "00000000-0000-4000-8000-000000000003";
+		for (const repeatedId of [changedId, "provider-controlled-invalid-identity"]) {
+			const fixture = bridgeFixture();
+			await startReady(fixture, establishedId);
+			const observed: any[] = [];
+			fixture.bridge.onEvent(event => observed.push(event));
+
+			fixture.query.emitSystemInit(repeatedId);
+			await flushMicrotasks();
+
+			expect((fixture.bridge as any).state).toBe("failed");
+			expect(fixture.query.closeCalls).toBe(1);
+			expect((await fixture.bridge.getState()).data.sessionId).toBe(establishedId);
+			expect(observed).toEqual([expect.objectContaining({ type: "process_exit", code: 1, error: "SDK_SESSION_UNAVAILABLE" })]);
+			expect(JSON.stringify(observed)).not.toContain(repeatedId);
+		}
 	});
 
 	it("fails closed when a resumed query does not confirm its persisted identity", async () => {

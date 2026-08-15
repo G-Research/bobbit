@@ -315,7 +315,6 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 	private initializationPending = false;
 	private initializationComplete = false;
 	private initializationPromise?: Promise<void>;
-	private identityObserved = false;
 	private readonly terminal: Promise<never>;
 	private resolveReady!: () => void;
 	private rejectReady!: (error: Error) => void;
@@ -654,16 +653,17 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 	private observeInitializationIdentity(sdkEvent: unknown): void {
 		const event = sdkEvent as { type?: unknown; subtype?: unknown; session_id?: unknown };
 		if (event.type !== "system" || event.subtype !== "init") return;
-		if (this.identityObserved) {
-			// The SDK contract emits exactly one init. A second event could otherwise
-			// replace the durable identity after readiness.
-			this.fail(new ClaudeAgentSdkUnavailableError("Claude Agent SDK emitted duplicate initialization identity"));
-			return;
-		}
-		this.identityObserved = true;
 		if (!isClaudeAgentSdkSessionId(event.session_id)) {
 			// Never include provider-controlled identity data in an exposed error.
 			this.fail(new ClaudeAgentSdkUnavailableError("Claude Agent SDK did not provide a valid resumable session id"));
+			return;
+		}
+		if (this.initializedSessionId) {
+			// Current SDK versions repeat system:init before later turns. A matching
+			// identity is idempotent; never re-resolve or otherwise reinitialize.
+			if (event.session_id !== this.initializedSessionId) {
+				this.fail(new ClaudeAgentSdkUnavailableError("Claude Agent SDK initialization identity changed"));
+			}
 			return;
 		}
 		if (this.options.claudeAgentSdkSessionId && event.session_id !== this.options.claudeAgentSdkSessionId) {
