@@ -5093,8 +5093,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				persistPublishedGatewayUrl(stateDir, publishedGatewayUrl, gatewayDeps.fsImpl);
 
 			// Import decisions are project-owned and must replay before an ordinary
-			// agent session can resume. The coordinator isolates each project (and its
-			// bounded replay timeout), while this await preserves startup ordering.
+			// agent session can resume. The coordinator isolates projects concurrently
+			// while awaiting their bounded hook dispatches, preserving startup ordering.
 			await bootPhase("replay-project-import-decisions", async () => {
 				await projectImportStartupReplay;
 			});

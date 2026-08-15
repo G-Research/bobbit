@@ -44,18 +44,22 @@ describe("ProjectImportDecisionCoordinator", () => {
 		}]);
 	});
 
-	it("contains a startup replay timeout and still traces a later project", async () => {
+	it("awaits every bounded dispatch before resolving while projects reconcile concurrently", async () => {
 		const runs = new Map<string, any>();
-		const dispatched: string[] = [];
+		const mutations: string[] = [];
 		const errors: string[] = [];
 		const traces: string[] = [];
 		const ready = (id: string) => ({ version: 1 as const, id: `import-${id}`, createdAt: Date.now(), state: "ready" as const });
+		let releaseFirst!: () => void;
+		let firstStarted!: () => void;
+		const firstDispatch = new Promise<void>(resolve => { releaseFirst = resolve; });
+		const firstStartedPromise = new Promise<void>(resolve => { firstStarted = resolve; });
 		const coordinator = new ProjectImportDecisionCoordinator({
 			registry: {
-				get: (projectId: string) => projectId === "project-1" || projectId === "project-2"
+				get: (projectId: string) => ["project-1", "project-2", "project-3"].includes(projectId)
 					? { id: projectId, rootPath: `/${projectId}`, importDecisionRun: ready(projectId) }
 					: undefined,
-				list: () => ["project-1", "project-2"].map(id => ({ id, rootPath: `/${id}`, importDecisionRun: ready(id) })),
+				list: () => ["project-1", "project-2", "project-3"].map(id => ({ id, rootPath: `/${id}`, importDecisionRun: ready(id) })),
 			} as any,
 			projectContextManager: {
 				getOrCreate: () => ({
@@ -71,20 +75,38 @@ describe("ProjectImportDecisionCoordinator", () => {
 			}),
 			dispatcher: {
 				dispatchProjectImport: async (projectId) => {
-					dispatched.push(projectId);
-					if (projectId === "project-1") return await new Promise<never>(() => {});
+					if (projectId === "project-1") {
+						firstStarted();
+						await firstDispatch;
+						mutations.push(projectId);
+					} else if (projectId === "project-2") {
+						mutations.push(projectId);
+					} else {
+						throw new Error("isolated replay failure");
+					}
 					return [{ kind: "decision" as const, packId: "extension-pack", hookId: "import-hook", event: "projectImported" as const, outcome: "applied" as const }];
 				},
 			},
-			reconcileTimeoutMs: 5,
 			onError: projectId => errors.push(projectId),
 			trace: { appendProjectImportTrace: projectId => traces.push(projectId) },
 		});
 
-		await coordinator.reconcileAll();
+		let resolved = false;
+		const replay = coordinator.reconcileAll().then(() => { resolved = true; });
+		await firstStartedPromise;
 
-		expect(dispatched).toEqual(["project-1", "project-2"]);
-		expect(errors).toEqual(["project-1"]);
-		expect(traces).toEqual(["project-2"]);
+		// project-2 completes even though project-1 remains live; the failed
+		// project is contained instead of preventing either reconciliation.
+		expect(mutations).toEqual(["project-2"]);
+		expect(resolved).toBe(false);
+		releaseFirst();
+		await replay;
+
+		expect(mutations).toEqual(["project-2", "project-1"]);
+		expect(errors).toEqual(["project-3"]);
+		expect(traces).toEqual(["project-2", "project-1"]);
+		const mutationsAtResolution = [...mutations];
+		await Promise.resolve();
+		expect(mutations).toEqual(mutationsAtResolution);
 	});
 });

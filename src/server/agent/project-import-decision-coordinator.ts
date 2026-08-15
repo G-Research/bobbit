@@ -41,8 +41,6 @@ export interface ProjectImportDecisionCoordinatorDeps {
   dispatcher: ProjectImportDispatcher;
   buildContext(input: { project: Pick<RegisteredProject, "id" | "rootPath">; importId: string; components: readonly Component[] }): ProjectImportDecisionContextSnapshot;
   now?: () => number;
-  /** Bounds one broken project during startup replay. */
-  reconcileTimeoutMs?: number;
   /** Project/import-run diagnostics use a separate redacted stream, never a session id. */
   trace?: Pick<ContextTraceStore, "appendProjectImportTrace">;
   onError?: (projectId: string, error: unknown) => void;
@@ -56,11 +54,9 @@ export interface ProjectImportDecisionCoordinatorDeps {
 export class ProjectImportDecisionCoordinator {
   private readonly running = new Map<string, Promise<readonly TraceDecisionOutcomeRow[]>>();
   private readonly now: () => number;
-  private readonly reconcileTimeoutMs: number;
 
   constructor(private readonly deps: ProjectImportDecisionCoordinatorDeps) {
     this.now = deps.now ?? Date.now;
-    this.reconcileTimeoutMs = Math.max(1, deps.reconcileTimeoutMs ?? 10_000);
   }
 
   dispatch(projectId: string, importId: string): Promise<readonly TraceDecisionOutcomeRow[]> {
@@ -80,29 +76,19 @@ export class ProjectImportDecisionCoordinator {
     await this.dispatch(project.id, marker.id);
   }
 
-  /** One broken project is isolated from every other registered project. */
+  /**
+   * Reconcile every project concurrently, but do not release startup ordering
+   * until each dispatch has settled. Hook invocation itself is bounded by the
+   * dispatcher/module host; a local timer cannot safely cancel its mutations.
+   */
   async reconcileAll(): Promise<void> {
-    for (const project of this.deps.registry.list()) {
+    await Promise.all(this.deps.registry.list().map(async (project) => {
       try {
-        await this.reconcileWithinTimeout(project.id);
+        await this.reconcile(project.id);
       } catch (error) {
         this.deps.onError?.(project.id, error);
       }
-    }
-  }
-
-  private async reconcileWithinTimeout(projectId: string): Promise<void> {
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    try {
-      await Promise.race([
-        this.reconcile(projectId),
-        new Promise<never>((_resolve, reject) => {
-          timeout = setTimeout(() => reject(new Error("Project import reconciliation timed out")), this.reconcileTimeoutMs);
-        }),
-      ]);
-    } finally {
-      if (timeout) clearTimeout(timeout);
-    }
+    }));
   }
 
   private async dispatchOne(projectId: string, importId: string): Promise<readonly TraceDecisionOutcomeRow[]> {
