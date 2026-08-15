@@ -84,6 +84,9 @@ import { ModuleHost } from "./extension-host/module-host-worker.js";
 import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
 import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaError } from "./extension-host/pack-store.js";
 import { createServerHostApi } from "./extension-host/server-host-api.js";
+import { ServiceExtensionRuntimeManager } from "./extension-host/service-extension-runtime.js";
+import { ServiceExtensionRegistry } from "./extension-host/service-extension-registry.js";
+import { WorktreeServiceCoordinator } from "./extension-host/worktree-service-coordinator.js";
 import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./extension-host/contract-adapter.js";
 import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
@@ -3154,6 +3157,81 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		extensionSettingsRuntimeLookup,
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).runtimes ?? [],
 	);
+	// Managed-service ownership starts at the gateway boundary. The runtime gets
+	// only core-owned launch/probe seams; no pack declaration can choose a host
+	// executable, container, path, port owner, or transport. This slice has no
+	// registered consumer adapter yet, so every declared run mode fails closed.
+	const serviceExtensionRegistry = new ServiceExtensionRegistry(packContributionRegistry);
+	const managedServiceAuthorization = createExtensionCapabilityGrantResolver({
+		contextForProject: (projectId) => {
+			const context = projectContextManager.getOrCreate(projectId);
+			return context ? { projectConfigStore: context.projectConfigStore } : undefined;
+		},
+		contributions: packContributionRegistry,
+	});
+	const servicePortOwners = new Map<number, string>();
+	let worktreeServices!: WorktreeServiceCoordinator;
+	const managedServiceRuntime = new ServiceExtensionRuntimeManager({
+		listActive: (projectId) => serviceExtensionRegistry.list(projectId),
+		authorize: managedServiceAuthorization,
+		launchers: {
+			local: async () => { throw new Error("Managed service launch adapter is unavailable"); },
+			docker: async () => { throw new Error("Managed service launch adapter is unavailable"); },
+			compose: async () => { throw new Error("Managed service launch adapter is unavailable"); },
+		},
+		probe: async () => false,
+		ports: {
+			lease: async (ref, port) => {
+				const key = [ref.projectId, ref.component, ref.canonicalWorktreeRoot, ref.packId, ref.serviceId, ref.discriminator].join("\0");
+				if (servicePortOwners.has(port)) return undefined;
+				servicePortOwners.set(port, key);
+				return { release: async () => { if (servicePortOwners.get(port) === key) servicePortOwners.delete(port); } };
+			},
+		},
+		filesystem: { ensureDirectory: async (target) => { await fs.promises.mkdir(target, { recursive: true }); } },
+		clock: {
+			now: () => new Date(gatewayDeps.clock.now()),
+			sleep: (ms) => new Promise<void>(resolve => gatewayDeps.clock.setTimeout(() => resolve(), ms)),
+		},
+		resolveDataDir: (ref, declaredPath) => worktreeServices.resolveDataDir(ref, declaredPath),
+		resolveSettings: (ref) => {
+			const settings = extensionSettingsRuntimeLookup(ref.projectId, ref.packId, "runtime", ref.serviceId);
+			if (settings.state === "error" || settings.state === "present" && !settings.enabled) throw new Error("Managed service settings are unavailable");
+			return settings.state === "present" ? settings.values : {};
+		},
+	});
+	worktreeServices = new WorktreeServiceCoordinator({
+		sessions: {
+			get: (sessionId) => sessionManager.getPersistedSession(sessionId) ?? sessionManager.getSession(sessionId),
+			list: (projectId) => {
+				const context = [...projectContextManager.all()].find(candidate => candidate.project.id === projectId);
+				const persisted = context?.sessionStore.getAll().filter(session => session.projectId === undefined || session.projectId === projectId) ?? [];
+				const known = new Set(persisted.map(session => session.id));
+				return [...persisted, ...sessionManager.getAllSessionsRaw().filter(session => session.projectId === projectId && !known.has(session.id))];
+			},
+		},
+		components: (projectId) => [...projectContextManager.all()].find(context => context.project.id === projectId)?.projectConfigStore.getComponents() ?? [],
+		stateDir: (projectId) => [...projectContextManager.all()].find(context => context.project.id === projectId)?.stateDir,
+		git: {
+			topLevel: async (cwd) => {
+				const result = await gatewayDeps.commandRunner.execFile("git", ["rev-parse", "--show-toplevel"], { cwd, timeout: 15_000 });
+				return String(result.stdout).trim();
+			},
+		},
+		filesystem: {
+			realpath: (target) => fs.promises.realpath(target),
+			isDirectory: async (target) => (await fs.promises.stat(target)).isDirectory(),
+			removeDirectory: async (target) => { await fs.promises.rm(target, { recursive: true, force: true }); },
+		},
+		listActive: (projectId) => serviceExtensionRegistry.list(projectId),
+		authorize: managedServiceAuthorization,
+		settingsReadable: (ref) => {
+			const settings = extensionSettingsRuntimeLookup(ref.projectId, ref.packId, "runtime", ref.serviceId);
+			return settings.state !== "error" && !(settings.state === "present" && !settings.enabled);
+		},
+		runtime: managedServiceRuntime,
+	});
+
 	const contextTraceStore = new ContextTraceStore(bobbitStateDir(), gatewayDeps.fsImpl, (sessionId, entry) => {
 		broadcastToSession(sessionId, { type: "context_trace_updated", sessionId, ts: entry.ts });
 	});
@@ -4229,7 +4307,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToProject, broadcastToUi, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, decisionRequestManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionSettingsCatalogue, requestMutationDispatcher, toolResultFilterDispatcher, contextTraceStore, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToProject, broadcastToUi, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, decisionRequestManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, worktreeServices, extensionSettingsCatalogue, requestMutationDispatcher, toolResultFilterDispatcher, contextTraceStore, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -4626,12 +4704,33 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		} catch (err) {
 			console.error(`[broadcast] session_created failed for ${session.id}:`, err);
 		}
+		void worktreeServices.reconcileSession(session.id).catch(() => undefined);
 	});
+	// Cold worktree setup persists its coordinates after the initial creation
+	// event. Reconcile again at that durable boundary rather than guessing a path.
+	sessionManager.addWorktreeReadyListener((session) => {
+		void worktreeServices.reconcileSession(session.id).catch(() => undefined);
+	});
+	const stopManagedServicesForSession = async (info: import("./agent/session-manager.js").SessionTerminationInfo): Promise<void> => {
+		if (!info.projectId) return;
+		const candidates = new Set<string>([
+			...(info.worktreePath ? [info.worktreePath] : []),
+			...(info.repoWorktrees?.map(worktree => worktree.worktreePath) ?? []),
+		]);
+		for (const candidate of candidates) {
+			try {
+				const result = await gatewayDeps.commandRunner.execFile("git", ["rev-parse", "--show-toplevel"], { cwd: candidate, timeout: 15_000 });
+				const canonicalRoot = await fs.promises.realpath(String(result.stdout).trim());
+				await worktreeServices.stopWorktree(info.projectId, canonicalRoot);
+			} catch { /* stale/deleted worktrees are already unavailable */ }
+		}
+	};
 	// Push a session_removed broadcast to ALL clients on terminate/archive/purge
 	// so sidebars and dashboards update instantly. Replaces a 5s polling tick
 	// for a documented class of races (e.g. clicking a stale sidebar entry just
 	// after another tab archived the session).
 	sessionManager.addTerminationListener(async (sessionId, info) => {
+		await stopManagedServicesForSession(info);
 		try {
 			broadcastToAll({ type: "session_removed", sessionId, projectId: info.projectId, reason: info.reason });
 		} catch (err) {
@@ -5326,6 +5425,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				// worktrees have already left their pools, and stale disk entries are
 				// never discovered or adopted during shutdown.
 				await phase("worktree-pools", () => drainWorktreePoolsForShutdown(sessionManager.getAllWorktreePools()));
+				await phase("managed-services", () => worktreeServices.close());
 				await phase("extension-channels", () => disposeExtensionChannelServices(extensionChannelServices, "gateway-shutdown"));
 				await phase("cpu-diagnostics", () => shutdownCpuDiagnostics());
 				shutdownEventLoopLagMonitor();
@@ -5576,6 +5676,7 @@ async function handleApiRoute(
 	routeDispatcherArg?: RouteDispatcher,
 	routeRegistryArg?: RouteRegistry,
 	packContributionRegistryArg?: PackContributionRegistry,
+	worktreeServicesArg?: WorktreeServiceCoordinator,
 	extensionSettingsCatalogue?: (projectId: string | undefined) => PackContributions[],
 	requestMutationDispatcher?: RequestMutationDispatcher,
 	toolResultFilterDispatcher?: ToolResultFilterDispatcher,
@@ -5602,6 +5703,7 @@ async function handleApiRoute(
 	// pack-schema-v1 §5.2: the project-scoped pack-contribution registry (panels /
 	// entrypoints / routes), always wired by the sole caller.
 	const packContributionRegistry = packContributionRegistryArg!;
+	const worktreeServices = worktreeServicesArg!;
 	const settingsCatalogue = extensionSettingsCatalogue!;
 	type SettingsField = ExtensionSettingDefinition;
 	type SettingsTarget = { ref: ExtensionSettingsTargetRef; packName: string; listName: string; fields: SettingsField[]; requiresConfig: string[]; contribution: any };
@@ -5724,6 +5826,12 @@ async function handleApiRoute(
 		packContributionRegistry.invalidate();
 		sessionManager.lifecycleHub?.cancelScheduledAdvisors?.();
 		closeUnavailableExtensionChannels();
+		// Coalesce one pass per currently owned project after any committed
+		// pack/settings/grant invalidation. The coordinator does not start a
+		// declaration unless it can derive a live worktree scope.
+		for (const context of projectContextManager.all()) {
+			void worktreeServices.reconcileProject(context.project.id).catch(() => undefined);
+		}
 		for (const projectId of new Set(sessionManager.listSessions().map(session => session.projectId).filter((id): id is string => !!id))) {
 			sessionManager.refreshStaticPromptSections(projectId);
 		}
@@ -7295,8 +7403,15 @@ async function handleApiRoute(
 			}, 409);
 			return;
 		}
+		const projectId = projectGetMatch[1];
+		const existing = projectRegistry.get(projectId);
+		const hasLiveContext = [...projectContextManager.all()].some(context => context.project.id === projectId);
+		if (updates.rootPath && existing && !samePath(updates.rootPath, existing.rootPath) && hasLiveContext) {
+			json({ error: "Project root cannot be replaced while project state is active", code: "PROJECT_ROOT_REPLACEMENT_REQUIRES_CONTEXT_REMOVAL" }, 409);
+			return;
+		}
 		try {
-			const updated = projectRegistry.update(projectGetMatch[1], updates);
+			const updated = projectRegistry.update(projectId, updates);
 			json(updated);
 		} catch (err: any) {
 			if (writeSpecialProjectMutationError(err)) return;
@@ -7347,6 +7462,9 @@ async function handleApiRoute(
 				return;
 			}
 			await sessionManager.cleanupScopedMcpManagersForProject(projectId, project?.rootPath);
+			// The data directory and fresh settings owner belong to this context.
+			// Fence/stop services before the context is closed or removed.
+			await worktreeServices.stopProject(projectId);
 			await projectContextManager.remove(projectId);
 			if (project?.provisional) {
 				projectRegistry.removeProvisional(projectId);
@@ -11093,6 +11211,7 @@ async function handleApiRoute(
 			readOwnTranscript,
 			// Sub-goal A seam — sub-goal C consumes this to back `host.agents`.
 			orchestrationCore,
+			serviceToolRpc: worktreeServices,
 			// Sub-goal C: live status reader for host.agents.status/list (the core has
 			// no public status accessor).
 			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,
@@ -11513,6 +11632,7 @@ async function handleApiRoute(
 			readOwnTranscript,
 			// Sub-goal A seam — sub-goal C consumes this to back `host.agents`.
 			orchestrationCore,
+			serviceToolRpc: worktreeServices,
 			// Sub-goal C: live status reader for host.agents.status/list (the core has
 			// no public status accessor).
 			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,

@@ -2869,6 +2869,8 @@ export interface SessionTerminationInfo {
 }
 
 export type SessionTerminationListener = (sessionId: string, info: SessionTerminationInfo) => void | Promise<void>;
+/** Fired only after a worktree-backed session has persisted its final coordinates. */
+export type SessionWorktreeReadyListener = (session: SessionInfo) => void | Promise<void>;
 
 /** Purge-only entry into the gateway's per-session preview operation queue. */
 export type SessionPreviewPurgeOperation = <T>(sessionId: string, operation: () => Promise<T>) => Promise<T>;
@@ -3074,6 +3076,7 @@ export class SessionManager {
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
 	private _terminationListeners: SessionTerminationListener[] = [];
 	private _creationListeners: Array<(session: SessionInfo) => void> = [];
+	private _worktreeReadyListeners: SessionWorktreeReadyListener[] = [];
 	private _extensionChannels?: ExtensionChannelServices;
 	/**
 	 * Count of agent-CLI `*.jsonl` transcripts on disk that don't match any
@@ -3547,6 +3550,19 @@ export class SessionManager {
 	/** Subscribe to newly created visible sessions. Listeners are invoked after initial persistence. */
 	addCreationListener(fn: (session: SessionInfo) => void): void {
 		this._creationListeners.push(fn);
+	}
+
+	/** Subscribe to the durable worktree-ready boundary in the setup pipeline. */
+	addWorktreeReadyListener(fn: SessionWorktreeReadyListener): void {
+		this._worktreeReadyListeners.push(fn);
+	}
+
+	private async notifyWorktreeReady(session: SessionInfo): Promise<void> {
+		for (const fn of this._worktreeReadyListeners) {
+			try { await fn(session); } catch (err) {
+				console.error(`[session-manager] worktree-ready listener failed for ${session.id}:`, err);
+			}
+		}
 	}
 
 	private notifySessionCreated(session: SessionInfo): void {
@@ -4276,6 +4292,7 @@ export class SessionManager {
 			commandRunner: this.commandRunner,
 			assemblePrompt: (id, parts) => this.assemblePrompt(id, parts),
 			resolveStaticPromptSections: (targetProjectId) => this.resolveStaticPromptSections(targetProjectId ?? projectId),
+			onWorktreeReady: (session) => this.notifyWorktreeReady(session),
 
 			applySandboxWiring: (opts, id, sandboxOpts) => this.applySandboxWiring(opts, id, sandboxOpts),
 			finalizeSpawnOptions: (opts, requested) => this.finalizeSpawnOptions(opts, requested),
@@ -15640,10 +15657,17 @@ export class SessionManager {
 		await this.cleanupScopedMcpManagersForSessionScope({ projectId: ps.projectId, cwd: ps.cwd });
 
 		// Notify termination listeners (sidebar broadcast etc.) so cached UI lists
-		// drop the entry without waiting for a polling tick.
+		// drop the entry without waiting for a polling tick. Preserve worktree
+		// coordinates for lifecycle owners that must stop state before deletion.
 		for (const listener of this._terminationListeners) {
 			try {
-				await listener(ps.id, { projectId: ps.projectId, reason: "purged" });
+				await listener(ps.id, {
+					projectId: ps.projectId,
+					reason: "purged",
+					cwd: ps.cwd,
+					worktreePath: ps.worktreePath,
+					repoWorktrees: ps.repoWorktrees ? Object.values(ps.repoWorktrees).map(worktreePath => ({ worktreePath })) : undefined,
+				});
 			} catch (err) {
 				console.error(`[session ${ps.id}] purge listener failed:`, err);
 			}

@@ -3587,6 +3587,15 @@
       }
     },
     {
+      "path": "tests2/integration/service-extension-gateway.test.ts",
+      "reason": "Gateway-owned managed-service lifecycle wiring rejects root replacement before live context-owned service state can be orphaned.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
       "path": "tests2/core/staff-improvement-signals.test.ts",
       "reason": "Bounded fixed-label/count staff-improvement signal boundary rejects transcript-like data and invalid shapes.",
       "execution": {
