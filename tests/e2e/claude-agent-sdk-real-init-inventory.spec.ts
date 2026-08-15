@@ -18,7 +18,7 @@ import { buildClaudeAgentSdkQueryOptions, buildClaudeSdkSubagentPolicy, buildCla
 const EXPECTED_INVENTORY = {
 	sdkPackageVersion: "0.3.222",
 	claudeCodeVersion: "2.1.222",
-	tools: ["Skill", "mcp__bobbit__find", "mcp__bobbit__grep", "mcp__bobbit__read"],
+	tools: ["Skill", "Task", "mcp__bobbit__find", "mcp__bobbit__grep", "mcp__bobbit__read"],
 	skills: ["batch", "claude-api", "code-review", "dataviz", "debug", "deep-research", "design-sync", "doctor", "fewer-permission-prompts", "loop", "run", "run-skill-generator", "simplify", "update-config", "verify"],
 	agents: ["Explore", "Plan", "bobbit-backend-parity-reviewer", "bobbit-billing-safety-auditor", "bobbit-protocol-scout", "claude", "general-purpose", "statusline-setup"],
 	slash_commands: ["__remote-workflow", "agents", "autocompact", "batch", "claude-api", "clear", "code-review", "color", "compact", "config", "context", "dataviz", "debug", "deep-research", "design", "design-consent", "design-revoke", "design-sync", "doctor", "effort", "fast", "fewer-permission-prompts", "goal", "heapdump", "init", "insights", "loop", "mcp", "model", "recap", "reload-skills", "rename", "review", "run", "run-skill-generator", "security-review", "simplify", "team-onboarding", "update-config", "usage", "verify", "workflow-launch-exec"],
@@ -134,8 +134,8 @@ test.describe("Claude Agent SDK real initialization inventory", () => {
 				autoMemoryEnabled: EXPECTED_INVENTORY.autoMemoryEnabled,
 				mcpServers: EXPECTED_INVENTORY.mcp_servers,
 			});
-			// `init.tools` reports literal callable tools only. The programmatic
-			// `agents` definitions are the real Agent meta-facility inventory.
+			// Bobbit exposes Agent in the model-facing SDK options; the SDK later
+			// resolves that alias to private Task transport in `init.tools`.
 			expect(options.tools).toEqual(["Skill", "Agent"]);
 			expect(options.skills).toEqual(EXPECTED_INVENTORY.skills);
 			expect(options.agents && Object.keys(options.agents).sort()).toEqual([
@@ -186,11 +186,14 @@ test.describe("Claude Agent SDK real initialization inventory", () => {
 					expect(observed).toEqual(EXPECTED_INVENTORY);
 				} catch (error) {
 					// Pin upgrades must be reviewed against the literal live report, never
-					// accepted by regenerating the fixture. In 2.1.222 `init.tools` omits
-					// Agent: the agent definitions are the real meta-facility inventory.
+					// accepted by regenerating the fixture. In 2.1.222 `init.tools` reports
+					// resolved private Task transport metadata after Bobbit's public Agent
+					// alias; it does not expose Agent as a model-facing tool.
 					console.error("[claude-sdk-real-init-inventory] observed", JSON.stringify(observed));
 					throw error;
 				}
+				expect(init.tools).toContain("Task");
+				expect(init.tools).not.toContain("Agent");
 				expect(names(initialization.commands)).toEqual(EXPECTED_INVENTORY.slash_commands);
 				expect(names(initialization.agents)).toEqual(EXPECTED_INVENTORY.agents);
 				expect(await live.mcpServerStatus()).toEqual([
