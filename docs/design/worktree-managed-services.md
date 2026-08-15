@@ -6,13 +6,44 @@
 
 The current seams are intentionally dormant:
 
-- `pack-contributions.ts` strictly loads schema-2 `runtimes/<name>.yaml`; `PackContributionRegistry` applies winning-pack, runtime enablement, and extension-settings/`requiresConfig` filtering; `ServiceExtensionRegistry` returns cloned declarations without settings bytes.
+- `src/server/agent/pack-contributions.ts` strictly loads schema-2 `runtimes/<name>.yaml`; `PackContributionRegistry` applies winning-pack, runtime enablement, and extension-settings/`requiresConfig` filtering; `ServiceExtensionRegistry` returns cloned declarations without settings bytes.
 - `ServiceExtensionRuntimeManager` has bounded lifecycle, port leases, per-identity queues, generation fences, status redaction, and a fresh `service.manage` authorization seam, but its identity is only `(projectId, packId, serviceId)` and no gateway constructs it.
 - `server.ts` creates the live `ExtensionCapabilityGrantResolver`, invalidates the registry for pack/settings/grant mutations, and owns session/project teardown. It currently does not reconcile a service manager.
 - Tool actions already prove the required trust pattern: `authorizeActionRequest()` binds the `x-bobbit-session-id`, checks the session allowlist and an owned transcript `toolUseId`, derives the winning pack/tool server-side, then creates a closure-bound `ServerHostApi`. The parent gateway never imports pack actions.
 - Project deletion drains the worktree pool and sessions before `ProjectContextManager.remove()`. `ProjectContextManager.remove()` only closes the context; no managed-service cleanup hook exists. A linked worktree is validated elsewhere with `git rev-parse --show-toplevel`; a linked worktree's `.git` is a file and must not be treated as the identity root.
 
 **Decision:** preserve the declarative pack contract, but replace the project-only service identity with a server-derived `ServiceInstanceRef`. A gateway-owned coordinator resolves this ref from an already authorized session/worktree, starts/reconciles only that instance, and supplies a closure-bound `host.services.call()` bridge to extension action/route workers. The bridge never returns a process, socket, command, host path, settings, or arbitrary endpoint.
+
+## Alternatives considered
+
+Both options retain the approved closed YAML declaration, full server-derived identity, fresh deny-wins `service.manage` checks, bounded runtime lifecycle, and no process/path exposure. Neither adds a Code Intelligence consumer, Hindsight managed mode, browser surface, or generic process/RPC transport.
+
+### Option A — minimal composition in the current runtime and server
+
+Extend `ServiceExtensionIdentity` and `identityKey()` in `src/server/extension-host/service-extension-runtime.ts` to the full `ServiceInstanceRef`. Keep `ServiceExtensionRuntimeManager` as the only long-lived service state owner, place worktree/component scope derivation and reconcile triggers directly in `src/server/server.ts`, and have `createServerHostApi()` bind `services.call()` directly to a server-owned runtime request helper. This reuses the manager's lifecycle, fences, port leases, queues, and redaction, protected by `tests2/core/service-extension-runtime.test.ts`; closed declaration validation in `service-extension-contract.ts`, protected by `tests2/core/service-extension-contract.test.ts`; active-declaration filtering, protected by `tests2/integration/service-extension-registry.test.ts`; and the closure-bound session/action authorization pattern in `action-guard.ts`.
+
+This is the fewest new files, but it makes `server.ts` own Git/fs/session scope transformation plus per-project reconcile coalescing and makes the process lifecycle manager answer request-broker concerns. The resulting seams are harder to isolate than the existing runtime lifecycle tests, even though scope derivation, stale-root cleanup, and operation binding need deterministic unit coverage.
+
+### Option B — coordinator and narrow broker (chosen)
+
+Keep `ServiceExtensionRuntimeManager` focused on the full-key process lifecycle. Add `WorktreeServiceCoordinator` as the gateway-owned boundary for session/worktree resolution, coalesced reconciliation, data-directory ownership, exact-instance broker requests, and removal cleanup; place the bounded request/response and registered-adapter contract in `service-extension-tool-rpc.ts`. `server.ts` constructs and invokes the coordinator, while `createServerHostApi()` only closes over the already verified session and derived pack identity.
+
+| Axis | Option A: compose in runtime/server | Option B: coordinator/broker |
+|---|---|---|
+| Data and control flow | `server.ts` resolves the worktree, builds the full ref, tracks dirty projects, reconciles the runtime, and brokers host calls into it. The runtime receives both process and request concerns. | `server.ts` supplies lifecycle notifications; the coordinator derives scopes, coalesces project passes, reconciles the runtime, and brokers only an exact instance. The runtime owns only lifecycle state. |
+| Exact production-source footprint | Modifies `service-extension-contract.ts`, `service-extension-runtime.ts`, `server-host-api.ts`, `server.ts`, `session-manager.ts`, and `session-setup.ts`; adds no module, instead concentrating coordinator/broker responsibilities in `server.ts` and the runtime. | Modifies those same six files; adds exactly `service-extension-tool-rpc.ts` and `worktree-service-coordinator.ts`. `project-context-manager.ts` remains unchanged because `server.ts` invokes cleanup before its existing removal method. |
+| Primary failure mode | Git/fs/session resolution and dirty-pass state can drift from lifecycle fences inside a broad `server.ts`; direct host-to-runtime request handling risks mixing typed operation policy with process supervision. | The coordinator can drift from the runtime's instance fences or retain stale scope state; one additional injection boundary can be miswired. Full refs, coordinator-owned fences, and focused seam tests mitigate this. |
+| Test seams | Existing runtime tests protect lifecycle, but exact scope/replacement/request behavior needs gateway-level construction and difficult Git/session setup. | Injected Git, fs, session, settings, and adapter seams allow deterministic coordinator/RPC tests; existing runtime, contract, registry, and action-guard tests remain their focused protections. |
+
+### Added defect surface and justification
+
+- **Coordinator state owner and API:** `WorktreeServiceCoordinator` adds only dirty-project/coalesced-reconcile and discovered-scope state, with `reconcile*`, exact `request`, and `stop*`/`close` methods. This is necessary to make a worktree-scoped desired set and its cleanup owner explicit without putting Git/fs/session ownership into the lifecycle manager or `server.ts`.
+- **Server Host API:** `ServerHostServicesApi`, the `services` capability, and injected `serviceToolRpc` add one closure-bound API. They are necessary so a tool action can name a closed operation on its own exact instance without receiving a process, path, socket, or caller-selected identity.
+- **RPC contract module:** `service-extension-tool-rpc.ts` adds the `ServiceExtensionToolRpc` request/result schemas, bounded validation, and registered adapter lookup. It is necessary to keep operation validation independently testable and prevent an untyped transport from becoming an ambient extension API.
+- **Identity and path transformations:** `serviceInstanceKey()`, the opaque `worktreeKey` digest, `resolveScope()`, and coordinator-owned contained `resolveDataDir()` add transformations. They are required respectively for non-colliding lifecycle ownership, safe public/data-directory projection, server-only canonical linked-worktree/component derivation, and a pack-relative suffix that cannot escape its core-owned directory; none accepts a pack or request host path.
+- **Lifecycle callbacks:** the worktree-valid callback in `session-setup.ts`, the pre-removal callback in `session-manager.ts`, and server calls after committed invalidation, before project-context removal, and at shutdown are necessary to reconcile only valid scopes and stop an instance before its root/context disappears. They do not alter session tool, sandbox, settings, or decision contracts.
+
+**Selection:** Option B is the smallest robust choice. Option A saves two modules but turns `server.ts` into a hard-to-isolate scope/broker state owner and couples Git/session resolution and typed operations to the lifecycle state machine. Option B adds one ownership boundary and two small modules, but preserves the current runtime's narrow, well-tested lifecycle role, mirrors the existing closure-bound `authorizeActionRequest()` broker pattern, and supplies focused injected seams for the new failure-prone transformations. The accepted cost is coordinator/runtime fence alignment and lifecycle injection wiring; the coordinator/RPC tests and full-instance keying explicitly cover that cost.
 
 ## Identity, keys, and public projection
 
@@ -225,7 +256,7 @@ Call cleanup instead of only invalidating:
 
 - session archive/terminate/purge and every host worktree cleanup path call `stopWorktree()` after the worktree is no longer usable, using the pre-removal canonical root captured while it still exists;
 - `DELETE /api/projects/:id` calls `await coordinator.stopProject(projectId)` after sessions/pool drain but before `ProjectContextManager.remove(projectId)` and registry removal;
-- a project root replacement through `PUT /api/projects/:id` first stops the old project instances, removes/reopens its old context, updates the registry, then reconciles the new context. The current direct registry update is not sufficient because it leaves a context keyed to the old root; this slice must make that replacement transactional or reject root-path changes while a context exists;
+- a project root replacement through `PUT /api/projects/:id` is **rejected fail-closed while a `ProjectContextManager` context exists**. That is sufficient: every managed instance requires that context for its owned state directory and live settings read, and every path that removes a context already calls `stopProject()` first. If no context exists, no service can be running, so the existing root update may proceed and a later valid worktree reconciliation can create instances for the new root. The current direct registry update must not replace a root under an extant context;
 - process shutdown calls `await coordinator.close()` exactly once, fences all work, then performs existing manager/context shutdown.
 
 `invalidateResolverCaches()` must notify the coordinator after invalidating pack/settings/grant caches. Do not have the registry notify the runtime itself: it must remain read-only and testable without process lifecycle work.
@@ -245,7 +276,7 @@ Call cleanup instead of only invalidating:
 | File | Change |
 |---|---|
 | `src/server/extension-host/service-extension-contract.ts` | Add exact instance/status reference types and discriminator validation; preserve closed declaration validation. |
-| `src/server/extension-host/service-extension-registry.ts` | Keep value-free active declarations; add exact runtime lookup helper if needed, never process/settings work. |
+| `src/server/extension-host/service-extension-registry.ts` | No change: the coordinator filters its existing value-free `list(projectId)` results by exact pack/service; the registry never owns process or settings work. |
 | `src/server/extension-host/service-extension-runtime.ts` | Migrate all identity/fence/status/data-dir/queue keys to `ServiceInstanceRef`; replace ambiguous project-only API. |
 | `src/server/extension-host/service-extension-tool-rpc.ts` | New narrow request/response schemas, registered adapter surface, payload/result bounds, and broker type. |
 | `src/server/extension-host/worktree-service-coordinator.ts` | New server-derived worktree/component resolver, reconcile coalescer, data-dir resolver, lifecycle/RPC bridge, and cleanup owner. |
@@ -265,10 +296,11 @@ Register all additions in `tests2/tests-map.json`.
 |---|---|---|
 | Core | `tests2/core/service-extension-contract.test.ts` | Discriminator/status-reference validation and absence of host paths from the public projection. |
 | Core | `tests2/core/service-extension-runtime.test.ts` | Same project/pack/service across two canonical roots, components, and discriminators gets independent queue/fence/status/data/lease lifecycle; stop/revoke in one cannot affect the other. Retain existing restart/readiness/redaction tests. |
-| Core | `tests2/core/worktree-service-coordinator.test.ts` | Linked-worktree realpath derivation, component mismatch rejection, no path input, deterministic opaque key/data path, stale/deleted root cleanup, coalesced reconcile, exact active/settings/grant rechecks, and project/global stop fences. Use injected Git/fs/session/settings/adapter seams. |
+| Core | `tests2/core/worktree-service-coordinator.test.ts` | Linked-worktree realpath derivation; primary project root accepts only the implicit `.` component; component mismatch rejection; no path input; deterministic opaque key/data path; stale/deleted root cleanup; coalesced reconcile; exact active/settings/grant rechecks; and project/global stop fences. Use injected Git/fs/session/settings/adapter seams. |
 | Core | `tests2/core/service-extension-tool-rpc.test.ts` | Server-derived session/pack binding, default and bounded discriminator, exact instance selection, closed operation/payload/result validation, no process/path exposure, unavailable/non-ready rejection, concurrent FIFO/cap behavior, and revoke while an operation waits. |
-| Integration | `tests2/integration/service-extension-gateway.test.ts` | Production gateway construction, settings/grant/market invalidation reconciles services, a tool action reaches only its own session worktree instance, project deletion and root replacement stop services before context loss, and global shutdown drains them. Assert redaction in JSON/log capture. |
-| Regression | existing Hindsight provider/integration tests | Hindsight remains external-only with no `runtimes` declaration, process launch, or altered request route. |
+| Integration | `tests2/integration/service-extension-registry.test.ts` | Winning enabled declaration filtering remains value-free and fails closed for disabled or unreadable runtime settings. |
+| Integration | `tests2/integration/service-extension-gateway.test.ts` | Production gateway construction, settings/grant/market invalidation reconciles services, a tool action reaches only its own session worktree instance, project deletion stops services before context loss, root replacement is rejected while a context exists and preserves its instance, and global shutdown drains them. Assert redaction in JSON/log capture. |
+| Integration | `tests2/integration/hindsight-external.test.ts` | Hindsight remains external-only with no `runtimes` declaration, process launch, or altered request route. |
 
 Focused command after implementation:
 
