@@ -490,6 +490,30 @@ function manualTerminalTurnFacts({
 	};
 }
 
+/**
+ * Initial Docker bridge startup can fail before a prompt subscribes to its
+ * lifecycle. Replace that raw rejection with the same safe terminal schema
+ * used by prompt turns, without changing the readiness timeout or retry path.
+ */
+async function waitForManualDockerInitialReadiness(
+	rpcClient: { waitForReady(timeoutMs: number): Promise<void>; readonly running: boolean },
+	routeDiagnostic: (error: unknown) => string,
+): Promise<void> {
+	const bridge = rpcClient as unknown as Record<string, unknown>;
+	try {
+		await rpcClient.waitForReady(120_000);
+	} catch {
+		throw new Error(JSON.stringify(manualTerminalTurnFacts({
+			eventTypeCounts: createManualTurnEventCounts(),
+			lifecycle: { diagnostics: () => ({ rootAgentStarted: false, rootAgentTerminal: false }) },
+			bridge,
+			bridgeRunning: diagnosticBoolean(() => rpcClient.running),
+			pendingToolPermission: false,
+			routeDiagnostic,
+		})));
+	}
+}
+
 test("Claude Agent SDK manual timeout event diagnostics retain only fixed event categories", () => {
 	const counts = createManualTurnEventCounts();
 	countManualTurnEvent(counts, { type: "agent_start", privatePayload: "must-not-appear" });
@@ -652,6 +676,40 @@ test("Claude Agent SDK manual Docker terminal facts normalize unknown bridge dat
 	expect(facts.sdkTerminalDiagnostic).toBe("SDK_SESSION_UNAVAILABLE");
 	const serialized = JSON.stringify(facts);
 	for (const secret of ["private-state", "private provider failure"]) expect(serialized).not.toContain(secret);
+});
+
+test("Claude Agent SDK manual Docker readiness failure emits safe pre-turn terminal facts", async () => {
+	const { ClaudeAgentSdkUnavailableError, claudeAgentSdkUnavailableRouteDiagnostic } = await import("../../dist/server/agent/claude-agent-sdk-error.js");
+	const privateValue = "must-not-appear";
+	let readinessTimeout: number | undefined;
+	const rpcClient = {
+		running: false,
+		state: "failed",
+		terminalError: new ClaudeAgentSdkUnavailableError(`provider body=${privateValue} CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE`),
+		async waitForReady(timeoutMs: number): Promise<void> {
+			readinessTimeout = timeoutMs;
+			throw new Error(`raw error ${privateValue}`);
+		},
+	};
+	let diagnostic = "";
+	try {
+		await waitForManualDockerInitialReadiness(rpcClient, claudeAgentSdkUnavailableRouteDiagnostic);
+	} catch (error) {
+		diagnostic = error instanceof Error ? error.message : "";
+	}
+	expect(readinessTimeout).toBe(120_000);
+	expect(JSON.parse(diagnostic)).toEqual({
+		eventTypeCounts: createManualTurnEventCounts(),
+		rootLifecycle: { rootAgentStarted: false, rootAgentTerminal: false },
+		bridgeRunning: false,
+		bridgeLifecycleState: "failed",
+		sdkTerminalDiagnostic: "SDK_SESSION_UNAVAILABLE: CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE",
+		pendingToolPermission: false,
+		bridgeInputQueue: { hasQueuedRows: false, hasWaitingReader: false },
+		initializationComplete: false,
+		queryHandlePresent: false,
+	});
+	for (const secret of [privateValue, "provider body", "raw error"]) expect(diagnostic).not.toContain(secret);
 });
 
 test("Claude Agent SDK provider-unavailable failure is bounded and sanitized without an alternative runtime", async () => {
@@ -1399,7 +1457,7 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			expect(session.runtime).toBe("claude-agent-sdk");
 			expect(session.sandboxed).toBe(true);
 			expect(session.cwd).toBe("/workspace");
-			await session.rpcClient.waitForReady(120_000);
+			await waitForManualDockerInitialReadiness(session.rpcClient, claudeAgentSdkUnavailableRouteDiagnostic);
 			// The SDK establishes its persistent identity from the first accepted real
 			// user turn; readiness alone must not synthesize a bootstrap session.
 			expect(gateway.sessionManager.getPersistedSession(created.id)?.claudeAgentSdkSessionId).toBeUndefined();
