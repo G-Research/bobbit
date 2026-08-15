@@ -8752,18 +8752,29 @@ async function handleApiRoute(
 		const records = state === "pending"
 			? decisionRequestManager?.listPendingImportRequests(projectId, marker.id) ?? []
 			: decisionRequestManager?.listImportRequests(projectId, marker.id) ?? [];
-		json({ requests: records.map(record => ({
-			id: record.id,
-			status: record.status,
-			decisionClass: record.decisionClass ?? "deferrable",
-			classificationReason: record.classificationReason ?? "requested",
-			request: {
-				title: record.request.title,
-				question: record.request.question,
-				options: record.request.options.map(option => ({ value: option.value, label: option.label })),
-			},
-			...(record.resolution ? { resolution: { value: record.resolution.value } } : {}),
-		})) });
+		// Activity is diagnostic, but it belongs to this same durable projection:
+		// a separate browser fetch can race a mandatory settlement refresh. Trace
+		// read failure must never hide a pending decision or make it actionable.
+		let activity: unknown[] = [];
+		try {
+			activity = new ContextTraceStore(bobbitStateDir(), fsImpl)
+				.readProjectImportTrace(projectId, marker.id, 50);
+		} catch { /* the decision projection remains authoritative without activity */ }
+		json({
+			requests: records.map(record => ({
+				id: record.id,
+				status: record.status,
+				decisionClass: record.decisionClass ?? "deferrable",
+				classificationReason: record.classificationReason ?? "requested",
+				request: {
+					title: record.request.title,
+					question: record.request.question,
+					options: record.request.options.map(option => ({ value: option.value, label: option.label })),
+				},
+				...(record.resolution ? { resolution: { value: record.resolution.value } } : {}),
+			})),
+			activity,
+		});
 		return;
 	}
 

@@ -116,6 +116,7 @@ describe("decision proposal routing", () => {
 		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "proposal-import-collision-"));
 		const first = { kind: "project-import" as const, projectId: "project-123", importId: "import-123", requestId: "request-one" };
 		const second = { ...first, requestId: "request-two" };
+		const workspaces: unknown[] = [];
 		const service = new ProposalSeedService({
 			stateDir,
 			sessionManager: {} as any,
@@ -127,6 +128,7 @@ describe("decision proposal routing", () => {
 			systemProjectId: "system",
 			headquartersProjectId: "headquarters",
 			readBody: async () => ({}),
+			openProjectImportProposalWorkspace: workspace => { workspaces.push(workspace); },
 		} satisfies ProposalSeedServiceDeps);
 		try {
 			const firstResult = await service.seedFromDecision(first, "role", {
@@ -137,6 +139,7 @@ describe("decision proposal routing", () => {
 			});
 			assert.equal(firstResult.ok, true);
 			assert.equal(secondResult.ok, true);
+			if (!firstResult.ok || !secondResult.ok) return;
 
 			const firstDraftId = proposalDraftOwnerId(first);
 			const secondDraftId = proposalDraftOwnerId(second);
@@ -144,6 +147,10 @@ describe("decision proposal routing", () => {
 			assert.notEqual(firstDraftId, secondDraftId);
 			assert.notEqual(firstDraftId, proposalDraftOwnerId({ ...first, projectId: "project-456" }));
 			assert.equal(firstDraftId.length, "project-import-v1-".length + 64);
+			assert.deepEqual(workspaces, [
+				{ owner: first, draftId: firstDraftId, proposalType: "role", fields: firstResult.fields, rev: firstResult.rev },
+				{ owner: second, draftId: secondDraftId, proposalType: "role", fields: secondResult.fields, rev: secondResult.rev },
+			]);
 			assert.deepEqual(await parseProposalFile(stateDir, firstDraftId, "role"), {
 				ok: true,
 				value: { type: "role", fields: { name: "first-import-role", label: "First import role", prompt: "First draft.", projectId: first.projectId } },
