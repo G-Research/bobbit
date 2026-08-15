@@ -236,10 +236,11 @@ describe("artifacts pack viewer — hljs highlightCode helper", () => {
 
 describe("artifacts pack viewer — html console capture shim", () => {
 	it("tees console.* + errors to parent.postMessage tagged with the marker + id", () => {
-		const shim = consoleCaptureScript("art-42");
+		const shim = consoleCaptureScript("art-42", "channel-42");
 		assert.match(shim, /^<script>/);
 		assert.ok(shim.includes(CONSOLE_MESSAGE_MARKER));
 		assert.ok(shim.includes("art-42"));
+		assert.ok(shim.includes("channel-42"));
 		assert.ok(shim.includes("parent.postMessage"));
 		assert.ok(shim.includes('"error"') || shim.includes("error"));
 	});

@@ -53,8 +53,8 @@ const INDIRECT_READ_PAIRS = [
 	{ consumer: "tests2/core/base-path-preview-contract.test.ts", input: "src/app/side-panel-workspace.ts" },
 	{ consumer: "tests2/core/enforce-headless-qa.test.ts", input: ".claude/.mcp.json" },
 	{ consumer: "tests2/core/affected-test-classification.test.ts", input: "scripts/testing-v2/test-map-execution.mjs" },
-	{ consumer: "tests2/integration/tool-result-filter-pi-gate.test.ts", input: "patches/@earendil-works+pi-agent-core+0.82.1.patch" },
-	{ consumer: "tests2/integration/tool-result-filter-pi-gate.test.ts", input: "patches/@earendil-works+pi-coding-agent+0.82.1.patch" },
+	{ consumer: "tests2/integration/tool-result-filter-pi-gate.test.ts", input: "patches/@earendil-works+pi-agent-core+0.84.1.patch" },
+	{ consumer: "tests2/integration/tool-result-filter-pi-gate.test.ts", input: "patches/@earendil-works+pi-coding-agent+0.84.1.patch" },
 	{ consumer: "tests2/integration/tool-result-filter-pi-gate.test.ts", input: "tests2/integration/tool-result-filter-pi-gate-scenario.mjs" },
 	{ consumer: "tests2/core/build-unit-gate-ci.test.ts", input: ".github/workflows/build-unit-gate.yml" },
 	{ consumer: "tests2/core/build-unit-gate-ci.test.ts", input: ".github/workflows/codeql.yml" },
@@ -317,17 +317,17 @@ describe("affected repository reader inventory", () => {
 		const observedOperations = graph.meta.dynamicExecutableConsumerAudit.actual as Map<string, Map<string, number>>;
 		// Exact review inventory: every dynamic executable consumer and each
 		// distinct operation remains intentional rather than silently untracked.
-		expect(audit).toHaveLength(50);
-		expect(audit.reduce((count, entry) => count + entry.operations.length, 0)).toBe(67);
+		expect(audit).toHaveLength(51);
+		expect(audit.reduce((count, entry) => count + entry.operations.length, 0)).toBe(68);
 		expect([...observedOperations.values()].reduce(
 			(count, operations) => count + [...operations.values()].reduce((sum, occurrences) => sum + occurrences, 0),
 			0,
-		)).toBe(72);
+		)).toBe(73);
 		expect(REPOSITORY_SCAN_RULES).toHaveLength(18);
 		expect(REPOSITORY_SCAN_RULES.map((rule: { id: string }) => rule.id)).toEqual(REPOSITORY_SCAN_RULE_IDS);
 		expect(graph.meta.dynamicExecutableConsumerAudit.issues).toEqual([]);
-		expect(observedOperations.size).toBe(50);
-		expect(graph.meta.dynamicExecutableConsumerAudit.auditedConsumers.size).toBe(50);
+		expect(observedOperations.size).toBe(51);
+		expect(graph.meta.dynamicExecutableConsumerAudit.auditedConsumers.size).toBe(51);
 		expect(graph.meta.repositoryScanValidation.issues).toEqual([]);
 		for (const entry of audit) {
 			for (const operation of entry.operations) {
@@ -335,6 +335,16 @@ describe("affected repository reader inventory", () => {
 					`${entry.consumer}: ${operation.kind}:${operation.expression}`).toBe(true);
 			}
 		}
+
+		expect(audit.find((entry) => entry.consumer === "tests2/core/pi-installed-contract.test.ts")).toEqual({
+			consumer: "tests2/core/pi-installed-contract.test.ts",
+			operations: [{
+				kind: "dynamic-import",
+				expression: "pathToFileURL(adapterPath).href",
+				count: 1,
+				declarations: ["impact:package-metadata"],
+			}],
+		});
 
 		const staffGoalTriggers = "tests2/integration/staff-goal-triggers.test.ts";
 		expect(audit.find((entry) => entry.consumer === staffGoalTriggers)).toEqual({
@@ -461,6 +471,20 @@ describe("affected repository reader inventory", () => {
 		for (const entry of audit) {
 			expect(Boolean(entry.allowReason) !== Boolean(entry.declarations?.length), entry.consumer).toBe(true);
 		}
+
+		expect(audit.find((entry) => entry.consumer === "tests2/core/pi-installed-contract.test.ts")).toEqual({
+			consumer: "tests2/core/pi-installed-contract.test.ts",
+			declarations: ["impact:package-metadata"],
+			reads: [
+				{ expression: "candidate", count: 1 },
+				{ expression: "path.join(installedPackageRoot(packageName), \"package.json\")", count: 1 },
+			],
+		});
+		expect(audit.find((entry) => entry.consumer === "tests2/core/market-pack-tool-typebox-v1.test.ts")).toEqual({
+			consumer: "tests2/core/market-pack-tool-typebox-v1.test.ts",
+			declarations: ["impact:market-packs"],
+			reads: [{ expression: "extension", count: 1 }],
+		});
 
 		const staffGoalTriggers = "tests2/integration/staff-goal-triggers.test.ts";
 		const staffFixtureAudit = audit.find((entry) => entry.consumer === staffGoalTriggers);

@@ -38,7 +38,7 @@ function state(thinkingLevel: string) {
 	return {
 		success: true,
 		data: {
-			model: { provider: "anthropic", id: "claude-opus-4-1" },
+			model: { provider: "anthropic", id: "claude-opus-5" },
 			thinkingLevel,
 		},
 	};
@@ -47,10 +47,10 @@ function state(thinkingLevel: string) {
 describe("runtime model selection human pins", () => {
 	it("keeps pin provenance separate from durable tuple normalization", () => {
 		assert.deepEqual(normalizeHumanSelectionPins({
-			model: { provider: "anthropic", modelId: "claude-opus-4-1" },
+			model: { provider: "anthropic", modelId: "claude-opus-5" },
 			thinkingLevel: "high",
 		}), {
-			model: { provider: "anthropic", modelId: "claude-opus-4-1" },
+			model: { provider: "anthropic", modelId: "claude-opus-5" },
 			thinkingLevel: "high",
 		});
 		assert.equal(normalizeHumanSelectionPins({ model: { provider: "anthropic" }, thinkingLevel: "not-real" }), undefined);
@@ -68,16 +68,16 @@ describe("runtime model selection human pins", () => {
 				createdAt: 1,
 				lastActivity: 1,
 				modelProvider: "anthropic",
-				modelId: "claude-opus-4-1",
+				modelId: "claude-opus-5",
 				effectiveThinkingLevel: "medium",
 				humanSelectionPins: {
-					model: { provider: "anthropic", modelId: "claude-opus-4-1" },
+					model: { provider: "anthropic", modelId: "claude-opus-5" },
 					thinkingLevel: "high",
 				},
 			});
 			await store.flushAsync();
 			assert.deepEqual(new SessionStore(stateDir).get("pin-session")?.humanSelectionPins, {
-				model: { provider: "anthropic", modelId: "claude-opus-4-1" },
+				model: { provider: "anthropic", modelId: "claude-opus-5" },
 				thinkingLevel: "high",
 			});
 		} finally {
@@ -96,14 +96,14 @@ describe("runtime model selection human pins", () => {
 			id: "runtime-model-selection",
 			clients: new Set(),
 			rpcClient,
-			spawnPinnedModel: "anthropic/claude-opus-4-1",
+			spawnPinnedModel: "anthropic/claude-opus-5",
 			spawnPinnedThinkingLevel: "high",
 		};
 		const persisted: any[] = [];
 		const manager: any = {
 			getPersistedSession: () => ({
 				modelProvider: "anthropic",
-				modelId: "claude-opus-4-1",
+				modelId: "claude-opus-5",
 				effectiveThinkingLevel: "high",
 			}),
 			persistSessionModel: (...args: unknown[]) => persisted.push(args),
@@ -124,10 +124,10 @@ describe("runtime model selection human pins", () => {
 
 		assert.deepEqual(verified, {
 			provider: "anthropic",
-			id: "claude-opus-4-1",
+			id: "claude-opus-5",
 			thinkingLevel: "medium",
 		});
-		assert.deepEqual(persisted, [["runtime-model-selection", "anthropic", "claude-opus-4-1", "medium"]]);
+		assert.deepEqual(persisted, [["runtime-model-selection", "anthropic", "claude-opus-5", "medium"]]);
 		assert.equal(session.spawnPinnedThinkingLevel, "medium");
 		assert.equal(broadcasts.at(-1)?.data?.thinkingLevel, "medium");
 	});
@@ -150,11 +150,11 @@ describe("runtime model selection human pins", () => {
 			projectId: "project-a",
 			// A verified runtime mutation mirrors its tuple here; it is durability,
 			// not an ongoing user/operator choice.
-			spawnPinnedModel: "anthropic/claude-opus-4-1",
+			spawnPinnedModel: "anthropic/claude-opus-5",
 		};
 		const persisted: any = {
 			modelProvider: "anthropic",
-			modelId: "claude-opus-4-1",
+			modelId: "claude-opus-5",
 			effectiveThinkingLevel: "high",
 			projectId: "project-a",
 		};

@@ -275,12 +275,13 @@ export const CONSOLE_MESSAGE_MARKER = "__bobbitArtifactConsole";
  *  iframe stays `sandbox="allow-scripts"` (NO same-origin) — postMessage works
  *  cross-origin, so capture needs no privileged host bridge. `id` is embedded so
  *  the panel routes logs to the right artifact when several viewers exist. */
-export function consoleCaptureScript(artifactId: string): string {
+export function consoleCaptureScript(artifactId: string, channelToken = ""): string {
 	const id = JSON.stringify(String(artifactId || ""));
 	const marker = JSON.stringify(CONSOLE_MESSAGE_MARKER);
+	const token = JSON.stringify(channelToken);
 	return `<script>(function(){try{` +
 		`var post=function(method,args){try{var parts=[];for(var i=0;i<args.length;i++){var a=args[i];try{parts.push(typeof a==="object"?JSON.stringify(a):String(a));}catch(e){parts.push(String(a));}}` +
-		`var m={};m[${marker}]=true;m.id=${id};m.method=method;m.text=parts.join(" ");parent.postMessage(m,"*");}catch(e){}};` +
+		`var m={};m[${marker}]=true;m.id=${id};m.channelToken=${token};m.method=method;m.text=parts.join(" ");parent.postMessage(m,"*");}catch(e){}};` +
 		`["log","error","warn","info"].forEach(function(method){var orig=console[method];console[method]=function(){post(method,arguments);if(orig)try{orig.apply(console,arguments);}catch(e){}};});` +
 		`window.addEventListener("error",function(e){post("error",[e&&e.message?e.message:"Error"]);});` +
 		`window.addEventListener("unhandledrejection",function(e){post("error",[(e&&e.reason&&e.reason.message)||String(e&&e.reason)]);});` +
@@ -321,6 +322,7 @@ export function buildArtifactBody(
 	doc?: DocLike | null,
 	viewMode?: "preview" | "code",
 	artifactId?: string,
+	consoleChannelToken?: string,
 ): any {
 	doc = doc || (typeof document !== "undefined" ? (document as unknown as DocLike) : null);
 	const c = String(content || "");
@@ -343,7 +345,7 @@ export function buildArtifactBody(
 		iframe.setAttribute("data-testid", "artifact-viewer-iframe");
 		iframe.className = "w-full h-full border-0 bg-background";
 		iframe.style.minHeight = "240px";
-		iframe.srcdoc = consoleCaptureScript(artifactId || "") + c;
+		iframe.srcdoc = consoleCaptureScript(artifactId || "", consoleChannelToken) + c;
 		return iframe;
 	}
 

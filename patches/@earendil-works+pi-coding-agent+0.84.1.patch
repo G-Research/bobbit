@@ -1,7 +1,7 @@
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
-@@ -122,6 +122,7 @@
+@@ -123,6 +123,7 @@
      _extensionCommandContextActions;
      _extensionAbortHandler;
      _extensionShutdownHandler;
@@ -9,7 +9,7 @@ diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-sessio
      _extensionErrorListener;
      _extensionErrorUnsubscriber;
      _modelRuntime;
-@@ -212,6 +213,9 @@
+@@ -221,6 +222,9 @@
       * happens here instead of in wrappers.
       */
      _installAgentToolHooks() {
@@ -19,7 +19,7 @@ diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-sessio
          this.agent.beforeToolCall = async ({ toolCall, args }) => {
              const runner = this._extensionRunner;
              if (!runner.hasHandlers("tool_call")) {
-@@ -232,28 +236,57 @@
+@@ -241,33 +245,55 @@
                  throw new Error(`Extension failed, blocking execution: ${String(err)}`);
              }
          };
@@ -45,47 +45,48 @@ diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-sessio
 +                    return { content: [{ type: "text", text: "Tool result withheld by project result policy [ref: core-gate]." }], details: undefined, usage: undefined, isError: true, replaceResult: true };
 +                }
 +            }
-             if (!runner.hasHandlers("tool_result")) {
--                return undefined;
-+                return gate ? { content: gatedResult.content, details: gatedResult.details, usage: gatedResult.usage, isError: gatedIsError, replaceResult: true } : undefined;
-             }
-             const hookResult = await runner.emitToolResult({
-                 type: "tool_result",
-                 toolName: toolCall.name,
-                 toolCallId: toolCall.id,
-                 input: args,
--                content: result.content,
--                details: result.details,
--                isError,
--                usage: result.usage,
-+                content: gatedResult.content,
-+                details: gatedResult.details,
-+                isError: gatedIsError,
-+                usage: gatedResult.usage,
+             const hookResult = runner.hasHandlers("tool_result")
+                 ? await runner.emitToolResult({
+                     type: "tool_result",
+                     toolName: toolCall.name,
+                     toolCallId: toolCall.id,
+                     input: args,
+-                    content: result.content,
+-                    details: result.details,
+-                    isError,
+-                    usage: result.usage,
++                    content: gatedResult.content,
++                    details: gatedResult.details,
++                    isError: gatedIsError,
++                    usage: gatedResult.usage,
+                 })
+                 : undefined;
+-            const content = hookResult?.content ?? result.content ?? [];
+-            // Runs after the extension hook so images injected or replaced by extensions are normalized too.
++            const content = hookResult?.content ?? gatedResult.content ?? [];
++            // The gate has already made this content safe; normalize the final
++            // replacement before Pi can fan it out to transcript or model.
+             const normalizedContent = await normalizeToolResultImages(content, {
+                 autoResizeImages: this.settingsManager.getImageAutoResize(),
              });
-             if (!hookResult) {
--                return undefined;
-+                return gate ? { content: gatedResult.content, details: gatedResult.details, usage: gatedResult.usage, isError: gatedIsError, replaceResult: true } : undefined;
+-            if (!hookResult && normalizedContent === content) {
++            if (!gate && !hookResult && normalizedContent === content) {
+                 return undefined;
              }
-+            if (gate) {
-+                return {
-+                    content: hookResult.content ?? gatedResult.content,
-+                    details: hookResult.details ?? gatedResult.details,
-+                    isError: hookResult.isError ?? gatedIsError,
-+                    usage: hookResult.usage ?? gatedResult.usage,
-+                    terminate: hookResult.terminate,
-+                    replaceResult: true,
-+                };
-+            }
              return {
-                 content: hookResult.content,
-                 details: hookResult.details,
--                isError: hookResult.isError ?? isError,
-+                isError: hookResult.isError ?? gatedIsError,
-                 usage: hookResult.usage,
+                 content: normalizedContent,
+-                details: hookResult?.details,
+-                isError: hookResult?.isError ?? isError,
+-                usage: hookResult?.usage,
++                details: hookResult?.details ?? gatedResult.details,
++                isError: hookResult?.isError ?? gatedIsError,
++                usage: hookResult?.usage ?? gatedResult.usage,
++                terminate: hookResult?.terminate,
++                replaceResult: !!gate,
              };
          };
-@@ -2028,6 +2061,9 @@
+     }
+@@ -2029,6 +2055,9 @@
              });
          this._baseToolDefinitions = new Map(Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool]));
          const extensionsResult = this._resourceLoader.getExtensions();
@@ -98,7 +99,7 @@ diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-sessio
 diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
 --- a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
 +++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
-@@ -54,6 +54,93 @@
+@@ -55,6 +55,93 @@
      "@mariozechner/pi-coding-agent": _bundledPiCodingAgent,
  };
  const require = createRequire(import.meta.url);
@@ -189,10 +190,10 @@ diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/l
 +        throw sealedCoreToolResultGateFailure;
 +    }
 +}
+ const isTypeScriptSourceRuntime = !isBunBinary && path.extname(fileURLToPath(import.meta.url)) === ".ts";
  /**
-  * Get aliases for jiti (used in Node.js/development mode).
-  * In Bun binary mode, virtualModules is used instead.
-@@ -400,6 +487,15 @@
+  * Get aliases for jiti (used in built Node.js mode).
+@@ -436,6 +523,15 @@
      const resolvedCwd = cacheToken?.cwd ?? resolvePath(cwd);
      const resolvedEventBus = eventBus ?? createEventBus();
      const resolvedRuntime = runtime ?? createExtensionRuntime();

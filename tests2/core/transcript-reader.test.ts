@@ -395,6 +395,16 @@ describe("transcript-reader / readTranscript", () => {
 		assert.deepEqual(indices, [2, 5]);
 	});
 
+	it("preserves RE2 alternation semantics without locale-dependent casing", async () => {
+		const fixture = makeJsonl([
+			{ role: "user", content: "ERROR raised" },
+			{ role: "assistant", content: "warning emitted" },
+			{ role: "user", content: "ordinary output" },
+		]);
+		const env = await readTranscript({ pattern: "error|fail|warning" }, memoryTranscript(fixture));
+		assert.equal(env.matchCount, 2);
+	});
+
 	it("pattern with case_sensitive misses lowercase", async () => {
 		const env = await readTranscript({ pattern: "ERROR", caseSensitive: true }, memoryTranscript(sample));
 		assert.equal(env.matchCount, 1);
@@ -417,11 +427,13 @@ describe("transcript-reader / readTranscript", () => {
 		assert.deepEqual(indices, [1, 2, 3, 4, 5, 6]);
 	});
 
-	it("invalid regex throws invalid_regex", async () => {
-		await assert.rejects(
-			() => readTranscript({ pattern: "(" }, memoryTranscript(sample)),
-			(err: unknown) => err instanceof TranscriptReaderError && err.code === "invalid_regex",
-		);
+	it("invalid or oversized regex throws invalid_regex", async () => {
+		for (const pattern of ["(", "(a)\\1", "x".repeat(1_025)]) {
+			await assert.rejects(
+				() => readTranscript({ pattern }, memoryTranscript(sample)),
+				(err: unknown) => err instanceof TranscriptReaderError && err.code === "invalid_regex",
+			);
+		}
 	});
 
 	it("limit out of range throws invalid_params", async () => {

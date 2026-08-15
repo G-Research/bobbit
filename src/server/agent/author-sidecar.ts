@@ -28,7 +28,12 @@ import {
 export interface PromptAuthorDispatchRecord {
 	schemaVersion: 2;
 	type: "prompt-author";
+	/** Legacy-compatible sidecar key. Modern dispatches keep it attempt-unique. */
 	promptId: string;
+	/** Durable accepted occurrence and one-attempt evidence. Optional on v2 legacy rows. */
+	intentId?: string;
+	attemptId?: string;
+	dispatchEpoch?: number;
 	dispatchedAt: number;
 	/** Keyed digest of the exact text sent to Pi, including any author prefix. */
 	modelTextDigest: string;
@@ -42,19 +47,54 @@ export interface PromptAuthorSettlementRecord {
 	schemaVersion: 2;
 	type: "prompt-author-settlement";
 	promptId: string;
+	intentId?: string;
+	attemptId?: string;
 	settledAt: number;
 	outcome: "echoed" | "cancelled";
 	messageId?: string;
 	messageTimestamp?: number;
 }
 
-export type AuthorSidecarRecord = PromptAuthorDispatchRecord | PromptAuthorSettlementRecord;
+/**
+ * One durable explicit-dismissal record. It carries both the synthetic attempt
+ * identity and its terminal cancelled settlement, so no crash boundary can
+ * expose one without the other.
+ */
+export interface PromptAuthorDismissalTombstoneRecord {
+	schemaVersion: 2;
+	type: "prompt-author-dismissal";
+	promptId: string;
+	intentId: string;
+	attemptId: string;
+	dispatchEpoch: number;
+	dispatchedAt: number;
+	settledAt: number;
+	modelTextDigest: string;
+	source: PromptSource;
+	author: MessageAuthor;
+	modelPrefix?: string;
+}
+
+export type AuthorSidecarRecord =
+	| PromptAuthorDispatchRecord
+	| PromptAuthorSettlementRecord
+	| PromptAuthorDismissalTombstoneRecord;
+
+/** Non-serialized append evidence used only to break equal lifecycle timestamps. */
+const PROMPT_AUTHOR_LIFECYCLE_ORDER = Symbol("prompt-author-lifecycle-order");
+
+type OrderedPromptAuthorBinding = PromptAuthorBinding & {
+	[PROMPT_AUTHOR_LIFECYCLE_ORDER]?: number;
+};
 
 /** Callers still provide exact prompt text in memory; append immediately hashes it. */
 export interface PromptAuthorDispatchInput {
 	schemaVersion?: 1 | 2;
 	type?: "prompt-author";
 	promptId: string;
+	intentId?: string;
+	attemptId?: string;
+	dispatchEpoch?: number;
 	dispatchedAt: number;
 	/** Exact text that will be sent to Pi; append immediately hashes it. */
 	modelText: string;
@@ -68,10 +108,28 @@ export interface PromptAuthorSettlementInput {
 	schemaVersion?: 1 | 2;
 	type?: "prompt-author-settlement";
 	promptId: string;
+	intentId?: string;
+	attemptId?: string;
 	settledAt: number;
 	outcome: "echoed" | "cancelled";
 	messageId?: string;
 	messageTimestamp?: number;
+}
+
+export interface PromptAuthorDismissalTombstoneInput {
+	schemaVersion?: 2;
+	type?: "prompt-author-dismissal";
+	promptId: string;
+	intentId: string;
+	attemptId: string;
+	dispatchEpoch: number;
+	dispatchedAt: number;
+	settledAt: number;
+	/** Exact text is accepted only in memory and immediately becomes a keyed digest. */
+	modelText: string;
+	source: PromptSource;
+	author: MessageAuthor;
+	modelPrefix?: string;
 }
 
 /**
@@ -82,6 +140,9 @@ export interface PromptAuthorBinding {
 	schemaVersion: 1 | 2;
 	type: "prompt-author";
 	promptId: string;
+	intentId?: string;
+	attemptId?: string;
+	dispatchEpoch?: number;
 	dispatchedAt: number;
 	modelText?: string;
 	modelTextDigest?: string;
@@ -92,6 +153,8 @@ export interface PromptAuthorBinding {
 		schemaVersion: 1 | 2;
 		type: "prompt-author-settlement";
 		promptId: string;
+		intentId?: string;
+		attemptId?: string;
 		settledAt: number;
 		outcome: "echoed" | "cancelled";
 		messageId?: string;
@@ -137,6 +200,7 @@ interface LegacyPromptAuthorSettlementRecord {
 
 const CORRELATION_TOLERANCE_MS = 2_000;
 const MAX_KEY_LENGTH = 256;
+const MAX_SIDECAR_BYTES = 4 * 1024 * 1024;
 const MAX_DIAGNOSTIC_VALUE_LENGTH = 512;
 const DIGEST_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const SIDECAR_KEY_DOMAIN = "bobbit/author-sidecar/v2/key\0";
@@ -151,6 +215,15 @@ function validKey(value: unknown): value is string {
 
 function validTimestamp(value: unknown): value is number {
 	return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function validOptionalKey(value: unknown): boolean {
+	return value === undefined || validKey(value);
+}
+
+function validOptionalEpoch(value: unknown): boolean {
+	return value === undefined
+		|| (typeof value === "number" && Number.isSafeInteger(value) && value >= 0);
 }
 
 function validDigest(value: unknown): value is string {
@@ -176,6 +249,9 @@ function isDispatchRecord(value: unknown): value is PromptAuthorDispatchRecord {
 	return record.schemaVersion === 2
 		&& record.type === "prompt-author"
 		&& validKey(record.promptId)
+		&& validOptionalKey(record.intentId)
+		&& validOptionalKey(record.attemptId)
+		&& validOptionalEpoch(record.dispatchEpoch)
 		&& validTimestamp(record.dispatchedAt)
 		&& validDigest(record.modelTextDigest)
 		&& isPromptSource(record.source)
@@ -189,10 +265,30 @@ function isSettlementRecord(value: unknown): value is PromptAuthorSettlementReco
 	return record.schemaVersion === 2
 		&& record.type === "prompt-author-settlement"
 		&& validKey(record.promptId)
+		&& validOptionalKey(record.intentId)
+		&& validOptionalKey(record.attemptId)
 		&& validTimestamp(record.settledAt)
 		&& (record.outcome === "echoed" || record.outcome === "cancelled")
 		&& (record.messageId === undefined || validKey(record.messageId))
 		&& (record.messageTimestamp === undefined || validTimestamp(record.messageTimestamp));
+}
+
+function isDismissalTombstoneRecord(value: unknown): value is PromptAuthorDismissalTombstoneRecord {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const record = value as Record<string, unknown>;
+	return record.schemaVersion === 2
+		&& record.type === "prompt-author-dismissal"
+		&& validKey(record.promptId)
+		&& validKey(record.intentId)
+		&& validKey(record.attemptId)
+		&& validOptionalEpoch(record.dispatchEpoch)
+		&& record.dispatchEpoch !== undefined
+		&& validTimestamp(record.dispatchedAt)
+		&& validTimestamp(record.settledAt)
+		&& validDigest(record.modelTextDigest)
+		&& isPromptSource(record.source)
+		&& isMessageAuthor(record.author)
+		&& hasValidModelPrefix({ author: record.author, modelPrefix: record.modelPrefix });
 }
 
 function isLegacyDispatchRecord(value: unknown): value is LegacyPromptAuthorDispatchRecord {
@@ -229,6 +325,9 @@ function canonicalDispatchRecord(record: PromptAuthorDispatchRecord): PromptAuth
 		schemaVersion: 2,
 		type: "prompt-author",
 		promptId: record.promptId,
+		...(record.intentId === undefined ? {} : { intentId: record.intentId }),
+		...(record.attemptId === undefined ? {} : { attemptId: record.attemptId }),
+		...(record.dispatchEpoch === undefined ? {} : { dispatchEpoch: record.dispatchEpoch }),
 		dispatchedAt: record.dispatchedAt,
 		modelTextDigest: record.modelTextDigest,
 		source: record.source,
@@ -242,6 +341,8 @@ function canonicalSettlementRecord(record: PromptAuthorSettlementRecord): Prompt
 		schemaVersion: 2,
 		type: "prompt-author-settlement",
 		promptId: record.promptId,
+		...(record.intentId === undefined ? {} : { intentId: record.intentId }),
+		...(record.attemptId === undefined ? {} : { attemptId: record.attemptId }),
 		settledAt: record.settledAt,
 		outcome: record.outcome,
 		...(record.messageId === undefined ? {} : { messageId: record.messageId }),
@@ -249,10 +350,29 @@ function canonicalSettlementRecord(record: PromptAuthorSettlementRecord): Prompt
 	};
 }
 
+function canonicalDismissalTombstoneRecord(
+	record: PromptAuthorDismissalTombstoneRecord,
+): PromptAuthorDismissalTombstoneRecord {
+	return {
+		schemaVersion: 2,
+		type: "prompt-author-dismissal",
+		promptId: record.promptId,
+		intentId: record.intentId,
+		attemptId: record.attemptId,
+		dispatchEpoch: record.dispatchEpoch,
+		dispatchedAt: record.dispatchedAt,
+		settledAt: record.settledAt,
+		modelTextDigest: record.modelTextDigest,
+		source: record.source,
+		author: canonicalAuthor(record.author),
+		...(record.modelPrefix === undefined ? {} : { modelPrefix: record.modelPrefix }),
+	};
+}
+
 function canonicalRecord(record: AuthorSidecarRecord): AuthorSidecarRecord {
-	return record.type === "prompt-author"
-		? canonicalDispatchRecord(record)
-		: canonicalSettlementRecord(record);
+	if (record.type === "prompt-author") return canonicalDispatchRecord(record);
+	if (record.type === "prompt-author-settlement") return canonicalSettlementRecord(record);
+	return canonicalDismissalTombstoneRecord(record);
 }
 
 function isPromptAuthorBinding(value: unknown): value is PromptAuthorBinding {
@@ -261,6 +381,9 @@ function isPromptAuthorBinding(value: unknown): value is PromptAuthorBinding {
 	if ((record.schemaVersion !== 1 && record.schemaVersion !== 2)
 		|| record.type !== "prompt-author"
 		|| !validKey(record.promptId)
+		|| !validOptionalKey(record.intentId)
+		|| !validOptionalKey(record.attemptId)
+		|| !validOptionalEpoch(record.dispatchEpoch)
 		|| !validTimestamp(record.dispatchedAt)
 		|| !isPromptSource(record.source)
 		|| !isMessageAuthor(record.author)
@@ -337,11 +460,19 @@ function getSidecarDir(): string | undefined {
 	}
 }
 
-function filePath(sessionId: string): string | undefined {
+type SidecarPath = string & { readonly __sidecarPath: unique symbol };
+
+/** Construct one known filename and prove it remains directly below the private root. */
+function filePath(sessionId: string): SidecarPath | undefined {
 	const dir = getSidecarDir();
 	if (!dir) return undefined;
 	const safe = sessionId.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 160) || "unknown";
-	return path.join(dir, `${safe}.jsonl`);
+	const root = path.resolve(dir);
+	const target = path.resolve(root, `${safe}.jsonl`);
+	// `safe` is deliberately restrictive, but retain this containment guard as
+	// the authority for all filesystem calls should the naming convention change.
+	if (path.dirname(target) !== root) return undefined;
+	return target as SidecarPath;
 }
 
 function secureOpenFlags(baseFlags: number): number {
@@ -361,25 +492,32 @@ function secureFileDescriptor(fd: number): void {
 function writeAll(fd: number, value: Buffer): void {
 	let offset = 0;
 	while (offset < value.length) {
-		// Only canonical v2 ledger JSON reaches this private, non-executable file;
-		// paths are server-rooted and prompt bodies have already become keyed HMACs.
-		// codeql[js/http-to-file-access] Intentional bounded metadata ledger write, not an arbitrary upload.
 		const written = fs.writeSync(fd, value, offset, value.length - offset, null);
 		if (!Number.isSafeInteger(written) || written <= 0) throw new Error("Author-sidecar write was incomplete");
 		offset += written;
 	}
 }
 
-function appendLineSecure(target: string, line: string): void {
+function boundedText(value: string): Buffer {
+	const bytes = Buffer.from(value, "utf8");
+	if (bytes.length > MAX_SIDECAR_BYTES) throw new Error("Author-sidecar record exceeds the storage limit");
+	return bytes;
+}
+
+function appendLineSecure(target: SidecarPath, line: string): void {
 	let fd: number | undefined;
 	try {
+		const bytes = boundedText(line);
 		fd = fs.openSync(
 			target,
 			secureOpenFlags(fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_WRONLY),
 			0o600,
 		);
 		secureFileDescriptor(fd);
-		writeAll(fd, Buffer.from(line, "utf8"));
+		if (fs.fstatSync(fd).size + bytes.length > MAX_SIDECAR_BYTES) {
+			throw new Error("Author-sidecar storage limit exceeded");
+		}
+		writeAll(fd, bytes);
 		fs.fsyncSync(fd);
 	} finally {
 		if (fd !== undefined) fs.closeSync(fd);
@@ -404,12 +542,23 @@ function fsyncDirectory(target: string): void {
 	}
 }
 
-function readSecureText(target: string): string | undefined {
+function readSecureText(target: SidecarPath): string | undefined {
 	let fd: number | undefined;
 	try {
 		fd = fs.openSync(target, secureOpenFlags(fs.constants.O_RDONLY));
 		secureFileDescriptor(fd);
-		return fs.readFileSync(fd, "utf8");
+		const size = fs.fstatSync(fd).size;
+		if (!Number.isSafeInteger(size) || size < 0 || size > MAX_SIDECAR_BYTES) {
+			throw new Error("Author-sidecar ledger exceeds the storage limit");
+		}
+		const bytes = Buffer.alloc(size);
+		let offset = 0;
+		while (offset < bytes.length) {
+			const read = fs.readSync(fd, bytes, offset, bytes.length - offset, offset);
+			if (!Number.isSafeInteger(read) || read <= 0) break;
+			offset += read;
+		}
+		return bytes.subarray(0, offset).toString("utf8");
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return undefined;
 		throw error;
@@ -418,7 +567,8 @@ function readSecureText(target: string): string | undefined {
 	}
 }
 
-function writeSecureReplacement(target: string, text: string): void {
+function writeSecureReplacement(target: SidecarPath, text: string): void {
+	const replacement = boundedText(text);
 	const suffix = crypto.randomBytes(9).toString("base64url");
 	const temp = `${target}.${process.pid}.${suffix}.tmp`;
 	let fd: number | undefined;
@@ -427,7 +577,7 @@ function writeSecureReplacement(target: string, text: string): void {
 		fd = fs.openSync(temp, secureOpenFlags(fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY), 0o600);
 		tempCreated = true;
 		secureFileDescriptor(fd);
-		writeAll(fd, Buffer.from(text, "utf8"));
+		writeAll(fd, replacement);
 		fs.fsyncSync(fd);
 		fs.closeSync(fd);
 		fd = undefined;
@@ -475,7 +625,9 @@ function recordsFromText(text: string): AuthorSidecarRecord[] {
 		if (!trimmed) continue;
 		try {
 			const parsed: unknown = JSON.parse(trimmed);
-			if (isDispatchRecord(parsed) || isSettlementRecord(parsed)) records.push(canonicalRecord(parsed));
+			if (isDispatchRecord(parsed) || isSettlementRecord(parsed) || isDismissalTombstoneRecord(parsed)) {
+				records.push(canonicalRecord(parsed));
+			}
 		} catch { /* a partial final line is expected after some crashes */ }
 	}
 	return records;
@@ -553,7 +705,7 @@ function migrateLegacyFile(legacyFile: string, sessionId: string, legacyDir: str
 					...(parsed.messageId === undefined ? {} : { messageId: parsed.messageId }),
 					...(parsed.messageTimestamp === undefined ? {} : { messageTimestamp: parsed.messageTimestamp }),
 				});
-			} else if (isDispatchRecord(parsed) || isSettlementRecord(parsed)) {
+			} else if (isDispatchRecord(parsed) || isSettlementRecord(parsed) || isDismissalTombstoneRecord(parsed)) {
 				migrated.push(canonicalRecord(parsed));
 			}
 		} catch { /* malformed/future rows safely degrade to inference */ }
@@ -664,7 +816,11 @@ export function initAuthorSidecarDir(
 	sidecarPlatform = options.platform ?? process.platform;
 	try {
 		ensurePrivateDirectory(nextDir);
-		sidecarDir = nextDir;
+		// Resolve the private root once after its no-symlink directory check. Every
+		// ledger path is subsequently derived and containment-checked beneath this
+		// canonical root, rather than reopening a caller-controlled path string.
+		sidecarDir = fs.realpathSync(nextDir);
+		enforceDirectoryMode(sidecarDir);
 		promptDigestKey = derivePromptDigestKey(keyMaterial);
 		migrateLegacyAuthorSidecars(legacyStateDir);
 	} catch (error) {
@@ -684,6 +840,9 @@ export function appendPromptAuthorDispatch(
 		schemaVersion: 2,
 		type: "prompt-author",
 		promptId: input.promptId,
+		...(input.intentId === undefined ? {} : { intentId: input.intentId }),
+		...(input.attemptId === undefined ? {} : { attemptId: input.attemptId }),
+		...(input.dispatchEpoch === undefined ? {} : { dispatchEpoch: input.dispatchEpoch }),
 		dispatchedAt: input.dispatchedAt,
 		modelTextDigest: modelTextDigest ?? "",
 		source: input.source,
@@ -702,6 +861,8 @@ export function appendPromptAuthorSettlement(
 		schemaVersion: 2,
 		type: "prompt-author-settlement",
 		promptId: input.promptId,
+		...(input.intentId === undefined ? {} : { intentId: input.intentId }),
+		...(input.attemptId === undefined ? {} : { attemptId: input.attemptId }),
 		settledAt: input.settledAt,
 		outcome: input.outcome,
 		...(input.messageId === undefined ? {} : { messageId: input.messageId }),
@@ -711,20 +872,140 @@ export function appendPromptAuthorSettlement(
 	return appendRecord(sessionId, record);
 }
 
-/** Fold redispatches by prompt id. The latest dispatch resets prior settlement. */
+/** Persist synthetic dismissal identity and terminal cancellation in one fsynced append. */
+export function appendPromptAuthorDismissalTombstone(
+	sessionId: string,
+	input: PromptAuthorDismissalTombstoneInput,
+): boolean {
+	const modelTextDigest = digestPromptModelText(input.modelText);
+	const record: PromptAuthorDismissalTombstoneRecord = {
+		schemaVersion: 2,
+		type: "prompt-author-dismissal",
+		promptId: input.promptId,
+		intentId: input.intentId,
+		attemptId: input.attemptId,
+		dispatchEpoch: input.dispatchEpoch,
+		dispatchedAt: input.dispatchedAt,
+		settledAt: input.settledAt,
+		modelTextDigest: modelTextDigest ?? "",
+		source: input.source,
+		author: isMessageAuthor(input.author) ? canonicalAuthor(input.author) : input.author,
+		...(input.modelPrefix === undefined ? {} : { modelPrefix: input.modelPrefix }),
+	};
+	if (!isDismissalTombstoneRecord(record)) return false;
+	return appendRecord(sessionId, record);
+}
+
+/**
+ * Compare sidecar lifecycle evidence for one occurrence. Modern attempts are
+ * ordered by their dispatch epoch, never by accepted-message time. Settlement
+ * time and append order break ties so a synthetic terminal attempt cannot be
+ * shadowed by an older dispatch whose accepted timestamp happens to be later.
+ * Legacy bindings retain their historical dispatchedAt ordering.
+ */
+export function comparePromptAuthorLifecycleEvidence(
+	left: PromptAuthorBinding,
+	right: PromptAuthorBinding,
+): number {
+	const leftModern = left.intentId !== undefined || left.attemptId !== undefined || left.dispatchEpoch !== undefined;
+	const rightModern = right.intentId !== undefined || right.attemptId !== undefined || right.dispatchEpoch !== undefined;
+	if (leftModern && rightModern) {
+		const epoch = (left.dispatchEpoch ?? -1) - (right.dispatchEpoch ?? -1);
+		if (epoch !== 0) return epoch;
+		const lifecycle = (left.settlement?.settledAt ?? left.dispatchEpoch ?? left.dispatchedAt)
+			- (right.settlement?.settledAt ?? right.dispatchEpoch ?? right.dispatchedAt);
+		if (lifecycle !== 0) return lifecycle;
+	} else {
+		const dispatched = left.dispatchedAt - right.dispatchedAt;
+		if (dispatched !== 0) return dispatched;
+		const settled = (left.settlement?.settledAt ?? -1) - (right.settlement?.settledAt ?? -1);
+		if (settled !== 0) return settled;
+	}
+	return ((left as OrderedPromptAuthorBinding)[PROMPT_AUTHOR_LIFECYCLE_ORDER] ?? -1)
+		- ((right as OrderedPromptAuthorBinding)[PROMPT_AUTHOR_LIFECYCLE_ORDER] ?? -1);
+}
+
+/** Select the newest lifecycle row using the one canonical evidence ordering. */
+export function selectLatestPromptAuthorBinding(
+	bindings: readonly PromptAuthorBinding[],
+	predicate: (binding: PromptAuthorBinding) => boolean,
+): PromptAuthorBinding | undefined {
+	let latest: PromptAuthorBinding | undefined;
+	for (const binding of bindings) {
+		if (!predicate(binding)) continue;
+		if (!latest || comparePromptAuthorLifecycleEvidence(latest, binding) <= 0) latest = binding;
+	}
+	return latest;
+}
+
+/**
+ * Fold sidecar evidence by attempt when present. Legacy prompt-id redispatches
+ * retain their historical latest-wins behavior, while modern stale settlements
+ * can no longer settle a replacement attempt for the same accepted intent.
+ */
 export function foldAuthorSidecarRecords(records: AuthorSidecarRecord[]): PromptAuthorBinding[] {
 	const bindings = new Map<string, PromptAuthorBinding>();
-	for (const record of records) {
+	const latestKeyByPromptId = new Map<string, string>();
+	for (let recordIndex = 0; recordIndex < records.length; recordIndex += 1) {
+		const record = records[recordIndex];
 		if (isDispatchRecord(record)) {
-			bindings.set(record.promptId, { ...record });
+			const key = record.attemptId ? `attempt:${record.attemptId}` : `prompt:${record.promptId}`;
+			const binding: OrderedPromptAuthorBinding = { ...record };
+			Object.defineProperty(binding, PROMPT_AUTHOR_LIFECYCLE_ORDER, {
+				value: recordIndex,
+				writable: true,
+				configurable: true,
+			});
+			bindings.set(key, binding);
+			latestKeyByPromptId.set(record.promptId, key);
+			continue;
+		}
+		if (isDismissalTombstoneRecord(record)) {
+			const key = `attempt:${record.attemptId}`;
+			const binding: OrderedPromptAuthorBinding = {
+				schemaVersion: 2,
+				type: "prompt-author",
+				promptId: record.promptId,
+				intentId: record.intentId,
+				attemptId: record.attemptId,
+				dispatchEpoch: record.dispatchEpoch,
+				dispatchedAt: record.dispatchedAt,
+				modelTextDigest: record.modelTextDigest,
+				source: record.source,
+				author: record.author,
+				...(record.modelPrefix === undefined ? {} : { modelPrefix: record.modelPrefix }),
+				settlement: {
+					schemaVersion: 2,
+					type: "prompt-author-settlement",
+					promptId: record.promptId,
+					intentId: record.intentId,
+					attemptId: record.attemptId,
+					settledAt: record.settledAt,
+					outcome: "cancelled",
+				},
+			};
+			Object.defineProperty(binding, PROMPT_AUTHOR_LIFECYCLE_ORDER, {
+				value: recordIndex,
+				writable: true,
+				configurable: true,
+			});
+			bindings.set(key, binding);
+			latestKeyByPromptId.set(record.promptId, key);
 			continue;
 		}
 		if (!isSettlementRecord(record)) continue;
-		const binding = bindings.get(record.promptId);
+		const key = record.attemptId
+			? `attempt:${record.attemptId}`
+			: latestKeyByPromptId.get(record.promptId);
+		if (!key) continue;
+		const binding = bindings.get(key) as OrderedPromptAuthorBinding | undefined;
 		if (!binding) continue;
+		// When both sides carry occurrence identity, contradictory evidence fails closed.
+		if (record.intentId && binding.intentId && record.intentId !== binding.intentId) continue;
 		binding.settlement = record;
+		binding[PROMPT_AUTHOR_LIFECYCLE_ORDER] = recordIndex;
 	}
-	return [...bindings.values()].sort((left, right) => left.dispatchedAt - right.dispatchedAt);
+	return [...bindings.values()].sort(comparePromptAuthorLifecycleEvidence);
 }
 
 /** Missing, corrupt, partial, and future-version sidecars safely read as absent rows. */
@@ -765,8 +1046,8 @@ export function extractPromptModelText(message: Record<string, unknown>): string
  */
 export function projectCorrelatedPromptMessage<T extends Record<string, unknown>>(
 	message: T,
-	binding: Pick<PromptAuthorBinding, "author" | "modelPrefix" | "modelTextDigest">,
-): T & { author: MessageAuthor } {
+	binding: Pick<PromptAuthorBinding, "author" | "modelPrefix" | "modelTextDigest" | "intentId" | "attemptId">,
+): T & { author: MessageAuthor; deliveryIntentId?: string; deliveryAttemptId?: string } {
 	const candidateModelText = extractPromptModelText(message);
 	const rawTextProven = candidateModelText !== undefined
 		&& promptAuthorBindingDigestMatchesText(binding, candidateModelText);
@@ -801,11 +1082,17 @@ export function projectCorrelatedPromptMessage<T extends Record<string, unknown>
 	}
 
 	const authorChanged = !sameAuthor(message.author, binding.author);
-	if (!contentChanged && !authorChanged) return message as T & { author: MessageAuthor };
+	const intentChanged = binding.intentId !== undefined && message.deliveryIntentId !== binding.intentId;
+	const attemptChanged = binding.attemptId !== undefined && message.deliveryAttemptId !== binding.attemptId;
+	if (!contentChanged && !authorChanged && !intentChanged && !attemptChanged) {
+		return message as T & { author: MessageAuthor; deliveryIntentId?: string; deliveryAttemptId?: string };
+	}
 	return {
 		...message,
 		...(contentChanged ? { content: projectedContent } : {}),
 		author: binding.author,
+		...(binding.intentId === undefined ? {} : { deliveryIntentId: binding.intentId }),
+		...(binding.attemptId === undefined ? {} : { deliveryAttemptId: binding.attemptId }),
 	};
 }
 
@@ -896,6 +1183,8 @@ function utf8Length(value: unknown): number {
 function streamBindingBytes(binding: PromptAuthorBinding): number {
 	return 128
 		+ utf8Length(binding.promptId)
+		+ utf8Length(binding.intentId)
+		+ utf8Length(binding.attemptId)
 		+ utf8Length(binding.modelTextDigest)
 		+ utf8Length(binding.modelText)
 		+ utf8Length(binding.modelPrefix)
@@ -998,6 +1287,8 @@ export function createPromptAuthorStreamCorrelation(
 
 	const exactMessageIds = new Map<string, StreamBindingRef[]>();
 	const exactPromptIds = new Map<string, StreamBindingRef[]>();
+	const exactIntentIds = new Map<string, StreamBindingRef[]>();
+	const exactAttemptIds = new Map<string, StreamBindingRef[]>();
 	const timestampBindings = createBuckets();
 	const fifoBindings = createBuckets();
 	const refs: StreamBindingRef[] = [];
@@ -1007,6 +1298,8 @@ export function createPromptAuthorStreamCorrelation(
 		const ref: StreamBindingRef = { binding, order: refs.length, consumed: false };
 		refs.push(ref);
 		appendBucket(exactPromptIds, binding.promptId, ref);
+		if (binding.intentId) appendBucket(exactIntentIds, binding.intentId, ref);
+		if (binding.attemptId) appendBucket(exactAttemptIds, binding.attemptId, ref);
 		if (binding.settlement?.outcome !== "echoed") continue;
 		const settledMessageId = binding.settlement.messageId;
 		if (settledMessageId) {
@@ -1075,9 +1368,16 @@ export function createPromptAuthorStreamCorrelation(
 		// Unresolved dispatches are never allowed into digest/FIFO matching. The
 		// sole supported occurrence is Bobbit's exact synthetic in-flight steer id.
 		const id = messageId(message);
-		if (message._inFlightSteer === true && id?.startsWith("inflight-steer:")) {
-			const promptId = id.slice("inflight-steer:".length);
-			const direct = firstUnconsumed(exactPromptIds.get(promptId));
+		if (message._inFlightSteer === true) {
+			const deliveryAttemptId = validKey(message.deliveryAttemptId) ? message.deliveryAttemptId : undefined;
+			const deliveryIntentId = validKey(message.deliveryIntentId) ? message.deliveryIntentId : undefined;
+			const encodedId = id?.startsWith("inflight-steer:")
+				? id.slice("inflight-steer:".length)
+				: undefined;
+			const direct = firstUnconsumed(deliveryAttemptId ? exactAttemptIds.get(deliveryAttemptId) : undefined)
+				?? firstUnconsumed(deliveryIntentId ? exactIntentIds.get(deliveryIntentId) : undefined)
+				?? firstUnconsumed(encodedId ? exactPromptIds.get(encodedId) : undefined)
+				?? firstUnconsumed(encodedId ? exactIntentIds.get(encodedId) : undefined);
 			if (direct) {
 				direct.consumed = true;
 				return direct.binding;
@@ -1132,9 +1432,16 @@ export function mergeAuthorSidecarIntoMessages<T extends object>(
 		const row = rows[index];
 		if (!eligiblePromptMessage(row) || row._inFlightSteer !== true) continue;
 		const id = messageId(row);
-		if (!id?.startsWith("inflight-steer:")) continue;
-		const promptId = id.slice("inflight-steer:".length);
-		const binding = directPromptBindings.find((candidate) => !consumed.has(candidate) && candidate.promptId === promptId);
+		const encodedId = id?.startsWith("inflight-steer:")
+			? id.slice("inflight-steer:".length)
+			: undefined;
+		const deliveryIntentId = validKey(row.deliveryIntentId) ? row.deliveryIntentId : undefined;
+		const deliveryAttemptId = validKey(row.deliveryAttemptId) ? row.deliveryAttemptId : undefined;
+		const binding = directPromptBindings.find((candidate) => !consumed.has(candidate) && (
+			(deliveryAttemptId !== undefined && candidate.attemptId === deliveryAttemptId)
+			|| (deliveryIntentId !== undefined && candidate.intentId === deliveryIntentId)
+			|| (encodedId !== undefined && (candidate.promptId === encodedId || candidate.intentId === encodedId))
+		));
 		if (!binding) continue;
 		assignments.set(index, binding);
 		consumed.add(binding);
@@ -1315,6 +1622,9 @@ export function copyAuthorSidecar(
 				schemaVersion: 2,
 				type: "prompt-author",
 				promptId: binding.promptId,
+				...(binding.intentId === undefined ? {} : { intentId: binding.intentId }),
+				...(binding.attemptId === undefined ? {} : { attemptId: binding.attemptId }),
+				...(binding.dispatchEpoch === undefined ? {} : { dispatchEpoch: binding.dispatchEpoch }),
 				dispatchedAt: binding.dispatchedAt,
 				modelTextDigest: binding.modelTextDigest,
 				source: binding.source,
@@ -1325,6 +1635,8 @@ export function copyAuthorSidecar(
 				schemaVersion: 2,
 				type: "prompt-author-settlement",
 				promptId: binding.promptId,
+				...(binding.intentId === undefined ? {} : { intentId: binding.intentId }),
+				...(binding.attemptId === undefined ? {} : { attemptId: binding.attemptId }),
 				settledAt: binding.settlement.settledAt,
 				outcome: "echoed",
 				...(binding.settlement.messageId === undefined ? {} : { messageId: binding.settlement.messageId }),

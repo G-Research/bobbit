@@ -25,9 +25,12 @@ import { isSocketSendable } from "../ws/socket-sendability.js";
 import { getShellConfig, GIT_BASH } from "./shell-util.js";
 import type { BgProcessStore, PersistedBgProcess } from "./bg-process-store.js";
 import { bgRunnerHelperPath } from "./bg-runner.js";
+import { compileSafeLiteral, compileSafeRegex, MAX_SAFE_REGEX_PATTERN_BYTES } from "./safe-regex.js";
 
 const MAX_LOG_LINES = 5000;
 const MAX_LOG_BYTES = 512 * 1024; // 512KB per process (COMBINED across stdout+stderr)
+const MAX_LOG_SEARCH_CONTEXT_LINES = 100;
+const MAX_LOG_SEARCH_RESULTS = 100;
 /** Retained tail when a spool is trimmed by the gateway/ wrapper copytruncate. */
 const KEEP_BYTES = MAX_LOG_BYTES;
 /** Status-watcher poll interval. */
@@ -1416,18 +1419,36 @@ export class BgProcessManager {
 	grepLogs(sessionId: string, processId: string, pattern: string, contextLines = 0, maxResults = 50): { matches: { line: number; ts: number; text: string }[]; total: number } | null {
 		const bg = this.processes.get(sessionId)?.get(processId);
 		if (!bg) return null;
-		let regex: RegExp;
-		try { regex = new RegExp(pattern, "i"); }
-		catch { regex = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"); }
+		// Preserve the documented case-insensitive regex query surface without
+		// evaluating caller input in V8's backtracking engine. Invalid patterns
+		// retain the legacy literal fallback; oversized input still returns no rows.
+		let regex;
+		try {
+			regex = compileSafeRegex(pattern, { maxPatternBytes: MAX_SAFE_REGEX_PATTERN_BYTES });
+		} catch {
+			try {
+				regex = compileSafeLiteral(pattern);
+			} catch {
+				return { matches: [], total: 0 };
+			}
+		}
+		const context = Number.isFinite(contextLines)
+			? Math.min(MAX_LOG_SEARCH_CONTEXT_LINES, Math.max(0, Math.floor(contextLines)))
+			: 0;
+		const limit = Number.isFinite(maxResults)
+			? Math.min(MAX_LOG_SEARCH_RESULTS, Math.max(1, Math.floor(maxResults)))
+			: 50;
 		const log = bg.log;
 		const matchIndices: number[] = [];
-		for (let i = 0; i < log.length; i++) if (regex.test(log[i].text)) matchIndices.push(i);
+		for (let i = 0; i < log.length; i++) {
+			if (regex.test(log[i].text)) matchIndices.push(i);
+		}
 		const total = matchIndices.length;
 		const seen = new Set<number>();
 		const matches: { line: number; ts: number; text: string }[] = [];
-		for (const idx of matchIndices.slice(0, maxResults)) {
-			const start = Math.max(0, idx - contextLines);
-			const end = Math.min(log.length - 1, idx + contextLines);
+		for (const idx of matchIndices.slice(0, limit)) {
+			const start = Math.max(0, idx - context);
+			const end = Math.min(log.length - 1, idx + context);
 			for (let i = start; i <= end; i++) {
 				if (!seen.has(i)) { seen.add(i); matches.push({ line: i + 1, ts: log[i].ts, text: log[i].text }); }
 			}

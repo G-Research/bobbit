@@ -124,3 +124,173 @@ test.describe("POST /api/goals — data-only child auto-start (state !== blocked
 		}
 	});
 });
+
+test.describe("POST /api/goals/:id/retry-setup — child scheduler and recovered setup state", () => {
+	test("a dependency-blocked auto-start child repairs setup without requesting a team", async ({ gateway }) => {
+		const parent = await createParent();
+		let childId: string | undefined;
+		const context = gateway.projectContextManager.getContextForGoal(parent.id);
+		const goalManager = context.goalManager as any;
+		const originalSetupWorktree = goalManager.setupWorktree;
+		let setupCalls = 0;
+		try {
+			const createChild = await apiFetch("/api/goals", {
+				method: "POST",
+				body: JSON.stringify({
+					title: `blocked retry child ${Date.now()}`,
+					cwd: nonGitCwd(),
+					parentGoalId: parent.id,
+					autoStartTeam: false,
+					workflowId: "feature",
+					spec: "Blocked child setup retry must repair its worktree but wait for dependency scheduling before starting a team.",
+				}),
+			});
+			expect(createChild.status).toBe(201);
+			childId = (await createChild.json()).id;
+			context.goalStore.update(childId, { autoStartTeam: true, state: "blocked" });
+			context.goalStore.transitionSetup(childId, "error", "simulated setup failure");
+
+			goalManager.setupWorktree = async (goalId: string) => {
+				setupCalls++;
+				context.goalStore.transitionSetup(goalId, "ready");
+			};
+			const retry = await apiFetch(`/api/goals/${childId}/retry-setup`, { method: "POST" });
+			expect(retry.status).toBe(200);
+			expect(await retry.json()).toMatchObject({ ok: true, coalesced: false, setupStatus: "retrying" });
+			await waitForCondition(() => context.goalStore.get(childId!)?.setupStatus === "ready", {
+				message: "blocked child setup retry reaches ready",
+			});
+
+			expect(setupCalls).toBe(1);
+			expect(startRequests).not.toContain(childId);
+			expect(gateway.teamManager.getTeamState(childId)).toBeUndefined();
+			expect(context.goalStore.get(childId)?.state).toBe("blocked");
+		} finally {
+			goalManager.setupWorktree = originalSetupWorktree;
+			if (childId) await deleteGoal(childId);
+			await deleteGoal(parent.id);
+		}
+	});
+
+	test("an orphaned preparing status reports an actionable conflict instead of false coalesced success", async ({ gateway }) => {
+		const context = gateway.projectContextManager.getOrCreate(gateway.defaultProjectId);
+		const goalManager = context.goalManager as any;
+		const originalSetupWorktree = goalManager.setupWorktree;
+		let setupCalls = 0;
+		let goalId: string | undefined;
+		try {
+			const create = await apiFetch("/api/goals", {
+				method: "POST",
+				body: JSON.stringify({
+					title: `orphan preparing retry ${Date.now()}`,
+					cwd: nonGitCwd(),
+					autoStartTeam: false,
+					workflowId: "feature",
+					spec: "A persisted preparing setup without an in-memory setup flight must not pretend that retry was coalesced.",
+				}),
+			});
+			expect(create.status).toBe(201);
+			goalId = (await create.json()).id;
+			context.goalStore.transitionSetup(goalId, "preparing");
+			goalManager.setupWorktree = async () => { setupCalls++; };
+
+			const retry = await apiFetch(`/api/goals/${goalId}/retry-setup`, { method: "POST" });
+			expect(retry.status).toBe(409);
+			expect(await retry.json()).toMatchObject({
+				setupStatus: "preparing",
+				error: expect.stringContaining("no active setup flight"),
+			});
+			expect(setupCalls).toBe(0);
+		} finally {
+			goalManager.setupWorktree = originalSetupWorktree;
+			if (goalId) await deleteGoal(goalId);
+		}
+	});
+
+	test("an orphaned retrying status starts one recovery setup instead of false coalesced success", async ({ gateway }) => {
+		const context = gateway.projectContextManager.getOrCreate(gateway.defaultProjectId);
+		const goalManager = context.goalManager as any;
+		const originalSetupWorktree = goalManager.setupWorktree;
+		let setupCalls = 0;
+		let goalId: string | undefined;
+		try {
+			const create = await apiFetch("/api/goals", {
+				method: "POST",
+				body: JSON.stringify({
+					title: `orphan retrying recovery ${Date.now()}`,
+					cwd: nonGitCwd(),
+					autoStartTeam: false,
+					workflowId: "feature",
+					spec: "A persisted retrying setup without an in-memory flight must resume setup when the retry endpoint is invoked.",
+				}),
+			});
+			expect(create.status).toBe(201);
+			goalId = (await create.json()).id;
+			context.goalStore.transitionSetup(goalId, "retrying");
+			goalManager.setupWorktree = async (id: string) => {
+				setupCalls++;
+				context.goalStore.transitionSetup(id, "ready");
+			};
+
+			const retry = await apiFetch(`/api/goals/${goalId}/retry-setup`, { method: "POST" });
+			expect(retry.status).toBe(200);
+			expect(await retry.json()).toMatchObject({ ok: true, coalesced: false, setupStatus: "retrying" });
+			await waitForCondition(() => context.goalStore.get(goalId!)?.setupStatus === "ready", {
+				message: "orphaned retrying setup reaches ready",
+			});
+			expect(setupCalls).toBe(1);
+		} finally {
+			goalManager.setupWorktree = originalSetupWorktree;
+			if (goalId) await deleteGoal(goalId);
+		}
+	});
+
+	test("concurrent retry posts coalesce their route continuation", async ({ gateway }) => {
+		const context = gateway.projectContextManager.getOrCreate(gateway.defaultProjectId);
+		const goalManager = context.goalManager as any;
+		const originalSetupWorktree = goalManager.setupWorktree;
+		let setupCalls = 0;
+		let release!: () => void;
+		let goalId: string | undefined;
+		try {
+			const create = await apiFetch("/api/goals", {
+				method: "POST",
+				body: JSON.stringify({
+					title: `coalesced retry ${Date.now()}`,
+					cwd: nonGitCwd(),
+					autoStartTeam: false,
+					workflowId: "feature",
+					spec: "Concurrent retry setup posts must share one route continuation and one authoritative setup flight.",
+				}),
+			});
+			expect(create.status).toBe(201);
+			goalId = (await create.json()).id;
+			context.goalStore.transitionSetup(goalId, "error", "simulated setup failure");
+			goalManager.setupWorktree = (id: string) => {
+				setupCalls++;
+				return new Promise<void>((resolve) => {
+					release = () => {
+						context.goalStore.transitionSetup(id, "ready");
+						resolve();
+					};
+				});
+			};
+
+			const [first, second] = await Promise.all([
+				apiFetch(`/api/goals/${goalId}/retry-setup`, { method: "POST" }),
+				apiFetch(`/api/goals/${goalId}/retry-setup`, { method: "POST" }),
+			]);
+			const results = [await first.json(), await second.json()];
+			expect(results.filter(result => result.coalesced === false)).toHaveLength(1);
+			expect(results.filter(result => result.coalesced === true)).toHaveLength(1);
+			expect(setupCalls).toBe(1);
+			release();
+			await waitForCondition(() => context.goalStore.get(goalId!)?.setupStatus === "ready", {
+				message: "coalesced setup reaches ready",
+			});
+		} finally {
+			goalManager.setupWorktree = originalSetupWorktree;
+			if (goalId) await deleteGoal(goalId);
+		}
+	});
+});

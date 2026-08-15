@@ -2,7 +2,7 @@ import fs from "node:fs";
 
 import { globalAuthPath } from "../bobbit-dir.js";
 import type { PreferencesStore } from "./preferences-store.js";
-import type { CustomProviderConfig } from "./model-registry.js";
+import { normalizeCustomProviderBaseUrl, type CustomProviderConfig } from "./model-registry.js";
 import { resolveHostTokenValue } from "./host-tokens.js";
 
 const defaultFetch: typeof fetch = (input, init) => globalThis.fetch(input, init);
@@ -24,6 +24,8 @@ export interface ApiImageModel {
 	 * Built-in providers leave this undefined. Used by getImageProviderKey to
 	 * resolve the API key by config.id rather than display-name collisions. */
 	customProviderId?: string;
+	/** The server-derived trust bit attached to persisted custom-provider config. */
+	trustedCustomProvider?: true;
 }
 
 export interface GeneratedImage {
@@ -177,17 +179,24 @@ export function getAvailableImageModels(prefs: PreferencesStore): ApiImageModel[
 	];
 
 	const custom = ((prefs.get("customProviders") as CustomProviderConfig[] | undefined) || [])
-		.filter((config) => config.type === "openai-images" || config.type === "gemini-images" || config.type === "google-imagen")
+		// Legacy records were written through the same server route before the
+		// marker existed, so they are migrated as trusted on read. A caller cannot
+		// use the unpersisted discovery route to create these entries.
+		.filter((config) => config.trusted !== false && (config.type === "openai-images" || config.type === "gemini-images" || config.type === "google-imagen"))
 		.flatMap((config) => {
+			let baseUrl: string;
+			try { baseUrl = normalizeCustomProviderBaseUrl(config.baseUrl, true); }
+			catch { return []; }
 			const models = config.models || [];
-			return models.map((m) => ({
+			return models.map<ApiImageModel>((m) => ({
 				id: m.id,
 				name: m.name || m.id,
 				provider: config.name || config.id,
 				api: config.type as ImageProviderType,
-				baseUrl: config.baseUrl,
+				baseUrl,
 				authenticated: Boolean(config.apiKey) || (config.type === "openai-images" ? openaiAuth : googleAuth),
 				customProviderId: config.id,
+				trustedCustomProvider: true,
 			}));
 		});
 
@@ -650,27 +659,47 @@ function isBuiltinImageProvider(model: ApiImageModel | undefined): boolean {
 	return !model.customProviderId;
 }
 
-async function imageFromUrl(url: string, model: ApiImageModel | undefined, revisedPrompt?: string, fetchImpl: typeof fetch = defaultFetch): Promise<GeneratedImage> {
+type TrustedCustomImageModel = ApiImageModel & {
+	customProviderId: string;
+	trustedCustomProvider: true;
+};
+
+function isTrustedCustomImageModel(model: ApiImageModel | undefined): model is TrustedCustomImageModel {
+	return Boolean(model?.customProviderId && model.trustedCustomProvider === true);
+}
+
+export function validateImageDownloadUrl(url: string, model: ApiImageModel | undefined): URL {
 	let parsed: URL;
 	try {
 		parsed = new URL(url);
 	} catch {
 		throw new Error("imageFromUrl: invalid URL");
 	}
-	if (parsed.protocol !== "https:") {
-		throw new Error("imageFromUrl: only https URLs allowed");
-	}
 	if (isBuiltinImageProvider(model)) {
-		const host = parsed.hostname;
-		const allowed = BUILTIN_IMAGE_HOST_ALLOWLIST.some((rx) => rx.test(host));
-		if (!allowed) {
-			throw new Error(`imageFromUrl: host not allowlisted for built-in provider: ${host}`);
+		if (parsed.protocol !== "https:") throw new Error("imageFromUrl: only https URLs allowed");
+		const allowed = BUILTIN_IMAGE_HOST_ALLOWLIST.some((rx) => rx.test(parsed.hostname));
+		if (!allowed) throw new Error(`imageFromUrl: host not allowlisted for built-in provider: ${parsed.hostname}`);
+	} else {
+		// A custom provider is explicit trusted configuration, but its response body
+		// is not. Keep URL downloads on the configured origin so a compromised image
+		// API cannot turn an image URL into an arbitrary internal-network fetch.
+		let configuredOrigin: string | undefined;
+		if (isTrustedCustomImageModel(model)) {
+			try { configuredOrigin = new URL(model.baseUrl).origin; } catch { /* reject below */ }
+		}
+		if (!configuredOrigin || parsed.origin !== configuredOrigin) {
+			throw new Error("imageFromUrl: custom provider image URL must use its configured origin");
 		}
 	}
+	return parsed;
+}
+
+async function imageFromUrl(url: string, model: ApiImageModel | undefined, revisedPrompt?: string, fetchImpl: typeof fetch = defaultFetch): Promise<GeneratedImage> {
+	const parsed = validateImageDownloadUrl(url, model);
 	const controller = new AbortController();
 	const timeoutSignal = AbortSignal.timeout(IMAGE_FETCH_TIMEOUT_MS);
 	timeoutSignal.addEventListener("abort", () => controller.abort(timeoutSignal.reason));
-	const resp = await fetchImpl(url, { signal: controller.signal, redirect: "manual" });
+	const resp = await fetchImpl(parsed.href, { signal: controller.signal, redirect: "manual" });
 	if (resp.type === "opaqueredirect" || (resp.status >= 300 && resp.status < 400)) {
 		throw new Error(`imageFromUrl: redirects not followed (status ${resp.status})`);
 	}

@@ -33,6 +33,12 @@ import {
 	// process not yet up) that must leave the gate pending, not failed.
 	isRestartInterruptError,
 	isRetryableGenericAgentError,
+	isReviewerBusyError,
+	isVerifierBusyTransportError,
+	isVerifierPromptDispatchTimeoutError,
+	isVerifierRestartBeforeDispatchError,
+	isTransientVerifierReviewError,
+	isTransientVerifierQaError,
 	shouldRetryVerificationStep,
 } from "../../src/server/agent/verification-logic.ts";
 
@@ -263,6 +269,111 @@ describe("isTransientReviewError", () => {
 
 		for (const { output, message } of variants) {
 			assert.equal(isTransientReviewError(output), true, message);
+		}
+	});
+});
+
+// ===================================================================
+// reviewer busy contention
+// ===================================================================
+
+describe("isReviewerBusyError", () => {
+	const BUSY_REJECTION = "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.";
+
+	it("matches the raw bridge rejection only", () => {
+		assert.equal(isReviewerBusyError(BUSY_REJECTION), true);
+		assert.equal(isReviewerBusyError(`LLM review failed: ${BUSY_REJECTION}`), false);
+		assert.equal(isReviewerBusyError("Agent is already processing"), false);
+		assert.equal(isReviewerBusyError("Specify streamingBehavior ('steer' or 'followUp')"), false);
+		assert.equal(isReviewerBusyError("Agent is processing a streamingBehavior setting"), false);
+	});
+
+	it("keeps generic review and QA policies out of verifier transport contention", () => {
+		for (const isTransient of [isTransientReviewError, isTransientQaError]) {
+			assert.equal(isTransient(BUSY_REJECTION), false);
+			assert.equal(isTransient("LLM review failed: Verifier prompt verifier-row-123 did not dispatch within 60000ms"), false);
+		}
+	});
+
+	it("retries only verifier transport contention with the bounded policy", () => {
+		const busyOutput = `LLM review failed: ${BUSY_REJECTION}`;
+		const parkedOutput = `Agent QA failed: Verifier prompt parked after reviewer contention: ${BUSY_REJECTION}`;
+		const timeoutOutput = "LLM review failed: Verifier prompt verifier-row-123 did not dispatch within 60000ms";
+		for (const [output, classifier] of [
+			[busyOutput, isVerifierBusyTransportError],
+			[parkedOutput, isVerifierBusyTransportError],
+			[timeoutOutput, isVerifierPromptDispatchTimeoutError],
+		] as const) {
+			assert.equal(classifier(output), true);
+			for (const isTransient of [isTransientVerifierReviewError, isTransientVerifierQaError]) {
+				assert.equal(isTransient(output), true, "VERIFIER_BUSY_RACE_REPRO: verifier queue contention must not become a terminal content failure");
+				assert.equal(shouldRetryVerificationStep({ passed: false, output, attempt: 1, maxBoundedAttempts: 3, isTransient }), "retry");
+				assert.equal(shouldRetryVerificationStep({ passed: false, output, attempt: 3, maxBoundedAttempts: 3, isTransient }), "break");
+			}
+		}
+		assert.equal(isTransientReviewError(parkedOutput), false, "generic review policy must remain verifier-scoped");
+		assert.equal(isTransientQaError(parkedOutput), false, "generic QA policy must remain verifier-scoped");
+		assert.equal(isProviderBackoffError(BUSY_REJECTION), false);
+	});
+
+	it("does not mistake a reviewer summary embedding the parked envelope for transport contention", () => {
+		const parkedEnvelope = `Verifier prompt parked after reviewer contention: ${BUSY_REJECTION}`;
+		const finding = `LLM review failed: Summary: the agent reported \"${parkedEnvelope}\" while testing an unrelated workflow.`;
+		assert.equal(isVerifierBusyTransportError(finding), false);
+		assert.equal(isTransientVerifierReviewError(finding), false);
+		assert.equal(shouldRetryVerificationStep({
+			passed: false, output: finding, attempt: 1, maxBoundedAttempts: 3,
+			isTransient: isTransientVerifierReviewError,
+		}), "break");
+	});
+
+	it("classifies wrapped cold receipt and restart interruptions without matching findings", () => {
+		const backoff = " Last turn hit a provider rate-limit error after 1 auto-retry attempt — auto-retry still pending. Check your provider quota.";
+		const coldTimeout = "Reviewer agent was not ready / timed out while resuming after server restart: Verifier prompt reviewer-123 did not dispatch within 215000ms";
+		const interruption = "Reviewer agent was not ready / timed out while resuming after server restart: Verifier session reviewer-123 restarted before dispatch";
+		for (const output of [coldTimeout, `${coldTimeout}${backoff}`]) {
+			assert.equal(isVerifierPromptDispatchTimeoutError(output), true);
+			assert.equal(isTransientVerifierReviewError(output), true);
+			assert.equal(isTransientVerifierQaError(output), true);
+		}
+		for (const output of [interruption, `${interruption}${backoff}`]) {
+			assert.equal(isVerifierRestartBeforeDispatchError(output), true);
+			assert.equal(isTransientVerifierReviewError(output), true);
+			assert.equal(isTransientVerifierQaError(output), true);
+		}
+		assert.equal(isVerifierPromptDispatchTimeoutError("Reviewer summary: Verifier prompt reviewer-123 did not dispatch within 215000ms"), false);
+		assert.equal(isVerifierRestartBeforeDispatchError("Reviewer summary: Verifier session reviewer-123 restarted before dispatch"), false);
+	});
+
+	it("does not override terminal error categories", () => {
+		const terminalBusyEnvelopes = [
+			"authentication failed",
+			"missing API key",
+			"configuration error: review model is not configured",
+			"unsupported provider",
+			"unsupported model",
+			"invalid request",
+			"schema validation failed",
+			"content policy violation",
+			"user cancelled the turn",
+		];
+
+		for (const terminal of terminalBusyEnvelopes) {
+			const output = `${BUSY_REJECTION} ${terminal}`;
+			const wrappedTimeout = `LLM review failed: Verifier prompt reviewer-123 did not dispatch within 215000ms ${terminal}`;
+			assert.equal(
+				shouldRetryVerificationStep({
+					passed: false,
+					output,
+					attempt: 1,
+					maxBoundedAttempts: 3,
+					isTransient: isTransientReviewError,
+				}),
+				"break",
+				`Expected terminal category to win: ${terminal}`,
+			);
+			assert.equal(isTransientVerifierReviewError(wrappedTimeout), false, `Verifier timeout must not absorb terminal category: ${terminal}`);
+			assert.equal(isTransientVerifierQaError(wrappedTimeout), false, `Verifier QA timeout must not absorb terminal category: ${terminal}`);
 		}
 	});
 });
@@ -625,6 +736,16 @@ describe("matchExpectFailure", () => {
 	it("passes when command fails and error_pattern matches", () => {
 		const r = matchExpectFailure(1, "Expected element to exist", "Expected element");
 		assert.equal(r.passed, true);
+	});
+
+	it("preserves case-insensitive RE2 regex semantics", () => {
+		const r = matchExpectFailure(1, "Build FAILED: warning emitted", "error|fail|warning");
+		assert.equal(r.passed, true);
+	});
+
+	it("rejects RE2-unsupported and oversized patterns as invalid", () => {
+		assert.ok(matchExpectFailure(1, "aa", "(a)\\1").output.includes("Invalid error_pattern regex"));
+		assert.ok(matchExpectFailure(1, "x", "x".repeat(1_025)).output.includes("Invalid error_pattern regex"));
 	});
 
 	it("fails when command fails but error_pattern does not match", () => {

@@ -587,9 +587,13 @@ function externalNetworkBlockedForTests(): boolean {
 	return runtimeFlags.testNoExternal || runtimeFlags.e2e;
 }
 
+function hostnameForIpCheck(hostname: string): string {
+	return hostname.replace(/^\[|\]$/g, "").toLowerCase();
+}
+
 function isLocalHttpUrl(raw: string): boolean {
 	try {
-		const host = new URL(raw).hostname.toLowerCase();
+		const host = hostnameForIpCheck(new URL(raw).hostname);
 		return host === "localhost" || host === "127.0.0.1" || host === "::1" || host.endsWith(".localhost");
 	} catch {
 		return false;
@@ -718,6 +722,9 @@ function httpHead(url: string, timeoutMs = 4_000): Promise<void> {
 
 const MAX_DISCOVERY_BODY_BYTES = 1024 * 1024;
 const WELL_KNOWN_DEADLINE_MS = 8_000;
+// The proxy has a generous response timeout, but DNS admission must not hold a
+// browser request open longer than the discovery path permits.
+const PROXY_DNS_DEADLINE_MS = WELL_KNOWN_DEADLINE_MS;
 
 function normalizeHttpUrl(raw: string, label = "AI Gateway URL"): URL {
 	let parsed: URL;
@@ -771,12 +778,21 @@ function isPublicIp(address: string): boolean {
 	return /^[23]/.test(lower);
 }
 
-function structurallyValidateTarget(raw: string, configuredOrigin: string): URL | null {
+function structurallyValidateTarget(
+	raw: string,
+	configuredOrigin: string,
+	allowPrivateConfiguredOrigin = false,
+): URL | null {
 	try {
 		const parsed = normalizeHttpUrl(raw, "Discovery target");
-		if (parsed.origin === configuredOrigin) return parsed;
+		const isConfiguredOrigin = parsed.origin === configuredOrigin;
+		// Only a gateway explicitly persisted by the server may use a private or
+		// plaintext origin. Remote config and provider redirects never inherit that
+		// authority merely by naming a private address.
+		if (isConfiguredOrigin && allowPrivateConfiguredOrigin) return parsed;
 		if (parsed.protocol !== "https:") return null;
-		if (net.isIP(parsed.hostname) && !isPublicIp(parsed.hostname)) return null;
+		const hostname = hostnameForIpCheck(parsed.hostname);
+		if (net.isIP(hostname) && !isPublicIp(hostname)) return null;
 		return parsed;
 	} catch {
 		return null;
@@ -846,8 +862,12 @@ function syncAigwProviderDnsGuardFromModelsJson(): void {
 	replaceAigwProviderDnsGuardHosts(collectAigwProviderDnsHosts(readModelsJson()?.providers?.aigw));
 }
 
-function validateProviderBaseTarget(raw: string, configuredOrigin: string): URL | null {
-	return structurallyValidateTarget(raw, configuredOrigin);
+function validateProviderBaseTarget(
+	raw: string,
+	configuredOrigin: string,
+	allowPrivateConfiguredOrigin = true,
+): URL | null {
+	return structurallyValidateTarget(raw, configuredOrigin, allowPrivateConfiguredOrigin);
 }
 
 interface ValidatedTarget {
@@ -888,17 +908,20 @@ async function validateAndPinTarget(
 	configuredOrigin: string,
 	deadline: number,
 	lookupImpl: DnsLookup = originalGatewayDnsLookup,
+	allowPrivateConfiguredOrigin = false,
 ): Promise<ValidatedTarget | null> {
-	const url = structurallyValidateTarget(raw, configuredOrigin);
+	const url = structurallyValidateTarget(raw, configuredOrigin, allowPrivateConfiguredOrigin);
 	if (!url) return null;
-	if (url.origin === configuredOrigin || net.isIP(url.hostname)) return { url };
+	const trustedConfiguredTarget = allowPrivateConfiguredOrigin && url.origin === configuredOrigin;
+	const hostname = hostnameForIpCheck(url.hostname);
+	if (net.isIP(hostname)) return { url };
 	let addresses: Array<{ address: string; family: number }>;
 	try {
-		addresses = await lookupAllBeforeDeadline(url.hostname, deadline, lookupImpl);
+		addresses = await lookupAllBeforeDeadline(hostname, deadline, lookupImpl);
 	} catch {
 		return null;
 	}
-	if (addresses.length === 0 || addresses.some((entry) => !isPublicIp(entry.address))) return null;
+	if (addresses.length === 0 || (!trustedConfiguredTarget && addresses.some((entry) => !isPublicIp(entry.address)))) return null;
 	// Pin connection lookup to the already-validated answers. HTTPS still uses
 	// the original URL hostname, preserving SNI and certificate verification.
 	const lookup = (_hostname: string, options: any, callback: any) => {
@@ -934,8 +957,9 @@ async function httpGetJson(
 	configuredOrigin: string,
 	deadline: number,
 	extraHeaders?: Record<string, string>,
+	allowPrivateConfiguredOrigin = false,
 ): Promise<any> {
-	const validated = await validateAndPinTarget(target, configuredOrigin, deadline);
+	const validated = await validateAndPinTarget(target, configuredOrigin, deadline, originalGatewayDnsLookup, allowPrivateConfiguredOrigin);
 	if (!validated) throw new Error("Discovery target was rejected");
 	const remaining = deadline - Date.now();
 	if (remaining <= 0) throw new Error("Discovery deadline exceeded");
@@ -1007,13 +1031,47 @@ async function httpGetJson(
  * Proxy an HTTP request: reads the incoming request body, forwards to the
  * target URL, and pipes the response back.
  */
-export function proxyRequest(
-	targetUrl: string,
+export async function proxyRequest(
+	configuredGatewayUrl: string,
+	requestPath: string,
 	incomingReq: http.IncomingMessage,
 	outgoingRes: http.ServerResponse,
-): void {
-	const parsed = new URL(targetUrl);
-	const transport = parsed.protocol === "https:" ? https : http;
+): Promise<void> {
+	let parsed: URL;
+	try {
+		const configured = normalizeHttpUrl(configuredGatewayUrl);
+		// `requestPath` is browser input. Validate it in an isolated origin, then
+		// append it to the configured path prefix instead of resolving it against
+		// the origin (which would silently discard a reverse-proxy mount).
+		const request = new URL(requestPath, "http://bobbit-proxy.invalid");
+		if (request.origin !== "http://bobbit-proxy.invalid" || !request.pathname.startsWith("/v1/")) {
+			throw new Error("invalid proxy target");
+		}
+		const configuredPath = configured.pathname.replace(/\/+$/, "");
+		// A configured `/v1` is already the API prefix; retain the established
+		// root-path behavior while preserving any mount before that segment.
+		const proxyPathPrefix = configuredPath.endsWith("/v1") ? configuredPath : `${configuredPath}/v1`;
+		// The public proxy surface is always `/v1/*`; it supplies the API segment
+		// exactly once, after the configured mount path (if any).
+		const requestSuffix = request.pathname.slice("/v1".length);
+		parsed = new URL(`${proxyPathPrefix}${requestSuffix}${request.search}`, configured.origin);
+		if (parsed.origin !== configured.origin || !parsed.pathname.startsWith(`${proxyPathPrefix}/`)) {
+			throw new Error("invalid proxy target");
+		}
+	} catch {
+		outgoingRes.writeHead(400, { "Content-Type": "application/json" });
+		outgoingRes.end(JSON.stringify({ error: "Invalid AI Gateway proxy target" }));
+		return;
+	}
+	// A configured gateway is explicit trusted configuration and may be local.
+	// Resolve once and pin that answer to close public-DNS rebinding before connect.
+	const validated = await validateAndPinTarget(parsed.href, parsed.origin, Date.now() + PROXY_DNS_DEADLINE_MS, originalGatewayDnsLookup, true);
+	if (!validated) {
+		outgoingRes.writeHead(502, { "Content-Type": "application/json" });
+		outgoingRes.end(JSON.stringify({ error: "AI Gateway proxy target was rejected" }));
+		return;
+	}
+	const transport = validated.url.protocol === "https:" ? https : http;
 
 	const chunks: Buffer[] = [];
 	incomingReq.on("data", (c: Buffer) => chunks.push(c));
@@ -1036,10 +1094,11 @@ export function proxyRequest(
 			completed = true;
 		};
 
-		const proxyReq = transport.request(parsed, {
+		const proxyReq = transport.request(validated.url, {
 			method: incomingReq.method || "GET",
 			headers,
 			timeout: RESPONSE_TIMEOUT_MS,
+			...(validated.lookup ? { lookup: validated.lookup } : {}),
 		}, (proxyRes) => {
 			outgoingRes.writeHead(proxyRes.statusCode || 502, proxyRes.headers);
 			proxyRes.pipe(outgoingRes);
@@ -1049,7 +1108,7 @@ export function proxyRequest(
 
 		responseTimer = setTimeout(() => {
 			if (!completed) {
-				console.error(`[aigw-proxy] Response timeout after ${RESPONSE_TIMEOUT_MS}ms proxying to ${targetUrl}`);
+				console.error(`[aigw-proxy] Response timeout after ${RESPONSE_TIMEOUT_MS}ms proxying to configured gateway`);
 				proxyReq.destroy();
 				if (!outgoingRes.headersSent) {
 					outgoingRes.writeHead(504, { "Content-Type": "application/json" });
@@ -1061,7 +1120,7 @@ export function proxyRequest(
 
 		proxyReq.on("error", (err) => {
 			cleanup();
-			console.error(`[aigw-proxy] Error proxying to ${targetUrl}:`, err.message);
+			console.error("[aigw-proxy] Error proxying to configured gateway:", err.message);
 			if (!outgoingRes.headersSent) {
 				outgoingRes.writeHead(502, { "Content-Type": "application/json" });
 			}
@@ -1150,7 +1209,11 @@ function buildThinkingLevelMap(variants: Record<string, unknown> | undefined): R
  * `disabled_providers` + per-provider `whitelist` as HARD filters and never
  * runs legacy model-name inference. Unit-tested against a captured fixture.
  */
-export function translateWellKnown(config: WellKnownConfig, gatewayBaseUrl: string): AigwModel[] {
+export function translateWellKnown(
+	config: WellKnownConfig,
+	gatewayBaseUrl: string,
+	allowPrivateConfiguredOrigin = true,
+): AigwModel[] {
 	const disabled = new Set(Array.isArray(config.disabled_providers) ? config.disabled_providers : []);
 	let configuredOrigin: string;
 	try { configuredOrigin = normalizeHttpUrl(gatewayBaseUrl).origin; }
@@ -1166,7 +1229,7 @@ export function translateWellKnown(config: WellKnownConfig, gatewayBaseUrl: stri
 		const api = PROVIDER_NPM_TO_API[provider.npm ?? ""];
 		if (!api) continue;
 		const validatedBase = typeof provider.options?.baseURL === "string"
-			? validateProviderBaseTarget(provider.options.baseURL, configuredOrigin)
+			? validateProviderBaseTarget(provider.options.baseURL, configuredOrigin, allowPrivateConfiguredOrigin)
 			: null;
 		// A provider without a safe explicit base is unusable, but the provider
 		// object remains authoritative: the caller must not fall back to /v1/models.
@@ -1272,12 +1335,20 @@ export function readOpencodeWellKnownToken(gatewayUrl: string): string | undefin
  * - A top-level `config` wrapper is unwrapped; otherwise the object itself is
  *   treated as the config.
  */
-export async function fetchWellKnownConfig(baseUrl: string, timeoutMs = WELL_KNOWN_DEADLINE_MS): Promise<WellKnownConfig | null> {
+export async function fetchWellKnownConfig(
+	baseUrl: string,
+	timeoutMs = WELL_KNOWN_DEADLINE_MS,
+	allowPrivateGateway = true,
+): Promise<WellKnownConfig | null> {
 	const deadline = Date.now() + Math.min(Math.max(timeoutMs, 1), WELL_KNOWN_DEADLINE_MS);
-	return fetchWellKnownConfigBeforeDeadline(baseUrl, deadline);
+	return fetchWellKnownConfigBeforeDeadline(baseUrl, deadline, allowPrivateGateway);
 }
 
-async function fetchWellKnownConfigBeforeDeadline(baseUrl: string, deadline: number): Promise<WellKnownConfig | null> {
+async function fetchWellKnownConfigBeforeDeadline(
+	baseUrl: string,
+	deadline: number,
+	allowPrivateGateway: boolean,
+): Promise<WellKnownConfig | null> {
 	let gateway: URL;
 	try { gateway = normalizeHttpUrl(baseUrl); }
 	catch { return null; }
@@ -1287,8 +1358,8 @@ async function fetchWellKnownConfigBeforeDeadline(baseUrl: string, deadline: num
 	const token = readOpencodeWellKnownToken(gateway.href);
 	const authHeader: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
 	try {
-		const payload = await httpGetJson(wellKnownUrl, gateway.origin, deadline, authHeader);
-		return await resolveWellKnownPayload(payload, gateway.origin, authHeader, deadline, 0);
+		const payload = await httpGetJson(wellKnownUrl, gateway.origin, deadline, authHeader, allowPrivateGateway);
+		return await resolveWellKnownPayload(payload, gateway.origin, authHeader, deadline, 0, allowPrivateGateway);
 	} catch {
 		return null;
 	}
@@ -1300,6 +1371,7 @@ async function resolveWellKnownPayload(
 	inheritedAuth: Record<string, string>,
 	deadline: number,
 	depth: number,
+	allowPrivateConfiguredOrigin: boolean,
 ): Promise<WellKnownConfig | null> {
 	if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
 	const record = payload as Record<string, unknown>;
@@ -1316,7 +1388,7 @@ async function resolveWellKnownPayload(
 	if (!rc || typeof rc !== "object" || Array.isArray(rc) || depth >= 1) return null;
 	const remote = rc as Record<string, unknown>;
 	if (typeof remote.url !== "string") return null;
-	const target = structurallyValidateTarget(remote.url, configuredOrigin);
+	const target = structurallyValidateTarget(remote.url, configuredOrigin, allowPrivateConfiguredOrigin);
 	if (!target) return null;
 	const declared = sanitizeRemoteHeaders(remote.headers);
 	// Inherited gateway credentials never cross origins. Explicitly declared
@@ -1326,8 +1398,14 @@ async function resolveWellKnownPayload(
 		? { ...inheritedAuth, ...declared }
 		: declared;
 	try {
-		const remotePayload = await httpGetJson(target.href, configuredOrigin, deadline, headers);
-		return resolveWellKnownPayload(remotePayload, configuredOrigin, inheritedAuth, deadline, depth + 1);
+		const remotePayload = await httpGetJson(
+			target.href,
+			configuredOrigin,
+			deadline,
+			headers,
+			allowPrivateConfiguredOrigin && target.origin === configuredOrigin,
+		);
+		return resolveWellKnownPayload(remotePayload, configuredOrigin, inheritedAuth, deadline, depth + 1, allowPrivateConfiguredOrigin);
 	} catch {
 		return null;
 	}
@@ -1338,28 +1416,30 @@ export async function filterValidatedProviderUrls(
 	configuredOrigin: string,
 	deadline: number,
 	lookupImpl: DnsLookup = originalGatewayDnsLookup,
+	allowPrivateConfiguredOrigin = true,
 ): Promise<WellKnownConfig> {
 	const disabled = new Set(Array.isArray(config.disabled_providers) ? config.disabled_providers : []);
 	const candidates = Object.entries(config.provider ?? {}).flatMap(([name, provider]) => {
 		if (!provider || disabled.has(name) || typeof provider.options?.baseURL !== "string") return [];
-		const target = validateProviderBaseTarget(provider.options.baseURL, configuredOrigin);
+		const target = validateProviderBaseTarget(provider.options.baseURL, configuredOrigin, allowPrivateConfiguredOrigin);
 		return target ? [{ name, provider, target }] : [];
 	});
 	// Resolve distinct DNS names concurrently. One slow or duplicated provider can
 	// consume only the remaining shared discovery budget, never N × DNS timeout.
 	const admissions = new Map<string, Promise<boolean>>();
 	for (const { target } of candidates) {
-		if (target.origin === configuredOrigin || net.isIP(target.hostname)) continue;
-		const hostname = target.hostname.toLowerCase();
+		const hostname = hostnameForIpCheck(target.hostname);
+		if (target.origin === configuredOrigin || net.isIP(hostname)) continue;
 		if (!admissions.has(hostname)) {
 			admissions.set(hostname, validateAndPinTarget(target.href, configuredOrigin, deadline, lookupImpl).then(Boolean));
 		}
 	}
 	const entries: Array<[string, WkProvider]> = [];
 	for (const { name, provider, target } of candidates) {
-		const admitted = target.origin === configuredOrigin || net.isIP(target.hostname)
+		const hostname = hostnameForIpCheck(target.hostname);
+		const admitted = target.origin === configuredOrigin || net.isIP(hostname)
 			? true
-			: await admissions.get(target.hostname.toLowerCase());
+			: await admissions.get(hostname);
 		if (admitted) entries.push([name, provider]);
 	}
 	return { ...config, provider: Object.fromEntries(entries) };
@@ -1403,22 +1483,31 @@ interface AigwDiscoveryResult {
 	wellKnown: WellKnownConfig | null;
 }
 
-async function discoverAigwResult(baseUrl: string): Promise<AigwDiscoveryResult> {
+async function discoverAigwResult(baseUrl: string, allowPrivateGateway = true): Promise<AigwDiscoveryResult> {
 	const gateway = normalizeHttpUrl(baseUrl);
+	if (!allowPrivateGateway && !structurallyValidateTarget(gateway.href, gateway.origin, false)) {
+		throw new Error("Untrusted AI Gateway discovery requires a public HTTPS endpoint");
+	}
 	const url = gateway.href.replace(/\/$/, "");
 	if (externalNetworkBlockedForTests() && !isLocalHttpUrl(url)) {
 		throw new Error("External AI Gateway discovery is disabled in tests");
 	}
 
 	const discoveryDeadline = Date.now() + WELL_KNOWN_DEADLINE_MS;
-	const fetchedWellKnown = await fetchWellKnownConfigBeforeDeadline(url, discoveryDeadline);
+	const fetchedWellKnown = await fetchWellKnownConfigBeforeDeadline(url, discoveryDeadline, allowPrivateGateway);
 	if (fetchedWellKnown && fetchedWellKnown.provider) {
-		const wellKnown = await filterValidatedProviderUrls(fetchedWellKnown, gateway.origin, discoveryDeadline);
-		return { models: translateWellKnown(wellKnown, url), wellKnown };
+		const wellKnown = await filterValidatedProviderUrls(
+			fetchedWellKnown,
+			gateway.origin,
+			discoveryDeadline,
+			originalGatewayDnsLookup,
+			allowPrivateGateway,
+		);
+		return { models: translateWellKnown(wellKnown, url, allowPrivateGateway), wellKnown };
 	}
 
 	const modelsUrl = url.endsWith("/v1") ? `${url}/models` : `${url}/v1/models`;
-	const data = await httpGetJson(modelsUrl, gateway.origin, Date.now() + 10_000);
+	const data = await httpGetJson(modelsUrl, gateway.origin, Date.now() + 10_000, undefined, allowPrivateGateway);
 	if (!data?.data || !Array.isArray(data.data)) {
 		throw new Error("Unexpected response format from /v1/models — expected { data: [...] }");
 	}
@@ -1486,8 +1575,8 @@ async function discoverAigwResult(baseUrl: string): Promise<AigwDiscoveryResult>
 	return { models, wellKnown: null };
 }
 
-export async function discoverAigwModels(baseUrl: string): Promise<AigwModel[]> {
-	return (await discoverAigwResult(baseUrl)).models;
+export async function discoverAigwModels(baseUrl: string, options: { allowPrivateGateway?: boolean } = {}): Promise<AigwModel[]> {
+	return (await discoverAigwResult(baseUrl, options.allowPrivateGateway !== false)).models;
 }
 
 /**
@@ -1497,7 +1586,7 @@ export async function discoverAigwModels(baseUrl: string): Promise<AigwModel[]> 
 export async function configureAigw(baseUrl: string, prefs: PreferencesStore): Promise<AigwModel[]> {
 	const gateway = normalizeHttpUrl(baseUrl);
 	const normalizedUrl = gateway.href.replace(/\/$/, "");
-	const result = await discoverAigwResult(normalizedUrl);
+	const result = await discoverAigwResult(normalizedUrl, true);
 	// Legacy fallback Claude entries are normalized during discovery. Do not
 	// remap authoritative well-known models merely because their ID contains
 	// "claude"; their adapter-selected API/baseUrl remains authoritative.

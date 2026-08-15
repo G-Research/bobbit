@@ -8,33 +8,42 @@ export interface LocalMockAgentClock {
 }
 
 /**
- * Restore a session with its per-bridge virtual clock installed at the exact
- * queue-drain boundary. `restoreSessions()` re-enqueues durable steers, then
- * releases its replacement coordinator which drains that queue synchronously.
- * Attaching after restore returns races the mock's first sleep: that sleep can
- * already have captured the real-time implementation, while the caller only
- * advances the local clock. Installing immediately before the drain makes the
- * entire recovered turn belong to one deterministic clock.
+ * Restore a session with its per-bridge virtual clock installed before either
+ * the interrupted-turn boot continuation or the recovered queue drain. The
+ * continuation must finish before its terminal boundary can release next-turn
+ * work, so both prompt-chain generations belong to one deterministic clock.
  */
 export async function restoreWithLocalMockAgentClock(gateway: any, sessionId: string): Promise<LocalMockAgentClock> {
 	const manager = gateway.sessionManager;
+	const originalBootContinuation = manager._dispatchBootContinuation;
 	const originalDrainQueue = manager.drainQueue;
 	let localClock: LocalMockAgentClock | undefined;
 
-	const patchedDrainQueue = (session: { id?: string }) => {
+	const ensureLocalClock = (session: { id?: string }) => {
 		if (session?.id === sessionId && !localClock) {
 			localClock = attachLocalMockAgentClock(gateway, sessionId);
 		}
+	};
+	const patchedBootContinuation = function (session: { id?: string }) {
+		ensureLocalClock(session);
+		return originalBootContinuation.call(manager, session);
+	};
+	const patchedDrainQueue = (session: { id?: string }) => {
+		ensureLocalClock(session);
 		return originalDrainQueue.call(manager, session);
 	};
+	manager._dispatchBootContinuation = patchedBootContinuation;
 	manager.drainQueue = patchedDrainQueue;
 	try {
 		await manager.restoreSessions();
 	} finally {
+		if (manager._dispatchBootContinuation === patchedBootContinuation) {
+			manager._dispatchBootContinuation = originalBootContinuation;
+		}
 		if (manager.drainQueue === patchedDrainQueue) manager.drainQueue = originalDrainQueue;
 	}
 	if (!localClock) {
-		throw new Error(`session ${sessionId} did not drain a recovered mock-agent prompt`);
+		throw new Error(`session ${sessionId} did not start recovered mock-agent work`);
 	}
 	return localClock;
 }
@@ -73,11 +82,8 @@ export function attachLocalMockAgentClock(gateway: any, sessionId: string): Loca
 	}));
 
 	async function yieldTurn(): Promise<void> {
-		// A prompt may have started its first real-time sleep just before setSleep()
-		// installs this clock. Yield through the timers phase so that hand-off can
-		// settle; a setImmediate-only loop can starve that pre-existing timer while
-		// virtual time reaches its limit.
-		await new Promise<void>((resolve) => setTimeout(resolve, 0));
+		// Let RPC/event microtasks append follow-up work without consuming real time.
+		await new Promise<void>((resolve) => setImmediate(resolve));
 	}
 
 	async function advanceUntilSettled<T>(promise: Promise<T>, maxVirtualMs = 10_000): Promise<T> {
@@ -109,11 +115,22 @@ export function attachLocalMockAgentClock(gateway: any, sessionId: string): Loca
 
 	async function settleCurrentPrompt(maxVirtualMs = 10_000): Promise<void> {
 		const agent = bridge._agent;
-		const chain = agent?._promptChain;
-		if (!chain || typeof chain.then !== "function") {
-			throw new Error(`session ${sessionId} has no active mock-agent prompt chain`);
-		}
-		await advanceUntilSettled(chain, maxVirtualMs);
+		const followPromptChain = async () => {
+			let chain = agent?._promptChain;
+			if (!chain || typeof chain.then !== "function") {
+				throw new Error(`session ${sessionId} has no active mock-agent prompt chain`);
+			}
+			while (true) {
+				await chain;
+				// agent_end may synchronously release a recovered next-turn drain, whose
+				// RPC appends a replacement chain in a later event-loop turn.
+				await yieldTurn();
+				const replacement = agent?._promptChain;
+				if (!replacement || replacement === chain) return;
+				chain = replacement;
+			}
+		};
+		await advanceUntilSettled(followPromptChain(), maxVirtualMs);
 	}
 
 	return { clock, advanceUntilSettled, waitUntil, settleCurrentPrompt };

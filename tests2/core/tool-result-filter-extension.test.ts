@@ -58,8 +58,8 @@ describe("generated tool-result filter Pi gate", () => {
 		// These are the exact sources applied by postinstall for packed consumers.
 		const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 		const [agentCorePatch, codingAgentPatch] = await Promise.all([
-			readFile(path.join(root, "patches", "@earendil-works+pi-agent-core+0.82.1.patch"), "utf8"),
-			readFile(path.join(root, "patches", "@earendil-works+pi-coding-agent+0.82.1.patch"), "utf8"),
+			readFile(path.join(root, "patches", "@earendil-works+pi-agent-core+0.84.1.patch"), "utf8"),
+			readFile(path.join(root, "patches", "@earendil-works+pi-coding-agent+0.84.1.patch"), "utf8"),
 		]);
 		expect(agentCorePatch).toContain("gatedAfterResult.replaceResult === true");
 		expect(agentCorePatch).toContain("signal?.aborted && config.__bobbitCoreToolResultGateMarker === __bobbitCoreToolResultGateMarker");

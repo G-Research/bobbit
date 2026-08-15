@@ -180,21 +180,17 @@ export class SandboxIframe extends LitElement {
 		};
 
 		const errorHandler = (e: MessageEvent) => {
-			if (e.data.type === "sandbox-error" && e.source === this.iframe?.contentWindow) {
+			if (e.data?.type === "sandbox-error" && e.source === this.iframe?.contentWindow) {
 				window.removeEventListener("message", readyHandler);
 				window.removeEventListener("message", errorHandler);
 
-				// The sandbox.js already sent us the error via postMessage.
-				// We need to convert it to an execution-error message that the execute() consumer will handle.
-				// Simulate receiving an execution-error from the sandbox
-				window.postMessage(
-					{
-						sandboxId: sandboxId,
-						type: "execution-error",
-						error: { message: e.data.error, stack: e.data.stack },
-					},
-					"*",
-				);
+				// The iframe source was checked above. Deliver this locally rather
+				// than self-posting an unauthenticated synthetic router message.
+				void RUNTIME_MESSAGE_ROUTER.dispatchTrustedConsumerMessage(sandboxId, {
+					sandboxId,
+					type: "execution-error",
+					error: { message: e.data.error, stack: e.data.stack },
+				});
 			}
 		};
 
@@ -373,19 +369,17 @@ export class SandboxIframe extends LitElement {
 				};
 
 				const errorHandler = (e: MessageEvent) => {
-					if (e.data.type === "sandbox-error" && e.source === this.iframe?.contentWindow) {
+					if (e.data?.type === "sandbox-error" && e.source === this.iframe?.contentWindow) {
 						window.removeEventListener("message", readyHandler);
 						window.removeEventListener("message", errorHandler);
 
-						// Convert sandbox-error to execution-error for the execution consumer
-						window.postMessage(
-							{
-								sandboxId: sandboxId,
-								type: "execution-error",
-								error: { message: e.data.error, stack: e.data.stack },
-							},
-							"*",
-						);
+						// The iframe source was checked above. Deliver this locally rather
+						// than self-posting an unauthenticated synthetic router message.
+						void RUNTIME_MESSAGE_ROUTER.dispatchTrustedConsumerMessage(sandboxId, {
+							sandboxId,
+							type: "execution-error",
+							error: { message: e.data.error, stack: e.data.stack },
+						});
 					}
 				};
 
@@ -539,11 +533,13 @@ export class SandboxIframe extends LitElement {
 		}
 
 		// Generate bridge code (skip if standalone)
+		const channelToken = isStandalone ? undefined : RUNTIME_MESSAGE_ROUTER.getSandboxChannelToken(sandboxId);
 		const bridgeCode = isStandalone
 			? ""
 			: RuntimeMessageBridge.generateBridgeCode({
 					context: "sandbox-iframe",
 					sandboxId,
+					channelToken,
 				});
 
 		// Collect all runtime functions - pass sandboxId as string literal

@@ -21,6 +21,7 @@ import {
 	readAuthorSidecar,
 	type PromptAuthorBinding,
 } from "./author-sidecar.js";
+import { compileSafeRegex, MAX_SAFE_REGEX_PATTERN_BYTES } from "./safe-regex.js";
 
 // ── Types ──
 
@@ -486,11 +487,11 @@ function buildMatchList(
 	context: number,
 	searchText?: (message: RawMessage) => string,
 ): { matchCount: number; expanded: number[] } {
-	let regex: RegExp;
+	let regex;
 	try {
-		regex = new RegExp(pattern, caseSensitive ? "" : "i");
+		regex = compileSafeRegex(pattern, { caseSensitive, maxPatternBytes: MAX_SAFE_REGEX_PATTERN_BYTES });
 	} catch (err) {
-		throw new TranscriptReaderError("invalid_regex", err instanceof Error ? err.message : String(err));
+		throw new TranscriptReaderError("invalid_regex", err instanceof Error ? err.message : "Invalid regular expression");
 	}
 	const matches: number[] = [];
 	for (const m of messages) {

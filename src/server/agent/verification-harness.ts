@@ -981,8 +981,8 @@ import type { ProjectContextManager } from "./project-context-manager.js";
 import { generateTeamName } from "./team-names.js";
 import {
 	substituteVars as _substituteVars,
-	isTransientReviewError,
-	isTransientQaError,
+	isTransientVerifierReviewError,
+	isTransientVerifierQaError,
 	matchExpectFailure,
 	groupStepsByPhase,
 	getSortedPhases,
@@ -997,6 +997,8 @@ import {
 	isPreImplementationGate,
 	isProviderBackoffError,
 	isRetryableGenericAgentError,
+	isReviewerBusyError,
+	isVerifierPromptDispatchTimeoutError,
 	TRANSIENT_INFRA_ERROR_REGEXES,
 	shouldRetryVerificationStep,
 	isRestartInterruptError,
@@ -1007,7 +1009,11 @@ import {
 	type CommandRecoveryMode,
 } from "./verification-logic.js";
 import { nextBackoffDelay } from "./session-setup.js";
-import { dispatchTrackedSystemPrompt } from "./session-manager.js";
+import { dispatchTrackedSystemPrompt, type SessionInfo } from "./session-manager.js";
+import {
+	COLD_REPROMPT_PROMPT_TIMEOUT_MS,
+	COLD_REPROMPT_READY_TIMEOUT_MS,
+} from "./rpc-bridge.js";
 import { Semaphore } from "./semaphore.js";
 import { ChildTeamScheduler } from "./child-team-scheduler.js";
 import { applyReviewModelOverrides, applyModelString } from "./review-model-override.js";
@@ -2074,22 +2080,36 @@ export function sanitizeVerificationWsEvent<T>(event: T): T {
 // once streaming starts, the retry receives its full resolved allowance.
 const REVIEWER_ERRORED_TURN_GRACE_MS = 75_000;
 const REVIEWER_PROVIDER_BACKOFF_GRACE_MS = 330_000;
+/** Queue admission is outside active review time, but cannot block forever. */
+export const VERIFIER_PROMPT_DISPATCH_TIMEOUT_MS = 60_000;
+/** Small event-loop/RPC handoff allowance beyond the bridge's cold-start budgets. */
+export const VERIFIER_COLD_PROMPT_DISPATCH_MARGIN_MS = 5_000;
+/**
+ * A cold receipt includes both bridge waits: readiness plus its first prompt
+ * acknowledgement. Keep this derived from RpcBridge's exported contract so a
+ * bridge timeout change cannot silently reintroduce a shorter verifier fence.
+ */
+export const VERIFIER_COLD_PROMPT_DISPATCH_TIMEOUT_MS =
+	COLD_REPROMPT_READY_TIMEOUT_MS + COLD_REPROMPT_PROMPT_TIMEOUT_MS + VERIFIER_COLD_PROMPT_DISPATCH_MARGIN_MS;
+
+export function verifierPromptDispatchTimeoutMs(coldStart?: boolean): number {
+	return coldStart ? VERIFIER_COLD_PROMPT_DISPATCH_TIMEOUT_MS : VERIFIER_PROMPT_DISPATCH_TIMEOUT_MS;
+}
 // Reminder-path fairness (see runLlmReviewViaSession). A reviewer that went
 // idle without calling verification_result is nudged up to MAX_REVIEWER_REMINDERS
-// times. Each nudge gets a fair turn: we wait REVIEWER_REMINDER_STREAM_SETTLE_MS
-// for the agent to actually start streaming before racing waitForIdle, and —
-// if it did stream this turn — a further REVIEWER_REMINDER_LATE_VERDICT_SETTLE_MS
-// for an in-flight verdict POST to land before giving up. This restores the
-// pre-regression behavior where a reviewer that completed its analysis but
-// missed the tool call is re-nudged on the SAME session (preserving its
-// context) instead of being torn down after a single under-graced reminder.
+// times. Each nudge waits for its exact durable dispatch receipt, then gives
+// an in-flight verdict POST a short grace before another reminder/teardown.
 const MAX_REVIEWER_REMINDERS = 2;
-const REVIEWER_REMINDER_STREAM_SETTLE_MS = 15_000;
 const REVIEWER_REMINDER_LATE_VERDICT_SETTLE_MS = 20_000;
 const MAX_VERIFIER_SAME_SESSION_RESURRECTIONS = 3;
 
+type VerifierPromptDispatchOutcome =
+	| { type: "dispatched" }
+	| { type: "result"; result: VerificationResult }
+	| { type: "cancelled"; reason: string };
+
 function isRetryableLlmReviewRecovery(output: string): boolean {
-	return isTransientReviewError(output) || isRetryableGenericAgentError(output);
+	return isTransientVerifierReviewError(output) || isRetryableGenericAgentError(output);
 }
 
 function isVerifierInfrastructureDisconnectError(output: string): boolean {
@@ -2102,7 +2122,7 @@ function isVerifierInfrastructureDisconnectError(output: string): boolean {
 
 function classifyLlmReviewRecoveryError(output: string): string {
 	if (isProviderBackoffError(output)) return "provider-backoff";
-	if (isTransientReviewError(output)) return "transient";
+	if (isTransientVerifierReviewError(output)) return "transient";
 	if (isRetryableGenericAgentError(output)) return "generic-runtime";
 	if (output.includes("Agent did not call verification_result")) return "missing-verification-result";
 	return "deterministic";
@@ -2168,6 +2188,14 @@ export class VerificationHarness {
 	private static _warnedCmdExeDetached = false;
 	private notifyTeamLeadFn?: (goalId: string, message: string) => void;
 	private activeVerifications = new Map<string, ActiveVerification>();
+	/**
+	 * Signal generations cancelled in this process. Keep this fence after their
+	 * active row is finalized: an already-running verifier loop can otherwise
+	 * enqueue a follow-up after its cancelled row has been removed.
+	 */
+	private cancelledVerificationSignals = new Set<string>();
+	/** Exact prompt admissions waiting to learn that their signal generation was cancelled. */
+	private verifierDispatchCancellationWaiters = new Map<string, Set<(reason: string) => void>>();
 	/** Random UUID generated once per server process. Steps stamped with this bootEpoch were started by this process. */
 	private readonly bootEpoch: string = randomUUID();
 	private readonly _persistPath: string;
@@ -2455,10 +2483,11 @@ export class VerificationHarness {
 		const cancelled = persisted.filter(v => v.cancelled || v.overallStatus === "cancelled");
 		for (const v of cancelled) {
 			const active = this.activeVerifications.get(v.signalId) ?? v;
-			active.cancelled = true;
-			active.overallStatus = "cancelled";
 			this.activeVerifications.set(active.signalId, active);
-			const settled = await this._killPersistedCommandSteps(active, "SIGKILL", { markIntent: true, reason: "cancelled" });
+			this._markVerificationCancelled(active);
+			this._persistActive();
+			await this._terminateCancelledReviewers(this._snapshotRunningReviewers([active]));
+			const settled = await this._killPersistedCommandSteps(active, "SIGKILL", { markIntent: false });
 			if (settled) {
 				await this._finalizeCancelledVerification(active);
 			} else {
@@ -2489,9 +2518,10 @@ export class VerificationHarness {
 				if (goal && (goal.state === "complete" || goal.state === "shelved")) {
 					if (process.env.BOBBIT_DEBUG) console.log(`[verification] Cleaning resumed verification ${v.signalId} for ${goal.state} goal ${v.goalId}`);
 					// A retry after the crash window must delete this record, not resume it.
-					v.cancelled = true;
-					v.overallStatus = "cancelled";
-					const settled = await this._killPersistedCommandSteps(v, "SIGKILL", { markIntent: true, reason: "cancelled" });
+					this._markVerificationCancelled(v);
+					this._persistActive();
+					await this._terminateCancelledReviewers(this._snapshotRunningReviewers([v]));
+					const settled = await this._killPersistedCommandSteps(v, "SIGKILL", { markIntent: false });
 					if (settled) {
 						await this._finalizeCancelledVerification(v);
 					} else {
@@ -2803,7 +2833,7 @@ export class VerificationHarness {
 			// scratch instead of leaving it a terminal "could not be recovered"
 			// restart-interrupt (shouldRerunSessionStepOnResume).
 			const isTransient = step.type === "agent-qa"
-					? isTransientQaError(resumeResult?.output || "")
+					? isTransientVerifierQaError(resumeResult?.output || "")
 					: isRetryableLlmReviewRecovery(resumeResult?.output || "");
 			const rerunnable = resumeResult?.status !== "timeout"
 				&& (isTransient || shouldRerunSessionStepOnResume(resumeResult?.output || ""));
@@ -3076,16 +3106,25 @@ export class VerificationHarness {
 			// `pending` when the rerun context is unavailable).
 			let reminderStarted = false;
 			try {
-				await dispatchTrackedSystemPrompt(session, reminderPrompt, {
-					source: "verification",
+				const reminderDispatch = await this.dispatchVerifierPrompt(session, reminderPrompt, {
+					goalId: v.goalId,
+					gateId: v.gateId,
+					signalId: v.signalId,
+					stepName: step.name,
+					verifierKind: step.type === "agent-qa" ? "agent-qa" : "llm-review",
+					promptKind: useRestartContinuationPrompt ? "restart-resume" : "reminder",
 					whenReady: true,
-					streamingBehavior: "followUp",
-					now: () => this.clock.now(),
+					resultPromise,
 				});
-				// Reminder dispatch is fire-and-forget on the RPC channel; the session
-				// stays `idle` for a tick before transitioning to `streaming`. This fixed
-				// settle is outside the fresh active-turn allowance.
-				reminderStarted = await this.sessionManager!.waitForStreaming(step.sessionId, 10_000).then(() => true).catch(() => false);
+				if (reminderDispatch.type === "result") {
+					return { name: step.name, type: step.type, passed: reminderDispatch.result.verdict, output: reminderDispatch.result.summary, duration_ms: Date.now() - step.startedAt };
+				}
+				if (reminderDispatch.type === "cancelled") {
+					return { name: step.name, type: step.type, passed: false, output: reminderDispatch.reason, duration_ms: Date.now() - step.startedAt };
+				}
+				// dispatchVerifierPrompt waited for this exact durable row's provider
+				// acceptance; do not let an unrelated streaming turn prove readiness.
+				reminderStarted = true;
 			} catch (resumeErr) {
 				const msg = (resumeErr as Error)?.message || String(resumeErr);
 				console.warn(`[verification] Resume reminder for ${step.sessionId} could not reach the revived reviewer (treating as restart-interrupt): ${msg}`);
@@ -3141,13 +3180,23 @@ export class VerificationHarness {
 				console.log(`[verification] Restart continuation for resumed session ${step.sessionId} ended without verification_result, sending ${fallbackKind} fallback reminder...`);
 				let fallbackStarted = false;
 				try {
-					await dispatchTrackedSystemPrompt(session, fallbackPrompt, {
-						source: "verification",
+					const fallbackDispatch = await this.dispatchVerifierPrompt(session, fallbackPrompt, {
+						goalId: v.goalId,
+						gateId: v.gateId,
+						signalId: v.signalId,
+						stepName: step.name,
+						verifierKind: step.type === "agent-qa" ? "agent-qa" : "llm-review",
+						promptKind: "fallback",
 						whenReady: true,
-						streamingBehavior: "followUp",
-						now: () => this.clock.now(),
+						resultPromise,
 					});
-					fallbackStarted = await this.sessionManager!.waitForStreaming(step.sessionId, 10_000).then(() => true).catch(() => false);
+					if (fallbackDispatch.type === "result") {
+						return { name: step.name, type: step.type, passed: fallbackDispatch.result.verdict, output: fallbackDispatch.result.summary, duration_ms: Date.now() - step.startedAt };
+					}
+					if (fallbackDispatch.type === "cancelled") {
+						return { name: step.name, type: step.type, passed: false, output: fallbackDispatch.reason, duration_ms: Date.now() - step.startedAt };
+					}
+					fallbackStarted = true;
 				} catch (resumeErr) {
 					const msg = (resumeErr as Error)?.message || String(resumeErr);
 					console.warn(`[verification] Post-continuation fallback reminder for ${step.sessionId} could not reach the revived reviewer: ${msg}`);
@@ -3263,13 +3312,13 @@ export class VerificationHarness {
 				ctx.cwd, ctx.builtinVars,
 				ctx.signal.content, ctx.signal.metadata,
 				ctx.goalSpec, ctx.allGateStates, goalId,
-				undefined, ctx.gate,
+				undefined, ctx.gate, { gateId, signalId },
 			);
 			if (result.status === "timeout") break;
 			const decision = shouldRetryVerificationStep({
 				passed: result.passed, output: result.output,
 				attempt, maxBoundedAttempts,
-				isTransient: isTransientReviewError,
+				isTransient: isTransientVerifierReviewError,
 			});
 			if (decision === "break") break;
 			const isBackoff = isProviderBackoffError(result.output);
@@ -3336,12 +3385,13 @@ export class VerificationHarness {
 				{ name: stepDef.name, prompt, timeout: stepDef.timeout, role: stepDef.role, component: stepDef.component },
 				ctx.cwd, goalId, ctx.builtinVars,
 				ctx.signal.content, ctx.signal.metadata, ctx.goalSpec, ctx.allGateStates,
+				undefined, { gateId, signalId },
 			);
 			if (result.status === "timeout") break;
 			const decision = shouldRetryVerificationStep({
 				passed: result.passed, output: result.output,
 				attempt, maxBoundedAttempts,
-				isTransient: isTransientQaError,
+				isTransient: isTransientVerifierQaError,
 			});
 			if (decision === "break") break;
 			const isBackoff = isProviderBackoffError(result.output);
@@ -3864,6 +3914,45 @@ export class VerificationHarness {
 		return !Array.isArray(signals) || signals.length === 0 || signals[signals.length - 1]?.id === active.signalId;
 	}
 
+	private _markVerificationCancelled(active: ActiveVerification): void {
+		active.cancelled = true;
+		active.overallStatus = "cancelled";
+		active.cancelRequestedAt ??= Date.now();
+		this.cancelledVerificationSignals.add(active.signalId);
+		const waiters = this.verifierDispatchCancellationWaiters.get(active.signalId);
+		this.verifierDispatchCancellationWaiters.delete(active.signalId);
+		for (const notify of waiters ?? []) notify(`Verifier prompt signal ${active.signalId} was cancelled or superseded`);
+		this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
+	}
+
+	/** Snapshot every live reviewer before any asynchronous command cleanup can yield. */
+	private _snapshotRunningReviewers(actives: readonly ActiveVerification[]): Array<{ goalId: string; sessionId: string }> {
+		const reviewers = new Map<string, { goalId: string; sessionId: string }>();
+		for (const active of actives) {
+			for (const step of active.steps) {
+				if (step.status === "running" && step.sessionId) {
+					reviewers.set(step.sessionId, { goalId: active.goalId, sessionId: step.sessionId });
+				}
+			}
+		}
+		return [...reviewers.values()];
+	}
+
+	/**
+	 * Stop reviewer-owned queues before command cleanup waits. Session termination
+	 * purges the exact verifier receipts, so a late agent_end cannot redrain them.
+	 */
+	private async _terminateCancelledReviewers(reviewers: readonly { goalId: string; sessionId: string }[]): Promise<void> {
+		const cleanup: Promise<unknown>[] = [];
+		for (const { goalId, sessionId } of reviewers) {
+			// Start both operations now. Do not let a slow stop RPC defer reviewer
+			// ownership removal until after another lifecycle event has redrained it.
+			cleanup.push(Promise.resolve(this.sessionManager?.terminateSession(sessionId)).catch(() => {}));
+			cleanup.push(Promise.resolve(this.teamManager?.unregisterReviewerSession(goalId, sessionId)).catch(() => {}));
+		}
+		await Promise.all(cleanup);
+	}
+
 	/** One terminal cancellation path, invoked only after every cleanup phase settles. */
 	private async _finalizeCancelledVerification(active: ActiveVerification): Promise<void> {
 		if (this._hasPendingCommandKillCleanup(active)) return;
@@ -3871,11 +3960,6 @@ export class VerificationHarness {
 		// cleanup was settling. The obsolete generation must not publish anything.
 		if (this.activeVerifications.get(active.signalId) !== active) return;
 		this.activeVerifications.delete(active.signalId);
-		for (const step of active.steps) {
-			if (!step.sessionId || step.status !== "running") continue;
-			try { await this.sessionManager?.terminateSession(step.sessionId); } catch { /* already stopped */ }
-			try { await this.teamManager?.unregisterReviewerSession(active.goalId, step.sessionId); } catch { /* already stopped */ }
-		}
 		const stillCurrent = this._isCurrentGateSignal(active);
 		this.resolveGateStore(active.goalId)?.updateSignalVerification(active.signalId, {
 			status: "failed",
@@ -4204,14 +4288,16 @@ export class VerificationHarness {
 	 */
 	async cancelAllVerifications(goalId: string): Promise<boolean> {
 		this._mergePersistedActiveVerifications(v => v.goalId === goalId);
-		for (const [signalId, active] of Array.from(this.activeVerifications)) {
-			if (active.goalId !== goalId) continue;
-			active.cancelled = true;
-			active.overallStatus = "cancelled";
-			active.cancelRequestedAt ??= Date.now();
+		const cancellations = Array.from(this.activeVerifications.values()).filter(active => active.goalId === goalId);
+		for (const active of cancellations) this._markVerificationCancelled(active);
+		// Persist the cancellation fence before yielding, then snapshot and tear down
+		// all reviewer queues before any command-child ownership barrier can block.
+		if (cancellations.length > 0) this._persistActive();
+		const reviewers = this._snapshotRunningReviewers(cancellations);
+		await this._terminateCancelledReviewers(reviewers);
 
-			this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
-			this._persistActive();
+		for (const active of cancellations) {
+			const { signalId } = active;
 			// Partition siblings by ownership domain. A live docker-exec transport
 			// is never reaped through the recovered sentinel path.
 			const liveHostCleanupSettled = await this._killTrackedForSignal(signalId, step => !step?.containerId);
@@ -4221,15 +4307,6 @@ export class VerificationHarness {
 				: !Array.from(this._trackedCommandChildren.keys()).some(key => key.startsWith(`${signalId}:`));
 			const commandKillsSettled = liveHostCleanupSettled && persistedCleanupSettled && liveTransportCleanupSettled;
 			this._drainPendingSignoffsForSignal(signalId);
-
-			for (const step of active.steps) {
-				if (step.sessionId && step.status === "running") {
-					try { await this.sessionManager?.terminateSession(step.sessionId); } catch { /* ignore */ }
-					if (this.teamManager) {
-						try { await this.teamManager.unregisterReviewerSession(goalId, step.sessionId); } catch { /* ignore */ }
-					}
-				}
-			}
 
 			if (commandKillsSettled) {
 				await this._finalizeCancelledVerification(active);
@@ -4266,17 +4343,18 @@ export class VerificationHarness {
 	): Promise<boolean> {
 		const gateIdSet = new Set(gateIds);
 		this._mergePersistedActiveVerifications(v => v.goalId === goalId && gateIdSet.has(v.gateId));
+		const targets = Array.from(this.activeVerifications.values())
+			.filter(active => active.goalId === goalId && gateIdSet.has(active.gateId));
+		for (const active of targets) this._markVerificationCancelled(active);
+		// Cancellation must fence verifier admission and stop every reviewer before
+		// a held command cleanup yields to an old agent_end or late tool result.
+		if (targets.length > 0) this._persistActive();
+		const reviewers = this._snapshotRunningReviewers(targets);
+		await this._terminateCancelledReviewers(reviewers);
+
 		const cancellations: ActiveVerification[] = [];
-
-		for (const [signalId, active] of Array.from(this.activeVerifications)) {
-			if (active.goalId !== goalId || !gateIdSet.has(active.gateId)) continue;
-
-			active.cancelled = true;
-			active.overallStatus = "cancelled";
-			active.cancelRequestedAt ??= Date.now();
-
-			this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
-			this._persistActive();
+		for (const active of targets) {
+			const { signalId } = active;
 			const liveHostCleanupSettled = await this._killTrackedForSignal(signalId, step => !step?.containerId);
 			const persistedCleanupSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { markIntent: false });
 			const liveTransportCleanupSettled = persistedCleanupSettled
@@ -4289,7 +4367,6 @@ export class VerificationHarness {
 			} else {
 				this._scheduleCommandKillCleanupRetry(signalId);
 			}
-
 		}
 
 		if (cancellations.length > 0) this._persistActive();
@@ -4925,6 +5002,7 @@ export class VerificationHarness {
 										cwd, signal.goalId, builtinVars,
 										signal.content, signal.metadata,
 										goalSpec, allGateStates, attemptSessionId,
+										{ gateId: signal.gateId, signalId: signal.id },
 									);
 									result = qaResult;
 									if (qaResult.artifact) {
@@ -4934,7 +5012,7 @@ export class VerificationHarness {
 									const decision = shouldRetryVerificationStep({
 										passed: qaResult.passed, output: qaResult.output,
 										attempt, maxBoundedAttempts,
-										isTransient: isTransientQaError,
+										isTransient: isTransientVerifierQaError,
 									});
 									if (decision === "break") break;
 									const isBackoff = isProviderBackoffError(qaResult.output);
@@ -5055,13 +5133,13 @@ export class VerificationHarness {
 										cwd, builtinVars,
 										signal.content, signal.metadata,
 										goalSpec, allGateStates, signal.goalId, attemptSessionId,
-										gate,
+										gate, { gateId: signal.gateId, signalId: signal.id },
 									);
 									if (result.status === "timeout") break;
 									const decision = shouldRetryVerificationStep({
 										passed: result.passed, output: result.output,
 										attempt, maxBoundedAttempts,
-										isTransient: isTransientReviewError,
+										isTransient: isTransientVerifierReviewError,
 									});
 									if (decision === "break") break;
 									const isBackoff = isProviderBackoffError(result.output);
@@ -5212,6 +5290,7 @@ export class VerificationHarness {
 		goalId?: string,
 		sessionId?: string,
 		gate?: WorkflowGate,
+		verificationContext?: { gateId?: string; signalId?: string },
 	): Promise<ReviewStepExecutionResult> {
 		const roleName = step.role || "reviewer";
 		// Goal-scoped inline roles win over the role store. The default
@@ -5253,7 +5332,7 @@ export class VerificationHarness {
 		if (!this.sessionManager || !goalId) {
 			throw new Error("LLM review requires an active SessionManager and goalId");
 		}
-		return this.runLlmReviewViaSession(step, cwd, goalId, role, combinedPrompt, kickoff, timeoutMs, sessionId);
+		return this.runLlmReviewViaSession(step, cwd, goalId, role, combinedPrompt, kickoff, timeoutMs, sessionId, verificationContext);
 	}
 
 	// buildReviewPrompt is exported at module scope (below) so unit tests can
@@ -5271,6 +5350,179 @@ export class VerificationHarness {
 			? (this.resolveProjectConfigStore(goalId)?.getQaMaxDurationMinutes(componentName) ?? 10)
 			: 10;
 		return resolveReviewStepTimeoutSec(step, qaMinutes);
+	}
+
+	/**
+	 * Admit a verifier-owned turn through SessionManager's durable queue and
+	 * await the receipt for that exact row. Session-wide streaming state cannot
+	 * prove this intent started: it may describe the preceding reviewer turn.
+	 */
+	private async dispatchVerifierPrompt(
+		session: SessionInfo,
+		text: string,
+		args: {
+			goalId?: string;
+			gateId?: string;
+			signalId?: string;
+			stepName: string;
+			verifierKind: "llm-review" | "agent-qa";
+			promptKind: "kickoff" | "reminder" | "restart-resume" | "fallback" | "resurrection";
+			whenReady?: boolean;
+			attempt?: number;
+			/** First verdict from this same reviewer, registered before prompt admission. */
+			resultPromise?: Promise<VerificationResult>;
+		},
+	): Promise<VerifierPromptDispatchOutcome> {
+		const dispatchBudgetMs = verifierPromptDispatchTimeoutMs(args.whenReady);
+		const fields = `goal=${args.goalId ?? "-"} gate=${args.gateId ?? "-"} signal=${args.signalId ?? "-"} step=${args.stepName} reviewerSession=${session.id} verifier=${args.verifierKind} prompt=${args.promptKind} attempt=${args.attempt ?? 1} dispatchBudgetMs=${dispatchBudgetMs}`;
+		const signalIsCurrent = () => {
+			if (!args.signalId) return true;
+			const active = this.activeVerifications.get(args.signalId);
+			return !this.cancelledVerificationSignals.has(args.signalId)
+				&& (!active || (!active.cancelled
+					&& active.overallStatus !== "cancelled"
+					&& active.goalId === args.goalId
+					&& active.gateId === args.gateId
+					&& this._isCurrentGateSignal(active)));
+		};
+		if (!signalIsCurrent()) {
+			console.warn(`[verification][verifier-dispatch] ${fields} mode=queued decision=cancelled-generation`);
+			return { type: "cancelled", reason: `Verifier prompt admission rejected for cancelled or superseded signal ${args.signalId}` };
+		}
+		const cancellation = (() => {
+			if (!args.signalId) return { promise: new Promise<{ type: "cancelled"; reason: string }>(() => {}), dispose: () => {} };
+			let notify: ((reason: string) => void) | undefined;
+			const promise = new Promise<{ type: "cancelled"; reason: string }>(resolve => {
+				notify = reason => resolve({ type: "cancelled", reason });
+				const waiters = this.verifierDispatchCancellationWaiters.get(args.signalId!) ?? new Set();
+				waiters.add(notify);
+				this.verifierDispatchCancellationWaiters.set(args.signalId!, waiters);
+			});
+			return {
+				promise,
+				dispose: () => {
+					const waiters = this.verifierDispatchCancellationWaiters.get(args.signalId!);
+					if (!waiters || !notify) return;
+					waiters.delete(notify);
+					if (waiters.size === 0) this.verifierDispatchCancellationWaiters.delete(args.signalId!);
+				},
+			};
+		})();
+		const manager = this.sessionManager;
+		if (manager && typeof manager.enqueueVerifierPrompt === "function") {
+			const receipt = (() => {
+				try {
+					return manager.enqueueVerifierPrompt(session.id, text, {
+						coldStart: args.whenReady,
+						streamingBehavior: "followUp",
+						suppressTitleGen: true,
+					});
+				} catch (error) {
+					// Admission itself can fail (for example model setup fencing) before
+					// a receipt exists; do not leave a cancellation waiter behind.
+					cancellation.dispose();
+					throw error;
+				}
+			})();
+			let timer: TimerHandle | undefined;
+			let settledResult: VerificationResult | undefined;
+			const resultArrival = args.resultPromise?.then(result => {
+				settledResult = result;
+				return { type: "result" as const, result };
+			});
+			try {
+				const winner = await Promise.race([
+					receipt.dispatched.then(() => ({ type: "dispatched" as const })),
+					...(resultArrival ? [resultArrival] : []),
+					cancellation.promise,
+					new Promise<{ type: "timeout" }>(resolve => {
+						timer = this.clock.setTimeout(() => resolve({ type: "timeout" }), dispatchBudgetMs);
+					}),
+				]);
+				// A tool POST can arrive between the provider accepting a turn and its
+				// RPC acknowledgement reaching the receipt. Prefer that first verdict
+				// over a new reminder/retry, even when both promises settle this tick.
+				await Promise.resolve();
+				if (winner.type === "result" || settledResult) {
+					const result = winner.type === "result" ? winner.result : settledResult!;
+					receipt.cancel();
+					console.log(`[verification][verifier-dispatch] ${fields} mode=${receipt.mode} decision=verdict-before-ack row=${receipt.rowId}`);
+					return { type: "result", result };
+				}
+				if (winner.type === "cancelled" || !signalIsCurrent()) {
+					receipt.cancel();
+					console.warn(`[verification][verifier-dispatch] ${fields} mode=${receipt.mode} decision=cancelled-generation row=${receipt.rowId}`);
+					return { type: "cancelled", reason: winner.type === "cancelled" ? winner.reason : `Verifier prompt ${receipt.rowId} was superseded before acknowledgement` };
+				}
+				if (winner.type === "timeout") throw new Error(`Verifier prompt ${receipt.rowId} did not dispatch within ${dispatchBudgetMs}ms`);
+				console.log(`[verification][verifier-dispatch] ${fields} mode=${receipt.mode} decision=dispatched row=${receipt.rowId}`);
+				return { type: "dispatched" };
+			} catch (error) {
+				receipt.cancel();
+				// A rejected receipt can race a verification_result accepted by the
+				// tool handler for this same attempt. Give the already-subscribed
+				// result promise one turn to settle before treating transport failure
+				// as retryable contention; never discard a first verdict (including
+				// agent-qa's reportHtml) merely because acknowledgement lost the race.
+				await Promise.resolve();
+				if (settledResult && signalIsCurrent()) {
+					console.log(`[verification][verifier-dispatch] ${fields} mode=${receipt.mode} decision=verdict-before-ack row=${receipt.rowId}`);
+					return { type: "result", result: settledResult };
+				}
+				const message = error instanceof Error ? error.message : String(error);
+				const decision = isReviewerBusyError(message)
+					? "busy-contention"
+					: isVerifierPromptDispatchTimeoutError(message)
+						|| /^Verifier prompt [a-z0-9][a-z0-9-]* did not dispatch within \d+ms$/i.test(message)
+						? "dispatch-timeout"
+						: "cancelled";
+				// Lifecycle fields only: error strings can include provider payloads.
+				console.warn(`[verification][verifier-dispatch] ${fields} mode=${receipt.mode} decision=${decision} row=${receipt.rowId}`);
+				throw error;
+			} finally {
+				if (timer) this.clock.clearTimeout(timer);
+				cancellation.dispose();
+			}
+		}
+		cancellation.dispose();
+		// Legacy test shims predate row receipts. Retain their queue API while
+		// keeping production on enqueueVerifierPrompt above.
+		// Legacy restart shims label the old generic resume continuation as a
+		// reminder, but still need the historical 10s cold-start settle. Normal
+		// same-session reminders and resurrections retain their 15s allowance.
+		const compatibilityStreamingSettleMs = args.promptKind === "restart-resume"
+			|| args.promptKind === "fallback"
+			|| (args.promptKind === "reminder" && args.whenReady)
+			? 10_000
+			: args.promptKind === "reminder" || args.promptKind === "resurrection"
+				? 15_000
+				: undefined;
+		if (manager && typeof (manager as any).enqueuePrompt === "function") {
+			console.log(`[verification][verifier-dispatch] ${fields} mode=compat-queued decision=followUp`);
+			await (manager as any).enqueuePrompt(session.id, text, {
+				source: "verification",
+				coldStart: args.whenReady,
+				streamingBehavior: "followUp",
+				suppressTitleGen: true,
+			});
+			// Compatibility-only: production must not use session-global streaming
+			// as row correlation, but old narrow mocks expose no receipt.
+			if (compatibilityStreamingSettleMs && typeof (manager as any).waitForStreaming === "function") {
+				await (manager as any).waitForStreaming(session.id, compatibilityStreamingSettleMs);
+			}
+			return { type: "dispatched" };
+		}
+		console.log(`[verification][verifier-dispatch] ${fields} mode=direct decision=followUp`);
+		await dispatchTrackedSystemPrompt(session, text, {
+			source: "verification",
+			whenReady: args.whenReady,
+			streamingBehavior: "followUp",
+			now: () => this.clock.now(),
+		});
+		if (compatibilityStreamingSettleMs && manager && typeof (manager as any).waitForStreaming === "function") {
+			await (manager as any).waitForStreaming(session.id, compatibilityStreamingSettleMs);
+		}
+		return { type: "dispatched" };
 	}
 
 	/** Distinguish a real idle turn from expiry of its active-thinking allowance. */
@@ -5391,6 +5643,9 @@ export class VerificationHarness {
 	}
 
 	private async recoverVerifierAfterProcessDeath(args: {
+		goalId?: string;
+		gateId?: string;
+		signalId?: string;
 		sessionId: string;
 		stepName: string;
 		label: string;
@@ -5408,7 +5663,7 @@ export class VerificationHarness {
 
 		for (let attempt = 1; attempt <= MAX_VERIFIER_SAME_SESSION_RESURRECTIONS; attempt++) {
 			attempts = attempt;
-			console.log(`[verification][verifier-lifecycle] resurrection ${attempt}/${MAX_VERIFIER_SAME_SESSION_RESURRECTIONS} for ${args.label} verifier ${args.sessionId} (\"${args.stepName}\") — preserving same session id/history; freshAllowanceMs=${args.timeoutMs}.`);
+			console.log(`[verification][verifier-lifecycle] resurrection ${attempt}/${MAX_VERIFIER_SAME_SESSION_RESURRECTIONS} goal=${args.goalId ?? "-"} gate=${args.gateId ?? "-"} signal=${args.signalId ?? "-"} for ${args.label} verifier ${args.sessionId} (\"${args.stepName}\") — preserving same session id/history; freshAllowanceMs=${args.timeoutMs}.`);
 			try {
 				const existing = sessionManager.getSession(args.sessionId);
 				if (existing && existing.status !== "terminated" && typeof sessionManager.restartAgent === "function") {
@@ -5424,21 +5679,23 @@ export class VerificationHarness {
 				const session = sessionManager.getSession(args.sessionId);
 				if (!session?.rpcClient) throw new Error("Session missing after same-session resurrection");
 
-				await dispatchTrackedSystemPrompt(session, args.prompt, {
-					source: "verification",
+				const resurrectionDispatch = await this.dispatchVerifierPrompt(session, args.prompt, {
+					goalId: args.goalId,
+					gateId: args.gateId,
+					signalId: args.signalId,
+					stepName: args.stepName,
+					verifierKind: args.label === "Agent QA" ? "agent-qa" : "llm-review",
+					promptKind: "resurrection",
 					whenReady: typeof session.rpcClient.promptWhenReady === "function",
-					streamingBehavior: "followUp",
-					now: () => this.clock.now(),
+					attempt,
+					resultPromise: args.resultPromise,
 				});
+				if (resurrectionDispatch.type === "result") return { type: "result", ...resurrectionDispatch.result };
+				if (resurrectionDispatch.type === "cancelled") return { type: "failed", output: resurrectionDispatch.reason };
 
-				// Readiness, restart, prompt delivery, and this fixed settle window are
-				// outside the fresh active-turn allowance.
-				const started = await sessionManager.waitForStreaming(args.sessionId, REVIEWER_REMINDER_STREAM_SETTLE_MS)
-					.then(() => true)
-					.catch((err: any) => {
-						lastError = (err as Error)?.message || String(err);
-						return false;
-					});
+				// The exact resurrection row is provider-accepted above. Session-wide
+				// streaming may still describe the interrupted turn and is not evidence.
+				const started = true;
 
 				if (!started) {
 					lastError = `${lastError}; resurrected verifier did not start streaming`;
@@ -5485,6 +5742,7 @@ export class VerificationHarness {
 		kickoff: string,
 		timeoutMs: number,
 		preGeneratedSessionId?: string,
+		verificationContext?: { gateId?: string; signalId?: string },
 	): Promise<ReviewStepExecutionResult> {
 		// Pause-cascade backstop: race-window guard. The mainline path is
 		// blocked at `/gates/:id/signal` (server.ts), but a deep descendant
@@ -5661,13 +5919,18 @@ export class VerificationHarness {
 				}
 			});
 
-			// Send kickoff prompt. Pi may already be streaming its startup turn;
-			// followUp atomically queues this verifier-owned turn rather than rejecting it.
-			await dispatchTrackedSystemPrompt(session, kickoff, {
-				source: "verification",
-				streamingBehavior: "followUp",
-				now: () => this.clock.now(),
+			// Send kickoff prompt. Pi atomically queues this verifier-owned turn.
+			const kickoffDispatch = await this.dispatchVerifierPrompt(session, kickoff, {
+				goalId,
+				gateId: verificationContext?.gateId,
+				signalId: verificationContext?.signalId,
+				stepName: step.name,
+				verifierKind: "llm-review",
+				promptKind: "kickoff",
+				resultPromise,
 			});
+			if (kickoffDispatch.type === "result") return { passed: kickoffDispatch.result.verdict, output: kickoffDispatch.result.summary, sessionId };
+			if (kickoffDispatch.type === "cancelled") return { passed: false, output: kickoffDispatch.reason, sessionId };
 
 			// Kickoff transport is outside the allowance. Once dispatched, distinguish
 			// a real idle turn from expiry of the full active-thinking window.
@@ -5710,17 +5973,27 @@ export class VerificationHarness {
 				const jsonErr = lastErroredToolOutput ? detectJsonValidationError(lastErroredToolOutput) : null;
 				const reminderPrompt = jsonErr ? buildJsonRetryPrompt(jsonErr) : buildContextRichReminder(kickoff);
 				console.log(`[verification][reviewer-lifecycle] reminder ${reminderNum}/${MAX_REVIEWER_REMINDERS} to ${sessionId} for "${step.name}" (${jsonErr ? "JSON-retry" : "context-rich"}) — re-nudging same session (context preserved).`);
-				await dispatchTrackedSystemPrompt(session, reminderPrompt, {
-					source: "verification",
-					streamingBehavior: "followUp",
-					now: () => this.clock.now(),
+				const reminderDispatch = await this.dispatchVerifierPrompt(session, reminderPrompt, {
+					goalId,
+					gateId: verificationContext?.gateId,
+					signalId: verificationContext?.signalId,
+					stepName: step.name,
+					verifierKind: "llm-review",
+					promptKind: "reminder",
+					attempt: reminderNum,
+					resultPromise,
 				});
-				// Wait for the agent to actually pick up the reminder before racing
-				// against waitForIdle — see _tryResumeFromSession for rationale. Give
-				// it a fair settle window; if it never starts streaming we still loop
-				// to the next reminder rather than tearing down after one nudge.
-				const started = await this.sessionManager!.waitForStreaming(sessionId, REVIEWER_REMINDER_STREAM_SETTLE_MS).then(() => true).catch(() => false);
-				if (!started) continue;
+				if (reminderDispatch.type === "result") {
+					reminderOutcome = { type: "result", verdict: reminderDispatch.result.verdict, summary: reminderDispatch.result.summary };
+					break;
+				}
+				if (reminderDispatch.type === "cancelled") {
+					reminderOutcome = { type: "errored", output: reminderDispatch.reason };
+					break;
+				}
+				// The receipt above identifies this reminder; do not use the preceding
+				// turn's session-level streaming state as its start acknowledgement.
+				const started = true;
 				const result2 = await this.waitForReviewTurn(sessionId, resultPromise, timeoutMs);
 				if (result2.type === "result") {
 					reminderOutcome = { type: "result", verdict: result2.verdict, summary: result2.summary };
@@ -5783,6 +6056,9 @@ export class VerificationHarness {
 			if (isProcessDeath) {
 				console.error(`[verification] Reviewer agent process died during "${step.name}" (session ${sessionId}): ${msg}`);
 				const recovered = await this.recoverVerifierAfterProcessDeath({
+					goalId,
+					gateId: verificationContext?.gateId,
+					signalId: verificationContext?.signalId,
 					sessionId,
 					stepName: step.name,
 					label: "LLM review",
@@ -5891,6 +6167,7 @@ export class VerificationHarness {
 		goalSpec?: string,
 		allGateStates?: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>,
 		sessionId?: string,
+		verificationContext?: { gateId?: string; signalId?: string },
 	): Promise<ReviewStepExecutionResult & { artifact?: { content: string; contentType: string } }> {
 		const QA_MAX_ARTIFACT = 10 * 1024 * 1024; // 10 MB — same limit as llm-review artifacts
 		// Inline-roles-aware lookup. Same fallback chain as before: explicit
@@ -6099,13 +6376,23 @@ export class VerificationHarness {
 				}
 			});
 
-			// Send kickoff prompt. Pi may already be streaming its startup turn;
-			// followUp atomically queues this verifier-owned turn rather than rejecting it.
-			await dispatchTrackedSystemPrompt(session, kickoff, {
-				source: "verification",
-				streamingBehavior: "followUp",
-				now: () => this.clock.now(),
+			// Send kickoff prompt. Pi atomically queues this verifier-owned turn.
+			const kickoffDispatch = await this.dispatchVerifierPrompt(session, kickoff, {
+				goalId,
+				gateId: verificationContext?.gateId,
+				signalId: verificationContext?.signalId,
+				stepName: step.name,
+				verifierKind: "agent-qa",
+				promptKind: "kickoff",
+				resultPromise,
 			});
+			if (kickoffDispatch.type === "result") {
+				const artifact = kickoffDispatch.result.reportHtml
+					? { content: kickoffDispatch.result.reportHtml.slice(0, QA_MAX_ARTIFACT), contentType: "text/html" }
+					: undefined;
+				return { passed: kickoffDispatch.result.verdict, output: kickoffDispatch.result.summary, sessionId: qaSessionId, artifact };
+			}
+			if (kickoffDispatch.type === "cancelled") return { passed: false, output: kickoffDispatch.reason, sessionId: qaSessionId };
 
 			// Kickoff transport is outside the allowance. Each active QA turn gets
 			// the full resolved window once the prompt has been dispatched.
@@ -6150,13 +6437,26 @@ export class VerificationHarness {
 				const qaJsonErr = qaLastErroredToolOutput ? detectJsonValidationError(qaLastErroredToolOutput) : null;
 				const qaReminderPrompt = qaJsonErr ? buildJsonRetryPrompt(qaJsonErr) : buildContextRichReminder(kickoff);
 				console.log(`[verification][verifier-lifecycle] QA reminder ${reminderNum}/${MAX_REVIEWER_REMINDERS} to ${qaSessionId} for "${step.name}" (${qaJsonErr ? "JSON-retry" : "context-rich"}) — re-nudging same session (context preserved).`);
-				await dispatchTrackedSystemPrompt(session, qaReminderPrompt, {
-					source: "verification",
-					streamingBehavior: "followUp",
-					now: () => this.clock.now(),
+				const reminderDispatch = await this.dispatchVerifierPrompt(session, qaReminderPrompt, {
+					goalId,
+					gateId: verificationContext?.gateId,
+					signalId: verificationContext?.signalId,
+					stepName: step.name,
+					verifierKind: "agent-qa",
+					promptKind: "reminder",
+					attempt: reminderNum,
+					resultPromise,
 				});
-				const started = await this.sessionManager!.waitForStreaming(qaSessionId, REVIEWER_REMINDER_STREAM_SETTLE_MS).then(() => true).catch(() => false);
-				if (!started) continue;
+				if (reminderDispatch.type === "result") {
+					qaReminderOutcome = { type: "result", verdict: reminderDispatch.result.verdict, summary: reminderDispatch.result.summary, reportHtml: reminderDispatch.result.reportHtml };
+					break;
+				}
+				if (reminderDispatch.type === "cancelled") {
+					qaReminderOutcome = { type: "errored", output: reminderDispatch.reason };
+					break;
+				}
+				// dispatchVerifierPrompt awaited this exact QA reminder row.
+				const started = true;
 				const result2 = await this.waitForReviewTurn(qaSessionId, resultPromise, timeoutMs);
 
 				if (result2.type === "result") {
@@ -6218,6 +6518,9 @@ export class VerificationHarness {
 			if (isProcessDeath && qaSessionId) {
 				console.error(`[verification] QA agent process died during "${step.name}" (session ${qaSessionId}): ${msg}`);
 				const recovered = await this.recoverVerifierAfterProcessDeath({
+					goalId,
+					gateId: verificationContext?.gateId,
+					signalId: verificationContext?.signalId,
 					sessionId: qaSessionId,
 					stepName: step.name,
 					label: "Agent QA",
@@ -6536,12 +6839,9 @@ export class VerificationHarness {
 				appendRetainedLogChunk(outFile, "");
 				appendRetainedLogChunk(errFile, err.message);
 				if (expectFailure && errorPattern) {
-					try {
-						const regex = new RegExp(errorPattern, "i");
-						return withDiagnostics({ passed: regex.test(err.message), output: err.message });
-					} catch {
-						return withDiagnostics({ passed: false, output: `Invalid error_pattern regex when handling spawn error: ${err.message}` });
-					}
+					// Use the same bounded RE2 compilation and invalid-pattern fallback
+					// as ordinary command completion.
+					return withDiagnostics(matchExpectFailure(null, err.message, errorPattern));
 				}
 				return withDiagnostics({ passed: expectFailure, output: err.message });
 			};
@@ -7822,12 +8122,12 @@ export class VerificationHarness {
 	 * the permit, re-enqueues the child, and drains the next eligible (the retry
 	 * hits the worktree-ready else-branch and just re-runs `startTeam`).
 	 */
-	private _startScheduledChildTeam(childGoalId: string): void | Promise<void> {
+	private async _startScheduledChildTeam(childGoalId: string): Promise<void> {
 		const ctx = this.projectContextManager?.getContextForGoal(childGoalId);
 		const goalManager = ctx?.goalManager;
 		const teamManager = this.teamManager;
 		if (!goalManager || !teamManager) return;
-		const g = goalManager.getGoal(childGoalId);
+		let g = goalManager.getGoal(childGoalId);
 		// Throw (rather than silently return) for not-found / archived / paused so
 		// the scheduler RELEASES the permit it acquired before calling us — never
 		// leak it. A paused child is re-enqueued by the scheduler and stays queued
@@ -7839,38 +8139,52 @@ export class VerificationHarness {
 		if (g.archived) throw new Error(`[scheduler] child ${childGoalId} is archived — not starting`);
 		if (g.paused) throw new Error(`[scheduler] child ${childGoalId} is paused — not starting`);
 		if (g.state === "blocked") {
-			goalManager.updateGoal(childGoalId, { state: "todo" })
-				.then(() => this.broadcastFn?.(childGoalId, { type: "goal_state_changed", goalId: childGoalId }))
-				.catch((err) => console.warn(`[scheduler] flip blocked→todo failed for ${childGoalId} (non-fatal):`, err));
+			// State='blocked' is used for both dependency and capacity parking. The
+			// scheduler has already established that this child is eligible, so make
+			// its runnable transition durable before TeamManager rechecks it.
+			await goalManager.updateGoal(childGoalId, { state: "todo" });
+			this.broadcastFn?.(childGoalId, { type: "goal_state_changed", goalId: childGoalId });
+			g = goalManager.getGoal(childGoalId);
+			if (!g) throw new Error(`[scheduler] child ${childGoalId} disappeared while becoming runnable`);
 		}
-		if (g.setupStatus === "preparing") {
-			// Propagate the rejection (don't swallow) so the scheduler releases the
-			// permit + re-enqueues when the team does not actually start.
-			return goalManager.setupWorktreeAndStartTeam(childGoalId, () => teamManager.startTeam(childGoalId))
-				.then(() => { this.broadcastFn?.(childGoalId, { type: "goal_setup_complete", goalId: childGoalId }); })
-				.catch((err) => {
-					const cur = goalManager.getGoal(childGoalId);
-					if (cur?.setupStatus === "ready") {
-						// Worktree finished but the team start raced (e.g. goal
-						// paused/archived mid-start). The worktree work is preserved, so
-						// surface setup-complete (no error UI) — but STILL rethrow so the
-						// scheduler frees the permit; the re-enqueued retry takes the
-						// worktree-ready else-branch and just re-runs startTeam.
-						this.broadcastFn?.(childGoalId, { type: "goal_setup_complete", goalId: childGoalId });
-						console.error(`[scheduler] auto-start team failed for ${childGoalId} (worktree ready):`, err);
-					} else {
-						console.error(`[scheduler] setup failed for ${childGoalId}:`, err);
-						this.broadcastFn?.(childGoalId, { type: "goal_setup_error", goalId: childGoalId, error: String(err) });
-					}
-					throw err;
-				});
+		const setupStatus: string | undefined = g.setupStatus;
+		if (setupStatus === "preparing" || setupStatus === "retrying") {
+			// The GoalManager owns the same-goal setup promise. Await it here so the
+			// scheduler cannot call startTeam until the persisted status is ready.
+			try {
+				await goalManager.setupWorktreeAndStartTeam(childGoalId, () => teamManager.startTeam(childGoalId));
+				this.broadcastFn?.(childGoalId, { type: "goal_state_changed", goalId: childGoalId });
+				this.broadcastFn?.(childGoalId, { type: "goal_setup_complete", goalId: childGoalId });
+				return;
+			} catch (err) {
+				const cur = goalManager.getGoal(childGoalId);
+				if (cur?.setupStatus === "ready") {
+					// Setup did finish; a later lifecycle race prevented the lead start.
+					this.broadcastFn?.(childGoalId, { type: "goal_state_changed", goalId: childGoalId });
+					this.broadcastFn?.(childGoalId, { type: "goal_setup_complete", goalId: childGoalId });
+					console.error(`[scheduler] auto-start team failed for ${childGoalId} (worktree ready):`, err);
+				} else {
+					console.error(`[scheduler] setup failed for ${childGoalId}:`, err);
+					this.broadcastFn?.(childGoalId, { type: "goal_state_changed", goalId: childGoalId });
+					this.broadcastFn?.(childGoalId, { type: "goal_setup_error", goalId: childGoalId, error: String(err) });
+				}
+				throw err;
+			}
+		}
+		if (setupStatus !== "ready") {
+			// Failed setup is neither a dependency completion nor an operator pause.
+			// Do not create a team/session; surface a refreshable, actionable state.
+			this.broadcastFn?.(childGoalId, { type: "goal_state_changed", goalId: childGoalId });
+			throw new Error(`[scheduler] child ${childGoalId} setup is ${setupStatus ?? "unmigrated"}; retry setup before starting its team`);
 		}
 		// Worktree already exists (resumed/ready goal): just start the team.
 		// Propagate failure so the scheduler releases the permit + re-enqueues.
-		return Promise.resolve(teamManager.startTeam(childGoalId)).then(() => {}).catch((err) => {
+		try {
+			await teamManager.startTeam(childGoalId);
+		} catch (err) {
 			console.error(`[scheduler] startTeam failed for ${childGoalId}:`, err);
 			throw err;
-		});
+		}
 	}
 
 	/**

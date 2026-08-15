@@ -115,6 +115,7 @@ export const IMPACT_RULES = Object.freeze([
 		canaries: frozen([
 			"tests2/core/builtin-packs.test.ts",
 			"tests2/core/extension-host-terminal.test.ts",
+			"tests2/core/market-pack-tool-typebox-v1.test.ts",
 			"tests2/core/pack-contributions.test.ts",
 			"tests2/core/pack-marketplace.test.ts",
 			"tests2/core/pack-pi-extensions-loader.test.ts",
@@ -167,6 +168,7 @@ export const IMPACT_RULES = Object.freeze([
 		canaries: frozen([
 			"tests2/core/aigw-headers.test.ts",
 			"tests2/core/aigw-startup-refresh.test.ts",
+			"tests2/core/pi-installed-contract.test.ts",
 			"tests2/core/aigw-user-agent.test.ts",
 			"tests2/core/node-modules-ring-fence.test.ts",
 			"tests2/core/package-files.test.ts",
@@ -439,8 +441,8 @@ export const INDIRECT_REPOSITORY_READ_RULES = Object.freeze([
 		id: "tool-result-filter-pi-gate-assets",
 		consumer: "tests2/integration/tool-result-filter-pi-gate.test.ts",
 		inputs: frozen([
-			"patches/@earendil-works+pi-agent-core+0.82.1.patch",
-			"patches/@earendil-works+pi-coding-agent+0.82.1.patch",
+			"patches/@earendil-works+pi-agent-core+0.84.1.patch",
+			"patches/@earendil-works+pi-coding-agent+0.84.1.patch",
 			"tests2/integration/tool-result-filter-pi-gate-scenario.mjs",
 		]),
 	},
@@ -726,6 +728,13 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		// The adapter is loaded from the installed Pi package selected by package metadata.
+		consumer: "tests2/core/pi-installed-contract.test.ts",
+		operations: frozen([
+			declaredExecutableOperation("dynamic-import", "pathToFileURL(adapterPath).href", ["impact:package-metadata"]),
+		]),
+	},
+	{
 		consumer: "tests2/core/pi-rpc-thinking-levels.test.ts",
 		operations: frozen([
 			allowedExecutableOperation("dynamic-import", "pathToFileURL(nestedCoreEntry).href", "resolved external nested package runtime"),
@@ -924,6 +933,25 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "test-owned generated Pi result-gate extension file",
 		reads: frozen([
 			{ expression: "gatePath!", count: 1 },
+		]),
+	},
+	{
+		// Installed Pi package roots and manifests are determined by the selected
+		// dependency set; package metadata changes must rerun this contract test.
+		consumer: "tests2/core/pi-installed-contract.test.ts",
+		declarations: frozen(["impact:package-metadata"]),
+		reads: frozen([
+			{ expression: "candidate", count: 1 },
+			{ expression: "path.join(installedPackageRoot(packageName), \"package.json\")", count: 1 },
+		]),
+	},
+	{
+		// This test discovers all shipped market-pack tool extensions. The market
+		// pack impact rule supplies the bounded input and cache closure.
+		consumer: "tests2/core/market-pack-tool-typebox-v1.test.ts",
+		declarations: frozen(["impact:market-packs"]),
+		reads: frozen([
+			{ expression: "extension", count: 1 },
 		]),
 	},
 	{

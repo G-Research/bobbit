@@ -57,7 +57,7 @@ diff --git a/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js b/nod
              const finalized = await finalizeExecutedToolCall(currentContext, assistantMessage, preparation, executed, config, signal);
              await emitToolExecutionEnd(finalized, emit);
              return finalized;
-@@ -446,13 +477,41 @@
+@@ -450,13 +481,41 @@
          };
      }
  }
@@ -100,7 +100,7 @@ diff --git a/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js b/nod
              updateEvents.push(Promise.resolve(emit({
                  type: "tool_execution_update",
                  toolCallId: prepared.toolCall.id,
-@@ -463,7 +522,7 @@
+@@ -467,7 +526,7 @@
          });
          acceptingUpdates = false;
          await Promise.all(updateEvents);
@@ -109,7 +109,7 @@ diff --git a/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js b/nod
      }
      catch (error) {
          acceptingUpdates = false;
-@@ -471,6 +530,7 @@
+@@ -475,6 +534,7 @@
          return {
              result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
              isError: true,
@@ -117,7 +117,7 @@ diff --git a/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js b/nod
          };
      }
      finally {
-@@ -480,6 +540,15 @@
+@@ -484,6 +544,15 @@
  async function finalizeExecutedToolCall(currentContext, assistantMessage, prepared, executed, config, signal) {
      let result = executed.result;
      let isError = executed.isError;
@@ -133,7 +133,7 @@ diff --git a/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js b/nod
      if (config.afterToolCall) {
          try {
              const afterResult = await config.afterToolCall({
-@@ -490,15 +559,38 @@
+@@ -494,15 +563,38 @@
                  isError,
                  context: currentContext,
              }, signal);
@@ -184,7 +184,7 @@ diff --git a/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js b/nod
 diff --git a/node_modules/@earendil-works/pi-agent-core/dist/types.d.ts b/node_modules/@earendil-works/pi-agent-core/dist/types.d.ts
 --- a/node_modules/@earendil-works/pi-agent-core/dist/types.d.ts
 +++ b/node_modules/@earendil-works/pi-agent-core/dist/types.d.ts
-@@ -55,6 +55,8 @@
+@@ -60,6 +60,8 @@
   * There is no deep merge for `content`, `details`, or `usage`.
   */
  export interface AfterToolCallResult {
@@ -193,7 +193,7 @@ diff --git a/node_modules/@earendil-works/pi-agent-core/dist/types.d.ts b/node_m
      content?: (TextContent | ImageContent)[];
      details?: unknown;
      isError?: boolean;
-@@ -115,6 +117,8 @@
+@@ -120,6 +122,8 @@
  export interface PrepareNextTurnContext extends ShouldStopAfterTurnContext {
  }
  export interface AgentLoopConfig extends SimpleStreamOptions {
@@ -217,17 +217,17 @@ diff --git a/node_modules/@earendil-works/pi-agent-core/dist/agent.js b/node_mod
      afterToolCall;
 +    // @internal Identity marker copied into the loop config by core session code.
 +    __bobbitCoreToolResultGateActive;
+     shouldStopAfterTurn;
      prepareNextTurn;
      prepareNextTurnWithContext;
-     activeRun;
-@@ -293,6 +295,7 @@
+@@ -299,6 +301,7 @@
              toolExecution: this.toolExecution,
              beforeToolCall: this.beforeToolCall,
              afterToolCall: this.afterToolCall,
 +            __bobbitCoreToolResultGateMarker: this.__bobbitCoreToolResultGateActive ? __bobbitCoreToolResultGateMarker : undefined,
-             prepareNextTurn: this.prepareNextTurnWithContext || this.prepareNextTurn
-                 ? async (context) => {
-                     if (this.prepareNextTurnWithContext) {
+             shouldStopAfterTurn: shouldStopAfterTurn
+                 ? async (context) => await shouldStopAfterTurn(context, this.signal)
+                 : undefined,
 diff --git a/node_modules/@earendil-works/pi-agent-core/dist/agent.d.ts b/node_modules/@earendil-works/pi-agent-core/dist/agent.d.ts
 --- a/node_modules/@earendil-works/pi-agent-core/dist/agent.d.ts
 +++ b/node_modules/@earendil-works/pi-agent-core/dist/agent.d.ts
@@ -237,18 +237,18 @@ diff --git a/node_modules/@earendil-works/pi-agent-core/dist/agent.d.ts b/node_m
      afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
 +    /** @internal Identity marker only Pi core session code can install. */
 +    __bobbitCoreToolResultGateActive?: boolean;
+     shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext, signal?: AbortSignal) => boolean | Promise<boolean>;
      prepareNextTurn?: (signal?: AbortSignal) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
      prepareNextTurnWithContext?: (context: PrepareNextTurnContext, signal?: AbortSignal) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
-     steeringMode?: QueueMode;
-@@ -41,6 +43,8 @@
+@@ -42,6 +44,8 @@
      onResponse?: SimpleStreamOptions["onResponse"];
      beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined>;
      afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
 +    /** @internal Identity marker only Pi core session code can install. */
 +    __bobbitCoreToolResultGateActive?: boolean;
+     shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext, signal?: AbortSignal) => boolean | Promise<boolean>;
      prepareNextTurn?: (signal?: AbortSignal) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
      prepareNextTurnWithContext?: (context: PrepareNextTurnContext, signal?: AbortSignal) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
-     private activeRun?;
 diff --git a/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.d.ts b/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.d.ts
 --- a/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.d.ts
 +++ b/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.d.ts

@@ -1878,6 +1878,24 @@ function unifiedSlideX(index: number, count: number): number {
 	return -(index * 100) / count;
 }
 
+/**
+ * Return the mounted preview frame that authenticated this message. Mobile
+ * rendering can retain multiple preview panes, so a first-match query would
+ * reject swipes from every later iframe (or validate against the wrong origin).
+ */
+export function authenticatedPreviewIframeForMessage(event: MessageEvent): HTMLIFrameElement | null {
+	for (const iframe of document.querySelectorAll<HTMLIFrameElement>(".goal-preview-panel iframe")) {
+		const src = iframe.getAttribute("src");
+		if (!src || src === "about:blank" || event.source !== iframe.contentWindow) continue;
+		try {
+			if (event.origin === new URL(iframe.src, window.location.href).origin) return iframe;
+		} catch {
+			// A malformed or no-longer-valid iframe source is never eligible.
+		}
+	}
+	return null;
+}
+
 /** Listen for postMessage from the preview iframe and drive the slider track.
  *  Also handles touch swipes on the chat / content panes. */
 function setupPreviewSwipe(): void {
@@ -1893,6 +1911,7 @@ function setupPreviewSwipe(): void {
 		const curIdx = unifiedMobilePaneIndex();
 		const activeTab = panes[curIdx];
 		if (activeTab?.kind !== "preview") return;
+		if (!authenticatedPreviewIframeForMessage(e)) return;
 		const track = getTrack();
 		if (!track) return;
 
@@ -1903,11 +1922,13 @@ function setupPreviewSwipe(): void {
 		if (e.data?.type === "preview-swipe-start") {
 			track.style.transition = "none";
 		} else if (e.data?.type === "preview-swipe-move") {
+			if (!Number.isFinite(e.data.dx)) return;
 			const dx: number = e.data.dx;
 			const dragPercent = (dx / paneW) * (100 / count);
 			const target = Math.max(unifiedSlideX(count - 1, count), Math.min(0, baseX + dragPercent));
 			track.style.transform = `translateX(${target}%)`;
 		} else if (e.data?.type === "preview-swipe-end") {
+			if (!Number.isFinite(e.data.dx)) return;
 			track.style.transition = "transform 0.3s ease-out";
 			const dx: number = e.data.dx;
 			const threshold = paneW * 0.2;

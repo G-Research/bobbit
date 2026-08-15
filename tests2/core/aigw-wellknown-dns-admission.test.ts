@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-	GATEWAY, filterValidatedProviderUrls, getAigwProviderDnsGuardHosts, removeAigw,
+	GATEWAY, discoverAigwModels, filterValidatedProviderUrls, getAigwProviderDnsGuardHosts, removeAigw,
 	replaceAigwProviderDnsGuardHosts, resetAgentDirStateForTests, translateWellKnown,
 } from "./helpers/aigw-wellknown-test-helpers.js";
 
@@ -66,6 +66,38 @@ describe("AIGW DNS admission lifecycle", () => {
 		assert.deepEqual(admitted.provider, {});
 		assert.equal(lookups, 1, "duplicate provider hostnames share one DNS admission");
 		assert.ok(Date.now() - started < 500, "DNS admission must stop at the shared deadline");
+	});
+
+	it("keeps persisted same-origin HTTP providers while rejecting cross-origin HTTP", async () => {
+		const configuredOrigin = "http://127.0.0.1:4096";
+		const models = { model: {
+			limit: { context: 128_000, output: 16_384 }, reasoning: false, modalities: { input: ["text"] },
+		} };
+		const config = { provider: {
+			local: { npm: "@ai-sdk/openai", options: { baseURL: `${configuredOrigin}/openai/v1` }, models },
+			redirected: { npm: "@ai-sdk/openai", options: { baseURL: "http://public.example/v1" }, models },
+		} };
+		const admitted = await filterValidatedProviderUrls(config, configuredOrigin, Date.now() + 250);
+		assert.deepEqual(Object.keys(admitted.provider ?? {}), ["local"]);
+		assert.equal(translateWellKnown(admitted, configuredOrigin)[0]?.baseUrl, `${configuredOrigin}/openai/v1`);
+	});
+
+	it("refuses a private gateway during an unpersisted probe", async () => {
+		await assert.rejects(
+			discoverAigwModels("http://127.0.0.1:11434", { allowPrivateGateway: false }),
+			/public HTTPS endpoint/,
+		);
+	});
+
+	it("rejects untrusted bracketed IPv6 literals without a DNS lookup", async () => {
+		let lookups = 0;
+		const admitted = await filterValidatedProviderUrls({ provider: { remote: {
+			options: { baseURL: "https://[2001:db8::1]/v1" }, models: {},
+		} } }, "https://gateway.example", Date.now() + 250, ((_hostname: string, _options: any, _callback: any) => {
+			lookups++;
+		}) as any, false);
+		assert.deepEqual(admitted.provider, {});
+		assert.equal(lookups, 0);
 	});
 
 });

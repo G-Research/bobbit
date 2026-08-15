@@ -420,6 +420,7 @@ describe("built-in file explorer panel", () => {
 
 	it("refreshes on the first idle and later non-idle to idle transitions while pruning vanished selection", async () => {
 		let statusCallback: ((value: { status: "idle" | "running" | "error" }) => void) | undefined;
+
 		let entries: Entry[] = [{ path: "keep.txt", name: "keep.txt", kind: "file" }];
 		const statusDispose = vi.fn();
 		const fakeHost = host({
@@ -427,10 +428,12 @@ describe("built-in file explorer panel", () => {
 			read: ({ path }) => ({ kind: "text", text: String(path) }),
 			diff: () => ({ kind: "empty" }),
 		}, { onStatus: (cb) => { statusCallback = cb; }, statusDispose });
-		const root = mount("refresh-lifecycle", fakeHost);
-		const keepItem = whenTreeItemRenders(root, "keep.txt");
-		await keepItem;
-		expect(statusCallback).toBeTypeOf("function");
+		const sid = `refresh-lifecycle-${++mountAttempt}`;
+		const root = mount(sid, fakeHost);
+		await vi.waitFor(() => {
+			expect(statusCallback).toBeTypeOf("function");
+			expect(row(root, "keep.txt")).not.toBeNull();
+		});
 		click(row(root, "keep.txt"));
 		await tick();
 		const rootStatusCount = () => fakeHost.callRoute.mock.calls.filter(([name, init]) => name === "list" && (init?.body as Record<string, unknown> | undefined)?.includeStatus === true).length;
@@ -448,14 +451,15 @@ describe("built-in file explorer panel", () => {
 		expect(row(root, "keep.txt").getAttribute("aria-selected")).toBe("true");
 
 		entries = [];
-		await createFileExplorerPanel().refresh?.({ __sessionId: "refresh-lifecycle" }, fakeHost as Parameters<ReturnType<typeof createFileExplorerPanel>["render"]>[1]);
+		await createFileExplorerPanel().refresh?.({ __sessionId: sid }, fakeHost as Parameters<ReturnType<typeof createFileExplorerPanel>["render"]>[1]);
 		await tick();
 		expect(root.textContent).toContain("This folder is empty.");
 		expect(root.textContent).toContain("Select a file to preview");
 		expect(root.querySelector('[role="status"]')?.textContent).toBe("Explorer refreshed.");
 
 		root.remove();
-		await Promise.resolve();
+		await vi.waitFor(() => expect(statusDispose).toHaveBeenCalledTimes(1));
+		await tick();
 		expect(statusDispose).toHaveBeenCalledTimes(1);
 	});
 
@@ -497,6 +501,21 @@ describe("built-in file explorer panel", () => {
 		remountList.resolve(list([{ path: "current.txt", name: "current.txt", kind: "file" }]));
 		await replacementItem;
 		expect(row(remounted, "old.txt")).toBeNull();
+	});
+
+	it("disposes status subscriptions through element disconnect without document mutation observation", async () => {
+		class SilentMutationObserver {
+			observe(): void {}
+			disconnect(): void {}
+		}
+		vi.stubGlobal("MutationObserver", SilentMutationObserver);
+		const statusDispose = vi.fn();
+		const fakeHost = host({ list: () => list([]) }, { statusDispose });
+		const root = mount(`disconnect-lifecycle-${++mountAttempt}`, fakeHost);
+		await vi.waitFor(() => expect(fakeHost.session.subscribe).toHaveBeenCalledTimes(1));
+
+		root.remove();
+		await vi.waitFor(() => expect(statusDispose).toHaveBeenCalledTimes(1));
 	});
 
 	it("queues one first-idle refresh that arrives during initialization", async () => {

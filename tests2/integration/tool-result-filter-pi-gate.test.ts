@@ -10,8 +10,8 @@ import { generateToolResultFilterExtension } from "../../src/server/agent/tool-r
 const require = createRequire(import.meta.url);
 const packageName = "@earendil-works/pi-coding-agent";
 const packagePatches = [
-	fileURLToPath(new URL("../../patches/@earendil-works+pi-agent-core+0.82.1.patch", import.meta.url)),
-	fileURLToPath(new URL("../../patches/@earendil-works+pi-coding-agent+0.82.1.patch", import.meta.url)),
+	fileURLToPath(new URL("../../patches/@earendil-works+pi-agent-core+0.84.1.patch", import.meta.url)),
+	fileURLToPath(new URL("../../patches/@earendil-works+pi-coding-agent+0.84.1.patch", import.meta.url)),
 ];
 const scenarioFile = fileURLToPath(new URL("./tool-result-filter-pi-gate-scenario.mjs", import.meta.url));
 const scenarioSuccess = "PI_RESULT_GATE_SCENARIO_PASSED\n";
@@ -125,7 +125,7 @@ function createPatchedPiHarness(): string {
 	const sourcePackageJson = join(sourcePackage, "package.json");
 	const sourceNodeModules = dirname(dirname(sourcePackage));
 	const version = JSON.parse(readFileSync(sourcePackageJson, "utf8")).version;
-	expect(version).toBe("0.82.1");
+	expect(version).toBe("0.84.1");
 
 	const root = mkdtempSync(join(tmpdir(), "bobbit-pi-result-gate-"));
 	const targetPackage = join(root, "node_modules", "@earendil-works", "pi-coding-agent");

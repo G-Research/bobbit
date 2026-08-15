@@ -707,7 +707,7 @@ export function generateMcpProxyExtension(
   });`;
 	}).join('\n');
 
-	return `import { Type } from "@sinclair/typebox";
+	return `import { Type } from "typebox";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -766,7 +766,7 @@ export function generateMcpMetaExtension(
 				args: { type: "object" },
 			},
 		});
-		return `import { Type } from "@sinclair/typebox";
+		return `import { Type } from "typebox";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -793,7 +793,7 @@ export default function(pi) {
 	const schema = jsonSchemaToTypeBox(buildMetaToolInputSchema(ops));
 	const opNames = ops.map(o => o.name);
 
-	return `import { Type } from "@sinclair/typebox";
+	return `import { Type } from "typebox";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";

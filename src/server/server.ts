@@ -681,7 +681,7 @@ import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/even
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, configureAigwRuntimeFlags, normalizeAigwModelString } from "./agent/aigw-manager.js";
 import { aigwUserAgentHeaders } from "./agent/aigw-user-agent.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
-import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, findSessionSelectableModel } from "./agent/model-registry.js";
+import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, findSessionSelectableModel, normalizeCustomProviderBaseUrl } from "./agent/model-registry.js";
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
 import { modelProbeFailure, modelProbeFailureFromHttpStatus } from "./agent/model-probe-result.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
@@ -1243,6 +1243,11 @@ let _dockerAvailCache: { available: boolean; error?: string; ts: number } | null
 const _prCache = new Map<string, { data: any; ts: number; ttl: number }>();
 const PR_NULL_CACHE_TTL_MS = 30_000; // 30 seconds for null (no-PR) results
 const _prInFlight = new Map<string, Promise<any | null>>();
+// GoalManager owns setup single-flight. This smaller route-owned guard owns
+// only the follow-on retry side effects (scheduler/team start), so duplicate
+// retry HTTP requests cannot attach a second start callback while still letting
+// a persisted retrying goal recover after a process restart.
+const _retrySetupRouteFlights = new WeakMap<object, Set<string>>();
 const PR_STATUS_FIELDS = "state,url,number,title,mergeable,headRefName,baseRefName,reviewDecision";
 const PR_HEAD_LIST_FIELDS = `${PR_STATUS_FIELDS},updatedAt,headRepository,headRepositoryOwner,isCrossRepository`;
 const PR_MERGE_PERMISSIONS_QUERY = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){viewerPermission pullRequest(number:$number){viewerCanMergeAsAdmin}}}";
@@ -9048,6 +9053,20 @@ async function handleApiRoute(
 			}
 		}
 
+		// Goal-scoped sessions are another start path, independent of team mode.
+		// Never let one race worktree setup: GoalStore migrates legacy records to
+		// ready on load, while every newly-created goal must be exactly ready.
+		if (goalId && goalForSession?.setupStatus !== undefined && goalForSession.setupStatus !== "ready") {
+			json({
+				error: goalForSession.setupStatus === "error"
+					? "Goal setup failed. Retry setup before starting a session."
+					: "Goal setup is still in progress. Wait for verified readiness before starting a session.",
+				code: "GOAL_SETUP_INCOMPLETE",
+				goalId,
+			}, 409);
+			return;
+		}
+
 		let resolvedProjectId = explicitProjectId;
 		let resolvedProject: RegisteredProject | undefined;
 		let provisionalProjectId: string | undefined;
@@ -10012,37 +10031,105 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/goals/:id/retry-setup � retry worktree setup for a goal in error state
+	// POST /api/goals/:id/retry-setup — retry worktree setup for a failed goal.
 	const retrySetupMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/retry-setup$/);
 	if (retrySetupMatch && req.method === "POST") {
 		const goalId = retrySetupMatch[1];
 		const retryGoalManager = getGoalManagerForGoal(goalId);
-		const ok = retryGoalManager.retrySetup(goalId);
-		if (!ok) {
-			json({ error: "Goal not found or not in error state" }, 400);
+		const current = retryGoalManager.getGoal(goalId);
+		if (!current) {
+			json({ error: "Goal not found" }, 404);
 			return;
 		}
-		json({ ok: true });
-		// Fire-and-forget async worktree setup (and optionally start team)
+		const currentStatus: string | undefined = current.setupStatus;
+		const routeFlights = _retrySetupRouteFlights.get(retryGoalManager as object);
+		// This request already owns the setup/start continuation. The GoalManager
+		// will coalesce the setup promise; this guard also coalesces the route's
+		// scheduler/team side effect.
+		if (routeFlights?.has(goalId)) {
+			broadcastToAll({ type: "goal_state_changed", goalId });
+			json({ ok: true, coalesced: true, setupStatus: currentStatus });
+			return;
+		}
+
+		const ok = retryGoalManager.retrySetup(goalId);
+		if (!ok) {
+			// `preparing` only joins when GoalManager has a live setup promise. A
+			// persisted preparing row with no promise is an interrupted setup, not a
+			// successful coalesced retry; report it truthfully instead of stranding it.
+			const error = currentStatus === "preparing"
+				? "Goal setup is preparing but no active setup flight exists; restart recovery must mark it failed before it can be retried"
+				: "Goal setup is not in an actionable error state";
+			json({ error, setupStatus: currentStatus ?? "ready" }, 409);
+			return;
+		}
+		// A live preparing setup is owned by the create/scheduler path. Joining it
+		// must not add a second Team Lead start callback.
+		if (currentStatus === "preparing") {
+			broadcastToAll({ type: "goal_state_changed", goalId });
+			json({ ok: true, coalesced: true, setupStatus: currentStatus });
+			return;
+		}
+
 		const retryGoal = retryGoalManager.getGoal(goalId);
+		const retryStatus: string = retryGoal?.setupStatus ?? "preparing";
+		// Publish the persisted retrying transition before returning so every
+		// client invalidates stale error banners and controls.
+		broadcastToAll({ type: "goal_state_changed", goalId });
+		json({ ok: true, coalesced: false, setupStatus: retryStatus });
+
+		const ownedFlights = routeFlights ?? new Set<string>();
+		if (!routeFlights) _retrySetupRouteFlights.set(retryGoalManager as object, ownedFlights);
+		const trackRetryFlight = (flight: Promise<void>): void => {
+			ownedFlights.add(goalId);
+			void flight.then(
+				() => ownedFlights.delete(goalId),
+				() => ownedFlights.delete(goalId),
+			);
+		};
+		const publishSettledRetry = (err?: unknown): void => {
+			const settled = retryGoalManager.getGoal(goalId);
+			broadcastToAll({ type: "goal_state_changed", goalId });
+			if (settled?.setupStatus === "ready") {
+				broadcastToAll({ type: "goal_setup_complete", goalId });
+				if (err) console.error("[goal] Auto-start team failed after verified retry setup:", err);
+			} else {
+				broadcastToAll({ type: "goal_setup_error", goalId, error: String(err ?? settled?.setupError ?? "Goal setup failed") });
+			}
+		};
+
+		// Children must retain the unified per-root scheduler permit. It waits for
+		// their own setup flight before TeamManager can create a lead. A
+		// dependency-blocked child still repairs its worktree, but must remain
+		// teamless until the dependency scheduler explicitly unblocks it.
+		if (retryGoal?.autoStartTeam && retryGoal.parentGoalId) {
+			if (retryGoal.state === "blocked") {
+				const flight = retryGoalManager.setupWorktree(goalId);
+				trackRetryFlight(flight);
+				void flight.then(() => publishSettledRetry(), (err) => publishSettledRetry(err));
+				return;
+			}
+			const outcome = verificationHarness.requestChildStart(goalId);
+			if (outcome === "capacity-blocked") {
+				retryGoalManager.updateGoal(goalId, { state: "blocked" })
+					.then(() => broadcastToAll({ type: "goal_state_changed", goalId }))
+					.catch((err) => console.warn(`[goal] failed to mark retrying child ${goalId} capacity-blocked:`, err));
+				return;
+			}
+			// The scheduler started the authoritative setup flight. Track it so a
+			// second POST coalesces instead of requesting another child-team start.
+			const flight = retryGoalManager.setupWorktree(goalId);
+			trackRetryFlight(flight);
+			return;
+		}
 		if (retryGoal?.autoStartTeam) {
-			retryGoalManager.setupWorktreeAndStartTeam(goalId, () => teamManager.startTeam(goalId)).then(() => {
-				broadcastToAll({ type: "goal_setup_complete", goalId });
-			}).catch((err) => {
-				const g = retryGoalManager.getGoal(goalId);
-				if (g?.setupStatus === "ready") {
-					broadcastToAll({ type: "goal_setup_complete", goalId });
-					console.error("[goal] Auto-start team failed on retry (worktree ready):", err);
-				} else {
-					broadcastToAll({ type: "goal_setup_error", goalId, error: String(err) });
-				}
-			});
+			const flight = retryGoalManager.setupWorktreeAndStartTeam(goalId, () => teamManager.startTeam(goalId));
+			trackRetryFlight(flight);
+			void flight.then(() => publishSettledRetry(), (err) => publishSettledRetry(err));
 		} else {
-			retryGoalManager.setupWorktree(goalId).then(() => {
-				broadcastToAll({ type: "goal_setup_complete", goalId });
-			}).catch((err) => {
-				broadcastToAll({ type: "goal_setup_error", goalId, error: String(err) });
-			});
+			const flight = retryGoalManager.setupWorktree(goalId);
+			trackRetryFlight(flight);
+			void flight.then(() => publishSettledRetry(), (err) => publishSettledRetry(err));
 		}
 		return;
 	}
@@ -12961,16 +13048,26 @@ async function handleApiRoute(
 	// POST /api/custom-providers/test — discover models without persisting
 	if (url.pathname === "/api/custom-providers/test" && req.method === "POST") {
 		const body = await readBody(req);
-		if (!body || !body.type || !body.baseUrl) {
-			json({ error: "Missing required fields: type, baseUrl" }, 400);
+		const customProviderTypes = new Set(["ollama", "lmstudio", "llama.cpp", "vllm", "manual", "openai-images", "gemini-images", "google-imagen"]);
+		if (!body || typeof body.type !== "string" || !customProviderTypes.has(body.type) || typeof body.baseUrl !== "string") {
+			json({ error: "Missing or invalid required fields: type, baseUrl" }, 400);
+			return;
+		}
+		// A probe is deliberately untrusted: it cannot scan localhost/private
+		// services before an operator explicitly persists a provider record.
+		let baseUrl: string;
+		try {
+			baseUrl = normalizeCustomProviderBaseUrl(body.baseUrl, false);
+		} catch (error) {
+			json({ error: error instanceof Error ? error.message : "Invalid custom provider URL" }, 400);
 			return;
 		}
 		const config: CustomProviderConfig = {
-			id: body.id || "test-" + Date.now(),
-			name: body.name || body.type,
-			type: body.type,
-			baseUrl: body.baseUrl,
-			...(body.apiKey ? { apiKey: body.apiKey } : {}),
+			id: typeof body.id === "string" ? body.id : "test-" + Date.now(),
+			name: typeof body.name === "string" ? body.name : body.type,
+			type: body.type as CustomProviderConfig["type"],
+			baseUrl,
+			...(typeof body.apiKey === "string" ? { apiKey: body.apiKey } : {}),
 		};
 		try {
 			const models = await discoverModelsForConfig(config);
@@ -12984,19 +13081,32 @@ async function handleApiRoute(
 	// POST /api/custom-providers — add or update a custom provider config
 	if (url.pathname === "/api/custom-providers" && req.method === "POST") {
 		const body = await readBody(req);
-		if (!body || !body.id || !body.type || !body.baseUrl) {
-			json({ error: "Missing required fields: id, type, baseUrl" }, 400);
+		const customProviderTypes = new Set(["ollama", "lmstudio", "llama.cpp", "vllm", "manual", "openai-images", "gemini-images", "google-imagen"]);
+		if (!body || typeof body.id !== "string" || !body.id.trim() || typeof body.type !== "string" || !customProviderTypes.has(body.type) || typeof body.baseUrl !== "string") {
+			json({ error: "Missing or invalid required fields: id, type, baseUrl" }, 400);
+			return;
+		}
+		let baseUrl: string;
+		try {
+			// This route persists the operator-selected endpoint, so it is the only
+			// place allowed to enable local/private custom-provider transports.
+			baseUrl = normalizeCustomProviderBaseUrl(body.baseUrl, true);
+		} catch (error) {
+			json({ error: error instanceof Error ? error.message : "Invalid custom provider URL" }, 400);
 			return;
 		}
 		const configs = (preferencesStore.get("customProviders") as CustomProviderConfig[] | undefined) || [];
 		const existing = configs.findIndex((c: CustomProviderConfig) => c.id === body.id);
+		// `trusted` is server-derived at the authenticated configuration boundary;
+		// callers cannot smuggle it into a one-off discovery request.
 		const config: CustomProviderConfig = {
 			id: body.id,
-			name: body.name || body.id,
-			type: body.type,
-			baseUrl: body.baseUrl,
-			...(body.apiKey ? { apiKey: body.apiKey } : {}),
-			...(body.models ? { models: body.models } : {}),
+			name: typeof body.name === "string" ? body.name : body.id,
+			type: body.type as CustomProviderConfig["type"],
+			baseUrl,
+			trusted: true,
+			...(typeof body.apiKey === "string" ? { apiKey: body.apiKey } : {}),
+			...(Array.isArray(body.models) ? { models: body.models } : {}),
 		};
 		if (existing >= 0) {
 			configs[existing] = config;
@@ -13158,7 +13268,10 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			const models = await discoverAigwModels(body.url);
+			// A one-off probe has not been persisted as trusted gateway configuration.
+			// It may contact public HTTPS endpoints only; private/localhost gateways are
+			// available after the explicit configure action records them server-side.
+			const models = await discoverAigwModels(body.url, { allowPrivateGateway: false });
 			json({ ok: true, models });
 		} catch (err: any) {
 			jsonError(502, err);
@@ -13222,15 +13335,20 @@ async function handleApiRoute(
 				json({ ok: false, error: "No AI Gateway configured." });
 				return;
 			}
-			const baseUrl = aigwUrl.replace(/\/+$/, "");
-			const modelBaseUrl = (resolved.baseUrl || baseUrl).replace(/\/+$/, "");
-			if (resolved.api !== "openai-responses" && resolved.api !== "openai-completions") {
-				// Converse and future provider-native APIs must be exercised through
-				// pi-ai; never relabel them as a root chat-completions request.
+			const configuredGateway = new URL(aigwUrl);
+			const resolvedEndpoint = new URL(resolved.baseUrl || configuredGateway.href);
+			if (
+				(resolved.api !== "openai-responses" && resolved.api !== "openai-completions")
+				|| resolvedEndpoint.origin !== configuredGateway.origin
+			) {
+				// Provider-native and well-known cross-origin adapters are exercised by
+				// pi-ai, whose admitted provider configuration owns their transport. This
+				// REST probe only ever connects to the explicitly configured gateway.
 				const result = await testModelPreference(preferencesStore, normalizedPref);
 				json(result, result.status || (result.ok ? 200 : 502));
 				return;
 			}
+			const modelBaseUrl = `${configuredGateway.origin}${resolvedEndpoint.pathname}`.replace(/\/+$/, "");
 			const started = Date.now();
 			try {
 				let resp: Response;
@@ -13288,8 +13406,7 @@ async function handleApiRoute(
 	if (url.pathname.startsWith("/api/aigw/v1/") && getAigwUrl(preferencesStore)) {
 		const aigwUrl = getAigwUrl(preferencesStore)!;
 		const subPath = url.pathname.replace("/api/aigw/v1/", "/v1/");
-		const targetUrl = `${aigwUrl}${subPath}${url.search}`;
-		proxyRequest(targetUrl, req, res);
+		void proxyRequest(aigwUrl, `${subPath}${url.search}`, req, res);
 		return;
 	}
 

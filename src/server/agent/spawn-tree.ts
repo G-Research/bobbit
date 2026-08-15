@@ -172,6 +172,12 @@ interface InternalTracked extends TrackedChild {
 
 const TREE_EXIT_POLL_MS = 25;
 const TREE_EXIT_SETTLE_MS = 1_500;
+const MAX_TRACKED_COMMAND_BYTES = 4 * 1024;
+const MAX_TRACKED_ARGUMENTS = 256;
+const MAX_TRACKED_ARGUMENT_BYTES = 64 * 1024;
+const MAX_TRACKED_CWD_BYTES = 8 * 1024;
+const MAX_TRACKED_ENV_ENTRIES = 1_024;
+const MAX_TRACKED_ENV_BYTES = 256 * 1024;
 const POSIX_SENTINEL_READINESS_FAILURE = "POSIX sentinel ownership was not established";
 const WINDOWS_JOB_READINESS_FAILURE = "Windows Job ownership was not established";
 
@@ -394,12 +400,45 @@ function withPosixSentinelReadyPipe(stdio: StdioOptions | undefined): StdioOptio
 	return [standard, standard, standard, "pipe"] as StdioOptions;
 }
 
+/**
+ * Keep the supervisor transport bounded even when a workflow command is large.
+ * Commands remain typed argv all the way to `spawn`; the POSIX sentinel uses
+ * `exec "$@"`, and the Windows supervisor quotes every argv element before
+ * CreateProcess. Neither path interpolates command data into a shell program.
+ */
+function assertBoundedSpawnInput(cmd: string, args: readonly string[], opts: SpawnTrackedOptions): void {
+	if (typeof cmd !== "string" || cmd.includes("\0") || Buffer.byteLength(cmd, "utf8") > MAX_TRACKED_COMMAND_BYTES) {
+		throw new Error("Tracked command executable is invalid or exceeds the size limit");
+	}
+	if (args.length > MAX_TRACKED_ARGUMENTS) throw new Error("Tracked command has too many arguments");
+	let argumentBytes = 0;
+	for (const arg of args) {
+		if (typeof arg !== "string" || arg.includes("\0")) throw new Error("Tracked command argument is invalid");
+		argumentBytes += Buffer.byteLength(arg, "utf8");
+		if (argumentBytes > MAX_TRACKED_ARGUMENT_BYTES) throw new Error("Tracked command arguments exceed the size limit");
+	}
+	if (opts.cwd !== undefined && (opts.cwd.includes("\0") || Buffer.byteLength(opts.cwd, "utf8") > MAX_TRACKED_CWD_BYTES)) {
+		throw new Error("Tracked command working directory is invalid or exceeds the size limit");
+	}
+	if (opts.env) {
+		const entries = Object.entries(opts.env);
+		if (entries.length > MAX_TRACKED_ENV_ENTRIES) throw new Error("Tracked command environment has too many entries");
+		let envBytes = 0;
+		for (const [key, value] of entries) {
+			if (key.includes("=") || key.includes("\0") || value?.includes("\0")) throw new Error("Tracked command environment is invalid");
+			envBytes += Buffer.byteLength(key, "utf8") + (value === undefined ? 0 : Buffer.byteLength(value, "utf8"));
+			if (envBytes > MAX_TRACKED_ENV_BYTES) throw new Error("Tracked command environment exceeds the size limit");
+		}
+	}
+}
+
 /** Spawn a process whose entire tree we can later kill. */
 export function spawnTracked(
 	cmd: string,
 	args: readonly string[],
 	opts: SpawnTrackedOptions = {},
 ): TrackedChild {
+	assertBoundedSpawnInput(cmd, args, opts);
 	const isWin = (opts.platform ?? process.platform) === "win32";
 	const spawnImpl = opts.spawnImpl ?? spawn;
 	const killGraceMs = opts.killGraceMs ?? 5000;

@@ -10,6 +10,7 @@ import { bobbitDir, bobbitStateDir, headquartersDir, globalAgentDir } from "../b
 import { caCertPath } from "../auth/tls.js";
 import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { TOOLS_DIR, type ToolManager } from "./tool-manager.js";
+import { PiAssistantStreamNormalizer } from "../../shared/assistant-stream-delta.js";
 import { THINKING_LEVELS, type ThinkingLevel } from "../../shared/thinking-levels.js";
 import { resolveBuiltinPacksDir } from "./builtin-packs.js";
 import { scopePaths } from "./pack-types.js";
@@ -547,6 +548,8 @@ export class RpcBridge {
 	private stderrTail: string[] = [];
 	/** Cleared immediately after the single private stdin write. */
 	private toolResultFilterBootstrap: ToolResultFilterGateCredential | undefined;
+	/** Rebuilds Pi 0.84 delta-only RPC updates for Bobbit's cumulative pipeline. */
+	private readonly assistantStreamNormalizer = new PiAssistantStreamNormalizer();
 	private readonly clock: Clock = realClock;
 
 	constructor(
@@ -817,6 +820,7 @@ export class RpcBridge {
 		// Handle spawn errors (e.g. ENOENT when executable not found) — without this
 		// the error becomes an uncaught exception and crashes the gateway.
 		this.process!.on("error", (err: NodeJS.ErrnoException) => {
+			this.assistantStreamNormalizer.reset();
 			console.error(`[rpc-bridge] Process error: ${err.code || err.message}${this.options.cwd ? ` cwd=${this.options.cwd}` : ""}`);
 			for (const [, p] of this.pending) {
 				this.clock.clearTimeout(p.timeout);
@@ -827,6 +831,7 @@ export class RpcBridge {
 		});
 
 		this.process!.on("exit", (code, signal) => {
+			this.assistantStreamNormalizer.reset();
 			const reason = signal ? `signal ${signal}` : `code ${code}`;
 			const stderrContext = this.stderrTail.length > 0
 				? `\n  Last stderr:\n    ${this.stderrTail.slice(-5).join("\n    ")}`
@@ -1243,8 +1248,9 @@ export class RpcBridge {
 			this.pending.delete(parsed.id);
 			p.resolve(parsed);
 		} else {
-			this.recordPiExtensionLoadFailureFromEvent(parsed);
-			const normalized = normalizeToolResultErrorEvent(parsed);
+			const streamNormalized = this.assistantStreamNormalizer.normalize(parsed);
+			this.recordPiExtensionLoadFailureFromEvent(streamNormalized);
+			const normalized = normalizeToolResultErrorEvent(streamNormalized);
 			// Agent event — forward to listeners
 			for (const listener of this.eventListeners) {
 				listener(normalized);

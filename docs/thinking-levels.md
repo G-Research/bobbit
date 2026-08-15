@@ -114,7 +114,7 @@ old down-only walk did — the fix is strictly additive for the
 `off`-unsupported case. Concretely:
 
 - `xhigh` on Sonnet 4.6 (no xhigh) clamps to `high`.
-- `max` on Opus 4.8 clamps to `xhigh`; `max` on a Pi `0.82.1` Opus 5 catalog
+- `max` on Opus 4.8 clamps to `xhigh`; `max` on a Pi `0.84.1` Opus 5 catalog
   row stays `max` because that exact row advertises it.
 - `xhigh` on a non-reasoning model (e.g. Haiku) clamps to `off`.
 - `off` on Fable (`off` unsupported) clamps **up** to `minimal`; `high` and
@@ -353,7 +353,7 @@ the wire:
 | Test | What it pins |
 |---|---|
 | `tests2/core/thinking-levels.test.ts` | Capability matrix for Opus 4.5/4.6/4.7/4.8, dotted Opus ids, AIGW-routed Opus ids, Sonnet 4.6, GPT 5.x, non-reasoning models, clamping behaviour, and the cross-provider-collision pin. It also covers map-present cases including Fable's `{off:null, xhigh:"xhigh", max:"max"}` and GPT 5.6 `max` exposure. |
-| `tests2/core/model-utils.test.ts` and `tests2/core/models-api.test.ts` | Pi `0.82.1` direct Anthropic and supported Bedrock Opus 5 rows advertise exact `{xhigh, max}` metadata and the complete supported ladder. |
+| `tests2/core/model-utils.test.ts` and `tests2/core/models-api.test.ts` | Pi `0.84.1` direct Anthropic and supported Bedrock Opus 5 rows advertise exact `{xhigh, max}` metadata and the complete supported ladder. |
 | `tests2/dom/client-combined-model-thinking-selection.test.ts` | The picker sends one clamped `set_model` tuple, authoritative state replaces both optimistic fields, and selection errors request `get_state`. |
 | `tests2/core/controlled-model-fallback.test.ts` | Combined and standalone selections persist only verified complete tuples; failed or partial writes correct both fields and use bounded rollback/restart recovery. |
 | `tests2/core/fable-thinking-levels-repro.test.ts` | Regression repro for the Fable-specific outcome — forced adaptive thinking (`off` dropped) with the selector present. |
@@ -389,7 +389,7 @@ in the wiring between the shared module and the UI / server boundary.
 - [Spawn-time model pinning](internals.md#spawn-time-model-pinning) — how
   setup passes a selected, clamped level into the agent CLI args so there is no
   boot-time race.
-- [Pi runtime compatibility](pi-runtime-compatibility.md) — current Pi `0.82.1`
+- [Pi runtime compatibility](pi-runtime-compatibility.md) — current Pi `0.84.1`
   package, Opus 5 catalog, exact tuple, spawn, audit, and verification status.
 - [Pi 0.77 / Claude Opus 4.8 compatibility](pi-0.77-opus-4.8.md) — historical
   package, ranking, xhigh, spawn, transcript, and regression-test notes.

@@ -15,6 +15,7 @@ import {
 	projectCorrelatedPromptMessage,
 	promptAuthorBindingMatchesText,
 	purgeAuthorSidecar,
+	selectLatestPromptAuthorBinding,
 	readAuthorSidecar,
 	type PromptAuthorBinding,
 	type PromptAuthorDispatchInput,
@@ -99,6 +100,54 @@ function echoedBinding(
 		},
 	};
 }
+
+describe("author sidecar lifecycle evidence", () => {
+	it("selects the newest modern attempt by dispatch epoch before accepted time", () => {
+		const digest = digestPromptModelText("identical text")!;
+		const bindings = foldAuthorSidecarRecords([{
+			schemaVersion: 2,
+			type: "prompt-author",
+			promptId: "intent-order",
+			intentId: "intent-order",
+			attemptId: "attempt:old",
+			dispatchEpoch: 10,
+			dispatchedAt: 9_000,
+			modelTextDigest: digest,
+			source: "user",
+			author: LOCAL_USER_AUTHOR,
+		}, {
+			schemaVersion: 2,
+			type: "prompt-author-settlement",
+			promptId: "intent-order",
+			intentId: "intent-order",
+			attemptId: "attempt:old",
+			settledAt: 11,
+			outcome: "cancelled",
+		}, {
+			schemaVersion: 2,
+			type: "prompt-author",
+			promptId: "intent-order",
+			intentId: "intent-order",
+			attemptId: "dismiss:new",
+			dispatchEpoch: 20,
+			dispatchedAt: 20,
+			modelTextDigest: digest,
+			source: "user",
+			author: LOCAL_USER_AUTHOR,
+		}, {
+			schemaVersion: 2,
+			type: "prompt-author-settlement",
+			promptId: "intent-order",
+			intentId: "intent-order",
+			attemptId: "dismiss:new",
+			settledAt: 20,
+			outcome: "cancelled",
+		}]);
+
+		expect(selectLatestPromptAuthorBinding(bindings, (binding) => binding.intentId === "intent-order"))
+			.toMatchObject({ attemptId: "dismiss:new", settlement: { outcome: "cancelled" } });
+	});
+});
 
 describe("author sidecar v2 persistence", () => {
 	it("stores v2 digest rows in private secrets without prompt plaintext", () => {

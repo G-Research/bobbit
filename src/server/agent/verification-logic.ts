@@ -7,6 +7,7 @@
 
 import type { GateSignal, GateSignalStep } from "./gate-store.js";
 import type { VerifyStep } from "./workflow-store.js";
+import { compileSafeRegex, MAX_SAFE_REGEX_PATTERN_BYTES } from "./safe-regex.js";
 
 // ---------------------------------------------------------------------------
 // Transient error detection
@@ -349,6 +350,89 @@ export const QA_NON_TRANSIENT_PATTERNS = [
 	"Agent did not call verification_result",
 ];
 
+/**
+ * Identify the bridge's explicit reviewer-contention rejection. Both clauses
+ * are required: a generic "already processing" status is not enough to
+ * retry, and a streamingBehavior reference alone may describe configuration.
+ *
+ * This is deliberately separate from provider backoff. Contention retries use
+ * the ordinary bounded verification retry policy rather than a rate-limit
+ * backoff loop.
+ */
+export function isReviewerBusyError(output: string): boolean {
+	return !!output && /^Agent is already processing\.\s*Specify streamingBehavior \('steer' or 'followUp'\) to queue the message\.?$/i.test(output.trim());
+}
+
+const VERIFIER_FAILURE_PREFIX = "(?:LLM review|Agent QA) failed:";
+const VERIFIER_BUSY_PARKED_ENVELOPE = "Verifier prompt parked after reviewer contention: ";
+const VERIFIER_BUSY_TRANSPORT = "Agent is already processing\\.\\s*Specify streamingBehavior \\('steer' or 'followUp'\\) to queue the message\\.?";
+const VERIFIER_RECEIPT_TIMEOUT = "Verifier prompt [a-z0-9][a-z0-9-]* did not dispatch within \\d+ms";
+const VERIFIER_RESTART_BEFORE_DISPATCH = "Verifier (?:session [a-z0-9][a-z0-9-]* (?:restarted|was terminated) before dispatch|prompt [a-z0-9][a-z0-9-]* was cancelled before dispatch)";
+// describeProviderBackoff() appends this durable diagnostic to a failed step.
+// Permit only its fixed shape after an otherwise exact infrastructure envelope;
+// never scan a reviewer finding for a phrase that merely resembles one.
+const VERIFIER_BACKOFF_SUFFIX = "(?:\\s+Last turn hit a provider (?:rate-limit|overload|backoff) error(?:[\\s\\S]*))?";
+const VERIFIER_RECOVERY_PREFIX = "Reviewer agent was not ready / timed out while (?:resuming|sending post-continuation reminder) after server restart:\\s*";
+
+/**
+ * The verifier receipt's bounded dispatch wait elapsed while its durable row
+ * remained queued. This is queue contention, not reviewer content or provider
+ * configuration. It is intentionally verifier-scoped: ordinary session prompt
+ * delivery uses its tick-zero queue redrain rather than verification retries.
+ */
+export function isVerifierPromptDispatchTimeoutError(output: string): boolean {
+	return !!output && new RegExp(
+		`^(?:${VERIFIER_FAILURE_PREFIX}\\s*|${VERIFIER_RECOVERY_PREFIX})${VERIFIER_RECEIPT_TIMEOUT}${VERIFIER_BACKOFF_SUFFIX}$`,
+		"i",
+	).test(output.trim());
+}
+
+/**
+ * Match only the complete verifier transport envelope. SessionManager may
+ * park the same bridge rejection after its bounded queue redrains, but that
+ * marker remains verifier-only and must immediately precede the full bridge
+ * signature. A reviewer finding that quotes either message is content, not
+ * infrastructure.
+ */
+export function isVerifierBusyTransportError(output: string): boolean {
+	return !!output && new RegExp(
+		`^${VERIFIER_FAILURE_PREFIX}\\s*(?:${VERIFIER_BUSY_PARKED_ENVELOPE})?${VERIFIER_BUSY_TRANSPORT}$`,
+		"i",
+	).test(output.trim());
+}
+
+/**
+ * A verifier receipt was fenced because restart/termination won before its
+ * provider dispatch. The explicit harness envelope prevents a review summary
+ * mentioning restart from being retried as infrastructure.
+ */
+export function isVerifierRestartBeforeDispatchError(output: string): boolean {
+	if (!output) return false;
+	const text = output.trim();
+	return new RegExp(
+		`^(?:${VERIFIER_FAILURE_PREFIX}\\s*|${VERIFIER_RECOVERY_PREFIX})${VERIFIER_RESTART_BEFORE_DISPATCH}${VERIFIER_BACKOFF_SUFFIX}$`,
+		"i",
+	).test(text);
+}
+
+/** Verifier-only transient policy; generic SessionManager policy stays narrow. */
+export function isTransientVerifierReviewError(output: string): boolean {
+	if (isNonRetryableAgentError(output)) return false;
+	return isTransientReviewError(output)
+		|| isVerifierBusyTransportError(output)
+		|| isVerifierPromptDispatchTimeoutError(output)
+		|| isVerifierRestartBeforeDispatchError(output);
+}
+
+/** Verifier-only QA variant, preserving QA's ordinary stricter policy. */
+export function isTransientVerifierQaError(output: string): boolean {
+	if (isNonRetryableAgentError(output)) return false;
+	return isTransientQaError(output)
+		|| isVerifierBusyTransportError(output)
+		|| isVerifierPromptDispatchTimeoutError(output)
+		|| isVerifierRestartBeforeDispatchError(output);
+}
+
 function matchesAnyTransient(output: string): boolean {
 	if (TRANSIENT_ERROR_PATTERNS.some(pattern => output.includes(pattern))) return true;
 	if (TRANSIENT_ERROR_REGEXES.some(re => re.test(output))) return true;
@@ -359,7 +443,11 @@ function matchesAnyTransient(output: string): boolean {
 	return PROVIDER_BACKOFF_REGEXES.some(re => re.test(output));
 }
 
-/** Check if an LLM review error output matches a transient failure pattern. */
+/**
+ * Check if an ordinary LLM review error output matches a transient failure pattern.
+ * Verifier transport contention is intentionally excluded; see
+ * `isTransientVerifierReviewError()` at the harness boundary.
+ */
 export function isTransientReviewError(output: string): boolean {
 	return matchesAnyTransient(output);
 }
@@ -485,7 +573,7 @@ export function describeProviderBackoff(session: BackoffSnapshot | undefined): s
 	return ` Last turn hit a provider ${kind} error${attemptPart}${pendingPart}. Check your provider quota / subscription rate limits. (Error: ${snippet})`;
 }
 
-/** Check if an agent-qa error output matches a transient failure pattern (stricter than LLM reviews). */
+/** Check if an ordinary agent-qa error output matches a transient failure pattern (stricter than LLM reviews). */
 export function isTransientQaError(output: string): boolean {
 	if (QA_NON_TRANSIENT_PATTERNS.some(pattern => output.includes(pattern))) return false;
 	return matchesAnyTransient(output);
@@ -630,10 +718,20 @@ export function readyToMergeUnresolvedBuiltinFailure(gateId: string, resolvedCmd
  * Rules:
  * - If exitCode === 0: the command was expected to fail but succeeded → fail
  * - If no errorPattern provided: fail (pattern is required for expect:failure gates)
- * - If errorPattern is an invalid regex: fail with regex error
+ * - If errorPattern is invalid or exceeds the 1,024-byte cap: fail with a regex error
  * - If output matches errorPattern (case-insensitive): pass
  * - If output does not match: fail
  */
+
+/**
+ * Match gate metadata with RE2 rather than JavaScript's backtracking engine.
+ * This preserves the public regex contract while bounding pattern size and
+ * rejecting unsupported/non-linear syntax before evaluating command output.
+ */
+export function matchesExpectedFailurePattern(output: string, errorPattern: string): boolean {
+	return compileSafeRegex(errorPattern, { maxPatternBytes: MAX_SAFE_REGEX_PATTERN_BYTES }).test(output);
+}
+
 export function matchExpectFailure(
 	exitCode: number | null,
 	output: string,
@@ -654,18 +752,18 @@ export function matchExpectFailure(
 	}
 
 	try {
-		const regex = new RegExp(errorPattern, 'i');
-		if (regex.test(output)) {
+		if (matchesExpectedFailurePattern(output, errorPattern)) {
 			return { passed: true, output: output || `exit code ${exitCode}` };
 		}
 		return {
 			passed: false,
 			output: `Command failed (exit code ${exitCode}) but output did not match expected error pattern.\n\nExpected pattern: /${errorPattern}/i\n\nActual output (first 500 chars):\n${(output || '').slice(0, 500)}`,
 		};
-	} catch (regexErr: any) {
+	} catch (regexErr) {
+		const message = regexErr instanceof Error ? regexErr.message : "Invalid regular expression";
 		return {
 			passed: false,
-			output: `Invalid error_pattern regex: ${regexErr.message}\n\nPattern was: ${errorPattern}`,
+			output: `Invalid error_pattern regex: ${message}\n\nPattern was: ${errorPattern}`,
 		};
 	}
 }

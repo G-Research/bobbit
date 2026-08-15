@@ -9,6 +9,7 @@ import {
 	renderApp,
 	activeSessionId,
 	isDesktop,
+	getGoalSetupUiState,
 	GW_SESSION_KEY,
 	type GatewaySession,
 	type Project,
@@ -1358,6 +1359,8 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 
 	const outgoingPanel = transferActiveSessionToCache(state.selectedSessionId, sessionId);
 	state.selectedSessionId = sessionId;
+	// A new canonical selection supersedes any prior explicit sidebar reveal.
+	state.sidebarRevealSessionId = null;
 
 	// Proposals are scoped to the session that emitted them. Clear stale slots
 	// the moment the user navigates away so they never bleed into other sessions.
@@ -1859,12 +1862,12 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			}
 		};
 
-		remote.onGoalSetupEvent = async () => {
-			// Refresh sessions and goals to pick up setupStatus changes
-			refreshSessions();
-			// Also refresh the goal dashboard's local state so the banner dismisses
+		remote.onGoalSetupEvent = async (goalId?: string) => {
+			// A session-scoped broadcast still changes the shared goal list. Refresh
+			// it for sidebar/landing consumers, then refresh any visible dashboard.
+			void refreshSessions();
 			const { refreshDashboardGoal } = await import("./goal-dashboard.js");
-			refreshDashboardGoal();
+			void refreshDashboardGoal(goalId);
 		};
 
 		remote.onBgProcessEvent = (msg) => {
@@ -2903,6 +2906,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 export async function createAndConnectSession(goalId?: string, roleId?: string, cwd?: string, worktree?: boolean, sandboxed?: boolean, projectId?: string): Promise<void> {
 	if (state.creatingSession) return;
+	const goal = goalId ? state.goals.find((item) => item.id === goalId) : undefined;
+	if (goal && !getGoalSetupUiState(goal).canStart) return;
 	state.creatingSession = true;
 	state.creatingSessionForGoalId = goalId || null;
 	renderApp();

@@ -111,10 +111,15 @@ describe("Pi RPC agent_end retry contract", () => {
 		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false, messages: [] });
 		await flush();
 
-		// Only the final (willRetry:false) agent_end increments the counter — exactly once.
+		// Only the final (willRetry:false) agent_end increments the counter — exactly once,
+		// but Pi still owns post-run work until agent_settled.
 		assert.equal(session.completedTurnCount, 1);
 		assert.deepEqual(session.allowedTools, ["write"]);
 		assert.deepEqual(session.oneTimeGrantedTools, []);
+		expect(prompt).not.toHaveBeenCalled();
+
+		manager.handleAgentLifecycle(session, { type: "agent_settled" });
+		await flush();
 		expect(prompt).toHaveBeenCalledTimes(1);
 		expect(prompt.mock.calls[0][0]).toBe("queued until Pi settles");
 	});
@@ -333,12 +338,13 @@ describe("Pi RPC agent_end retry contract", () => {
 		// second compaction_end; the next agent_end is the terminal turn boundary.
 		emit({ type: "agent_start" });
 		emit({ type: "agent_end", messages: [], willRetry: false });
+		emit({ type: "agent_settled" });
 		await wait;
 		await flush();
 
 		expect(idleResolved).toBe(true);
 		expect(session.eventBuffer.getAll().filter((entry: any) => entry.event.type === "compaction_end")).toHaveLength(1);
-		// The terminal turn boundary briefly settles idle and then drains the
+		// The terminal turn boundary settles idle; agent_settled then drains the
 		// queued prompt, whose optimistic dispatch makes the session streaming.
 		expect(session.status).toBe("streaming");
 		expect(session.completedTurnCount).toBe(1);

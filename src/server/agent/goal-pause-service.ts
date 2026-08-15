@@ -69,7 +69,9 @@ export async function executePauseForGoals(
 			}
 			continue;
 		}
-		store.update(goal.id, { paused: true, pauseReason: undefined });
+		// Provenance distinguishes an operator pause from pre-provenance legacy
+		// dependency pauses when GoalManager restores persisted goals on boot.
+		store.update(goal.id, { paused: true, pauseReason: undefined, pauseSource: "operator" });
 		await cancelAllVerifications(deps.verificationHarness, goal.id);
 		deps.broadcastGoalStateChanged(goal.id);
 		count++;

@@ -161,6 +161,7 @@ async function sendPrompt({
 		getSessionCostUpdate: () => undefined,
 		getPendingToolPermission: () => undefined,
 		getProjectContextManager: () => undefined,
+		intentSettlement: () => undefined,
 		enqueuePrompt: async (_id: string, originalText: string, options: Record<string, unknown>) => queued.push({ originalText, options }),
 	};
 	const projectContextManager = projectId && projectStore ? {
@@ -309,7 +310,11 @@ describe("WebSocket slash-skill pack activation", () => {
 			text: "/ws-legacy arg",
 			selectedSkills: ["ws-legacy"],
 		});
-		assert.deepEqual(selected, legacy, "a matching selection must not change WebSocket expansion output");
+		// intentId is a fresh per-call identifier (unrelated to skill-selection
+		// output); exclude it so this stays a comparison of expansion behavior.
+		const { intentId: _legacyIntentId, ...legacyOptions } = legacy.options as Record<string, unknown>;
+		const { intentId: _selectedIntentId, ...selectedOptions } = selected.options as Record<string, unknown>;
+		assert.deepEqual({ ...selected, options: selectedOptions }, { ...legacy, options: legacyOptions }, "a matching selection must not change WebSocket expansion output");
 
 		const denied = await sendPrompt({
 			cwd: projectRoot,
