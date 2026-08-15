@@ -281,36 +281,43 @@ explicit changes remain subject to the normal policy cascade.
 
 ### Extension decision requests
 
-Schema-2 extension decision hooks have a server-owned actionable conversation
-projection. It includes ordinary pending requests and a durable
+Schema-2 extension decision hooks have a server-owned actionable projection.
+Session decisions can include ordinary pending requests and a durable
 `paused-awaiting-consent` request whose exact goal pause still needs an answer.
-The surface reuses the Ask User Choices widget but never submits an ask envelope,
-appends a transcript message, or enqueues an agent prompt. See
-[Extension decision requests](extension-decision-requests.md) for the hook
-contract, grant, deadlines, scoped memories, and privacy boundary.
+Project-import decisions are instead owned by one ready project-import run and
+have no session or transcript. Both surfaces reuse the Ask User Choices widget
+without submitting an ask envelope, appending a transcript message, or enqueuing
+an agent prompt. See [Extension decision requests](extension-decision-requests.md)
+for the hook contract, grant, bounded import context, replay, deadlines, scoped
+memories, and privacy boundary.
 
 | Method | Path | Body | Result |
 |---|---|---|---|
 | `GET` | `/api/sessions/:sessionId/decision-requests?state=pending` | — | `200 { requests }`, containing actionable requests owned by that session. `state`, when supplied, must be `pending`. |
 | `POST` | `/api/sessions/:sessionId/decision-requests/:requestId/answer` | `{ value: { kind: "option", value } \| { kind: "other", text } }` | `200 { request }`, the authoritative settlement projection. |
+| `GET` | `/api/projects/:projectId/import-decision-requests?state=pending` | — | `200 { requests }` for only the registered project's current ready import run. `state`, when supplied, must be `pending`; another value returns `400`. A project without a ready run returns `404`. |
+| `POST` | `/api/projects/:projectId/import-decision-requests/:requestId/answer` | `{ value: { kind: "option", value } \| { kind: "other", text } }` | `200 { request }`, the authoritative settlement projection for that import run. |
 
-Each projected request contains only its `id`, `sessionId`, `status`,
-`decisionClass`, bounded classification/pause metadata, and `request` display
-fields (`title`, `question`, option `value`/`label`), plus a terminal
-`resolution.value` when applicable. Deadline, scope, default, effects,
-memories, internal dedupe data, protected-operation identity, continuation
-state, and proposal seeds are not projected.
+Each projected request contains only its `id`, `status`, `decisionClass`, and
+`request` display fields (`title`, `question`, option `value`/`label`), plus a
+terminal `resolution.value` when applicable. Session projections additionally
+contain `sessionId` and bounded classification/pause metadata. Deadline, scope,
+default, effects, memories, internal dedupe data, protected-operation identity,
+continuation state, import context, and proposal seeds are not projected.
 
-The answer body must contain exactly `value`. Invalid answer shapes return
-`400`; unknown request ids and request ids belonging to another session return
-`404`. A valid late or duplicate answer receives the current terminal request,
-so clients must treat the returned record as authoritative. The request id alone
-is never authority: the route checks ownership against `:sessionId` before it
-passes an answer to the decision manager.
+The answer body must contain exactly `value`. Invalid answer shapes or values
+return `400`. A missing request, a session request outside `:sessionId`, or an
+import request outside `:projectId`'s current ready run returns `404`. A valid
+late or duplicate answer receives the current terminal request, so clients must
+treat the returned record as authoritative. Request ids are not authority: each
+route validates its owning delivery target before passing an answer to the
+decision manager.
 
-`decision_requests_updated` is a metadata-only WebSocket invalidation with a
-session id and timestamp. Clients re-fetch the GET route; no question or answer
-payload is sent over WebSocket.
+`decision_requests_updated` and
+`project_import_decision_requests_updated` are metadata-only WebSocket
+invalidations with, respectively, `sessionId` or `projectId` and a timestamp.
+Clients re-fetch the corresponding GET route; no question or answer payload is
+sent over WebSocket.
 
 ### Context trace endpoint
 
@@ -1429,7 +1436,7 @@ Staff records include a persisted `accessory` string as part of the staff identi
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/projects` | List visible registered projects in persisted project order. Headquarters is a reorderable project with a `position` field; its position in the list reflects the saved sidebar order. Set `showHeadquartersInProjectLists === false` to hide it from listings. Hidden projects, including the synthetic `system` project, are excluded. |
-| `POST` | `/api/projects` | Register a normal project (`{ name, rootPath, color?, upsert?, acceptCanonical? }`). With `upsert: true`, returns the existing project if one already exists at `rootPath`; an upsert for the server workspace returns the existing Headquarters project. Without upsert, the server workspace returns `409 { code: "HEADQUARTERS_ALREADY_EXISTS", projectId: "headquarters" }`. On success, `base_ref` is pinned best-effort to the live remote's `origin/<branch>` (via `git ls-remote --symref origin HEAD`) before `project.yaml` is persisted — an unreachable remote leaves it blank (today's runtime fallback). The same pin runs on the provisional→promote path. See [design/base-ref.md](design/base-ref.md). When `rootPath` is a symlink, returns 400 `{ error, code: "symlink_root", rootPath, canonical }` unless `acceptCanonical: true` is set — the caller should prompt the user with both paths and re-submit with `acceptCanonical: true` to register the canonical path (see [internals.md — Symlinked project rootPath handling](internals.md#symlinked-project-rootpath-handling)). Also returns 400 `{ error, code: "preflight_failed", report }` when the server-side pre-flight surfaces any `fail` check (see [add-project-preflight.md](add-project-preflight.md)). |
+| `POST` | `/api/projects` | Register a normal project (`{ name, rootPath, color?, upsert?, acceptCanonical? }`). With `upsert: true`, returns the existing project if one already exists at `rootPath`; an upsert for the server workspace returns the existing Headquarters project. Without upsert, the server workspace returns `409 { code: "HEADQUARTERS_ALREADY_EXISTS", projectId: "headquarters" }`. After component configuration is durable, a new normal project receives one ready project-import decision run; its eligible, granted `projectImported` hooks are dispatched without creating an agent session. An upsert resumes or reconciles that same run rather than creating another. Existing projects are not backfilled. On success, `base_ref` is pinned best-effort to the live remote's `origin/<branch>` (via `git ls-remote --symref origin HEAD`) before `project.yaml` is persisted — an unreachable remote leaves it blank (today's runtime fallback). The same pin runs on the provisional→promote path. See [design/base-ref.md](design/base-ref.md). When `rootPath` is a symlink, returns 400 `{ error, code: "symlink_root", rootPath, canonical }` unless `acceptCanonical: true` is set — the caller should prompt the user with both paths and re-submit with `acceptCanonical: true` to register the canonical path (see [internals.md — Symlinked project rootPath handling](internals.md#symlinked-project-rootpath-handling)). Also returns 400 `{ error, code: "preflight_failed", report }` when the server-side pre-flight surfaces any `fail` check (see [add-project-preflight.md](add-project-preflight.md)). |
 | `PUT` | `/api/projects/order` | Persist the visible-project order for sidebar drag reorder. Include Headquarters in `projectIds` when it is visible; omit it when hidden via preference (the server excludes it automatically). Returns `200 { projects }` in the saved order and broadcasts `projects_changed`. See [Project order](#project-order). |
 | `GET` | `/api/projects/preflight?path=<absolute>` | Run the [pre-flight validation pass](add-project-preflight.md) for a candidate `rootPath`. Always 200 with a `PreflightReport` when `path` is supplied — failures are the response, not an error. 400 only when `path` is missing. For the server workspace, remediation that would archive gateway-owned `.bobbit` state is removed and the report explains that Headquarters already owns the path. |
 | `POST` | `/api/projects/archive-bobbit` | Move existing `<rootPath>/.bobbit/` contents aside into `<rootPath>/.bobbit-archive-NNN/`, preserving `GATEWAY_OWNED_FILES` when the path is gateway-owned. Body: `{ rootPath }`. Does not mutate the registry. Returns 200 with `ArchiveResult`, 400 for bad input (`code: "bad-path"`), or 409 when `.bobbit/` is missing/empty (`code: "no-bobbit-dir"` / `"empty-bobbit-dir"`). Returns 403 `HEADQUARTERS_IMMUTABLE` for the server/Headquarters-owned `.bobbit` state. See [add-project-preflight.md](add-project-preflight.md). |

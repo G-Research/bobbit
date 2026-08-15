@@ -319,6 +319,36 @@ describe("ContextTraceStore", () => {
 		assert.ok(!persisted.includes(secret));
 	});
 
+	it("writes project-import dispatch and resolution rows to a redacted non-session stream", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs);
+		const secret = "/private/root component-id typescript question Other proposal args raw error";
+		store.appendProjectImportTrace("project-1", "import-1", [{
+			kind: "decision", packId: "extension-pack", hookId: "import-hook", event: "projectImported", outcome: "applied",
+			requestId: "request-1", questionId: "a".repeat(64),
+			...({ projectRoot: secret, ownedRoots: [secret], components: [{ id: secret, languages: [secret] }], question: secret, otherText: secret, proposal: { args: secret }, error: secret } as any),
+		}]);
+		store.appendProjectImportOutcome("project-1", "import-1", {
+			kind: "decision", packId: "extension-pack", hookId: "import-hook", event: "projectImported", outcome: "applied",
+			requestId: "request-1", questionId: "a".repeat(64), answer: "other", actor: "user", defaultApplied: false,
+			...({ question: secret, otherText: secret, proposal: { args: secret }, error: secret } as any),
+		});
+
+		expect(store.readTrace("project-1")).toEqual([]);
+		expect(store.readProjectImportTrace("project-1", "import-1")).toEqual([
+			{
+				ts: expect.any(Number), hook: "projectImported", projectId: "project-1", importId: "import-1", providers: [],
+				outcomes: [{ kind: "decision", packId: "extension-pack", hookId: "import-hook", event: "projectImported", outcome: "applied", requestId: "request-1", questionId: "a".repeat(64) }],
+			},
+			{
+				ts: expect.any(Number), hook: "decisionResolved", projectId: "project-1", importId: "import-1", providers: [],
+				outcomes: [{ kind: "decision", packId: "extension-pack", hookId: "import-hook", event: "decisionResolved", outcome: "applied", requestId: "request-1", questionId: "a".repeat(64), answer: "other", actor: "user", defaultApplied: false }],
+			},
+		]);
+		const persisted = memfs.readFileSync(path.join(STATE_DIR, "session-context-trace", "project-import", "project-1", "import-1.jsonl"), "utf-8");
+		expect(persisted).not.toContain(secret);
+	});
+
 	it("persists only fixed consent audit metadata and rejects raw protected payloads", () => {
 		const memfs = createMemFs();
 		const store = new ContextTraceStore(STATE_DIR, memfs);

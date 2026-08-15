@@ -72,7 +72,7 @@ const PROVIDER_HOOKS = new Set([
 	"goalProvisioned",
 ]);
 const HOOK_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
-const HOOK_EVENTS = new Set(["sessionSetup", "beforePrompt", "beforeToolCall", "afterToolResult", "afterTurn", "beforeCompact", "sessionShutdown", "goalProvisioned"] as const);
+const HOOK_EVENTS = new Set(["sessionSetup", "beforePrompt", "beforeToolCall", "afterToolResult", "afterTurn", "beforeCompact", "sessionShutdown", "goalProvisioned", "projectImported"] as const);
 const HOOK_CAPABILITIES = new Set(["store", "session", "agents", "mutate", "filter:tool-result", "prompt:system-static", "prompt:system-author"] as const);
 const HOOK_TOP_LEVEL_KEYS = new Set(["id", "module", "events", "mode", "capabilities", "budget", "config", "activation", "schedule", "selectors"]);
 
@@ -283,7 +283,7 @@ export interface ProviderContribution {
 }
 
 /** Supported inert hook declaration events. Declaring one does not register or execute it. */
-export type HookEvent = "sessionSetup" | "beforePrompt" | "beforeToolCall" | "afterToolResult" | "afterTurn" | "beforeCompact" | "sessionShutdown" | "goalProvisioned";
+export type HookEvent = "sessionSetup" | "beforePrompt" | "beforeToolCall" | "afterToolResult" | "afterTurn" | "beforeCompact" | "sessionShutdown" | "goalProvisioned" | "projectImported";
 export type HookMode = "observe" | "decide";
 /** Optional dynamic capability selector stages; declarations remain inert metadata. */
 export type HookSelector = "skills" | "mcp";
@@ -900,6 +900,10 @@ export function loadHooks(packRoot: string, manifest: PackManifest): HookContrib
 		const parsedSelectors = parseHookSelectors(data.selectors);
 		if (parsedSchedule.error) { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) ${parsedSchedule.error}; dropping`); continue; }
 		if (parsedSelectors.error) { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) ${parsedSelectors.error}; dropping`); continue; }
+		const isProjectImportHook = normalizedEvents.includes("projectImported");
+		if (isProjectImportHook && mode !== "decide") { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) event 'projectImported' requires mode 'decide'; dropping`); continue; }
+		if (isProjectImportHook && parsedSelectors.selectors) { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) event 'projectImported' cannot declare selectors; dropping`); continue; }
+		if (isProjectImportHook && parsedSchedule.schedule) { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) event 'projectImported' cannot declare a schedule; dropping`); continue; }
 		if (parsedSelectors.selectors && (mode !== "decide" || !normalizedEvents.includes("sessionSetup"))) { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) selectors require mode 'decide' and event 'sessionSetup'; dropping`); continue; }
 		if (parsedSchedule.schedule?.everyNTurns !== undefined && (mode !== "decide" || normalizedEvents.length !== 1 || normalizedEvents[0] !== "afterTurn")) { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) schedule.everyNTurns requires mode 'decide' and exactly events: [afterTurn]; dropping`); continue; }
 		if (parsedSchedule.schedule?.kind === "decision" && (mode !== "decide" || normalizedEvents.length !== 1 || normalizedEvents[0] !== "afterTurn" || parsedSchedule.schedule.everyNTurns === undefined)) { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) schedule.kind 'decision' requires mode 'decide', exactly events: [afterTurn], and everyNTurns; dropping`); continue; }

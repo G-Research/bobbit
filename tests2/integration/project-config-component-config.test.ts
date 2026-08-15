@@ -223,6 +223,70 @@ test.describe("Component config map (REST API)", () => {
 		}
 	});
 
+	test("configuring upsert restores full component fields and workflows", async ({ gateway }) => {
+		const dir = postProjectDir;
+		let projectId: string | undefined;
+		try {
+			const initial = await apiFetch("/api/projects", {
+				method: "POST",
+				body: JSON.stringify({ name: `configuring-retry-${Date.now()}`, rootPath: dir, __e2e_seed_skip__: true }),
+			});
+			expect(initial.status).toBe(201);
+			const project = await initial.json();
+			projectId = project.id;
+
+			// Reproduce the durable boundary between register() and route
+			// configuration: the marker exists, but the config write did not.
+			const context = gateway.projectContextManager.getOrCreate(project.id);
+			context.project.importDecisionRun.state = "configuring";
+			context.projectConfigStore.setComponents([]);
+			context.projectConfigStore.setWorkflows(undefined);
+
+			const components = [{
+				name: "web",
+				repo: ".",
+				relative_path: "apps/web",
+				worktree_setup_command: "npm ci",
+				commands: { build: "npm run build" },
+				config: { qa_start_command: "npm start" },
+			}];
+			const workflows = { quick: { name: "Quick", steps: [] } };
+			// A store failure while dispatching is intentionally downstream of the
+			// durable registration/configuration boundary: the retry must still
+			// succeed and leave its full configuration available for later replay.
+			const decisionStore = context.decisionRequestStore as any;
+			const getImportRun = decisionStore.getImportRun;
+			const ensureImportRun = decisionStore.ensureImportRun;
+			decisionStore.getImportRun = () => undefined;
+			decisionStore.ensureImportRun = () => { throw new Error("test dispatch failure"); };
+			let retried: Response;
+			try {
+				retried = await apiFetch("/api/projects", {
+					method: "POST",
+					body: JSON.stringify({ name: "ignored-on-upsert", rootPath: dir, upsert: true, components, workflows }),
+				});
+			} finally {
+				decisionStore.getImportRun = getImportRun;
+				decisionStore.ensureImportRun = ensureImportRun;
+			}
+			expect(retried!.status).toBe(200);
+
+			const structured = await (await apiFetch(`/api/projects/${project.id}/structured`)).json();
+			expect(structured.components).toEqual([{
+				name: "web",
+				repo: ".",
+				relativePath: "apps/web",
+				worktreeSetupCommand: "npm ci",
+				commands: { build: "npm run build" },
+				config: { qa_start_command: "npm start" },
+			}]);
+			expect(structured.workflows).toEqual(workflows);
+			expect((await retried!.json()).importDecisionRun?.state).toBe("ready");
+		} finally {
+			if (projectId) await apiFetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => {});
+		}
+	});
+
 	test("PUT with legacy flat build_command preserves existing components[0].config", async () => {
 		const { id, cleanup } = sharedProjectFixture();
 		try {

@@ -7,11 +7,14 @@ import type { PackContributionRegistry } from "../extension-host/pack-contributi
 import { ModuleHost, type InvokeRequest } from "../extension-host/module-host-worker.js";
 import type { Clock } from "../gateway-deps.js";
 import { realClock } from "../gateway-deps.js";
-import type { ProposalSeedService } from "../proposals/proposal-seed-service.js";
+import type { ProposalDraftOwner, ProposalSeedService } from "../proposals/proposal-seed-service.js";
 import { packIdFromRoot, type HookContribution } from "./pack-contributions.js";
 import {
 	DecisionHookContractError,
 	validateDecisionHookOutput,
+	validateProjectImportDecisionHookOutput,
+	type ProjectImportDecisionHookContext,
+	type ProjectImportDecisionResolutionContext,
 	validateDecisionValue,
 	type DecisionHookContext,
 	type DecisionLifecycleEvent,
@@ -20,14 +23,18 @@ import {
 	type ExtensionAdvisory,
 	type ValidatedDecisionHookOutput,
 	type ValidatedExtensionDecisionRequest,
+	type ProposalType,
 } from "./decision-hook-contract.js";
 import {
 	DecisionRequestStore,
+	type StoredProjectImportRun,
+	type ImportDecisionOutcomeCode,
 	type ConsentTimeoutAction,
 	type DecisionActor,
 	type DecisionClassificationReason,
 	type DecisionMemory,
 	type DecisionReason,
+	type DecisionDelivery,
 	type StoredDecisionRequest,
 } from "./decision-request-store.js";
 import { resolveExtensionGrant, type ResolvedHook } from "./extension-grant-policy.js";
@@ -91,6 +98,17 @@ export interface DecisionRequestOrigin {
 	hookId: string;
 }
 
+/** Project registration has a durable target, not a synthetic agent session. */
+export interface ProjectImportDecisionRequestOrigin {
+	projectId: string;
+	importId: string;
+	event: "projectImported";
+	packId: string;
+	hookId: string;
+}
+
+type AnyDecisionRequestOrigin = DecisionRequestOrigin | ProjectImportDecisionRequestOrigin;
+
 /** Minimal injectable bridge so manager tests do not need a gateway. */
 export interface DecisionContinuation {
 	deliver(request: StoredDecisionRequest): Promise<"delivered" | "skipped">;
@@ -134,9 +152,11 @@ export interface DecisionRequestManagerDeps {
 	/** Rebuilds hook/grant/live core facts immediately before protected work. */
 	recheckConsentOperation?: (request: StoredDecisionRequest) => boolean | Promise<boolean>;
 	proposalSeedService?: Pick<ProposalSeedService, "seedFromDecision">;
-	trace?: Pick<ContextTraceStore, "appendOutcome">;
+	trace?: Pick<ContextTraceStore, "appendOutcome" | "appendProjectImportOutcome">;
 	/** Invalidates a REST projection only; callers must never put decision data in this frame. */
 	invalidateSession?: (sessionId: string) => void;
+	/** Metadata-only invalidation for a project-import decision projection. */
+	invalidateProjectImport?: (projectId: string) => void;
 	continuation?: DecisionContinuation;
 	/** Enumerates contexts already opened at boot for restart reconciliation. */
 	projectIds?: () => Iterable<string>;
@@ -208,12 +228,12 @@ export class DecisionRequestManager {
 	}
 
 	/** Add a validated request, enforcing semantic dedupe and server-owned limits. */
-	async create(origin: DecisionRequestOrigin, request: ValidatedExtensionDecisionRequest, operation?: TrustedDecisionOperation): Promise<DecisionCreateResult> {
+	async create(origin: AnyDecisionRequestOrigin, request: ValidatedExtensionDecisionRequest, operation?: TrustedDecisionOperation): Promise<DecisionCreateResult> {
 		this.projects.add(origin.projectId);
 		const store = this.deps.storeForProject(origin.projectId);
 		if (!store?.isHealthy()) return { status: "store_unavailable", code: "DECISION_STORE_UNAVAILABLE" };
 		const scopeId = scopeIdFor(request.scope, origin);
-		if (!scopeId) return { status: "rejected", code: "DECISION_SCOPE_UNAVAILABLE" };
+		if (!scopeId || origin.event === "projectImported" && request.scope !== "project") return { status: "rejected", code: "DECISION_SCOPE_UNAVAILABLE" };
 		const classification = classifyEffectiveClass(request, operation);
 		const effectiveRequest = classification.decisionClass === "consent-required" ? stripDefault(request) : request;
 		// Rendered prose and labels are intentionally not semantic identity: a pack
@@ -242,16 +262,17 @@ export class DecisionRequestManager {
 			}
 		}
 		if (!withinBudgets(store, origin, this.clock.now())) {
-			console.warn("[decision-requests] budget exhausted pack=%s hook=%s session=%s", origin.packId, origin.hookId, origin.sessionId);
+			console.warn("[decision-requests] budget exhausted pack=%s hook=%s delivery=%s", origin.packId, origin.hookId, deliveryId(origin));
 			return { status: "rejected", code: "DECISION_BUDGET_EXHAUSTED" };
 		}
 		const now = new Date(this.clock.now()).toISOString();
 		const timeoutAction = classification.decisionClass === "consent-required"
-			? (operation?.timeoutAction === "pause-goal" && origin.goalId && this.deps.consentPauseLifecycle ? "pause-goal" : "deny-operation")
+			? (operation?.timeoutAction === "pause-goal" && isSessionOrigin(origin) && origin.goalId && this.deps.consentPauseLifecycle ? "pause-goal" : "deny-operation")
 			: undefined;
+		const delivery = deliveryFor(origin);
 		const record: StoredDecisionRequest = {
-			id: randomUUID(), projectId: origin.projectId, sessionId: origin.sessionId,
-			...(origin.goalId ? { goalId: origin.goalId } : {}),
+			id: randomUUID(), projectId: origin.projectId, delivery,
+			...(isSessionOrigin(origin) ? { sessionId: origin.sessionId, ...(origin.goalId ? { goalId: origin.goalId } : {}) } : {}),
 			asker: { packId: origin.packId, hookId: origin.hookId, event: origin.event },
 			dedupeId, questionId: fingerprint({ key: effectiveRequest.key, question: effectiveRequest.question, options: effectiveRequest.options, other: effectiveRequest.other }),
 			request: effectiveRequest, decisionClass: classification.decisionClass, classificationReason: classification.reason,
@@ -265,7 +286,7 @@ export class DecisionRequestManager {
 			const terminal = await this.resolveTimeout(record, "headless");
 			return { status: "created", requestId: record.id, request: terminal ?? store.get(record.id) };
 		}
-		this.invalidate(record.sessionId);
+		this.invalidate(record);
 		this.armDeadlineTimer();
 		return { status: "created", requestId: record.id, request: record };
 	}
@@ -304,10 +325,28 @@ export class DecisionRequestManager {
 		return this.deps.storeForProject(projectId)?.listPending(sessionId) ?? [];
 	}
 
+	/** Project-owned projection seam; it can never leak a session delivery. */
+	listPendingImportRequests(projectId: string, importId: string): StoredDecisionRequest[] {
+		return this.deps.storeForProject(projectId)?.listPendingImportRequests(importId) ?? [];
+	}
+
+	/** Import-run state remains in the same project-owned atomic snapshot as requests. */
+	getImportRun(projectId: string, importId: string): StoredProjectImportRun | undefined {
+		return this.deps.storeForProject(projectId)?.getImportRun(importId);
+	}
+
+	ensureImportHooks(projectId: string, importId: string, hookKeys: readonly string[]): StoredProjectImportRun | undefined {
+		return this.deps.storeForProject(projectId)?.ensureImportHooks(importId, hookKeys);
+	}
+
+	completeImportHook(projectId: string, importId: string, hookKey: string, outcome: ImportDecisionOutcomeCode): boolean {
+		return this.deps.storeForProject(projectId)?.completeImportHook(importId, hookKey, outcome, new Date(this.clock.now()).toISOString()) ?? false;
+	}
+
 	/** Actionable session records include a durable consent pause awaiting its one answer. */
 	listActionable(projectId: string, sessionId: string): StoredDecisionRequest[] {
 		return (this.deps.storeForProject(projectId)?.list() ?? []).filter(request =>
-			request.sessionId === sessionId && (request.status === "pending" || request.status === "paused-awaiting-consent"),
+			request.delivery.kind === "session" && request.delivery.sessionId === sessionId && (request.status === "pending" || request.status === "paused-awaiting-consent"),
 		);
 	}
 
@@ -317,14 +356,14 @@ export class DecisionRequestManager {
 	}
 
 	/** Exact scope lookup; never falls back across scopes, keys, packs, or hooks. */
-	getMemory(origin: Pick<DecisionRequestOrigin, "projectId" | "sessionId" | "goalId" | "packId" | "hookId">, scope: ValidatedExtensionDecisionRequest["scope"], key: string): DecisionValue | undefined {
+	getMemory(origin: Pick<DecisionRequestOrigin, "projectId" | "sessionId" | "goalId" | "packId" | "hookId"> | Pick<ProjectImportDecisionRequestOrigin, "projectId" | "importId" | "packId" | "hookId">, scope: ValidatedExtensionDecisionRequest["scope"], key: string): DecisionValue | undefined {
 		const scopeId = scopeIdFor(scope, origin);
 		if (!scopeId) return undefined;
 		return this.deps.storeForProject(origin.projectId)?.getMemory({ scope, scopeId, packId: origin.packId, hookId: origin.hookId, key })?.value;
 	}
 
 	/** Advisories reuse the durable inbox but do not create an immediate staff wake. */
-	advisory(origin: Pick<DecisionRequestOrigin, "packId" | "hookId" | "sessionId">, advisory: ExtensionAdvisory): DecisionAdvisoryStatus {
+	advisory(origin: Pick<AnyDecisionRequestOrigin, "packId" | "hookId">, advisory: ExtensionAdvisory): DecisionAdvisoryStatus {
 		const inbox = this.deps.inboxManager;
 		if (!inbox || !inbox.hasStaff(advisory.staffId)) return "unavailable";
 		try {
@@ -333,7 +372,7 @@ export class DecisionRequestManager {
 			const extensionPending = pending.filter(entry => entry.source.type === "extension_advisory");
 			if (extensionPending.some(entry => entry.source.packId === origin.packId && entry.source.hookId === origin.hookId && entry.context === marker)) return "deduplicated";
 			if (extensionPending.length >= DECISION_ADVISORY_PENDING_LIMIT) {
-				console.warn("[decision-requests] advisory budget exhausted pack=%s hook=%s session=%s", origin.packId, origin.hookId, origin.sessionId);
+				console.warn("[decision-requests] advisory budget exhausted pack=%s hook=%s", origin.packId, origin.hookId);
 				return "rejected";
 			}
 			inbox.enqueue(advisory.staffId, {
@@ -366,7 +405,7 @@ export class DecisionRequestManager {
 		if (result.written && settled) {
 			store.updateContinuation(settled.id, { continuationState: "skipped", continuationAttempts: settled.continuationAttempts });
 			this.traceResolution(settled);
-			this.invalidate(settled.sessionId);
+			this.invalidate(settled);
 			await this.settleConsentInbox(settled, "cancelled");
 			this.armDeadlineTimer();
 		}
@@ -386,7 +425,7 @@ export class DecisionRequestManager {
 		if (!paused) return undefined;
 		if (result.written) {
 			this.traceResolution(paused);
-			this.invalidate(paused.sessionId);
+			this.invalidate(paused);
 		}
 		await this.replayConsentPause(paused);
 		this.armDeadlineTimer();
@@ -412,7 +451,7 @@ export class DecisionRequestManager {
 			if (!record.consentPause.pauseAppliedAt) {
 				if (!this.deps.consentPauseLifecycle) return;
 				try {
-					const outcome = await this.deps.consentPauseLifecycle.pause(record.consentPause.goalId, record.consentPause.reason, record.sessionId);
+					const outcome = await this.deps.consentPauseLifecycle.pause(record.consentPause.goalId, record.consentPause.reason, record.delivery.kind === "session" ? record.delivery.sessionId : undefined);
 					if (outcome === "not-matching") {
 						await this.settleConsentInbox(record, "cancelled");
 						return;
@@ -430,7 +469,8 @@ export class DecisionRequestManager {
 		const store = this.deps.storeForProject(record.projectId);
 		const inbox = record.consentInbox;
 		if (!store || !inbox || inbox.status !== "pending") return;
-		const staffId = this.deps.consentInboxTarget?.(record.projectId, record.sessionId);
+		if (record.delivery.kind !== "session") return;
+		const staffId = this.deps.consentInboxTarget?.(record.projectId, record.delivery.sessionId);
 		if (!staffId || !this.deps.inboxManager?.hasStaff(staffId)) {
 			store.updateConsentInboxSurface(record.id, inbox.sourceKey, { status: "projection-only", updatedAt: new Date(this.clock.now()).toISOString() });
 			return;
@@ -488,7 +528,7 @@ export class DecisionRequestManager {
 		const completed = store.completeConsentResume(record.id, { pause: record.consentPause, completedAt, outcome, terminal });
 		const settled = completed.request ?? store.get(record.id);
 		if (!completed.completed || !settled) return { status: "already_resolved", request: settled };
-		this.invalidate(settled.sessionId);
+		this.invalidate(settled);
 		await this.settleConsentInbox(settled, denied ? "cancelled" : "completed");
 		if (denied) {
 			store.updateContinuation(settled.id, { continuationState: "skipped", continuationAttempts: settled.continuationAttempts });
@@ -506,7 +546,8 @@ export class DecisionRequestManager {
 	private async settleConsentInbox(record: StoredDecisionRequest, status: "completed" | "cancelled"): Promise<void> {
 		const inbox = record.consentInbox;
 		if (!inbox || inbox.status === "projection-only" || inbox.status === status) return;
-		const staffId = this.deps.consentInboxTarget?.(record.projectId, record.sessionId);
+		if (record.delivery.kind !== "session") return;
+		const staffId = this.deps.consentInboxTarget?.(record.projectId, record.delivery.sessionId);
 		if (!staffId || !inbox.entryId) return;
 		try {
 			if (status === "completed") this.deps.inboxManager?.completeOnce?.(staffId, inbox.entryId, "Consent answered");
@@ -532,7 +573,7 @@ export class DecisionRequestManager {
 		const resolvedAt = new Date(this.clock.now()).toISOString();
 		const result = store.writeTerminalFirst(record.id, { status: "resolved", resolvedAt, resolution: { value: cloneValue(value), actor: "user", reason: "answered" } });
 		if (!result.written || !result.request) return result;
-		this.invalidate(result.request.sessionId);
+		this.invalidate(result.request);
 		this.traceResolution(result.request);
 		await this.routeProposal(result.request);
 		await this.deliverContinuation(result.request);
@@ -554,7 +595,7 @@ export class DecisionRequestManager {
 			status, resolvedAt, resolution: { value: cloneValue(value), actor, reason },
 		}, memory);
 		if (!result.written || !result.request) return result;
-		this.invalidate(result.request.sessionId);
+		this.invalidate(result.request);
 		this.traceResolution(result.request);
 		await this.routeProposal(result.request);
 		await this.deliverContinuation(result.request);
@@ -567,10 +608,16 @@ export class DecisionRequestManager {
 		const key = record.resolution.value.kind === "option" ? record.resolution.value.value : "other";
 		const seed = record.request.effect.proposals[key];
 		if (!seed || !this.deps.proposalSeedService) return;
+		const owner: string | ProposalDraftOwner = record.delivery.kind === "session"
+			? record.delivery.sessionId
+			: { kind: "project-import", projectId: record.projectId, importId: record.delivery.importId, requestId: record.id };
 		try {
-			const result = await this.deps.proposalSeedService.seedFromDecision(
-				record.sessionId,
-				seed.proposalType as Parameters<ProposalSeedService["seedFromDecision"]>[1],
+			const proposalService = this.deps.proposalSeedService as unknown as {
+				seedFromDecision(owner: string | ProposalDraftOwner, type: ProposalType, args: Record<string, unknown>): ReturnType<ProposalSeedService["seedFromDecision"]>;
+			};
+			const result = await proposalService.seedFromDecision(
+				owner,
+				seed.proposalType,
 				seed.args,
 			);
 			const store = this.deps.storeForProject(record.projectId);
@@ -638,25 +685,30 @@ export class DecisionRequestManager {
 		const decisionStatus = record.status === "resolved" || record.status === "defaulted" || record.status === "denied" || record.status === "paused-awaiting-consent"
 			? record.status : undefined;
 		if (!decisionStatus) return;
+		const outcome: TraceDecisionOutcomeRow = {
+			kind: "decision", packId: record.asker.packId, hookId: record.asker.hookId,
+			event: "decisionResolved", outcome: record.status === "denied" ? "denied" : "applied", requestId: record.id, questionId: record.questionId,
+			...(resolution ? {
+				answer: resolution.value.kind === "option" ? resolution.value.value : "other",
+				defaultApplied: resolution.actor !== "user", actor: resolution.actor,
+				reason: resolution.actor === "deadline" ? "Deadline elapsed" : resolution.actor === "headless" ? "Headless default" : undefined,
+			} : {}),
+			decisionClass: record.decisionClass ?? "deferrable", decisionStatus,
+			classificationReason: record.classificationReason ?? "requested",
+			...(record.timeoutAction ? { timeoutAction: record.timeoutAction } : {}),
+			...(record.consentPause?.resume ? { resumeStatus: record.consentPause.resume.status } : {}),
+		};
 		try {
-			this.deps.trace?.appendOutcome(record.sessionId, {
-				kind: "decision", packId: record.asker.packId, hookId: record.asker.hookId,
-				event: "decisionResolved", outcome: record.status === "denied" ? "denied" : "applied", requestId: record.id, questionId: record.questionId,
-				...(resolution ? {
-					answer: resolution.value.kind === "option" ? resolution.value.value : "other",
-					defaultApplied: resolution.actor !== "user", actor: resolution.actor,
-					reason: resolution.actor === "deadline" ? "Deadline elapsed" : resolution.actor === "headless" ? "Headless default" : undefined,
-				} : {}),
-				decisionClass: record.decisionClass ?? "deferrable", decisionStatus,
-				classificationReason: record.classificationReason ?? "requested",
-				...(record.timeoutAction ? { timeoutAction: record.timeoutAction } : {}),
-				...(record.consentPause?.resume ? { resumeStatus: record.consentPause.resume.status } : {}),
-			});
+			if (record.delivery.kind === "session") this.deps.trace?.appendOutcome(record.delivery.sessionId, outcome);
+			else this.deps.trace?.appendProjectImportOutcome(record.projectId, record.delivery.importId, outcome);
 		} catch { /* tracing is never on the answer path */ }
 	}
 
-	private invalidate(sessionId: string): void {
-		try { this.deps.invalidateSession?.(sessionId); } catch { /* metadata projection is best effort */ }
+	private invalidate(record: Pick<StoredDecisionRequest, "projectId" | "delivery">): void {
+		try {
+			if (record.delivery.kind === "session") this.deps.invalidateSession?.(record.delivery.sessionId);
+			else this.deps.invalidateProjectImport?.(record.projectId);
+		} catch { /* metadata projection is best effort */ }
 	}
 
 	private armDeadlineTimer(): void {
@@ -741,6 +793,62 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 		const result = await this.dispatchInternal("sessionSetup", context, true);
 		const thinking = result.reduction.thinking?.selection;
 		return { outcomes: result.outcomes, ...(thinking?.kind === "thinking" ? { thinkingLevel: thinking.thinkingLevel } : {}) };
+	}
+
+	/**
+	 * Registration-only dispatch. The context was already atomically persisted by
+	 * the coordinator, so restart/retry never reads the filesystem or invents a
+	 * session. Pending hook records are written before code is invoked.
+	 */
+	async dispatchProjectImport(projectId: string, importId: string): Promise<readonly TraceDecisionOutcomeRow[]> {
+		this.deps.manager.registerProject(projectId);
+		const run = this.deps.manager.getImportRun(projectId, importId);
+		if (!run || run.completedAt) return [];
+		const hooks = this.projectImportHooks(projectId);
+		const keyed = hooks.map(candidate => ({ ...candidate, origin: { ...candidate.origin, importId }, key: `${candidate.origin.packId}:${candidate.origin.hookId}` }));
+		const admitted = this.deps.manager.ensureImportHooks(projectId, importId, keyed.map(candidate => candidate.key));
+		if (!admitted) return [];
+
+		const outcomes: TraceDecisionOutcomeRow[] = [];
+		const currentKeys = new Set(keyed.map(candidate => candidate.key));
+		// A declaration disabled between a crash and replay is explicitly denied;
+		// it cannot remain an unbounded pending import hook.
+		for (const [key, entry] of Object.entries(admitted.hooks)) {
+			if (entry.state === "pending" && !currentKeys.has(key)
+				&& this.deps.manager.completeImportHook(projectId, importId, key, "denied")) {
+				const [packId, hookId] = key.split(":", 2);
+				outcomes.push(outcome({ packId: packId!, hookId: hookId!, event: "projectImported" }, "denied", "Grant required"));
+			}
+		}
+
+		for (const candidate of keyed) {
+			const latest = this.deps.manager.getImportRun(projectId, importId);
+			if (latest?.hooks[candidate.key]?.state !== "pending") continue;
+			const started = Date.now();
+			let row: TraceDecisionOutcomeRow;
+			try {
+				if (!this.isStillProjectImportDispatchable(projectId, candidate.origin)) {
+					row = outcome(candidate.origin, "denied", "Grant required", elapsed(started));
+				} else {
+					const value = await this.invoke(candidate.hook, "decide", importContext(run));
+					const parsed = validateProjectImportDecisionHookOutput(value);
+					const ms = elapsed(started);
+					if (!parsed) row = outcome(candidate.origin, "applied", undefined, ms);
+					else if (parsed.kind === "selection" || parsed.kind === "request-mutation") row = outcome(candidate.origin, "dropped", "Unavailable value", ms);
+					else if (!this.isStillProjectImportDispatchable(projectId, candidate.origin)) row = outcome(candidate.origin, "denied", "Grant required", ms);
+					else row = await this.apply(candidate.origin, parsed, ms, false);
+				}
+			} catch (error) {
+				const ms = elapsed(started);
+				row = isTimeout(error) ? outcome(candidate.origin, "dropped", "Timed out", ms)
+					: error instanceof DecisionHookContractError ? outcome(candidate.origin, "dropped", "Malformed result", ms)
+					: outcome(candidate.origin, "error", undefined, ms);
+			}
+			const completion = row.outcome === "error" ? "error" : row.outcome === "denied" ? "denied"
+				: row.outcome === "dropped" ? "dropped" : row.outcome === "superseded" ? "superseded" : "applied";
+			if (this.deps.manager.completeImportHook(projectId, importId, candidate.key, completion)) outcomes.push(row);
+		}
+		return outcomes;
 	}
 
 	private async dispatchInternal(
@@ -912,6 +1020,19 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 		);
 	}
 
+	private projectImportHooks(projectId: string): Array<{ hook: HookContribution; origin: ProjectImportDecisionRequestOrigin }> {
+		return activePacks(this.deps.registry, projectId).flatMap(pack => pack.hooks
+			.filter(hook => hook.mode === "decide" && hook.events.includes("projectImported"))
+			.map(hook => ({ hook, origin: { projectId, importId: "", event: "projectImported" as const, packId: pack.packId, hookId: hook.id } }))
+			.sort((a, b) => a.origin.hookId.localeCompare(b.origin.hookId) || (a.hook.listName ?? "").localeCompare(b.hook.listName ?? "")),
+		);
+	}
+
+	private isStillProjectImportDispatchable(projectId: string, origin: Pick<ProjectImportDecisionRequestOrigin, "packId" | "hookId">): boolean {
+		return this.projectImportHooks(projectId).some(candidate => candidate.origin.packId === origin.packId && candidate.origin.hookId === origin.hookId)
+			&& resolveExtensionGrant(resolvedHooks(this.deps.registry, projectId), this.deps.grantsForProject(projectId), origin, "decide").allowed;
+	}
+
 	private isStillDispatchable(
 		event: DecisionLifecycleEvent,
 		context: Omit<DecisionRequestOrigin, "event" | "packId" | "hookId"> & { turnIndex?: number; cadenceTurnIndex?: number },
@@ -943,9 +1064,26 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 	}
 
 	async deliver(record: StoredDecisionRequest): Promise<"delivered" | "skipped"> {
+		if (record.delivery.kind === "project-import") {
+			const origin: ProjectImportDecisionRequestOrigin = {
+				projectId: record.projectId, importId: record.delivery.importId, event: "projectImported",
+				packId: record.asker.packId, hookId: record.asker.hookId,
+			};
+			if (!this.isStillProjectImportDispatchable(record.projectId, origin)) return "skipped";
+			const hook = this.projectImportHooks(record.projectId).find(candidate => candidate.origin.packId === origin.packId && candidate.origin.hookId === origin.hookId)?.hook;
+			const run = this.deps.manager.getImportRun(record.projectId, record.delivery.importId);
+			if (!hook || !run) return "skipped";
+			try {
+				await this.invoke(hook, "onDecision", { ...importContext(run), requestId: record.id, resolution: record.resolution! });
+				return "delivered";
+			} catch (error) {
+				if (error instanceof ActionError && error.status === 404) return "skipped";
+				throw error;
+			}
+		}
 		const origin = this.contexts.get(record.id) ?? {
-			projectId: record.projectId, sessionId: record.sessionId, goalId: record.goalId,
-			cwd: process.cwd(), event: record.asker.event, packId: record.asker.packId, hookId: record.asker.hookId,
+			projectId: record.projectId, sessionId: record.delivery.sessionId, goalId: record.goalId,
+			cwd: process.cwd(), event: record.asker.event as DecisionLifecycleEvent, packId: record.asker.packId, hookId: record.asker.hookId,
 		};
 		const hook = this.deps.registry.listHooks(record.projectId).find(candidate =>
 			candidate.id === record.asker.hookId && packIdFromRoot(candidate.packRoot) === record.asker.packId && candidate.mode === "decide",
@@ -964,7 +1102,7 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 		this.contexts.delete(record.id);
 	}
 
-	private async apply(origin: DecisionRequestOrigin, parsed: Exclude<ValidatedDecisionHookOutput, { kind: "selection" } | { kind: "request-mutation" }>, ms: number, scheduledDecision: boolean): Promise<TraceDecisionOutcomeRow> {
+	private async apply(origin: AnyDecisionRequestOrigin, parsed: Exclude<ValidatedDecisionHookOutput, { kind: "selection" } | { kind: "request-mutation" }>, ms: number, scheduledDecision: boolean): Promise<TraceDecisionOutcomeRow> {
 		if (parsed.kind === "advisory") {
 			const advised = this.deps.manager.advisory(origin, parsed.advisory);
 			return outcome(origin, advised === "enqueued" ? "advised" : advised === "deduplicated" ? "superseded" : "dropped", advised === "deduplicated" ? "Duplicate" : advised === "rejected" ? "Budget exhausted" : undefined, ms, "advisory");
@@ -979,15 +1117,16 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 		// router. Reject misleading or inverted mappings before they become durable.
 		if (!request) return outcome(origin, "dropped", "Malformed result", ms);
 		const created = await this.deps.manager.create(origin, request, trustedOperationForExtensionDecision(request));
-		if (created.requestId) this.contexts.set(created.requestId, origin);
+		if (created.requestId && isSessionOrigin(origin)) this.contexts.set(created.requestId, origin);
 		if (created.status === "rejected") return outcome(origin, "dropped", created.code === "DECISION_SCOPE_UNAVAILABLE" ? "Unavailable value" : "Budget exhausted", ms);
 		if (created.status === "store_unavailable") return outcome(origin, "dropped", "Unavailable value", ms);
 		return { ...outcome(origin, created.status === "deduplicated" ? "superseded" : "applied", created.status === "deduplicated" ? "Duplicate" : undefined, ms), requestId: created.requestId, questionId: created.request?.questionId };
 	}
 
-	private invoke(hook: HookContribution, member: "decide" | "onDecision" | "selectSkills" | "selectMcp", ctx: DecisionHookContext | import("./decision-hook-contract.js").DecisionResolutionContext | CapabilitySelectionContext): Promise<unknown> {
+	private invoke(hook: HookContribution, member: "decide" | "onDecision" | "selectSkills" | "selectMcp", ctx: DecisionHookContext | import("./decision-hook-contract.js").DecisionResolutionContext | ProjectImportDecisionHookContext | ProjectImportDecisionResolutionContext | CapabilitySelectionContext): Promise<unknown> {
 		const url = pathToFileURL(path.resolve(path.dirname(hook.sourceFile), hook.module)).href;
-		return this.deps.moduleHost.invoke({ url, packRoot: hook.packRoot, epoch: 0, exportKind: "hooks", member, ctx, arg: undefined, workingDir: ctx.cwd } as InvokeRequest<DecisionHookContext>, hook.budget.timeoutMs);
+		const workingDir = "cwd" in ctx ? ctx.cwd : ctx.projectRoot;
+		return this.deps.moduleHost.invoke({ url, packRoot: hook.packRoot, epoch: 0, exportKind: "hooks", member, ctx, arg: undefined, workingDir } as InvokeRequest<DecisionHookContext>, hook.budget.timeoutMs);
 	}
 }
 
@@ -1010,18 +1149,37 @@ function stripDefault(request: ValidatedExtensionDecisionRequest): StoredDecisio
 function isConsent(request: StoredDecisionRequest): boolean { return request.decisionClass === "consent-required"; }
 function consentSourceKey(record: Pick<StoredDecisionRequest, "projectId" | "id">): string { return `consent-pause:${record.projectId}:${record.id}`; }
 function deadlineRetryKey(record: Pick<StoredDecisionRequest, "projectId" | "id">): string { return `${record.projectId}:${record.id}`; }
-function scopeIdFor(scope: ValidatedExtensionDecisionRequest["scope"], origin: Pick<DecisionRequestOrigin, "projectId" | "sessionId" | "goalId">): string | undefined {
-	return scope === "project" ? origin.projectId : scope === "session" ? origin.sessionId : origin.goalId;
+function isSessionOrigin(origin: AnyDecisionRequestOrigin): origin is DecisionRequestOrigin {
+	return origin.event !== "projectImported";
 }
-function withinBudgets(store: DecisionRequestStore, origin: Pick<DecisionRequestOrigin, "sessionId" | "goalId">, now: number): boolean {
+function deliveryFor(origin: AnyDecisionRequestOrigin): DecisionDelivery {
+	return isSessionOrigin(origin) ? { kind: "session", sessionId: origin.sessionId } : { kind: "project-import", importId: origin.importId };
+}
+function deliveryId(origin: AnyDecisionRequestOrigin): string {
+	return isSessionOrigin(origin) ? origin.sessionId : origin.importId;
+}
+function scopeIdFor(
+	scope: ValidatedExtensionDecisionRequest["scope"],
+	origin: Pick<DecisionRequestOrigin, "projectId" | "sessionId" | "goalId"> | Pick<ProjectImportDecisionRequestOrigin, "projectId" | "importId"> | Pick<StoredDecisionRequest, "projectId" | "sessionId" | "goalId" | "delivery">,
+): string | undefined {
+	if (scope === "project") return origin.projectId;
+	if (scope === "session") return "sessionId" in origin ? origin.sessionId : undefined;
+	return "goalId" in origin ? origin.goalId : undefined;
+}
+function withinBudgets(store: DecisionRequestStore, origin: AnyDecisionRequestOrigin, now: number): boolean {
 	const records = store.list();
 	const recent = records.filter(request => Date.parse(request.createdAt) > now - DAY_MS);
 	// An awaiting-consent pause is still interrupting work and consumes the
 	// same caps, but must never be treated as a deadline-timer candidate.
 	const active = records.filter(request => request.status === "pending" || request.status === "paused-awaiting-consent");
-	if (active.filter(request => request.sessionId === origin.sessionId).length >= DECISION_SESSION_PENDING_LIMIT) return false;
-	if (recent.filter(request => request.sessionId === origin.sessionId).length >= DECISION_SESSION_24H_LIMIT) return false;
-	if (origin.goalId) {
+	const delivery = deliveryFor(origin);
+	const sameDelivery = (request: StoredDecisionRequest) => {
+		if (delivery.kind === "session") return request.delivery.kind === "session" && request.delivery.sessionId === delivery.sessionId;
+		return request.delivery.kind === "project-import" && request.delivery.importId === delivery.importId;
+	};
+	if (active.filter(sameDelivery).length >= DECISION_SESSION_PENDING_LIMIT) return false;
+	if (recent.filter(sameDelivery).length >= DECISION_SESSION_24H_LIMIT) return false;
+	if (isSessionOrigin(origin) && origin.goalId) {
 		if (active.filter(request => request.goalId === origin.goalId).length >= DECISION_GOAL_PENDING_LIMIT) return false;
 		if (recent.filter(request => request.goalId === origin.goalId).length >= DECISION_GOAL_24H_LIMIT) return false;
 	}
@@ -1035,6 +1193,12 @@ function canonical(value: unknown): string {
 	return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonical(record[key])}`).join(",")}}`;
 }
 function cloneValue(value: Readonly<DecisionValue>): DecisionValue { return value.kind === "option" ? { kind: "option", value: value.value } : { kind: "other", text: value.text }; }
+function importContext(run: StoredProjectImportRun): ProjectImportDecisionHookContext {
+	// The store validates this snapshot on every load; defensive JSON copying
+	// prevents a module from mutating a shared durable object in-process.
+	return Object.freeze(JSON.parse(JSON.stringify(run.context))) as ProjectImportDecisionHookContext;
+}
+
 function hookContext(
 	origin: DecisionRequestOrigin,
 	usage?: import("./lifecycle-hub.js").TurnUsageSnapshot,
@@ -1096,7 +1260,7 @@ function resolvedHooks(registry: PackContributionRegistry, projectId: string): R
 		pack.hooks.map(hook => ({ packId: pack.packId, hookId: hook.id, mode: hook.mode, capabilities: hook.capabilities, priority })),
 	);
 }
-function outcome(origin: Pick<DecisionRequestOrigin, "packId" | "hookId" | "event">, state: TraceDecisionOutcomeRow["outcome"], reason?: TraceDecisionOutcomeRow["reason"], ms?: number, kind: "decision" | "advisory" = "decision"): TraceDecisionOutcomeRow {
+function outcome(origin: Pick<AnyDecisionRequestOrigin, "packId" | "hookId" | "event">, state: TraceDecisionOutcomeRow["outcome"], reason?: TraceDecisionOutcomeRow["reason"], ms?: number, kind: "decision" | "advisory" = "decision"): TraceDecisionOutcomeRow {
 	return { kind, packId: origin.packId, hookId: origin.hookId, event: origin.event, outcome: state, ...(reason ? { reason } : {}), ...(ms === undefined ? {} : { ms }) };
 }
 function emptyCapabilityStageResult(): CapabilityStageResult {

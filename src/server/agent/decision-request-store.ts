@@ -5,9 +5,11 @@ import { realFs } from "../gateway-deps.js";
 
 /** Terminal deferrable records remain available for semantic deduplication. */
 export const DECISION_REQUEST_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
-export const DECISION_REQUEST_STORE_VERSION = 1 as const;
+export const DECISION_REQUEST_STORE_VERSION = 2 as const;
 
 export type DecisionLifecycleEvent = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown";
+/** Durable event labels accepted by the decision store. */
+export type StoredDecisionEvent = DecisionLifecycleEvent | "projectImported";
 export type DecisionScope = "session" | "goal" | "project";
 export type DecisionStatus = "pending" | "resolved" | "rejected" | "expired" | "superseded" | "defaulted" | "denied" | "paused-awaiting-consent";
 /** A consent pause is durable waiting work, not a terminal decision. */
@@ -102,12 +104,49 @@ export interface DecisionMemoryIdentity {
 	key: string;
 }
 
+/** A delivery is never represented by a fabricated agent-session id. */
+export type DecisionDelivery =
+	| { kind: "session"; sessionId: string }
+	| { kind: "project-import"; importId: string };
+
+export type ImportDecisionOutcomeCode = "applied" | "superseded" | "denied" | "dropped" | "error";
+
+/** Persisted, bounded import context. The context builder owns construction. */
+export interface StoredProjectImportContext {
+	event: "projectImported";
+	projectId: string;
+	importId: string;
+	projectRoot: string;
+	ownedRoots: readonly string[];
+	components: readonly {
+		id: string;
+		root: string;
+		languages: readonly string[];
+	}[];
+}
+
+export interface StoredProjectImportRun {
+	id: string;
+	projectId: string;
+	context: StoredProjectImportContext;
+	createdAt: string;
+	completedAt?: string;
+	hooks: Record<string, {
+		state: "pending" | "completed";
+		completedAt?: string;
+		outcome?: ImportDecisionOutcomeCode;
+	}>;
+}
+
 export interface StoredDecisionRequest {
 	id: string;
 	projectId: string;
-	sessionId: string;
+	/** Compatibility field retained for existing session routes and state files. */
+	sessionId?: string;
+	/** Explicit durable target. v1 records normalize to a session delivery. */
+	delivery: DecisionDelivery;
 	goalId?: string;
-	asker: { packId: string; hookId: string; event: DecisionLifecycleEvent };
+	asker: { packId: string; hookId: string; event: StoredDecisionEvent };
 	dedupeId: string;
 	questionId: string;
 	request: ValidatedExtensionDecisionRequest;
@@ -135,6 +174,7 @@ export interface DecisionRequestStoreState {
 	version: typeof DECISION_REQUEST_STORE_VERSION;
 	requests: Record<string, StoredDecisionRequest>;
 	memories: Record<string, DecisionMemory>;
+	importRuns: Record<string, StoredProjectImportRun>;
 }
 
 export interface DecisionTerminalUpdate {
@@ -221,7 +261,67 @@ export class DecisionRequestStore {
 	}
 
 	listPending(sessionId?: string): StoredDecisionRequest[] {
-		return this.list().filter(request => request.status === "pending" && (sessionId === undefined || request.sessionId === sessionId));
+		return this.list().filter(request => request.status === "pending" && (sessionId === undefined || request.delivery.kind === "session" && request.delivery.sessionId === sessionId));
+	}
+
+	/** Pending records addressed to one durable project-import run. */
+	listPendingImportRequests(importId: string): StoredDecisionRequest[] {
+		return this.list().filter(request => request.status === "pending" && request.delivery.kind === "project-import" && request.delivery.importId === importId);
+	}
+
+	getImportRun(id: string): StoredProjectImportRun | undefined {
+		const run = this.state.importRuns[id];
+		return run ? clone(run) : undefined;
+	}
+
+	/**
+	 * Publish an immutable import run once. A retry may observe the same snapshot,
+	 * but can never replace its context or silently start a second run.
+	 */
+	ensureImportRun(run: StoredProjectImportRun): { created: boolean; run: StoredProjectImportRun } | undefined {
+		if (!isImportRun(run)) return undefined;
+		const result = this.commit(next => {
+			const existing = next.importRuns[run.id];
+			if (existing) {
+				if (canonical(existing.context) !== canonical(run.context) || existing.projectId !== run.projectId) return undefined;
+				return { created: false, run: clone(existing) };
+			}
+			next.importRuns[run.id] = clone(run);
+			return { created: true, run: clone(run) };
+		});
+		return result;
+	}
+
+	/**
+	 * Add newly discovered active hooks without disturbing an immutable context or
+	 * a completed hook. This is the crash boundary between hook enumeration and
+	 * invocation: a replay sees the durable pending entry before calling code.
+	 */
+	ensureImportHooks(runId: string, hookKeys: readonly string[]): StoredProjectImportRun | undefined {
+		if (!hookKeys.every(key => isBoundedString(key, 256))) return undefined;
+		return this.commit(next => {
+			const run = next.importRuns[runId];
+			if (!run || run.completedAt) return run ? clone(run) : undefined;
+			for (const key of new Set(hookKeys)) run.hooks[key] ??= { state: "pending" };
+			// An import with no active hooks is still a completed one-shot run; it
+			// must not acquire hooks installed only after registration.
+			if (Object.values(run.hooks).every(entry => entry.state === "completed")) run.completedAt = run.createdAt;
+			return clone(run);
+		});
+	}
+
+	/** First durable completion for one hook wins; completed hooks never replay. */
+	completeImportHook(runId: string, hookKey: string, outcome: ImportDecisionOutcomeCode, at: string): boolean {
+		return this.commit(next => {
+			const run = next.importRuns[runId];
+			const hook = run?.hooks[hookKey];
+			if (!run || !hook || hook.state !== "pending" || !isBoundedString(hookKey, 256) || !isImportOutcome(outcome) || !isIsoInstant(at)) return false;
+			hook.state = "completed";
+			hook.completedAt = at;
+			hook.outcome = outcome;
+			if (Object.values(run.hooks).every(entry => entry.state === "completed")) run.completedAt ??= at;
+			return true;
+		}) ?? false;
 	}
 
 	findByDedupeId(dedupeId: string): StoredDecisionRequest | undefined {
@@ -416,8 +516,9 @@ export class DecisionRequestStore {
 		if (!this.fs.existsSync(this.file)) return;
 		try {
 			const parsed = JSON.parse(this.fs.readFileSync(this.file, "utf-8")) as unknown;
-			if (!isState(parsed)) throw new Error("invalid decision request state");
-			this.state = clone(parsed);
+			const migrated = migrateState(parsed);
+			if (!migrated) throw new Error("invalid decision request state");
+			this.state = clone(migrated);
 		} catch (error) {
 			this.healthy = false;
 			this.state = emptyState();
@@ -454,7 +555,7 @@ export class DecisionRequestStore {
 }
 
 function emptyState(): DecisionRequestStoreState {
-	return { version: DECISION_REQUEST_STORE_VERSION, requests: {}, memories: {} };
+	return { version: DECISION_REQUEST_STORE_VERSION, requests: {}, memories: {}, importRuns: {} };
 }
 
 /** JSON cloning provides both defensive copies and a JSON-only persistence fence. */
@@ -462,22 +563,47 @@ function clone<T>(value: T): T {
 	return JSON.parse(JSON.stringify(value)) as T;
 }
 
+/** Stable snapshot identity keeps import-run retries from replacing context. */
+function canonical(value: unknown): string {
+	if (value === null || typeof value !== "object") return JSON.stringify(value);
+	if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+	const record = value as Record<string, unknown>;
+	return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonical(record[key])}`).join(",")}}`;
+}
+
 function memoryKey(memory: DecisionMemoryIdentity): string {
 	// JSON avoids delimiter collisions while preserving the exact five-part key.
 	return JSON.stringify([memory.scope, memory.scopeId, memory.packId, memory.hookId, memory.key]);
 }
 
+function migrateState(value: unknown): DecisionRequestStoreState | undefined {
+	if (isState(value)) return value;
+	// Schema-1 had an implicit session delivery. Normalizing while loading keeps
+	// existing session routes working and makes the next atomic write upgrade it.
+	if (!isRecord(value) || value.version !== 1 || !isRecord(value.requests) || !isRecord(value.memories)) return undefined;
+	const requests: Record<string, StoredDecisionRequest> = {};
+	for (const [id, request] of Object.entries(value.requests)) {
+		if (!isLegacyStoredRequest(request) || request.id !== id) return undefined;
+		requests[id] = { ...clone(request), delivery: { kind: "session", sessionId: request.sessionId } };
+	}
+	if (!Object.values(value.memories).every(isMemory)) return undefined;
+	return { version: DECISION_REQUEST_STORE_VERSION, requests, memories: clone(value.memories) as Record<string, DecisionMemory>, importRuns: {} };
+}
+
 function isState(value: unknown): value is DecisionRequestStoreState {
-	if (!isRecord(value) || value.version !== DECISION_REQUEST_STORE_VERSION || !isRecord(value.requests) || !isRecord(value.memories)) return false;
+	if (!isRecord(value) || value.version !== DECISION_REQUEST_STORE_VERSION || !isRecord(value.requests) || !isRecord(value.memories) || !isRecord(value.importRuns)) return false;
 	return Object.entries(value.requests).every(([id, request]) => isStoredRequest(request) && request.id === id)
-		&& Object.values(value.memories).every(isMemory);
+		&& Object.values(value.memories).every(isMemory)
+		&& Object.entries(value.importRuns).every(([id, run]) => isImportRun(run) && run.id === id);
 }
 
 function isStoredRequest(value: unknown): value is StoredDecisionRequest {
 	if (!isRecord(value)
-		|| !isString(value.id) || !isString(value.projectId) || !isString(value.sessionId)
+		|| !isString(value.id) || !isString(value.projectId)
+		|| !isDelivery(value.delivery)
+		|| (value.sessionId !== undefined && !isString(value.sessionId))
 		|| (value.goalId !== undefined && !isString(value.goalId))
-		|| !isRecord(value.asker) || !isString(value.asker.packId) || !isString(value.asker.hookId) || !isLifecycleEvent(value.asker.event)
+		|| !isRecord(value.asker) || !isString(value.asker.packId) || !isString(value.asker.hookId) || !isStoredEvent(value.asker.event)
 		|| !isString(value.dedupeId) || !isString(value.questionId) || !isValidatedRequest(value.request)
 		|| (value.decisionClass !== undefined && !isDecisionClass(value.decisionClass))
 		|| (value.classificationReason !== undefined && !isClassificationReason(value.classificationReason))
@@ -489,10 +615,63 @@ function isStoredRequest(value: unknown): value is StoredDecisionRequest {
 		|| (value.resolvedAt !== undefined && !isIsoInstant(value.resolvedAt))
 		|| (value.resolution !== undefined && !isResolution(value.resolution))
 		|| !isContinuationState(value.continuationState) || !isNonNegativeInteger(value.continuationAttempts)) return false;
+	if (value.delivery.kind === "session" && (value.sessionId !== value.delivery.sessionId || !isLifecycleEvent(value.asker.event))) return false;
+	if (value.delivery.kind === "project-import" && (value.sessionId !== undefined || value.goalId !== undefined || value.request.scope !== "project" || value.asker.event !== "projectImported")) return false;
 	if (value.decisionClass === "consent-required" && value.request.default !== undefined) return false;
 	if ((value.decisionClass ?? "deferrable") === "deferrable" && value.request.default === undefined) return false;
 	if (value.status === "paused-awaiting-consent" && (!value.consentPause || !value.consentInbox)) return false;
 	return value.proposal === undefined || isProposal(value.proposal);
+}
+
+/** The schema-1 request validator before delivery became explicit. */
+function isLegacyStoredRequest(value: unknown): value is Omit<StoredDecisionRequest, "delivery"> & { sessionId: string } {
+	if (!isRecord(value) || !isString(value.sessionId)) return false;
+	return isStoredRequest({ ...value, delivery: { kind: "session", sessionId: value.sessionId } });
+}
+
+const IMPORT_LANGUAGES = new Set([
+	"c", "cpp", "csharp", "dart", "elixir", "go", "haskell", "java", "javascript", "kotlin", "lua", "php", "python", "ruby", "rust", "scala", "shell", "sql", "swift", "typescript",
+]);
+
+function isDelivery(value: unknown): value is DecisionDelivery {
+	return isRecord(value) && (value.kind === "session" && isSafeIdentifier(value.sessionId)
+		|| value.kind === "project-import" && isSafeIdentifier(value.importId));
+}
+
+function isImportRun(value: unknown): value is StoredProjectImportRun {
+	if (!isRecord(value) || !isSafeIdentifier(value.id) || !isSafeIdentifier(value.projectId) || !isImportContext(value.context)
+		|| value.context.projectId !== value.projectId || value.context.importId !== value.id || !isIsoInstant(value.createdAt)
+		|| (value.completedAt !== undefined && !isIsoInstant(value.completedAt)) || !isRecord(value.hooks)) return false;
+	return Object.entries(value.hooks).every(([key, hook]) => isBoundedString(key, 256) && isImportHook(hook));
+}
+
+function isImportContext(value: unknown): value is StoredProjectImportContext {
+	if (!isRecord(value) || value.event !== "projectImported" || !isSafeIdentifier(value.projectId) || !isSafeIdentifier(value.importId)
+		|| !isCanonicalPath(value.projectRoot) || !Array.isArray(value.ownedRoots) || value.ownedRoots.length === 0 || value.ownedRoots.length > 31
+		|| !value.ownedRoots.every(isCanonicalPath) || !Array.isArray(value.components) || value.components.length > 30) return false;
+	if (new Set(value.ownedRoots).size !== value.ownedRoots.length || !value.ownedRoots.includes(value.projectRoot)) return false;
+	return value.components.every(component => isRecord(component) && isSafeIdentifier(component.id) && isCanonicalPath(component.root)
+		&& Array.isArray(component.languages) && component.languages.length <= 12 && component.languages.every(language => typeof language === "string" && IMPORT_LANGUAGES.has(language))
+		&& new Set(component.languages).size === component.languages.length);
+}
+
+function isImportHook(value: unknown): boolean {
+	return isRecord(value) && (value.state === "pending" || value.state === "completed")
+		&& (value.completedAt === undefined || isIsoInstant(value.completedAt))
+		&& (value.outcome === undefined || isImportOutcome(value.outcome))
+		&& (value.state === "pending" ? value.completedAt === undefined && value.outcome === undefined : value.completedAt !== undefined && value.outcome !== undefined);
+}
+
+function isImportOutcome(value: unknown): value is ImportDecisionOutcomeCode {
+	return value === "applied" || value === "superseded" || value === "denied" || value === "dropped" || value === "error";
+}
+
+function isCanonicalPath(value: unknown): value is string {
+	return isString(value) && value.length > 0 && value.length <= 4096 && path.isAbsolute(value) && path.normalize(value) === value;
+}
+
+function isSafeIdentifier(value: unknown): value is string {
+	return isString(value) && value.length > 0 && value.length <= 128 && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
 }
 
 function isValidatedRequest(value: unknown): value is ValidatedExtensionDecisionRequest {
@@ -615,5 +794,6 @@ function isConsentInboxSurfaceStatus(value: unknown): value is ConsentInboxSurfa
 function isConsentResumeStatus(value: unknown): value is ConsentResumeStatus { return value === "claimed" || value === "resumed" || value === "already-resumed" || value === "not-matching" || value === "denied"; }
 function isDecisionScope(value: unknown): value is DecisionScope { return value === "session" || value === "goal" || value === "project"; }
 function isLifecycleEvent(value: unknown): value is DecisionLifecycleEvent { return value === "sessionSetup" || value === "beforePrompt" || value === "afterTurn" || value === "beforeCompact" || value === "sessionShutdown"; }
+function isStoredEvent(value: unknown): value is StoredDecisionEvent { return value === "projectImported" || isLifecycleEvent(value); }
 function isContinuationState(value: unknown): value is StoredDecisionRequest["continuationState"] { return value === "pending" || value === "delivered" || value === "skipped"; }
 function isProposalType(value: unknown): value is ProposalType { return value === "goal" || value === "project" || value === "workflow" || value === "role" || value === "tool" || value === "staff"; }

@@ -79,6 +79,12 @@ function runtimeHookIds(gateway: any, projectId: string): string[] {
 		.map((hook: any) => hook.id);
 }
 
+/** Direct legacy-store writes bypass the production route's resolver invalidation. */
+async function putLegacyProviderConfig(gateway: any, values: Record<string, unknown>): Promise<void> {
+	await getPackStore().put(PACK_ID, providerConfigStoreKey(PROVIDER_ID), values);
+	gateway.sessionManager.lifecycleHub?.registry.invalidate();
+}
+
 function writeFixturePack(headquartersDir: string): void {
 	packDir = path.join(headquartersDir, "config", "market-packs", PACK_ID);
 	fs.mkdirSync(path.join(packDir, "providers"), { recursive: true });
@@ -459,7 +465,7 @@ test.describe("extension settings API", () => {
 		const grantsBefore = await readJson(await apiFetch(`/api/projects/${encodeURIComponent(projectA.id)}/extension-grants`));
 
 		const legacyUrl = "https://legacy-hindsight.example.test";
-		await getPackStore().put(PACK_ID, providerConfigStoreKey(PROVIDER_ID), { externalUrl: legacyUrl, languages: ["python"], mode: "managed" });
+		await putLegacyProviderConfig(gateway, { externalUrl: legacyUrl, languages: ["python"], mode: "managed" });
 		const beforeRecord = target(await settings(projectB.id));
 		expect(beforeRecord.fields.find((field: any) => field.key === "externalUrl")).toMatchObject({ value: legacyUrl, source: "legacy" });
 		expect(beforeRecord.fields.find((field: any) => field.key === "languages"))
@@ -470,10 +476,10 @@ test.describe("extension settings API", () => {
 			.toMatchObject({ externalUrl: legacyUrl, mode: "managed" });
 
 		const invalidLegacyProject = await createProject(gateway, "legacy-invalid");
-		await getPackStore().put(PACK_ID, providerConfigStoreKey(PROVIDER_ID), { externalUrl: legacyUrl, recallScope: "invalid", mode: "managed" });
+		await putLegacyProviderConfig(gateway, { externalUrl: legacyUrl, recallScope: "invalid", mode: "managed" });
 		expect(target(await settings(invalidLegacyProject.id)).configuration).toMatchObject({ state: "invalid-values" });
 		expect(runtimeProviderIds(gateway, invalidLegacyProject.id)).not.toContain(PROVIDER_ID);
-		await getPackStore().put(PACK_ID, providerConfigStoreKey(PROVIDER_ID), { externalUrl: legacyUrl, mode: "managed" });
+		await putLegacyProviderConfig(gateway, { externalUrl: legacyUrl, mode: "managed" });
 
 		const aInitial = await settings(projectA.id);
 		const aSaved = await patchTarget(projectA.id, aInitial.revision, {
