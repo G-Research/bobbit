@@ -3,6 +3,7 @@ import {
 	DECISION_DEADLINE_MAX_MS,
 	DECISION_DEADLINE_MIN_MS,
 	validateDecisionHookOutput,
+	validateProjectImportDecisionHookOutput,
 	validateDecisionValue,
 } from "../../src/server/agent/decision-hook-contract.ts";
 
@@ -44,6 +45,14 @@ describe("decision hook contract", () => {
 		if (!output || output.kind !== "request") throw new Error("expected request");
 		expect(Object.isFrozen(output.request)).toBe(true);
 		expect(validateDecisionValue({ kind: "other", text: "Two words" }, output.request.options, output.request.other)).toEqual({ kind: "other", text: "Two words" });
+	});
+
+	it("limits project-import requests to project scope and no mutation output", () => {
+		const projectScoped = validRequest();
+		projectScoped.scope = "project";
+		expect(validateProjectImportDecisionHookOutput(requestOutput(projectScoped), { now })).toMatchObject({ kind: "request", request: { scope: "project" } });
+		expect(() => validateProjectImportDecisionHookOutput(requestOutput(validRequest()), { now })).toThrow(expect.objectContaining({ code: "DECISION_SCOPE_UNAVAILABLE" }));
+		expect(() => validateProjectImportDecisionHookOutput({ kind: "request-mutation", proposal: {} }, { now })).toThrow(expect.objectContaining({ code: "DECISION_OUTPUT_UNAVAILABLE" }));
 	});
 
 	it("accepts only null or undefined as a no-op", () => {
