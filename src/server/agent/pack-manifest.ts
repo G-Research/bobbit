@@ -50,6 +50,50 @@ export function isSafeBasename(name: unknown): name is string {
 	);
 }
 
+/** Schema-3 sandbox declarations have tighter limits than generic catalogues. */
+export const MAX_SANDBOX_REQUIREMENT_CATALOGUE_ROWS_PER_PACK = 32;
+export const MAX_SANDBOX_REQUIREMENT_LIST_NAME_LENGTH = 64;
+export const MAX_SANDBOX_REQUIREMENT_LIST_NAME_UTF8_BYTES = 64;
+export const MAX_SANDBOX_REQUIREMENT_ID_LENGTH = 64;
+export const MAX_SANDBOX_REQUIREMENT_ID_UTF8_BYTES = 64;
+export const MAX_SANDBOX_REQUIREMENT_DECLARATION_FILE_BYTES = 64 * 1024;
+
+const SANDBOX_REQUIREMENT_LIST_NAME_RE = /^[a-z0-9][a-z0-9._-]*$/;
+const SANDBOX_REQUIREMENT_ID_RE = /^[a-z0-9][a-z0-9._-]*$/;
+
+function isBoundedSandboxRequirementToken(
+	value: unknown,
+	re: RegExp,
+	maxLength: number,
+	maxUtf8Bytes: number,
+): value is string {
+	return typeof value === "string"
+		&& isSafeBasename(value)
+		&& value.length <= maxLength
+		&& Buffer.byteLength(value, "utf8") <= maxUtf8Bytes
+		&& re.test(value);
+}
+
+/** Safe, bounded basename for a schema-3 sandbox declaration file. */
+export function isValidSandboxRequirementListName(value: unknown): value is string {
+	return isBoundedSandboxRequirementToken(
+		value,
+		SANDBOX_REQUIREMENT_LIST_NAME_RE,
+		MAX_SANDBOX_REQUIREMENT_LIST_NAME_LENGTH,
+		MAX_SANDBOX_REQUIREMENT_LIST_NAME_UTF8_BYTES,
+	);
+}
+
+/** Safe, bounded identifier exposed by a schema-3 sandbox declaration. */
+export function isValidSandboxRequirementId(value: unknown): value is string {
+	return isBoundedSandboxRequirementToken(
+		value,
+		SANDBOX_REQUIREMENT_ID_RE,
+		MAX_SANDBOX_REQUIREMENT_ID_LENGTH,
+		MAX_SANDBOX_REQUIREMENT_ID_UTF8_BYTES,
+	);
+}
+
 function nonEmptyString(v: unknown): v is string {
 	return typeof v === "string" && v.trim().length > 0;
 }
@@ -194,6 +238,17 @@ export function validateManifest(
 	if (schema >= 3) {
 		const parsedSandboxRequirements = parseContentsBasenames("sandboxRequirements", c.sandboxRequirements);
 		if (parsedSandboxRequirements === null) return null;
+		if (parsedSandboxRequirements.length > MAX_SANDBOX_REQUIREMENT_CATALOGUE_ROWS_PER_PACK) {
+			return fail(`pack.yaml: contents.sandboxRequirements may contain at most ${MAX_SANDBOX_REQUIREMENT_CATALOGUE_ROWS_PER_PACK} entries`);
+		}
+		for (const entry of parsedSandboxRequirements) {
+			if (!isValidSandboxRequirementListName(entry)) {
+				return fail(
+					`pack.yaml: contents.sandboxRequirements entry ${JSON.stringify(entry)} must be a lowercase, bounded basename ` +
+						`(max ${MAX_SANDBOX_REQUIREMENT_LIST_NAME_LENGTH} characters / ${MAX_SANDBOX_REQUIREMENT_LIST_NAME_UTF8_BYTES} UTF-8 bytes)`,
+				);
+			}
+		}
 		sandboxRequirements = parsedSandboxRequirements;
 	}
 

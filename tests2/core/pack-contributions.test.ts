@@ -26,7 +26,13 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { createMemFs } from "../harness/mem-fs.js";
-import { validateManifest } from "../../src/server/agent/pack-manifest.ts";
+import {
+	MAX_SANDBOX_REQUIREMENT_CATALOGUE_ROWS_PER_PACK,
+	MAX_SANDBOX_REQUIREMENT_DECLARATION_FILE_BYTES,
+	MAX_SANDBOX_REQUIREMENT_ID_LENGTH,
+	MAX_SANDBOX_REQUIREMENT_LIST_NAME_LENGTH,
+	validateManifest,
+} from "../../src/server/agent/pack-manifest.ts";
 import { loadHooks, loadPackContributions, loadSandboxRequirements, loadSystemPromptSections, packIdFromRoot, PackContributionError } from "../../src/server/agent/pack-contributions.ts";
 import { DYNAMIC_CONTEXT_END, DYNAMIC_CONTEXT_START } from "../../src/server/agent/prompt-delimiters.ts";
 import { HOST_API_VERSION, HOST_CONTRACT_VERSION, type HostChannelFrame, type HostChannelsApi, type HostApi } from "../../src/shared/extension-host/host-api.ts";
@@ -44,7 +50,7 @@ const fsSpies: Array<{ mockRestore(): void }> = [];
 
 beforeAll(() => {
 	memoryFs.mkdirSync(tmp, { recursive: true });
-	for (const name of ["existsSync", "mkdirSync", "readFileSync", "readdirSync", "rmSync", "writeFileSync"] as const) {
+	for (const name of ["existsSync", "mkdirSync", "readFileSync", "readdirSync", "rmSync", "statSync", "writeFileSync"] as const) {
 		fsSpies.push(vi.spyOn(fs, name).mockImplementation(memoryFs[name].bind(memoryFs) as never));
 	}
 	fsSpies.push(vi.spyOn(fs, "realpathSync").mockImplementation(((file: fs.PathLike) => {
@@ -315,6 +321,42 @@ describe("schema-3 sandbox requirement declarations", () => {
 
 		const denied = new PackContributionRegistry(() => [entry(root, "server", m)]);
 		assert.deepEqual(denied.listSandboxRequirements(undefined), []);
+	});
+
+	it("rejects sandbox catalogues and list basenames beyond their closed bounds", () => {
+		const base = { ...manifest("safe-tools"), schema: 3 };
+		const tooMany = Array.from({ length: MAX_SANDBOX_REQUIREMENT_CATALOGUE_ROWS_PER_PACK + 1 }, (_, index) => `entry-${index}`);
+		const countProblems: string[] = [];
+		assert.equal(validateManifest({ ...base, contents: { ...base.contents, sandboxRequirements: tooMany } }, countProblems), null);
+		assert.match(countProblems.join("\n"), /at most/);
+
+		for (const value of ["Uppercase", "a".repeat(MAX_SANDBOX_REQUIREMENT_LIST_NAME_LENGTH + 1)]) {
+			const problems: string[] = [];
+			assert.equal(validateManifest({ ...base, contents: { ...base.contents, sandboxRequirements: [value] } }, problems), null);
+			assert.match(problems.join("\n"), /lowercase, bounded basename/);
+		}
+		assert.equal(
+			validateManifest({ ...base, contents: { ...base.contents, sandboxRequirements: [`a${"é".repeat(MAX_SANDBOX_REQUIREMENT_LIST_NAME_LENGTH)}`] } }),
+			null,
+		);
+	});
+
+	it("drops direct-loader catalogues, oversized declarations, and invalid bounded IDs before activation or authorization", () => {
+		const root = packRoot("sandbox-requirements-limits", "safe-tools");
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const overCatalogue = { ...manifest("safe-tools", { sandboxRequirements: Array.from({ length: MAX_SANDBOX_REQUIREMENT_CATALOGUE_ROWS_PER_PACK + 1 }, (_, index) => `entry-${index}`) }), schema: 3 };
+			assert.deepEqual(loadSandboxRequirements(root, overCatalogue), []);
+
+			w(path.join(root, "sandbox-requirements", "oversized.yaml"), `id: oversized\nprofiles: [python]\n#${"x".repeat(MAX_SANDBOX_REQUIREMENT_DECLARATION_FILE_BYTES)}\n`);
+			w(path.join(root, "sandbox-requirements", "long-id.yaml"), `id: ${"a".repeat(MAX_SANDBOX_REQUIREMENT_ID_LENGTH + 1)}\nprofiles: [python]\n`);
+			w(path.join(root, "sandbox-requirements", "unknown.yaml"), "id: unknown\nprofiles: [unknown]\n");
+			w(path.join(root, "sandbox-requirements", "duplicate.yaml"), "id: duplicate\nprofiles: [python, python]\n");
+			const m = { ...manifest("safe-tools", { sandboxRequirements: ["oversized", "long-id", "unknown", "duplicate"] }), schema: 3 };
+			assert.deepEqual(loadSandboxRequirements(root, m), []);
+		} finally {
+			warning.mockRestore();
+		}
 	});
 });
 
