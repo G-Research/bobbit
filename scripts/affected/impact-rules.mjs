@@ -1349,6 +1349,32 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
 		reads: frozen([
 			{ expression: "result.diagnostics.stdout.path", count: 1 },
+			{ expression: "path.join(hostPinnedCwd, \"pinned-fixture.txt\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/verification-pinned-checkout.test.ts",
+		allowReason: "test-owned Git-template clone and pinned-checkout fixture output",
+		reads: frozen([
+			{ expression: "path.join(checkout.path, \"raw.txt\")", count: 1 },
+			{ expression: "path.join(checkout.path, \"staged.txt\")", count: 1 },
+			{ expression: "path.join(checkout.path, \"new.txt\")", count: 1 },
+			{ expression: "path.join(checkout.path, \"deleted.txt\")", count: 1 },
+			{ expression: "path.join(checkout.path, \"ignored\")", count: 1 },
+			{ expression: "checkout.path", count: 3 },
+			{ expression: "path.join(pinnedDependencies, \"marker.js\")", count: 1 },
+			{ expression: "path.join(checkout.path, \"link\")", count: 1 },
+			{ expression: "path.join(restored.path, \"raw.txt\")", count: 1 },
+			{ expression: "path.join(unrelated, \"keep.txt\")", count: 2 },
+			{ expression: "path.join(outside, \"sentinel\")", count: 3 },
+			{ expression: "path.join(outside, \"outside-canary\")", count: 1 },
+			{ expression: "path.join(beta, \"foreign-canary\")", count: 1 },
+			{ expression: "path.join(source.state, \"verification-checkouts.json\")", count: 3 },
+			{ expression: "path.join(checkout.path, \"replacement-canary\")", count: 1 },
+			{ expression: "path.join(displaced, \"raw.txt\")", count: 1 },
+			{ expression: "path.join(checkout.path, \"services\", \"api\", \"raw.txt\")", count: 1 },
+			{ expression: "path.join(checkout.path, \"apps\", \"web\", \"raw.txt\")", count: 1 },
+			{ expression: "path.join(resumed.path, \"apps\", \"web\", \"raw.txt\")", count: 1 },
 		]),
 	},
 	{
@@ -1497,6 +1523,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		reads: frozen([
 			{ expression: "probe.sentinelFile", count: 1 },
 			{ expression: "path.join(stateDir, \"active-verifications.json\")", count: 4 },
+			{ expression: "persistPath", count: 1 },
 		]),
 	},
 	{
@@ -1688,6 +1715,14 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		declarations: frozen(["impact:builtin-roles"]),
 		reads: frozen([
 			{ expression: "file", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/project-sandbox-agent-dir-mounts.test.ts",
+		allowReason: "test-owned temporary scope-symlink canary output",
+		reads: frozen([
+			{ expression: "path.join(outside, \"outside-canary\")", count: 1 },
+			{ expression: "path.join(beta, \"foreign-canary\")", count: 1 },
 		]),
 	},
 	{

@@ -27,6 +27,8 @@ import {
 // ---------------------------------------------------------------------------
 
 test.describe("atomic models.json bind mount", () => {
+	test.describe.configure({ mode: "serial" });
+
 	test("refresh restores exact managed AIGW publication without disturbing a sibling run", async () => {
 		test.skip(!isDockerAvailable(), "Docker not available");
 		const root = mkdtempSync(path.join(tmpdir(), "bobbit-model-remount-"));
@@ -217,6 +219,71 @@ test.describe("atomic models.json bind mount", () => {
 			else rmSync(modelsJson, { force: true });
 			if (originalReplacement) writeFileSync(replacement, originalReplacement);
 			else rmSync(replacement, { force: true });
+			if (originalRunId === undefined) delete process.env.BOBBIT_E2E_RUN_ID;
+			else process.env.BOBBIT_E2E_RUN_ID = originalRunId;
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+	test("restart discovery keeps a newer verification sidecar separate from its project container", async () => {
+		test.skip(!isDockerAvailable(), "Docker not available");
+		test.setTimeout(90_000);
+		const root = mkdtempSync(path.join(tmpdir(), "bobbit-sidecar-discovery-"));
+		const source = path.join(root, "source");
+		const projectId = `sidecar-discovery-${randomUUID()}`;
+		const runId = `sidecar-discovery-run-${randomUUID()}`;
+		const signalId = randomUUID();
+		const originalRunId = process.env.BOBBIT_E2E_RUN_ID;
+		const docker = (args: string[]): string => execFileSync("docker", args, { encoding: "utf-8", timeout: 30_000 }).trim();
+		let sandbox: ProjectSandbox | undefined;
+		let sidecarId: string | undefined;
+		try {
+			docker(["image", "inspect", "bobbit-agent"]);
+			mkdirSync(source, { recursive: true });
+			execFileSync("git", ["init"], { cwd: source, stdio: "ignore" });
+			writeFileSync(path.join(source, "README.md"), "sidecar discovery source\n");
+			execFileSync("git", ["add", "README.md"], { cwd: source, stdio: "ignore" });
+			execFileSync("git", ["-c", "user.name=Bobbit", "-c", "user.email=bobbit@bobbit.ai", "commit", "-m", "sandbox source"], { cwd: source, stdio: "ignore" });
+			process.env.BOBBIT_E2E_RUN_ID = runId;
+			const options = {
+				projectId,
+				projectDir: root,
+				repoUrl: "file:///workspace-src",
+				cloneSource: { kind: "mounted" as const, hostPath: source, mountPath: "/workspace-src", cloneUrl: "file:///workspace-src" },
+				image: "bobbit-agent",
+			};
+			sandbox = new ProjectSandbox(options);
+			await sandbox.init();
+			const projectContainerId = await sandbox.getContainerId();
+
+			// Deliberately create this after the project container: without the
+			// exclusion, Docker's newest-first output would reattach the sidecar.
+			sidecarId = docker([
+				"run", "-d",
+				"--label", `bobbit-project=${projectId}`,
+				"--label", `bobbit-e2e-run=${runId}`,
+				"--label", "bobbit-verification-sidecar=1",
+				"--label", `bobbit-verification-signal=${signalId}`,
+				"bobbit-agent", "sleep", "infinity",
+			]);
+			expect(sidecarId).toMatch(/^[a-f0-9]{64}$/i);
+			docker(["stop", projectContainerId]);
+
+			const restartedSandbox = new ProjectSandbox(options);
+			await restartedSandbox.init();
+			expect(await restartedSandbox.getContainerId()).toBe(projectContainerId);
+			expect(docker(["inspect", "--format", "{{.State.Running}}", sidecarId])).toBe("true");
+			expect(JSON.parse(docker(["inspect", "--format", "{{json .Config.Labels}}", sidecarId]))).toMatchObject({
+				"bobbit-project": projectId,
+				"bobbit-verification-sidecar": "1",
+			});
+		} finally {
+			if (sandbox) await sandbox.destroy();
+			if (sidecarId) {
+				try {
+					execFileSync("docker", ["inspect", sidecarId], { timeout: 5_000, stdio: "ignore" });
+					docker(["rm", "-f", sidecarId]);
+				} catch { /* destroy normally owns this sidecar; cleanup is idempotent. */ }
+			}
 			if (originalRunId === undefined) delete process.env.BOBBIT_E2E_RUN_ID;
 			else process.env.BOBBIT_E2E_RUN_ID = originalRunId;
 			rmSync(root, { recursive: true, force: true });
