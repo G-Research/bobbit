@@ -21,6 +21,7 @@ import { ProjectSandbox } from "../../src/server/agent/project-sandbox.js";
 
 const TOKEN = "sandbox-extension-requirements-token";
 const PACK_ID = "sandbox-requirements-integration-fixture";
+const TEMPORARY_PACK_ID = "sandbox-requirements-mutation-fixture";
 const SECOND_PACK_ID = "sandbox-requirements-same-profile-fixture";
 const REQUIREMENT_ID = "python-analysis";
 
@@ -156,11 +157,71 @@ async function grant(fixture: Fixture, projectId = fixture.projectA, packId = PA
 	expect(response.status, await response.clone().text()).toBe(200);
 }
 
-async function revoke(fixture: Fixture): Promise<void> {
-	const response = await api(fixture, `/api/projects/${encodeURIComponent(fixture.projectA)}/extension-grants/${encodeURIComponent(PACK_ID)}/principals/pack/sandbox%3Abuild`, {
+async function revoke(fixture: Fixture, projectId = fixture.projectA, packId = PACK_ID): Promise<void> {
+	const response = await api(fixture, `/api/projects/${encodeURIComponent(projectId)}/extension-grants/${encodeURIComponent(packId)}/principals/pack/sandbox%3Abuild`, {
 		method: "DELETE", headers: fixture.operatorHeaders,
 	});
 	expect(response.status, await response.clone().text()).toBe(200);
+}
+
+async function addSourceIdempotently(fixture: Fixture, sourceRoot: string): Promise<string> {
+	const sourceResponse = await api(fixture, "/api/marketplace/sources", {
+		method: "POST", body: JSON.stringify({ url: sourceRoot }),
+	});
+	if (sourceResponse.status === 201) return (await responseJson(sourceResponse)).source.id as string;
+	if (sourceResponse.status !== 409) expect(sourceResponse.status, await sourceResponse.clone().text()).toBe(201);
+	const sources = await api(fixture, "/api/marketplace/sources");
+	expect(sources.status, await sources.clone().text()).toBe(200);
+	const source = (await responseJson(sources)).sources?.find((candidate: any) => candidate.url === sourceRoot);
+	expect(source, "SANDBOX_REQUIREMENTS_EXISTING_SOURCE_MISSING").toBeTruthy();
+	return source.id as string;
+}
+
+async function uninstallIfPresent(fixture: Fixture, packId: string): Promise<void> {
+	const response = await api(fixture, "/api/marketplace/installed", {
+		method: "DELETE", body: JSON.stringify({ scope: "server", packName: packId }),
+	});
+	expect([204, 404], await response.clone().text()).toContain(response.status);
+}
+
+async function clearPackActivationIfPresent(fixture: Fixture, packId: string): Promise<void> {
+	const response = await api(fixture, "/api/marketplace/pack-activation", {
+		method: "PUT", body: JSON.stringify({ scope: "server", packName: packId, disabled: {} }),
+	});
+	expect([200, 404], await response.clone().text()).toContain(response.status);
+}
+
+async function removeSourceIfPresent(fixture: Fixture, sourceId: string | undefined): Promise<void> {
+	if (!sourceId) return;
+	const response = await api(fixture, `/api/marketplace/sources/${encodeURIComponent(sourceId)}`, { method: "DELETE" });
+	expect([204, 404], await response.clone().text()).toContain(response.status);
+}
+
+async function packOrder(fixture: Fixture, scope: "server" | "project", projectId?: string): Promise<string[]> {
+	const params = new URLSearchParams({ scope, ...(projectId ? { projectId } : {}) });
+	const response = await api(fixture, `/api/marketplace/pack-order?${params}`);
+	expect(response.status, await response.clone().text()).toBe(200);
+	return (await responseJson(response)).order ?? [];
+}
+
+async function setPackOrder(fixture: Fixture, scope: "server" | "project", order: string[], projectId?: string): Promise<void> {
+	const response = await api(fixture, "/api/marketplace/pack-order", {
+		method: "PUT", body: JSON.stringify({ scope, order, ...(projectId ? { projectId } : {}) }),
+	});
+	expect(response.status, await response.clone().text()).toBe(200);
+}
+
+function requirementEntry(body: any, packId: string): any {
+	const entry = requirementStatus(body).entries.find((candidate: any) => candidate.packId === packId && candidate.requirementId === REQUIREMENT_ID);
+	expect(entry, `SANDBOX_REQUIREMENTS_TEMPORARY_ENTRY_MISSING: ${packId}/${REQUIREMENT_ID}`).toBeTruthy();
+	return entry;
+}
+
+async function expectRequirementState(fixture: Fixture, projectId: string, packIds: readonly string[], state: "failed" | "pending", code?: string): Promise<void> {
+	const body = await status(fixture, projectId);
+	for (const packId of packIds) {
+		expect(requirementEntry(body, packId)).toMatchObject({ packId, requirementId: REQUIREMENT_ID, state, ...(code ? { code } : {}) });
+	}
 }
 
 async function setRequirementEnabled(fixture: Fixture, enabled: boolean): Promise<void> {
@@ -317,80 +378,97 @@ describe.sequential("sandbox extension requirements integration", () => {
 
 	it("clears same-profile failures after marketplace mutations without crossing project scope", async () => {
 		const sourceRoot = path.join(fixture.root, "same-profile-source");
-		writeFixturePack(path.join(sourceRoot, PACK_ID), PACK_ID);
-		writeFixturePack(path.join(sourceRoot, SECOND_PACK_ID), SECOND_PACK_ID);
-		const sourceResponse = await api(fixture, "/api/marketplace/sources", {
-			method: "POST", body: JSON.stringify({ url: sourceRoot }),
-		});
-		expect(sourceResponse.status, await sourceResponse.clone().text()).toBe(201);
-		const sourceId = (await responseJson(sourceResponse)).source.id as string;
-		const install = async (packName: string) => {
-			const response = await api(fixture, "/api/marketplace/install", {
-				method: "POST", body: JSON.stringify({ sourceId, dirName: packName, scope: "server" }),
-			});
-			expect(response.status, await response.clone().text()).toBe(201);
-		};
-		await install(PACK_ID);
-		await install(SECOND_PACK_ID);
-		await setPackActivation(fixture, { enabled: true, sandboxRequirements: [] }, PACK_ID);
-		await setPackActivation(fixture, { enabled: true, sandboxRequirements: [] }, SECOND_PACK_ID);
-		for (const projectId of [fixture.projectA, fixture.projectB]) {
-			await grant(fixture, projectId, PACK_ID);
-			await grant(fixture, projectId, SECOND_PACK_ID);
-			// Earlier cases may have built the same profile under this project's base
-			// image. Remove it so this test records a visible pending-plan failure.
-			fixture.runner.images.delete((await status(fixture, projectId)).imageName);
-		}
-
-		const recordFailures = async () => {
-			fixture.runner.failBuild = true;
-			for (const projectId of [fixture.projectA, fixture.projectB]) {
-				const response = await api(fixture, "/api/sandbox-image/build", { method: "POST", body: JSON.stringify({ projectId }) });
-				expect(response.status, await response.clone().text()).toBe(500);
-				expect(requirementStatus(await status(fixture, projectId))).toMatchObject({ entries: [{ state: "failed", code: "build-failed" }] });
+		const temporaryPackIds = [TEMPORARY_PACK_ID, SECOND_PACK_ID] as const;
+		let sourceId: string | undefined;
+		const initialServerOrder = await packOrder(fixture, "server");
+		const initialProjectOrder = await packOrder(fixture, "project", fixture.projectA);
+		const projectBConfig = await api(fixture, `/api/projects/${encodeURIComponent(fixture.projectB)}/config`);
+		expect(projectBConfig.status, await projectBConfig.clone().text()).toBe(200);
+		const initialProjectBConfig = await responseJson(projectBConfig);
+		try {
+			// A retry can re-enter after a failed assertion. Remove only this test's
+			// uniquely named packs before installing them again.
+			for (const packId of temporaryPackIds) {
+				await clearPackActivationIfPresent(fixture, packId);
+				await uninstallIfPresent(fixture, packId);
 			}
-		};
-		const expectPending = async (projectId: string) => {
-			expect(requirementStatus(await status(fixture, projectId))).toMatchObject({ profiles: ["python"], entries: [{ state: "pending" }] });
-		};
+			fs.rmSync(sourceRoot, { recursive: true, force: true });
+			writeFixturePack(path.join(sourceRoot, TEMPORARY_PACK_ID), TEMPORARY_PACK_ID);
+			writeFixturePack(path.join(sourceRoot, SECOND_PACK_ID), SECOND_PACK_ID);
+			sourceId = await addSourceIdempotently(fixture, sourceRoot);
+			const install = async (packName: string) => {
+				const response = await api(fixture, "/api/marketplace/install", {
+					method: "POST", body: JSON.stringify({ sourceId, dirName: packName, scope: "server" }),
+				});
+				expect(response.status, await response.clone().text()).toBe(201);
+			};
+			for (const packId of temporaryPackIds) {
+				await install(packId);
+				await setPackActivation(fixture, { enabled: true, sandboxRequirements: [] }, packId);
+			}
+			// The preceding case disables project B. Restore a Docker sandbox for this
+			// two-project assertion, then restore the exact prior config in finally.
+			const enableProjectB = await api(fixture, `/api/projects/${encodeURIComponent(fixture.projectB)}/config`, {
+				method: "PUT", body: JSON.stringify({ sandbox: "docker", sandbox_image: "registry.example.test/team/agent:b" }),
+			});
+			expect(enableProjectB.status, await enableProjectB.clone().text()).toBe(200);
+			for (const projectId of [fixture.projectA, fixture.projectB]) {
+				for (const packId of temporaryPackIds) await grant(fixture, projectId, packId);
+				// Earlier cases may have built the same profile under this project's base
+				// image. Remove it so this test records a visible pending-plan failure.
+				fixture.runner.images.delete((await status(fixture, projectId)).imageName);
+			}
 
-		await recordFailures();
-		const update = await api(fixture, "/api/marketplace/update", { method: "POST", body: JSON.stringify({ scope: "server", packName: PACK_ID }) });
-		expect(update.status, await update.clone().text()).toBe(200);
-		await expectPending(fixture.projectA);
-		await expectPending(fixture.projectB);
+			const recordFailures = async (packIds: readonly string[] = temporaryPackIds) => {
+				fixture.runner.failBuild = true;
+				for (const projectId of [fixture.projectA, fixture.projectB]) {
+					const response = await api(fixture, "/api/sandbox-image/build", { method: "POST", body: JSON.stringify({ projectId }) });
+					expect(response.status, await response.clone().text()).toBe(500);
+					await expectRequirementState(fixture, projectId, packIds, "failed", "build-failed");
+				}
+			};
+			const expectPending = async (packIds: readonly string[] = temporaryPackIds) => {
+				for (const projectId of [fixture.projectA, fixture.projectB]) await expectRequirementState(fixture, projectId, packIds, "pending");
+			};
 
-		await recordFailures();
-		const currentOrder = await api(fixture, "/api/marketplace/pack-order?scope=server");
-		expect(currentOrder.status, await currentOrder.clone().text()).toBe(200);
-		const ordered = (await responseJson(currentOrder)).order as string[];
-		const reorder = await api(fixture, "/api/marketplace/pack-order", {
-			method: "PUT", body: JSON.stringify({ scope: "server", order: [...ordered].reverse() }),
-		});
-		expect(reorder.status, await reorder.clone().text()).toBe(200);
-		await expectPending(fixture.projectA);
-		await expectPending(fixture.projectB);
+			await recordFailures();
+			const update = await api(fixture, "/api/marketplace/update", { method: "POST", body: JSON.stringify({ scope: "server", packName: TEMPORARY_PACK_ID }) });
+			expect(update.status, await update.clone().text()).toBe(200);
+			await expectPending();
 
-		await recordFailures();
-		const projectOrder = await api(fixture, "/api/marketplace/pack-order", {
-			method: "PUT", body: JSON.stringify({ scope: "project", projectId: fixture.projectA, order: [] }),
-		});
-		expect(projectOrder.status, await projectOrder.clone().text()).toBe(200);
-		await expectPending(fixture.projectA);
-		expect(requirementStatus(await status(fixture, fixture.projectB))).toMatchObject({ entries: [{ state: "failed", code: "build-failed" }] });
+			await recordFailures();
+			await setPackOrder(fixture, "server", [...await packOrder(fixture, "server")].reverse());
+			await expectPending();
 
-		const uninstall = await api(fixture, "/api/marketplace/installed", {
-			method: "DELETE", body: JSON.stringify({ scope: "server", packName: PACK_ID }),
-		});
-		expect(uninstall.status, await uninstall.clone().text()).toBe(204);
-		await expectPending(fixture.projectA);
-		await expectPending(fixture.projectB);
+			await recordFailures();
+			await setPackOrder(fixture, "project", [], fixture.projectA);
+			await expectRequirementState(fixture, fixture.projectA, temporaryPackIds, "pending");
+			await expectRequirementState(fixture, fixture.projectB, temporaryPackIds, "failed", "build-failed");
 
-		await recordFailures();
-		await install(PACK_ID);
-		await expectPending(fixture.projectA);
-		await expectPending(fixture.projectB);
-		fixture.runner.failBuild = false;
+			await uninstallIfPresent(fixture, TEMPORARY_PACK_ID);
+			await expectPending([SECOND_PACK_ID]);
+
+			await recordFailures([SECOND_PACK_ID]);
+			await install(TEMPORARY_PACK_ID);
+			await expectPending();
+		} finally {
+			fixture.runner.failBuild = false;
+			for (const projectId of [fixture.projectA, fixture.projectB]) {
+				for (const packId of temporaryPackIds) await revoke(fixture, projectId, packId);
+			}
+			for (const packId of temporaryPackIds) {
+				await clearPackActivationIfPresent(fixture, packId);
+				await uninstallIfPresent(fixture, packId);
+			}
+			await setPackOrder(fixture, "server", initialServerOrder);
+			await setPackOrder(fixture, "project", initialProjectOrder, fixture.projectA);
+			await removeSourceIfPresent(fixture, sourceId);
+			fs.rmSync(sourceRoot, { recursive: true, force: true });
+			const restoreProjectB = await api(fixture, `/api/projects/${encodeURIComponent(fixture.projectB)}/config`, {
+				method: "PUT", body: JSON.stringify({ sandbox: initialProjectBConfig.sandbox, sandbox_image: initialProjectBConfig.sandbox_image }),
+			});
+			expect(restoreProjectB.status, await restoreProjectB.clone().text()).toBe(200);
+		}
 	});
 
 	it("skips heavyweight bootstrap for an unchanged identity and recreates once when it changes", async () => {
