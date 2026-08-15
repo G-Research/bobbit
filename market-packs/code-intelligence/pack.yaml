@@ -1,17 +1,17 @@
 schema: 2
 name: code-intelligence
 description: >-
-  Host-side Graphify code intelligence for component-scoped code graphs. Graph
-  queries are read-only, default to code-tier results, and never expose graph
-  artifacts to agent sandboxes. Structural-search and bounded LSP adapter source
-  remains staged pending its public Extension Platform integration.
+  Host-side Graphify code intelligence for component-scoped code graphs and
+  read-only structural search. Graph queries default to code-tier results and
+  never expose graph artifacts to agent sandboxes. LSP remains unavailable until
+  its exact-worktree adapter is integrated through the Extension Platform.
 version: 0.1.0
 # The pack ships inert. Enabling it is the sole activation switch for its
 # provider, graph tools, routes, and status panel.
 defaultDisabled: true
 contents:
   roles: []
-  tools: [graph]
+  tools: [graph, ast]
   skills: []
   entrypoints: [code-intelligence-route]
   providers: [indexer]
