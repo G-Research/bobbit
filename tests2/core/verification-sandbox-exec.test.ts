@@ -168,6 +168,22 @@ async function runCommandStep(harness: InstanceType<typeof VerificationHarness>,
 	return (harness as any).runCommandStep(...args);
 }
 
+/** Direct streamed command tests must model a current, admitted generation. */
+function seedActiveCommandVerification(
+	harness: InstanceType<typeof VerificationHarness>,
+	streamCtx: { goalId: string; gateId: string; signalId: string; stepIndex: number },
+): void {
+	(harness as any).activeVerifications.set(streamCtx.signalId, {
+		goalId: streamCtx.goalId,
+		gateId: streamCtx.gateId,
+		signalId: streamCtx.signalId,
+		overallStatus: "running",
+		startedAt: Date.now(),
+		currentPhase: 0,
+		steps: [{ name: "streamed command", type: "command", status: "running", startedAt: Date.now() }],
+	});
+}
+
 // ---------------------------------------------------------------------------
 // Tests: runCommandStep spawn behavior (direct private method invocation)
 // ---------------------------------------------------------------------------
@@ -199,6 +215,7 @@ describe("runCommandStep spawn behavior", () => {
 			signalId: "sig-1",
 			stepIndex: 0,
 		};
+		seedActiveCommandVerification(harness, streamCtx);
 		const result = await runCommandStep(harness,
 			STREAM_MARKER_COMMAND,
 			HOST_CWD,
