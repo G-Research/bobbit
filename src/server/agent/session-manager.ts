@@ -1238,12 +1238,15 @@ export function preparePromptAuthorDispatch(
 	source: PromptSource,
 	author: MessageAuthor,
 	now: number,
-	evidence?: { intentId: string },
+	evidence?: { intentId: string; attemptId?: string; dispatchEpoch?: number },
 ): PreparedPromptAuthorDispatch {
 	const desiredPrefix = modelPrefixForPromptAuthor(author);
 	const desiredPiText = desiredPrefix ? `${desiredPrefix}${baseModelText}` : baseModelText;
-	const attemptId = promptAttemptId("attempt");
-	const dispatchEpoch = evidence ? now : undefined;
+	// A proven-no-start redrive keeps its logical reliable attempt. Re-appending
+	// that exact identity supersedes its cancellation marker without multiplying
+	// sidecar bindings for one verifier receipt.
+	const attemptId = evidence?.attemptId ?? promptAttemptId("attempt");
+	const dispatchEpoch = evidence ? evidence.dispatchEpoch ?? now : undefined;
 	const sidecarPersisted = appendPromptAuthorDispatch(session.id, {
 		schemaVersion: 2,
 		type: "prompt-author",
@@ -6373,7 +6376,33 @@ export class SessionManager {
 				return { status: settlementFenced ? "queued" : "dispatched" };
 			}
 			if (session.status === "idle") {
-				this.drainQueue(session);
+				// Preserve the historical direct-call contract when this accepted
+				// occurrence is the sole idle item: callers receive a definite
+				// pre-admission rejection while the exact reliable row still owns
+				// recovery. Otherwise the lane-aware drain retains FIFO ordering.
+				if (session._piAgentRunSettled !== false
+					&& session.promptQueue.length === 1
+					&& session.promptQueue.peek()?.id === accepted.id) {
+					if (!opts?.suppressTitleGen) this.tryGenerateTitleFromPrompt(sessionId, text);
+					await this.dispatchDirectPrompt(
+						session,
+						dispatchText,
+						opts?.images,
+						opts?.attachments,
+						!!opts?.isSteered,
+						!!opts?.coldStart,
+						source,
+						author,
+						accepted.id,
+						accepted.id,
+						opts?.streamingBehavior,
+						false,
+						false,
+						opts?.suppressTitleGen,
+					);
+				} else {
+					this.drainQueue(session);
+				}
 				return { status: "dispatched" };
 			}
 			return { status: "queued" };
@@ -6727,6 +6756,7 @@ export class SessionManager {
 		source: PromptSource,
 		author: MessageAuthor,
 		intentId?: string,
+		attempt?: Pick<ReliableQueuedMessage, "attemptId" | "dispatchEpoch">,
 	): PreparedPromptAuthorDispatch {
 		return preparePromptAuthorDispatch(
 			session,
@@ -6735,7 +6765,11 @@ export class SessionManager {
 			source,
 			author,
 			this.clock.now(),
-			intentId === undefined ? undefined : { intentId },
+			intentId === undefined ? undefined : {
+				intentId,
+				...(attempt?.attemptId === undefined ? {} : { attemptId: attempt.attemptId }),
+				...(attempt?.dispatchEpoch === undefined ? {} : { dispatchEpoch: attempt.dispatchEpoch }),
+			},
 		);
 	}
 
@@ -7608,7 +7642,15 @@ export class SessionManager {
 			session.lastPromptImages = images;
 			session.lastPromptSource = source;
 			this.markPromptDispatchStreaming(session);
-			const prepared = this.preparePromptAuthorDispatch(session, reliableRow.id, text, source, author, reliableRow.id);
+			const prepared = this.preparePromptAuthorDispatch(
+				session,
+				reliableRow.id,
+				text,
+				source,
+				author,
+				reliableRow.id,
+				reliableRow,
+			);
 			const attempt: ReliableInFlightRecord = {
 				text,
 				promptId: reliableRow.id,
@@ -7644,10 +7686,15 @@ export class SessionManager {
 					definiteRejection = true;
 					throw new Error((response as any).error || "prompt rejected");
 				}
-				acceptPreparedPromptDispatch(session, prepared, activityBoundary);
-				this.clearRecoveredPromptDispatchOwnership(session, [reliableRow.id]);
-				if (!this.pruneTerminalInFlightAttempt(session, reliableRow.id, prepared.attemptId)) {
-					this.broadcastQueue(session);
+				if (acceptPreparedPromptDispatch(session, prepared, activityBoundary)) {
+					this.clearRecoveredPromptDispatchOwnership(session, [reliableRow.id]);
+					if (!this.pruneTerminalInFlightAttempt(session, reliableRow.id, prepared.attemptId)) {
+						this.broadcastQueue(session);
+					}
+					// A verifier receipt tracks provider acceptance, not its later Pi echo.
+					// The occurrence remains in the reliable in-flight ledger for outbox
+					// projection until that echo settles it.
+					this.settleVerifierPromptReceipt(session.id, reliableRow.id);
 				}
 				return;
 			} catch (error) {
@@ -7674,6 +7721,45 @@ export class SessionManager {
 					console.warn(`[session-manager] intent dispatch restored session=${session.id} intent=${reliableRow.id} attempt=${prepared.attemptId} outcome=compaction-active`);
 					return;
 				}
+
+				// A proven rejection must retain the historical direct-recovery path,
+				// even after server work gained a reliable queue row. Verifier-owned
+				// rows also treat an unacknowledged transport throw as recoverable: their
+				// receipt-bound, bounded retry contract cannot leave them uncertain.
+				if (definiteRejection || reliableRow.verifierOwned === true) {
+					if (index !== -1) session.inFlightSteerTexts!.splice(index, 1);
+					this.cancelPromptAuthorDispatch(session, prepared);
+					this.enqueueReliableIntent(session, {
+						...reliableRow,
+						deliveryState: "queued",
+						deliveryReason: undefined,
+						deliveryError: undefined,
+						retryable: false,
+						attemptId: prepared.attemptId,
+						dispatchEpoch: prepared.dispatchEpoch,
+					}, { front: true });
+					this.recoverPromptDispatch(
+						session,
+						[{
+							id: reliableRow.id,
+							text: reliableRow.text,
+							images: reliableRow.images,
+							attachments: reliableRow.attachments,
+							isSteered: reliableRow.isSteered,
+							source: reliableRow.source,
+							verifierOwned: reliableRow.verifierOwned,
+							author: reliableRow.author,
+							streamingBehavior: reliableRow.streamingBehavior,
+							coldStart: reliableRow.coldStart,
+							suppressTitleGen: reliableRow.suppressTitleGen,
+						}],
+						error instanceof Error ? error.message : String(error),
+						reliableRow.verifierOwned === true ? "reliable verifier prompt" : "reliable prompt",
+						[reliableRow.id],
+					);
+					throw error;
+				}
+
 				if (definiteRejection) {
 					if (index !== -1) session.inFlightSteerTexts!.splice(index, 1);
 					this.cancelPromptAuthorDispatch(session, prepared);
