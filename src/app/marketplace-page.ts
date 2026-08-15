@@ -490,7 +490,7 @@ async function loadGrantAudit(projectId = currentProjectId()): Promise<void> {
 	}
 }
 
-async function loadExtensionSettings(projectId = currentProjectId()): Promise<void> {
+async function loadExtensionSettings(projectId = currentProjectId(), discardDrafts = false): Promise<void> {
 	if (!projectId) {
 		extensionSettings = null;
 		extensionSettingsProjectId = undefined;
@@ -505,9 +505,10 @@ async function loadExtensionSettings(projectId = currentProjectId()): Promise<vo
 		const response = await getExtensionSettings(requestedProjectId);
 		if (!response.ok) throw new Error("Extension settings are unavailable.");
 		if (currentProjectId() !== requestedProjectId) return;
-		// Server replacement wins over local drafts after explicit reloads, a
-		// metadata refresh, or conflict recovery. Retain no stale array references.
-		discardExtensionSettingsDrafts();
+		// Passive metadata, grant, and activation refreshes update only the server
+		// projection; do not erase an in-progress settings form. Explicit reloads,
+		// successful saves, and project replacement deliberately discard drafts.
+		if (discardDrafts) discardExtensionSettingsDrafts();
 		extensionSettings = normalizeExtensionSettings(response.data, requestedProjectId);
 	} catch {
 		if (currentProjectId() !== requestedProjectId) return;
@@ -2286,6 +2287,7 @@ function settingsTargetIsDirty(target: ExtensionSettingsTarget, owner: string): 
 	const draft = settingsDrafts.get(owner);
 	if (draft) {
 		for (const field of target.fields ?? []) {
+			if (field.type === "secret" && draft.get(`__clear__${field.key}`) === true) return true;
 			if (!draft.has(field.key)) continue;
 			const staged = draft.get(field.key);
 			if (staged === undefined) {
@@ -2474,7 +2476,7 @@ async function saveSettingsTarget(target: ExtensionSettingsTarget): Promise<void
 		}
 		clearExtensionSettingsUi(false);
 		settingsStatus = `Settings saved for ${state.projects.find((project) => project.id === projectId)?.name || "this project"}.`;
-		await loadExtensionSettings(projectId);
+		await loadExtensionSettings(projectId, true);
 	} catch {
 		settingsFormErrors.set(owner, "Settings were not saved. Secret values were cleared; re-enter them and retry.");
 	} finally {
@@ -2651,7 +2653,7 @@ function renderSettingsTarget(target: ExtensionSettingsTarget): TemplateResult {
 		<span class="market-lozenge ${status.className}" data-testid="market-runtime-status" data-state=${status.state}>${status.label}</span>
 		${configurable ? html`<button type="button" class="market-btn" data-testid="market-settings-toggle" data-owner-kind=${target.kind} data-owner-id=${target.id} aria-expanded=${open ? "true" : "false"} aria-controls=${panelId} @click=${() => { expandedSettingsOwner = open ? "" : owner; renderApp(); }}>${open ? "Close settings" : "Configure"}</button>` : ""}
 		${renderExtensionGrants(target)}
-		${open && configurable ? html`<fieldset id=${panelId} class="market-settings-form" data-testid="market-settings-form" data-owner-kind=${target.kind} data-owner-id=${target.id} data-revision=${extensionSettings?.revision ?? 0} aria-busy=${busyOwner ? "true" : "false"}><legend>${target.label || target.id} ${target.kind} settings</legend><div class="market-settings-project">Project: ${state.projects.find((project) => project.id === currentProjectId())?.name || "Unknown"}</div><p class="market-settings-status-copy">${status.message}</p>${formError ? html`<div class="market-settings-error-summary" data-testid="market-settings-error-summary" role="alert">${formError}${formError.includes("changed elsewhere") ? html` <button type="button" class="market-btn" @click=${() => loadExtensionSettings(currentProjectId())}>Reload latest</button>` : ""}</div>` : ""}<div class="market-settings-fields">${(target.fields ?? []).map((field) => renderSettingsField(target, field))}</div><div class="market-settings-actions"><button type="button" class="market-btn market-btn--danger" data-testid="market-settings-reset" ?disabled=${busyOwner} @click=${() => resetSettingsTarget(target)}>Reset project settings</button><button type="button" class="market-btn market-btn--primary" data-testid="market-settings-save" ?disabled=${!dirty || busyOwner} @click=${() => saveSettingsTarget(target)}>${busyOwner ? "Saving…" : "Save"}</button></div></fieldset>` : ""}
+		${open && configurable ? html`<fieldset id=${panelId} class="market-settings-form" data-testid="market-settings-form" data-owner-kind=${target.kind} data-owner-id=${target.id} data-revision=${extensionSettings?.revision ?? 0} aria-busy=${busyOwner ? "true" : "false"}><legend>${target.label || target.id} ${target.kind} settings</legend><div class="market-settings-project">Project: ${state.projects.find((project) => project.id === currentProjectId())?.name || "Unknown"}</div><p class="market-settings-status-copy">${status.message}</p>${formError ? html`<div class="market-settings-error-summary" data-testid="market-settings-error-summary" role="alert">${formError}${formError.includes("changed elsewhere") ? html` <button type="button" class="market-btn" @click=${() => loadExtensionSettings(currentProjectId(), true)}>Reload latest</button>` : ""}</div>` : ""}<div class="market-settings-fields">${(target.fields ?? []).map((field) => renderSettingsField(target, field))}</div><div class="market-settings-actions"><button type="button" class="market-btn market-btn--danger" data-testid="market-settings-reset" ?disabled=${busyOwner} @click=${() => resetSettingsTarget(target)}>Reset project settings</button><button type="button" class="market-btn market-btn--primary" data-testid="market-settings-save" ?disabled=${!dirty || busyOwner} @click=${() => saveSettingsTarget(target)}>${busyOwner ? "Saving…" : "Save"}</button></div></fieldset>` : ""}
 	</div>`;
 }
 
@@ -2659,7 +2661,7 @@ function renderProjectRuntime(pack: InstalledPackWire): TemplateResult {
 	const projectId = currentProjectId();
 	if (!projectId) return html``;
 	if (extensionSettingsLoading && extensionSettingsProjectId === projectId) return html`<div class="market-project-runtime market-project-runtime--loading" data-testid="market-project-runtime" data-project-id=${projectId} data-pack-id=${pack.packName}>Loading project runtime…</div>`;
-	if (extensionSettingsError) return html`<div class="market-project-runtime" data-testid="market-project-runtime" data-project-id=${projectId} data-pack-id=${pack.packName}><span class="market-lozenge market-lozenge--error" data-testid="market-runtime-status" data-state="unavailable">Unavailable</span><button class="market-btn" @click=${() => loadExtensionSettings(projectId)}>Retry</button></div>`;
+	if (extensionSettingsError) return html`<div class="market-project-runtime" data-testid="market-project-runtime" data-project-id=${projectId} data-pack-id=${pack.packName}><span class="market-lozenge market-lozenge--error" data-testid="market-runtime-status" data-state="unavailable">Unavailable</span><button class="market-btn" @click=${() => loadExtensionSettings(projectId, true)}>Retry</button></div>`;
 	const targets = extensionSettings?.targets.filter((target) => target.packId === pack.packName) ?? [];
 	if (!targets.length) return html``;
 	const project = state.projects.find((item) => item.id === projectId);

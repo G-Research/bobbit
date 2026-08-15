@@ -5,11 +5,12 @@ __syncBeforeAll(() => __syncCE());
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "lit";
-import { clearMarketplaceState, loadMarketplaceData, renderMarketplacePage } from "../../src/app/marketplace-page.js";
+import { clearMarketplaceState, loadMarketplaceData, refreshMarketplaceExtensionSettings, renderMarketplacePage } from "../../src/app/marketplace-page.js";
 import { setRenderApp, state } from "../../src/app/state.js";
 
 let root: HTMLElement;
 let patches: unknown[];
+let settingsReads: number;
 
 function fixturePack(): any {
 	return {
@@ -52,7 +53,7 @@ async function renderFixture(fields: any[]): Promise<void> {
 			: url.pathname === "/api/packs/conflicts" ? { conflicts: [] }
 			: url.pathname === "/api/marketplace/adoptions" ? { adoptions: [] }
 			: url.pathname === "/api/marketplace/browse" ? { sources: [], packs: [] }
-			: url.pathname.endsWith("/extension-settings") ? { schema: 2, revision: 1, targets: [target(fields)] }
+			: url.pathname.endsWith("/extension-settings") ? { schema: 2, revision: ++settingsReads, targets: [target(fields)] }
 			: url.pathname.endsWith("/extension-grant-audit") ? { entries: [] }
 			: url.pathname === "/api/marketplace/pack-activation" ? { scope: "project", packName: "language-pack", catalogue: { roles: [], tools: [], skills: [], entrypoints: [], mcp: [], piExtensions: [] }, disabled: {} }
 			: {};
@@ -70,6 +71,7 @@ beforeEach(() => {
 	root = document.createElement("div");
 	document.body.append(root);
 	patches = [];
+	settingsReads = 0;
 });
 
 afterEach(() => {
@@ -148,5 +150,33 @@ describe("Market multi-enum extension settings", () => {
 		root.querySelector<HTMLButtonElement>('[data-testid="market-settings-save"]')!.click();
 		await waitFor(() => patches.length === 1, "primitive Use default PATCH");
 		expect(patches[0]).toMatchObject({ values: { bank: null } });
+	});
+
+	it("enables Save for Remove secret alone and PATCHes only a write-only clear", async () => {
+		await renderFixture([
+			{ key: "languages", type: "multi-enum", label: "Languages", optional: true, values: ["go"], default: [], value: [], source: "default" },
+			{ key: "apiKey", type: "secret", label: "API key", optional: true, secretSet: true, source: "project" },
+		]);
+		const save = root.querySelector<HTMLButtonElement>('[data-testid="market-settings-save"]')!;
+		expect(save.disabled).toBe(true);
+		root.querySelector<HTMLButtonElement>('[data-testid="market-settings-secret-remove"][data-field-key="apiKey"]')!.click();
+		await waitFor(() => !root.querySelector<HTMLButtonElement>('[data-testid="market-settings-save"]')!.disabled, "secret removal save enabled");
+		expect(root.querySelector<HTMLInputElement>('[data-secret-owner]')?.value).toBe("");
+		root.querySelector<HTMLButtonElement>('[data-testid="market-settings-save"]')!.click();
+		await waitFor(() => patches.length === 1, "secret clear PATCH");
+		expect(patches[0]).toEqual({ expectedRevision: 1, values: { apiKey: null } });
+		expect(JSON.stringify(patches[0])).not.toContain("api-key-secret");
+	});
+
+	it("preserves an unsaved draft across a passive metadata refresh", async () => {
+		await renderFixture([{
+			key: "languages", type: "multi-enum", label: "Languages", optional: true,
+			values: ["typescript", "go"], default: [], value: [], source: "default",
+		}]);
+		root.querySelector<HTMLInputElement>('[data-testid="market-settings-multi-enum-option"][data-option-value="typescript"]')!.click();
+		await waitFor(() => root.querySelector('[data-testid="market-settings-multi-enum-summary"]')?.textContent === "1 selected", "unsaved selection");
+		refreshMarketplaceExtensionSettings("multi-enum-project");
+		await waitFor(() => root.querySelector('[data-testid="market-settings-form"]')?.getAttribute("data-revision") === "2", "passive refresh projection");
+		expect(root.querySelector<HTMLInputElement>('[data-testid="market-settings-multi-enum-option"][data-option-value="typescript"]')?.checked).toBe(true);
 	});
 });
