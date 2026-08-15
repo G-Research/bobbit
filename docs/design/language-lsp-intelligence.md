@@ -124,7 +124,7 @@ market-packs/code-intelligence/
   lib/capability-status.mjs
   lib/lsp-request-adapter.mjs
   lib/sandbox-requirements.mjs
-  src/…                              # bundled through scripts/build-market-packs.mjs
+  src/…                              # source-only adapters; excluded from built pack copies
 ```
 
 No language-specific `if` statements belong in tool handlers, detection UI, service lifecycle, or sandbox logic. Adding a language changes a single matrix entry and fixtures.

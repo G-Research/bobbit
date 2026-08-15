@@ -3,11 +3,11 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CODE_INTELLIGENCE_LANGUAGE_MATRIX } from "../../market-packs/code-intelligence/lib/language-matrix.ts";
-import { detectComponentLanguages } from "../../market-packs/code-intelligence/src/language-detection.ts";
+import { detectComponentLanguages } from "../../market-packs/code-intelligence/lib/language-detection.ts";
 import {
 	serializeLspRequest,
 	type LspLanguageDeclaration,
-} from "../../market-packs/code-intelligence/src/lsp-request-adapter.ts";
+} from "../../market-packs/code-intelligence/lib/lsp-request-adapter.ts";
 import { copyGitTemplate, prepareGitTemplate } from "../harness/git-template.ts";
 import { createRunChild, removeOwnedRunChild } from "../harness/run-isolation.ts";
 import { runFixtureCommand } from "../harness/spawn-with-retry.ts";

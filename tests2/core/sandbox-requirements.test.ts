@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { CODE_INTELLIGENCE_LANGUAGE_MATRIX, type AstGrepLanguageAlias, type LspCapability } from "../../market-packs/code-intelligence/lib/language-matrix.ts";
-import type { LanguageDetection } from "../../market-packs/code-intelligence/src/language-detection.ts";
+import type { LanguageDetection } from "../../market-packs/code-intelligence/lib/language-detection.ts";
 import {
 	deriveSandboxRequirements,
 	type DerivedSandboxLayerRequirement,
-} from "../../market-packs/code-intelligence/src/sandbox-requirements.ts";
+} from "../../market-packs/code-intelligence/lib/sandbox-requirements.ts";
 
 const shellOrDockerfile = /(?:\bRUN\b|\bFROM\b|\bCOPY\b|\bdocker\b|\bsh\b|\bbash\b|\n|\r|;|&&|\|\|)/i;
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CODE_INTELLIGENCE_LANGUAGE_MATRIX } from "../../market-packs/code-intelligence/lib/language-matrix.ts";
-import { deriveLanguageCapabilityStatus, type LspServiceInstanceKey } from "../../market-packs/code-intelligence/src/capability-status.ts";
-import type { LanguageDetection } from "../../market-packs/code-intelligence/src/language-detection.ts";
+import { deriveLanguageCapabilityStatus, type LspServiceInstanceKey } from "../../market-packs/code-intelligence/lib/capability-status.ts";
+import type { LanguageDetection } from "../../market-packs/code-intelligence/lib/language-detection.ts";
 
 type LanguageRecord = {
 	id: string;
