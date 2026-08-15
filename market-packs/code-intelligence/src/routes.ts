@@ -124,6 +124,21 @@ function declaredStatus(value: unknown): Body | undefined {
 	return out;
 }
 
+/** Rebuild envelopes may carry an updated status. Validate that nested projection
+ * before it reaches the panel; only the public rebuild outcome is retained. */
+function declaredRebuild(value: unknown): Body | undefined {
+	const input = object(value);
+	if (typeof input.accepted !== "boolean") return undefined;
+	const status = declaredStatus(input.status);
+	if (!status) return undefined;
+	const out: Body = { accepted: input.accepted, status };
+	if (input.reason !== undefined) {
+		if (input.reason !== "GRAPH_REBUILD_UNAVAILABLE_PENDING_EP8") return undefined;
+		out.reason = input.reason;
+	}
+	return out;
+}
+
 function declaredConfig(value: unknown): Body | undefined {
 	const input = object(value);
 	if (containsRawPath(input)) return undefined;
@@ -431,9 +446,11 @@ export const routes = {
 		if (method(req) !== "POST") return { ok: false, error: "GRAPH_REBUILD_POST_REQUIRED" };
 		const body = object(req?.body);
 		const selected = components(body.components ?? body.component);
-		return responseWithinCap(await safely(async () => {
+		const response = await safely(async () => {
 			const runtime = await graphRuntimeFor(ctx);
 			return runtime.rebuild(ctx, { source: "manual", ...(selected ? { components: selected } : {}) });
-		}));
+		});
+		if (isRouteFailure(response)) return response;
+		return responseWithinCap(declaredRebuild(response) ?? { ok: false, error: "GRAPH_STATUS_DECLARATION_INVALID" });
 	},
 };

@@ -94,6 +94,21 @@ describe("graph routes — host boundary caps and errors", () => {
 		assert.deepEqual((bounded.components as Array<Record<string, unknown>>)[0].roots, [{ tier: "code", path: "src" }]);
 	});
 
+	it("validates rebuild's embedded status before returning it to the panel", async () => {
+		__setGraphRuntimeForTests(() => ({
+			query: async () => ({ ok: true }), status: async () => declaredStatus(), config: async () => declaredConfig(),
+			rebuild: async () => ({
+				accepted: false,
+				reason: "GRAPH_REBUILD_UNAVAILABLE_PENDING_EP8",
+				status: { ...declaredStatus(), hostRoot: "/private/graph-store" },
+			}),
+		} as never));
+
+		const response = await routes.rebuild(context, { method: "POST", body: {} });
+		assert.deepEqual(response, { ok: false, error: "GRAPH_STATUS_DECLARATION_INVALID" });
+		assert.doesNotMatch(JSON.stringify(response), /private|graph-store/);
+	});
+
 	it("rejects unknown declared states and raw configuration paths", async () => {
 		installRuntime(request => request.op === "status" ? declaredStatus({ state: "unknown-future-state" }) : { ok: true });
 		assert.deepEqual(await routes.status(context, { body: {} }), { ok: false, error: "GRAPH_STATUS_DECLARATION_INVALID" });
