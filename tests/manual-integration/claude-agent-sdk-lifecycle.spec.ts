@@ -509,9 +509,10 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			const goal = await goalResponse.json() as { id: string };
 			// Configure an isolated role before session setup: one harmless tool must
 			// ask so the real SessionManager permission-card lifecycle is exercised,
-			// while the read-only gate query remains non-interactive. Role reads and
-			// mutations require an explicit scope; customize first so this never
-			// changes the headquarters/server configuration.
+			// while the read-only gate query remains non-interactive. Deny the
+			// canonical delegate tool so native Agent remains the only helper path.
+			// Role reads and mutations require an explicit scope; customize first so
+			// this never changes the headquarters/server configuration.
 			const roleScope = `projectId=${encodeURIComponent(project.id)}`;
 			const roleCustomize = await api(`/api/roles/general/customize?scope=project&${roleScope}`, { method: "POST" });
 			expect(roleCustomize.status).toBe(201);
@@ -520,9 +521,17 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			const role = await roleResponse.json() as { toolPolicies?: Record<string, string> };
 			const roleUpdate = await api(`/api/roles/general?${roleScope}`, {
 				method: "PUT",
-				body: JSON.stringify({ toolPolicies: { ...(role.toolPolicies ?? {}), Gates: "allow", grep: "ask" } }),
+				body: JSON.stringify({ toolPolicies: { ...(role.toolPolicies ?? {}), Gates: "allow", grep: "ask", team_delegate: "never" } }),
 			});
 			expect(roleUpdate.status).toBe(200);
+			const configuredRoleResponse = await api(`/api/roles/general?${roleScope}`);
+			expect(configuredRoleResponse.status).toBe(200);
+			const configuredRole = await configuredRoleResponse.json() as { toolPolicies?: Record<string, string> };
+			expect({
+				gates: configuredRole.toolPolicies?.Gates,
+				grep: configuredRole.toolPolicies?.grep,
+				teamDelegate: configuredRole.toolPolicies?.team_delegate,
+			}).toEqual({ gates: "allow", grep: "ask", teamDelegate: "never" });
 
 			const configuredModel = manualSdkModel();
 			const alternateModel = alternateManualSdkModel(configuredModel);
@@ -886,7 +895,8 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			expect(goalResponse.status).toBe(201);
 			const goal = await goalResponse.json() as { id: string };
 			// Keep the grep permission-card role override inside this temporary project.
-			// The role API requires an explicit scope for both reads and mutations.
+			// Deny the canonical delegate tool so native Agent remains the only helper
+			// path. The role API requires an explicit scope for reads and mutations.
 			const roleScope = `projectId=${encodeURIComponent(project.id)}`;
 			const roleCustomize = await api(`/api/roles/general/customize?scope=project&${roleScope}`, { method: "POST" });
 			expect(roleCustomize.status).toBe(201);
@@ -895,9 +905,17 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			const role = await roleResponse.json() as { toolPolicies?: Record<string, string> };
 			const roleUpdate = await api(`/api/roles/general?${roleScope}`, {
 				method: "PUT",
-				body: JSON.stringify({ toolPolicies: { ...(role.toolPolicies ?? {}), Gates: "allow", grep: "ask" } }),
+				body: JSON.stringify({ toolPolicies: { ...(role.toolPolicies ?? {}), Gates: "allow", grep: "ask", team_delegate: "never" } }),
 			});
 			expect(roleUpdate.status).toBe(200);
+			const configuredRoleResponse = await api(`/api/roles/general?${roleScope}`);
+			expect(configuredRoleResponse.status).toBe(200);
+			const configuredRole = await configuredRoleResponse.json() as { toolPolicies?: Record<string, string> };
+			expect({
+				gates: configuredRole.toolPolicies?.Gates,
+				grep: configuredRole.toolPolicies?.grep,
+				teamDelegate: configuredRole.toolPolicies?.team_delegate,
+			}).toEqual({ gates: "allow", grep: "ask", teamDelegate: "never" });
 			const config = await api(`/api/projects/${project.id}/config`, {
 				method: "PUT",
 				body: JSON.stringify({ sandbox: "docker", sandbox_tokens: [{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: true }] }),
