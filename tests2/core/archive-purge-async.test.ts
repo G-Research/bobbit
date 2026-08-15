@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, describe, it, vi } from "vitest";
 import { BACKGROUND_IO_CONCURRENCY } from "../../src/server/agent/bounded-async-work.ts";
 import {
@@ -30,6 +33,23 @@ function heldDeferred(): Deferred<void> {
 	return hold;
 }
 
+function fileError(code: string): NodeJS.ErrnoException {
+	return Object.assign(new Error(code), { code });
+}
+
+function cleanupRunner(onList?: () => { stdout: string; stderr: string } | Promise<{ stdout: string; stderr: string }>): any {
+	return {
+		execFile: async (_command: string, args: readonly string[]) => {
+			if (args[0] === "worktree" && args[1] === "remove") {
+				await fs.promises.rm(String(args[2]), { recursive: true, force: true });
+				return { stdout: "", stderr: "" };
+			}
+			if (args[0] === "worktree" && args[1] === "list") return await onList?.() ?? { stdout: "", stderr: "" };
+			return { stdout: "", stderr: "" };
+		},
+	};
+}
+
 function archivedSession(id: string, now: number, agentSessionFile?: string): any {
 	return {
 		id,
@@ -50,6 +70,7 @@ function makeManager(options: {
 	archiveStat?: (filePath: string) => Promise<{ size: number }>;
 	purgeAsync?: (id: string) => Promise<void>;
 	previewPurgeOperation?: SessionPreviewPurgeOperation;
+	commandRunner?: any;
 }): { manager: SessionManager; records: Map<string, any>; clock: ManualClock } {
 	const clock = options.clock ?? createManualClock(20 * DAY_MS);
 	const records = new Map(options.records.map(record => [record.id, record]));
@@ -82,6 +103,8 @@ function makeManager(options: {
 		projectContextManager: projectContextManager as any,
 		archiveStat: options.archiveStat,
 		previewPurgeOperation: options.previewPurgeOperation,
+		commandRunner: options.commandRunner,
+		remoteGitPolicy: { skipRemotePush: true },
 	});
 	const internal = manager as any;
 	if (internal._statusHeartbeatTimer) {
@@ -251,6 +274,95 @@ describe("asynchronous archive purge lifecycle", () => {
 		assert.deepEqual(removals, []);
 		await (manager as any).notifyWorktreeRemoved("archive-worktree-removal", "project-archive", ["/worktree/removed"]);
 		assert.deepEqual(removals, [{ sessionId: "archive-worktree-removal", projectId: "project-archive", worktreePaths: ["/worktree/removed"] }]);
+	});
+
+	it("confirms ENOENT before notifying a single-repo purge removal", async () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "archive-purge-enoent-"));
+		try {
+			const repo = path.join(tmp, "repo");
+			const worktree = path.join(tmp, "repo-wt", "archive");
+			fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
+			fs.mkdirSync(worktree, { recursive: true });
+			const { manager } = makeManager({
+				records: [{ ...archivedSession("archive-enoent", 20 * DAY_MS), repoPath: repo, worktreePath: worktree, cwd: worktree, branch: "session/archive-enoent" }],
+				commandRunner: cleanupRunner(),
+			});
+			managers.push(manager);
+			const removals: string[][] = [];
+			manager.addWorktreeRemovedListener((_sessionId, info) => { removals.push([...info.worktreePaths]); });
+			assert.equal(await manager.purgeArchivedSession("archive-enoent"), true);
+			assert.deepEqual(removals, [[worktree]]);
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps EACCES and EIO purge paths unconfirmed across single and multi-repo cleanup", async () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "archive-purge-unconfirmed-"));
+		try {
+			const repo = path.join(tmp, "repo");
+			const single = path.join(tmp, "repo-wt", "single");
+			const api = path.join(tmp, "repo-wt", "multi", "api");
+			const web = path.join(tmp, "repo-wt", "multi", "web");
+			fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
+			fs.mkdirSync(single, { recursive: true });
+			fs.mkdirSync(api, { recursive: true });
+			fs.mkdirSync(web, { recursive: true });
+			const { manager } = makeManager({
+				records: [
+					{ ...archivedSession("archive-eacces", 20 * DAY_MS), repoPath: repo, worktreePath: single, cwd: single, branch: "session/archive-eacces" },
+					{ ...archivedSession("archive-eio", 20 * DAY_MS), repoPath: repo, worktreePath: path.dirname(api), branch: "session/archive-eio", repoWorktrees: { api, web } },
+				],
+				commandRunner: cleanupRunner(),
+			});
+			managers.push(manager);
+			const nativeLstat = fs.promises.lstat.bind(fs.promises);
+			vi.spyOn(fs.promises, "lstat").mockImplementation((async (target: fs.PathLike) => {
+				if (String(target) === single) throw fileError("EACCES");
+				if (String(target) === api) throw fileError("EIO");
+				return await nativeLstat(target);
+			}) as typeof fs.promises.lstat);
+			const removals: string[][] = [];
+			manager.addWorktreeRemovedListener((_sessionId, info) => { removals.push([...info.worktreePaths]); });
+			assert.equal(await manager.purgeArchivedSession("archive-eacces"), true);
+			assert.equal(await manager.purgeArchivedSession("archive-eio"), true);
+			assert.deepEqual(removals, [[web]], "only the component with a definitive ENOENT probe may notify removal");
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps archived cleanup unconfirmed when both lstat and Git worktree listing fail", async () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "archive-cleanup-unconfirmed-"));
+		try {
+			const repo = path.join(tmp, "repo");
+			const worktree = path.join(tmp, "repo-wt", "archive");
+			const branch = "session/archive-maintenance";
+			fs.mkdirSync(path.join(repo, ".git"), { recursive: true });
+			fs.mkdirSync(worktree, { recursive: true });
+			let listCalls = 0;
+			const runner = cleanupRunner(() => {
+				listCalls++;
+				if (listCalls === 1) return { stdout: `worktree ${repo}\nbranch refs/heads/main\n\nworktree ${worktree}\nbranch refs/heads/${branch}\n`, stderr: "" };
+				throw new Error("git worktree list failed");
+			});
+			const { manager, records } = makeManager({
+				records: [{ ...archivedSession("archive-maintenance", 20 * DAY_MS), repoPath: repo, worktreePath: worktree, cwd: worktree, branch }],
+				commandRunner: runner,
+			});
+			managers.push(manager);
+			vi.spyOn(fs.promises, "lstat").mockRejectedValue(fileError("EACCES"));
+			const removals: string[][] = [];
+			manager.addWorktreeRemovedListener((_sessionId, info) => { removals.push([...info.worktreePaths]); });
+			const result = await manager.cleanupArchivedSessionWorktrees({ mode: "all" });
+			assert.equal(result.counts.cleaned, 0);
+			assert.equal(result.counts.failed, 1);
+			assert.deepEqual(removals, []);
+			assert.equal(records.has("archive-maintenance"), true, "unconfirmed cleanup must leave archived data available for retry");
+			assert.equal(listCalls, 2, "post-cleanup verification must observe the Git listing failure");
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
 	});
 
 	it("awaits termination listeners and isolates a rejected purge listener", async () => {

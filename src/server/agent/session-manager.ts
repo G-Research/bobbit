@@ -416,6 +416,24 @@ interface GitWorktreeRef {
 
 interface GitWorktreeRefs {
 	entries: GitWorktreeRef[];
+	/** False when Git could not authoritatively enumerate worktree metadata. */
+	verified: boolean;
+}
+
+type PostCleanupPathState = "absent" | "present" | "unconfirmed";
+
+/**
+ * Confirm removal after a destructive operation without treating inaccessible
+ * paths as missing. Only lstat's definitive missing-path errors prove absence.
+ */
+async function postCleanupPathState(candidatePath: string): Promise<PostCleanupPathState> {
+	try {
+		await fsp.lstat(candidatePath);
+		return "present";
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException | undefined)?.code;
+		return code === "ENOENT" || code === "ENOTDIR" ? "absent" : "unconfirmed";
+	}
 }
 
 interface ArchivedWorktreeGuardRef {
@@ -14930,7 +14948,7 @@ export class SessionManager {
 
 			try {
 				const { cleanupWorktree } = await import("../skills/git.js");
-				await cleanupWorktree(item.repoPath, item.path, item.branch, false);
+				await cleanupWorktree(item.repoPath, item.path, item.branch, false, this.commandRunner, this.remoteGitPolicy);
 
 				const worktreeRemoved = await this.archivedWorktreeRemoved(item);
 				if (!worktreeRemoved) {
@@ -15292,6 +15310,14 @@ export class SessionManager {
 		let pathExists = false;
 		try { pathExists = fs.existsSync(spec.worktreePath); } catch { pathExists = false; }
 		const gitRefs = await this.readGitWorktreeRefs(spec.repoPath, ctx);
+		if (!gitRefs.verified) {
+			return base({
+				pathExists,
+				status: "skipped",
+				reason: "scan-error",
+				detail: "Could not verify git worktree metadata; archived-session cleanup will preserve this path for retry.",
+			});
+		}
 		const normalizedCandidate = normalizeWorktreeHostPath(spec.worktreePath);
 		const gitWorktreeMetadataExists = this.gitWorktreeMetadataMatches(gitRefs, normalizedCandidate, spec.branch);
 		const localBranchExists = await this.localBranchExists(spec.repoPath, spec.branch, ctx);
@@ -15381,12 +15407,15 @@ export class SessionManager {
 	}
 
 	private async archivedWorktreeRemoved(item: ArchivedSessionWorktreeItem): Promise<boolean> {
-		let pathExists = false;
-		try { pathExists = fs.existsSync(item.path); } catch { pathExists = false; }
-		const gitRefs = await this.readGitWorktreeRefsUncached(item.repoPath);
+		// Both observations are authoritative removal fences: an inaccessible path
+		// or failed Git listing is not evidence that cleanup completed.
+		const [pathState, gitRefs] = await Promise.all([
+			postCleanupPathState(item.path),
+			this.readGitWorktreeRefsUncached(item.repoPath),
+		]);
+		if (pathState !== "absent" || !gitRefs.verified) return false;
 		const normalizedCandidate = normalizeWorktreeHostPath(item.path);
-		const gitWorktreeMetadataExists = this.gitWorktreeMetadataMatches(gitRefs, normalizedCandidate, item.branch);
-		return !pathExists && !gitWorktreeMetadataExists;
+		return !this.gitWorktreeMetadataMatches(gitRefs, normalizedCandidate, item.branch);
 	}
 
 	private async deleteArchivedWorktreeBranchIfAllowed(item: ArchivedSessionWorktreeItem): Promise<boolean> {
@@ -15436,9 +15465,9 @@ export class SessionManager {
 				if (!normalizedPath) continue;
 				entries.push({ path: normalizedPath, branch: branchMatch?.[1] });
 			}
-			return { entries };
+			return { entries, verified: true };
 		} catch {
-			return { entries: [] };
+			return { entries: [], verified: false };
 		}
 	}
 
@@ -15616,10 +15645,11 @@ export class SessionManager {
 						const repoPath = repo === "." ? ps.repoPath! : path.join(ps.repoPath!, repo);
 						try {
 							await cleanupWorktree(repoPath, wt, ps.branch, true, this.commandRunner, this.remoteGitPolicy);
-							try {
-								await fsp.access(wt);
-								console.error(`[session-manager] Component "${repo}" cleanup left worktree for ${ps.id}: ${wt}`);
-							} catch { removedWorktreePaths.push(wt); }
+							if (await postCleanupPathState(wt) === "absent") {
+								removedWorktreePaths.push(wt);
+							} else {
+								console.error(`[session-manager] Component "${repo}" cleanup did not confirm worktree removal for ${ps.id}: ${wt}`);
+							}
 						} catch (err) {
 							console.error(`[session-manager] Failed to clean up component "${repo}" worktree for ${ps.id}:`, err);
 						}
@@ -15631,7 +15661,11 @@ export class SessionManager {
 					}
 				} else if (!isWorktreePathReferencedByLiveSession(ps.worktreePath, allPersisted, { ignoreSessionId: ps.id })) {
 					await cleanupWorktree(ps.repoPath, ps.worktreePath, ps.branch, true, this.commandRunner, this.remoteGitPolicy);
-					try { await fsp.access(ps.worktreePath); } catch { removedWorktreePaths.push(ps.worktreePath); }
+					if (await postCleanupPathState(ps.worktreePath) === "absent") {
+						removedWorktreePaths.push(ps.worktreePath);
+					} else {
+						console.error(`[session-manager] Cleanup did not confirm worktree removal for ${ps.id}: ${ps.worktreePath}`);
+					}
 				} else {
 					console.log(`[session-manager] Skipping shared worktree cleanup for purged session ${ps.id}: ${ps.worktreePath}`);
 				}
