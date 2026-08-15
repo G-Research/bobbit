@@ -54,7 +54,7 @@ async function removeSdkCatalogFixture(gateway: { baseURL: string; token: string
 function installReadySdkBridgeFixture(
 	gateway: { clock: any; sessionManager: any },
 	unavailableSessionIds: readonly string[] = [],
-	initializationError?: Error,
+	queryError?: Error,
 ): { infoCalls: Array<{ sessionId: string; options: unknown }>; nativeLoads: () => number; queryCount: () => number; restore: () => void } {
 	const unavailable = new Set(unavailableSessionIds);
 	const infoCalls: Array<{ sessionId: string; options: unknown }> = [];
@@ -73,13 +73,11 @@ function installReadySdkBridgeFixture(
 		clock: gateway.clock,
 		query: () => {
 			queries++;
+			if (queryError) throw queryError;
 			let finish!: () => void;
 			const done = new Promise<void>(resolve => { finish = resolve; });
 			return {
-				initializationResult: async () => {
-					if (initializationError) throw initializationError;
-					return {};
-				},
+				initializationResult: async () => ({}),
 				interrupt: async () => {},
 				setModel: async () => {},
 				setMaxThinkingTokens: async () => {},
@@ -289,6 +287,7 @@ test.describe("session runtime route boundary", () => {
 			expect(response.status, await response.clone().text()).toBe(503);
 			const body = await response.json();
 			expect(body).toEqual({ error: "SDK_SESSION_UNAVAILABLE", code: "SDK_SESSION_UNAVAILABLE" });
+			expect(sdk.queryCount()).toBe(1);
 			const responseText = JSON.stringify(body);
 			const logText = JSON.stringify(logged);
 			for (const privateValue of [
