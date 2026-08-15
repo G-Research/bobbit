@@ -7759,7 +7759,8 @@ async function handleApiRoute(
 	// GET/PUT /api/projects/:id/config, GET /api/projects/:id/config/defaults, GET /api/projects/:id/config/resolved
 	const projectConfigMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/config(?:\/(defaults|resolved))?$/);
 	if (projectConfigMatch) {
-		const ctx = projectContextManager.getOrCreate(projectConfigMatch[1]);
+		const requestedProjectId = projectConfigMatch[1];
+		const ctx = projectContextManager.getOrCreate(requestedProjectId);
 		if (!ctx) {
 			// Endpoint defense in depth: `fields.projectId` drives create-versus-edit
 			// acceptance dispatch on the client. A config mutation that nevertheless
@@ -7770,6 +7771,14 @@ async function handleApiRoute(
 			} else {
 				json({ error: "Project not found" }, 404);
 			}
+			return;
+		}
+		// The context manager resolves the exact registered scope. Keep that
+		// authoritative identity for side effects rather than relying on an
+		// unrelated route-local variable or inferring from configuration.
+		const projectId = ctx.project.id;
+		if (projectId !== requestedProjectId || !projectRegistry.get(projectId)) {
+			json({ ok: false, code: "UNKNOWN_PROJECT", message: `Unknown project: ${requestedProjectId}` }, 422);
 			return;
 		}
 		const suffix = projectConfigMatch[2]; // undefined | "defaults" | "resolved"
@@ -8124,7 +8133,7 @@ async function handleApiRoute(
 			// A changed image authority must never inherit a bounded failed-build
 			// marker for a previous configured image. This is project-local.
 			if ("sandbox_image" in (body as Record<string, unknown>) || "sandbox" in (body as Record<string, unknown>)) {
-				sandboxImageRequirements.invalidateProject(resolved.projectId);
+				sandboxImageRequirements.invalidateProject(projectId);
 			}
 			if (Object.keys(pendingTokenSecretUpdates).length > 0) {
 				try {

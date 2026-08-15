@@ -378,7 +378,10 @@ describe.sequential("sandbox extension requirements integration", () => {
 		const legal = await api(fixture, `/api/projects/${encodeURIComponent(fixture.projectB)}/config`, {
 			method: "PUT", body: JSON.stringify({ sandbox: "docker", sandbox_image: "registry.example/team/agent--stable__v2:base" }),
 		});
+		// A successful config mutation reaches the failure-state invalidation path;
+		// this catches route-local reference errors before fixture boot can hang.
 		expect(legal.status, await legal.clone().text()).toBe(200);
+		expect(await responseJson(legal)).toMatchObject({ ok: true });
 		const legalStatus = await status(fixture, fixture.projectB);
 		expect(legalStatus).toMatchObject({ imageName: "registry.example/team/agent--stable__v2:base", imageReady: false, imageBuildable: true });
 
