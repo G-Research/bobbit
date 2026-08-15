@@ -28,6 +28,12 @@ function workflowId(prefix: string): string {
 	return `${prefix}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+	let resolve!: () => void;
+	const promise = new Promise<void>((done) => { resolve = done; });
+	return { promise, resolve };
+}
+
 async function createWorkflow(id: string, gates: Array<Record<string, unknown>>): Promise<void> {
 	const res = await apiFetch("/api/workflows", {
 		method: "POST",
@@ -671,6 +677,96 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/reset", () => {
 			const body = await res.json();
 			expect(String(body.error)).toMatch(/sandbox token cannot access|forbidden/i);
 		} finally {
+			await deleteGoal(goalId).catch(() => {});
+			await deleteWorkflow(wf);
+		}
+	});
+
+	test("fences signal admission until a delayed reset cancellation has settled", async ({ gateway }) => {
+		const wf = workflowId("gate-reset-admission-fence");
+		await createWorkflow(wf, [
+			{ id: "root", name: "Root", dependsOn: [], verify: [{ name: "slow", type: "command", run: "node -e \"setTimeout(()=>process.exit(0), 30000)\"" }] },
+		]);
+		const goal = await createGoal({ title: `Gate Reset Admission Fence ${Date.now()}`, workflowId: wf, worktree: false, team: false });
+		const goalId = goal.id;
+		const sessionId = await createSession({ goalId });
+		let conn: WsConnection | undefined;
+		let cancelSpy: any;
+		const cancellationEntered = deferred();
+		const releaseCancellation = deferred();
+		try {
+			conn = trackGateApiConnection(await connectWs(sessionId));
+			const startCursor = conn.messageCount();
+			const originalSignal = await signalGate(goalId, "root", { content: "reset must fence admission" });
+			const signalId = originalSignal.signal.id;
+			await conn.waitForFrom(startCursor, (message) => message.type === "gate_verification_started"
+				&& message.goalId === goalId && message.gateId === "root" && message.signalId === signalId, 10_000);
+			const harness = gateway.teamManager.verificationHarness;
+			const originalCancel = harness.cancelStaleVerificationsForGates.bind(harness);
+			cancelSpy = vi.spyOn(harness, "cancelStaleVerificationsForGates").mockImplementation(async (cancelGoalId, gateIds, cause) => {
+				cancellationEntered.resolve();
+				await releaseCancellation.promise;
+				return originalCancel(cancelGoalId, gateIds, cause);
+			});
+
+			const resetCursor = conn.messageCount();
+			const resetRequest = resetGate(goalId, "root");
+			await cancellationEntered.promise;
+
+			const rejectedSignal = await apiFetch(`/api/goals/${goalId}/gates/root/signal`, {
+				method: "POST",
+				body: JSON.stringify({ content: "must not be admitted while reset is fenced" }),
+			});
+			expect(rejectedSignal.status).toBe(409);
+			expect(await rejectedSignal.json()).toMatchObject({ code: "GATE_MUTATION_IN_PROGRESS", retryable: true });
+			expect((await getSignals(goalId, "root")).map((signal) => signal.id)).toEqual([signalId]);
+			expect((await activeVerifications(goalId)).map((verification) => verification.signalId)).toEqual([signalId]);
+
+			releaseCancellation.resolve();
+			const reset = await resetRequest;
+			expect(reset.status, JSON.stringify(reset.body)).toBe(200);
+			await conn.waitForFrom(resetCursor, (message) => message.type === "gate_verification_complete"
+				&& message.goalId === goalId && message.gateId === "root" && message.signalId === signalId && message.status === "cancelled", 10_000);
+			await waitForGateStatus(goalId, "root", "pending");
+			expect((await activeVerifications(goalId)).some((verification) => verification.signalId === signalId)).toBe(false);
+			const finalGate = await getGate(goalId, "root");
+			expect(finalGate.status, "GATE_RESET_STALE_GENERATION_OVERWROTE_PENDING").toBe("pending");
+			expect(finalGate.signals.find((signal: any) => signal.id === signalId)?.verification.status).toBe("cancelled");
+		} finally {
+			// Always release the wrapper so teardown cannot leave the gateway harness blocked.
+			releaseCancellation.resolve();
+			cancelSpy?.mockRestore();
+			conn?.close();
+			await deleteSession(sessionId).catch(() => {});
+			await deleteGoal(goalId).catch(() => {});
+			await deleteWorkflow(wf);
+		}
+	});
+
+	test("does not reset a gate when durable cancellation fencing fails", async ({ gateway }) => {
+		const wf = workflowId("gate-reset-cancel-persist-failure");
+		await createWorkflow(wf, [
+			{ id: "root", name: "Root", dependsOn: [], verify: [{ name: "ok", type: "command", run: "echo ok" }] },
+		]);
+		const goal = await createGoal({ title: `Gate Reset Cancellation Failure ${Date.now()}`, workflowId: wf, worktree: false, team: false });
+		const goalId = goal.id;
+		let cancelSpy: any;
+		try {
+			const signal = await signalGate(goalId, "root");
+			await waitForGateStatus(goalId, "root", "passed");
+			const beforeSignals = await getSignals(goalId, "root");
+			cancelSpy = vi.spyOn(gateway.teamManager.verificationHarness, "cancelStaleVerificationsForGates")
+				.mockRejectedValue(new Error("injected durable cancellation persistence failure"));
+
+			const reset = await resetGate(goalId, "root");
+			expect(reset.status).toBe(503);
+			expect(reset.body).toMatchObject({ code: "VERIFICATION_CANCELLATION_FENCE_FAILED", retryable: true });
+			const afterGate = await getGate(goalId, "root");
+			expect(afterGate.status).toBe("passed");
+			expect((await getSignals(goalId, "root")).map((entry) => entry.id)).toEqual(beforeSignals.map((entry) => entry.id));
+			expect(afterGate.signals.map((entry: any) => entry.id)).toContain(signal.signal.id);
+		} finally {
+			cancelSpy?.mockRestore();
 			await deleteGoal(goalId).catch(() => {});
 			await deleteWorkflow(wf);
 		}
