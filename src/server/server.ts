@@ -601,6 +601,7 @@ function copyHistoryForkSidecar(
 	return _historyForkSidecarCopyFake?.(kind, fromSessionId, toSessionId) ?? copy();
 }
 import { inlineFileImages } from "./agent/inline-file-images.js";
+import { readSessionMarkdownImage, SessionMarkdownImageError } from "./agent/session-markdown-image.js";
 import { StaffManager } from "./agent/staff-manager.js";
 import { buildStaffSystemPrompt } from "./agent/role-prompt.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
@@ -5178,6 +5179,9 @@ function parseGateInspectSelectionOptions(params: URLSearchParams): TextSelectio
 		to: parseGateInspectIntegerParam(params, "to"),
 	};
 }
+
+const activeMarkdownImageReads = new Map<string, number>();
+const MAX_CONCURRENT_MARKDOWN_IMAGE_READS_PER_SESSION = 8;
 
 async function handleApiRoute(
 	url: URL,
@@ -15997,6 +16001,53 @@ async function handleApiRoute(
 			json(result);
 		} catch (err) {
 			jsonError(400, err);
+		}
+		return;
+	}
+
+	// GET /api/sessions/:id/markdown-image?path=<relative-or-absolute-or-file-url>
+	// Authenticated, session-scoped image transport for local paths in assistant
+	// Markdown. The path must resolve beneath the session cwd (including through
+	// symlinks); sandboxed sessions are resolved and read inside their container.
+	const markdownImageMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/markdown-image$/);
+	if (req.method === "GET" && markdownImageMatch) {
+		const id = markdownImageMatch[1];
+		const session = sessionManager.getPersistedSession(id);
+		if (!session) { json({ error: "Session not found" }, 404); return; }
+		const imagePath = url.searchParams.get("path");
+		if (!imagePath) { json({ error: "Missing path parameter" }, 400); return; }
+		const activeReads = activeMarkdownImageReads.get(id) ?? 0;
+		if (activeReads >= MAX_CONCURRENT_MARKDOWN_IMAGE_READS_PER_SESSION) {
+			res.setHeader("Retry-After", "1");
+			json({ error: "Too many concurrent image requests" }, 429);
+			return;
+		}
+		activeMarkdownImageReads.set(id, activeReads + 1);
+		try {
+			const image = await readSessionMarkdownImage(session, imagePath, sandboxManager ?? null);
+			res.writeHead(200, {
+				"Content-Type": image.mimeType,
+				"Content-Length": String(image.data.length),
+				"Cache-Control": "private, no-store",
+				"Content-Disposition": "inline",
+				"X-Content-Type-Options": "nosniff",
+				"Content-Security-Policy": "default-src 'none'; sandbox",
+			});
+			res.end(image.data);
+		} catch (error) {
+			if (error instanceof SessionMarkdownImageError) {
+				const status = error.code === "forbidden" ? 403
+					: error.code === "not_found" ? 404
+						: error.code === "too_large" ? 413
+							: error.code === "unavailable" ? 503 : 400;
+				json({ error: error.message }, status);
+			} else {
+				jsonError(500, error);
+			}
+		} finally {
+			const remaining = (activeMarkdownImageReads.get(id) ?? 1) - 1;
+			if (remaining <= 0) activeMarkdownImageReads.delete(id);
+			else activeMarkdownImageReads.set(id, remaining);
 		}
 		return;
 	}
