@@ -256,32 +256,77 @@ export interface LanguageDetectorFs {
 	readdirSync: typeof fs.readdirSync;
 }
 
+interface DirectoryFrame {
+	directory: string;
+	entries: readonly fs.Dirent[];
+	index: number;
+}
+
+/**
+ * Visit regular files in deterministic depth-first directory order. Every path
+ * that reaches `lstatSync` consumes one unit of the shared scan budget; queued
+ * directory entries do not. Symlinks and ignored directories are excluded
+ * before they can expand the walk.
+ */
+export function walkLanguageDetectionPaths(
+	roots: readonly string[],
+	seams: LanguageDetectorFs,
+	onFile: (filePath: string) => void,
+): void {
+	const orderedRoots = [...roots].sort(compareNames);
+	const directories: DirectoryFrame[] = [];
+	let rootIndex = 0;
+	let processed = 0;
+
+	while (processed < MAX_LANGUAGE_DETECTION_ENTRIES) {
+		const current = nextPath();
+		if (!current) return;
+		processed += 1;
+
+		let stat: fs.Stats;
+		try { stat = seams.lstatSync(current); } catch { continue; }
+		if (stat.isSymbolicLink()) continue;
+		if (stat.isFile()) {
+			onFile(current);
+			continue;
+		}
+		if (!stat.isDirectory()) continue;
+
+		try {
+			const entries = seams.readdirSync(current, { withFileTypes: true }) as fs.Dirent[];
+			directories.push({ directory: current, entries: [...entries].sort((left, right) => compareNames(left.name, right.name)), index: 0 });
+		} catch { continue; }
+	}
+
+	function nextPath(): string | undefined {
+		while (directories.length > 0) {
+			const frame = directories[directories.length - 1];
+			if (frame.index >= frame.entries.length) {
+				directories.pop();
+				continue;
+			}
+			const entry = frame.entries[frame.index++];
+			if (entry.isSymbolicLink()) continue;
+			if (entry.isDirectory() && ignoredDirectories.has(entry.name)) continue;
+			return path.join(frame.directory, entry.name);
+		}
+		if (rootIndex >= orderedRoots.length) return undefined;
+		return orderedRoots[rootIndex++];
+	}
+}
+
+function compareNames(left: string, right: string): number {
+	return left < right ? -1 : left > right ? 1 : 0;
+}
+
 /** Bounded, symlink-safe structural-language discovery. */
 export function detectAstGrepLanguages(
 	roots: readonly string[],
 	seams: LanguageDetectorFs = fs,
 ): AstGrepLanguageAlias[] {
 	const found = new Set<AstGrepLanguageAlias>();
-	const pending = [...roots];
-	let scanned = 0;
-	while (pending.length > 0 && scanned < MAX_LANGUAGE_DETECTION_ENTRIES) {
-		const current = pending.pop()!;
-		let stat: fs.Stats;
-		try { stat = seams.lstatSync(current); } catch { continue; }
-		if (stat.isSymbolicLink()) continue;
-		if (stat.isFile()) {
-			for (const alias of languagesForExtension(path.extname(current))) found.add(alias);
-			continue;
-		}
-		if (!stat.isDirectory()) continue;
-		let entries: fs.Dirent[];
-		try { entries = seams.readdirSync(current, { withFileTypes: true }) as fs.Dirent[]; } catch { continue; }
-		for (const entry of entries) {
-			if (scanned++ >= MAX_LANGUAGE_DETECTION_ENTRIES) break;
-			if (entry.isSymbolicLink()) continue;
-			if (entry.isDirectory() && ignoredDirectories.has(entry.name)) continue;
-			pending.push(path.join(current, entry.name));
-		}
-	}
+	walkLanguageDetectionPaths(roots, seams, (filePath) => {
+		for (const alias of languagesForExtension(path.extname(filePath))) found.add(alias);
+	});
 	return [...found].sort() as AstGrepLanguageAlias[];
 }

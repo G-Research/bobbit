@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
 	CODE_INTELLIGENCE_LANGUAGE_MATRIX,
-	MAX_LANGUAGE_DETECTION_ENTRIES,
+	walkLanguageDetectionPaths,
 	type AstGrepLanguageAlias,
 	type CodeIntelligenceLanguage,
 	type LanguageDetectorFs,
@@ -36,10 +36,6 @@ export interface LanguageDetection {
 
 export interface LanguageDetectionFs extends LanguageDetectorFs {}
 
-const ignoredDirectories = new Set([
-	".git", ".hg", ".svn", "node_modules", "dist", "build", "coverage", ".next", ".cache", "vendor",
-]);
-
 /**
  * Detect matrix-declared languages below one configured component root. The walk
  * is bounded, never follows symlinks, and only inspects filenames/markers; it
@@ -54,28 +50,9 @@ export function detectComponentLanguages(
 	const counts = new Map<AstGrepLanguageAlias, number>();
 	const globs = new Map<AstGrepLanguageAlias, Set<string>>();
 	const rootMarkers = readRootMarkers(input.root, seams);
-	const pending = [input.root];
-	let scanned = 0;
-
-	while (pending.length > 0 && scanned < MAX_LANGUAGE_DETECTION_ENTRIES) {
-		const current = pending.pop()!;
-		let stat: fs.Stats;
-		try { stat = seams.lstatSync(current); } catch { continue; }
-		if (stat.isSymbolicLink()) continue;
-		if (stat.isFile()) {
-			collectFileEvidence(current, counts, globs);
-			continue;
-		}
-		if (!stat.isDirectory()) continue;
-		let entries: fs.Dirent[];
-		try { entries = seams.readdirSync(current, { withFileTypes: true }) as fs.Dirent[]; } catch { continue; }
-		for (const entry of entries) {
-			if (scanned++ >= MAX_LANGUAGE_DETECTION_ENTRIES) break;
-			if (entry.isSymbolicLink()) continue;
-			if (entry.isDirectory() && ignoredDirectories.has(entry.name)) continue;
-			pending.push(path.join(current, entry.name));
-		}
-	}
+	walkLanguageDetectionPaths([input.root], seams, (filePath) => {
+		collectFileEvidence(filePath, counts, globs);
+	});
 
 	const detected: LanguageDetection[] = [];
 	for (const language of CODE_INTELLIGENCE_LANGUAGE_MATRIX as readonly CodeIntelligenceLanguage[]) {
