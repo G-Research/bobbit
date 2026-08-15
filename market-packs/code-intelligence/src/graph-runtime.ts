@@ -518,7 +518,7 @@ function orientationFromStatus(status: GraphRuntimeStatus): GraphHookResult {
 
 function orientationGraphDetail(component: CodeIntelligenceComponentStatus): string {
 	const revision = component.revisions?.headRev ?? component.revision ?? "unknown revision";
-	if (component.state === "base-fallback") return `Base fallback — this branch has no current graph. Queries use the accepted base graph at ${component.revisions?.baseRev ?? revision} and may omit branch-only changes.`;
+	if (component.state === "base-fallback") return `Base fallback — this branch has no current graph. Queries use the last accepted graph at ${component.revisions?.baseRev ?? revision} (the accepted base graph) and may omit branch-only changes.`;
 	if (component.state === "stale" && component.staleReason === "parent-advanced") return `Stale — the parent changed. Showing the last accepted graph at ${revision} until this branch is rebuilt.`;
 	if (component.state === "stale") return `Stale (${component.staleReason ?? "unknown reason"}) at ${revision}; it is a discovery lead, not current impact.`;
 	if (component.state === "failed") return `Graph publication failed; do not treat ${revision} as current impact.`;

@@ -1,31 +1,52 @@
-function v(e){return e instanceof Error?e.message:String(e||"Unable to load graph status.")}function y(e){if(Array.isArray(e))return e.filter(r=>!!r&&typeof r=="object");if(!e||typeof e!="object")return[];let n=e;for(let r of[n.components,n.items,n.graphs])if(Array.isArray(r))return y(r);return n.component?[n]:[]}function p(e){return String(e?.state??e?.freshness??"UNAVAILABLE").replace(/-/g," ").toUpperCase()}function f(e){let r=(Array.isArray(e?.warnings)?e.warnings:[]).find(a=>typeof a=="string"&&a.trim());return typeof r=="string"?r:void 0}function $(e){let n=e?.component,r=String(n?.name??n??"Component"),a=typeof n?.repo=="string"&&n.repo.trim()?n.repo:void 0;return a?`${r} \xB7 ${a}`:r}function h(e){let n=e?.revisions??{};return String(n.headRev??n.baseRev??e?.revision??"unknown").slice(0,12)}function b(e){return typeof e?.staleReason=="string"&&e.staleReason.trim()?e.staleReason.replace(/-/g," "):void 0}function w({html:e,nothing:n}){let r=new Map,a=l=>{try{l.requestRender?.()}catch{}};return{render(l,i){let g=typeof l?.__sessionId=="string"?l.__sessionId:"default",t=r.get(g)??{loaded:!1,loading:!1,rebuilding:!1};r.set(g,t);let u=async o=>{if(!i?.callRoute){t.error="Code Intelligence routes are unavailable.",a(i??{});return}try{o==="rebuild"?t.rebuilding=!0:t.loading=!0,t.error=void 0,a(i);let s=await i.callRoute(o,o==="rebuild"?{method:"POST",body:{scope:"eligible"}}:{method:"GET"});if(s&&typeof s=="object"&&s.ok===!1){let d=s.error;throw new Error(typeof d=="string"&&d?d:"Code Intelligence route request failed.")}if(o==="status"&&(t.status=s),o==="config"&&(t.config=s),o==="rebuild"){let d=s&&typeof s=="object"?s:{};t.status=d.status??s}t.loaded=!0}catch(s){t.error=v(s)}finally{t.loading=!1,t.rebuilding=!1,a(i)}},c=y(t.status),m="v1 has no cross-repo edges.",x=c.length>0?p(c[0]):"STALE \u2014 no current graph is published.";return e`
-				<section class="h-full overflow-auto p-4 space-y-4 text-sm" data-testid="code-intelligence-status-panel">
-					<header class="flex items-start justify-between gap-3">
-						<div>
-							<h2 class="text-base font-semibold text-foreground">Code Intelligence</h2>
-							<p class="text-muted-foreground">Host-side, component-scoped Graphify indexes.</p>
-						</div>
-						<div class="flex gap-2">
-							<button class="rounded border border-border px-2 py-1 text-foreground hover:bg-muted disabled:opacity-50" data-testid=${t.loaded?"graph-status-refresh":"graph-status-load"} ?disabled=${t.loading} @click=${()=>{u("status")}}>${t.loading?"Loading\u2026":t.loaded?"Refresh":"Load status"}</button>
-							<button class="rounded border border-border px-2 py-1 text-foreground hover:bg-muted disabled:opacity-50" data-testid="graph-status-config" ?disabled=${t.loading} @click=${()=>{u("config")}}>Configuration</button>
-							<button class="rounded bg-primary px-2 py-1 text-primary-foreground disabled:opacity-50" data-testid="code-intelligence-rebuild" ?disabled=${t.rebuilding} @click=${()=>{u("rebuild")}}>${t.rebuilding?"Checking\u2026":"Rebuild"}</button>
-						</div>
+function C(e){return e instanceof Error?e.message:String(e||"Unable to load Code Intelligence status.")}function o(e){return e&&typeof e=="object"&&!Array.isArray(e)?e:void 0}function h(e){return Array.isArray(e)?e.filter(n=>!!o(n)):[]}function w(e){let n=o(e);if(!n)return[];for(let t of[n.components,n.items,n.graphs])if(Array.isArray(t))return h(t);return n.component?[n]:[]}function R(e){return String(e?.state??e?.freshness??"unavailable").trim().toLowerCase()}function S(e){return e.replace(/-/g," ").replace(/\b\w/g,n=>n.toUpperCase())}function A(e){let n=e.component,t=o(n),a=String(t?.name??n??"Component"),s=typeof t?.repo=="string"&&t.repo.trim()?t.repo:void 0;return s?`${a} \xB7 ${s}`:a}function p(e,n="head"){let t=o(e.revisions),a=n==="base"?t?.baseRev??e.baseRevision??e.baseRev??e.revision:t?.headRev??e.headRev??e.revision;return typeof a=="string"&&a.trim()?a.slice(0,12):"unknown"}function v(e){return typeof e.staleReason=="string"&&e.staleReason.trim()?e.staleReason.replace(/-/g," "):void 0}function V(e){if(e.length===0)return"No graph published";let n=e.map(R);return n.some(t=>t==="failed"||t==="stale")?"Not current":n.includes("base-fallback")?"Limited":n.includes("building")?"Updating":n.every(t=>t==="fresh")?"Current":"Not current"}function x(e){let n=R(e);if(n==="base-fallback")return`Base fallback \u2014 this branch has no current graph. Queries use the accepted base graph at ${p(e,"base")} and may omit branch-only changes.`;if(n==="stale")return v(e)==="parent advanced"?`Stale \u2014 the parent changed. Showing the last accepted graph at ${p(e)} until this branch is rebuilt.`:`Stale \u2014 showing the last accepted graph at ${p(e)} until this branch is rebuilt.`}function L(e){let n=o(e);if(!n)return[];for(let t of[n.capabilities,n.languageCapabilities,n.languages])if(Array.isArray(t))return h(t);return w(n).flatMap(t=>{for(let a of[t.capabilities,t.languageCapabilities,t.languages])if(Array.isArray(a))return h(a).map(s=>({...s,component:s.component??t.component??t.name}));return[]})}function q(e){let n=o(e.language),t=e.label??e.languageLabel??n?.label??e.languageId??n?.id;return typeof t=="string"&&t.trim()?t:"Declared language"}function I(e){let n=o(e.evidence??e.detection?.evidence);if(!n)return;let t=[];typeof n.fileCount=="number"&&t.push(`${n.fileCount} ${n.fileCount===1?"file":"files"}`);let a=Array.isArray(n.rootMarkers)?n.rootMarkers.filter(s=>typeof s=="string"&&s.trim().length>0):[];return a.length&&t.push(a.join(", ")),t.length?`Detected from ${t.join(" \xB7 ")}`:void 0}function P(e){let n=e.structuralSearch,t=typeof n=="string"?n:o(n)?.state;return t==="available"||t==="supported"?"Supported \u2014 syntax-aware, not type-aware":"Unavailable"}function M(e){let n=o(e.lsp)??{},t=String(n.state??e.lspState??"unavailable").toLowerCase(),a={disabled:"Disabled","requires-toolchain":"Needs runtime",ready:"Ready",unavailable:"Unavailable",unsupported:"Structural search only"},s=typeof n.reason=="string"&&n.reason.trim()?n.reason:N(n),l=Array.isArray(n.actions)?n.actions.filter(u=>typeof u=="string"&&u.trim().length>0).join(", "):void 0;return{label:a[t]??"Unavailable",reason:s,actions:l}}function N(e){let n=Array.isArray(e.missing)&&e.missing.length?e.missing:e.requirements;if(!Array.isArray(n)||n.length===0)return;let t=n.map(a=>{let s=o(a);return typeof s?.label=="string"?s.label:typeof s?.id=="string"?s.id:void 0}).filter(a=>!!a);return t.length?`Requires ${t.join(", ")}.`:void 0}function U(e,n){let t=o(e),a=o(t?.config);return o(t?.manualRebuild)??o(a?.manualRebuild)??o(o(n)?.manualRebuild)}function j(e){return e?.available===!0?{available:!0,reason:""}:{available:!1,reason:typeof e?.reason=="string"&&e.reason.trim()?e.reason:"Manual rebuild availability is not declared."}}function D({html:e,nothing:n}){let t=new Map,a=s=>{try{s.requestRender?.()}catch{}};return{render(s,l){let u=typeof s?.__sessionId=="string"?s.__sessionId:"default",r=t.get(u)??{loaded:!1,loading:!1,rebuilding:!1};t.set(u,r);let b=async i=>{if(!l?.callRoute){r.error="Code Intelligence routes are unavailable.",a(l??{});return}try{i==="rebuild"?r.rebuilding=!0:r.loading=!0,r.error=void 0,a(l);let d=await l.callRoute(i,i==="rebuild"?{method:"POST",body:{scope:"eligible"}}:{method:"GET"});if(o(d)?.ok===!1)throw new Error(typeof o(d)?.error=="string"?o(d)?.error:"Code Intelligence route request failed.");if(i==="status"&&(r.status=d),i==="config"&&(r.config=d),i==="rebuild"){let m=o(d)??{};r.status=m.status??d}r.loaded=!0}catch(d){r.error=C(d)}finally{r.loading=!1,r.rebuilding=!1,a(l)}},f=w(r.status),$=L(r.status),c=j(U(r.status,r.config)),g=r.loading||r.rebuilding,k=r.loading?"Checking language support\u2026":r.rebuilding?"Checking manual rebuild availability\u2026":V(f);return e`
+				<section class="h-full overflow-auto p-4 space-y-4 text-sm" data-testid="code-intelligence-status-panel" aria-busy=${g?"true":"false"}>
+					<header>
+						<h2 class="text-base font-semibold text-foreground">Code Intelligence</h2>
+						<p class="text-muted-foreground">Declared, component-scoped capabilities. Loading status does not start indexing or an LSP.</p>
 					</header>
-					<p class="rounded border border-border p-2 text-muted-foreground" data-testid="code-intelligence-no-cross-repo-warning">${m}</p>
-					<p class="rounded border border-border p-2 font-medium text-foreground" data-testid="code-intelligence-freshness">${x}</p>
-					<p class="text-muted-foreground" data-testid="code-intelligence-rebuild-status">${t.rebuilding?"Checking manual rebuild availability\u2026":"Automatic lifecycle processing is unavailable pending EP-8. Manual rebuild is route-only."}</p>
-					${t.error?e`<p class="rounded border border-destructive p-2 text-destructive" role="alert">${t.error}</p>`:n}
-					${t.loaded?n:e`<p class="text-muted-foreground">Load status to inspect freshness, lifecycle availability, and version drift.</p>`}
-					${c.map(o=>e`
-						<article class="rounded border border-border p-3 space-y-2" data-testid="graph-status-component">
-							<strong class="text-foreground" data-testid="graph-status-component-label">${$(o)}</strong>
-							<p class="font-mono text-xs text-muted-foreground" data-testid="graph-status-component-revision">Revision: ${h(o)}</p>
-							<p class="font-medium text-foreground" data-testid="graph-status-state">${p(o)}</p>
-							${b(o)?e`<p class="text-muted-foreground" data-testid="graph-status-stale-reason">Stale reason: ${b(o)}</p>`:n}
-							${f(o)?e`<p class="text-warning" data-testid="graph-status-component-warning">${f(o)}</p>`:n}
-						</article>
-					`)}
-					${t.loaded&&c.length===0?e`<p class="text-muted-foreground" data-testid="graph-status-empty">No component graph status is available yet.</p>`:n}
-					${t.config?e`<pre class="overflow-auto rounded border border-border p-3 text-xs text-muted-foreground" data-testid="graph-status-config-value">${JSON.stringify(t.config,null,2)}</pre>`:n}
+					<p class="rounded border border-border p-2 font-medium text-foreground" data-testid="code-intelligence-freshness" role="status" aria-live="polite" aria-atomic="true">${k}</p>
+					<div class="flex flex-wrap gap-2" aria-label="Code Intelligence panel actions">
+						<button type="button" class="min-h-6 min-w-6 rounded border border-border px-2 py-1 text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50" data-testid=${r.loaded?"graph-status-refresh":"graph-status-load"} ?disabled=${g} aria-busy=${r.loading?"true":"false"} @click=${()=>{b("status")}}>${r.loading?"Checking language support\u2026":r.loaded?"Refresh":"Load status"}</button>
+						<button type="button" class="min-h-6 min-w-6 rounded border border-border px-2 py-1 text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50" data-testid="graph-status-config" ?disabled=${g} aria-busy=${r.loading?"true":"false"} @click=${()=>{b("config")}}>Configuration</button>
+						<button type="button" class="min-h-6 min-w-6 rounded px-2 py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 ${c.available?"bg-primary text-primary-foreground":"border border-border text-foreground"}" data-testid="code-intelligence-rebuild" ?disabled=${g||!c.available} aria-busy=${r.rebuilding?"true":"false"} @click=${()=>{b("rebuild")}}>${r.rebuilding?"Checking\u2026":c.available?"Rebuild index":"Rebuild unavailable"}</button>
+					</div>
+					<p class="text-muted-foreground" data-testid="code-intelligence-rebuild-status">${r.rebuilding?"Checking manual rebuild availability\u2026":c.available?"Manual rebuild is available through this route.":c.reason}</p>
+					${r.error?e`<p class="rounded border border-destructive p-2 text-destructive" role="alert">${r.error}</p>`:n}
+					${r.loaded?n:e`<p class="text-muted-foreground">Load status to inspect declared language support, graph freshness, and rebuild availability.</p>`}
+
+					<section class="space-y-2" aria-labelledby="code-intelligence-capabilities">
+						<h3 id="code-intelligence-capabilities" class="font-semibold text-foreground">Capabilities</h3>
+						${$.map(i=>{let d=M(i),y=I(i),m=o(i.evidence??i.detection?.evidence)?.truncated===!0;return e`<article class="rounded border border-border p-3 space-y-1" data-testid="code-intelligence-language-row">
+								<h4 class="font-medium text-foreground" data-testid="code-intelligence-language-label">${q(i)}</h4>
+								${y?e`<p class="text-muted-foreground" data-testid="code-intelligence-language-evidence">${y}</p>`:n}
+								${m?e`<p class="text-warning" data-testid="code-intelligence-detection-truncated">Scan incomplete — the 10,000-entry limit was reached; some languages may be missing.</p>`:n}
+								<p><strong>Structural search</strong> <span data-testid="code-intelligence-structural-state">${P(i)}</span></p>
+								<p><strong>LSP</strong> <span data-testid="code-intelligence-lsp-state">${d.label}</span></p>
+								${d.reason?e`<p class="text-muted-foreground" data-testid="code-intelligence-lsp-reason">${d.reason}</p>`:n}
+								${d.label==="Ready"&&d.actions?e`<p class="text-muted-foreground">Actions: ${d.actions}</p>`:n}
+							</article>`})}
+						${r.loaded&&$.length===0?e`<p class="text-muted-foreground" data-testid="code-intelligence-capabilities-empty">No declared language capabilities are available for this session.</p>`:n}
+					</section>
+
+					<section class="space-y-2" aria-labelledby="code-intelligence-graph-index">
+						<h3 id="code-intelligence-graph-index" class="font-semibold text-foreground">Graph index</h3>
+						${f.map(i=>e`
+							<article class="rounded border border-border p-3 space-y-2" data-testid="graph-status-component">
+								<strong class="text-foreground" data-testid="graph-status-component-label">${A(i)}</strong>
+								<p class="font-mono text-xs text-muted-foreground" data-testid="graph-status-component-revision">Revision: ${p(i)}</p>
+								<p class="font-medium text-foreground" data-testid="graph-status-state">${S(R(i))}</p>
+								${v(i)?e`<p class="text-muted-foreground" data-testid="graph-status-stale-reason">Reason: ${v(i)}</p>`:n}
+								${x(i)?e`<p class="text-muted-foreground" data-testid="graph-status-consequence">${x(i)}</p>`:n}
+							</article>
+						`)}
+						${r.loaded&&f.length===0?e`<p class="text-muted-foreground" data-testid="graph-status-empty">No component graph status is available yet.</p>`:n}
+					</section>
+
+					<section class="space-y-2" aria-labelledby="code-intelligence-boundaries">
+						<h3 id="code-intelligence-boundaries" class="font-semibold text-foreground">Boundaries and review guidance</h3>
+						<p class="rounded border border-border p-2 text-muted-foreground" data-testid="code-intelligence-no-cross-repo-warning" role="note" aria-label="Repository boundary"><strong>Repository boundary:</strong> v1 has no cross-repo edges. A result in web cannot prove a call into api.</p>
+						<p class="rounded border border-border p-2 text-muted-foreground" data-testid="code-intelligence-review-guidance">Graph relationships are breadth-first leads; LSP locations are precise within the active worktree. Open and read every cited source before changing or approving code.</p>
+					</section>
+					${r.config?e`<pre class="overflow-auto rounded border border-border p-3 text-xs text-muted-foreground" data-testid="graph-status-config-value">${JSON.stringify(r.config,null,2)}</pre>`:n}
 				</section>
-			`}}}export{w as default};
+			`}}}export{D as default};
