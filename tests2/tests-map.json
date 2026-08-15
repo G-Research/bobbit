@@ -2,9 +2,9 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1140,
+  "censusTotal": 1141,
   "buckets": {
-    "daily": 66,
+    "daily": 67,
     "v2-browser": 216,
     "v2-core": 512,
     "v2-dom": 144,
@@ -15,7 +15,7 @@
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
-    "relocate": 51,
+    "relocate": 52,
     "rewrite": 145,
     "vitest-e2e": 2
   },
@@ -2263,6 +2263,15 @@
       }
     },
     {
+      "path": "tests2/core/verification-busy-concurrency-repro.test.ts",
+      "reason": "Deterministic failing-first verifier contention coverage: two goals with distinct healthy-but-busy reviewer sessions queue and complete exactly once, while cancel/re-signal invalidates the superseded queued delivery and fences its late verdict from the replacement signal.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/message-author-surfacing.test.ts",
       "reason": "Pure core coverage for accountable-prompt visibility, exact human/system/agent badge presentation, safe label normalization, deterministic display IDs, and model-prefix formatting that leaves human prompts unprefixed.",
       "execution": {
@@ -3153,6 +3162,60 @@
         "tier": "browser",
         "project": "browser"
       }
+    },
+    {
+      "path": "tests2/core/pi-installed-contract.test.ts",
+      "reason": "Installed-runtime contract coverage for the aligned Pi trio version, active-run release before agent_settled observers, delta-only streaming with terminal authority, compaction event order and retry metadata, manual-compaction prompt rejection, recoverable-length overflow retry, queue release, and steer acknowledgement before user echo.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/reliable-intent-queue.test.ts",
+      "reason": "Core reliable-turn queue coverage for stable occurrence identity, replay idempotence, metadata-preserving restore, target-turn lane ordering, identical steers, and abort retargeting, using the shared deterministic reliable-intent fixture.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/reliable-intent-attempt.test.ts",
+      "reason": "Core reliable-turn attempt-ledger coverage for delayed acknowledgement and echo, exact-once identical steers, ambiguous failure, abort interleavings, stale attempts, and persisted restore, using the shared deterministic reliable-intent fixture.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/reliable-compaction-release.test.ts",
+      "reason": "Core reliable-turn compaction coverage for admission fencing, agent_end-to-agent_settled next-turn release, definite-rejection status rollback, single release across manual, threshold, overflow, failure, and abort outcomes, continuation-versus-next-turn ordering, and Stop interleavings, using the shared deterministic reliable-intent fixture.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/reliable-intent-recovery.test.ts",
+      "reason": "In-process gateway and mock-Pi integration coverage for agent_end-to-agent_settled admission fencing, barrier-driven compaction, durable ID-keyed admission, ordered identical steers, delayed acknowledgement and echo, reconnect, restart, abort, failure, and exactly-once transcript recovery, with helper-owned deterministic runtime barriers.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
+      "reason": "Browser journey covering the reliable-turn visible-carrier invariant across idle and busy prompts, agent_end-to-agent_settled release, rapid identical steers, delayed acknowledgement and echo, manual, threshold, and overflow compaction, Stop races, reload, reconnect, second-tab convergence, and actionable delivery failure through its dedicated runtime fixture.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [
@@ -3298,6 +3361,10 @@
     },
     {
       "path": "tests2/browser/journeys/history-fork-prompt-actions.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "type": "smoke-journey"
     }
   ],
@@ -18210,6 +18277,13 @@
       "method": "relocate",
       "replacement": [],
       "rationale": "Authenticated production-gateway coverage for live pin, archive retention, archived list projection, archived unpin, and durable tag state across two real gateway restarts."
+    },
+    {
+      "file": "tests/manual-integration/reliable-agent-context-pressure.spec.ts",
+      "bucket": "daily",
+      "method": "relocate",
+      "replacement": [],
+      "rationale": "Opt-in real Pi/real-model context-pressure smoke for exact-once steer and follow-up delivery through automatic compaction; manual/daily only, with explicit credentials, no provider fallback, and bounded request/token/cost/time guards."
     }
   ]
 }

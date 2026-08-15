@@ -571,6 +571,8 @@ Gates can define automated verification that runs when signaled:
 
 Verification is async. On signal, the verification status is `"running"`. On completion: the gate transitions to `"passed"` (all steps pass) or `"failed"` (any step fails, with details). A WebSocket event `gate_verification_complete` is emitted. If no verification is defined, the gate auto-passes.
 
+`llm-review` and `agent-qa` prompts use a verifier-owned durable queue row and Pi's atomic follow-up delivery rather than treating a busy reviewer as a content failure. The row receipt, cancellation/re-signal fence, same-session recovery, and diagnostic contract are described in [Verifier Recovery](llm-review-recovery.md#verifier-prompt-dispatch-and-contention).
+
 #### Failure remediation guidance
 
 Every verification-step type (`command`, `llm-review`, `agent-qa`, and `human-signoff`) accepts optional `failureGuidance`. It is static, workflow-authored Markdown for explaining how the team lead should diagnose and remediate that specific check. Use it for durable, check-specific advice rather than copied logs or expected verifier output.
@@ -841,7 +843,7 @@ The `agent-qa` verification step type spawns a test-engineer agent session that 
 2. The agent uses the `/qa-test` skill to stand up an ephemeral server, drive browser scenarios, and produce an HTML report.
 3. The agent calls the `verification_result` tool to deliver structured results: verdict (pass/fail), summary, and optional HTML report.
 4. If the agent includes `report_html`, the HTML is stored as the step's artifact with `contentType: "text/html"`.
-5. If the agent goes idle without calling the tool, the harness sends a reminder prompt. If idle again, the step fails.
+5. If the agent goes idle without calling the tool, the harness sends bounded same-session reminders through the verifier dispatch queue. It preserves the session's transcript and title while it waits for an exact-row receipt; only exhausted recovery fails the step. See [Verifier Recovery](llm-review-recovery.md#verifier-prompt-dispatch-and-contention).
 
 **Timeout:** When `timeout` is omitted, the resolved active-turn allowance is the maximum of 1200 seconds and `(qa_max_duration_minutes + 5) * 60` seconds; `qa_max_duration_minutes` defaults to 10. A valid explicit workflow timeout always wins, even when shorter than the omitted default, with a one-second minimum. The harness resolves the owning component via the step's `component:` field, falling back to the first component with `config.qa_start_command`, then a name-match against the project. See [QA Testing](qa-testing.md) for the full per-component config layout.
 

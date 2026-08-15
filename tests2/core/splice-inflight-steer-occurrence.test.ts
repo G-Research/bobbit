@@ -71,15 +71,30 @@ describe("spliceInFlightSteers occurrence correlation", () => {
 		const historical = userRow("old-user", "reroute");
 		const messages = [historical, { id: "assistant", role: "assistant", content: "working" }];
 
-		const result = spliceInFlightSteers(messages, [steer("reroute", "new-system-steer")]);
+		const result = spliceInFlightSteers(messages, [{
+			...steer("reroute", "attempt-new-system-steer"),
+			intentId: "intent-new-system-steer",
+			attemptId: "attempt-new-system-steer",
+			state: "dispatching",
+			targetTurn: "continuation",
+			sequence: 7,
+		}]);
 
 		expect(result).toHaveLength(3);
 		expect(result.slice(0, 2)).toEqual(messages);
 		expect(result[2]).toMatchObject({
-			id: "inflight-steer:new-system-steer",
+			id: "inflight-steer:intent-new-system-steer",
 			role: "user",
 			author: SYSTEM_AUTHOR,
+			deliveryIntentId: "intent-new-system-steer",
+			deliveryAttemptId: "attempt-new-system-steer",
+			deliveryState: "dispatching",
+			targetTurn: "continuation",
+			sequence: 7,
+			kind: "steer",
+			isSteered: true,
 			_inFlightSteer: true,
+			_deliveryRecoveryProjection: true,
 		});
 	});
 
@@ -173,5 +188,6 @@ describe("spliceInFlightSteers occurrence correlation", () => {
 			author: LOCAL_USER_AUTHOR,
 			_inFlightSteer: true,
 		});
+		expect(result[1]._deliveryRecoveryProjection).toBeUndefined();
 	});
 });

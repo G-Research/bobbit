@@ -138,7 +138,7 @@ The build must precede `audit:packed-consumer` because the command packs the bui
 
 The command uses fresh home, config, cache, and temporary directories; empty user/global npm configuration; and the public npm registry. It does not inherit auth tokens or custom registry credentials, and pack/install lifecycle scripts are disabled. These controls make the diagnostic reproducible without turning mutable registry output into publication policy.
 
-Unit, browser, and E2E suites intentionally do not query or assert live advisory output. The packed-consumer E2E instead verifies deterministic properties: consumer lock creation, dependency-owned shrinkwrap presence, installed graph validity, coordinated Pi versions, known dependency version/path floors, and bundled binary resolution and smoke behavior. See the [Pi `0.82.1` compatibility outcome](pi-runtime-compatibility.md#pi-0821-compatibility-outcome) for the current dependency constraints.
+Unit, browser, and E2E suites intentionally do not query or assert live advisory output. The packed-consumer E2E instead verifies deterministic properties: consumer lock creation, dependency-owned shrinkwrap presence, installed graph validity, coordinated Pi versions, known dependency version/path floors, and bundled binary resolution and smoke behavior. See [Pi runtime compatibility](pi-runtime-compatibility.md) for the selected runtime and historical dependency dispositions.
 
 ## Bundled fd/rg binaries
 

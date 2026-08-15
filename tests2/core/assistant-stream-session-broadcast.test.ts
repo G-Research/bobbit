@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import assert from "node:assert/strict";
-import { describe, it } from "vitest";
+import { describe, it, vi } from "vitest";
 import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
 import { emitSessionEvent, SessionManager } from "../../src/server/agent/session-manager.ts";
 import { handleWebSocketConnection } from "../../src/server/ws/handler.ts";
@@ -538,6 +538,105 @@ describe("assistant stream session broadcast", () => {
 		assert.ok(compact.assistantMessageBaseline, "the first post-snapshot delta must be self-contained");
 		const reconstructed = reconstructAssistantStreamDelta(compact) as any;
 		assert.equal(reconstructed.message.content[0].text, "Hello world");
+	});
+
+	it("broadcasts length-tail invalidation before retry output and never invalidates a final second length", () => {
+		const session: any = {
+			id: "sess-overflow-stream",
+			projectId: "project-1",
+			status: "streaming",
+			statusVersion: 1,
+			title: "Session",
+			clients: new Set(),
+			eventBuffer: new EventBuffer(),
+			promptQueue: { toArray: () => [] },
+			cwd: process.cwd(),
+			rpcClient: {},
+		};
+		const ws = new FakeWebSocket();
+		session.clients.add(ws);
+		const manager = Object.create(SessionManager.prototype) as any;
+		manager._sessionReplacementCoordinators = new Map();
+		manager._sessionWriterIsCurrent = () => true;
+		manager.messageAuthorDependencies = () => undefined;
+		const releaseOrder: string[] = [];
+		manager.finishCompactionAndRelease = vi.fn(() => releaseOrder.push("release"));
+		manager.emitAgentEvent = (current: any, event: any) => {
+			releaseOrder.push(event.type);
+			emitSessionEvent(current, event);
+		};
+
+		const firstStart = manager.prepareVisibleAgentEvent(session, {
+			type: "message_start",
+			message: { role: "assistant", content: [], timestamp: 1 },
+		});
+		const firstStreamId = firstStart.assistantStreamId;
+		assert.match(firstStreamId, /^assistant-stream:/);
+		const firstUpdate = manager.prepareVisibleAgentEvent(session, {
+			type: "message_update",
+			message: { role: "assistant", content: [{ type: "text", text: "truncated" }], timestamp: 1 },
+			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "truncated" },
+		});
+		const firstEnd = manager.prepareVisibleAgentEvent(session, {
+			type: "message_end",
+			message: { role: "assistant", content: [{ type: "text", text: "truncated" }], stopReason: "length", timestamp: 1 },
+		});
+		assert.equal(firstUpdate.assistantStreamId, firstStreamId);
+		assert.equal(firstEnd.assistantStreamId, firstStreamId);
+		for (const event of [firstStart, firstUpdate, firstEnd]) emitSessionEvent(session, event);
+
+		session.pendingRecoverableLengthStreamId = firstStreamId;
+		const retryingCompactionEnd = { type: "compaction_end", reason: "overflow", willRetry: true, aborted: false };
+		manager.handleAgentLifecycle(session, retryingCompactionEnd);
+		assert.deepEqual(releaseOrder, ["assistant_stream_invalidated", "release"]);
+		emitSessionEvent(session, retryingCompactionEnd);
+
+		const retryStart = manager.prepareVisibleAgentEvent(session, {
+			type: "message_start",
+			message: { role: "assistant", content: [], timestamp: 2 },
+		});
+		const retryStreamId = retryStart.assistantStreamId;
+		assert.notEqual(retryStreamId, firstStreamId);
+		const retryUpdate = manager.prepareVisibleAgentEvent(session, {
+			type: "message_update",
+			message: { role: "assistant", content: [{ type: "text", text: "complete retry" }], timestamp: 2 },
+			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "complete retry" },
+		});
+		const retryEnd = manager.prepareVisibleAgentEvent(session, {
+			type: "message_end",
+			message: { role: "assistant", content: [{ type: "text", text: "complete retry" }], stopReason: "stop", timestamp: 2 },
+		});
+		for (const event of [retryStart, retryUpdate, retryEnd]) emitSessionEvent(session, event);
+
+		const secondLengthStart = manager.prepareVisibleAgentEvent(session, {
+			type: "message_start",
+			message: { role: "assistant", content: [], timestamp: 3 },
+		});
+		const secondLengthStreamId = secondLengthStart.assistantStreamId;
+		const secondLengthEnd = manager.prepareVisibleAgentEvent(session, {
+			type: "message_end",
+			message: { role: "assistant", content: [{ type: "text", text: "final length" }], stopReason: "length", timestamp: 3 },
+		});
+		for (const event of [secondLengthStart, secondLengthEnd]) emitSessionEvent(session, event);
+		session.pendingRecoverableLengthStreamId = secondLengthStreamId;
+		manager.handleAgentLifecycle(session, {
+			type: "compaction_end",
+			reason: "overflow",
+			willRetry: false,
+			aborted: false,
+			errorMessage: "recovery capped after one retry",
+		});
+
+		const events = session.eventBuffer.getAll().map((entry: any) => entry.event);
+		const invalidationIndexes = events.flatMap((event: any, index: number) =>
+			event.type === "assistant_stream_invalidated" ? [index] : []);
+		assert.deepEqual(invalidationIndexes, [3], "only the first recoverable tail is invalidated");
+		assert.equal(events[invalidationIndexes[0]].assistantStreamId, firstStreamId);
+		assert.equal(events[invalidationIndexes[0] + 1].type, "compaction_end");
+		assert.equal(events[invalidationIndexes[0] + 2].type, "message_start");
+		assert.equal(events[invalidationIndexes[0] + 2].assistantStreamId, retryStreamId);
+		assert.equal(events.at(-1).assistantStreamId, secondLengthStreamId, "final second length remains terminal");
+		assert.equal(session.pendingRecoverableLengthStreamId, undefined);
 	});
 
 	it("cuts over only the slow replaceable client and fences later sends on that socket", async () => {
