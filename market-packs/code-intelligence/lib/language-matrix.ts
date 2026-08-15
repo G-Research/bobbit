@@ -226,8 +226,16 @@ export const CODE_INTELLIGENCE_LANGUAGE_MATRIX = [
 	{ id: "yaml", label: "YAML", evidence: { globs: ["**/*.yaml", "**/*.yml"], rootMarkers: noMarkers, minimumFiles: 1 }, ...structural("Yaml") },
 ] as const satisfies readonly CodeIntelligenceLanguage[];
 
-export type AstGrepLanguageAlias = (typeof CODE_INTELLIGENCE_LANGUAGE_MATRIX)[number]["id"];
-export type AstGrepLanguage = CodeIntelligenceLanguage & { ast: AstCapability };
+type StructuralSearchMatrixLanguage = Extract<
+	(typeof CODE_INTELLIGENCE_LANGUAGE_MATRIX)[number],
+	{ readonly ast: AstCapability }
+>;
+export type AstGrepLanguageAlias = StructuralSearchMatrixLanguage["id"];
+/** A structural-search entry whose ID remains tied to the matrix literal. */
+export type AstGrepLanguage = Omit<CodeIntelligenceLanguage, "id" | "ast"> & {
+	id: AstGrepLanguageAlias;
+	ast: AstCapability;
+};
 
 export const MAX_LANGUAGE_DETECTION_ENTRIES = 10_000;
 const ignoredDirectories = new Set([
@@ -358,5 +366,5 @@ export function detectAstGrepLanguages(
 	walkLanguageDetectionPaths(roots, seams, (filePath) => {
 		for (const alias of languagesForExtension(path.extname(filePath))) found.add(alias);
 	});
-	return [...found].sort() as AstGrepLanguageAlias[];
+	return [...found].sort();
 }
