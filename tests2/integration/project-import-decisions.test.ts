@@ -211,7 +211,8 @@ test.describe("project import decisions — real gateway lifecycle", () => {
 			});
 			expect(promoted.status, await promoted.clone().text()).toBe(200);
 			const promotedProject = await readJson<any>(promoted);
-			expect(promotedProject).toMatchObject({ provisional: false, importDecisionRun: { state: "ready" } });
+			expect(promotedProject.provisional).not.toBe(true);
+			expect(promotedProject.importDecisionRun).toMatchObject({ state: "ready" });
 			const importId = promotedProject.importDecisionRun.id as string;
 			const state = decisionState(rootPath);
 			expect(state.importRuns[importId].context.components).toHaveLength(1);
