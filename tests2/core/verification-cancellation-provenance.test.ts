@@ -43,8 +43,13 @@ const GATE: WorkflowGate = {
 	verify: [{ name: "Running sign-off", type: "human-signoff", prompt: "Awaiting cancellation" }],
 };
 const roots: string[] = [];
+const gateStores: GateStore[] = [];
 
 afterEach(async () => {
+	// GateStore's JSON writer coalesces non-strict state writes. Drain every
+	// fixture-owned writer before deleting its root so a retry cannot attempt a
+	// late rename into an already-removed directory.
+	await Promise.all(gateStores.splice(0).map(store => store.close()));
 	for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -56,6 +61,7 @@ function makeFixture(
 	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "verification-cancellation-provenance-"));
 	roots.push(stateDir);
 	const gateStore = new GateStore(stateDir, undefined, { persistence });
+	gateStores.push(gateStore);
 	gateStore.initGatesForGoal(GOAL_ID, [GATE_ID]);
 	const events: any[] = [];
 	const projectContextManager = goal ? {
@@ -140,6 +146,7 @@ function makeExactResourceFixture(signalId: string, cause: CancellationCause | "
 	roots.push(stateDir);
 	const clock = createManualClock(1_700_000_000_000);
 	const gateStore = new GateStore(stateDir, undefined, { persistence: "json" });
+	gateStores.push(gateStore);
 	gateStore.initGatesForGoal(GOAL_ID, [GATE_ID]);
 	const signal: GateSignal = {
 		id: signalId, goalId: GOAL_ID, gateId: GATE_ID, sessionId: "resource-owner", timestamp: clock.now(),
@@ -187,10 +194,6 @@ function makeExactResourceFixture(signalId: string, cause: CancellationCause | "
 	return { clock, gateStore, harness, active, events, notifications, order, checkoutManager };
 }
 
-async function flushResourceBarrier(): Promise<void> {
-	for (let turn = 0; turn < 4; turn++) await new Promise<void>(resolve => setImmediate(resolve));
-}
-
 test("failed supersession fence restores state without interrupting verifier waiters, signoffs, or cleanup", () => {
 	const { harness, signal, signoffCancelled } = makeFixture("terminal-fence-persistence-failure");
 	const active = (harness as any).activeVerifications.get(signal.id) as ActiveVerification;
@@ -221,6 +224,7 @@ test("exact sidecar and checkout retries suppress terminal cancellation publicat
 	const fixture = makeExactResourceFixture("exact-resource-retry");
 	const strict = vi.spyOn(fixture.gateStore, "updateSignalVerificationStrict");
 	const gateStatus = vi.spyOn(fixture.gateStore, "updateGateStatusStrict");
+	const finalizer = vi.spyOn(fixture.harness, "_finalizeCancelledVerification");
 
 	await fixture.harness._finalizeCancelledVerification(fixture.active);
 	expect(fixture.order).toEqual(["sidecar:1"]);
@@ -231,8 +235,12 @@ test("exact sidecar and checkout retries suppress terminal cancellation publicat
 	expect(fixture.harness.activeVerifications.get(fixture.active.signalId),
 		"EXACT_RESOURCE_BARRIER_MUST_RETAIN_OWNER_AFTER_SIDECAR_FAILURE").toBe(fixture.active);
 
+	finalizer.mockClear();
 	fixture.clock.advance(1_000);
-	await flushResourceBarrier();
+	// The manual clock has no timer promise. Await the exact finalizer dispatched
+	// by its retry, rather than assuming a fixed number of event-loop turns.
+	await Promise.all(finalizer.mock.results.map(result => result.value));
+	expect(finalizer).toHaveBeenCalledTimes(1);
 	expect(fixture.order).toEqual(["sidecar:1", "sidecar:2", "checkout:1"]);
 	expect(strict, "EXACT_RESOURCE_BARRIER_MUST_NOT_STRICTLY_UPDATE_SIGNAL_BEFORE_CHECKOUT_RELEASE").not.toHaveBeenCalled();
 	expect(gateStatus).not.toHaveBeenCalled();
@@ -241,8 +249,10 @@ test("exact sidecar and checkout retries suppress terminal cancellation publicat
 	expect(fixture.harness.activeVerifications.get(fixture.active.signalId),
 		"EXACT_RESOURCE_BARRIER_MUST_RETAIN_OWNER_AFTER_CHECKOUT_FAILURE").toBe(fixture.active);
 
+	finalizer.mockClear();
 	fixture.clock.advance(2_000);
-	await flushResourceBarrier();
+	await Promise.all(finalizer.mock.results.map(result => result.value));
+	expect(finalizer).toHaveBeenCalledTimes(1);
 	expect(fixture.order, "SIDECAR_MUST_FINISH_BEFORE_EACH_CHECKOUT_RELEASE_ATTEMPT").toEqual([
 		"sidecar:1", "sidecar:2", "checkout:1", "checkout:2",
 	]);

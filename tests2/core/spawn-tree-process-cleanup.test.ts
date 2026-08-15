@@ -415,10 +415,18 @@ function makeRecoveryHarness(
 ): VerificationHarness {
 	const pinnedCheckoutManager = deps.pinnedCheckoutManager ?? new FakePinnedCheckoutManager(path.join(stateDir, "verification-checkouts"));
 	const persistPath = path.join(stateDir, "active-verifications.json");
+	let persistedCurrentSignalId = "signal";
 	if (fs.existsSync(persistPath)) {
 		const persisted = JSON.parse(fs.readFileSync(persistPath, "utf8"));
+		const verifications = persisted.verifications ?? [];
+		// Recovery sees the signal history already persisted by the gate store.
+		// Use the recovered active record's actual ID, rather than a synthetic
+		// default, so the fixture does not turn a valid generation into stale work.
+		if (typeof verifications[verifications.length - 1]?.signalId === "string") {
+			persistedCurrentSignalId = verifications[verifications.length - 1].signalId;
+		}
 		let changed = false;
-		for (const verification of persisted.verifications ?? []) {
+		for (const verification of verifications) {
 			if (typeof verification?.signalId !== "string") continue;
 			const checkout = pinnedCheckoutManager.seed(verification.signalId, stateDir);
 			if (!verification.pinnedCheckout) {
@@ -435,7 +443,7 @@ function makeRecoveryHarness(
 			updateGateStatus: (_goalId: string, _gateId: string, status: string) => calls.push({ kind: "gate", status }),
 			// Model the persisted current generation. Restart cancellation must
 			// restore this eligible gate to pending after exact cleanup settles.
-			getGate: () => ({ status: "running", signals: [{ id: "signal", verification: { status: "running", steps: [] } }] }),
+			getGate: () => ({ status: "running", signals: [{ id: persistedCurrentSignalId, verification: { status: "running", steps: [] } }] }),
 		} as any,
 		() => {},
 		{ get: () => undefined, getAll: () => [] } as any,
