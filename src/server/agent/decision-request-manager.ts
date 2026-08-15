@@ -20,6 +20,7 @@ import {
 	type ExtensionAdvisory,
 	type ValidatedDecisionHookOutput,
 	type ValidatedExtensionDecisionRequest,
+	type ProposalType,
 } from "./decision-hook-contract.js";
 import {
 	DecisionRequestStore,
@@ -28,6 +29,7 @@ import {
 	type DecisionClassificationReason,
 	type DecisionMemory,
 	type DecisionReason,
+	type DecisionDelivery,
 	type StoredDecisionRequest,
 } from "./decision-request-store.js";
 import { resolveExtensionGrant, type ResolvedHook } from "./extension-grant-policy.js";
@@ -91,6 +93,17 @@ export interface DecisionRequestOrigin {
 	hookId: string;
 }
 
+/** Project registration has a durable target, not a synthetic agent session. */
+export interface ProjectImportDecisionRequestOrigin {
+	projectId: string;
+	importId: string;
+	event: "projectImported";
+	packId: string;
+	hookId: string;
+}
+
+type AnyDecisionRequestOrigin = DecisionRequestOrigin | ProjectImportDecisionRequestOrigin;
+
 /** Minimal injectable bridge so manager tests do not need a gateway. */
 export interface DecisionContinuation {
 	deliver(request: StoredDecisionRequest): Promise<"delivered" | "skipped">;
@@ -137,6 +150,8 @@ export interface DecisionRequestManagerDeps {
 	trace?: Pick<ContextTraceStore, "appendOutcome">;
 	/** Invalidates a REST projection only; callers must never put decision data in this frame. */
 	invalidateSession?: (sessionId: string) => void;
+	/** Metadata-only invalidation for a project-import decision projection. */
+	invalidateProjectImport?: (projectId: string) => void;
 	continuation?: DecisionContinuation;
 	/** Enumerates contexts already opened at boot for restart reconciliation. */
 	projectIds?: () => Iterable<string>;
@@ -208,12 +223,12 @@ export class DecisionRequestManager {
 	}
 
 	/** Add a validated request, enforcing semantic dedupe and server-owned limits. */
-	async create(origin: DecisionRequestOrigin, request: ValidatedExtensionDecisionRequest, operation?: TrustedDecisionOperation): Promise<DecisionCreateResult> {
+	async create(origin: AnyDecisionRequestOrigin, request: ValidatedExtensionDecisionRequest, operation?: TrustedDecisionOperation): Promise<DecisionCreateResult> {
 		this.projects.add(origin.projectId);
 		const store = this.deps.storeForProject(origin.projectId);
 		if (!store?.isHealthy()) return { status: "store_unavailable", code: "DECISION_STORE_UNAVAILABLE" };
 		const scopeId = scopeIdFor(request.scope, origin);
-		if (!scopeId) return { status: "rejected", code: "DECISION_SCOPE_UNAVAILABLE" };
+		if (!scopeId || origin.event === "projectImported" && request.scope !== "project") return { status: "rejected", code: "DECISION_SCOPE_UNAVAILABLE" };
 		const classification = classifyEffectiveClass(request, operation);
 		const effectiveRequest = classification.decisionClass === "consent-required" ? stripDefault(request) : request;
 		// Rendered prose and labels are intentionally not semantic identity: a pack
@@ -242,16 +257,17 @@ export class DecisionRequestManager {
 			}
 		}
 		if (!withinBudgets(store, origin, this.clock.now())) {
-			console.warn("[decision-requests] budget exhausted pack=%s hook=%s session=%s", origin.packId, origin.hookId, origin.sessionId);
+			console.warn("[decision-requests] budget exhausted pack=%s hook=%s delivery=%s", origin.packId, origin.hookId, deliveryId(origin));
 			return { status: "rejected", code: "DECISION_BUDGET_EXHAUSTED" };
 		}
 		const now = new Date(this.clock.now()).toISOString();
 		const timeoutAction = classification.decisionClass === "consent-required"
-			? (operation?.timeoutAction === "pause-goal" && origin.goalId && this.deps.consentPauseLifecycle ? "pause-goal" : "deny-operation")
+			? (operation?.timeoutAction === "pause-goal" && isSessionOrigin(origin) && origin.goalId && this.deps.consentPauseLifecycle ? "pause-goal" : "deny-operation")
 			: undefined;
+		const delivery = deliveryFor(origin);
 		const record: StoredDecisionRequest = {
-			id: randomUUID(), projectId: origin.projectId, sessionId: origin.sessionId,
-			...(origin.goalId ? { goalId: origin.goalId } : {}),
+			id: randomUUID(), projectId: origin.projectId, delivery,
+			...(isSessionOrigin(origin) ? { sessionId: origin.sessionId, ...(origin.goalId ? { goalId: origin.goalId } : {}) } : {}),
 			asker: { packId: origin.packId, hookId: origin.hookId, event: origin.event },
 			dedupeId, questionId: fingerprint({ key: effectiveRequest.key, question: effectiveRequest.question, options: effectiveRequest.options, other: effectiveRequest.other }),
 			request: effectiveRequest, decisionClass: classification.decisionClass, classificationReason: classification.reason,
@@ -265,7 +281,7 @@ export class DecisionRequestManager {
 			const terminal = await this.resolveTimeout(record, "headless");
 			return { status: "created", requestId: record.id, request: terminal ?? store.get(record.id) };
 		}
-		this.invalidate(record.sessionId);
+		this.invalidate(record);
 		this.armDeadlineTimer();
 		return { status: "created", requestId: record.id, request: record };
 	}
@@ -304,10 +320,15 @@ export class DecisionRequestManager {
 		return this.deps.storeForProject(projectId)?.listPending(sessionId) ?? [];
 	}
 
+	/** Project-owned projection seam; it can never leak a session delivery. */
+	listPendingImportRequests(projectId: string, importId: string): StoredDecisionRequest[] {
+		return this.deps.storeForProject(projectId)?.listPendingImportRequests(importId) ?? [];
+	}
+
 	/** Actionable session records include a durable consent pause awaiting its one answer. */
 	listActionable(projectId: string, sessionId: string): StoredDecisionRequest[] {
 		return (this.deps.storeForProject(projectId)?.list() ?? []).filter(request =>
-			request.sessionId === sessionId && (request.status === "pending" || request.status === "paused-awaiting-consent"),
+			request.delivery.kind === "session" && request.delivery.sessionId === sessionId && (request.status === "pending" || request.status === "paused-awaiting-consent"),
 		);
 	}
 
@@ -317,7 +338,7 @@ export class DecisionRequestManager {
 	}
 
 	/** Exact scope lookup; never falls back across scopes, keys, packs, or hooks. */
-	getMemory(origin: Pick<DecisionRequestOrigin, "projectId" | "sessionId" | "goalId" | "packId" | "hookId">, scope: ValidatedExtensionDecisionRequest["scope"], key: string): DecisionValue | undefined {
+	getMemory(origin: Pick<DecisionRequestOrigin, "projectId" | "sessionId" | "goalId" | "packId" | "hookId"> | Pick<ProjectImportDecisionRequestOrigin, "projectId" | "importId" | "packId" | "hookId">, scope: ValidatedExtensionDecisionRequest["scope"], key: string): DecisionValue | undefined {
 		const scopeId = scopeIdFor(scope, origin);
 		if (!scopeId) return undefined;
 		return this.deps.storeForProject(origin.projectId)?.getMemory({ scope, scopeId, packId: origin.packId, hookId: origin.hookId, key })?.value;
@@ -366,7 +387,7 @@ export class DecisionRequestManager {
 		if (result.written && settled) {
 			store.updateContinuation(settled.id, { continuationState: "skipped", continuationAttempts: settled.continuationAttempts });
 			this.traceResolution(settled);
-			this.invalidate(settled.sessionId);
+			this.invalidate(settled);
 			await this.settleConsentInbox(settled, "cancelled");
 			this.armDeadlineTimer();
 		}
@@ -386,7 +407,7 @@ export class DecisionRequestManager {
 		if (!paused) return undefined;
 		if (result.written) {
 			this.traceResolution(paused);
-			this.invalidate(paused.sessionId);
+			this.invalidate(paused);
 		}
 		await this.replayConsentPause(paused);
 		this.armDeadlineTimer();
@@ -412,7 +433,7 @@ export class DecisionRequestManager {
 			if (!record.consentPause.pauseAppliedAt) {
 				if (!this.deps.consentPauseLifecycle) return;
 				try {
-					const outcome = await this.deps.consentPauseLifecycle.pause(record.consentPause.goalId, record.consentPause.reason, record.sessionId);
+					const outcome = await this.deps.consentPauseLifecycle.pause(record.consentPause.goalId, record.consentPause.reason, record.delivery.kind === "session" ? record.delivery.sessionId : undefined);
 					if (outcome === "not-matching") {
 						await this.settleConsentInbox(record, "cancelled");
 						return;
@@ -430,7 +451,8 @@ export class DecisionRequestManager {
 		const store = this.deps.storeForProject(record.projectId);
 		const inbox = record.consentInbox;
 		if (!store || !inbox || inbox.status !== "pending") return;
-		const staffId = this.deps.consentInboxTarget?.(record.projectId, record.sessionId);
+		if (record.delivery.kind !== "session") return;
+		const staffId = this.deps.consentInboxTarget?.(record.projectId, record.delivery.sessionId);
 		if (!staffId || !this.deps.inboxManager?.hasStaff(staffId)) {
 			store.updateConsentInboxSurface(record.id, inbox.sourceKey, { status: "projection-only", updatedAt: new Date(this.clock.now()).toISOString() });
 			return;
@@ -488,7 +510,7 @@ export class DecisionRequestManager {
 		const completed = store.completeConsentResume(record.id, { pause: record.consentPause, completedAt, outcome, terminal });
 		const settled = completed.request ?? store.get(record.id);
 		if (!completed.completed || !settled) return { status: "already_resolved", request: settled };
-		this.invalidate(settled.sessionId);
+		this.invalidate(settled);
 		await this.settleConsentInbox(settled, denied ? "cancelled" : "completed");
 		if (denied) {
 			store.updateContinuation(settled.id, { continuationState: "skipped", continuationAttempts: settled.continuationAttempts });
@@ -506,7 +528,8 @@ export class DecisionRequestManager {
 	private async settleConsentInbox(record: StoredDecisionRequest, status: "completed" | "cancelled"): Promise<void> {
 		const inbox = record.consentInbox;
 		if (!inbox || inbox.status === "projection-only" || inbox.status === status) return;
-		const staffId = this.deps.consentInboxTarget?.(record.projectId, record.sessionId);
+		if (record.delivery.kind !== "session") return;
+		const staffId = this.deps.consentInboxTarget?.(record.projectId, record.delivery.sessionId);
 		if (!staffId || !inbox.entryId) return;
 		try {
 			if (status === "completed") this.deps.inboxManager?.completeOnce?.(staffId, inbox.entryId, "Consent answered");
@@ -532,7 +555,7 @@ export class DecisionRequestManager {
 		const resolvedAt = new Date(this.clock.now()).toISOString();
 		const result = store.writeTerminalFirst(record.id, { status: "resolved", resolvedAt, resolution: { value: cloneValue(value), actor: "user", reason: "answered" } });
 		if (!result.written || !result.request) return result;
-		this.invalidate(result.request.sessionId);
+		this.invalidate(result.request);
 		this.traceResolution(result.request);
 		await this.routeProposal(result.request);
 		await this.deliverContinuation(result.request);
@@ -554,7 +577,7 @@ export class DecisionRequestManager {
 			status, resolvedAt, resolution: { value: cloneValue(value), actor, reason },
 		}, memory);
 		if (!result.written || !result.request) return result;
-		this.invalidate(result.request.sessionId);
+		this.invalidate(result.request);
 		this.traceResolution(result.request);
 		await this.routeProposal(result.request);
 		await this.deliverContinuation(result.request);
@@ -567,10 +590,16 @@ export class DecisionRequestManager {
 		const key = record.resolution.value.kind === "option" ? record.resolution.value.value : "other";
 		const seed = record.request.effect.proposals[key];
 		if (!seed || !this.deps.proposalSeedService) return;
+		const owner = record.delivery.kind === "session"
+			? record.delivery.sessionId
+			: { kind: "project-import" as const, projectId: record.projectId, importId: record.delivery.importId, requestId: record.id };
 		try {
-			const result = await this.deps.proposalSeedService.seedFromDecision(
-				record.sessionId,
-				seed.proposalType as Parameters<ProposalSeedService["seedFromDecision"]>[1],
+			const proposalService = this.deps.proposalSeedService as unknown as {
+				seedFromDecision(owner: string | typeof owner, type: ProposalType, args: Record<string, unknown>): ReturnType<ProposalSeedService["seedFromDecision"]>;
+			};
+			const result = await proposalService.seedFromDecision(
+				owner,
+				seed.proposalType,
 				seed.args,
 			);
 			const store = this.deps.storeForProject(record.projectId);
@@ -634,12 +663,15 @@ export class DecisionRequestManager {
 	}
 
 	private traceResolution(record: StoredDecisionRequest): void {
+		// Import traces are coordinator-owned and identify the import run rather
+		// than fabricating a session trace stream.
+		if (record.delivery.kind !== "session") return;
 		const resolution = record.resolution;
 		const decisionStatus = record.status === "resolved" || record.status === "defaulted" || record.status === "denied" || record.status === "paused-awaiting-consent"
 			? record.status : undefined;
 		if (!decisionStatus) return;
 		try {
-			this.deps.trace?.appendOutcome(record.sessionId, {
+			this.deps.trace?.appendOutcome(record.delivery.sessionId, {
 				kind: "decision", packId: record.asker.packId, hookId: record.asker.hookId,
 				event: "decisionResolved", outcome: record.status === "denied" ? "denied" : "applied", requestId: record.id, questionId: record.questionId,
 				...(resolution ? {
@@ -655,8 +687,11 @@ export class DecisionRequestManager {
 		} catch { /* tracing is never on the answer path */ }
 	}
 
-	private invalidate(sessionId: string): void {
-		try { this.deps.invalidateSession?.(sessionId); } catch { /* metadata projection is best effort */ }
+	private invalidate(record: Pick<StoredDecisionRequest, "projectId" | "delivery">): void {
+		try {
+			if (record.delivery.kind === "session") this.deps.invalidateSession?.(record.delivery.sessionId);
+			else this.deps.invalidateProjectImport?.(record.projectId);
+		} catch { /* metadata projection is best effort */ }
 	}
 
 	private armDeadlineTimer(): void {
@@ -943,8 +978,11 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 	}
 
 	async deliver(record: StoredDecisionRequest): Promise<"delivered" | "skipped"> {
+		// Import delivery uses the coordinator's context-aware continuation; this
+		// legacy session dispatcher must never synthesize a session or cwd for it.
+		if (record.delivery.kind !== "session" || record.asker.event === "projectImported") return "skipped";
 		const origin = this.contexts.get(record.id) ?? {
-			projectId: record.projectId, sessionId: record.sessionId, goalId: record.goalId,
+			projectId: record.projectId, sessionId: record.delivery.sessionId, goalId: record.goalId,
 			cwd: process.cwd(), event: record.asker.event, packId: record.asker.packId, hookId: record.asker.hookId,
 		};
 		const hook = this.deps.registry.listHooks(record.projectId).find(candidate =>
@@ -1010,18 +1048,35 @@ function stripDefault(request: ValidatedExtensionDecisionRequest): StoredDecisio
 function isConsent(request: StoredDecisionRequest): boolean { return request.decisionClass === "consent-required"; }
 function consentSourceKey(record: Pick<StoredDecisionRequest, "projectId" | "id">): string { return `consent-pause:${record.projectId}:${record.id}`; }
 function deadlineRetryKey(record: Pick<StoredDecisionRequest, "projectId" | "id">): string { return `${record.projectId}:${record.id}`; }
-function scopeIdFor(scope: ValidatedExtensionDecisionRequest["scope"], origin: Pick<DecisionRequestOrigin, "projectId" | "sessionId" | "goalId">): string | undefined {
-	return scope === "project" ? origin.projectId : scope === "session" ? origin.sessionId : origin.goalId;
+function isSessionOrigin(origin: AnyDecisionRequestOrigin): origin is DecisionRequestOrigin {
+	return origin.event !== "projectImported";
 }
-function withinBudgets(store: DecisionRequestStore, origin: Pick<DecisionRequestOrigin, "sessionId" | "goalId">, now: number): boolean {
+function deliveryFor(origin: AnyDecisionRequestOrigin): DecisionDelivery {
+	return isSessionOrigin(origin) ? { kind: "session", sessionId: origin.sessionId } : { kind: "project-import", importId: origin.importId };
+}
+function deliveryId(origin: AnyDecisionRequestOrigin): string {
+	return isSessionOrigin(origin) ? origin.sessionId : origin.importId;
+}
+function scopeIdFor(
+	scope: ValidatedExtensionDecisionRequest["scope"],
+	origin: Pick<DecisionRequestOrigin, "projectId" | "sessionId" | "goalId"> | Pick<ProjectImportDecisionRequestOrigin, "projectId" | "importId"> | Pick<StoredDecisionRequest, "projectId" | "sessionId" | "goalId" | "delivery">,
+): string | undefined {
+	if (scope === "project") return origin.projectId;
+	if (scope === "session") return "sessionId" in origin ? origin.sessionId : undefined;
+	return "goalId" in origin ? origin.goalId : undefined;
+}
+function withinBudgets(store: DecisionRequestStore, origin: AnyDecisionRequestOrigin, now: number): boolean {
 	const records = store.list();
 	const recent = records.filter(request => Date.parse(request.createdAt) > now - DAY_MS);
 	// An awaiting-consent pause is still interrupting work and consumes the
 	// same caps, but must never be treated as a deadline-timer candidate.
 	const active = records.filter(request => request.status === "pending" || request.status === "paused-awaiting-consent");
-	if (active.filter(request => request.sessionId === origin.sessionId).length >= DECISION_SESSION_PENDING_LIMIT) return false;
-	if (recent.filter(request => request.sessionId === origin.sessionId).length >= DECISION_SESSION_24H_LIMIT) return false;
-	if (origin.goalId) {
+	const delivery = deliveryFor(origin);
+	const sameDelivery = (request: StoredDecisionRequest) => request.delivery.kind === delivery.kind
+		&& (delivery.kind === "session" ? request.delivery.sessionId === delivery.sessionId : request.delivery.importId === delivery.importId);
+	if (active.filter(sameDelivery).length >= DECISION_SESSION_PENDING_LIMIT) return false;
+	if (recent.filter(sameDelivery).length >= DECISION_SESSION_24H_LIMIT) return false;
+	if (isSessionOrigin(origin) && origin.goalId) {
 		if (active.filter(request => request.goalId === origin.goalId).length >= DECISION_GOAL_PENDING_LIMIT) return false;
 		if (recent.filter(request => request.goalId === origin.goalId).length >= DECISION_GOAL_24H_LIMIT) return false;
 	}

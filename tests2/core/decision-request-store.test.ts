@@ -23,6 +23,7 @@ function request(id: string, overrides: Partial<StoredDecisionRequest> = {}): St
 		id,
 		projectId: "project-1",
 		sessionId: "session-1",
+		delivery: { kind: "session", sessionId: "session-1" },
 		goalId: "goal-1",
 		asker: { packId: "pack-1", hookId: "hook-1", event: "beforePrompt" },
 		dedupeId: `dedupe-${id}`,
@@ -91,6 +92,19 @@ function inbox() {
 }
 
 describe("DecisionRequestStore", () => {
+	it("migrates schema-1 session records to an explicit session delivery", () => {
+		const dir = stateDir("schema-1");
+		const legacy = request("legacy");
+		const { delivery: _delivery, ...v1Request } = legacy;
+		memfs.writeFileSync(path.join(dir, "extension-decision-requests.json"), JSON.stringify({
+			version: 1, requests: { legacy: v1Request }, memories: {},
+		}), "utf-8");
+		const store = new DecisionRequestStore(dir, memfs);
+		assert.equal(store.isHealthy(), true);
+		assert.deepEqual(store.get("legacy")?.delivery, { kind: "session", sessionId: "session-1" });
+		assert.equal(store.get("legacy")?.sessionId, "session-1");
+	});
+
 	it("atomically persists requests and exact scoped memories across restart", () => {
 		const dir = stateDir("round-trip");
 		const store = new DecisionRequestStore(dir, memfs);
@@ -106,6 +120,25 @@ describe("DecisionRequestStore", () => {
 		assert.equal(restarted.isHealthy(), true);
 		assert.equal(restarted.get("request-1")?.status, "resolved");
 		assert.deepEqual(restarted.getMemory(memory()), memory());
+	});
+
+	it("persists immutable import runs and completes each hook once", () => {
+		const store = new DecisionRequestStore(stateDir("import-run"), memfs);
+		const run = {
+			id: "import-1", projectId: "project-1", createdAt: "2026-01-01T00:00:00.000Z",
+			context: {
+				event: "projectImported" as const, projectId: "project-1", importId: "import-1",
+				projectRoot: "/work/project", ownedRoots: ["/work/project", "/work/project/api"],
+				components: [{ id: "component-1", root: "/work/project/api", languages: ["typescript"] }],
+			},
+			hooks: { "pack-1:hook-1": { state: "pending" as const } },
+		};
+		assert.equal(store.ensureImportRun(run)?.created, true);
+		assert.equal(store.ensureImportRun(run)?.created, false);
+		assert.equal(store.ensureImportRun({ ...run, context: { ...run.context, projectRoot: "/other" } }), undefined);
+		assert.equal(store.completeImportHook("import-1", "pack-1:hook-1", "applied", "2026-01-01T00:01:00.000Z"), true);
+		assert.equal(store.completeImportHook("import-1", "pack-1:hook-1", "error", "2026-01-01T00:02:00.000Z"), false);
+		assert.equal(store.getImportRun("import-1")?.completedAt, "2026-01-01T00:01:00.000Z");
 	});
 
 	it("persists a consent pause once, excludes it from retention, and CASes exact resume", () => {
