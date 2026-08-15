@@ -57,6 +57,90 @@ function signal(id: string, head: string, goalId = "goal", gateId = "verify"): G
 	return { id, goalId, gateId, sessionId: "test-session", timestamp: Date.now(), commitSha: head, verification: { status: "running", steps: [] } };
 }
 
+type ExactCancellationActive = {
+	signalId: string;
+	cancellationFinalizing?: boolean;
+	terminalVerdictPublished?: boolean;
+};
+
+type CancellationHarnessInternals = {
+	activeVerifications: Map<string, ExactCancellationActive>;
+	_cancelledCleanupPromises: Map<string, Promise<void>>;
+	_terminalCleanupPromises: Map<string, Promise<boolean>>;
+	_startCancelledVerificationCleanup(active: ExactCancellationActive): Promise<void>;
+	_finalizeCancelledVerification(active: ExactCancellationActive): Promise<void>;
+	_releaseTerminalVerificationResources(active: ExactCancellationActive): Promise<boolean>;
+};
+
+/**
+ * Join the actual cancellation finalizer for one active generation, including
+ * cleanup ownership it creates after the command's promise has unwound. This
+ * deliberately observes harness ownership rather than relying on a timer or
+ * assuming `verifyGateSignal()` owns detached cancellation publication.
+ */
+function trackExactCancellationSettlement(harness: VerificationHarness, signalId: string) {
+	const internals = harness as unknown as CancellationHarnessInternals;
+	const active = internals.activeVerifications.get(signalId);
+	assert.ok(active, "the fixture must have an exact active verification owner before cancellation");
+
+	const startCleanup = internals._startCancelledVerificationCleanup;
+	const finalize = internals._finalizeCancelledVerification;
+	const releaseTerminal = internals._releaseTerminalVerificationResources;
+	const cancellationOwners: Promise<void>[] = [];
+	const terminalOwners: Promise<boolean>[] = [];
+	let resolveFinalizerStarted!: () => void;
+	const finalizerStarted = new Promise<void>(resolve => { resolveFinalizerStarted = resolve; });
+	let exactFinalizer: Promise<void> | undefined;
+
+	internals._startCancelledVerificationCleanup = function (owned) {
+		const cleanup = startCleanup.call(harness, owned);
+		if (owned === active) cancellationOwners.push(cleanup);
+		return cleanup;
+	};
+	internals._finalizeCancelledVerification = function (owned) {
+		const wasFinalizing = owned.cancellationFinalizing === true;
+		const finalization = finalize.call(harness, owned);
+		// The original method synchronously claims this marker before its first
+		// resource await. Ignore no-op callers that encountered an owner already
+		// finalizing, then join the sole finalizer that owns publication.
+		if (owned === active && !wasFinalizing && owned.cancellationFinalizing === true && !exactFinalizer) {
+			exactFinalizer = finalization;
+			resolveFinalizerStarted();
+		}
+		return finalization;
+	};
+	internals._releaseTerminalVerificationResources = function (owned) {
+		const release = releaseTerminal.call(harness, owned);
+		if (owned === active) terminalOwners.push(release);
+		return release;
+	};
+
+	const captureRecordedOwners = () => {
+		const cancellationOwner = internals._cancelledCleanupPromises.get(signalId);
+		if (cancellationOwner && !cancellationOwners.includes(cancellationOwner)) cancellationOwners.push(cancellationOwner);
+		const terminalOwner = internals._terminalCleanupPromises.get(signalId);
+		if (terminalOwner && !terminalOwners.includes(terminalOwner)) terminalOwners.push(terminalOwner);
+	};
+
+	return {
+		async settle(): Promise<void> {
+			captureRecordedOwners();
+			await finalizerStarted;
+			captureRecordedOwners();
+			await exactFinalizer!;
+			captureRecordedOwners();
+			await Promise.all(cancellationOwners);
+			await Promise.all(terminalOwners);
+			assert.equal(internals.activeVerifications.get(signalId), undefined, "the exact cancelled generation must not retain an active owner after its cleanup settles");
+		},
+		restore(): void {
+			internals._startCancelledVerificationCleanup = startCleanup;
+			internals._finalizeCancelledVerification = finalize;
+			internals._releaseTerminalVerificationResources = releaseTerminal;
+		},
+	};
+}
+
 function harnessFixture(input: {
 	state: string;
 	goal: PersistedGoal;
@@ -164,18 +248,16 @@ describe("pinned gate verification lifecycle (real Git and commands)", () => {
 		const manager = new VerificationPinnedCheckoutManager(f.state);
 		let acquiredPath = "";
 		let released = false;
-		let releaseSawTerminalCommand = false;
+		let releaseSawReapedCommand = false;
 		let heldPid = 0;
 		const acquire = manager.acquire.bind(manager);
 		const release = manager.release.bind(manager);
 		manager.acquire = async input => { const checkout = await acquire(input); acquiredPath = checkout.path; return checkout; };
 		const { harness, gateStore } = harnessFixture({ state: f.state, goal: goal("goal", f.source, workflow), manager });
 		manager.release = async (...args: Parameters<typeof release>) => {
-			const step = gateStore.getGate("goal", "verify")?.signals[0]?.verification.steps[0];
-			releaseSawTerminalCommand = step?.status === "cancelled";
-			assert.ok(releaseSawTerminalCommand, "the cancelled command step must be terminal/reaped before its pinned lease releases");
 			assert.ok(Number.isSafeInteger(heldPid) && heldPid > 0, "held command identity must be captured before a liveness check");
 			assert.throws(() => process.kill(heldPid, 0), (error: NodeJS.ErrnoException) => error.code === "ESRCH", "the held command process must be reaped before its pinned lease releases");
+			releaseSawReapedCommand = true;
 			released = true;
 			return release(...args);
 		};
@@ -185,8 +267,14 @@ describe("pinned gate verification lifecycle (real Git and commands)", () => {
 			await waitFor(ready);
 			heldPid = Number(await readFile(ready, "utf8"));
 			assert.ok(Number.isSafeInteger(heldPid) && heldPid > 0, "fixture must capture the held command process identity");
-			await harness.cancelStaleVerifications("goal", "verify");
-			await verification;
+			const cancellation = trackExactCancellationSettlement(harness, candidate.id);
+			try {
+				await harness.cancelStaleVerifications("goal", "verify");
+				await verification;
+				await cancellation.settle();
+			} finally {
+				cancellation.restore();
+			}
 			const storedGate = gateStore.getGate("goal", "verify")!;
 			const storedVerification = storedGate.signals[0]!.verification;
 			assert.equal(storedVerification.status, "cancelled", "a stale killed command is an orchestration cancellation, never a product verdict");
@@ -196,7 +284,7 @@ describe("pinned gate verification lifecycle (real Git and commands)", () => {
 			assert.notEqual(storedVerification.status, "passed", "a killed command cannot fabricate a pass");
 			assert.notEqual(storedVerification.status, "failed", "a stale cancellation cannot fabricate a product failure");
 			assert.equal(storedGate.status, "pending", "the current gate remains eligible for an explicit re-signal");
-			assert.ok(released && releaseSawTerminalCommand, "terminal cancellation releases only after command cleanup");
+			assert.ok(released && releaseSawReapedCommand, "terminal cancellation releases only after command cleanup");
 			await assert.rejects(lstat(acquiredPath), /ENOENT/);
 		} finally {
 			await harness.cancelStaleVerifications("goal", "verify").catch(() => {});
