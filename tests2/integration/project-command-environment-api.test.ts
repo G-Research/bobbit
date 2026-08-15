@@ -193,7 +193,10 @@ test.describe("Project command environment API", () => {
 
 			const rejected = await apiFetch(`/api/workflows/${id}?projectId=${project.id}`, {
 				method: "PUT",
-				body: JSON.stringify(workflow(id, { name: "Review", type: "llm-review", prompt: "review", env: { CI: "1" } })),
+				body: JSON.stringify({
+					...workflow(id, { name: "Review", type: "llm-review", prompt: "review", env: { CI: "1" } }),
+					id: undefined,
+				}),
 			});
 			expect(rejected.status, await rejected.clone().text()).toBe(400);
 			expect(await rejected.text()).toMatch(/env/i);

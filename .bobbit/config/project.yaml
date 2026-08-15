@@ -758,12 +758,12 @@ workflows:
         depends_on:
           - issue-analysis
         metadata:
-          test_command: string
           error_pattern: string
         verify:
           - name: Test fails (bug exists)
             type: command
-            run: "{{agent.test_command}}"
+            component: bobbit
+            command: unit
             expect: failure
       - id: implementation
         name: Implementation
@@ -781,11 +781,6 @@ workflows:
             phase: 1
             component: bobbit
             command: check
-          - name: Repro test passes (bug fixed)
-            type: command
-            phase: 1
-            run: "{{reproducing-test.meta.test_command}}"
-            expect: success
           - name: Unit tests
             type: command
             phase: 1

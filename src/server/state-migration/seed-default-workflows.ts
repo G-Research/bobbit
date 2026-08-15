@@ -517,7 +517,6 @@ ${REVISION_READY_CONTENT_PACKET_PROMPT}`,
 				verify: [
 					{ name: "Build", type: "command", phase: 0, component: c, command: "build", timeout: 600 },
 					{ name: "Type check", type: "command", phase: 1, component: c, command: "check" },
-					{ name: "Repro test passes (bug fixed)", type: "command", phase: 1, component: c, command: "unit", expect: "success" },
 					{ name: "Unit tests", type: "command", phase: 1, component: c, command: "unit" },
 					{ name: "Browser tests", type: "command", phase: 1, timeout: 900, component: c, command: "browser" },
 					{ name: "E2E tests", type: "command", phase: 1, timeout: 900, component: c, command: "e2e" },
