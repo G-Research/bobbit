@@ -8,7 +8,7 @@ const MAX_LIMIT = 1000;
 const MAX_DISPLAY_NUMBER = 1_000_000_000;
 const MAX_TIMESTAMP = 8_640_000_000_000_000;
 const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-const HOOKS = new Set(["sessionSetup", "beforePrompt", "afterTurn", "beforeCompact", "sessionShutdown", "decisionResolved"]);
+const HOOKS = new Set(["sessionSetup", "beforePrompt", "afterTurn", "beforeCompact", "sessionShutdown", "projectImported", "decisionResolved"]);
 const OUTCOME_KINDS = new Set(["decision", "advisory", "audit"]);
 const OUTCOMES = new Set(["advised", "applied", "denied", "dropped", "error", "superseded"]);
 const VALUE_OUTCOMES = new Set(["advised", "applied", "superseded"]);
@@ -31,6 +31,7 @@ const OUTCOME_REASONS = new Set<string>([
 	"Capability revoked",
 	"Proposal failed",
 	"Lower-priority selection",
+	"Unavailable",
 ]);
 const SELECTION_KINDS = new Set(["model", "thinking", "role", "workflow"]);
 const CAPABILITY_SELECTOR_STAGES = new Set(["skills", "mcp"]);
@@ -53,11 +54,11 @@ const SECRET_PATTERNS = [
 ];
 
 export type ContextTraceStatus = "idle" | "loading" | "ready" | "error";
-export type SafeContextTraceHook = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown" | "decisionResolved" | "Unknown event";
+export type SafeContextTraceHook = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown" | "projectImported" | "decisionResolved" | "Unknown event";
 export type SafeContextTraceError = "Timed out" | "Malformed blocks omitted" | "Provider error";
 export type SafeTraceOutcomeKind = "decision" | "advisory" | "audit";
 export type SafeTraceOutcome = "advised" | "applied" | "denied" | "dropped" | "error" | "superseded";
-export type SafeTraceOutcomeReason = "Grant required" | "User pin" | "Unavailable value" | "Malformed result" | "Timed out" | "Overlapping invocation" | "Cancelled" | "Disabled or revoked" | "Budget exhausted" | "Deadline elapsed" | "Headless default" | "Invalid answer" | "Duplicate" | "Capability revoked" | "Proposal failed" | "Lower-priority selection";
+export type SafeTraceOutcomeReason = "Grant required" | "User pin" | "Unavailable value" | "Malformed result" | "Timed out" | "Overlapping invocation" | "Cancelled" | "Disabled or revoked" | "Budget exhausted" | "Deadline elapsed" | "Headless default" | "Invalid answer" | "Duplicate" | "Capability revoked" | "Proposal failed" | "Lower-priority selection" | "Unavailable";
 export type SafeTraceSelectionKind = "model" | "thinking" | "role" | "workflow";
 export type SafeTraceCapabilitySelectorStage = "skills" | "mcp";
 export type SafeTraceOutcomeActor = "extension" | "user" | "deadline" | "headless";

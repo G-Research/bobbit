@@ -3188,9 +3188,16 @@ async function acceptNewProjectProposalFromPanel(proposal: ActiveProjectProposal
 	if (!projectId) {
 		let res: Response;
 		try {
+			// Components are part of the server-derived import snapshot. Carry the
+			// finalized structured proposal into initial registration so import hooks
+			// never observe the temporary default component before this panel writes
+			// the remaining project config.
+			const registration: Record<string, unknown> = { name, rootPath };
+			if (Array.isArray(fields.components)) registration.components = fields.components;
+			if (fields.workflows && typeof fields.workflows === "object") registration.workflows = fields.workflows;
 			res = await gatewayFetch("/api/projects", {
 				method: "POST",
-				body: JSON.stringify({ name, rootPath }),
+				body: JSON.stringify(registration),
 			});
 		} catch (err) {
 			showProjectProposalCaughtError(PROJECT_ACCEPT_FAILED, err);
@@ -3240,8 +3247,12 @@ async function acceptProvisionalProjectProposalFromPanel(
 ): Promise<boolean> {
 	const { fields, sessionId: propSessionId } = proposal;
 	const fieldNameStr = typeof fields.name === "string" ? fields.name : "";
-	if (!await promoteProjectProposal(projectId, fieldNameStr)) return false;
+	// Persist the complete proposal configuration while the project is still
+	// provisional. POST /promote is the one durable import boundary and only
+	// creates/publishes its marker after this succeeds; retrying either request
+	// reuses the same project/run and cannot ask extensions twice.
 	if (!await writeProjectProposalConfig(projectId, fields as Record<string, unknown>, propSessionId)) return false;
+	if (!await promoteProjectProposal(projectId, fieldNameStr)) return false;
 
 	await refreshProjectProposalProjects();
 	void invalidateProjectProposalConfig(projectId);

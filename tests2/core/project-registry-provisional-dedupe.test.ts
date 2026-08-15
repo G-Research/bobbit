@@ -249,6 +249,28 @@ test("ProjectRegistry preserves distinct nonexistent suffixes on an injected sen
   }
 });
 
+test("promotion creates one durable import marker only after provisional registration", () => {
+  const serverRoot = makeTmpDir("promote-import-run-server-");
+  const stateDir = makeTmpDir("promote-import-run-state-");
+  try {
+    const registry = new ProjectRegistry(stateDir);
+    const provisional = registry.registerProvisional("imported", serverRoot);
+    assert.equal(provisional.importDecisionRun, undefined);
+
+    const promoted = registry.promote(provisional.id, { name: "final-name" });
+    assert.equal(promoted.provisional, undefined);
+    assert.equal(promoted.importDecisionRun?.state, "configuring");
+    const runId = promoted.importDecisionRun?.id;
+    assert.ok(runId);
+
+    const retry = registry.promote(provisional.id, {});
+    assert.equal(retry.importDecisionRun?.id, runId, "promotion retries reuse the original run");
+  } finally {
+    fs.rmSync(serverRoot, { recursive: true, force: true });
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("ProjectRegistry.registerProvisional keeps Headquarters immutable and hidden system anchors non-blocking", () => {
   const serverRoot = makeTmpDir("bobbit-provisional-special-server-");
   const stateDir = makeTmpDir("bobbit-provisional-special-state-");

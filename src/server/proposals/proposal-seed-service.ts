@@ -10,6 +10,7 @@ import type { PackContributionRegistry } from "../extension-host/pack-contributi
 import { openSidePanelWorkspaceTab } from "../side-panel-workspace-routes.js";
 import { prepareGoalProposalSeed, type GoalProposalValidationError } from "./goal-proposal-seed.js";
 import {
+	deleteProposalFile,
 	parseProposalFile,
 	writeProposalFile,
 	type ProposalType,
@@ -166,15 +167,22 @@ export class ProposalSeedService {
 				source: "seed",
 			});
 		} else {
-			await Promise.resolve(this.deps.openProjectImportProposalWorkspace?.({
-				owner,
-				draftId,
-				proposalType,
-				fields: parsed.value.fields,
-				rev: writeRes.rev,
-			})).catch((err) => {
+			// Unlike a session projection, a project import has no later WS/session
+			// recovery path. A draft is successful only when its project-owned
+			// workspace is durably projected; otherwise do not report `created`.
+			if (!this.deps.openProjectImportProposalWorkspace) {
+				await deleteProposalFile(this.deps.stateDir, draftId, proposalType).catch(() => {});
+				return { ok: false, status: 422, body: { ok: false, code: "PROJECT_IMPORT_WORKSPACE_UNAVAILABLE", message: "Project import proposal workspace is unavailable" } };
+			}
+			try {
+				await this.deps.openProjectImportProposalWorkspace({
+					owner, draftId, proposalType, fields: parsed.value.fields, rev: writeRes.rev,
+				});
+			} catch (err) {
 				console.warn(`[proposal/seed] failed to open project-import proposal workspace for ${owner.importId}/${proposalType}:`, err);
-			});
+				await deleteProposalFile(this.deps.stateDir, draftId, proposalType).catch(() => {});
+				return { ok: false, status: 422, body: { ok: false, code: "PROJECT_IMPORT_WORKSPACE_UNAVAILABLE", message: "Project import proposal workspace is unavailable" } };
+			}
 		}
 		return { ok: true, status: 200, rev: writeRes.rev, fields: parsed.value.fields };
 	}

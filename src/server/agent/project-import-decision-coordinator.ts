@@ -2,6 +2,7 @@ import type { ContextTraceStore, TraceDecisionOutcomeRow } from "./context-trace
 import type { ProjectContextManager } from "./project-context-manager.js";
 import type { ProjectRegistry, RegisteredProject } from "./project-registry.js";
 import type { Component } from "./project-config-store.js";
+import type { DecisionRequestStore, StoredProjectImportRun } from "./decision-request-store.js";
 import {
   canonicalProjectImportRoot,
   validateProjectImportDecisionContext,
@@ -19,20 +20,6 @@ export interface ProjectImportDecisionContextSnapshot {
   readonly projectRoot: string;
   readonly ownedRoots: readonly string[];
   readonly components: readonly unknown[];
-}
-
-interface StoredImportRun {
-  id: string;
-  projectId: string;
-  context: ProjectImportDecisionContextSnapshot;
-  createdAt: string;
-  completedAt?: string;
-  hooks: Record<string, { state: "pending" | "completed"; completedAt?: string; outcome?: "applied" | "superseded" | "denied" | "dropped" | "error" }>;
-}
-
-interface ImportRunStore {
-  getImportRun?(importId: string): StoredImportRun | undefined;
-  ensureImportRun(run: StoredImportRun): { created: boolean; run: StoredImportRun };
 }
 
 interface ProjectImportDispatcher {
@@ -104,28 +91,43 @@ export class ProjectImportDecisionCoordinator {
     if (!project || !marker || marker.version !== 1 || marker.state !== "ready" || marker.id !== importId) return [];
 
     const context = this.deps.projectContextManager.getOrCreate(projectId);
-    const store = context?.decisionRequestStore as unknown as ImportRunStore | undefined;
-    if (!context || !store) return [];
+    const store: Pick<DecisionRequestStore, "getImportRun" | "ensureImportRun"> | undefined = context?.decisionRequestStore;
+    if (!context || !store) {
+      this.reportFailure(projectId, importId, "import decision store unavailable");
+      return [];
+    }
 
     // Never rebuild an already durable context. An import retry/restart must
     // dispatch against the exact snapshot originally admitted, not current FS.
-    let run = store.getImportRun?.(importId);
+    let run: StoredProjectImportRun | undefined = store.getImportRun(importId);
     if (!run) {
-      const snapshot = this.deps.buildContext({
-        project,
-        importId,
-        components: context.projectConfigStore.getComponents(),
-      });
-      const ensured = store.ensureImportRun({
-        id: importId,
-        projectId,
-        context: snapshot,
-        createdAt: new Date(marker.createdAt || this.now()).toISOString(),
-        hooks: {},
-      });
+      let ensured: { created: boolean; run: StoredProjectImportRun } | undefined;
+      try {
+        const snapshot = this.deps.buildContext({
+          project,
+          importId,
+          components: context.projectConfigStore.getComponents(),
+        });
+        ensured = store.ensureImportRun({
+          id: importId,
+          projectId,
+          context: snapshot,
+          createdAt: new Date(marker.createdAt || this.now()).toISOString(),
+          hooks: {},
+        });
+      } catch {
+        this.reportFailure(projectId, importId, "import run admission failed");
+        return [];
+      }
       run = ensured?.run;
+      // `undefined` is not a benign no-op: it means the atomic store rejected
+      // an invalid/mismatched immutable run. Do not silently retry against a
+      // different filesystem snapshot or make a user answer again.
+      if (!run) {
+        this.reportFailure(projectId, importId, "import run admission rejected");
+        return [];
+      }
     }
-    if (!run) return [];
 
     // The durable file is untrusted on every restart. Match the snapshot to
     // the current registry identity/root immediately before any dispatcher can
@@ -135,6 +137,7 @@ export class ProjectImportDecisionCoordinator {
       const projectRoot = this.deps.canonicalProjectRoot?.(project) ?? canonicalProjectImportRoot(project.rootPath);
       snapshot = validateProjectImportDecisionContext(run.context, { projectId, importId, projectRoot });
     } catch {
+      this.reportFailure(projectId, importId, "durable import context mismatch");
       return [];
     }
     const outcomes = await this.deps.dispatcher.dispatchProjectImport(projectId, importId, snapshot);
@@ -146,5 +149,22 @@ export class ProjectImportDecisionCoordinator {
       catch { /* tracing is intentionally isolated from import delivery */ }
     }
     return outcomes;
+  }
+
+  /**
+   * Import failures are deliberately visible without retaining exception text
+   * or untrusted path/context bytes. The fixed trace row is safe for the
+   * project activity surface and the log gives operators a loud correlation.
+   */
+  private reportFailure(projectId: string, importId: string, message: string): void {
+    this.deps.onError?.(projectId, new Error(message));
+    try {
+      this.deps.trace?.appendProjectImportTrace(projectId, importId, [{
+        kind: "decision", packId: "project-import", hookId: "coordinator",
+        event: "projectImported", outcome: "error", reason: "Unavailable",
+      }]);
+    } catch {
+      // Diagnostics must not change replay or registration semantics.
+    }
   }
 }

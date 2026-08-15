@@ -331,6 +331,19 @@ export class DecisionRequestManager {
 		return this.deps.storeForProject(projectId)?.listPendingImportRequests(importId) ?? [];
 	}
 
+	/** All records for a durable import run, for a project-owned read-only projection. */
+	listImportRequests(projectId: string, importId: string): StoredDecisionRequest[] {
+		return (this.deps.storeForProject(projectId)?.list() ?? []).filter(record =>
+			record.delivery.kind === "project-import" && record.delivery.importId === importId,
+		);
+	}
+
+	/** Exact delivery fence for import answer and proposal projection routes. */
+	getImportRequest(projectId: string, importId: string, requestId: string): StoredDecisionRequest | undefined {
+		const record = this.deps.storeForProject(projectId)?.get(requestId);
+		return record?.delivery.kind === "project-import" && record.delivery.importId === importId ? record : undefined;
+	}
+
 	/** Import-run state remains in the same project-owned atomic snapshot as requests. */
 	getImportRun(projectId: string, importId: string): StoredProjectImportRun | undefined {
 		return this.deps.storeForProject(projectId)?.getImportRun(importId);

@@ -56,6 +56,7 @@ import {
 	activateProjectImportDecisionRequests,
 	deactivateProjectImportDecisionRequests,
 	projectImportDecisionProjectionError,
+	projectImportDecisionActivityForProject,
 	projectImportDecisionRequestsForProject,
 	projectImportDecisionRequestsLoaded,
 	refreshProjectImportDecisionRequests,
@@ -2804,13 +2805,20 @@ export function showProjectDialog(): void {
 			return html`<div class="flex items-center justify-center h-full text-sm text-muted-foreground" data-testid="project-import-decisions-loading">Checking project import decisions…</div>`;
 		}
 		const requests = projectImportDecisionRequestsForProject(project.id);
+		const activity = projectImportDecisionActivityForProject(project.id);
+		const activityPanel = activity.length ? html`
+			<details class="text-xs text-muted-foreground" data-testid="project-import-decision-activity">
+				<summary>Extension activity (${activity.length})</summary>
+				<ul class="mt-2 space-y-1">${activity.map(row => html`<li>${row.packId ? `${row.packId}/` : ""}${row.hookId}: ${row.outcome}${row.reason ? ` — ${row.reason}` : ""}</li>`)}</ul>
+			</details>` : nothing;
 		if (requests.length === 0) {
-			return html`<div class="flex items-center justify-center h-full text-sm text-muted-foreground" data-testid="project-import-decisions-complete">Completing project import…</div>`;
+			return html`<div class="flex flex-col items-center justify-center gap-3 h-full text-sm text-muted-foreground" data-testid="project-import-decisions-complete"><div>Completing project import…</div>${activityPanel}</div>`;
 		}
 		return html`
 			<div class="flex flex-col gap-4 h-full min-h-0 overflow-y-auto" data-testid="project-import-decisions">
 				<p class="text-sm text-muted-foreground">Review these project import decisions before continuing.</p>
 				${requests.map((request) => importDecisionRenderer.render(request))}
+				${activityPanel}
 			</div>
 		`;
 	};

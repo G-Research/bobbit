@@ -20,9 +20,18 @@ export type ProjectImportDecisionProjectionError = {
 	message: string;
 };
 
+/** Bounded redacted activity rows from the project-owned EP-5 trace endpoint. */
+export type ProjectImportDecisionActivity = {
+	packId?: string;
+	hookId: string;
+	outcome: "advised" | "applied" | "denied" | "dropped" | "error" | "superseded";
+	reason?: string;
+};
+
 type ActiveProjection = {
 	projectId: string;
 	requests: ProjectImportDecisionRequestProjection[];
+	activity: ProjectImportDecisionActivity[];
 	listeners: Set<Listener>;
 	generation: number;
 	state: ProjectionState;
@@ -107,6 +116,24 @@ export function normalizeProjectImportDecisionRequest(value: unknown, projectId:
 	};
 }
 
+function importActivityFromPayload(payload: unknown): ProjectImportDecisionActivity[] {
+	const entries = Array.isArray(record(payload)?.entries) ? record(payload)!.entries : [];
+	const rows: ProjectImportDecisionActivity[] = [];
+	for (const rawEntry of entries.slice(-50)) {
+		const outcomes = Array.isArray(record(rawEntry)?.outcomes) ? record(rawEntry)!.outcomes : [];
+		for (const raw of outcomes.slice(0, 50)) {
+			const outcome = record(raw);
+			const hookId = string(outcome?.hookId, 128);
+			const status = outcome?.outcome;
+			if (!hookId || status !== "advised" && status !== "applied" && status !== "denied" && status !== "dropped" && status !== "error" && status !== "superseded") continue;
+			const packId = string(outcome?.packId, 128) ?? undefined;
+			const reason = string(outcome?.reason, 120) ?? undefined;
+			rows.push({ hookId, outcome: status, ...(packId ? { packId } : {}), ...(reason ? { reason } : {}) });
+		}
+	}
+	return rows.slice(-50).reverse();
+}
+
 function actionableFromPayload(payload: unknown, projectId: string): ProjectImportDecisionRequestProjection[] {
 	const root = record(payload);
 	const rawRequests = Array.isArray(root?.requests)
@@ -141,11 +168,12 @@ function notify(current: ActiveProjection): void {
 
 function setProjectionState(
 	current: ActiveProjection,
-	next: { state: ProjectionState; requests?: ProjectImportDecisionRequestProjection[]; error?: ProjectImportDecisionProjectionError | null },
+	next: { state: ProjectionState; requests?: ProjectImportDecisionRequestProjection[]; activity?: ProjectImportDecisionActivity[]; error?: ProjectImportDecisionProjectionError | null },
 ): void {
 	if (active !== current) return;
 	current.state = next.state;
 	if (next.requests) current.requests = next.requests;
+	if (next.activity) current.activity = next.activity;
 	current.error = next.error ?? null;
 	notify(current);
 }
@@ -167,6 +195,11 @@ export function projectImportDecisionRequestsLoaded(projectId: string): boolean 
 	return active?.projectId === projectId && active.state === "loaded";
 }
 
+/** Safe trace rows for the Add Project decision workspace; no raw hook payload crosses here. */
+export function projectImportDecisionActivityForProject(projectId: string): readonly ProjectImportDecisionActivity[] {
+	return active?.projectId === projectId ? active.activity : [];
+}
+
 /** A projection error is distinct from an authoritative empty projection. */
 export function projectImportDecisionProjectionError(projectId: string): ProjectImportDecisionProjectionError | null {
 	return active?.projectId === projectId ? active.error : null;
@@ -177,7 +210,7 @@ export function activateProjectImportDecisionRequests(projectId: string, listene
 	if (!projectId) return () => {};
 	if (!active || active.projectId !== projectId) {
 		active?.controller?.abort();
-		active = { projectId, requests: [], listeners: new Set(), generation: 0, state: "loading", error: null };
+		active = { projectId, requests: [], activity: [], listeners: new Set(), generation: 0, state: "loading", error: null };
 		void refreshProjectImportDecisionRequests(projectId);
 	}
 	const current = active;
@@ -215,10 +248,22 @@ export async function refreshProjectImportDecisionRequests(projectId: string): P
 			return;
 		}
 		const payload: unknown = await response.json();
+		// Trace visibility is diagnostic only. A stale/unauthorized activity view
+		// must never turn an otherwise actionable decision projection into an
+		// empty success or block the user from answering it.
+		let activity: ProjectImportDecisionActivity[] = [];
+		try {
+			const trace = await gatewayFetch(
+				gatewayRoute(`/api/projects/${encodeURIComponent(projectId)}/import-decision-trace?limit=50`),
+				{ signal: controller.signal },
+			);
+			if (trace.ok) activity = importActivityFromPayload(await trace.json());
+		} catch { /* trace remains an optional, bounded activity projection */ }
 		if (active !== current || current.generation !== generation) return;
 		setProjectionState(current, {
 			state: "loaded",
 			requests: actionableFromPayload(payload, projectId),
+			activity,
 		});
 	} catch {
 		finishFailedProjection(current, generation);
