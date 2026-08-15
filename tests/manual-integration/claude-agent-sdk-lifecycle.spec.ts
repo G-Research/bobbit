@@ -120,12 +120,18 @@ type ManualNestedHelperFacts = {
 	rootAgentCall: boolean;
 	subagentWorkCount: number;
 	phase: ManualNestedHelperPhase;
+	childReadCallPresent: boolean;
+	childReadResultPresent: boolean;
+	childReadResultError: boolean;
 	successfulChildRead: boolean;
 };
 
 /** Evaluate exact-parent helper completion without retaining IDs or model data in diagnostics. */
 function manualNestedHelperFacts(snapshot: unknown): ManualNestedHelperFacts {
-	if (!snapshot || typeof snapshot !== "object") return { rootAgentCall: false, subagentWorkCount: 0, phase: "other", successfulChildRead: false };
+	if (!snapshot || typeof snapshot !== "object") return {
+		rootAgentCall: false, subagentWorkCount: 0, phase: "other", childReadCallPresent: false,
+		childReadResultPresent: false, childReadResultError: false, successfulChildRead: false,
+	};
 	const value = snapshot as { messages?: unknown; subagentWork?: unknown };
 	const subagentWork = Array.isArray(value.subagentWork) ? value.subagentWork : [];
 	const helper = subagentWork.length === 1 && subagentWork[0] && typeof subagentWork[0] === "object"
@@ -144,14 +150,21 @@ function manualNestedHelperFacts(snapshot: unknown): ManualNestedHelperFacts {
 	const readCallIds = new Set(childMessages.flatMap((message: any) => Array.isArray(message?.content)
 		? message.content.flatMap((part: any) => part?.type === "toolCall" && part?.name === "read" && typeof part?.id === "string" ? [part.id] : [])
 		: []));
-	const successfulChildRead = readCallIds.size > 0 && childMessages.some((message: any) =>
-		message?.role === "toolResult" && message?.toolName === "read" && message?.isError !== true
+	const childReadCallPresent = readCallIds.size > 0;
+	const readResults = childMessages.filter((message: any) =>
+		message?.role === "toolResult" && message?.toolName === "read"
 		&& typeof message?.toolCallId === "string" && readCallIds.has(message.toolCallId),
 	);
+	const childReadResultPresent = readResults.length > 0;
+	const childReadResultError = readResults.some((message: any) => message?.isError === true);
+	const successfulChildRead = childReadResultPresent && !childReadResultError;
 	return {
 		rootAgentCall,
 		subagentWorkCount: Math.min(subagentWork.length, 1_000_000),
 		phase,
+		childReadCallPresent,
+		childReadResultPresent,
+		childReadResultError,
 		successfulChildRead,
 	};
 }
@@ -371,13 +384,15 @@ test("Claude Agent SDK manual helper oracle reports only fixed completion facts"
 		}],
 	};
 	expect(manualNestedHelperFacts(complete)).toEqual({
-		rootAgentCall: true, subagentWorkCount: 1, phase: "completed", successfulChildRead: true,
+		rootAgentCall: true, subagentWorkCount: 1, phase: "completed", childReadCallPresent: true,
+		childReadResultPresent: true, childReadResultError: false, successfulChildRead: true,
 	});
 	let diagnostic = "";
 	try { assertManualNestedHelper({ messages: [], subagentWork: [] }); }
 	catch (error) { diagnostic = error instanceof Error ? error.message : ""; }
 	expect(JSON.parse(diagnostic)).toEqual({
-		rootAgentCall: false, subagentWorkCount: 0, phase: "other", successfulChildRead: false,
+		rootAgentCall: false, subagentWorkCount: 0, phase: "other", childReadCallPresent: false,
+		childReadResultPresent: false, childReadResultError: false, successfulChildRead: false,
 	});
 	for (const privateValue of ["private-root-agent-id", "private-child-read-id"]) expect(diagnostic).not.toContain(privateValue);
 });

@@ -305,6 +305,11 @@ export function buildClaudeSdkSubagentPolicy(options: ClaudeSdkSubagentPolicyOpt
 			maxTurns: approved.maxTurns,
 			background: false,
 			permissionMode: "default",
+			// A subagent inherits the root tool definitions, but its MCP server list
+			// is independently scoped by the AgentDefinition. Name the one already
+			// configured in this query so strict MCP mode cannot leave these literal
+			// raw tool names disconnected in the child.
+			mcpServers: ["bobbit"],
 			tools: ["Skill", ...selectedRaw],
 			// `Task` is removed from the root disallow list solely as Agent's private
 			// alias target. It remains explicitly unavailable to every child.

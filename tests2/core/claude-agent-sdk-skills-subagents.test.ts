@@ -104,6 +104,7 @@ describe("Claude Agent SDK D3/D4 skills and subagents", () => {
 				maxTurns: expected.maxTurns,
 				background: false,
 				permissionMode: "default",
+				mcpServers: ["bobbit"],
 				tools: ["Skill", ...CHILD_MCP_TOOLS],
 				skills: BUNDLED_SKILLS_0_3_222,
 			});
@@ -111,7 +112,10 @@ describe("Claude Agent SDK D3/D4 skills and subagents", () => {
 			for (const forbidden of ["Agent", "Task", "Bash", "mcp__bobbit__bash"]) {
 				expect(definition.disallowedTools, `${agentType} must explicitly disallow ${forbidden}`).toContain(forbidden);
 			}
-			for (const absent of ["memory", "mcpServers", "initialPrompt", "observer", "observerMessage"]) {
+			for (const childTool of CHILD_MCP_TOOLS) {
+				expect(definition.disallowedTools, `${agentType} must not shadow an approved child tool`).not.toContain(childTool);
+			}
+			for (const absent of ["memory", "initialPrompt", "observer", "observerMessage"]) {
 				expect(definition[absent], `${agentType} must not inherit ${absent}`).toBeUndefined();
 			}
 		}
