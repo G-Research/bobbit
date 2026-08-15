@@ -161,6 +161,8 @@ describe("shared worktree guard reproductions", () => {
 			}));
 
 			const manager = makeManager(store);
+			const removals: string[][] = [];
+			manager.addWorktreeRemovedListener((_sessionId: string, info: { worktreePaths: readonly string[] }) => { removals.push([...info.worktreePaths]); });
 			const purged = await manager.purgeArchivedSession("archived-a");
 
 			assert.equal(purged, true, "archived session should be purged by the test setup");
@@ -169,6 +171,7 @@ describe("shared worktree guard reproductions", () => {
 				"SHARED_WORKTREE_GUARD_PURGE_SINGLE_REGRESSION: archived session purge removed a worktree path still referenced by a non-archived session cwd",
 			);
 			assert.equal(fakeGitState.commands.some(call => call.args[0] === "worktree"), false);
+			assert.deepEqual(removals, [], "shared worktree skips must not announce destructive cleanup");
 		} finally {
 			fs.rmSync(tmp, { recursive: true, force: true });
 		}

@@ -89,7 +89,7 @@ describe("ModuleHost decision hooks", () => {
 				sessionId: "session-1",
 				config: "review",
 				hasHost: false,
-				capabilities: { callRoute: false, session: false, store: false, agents: false },
+				capabilities: { callRoute: false, session: false, store: false, agents: false, services: false },
 			});
 		} finally {
 			host.dispose();
@@ -121,7 +121,7 @@ describe("ModuleHost decision hooks", () => {
 			await expect(host.invoke(filterRequest(url))).resolves.toEqual({
 				event: "afterToolResult",
 				hasHost: false,
-				capabilities: { callRoute: false, session: false, store: false, agents: false },
+				capabilities: { callRoute: false, session: false, store: false, agents: false, services: false },
 				token: null,
 				providerSecret: null,
 				path: process.env.PATH ?? process.env.Path ?? null,

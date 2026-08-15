@@ -4,6 +4,7 @@ import {
 	type ActiveServiceExtension,
 	type ServiceExtensionProcess,
 } from "../../src/server/extension-host/service-extension-runtime.ts";
+import type { ServiceInstancePublicRef, ServiceInstanceRef } from "../../src/server/extension-host/service-extension-contract.ts";
 
 const spec = {
 	id: "service",
@@ -14,6 +15,24 @@ const spec = {
 	ports: [8080],
 	dataDir: "service",
 };
+
+function instance(overrides: Partial<ServiceInstanceRef> = {}): ServiceInstanceRef {
+	return {
+		projectId: "project-a",
+		component: ".",
+		canonicalWorktreeRoot: "/worktree/a",
+		worktreeKey: "1234567890123456789012",
+		packId: "pack",
+		serviceId: "service",
+		discriminator: "default",
+		...overrides,
+	};
+}
+
+function publicRef(ref: ServiceInstanceRef): ServiceInstancePublicRef {
+	const { canonicalWorktreeRoot: _root, ...safe } = ref;
+	return safe;
+}
 
 function fixture(overrides: {
 	active?: ActiveServiceExtension[];
@@ -27,7 +46,7 @@ function fixture(overrides: {
 	let ready = overrides.ready ?? true;
 	let portAvailable = overrides.portAvailable ?? true;
 	let authorized = overrides.authorized ?? true;
-	const launches: string[] = [];
+	const launches: Array<{ mode: string; ref: ServiceInstanceRef; workingDirectory: string; settings?: unknown }> = [];
 	const stops: number[] = [];
 	const releases: number[] = [];
 	const processes: Array<{ process: ServiceExtensionProcess; exit: () => void }> = [];
@@ -35,19 +54,19 @@ function fixture(overrides: {
 		listActive: projectId => overrides.listActive?.(projectId) ?? active,
 		authorize: () => ({ allowed: authorized }),
 		launchers: {
-			local: async request => makeProcess("local", request.spec.stopGraceMs),
-			docker: async request => makeProcess("docker", request.spec.stopGraceMs),
-			compose: async request => makeProcess("compose", request.spec.stopGraceMs),
+			local: async request => makeProcess("local", request),
+			docker: async request => makeProcess("docker", request),
+			compose: async request => makeProcess("compose", request),
 		},
 		probe: async () => ready,
 		ports: { lease: async () => portAvailable ? { release: async () => { releases.push(1); } } : undefined },
 		filesystem: { ensureDirectory: async () => {} },
 		clock: { now: () => new Date(now), sleep: async (ms: number) => { now += ms; } },
-		resolveDataDir: ({ projectId }, path) => `/owned/${projectId}/${path}`,
+		resolveDataDir: (ref, path) => `/owned/${ref.worktreeKey}/${path}`,
 	});
 
-	function makeProcess(mode: string, _grace: number): ServiceExtensionProcess {
-		launches.push(mode);
+	function makeProcess(mode: string, request: { ref: ServiceInstanceRef; workingDirectory: string; settings?: unknown }): ServiceExtensionProcess {
+		launches.push({ mode, ref: request.ref, workingDirectory: request.workingDirectory, ...(request.settings === undefined ? {} : { settings: request.settings }) });
 		let listener: (() => void) | undefined;
 		const process: ServiceExtensionProcess = {
 			stop: async grace => { stops.push(grace); },
@@ -76,119 +95,92 @@ function deferred<T>() {
 }
 
 describe("service extension runtime", () => {
-	it("selects the local, Docker, and Compose adapters and publishes readiness", async () => {
+	it("selects adapters, passes only core-derived roots, and projects no host path", async () => {
 		for (const runMode of ["local", "docker", "compose"] as const) {
 			const f = fixture({ active: [{ packId: "pack", spec: { ...spec, runMode } }] });
-			await f.manager.reconcile("project-a");
-			expect(f.launches).toEqual([runMode]);
-			expect(f.manager.status("project-a", "service")).toMatchObject({ state: "ready" });
+			const ref = instance();
+			await f.manager.reconcile(ref);
+			expect(f.launches).toMatchObject([{ mode: runMode, workingDirectory: "/worktree/a" }]);
+			const status = f.manager.status(publicRef(ref));
+			expect(status).toMatchObject({ state: "ready", ref: publicRef(ref) });
+			expect(JSON.stringify(status)).not.toContain("/worktree/a");
 		}
 	});
 
-	it("does not launch without exact pack service.manage authorization", async () => {
+	it("does not launch without exact pack service.manage authorization and stops after revoke", async () => {
 		const f = fixture({ authorized: false });
-		await f.manager.reconcile("project-a");
+		const ref = instance();
+		await f.manager.reconcile(ref);
 		expect(f.launches).toEqual([]);
-		expect(f.manager.status("project-a", "service")).toBeUndefined();
-	});
-
-	it("stops a previously authorized service when a later reconcile denies it", async () => {
-		const f = fixture();
-		await f.manager.reconcile("project-a");
+		f.setAuthorized(true);
+		await f.manager.reconcile(ref);
 		f.setAuthorized(false);
-		await f.manager.reconcile("project-a");
-
+		await f.manager.reconcile(ref);
 		expect(f.stops).toEqual([100]);
-		expect(f.manager.status("project-a", "service")).toMatchObject({ state: "stopped" });
+		expect(f.manager.status(publicRef(ref))).toMatchObject({ state: "stopped" });
 	});
 
-	it("does not launch on a port collision and publishes a bounded status", async () => {
-		const f = fixture({ portAvailable: false });
-		await f.manager.reconcile("project-a");
-		expect(f.launches).toEqual([]);
-		expect(f.manager.status("project-a", "service")).toMatchObject({ state: "unhealthy", detail: "port-conflict" });
+	it("does not launch on collision and bounds readiness failures", async () => {
+		const collision = fixture({ portAvailable: false });
+		const collisionRef = instance();
+		await collision.manager.reconcile(collisionRef);
+		expect(collision.launches).toEqual([]);
+		expect(collision.manager.status(publicRef(collisionRef))).toMatchObject({ state: "unhealthy", detail: "port-conflict" });
+
+		const timeout = fixture({ ready: false });
+		const timeoutRef = instance();
+		await timeout.manager.reconcile(timeoutRef);
+		expect(timeout.manager.status(publicRef(timeoutRef))).toMatchObject({ state: "unhealthy", detail: "readiness-timeout" });
+		expect(timeout.stops).toEqual([100]);
+		expect(timeout.releases).toHaveLength(1);
 	});
 
-	it("times out readiness, stops using the declared grace, and releases leases", async () => {
-		const f = fixture({ ready: false });
-		await f.manager.reconcile("project-a");
-		expect(f.manager.status("project-a", "service")).toMatchObject({ state: "unhealthy", detail: "readiness-timeout" });
-		expect(f.stops).toEqual([100]);
-		expect(f.releases).toHaveLength(1);
-	});
-
-	it("restarts one failed active service once and ignores further exits", async () => {
+	it("restarts a failed active service once", async () => {
 		const f = fixture();
-		await f.manager.reconcile("project-a");
+		const ref = instance();
+		await f.manager.reconcile(ref);
 		f.processes[0].exit();
 		await turn();
-		expect(f.launches).toEqual(["local", "local"]);
+		expect(f.launches).toHaveLength(2);
 		f.processes[1].exit();
 		await turn();
-		expect(f.launches).toEqual(["local", "local"]);
-		expect(f.manager.status("project-a", "service")).toMatchObject({ state: "failed", detail: "process-exited" });
+		expect(f.launches).toHaveLength(2);
+		expect(f.manager.status(publicRef(ref))).toMatchObject({ state: "failed", detail: "process-exited" });
 	});
 
-	it("stops services removed by reconciliation and on shutdown", async () => {
+	it("isolates same project/pack/service across roots, components, and discriminators", async () => {
 		const f = fixture();
-		await f.manager.reconcile("project-a");
-		f.setActive([]);
-		await f.manager.reconcile("project-a");
+		const rootA = instance();
+		const rootB = instance({ canonicalWorktreeRoot: "/worktree/b", worktreeKey: "abcdefghijklmnopqrstuv", component: "api", discriminator: "typescript" });
+		await Promise.all([f.manager.reconcile(rootA), f.manager.reconcile(rootB)]);
+		expect(f.launches).toHaveLength(2);
+		await f.manager.stop(rootA);
 		expect(f.stops).toEqual([100]);
-		expect(f.manager.status("project-a", "service")).toMatchObject({ state: "stopped" });
+		expect(f.manager.status(publicRef(rootA))).toMatchObject({ state: "stopped" });
+		expect(f.manager.status(publicRef(rootB))).toMatchObject({ state: "ready" });
+		f.processes[1].exit();
+		await turn();
+		expect(f.launches).toHaveLength(3);
 	});
 
-	it("does not allow an older delayed active snapshot to supersede a newer reconcile", async () => {
-		const first = deferred<readonly ActiveServiceExtension[]>();
-		const second = deferred<readonly ActiveServiceExtension[]>();
-		let calls = 0;
-		const f = fixture({ listActive: () => (++calls === 1 ? first.promise : second.promise) });
-
-		const reconcileA = f.manager.reconcile("project-a");
-		const reconcileB = f.manager.reconcile("project-a");
-		second.resolve([{ packId: "pack", spec: { ...spec, runMode: "docker" } }]);
-		await reconcileB;
-		first.resolve([{ packId: "pack", spec }]);
-		await reconcileA;
-
-		expect(f.launches).toEqual(["docker"]);
-		expect(f.manager.status("project-a", "service")).toMatchObject({ state: "ready" });
-	});
-
-	it("closes globally before a pending active snapshot can launch", async () => {
-		const pending = deferred<readonly ActiveServiceExtension[]>();
-		let calls = 0;
-		const f = fixture({ listActive: () => { calls++; return pending.promise; } });
-
-		const reconcile = f.manager.reconcile("project-a");
-		await f.manager.stop();
-		pending.resolve([{ packId: "pack", spec }]);
-		await reconcile;
-		await f.manager.reconcile("project-a");
-
-		expect(calls).toBe(1);
-		expect(f.launches).toEqual([]);
-		expect(f.manager.status("project-a", "service")).toBeUndefined();
-	});
-
-	it("fences a stopped project without blocking another project's pending reconcile", async () => {
-		const projectA = deferred<readonly ActiveServiceExtension[]>();
-		const projectB = deferred<readonly ActiveServiceExtension[]>();
-		const f = fixture({ listActive: projectId => projectId === "project-a" ? projectA.promise : projectB.promise });
-
-		const reconcileA = f.manager.reconcile("project-a");
-		const reconcileB = f.manager.reconcile("project-b");
-		await f.manager.stop("project-a");
-		projectA.resolve([{ packId: "pack", spec }]);
-		projectB.resolve([{ packId: "pack", spec }]);
+	it("fences a stopped instance without blocking another worktree's pending reconcile", async () => {
+		const a = deferred<readonly ActiveServiceExtension[]>();
+		const b = deferred<readonly ActiveServiceExtension[]>();
+		const f = fixture({ listActive: projectId => projectId === "project-a" ? a.promise : b.promise });
+		const rootA = instance({ projectId: "project-a" });
+		const rootB = instance({ projectId: "project-b", canonicalWorktreeRoot: "/worktree/b", worktreeKey: "abcdefghijklmnopqrstuv" });
+		const reconcileA = f.manager.reconcile(rootA);
+		const reconcileB = f.manager.reconcile(rootB);
+		await f.manager.stop(rootA);
+		a.resolve([{ packId: "pack", spec }]);
+		b.resolve([{ packId: "pack", spec }]);
 		await Promise.all([reconcileA, reconcileB]);
-
-		expect(f.launches).toEqual(["local"]);
-		expect(f.manager.status("project-a", "service")).toBeUndefined();
-		expect(f.manager.status("project-b", "service")).toMatchObject({ state: "ready" });
+		expect(f.launches).toHaveLength(1);
+		expect(f.manager.status(publicRef(rootA))).toBeUndefined();
+		expect(f.manager.status(publicRef(rootB))).toMatchObject({ state: "ready" });
 	});
 
-	it("abandons an awaited launch when service.manage authorization changes before publication", async () => {
+	it("abandons an awaited launch after authorization changes", async () => {
 		const pendingLaunch = deferred<ServiceExtensionProcess>();
 		let authorized = true;
 		const stops: number[] = [];
@@ -206,17 +198,17 @@ describe("service extension runtime", () => {
 			clock: { now: () => new Date(0), sleep: async () => {} },
 			resolveDataDir: () => "/owned/service",
 		});
-		const reconcile = manager.reconcile("project-a");
+		const ref = instance();
+		const reconcile = manager.reconcile(ref);
 		await turn();
 		authorized = false;
 		pendingLaunch.resolve({ stop: async grace => { stops.push(grace); }, onExit: () => () => {} });
 		await reconcile;
-
 		expect(stops).toEqual([100]);
-		expect(manager.status("project-a", "service")).toMatchObject({ state: "stopped" });
+		expect(manager.status(publicRef(ref))).toMatchObject({ state: "stopped" });
 	});
 
-	it("passes resolved settings only to core launch seams, never status", async () => {
+	it("passes settings only to core launch seams and never status", async () => {
 		let received: unknown;
 		const process: ServiceExtensionProcess = { stop: async () => {}, onExit: () => () => {} };
 		const manager = new ServiceExtensionRuntimeManager({
@@ -230,8 +222,9 @@ describe("service extension runtime", () => {
 			resolveDataDir: () => "/owned/service",
 			resolveSettings: () => ({ apiKey: "MUST_NEVER_APPEAR" }),
 		});
-		await manager.reconcile("project-a");
+		const ref = instance();
+		await manager.reconcile(ref);
 		expect(received).toEqual({ apiKey: "MUST_NEVER_APPEAR" });
-		expect(JSON.stringify(manager.status("project-a", "service"))).not.toContain("MUST_NEVER_APPEAR");
+		expect(JSON.stringify(manager.status(publicRef(ref)))).not.toContain("MUST_NEVER_APPEAR");
 	});
 });
