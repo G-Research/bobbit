@@ -29,6 +29,13 @@ import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope
 // import is erased at runtime (no module cycle); the gateway injects the live
 // instance through CreateServerHostApiOptions.orchestrationCore (an A seam).
 import type { DismissResult, OrchestrationCore } from "../agent/orchestration-core.js";
+import {
+	ServiceToolRpcError,
+	validateServiceToolRequest,
+	validateServiceToolResponse,
+	type ServiceExtensionToolRpc,
+	type ServiceToolRequest,
+} from "./service-extension-tool-rpc.js";
 
 export interface ServerHostStoreApi {
 	get<T = unknown>(key: string): Promise<T | null>;
@@ -96,6 +103,12 @@ export interface ServerHostAgentsApi {
 	status(childSessionId: string): Promise<{ status: "idle" | "streaming" | "queued" | "preparing" | "terminated" }>;
 }
 
+/** Exact-instance managed-service calls. The session and pack identity are held
+ * in the server host closure; callers cannot select them or receive a process. */
+export interface ServerHostServicesApi {
+	call<T = unknown>(request: ServiceToolRequest): Promise<T>;
+}
+
 /** Mirrors HostSessionApi server-side, but READ-ONLY. Slice B2 implements the
  *  own-session READS (`readTranscript`/`readToolCall`) through the contract adapter.
  *
@@ -124,6 +137,8 @@ export interface ServerHostCapabilities {
 	/** Ambient child-agent orchestration (sub-goal C). True once `host.agents` is
 	 *  wired to the injected OrchestrationCore. */
 	readonly agents: boolean;
+	/** Exact managed-service RPC for this host's server-derived session and pack. */
+	readonly services: boolean;
 	/** Convenience: feature-detect by name; returns the flag, or false for unknown names. */
 	has(name: string): boolean;
 }
@@ -146,6 +161,8 @@ export interface ServerHostApi {
 	readonly session: ServerHostSessionApi;
 	/** Ambient child-agent orchestration (sub-goal C) — own host.agents children only. */
 	readonly agents: ServerHostAgentsApi;
+	/** Exact, closure-bound managed-service RPC. It exposes no URL, path, or process. */
+	readonly services: ServerHostServicesApi;
 }
 
 export interface CreateServerHostApiOptions {
@@ -187,6 +204,9 @@ export interface CreateServerHostApiOptions {
 	 *  gateway as `sessionManager.getSession(id)?.status`. Absent in non-gateway
 	 *  contexts → status reports "preparing". */
 	readChildStatus?: (sessionId: string) => string | undefined;
+	/** Gateway-owned broker for exact managed-service tool calls. It is optional so
+	 *  non-gateway hosts fail closed rather than receiving an ambient transport. */
+	serviceToolRpc?: ServiceExtensionToolRpc;
 	/** Least-privilege capability mask (EP provider hooks). When supplied, the host
 	 *  reports ONLY the capabilities set `true` here and DENIES the rest — each
 	 *  masked-off namespace throws a clear "not available" error rather than
@@ -194,7 +214,7 @@ export interface CreateServerHostApiOptions {
 	 *  worker tier gets `capabilities.store === true` while `session`/`agents` stay
 	 *  false AND unavailable. Omitted ⇒ the full implemented capability set
 	 *  (store/session/agents all true) — the existing route/action host behaviour. */
-	capabilityMask?: { store?: boolean; session?: boolean; agents?: boolean };
+	capabilityMask?: { store?: boolean; session?: boolean; agents?: boolean; services?: boolean };
 }
 
 /**
@@ -234,9 +254,12 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 	// namespaces are additionally replaced with throwing stubs below so a denied
 	// capability is unavailable, not merely flagged false.
 	const mask = opts.capabilityMask;
+	// `services` is available only on a gateway-bound host. Unlike stores, a
+	// service call cannot usefully degrade without its exact session/pack broker.
+	const servicesAvailable = Boolean(opts.serviceToolRpc && opts.sessionId && opts.packId);
 	const flags = mask
-		? { session: mask.session === true, store: mask.store === true, agents: mask.agents === true }
-		: { session: true, store: true, agents: true };
+		? { session: mask.session === true, store: mask.store === true, agents: mask.agents === true, services: mask.services === true && servicesAvailable }
+		: { session: true, store: true, agents: true, services: servicesAvailable };
 	const capabilities: ServerHostCapabilities = {
 		...flags,
 		has: (name: string) => (flags as Record<string, boolean>)[name] === true,
@@ -324,6 +347,25 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 			default: return "preparing";
 		}
 	};
+	// Managed service selection remains entirely on the gateway side. The host
+	// validates/clones only the closed request and response envelope, then passes
+	// its closure-bound sessionId + packId to the injected broker.
+	const serviceToolRpc = opts.serviceToolRpc;
+	const services: ServerHostServicesApi = {
+		call: async <T = unknown>(request: ServiceToolRequest): Promise<T> => {
+			if (!serviceToolRpc || !opts.sessionId || !packId) {
+				throw new ServiceToolRpcError("service_unavailable");
+			}
+			const response = validateServiceToolResponse(await serviceToolRpc.request({
+				sessionId: opts.sessionId,
+				packId,
+				request: validateServiceToolRequest(request),
+			}));
+			if (response.state !== "ready") throw new ServiceToolRpcError("service_not_ready");
+			return response.value as T;
+		},
+	};
+
 	const agents: ServerHostAgentsApi = {
 		spawn: async (spawnOpts) => {
 			const c = requireCore();
@@ -382,6 +424,7 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 		store: flags.store ? store : denyNamespace("store", store),
 		session: flags.session ? session : denyNamespace("session", session),
 		agents: flags.agents ? agents : denyNamespace("agents", agents),
+		services: flags.services ? services : denyNamespace("services", services),
 	};
 }
 
