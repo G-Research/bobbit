@@ -11,6 +11,27 @@ import { CoalescedJsonWriter } from "./coalesced-json-writer.js";
 
 export type GateStatus = "pending" | "passed" | "failed" | "bypassed";
 
+/** Durable orchestration reason; deliberately independent of command kill mechanics. */
+export type VerificationCancellationCause =
+	| "manual"
+	| "goal-pause"
+	| "superseded"
+	| "gate-reset"
+	| "bypass"
+	| "goal-complete"
+	| "team-teardown"
+	| "shelved"
+	| "archive"
+	| "zombie-recovery"
+	| "gateway-restart-recovery"
+	| "unknown";
+
+export interface VerificationCancellation {
+	cause: VerificationCancellationCause;
+	requestedAt: number;
+	finalizedAt?: number;
+}
+
 export interface VerificationTimeoutInfo {
 	/** Resolved per-turn review allowance. */
 	configuredSeconds: number;
@@ -40,7 +61,10 @@ export interface GateSignalStep {
 	 * carries useful progress information from the moment it is recorded,
 	 * then preserved as `passed`/`failed`/`timeout`/`skipped` for historical rendering.
 	 */
-	status?: "waiting" | "running" | "passed" | "failed" | "timeout" | "skipped";
+	status?: "waiting" | "running" | "passed" | "failed" | "timeout" | "skipped" | "cancelled";
+	/** Durable audit fields for an interrupted row. */
+	cancellationCause?: VerificationCancellationCause;
+	cancelledAt?: number;
 	/** Present only when a review turn exhausted its configured allowance. */
 	timeout?: VerificationTimeoutInfo;
 	/** Optional phase number, mirrored from the workflow VerifyStep for ordering. */
@@ -58,8 +82,10 @@ export interface GateSignal {
 	content?: string;
 	contentVersion?: number;
 	verification: {
-		status: "running" | "passed" | "failed";
+		status: "running" | "passed" | "failed" | "cancelled";
 		steps: GateSignalStep[];
+		/** Present for cancellation outcomes; old records normalize to `unknown`. */
+		cancellation?: VerificationCancellation;
 	};
 }
 
@@ -161,8 +187,12 @@ const GATE_LEGACY_RETIREMENT_KEY = "pending_retirement:gates.json";
 const GATE_RECOVERY_RETIREMENT_KEY = "pending_retirement:gates.json.pre-migration";
 
 const GATE_STATUSES = new Set<GateStatus>(["pending", "passed", "failed", "bypassed"]);
-const SIGNAL_STATUSES = new Set(["running", "passed", "failed"]);
-const STEP_STATUSES = new Set(["waiting", "running", "passed", "failed", "timeout", "skipped"]);
+const SIGNAL_STATUSES = new Set(["running", "passed", "failed", "cancelled"]);
+const STEP_STATUSES = new Set(["waiting", "running", "passed", "failed", "timeout", "skipped", "cancelled"]);
+const CANCELLATION_CAUSES = new Set<VerificationCancellationCause>([
+	"manual", "goal-pause", "superseded", "gate-reset", "bypass", "goal-complete",
+	"team-teardown", "shelved", "archive", "zombie-recovery", "gateway-restart-recovery", "unknown",
+]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -259,6 +289,21 @@ function validateGateState(value: unknown, label: string, expectedIdentity?: { g
 			|| !Array.isArray(signal.verification.steps)) {
 			invalidGate(signalLabel, "verification must have a supported status and steps array");
 		}
+		if (signal.verification.status === "cancelled" && signal.verification.cancellation === undefined) {
+			// Pre-typed cancellation records have no reliable producer provenance.
+			// Retain their history but make that absence explicit rather than guessing.
+			signal.verification.cancellation = { cause: "unknown", requestedAt: signal.timestamp };
+		}
+		if (signal.verification.cancellation !== undefined) {
+			const cancellation = signal.verification.cancellation;
+			if (!isRecord(cancellation)
+				|| typeof cancellation.cause !== "string"
+				|| !CANCELLATION_CAUSES.has(cancellation.cause as VerificationCancellationCause)
+				|| !Number.isFinite(cancellation.requestedAt)
+				|| (cancellation.finalizedAt !== undefined && !Number.isFinite(cancellation.finalizedAt))) {
+				invalidGate(signalLabel, "verification cancellation metadata is invalid");
+			}
+		}
 		for (let stepIndex = 0; stepIndex < signal.verification.steps.length; stepIndex++) {
 			const step = signal.verification.steps[stepIndex];
 			const stepLabel = `${signalLabel} verification step at index ${stepIndex}`;
@@ -278,6 +323,10 @@ function validateGateState(value: unknown, label: string, expectedIdentity?: { g
 			if (step.skipped !== undefined && typeof step.skipped !== "boolean") invalidGate(stepLabel, "skipped must be boolean");
 			if (step.expect !== undefined && step.expect !== "success" && step.expect !== "failure") invalidGate(stepLabel, "expect is unsupported");
 			if (step.status !== undefined && (typeof step.status !== "string" || !STEP_STATUSES.has(step.status))) invalidGate(stepLabel, "status is unsupported");
+			if (step.cancellationCause !== undefined && (typeof step.cancellationCause !== "string" || !CANCELLATION_CAUSES.has(step.cancellationCause as VerificationCancellationCause))) {
+				invalidGate(stepLabel, "cancellationCause is unsupported");
+			}
+			if (step.cancelledAt !== undefined && !Number.isFinite(step.cancelledAt)) invalidGate(stepLabel, "cancelledAt must be finite");
 			if (step.phase !== undefined && !Number.isFinite(step.phase)) invalidGate(stepLabel, "phase must be finite");
 			if (step.artifact !== undefined) {
 				if (!isRecord(step.artifact) || typeof step.artifact.content !== "string" || typeof step.artifact.contentType !== "string") {
@@ -945,16 +994,27 @@ export class GateStore {
 
 	/** Update a signal's verification results by signal ID. */
 	updateSignalVerification(signalId: string, verification: GateSignal["verification"]): void {
+		this.updateSignalVerificationInternal(signalId, verification, false);
+	}
+
+	/** Strict terminal publication for lifecycle paths which cannot lose a settled outcome. */
+	async updateSignalVerificationStrict(signalId: string, verification: GateSignal["verification"]): Promise<void> {
+		await this.updateSignalVerificationInternal(signalId, verification, true);
+	}
+
+	private updateSignalVerificationInternal(
+		signalId: string,
+		verification: GateSignal["verification"],
+		strict: boolean,
+	): void | Promise<void> {
 		this.assertAcceptingMutations();
 		for (const [key, gate] of this.gates) {
 			const signal = gate.signals.find(s => s.id === signalId);
-			if (signal) {
-				if (signal.verification.status !== "running") return; // already finalized
-				signal.verification = verification;
-				gate.updatedAt = Date.now();
-				this.save([key]);
-				return;
-			}
+			if (!signal) continue;
+			if (signal.verification.status !== "running") return; // already finalized
+			signal.verification = verification;
+			gate.updatedAt = Date.now();
+			return strict ? this.saveStrict([key]) : this.save([key]);
 		}
 	}
 
