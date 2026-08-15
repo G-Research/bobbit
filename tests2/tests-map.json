@@ -3146,12 +3146,30 @@
       }
     },
     {
+      "path": "tests2/browser/journeys/scheduler-recovery.journey.spec.ts",
+      "reason": "Production Chromium journey for the root dashboard and Plan child scheduler-recovery controls, authorized retry POSTs, live cleanup, reload persistence, and fixture teardown.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/browser/goal-setup-recovery.spec.ts",
       "reason": "Chromium journey through the real gateway retry route and live broadcasts: current setup failures disable team and session starts, retrying renders as in-flight without an agent, and a persisted ready recovery clears dashboard/sidebar warnings through reload.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
         "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/dom/goal-dashboard-root-recovery.test.ts",
+      "reason": "Focused DOM coverage for root and Plan scheduler recovery retries: successful reconciliation fences held pre-consume descendants and goals snapshots, refetches fenced generations despite conditional changed:false replies so later server recovery generations surface, while non-OK and network failures retain the recovery action.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
       }
     },
     {
@@ -3424,6 +3442,10 @@
     },
     {
       "path": "tests2/browser/journeys/history-fork-prompt-actions.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/scheduler-recovery.journey.spec.ts",
       "type": "smoke-journey"
     },
     {

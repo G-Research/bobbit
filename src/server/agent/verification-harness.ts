@@ -1058,7 +1058,7 @@ import {
 	COLD_REPROMPT_READY_TIMEOUT_MS,
 } from "./rpc-bridge.js";
 import { Semaphore } from "./semaphore.js";
-import { ChildTeamScheduler } from "./child-team-scheduler.js";
+import { ChildTeamScheduler, type SchedulerRecovery } from "./child-team-scheduler.js";
 import { applyReviewModelOverrides, applyModelString } from "./review-model-override.js";
 import { buildVerificationFailureMessage, type FailureStepLike } from "./notify-team-lead-failure.js";
 import {
@@ -3961,7 +3961,18 @@ export class VerificationHarness {
 					.resolveRootMaxConcurrentChildren(rootGoalId) ?? 3,
 			getChild: (childGoalId) =>
 				this.projectContextManager?.getContextForGoal(childGoalId)?.goalStore.get(childGoalId),
+			// Match TeamManager's idempotency contract: a persisted team only
+			// counts when its lead session still exists and is non-terminated.
+			hasLiveTeam: (childGoalId) => {
+				const leadId = this.teamManager?.getTeamState(childGoalId)?.teamLeadSessionId;
+				const lead = leadId ? this.sessionManager?.getSession(leadId) : undefined;
+				return !!lead && lead.status !== "terminated";
+			},
 			startChildTeam: (childGoalId) => this._startScheduledChildTeam(childGoalId),
+			repairUnavailableLead: (childGoalId) => this.teamManager?.teardownTeam(childGoalId),
+			onRecovery: (recovery) => this._publishSchedulerRecovery(recovery),
+			onChildRecoveryCleared: (childGoalId) => this._clearScheduledRecovery(childGoalId),
+			onRootRecoveryCleared: (rootGoalId) => this._clearScheduledRecovery(rootGoalId),
 		});
 		// Load any persisted active verifications from a prior run into memory
 		// (they'll be resumed by resumeInterruptedVerifications() after session restore)
@@ -9082,6 +9093,55 @@ export class VerificationHarness {
 		return this.childScheduler.requestStart(childGoalId);
 	}
 
+	/** True only when a child already has scheduler-owned start intent. */
+	isScheduledChildStartTracked(childGoalId: string): boolean {
+		return this.childScheduler.isTracked(childGoalId);
+	}
+
+	/** One-action route/UI recovery delegates to a fresh scheduler generation. */
+	retryScheduledChildStart(childGoalId: string): "started" | "capacity-blocked" {
+		return this.childScheduler.retry(childGoalId);
+	}
+
+	/**
+	 * Root breaker recovery reconstitutes only the circuit breaker's durable
+	 * targets. The queue is process-local, so after a gateway restart merely
+	 * draining it would otherwise acknowledge recovery without starting work.
+	 */
+	retryScheduledRoot(rootGoalId: string, childGoalIds: readonly string[]): Array<"started" | "capacity-blocked"> {
+		this.childScheduler.retryRoot(rootGoalId);
+		return childGoalIds.map(childGoalId => this.childScheduler.retry(childGoalId));
+	}
+
+	private _clearScheduledRecovery(goalId: string): void {
+		const ctx = this.projectContextManager?.getContextForGoal(goalId);
+		if (!ctx?.goalStore.get(goalId)?.schedulerRecovery) return;
+		// GoalStore deliberately strips undefined from updates, so use its narrow
+		// deletion path. It mutates before the returned promise settles, making a
+		// retry endpoint's consume operation non-replayable.
+		void ctx.goalManager.clearSchedulerRecovery(goalId).then((cleared) => {
+			if (cleared) this.broadcastFn?.(goalId, { type: "goal_state_changed", goalId });
+		}).catch(err => console.error(`[scheduler] failed to clear recovery for ${goalId}:`, err));
+	}
+
+	private _publishSchedulerRecovery(recovery: SchedulerRecovery): void {
+		const goalId = recovery.kind === "child" ? recovery.childGoalId : recovery.rootGoalId;
+		if (!goalId) return;
+		const ctx = this.projectContextManager?.getContextForGoal(goalId);
+		if (!ctx?.goalStore.get(goalId)) return;
+		void ctx.goalManager.updateGoal(goalId, {
+			schedulerRecovery: {
+				kind: recovery.kind,
+				...(recovery.kind === "root" ? { affectedChildGoalIds: recovery.affectedChildGoalIds ?? [] } : {}),
+				code: recovery.code,
+				reason: recovery.reason,
+				retryable: recovery.retryable,
+				updatedAt: Date.now(),
+			},
+		}).then(() => this.broadcastFn?.(goalId, { type: "goal_state_changed", goalId })).catch(err =>
+			console.error(`[scheduler] failed to publish recovery for ${goalId}:`, err));
+	}
+
 	/**
 	 * Notify the scheduler of a terminal child event (merge / archive /
 	 * completion) so its permit is released and the next capacity-blocked child
@@ -9122,9 +9182,9 @@ export class VerificationHarness {
 		// (Primary guarantee is the scheduler's pre-acquire paused/archived skip;
 		// this covers the race where the child is paused/archived in the window
 		// between the eligibility check and this start.)
-		if (!g) throw new Error(`[scheduler] child ${childGoalId} not found — not starting`);
-		if (g.archived) throw new Error(`[scheduler] child ${childGoalId} is archived — not starting`);
-		if (g.paused) throw new Error(`[scheduler] child ${childGoalId} is paused — not starting`);
+		if (!g) throw Object.assign(new Error(`[scheduler] child ${childGoalId} not found — not starting`), { code: "GOAL_NOT_FOUND" });
+		if (g.archived) throw Object.assign(new Error(`[scheduler] child ${childGoalId} is archived — not starting`), { code: "GOAL_ARCHIVED" });
+		if (g.paused) throw Object.assign(new Error(`[scheduler] child ${childGoalId} is paused — not starting`), { code: "GOAL_PAUSED" });
 		if (g.state === "blocked") {
 			// State='blocked' is used for both dependency and capacity parking. The
 			// scheduler has already established that this child is eligible, so make
@@ -9139,7 +9199,7 @@ export class VerificationHarness {
 			// The GoalManager owns the same-goal setup promise. Await it here so the
 			// scheduler cannot call startTeam until the persisted status is ready.
 			try {
-				await goalManager.setupWorktreeAndStartTeam(childGoalId, () => teamManager.startTeam(childGoalId));
+				await goalManager.setupWorktreeAndStartTeam(childGoalId, () => teamManager.startTeam(childGoalId, { explicitIdempotent: true }));
 				this.broadcastFn?.(childGoalId, { type: "goal_state_changed", goalId: childGoalId });
 				this.broadcastFn?.(childGoalId, { type: "goal_setup_complete", goalId: childGoalId });
 				return;
@@ -9167,7 +9227,7 @@ export class VerificationHarness {
 		// Worktree already exists (resumed/ready goal): just start the team.
 		// Propagate failure so the scheduler releases the permit + re-enqueues.
 		try {
-			await teamManager.startTeam(childGoalId);
+			await teamManager.startTeam(childGoalId, { explicitIdempotent: true });
 		} catch (err) {
 			console.error(`[scheduler] startTeam failed for ${childGoalId}:`, err);
 			throw err;
