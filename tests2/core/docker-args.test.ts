@@ -28,7 +28,7 @@ let restoreFs: () => void;
 
 beforeAll(() => {
 	const scoped = installScopedMemFs([
-		"chmodSync", "existsSync", "mkdirSync", "readFileSync", "renameSync", "rmSync",
+		"chmodSync", "existsSync", "lstatSync", "mkdirSync", "readFileSync", "realpathSync", "renameSync", "rmSync",
 		"statSync", "symlinkSync", "writeFileSync",
 	]);
 	restoreFs = scoped.restore;
@@ -203,6 +203,7 @@ describe("buildDockerRunArgs", () => {
 			await sandbox.destroy();
 
 			assert.deepEqual(calls.map((args) => args.slice(0, 4)), [
+				["ps", "-a", "--filter", "label=bobbit-verification-sidecar=1"],
 				["rm", "-f", "captured-container"],
 				["volume", "rm", "-f", `bobbit-workspace-${projectId}-e2e-${capturedRunId}`],
 				["volume", "rm", "-f", `bobbit-worktrees-${projectId}-e2e-${capturedRunId}`],
@@ -210,6 +211,68 @@ describe("buildDockerRunArgs", () => {
 		} finally {
 			if (prior === undefined) delete process.env.BOBBIT_E2E_RUN_ID;
 			else process.env.BOBBIT_E2E_RUN_ID = prior;
+		}
+	});
+
+	it("repairs initialized empty named-volume roots before the init clone", async () => {
+		_resetDockerLimitsCache();
+		const calls: string[][] = [];
+		const volumes = new Map<string, Record<string, string>>();
+		const commandRunner: CommandRunner = {
+			async execFile(_file, args) {
+				const call = [...args];
+				calls.push(call);
+				if (call[0] === "info") return { stdout: "4 8589934592\n", stderr: "" };
+				if (call[0] === "volume" && call[1] === "inspect") {
+					const name = call.at(-1)!;
+					const labels = volumes.get(name);
+					if (!labels) throw new Error(`missing volume ${name}`);
+					return { stdout: call.includes("--format") ? JSON.stringify(labels) : name, stderr: "" };
+				}
+				if (call[0] === "volume" && call[1] === "create") {
+					const labels: Record<string, string> = {};
+					for (let index = 0; index < call.length; index++) {
+						if (call[index] !== "--label") continue;
+						const [key, value] = call[index + 1]!.split("=", 2);
+						labels[key!] = value!;
+					}
+					volumes.set(call.at(-1)!, labels);
+					return { stdout: `${call.at(-1)}\n`, stderr: "" };
+				}
+				if (call[0] === "run") return { stdout: "sandbox-container\n", stderr: "" };
+				if (call[0] === "ps") return { stdout: "", stderr: "" };
+				const command = call.join(" ");
+				if (command.includes("test -d /workspace/.git") || command.includes("test -f /workspace/package-lock.json") || command.includes("test -f /workspace/node_modules") || command.includes("if(!p.scripts?.build)")) {
+					throw new Error("not present in fresh workspace");
+				}
+				return { stdout: "", stderr: "" };
+			},
+			execFileSync() { return ""; },
+		};
+		try {
+			const sandbox = new ProjectSandbox({
+				projectId: "fresh-volume-owner",
+				projectDir: fixtureDir("fresh-volume-owner"),
+				repoUrl: "https://example.test/repo.git",
+				image: "test",
+			}, { commandRunner });
+
+			await sandbox.init();
+
+			const runIndex = calls.findIndex((args) => args[0] === "run");
+			const ownershipIndex = calls.findIndex((args) =>
+				args[0] === "exec" && args[1] === "-u" && args[2] === "root" &&
+				args.at(-1)?.includes("repair_empty_root_owned_dir /workspace"),
+			);
+			const cloneIndex = calls.findIndex((args) => args.includes("git") && args.includes("clone"));
+
+			assert.ok(runIndex >= 0, "expected a sandbox container to be created");
+			assert.ok(ownershipIndex > runIndex, "must repair named-volume ownership after creating the container");
+			assert.ok(cloneIndex > ownershipIndex, "must repair named-volume ownership before cloning as the image user");
+			assert.match(calls[ownershipIndex].at(-1) ?? "", /repair_empty_root_owned_dir \/workspace-wt/);
+			assert.match(calls[ownershipIndex].at(-1) ?? "", /-mindepth 1 -maxdepth 1 -print -quit/);
+		} finally {
+			_resetDockerLimitsCache();
 		}
 	});
 
@@ -233,8 +296,8 @@ describe("buildDockerRunArgs", () => {
 					const labels: Record<string, string> = {};
 					for (let index = 0; index < args.length; index++) {
 						if (args[index] !== "--label") continue;
-						const [key, value] = args[index + 1].split("=", 2);
-						labels[key] = value;
+						const [key, value] = args[index + 1]!.split("=", 2);
+						labels[key!] = value!;
 					}
 					volumes.set(args.at(-1)!, labels);
 					return { stdout: `${args.at(-1)}\n`, stderr: "" };
@@ -246,7 +309,6 @@ describe("buildDockerRunArgs", () => {
 						repairScripts.push(script);
 						if (++repairAttempts === 1) throw new Error("transient exec failure");
 					}
-					return { stdout: "", stderr: "" };
 				}
 				return { stdout: "", stderr: "" };
 			},
@@ -283,7 +345,7 @@ describe("buildDockerRunArgs", () => {
 		}, {
 			commandRunner: {
 				async execFile(_file, args) {
-					repairScript = args[args.length - 1] ?? "";
+					repairScript = args.at(-1) ?? "";
 					return { stdout: "", stderr: "" };
 				},
 				execFileSync() { return ""; },
@@ -327,6 +389,127 @@ describe("buildDockerRunArgs", () => {
 				!mounts.some((m) => m.endsWith(":/bobbit-state")),
 				"must never mount the full state dir",
 			);
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps long-lived project containers away from verification source and mounts one exact sidecar root", () => {
+		const stateDir = fixtureDir("pinned-state");
+		const checkoutDir = fixtureDir("pinned-checkouts");
+		const projectId = "test-project";
+		const signalId = "123e4567-e89b-42d3-a456-426614174000";
+		try {
+			const projectArgs = buildDockerRunArgs({ image: "test", workspaceDir: "/tmp/test", stateDir, projectId }, NOOP_COMMAND_RUNNER);
+			assert.ok(!projectArgs.some(arg => arg.includes("verification-checkouts")), "shared project container must not mount verification source");
+			const sidecarArgs = buildDockerRunArgs({
+				image: "test", workspaceDir: "/tmp/test", stateDir, projectId,
+				verificationSidecar: { signalId, checkoutDir },
+			}, NOOP_COMMAND_RUNNER);
+			assert.ok(sidecarArgs.includes(`${toDockerPath(checkoutDir)}:/bobbit-state/verification-sources/${signalId}:ro`));
+			assert.ok(!sidecarArgs.some(arg => arg.includes(`/bobbit-state/verification-checkouts/${signalId}`)), "execution view is container-owned, never a writable host bind");
+			assert.ok(sidecarArgs.includes("bobbit-verification-sidecar=1"));
+			assert.ok(sidecarArgs.includes(`bobbit-verification-signal=${signalId}`));
+			assert.ok(sidecarArgs.includes("bobbit-verification-version=3"));
+			assert.ok(sidecarArgs.includes("bobbit-verification-outputs="));
+			assert.ok(!sidecarArgs.some(arg => /:\/workspace(?:-wt)?(?:$|:)/.test(arg)),
+				"a verification sidecar must not receive broad live workspace or worktree volumes");
+			assert.ok(sidecarArgs.includes("--pids-limit=512"), "a verification sidecar must retain the default finite PID limit");
+			const persistentOutputArgs = buildDockerRunArgs({
+				image: "test", workspaceDir: "/tmp/test", stateDir, projectId,
+				verificationSidecar: { signalId, checkoutDir, ignoredOutputDirs: ["dist", "coverage/reports"] },
+			}, NOOP_COMMAND_RUNNER);
+			assert.ok(persistentOutputArgs.includes(`${toDockerPath(path.join(checkoutDir, "dist"))}:/bobbit-state/verification-checkouts/${signalId}/dist`));
+			assert.ok(persistentOutputArgs.includes(`${toDockerPath(path.join(checkoutDir, "coverage", "reports"))}:/bobbit-state/verification-checkouts/${signalId}/coverage/reports`));
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+			fs.rmSync(checkoutDir, { recursive: true, force: true });
+		}
+	});
+
+	it("mounts only exact read-only named-volume dependency leaves for verification", () => {
+		const stateDir = fixtureDir("sidecar-dependency-state");
+		const checkoutDir = fixtureDir("sidecar-dependency-checkout");
+		const projectId = "sidecar-dependency-project";
+		const signalId = "123e4567-e89b-42d3-a456-426614174000";
+		try {
+			const args = buildDockerRunArgs({
+				image: "test", workspaceDir: "/tmp/test", stateDir, projectId,
+				verificationSidecar: {
+					signalId, checkoutDir,
+					dependencyLinks: [
+						{ path: "apps/web/node_modules", target: "/workspace-wt/goal/apps/web/node_modules" },
+						{ path: "services/api/node_modules", target: "/workspace-wt/goal/services/api/node_modules" },
+					],
+				},
+			}, NOOP_COMMAND_RUNNER);
+			const mounts = args.filter((_arg, index) => args[index - 1] === "--mount");
+			const volumes = projectSandboxVolumeNames(projectId);
+			assert.ok(mounts.includes(`type=volume,src=${volumes.worktrees},dst=/workspace-wt/goal/apps/web/node_modules,readonly,volume-subpath=goal/apps/web/node_modules`));
+			assert.ok(mounts.includes(`type=volume,src=${volumes.worktrees},dst=/workspace-wt/goal/services/api/node_modules,readonly,volume-subpath=goal/services/api/node_modules`));
+			assert.ok(!args.includes(`${volumes.workspace}:/workspace`));
+			assert.ok(!args.includes(`${volumes.worktrees}:/workspace-wt`));
+			assert.throws(() => buildDockerRunArgs({
+				image: "test", workspaceDir: "/tmp/test", stateDir, projectId,
+				verificationSidecar: { signalId, checkoutDir },
+				sandboxMounts: ["/host/live:/workspace-wt:ro"],
+			}, NOOP_COMMAND_RUNNER), /do not permit sandbox or clone-source mounts/);
+			assert.throws(() => buildDockerRunArgs({
+				image: "test", workspaceDir: "/tmp/test", stateDir, projectId,
+				verificationSidecar: { signalId, checkoutDir },
+				extraReadonlyMounts: [{ hostPath: "/host/clone", mountPath: "/clone-source" }],
+			}, NOOP_COMMAND_RUNNER), /do not permit sandbox or clone-source mounts/);
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+			fs.rmSync(checkoutDir, { recursive: true, force: true });
+		}
+	});
+
+	it("mounts one opaque multi-repository source root while preserving nested per-repository output overlays", () => {
+		const stateDir = fixtureDir("multi-repo-pinned-state");
+		const checkoutDir = fixtureDir("multi-repo-pinned-checkout");
+		const projectId = "multi-repo-project";
+		const signalId = "123e4567-e89b-42d3-a456-426614174000";
+		try {
+			const args = buildDockerRunArgs({
+				image: "test", workspaceDir: "/tmp/test", stateDir, projectId,
+				verificationSidecar: {
+					signalId,
+					checkoutDir,
+					ignoredOutputDirs: ["apps/web/test-results", "services/api/coverage"],
+				},
+			}, NOOP_COMMAND_RUNNER);
+			const mounts = args.filter((_arg, index) => args[index - 1] === "-v");
+			const sourceMount = `${toDockerPath(checkoutDir)}:/bobbit-state/verification-sources/${signalId}:ro`;
+			assert.equal(mounts.filter(mount => mount === sourceMount).length, 1,
+				"the sidecar must receive exactly one read-only bind for the complete frozen multi-repo layout");
+			assert.ok(mounts.includes(`${toDockerPath(path.join(checkoutDir, "apps", "web", "test-results"))}:/bobbit-state/verification-checkouts/${signalId}/apps/web/test-results`));
+			assert.ok(mounts.includes(`${toDockerPath(path.join(checkoutDir, "services", "api", "coverage"))}:/bobbit-state/verification-checkouts/${signalId}/services/api/coverage`));
+			assert.ok(!mounts.some(mount => mount.includes("/workspace-wt/") || mount.includes("verification-checkouts-private")),
+				"a verification sidecar may not bind a mutable component worktree or private Git materialization");
+			assert.ok(!mounts.some(mount => mount.includes(`/bobbit-state/verification-sources/${signalId}/services/api`)),
+				"component selection is a cwd suffix inside the frozen layout, not a second component source mount");
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+			fs.rmSync(checkoutDir, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects non-canonical sidecar signal and ignored-output paths before Docker receives a mount argument", () => {
+		const stateDir = fixtureDir("bad-sidecar");
+		try {
+			assert.throws(() => buildDockerRunArgs({
+				image: "test", workspaceDir: "/tmp/test", stateDir, projectId: "project",
+				verificationSidecar: { signalId: "../../escape", checkoutDir: "/host/checkout" },
+			}, NOOP_COMMAND_RUNNER), /canonical signal UUID/);
+			assert.throws(() => buildDockerRunArgs({
+				image: "test", workspaceDir: "/tmp/test", stateDir, projectId: "project",
+				verificationSidecar: { signalId: "123e4567-e89b-42d3-a456-426614174000", checkoutDir: "/host/checkout", ignoredOutputDirs: ["../tracked"] },
+			}, NOOP_COMMAND_RUNNER), /safe relative ignored output paths/);
+			assert.throws(() => buildDockerRunArgs({
+				image: "test", workspaceDir: "/tmp/test", stateDir, projectId: "project",
+				verificationSidecar: { signalId: "123e4567-e89b-42d3-a456-426614174000", checkoutDir: "/host/checkout", ignoredOutputDirs: ["dist", "dist/nested"] },
+			}, NOOP_COMMAND_RUNNER), /non-overlapping ignored output paths/);
 		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });
 		}

@@ -1,4 +1,6 @@
 import type { Page } from "@playwright/test";
+import fs from "node:fs";
+import path from "node:path";
 import {
 	createSession,
 	deleteSession,
@@ -74,6 +76,40 @@ async function expectCanonicalHumanReplyTail(page: Page, prompt: string): Promis
 
 test.describe("Journey: Reliable Agent Turns", () => {
 	test.setTimeout(120_000);
+
+	test("assistant Markdown renders session-local images through the authenticated asset route after reload", async ({ page, gateway }) => {
+		const scenario = await createScenario(page, gateway);
+		const session = gateway.sessionManager.getSession(scenario.sessionId);
+		const relativePath = `.bobbit-qa/screenshots/markdown-local-${scenario.sessionId}.png`;
+		const imagePath = path.join(session.cwd, ...relativePath.split("/"));
+		// Minimal valid 1×1 transparent PNG.
+		const png = Buffer.from(
+			"89504E470D0A1A0A0000000D49484452000000010000000108060000001F15C4890000000D4944415478DA63F8CF000000030001000100A7E8B13C0000000049454E44AE426082",
+			"hex",
+		);
+		fs.mkdirSync(path.dirname(imagePath), { recursive: true });
+		fs.writeFileSync(imagePath, png);
+		try {
+			const assetResponse = page.waitForResponse((response) =>
+				response.url().includes(`/api/sessions/${scenario.sessionId}/markdown-image`),
+			);
+			await submit(page, `MARKDOWN_LOCAL_IMAGE:${relativePath}`);
+			const response = await assetResponse;
+			expect(response.status()).toBe(200);
+			expect(response.headers()["content-type"]).toBe("image/png");
+
+			const image = page.getByTestId("session-markdown-image");
+			await expect(image).toHaveAttribute("alt", "Session local screenshot", { timeout: 20_000 });
+			await expect.poll(() => image.evaluate((element: HTMLImageElement) => element.naturalWidth)).toBe(1);
+
+			await page.reload();
+			await expect(image).toHaveAttribute("alt", "Session local screenshot", { timeout: 20_000 });
+			await expect.poll(() => image.evaluate((element: HTMLImageElement) => element.naturalWidth)).toBe(1);
+		} finally {
+			fs.rmSync(imagePath, { force: true });
+			await scenario.cleanup();
+		}
+	});
 
 	test("idle and busy prompts keep one visible carrier from acceptance through transcript surfacing", async ({ page, gateway }) => {
 		const scenario = await createScenario(page, gateway);

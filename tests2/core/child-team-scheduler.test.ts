@@ -15,10 +15,11 @@
  * synchronously starts the next eligible queued child (the semaphore IS the
  * scheduler — no poll loop). Live `PATCH /policy` resizes apply in place.
  */
-import { describe, it } from "vitest";
+import { describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 
 import { ChildTeamScheduler, type SchedulerChildView } from "../../src/server/agent/child-team-scheduler.ts";
+import { VerificationHarness } from "../../src/server/agent/verification-harness.ts";
 
 interface FakeChild extends SchedulerChildView { id: string; }
 
@@ -152,6 +153,23 @@ describe("ChildTeamScheduler — per-root concurrency cap", () => {
 		fx.addChild("orphan", { rootGoalId: undefined, parentGoalId: undefined });
 		assert.equal(fx.scheduler.requestStart("orphan"), "started");
 		assert.deepEqual(fx.started, ["orphan"]);
+	});
+
+	it("adopts a live team without an in-memory permit and leaves capacity for parked work", () => {
+		const root = "root"; const live = "live"; const parked = "parked"; const started: string[] = [];
+		const children = new Map<string, FakeChild>([
+			[live, { id: live, rootGoalId: root }],
+			[parked, { id: parked, rootGoalId: root }],
+		]);
+		const scheduler = new ChildTeamScheduler({
+			resolveCap: () => 1, getChild: id => children.get(id),
+			hasLiveTeam: id => id === live,
+			startChildTeam: id => { started.push(id); },
+		});
+		assert.equal(scheduler.requestStart(live), "started");
+		assert.equal(scheduler.pendingCount(root), 0);
+		assert.equal(scheduler.requestStart(parked), "started");
+		assert.deepEqual(started, [parked], "the live lead neither restarts nor consumes a permit");
 	});
 
 	it("notifyTerminal is idempotent / a no-op for an unknown child", () => {
@@ -298,7 +316,7 @@ describe("ChildTeamScheduler — pause awareness (no paused start; no permit lea
 });
 
 describe("ChildTeamScheduler — start-failure never leaks a permit", () => {
-	it("releases the permit + re-enqueues the child when startChildTeam throws synchronously", () => {
+	it("releases the permit + re-enqueues the child when startChildTeam throws synchronously", async () => {
 		const ROOT = "r";
 		const children = new Map<string, FakeChild>([
 			["x", { id: "x", state: "todo", rootGoalId: ROOT, parentGoalId: ROOT }],
@@ -317,8 +335,10 @@ describe("ChildTeamScheduler — start-failure never leaks a permit", () => {
 		assert.equal(scheduler.requestStart("x"), "capacity-blocked");
 		assert.equal(scheduler.pendingCount(ROOT), 1);
 		assert.deepEqual(started, []);
-		// The freed permit is reusable: re-drive starts x (now succeeds).
+		// The retry is timer-owned, so a manual drain cannot spin it immediately.
 		scheduler.startNextEligible(ROOT);
+		assert.deepEqual(started, []);
+		await new Promise(resolve => setTimeout(resolve, 120));
 		assert.deepEqual(started, ["x"]);
 		assert.equal(scheduler.pendingCount(ROOT), 0);
 	});
@@ -363,9 +383,49 @@ describe("ChildTeamScheduler — start-failure never leaks a permit", () => {
 		// y reaches a terminal event → frees the permit → x retries and now succeeds.
 		children.get("y")!.archived = true;
 		scheduler.notifyTerminal("y");
-		await Promise.resolve();
-		assert.deepEqual(started, ["y", "x"], "x retried into the freed permit (no deadlock)");
+		await new Promise(resolve => setTimeout(resolve, 120));
+		assert.deepEqual(started, ["y", "x"], "x retried after backoff into the freed permit (no deadlock)");
 		assert.equal(scheduler.pendingCount(ROOT), 0);
+	});
+
+	it("drops an immediate async TEAM_ALREADY_ACTIVE failure without a retry storm", async () => {
+		// This models the outage path: an active team remains incorrectly queued and
+		// every scheduled start rejects in an immediately-settling microtask. The
+		// local fuse makes the current buggy scheduler settle instead of starving
+		// the test process forever; a fixed scheduler must stop after attempt one.
+		const ROOT = "r";
+		const childId = "already-active";
+		const children = new Map<string, FakeChild>([
+			[childId, { id: childId, state: "todo", rootGoalId: ROOT, parentGoalId: ROOT }],
+		]);
+		const rejectionFuse = 4;
+		let scheduledStartCalls = 0;
+		const scheduler = new ChildTeamScheduler({
+			resolveCap: () => 1,
+			getChild: (id) => children.get(id),
+			startChildTeam: () => {
+				scheduledStartCalls++;
+				if (scheduledStartCalls <= rejectionFuse) {
+					return Promise.reject(Object.assign(new Error("Team already active"), {
+						code: "TEAM_ALREADY_ACTIVE",
+					}));
+				}
+				return Promise.resolve();
+			},
+		});
+
+		assert.equal(scheduler.requestStart(childId), "started");
+		// Each rejection and re-drive occupies a distinct microtask. The extra turn
+		// observes the fuse's resolved call and proves this baseline-safe fixture has
+		// no remaining detached rejection.
+		for (let turn = 0; turn <= rejectionFuse; turn++) await Promise.resolve();
+
+		assert.equal(
+			scheduledStartCalls,
+			1,
+			"SCHEDULER_RETRY_STORM: TEAM_ALREADY_ACTIVE must be attempted exactly once; no immediate scheduler re-drive is allowed",
+		);
+		assert.equal(scheduler.pendingCount(ROOT), 0, "permanent TEAM_ALREADY_ACTIVE is removed from pending work");
 	});
 
 	it("does NOT double-release when a terminal event races an async start rejection", async () => {
@@ -407,6 +467,200 @@ describe("ChildTeamScheduler — start-failure never leaks a permit", () => {
 		assert.equal(scheduler.requestStart("y"), "started");
 		assert.deepEqual(started, ["y"]);
 		assert.equal(scheduler.pendingCount(ROOT), 0, "x not re-enqueued by the late rejection");
+	});
+});
+
+describe("VerificationHarness scheduled start idempotency", () => {
+	it("forwards explicitIdempotent in both ready and preparing branches", async () => {
+		for (const setupStatus of ["ready", "preparing"] as const) {
+			const startTeam = vi.fn(async () => ({}));
+			const goal = { id: "child", state: "todo", setupStatus, archived: false, paused: false };
+			const goalManager: any = {
+				getGoal: () => goal, updateGoal: async () => true,
+				setupWorktreeAndStartTeam: async (_id: string, start: () => Promise<unknown>) => start(),
+			};
+			const harness: any = Object.create(VerificationHarness.prototype);
+			harness.projectContextManager = { getContextForGoal: () => ({ goalManager }) };
+			harness.teamManager = { startTeam };
+			harness.broadcastFn = vi.fn();
+			await harness._startScheduledChildTeam("child");
+			assert.deepEqual(startTeam.mock.calls[0], ["child", { explicitIdempotent: true }]);
+		}
+	});
+});
+
+describe("ChildTeamScheduler — bounded recovery", () => {
+	it("terminally discards every permanent TEAM_ALREADY_ACTIVE failure exactly once", async () => {
+		const root = "root"; const child = "child";
+		const children = new Map([[child, { id: child, rootGoalId: root } as FakeChild]]);
+		const recovery: any[] = []; const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			const scheduler = new ChildTeamScheduler({
+				resolveCap: () => 1, getChild: id => children.get(id),
+				startChildTeam: () => Promise.reject(Object.assign(new Error("already active"), { code: "TEAM_ALREADY_ACTIVE" })),
+				onRecovery: r => recovery.push(r),
+			});
+			scheduler.requestStart(child);
+			await Promise.resolve(); await Promise.resolve();
+			assert.equal(scheduler.pendingCount(root), 0);
+			assert.equal(recovery.length, 1);
+			assert.equal(recovery[0].code, "TEAM_ALREADY_ACTIVE");
+			assert.equal(error.mock.calls.filter(c => c[0] === "[scheduler] terminal child start failure").length, 1);
+		} finally { error.mockRestore(); }
+	});
+
+	it("backs transient failures off through injected timers then publishes one retry-exhausted stop", () => {
+		const root = "root"; const child = "child";
+		const timers: Array<{ callback: () => void; delay: number }> = []; const delays: number[] = []; const recovery: any[] = [];
+		const scheduler = new ChildTeamScheduler({
+			resolveCap: () => 1, getChild: () => ({ id: child, rootGoalId: root } as FakeChild),
+			startChildTeam: () => { throw Object.assign(new Error("worktree busy"), { code: "WORKTREE_BUSY" }); },
+			setTimer: (callback, delay) => { delays.push(delay); timers.push({ callback, delay }); return timers.length as any; },
+			clearTimer: () => {}, onRecovery: r => recovery.push(r),
+		});
+		assert.equal(scheduler.requestStart(child), "capacity-blocked");
+		while (timers.length) timers.shift()!.callback();
+		assert.deepEqual(delays, [100, 200, 400, 800, 1_600, 3_200, 5_000], "retry delay grows exponentially through the generous finite cap");
+		assert.equal(recovery.length, 1);
+		assert.equal(recovery[0].code, "RETRY_EXHAUSTED");
+		assert.equal(scheduler.pendingCount(root), 0);
+	});
+
+	it("repairs TEAM_LEAD_UNAVAILABLE then performs exactly one idempotent retry", async () => {
+		const root = "root"; const child = "child"; const timers: Array<() => void> = [];
+		let starts = 0; let repairs = 0;
+		const scheduler = new ChildTeamScheduler({
+			resolveCap: () => 1, getChild: () => ({ id: child, rootGoalId: root } as FakeChild),
+			startChildTeam: () => ++starts === 1
+				? Promise.reject(Object.assign(new Error("lead terminated"), { code: "TEAM_LEAD_UNAVAILABLE" }))
+				: Promise.resolve(),
+			repairUnavailableLead: async () => { repairs++; },
+			setTimer: callback => { timers.push(callback); return timers.length as any; }, clearTimer: () => {},
+		});
+		scheduler.requestStart(child);
+		for (let i = 0; i < 4; i++) await Promise.resolve();
+		assert.equal(repairs, 1); assert.equal(timers.length, 1);
+		timers.shift()!();
+		await Promise.resolve();
+		assert.equal(starts, 2, "repair gets one retry, not a retry loop");
+		assert.equal(scheduler.pendingCount(root), 0);
+	});
+
+	it("watchdog leaves delayed retries intact and clears root recovery after its window", () => {
+		const root = "root"; let now = 0; const cleared: string[] = []; const recovery: any[] = [];
+		const timers: Array<() => void> = [];
+		const scheduler = new ChildTeamScheduler({
+			resolveCap: () => 1, now: () => now,
+			getChild: () => ({ id: "child", rootGoalId: root } as FakeChild),
+			startChildTeam: () => { throw Object.assign(new Error("busy"), { code: "WORKTREE_BUSY" }); },
+			setTimer: callback => { timers.push(callback); return timers.length as any; }, clearTimer: () => { throw new Error("breaker must not cancel delayed retry"); },
+			onRootRecoveryCleared: id => cleared.push(id), onRecovery: r => recovery.push(r),
+		});
+		scheduler.requestStart("child");
+		for (let i = 0; i < 33; i++) (scheduler as any)._recordUnproductiveRedrive(root);
+		assert.equal(timers.length, 1, "existing delayed retry survives the trip");
+		assert.deepEqual(recovery[0]?.affectedChildGoalIds, ["child"], "breaker captures durable restart intent");
+		now = 1_001;
+		// A normal scheduler entry after the window automatically clears the
+		// visible root stop; it does not depend on a watchdog timer.
+		scheduler.startNextEligible(root);
+		assert.deepEqual(cleared, [root]);
+	});
+
+	it("explicit root retry clears its in-memory fuse without consuming durable recovery", () => {
+		const root = "root"; const child = "child"; const cleared: string[] = []; const started: string[] = [];
+		const scheduler = new ChildTeamScheduler({
+			resolveCap: () => 1, getChild: () => ({ id: child, rootGoalId: root } as FakeChild),
+			startChildTeam: id => { started.push(id); }, onRootRecoveryCleared: id => cleared.push(id),
+		});
+		scheduler.getSemaphore(root);
+		(scheduler as any)._enqueue(root, child);
+		for (let i = 0; i < 33; i++) (scheduler as any)._recordUnproductiveRedrive(root);
+
+		scheduler.retryRoot(root);
+
+		assert.deepEqual(started, [child], "explicit retry re-drives the root queue");
+		assert.deepEqual(cleared, [], "the route remains the sole durable-recovery consume owner");
+	});
+
+	it("progress clears a tripped watchdog and notifies durable recovery", () => {
+		const root = "root"; const child = "child"; const cleared: string[] = [];
+		const scheduler = new ChildTeamScheduler({
+			resolveCap: () => 1, getChild: () => ({ id: child, rootGoalId: root } as FakeChild),
+			startChildTeam: () => {}, onRootRecoveryCleared: id => cleared.push(id),
+		});
+		for (let i = 0; i < 33; i++) (scheduler as any)._recordUnproductiveRedrive(root);
+
+		scheduler.requestStart(child);
+
+		assert.deepEqual(cleared, [root], "normal fresh work still clears the visible root recovery");
+	});
+
+	it("inline watchdog trips only an unproductive root and healthy volume never trips", () => {
+		const root = "root"; const other = "other"; const recovery: any[] = [];
+		let now = 0;
+		const scheduler = new ChildTeamScheduler({
+			resolveCap: () => 100, now: () => now, getChild: id => ({ id, rootGoalId: id.startsWith("other") ? other : root }),
+			startChildTeam: () => {}, onRecovery: r => recovery.push(r),
+		});
+		for (let i = 0; i < 100; i++) scheduler.requestStart(`healthy-${i}`);
+		assert.equal(recovery.length, 0, "productive work is not an immediate re-drive storm");
+		for (let i = 0; i < 33; i++) (scheduler as any)._recordUnproductiveRedrive(root);
+		assert.equal(recovery.length, 1); assert.equal(recovery[0].rootGoalId, root);
+		now += 1_001;
+		(scheduler as any)._recordUnproductiveRedrive(other);
+		assert.equal(recovery.length, 1, "other root remains independent");
+	});
+});
+
+describe("ChildTeamScheduler — duplicate request single-flight", () => {
+	it("cap=2: a duplicate deferred success owns one permit and admits the second sibling", async () => {
+		const root = "root";
+		const children = new Map<string, FakeChild>([
+			["a", { id: "a", rootGoalId: root, parentGoalId: root }],
+			["b", { id: "b", rootGoalId: root, parentGoalId: root }],
+			["c", { id: "c", rootGoalId: root, parentGoalId: root }],
+		]);
+		let resolveA!: () => void; const starts: string[] = [];
+		const scheduler = new ChildTeamScheduler({
+			resolveCap: () => 2, getChild: id => children.get(id),
+			startChildTeam: id => {
+				starts.push(id);
+				if (id === "a") return new Promise<void>(resolve => { resolveA = resolve; });
+			},
+		});
+		assert.equal(scheduler.requestStart("a"), "started");
+		assert.equal(scheduler.requestStart("a"), "started", "duplicate must join the held start");
+		assert.equal(scheduler.requestStart("b"), "started", "the second permit remains available");
+		assert.equal(scheduler.requestStart("c"), "capacity-blocked");
+		assert.deepEqual(starts, ["a", "b"], "duplicate did not call the adapter twice");
+		resolveA(); await Promise.resolve();
+		children.get("a")!.archived = true; scheduler.notifyTerminal("a");
+		assert.deepEqual(starts, ["a", "b", "c"], "exactly one released permit progresses the queued sibling");
+	});
+
+	it("cap=1: duplicate deferred failure releases exactly one permit and progresses its sibling", async () => {
+		const root = "root";
+		const children = new Map<string, FakeChild>([
+			["a", { id: "a", rootGoalId: root, parentGoalId: root }],
+			["b", { id: "b", rootGoalId: root, parentGoalId: root }],
+		]);
+		let rejectA!: (err: Error) => void; const starts: string[] = [];
+		const scheduler = new ChildTeamScheduler({
+			resolveCap: () => 1, getChild: id => children.get(id),
+			startChildTeam: id => {
+				if (id === "a") return new Promise<void>((_, reject) => { rejectA = reject; });
+				starts.push(id);
+			},
+			setTimer: () => 1 as any, clearTimer: () => {},
+		});
+		assert.equal(scheduler.requestStart("a"), "started");
+		assert.equal(scheduler.requestStart("a"), "started", "duplicate must join the held start");
+		assert.equal(scheduler.requestStart("b"), "capacity-blocked");
+		rejectA(Object.assign(new Error("busy"), { code: "WORKTREE_BUSY" }));
+		await Promise.resolve(); await Promise.resolve();
+		assert.deepEqual(starts, ["b"], "failure freed one permit for the queued sibling");
+		assert.equal(scheduler.pendingCount(root), 1, "only the timer-owned failed child remains queued");
 	});
 });
 
