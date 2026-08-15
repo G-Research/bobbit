@@ -135,6 +135,35 @@ describe("agent directory resolver", () => {
 		);
 	});
 
+	it("resets the startup singleton when a fixture reinstalls its agent directory", async () => {
+		const mod = await import("../../src/server/bobbit-dir.ts");
+		const previousAgentDir = process.env.BOBBIT_AGENT_DIR;
+		const previousProjectRoot = mod.getProjectRoot();
+		const staleProjectRoot = tempProjectRoot("singleton-stale");
+		const fixtureProjectRoot = tempProjectRoot("singleton-fixture");
+		const staleAgentDir = path.join(os.tmpdir(), "bobbit-agent-dir-singleton-stale");
+		const fixtureAgentDir = path.join(os.tmpdir(), "bobbit-agent-dir-singleton-fixture");
+
+		try {
+			process.env.BOBBIT_AGENT_DIR = staleAgentDir;
+			mod.resetAgentDirStateForTests();
+			mod.setProjectRoot(staleProjectRoot);
+			assert.equal(mod.globalAgentDir() === staleAgentDir, true);
+			assert.equal(mod.getAgentDirState().startup.source, "BOBBIT_AGENT_DIR");
+
+			process.env.BOBBIT_AGENT_DIR = fixtureAgentDir;
+			mod.resetAgentDirStateForTests();
+			mod.setProjectRoot(fixtureProjectRoot);
+			assert.equal(mod.globalAgentDir() === fixtureAgentDir, true);
+			assert.equal(mod.getAgentDirState().startup.source, "BOBBIT_AGENT_DIR");
+		} finally {
+			if (previousAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;
+			else process.env.BOBBIT_AGENT_DIR = previousAgentDir;
+			mod.setProjectRoot(previousProjectRoot);
+			mod.resetAgentDirStateForTests();
+		}
+	});
+
 	it("scaffold and agent-dir runtime leave existing ~/.pi/agent untouched", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-pi-agent-untouched-"));
 		const projectRoot = path.join(root, "project");

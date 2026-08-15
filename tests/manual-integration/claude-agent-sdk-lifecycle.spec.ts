@@ -199,10 +199,13 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			process.env.BOBBIT_SKIP_WORKTREE_POOL = "1";
 			process.env.BOBBIT_NO_OPEN = "1";
 
-			const { setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
+			const { resetAgentDirStateForTests, setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
 			const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
 			const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
 			const { createGateway } = await import("../../dist/server/server.js");
+			// Playwright workers can initialize this startup-pinned singleton before
+			// this fixture reinstalls the operator-owned agent directory.
+			resetAgentDirStateForTests();
 			setProjectRoot(bobbitDir);
 			scaffoldBobbitDir(bobbitDir);
 			token = loadOrCreateToken();
@@ -431,8 +434,10 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			expect(gateway.sessionManager.getSession(created.id)?.status).toBe("terminated");
 		} finally {
 			if (gateway) await gateway.shutdown().catch(() => {});
-			if (existsSync(root)) rmSync(root, { recursive: true, force: true });
 			restoreSmokeEnvironment(originalEnvironment);
+			const { resetAgentDirStateForTests } = await import("../../dist/server/bobbit-dir.js");
+			resetAgentDirStateForTests();
+			if (existsSync(root)) rmSync(root, { recursive: true, force: true });
 		}
 	});
 });
@@ -486,10 +491,13 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			process.env.BOBBIT_SKIP_TITLE_GEN = "1";
 			process.env.BOBBIT_SKIP_WORKTREE_POOL = "1";
 			process.env.BOBBIT_NO_OPEN = "1";
-			const { setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
+			const { resetAgentDirStateForTests, setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
 			const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
 			const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
 			const { createGateway } = await import("../../dist/server/server.js");
+			// Re-resolve the startup-pinned directory after restoring the operator's
+			// isolated agent directory, before gateway startup can read it.
+			resetAgentDirStateForTests();
 			setProjectRoot(bobbitDir);
 			scaffoldBobbitDir(bobbitDir);
 			token = loadOrCreateToken();
@@ -657,8 +665,10 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			expect(gateway.sessionManager.getSession(created.id)?.status).toBe("terminated");
 		} finally {
 			if (gateway) await gateway.shutdown().catch(() => {});
-			if (existsSync(root)) rmSync(root, { recursive: true, force: true });
 			restoreSmokeEnvironment(originalEnvironment);
+			const { resetAgentDirStateForTests } = await import("../../dist/server/bobbit-dir.js");
+			resetAgentDirStateForTests();
+			if (existsSync(root)) rmSync(root, { recursive: true, force: true });
 		}
 	});
 });
