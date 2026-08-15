@@ -1081,13 +1081,6 @@ export interface SessionInfo {
 	/** A compaction end observed while Stop owns the turn; released by replacement. */
 	_reliableCompactionReleaseDeferred?: boolean;
 	/**
-	 * Pi keeps its run active after the final agent_end while post-run work such
-	 * as threshold compaction completes. Only agent_settled proves that a fresh
-	 * prompt RPC can start. Undefined preserves compatibility with old/replayed
-	 * lifecycles that never emitted agent_start/agent_settled.
-	 */
-	_piAgentRunSettled?: boolean;
-	/**
 	 * Latest in-flight `message_update` payload. Set on every `message_update`
 	 * event with a non-empty `event.message`; cleared on `message_end`,
 	 * `agent_end`, and `process_exit`. Used to splice the in-flight row into
@@ -6284,9 +6277,8 @@ export class SessionManager {
 					}
 				}
 				const prefixedDispatch = buildErrorRecoveryPrefix(errorSnippet, dispatchText);
-				const settlementFenced = session._piAgentRunSettled === false;
 				await this.dispatchDirectPrompt(session, prefixedDispatch, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, accepted.id, accepted.id, opts?.streamingBehavior, false, false, opts?.suppressTitleGen);
-				return { status: settlementFenced ? "queued" : "dispatched" };
+				return { status: "dispatched" };
 			}
 			if (session.status === "idle") {
 				this.drainQueue(session);
@@ -6489,15 +6481,14 @@ export class SessionManager {
 			// cleared).
 			// Inject the recovery prefix into the model-facing dispatch text.
 			const prefixedDispatch = buildErrorRecoveryPrefix(errSnippet, dispatchText);
-			const settlementFenced = session._piAgentRunSettled === false;
 			await this.dispatchDirectPrompt(session, prefixedDispatch, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, undefined, undefined, opts?.streamingBehavior, undefined, false, opts?.suppressTitleGen);
-			return { status: settlementFenced ? "queued" : "dispatched" };
+			return { status: "dispatched" };
 		}
 
 		// If agent is idle and queue is empty, dispatch directly. Mark streaming
 		// before awaiting rpcClient.prompt(): Pi 0.77 OpenAI/Codex preflight can be
 		// slow, and clients/API polling must see the turn as in-flight immediately.
-		if (session.status === "idle" && session._piAgentRunSettled !== false && session.promptQueue.isEmpty) {
+		if (session.status === "idle" && session.promptQueue.isEmpty) {
 			if (!opts?.suppressTitleGen) this.tryGenerateTitleFromPrompt(sessionId, text);
 			await this.dispatchDirectPrompt(session, dispatchText, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, undefined, undefined, opts?.streamingBehavior, undefined, false, opts?.suppressTitleGen);
 			return { status: "dispatched" };
@@ -7200,21 +7191,6 @@ export class SessionManager {
 		broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
 	}
 
-	/** Roll back an optimistic prompt dispatch after Pi proves that no run opened. */
-	private rollbackRejectedPromptDispatch(session: SessionInfo): void {
-		// Stop/replacement or a later lifecycle transition owns every non-streaming
-		// state. A late rejection may clean up its exact queue/sidecar attempt, but it
-		// must not settle abort waiters or overwrite a newer status owner.
-		if (session.status !== "streaming") return;
-		session.streamingStartedAt = undefined;
-		this.resolveStoreForSession(session.id).update(session.id, {
-			wasStreaming: false,
-			streamingStartedAt: undefined,
-		});
-		broadcastStatus(session, "idle");
-		this.resolveIdleWaiters(session.id);
-	}
-
 	private async applyDirectProviderEnv(bridgeOptions: RpcBridgeOptions, sandboxed: boolean | undefined, provider?: string): Promise<void> {
 		if (sandboxed) return;
 		bridgeOptions.env = mergeHostAgentProviderEnv(bridgeOptions.env, this.preferencesStore, {
@@ -7398,7 +7374,7 @@ export class SessionManager {
 			this.broadcastQueue(session);
 			return;
 		}
-		this.rollbackRejectedPromptDispatch(session);
+		broadcastStatus(session, "idle");
 		this.broadcastQueue(session);
 		if (this.maybeAutoRetryPromptDeliveryFailure(session, safeReason, source)) {
 			// Bounded retry exhaustion switches regular prompts to manual recovery.
@@ -7468,52 +7444,6 @@ export class SessionManager {
 		// replacement coordinator. All unrelated dispatch remains fenced until the
 		// coordinator releases.
 		if (session.isCompacting || session.status === "aborting" || (replacementKind !== undefined && replacementKind !== "poison-redrive")) return;
-		if (session._piAgentRunSettled === false && replacementKind !== "poison-redrive") {
-			// An accepted stable occurrence already owns its durable queue row. Legacy
-			// and automatic-retry callers have no such row, so create one before
-			// returning; agent_settled will drain the same occurrence exactly once.
-			const existing = durableQueueRowId
-				? session.promptQueue.toArray().find((row) => row.id === durableQueueRowId)
-				: undefined;
-			if (existing) {
-				// Admission created this occurrence before the error-recovery envelope was
-				// known. Preserve its identity/lane/state while durably replacing only the
-				// model-facing payload and dispatch metadata that settlement must replay.
-				Object.assign(existing, {
-					text,
-					images,
-					attachments,
-					isSteered: isSteered ?? false,
-					source,
-					verifierOwned,
-					author,
-					streamingBehavior,
-					coldStart,
-					suppressTitleGen,
-				});
-			} else {
-				const deferred = {
-					id: durableQueueRowId ?? randomUUID(),
-					text,
-					images,
-					attachments,
-					isSteered: isSteered ?? false,
-					createdAt: this.clock.now(),
-					source,
-					verifierOwned,
-					author,
-					streamingBehavior,
-					coldStart,
-					suppressTitleGen,
-				};
-				session.promptQueue.restoreAtFront(deferred);
-			}
-			session.lastPromptText = text;
-			session.lastPromptImages = images;
-			session.lastPromptSource = source;
-			this.broadcastQueue(session);
-			return;
-		}
 		const reliableRow = durableQueueRowId
 			? (session.promptQueue.toArray() as ReliableQueuedMessage[]).find((row) => row.id === durableQueueRowId && row.kind !== undefined)
 			: undefined;
@@ -7582,9 +7512,9 @@ export class SessionManager {
 						dispatchEpoch: prepared.dispatchEpoch,
 					}, { front: true });
 					this.broadcastQueue(session);
-					// Pi rejected before opening a turn; undo every optimistic status plane
-					// so the matching compaction finisher can own the sole redrain.
-					this.rollbackRejectedPromptDispatch(session);
+					// Pi rejected before opening a turn; undo the optimistic idle dispatch
+					// status so the matching compaction finisher can own the sole redrain.
+					broadcastStatus(session, "idle");
 					console.warn(`[session-manager] intent dispatch restored session=${session.id} intent=${reliableRow.id} attempt=${prepared.attemptId} outcome=compaction-active`);
 					return;
 				}
@@ -7599,7 +7529,6 @@ export class SessionManager {
 						attemptId: prepared.attemptId,
 						dispatchEpoch: prepared.dispatchEpoch,
 					}, { front: true });
-					this.rollbackRejectedPromptDispatch(session);
 				} else if (index !== -1) {
 					attempt.state = "uncertain";
 					attempt.retryable = false;
@@ -7687,10 +7616,6 @@ export class SessionManager {
 		if (this.getModelSelectionRecoveryAdmission(session.id).condition) return;
 		if (!this._sessionWriterIsCurrent(session)) return;
 		if (session.isCompacting || session.status === "aborting" || (this._sessionReplacementCoordinators?.has(session.id) ?? false)) return;
-		// agent_end is not Pi's prompt-admission boundary: automatic compaction and
-		// queued continuation handling still run before agent_settled clears the
-		// runtime's active-run guard.
-		if (session._piAgentRunSettled === false) return;
 		if (session.promptQueue.isEmpty) return;
 
 		const reliableNext = (session.promptQueue.toArray() as ReliableQueuedMessage[])
@@ -8055,9 +7980,6 @@ export class SessionManager {
 		}
 
 		if (event.type === "agent_start") {
-			// Pi's run remains active through agent_end post-processing. A later
-			// agent_settled is the sole fresh-prompt admission boundary.
-			session._piAgentRunSettled = false;
 			// The session has begun its turn — clear the boot re-prompt marker so
 			// the set doesn't leak across the process lifetime (restoreSession is
 			// also re-invoked on in-place respawn).
@@ -8111,12 +8033,6 @@ export class SessionManager {
 					session.lastAssistantTerminalIdentity = undefined;
 				}
 				return;
-			}
-			// A synthetic hard-kill terminal has no later Pi settlement event. Synthesize
-			// settlement even when the real final agent_end already performed this turn's
-			// bookkeeping; graceful replacement replay still waits for agent_settled.
-			if (opts?.replacementOwnedTerminal && opts.abortAttemptOutcome !== undefined) {
-				session._piAgentRunSettled = true;
 			}
 			if (session.turnTerminalHandled) return;
 			session.turnTerminalHandled = true;
@@ -8213,10 +8129,8 @@ export class SessionManager {
 				session.recoverDrainAttempts = 0;
 				// A graceful Stop or canonical coordinated prompt performs terminal
 				// bookkeeping while replacement ownership is still held. The coordinator
-				// performs the sole drain after prompt acknowledgement settles. For a
-				// normal Pi turn, agent_end precedes post-run compaction; drainQueue is
-				// fenced until agent_settled clears Pi's active-run guard.
-				if (!deferQueueDrain && session._piAgentRunSettled !== false) this.drainQueue(session);
+				// performs the sole drain after prompt acknowledgement settles.
+				if (!deferQueueDrain) this.drainQueue(session);
 				else if (coordinator && writerIsCurrent && !opts?.replacementOwnedTerminal) {
 					coordinator.drainOnRelease = true;
 				}
@@ -8237,18 +8151,6 @@ export class SessionManager {
 				this._finishSessionSetup(session).catch((err) => {
 					console.error(`[session-manager] Deferred setup error for session ${session.id}:`, err);
 				});
-			}
-		} else if (event.type === "agent_settled") {
-			// Pi sets its internal active-run flag false immediately before this event,
-			// after all retry/compaction/queued-continuation post-processing. New-turn
-			// work must enter Pi here, never synchronously from agent_end.
-			session._piAgentRunSettled = true;
-			if (session.status === "idle"
-				&& !session.lastTurnErrored
-				&& !session.isCompacting
-				&& !deferQueueDrain) {
-				session.recoverDrainAttempts = 0;
-				this.drainQueue(session);
 			}
 		} else if (event.type === "auto_compaction_start" || event.type === "compaction_start") {
 			session.isCompacting = true;
@@ -8397,7 +8299,6 @@ export class SessionManager {
 				reason,
 			});
 		} else if (event.type === "process_exit") {
-			session._piAgentRunSettled = true;
 			session.streamingStartedAt = undefined;
 			this.resolveStoreForSession(session.id).update(session.id, {
 				wasStreaming: false,
@@ -15951,19 +15852,12 @@ export class SessionManager {
 			// The canonical listener is lifecycle-fenced while Stop owns the shared
 			// coordinator. Preserve its terminal sequence and replay bookkeeping once
 			// after graceful settlement; this listener never broadcasts the events.
-			if (event.type === "message_end"
-				|| event.type === "compaction_end"
-				|| event.type === "auto_compaction_end") {
-				deferredTerminalEvents.push(event);
-			}
-			// agent_end is only user-visible terminal output. Pi still owns finishRun,
-			// automatic compaction, and queued continuation work until agent_settled.
-			// Ending the grace race at agent_end recreates the busy prompt race when
-			// coordinator release drains against that still-active run.
+			if (event.type === "message_end") deferredTerminalEvents.push(event);
+			// A retryable agent_end (willRetry:true) means Pi is about to retry the
+			// attempt, not that the run stopped — treating it as settled would end
+			// the grace race early and skip force-kill while the agent is still
+			// live. Only a final (willRetry:false) agent_end settles the abort.
 			if (event.type === "agent_end" && event.willRetry !== true) {
-				deferredTerminalEvents.push(event);
-			}
-			if (event.type === "agent_settled") {
 				deferredTerminalEvents.push(event);
 				this.clock.clearTimeout(settleTimer);
 				unsubSettle();
@@ -16033,25 +15927,6 @@ export class SessionManager {
 		// before the hard kill even though the old live listener never observed it.
 		// The staged switch listener consumes only proven echoes; anything still
 		// unresolved is re-enqueued after replay (or on replacement failure).
-
-		// A hard kill during compaction cannot emit its end event. Finalize that
-		// active epoch as aborted before terminal bookkeeping so isCompacting cannot
-		// permanently fence the durable queue on coordinator release.
-		if (session.isCompacting) {
-			const syntheticCompactionEnd = {
-				type: "compaction_end",
-				reason: session._reliableCompactionReason ?? "threshold",
-				compactionId: session._reliableCompactionId,
-				aborted: true,
-				success: false,
-				error: "compaction interrupted by Stop",
-			};
-			this.handleAgentLifecycle(session, syntheticCompactionEnd, {
-				replacementOwnedTerminal: true,
-				deferQueueDrain: true,
-			});
-			emitSessionEvent(session, syntheticCompactionEnd);
-		}
 
 		// Hard kill cannot emit Pi's terminal lifecycle event. Run the exact same
 		// canonical terminal bookkeeping once before deriving the replacement
