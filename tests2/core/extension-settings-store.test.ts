@@ -3,6 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import yaml from "yaml";
 import {
+	ExtensionSettingsMutationError,
 	ExtensionSettingsRevisionConflictError,
 	ExtensionSettingsStore,
 	ExtensionSettingsUnavailableError,
@@ -393,6 +394,22 @@ describe("extension settings store", () => {
 			values: Object.fromEntries(Array.from({ length: 5 }, (_, index) => [`field${index}`, selection])),
 		})).toThrow();
 		expect(store.getPublicState()).toEqual({ schema: 2, revision: 0, targets: {} });
+	});
+
+	it("rejects merged target selection overflow as an invalid mutation without changing state", () => {
+		const memFs = createMemFs();
+		const config = new ProjectConfigStore("/memfs/merged-aggregate-settings", memFs);
+		const store = new ExtensionSettingsStore(config, new ExtensionSettingsSecretStore("/memfs/merged-aggregate-secrets", memFs));
+		const selection = Array.from({ length: 64 }, (_, index) => `value-${index}`);
+		store.compareAndSwap(ref, 0, {
+			values: Object.fromEntries(Array.from({ length: 4 }, (_, index) => [`field${index}`, selection])),
+		});
+		const before = store.getPublicState();
+
+		expect(() => store.compareAndSwap(ref, before.revision, {
+			values: { field4: ["one-more"] },
+		})).toThrow(ExtensionSettingsMutationError);
+		expect(store.getPublicState()).toEqual(before);
 	});
 
 	it("resolves public and owner-only values independently for each project", () => withTmpDir(root => {

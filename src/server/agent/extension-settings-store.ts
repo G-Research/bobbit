@@ -378,6 +378,20 @@ export class ExtensionSettingsStore {
           next.values[field] = cloneValue(normalized);
         }
       }
+      // Validate the merged record as a mutation before publishing. Per-request
+      // validation above cannot see selections retained by prior writes.
+      let selectedCount = 0;
+      let selectedBytes = 0;
+      for (const value of Object.values(next.values)) {
+        if (Array.isArray(value)) {
+          selectedCount += value.length;
+          selectedBytes += value.reduce((total, member) => total + Buffer.byteLength(member, "utf8"), 0);
+        }
+      }
+      if (selectedCount > MAX_EXTENSION_SETTINGS_MULTI_ENUM_SELECTED_VALUES_PER_TARGET
+        || selectedBytes > MAX_EXTENSION_SETTINGS_MULTI_ENUM_SELECTED_BYTES_PER_TARGET) {
+        throw new ExtensionSettingsMutationError();
+      }
       candidate.targets[key] = next;
     }
     assertState(candidate);
