@@ -7,7 +7,7 @@ import { ansiToHtml, hasAnsi } from "../ui/utils/ansi.js";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { state, renderApp, getGoalSetupUiState, type Goal, type RemoteStateMetadata } from "./state.js";
 import { isHeadquartersProject } from "./headquarters.js";
-import { gatewayFetch, deleteGoal, startTeam, teardownTeamWithDialog, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, refreshGateStatusForGoal, scheduleGateStatusRefreshForGoal, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, pauseGoalWithDialog, resumeGoalWithDialog, isGoalPauseResumeActionPending, parseRemoteStateSnapshot, ACTIVE_PR_POLL_INTERVAL_MS, type RemoteStateSnapshot, type GateState, type GateSignal, type VerificationTimeoutInfo } from "./api.js";
+import { gatewayFetch, deleteGoal, startTeam, teardownTeamWithDialog, getTeamState, fetchGoalGates, fetchRoles, refreshPrStatusCache, refreshGateStatusForGoal, scheduleGateStatusRefreshForGoal, fetchArchivedSessions, archivedSessionsLoaded, fetchGoalGitStatus, pauseGoalWithDialog, resumeGoalWithDialog, isGoalPauseResumeActionPending, parseRemoteStateSnapshot, ACTIVE_PR_POLL_INTERVAL_MS, type RemoteStateSnapshot, type GateState, type GateSignal, type VerificationCancellation, type VerificationCancellationCause, type VerificationTimeoutInfo } from "./api.js";
 import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { GATE_STATUS_CLIENT_EVENT, shouldRefreshActiveVerificationsForEvent, shouldRefreshGateDetailsForEvent, shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
@@ -306,11 +306,13 @@ let setupPollTimer: ReturnType<typeof setInterval> | null = null;
 interface LiveVerification {
 	gateId: string;
 	signalId: string;
-	steps: Array<{ name: string; type: string; status: string; phase?: number; durationMs?: number; output?: string; liveOutput?: string; startedAt: number; sessionId?: string; timeoutSec?: number; timeout?: VerificationTimeoutInfo }>;
+	steps: Array<{ name: string; type: string; status: string; phase?: number; durationMs?: number; output?: string; liveOutput?: string; startedAt: number; sessionId?: string; timeoutSec?: number; timeout?: VerificationTimeoutInfo; cancellation?: VerificationCancellation }>;
 	overallStatus: string;
+	cancellation?: VerificationCancellation;
 	currentPhase?: number;
 }
 let liveVerifications: Map<string, LiveVerification> = new Map();
+const resignallingGateIds = new Set<string>();
 let liveVerifTimer: ReturnType<typeof setInterval> | null = null;
 let expandedLiveStepKeys: Set<string> = new Set();
 let expandedArtifactKeys: Set<string> = new Set();
@@ -1347,6 +1349,7 @@ function handleLiveVerificationEvent(e: Event) {
 				output: detail.output,
 				sessionId: detail.sessionId ?? entry.steps[detail.stepIndex].sessionId,
 				timeout: detail.timeout ?? entry.steps[detail.stepIndex].timeout,
+				cancellation: detail.cancellation ?? entry.steps[detail.stepIndex].cancellation,
 			};
 			renderApp();
 			break;
@@ -1365,6 +1368,7 @@ function handleLiveVerificationEvent(e: Event) {
 			const entry = liveVerifications.get(key);
 			if (entry) {
 				entry.overallStatus = detail.status;
+				entry.cancellation = detail.cancellation;
 			}
 			// Re-fetch gates to update signal history. Some auto-pass gates complete
 			// without a preceding started event, so this must not depend on live state.
@@ -1609,6 +1613,25 @@ function findAssigneeSession(sessionId: string | undefined) {
 	return state.gatewaySessions.find((s) => s.id === sessionId)
 		|| state.archivedSessions.find((s) => s.id === sessionId)
 		|| null;
+}
+
+const CANCELLATION_CAUSE_LABELS: Record<VerificationCancellationCause, string> = {
+	manual: "Cancelled manually",
+	"goal-pause": "Goal paused",
+	superseded: "Superseded by a newer signal",
+	"gate-reset": "Gate reset",
+	bypass: "Gate bypassed",
+	"goal-complete": "Goal completed",
+	"team-teardown": "Team torn down",
+	shelved: "Goal shelved",
+	archive: "Goal archived",
+	"zombie-recovery": "Recovered orphaned verification",
+	"gateway-restart-recovery": "Gateway restarted",
+	unknown: "Cause unavailable (legacy)",
+};
+
+function cancellationCauseLabel(cancellation: VerificationCancellation | undefined): string {
+	return CANCELLATION_CAUSE_LABELS[cancellation?.cause ?? "unknown"];
 }
 
 function formatRelativeTime(timestamp: string | number): string {
@@ -2525,6 +2548,35 @@ async function cancelVerification(gateId: string): Promise<void> {
 	}
 }
 
+/** Explicit only: a cancelled run is historical and is never replayed automatically. */
+async function resignalCancelledVerification(signal: GateSignal): Promise<void> {
+	if (!currentGoalId || currentGoalId !== signal.goalId || resignallingGateIds.has(signal.gateId)) return;
+	resignallingGateIds.add(signal.gateId);
+	renderApp();
+	try {
+		const response = await gatewayFetch(`/api/goals/${encodeURIComponent(currentGoalId)}/gates/${encodeURIComponent(signal.gateId)}/signal`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				sessionId: signal.sessionId,
+				...(signal.content !== undefined ? { content: signal.content } : {}),
+				...(signal.metadata ? { metadata: signal.metadata } : {}),
+			}),
+		});
+		if (response.ok) {
+			gates = await fetchGoalGates(currentGoalId);
+			await refreshDashboardGoal();
+		} else {
+			console.error("Failed to re-signal gate:", await response.text());
+		}
+	} catch (err) {
+		console.error("Failed to re-signal gate:", err);
+	} finally {
+		resignallingGateIds.delete(signal.gateId);
+		renderApp();
+	}
+}
+
 function toggleSignalExpand(signalId: string): void {
 	if (expandedSignalIds.has(signalId)) {
 		expandedSignalIds.delete(signalId);
@@ -3028,6 +3080,15 @@ function renderGateDetail(
 
 function renderSignalEntry(signal: GateSignal): TemplateResult {
 	const vStatus = signal.verification.status;
+	const cancellation = vStatus === "cancelled" ? signal.verification.cancellation : undefined;
+	const causeLabel = cancellationCauseLabel(cancellation);
+	const gate = gates.find(candidate => candidate.gateId === signal.gateId);
+	const latestCancelledSignal = [...(gate?.signals ?? [])].reverse().find(candidate => candidate.verification.status === "cancelled");
+	const canResignal = vStatus === "cancelled"
+		&& latestCancelledSignal?.id === signal.id
+		&& gate?.status === "pending"
+		&& !currentGoal?.paused
+		&& !currentGoal?.archived;
 	const isExpanded = expandedSignalIds.has(signal.id);
 	const isFocused = focusedSignalId === signal.id;
 	const shortSha = signal.commitSha ? signal.commitSha.slice(0, 7) : "???????";
@@ -3050,9 +3111,10 @@ function renderSignalEntry(signal: GateSignal): TemplateResult {
 		<div class="signal-entry signal-entry--${vStatus} ${isFocused ? "signal-entry--focused" : ""}" data-testid="goal-dashboard-signal-entry" data-signal-id=${signal.id} data-signal-status=${vStatus} data-focused=${String(isFocused)}>
 			<div class="signal-entry__header" @click=${() => toggleSignalExpand(signal.id)}>
 				<span class="signal-status-badge signal-status-badge--${vStatus}">
-					${vStatus === "passed" ? "\u2713" : vStatus === "failed" ? "\u2717" : "\u23F3"}
+					${vStatus === "passed" ? "\u2713" : vStatus === "failed" ? "\u2717" : vStatus === "cancelled" ? "\u23F8" : "\u23F3"}
 					${vStatus}
 				</span>
+				${vStatus === "cancelled" ? html`<span data-testid="goal-dashboard-signal-cancellation" title=${causeLabel}>${causeLabel}</span>` : nothing}
 				<code class="signal-entry__commit" data-testid="goal-dashboard-signal-commit">${shortSha}</code>
 				<span class="signal-entry__time">${formatRelativeTime(signal.timestamp)}</span>
 				${staleLive ? html`<span class="signal-stale-badge" data-testid="goal-dashboard-signal-stale" title="Verification stopped without completing — cancel and re-signal to retry">interrupted</span>` : nothing}
@@ -3060,8 +3122,16 @@ function renderSignalEntry(signal: GateSignal): TemplateResult {
 					<span class="signal-steps-summary">${livePassedCount}/${liveTotalCount} checks</span>
 				` : signal.verification.steps.length > 0 ? html`
 					<span class="signal-steps-summary">
-						${signal.verification.steps.filter(s => s.passed).length}/${signal.verification.steps.length} checks
+						${signal.verification.steps.filter(s => s.passed || s.status === "passed").length}/${signal.verification.steps.length} checks
 					</span>
+				` : nothing}
+				${canResignal ? html`
+					<button class="cancel-verification-btn" data-testid="goal-dashboard-resignal" ?disabled=${resignallingGateIds.has(signal.gateId)}
+						style="background:var(--primary);border-color:var(--primary);color:var(--primary-foreground);"
+						title="Start a fresh verification for this pending gate"
+						@click=${(e: Event) => { e.stopPropagation(); void resignalCancelledVerification(signal); }}>
+						${resignallingGateIds.has(signal.gateId) ? "Re-signalling…" : "Re-signal gate"}
+					</button>
 				` : nothing}
 				${vStatus === "running" ? html`
 					<button class="cancel-verification-btn" title="Cancel stuck verification"
@@ -3073,6 +3143,13 @@ function renderSignalEntry(signal: GateSignal): TemplateResult {
 			</div>
 			${isExpanded ? html`
 				<div class="signal-entry__body">
+					${vStatus === "cancelled" ? html`
+						<div class="gate-historical-notice" data-testid="goal-dashboard-signal-cancellation">
+							Cancelled — ${causeLabel} · requested ${formatRelativeTime(cancellation?.requestedAt ?? signal.timestamp)}
+							${cancellation?.finalizedAt ? html` · cleanup finished ${formatRelativeTime(cancellation.finalizedAt)}` : nothing}
+							. Gate pending · eligible to run again.
+						</div>
+					` : nothing}
 					${isLive ? renderLiveVerificationSteps(liveEntry!) : vStatus === "running" && signal.verification.steps.length === 0
 						? html`<div class="verify-card verify-card--running" style="padding:8px 10px;">
 							<span class="verify-card__icon verify-card__icon--running">\u25CF</span>
@@ -3085,24 +3162,30 @@ function renderSignalEntry(signal: GateSignal): TemplateResult {
 							</div>`
 						: html`
 						${signal.verification.steps.map((step, si) => {
-							// For in-flight signals seeded by beginVerification, prefer
-							// `step.status` over `step.passed` so waiting/running rows
-							// don't render as failed. Completed signals leave `status`
-							// unset and fall back to the boolean `passed` verdict.
-							const inFlight = vStatus === "running" && step.status && step.status !== "passed" && step.status !== "failed";
-							const stepClass = inFlight
-								? (step.status === "running" ? "running" : step.status === "skipped" ? "skip" : "waiting")
-								: (step.passed ? "pass" : "fail");
-							const stepIcon = inFlight
-								? (step.status === "running" ? "\u25CF" : step.status === "skipped" ? "\u2192" : "\u25CB")
-								: (step.passed ? "\u2713" : "\u2717");
+							// A durable cancelled status takes precedence over the legacy boolean
+							// verdict so interrupted rows never appear as product failures.
+							const cancelled = step.status === "cancelled";
+							const inFlight = !cancelled && vStatus === "running" && step.status && step.status !== "passed" && step.status !== "failed";
+							const stepClass = cancelled
+								? "cancelled"
+								: inFlight
+									? (step.status === "running" ? "running" : step.status === "skipped" ? "skip" : "waiting")
+									: (step.passed || step.status === "passed" ? "pass" : "fail");
+							const stepIcon = cancelled
+								? "\u23F8"
+								: inFlight
+									? (step.status === "running" ? "\u25CF" : step.status === "skipped" ? "\u2192" : "\u25CB")
+									: (step.passed || step.status === "passed" ? "\u2713" : "\u2717");
+							const stepCancellation = step.cancellation ?? cancellation;
+							const interrupted = cancelled && (step.duration_ms > 0 || step.output);
 							return html`
-							<div class="verify-step verify-step--${stepClass}">
+							<div class="verify-step verify-step--${stepClass}" data-step-status=${cancelled ? (interrupted ? "interrupted" : "cancelled") : stepClass}>
 								<div class="verify-step__header">
 									<span class="verify-step__icon">${stepIcon}</span>
 									<span class="verify-step__name">${step.name}</span>
 									<span class="verify-step__type">${step.type}</span>
 									${step.expect ? html`<span class="verify-step__expect">expect: ${step.expect}</span>` : nothing}
+									${cancelled ? html`<span class="verify-step__expect">${interrupted ? "Interrupted" : "Cancelled"} · ${cancellationCauseLabel(stepCancellation)} · ${formatRelativeTime(stepCancellation?.requestedAt ?? cancellation?.requestedAt ?? signal.timestamp)}</span>` : nothing}
 									<span class="verify-step__duration">${step.duration_ms}ms</span>
 								</div>
 								${step.output ? (
@@ -3203,9 +3286,11 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 	// Auto-pass: complete with no steps
 	if (entry.steps.length === 0 && entry.overallStatus !== "running") {
 		const isPassed = entry.overallStatus === "passed";
-		return html`<div class="verify-card verify-card--${isPassed ? "pass" : "fail"}" style="padding:8px 10px;">
-			<span class="verify-card__icon verify-card__icon--${isPassed ? "pass" : "fail"}">${isPassed ? "\u2713" : "\u2717"}</span>
-			<span>${isPassed ? "Passed (no verification)" : "Failed"}</span>
+		const isCancelled = entry.overallStatus === "cancelled";
+		const state = isPassed ? "pass" : isCancelled ? "skipped" : "fail";
+		return html`<div class="verify-card verify-card--${state}" style="padding:8px 10px;">
+			<span class="verify-card__icon verify-card__icon--${state}">${isPassed ? "\u2713" : isCancelled ? "\u23F8" : "\u2717"}</span>
+			<span>${isPassed ? "Passed (no verification)" : isCancelled ? `Cancelled — ${cancellationCauseLabel(entry.cancellation)}` : "Failed"}</span>
 		</div>`;
 	}
 
@@ -3220,8 +3305,10 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 	const passedCount = entry.steps.filter(s => s.status === "passed").length;
 	const failedCount = entry.steps.filter(s => s.status === "failed").length;
 	const skippedCount = entry.steps.filter(s => s.status === "skipped").length;
+	const cancelledCount = entry.steps.filter(s => s.status === "cancelled").length;
 	const totalCount = entry.steps.length;
 	const isDone = entry.overallStatus !== "running";
+	const isCancelled = entry.overallStatus === "cancelled";
 
 	// Determine if steps span multiple phases for phase dividers
 	const phases = new Set(entry.steps.map(s => s.phase ?? 0));
@@ -3233,7 +3320,9 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 				${isDone
 					? entry.overallStatus === "passed"
 						? html`<span class="verify-cards__header-status verify-cards__header-status--pass">\u2713 Verified \u2014 passed</span>`
-						: html`<span class="verify-cards__header-status verify-cards__header-status--fail">\u2717 Verified \u2014 failed${skippedCount > 0 ? ` (${skippedCount} skipped)` : ""}</span>`
+						: isCancelled
+							? html`<span class="verify-cards__header-status verify-cards__header-status--running">\u23F8 Cancelled \u2014 ${cancellationCauseLabel(entry.cancellation)} · ${passedCount} passed, ${cancelledCount} interrupted</span>`
+							: html`<span class="verify-cards__header-status verify-cards__header-status--fail">\u2717 Verified \u2014 failed${skippedCount > 0 ? ` (${skippedCount} skipped)` : ""}</span>`
 					: html`<span class="verify-cards__header-status verify-cards__header-status--running">Verifying \u2014 ${passedCount}/${totalCount} checks passed${failedCount > 0 ? html`, <span style="color:var(--destructive)">${failedCount} failed</span>` : nothing}</span>`
 				}
 			</div>
@@ -3247,19 +3336,20 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 				const isPassed = step.status === "passed";
 				const isSkipped = step.status === "skipped";
 				const isWaiting = step.status === "waiting";
+				const isCancelledStep = step.status === "cancelled";
 				const hasOutput = !!step.output;
 				const isExpanded = expandedLiveStepKeys.has(stepKey);
 				const isLlm = step.type === "llm-review";
 				const isRunningCmd = isRunning && step.type === "command";
 				const clickable = hasOutput || isRunningCmd;
 
-				const cardClass = isWaiting ? "waiting" : isSkipped ? "skipped" : isRunning ? "running" : isPassed ? "pass" : "fail";
-				const iconClass = isWaiting ? "waiting" : isSkipped ? "skipped" : isRunning ? "running" : isPassed ? "pass" : "fail";
-				const icon = isWaiting ? "\u25CB" : isSkipped ? "\u2014" : isRunning ? "\u25CF" : isPassed ? "\u2713" : "\u2717";
+				const cardClass = isWaiting ? "waiting" : isCancelledStep ? "skipped" : isSkipped ? "skipped" : isRunning ? "running" : isPassed ? "pass" : "fail";
+				const iconClass = isWaiting ? "waiting" : isCancelledStep ? "skipped" : isSkipped ? "skipped" : isRunning ? "running" : isPassed ? "pass" : "fail";
+				const icon = isWaiting ? "\u25CB" : isCancelledStep ? "\u23F8" : isSkipped ? "\u2014" : isRunning ? "\u25CF" : isPassed ? "\u2713" : "\u2717";
 
 				return html`
 					${showPhaseDivider ? html`<div class="phase-divider">Phase ${curPhase}</div>` : nothing}
-					<div class="verify-card verify-card--${cardClass}">
+					<div class="verify-card verify-card--${cardClass}" data-step-status=${isCancelledStep ? "interrupted" : step.status}>
 						<div class="verify-card__header ${clickable ? "verify-card__header--clickable" : ""}"
 							@click=${clickable ? () => {
 								if (isRunningCmd) {
@@ -3274,6 +3364,7 @@ function renderLiveVerificationSteps(entry: LiveVerification): TemplateResult {
 							</span>
 							<span class="verify-card__name">${step.name}</span>
 							<span class="verify-card__type-badge ${isLlm ? "verify-card__type-badge--llm" : ""}">${step.type}</span>
+							${isCancelledStep ? html`<span class="verify-card__duration">Interrupted · ${cancellationCauseLabel(step.cancellation ?? entry.cancellation)} · ${formatRelativeTime(step.cancellation?.requestedAt ?? entry.cancellation?.requestedAt ?? Date.now())}</span>` : nothing}
 							<span class="verify-card__duration">
 								${isWaiting ? "" : isRunning ? formatStepElapsed(step.startedAt) : step.durationMs != null ? formatStepDuration(step.durationMs) : ""}
 							</span>
