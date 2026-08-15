@@ -278,13 +278,21 @@ describe.sequential("sandbox extension requirements integration", () => {
 
 	it("recreates only the sandbox whose resolved plan changes", async () => {
 		const created: string[] = [];
-		const shutdown: string[] = [];
-		const init = vi.spyOn(ProjectSandbox.prototype, "init").mockImplementation(async function () { created.push((this as any).options?.projectId ?? "unknown"); });
-		const getStatus = vi.spyOn(ProjectSandbox.prototype, "getStatus").mockImplementation(function () { return { status: "ready", projectId: (this as any).options?.projectId ?? "unknown", containerId: "fixture" } as any; });
+		const removed: string[] = [];
+		const generations = new Map<string, number>();
+		const init = vi.spyOn(ProjectSandbox.prototype, "init").mockImplementation(async function () {
+			const sandbox = this as any;
+			const projectId = sandbox.options?.projectId ?? "unknown";
+			const generation = (generations.get(projectId) ?? 0) + 1;
+			generations.set(projectId, generation);
+			created.push(projectId);
+			sandbox.containerId = `fixture-${projectId}-${generation}`;
+			sandbox._status = "ready";
+		});
+		const remove = vi.spyOn(ProjectSandbox.prototype as any, "_removeContainer").mockImplementation(async (containerId: string) => { removed.push(containerId); });
 		const start = vi.spyOn(ProjectSandbox.prototype, "startHealthMonitor").mockImplementation(() => {});
 		const onHealth = vi.spyOn(ProjectSandbox.prototype, "onHealthEvent").mockImplementation(() => () => {});
 		const stop = vi.spyOn(ProjectSandbox.prototype, "stopHealthMonitor").mockImplementation(() => {});
-		const close = vi.spyOn(ProjectSandbox.prototype, "shutdown").mockImplementation(async function () { shutdown.push((this as any).options?.projectId ?? "unknown"); });
 		try {
 			const plans = new Map([["project-a", { image: "agent:a", fingerprint: "a" }], ["project-b", { image: "agent:b", fingerprint: "b" }]]);
 			const manager = new SandboxManager({ bootstrap: async (projectId) => ({ projectId, projectDir: "/fixture", repoUrl: "file:///fixture", networkName: "fixture", image: plans.get(projectId)!.image, sandboxImageFingerprint: plans.get(projectId)!.fingerprint } as any) });
@@ -293,10 +301,11 @@ describe.sequential("sandbox extension requirements integration", () => {
 			plans.set("project-a", { image: "agent:a-python", fingerprint: "a-python" });
 			await manager.ensureForProject("project-a");
 			expect(created).toEqual(["project-a", "project-b", "project-a"]);
-			expect(shutdown).toEqual(["project-a"]);
-			expect(manager.get("project-b")).toBeTruthy();
+			expect(removed).toEqual(["fixture-project-a-1"]);
+			expect(manager.get("project-a")?.getStatus().containerId).toBe("fixture-project-a-2");
+			expect(manager.get("project-b")?.getStatus().containerId).toBe("fixture-project-b-1");
 		} finally {
-			init.mockRestore(); getStatus.mockRestore(); start.mockRestore(); onHealth.mockRestore(); stop.mockRestore(); close.mockRestore();
+			init.mockRestore(); remove.mockRestore(); start.mockRestore(); onHealth.mockRestore(); stop.mockRestore();
 		}
 	});
 });
