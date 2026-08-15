@@ -2363,6 +2363,8 @@ function renderSettingsField(target: ExtensionSettingsTarget, field: ExtensionSe
 		</select>`;
 	} else if (field.type === "multi-enum") {
 		const selected = canonicalMultiEnum(value) ?? [];
+		const draft = settingsDrafts.get(owner);
+		const usingDefault = draft?.has(field.key) === true && draft.get(field.key) === undefined;
 		const toggle = (option: string, checked: boolean): void => {
 			change(checked ? [...selected, option] : selected.filter((value) => value !== option));
 		};
@@ -2374,7 +2376,7 @@ function renderSettingsField(target: ExtensionSettingsTarget, field: ExtensionSe
 					return html`<label class="market-settings-multi-enum-option" for=${optionId}><input id=${optionId} type="checkbox" data-testid="market-settings-multi-enum-option" data-option-value=${option.value} ?disabled=${busyOwner} .checked=${selected.includes(option.value)} @change=${(event: Event) => toggle(option.value, (event.target as HTMLInputElement).checked)} /><span>${option.label || option.value}</span></label>`;
 				})}
 			</div>
-			<div class="market-settings-multi-enum-summary" data-testid="market-settings-multi-enum-summary">${selected.length === 0 ? "None selected" : selected.length === 1 ? "1 selected" : `${selected.length} selected`}</div>
+			<div class="market-settings-multi-enum-summary" data-testid="market-settings-multi-enum-summary">${usingDefault ? "Using default" : selected.length === 0 ? "None selected" : selected.length === 1 ? "1 selected" : `${selected.length} selected`}</div>
 		</fieldset>`;
 	} else if (field.type === "boolean") {
 		const checked = value === true;

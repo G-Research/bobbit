@@ -119,6 +119,7 @@ describe("Market multi-enum extension settings", () => {
 
 		root.querySelector<HTMLButtonElement>('[data-testid="market-settings-use-default"]')!.click();
 		await waitFor(() => root.querySelector<HTMLInputElement>('[data-testid="market-settings-multi-enum-option"][data-option-value="go"]')?.checked === true, "inherited default selection");
+		await waitFor(() => root.querySelector('[data-testid="market-settings-multi-enum-summary"]')?.textContent === "Using default", "inherited default summary");
 		root.querySelector<HTMLButtonElement>('[data-testid="market-settings-save"]')!.click();
 		await waitFor(() => patches.length === 1, "Use default PATCH");
 		expect(patches[0]).toMatchObject({ values: { languages: null } });
