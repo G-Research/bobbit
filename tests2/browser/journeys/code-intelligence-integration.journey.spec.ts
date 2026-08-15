@@ -9,8 +9,8 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createAstGrepExtension } from "../../../market-packs/code-intelligence/tools/ast/extension.ts";
-import { test, expect, apiFetch, deleteSession, openApp, navigateToHash, sendMessage, waitForSessionStatus } from "../_helpers/journey-fixture.js";
-import { ADD_PROJECT, openAddProjectDialog, preflightAvailable, uniqueDir } from "../_helpers/project-onboarding.js";
+import { test, expect, apiFetch, createGoal, createSession, deleteGoal, deleteSession, openApp, navigateToHash, registerProject, sendMessage, waitForSessionStatus } from "../_helpers/journey-fixture.js";
+import { uniqueDir } from "../_helpers/project-onboarding.js";
 
 const PACK = "code-intelligence";
 const GRAPH_TOOLS = ["graph_affected", "graph_explain", "graph_path", "graph_neighbors", "graph_query", "graph_status"] as const;
@@ -27,6 +27,7 @@ const STATIC_AST_GREP_BINARY = join(
 let workspace = "";
 let sessionId = "";
 let projectId = "";
+let goalId = "";
 const previousCwd = process.env.BOBBIT_CWD;
 const previousAstGrepPath = process.env.BOBBIT_AST_GREP_PATH;
 
@@ -93,6 +94,7 @@ function makeImportFixture(): string {
 
 async function cleanup(): Promise<void> {
 	if (sessionId) await deleteSession(sessionId).catch(() => {});
+	if (goalId) await deleteGoal(goalId).catch(() => {});
 	if (projectId) await apiFetch(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => {});
 	await disablePack();
 	if (workspace) rmSync(workspace, { recursive: true, force: true });
@@ -107,9 +109,8 @@ async function cleanup(): Promise<void> {
 test.describe.configure({ mode: "serial", retries: 0 });
 
 test.describe("Journey: Code Intelligence integration", () => {
-	test("imports normally, enables server-scoped capabilities, queries and reads source, reloads, then cleans up", async ({ page, gateway }, testInfo) => {
+	test("registers a project, verifies an ordinary session context, enables capabilities, queries and reads source, reloads, then cleans up", async ({ page, gateway }) => {
 		test.setTimeout(120_000);
-		if (!(await preflightAvailable())) { testInfo.skip(true, "project preflight endpoint unavailable"); return; }
 		expect(existsSync(STATIC_AST_GREP_BINARY), "the pinned ast-grep test binary must be installed").toBe(true);
 		expect(spawnSync(STATIC_AST_GREP_BINARY, ["--version"], { encoding: "utf8", shell: false }).status).toBe(0);
 
@@ -120,21 +121,32 @@ test.describe("Journey: Code Intelligence integration", () => {
 			await navigateToHash(page, "#/ext/code-intelligence");
 			await expect(page.getByTestId("ext-route-unavailable")).toBeVisible({ timeout: 15_000 });
 
-			// A normal Add Project flow has no Code Intelligence decision or claim.
+			// Register the fixture as a normal project, then create an ordinary general
+			// session for a project-owned goal. This supplies the server-verified project,
+			// component, goal, and working-directory context that the status route needs;
+			// a provisional project-assistant session is intentionally not sufficient.
 			workspace = makeImportFixture();
-			await navigateToHash(page, "#/settings/projects");
-			await openAddProjectDialog(page);
-			const dialog = page.locator(ADD_PROJECT.dialog);
-			await expect(dialog).not.toContainText(/Code Intelligence/i);
-			await dialog.locator(ADD_PROJECT.pickerInput).fill(workspace);
-			await expect(page.locator(ADD_PROJECT.preflightPanel)).toBeVisible({ timeout: 15_000 });
-			await expect.poll(async () => (await page.locator(ADD_PROJECT.preflightPanel).getAttribute("data-has-fail")) ?? "loading", { timeout: 15_000 }).toBe("0");
-			await page.locator("button").filter({ hasText: "Continue" }).first().click();
-			await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 20_000 }).toMatch(/^#\/session\//);
-			sessionId = (await page.evaluate(() => window.location.hash)).replace(/^#\/session\//, "");
+			const project = await registerProject({
+				name: `code-intelligence-browser-${Date.now()}`,
+				rootPath: workspace,
+				components: [{ name: "fixture", repo: "." }],
+			});
+			projectId = project.id;
+			expect(project.provisional).not.toBe(true);
+			const goal = await createGoal({
+				title: `Code Intelligence browser fixture ${Date.now()}`,
+				cwd: workspace,
+				projectId,
+				worktree: false,
+			});
+			goalId = goal.id as string;
+			sessionId = await createSession({ cwd: workspace, projectId, goalId });
 			await waitForSessionStatus(sessionId, "idle");
-			const session = await (await apiFetch(`/api/sessions/${sessionId}`)).json() as { projectId?: string };
-			projectId = session.projectId ?? "";
+			const session = await (await apiFetch(`/api/sessions/${sessionId}`)).json() as {
+				assistantType?: string; cwd?: string; goalId?: string; projectId?: string;
+			};
+			expect(session).toMatchObject({ cwd: workspace, goalId, projectId });
+			expect(session.assistantType).toBeFalsy();
 
 			// The Marketplace control must disclose that this is a server-wide,
 			// explicit activation; use keyboard activation to cover the native toggle.
@@ -218,6 +230,9 @@ test.describe("Journey: Code Intelligence integration", () => {
 			await navigateToHash(page, "#/ext/code-intelligence");
 			const reloadedPanel = page.getByTestId("code-intelligence-status-panel");
 			await expect(reloadedPanel).toBeVisible({ timeout: 20_000 });
+			// Reload restores the enabled route but never auto-starts a status read,
+			// Graphify, or an LSP. A fresh explicit read must rehydrate the same facts.
+			await reloadedPanel.getByTestId("graph-status-load").click();
 			await expect(reloadedPanel).toContainText("TypeScript");
 			await expect(reloadedPanel).toContainText("Go");
 			await expect(reloadedPanel).not.toContainText(/LSP\s+Ready/i);
