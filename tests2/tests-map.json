@@ -2489,6 +2489,24 @@
       }
     },
     {
+      "path": "tests2/core/lsp-capability-status.test.ts",
+      "reason": "Truthful LSP capability-status coverage for structural-only languages, explicit enablement, named toolchain requirements, exact service identity, version compatibility, and ready-state fencing.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/lsp-extension.test.ts",
+      "reason": "Code Intelligence LSP extension coverage for inert defaults, six bounded read-only tools, linked-worktree context, and sanitized unavailable failures.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/integration/language-lsp-worktree.test.ts",
       "reason": "Isolated linked-Git-worktree integration coverage for component-local detection, exact worktree-root request identity, primary-checkout escape rejection, named missing-toolchain degradation, and cleanup.",
       "execution": {
