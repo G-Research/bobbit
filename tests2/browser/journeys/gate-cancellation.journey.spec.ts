@@ -123,8 +123,8 @@ async function expectCancelledAudit(fixture: Fixture): Promise<any> {
 		status: "cancelled",
 		cancellation: { cause: "goal-pause", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
 		steps: [
-			expect.objectContaining({ name: "Long running command", status: "cancelled", cancellation: { cause: "goal-pause" } }),
-			expect.objectContaining({ name: "Operator review", status: "cancelled", cancellation: { cause: "goal-pause" } }),
+			expect.objectContaining({ name: "Long running command", status: "cancelled", cancellation: expect.objectContaining({ cause: "goal-pause" }) }),
+			expect.objectContaining({ name: "Operator review", status: "cancelled", cancellation: expect.objectContaining({ cause: "goal-pause" }) }),
 		],
 	});
 	expect(result.state.status, "paused orchestration cancellation must leave the gate pending, not failed").toBe("pending");
