@@ -280,6 +280,19 @@ describe("message author primitives", () => {
 		]);
 	});
 
+	it("preserves distinct migration carriers for duplicate bare-string records across restart normalization", () => {
+		const persisted = ["same legacy steer", "same legacy steer"];
+		const restored = normalizePersistedInFlightSteers(persisted)!;
+		const restarted = normalizePersistedInFlightSteers(restored)!;
+
+		expect(restored.map((record) => record.promptId)).toEqual([
+			"legacy-inflight-steer:0",
+			"legacy-inflight-steer:1",
+		]);
+		expect(new Set(restored.map((record) => record.promptId)).size).toBe(2);
+		expect(restarted).toEqual(restored);
+	});
+
 	it("keeps authors on in-flight assistant and steer snapshot splices", () => {
 		const agentAuthor: MessageAuthor = { kind: "agent", id: "session:abc", label: "Coder" };
 		const systemAuthor: MessageAuthor = { kind: "system", id: "system:bobbit", label: "Bobbit" };
