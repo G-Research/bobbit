@@ -853,8 +853,8 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(false);
 	});
 
-	it("re-arms an unobserved failed boot continuation on the queued assignRole replacement", async () => {
-		const file = hostTranscript("boot-continuation-rearmed-after-role");
+	it("retains an ambiguous boot continuation as one uncertain owner across queued assignRole", async () => {
+		const file = hostTranscript("boot-continuation-ambiguous-after-role");
 		const bootEntered = deferred<void>();
 		const rejectBoot = deferred<void>();
 		const restoreBridge = recordingBridge(() => {});
@@ -870,7 +870,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 			.mockReturnValueOnce(restoreBridge)
 			.mockReturnValueOnce(roleBridge);
 		registerRpcBridgeFactory(factory);
-		const ps = persisted("boot-continuation-rearmed-after-role", file, { wasStreaming: true });
+		const ps = persisted("boot-continuation-ambiguous-after-role", file, { wasStreaming: true });
 		const manager: any = new SessionManager();
 		manager._testStore = {
 			get: vi.fn(() => ps),
@@ -897,16 +897,86 @@ describe("executable SessionManager rehydration boundaries", () => {
 		]);
 		expect(factory).toHaveBeenCalledTimes(2);
 		expect(restoreBridge.promptWhenReady).toHaveBeenCalledTimes(1);
-		expect(roleBridge.promptWhenReady).toHaveBeenCalledTimes(1);
+		expect(roleBridge.promptWhenReady).not.toHaveBeenCalled();
+		expect(roleBridge.prompt).not.toHaveBeenCalled();
+
+		const canonical = manager.sessions.get(ps.id);
+		const intentId = `boot-continuation:${ps.id}`;
+		expect(canonical?.rpcClient).toBe(roleBridge);
+		expect(canonical?.restoreStartupWasStreaming).toBe(true);
+		expect(ps.wasStreaming).toBe(true);
+		expect(canonical?.inFlightSteerTexts).toEqual([
+			expect.objectContaining({
+				intentId,
+				promptId: intentId,
+				state: "uncertain",
+				retryable: false,
+			}),
+		]);
+		expect(canonical?.inFlightSteerTexts?.every((record: any) => record.intentId)).toBe(true);
+		expect(manager.projectDeliveryOutbox(ps.id)).toEqual([
+			expect.objectContaining({
+				id: intentId,
+				deliveryState: "uncertain",
+				retryable: false,
+			}),
+		]);
+		const sidecar = readAuthorSidecar(ps.id);
+		expect(sidecar).toHaveLength(1);
+		expect(sidecar[0]).toMatchObject({ intentId });
+		expect(sidecar[0]?.settlement).toBeUndefined();
+		expect(sidecar.some((binding) => binding.settlement?.outcome === "cancelled")).toBe(false);
+		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(false);
+	});
+
+	it("retries a boot continuation on queued assignRole only after explicit no-start rejection", async () => {
+		const file = hostTranscript("boot-continuation-no-start-after-role");
+		const bootEntered = deferred<void>();
+		const rejectBoot = deferred<void>();
+		const restoreBridge = recordingBridge(() => {});
+		const roleBridge = recordingBridge(() => {});
+		restoreBridge.promptWhenReady = vi.fn(async () => {
+			bootEntered.resolve();
+			await rejectBoot.promise;
+			return { success: false, error: "fixture boot continuation preflight rejection" };
+		});
+		roleBridge.promptWhenReady = vi.fn(async () => ({ success: true }));
+		const factory = vi.fn()
+			.mockReturnValueOnce(restoreBridge)
+			.mockReturnValueOnce(roleBridge);
+		registerRpcBridgeFactory(factory);
+		const ps = persisted("boot-continuation-no-start-after-role", file, { wasStreaming: true });
+		const manager: any = new SessionManager();
+		manager._testStore = {
+			get: vi.fn(() => ps),
+			getLive: vi.fn(() => [ps]),
+			update: vi.fn((_id: string, updates: Record<string, unknown>) => Object.assign(ps, updates)),
+			put: vi.fn(() => {}),
+			archive: vi.fn(() => {}),
+		};
+		managers.push(manager);
+		vi.spyOn(console, "error").mockImplementation(() => {});
+
+		const restore = manager._restoreSessionCoalesced(ps);
+		await bootEntered.promise;
+		const assignment = manager.assignRole(ps.id, {
+			name: "replacement-role",
+			promptTemplate: "Replacement role",
+			accessory: "replacement-accessory",
+		});
+		rejectBoot.resolve();
+
+		await expect(Promise.all([restore, assignment])).resolves.toEqual([
+			expect.objectContaining({ id: ps.id }),
+			true,
+		]);
+		expect(restoreBridge.promptWhenReady).toHaveBeenCalledTimes(1);
 		expect(roleBridge.promptWhenReady).toHaveBeenCalledWith(
 			expect.stringMatching(/server restarted while you were mid-turn/i),
 			undefined,
 			{ streamingBehavior: "followUp" },
 		);
-		expect(roleBridge.prompt).not.toHaveBeenCalled();
-		const canonical = manager.sessions.get(ps.id);
-		expect(canonical?.rpcClient).toBe(roleBridge);
-		expect(canonical?.restoreStartupWasStreaming).toBe(false);
+		expect(manager.sessions.get(ps.id)?.restoreStartupWasStreaming).toBe(false);
 		expect(ps.wasStreaming).toBe(false);
 		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(false);
 	});
