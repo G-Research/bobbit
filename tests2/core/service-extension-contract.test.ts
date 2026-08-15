@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+	isServiceInstanceDiscriminator,
+	isServiceInstancePublicRef,
 	isServiceStateTransitionAllowed,
 	normalizeServiceStatus,
 	redactServiceDiagnostic,
@@ -14,6 +16,15 @@ const valid = {
 	restart: "on-failure",
 	ports: [8080],
 	dataDir: "hindsight/data",
+};
+
+const ref = {
+	projectId: "project-a",
+	component: ".",
+	worktreeKey: "1234567890123456789012",
+	packId: "pack",
+	serviceId: "hindsight",
+	discriminator: "default",
 };
 
 describe("service extension contract", () => {
@@ -40,10 +51,20 @@ describe("service extension contract", () => {
 		]) expect(validateServiceExtensionSpec(declaration).ok).toBe(false);
 	});
 
-	it("normalizes the public status enum and never preserves arbitrary detail", () => {
-		expect(normalizeServiceStatus({ id: "hindsight", state: "ready", updatedAt: "2026-01-01T00:00:00.000Z" }))
-		.toEqual({ id: "hindsight", state: "ready", updatedAt: "2026-01-01T00:00:00.000Z" });
-		expect(normalizeServiceStatus({ id: "hindsight", state: "ready", updatedAt: "2026-01-01T00:00:00.000Z", detail: "api-key=secret" })).toBeUndefined();
+	it("validates bounded path-free public identities", () => {
+		expect(isServiceInstanceDiscriminator("typescript")).toBe(true);
+		expect(isServiceInstanceDiscriminator("A".repeat(33))).toBe(false);
+		expect(isServiceInstanceDiscriminator("../escape")).toBe(false);
+		expect(isServiceInstancePublicRef(ref)).toBe(true);
+		expect(isServiceInstancePublicRef({ ...ref, canonicalWorktreeRoot: "/host/repo" })).toBe(false);
+		expect(isServiceInstancePublicRef({ ...ref, worktreeKey: "/host/repo" })).toBe(false);
+	});
+
+	it("normalizes a path-free public status enum and never preserves arbitrary detail", () => {
+		const status = normalizeServiceStatus({ ref, state: "ready", updatedAt: "2026-01-01T00:00:00.000Z" });
+		expect(status).toEqual({ ref, state: "ready", updatedAt: "2026-01-01T00:00:00.000Z" });
+		expect(JSON.stringify(status)).not.toContain("canonicalWorktreeRoot");
+		expect(normalizeServiceStatus({ ref, state: "ready", updatedAt: "2026-01-01T00:00:00.000Z", detail: "api-key=secret" })).toBeUndefined();
 		expect(isServiceStateTransitionAllowed("ready", "failed")).toBe(true);
 		expect(isServiceStateTransitionAllowed("stopped", "ready")).toBe(false);
 	});

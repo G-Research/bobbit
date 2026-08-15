@@ -5,18 +5,14 @@
 
 import {
 	type ServiceExtensionSpec,
+	type ServiceInstancePublicRef,
+	type ServiceInstanceRef,
 	type ServiceRunMode,
 	type ServiceState,
 	type ServiceStatus,
 	type ServiceStatusDetail,
 	validateServiceExtensionSpec,
 } from "./service-extension-contract.js";
-
-export interface ServiceExtensionIdentity {
-	projectId: string;
-	packId: string;
-	serviceId: string;
-}
 
 /** A declaration has already passed active-pack and settings filtering. */
 export interface ActiveServiceExtension {
@@ -36,8 +32,10 @@ export interface ServicePortLease {
 }
 
 export interface ServiceExtensionLaunchRequest {
-	identity: ServiceExtensionIdentity;
+	ref: ServiceInstanceRef;
 	spec: ServiceExtensionSpec;
+	/** Core-derived worktree root. Available only to a core launch adapter. */
+	workingDirectory: string;
 	/** Core-resolved owned directory, never a pack-selected absolute path. */
 	dataDir?: string;
 	/** Runtime-only values, including resolved secrets. This never enters status. */
@@ -59,7 +57,7 @@ export interface ServiceExtensionFilesystem {
 }
 
 export interface ServiceExtensionPortAllocator {
-	lease(identity: ServiceExtensionIdentity, port: number): Promise<ServicePortLease | undefined>;
+	lease(ref: ServiceInstanceRef, port: number): Promise<ServicePortLease | undefined>;
 }
 
 /**
@@ -83,26 +81,26 @@ export interface ServiceExtensionRuntimeDeps {
 	filesystem: ServiceExtensionFilesystem;
 	clock: ServiceExtensionClock;
 	/** Resolve a declared relative dataDir under a project-owned root. */
-	resolveDataDir(identity: ServiceExtensionIdentity, declaredPath: string): string;
+	resolveDataDir(ref: ServiceInstanceRef, declaredPath: string): string;
 	/** Owner-only settings/secret read performed immediately before launch. */
-	resolveSettings?(identity: ServiceExtensionIdentity): Promise<Readonly<Record<string, unknown>>> | Readonly<Record<string, unknown>>;
+	resolveSettings?(ref: ServiceInstanceRef): Promise<Readonly<Record<string, unknown>>> | Readonly<Record<string, unknown>>;
 }
 
 export interface ServiceExtensionRuntime {
-	reconcile(projectId: string): Promise<void>;
-	status(projectId: string, id: string): ServiceStatus | undefined;
-	stop(projectId?: string): Promise<void>;
+	reconcile(ref: ServiceInstanceRef): Promise<void>;
+	status(ref: ServiceInstancePublicRef): ServiceStatus | undefined;
+	stop(ref?: ServiceInstanceRef): Promise<void>;
 }
 
 interface DesiredService {
-	identity: ServiceExtensionIdentity;
+	ref: ServiceInstanceRef;
 	spec: ServiceExtensionSpec;
 	fingerprint: string;
 }
 
 interface LifecycleFence {
 	global: number;
-	project: number;
+	instance: number;
 }
 
 interface RunningService extends DesiredService {
@@ -119,12 +117,19 @@ interface RunningService extends DesiredService {
 
 const READINESS_POLL_MS = 100;
 
-function identityKey(identity: ServiceExtensionIdentity): string {
-	return `${identity.projectId}\u0000${identity.packId}\u0000${identity.serviceId}`;
-}
-
-function projectKey(projectId: string): string {
-	return `${projectId}\u0000`;
+/**
+ * The internal lifecycle, queue, lease, and fence key. The canonical root is
+ * intentionally included here and intentionally omitted from ServiceStatus.
+ */
+export function serviceInstanceKey(ref: ServiceInstanceRef): string {
+	return [
+		ref.projectId,
+		ref.component,
+		ref.canonicalWorktreeRoot,
+		ref.packId,
+		ref.serviceId,
+		ref.discriminator,
+	].join("\0");
 }
 
 function fingerprint(spec: ServiceExtensionSpec): string {
@@ -134,144 +139,159 @@ function fingerprint(spec: ServiceExtensionSpec): string {
 	});
 }
 
+function publicRef(ref: ServiceInstanceRef): ServiceInstancePublicRef {
+	return {
+		projectId: ref.projectId,
+		component: ref.component,
+		worktreeKey: ref.worktreeKey,
+		packId: ref.packId,
+		serviceId: ref.serviceId,
+		discriminator: ref.discriminator,
+	};
+}
+
+function samePublicRef(left: ServiceInstancePublicRef, right: ServiceInstancePublicRef): boolean {
+	return left.projectId === right.projectId
+		&& left.component === right.component
+		&& left.worktreeKey === right.worktreeKey
+		&& left.packId === right.packId
+		&& left.serviceId === right.serviceId
+		&& left.discriminator === right.discriminator;
+}
+
 async function releaseLeases(leases: readonly ServicePortLease[]): Promise<void> {
 	await Promise.allSettled(leases.map(lease => lease.release()));
 }
 
 /**
- * Maintains one core-owned process per `(project, pack, service)` identity.
- * Per-identity queues make process exit/start/stop races generation-safe while
- * allowing independent projects and services to make progress concurrently.
+ * Maintains one core-owned process per full ServiceInstanceRef. Per-instance
+ * queues and fences keep linked worktrees, components, and discriminators
+ * independent even when they share a project, pack, and declared service ID.
  */
 export class ServiceExtensionRuntimeManager implements ServiceExtensionRuntime {
 	private readonly desired = new Map<string, DesiredService>();
 	private readonly running = new Map<string, RunningService>();
 	private readonly statuses = new Map<string, ServiceStatus>();
 	private readonly queues = new Map<string, Promise<void>>();
-	private readonly projectGenerations = new Map<string, number>();
+	private readonly instanceGenerations = new Map<string, number>();
 	private globalGeneration = 0;
 	private closed = false;
 	private nextGeneration = 0;
 
 	constructor(private readonly deps: ServiceExtensionRuntimeDeps) {}
 
-	async reconcile(projectId: string): Promise<void> {
-		const fence = this.openReconcileFence(projectId);
+	async reconcile(ref: ServiceInstanceRef): Promise<void> {
+		const key = serviceInstanceKey(ref);
+		const fence = this.openReconcileFence(key);
 		if (!fence) return;
 
 		let declarations: readonly ActiveServiceExtension[];
 		try {
-			declarations = await this.deps.listActive(projectId);
+			declarations = await this.deps.listActive(ref.projectId);
 		} catch {
-			if (!this.isCurrent(fence, projectId)) return;
-			// A settings/registry read failure never justifies retaining a stale process.
-			const stale = [...this.desired.entries()].filter(([key]) => key.startsWith(projectKey(projectId)));
-			for (const [key] of stale) this.desired.delete(key);
-			await Promise.all(stale.map(([key, desired]) => this.enqueue(key, async () => {
-				if (!this.isCurrent(fence, projectId)) return;
+			if (!this.isCurrent(fence, key)) return;
+			this.desired.delete(key);
+			await this.enqueue(key, async () => {
+				if (!this.isCurrent(fence, key)) return;
 				const running = this.running.get(key);
 				if (running) await this.stopRunning(key, running);
-				if (this.isCurrent(fence, projectId)) this.publish(desired.identity, "failed", "configuration-unavailable");
-			})));
+				if (this.isCurrent(fence, key)) this.publish(ref, "failed", "configuration-unavailable");
+			});
 			return;
 		}
-		if (!this.isCurrent(fence, projectId)) return;
+		if (!this.isCurrent(fence, key)) return;
 
-		const wanted = new Map<string, DesiredService>();
+		let selected: ServiceExtensionSpec | undefined;
+		let duplicate = false;
 		for (const declaration of declarations) {
+			if (declaration.packId !== ref.packId) continue;
 			const validated = validateServiceExtensionSpec(declaration.spec);
-			if (!validated.ok) continue; // Registry input is untrusted; a bad declaration never starts.
-			const identity = { projectId, packId: declaration.packId, serviceId: validated.value.id };
-			// A denied declaration is removed like any inactive declaration, so
-			// ordinary reconciliation stops an already-running service.
-			if (!this.isAuthorized(identity)) continue;
-			const key = identityKey(identity);
-			if (wanted.has(key)) continue; // Duplicate active identity is fail-closed.
-			wanted.set(key, { identity, spec: validated.value, fingerprint: fingerprint(validated.value) });
+			if (!validated.ok || validated.value.id !== ref.serviceId) continue;
+			if (selected) duplicate = true;
+			else selected = validated.value;
 		}
-		if (!this.isCurrent(fence, projectId)) return;
 
-		const currentKeys = [...this.desired.keys()].filter(key => key.startsWith(projectKey(projectId)));
-		for (const key of currentKeys) this.desired.delete(key);
-		for (const [key, value] of wanted) this.desired.set(key, value);
+		this.desired.delete(key);
+		if (selected && !duplicate && this.isAuthorized(ref)) {
+			this.desired.set(key, { ref, spec: selected, fingerprint: fingerprint(selected) });
+		}
+		if (!this.isCurrent(fence, key)) return;
 
-		const affected = new Set<string>([
-			...currentKeys,
-			...wanted.keys(),
-			...[...this.running.keys()].filter(key => key.startsWith(projectKey(projectId))),
-		]);
-		await Promise.all([...affected].map(key => this.enqueue(key, async () => {
-			if (!this.isCurrent(fence, projectId)) return;
+		await this.enqueue(key, async () => {
+			if (!this.isCurrent(fence, key)) return;
 			const running = this.running.get(key);
 			const desired = this.desired.get(key);
+			// Re-read the deny-wins grant after waiting for this instance queue.
+			if (desired && !this.isAuthorized(ref)) {
+				this.desired.delete(key);
+				if (running) await this.stopRunning(key, running);
+				return;
+			}
 			if (!desired) {
 				if (running) await this.stopRunning(key, running);
 				return;
 			}
 			if (running && running.fingerprint !== desired.fingerprint) {
 				await this.stopRunning(key, running);
-				if (!this.isCurrent(fence, projectId)) return;
+				if (!this.isCurrent(fence, key)) return;
 			}
 			if (!this.running.has(key)) await this.start(key, desired, 0, fence);
 			else this.running.get(key)!.fence = fence;
-		})));
+		});
 	}
 
-	status(projectId: string, id: string): ServiceStatus | undefined {
-		// IDs are pack-local. Status intentionally refuses an ambiguous cross-pack projection.
-		const matches = [...this.statuses.entries()]
-			.filter(([key, status]) => key.startsWith(projectKey(projectId)) && status.id === id)
-			.map(([, status]) => status);
+	status(ref: ServiceInstancePublicRef): ServiceStatus | undefined {
+		const matches = [...this.statuses.values()].filter(status => samePublicRef(status.ref, ref));
 		if (matches.length !== 1) return undefined;
-		return { ...matches[0] };
+		const status = matches[0];
+		return { ...status, ref: { ...status.ref } };
 	}
 
-	async stop(projectId?: string): Promise<void> {
-		if (projectId === undefined) {
+	async stop(ref?: ServiceInstanceRef): Promise<void> {
+		if (ref === undefined) {
 			this.closed = true;
 			this.globalGeneration++;
 			this.desired.clear();
-		} else {
-			this.projectGenerations.set(projectId, (this.projectGenerations.get(projectId) ?? 0) + 1);
-			for (const key of [...this.desired.keys()]) {
-				if (key.startsWith(projectKey(projectId))) this.desired.delete(key);
-			}
+			await Promise.all([...this.running.keys()].map(key => this.enqueue(key, async () => {
+				const running = this.running.get(key);
+				if (running) await this.stopRunning(key, running);
+			})));
+			return;
 		}
-		const keys = [...this.running.keys()].filter(key => projectId === undefined || key.startsWith(projectKey(projectId)));
-		await Promise.all(keys.map(key => this.enqueue(key, async () => {
+
+		const key = serviceInstanceKey(ref);
+		this.instanceGenerations.set(key, (this.instanceGenerations.get(key) ?? 0) + 1);
+		this.desired.delete(key);
+		await this.enqueue(key, async () => {
 			const running = this.running.get(key);
 			if (running) await this.stopRunning(key, running);
-		})));
+		});
 	}
 
-	private openReconcileFence(projectId: string): LifecycleFence | undefined {
+	private openReconcileFence(key: string): LifecycleFence | undefined {
 		if (this.closed) return undefined;
-		const project = (this.projectGenerations.get(projectId) ?? 0) + 1;
-		this.projectGenerations.set(projectId, project);
-		return { global: this.globalGeneration, project };
+		const instance = (this.instanceGenerations.get(key) ?? 0) + 1;
+		this.instanceGenerations.set(key, instance);
+		return { global: this.globalGeneration, instance };
 	}
 
-	private isCurrent(fence: LifecycleFence, projectId: string): boolean {
+	private isCurrent(fence: LifecycleFence, key: string): boolean {
 		return !this.closed
 			&& fence.global === this.globalGeneration
-			&& fence.project === this.projectGenerations.get(projectId);
+			&& fence.instance === this.instanceGenerations.get(key);
 	}
 
 	/** Never cache an allow: revoked authorization must win over awaited work. */
-	private isAuthorized(identity: ServiceExtensionIdentity): boolean {
+	private isAuthorized(ref: ServiceInstanceRef): boolean {
 		try {
-			return this.deps.authorize(
-				identity.projectId,
-				{ kind: "pack", packId: identity.packId },
-				"service.manage",
-			).allowed === true;
+			return this.deps.authorize(ref.projectId, { kind: "pack", packId: ref.packId }, "service.manage").allowed === true;
 		} catch {
 			return false;
 		}
 	}
 
-	private canRun(fence: LifecycleFence, identity: ServiceExtensionIdentity): boolean {
-		return this.isCurrent(fence, identity.projectId) && this.isAuthorized(identity);
+	private canRun(fence: LifecycleFence, key: string, ref: ServiceInstanceRef): boolean {
+		return this.isCurrent(fence, key) && this.isAuthorized(ref);
 	}
 
 	private enqueue(key: string, operation: () => Promise<void>): Promise<void> {
@@ -284,82 +304,69 @@ export class ServiceExtensionRuntimeManager implements ServiceExtensionRuntime {
 		return next;
 	}
 
-	private publish(identity: ServiceExtensionIdentity, state: ServiceState, detail?: ServiceStatusDetail): void {
-		this.statuses.set(identityKey(identity), {
-			id: identity.serviceId,
+	private publish(ref: ServiceInstanceRef, state: ServiceState, detail?: ServiceStatusDetail): void {
+		this.statuses.set(serviceInstanceKey(ref), {
+			ref: publicRef(ref),
 			state,
 			updatedAt: this.deps.clock.now().toISOString(),
 			...(detail === undefined ? {} : { detail }),
 		});
 	}
 
+	private request(entry: RunningService): ServiceExtensionLaunchRequest {
+		return {
+			ref: entry.ref,
+			spec: entry.spec,
+			workingDirectory: entry.ref.canonicalWorktreeRoot,
+			...(entry.dataDir === undefined ? {} : { dataDir: entry.dataDir }),
+			...(entry.settings === undefined ? {} : { settings: entry.settings }),
+		};
+	}
+
 	private async start(key: string, desired: DesiredService, restarts: number, fence: LifecycleFence): Promise<void> {
-		if (!this.canRun(fence, desired.identity)) return;
+		if (!this.canRun(fence, key, desired.ref)) return;
 		const entry: RunningService = { ...desired, generation: ++this.nextGeneration, fence, restarts, stopping: false, leases: [] };
 		this.running.set(key, entry);
-		this.publish(entry.identity, "starting", "starting");
+		this.publish(entry.ref, "starting", "starting");
 		try {
-			if (this.deps.resolveSettings) entry.settings = await this.deps.resolveSettings(entry.identity);
-			if (!this.canRun(fence, entry.identity)) {
-				await this.abandonStart(key, entry);
-				return;
-			}
+			if (this.deps.resolveSettings) entry.settings = await this.deps.resolveSettings(entry.ref);
+			if (!this.canRun(fence, key, entry.ref)) return await this.abandonStart(key, entry);
 			if (entry.spec.dataDir !== undefined) {
-				entry.dataDir = this.deps.resolveDataDir(entry.identity, entry.spec.dataDir);
+				entry.dataDir = this.deps.resolveDataDir(entry.ref, entry.spec.dataDir);
 				await this.deps.filesystem.ensureDirectory(entry.dataDir);
-				if (!this.canRun(fence, entry.identity)) {
-					await this.abandonStart(key, entry);
-					return;
-				}
+				if (!this.canRun(fence, key, entry.ref)) return await this.abandonStart(key, entry);
 			}
 			for (const port of entry.spec.ports ?? []) {
-				const lease = await this.deps.ports.lease(entry.identity, port);
-				if (!this.canRun(fence, entry.identity)) {
+				const lease = await this.deps.ports.lease(entry.ref, port);
+				if (!this.canRun(fence, key, entry.ref)) {
 					if (lease) await releaseLeases([lease]);
-					await this.abandonStart(key, entry);
-					return;
+					return await this.abandonStart(key, entry);
 				}
-				if (!lease) {
-					await this.failStart(key, entry, "unhealthy", "port-conflict");
-					return;
-				}
+				if (!lease) return await this.failStart(key, entry, "unhealthy", "port-conflict");
 				entry.leases.push(lease);
 			}
-			const launch = this.deps.launchers[entry.spec.runMode];
-			if (!this.canRun(fence, entry.identity)) {
-				await this.abandonStart(key, entry);
-				return;
-			}
-			entry.process = await launch({ identity: entry.identity, spec: entry.spec, ...(entry.dataDir === undefined ? {} : { dataDir: entry.dataDir }), ...(entry.settings === undefined ? {} : { settings: entry.settings }) });
-			if (!this.canRun(fence, entry.identity)) {
-				await this.abandonStart(key, entry);
-				return;
-			}
+			if (!this.canRun(fence, key, entry.ref)) return await this.abandonStart(key, entry);
+			entry.process = await this.deps.launchers[entry.spec.runMode](this.request(entry));
+			if (!this.canRun(fence, key, entry.ref)) return await this.abandonStart(key, entry);
 			const generation = entry.generation;
 			entry.unsubscribeExit = entry.process.onExit(() => {
 				void this.enqueue(key, () => this.processExited(key, entry, generation));
 			});
 			const deadline = this.deps.clock.now().getTime() + entry.spec.readiness.timeoutMs;
-			while (this.running.get(key) === entry && !entry.stopping && this.canRun(fence, entry.identity)) {
-				const ready = await this.deps.probe({ identity: entry.identity, spec: entry.spec, ...(entry.dataDir === undefined ? {} : { dataDir: entry.dataDir }), ...(entry.settings === undefined ? {} : { settings: entry.settings }) });
-				if (!this.canRun(fence, entry.identity)) {
-					await this.abandonStart(key, entry);
-					return;
-				}
+			while (this.running.get(key) === entry && !entry.stopping && this.canRun(fence, key, entry.ref)) {
+				const ready = await this.deps.probe(this.request(entry));
+				if (!this.canRun(fence, key, entry.ref)) return await this.abandonStart(key, entry);
 				if (ready) {
-					if (this.running.get(key) === entry && !entry.stopping) this.publish(entry.identity, "ready");
+					if (this.running.get(key) === entry && !entry.stopping) this.publish(entry.ref, "ready");
 					return;
 				}
 				const remaining = deadline - this.deps.clock.now().getTime();
-				if (remaining <= 0) {
-					await this.failStart(key, entry, "unhealthy", "readiness-timeout");
-					return;
-				}
+				if (remaining <= 0) return await this.failStart(key, entry, "unhealthy", "readiness-timeout");
 				await this.deps.clock.sleep(Math.min(READINESS_POLL_MS, remaining));
 			}
 			if (this.running.get(key) === entry && !entry.stopping) await this.abandonStart(key, entry);
 		} catch {
-			if (!this.canRun(fence, entry.identity)) await this.abandonStart(key, entry);
+			if (!this.canRun(fence, key, entry.ref)) await this.abandonStart(key, entry);
 			else await this.failStart(key, entry, "failed", "configuration-unavailable");
 		}
 	}
@@ -374,7 +381,7 @@ export class ServiceExtensionRuntimeManager implements ServiceExtensionRuntime {
 		entry.leases = [];
 		entry.process = undefined;
 		if (this.running.get(key) === entry) this.running.delete(key);
-		this.publish(entry.identity, "stopped");
+		this.publish(entry.ref, "stopped");
 	}
 
 	private async failStart(key: string, entry: RunningService, state: ServiceState, detail: ServiceStatusDetail): Promise<void> {
@@ -387,7 +394,7 @@ export class ServiceExtensionRuntimeManager implements ServiceExtensionRuntime {
 		entry.leases = [];
 		entry.process = undefined;
 		if (this.running.get(key) === entry) this.running.delete(key);
-		this.publish(entry.identity, state, detail);
+		this.publish(entry.ref, state, detail);
 	}
 
 	private async stopRunning(key: string, entry: RunningService): Promise<void> {
@@ -399,7 +406,7 @@ export class ServiceExtensionRuntimeManager implements ServiceExtensionRuntime {
 		await releaseLeases(entry.leases);
 		entry.leases = [];
 		if (this.running.get(key) === entry) this.running.delete(key);
-		this.publish(entry.identity, "stopped");
+		this.publish(entry.ref, "stopped");
 	}
 
 	private async processExited(key: string, entry: RunningService, generation: number): Promise<void> {
@@ -408,9 +415,9 @@ export class ServiceExtensionRuntimeManager implements ServiceExtensionRuntime {
 		entry.unsubscribeExit = undefined;
 		await releaseLeases(entry.leases);
 		entry.leases = [];
-		this.publish(entry.identity, "failed", "process-exited");
+		this.publish(entry.ref, "failed", "process-exited");
 		const desired = this.desired.get(key);
-		if (!this.isCurrent(entry.fence, entry.identity.projectId)
+		if (!this.isCurrent(entry.fence, key)
 			|| entry.spec.restart !== "on-failure"
 			|| entry.restarts >= 1
 			|| !desired
