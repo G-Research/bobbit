@@ -177,7 +177,10 @@ test.describe("Gate Re-signal Cancellation", () => {
 			gateId: GATE_ID,
 			signalId: signal1.id,
 			status: "cancelled",
+			cancellation: expect.objectContaining({ cause: "superseded" }),
 		}));
+		expect(gateStore.getGate(GOAL_ID, GATE_ID)?.status,
+		"a superseded historical generation must not publish a failed gate state").toBe("pending");
 		expect(activeVerifications()).toEqual([
 			expect.objectContaining({ signalId: signal2.id, overallStatus: "running" }),
 		]);
@@ -193,8 +196,12 @@ test.describe("Gate Re-signal Cancellation", () => {
 		const history = signals();
 		expect(history).toHaveLength(2);
 		expect(history[0].verification).toMatchObject({
-			status: "failed",
-			steps: [{ name: "Cancelled", status: "failed" }],
+			status: "cancelled",
+			cancellation: { cause: "superseded", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
+			steps: [
+				{ name: "Optional approval", status: "cancelled", cancellation: { cause: "superseded" } },
+				{ name: "Final signal check", status: "cancelled", cancellation: { cause: "superseded" } },
+			],
 		});
 		expect(history.at(-1)).toMatchObject({
 			id: signal2.id,
@@ -226,7 +233,18 @@ test.describe("Gate Re-signal Cancellation", () => {
 		await completeSignal(signal3);
 		expect(activeVerifications()).toHaveLength(0);
 		expect(gateStore.getGate(GOAL_ID, GATE_ID)?.status).toBe("passed");
-		expect(signals().map((signal) => signal.verification.status)).toEqual(["failed", "failed", "passed"]);
+		const history = signals();
+		expect(history.map((signal) => signal.verification.status)).toEqual(["cancelled", "cancelled", "passed"]);
+		for (const historical of history.slice(0, -1)) {
+			expect(historical.verification).toMatchObject({
+				status: "cancelled",
+				cancellation: { cause: "superseded", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
+				steps: [
+					{ name: "Optional approval", status: "cancelled", cancellation: { cause: "superseded" } },
+					{ name: "Final signal check", status: "cancelled", cancellation: { cause: "superseded" } },
+				],
+			});
+		}
 		expect(events.filter((event) => event.type === "gate_verification_complete" && event.status === "passed"))
 			.toEqual([expect.objectContaining({ signalId: signal3.id })]);
 		expect(notifications).toEqual([

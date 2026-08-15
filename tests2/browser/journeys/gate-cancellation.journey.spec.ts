@@ -44,7 +44,7 @@ async function createFixture(): Promise<Fixture> {
 				dependsOn: [],
 				verify: [
 					{ name: "Long running command", type: "command", run: SLOW_COMMAND, phase: 0 },
-					{ name: "Operator review", type: "human-signoff", prompt: "Review while command runs", phase: 0 },
+					{ name: "Operator review", type: "human-signoff", label: "Review paused verification", prompt: "Review while command runs", phase: 0 },
 				],
 			}],
 		}),
@@ -96,8 +96,9 @@ async function expectCancelledAudit(fixture: Fixture): Promise<any> {
 		const state = await gate(fixture);
 		const verification = state.signals?.at(-1)?.verification;
 		result = { state, verification };
-		return verification?.status === "cancelled" ? verification : null;
-	}, { timeout: 20_000, message: "pause must publish a durable cancelled, never failed, verification" }).toMatchObject({
+		return verification?.status;
+	}, { timeout: 20_000, message: "pause must publish a durable cancelled, never failed, verification" }).toBe("cancelled");
+	expect(result.verification).toMatchObject({
 		status: "cancelled",
 		cancellation: { cause: "goal-pause", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
 		steps: [

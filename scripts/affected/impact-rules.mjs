@@ -1250,6 +1250,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/verification-cancellation-provenance.test.ts",
+		allowReason: "isolated test-owned active-verification persistence state",
+		reads: frozen([
+			{ expression: "path.join(stateDir, \"active-verifications.json\")", count: 1 },
+		]),
+	},
+	{
 		consumer: "tests2/core/unit-lanes-scheduling.test.ts",
 		declarations: frozen(["scan:unit-runtime-closure-guard"]),
 		reads: frozen([
