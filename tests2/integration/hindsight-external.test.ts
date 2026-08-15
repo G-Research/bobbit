@@ -134,6 +134,14 @@ async function grant(projectId: string, capability: "memory.read" | "memory.writ
 	expect(response.status, `live Hindsight ${capability} grant: ${await response.clone().text()}`).toBe(200);
 }
 
+async function revoke(projectId: string, capability: "memory.read" | "memory.write", operatorCookie: string): Promise<void> {
+	const response = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/extension-grants/${PACK_NAME}/principals/pack/${capability}`, {
+		method: "DELETE",
+		headers: { Cookie: operatorCookie },
+	});
+	expect(response.status, `live Hindsight ${capability} revoke: ${await response.clone().text()}`).toBe(200);
+}
+
 /** Notify the gateway after this fixture's direct on-disk install/uninstall. */
 async function notifyPackFilesystemMutation(order: string[]): Promise<void> {
 	const response = await apiFetch("/api/marketplace/pack-order", {
@@ -206,6 +214,20 @@ describe("hindsight installed-provider worker boundary", () => {
 		if (stub) await stub.close().catch(() => {});
 		if (packDir) fs.rmSync(packDir, { recursive: true, force: true });
 		if (originalPackOrder) await notifyPackFilesystemMutation(originalPackOrder).catch(() => {});
+	});
+
+	test("activates lifecycle hooks only while a live memory grant exists", async ({ gateway }) => {
+		const hub = gateway.sessionManager.lifecycleHub;
+		expect(hub, "gateway must own the lifecycle hub used for session bridge activation").toBeTruthy();
+		await revoke(projectId, "memory.read", operatorCookie);
+		await revoke(projectId, "memory.write", operatorCookie);
+		expect(hub!.hasProvidersForHooks(projectId, ["beforePrompt"])).toBe(false);
+
+		await grant(projectId, "memory.read", operatorCookie);
+		expect(hub!.hasProvidersForHooks(projectId, ["beforePrompt"])).toBe(true);
+
+		await revoke(projectId, "memory.read", operatorCookie);
+		expect(hub!.hasProvidersForHooks(projectId, ["beforePrompt"])).toBe(false);
 	});
 
 	test("configured pack recalls and retains through ModuleHost and the host-store proxy", async () => {

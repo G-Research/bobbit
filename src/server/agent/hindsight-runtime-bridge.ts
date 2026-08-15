@@ -66,6 +66,10 @@ export interface HindsightRuntimeControlResult {
 
 export interface HindsightRuntimeBridgeOptions {
 	contributions: Pick<PackContributionResolver, "getPack">;
+	/** Unfiltered descriptor lookup for status/settings operations. Lifecycle
+	 * activation deliberately filters providers by live grants, but an authorized
+	 * runtime control/status path must still see the declared provider settings. */
+	providerForProject?(projectId: string): ProviderContribution | undefined;
 	contextForProject(projectId: string): {
 		stateDir: string;
 		extensionSettingsStore: ExtensionSettingsStore;
@@ -115,6 +119,7 @@ export class HindsightRuntimeSettingsResolver {
 		private readonly projectId: string,
 		private readonly context: { stateDir: string; extensionSettingsStore: ExtensionSettingsStore },
 		private readonly contributions: Pick<PackContributionResolver, "getPack">,
+		private readonly providerForProject?: (projectId: string) => ProviderContribution | undefined,
 	) {}
 
 	resolve(input: ServiceRuntimeControlRequest & { contribution: { id: string } }): ServiceRuntimeSettings {
@@ -192,7 +197,9 @@ export class HindsightRuntimeSettingsResolver {
 	}
 
 	private provider(): ProviderContribution {
-		const provider = this.contributions.getPack(this.projectId, HINDSIGHT_PACK_ID)?.providers.find(item => item.id === HINDSIGHT_PROVIDER_ID);
+		const provider = this.providerForProject
+			? this.providerForProject(this.projectId)
+			: this.contributions.getPack(this.projectId, HINDSIGHT_PACK_ID)?.providers.find(item => item.id === HINDSIGHT_PROVIDER_ID);
 		if (!provider || provider.runtime !== HINDSIGHT_RUNTIME_ID) throw new ServiceRuntimeError("SERVICE_RUNTIME_NOT_FOUND");
 		return provider;
 	}
@@ -398,14 +405,16 @@ export class HindsightRuntimeBridge {
 	private settings(projectId: string): HindsightRuntimeSettingsResolver {
 		let resolver = this.resolvers.get(projectId);
 		if (!resolver) {
-			resolver = new HindsightRuntimeSettingsResolver(projectId, this.projectContext(projectId), this.options.contributions);
+			resolver = new HindsightRuntimeSettingsResolver(projectId, this.projectContext(projectId), this.options.contributions, this.options.providerForProject);
 			this.resolvers.set(projectId, resolver);
 		}
 		return resolver;
 	}
 
 	private provider(projectId: string): ProviderContribution {
-		const provider = this.options.contributions.getPack(projectId, HINDSIGHT_PACK_ID)?.providers.find(item => item.id === HINDSIGHT_PROVIDER_ID);
+		const provider = this.options.providerForProject
+			? this.options.providerForProject(projectId)
+			: this.options.contributions.getPack(projectId, HINDSIGHT_PACK_ID)?.providers.find(item => item.id === HINDSIGHT_PROVIDER_ID);
 		if (!provider) throw new ServiceRuntimeError("SERVICE_RUNTIME_NOT_FOUND");
 		return provider;
 	}

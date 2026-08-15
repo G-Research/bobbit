@@ -3133,7 +3133,40 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	packContributionRegistry = new PackContributionRegistry(
 		marketPackEntriesForProject,
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).entrypoints ?? [],
-		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).providers ?? [],
+		(scope, projectId, packName) => {
+			const disabled = [...(packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).providers ?? [])];
+			// Hindsight settings/routes stay catalogue-visible without a grant. Only its
+			// automatic lifecycle provider is costly, so suppress that one provider until
+			// the owning project has a live EP-6 memory grant. The canonical resolver
+			// normally proves a pack through this registry; this callback runs while the
+			// active Hindsight pack is being indexed, so provide that already-proven pack
+			// directly and avoid recursively rebuilding the index.
+			if (packName !== "hindsight" || disabled.includes("memory")) return disabled;
+			if (!projectId) return [...disabled, "memory"];
+			let context: ReturnType<typeof projectContextManager.getOrCreate>;
+			try { context = projectContextManager.getOrCreate(projectId); }
+			catch { return disabled; } // Grant storage/context unavailable: provider enforces fail-closed access itself.
+			if (!context) return [...disabled, "memory"];
+			let grantsReadable = true;
+			const activationGrants = createExtensionCapabilityGrantResolver({
+				contextForProject: (id) => id === projectId ? {
+					projectConfigStore: {
+						getExtensionGrants: () => {
+							try { return context.projectConfigStore.getExtensionGrants(); }
+							catch { grantsReadable = false; throw new Error("EXTENSION_GRANTS_UNAVAILABLE"); }
+						},
+					},
+				} : undefined,
+				contributions: {
+					getPack: (_id, id) => id === "hindsight"
+						? ({ packId: "hindsight", hooks: [] } as unknown as PackContributions)
+						: undefined,
+				},
+			});
+			const granted = activationGrants(projectId, { kind: "pack", packId: "hindsight" }, "memory.read").allowed
+				|| activationGrants(projectId, { kind: "pack", packId: "hindsight" }, "memory.write").allowed;
+			return granted || !grantsReadable ? disabled : [...disabled, "memory"];
+		},
 		// Config-gated provider activation + effective-config overlay: read the
 		// provider's PERSISTED flat config (written by the pack's `config` route to
 		// the pack-scoped store under providerConfigStoreKey) synchronously, so a
@@ -3169,6 +3202,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const hindsightServerIdentity = `hindsight-${createHash("sha256").update(stateDir).digest("hex").slice(0, 24)}`;
 	const hindsightRuntimeBridge = new HindsightRuntimeBridge({
 		contributions: packContributionRegistry,
+		// The lifecycle registry filters Hindsight's provider by live memory grants;
+		// settings and authorized runtime status/control retain their catalogue source.
+		providerForProject: (projectId) => extensionSettingsCatalogue(projectId)
+			.find(pack => pack.packId === "hindsight")?.providers.find(provider => provider.id === "memory"),
 		contextForProject: (projectId) => {
 			const context = projectContextManager.getOrCreate(projectId);
 			return context ? { stateDir: context.stateDir, extensionSettingsStore: context.extensionSettingsStore } : undefined;
