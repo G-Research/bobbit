@@ -46,11 +46,16 @@ function fixture(opts: { headless?: boolean; continuation?: () => Promise<"deliv
 	const clock = new FakeClock(Date.parse("2026-01-01T00:00:00.000Z"));
 	const invalidations: string[] = [];
 	const proposals: Array<{ type: string; args: Record<string, unknown> }> = [];
+	const projectImportTrace: Array<{ projectId: string; importId: string; outcome: unknown }> = [];
 	const manager = new DecisionRequestManager({
 		storeForProject: projectId => projectId === "project-1" ? store : undefined,
 		clock,
 		isHeadless: () => opts.headless === true,
 		invalidateSession: sessionId => invalidations.push(sessionId),
+		trace: {
+			appendOutcome: () => {},
+			appendProjectImportOutcome: (projectId, importId, outcome) => projectImportTrace.push({ projectId, importId, outcome }),
+		},
 		proposalSeedService: opts.proposal ? {
 			seedFromDecision: async (_session, type, args) => {
 				proposals.push({ type, args });
@@ -59,7 +64,7 @@ function fixture(opts: { headless?: boolean; continuation?: () => Promise<"deliv
 		} : undefined,
 		continuation: opts.continuation ? { deliver: () => opts.continuation!(), complete: opts.continuationComplete } : undefined,
 	});
-	return { fs, store, clock, manager, invalidations, proposals };
+	return { fs, store, clock, manager, invalidations, proposals, projectImportTrace };
 }
 
 function origin(overrides: Partial<DecisionRequestOrigin> = {}): DecisionRequestOrigin {
@@ -160,6 +165,17 @@ describe("DecisionRequestManager", () => {
 		assert.deepEqual(invalidations, [], "a project import must not emit a session invalidation");
 		assert.deepEqual(store.get(pending[0]!.id)?.resolution?.value, { kind: "option", value: "quick" });
 		assert.deepEqual(manager.getMemory(imported, "project", "import-0"), { kind: "option", value: "quick" });
+	});
+
+	it("traces project-import resolutions without a synthetic session", async () => {
+		const { manager, clock, projectImportTrace } = fixture();
+		const imported = { projectId: "project-1", importId: "import-1", event: "projectImported" as const, packId: "pack-1", hookId: "hook-1" };
+		const created = await manager.create(imported, request(clock, { scope: "project" }));
+		await manager.answer("project-1", created.requestId!, { kind: "option", value: "thorough" });
+		expect(projectImportTrace).toEqual([{
+			projectId: "project-1", importId: "import-1",
+			outcome: expect.objectContaining({ event: "decisionResolved", requestId: created.requestId, answer: "thorough", actor: "user" }),
+		}]);
 	});
 
 	it("rejects project-import requests outside project scope", async () => {

@@ -152,7 +152,7 @@ export interface DecisionRequestManagerDeps {
 	/** Rebuilds hook/grant/live core facts immediately before protected work. */
 	recheckConsentOperation?: (request: StoredDecisionRequest) => boolean | Promise<boolean>;
 	proposalSeedService?: Pick<ProposalSeedService, "seedFromDecision">;
-	trace?: Pick<ContextTraceStore, "appendOutcome">;
+	trace?: Pick<ContextTraceStore, "appendOutcome" | "appendProjectImportOutcome">;
 	/** Invalidates a REST projection only; callers must never put decision data in this frame. */
 	invalidateSession?: (sessionId: string) => void;
 	/** Metadata-only invalidation for a project-import decision projection. */
@@ -681,27 +681,26 @@ export class DecisionRequestManager {
 	}
 
 	private traceResolution(record: StoredDecisionRequest): void {
-		// Import traces are coordinator-owned and identify the import run rather
-		// than fabricating a session trace stream.
-		if (record.delivery.kind !== "session") return;
 		const resolution = record.resolution;
 		const decisionStatus = record.status === "resolved" || record.status === "defaulted" || record.status === "denied" || record.status === "paused-awaiting-consent"
 			? record.status : undefined;
 		if (!decisionStatus) return;
+		const outcome: TraceDecisionOutcomeRow = {
+			kind: "decision", packId: record.asker.packId, hookId: record.asker.hookId,
+			event: "decisionResolved", outcome: record.status === "denied" ? "denied" : "applied", requestId: record.id, questionId: record.questionId,
+			...(resolution ? {
+				answer: resolution.value.kind === "option" ? resolution.value.value : "other",
+				defaultApplied: resolution.actor !== "user", actor: resolution.actor,
+				reason: resolution.actor === "deadline" ? "Deadline elapsed" : resolution.actor === "headless" ? "Headless default" : undefined,
+			} : {}),
+			decisionClass: record.decisionClass ?? "deferrable", decisionStatus,
+			classificationReason: record.classificationReason ?? "requested",
+			...(record.timeoutAction ? { timeoutAction: record.timeoutAction } : {}),
+			...(record.consentPause?.resume ? { resumeStatus: record.consentPause.resume.status } : {}),
+		};
 		try {
-			this.deps.trace?.appendOutcome(record.delivery.sessionId, {
-				kind: "decision", packId: record.asker.packId, hookId: record.asker.hookId,
-				event: "decisionResolved", outcome: record.status === "denied" ? "denied" : "applied", requestId: record.id, questionId: record.questionId,
-				...(resolution ? {
-					answer: resolution.value.kind === "option" ? resolution.value.value : "other",
-					defaultApplied: resolution.actor !== "user", actor: resolution.actor,
-					reason: resolution.actor === "deadline" ? "Deadline elapsed" : resolution.actor === "headless" ? "Headless default" : undefined,
-				} : {}),
-				decisionClass: record.decisionClass ?? "deferrable", decisionStatus,
-				classificationReason: record.classificationReason ?? "requested",
-				...(record.timeoutAction ? { timeoutAction: record.timeoutAction } : {}),
-				...(record.consentPause?.resume ? { resumeStatus: record.consentPause.resume.status } : {}),
-			});
+			if (record.delivery.kind === "session") this.deps.trace?.appendOutcome(record.delivery.sessionId, outcome);
+			else this.deps.trace?.appendProjectImportOutcome(record.projectId, record.delivery.importId, outcome);
 		} catch { /* tracing is never on the answer path */ }
 	}
 
