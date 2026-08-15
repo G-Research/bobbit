@@ -1,6 +1,6 @@
 import { test, expect, type TestInfo } from "@playwright/test";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -14,7 +14,12 @@ import {
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const ENSURE_DIST_SCRIPT = join(PROJECT_ROOT, "scripts", "testing-v2", "ensure-dist.mjs");
-const PACKAGE_NAME = (JSON.parse(readFileSync(join(PROJECT_ROOT, "package.json"), "utf8")) as { name: string }).name;
+const BUILD_BINARIES_SCRIPT = join(PROJECT_ROOT, "scripts", "build-binaries.mjs");
+const ROOT_PACKAGE = JSON.parse(readFileSync(join(PROJECT_ROOT, "package.json"), "utf8")) as {
+	name: string;
+	optionalDependencies?: Record<string, string>;
+};
+const PACKAGE_NAME = ROOT_PACKAGE.name;
 const PACKAGE_INSTALL_SEGMENTS = PACKAGE_NAME.split("/");
 const PI_PACKAGES = [
 	"@earendil-works/pi-agent-core",
@@ -38,6 +43,7 @@ interface PackedConsumerReport {
 	commands: PiPackedConsumerCommandResult[];
 	selectedPiVersion?: string;
 	pack?: unknown;
+	binaryPack?: unknown;
 	tree?: unknown;
 	binaries?: unknown;
 }
@@ -115,6 +121,12 @@ function commandDisplay(result: PiPackedConsumerCommandResult): string {
 	return [result.command, ...result.args].join(" ");
 }
 
+function binaryPackageDirectory(packageName: string): string {
+	const prefix = "@bobbit/";
+	expect(packageName.startsWith(prefix), "binary package must use the @bobbit scope").toBe(true);
+	return packageName.slice(prefix.length);
+}
+
 function expectSuccess(result: PiPackedConsumerCommandResult): void {
 	expect(
 		result.code,
@@ -129,11 +141,12 @@ async function attachReport(testInfo: TestInfo, report: PackedConsumerReport): P
 	});
 }
 
-test.describe("published Bobbit package dependency security", () => {
-	test("a clean consumer preserves secure Pi edges and bundled binaries", async ({}, testInfo) => {
+test.describe("packed Bobbit package dependency security", () => {
+	test("a clean consumer preserves secure Pi edges and complete bundled binaries", async ({}, testInfo) => {
 		test.setTimeout(15 * 60_000);
 		const tempRoot = await mkdtemp(join(tmpdir(), "bobbit-pi-packed-consumer-"));
 		const packDir = join(tempRoot, "pack");
+		const binaryStagingRoot = join(tempRoot, "binary-staging");
 		const consumerDir = join(tempRoot, "consumer");
 		const report: PackedConsumerReport = { commands: [] };
 
@@ -150,6 +163,7 @@ test.describe("published Bobbit package dependency security", () => {
 
 		try {
 			await mkdir(packDir, { recursive: true });
+			await mkdir(binaryStagingRoot, { recursive: true });
 			await mkdir(consumerDir, { recursive: true });
 			await writeFile(join(consumerDir, "package.json"), `${JSON.stringify({
 				name: "bobbit-packed-consumer-e2e",
@@ -180,12 +194,57 @@ test.describe("published Bobbit package dependency security", () => {
 			const tarballPath = resolve(packDir, packEntry.filename as string);
 			expect(existsSync(tarballPath), `npm pack did not create ${tarballPath}`).toBe(true);
 
+			const platformBinaryPackage = `@bobbit/binaries-${process.platform}-${process.arch}`;
+			const expectedBinaryPackage = ROOT_PACKAGE.optionalDependencies?.[platformBinaryPackage]
+				? platformBinaryPackage
+				: null;
+			let binaryTarballPath: string | undefined;
+			if (expectedBinaryPackage) {
+				const packageDirectory = binaryPackageDirectory(expectedBinaryPackage);
+				const stagedPackageDirectory = join(binaryStagingRoot, packageDirectory);
+				// The release package is intentionally not published from a development
+				// branch. Build one complete, platform-matched package in a disposable
+				// directory, never inside the checkout, then install that exact tarball.
+				await cp(join(PROJECT_ROOT, "binaries", packageDirectory), stagedPackageDirectory, {
+					recursive: true,
+					errorOnExist: true,
+				});
+				const buildBinaries = await runPiPackedConsumerCommand(
+					process.execPath,
+					[BUILD_BINARIES_SCRIPT, "--only", `${process.platform}-${process.arch}`, "--staging-root", binaryStagingRoot],
+					{ cwd: PROJECT_ROOT, timeoutMs: 10 * 60_000 },
+				);
+				report.commands.push(buildBinaries);
+				expectSuccess(buildBinaries);
+
+				const binaryPacked = await runNpm(
+					["pack", "--json", "--pack-destination", packDir],
+					stagedPackageDirectory,
+					3 * 60_000,
+				);
+				expectSuccess(binaryPacked);
+				const binaryPackJson = parseJson(binaryPacked.stdout, "binary npm pack");
+				report.binaryPack = binaryPackJson;
+				expect(Array.isArray(binaryPackJson), "binary npm pack must report one-element JSON array").toBe(true);
+				expect(binaryPackJson).toHaveLength(1);
+				const binaryPackEntry = asRecord((binaryPackJson as unknown[])[0], "binary npm pack entry");
+				expect(binaryPackEntry.name).toBe(expectedBinaryPackage);
+				expect(typeof binaryPackEntry.filename).toBe("string");
+				binaryTarballPath = resolve(packDir, binaryPackEntry.filename as string);
+				expect(existsSync(binaryTarballPath), `binary npm pack did not create ${binaryTarballPath}`).toBe(true);
+			}
+
 			const consumerEnv = piPackedConsumerNpmEnv(consumerDir);
 			const lockConfig = await runNpm(["config", "get", "package-lock"], consumerDir, 30_000, consumerEnv);
 			expectSuccess(lockConfig);
 			expect(lockConfig.stdout.trim(), "clean consumer must use npm's normal package-lock=true default").toBe("true");
 
-			const install = await runNpm(["install", tarballPath], consumerDir, 10 * 60_000, consumerEnv);
+			const install = await runNpm(
+				binaryTarballPath ? ["install", tarballPath, binaryTarballPath] : ["install", tarballPath],
+				consumerDir,
+				10 * 60_000,
+				consumerEnv,
+			);
 			expectSuccess(install);
 			expect(existsSync(join(consumerDir, "package-lock.json")), "consumer install must create its own lockfile").toBe(true);
 			expect(
@@ -256,17 +315,20 @@ test.describe("published Bobbit package dependency security", () => {
 				expectedBinaryPackage(): string | null;
 				getFdResolution(): { source: string; path: string | null; expectedPackage: string };
 				getRgResolution(): { source: string; path: string | null; expectedPackage: string };
+				getSgResolution(): { source: string; path: string | null; expectedPackage: string };
 			};
-			const expectedBinaryPackage = binaries.expectedBinaryPackage();
+			const resolvedBinaryPackage = binaries.expectedBinaryPackage();
+			expect(resolvedBinaryPackage).toBe(expectedBinaryPackage);
 			const resolutions = {
 				fd: binaries.getFdResolution(),
 				rg: binaries.getRgResolution(),
+				astGrep: binaries.getSgResolution(),
 			};
-			report.binaries = { expectedBinaryPackage, resolutions };
-			if (expectedBinaryPackage) {
+			report.binaries = { expectedBinaryPackage: resolvedBinaryPackage, resolutions };
+			if (resolvedBinaryPackage) {
 				for (const [tool, resolution] of Object.entries(resolutions)) {
-					expect(resolution.source, `${tool} must resolve from ${expectedBinaryPackage}`).toBe("bundled");
-					expect(resolution.expectedPackage).toBe(expectedBinaryPackage);
+					expect(resolution.source, `${tool} must resolve from ${resolvedBinaryPackage}`).toBe("bundled");
+					expect(resolution.expectedPackage).toBe(resolvedBinaryPackage);
 					expect(resolution.path, `${tool} bundled resolution must have a path`).not.toBeNull();
 					expect(existsSync(resolution.path!), `${tool} binary does not exist at ${resolution.path}`).toBe(true);
 					const smoke = await runPiPackedConsumerCommand(resolution.path!, ["--version"], {
