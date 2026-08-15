@@ -208,6 +208,36 @@ describe("ClaudeAgentSdkBridge", () => {
 		await fixture.bridge.stop();
 	});
 
+	it("projects initial thinking into idle query options and acknowledges only its exact pre-init tuple", async () => {
+		const off = bridgeFixture({ autoPullInputs: false, initialThinkingLevel: "off" });
+		await off.bridge.start();
+		expect(off.query.options.thinking).toEqual({ type: "disabled" });
+		await expect(off.bridge.setThinkingLevel("off")).resolves.toEqual({ success: true });
+		await expect(off.bridge.setThinkingLevel("high")).resolves.toMatchObject({
+			success: false, error: "Claude Agent SDK controls are unavailable until initialization completes",
+		});
+		expect(off.query.thinkingControlCalls).toEqual([]);
+		await off.bridge.stop();
+
+		const models: SdkModel[] = [{ value: "opus", supportsAdaptiveThinking: true }];
+		const fixedBudget = bridgeFixture({
+			autoPullInputs: false,
+			initialModel: "claude-agent-sdk/opus",
+			initialThinkingLevel: "high",
+			models,
+		});
+		await fixedBudget.bridge.start();
+		expect(fixedBudget.query.options.thinking).toEqual({ type: "enabled", budgetTokens: 8_192 });
+		await expect(fixedBudget.bridge.setThinkingLevel("high")).resolves.toEqual({ success: true });
+		expect(fixedBudget.query.thinkingControlCalls).toEqual([]);
+
+		void fixedBudget.query.pullInputs();
+		await startReady(fixedBudget);
+		await expect(fixedBudget.bridge.setThinkingLevel("high")).resolves.toEqual({ success: true });
+		expect(fixedBudget.query.thinkingControlCalls).toEqual(["effort:null", "budget:8192"]);
+		await fixedBudget.bridge.stop();
+	});
+
 	it("terminally settles the first input when provider initialization fails", async () => {
 		const fixture = bridgeFixture();
 		const observed: any[] = [];

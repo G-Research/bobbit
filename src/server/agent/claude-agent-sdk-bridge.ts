@@ -158,6 +158,14 @@ export function thinkingBudgetForLevel(level: string): number | null | undefined
 	}
 }
 
+/** Project the persisted tuple into the initial SDK query, before controls exist. */
+function initialClaudeSdkThinking(level: string | undefined): Options["thinking"] | undefined {
+	if (level === undefined) return undefined;
+	const budget = thinkingBudgetForLevel(level);
+	if (budget === undefined) return undefined;
+	return budget === null ? { type: "disabled" } : { type: "enabled", budgetTokens: budget };
+}
+
 /** Strictly accept the opaque UUID values issued by the Agent SDK. */
 export function isClaudeAgentSdkSessionId(value: unknown): value is string {
 	return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
@@ -321,6 +329,9 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 	private initializedSessionId?: string;
 	private modelId?: string;
 	private thinkingLevel?: string;
+	/** Exact persisted request projected into the initial query before controls exist. */
+	private readonly initialThinking?: Options["thinking"];
+	private readonly projectedInitialThinkingLevel?: string;
 	/** Undefined means an older SDK did not provide model data; [] means it did and no model is selectable. */
 	private modelCapabilities?: ClaudeAgentSdkModelCapability[];
 	private activeModelCapability?: ClaudeAgentSdkModelCapability;
@@ -340,6 +351,8 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 	constructor(private readonly options: ClaudeAgentSdkBridgeOptions, private readonly deps: ClaudeAgentSdkBridgeDeps) {
 		this.modelId = options.initialModel?.startsWith("claude-agent-sdk/") ? options.initialModel.slice("claude-agent-sdk/".length) : undefined;
 		this.thinkingLevel = options.initialThinkingLevel;
+		this.initialThinking = initialClaudeSdkThinking(options.initialThinkingLevel);
+		this.projectedInitialThinkingLevel = this.initialThinking === undefined ? undefined : options.initialThinkingLevel;
 		this.ready = new Promise<void>((resolve, reject) => { this.resolveReady = resolve; this.rejectReady = reject; });
 		this.terminal = new Promise<never>((_, reject) => { this.rejectTerminal = reject; });
 		// A failed start is normally observed through start(); retain waitForReady's rejection semantics without process-wide noise.
@@ -452,6 +465,7 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 				}) } : {}),
 				...(systemPrompt ? { systemPrompt } : {}),
 				...(initialModel ? { model: initialModel } : {}),
+				...(this.initialThinking ? { thinking: this.initialThinking } : {}),
 				...(this.options.claudeAgentSdkSessionId ? { resume: this.options.claudeAgentSdkSessionId } : {}),
 			};
 			// Direct bridge construction is retained only through an equally strict,
@@ -877,7 +891,13 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 	}
 	async setThinkingLevel(level: string): Promise<any> {
 		if (!this.queryHandle) return unsupported("Claude Agent SDK query is not running");
-		if (!this.initializationComplete) return unsupported("Claude Agent SDK controls are unavailable until initialization completes");
+		if (!this.initializationComplete) {
+			// Query controls do not exist until the first genuine input initializes the
+			// SDK. The only safe pre-init acknowledgement is the exact value already
+			// projected into its immutable initial query options.
+			if (level === this.projectedInitialThinkingLevel) return { success: true };
+			return unsupported("Claude Agent SDK controls are unavailable until initialization completes");
+		}
 		const capability = this.activeModelCapability;
 		const budget = thinkingBudgetForLevel(level);
 		if (budget === undefined) return unsupported(`Unsupported thinking level: ${level}`);
