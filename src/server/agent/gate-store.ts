@@ -62,8 +62,11 @@ export interface GateSignalStep {
 	 * then preserved as `passed`/`failed`/`timeout`/`skipped` for historical rendering.
 	 */
 	status?: "waiting" | "running" | "passed" | "failed" | "timeout" | "skipped" | "cancelled";
-	/** Durable audit fields for an interrupted row. */
+	/** Durable audit metadata for an interrupted row. */
+	cancellation?: VerificationCancellation;
+	/** @deprecated Legacy flat cancellation audit fields, normalized while loading. */
 	cancellationCause?: VerificationCancellationCause;
+	/** @deprecated Legacy flat cancellation audit fields, normalized while loading. */
 	cancelledAt?: number;
 	/** Present only when a review turn exhausted its configured allowance. */
 	timeout?: VerificationTimeoutInfo;
@@ -327,6 +330,32 @@ function validateGateState(value: unknown, label: string, expectedIdentity?: { g
 				invalidGate(stepLabel, "cancellationCause is unsupported");
 			}
 			if (step.cancelledAt !== undefined && !Number.isFinite(step.cancelledAt)) invalidGate(stepLabel, "cancelledAt must be finite");
+			// Older records used flat fields. Normalize them at the durable boundary so
+			// every current consumer sees the canonical cancellation object.
+			if (step.cancellation === undefined && (step.cancellationCause !== undefined || step.cancelledAt !== undefined)) {
+				step.cancellation = {
+					cause: (step.cancellationCause as VerificationCancellationCause | undefined) ?? "unknown",
+					requestedAt: step.cancelledAt ?? signal.timestamp,
+				};
+			}
+			if (step.cancellation === undefined && step.status === "cancelled") {
+				const signalCancellation = signal.verification.cancellation as Partial<VerificationCancellation> | undefined;
+				step.cancellation = signalCancellation
+					? { ...signalCancellation } as VerificationCancellation
+					: { cause: "unknown", requestedAt: signal.timestamp };
+			}
+			if (step.cancellation !== undefined) {
+				const cancellation = step.cancellation;
+				if (!isRecord(cancellation)
+					|| typeof cancellation.cause !== "string"
+					|| !CANCELLATION_CAUSES.has(cancellation.cause as VerificationCancellationCause)
+					|| !Number.isFinite(cancellation.requestedAt)
+					|| (cancellation.finalizedAt !== undefined && !Number.isFinite(cancellation.finalizedAt))) {
+					invalidGate(stepLabel, "cancellation metadata is invalid");
+				}
+				delete step.cancellationCause;
+				delete step.cancelledAt;
+			}
 			if (step.phase !== undefined && !Number.isFinite(step.phase)) invalidGate(stepLabel, "phase must be finite");
 			if (step.artifact !== undefined) {
 				if (!isRecord(step.artifact) || typeof step.artifact.content !== "string" || typeof step.artifact.contentType !== "string") {

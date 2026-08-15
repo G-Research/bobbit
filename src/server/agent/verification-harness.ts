@@ -1695,6 +1695,8 @@ export interface ActiveVerification {
 		expect?: GateSignalStep["expect"];
 		artifact?: GateSignalStep["artifact"];
 		diagnostics?: GateSignalStep["diagnostics"];
+		/** Durable interruption fence captured before asynchronous cleanup starts. */
+		cancellation?: VerificationCancellation;
 		startedAt: number;
 		sessionId?: string;
 		/** Subgoal-step cache — Tier-1.5 lookup reads `childGoalId` to short-circuit tier resolution. */
@@ -3937,6 +3939,13 @@ export class VerificationHarness {
 	): void {
 		const requestedAt = active.cancellation?.requestedAt ?? Date.now();
 		active.cancellation ??= { cause, requestedAt };
+		// Capture the exact in-flight rows before reviewer/process cleanup can
+		// resolve a killed command as a normal failed result. This fence is durable
+		// with the active record and first-writer-wins with the run cancellation.
+		for (const step of active.steps) {
+			if (step.status !== "waiting" && step.status !== "running") continue;
+			step.cancellation ??= { ...active.cancellation };
+		}
 		active.cancelled = true;
 		active.overallStatus = "cancelled";
 		// Retained only for old process-cleanup records. It must never carry the
@@ -4012,9 +4021,17 @@ export class VerificationHarness {
 		for (let index = 0; index < count; index++) {
 			const persisted = persistedSteps[index];
 			const live = active.steps[index];
-			const liveStatus = live?.status;
-			const interrupted = liveStatus === "waiting" || liveStatus === "running"
+			const interruption = live?.cancellation ?? persisted?.cancellation;
+			// The cancellation fence, not a post-kill step status, determines whether
+			// this row was interrupted. A process close can legitimately write a
+			// failed result after cancellation was requested; it is not a product
+			// verification failure and must remain neutral in the audit.
+			const interrupted = interruption !== undefined
 				|| (!live && (persisted?.status === "waiting" || persisted?.status === "running"));
+			const stepCancellation = interrupted
+				? { ...(interruption ?? cancellation), finalizedAt: interruption?.finalizedAt ?? cancellation.finalizedAt }
+				: undefined;
+			const liveStatus = live?.status;
 			const status = interrupted ? "cancelled" as const : (liveStatus ?? persisted?.status ?? "cancelled");
 			const passed = interrupted ? false : (live?.passed ?? persisted?.passed ?? false);
 			const skipped = !interrupted && (live?.skipped ?? persisted?.skipped);
@@ -4033,9 +4050,9 @@ export class VerificationHarness {
 				...(live?.expect ?? persisted?.expect ? { expect: live?.expect ?? persisted?.expect } : {}),
 				...(live?.artifact ?? persisted?.artifact ? { artifact: live?.artifact ?? persisted?.artifact } : {}),
 				...(live?.diagnostics ?? persisted?.diagnostics ? { diagnostics: live?.diagnostics ?? persisted?.diagnostics } : {}),
-				...(interrupted ? { cancellationCause: cancellation.cause, cancelledAt: cancellation.requestedAt } : {}),
+				...(stepCancellation ? { cancellation: stepCancellation } : {}),
 			};
-			if (persisted?.timeout) result.timeout = persisted.timeout;
+			if (live?.timeout ?? persisted?.timeout) result.timeout = live?.timeout ?? persisted?.timeout;
 			steps.push(result);
 		}
 		return { status: "cancelled", steps, cancellation };
