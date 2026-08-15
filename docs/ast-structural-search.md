@@ -26,7 +26,7 @@ Use `grep` for literal text, regular expressions, and broad discovery. Use `read
 | `language` | Optional case-insensitive language alias. When omitted, supported languages are detected from the requested paths. |
 | `strictness` | Optional match mode: `cst`, `smart` (the default), `ast`, `relaxed`, `signature`, or `template`. |
 
-Supported aliases are `bash`, `c`, `cpp`, `csharp`, `css`, `elixir`, `go`, `haskell`, `hcl`, `html`, `java`, `javascript`, `json`, `kotlin`, `lua`, `nix`, `php`, `python`, `ruby`, `rust`, `scala`, `solidity`, `swift`, `typescript`, `tsx`, and `yaml`. The Code Intelligence language matrix owns the extension mapping, so structural-search support is independent of LSP availability.
+Supported aliases are `bash`, `c`, `cpp`, `csharp`, `css`, `elixir`, `go`, `haskell`, `hcl`, `html`, `java`, `javascript`, `json`, `kotlin`, `lua`, `nix`, `php`, `python`, `ruby`, `rust`, `scala`, `solidity`, `swift`, `typescript`, `tsx`, and `yaml`. The Code Intelligence language matrix owns the extension mapping, so structural-search support is independent of LSP availability. See [Language LSP Intelligence](language-lsp-intelligence.md) for the dormant LSP capability model.
 
 For example, a Python search can be explicit:
 
