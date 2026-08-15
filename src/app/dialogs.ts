@@ -2152,9 +2152,11 @@ export function showProjectDialog(): void {
 	document.body.appendChild(container);
 
 	type Step = "path" | "scan" | "import-decisions";
+	type ImportContinuation = () => void | Promise<void>;
 	let step: Step = "path";
 	let importProject: import("./state.js").Project | null = null;
 	let importDecisionUnsubscribe: (() => void) | null = null;
+	let importContinuation: ImportContinuation | null = null;
 	let importHandoffStarted = false;
 	const importDecisionRenderer = new ProjectImportDecisionRenderer();
 	let pathValue = "";
@@ -2208,27 +2210,29 @@ export function showProjectDialog(): void {
 		container.remove();
 	};
 
-	const beginProjectAssistantAfterImport = async () => {
+	const completeImportDecisionStep = async () => {
 		const project = importProject;
 		if (!project || step !== "import-decisions" || importHandoffStarted) return;
 		if (!projectImportDecisionRequestsLoaded(project.id) || projectImportDecisionRequestsForProject(project.id).length > 0) return;
 		importHandoffStarted = true;
-		cleanup();
-		await createProjectAssistantSession(pathValue.trim(), false, {
-			projectId: project.id,
-			existingProjectName: project.name,
-		});
+		await importContinuation?.();
 	};
 
-	const enterImportDecisionStep = (project: import("./state.js").Project) => {
+	/**
+	 * Preserve the terminal action of the caller that registered the project.
+	 * Import decisions may precede an existing assistant handoff, but must never
+	 * manufacture one for callers that previously just closed this dialog.
+	 */
+	const enterImportDecisionStep = (project: import("./state.js").Project, onComplete: ImportContinuation) => {
 		importDecisionUnsubscribe?.();
 		importProject = project;
+		importContinuation = onComplete;
 		importHandoffStarted = false;
 		step = "import-decisions";
 		busy = false;
 		importDecisionUnsubscribe = activateProjectImportDecisionRequests(project.id, () => {
 			renderDialog();
-			void beginProjectAssistantAfterImport();
+			void completeImportDecisionStep();
 		});
 		renderDialog();
 	};
@@ -2490,7 +2494,7 @@ export function showProjectDialog(): void {
 					if (project) {
 						setProjects(await fetchProjects());
 						renderApp();
-						enterImportDecisionStep(project);
+						enterImportDecisionStep(project, cleanup);
 					} else {
 						busy = false;
 						renderDialog();
@@ -2513,7 +2517,7 @@ export function showProjectDialog(): void {
 									if (p2) {
 										setProjects(await fetchProjects());
 										renderApp();
-										enterImportDecisionStep(p2);
+										enterImportDecisionStep(p2, cleanup);
 									} else {
 										busy = false;
 										renderDialog();
@@ -2783,7 +2787,7 @@ export function showProjectDialog(): void {
 		}
 		const requests = projectImportDecisionRequestsForProject(project.id);
 		if (requests.length === 0) {
-			return html`<div class="flex items-center justify-center h-full text-sm text-muted-foreground" data-testid="project-import-decisions-complete">Opening project assistant…</div>`;
+			return html`<div class="flex items-center justify-center h-full text-sm text-muted-foreground" data-testid="project-import-decisions-complete">Completing project import…</div>`;
 		}
 		return html`
 			<div class="flex flex-col gap-4 h-full min-h-0 overflow-y-auto" data-testid="project-import-decisions">

@@ -117,7 +117,7 @@ test.describe("Add Project flow (UI)", () => {
 		expect((await pathInput.inputValue()).length).toBeGreaterThan(0);
 	});
 
-	test("project import decisions block assistant handoff and use no ask transcript route", async ({ page }) => {
+	test("project import decisions preserve existing-project completion and use no ask transcript route", async ({ page }) => {
 		const dir = uniqueDir("import-decision");
 		mkdirSync(join(dir, ".bobbit", "config"), { recursive: true });
 		mkdirSync(join(dir, ".bobbit", "state"), { recursive: true });
@@ -183,7 +183,8 @@ test.describe("Add Project flow (UI)", () => {
 
 			await decisions.locator("label.ask-option").filter({ hasText: "Safe mode" }).click();
 			await expect.poll(() => answerPosts).toBe(1);
-			await expect.poll(() => sessionPosts).toBe(1);
+			await expect(pathInput).not.toBeVisible({ timeout: 10_000 });
+			expect(sessionPosts).toBe(0);
 			expect(askPosts).toBe(0);
 		} finally {
 			await page.unroute(/\/import-decision-requests\?state=pending$/).catch(() => {});
@@ -194,6 +195,10 @@ test.describe("Add Project flow (UI)", () => {
 	});
 
 	test("auto-import project with existing .bobbit directory", async ({ page }) => {
+		let sessionPosts = 0;
+		page.on("request", (request) => {
+			if (request.method() === "POST" && request.url().includes("/api/sessions")) sessionPosts++;
+		});
 		// Create a temp dir with .bobbit/config/project.yaml — required for
 		// hasBobbit=true since commit 54d5b710 (project.yaml is now the source
 		// of truth, not the bare .bobbit/ directory).
@@ -218,6 +223,10 @@ test.describe("Add Project flow (UI)", () => {
 		// The dialog should close and the project should appear in the sidebar
 		// Wait for dialog to disappear
 		await expect(page.locator('input[placeholder="/path/to/project"]')).not.toBeVisible({ timeout: 10_000 });
+
+		// Existing-project registration previously ended at dialog cleanup; it
+		// must not manufacture a project-assistant session after an empty import projection.
+		expect(sessionPosts).toBe(0);
 
 		// Verify the project was registered via API
 		const res = await apiFetch("/api/projects");

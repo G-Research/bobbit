@@ -138,6 +138,13 @@ function setRequests(current: ActiveProjection, next: ProjectImportDecisionReque
 	notify(current);
 }
 
+/** Treat a failed initial or refresh projection as terminally empty for this UI flow. */
+function finishFailedProjection(current: ActiveProjection, generation: number): void {
+	if (active !== current || current.generation !== generation) return;
+	current.loaded = true;
+	setRequests(current, []);
+}
+
 /** The currently visible registered project's durable import decisions. */
 export function projectImportDecisionRequestsForProject(projectId: string): readonly ProjectImportDecisionRequestProjection[] {
 	return active?.projectId === projectId ? active.requests : [];
@@ -184,13 +191,18 @@ export async function refreshProjectImportDecisionRequests(projectId: string): P
 			gatewayRoute(`/api/projects/${encodeURIComponent(projectId)}/import-decision-requests?state=pending`),
 			{ signal: controller.signal },
 		);
-		if (!response.ok) return;
+		if (!response.ok) {
+			finishFailedProjection(current, generation);
+			return;
+		}
 		const payload: unknown = await response.json();
 		if (active !== current || current.generation !== generation) return;
 		current.loaded = true;
 		setRequests(current, actionableFromPayload(payload, projectId));
 	} catch {
-		// Keep the last durable projection on a failed refresh. Decisions remain server-owned.
+		// A completed registration must not be stranded on a transient projection
+		// failure. REST remains authoritative; the next invalidation can reload it.
+		finishFailedProjection(current, generation);
 	}
 }
 
