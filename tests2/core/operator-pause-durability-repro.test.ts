@@ -10,7 +10,17 @@ import { tryHandleNestedGoalRoute, type NestedGoalRouteDeps } from "../../src/se
 import { createMemFs } from "../harness/mem-fs.js";
 
 type GoalWithPauseSource = PersistedGoal & { pauseSource?: "operator" | "legacy-deps" };
-type RouteResult = { handled: boolean; status: number; payload: unknown };
+type RouteResult = { handled: boolean; status: number; payload: any };
+
+function deferred() {
+	let resolve!: () => void;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<void>((res, rej) => {
+		resolve = () => res();
+		reject = rej;
+	});
+	return { promise, resolve, reject };
+}
 
 function goal(id: string, overrides: Partial<GoalWithPauseSource> = {}): GoalWithPauseSource {
 	return {
@@ -36,6 +46,108 @@ async function restartWith(goals: GoalWithPauseSource[]): Promise<GoalStore> {
 	const afterRestart = new GoalStore(stateDir, memfs);
 	new GoalManager(afterRestart);
 	return afterRestart;
+}
+
+function createPauseRouteFixture() {
+	const memfs = createMemFs();
+	const stateDir = path.resolve("/memfs/operator-pause-fence/state");
+	memfs.mkdirSync(stateDir);
+	const goalStore = new GoalStore(stateDir, memfs);
+	const goalManager = new GoalManager(goalStore);
+	const pausedGoal = goal("pause-target");
+	goalStore.put(pausedGoal);
+
+	let fenceDepth = 0;
+	let failFence: Error | undefined;
+	let updateCalls = 0;
+	const fenceCalls: Array<{ goalId: string; cause: string; depth: number }> = [];
+	const broadcasts: any[] = [];
+	const broadcastFenceDepths: number[] = [];
+	const abortCalls: string[] = [];
+	const verificationHarness: any = {
+		acquireGoalLifecycleFence: () => {
+			fenceDepth++;
+			let released = false;
+			return () => {
+				if (!released) {
+					released = true;
+					fenceDepth--;
+				}
+			};
+		},
+		fenceAndCancelAllVerifications: (goalId: string, cause: string) => {
+			fenceCalls.push({ goalId, cause, depth: fenceDepth });
+			if (failFence) throw failFence;
+		},
+		getActiveVerifications: () => [],
+		cancelStaleVerifications: async () => {},
+		resolvePlanStepChild: () => ({ source: "none", child: undefined }),
+		requestChildStart: () => "started",
+		notifyChildTerminal: () => {},
+	};
+	const originalUpdateGoal = goalManager.updateGoal.bind(goalManager);
+	let stallWrite: { started: ReturnType<typeof deferred>; release: ReturnType<typeof deferred> } | undefined;
+	(goalManager as any).updateGoal = async (...args: Parameters<GoalManager["updateGoal"]>) => {
+		updateCalls++;
+		if (stallWrite) {
+			stallWrite.started.resolve();
+			await stallWrite.release.promise;
+		}
+		return originalUpdateGoal(...args);
+	};
+	const context = { goalStore, goalManager, gateStore: {}, project: { id: "project" } };
+	const deps = {
+		projectContextManager: { getContextForGoal: () => context, all: () => [context] },
+		verificationHarness,
+		teamManager: { teardownTeam: async () => {}, getTeamState: () => undefined },
+		sessionManager: {
+			getAllSessionsRaw: () => [{ id: "streaming-session", goalId: pausedGoal.id, status: "streaming" }],
+			abortSessionTurn: async (sessionId: string) => { abortCalls.push(sessionId); },
+			getSession: () => undefined, deliverLiveSteer: async () => {}, enqueuePrompt: async () => {},
+			sessionSecretStore: { resolveSessionIdBySecret: () => undefined },
+		},
+		cookieStore: { verify: (value: string) => value === "human" },
+		requireSubgoalsEnabled: () => true,
+		getGoalAcrossProjects: (goalId: string) => goalStore.get(goalId),
+		getGoalManagerForGoal: () => goalManager,
+		readBody: async (req: http.IncomingMessage) => (req as any)._body,
+		json: () => {},
+		jsonError: () => {},
+		broadcastToAll: (event: any) => { broadcasts.push(event); broadcastFenceDepths.push(fenceDepth); },
+		getSubgoalNestingPrefs: () => ({ subgoalsEnabled: true, maxNestingDepth: 5 }),
+	} as unknown as NestedGoalRouteDeps;
+
+	async function post(): Promise<RouteResult> {
+		let status = 0;
+		let payload: any;
+		const handled = await tryHandleNestedGoalRoute(
+			{ method: "POST", headers: { cookie: "bobbit_session=human" }, _body: { cascade: false } } as any as http.IncomingMessage,
+			new URL(`http://test/api/goals/${pausedGoal.id}/pause`),
+			{
+				...deps,
+				json: (responseBody, responseStatus) => { payload = responseBody; status = responseStatus ?? 200; },
+				jsonError: (responseStatus, error) => { payload = { error }; status = responseStatus; },
+			},
+		);
+		return { handled, status, payload };
+	}
+
+	return {
+		goal: pausedGoal,
+		goalStore,
+		post,
+		fenceCalls,
+		broadcasts,
+		broadcastFenceDepths,
+		abortCalls,
+		get fenceDepth() { return fenceDepth; },
+		get updateCalls() { return updateCalls; },
+		failCancellationFence(error = new Error("simulated durable fence failure")) { failFence = error; },
+		stallPausedWrite() {
+			stallWrite = { started: deferred(), release: deferred() };
+			return stallWrite;
+		},
+	};
 }
 
 function createResumeRouteFixture() {
@@ -93,6 +205,8 @@ function createResumeRouteFixture() {
 	const deps = {
 		projectContextManager: { getContextForGoal: () => context, all: () => [context] },
 		verificationHarness: {
+			acquireGoalLifecycleFence: () => () => {},
+			fenceAndCancelAllVerifications: () => {},
 			getActiveVerifications: () => [],
 			cancelStaleVerifications: async () => {},
 			resolvePlanStepChild: () => ({ source: "none", child: undefined }),
@@ -190,6 +304,64 @@ describe("operator pause durability", () => {
 		const migrated = store.get("legacy-dependency-paused-child")!;
 		assert.equal(migrated.state, "blocked", "legacy dependency pause must migrate to scheduler-blocked state");
 		assert.equal(migrated.paused, false, "legacy dependency pause must clear paused so it can auto-start after deps resolve");
+	});
+});
+
+describe("canonical operator pause lifecycle", () => {
+	it("fails closed when durable cancellation fencing fails", async () => {
+		const fx = createPauseRouteFixture();
+		fx.failCancellationFence();
+
+		const result = await fx.post();
+
+		assert.equal(result.handled, true);
+		assert.equal(result.status, 503);
+		assert.deepEqual(result.payload, {
+			error: "Could not durably cancel active verifications",
+			code: "VERIFICATION_CANCELLATION_FENCE_FAILED",
+			retryable: true,
+		});
+		assert.notEqual(fx.goalStore.get(fx.goal.id)!.paused, true, "a failed fence must not persist pause state");
+		assert.equal(fx.broadcasts.length, 0, "a failed fence must not publish a successful pause");
+		assert.deepEqual(fx.abortCalls, [], "a failed fence must not abort goal sessions");
+		assert.equal(fx.fenceDepth, 0, "the lifecycle admission fence must release after failure");
+	});
+
+	it("holds goal-wide admission through the paused write", async () => {
+		const fx = createPauseRouteFixture();
+		const write = fx.stallPausedWrite();
+		let signalGeneration = 0;
+		const admitSignal = () => {
+			if (fx.fenceDepth > 0) return { status: 409, code: "GOAL_LIFECYCLE_FENCED" };
+			signalGeneration++;
+			return { status: 201 };
+		};
+
+		const pause = fx.post();
+		await write.started.promise;
+		assert.deepEqual(admitSignal(), { status: 409, code: "GOAL_LIFECYCLE_FENCED" });
+		assert.equal(signalGeneration, 0, "no signal generation may escape while the pause decision is open");
+		assert.equal(fx.goalStore.get(fx.goal.id)!.paused, undefined, "pause write remains authoritative and incomplete");
+
+		write.release.resolve();
+		const result = await pause;
+		assert.equal(result.status, 200);
+		assert.deepEqual(result.payload, { paused: 1 });
+		assert.equal(fx.goalStore.get(fx.goal.id)!.paused, true);
+		assert.equal(fx.fenceDepth, 0, "admission reopens only after the paused write and broadcast settle");
+		assert.deepEqual(fx.fenceCalls, [{ goalId: fx.goal.id, cause: "goal-pause", depth: 1 }]);
+		assert.deepEqual(fx.broadcastFenceDepths, [1], "the paused broadcast must remain inside the lifecycle fence");
+	});
+
+	it("repeated pause re-drives durable cancellation without duplicating state work", async () => {
+		const fx = createPauseRouteFixture();
+		assert.deepEqual(await fx.post(), { handled: true, status: 200, payload: { paused: 1 } });
+		assert.deepEqual(await fx.post(), { handled: true, status: 200, payload: { paused: 0 } });
+
+		assert.equal(fx.updateCalls, 1, "repeated pause must not rewrite already-paused state");
+		assert.equal(fx.broadcasts.length, 1, "repeated pause must not publish another state transition");
+		assert.deepEqual(fx.fenceCalls.map(call => call.cause), ["goal-pause", "goal-pause"]);
+		assert.equal(fx.fenceDepth, 0);
 	});
 });
 
