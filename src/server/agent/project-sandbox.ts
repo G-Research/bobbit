@@ -577,6 +577,22 @@ export class ProjectSandbox {
 
 	/** Create or reconnect to the project container. */
 	async init(): Promise<void> {
+		await this._initializeContainer(() => this._initContainer());
+	}
+
+	/**
+	 * Recreate the recorded plan without discovering a container by its project
+	 * label first. Rollback uses this after a failed replacement: a half-created
+	 * desired-plan container must never be mistaken for the restored plan.
+	 */
+	private async _initializeFreshContainer(): Promise<void> {
+		await this._initializeContainer(async () => {
+			await this._createContainer(this.e2eRunId);
+			await this._runInitSequence();
+		});
+	}
+
+	private async _initializeContainer(initializer: () => Promise<void>): Promise<void> {
 		// Defensive: Headquarters / hidden `system` scopes are data-only /
 		// no-worktree / no-git and must never be sandboxed. If an HQ ProjectSandbox
 		// is somehow constructed, refuse to run rather than clone the server-run-dir
@@ -599,7 +615,7 @@ export class ProjectSandbox {
 		this._readyPromise.catch(() => {});
 
 		try {
-			await this._initContainer();
+			await initializer();
 			this._status = "ready";
 			this._readyResolve!();
 		} catch (err: any) {
@@ -1333,16 +1349,62 @@ export class ProjectSandbox {
 	async recreate(options: ProjectSandboxOptions): Promise<void> {
 		await this._withContainerLifecycle(async () => {
 			if (this._status === "starting" && this._readyPromise) await this._readyPromise;
+			const previousOptions = this.options;
+			const previousStatus = this._status;
 			const oldContainerId = this.containerId;
 			this._recovering = true;
-			this._status = "error";
-			if (oldContainerId) this._emitHealthEvent({ type: "container-died", projectId: this.options.projectId, containerId: oldContainerId });
 			try {
+				// Do not announce or mutate authority until Docker confirmed that the
+				// applied-plan container is gone. A daemon/permission failure leaves A
+				// live, authoritative, and retryable rather than stranding it in error.
 				if (oldContainerId) await this._removeContainer(oldContainerId);
 				this.containerId = null;
+				if (oldContainerId) {
+					this._emitHealthEvent({ type: "container-died", projectId: previousOptions.projectId, containerId: oldContainerId });
+				}
+
 				this.options = options;
-				await this.init();
+				try {
+					await this.init();
+				} catch (transitionError) {
+					// A replacement can fail after Docker has accepted `rm`. Remove the
+					// partial B if possible, then create A directly rather than looking up
+					// the project label (which could otherwise rediscover B).
+					const failedContainerId = this.containerId;
+					this.containerId = null;
+					this.options = previousOptions;
+					if (failedContainerId) {
+						try {
+							await this._removeContainer(failedContainerId);
+						} catch (cleanupError) {
+							// Do not create A beside an unconfirmed B: both would share
+							// writable named volumes. A generic remove error is never an
+							// absence signal, so abort loudly instead of guessing.
+							throw new AggregateError(
+								[transitionError, cleanupError],
+								`[project-sandbox] failed to apply sandbox plan for ${options.projectId} and clear the partial replacement`,
+							);
+						}
+					}
+					try {
+						await this._initializeFreshContainer();
+					} catch (rollbackError) {
+						throw new AggregateError(
+							[transitionError, rollbackError],
+							`[project-sandbox] failed to apply sandbox plan for ${options.projectId} and restore the prior plan`,
+						);
+					}
+					this._emitHealthEvent({ type: "container-recovered", projectId: previousOptions.projectId, containerId: this.containerId! });
+					throw transitionError;
+				}
 				this._emitHealthEvent({ type: "container-recovered", projectId: options.projectId, containerId: this.containerId! });
+			} catch (error) {
+				// The old container was never removed. Restore the exact in-memory A
+				// authority before reporting the desired-plan failure.
+				if (this.options === previousOptions && this.containerId === oldContainerId) {
+					this._status = previousStatus;
+				}
+				throw error;
 			} finally {
 				this._recovering = false;
 			}
@@ -2479,7 +2541,13 @@ export class ProjectSandbox {
 				timeout: 15_000,
 				env: DOCKER_ENV,
 			});
-		} catch { /* already gone */ }
+		} catch (error) {
+			// Idempotence applies only to Docker's explicit response for this exact
+			// identity. Permission, daemon, timeout, and ambiguous failures leave the
+			// applied container authoritative and must abort the transition.
+			if (this._isConfirmedExactContainerAbsence(error, containerId)) return;
+			throw error;
+		}
 	}
 
 	private async _dockerExec(

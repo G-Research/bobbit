@@ -8,6 +8,7 @@
 
 import { ProjectSandbox } from "./project-sandbox.js";
 import type { ProjectSandboxOptions, ContainerState, SandboxHealthEvent, VerificationSidecar, VerificationSidecarRequest, VerificationSidecarRemovalRequest } from "./project-sandbox.js";
+import { sandboxImageRequirements } from "./sandbox-image-requirements.js";
 import type { Clock, CommandRunner } from "../gateway-deps.js";
 import { HEADQUARTERS_PROJECT_ID, SYSTEM_PROJECT_ID } from "./project-registry.js";
 
@@ -195,7 +196,18 @@ export class SandboxManager {
 			if (current?.getStatus().status === "ready") {
 				const applied = this._appliedImagePlans.get(projectId);
 				if (applied?.image === opts.image && applied.fingerprint === opts.sandboxImageFingerprint) return;
-				await current.recreate(opts);
+				try {
+					await current.recreate(opts);
+				} catch (error) {
+					// The ProjectSandbox either retained A or restored it before this
+					// boundary rejects. Keep A's applied identity and expose the failed
+					// desired B plan through the existing core-owned status projection.
+					if (opts.sandboxImageFingerprint) {
+						sandboxImageRequirements.recordBuildFailure(projectId, opts.sandboxImageFingerprint);
+					}
+					throw error;
+				}
+				// Commit identity only after the desired container is healthy.
 				this._appliedImagePlans.set(projectId, { image: opts.image, fingerprint: opts.sandboxImageFingerprint });
 				return;
 			}
