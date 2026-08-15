@@ -51,17 +51,19 @@ export function buildProjectImportDecisionContext(input: {
 	project: Pick<RegisteredProject, "id" | "rootPath">;
 	importId: string;
 	components: readonly Component[];
-	fs?: Pick<typeof fs, "realpathSync" | "readdirSync" | "existsSync">;
+	fs?: Pick<typeof fs, "realpathSync" | "opendirSync">;
 }): ProjectImportDecisionContext {
 	const fileSystem = input.fs ?? fs;
 	const projectId = requireIdentifier(input.project?.id);
 	const importId = requireIdentifier(input.importId);
+	// Select a fixed prefix before resolving any component path. Persisted
+	// component order is stable, while this ensures configuration-controlled
+	// input can never cause unbounded filesystem work.
+	const selectedComponents = selectComponents(input.components);
 	const projectRoot = canonicalPath(fileSystem, input.project?.rootPath);
 
 	const components: ProjectImportComponent[] = [];
-	for (let index = 0; index < input.components.length; index++) {
-		const component = input.components[index];
-		if (!isComponent(component)) continue;
+	for (const { component, index } of selectedComponents) {
 		const root = canonicalComponentRoot(fileSystem, projectRoot, component);
 		if (!root) continue;
 		components.push(Object.freeze({
@@ -111,7 +113,7 @@ export function validateProjectImportDecisionContext(raw: unknown): ProjectImpor
 }
 
 function canonicalComponentRoot(
-	fileSystem: Pick<typeof fs, "realpathSync" | "readdirSync" | "existsSync">,
+	fileSystem: Pick<typeof fs, "realpathSync" | "opendirSync">,
 	projectRoot: string,
 	component: Component,
 ): string | undefined {
@@ -126,7 +128,7 @@ function canonicalComponentRoot(
 	}
 }
 
-function canonicalPath(fileSystem: Pick<typeof fs, "realpathSync" | "readdirSync" | "existsSync">, candidate: unknown): string {
+function canonicalPath(fileSystem: Pick<typeof fs, "realpathSync" | "opendirSync">, candidate: unknown): string {
 	if (typeof candidate !== "string" || candidate.length === 0) throw unavailable();
 	try {
 		const resolved = fileSystem.realpathSync(candidate);
@@ -138,17 +140,22 @@ function canonicalPath(fileSystem: Pick<typeof fs, "realpathSync" | "readdirSync
 	}
 }
 
-function detectLanguages(fileSystem: Pick<typeof fs, "realpathSync" | "readdirSync" | "existsSync">, root: string): DetectedProjectLanguage[] {
-	let entries: string[];
+function detectLanguages(fileSystem: Pick<typeof fs, "realpathSync" | "opendirSync">, root: string): DetectedProjectLanguage[] {
+	const found = new Set<DetectedProjectLanguage>();
+	let directory: ReturnType<typeof fs.opendirSync> | undefined;
 	try {
-		if (!fileSystem.existsSync(root)) return [];
-		entries = fileSystem.readdirSync(root).filter((entry): entry is string => typeof entry === "string").slice(0, MAX_PROJECT_IMPORT_ROOT_ENTRIES);
+		directory = fileSystem.opendirSync(root);
+		for (let count = 0; count < MAX_PROJECT_IMPORT_ROOT_ENTRIES; count++) {
+			const entry = directory.readSync();
+			if (!entry) break;
+			for (const language of languagesForEntry(entry.name)) found.add(language);
+		}
 	} catch {
 		return [];
-	}
-	const found = new Set<DetectedProjectLanguage>();
-	for (const entry of entries) {
-		for (const language of languagesForEntry(entry)) found.add(language);
+	} finally {
+		// A directory handle consumes a process resource. Close it on normal,
+		// exhausted, and failed reads, and never let a close failure escape.
+		try { directory?.closeSync(); } catch { /* best effort after a read failure */ }
 	}
 	return [...found].sort(compareText).slice(0, MAX_PROJECT_IMPORT_LANGUAGES);
 }
@@ -215,6 +222,23 @@ function validateComponentSnapshot(raw: unknown): ProjectImportComponent {
 	});
 	if (!isSortedUnique(languages)) throw unavailable();
 	return Object.freeze({ id, root, languages: Object.freeze(languages) });
+}
+
+function selectComponents(input: readonly Component[]): readonly { component: Component; index: number }[] {
+	if (!Array.isArray(input)) throw unavailable();
+	try {
+		const selected: { component: Component; index: number }[] = [];
+		// Do not iterate or sort the unbounded caller array. Array.prototype.slice
+		// reads only this fixed prefix even when a hostile runtime value is supplied.
+		const prefix = Array.prototype.slice.call(input, 0, MAX_PROJECT_IMPORT_COMPONENTS) as unknown[];
+		for (let index = 0; index < prefix.length; index++) {
+			const component = prefix[index];
+			if (isComponent(component)) selected.push({ component, index });
+		}
+		return selected;
+	} catch {
+		throw unavailable();
+	}
 }
 
 function isComponent(value: unknown): value is Component {
