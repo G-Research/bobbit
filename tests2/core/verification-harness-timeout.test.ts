@@ -415,6 +415,22 @@ describe("deterministic tracked child", () => {
 });
 
 describe("runCommandStep tree-kill", () => {
+	it("uses canonical expect-failure matching when spawning throws", async () => {
+		const spawnError = "Expected SPAWN failure";
+		const throwingRunner = {
+			nonDurable: true,
+			spawn: () => { throw new Error(spawnError); },
+		};
+		const harness = makeHarness({ commandStepRunner: throwingRunner });
+
+		const matched = await (harness as any).runCommandStep("true", TEST_DIR, 60, true, undefined, "expected spawn") as { passed: boolean; output: string };
+		expect(matched).toEqual(expect.objectContaining({ passed: true, output: spawnError }));
+
+		const invalid = await (harness as any).runCommandStep("true", TEST_DIR, 60, true, undefined, "[invalid(") as { passed: boolean; output: string };
+		expect(invalid.passed).toBe(false);
+		expect(invalid.output).toMatch(/^Invalid error_pattern regex:/);
+	});
+
 	it("kills the tracked command on step timeout and emits output plus marker", async () => {
 		const tmp = fs.mkdtempSync(path.join(TEST_DIR, "rcs-timeout-"));
 		const { harness, signalId, stepPromise } = await startFakeTreeStep("timeout", tmp);

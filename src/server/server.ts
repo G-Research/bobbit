@@ -4898,7 +4898,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					return null;
 				}
 			};
-			const sandboxBootstrap: SandboxBootstrap = async (projectId) => {
+			const sandboxBootstrap: SandboxBootstrap = async (projectId, purpose = "session") => {
 				const project = projectRegistry.get(projectId);
 				if (!project) {
 					throw new Error(`[sandbox] bootstrap: project ${projectId} not registered`);
@@ -4909,15 +4909,27 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				}
 				const cfg = ctx.projectConfigStore;
 				const sandboxCfg = cfg.get("sandbox") || "none";
-				if (sandboxCfg !== "docker") return null;
-
 				const projectDir = project.rootPath;
 				const plan = resolveProjectSandboxImagePlan(packContributionRegistry, cfg, projectId);
-
-				// Auto-build or rebuild image if missing or stale. Images are
-				// shared across projects (Docker image tags) so the first project
-				// to request a sandbox pays the build cost.
 				const dockerContextRoot = resolveSandboxDockerContext(config.defaultCwd);
+
+				if (purpose === "verification") {
+					// Frozen verification needs a prepared exact plan but must never build,
+					// clone, or inject project credentials as a side effect of a gate signal.
+					const imageStatus = await checkDockerAvailability(plan, dockerContextRoot ?? undefined, gatewayDeps.commandRunner);
+					if (!imageStatus.available || imageStatus.imageExists !== true) {
+						throw new Error("Frozen verification requires Docker and a prepared Bobbit sandbox image. Install Docker and build the configured sandbox image before signalling this gate.");
+					}
+					return {
+						projectId, projectDir, repoUrl: "", image: plan.imageName,
+						sandboxImageFingerprint: plan.fingerprint,
+						toolManager: ctx.toolManager,
+					};
+				}
+
+				if (sandboxCfg !== "docker") return null;
+
+				// Session sandboxes retain their existing image provisioning lifecycle.
 				const imageStatus = await checkDockerAvailability(plan, dockerContextRoot ?? undefined, gatewayDeps.commandRunner);
 				if (imageStatus.imageExists === false) {
 					if (!dockerContextRoot) {

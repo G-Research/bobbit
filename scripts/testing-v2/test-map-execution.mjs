@@ -15,6 +15,10 @@ export const APPROVED_E2E_VITEST_PATHS = Object.freeze([
 	"tests2/integration/affected-runner-boundary.test.ts",
 	"tests2/integration/base-path-cli-entrypoint.test.ts",
 	"tests2/integration/team-spawn-multi-repo-real-git.test.ts",
+	"tests2/integration/verification-pinned-checkout-npm.test.ts",
+	"tests2/integration/verification-pinned-checkout-real-git.test.ts",
+	"tests2/integration/verification-pinned-checkout-multi-repo-real-git.test.ts",
+	"tests2/integration/pinned-gate-verification-e2e.test.ts",
 ]);
 
 export const ISOLATED_VITEST_FILES = Object.freeze({

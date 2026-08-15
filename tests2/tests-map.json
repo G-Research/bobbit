@@ -2,9 +2,9 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1142,
+  "censusTotal": 1143,
   "buckets": {
-    "daily": 67,
+    "daily": 68,
     "v2-browser": 216,
     "v2-core": 512,
     "v2-dom": 144,
@@ -15,7 +15,7 @@
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
-    "relocate": 52,
+    "relocate": 53,
     "rewrite": 145,
     "vitest-e2e": 2
   },
@@ -3892,6 +3892,123 @@
         "tier": "browser",
         "project": "browser"
       }
+    },
+    {
+      "path": "tests2/integration/strict-update-body-routes.test.ts",
+      "reason": "Regression contract for strict finite-shape update bodies: exact route allow-lists, accepted representative updates, unknown-key rejection, no mutation, goal policy guidance, and immutable staff sandboxing.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/core/session-markdown-image.test.ts",
+      "reason": "Core security and filesystem regression coverage for authenticated session-scoped Markdown images, including cwd containment, symlink and traversal rejection, MIME and size limits, file URLs, and sandbox-realm reads.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/system-prompt-markdown-image.test.ts",
+      "reason": "Core prompt regression coverage ensuring agents are taught the session-relative local-image syntax while avoiding base64 and raw HTML output.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/gate-store-content-digest.test.ts",
+      "reason": "Pins append-only gate signal content-digest mutation, durable sanitized errors, and legacy-signal compatibility.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/verification-content-digest.test.ts",
+      "reason": "Pins raw worktree-byte verification content witnesses, ignored-file exclusion, mode and CRLF sensitivity, tracked deletion, and fail-closed inventory validation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/verification-pinned-checkout.test.ts",
+      "reason": "Pins private detached raw-byte staging, atomic source-only public checkout publication/quarantine, immutable digest assertions, symlink-race containment, stale-commit rejection, targeted orphan-lease recovery, and ignored dependency sensitivity boundaries.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/verification-pinned-checkout-npm.test.ts",
+      "reason": "E2E Vitest npm-script smoke proving a frozen checkout exposes only ignored top-level node_modules dependencies while their mutable bytes remain outside the pinned digest.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
+      }
+    },
+    {
+      "path": "tests2/integration/verification-pinned-checkout-real-git.test.ts",
+      "reason": "Real-Git D-3 regression: a private detached no-checkout worktree publishes a Git-free public inventory, permits ignored output, rejects non-ignored additions, and resumes from the persisted lease.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
+      }
+    },
+    {
+      "path": "tests2/integration/verification-pinned-checkout-multi-repo-real-git.test.ts",
+      "reason": "Real-Git D-4 integration: distinct component repositories retain independent commits in one immutable logical layout, resume without consulting mutable live roots, reject escaping layout entries, and clean only recorded resources.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
+      }
+    },
+    {
+      "path": "tests2/integration/pinned-gate-verification-e2e.test.ts",
+      "reason": "Real-Git D-5 lifecycle E2E: production VerificationHarness executes frozen single- and multi-repository checkouts, audits source mutation, and keeps cache witnesses digest- and repository-identity-safe.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
+      }
+    },
+    {
+      "path": "tests2/integration/gate-content-digest-nested.test.ts",
+      "reason": "Integration seam for nested child branch-container content witnesses: parent, sibling, and child layouts remain isolated; same-SHA content changes and v2 repository identities report legible cache misses, while component cwd is composed once.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/scheduler-recovery.journey.spec.ts",
+      "reason": "Production Chromium journey for the root dashboard and Plan child scheduler-recovery controls, authorized retry POSTs, live cleanup, reload persistence, and fixture teardown.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/dom/goal-dashboard-root-recovery.test.ts",
+      "reason": "Focused DOM coverage for root and Plan scheduler recovery retries: successful reconciliation fences held pre-consume descendants and goals snapshots, refetches fenced generations despite conditional changed:false replies so later server recovery generations surface, while non-OK and network failures retain the recovery action.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
     }
   ],
   "journeys": [
@@ -4045,6 +4162,10 @@
     },
     {
       "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/scheduler-recovery.journey.spec.ts",
       "type": "smoke-journey"
     }
   ],
@@ -18973,6 +19094,13 @@
       "method": "relocate",
       "replacement": [],
       "rationale": "Opt-in real Pi/real-model context-pressure smoke for exact-once steer and follow-up delivery through automatic compaction; manual/daily only, with explicit credentials, no provider fallback, and bounded request/token/cost/time guards."
+    },
+    {
+      "file": "tests/e2e/pinned-verification-sidecar.spec.ts",
+      "bucket": "daily",
+      "method": "relocate",
+      "replacement": [],
+      "rationale": "Production SessionManager → SandboxManager Docker sidecar verification lifecycle with live source mutation and exact cleanup."
     }
   ]
 }

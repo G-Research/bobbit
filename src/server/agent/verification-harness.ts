@@ -6838,12 +6838,9 @@ export class VerificationHarness {
 			const handleSpawnError = (err: Error): { passed: boolean; output: string; diagnostics?: GateStepDiagnostics } => {
 				appendRetainedLogChunk(outFile, "");
 				appendRetainedLogChunk(errFile, err.message);
-				if (expectFailure && errorPattern) {
-					// Use the same bounded RE2 compilation and invalid-pattern fallback
-					// as ordinary command completion.
-					return withDiagnostics(matchExpectFailure(null, err.message, errorPattern));
-				}
-				return withDiagnostics({ passed: expectFailure, output: err.message });
+				return withDiagnostics(expectFailure
+					? matchExpectFailure(null, err.message, errorPattern)
+					: { passed: false, output: err.message });
 			};
 
 			// IMPORTANT: do NOT re-introduce `spawn(..., { timeout })` here.

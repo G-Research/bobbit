@@ -276,6 +276,7 @@ export const DAILY_OVERRIDES = new Map([
 	["tests/e2e/remove-boot-respawn-restart.spec.ts", "Real boot-respawn across a real gateway restart."],
 	["tests/e2e/anthropic-oauth-restart-sandbox-lock.spec.ts", "Real gateway crash/restart preserves an isolated Anthropic OAuth credential and direct mock-model authentication; its companion sandbox and stale-lock checks retain the same secure credential fixture."],
 	// --- real docker container runtime (e2e) ---
+	["tests/e2e/pinned-verification-sidecar.spec.ts", "Production SessionManager → SandboxManager Docker sidecar verification lifecycle with live source mutation and exact cleanup."],
 	["tests/e2e/sandbox-recovery.spec.ts", "Real Docker sandbox container recovery."],
 	// --- real MCP subprocess (e2e) ---
 	["tests/e2e/mcp-integration.spec.ts", "Spawns a real MCP server subprocess (process.execPath)."],
