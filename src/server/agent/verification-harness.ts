@@ -2833,12 +2833,19 @@ export class VerificationHarness {
 			try {
 				// A restart cannot silently skip a persisted sidecar merely because this
 				// process has not registered its project sandbox yet.
-				const recoveryBackend = sandboxManager as (typeof sandboxManager & { ensureVerificationBackend?: (id: string) => Promise<void> }) | null;
+				const recoveryBackend = sandboxManager as (typeof sandboxManager & {
+					ensureVerificationBackend?: (id: string) => Promise<void>;
+					recoverVerificationSidecars?: (id: string, activeSignalIds: ReadonlySet<string>) => Promise<string[]>;
+				}) | null;
 				if (recoveryBackend?.ensureVerificationBackend) await recoveryBackend.ensureVerificationBackend(projectId);
 				else await sandboxManager?.ensureForProject?.(projectId);
-				const sandbox = sandboxManager?.get(projectId);
-				if (!sandbox?.recoverVerificationSidecars) throw new Error("sandbox recovery is unavailable");
-				await sandbox.recoverVerificationSidecars(activeSignalsByProject.get(projectId) ?? new Set<string>());
+				if (recoveryBackend?.recoverVerificationSidecars) {
+					await recoveryBackend.recoverVerificationSidecars(projectId, activeSignalsByProject.get(projectId) ?? new Set<string>());
+				} else {
+					const sandbox = sandboxManager?.get(projectId);
+					if (!sandbox?.recoverVerificationSidecars) throw new Error("sandbox recovery is unavailable");
+					await sandbox.recoverVerificationSidecars(activeSignalsByProject.get(projectId) ?? new Set<string>());
+				}
 			} catch (error) {
 				// Per-project isolation keeps one unavailable cleanup resource from
 				// aborting recovery of unrelated verification rows. Its exact lease stays
@@ -4145,22 +4152,35 @@ export class VerificationHarness {
 		if (!reference) return;
 		const checkoutPath = active.pinnedCheckout?.path;
 		const sandboxManager = this.sessionManager?.getSandboxManager?.();
+		const verificationBackend = sandboxManager as (typeof sandboxManager & {
+			ensureVerificationBackend?: (projectId: string) => Promise<void>;
+			removeVerificationSidecar?: (projectId: string, request: {
+				signalId: string; checkoutPath: string; containerId: string; ignoredOutputDirs: readonly string[];
+				dependencyLinks?: readonly { path: string; target: string }[];
+			}) => Promise<void>;
+		}) | null;
 		let sandbox = sandboxManager?.get(reference.projectId);
-		if (!sandbox && sandboxManager?.ensureForProject) {
-			await sandboxManager.ensureForProject(reference.projectId);
-			sandbox = sandboxManager.get(reference.projectId);
-		}
-		if (!checkoutPath || !sandbox?.removeVerificationSidecar) {
+		if (!checkoutPath || (!verificationBackend?.removeVerificationSidecar && !sandbox?.removeVerificationSidecar)) {
 			throw new PinnedCheckoutError("PINNED_CHECKOUT_UNREADABLE", "Frozen verification sidecar cleanup is unavailable");
 		}
 		try {
-			await sandbox.removeVerificationSidecar({
+			const request = {
 				signalId: reference.signalId,
 				checkoutPath,
 				containerId: reference.containerId,
 				ignoredOutputDirs: reference.ignoredOutputDirs,
 				dependencyLinks: reference.dependencyLinks,
-			});
+			};
+			if (verificationBackend?.removeVerificationSidecar) {
+				await verificationBackend.removeVerificationSidecar(reference.projectId, request);
+			} else {
+				if (!sandbox && sandboxManager?.ensureForProject) {
+					await sandboxManager.ensureForProject(reference.projectId);
+					sandbox = sandboxManager.get(reference.projectId);
+				}
+				if (!sandbox?.removeVerificationSidecar) throw new Error("sandbox cleanup is unavailable");
+				await sandbox.removeVerificationSidecar(request);
+			}
 			delete active.verificationContainer;
 			this._persistActive();
 		} catch {

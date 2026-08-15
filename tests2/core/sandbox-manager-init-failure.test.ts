@@ -21,6 +21,7 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { SandboxManager, type SandboxBootstrap } from "../../src/server/agent/sandbox-manager.js";
+import { ProjectSandbox } from "../../src/server/agent/project-sandbox.js";
 
 describe("SandboxManager.ensureForProject failure isolation", () => {
 	it("rejects on the awaited boundary, leaks no unhandledRejection, and stays usable", async () => {
@@ -76,7 +77,7 @@ describe("SandboxManager.ensureForProject failure isolation", () => {
 		}
 	});
 
-	it("creates a verification-only backend without initializing a mutable project container", async () => {
+	it("creates a separate verification backend without initializing a mutable project container", async () => {
 		const manager = new SandboxManager({
 			bootstrap: async () => ({
 				projectId: "verification-only-project",
@@ -87,8 +88,8 @@ describe("SandboxManager.ensureForProject failure isolation", () => {
 		});
 
 		await manager.ensureVerificationBackend("verification-only-project");
-		assert.equal(manager.has("verification-only-project"), true);
-		assert.equal(manager.get("verification-only-project")?.getStatus().status, "starting",
+		assert.equal(manager.has("verification-only-project"), false);
+		assert.equal((manager as any)._verificationBackends.get("verification-only-project")?.sandbox.getStatus().status, "starting",
 			"verification preparation must not create the long-lived mutable project container");
 	});
 
@@ -107,8 +108,41 @@ describe("SandboxManager.ensureForProject failure isolation", () => {
 		assert.equal(manager.has("direct-project"), false);
 	});
 
-	it("does not replace an in-flight session sandbox with a verification-only instance", async () => {
-		const projectId = "concurrent-project";
+	it("runs a ready B verification image instead of the live A session image", async () => {
+		const projectId = "plan-change-project";
+		const bootstraps: string[] = [];
+		const manager = new SandboxManager({
+			bootstrap: async (_id, purpose) => {
+				bootstraps.push(purpose ?? "session");
+				return purpose === "verification"
+					? { projectId, projectDir: process.cwd(), repoUrl: "", image: "image-b", sandboxImageFingerprint: "fingerprint-b", sandboxCredentials: { SECRET: "must-not-reach-sidecar" }, githubToken: "must-not-reach-sidecar" }
+					: { projectId, projectDir: process.cwd(), repoUrl: "", image: "image-a", sandboxImageFingerprint: "fingerprint-a" };
+			},
+		});
+		const sessionSandbox = { getStatus: () => ({ projectId, status: "ready", containerId: "container-a" }) };
+		(manager as any).sandboxes.set(projectId, sessionSandbox);
+		(manager as any)._appliedImagePlans.set(projectId, { image: "image-a", fingerprint: "fingerprint-a" });
+
+		const original = ProjectSandbox.prototype.getVerificationSidecar;
+		const dockerRuns: Array<{ image: string; fingerprint?: string; credentials?: unknown; githubToken?: unknown }> = [];
+		ProjectSandbox.prototype.getVerificationSidecar = async function(request) {
+			const options = (this as any).options;
+			dockerRuns.push({ image: options.image, fingerprint: options.sandboxImageFingerprint, credentials: options.sandboxCredentials, githubToken: options.githubToken });
+			return { containerId: "b".repeat(64), projectId: options.projectId, signalId: request.signalId, checkoutPath: request.checkoutPath, cwd: "/verified-b" };
+		};
+		try {
+			const sidecar = await manager.getVerificationSidecar(projectId, { signalId: "signal-b", checkoutPath: process.cwd(), ignoredOutputDirs: [] });
+			assert.equal(sidecar.cwd, "/verified-b");
+			assert.deepEqual(bootstraps, ["verification"], "every sidecar request must run the no-build exact-image bootstrap");
+			assert.deepEqual(dockerRuns, [{ image: "image-b", fingerprint: "fingerprint-b", credentials: undefined, githubToken: undefined }]);
+			assert.equal(manager.get(projectId), sessionSandbox, "verification must not replace or damage live A");
+		} finally {
+			ProjectSandbox.prototype.getVerificationSidecar = original;
+		}
+	});
+
+	it("runs verification bootstrap and B while A session initialization is in flight", async () => {
+		const projectId = "concurrent-plan-change-project";
 		const purposes: string[] = [];
 		let releaseInit!: () => void;
 		let sessionPublished!: () => void;
@@ -117,7 +151,9 @@ describe("SandboxManager.ensureForProject failure isolation", () => {
 		const manager = new SandboxManager({
 			bootstrap: async (_id, purpose) => {
 				purposes.push(purpose ?? "session");
-				return { projectId, projectDir: process.cwd(), repoUrl: "", image: "prepared-verifier-image" };
+				return purpose === "verification"
+					? { projectId, projectDir: process.cwd(), repoUrl: "", image: "image-b", sandboxImageFingerprint: "fingerprint-b" }
+					: { projectId, projectDir: process.cwd(), repoUrl: "", image: "image-a", sandboxImageFingerprint: "fingerprint-a" };
 			},
 		});
 		const sessionSandbox = { getStatus: () => ({ projectId, status: "starting", containerId: "" }) };
@@ -127,14 +163,24 @@ describe("SandboxManager.ensureForProject failure isolation", () => {
 			await initReleased;
 		};
 
-		const sessionInit = manager.ensureForProject(projectId);
-		await sessionPublishedPromise;
-		const verificationInit = manager.ensureVerificationBackend(projectId);
-		releaseInit();
-		await Promise.all([sessionInit, verificationInit]);
-
-		assert.equal(manager.get(projectId), sessionSandbox, "the session-owned sandbox remains registered after the race");
-		assert.equal((manager as any)._verificationOnlyProjects.has(projectId), false);
-		assert.deepEqual(purposes, ["session"], "verification must await the in-flight session bootstrap instead of replacing it");
+		const original = ProjectSandbox.prototype.getVerificationSidecar;
+		const dockerRunImages: string[] = [];
+		ProjectSandbox.prototype.getVerificationSidecar = async function(request) {
+			const options = (this as any).options;
+			dockerRunImages.push(options.image);
+			return { containerId: "b".repeat(64), projectId: options.projectId, signalId: request.signalId, checkoutPath: request.checkoutPath, cwd: "/verified-b" };
+		};
+		try {
+			const sessionInit = manager.ensureForProject(projectId);
+			await sessionPublishedPromise;
+			await manager.getVerificationSidecar(projectId, { signalId: "signal-b", checkoutPath: process.cwd(), ignoredOutputDirs: [] });
+			assert.deepEqual(purposes, ["session", "verification"], "in-flight A must not suppress B's exact-image verification bootstrap");
+			assert.deepEqual(dockerRunImages, ["image-b"], "the sidecar Docker run must use verified B");
+			assert.equal(manager.get(projectId), sessionSandbox, "verification must not replace the initializing session sandbox");
+			releaseInit();
+			await sessionInit;
+		} finally {
+			ProjectSandbox.prototype.getVerificationSidecar = original;
+		}
 	});
 });
