@@ -50,6 +50,9 @@ test.describe("atomic models.json bind mount", () => {
 		const mountedModels = (containerId: string): string => docker([
 			"exec", containerId, "cat", "/home/node/.bobbit/agent/models.json",
 		]);
+		const workspaceOwnership = (containerId: string): string => docker([
+			"exec", containerId, "stat", "-c", "%U:%G", "/workspace",
+		]);
 		const exists = (containerId: string): boolean => {
 			try {
 				execFileSync("docker", ["inspect", containerId], { stdio: "ignore" });
@@ -165,6 +168,7 @@ test.describe("atomic models.json bind mount", () => {
 			expect(volumesA).not.toEqual(volumesB);
 			for (const [runId, containerId, volumes] of [[runA, initialA, volumesA], [runB, initialB, volumesB]] as const) {
 				expect(containerLabels(containerId)).toMatchObject({ "bobbit-project": projectId, "bobbit-e2e-run": runId });
+				expect(workspaceOwnership(containerId)).toBe("node:node");
 				for (const volume of volumes) {
 					expect(volume).toContain(`-e2e-${runId}`);
 					expect(volumeLabels(volume)).toMatchObject({ "bobbit-project": projectId, "bobbit-e2e-run": runId });
