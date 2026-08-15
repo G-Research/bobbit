@@ -24,6 +24,7 @@ import {
 	refreshSandboxAnthropicOAuthCredential,
 	recoverAnthropicApiKeyRuntime,
 	resolveHostTokenValue,
+	ClaudeAgentSdkDirectAuthUnavailableError,
 	sandboxAgentAuthPath,
 	sandboxTokenPolicyAllowsAnthropicAuth,
 } from "../../src/server/agent/host-tokens.js";
@@ -83,6 +84,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 	it.each([
 		"CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE",
 		"CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE",
+		"CLAUDE_AGENT_SDK_AUTH_UNAVAILABLE",
 	] as const)("preserves the safe %s reason code while redacting embedded credentials and config paths", (category) => {
 		const secret = "sk-sandbox-diagnostic-secret";
 		const configPath = `/Users/operator/${category}/credentials.json`;
@@ -97,6 +99,19 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 		assert.equal(claudeAgentSdkUnavailableRouteDiagnostic(error), `${SDK_SESSION_UNAVAILABLE}: ${category}`);
 		assert.doesNotMatch(diagnostic, new RegExp(secret));
 		assert.doesNotMatch(diagnostic, new RegExp(configPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+	});
+
+	it("maps direct OAuth unavailability to the canonical SDK error and safe route category", () => {
+		const error = new ClaudeAgentSdkDirectAuthUnavailableError();
+
+		assert.ok(error instanceof ClaudeAgentSdkUnavailableError);
+		assert.equal(error.code, SDK_SESSION_UNAVAILABLE);
+		assert.equal(error.message, SDK_SESSION_UNAVAILABLE);
+		assert.equal(claudeAgentSdkUnavailableDiagnostic(error), "CLAUDE_AGENT_SDK_AUTH_UNAVAILABLE");
+		assert.equal(
+			claudeAgentSdkUnavailableRouteDiagnostic(error),
+			"SDK_SESSION_UNAVAILABLE: CLAUDE_AGENT_SDK_AUTH_UNAVAILABLE",
+		);
 	});
 
 	it("exports only a sanctioned, current non-renewable Anthropic OAuth credential", () => {

@@ -1,9 +1,11 @@
-import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { vi } from "vitest";
 import { createSession } from "./_e2e/e2e-setup.js";
 import { invalidateModelCache } from "../../src/server/agent/model-registry.js";
+import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
 import { setClaudeAgentSdkBridgeDepsForTesting } from "../../src/server/agent/session-runtime.js";
 import {
 	createSessionTracker,
@@ -306,6 +308,68 @@ test.describe("session runtime route boundary", () => {
 				body: JSON.stringify({ "default.sessionModel": beforeDefault }),
 			});
 			sdk.restore();
+			await removeSdkCatalogFixture(gateway);
+		}
+	});
+
+	test("returns a canonical 503 before direct SDK spawn when Bobbit OAuth is unavailable", async ({ gateway }) => {
+		await registerSdkCatalogFixture(gateway);
+		const privateCwd = join(gateway.bobbitDir, "default-project", "private-direct-sdk-cwd");
+		const privatePrompt = "PRIVATE_DIRECT_SDK_PROMPT";
+		const previousAgentDir = process.env.BOBBIT_AGENT_DIR;
+		const emptyAgentDir = mkdtempSync(join(tmpdir(), "bobbit-direct-sdk-no-auth-"));
+		const beforeDefaultResponse = await localApiFetch(gateway, "/api/preferences");
+		expect(beforeDefaultResponse.status).toBe(200);
+		const beforeDefault = (await beforeDefaultResponse.json())["default.sessionModel"];
+		const liveBefore = gateway.sessionManager.listSessions().length;
+		const persistedBefore = gateway.sessionManager.getSessionStore(gateway.defaultProjectId).getAll().length;
+		const logged: unknown[][] = [];
+		const errorSpy = vi.spyOn(console, "error").mockImplementation((...args) => { logged.push(args); });
+		try {
+			process.env.BOBBIT_AGENT_DIR = emptyAgentDir;
+			resetAgentDirStateForTests();
+			mkdirSync(privateCwd, { recursive: true });
+			const setDefault = await localApiFetch(gateway, "/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ "default.sessionModel": `${SDK_PROVIDER}/${SDK_MODEL}` }),
+			});
+			expect(setDefault.status).toBe(200);
+
+			const response = await localApiFetch(gateway, "/api/sessions", {
+				method: "POST",
+				body: JSON.stringify({
+					cwd: privateCwd,
+					projectId: gateway.defaultProjectId,
+					worktree: false,
+					prompt: privatePrompt,
+				}),
+			});
+			expect(response.status, await response.clone().text()).toBe(503);
+			const body = await response.json();
+			expect(body).toEqual({ error: "SDK_SESSION_UNAVAILABLE", code: "SDK_SESSION_UNAVAILABLE" });
+			expect(gateway.sessionManager.listSessions()).toHaveLength(liveBefore);
+			expect(gateway.sessionManager.getSessionStore(gateway.defaultProjectId).getAll()).toHaveLength(persistedBefore);
+			expect((gateway.sessionManager as any).claudeAgentSdkBridgeDepsFactory).toBeUndefined();
+			const responseText = JSON.stringify(body);
+			const logText = JSON.stringify(logged);
+			for (const privateValue of [privateCwd, gateway.defaultProjectId, privatePrompt, emptyAgentDir, "claude-agent-sdk"]) {
+				expect(responseText).not.toContain(privateValue);
+				expect(logText).not.toContain(privateValue);
+			}
+			expect(logged).toEqual([[
+				"[POST /api/sessions] SDK unavailable: SDK_SESSION_UNAVAILABLE: CLAUDE_AGENT_SDK_AUTH_UNAVAILABLE",
+			]]);
+		} finally {
+			errorSpy.mockRestore();
+			if (previousAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;
+			else process.env.BOBBIT_AGENT_DIR = previousAgentDir;
+			resetAgentDirStateForTests();
+			rmSync(emptyAgentDir, { recursive: true, force: true });
+			rmSync(privateCwd, { recursive: true, force: true });
+			await localApiFetch(gateway, "/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ "default.sessionModel": beforeDefault }),
+			});
 			await removeSdkCatalogFixture(gateway);
 		}
 	});

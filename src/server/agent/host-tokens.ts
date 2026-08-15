@@ -14,6 +14,7 @@ import {
 } from "../auth/credential-store.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
+import { ClaudeAgentSdkUnavailableError } from "./claude-agent-sdk-error.js";
 
 /** Provider keys from auth.json / host env → sandbox env var name + description */
 const PROVIDER_TOKENS: { envVar: string; label: string; provider: string; envKeys: string[] }[] = [
@@ -324,10 +325,9 @@ export class ClaudeAgentSdkSandboxAuthUnavailableError extends Error {
 }
 
 /** Stable, credential-free failure for a direct SDK subscription handoff. */
-export class ClaudeAgentSdkDirectAuthUnavailableError extends Error {
-	readonly code = "CLAUDE_AGENT_SDK_AUTH_UNAVAILABLE";
+export class ClaudeAgentSdkDirectAuthUnavailableError extends ClaudeAgentSdkUnavailableError {
 	constructor() {
-		super("CLAUDE_AGENT_SDK_AUTH_UNAVAILABLE: connect Anthropic OAuth in Bobbit and retry");
+		super("CLAUDE_AGENT_SDK_AUTH_UNAVAILABLE");
 		this.name = "ClaudeAgentSdkDirectAuthUnavailableError";
 	}
 }

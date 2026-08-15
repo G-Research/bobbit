@@ -7,14 +7,15 @@ const diagnostics = new WeakMap<ClaudeAgentSdkUnavailableError, string>();
 
 /**
  * These are operator-facing reason codes, not credentials. They must survive
- * generic token redaction so retry logs retain the actionable sandbox cause.
+ * generic token redaction so retry logs retain the actionable recovery cause.
  */
-const SAFE_SANDBOX_DIAGNOSTIC_CATEGORIES = [
+const SAFE_ROUTE_DIAGNOSTIC_CATEGORIES = [
 	"CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE",
 	"CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE",
+	"CLAUDE_AGENT_SDK_AUTH_UNAVAILABLE",
 ] as const;
-const safeSandboxDiagnosticCategoryPattern = new RegExp(
-	`\\b(?:${SAFE_SANDBOX_DIAGNOSTIC_CATEGORIES.join("|")})\\b`,
+const safeRouteDiagnosticCategoryPattern = new RegExp(
+	`\\b(?:${SAFE_ROUTE_DIAGNOSTIC_CATEGORIES.join("|")})\\b`,
 	"g",
 );
 
@@ -45,7 +46,7 @@ export function sanitizeClaudeAgentSdkErrorForLog(error: unknown, maxLength = 1_
 	const raw = error instanceof Error ? (error.stack || error.message) : String(error ?? "");
 	// Redact whole credential paths before partitioning around safe categories:
 	// a category-shaped directory name must not split a sensitive path in two.
-	return sanitizePreservingSafeSandboxDiagnosticCategories(redactClaudeCredentialPaths(raw)).slice(0, maxLength);
+	return sanitizePreservingSafeRouteDiagnosticCategories(redactClaudeCredentialPaths(raw)).slice(0, maxLength);
 }
 
 export function claudeAgentSdkUnavailableDiagnostic(error: unknown): string {
@@ -56,11 +57,11 @@ export function claudeAgentSdkUnavailableDiagnostic(error: unknown): string {
 
 /**
  * API route logs must not retain provider-controlled diagnostics. Preserve the
- * stable unavailable category and, when present, an actionable sandbox category.
+ * stable unavailable category and, when present, one actionable allowlisted category.
  */
 export function claudeAgentSdkUnavailableRouteDiagnostic(error: unknown): string {
 	const diagnostic = claudeAgentSdkUnavailableDiagnostic(error);
-	const category = diagnostic.match(safeSandboxDiagnosticCategoryPattern)?.[0];
+	const category = diagnostic.match(safeRouteDiagnosticCategoryPattern)?.[0];
 	return category ? `${SDK_SESSION_UNAVAILABLE}: ${category}` : SDK_SESSION_UNAVAILABLE;
 }
 
@@ -69,10 +70,10 @@ export function claudeAgentSdkUnavailablePayload(): { error: typeof SDK_SESSION_
 	return { error: SDK_SESSION_UNAVAILABLE, code: SDK_SESSION_UNAVAILABLE };
 }
 
-function sanitizePreservingSafeSandboxDiagnosticCategories(value: string): string {
+function sanitizePreservingSafeRouteDiagnosticCategories(value: string): string {
 	let result = "";
 	let offset = 0;
-	for (const match of value.matchAll(safeSandboxDiagnosticCategoryPattern)) {
+	for (const match of value.matchAll(safeRouteDiagnosticCategoryPattern)) {
 		result += sanitizeUntrustedDiagnosticText(value.slice(offset, match.index));
 		result += match[0];
 		offset = (match.index ?? 0) + match[0].length;
