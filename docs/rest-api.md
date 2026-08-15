@@ -852,12 +852,15 @@ Per-session review annotations are stored server-side so they survive browser cl
 
 ### Goals
 
+Finite-shape resource update routes accept only their documented request keys. An unknown key returns `400` with every offending field named, and the route makes no update. Rejecting instead of projecting selected fields prevents an `ok: true` response from concealing a no-op. This applies to the update routes for projects, goals, tools, roles, tasks, workflows, sessions, staff, and goal policy.
+
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/goals` | List goals. `?archived=true` returns archived goals with an `archivedSessions` field; `q` filters archived goals by goal title or affiliated session title/role before pagination. Supports `?since=N` generation counter for conditional fetch. See [Archived goal list and query search](#archived-goal-list-and-query-search) |
 | `POST` | `/api/goals` | Create a goal (`{ title, cwd, spec, projectId?, team?, worktree?, reattemptOf?, metadata? }`). `metadata` is an optional arbitrary, namespaced key/value object persisted on the goal and inherited by all its sessions and sub-goals; accepted only when it is a non-empty plain object. `projectId: "headquarters"` is valid; with `worktree: false`, a Headquarters goal can run data-only with no branch/worktree. See [Hierarchical goal metadata](design/goal-metadata.md). |
 | `GET` | `/api/goals/:id` | Get a goal |
-| `PUT` | `/api/goals/:id` | Update a goal (title, cwd, state, spec, team, repoPath, branch, reattemptOf) |
+| `PUT` | `/api/goals/:id` | Update a goal (`title`, `cwd`, `state`, `spec`, `branch`, `reattemptOf`; `team` remains an accepted compatibility key). `team` does not change the always-on team mode. `repoPath` and `prUrl` are lifecycle/remote-state data, not update fields, and are rejected with `400`. |
+| `PATCH` | `/api/goals/:id/policy` | Update per-goal policy (`subgoalsAllowed`, `maxNestingDepth`, `divergencePolicy`, `maxConcurrentChildren`). |
 | `PUT` | `/api/goals/:id/workflow` | Replace the goal's complete frozen workflow snapshot, validate it, and reconcile gate state. See [Goal workflow replacement](#goal-workflow-replacement). |
 | `POST` | `/api/goals/:id/retry-setup` | Retry a failed worktree setup. See [Goal setup recovery](#goal-setup-recovery). |
 | `DELETE` | `/api/goals/:id` | Delete a goal and its tasks |
@@ -870,6 +873,9 @@ Per-session review annotations are stored server-side so they survive browser cl
 | `GET` | `/api/goals/:id/github-link` | PR URL or sanitized GitHub branch fallback. No-worktree goals return `200 { available: false, reason: "no-worktree", message }`. Still available, but the sidebar `Open on GitHub` item now mirrors the goal-row PR badge instead of gating on this endpoint. See [Goal GitHub link endpoint](#goal-github-link-endpoint) |
 | `POST` | `/api/goals/:id/pr-merge` | Merge PR for goal branch (`{ method? }`). No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. |
 | `POST` | `/api/goals/:id/integrate-child/:childId` | Locally merge a direct child's branch into the parent and auto-archive it on success. Body `{ force?: boolean }`. Never pushes either branch. See [Child-goal integration](#child-goal-integration). |
+| `POST` | `/api/goals/:id/retry-scheduled-start` | Consume a current retryable child or root scheduler-recovery record and retry through the child scheduler. See [Scheduled child-start recovery](#scheduled-child-start-recovery). |
+
+`PUT /api/goals/:id` rejects the four policy keys with `400`, names all of them in the response, and directs callers to `PATCH /api/goals/:id/policy`. That routing changes neither policy nor authorization: `subgoalsAllowed` and `maxNestingDepth` are operator-class, while `divergencePolicy` and `maxConcurrentChildren` are orchestration-class and remain team-lead-only. A mixed policy body uses the stricter orchestration class.
 
 ### Goal setup recovery
 
@@ -1004,6 +1010,36 @@ merge, preserves the child, and returns `409` with
 A missing/unpassed gate returns `409 RTM_NOT_PASSED`; goals without usable Git
 worktrees return `409 GOAL_GIT_UNAVAILABLE`. Responses intentionally omit the
 legacy `pushed` field because integration has no remote side effect.
+
+### Scheduled child-start recovery
+
+`POST /api/goals/:id/retry-scheduled-start` is the operator recovery action for
+a visible, bounded scheduled-start stop. It accepts no body. The target must
+have a current retryable `schedulerRecovery` record and be an active,
+start-eligible goal; paused, blocked, complete, and shelved goals return
+`409 SCHEDULER_RETRY_INELIGIBLE` until their lifecycle condition is resolved.
+Archived or unknown goals return `404`.
+
+The route requires the same operator authorization as pause/resume. A child
+recovery is consumed before entering the scheduler, so a replay or double-click
+returns `409 NO_SCHEDULER_RECOVERY` rather than starting duplicate work. A root
+recovery first validates and re-requests its durable affected-child targets;
+if none remain actionable it retains the recovery and returns
+`409 SCHEDULER_ROOT_RETRY_INELIGIBLE`. A child retry creates a fresh scheduler
+request generation and returns:
+
+```json
+{ "childGoalId": "…", "outcome": "started" }
+```
+
+`outcome` may instead be `"capacity-blocked"` when the root is already at its
+concurrency cap. A root circuit-breaker record persists its affected child IDs,
+then re-requests only the still-eligible children after a restart and returns
+`{ "rootGoalId": "…", "outcomes": ["started" | "capacity-blocked", "…"] }`.
+The route never bypasses scheduler permits or directly creates a team.
+
+See [Bounded scheduled-start recovery](nested-goals.md#bounded-scheduled-start-recovery)
+for failure classification, re-entry, and operator workflow.
 
 ### Goal workflow replacement
 
@@ -1385,7 +1421,7 @@ Staff records include a persisted `accessory` string as part of the staff identi
 | `GET` | `/api/staff/orphaned` | List staff records that are not anchored to a real project — missing `projectId` or persisted under the synthetic `system` project (legacy from before staff became project-scoped). Returns `{ staff: PersistedStaff[] }` with the same normalised staff shape. Consumed by the sidebar's orphan banner. |
 | `GET` | `/api/staff/:id` | Get a single staff agent definition, including the normalised persisted `accessory` and persisted `sandboxed` boolean. |
 | `POST` | `/api/staff` | Create a staff agent (`{ name, description, systemPrompt, cwd?, worktree?, triggers?, roleId?, projectId?, sandboxed?, accessory? }`). Returns `400` when any element of `triggers[]` has `type` `goal_created` / `goal_archived` and a missing or empty `prompt` (see [staff-triggers.md](staff-triggers.md)). Subject to the [project resolution contract](#project-resolution-contract): `projectId` selects a registered project; otherwise `cwd` must be inside one. With `projectId` and missing/blank `cwd`, the server uses the project root. Explicit `cwd` with `projectId` must stay inside that selected project. `worktree` defaults to auto (`true`/omitted: use a project worktree when supported; `false`: run in the project directory; non-git projects fall back to no-worktree). `sandboxed` defaults to `false` and is immutable. `accessory` defaults to `"none"`, is persisted on the staff record, and is copied onto the initial permanent session for rendering. `roleId` is optional: a non-empty string attaches a role (validated — unknown role returns **404**; a non-string, non-null value returns **400**); the role's prompt context is prepended to the staff system prompt and, when no explicit `accessory` is given, the role's accessory becomes the default. See [staff-agents.md — Role selection](staff-agents.md#role-selection). |
-| `PUT` | `/api/staff/:id` | Update a staff agent (`{ name, description, systemPrompt, cwd, state, triggers, memory, roleId, contextPolicy, accessory }`). Same goal-trigger prompt validation as `POST /api/staff`: empty `prompt` on a `goal_created` / `goal_archived` row returns `400`. Changed `cwd` values must be non-empty and inside the staff agent's own project. An unchanged `cwd` on a legacy/orphan record may still be re-sent so other fields remain editable. `accessory`, when present, is normalised, persisted on the staff record, and mirrored to the current permanent session if one exists. `roleId` is optional and validated the same way as on `POST`: a non-empty string sets the role (unknown → **404**), `null` clears it, and a non-string non-null value → **400**; the change takes effect on the next session spawn. See [staff-agents.md — Role selection](staff-agents.md#role-selection). `sandboxed` is not in the allow-list — attempts to change it are silently dropped (see [staff-agents.md](staff-agents.md)). `contextPolicy` accepts `"preserve"` or `"compact"` (see [staff-inbox.md](staff-inbox.md#contextpolicy)); other values are ignored. |
+| `PUT` | `/api/staff/:id` | Update a staff agent (`{ name, description, systemPrompt, cwd, state, triggers, memory, roleId, contextPolicy, accessory }`). Same goal-trigger prompt validation as `POST /api/staff`: empty `prompt` on a `goal_created` / `goal_archived` row returns `400`. Changed `cwd` values must be non-empty and inside the staff agent's own project. An unchanged `cwd` on a legacy/orphan record may still be re-sent so other fields remain editable. `accessory`, when present, is normalised, persisted on the staff record, and mirrored to the current permanent session if one exists. `roleId` is optional and validated the same way as on `POST`: a non-empty string sets the role (unknown → **404**), `null` clears it, and a non-string non-null value → **400**; the change takes effect on the next session spawn. See [staff-agents.md — Role selection](staff-agents.md#role-selection). `sandboxed` is immutable and not an update field: a `PUT` containing it returns `400` naming `sandboxed` rather than silently dropping it (see [staff-agents.md](staff-agents.md)). `contextPolicy` accepts `"preserve"` or `"compact"` (see [staff-inbox.md](staff-inbox.md#contextpolicy)); other values are ignored. |
 | `PATCH` | `/api/staff/:id` | Re-home a staff record to a different project. Body: `{ projectId }`. Moves the persisted record between per-project stores, updates `staff.projectId`, re-indexes search, resets `cwd` to the target project root, and clears old runtime metadata (`currentSessionId`, `worktreePath`, `branch`, `repoPath`, `repoWorktrees`) so old-project paths cannot be retained. Used by the sidebar's orphan banner "Assign to project…" action. Returns the updated `PersistedStaff` on 200. **400** when `projectId` is missing, empty, hidden, or the system project; **404** when either the staff id or the target project is unknown. |
 | `DELETE` | `/api/staff/:id` | Delete a staff agent and terminate its session |
 | `GET` | `/api/staff/:id/inbox` | List inbox entries for a staff agent. Query: `state` (`pending` \| `completed` \| `failed` \| `cancelled`, default returns all), `limit` (default unbounded). Returns `{ entries: InboxEntry[] }` in FIFO order. See [staff-inbox.md](staff-inbox.md#rest-surface). |

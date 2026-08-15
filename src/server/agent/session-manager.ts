@@ -89,6 +89,7 @@ import {
 	type HumanSelectionPins,
 	type InFlightSteerRecord,
 	type PersistedSession,
+	type VerificationContainerReference,
 } from "./session-store.js";
 import { isWorktreePathReferencedByLiveSession, normalizeWorktreeHostPath, type WorktreeReferenceRecord } from "./worktree-reference-guard.js";
 import { BgProcessStore } from "./bg-process-store.js";
@@ -198,8 +199,58 @@ import {
 
 
 function isSandboxContainerPath(cwd?: string): boolean {
-	return !!cwd && (cwd === "/workspace" || cwd.startsWith("/workspace/") || cwd === "/workspace-wt" || cwd.startsWith("/workspace-wt/"));
+	return !!cwd && (cwd === "/workspace" || cwd.startsWith("/workspace/") || cwd === "/workspace-wt" || cwd.startsWith("/workspace-wt/") || isPinnedVerificationContainerPath(cwd));
 }
+
+/** Only signal-owned checkout mounts with a normalized logical suffix may bypass worktree remapping. */
+function isPinnedVerificationContainerPath(cwd?: string): boolean {
+	return !!cwd && /^\/bobbit-state\/verification-checkouts\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/i.test(cwd);
+}
+
+/** Preserve a previously resolved pinned logical suffix without accepting host or live-worktree coordinates. */
+function pinnedVerificationRelativePath(cwd: string | undefined, root: string): string | null {
+	if (!cwd || !isPinnedVerificationContainerPath(root) || !isPinnedVerificationContainerPath(cwd)) return null;
+	if (cwd === root) return "";
+	if (!cwd.startsWith(`${root}/`)) return null;
+	const relative = cwd.slice(root.length + 1);
+	return relative && relative.split("/").every(segment => /^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(segment)) ? relative : null;
+}
+
+const CANONICAL_DOCKER_CONTAINER_ID_RE = /^[a-f0-9]{64}$/i;
+const VERIFICATION_SIGNAL_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function isVerifierSessionId(id: string): boolean {
+	return /^(?:llm-review|agent-qa)-/.test(id);
+}
+
+/** Reject every caller-controlled coordinate before sidecar resolution. */
+function isValidVerificationContainerReference(value: VerificationContainerReference | undefined): value is VerificationContainerReference {
+	return (value?.version === 1 || value?.version === 2)
+		&& typeof value.projectId === "string" && value.projectId.length > 0
+		&& typeof value.signalId === "string" && VERIFICATION_SIGNAL_ID_RE.test(value.signalId)
+		&& typeof value.containerId === "string" && CANONICAL_DOCKER_CONTAINER_ID_RE.test(value.containerId)
+		&& value.cwd === `/bobbit-state/verification-checkouts/${value.signalId}`
+		&& Array.isArray(value.ignoredOutputDirs)
+		&& value.ignoredOutputDirs.every((dir, index, dirs) => typeof dir === "string"
+			&& /^(?:[A-Za-z0-9][A-Za-z0-9._-]*)(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/u.test(dir)
+			&& (index === 0 || dirs[index - 1] < dir))
+		&& (value.version === 1
+			? value.dependencyLinks === undefined
+			: Array.isArray(value.dependencyLinks)
+				&& value.dependencyLinks.every((link, index, links) => !!link
+					&& /^(?:[A-Za-z0-9][A-Za-z0-9._-]*\/)*node_modules$/u.test(link.path)
+					&& /^\/workspace(?:-wt\/(?:[A-Za-z0-9][A-Za-z0-9._-]*)(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*)?\/node_modules$/u.test(link.target)
+					&& link.target.endsWith(`/${link.path}`)
+					&& (index === 0 || links[index - 1]!.path < link.path)));
+}
+
+type ResolvedVerificationSidecar = Pick<VerificationContainerReference, "projectId" | "signalId" | "containerId" | "cwd">;
+type VerificationSidecarResolver = {
+	resolveVerificationSidecar?: (
+		projectId: string,
+		reference: Pick<VerificationContainerReference, "signalId" | "containerId" | "ignoredOutputDirs" | "dependencyLinks">,
+	) => Promise<ResolvedVerificationSidecar>;
+};
 
 function isWindowsAbsolutePath(filePath: string): boolean {
 	return /^[A-Za-z]:[\\/]/.test(filePath);
@@ -4513,7 +4564,59 @@ export class SessionManager {
 			throw new Error(`No sandbox initialized for project ${projectId}`);
 		}
 
-		const containerId = await sandbox.getContainerId();
+		let containerId: string;
+		const verificationContainer = opts?.verificationContainer;
+		// The harness resolved this logical suffix before it reached SessionManager.
+		// Keep it as data until the sidecar root has been revalidated; do not derive
+		// it from a host cwd or remap it through a mutable project worktree.
+		const requestedPinnedRelativePath = verificationContainer
+			? pinnedVerificationRelativePath(bridgeOptions.cwd, verificationContainer.cwd)
+			: undefined;
+		if (verificationContainer) {
+			// This is deliberately a narrow internal seam: the verifier has no
+			// authority to select a general Docker target. Re-resolve its exact
+			// project+signal sidecar, whose implementation validates Docker's full
+			// ID, labels, image, and single checkout mount before returning it.
+			if (!isVerifierSessionId(sessionId)
+				|| requestedPinnedRelativePath === null
+				|| !isValidVerificationContainerReference(verificationContainer)
+				|| verificationContainer.projectId !== projectId
+				|| !opts?.goalId
+				|| opts.sandboxBranch
+				|| opts.sandboxBaseBranch) {
+				throw new Error("Invalid internal verification container override");
+			}
+			if (!projectContext
+				|| projectContext.project.id !== projectId
+				|| !projectContext.goalStore.get(opts.goalId)
+				|| !projectContext.gateStore.getGatesForGoal(opts.goalId)
+					.some(gate => gate.signals.some(signal => signal.id === verificationContainer.signalId))) {
+				throw new Error("Verification container override does not belong to the requested project and signal");
+			}
+			const resolver = (this.sandboxManager as SandboxManager & VerificationSidecarResolver)
+				.resolveVerificationSidecar;
+			if (typeof resolver !== "function") {
+				throw new Error("Verification sidecar support is unavailable");
+			}
+			const resolved = await resolver.call(this.sandboxManager, projectId, {
+				signalId: verificationContainer.signalId,
+				containerId: verificationContainer.containerId,
+				ignoredOutputDirs: verificationContainer.ignoredOutputDirs,
+				dependencyLinks: verificationContainer.dependencyLinks,
+			});
+			if (resolved.projectId !== verificationContainer.projectId
+				|| resolved.signalId !== verificationContainer.signalId
+				|| resolved.containerId !== verificationContainer.containerId
+				|| resolved.cwd !== verificationContainer.cwd) {
+				throw new Error("Verification sidecar identity changed during validation");
+			}
+			containerId = resolved.containerId;
+			bridgeOptions.cwd = requestedPinnedRelativePath
+				? `${resolved.cwd}/${requestedPinnedRelativePath}`
+				: resolved.cwd;
+		} else {
+			containerId = await sandbox.getContainerId();
+		}
 
 		// Read gateway URL and generate scoped token for the container.
 		const gwUrl = this.readGatewayUrlForAgent();
@@ -10673,6 +10776,9 @@ export class SessionManager {
 		// ── Restore Docker sandbox wiring ──
 		let restoredSandboxed = ps.sandboxed === true && !(ps.projectId && isSandboxExemptProject(ps.projectId));
 		if (ps.sandboxed === true) {
+			if (ps.verificationContainer && (!ps.nonInteractive || !isVerifierSessionId(ps.id))) {
+				throw new Error(`Invalid persisted verification sidecar session ${ps.id}`);
+			}
 			// Keep applySandboxWiring as the single restore decision point. It uses
 			// the selected project's config internally, returns false for non-docker
 			// projects, and preserves Headquarters/system no-sandbox exemptions.
@@ -10684,6 +10790,7 @@ export class SessionManager {
 			restoredSandboxed = await this.applySandboxWiring(bridgeOptions, ps.id, {
 				projectId: ps.projectId,
 				goalId: ps.goalId ?? ps.teamGoalId,
+				verificationContainer: ps.verificationContainer,
 			});
 			if (!restoredSandboxed) {
 				if ((ps as any)._preserveSandboxRealm) {
@@ -11162,7 +11269,14 @@ export class SessionManager {
 		// host-side operations can run commands inside the container via docker exec.
 		// The containerId is not persisted — it's resolved from SandboxManager which
 		// reconnects to the existing container by label on startup.
-		if (ps.sandboxed && this.sandboxManager && ps.projectId) {
+		if (ps.sandboxed && ps.verificationContainer) {
+			// applySandboxWiring already re-resolved the exact sidecar identity.
+			// Never replace it with the project's long-lived mutable container.
+			if (!bridgeOptions.containerId || bridgeOptions.containerId !== ps.verificationContainer.containerId) {
+				throw new Error(`Verification sidecar could not be restored for ${ps.id}`);
+			}
+			session.containerId = bridgeOptions.containerId;
+		} else if (ps.sandboxed && this.sandboxManager && ps.projectId) {
 			try {
 				const sandbox = this.sandboxManager.get(ps.projectId);
 				if (sandbox) {
@@ -11407,7 +11521,7 @@ export class SessionManager {
 		} });
 	}
 
-	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePath?: string; borrowsWorktree?: boolean; borrowedWorktreeOwnerSessionId?: string; repoPath?: string; branch?: string; repoWorktrees?: Record<string, string>; reattemptGoalId?: string; sandboxed?: boolean; projectId?: string; sessionId?: string; allowSessionReuse?: boolean; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
+	async createSession(cwd: string, agentArgs?: string[], goalId?: string, assistantType?: string, opts?: { rolePrompt?: string; roleName?: string; role?: string; teamGoalId?: string; teamLeadSessionId?: string; accessory?: string; nonInteractive?: boolean; env?: Record<string, string>; taskId?: string; staffId?: string; allowedTools?: string[]; workflowContext?: string; worktreeOpts?: { repoPath: string }; worktreePath?: string; borrowsWorktree?: boolean; borrowedWorktreeOwnerSessionId?: string; repoPath?: string; branch?: string; repoWorktrees?: Record<string, string>; reattemptGoalId?: string; sandboxed?: boolean; /** Internal-only frozen verification sidecar. */ verificationContainer?: VerificationContainerReference; projectId?: string; sessionId?: string; allowSessionReuse?: boolean; sandboxBranch?: string; sandboxBaseBranch?: string; sandboxCwdOffset?: string; skipAutoModel?: boolean; skipAutoThinking?: boolean; initialModel?: string; initialThinkingLevel?: string; preExistingAgentSessionFile?: string; preExistingAgentSessionOldCwds?: string[]; parentSessionId?: string; childKind?: string; readOnly?: boolean; title?: string; awaitWorktreeSetup?: boolean; bypassWorktreePool?: boolean }): Promise<SessionInfo> {
 		const id = opts?.sessionId || randomUUID();
 		// Guard against silently clobbering an existing session's transcript. A
 		// caller-supplied sessionId that already maps to a LIVE session (or an
@@ -11442,6 +11556,18 @@ export class SessionManager {
 		const sandboxExemptScope = projectId ? isSandboxExemptProject(projectId) : false;
 		const headquartersScope = projectId === HEADQUARTERS_PROJECT_ID;
 		const effectiveSandboxed = opts?.sandboxed && !sandboxExemptScope ? true : undefined;
+		const verificationContainer = opts?.verificationContainer;
+		if (verificationContainer && (!effectiveSandboxed
+			|| !opts?.nonInteractive
+			|| !isVerifierSessionId(id)
+			|| !isValidVerificationContainerReference(verificationContainer)
+			|| verificationContainer.projectId !== projectId
+			|| !goalId
+			|| opts?.worktreeOpts
+			|| opts?.sandboxBranch
+			|| opts?.sandboxBaseBranch)) {
+			throw new Error("Invalid internal verification container override");
+		}
 		const worktreeOpts = headquartersScope ? undefined : opts?.worktreeOpts;
 		const sandboxBranch = effectiveSandboxed ? opts?.sandboxBranch : undefined;
 		const sandboxBaseBranch = effectiveSandboxed ? opts?.sandboxBaseBranch : undefined;
@@ -11647,6 +11773,7 @@ export class SessionManager {
 				repoPath,
 				branch,
 				sandboxed: effectiveSandboxed,
+				verificationContainer,
 				role: opts?.role,
 				accessory: opts?.accessory,
 				nonInteractive: opts?.nonInteractive,
@@ -11748,6 +11875,7 @@ export class SessionManager {
 			// Pinned by `tests/staff-session-staffid-persistence.test.ts`.
 			staffId: opts?.staffId,
 			sandboxed: effectiveSandboxed,
+			verificationContainer,
 			role: opts?.role,
 			accessory: opts?.accessory,
 			nonInteractive: opts?.nonInteractive,

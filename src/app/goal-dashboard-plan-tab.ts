@@ -4,6 +4,7 @@
 // output for the same inputs.
 
 import { html, nothing, svg, type TemplateResult } from "lit";
+import { gatewayFetch } from "./gateway-fetch.js";
 import { setHashRoute } from "./routing.js";
 import { state, renderApp, type Goal } from "./state.js";
 import { computePlanStepsForGoal, isLivePlanChild } from "./goal-plan-steps.js";
@@ -14,6 +15,44 @@ import { computeEdgePaths, type PlanEdgeNode, type PlanEdge } from "./plan-edge-
 export { computePlanStepsForGoal } from "./goal-plan-steps.js";
 
 const svgPlan = html`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M3 12h18"/><path d="M3 18h18"/></svg>`;
+
+/** Remove a consumed scheduler-recovery record without mutating cached goals. */
+type SchedulerRecovery = NonNullable<Goal["schedulerRecovery"]>;
+
+/** Remove a consumed recovery without erasing a newer replacement for that goal. */
+export function clearSchedulerRecoveryForGoal<T extends { id: string; schedulerRecovery?: SchedulerRecovery }>(
+	goals: readonly T[],
+	goalId: string,
+	consumedRecovery: SchedulerRecovery,
+): T[] {
+	return goals.map(goal => {
+		if (goal.id !== goalId || goal.schedulerRecovery === undefined || goal.schedulerRecovery.updatedAt > consumedRecovery.updatedAt) return goal;
+		const { schedulerRecovery: _schedulerRecovery, ...withoutRecovery } = goal;
+		return withoutRecovery as T;
+	});
+}
+
+type SchedulerRetryRequest = (url: string, init: RequestInit) => Promise<{ ok: boolean }>;
+
+/**
+ * Post a scheduler recovery retry and reconcile only after the server consumes it.
+ * A failed request deliberately leaves the cached recovery visible for another try.
+ */
+export async function retryPlanNodeSchedulerStart(
+	childGoalId: string,
+	recovery: SchedulerRecovery,
+	request: SchedulerRetryRequest,
+	onSuccess: (goalId: string, consumedRecovery: SchedulerRecovery) => void,
+): Promise<boolean> {
+	try {
+		const response = await request(`/api/goals/${encodeURIComponent(childGoalId)}/retry-scheduled-start`, { method: "POST" });
+		if (!response.ok) return false;
+		onSuccess(childGoalId, recovery);
+		return true;
+	} catch {
+		return false;
+	}
+}
 
 /**
  * Plan-tab nested expansion state keyed by `goalId`. Default is **expanded**;
@@ -59,6 +98,8 @@ interface PlanLayoutNode extends PlanEdgeNode {
 	gateStatus?: PlanNodeGateStatus;
 	/** Resolved child hit a merge conflict preserved for manual recovery. */
 	mergeConflict?: boolean;
+	/** Bounded scheduler stop; retry routes through the scheduler. */
+	schedulerRecovery?: SchedulerRecovery;
 }
 
 const PLAN_NODE_W = 200;
@@ -99,6 +140,7 @@ function layoutPlanLevel(steps: PlanStep[], allGoals: Goal[], yOffset: number, p
 			createdAt: g.createdAt,
 			mergeConflict: !!(g as any).mergeConflict,
 			gateStatus: (g as any).gateStatus as PlanNodeGateStatus | undefined,
+			schedulerRecovery: (g as any).schedulerRecovery,
 		}));
 	const nodes: PlanLayoutNode[] = [];
 	let maxColH = 0;
@@ -119,6 +161,7 @@ function layoutPlanLevel(steps: PlanStep[], allGoals: Goal[], yOffset: number, p
 				childGoal,
 				gateStatus: resolution.child?.gateStatus,
 				mergeConflict: !!resolution.child?.mergeConflict,
+				schedulerRecovery: resolution.child?.schedulerRecovery,
 				x,
 				y,
 				width: PLAN_NODE_W,
@@ -180,7 +223,14 @@ function planGateStatusColor(s: PlanNodeGateStatus): string {
 	}
 }
 
-function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number, ownerGoalId: string, liveOnly: boolean): TemplateResult | typeof nothing {
+function renderPlanLevel(
+	steps: PlanStep[],
+	allGoals: Goal[],
+	depth: number,
+	ownerGoalId: string,
+	liveOnly: boolean,
+	onSchedulerRecoveryRetrySucceeded: (goalId: string, consumedRecovery: SchedulerRecovery) => void,
+): TemplateResult | typeof nothing {
 	if (steps.length === 0 || depth > PLAN_RENDER_DEPTH_CAP) return nothing;
 	const { nodes, edges, width, height } = layoutPlanLevel(steps, allGoals, 0, ownerGoalId, liveOnly);
 	const paths = computeEdgePaths(nodes, edges, {});
@@ -197,6 +247,7 @@ function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number, own
 					const isArchived = !!n.childGoal?.archived;
 					const gateStatus = n.gateStatus;
 					const hasConflict = !!n.mergeConflict;
+					const recovery = n.schedulerRecovery;
 					return svg`<g data-testid="plan-node" data-plan-state="${n.state}" data-plan-gate-status="${gateStatus ?? ""}" data-plan-conflict="${hasConflict ? 'true' : 'false'}" data-plan-id="${n.step.planId}" data-child-goal-id="${n.childGoal?.id ?? ""}" data-archived="${isArchived ? 'true' : 'false'}" style="${isArchived ? 'opacity:0.55;' : ''}">
 					<rect x=${n.x} y=${n.y} width=${n.width} height=${n.height} rx="6" ry="6"
 						fill=${planNodeFillColor(n.state)}
@@ -218,6 +269,7 @@ function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number, own
 								</span>` : nothing}
 								<span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;" title="${n.step.title}">${n.step.title}</span>
 								${hasConflict ? html`<span data-testid="plan-node-conflict-pill" title="Merge conflict — child preserved for manual recovery" style="flex-shrink:0;font-size:9px;font-weight:600;padding:1px 5px;border-radius:8px;background:color-mix(in oklch, var(--negative) 16%, transparent);color:var(--negative);text-transform:uppercase;letter-spacing:0.04em;">conflict</span>` : nothing}
+								${recovery ? html`<button data-testid="plan-node-scheduler-retry" title="${recovery.reason}" ?disabled=${!recovery.retryable} style="flex-shrink:0;font-size:9px;font-weight:600;padding:1px 5px;border:0;border-radius:8px;background:color-mix(in oklch, var(--warning) 16%, transparent);color:var(--warning);cursor:pointer;" @click=${async (e: Event) => { e.stopPropagation(); if (!n.childGoal || !recovery.retryable) return; await retryPlanNodeSchedulerStart(n.childGoal.id, recovery, gatewayFetch, onSchedulerRecoveryRetrySucceeded); }}>retry</button>` : nothing}
 								${isArchived ? html`<span data-testid="plan-node-archived-pill" style="flex-shrink:0;font-size:9px;font-weight:500;padding:1px 5px;border-radius:8px;background:var(--muted);color:var(--muted-foreground);text-transform:uppercase;letter-spacing:0.04em;">archived</span>` : nothing}
 							</div>
 							<div style="display:flex;justify-content:space-between;align-items:center;font-size:10px;color:var(--muted-foreground);">
@@ -244,7 +296,7 @@ function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number, own
 				return html`
 					<div data-testid="plan-subtree" data-parent-goal-id="${child.id}"
 						style="margin-left:24px;border-left:2px solid var(--border);padding-left:8px;">
-						${renderPlanLevel(childPlanSteps, allGoals, depth + 1, child.id, liveOnly)}
+						${renderPlanLevel(childPlanSteps, allGoals, depth + 1, child.id, liveOnly, onSchedulerRecoveryRetrySucceeded)}
 					</div>
 				`;
 			})}
@@ -255,8 +307,9 @@ function renderPlanLevel(steps: PlanStep[], allGoals: Goal[], depth: number, own
 export function renderPlanTab(args: {
 	currentGoal: Goal;
 	allGoals: Goal[];
+	onSchedulerRecoveryRetrySucceeded: (goalId: string, consumedRecovery: SchedulerRecovery) => void;
 }): TemplateResult {
-	const { currentGoal, allGoals } = args;
+	const { currentGoal, allGoals, onSchedulerRecoveryRetrySucceeded } = args;
 	const liveOnly = _isPlanLiveOnly(currentGoal.id);
 	const steps = computePlanStepsForGoal(currentGoal, allGoals, { liveOnly });
 	const toggle = html`
@@ -282,7 +335,7 @@ export function renderPlanTab(args: {
 	return html`
 		<div class="tab-panel-inner" data-testid="plan-tab" style="overflow-x:auto;">
 			${toggle}
-			${renderPlanLevel(steps, allGoals, 0, currentGoal.id, liveOnly)}
+			${renderPlanLevel(steps, allGoals, 0, currentGoal.id, liveOnly, onSchedulerRecoveryRetrySucceeded)}
 		</div>
 	`;
 }

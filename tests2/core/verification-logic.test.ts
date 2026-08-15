@@ -50,19 +50,29 @@ function step(name: string, opts: Record<string, unknown> = {}): any {
 	return { name, type: "command" as const, ...opts };
 }
 
+const DIGEST = { algorithm: "sha256" as const, version: 1 as const, digest: "a".repeat(64), fileCount: 1 };
+const CACHE_COMMIT_SHA = "0123456789abcdef0123456789abcdef01234567";
+
 function signal(
 	id: string,
 	commitSha: string,
 	verification?: { status: string; steps: { name: string; passed: boolean; output?: string; duration_ms?: number; type?: string }[] },
 	opts: { timestamp?: number } = {},
 ): any {
+	// Keep legacy test labels concise while creating durable full SHAs like the
+	// pinned-checkout manager does in production.
+	const normalizedCommitSha = /^[a-f0-9]{40}$/.test(commitSha)
+		? commitSha
+		: `${commitSha}${"0".repeat(40)}`.slice(0, 40);
 	return {
 		id,
 		gateId: "g",
 		goalId: "goal",
 		sessionId: "s",
 		timestamp: opts.timestamp ?? Date.now(),
-		commitSha,
+		commitSha: normalizedCommitSha,
+		contentDigest: DIGEST,
+		pinnedCheckout: { version: 1, commitSha: normalizedCommitSha, contentDigest: DIGEST },
 		verification: verification ?? { status: "passed", steps: [] },
 	};
 }
@@ -904,26 +914,26 @@ describe("partitionOptionalSteps", () => {
 
 describe("buildStepCache", () => {
 	it("returns empty cache when no previous signals", () => {
-		const cache = buildStepCache([], "sig-1", "abc");
-		assert.equal(cache.size, 0);
+		const cache = buildStepCache([], "sig-1", CACHE_COMMIT_SHA, DIGEST);
+		assert.equal(cache.steps.size, 0);
 	});
 
 	it("returns empty cache when commitSha is undefined", () => {
-		const sigs = [signal("sig-0", "abc", { status: "passed", steps: [{ name: "test", passed: true }] })];
+		const sigs = [signal("sig-0", CACHE_COMMIT_SHA, { status: "passed", steps: [{ name: "test", passed: true }] })];
 		const cache = buildStepCache(sigs, "sig-1", undefined);
-		assert.equal(cache.size, 0);
+		assert.equal(cache.steps.size, 0);
 	});
 
 	it("caches passed step with same commit SHA", () => {
 		const sigs = [
-			signal("sig-0", "abc", {
+			signal("sig-0", CACHE_COMMIT_SHA, {
 				status: "passed",
 				steps: [{ name: "test", passed: true, output: "ok", duration_ms: 100 }],
 			}),
 		];
-		const cache = buildStepCache(sigs, "sig-1", "abc");
-		assert.equal(cache.size, 1);
-		assert.ok(cache.has("test"));
+		const cache = buildStepCache(sigs, "sig-1", CACHE_COMMIT_SHA, DIGEST);
+		assert.equal(cache.steps.size, 1);
+		assert.ok(cache.steps.has("test"));
 	});
 
 	it("does not cache steps from signals with different commit SHA", () => {
@@ -933,95 +943,95 @@ describe("buildStepCache", () => {
 				steps: [{ name: "test", passed: true, output: "ok", duration_ms: 100 }],
 			}),
 		];
-		const cache = buildStepCache(sigs, "sig-1", "abc");
-		assert.equal(cache.size, 0);
+		const cache = buildStepCache(sigs, "sig-1", CACHE_COMMIT_SHA, DIGEST);
+		assert.equal(cache.steps.size, 0);
 	});
 
 	it("does not cache failed steps", () => {
 		const sigs = [
-			signal("sig-0", "abc", {
+			signal("sig-0", CACHE_COMMIT_SHA, {
 				status: "failed",
 				steps: [{ name: "test", passed: false, output: "err", duration_ms: 50 }],
 			}),
 		];
-		const cache = buildStepCache(sigs, "sig-1", "abc");
-		assert.equal(cache.size, 0);
+		const cache = buildStepCache(sigs, "sig-1", CACHE_COMMIT_SHA, DIGEST);
+		assert.equal(cache.steps.size, 0);
 	});
 
 	it("does not cache steps from running verifications", () => {
 		const sigs = [
-			signal("sig-0", "abc", {
+			signal("sig-0", CACHE_COMMIT_SHA, {
 				status: "running",
 				steps: [{ name: "test", passed: true, output: "ok", duration_ms: 100 }],
 			}),
 		];
-		const cache = buildStepCache(sigs, "sig-1", "abc");
-		assert.equal(cache.size, 0);
+		const cache = buildStepCache(sigs, "sig-1", CACHE_COMMIT_SHA, DIGEST);
+		assert.equal(cache.steps.size, 0);
 	});
 
 	it("excludes current signal ID from cache", () => {
 		const sigs = [
-			signal("sig-1", "abc", {
+			signal("sig-1", CACHE_COMMIT_SHA, {
 				status: "passed",
 				steps: [{ name: "test", passed: true, output: "ok", duration_ms: 100 }],
 			}),
 		];
-		const cache = buildStepCache(sigs, "sig-1", "abc");
-		assert.equal(cache.size, 0);
+		const cache = buildStepCache(sigs, "sig-1", CACHE_COMMIT_SHA, DIGEST);
+		assert.equal(cache.steps.size, 0);
 	});
 
 	it("first cached result wins when multiple signals have the same step", () => {
 		const sigs = [
-			signal("sig-0", "abc", {
+			signal("sig-0", CACHE_COMMIT_SHA, {
 				status: "passed",
 				steps: [{ name: "test", passed: true, output: "first", duration_ms: 100 }],
 			}),
-			signal("sig-2", "abc", {
+			signal("sig-2", CACHE_COMMIT_SHA, {
 				status: "passed",
 				steps: [{ name: "test", passed: true, output: "second", duration_ms: 200 }],
 			}),
 		];
-		const cache = buildStepCache(sigs, "sig-1", "abc");
-		assert.equal(cache.get("test")!.output, "first");
+		const cache = buildStepCache(sigs, "sig-1", CACHE_COMMIT_SHA, DIGEST);
+		assert.equal(cache.steps.get("test")!.output, "first");
 	});
 
 	it("ignores same-commit passed steps from before the reset invalidation marker", () => {
 		const resetAt = 1_700_000_000_000;
 		const sigs = [
-			signal("sig-before-reset", "abc", {
+			signal("sig-before-reset", CACHE_COMMIT_SHA, {
 				status: "passed",
 				steps: [{ name: "test", passed: true, output: "pre-reset", duration_ms: 100 }],
 			}, { timestamp: resetAt - 1 }),
-			signal("sig-after-reset", "abc", {
+			signal("sig-after-reset", CACHE_COMMIT_SHA, {
 				status: "passed",
 				steps: [{ name: "test", passed: true, output: "post-reset", duration_ms: 125 }],
 			}, { timestamp: resetAt + 1 }),
 		];
 
-		const cache = (buildStepCache as any)(sigs, "sig-current", "abc", resetAt);
+		const cache = (buildStepCache as any)(sigs, "sig-current", CACHE_COMMIT_SHA, DIGEST, undefined, resetAt);
 
-		assert.equal(cache.size, 1);
-		assert.equal(cache.get("test")!.output, "post-reset");
+		assert.equal(cache.steps.size, 1);
+		assert.equal(cache.steps.get("test")!.output, "post-reset");
 	});
 
 	it("does not cache any pre-reset same-commit passed steps when there are no post-reset passes", () => {
 		const resetAt = 1_700_000_000_000;
 		const sigs = [
-			signal("sig-before-reset", "abc", {
+			signal("sig-before-reset", CACHE_COMMIT_SHA, {
 				status: "passed",
 				steps: [{ name: "test", passed: true, output: "pre-reset", duration_ms: 100 }],
 			}, { timestamp: resetAt - 1 }),
 		];
 
-		const cache = (buildStepCache as any)(sigs, "sig-current", "abc", resetAt);
+		const cache = (buildStepCache as any)(sigs, "sig-current", CACHE_COMMIT_SHA, DIGEST, undefined, resetAt);
 
-		assert.equal(cache.size, 0);
+		assert.equal(cache.steps.size, 0);
 	});
 
 	it("keeps post-reset same-commit passed steps cache eligible while excluding human signoff", () => {
 		const resetAt = 1_700_000_000_000;
 		const sigs = [
-			signal("sig-after-reset", "abc", {
+			signal("sig-after-reset", CACHE_COMMIT_SHA, {
 				status: "passed",
 				steps: [
 					{ name: "build", type: "command", passed: true, output: "ok", duration_ms: 100 },
@@ -1030,11 +1040,11 @@ describe("buildStepCache", () => {
 			}, { timestamp: resetAt + 1 }),
 		];
 
-		const cache = (buildStepCache as any)(sigs, "sig-current", "abc", resetAt);
+		const cache = (buildStepCache as any)(sigs, "sig-current", CACHE_COMMIT_SHA, DIGEST, undefined, resetAt);
 
-		assert.equal(cache.size, 1, "only the command step should be cached after reset");
-		assert.ok(cache.has("build"), "post-reset command step must still be reused");
-		assert.ok(!cache.has("approve-design"), "human-signoff step must still NOT be reused");
+		assert.equal(cache.steps.size, 1, "only the command step should be cached after reset");
+		assert.ok(cache.steps.has("build"), "post-reset command step must still be reused");
+		assert.ok(!cache.steps.has("approve-design"), "human-signoff step must still NOT be reused");
 	});
 
 	// Pin the human-signoff exclusion (Bug-1 defense-in-depth fix in the
@@ -1044,7 +1054,7 @@ describe("buildStepCache", () => {
 	// re-signal at the same SHA.
 	it("excludes human-signoff steps even when passed at the same commit SHA", () => {
 		const sigs = [
-			signal("sig-0", "abc", {
+			signal("sig-0", CACHE_COMMIT_SHA, {
 				status: "passed",
 				steps: [
 					// A real previously-passed command step — must still be cached,
@@ -1055,11 +1065,94 @@ describe("buildStepCache", () => {
 				],
 			}),
 		];
-		const cache = buildStepCache(sigs, "sig-1", "abc");
-		assert.equal(cache.size, 1, "only the command step should be cached");
-		assert.ok(cache.has("build"), "command step must still be reused");
-		assert.ok(!cache.has("approve-design"), "human-signoff step must NOT be reused");
+		const cache = buildStepCache(sigs, "sig-1", CACHE_COMMIT_SHA, DIGEST);
+		assert.equal(cache.steps.size, 1, "only the command step should be cached");
+		assert.ok(cache.steps.has("build"), "command step must still be reused");
+		assert.ok(!cache.steps.has("approve-design"), "human-signoff step must NOT be reused");
 	});
+	it("refuses same-SHA reuse when a valid digest differs", () => {
+		const otherDigest = { ...DIGEST, digest: "b".repeat(64) };
+		const decision = buildStepCache([signal("sig-0", CACHE_COMMIT_SHA, { status: "passed", steps: [{ name: "test", passed: true }] })], "sig-1", CACHE_COMMIT_SHA, otherDigest);
+		assert.equal(decision.steps.size, 0);
+		assert.equal(decision.missReason, "content-digest-mismatch");
+		assert.deepEqual(decision.priorSignalIds, ["sig-0"]);
+	});
+
+	it("fails closed for legacy or failed digest records", () => {
+		const legacy = signal("legacy", CACHE_COMMIT_SHA, { status: "passed", steps: [{ name: "test", passed: true }] });
+		delete legacy.contentDigest;
+		const decision = buildStepCache([legacy], "sig-1", CACHE_COMMIT_SHA, DIGEST);
+		assert.equal(decision.steps.size, 0);
+		assert.equal(decision.missReason, "content-digest-unavailable");
+	});
+
+	it("fails closed when the current digest computation reports an error", () => {
+		const prior = signal("prior", CACHE_COMMIT_SHA, { status: "passed", steps: [{ name: "test", passed: true }] });
+		const decision = buildStepCache(
+			[prior], "sig-1", CACHE_COMMIT_SHA, DIGEST,
+			{ code: "VERIFICATION_CONTENT_DIGEST_FAILED", message: "Unable to compute verification content digest" },
+		);
+		assert.equal(decision.steps.size, 0);
+		assert.equal(decision.missReason, "content-digest-unavailable");
+		assert.deepEqual(decision.priorSignalIds, ["prior"]);
+	});
+
+	it("fails closed when the current digest is malformed", () => {
+		const prior = signal("prior", CACHE_COMMIT_SHA, { status: "passed", steps: [{ name: "test", passed: true }] });
+		const malformedDigest = { ...DIGEST, digest: "not-a-sha256" };
+		const decision = buildStepCache([prior], "sig-1", CACHE_COMMIT_SHA, malformedDigest as any);
+		assert.equal(decision.steps.size, 0);
+		assert.equal(decision.missReason, "content-digest-unavailable");
+		assert.deepEqual(decision.priorSignalIds, ["prior"]);
+	});
+
+	it("reports a mismatch when a valid prior digest differs beside a legacy signal", () => {
+		const legacy = signal("legacy", CACHE_COMMIT_SHA, { status: "passed", steps: [{ name: "test", passed: true }] });
+		delete legacy.contentDigest;
+		const changed = signal("changed", CACHE_COMMIT_SHA, { status: "passed", steps: [{ name: "test", passed: true }] });
+		changed.contentDigest = { ...DIGEST, digest: "b".repeat(64) };
+		const decision = buildStepCache([legacy, changed], "sig-1", CACHE_COMMIT_SHA, DIGEST);
+		assert.equal(decision.steps.size, 0);
+		assert.equal(decision.missReason, "content-digest-mismatch");
+		assert.deepEqual(decision.priorSignalIds, ["legacy", "changed"]);
+	});
+
+	it("fails closed when a digest-matching legacy signal lacks a pinned checkout", () => {
+		const legacy = signal("legacy", CACHE_COMMIT_SHA, { status: "passed", steps: [{ name: "test", passed: true }] });
+		delete legacy.pinnedCheckout;
+		const decision = buildStepCache([legacy], "sig-1", CACHE_COMMIT_SHA, DIGEST);
+		assert.equal(decision.steps.size, 0);
+		assert.equal(decision.missReason, "pinned-checkout-mismatch");
+		assert.deepEqual(decision.priorSignalIds, ["legacy"]);
+	});
+
+	it("fails closed when a matching signal records a pinned checkout failure", () => {
+		const unavailable = signal("unavailable", CACHE_COMMIT_SHA, { status: "passed", steps: [{ name: "test", passed: true }] });
+		unavailable.pinnedCheckoutError = {
+			code: "PINNED_CHECKOUT_UNREADABLE",
+			message: "Pinned checkout could not be read",
+		};
+		delete unavailable.pinnedCheckout;
+		const decision = buildStepCache([unavailable], "sig-1", CACHE_COMMIT_SHA, DIGEST);
+		assert.equal(decision.steps.size, 0);
+		assert.equal(decision.missReason, "pinned-checkout-unavailable");
+		assert.deepEqual(decision.priorSignalIds, ["unavailable"]);
+	});
+
+	it("rejects attestations whose commit or full digest does not match their signal", () => {
+		const invalidCommit = signal("invalid-commit", CACHE_COMMIT_SHA, { status: "passed", steps: [{ name: "test", passed: true }] });
+		invalidCommit.pinnedCheckout = { ...invalidCommit.pinnedCheckout, commitSha: "f".repeat(40) };
+		const invalidDigest = signal("invalid-digest", CACHE_COMMIT_SHA, { status: "passed", steps: [{ name: "test", passed: true }] });
+		invalidDigest.pinnedCheckout = {
+			...invalidDigest.pinnedCheckout,
+			contentDigest: { ...DIGEST, fileCount: DIGEST.fileCount + 1 },
+		};
+		const decision = buildStepCache([invalidCommit, invalidDigest], "sig-1", CACHE_COMMIT_SHA, DIGEST);
+		assert.equal(decision.steps.size, 0);
+		assert.equal(decision.missReason, "pinned-checkout-mismatch");
+		assert.deepEqual(decision.priorSignalIds, ["invalid-commit", "invalid-digest"]);
+	});
+
 });
 
 // ===================================================================

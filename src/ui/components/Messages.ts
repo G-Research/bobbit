@@ -438,6 +438,7 @@ export class UserMessage extends LitElement {
 @customElement("assistant-message")
 export class AssistantMessage extends LitElement {
 	@property({ type: Object }) message!: BobbitMessage<AssistantMessageType>;
+	@property({ type: String }) sessionId = "";
 	@property({ type: Array }) tools?: AgentTool<any>[];
 	@property({ type: Object }) pendingToolCalls?: Set<string>;
 	@property({ type: Object }) permissionBlockedTools?: Set<string>;
@@ -519,7 +520,9 @@ export class AssistantMessage extends LitElement {
 				const displayText = chunk.text.replace(/<suggest_goal\s*\/?>/g, '');
 				if (displayText.trim() !== '') {
 					const mdContent = this.isStreaming ? this._getThrottledContent(displayText) : displayText;
-					orderedParts.push(html`<markdown-block .content=${mdContent}></markdown-block>`);
+					// Local image fetches begin only after the final assistant row is stable;
+					// reparsing streaming Markdown would repeatedly abort and restart them.
+					orderedParts.push(html`<markdown-block .content=${mdContent} .sessionId=${this.isStreaming ? "" : this.sessionId}></markdown-block>`);
 				}
 				i++;
 			} else if (chunk.type === "thinking" && chunk.thinking.trim() !== "") {
