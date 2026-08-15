@@ -11,14 +11,16 @@ deep debugging without polluting the default stream.
 
 ## Keep (logged by default)
 
-1. **Background-task actions not visible in the UI** — orphan-worktree cleanup,
-   remote-branch deletion, worktree-pool reclaim, team spawn/dismiss/teardown.
+1. **Background-task actions not visible in the UI** — preservation diagnostics
+   for ownership-unverified worktrees, exact-owned lifecycle cleanup, bounded
+   graceful current-instance pool drain failures, and team spawn/dismiss/teardown.
 2. **Genuinely actionable errors / warnings** — credential failures, transient
    gateway retries, unhandled rejections, re-prompt failures, disallowed-tool
    guard breaches, "project no longer registered" skips.
 3. **Key start-up / connection info** — the gateway banner (URL, auth token,
    CWD, accessible addresses), MCP connection summary, provider/network status,
-   boot-phase milestones and summaries (`[boot] … done`, sweeper totals).
+   boot-phase milestones and summaries (`[boot] … done`, diagnostic sweeper
+   preservation totals).
 
 ## Do NOT log by default
 

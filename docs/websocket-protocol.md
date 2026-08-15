@@ -35,7 +35,7 @@ The frame contains no session, project, or credential information and is sent be
 
 Gateway boot also returns HTTP `503` with `Retry-After: 1` for mounted HTTP routes until the same readiness boundary opens. Search indexing does not delay this boundary because its worker starts lazily; see [Search worker and persistence](search-worker-persistence.md#diagnostics-and-session-admission).
 
-Session-list invalidations (`session_created`, `sessions_changed`, and `session_removed`) are global. The browser keeps a lightweight `/ws/viewer` connection open even when no session `RemoteAgent` is active, so desktop sidebars, mobile landing pages, and dashboards can refresh `GET /api/sessions` promptly instead of waiting for the periodic poll. Session sockets also handle the same invalidations for already-open chats. Treat these messages as refresh triggers only; the session list REST response remains the source of truth.
+Session-list invalidations (`session_created`, `sessions_changed`, and `session_removed`) are global. The browser keeps a lightweight `/ws/viewer` connection open even when no session `RemoteAgent` is active, so desktop sidebars, mobile landing pages, and dashboards can refresh `GET /api/sessions` promptly instead of waiting for the periodic poll. Session sockets also handle the same invalidations for already-open chats. Every frame remains a refresh trigger and the session list REST response remains authoritative. A `sessions_changed` frame may additionally carry `sessionId` and `user_tags` so an idle client can patch a loaded row before refresh; a client with a newer queued pin intent defers that additive payload until its mutation queue settles.
 
 ## Frame size routing and limits
 
@@ -50,7 +50,7 @@ Bobbit has separate limits for the socket transport, the chat composer, and Exte
 Routing rules:
 
 - The first unauthenticated frame is only expected to authenticate. Oversized unauthenticated frames are rejected before command routing to avoid parsing arbitrary large unauthenticated input.
-- After authentication, non-extension session commands such as `prompt`, `steer`, `follow_up`, queue edits, `ext_session_write_permit`, and `ext_session_post` are governed by the WebSocket transport limit plus their feature-specific validation. They are **not** rejected solely because the serialized frame is larger than the 1 MiB extension-channel envelope cap.
+- After authentication, non-extension session commands such as `prompt`, `steer`, queue edits, `ext_session_write_permit`, and `ext_session_post` are governed by the WebSocket transport limit plus their feature-specific validation. They are **not** rejected solely because the serialized frame is larger than the 1 MiB extension-channel envelope cap.
 - Prompt frames sent from the browser composer should stay below `MessageEditor.MAX_SERIALIZED_SEND_BYTES`, which is deliberately lower than `WS_MAX_PAYLOAD_BYTES`. This ordering makes the composer error the common failure mode for oversized attachment sends, not a socket close.
 - Extension-channel operations (`ext_channel_open_grant`, `ext_channel_open`, `ext_channel_attach`, `ext_channel_list`, `ext_channel_send`, `ext_channel_close`, `ext_channel_detach`) remain capped by `MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES`. If one is too large, the server returns a structured size error and leaves the socket usable. With a `requestId`, callers receive an `ext_channel_result` or `ext_channel_open_grant_result` failure; without one, the fallback is a normal `error` frame with code `FRAME_TOO_LARGE`.
 - The 1 MiB cap is only an envelope guard. It does not replace per-channel quotas such as declared frame and inbound-byte limits, pack identity checks, open grants, attachment checks, or session-write permits.
@@ -65,6 +65,89 @@ Bobbit keeps normal streaming responsive by bounding payloads before they enter 
 - **Overflow guard** — when `bufferedAmount` exceeds the warning threshold, the server logs payload diagnostics. When it exceeds the overflow threshold, the server sends the current frame, waits for a short drain window, and terminates only if the socket remains backed up. The reconnect/resume path then recovers with either a bounded replay or `resume_gap`.
 
 Overflow diagnostics include `outerType`, `innerType` for `{ type: "event" }` frames, serialized `bytes`, recipient kind, and context such as `goalId`. These fields are the first place to look when a reconnect storm follows verification or reviewer activity.
+
+## Cumulative assistant stream compaction
+
+Pi `0.84.1` JSON/RPC emits delta-only assistant `message_update` frames. `RpcBridge` first reconstructs Bobbit's cumulative internal event from the preceding assistant start, while preserving `message_end.message` as terminal authority. Repeating those growing cumulative copies to every browser would make WebSocket serialization and wire traffic grow with transcript length, so Bobbit compacts only the live browser projection for clients that negotiate it. Replay and snapshots remain cumulative and authoritative.
+
+### Negotiation and compatibility
+
+An app client requests version 1 in its authentication frame:
+
+```json
+{
+  "type": "auth",
+  "token": "<token>",
+  "capabilities": { "assistantStreamDelta": 1 }
+}
+```
+
+The gateway echoes `capabilities.assistantStreamDelta: 1` in `auth_ok` only when it accepts that version. A negotiated session socket receives compact live updates for supported assistant text, thinking, and progressive tool-call JSON events. The compact event carries `assistantStreamDelta: 1` plus the semantic fragment and any baseline or block checkpoint required to reconstruct Bobbit's cumulative internal shape exactly.
+
+Compatibility is fail-safe:
+
+- Clients that omit the capability continue to receive cumulative events.
+- Unsupported or non-convergent event shapes remain cumulative even on a capable socket.
+- A socket attaching during a stream receives a self-contained first compact update. This baseline is recipient-specific and is not shared with already-synchronized sockets.
+- Equivalent capable recipients share compact-frame construction and serialization. Legacy and baseline-needing recipients remain separate output classes.
+- Updates are emitted immediately. There is no process-global timer that coalesces, replaces, or defers `message_update` delivery.
+
+The client reconstructs the cumulative `message` and `assistantMessageEvent.partial` before normal reducer processing. It keeps reconstruction state only for the active assistant stream and clears it on an explicit client reset, snapshot application, reconstruction failure, `process_exit`, `agent_end`, and `message_end`. Normal socket teardown does not clear that state: reconnect may continue the same logical stream through cumulative replay. Progressive tool JSON is rebuilt from fragments while preserving the useful parseable prefix. A replacement socket independently starts its compact live projection with a self-contained baseline. If exact reconstruction cannot be proven, the client clears the invalid state, discards the compact frame, and reconnects; cumulative replay or a snapshot remains the authoritative recovery path.
+
+### Sources of truth and replay
+
+Compaction is deliberately not a storage format. The following contracts prevent live, replayed, and reloaded transcripts from drifting:
+
+- Durable Pi JSONL is unchanged and contains the complete original events.
+- `EventBuffer` retains the original cumulative event, never the compact client projection.
+- Snapshots and resume replay remain cumulative and authoritative. Proposals, permissions, compaction notices, verification cards, and event categories outside the supported assistant fragments continue through their existing state and pass-through paths.
+- Per-session sequence numbers stay monotonic even when retention evicts an event, rejects an oversized or unserializable event, or assigns a sequence to an intentionally unretained frame.
+
+The default `EventBuffer` is bounded by both 1,000 events and 2 MiB of estimated serialized UTF-8 data. Eviction is head-only. The 2 MiB retention budget matches the resume replay byte budget; retaining a larger tail would add heap pressure without making it replayable.
+
+A cursor is replayable only when the buffer covers a contiguous suffix beginning at `fromSeq + 1`. Count or byte eviction advances that safe window. Oversized events and unretained sequenced frames create explicit holes. A request that crosses any hole receives `resume_gap` and recovers from `get_messages`; the server never sends a plausible-looking partial suffix with missing history. Replay is paced and checks socket sendability before and during the loop.
+
+### Slow-client isolation and egress fencing
+
+A replaceable assistant update is not allowed to make a slow recipient degrade healthy recipients. When a socket's `bufferedAmount` reaches the 1 MiB soft cutover threshold at an assistant update, the gateway marks that socket as cut over before terminating it. The marker is the durable in-memory fence: all later authenticated send boundaries reject the socket even if transport termination throws or `readyState` temporarily remains open. This includes ordinary events, late snapshots, state, resume responses, and paced replay sends. Other sockets continue independently.
+
+This cutover is narrower than the general overflow guard documented above. The general guard still warns at 1 MiB and protects non-replaceable traffic with its 4 MiB overflow threshold; stream cutover avoids growing a replaceable cumulative-update queue to that point.
+
+After reconnect authentication, IndexedDB-backed local intent is resent before resume or snapshot traffic. The FIFO resend keeps the original `intentId`; socket acceptance records only the connection epoch and does not remove the occurrence. Server admission is idempotent, its authoritative projection replaces local ownership by ID, and correlated transcript surfacing or explicit cancellation is the settlement boundary.
+
+### Diagnostics and lifecycle
+
+Detailed metrics remain opt-in through `BOBBIT_CPU_DIAG=1`; set `BOBBIT_CPU_DIAG_JSONL=<path>` for a JSONL artifact and `BOBBIT_CPU_DIAG_FLUSH_MS` to override the one-second default interval. Disabled diagnostics use no-op recorders.
+
+Stream broadcast diagnostics report retained buffer bytes, recipient/cutover counters, and the normalization, retention, compaction, serialization, and send phases separately. The always-on event-loop lag monitor records named operation breadcrumbs around these phases, making a warning attributable to work such as retention or broadcast rather than only to a delayed timer. Diagnostic labels and timing samples are bounded to prevent the observer from becoming a new unbounded workload.
+
+Each interval also reports GC count, major-GC count, cumulative duration, and maximum duration. Shutdown first drains queued GC observer records, then disconnects the observer and writes the final snapshot after earlier queued writes. This ordering avoids losing terminal GC data or retaining observer/process listeners across lifecycle teardown.
+
+### MVP evidence and qualification
+
+The measurements below apply to the qualified cumulative-replay MVP, not to a semantic-delta replay design:
+
+| Workload | Observation |
+|---|---|
+| Synthetic production shape: 35 sessions, 1,000 updates each, 32 KiB final text | Capable-client wire traffic fell 99.37%, retained replay data fell 93.76%, and median MVP processing time fell 27.22%. |
+| Same-sequence live A/B: 3,401 `message_update` frames | Legacy traffic was 24,049,444 bytes and compact traffic was 831,591 bytes, a 96.54% reduction. Reconstruction reported no failures or final-message hash mismatches. |
+| Workload-matched live windows | Delay-max p95 changed from 146.8 to 70.9 ms, CPU median from 15.5% to 8.5%, and heap p95 from 831.8 to 734.4 MiB. |
+
+The live-window comparison was not randomized and did not control host or client load; the worst single delay also did not improve. Treat those latency, CPU, and heap changes as indicative rather than causal. The same-sequence byte and reconstruction comparison is the stronger protocol-specific evidence.
+
+An exact PR candidate is qualified with:
+
+```bash
+npm run check
+npm run test:unit
+npm run test:browser
+npm run test:e2e
+git diff --check
+```
+
+Focused contract coverage exercises buffer eviction and resume floors, mixed capable/legacy recipients, mid-stream text/thinking/tool baselines, terminal convergence, reconstruction failure, post-cutover egress fencing, reconnect outbox FIFO, and GC observer cleanup. Any correction to these contracts requires a pinning regression test.
+
+Hold or roll back the candidate on transcript divergence, reconstruction loops, silent prompt loss, sequence stalls, reconnect storms, any send after slow-client cutover, or degradation of healthy clients. Do not respond by switching replay storage to semantic delta chains or by adding global timer-based update coalescing; either change requires a separate design and proof.
 
 ## Authenticated session work policy
 
@@ -144,15 +227,15 @@ lifecycle, validation, size, or replay rules.
 
 | Type | Fields | Description |
 |---|---|---|
-| `auth` | `token`, `goalId?` | Authenticate the connection. `goalId` is only used by `/ws/viewer` to subscribe immediately after auth. |
+| `auth` | `token`, `goalId?`, `capabilities?` | Authenticate the connection. `goalId` is only used by `/ws/viewer` to subscribe immediately after auth. Session clients may request `capabilities.assistantStreamDelta: 1`; see [Cumulative assistant stream compaction](#cumulative-assistant-stream-compaction). |
 | `subscribe_goal` | `goalId` | `/ws/viewer` only: add a goal subscription for goal-scoped broadcasts. |
 | `unsubscribe_goal` | `goalId` | `/ws/viewer` only: remove one goal subscription. |
 | `clear_goal_subscriptions` | — | `/ws/viewer` only: remove all goal subscriptions. |
-| `prompt` | `text`, `images?`, `attachments?` | Send a user prompt |
-| `steer` | `text` | Interrupt the agent mid-turn with guidance |
-| `follow_up` | `text` | Send a follow-up message |
-| `steer_queued` | `messageId` | Promote a queued message to steered (priority) |
-| `remove_queued` | `messageId` | Remove a message from the queue |
+| `prompt` | `text`, `intentId?`, `images?`, `attachments?` | Admit one prompt occurrence; replay by ID is idempotent. |
+| `steer` | `text`, `intentId?` | Admit one steer occurrence; it may target the current or next turn. |
+| `retry_intent` | `intentId` | Retry one definitely failed occurrence without changing its stable ID. |
+| `steer_queued` | `messageId` | Promote an accepted queued prompt to steer intent. |
+| `remove_queued` | `messageId` | Durably dismiss one queued or uncertain occurrence. |
 | `reorder_queue` | `messageIds` | Reorder the prompt queue to match the given ID order |
 | `abort` | — | Abort the current agent turn |
 | `retry` | — | Retry the last failed turn |
@@ -201,7 +284,7 @@ The optional field preserves compatibility with older clients. When it is
 absent, the gateway reuses the previous durable effective level when available,
 otherwise the current authoritative level, and clamps it against the exact new
 model. It does not infer `max`: that level is selectable only when the model's
-`thinkingLevelMap` explicitly contains a non-null `max` entry. Pi `0.82.1`'s
+`thinkingLevelMap` explicitly contains a non-null `max` entry. Pi `0.84.1`'s
 direct Anthropic and supported Amazon Bedrock Opus 5 rows publish
 `{ xhigh: "xhigh", max: "max" }`, so both levels—and the ordinary
 `off` through `high` levels retained by the map rules—are available for those
@@ -220,16 +303,49 @@ On success, the gateway:
 5. Persists and broadcasts only that verified tuple in one authoritative
    `state` frame containing both `model` and `thinkingLevel`.
 
-`set_model` and `set_thinking_level` use the existing per-session command FIFO,
-so a prompt or later selection cannot overtake an in-flight tuple mutation.
+For an ordinary live session, `set_model` and `set_thinking_level` use the
+existing per-session command FIFO, so a prompt or later selection cannot
+overtake an in-flight tuple mutation.
+
+#### Recovering an unavailable persisted model
+
+When `state.data.condition` is
+`{ code: "MODEL_SELECTION_REQUIRED", provider, modelId }`, `set_model` is a
+recovery request rather than an ordinary live mutation. The gateway accepts
+only an exact currently session-selectable tuple, clamps thinking, starts a
+replacement pinned to that tuple, rehydrates the existing transcript, and
+verifies model read-back. It persists and publishes the replacement tuple with
+`condition: null` only after activation succeeds.
+
+An ordinary retryable activation failure returns
+`MODEL_SELECTION_RECOVERY_FAILED` with a sanitized message that says to choose
+another available model or retry. It preserves the unavailable durable tuple,
+transcript, and condition. A second `set_model` while activation is running
+returns the same code instead of waiting behind the first request.
+
+An unverified transcript rollback also returns
+`MODEL_SELECTION_RECOVERY_FAILED`, but its sanitized fail-closed message says
+that the original conversation transcript could not be restored and **Do not
+retry model selection**. The unavailable durable tuple and
+`MODEL_SELECTION_REQUIRED` condition remain authoritative, but transcript
+integrity is not guaranteed. The user must stop selecting models and ask an
+administrator to inspect server logs and restore the transcript before
+continuing; clients must not reinterpret this same-code message as the ordinary
+retryable case.
+
+While the condition remains, `prompt`, `steer`, `retry`, `restart_agent`, and
+`set_thinking_level` return `MODEL_SELECTION_REQUIRED`. Before activation and
+after an ordinary retryable failure, `get_state` and `get_messages` remain
+available so the session stays navigable and readable. See
+[Restored session requires a model](debugging.md#restored-session-requires-a-model).
 
 #### Failed selection and correction
 
-The client treats `state` as authoritative over its optimistic model and
-thinking values. If either write fails, the gateway keeps the previous durable
-tuple unchanged and broadcasts a complete correction—both `model` and
-`thinkingLevel`—from live read-back when available, otherwise from complete
-durable state.
+For ordinary live model or thinking changes, the client treats `state` as
+authoritative over its optimistic values. If either write fails, the gateway
+keeps the previous durable tuple unchanged and broadcasts a complete
+correction—both `model` and `thinkingLevel`—from live read-back when available,
+otherwise from complete durable state.
 
 After a partial mutation, the gateway makes one bounded rollback attempt on the
 same RPC bridge that received the request. If exact rollback cannot be verified,
@@ -272,7 +388,7 @@ would destroy the replacement rather than fence the stale target. The client
 should reconnect before retrying. This also prevents an older durable snapshot
 from overwriting a tuple committed by the replacement.
 
-A thinking-only UI change remains supported with:
+For an ordinary live session, a thinking-only UI change remains supported with:
 
 ```json
 { "type": "set_thinking_level", "level": "high" }
@@ -292,24 +408,26 @@ semantics and the shared clamp order.
 
 | Type | Key Fields | Description |
 |---|---|---|
-| `auth_ok` | — | Authentication succeeded |
+| `auth_ok` | `capabilities?` | Authentication succeeded. Accepted optional capabilities are echoed with their negotiated version. |
 | `auth_failed` | — | Authentication failed |
-| `state` | `data` | Current agent state snapshot |
+| `state` | `data` | Current agent state snapshot. `data.condition` may be `{ code: "MODEL_SELECTION_REQUIRED", provider: string, modelId: string }`; partial snapshots that omit it do not clear it, and the server sends explicit `condition: null` only after verified recovery. |
 | `messages` | `data` | Full message history array |
-| `event` | `data`, `seq?`, `ts?` | Streaming agent event (message_start, content_delta, tool calls, etc.). `seq` is a monotonic per-session counter starting at 1; `ts` is wall-clock ms at broadcast time. Both are optional for backward compatibility — old clients that ignore them still function correctly. |
+| `event` | `data`, `seq?`, `ts?` | Ordered agent event. Correlated user events carry delivery identity; `assistant_stream_invalidated` removes a provisional recoverable-length tail by `assistantStreamId`. `seq` is monotonic per session and `ts` is wall-clock ms; both remain optional for legacy interoperability. |
 | `resume_gap` | `lastSeq` | Server's reply when `resume` cannot safely replay the missed tail. This can mean the requested `fromSeq` is outside the retained EventBuffer window, the replay would exceed the resume byte budget, or the socket is already backed up. Client must fall back to `get_messages` for a fresh snapshot and reset its seq counter to `lastSeq`. |
 | `session_status` | `status` | Session status change (`idle`, `streaming`, `aborting`, etc.) |
 | `session_title` | `sessionId`, `title` | Title changed |
 | `session_created` | `sessionId`, `projectId?` | A visible session was created through REST, UI, or `host.agents`; clients should refresh the session list immediately. |
-| `sessions_changed` | `projectId?` | Broad session-list invalidation fallback; clients should refresh the session list. |
+| `sessions_changed` | `projectId?`, `sessionId?`, `user_tags?` | Broad session-list invalidation. Pin mutations include the authoritative normalized user tags for an immediate row patch; clients still refresh the session list. |
 | `session_removed` | `sessionId`, `projectId?`, `reason` | A session was terminated, archived, or purged; clients should remove or refresh the matching row promptly. |
 | `staff_changed` | `reason`, `staffId`, `projectId`, `previousProjectId?`, `sessionId?` | A staff record was created, updated, reassigned, or deleted through REST/tool paths. Clients should reload staff and orphaned-staff state before refreshing sessions so permanent staff-agent sessions are classified under Staff instead of regular Sessions. |
 | `client_joined` | `clientId` | Another client connected |
 | `client_left` | `clientId` | A client disconnected |
-| `error` | `message`, `code` | Error message |
+| `error` | `message`, `code`, `intentId?`, `retryable?` | Error message. Correlated pre-admission errors may update only that local occurrence; uncorrelated errors settle none. |
 | `pong` | — | Keepalive response |
 | `cost_update` | `sessionId`, `goalId?`, `taskId?`, `cost` | Cumulative persisted session cost snapshot. Sent after live completed assistant usage and during hydration paths when persisted cost exists. Current servers include `cost.cacheHitRate`; see [Cost update shape](#cost-update-shape). |
-| `queue_update` | `sessionId`, `queue` | Prompt queue changed |
+| `queue_update` | `sessionId`, `queue` | Full server delivery-outbox projection, including accepted and in-flight occurrences. |
+| `delivery_outbox` | `sessionId`, `outbox` | Attach-time server-authoritative delivery projection; current clients merge it by occurrence ID. |
+| `intent_update` | `sessionId`, `intent`, `settlement?` | One exact occurrence projection or `surfaced` / `failed` / `cancelled` disposition. |
 | `side_panel_workspace` | `sessionId`, `workspace` | The server-authoritative side-panel workspace for the session changed. Clients replace their local mirror only when `workspace.revision` is newer; see [side-panel-workspace.md](side-panel-workspace.md). |
 | `task_changed` | `task` | A task was created, updated, or deleted |
 | `tasks_list` | `tasks` | Full task list for a goal |
@@ -328,9 +446,9 @@ semantics and the shared clamp order.
 | `gate_verification_complete` | `goalId`, `gateId`, `signalId`, `status` | All verification steps finished |
 | `gate_status_changed` | `goalId`, `gateId`, `status` | Gate status changed |
 | `gate_reset` | `goalId`, `gateId`, `affectedGateIds`, `changedGateIds`, `unchangedGateIds`, `reopen` | A gate reset invalidated the requested gate and downstream dependents. `reopen` is the lifecycle outcome described below. Clients should refresh gate summaries for all affected ids. |
-| `goal_state_changed` | `goalId` | Goal persistence changed. Treat as an invalidation and refresh goal-list state; reset-driven reopening emits this globally only when it performs `complete` → `in-progress`. |
-| `goal_setup_complete` | `goalId` | Goal worktree/team setup finished |
-| `goal_setup_error` | `goalId`, `error` | Goal setup failed |
+| `goal_state_changed` | `goalId` | A persisted goal state or setup-lifecycle transition changed. Treat it as an invalidation and refresh goal-list state, including retry transitions that clear stale setup errors and controls; reset-driven reopening emits this globally only when it performs `complete` → `in-progress`. |
+| `goal_setup_complete` | `goalId` | Worktree setup was verified ready. It does not guarantee that a Team Lead or team has started. |
+| `goal_setup_error` | `goalId`, `error` | Current setup failed; starting remains blocked until a retry or recovery reaches verified ready. |
 | `team_agent_spawned` | `goalId`, `sessionId`, `role`, `name` | Team agent was spawned |
 | `team_agent_dismissed` | `goalId`, `sessionId`, `role`, `name` | Team agent was dismissed |
 | `team_agent_finished` | `goalId`, `sessionId`, `role`, `name` | Team agent finished its turn |

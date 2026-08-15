@@ -191,7 +191,7 @@ function restartCancellationSignal(id: string, contentVersion: number): GateSign
 function createRestartCancellationFixture(options: { pendingFirst?: boolean; newerSignal?: boolean } = {}): RestartCancellationFixture {
 	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "cancel-verification-restart-"));
 	const clock = createManualClock(1_700_000_000_000);
-	const gateStore = new GateStore(stateDir);
+	const gateStore = new GateStore(stateDir, undefined, { persistence: "json" });
 	gateStore.initGatesForGoal(RESTART_CANCEL_GOAL_ID, [RESTART_CANCEL_GATE_ID]);
 	const oldSignalId = `restart-cancel-old-${Math.random().toString(36).slice(2)}`;
 	gateStore.recordSignal(restartCancellationSignal(oldSignalId, 1));

@@ -111,7 +111,7 @@ function buildSignal(): GateSignal {
 }
 
 test("VerificationHarness exposes a synchronous beginVerification(signal, gate) — GATE_SIGNAL_STEP_ENUMERATION_RACE", () => {
-	const gateStore = new GateStore(STATE_DIR);
+	const gateStore = new GateStore(STATE_DIR, undefined, { persistence: "json" });
 	const harness = makeHarness(gateStore);
 
 	assert.strictEqual(
@@ -122,7 +122,7 @@ test("VerificationHarness exposes a synchronous beginVerification(signal, gate) 
 });
 
 test("beginVerification populates getActiveVerifications synchronously in the same tick — GATE_SIGNAL_STEP_ENUMERATION_RACE", () => {
-	const gateStore = new GateStore(STATE_DIR);
+	const gateStore = new GateStore(STATE_DIR, undefined, { persistence: "json" });
 	gateStore.initGatesForGoal(GOAL_ID, [GATE_ID]);
 	const harness = makeHarness(gateStore);
 
@@ -194,7 +194,7 @@ test("beginVerification populates getActiveVerifications synchronously in the sa
 });
 
 test("gate-store and active-verifications agree on enumerated steps in the same tick — GATE_SIGNAL_STEP_ENUMERATION_RACE", () => {
-	const gateStore = new GateStore(STATE_DIR);
+	const gateStore = new GateStore(STATE_DIR, undefined, { persistence: "json" });
 	gateStore.initGatesForGoal(GOAL_ID, [GATE_ID]);
 	const harness = makeHarness(gateStore);
 

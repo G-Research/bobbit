@@ -10,7 +10,8 @@ import { bobbitDir, bobbitStateDir, headquartersDir, globalAgentDir } from "../b
 import { caCertPath } from "../auth/tls.js";
 import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { TOOLS_DIR, type ToolManager } from "./tool-manager.js";
-import { THINKING_LEVELS } from "../../shared/thinking-levels.js";
+import { PiAssistantStreamNormalizer } from "../../shared/assistant-stream-delta.js";
+import { THINKING_LEVELS, type ThinkingLevel } from "../../shared/thinking-levels.js";
 import { resolveBuiltinPacksDir } from "./builtin-packs.js";
 import { scopePaths } from "./pack-types.js";
 import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
@@ -129,6 +130,10 @@ export interface RpcBridgeOptions {
 	 * Valid: off|minimal|low|medium|high|xhigh|max. Silently ignored otherwise.
 	 */
 	initialThinkingLevel?: string;
+	/** Original model request retained separately when final argv canonicalization changes it. */
+	requestedModel?: string;
+	/** Original thinking request retained separately from the exact clamped spawn level. */
+	requestedThinkingLevel?: string;
 	/** Timer/clock implementation. Defaults to real timers. */
 	clock?: Clock;
 }
@@ -152,15 +157,21 @@ export type RpcEventListener = (event: any) => void;
  * interface (`IRpcBridge`). The production code is unchanged: it still
  * calls `new RpcBridge(opts)` and the factory intercepts transparently.
  */
+export type PromptStreamingBehavior = "steer" | "followUp";
+
 export interface IRpcBridge {
 	start(): Promise<void>;
 	stop(): Promise<void>;
-	prompt(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, timeoutMs?: number): Promise<any>;
-	promptWhenReady(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number }): Promise<any>;
+	prompt(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, timeoutMs?: number, streamingBehavior?: PromptStreamingBehavior): Promise<any>;
+	promptWhenReady(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number; streamingBehavior?: PromptStreamingBehavior }): Promise<any>;
 	steer(text: string): Promise<any>;
 	abort(): Promise<any>;
 	getState(): Promise<any>;
 	getMessages(): Promise<any>;
+	/** Narrow read-only Pi session-tree plane used for authoritative sidecar binding. */
+	getTranscriptEntries?(): Promise<any>;
+	/** Read-only Pi transcript cursor/tree plane used to authorize history actions. */
+	getTranscriptCursorSnapshot?(): Promise<any>;
 	setModel(provider: string, modelId: string): Promise<any>;
 	setThinkingLevel(level: string): Promise<any>;
 	compact(timeoutMs?: number): Promise<any>;
@@ -314,6 +325,116 @@ export function resolveDirectGatewayEnv(
 	return env;
 }
 
+export interface EffectivePiSelection {
+	requestedModel?: string;
+	effectiveModel?: string;
+	requestedThinking?: ThinkingLevel;
+	effectiveThinking?: ThinkingLevel;
+	sanitizedArgs: string[];
+}
+
+function splitQualifiedModel(value: string | undefined): { provider: string; modelId: string } | undefined {
+	if (!value) return undefined;
+	const slash = value.indexOf("/");
+	if (slash <= 0 || slash === value.length - 1) return undefined;
+	return { provider: value.slice(0, slash), modelId: value.slice(slash + 1) };
+}
+
+/**
+ * Resolve Pi's effective provider/model/thinking tuple before process creation.
+ *
+ * Pi treats the last provider/model/thinking option as authoritative. A
+ * qualified model infers its provider only when no explicit raw provider is
+ * present; a bare raw model retains the initially pinned provider. Selection
+ * flags are removed from `sanitizedArgs` so callers can emit one canonical
+ * tuple after validating it against Bobbit's exact target-realm catalog.
+ */
+export function resolveEffectivePiSelection(options: RpcBridgeOptions): EffectivePiSelection {
+	const requestedModel = options.requestedModel ?? options.initialModel;
+	const requestedThinking = (THINKING_LEVELS as readonly string[]).includes(
+		options.requestedThinkingLevel ?? options.initialThinkingLevel ?? "",
+	)
+		? (options.requestedThinkingLevel ?? options.initialThinkingLevel) as ThinkingLevel
+		: undefined;
+	const initial = splitQualifiedModel(options.initialModel);
+	let rawProvider: string | undefined;
+	let rawModel: string | undefined;
+	let rawThinking: ThinkingLevel | undefined;
+	let sawRawProvider = false;
+	const sanitizedArgs: string[] = [];
+	const args = options.args ?? [];
+
+	const readSelectionValue = (flag: string, index: number): { value: string; nextIndex: number } => {
+		const value = args[index + 1];
+		if (!value || value.startsWith("-")) {
+			throw new Error(`Invalid Pi ${flag} argument: expected a non-empty value`);
+		}
+		return { value, nextIndex: index + 1 };
+	};
+
+	for (let i = 0; i < args.length; i++) {
+		const flag = args[i];
+		if (flag !== "--provider" && flag !== "--model" && flag !== "--thinking") {
+			sanitizedArgs.push(flag);
+			continue;
+		}
+		const parsed = readSelectionValue(flag, i);
+		i = parsed.nextIndex;
+		if (flag === "--provider") {
+			sawRawProvider = true;
+			rawProvider = parsed.value;
+		} else if (flag === "--model") {
+			rawModel = parsed.value;
+		} else {
+			if (!(THINKING_LEVELS as readonly string[]).includes(parsed.value)) {
+				throw new Error(`Invalid Pi --thinking argument: unknown level "${parsed.value}"`);
+			}
+			rawThinking = parsed.value as ThinkingLevel;
+		}
+	}
+
+	// Pi supports `--model <pattern>:<thinking>` when no explicit --thinking
+	// was supplied. Preserve strict exact model matching while honoring that
+	// documented shorthand.
+	if (rawModel && !rawThinking) {
+		const colon = rawModel.lastIndexOf(":");
+		const suffix = colon > 0 ? rawModel.slice(colon + 1) : "";
+		if ((THINKING_LEVELS as readonly string[]).includes(suffix)) {
+			rawModel = rawModel.slice(0, colon);
+			rawThinking = suffix as ThinkingLevel;
+		}
+	}
+
+	let provider = rawProvider ?? initial?.provider;
+	let modelId = rawModel ?? initial?.modelId;
+	if (rawModel && !sawRawProvider) {
+		const qualified = splitQualifiedModel(rawModel);
+		if (qualified) {
+			provider = qualified.provider;
+			modelId = qualified.modelId;
+		}
+	} else if (rawModel && rawProvider) {
+		// Pi tolerates `--provider p --model p/id` by stripping the matching
+		// provider prefix before exact model resolution.
+		const prefix = `${rawProvider}/`;
+		if (rawModel.toLowerCase().startsWith(prefix.toLowerCase())) {
+			modelId = rawModel.slice(prefix.length);
+		}
+	}
+	const effectiveModel = provider && modelId ? `${provider}/${modelId}` : undefined;
+	const initialThinking = (THINKING_LEVELS as readonly string[]).includes(options.initialThinkingLevel ?? "")
+		? options.initialThinkingLevel as ThinkingLevel
+		: undefined;
+
+	return {
+		...(requestedModel ? { requestedModel } : {}),
+		...(effectiveModel ? { effectiveModel } : {}),
+		...(requestedThinking ? { requestedThinking } : {}),
+		...(rawThinking ?? initialThinking ? { effectiveThinking: rawThinking ?? initialThinking } : {}),
+		sanitizedArgs,
+	};
+}
+
 export function buildAgentArgs(options: RpcBridgeOptions): string[] {
 	const args = ["--mode", "rpc", "--no-approve", "--no-context-files"];
 	if (options.systemPromptPath) args.push("--system-prompt", options.systemPromptPath);
@@ -388,6 +509,8 @@ export class RpcBridge {
 	private stderrDecoder = new StringDecoder("utf8");
 	/** Ring buffer of last stderr lines — included in exit error messages for diagnostics. */
 	private stderrTail: string[] = [];
+	/** Rebuilds Pi 0.84 delta-only RPC updates for Bobbit's cumulative pipeline. */
+	private readonly assistantStreamNormalizer = new PiAssistantStreamNormalizer();
 	private readonly clock: Clock = realClock;
 
 	constructor(
@@ -614,6 +737,7 @@ export class RpcBridge {
 		// Handle spawn errors (e.g. ENOENT when executable not found) — without this
 		// the error becomes an uncaught exception and crashes the gateway.
 		this.process!.on("error", (err: NodeJS.ErrnoException) => {
+			this.assistantStreamNormalizer.reset();
 			console.error(`[rpc-bridge] Process error: ${err.code || err.message}${this.options.cwd ? ` cwd=${this.options.cwd}` : ""}`);
 			for (const [, p] of this.pending) {
 				this.clock.clearTimeout(p.timeout);
@@ -624,6 +748,7 @@ export class RpcBridge {
 		});
 
 		this.process!.on("exit", (code, signal) => {
+			this.assistantStreamNormalizer.reset();
 			const reason = signal ? `signal ${signal}` : `code ${code}`;
 			const stderrContext = this.stderrTail.length > 0
 				? `\n  Last stderr:\n    ${this.stderrTail.slice(-5).join("\n    ")}`
@@ -682,7 +807,12 @@ export class RpcBridge {
 
 	// --- Convenience methods matching the RPC protocol ---
 
-	prompt(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, timeoutMs?: number) {
+	prompt(
+		text: string,
+		images?: Array<{ type: "image"; data: string; mimeType: string }>,
+		timeoutMs?: number,
+		streamingBehavior?: PromptStreamingBehavior,
+	) {
 		// Defensive backstop: if a prompt carries image(s) but blank text, the
 		// model API rejects the blank ContentBlock. The primary fix synthesizes
 		// text upstream in session-manager.enqueuePrompt (where non-image
@@ -692,7 +822,12 @@ export class RpcBridge {
 		if (images?.length) {
 			console.log(`[rpc-bridge] Sending prompt with ${images.length} image(s), first image: type=${images[0].type}, mimeType=${images[0].mimeType}, data length=${images[0].data?.length}`);
 		}
-		return this.sendCommand({ type: "prompt", message: effectiveText, ...(images?.length ? { images } : {}) }, timeoutMs);
+		return this.sendCommand({
+			type: "prompt",
+			message: effectiveText,
+			...(images?.length ? { images } : {}),
+			...(streamingBehavior ? { streamingBehavior } : {}),
+		}, timeoutMs);
 	}
 
 	/** Wait for a (possibly cold) agent to become responsive, then prompt with a
@@ -702,10 +837,15 @@ export class RpcBridge {
 	async promptWhenReady(
 		text: string,
 		images?: Array<{ type: "image"; data: string; mimeType: string }>,
-		opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number },
+		opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number; streamingBehavior?: PromptStreamingBehavior },
 	): Promise<any> {
 		await this.waitForReady(opts?.readyTimeoutMs ?? COLD_REPROMPT_READY_TIMEOUT_MS);
-		return this.prompt(text, images, opts?.promptTimeoutMs ?? COLD_REPROMPT_PROMPT_TIMEOUT_MS);
+		return this.prompt(
+			text,
+			images,
+			opts?.promptTimeoutMs ?? COLD_REPROMPT_PROMPT_TIMEOUT_MS,
+			opts?.streamingBehavior,
+		);
 	}
 
 	steer(text: string) {
@@ -758,6 +898,45 @@ export class RpcBridge {
 		const response = await this.sendCommand({ type: "get_messages" });
 		if (response?.success) return { ...response, data: normalizeToolResultErrorSnapshot(response.data) };
 		return response;
+	}
+
+	/** Read Pi's session tree without invoking any mutating fork operation. */
+	async getTranscriptEntries() {
+		const response = await this.sendCommand({ type: "get_entries" });
+		if (!response?.success) return response;
+		return {
+			success: true,
+			data: {
+				entries: response.data?.entries,
+				leafId: response.data?.leafId,
+			},
+		};
+	}
+
+	/**
+	 * Read Pi's immutable fork selector and session tree without invoking its
+	 * mutating fork RPC. The caller correlates these two views with get_messages;
+	 * malformed or unsuccessful responses remain failures rather than cursors.
+	 */
+	async getTranscriptCursorSnapshot() {
+		const [forkMessages, entries] = await Promise.all([
+			this.sendCommand({ type: "get_fork_messages" }),
+			this.sendCommand({ type: "get_entries" }),
+		]);
+		if (!forkMessages?.success || !entries?.success) {
+			return {
+				success: false,
+				error: forkMessages?.error ?? entries?.error ?? "Pi transcript cursor data is unavailable",
+			};
+		}
+		return {
+			success: true,
+			data: {
+				forkMessages: forkMessages.data?.messages,
+				entries: entries.data?.entries,
+				leafId: entries.data?.leafId,
+			},
+		};
 	}
 
 	async stop(): Promise<void> {
@@ -974,8 +1153,9 @@ export class RpcBridge {
 			this.pending.delete(parsed.id);
 			p.resolve(parsed);
 		} else {
-			this.recordPiExtensionLoadFailureFromEvent(parsed);
-			const normalized = normalizeToolResultErrorEvent(parsed);
+			const streamNormalized = this.assistantStreamNormalizer.normalize(parsed);
+			this.recordPiExtensionLoadFailureFromEvent(streamNormalized);
+			const normalized = normalizeToolResultErrorEvent(streamNormalized);
 			// Agent event — forward to listeners
 			for (const listener of this.eventListeners) {
 				listener(normalized);

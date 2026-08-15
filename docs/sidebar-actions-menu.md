@@ -173,26 +173,12 @@ This is intentionally **mouse-only** — there is no keyboard shortcut and no en
 
 ### Fork session endpoint
 
-`POST /api/sessions/:id/fork` creates a new session that rehydrates from a clone of the source session's conversation history. Unlike the old duplicate flow, fork copies history — it clones the source `.jsonl` transcript plus its tool-content cache and proposal drafts, then hands the clone to the new session via `switch_session` (the same lossless mechanism as Continue-Archived).
+`POST /api/sessions/:id/fork` has two server-authoritative modes:
 
-The endpoint preserves the project/task/goal/session configuration:
+- **Session-row Fork** posts `{ newWorktree }` and clones the complete source transcript. Its **New worktree** toggle resets to checked on every menu open, so the default uses the established fresh worktree/branch lifecycle.
+- **Historic prompt Fork** posts `{ entryId, newWorktree }`. The server clones the active transcript branch strictly before that durable user-prompt cursor; the selected prompt, later entries, inactive-branch records, and positional tool-content cache are excluded. Its independent toggle resets to unchecked, so the default reuses the source session's exact live cwd and branch as a borrowed worktree with no teardown ownership.
 
-- project id
-- goal id and reattempt goal id
-- task id
-- assistant type
-- staff id, role, accessory, role prompt, and staff pinned memory when applicable
-- sandbox setting and allowed tools
-- selected model provider/model id
-
-The request body `{ newWorktree?: boolean }` (default `true`) controls the worktree:
-
-- `true` — create a fresh worktree/branch off the project repo (plain project-root session when the project isn't a git repo).
-- `false` — reuse the source session's existing worktree path directly, creating no new worktree (two live sessions intentionally share the tree). The fork registers no worktree metadata, so terminating either session never removes the shared worktree. When the source has no worktree, the fork reuses the project-root cwd.
-
-The new title is `Fork: <source title>` (`markGenerated`). Goal-bound forks go through the goal-aware creation path so goal context is preserved; if the source goal is still `todo`, the server advances it to `in-progress`.
-
-The client helper `forkSession(source, { newWorktree })` posts to the endpoint, refreshes the session list, and connects to the returned session id.
+Both modes use the shared fork lifecycle rather than separate cloning or launch implementations. See [REST API — Fork session endpoint](rest-api.md#fork-session-endpoint) for the authoritative request, validation, retained-context, sidecar, ownership, cleanup, and response contract. See [Unified Session Actions — Historic prompt actions](session-actions.md#historic-prompt-actions) for the prompt-row controls and copy behavior.
 
 ## Goal actions
 

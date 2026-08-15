@@ -9,6 +9,7 @@ import {
 	renderApp,
 	activeSessionId,
 	isDesktop,
+	getGoalSetupUiState,
 	GW_SESSION_KEY,
 	type GatewaySession,
 	type Project,
@@ -184,6 +185,13 @@ type InteractionModeTarget = {
 	nonInteractive?: boolean;
 };
 
+function isModelSelectionRequiredRecord(record: Partial<GatewaySession> | undefined): boolean {
+	const condition = (record as any)?.condition;
+	return condition?.code === "MODEL_SELECTION_REQUIRED"
+		&& typeof condition.provider === "string"
+		&& typeof condition.modelId === "string";
+}
+
 /** Apply every interaction restriction already known without ever clearing one. */
 function applyKnownSessionInteractionMode(
 	target: InteractionModeTarget,
@@ -199,7 +207,7 @@ function applyKnownSessionInteractionMode(
 		|| records.some((record) => record?.readOnly === true
 			|| record?.archived === true
 			|| record?.status === "archived"
-			|| record?.status === "terminated")
+			|| (record?.status === "terminated" && !isModelSelectionRequiredRecord(record)))
 	) {
 		target.readOnly = true;
 	}
@@ -1349,6 +1357,8 @@ export function selectSession(sessionId: string, replaceHistory?: boolean): void
 
 	const outgoingPanel = transferActiveSessionToCache(state.selectedSessionId, sessionId);
 	state.selectedSessionId = sessionId;
+	// A new canonical selection supersedes any prior explicit sidebar reveal.
+	state.sidebarRevealSessionId = null;
 
 	// Proposals are scoped to the session that emitted them. Clear stale slots
 	// the moment the user navigates away so they never bleed into other sessions.
@@ -1536,6 +1546,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.previewPanelMtime = 0;
 		state.previewPanelEntry = "";
 		state.previewPanelContentHash = "";
+		state.reviewGroups = new Map();
+		state.reviewActiveReviewId = "";
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
@@ -1713,8 +1725,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 		// Keep selection UX optimistic, but only persist server-confirmed model state.
 		const originalSetModel = remote.setModel.bind(remote);
-		remote.setModel = (model: any) => {
-			originalSetModel(model);
+		remote.setModel = (model: any, thinkingLevel?: string) => {
+			originalSetModel(model, thinkingLevel);
 			renderApp();
 		};
 
@@ -1842,12 +1854,12 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 			}
 		};
 
-		remote.onGoalSetupEvent = async () => {
-			// Refresh sessions and goals to pick up setupStatus changes
-			refreshSessions();
-			// Also refresh the goal dashboard's local state so the banner dismisses
+		remote.onGoalSetupEvent = async (goalId?: string) => {
+			// A session-scoped broadcast still changes the shared goal list. Refresh
+			// it for sidebar/landing consumers, then refresh any visible dashboard.
+			void refreshSessions();
 			const { refreshDashboardGoal } = await import("./goal-dashboard.js");
-			refreshDashboardGoal();
+			void refreshDashboardGoal(goalId);
 		};
 
 		remote.onBgProcessEvent = (msg) => {
@@ -2414,6 +2426,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		state.previewPanelMtime = 0;
 		state.previewPanelEntry = "";
 		state.previewPanelContentHash = "";
+		state.reviewGroups = new Map();
+		state.reviewActiveReviewId = "";
 		state.reviewDocuments = new Map();
 		state.reviewActiveTab = "";
 		state.reviewPanelOpen = false;
@@ -2428,6 +2442,12 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// a direct-record fetch remains a best-effort fallback after hydration.
 		let sessionDataAny: any = sessionData
 			|| state.archivedSessions?.find((s: any) => s.id === sessionId);
+		// Seed the cold-restore condition from the authoritative listing before the
+		// first editor render. The WS state snapshot will subsequently own updates
+		// and must explicitly publish null after verified recovery.
+		if (isModelSelectionRequiredRecord(sessionDataAny) && !remote.conditionSnapshotReceived) {
+			remote.state.condition = { ...sessionDataAny.condition };
+		}
 
 		// Bind draft autosave before setAgent can render an interactive editor.
 		_bindPromptDraftSession(sessionId);
@@ -2452,14 +2472,13 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 		// Initial workspace hydration has one owner and starts only after the
 		// transcript-bearing agent is bound, so REST latency cannot delay paint.
 		await hydrateSidePanelWorkspace(sessionId);
-		// Transcript replay may have observed the submitted-review marker before
-		// any server tabs existed locally. Replay that cleanup after hydration,
-		// including for a now-cached session, before stale-invocation teardown.
+		// Reconcile artifact content only after authoritative tabs are available.
+		// An exact primary wins over passive-replay tombstones; absence plus a
+		// tombstone remains suppressed by the restore below.
 		await remote.reconcileSubmittedReviewWorkspace();
 		if (isStale()) { cleanupRemote(remote); return; }
 		// The earlier restore runs before hydration so it cannot see cold-loaded
-		// review tabs. Restore again only after submitted tabs have been removed;
-		// unsubmitted persisted documents now have authoritative tabs to bind to.
+		// review tabs. Restore again now that authoritative presence is known.
 		reviewSources.restorePersistedReviewDocuments(sessionId, { select: true });
 
 		// Listen for suggest-goal events from assistant messages
@@ -2878,6 +2897,8 @@ export async function connectToSession(sessionId: string, isExisting: boolean, o
 
 export async function createAndConnectSession(goalId?: string, roleId?: string, cwd?: string, worktree?: boolean, sandboxed?: boolean, projectId?: string): Promise<void> {
 	if (state.creatingSession) return;
+	const goal = goalId ? state.goals.find((item) => item.id === goalId) : undefined;
+	if (goal && !getGoalSetupUiState(goal).canStart) return;
 	state.creatingSession = true;
 	state.creatingSessionForGoalId = goalId || null;
 	renderApp();
@@ -2940,15 +2961,22 @@ export type ForkSessionResponse = {
  * session and either spins up a fresh worktree (`newWorktree: true`, default)
  * or reuses the source session's existing worktree (`newWorktree: false`).
  */
-export async function forkSession(source: GatewaySession, opts: { newWorktree: boolean }): Promise<void> {
+export async function forkSession(
+	source: GatewaySession,
+	opts: { newWorktree: boolean; entryId?: string },
+): Promise<void> {
 	if (state.creatingSession) return;
 	state.creatingSession = true;
 	state.creatingSessionForGoalId = source.goalId || null;
 	renderApp();
 	try {
+		const body: { newWorktree: boolean; entryId?: string } = {
+			newWorktree: opts.newWorktree,
+		};
+		if (opts.entryId !== undefined) body.entryId = opts.entryId;
 		const res = await gatewayFetch(`/api/sessions/${encodeURIComponent(source.id)}/fork`, {
 			method: "POST",
-			body: JSON.stringify({ newWorktree: opts.newWorktree }),
+			body: JSON.stringify(body),
 		});
 		if (!res.ok) {
 			const data = await res.json().catch(() => ({} as any));
@@ -3120,6 +3148,8 @@ export function backToSessions(): void {
 	state.assistantHasProposal = false;
 	state.isPreviewSession = false;
 	state.previewPanelFullscreen = false;
+	state.reviewGroups = new Map();
+	state.reviewActiveReviewId = "";
 	state.reviewDocuments = new Map();
 	state.reviewActiveTab = "";
 	state.reviewPanelOpen = false;
@@ -3146,6 +3176,8 @@ export function disconnectGateway(): void {
 	state.assistantHasProposal = false;
 	state.isPreviewSession = false;
 	state.previewPanelFullscreen = false;
+	state.reviewGroups = new Map();
+	state.reviewActiveReviewId = "";
 	state.reviewDocuments = new Map();
 	state.reviewActiveTab = "";
 	state.reviewPanelOpen = false;

@@ -19,7 +19,7 @@
  *
  * See docs/design/bobbit-gateway-tool.md for the authoritative design.
  */
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import fs from "node:fs";
 import path from "node:path";
@@ -52,6 +52,10 @@ interface PageSpec {
 	maxLimit?: number;
 	/** Whether this operation should use cursor (`after`) pagination for these params. */
 	cursor?: boolean | ((p: Params) => boolean);
+	/** Translate a numeric cursor/after position to the endpoint's offset protocol. */
+	offsetCursor?: boolean;
+	/** Fall back to tool slicing if a supposedly paged REST response exceeds the requested limit. */
+	enforceBound?: boolean;
 }
 
 interface OpSpec {
@@ -108,17 +112,24 @@ function isCursorPaging(params: Params, spec: PageSpec): boolean {
 
 function normalizePaging(params: Params, spec: PageSpec): NormalizedPaging {
 	const limit = clampInteger(params.limit, spec.defaultLimit ?? DEFAULT_PAGE_LIMIT, 1, spec.maxLimit ?? MAX_PAGE_LIMIT);
-	const offset = Math.max(0, parseInteger(params.offset) ?? 0);
 	const rawCursor = params.cursor ?? params.after;
-	const cursor = rawCursor !== undefined && rawCursor !== null && rawCursor !== "" ? rawCursor as string | number : undefined;
-	const mode: PageMode = isCursorPaging(params, spec) ? "cursor" : "offset";
+	const numericCursor = spec.offsetCursor ? parseInteger(rawCursor) : undefined;
+	const cursor = spec.offsetCursor
+		? (numericCursor !== undefined ? Math.max(0, numericCursor) : undefined)
+		: (rawCursor !== undefined && rawCursor !== null && rawCursor !== "" ? rawCursor as string | number : undefined);
+	const offset = numericCursor !== undefined
+		? Math.max(0, numericCursor)
+		: Math.max(0, parseInteger(params.offset) ?? 0);
+	const mode: PageMode = spec.offsetCursor
+		? (numericCursor !== undefined ? "cursor" : "offset")
+		: (isCursorPaging(params, spec) ? "cursor" : "offset");
 	return { limit, offset, cursor, mode };
 }
 
 function appendPagingQuery(base: string, entries: Array<[string, unknown]>, params: Params, spec: PageSpec): string {
 	const paging = normalizePaging(params, spec);
 	const pagingEntries: Array<[string, unknown]> = [["limit", paging.limit]];
-	if (paging.mode === "cursor" && paging.cursor !== undefined) {
+	if (paging.mode === "cursor" && paging.cursor !== undefined && !spec.offsetCursor) {
 		pagingEntries.push(["after", paging.cursor]);
 	} else {
 		pagingEntries.push(["offset", paging.offset]);
@@ -187,12 +198,18 @@ function sliceByPath(data: unknown, spec: PageSpec, paging: NormalizedPaging): {
 	const sourceItems = Array.isArray(data) ? data : getAtPath(data, itemPath);
 	if (!Array.isArray(sourceItems)) return undefined;
 
-	const start = hasRestPagination ? 0 : paging.mode === "offset" ? paging.offset : 0;
+	// A domain-level `total` is not by itself proof that the endpoint honored its
+	// page size. Gate responses historically had such a count while returning the
+	// entire collection, so explicitly bounded operations fail closed to slicing.
+	const restIgnoredBound = hasRestPagination && spec.enforceBound === true && sourceItems.length > paging.limit;
+	const start = hasRestPagination && !restIgnoredBound
+		? 0
+		: (paging.mode === "offset" || spec.offsetCursor ? paging.offset : 0);
 	const end = start + paging.limit;
-	const shouldSlice = !hasRestPagination;
+	const shouldSlice = !hasRestPagination || restIgnoredBound;
 	const items = shouldSlice ? sourceItems.slice(start, end) : sourceItems;
 	const total = numberField(data, "total") ?? numberField(pagination, "total") ?? (hasRestPagination ? undefined : sourceItems.length);
-	const pagedBy = shouldSlice ? "tool" : "rest";
+	const pagedBy = hasRestPagination && !restIgnoredBound ? "rest" : "tool";
 	const result = Array.isArray(data)
 		? { [spec.itemKey]: items }
 		: setAtPath(data as Record<string, unknown>, itemPath, items);
@@ -205,15 +222,19 @@ function pageResult(data: unknown, params: Params, spec: PageSpec): unknown {
 	if (!sliced) return data;
 	const pagination = data && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>).pagination : undefined;
 	const total = sliced.total;
-	const computedHasMore = (sliced.start + sliced.items.length) < (total ?? sliced.sourceLength);
+	const pagePosition = spec.offsetCursor ? paging.offset : sliced.start;
+	const computedHasMore = (pagePosition + sliced.items.length) < (total ?? sliced.sourceLength);
 	const topLevelHasMore = booleanField(data, "hasMore") ?? booleanField(pagination, "hasMore");
 	const hasMore = Boolean(sliced.pagedBy === "tool" ? (topLevelHasMore || computedHasMore) : (topLevelHasMore ?? computedHasMore));
+	const restNextOffset = numberField(data, "nextOffset") ?? numberField(pagination, "nextOffset");
 	const nextOffset = paging.mode === "offset" && hasMore
-		? numberField(data, "nextOffset") ?? numberField(pagination, "nextOffset") ?? paging.offset + sliced.items.length
+		? (spec.enforceBound && sliced.pagedBy === "tool" ? undefined : restNextOffset) ?? paging.offset + sliced.items.length
 		: undefined;
 	const nextCursor = paging.mode === "cursor"
-		? valueField(data, "nextCursor") ?? valueField(pagination, "nextCursor")
-		: undefined;
+		? (spec.offsetCursor
+			? (hasMore ? restNextOffset ?? paging.offset + sliced.items.length : undefined)
+			: valueField(data, "nextCursor") ?? valueField(pagination, "nextCursor"))
+		: (spec.offsetCursor && hasMore ? nextOffset : undefined);
 	return {
 		...(sliced.result as Record<string, unknown>),
 		pagination: {
@@ -308,7 +329,8 @@ const MAINTENANCE_PAGE_SPECS: Record<string, PageSpec | undefined> = {
 	orphaned_worktrees: { itemKey: "worktrees" },
 	orphaned_sessions: { itemKey: "sessions" },
 	orphaned_index_rows: { itemKey: "sample" },
-	archived_session_worktrees: { itemKey: "worktrees" },
+	worktrees: { itemKey: "items" },
+	archived_session_worktrees: { itemKey: "items" },
 };
 
 // POST maintenance/search actions for bobbit_admin.maintenance_cleanup.
@@ -339,7 +361,11 @@ const READ_OPS: Record<string, OpSpec> = {
 	get_goal: { method: "GET", buildPath: (p) => `/api/goals/${p.goalId}`, required: ["goalId"] },
 	goal_cost: { method: "GET", buildPath: (p) => `/api/goals/${p.goalId}/cost`, required: ["goalId"] },
 	goal_git_status: { method: "GET", buildPath: (p) => `/api/goals/${p.goalId}/git-status`, required: ["goalId"] },
-	goal_commits: { method: "GET", buildPath: (p) => `/api/goals/${p.goalId}/commits`, required: ["goalId"] },
+	goal_commits: {
+		method: "GET",
+		buildPath: (p) => withQuery(`/api/goals/${p.goalId}/commits`, [["limit", p.limit]]),
+		required: ["goalId"],
+	},
 	goal_pr_status: { method: "GET", buildPath: (p) => `/api/goals/${p.goalId}/pr-status`, required: ["goalId"] },
 	list_sessions: {
 		method: "GET",
@@ -381,9 +407,13 @@ const READ_OPS: Record<string, OpSpec> = {
 	list_tools: { method: "GET", buildPath: (p) => withQuery("/api/tools", [["projectId", p.projectId]]), required: [], page: { itemKey: "tools" } },
 	list_gates: {
 		method: "GET",
-		buildPath: (p) => withQuery(`/api/goals/${p.goalId}/gates`, [["view", p.view]]),
+		buildPath: (p) => appendPagingQuery(`/api/goals/${p.goalId}/gates`, [["view", p.view]], p, {
+			itemKey: "gates",
+			offsetCursor: true,
+			enforceBound: true,
+		}),
 		required: ["goalId"],
-		page: { itemKey: "gates" },
+		page: { itemKey: "gates", offsetCursor: true, enforceBound: true },
 	},
 	list_tasks: {
 		method: "GET",
@@ -669,7 +699,10 @@ export default function (pi: ExtensionAPI) {
 			const data = await api(method, urlPath, body);
 			const processed = spec.postProcess ? spec.postProcess(data, params) : data;
 			const paged = pageSpec ? pageResult(processed, params, pageSpec) : processed;
-			return ok(params.verbose === true ? paged : projectBobbitResponse(tool, params.operation, paged));
+			const output = tool !== "bobbit_read" && params.verbose === true
+				? paged
+				: projectBobbitResponse(tool, params.operation, paged, params);
+			return ok(output);
 		} catch (e: any) {
 			return err(e.message);
 		}
@@ -685,7 +718,7 @@ export default function (pi: ExtensionAPI) {
 		name: "bobbit_read",
 		label: "Bobbit Read",
 		description: "Read-only gateway introspection: goals, sessions, projects, tasks, gates, search, maintenance probes.",
-		promptSnippet: "Read gateway state by operation; see detail_docs for the catalogue.",
+		promptSnippet: "List compactly, choose one entity id, then inspect that exact entity with get_*.",
 		parameters: Type.Object({
 			operation: opUnion(READ_OPS),
 			goalId: Type.Optional(Type.String({ description: "Goal id." })),
@@ -704,8 +737,7 @@ export default function (pi: ExtensionAPI) {
 			includeArchived: Type.Optional(Type.Boolean({ description: "REST-style search archive opt-in." })),
 			view: Type.Optional(Type.String({ description: "Response view, e.g. 'summary'." })),
 			probe: Type.Optional(Type.String({ description: "maintenance_inspect probe selector." })),
-			verbose: Type.Optional(Type.Boolean({ description: "Full JSON; default compact. Paged operations require explicit limit <= 10." })),
-		}),
+		}, { additionalProperties: false }),
 		async execute(_id: string, params: Params) {
 			return dispatch("bobbit_read", READ_OPS, params, { pageResults: true });
 		},

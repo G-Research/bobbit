@@ -53,6 +53,9 @@ export interface AccessorySpriteData {
   addsHeight: boolean;
   /** Y-axis delta when rendering in blob context vs sidebar context */
   blobYAdjust: number;
+  /** Optional sidebar-only frame used while the eyes face right. Kept as a
+   *  pixel subset so swapping frames needs only a compositor opacity animation. */
+  sidebarRightFacingPixels?: SpritePixel[];
 }
 
 // ============================================================================
@@ -524,13 +527,7 @@ export const ACCESSORY_NURSE_CAP: AccessorySpriteData = {
  * only (NOT in the flask exception set) so it is counter-hue-rotated and stays
  * neutral across every session palette.
  */
-export const ACCESSORY_HEADSET: AccessorySpriteData = {
-  id: 'headset',
-  label: 'Headset',
-  yOffset: 2,
-  addsHeight: false,
-  blobYAdjust: 2,
-  pixels: [
+const headsetFrontPixels: SpritePixel[] = [
     // Row 0
     [2, 0, '#000'], [3, 0, '#000'], [4, 0, '#000'], [5, 0, '#000'], [6, 0, '#000'], [7, 0, '#000'],
     // Row 1
@@ -547,7 +544,18 @@ export const ACCESSORY_HEADSET: AccessorySpriteData = {
     [0, 6, '#000'], [1, 6, '#000'], [7, 6, '#1f2937'], [8, 6, '#000'], [9, 6, '#000'],
     // Row 7
     [4, 7, '#f97316'], [5, 7, '#1f2937'], [6, 7, '#1f2937'],
-  ],
+];
+
+export const ACCESSORY_HEADSET: AccessorySpriteData = {
+  id: 'headset',
+  label: 'Headset',
+  yOffset: 2,
+  addsHeight: false,
+  blobYAdjust: 2,
+  pixels: headsetFrontPixels,
+  // Sidebar eyes have a simpler right-facing beat than the chat choreography:
+  // retain the band and near cup, but let the body occlude the far/right cup.
+  sidebarRightFacingPixels: headsetFrontPixels.filter(([x, y]) => !(y >= 2 && y <= 6 && x >= 7)),
 };
 
 /**
@@ -576,13 +584,7 @@ export const ACCESSORY_HEADSET: AccessorySpriteData = {
  * (right) curtain rotates out of view. Mirrors the headset's technique and reuses
  * its exact phase stops.
  */
-export const ACCESSORY_PONYTAIL: AccessorySpriteData = {
-  id: 'ponytail',
-  label: 'Ponytail',
-  yOffset: 0,
-  addsHeight: false,
-  blobYAdjust: 0,
-  pixels: [
+const ponytailFrontPixels: SpritePixel[] = [
     // Row 0: crown top — all rim, continuing the body's own outline
     [3, 0, '#0e0d18'], [4, 0, '#0e0d18'], [5, 0, '#0e0d18'], [6, 0, '#0e0d18'], [7, 0, '#0e0d18'],
     // Row 1: crown closed; sheen streak on the left
@@ -601,7 +603,18 @@ export const ACCESSORY_PONYTAIL: AccessorySpriteData = {
     // Row 7: translucent jaw sweep
     [2, 7, 'rgba(24,23,38,0.30)'], [3, 7, 'rgba(24,23,38,0.30)'], [4, 7, 'rgba(24,23,38,0.30)'],
     [5, 7, 'rgba(24,23,38,0.30)'], [6, 7, 'rgba(24,23,38,0.30)'], [7, 7, 'rgba(24,23,38,0.30)'],
-  ],
+];
+
+export const ACCESSORY_PONYTAIL: AccessorySpriteData = {
+  id: 'ponytail',
+  label: 'Ponytail',
+  yOffset: 0,
+  addsHeight: false,
+  blobYAdjust: 0,
+  pixels: ponytailFrontPixels,
+  // The compact sidebar frame only needs occlusion: preserve the crown and
+  // near curtain while hiding the far curtain, right-side tail, and cheek flecks.
+  sidebarRightFacingPixels: ponytailFrontPixels.filter(([x, y]) => !(y >= 2 && y <= 6 && x >= 7)),
 };
 
 /** Registry of all accessories by ID */

@@ -34,7 +34,7 @@ Order:
 
 1. `Continue in new session` — only when the archived session satisfies the existing continue rules: non-goal, non-delegate, non-team, registered project, and transcript available. This uses `POST /api/sessions/:id/continue`, not the live Fork endpoint.
 2. `Copy link`
-3. `View System Prompt`
+3. `View system prompt`
 4. `Open in new window`
 
 If Continue is not eligible, hide it rather than disabling it. The remaining read-only actions keep the same order.

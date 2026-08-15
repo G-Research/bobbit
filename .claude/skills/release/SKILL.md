@@ -275,8 +275,8 @@ Notes:
 
 **STOP. Merging is the publish.** The squash merge pushes the release commit to
 `main`, and that push is the release trigger:
-`.github/workflows/release-publish.yml` validates, builds, tests, and packs the
-commit without OIDC authority, then publishes the verified tarball without
+`.github/workflows/release-publish.yml` validates, builds, type-checks, and packs
+the commit without OIDC authority, then publishes the verified tarball without
 running lifecycle scripts, creates the `v<new-version>` tag, and creates the
 GitHub release. Nothing after this point is reversible — npm version
 numbers are immutable and release tags cannot be moved or deleted.

@@ -8,7 +8,7 @@ SSE, content origin) and [`reopenable-preview-widgets.md`](./reopenable-preview-
 > **Current contract:** the product workspace is server-authoritative.
 > Open tabs, active tab, tab order, and size mode live on the session's persisted
 > `sidePanelWorkspace`. Closed tabs are durable absence: render/content caches,
-> preview mounts, proposal state, review documents, inbox state, and localStorage
+> preview mounts, proposal state, review groups, inbox state, and localStorage
 > must not recreate them. See [`side-panel-workspace.md`](../side-panel-workspace.md)
 > for the implementation contract. Historical sections in this design note are
 > explicitly labelled and describe pre-workspace behavior only.
@@ -32,7 +32,7 @@ SSE, content origin) and [`reopenable-preview-widgets.md`](./reopenable-preview-
 
 Bobbit's UI has two main areas: the **chat** (transcript + prompt textarea)
 and a **side pane** that hosts everything else the agent might surface
-alongside the chat — HTML previews, draft proposals, review documents,
+alongside the chat — HTML previews, draft proposals, review groups,
 pack panels such as PR walkthrough, and the staff-agent inbox. The current
 contract exists because older builds had several parallel sources of truth
 for what the side pane was showing:
@@ -94,7 +94,7 @@ Valid side-pane tab ids:
 | `preview:entry:<encoded-filename>:v:<N>` | Historical immutable preview artifact. Label is `report.html (vN)`. |
 | `proposal:<type>` | Current proposal of `<type>` (`goal`, `project`, `role`, `tool`, `staff`). |
 | `proposal:<type>:rev:<N>` | Historical proposal revision opened by an explicit reopen action. |
-| `review:<encoded-documentId>` | Review document by stable document id. Title is display metadata only. |
+| `review:<encoded-reviewId>` | One primary workspace tab for a review group. `reviewId` is stable; review and file titles are display metadata only. |
 | `pack:<encoded-packId>:<encoded-panelId>:<encoded-instanceKey>` | Pack-hosted panel instance, including PR walkthrough and artifact viewers. |
 | `inbox` | Staff-agent inbox. Normal closeable/reorderable workspace tab. |
 | ~~`walkthrough:<changeset-id>`~~ *(historical - deleted)* | Former PR / changeset walkthrough tab kind. **Removed**: the walkthrough viewer is now a first-party pack panel, not a bespoke side-pane tab id. |
@@ -113,7 +113,8 @@ and only when the server workspace is empty and has no migration stamp:
 |---|---|
 | `chat` (tab row or active id) | **Dropped.** Chat is not a side-panel tab. |
 | `preview` / `preview:live` | Mapped to the current filename preview tab when the current entry is known. |
-| `review:<encoded-title>` | Mapped to a deterministic legacy document id so future identity is document-based. |
+| `review:<encoded-documentId>` or a review source with `documentId` but no `reviewId` | **Legacy migration input.** The old document identity is canonicalized as the group's `reviewId`; it is not a current per-file tab identity. |
+| `review:<encoded-title>` with no stable source identity | **Legacy migration input.** Mapped once to a deterministic `legacy-title-<hash>` review id. |
 | `pack:<packId>:<panelId>` | Mapped to `pack:<packId>:<panelId>:default` only for valid singleton panels. |
 | `bobbit-preview-collapsed-<sessionId>` | Migrates to `sidePanelWorkspace.sizeMode = "collapsed"`. |
 | `bobbit-panel-active-by-session` / `bobbit-panel-tabs-by-session` | Seed the initial server workspace order/active id during migration only. |
@@ -289,11 +290,35 @@ the matching current tab instead of creating a duplicate. Closing a proposal tab
 removes only the workspace tab unless the business action also dismisses the
 proposal; refresh must not recreate it from `activeProposals`.
 
-**Review tabs** use `review:<encoded-documentId>`. `documentId` is stable and
-survives title changes; title is display metadata. Review content/annotations
-may remain cached after close, but restoring those caches must not open a tab
-unless the server workspace already contains it or the user explicitly reopens
-it.
+**Review tabs** use `review:<encoded-reviewId>`. A review group owns exactly one
+closable primary workspace tab; `reviewId` survives title changes and separates
+reviews whose display titles are duplicated. Its ordered files exist only as
+secondary navigation inside the review pane and never become workspace tabs.
+Secondary file tabs have no close action, and a one-file review hides the row
+rather than repeating the primary title.
+
+Switching primary tabs selects a review; switching secondary tabs changes only
+that review's active file. Closing the primary or completing Approve / Reject
+cleans up the whole selected review and its files/annotations while leaving
+sibling reviews intact. The public `review_close` tool remains title-based (or
+closes all reviews when its title is omitted); it does not expose a `reviewId`
+argument, so duplicate titles intentionally close together.
+
+Review groups are owned by their emitting session. Every workspace open,
+including an ordinary non-live human sign-off launch, is serialized with close
+and decision cleanup by exact `(sessionId, reviewId)` key. A background open may
+create and focus that owner's primary tab without selecting the session or
+mutating the foreground review model. The exact primary tab is the hydration
+authority: while it is present, the owner may hydrate the review even when an
+older exact tombstone or legacy submitted flag remains; while it is absent,
+retained suppression prevents passive historical replay and content caches from
+recreating the review. An explicit review-tool or sign-off open creates or
+focuses that primary without deleting tombstones, legacy flags, or sibling
+state. Legacy `documentId` and title-shaped sources are accepted only for
+migration and canonicalized to a stable group `reviewId`, never treated as new
+per-document workspace identity. See
+[Review Pane Sign-Off — Review hierarchy and identity](../review-pane-signoff.md#review-hierarchy-and-identity)
+and [Durable review opening](../review-open-architecture.md).
 
 **Pack tabs** use `pack:<packId>:<panelId>:<instanceKey>`. The PR walkthrough is
 a singleton pack panel; artifact-style pack panels can use distinct instance

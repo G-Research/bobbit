@@ -1,6 +1,6 @@
 # Unified Message Ordering Reducer — Design Doc
 
-Status: design / not yet implemented. Branch `goal/unified-me-c6054622`.
+Status: historical implemented design. Its prompt text-fallback assumptions are superseded by reliable `deliveryIntentId` correlation; see [Reliable prompt and steer delivery](../prompt-queue.md).
 Companion to [`streaming-dedup-reorder.md`](./streaming-dedup-reorder.md), which fixes
 **transport-level** dedup; this doc fixes **client-state-level** ordering.
 

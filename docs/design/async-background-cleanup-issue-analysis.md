@@ -1,8 +1,8 @@
 # Async background cleanup: issue analysis
 
-Status: issue-analysis artifact
+**Historical issue-analysis artifact.** This document records the production baseline and proposed migration for the earlier **Async Background Cleanup** goal. It is not a current worktree ownership or restart policy. [Preserve user worktrees](preserve-user-worktrees.md) supersedes its worktree sweep, Maintenance eligibility, startup reclaim/adoption, and gateway-shutdown claims: boot discovery is diagnostic-only, stale pool entries are not adopted, and graceful shutdown drains only current-instance ready pool entries. The remaining sections are preserved as implementation history.
 
-Scope: the focused background-sweeper, purge, orphan-cleanup, and preview-artifact slice described by goal **Async Background Cleanup**
+Scope at the time: the focused background-sweeper, purge, orphan-cleanup, and preview-artifact slice described by goal **Async Background Cleanup**
 
 ## 1. Finding and target state
 
@@ -16,7 +16,7 @@ The target state is:
 - periodic jobs are single-flight and their stop/shutdown path can await the active run;
 - existing selection order, counts, error isolation, path/ownership guards, retention policy, API shapes, and preview hashes remain unchanged.
 
-This document inventories current production and existing-test edges. Function names, rather than line numbers, are the durable anchors.
+This document inventories the production and existing-test edges at that historical baseline. Function names, rather than line numbers, are the durable anchors.
 
 ## 2. Shared mechanics
 
@@ -185,9 +185,11 @@ Directories and non-files are not hashed. Directory-read failure currently contr
 
 The purge listener contract should become `void | Promise<void>` (or use a dedicated async purge-listener channel) and `SessionManager` should await listeners in registration order with per-listener `try/catch`. Do not write `void removeArtifacts(...).catch(...)` behind the current synchronous contract: purge completion must mean preview cleanup settled, and errors must have one owner.
 
-## 4. Worktree sweep, pool, inventory, and cleanup
+## 4. Worktree sweep, pool, inventory, and cleanup — historical baseline
 
-### 4.1 Post-listen production call graph
+> **Superseded policy:** The call graphs and recommendations in this section explain the earlier async migration. They do not authorize current boot repair/removal, shape-based Maintenance cleanup, startup pool reclaim, or restart adoption. Use [Preserve user worktrees](preserve-user-worktrees.md) for current behavior.
+
+### 4.1 Post-listen production call graph at the baseline
 
 ```text
 Gateway start, src/server/server.ts::runBootBackgroundTasks
@@ -222,9 +224,9 @@ Gateway start, src/server/server.ts::runBootBackgroundTasks
 
 Sweeper and pool initialization intentionally overlap because their branch sets are disjoint: the sweeper never deletes a Bobbit pool branch, while pool reclaim only adopts a valid pool branch.
 
-### 4.2 Pool and shared-helper synchronous inventory
+### 4.2 Pool and shared-helper synchronous inventory at the baseline
 
-| File and function | Current blocking operation | Required treatment |
+| File and function | Blocking operation at the baseline | Required treatment at the time |
 |---|---|---|
 | `src/server/agent/worktree-pool.ts::execGitSync` / `resolveRepoToplevel` / constructor | injected `CommandRunner.execFileSync` for `git rev-parse --show-toplevel` | Remove sync wrapper; constructor becomes pure; resolve in awaited initialization |
 | `inspectMultiRepoPoolCandidate` | `fs.accessSync` on component repos/worktrees and `.git` | async access/stat, preserving “all declared distinct repos complete and on same branch” rule |
@@ -237,7 +239,7 @@ Sweeper and pool initialization intentionally overlap because their branch sets 
 
 The sync Git Bash discovery at module initialization in `src/server/agent/shell-util.ts` is not executed by a sweep tick or pool operation; it is explicitly outside this call-graph slice. The new guard should follow callable declarations from scoped roots, not treat every imported module’s top-level initialization as a callee.
 
-### 4.3 WorktreePool initialization and lifecycle
+### 4.3 Historical WorktreePool initialization and lifecycle proposal
 
 `WorktreePool` must not run Git in its constructor. Use an awaited `initialize(activeWorktreePaths)` or async factory:
 
@@ -252,9 +254,9 @@ The sync Git Bash discovery at module initialization in `src/server/agent/shell-
 
 The gateway should retain the one-shot `runBootBackgroundTasks` promise and await it, or an abort-aware settled barrier, before destroying SessionManager/project-context resources. This prevents a late pool initialization or sweep from touching a removed project during shutdown. It is not a new automatic cleanup policy.
 
-### 4.4 Sweeper safety and result semantics
+### 4.4 Historical sweeper safety and result semantics
 
-The async sweeper must preserve all current guards:
+The async sweeper proposal required preserving all guards present at that baseline:
 
 - skip Headquarters/hidden contexts before Git discovery;
 - require the configured repo directory itself to have `.git`; never let Git walk upward from a non-repo fixture and enumerate a parent checkout;
@@ -270,7 +272,7 @@ The async sweeper must preserve all current guards:
 
 Thread the injected `commandRunner` through the server call, the repair call (currently omitted there), and `cleanupWorktree`. Thread the existing remote policy as well; do not accidentally contact a non-local remote in tests or change deletion policy.
 
-### 4.5 WorktreeInventoryService call graph and sync inventory
+### 4.5 WorktreeInventoryService call graph and sync inventory at the baseline
 
 Production routes in `src/server/server.ts` create a fresh `WorktreeInventoryService` for:
 
@@ -279,7 +281,7 @@ Production routes in `src/server/server.ts` create a fresh `WorktreeInventorySer
 - `GET /api/maintenance/archived-session-worktrees` -> `legacyArchivedSessionWorktrees` -> `scan`;
 - both cleanup POST routes -> fresh `scan` -> selection -> `cleanupWorktree` -> verify path/Git metadata -> optional branch delete.
 
-Current blocking edges in `src/server/agent/worktree-inventory.ts` are:
+Blocking edges in `src/server/agent/worktree-inventory.ts` at that baseline were:
 
 - injected `fs` only exposes `existsSync`, `readdirSync`, `statSync`;
 - `discoverRepos`, `contextRepoPaths`, and `resolveSingleRepoRoot` synchronously walk ancestors for `.git`;

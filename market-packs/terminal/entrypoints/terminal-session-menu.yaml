@@ -1,6 +1,6 @@
 id: terminal.session-menu
 kind: session-menu
-label: Open Terminal
+label: Open terminal
 icon: terminal
 target:
   action: channel-panel

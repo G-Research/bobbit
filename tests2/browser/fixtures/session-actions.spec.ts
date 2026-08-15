@@ -20,6 +20,7 @@ test.describe.configure({ mode: "serial" });
 const CANONICAL_SESSION_ACTION_IDS = [
 	"modify",
 	"terminate",
+	"pin",
 	"refresh-agent",
 	"fork",
 	"copy-link",
@@ -202,10 +203,6 @@ function canonicalSessionActionIds(ids: readonly string[], expected = CANONICAL_
 	return ids.filter((id) => (expected as readonly string[]).includes(id));
 }
 
-function expectCanonicalOrder(ids: string[], expected = CANONICAL_SESSION_ACTION_IDS): void {
-	expect(canonicalSessionActionIds(ids, expected)).toEqual(expected.filter((id) => ids.includes(id)));
-}
-
 function expectCanonicalActionsPresentInPriorityOrder(ids: string[], expected = CANONICAL_SESSION_ACTION_IDS): void {
 	expect(canonicalSessionActionIds(ids, expected)).toEqual([...expected]);
 }
@@ -299,15 +296,112 @@ test.describe("unified session actions", () => {
 		expect(sidebarSourceIds, "sidebar session menus should keep quick-only FLIP sources").toEqual(["modify", "terminate"]);
 		await closePopover(page);
 
-		const headerIds = await headerActionIds(page);
-		expect(headerIds).toEqual(sidebarIds);
+		await openHeaderActions(page);
+		const headerMenuIds = await popoverActionIds(page);
+		expect(headerMenuIds, "header and sidebar menus should expose the exact same eligible actions in canonical order").toEqual(sidebarIds);
+		await closePopover(page);
 		expectCanonicalActionsPresentInPriorityOrder(sidebarIds);
+	});
+
+	test("mobile sidebar aligns team-lead activity, active spinner, and action spacing", async ({ page }) => {
+		test.slow();
+		const referenceSessionId = await createSession();
+		sessionsToDelete.add(referenceSessionId);
+		await waitForSessionStatus(referenceSessionId, "idle");
+
+		const goal = await createGoal({
+			title: `Mobile sidebar alignment ${Date.now()}`,
+			team: true,
+			autoStartTeam: false,
+			worktree: false,
+		});
+		goalsToDelete.add(goal.id as string);
+		const teamLeadId = await startTeam(goal.id as string);
+		teamsToTeardown.add(goal.id as string);
+		sessionsToDelete.add(teamLeadId);
+		await waitForSessionStatus(teamLeadId, "idle", 30_000);
+
+		await page.setViewportSize({ width: 390, height: 844 });
+		await openApp(page);
+		await page.evaluate((goalId) => {
+			(window as any).__bobbitExpandedGoals?.add(goalId);
+			(window as any).__bobbitRenderApp?.();
+		}, goal.id);
+
+		const referenceRow = sessionRow(page, referenceSessionId);
+		const leadRow = sessionRow(page, teamLeadId);
+		await expect(referenceRow, "reference session row should be visible on the mobile landing page").toBeVisible({ timeout: 20_000 });
+		await expect(leadRow, "expanded team goal should expose its team-lead row").toBeVisible({ timeout: 20_000 });
+		await expect(referenceRow.locator('[data-testid="sidebar-session-last-activity"]')).toBeVisible();
+		await expect(leadRow.locator('[data-testid="sidebar-session-last-activity"]')).toBeVisible();
+
+		type MobileRowMetrics = {
+			indicatorLeft: number;
+			indicatorRight: number;
+			indicatorCenterY: number;
+			firstIconLeft: number;
+			firstIconCenterY: number;
+			firstIconRight: number;
+			secondIconLeft: number;
+		};
+		const measure = (row: Locator, indicatorSelector: string) => row.evaluate((element, selector): MobileRowMetrics => {
+			const indicator = element.querySelector<HTMLElement>(selector);
+			const cluster = element.querySelector<HTMLElement>(".sidebar-mobile-action-cluster");
+			const icons = cluster
+				? Array.from(cluster.querySelectorAll<HTMLElement>("button .sidebar-scale-icon"))
+				: [];
+			if (!indicator || icons.length < 2) throw new Error("Missing mobile row indicator or action icons");
+			const indicatorRect = indicator.getBoundingClientRect();
+			const firstRect = icons[0]!.getBoundingClientRect();
+			const secondRect = icons[1]!.getBoundingClientRect();
+			return {
+				indicatorLeft: indicatorRect.left,
+				indicatorRight: indicatorRect.right,
+				indicatorCenterY: indicatorRect.top + indicatorRect.height / 2,
+				firstIconLeft: firstRect.left,
+				firstIconCenterY: firstRect.top + firstRect.height / 2,
+				firstIconRight: firstRect.right,
+				secondIconLeft: secondRect.left,
+			};
+		}, indicatorSelector);
+
+		const referenceIdle = await measure(referenceRow, '[data-testid="sidebar-session-last-activity"]');
+		const leadIdle = await measure(leadRow, '[data-testid="sidebar-session-last-activity"]');
+		expect(Math.abs(leadIdle.indicatorRight - referenceIdle.indicatorRight), "team-lead activity should share the ordinary session metadata column").toBeLessThanOrEqual(1);
+		expect(Math.abs(leadIdle.indicatorCenterY - leadIdle.firstIconCenterY), "team-lead activity should be vertically centered with its actions").toBeLessThanOrEqual(1);
+		expect(
+			Math.abs((leadIdle.firstIconLeft - leadIdle.indicatorRight) - (leadIdle.secondIconLeft - leadIdle.firstIconRight)),
+			"activity-to-first-action whitespace should match the whitespace between action icons",
+		).toBeLessThanOrEqual(1);
+
+		await page.evaluate((sessionId) => {
+			const state = (window as any).__bobbitState;
+			const session = state?.gatewaySessions?.find((candidate: { id?: string }) => candidate.id === sessionId);
+			if (!session) throw new Error(`Missing client session ${sessionId}`);
+			session.status = "busy";
+			(window as any).__bobbitRenderApp?.();
+		}, referenceSessionId);
+		await expect(referenceRow.locator(".sidebar-active-dot")).toBeVisible();
+		const active = await measure(referenceRow, ".sidebar-active-dot");
+		expect(Math.abs(active.indicatorCenterY - referenceIdle.indicatorCenterY), "active spinner should occupy the last-activity vertical center").toBeLessThanOrEqual(1);
+		expect(Math.abs(active.indicatorCenterY - active.firstIconCenterY), "active spinner should be vertically centered with its actions").toBeLessThanOrEqual(1);
+		expect(
+			Math.abs((active.firstIconLeft - active.indicatorRight) - (active.secondIconLeft - active.firstIconRight)),
+			"spinner-to-first-action whitespace should match the whitespace between action icons",
+		).toBeLessThanOrEqual(1);
+		expect(await referenceRow.locator(".sidebar-active-dot").evaluate((element) => ({
+			left: getComputedStyle(element).left,
+			alignSelf: getComputedStyle(element).alignSelf,
+		}))).toEqual({ left: "0px", alignSelf: "center" });
 	});
 
 	test("staff and team-lead sessions keep canonical labels and visibility", async ({ page }) => {
 		test.slow(); // staff-session sidebar lookup: extend timeout for concurrent verification load
 		await page.setViewportSize({ width: 900, height: 900 });
 
+		const referenceSessionId = await createSession();
+		sessionsToDelete.add(referenceSessionId);
+		await waitForSessionStatus(referenceSessionId, "idle");
 		const staff = await createStaffAgent(`ActionsBot-${Date.now()}`);
 		staffToDelete.add(staff.id);
 		const staffSessionId = await waitForStaffSession(staff.id);
@@ -321,9 +415,42 @@ test.describe("unified session actions", () => {
 
 		await openSessionView(page, staffSessionId);
 		const staffRow = staffSessionRow(page, staffSessionId);
-		await expect(staffRow, "staff sidebar rows use nav ids and expose an existing Edit button").toBeVisible({ timeout: 30_000 });
+		await expect(staffRow, "staff sidebar rows use nav ids and expose session actions").toBeVisible({ timeout: 30_000 });
+		const referenceRow = sessionRow(page, referenceSessionId);
+		await expect(referenceRow, "reference non-staff session should be visible").toBeVisible({ timeout: 10_000 });
+		const typography = async (row: Locator) => row.evaluate((element) => {
+			const styleOf = (selector: string) => {
+				const target = element.querySelector<HTMLElement>(selector);
+				if (!target) throw new Error(`Missing typography target: ${selector}`);
+				const style = getComputedStyle(target);
+				return {
+					fontFamily: style.fontFamily,
+					fontSize: style.fontSize,
+					fontStyle: style.fontStyle,
+					letterSpacing: style.letterSpacing,
+					lineHeight: style.lineHeight,
+					fontVariantNumeric: style.fontVariantNumeric,
+				};
+			};
+			return {
+				title: styleOf('[data-testid="sidebar-session-title-text"]'),
+				lastActivity: styleOf('[data-testid="sidebar-session-last-activity"]'),
+			};
+		});
+		expect(await typography(staffRow), "staff title and last-activity typography should match non-staff sessions").toEqual(await typography(referenceRow));
+
 		await staffRow.hover();
-		const staffSidebarEdit = staffRow.locator(`button[title="Edit"]`).first();
+		const staffTrigger = sidebarTrigger(staffRow, staffSessionId);
+		await expect(staffTrigger, "staff rows should expose the same hamburger as regular sessions").toBeVisible({ timeout: 5_000 });
+		await staffTrigger.click();
+		await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
+		expectCanonicalActionsPresentInPriorityOrder(await popoverActionIds(page));
+		await expect(popoverAction(page, "modify")).toContainText("Edit staff");
+		expect(await popoverSourceActionIds(page), "staff menus should animate their quick actions into the popover").toEqual(["modify", "terminate"]);
+		await closePopover(page);
+
+		await staffRow.hover();
+		const staffSidebarEdit = staffRow.locator(`[data-session-action-id="modify"][data-sidebar-action-quick="true"]`).first();
 		await expect(staffSidebarEdit).toBeVisible({ timeout: 5_000 });
 		await staffSidebarEdit.click();
 		await expect.poll(() => page.evaluate(() => window.location.hash), { timeout: 10_000 }).toContain(`#/staff/${staff.id}`);
@@ -345,7 +472,7 @@ test.describe("unified session actions", () => {
 		await closePopover(page);
 	});
 
-	test("constrained desktop header hamburger opens the full menu and FLIP-animates every visible direct action", async ({ page }) => {
+	test("constrained desktop keeps Pin menu-only while preserving the full menu and direct-action FLIP", async ({ page }) => {
 		await page.setViewportSize({ width: 1_000, height: 900 });
 		const sessionId = await createSession();
 		sessionsToDelete.add(sessionId);
@@ -353,10 +480,8 @@ test.describe("unified session actions", () => {
 		await openSession(page, sessionId);
 
 		const directIds = await visibleHeaderDirectActionIds(page);
-		expect(directIds.length, "constrained desktop should render more than two direct actions before overflowing the rest").toBeGreaterThan(2);
-		expect(directIds.length, "constrained desktop should not render every action directly").toBeLessThan(CANONICAL_SESSION_ACTION_IDS.length);
-		expectCanonicalOrder(directIds);
-		expect(directIds, "the constrained desktop reproducer must include a non-quick direct action").toContain("refresh-agent");
+		expect(directIds, "desktop direct actions should retain the pre-Pin set and order").toEqual(["modify", "terminate", "refresh-agent"]);
+		await expect(headerDirectAction(page, "pin"), "Pin must not leak into the live desktop header").toHaveCount(0);
 
 		await installActionAnimationRecorder(page, "__desktopHeaderActionAnimations");
 		await expect(headerTrigger(page), "overflow trigger should expose the complete header action menu").toBeVisible({ timeout: 5_000 });
@@ -366,6 +491,7 @@ test.describe("unified session actions", () => {
 			canonicalSessionActionIds(popoverIds),
 			"header hamburger popover should contain the full canonical session action list, including direct buttons",
 		).toEqual([...CANONICAL_SESSION_ACTION_IDS]);
+		await expect(popoverAction(page, "pin"), "Pin should retain its third built-in live menu position").toContainText("Pin session");
 		expect(await popoverSourceActionIds(page), "desktop header hamburger should capture every visible direct action as a FLIP source").toEqual(expect.arrayContaining(directIds));
 		await expectPopoverTranslateAnimationsForActionIds(
 			page,
@@ -381,6 +507,18 @@ test.describe("unified session actions", () => {
 		for (const actionId of directIds) {
 			await expect(headerDirectAction(page, actionId), `desktop header ${actionId} direct action should return after close`).toBeVisible({ timeout: 5_000 });
 		}
+
+		await openHeaderActions(page);
+		await popoverAction(page, "pin").click();
+		await expect.poll(() => page.evaluate((id) => {
+			const session = (window as any).bobbitState?.gatewaySessions?.find((candidate: { id?: string }) => candidate.id === id);
+			return session?.user_tags?.includes("pinned=true") === true;
+		}, sessionId), { message: "live Pin action should update the loaded session" }).toBe(true);
+		await expect(headerDirectAction(page, "pin"), "Unpin must also remain absent from the live desktop header").toHaveCount(0);
+		await openHeaderActions(page);
+		expect(canonicalSessionActionIds(await popoverActionIds(page))).toEqual([...CANONICAL_SESSION_ACTION_IDS]);
+		await expect(popoverAction(page, "pin"), "the same third menu item should become Unpin").toContainText("Unpin session");
+		await closePopover(page);
 	});
 
 	test("mobile session header shows icon-only quick actions and opens the remaining menu with FLIP sources", async ({ page }) => {

@@ -19,6 +19,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
+import { isPiTranscriptEntryId } from "../../shared/message-author.js";
 
 /** Sidecar record schema v1. Consumers must skip lines whose schemaVersion
  *  they don't recognise (forward-compat). */
@@ -44,6 +45,8 @@ export interface CompactionSidecarEntry {
 	 *  the Part B reader to slice the .jsonl into orphaned vs active.
 	 *  May be null if the upstream payload didn't carry it (legacy or error). */
 	firstKeptEntryId: string | null;
+	/** Authoritative Pi compaction-entry identity. Distinct from Bobbit card `id`. */
+	transcriptCompactionEntryId?: string;
 }
 
 /** Generate a stable compaction id `c_<startedAtMs>_<rand6>`. */
@@ -127,7 +130,13 @@ export function readCompactionSidecarEntries(sessionId: string): CompactionSidec
 					typeof parsed.id === "string" &&
 					(parsed.trigger === "manual" || parsed.trigger === "auto" || parsed.trigger === "overflow")
 				) {
-					out.push(parsed);
+					const { transcriptCompactionEntryId, ...legacyFields } = parsed;
+					out.push({
+						...legacyFields,
+						...(isPiTranscriptEntryId(transcriptCompactionEntryId)
+							? { transcriptCompactionEntryId }
+							: {}),
+					});
 				}
 			} catch { /* skip malformed line */ }
 		}
@@ -145,6 +154,168 @@ export function findCompactionSidecarEntry(
 ): CompactionSidecarEntry | undefined {
 	if (!id) return undefined;
 	return readCompactionSidecarEntries(sessionId).find((e) => e.id === id);
+}
+
+/** Minimal structural contract accepted from the transcript materializer. */
+export interface RetainedCompactionTranscriptEntry {
+	entry: Record<string, unknown>;
+}
+
+export interface TranscriptEntriesSnapshot {
+	entries: unknown;
+	leafId: unknown;
+}
+
+export interface CompactionIdentityExpectation {
+	summary: string;
+	firstKeptEntryId: string;
+	tokensBefore: number;
+}
+
+type TranscriptTreeEntry = Record<string, unknown> & { id: string; parentId: string | null };
+
+function validatedTranscriptTree(snapshot: TranscriptEntriesSnapshot): {
+	branch: TranscriptTreeEntry[];
+	allIds: Set<string>;
+} | undefined {
+	if (!Array.isArray(snapshot?.entries)) return undefined;
+	const byId = new Map<string, TranscriptTreeEntry>();
+	for (const value of snapshot.entries) {
+		if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+		const entry = value as Record<string, unknown>;
+		if (!isPiTranscriptEntryId(entry.id)
+			|| (entry.parentId !== null && !isPiTranscriptEntryId(entry.parentId))
+			|| byId.has(entry.id)) return undefined;
+		byId.set(entry.id, entry as TranscriptTreeEntry);
+	}
+	const resolvedAcyclic = new Set<string>();
+	for (const entry of byId.values()) {
+		if (entry.parentId !== null && !byId.has(entry.parentId)) return undefined;
+		const pathIds: string[] = [];
+		const pathSet = new Set<string>();
+		let cursor: TranscriptTreeEntry | undefined = entry;
+		while (cursor && !resolvedAcyclic.has(cursor.id)) {
+			if (pathSet.has(cursor.id)) return undefined;
+			pathSet.add(cursor.id);
+			pathIds.push(cursor.id);
+			cursor = cursor.parentId === null ? undefined : byId.get(cursor.parentId);
+		}
+		for (const id of pathIds) resolvedAcyclic.add(id);
+	}
+	if (snapshot.leafId === null && byId.size === 0) return { branch: [], allIds: new Set() };
+	if (!isPiTranscriptEntryId(snapshot.leafId) || !byId.has(snapshot.leafId)) return undefined;
+	const branch: TranscriptTreeEntry[] = [];
+	const seen = new Set<string>();
+	let cursor: string | null = snapshot.leafId;
+	while (cursor !== null) {
+		if (seen.has(cursor)) return undefined;
+		seen.add(cursor);
+		const entry = byId.get(cursor);
+		if (!entry) return undefined;
+		branch.push(entry);
+		cursor = entry.parentId;
+	}
+	branch.reverse();
+	return { branch, allIds: new Set(byId.keys()) };
+}
+
+/** Resolve exactly one post-compaction active checkpoint added after a proven baseline. */
+export function resolveCompactionTranscriptEntryId(
+	baseline: TranscriptEntriesSnapshot,
+	post: TranscriptEntriesSnapshot,
+	expected: CompactionIdentityExpectation,
+): string | undefined {
+	const before = validatedTranscriptTree(baseline);
+	const after = validatedTranscriptTree(post);
+	if (!before || !after) return undefined;
+	if ([...before.allIds].some((id) => !after.allIds.has(id))) return undefined;
+	if (before.branch.length > 0
+		&& !after.branch.some((entry) => entry.id === before.branch.at(-1)!.id)) return undefined;
+	const matches = after.branch.filter((entry) =>
+		!before.allIds.has(entry.id)
+		&& entry.type === "compaction"
+		&& entry.summary === expected.summary
+		&& entry.firstKeptEntryId === expected.firstKeptEntryId
+		&& entry.tokensBefore === expected.tokensBefore,
+	);
+	return matches.length === 1 ? matches[0].id : undefined;
+}
+
+/**
+ * Copy only compaction cards whose Pi checkpoint and exact first-kept boundary
+ * both survive a history cut. Null, stale, or otherwise unprovable sidecar
+ * records are deliberately dropped so the destination cannot expose an
+ * expansion link into discarded transcript history.
+ */
+export function copyCompactionSidecarForTranscript(
+	fromSessionId: string,
+	toSessionId: string,
+	retainedCompactions: readonly RetainedCompactionTranscriptEntry[],
+	retainedEntryIds: ReadonlySet<string>,
+): boolean {
+	const target = sidecarPath(toSessionId);
+	if (!target) return false;
+	try {
+		// A boundary is not a compaction identity: distinct active and discarded
+		// checkpoints can share it. Correlate by the Pi checkpoint id first, then
+		// verify the boundary so source-sidecar order cannot select the wrong card.
+		const retainedBoundariesById = new Map<string, string>();
+		const ambiguousTranscriptIds = new Set<string>();
+		for (const record of retainedCompactions) {
+			const entry = record?.entry;
+			if (!entry || entry.type !== "compaction") continue;
+			const compactionId = typeof entry.id === "string" ? entry.id : "";
+			const firstKeptEntryId = typeof entry.firstKeptEntryId === "string"
+				? entry.firstKeptEntryId
+				: "";
+			if (
+				!compactionId
+				|| !retainedEntryIds.has(compactionId)
+				|| !firstKeptEntryId
+				|| !retainedEntryIds.has(firstKeptEntryId)
+			) continue;
+			if (retainedBoundariesById.has(compactionId)) {
+				retainedBoundariesById.delete(compactionId);
+				ambiguousTranscriptIds.add(compactionId);
+				continue;
+			}
+			if (!ambiguousTranscriptIds.has(compactionId)) {
+				retainedBoundariesById.set(compactionId, firstKeptEntryId);
+			}
+		}
+
+		const candidatesById = new Map<string, CompactionSidecarEntry[]>();
+		for (const entry of readCompactionSidecarEntries(fromSessionId)) {
+			const transcriptId = entry.transcriptCompactionEntryId;
+			if (!isPiTranscriptEntryId(transcriptId)) continue;
+			const expectedBoundary = retainedBoundariesById.get(transcriptId);
+			if (
+				!expectedBoundary
+				|| !retainedEntryIds.has(transcriptId)
+				|| entry.firstKeptEntryId !== expectedBoundary
+				|| !retainedEntryIds.has(expectedBoundary)
+			) continue;
+			const candidates = candidatesById.get(transcriptId) ?? [];
+			candidates.push(entry);
+			candidatesById.set(transcriptId, candidates);
+		}
+		const retained = Array.from(retainedBoundariesById.keys())
+			.map((id) => candidatesById.get(id))
+			.filter((candidates): candidates is [CompactionSidecarEntry] => candidates?.length === 1)
+			.map(([entry]) => entry);
+
+		if (retained.length === 0) {
+			try { fs.unlinkSync(target); } catch (error) {
+				if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+			}
+			return true;
+		}
+		fs.writeFileSync(target, retained.map((entry) => JSON.stringify(entry)).join("\n") + "\n", "utf-8");
+		return true;
+	} catch (err) {
+		console.warn(`[compaction-sidecar] Filtered copy failed from ${fromSessionId} to ${toSessionId}:`, err);
+		return false;
+	}
 }
 
 /** Delete the sidecar for a session (archive purge / terminate). */
