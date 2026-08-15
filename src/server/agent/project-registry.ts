@@ -8,6 +8,12 @@ import {
 } from "../../shared/palette-colors.js";
 import { getProjectRoot, headquartersDir } from "../bobbit-dir.js";
 import { runPreflight, type PreflightReport } from "./project-preflight.js";
+import {
+  isExtensionGrant,
+  sameExtensionGrant,
+  type ExtensionGrant,
+  type ExtensionGrantMap,
+} from "./project-config-store.js";
 
 export type ProjectKind = "normal" | "headquarters" | "system";
 
@@ -33,6 +39,12 @@ export interface RegisteredProject {
   provisional?: boolean; // True while a project assistant is setting up this project
   /** Durable one-shot import decision lifecycle marker for newly registered normal projects. */
   importDecisionRun?: ImportDecisionRunMarker;
+  /**
+   * Gateway-owned exact grant rows. Project config is untrusted input; a config
+   * row authorizes only while this independently persisted operator binding
+   * matches every authority field.
+   */
+  extensionGrantBindings?: ExtensionGrantMap;
   /**
    * True for synthetic projects that should be filtered out of UI listings
    * but still resolvable by id (e.g. the "system" project used as the
@@ -684,6 +696,17 @@ export class ProjectRegistry {
     let changed = false;
     this.projects.clear();
     for (const p of arr) {
+      // A registry is gateway-owned, but malformed/migrated binding rows still
+      // fail closed rather than becoming a source of authority.
+      if (Array.isArray(p?.extensionGrantBindings)) {
+        const bindings = p.extensionGrantBindings.filter(isExtensionGrant).map((grant: ExtensionGrant) => ({ ...grant }));
+        if (bindings.length !== p.extensionGrantBindings.length) changed = true;
+        if (bindings.length > 0) p.extensionGrantBindings = bindings;
+        else { delete p.extensionGrantBindings; changed = true; }
+      } else if (p?.extensionGrantBindings !== undefined) {
+        delete p.extensionGrantBindings;
+        changed = true;
+      }
       // Migration: ensure colorLight/colorDark always present
       if (!p.colorLight || !p.colorDark) {
         if (p.color) {
@@ -1005,6 +1028,54 @@ export class ProjectRegistry {
     }
     if (project.importDecisionRun.state === "ready") return project;
     project.importDecisionRun = { ...project.importDecisionRun, state: "ready" };
+    this.projects.set(projectId, project);
+    this.save();
+    return project;
+  }
+
+  /**
+   * Return only config grants that exactly match a gateway-owned operator
+   * binding for this project. This is intentionally a pure read fence: stale,
+   * revoked, or checkout-supplied rows never reach capability policy.
+   */
+  authorizedExtensionGrants(projectId: string, grants: readonly ExtensionGrant[]): ExtensionGrantMap {
+    const bindings = this.projects.get(projectId)?.extensionGrantBindings;
+    if (!bindings?.length) return [];
+    return grants.filter(grant => bindings.some(binding => sameExtensionGrant(binding, grant))).map(grant => ({ ...grant }));
+  }
+
+  /** Persist one authenticated exact grant binding, replacing its prior tuple. */
+  bindExtensionGrant(projectId: string, grant: ExtensionGrant): RegisteredProject {
+    if (!isExtensionGrant(grant)) throw new Error("Invalid extension grant binding");
+    const project = this.projects.get(projectId);
+    if (!project) throw new Error(`Project not found: ${projectId}`);
+    const sameAuthorityTuple = (candidate: ExtensionGrant): boolean => candidate.packId === grant.packId
+      && candidate.capability === grant.capability
+      && (("principal" in candidate) === ("principal" in grant))
+      && (("principal" in candidate) || candidate.hookId === (grant as Exclude<ExtensionGrant, { principal: "pack" }>).hookId);
+    const bindings = (project.extensionGrantBindings ?? []).filter(candidate => !sameAuthorityTuple(candidate));
+    bindings.push({ ...grant });
+    project.extensionGrantBindings = bindings;
+    this.projects.set(projectId, project);
+    this.save();
+    return project;
+  }
+
+  /**
+   * Remove every provenance version for the exact authority tuple before
+   * revoking its config mirror. This prevents a stale checkout row from
+   * laundering an older matching binding back into effect after a revoke.
+   */
+  revokeExtensionGrantBinding(projectId: string, grant: ExtensionGrant): RegisteredProject {
+    const project = this.projects.get(projectId);
+    if (!project) throw new Error(`Project not found: ${projectId}`);
+    const sameAuthorityTuple = (candidate: ExtensionGrant): boolean => candidate.packId === grant.packId
+      && candidate.capability === grant.capability
+      && (("principal" in candidate) === ("principal" in grant))
+      && (("principal" in candidate) || candidate.hookId === (grant as Exclude<ExtensionGrant, { principal: "pack" }>).hookId);
+    const bindings = (project.extensionGrantBindings ?? []).filter(candidate => !sameAuthorityTuple(candidate));
+    if (bindings.length > 0) project.extensionGrantBindings = bindings;
+    else delete project.extensionGrantBindings;
     this.projects.set(projectId, project);
     this.save();
     return project;

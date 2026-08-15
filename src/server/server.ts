@@ -3201,6 +3201,17 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	};
 	sessionManager.setMarketplaceMcpResolver(marketplaceMcpResolver);
 	sessionManager.setMarketplacePiExtensionResolver(marketplacePiExtensionResolver);
+	/**
+	 * project.yaml is checkout content, never authority. Every runtime consumer
+	 * receives only rows whose exact metadata is independently bound in the
+	 * gateway-owned project registry by the authenticated grant route.
+	 */
+	const effectiveExtensionGrants = (projectId: string | undefined, store?: ProjectConfigStore): ExtensionGrant[] => {
+		if (!projectId) return [];
+		const configStore = store ?? projectContextManager.getOrCreate(projectId)?.projectConfigStore;
+		if (!configStore) return [];
+		return projectRegistry.authorizedExtensionGrants(projectId, configStore.getExtensionGrants());
+	};
 	packContributionRegistry = new PackContributionRegistry(
 		marketPackEntriesForProject,
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).entrypoints ?? [],
@@ -3233,7 +3244,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).systemPrompts ?? [],
 		(projectId, packId, activeHooks = []) => {
 			const store = projectId ? projectContextManager.getOrCreate(projectId)?.projectConfigStore : undefined;
-			return !!store?.getExtensionGrants().some(grant => grant.packId === packId
+			return effectiveExtensionGrants(projectId, store).some(grant => grant.packId === packId
 				&& grant.capability === "prompt:system-static"
 				&& activeHooks.some(hook => hook.id === grant.hookId && hook.capabilities.includes("prompt:system-static")),
 			);
@@ -3245,7 +3256,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const store = projectId
 				? projectContextManager.getOrCreate(projectId)?.projectConfigStore
 				: projectConfigStore;
-			return store?.getExtensionGrants().some(grant => (grant as { principal?: unknown }).principal === "pack"
+			return effectiveExtensionGrants(projectId, store).some(grant => (grant as { principal?: unknown }).principal === "pack"
 				&& grant.packId === packId && grant.capability === "sandbox:build") === true;
 		},
 	);
@@ -3257,9 +3268,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	requestMutationDispatcher = new RequestMutationDispatcher({
 		registry: packContributionRegistry,
 		moduleHost,
-		grantsForProject: (projectId) => projectId
-			? projectContextManager.getOrCreate(projectId)?.projectConfigStore.getExtensionGrants() ?? []
-			: projectConfigStore.getExtensionGrants(),
+		grantsForProject: (projectId) => effectiveExtensionGrants(projectId),
 		coreShapers: [],
 		cwdForSession: (sessionId) => sessionManager.getSession(sessionId)?.cwd
 			?? sessionManager.getPersistedSession(sessionId)?.cwd
@@ -3268,9 +3277,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	toolResultFilterDispatcher = new ToolResultFilterDispatcher({
 		registry: packContributionRegistry,
 		moduleHost,
-		grantsForProject: (projectId) => projectId
-			? projectContextManager.getOrCreate(projectId)?.projectConfigStore.getExtensionGrants() ?? []
-			: projectConfigStore.getExtensionGrants(),
+		grantsForProject: (projectId) => effectiveExtensionGrants(projectId),
 		cwdForSession: (sessionId) => sessionManager.getSession(sessionId)?.cwd
 			?? sessionManager.getPersistedSession(sessionId)?.cwd
 			?? process.cwd(),
@@ -3329,7 +3336,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const configStore = projectId
 				? projectContextManager.getOrCreate(projectId)?.projectConfigStore ?? projectConfigStore
 				: projectConfigStore;
-			return resolveExtensionGrant(activeHooks, configStore.getExtensionGrants(), { packId, hookId }, "decide").allowed;
+			return resolveExtensionGrant(activeHooks, effectiveExtensionGrants(projectId, configStore), { packId, hookId }, "decide").allowed;
 		},
 		gatewayInfo: () => {
 			try {
@@ -3463,7 +3470,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const active: ResolvedHook[] = packContributionRegistry.list(record.projectId).flatMap(pack =>
 				pack.hooks.map(hook => ({ packId: pack.packId, hookId: hook.id, mode: hook.mode, capabilities: hook.capabilities })),
 			);
-			const grants = projectContextManager.getOrCreate(record.projectId)?.projectConfigStore.getExtensionGrants() ?? [];
+			const grants = effectiveExtensionGrants(record.projectId);
 			if (!resolveExtensionGrant(active, grants, { packId: record.asker.packId, hookId: record.asker.hookId }, "decide").allowed) return false;
 			// Unprotected, explicitly consent-required hook requests still need the
 			// fresh grant fence. Protected extension proposal effects additionally
@@ -3490,7 +3497,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const active: ResolvedHook[] = packContributionRegistry.list(projectId).flatMap(pack =>
 				pack.hooks.map(hook => ({ packId: pack.packId, hookId: hook.id, mode: hook.mode, capabilities: hook.capabilities })),
 			);
-			const grants = projectContextManager.getOrCreate(projectId)?.projectConfigStore.getExtensionGrants() ?? [];
+			const grants = effectiveExtensionGrants(projectId);
 			return resolveExtensionGrant(active, grants, source, "decide").allowed;
 		},
 		broadcast: (sessionId, message) => broadcastToSession(sessionId, message),
@@ -3499,7 +3506,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		manager: decisionRequestManager,
 		registry: packContributionRegistry,
 		moduleHost,
-		grantsForProject: (projectId) => projectContextManager.getOrCreate(projectId)?.projectConfigStore.getExtensionGrants() ?? [],
+		grantsForProject: (projectId) => effectiveExtensionGrants(projectId),
 		availabilityForProject: async (projectId) => ({
 			models: (await getAvailableModels(preferencesStore))
 				.filter(model => model.sessionSelectable !== false)
@@ -5769,6 +5776,14 @@ async function handleApiRoute(
 	// pack-schema-v1 §5.2: the project-scoped pack-contribution registry (panels /
 	// entrypoints / routes), always wired by the sole caller.
 	const packContributionRegistry = packContributionRegistryArg!;
+	// Route projections and mutations use the same operator-provenance fence as
+	// runtime dispatch; project.yaml is never an authorization source by itself.
+	const effectiveExtensionGrants = (projectId: string | undefined, store?: ProjectConfigStore): ExtensionGrant[] => {
+		if (!projectId) return [];
+		const configStore = store ?? projectContextManager.getOrCreate(projectId)?.projectConfigStore;
+		if (!configStore) return [];
+		return projectRegistry.authorizedExtensionGrants(projectId, configStore.getExtensionGrants());
+	};
 	const settingsCatalogue = extensionSettingsCatalogue!;
 	type SettingsField = ExtensionSettingDefinition;
 	type SettingsTarget = { ref: ExtensionSettingsTargetRef; packName: string; listName: string; fields: SettingsField[]; requiresConfig: string[]; contribution: any };
@@ -5913,6 +5928,7 @@ async function handleApiRoute(
 			return context ? { projectConfigStore: context.projectConfigStore } : undefined;
 		},
 		contributions: packContributionRegistry,
+		grantsForProject: (projectId, raw) => projectRegistry.authorizedExtensionGrants(projectId, raw),
 	});
 	const extensionPackGrantCapabilities: readonly ExtensionCapability[] = [
 		"service.manage", "memory.read", "memory.write", "memory.reflect", "memory.invalidate", "memory.read.all", "sandbox:build",
@@ -5920,7 +5936,7 @@ async function handleApiRoute(
 	const isPackExtensionGrant = (grant: ExtensionGrant): grant is Extract<ExtensionGrant, { principal: "pack" }> =>
 		(grant as { principal?: unknown }).principal === "pack";
 	const extensionGrantStatus = (projectId: string | undefined, store: ProjectConfigStore) => {
-		const grants = store.getExtensionGrants();
+		const grants = effectiveExtensionGrants(projectId, store);
 		const packs = packContributionRegistry.list(projectId);
 		const activeHooks: ResolvedHook[] = packs.flatMap(pack => pack.hooks.map(hook => ({
 			packId: pack.packId,
@@ -5999,7 +6015,7 @@ async function handleApiRoute(
 			const hookGrant = target.ref.kind === "hook" ? (() => {
 				const hook = target.contribution as { mode: "observe" | "decide"; capabilities: ExtensionCapability[]; events: string[] };
 				const requestedCapabilities: ExtensionCapability[] = hook.mode === "decide" ? ["decide", ...hook.capabilities] : [...hook.capabilities];
-				const grants = context.projectConfigStore.getExtensionGrants();
+				const grants = effectiveExtensionGrants(projectId, context.projectConfigStore);
 				const granted = requestedCapabilities.filter(capability => supportsExtensionGrantCapability(hook, capability)
 					&& grants.some(grant => grant.packId === target.ref.packId && grant.hookId === target.ref.id && grant.capability === capability));
 				const runnable = hook.mode === "decide" && granted.includes("decide");
@@ -11112,7 +11128,7 @@ async function handleApiRoute(
 		if (!context) { json({ error: `Project not found: ${resolved.projectId}`, code: "PROJECT_NOT_FOUND" }, 404); return; }
 		const store = context.projectConfigStore;
 		if (req.method === "GET") {
-			json({ grants: store.getExtensionGrants(), ...extensionGrantProjection(resolved.projectId, store) });
+			json({ grants: effectiveExtensionGrants(resolved.projectId, store), ...extensionGrantProjection(resolved.projectId, store) });
 			return;
 		}
 
@@ -11170,6 +11186,9 @@ async function handleApiRoute(
 				: isPackExtensionGrant(current) || current.packId !== packId || current.hookId !== validHookId || current.capability !== capability,
 			);
 			store.setExtensionGrants([...retained, grant]);
+			// Config writes precede the independent registry binding. A crash/failure
+			// between them leaves the config row inert, never accidentally authorized.
+			projectRegistry.bindExtensionGrant(resolved.projectId, grant);
 		} catch (err) {
 			jsonError(503, err);
 			return;
@@ -11184,6 +11203,13 @@ async function handleApiRoute(
 			console.warn(`[extension-grants] audit unavailable action=granted project=${resolved.projectId} pack=${packId} principal=${isPackPrincipal ? "pack" : validHookId} capability=${capability}`);
 		}
 		broadcastExtensionGrantInvalidation(resolved.projectId);
+		// An explicit operator grant may admit hooks that were deliberately kept
+		// pending during registration. Replay only the durable ready marker.
+		const importRun = projectRegistry.get(resolved.projectId)?.importDecisionRun;
+		if (importRun?.state === "ready") {
+			try { await projectImportDecisionCoordinator?.dispatch(resolved.projectId, importRun.id); }
+			catch (error) { console.warn(`[project-import-decisions] grant replay failed project=${resolved.projectId}:`, error); }
+		}
 		const projection = extensionGrantProjection(resolved.projectId, store);
 		if (!auditAvailable) {
 			json({ error: "Extension grant changed but audit is unavailable", code: "EXTENSION_GRANT_AUDIT_UNAVAILABLE", grant, ...projection }, 503);
@@ -11233,6 +11259,10 @@ async function handleApiRoute(
 			: { action: "revoked" as const, packId, hookId: validHookId, capability };
 		if (revoked) {
 			try {
+				const revokedGrant = grants.find(matchesGrant)!;
+				// Remove the gateway binding first. If the config write then fails, the
+				// stale checkout row remains fail-closed until explicitly re-granted.
+				projectRegistry.revokeExtensionGrantBinding(resolved.projectId, revokedGrant);
 				store.setExtensionGrants(grants.filter(grant => !matchesGrant(grant)));
 			} catch (err) {
 				jsonError(503, err);
@@ -17520,7 +17550,7 @@ async function handleApiRoute(
 			const context = targetProjectId && projectContextManager.getOrCreate(targetProjectId);
 			if (!context) throw new PromptExtensionValidationError("GRANT_REQUIRED", "Prompt extension proposals require an existing target project");
 			const packs = packContributionRegistry.list(targetProjectId);
-			const grants = context.projectConfigStore.getExtensionGrants();
+			const grants = effectiveExtensionGrants(targetProjectId, context.projectConfigStore);
 			for (const change of authorizationSections) {
 				const grant = grants.find(candidateGrant => candidateGrant.packId === change.packId
 					&& candidateGrant.capability === "prompt:system-author");
@@ -17677,7 +17707,7 @@ async function handleApiRoute(
 				const before = resolveStaticPromptSectionsForProject(projectContextManager, packContributionRegistry, targetProjectId);
 				acceptPromptExtensionProposal(context.projectConfigStore, changes, {
 					actor: extensionGrantActor,
-					hasStaticGrant: (packId) => context.projectConfigStore.getExtensionGrants().some(grant => {
+					hasStaticGrant: (packId) => effectiveExtensionGrants(targetProjectId, context.projectConfigStore).some(grant => {
 						if (isPackExtensionGrant(grant) || grant.packId !== packId || grant.capability !== "prompt:system-static") return false;
 						const hook = active.find(pack => pack.packId === packId)?.hooks.find(candidate => candidate.id === grant.hookId);
 						return !!hook && hook.capabilities.includes("prompt:system-static" as any);

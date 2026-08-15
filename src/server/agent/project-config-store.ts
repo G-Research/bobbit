@@ -307,6 +307,28 @@ export type ExtensionGrant = ExtensionHookGrant | ExtensionPackGrant;
 
 export type ExtensionGrantMap = ExtensionGrant[];
 
+/** A grant's full persisted identity; all fields are operator-bound provenance. */
+export function isExtensionGrant(value: unknown): value is ExtensionGrant {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const candidate = value as Record<string, unknown>;
+	if (!isSafeExtensionGrantIdentifier(candidate.packId)
+		|| !isExtensionCapability(candidate.capability)
+		|| !isCanonicalExtensionGrantTimestamp(candidate.grantedAt)
+		|| !isSafeExtensionGrantIdentifier(candidate.grantedBy)) return false;
+	if (candidate.principal === "pack") return candidate.hookId === undefined;
+	return candidate.principal === undefined && isSafeExtensionGrantIdentifier(candidate.hookId);
+}
+
+/** Exact tuple + metadata equality used to bind config rows to operator state. */
+export function sameExtensionGrant(left: ExtensionGrant, right: ExtensionGrant): boolean {
+	return left.packId === right.packId
+		&& left.capability === right.capability
+		&& left.grantedAt === right.grantedAt
+		&& left.grantedBy === right.grantedBy
+		&& ("principal" in left) === ("principal" in right)
+		&& (("principal" in left) || left.hookId === (right as ExtensionHookGrant).hookId);
+}
+
 /** Public, project-owned settings overlay. Secret fields are never represented here. */
 export interface ExtensionSettingsRecord {
 	enabled?: boolean;
