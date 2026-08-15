@@ -229,6 +229,64 @@ test.describe("atomic models.json bind mount", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Empty root-owned named volumes are recoverable after a failed create.
+// ---------------------------------------------------------------------------
+
+test.describe("sandbox ownership recovery", () => {
+	test("repairs a pre-created empty root-owned worktrees volume", async () => {
+		test.skip(!isDockerAvailable(), "Docker not available");
+		const root = mkdtempSync(path.join(tmpdir(), "bobbit-worktrees-recovery-"));
+		const source = path.join(root, "source");
+		const projectId = `worktrees-recovery-${randomUUID()}`;
+		const runId = `run-${randomUUID()}`;
+		const priorRunId = process.env.BOBBIT_E2E_RUN_ID;
+		const volumes = projectSandboxVolumeNames(projectId, runId);
+		const docker = (args: string[]): string => execFileSync("docker", args, { encoding: "utf-8" }).trim();
+		let sandbox: ProjectSandbox | undefined;
+		try {
+			docker(["image", "inspect", "bobbit-agent"]);
+			mkdirSync(source, { recursive: true });
+			execFileSync("git", ["init"], { cwd: source, stdio: "ignore" });
+			writeFileSync(path.join(source, "README.md"), "sandbox source\n");
+			execFileSync("git", ["add", "README.md"], { cwd: source, stdio: "ignore" });
+			execFileSync("git", ["-c", "user.name=Bobbit", "-c", "user.email=bobbit@bobbit.ai", "commit", "-m", "sandbox source"], { cwd: source, stdio: "ignore" });
+
+			// This models a first create which allocated the volume but died before
+			// its ownership-repair exec. Docker initializes named-volume roots as root.
+			docker([
+				"volume", "create",
+				"--label", `bobbit-project=${projectId}`,
+				"--label", `bobbit-e2e-run=${runId}`,
+				"--label", `bobbit-volume-initialization=${randomUUID()}`,
+				volumes.worktrees,
+			]);
+
+			process.env.BOBBIT_E2E_RUN_ID = runId;
+			sandbox = new ProjectSandbox({
+				projectId,
+				projectDir: root,
+				repoUrl: "file:///workspace-src",
+				cloneSource: { kind: "mounted", hostPath: source, mountPath: "/workspace-src", cloneUrl: "file:///workspace-src" },
+				image: "bobbit-agent",
+			});
+			await sandbox.init();
+			const containerId = await sandbox.getContainerId();
+
+			expect(docker(["exec", containerId, "stat", "-c", "%U:%G", "/workspace-wt"])).toBe("node:node");
+			expect(docker(["exec", containerId, "find", "/workspace-wt", "-mindepth", "1", "-maxdepth", "1", "-print", "-quit"])).toBe("");
+		} finally {
+			await sandbox?.destroy().catch(() => {});
+			for (const volume of Object.values(volumes)) {
+				try { docker(["volume", "rm", "-f", volume]); } catch { /* best-effort cleanup */ }
+			}
+			if (priorRunId === undefined) delete process.env.BOBBIT_E2E_RUN_ID;
+			else process.env.BOBBIT_E2E_RUN_ID = priorRunId;
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+});
+
+// ---------------------------------------------------------------------------
 // process_exit event handling (no Docker needed)
 // ---------------------------------------------------------------------------
 

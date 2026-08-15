@@ -47,9 +47,9 @@ interface DockerMountInfo {
 	Mode?: string;
 }
 
-type FreshSandboxVolumes = {
-	workspace: boolean;
-	worktrees: boolean;
+type SandboxVolumeOwnershipEvidence = {
+	/** The workspace volume carries Bobbit's persistent creation marker. */
+	workspaceInitializedByBobbit: boolean;
 };
 
 export interface AgentDirMountExpectation {
@@ -437,10 +437,11 @@ export class ProjectSandbox {
 		try {
 			await this._dockerExec(containerId, ["mkdir", "-p", "/workspace-wt"]);
 		} catch {
-			// Permission denied — create as root and chown to node
+			// Permission denied — repair only an empty root-owned mount root. Do
+			// not take over a non-empty pre-existing worktrees volume here.
 			await this.execDocker([
 				"exec", "-u", "root", containerId, "sh", "-c",
-				"mkdir -p /workspace-wt && chown node:node /workspace-wt",
+				"mkdir -p /workspace-wt && [ \"$(stat -c %u /workspace-wt)\" = 0 ] && [ -z \"$(find /workspace-wt -mindepth 1 -maxdepth 1 -print -quit)\" ] && chown node:node /workspace-wt",
 			], { timeout: 10_000, env: DOCKER_ENV });
 		}
 
@@ -1159,9 +1160,10 @@ export class ProjectSandbox {
 
 		// Docker-created named volumes start root-owned, but init and agents run as
 		// `node`. Explicit creation also gives every Bobbit-owned volume an owner
-		// label. Capture which ones this attempt actually created so a replacement
-		// container never changes ownership of an existing workspace.
-		const freshVolumes = await this._createFreshSandboxVolumes(e2eRunId);
+		// label. Keep the workspace's persistent initialization evidence so a
+		// replacement can repair a failed prior initialization without taking over
+		// an unproven pre-existing workspace volume.
+		const volumeEvidence = await this._createSandboxVolumes(e2eRunId);
 		const dockerArgs = buildDockerRunArgs({
 			image,
 			workspaceDir: "", // unused for /workspace — named volume instead
@@ -1203,7 +1205,7 @@ export class ProjectSandbox {
 
 		this.containerId = containerId;
 
-		await this._initializeFreshSandboxVolumes(containerId, freshVolumes);
+		await this._repairSandboxVolumeOwnership(containerId, volumeEvidence);
 
 		// Defense-in-depth: mask /proc/1/environ
 		try {
@@ -1220,27 +1222,23 @@ export class ProjectSandbox {
 
 	/**
 	 * Create named volumes before `docker run` so their ownership labels identify
-	 * Bobbit's resources. The per-attempt initialization marker is checked after
-	 * creation because Docker returns success when a same-named volume already
-	 * exists; only a marker matching this exact attempt proves it is safe to
-	 * initialize.
+	 * Bobbit's resources. A marker created by this attempt proves a fresh volume;
+	 * the same marker surviving a failed attempt proves Bobbit owns a retried,
+	 * still-empty workspace. That is intentionally stronger than a name match.
 	 */
-	private async _createFreshSandboxVolumes(e2eRunId: string | undefined): Promise<FreshSandboxVolumes> {
+	private async _createSandboxVolumes(e2eRunId: string | undefined): Promise<SandboxVolumeOwnershipEvidence> {
 		const runId = e2eRunId ?? "";
 		const names = projectSandboxVolumeNames(this.options.projectId, runId);
-		const initializationId = randomUUID();
-		const createArgs = projectSandboxVolumeCreateArgs(this.options.projectId, runId, initializationId);
-		const fresh: FreshSandboxVolumes = { workspace: false, worktrees: false };
+		const createArgs = projectSandboxVolumeCreateArgs(this.options.projectId, runId, randomUUID());
 
-		for (const [key, name] of Object.entries(names) as Array<[keyof FreshSandboxVolumes, string]>) {
+		for (const [key, name] of Object.entries(names) as Array<[keyof typeof names, string]>) {
 			if (await this._sandboxVolumeExists(name)) continue;
 			await this.execDocker(createArgs[key === "workspace" ? 0 : 1], { timeout: 15_000, env: DOCKER_ENV });
-			fresh[key] = await this._hasFreshSandboxVolumeLabel(name, runId, initializationId);
-			if (!fresh[key]) {
-				console.warn(`[project-sandbox] Volume ${name} appeared during creation; preserving its existing ownership`);
-			}
 		}
-		return fresh;
+
+		return {
+			workspaceInitializedByBobbit: await this._hasSandboxVolumeInitializationEvidence(names.workspace, runId),
+		};
 	}
 
 	private async _sandboxVolumeExists(name: string): Promise<boolean> {
@@ -1252,32 +1250,57 @@ export class ProjectSandbox {
 		}
 	}
 
-	private async _hasFreshSandboxVolumeLabel(name: string, runId: string, initializationId: string): Promise<boolean> {
+	private async _hasSandboxVolumeInitializationEvidence(name: string, runId: string): Promise<boolean> {
 		try {
 			const { stdout } = await this.execDocker([
 				"volume", "inspect", "--format", "{{json .Labels}}", name,
 			], { timeout: 10_000, env: DOCKER_ENV });
 			const labels = JSON.parse(stdout.trim()) as Record<string, string> | null;
 			return labels?.["bobbit-project"] === this.options.projectId
-				&& labels?.["bobbit-volume-initialization"] === initializationId
+				&& typeof labels?.["bobbit-volume-initialization"] === "string"
+				&& /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(labels["bobbit-volume-initialization"])
 				&& (!runId || labels?.["bobbit-e2e-run"] === runId);
 		} catch {
 			return false;
 		}
 	}
 
-	/** Assign writable roots only to volumes proven new by this lifecycle attempt. */
-	private async _initializeFreshSandboxVolumes(containerId: string, fresh: FreshSandboxVolumes): Promise<void> {
-		const directories = [
-			fresh.workspace ? "/workspace" : undefined,
-			fresh.worktrees ? "/workspace-wt" : undefined,
-		].filter((directory): directory is string => Boolean(directory));
-		if (directories.length === 0) return;
+	/**
+	 * Repair only empty root-owned mount roots. Worktrees are always safe to
+	 * repair when empty, including a volume left behind after a failed first
+	 * container create. The workspace additionally requires Bobbit's creation
+	 * evidence: a same-named, unlabelled volume must never be adopted.
+	 */
+	private async _repairSandboxVolumeOwnership(
+		containerId: string,
+		evidence: SandboxVolumeOwnershipEvidence,
+	): Promise<void> {
+		const workspaceRepair = evidence.workspaceInitializedByBobbit
+			? "repair_empty_root_owned_dir /workspace"
+			: "";
+		const command = [
+			"repair_empty_root_owned_dir() {",
+			"  dir=\"$1\"",
+			"  [ -d \"$dir\" ] || return 0",
+			"  owner=$(stat -c %u \"$dir\") || return 1",
+			"  [ \"$owner\" = 0 ] || return 0",
+			"  entry=$(find \"$dir\" -mindepth 1 -maxdepth 1 -print -quit) || return 1",
+			"  [ -z \"$entry\" ] || return 0",
+			"  chown node:node \"$dir\"",
+			"}",
+			"repair_empty_root_owned_dir /workspace-wt",
+			workspaceRepair,
+		].filter(Boolean).join("\n");
 
-		const command = directories.map(directory => `mkdir -p ${directory} && chown node:node ${directory}`).join(" && ");
-		await this.execDocker([
-			"exec", "-u", "root", containerId, "sh", "-c", command,
-		], { timeout: 10_000, env: DOCKER_ENV });
+		try {
+			await this.execDocker([
+				"exec", "-u", "root", containerId, "sh", "-c", command,
+			], { timeout: 10_000, env: DOCKER_ENV });
+		} catch (err: any) {
+			// The container remains usable if the repair itself is interrupted. A
+			// future replacement reruns this evidence-based, idempotent repair.
+			console.warn(`[project-sandbox] Could not repair volume ownership for ${containerId.substring(0, 12)}: ${err?.message || err}`);
+		}
 	}
 
 	private async _runInitSequence(): Promise<void> {
