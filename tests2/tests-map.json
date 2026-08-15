@@ -2498,6 +2498,15 @@
       }
     },
     {
+      "path": "tests2/integration/language-lsp-docker.test.ts",
+      "reason": "Docker-gated ProjectSandbox linked-worktree coverage preserving Go structural search while honestly reporting its named Go and gopls toolchain requirements without LSP state.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
+      }
+    },
+    {
       "path": "tests2/core/ast-grep-runner.test.ts",
       "reason": "Focused read-only ast-grep argv, validation, normalization, diagnostics, cancellation, and truncation coverage for the Code Intelligence market pack.",
       "execution": {
