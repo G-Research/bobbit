@@ -52,6 +52,13 @@ import { accountOAuthProviderLabel, dismissAccountOAuthExpiryReminders, type Exp
 import { defaultCwdForProjectSession, HEADQUARTERS_PROJECT_ID } from "./headquarters.js";
 import { activeGatewayConnection, gatewayBaseUrl, gatewayUrl, InvalidGatewayBaseUrlError, LOCALHOST_TOKEN } from "./gateway-fetch.js";
 import { gatewayRoute } from "../shared/base-path.js";
+import {
+	activateProjectImportDecisionRequests,
+	deactivateProjectImportDecisionRequests,
+	projectImportDecisionRequestsForProject,
+	projectImportDecisionRequestsLoaded,
+} from "./project-import-decisions.js";
+import { ProjectImportDecisionRenderer } from "../ui/tools/renderers/ProjectImportDecisionRenderer.js";
 // NOTE: session-manager imports from dialogs, so we use dynamic imports to break the cycle
 
 // ============================================================================
@@ -2144,8 +2151,12 @@ export function showProjectDialog(): void {
 	const container = document.createElement("div");
 	document.body.appendChild(container);
 
-	type Step = "path" | "scan";
+	type Step = "path" | "scan" | "import-decisions";
 	let step: Step = "path";
+	let importProject: import("./state.js").Project | null = null;
+	let importDecisionUnsubscribe: (() => void) | null = null;
+	let importHandoffStarted = false;
+	const importDecisionRenderer = new ProjectImportDecisionRenderer();
 	let pathValue = "";
 
 	let detectionResult: { exists: boolean; hasBobbit: boolean; isEmpty: boolean; name: string } | null = null;
@@ -2186,12 +2197,40 @@ export function showProjectDialog(): void {
 	};
 
 	const cleanup = () => {
+		importDecisionUnsubscribe?.();
+		importDecisionUnsubscribe = null;
+		if (importProject) deactivateProjectImportDecisionRequests(importProject.id);
 		if (detectDebounceTimer) {
 			clearTimeout(detectDebounceTimer);
 			detectDebounceTimer = null;
 		}
 		render(html``, container);
 		container.remove();
+	};
+
+	const beginProjectAssistantAfterImport = async () => {
+		const project = importProject;
+		if (!project || step !== "import-decisions" || importHandoffStarted) return;
+		if (!projectImportDecisionRequestsLoaded(project.id) || projectImportDecisionRequestsForProject(project.id).length > 0) return;
+		importHandoffStarted = true;
+		cleanup();
+		await createProjectAssistantSession(pathValue.trim(), false, {
+			projectId: project.id,
+			existingProjectName: project.name,
+		});
+	};
+
+	const enterImportDecisionStep = (project: import("./state.js").Project) => {
+		importDecisionUnsubscribe?.();
+		importProject = project;
+		importHandoffStarted = false;
+		step = "import-decisions";
+		busy = false;
+		importDecisionUnsubscribe = activateProjectImportDecisionRequests(project.id, () => {
+			renderDialog();
+			void beginProjectAssistantAfterImport();
+		});
+		renderDialog();
 	};
 
 	const runDetection = async (dirPath: string) => {
@@ -2451,7 +2490,7 @@ export function showProjectDialog(): void {
 					if (project) {
 						setProjects(await fetchProjects());
 						renderApp();
-						cleanup();
+						enterImportDecisionStep(project);
 					} else {
 						busy = false;
 						renderDialog();
@@ -2474,7 +2513,7 @@ export function showProjectDialog(): void {
 									if (p2) {
 										setProjects(await fetchProjects());
 										renderApp();
-										cleanup();
+										enterImportDecisionStep(p2);
 									} else {
 										busy = false;
 										renderDialog();
@@ -2737,8 +2776,32 @@ export function showProjectDialog(): void {
 		`;
 	};
 
+	const renderImportDecisionBody = () => {
+		const project = importProject;
+		if (!project || !projectImportDecisionRequestsLoaded(project.id)) {
+			return html`<div class="flex items-center justify-center h-full text-sm text-muted-foreground" data-testid="project-import-decisions-loading">Checking project import decisions…</div>`;
+		}
+		const requests = projectImportDecisionRequestsForProject(project.id);
+		if (requests.length === 0) {
+			return html`<div class="flex items-center justify-center h-full text-sm text-muted-foreground" data-testid="project-import-decisions-complete">Opening project assistant…</div>`;
+		}
+		return html`
+			<div class="flex flex-col gap-4 h-full min-h-0 overflow-y-auto" data-testid="project-import-decisions">
+				<p class="text-sm text-muted-foreground">Review these project import decisions before continuing.</p>
+				${requests.map((request) => importDecisionRenderer.render(request))}
+			</div>
+		`;
+	};
+
 	// --- footer (sticky, position-invariant across all states) --------------
 	const renderFooter = () => {
+		if (step === "import-decisions") {
+			return html`
+				<div class="flex gap-2 justify-end">
+					${Button({ variant: "ghost", onClick: cleanup, children: "Cancel" })}
+				</div>
+			`;
+		}
 		if (step === "scan") {
 			return html`
 				<div class="flex gap-2 justify-end">
@@ -2795,14 +2858,16 @@ export function showProjectDialog(): void {
 							${DialogHeader({
 								title: step === "scan"
 									? "Confirm repos/subdirectories"
-									: detectionResult?.hasBobbit
-										? "Register Project"
-										: "Add Project",
+									: step === "import-decisions"
+										? "Project import decisions"
+										: detectionResult?.hasBobbit
+											? "Register Project"
+											: "Add Project",
 							})}
 							<span class="hidden" data-testid="add-project-step">${step}</span>
 						</div>
 						<div class="flex-1 min-h-0 px-6 pb-2 overflow-hidden">
-							${step === "scan" ? renderScanBody() : renderPathBody()}
+							${step === "scan" ? renderScanBody() : step === "import-decisions" ? renderImportDecisionBody() : renderPathBody()}
 						</div>
 						<div
 							class="shrink-0 px-6 py-4 border-t border-border"

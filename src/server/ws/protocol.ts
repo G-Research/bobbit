@@ -353,6 +353,8 @@ export type ServerMessage =
 	| { type: "context_trace_updated"; sessionId: string; ts: number }
 	/** Metadata-only invalidation after a session's durable decision requests change. */
 	| { type: "decision_requests_updated"; sessionId: string; ts: number }
+	/** Metadata-only invalidation after a project's durable import decisions change. */
+	| { type: "project_import_decision_requests_updated"; projectId: string; ts: number }
 	/** Metadata-only invalidation after a project's extension grants change. */
 	| { type: "extension_grants_updated"; projectId: string; ts: number }
 	/** Metadata-only invalidation after a project's extension settings change. */
