@@ -411,6 +411,11 @@ const manualTurnEventTypes = [
 ] as const;
 type ManualTurnEventType = typeof manualTurnEventTypes[number];
 
+// Docker smoke failures use only these fixed journey stages. Never serialize a
+// caller-provided label because it may contain a prompt or provider detail.
+const manualSandboxTurnStages = ["readiness", "slash", "read", "grep", "helper", "control"] as const;
+type ManualSandboxTurnStage = typeof manualSandboxTurnStages[number];
+
 function createManualTurnEventCounts(): Record<ManualTurnEventType, number> {
 	return Object.fromEntries(manualTurnEventTypes.map(type => [type, 0])) as Record<ManualTurnEventType, number>;
 }
@@ -509,21 +514,15 @@ function normalizeManualBridgeState(value: unknown): "new" | "starting" | "ready
 }
 
 /** Build terminal smoke facts without retaining turn, provider, or bridge payloads. */
-function manualTerminalTurnFacts({
-	eventTypeCounts,
-	lifecycle,
-	bridge,
-	bridgeRunning,
-	pendingToolPermission,
-	routeDiagnostic,
-}: {
+type ManualTerminalTurnInput = {
 	eventTypeCounts: Record<ManualTurnEventType, number>;
 	lifecycle: { diagnostics(): { rootAgentStarted: boolean; rootAgentTerminal: boolean } };
 	bridge: Record<string, unknown>;
 	bridgeRunning: boolean;
 	pendingToolPermission: boolean;
 	routeDiagnostic(error: unknown): string;
-}): {
+};
+type ManualTerminalTurnFacts = {
 	eventTypeCounts: Record<ManualTurnEventType, number>;
 	rootLifecycle: { rootAgentStarted: boolean; rootAgentTerminal: boolean };
 	bridgeRunning: boolean;
@@ -533,7 +532,16 @@ function manualTerminalTurnFacts({
 	bridgeInputQueue: { hasQueuedRows: boolean; hasWaitingReader: boolean };
 	initializationComplete: boolean;
 	queryHandlePresent: boolean;
-} {
+};
+
+function manualTerminalTurnFacts({
+	eventTypeCounts,
+	lifecycle,
+	bridge,
+	bridgeRunning,
+	pendingToolPermission,
+	routeDiagnostic,
+}: ManualTerminalTurnInput): ManualTerminalTurnFacts {
 	const input = diagnosticValue(() => bridge.input) as Record<string, unknown> | undefined;
 	return {
 		eventTypeCounts,
@@ -551,6 +559,62 @@ function manualTerminalTurnFacts({
 	};
 }
 
+/** Docker-only failures identify a fixed journey stage without free-form text. */
+function manualSandboxTerminalTurnFacts(
+	turnStage: ManualSandboxTurnStage,
+	input: ManualTerminalTurnInput,
+): ManualTerminalTurnFacts & { turnStage: ManualSandboxTurnStage } {
+	return { turnStage, ...manualTerminalTurnFacts(input) };
+}
+
+type ManualSandboxReplacementFacts = {
+	rootAgentStarted: boolean;
+	streamingAtForceAbort: boolean;
+	rpcClientReplaced: boolean;
+	replacementRunning: boolean;
+	runtimeIsClaudeAgentSdk: boolean;
+	persistedSdkIdentityPreserved: boolean;
+};
+
+/** Compare replacement identity without retaining either bridge or SDK identity in diagnostics. */
+function manualSandboxReplacementFacts({
+	rootAgentStarted,
+	streamingAtForceAbort,
+	oldRpcClient,
+	replacementSession,
+	expectedPersistedSdkSessionId,
+	actualPersistedSdkSessionId,
+}: {
+	rootAgentStarted: boolean;
+	streamingAtForceAbort: boolean;
+	oldRpcClient: unknown;
+	replacementSession: { rpcClient?: { readonly running?: unknown }; runtime?: unknown } | undefined;
+	expectedPersistedSdkSessionId: unknown;
+	actualPersistedSdkSessionId: unknown;
+}): ManualSandboxReplacementFacts {
+	return {
+		rootAgentStarted,
+		streamingAtForceAbort,
+		rpcClientReplaced: replacementSession?.rpcClient !== oldRpcClient,
+		replacementRunning: diagnosticBoolean(() => replacementSession?.rpcClient?.running),
+		runtimeIsClaudeAgentSdk: replacementSession?.runtime === "claude-agent-sdk",
+		persistedSdkIdentityPreserved: typeof expectedPersistedSdkSessionId === "string"
+			&& actualPersistedSdkSessionId === expectedPersistedSdkSessionId,
+	};
+}
+
+function assertManualSandboxReplacement(facts: ManualSandboxReplacementFacts): void {
+	if (
+		facts.rootAgentStarted
+		&& facts.streamingAtForceAbort
+		&& facts.rpcClientReplaced
+		&& facts.replacementRunning
+		&& facts.runtimeIsClaudeAgentSdk
+		&& facts.persistedSdkIdentityPreserved
+	) return;
+	throw new Error(JSON.stringify(facts));
+}
+
 /**
  * Initial Docker bridge startup can fail before a prompt subscribes to its
  * lifecycle. Replace that raw rejection with the same safe terminal schema
@@ -564,7 +628,7 @@ async function waitForManualDockerInitialReadiness(
 	try {
 		await rpcClient.waitForReady(120_000);
 	} catch {
-		throw new Error(JSON.stringify(manualTerminalTurnFacts({
+		throw new Error(JSON.stringify(manualSandboxTerminalTurnFacts("readiness", {
 			eventTypeCounts: createManualTurnEventCounts(),
 			lifecycle: { diagnostics: () => ({ rootAgentStarted: false, rootAgentTerminal: false }) },
 			bridge,
@@ -603,6 +667,53 @@ test("Claude Agent SDK manual lifecycle waits for a root start followed by its t
 	expect(lifecycle.completed()).toBe(true);
 	lifecycle.unsubscribe();
 	expect(listener).toBeUndefined();
+});
+
+test("Claude Agent SDK manual Docker replacement oracle rejects the old bridge", () => {
+	const oldRpcClient = { running: true };
+	const sameBridgeFacts = manualSandboxReplacementFacts({
+		rootAgentStarted: true,
+		streamingAtForceAbort: true,
+		oldRpcClient,
+		replacementSession: { rpcClient: oldRpcClient, runtime: "claude-agent-sdk" },
+		expectedPersistedSdkSessionId: "private-sdk-session-id",
+		actualPersistedSdkSessionId: "private-sdk-session-id",
+	});
+	expect(sameBridgeFacts).toEqual({
+		rootAgentStarted: true,
+		streamingAtForceAbort: true,
+		rpcClientReplaced: false,
+		replacementRunning: true,
+		runtimeIsClaudeAgentSdk: true,
+		persistedSdkIdentityPreserved: true,
+	});
+	let diagnostic = "";
+	try { assertManualSandboxReplacement(sameBridgeFacts); }
+	catch (error) { diagnostic = error instanceof Error ? error.message : ""; }
+	expect(JSON.parse(diagnostic)).toEqual(sameBridgeFacts);
+	expect(diagnostic).not.toContain("private-sdk-session-id");
+	expect(() => assertManualSandboxReplacement(manualSandboxReplacementFacts({
+		rootAgentStarted: true,
+		streamingAtForceAbort: true,
+		oldRpcClient,
+		replacementSession: { rpcClient: { running: true }, runtime: "claude-agent-sdk" },
+		expectedPersistedSdkSessionId: "private-sdk-session-id",
+		actualPersistedSdkSessionId: "private-sdk-session-id",
+	}))).not.toThrow();
+});
+
+test("Claude Agent SDK manual Docker terminal facts use only fixed journey stages", () => {
+	expect(manualSandboxTurnStages).toEqual(["readiness", "slash", "read", "grep", "helper", "control"]);
+	const facts = manualSandboxTerminalTurnFacts("read", {
+		eventTypeCounts: createManualTurnEventCounts(),
+		lifecycle: { diagnostics: () => ({ rootAgentStarted: false, rootAgentTerminal: false }) },
+		bridge: { state: "private-state" },
+		bridgeRunning: false,
+		pendingToolPermission: false,
+		routeDiagnostic: () => "SDK_SESSION_UNAVAILABLE",
+	});
+	expect(facts.turnStage).toBe("read");
+	expect(JSON.stringify(facts)).not.toContain("private-state");
 });
 
 test("Claude Agent SDK manual helper oracle requires completed nested work, not child tool choice", () => {
@@ -760,6 +871,7 @@ test("Claude Agent SDK manual Docker readiness failure emits safe pre-turn termi
 	}
 	expect(readinessTimeout).toBe(120_000);
 	expect(JSON.parse(diagnostic)).toEqual({
+		turnStage: "readiness",
 		eventTypeCounts: createManualTurnEventCounts(),
 		rootLifecycle: { rootAgentStarted: false, rootAgentTerminal: false },
 		bridgeRunning: false,
@@ -1572,7 +1684,7 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			// The SDK establishes its persistent identity from the first accepted real
 			// user turn; readiness alone must not synthesize a bootstrap session.
 			expect(gateway.sessionManager.getPersistedSession(created.id)?.claudeAgentSdkSessionId).toBeUndefined();
-			const runSandboxTurn = async (text: string, label: string, options: Record<string, unknown> = {}) => {
+			const runSandboxTurn = async (text: string, turnStage: ManualSandboxTurnStage, options: Record<string, unknown> = {}) => {
 				const eventTypeCounts = createManualTurnEventCounts();
 				const bridge = session.rpcClient as unknown as Record<string, unknown>;
 				// Subscribe before enqueue to correlate this accepted prompt rather than
@@ -1581,11 +1693,11 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 				const unsubscribeCounts = session.rpcClient.onEvent(event => countManualTurnEvent(eventTypeCounts, event));
 				try {
 					await gateway!.sessionManager.enqueuePrompt(created.id, text, { source: "user", ...options });
-					await waitFor(() => lifecycle.completed() ? true : undefined, `${label} root terminal`, 120_000);
+					await waitFor(() => lifecycle.completed() ? true : undefined, `sandbox ${turnStage} root terminal`, 120_000);
 				} catch {
 					// Terminal failures can happen before a root lifecycle terminal arrives.
 					// Retain only fixed facts and the route-safe bridge category.
-					throw new Error(JSON.stringify(manualTerminalTurnFacts({
+					throw new Error(JSON.stringify(manualSandboxTerminalTurnFacts(turnStage, {
 						eventTypeCounts,
 						lifecycle,
 						bridge,
@@ -1608,15 +1720,15 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			const sandboxRegistry = createComposerSlashRegistry({ runtime: "claude-agent-sdk", skills: [{ name: "sdk-sandbox-dogfood", description: "isolated sandbox lifecycle proof", source: "project" }], launchers: [] });
 			expect(resolveComposerSlashDispatch("/sdk-sandbox-dogfood", { runtime: "claude-agent-sdk", registry: sandboxRegistry })?.kind).toBe("skill");
 			expect(resolveComposerSlashDispatch("/compact", { runtime: "claude-agent-sdk", registry: sandboxRegistry })?.kind).toBe("unsupported-compact");
-			await runSandboxTurn(sandboxSlash.originalText, "sandbox Bobbit-owned slash prompt", { modelText: sandboxSlash.modelText, skillExpansions: sandboxSlash.expansions });
+			await runSandboxTurn(sandboxSlash.originalText, "slash", { modelText: sandboxSlash.modelText, skillExpansions: sandboxSlash.expansions });
 			const persistedSdkSessionId = gateway.sessionManager.getPersistedSession(created.id)?.claudeAgentSdkSessionId;
 			expect(typeof persistedSdkSessionId).toBe("string");
 			if (typeof persistedSdkSessionId !== "string") throw new Error("SDK session identity was not persisted after the first accepted sandbox turn.");
 
-			await runSandboxTurn("Reply with exactly: SDK_SANDBOX_READY", "first sandbox SDK prompt");
+			await runSandboxTurn("Reply with exactly: SDK_SANDBOX_READY", "control");
 
 			// An allowed read is one complete turn before the permission-gated grep.
-			await runSandboxTurn("Use only Bobbit read on README.md. Do not use any other tools.", "sandbox canonical Bobbit read turn");
+			await runSandboxTurn("Use only Bobbit read on README.md. Do not use any other tools.", "read");
 			let sandboxTranscript = await gateway.sessionManager.getMessagesSnapshotBase(session);
 			const visibleSandboxCanonicalReadTranscript = sandboxTranscript.success
 				? gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data)
@@ -1625,6 +1737,7 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 
 			// Count only fixed tool categories for the separate permission-card turn.
 			const sandboxCanonicalGrepExecution = createManualCanonicalToolExecutionCounts();
+			const sandboxCanonicalGrepBridge = session.rpcClient as unknown as Record<string, unknown>;
 			const sandboxCanonicalGrepLifecycle = observeManualRootTurnLifecycle(session.rpcClient);
 			const unsubscribeSandboxCanonicalGrepExecution = session.rpcClient.onEvent(event => countManualCanonicalToolExecution(sandboxCanonicalGrepExecution, event));
 			try {
@@ -1636,6 +1749,15 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 				expect(permission.toolName === "grep" && permission.group === "File System").toBe(true);
 				await gateway.sessionManager.grantToolPermission(created.id, "grep", "tool", "File System", "one-time", permission.id);
 				await waitFor(() => sandboxCanonicalGrepLifecycle.completed() ? true : undefined, "sandbox canonical Bobbit grep root terminal", 120_000);
+			} catch {
+				throw new Error(JSON.stringify(manualSandboxTerminalTurnFacts("grep", {
+					eventTypeCounts: createManualTurnEventCounts(),
+					lifecycle: sandboxCanonicalGrepLifecycle,
+					bridge: sandboxCanonicalGrepBridge,
+					bridgeRunning: diagnosticBoolean(() => session.rpcClient.running),
+					pendingToolPermission: diagnosticBoolean(() => gateway!.sessionManager.getPendingToolPermission(created.id) !== undefined),
+					routeDiagnostic: claudeAgentSdkUnavailableRouteDiagnostic,
+				})));
 			} finally {
 				unsubscribeSandboxCanonicalGrepExecution();
 				sandboxCanonicalGrepLifecycle.unsubscribe();
@@ -1646,14 +1768,14 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 				? gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data)
 				: undefined;
 			assertManualDurableCanonicalToolExecution(visibleSandboxCanonicalGrepTranscript, "grep", sandboxCanonicalGrepExecution);
-			await runSandboxTurn("Use only Bobbit gate_list to inspect current workflow state. Do not signal or modify any gate.", "sandbox read-only workflow-gate tool action");
+			await runSandboxTurn("Use only Bobbit gate_list to inspect current workflow state. Do not signal or modify any gate.", "control");
 			sandboxTranscript = await gateway.sessionManager.getMessagesSnapshotBase(session);
 			const visibleSandboxTranscript = sandboxTranscript.success
 				? gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data)
 				: undefined;
 			expect(sandboxTranscript.success && hasRootCanonicalToolCall(visibleSandboxTranscript, "gate_list")).toBe(true);
 			expect(sandboxTranscript.success && hasSuccessfulRootToolResult(visibleSandboxTranscript, "gate_list")).toBe(true);
-			await runSandboxTurn("Call the native Agent tool exactly once with run_in_background: false and subagent_type: \"bobbit-backend-parity-reviewer\". Its task must be: use the Bobbit read tool on README.md. Do not call any other root tool. Do not create or invoke an additional helper.", "sandbox constrained foreground helper");
+			await runSandboxTurn("Call the native Agent tool exactly once with run_in_background: false and subagent_type: \"bobbit-backend-parity-reviewer\". Its task must be: use the Bobbit read tool on README.md. Do not call any other root tool. Do not create or invoke an additional helper.", "helper");
 			sandboxTranscript = await gateway.sessionManager.getMessagesSnapshotBase(session);
 			if (!sandboxTranscript.success) throw new Error(JSON.stringify(manualNestedHelperFacts(undefined)));
 			assertManualNestedHelper(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data));
@@ -1707,10 +1829,48 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			} finally {
 				interruptedSandboxTurnLifecycle.unsubscribe();
 			}
-			await gateway.sessionManager.forceAbort(created.id);
-			session = await waitFor(() => gateway!.sessionManager.getSession(created.id)?.rpcClient?.running ? gateway!.sessionManager.getSession(created.id) : undefined, "sandbox SDK replacement");
-			expect(session.runtime).toBe("claude-agent-sdk");
-			expect(gateway.sessionManager.getPersistedSession(created.id)?.claudeAgentSdkSessionId).toBe(persistedSdkSessionId);
+
+			// The soft-interrupt bridge is now idle. Start a distinct long root turn so
+			// forceAbort owns a live bridge rather than silently taking its idle no-op.
+			const forcedReplacementLifecycle = observeManualRootTurnLifecycle(session.rpcClient);
+			try {
+				await gateway.sessionManager.enqueuePrompt(
+					created.id,
+					"List integers from 1 upward, one per line, and do not stop or summarize.",
+					{ source: "user" },
+				);
+				await waitFor(() => forcedReplacementLifecycle.started() ? true : undefined, "sandbox force-abort root agent_start");
+				const oldRpcClient = session.rpcClient;
+				const streamingAtForceAbort = gateway.sessionManager.getSession(created.id)?.status === "streaming";
+				expect(streamingAtForceAbort).toBe(true);
+				try {
+					// One millisecond intentionally prevents a soft abort from masking the
+					// hard replacement path while remaining a bounded grace period.
+					await gateway.sessionManager.forceAbort(created.id, 1);
+				} catch {
+					throw new Error(JSON.stringify(manualSandboxTerminalTurnFacts("control", {
+						eventTypeCounts: createManualTurnEventCounts(),
+						lifecycle: forcedReplacementLifecycle,
+						bridge: oldRpcClient as unknown as Record<string, unknown>,
+						bridgeRunning: diagnosticBoolean(() => oldRpcClient.running),
+						pendingToolPermission: diagnosticBoolean(() => gateway!.sessionManager.getPendingToolPermission(created.id) !== undefined),
+						routeDiagnostic: claudeAgentSdkUnavailableRouteDiagnostic,
+					})));
+				}
+				const replacementSession = gateway.sessionManager.getSession(created.id);
+				const replacementFacts = manualSandboxReplacementFacts({
+					rootAgentStarted: forcedReplacementLifecycle.started(),
+					streamingAtForceAbort,
+					oldRpcClient,
+					replacementSession,
+					expectedPersistedSdkSessionId: persistedSdkSessionId,
+					actualPersistedSdkSessionId: gateway.sessionManager.getPersistedSession(created.id)?.claudeAgentSdkSessionId,
+				});
+				assertManualSandboxReplacement(replacementFacts);
+				session = replacementSession;
+			} finally {
+				forcedReplacementLifecycle.unsubscribe();
+			}
 			// Rebuild the gateway against the same isolated state. This exercises the
 			// persisted SDK UUID, fresh container wiring, and subscription handoff a
 			// second time without exposing any credential material to the test.
