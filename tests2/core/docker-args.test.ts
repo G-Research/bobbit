@@ -12,7 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { CommandRunner } from "../../src/server/gateway-deps.ts";
 import { buildDockerRunArgs, e2eSandboxVolumeCreateArgs, projectSandboxVolumeNames } from "../../src/server/agent/docker-args.js";
-import { ProjectSandbox } from "../../src/server/agent/project-sandbox.js";
+import { ProjectSandbox, _resetDockerLimitsCache } from "../../src/server/agent/project-sandbox.js";
 import { prepareSanitizedSandboxCloneSource, resolveSandboxCloneSource } from "../../src/server/agent/sandbox-clone-source.js";
 import { toDockerPath } from "../../src/server/agent/rpc-bridge.js";
 import {
@@ -211,6 +211,89 @@ describe("buildDockerRunArgs", () => {
 			if (prior === undefined) delete process.env.BOBBIT_E2E_RUN_ID;
 			else process.env.BOBBIT_E2E_RUN_ID = prior;
 		}
+	});
+
+	it("retries non-fatal ownership repair for an empty root-owned volume left by a failed create", async () => {
+		_resetDockerLimitsCache();
+		const projectId = `ownership-retry-${fixtureSequence++}`;
+		const volumes = new Map<string, Record<string, string>>();
+		const repairScripts: string[] = [];
+		let repairAttempts = 0;
+		let creates = 0;
+		const commandRunner: CommandRunner = {
+			async execFile(_file, args) {
+				if (args[0] === "info") return { stdout: "4 8589934592\n", stderr: "" };
+				if (args[0] === "volume" && args[1] === "inspect") {
+					const name = args.at(-1)!;
+					const labels = volumes.get(name);
+					if (!labels) throw new Error(`missing volume ${name}`);
+					return { stdout: args.includes("--format") ? JSON.stringify(labels) : name, stderr: "" };
+				}
+				if (args[0] === "volume" && args[1] === "create") {
+					const labels: Record<string, string> = {};
+					for (let index = 0; index < args.length; index++) {
+						if (args[index] !== "--label") continue;
+						const [key, value] = args[index + 1].split("=", 2);
+						labels[key] = value;
+					}
+					volumes.set(args.at(-1)!, labels);
+					return { stdout: `${args.at(-1)}\n`, stderr: "" };
+				}
+				if (args[0] === "run") return { stdout: `container-${++creates}\n`, stderr: "" };
+				if (args[0] === "exec") {
+					const script = args.at(-1)!;
+					if (script.includes("repair_empty_root_owned_dir")) {
+						repairScripts.push(script);
+						if (++repairAttempts === 1) throw new Error("transient exec failure");
+					}
+					return { stdout: "", stderr: "" };
+				}
+				return { stdout: "", stderr: "" };
+			},
+			execFileSync() { return ""; },
+		};
+		try {
+			const sandbox = new ProjectSandbox({
+				projectId,
+				projectDir: fixtureDir("ownership-retry"),
+				repoUrl: "https://example.test/repo.git",
+				image: "test",
+			}, { commandRunner });
+
+			await (sandbox as any)._createContainer(undefined);
+			await (sandbox as any)._createContainer(undefined);
+
+			assert.equal(creates, 2, "the transient ownership-repair failure must not abort either container create");
+			assert.equal(repairAttempts, 2, "each replacement must retry ownership repair");
+			assert.ok(repairScripts.every((script) => script.includes("repair_empty_root_owned_dir /workspace-wt")));
+			assert.ok(repairScripts.every((script) => script.includes("repair_empty_root_owned_dir /workspace")), "the labelled empty workspace remains eligible for safe repair");
+			assert.ok(repairScripts.every((script) => script.includes("-mindepth 1 -maxdepth 1 -print -quit")), "repairs must prove a root is empty before chowning it");
+		} finally {
+			_resetDockerLimitsCache();
+		}
+	});
+
+	it("does not adopt an unlabelled workspace while still repairing empty worktrees", async () => {
+		let repairScript = "";
+		const sandbox = new ProjectSandbox({
+			projectId: "unlabelled-workspace",
+			projectDir: fixtureDir("unlabelled-workspace"),
+			repoUrl: "https://example.test/repo.git",
+			image: "test",
+		}, {
+			commandRunner: {
+				async execFile(_file, args) {
+					repairScript = args[args.length - 1] ?? "";
+					return { stdout: "", stderr: "" };
+				},
+				execFileSync() { return ""; },
+			},
+		});
+
+		await (sandbox as any)._repairSandboxVolumeOwnership("container", { workspaceInitializedByBobbit: false });
+
+		assert.match(repairScript, /repair_empty_root_owned_dir \/workspace-wt/);
+		assert.doesNotMatch(repairScript, /repair_empty_root_owned_dir \/workspace(?:\s|$)/);
 	});
 
 	it("does not mount worktrees volume when projectId is not set", () => {
