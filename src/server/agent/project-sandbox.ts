@@ -40,6 +40,9 @@ const DOCKER_ENV = { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL:
 const CONTAINER_AGENT_SESSIONS_DIR = "/home/node/.bobbit/agent/sessions";
 const CONTAINER_AGENT_MODELS_JSON = "/home/node/.bobbit/agent/models.json";
 export const CLAUDE_AGENT_SDK_SANDBOX_VERSION = "0.3.222";
+/** Exact `bobbit-claude-agent-sdk --version` output from the bundled binary. */
+export const CLAUDE_AGENT_SDK_SANDBOX_CLAUDE_VERSION = "2.1.222";
+const CLAUDE_AGENT_SDK_SANDBOX_VERSION_OUTPUT = `${CLAUDE_AGENT_SDK_SANDBOX_CLAUDE_VERSION} (Claude Code)`;
 const SDK_STATE_ENTRY_LIMIT = 10_000;
 
 // Lock the mounted parent before any node/Pi/tool process is exposed. It stays
@@ -873,6 +876,13 @@ export class ProjectSandbox {
 			if (stdout.trim() !== CLAUDE_AGENT_SDK_SANDBOX_VERSION) return false;
 			const containerId = await this.getContainerId();
 			await this._dockerExec(containerId, ["test", "-x", "/usr/local/bin/bobbit-claude-agent-sdk"], { timeout: 5_000 });
+			// The wrapper is the launch contract, not merely an executable bit. Probe
+			// it under the SDK UID with its non-network version command; never expose
+			// its raw output in capability diagnostics.
+			const { stdout } = await this.execDocker([
+				"exec", "-i", "-u", CLAUDE_AGENT_SDK_DOCKER_USER, containerId, "/usr/local/bin/bobbit-claude-agent-sdk", "--version",
+			], { timeout: 5_000, env: DOCKER_ENV });
+			if (stdout.trim() !== CLAUDE_AGENT_SDK_SANDBOX_VERSION_OUTPUT) return false;
 			await this.execDocker([
 				"exec", "-i", "-u", CLAUDE_AGENT_SDK_DOCKER_USER, containerId, "test", "-r", SANDBOX_SDK_MODULE_PATH,
 			], { timeout: 5_000, env: DOCKER_ENV });

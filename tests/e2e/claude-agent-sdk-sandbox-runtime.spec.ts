@@ -12,10 +12,23 @@ import { join } from "node:path";
 import { expect, test } from "./gateway-harness.js";
 import { apiFetch, connectWs, defaultProjectId, gitCwd, nonGitCwd, waitForSessionStatus } from "./e2e-setup.js";
 import { isDockerSandboxAvailable, SANDBOX_IMAGE } from "./test-utils/docker.js";
-import { ProjectSandbox } from "../../src/server/agent/project-sandbox.js";
+import { CLAUDE_AGENT_SDK_SANDBOX_CLAUDE_VERSION, ProjectSandbox } from "../../src/server/agent/project-sandbox.js";
 
 const SDK_SESSION_ID = "22222222-2222-4222-8222-222222222222";
 const OAUTH_POLICY = "ANTHROPIC_OAUTH_TOKEN";
+
+function hasPinnedSdkWrapper(): boolean {
+	if (!isDockerSandboxAvailable()) return false;
+	try {
+		const version = execFileSync("docker", [
+			"run", "--rm", "--user", "bobbit-sdk", SANDBOX_IMAGE,
+			"/usr/local/bin/bobbit-claude-agent-sdk", "--version",
+		], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 10_000 });
+		return version.trim() === `${CLAUDE_AGENT_SDK_SANDBOX_CLAUDE_VERSION} (Claude Code)`;
+	} catch {
+		return false;
+	}
+}
 
 type DockerDispatcherLaunch = {
 	containerId: string;
@@ -356,13 +369,8 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 	});
 
 	test("migrates legacy SDK state in a private named volume and rejects replacement", async () => {
-		const imageHasSdkUser = isDockerSandboxAvailable() && (() => {
-			try {
-				execFileSync("docker", ["run", "--rm", SANDBOX_IMAGE, "id", "-u", "bobbit-sdk"], { stdio: "ignore", timeout: 10_000 });
-				return true;
-			} catch { return false; }
-		})();
-		test.skip(!imageHasSdkUser, "requires a locally rebuilt bobbit-agent image with the SDK user");
+		const imageHasPinnedSdkWrapper = hasPinnedSdkWrapper();
+		test.skip(!imageHasPinnedSdkWrapper, "requires a locally rebuilt bobbit-agent image with the pinned SDK wrapper");
 		const stateVolume = `bobbit-sdk-state-${randomUUID().slice(0, 8)}`;
 		const name = `bobbit-sdk-state-${randomUUID().slice(0, 8)}`;
 		const replacement = `${name}-replacement`;
@@ -456,13 +464,8 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 	});
 
 	test("keeps an OAuth-bearing SDK process outside the tool UID while workspace and SDK state survive restart", () => {
-		const imageHasSdkUser = isDockerSandboxAvailable() && (() => {
-			try {
-				execFileSync("docker", ["run", "--rm", SANDBOX_IMAGE, "id", "-u", "bobbit-sdk"], { stdio: "ignore", timeout: 10_000 });
-				return true;
-			} catch { return false; }
-		})();
-		test.skip(!imageHasSdkUser, "requires a locally rebuilt bobbit-agent image with the SDK user");
+		const imageHasPinnedSdkWrapper = hasPinnedSdkWrapper();
+		test.skip(!imageHasPinnedSdkWrapper, "requires a locally rebuilt bobbit-agent image with the pinned SDK wrapper");
 		const name = `bobbit-sdk-uid-${randomUUID().slice(0, 8)}`;
 		const sentinel = `sdk-proc-${randomUUID()}`;
 		const docker = (args: string[]): string => execFileSync("docker", args, { encoding: "utf8", timeout: 20_000 });

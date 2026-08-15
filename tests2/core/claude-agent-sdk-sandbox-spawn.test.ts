@@ -15,7 +15,7 @@ import {
 	resolveSandboxClaudeAgentSdkOAuthAccessToken,
 } from "../../src/server/agent/host-tokens.ts";
 import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.ts";
-import { CLAUDE_AGENT_SDK_SANDBOX_VERSION, ProjectSandbox } from "../../src/server/agent/project-sandbox.ts";
+import { CLAUDE_AGENT_SDK_SANDBOX_CLAUDE_VERSION, CLAUDE_AGENT_SDK_SANDBOX_VERSION, ProjectSandbox } from "../../src/server/agent/project-sandbox.ts";
 
 const originalAgentDir = process.env.BOBBIT_AGENT_DIR;
 let authRoot: string | undefined;
@@ -251,25 +251,43 @@ describe("Claude Agent SDK sandbox spawn", () => {
 	it("fails closed unless the image label and fixed SDK wrapper both match", async () => {
 		const sandbox = new ProjectSandbox({ projectId: "sdk-capability", projectDir: "/host/project", repoUrl: "https://example.test/repo.git", image: "bobbit:test" });
 		(sandbox as any).containerId = "container-current";
-		const inspect = vi.fn(async () => ({ stdout: `${CLAUDE_AGENT_SDK_SANDBOX_VERSION}\n`, stderr: "" }));
+		const inspect = vi.fn(async (args: string[]) => ({
+			stdout: args[0] === "image"
+				? `${CLAUDE_AGENT_SDK_SANDBOX_VERSION}\n`
+				: args.includes("bobbit-claude-agent-sdk")
+					? `${CLAUDE_AGENT_SDK_SANDBOX_CLAUDE_VERSION} (Claude Code)\n`
+					: "",
+			stderr: "",
+		}));
 		const wrapper = vi.fn(async (_containerId: string, args: string[]) => args[0] === "id" ? "1001\n" : "");
 		(sandbox as any).execDocker = inspect;
 		(sandbox as any)._dockerExec = wrapper;
 		await expect(sandbox.hasClaudeAgentSdkCapability()).resolves.toBe(true);
 		expect(inspect).toHaveBeenNthCalledWith(1, expect.arrayContaining(["image", "inspect", "--format"]), expect.any(Object));
-		expect(inspect).toHaveBeenNthCalledWith(2, ["exec", "-i", "-u", "bobbit-sdk", "container-current", "test", "-r", SANDBOX_SDK_MODULE_PATH], expect.objectContaining({ timeout: 5_000 }));
+		expect(inspect).toHaveBeenNthCalledWith(2, ["exec", "-i", "-u", "bobbit-sdk", "container-current", "/usr/local/bin/bobbit-claude-agent-sdk", "--version"], expect.objectContaining({ timeout: 5_000 }));
+		expect(inspect).toHaveBeenNthCalledWith(3, ["exec", "-i", "-u", "bobbit-sdk", "container-current", "test", "-r", SANDBOX_SDK_MODULE_PATH], expect.objectContaining({ timeout: 5_000 }));
 		expect(wrapper).toHaveBeenNthCalledWith(1, "container-current", ["test", "-x", "/usr/local/bin/bobbit-claude-agent-sdk"], { timeout: 5_000 });
 		expect(wrapper).toHaveBeenNthCalledWith(2, "container-current", ["id", "-u", "bobbit-sdk"], { timeout: 5_000 });
 
 		(sandbox as any).execDocker = async () => ({ stdout: "0.3.221\n", stderr: "" });
 		await expect(sandbox.hasClaudeAgentSdkCapability()).resolves.toBe(false);
+		(sandbox as any).execDocker = async (args: string[]) => ({
+			stdout: args[0] === "image" ? `${CLAUDE_AGENT_SDK_SANDBOX_VERSION}\n` : "2.1.221 (Claude Code)\n",
+			stderr: "",
+		});
+		await expect(sandbox.hasClaudeAgentSdkCapability()).resolves.toBe(false);
+		(sandbox as any).execDocker = async (args: string[]) => {
+			if (args.includes("bobbit-claude-agent-sdk")) throw Object.assign(new Error("wrapper exited"), { code: 127, stdout: "secret", stderr: "secret" });
+			return { stdout: `${CLAUDE_AGENT_SDK_SANDBOX_VERSION}\n`, stderr: "" };
+		};
+		await expect(sandbox.hasClaudeAgentSdkCapability()).resolves.toBe(false);
 		(sandbox as any).execDocker = async (args: string[]) => {
 			if (args.includes(SANDBOX_SDK_MODULE_PATH)) throw new Error("missing module wrapper");
-			return { stdout: `${CLAUDE_AGENT_SDK_SANDBOX_VERSION}\n`, stderr: "" };
+			return { stdout: args[0] === "image" ? `${CLAUDE_AGENT_SDK_SANDBOX_VERSION}\n` : `${CLAUDE_AGENT_SDK_SANDBOX_CLAUDE_VERSION} (Claude Code)\n`, stderr: "" };
 		};
 		(sandbox as any)._dockerExec = wrapper;
 		await expect(sandbox.hasClaudeAgentSdkCapability()).resolves.toBe(false);
-		(sandbox as any).execDocker = async () => ({ stdout: `${CLAUDE_AGENT_SDK_SANDBOX_VERSION}\n`, stderr: "" });
+		(sandbox as any).execDocker = inspect;
 		(sandbox as any)._dockerExec = async () => { throw new Error("missing launcher wrapper"); };
 		await expect(sandbox.hasClaudeAgentSdkCapability()).resolves.toBe(false);
 		(sandbox as any)._dockerExec = async (_containerId: string, args: string[]) => args[0] === "id" ? "1000\n" : "";
