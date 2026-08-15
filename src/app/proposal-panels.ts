@@ -2356,6 +2356,28 @@ function toolPreviewPanel() {
 		dismissTypedProposal("tool");
 	};
 
+	const handleApplyToolProposal = async () => {
+		const slot = state.activeProposals.tool;
+		const toolName = state.toolPreviewName.trim();
+		const action = slot?.fields.action;
+		const content = slot?.fields.content;
+		const target = proposalProjectId("tool", slot?.sessionId ?? activeSessionId());
+		if (!toolName || !target || (action !== "create" && action !== "update" && action !== "delete")) return;
+		try {
+			const res = await gatewayFetch("/api/tools/proposal", {
+				method: "POST",
+				body: JSON.stringify({ projectId: target, tool: toolName, action, ...(action === "delete" ? {} : { content }) }),
+			});
+			if (!res.ok) {
+				await showProjectProposalResponseError(res, "Failed to apply tool proposal", "Tool proposal was rejected");
+				return;
+			}
+			await handleViewTool();
+		} catch (error) {
+			showProjectProposalCaughtError("Failed to apply tool proposal", error);
+		}
+	};
+
 	const handleViewTool = async () => {
 		const toolName = state.toolPreviewName.trim();
 		if (!toolName) return;
@@ -2375,6 +2397,8 @@ function toolPreviewPanel() {
 		renderApp();
 	};
 
+	const proposalAction = state.activeProposals.tool?.fields.action;
+	const canApplyToolProposal = proposalAction === "create" || proposalAction === "update" || proposalAction === "delete";
 	const checklist = state.toolPreviewChecklist;
 	const checklistItems = [
 		{ key: "docs" as const, label: "Documentation", desc: "Usage examples, parameter descriptions" },
@@ -2452,9 +2476,9 @@ function toolPreviewPanel() {
 				${Button({ variant: "ghost", onClick: handleDone, children: state.assistantType === "tool" ? "Close" : "Dismiss" })}
 				${state.toolPreviewName ? html`<span data-testid="proposal-primary-submit">${Button({
 					variant: "default",
-					onClick: handleViewTool,
+					onClick: canApplyToolProposal ? handleApplyToolProposal : handleViewTool,
 					disabled: streaming,
-					children: html`<span class="inline-flex items-center gap-1.5">${icon(Wrench, "sm")} View Tool</span>`,
+					children: html`<span class="inline-flex items-center gap-1.5">${icon(Wrench, "sm")} ${canApplyToolProposal ? "Apply Tool" : "View Tool"}</span>`,
 				})}</span>` : ""}
 			</div>
 		</div>

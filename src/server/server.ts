@@ -19610,7 +19610,7 @@ async function handleApiRoute(
 		try {
 			const ctx = projectContextManager.getOrCreate(targetProjectId);
 			if (!ctx) { json({ error: "Project not found" }, 404); return; }
-			json(createCanonicalWorkflow(body, ctx.workflowStore), 201);
+			json(createCanonicalWorkflow(body, ctx.workflowStore, ctx.projectConfigStore.getComponents()), 201);
 		} catch (err: any) {
 			jsonError(err instanceof CanonicalMutationError ? err.status : 400, err);
 		}
@@ -19678,7 +19678,7 @@ async function handleApiRoute(
 		const ctx = projectContextManager.getOrCreate(qProjectId);
 		if (!ctx) { json({ error: "Project not found" }, 404); return; }
 		try {
-			json(updateCanonicalWorkflow(id, body, ctx.workflowStore));
+			json(updateCanonicalWorkflow(id, body, ctx.workflowStore, ctx.projectConfigStore.getComponents()));
 		} catch (error) {
 			if (error instanceof CanonicalMutationError) json({ error: error.message }, error.status);
 			else jsonError(500, error);

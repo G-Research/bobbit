@@ -4,12 +4,14 @@
  * second, almost-the-same implementation.
  */
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { parseDocument } from "yaml";
 import type { Role, RoleStore } from "../agent/role-store.js";
 import type { RoleManager } from "../agent/role-manager.js";
 import type { Workflow, WorkflowStore } from "../agent/workflow-store.js";
-import type { ToolManager } from "../agent/tool-manager.js";
+import { validateWorkflowDefinition, type WorkflowComponentRef } from "../agent/workflow-validator.js";
+import { ToolManager, __resetToolScanCache } from "../agent/tool-manager.js";
 
 export class CanonicalMutationError extends Error {
 	constructor(public readonly status: 400 | 404 | 409 | 422, message: string, public readonly code?: string) {
@@ -111,19 +113,25 @@ export function deleteCanonicalRole(name: string, target: RoleTarget): void {
 	if (!target.manager.deleteRole(name)) throw new CanonicalMutationError(404, "Role not found");
 }
 
-export function createCanonicalWorkflow(body: Record<string, any>, workflowStore: WorkflowStore): Workflow {
+function assertWorkflow(candidate: unknown, components: WorkflowComponentRef[]): void {
+	const errors = validateWorkflowDefinition(candidate, components);
+	if (errors.length) throw new CanonicalMutationError(400, errors[0].message);
+}
+
+export function createCanonicalWorkflow(body: Record<string, any>, workflowStore: WorkflowStore, components: WorkflowComponentRef[]): Workflow {
 	const now = Date.now();
 	const workflow: Workflow = { id: body.id as string, name: (body.name as string) ?? body.id, description: (body.description as string) ?? "", gates: body.gates || [], createdAt: now, updatedAt: now };
-	if (!workflow.id || typeof workflow.id !== "string") throw new CanonicalMutationError(400, "Missing id");
+	assertWorkflow(workflow, components);
 	workflowStore.put(workflow);
 	return workflow;
 }
 
-export function updateCanonicalWorkflow(id: string, body: Record<string, any>, workflowStore: WorkflowStore): Workflow {
+export function updateCanonicalWorkflow(id: string, body: Record<string, any>, workflowStore: WorkflowStore, components: WorkflowComponentRef[]): Workflow {
 	const existing = workflowStore.get(id);
 	if (!existing) throw new CanonicalMutationError(404, "Workflow not found in project");
 	const updated: Workflow = { ...existing, name: body.name ?? existing.name, description: body.description ?? existing.description,
 		gates: Array.isArray(body.gates) ? body.gates : existing.gates, id, updatedAt: Date.now() };
+	assertWorkflow(updated, components);
 	workflowStore.put(updated);
 	return updated;
 }
@@ -162,7 +170,7 @@ export function updateCanonicalStaff<T>(
 
 export async function deleteCanonicalStaff<T>(
 	id: string,
-	deps: { read(id: string): T | undefined; remove(id: string): Promise<boolean },
+	deps: { read(id: string): T | undefined; remove(id: string): Promise<boolean> },
 ): Promise<T | undefined> {
 	const staff = deps.read(id);
 	if (!await deps.remove(id)) throw new CanonicalMutationError(404, "Staff agent not found");
@@ -193,7 +201,17 @@ function parseToolYaml(content: string, expectedName: string): ParsedTool {
 	if (typeof tool.name !== "string" || !TOOL_NAME.test(tool.name) || tool.name !== expectedName) throw new CanonicalMutationError(422, "Tool YAML name must exactly match tool");
 	if (typeof tool.description !== "string") throw new CanonicalMutationError(422, "Tool YAML requires a string description");
 	if (typeof tool.group !== "string" || !tool.group.trim()) throw new CanonicalMutationError(422, "Tool YAML requires a non-empty group");
-	if (tool.provider !== undefined && (!tool.provider || typeof tool.provider !== "object" || Array.isArray(tool.provider))) throw new CanonicalMutationError(422, "Tool YAML provider must be a mapping");
+	if (tool.provider !== undefined) {
+		if (!tool.provider || typeof tool.provider !== "object" || Array.isArray(tool.provider)) throw new CanonicalMutationError(422, "Tool YAML provider must be a mapping");
+		const provider = tool.provider as Record<string, unknown>;
+		if (provider.type !== "builtin" && provider.type !== "bobbit-extension" && provider.type !== "mcp" && provider.type !== "pi-extension") {
+			throw new CanonicalMutationError(422, "Tool YAML provider type is invalid");
+		}
+		for (const key of ["tool", "extension", "server", "mcpTool", "providerKey"] as const) {
+			if (provider[key] !== undefined && typeof provider[key] !== "string") throw new CanonicalMutationError(422, `Tool YAML provider.${key} must be a string`);
+		}
+	}
+	if (tool.params !== undefined && (!Array.isArray(tool.params) || tool.params.some(value => typeof value !== "string"))) throw new CanonicalMutationError(422, "Tool YAML params must be an array of strings");
 	return { name: tool.name, group: tool.group, value: tool };
 }
 
@@ -227,6 +245,27 @@ function atomicWrite(file: string, content: string): void {
 	finally { try { fs.rmSync(temporary, { force: true }); } catch { /* no-op */ } }
 }
 
+function loaderAcceptsCandidate(content: string, parsed: ParsedTool, toolManager: ToolManager): boolean {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-tool-proposal-"));
+	try {
+		const configDir = path.join(root, "config");
+		atomicWrite(path.join(configDir, "tools", canonicalToolGroupDir(parsed.group), `${parsed.name}.yaml`), content);
+		const candidateManager = new ToolManager(configDir, toolManager.getBuiltinToolsDir());
+		const visible = candidateManager.getLocalTools().some(tool => tool.name === parsed.name);
+		const diagnostics = candidateManager.getToolDiagnostics().some(diagnostic => diagnostic.toolName === parsed.name || diagnostic.tool === parsed.name);
+		return visible && !diagnostics;
+	} finally {
+		try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* no-op */ }
+	}
+}
+
+function targetLoaderAccepts(toolManager: ToolManager, name: string): boolean {
+	__resetToolScanCache();
+	const visible = toolManager.getLocalTools().some(tool => tool.name === name);
+	const diagnostics = toolManager.getToolDiagnostics().some(diagnostic => diagnostic.toolName === name || diagnostic.tool === name);
+	return visible && !diagnostics;
+}
+
 /**
  * Applies a project-scoped tool proposal into the exact tree ToolManager scans.
  * Update/delete deliberately only address a local override; inherited tool packs
@@ -243,19 +282,30 @@ export function applyCanonicalToolProposal(proposal: ToolProposal, deps: { confi
 		try { if (local.groupDir) fs.rmdirSync(path.join(toolsDir, local.groupDir)); } catch { /* group has siblings */ }
 		return { action: proposal.action, tool: proposal.tool, groupDir: local.groupDir };
 	}
-	const parsed = parseToolYaml(proposal.content ?? "", proposal.tool);
+	const content = proposal.content ?? "";
+	const parsed = parseToolYaml(content, proposal.tool);
 	const groupDir = canonicalToolGroupDir(parsed.group);
 	if (proposal.action === "create" && local) throw new CanonicalMutationError(409, "Tool override already exists in project");
 	if (proposal.action === "update" && !local) throw new CanonicalMutationError(404, "Tool override not found in project");
+	// Exercise the same parser, contribution preflight and diagnostics as the
+	// runtime loader in an isolated tree before publishing any candidate bytes.
+	if (!loaderAcceptsCandidate(content, parsed, deps.toolManager)) {
+		throw new CanonicalMutationError(422, "Tool YAML was rejected by the tool loader");
+	}
 	// Preserve an existing layout on update: the declaration controls display
 	// grouping while the override's existing on-disk group remains canonical.
 	const file = local?.file ?? path.join(toolsDir, groupDir, `${parsed.name}.yaml`);
-	atomicWrite(file, proposal.content!);
-	// Use the same loader as /api/tools as a final schema/visibility check. A
-	// failed check rolls the candidate back rather than publishing a dead tool.
-	const loaded = deps.toolManager.getLocalTools().some(tool => tool.name === parsed.name);
-	if (!loaded) {
-		try { fs.rmSync(file, { force: true }); } catch { /* best effort rollback */ }
+	const previous = local ? fs.readFileSync(file, "utf8") : undefined;
+	atomicWrite(file, content);
+	if (!targetLoaderAccepts(deps.toolManager, parsed.name)) {
+		// A target group can have an invalid shared extension even though a clean
+		// candidate was valid. Restore byte-for-byte rather than deleting a valid
+		// override on update.
+		try {
+			if (previous !== undefined) atomicWrite(file, previous);
+			else fs.rmSync(file, { force: true });
+			__resetToolScanCache();
+		} catch { /* preservation failure is surfaced as a rejected mutation */ }
 		throw new CanonicalMutationError(422, "Tool YAML was rejected by the tool loader");
 	}
 	return { action: proposal.action, tool: parsed.name, groupDir: local?.groupDir ?? groupDir };

@@ -4108,6 +4108,33 @@
         "tier": "unit",
         "project": "integration"
       }
+    },
+    {
+      "path": "tests2/core/canonical-proposal-mutations.test.ts",
+      "reason": "Canonical proposal mutation coverage for loader-validated tool override create/update/delete, non-mutating invalid inputs, rollback preservation, and pre-persistence workflow validation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/tool-proposal-api.test.ts",
+      "reason": "Real authenticated route coverage for project-scoped tool proposal create/update/delete, loader visibility, invalid input rejection, and no stale override publication.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/canonical-mutation-route-parity.test.ts",
+      "reason": "Real route parity coverage proving role, workflow, and staff records remain durable after their public mutations delegate to canonical services.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
     }
   ],
   "journeys": [

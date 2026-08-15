@@ -191,7 +191,7 @@ describe("finite-shape update routes reject unknown request fields", () => {
 			id,
 			name: "Original strict workflow",
 			description: "Strict workflow fixture.",
-			gates: [],
+			gates: [{ id: "validate", name: "Validate", dependsOn: [], verify: [{ name: "Validate", type: "command", run: "echo ok" }] }],
 		}));
 		expect(create.status, `workflow creation: ${await create.clone().text()}`).toBe(201);
 		const path = `/api/workflows/${id}?projectId=${encodeURIComponent(project.id)}`;

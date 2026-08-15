@@ -305,7 +305,7 @@ test.describe("Journey: cross-project proposal banner (design §7)", () => {
 			.toBe("provisional");
 	});
 
-	test("tool proposal targeting another project routes 'View Tool' to the target scope", async ({ page }) => {
+	test("tool proposal acceptance applies into and routes to the target scope", async ({ page }) => {
 		const target = await registerTargetProject();
 		await openApp(page);
 		await createSessionViaUI(page);
@@ -314,6 +314,8 @@ test.describe("Journey: cross-project proposal banner (design §7)", () => {
 		await driveUnifiedProposal(page, "tool", {
 			tool: "cross-tool",
 			name: "cross-tool",
+			action: "create",
+			content: "name: cross-tool\ndescription: Cross-project fixture\ngroup: Cross Project\n",
 			projectId: target.id,
 		});
 		await activatePanel(page, "Tool", '[data-panel="tool-proposal"]');
@@ -330,8 +332,8 @@ test.describe("Journey: cross-project proposal banner (design §7)", () => {
 			{ timeout: 20_000 },
 		);
 
-		// Finding 1: clicking "View Tool" must scope the tool editor to the TARGET
-		// project so the tool is edited/saved in the target's config store.
+		// Applying the proposal must call the canonical public operation before
+		// opening the tool editor at the TARGET config scope.
 		await page.locator('[data-panel="tool-proposal"] [data-testid="proposal-primary-submit"] button').first().click();
 		await expect
 			.poll(async () => page.evaluate(() => (window as any).__bobbitGetConfigScope?.() ?? null), { timeout: 10_000 })
