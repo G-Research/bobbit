@@ -61,6 +61,7 @@ export const IMPACT_RULES = Object.freeze([
 			"tests2/core/role-bobbit-tools-policy.test.ts",
 			"tests2/core/role-children-tools-policy.test.ts",
 			"tests2/core/role-team-tools-policy.test.ts",
+			"tests2/core/sandbox-status.test.ts",
 			"tests2/core/tool-description-budget.test.ts",
 			"tests2/core/tool-docs-prompt.test.ts",
 			"tests2/core/tool-policy-resolution.test.ts",
@@ -866,6 +867,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 			{ expression: "path.join(sentinel, \"sentinel.txt\")", count: 1 },
 			{ expression: "filesystem.hostPath(destination)", count: 2 },
 			{ expression: "hostCanary", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/sandbox-status.test.ts",
+		declarations: frozen(["impact:builtin-tools"]),
+		reads: frozen([
+			{ expression: "extensionUrl", count: 1 },
 		]),
 	},
 	{
