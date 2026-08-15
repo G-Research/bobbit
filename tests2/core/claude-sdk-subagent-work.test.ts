@@ -210,6 +210,70 @@ describe("Claude SDK embedded subagent work", () => {
 		expect(recovered).toHaveLength(1 + MAX_RECOVERY_ROWS);
 	});
 
+	it("anchors recovered children at their immutable root parent boundary so later root rows preserve the snapshot prefix", async () => {
+		const parent = "agent-use";
+		const root = assistant("root-agent", undefined, "", [{ type: "toolCall", id: parent, name: "Agent", arguments: {} }]);
+		const terminal: ClaudeAgentSdkHistoryMessage = {
+			id: "root-agent-result", role: "toolResult", toolCallId: parent, toolName: "Agent", content: [], timestamp: 2,
+		};
+		const laterRoot = assistant("later-root", undefined, "", [{ type: "text", text: "later official root turn" }]);
+		const fixture = recoverySdk({
+			"child-1": [{
+				type: "assistant", uuid: "recovered-child", session_id: SESSION_ID, parent_tool_use_id: parent, parent_agent_id: "child-1",
+				message: { content: [{ type: "text", text: "recovered child work" }], stop_reason: "end_turn" },
+			}],
+		});
+		const snapshotA = await recoverClaudeSdkEmbeddedWork([root, terminal], { sessionId: SESSION_ID, cwd: "/workspace", access: fixture.deps });
+		const snapshotB = await recoverClaudeSdkEmbeddedWork([root, terminal, laterRoot], { sessionId: SESSION_ID, cwd: "/workspace", access: fixture.deps });
+
+		// The recovered child is nested at its immutable root invocation, not
+		// globally tailed behind later official history.
+		expect(snapshotA.map(message => ({ id: message.id, role: message.role }))).toEqual([
+			{ id: "root-agent", role: "assistant" },
+			{ id: "recovered-child", role: "assistant" },
+			{ id: "root-agent-result", role: "toolResult" },
+		]);
+		expect(snapshotB.slice(0, snapshotA.length).map(message => ({ id: message.id, role: message.role })))
+			.toEqual(snapshotA.map(message => ({ id: message.id, role: message.role })));
+
+		const projectedA = projectClaudeSdkEmbeddedWork(snapshotA);
+		const projectedB = projectClaudeSdkEmbeddedWork(snapshotB);
+		expect(projectedA.rootMessages.map(message => ({ id: message.id, role: message.role }))).toEqual([
+			{ id: "root-agent", role: "assistant" },
+			{ id: "root-agent-result", role: "toolResult" },
+		]);
+		expect(projectedB.rootMessages.slice(0, projectedA.rootMessages.length).map(message => ({ id: message.id, role: message.role })))
+			.toEqual(projectedA.rootMessages.map(message => ({ id: message.id, role: message.role })));
+		expect(projectedB.workByParent.get(parent)?.messages.map(message => message.id)).toEqual(["recovered-child"]);
+	});
+
+	it("keeps an unterminated recovered child before a later terminal and root tail", async () => {
+		const parent = "agent-use-late-terminal";
+		const root = assistant("root-agent", undefined, "", [{ type: "toolCall", id: parent, name: "Agent", arguments: {} }]);
+		const terminal: ClaudeAgentSdkHistoryMessage = {
+			id: "late-terminal", role: "toolResult", toolCallId: parent, toolName: "Agent", content: [], timestamp: 2,
+		};
+		const laterRoot = assistant("later-root", undefined, "", [{ type: "text", text: "later official root turn" }]);
+		const fixture = recoverySdk({
+			"child-1": [{
+				type: "assistant", uuid: "recovered-child", session_id: SESSION_ID, parent_tool_use_id: parent, parent_agent_id: "child-1",
+				message: { content: [{ type: "text", text: "recovered child work" }], stop_reason: "end_turn" },
+			}],
+		});
+		const snapshotA = await recoverClaudeSdkEmbeddedWork([root], { sessionId: SESSION_ID, cwd: "/workspace", access: fixture.deps });
+		const snapshotB = await recoverClaudeSdkEmbeddedWork([root, terminal, laterRoot], { sessionId: SESSION_ID, cwd: "/workspace", access: fixture.deps });
+
+		expect(snapshotA.map(message => ({ id: message.id, role: message.role }))).toEqual([
+			{ id: "root-agent", role: "assistant" },
+			{ id: "recovered-child", role: "assistant" },
+		]);
+		expect(snapshotB.slice(0, snapshotA.length).map(message => ({ id: message.id, role: message.role })))
+			.toEqual(snapshotA.map(message => ({ id: message.id, role: message.role })));
+		expect(projectClaudeSdkEmbeddedWork(snapshotB).rootMessages.map(message => message.id)).toEqual([
+			"root-agent", "late-terminal", "later-root",
+		]);
+	});
+
 	it("partitions only exact non-empty root parents and drops rows after the byte budget without failing recovery", async () => {
 		const one = "agent-use-1";
 		const two = "agent-use-2";
