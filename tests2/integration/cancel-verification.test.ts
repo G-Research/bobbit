@@ -1060,13 +1060,17 @@ test.describe("Cancel Verification API", () => {
 		}
 	});
 
-	test("late cancellation finalization cannot overwrite a newer re-signal", async ({ gateway }) => {
+	test("inactive duplicate replacement records zombie recovery without serializing the new generation or nudging", async ({ gateway }) => {
 		let setup: SlowWorkflowGoal | undefined;
 		let sessionId: string | undefined;
 		let conn: WsConnection | undefined;
 		let resignalRequest: Promise<Response> | undefined;
 		const runner = new PendingExactCleanupRunner();
-		gateway.teamManager.verificationHarness!.commandStepRunner = runner;
+		const harness = gateway.teamManager.verificationHarness!;
+		const recoveryNudges: string[] = [];
+		const originalNotifier = (harness as any).notifyTeamLeadFn;
+		harness.setTeamLeadNotifier((_goalId: string, message: string) => { recoveryNudges.push(message); });
+		harness.commandStepRunner = runner;
 		try {
 			setup = await createSlowWorkflowGoal("Pending Re-signal Generation");
 			sessionId = await createSession({ goalId: setup.goalId });
@@ -1098,11 +1102,13 @@ test.describe("Cancel Verification API", () => {
 			const afterOldCleanup = await getGateState(setup.goalId);
 			expect(afterOldCleanup.signals.find(signal => signal.id === firstSignalId)?.verification.status).toBe("cancelled");
 			expect(afterOldCleanup.signals.find(signal => signal.id === firstSignalId)?.verification.cancellation,
-				"SUPERSEDED_GENERATION_MUST_RETAIN_ITS_OWN_CAUSE").toMatchObject({ cause: "superseded" });
+				"INACTIVE_DUPLICATE_MUST_RETAIN_ZOMBIE_RECOVERY_CAUSE").toMatchObject({ cause: "zombie-recovery" });
 			expect(afterOldCleanup.signals.find(signal => signal.id === secondSignalId)?.verification.status,
-				"LATE_CANCEL_MUST_NOT_FINALIZE_NEW_SIGNAL").toBe("running");
-			expect(afterOldCleanup.status, "LATE_CANCEL_MUST_NOT_OVERWRITE_NEW_GATE_STATE").toBe("pending");
+				"ZOMBIE_CLEANUP_MUST_NOT_FINALIZE_NEW_SIGNAL").toBe("running");
+			expect(afterOldCleanup.status, "ZOMBIE_CLEANUP_MUST_NOT_OVERWRITE_NEW_GATE_STATE").toBe("pending");
+			expect(recoveryNudges, "ZOMBIE_RECOVERY_MUST_NOT_EMIT_A_RESIGNAL_NUDGE").toEqual([]);
 		} finally {
+			(harness as any).notifyTeamLeadFn = originalNotifier;
 			runner.settleAll();
 			await resignalRequest?.catch(() => {});
 			conn?.close();

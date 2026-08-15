@@ -13000,7 +13000,7 @@ async function handleApiRoute(
 					// This request is an explicit replacement generation. Fence the old
 					// generation now, but never make the new signal wait for its exact
 					// process/Docker cleanup or let a later broad sweep cancel the new row.
-					void verificationHarness.cancelStaleVerifications(goalId, gateId, "superseded").catch(error => {
+					void verificationHarness.cancelStaleVerifications(goalId, gateId, "zombie-recovery").catch(error => {
 						console.error(`[api] Error cancelling inactive verification for re-signal ${goalId}/${gateId}:`, error);
 					});
 					staleCancellationStarted = true;
