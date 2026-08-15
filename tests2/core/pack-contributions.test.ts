@@ -207,16 +207,22 @@ describe("validateManifest (§1.2)", () => {
 		}
 	});
 
-	it("accepts schema-3 sandbox requirement catalogues only with safe basenames", () => {
-		const schema2Problems: string[] = [];
-		assert.equal(validateManifest({ ...ok, schema: 2, contents: { ...ok.contents, sandboxRequirements: ["python"] } }, schema2Problems), null);
-		assert.match(schema2Problems.join("\n"), /requires schema 3/);
+	it("accepts the schema-3 sandbox-requirements authored key and camelCase alias only with safe basenames", () => {
+		for (const schema of [1, 2]) {
+			for (const key of ["sandbox-requirements", "sandboxRequirements"] as const) {
+				const problems: string[] = [];
+				assert.equal(validateManifest({ ...ok, schema, contents: { ...ok.contents, [key]: ["python"] } }, problems), null);
+				assert.match(problems.join("\n"), /contents\.sandbox-requirements requires schema 3/);
+			}
+		}
 		const problems: string[] = [];
-		const m = validateManifest({ ...ok, schema: 3, contents: { ...ok.contents, sandboxRequirements: ["python-analysis"] } }, problems);
+		const m = validateManifest({ ...ok, schema: 3, contents: { ...ok.contents, "sandbox-requirements": ["python-analysis"] } }, problems);
 		assert.ok(m);
 		assert.deepEqual(m.contents.sandboxRequirements, ["python-analysis"]);
 		assert.deepEqual(problems, []);
-		assert.equal(validateManifest({ ...ok, schema: 3, contents: { ...ok.contents, sandboxRequirements: ["../escape"] } }), null);
+		const alias = validateManifest({ ...ok, schema: 3, contents: { ...ok.contents, sandboxRequirements: ["python-alias"] } });
+		assert.deepEqual(alias?.contents.sandboxRequirements, ["python-alias"]);
+		assert.equal(validateManifest({ ...ok, schema: 3, contents: { ...ok.contents, "sandbox-requirements": ["../escape"] } }), null);
 	});
 
 	it("rejects bad capability names and warns on schemas newer than schema 3", () => {
