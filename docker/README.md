@@ -58,10 +58,13 @@ RUN npm install -g @earendil-works/pi-coding-agent@${PI_AGENT_VERSION} ...
 LABEL bobbit.pi-agent-version=${PI_AGENT_VERSION}
 ```
 
-At startup the gateway reads its own `pi-coding-agent` version from `node_modules`, compares it to the image's `bobbit.pi-agent-version` label, and rebuilds automatically when they drift — passing `--build-arg PI_AGENT_VERSION=<host-version>` so the image always matches the gateway. See `src/server/agent/sandbox-status.ts::ensureImageAgentVersion`.
+At startup the gateway reads its own `pi-coding-agent` version from `node_modules`, compares it to the image's `bobbit.pi-agent-version` label, and rebuilds automatically when they drift — passing `--build-arg PI_AGENT_VERSION=<host-version>` so the image always matches the gateway. It also requires `bobbit.runtime-schema=1`, the fixed Bobbit-owned global dispatcher-runtime import contract; bump that schema only when the runtime contract changes, never to encode provider or dependency versions. See `src/server/agent/sandbox-status.ts::ensureImageAgentVersion`.
+
+The image globally installs Bobbit's dispatcher imports (`jiti@2.7.0` and `typebox@1.1.38`) and probes `jiti/static` and `typebox/value` at build time. They must not come from an arbitrary mounted workspace's `node_modules`.
 
 This ensures:
 - The container always uses the **same agent version** as the gateway
+- The dispatcher has its required runtime imports without host or project dependencies
 - Fast filesystem access for the agent runtime (no cross-OS bridge)
 - No version drift between sandboxed and non-sandboxed sessions
 

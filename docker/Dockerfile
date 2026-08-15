@@ -57,6 +57,17 @@ RUN npm install -g @earendil-works/pi-coding-agent@${PI_AGENT_VERSION} --no-audi
     && ln -sf $(npm root -g) /node_modules
 LABEL bobbit.pi-agent-version=${PI_AGENT_VERSION}
 
+# The SDK extension dispatcher is compiled by Bobbit but runs from an arbitrary
+# user workspace. Keep its runtime imports global rather than relying on that
+# workspace's node_modules. The import probe makes the image contract fail at
+# build time instead of later as a generic worker-exited error.
+RUN npm install -g jiti@2.7.0 typebox@1.1.38 --no-audit --no-fund 2>/dev/null \
+    && node --input-type=module -e 'await import("jiti/static"); await import("typebox/value")'
+
+# Bump only when the Bobbit-owned global runtime import contract changes.
+ARG BOBBIT_RUNTIME_SCHEMA_VERSION=1
+LABEL bobbit.runtime-schema=${BOBBIT_RUNTIME_SCHEMA_VERSION}
+
 # The sandbox SDK launcher is deliberately pinned to the server dependency.
 # It discovers only the installed package's bundled platform binary; it never
 # falls back to a globally installed `claude` command.

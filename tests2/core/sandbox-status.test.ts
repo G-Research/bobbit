@@ -7,9 +7,18 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { buildSandboxImage, checkDockerAvailability, ensureImageAgentVersion, getHostAgentVersion, resolveSandboxDockerContext } from "../../src/server/agent/sandbox-status.js";
+import {
+	buildSandboxImage,
+	checkDockerAvailability,
+	ensureImageAgentVersion,
+	getHostAgentVersion,
+	resolveSandboxDockerContext,
+	SANDBOX_RUNTIME_SCHEMA_LABEL,
+	SANDBOX_RUNTIME_SCHEMA_VERSION,
+} from "../../src/server/agent/sandbox-status.js";
 
 const SERVER_SOURCE = readFileSync(new URL("../../src/server/server.ts", import.meta.url), "utf8");
+const DOCKERFILE = readFileSync(new URL("../../docker/Dockerfile", import.meta.url), "utf8");
 const DOCKER_FENCE_ERROR = "SANDBOX_DOCKER_RUNNER_FENCE";
 
 function fencedDockerRunner(calls: Array<{ file: string; args: readonly string[] }>) {
@@ -61,7 +70,14 @@ describe("sandbox Docker context resolution", () => {
 		assert.equal(buildCalls[0].args[0], "build");
 	});
 
-	it("uses its injected runner for image version inspection and rebuilding", async () => {
+	it("pins the global dispatcher runtime imports and stamps their schema", () => {
+		assert.match(DOCKERFILE, /npm install -g jiti@2\.7\.0 typebox@1\.1\.38 --no-audit --no-fund/);
+		assert.match(DOCKERFILE, /await import\("jiti\/static"\); await import\("typebox\/value"\)/);
+		assert.match(DOCKERFILE, new RegExp(`LABEL ${SANDBOX_RUNTIME_SCHEMA_LABEL}\\=\\$\\{BOBBIT_RUNTIME_SCHEMA_VERSION\\}`));
+		assert.match(DOCKERFILE, new RegExp(`ARG BOBBIT_RUNTIME_SCHEMA_VERSION=${SANDBOX_RUNTIME_SCHEMA_VERSION}`));
+	});
+
+	it("rebuilds when the image lacks either required runtime label", async () => {
 		const hostVersion = getHostAgentVersion();
 		assert.ok(hostVersion, "the local pi-coding-agent package supplies a version");
 		const calls: Array<{ file: string; args: readonly string[] }> = [];
@@ -77,10 +93,49 @@ describe("sandbox Docker context resolution", () => {
 		assert.equal(await ensureImageAgentVersion("fenced-image", resolve(import.meta.dirname, "..", ".."), recordingRunner), true);
 		assert.deepEqual(calls.map(({ file, args }) => ({ file, command: args[0] })), [
 			{ file: "docker", command: "inspect" },
+			{ file: "docker", command: "inspect" },
 			{ file: "docker", command: "build" },
 		]);
 		assert.deepEqual(calls[0].args, ["inspect", "--format", "{{index .Config.Labels \"bobbit.pi-agent-version\"}}", "fenced-image"]);
-		assert.ok(calls[1].args.includes(`PI_AGENT_VERSION=${hostVersion}`));
+		assert.deepEqual(calls[1].args, ["inspect", "--format", `{{index .Config.Labels "${SANDBOX_RUNTIME_SCHEMA_LABEL}"}}`, "fenced-image"]);
+		assert.ok(calls[2].args.includes(`PI_AGENT_VERSION=${hostVersion}`));
+	});
+
+	it("rebuilds a current Pi image with a stale runtime schema", async () => {
+		const hostVersion = getHostAgentVersion();
+		assert.ok(hostVersion);
+		const calls: Array<{ file: string; args: readonly string[] }> = [];
+		const runner = {
+			execFile: async (file: string, args: readonly string[]) => {
+				calls.push({ file, args });
+				if (args[0] === "inspect") {
+					return { stdout: Buffer.from(args[2].includes("pi-agent-version") ? hostVersion : "0"), stderr: Buffer.alloc(0) };
+				}
+				return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+			},
+		};
+		assert.equal(await ensureImageAgentVersion("fenced-image", resolve(import.meta.dirname, "..", ".."), runner), true);
+		assert.equal(calls.filter(({ args }) => args[0] === "build").length, 1);
+	});
+
+	it("does not rebuild a fully current image and reports rebuild failures", async () => {
+		const hostVersion = getHostAgentVersion();
+		assert.ok(hostVersion);
+		const currentRunner = {
+			execFile: async (_file: string, args: readonly string[]) => ({
+				stdout: Buffer.from(args[2].includes("pi-agent-version") ? hostVersion : SANDBOX_RUNTIME_SCHEMA_VERSION),
+				stderr: Buffer.alloc(0),
+			}),
+		};
+		assert.equal(await ensureImageAgentVersion("fenced-image", resolve(import.meta.dirname, "..", ".."), currentRunner), true);
+
+		const failingRunner = {
+			execFile: async (_file: string, args: readonly string[]) => {
+				if (args[0] === "inspect") return { stdout: Buffer.from("<no value>"), stderr: Buffer.alloc(0) };
+				throw new Error(DOCKER_FENCE_ERROR);
+			},
+		};
+		assert.equal(await ensureImageAgentVersion("fenced-image", resolve(import.meta.dirname, "..", ".."), failingRunner), false);
 	});
 
 	it("threads the gateway runner to every sandbox Docker helper call site", () => {
