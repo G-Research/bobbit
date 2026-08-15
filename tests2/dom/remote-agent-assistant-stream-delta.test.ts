@@ -131,6 +131,69 @@ describe("RemoteAgent assistant stream delta", () => {
 		expect(agent._previousRawAssistantStreamMessage).toBeUndefined();
 	});
 
+	it("removes a recoverable length tail by stream id before rendering the retry terminal", async () => {
+		const agent: any = new RemoteAgent();
+		agent.send = () => {};
+		const firstStreamId = "assistant-stream:first-length";
+		const retryStreamId = "assistant-stream:retry";
+		const prior = {
+			role: "assistant",
+			id: "prior-terminal",
+			assistantStreamId: "assistant-stream:prior",
+			content: [{ type: "text", text: "prior canonical output" }],
+			stopReason: "stop",
+		};
+		await agent.handleServerMessage({ type: "messages", data: [prior] });
+
+		const firstUpdate = makeAssistantUpdate("truncated first tail", "truncated first tail");
+		firstUpdate.message.id = "first-length-tail";
+		(firstUpdate.message as any).assistantStreamId = firstStreamId;
+		(firstUpdate.assistantMessageEvent.partial as any).id = "first-length-tail";
+		(firstUpdate.assistantMessageEvent.partial as any).assistantStreamId = firstStreamId;
+		await agent.handleServerMessage({ type: "event", seq: 1, ts: 10, data: firstUpdate });
+		expect(agent.state.streamingMessage.assistantStreamId).toBe(firstStreamId);
+		await agent.handleServerMessage({
+			type: "event",
+			seq: 2,
+			ts: 20,
+			data: {
+				type: "message_end",
+				assistantStreamId: firstStreamId,
+				message: { ...firstUpdate.message, stopReason: "length" },
+			},
+		});
+		expect(agent.state.messages.map((row: any) => row.id)).toEqual(["prior-terminal", "first-length-tail"]);
+
+		await agent.handleServerMessage({
+			type: "event",
+			seq: 3,
+			ts: 30,
+			data: { type: "assistant_stream_invalidated", assistantStreamId: firstStreamId, reason: "overflow-retry" },
+		});
+		expect(agent.state.streamingMessage).toBeNull();
+		expect(agent.state.messages.map((row: any) => row.id)).toEqual(["prior-terminal"]);
+
+		const retryUpdate = makeAssistantUpdate("complete retry output", "complete retry output");
+		retryUpdate.message.id = "retry-terminal";
+		(retryUpdate.message as any).assistantStreamId = retryStreamId;
+		(retryUpdate.assistantMessageEvent.partial as any).id = "retry-terminal";
+		(retryUpdate.assistantMessageEvent.partial as any).assistantStreamId = retryStreamId;
+		await agent.handleServerMessage({ type: "event", seq: 4, ts: 40, data: retryUpdate });
+		await agent.handleServerMessage({
+			type: "event",
+			seq: 5,
+			ts: 50,
+			data: {
+				type: "message_end",
+				assistantStreamId: retryStreamId,
+				message: { ...retryUpdate.message, stopReason: "stop" },
+			},
+		});
+
+		expect(agent.state.messages.map((row: any) => row.id)).toEqual(["prior-terminal", "retry-terminal"]);
+		expect(agent.state.messages.at(-1).content[0].text).toBe("complete retry output");
+	});
+
 	it("continues progressive tool JSON after a snapshot with a self-contained baseline", async () => {
 		const agent: any = new RemoteAgent();
 		const ws = new FakeWS("ws://test");

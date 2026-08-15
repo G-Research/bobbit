@@ -5,7 +5,7 @@
 import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
-import { Value } from "@sinclair/typebox/value";
+import * as Value from "typebox/value";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
 	BOBBIT_COMPACT_PROJECTIONS,
