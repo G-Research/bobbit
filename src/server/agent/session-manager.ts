@@ -33,6 +33,7 @@ import { isClaudeSdkRetainedNativeTool } from "./claude-agent-sdk-tool-surface.j
 import { sanitizeClaudeAgentSdkErrorForLog } from "./claude-agent-sdk-error.js";
 import { claudeAgentSdkDirectConfigDir, createDirectClaudeAgentSdkSessionAccess, createSandboxClaudeAgentSdkSessionAccess, defaultClaudeAgentSdkSessionAccessDeps, readSdkSessionInfo, readSdkSessionMessages, type ClaudeAgentSdkSessionAccessDeps, type ClaudeAgentSdkSessionApi, type SdkSessionInfo } from "./claude-agent-sdk-session-access.js";
 import { isSandboxContainerCwd } from "./docker-exec-spawn.js";
+import { translateSandboxGatewayUrl } from "./sandbox-gateway-url.js";
 import { adaptSdkSessionMessages } from "./claude-agent-sdk-history-adapter.js";
 import { projectClaudeSdkEmbeddedWork, recoverClaudeSdkEmbeddedWork } from "./claude-sdk-subagent-work.js";
 import {
@@ -3955,10 +3956,14 @@ export class SessionManager {
 			throw new ClaudeAgentSdkUnavailableError("CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE: rebuild the Docker sandbox image before starting a Claude Agent SDK session");
 		}
 
-		// Read gateway URL and generate scoped token for the container.
+		// Read gateway URL and generate scoped token for the container. Docker
+		// reaches a host loopback listener through host.docker.internal, while
+		// direct agents and the persisted gateway-url retain their exact URL.
 		const gwUrl = this.readGatewayUrlForAgent();
 		if (!gwUrl) throw new Error("Cannot read gateway credentials for sandbox: gateway-url not found");
-		bridgeOptions.gatewayUrl = gwUrl;
+		const sandboxGatewayUrl = translateSandboxGatewayUrl(gwUrl);
+		if (!sandboxGatewayUrl) throw new Error("Cannot read gateway credentials for sandbox: gateway-url is invalid");
+		bridgeOptions.gatewayUrl = sandboxGatewayUrl;
 		const scopedToken = this.mintScopedGatewayToken(projectId, sessionId, opts?.goalId ?? bridgeOptions.env?.BOBBIT_GOAL_ID);
 		if (scopedToken) {
 			bridgeOptions.gatewayToken = scopedToken;

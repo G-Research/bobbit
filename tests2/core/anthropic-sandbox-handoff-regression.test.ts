@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 
 import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
 import { SessionManager } from "../../src/server/agent/session-manager.js";
+import { translateSandboxGatewayUrl } from "../../src/server/agent/sandbox-gateway-url.js";
 import { ToolManager } from "../../src/server/agent/tool-manager.js";
 import {
 	ClaudeAgentSdkUnavailableError,
@@ -81,6 +82,38 @@ afterEach(() => {
 });
 
 describe("Anthropic sandbox OAuth handoff regressions", () => {
+	it("translates only trusted loopback URLs for Docker callbacks", () => {
+		assert.equal(
+			translateSandboxGatewayUrl("http://127.24.6.8:3001/team/bobbit?mount=active"),
+			"http://host.docker.internal:3001/team/bobbit?mount=active",
+		);
+		assert.equal(
+			translateSandboxGatewayUrl("https://localhost:8443/team/bobbit?mount=active"),
+			"https://host.docker.internal:8443/team/bobbit?mount=active",
+		);
+		assert.equal(
+			translateSandboxGatewayUrl("http://[::1]:3001/team/bobbit?mount=active"),
+			"http://host.docker.internal:3001/team/bobbit?mount=active",
+		);
+		assert.equal(
+			translateSandboxGatewayUrl("https://gateway.example.test:8443/team/bobbit?mount=active"),
+			"https://gateway.example.test:8443/team/bobbit?mount=active",
+		);
+		assert.equal(translateSandboxGatewayUrl("http://user:password@127.0.0.1:3001"), undefined);
+		assert.equal(translateSandboxGatewayUrl("not a gateway URL"), undefined);
+	});
+
+	it("keeps the direct-agent authority unchanged", () => {
+		useHostAuth(completePiOAuthCredential("direct-current-access", Date.now() + 60_000));
+		writeFileSync(path.join(root!, "state", "gateway-url"), "http://127.0.0.1:3001/team/bobbit?mount=active\n");
+		const manager: any = new SessionManager();
+
+		assert.equal(
+			manager.scopedGatewayEnvForDirectAgent("direct-session", "project-direct").BOBBIT_GATEWAY_URL,
+			"http://127.0.0.1:3001/team/bobbit?mount=active",
+		);
+	});
+
 	it.each([
 		"CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE",
 		"CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE",
@@ -323,6 +356,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 		assert.deepEqual(scopedStore.addSession.mock.calls, [["project-sdk", "session-sdk"]]);
 		assert.deepEqual(scopedStore.addGoal.mock.calls, [["project-sdk", "goal-sdk"]]);
 		assert.equal("sandboxCredentials" in bridgeOptions, false);
+		assert.equal(bridgeOptions.gatewayUrl, "http://host.docker.internal:3001");
 		assert.deepEqual(bridgeOptions.claudeSdkSandboxLaunch, {
 			containerId: "container-sdk",
 			cwd: "/workspace-wt/sdk",
@@ -330,7 +364,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 			sessionSecret: "session-secret",
 			goalId: "goal-sdk",
 			gatewayToken: scopedToken,
-			gatewayUrl: "http://127.0.0.1:3001",
+			gatewayUrl: "http://host.docker.internal:3001",
 			oauthAccessToken: hostAccess,
 		});
 		assert.equal(readFileSync(piAuthPath, "utf8"), piAuth, "SDK wiring must not rewrite Pi's shared auth state");
