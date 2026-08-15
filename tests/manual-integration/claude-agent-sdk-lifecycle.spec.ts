@@ -30,6 +30,11 @@ type ManualRole = {
 	toolPolicies?: Record<string, string>;
 };
 
+/** Reload through the session's owning project rather than the default manager. */
+function manualTranscriptReloadPath(sessionId: string, projectId: string): string {
+	return `/api/sessions/${encodeURIComponent(sessionId)}/transcript?projectId=${encodeURIComponent(projectId)}`;
+}
+
 /** Isolate the constrained native helper from its normal gate-review prompt. */
 async function configureManualHelperRole(
 	api: (path: string, init?: RequestInit) => Promise<Response>,
@@ -544,6 +549,12 @@ test("Claude Agent SDK manual live controls choose a distinct SDK wire alias", (
 	}).toEqual({ fullHaiku: "sonnet", aliasHaiku: "sonnet", sonnet: "haiku" });
 });
 
+test("Claude Agent SDK manual transcript reload scopes and encodes its project", () => {
+	expect(manualTranscriptReloadPath("session/id", "project & id")).toBe(
+		"/api/sessions/session%2Fid/transcript?projectId=project%20%26%20id",
+	);
+});
+
 test("Claude Agent SDK manual smoke setup installs the explicit auth directory and removes ambient API credentials", () => {
 	const originalEnvironment = captureSmokeEnvironment();
 	try {
@@ -968,7 +979,7 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 				id: expectedResumeTuple?.data?.model?.id,
 				thinkingLevel: expectedResumeTuple?.data?.thinkingLevel,
 			});
-			const reloaded = await api(`/api/sessions/${created.id}/transcript`);
+			const reloaded = await api(manualTranscriptReloadPath(created.id, project.id));
 			expect(reloaded.status).toBe(200);
 			const afterRestart = await gateway.sessionManager.getMessagesSnapshotBase(session);
 			expect(beforeRestart.success && afterRestart.success && sameTranscriptProjection(beforeRestart.data, afterRestart.data)).toBe(true);
@@ -1312,7 +1323,7 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 				id: expectedSandboxResumeTuple?.data?.model?.id,
 				thinkingLevel: expectedSandboxResumeTuple?.data?.thinkingLevel,
 			});
-			const sandboxReload = await api(`/api/sessions/${created.id}/transcript`);
+			const sandboxReload = await api(manualTranscriptReloadPath(created.id, project.id));
 			expect(sandboxReload.status).toBe(200);
 			const afterRestart = await gateway.sessionManager.getMessagesSnapshotBase(session);
 			expect(beforeReplacement.success && afterRestart.success && sameTranscriptProjection(beforeReplacement.data, afterRestart.data)).toBe(true);
