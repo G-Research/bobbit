@@ -1557,9 +1557,10 @@ declaration cannot grant itself authority, and enabling a pack does not grant `d
 capability. An active `decide` grant permits only the bounded runtimes documented here: the
 scheduled-advisor path below, the [decision-request dispatcher](extension-decision-requests.md)
 for a supported lifecycle event, the [gated request-mutation](request-mutation.md) consumer for a
-`mode: decide` hook with an exact `mutate` grant, or an explicitly declared startup
-capability-selector stage. Each runtime rechecks the active declaration and exact grant at its
-application fence, and creates neither a working Host API nor a general hook runtime.
+`mode: decide` hook with an exact `mutate` grant, an explicitly declared startup
+capability-selector stage, or the project-registration import dispatcher. Each
+runtime rechecks the active declaration and exact grant at its application
+fence, and creates neither a working Host API nor a general hook runtime.
 
 A `decide()` hook may also return the strict advisory-selection envelope
 `{ kind: "selection", selection: { ... } }`. It can recommend one bounded
@@ -1600,6 +1601,38 @@ config:
 activation:
   requiresConfig: [auditEndpoint]
 ```
+
+#### Project import decision hook
+
+A `projectImported` hook can make a bounded decision while a **new normal
+project** is registered, before the Add Project flow creates its ordinary
+assistant session. This is a project-owned delivery lifecycle, not a session
+hook: it does not provide a session id, working directory, transcript, prompt,
+Host API, or a path to start an agent.
+
+The declaration needs `mode: decide`, an active exact `decide` grant, and no
+`selectors` or `schedule`. It may return only a decision request, a non-waking
+advisory, or no result; selection and request-mutation envelopes are unavailable.
+Requests must use `scope: project`. The detailed context, settlement, replay,
+and proposal-only effect boundary are in [Project import decision hooks](extension-decision-requests.md#project-import-decision-hooks).
+
+```yaml
+# hooks/project-import.yaml
+id: project-import
+module: ../lib/project-import.mjs
+events: [projectImported]
+mode: decide
+capabilities: []
+budget:
+  maxTokens: 64
+  timeoutMs: 1000
+```
+
+Treat `decide()` as declaration-only. The gateway atomically stores an import
+run and invokes an unfinished hook again after a crash, so external work in
+`decide()` could be duplicated. `onDecision()` receives the durable winning
+resolution and the same stored context; it is not a callback for a fresh
+filesystem scan.
 
 #### Startup capability selectors
 
@@ -1789,9 +1822,12 @@ The declaration fields are strict:
   pack-escaping paths reject the pack.
 - **`events`** is required, non-empty, and duplicate-free. Supported values are
   `sessionSetup`, `beforePrompt`, `beforeToolCall`, `afterToolResult`, `afterTurn`,
-  `beforeCompact`, `sessionShutdown`, and `goalProvisioned`. `afterToolResult` is reserved for
-  the result-filter consumer. A declaration is eligible for its `filter:tool-result` grant only
-  when it is the sole event; other metadata remains inert.
+  `beforeCompact`, `sessionShutdown`, `goalProvisioned`, and `projectImported`.
+  `afterToolResult` is reserved for the result-filter consumer. `projectImported`
+  requires `mode: decide` and cannot declare `selectors` or `schedule`; it is
+  dispatched only after new-project component persistence. A declaration is
+  eligible for its `filter:tool-result` grant only when `afterToolResult` is the
+  sole event; other metadata remains inert.
 - **`mode`** is required and is exactly `observe` or `decide`.
 - **`capabilities`** is required and duplicate-free. Its only values are `store`, `session`,
   `agents`, `mutate`, `filter:tool-result`, `prompt:system-static`, and
@@ -1863,8 +1899,10 @@ advisor with omitted/`advisor` kind meeting the exact contract above; an active 
 `mode: decide` hook invoked by the decision-request dispatcher (including only-due `kind: decision`
 every-N hooks); an active exact-granted `mode: decide`/`mutate` hook invoked by [gated request
 mutation](request-mutation.md); an active exact-granted declared selector during session setup;
-and an active exact-granted `afterToolResult` filter. The decision dispatcher rechecks the grant
-before `decide()` and optional `onDecision()`; request mutation rechecks every extension candidate
+an active exact-granted `afterToolResult` filter; and an active exact-granted
+`projectImported` decision hook after new-project component persistence. The
+decision dispatcher rechecks the grant before `decide()` and optional
+`onDecision()`; request mutation rechecks every extension candidate
 after all workers settle and immediately before core applies a result; result filtering checks
 before invocation and after all workers settle; selectors recheck at their application fence. A
 scheduled `kind: decision`

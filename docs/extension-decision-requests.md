@@ -5,7 +5,9 @@ creating an agent turn or gaining a configuration-apply capability. Requests
 and inbox advisories are durable mediation; selection proposals are
 non-durable, host-owned advice. The gateway—not the hook—validates and
 classifies every result, owns durable settlement where applicable, and controls
-whether silence can continue work.
+whether silence can continue work. Most decisions belong to a session; the
+`projectImported` lifecycle instead belongs to a newly registered project and
+has no agent session.
 
 The three classes have deliberately different semantics:
 
@@ -57,7 +59,8 @@ A hook needs all of the following before it can make a decision:
 1. A schema-2 pack lists its hook basename in `contents.hooks`.
 2. The hook declaration is active and has `mode: decide`.
 3. Its event is one of `sessionSetup`, `beforePrompt`, `afterTurn`,
-   `beforeCompact`, or `sessionShutdown`.
+   `beforeCompact`, `sessionShutdown`, or `projectImported`. The last is
+   dispatched only by the project-registration lifecycle described below.
 4. The project has an exact EP-6 `decide` grant for `(packId, hookId)`.
 
 Activation alone is not permission. Operators grant the capability through the
@@ -140,10 +143,98 @@ export default {
 `decide()` may return `null` or `undefined` for no action, one request, one
 advisory, or one selection proposal. Any other value is rejected. Unknown
 fields at every level are rejected rather than ignored, so authors should treat
-this as a strict output
-contract. `onDecision()` receives the winning durable resolution; its return
-value is ignored. A thrown callback is retried during reconciliation up to the
-bounded delivery limit without changing that resolution.
+this as a strict output contract. `onDecision()` receives the winning durable
+resolution; its return value is ignored. A thrown callback is retried during
+reconciliation up to the bounded delivery limit without changing that
+resolution.
+
+## Project import decision hooks
+
+`projectImported` lets an installed, active, exactly granted decision hook ask
+about a project **after** a new normal project has been registered and its
+components have been persisted, but before the Add Project flow starts its
+ordinary assistant session. It gives import-time guidance a durable owner
+without fabricating a session, transcript, `ask_user_choices` envelope, or
+agent wake-up.
+
+Only `POST /api/projects` creates this lifecycle, and only for a new normal
+project. Existing projects are not backfilled. A retry with `upsert: true`
+reuses the same import run; it does not ask again. A hook declaration that
+includes this event must use `mode: decide` and must not declare `selectors` or
+`schedule`. The ordinary hook `decide` grant remains the authority check, and
+the gateway checks the active declaration and exact grant before invocation and
+again before admitting a result or delivering a continuation.
+
+An import hook receives a frozen, server-derived context instead of the normal
+session context:
+
+```ts
+{
+  event: "projectImported";
+  projectId: string;
+  importId: string;
+  projectRoot: string;
+  ownedRoots: readonly string[];
+  components: readonly Array<{
+    id: string;
+    root: string;
+    languages: readonly DetectedProjectLanguage[];
+  }>;
+}
+```
+
+`projectRoot`, `ownedRoots`, and component roots are absolute canonical paths.
+The gateway canonicalizes the project root and each configured component root,
+and drops a component that resolves outside the project root. `ownedRoots` is a
+sorted, deduplicated set containing the project root and accepted component
+roots. Component `id` is a stable opaque identifier; it is not the configured
+component name.
+
+The context is intentionally a shallow classification, not Code Intelligence:
+the gateway considers at most 30 configured components, examines at most 256
+direct directory entries per accepted root, never recurses or reads source
+contents, and returns at most 12 sorted language identifiers per component.
+The closed language vocabulary is `c`, `cpp`, `csharp`, `dart`, `elixir`,
+`go`, `haskell`, `java`, `javascript`, `kotlin`, `lua`, `php`, `python`,
+`ruby`, `rust`, `scala`, `shell`, `sql`, `swift`, and `typescript`. Paths are
+capped at 4,096 UTF-16 code units. This containment and size boundary prevents
+configuration or a repository tree from becoming an unbounded extension input.
+
+Import hooks may return `null`, an advisory, or a request. Selection and
+request-mutation outputs are unavailable at this lifecycle. An import request
+must use `scope: "project"`; session and goal scope are rejected before
+persistence. It otherwise uses the same strict request/value validation,
+classification, default, consent, proposal-effect, advisory, and grant rules
+as a session decision. A proposal effect creates an editable draft through the
+normal proposal path after a valid resolution; it never applies configuration.
+No project-import proposal workspace behavior is part of this contract.
+
+### Durable import delivery and replay
+
+The registry first records a `configuring` import marker. The registration route
+persists components, changes that marker to `ready`, then dispatches the run.
+A `configuring` marker is intentionally skipped at startup: the original
+registration body was not durably complete, so guessing would risk importing
+an incomplete project. An upsert retry is the recovery path; it completes the
+component configuration using its request and publishes the original marker.
+
+Once ready, the project decision store atomically records one immutable context
+snapshot and durable per-hook completion entries alongside requests, memories,
+and terminal state. Startup reconciles ready markers after project contexts are
+available. It invokes only uncompleted hooks against that stored snapshot, not
+the current filesystem. A crash after a hook begins but before its completion
+entry is durable can invoke the declaration again; request dedupe, terminal
+compare-and-set, memory publication, proposal seeding, and continuation state
+remain independently durable. Hook authors must therefore keep `decide()`
+declarative and free of external side effects.
+
+The import run uses the session delivery limits under its `importId`: at most
+two actionable requests and six newly accepted requests in 24 hours. Deferrable
+project memory remains keyed by project, pack, hook, and request key—not by
+import id—so it keeps the normal project-scope meaning. Consent-required import
+requests cannot pause a goal because they have no goal; timeout or headless
+settlement denies the protected operation. Deferrable requests use only their
+already validated safe default. Silence never authorizes an effect.
 
 ## Request contract
 
@@ -305,8 +396,8 @@ best-effort:
 
 | Scope | Actionable limit | Creation limit in the trailing 24 hours |
 |---|---:|---:|
-| Session | 2 | 6 |
-| Goal | 4 | 12 |
+| Session or project-import delivery | 2 | 6 |
+| Goal (session delivery only) | 4 | 12 |
 
 `pending` and `paused-awaiting-consent` records both consume the actionable
 limit. A request rejected for a limit is not displayed; the lifecycle trace
@@ -497,6 +588,16 @@ projection. No decision text or answer travels over that WebSocket frame.
 Only the request's owning session can read or answer it. Request ids are not
 authority: substituting an id from another session returns not found.
 
+Project-import decisions use the same widget in the Add Project flow, but their
+projection is project-owned: `GET /api/projects/:projectId/import-decision-requests`
+and `POST /api/projects/:projectId/import-decision-requests/:requestId/answer`.
+The GET route exposes records only for that project's current ready import run;
+the answer route accepts exactly `{ value }` and rejects a missing, mismatched,
+or cross-project request with `404`. It has the same `400` invalid-value and
+idempotent terminal-answer behavior as the session route. The metadata-only
+`project_import_decision_requests_updated` frame contains only `projectId` and
+a timestamp; REST remains authoritative.
+
 See [REST API — Extension decision requests](rest-api.md#extension-decision-requests)
 for response shapes and HTTP errors.
 
@@ -526,7 +627,10 @@ or other projects. Failed persistence leaves the previous in-memory snapshot
 unchanged.
 
 On restart, the manager reconciles overdue deferrable defaults, consent
-pause/claim state, inbox projections, and terminal callbacks. A consent pause
+pause/claim state, inbox projections, and terminal callbacks. The project-import
+coordinator separately replays only ready import markers after project contexts
+are initialized; it preserves their immutable snapshot and never backfills a
+legacy project. A consent pause
 has a durable inbox source key. If the origin session still belongs to a staff
 record in the same project, the server creates or reuses exactly one non-waking
 `consent_pause` inbox entry. If that target is unavailable, the record changes
@@ -588,6 +692,12 @@ Focused coverage is registered in `tests2/tests-map.json`:
   protection, advisory isolation, and proposal-only configuration effects.
 - `tests2/integration/extension-decision-requests.test.ts` — grants/revocation,
   answer ownership, malformed values, and no-prompt isolation.
+- `tests2/core/project-import-decision-context.test.ts`,
+  `tests2/core/project-import-decision-coordinator.test.ts`,
+  `tests2/core/decision-hook-dispatcher.test.ts`, and
+  `tests2/dom/project-import-decision-renderer.test.ts` — bounded context,
+  immutable run replay, no-session delivery, and the project-owned choice
+  projection.
 - `tests2/dom/decision-request-renderer.test.ts` and
   `tests2/dom/consent-inbox-reference.test.ts` — shared-card rendering and the
   non-destructive consent inbox Review action.
