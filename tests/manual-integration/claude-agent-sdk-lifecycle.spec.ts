@@ -166,6 +166,7 @@ type ManualNestedHelperFacts = {
 	rootAgentCall: boolean;
 	subagentWorkCount: number;
 	phase: ManualNestedHelperPhase;
+	nestedMessagePresent: boolean;
 	childReadCallPresent: boolean;
 	childReadResultPresent: boolean;
 	childReadResultError: boolean;
@@ -175,8 +176,8 @@ type ManualNestedHelperFacts = {
 /** Evaluate exact-parent helper completion without retaining IDs or model data in diagnostics. */
 function manualNestedHelperFacts(snapshot: unknown): ManualNestedHelperFacts {
 	if (!snapshot || typeof snapshot !== "object") return {
-		rootAgentCall: false, subagentWorkCount: 0, phase: "other", childReadCallPresent: false,
-		childReadResultPresent: false, childReadResultError: false, successfulChildRead: false,
+		rootAgentCall: false, subagentWorkCount: 0, phase: "other", nestedMessagePresent: false,
+		childReadCallPresent: false, childReadResultPresent: false, childReadResultError: false, successfulChildRead: false,
 	};
 	const value = snapshot as { messages?: unknown; subagentWork?: unknown };
 	const subagentWork = Array.isArray(value.subagentWork) ? value.subagentWork : [];
@@ -193,6 +194,7 @@ function manualNestedHelperFacts(snapshot: unknown): ManualNestedHelperFacts {
 		),
 	);
 	const childMessages = Array.isArray(helper?.messages) ? helper.messages : [];
+	const nestedMessagePresent = childMessages.length > 0;
 	const readCallIds = new Set(childMessages.flatMap((message: any) => Array.isArray(message?.content)
 		? message.content.flatMap((part: any) => part?.type === "toolCall" && part?.name === "read" && typeof part?.id === "string" ? [part.id] : [])
 		: []));
@@ -208,6 +210,7 @@ function manualNestedHelperFacts(snapshot: unknown): ManualNestedHelperFacts {
 		rootAgentCall,
 		subagentWorkCount: Math.min(subagentWork.length, 1_000_000),
 		phase,
+		nestedMessagePresent,
 		childReadCallPresent,
 		childReadResultPresent,
 		childReadResultError,
@@ -217,7 +220,7 @@ function manualNestedHelperFacts(snapshot: unknown): ManualNestedHelperFacts {
 
 function assertManualNestedHelper(snapshot: unknown): void {
 	const facts = manualNestedHelperFacts(snapshot);
-	if (facts.rootAgentCall && facts.subagentWorkCount === 1 && facts.phase === "completed" && facts.successfulChildRead) return;
+	if (facts.rootAgentCall && facts.subagentWorkCount === 1 && facts.phase === "completed" && facts.nestedMessagePresent) return;
 	throw new Error(JSON.stringify(facts));
 }
 
@@ -418,7 +421,7 @@ test("Claude Agent SDK manual lifecycle waits for a root start followed by its t
 	expect(listener).toBeUndefined();
 });
 
-test("Claude Agent SDK manual helper oracle reports only fixed completion facts", () => {
+test("Claude Agent SDK manual helper oracle requires completed nested work, not child tool choice", () => {
 	const complete = {
 		messages: [{ content: [{ type: "toolCall", name: "Agent", id: "private-root-agent-id" }] }],
 		subagentWork: [{
@@ -430,15 +433,24 @@ test("Claude Agent SDK manual helper oracle reports only fixed completion facts"
 		}],
 	};
 	expect(manualNestedHelperFacts(complete)).toEqual({
-		rootAgentCall: true, subagentWorkCount: 1, phase: "completed", childReadCallPresent: true,
-		childReadResultPresent: true, childReadResultError: false, successfulChildRead: true,
+		rootAgentCall: true, subagentWorkCount: 1, phase: "completed", nestedMessagePresent: true,
+		childReadCallPresent: true, childReadResultPresent: true, childReadResultError: false, successfulChildRead: true,
 	});
+	const completedWithoutChildTool = {
+		messages: [{ content: [{ type: "toolCall", name: "Agent", id: "private-root-agent-id" }] }],
+		subagentWork: [{ parentToolUseId: "private-root-agent-id", phase: "completed", messages: [{}] }],
+	};
+	expect(manualNestedHelperFacts(completedWithoutChildTool)).toEqual({
+		rootAgentCall: true, subagentWorkCount: 1, phase: "completed", nestedMessagePresent: true,
+		childReadCallPresent: false, childReadResultPresent: false, childReadResultError: false, successfulChildRead: false,
+	});
+	expect(() => assertManualNestedHelper(completedWithoutChildTool)).not.toThrow();
 	let diagnostic = "";
 	try { assertManualNestedHelper({ messages: [], subagentWork: [] }); }
 	catch (error) { diagnostic = error instanceof Error ? error.message : ""; }
 	expect(JSON.parse(diagnostic)).toEqual({
-		rootAgentCall: false, subagentWorkCount: 0, phase: "other", childReadCallPresent: false,
-		childReadResultPresent: false, childReadResultError: false, successfulChildRead: false,
+		rootAgentCall: false, subagentWorkCount: 0, phase: "other", nestedMessagePresent: false,
+		childReadCallPresent: false, childReadResultPresent: false, childReadResultError: false, successfulChildRead: false,
 	});
 	for (const privateValue of ["private-root-agent-id", "private-child-read-id"]) expect(diagnostic).not.toContain(privateValue);
 });
@@ -880,6 +892,8 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			transcript = await gateway.sessionManager.getMessagesSnapshotBase(session);
 			if (!transcript.success) throw new Error(JSON.stringify(manualNestedHelperFacts(undefined)));
 			assertManualNestedHelper(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, transcript.data));
+			// A native helper is rendered beneath its root Agent card, not as a Bobbit session.
+			expect(gateway.sessionManager.listSessions()).toHaveLength(1);
 
 			// Use the production live-control transaction with the same isolated
 			// preferences store as the session. This must not retry or fall back.
@@ -1216,6 +1230,8 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			sandboxTranscript = await gateway.sessionManager.getMessagesSnapshotBase(session);
 			if (!sandboxTranscript.success) throw new Error(JSON.stringify(manualNestedHelperFacts(undefined)));
 			assertManualNestedHelper(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data));
+			// A native helper is rendered beneath its root Agent card, not as a Bobbit session.
+			expect(gateway.sessionManager.listSessions()).toHaveLength(1);
 			const { applyRuntimeSessionModelSelection } = await import("../../dist/server/ws/runtime-model-selection.js");
 			const beforeSandboxModelChange = await session.rpcClient.getState();
 			const sandboxThinking = beforeSandboxModelChange?.data?.thinkingLevel;
