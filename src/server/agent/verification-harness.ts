@@ -5357,9 +5357,10 @@ export class VerificationHarness {
 			// Results array indexed by step position (declared early for optional step skipping)
 			const allResults: Array<GateSignalStep | null> = new Array(steps.length).fill(null);
 
-			// Sync the goal worktree with the latest commits before running verification.
-			// Agents (sandbox or not) push to origin — fetch and reset to pick up their changes.
-			if (goalBranch) {
+			// Sync root publication worktrees with the latest remote commits before
+			// verification. Parent-target children merge locally into their parent,
+			// so their ready-to-merge verification is deliberately remote-free.
+			if (goalBranch && !isParentTargetReadyToMerge) {
 				let hasOriginRemote = false;
 				try {
 					await this.commandRunner.execFile("git", ["remote", "get-url", "origin"], { cwd, timeout: 5_000 });
@@ -5449,7 +5450,7 @@ export class VerificationHarness {
 			// the durable signal before any cache or checkout can observe it. A missing
 			// container HEAD is valid for an unborn or non-Git legacy container, so it
 			// remains unrepinned rather than failing the entire verification.
-			if (goalBranch && !pinnedLayout) {
+			if (goalBranch && !pinnedLayout && !isParentTargetReadyToMerge) {
 				let postSyncHead: string | undefined;
 				try {
 					const { stdout } = await this.commandRunner.execFile(

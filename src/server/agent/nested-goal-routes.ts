@@ -328,6 +328,8 @@ export async function tryHandleNestedGoalRoute(
 		return true;
 	}
 
+	// Keep all pause entry points on the consent-aware shared lifecycle. This
+	// preserves operator provenance and clears stale consent reasons correctly.
 	const goalPauseDeps = {
 		getGoalManagerForGoal,
 		verificationHarness,
