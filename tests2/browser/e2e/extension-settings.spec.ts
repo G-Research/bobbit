@@ -31,6 +31,14 @@ function installHindsightFixture(bobbitDir: string): string {
 	fs.rmSync(destination, { recursive: true, force: true });
 	fs.mkdirSync(path.dirname(destination), { recursive: true });
 	fs.cpSync(source, destination, { recursive: true });
+	const providerPath = path.join(destination, "providers", `${PROVIDER_ID}.yaml`);
+	const provider = fs.readFileSync(providerPath, "utf8");
+	const providerWithLanguages = provider.replace(
+		"  recallScope: { type: enum, label: Recall scope, description: Limit automatic recall to this project or use all memories., values: [project, all], default: all }",
+		"  recallScope: { type: enum, label: Recall scope, description: Limit automatic recall to this project or use all memories., values: [project, all], default: all }\n  languages: { type: multi-enum, label: Languages, description: Languages this provider should use., values: [typescript, javascript, python, rust], optional: true, default: [typescript, python] }",
+	);
+	if (providerWithLanguages === provider) throw new Error("Hindsight fixture no longer has the expected provider settings declaration");
+	fs.writeFileSync(providerPath, providerWithLanguages);
 	const manifestPath = path.join(destination, "pack.yaml");
 	const manifest = fs.readFileSync(manifestPath, "utf8");
 	const updatedManifest = manifest.replace("  hooks: []", `  hooks: [${HOOK_ID}] # browser reconciliation fixture`);
@@ -191,7 +199,7 @@ test.describe("Market extension settings", () => {
 		await expect(rowA.getByTestId("market-runtime-status")).toHaveText("Needs configuration");
 		const formA = await openProviderSettings(page);
 
-		// Native labels expose all five declared kinds. The boolean is toggled with
+		// Native labels expose all declared kinds. The boolean is toggled with
 		// Space and Save with Enter, so the journey does not rely only on clicks.
 		const url = formA.getByLabel("Hindsight URL");
 		const apiKey = formA.getByLabel("API key");
@@ -207,6 +215,32 @@ test.describe("Market extension settings", () => {
 		expect(await recallScope.evaluate(element => element.tagName)).toBe("SELECT");
 		await expect(automaticRecall).toBeChecked();
 		await expect(recallBudget).toHaveAttribute("type", "number");
+
+		// The public multi-enum field is a labelled native checkbox group in
+		// publisher order. Select/remove with Space to prove normal keyboard
+		// semantics rather than a custom listbox implementation.
+		const languagesField = formA.locator('[data-testid="market-settings-field"][data-field-key="languages"][data-field-type="multi-enum"]');
+		const languages = languagesField.getByTestId("market-settings-multi-enum");
+		await expect(languages).toHaveAccessibleName("Languages");
+		expect(await languages.evaluate(element => element.tagName)).toBe("FIELDSET");
+		const languageOptions = languages.getByTestId("market-settings-multi-enum-option");
+		await expect(languageOptions).toHaveCount(4);
+		expect(await languageOptions.evaluateAll(options => options.map(option => option.getAttribute("data-option-value")))).toEqual(["typescript", "javascript", "python", "rust"]);
+		await expect(languageOptions).toHaveAttribute("type", "checkbox");
+		const typescript = languages.locator('[data-testid="market-settings-multi-enum-option"][data-option-value="typescript"]');
+		const javascript = languages.locator('[data-testid="market-settings-multi-enum-option"][data-option-value="javascript"]');
+		const python = languages.locator('[data-testid="market-settings-multi-enum-option"][data-option-value="python"]');
+		const rust = languages.locator('[data-testid="market-settings-multi-enum-option"][data-option-value="rust"]');
+		await expect(typescript).toBeChecked();
+		await expect(python).toBeChecked();
+		await expect(javascript).not.toBeChecked();
+		await python.focus();
+		await page.keyboard.press("Space");
+		await expect(python).not.toBeChecked();
+		await javascript.focus();
+		await page.keyboard.press("Space");
+		await expect(javascript).toBeChecked();
+		await expect(languages.getByTestId("market-settings-multi-enum-summary")).toHaveText("2 selected");
 
 		await url.fill("https://settings-a.invalid");
 		await bank.fill("project-a-bank");
@@ -227,6 +261,12 @@ test.describe("Market extension settings", () => {
 		expect(saved.status()).toBe(200);
 		const savedBody = await saved.json();
 		assertNoSecrets(savedBody);
+		expect(saved.request().postDataJSON()).toMatchObject({ values: { languages: ["javascript", "typescript"] } });
+		expect(savedBody.target.fields.find((field: { key: string }) => field.key === "languages")).toMatchObject({ type: "multi-enum", value: ["javascript", "typescript"], source: "project" });
+		const settingsAfterSave = await browserApi(page, { path: `/api/projects/${encodeURIComponent(projectA.id)}/extension-settings` });
+		expect(settingsAfterSave.status, settingsAfterSave.text).toBe(200);
+		const savedTarget = (JSON.parse(settingsAfterSave.text) as { targets: Array<{ ref: { packId: string; kind: string; id: string }; fields: Array<{ key: string; value?: unknown }> }> }).targets.find(target => target.ref.packId === PACK_ID && target.ref.kind === "provider" && target.ref.id === PROVIDER_ID);
+		expect(savedTarget?.fields.find(field => field.key === "languages")).toMatchObject({ value: ["javascript", "typescript"] });
 		expect(savedBody.target.fields.find((field: { key: string }) => field.key === "apiKey")).toMatchObject({ type: "secret", secretSet: true });
 		await expect(page.getByTestId("market-settings-status")).toContainText(`Settings saved for ${projectA.name}.`, { timeout: 15_000 });
 
@@ -248,6 +288,36 @@ test.describe("Market extension settings", () => {
 		assertNoSecrets(rotatedBody);
 		expect(rotatedBody.target.fields.find((field: { key: string }) => field.key === "apiKey")).toMatchObject({ type: "secret", secretSet: true });
 		assertNoSecrets(await publicBrowserSurfaces(page));
+
+		// An empty selection is a durable project override, while Use default is
+		// an explicit null PATCH. Keep these states visibly distinct before reset.
+		const emptyForm = await openProviderSettings(page);
+		const emptyLanguages = emptyForm.getByTestId("market-settings-multi-enum");
+		const emptyTypescript = emptyLanguages.locator('[data-testid="market-settings-multi-enum-option"][data-option-value="typescript"]');
+		const emptyJavascript = emptyLanguages.locator('[data-testid="market-settings-multi-enum-option"][data-option-value="javascript"]');
+		await emptyJavascript.focus();
+		await page.keyboard.press("Space");
+		await emptyTypescript.focus();
+		await page.keyboard.press("Space");
+		await expect(emptyTypescript).not.toBeChecked();
+		await expect(emptyLanguages.getByTestId("market-settings-multi-enum-summary")).toHaveText("No options selected");
+		const emptyResponse = page.waitForResponse(response => response.url().endsWith(patchPath) && response.request().method() === "PATCH");
+		await emptyForm.getByTestId("market-settings-save").click();
+		const emptied = await emptyResponse;
+		expect(emptied.status()).toBe(200);
+		expect(emptied.request().postDataJSON()).toMatchObject({ values: { languages: [] } });
+		expect((await emptied.json()).target.fields.find((field: { key: string }) => field.key === "languages")).toMatchObject({ value: [], source: "project" });
+
+		const defaultForm = await openProviderSettings(page);
+		const defaultLanguagesField = defaultForm.locator('[data-testid="market-settings-field"][data-field-key="languages"]');
+		await defaultLanguagesField.getByTestId("market-settings-use-default").click();
+		await expect(defaultLanguagesField.getByTestId("market-settings-multi-enum-summary")).toHaveText("Using default");
+		const defaultResponse = page.waitForResponse(response => response.url().endsWith(patchPath) && response.request().method() === "PATCH");
+		await defaultForm.getByTestId("market-settings-save").click();
+		const restoredDefault = await defaultResponse;
+		expect(restoredDefault.status()).toBe(200);
+		expect(restoredDefault.request().postDataJSON()).toMatchObject({ values: { languages: null } });
+		expect((await restoredDefault.json()).target.fields.find((field: { key: string }) => field.key === "languages")).toMatchObject({ value: ["python", "typescript"], source: "default" });
 
 		// Reset removes the secret and all project overrides. Exercise the actual
 		// per-field default action first: a required field with a declared default
@@ -280,6 +350,7 @@ test.describe("Market extension settings", () => {
 		expect(resetFields.find(field => field.key === "recallScope")).toMatchObject({ value: "all", source: "default" });
 		expect(resetFields.find(field => field.key === "autoRecall")).toMatchObject({ value: true, source: "default" });
 		expect(resetFields.find(field => field.key === "recallBudget")).toMatchObject({ value: 1200, source: "default" });
+		expect(resetFields.find(field => field.key === "languages")).toMatchObject({ value: ["python", "typescript"], source: "default" });
 		await expect(page.getByTestId("market-settings-status")).toContainText(`Settings saved for ${projectA.name}.`, { timeout: 15_000 });
 		assertNoSecrets(await publicBrowserSurfaces(page));
 
@@ -287,11 +358,19 @@ test.describe("Market extension settings", () => {
 		// retains an active Project A without bypassing the Market save path.
 		const reconfigureForm = await openProviderSettings(page);
 		await reconfigureForm.getByLabel("Hindsight URL").fill("https://settings-a.invalid");
+		const reconfigureLanguages = reconfigureForm.getByTestId("market-settings-multi-enum");
+		const reconfigurePython = reconfigureLanguages.locator('[data-testid="market-settings-multi-enum-option"][data-option-value="python"]');
+		const reconfigureRust = reconfigureLanguages.locator('[data-testid="market-settings-multi-enum-option"][data-option-value="rust"]');
+		await reconfigurePython.focus();
+		await page.keyboard.press("Space");
+		await reconfigureRust.focus();
+		await page.keyboard.press("Space");
 		const reconfigureResponse = page.waitForResponse(response => response.url().endsWith(patchPath) && response.request().method() === "PATCH");
 		await reconfigureForm.getByTestId("market-settings-save").click();
 		const reconfigured = await reconfigureResponse;
 		expect(reconfigured.status()).toBe(200);
-		assertNoSecrets(await reconfigured.json());
+		expect(reconfigured.request().postDataJSON()).toMatchObject({ values: { languages: ["rust", "typescript"] } });
+		expect((await reconfigured.json()).target.fields.find((field: { key: string }) => field.key === "languages")).toMatchObject({ value: ["rust", "typescript"], source: "project" });
 
 		// A hard reload clears the local reset draft, then reconstructs the server
 		// defaults and a redacted, empty secret input from the returned projection.
@@ -302,6 +381,11 @@ test.describe("Market extension settings", () => {
 		const reloadedForm = await openProviderSettings(page);
 		await expect(reloadedForm.getByLabel("API key")).toHaveValue("");
 		await expect(reloadedForm.getByTestId("market-settings-secret-state")).toHaveText("Not set");
+		const reloadedLanguages = reloadedForm.getByTestId("market-settings-multi-enum");
+		await expect(reloadedLanguages.locator('[data-option-value="typescript"]')).toBeChecked();
+		await expect(reloadedLanguages.locator('[data-option-value="rust"]')).toBeChecked();
+		await expect(reloadedLanguages.locator('[data-option-value="python"]')).not.toBeChecked();
+		await expect(reloadedLanguages.getByTestId("market-settings-multi-enum-summary")).toHaveText("2 selected");
 
 		// Project B is a fresh projection: it must not flash A's URL or expose A's
 		// secret presence. Disable B's provider and then prove A remains active.
@@ -313,6 +397,10 @@ test.describe("Market extension settings", () => {
 		const formB = await openProviderSettings(page);
 		await expect(formB.getByLabel("Hindsight URL")).toHaveValue("");
 		await expect(formB.getByTestId("market-settings-secret-state")).toHaveAttribute("data-state", "unset");
+		const bLanguages = formB.getByTestId("market-settings-multi-enum");
+		await expect(bLanguages.locator('[data-option-value="typescript"]')).toBeChecked();
+		await expect(bLanguages.locator('[data-option-value="python"]')).toBeChecked();
+		await expect(bLanguages.locator('[data-option-value="rust"]')).not.toBeChecked();
 		await providerRow(page).getByTestId("market-settings-toggle").click();
 		const enabledB = providerRow(page).getByTestId("market-project-provider-enabled");
 		await expect(enabledB).toBeChecked();
@@ -326,6 +414,10 @@ test.describe("Market extension settings", () => {
 		const isolatedAForm = await openProviderSettings(page);
 		await expect(isolatedAForm.getByLabel("Hindsight URL")).toHaveValue("https://settings-a.invalid");
 		await expect(isolatedAForm.getByTestId("market-settings-secret-state")).toHaveAttribute("data-state", "unset");
+		const isolatedALanguages = isolatedAForm.getByTestId("market-settings-multi-enum");
+		await expect(isolatedALanguages.locator('[data-option-value="typescript"]')).toBeChecked();
+		await expect(isolatedALanguages.locator('[data-option-value="rust"]')).toBeChecked();
+		await expect(isolatedALanguages.locator('[data-option-value="python"]')).not.toBeChecked();
 
 		// The sentinel must be absent after the write from every public browser
 		// surface: DOM/attributes, storage, API responses, and console output.
