@@ -632,6 +632,8 @@ import {
 	ProjectConfigLoadError,
 	ProjectConfigStore,
 	isExtensionCapability,
+	type Component,
+	type InlineWorkflowDef,
 	isSafeExtensionGrantIdentifier,
 	type ExtensionCapability,
 	type ExtensionGrant,
@@ -2073,6 +2075,42 @@ function validateComponentsConfig(components: unknown): string | null {
 	return null;
 }
 
+/**
+ * POST retries must write the same complete component shape as initial project
+ * registration. A crash while the import marker is `configuring` must not
+ * turn a valid retry into a lossy rewrite.
+ */
+function normalizeProjectRegistrationComponents(raw: unknown): Component[] | undefined {
+	if (!Array.isArray(raw) || raw.length === 0) return undefined;
+	return raw.map(value => {
+		const component = value && typeof value === "object" && !Array.isArray(value)
+			? value as Record<string, unknown>
+			: {};
+		return {
+			name: String(component.name ?? ""),
+			repo: typeof component.repo === "string" && component.repo ? component.repo : ".",
+			relativePath: typeof component.relative_path === "string"
+				? component.relative_path
+				: typeof component.relativePath === "string" ? component.relativePath : undefined,
+			worktreeSetupCommand: typeof component.worktree_setup_command === "string"
+				? component.worktree_setup_command
+				: typeof component.worktreeSetupCommand === "string" ? component.worktreeSetupCommand : undefined,
+			commands: component.commands && typeof component.commands === "object" && !Array.isArray(component.commands)
+				? component.commands as Record<string, string>
+				: undefined,
+			config: component.config && typeof component.config === "object" && !Array.isArray(component.config)
+				? component.config as Record<string, string>
+				: undefined,
+		};
+	});
+}
+
+function projectRegistrationWorkflows(raw: unknown): Record<string, InlineWorkflowDef> | undefined {
+	return raw && typeof raw === "object" && !Array.isArray(raw)
+		? raw as Record<string, InlineWorkflowDef>
+		: undefined;
+}
+
 export async function getGitDiff(cwd: string, file?: string, containerId?: string, commit?: string, commandRunner?: CommandRunner): Promise<string> {
 	let hasHead = true;
 	try { await execGit("git rev-parse --verify HEAD", cwd, 5000, containerId, commandRunner); } catch { hasHead = false; }
@@ -2678,6 +2716,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	let toolResultFilterDispatcher!: ToolResultFilterDispatcher;
 	let decisionRequestManager!: DecisionRequestManager;
 	let projectImportDecisionCoordinator!: ProjectImportDecisionCoordinator;
+	let projectImportStartupReplay: Promise<void> | undefined;
 	let extensionChannelServices: ExtensionChannelServices | undefined;
 	let extensionChannelServicesInit: Promise<ExtensionChannelServices | undefined> | undefined;
 	// Slice B1: warm the process-singleton pack store (file-backed, pack-namespaced
@@ -4735,7 +4774,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	});
 	// Replay only ready registrations after all project contexts and the shared
 	// decision owner exist. Configuring markers intentionally remain dormant.
-	void projectImportDecisionCoordinator.reconcileAll().catch((err) => {
+	// This promise is awaited before normal session restoration below; failures
+	// are still contained so a damaged project cannot stop gateway boot.
+	projectImportStartupReplay = projectImportDecisionCoordinator.reconcileAll().catch((err) => {
 		console.warn("[project-import-decisions] startup reconciliation failed (non-fatal):", err);
 	});
 	teamManager.setVerificationHarness(verificationHarness);
@@ -5049,6 +5090,13 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					publishedGatewayUrl = normalizePublishedGatewayUrl(callbackUrl, basePath);
 				}
 				persistPublishedGatewayUrl(stateDir, publishedGatewayUrl, gatewayDeps.fsImpl);
+
+			// Import decisions are project-owned and must replay before an ordinary
+			// agent session can resume. The coordinator isolates each project (and its
+			// bounded replay timeout), while this await preserves startup ordering.
+			await bootPhase("replay-project-import-decisions", async () => {
+				await projectImportStartupReplay;
+			});
 
 			// Restore persisted teams before sessions so reconstructed records are available
 			// to session revival. Both complete before accepting connections.
@@ -7064,6 +7112,18 @@ async function handleApiRoute(
 			const palette = typeof body.palette === "string" ? body.palette : undefined;
 			const colorLight = typeof body.colorLight === "string" ? body.colorLight : undefined;
 			const colorDark = typeof body.colorDark === "string" ? body.colorDark : undefined;
+			const configuredComponents = normalizeProjectRegistrationComponents((body as Record<string, unknown>).components);
+			const createWorkflows = projectRegistrationWorkflows((body as Record<string, unknown>).workflows);
+			const dispatchImportDecisionSafely = async (projectId: string, importId: string): Promise<void> => {
+				try {
+					await projectImportDecisionCoordinator?.dispatch(projectId, importId);
+				} catch (error) {
+					// Registration/configuration has already committed. Dispatch is a
+					// replayable best-effort boundary, never a reason to lie that the
+					// durable project failed to register.
+					console.warn(`[project-import-decisions] dispatch failed project=${projectId}:`, error);
+				}
+			};
 
 			if (isHeadquartersOwnedPath(body.rootPath)) {
 				const hq = headquartersProject();
@@ -7101,24 +7161,17 @@ async function handleApiRoute(
 						// while configuring. Persist the supplied/default components before
 						// publishing the original marker; never allocate a second run.
 						if (existing.importDecisionRun?.state === "configuring") {
-							const supplied = (body as Record<string, unknown>).components;
-							if (Array.isArray(supplied) && supplied.length > 0) {
-								ctx.projectConfigStore.setComponents(supplied.map(c => {
-									const item = c && typeof c === "object" && !Array.isArray(c) ? c as Record<string, unknown> : {};
-									return {
-										name: String(item.name ?? ""),
-										repo: typeof item.repo === "string" && item.repo ? item.repo : ".",
-										relativePath: typeof item.relative_path === "string" ? item.relative_path : (typeof item.relativePath === "string" ? item.relativePath : undefined),
-									};
-								}));
+							if (configuredComponents) {
+								ctx.projectConfigStore.setComponents(configuredComponents);
 							} else if (ctx.projectConfigStore.getComponents().length === 0) {
 								ctx.projectConfigStore.setComponents([{ name: existing.name, repo: "." }]);
 							}
+							if (createWorkflows) ctx.projectConfigStore.setWorkflows(createWorkflows);
 							projectRegistry.markImportDecisionRunReady(existing.id, existing.importDecisionRun.id);
 						}
 					}
 					const marker = existing.importDecisionRun;
-					if (marker?.state === "ready") await projectImportDecisionCoordinator?.dispatch(existing.id, marker.id);
+					if (marker?.state === "ready") await dispatchImportDecisionSafely(existing.id, marker.id);
 					json(projectRegistry.get(existing.id) ?? existing, 200);
 					return;
 				}
@@ -7158,17 +7211,12 @@ async function handleApiRoute(
 
 			// Multi-repo: accept optional components / workflows in the create body.
 			// Single-repo without components → fill default `[{name: <project name>, repo: "."}]`.
-			const createComponents = (body as Record<string, unknown>).components;
-			const createWorkflows = (body as Record<string, unknown>).workflows;
 			if (newCtx) {
-				if (Array.isArray(createComponents) && createComponents.length > 0) {
-					if (createWorkflows && typeof createWorkflows === "object" && !Array.isArray(createWorkflows)) {
+				if (configuredComponents) {
+					if (createWorkflows) {
 						try {
 							const { validateAllWorkflows } = await import("./agent/workflow-validator.js");
-							const errors = validateAllWorkflows(
-								createWorkflows as Parameters<typeof validateAllWorkflows>[0],
-								createComponents as Parameters<typeof validateAllWorkflows>[1],
-							);
+							const errors = validateAllWorkflows(createWorkflows, configuredComponents);
 							if (errors.length > 0) {
 								projectRegistry.remove(project.id);
 								json({ error: "Workflow validation failed", details: errors }, 400);
@@ -7176,18 +7224,8 @@ async function handleApiRoute(
 							}
 						} catch { /* best-effort */ }
 					}
-					const normalized = (createComponents as Array<Record<string, unknown>>).map(c => ({
-						name: String(c.name ?? ""),
-						repo: typeof c.repo === "string" && c.repo ? c.repo : ".",
-						relativePath: typeof c.relative_path === "string" ? c.relative_path : (typeof c.relativePath === "string" ? c.relativePath as string : undefined),
-						worktreeSetupCommand: typeof c.worktree_setup_command === "string" ? c.worktree_setup_command : (typeof c.worktreeSetupCommand === "string" ? c.worktreeSetupCommand as string : undefined),
-						commands: c.commands && typeof c.commands === "object" && !Array.isArray(c.commands) ? c.commands as Record<string, string> : undefined,
-						config: c.config && typeof c.config === "object" && !Array.isArray(c.config) ? c.config as Record<string, string> : undefined,
-					}));
-					newCtx.projectConfigStore.setComponents(normalized);
-					if (createWorkflows && typeof createWorkflows === "object" && !Array.isArray(createWorkflows)) {
-						newCtx.projectConfigStore.setWorkflows(createWorkflows as Record<string, import("./agent/project-config-store.js").InlineWorkflowDef>);
-					}
+					newCtx.projectConfigStore.setComponents(configuredComponents);
+					if (createWorkflows) newCtx.projectConfigStore.setWorkflows(createWorkflows);
 				} else {
 					// Default single-repo component named after the project.
 					if (newCtx.projectConfigStore.getComponents().length === 0) {
@@ -7270,7 +7308,7 @@ async function handleApiRoute(
 				wireGoalManagerResolvers(newCtx, { sessionManager, projectContextManager, projectRegistry });
 			}
 			const importMarker = project.importDecisionRun;
-			if (importMarker?.state === "ready") await projectImportDecisionCoordinator?.dispatch(project.id, importMarker.id);
+			if (importMarker?.state === "ready") await dispatchImportDecisionSafely(project.id, importMarker.id);
 			json(project, 201);
 		} catch (err: any) {
 			jsonError(400, err);

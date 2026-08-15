@@ -41,6 +41,8 @@ export interface ProjectImportDecisionCoordinatorDeps {
   dispatcher: ProjectImportDispatcher;
   buildContext(input: { project: Pick<RegisteredProject, "id" | "rootPath">; importId: string; components: readonly Component[] }): ProjectImportDecisionContextSnapshot;
   now?: () => number;
+  /** Bounds one broken project during startup replay. */
+  reconcileTimeoutMs?: number;
   onError?: (projectId: string, error: unknown) => void;
 }
 
@@ -52,9 +54,11 @@ export interface ProjectImportDecisionCoordinatorDeps {
 export class ProjectImportDecisionCoordinator {
   private readonly running = new Map<string, Promise<readonly TraceDecisionOutcomeRow[]>>();
   private readonly now: () => number;
+  private readonly reconcileTimeoutMs: number;
 
   constructor(private readonly deps: ProjectImportDecisionCoordinatorDeps) {
     this.now = deps.now ?? Date.now;
+    this.reconcileTimeoutMs = Math.max(1, deps.reconcileTimeoutMs ?? 10_000);
   }
 
   dispatch(projectId: string, importId: string): Promise<readonly TraceDecisionOutcomeRow[]> {
@@ -78,10 +82,24 @@ export class ProjectImportDecisionCoordinator {
   async reconcileAll(): Promise<void> {
     for (const project of this.deps.registry.list()) {
       try {
-        await this.reconcile(project.id);
+        await this.reconcileWithinTimeout(project.id);
       } catch (error) {
         this.deps.onError?.(project.id, error);
       }
+    }
+  }
+
+  private async reconcileWithinTimeout(projectId: string): Promise<void> {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        this.reconcile(projectId),
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => reject(new Error("Project import reconciliation timed out")), this.reconcileTimeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
     }
   }
 
