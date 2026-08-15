@@ -6,21 +6,15 @@ import type { DecisionRequestStore, StoredProjectImportRun } from "./decision-re
 import {
   canonicalProjectImportRoot,
   validateProjectImportDecisionContext,
+  type ProjectImportDecisionContext,
 } from "./project-import-decision-context.js";
 
 /**
- * Minimal context shape retained here to keep this lifecycle owner independent
- * of the decision contract. The context builder is the authoritative bounded
- * server-derived implementation.
+ * The builder and replay validator share the one precise, bounded context
+ * contract. Keeping it typed prevents an unvalidated component shape from
+ * reaching durable import-run storage or the dispatcher.
  */
-export interface ProjectImportDecisionContextSnapshot {
-  readonly event: "projectImported";
-  readonly projectId: string;
-  readonly importId: string;
-  readonly projectRoot: string;
-  readonly ownedRoots: readonly string[];
-  readonly components: readonly unknown[];
-}
+export type ProjectImportDecisionContextSnapshot = ProjectImportDecisionContext;
 
 interface ProjectImportDispatcher {
   /** The coordinator supplies the freshly registry-validated snapshot. */
