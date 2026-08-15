@@ -2445,11 +2445,56 @@
     },
     {
       "path": "tests2/core/ast-grep-language-catalog.test.ts",
-      "reason": "Canonical Code Intelligence AST language-matrix coverage for aliases, extension collisions, AST-only capability, and bounded discovery.",
+      "reason": "Canonical Code Intelligence language-matrix coverage for aliases, extension collisions, independently declared AST and LSP capabilities, and bounded discovery.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
         "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/language-lsp-matrix.test.ts",
+      "reason": "Data-driven language capability-matrix coverage for independent structural-search and LSP declarations, supported actions, roots, named toolchains, sandbox layers, and version constraints.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/language-lsp-detection.test.ts",
+      "reason": "Bounded, component-local language detection coverage for serializable disabled-by-default LSP offers and symlink containment.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/sandbox-requirements.test.ts",
+      "reason": "Pure matrix-derived sandbox requirement coverage for enabled detected languages, named-layer deduplication, language attribution, and no build or shell invocation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/lsp-request-adapter.test.ts",
+      "reason": "LSP request serialization coverage for linked-worktree roots, path containment, validation, truthful degradation, sanitized failure reasons, and no private runtime lifecycle.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/language-lsp-worktree.test.ts",
+      "reason": "Isolated linked-Git-worktree integration coverage for component-local detection, exact worktree-root request identity, primary-checkout escape rejection, named missing-toolchain degradation, and cleanup.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
       }
     },
     {
