@@ -695,6 +695,10 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			expect(transcript.success && hasRootCanonicalToolCall(visibleTranscript, "gate_list")).toBe(true);
 			expect(transcript.success && hasSuccessfulRootToolResult(visibleTranscript, "gate_list")).toBe(true);
 
+			await runTurn("Call the native Agent tool exactly once with run_in_background: false and subagent_type: \"bobbit-backend-parity-reviewer\". Its task must be: use the Bobbit read tool on README.md. Do not call any other root tool. Do not create or invoke an additional helper.", "constrained foreground helper");
+			transcript = await gateway.sessionManager.getMessagesSnapshotBase(session);
+			expect(transcript.success && hasOneNestedHelper(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, transcript.data))).toBe(true);
+
 			// Use the production live-control transaction with the same isolated
 			// preferences store as the session. This must not retry or fall back.
 			const { applyRuntimeSessionModelSelection } = await import("../../dist/server/ws/runtime-model-selection.js");
@@ -720,10 +724,6 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 				id: afterModelChange?.data?.model?.id,
 				thinkingLevel: afterModelChange?.data?.thinkingLevel,
 			}).toEqual(selectedModel);
-
-			await runTurn("Call the native Agent tool exactly once with run_in_background: false and subagent_type: \"bobbit-backend-parity-reviewer\". Its task must be: use the Bobbit read tool on README.md. Do not call any other root tool. Do not create or invoke an additional helper.", "constrained foreground helper");
-			transcript = await gateway.sessionManager.getMessagesSnapshotBase(session);
-			expect(transcript.success && hasOneNestedHelper(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, transcript.data))).toBe(true);
 
 			// Only exercise a live SDK-advertised thinking level. When none is
 			// advertised, verify the explicit unsupported path rather than guessing.
@@ -998,6 +998,9 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 				: undefined;
 			expect(sandboxTranscript.success && hasRootCanonicalToolCall(visibleSandboxTranscript, "gate_list")).toBe(true);
 			expect(sandboxTranscript.success && hasSuccessfulRootToolResult(visibleSandboxTranscript, "gate_list")).toBe(true);
+			await runSandboxTurn("Call the native Agent tool exactly once with run_in_background: false and subagent_type: \"bobbit-backend-parity-reviewer\". Its task must be: use the Bobbit read tool on README.md. Do not call any other root tool. Do not create or invoke an additional helper.", "sandbox constrained foreground helper");
+			sandboxTranscript = await gateway.sessionManager.getMessagesSnapshotBase(session);
+			expect(sandboxTranscript.success && hasOneNestedHelper(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data))).toBe(true);
 			const { applyRuntimeSessionModelSelection } = await import("../../dist/server/ws/runtime-model-selection.js");
 			const beforeSandboxModelChange = await session.rpcClient.getState();
 			const sandboxThinking = beforeSandboxModelChange?.data?.thinkingLevel;
@@ -1021,9 +1024,6 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 				id: afterSandboxModelChange?.data?.model?.id,
 				thinkingLevel: afterSandboxModelChange?.data?.thinkingLevel,
 			}).toEqual(selectedSandboxModel);
-			await runSandboxTurn("Call the native Agent tool exactly once with run_in_background: false and subagent_type: \"bobbit-backend-parity-reviewer\". Its task must be: use the Bobbit read tool on README.md. Do not call any other root tool. Do not create or invoke an additional helper.", "sandbox constrained foreground helper");
-			sandboxTranscript = await gateway.sessionManager.getMessagesSnapshotBase(session);
-			expect(sandboxTranscript.success && hasOneNestedHelper(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data))).toBe(true);
 			const { applyRuntimeSessionThinkingSelection } = await import("../../dist/server/ws/runtime-model-selection.js");
 			const sandboxState = await session.rpcClient.getState();
 			const sandboxModel = sandboxState?.data?.model as { thinkingLevelMap?: Record<string, string | null>; reasoning?: boolean } | undefined;
