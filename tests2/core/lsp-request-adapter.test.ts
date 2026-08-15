@@ -47,6 +47,22 @@ const structuralOnly: LspLanguageDeclaration = {
 	evidence: { globs: ["**/*.json"] },
 };
 
+const go: LspLanguageDeclaration = {
+	id: "go",
+	label: "Go",
+	evidence: { globs: ["**/*.go"] },
+	lsp: {
+		server: { id: "gopls", command: "gopls", args: [] },
+		actions: ["workspaceSymbols"],
+		host: [{
+			id: "gopls",
+			label: "gopls",
+			installHint: "Install gopls with go install golang.org/x/tools/gopls@latest; see https://pkg.go.dev/golang.org/x/tools/gopls.",
+		}],
+		sandbox: [],
+	},
+};
+
 function fixture(): { linkedRoot: string; primaryRoot: string; source: string; dispose: () => void } {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "lsp-request-adapter-"));
 	const primaryRoot = path.join(root, "primary", "api");
@@ -150,6 +166,40 @@ describe("LSP request adapter", () => {
 		}
 	});
 
+	it("canonicalizes the root for workspace/status actions and only forwards required positions", () => {
+		const f = fixture();
+		try {
+			const workspace = serializeLspRequest({
+				action: "workspaceSymbols", language: "typescript", query: "server", position: { line: 2, character: 3 },
+			}, options(f.linkedRoot));
+			expect(workspace.request).toMatchObject({ action: "workspaceSymbols", query: "server", key: { worktreePath: fs.realpathSync(f.linkedRoot) } });
+			expect(workspace.request).not.toHaveProperty("uri");
+			expect(workspace.request).not.toHaveProperty("position");
+
+			const documentSymbols = serializeLspRequest({
+				action: "documentSymbols", path: "src/server.ts", position: { line: 2, character: 3 },
+			}, options(f.linkedRoot));
+			expect(documentSymbols.request).not.toHaveProperty("position");
+
+			const status = serializeLspRequest({ action: "status", language: "typescript" }, options(f.linkedRoot));
+			expect(status.request).toBeUndefined();
+
+			fs.rmSync(f.linkedRoot, { recursive: true, force: true });
+			for (const input of [
+				{ action: "workspaceSymbols" as const, language: "typescript", query: "server" },
+				{ action: "status" as const, language: "typescript" },
+			]) {
+				const unavailable = serializeLspRequest(input, options(f.linkedRoot));
+				expect(unavailable).toEqual({
+					result: expect.objectContaining({ status: "unavailable", reasonCode: "component-unavailable", reason: "The linked-worktree component is unavailable." }),
+				});
+				expect(JSON.stringify(unavailable)).not.toContain(f.linkedRoot);
+			}
+		} finally {
+			f.dispose();
+		}
+	});
+
 	it("reports unsupported, disabled, missing-runtime, unavailable, and failed states truthfully", () => {
 		const f = fixture();
 		try {
@@ -199,6 +249,26 @@ describe("LSP request adapter", () => {
 				toolchain: "missing", runtime: "host", missingToolchainIds: ["unrelated-tool"],
 			}, [layeredTypeScript]));
 			expect(unmatched.result.reason).toBe("The host LSP toolchain is unavailable, but no reported missing ID matches a matrix-declared requirement.");
+		} finally {
+			f.dispose();
+		}
+	});
+
+	it("preserves gopls install URLs while redacting absolute paths and secrets", () => {
+		const f = fixture();
+		try {
+			const missing = serializeLspRequest({ action: "workspaceSymbols", language: "go", query: "handler" }, options(f.linkedRoot, {
+				toolchain: "missing", runtime: "host", missingToolchainIds: ["gopls"],
+			}, [go]));
+			expect(missing.result.reason).toContain("go install golang.org/x/tools/gopls@latest");
+			expect(missing.result.reason).toContain("https://pkg.go.dev/golang.org/x/tools/gopls");
+
+			const reason = sanitizeLspReason("See https://pkg.go.dev/golang.org/x/tools/gopls after /private/worktree/gopls.log token=secret-value");
+			expect(reason).toContain("https://pkg.go.dev/golang.org/x/tools/gopls");
+			expect(reason).toContain("[redacted path]");
+			expect(reason).toContain("token=[redacted]");
+			expect(reason).not.toContain("/private/worktree");
+			expect(reason).not.toContain("secret-value");
 		} finally {
 			f.dispose();
 		}
