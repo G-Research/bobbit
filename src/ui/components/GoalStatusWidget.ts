@@ -129,7 +129,10 @@ export class GoalStatusWidget extends LitElement {
 		if (!msg || typeof msg !== "object") return;
 		if (typeof msg.goalId === "string" && msg.goalId !== this.goalId) return;
 		if (msg.type === GATE_STATUS_CACHE_UPDATED_EVENT_TYPE) {
-			this.requestUpdate();
+			// The compact `/gates` response can omit the current signal projection.
+			// Reconcile existing rows against the authoritative summary so a newer
+			// non-cancelled signal also clears an earlier cancellation caption.
+			this._gates = this._normalizeGates(this._gates);
 			this._syncDropdown();
 			return;
 		}
@@ -325,7 +328,16 @@ export class GoalStatusWidget extends LitElement {
 					if (whoAmI === undefined) whoAmI = fallback?.whoAmI;
 				}
 			}
-			const latestCancellation = this._latestCancellation(obj);
+			const gateCancellation = this._latestCancellation(obj);
+			const summaryGate = appState.gateStatusCache.get(this.goalId)?.gates?.find(gate => gate.gateId === id);
+			// A hydrated summary is the current-signal authority. Prefer its
+			// cancellation projection when present, and clear a stale local caption
+			// when the newer summary says the latest signal is not cancelled.
+			const latestCancellation = summaryGate
+				? summaryGate.verificationStatus === "cancelled"
+					? this._normalizeCancellation(summaryGate.cancellation) ?? {}
+					: undefined
+				: gateCancellation;
 			out.push({
 				id,
 				name,

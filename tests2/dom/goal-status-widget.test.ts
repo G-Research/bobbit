@@ -118,7 +118,7 @@ async function mountGoalStatusWidget(fixture: {
 	gates: any[];
 	verifications?: any[];
 	signals?: Record<string, any[]>;
-	cache?: { passed: number; total: number; bypassed?: number };
+	cache?: { passed: number; total: number; bypassed?: number; gates?: any[] };
 	goalState?: string;
 }): Promise<HTMLElement> {
 	openReviewEvents = [];
@@ -317,6 +317,63 @@ describe("GoalStatusWidget fixture", () => {
 		} }));
 		await sleep(20);
 		expect(dd.querySelector('[data-testid="goal-widget-signoff-content-toggle"]')).toBeNull();
+	});
+
+	it("hydrates a pending dropdown row's cancellation from the authoritative summary and clears it for a newer signal", async () => {
+		const el = await mountGoalStatusWidget({
+			goalId: GOAL_ID,
+			gates: [{ gateId: "implementation", name: "Implementation", status: "pending" }],
+			cache: {
+				passed: 0,
+				total: 1,
+				gates: [{
+					gateId: "implementation",
+					status: "pending",
+					effectiveStatus: "pending",
+					running: false,
+					awaitingSignoffCount: 0,
+					dependsOn: [],
+					signalCount: 1,
+					verificationStatus: "cancelled",
+					cancellation: { cause: "goal-pause", requestedAt: 1 },
+				}],
+			},
+		});
+		await openDropdown(el);
+
+		const row = dropdown()!.querySelector('[data-testid="goal-widget-gate"][data-gate-id="implementation"]')!;
+		expect(row.getAttribute("data-gate-status")).toBe("pending");
+		expect(dropdown()!.querySelector('[data-testid="goal-widget-gate-cancellation"]')?.textContent).toContain("cancelled · Goal paused");
+
+		// The summary is current-signal authoritative: a re-signal clears the
+		// cancellation projection without changing this pending gate's status.
+		state.gateStatusCache.set(GOAL_ID, {
+			passed: 0,
+			bypassed: 0,
+			total: 1,
+			verifying: false,
+			verifyingCount: 0,
+			awaitingSignoffCount: 0,
+			awaitingHumanSignoff: false,
+			runningGateIds: [],
+			gates: [{
+				gateId: "implementation",
+				status: "pending",
+				effectiveStatus: "pending",
+				running: false,
+				awaitingSignoffCount: 0,
+				dependsOn: [],
+				signalCount: 2,
+			}],
+		});
+		window.dispatchEvent(new CustomEvent(GATE_STATUS_CLIENT_EVENT, { detail: {
+			type: "gate_status_cache_updated",
+			goalId: GOAL_ID,
+		} }));
+		await (el as any).updateComplete;
+
+		expect(row.getAttribute("data-gate-status")).toBe("pending");
+		expect(dropdown()!.querySelector('[data-testid="goal-widget-gate-cancellation"]')).toBeNull();
 	});
 
 	it("passed, failed, bypassed, and completed states expose the right lightweight actions", async () => {
