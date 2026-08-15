@@ -34,6 +34,11 @@ import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
 import { execShellCommand } from "./shell-util.js";
 import type { Component } from "./project-config-store.js";
 import { branchToSlug, worktreeRoot as resolveWorktreeRoot } from "../skills/worktree-paths.js";
+import {
+	canonicalGitCommonDir,
+	repositoryMutationCoordinator,
+	type RepositoryMutationCoordinator,
+} from "../skills/repository-mutation-coordinator.js";
 import { isBobbitPoolBranch, type WorktreePoolSnapshot } from "./worktree-inventory.js";
 import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 import { mapWithConcurrency, RECOVERY_IO_CONCURRENCY } from "./bounded-async-work.js";
@@ -135,6 +140,8 @@ export interface WorktreePoolOptions {
 	fsImpl?: WorktreePoolFs;
 	cleanupWorktreeImpl?: typeof cleanupWorktree;
 	resolveRepoToplevelImpl?: (repoPath: string, commandRunner: CommandRunner) => Promise<string>;
+	/** Test seam; production uses the process-wide canonical common-dir coordinator. */
+	repositoryMutationCoordinator?: RepositoryMutationCoordinator;
 }
 
 /** Whether a branch name belongs to a pool entry (current or legacy form). */
@@ -261,6 +268,7 @@ export class WorktreePool {
 	private readonly fsImpl: WorktreePoolFs;
 	private readonly cleanupWorktreeImpl: typeof cleanupWorktree;
 	private readonly resolveRepoToplevelImpl: (repoPath: string, commandRunner: CommandRunner) => Promise<string>;
+	private readonly repositoryMutationCoordinator: RepositoryMutationCoordinator;
 	private pathsResolved = false;
 	private pathsResolution?: Promise<void>;
 	private initializationStarted = false;
@@ -320,12 +328,58 @@ export class WorktreePool {
 		this.fsImpl = opts.fsImpl ?? realWorktreePoolFs;
 		this.cleanupWorktreeImpl = opts.cleanupWorktreeImpl ?? cleanupWorktree;
 		this.resolveRepoToplevelImpl = opts.resolveRepoToplevelImpl ?? resolveRepoToplevel;
+		this.repositoryMutationCoordinator = opts.repositoryMutationCoordinator ?? repositoryMutationCoordinator;
 	}
 
 	private execGit(args: readonly string[], options?: any): Promise<{ stdout: string; stderr: string }> {
 		return execGit(args, options, this.commandRunner);
 	}
 
+	/**
+	 * Resolve the common Git directory shared by linked worktrees. Real Git
+	 * failures intentionally fall through to the operation itself, which keeps
+	 * the pool's existing cold-path fallback behaviour for malformed repos while
+	 * still using the canonical common-dir key for every usable repository.
+	 */
+	private async resolveGitCommonDir(repoPath: string): Promise<string> {
+		let commonDir = "";
+		try {
+			try {
+				const result = await this.execGit(["rev-parse", "--path-format=absolute", "--git-common-dir"], {
+					cwd: repoPath,
+					timeout: 5_000,
+				});
+				commonDir = result.stdout.toString().trim();
+			} catch {
+				const result = await this.execGit(["rev-parse", "--git-common-dir"], {
+					cwd: repoPath,
+					timeout: 5_000,
+				});
+				commonDir = result.stdout.toString().trim();
+			}
+		} catch {
+			// The following mutating command provides the actionable Git error. This
+			// fallback also keeps virtual command-runner tests from masquerading as
+			// a real repository identity.
+		}
+		return canonicalGitCommonDir(commonDir
+			? (path.isAbsolute(commonDir) ? commonDir : path.resolve(repoPath, commonDir))
+			: repoPath);
+	}
+
+	private async withRepositoryMutation<T>(repoPath: string, operation: () => Promise<T>): Promise<T> {
+		const commonDir = await this.resolveGitCommonDir(repoPath);
+		return this.repositoryMutationCoordinator.run(commonDir, operation);
+	}
+
+	/** Acquire every repository lock in canonical order to prevent AB/BA deadlocks. */
+	private async withRepositoryMutations<T>(repoPaths: readonly string[], operation: () => Promise<T>): Promise<T> {
+		const keys = [...new Set(await Promise.all(repoPaths.map(repoPath => this.resolveGitCommonDir(repoPath))))].sort();
+		const run = async (index: number): Promise<T> => index === keys.length
+			? operation()
+			: this.repositoryMutationCoordinator.run(keys[index]!, () => run(index + 1));
+		return run(0);
+	}
 
 	/** Whether the given components list implies multi-repo fill. */
 	private isMultiRepo(components: Component[] | undefined): boolean {
@@ -460,25 +514,27 @@ export class WorktreePool {
 	 */
 	private scheduleFailureCleanup(repoPath: string, worktreePath: string, branchName: string): void {
 		const cleanup = Promise.resolve()
-			.then(() => this.cleanupWorktreeImpl(repoPath, worktreePath, branchName, true, this.commandRunner, {
-				...this.remotePolicy,
-				skipRemotePush: true,
+			.then(() => this.withRepositoryMutation(repoPath, async () => {
+				await this.cleanupWorktreeImpl(repoPath, worktreePath, branchName, true, this.commandRunner, {
+					...this.remotePolicy,
+					skipRemotePush: true,
+				});
 			}))
 			.catch(() => { /* best-effort; claim already logged the owning failure */ });
 		this.trackOperation(cleanup);
 	}
 
 	private scheduleFailureCleanups(worktrees: readonly { repoPath: string; worktreePath: string }[], branchName: string): void {
-		const cleanup = mapWithConcurrency(worktrees, RECOVERY_IO_CONCURRENCY, async (worktree) => {
-			try {
-				await this.cleanupWorktreeImpl(worktree.repoPath, worktree.worktreePath, branchName, true, this.commandRunner, {
-					...this.remotePolicy,
-					skipRemotePush: true,
-				});
-			} catch {
-				// Best-effort and isolated per repository; claim already logged the owning failure.
-			}
-		});
+		const cleanupPolicy: RemoteGitPolicy = { ...this.remotePolicy, skipRemotePush: true };
+		const cleanup = this.withRepositoryMutations(worktrees.map(worktree => worktree.repoPath), async () => {
+			await mapWithConcurrency(worktrees, RECOVERY_IO_CONCURRENCY, async (worktree) => {
+				try {
+					await this.cleanupWorktreeImpl(worktree.repoPath, worktree.worktreePath, branchName, true, this.commandRunner, cleanupPolicy);
+				} catch {
+					// Best-effort and isolated per repository; claim already logged the owning failure.
+				}
+			});
+		}).catch(() => { /* best-effort; claim already logged the owning failure */ });
 		this.trackOperation(cleanup);
 	}
 
@@ -565,15 +621,30 @@ export class WorktreePool {
 		// pointer to the new container path.
 		if (entry.worktrees && entry.worktrees.length > 0) {
 			if (counters) counters.multiRepo = 1;
-			const result = await this._claimMultiRepo(entry, targetBranch);
-			if (counters) {
-				counters.success = result ? 1 : 0;
-				counters.degraded = result?.degraded ? 1 : 0;
+			try {
+				const result = await this.withRepositoryMutations(
+					entry.worktrees.map(worktree => worktree.repoPath),
+					() => this._claimMultiRepo(entry, targetBranch),
+				);
+				if (counters) {
+					counters.success = result ? 1 : 0;
+					counters.degraded = result?.degraded ? 1 : 0;
+				}
+				recordClaimTimer();
+				return result;
+			} catch (err) {
+				console.error(`[worktree-pool] Multi-repo claim coordination failed for ${targetBranch}:`, err);
+				this.scheduleFailureCleanups(entry.worktrees, entry.branchName);
+				recordClaimTimer();
+				return null;
 			}
-			recordClaimTimer();
-			return result;
 		}
 
+		// Branch rename, upstream cleanup, move, and rollback are one common-dir
+		// transaction. A sibling setup cannot observe a partially claimed branch
+		// or contend on the shared config file between those operations.
+		try {
+			return await this.withRepositoryMutation(this.repoPath, async () => {
 		// 1. Rename branch (fast — local ref op).
 		try {
 			await this.execGit(["branch", "-m", entry.branchName, targetBranch], {
@@ -642,6 +713,13 @@ export class WorktreePool {
 		if (counters) counters.success = 1;
 		recordClaimTimer();
 		return result;
+			});
+		} catch (err) {
+			console.error(`[worktree-pool] Claim coordination failed for ${targetBranch}:`, err);
+			this.scheduleFailureCleanup(this.repoPath, entry.worktreePath, entry.branchName);
+			recordClaimTimer();
+			return null;
+		}
 	}
 
 	/**
@@ -856,6 +934,7 @@ export class WorktreePool {
 							configuredBaseRef,
 							commandRunner: this.commandRunner,
 							remotePolicy: this.remotePolicy,
+							repositoryMutationCoordinator: this.repositoryMutationCoordinator,
 						});
 						if (set.worktrees.length === 0) {
 							console.warn(`[worktree-pool] Skipping pre-build ${branchName}: no worktree-able repo with a resolved HEAD`);
@@ -879,6 +958,7 @@ export class WorktreePool {
 							configuredBaseRef,
 							commandRunner: this.commandRunner,
 							remotePolicy: this.remotePolicy,
+							repositoryMutationCoordinator: this.repositoryMutationCoordinator,
 						});
 						container = result.worktreePath;
 						entry = {
@@ -976,18 +1056,24 @@ export class WorktreePool {
 		const cleanupPolicy: RemoteGitPolicy = { ...this.remotePolicy, skipRemotePush: true };
 		await mapWithConcurrency(entries, RECOVERY_IO_CONCURRENCY, async (entry) => {
 			if (entry.worktrees && entry.worktrees.length > 0) {
-				// Keep each set sequential so concurrent sets — not set size × sets —
-				// define the global cleanup ceiling. Failure in one repo never prevents
-				// cleanup of the remaining repos in the same pool set.
-				for (const worktree of entry.worktrees) {
-					try {
-						await this.cleanupWorktreeImpl(worktree.repoPath, worktree.worktreePath, entry.branchName, true, this.commandRunner, cleanupPolicy);
-					} catch { /* all-settled per repository */ }
-				}
+				// Hold the complete set in canonical order. Cleanup remains sequential
+				// within the set, so concurrent sets — not set size × sets — define the
+				// global cleanup ceiling. A failure never prevents later repos in a set.
+				try {
+					await this.withRepositoryMutations(entry.worktrees.map(worktree => worktree.repoPath), async () => {
+						for (const worktree of entry.worktrees!) {
+							try {
+								await this.cleanupWorktreeImpl(worktree.repoPath, worktree.worktreePath, entry.branchName, true, this.commandRunner, cleanupPolicy);
+							} catch { /* all-settled per repository */ }
+						}
+					});
+				} catch { /* all-settled per entry */ }
 				return;
 			}
 			try {
-				await this.cleanupWorktreeImpl(this.repoPath, entry.worktreePath, entry.branchName, true, this.commandRunner, cleanupPolicy);
+				await this.withRepositoryMutation(this.repoPath, async () => {
+					await this.cleanupWorktreeImpl(this.repoPath, entry.worktreePath, entry.branchName, true, this.commandRunner, cleanupPolicy);
+				});
 			} catch { /* all-settled per entry */ }
 		});
 		if (diagEnabled) getCpuDiagnostics().recordTimer("worktree-pool:drain", performance.now() - diagStart, { entries: entries.length });

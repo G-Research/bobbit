@@ -1365,10 +1365,12 @@ export function messageEndPredicate(role: string): (m: WsMsg) => boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * Signal a gate via REST and wait for it to reach the target status via WebSocket.
+ * Signal a gate via REST and wait for its terminal status via WebSocket.
  *
  * Race-safe: captures the WS message cursor BEFORE the signal, so re-signals
  * correctly wait for the NEW event instead of matching a stale one in the buffer.
+ * A terminal status that is not expected fails immediately instead of obscuring
+ * the real gate failure behind a WebSocket timeout.
  *
  * Usage:
  *   await signalAndWaitForGate(ws, goalId, "design-doc", { content: "..." }, "passed");
@@ -1391,11 +1393,24 @@ export async function signalAndWaitForGate(
 		const text = await res.text();
 		throw new Error(`signal ${gateId} failed: ${res.status} ${text}`);
 	}
-	return conn.waitForFrom(
+	const signalResponse = await res.json() as { signal?: { id?: unknown } };
+	const signalId = typeof signalResponse.signal?.id === "string" ? signalResponse.signal.id : "<unknown>";
+	const terminalStatuses = new Set(["passed", "failed", "bypassed"]);
+	const event = await conn.waitForFrom(
 		cursor,
-		(m) => m.type === "gate_status_changed" && m.goalId === goalId && m.gateId === gateId && statuses.includes(m.status),
+		(m) => m.type === "gate_status_changed"
+			&& m.goalId === goalId
+			&& m.gateId === gateId
+			&& terminalStatuses.has(m.status),
 		timeoutMs,
 	);
+	if (!statuses.includes(event.status)) {
+		throw new Error(
+			`Gate reached an unexpected terminal status: goalId=${goalId} gateId=${gateId} ` +
+			`observedStatus=${event.status} signalId=${signalId} expectedStatuses=${statuses.join(",")}`,
+		);
+	}
+	return event;
 }
 
 // ---------------------------------------------------------------------------

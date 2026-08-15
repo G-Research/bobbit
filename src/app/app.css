@@ -382,6 +382,36 @@ bell-toggle button {
 	color: var(--foreground);
 }
 
+.sidebar-reveal-current-control {
+	display: inline-flex;
+	flex: 0 0 auto;
+}
+
+.sidebar-reveal-current-button {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0.25em;
+	border-radius: 0.4167em;
+	color: var(--muted-foreground);
+	transition: color 120ms ease, background-color 120ms ease;
+}
+
+.sidebar-reveal-current-button:hover:not(:disabled) {
+	background: var(--secondary);
+	color: var(--foreground);
+}
+
+.sidebar-reveal-current-button:focus-visible {
+	outline: 2px solid var(--ring);
+	outline-offset: 2px;
+}
+
+.sidebar-reveal-current-button:disabled {
+	cursor: not-allowed;
+	opacity: 0.45;
+}
+
 .sidebar-view-controls--mobile {
 	margin-inline: 0.6667em;
 	min-height: 2.75em;
@@ -563,6 +593,47 @@ bell-toggle button {
 	font-size: 0.75em;
 	line-height: 1.45;
 	text-align: center;
+}
+
+.sidebar-reveal-emphasis::after {
+	content: "";
+	position: absolute;
+	inset: -2px;
+	z-index: 4;
+	border: 1px solid color-mix(in oklch, var(--primary) 82%, var(--ring));
+	border-radius: inherit;
+	box-shadow: 0 0 0 0 color-mix(in oklch, var(--ring) 55%, transparent);
+	pointer-events: none;
+	animation: sidebar-reveal-ring 680ms ease-out both;
+}
+
+@keyframes sidebar-reveal-ring {
+	0% {
+		opacity: 1;
+		box-shadow: 0 0 0 0 color-mix(in oklch, var(--ring) 55%, transparent);
+	}
+	55% {
+		opacity: 0.9;
+		box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 28%, transparent);
+	}
+	100% {
+		opacity: 0;
+		box-shadow: 0 0 0 5px transparent;
+	}
+}
+
+.sidebar-reveal-emphasis--reduced::after {
+	opacity: 1;
+	box-shadow: 0 0 0 2px color-mix(in oklch, var(--ring) 35%, transparent);
+	animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.sidebar-reveal-emphasis::after {
+		opacity: 1;
+		box-shadow: 0 0 0 2px color-mix(in oklch, var(--ring) 35%, transparent);
+		animation: none;
+	}
 }
 
 @media (max-width: 360px) {
@@ -1032,6 +1103,25 @@ details.wf-proposal-workflow .wf-proposal-gates {
 	74%, 86%  { transform: scaleY(0.75) translateX(1.6px) translateY(7.2px); opacity: 1; transform-origin: 0 14.4px; }
 	87%, 89%  { transform: scaleY(0.75) translateY(7.2px); opacity: 0; transform-origin: 0 14.4px; }
 	90%, 100% { transform: scaleY(0.75) translateY(7.2px); opacity: 1; transform-origin: 0 14.4px; }
+}
+
+/* Sidebar headset/ponytail right-facing occlusion. Two immutable canvas
+ * bitmaps swap opacity on the existing 6s eye clock. This stays compositor-only:
+ * no JS timer, canvas redraw, or main-thread animation work. */
+.bobbit-sidebar-accessory-turn-front {
+	animation: bobbit-sidebar-accessory-turn-front 6s step-end infinite;
+}
+.bobbit-sidebar-accessory-turn-right {
+	opacity: 0;
+	animation: bobbit-sidebar-accessory-turn-right 6s step-end infinite;
+}
+@keyframes bobbit-sidebar-accessory-turn-front {
+	0%, 73%, 87%, 100% { opacity: 1; }
+	74%, 86% { opacity: 0; }
+}
+@keyframes bobbit-sidebar-accessory-turn-right {
+	0%, 73%, 87%, 100% { opacity: 0; }
+	74%, 86% { opacity: 1; }
 }
 
 /* ============================================================================

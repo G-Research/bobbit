@@ -11,6 +11,7 @@ import {
 	renderApp,
 	activeSessionId,
 	isDesktop,
+	getGoalSetupUiState,
 	type GatewaySession,
 	type Goal,
 	type Project,
@@ -1637,7 +1638,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 		}
 	}
 	const isLoading = teamLoading.has(goal.id);
-	const isPreparing = goal.setupStatus === "preparing";
+	const setup = getGoalSetupUiState(goal);
 
 	// On-demand fetch for expanded goals with no visible children
 	if (isExpanded && isTeamGoal && goalSessions.length === 0 && !_goalChildrenFetched.has(goal.id)) {
@@ -1677,6 +1678,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 
 	const handleStartTeam = async (e?: Event) => {
 		e?.stopPropagation();
+		if (!setup.canStart) return;
 		teamLoading.add(goal.id);
 		renderApp();
 		const sid = await startTeam(goal.id);
@@ -1703,8 +1705,8 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 				: isWorkMerged
 				? html`<span style="vertical-align:middle">Work merged —</span> <button class="inline-flex items-center gap-1 px-1.5 py-px rounded bg-secondary/50 text-muted-foreground font-normal hover:bg-secondary/80 hover:text-foreground transition-colors align-middle" style="font-size: 0.8333em;" title="Archive goal" @click=${(e: Event) => { e.stopPropagation(); deleteGoal(goal.id); }}>${icon(Trash2, "xs")}Archive</button>`
 				: isTeamGoal
-				? html`<span style="vertical-align:middle">No agents —</span> <button class="inline-flex items-center gap-1 px-1.5 py-px rounded bg-primary/10 text-primary font-semibold hover:bg-primary/20 transition-colors align-middle ${isPreparing ? "opacity-60 pointer-events-none" : ""}" style="font-size: 0.8333em;" title="${isPreparing ? "Setting up worktree\u2026" : "Start team"}" @click=${handleStartTeam} ?disabled=${isLoading || isPreparing}>${isPreparing ? html`<svg class="animate-spin" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>` : html`<svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M2 12h12v1.5H2V12zm0-1L1 4l4 3 3-5 3 5 4-3-1 7H2z"/></svg>`}${isLoading ? "Starting\u2026" : isPreparing ? "Setting up\u2026" : "Start Team"}</button>`
-				: html`No sessions — <button class="inline-flex items-center gap-1 px-1.5 py-px rounded bg-primary/10 text-primary font-semibold hover:bg-primary/20 transition-colors" title="Start a session" @click=${() => createAndConnectSession(goal.id)}><svg width="8" height="8" viewBox="0 0 16 16" fill="currentColor"><path d="M5 3l8 5-8 5V3z"/></svg>start one</button>`}
+				? html`<span style="vertical-align:middle">No agents —</span> <button class="inline-flex items-center gap-1 px-1.5 py-px rounded bg-primary/10 text-primary font-semibold hover:bg-primary/20 transition-colors align-middle ${setup.isPending ? "opacity-60 pointer-events-none" : ""}" style="font-size: 0.8333em;" title=${setup.isPending ? (setup.status === "retrying" ? "Retrying worktree setup…" : "Setting up worktree…") : setup.hasError ? "Worktree setup failed" : "Start team"} @click=${handleStartTeam} ?disabled=${isLoading || !setup.canStart}>${setup.isPending ? html`<svg class="animate-spin" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>` : html`<svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M2 12h12v1.5H2V12zm0-1L1 4l4 3 3-5 3 5 4-3-1 7H2z"/></svg>`}${isLoading ? "Starting…" : setup.isPending ? (setup.status === "retrying" ? "Retrying…" : "Setting up…") : "Start Team"}</button>`
+				: html`No sessions — <button class="inline-flex items-center gap-1 px-1.5 py-px rounded bg-primary/10 text-primary font-semibold hover:bg-primary/20 transition-colors" title=${setup.canStart ? "Start a session" : (setup.isPending ? "Worktree setup in progress" : "Worktree setup failed")} @click=${() => createAndConnectSession(goal.id)} ?disabled=${!setup.canStart}><svg width="8" height="8" viewBox="0 0 16 16" fill="currentColor"><path d="M5 3l8 5-8 5V3z"/></svg>start one</button>`}
 		</div>
 	`;
 
@@ -1843,7 +1845,7 @@ export function renderGoalGroup(goal: Goal, opts?: { descendantCount?: number; r
 				@dblclick=${!mobile ? () => { if (goal.team) { const tl = goalSessions.find(s => s.role === "team-lead"); if (tl) connectToSession(tl.id, true); } } : null}>
 				<span class="sidebar-chevron-slot sidebar-chevron-slot--header sidebar-chevron-slot--absolute text-muted-foreground select-none" title="${isExpanded ? "Collapse goal" : "Expand goal"}"><span class="sidebar-chevron-glyph">${isExpanded ? "▾" : "▸"}</span></span>
 				<span class="shrink-0 text-muted-foreground" style="${mobile ? "margin-left:0;margin-right:1px;" : "margin-left:-3px;"}">${icon(GoalIcon, mobile ? "sm" : "xs")}</span>
-				${goal.setupStatus === "preparing" ? html`<svg class="animate-spin shrink-0" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.6"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>` : goal.setupStatus === "error" ? html`<span class="shrink-0" style="color:var(--destructive);font-size:0.8333em;line-height:1;" title="Worktree setup failed">⚠</span>` : ""}
+				${setup.isPending ? html`<svg class="animate-spin shrink-0" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.6"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>` : setup.hasError ? html`<span class="shrink-0" style="color:var(--destructive);font-size:0.8333em;line-height:1;" title="Worktree setup failed">⚠</span>` : ""}
 				<span class="flex-1 min-w-0 truncate text-muted-foreground uppercase tracking-wider font-medium" style="${mobile ? "font-size: 1.1667em;" : "font-size: 0.8333em;"}">${renderHighlightedText(goal.title, state.searchQuery)}${effectiveDisplayTitleSuffix ? html`<span class="ml-1 text-muted-foreground/60 font-mono normal-case tracking-normal" data-testid="sidebar-goal-title-suffix" title="Disambiguator: this goal shares its title with a sibling.">(${effectiveDisplayTitleSuffix})</span>` : ""}</span>
 				${effectiveDescendantCount > 0 ? html`
 					<span

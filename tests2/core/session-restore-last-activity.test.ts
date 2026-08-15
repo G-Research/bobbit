@@ -77,6 +77,7 @@ class RestoreBridge {
 			{ type: "tool_execution_end", toolName: "read" },
 			{ type: "message_end", message: { id: `new-${this.id}`, role: "assistant", content: [] } },
 			{ type: "agent_end" },
+			{ type: "agent_settled" },
 		];
 		for (const event of events) this.emit(event);
 		if (this.promptError) throw this.promptError;
@@ -972,6 +973,7 @@ describe("authoritative session activity attribution", () => {
 		// origin quarantine because no new prompt has been dispatched.
 		for (const bridge of bridges.values()) {
 			for (const event of [...LIFECYCLE_EVENTS, ...REPLAY_VISIBLE_EVENTS]) bridge.emit(event);
+			bridge.emit({ type: "agent_settled" });
 		}
 		await store.flushAsync();
 
@@ -986,7 +988,8 @@ describe("authoritative session activity attribution", () => {
 		expect(transitions.filter(({ patch }) => "lastReadAt" in patch)).toEqual([]);
 
 		const target = rows[1];
-		await manager.enqueuePrompt(target.id, "genuine post-restore prompt");
+		await expect(manager.enqueuePrompt(target.id, "genuine post-restore prompt"))
+			.resolves.toEqual({ status: "dispatched" });
 		await store.flushAsync();
 		const after = store.get(target.id)!;
 		expect(after.lastActivity).toBeGreaterThan(after.lastReadAt!);

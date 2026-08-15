@@ -10,7 +10,7 @@
  * Also provides bash_bg_create, bash_bg_logs, bash_bg_kill tools for
  * managing long-running background processes via the gateway API.
  */
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import fs from "node:fs";

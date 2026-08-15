@@ -192,6 +192,42 @@ describe("message-reducer", () => {
 		]);
 	});
 
+	it("invalidates only the provisional recoverable-length stream and retains the retry terminal", () => {
+		const firstTail = assistantMsg("first-tail", "truncated first tail", {
+			assistantStreamId: "assistant-stream:first",
+			stopReason: "length",
+		});
+		const unrelated = assistantMsg("unrelated", "prior canonical output", {
+			assistantStreamId: "assistant-stream:prior",
+		});
+		const retryTerminal = assistantMsg("retry-final", "complete retry output", {
+			assistantStreamId: "assistant-stream:retry",
+			stopReason: "stop",
+		});
+		const s = applyAll([
+			{ type: "snapshot", messages: [unrelated, firstTail] },
+			{ type: "assistant-stream-invalidated", assistantStreamId: "assistant-stream:first" },
+			liveMessageEnd(3, retryTerminal),
+		]);
+
+		assert.deepStrictEqual(s.messages.map((row) => row.id), ["unrelated", "retry-final"]);
+		assert.equal(s.messages.some((row: any) => row.assistantStreamId === "assistant-stream:first"), false);
+		assert.equal(extractText(s.messages.at(-1)), "complete retry output");
+	});
+
+	it("keeps a final second length terminal when no matching retry invalidation is emitted", () => {
+		const finalLength = assistantMsg("second-length", "final bounded length outcome", {
+			assistantStreamId: "assistant-stream:second",
+			stopReason: "length",
+		});
+		const s = applyAll([
+			liveMessageEnd(1, finalLength),
+			{ type: "assistant-stream-invalidated", assistantStreamId: "assistant-stream:first" },
+		]);
+		assert.deepStrictEqual(s.messages.map((row) => row.id), ["second-length"]);
+		assert.equal(extractText(s.messages[0]), "final bounded length outcome");
+	});
+
 	it("(2) out-of-order live events sort by _order", () => {
 		const s = applyAll([
 			liveMessageEnd(2, assistantMsg("a1", "hello")),
@@ -775,6 +811,67 @@ describe("message-reducer", () => {
 		assert.strictEqual(payload.trigger, "overflow");
 		assert.strictEqual(payload.state, "error");
 		assert.strictEqual(payload.tokensBefore, PARSED);
+	});
+
+	it("(12e-recovery) overflow start suppresses a preceding Codex context error only", () => {
+		const providerError = "Codex error: Your input exceeds the context window of this model. Please adjust your input and try again.";
+		const overflow = {
+			id: "overflow-error",
+			role: "assistant",
+			content: [],
+			stopReason: "error",
+			errorMessage: providerError,
+		};
+		const recovered = applyAll([
+			liveMessageEnd(1, overflow),
+			{ type: "suppress-latest-context-overflow-error" },
+		]);
+		assert.strictEqual(
+			(recovered.messages.find((message) => message.id === "overflow-error") as any)?._suppressedByOverflowRecovery,
+			true,
+		);
+		const refreshed = reduce(recovered, {
+			type: "snapshot",
+			messages: [
+				{ ...overflow, id: "retained-overflow-error" },
+				assistantMsg("kept-assistant", "Resuming work after the summary."),
+			],
+		});
+		assert.strictEqual(
+			(refreshed.messages.find((message) => message.id === "retained-overflow-error") as any)?._suppressedByOverflowRecovery,
+			true,
+			"post-compaction snapshots must not resurrect the hidden provider error",
+		);
+		const repeatedLive = reduce(recovered, liveMessageEnd(2, { ...overflow, id: "later-identical-error" }));
+		const repeatedSnapshot = reduce(repeatedLive, {
+			type: "snapshot",
+			messages: [
+				{ ...overflow, id: "retained-overflow-error" },
+				{ ...overflow, id: "later-identical-error" },
+			],
+		});
+		assert.strictEqual(
+			(repeatedSnapshot.messages.find((message) => message.id === "retained-overflow-error") as any)?._suppressedByOverflowRecovery,
+			true,
+		);
+		assert.strictEqual(
+			(repeatedSnapshot.messages.find((message) => message.id === "later-identical-error") as any)?._suppressedByOverflowRecovery,
+			undefined,
+			"a later identical error must remain visible until its own compaction starts",
+		);
+
+		const unrelated = {
+			id: "rate-limit-error",
+			role: "assistant",
+			content: [],
+			stopReason: "error",
+			errorMessage: "rate limited while opening a context window",
+		};
+		const untouched = applyAll([
+			liveMessageEnd(1, unrelated),
+			{ type: "suppress-latest-context-overflow-error" },
+		]);
+		assert.strictEqual((untouched.messages[0] as any)._suppressedByOverflowRecovery, undefined);
 	});
 
 	it("(12c-replacement) sidecar synthetic in snapshot is rendered as rich card", () => {

@@ -700,6 +700,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 				message: { role: "assistant", content: [{ type: "text", text: "queued done" }], stopReason: "stop" },
 			});
 			listener?.({ type: "agent_end", messages: [] });
+			listener?.({ type: "agent_settled" });
 			return { success: true };
 		});
 		const ps = persisted("boot-continuation-dispatch-fence", file, { wasStreaming: true });
@@ -719,11 +720,14 @@ describe("executable SessionManager rehydration boundaries", () => {
 			message: { role: "assistant", content: [{ type: "text", text: "continued" }], stopReason: "stop" },
 		});
 		listener?.({ type: "agent_end", messages: [] });
-		const canonicalBeforeAck = manager.sessions.get(ps.id);
-		expect(canonicalBeforeAck?.status).toBe("idle");
-		expect(canonicalBeforeAck?.completedTurnCount).toBe(1);
-		expect(canonicalBeforeAck?.promptQueue.toArray().map((row: any) => row.text))
+		const canonicalBeforeSettlement = manager.sessions.get(ps.id);
+		expect(canonicalBeforeSettlement?.status).toBe("idle");
+		expect(canonicalBeforeSettlement?.completedTurnCount).toBe(1);
+		expect(canonicalBeforeSettlement?.promptQueue.toArray().map((row: any) => row.text))
 			.toEqual(["accepted while boot prompt is pending"]);
+		expect(bridge.prompt).not.toHaveBeenCalled();
+
+		listener?.({ type: "agent_settled" });
 		expect(bridge.prompt).not.toHaveBeenCalled();
 
 		bootAccepted.resolve();
@@ -897,6 +901,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(roleBridge.promptWhenReady).toHaveBeenCalledWith(
 			expect.stringMatching(/server restarted while you were mid-turn/i),
 			undefined,
+			{ streamingBehavior: "followUp" },
 		);
 		expect(roleBridge.prompt).not.toHaveBeenCalled();
 		const canonical = manager.sessions.get(ps.id);
@@ -2608,6 +2613,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 		const manager = makeManager(ps, replacement);
 		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
 		oldBridge.stop = vi.fn(async () => {});
+		oldBridge.prompt = vi.fn(async () => ({ success: true }));
 		const original = liveSession(ps.id, oldBridge, { unsubscribe: vi.fn() });
 		manager.sessions.set(ps.id, original);
 
@@ -2629,6 +2635,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(canonical.lifecycleFenced).not.toBe(true);
 		expect(canonical.rpcClient).toBe(oldBridge);
 		expect(canonical.status).toBe("idle");
+		expect(oldBridge.prompt).not.toHaveBeenCalled();
 		expect(replacement.stop).toHaveBeenCalledTimes(1);
 		expect(replacement.prompt).not.toHaveBeenCalled();
 		expect(canonical.promptQueue.toArray().map((row: any) => row.text))
