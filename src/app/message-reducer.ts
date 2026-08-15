@@ -16,6 +16,7 @@
  */
 
 import type { MessageAuthor } from "../shared/message-author.js";
+import { isContextOverflowError } from "./compaction-types.js";
 
 export type MessageOrigin = "server" | "optimistic" | "synthetic" | "permission";
 
@@ -69,6 +70,7 @@ export type Action =
 	| { type: "permission-reconciled"; current: any | null; reason?: string }
 	| { type: "blocked-tool-call-placeholder"; message: any; seq?: number }
 	| { type: "compaction-placeholder"; message: any }
+	| { type: "suppress-latest-context-overflow-error" }
 	| { type: "compaction-result"; message: any; success: boolean; toolResult?: any }
 	| { type: "system-notification"; message: any }
 	| { type: "mutation-pending"; message: any }
@@ -500,9 +502,43 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 
 		case "snapshot": {
 			const tick = state.nextTick;
-			const enriched = deduplicateSnapshotUserDeliveryIntents(
+			let enriched = deduplicateSnapshotUserDeliveryIntents(
 				action.messages.map(enrichUserMessage),
 			);
+			// A post-compaction snapshot can retain the provider's context-limit
+			// boundary row. Preserve the suppression established by the live
+			// auto_compaction_start instead of replacing it with an untagged copy.
+			// Match reverse occurrence ordinals per exact provider message: the
+			// compacted snapshot may omit older history, while a later identical
+			// error must not inherit suppression from this recovered occurrence.
+			const suppressedOrdinals = new Map<string, Set<number>>();
+			const stateOrdinals = new Map<string, number>();
+			for (let i = state.messages.length - 1; i >= 0; i--) {
+				const message = state.messages[i] as any;
+				if (message.role !== "assistant" || message.stopReason !== "error" || !isContextOverflowError(message.errorMessage)) continue;
+				const key = message.errorMessage as string;
+				const ordinal = stateOrdinals.get(key) ?? 0;
+				stateOrdinals.set(key, ordinal + 1);
+				if (message._suppressedByOverflowRecovery === true) {
+					const ordinals = suppressedOrdinals.get(key) ?? new Set<number>();
+					ordinals.add(ordinal);
+					suppressedOrdinals.set(key, ordinals);
+				}
+			}
+			if (suppressedOrdinals.size > 0) {
+				const snapshotOrdinals = new Map<string, number>();
+				for (let i = enriched.length - 1; i >= 0; i--) {
+					const message = enriched[i] as any;
+					if (message.role !== "assistant" || message.stopReason !== "error" || !isContextOverflowError(message.errorMessage)) continue;
+					const key = message.errorMessage as string;
+					const ordinal = snapshotOrdinals.get(key) ?? 0;
+					snapshotOrdinals.set(key, ordinal + 1);
+					if (suppressedOrdinals.get(key)?.has(ordinal)) {
+						enriched = enriched.slice();
+						enriched[i] = { ...message, _suppressedByOverflowRecovery: true };
+					}
+				}
+			}
 			// Two-way compaction dedup:
 			//   (a) State has a rich synthetic (`__compaction_summary` toolCall) —
 			//       drop the server's plain-text marker from this snapshot. Rich
@@ -1050,6 +1086,24 @@ export function reduce(state: ReducerState, action: Action): ReducerState {
 				nextTick: tick + 1,
 				highestSeq: state.highestSeq,
 			};
+		}
+
+		case "suppress-latest-context-overflow-error": {
+			// Providers may emit the recoverable error before auto_compaction_start,
+			// so the later compaction event must retroactively hide that live row.
+			let target = -1;
+			for (let i = state.messages.length - 1; i >= 0; i--) {
+				const message = state.messages[i] as any;
+				if (message.role !== "assistant") continue;
+				if (message.stopReason === "error" && isContextOverflowError(message.errorMessage)) {
+					target = i;
+				}
+				break;
+			}
+			if (target < 0 || (state.messages[target] as any)._suppressedByOverflowRecovery === true) return state;
+			const messages = state.messages.slice();
+			messages[target] = { ...messages[target], _suppressedByOverflowRecovery: true };
+			return { ...state, messages };
 		}
 
 		case "compaction-placeholder": {

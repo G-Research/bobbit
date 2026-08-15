@@ -66,6 +66,7 @@ import { computeStreamingMessageId } from "./streaming-message-id.js";
 import {
 	buildCompactionSummaryMessages,
 	buildInProgressCompactionPayload,
+	isContextOverflowError,
 	parseOverflowTokenCount,
 	type CompactionSummaryPayload,
 	type CompactionTrigger,
@@ -3668,8 +3669,7 @@ export class RemoteAgent {
 							this._overflowRecoveryDeadline !== null
 							&& Date.now() <= this._overflowRecoveryDeadline
 							&& msg.stopReason === "error"
-							&& typeof msg.errorMessage === "string"
-							&& /prompt is too long|tokens?\s*>\s*\d/i.test(msg.errorMessage)
+							&& isContextOverflowError(msg.errorMessage)
 						) {
 							msg = { ...msg, _suppressedByOverflowRecovery: true };
 							suppressedOverflowRetry = true;
@@ -3882,6 +3882,7 @@ export class RemoteAgent {
 				// surfacing as a standalone red banner.
 				if (this._triggerFromEvent(event) === "overflow") {
 					this._overflowRecoveryDeadline = Date.now() + 60_000;
+					this.apply({ type: "suppress-latest-context-overflow-error" });
 				}
 				// Add a rich in-progress synthetic so compaction is visible in chat history
 				this._addCompactingPlaceholder(this._triggerFromEvent(event));

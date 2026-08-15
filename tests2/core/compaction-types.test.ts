@@ -24,6 +24,7 @@ import {
 	COMPACTION_ACTIVE_TOOLCALL_ID,
 	buildCompactionSummaryMessages,
 	buildInProgressCompactionPayload,
+	isContextOverflowError,
 	parseOverflowTokenCount,
 } from "../../src/app/compaction-types.ts";
 import { readOrphanedBeforeCompaction } from "../../src/server/agent/transcript-reader.ts";
@@ -40,6 +41,13 @@ const RICH_USAGE = {
 };
 
 describe("compaction-types", () => {
+	it("recognizes provider-specific context overflow errors without matching unrelated failures", () => {
+		assert.strictEqual(isContextOverflowError("prompt is too long: 202592 tokens > 200000 maximum"), true);
+		assert.strictEqual(isContextOverflowError("Codex error: Your input exceeds the context window of this model. Please adjust your input and try again."), true);
+		assert.strictEqual(isContextOverflowError("rate limited while opening a context window"), false);
+		assert.strictEqual(isContextOverflowError(undefined), false);
+	});
+
 	it("parseOverflowTokenCount: canonical Anthropic 400 string", () => {
 		assert.strictEqual(
 			parseOverflowTokenCount("prompt is too long: 202592 tokens > 200000 maximum"),
