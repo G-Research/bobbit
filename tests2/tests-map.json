@@ -3864,6 +3864,33 @@
         "tier": "browser",
         "project": "browser"
       }
+    },
+    {
+      "path": "tests2/core/sandbox-image-requirements.test.ts",
+      "reason": "Core coverage for validated deterministic sandbox requirement image plans, fixed core build arguments, injection rejection, and bounded project-local build-failure state.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/sandbox-extension-requirements.test.ts",
+      "reason": "Fake-Docker in-process coverage for selected-project sandbox requirement resolution, server-owned build inputs, status transitions, invalidation lifecycle, and affected-project sandbox recreation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/sandbox-extension-requirements.spec.ts",
+      "reason": "Authenticated browser API journey for the existing sandbox status surface, exact pack build grant persistence across reload, and revoke removal while Docker remains deliberately fenced.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [
