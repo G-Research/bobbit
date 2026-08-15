@@ -35,7 +35,8 @@
 import { execFileSync, spawn, type ChildProcess, type StdioOptions } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, watch, type FSWatcher } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { extname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { connect } from "node:net";
 import { randomUUID } from "node:crypto";
 import type { Clock } from "../gateway-deps.js";
@@ -370,28 +371,24 @@ exit [BobbitJobSupervisor]::Run([string]$payload.file, [string[]]$payload.args, 
 
 const WINDOWS_JOB_SUPERVISOR_COMMAND = Buffer.from(WINDOWS_JOB_SUPERVISOR, "utf16le").toString("base64");
 
-// The background shell remains in the detached process group but ignores the
-// graceful signal. It makes root exit an ownership-safe place to send SIGKILL:
-// no empty-group/PGID-reuse window exists until that final signal kills it.
-// A persisted POSIX identity must be an exact process-incarnation authority.
-// Linux field 22 is kernel-stable for an incarnation. Node exposes no libproc
-// binding, so Darwin combines its process start time with a cryptographic nonce
-// held in the sentinel's argv. `lstart` alone is never accepted: a same-second
-// PID reuse lacks the 128-bit nonce and fails closed during recovery.
-const POSIX_TREE_SENTINEL_CHILD_SCRIPT = "trap '' HUP INT TERM; if [ -n \"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE\" ]; then case \"$(uname -s 2>/dev/null)\" in Linux) __bobbit_sentinel_start=$(awk '{print $22}' \"/proc/$$/stat\" 2>/dev/null || true); __bobbit_sentinel_kind=linux-proc-stat-22 ;; Darwin) __bobbit_sentinel_start=$(LC_ALL=C ps -o lstart= -p \"$$\" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'); __bobbit_sentinel_kind=darwin-lstart-argv-nonce ;; *) exit 125 ;; esac; [ -n \"$__bobbit_sentinel_start\" ] || exit 125; __bobbit_sentinel_tmp=\"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE.$$.tmp\"; printf '{\"pid\":%s,\"pgid\":%s,\"nonce\":\"%s\",\"startTokenKind\":\"%s\",\"startToken\":\"%s\"}\\n' \"$$\" \"$BOBBIT_POSIX_SENTINEL_PGID\" \"$BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE\" \"$__bobbit_sentinel_kind\" \"$__bobbit_sentinel_start\" > \"$__bobbit_sentinel_tmp\" && mv \"$__bobbit_sentinel_tmp\" \"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE\" || { rm -f \"$__bobbit_sentinel_tmp\"; exit 125; }; fi; printf . >&3; exec 3>&-; while :; do sleep 2147483647 & wait $!; done";
-// Run this in a separately invoked shell, rather than a background subshell.
-// POSIX `/bin/sh` preserves the outer shell's `$$` in `( ... ) &`; a new shell
-// gives the identity record the actual sentinel PID needed after root exit.
-// This is fixed shell source. Configured command bytes are positional arguments
-// after `bobbit-tree-sentinel`, so `exec "$@"` keeps them outside the shell
-// parser. Keep its spawn call isolated below: it makes that boundary clear to
-// both reviewers and static analysis.
-const POSIX_TREE_SENTINEL_SCRIPT = "__bobbit_sentinel_pgid=$$; export BOBBIT_POSIX_SENTINEL_PGID=\"$__bobbit_sentinel_pgid\"; /bin/sh -c \"$BOBBIT_POSIX_TREE_SENTINEL_CHILD_SCRIPT\" \"bobbit-posix-sentinel:$BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE\" & unset BOBBIT_POSIX_SENTINEL_PGID BOBBIT_POSIX_SENTINEL_IDENTITY_FILE BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE BOBBIT_POSIX_TREE_SENTINEL_CHILD_SCRIPT; exec 3>&-; exec \"$@\"";
+// The POSIX supervisor is a fixed Node program. It starts a same-group
+// sentinel, publishes its ownership handshake over FD 3, and directly spawns
+// the configured payload from argv. No configured bytes cross a shell parser.
+const POSIX_TREE_PAYLOAD_ENV = "BOBBIT_POSIX_TREE_PAYLOAD";
 
-function withPosixSentinelReadyPipe(stdio: StdioOptions | undefined): StdioOptions {
-	if (Array.isArray(stdio)) return [...stdio.slice(0, 3), "pipe", ...stdio.slice(3)] as StdioOptions;
+function posixSupervisorArgs(): string[] {
+	const extension = extname(fileURLToPath(import.meta.url));
+	const supervisor = fileURLToPath(new URL(`./posix-tree-supervisor${extension}`, import.meta.url));
+	return extension === ".ts" ? ["--import", "tsx", supervisor] : [supervisor];
+}
+
+function withPosixSentinelReadyPipe(stdio: StdioOptions | undefined): { stdio: StdioOptions; payloadStdioCount: number } {
+	if (Array.isArray(stdio)) {
+		const supervisorStdio = [...stdio.slice(0, 3), "pipe", ...stdio.slice(3)] as StdioOptions;
+		return { stdio: supervisorStdio, payloadStdioCount: supervisorStdio.length };
+	}
 	const standard = stdio ?? "pipe";
-	return [standard, standard, standard, "pipe"] as StdioOptions;
+	return { stdio: [standard, standard, standard, "pipe"] as StdioOptions, payloadStdioCount: 4 };
 }
 
 /** Spawn a process whose entire tree we can later kill. */
@@ -432,10 +429,11 @@ export function spawnTracked(
 			cwd: opts.cwd ?? process.cwd(),
 		}), "utf8").toString("base64")
 		: undefined;
+	const posixStdio = posixTreeSentinel ? withPosixSentinelReadyPipe(opts.stdio) : undefined;
 	const sentinelEnv = posixTreeSentinel
 		? {
 			...(opts.env ?? process.env),
-			BOBBIT_POSIX_TREE_SENTINEL_CHILD_SCRIPT: POSIX_TREE_SENTINEL_CHILD_SCRIPT,
+			[POSIX_TREE_PAYLOAD_ENV]: JSON.stringify({ file: cmd, args, stdioCount: posixStdio!.payloadStdioCount }),
 			...(opts.posixSentinelIdentity ? {
 				BOBBIT_POSIX_SENTINEL_IDENTITY_FILE: opts.posixSentinelIdentity.file,
 				BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE: opts.posixSentinelIdentity.nonce,
@@ -469,15 +467,16 @@ export function spawnTracked(
 				},
 			);
 		} else if (posixTreeSentinel) {
-			// This is the sole POSIX shell sink. The script is the constant above;
-			// cmd and args begin after `$0` and execute only via its quoted `exec "$@"`.
+			// The fixed supervisor consumes a private JSON envelope and launches its
+			// payload with argv. The executable passed here is trusted runtime state,
+			// not the configured command, so the tracked launch has no shell sink.
 			child = spawnImpl(
-				"/bin/sh",
-				["-c", POSIX_TREE_SENTINEL_SCRIPT, "bobbit-tree-sentinel", cmd, ...args],
+				process.execPath,
+				posixSupervisorArgs(),
 				{
 					cwd: opts.cwd,
 					env: sentinelEnv,
-					stdio: withPosixSentinelReadyPipe(opts.stdio),
+					stdio: posixStdio!.stdio,
 					detached: !isWin,
 					windowsHide: opts.windowsHide ?? isWin,
 				},

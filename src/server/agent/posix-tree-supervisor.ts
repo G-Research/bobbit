@@ -1,0 +1,146 @@
+/*
+ * Fixed, shell-free POSIX supervisor for spawnTracked.
+ *
+ * This program is launched only by spawn-tree.ts. Configured command bytes
+ * arrive as JSON in a private environment envelope and are used solely as
+ * argv by child_process.spawn; they are never parsed by a shell.
+ */
+
+import { execFileSync, spawn } from "node:child_process";
+import { closeSync, readFileSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
+
+const PAYLOAD_ENV = "BOBBIT_POSIX_TREE_PAYLOAD";
+const IDENTITY_FILE_ENV = "BOBBIT_POSIX_SENTINEL_IDENTITY_FILE";
+const IDENTITY_NONCE_ENV = "BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE";
+const SENTINEL_FLAG = "--bobbit-posix-tree-sentinel";
+const INTERNAL_ENVIRONMENT = [PAYLOAD_ENV, IDENTITY_FILE_ENV, IDENTITY_NONCE_ENV] as const;
+
+type Payload = { file: string; args: string[]; stdioCount: number };
+type SentinelIdentity = { pgid: number; startTokenKind: string; startToken: string };
+
+function die(): never {
+	process.exit(125);
+}
+
+function parsePayload(): Payload {
+	try {
+		const payload: unknown = JSON.parse(process.env[PAYLOAD_ENV] ?? "");
+		if (!payload || typeof payload !== "object") return die();
+		const { file, args, stdioCount } = payload as Partial<Payload>;
+		if (typeof file !== "string" || !Array.isArray(args) || args.some(arg => typeof arg !== "string") || typeof stdioCount !== "number" || !Number.isSafeInteger(stdioCount) || stdioCount < 4) return die();
+		return { file, args, stdioCount };
+	} catch {
+		return die();
+	}
+}
+
+function inspectSelf(): SentinelIdentity | undefined {
+	try {
+		if (process.platform === "linux") {
+			const stat = readFileSync(`/proc/${process.pid}/stat`, "utf8");
+			const closeParen = stat.lastIndexOf(")");
+			const fields = stat.slice(closeParen + 2).trim().split(/\s+/);
+			const pgid = Number(fields[2]); // field 5; fields begin at state (field 3)
+			const startToken = fields[19]; // field 22
+			return Number.isFinite(pgid) && !!startToken ? { pgid, startTokenKind: "linux-proc-stat-22", startToken } : undefined;
+		}
+		if (process.platform === "darwin") {
+			const startToken = execFileSync("ps", ["-o", "lstart=", "-p", String(process.pid)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+			const pgid = Number(execFileSync("ps", ["-o", "pgid=", "-p", String(process.pid)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim());
+			return Number.isFinite(pgid) && !!startToken ? { pgid, startTokenKind: "darwin-lstart-argv-nonce", startToken } : undefined;
+		}
+	} catch { /* unsupported or unavailable process inspection fails closed */ }
+	return undefined;
+}
+
+function publishIdentity(): boolean {
+	const file = process.env[IDENTITY_FILE_ENV];
+	const nonce = process.env[IDENTITY_NONCE_ENV];
+	if (!file && !nonce) return true;
+	if (!file || !nonce) return false;
+	const identity = inspectSelf();
+	if (!identity) return false;
+	const temporary = `${file}.${process.pid}.tmp`;
+	try {
+		writeFileSync(temporary, `${JSON.stringify({ pid: process.pid, nonce, ...identity })}\n`, { encoding: "utf8", mode: 0o600 });
+		renameSync(temporary, file);
+		return true;
+	} catch {
+		try { rmSync(temporary, { force: true }); } catch { /* ignore failed cleanup */ }
+		return false;
+	}
+}
+
+function supervisorPath(): string {
+	const entry = process.argv[1];
+	if (!entry) return die();
+	return entry;
+}
+
+function sentinelArgs(): string[] {
+	const entry = supervisorPath();
+	return entry.endsWith(".ts")
+		? ["--import", "tsx", entry, SENTINEL_FLAG]
+		: [entry, SENTINEL_FLAG];
+}
+
+function payloadEnvironment(): NodeJS.ProcessEnv {
+	const environment = { ...process.env };
+	for (const name of INTERNAL_ENVIRONMENT) delete environment[name];
+	return environment;
+}
+
+function runSentinel(): void {
+	if (!publishIdentity()) die();
+	try {
+		writeSync(3, ".");
+		closeSync(3);
+	} catch {
+		die();
+	}
+	// The sentinel is the group member that survives root exit until the host's
+	// final negative-PGID signal. It intentionally ignores graceful signals.
+	for (const signal of ["SIGHUP", "SIGINT", "SIGTERM"] as const) process.on(signal, () => {});
+	setInterval(() => {}, 2_147_483_647);
+}
+
+function runSupervisor(): void {
+	const payload = parsePayload();
+	const sentinel = spawn(process.execPath, sentinelArgs(), {
+		env: process.env,
+		stdio: ["ignore", "ignore", "ignore", 3],
+	});
+	// A failed sentinel never acknowledges FD 3. Let the host's ownership
+	// barrier fail closed rather than running a payload without a durable group
+	// member. Its spawn error is intentionally not forwarded to command stderr.
+	sentinel.once("error", () => die());
+	// Its process-group membership, not the supervisor's child-process handle,
+	// is its lifetime authority. Unref lets the supervisor exit with the payload
+	// while the sentinel retains the group for the host's final signal.
+	sentinel.unref();
+	try { closeSync(3); } catch { die(); }
+
+	// FD 3 is exclusively the parent/sentinel readiness channel. Preserve every
+	// caller-provided descriptor after it (for example a durable exit witness)
+	// at its original shifted position without exposing FD 3 to the payload.
+	const child = spawn(payload.file, payload.args, {
+		env: payloadEnvironment(),
+		stdio: ["inherit", "inherit", "inherit", "ignore", ...Array.from({ length: payload.stdioCount - 4 }, (_, index) => index + 4)],
+	});
+	let settled = false;
+	const finish = (code: number | null, signal: NodeJS.Signals | null) => {
+		if (settled) return;
+		settled = true;
+		if (signal) {
+			try { process.kill(process.pid, signal); } catch { process.exit(125); }
+			return;
+		}
+		process.exit(code ?? 125);
+	};
+	child.once("error", () => finish(127, null));
+	child.once("close", finish);
+}
+
+if (process.argv[2] === SENTINEL_FLAG) runSentinel();
+else runSupervisor();
+

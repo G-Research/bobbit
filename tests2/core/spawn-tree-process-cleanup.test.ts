@@ -793,10 +793,10 @@ describe("spawnTracked timeout cleanup", () => {
 		}
 		const result = await runNativeJsonProbe(POSIX_COMMAND_INJECTION_PROBE);
 		expect(result).toEqual({ injected: false });
-		expect(SPAWN_TREE_SOURCE).toContain("withPosixSentinelReadyPipe");
-		expect(SPAWN_TREE_SOURCE).toContain('["-c", POSIX_TREE_SENTINEL_SCRIPT, "bobbit-tree-sentinel", cmd, ...args]');
+		expect(SPAWN_TREE_SOURCE).toContain("posixSupervisorArgs");
+		expect(SPAWN_TREE_SOURCE).toContain("POSIX_TREE_PAYLOAD_ENV");
+		expect(SPAWN_TREE_SOURCE).not.toContain('"/bin/sh"');
 		expect(SPAWN_TREE_SOURCE).not.toContain("/dev/fd/");
-		expect(SPAWN_TREE_SOURCE).toContain('exec \\"$@\\"');
 	});
 
 	it("refuses a reused POSIX sentinel PID before it can signal a group", async () => {
