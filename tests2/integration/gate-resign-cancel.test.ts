@@ -271,9 +271,14 @@ test.describe("Gate Re-signal Cancellation", () => {
 		expect(spawnCalls, "RESET_PRE_SPAWN_MATERIALIZATION_RESUME_MUST_NOT_SPAWN_CANCELLED_COMMAND").toBe(0);
 		expect(activeVerifications()).toEqual([]);
 		expect(signals().find(candidate => candidate.id === signal.id)?.verification).toMatchObject({
-			status: "failed",
-			steps: [{ name: "Cancelled", status: "failed" }],
+			status: "cancelled",
+			cancellation: { cause: "superseded", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
+			steps: [
+				{ name: "Optional approval", status: "cancelled", cancellation: { cause: "superseded" } },
+				{ name: "Final signal check", status: "cancelled", cancellation: { cause: "superseded" } },
+			],
 		});
+		expect(gateStore.getGate(GOAL_ID, GATE_ID)?.status).toBe("pending");
 		expect(events).toContainEqual(expect.objectContaining({
 			type: "gate_verification_complete", signalId: signal.id, status: "cancelled",
 		}));
@@ -303,7 +308,14 @@ test.describe("Gate Re-signal Cancellation", () => {
 		runner.settle();
 		await cancellation;
 		await oldVerification;
-		expect(signals().find(signal => signal.id === oldSignal.id)?.verification.status).toBe("failed");
+		expect(signals().find(signal => signal.id === oldSignal.id)?.verification).toMatchObject({
+			status: "cancelled",
+			cancellation: { cause: "superseded", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
+			steps: [
+				{ name: "Optional approval", status: "cancelled", cancellation: { cause: "superseded" } },
+				{ name: "Final signal check", status: "cancelled", cancellation: { cause: "superseded" } },
+			],
+		});
 		expect(signals().find(signal => signal.id === newSignal.id)?.verification.status).toBe("running");
 		expect(gateStore.getGate(GOAL_ID, GATE_ID)?.status).toBe("pending");
 		expect(events.filter(event => event.type === "gate_verification_complete" && event.signalId === oldSignal.id && event.status === "cancelled")).toHaveLength(1);
