@@ -231,24 +231,15 @@ function countManualCanonicalToolExecution(counts: ManualCanonicalToolExecutionC
  * Durable visible history is the execution oracle. Stream boundaries are only
  * fixed-category diagnostics because official SDK frames may arrive late.
  */
-function assertManualDurableCanonicalToolExecution(snapshot: unknown, counts: ManualCanonicalToolExecutionCounts): void {
-	const readHasRootCanonicalToolCall = hasRootCanonicalToolCall(snapshot, "read");
-	const readHasSuccessfulRootToolResult = hasSuccessfulRootToolResult(snapshot, "read");
-	const grepHasRootCanonicalToolCall = hasRootCanonicalToolCall(snapshot, "grep");
-	const grepHasSuccessfulRootToolResult = hasSuccessfulRootToolResult(snapshot, "grep");
-	if (
-		!readHasRootCanonicalToolCall
-		|| !readHasSuccessfulRootToolResult
-		|| !grepHasRootCanonicalToolCall
-		|| !grepHasSuccessfulRootToolResult
-	) {
-		throw new Error(JSON.stringify({
-			readHasRootCanonicalToolCall,
-			readHasSuccessfulRootToolResult,
-			grepHasRootCanonicalToolCall,
-			grepHasSuccessfulRootToolResult,
-			counts,
-		}));
+function assertManualDurableCanonicalToolExecution(
+	snapshot: unknown,
+	toolName: Exclude<ManualCanonicalToolCategory, "other">,
+	counts?: ManualCanonicalToolExecutionCounts,
+): void {
+	const hasCall = hasRootCanonicalToolCall(snapshot, toolName);
+	const hasSuccessfulResult = hasSuccessfulRootToolResult(snapshot, toolName);
+	if (!hasCall || !hasSuccessfulResult) {
+		throw new Error(JSON.stringify({ hasCall, hasSuccessfulResult, ...(counts ? { counts } : {}) }));
 	}
 }
 
@@ -292,25 +283,29 @@ test("Claude Agent SDK manual durable tool oracle retains only fixed booleans an
 		grep: { starts: 1, ends: 0 },
 		other: { starts: 0, ends: 1 },
 	});
-	const successfulVisibleHistory = {
+	const successfulReadHistory = {
 		messages: [
-			{ content: [{ type: "toolCall", name: "read", id: "read-call" }, { type: "toolCall", name: "grep", id: "grep-call" }] },
+			{ content: [{ type: "toolCall", name: "read", id: "read-call" }] },
 			{ role: "toolResult", toolName: "read", toolCallId: "read-call", isError: false },
+		],
+	};
+	const successfulGrepHistory = {
+		messages: [
+			{ content: [{ type: "toolCall", name: "grep", id: "grep-call" }] },
 			{ role: "toolResult", toolName: "grep", toolCallId: "grep-call", isError: false },
 		],
 	};
-	expect(() => assertManualDurableCanonicalToolExecution(successfulVisibleHistory, counts)).not.toThrow();
+	expect(() => assertManualDurableCanonicalToolExecution(successfulReadHistory, "read")).not.toThrow();
+	expect(() => assertManualDurableCanonicalToolExecution(successfulGrepHistory, "grep", counts)).not.toThrow();
 	let diagnostic = "";
 	try {
-		assertManualDurableCanonicalToolExecution(undefined, counts);
+		assertManualDurableCanonicalToolExecution(undefined, "grep", counts);
 	} catch (error) {
 		diagnostic = error instanceof Error ? error.message : "";
 	}
 	expect(JSON.parse(diagnostic)).toEqual({
-		readHasRootCanonicalToolCall: false,
-		readHasSuccessfulRootToolResult: false,
-		grepHasRootCanonicalToolCall: false,
-		grepHasSuccessfulRootToolResult: false,
+		hasCall: false,
+		hasSuccessfulResult: false,
 		counts,
 	});
 	expect(diagnostic).not.toContain("must-not-appear");
@@ -645,13 +640,20 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			expect(resolveComposerSlashDispatch("/compact", { runtime: "claude-agent-sdk", registry: slashRegistry })?.kind).toBe("unsupported-compact");
 			await runTurn(slash.originalText, "Bobbit-owned slash prompt", { modelText: slash.modelText, skillExpansions: slash.expansions });
 
-			// The model makes one safe allowed read and one permission-gated grep.
-			// Count only fixed tool categories while the manager-owned card settles.
-			const toolTurnVersion = session.agentObservedTurnVersion ?? 0;
-			const canonicalToolExecution = createManualCanonicalToolExecutionCounts();
-			const unsubscribeCanonicalToolExecution = session.rpcClient.onEvent(event => countManualCanonicalToolExecution(canonicalToolExecution, event));
+			// An allowed read is one complete turn before the permission-gated grep.
+			await runTurn("Use only Bobbit read on README.md. Do not use any other tools.", "canonical Bobbit read turn");
+			let transcript = await gateway.sessionManager.getMessagesSnapshotBase(session);
+			const visibleCanonicalReadTranscript = transcript.success
+				? gateway.sessionManager.buildVisibleMessageSnapshot(created.id, transcript.data)
+				: undefined;
+			assertManualDurableCanonicalToolExecution(visibleCanonicalReadTranscript, "read");
+
+			// Count only fixed tool categories for the separate permission-card turn.
+			const grepTurnVersion = session.agentObservedTurnVersion ?? 0;
+			const canonicalGrepExecution = createManualCanonicalToolExecutionCounts();
+			const unsubscribeCanonicalGrepExecution = session.rpcClient.onEvent(event => countManualCanonicalToolExecution(canonicalGrepExecution, event));
 			try {
-				await gateway.sessionManager.enqueuePrompt(created.id, "Use Bobbit read on README.md, then use Bobbit grep with pattern Bobbit, path README.md, and literal true. Use no other tools.", { source: "user" });
+				await gateway.sessionManager.enqueuePrompt(created.id, "Use exactly one Bobbit grep with pattern Bobbit, path README.md, and literal true. Do not use any other tools.", { source: "user" });
 				const permission = await waitFor(
 					() => {
 						const pending = gateway!.sessionManager.getPendingToolPermission(created.id);
@@ -662,17 +664,17 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 				);
 				expect(permission.toolName === "grep" && permission.group === "File System").toBe(true);
 				await gateway.sessionManager.grantToolPermission(created.id, "grep", "tool", "File System", "one-time", permission.id);
-				await waitFor(() => (session.agentObservedTurnVersion ?? 0) > toolTurnVersion ? true : undefined, "canonical Bobbit tool turn", 120_000);
-				await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined, "canonical Bobbit tool turn to settle", 120_000);
+				await waitFor(() => (session.agentObservedTurnVersion ?? 0) > grepTurnVersion ? true : undefined, "canonical Bobbit grep turn", 120_000);
+				await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined, "canonical Bobbit grep turn to settle", 120_000);
 			} finally {
-				unsubscribeCanonicalToolExecution();
+				unsubscribeCanonicalGrepExecution();
 			}
-			// Fetch durable visible history before evaluating boundary diagnostics.
-			let transcript = await gateway.sessionManager.getMessagesSnapshotBase(session);
-			const visibleCanonicalToolTranscript = transcript.success
+			// Fetch durable visible history before evaluating fixed boundary diagnostics.
+			transcript = await gateway.sessionManager.getMessagesSnapshotBase(session);
+			const visibleCanonicalGrepTranscript = transcript.success
 				? gateway.sessionManager.buildVisibleMessageSnapshot(created.id, transcript.data)
 				: undefined;
-			assertManualDurableCanonicalToolExecution(visibleCanonicalToolTranscript, canonicalToolExecution);
+			assertManualDurableCanonicalToolExecution(visibleCanonicalGrepTranscript, "grep", canonicalGrepExecution);
 
 			// This is read-only: it observes workflow state without signaling a real gate.
 			await runTurn("Use only Bobbit gate_list to inspect the current workflow state; do not signal or modify any gate.", "read-only workflow-gate tool action");
@@ -905,28 +907,37 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			await waitFor(() => (session.agentObservedTurnVersion ?? 0) > firstVersion ? true : undefined, "sandbox SDK prompt output");
 			await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined, "sandbox SDK prompt to settle", 120_000);
 
-			const toolTurnVersion = session.agentObservedTurnVersion ?? 0;
-			const sandboxCanonicalToolExecution = createManualCanonicalToolExecutionCounts();
-			const unsubscribeSandboxCanonicalToolExecution = session.rpcClient.onEvent(event => countManualCanonicalToolExecution(sandboxCanonicalToolExecution, event));
+			// An allowed read is one complete turn before the permission-gated grep.
+			await runSandboxTurn("Use only Bobbit read on README.md. Do not use any other tools.", "sandbox canonical Bobbit read turn");
+			let sandboxTranscript = await gateway.sessionManager.getMessagesSnapshotBase(session);
+			const visibleSandboxCanonicalReadTranscript = sandboxTranscript.success
+				? gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data)
+				: undefined;
+			assertManualDurableCanonicalToolExecution(visibleSandboxCanonicalReadTranscript, "read");
+
+			// Count only fixed tool categories for the separate permission-card turn.
+			const sandboxGrepTurnVersion = session.agentObservedTurnVersion ?? 0;
+			const sandboxCanonicalGrepExecution = createManualCanonicalToolExecutionCounts();
+			const unsubscribeSandboxCanonicalGrepExecution = session.rpcClient.onEvent(event => countManualCanonicalToolExecution(sandboxCanonicalGrepExecution, event));
 			try {
-				await gateway.sessionManager.enqueuePrompt(created.id, "Use Bobbit read on README.md, then use Bobbit grep with pattern Bobbit, path README.md, and literal true. Use no other tools.", { source: "user" });
+				await gateway.sessionManager.enqueuePrompt(created.id, "Use exactly one Bobbit grep with pattern Bobbit, path README.md, and literal true. Do not use any other tools.", { source: "user" });
 				const permission = await waitFor(() => {
 					const pending = gateway!.sessionManager.getPendingToolPermission(created.id);
 					return pending?.toolName === "grep" && pending.group === "File System" ? pending : undefined;
 				}, "sandbox canonical grep permission card", 90_000);
 				expect(permission.toolName === "grep" && permission.group === "File System").toBe(true);
 				await gateway.sessionManager.grantToolPermission(created.id, "grep", "tool", "File System", "one-time", permission.id);
-				await waitFor(() => (session.agentObservedTurnVersion ?? 0) > toolTurnVersion ? true : undefined, "sandbox canonical Bobbit tool turn", 120_000);
-				await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined, "sandbox canonical Bobbit tool turn to settle", 120_000);
+				await waitFor(() => (session.agentObservedTurnVersion ?? 0) > sandboxGrepTurnVersion ? true : undefined, "sandbox canonical Bobbit grep turn", 120_000);
+				await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined, "sandbox canonical Bobbit grep turn to settle", 120_000);
 			} finally {
-				unsubscribeSandboxCanonicalToolExecution();
+				unsubscribeSandboxCanonicalGrepExecution();
 			}
-			// Fetch durable visible history before evaluating boundary diagnostics.
-			let sandboxTranscript = await gateway.sessionManager.getMessagesSnapshotBase(session);
-			const visibleSandboxCanonicalToolTranscript = sandboxTranscript.success
+			// Fetch durable visible history before evaluating fixed boundary diagnostics.
+			sandboxTranscript = await gateway.sessionManager.getMessagesSnapshotBase(session);
+			const visibleSandboxCanonicalGrepTranscript = sandboxTranscript.success
 				? gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data)
 				: undefined;
-			assertManualDurableCanonicalToolExecution(visibleSandboxCanonicalToolTranscript, sandboxCanonicalToolExecution);
+			assertManualDurableCanonicalToolExecution(visibleSandboxCanonicalGrepTranscript, "grep", sandboxCanonicalGrepExecution);
 			await runSandboxTurn("Use only Bobbit gate_list to inspect current workflow state. Do not signal or modify any gate.", "sandbox read-only workflow-gate tool action");
 			sandboxTranscript = await gateway.sessionManager.getMessagesSnapshotBase(session);
 			const visibleSandboxTranscript = sandboxTranscript.success
