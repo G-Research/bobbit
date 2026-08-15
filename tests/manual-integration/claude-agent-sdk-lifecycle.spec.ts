@@ -230,6 +230,17 @@ test("Claude Agent SDK manual timeout event diagnostics retain only fixed event 
 	expect(counts.other).toBe(1);
 });
 
+test("Claude Agent SDK manual terminal diagnostics expose only route-safe categories", async () => {
+	const { ClaudeAgentSdkUnavailableError, claudeAgentSdkUnavailableRouteDiagnostic } = await import("../../dist/server/agent/claude-agent-sdk-error.js");
+	const providerLookingDetail = "provider response token=private-token request_id=private-request /private/provider/path CLAUDE_AGENT_SDK_RATE_LIMITED";
+	const diagnostic = claudeAgentSdkUnavailableRouteDiagnostic(new ClaudeAgentSdkUnavailableError(providerLookingDetail));
+	expect(diagnostic).toBe("SDK_SESSION_UNAVAILABLE: CLAUDE_AGENT_SDK_RATE_LIMITED");
+	expect(diagnostic).toMatch(/^SDK_SESSION_UNAVAILABLE(?:: CLAUDE_AGENT_SDK_RATE_LIMITED)?$/);
+	expect(diagnostic).not.toContain("private-token");
+	expect(diagnostic).not.toContain("private-request");
+	expect(diagnostic).not.toContain("/private/provider/path");
+});
+
 test("Claude Agent SDK provider-unavailable failure is bounded and sanitized without an alternative runtime", async () => {
 	test.setTimeout(15_000);
 	const nonce = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -428,6 +439,7 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 
 			const configuredModel = manualSdkModel();
 			const sessionModel = `claude-agent-sdk/${configuredModel}`;
+			const { claudeAgentSdkUnavailableRouteDiagnostic } = await import("../../dist/server/agent/claude-agent-sdk-error.js");
 			const providerResponse = await api("/api/custom-providers", {
 				method: "POST",
 				body: JSON.stringify({
@@ -461,17 +473,22 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			const runTurn = async (text: string, label: string, options: Record<string, unknown> = {}) => {
 				const before = session.agentObservedTurnVersion ?? 0;
 				const eventTypeCounts = createManualTurnEventCounts();
+				const bridge = session.rpcClient as unknown as Record<string, unknown>;
+				const terminalDiagnostic = () => claudeAgentSdkUnavailableRouteDiagnostic(diagnosticValue(() => bridge.terminalError));
 				const unsubscribe = session.rpcClient.onEvent(event => countManualTurnEvent(eventTypeCounts, event));
 				try {
 					await gateway!.sessionManager.enqueuePrompt(created.id, text, { source: "user", ...options });
 					await waitFor(() => (session.agentObservedTurnVersion ?? 0) > before ? true : undefined, label, 120_000);
-					await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined, `${label} to settle`, 120_000);
+					await waitFor(() => {
+						const sessionStatus = normalizeManualSessionStatus(diagnosticValue(() => gateway!.sessionManager.getSession(created.id)?.status));
+						if (sessionStatus === "terminated") throw new Error(terminalDiagnostic());
+						return sessionStatus === "idle" ? true : undefined;
+					}, `${label} to settle`, 120_000);
 				} catch (error) {
 					if (error instanceof Error && (
 						error.message === `Timed out waiting for ${label}`
 						|| error.message === `Timed out waiting for ${label} to settle`
 					)) {
-						const bridge = session.rpcClient as unknown as Record<string, unknown>;
 						const input = diagnosticValue(() => bridge.input) as Record<string, unknown> | undefined;
 						throw new Error(JSON.stringify({
 							label,
@@ -480,6 +497,7 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 							sessionManagerStatus: normalizeManualSessionStatus(diagnosticValue(() => gateway!.sessionManager.getSession(created.id)?.status)),
 							bridgeRunning: diagnosticBoolean(() => session.rpcClient.running),
 							bridgeLifecycleState: normalizeManualBridgeState(diagnosticValue(() => bridge.state)),
+							sdkTerminalDiagnostic: terminalDiagnostic(),
 							pendingToolPermission: diagnosticBoolean(() => gateway!.sessionManager.getPendingToolPermission(created.id) !== undefined),
 							bridgeInputQueue: {
 								hasQueuedRows: diagnosticBoolean(() => Array.isArray(input?.rows) && input.rows.length > 0),
