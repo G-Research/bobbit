@@ -27,6 +27,7 @@ const ENV_KEYS = ["BOBBIT_DIR", "BOBBIT_SECRETS_DIR", "BOBBIT_AGENT_DIR", "BOBBI
 type ProcessState = { env: Record<(typeof ENV_KEYS)[number], string | undefined>; projectRoot: string; agentDirState?: AgentDirRuntimeState };
 type DockerImage = { fingerprint: string; piVersion: string };
 type RunnerCall = { file: string; args: readonly string[]; options?: ExecFileOptions };
+type ProjectSandboxTestPrototype = { _removeContainer(containerId: string): Promise<void> };
 
 type Fixture = {
 	root: string;
@@ -280,7 +281,7 @@ describe.sequential("sandbox extension requirements integration", () => {
 		const created: string[] = [];
 		const removed: string[] = [];
 		const generations = new Map<string, number>();
-		const init = vi.spyOn(ProjectSandbox.prototype, "init").mockImplementation(async function () {
+		const init = vi.spyOn(ProjectSandbox.prototype, "init").mockImplementation(async function (this: ProjectSandbox) {
 			const sandbox = this as any;
 			const projectId = sandbox.options?.projectId ?? "unknown";
 			const generation = (generations.get(projectId) ?? 0) + 1;
@@ -289,7 +290,7 @@ describe.sequential("sandbox extension requirements integration", () => {
 			sandbox.containerId = `fixture-${projectId}-${generation}`;
 			sandbox._status = "ready";
 		});
-		const remove = vi.spyOn(ProjectSandbox.prototype as any, "_removeContainer").mockImplementation(async (containerId: string) => { removed.push(containerId); });
+		const remove = vi.spyOn(ProjectSandbox.prototype as unknown as ProjectSandboxTestPrototype, "_removeContainer").mockImplementation(async containerId => { removed.push(containerId); });
 		const start = vi.spyOn(ProjectSandbox.prototype, "startHealthMonitor").mockImplementation(() => {});
 		const onHealth = vi.spyOn(ProjectSandbox.prototype, "onHealthEvent").mockImplementation(() => () => {});
 		const stop = vi.spyOn(ProjectSandbox.prototype, "stopHealthMonitor").mockImplementation(() => {});
