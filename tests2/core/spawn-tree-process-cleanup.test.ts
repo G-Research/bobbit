@@ -793,8 +793,9 @@ describe("spawnTracked timeout cleanup", () => {
 		}
 		const result = await runNativeJsonProbe(POSIX_COMMAND_INJECTION_PROBE);
 		expect(result).toEqual({ injected: false });
-		expect(SPAWN_TREE_SOURCE).toContain("withPosixSentinelPipes");
-		expect(SPAWN_TREE_SOURCE).toContain("/dev/fd/${posixPipes!.scriptFd}");
+		expect(SPAWN_TREE_SOURCE).toContain("withPosixSentinelReadyPipe");
+		expect(SPAWN_TREE_SOURCE).toContain('["-c", POSIX_TREE_SENTINEL_SCRIPT, "bobbit-tree-sentinel", cmd, ...args]');
+		expect(SPAWN_TREE_SOURCE).not.toContain("/dev/fd/");
 		expect(SPAWN_TREE_SOURCE).toContain('exec \\"$@\\"');
 	});
 

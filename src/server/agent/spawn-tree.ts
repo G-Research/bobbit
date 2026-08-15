@@ -379,22 +379,19 @@ const WINDOWS_JOB_SUPERVISOR_COMMAND = Buffer.from(WINDOWS_JOB_SUPERVISOR, "utf1
 // held in the sentinel's argv. `lstart` alone is never accepted: a same-second
 // PID reuse lacks the 128-bit nonce and fails closed during recovery.
 const POSIX_TREE_SENTINEL_CHILD_SCRIPT = "trap '' HUP INT TERM; if [ -n \"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE\" ]; then case \"$(uname -s 2>/dev/null)\" in Linux) __bobbit_sentinel_start=$(awk '{print $22}' \"/proc/$$/stat\" 2>/dev/null || true); __bobbit_sentinel_kind=linux-proc-stat-22 ;; Darwin) __bobbit_sentinel_start=$(LC_ALL=C ps -o lstart= -p \"$$\" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'); __bobbit_sentinel_kind=darwin-lstart-argv-nonce ;; *) exit 125 ;; esac; [ -n \"$__bobbit_sentinel_start\" ] || exit 125; __bobbit_sentinel_tmp=\"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE.$$.tmp\"; printf '{\"pid\":%s,\"pgid\":%s,\"nonce\":\"%s\",\"startTokenKind\":\"%s\",\"startToken\":\"%s\"}\\n' \"$$\" \"$BOBBIT_POSIX_SENTINEL_PGID\" \"$BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE\" \"$__bobbit_sentinel_kind\" \"$__bobbit_sentinel_start\" > \"$__bobbit_sentinel_tmp\" && mv \"$__bobbit_sentinel_tmp\" \"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE\" || { rm -f \"$__bobbit_sentinel_tmp\"; exit 125; }; fi; printf . >&3; exec 3>&-; while :; do sleep 2147483647 & wait $!; done";
-// The outer shell reads this fixed program from a private descriptor, rather
-// than receiving it through `-c`. Configured command bytes remain positional
-// argv values and `exec "$@"` preserves that shell-free boundary. The sentinel
-// is separately invoked because a POSIX background subshell keeps the outer
-// shell's `$$`; its `$0` is the Darwin nonce witness and is never inherited by
-// the payload.
+// Run this in a separately invoked shell, rather than a background subshell.
+// POSIX `/bin/sh` preserves the outer shell's `$$` in `( ... ) &`; a new shell
+// gives the identity record the actual sentinel PID needed after root exit.
+// This is fixed shell source. Configured command bytes are positional arguments
+// after `bobbit-tree-sentinel`, so `exec "$@"` keeps them outside the shell
+// parser. Keep its spawn call isolated below: it makes that boundary clear to
+// both reviewers and static analysis.
 const POSIX_TREE_SENTINEL_SCRIPT = "__bobbit_sentinel_pgid=$$; export BOBBIT_POSIX_SENTINEL_PGID=\"$__bobbit_sentinel_pgid\"; /bin/sh -c \"$BOBBIT_POSIX_TREE_SENTINEL_CHILD_SCRIPT\" \"bobbit-posix-sentinel:$BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE\" & unset BOBBIT_POSIX_SENTINEL_PGID BOBBIT_POSIX_SENTINEL_IDENTITY_FILE BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE BOBBIT_POSIX_TREE_SENTINEL_CHILD_SCRIPT; exec 3>&-; exec \"$@\"";
 
-function withPosixSentinelPipes(stdio: StdioOptions | undefined): { stdio: StdioOptions; scriptFd: number } {
-	const withReadyPipe = Array.isArray(stdio)
-		? [...stdio.slice(0, 3), "pipe", ...stdio.slice(3)]
-		: [stdio ?? "pipe", stdio ?? "pipe", stdio ?? "pipe", "pipe"];
-	// Keep FD 3 exclusively for the sentinel handshake. The fixed shell program
-	// arrives over a later private descriptor, preserving callers' FD 4+ layout.
-	const scriptFd = withReadyPipe.length;
-	return { stdio: [...withReadyPipe, "pipe"] as StdioOptions, scriptFd };
+function withPosixSentinelReadyPipe(stdio: StdioOptions | undefined): StdioOptions {
+	if (Array.isArray(stdio)) return [...stdio.slice(0, 3), "pipe", ...stdio.slice(3)] as StdioOptions;
+	const standard = stdio ?? "pipe";
+	return [standard, standard, standard, "pipe"] as StdioOptions;
 }
 
 /** Spawn a process whose entire tree we can later kill. */
@@ -435,11 +432,6 @@ export function spawnTracked(
 			cwd: opts.cwd ?? process.cwd(),
 		}), "utf8").toString("base64")
 		: undefined;
-	const posixPipes = posixTreeSentinel ? withPosixSentinelPipes(opts.stdio) : undefined;
-	// The descriptor number is generated from our own stdio layout, never from
-	// command configuration. Close it before starting the sentinel or payload so
-	// neither can hold the script pipe open after the root exits.
-	const posixSentinelScript = posixPipes ? `exec ${posixPipes.scriptFd}>&-; ${POSIX_TREE_SENTINEL_SCRIPT}` : undefined;
 	const sentinelEnv = posixTreeSentinel
 		? {
 			...(opts.env ?? process.env),
@@ -452,17 +444,16 @@ export function spawnTracked(
 		: opts.env;
 	let child: ChildProcess;
 	try {
-		child = spawnImpl(
-			windowsJobSupervisor ? "powershell.exe" : (posixTreeSentinel ? "/bin/sh" : cmd),
-			(windowsJobSupervisor
-				? ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", WINDOWS_JOB_SUPERVISOR_COMMAND]
-				// The fixed script is read from a private FD; command bytes are only
-				// positional argv consumed by its quoted `exec "$@"` boundary.
-				: posixTreeSentinel ? [`/dev/fd/${posixPipes!.scriptFd}`, cmd, ...args] : args) as string[],
-			{
-				cwd: opts.cwd,
-				env: windowsJobSupervisor
-					? {
+		if (windowsJobSupervisor) {
+			// Keep the PowerShell supervisor separate from the POSIX shell launch:
+			// its encoded program is constant and the configured payload is JSON in
+			// an environment envelope consumed by that supervisor only.
+			child = spawnImpl(
+				"powershell.exe",
+				["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", WINDOWS_JOB_SUPERVISOR_COMMAND],
+				{
+					cwd: opts.cwd,
+					env: {
 						...(opts.env ?? process.env),
 						BOBBIT_WINDOWS_JOB_PAYLOAD: windowsPayload,
 						BOBBIT_WINDOWS_JOB_READY_FILE: windowsJobReadiness!.file,
@@ -471,25 +462,42 @@ export function spawnTracked(
 							BOBBIT_WINDOWS_JOB_COMPLETION_NONCE: opts.windowsJobCompletion.nonce,
 							...(windowsJobShutdownPipe ? { BOBBIT_WINDOWS_JOB_SHUTDOWN_PIPE: windowsJobShutdownPipe } : {}),
 						} : {}),
-					}
-					: sentinelEnv,
-				stdio: posixPipes?.stdio ?? opts.stdio,
-				// POSIX: detached:true puts the child in its own process group so we
-				// can kill the whole tree via process.kill(-pgid, sig).
+					},
+					stdio: opts.stdio,
+					detached: !isWin,
+					windowsHide: opts.windowsHide ?? isWin,
+				},
+			);
+		} else if (posixTreeSentinel) {
+			// This is the sole POSIX shell sink. The script is the constant above;
+			// cmd and args begin after `$0` and execute only via its quoted `exec "$@"`.
+			child = spawnImpl(
+				"/bin/sh",
+				["-c", POSIX_TREE_SENTINEL_SCRIPT, "bobbit-tree-sentinel", cmd, ...args],
+				{
+					cwd: opts.cwd,
+					env: sentinelEnv,
+					stdio: withPosixSentinelReadyPipe(opts.stdio),
+					detached: !isWin,
+					windowsHide: opts.windowsHide ?? isWin,
+				},
+			);
+		} else {
+			// Direct launch has no shell boundary and must remain distinct from both
+			// supervisor paths so configured command bytes cannot flow into either.
+			child = spawnImpl(cmd, [...args], {
+				cwd: opts.cwd,
+				env: opts.env,
+				stdio: opts.stdio,
 				detached: !isWin,
 				windowsHide: opts.windowsHide ?? isWin,
-			},
-		);
+			});
+		}
 	} catch (error) {
 		windowsJobReadiness?.fail();
 		windowsJobReadiness?.cleanup();
 		throw error;
 	}
-	// The private descriptor is opened before `/bin/sh` starts reading. Its
-	// contents are fixed source, never configured command text; the latter stays
-	// in the shell's positional argv and is executed only through quoted `$@`.
-	const posixScriptPipe = posixPipes ? child.stdio[posixPipes.scriptFd] as { end?: (source: string) => void } | null : undefined;
-	try { posixScriptPipe?.end?.(posixSentinelScript!); } catch { try { child.kill("SIGKILL"); } catch { /* ignore */ } }
 	// Covers a supervisor that acknowledged synchronously before the watcher
 	// callback could be dispatched; this is observation, never polling.
 	windowsJobReadiness?.confirm();
