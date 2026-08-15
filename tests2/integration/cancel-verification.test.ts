@@ -20,6 +20,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { vi } from "vitest";
 import { resetAndInstallFakeCommandStepTestState, trackFakeCommandStepConnection } from "./_e2e/fake-cmd-setup.js";
 import { GateStore, type GateSignal } from "../../src/server/agent/gate-store.js";
 import { VerificationHarness, type ActiveVerification } from "../../src/server/agent/verification-harness.js";
@@ -161,6 +162,18 @@ async function getGateState(goalId: string): Promise<SlowGateState> {
 	const res = await apiFetch(`/api/goals/${goalId}/gates/slow-gate`);
 	expect(res.status).toBe(200);
 	return await res.json() as SlowGateState;
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+	let resolve!: () => void;
+	return { promise: new Promise<void>(done => { resolve = done; }), resolve };
+}
+
+async function expectNoSignalAdmission(gateway: any, goalId: string, expectedSignalCount = 0): Promise<void> {
+	const gate = await getGateState(goalId);
+	expect(gate.signals, "REJECTED_SIGNAL_MUST_NOT_CREATE_A_SIGNAL_RECORD").toHaveLength(expectedSignalCount);
+	expect(gateway.teamManager.verificationHarness!.getActiveVerifications(goalId),
+		"REJECTED_SIGNAL_MUST_NOT_CREATE_AN_ACTIVE_VERIFICATION").toEqual([]);
 }
 
 /**
@@ -627,6 +640,117 @@ test.describe("Cancel Verification API", () => {
 			});
 		} finally {
 			runner.settleAll();
+			await cleanupSlowWorkflowGoal(setup);
+		}
+	});
+
+	test("completed and shelved goals reject fresh signals without creating a verification", async ({ gateway }) => {
+		const setups: SlowWorkflowGoal[] = [];
+		try {
+			for (const [state, code] of [["complete", "GOAL_COMPLETE"], ["shelved", "GOAL_SHELVED"]] as const) {
+				const setup = await createSlowWorkflowGoal(`Reject Signal On ${state}`);
+				setups.push(setup);
+				const terminal = await apiFetch(`/api/goals/${setup.goalId}`, {
+					method: "PUT",
+					body: JSON.stringify({ state }),
+				});
+				expect(terminal.status).toBe(200);
+
+				const rejected = await signalSlowVerification(setup.goalId, `must reject ${state}`);
+				expect(rejected.status).toBe(409);
+				expect(await rejected.json()).toMatchObject({ code });
+				await expectNoSignalAdmission(gateway, setup.goalId);
+			}
+		} finally {
+			await Promise.all(setups.map(cleanupSlowWorkflowGoal));
+		}
+	});
+
+	test("terminal goal lifecycle fence rejects a concurrent signal until the authoritative write completes", async ({ gateway }) => {
+		let setup: SlowWorkflowGoal | undefined;
+		let releaseUpdate: (() => void) | undefined;
+		let updateSpy: ReturnType<typeof vi.spyOn> | undefined;
+		try {
+			setup = await createSlowWorkflowGoal("Terminal Lifecycle Admission Race");
+			const context = gateway.projectContextManager.getContextForGoal(setup.goalId)!;
+			const originalUpdateGoal = context.goalManager.updateGoal.bind(context.goalManager);
+			const entered = deferred();
+			const release = deferred();
+			releaseUpdate = release.resolve;
+			let blocked = false;
+			updateSpy = vi.spyOn(context.goalManager, "updateGoal").mockImplementation(async (goalId, updates) => {
+				if (goalId === setup!.goalId && (updates as { state?: string }).state === "complete" && !blocked) {
+					blocked = true;
+					entered.resolve();
+					await release.promise;
+				}
+				return originalUpdateGoal(goalId, updates);
+			});
+
+			const terminalRequest = apiFetch(`/api/goals/${setup.goalId}`, {
+				method: "PUT",
+				body: JSON.stringify({ state: "complete" }),
+			});
+			await entered.promise;
+			expect(gateway.teamManager.verificationHarness!.isGoalLifecycleFenced(setup.goalId),
+				"TERMINAL_WRITE_MUST_ACQUIRE_THE_LIFECYCLE_FENCE_BEFORE_THE_GOAL_STORE_WRITE").toBe(true);
+
+			const rejected = await signalSlowVerification(setup.goalId, "signal during terminal write");
+			expect(rejected.status).toBe(409);
+			expect(await rejected.json()).toMatchObject({ code: "GOAL_LIFECYCLE_IN_PROGRESS", retryable: true });
+			await expectNoSignalAdmission(gateway, setup.goalId);
+
+			release.resolve();
+			releaseUpdate = undefined;
+			const terminal = await terminalRequest;
+			expect(terminal.status).toBe(200);
+			expect((await (await apiFetch(`/api/goals/${setup.goalId}`)).json())).toMatchObject({ state: "complete" });
+		} finally {
+			releaseUpdate?.();
+			updateSpy?.mockRestore();
+			await cleanupSlowWorkflowGoal(setup);
+		}
+	});
+
+	test("archive lifecycle fence rejects a concurrent signal until the authoritative archive completes", async ({ gateway }) => {
+		let setup: SlowWorkflowGoal | undefined;
+		let releaseArchive: (() => void) | undefined;
+		let archiveSpy: ReturnType<typeof vi.spyOn> | undefined;
+		try {
+			setup = await createSlowWorkflowGoal("Archive Lifecycle Admission Race");
+			const context = gateway.projectContextManager.getContextForGoal(setup.goalId)!;
+			const originalArchiveGoal = context.goalManager.archiveGoal.bind(context.goalManager);
+			const entered = deferred();
+			const release = deferred();
+			releaseArchive = release.resolve;
+			let blocked = false;
+			archiveSpy = vi.spyOn(context.goalManager, "archiveGoal").mockImplementation(async goalId => {
+				if (goalId === setup!.goalId && !blocked) {
+					blocked = true;
+					entered.resolve();
+					await release.promise;
+				}
+				return originalArchiveGoal(goalId);
+			});
+
+			const archiveRequest = apiFetch(`/api/goals/${setup.goalId}?cascade=false`, { method: "DELETE" });
+			await entered.promise;
+			expect(gateway.teamManager.verificationHarness!.isGoalLifecycleFenced(setup.goalId),
+				"ARCHIVE_MUST_ACQUIRE_THE_LIFECYCLE_FENCE_BEFORE_THE_GOAL_STORE_WRITE").toBe(true);
+
+			const rejected = await signalSlowVerification(setup.goalId, "signal during archive");
+			expect(rejected.status).toBe(409);
+			expect(await rejected.json()).toMatchObject({ code: "GOAL_LIFECYCLE_IN_PROGRESS", retryable: true });
+			await expectNoSignalAdmission(gateway, setup.goalId);
+
+			release.resolve();
+			releaseArchive = undefined;
+			const archived = await archiveRequest;
+			expect(archived.status).toBe(200);
+			expect(await (await apiFetch(`/api/goals/${setup.goalId}`)).json()).toMatchObject({ archived: true });
+		} finally {
+			releaseArchive?.();
+			archiveSpy?.mockRestore();
 			await cleanupSlowWorkflowGoal(setup);
 		}
 	});
