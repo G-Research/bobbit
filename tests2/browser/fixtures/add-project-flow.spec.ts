@@ -220,8 +220,9 @@ test.describe("Add Project flow (UI)", () => {
 			const registered = page.waitForResponse(response => response.request().method() === "POST" && /\/api\/projects$/.test(new URL(response.url()).pathname));
 			await page.locator("button").filter({ hasText: "Continue" }).first().click();
 			const projectResponse = await registered;
-			expect(projectResponse.status(), await projectResponse.clone().text()).toBe(201);
-			projectId = (await projectResponse.json()).id;
+			const project = await projectResponse.json();
+			expect(projectResponse.status(), JSON.stringify(project)).toBe(201);
+			projectId = project.id;
 			const grant = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/extension-grants`, {
 				method: "PUT", body: JSON.stringify({ packId: REAL_IMPORT_PACK, hookId: REAL_IMPORT_HOOK, capability: "decide" }),
 			});
@@ -301,8 +302,9 @@ test.describe("Add Project flow (UI)", () => {
 			const registered = page.waitForResponse(response => response.request().method() === "POST" && /\/api\/projects$/.test(new URL(response.url()).pathname));
 			await page.locator("button").filter({ hasText: "Continue" }).first().click();
 			const projectResponse = await registered;
-			expect(projectResponse.status(), await projectResponse.clone().text()).toBe(201);
-			projectId = (await projectResponse.json()).id;
+			const project = await projectResponse.json();
+			expect(projectResponse.status(), JSON.stringify(project)).toBe(201);
+			projectId = project.id;
 			const grant = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/extension-grants`, {
 				method: "PUT", body: JSON.stringify({ packId: REAL_IMPORT_PACK, hookId: REAL_IMPORT_HOOK, capability: "decide" }),
 			});
