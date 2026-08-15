@@ -3,36 +3,49 @@ import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { CODE_INTELLIGENCE_LANGUAGE_MATRIX } from "../../lib/language-matrix.ts";
 import {
 	serializeLspRequest,
-	type LspAction,
-	type LspToolAction,
 	type LspLanguageDeclaration,
 	type LspRequestAdapterOptions,
+	type LspResult,
+	type LspToolAction,
 	type LspToolRequest,
 } from "../../src/lsp-request-adapter.ts";
 
+/** Platform-owned linked-worktree context. Without it, this extension is inert. */
 export interface LspExtensionOptions {
 	adapterOptions?: () => Omit<LspRequestAdapterOptions, "languages">;
 	languages?: readonly LspLanguageDeclaration[];
 }
 
-function defaultAdapterOptions(): Omit<LspRequestAdapterOptions, "languages"> {
+function unavailableResult(action: LspToolAction, component: string, languageId?: string): LspResult {
 	return {
-		context: {
-			projectId: process.env.BOBBIT_PROJECT_ID,
-			component: {
-				name: process.env.BOBBIT_COMPONENT_NAME || "default",
-				repo: process.env.BOBBIT_COMPONENT_REPO || ".",
-				...(process.env.BOBBIT_COMPONENT_RELATIVE_PATH ? { relativePath: process.env.BOBBIT_COMPONENT_RELATIVE_PATH } : {}),
-			},
-			componentRoot: process.env.BOBBIT_COMPONENT_ROOT || process.env.BOBBIT_CWD || process.cwd(),
-		},
+		capability: "lsp",
+		action,
+		component,
+		...(languageId ? { languageId } : {}),
+		status: "unavailable",
+		reasonCode: "service-unavailable",
+		reason: "The platform LSP adapter is unavailable. Check language-service status and retry.",
 	};
 }
 
-function response(action: LspToolAction, params: Record<string, unknown>, options: LspExtensionOptions) {
-	const languages = options.languages ?? (CODE_INTELLIGENCE_LANGUAGE_MATRIX as unknown as readonly LspLanguageDeclaration[]);
-	const prepared = serializeLspRequest({ action, ...params } as LspToolRequest, { ...((options.adapterOptions ?? defaultAdapterOptions)()), languages });
-	return prepared.result;
+function declaredLanguageId(params: Record<string, unknown>, languages: readonly LspLanguageDeclaration[]): string | undefined {
+	if (typeof params.language !== "string") return undefined;
+	const requested = params.language.trim().toLowerCase();
+	return languages.find((language) => language.id === requested)?.id;
+}
+
+function response(action: LspToolAction, params: Record<string, unknown>, options: LspExtensionOptions): LspResult {
+	const languages: readonly LspLanguageDeclaration[] = options.languages ?? CODE_INTELLIGENCE_LANGUAGE_MATRIX;
+	const languageId = declaredLanguageId(params, languages);
+	let component = "unavailable";
+	try {
+		const adapterOptions = options.adapterOptions!();
+		component = adapterOptions.context.component.name;
+		return serializeLspRequest({ action, ...params } as LspToolRequest, { ...adapterOptions, languages }).result;
+	} catch {
+		// Adapter errors may include paths or credentials; never expose their text.
+		return unavailableResult(action, component, languageId);
+	}
 }
 
 const componentParameter = Type.Optional(Type.String({ maxLength: 160, description: "Optional component name; defaults to this linked-worktree component." }));
@@ -48,7 +61,7 @@ function register(pi: Parameters<ExtensionFactory>[0], name: string, label: stri
 		name,
 		label,
 		description,
-		promptSnippet: "Read-only LSP query. It never edits files or starts/install a language server.",
+		promptSnippet: "Read-only LSP query. It never edits files, starts, or installs a language server.",
 		promptGuidelines: [
 			"Use LSP results only when the returned capability is lsp and status is ready.",
 			"An unavailable LSP never falls back to structural search; use grep, read, or ast_grep separately.",
@@ -67,6 +80,7 @@ function register(pi: Parameters<ExtensionFactory>[0], name: string, label: stri
  * worktree seam exists, every validated request reports service-unavailable.
  */
 export const createLspExtension = (options: LspExtensionOptions = {}): ExtensionFactory => (pi) => {
+	if (!options.adapterOptions) return;
 	register(pi, "lsp_definition", "LSP Definition", "Find a definition through an enabled language service.", "definition", Type.Object({ component: componentParameter, language: languageParameter, path: pathParameter, position: positionParameter }), options);
 	register(pi, "lsp_references", "LSP References", "Find references through an enabled language service.", "references", Type.Object({ component: componentParameter, language: languageParameter, path: pathParameter, position: positionParameter }), options);
 	register(pi, "lsp_hover", "LSP Hover", "Read hover information through an enabled language service.", "hover", Type.Object({ component: componentParameter, language: languageParameter, path: pathParameter, position: positionParameter }), options);
@@ -74,11 +88,11 @@ export const createLspExtension = (options: LspExtensionOptions = {}): Extension
 		name: "lsp_symbols",
 		label: "LSP Symbols",
 		description: "List document or workspace symbols through an enabled language service.",
-		promptSnippet: "Read-only LSP symbol query. It never edits files or starts/install a language server.",
-		promptGuidelines: ["Use document scope for one file and workspace scope for a language workspace."],
+		promptSnippet: "Read-only LSP symbol query. It never edits files, starts, or installs a language server.",
+		promptGuidelines: ["Set scope to document with a path for one file, or workspace with a query for the selected language workspace."],
 		parameters: Type.Union([
-			Type.Object({ component: componentParameter, language: languageParameter, scope: Type.Literal("document"), path: pathParameter }),
-			Type.Object({ component: componentParameter, language: Type.String({ maxLength: 80 }), scope: Type.Literal("workspace"), query: Type.String({ maxLength: 500 }) }),
+			Type.Object({ component: componentParameter, language: languageParameter, scope: Type.Literal("document", { description: "List symbols in the specified path." }), path: pathParameter }),
+			Type.Object({ component: componentParameter, language: Type.String({ maxLength: 80 }), scope: Type.Literal("workspace", { description: "Search workspace symbols using query." }), query: Type.String({ maxLength: 500 }) }),
 		]),
 		async execute(_toolCallId, params) {
 			const symbolParams = params as Record<string, unknown>;
