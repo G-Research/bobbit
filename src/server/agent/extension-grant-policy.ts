@@ -2,6 +2,7 @@ import {
 	isCanonicalExtensionGrantTimestamp,
 	isExtensionCapability,
 	isSafeExtensionGrantIdentifier,
+	EXTENSION_PACK_CAPABILITIES,
 	type ExtensionCapability,
 	type ExtensionGrant,
 	type ExtensionHookRef,
@@ -52,14 +53,10 @@ export type GrantDecision =
 	| { allowed: true; grant: ExtensionGrant }
 	| { allowed: false; reason: "grant_required" | "inactive_hook" | "invalid_request" };
 
-const PACK_ONLY_CAPABILITIES: ReadonlySet<string> = new Set([
-	"service.manage",
-	"memory.read",
-	"memory.write",
-	"memory.reflect",
-	"memory.invalidate",
-	"memory.read.all",
-]);
+// Preserve one closed pack-principal capability vocabulary across persistence
+// and runtime authorization. In particular, sandbox builds can never be granted
+// to a hook principal.
+const PACK_ONLY_CAPABILITIES = EXTENSION_PACK_CAPABILITIES;
 
 type LegacyHookGrant = ExtensionGrant & ExtensionHookRef & { principal?: undefined };
 type PackGrant = ExtensionGrant & { principal: "pack"; packId: string; capability: ExtensionCapability; grantedAt: string; grantedBy: string };
