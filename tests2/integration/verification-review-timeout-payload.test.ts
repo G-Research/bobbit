@@ -10,11 +10,14 @@ import path from "node:path";
 import { GateStore } from "../../src/server/agent/gate-store.js";
 import { buildGateVerificationSnapshot } from "../../src/server/gate-verification-snapshot.js";
 import { VerificationHarness, sanitizeVerificationWsEvent } from "../../src/server/agent/verification-harness.js";
+import { InjectedPinnedCheckoutManager } from "./helpers/injected-pinned-checkout.js";
 
 const MARKER = "REVIEW_TIMEOUT_PAYLOAD";
 const tempRoots: string[] = [];
+const pinnedCheckoutManagers: InjectedPinnedCheckoutManager[] = [];
 
 afterEach(() => {
+	for (const manager of pinnedCheckoutManagers.splice(0)) manager.dispose();
 	for (const root of tempRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -71,6 +74,8 @@ describe("review timeout payload propagation", () => {
 			all: () => [ctx],
 		};
 		const events: any[] = [];
+		const pinnedCheckoutManager = new InjectedPinnedCheckoutManager();
+		pinnedCheckoutManagers.push(pinnedCheckoutManager);
 		let fakeNow = 0;
 		const fakeClock = {
 			now: () => fakeNow,
@@ -92,7 +97,7 @@ describe("review timeout payload propagation", () => {
 			undefined,
 			projectContextManager as any,
 			undefined,
-			{ clock: fakeClock as any },
+			{ clock: fakeClock as any, pinnedCheckoutManager: pinnedCheckoutManager as any },
 		) as any;
 
 		// Keep this integration deterministic: drive the real phase/event/store

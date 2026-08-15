@@ -551,7 +551,13 @@ import {
 	type GitStatusTarget,
 } from "./skills/git-status-envelope.js";
 export type { GitStatusResult } from "./skills/git-status-envelope.js";
-import { VerificationHarness, goalBranchContainer } from "./agent/verification-harness.js";
+import { VerificationHarness, goalBranchContainer, resolvePinnedSourceLayout } from "./agent/verification-harness.js";
+import {
+	computeVerificationContentDigest,
+	summarizeVerificationContentDigestError,
+	type VerificationContentDigest,
+	type VerificationContentDigestErrorSummary,
+} from "./agent/verification-content-digest.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
 import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
 import { isKnownThinkingLevel } from "../shared/thinking-levels.js";
@@ -601,6 +607,7 @@ function copyHistoryForkSidecar(
 	return _historyForkSidecarCopyFake?.(kind, fromSessionId, toSessionId) ?? copy();
 }
 import { inlineFileImages } from "./agent/inline-file-images.js";
+import { readSessionMarkdownImage, SessionMarkdownImageError } from "./agent/session-markdown-image.js";
 import { StaffManager } from "./agent/staff-manager.js";
 import { buildStaffSystemPrompt } from "./agent/role-prompt.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
@@ -4358,7 +4365,14 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	}
 
 	ck("pre-VerificationHarness");
-	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade, { commandRunner: gatewayDeps.commandRunner, commandStepRunner: gatewayDeps.commandStepRunner, clock: gatewayDeps.clock, skipLlmReview: gatewayRuntimeFlags.skipLlmReview });
+	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade, {
+		commandRunner: gatewayDeps.commandRunner,
+		commandStepRunner: gatewayDeps.commandStepRunner,
+		clock: gatewayDeps.clock,
+		pinnedCheckoutManager: gatewayDeps.pinnedCheckoutManager,
+		verificationExecutionBackend: gatewayDeps.verificationExecutionBackend,
+		skipLlmReview: gatewayRuntimeFlags.skipLlmReview,
+	});
 	ck("new VerificationHarness");
 	teamManager.setVerificationHarness(verificationHarness);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
@@ -4498,7 +4512,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// runs the host-side plumbing (image build/version check, mounts,
 			// credentials, sandbox network, GitHub token) the first time each
 			// project's sandbox is requested by session/goal/staff creation.
-			const sandboxBootstrap: SandboxBootstrap = async (projectId) => {
+			const sandboxBootstrap: SandboxBootstrap = async (projectId, purpose = "session") => {
 				const project = projectRegistry.get(projectId);
 				if (!project) {
 					throw new Error(`[sandbox] bootstrap: project ${projectId} not registered`);
@@ -4509,15 +4523,27 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				}
 				const cfg = ctx.projectConfigStore;
 				const sandboxCfg = cfg.get("sandbox") || "none";
-				if (sandboxCfg !== "docker") return null;
-
 				const projectDir = project.rootPath;
 				const imageName = cfg.get("sandbox_image") || "bobbit-agent";
-
-				// Auto-build or rebuild image if missing or stale. Images are
-				// shared across projects (Docker image tags) so the first project
-				// to request a sandbox pays the build cost.
 				const dockerContextRoot = resolveSandboxDockerContext(config.defaultCwd);
+
+				if (purpose === "verification") {
+					// Frozen verification needs only Docker and a prepared Bobbit image.
+					// Never silently build an image, clone a project, or inject project
+					// credentials as a side effect of signalling a gate.
+					const imageStatus = await checkDockerAvailability(imageName, dockerContextRoot ?? undefined, gatewayDeps.commandRunner);
+					if (!imageStatus.available || imageStatus.imageExists !== true) {
+						throw new Error("Frozen verification requires Docker and a prepared Bobbit sandbox image. Install Docker and build the configured sandbox image before signalling this gate.");
+					}
+					return {
+						projectId, projectDir, repoUrl: "", image: imageName,
+						toolManager: ctx.toolManager,
+					};
+				}
+
+				if (sandboxCfg !== "docker") return null;
+
+				// Session sandboxes retain their existing image provisioning lifecycle.
 				const imageStatus = await checkDockerAvailability(imageName, dockerContextRoot ?? undefined, gatewayDeps.commandRunner);
 				if (imageStatus.imageExists === false) {
 					if (!dockerContextRoot) {
@@ -5175,6 +5201,9 @@ function parseGateInspectSelectionOptions(params: URLSearchParams): TextSelectio
 		to: parseGateInspectIntegerParam(params, "to"),
 	};
 }
+
+const activeMarkdownImageReads = new Map<string, number>();
+const MAX_CONCURRENT_MARKDOWN_IMAGE_READS_PER_SESSION = 8;
 
 async function handleApiRoute(
 	url: URL,
@@ -12942,13 +12971,19 @@ async function handleApiRoute(
 			goal.workflow = freezeResult.workflow;
 		}
 
+		// The un-offset branch container is the cache witness root and command root.
+		const branchContainer = goalBranchContainer(goal);
+
 		// Get commit SHA
 		let commitSha = "unknown";
 		try {
-			commitSha = await execGitSafe("git rev-parse HEAD", goal.cwd, "unknown");
+			commitSha = await execGitSafe("git rev-parse HEAD", branchContainer, "unknown");
 		} catch { /* ignore */ }
 
-		// Reject if verification is already running for this gate+commit
+		// Reject if verification is already running for this gate+commit. A
+		// replacement-generation cancellation starts synchronously before the new
+		// signal is admitted, but its exact cleanup continues in the background.
+		let staleCancellationStarted = false;
 		if (commitSha !== "unknown") {
 			const activeVers = verificationHarness.getActiveVerifications(goalId);
 			const runningDup = activeVers.find(v => {
@@ -12961,8 +12996,14 @@ async function handleApiRoute(
 				// Check if sessions are actually alive — auto-cancel zombies
 				const alive = verificationHarness.areVerificationSessionsAlive(runningDup.signalId);
 				if (!alive) {
-					console.log(`[api] Auto-cancelling zombie verification ${runningDup.signalId} for gate ${gateId}`);
-					await verificationHarness.cancelStaleVerifications(goalId, gateId, "zombie-recovery");
+					console.log(`[api] Replacing inactive verification ${runningDup.signalId} for gate ${gateId}`);
+					// This request is an explicit replacement generation. Fence the old
+					// generation now, but never make the new signal wait for its exact
+					// process/Docker cleanup or let a later broad sweep cancel the new row.
+					void verificationHarness.cancelStaleVerifications(goalId, gateId, "superseded").catch(error => {
+						console.error(`[api] Error cancelling inactive verification for re-signal ${goalId}/${gateId}:`, error);
+					});
+					staleCancellationStarted = true;
 					// Fall through to create new signal
 				} else {
 					// Surface the step states so a future 409 is diagnosable from
@@ -12979,6 +13020,47 @@ async function handleApiRoute(
 					return;
 				}
 			}
+		}
+
+		// Compute a preliminary witness before whole-gate cache reuse. The harness
+		// recomputes this after origin sync before step-cache/command execution.
+		let contentDigest: VerificationContentDigest | undefined;
+		let contentDigestError: VerificationContentDigestErrorSummary | undefined;
+		// A replacement generation must be recorded immediately after its old
+		// generation is fenced. Do not let an optional whole-gate cache witness
+		// delay that boundary and accidentally serialize it behind exact cleanup.
+		if (staleCancellationStarted) {
+			contentDigestError = { code: "VERIFICATION_CONTENT_DIGEST_FAILED", message: "Unable to compute verification content digest" };
+		} else {
+			try {
+				contentDigest = await computeVerificationContentDigest(branchContainer, serverCommandRunner);
+			} catch (error) {
+				contentDigestError = summarizeVerificationContentDigestError(error);
+			}
+		}
+
+		// Cache a multi-repository gate only when the route independently observes
+		// the current ordered component identities. The aggregate digest alone does
+		// not prove that a component still names the same repository/commit.
+		let currentPinnedCheckout: import("./gate-signal-response.js").CurrentPinnedCheckoutWitness | undefined;
+		const repoWorktrees = (goal as { repoWorktrees?: Record<string, string> }).repoWorktrees;
+		if (!staleCancellationStarted && repoWorktrees && Object.keys(repoWorktrees).length > 0) {
+			// Keep this sentinel when layout resolution fails: an authoritative
+			// multi-repo goal must not fall back to a prior v1 route-cache record.
+			currentPinnedCheckout = { layout: "multi-unavailable" };
+			try {
+				const layout = await resolvePinnedSourceLayout(goal, serverCommandRunner);
+				if (layout.version === 2) {
+					currentPinnedCheckout = {
+						version: 2,
+						repositories: layout.repositories.map(repository => ({ repoKey: repository.repoKey, commitSha: repository.commitSha })),
+					};
+				}
+			} catch {
+				// A malformed or unreadable authoritative layout must bypass cache reuse.
+			}
+		} else if (!staleCancellationStarted) {
+			currentPinnedCheckout = { version: 1 };
 		}
 
 		// Every asynchronous admission check is above. Re-read the goal at the
@@ -12999,14 +13081,16 @@ async function handleApiRoute(
 			return;
 		}
 
-		// Auto-pass if a prior signal for the same commit already fully passed.
-		// The extracted decision core owns cache-boundary and response semantics so
-		// this route cannot drift from its deterministic store-level coverage.
-		const cachedResponse = reuseCachedGateSignal({
+		// Auto-pass only if commit and live content/layout witnesses match. The extracted
+		// decision core owns cache-boundary and response semantics.
+		const cacheDecision = reuseCachedGateSignal({
 			gateStore,
 			goalId,
 			gate: gateDef,
 			commitSha,
+			contentDigest,
+			contentDigestError,
+			currentPinnedCheckout,
 			body,
 			notifier: {
 				signalReceived: (notifiedGoalId, notifiedGateId, signalId) => {
@@ -13020,9 +13104,12 @@ async function handleApiRoute(
 				},
 			},
 		});
-		if (cachedResponse) {
-			json(cachedResponse, 201);
+		if (cacheDecision.response) {
+			json(cacheDecision.response, 201);
 			return;
+		}
+		if (cacheDecision.missReason && cacheDecision.missReason !== "no-prior-passed-signal" && cacheDecision.missReason !== "unknown-commit") {
+			console.warn(`[api] Gate cache bypassed: ${cacheDecision.missReason}; priorSignalIds=${cacheDecision.priorSignalIds.join(",")}`);
 		}
 
 		// Compute content version
@@ -13047,9 +13134,11 @@ async function handleApiRoute(
 		// await its exact cleanup: re-signal creates a fresh generation while the
 		// old one remains durably pending. The harness finalizer may update only
 		// that old signal and is forbidden from overwriting this gate's new state.
-		void verificationHarness.cancelStaleVerifications(goalId, gateId, "superseded").catch(error => {
-			console.error(`[api] Error cancelling stale verification for re-signal ${goalId}/${gateId}:`, error);
-		});
+		if (!staleCancellationStarted) {
+			void verificationHarness.cancelStaleVerifications(goalId, gateId, "superseded").catch(error => {
+				console.error(`[api] Error cancelling stale verification for re-signal ${goalId}/${gateId}:`, error);
+			});
+		}
 
 		// Create signal record. Step enumeration is performed synchronously
 		// via `beginVerification` BEFORE `recordSignal` so the gate-store and
@@ -13066,6 +13155,7 @@ async function handleApiRoute(
 			metadata: body?.metadata,
 			content: body?.content,
 			contentVersion,
+			...(contentDigest ? { contentDigest } : { contentDigestError: contentDigestError! }),
 			verification: { status: "running" as const, steps: [] as any[] },
 		};
 
@@ -13124,7 +13214,6 @@ async function handleApiRoute(
 		// integration target; when unset, fall back to the repo's detected primary.
 		// `parseBaseRef` normalizes remote refs like `origin/master` to `master`
 		// for workflow variables such as `{{baseBranch}}` and legacy `{{master}}`.
-		const branchContainer = goalBranchContainer(goal);
 		const configuredBase = parseBaseRef(gateSignalCtx.projectConfigStore.get("base_ref") || "");
 		const primary = configuredBase.branch || (await detectPrimaryBranch(branchContainer, serverCommandRunner, serverRemoteGitPolicy).catch(() => "master"));
 		verificationHarness.verifyGateSignal(
@@ -16111,6 +16200,53 @@ async function handleApiRoute(
 			json(result);
 		} catch (err) {
 			jsonError(400, err);
+		}
+		return;
+	}
+
+	// GET /api/sessions/:id/markdown-image?path=<relative-or-absolute-or-file-url>
+	// Authenticated, session-scoped image transport for local paths in assistant
+	// Markdown. The path must resolve beneath the session cwd (including through
+	// symlinks); sandboxed sessions are resolved and read inside their container.
+	const markdownImageMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/markdown-image$/);
+	if (req.method === "GET" && markdownImageMatch) {
+		const id = markdownImageMatch[1];
+		const session = sessionManager.getPersistedSession(id);
+		if (!session) { json({ error: "Session not found" }, 404); return; }
+		const imagePath = url.searchParams.get("path");
+		if (!imagePath) { json({ error: "Missing path parameter" }, 400); return; }
+		const activeReads = activeMarkdownImageReads.get(id) ?? 0;
+		if (activeReads >= MAX_CONCURRENT_MARKDOWN_IMAGE_READS_PER_SESSION) {
+			res.setHeader("Retry-After", "1");
+			json({ error: "Too many concurrent image requests" }, 429);
+			return;
+		}
+		activeMarkdownImageReads.set(id, activeReads + 1);
+		try {
+			const image = await readSessionMarkdownImage(session, imagePath, sandboxManager ?? null);
+			res.writeHead(200, {
+				"Content-Type": image.mimeType,
+				"Content-Length": String(image.data.length),
+				"Cache-Control": "private, no-store",
+				"Content-Disposition": "inline",
+				"X-Content-Type-Options": "nosniff",
+				"Content-Security-Policy": "default-src 'none'; sandbox",
+			});
+			res.end(image.data);
+		} catch (error) {
+			if (error instanceof SessionMarkdownImageError) {
+				const status = error.code === "forbidden" ? 403
+					: error.code === "not_found" ? 404
+						: error.code === "too_large" ? 413
+							: error.code === "unavailable" ? 503 : 400;
+				json({ error: error.message }, status);
+			} else {
+				jsonError(500, error);
+			}
+		} finally {
+			const remaining = (activeMarkdownImageReads.get(id) ?? 1) - 1;
+			if (remaining <= 0) activeMarkdownImageReads.delete(id);
+			else activeMarkdownImageReads.set(id, remaining);
 		}
 		return;
 	}

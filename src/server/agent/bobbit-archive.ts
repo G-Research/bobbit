@@ -73,6 +73,8 @@ export const GATEWAY_OWNED_FILES: readonly string[] = [
 	// intentionally NOT listed here — secrets must never be archived.
 	"state/system-project/",      // synthetic system-project anchor (server.ts)
 	"state/marketplace-cache/",   // server.ts (marketplace source git-clone cache; server-global)
+	"state/verification-checkouts/", // verification-pinned-checkout.ts detached source snapshots
+	"state/verification-checkouts.json", // verification-pinned-checkout.ts durable lease/recovery state
 ];
 
 export interface ArchiveResult {

@@ -27,6 +27,7 @@ import { dispatchGateStatusCacheUpdated } from "./gate-status-events.js";
 import { showHeaderToast } from "./header-toast.js";
 import { ensureProjectPlayFinishSoundOverride } from "./play-finish-sound.js";
 import { remoteStateRequestKey, remoteStateRequestOrder } from "./remote-state-request-order.js";
+import { beginSchedulerRecoverySnapshot, fenceStaleSchedulerRecovery } from "./scheduler-recovery-fence.js";
 export { errorFromResponse, errorDetails };
 // `dialogs.ts` is heavy (~90 kB) and only needed once the user opens a dialog;
 // route these through `dialogs-lazy.js` so it stays out of the eager
@@ -712,6 +713,9 @@ export function retryLoadSessions(): void {
 }
 
 export async function refreshSessions(): Promise<void> {
+	// A retry can consume recovery while this request is in flight. Keep the
+	// request's start generation so only its pre-consume snapshot is fenced.
+	const recoverySnapshotGeneration = beginSchedulerRecoverySnapshot();
 	const isInitial = isInitialSessionsLoad({
 		gatewaySessionsLength: state.gatewaySessions.length,
 		sessionsGeneration: state.sessionsGeneration,
@@ -822,7 +826,11 @@ export async function refreshSessions(): Promise<void> {
 			} else {
 				goalsChanged = true;
 				const prevGoalIds = new Set(state.goals.map((g) => g.id));
-				const incoming: Goal[] = goalsData.goals || [];
+				const fencedGoals = fenceStaleSchedulerRecovery(
+					(goalsData.goals || []) as Goal[],
+					recoverySnapshotGeneration,
+				);
+				const incoming = fencedGoals.goals;
 				// Merge instead of overwrite. The /api/goals endpoint returns only
 				// live goals by default; archived goals arrive via a separate
 				// fetchArchivedGoalsPaginated() call. A naive overwrite here
@@ -857,7 +865,10 @@ export async function refreshSessions(): Promise<void> {
 					}
 				}
 
-				if (goalsData.generation !== undefined) {
+				// A fenced response may have included a recovery created after its
+				// request began. Do not acknowledge its server generation: polling
+				// from it could return changed:false and hide that recovery forever.
+				if (goalsData.generation !== undefined && !fencedGoals.stripped) {
 					state.goalsGeneration = goalsData.generation;
 				}
 			}
@@ -2675,6 +2686,36 @@ export interface GateSignal {
 	metadata?: Record<string, string>;
 	content?: string;
 	contentVersion?: number;
+	contentDigest?: {
+		algorithm: "sha256";
+		version: 1;
+		digest: string;
+		fileCount: number;
+	};
+	contentDigestError?: {
+		code: "VERIFICATION_CONTENT_DIGEST_FAILED";
+		message: string;
+	};
+	/** Public attestation that verification used a frozen source snapshot. */
+	pinnedCheckout?: {
+		version: 1;
+		commitSha: string;
+		contentDigest: GateSignal["contentDigest"] & {};
+	} | {
+		version: 2;
+		layout: "multi-repo";
+		contentDigest: GateSignal["contentDigest"] & {};
+		repositories: Array<{
+			repoKey: string;
+			commitSha: string;
+			contentDigest: GateSignal["contentDigest"] & {};
+		}>;
+	};
+	/** Sanitized operational reason when frozen source verification was unavailable. */
+	pinnedCheckoutError?: {
+		code: "PINNED_CHECKOUT_ACQUIRE_FAILED" | "PINNED_CHECKOUT_MUTATED" | "PINNED_CHECKOUT_UNREADABLE" | "PINNED_CHECKOUT_UNSUPPORTED_LAYOUT";
+		message: string;
+	};
 	verification: {
 		status: "running" | "passed" | "failed" | "cancelled";
 		/** Present for cancelled runs; legacy cancellation records use `unknown`. */

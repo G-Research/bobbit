@@ -2169,6 +2169,7 @@ export class AgentInterface extends LitElement {
 				<!-- Streaming message container - manages its own updates -->
 				<streaming-message-container
 					.tools=${state.tools}
+					.sessionId=${this.session?.sessionId ?? ""}
 					.isStreaming=${state.isStreaming}
 					.archived=${this.readOnly && !this.nonInteractive}
 					.pendingToolCalls=${state.pendingToolCalls}

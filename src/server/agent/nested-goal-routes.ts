@@ -345,9 +345,7 @@ export async function tryHandleNestedGoalRoute(
 	 * MUST go through `executePauseForGoals`, not call this directly.
 	 */
 	async function applyOperatorPause(pauseGoalManager: GoalManager, goalId: string): Promise<void> {
-		// Provenance distinguishes an operator pause from pre-provenance legacy
-		// dependency pauses when GoalManager restores persisted goals on boot.
-		await pauseGoalManager.updateGoal(goalId, { paused: true, pauseSource: "operator" });
+		await pauseGoalManager.updateGoal(goalId, { paused: true });
 		await cancelAllVerifications(goalId);
 		broadcastToAll({ type: "goal_state_changed", goalId });
 	}
@@ -1156,13 +1154,9 @@ export async function tryHandleNestedGoalRoute(
 							if (!deps || deps.length === 0) continue;
 							if (!deps.includes(mergedPlanId)) continue;
 							// Re-check ALL deps — multi-dep children only unblock
-							// when the LAST dep merges.
-							const allResolved = deps.every(depPid => {
-								const depSib = ctx.goalStore.getAll().find(g =>
-									g.parentGoalId === parentId && g.spawnedFromPlanId === depPid);
-								return !!depSib && depSib.state === "complete";
-							});
-							if (!allResolved) continue;
+							// when the LAST dep merges. Resume uses this same predicate
+							// so it cannot turn a dependency-blocked child into a start.
+							if (hasUnresolvedPlanDependencies(sib, ctx.goalStore.getAll())) continue;
 							if (sib.state !== "blocked") continue;
 							// Finding 2 — deps now satisfied: request the sibling's
 							// team start through the unified scheduler instead of
@@ -1320,27 +1314,37 @@ export async function tryHandleNestedGoalRoute(
 			},
 		);
 		const count = resumeResult.processed.reduce((n, p) => n + (p.result as number), 0);
-		// The capacity queue is intentionally process-local. If the gateway
-		// restarted after an eligible child was paused, resume rebuilds that lost
-		// intent from durable scheduler state. This is deliberately narrow: only
-		// successfully resumed non-root auto-start children that are still blocked
-		// qualify; declared dependencies must all be complete. It therefore never
-		// invents starts for roots, manual work, or unresolved dependency children.
+		// Resuming clears only the operator-pause axis. It must wake only existing
+		// scheduler intent: a manually started team's paused descendant, or an
+		// in-progress child whose team was deliberately torn down, must not acquire
+		// a new permit merely because its pause was cleared. A resolved `blocked`
+		// state is the narrow durable fallback for capacity-parked work after a
+		// scheduler restart; dependency-blocked children remain owned by
+		// integrate-child until their final dependency merges.
 		for (const { goalId, result } of resumeResult.processed) {
 			if (!result) continue;
 			const resumed = getGoalAcrossProjects(goalId);
-			if (!resumed?.parentGoalId || resumed.archived || resumed.autoStartTeam === false || resumed.state !== "blocked") continue;
-			const currentGoals = projectContextManager.getContextForGoal(goalId)?.goalStore.getAll() ?? [];
-			if (hasUnresolvedPlanDependencies(resumed, currentGoals)) continue;
+			if (!resumed?.parentGoalId || resumed.autoStartTeam === false || resumed.archived || resumed.state === "complete" || resumed.state === "shelved") continue;
+			if (hasUnresolvedPlanDependencies(resumed, resumeAllGoals)) continue;
 			try {
 				requireAncestorsNotPaused(goalId, getGoalAcrossProjects);
 			} catch (err) {
 				if (err instanceof GoalPausedError) continue;
 				throw err;
 			}
-			// `requestChildStart` is idempotent for existing pending/holding entries
-			// and remains the sole owner of cap, state, and pause enforcement.
-			verificationHarness.requestChildStart(goalId);
+			const tracked = verificationHarness.isScheduledChildStartTracked?.(goalId) ?? false;
+			const capacityParkedAfterRestart = resumed.state === "blocked";
+			if (!tracked && !capacityParkedAfterRestart) continue;
+			const outcome = verificationHarness.requestChildStart(goalId);
+			// A resume can find all root permits occupied. Preserve the existing
+			// visible capacity-blocked lifecycle rather than leaving a todo child
+			// that has no team yet. Single-flight scheduler requests report
+			// `started` for an already-running child, so this cannot relabel one.
+			if (outcome === "capacity-blocked" && resumed.state !== "blocked") {
+				void getGoalManagerForGoal(goalId).updateGoal(goalId, { state: "blocked" })
+					.then(() => broadcastToAll({ type: "goal_state_changed", goalId }))
+					.catch(err => console.error(`[nested-goals] failed to stamp resumed child ${goalId} capacity-blocked:`, err));
+			}
 		}
 		json({
 			resumed: count,
@@ -1348,6 +1352,76 @@ export async function tryHandleNestedGoalRoute(
 				? { errors: resumeResult.errors.map(e => ({ goalId: e.goalId, error: e.error.message })) }
 				: {}),
 		});
+		return true;
+	}
+
+	// POST /api/goals/:id/retry-scheduled-start — one-action recovery for a
+	// bounded scheduler stop. A current retryable record is consumed before the
+	// scheduler is entered, so replay/double-clicks cannot mint another request.
+	const retryScheduledStartMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/retry-scheduled-start$/);
+	if (retryScheduledStartMatch && req.method === "POST") {
+		const goalId = retryScheduledStartMatch[1];
+		const goal = getGoalAcrossProjects(goalId);
+		if (!goal || goal.archived) { json({ error: "Goal not found" }, 404); return true; }
+		if (!authorizeTeamLeadOrReject(goalId, "operator")) return true;
+		const recovery = goal.schedulerRecovery;
+		if (!recovery || !recovery.retryable) {
+			json({ error: "No retryable scheduler recovery is pending", code: "NO_SCHEDULER_RECOVERY" }, 409);
+			return true;
+		}
+		if (goal.paused || goal.state === "blocked" || goal.state === "complete" || goal.state === "shelved") {
+			json({ error: "Goal lifecycle must be resolved before retrying scheduler start", code: "SCHEDULER_RETRY_INELIGIBLE" }, 409);
+			return true;
+		}
+		if ((recovery.kind === "root" && goal.parentGoalId)
+			|| (recovery.kind === "child" && !goal.parentGoalId)) {
+			json({ error: "Invalid scheduler recovery", code: "INVALID_SCHEDULER_RECOVERY" }, 409);
+			return true;
+		}
+		const goalManager = getGoalManagerForGoal(goalId);
+		if (recovery.kind === "root") {
+			const targetIds = [...new Set((recovery.affectedChildGoalIds ?? []).filter((id): id is string => typeof id === "string"))];
+			const rootGoals = projectContextManager.getContextForGoal(goalId)?.goalStore.getAll() ?? [];
+			const actionableTargetIds = targetIds.filter((childGoalId) => {
+				const child = getGoalAcrossProjects(childGoalId);
+				if (!child || !child.parentGoalId || child.rootGoalId !== goalId) return false;
+				if (child.archived || child.paused || child.autoStartTeam === false || child.state === "complete" || child.state === "shelved") return false;
+				if (hasUnresolvedPlanDependencies(child, rootGoals)) return false;
+				try { requireAncestorsNotPaused(childGoalId, getGoalAcrossProjects); } catch (err) {
+					if (err instanceof GoalPausedError) return false;
+					throw err;
+				}
+				return true;
+			});
+			if (actionableTargetIds.length === 0) {
+				json({ error: "No affected child remains eligible for scheduler recovery", code: "SCHEDULER_ROOT_RETRY_INELIGIBLE" }, 409);
+				return true;
+			}
+			// A root queue is process-local. Re-request the persisted, validated
+			// targets before consuming recovery so a gateway restart cannot turn a
+			// retry into a successful no-op.
+			const outcomes = verificationHarness.retryScheduledRoot(goalId, actionableTargetIds);
+			if (!outcomes?.length) {
+				json({ error: "Scheduler root recovery could not be dispatched", code: "SCHEDULER_ROOT_RETRY_UNAVAILABLE" }, 503);
+				return true;
+			}
+			if (!await goalManager.clearSchedulerRecovery(goalId)) {
+				json({ error: "Scheduler recovery was already consumed", code: "NO_SCHEDULER_RECOVERY" }, 409);
+				return true;
+			}
+			broadcastToAll({ type: "goal_state_changed", goalId });
+			json({ rootGoalId: goalId, outcomes });
+			return true;
+		}
+		// clearSchedulerRecovery mutates the store synchronously before its
+		// promise resolves; this is the child retry endpoint's atomic consume boundary.
+		if (!await goalManager.clearSchedulerRecovery(goalId)) {
+			json({ error: "Scheduler recovery was already consumed", code: "NO_SCHEDULER_RECOVERY" }, 409);
+			return true;
+		}
+		broadcastToAll({ type: "goal_state_changed", goalId });
+		const outcome = verificationHarness.retryScheduledChildStart?.(goalId) ?? verificationHarness.requestChildStart(goalId);
+		json({ childGoalId: goalId, outcome });
 		return true;
 	}
 

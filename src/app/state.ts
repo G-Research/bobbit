@@ -157,6 +157,8 @@ export interface Goal {
 	workflowId?: string;
 	setupStatus?: GoalSetupStatus;
 	setupError?: string;
+	/** Visible terminal scheduler state with a one-action retry path. */
+	schedulerRecovery?: { kind: "child" | "root"; code: string; reason: string; retryable: boolean; updatedAt: number };
 	/** Arbitrary, hierarchically-inherited per-goal metadata (namespaced keys).
 	 *  Drives extension goal-lifecycle hooks and core activation edges. */
 	metadata?: Record<string, unknown>;

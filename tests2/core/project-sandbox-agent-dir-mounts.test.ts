@@ -4,9 +4,12 @@
 
 import { describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { ProjectSandbox, getAgentDirMountStaleness, getModelsJsonContentStaleness, getStateDirMountStaleness } from "../../src/server/agent/project-sandbox.js";
+import { ProjectSandbox, getAgentDirMountStaleness, getModelsJsonContentStaleness, getStateDirMountStaleness, resolveScopedVerificationCheckoutMount } from "../../src/server/agent/project-sandbox.js";
 import { SandboxManager } from "../../src/server/agent/sandbox-manager.js";
+import { verificationCheckoutProjectDir } from "../../src/server/agent/verification-checkout-scope.js";
 
 type Call = string | [string, string];
 
@@ -242,6 +245,155 @@ describe("ProjectSandbox agent-dir mount staleness", () => {
 	}
 });
 
+describe("ProjectSandbox project container discovery", () => {
+	const projectId = "stale-agent-dir-mounts";
+	const sidecarId = "a".repeat(64);
+	const projectContainerId = "b".repeat(64);
+
+	function discoveryHarness(candidates: Array<{ ref: string; inspection?: unknown; error?: Error }>, options?: { rejectLabelNegation?: boolean }) {
+		const sandbox = makeSandbox() as any;
+		const calls: string[][] = [];
+		let psCalls = 0;
+		sandbox.execDocker = async (args: string[]) => {
+			calls.push(args);
+			if (args[0] === "ps") {
+				psCalls++;
+				if (options?.rejectLabelNegation && psCalls === 1) throw new Error("invalid filter 'label!'");
+				return { stdout: candidates.map(({ ref }) => ref).join("\n"), stderr: "" };
+			}
+			if (args[0] === "inspect") {
+				const candidate = candidates.find(({ ref }) => ref === args.at(-1));
+				if (!candidate) throw new Error(`unexpected inspect: ${args.at(-1)}`);
+				if (candidate.error) throw candidate.error;
+				return { stdout: JSON.stringify(candidate.inspection), stderr: "" };
+			}
+			throw new Error(`unexpected Docker command: ${args.join(" ")}`);
+		};
+		return { sandbox, calls };
+	}
+
+	function projectInspection(id = projectContainerId, labels: Record<string, string> = { "bobbit-project": projectId }) {
+		return { Id: id, Config: { Labels: labels } };
+	}
+
+	it("filters and then canonically inspects a newest sidecar before adopting the project container", async () => {
+		const { sandbox, calls } = discoveryHarness([
+			{ ref: sidecarId.slice(0, 12), inspection: projectInspection(sidecarId, {
+				"bobbit-project": projectId,
+				"bobbit-verification-sidecar": "1",
+				"bobbit-verification-outputs": "dist",
+			}) },
+			{ ref: projectContainerId.slice(0, 12), inspection: projectInspection() },
+		]);
+
+		const found = await sandbox._findContainerByLabel(`bobbit-project=${projectId}`);
+
+		assert.equal(found, projectContainerId, "project discovery must not adopt the newest verification sidecar");
+		assert.deepEqual(calls[0], [
+			"ps", "-a",
+			"--filter", `label=bobbit-project=${projectId}`,
+			"--filter", "label!=bobbit-verification-sidecar=1",
+			"--format", "{{.ID}}",
+		]);
+		assert.deepEqual(calls.slice(1).map(args => args.at(-1)), [sidecarId.slice(0, 12), projectContainerId.slice(0, 12)]);
+	});
+
+	it("falls back safely on daemons that reject label negation", async () => {
+		const { sandbox, calls } = discoveryHarness([
+			{ ref: sidecarId.slice(0, 12), inspection: projectInspection(sidecarId, {
+				"bobbit-project": projectId,
+				"bobbit-verification-sidecar": "1",
+			}) },
+			{ ref: projectContainerId.slice(0, 12), inspection: projectInspection() },
+		], { rejectLabelNegation: true });
+
+		assert.equal(await sandbox._findContainerByLabel(`bobbit-project=${projectId}`), projectContainerId);
+		assert.ok(calls[0].includes("label!=bobbit-verification-sidecar=1"));
+		assert.ok(!calls[1].includes("label!=bobbit-verification-sidecar=1"));
+	});
+
+	it("skips sidecars with empty outputs, malformed or uninspectable candidates, and returns only an inspected full ID", async () => {
+		const malformedId = "c".repeat(64);
+		const { sandbox } = discoveryHarness([
+			{ ref: sidecarId.slice(0, 12), inspection: projectInspection(sidecarId, {
+				"bobbit-project": projectId,
+				"bobbit-verification-sidecar": "1",
+				"bobbit-verification-outputs": "",
+			}) },
+			{ ref: malformedId.slice(0, 12), inspection: { Id: "not-a-full-id", Config: { Labels: { "bobbit-project": projectId } } } },
+			{ ref: "gone-candidate", error: new Error("No such object") },
+			{ ref: projectContainerId.slice(0, 12), inspection: projectInspection() },
+		]);
+
+		assert.equal(await sandbox._findContainerByLabel(`bobbit-project=${projectId}`), projectContainerId);
+	});
+
+	it("returns no project container when only a sidecar shares its project label", async () => {
+		const { sandbox } = discoveryHarness([{
+			ref: sidecarId.slice(0, 12),
+			inspection: projectInspection(sidecarId, {
+				"bobbit-project": projectId,
+				"bobbit-verification-sidecar": "unexpected-but-still-sidecar",
+			}),
+		}]);
+
+		assert.equal(await sandbox._findContainerByLabel(`bobbit-project=${projectId}`), null);
+	});
+
+	it("preserves E2E owner filtering while rejecting an inspected sidecar and foreign candidate", async () => {
+		const runId = "project-discovery-owner";
+		const foreignId = "c".repeat(64);
+		const { sandbox, calls } = discoveryHarness([
+			{ ref: sidecarId.slice(0, 12), inspection: projectInspection(sidecarId, {
+				"bobbit-project": projectId,
+				"bobbit-e2e-run": runId,
+				"bobbit-verification-sidecar": "1",
+			}) },
+			{ ref: foreignId.slice(0, 12), inspection: projectInspection(foreignId, {
+				"bobbit-project": "other-project",
+				"bobbit-e2e-run": runId,
+			}) },
+			{ ref: projectContainerId.slice(0, 12), inspection: projectInspection(projectContainerId, {
+				"bobbit-project": projectId,
+				"bobbit-e2e-run": runId,
+			}) },
+		]);
+
+		assert.equal(await sandbox._findContainerByLabel(`bobbit-project=${projectId}`, runId), projectContainerId);
+		assert.ok(calls[0].includes(`label=bobbit-e2e-run=${runId}`));
+	});
+
+	it("restarts the inspected project container instead of the newer sidecar during recovery", async () => {
+		const { sandbox, calls } = discoveryHarness([
+			{ ref: sidecarId.slice(0, 12), inspection: projectInspection(sidecarId, {
+				"bobbit-project": projectId,
+				"bobbit-verification-sidecar": "1",
+			}) },
+			{ ref: projectContainerId.slice(0, 12), inspection: projectInspection() },
+		]);
+		const discoveryExec = sandbox.execDocker;
+		sandbox.execDocker = async (args: string[]) => {
+			if (args[0] === "start") { calls.push(args); return { stdout: projectContainerId, stderr: "" }; }
+			return discoveryExec(args);
+		};
+		sandbox._hasStaleAgentDirMounts = async () => false;
+		sandbox._hasStaleStateDirMounts = async () => false;
+		sandbox._isContainerImageStale = async () => false;
+		sandbox._isContainerRunning = async () => false;
+		sandbox._dockerExec = async (id: string, args: string[]) => {
+			assert.equal(id, projectContainerId);
+			assert.deepEqual(args, ["echo", "ok"]);
+			return "ok";
+		};
+
+		await sandbox._initContainer();
+
+		assert.equal(sandbox.containerId, projectContainerId);
+		assert.ok(calls.some(args => args.join("\0") === ["start", projectContainerId].join("\0")));
+		assert.ok(!calls.some(args => args.join("\0") === ["start", sidecarId].join("\0")));
+	});
+});
+
 describe("SandboxManager atomic model refresh", () => {
 	it("observes every publication for ready, in-flight, and error sandboxes", async () => {
 		const manager = new SandboxManager();
@@ -270,6 +422,352 @@ describe("SandboxManager atomic model refresh", () => {
 	});
 });
 
+describe("ProjectSandbox verification sidecars", () => {
+	const signalId = "123e4567-e89b-42d3-a456-426614174000";
+	const fullId = "a".repeat(64);
+	const checkoutPath = "/server/verification-checkouts/project/signal";
+
+	it("reconnects the exact labelled sidecar rather than creating or using the shared container", async () => {
+		const sandbox = makeSandbox();
+		const calls: string[][] = [];
+		(sandbox as any).getContainerId = async () => "shared-container-must-not-be-returned";
+		(sandbox as any)._validateVerificationCheckout = () => checkoutPath;
+		(sandbox as any)._validatedSidecarOutputDirs = () => [];
+		(sandbox as any)._findVerificationSidecars = async () => [fullId];
+		(sandbox as any)._validateVerificationSidecar = async () => ({ containerId: fullId, projectId: "stale-agent-dir-mounts", signalId, checkoutPath, cwd: `/bobbit-state/verification-checkouts/${signalId}` });
+		(sandbox as any)._isContainerRunning = async () => false;
+		(sandbox as any).execDocker = async (args: string[]) => { calls.push(args); return { stdout: "", stderr: "" }; };
+
+		const sidecar = await sandbox.getVerificationSidecar({ signalId, checkoutPath });
+		assert.equal(sidecar.containerId, fullId);
+		assert.equal(sidecar.cwd, `/bobbit-state/verification-checkouts/${signalId}`);
+		assert.deepEqual(calls, [["start", fullId]], "restart must reattach the verified sidecar, never use the project container");
+	});
+
+	it("rejects short Docker aliases before inspecting a persisted sidecar", async () => {
+		const sandbox = makeSandbox();
+		await assert.rejects(
+			sandbox.resolveVerificationSidecar({ signalId, containerId: fullId.slice(0, 12), ignoredOutputDirs: [] }),
+			/canonical/,
+		);
+	});
+
+	it("validates nested declarations identically before later phases and restart", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-persistent-output-"));
+		try {
+			const checkout = path.join(root, "checkout");
+			fs.mkdirSync(path.join(checkout, "tests", "results", "tier-2-5"), { recursive: true });
+			fs.mkdirSync(path.join(checkout, "tests", "src"), { recursive: true });
+			fs.writeFileSync(path.join(checkout, "tests", "src", "source.ts"), "source");
+			const sandbox = makeSandbox() as any;
+			assert.deepEqual(sandbox._validatedSidecarOutputDirs({ ignoredOutputDirs: ["tests/results/tier-2-5"] }, checkout), ["tests/results/tier-2-5"]);
+			fs.writeFileSync(path.join(checkout, "tests", "results", "tier-2-5", "later-phase.txt"), "output");
+			assert.deepEqual(sandbox._validatedSidecarOutputDirs({ ignoredOutputDirs: ["tests/results/tier-2-5"] }, checkout), ["tests/results/tier-2-5"]);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects output declarations that overlap a source file or symlink ancestor", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-source-collision-"));
+		try {
+			const checkout = path.join(root, "checkout");
+			fs.mkdirSync(checkout);
+			fs.writeFileSync(path.join(checkout, "dist"), "source");
+			assert.throws(() => (makeSandbox() as any)._validatedSidecarOutputDirs({ ignoredOutputDirs: ["dist"] }, checkout), /source file/);
+			fs.unlinkSync(path.join(checkout, "dist"));
+			fs.mkdirSync(path.join(root, "outside"));
+			fs.symlinkSync(path.join(root, "outside"), path.join(checkout, "dist"), "dir");
+			assert.throws(() => (makeSandbox() as any)._validatedSidecarOutputDirs({ ignoredOutputDirs: ["dist", "dist/nested"] }, checkout), /unique and sorted|overlap|symlink/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("builds a root-owned nested output ancestor while mirroring every source sibling", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-nested-view-"));
+		try {
+			const checkout = path.join(root, "checkout");
+			fs.mkdirSync(path.join(checkout, "tests", "src"), { recursive: true });
+			fs.mkdirSync(path.join(checkout, "tests", "results", "tier-2-5"), { recursive: true });
+			fs.writeFileSync(path.join(checkout, "tests", "src", "source.ts"), "source");
+			fs.writeFileSync(path.join(checkout, "tests", "helper.ts"), "helper");
+			const calls: string[][] = [];
+			const sandbox = makeSandbox() as any;
+			sandbox.execDocker = async (args: string[]) => { calls.push(args); return { stdout: "", stderr: "" }; };
+			await sandbox._buildVerificationExecutionView(fullId, signalId, checkout, ["tests/results/tier-2-5"]);
+			const commandArgs = calls.map(args => args.slice(4));
+			const source = `/bobbit-state/verification-sources/${signalId}`;
+			const view = `/bobbit-state/verification-checkouts/${signalId}`;
+			assert.ok(commandArgs.some(args => args.join("\0") === ["mkdir", "-p", "--", `${view}/tests`].join("\0")));
+			assert.ok(commandArgs.some(args => args.join("\0") === ["chmod", "0555", "--", `${view}/tests`].join("\0")));
+			assert.ok(commandArgs.some(args => args.join("\0") === ["ln", "-s", "--", `${source}/tests/src`, `${view}/tests/src`].join("\0")), "tests/src must stay visible beside nested output");
+			assert.ok(commandArgs.some(args => args.join("\0") === ["ln", "-s", "--", `${source}/tests/helper.ts`, `${view}/tests/helper.ts`].join("\0")), "all source siblings must stay visible");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("builds one sidecar view that retains sibling source paths for distinct nested repository overlays", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-multi-repo-view-"));
+		try {
+			const checkout = path.join(root, "checkout");
+			fs.mkdirSync(path.join(checkout, "apps", "web", "src"), { recursive: true });
+			fs.mkdirSync(path.join(checkout, "apps", "web", "test-results"), { recursive: true });
+			fs.mkdirSync(path.join(checkout, "services", "api", "src"), { recursive: true });
+			fs.mkdirSync(path.join(checkout, "services", "api", "coverage"), { recursive: true });
+			fs.writeFileSync(path.join(checkout, "apps", "web", "src", "app.ts"), "web source");
+			fs.writeFileSync(path.join(checkout, "services", "api", "src", "api.ts"), "api source");
+			const calls: string[][] = [];
+			const sandbox = makeSandbox() as any;
+			sandbox.execDocker = async (args: string[]) => { calls.push(args); return { stdout: "", stderr: "" }; };
+
+			await sandbox._buildVerificationExecutionView(fullId, signalId, checkout, ["apps/web/test-results", "services/api/coverage"]);
+
+			const commandArgs = calls.map(args => args.slice(4));
+			const source = `/bobbit-state/verification-sources/${signalId}`;
+			const view = `/bobbit-state/verification-checkouts/${signalId}`;
+			assert.ok(commandArgs.some(args => args.join("\0") === ["ln", "-s", "--", `${source}/apps/web/src`, `${view}/apps/web/src`].join("\0")),
+				"the web component source must remain visible beside its writable result overlay");
+			assert.ok(commandArgs.some(args => args.join("\0") === ["ln", "-s", "--", `${source}/services/api/src`, `${view}/services/api/src`].join("\0")),
+				"the API component source must remain visible beside its writable coverage overlay");
+			assert.ok(!commandArgs.flat().some(arg => arg.includes("/workspace-wt/") || arg.includes("verification-checkouts-private")),
+				"the execution view must be assembled only from the signal-owned source and validated output leaves");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects a hidden sibling added beneath a nested output ancestor", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-hidden-sibling-"));
+		try {
+			const checkout = path.join(root, "checkout");
+			fs.mkdirSync(path.join(checkout, "tests", "src"), { recursive: true });
+			fs.mkdirSync(path.join(checkout, "tests", "results", "tier-2-5"), { recursive: true });
+			fs.writeFileSync(path.join(checkout, "tests", "src", "source.ts"), "source");
+			const sandbox = makeSandbox() as any;
+			const source = `/bobbit-state/verification-sources/${signalId}`;
+			const view = `/bobbit-state/verification-checkouts/${signalId}`;
+			sandbox.execDocker = async (args: string[]) => {
+				if (args.includes("stat")) return { stdout: args.includes("%F:%a") ? "directory:777" : "0:555", stderr: "" };
+				if (args.includes("find")) {
+					const dir = args[5];
+					return { stdout: dir === view ? "tests\n" : dir === `${view}/tests` ? "src\nresults\nhidden\n" : "tier-2-5\n", stderr: "" };
+				}
+				if (args.includes("readlink")) return { stdout: `${source}/tests/src`, stderr: "" };
+				return { stdout: "", stderr: "" };
+			};
+			await assert.rejects(sandbox._validateVerificationExecutionView(fullId, signalId, checkout, ["tests/results/tier-2-5"]), /missing or unallowlisted/);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("adopts only exact read-only dependency-volume leaves and rejects broad or mismatched views", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-dependency-mount-"));
+		try {
+			const checkout = path.join(root, "checkout");
+			const dependency = path.join(root, "live-dependencies", "node_modules");
+			fs.mkdirSync(path.join(checkout, "services", "api"), { recursive: true });
+			fs.mkdirSync(dependency, { recursive: true });
+			fs.symlinkSync(dependency, path.join(checkout, "services", "api", "node_modules"), "dir");
+			const sandbox = makeSandbox() as any;
+			sandbox._validateVerificationExecutionView = async () => {};
+			const link = { path: "services/api/node_modules", target: "/workspace-wt/goal/services/api/node_modules" };
+			const source = `/bobbit-state/verification-sources/${signalId}`;
+			const dependencyMount = {
+				Type: "volume", Source: "bobbit-worktrees-stale-agent-dir-mounts",
+				Destination: link.target, RW: false, Mode: "ro",
+			};
+			const inspection = (extraMounts: object[] = []) => ({
+				Id: fullId,
+				Config: { Image: "bobbit-test-image:latest", Labels: {
+					"bobbit-verification-sidecar": "1",
+					"bobbit-project": "stale-agent-dir-mounts",
+					"bobbit-verification-signal": signalId,
+					"bobbit-verification-version": "3",
+					"bobbit-verification-outputs": "",
+					"bobbit-verification-dependencies": `${link.path}=${link.target}`,
+				} },
+				Mounts: [
+					{ Type: "bind", Source: checkout, Destination: source, RW: false, Mode: "ro" },
+					dependencyMount,
+					...extraMounts,
+				],
+				HostConfig: { Mounts: [{
+					Type: "volume", Source: "bobbit-worktrees-stale-agent-dir-mounts", Target: link.target,
+					ReadOnly: true, VolumeOptions: { Subpath: "goal/services/api/node_modules" },
+				}] },
+			});
+
+			await sandbox._validateVerificationSidecar(fullId, signalId, checkout, inspection(), [], [link]);
+			await assert.rejects(
+				sandbox._validateVerificationSidecar(fullId, signalId, checkout, inspection([{
+					Type: "volume", Source: "bobbit-worktrees-stale-agent-dir-mounts", Destination: "/workspace-wt", RW: false, Mode: "ro",
+				}]), [], [link]),
+				/broad or foreign live workspace mount/,
+			);
+			await assert.rejects(
+				sandbox._validateVerificationSidecar(fullId, signalId, checkout, inspection([{
+					Type: "bind", Source: "/host/live-clone", Destination: "/workspace-src", RW: false, Mode: "ro",
+				}]), [], [link]),
+				/foreign mount/,
+			);
+			await assert.rejects(
+				sandbox._validateVerificationSidecar(fullId, signalId, checkout, inspection([{
+					...dependencyMount, Source: "foreign-project-worktrees",
+				}]), [], [link]),
+				/invalid read-only exact dependency volume mount/,
+			);
+			await assert.rejects(
+				sandbox._validateVerificationSidecar(fullId, signalId, checkout, inspection(), [], [{
+					...link, target: "/workspace-wt/other/services/api/node_modules",
+				}]),
+				/dependency links do not match the durable identity/,
+			);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("requires exact sidecar disappearance before reporting cleanup success", async () => {
+		const sandbox = makeSandbox();
+		const calls: string[][] = [];
+		(sandbox as any).execDocker = async (args: string[]) => {
+			calls.push(args);
+			if (args[0] === "rm") return { stdout: fullId, stderr: "" };
+			throw Object.assign(new Error(`Error response from daemon: No such object: ${fullId}`), { stderr: `No such object: ${fullId}` });
+		};
+
+		await (sandbox as any)._removeVerificationSidecarContainer(fullId);
+		assert.deepEqual(calls, [
+			["rm", "-f", fullId],
+			["inspect", "--format", "{{json .}}", fullId],
+		]);
+	});
+
+	it("does not turn daemon or timeout removal failures into success", async () => {
+		for (const message of ["Docker daemon unavailable", "Docker command timed out"]) {
+			const sandbox = makeSandbox();
+			(sandbox as any).execDocker = async (args: string[]) => {
+				if (args[0] === "rm") throw new Error(message);
+				return { stdout: JSON.stringify({ Id: fullId }), stderr: "" };
+			};
+
+			await assert.rejects(
+				(sandbox as any)._removeVerificationSidecarContainer(fullId),
+				/removal failed/,
+			);
+		}
+	});
+
+	it("fails cleanup when Docker reports success but the exact sidecar remains", async () => {
+		const sandbox = makeSandbox();
+		(sandbox as any).execDocker = async (args: string[]) => args[0] === "rm"
+			? { stdout: fullId, stderr: "" }
+			: { stdout: JSON.stringify({ Id: fullId }), stderr: "" };
+
+		await assert.rejects(
+			(sandbox as any)._removeVerificationSidecarContainer(fullId),
+			/did not remove the recorded container/,
+		);
+	});
+
+	it("does not treat a missing label search as cleanup unless the recorded exact ID is absent", async () => {
+		const sandbox = makeSandbox();
+		(sandbox as any)._validateVerificationCheckout = () => checkoutPath;
+		(sandbox as any)._findVerificationSidecars = async () => [];
+		(sandbox as any)._isExactContainerAbsent = async () => false;
+
+		await assert.rejects(
+			sandbox.removeVerificationSidecar({ signalId, checkoutPath, containerId: fullId }),
+			/recorded sidecar still exists/,
+		);
+	});
+
+	it("removes only an exact, fully-authorized sidecar when its checkout has already gone", async () => {
+		const sandbox = makeSandbox() as any;
+		const missing = path.join(os.tmpdir(), `sidecar-missing-${Date.now()}-${Math.random()}`);
+		const source = `/bobbit-state/verification-sources/${signalId}`;
+		sandbox._validateVerificationCheckout = () => { throw new Error("verification checkout is unavailable"); };
+		sandbox._expectedVerificationCheckoutPath = () => missing;
+		sandbox._inspectFullContainer = async () => ({
+			Id: fullId,
+			Config: { Image: "bobbit-test-image:latest", Labels: {
+				"bobbit-verification-sidecar": "1",
+				"bobbit-project": "stale-agent-dir-mounts",
+				"bobbit-verification-signal": signalId,
+				"bobbit-verification-version": "3",
+				"bobbit-verification-outputs": "",
+				"bobbit-verification-dependencies": "",
+			} },
+			Mounts: [{ Type: "bind", Source: missing, Destination: source, RW: false, Mode: "ro" }],
+		});
+		const removed: string[] = [];
+		sandbox._removeVerificationSidecarContainer = async (id: string) => { removed.push(id); };
+
+		await sandbox.removeVerificationSidecar({ signalId, checkoutPath: missing, containerId: fullId, ignoredOutputDirs: [] });
+		assert.deepEqual(removed, [fullId]);
+
+		sandbox._inspectFullContainer = async () => ({
+			Id: fullId,
+			Config: { Image: "bobbit-test-image:latest", Labels: { "bobbit-verification-sidecar": "1", "bobbit-project": "stale-agent-dir-mounts" } },
+			Mounts: [{ Type: "bind", Source: missing, Destination: source, RW: false, Mode: "ro" }],
+		});
+		await assert.rejects(sandbox.removeVerificationSidecar({ signalId, checkoutPath: missing, containerId: fullId, ignoredOutputDirs: [] }), /foreign, stale, or mismatched/);
+	});
+
+	it("refuses output mount symlink traversal and distinguishes a real tracked node_modules entry", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-output-overlay-"));
+		try {
+			const checkout = path.join(root, "checkout");
+			const outside = path.join(root, "outside");
+			fs.mkdirSync(checkout);
+			fs.mkdirSync(outside);
+			fs.symlinkSync(outside, path.join(checkout, "dist"), "dir");
+			assert.throws(() => (makeSandbox() as any)._validatedOutputMountPath(checkout, "dist", true), /symlink/);
+
+			fs.unlinkSync(path.join(checkout, "dist"));
+			fs.mkdirSync(path.join(checkout, "node_modules"));
+			assert.equal((makeSandbox() as any)._isManagedDependencyLink(checkout), false, "a tracked real directory must remain a read-only source entry");
+			fs.rmSync(path.join(checkout, "node_modules"), { recursive: true });
+			const managerDependency = path.join(outside, "node_modules");
+			fs.mkdirSync(managerDependency);
+			fs.symlinkSync(managerDependency, path.join(checkout, "node_modules"), "dir");
+			assert.equal((makeSandbox() as any)._isManagedDependencyLink(checkout), true);
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("removes orphan candidates independently while retaining a current active signal", async () => {
+		const sandbox = makeSandbox();
+		const removed: string[] = [];
+		const activeId = "a".repeat(64);
+		const malformedId = "b".repeat(64);
+		const orphanId = "c".repeat(64);
+		(sandbox as any)._findVerificationSidecarCandidates = async () => [activeId, malformedId, orphanId];
+		(sandbox as any)._inspectFullContainer = async (id: string) => ({
+			Id: id,
+			Config: { Labels: {
+				"bobbit-project": "stale-agent-dir-mounts",
+				"bobbit-verification-sidecar": "1",
+				"bobbit-verification-version": id === malformedId ? "1" : "3",
+				"bobbit-verification-outputs": "",
+				"bobbit-verification-dependencies": "",
+				"bobbit-verification-signal": id === activeId ? signalId : id === malformedId ? "not-a-uuid" : "123e4567-e89b-42d3-a456-426614174001",
+			} },
+		});
+		(sandbox as any)._removeVerificationSidecarContainer = async (id: string) => {
+			if (id === malformedId) throw new Error("Docker daemon unavailable");
+			removed.push(id);
+		};
+		const result = await sandbox.recoverVerificationSidecars(new Set([signalId]));
+		assert.deepEqual(result, ["123e4567-e89b-42d3-a456-426614174001"]);
+		assert.deepEqual(removed, [orphanId], "a failed orphan removal cannot be reported as recovered or block later cleanup");
+	});
+});
+
 describe("ProjectSandbox state mount staleness", () => {
 	it("accepts the current required state mounts including read-only generated extension dirs", () => {
 		const stateDir = path.resolve("/project/.bobbit/state");
@@ -277,6 +775,39 @@ describe("ProjectSandbox state mount staleness", () => {
 		const result = getStateDirMountStaleness(requiredStateMounts(stateDir), { stateDir });
 
 		assert.equal(result.stale, false, result.reason);
+	});
+
+	it("rejects a pre-existing scope symlink without exposing an outside or foreign-project canary", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "sandbox-checkout-scope-"));
+		try {
+			const checkoutRoot = path.join(root, "verification-checkouts");
+			const alpha = verificationCheckoutProjectDir(checkoutRoot, "project-alpha")!;
+			const beta = verificationCheckoutProjectDir(checkoutRoot, "project-beta")!;
+			const outside = path.join(root, "outside");
+			fs.mkdirSync(checkoutRoot, { recursive: true });
+			fs.mkdirSync(outside);
+			fs.writeFileSync(path.join(outside, "outside-canary"), "do not mount");
+			fs.symlinkSync(outside, alpha, "dir");
+			assert.throws(() => resolveScopedVerificationCheckoutMount(checkoutRoot, "project-alpha"), /scope is not a safe directory/);
+			assert.equal(fs.readFileSync(path.join(outside, "outside-canary"), "utf8"), "do not mount");
+
+			fs.unlinkSync(alpha);
+			fs.mkdirSync(beta);
+			fs.writeFileSync(path.join(beta, "foreign-canary"), "project beta only");
+			fs.symlinkSync(beta, alpha, "dir");
+			assert.throws(() => resolveScopedVerificationCheckoutMount(checkoutRoot, "project-alpha"), /scope is not a safe directory/);
+			assert.equal(fs.readFileSync(path.join(beta, "foreign-canary"), "utf8"), "project beta only");
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("marks a long-lived project container stale if it exposes any verification checkout scope", () => {
+		const stateDir = path.resolve("/project/.bobbit/state");
+		const leaked = [...requiredStateMounts(stateDir), mount("/server/state/verification-checkouts/project-alpha", "/bobbit-state/verification-checkouts")];
+		const result = getStateDirMountStaleness(leaked, { stateDir });
+		assert.equal(result.stale, true);
+		assert.match(result.reason ?? "", /verification checkout source/);
 	});
 
 	it("marks pre-upgrade containers stale when the tool-result-error bridge mount is missing", () => {

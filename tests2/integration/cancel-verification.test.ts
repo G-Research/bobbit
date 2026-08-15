@@ -27,7 +27,7 @@ import { VerificationHarness, type ActiveVerification } from "../../src/server/a
 import { createManualClock, type ManualClock } from "../harness/clock.js";
 
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, connectWs, createGoal, createSession, defaultProjectId, deleteGoal, deleteSession, startTeam, teardownTeam, type WsConnection } from "./_e2e/e2e-setup.js";
+import { apiFetch, connectWs, createGoal, createSession, defaultProjectId, deleteGoal, deleteSession, gitCwd, startTeam, teardownTeam, type WsConnection } from "./_e2e/e2e-setup.js";
 import type { VerificationCommandRunner, VerificationCommandSpawnSpec } from "../../src/server/agent/verification-command-runner.js";
 import type { TrackedChild } from "../../src/server/agent/spawn-tree.js";
 
@@ -108,6 +108,7 @@ async function createSlowWorkflowGoal(title: string): Promise<SlowWorkflowGoal> 
 			title: `${title} ${Date.now()}`,
 			workflowId: setup.workflowId,
 			projectId: setup.projectId,
+			cwd: gitCwd(),
 			worktree: false,
 		});
 		return { ...setup, goalId: goal.id };
@@ -1030,7 +1031,7 @@ test.describe("Cancel Verification API", () => {
 				outcome: "cancelled",
 				cause: "manual",
 				signalId,
-				pending: true,
+				pending: false,
 			});
 
 			const finalized = await getGateState(setup.goalId);
