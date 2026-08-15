@@ -26,6 +26,21 @@ function directoryStream(entries: readonly fs.Dirent[]): fs.Dir {
 	} as fs.Dir;
 }
 
+/** Preserve Node's full stat overload contract while supplying normal stats to the walker. */
+function fakeLstatSync(statForPath: (file: fs.PathLike) => fs.Stats): typeof fs.lstatSync {
+	function lstatSync(file: fs.PathLike, options?: undefined): fs.Stats;
+	function lstatSync(file: fs.PathLike, options?: fs.StatSyncOptions & { bigint?: false; throwIfNoEntry: false }): fs.Stats | undefined;
+	function lstatSync(file: fs.PathLike, options: fs.StatSyncOptions & { bigint: true; throwIfNoEntry: false }): fs.BigIntStats | undefined;
+	function lstatSync(file: fs.PathLike, options?: fs.StatSyncOptions & { bigint?: false }): fs.Stats;
+	function lstatSync(file: fs.PathLike, options: fs.StatSyncOptions & { bigint: true }): fs.BigIntStats;
+	function lstatSync(file: fs.PathLike, options: fs.StatSyncOptions & { bigint: boolean; throwIfNoEntry?: false }): fs.Stats | fs.BigIntStats;
+	function lstatSync(file: fs.PathLike, options?: fs.StatSyncOptions): fs.Stats | fs.BigIntStats | undefined;
+	function lstatSync(file: fs.PathLike, options?: fs.StatSyncOptions): fs.Stats | fs.BigIntStats | undefined {
+		return options?.bigint ? fs.lstatSync(file, options) : statForPath(file);
+	}
+	return lstatSync;
+}
+
 describe("per-component LSP language detection", () => {
 	it("returns serializable component-local evidence and keeps detection disabled by default", () => {
 		const f = fixture();
@@ -75,10 +90,10 @@ describe("per-component LSP language detection", () => {
 		const roots = Array.from({ length: MAX_LANGUAGE_DETECTION_ENTRIES + 1 }, (_, index) => `/components/${index}.ts`);
 		let inspected = 0;
 		const report = walkLanguageDetectionPaths(roots, {
-			lstatSync: () => {
+			lstatSync: fakeLstatSync(() => {
 				inspected += 1;
 				return { isSymbolicLink: () => false, isDirectory: () => false, isFile: () => true } as fs.Stats;
-			},
+			}),
 			opendirSync: () => { throw new Error("files do not open directories"); },
 		}, () => undefined);
 
@@ -91,10 +106,10 @@ describe("per-component LSP language detection", () => {
 		const entries = [fileEntry("first.ts"), ...Array.from({ length: MAX_LANGUAGE_DETECTION_ENTRIES }, (_, index) => fileEntry(`ignored-${index}.txt`)), fileEntry("late.py"), fileEntry("package.json")];
 		let reads = 0;
 		const seams = {
-			lstatSync(file: fs.PathLike) {
+			lstatSync: fakeLstatSync((file) => {
 				const value = String(file);
 				return { isSymbolicLink: () => false, isDirectory: () => value === root, isFile: () => value !== root } as fs.Stats;
-			},
+			}),
 			opendirSync() {
 				const stream = directoryStream(entries);
 				const readSync = stream.readSync.bind(stream);
