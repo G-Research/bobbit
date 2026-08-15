@@ -18,6 +18,14 @@ function fileEntry(name: string): fs.Dirent {
 	return { name, isFile: () => true, isDirectory: () => false, isSymbolicLink: () => false } as fs.Dirent;
 }
 
+function directoryStream(entries: readonly fs.Dirent[]): fs.Dir {
+	let index = 0;
+	return {
+		readSync: () => entries[index++] ?? null,
+		closeSync: () => undefined,
+	} as fs.Dir;
+}
+
 describe("per-component LSP language detection", () => {
 	it("returns serializable component-local evidence and keeps detection disabled by default", () => {
 		const f = fixture();
@@ -25,11 +33,12 @@ describe("per-component LSP language detection", () => {
 			fs.writeFileSync(path.join(f.root, "package.json"), "{}\n");
 			fs.mkdirSync(path.join(f.root, "src"));
 			fs.writeFileSync(path.join(f.root, "src", "app.ts"), "export const app = true;\n");
+			fs.writeFileSync(path.join(f.root, "src", "view.tsx"), "export const View = () => <main />;\n");
 			fs.writeFileSync(path.join(f.root, "src", "worker.py"), "print('ready')\n");
 
 			const result = detect("frontend", f.root);
 			expect(result.map(detection => detection.component)).toEqual(Array(result.length).fill("frontend"));
-			expect(result.map(detection => detection.languageId)).toEqual(expect.arrayContaining(["python", "typescript"]));
+			expect(result.map(detection => detection.languageId)).toEqual(expect.arrayContaining(["python", "typescript", "tsx"]));
 			for (const detection of result) {
 				expect(detection.evidence.fileCount).toBeGreaterThan(0);
 				expect(detection.evidence.matchedGlobs.length).toBeGreaterThan(0);
@@ -37,7 +46,7 @@ describe("per-component LSP language detection", () => {
 				expect(detection.structuralSearch).toMatch(/^(available|unsupported)$/);
 				expect(JSON.parse(JSON.stringify(detection))).toEqual(detection);
 			}
-			for (const languageId of ["python", "typescript"]) {
+			for (const languageId of ["python", "typescript", "tsx"]) {
 				expect(result.find(detection => detection.languageId === languageId)).toMatchObject({ lsp: "disabled" });
 			}
 		} finally { f.dispose(); }
@@ -63,17 +72,29 @@ describe("per-component LSP language detection", () => {
 
 	it("bounds each component scan before late entries can create evidence", () => {
 		const root = "/component";
-		const entries = [fileEntry("first.ts"), ...Array.from({ length: MAX_LANGUAGE_DETECTION_ENTRIES }, (_, index) => fileEntry(`ignored-${index}.txt`)), fileEntry("late.py")];
+		const entries = [fileEntry("first.ts"), ...Array.from({ length: MAX_LANGUAGE_DETECTION_ENTRIES }, (_, index) => fileEntry(`ignored-${index}.txt`)), fileEntry("late.py"), fileEntry("package.json")];
+		let reads = 0;
 		const seams = {
 			lstatSync(file: fs.PathLike) {
 				const value = String(file);
 				return { isSymbolicLink: () => false, isDirectory: () => value === root, isFile: () => value !== root } as fs.Stats;
 			},
-			readdirSync() { return entries; },
+			opendirSync() {
+				const stream = directoryStream(entries);
+				const readSync = stream.readSync.bind(stream);
+				stream.readSync = () => {
+					reads += 1;
+					return readSync();
+				};
+				return stream;
+			},
 		};
 
-		const ids = detect("bounded", root, seams).map(detection => detection.languageId);
+		const result = detect("bounded", root, seams);
+		const ids = result.map(detection => detection.languageId);
 		expect(ids).toContain("typescript");
 		expect(ids).not.toContain("python");
+		expect(result.find(detection => detection.languageId === "typescript")?.evidence.rootMarkers).toEqual([]);
+		expect(reads).toBeLessThan(MAX_LANGUAGE_DETECTION_ENTRIES);
 	});
 });

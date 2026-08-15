@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CODE_INTELLIGENCE_LANGUAGE_MATRIX } from "../../market-packs/code-intelligence/lib/language-matrix.ts";
+import { deriveLanguageCapabilityStatus, type LspServiceInstanceKey } from "../../market-packs/code-intelligence/src/capability-status.ts";
+import type { LanguageDetection } from "../../market-packs/code-intelligence/src/language-detection.ts";
 
 type LanguageRecord = {
 	id: string;
@@ -66,7 +68,7 @@ describe("Language LSP capability matrix", () => {
 
 	it("declares the initial maintained LSP languages without equating LSP with structural search", () => {
 		const byId = new Map(records().map(language => [language.id, language]));
-		for (const id of ["typescript", "javascript", "python", "go", "rust", "java", "c", "cpp", "csharp"]) {
+		for (const id of ["typescript", "tsx", "javascript", "python", "go", "rust", "java", "c", "cpp", "csharp"]) {
 			expect(byId.get(id)?.lsp, `${id} needs an explicit LSP declaration`).toBeDefined();
 		}
 
@@ -74,6 +76,48 @@ describe("Language LSP capability matrix", () => {
 		expect(structuralOnly.length).toBeGreaterThan(0);
 		expect(structuralOnly.every(language => language.lsp === undefined)).toBe(true);
 		expect(records().every(language => language.lsp || language.structuralSearch.state === "supported" || language.structuralSearch.state === "unsupported")).toBe(true);
+	});
+
+	it("keeps TSX structural grammar independent while declaring the TypeScript LSP", () => {
+		const byId = new Map(records().map(language => [language.id, language]));
+		const typescript = byId.get("typescript");
+		const tsx = byId.get("tsx");
+		expect(tsx?.structuralSearch.astGrepGrammar).toBe("Tsx");
+		expect(tsx?.structuralSearch.astGrepGrammar).not.toBe(typescript?.structuralSearch.astGrepGrammar);
+		expect(tsx?.lsp?.server).toEqual(typescript?.lsp?.server);
+		expect(tsx?.lsp?.actions).toEqual(typescript?.lsp?.actions);
+	});
+
+	it("never reports ready from toolchain IDs without an exact compatible platform service snapshot", () => {
+		const detection = {
+			component: "frontend",
+			languageId: "typescript",
+			structuralSearch: "available",
+			evidence: { fileCount: 1, matchedGlobs: ["**/*.ts"], rootMarkers: [] },
+			lsp: "disabled",
+			missing: [] as const,
+		} satisfies LanguageDetection;
+		const serviceKey: LspServiceInstanceKey = {
+			projectId: "project-1", component: "frontend", worktreePath: "/linked-worktrees/frontend", languageId: "typescript",
+		};
+		const options = {
+			enabledLanguageIds: ["typescript"], runtime: "host" as const,
+			availableToolchainIds: ["node", "typescript-language-server", "typescript"], serviceKey,
+		};
+
+		expect(deriveLanguageCapabilityStatus(detection, options).lsp.state).toBe("unavailable");
+		expect(deriveLanguageCapabilityStatus(detection, {
+			...options,
+			serviceSnapshot: { key: { ...serviceKey, worktreePath: "/other-worktree" }, state: "ready", serverId: "typescript-language-server", serverVersion: "4.3.0", versionCompatible: true },
+		}).lsp.state).toBe("unavailable");
+		expect(deriveLanguageCapabilityStatus(detection, {
+			...options,
+			serviceSnapshot: { key: serviceKey, state: "ready", serverId: "typescript-language-server", serverVersion: "4.3.0", versionCompatible: false },
+		}).lsp.state).toBe("unavailable");
+		expect(deriveLanguageCapabilityStatus(detection, {
+			...options,
+			serviceSnapshot: { key: serviceKey, state: "ready", serverId: "typescript-language-server", serverVersion: "4.3.0", versionCompatible: true },
+		}).lsp.state).toBe("ready");
 	});
 
 	it("uses declarative servers, roots, actions, and version-constrained named toolchains", () => {

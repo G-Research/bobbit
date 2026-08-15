@@ -49,16 +49,19 @@ export function detectComponentLanguages(
 
 	const counts = new Map<AstGrepLanguageAlias, number>();
 	const globs = new Map<AstGrepLanguageAlias, Set<string>>();
-	const rootMarkers = readRootMarkers(input.root, seams);
+	const rootMarkers = new Set<string>();
+	const rootPath = path.resolve(input.root);
 	walkLanguageDetectionPaths([input.root], seams, (filePath) => {
+		if (path.dirname(path.resolve(filePath)) === rootPath) rootMarkers.add(path.basename(filePath));
 		collectFileEvidence(filePath, counts, globs);
 	});
 
+	const rootMarkerNames = [...rootMarkers].sort();
 	const detected: LanguageDetection[] = [];
 	for (const language of CODE_INTELLIGENCE_LANGUAGE_MATRIX as readonly CodeIntelligenceLanguage[]) {
 		const fileCount = counts.get(language.id as AstGrepLanguageAlias) ?? 0;
 		if (fileCount < language.evidence.minimumFiles) continue;
-		const matchedMarkers = language.evidence.rootMarkers.filter((marker) => rootMarkers.some((name) => markerMatches(marker, name)));
+		const matchedMarkers = language.evidence.rootMarkers.filter((marker) => rootMarkerNames.some((name) => markerMatches(marker, name)));
 		detected.push({
 			component: input.component,
 			languageId: language.id as AstGrepLanguageAlias,
@@ -91,18 +94,6 @@ function collectFileEvidence(
 		const knownGlobs = globs.get(language.id) ?? new Set<string>();
 		for (const glob of matched) knownGlobs.add(glob);
 		globs.set(language.id, knownGlobs);
-	}
-}
-
-function readRootMarkers(root: string, seams: LanguageDetectionFs): readonly string[] {
-	try {
-		const stat = seams.lstatSync(root);
-		if (stat.isSymbolicLink() || !stat.isDirectory()) return [];
-		return (seams.readdirSync(root, { withFileTypes: true }) as fs.Dirent[])
-			.filter((entry) => !entry.isSymbolicLink())
-			.map((entry) => entry.name);
-	} catch {
-		return [];
 	}
 }
 

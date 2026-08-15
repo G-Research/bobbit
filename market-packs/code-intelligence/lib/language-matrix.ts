@@ -84,6 +84,12 @@ const nodeHost: ToolchainRequirement = {
 	installHint: "Install Node.js 20 or later.",
 };
 const nodeSandbox: SandboxLayerRequirement = { ...nodeHost, layerId: "nodejs-20" };
+const typescriptLsp: LspCapability = {
+	server: { id: "typescript-language-server", command: "typescript-language-server", args: ["--stdio"], version: { range: ">=4.3.0", reason: "TypeScript support requires typescript-language-server" } },
+	rootMarkers: ["package.json", "tsconfig.json"], actions: allLspActions,
+	host: [nodeHost, { id: "typescript-language-server", label: "TypeScript Language Server", executable: "typescript-language-server", version: { range: ">=4.3.0", reason: "TypeScript support requires TypeScript Language Server" }, installHint: "Install typescript-language-server and TypeScript." }, { id: "typescript", label: "TypeScript", executable: "tsc", version: { range: ">=5.0.0", reason: "TypeScript Language Server needs TypeScript" }, installHint: "Install TypeScript 5 or later." }],
+	sandbox: [nodeSandbox, { id: "typescript-language-server", label: "TypeScript Language Server", executable: "typescript-language-server", version: { range: ">=4.3.0", reason: "TypeScript support requires TypeScript Language Server" }, installHint: "Add typescript-language-server to the project sandbox image.", layerId: "typescript-language-server" }, { id: "typescript", label: "TypeScript", executable: "tsc", version: { range: ">=5.0.0", reason: "TypeScript Language Server needs TypeScript" }, installHint: "Add TypeScript 5 or later to the project sandbox image.", layerId: "typescript-5" }],
+};
 
 function structural(grammar: string): { structuralSearch: StructuralSearchCapability; ast: AstCapability } {
 	return {
@@ -210,14 +216,13 @@ export const CODE_INTELLIGENCE_LANGUAGE_MATRIX = [
 	{ id: "swift", label: "Swift", evidence: { globs: ["**/*.swift"], rootMarkers: ["Package.swift"], minimumFiles: 1 }, ...structural("Swift") },
 	{
 		id: "typescript", label: "TypeScript", evidence: { globs: ["**/*.ts", "**/*.cts", "**/*.mts"], rootMarkers: ["package.json", "tsconfig.json"], minimumFiles: 1 }, ...structural("TypeScript"),
-		lsp: {
-			server: { id: "typescript-language-server", command: "typescript-language-server", args: ["--stdio"], version: { range: ">=4.3.0", reason: "TypeScript support requires typescript-language-server" } },
-			rootMarkers: ["package.json", "tsconfig.json"], actions: allLspActions,
-			host: [nodeHost, { id: "typescript-language-server", label: "TypeScript Language Server", executable: "typescript-language-server", version: { range: ">=4.3.0", reason: "TypeScript support requires TypeScript Language Server" }, installHint: "Install typescript-language-server and TypeScript." }, { id: "typescript", label: "TypeScript", executable: "tsc", version: { range: ">=5.0.0", reason: "TypeScript Language Server needs TypeScript" }, installHint: "Install TypeScript 5 or later." }],
-			sandbox: [nodeSandbox, { id: "typescript-language-server", label: "TypeScript Language Server", executable: "typescript-language-server", version: { range: ">=4.3.0", reason: "TypeScript support requires TypeScript Language Server" }, installHint: "Add typescript-language-server to the project sandbox image.", layerId: "typescript-language-server" }, { id: "typescript", label: "TypeScript", executable: "tsc", version: { range: ">=5.0.0", reason: "TypeScript Language Server needs TypeScript" }, installHint: "Add TypeScript 5 or later to the project sandbox image.", layerId: "typescript-5" }],
-		},
+		lsp: typescriptLsp,
 	},
-	{ id: "tsx", label: "TSX", evidence: { globs: ["**/*.tsx"], rootMarkers: ["package.json", "tsconfig.json"], minimumFiles: 1 }, ...structural("Tsx") },
+	{
+		id: "tsx", label: "TSX", evidence: { globs: ["**/*.tsx"], rootMarkers: ["package.json", "tsconfig.json"], minimumFiles: 1 }, ...structural("Tsx"),
+		// TSX uses the TypeScript service but keeps its ast-grep grammar independent.
+		lsp: typescriptLsp,
+	},
 	{ id: "yaml", label: "YAML", evidence: { globs: ["**/*.yaml", "**/*.yml"], rootMarkers: noMarkers, minimumFiles: 1 }, ...structural("Yaml") },
 ] as const satisfies readonly CodeIntelligenceLanguage[];
 
@@ -253,65 +258,90 @@ function supportsStructuralSearch(language: CodeIntelligenceLanguage): language 
 
 export interface LanguageDetectorFs {
 	lstatSync: typeof fs.lstatSync;
-	readdirSync: typeof fs.readdirSync;
+	opendirSync: typeof fs.opendirSync;
 }
 
 interface DirectoryFrame {
 	directory: string;
-	entries: readonly fs.Dirent[];
-	index: number;
+	stream: fs.Dir;
+	/** A bounded, sorted batch. Entire directories are never materialized. */
+	entries: fs.Dirent[];
+	entryIndex: number;
 }
 
 /**
- * Visit regular files in deterministic depth-first directory order. Every path
- * that reaches `lstatSync` consumes one unit of the shared scan budget; queued
- * directory entries do not. Symlinks and ignored directories are excluded
- * before they can expand the walk.
+ * Visit regular files with a single budget shared by directory enumeration and
+ * lstat calls. Directory streams are read in bounded batches, then sorted, so
+ * discovery remains deterministic within the portion that can safely be read.
  */
 export function walkLanguageDetectionPaths(
 	roots: readonly string[],
 	seams: LanguageDetectorFs,
 	onFile: (filePath: string) => void,
 ): void {
-	const orderedRoots = [...roots].sort(compareNames);
+	const orderedRoots = roots.slice(0, MAX_LANGUAGE_DETECTION_ENTRIES).sort(compareNames);
 	const directories: DirectoryFrame[] = [];
 	let rootIndex = 0;
-	let processed = 0;
+	let remaining = MAX_LANGUAGE_DETECTION_ENTRIES;
 
-	while (processed < MAX_LANGUAGE_DETECTION_ENTRIES) {
-		const current = nextPath();
-		if (!current) return;
-		processed += 1;
+	try {
+		while (remaining > 0) {
+			const current = nextPath();
+			if (!current) return;
+			remaining -= 1;
 
-		let stat: fs.Stats;
-		try { stat = seams.lstatSync(current); } catch { continue; }
-		if (stat.isSymbolicLink()) continue;
-		if (stat.isFile()) {
-			onFile(current);
-			continue;
+			let stat: fs.Stats;
+			try { stat = seams.lstatSync(current); } catch { continue; }
+			if (stat.isSymbolicLink()) continue;
+			if (stat.isFile()) {
+				onFile(current);
+				continue;
+			}
+			if (!stat.isDirectory()) continue;
+
+			try {
+				directories.push({ directory: current, stream: seams.opendirSync(current, { bufferSize: 1 }), entries: [], entryIndex: 0 });
+			} catch { continue; }
 		}
-		if (!stat.isDirectory()) continue;
-
-		try {
-			const entries = seams.readdirSync(current, { withFileTypes: true }) as fs.Dirent[];
-			directories.push({ directory: current, entries: [...entries].sort((left, right) => compareNames(left.name, right.name)), index: 0 });
-		} catch { continue; }
+	} finally {
+		for (const frame of directories) {
+			try { frame.stream.closeSync(); } catch { /* already closed or unreadable */ }
+		}
 	}
 
 	function nextPath(): string | undefined {
 		while (directories.length > 0) {
 			const frame = directories[directories.length - 1];
-			if (frame.index >= frame.entries.length) {
+			if (frame.entryIndex >= frame.entries.length && !readBatch(frame)) {
 				directories.pop();
+				try { frame.stream.closeSync(); } catch { /* already closed or unreadable */ }
 				continue;
 			}
-			const entry = frame.entries[frame.index++];
-			if (entry.isSymbolicLink()) continue;
+			const entry = frame.entries[frame.entryIndex++];
+			if (!entry || entry.isSymbolicLink()) continue;
 			if (entry.isDirectory() && ignoredDirectories.has(entry.name)) continue;
 			return path.join(frame.directory, entry.name);
 		}
-		if (rootIndex >= orderedRoots.length) return undefined;
-		return orderedRoots[rootIndex++];
+		if (rootIndex < orderedRoots.length) return orderedRoots[rootIndex++];
+	}
+
+	function readBatch(frame: DirectoryFrame): boolean {
+		// Reserve one scan unit for lstat per yielded candidate. This prevents the
+		// stream itself from consuming the shared budget and starving inspection.
+		const batchSize = Math.floor(remaining / 2);
+		if (batchSize === 0) return false;
+		frame.entries = [];
+		frame.entryIndex = 0;
+		for (let index = 0; index < batchSize; index += 1) {
+			let entry: fs.Dirent | null;
+			try { entry = frame.stream.readSync(); } catch { break; }
+			if (!entry) break;
+			remaining -= 1;
+			frame.entries.push(entry);
+		}
+		frame.entries.sort((left, right) => compareNames(left.name, right.name));
+		frame.entryIndex = 0;
+		return frame.entries.length > 0;
 	}
 }
 
