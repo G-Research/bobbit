@@ -210,6 +210,34 @@ function countManualTurnEvent(counts: Record<ManualTurnEventType, number>, event
 	counts[type] = Math.min(counts[type] + 1, 1_000_000);
 }
 
+/**
+ * Correlate one queued prompt with its root lifecycle without retaining event
+ * payloads. Claude SDK child events are partitioned from root events, but keep
+ * the parent guard explicit so an admitted helper cannot settle its parent.
+ */
+function observeManualRootTurnLifecycle(source: { onEvent(listener: (event: unknown) => void): () => void }): {
+	started(): boolean;
+	completed(): boolean;
+	diagnostics(): { rootAgentStarted: boolean; rootAgentTerminal: boolean };
+	unsubscribe(): void;
+} {
+	let rootAgentStarted = false;
+	let rootAgentTerminal = false;
+	const unsubscribe = source.onEvent(event => {
+		if (!event || typeof event !== "object") return;
+		const lifecycle = event as { type?: unknown; parentToolUseId?: unknown; willRetry?: unknown };
+		if (lifecycle.parentToolUseId !== undefined) return;
+		if (lifecycle.type === "agent_start") rootAgentStarted = true;
+		if (rootAgentStarted && lifecycle.type === "agent_end" && lifecycle.willRetry !== true) rootAgentTerminal = true;
+	});
+	return {
+		started: () => rootAgentStarted,
+		completed: () => rootAgentStarted && rootAgentTerminal,
+		diagnostics: () => ({ rootAgentStarted, rootAgentTerminal }),
+		unsubscribe,
+	};
+}
+
 type ManualCanonicalToolCategory = "read" | "grep" | "other";
 type ManualCanonicalToolExecutionCounts = Record<ManualCanonicalToolCategory, { starts: number; ends: number }>;
 
@@ -260,12 +288,6 @@ function diagnosticValue(read: () => unknown): unknown {
 	try { return read(); } catch { return undefined; }
 }
 
-function normalizeManualSessionStatus(value: unknown): "starting" | "preparing" | "idle" | "streaming" | "aborting" | "terminated" | "other" {
-	return ["starting", "preparing", "idle", "streaming", "aborting", "terminated"].includes(value as string)
-		? value as "starting" | "preparing" | "idle" | "streaming" | "aborting" | "terminated"
-		: "other";
-}
-
 function normalizeManualBridgeState(value: unknown): "new" | "starting" | "ready" | "running" | "interrupting" | "failed" | "stopped" | "other" {
 	return ["new", "starting", "ready", "running", "interrupting", "failed", "stopped"].includes(value as string)
 		? value as "new" | "starting" | "ready" | "running" | "interrupting" | "failed" | "stopped"
@@ -279,6 +301,27 @@ test("Claude Agent SDK manual timeout event diagnostics retain only fixed event 
 	expect(Object.keys(counts)).toEqual(manualTurnEventTypes);
 	expect(counts.agent_start).toBe(1);
 	expect(counts.other).toBe(1);
+});
+
+test("Claude Agent SDK manual lifecycle waits for a root start followed by its terminal", () => {
+	let listener: ((event: unknown) => void) | undefined;
+	const lifecycle = observeManualRootTurnLifecycle({
+		onEvent: next => {
+			listener = next;
+			return () => { listener = undefined; };
+		},
+	});
+	listener?.({ type: "agent_end" });
+	listener?.({ type: "agent_start", parentToolUseId: "child" });
+	listener?.({ type: "agent_end", parentToolUseId: "child" });
+	expect(lifecycle.completed()).toBe(false);
+	listener?.({ type: "agent_start" });
+	listener?.({ type: "agent_end", willRetry: true });
+	expect(lifecycle.diagnostics()).toEqual({ rootAgentStarted: true, rootAgentTerminal: false });
+	listener?.({ type: "agent_end" });
+	expect(lifecycle.completed()).toBe(true);
+	lifecycle.unsubscribe();
+	expect(listener).toBeUndefined();
 });
 
 test("Claude Agent SDK manual durable tool oracle retains only fixed booleans and event counts", () => {
@@ -594,30 +637,23 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			expect(session.rpcClient.running, "SDK query must remain usable after readiness").toBe(true);
 			expect(gateway.sessionManager.getPersistedSession(created.id)?.claudeAgentSdkSessionId).toBeUndefined();
 			const runTurn = async (text: string, label: string, options: Record<string, unknown> = {}) => {
-				const before = session.agentObservedTurnVersion ?? 0;
 				const eventTypeCounts = createManualTurnEventCounts();
 				const bridge = session.rpcClient as unknown as Record<string, unknown>;
 				const terminalDiagnostic = () => claudeAgentSdkUnavailableRouteDiagnostic(diagnosticValue(() => bridge.terminalError));
-				const unsubscribe = session.rpcClient.onEvent(event => countManualTurnEvent(eventTypeCounts, event));
+				// Subscribe before enqueue: a synchronous accepted turn can otherwise emit
+				// both lifecycle boundaries before a post-enqueue observer is installed.
+				const lifecycle = observeManualRootTurnLifecycle(session.rpcClient);
+				const unsubscribeCounts = session.rpcClient.onEvent(event => countManualTurnEvent(eventTypeCounts, event));
 				try {
 					await gateway!.sessionManager.enqueuePrompt(created.id, text, { source: "user", ...options });
-					await waitFor(() => (session.agentObservedTurnVersion ?? 0) > before ? true : undefined, label, 120_000);
-					await waitFor(() => {
-						const sessionStatus = normalizeManualSessionStatus(diagnosticValue(() => gateway!.sessionManager.getSession(created.id)?.status));
-						if (sessionStatus === "terminated") throw new Error(terminalDiagnostic());
-						return sessionStatus === "idle" ? true : undefined;
-					}, `${label} to settle`, 120_000);
+					await waitFor(() => lifecycle.completed() ? true : undefined, `${label} root terminal`, 120_000);
 				} catch (error) {
-					if (error instanceof Error && (
-						error.message === `Timed out waiting for ${label}`
-						|| error.message === `Timed out waiting for ${label} to settle`
-					)) {
+					if (error instanceof Error && error.message === `Timed out waiting for ${label} root terminal`) {
 						const input = diagnosticValue(() => bridge.input) as Record<string, unknown> | undefined;
 						throw new Error(JSON.stringify({
 							label,
 							eventTypeCounts,
-							agentObservedTurnVersionAdvanced: (session.agentObservedTurnVersion ?? 0) > before,
-							sessionManagerStatus: normalizeManualSessionStatus(diagnosticValue(() => gateway!.sessionManager.getSession(created.id)?.status)),
+							rootLifecycle: lifecycle.diagnostics(),
 							bridgeRunning: diagnosticBoolean(() => session.rpcClient.running),
 							bridgeLifecycleState: normalizeManualBridgeState(diagnosticValue(() => bridge.state)),
 							sdkTerminalDiagnostic: terminalDiagnostic(),
@@ -632,25 +668,15 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 					}
 					throw error;
 				} finally {
-					unsubscribe();
+					unsubscribeCounts();
+					lifecycle.unsubscribe();
 				}
 			};
 
 			// Use the same SessionManager queue/steer path as the gateway. This keeps
 			// the smoke on the production IRpcBridge boundary while avoiding a second
 			// browser protocol and never recording model output in test diagnostics.
-			const firstTurnVersion = session.agentObservedTurnVersion ?? 0;
-			await gateway.sessionManager.enqueuePrompt(created.id, "Reply with exactly: SDK_SMOKE_READY", { source: "user" });
-			await waitFor(
-				() => (session.agentObservedTurnVersion ?? 0) > firstTurnVersion ? true : undefined,
-				"translated SDK prompt output",
-				120_000,
-			);
-			await waitFor(
-				() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined,
-				"first SDK prompt to settle",
-				120_000,
-			);
+			await runTurn("Reply with exactly: SDK_SMOKE_READY", "first SDK prompt");
 			const persistedSdkSessionId = await waitFor(
 				() => {
 					const id = gateway!.sessionManager.getPersistedSession(created.id)?.claudeAgentSdkSessionId;
@@ -690,8 +716,8 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			assertManualDurableCanonicalToolExecution(visibleCanonicalReadTranscript, "read");
 
 			// Count only fixed tool categories for the separate permission-card turn.
-			const grepTurnVersion = session.agentObservedTurnVersion ?? 0;
 			const canonicalGrepExecution = createManualCanonicalToolExecutionCounts();
+			const canonicalGrepLifecycle = observeManualRootTurnLifecycle(session.rpcClient);
 			const unsubscribeCanonicalGrepExecution = session.rpcClient.onEvent(event => countManualCanonicalToolExecution(canonicalGrepExecution, event));
 			try {
 				await gateway.sessionManager.enqueuePrompt(created.id, "Use exactly one Bobbit grep with pattern Bobbit, path README.md, and literal true. Do not use any other tools.", { source: "user" });
@@ -705,10 +731,10 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 				);
 				expect(permission.toolName === "grep" && permission.group === "File System").toBe(true);
 				await gateway.sessionManager.grantToolPermission(created.id, "grep", "tool", "File System", "one-time", permission.id);
-				await waitFor(() => (session.agentObservedTurnVersion ?? 0) > grepTurnVersion ? true : undefined, "canonical Bobbit grep turn", 120_000);
-				await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined, "canonical Bobbit grep turn to settle", 120_000);
+				await waitFor(() => canonicalGrepLifecycle.completed() ? true : undefined, "canonical Bobbit grep root terminal", 120_000);
 			} finally {
 				unsubscribeCanonicalGrepExecution();
+				canonicalGrepLifecycle.unsubscribe();
 			}
 			// Fetch durable visible history before evaluating fixed boundary diagnostics.
 			transcript = await gateway.sessionManager.getMessagesSnapshotBase(session);
@@ -800,23 +826,21 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			expect(beforeRestart.success && afterRestart.success && sameTranscriptProjection(beforeRestart.data, afterRestart.data)).toBe(true);
 			expect(hasDurableSubscriptionUsage(gateway.sessionManager.getSessionCost(created.id))).toBe(true);
 
-			await gateway.sessionManager.enqueuePrompt(
-				created.id,
-				"Count from 1 to 1000 slowly, one number per line, until you receive a new instruction.",
-				{ source: "user" },
-			);
-			await waitFor(
-				() => gateway!.sessionManager.getSession(created.id)?.status === "streaming" ? true : undefined,
-				"SDK streaming turn",
-			);
-			await gateway.sessionManager.deliverLiveSteer(created.id, "Stop counting now and briefly acknowledge this steer.");
-			await gateway.sessionManager.abortSessionTurn(created.id);
-			expect(session.rpcClient.running, "soft interrupt must not close the SDK query").toBe(true);
-			await waitFor(
-				() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined,
-				"soft interrupt to settle",
-				120_000,
-			);
+			const interruptedTurnLifecycle = observeManualRootTurnLifecycle(session.rpcClient);
+			try {
+				await gateway.sessionManager.enqueuePrompt(
+					created.id,
+					"Count from 1 to 1000 slowly, one number per line, until you receive a new instruction.",
+					{ source: "user" },
+				);
+				await waitFor(() => interruptedTurnLifecycle.started() ? true : undefined, "SDK streaming turn");
+				await gateway.sessionManager.deliverLiveSteer(created.id, "Stop counting now and briefly acknowledge this steer.");
+				await gateway.sessionManager.abortSessionTurn(created.id);
+				expect(session.rpcClient.running, "soft interrupt must not close the SDK query").toBe(true);
+				await waitFor(() => interruptedTurnLifecycle.completed() ? true : undefined, "soft interrupt root terminal", 120_000);
+			} finally {
+				interruptedTurnLifecycle.unsubscribe();
+			}
 
 			const terminated = await gateway.sessionManager.terminateSession(created.id);
 			expect(terminated).toBe(true);
@@ -996,10 +1020,15 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			const persistedSdkSessionId = gateway.sessionManager.getPersistedSession(created.id)?.claudeAgentSdkSessionId;
 			expect(typeof persistedSdkSessionId).toBe("string");
 			const runSandboxTurn = async (text: string, label: string, options: Record<string, unknown> = {}) => {
-				const before = session.agentObservedTurnVersion ?? 0;
-				await gateway!.sessionManager.enqueuePrompt(created.id, text, { source: "user", ...options });
-				await waitFor(() => (session.agentObservedTurnVersion ?? 0) > before ? true : undefined, label, 120_000);
-				await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined, `${label} to settle`, 120_000);
+				// Subscribe before enqueue to correlate this accepted prompt rather than
+				// treating the prior idle status as proof of completion.
+				const lifecycle = observeManualRootTurnLifecycle(session.rpcClient);
+				try {
+					await gateway!.sessionManager.enqueuePrompt(created.id, text, { source: "user", ...options });
+					await waitFor(() => lifecycle.completed() ? true : undefined, `${label} root terminal`, 120_000);
+				} finally {
+					lifecycle.unsubscribe();
+				}
 			};
 			const skillDir = join(projectRoot, ".claude", "skills", "sdk-sandbox-dogfood");
 			mkdirSync(skillDir, { recursive: true });
@@ -1013,10 +1042,7 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			expect(resolveComposerSlashDispatch("/compact", { runtime: "claude-agent-sdk", registry: sandboxRegistry })?.kind).toBe("unsupported-compact");
 			await runSandboxTurn(sandboxSlash.originalText, "sandbox Bobbit-owned slash prompt", { modelText: sandboxSlash.modelText, skillExpansions: sandboxSlash.expansions });
 
-			const firstVersion = session.agentObservedTurnVersion ?? 0;
-			await gateway.sessionManager.enqueuePrompt(created.id, "Reply with exactly: SDK_SANDBOX_READY", { source: "user" });
-			await waitFor(() => (session.agentObservedTurnVersion ?? 0) > firstVersion ? true : undefined, "sandbox SDK prompt output");
-			await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined, "sandbox SDK prompt to settle", 120_000);
+			await runSandboxTurn("Reply with exactly: SDK_SANDBOX_READY", "first sandbox SDK prompt");
 
 			// An allowed read is one complete turn before the permission-gated grep.
 			await runSandboxTurn("Use only Bobbit read on README.md. Do not use any other tools.", "sandbox canonical Bobbit read turn");
@@ -1027,8 +1053,8 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			assertManualDurableCanonicalToolExecution(visibleSandboxCanonicalReadTranscript, "read");
 
 			// Count only fixed tool categories for the separate permission-card turn.
-			const sandboxGrepTurnVersion = session.agentObservedTurnVersion ?? 0;
 			const sandboxCanonicalGrepExecution = createManualCanonicalToolExecutionCounts();
+			const sandboxCanonicalGrepLifecycle = observeManualRootTurnLifecycle(session.rpcClient);
 			const unsubscribeSandboxCanonicalGrepExecution = session.rpcClient.onEvent(event => countManualCanonicalToolExecution(sandboxCanonicalGrepExecution, event));
 			try {
 				await gateway.sessionManager.enqueuePrompt(created.id, "Use exactly one Bobbit grep with pattern Bobbit, path README.md, and literal true. Do not use any other tools.", { source: "user" });
@@ -1038,10 +1064,10 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 				}, "sandbox canonical grep permission card", 90_000);
 				expect(permission.toolName === "grep" && permission.group === "File System").toBe(true);
 				await gateway.sessionManager.grantToolPermission(created.id, "grep", "tool", "File System", "one-time", permission.id);
-				await waitFor(() => (session.agentObservedTurnVersion ?? 0) > sandboxGrepTurnVersion ? true : undefined, "sandbox canonical Bobbit grep turn", 120_000);
-				await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined, "sandbox canonical Bobbit grep turn to settle", 120_000);
+				await waitFor(() => sandboxCanonicalGrepLifecycle.completed() ? true : undefined, "sandbox canonical Bobbit grep root terminal", 120_000);
 			} finally {
 				unsubscribeSandboxCanonicalGrepExecution();
+				sandboxCanonicalGrepLifecycle.unsubscribe();
 			}
 			// Fetch durable visible history before evaluating fixed boundary diagnostics.
 			sandboxTranscript = await gateway.sessionManager.getMessagesSnapshotBase(session);
@@ -1097,11 +1123,16 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			const beforeReplacement = await gateway.sessionManager.getMessagesSnapshotBase(session);
 			expect(beforeReplacement.success && hasDurableSubscriptionUsage(gateway.sessionManager.getSessionCost(created.id))).toBe(true);
 			// Automatic compaction remains SDK-managed and is only observed if it occurs.
-			await gateway.sessionManager.enqueuePrompt(created.id, "Count slowly until told to stop.", { source: "user" });
-			await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "streaming" ? true : undefined, "sandbox SDK streaming turn");
-			await gateway.sessionManager.deliverLiveSteer(created.id, "Stop now and acknowledge this steer.");
-			await gateway.sessionManager.abortSessionTurn(created.id);
-			await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined, "sandbox SDK interrupt to settle");
+			const interruptedSandboxTurnLifecycle = observeManualRootTurnLifecycle(session.rpcClient);
+			try {
+				await gateway.sessionManager.enqueuePrompt(created.id, "Count slowly until told to stop.", { source: "user" });
+				await waitFor(() => interruptedSandboxTurnLifecycle.started() ? true : undefined, "sandbox SDK streaming turn");
+				await gateway.sessionManager.deliverLiveSteer(created.id, "Stop now and acknowledge this steer.");
+				await gateway.sessionManager.abortSessionTurn(created.id);
+				await waitFor(() => interruptedSandboxTurnLifecycle.completed() ? true : undefined, "sandbox SDK interrupt root terminal");
+			} finally {
+				interruptedSandboxTurnLifecycle.unsubscribe();
+			}
 			await gateway.sessionManager.forceAbort(created.id);
 			session = await waitFor(() => gateway!.sessionManager.getSession(created.id)?.rpcClient?.running ? gateway!.sessionManager.getSession(created.id) : undefined, "sandbox SDK replacement");
 			expect(session.runtime).toBe("claude-agent-sdk");
