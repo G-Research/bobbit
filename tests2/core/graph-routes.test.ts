@@ -25,6 +25,35 @@ function installRuntime(query: (request: Record<string, unknown>) => unknown | P
 	} as never));
 }
 
+function declaredStatus(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+	return {
+		state: "current", aggregate: { state: "current", label: "Current" },
+		components: [{
+			component: { name: "api", repo: "." }, state: "fresh", revision: "head-a",
+			revisions: { baseRef: "main", baseRev: "base-a", headRev: "head-a" },
+			roots: [{ tier: "code", path: "src" }], counts: { nodes: 2, edges: 1, bytes: 100 }, timing: { buildMs: 12 }, languages: [],
+		}],
+		languages: [{
+			languageId: "typescript", label: "TypeScript", structuralSearch: "available",
+			lsp: { state: "disabled", actions: ["definition"], requirements: [], missing: [], reason: "Explicit enablement is required." },
+			evidence: { fileCount: 2, matchedGlobs: ["**/*.ts"], rootMarkers: ["tsconfig.json"] },
+		}],
+		runtime: "host", noCrossRepoEdges: true, warning: "v1 has no cross-repo edges", warnings: [], guidance: [],
+		lifecycle: { automaticProcessing: "unavailable", pending: "EP-8", message: "Automatic lifecycle processing is unavailable." },
+		...overrides,
+	};
+}
+
+function declaredConfig(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+	return {
+		readOnly: true, storage: "host-only", defaultTiers: ["code"], docsOptIn: "graph_query.includeDocs",
+		lifecycle: { automaticProcessing: "unavailable", pending: "EP-8", message: "Automatic lifecycle processing is unavailable." },
+		manualRebuild: { routeOnly: true, available: false, reason: "GRAPH_REBUILD_UNAVAILABLE_PENDING_EP8" },
+		noCrossRepoEdges: true, warning: "v1 has no cross-repo edges",
+		...overrides,
+	};
+}
+
 afterEach(() => __setGraphRuntimeForTests());
 
 describe("graph routes — host boundary caps and errors", () => {
@@ -49,6 +78,33 @@ describe("graph routes — host boundary caps and errors", () => {
 		assert.equal("maxPaths" in seen[0], false);
 		assert.equal(seen[1].maxResults, GRAPH_QUERY_CAPS.results);
 		assert.equal(seen[1].maxDepth, GRAPH_QUERY_CAPS.depth);
+	});
+
+	it("passes only the bounded declared status projection from the runtime", async () => {
+		installRuntime(request => request.op === "status" ? { ...declaredStatus(), hostRoot: "/private/graph-store" } : { ok: true });
+		const response = await routes.status(context, { body: {} });
+		assert.deepEqual(response, { ok: false, error: "GRAPH_STATUS_DECLARATION_INVALID" });
+		assert.doesNotMatch(JSON.stringify(response), /private|graph-store/);
+
+		installRuntime(request => request.op === "status" ? { ...declaredStatus(), ignoredByRoute: "not published" } : { ok: true });
+		const bounded = await routes.status(context, { body: {} }) as Record<string, unknown>;
+		assert.equal(bounded.state, "current");
+		assert.deepEqual(bounded.runtime, "host");
+		assert.equal("ignoredByRoute" in bounded, false);
+		assert.deepEqual((bounded.components as Array<Record<string, unknown>>)[0].roots, [{ tier: "code", path: "src" }]);
+	});
+
+	it("rejects unknown declared states and raw configuration paths", async () => {
+		installRuntime(request => request.op === "status" ? declaredStatus({ state: "unknown-future-state" }) : { ok: true });
+		assert.deepEqual(await routes.status(context, { body: {} }), { ok: false, error: "GRAPH_STATUS_DECLARATION_INVALID" });
+
+		__setGraphRuntimeForTests(() => ({
+			query: async () => ({ ok: true }), status: async () => declaredStatus(), config: async () => declaredConfig({ hostRoot: "/private/graph-store" }),
+			rebuild: async () => ({ accepted: false, reason: "GRAPH_REBUILD_UNAVAILABLE_PENDING_EP8", status: {} as never }),
+		} as never));
+		const config = await routes.config(context, { method: "GET" });
+		assert.deepEqual(config, { ok: false, error: "GRAPH_CONFIG_DECLARATION_INVALID" });
+		assert.doesNotMatch(JSON.stringify(config), /private|graph-store/);
 	});
 
 	it("always declares no cross-repository edges while warning only on fan-out", async () => {
