@@ -574,6 +574,7 @@ function activationSatisfied(activation: { requiresConfig: string[] } | undefine
 		if (!Object.hasOwn(values, key)) return false;
 		const value = values[key];
 		if (value === undefined || value === null) return false;
+		if (Array.isArray(value)) return value.length > 0;
 		return typeof value !== "string" || value.trim().length > 0;
 	});
 }

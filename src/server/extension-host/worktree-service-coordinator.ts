@@ -6,8 +6,8 @@
 
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { isSafeExtensionGrantIdentifier } from "../agent/project-config-store.js";
 import type { ServiceInstancePublicRef, ServiceInstanceRef, ServiceStatus } from "./service-extension-contract.js";
+import { isServicePlatformIdentifier } from "./service-platform-identifier.js";
 import type { ServiceExtensionRuntime } from "./service-extension-runtime.js";
 import {
 	ServiceToolAdapterRegistry,
@@ -111,7 +111,7 @@ function safeIdentifier(value: unknown): value is string {
 }
 
 function safePlatformIdentifier(value: unknown): value is string {
-	return isSafeExtensionGrantIdentifier(value);
+	return isServicePlatformIdentifier(value);
 }
 
 function normalizeDiscriminator(value: string | undefined): string | undefined {

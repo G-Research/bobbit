@@ -10,7 +10,12 @@ import { ServiceExtensionRegistry } from "../../src/server/extension-host/servic
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 
-function install(scope: "server" | "project", name: string, id = "service"): PackEntry {
+function install(
+	scope: "server" | "project",
+	name: string,
+	id = "service",
+	options: { config?: readonly string[]; activation?: readonly string[] } = {},
+): PackEntry {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "service-extension-registry-"));
 	roots.push(root);
 	const packRoot = path.join(root, "market-packs", name);
@@ -22,8 +27,8 @@ function install(scope: "server" | "project", name: string, id = "service"): Pac
 		"  readiness: { url: http://127.0.0.1:8080/health, timeoutMs: 100 }",
 		"  stopGraceMs: 100",
 		"  restart: never",
-		"config:",
-		"  apiKey: { type: secret, optional: true }",
+		...(options.config ?? ["config:", "  apiKey: { type: secret, optional: true }"]),
+		...(options.activation ?? []),
 	].join("\n"), "utf8");
 	const manifest: PackManifest = {
 		schema: 2, name, description: "fixture", version: "1",
@@ -61,5 +66,20 @@ describe("service extension registry", () => {
 			() => ["managed"],
 		);
 		assert.deepEqual(new ServiceExtensionRegistry(disabled).list("p"), []);
+	});
+
+	it("requires a non-empty multi-enum runtime activation value while retaining scalar values", () => {
+		const entry = install("server", "multi-enum-runtime", "multi-enum", {
+			config: ["config:", "  languages: { type: enum, values: [typescript, javascript], optional: true }"],
+			activation: ["activation:", "  requiresConfig: [languages]"],
+		});
+		const withValues = (languages: unknown) => new ServiceExtensionRegistry(new PackContributionRegistry(
+			() => [entry], undefined, undefined, undefined, undefined, undefined, undefined,
+			() => ({ state: "present", enabled: true, values: { languages } }),
+		)).list("p");
+
+		assert.deepEqual(withValues([]), []);
+		assert.equal(withValues(["typescript"]).length, 1);
+		assert.equal(withValues("typescript").length, 1);
 	});
 });

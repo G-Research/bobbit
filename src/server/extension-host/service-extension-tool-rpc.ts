@@ -4,8 +4,8 @@
 // registered operation through a ServerHostApi that binds its session and pack.
 // This module deliberately contains no paths, endpoints, processes, or transport.
 
-import { isSafeExtensionGrantIdentifier } from "../agent/project-config-store.js";
 import type { ServiceState } from "./service-extension-contract.js";
+import { isServicePlatformIdentifier } from "./service-platform-identifier.js";
 
 const SAFE_ID = /^[a-z][a-z0-9-]{0,63}$/;
 const SAFE_DISCRIMINATOR = /^[a-z][a-z0-9-]{0,31}$/;
@@ -362,7 +362,7 @@ function isSafeId(value: unknown): value is string {
 }
 
 function isPlatformIdentifier(value: unknown): value is string {
-	return isSafeExtensionGrantIdentifier(value);
+	return isServicePlatformIdentifier(value);
 }
 
 function isComponent(value: unknown): value is string {
