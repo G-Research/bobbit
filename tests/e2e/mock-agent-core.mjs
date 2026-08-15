@@ -379,6 +379,11 @@ export class MockAgentCore {
 	static respondToPrompt(text) {
 		const lower = text.toLowerCase();
 
+		const markdownLocalImageMatch = text.match(/MARKDOWN_LOCAL_IMAGE:(\S+)/);
+		if (markdownLocalImageMatch) {
+			return { text: `Local image follows:\n\n![Session local screenshot](${markdownLocalImageMatch[1]})` };
+		}
+
 		const toolDeniedMatch = text.match(/TOOL_DENIED:(\S+)/);
 		if (toolDeniedMatch) return { toolDenied: toolDeniedMatch[1] };
 

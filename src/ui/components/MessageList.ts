@@ -569,6 +569,7 @@ export class MessageList extends LitElement {
 					key: keyFor(msg),
 					template: html`<assistant-message
 						.message=${amsg}
+						.sessionId=${this.sessionId}
 						.tools=${this.tools}
 						.isStreaming=${false}
 						.pendingToolCalls=${this.pendingToolCalls}

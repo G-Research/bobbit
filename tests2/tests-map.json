@@ -8,7 +8,7 @@
     "v2-browser": 216,
     "v2-core": 512,
     "v2-dom": 144,
-    "v2-integration": 203
+    "v2-integration": 202
   },
   "methods": {
     "adapter": 275,
@@ -27,6 +27,24 @@
         "runner": "vitest",
         "tier": "unit",
         "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/core/session-markdown-image.test.ts",
+      "reason": "Core security and filesystem regression coverage for authenticated session-scoped Markdown images, including cwd containment, symlink and traversal rejection, MIME and size limits, file URLs, and sandbox-realm reads.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/system-prompt-markdown-image.test.ts",
+      "reason": "Core prompt regression coverage ensuring agents are taught the session-relative local-image syntax while avoiding base64 and raw HTML output.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
       }
     },
     {
