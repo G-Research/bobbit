@@ -1,4 +1,5 @@
 import type { ChatPanel } from "../ui/ChatPanel.js";
+import type { GateStatusSummaryGate } from "./api.js";
 import type { RemoteAgent, ConnectionStatus } from "./remote-agent.js";
 import type { InboxEntry } from "../server/agent/inbox-store.js";
 import type { PanelWorkspaceTab } from "./panel-workspace.js";
@@ -471,13 +472,8 @@ export const state = {
 		awaitingSignoffCount: number;
 		awaitingHumanSignoff: boolean;
 		runningGateIds?: string[];
-		gates?: Array<{
-			gateId: string;
-			status: "pending" | "passed" | "failed" | "bypassed";
-			effectiveStatus?: "pending" | "passed" | "failed" | "running";
-			running?: boolean;
-			awaitingSignoffCount?: number;
-		}>;
+		/** Per-gate authoritative summary, including latest cancellation provenance. */
+		gates?: GateStatusSummaryGate[];
 	}>(),
 	/** PR status cache: goalId → server-authoritative fast state plus safe snapshot metadata. */
 	prStatusCache: new Map<string, RemotePrStatus>(),

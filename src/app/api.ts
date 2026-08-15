@@ -1598,6 +1598,13 @@ export async function fetchArchivedSessionsPaginated(limit = 50, afterCursor?: n
 	}
 }
 
+export interface GateStatusSummaryCancellation {
+	cause: VerificationCancellationCause;
+	/** Missing only on legacy records that predate durable provenance. */
+	requestedAt?: number;
+	finalizedAt?: number;
+}
+
 export interface GateStatusSummaryGate {
 	gateId: string;
 	name?: string;
@@ -1609,6 +1616,9 @@ export interface GateStatusSummaryGate {
 	signalCount: number;
 	updatedAt?: number;
 	failedSteps?: string[];
+	/** The latest signal was cancelled; gate status remains eligible/pending. */
+	verificationStatus?: "cancelled";
+	cancellation?: GateStatusSummaryCancellation;
 }
 
 export interface GateStatusSummary {

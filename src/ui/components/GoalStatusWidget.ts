@@ -33,7 +33,7 @@ import { completeTeam, refreshSessions, scheduleGateStatusRefreshForGoal } from 
 import type { SignoffReviewTarget } from "../../app/signoff-review-launch.js";
 import "./SignoffReviewLauncher.js";
 import { GATE_STATUS_CACHE_UPDATED_EVENT_TYPE, GATE_STATUS_CLIENT_EVENT, HUMAN_SIGNOFF_RESOLVED_EVENT_TYPE, shouldRefreshActiveVerificationsForEvent, shouldRefreshGateDetailsForEvent, shouldRefreshGateStatusForEvent } from "../../app/gate-status-events.js";
-import { renderGateProgressBadge, renderGateStatusIcon } from "../../app/render-helpers.js";
+import { renderGateProgressBadge, renderGateStatusIcon, verificationCancellationCauseLabel } from "../../app/render-helpers.js";
 import { setHashRoute } from "../../app/routing.js";
 import { state as appState } from "../../app/state.js";
 import { activeGatewayConnection, gatewayFetch, gatewayWsUrl } from "../../app/gateway-fetch.js";
@@ -41,11 +41,20 @@ import { gatewayRoute } from "../../shared/base-path.js";
 
 type GateStatus = "pending" | "passed" | "failed" | "running" | "bypassed";
 
+interface GateCancellationSummary {
+	cause?: string;
+	requestedAt?: number;
+	finalizedAt?: number;
+}
+
 interface GateSummary {
 	id: string;
 	name: string;
 	status: GateStatus;
 	latestPassedSignalId?: string;
+	/** The authoritative latest signal was cancelled; gate status stays pending. */
+	verificationStatus?: "cancelled";
+	cancellation?: GateCancellationSummary;
 	/** Human justification recorded when a gate was bypassed (honesty system). */
 	whyBypassed?: string;
 	/** Free-text “who am I” label of whoever bypassed the gate. */
@@ -316,7 +325,16 @@ export class GoalStatusWidget extends LitElement {
 					if (whoAmI === undefined) whoAmI = fallback?.whoAmI;
 				}
 			}
-			out.push({ id, name, status, latestPassedSignalId, whyBypassed, whoAmI });
+			const latestCancellation = this._latestCancellation(obj);
+			out.push({
+				id,
+				name,
+				status,
+				latestPassedSignalId,
+				whyBypassed,
+				whoAmI,
+				...(latestCancellation ? { verificationStatus: "cancelled" as const, cancellation: latestCancellation } : {}),
+			});
 		}
 		return out;
 	}
@@ -339,6 +357,30 @@ export class GoalStatusWidget extends LitElement {
 			};
 		}
 		return undefined;
+	}
+
+	/** Read only the current/latest signal so a historical cancellation never outlives a re-signal. */
+	private _latestCancellation(gate: Record<string, unknown>): GateCancellationSummary | undefined {
+		const topLevel = gate.cancellation;
+		if (gate.verificationStatus === "cancelled") {
+			return this._normalizeCancellation(topLevel) ?? {};
+		}
+		if (!Array.isArray(gate.signals) || gate.signals.length === 0) return undefined;
+		const latest = gate.signals[gate.signals.length - 1];
+		if (!latest || typeof latest !== "object") return undefined;
+		const verification = (latest as Record<string, unknown>).verification;
+		if (!verification || typeof verification !== "object" || (verification as Record<string, unknown>).status !== "cancelled") return undefined;
+		return this._normalizeCancellation((verification as Record<string, unknown>).cancellation) ?? {};
+	}
+
+	private _normalizeCancellation(value: unknown): GateCancellationSummary | undefined {
+		if (!value || typeof value !== "object") return undefined;
+		const cancellation = value as Record<string, unknown>;
+		return {
+			...(typeof cancellation.cause === "string" ? { cause: cancellation.cause } : {}),
+			...(typeof cancellation.requestedAt === "number" ? { requestedAt: cancellation.requestedAt } : {}),
+			...(typeof cancellation.finalizedAt === "number" ? { finalizedAt: cancellation.finalizedAt } : {}),
+		};
 	}
 
 	private _latestPassedSignalId(rawSignals: unknown): string | undefined {
@@ -828,9 +870,12 @@ export class GoalStatusWidget extends LitElement {
 		const effectiveStatus: GateStatus = this._activeGateIds.has(gate.id) ? "running" : gate.status;
 		const canBypass = effectiveStatus === "pending" || effectiveStatus === "failed";
 		const formOpen = this._bypassing === gate.id;
+		const cancelledLabel = gate.verificationStatus === "cancelled" && !this._activeGateIds.has(gate.id)
+			? verificationCancellationCauseLabel(gate.cancellation?.cause)
+			: undefined;
 		const rowTitle = effectiveStatus === "bypassed" && (gate.whoAmI || gate.whyBypassed)
 			? `Bypassed by ${gate.whoAmI || "unknown"}${gate.whyBypassed ? `: ${gate.whyBypassed}` : ""}`
-			: gate.name;
+			: cancelledLabel ? `${gate.name} — cancelled · ${cancelledLabel}` : gate.name;
 		return html`
 			<div class="goal-widget-gate-row flex items-center gap-2 rounded-md" data-testid="goal-widget-gate" data-gate-id=${gate.id} data-gate-status=${effectiveStatus}>
 				<div class="goal-widget-gate-main min-w-0 flex items-center gap-2">
@@ -884,6 +929,7 @@ export class GoalStatusWidget extends LitElement {
 					Bypassed${gate.whoAmI ? html` by <span class="goal-widget-bypass-who">${gate.whoAmI}</span>` : nothing}${gate.whyBypassed ? html`: ${gate.whyBypassed}` : nothing}
 				</div>
 			` : nothing}
+			${cancelledLabel ? html`<div class="text-muted-foreground" style="font-size:11px" data-testid="goal-widget-gate-cancellation">cancelled · ${cancelledLabel}</div>` : nothing}
 			${formOpen ? this._renderBypassForm(gate) : nothing}
 			${bypassError ? html`<div class="goal-widget-gate-error" data-testid="goal-widget-gate-bypass-error">${bypassError}</div>` : nothing}
 		`;
