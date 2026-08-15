@@ -113,6 +113,37 @@ describe("reliable intent dispatch attempt settlement", () => {
 		expect(ledgerFor(session, "intent-held")).toBeUndefined();
 	});
 
+	it("assigns automatic system steers a stable reliable occurrence before dispatch", async () => {
+		const ack = barrier<any>();
+		const steer = vi.fn(() => ack.hold());
+		const { manager, session } = useHarness({
+			rpcClient: {
+				steer,
+				prompt: vi.fn(async () => ({ success: true })),
+				getState: vi.fn(async () => ({ success: true, data: {} })),
+			},
+		});
+
+		const dispatch = manager.deliverLiveSteer(session.id, "task T completed", { source: "system" });
+		await ack.entered;
+
+		const [pending] = session.inFlightSteerTexts;
+		expect(pending, "automatic system steers must have a reliable occurrence identity").toMatchObject({
+			intentId: expect.any(String),
+			attemptId: expect.stringMatching(/^attempt:/),
+			state: "dispatching",
+			targetTurn: "continuation",
+			source: "system",
+		});
+		expect(pending.promptId).toBe(pending.intentId);
+		expect(manager.projectDeliveryOutbox(session.id)).toEqual([
+			expect.objectContaining({ id: pending.intentId, deliveryState: "dispatching" }),
+		]);
+
+		ack.release({ success: true });
+		await dispatch;
+	});
+
 	it("serializes rapid identical steers and correlates each occurrence exactly once", async () => {
 		const firstAck = barrier<any>();
 		const secondAck = barrier<any>();
