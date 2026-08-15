@@ -3,11 +3,12 @@ import { ensureAskUserChoicesWidget } from "../../../app/lazy-widgets.js";
 import {
 	answerDecisionRequest,
 	type DecisionRequestProjection,
+	type DecisionRequestWidgetProjection,
 	type DecisionValue,
 } from "../../../app/extension-decisions.js";
 import type { AskAnswer, AskQuestion, SubmitAnswers } from "../../components/AskUserChoicesWidget.js";
 
-function answersFromResolution(request: DecisionRequestProjection): AskAnswer[] | null {
+export function answersFromResolution(request: DecisionRequestWidgetProjection): AskAnswer[] | null {
 	const value = request.resolution?.value;
 	if (!value) return null;
 	const selected = value.kind === "option"
@@ -21,7 +22,7 @@ function answersFromResolution(request: DecisionRequestProjection): AskAnswer[] 
 	}];
 }
 
-function decisionValueFromAnswer(request: DecisionRequestProjection, answers: AskAnswer[]): DecisionValue {
+export function decisionValueFromAnswer(request: DecisionRequestWidgetProjection, answers: AskAnswer[]): DecisionValue {
 	const answer = answers[0];
 	if (!answer || Array.isArray(answer.selected)) throw new Error("Invalid decision answer");
 	if (answer.selected === "Other") {
@@ -38,26 +39,26 @@ function decisionValueFromAnswer(request: DecisionRequestProjection, answers: As
  * Thin data adapter over the existing ask-user-choices widget. It deliberately
  * owns no option DOM, validation, keyboard handling, ARIA, or draft mechanics.
  */
-function statusLabel(request: DecisionRequestProjection): string | null {
+export function statusLabel(request: DecisionRequestWidgetProjection): string | null {
 	if (request.status === "paused-awaiting-consent") return "Awaiting consent";
 	if (request.status === "defaulted") return "Default applied";
 	if (request.status === "denied") return "Denied";
 	return null;
 }
 
-function unavailableMessage(request: DecisionRequestProjection): string {
+export function unavailableMessage(request: DecisionRequestWidgetProjection): string {
 	if (request.status === "denied") return "This consent request was denied.";
 	if (request.status === "defaulted") return "The safe default was applied.";
 	return "This decision is no longer available.";
 }
 
 /** A decision answer is accepted only when the server supplies its settled value. */
-function answersFromAuthoritativeSettlement(request: DecisionRequestProjection | null): AskAnswer[] | null {
+export function answersFromAuthoritativeSettlement(request: DecisionRequestWidgetProjection | null): AskAnswer[] | null {
 	if (!request || (request.status !== "resolved" && request.status !== "defaulted")) return null;
 	return answersFromResolution(request);
 }
 
-function submissionFailureMessage(request: DecisionRequestProjection | null): string {
+export function submissionFailureMessage(request: DecisionRequestWidgetProjection | null): string {
 	if (request?.status === "denied") return unavailableMessage(request);
 	if (request?.status === "paused-awaiting-consent") return "This consent request is still awaiting consent.";
 	return "This decision is no longer available.";
