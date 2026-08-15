@@ -166,6 +166,10 @@ Constraints:
 - Missing files, non-image MIME types, and unresolvable paths are left as-is — they do not fail the submission.
 - The `report_html` inline-string parameter is not rewritten; use `report_html_file` to get automatic inlining.
 
+### Screenshots in chat responses
+
+Assistant Markdown may reference a screenshot with a path relative to the session cwd or with a local `file://` URL. Bobbit translates that destination into an authenticated session asset, fetches it with the active gateway credentials, and displays it through a blob URL. The server resolves both the workspace and image through their real paths, rejects traversal and symlink escapes, reads sandboxed files inside the owning container, permits only PNG/JPEG/GIF/WebP, and caps each image at 6 MB. Remote HTTP(S) Markdown images remain remote and are not sent through this endpoint.
+
 ### Cleanup
 
 The `.bobbit-qa/` directory is gitignored and scoped per session. It is deleted when the session shuts down. Do not commit spilled screenshots.
