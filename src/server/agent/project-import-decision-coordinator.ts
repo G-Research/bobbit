@@ -1,4 +1,4 @@
-import type { TraceDecisionOutcomeRow } from "./context-trace-store.js";
+import type { ContextTraceStore, TraceDecisionOutcomeRow } from "./context-trace-store.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import type { ProjectRegistry, RegisteredProject } from "./project-registry.js";
 import type { Component } from "./project-config-store.js";
@@ -43,6 +43,8 @@ export interface ProjectImportDecisionCoordinatorDeps {
   now?: () => number;
   /** Bounds one broken project during startup replay. */
   reconcileTimeoutMs?: number;
+  /** Project/import-run diagnostics use a separate redacted stream, never a session id. */
+  trace?: Pick<ContextTraceStore, "appendProjectImportTrace">;
   onError?: (projectId: string, error: unknown) => void;
 }
 
@@ -128,6 +130,14 @@ export class ProjectImportDecisionCoordinator {
         hooks: {},
       });
     }
-    return this.deps.dispatcher.dispatchProjectImport(projectId, importId);
+    const outcomes = await this.deps.dispatcher.dispatchProjectImport(projectId, importId);
+    // Hook completion is already durable before the dispatcher returns. Trace
+    // failures are diagnostic only and cannot cause a registration/replay retry
+    // to duplicate a request, default, memory, proposal, or continuation.
+    if (outcomes.length > 0) {
+      try { this.deps.trace?.appendProjectImportTrace(projectId, importId, outcomes); }
+      catch { /* tracing is intentionally isolated from import delivery */ }
+    }
+    return outcomes;
   }
 }

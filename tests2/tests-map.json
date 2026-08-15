@@ -3362,6 +3362,15 @@
       }
     },
     {
+      "path": "tests2/core/project-import-decision-coordinator.test.ts",
+      "reason": "Project-import dispatch persists outcomes in a dedicated redacted project/import trace without a synthetic session.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/inbox-nudger-advisory.test.ts",
       "reason": "Extension advisory inbox entries persist as non-waking, remain actionable, survive reload, and never nudge staff beside ordinary wakeable work.",
       "execution": {

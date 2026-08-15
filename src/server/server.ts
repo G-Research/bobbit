@@ -3463,6 +3463,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		projectContextManager,
 		dispatcher: decisionHookDispatcher,
 		buildContext: ({ project, importId, components }) => buildProjectImportDecisionContext({ project, importId, components }),
+		trace: contextTraceStore,
 		now: gatewayDeps.clock.now,
 		onError: (projectId, error) => console.warn(`[project-import-decisions] reconciliation failed project=${projectId}:`, error),
 	});
