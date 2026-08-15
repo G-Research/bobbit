@@ -2219,6 +2219,12 @@ export class VerificationHarness {
 	 * enqueue a follow-up after its cancelled row has been removed.
 	 */
 	private cancelledVerificationSignals = new Set<string>();
+	/**
+	 * Route-owned gate mutations (reset/bypass) temporarily close admission for
+	 * their exact gates. This prevents a new signal from slipping in after the
+	 * cancellation snapshot but before the durable gate mutation commits.
+	 */
+	private gateMutationFences = new Map<string, number>();
 	/** Exact prompt admissions waiting to learn that their signal generation was cancelled. */
 	private verifierDispatchCancellationWaiters = new Map<string, Set<(reason: string) => void>>();
 	/** Random UUID generated once per server process. Steps stamped with this bootEpoch were started by this process. */
@@ -2308,6 +2314,30 @@ export class VerificationHarness {
 		return active && !active.cancelled && active.overallStatus !== "cancelled" ? active : undefined;
 	}
 
+	private _gateMutationKey(goalId: string, gateId: string): string {
+		return `${goalId}::${gateId}`;
+	}
+
+	/** Block signal admission until a reset/bypass has committed or failed. */
+	acquireGateMutationFence(goalId: string, gateIds: readonly string[]): () => void {
+		const keys = [...new Set(gateIds.map(gateId => this._gateMutationKey(goalId, gateId)))];
+		for (const key of keys) this.gateMutationFences.set(key, (this.gateMutationFences.get(key) ?? 0) + 1);
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			for (const key of keys) {
+				const count = (this.gateMutationFences.get(key) ?? 1) - 1;
+				if (count > 0) this.gateMutationFences.set(key, count);
+				else this.gateMutationFences.delete(key);
+			}
+		};
+	}
+
+	isGateMutationFenced(goalId: string, gateId: string): boolean {
+		return (this.gateMutationFences.get(this._gateMutationKey(goalId, gateId)) ?? 0) > 0;
+	}
+
 	/**
 	 * Synchronously enumerate verification steps and seed the activeVerifications
 	 * map for `signal.id`. Returns the `GateSignalStep[]` shaped exactly for the
@@ -2336,6 +2366,9 @@ export class VerificationHarness {
 	 * must precede verification_started".
 	 */
 	beginVerification(signal: GateSignal, gate: WorkflowGate): GateSignalStep[] {
+		if (this.isGateMutationFenced(signal.goalId, signal.gateId)) {
+			throw new Error(`Gate ${signal.gateId} is being reset or bypassed; retry signalling after that operation completes`);
+		}
 		const steps = gate.verify;
 		if (!steps || steps.length === 0) return [];
 
@@ -2508,21 +2541,31 @@ export class VerificationHarness {
 		const cancelled = persisted.filter(v => v.cancelled || v.overallStatus === "cancelled");
 		for (const v of cancelled) {
 			const active = this.activeVerifications.get(v.signalId) ?? v;
-			// This is an in-memory concurrency fence only; a restart must retry the
-			// durable terminal publication rather than retain a stale lock.
-			delete active.cancellationFinalizing;
-			this.activeVerifications.set(active.signalId, active);
-			// A pre-typed persisted cancellation has no recoverable provenance.
-			this._markVerificationCancelled(active, active.cancellation?.cause ?? "unknown");
-			if (!this._persistActive()) throw new Error(`Could not persist cancellation fence for ${active.signalId}`);
-			await this._terminateCancelledReviewersFor([active]);
-			const settled = await this._killPersistedCommandSteps(active, "SIGKILL", { markIntent: false });
-			if (settled) {
-				await this._finalizeCancelledVerification(active);
-			} else {
-				this._scheduleCommandKillCleanupRetry(active.signalId);
+			try {
+				// This is an in-memory concurrency fence only; a restart must retry the
+				// durable terminal publication rather than retain a stale lock.
+				delete active.cancellationFinalizing;
+				// A crash may have happened between setting this marker and reviewer
+				// teardown. Re-drive the exact cleanup from the persisted running rows
+				// instead of retaining a permanent finalization block.
+				delete active.reviewerCleanupPending;
+				this.activeVerifications.set(active.signalId, active);
+				// A pre-typed persisted cancellation has no recoverable provenance.
+				this._markVerificationCancelled(active, active.cancellation?.cause ?? "unknown");
+				if (!this._persistActive()) throw new Error(`Could not persist cancellation fence for ${active.signalId}`);
+				await this._terminateCancelledReviewersFor([active]);
+				const settled = await this._killPersistedCommandSteps(active, "SIGKILL", { markIntent: false });
+				if (settled) {
+					await this._finalizeCancelledVerification(active);
+				} else {
+					this._scheduleCommandKillCleanupRetry(active.signalId);
+				}
+				this._persistActive();
+			} catch (err) {
+				// One corrupt or temporarily unwritable record must not prevent
+				// recovery of unrelated verification generations.
+				console.error(`[verification] Failed to recover cancelled ${active.signalId}:`, err);
 			}
-			this._persistActive();
 		}
 
 		const running = persisted.filter(v => v.overallStatus === "running" && !v.cancelled);
@@ -2540,7 +2583,13 @@ export class VerificationHarness {
 
 		for (const v of running) {
 			this.activeVerifications.set(v.signalId, v);
-			this._persistActive();
+			// A persisted marker is an unfinished teardown attempt, not proof that
+			// reviewer ownership is still being cleaned in this process.
+			delete v.reviewerCleanupPending;
+			if (!this._persistActive()) {
+				console.error(`[verification] Failed to persist recovered active ${v.signalId}; leaving it for a later restart`);
+				continue;
+			}
 			try {
 				// Skip verifications for goals that completed/shelved while we were down
 				const goal = this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId);
@@ -4145,6 +4194,19 @@ export class VerificationHarness {
 				type: "gate_verification_complete", goalId: active.goalId, gateId: active.gateId,
 				signalId: active.signalId, status: "cancelled", cancellation: verification.cancellation,
 			});
+			// Recovery interruptions need an explicit, neutral next action. Other
+			// orchestration causes (pause, teardown, archive, etc.) deliberately do
+			// not wake a team lead.
+			if (verification.cancellation?.cause === "gateway-restart-recovery"
+				|| verification.cancellation?.cause === "zombie-recovery") {
+				try {
+					this.notifyTeamLead(active.goalId, active.gateId, "cancelled");
+				} catch (err) {
+					// Notification is post-publication advice, never a reason to retry
+					// an already durable terminal cancellation.
+					console.error(`[verification] Failed to notify team lead about recovery cancellation ${active.signalId}:`, err);
+				}
+			}
 		} catch (error) {
 			delete active.cancellationFinalizing;
 			this._persistActive();
@@ -4579,6 +4641,8 @@ export class VerificationHarness {
 		// Notify the goal's OWN team-lead first (intra-team signal).
 		if (status === "passed") {
 			this.notifyTeamLeadFn(goalId, `Gate verification PASSED: "${gateId}". Downstream work for this gate can now proceed.`);
+		} else if (status === "cancelled") {
+			this.notifyTeamLeadFn(goalId, `Gate verification for "${gateId}" was interrupted by recovery. It did not fail. Re-signal this gate once when ready to run verification again.`);
 		} else {
 			const steps = failureContext?.steps ?? [];
 			const frozenGate = failureContext?.workflowAligned === false

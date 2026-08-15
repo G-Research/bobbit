@@ -107,6 +107,16 @@ test.each(CAUSES)("%s is durable, typed, and never becomes a failed gate", async
 	]);
 });
 
+test("reset and bypass admission fences reject a generation until the durable mutation releases", () => {
+	const { harness, signal } = makeFixture("mutation-fence");
+	const release = harness.acquireGateMutationFence(GOAL_ID, [GATE_ID]);
+	expect(harness.isGateMutationFenced(GOAL_ID, GATE_ID)).toBe(true);
+	expect(() => harness.beginVerification({ ...signal, id: "blocked-generation" }, GATE)).toThrow(/reset or bypassed/i);
+	release();
+	expect(harness.isGateMutationFenced(GOAL_ID, GATE_ID)).toBe(false);
+	expect(harness.beginVerification({ ...signal, id: "admitted-generation" }, GATE)).toHaveLength(1);
+});
+
 test("first cancellation writer is persisted before cleanup and cannot be overwritten by a later lifecycle event", () => {
 	const { stateDir, harness, signal } = makeFixture("first-writer-wins");
 	const active = (harness as any).activeVerifications.get(signal.id) as ActiveVerification;
@@ -161,6 +171,10 @@ test("restart preserves an already completed output and the persisted cause unti
 		startedAt: Date.now() - 12,
 		cancelRequestedAt: Date.now() - 10,
 		cancelReason: "cancelled",
+		// Simulate a process crash after the old process marked reviewer teardown
+		// pending but before it actually terminated the reviewer. Boot must clear
+		// and re-drive this marker rather than strand cancellation forever.
+		reviewerCleanupPending: true,
 		steps: [
 			{ name: "Completed evidence", type: "command", status: "passed", output: "retain this completed output", durationMs: 12, phase: 0, startedAt: Date.now() - 12 },
 			// A running human-signoff is process-free live work. Its durable
@@ -187,4 +201,15 @@ test("restart preserves an already completed output and the persisted cause unti
 		],
 	});
 	expect(gateStore.getGate(GOAL_ID, GATE_ID)!.status).toBe("pending");
+});
+
+test("only restart and zombie recovery wake the team lead after cancelled publication", async () => {
+	for (const cause of ["gateway-restart-recovery", "zombie-recovery", "goal-pause"] as const) {
+		const fixture = makeFixture(`recovery-notification-${cause}`);
+		const notifications: string[] = [];
+		fixture.harness.setTeamLeadNotifier((_goalId, message) => notifications.push(message));
+		await fixture.harness.cancelStaleVerifications(GOAL_ID, GATE_ID, cause);
+		expect(notifications).toHaveLength(cause === "goal-pause" ? 0 : 1);
+		if (notifications.length) expect(notifications[0]).toMatch(/did not fail.*re-signal/i);
+	}
 });

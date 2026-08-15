@@ -525,6 +525,46 @@ test.describe("Cancel Verification API", () => {
 		}
 	});
 
+	test("shelving durably fences a running verification before the terminal goal update", async ({ gateway }) => {
+		let setup: SlowWorkflowGoal | undefined;
+		const runner = new PendingExactCleanupRunner();
+		gateway.teamManager.verificationHarness!.commandStepRunner = runner;
+		try {
+			setup = await createSlowWorkflowGoal("Shelve Running Verification");
+			const signalRes = await signalSlowVerification(setup.goalId, "shelve while running");
+			expect(signalRes.status).toBe(201);
+			await runner.waitForSpawn(0);
+
+			const shelveRequest = apiFetch(`/api/goals/${setup.goalId}`, {
+				method: "PUT",
+				body: JSON.stringify({ state: "shelved" }),
+			});
+			await runner.waitForKill(0);
+			const shelveRes = await shelveRequest;
+			expect(shelveRes.status).toBe(200);
+			const shelvedGoal = await apiFetch(`/api/goals/${setup.goalId}`);
+			const shelvedGoalBody = await shelvedGoal.json() as { state: string };
+			expect(shelvedGoalBody.state).toBe("shelved");
+			const beforeCleanup = await getGateState(setup.goalId);
+			expect(beforeCleanup.status, "SHELVE_MUST_NOT_MANUFACTURE_A_FAILED_GATE_WHILE_EXACT_CLEANUP_IS_PENDING").toBe("pending");
+
+			runner.settle(0);
+			const gate = await observeUntil(
+				gateway.clock,
+				() => getGateState(setup!.goalId),
+				state => state.signals.at(-1)?.verification.status === "cancelled",
+				5_000,
+			);
+			expect(gate.signals.at(-1)?.verification).toMatchObject({
+				status: "cancelled",
+				cancellation: { cause: "shelved", finalizedAt: expect.any(Number) },
+			});
+		} finally {
+			runner.settleAll();
+			await cleanupSlowWorkflowGoal(setup);
+		}
+	});
+
 	test("cancel on archived goal returns 409", async () => {
 		let setup: SlowWorkflowGoal | undefined;
 		try {
