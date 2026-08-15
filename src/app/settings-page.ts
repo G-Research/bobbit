@@ -766,7 +766,9 @@ function renderSandboxSection(
 								<span class="text-foreground">Available${sandboxStatusLocal.dockerVersion ? ` (v${sandboxStatusLocal.dockerVersion})` : ""}</span>
 								${sandboxStatusLocal.imageExists !== undefined
 									? sandboxStatusLocal.imageExists
-										? html`<span class="text-xs text-muted-foreground ml-2">Image "${checkedImageName}": found</span>`
+										? sandboxStatusLocal.imageReady === false
+										? html`<span class="text-xs text-orange-500 ml-2">Image "${checkedImageName}": stale</span>`
+										: html`<span class="text-xs text-muted-foreground ml-2">Image "${checkedImageName}": found</span>`
 										: html`<span class="text-xs text-orange-500 ml-2">Image "${checkedImageName}": not found</span>
 											${sandboxStatusLocal!.buildCommand ? html`
 												<div class="flex flex-col gap-1 ml-2">

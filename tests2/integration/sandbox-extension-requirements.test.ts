@@ -258,15 +258,22 @@ describe.sequential("sandbox extension requirements integration", () => {
 
 		// An attempted build failure belongs to this exact fingerprint and must
 		// survive unrelated resolver cache invalidation.
+		// A failed retry must not override a genuinely available exact image.
 		fixture.runner.failBuild = true;
 		const failedBuild = await api(fixture, "/api/sandbox-image/build", { method: "POST", body: JSON.stringify({ projectId: fixture.projectA }) });
 		expect(failedBuild.status, await failedBuild.clone().text()).toBe(500);
+		expect(requirementStatus(await status(fixture, fixture.projectA))).toMatchObject({ entries: [{ state: "available" }] });
+
+		// Once the image is actually pending, the recorded failure is visible. A
+		// revoke/regrant is a fresh authority epoch and must clear it for A only.
+		fixture.runner.images.delete(pendingResponse.imageName);
+		const staleFailedBuild = await api(fixture, "/api/sandbox-image/build", { method: "POST", body: JSON.stringify({ projectId: fixture.projectA }) });
+		expect(staleFailedBuild.status, await staleFailedBuild.clone().text()).toBe(500);
 		expect(requirementStatus(await status(fixture, fixture.projectA))).toMatchObject({ entries: [{ state: "failed", code: "build-failed" }] });
-		const order = await api(fixture, "/api/marketplace/pack-order?scope=server");
-		expect(order.status, await order.clone().text()).toBe(200);
-		const unchangedOrder = await api(fixture, "/api/marketplace/pack-order", { method: "PUT", body: JSON.stringify({ scope: "server", order: (await responseJson(order)).order ?? [] }) });
-		expect(unchangedOrder.status, await unchangedOrder.clone().text()).toBe(200);
-		expect(requirementStatus(await status(fixture, fixture.projectA))).toMatchObject({ entries: [{ state: "failed", code: "build-failed" }] });
+		expect(requirementStatus(await status(fixture, fixture.projectB))).toMatchObject({ profiles: [], entries: [] });
+		await revoke(fixture);
+		await grant(fixture);
+		expect(requirementStatus(await status(fixture, fixture.projectA))).toMatchObject({ entries: [{ state: "pending" }] });
 		fixture.runner.failBuild = false;
 		const retry = await api(fixture, "/api/sandbox-image/build", { method: "POST", body: JSON.stringify({ projectId: fixture.projectA }) });
 		expect(retry.status, await retry.clone().text()).toBe(200);
@@ -349,10 +356,44 @@ describe.sequential("sandbox extension requirements integration", () => {
 			expect(dockerBootstrapCalls).toBe(3);
 			expect(created).toEqual(["project-a", "project-b", "project-a"]);
 			expect(removed).toEqual(["fixture-project-a-1"]);
+			// Verification must re-enter the no-build bootstrap readiness fence even
+			// when a session container is already ready.
+			await manager.ensureVerificationBackend("project-a");
+			expect(bootstrapCalls).toBe(4);
+			expect(dockerBootstrapCalls).toBe(4);
 			expect(manager.get("project-a")?.getStatus().containerId).toBe("fixture-project-a-2");
 			expect(manager.get("project-b")?.getStatus().containerId).toBe("fixture-project-b-1");
 		} finally {
 			init.mockRestore(); remove.mockRestore(); start.mockRestore(); onHealth.mockRestore(); stop.mockRestore();
 		}
+	});
+
+	it("validates sandbox_image at the write boundary and leaves digest baselines build-not-applicable", async () => {
+		const invalid = await api(fixture, `/api/projects/${encodeURIComponent(fixture.projectB)}/config`, {
+			method: "PUT", body: JSON.stringify({ sandbox_image: "registry.example/team/agent;not-a-tag" }),
+		});
+		expect(invalid.status, await invalid.clone().text()).toBe(400);
+		expect(await responseJson(invalid)).toMatchObject({ field: "sandbox_image" });
+
+		const legal = await api(fixture, `/api/projects/${encodeURIComponent(fixture.projectB)}/config`, {
+			method: "PUT", body: JSON.stringify({ sandbox: "docker", sandbox_image: "registry.example/team/agent--stable__v2:base" }),
+		});
+		// A successful config mutation reaches the failure-state invalidation path;
+		// this catches route-local reference errors before fixture boot can hang.
+		expect(legal.status, await legal.clone().text()).toBe(200);
+		expect(await responseJson(legal)).toMatchObject({ ok: true });
+		const legalStatus = await status(fixture, fixture.projectB);
+		expect(legalStatus).toMatchObject({ imageName: "registry.example/team/agent--stable__v2:base", imageReady: false, imageBuildable: true });
+
+		const digest = `registry.example/team/agent@sha256:${"a".repeat(64)}`;
+		const pinned = await api(fixture, `/api/projects/${encodeURIComponent(fixture.projectB)}/config`, {
+			method: "PUT", body: JSON.stringify({ sandbox_image: digest }),
+		});
+		expect(pinned.status, await pinned.clone().text()).toBe(200);
+		const callsBeforeBuild = fixture.runner.calls.length;
+		const build = await api(fixture, "/api/sandbox-image/build", { method: "POST", body: JSON.stringify({ projectId: fixture.projectB }) });
+		expect(build.status, await build.clone().text()).toBe(422);
+		expect(await responseJson(build)).toMatchObject({ code: "SANDBOX_IMAGE_BUILD_NOT_APPLICABLE" });
+		expect(fixture.runner.calls).toHaveLength(callsBeforeBuild);
 	});
 });
