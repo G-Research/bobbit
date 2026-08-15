@@ -7814,10 +7814,11 @@ async function handleApiRoute(
 				promotionContext.projectConfigStore.setComponents([{ name: promoted.name, repo: "." }]);
 			}
 			if (promoted.importDecisionRun?.state === "configuring") {
-				projectRegistry.markImportDecisionRunReady(projectId, promoted.importDecisionRun.id);
+				const importId = promoted.importDecisionRun.id;
+				projectRegistry.markImportDecisionRunReady(projectId, importId);
 				promoted = projectRegistry.get(projectId) ?? promoted;
 				try {
-					await projectImportDecisionCoordinator?.dispatch(projectId, promoted.importDecisionRun.id);
+					await projectImportDecisionCoordinator?.dispatch(projectId, importId);
 				} catch (error) {
 					// The ready marker is the recovery boundary. A restart/retry reuses
 					// it and dispatches the exact durable snapshot without re-asking.
@@ -8939,7 +8940,7 @@ async function handleApiRoute(
 			for (const record of decisionRequestManager.listImportRequests(projectId, marker.id)) {
 				if (record.proposal?.status !== "created") continue;
 				const draft = await resolveDraft(record.id, record.proposal.type);
-				if (draft) proposals.push({ requestId: record.id, proposalType: record.proposal.type, rev: draft.rev, fields: safeFields(draft.parsed.value.fields) as Record<string, unknown> });
+				if (draft) proposals.push({ requestId: record.id, proposalType: draft.type, rev: draft.rev, fields: safeFields(draft.parsed.value.fields) as Record<string, unknown> });
 			}
 			json({ proposals });
 			return;
@@ -8970,7 +8971,7 @@ async function handleApiRoute(
 			try {
 				new ContextTraceStore(bobbitStateDir(), fsImpl).appendProjectImportOutcome(projectId, marker.id, {
 					kind: "decision", packId: draft.record.asker.packId, hookId: draft.record.asker.hookId,
-					outcome, requestId, questionId: draft.record.questionId, actor: "user",
+					event: "decisionResolved", outcome, requestId, questionId: draft.record.questionId, actor: "user",
 				});
 			} catch { /* Audit availability never changes an already-decided proposal. */ }
 		};
