@@ -771,7 +771,7 @@ test.describe("Verification REST API", () => {
 			const changedSignal = (await componentChanged.json()).signal;
 			expect(changedSignal).toMatchObject({ status: "running" });
 			expect(changedSignal.cached).toBeUndefined();
-			await waitForGateStatusByRest(goalId, "verify", "passed", changedSignal.id);
+			await waitForGatePassedAndNoActive(goalId, "verify");
 
 			// A transition away from the authoritative layout also cannot fall back
 			// to any persisted v2 evidence, even though the root digest still matches.
@@ -781,10 +781,29 @@ test.describe("Verification REST API", () => {
 			const transitionedSignal = (await transitioned.json()).signal;
 			expect(transitionedSignal).toMatchObject({ status: "running" });
 			expect(transitionedSignal.cached).toBeUndefined();
+
+			// A terminal gate verdict is published before its pinned resources are
+			// released. Wait for the exact cleanup boundary, rather than letting the
+			// fixture teardown race a detached Git worktree on Windows.
+			await waitForGatePassedAndNoActive(goalId, "verify");
+			const pinnedCheckoutManager = (gateway.teamManager.verificationHarness as unknown as {
+				pinnedCheckoutManager: { getLease(signalId: string): unknown };
+			}).pinnedCheckoutManager;
+			for (const signalId of [changedSignal.id, transitionedSignal.id]) {
+				expect(gateway.teamManager.verificationHarness.getActiveVerification(signalId)).toBeUndefined();
+				expect(pinnedCheckoutManager.getLease(signalId)).toBeUndefined();
+			}
+			for (const repositoryRoot of [apiRoot, webRoot]) {
+				const worktrees = await git(repositoryRoot, "worktree", "list", "--porcelain");
+				expect(worktrees).not.toMatch(/verification-checkouts-private[\\/]/);
+			}
 		} finally {
-			if (goalId) await deleteGoal(goalId);
+			if (goalId) {
+				const archived = await apiFetch(`/api/goals/${goalId}?cascade=true`, { method: "DELETE" });
+				expect(archived.status).toBe(200);
+			}
 			await deleteWorkflow(workflowId);
-			rmSync(fixtureRoot, { recursive: true, force: true });
+			rmSync(fixtureRoot, { recursive: true });
 		}
 	});
 

@@ -36,6 +36,16 @@ export class FakePinnedCheckoutManager {
 		return this.seed(signal.id, sourceRoot, projectId);
 	}
 
+	/** Snapshot ownership for integration tests that must prove exact release before tearing down a source fixture. */
+	getLease(signalId: string): PinnedCheckout | undefined {
+		const checkout = this.leases.get(signalId);
+		return checkout ? {
+			...checkout,
+			contentDigest: { ...checkout.contentDigest },
+			writableIgnoredDirectories: [...checkout.writableIgnoredDirectories],
+		} : undefined;
+	}
+
 	seed(signalId: string, sourceRoot = this.root, projectId = "test-project-id"): PinnedCheckout {
 		const projectRoot = verificationCheckoutProjectDir(this.root, projectId)!;
 		const checkout: PinnedCheckout = {
