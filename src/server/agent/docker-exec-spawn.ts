@@ -46,17 +46,58 @@ function validEnvName(name: string): boolean {
 	return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name);
 }
 
-/** Redact per-process Docker credentials without hiding their diagnostic names. */
+/**
+ * Render Docker exec diagnostics without leaking per-process credentials,
+ * correlation IDs, private directories, gateway authority, or SDK resume IDs.
+ * Keep option and environment names visible so the log remains actionable.
+ */
 export function redactDockerArgs(args: readonly string[]): string {
+	const redacted = "<REDACTED>";
 	const sensitiveName = /^(BOBBIT_TOKEN|GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|AWS_SECRET|.*_SECRET|.*_TOKEN|.*_API_KEY|.*_OAUTH_TOKEN|.*_ACCESS_KEY)$/i;
-	const isSensitive = (token: string): boolean => sensitiveName.test(token.includes("=") ? token.slice(0, token.indexOf("=")) : token);
-	return args.map((arg, index) => {
-		if (index > 0 && args[index - 1] === "-e" && isSensitive(arg)) {
-			return arg.includes("=") ? arg.replace(/=.*/s, "=<REDACTED>") : arg;
+	const privateEnvironmentNames = new Set([
+		"BOBBIT_SESSION_ID",
+		"BOBBIT_GOAL_ID",
+		"BOBBIT_STAFF_ID",
+		"BOBBIT_CWD",
+		"BOBBIT_GATEWAY_URL",
+		"CLAUDE_CONFIG_DIR",
+	]);
+	const isSensitiveEnvironment = (name: string): boolean => privateEnvironmentNames.has(name.toUpperCase()) || sensitiveName.test(name);
+	const hasValue = (index: number): boolean => index < args.length && !args[index].startsWith("-");
+	const rendered = [...args];
+
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index];
+		if (arg === "-e" || arg === "--env") {
+			const environment = args[index + 1];
+			if (!environment) continue;
+			const equals = environment.indexOf("=");
+			const name = equals === -1 ? environment : environment.slice(0, equals);
+			if (!isSensitiveEnvironment(name)) continue;
+			if (equals !== -1) rendered[index + 1] = `${name}=${redacted}`;
+			else if (hasValue(index + 2)) rendered[index + 2] = redacted;
+			continue;
 		}
-		if (index > 1 && args[index - 2] === "-e" && !args[index - 1].includes("=") && isSensitive(args[index - 1])) return "<REDACTED>";
-		return arg;
-	}).join(" ");
+
+		if (arg.startsWith("--resume=")) {
+			rendered[index] = `--resume=${redacted}`;
+			continue;
+		}
+		if (arg === "--resume" && hasValue(index + 1)) {
+			rendered[index + 1] = redacted;
+			continue;
+		}
+
+		if ((arg === "-w" || arg === "--workdir") && hasValue(index + 1)) {
+			rendered[index + 1] = redacted;
+			// Docker exec takes its container immediately after its final option.
+			// The shared spawner always emits -w last, so this preserves safe
+			// command paths while removing the raw container correlation ID.
+			if (hasValue(index + 2)) rendered[index + 2] = redacted;
+		}
+	}
+
+	return rendered.join(" ");
 }
 
 /**
