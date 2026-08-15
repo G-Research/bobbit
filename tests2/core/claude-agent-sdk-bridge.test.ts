@@ -160,11 +160,16 @@ async function flushMicrotasks(count = 6): Promise<void> {
 }
 
 async function startReady(fixture: ReturnType<typeof bridgeFixture>, sessionId = "00000000-0000-4000-8000-000000000001"): Promise<FakeQuery> {
-	const started = fixture.bridge.start();
-	await Promise.resolve();
+	await fixture.bridge.start();
+	// This is an actual test user turn, not bridge bootstrap traffic. The bridge
+	// must remain idle until it is delivered to the SDK AsyncIterable.
+	const firstTurn = fixture.bridge.prompt("initialize test conversation");
+	await flushMicrotasks();
 	fixture.query.initialization.resolve({ models: fixture.models });
 	fixture.query.emitSystemInit(sessionId);
-	await started;
+	fixture.query.emit({ type: "result", subtype: "success" });
+	await firstTurn;
+	await fixture.query.nextInput();
 	return fixture.query;
 }
 
@@ -189,50 +194,36 @@ describe("ClaudeAgentSdkBridge", () => {
 		["malformed", "not-an-sdk-uuid"],
 	];
 
-	it("keeps a viable cold bridge running after a steer-specific readiness deadline", async () => {
-		const fixture = bridgeFixture();
-		const started = fixture.bridge.start();
-		await flushMicrotasks();
+	it("starts an idle bridge without consuming an input or requiring streamed initialization", async () => {
+		const fixture = bridgeFixture({ autoPullInputs: false });
+		await expect(fixture.bridge.start()).resolves.toBeUndefined();
 
-		const steer = fixture.bridge.steer("redirect while cold");
-		fixture.clock.advance(29_999);
-		await flushMicrotasks();
-		expect((fixture.bridge as any).state).toBe("starting");
-		expect(fixture.query.closeCalls).toBe(0);
-		expect(fixture.clock.pending()).toBe(2);
-
-		fixture.clock.advance(1);
-		await expect(steer).rejects.toMatchObject({ code: "SDK_SESSION_UNAVAILABLE", message: "SDK_SESSION_UNAVAILABLE" });
-		expect((fixture.bridge as any).state).toBe("starting");
-		expect(fixture.query.closeCalls).toBe(0);
-		expect(fixture.clock.pending()).toBe(1);
-
-		fixture.query.initialization.resolve({});
-		fixture.query.emitSystemInit("00000000-0000-4000-8000-000000000001");
-		await started;
-		await expect(fixture.bridge.waitForReady(1)).resolves.toBeUndefined();
 		expect((fixture.bridge as any).state).toBe("ready");
+		expect(fixture.query.inputs).toEqual([]);
+		expect(fixture.query.closeCalls).toBe(0);
 		expect(fixture.clock.pending()).toBe(0);
+		await expect(fixture.bridge.setModel("claude-agent-sdk", "sonnet-test")).resolves.toMatchObject({
+			success: false, error: "Claude Agent SDK controls are unavailable until initialization completes",
+		});
+		await fixture.bridge.stop();
 	});
 
-	it("terminally settles every readiness waiter when provider initialization fails", async () => {
+	it("terminally settles the first input when provider initialization fails", async () => {
 		const fixture = bridgeFixture();
 		const observed: any[] = [];
 		fixture.bridge.onEvent(event => observed.push(event));
-		const started = fixture.bridge.start();
-		await flushMicrotasks();
-		const directWaiter = fixture.bridge.waitForReady(60_000);
+		await fixture.bridge.start();
+		await expect(fixture.bridge.waitForReady(60_000)).resolves.toBeUndefined();
 		const pendingPrompt = fixture.bridge.promptWhenReady("must not be accepted", undefined, { readyTimeoutMs: 70_000 });
+		await flushMicrotasks();
 
 		const providerFailure = "subscription unavailable: Authorization: Bearer sk-secret-value abcdefgh.abcdefgh.ijklmnop /Users/aj/.claude/credentials.json opaque_12345678901234567890123456789012";
 		fixture.query.initialization.reject(new Error(providerFailure));
-		for (const pending of [started, directWaiter, pendingPrompt]) {
-			await expect(pending).rejects.toMatchObject({
-				code: "SDK_SESSION_UNAVAILABLE",
-				message: "SDK_SESSION_UNAVAILABLE",
-			});
-		}
-		const failure = await started.catch(error => error);
+		await expect(pendingPrompt).rejects.toMatchObject({
+			code: "SDK_SESSION_UNAVAILABLE",
+			message: "SDK_SESSION_UNAVAILABLE",
+		});
+		const failure = await pendingPrompt.catch(error => error);
 		const diagnostic = claudeAgentSdkUnavailableDiagnostic(failure);
 		for (const secret of ["sk-secret-value", "abcdefgh.abcdefgh.ijklmnop", "/Users/aj/.claude/credentials.json", "opaque_12345678901234567890123456789012"]) {
 			expect(diagnostic).not.toContain(secret);
@@ -245,17 +236,17 @@ describe("ClaudeAgentSdkBridge", () => {
 		]);
 	});
 
-	it.each(invalidInitializationIdentities)("fails %s streamed initialization identity once before becoming ready", async (_kind, sessionId) => {
+	it.each(invalidInitializationIdentities)("fails %s streamed initialization identity once the first real input starts it", async (_kind, sessionId) => {
 		const fixture = bridgeFixture();
 		const observed: any[] = [];
 		fixture.bridge.onEvent(event => observed.push(event));
-		const started = fixture.bridge.start();
+		await fixture.bridge.start();
 		const pendingPrompt = fixture.bridge.promptWhenReady("must not be accepted");
 		await flushMicrotasks();
 		fixture.query.initialization.resolve({});
 		fixture.query.emitSystemInit(sessionId);
 
-		await expect(started).rejects.toMatchObject({
+		await expect(pendingPrompt).rejects.toMatchObject({
 			code: "SDK_SESSION_UNAVAILABLE",
 			message: "SDK_SESSION_UNAVAILABLE",
 		});
@@ -280,33 +271,36 @@ describe("ClaudeAgentSdkBridge", () => {
 		expect((fixture.bridge as any).state).toBe("ready");
 	});
 
-	it("awaits controls and streamed identity in either official startup order", async () => {
+	it("awaits controls and streamed identity in either official order after the first input", async () => {
 		const fixture = bridgeFixture();
-		const started = fixture.bridge.start();
-		await flushMicrotasks();
+		await fixture.bridge.start();
+		const identityFirst = fixture.bridge.prompt("first user prompt");
+		await fixture.query.nextInput();
 		fixture.query.emitSystemInit("00000000-0000-4000-8000-000000000001");
 		await flushMicrotasks();
-		expect((fixture.bridge as any).state).toBe("starting");
+		expect((fixture.bridge as any).state).toBe("running");
 		fixture.query.initialization.resolve({});
-		await expect(started).resolves.toBeUndefined();
+		await expect(identityFirst).resolves.toBeUndefined();
 
 		const controlsFirst = bridgeFixture();
-		const controlsFirstStart = controlsFirst.bridge.start();
-		await flushMicrotasks();
+		await controlsFirst.bridge.start();
+		const controlsFirstPrompt = controlsFirst.bridge.prompt("first user prompt");
+		await controlsFirst.query.nextInput();
 		controlsFirst.query.initialization.resolve({});
 		await flushMicrotasks();
-		expect((controlsFirst.bridge as any).state).toBe("starting");
+		expect((controlsFirst.bridge as any).state).toBe("running");
 		controlsFirst.query.emitSystemInit("00000000-0000-4000-8000-000000000002");
-		await expect(controlsFirstStart).resolves.toBeUndefined();
+		await expect(controlsFirstPrompt).resolves.toBeUndefined();
 	});
 
 	it("rejects initializationResult identity, duplicate init, and missing streamed init", async () => {
 		const resultOnly = bridgeFixture();
-		const resultOnlyStart = resultOnly.bridge.start();
-		await flushMicrotasks();
+		await resultOnly.bridge.start();
+		const resultOnlyPrompt = resultOnly.bridge.prompt("first user prompt");
+		await resultOnly.query.nextInput();
 		resultOnly.query.initialization.resolve({ session_id: "00000000-0000-4000-8000-000000000001" } as any);
 		resultOnly.clock.advance(90_000);
-		await expect(resultOnlyStart).rejects.toBeInstanceOf(ClaudeAgentSdkUnavailableError);
+		await expect(resultOnlyPrompt).rejects.toBeInstanceOf(ClaudeAgentSdkUnavailableError);
 
 		const duplicate = bridgeFixture();
 		await startReady(duplicate);
@@ -314,6 +308,39 @@ describe("ClaudeAgentSdkBridge", () => {
 		await flushMicrotasks();
 		expect((duplicate.bridge as any).state).toBe("failed");
 		expect(duplicate.query.closeCalls).toBe(1);
+	});
+
+	it("fails closed when a resumed query does not confirm its persisted identity", async () => {
+		const resumeId = "00000000-0000-4000-8000-000000000009";
+		const invalidResume = bridgeFixture({ claudeAgentSdkSessionId: "not-an-sdk-uuid" });
+		await expect(invalidResume.bridge.start()).rejects.toBeInstanceOf(ClaudeAgentSdkUnavailableError);
+
+		const mismatch = bridgeFixture({ claudeAgentSdkSessionId: resumeId });
+		await mismatch.bridge.start();
+		const firstPrompt = mismatch.bridge.prompt("resume this actual user prompt");
+		await mismatch.query.nextInput();
+		mismatch.query.initialization.resolve({});
+		mismatch.query.emitSystemInit("00000000-0000-4000-8000-000000000010");
+		await expect(firstPrompt).rejects.toBeInstanceOf(ClaudeAgentSdkUnavailableError);
+		expect((await mismatch.bridge.getState()).data.sessionId).toBeUndefined();
+		expect(mismatch.query.closeCalls).toBe(1);
+	});
+
+	it("retries a first prompt after unpulled delivery times out without yielding bootstrap input", async () => {
+		const fixture = bridgeFixture({ autoPullInputs: false });
+		await fixture.bridge.start();
+		const timedOut = fixture.bridge.prompt("never delivered", undefined, 10);
+		await flushMicrotasks();
+		fixture.clock.advance(10);
+		await expect(timedOut).rejects.toThrow(/delivery timed out/i);
+
+		void fixture.query.pullInputs();
+		const retry = fixture.bridge.prompt("the only delivered prompt");
+		const delivered = await fixture.query.nextInput() as any;
+		expect(delivered.message.content).toBe("the only delivered prompt");
+		fixture.query.initialization.resolve({});
+		fixture.query.emitSystemInit("00000000-0000-4000-8000-000000000011");
+		await expect(retry).resolves.toBeUndefined();
 	});
 
 	it("reads visible history through the SDK session API with the initialized UUID and cwd", async () => {
@@ -496,9 +523,9 @@ describe("ClaudeAgentSdkBridge", () => {
 		})]);
 	});
 
-	it("does not publish agent_start when an unpulled input delivery times out", async () => {
+	it("does not publish agent_start when the first unpulled input delivery times out", async () => {
 		const fixture = bridgeFixture({ autoPullInputs: false });
-		await startReady(fixture);
+		await fixture.bridge.start();
 		const observed: any[] = [];
 		fixture.bridge.onEvent(event => observed.push(event));
 
@@ -511,9 +538,9 @@ describe("ClaudeAgentSdkBridge", () => {
 		expect(observed).toEqual([]);
 	});
 
-	it("does not publish agent_start when stop rejects an unpulled input", async () => {
+	it("does not publish agent_start when stop rejects the first unpulled input", async () => {
 		const fixture = bridgeFixture({ autoPullInputs: false });
-		await startReady(fixture);
+		await fixture.bridge.start();
 		const observed: any[] = [];
 		fixture.bridge.onEvent(event => observed.push(event));
 
@@ -723,12 +750,14 @@ describe("ClaudeAgentSdkBridge", () => {
 		expect(fixture.bridge.running).toBe(true);
 	});
 
-	it("bounds a never-resolving initialization and terminally cleans its single query", async () => {
+	it("bounds first-input initialization and terminally cleans its single query", async () => {
 		const fixture = bridgeFixture();
-		const started = fixture.bridge.start();
+		await fixture.bridge.start();
+		const firstPrompt = fixture.bridge.prompt("first user prompt");
+		await fixture.query.nextInput();
 		await flushMicrotasks();
 		fixture.clock.advance(90_000);
-		await expect(started).rejects.toBeInstanceOf(ClaudeAgentSdkUnavailableError);
+		await expect(firstPrompt).rejects.toBeInstanceOf(ClaudeAgentSdkUnavailableError);
 		expect(fixture.query.closeCalls).toBe(1);
 		expect(fixture.clock.pending()).toBe(0);
 		await expect(fixture.bridge.prompt("after timeout", undefined, 10)).rejects.toBeInstanceOf(ClaudeAgentSdkUnavailableError);
@@ -790,7 +819,7 @@ describe("ClaudeAgentSdkBridge", () => {
 			settingSources: [],
 			strictMcpConfig: true,
 			tools: ["Skill", "Agent"],
-			allowedTools: ["Agent"],
+			allowedTools: [],
 			agents: {},
 			skills: [
 				"batch", "claude-api", "code-review", "dataviz", "debug", "deep-research", "design-sync",
@@ -811,23 +840,22 @@ describe("ClaudeAgentSdkBridge", () => {
 		expect((query.options.hooks as any).PreToolUse).toHaveLength(1);
 	});
 
-	it("settles pending readiness on stop and never lets abort resurrect failed or stopped queries", async () => {
+	it("settles the first input on stop and never lets abort resurrect failed or stopped queries", async () => {
 		const fixture = bridgeFixture();
-		const started = fixture.bridge.start();
-		await Promise.resolve();
+		await fixture.bridge.start();
 		const pendingPrompt = fixture.bridge.promptWhenReady("waiting");
 		await fixture.bridge.stop();
 		await expect(pendingPrompt).rejects.toThrow(/stopped/i);
-		await expect(started).rejects.toThrow(/stopped/i);
 		expect(fixture.query.closeCalls).toBe(1);
 		await expect(fixture.bridge.abort()).resolves.toMatchObject({ success: false });
 		expect(fixture.bridge.running).toBe(false);
 
 		const failed = bridgeFixture();
-		const failedStart = failed.bridge.start();
-		await Promise.resolve();
+		await failed.bridge.start();
+		const failedPrompt = failed.bridge.prompt("first user prompt");
+		await failed.query.nextInput();
 		failed.query.initialization.reject(new Error("provider unavailable"));
-		await expect(failedStart).rejects.toBeInstanceOf(ClaudeAgentSdkUnavailableError);
+		await expect(failedPrompt).rejects.toBeInstanceOf(ClaudeAgentSdkUnavailableError);
 		await expect(failed.bridge.abort()).resolves.toMatchObject({ success: false });
 		expect(failed.bridge.running).toBe(false);
 	});

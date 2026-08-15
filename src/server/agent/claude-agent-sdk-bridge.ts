@@ -303,6 +303,10 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 	/** The official Query initialization result has controls, not the resume UUID.
 	 * The UUID is authoritative only on the streamed `system:init` event. */
 	private readonly initializationIdentity = deferred<string>();
+	/** Query stays idle until the first actual user row. Do not manufacture one. */
+	private initializationPending = false;
+	private initializationComplete = false;
+	private initializationPromise?: Promise<void>;
 	private identityObserved = false;
 	private readonly terminal: Promise<never>;
 	private resolveReady!: () => void;
@@ -369,6 +373,20 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		}
 	}
 
+	/** The first real input starts an official SDK query; bound only that initialization. */
+	private async withinInitializationWindow<T>(operation: Promise<T>, deadlineMs: number): Promise<T> {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			return await Promise.race([
+				operation,
+				this.terminal,
+				new Promise<never>((_, reject) => { timer = this.deps.clock.setTimeout(() => reject(new Error("Claude Agent SDK initialization timed out")), deadlineMs); }),
+			]);
+		} finally {
+			if (timer) this.deps.clock.clearTimeout(timer);
+		}
+	}
+
 	private async startInternal(): Promise<void> {
 		this.state = "starting";
 		try {
@@ -385,6 +403,9 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 			}
 			if (!sandboxLaunch && this.options.env?.BOBBIT_SESSION_ID && (!directLaunch || !directLaunch.sessionId || !directLaunch.configDir || !directLaunch.oauthAccessToken)) {
 				throw new ClaudeAgentSdkUnavailableError("CLAUDE_AGENT_SDK_AUTH_UNAVAILABLE: connect Anthropic OAuth in Bobbit and retry");
+			}
+			if (this.options.claudeAgentSdkSessionId && !isClaudeAgentSdkSessionId(this.options.claudeAgentSdkSessionId)) {
+				throw new ClaudeAgentSdkUnavailableError("Claude Agent SDK has no valid resume id");
 			}
 			const systemPrompt = this.options.systemPromptPath ? fs.readFileSync(this.options.systemPromptPath, "utf8") : undefined;
 			const initialModel = this.options.initialModel?.startsWith("claude-agent-sdk/")
@@ -451,15 +472,10 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 			}
 			this.queryHandle = isPromise(query) ? await this.withinStartupWindow(query) : query;
 			void this.consume(this.queryHandle);
-			// The streamed init and initializationResult are independently ordered by
-			// the SDK. Require both: controls from initializationResult and a validated
-			// resume identity from system:init. Never read identity from the result.
-			const [initialized] = await this.withinStartupWindow(Promise.all([
-				this.queryHandle.initializationResult(),
-				this.initializationIdentity.promise,
-			]));
-			await this.captureModelCapabilities(initialized);
-			if (this.terminalError || this.closed) throw this.terminalError ?? new Error("Claude Agent SDK stopped during initialization");
+			// Official AsyncIterable queries can remain completely idle until their
+			// first user row. Readiness here means the handle is usable, not that a
+			// conversation or resume identity exists yet.
+			if (this.terminalError || this.closed) throw this.terminalError ?? new Error("Claude Agent SDK stopped during startup");
 			this.state = "ready";
 			this.resolveReady();
 		} catch (error) {
@@ -467,6 +483,30 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 			await this.cleanupTerminal();
 			throw this.terminalError!;
 		}
+	}
+
+	/** Capture controls and identity only after the first genuine input is accepted. */
+	private async initializeFromFirstInput(timeoutMs: number): Promise<void> {
+		if (this.initializationPromise) return this.initializationPromise;
+		this.initializationPromise = (async () => {
+			try {
+				// The streamed init and initializationResult are independently ordered by
+				// the SDK. Require both: controls from initializationResult and a validated
+				// resume identity from system:init. Never read identity from the result.
+				const [initialized] = await this.withinInitializationWindow(Promise.all([
+					this.queryHandle!.initializationResult(),
+					this.initializationIdentity.promise,
+				]), Math.min(timeoutMs, COLD_REPROMPT_READY_TIMEOUT_MS));
+				await this.captureModelCapabilities(initialized);
+				if (this.terminalError || this.closed) throw this.terminalError ?? new Error("Claude Agent SDK stopped during initialization");
+				this.initializationComplete = true;
+				this.initializationPending = false;
+			} catch (error) {
+				this.fail(error);
+				throw this.terminalError!;
+			}
+		})();
+		return this.initializationPromise;
 	}
 
 	private async captureModelCapabilities(initialized: unknown): Promise<void> {
@@ -612,6 +652,11 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 			this.fail(new ClaudeAgentSdkUnavailableError("Claude Agent SDK did not provide a valid resumable session id"));
 			return;
 		}
+		if (this.options.claudeAgentSdkSessionId && event.session_id !== this.options.claudeAgentSdkSessionId) {
+			// A resumed query must not silently replace its persisted conversation.
+			this.fail(new ClaudeAgentSdkUnavailableError("Claude Agent SDK resume identity did not match"));
+			return;
+		}
 		this.initializedSessionId = event.session_id;
 		this.initializationIdentity.resolve(event.session_id);
 	}
@@ -646,7 +691,7 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 				if (rootTurnEnd) this.activeToolSurface?.subagentPolicy?.clear();
 				if (rootTurnEnd && this.state === "running") this.state = "ready";
 			}
-			if (!this.closed && this.state === "starting") this.fail(new Error("Claude Agent SDK ended before initialization"));
+			if (!this.closed && !this.initializationComplete) this.fail(new Error("Claude Agent SDK ended before initialization"));
 		} catch (error) {
 			if (!this.closed) this.fail(error);
 		}
@@ -716,6 +761,11 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 	private async enqueue(text: string, images: Array<{ type: "image"; data: string; mimeType: string }> | undefined, timeoutMs: number, priority?: "now"): Promise<void> {
 		await this.waitForReady(Math.min(timeoutMs, COLD_REPROMPT_READY_TIMEOUT_MS));
 		if (this.state === "failed" || this.state === "stopped") throw this.terminalError ?? new Error("Claude Agent SDK bridge stopped");
+		if (!this.initializationComplete && this.initializationPending) {
+			throw new ClaudeAgentSdkUnavailableError("Claude Agent SDK initialization is in progress");
+		}
+		const firstInitialization = !this.initializationComplete;
+		if (firstInitialization) this.initializationPending = true;
 		const body = synthesizeAttachmentText(text, images);
 		const content: Array<Record<string, unknown>> = [];
 		if (body) content.push({ type: "text", text: body });
@@ -733,7 +783,11 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		try {
 			await this.input.push(message, timeoutMs, this.deps.clock);
 			if (turn) this.emitPendingTurnStart(turn);
+			// This is deliberately after input delivery: an idle AsyncIterable must not
+			// receive a synthetic/bootstrap row merely to obtain system:init.
+			if (firstInitialization) await this.initializeFromFirstInput(timeoutMs);
 		} catch (error) {
+			if (firstInitialization && !this.initializationPromise) this.initializationPending = false;
 			if (turn && this.pendingTurnStart === turn) {
 				this.clearPendingTurnStart(turn);
 				// Do not resurrect terminal or interrupting states while undoing an
@@ -810,6 +864,7 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 	async setModel(provider: string, modelId: string): Promise<any> {
 		if (provider !== "claude-agent-sdk") return unsupported("Switching runtimes requires a new session");
 		if (!this.queryHandle) return unsupported("Claude Agent SDK query is not running");
+		if (!this.initializationComplete) return unsupported("Claude Agent SDK controls are unavailable until initialization completes");
 		const capability = resolveClaudeAgentSdkModelCapability(this.modelCapabilities, modelId);
 		if (this.modelCapabilities && !capability) return unsupported(`Unsupported Claude Agent SDK model: ${modelId}`);
 		await this.queryHandle.setModel(capability?.wireValue ?? modelId);
@@ -822,6 +877,7 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 	}
 	async setThinkingLevel(level: string): Promise<any> {
 		if (!this.queryHandle) return unsupported("Claude Agent SDK query is not running");
+		if (!this.initializationComplete) return unsupported("Claude Agent SDK controls are unavailable until initialization completes");
 		const capability = this.activeModelCapability;
 		const budget = thinkingBudgetForLevel(level);
 		if (budget === undefined) return unsupported(`Unsupported thinking level: ${level}`);
