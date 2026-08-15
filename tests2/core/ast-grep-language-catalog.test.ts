@@ -10,16 +10,24 @@ import {
 } from "../../market-packs/code-intelligence/lib/language-matrix.ts";
 
 describe("ast-grep language catalogue", () => {
-	it("uses the canonical data-driven AST shape without LSP capability data", () => {
-		expect(CODE_INTELLIGENCE_LANGUAGE_MATRIX.every((language) => language.ast.supported)).toBe(true);
+	it("keeps AST compatibility while declaring structural-search and LSP facts independently", () => {
+		expect(CODE_INTELLIGENCE_LANGUAGE_MATRIX.every((language) => language.ast?.supported)).toBe(true);
 		expect(normalizeAstGrepLanguage("PYTHON")).toMatchObject({
 			id: "python",
 			label: "Python",
 			evidence: { globs: expect.arrayContaining(["**/*.py", "**/*.pyi"]) },
 			ast: { supported: true, grammar: "Python" },
+			structuralSearch: { state: "supported", astGrepGrammar: "Python" },
 		});
 		expect(normalizeAstGrepLanguage("not-a-language")).toBeUndefined();
-		expect(CODE_INTELLIGENCE_LANGUAGE_MATRIX.every((language) => !("alias" in language || "cliLanguage" in language || "extensions" in language || "structuralSearch" in language))).toBe(true);
+		expect(CODE_INTELLIGENCE_LANGUAGE_MATRIX.every((language) => !("alias" in language || "cliLanguage" in language || "extensions" in language))).toBe(true);
+
+		const structuralOnly = CODE_INTELLIGENCE_LANGUAGE_MATRIX.filter((language) => language.structuralSearch.state === "supported" && !language.lsp);
+		expect(structuralOnly.length).toBeGreaterThan(0);
+		expect(CODE_INTELLIGENCE_LANGUAGE_MATRIX.find((language) => language.id === "typescript")).toMatchObject({
+			structuralSearch: { state: "supported", astGrepGrammar: "TypeScript" },
+			lsp: { server: { id: "typescript-language-server" } },
+		});
 	});
 
 	it("maps required extensions and makes collisions explicit", () => {
