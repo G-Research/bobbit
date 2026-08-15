@@ -11,6 +11,7 @@
  * import without dragging the whole verification-harness graph in.
  */
 
+import type { GateSignalStep } from "./gate-store.js";
 import { isRestartInterruptedStep } from "./verification-logic.js";
 
 export interface FailureStepLike {
@@ -18,7 +19,7 @@ export interface FailureStepLike {
 	type: string;
 	passed: boolean;
 	skipped?: boolean;
-	status?: "waiting" | "running" | "passed" | "failed" | "timeout" | "skipped";
+	status?: GateSignalStep["status"];
 	output?: string;
 }
 
@@ -77,7 +78,10 @@ export function buildVerificationFailureMessage(
 	const failed = steps
 		.map((step, index) => ({ step, index }))
 		.filter(({ step }) =>
-			!step.passed && !step.skipped && !isRestartInterruptedFailureStep(step),
+			!step.passed
+			&& !step.skipped
+			&& step.status !== "cancelled"
+			&& !isRestartInterruptedFailureStep(step),
 		);
 
 	const lines: string[] = [];

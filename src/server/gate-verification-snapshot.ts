@@ -16,7 +16,7 @@ import {
 const LIVE_LOG_READ_MAX_BYTES = 256 * 1024;
 const LIVE_LOG_TAIL_CHUNK_BYTES = 16 * 1024;
 
-export type GateVerificationSnapshotStatus = "passed" | "failed" | "timeout" | "skipped" | "running" | "waiting" | "blocked";
+export type GateVerificationSnapshotStatus = NonNullable<GateSignal["verification"]["steps"][number]["status"]> | "blocked";
 
 /** Thrown when a `stepName` filter does not match any verification step. Maps to a 400. */
 export class UnknownVerificationStepError extends Error {
@@ -345,7 +345,7 @@ function isBlockedByEarlierFailure(activeStep: ActiveVerification["steps"][numbe
 
 function finalStatusFromPersisted(step: GateSignal["verification"]["steps"][number], verificationStatus?: GateSignal["verification"]["status"]): GateVerificationSnapshotStatus {
 	if (verificationStatus === "running" && (step.status === "running" || step.status === "waiting")) return step.status;
-	if (step.status === "passed" || step.status === "failed" || step.status === "timeout" || step.status === "skipped") return step.status;
+	if (step.status === "passed" || step.status === "failed" || step.status === "timeout" || step.status === "skipped" || step.status === "cancelled") return step.status;
 	if (step.skipped) return "skipped";
 	return step.passed ? "passed" : "failed";
 }
@@ -360,7 +360,7 @@ function runningDurationMs(activeStep: ActiveVerification["steps"][number], now:
 }
 
 function buildSummary(counts: Record<GateVerificationSnapshotStatus, number>): string {
-	const order: GateVerificationSnapshotStatus[] = ["passed", "failed", "timeout", "skipped", "running", "waiting", "blocked"];
+	const order: GateVerificationSnapshotStatus[] = ["passed", "failed", "timeout", "skipped", "cancelled", "running", "waiting", "blocked"];
 	const parts = order.filter(status => counts[status] > 0).map(status => `${counts[status]} ${status}`);
 	return parts.length ? parts.join(", ") : "0 steps";
 }
@@ -527,6 +527,7 @@ export function buildGateVerificationSnapshot(input: {
 		failed: 0,
 		timeout: 0,
 		skipped: 0,
+		cancelled: 0,
 		running: 0,
 		waiting: 0,
 		blocked: 0,
