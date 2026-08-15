@@ -124,6 +124,11 @@ function parseModelString(modelString: string, label: string): { provider: strin
 	return { provider: normalizedModelString.slice(0, slash), modelId: normalizedModelString.slice(slash + 1) };
 }
 
+function isExplicitUnsuccessfulRpcResponse(value: unknown): boolean {
+	return !!value && typeof value === "object" && !Array.isArray(value)
+		&& (value as { success?: unknown }).success === false;
+}
+
 function validateControlledFallbackTarget(selectedModel: string, fallbackModel: string | undefined): string {
 	if (!fallbackModel) {
 		throw new Error("controlled model fallback is enabled but default.sessionModel is unset");
@@ -155,7 +160,11 @@ async function bindModelString(
 		let succeeded = false;
 		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 			try {
-				await rpc.setModel(provider, modelId);
+				const result = await rpc.setModel(provider, modelId);
+				if (isExplicitUnsuccessfulRpcResponse(result)) {
+					// RpcBridge failures can include provider bodies. Never reflect them.
+					throw new Error("setModel returned an unsuccessful response");
+				}
 				succeeded = true;
 				break;
 			} catch (err) {

@@ -67,6 +67,33 @@ describe("applyReviewModelOverrides — desired contract", () => {
 		);
 	});
 
+	it("treats an explicit unsuccessful RpcBridge envelope as a sanitized setModel failure", async () => {
+		const privateProviderBody = "provider response: Authorization: Bearer private-token";
+		const calls: Array<[string, string]> = [];
+		const rpc = makeRpc({
+			async setModel(provider: string, modelId: string) {
+				calls.push([provider, modelId]);
+				return { success: false, error: privateProviderBody };
+			},
+		});
+		const prefs = makePrefs({ "default.reviewModel": "aigw/us.anthropic.claude-haiku-4-5" });
+
+		await assert.rejects(
+			applyReviewModelOverrides(rpc, { prefs, maxAttempts: 2, retryDelayMs: 0 }),
+			(err: unknown) => {
+				assert.ok(err instanceof Error);
+				assert.match(err.message, /setModel returned an unsuccessful response/);
+				assert.equal(err.message.includes(privateProviderBody), false);
+				return true;
+			},
+		);
+		assert.deepEqual(calls, [
+			["aigw", "us.anthropic.claude-haiku-4-5"],
+			["aigw", "us.anthropic.claude-haiku-4-5"],
+		]);
+		assert.equal(rpc.getStateCalls, 0, "an unsuccessful envelope must not be misclassified as a read-back race");
+	});
+
 	it("(b) throws on read-back mismatch when getState reports a different bound model", async () => {
 		const rpc = makeRpc({
 			async setModel() { /* pretend success */ return undefined; },

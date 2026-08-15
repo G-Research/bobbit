@@ -897,8 +897,11 @@ describe("ClaudeAgentSdkBridge", () => {
 		});
 	});
 
-	it("keeps aliases as the public model identity while resolving them to SDK wire values", async () => {
-		const models: SdkModel[] = [{ value: "sonnet", resolvedModel: "claude-sonnet-5", supportsEffort: true, supportedEffortLevels: ["high"] }];
+	it("keeps documented aliases as the public model identity while resolving them to SDK wire values", async () => {
+		const models: SdkModel[] = [
+			{ value: "sonnet", resolvedModel: "claude-sonnet-5", supportsEffort: true, supportedEffortLevels: ["high"] },
+			{ value: "haiku", resolvedModel: "claude-haiku-5" },
+		];
 		const fixture = bridgeFixture({ initialModel: "claude-agent-sdk/sonnet", models });
 		const query = await startReady(fixture);
 		await expect(fixture.bridge.getState()).resolves.toMatchObject({
@@ -909,10 +912,10 @@ describe("ClaudeAgentSdkBridge", () => {
 		await expect(fixture.bridge.getState()).resolves.toMatchObject({
 			data: { model: expect.objectContaining({ id: "claude-sonnet-5" }) },
 		});
-		await fixture.bridge.setModel("claude-agent-sdk", "sonnet");
-		expect(query.setModels).toEqual(["sonnet", "sonnet"]);
+		await fixture.bridge.setModel("claude-agent-sdk", "haiku");
+		expect(query.setModels).toEqual(["sonnet", "haiku"]);
 		await expect(fixture.bridge.getState()).resolves.toMatchObject({
-			data: { model: expect.objectContaining({ id: "sonnet", reasoning: true }) },
+			data: { model: expect.objectContaining({ id: "haiku", reasoning: false }) },
 		});
 	});
 
