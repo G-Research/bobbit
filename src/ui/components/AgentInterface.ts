@@ -24,7 +24,7 @@ async function openImageModelSelector(...args: Parameters<typeof ImageModelSelec
 	const mod = await import("../dialogs/ImageModelSelector.js");
 	mod.ImageModelSelector.open(...args);
 }
-import type { MessageEditor } from "./MessageEditor.js";
+import type { MessageEditor, QueuedMessage } from "./MessageEditor.js";
 import "./MessageEditor.js";
 import "./MessageList.js";
 // <git-status-widget> is loaded on demand via `app/lazy-widgets.ts` to
@@ -522,8 +522,8 @@ export class AgentInterface extends LitElement {
 	};
 
 	/**
-	 * Window-level Escape handler. Aborts the streaming agent regardless of
-	 * which element has focus, matching the Stop button. Suppressed when a
+	 * Window-level Escape handler. Stops the active turn while it is streaming
+	 * or compacting, matching the unified Stop button. Suppressed when a
 	 * modal/popover is open so Escape can dismiss those instead.
 	 *
 	 * The MessageEditor textarea also handles Escape locally via its own
@@ -534,7 +534,8 @@ export class AgentInterface extends LitElement {
 		if (e.key !== "Escape") return;
 		if (e.defaultPrevented) return;
 		const session = this.session;
-		if (!session || !session.state?.isStreaming) return;
+		const isCompacting = !!(session as any)?._isCompacting;
+		if (!session || (!session.state?.isStreaming && !isCompacting) || (session as any).isAborting) return;
 
 		// Bail out if any modal/popover is open. Covers ARIA-tagged dialogs,
 		// known dialog custom elements, lightbox overlays, and any element
@@ -560,17 +561,19 @@ export class AgentInterface extends LitElement {
 			if (document.querySelector(dialogSelector)) return;
 		}
 
-		// Don't double-fire when MessageEditor's local handler will already abort.
-		// MessageEditor sits inside this component; let its existing focused-textarea
-		// path handle that case (it already calls onAbort).
+		// Don't double-fire when MessageEditor's local handler will already stop.
+		// MessageEditor sits inside this component; let its focused-textarea path
+		// handle that case (it already calls onAbort).
 		const active = (typeof document !== "undefined" ? document.activeElement : null) as HTMLElement | null;
 		if (active?.tagName === "TEXTAREA" || active?.tagName === "INPUT") return;
 
 		e.preventDefault();
 		session.abort();
 	};
-	// Server-authoritative queue state, updated via onQueueUpdate callback
-	private _serverQueue: Array<{ id: string; text: string; isSteered: boolean; createdAt: number; images?: any[]; attachments?: any[] }> = [];
+	// Server-authoritative delivery outbox, updated via onQueueUpdate callback.
+	// It includes queued and dispatching rows until their correlated transcript
+	// message is surfaced; MessageEditor is only the visible projection.
+	private _serverQueue: QueuedMessage[] = [];
 	/**
 	 * Per-session composer attachment draft, lifted out of the transient
 	 * <message-editor> element so it survives element recreation (slow-path
@@ -2686,13 +2689,6 @@ export class AgentInterface extends LitElement {
 							</div>
 						</div>
 						` : ''}
-						${(this.session as any)?.isAborting ? html`
-						<div class="flex items-center gap-2 px-4 py-1 text-muted-foreground text-sm">
-							<svg class="animate-spin shrink-0" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-								<path d="M21 12a9 9 0 1 1-6.219-8.56"/>
-							</svg>
-							Aborting…
-						</div>` : nothing}
 						${this.canContinueArchived && !this.nonInteractive && !(state as any).isPreparing ? html`
 						<div class="flex flex-col items-center gap-2 px-4 py-6" style="border-top:1px solid var(--border);" data-continue-archived-footer>
 							<div class="text-xs text-muted-foreground">This session is archived.</div>
@@ -2725,6 +2721,8 @@ export class AgentInterface extends LitElement {
 							.projectId=${this.projectId}
 							.runtime=${(state as { runtime?: "pi" | "claude-agent-sdk" }).runtime}
 							.isStreaming=${state.isStreaming}
+							.isCompacting=${!!(session as any)._isCompacting}
+							.isAborting=${!!(session as any).isAborting}
 							.currentModel=${state.model}
 							.thinkingLevel=${state.thinkingLevel}
 							.showAttachmentButton=${this.enableAttachments}
@@ -2752,15 +2750,20 @@ export class AgentInterface extends LitElement {
 									(session as any).removeQueued(id);
 								}
 							}}
-							.onEditQueued=${(msg: any) => {
-								// Remove pill from queue and place text back in textarea for editing
+							.onEditQueued=${(msg: QueuedMessage) => {
+								// Remove the exact occurrence, then restore its body to the composer.
 								if (typeof (session as any).removeQueued === 'function') {
 									(session as any).removeQueued(msg.id);
 								}
 								this._messageEditor.value = msg.text || '';
-								// Focus the textarea inside the editor
-								const ta = this._messageEditor.shadowRoot?.querySelector('textarea');
-								ta?.focus();
+								this._messageEditor.querySelector('textarea')?.focus();
+							}}
+							.onRetryQueued=${(msg: QueuedMessage) => {
+								if (typeof (session as any).retryIntent === 'function') {
+									(session as any).retryIntent(msg.id);
+								} else if (typeof (session as any).retryQueued === 'function') {
+									(session as any).retryQueued(msg.id);
+								}
 							}}
 							.onReorder=${(messageIds: string[]) => {
 								if (typeof (session as any).reorderQueue === 'function') {

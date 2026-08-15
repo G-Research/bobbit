@@ -18,6 +18,14 @@ import {
 	type WsConnection,
 	type WsMsg,
 } from "./_e2e/e2e-setup.js";
+import {
+	frameHasIntentIds,
+	intentId,
+	intentRows,
+	latestIntentProjection,
+	reliableMockCore,
+	userMessageEnds,
+} from "./helpers/reliable-turn-barriers.js";
 
 // Longer than the test timeout: these turns should only end via abort, never
 // because the worker was paused long enough for the mock sleep to finish.
@@ -28,6 +36,12 @@ async function startAbortableBusyTurn(conn: WsConnection, label: string): Promis
 	conn.send({ type: "prompt", text: `STAY_BUSY:${BUSY_TURN_MS} ${label}` });
 	await conn.waitForFrom(cursor, statusPredicate("streaming"));
 	await conn.waitForFrom(cursor, toolStartPredicate("Bash"));
+}
+
+function deliveryIntentId(frame: WsMsg): string | undefined {
+	return frame.data?.deliveryIntentId
+		?? frame.data?.message?.deliveryIntentId
+		?? frame.data?.message?.intentId;
 }
 
 test.setTimeout(30_000);
@@ -266,94 +280,118 @@ test.describe("Abort status E2E", () => {
 		}
 	});
 
-	test("PI-25c: live-steer + followup during aborting window preserves order", async () => {
-		// Acceptance criterion #2: if the user sends a follow-up prompt after
-		// Stop but before the steer drains, both messages appear in chronological
-		// order — the steered one first (it was in-flight when abort arrived) —
-		// and the agent processes both.
+	test("PI-25c: graceful Stop preserves followup without redriving an acknowledged steer", async ({ gateway }) => {
+		const directId = "pi25c-steer-0001";
+		const followupId = "pi25c-followup-0002";
 		sessionId = await createSession();
 		const conn = await connectWs(sessionId);
+		const followupConn = await connectWs(sessionId);
+		const core = reliableMockCore(gateway, sessionId);
 
 		try {
 			await conn.waitFor((m) => m.type === "queue_update");
+			await followupConn.waitFor((m) => m.type === "queue_update");
+			core.armBarrier("tool:before-end");
+			conn.send({ type: "prompt", text: "RELIABLE_TOOL_HOLD" });
+			await core.waitForBarrier("tool:before-end");
 
-			await startAbortableBusyTurn(conn, "long running task");
-
+			// Accept the steer into Bobbit's ledger but deterministically suppress
+			// Pi's original echo. Hold both RPC acknowledgement and abort terminal
+			// proof so the one-carrier aborting window is directly observable.
+			core.env.MOCK_STEER_QUEUE_DROP = "always";
+			core.armBarrier("steer:1:before-ack");
+			core.armBarrier("abort:1:before-agent-end");
+			core.armBarrier("prompt:2:received");
 			const cursor = conn.messageCount();
+			conn.send({ type: "steer", text: "S_DIRECT", intentId: directId });
+			await core.waitForBarrier("steer:1:before-ack");
+			// Admit the follow-up from a second client while the first socket is held
+			// at steer acknowledgement, then Stop with both occurrences durable.
+			followupConn.send({ type: "prompt", text: "FOLLOWUP", intentId: followupId });
+			const acceptedProjection = await conn.waitForFrom(cursor, (frame) =>
+				frameHasIntentIds(frame, [directId, followupId]),
+			).catch((error) => {
+				const projections = conn.messages.slice(cursor)
+					.filter((frame) => frame.type === "queue_update" || frame.type === "intent_update")
+					.map((frame) => intentRows(frame).map((row) => ({ id: intentId(row), state: row.deliveryState })));
+				throw new Error(`PI-25c accepted projection missing: ${JSON.stringify({ commands: core.commandJournal, projections })}`, { cause: error });
+			});
+			expect(intentRows(acceptedProjection).map(intentId)).toEqual([directId, followupId]);
 
-			// Live-steer, then abort, then follow-up while aborting.
-			conn.send({ type: "steer", text: "S_DIRECT" });
 			conn.send({ type: "abort" });
-			// Follow-up during the aborting window. `enqueuePrompt` will see
-			// status=="aborting" (not idle) and enqueue behind the steered row.
-			conn.send({ type: "prompt", text: "FOLLOWUP" });
+			await core.waitForBarrier("abort:1:before-agent-end");
+			const abortingProjection = latestIntentProjection(conn.messages);
+			if (!abortingProjection || !frameHasIntentIds(abortingProjection, [directId, followupId])) {
+				const projections = conn.messages.slice(cursor)
+					.filter((frame) => frame.type === "queue_update" || frame.type === "intent_update")
+					.map((frame) => intentRows(frame).map((row) => ({ id: intentId(row), state: row.deliveryState })));
+				throw new Error(`PI-25c aborting projection missing: ${JSON.stringify({ commands: core.commandJournal, projections })}`);
+			}
+			expect(intentRows(abortingProjection).map(intentId)).toEqual([directId, followupId]);
+			for (const id of [directId, followupId]) {
+				const pending = intentRows(abortingProjection).filter((row) => intentId(row) === id);
+				const surfaced = conn.messages.slice(cursor).filter((frame) =>
+					frame.type === "event"
+					&& frame.data?.type === "message_end"
+					&& deliveryIntentId(frame) === id,
+				);
+				expect(pending.length + surfaced.length, `PI-25c: ${id} has exactly one visible carrier while abort proof is held`).toBe(1);
+			}
 
-			// Wait for both user turns to be observed, then for both agent_ends.
-			await conn.waitForFrom(
-				cursor,
-				(m) =>
-					m.type === "event" &&
-					m.data?.type === "message_end" &&
-					m.data?.message?.role === "user" &&
-					m.data?.message?.content?.[0]?.text === "S_DIRECT",
-				10_000,
+			core.releaseBarrier("steer:1:before-ack");
+			core.releaseBarrier("tool:before-end");
+			await core.waitForBarrier("tool:after-end");
+			core.releaseBarrier("abort:1:before-agent-end");
+			const followupReceipt = await core.waitForBarrier("prompt:2:received");
+			const recoveredProjection = await conn.waitForFrom(cursor, (frame) => {
+				const rows = intentRows(frame);
+				return rows.map(intentId).join(",") === [directId, followupId].join(",")
+					&& rows.find((row) => intentId(row) === directId)?.deliveryState === "uncertain";
+			});
+			const recoveredRows = intentRows(recoveredProjection);
+			expect(recoveredRows.map(intentId)).toEqual([directId, followupId]);
+			const followupRow = recoveredRows.find((row) => intentId(row) === followupId);
+			expect({
+				kind: followupReceipt.kind,
+				occurrence: followupReceipt.occurrence,
+				text: followupReceipt.text,
+				intentId: intentId(followupRow),
+			}).toEqual({
+				kind: "prompt",
+				occurrence: 2,
+				text: "FOLLOWUP",
+				intentId: followupId,
+			});
+			expect(recoveredRows.find((row) => intentId(row) === directId)).toMatchObject({
+				deliveryState: "uncertain",
+				retryable: false,
+			});
+
+			core.releaseBarrier("prompt:2:received");
+			await conn.waitForFrom(cursor, (frame) =>
+				userMessageEnds([frame], "FOLLOWUP")
+					.some((messageEnd) => deliveryIntentId(messageEnd) === followupId),
 			);
 
-			await conn.waitForFrom(
-				cursor,
-				(m) =>
-					m.type === "event" &&
-					m.data?.type === "message_end" &&
-					m.data?.message?.role === "user" &&
-					m.data?.message?.content?.[0]?.text === "FOLLOWUP",
-				10_000,
-			);
+			const followupEnds = userMessageEnds(conn.messages.slice(cursor), "FOLLOWUP")
+				.filter((frame) => deliveryIntentId(frame) === followupId);
+			expect(followupEnds, "PI-25c: the queued follow-up surfaces exactly once after Stop").toHaveLength(1);
+			expect(userMessageEnds(conn.messages.slice(cursor), "S_DIRECT"),
+				"PI-25c: the acknowledged/no-echo steer must remain uncertain and never replay").toHaveLength(0);
 
-			// Inspect the ordering: we expect, after `cursor`:
-			//   agent_end (abort)
-			//   -> user message_end "S_DIRECT"
-			//   -> agent_end (steer turn)
-			//   -> user message_end "FOLLOWUP"
-			//   -> agent_end (followup turn)
-			const post = conn.messages.slice(cursor);
-			const directIdx = post.findIndex(
-				(m) =>
-					m.type === "event" &&
-					m.data?.type === "message_end" &&
-					m.data?.message?.role === "user" &&
-					m.data?.message?.content?.[0]?.text === "S_DIRECT",
-			);
-			const followupIdx = post.findIndex(
-				(m) =>
-					m.type === "event" &&
-					m.data?.type === "message_end" &&
-					m.data?.message?.role === "user" &&
-					m.data?.message?.content?.[0]?.text === "FOLLOWUP",
-			);
-
-			expect(directIdx).toBeGreaterThanOrEqual(0);
-			expect(followupIdx).toBeGreaterThanOrEqual(0);
-			expect(
-				directIdx,
-				"PI-25c: S_DIRECT must be processed before FOLLOWUP (steered messages drain first)",
-			).toBeLessThan(followupIdx);
-
-			// At least one agent_end between the two user turns (the steer's turn).
-			const agentEndsBetween = post
-				.slice(directIdx + 1, followupIdx)
-				.filter((m) => m.type === "event" && m.data?.type === "agent_end");
-			expect(
-				agentEndsBetween.length,
-				"PI-25c: agent must complete a turn on S_DIRECT before FOLLOWUP is dispatched",
-			).toBeGreaterThanOrEqual(1);
-
-			// And an agent_end after FOLLOWUP so both turns complete.
-			await conn.waitForFrom(
-				cursor + followupIdx,
-				(m) => m.type === "event" && m.data?.type === "agent_end",
-				10_000,
-			);
+			const finalOutbox = [...conn.messages].reverse().find((frame) => frame.type === "queue_update");
+			expect(intentRows(finalOutbox).map(intentId)).toEqual([directId]);
+			expect(intentRows(finalOutbox)[0]).toMatchObject({
+				deliveryState: "uncertain",
+				retryable: false,
+			});
+			expect(core.commandJournal.filter((entry) => entry.kind === "steer").map((entry) => entry.text))
+				.toEqual(["S_DIRECT"]);
+			expect(core.commandJournal.filter((entry) => entry.kind === "prompt").map((entry) => entry.text))
+				.toEqual(["RELIABLE_TOOL_HOLD", "FOLLOWUP"]);
 		} finally {
+			core.releaseAllBarriers();
+			followupConn.close();
 			conn.close();
 		}
 	});

@@ -19,7 +19,7 @@ Each session selects a runtime from its configured provider. Pi sessions run a `
 - **Multi-device**: Multiple browser tabs/devices can connect to the same session. Events are broadcast to all clients.
 - **Session actions**: Sidebar rows and open-session headers share one canonical action model for rename/edit staff, terminate/end team, refresh, fork, copy link, system prompt inspection, and opening sessions in new windows. Eligible durable user prompts use the same popover component for exact-text copy and cut-before history forks. See [session-actions.md](session-actions.md).
 - **Sidebar tree**: Projects, goals, sessions, staff, delegates, team leads, and archived sections share one tree model for hierarchy, expansion persistence, and indentation. See [sidebar-tree-state.md](sidebar-tree-state.md) and [sidebar-tree-indentation.md](sidebar-tree-indentation.md).
-- **Force abort**: If a graceful abort doesn't make the agent idle within 3 seconds, the process is killed, a synthetic `agent_end` is emitted, and a fresh agent is spawned to resume the session. An `"aborting"` status is broadcast immediately so the UI shows feedback during the grace period. After force-kill, any in-flight steers that the SDK accepted but never echoed are pulled off the per-session shadow ledger and re-enqueued at the front of `promptQueue`; `drainQueue()` then redispatches them as a single steered batch. See [prompt-queue.md](prompt-queue.md#abort-and-force-kill-recovery) for details.
+- **Force abort**: If graceful Stop does not settle, Bobbit replaces the agent process and broadcasts `aborting` during ownership transfer. Accepted queued work remains visible and retargets to the next turn. A dispatched occurrence is never blindly replayed: exact receipt settles it, proven no-start may restore it once, and unresolved delivery remains visibly uncertain. See [Stop, failure, and recovery](prompt-queue.md#stop-failure-and-recovery).
 
 ## Maintenance
 
@@ -102,19 +102,20 @@ Per-session token usage and cost tracking, aggregated to goal and task level.
 See [docs/cache-hit-rate.md](cache-hit-rate.md) for formula details, null semantics, and implementation notes.
 See [session-cost.md](session-cost.md) for source-of-truth, hydration, and compaction behavior.
 
-## Prompt Queue
+## Reliable Prompt and Steer Delivery
 
-Server-side queuing of user messages when the agent is busy.
+Every composer submission has a stable occurrence ID and remains visible in either the delivery outbox or transcript.
 
-- Steered messages sort before non-steered (priority interrupt).
-- Queue auto-drains when the agent finishes a turn (suppressed on error — user must retry first).
-- Client can promote queued messages to steered (`steer_queued`), remove them (`remove_queued`), edit them (remove + populate textarea), or drag-reorder them (`reorder_queue`).
-- Queue pills show drag handle, edit (pencil), steer, and remove buttons. Steered pills that remain queued show a "Sent" badge; rows promoted while streaming are removed from the queue as they dispatch.
-- Steered messages are batched — they reorder to the front of the queue and are delivered as a single combined prompt. Streaming `steer_queued` promotions dispatch immediately through `_dispatchSteer()`; idle or recovered steered rows drain first when the agent becomes idle.
-- `follow_up` flag is preserved through the queue: messages enqueued with `isFollowUp: true` dispatch via `followUp()` RPC on drain.
-- Queue state broadcast to clients via `queue_update` events.
+- The browser persists local unsent work in IndexedDB before transport; socket send never settles it.
+- The server persists accepted queue/attempt ownership before Pi dispatch and admits replay idempotently by ID.
+- Prompts and steers use `next-turn` and `continuation` lanes with FIFO sequence inside each lane.
+- Reliable steers dispatch serially as distinct occurrences, including identical text.
+- Queue pills show actionable lifecycle states such as **Waiting for connection**, **Sending…**, **Awaiting delivery confirmation**, and **Not delivered**.
+- Compaction, Stop, and bridge replacement keep admission open but fence dispatch until their release owner decides the safe lane.
+- A correlated Pi user event transfers the visible carrier into chat; Pi/socket acknowledgement alone does not.
+- Definite failures can Retry with the same occurrence ID. Ambiguous delivery remains visible and is never automatically replayed.
 
-See [prompt-queue.md](prompt-queue.md) for the full architecture.
+See [Reliable prompt and steer delivery](prompt-queue.md) for the full contract.
 
 ## Workflows
 
@@ -145,10 +146,15 @@ Sessions created with an `assistantType` get the corresponding system prompt aut
 
 ## Compaction
 
-Context compaction reduces token usage by summarising the conversation.
+Context compaction reduces token usage while remaining part of the active turn lifecycle.
 
-- **Manual**: User triggers via `compact` WebSocket command. Server calls `rpcClient.compact()` (120s timeout), then refreshes messages and state.
-- **Auto**: Triggered by the agent subprocess when context grows too large. Events flow through the event system and the UI refreshes automatically.
+- **Manual**: User triggers via `/compact`; input accepted during it targets the next turn.
+- **Threshold/overflow**: Pi triggers compaction under context pressure; continuation steers can remain attached to the interrupted turn.
+- All user input remains visible, but no Pi prompt/steer RPC is attempted while the compaction fence is active.
+- One idempotent finisher releases eligible work exactly once.
+- Recoverable `length` overflow invalidates the first truncated assistant stream before Pi retries once.
+
+See [Context compaction](compaction.md#reliable-turn-fence-and-release).
 
 ## System Prompt Assembly
 

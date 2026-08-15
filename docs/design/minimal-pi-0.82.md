@@ -1,5 +1,7 @@
 # Minimal Pi 0.82.1 upgrade
 
+> Historical design for the previous runtime line. The selected `0.84.1` contracts live in [Pi runtime compatibility](../pi-runtime-compatibility.md#pi-0841-reliable-turn-compatibility).
+
 **Status:** implementation-ready design based on `origin/master` at `60aa0d4099f58070217e9ef0c8fe7a683d955d30`.
 
 ## Decision

@@ -252,10 +252,15 @@ test.describe("Journey: orphan tool-result recovery", () => {
 			await editor.fill(FOLLOW_UP_INTENT);
 			await editor.press("Enter");
 			await expect.poll(
-				() => sessionManager.getSession(sessionId)?.rpcClient !== followUpRpc,
-				{ timeout: 20_000, message: "ORPHAN_TOOL_RESULT_BROWSER_RECOVERY: capped follow-up must sanitize and respawn before dispatch" },
-			).toBe(true);
-			await expect.poll(() => orphanIdsIn(transcriptFile), { timeout: 20_000 }).toEqual([]);
+				() => ({
+					replaced: sessionManager.getSession(sessionId)?.rpcClient !== followUpRpc,
+					sanitized: orphanIdsIn(transcriptFile).length === 0,
+					oldBridgeStopped: followUpRpc.running === false,
+				}),
+				{ timeout: 20_000, message: "ORPHAN_TOOL_RESULT_BROWSER_RECOVERY: stable-ID capped follow-up must sanitize, stop the poisoned bridge, and respawn before dispatch" },
+			).toEqual({ replaced: true, sanitized: true, oldBridgeStopped: true });
+			expect(sessionManager._sessionReplacementCoordinators.has(sessionId),
+				"poison recovery/redrive coordinator must release after canonical handoff").toBe(false);
 			session = requireSession(sessionManager, sessionId);
 			await expect.poll(() => messageTextCount(session, FOLLOW_UP_INTENT), { timeout: 20_000 }).toBe(1);
 			await expect.poll(() => session.promptQueue.toArray().filter((row: any) => row.text.includes(FOLLOW_UP_INTENT)).length, { timeout: 20_000 }).toBe(0);

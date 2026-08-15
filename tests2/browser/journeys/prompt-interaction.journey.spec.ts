@@ -271,7 +271,7 @@ test.describe("Journey: Prompt Interaction", () => {
 			const textarea = page.locator("message-editor textarea").first();
 			await expect(textarea).toBeVisible({ timeout: 15_000 });
 			await sendMessage(page, "STAY_BUSY:3000 working");
-			await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
+			await expect(page.getByRole("button", { name: "Stop current turn" })).toBeVisible({ timeout: 10_000 });
 			await textarea.fill("steer me now");
 			await textarea.press("Enter");
 			await expect(page.locator(".queue-pill").first()).toBeVisible({ timeout: 5_000 });
@@ -293,18 +293,18 @@ test.describe("Journey: Prompt Interaction", () => {
 			const textarea = page.locator("message-editor textarea").first();
 			await expect(textarea).toBeVisible({ timeout: 15_000 });
 			await sendMessage(page, "STAY_BUSY:30000 working");
-			await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
+			await expect(page.getByRole("button", { name: "Stop current turn" })).toBeVisible({ timeout: 10_000 });
 			await textarea.focus();
 			await textarea.press("Escape");
-			await expect(page.locator("button[title='Stop streaming']")).toHaveCount(0, { timeout: 10_000 });
+			await expect(page.locator(".stop-current-turn")).toHaveCount(0, { timeout: 10_000 });
 		} finally {
 			await deleteSession(sessionId).catch(() => {});
 		}
 	});
 
-	// Ctrl+Enter during an active turn sends a LIVE steer (optimistic user message),
-	// NOT a queued follow-up pill. Contrast with the queue-pill test above, which
-	// uses plain Enter mid-turn.
+	// Ctrl+Enter during an active turn sends a live steer through the durable
+	// outbox, then settles it only when the correlated transcript row surfaces.
+	// Contrast with plain Enter above, which remains queued for the next turn.
 	test("Ctrl+Enter during streaming sends a live steer, not a queued pill", async ({ page }) => {
 		test.setTimeout(90_000);
 		const sessionId = await createSession();
@@ -315,13 +315,12 @@ test.describe("Journey: Prompt Interaction", () => {
 			const textarea = page.locator("message-editor textarea").first();
 			await expect(textarea).toBeVisible({ timeout: 15_000 });
 			await sendMessage(page, "STAY_BUSY:3000 working");
-			await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 10_000 });
+			await expect(page.getByRole("button", { name: "Stop current turn" })).toBeVisible({ timeout: 10_000 });
 
 			await textarea.fill("steer me live");
 			await textarea.press("Control+Enter");
 
-			// A live steer renders an optimistic user message bubble immediately and
-			// clears the composer — it must NOT create a queue pill.
+			// The correlated live steer surfaces once and clears its outbox row.
 			await expect(
 				page.locator("user-message").filter({ hasText: "steer me live" }).first(),
 			).toBeVisible({ timeout: 10_000 });

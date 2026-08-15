@@ -101,7 +101,7 @@ test.describe("Journey: Preview snapshot reopen", () => {
 
 			const previewFrame = page.locator(".goal-preview-panel iframe").first();
 			const preview = page.frameLocator(".goal-preview-panel iframe").first();
-			await expect(previewFrame, "the initial file-mode preview should target the exact Unicode/dotted entry").toHaveAttribute("src", new RegExp(`/preview/${sessionId}/${FILE_MODE_ENTRY_ROUTE}`), { timeout: 20_000 });
+			await expect(previewFrame, "the initial file-mode preview should target the exact Unicode/dotted entry").toHaveAttribute("src", new RegExp(`/preview/${sessionId}/_artifact/[A-Za-z0-9_-]{1,64}/${FILE_MODE_ENTRY_ROUTE}(?:\\?mtime=|$)`), { timeout: 20_000 });
 			await expect(preview.locator("body"), "the initial file-mode preview should render the nested source entry").toContainText("Artifact File Compact Snapshot Restored Content", { timeout: 20_000 });
 			await expect(preview.locator("#nested-proof"), "the initial preview should load its declared nested asset").toHaveCSS("color", "rgb(12, 34, 56)", { timeout: 20_000 });
 
@@ -114,7 +114,7 @@ test.describe("Journey: Preview snapshot reopen", () => {
 			// Rehydration must preserve the exact Unicode/dotted basename before the
 			// user clicks Open, rather than exposing a source-path or compact marker.
 			await expect(page.locator(`[data-panel-tab-id="${FILE_MODE_TAB_ID}"]`), "the rehydrated marker should register its exact original entry tab").toHaveCount(1, { timeout: 20_000 });
-			await expect(previewFrame, "automatic rehydration should target the exact Unicode/dotted entry").toHaveAttribute("src", new RegExp(`/preview/${sessionId}/${FILE_MODE_ENTRY_ROUTE}`), { timeout: 20_000 });
+			await expect(previewFrame, "automatic rehydration should target the exact Unicode/dotted entry").toHaveAttribute("src", new RegExp(`/preview/${sessionId}/_artifact/[A-Za-z0-9_-]{1,64}/${FILE_MODE_ENTRY_ROUTE}(?:\\?mtime=|$)`), { timeout: 20_000 });
 			await expect(preview.locator("body"), "automatic rehydration should display the original file entry").toContainText("Artifact File Compact Snapshot Restored Content", { timeout: 20_000 });
 			await expect(preview.locator("#nested-proof"), "automatic rehydration should retain the declared nested asset").toHaveCSS("color", "rgb(12, 34, 56)", { timeout: 20_000 });
 

@@ -215,7 +215,7 @@ describe("inferLegacyAigwMeta()", () => {
 // ── Pi model catalog tests ─────────────────────────────────────────
 
 describe("pi-ai model catalog", () => {
-	it("exposes Pi 0.82.1's authoritative direct Claude Opus 5 metadata", () => {
+	it("exposes Pi 0.84.1's authoritative direct Claude Opus 5 metadata", () => {
 		const model = getBuiltinModels("anthropic").find((candidate) => candidate.id === "claude-opus-5");
 		assert.ok(model, "anthropic/claude-opus-5 should exist in the Pi catalog");
 		assert.equal(model.name, "Claude Opus 5");
