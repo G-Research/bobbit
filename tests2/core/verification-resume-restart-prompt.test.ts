@@ -24,13 +24,10 @@
  * `_rerunLlmReviewStep` fallback AND the `shouldSuppressRestartInterrupt`
  * machinery that exists precisely for restart interrupts.
  *
- * EXPECTED (post-fix): a restart-induced resume-prompt timeout must be treated
- * as a transient restart-interrupt and leave the gate **`pending`** (so the
- * team-lead re-signals) — NEVER `failed` with a `Resume Error` step.
- *
- * This test must FAIL on the current (buggy) branch — the gate is marked
- * `failed` and a `Resume Error` step is recorded — and PASS once the resume
- * path catches the RPC timeout and routes it into the suppression path.
+ * EXPECTED: a restart-induced resume-prompt timeout is an orchestration
+ * interruption. Its signal and interrupted review row are durably
+ * `cancelled` with cause `gateway-restart-recovery`; the existing gate remains
+ * pending and no `Resume Error` product-failure row is fabricated.
  */
 
 import { test } from "vitest";
@@ -145,7 +142,7 @@ function makeHarness() {
 	return { harness, gateStoreCalls };
 }
 
-test("a restart-induced resume-prompt timeout leaves the gate pending, never failed with a Resume Error", async () => {
+test("a restart-induced resume-prompt timeout is durably cancelled without a Resume Error", async () => {
 	seedPersistedReviewer();
 	const { harness, gateStoreCalls } = makeHarness();
 
@@ -164,18 +161,25 @@ test("a restart-induced resume-prompt timeout leaves the gate pending, never fai
 		`resumeInterruptedVerifications did not finalize within ${deadlineMs}ms — the resume path appears to be hanging instead of handling the prompt timeout.`,
 	);
 
-	// The recorded updateGateStatus calls — the final gate status the resume
-	// path settled on.
 	const gateStatusCalls = gateStoreCalls
 		.filter(c => c.kind === "updateGateStatus")
 		.map(c => c.args[2]); // updateGateStatus(goalId, gateId, status)
-	const finalGateStatus = gateStatusCalls[gateStatusCalls.length - 1];
-
-	assert.strictEqual(
-		finalGateStatus,
-		"pending",
-		`A restart-induced resume-prompt timeout ("Command timed out: prompt") must leave the gate PENDING so the team-lead re-signals — not "${finalGateStatus}". The current code lets the cold-agent RPC timeout escape uncaught into the outer catch in resumeInterruptedVerifications, which marks the gate "failed". Recorded updateGateStatus values: ${JSON.stringify(gateStatusCalls)}.`,
+	assert.deepStrictEqual(
+		gateStatusCalls,
+		[],
+		`Restart recovery must not update the existing pending gate, especially not to failed. Recorded updateGateStatus values: ${JSON.stringify(gateStatusCalls)}.`,
 	);
+
+	const verificationUpdate = gateStoreCalls
+		.filter(c => c.kind === "updateSignalVerification")
+		.map(c => c.args[1])
+		.at(-1);
+	assert.strictEqual(verificationUpdate?.status, "cancelled");
+	assert.strictEqual(verificationUpdate?.cancellation?.cause, "gateway-restart-recovery");
+	const interruptedReview = verificationUpdate?.steps?.find((step: any) => step?.name === "Doc review");
+	assert.strictEqual(interruptedReview?.status, "cancelled");
+	assert.strictEqual(interruptedReview?.cancellation?.cause, "gateway-restart-recovery");
+	assert.match(interruptedReview?.output ?? "", /timed out|restart|re-signal/i);
 
 	// No "Resume Error" step may be recorded — that is the symptom of the
 	// uncaught-timeout-as-hard-failure bug.

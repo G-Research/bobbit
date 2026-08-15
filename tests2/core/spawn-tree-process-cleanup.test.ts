@@ -377,13 +377,13 @@ function groupAlive(pid: number): boolean {
 
 function makeRecoveryHarness(
 	stateDir: string,
-	calls: Array<{ kind: string; status: string }>,
+	calls: Array<{ kind: string; status: string; update?: any }>,
 	deps: { platform?: NodeJS.Platform; posixProcessIdentityInspector?: (pid: number) => any; containerProcessIdentityInspector?: (containerId: string, pid: number) => Promise<{ pid: number; pgid: number; startToken: string } | undefined>; containerProcessTopSnapshot?: (containerId: string) => Promise<readonly any[]>; persistedTreeKiller?: (pid: number, signal?: NodeJS.Signals) => "signalled" | "unsupported" | "invalid"; recoveredSentinelReaper?: (step: any) => Promise<void>; projectContextManager?: any; clock?: any } = {},
 ): VerificationHarness {
 	return new VerificationHarness(
 		stateDir,
 		{
-			updateSignalVerification: (_signalId: string, update: any) => calls.push({ kind: "verification", status: update.status }),
+			updateSignalVerification: (_signalId: string, update: any) => calls.push({ kind: "verification", status: update.status, update }),
 			updateGateStatus: (_goalId: string, _gateId: string, status: string) => calls.push({ kind: "gate", status }),
 			getGate: () => undefined,
 		} as any,
@@ -452,7 +452,20 @@ async function expectRecoveredContainerSentinelWait(
 	releaseReap();
 	await expect(result).resolves.toBeUndefined();
 	expect(events).toEqual(expectedEvents);
-	expect(calls).toEqual(statuses);
+	expect(calls.map(({ kind, status }) => ({ kind, status }))).toEqual(statuses);
+	if (statuses.some(({ kind, status }) => kind === "verification" && status === "cancelled")) {
+		const verification = calls.find(call => call.kind === "verification") as any;
+		expect(verification?.update).toMatchObject({
+			status: "cancelled",
+			cancellation: { cause: "gateway-restart-recovery", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
+			steps: [expect.objectContaining({
+				name,
+				status: "cancelled",
+				cancellation: { cause: "gateway-restart-recovery", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
+				output: expect.stringMatching(/restart|re-signal/i),
+			})],
+		});
+	}
 }
 
 describe("spawnTracked timeout cleanup", () => {
@@ -697,12 +710,12 @@ describe("spawnTracked timeout cleanup", () => {
 		}
 	});
 
-	it("reaps the exact host sentinel before returning a recovered container no-verdict wait", async () => {
+	it("reaps the exact host sentinel before cancelling a recovered container with no verdict", async () => {
 		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-sentinel-no-verdict-"));
 		try {
 			await expectRecoveredContainerSentinelWait(stateDir, {
 				name: "No-verdict container", nonce: "no-verdict-nonce", deadlineMs: Date.now() + 10_000, recordTerm: false, events: ["reap"],
-				statuses: [{ kind: "verification", status: "failed" }, { kind: "gate", status: "pending" }],
+				statuses: [{ kind: "verification", status: "cancelled" }],
 			});
 		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });

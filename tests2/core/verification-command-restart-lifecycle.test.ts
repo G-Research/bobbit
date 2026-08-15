@@ -220,17 +220,29 @@ test("resume preserves a real durable non-zero command verdict", async () => {
 	assert.match(notificationText(notifications), /step="Real failed command"/);
 });
 
-test("no durable verdict remains restart-interrupted and pending", async () => {
+test("no durable verdict is cancelled as gateway restart recovery without failing the gate", async () => {
 	const { stateDir, harness, gateStoreCalls, notifications } = makeHarnessForStateDir();
 	const startedAt = Date.now() - 100;
 	const files = diagnosticFixture(stateDir, "sig-no-verdict", { out: "probe started\n", err: "" });
 	persistActive(stateDir, activeVerification("sig-no-verdict", [commandStepFixture({ name: "No verdict", startedAt, ...files })], startedAt));
 
 	await harness.resumeInterruptedVerifications();
-	const step = stepByName(latestSignalUpdate(gateStoreCalls), "No verdict");
-	assert.equal(latestGateStatus(gateStoreCalls), "pending");
-	assert.equal(step?.status, "waiting");
-	assert.match(step?.output ?? "", /no command verdict|re-signal|durable command exit status/i);
+	const update = latestSignalUpdate(gateStoreCalls);
+	const step = stepByName(update, "No verdict");
+	assert.equal(latestGateStatus(gateStoreCalls), undefined);
+	assert.equal(update?.status, "cancelled");
+	assert.deepEqual(update?.cancellation && {
+		cause: update.cancellation.cause,
+		requestedAt: typeof update.cancellation.requestedAt,
+		finalizedAt: typeof update.cancellation.finalizedAt,
+	}, { cause: "gateway-restart-recovery", requestedAt: "number", finalizedAt: "number" });
+	assert.equal(step?.status, "cancelled");
+	assert.deepEqual(step?.cancellation && {
+		cause: step.cancellation.cause,
+		requestedAt: typeof step.cancellation.requestedAt,
+		finalizedAt: typeof step.cancellation.finalizedAt,
+	}, { cause: "gateway-restart-recovery", requestedAt: "number", finalizedAt: "number" });
+	assert.match(step?.output ?? "", /probe started|no command verdict|re-signal|durable command exit status/i);
 	assert.doesNotMatch(notificationText(notifications), /step="No verdict"/);
 });
 
@@ -380,15 +392,19 @@ test("Windows recovered docker-exec transport requires nonce-bound Job-close evi
 	assert.equal(step.sentinelCleanupPending, undefined);
 });
 
-test("attached or container recovery stays retryable with clear diagnostics", async () => {
+test("unsupported attached container recovery is cancelled with a durable restart cause", async () => {
 	const { stateDir, harness, gateStoreCalls } = makeHarnessForStateDir();
 	const startedAt = Date.now() - 100;
 	persistActive(stateDir, activeVerification("sig-attached", [commandStepFixture({ name: "Container attached command", startedAt, containerId: "container-under-test" })], startedAt));
 
 	await harness.resumeInterruptedVerifications();
-	const step = stepByName(latestSignalUpdate(gateStoreCalls), "Container attached command");
-	assert.equal(latestGateStatus(gateStoreCalls), "pending");
-	assert.notEqual(step?.status, "failed");
+	const update = latestSignalUpdate(gateStoreCalls);
+	const step = stepByName(update, "Container attached command");
+	assert.equal(latestGateStatus(gateStoreCalls), undefined);
+	assert.equal(update?.status, "cancelled");
+	assert.equal(update?.cancellation?.cause, "gateway-restart-recovery");
+	assert.equal(step?.status, "cancelled");
+	assert.equal(step?.cancellation?.cause, "gateway-restart-recovery");
 	assert.match(step?.output ?? "", /container|attached|unsupported/i);
 	assert.match(step?.output ?? "", /re-signal|retry|pending|no command verdict/i);
 });
