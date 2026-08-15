@@ -199,13 +199,23 @@ function isExposedIgnoredSetupPath(value: string): boolean {
 	return EXPOSED_IGNORED_SETUP_DIRECTORIES.some(directory => value === directory || value.startsWith(`${directory}/`));
 }
 
+/**
+ * `realpath()` may use Windows' extended-length spelling while `path.join()`
+ * retains the ordinary drive/UNC spelling. Compare one canonical namespace so
+ * a durable lease cannot become unreadable merely because the spelling changed.
+ */
+function comparablePath(value: string): string {
+	if (process.platform !== "win32") return value;
+	return path.toNamespacedPath(path.resolve(value)).toLowerCase();
+}
+
 function isWithin(root: string, candidate: string): boolean {
-	const relative = path.relative(root, candidate);
+	const relative = path.relative(comparablePath(root), comparablePath(candidate));
 	return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }
 
 function samePath(left: string, right: string): boolean {
-	return process.platform === "win32" ? left.toLowerCase() === right.toLowerCase() : left === right;
+	return comparablePath(left) === comparablePath(right);
 }
 
 function sameIdentity(left: Stats, right: Stats): boolean {
@@ -935,11 +945,11 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 			for (const repository of lease.repositories) {
 				const scope = verificationCheckoutRepositoryScope(repository.repoKey);
 				const expectedWorktree = scope && await this.privatePath(lease.projectId, lease.signalId, `worktree-${scope}` as "worktree");
-				if (!scope || repository.worktreePath !== expectedWorktree) throw new Error("changed private multi worktree path");
+				if (!scope || !expectedWorktree || !samePath(repository.worktreePath, expectedWorktree)) throw new Error("changed private multi worktree path");
 			}
 		} else {
 			const expectedWorktree = await this.privatePath(lease.projectId, lease.signalId, "worktree");
-			if (worktree !== expectedWorktree) throw new Error("changed private worktree path");
+			if (!samePath(worktree, expectedWorktree)) throw new Error("changed private worktree path");
 		}
 		return { target, audit, worktree, candidate };
 	}
@@ -1549,15 +1559,18 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 			if (!verificationCheckoutProjectScope(lease.projectId) || !UUID.test(lease.signalId) || !checkoutDigestIsValid(lease.digest)
 				|| !hasRootIdentity(lease.publishedRootIdentity) || !Array.isArray(lease.repositories) || lease.repositories.length === 0
 				|| !Array.isArray(lease.publicDirectoryIdentities)) throw new Error("invalid multi lease");
+			// A restarted manager has no cached canonical checkout roots. Establish
+			// them before deriving any persisted public/private lease paths.
+			await this.ensureCheckoutRoot(lease.sourceRoot);
 			const target = await this.targetPath(lease.projectId, lease.signalId);
-			if (target !== lease.checkoutPath) throw new Error("changed lease path");
+			if (!samePath(target, lease.checkoutPath)) throw new Error("changed lease path");
 			const seenRepositories = new Set<string>();
 			const expectedDirectories = new Set<string>();
 			for (const repository of lease.repositories) {
 				const repoKey = verificationRepositoryKey(repository.repoKey);
 				const scope = repoKey && verificationCheckoutRepositoryScope(repoKey);
 				const expected = scope && await this.privatePath(lease.projectId, lease.signalId, `worktree-${scope}` as "worktree");
-				if (!repoKey || repository.publicRelativePath !== repoKey || seenRepositories.has(repoKey) || !scope || expected !== repository.worktreePath || !checkoutDigestIsValid(repository.digest)) throw new Error("invalid multi worktree");
+				if (!repoKey || repository.publicRelativePath !== repoKey || seenRepositories.has(repoKey) || !scope || !expected || !samePath(expected, repository.worktreePath) || !checkoutDigestIsValid(repository.digest)) throw new Error("invalid multi worktree");
 				seenRepositories.add(repoKey);
 				for (const other of seenRepositories) {
 					if (other !== repoKey && other !== "." && repoKey !== "." && (repoKey.startsWith(`${other}/`) || other.startsWith(`${repoKey}/`))) throw new Error("overlapping multi repositories");
@@ -1580,12 +1593,12 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		await this.ensureCheckoutRoot(lease.sourceRoot);
 		const source = await realpath(lease.sourceRoot);
 		const repo = await realpath(lease.repoRoot);
-		if (source !== lease.sourceRoot || repo !== lease.repoRoot || source !== repo) throw new Error("changed lease root");
+		if (!samePath(source, lease.sourceRoot) || !samePath(repo, lease.repoRoot) || !samePath(source, repo)) throw new Error("changed lease root");
 		const target = await this.targetPath(lease.projectId, lease.signalId);
-		if (target !== lease.checkoutPath) throw new Error("changed lease path");
+		if (!samePath(target, lease.checkoutPath)) throw new Error("changed lease path");
 		if (lease.worktreePath) {
 			const expected = await this.privatePath(lease.projectId, lease.signalId, "worktree");
-			if (expected !== lease.worktreePath) throw new Error("changed private worktree path");
+			if (!samePath(expected, lease.worktreePath)) throw new Error("changed private worktree path");
 		}
 		return target;
 	}
