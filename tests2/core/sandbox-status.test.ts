@@ -58,6 +58,7 @@ describe("sandbox Docker context resolution", () => {
 		const probeCalls: Array<{ file: string; args: readonly string[] }> = [];
 		const status = await checkDockerAvailability(plan(), undefined, fencedDockerRunner(probeCalls));
 		assert.equal(status.available, false);
+		assert.equal(status.imageName, plan().imageName, "unavailable Docker still identifies the exact image it could not inspect");
 		assert.match(status.error ?? "", new RegExp(DOCKER_FENCE_ERROR));
 		assert.deepEqual(probeCalls, [{ file: "docker", args: ["info", "--format", "{{.ServerVersion}}"] }]);
 		assert.equal(status.requirements?.entries[0]?.state, "unsupported");
@@ -110,6 +111,7 @@ describe("sandbox Docker context resolution", () => {
 			},
 		};
 		const available = await checkDockerAvailability(desiredPlan, root, matchingRunner);
+		assert.equal(available.imageName, desiredPlan.imageName);
 		assert.equal(available.requirements?.entries[0]?.state, "available");
 
 		const staleRunner = {
@@ -120,6 +122,7 @@ describe("sandbox Docker context resolution", () => {
 			},
 		};
 		const pending = await checkDockerAvailability(desiredPlan, root, staleRunner);
+		assert.equal(pending.imageName, desiredPlan.imageName);
 		assert.equal(pending.requirements?.entries[0]?.state, "pending");
 		assert.ok(calls.some((args) => args[0] === "inspect"));
 	});

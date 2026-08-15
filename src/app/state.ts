@@ -3,6 +3,7 @@ import type { RemoteAgent, ConnectionStatus } from "./remote-agent.js";
 import type { InboxEntry } from "../server/agent/inbox-store.js";
 import type { PanelWorkspaceTab } from "./panel-workspace.js";
 import type { SidePanelWorkspace } from "./side-panel-workspace.js";
+import type { SandboxStatusResponse } from "./api.js";
 import { isConfigPageRoute } from "./routing.js";
 import { type ProjectKind } from "./headquarters.js";
 import { safeSetItem, safeGetItem, safeGetJSON } from "./safe-storage.js";
@@ -704,7 +705,7 @@ export const state = {
 	showHeadquartersInProjectLists: true,
 
 	/** Docker sandbox status (fetched on demand) */
-	sandboxStatus: null as { available: boolean; error?: string; dockerVersion?: string; imageExists?: boolean; configured: boolean; dockerfileExists?: boolean; buildCommand?: string } | null,
+	sandboxStatus: null as SandboxStatusResponse | null,
 
 	/** Per-proposal-tag streaming flag. True between the first message_update
 	 *  delta carrying a propose_<tag> block and the matching block-finish event.

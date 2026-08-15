@@ -4045,6 +4045,15 @@
         "tier": "unit",
         "project": "dom"
       }
+    },
+    {
+      "path": "tests2/dom/sandbox-requirement-status.test.ts",
+      "reason": "DOM coverage for bounded, accessible pending, available, failed, and unsupported sandbox requirement status rendering.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
     }
   ],
   "journeys": [
