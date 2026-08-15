@@ -70,6 +70,8 @@ export class SandboxManager {
 	 * so later calls resolve immediately (idempotent).
 	 */
 	private _ensureInFlight = new Map<string, Promise<void>>();
+	/** Applied server-owned image identity for each live project sandbox. */
+	private _appliedImagePlans = new Map<string, { image: string; fingerprint?: string }>();
 	private _bootstrap: SandboxBootstrap | null;
 	private readonly deps: { commandRunner?: CommandRunner; clock?: Clock; worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string } };
 
@@ -110,10 +112,6 @@ export class SandboxManager {
 		// one-off `<hqDir>/.bobbit/{state,config}` layout.
 		if (isSandboxExemptProject(projectId)) return;
 
-		// Already fully initialized — fast path.
-		const existing = this.sandboxes.get(projectId);
-		if (existing && existing.getStatus().status === "ready") return;
-
 		// Join an in-flight init for the same project.
 		const inFlight = this._ensureInFlight.get(projectId);
 		if (inFlight) return inFlight;
@@ -124,9 +122,19 @@ export class SandboxManager {
 		const bootstrap = this._bootstrap;
 
 		const p = (async () => {
+			// Bootstrap resolves the desired image plan before the ready fast path.
+			// This lets activation/grant changes replace only the affected container.
 			const opts = await bootstrap(projectId);
 			if (!opts) {
 				// Sandbox not applicable (disabled, not a git repo). Not an error.
+				return;
+			}
+			const existing = this.sandboxes.get(projectId);
+			if (existing?.getStatus().status === "ready") {
+				const applied = this._appliedImagePlans.get(projectId);
+				if (applied?.image === opts.image && applied.fingerprint === opts.sandboxImageFingerprint) return;
+				await existing.recreate(opts);
+				this._appliedImagePlans.set(projectId, { image: opts.image, fingerprint: opts.sandboxImageFingerprint });
 				return;
 			}
 			await this.initForProject(projectId, opts);
@@ -172,6 +180,7 @@ export class SandboxManager {
 
 		try {
 			await sandbox.init();
+			this._appliedImagePlans.set(projectId, { image: opts.image, fingerprint: opts.sandboxImageFingerprint });
 			console.log(`[sandbox-manager] Project ${projectId} sandbox ready (container: ${sandbox.getStatus().containerId.substring(0, 12)})`);
 
 			// Start health monitoring and subscribe to events
@@ -265,6 +274,7 @@ export class SandboxManager {
 
 		await sandbox.destroy();
 		this.sandboxes.delete(projectId);
+		this._appliedImagePlans.delete(projectId);
 		console.log(`[sandbox-manager] Destroyed sandbox for project ${projectId}`);
 	}
 
@@ -283,6 +293,7 @@ export class SandboxManager {
 		);
 		await Promise.allSettled(destroyPromises);
 		this.sandboxes.clear();
+		this._appliedImagePlans.clear();
 	}
 
 	/** Number of tracked sandboxes. */

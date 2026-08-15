@@ -3180,7 +3180,7 @@ export interface PackEntrypointWire {
 
 /** Public vocabulary for exact, project-owned extension capability grants. */
 export type ExtensionCapabilityWire = "decide" | "mutate" | "filter:tool-result" | "store" | "session" | "agents" | "prompt:system-static" | "prompt:system-author"
-	| "service.manage" | "memory.read" | "memory.write" | "memory.reflect" | "memory.invalidate" | "memory.read.all";
+	| "service.manage" | "memory.read" | "memory.write" | "memory.reflect" | "memory.invalidate" | "memory.read.all" | "sandbox:build";
 
 /** A durable authority always names one exact hook or the active pack principal. */
 export type ExtensionCapabilityGrantTuple =
@@ -4111,6 +4111,7 @@ export interface DisabledRefs {
 	entrypoints?: string[];
 	mcp?: string[];
 	piExtensions?: string[];
+	sandboxRequirements?: string[];
 	/** contributionId -> disabled operation names. */
 	mcpOperations?: Record<string, string[]>;
 }
@@ -4133,6 +4134,8 @@ export interface PackActivationCatalogue {
 	/** Pi extension activation refs. Rich entries are preferred, but older backends may
 	 *  return string refs; the UI normalizes both. */
 	piExtensions?: Array<string | PackActivationPiExtensionEntry>;
+	/** Schema-3 inert sandbox toolchain requirement declaration list names. */
+	sandboxRequirements?: string[];
 	/** One-line per-entity descriptions for the activation disclosure (R3). */
 	descriptions?: PackEntityDescriptions;
 }
@@ -4173,7 +4176,7 @@ export function setMcpOperationActivation(opts: {
 
 export type ExtensionSettingKind = "string" | "secret" | "enum" | "boolean" | "number";
 export type ExtensionSettingValue = string | boolean | number;
-export type ExtensionSettingsTargetKind = "pack" | "provider" | "hook" | "runtime";
+export type ExtensionSettingsTargetKind = "pack" | "provider" | "hook" | "runtime" | "sandboxRequirement";
 
 export interface ExtensionSettingsTargetRef {
 	packId: string;

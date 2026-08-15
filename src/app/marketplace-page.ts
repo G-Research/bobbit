@@ -172,7 +172,7 @@ type ExtensionSettingField = {
 };
 type ExtensionSettingsTarget = {
 	packId: string;
-	kind: "pack" | "provider" | "hook" | "runtime";
+	kind: "pack" | "provider" | "hook" | "runtime" | "sandboxRequirement";
 	id: string;
 	label?: string;
 	enabled?: boolean;
@@ -206,7 +206,7 @@ const capabilityGrantBusy = new Set<string>();
 const capabilityGrantErrors = new Map<string, string>();
 const marketGrantCapabilities = new Set<ExtensionCapabilityWire>([
 	"decide", "mutate", "filter:tool-result", "store", "session", "agents", "prompt:system-static", "prompt:system-author",
-	"service.manage", "memory.read", "memory.write", "memory.reflect", "memory.invalidate", "memory.read.all",
+	"service.manage", "memory.read", "memory.write", "memory.reflect", "memory.invalidate", "memory.read.all", "sandbox:build",
 ]);
 const packCapabilityCopy: Partial<Record<ExtensionCapabilityWire, { label: string; description: string }>> = {
 	"service.manage": { label: "Manage service", description: "Start, stop, and manage this pack's project service." },
@@ -215,8 +215,9 @@ const packCapabilityCopy: Partial<Record<ExtensionCapabilityWire, { label: strin
 	"memory.reflect": { label: "Reflect on memory", description: "Produce derived reflections from memory this pack is allowed to read." },
 	"memory.invalidate": { label: "Invalidate memory", description: "Mark existing memory as invalid so it is no longer used as current knowledge." },
 	"memory.read.all": { label: "Read all memory", description: "Read all project memory, including memory outside the pack's ordinary scoped context." },
+	"sandbox:build": { label: "Build sandbox image", description: "Allow this pack's approved toolchain requirements to affect the project's core sandbox image." },
 };
-const packCapabilityOrder = ["service.manage", "memory.read", "memory.write", "memory.reflect", "memory.invalidate", "memory.read.all"] as const;
+const packCapabilityOrder = ["service.manage", "memory.read", "memory.write", "memory.reflect", "memory.invalidate", "memory.read.all", "sandbox:build"] as const;
 const packCapabilityRank = new Map<ExtensionCapabilityWire, number>(packCapabilityOrder.map((capability, index) => [capability, index]));
 
 // Drag-reorder state (market packs within one scope).
@@ -2383,7 +2384,7 @@ async function saveSettingsTarget(target: ExtensionSettingsTarget): Promise<void
 	settingsFormErrors.delete(owner);
 	renderApp();
 	try {
-		const response = await patchExtensionSettingsTarget(projectId, { packId: target.packId, kind: target.kind as "provider" | "hook" | "runtime", id: target.id }, { expectedRevision: projection.revision, values });
+		const response = await patchExtensionSettingsTarget(projectId, { packId: target.packId, kind: target.kind as "provider" | "hook" | "runtime" | "sandboxRequirement", id: target.id }, { expectedRevision: projection.revision, values });
 		if (!response.ok) {
 			if (response.status === 409) {
 				settingsFormErrors.set(owner, "Settings changed elsewhere. Reload the latest settings, review your changes, then save again.");

@@ -89,6 +89,7 @@ import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
 import type { StorePutOptions } from "../shared/extension-host/host-api.js";
 import { PackContributionRegistry, type ProviderConfigOverrideReadResult } from "./extension-host/pack-contribution-registry.js";
+
 import { loadPackContributions, packIdFromRoot, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX, type PackContributions } from "./agent/pack-contributions.js";
 import { ExtensionSettingsUnavailableError, type ExtensionSettingsTargetRef } from "./agent/extension-settings-store.js";
 import { isValidExtensionSettingValue, reconcileExtensionSettingsValues, type ExtensionSettingDefinition, type ExtensionSettingValue } from "./agent/extension-settings-schema.js";
@@ -237,6 +238,20 @@ function formatWaitText(result: WaitResult): string {
 		lines.push(`➜ Process this result now, then call team_wait again to await the remaining children — pass child_session_ids: [${remainingIds.join(", ")}].`);
 	}
 	return lines.join("\n");
+}
+
+/** Resolve the sole Docker image plan from server-owned project configuration and
+ * the registry's active, grant-aware sandbox requirement projection. */
+function resolveProjectSandboxImagePlan(
+	registry: PackContributionRegistry,
+	projectConfig: ProjectConfigStore,
+	projectId: string | undefined,
+): SandboxImagePlan {
+	return resolveSandboxImagePlan({
+		baseImageName: projectConfig.get("sandbox_image") || "bobbit-agent",
+		requirements: registry.listSandboxRequirements(projectId),
+		piAgentVersion: getHostAgentVersion(),
+	});
 }
 
 function isMissingOptionalExtensionChannelModule(err: unknown): boolean {
@@ -659,7 +674,8 @@ import {
 import { SecretsStorePersistenceError } from "./agent/secrets-store.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
-import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion, resolveSandboxDockerContext } from "./agent/sandbox-status.js";
+import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion, getHostAgentVersion, resolveSandboxDockerContext } from "./agent/sandbox-status.js";
+import { resolveSandboxImagePlan, sandboxImageRequirements, sandboxRequirementsStatus, UnsupportedSandboxImagePlanError, type SandboxImagePlan } from "./agent/sandbox-image-requirements.js";
 import { SandboxManager, type SandboxBootstrap } from "./agent/sandbox-manager.js";
 import { prepareSanitizedSandboxCloneSource, resolveSandboxCloneSource, type SandboxCloneSource } from "./agent/sandbox-clone-source.js";
 import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
@@ -3057,7 +3073,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 		return packs;
 	};
-	const extensionSettingsRuntimeLookup = (projectId: string | undefined, packId: string, kind: "pack" | "provider" | "hook" | "runtime", id?: string) => {
+	const extensionSettingsRuntimeLookup = (projectId: string | undefined, packId: string, kind: "pack" | "provider" | "hook" | "runtime" | "sandboxRequirement", id?: string) => {
 		const context = projectId ? projectContextManager.getOrCreate(projectId) : undefined;
 		if (!context) return { state: "absent" as const };
 		const pack = extensionSettingsCatalogue(projectId).find(candidate => candidate.packId === packId);
@@ -3066,6 +3082,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				...(pack?.providers ?? []).map(provider => ({ packId, kind: "provider" as const, id: provider.id })),
 				...(pack?.hooks ?? []).map(hook => ({ packId, kind: "hook" as const, id: hook.id })),
 				...(pack?.runtimes ?? []).map(runtime => ({ packId, kind: "runtime" as const, id: runtime.id })),
+				...(pack?.sandboxRequirements ?? []).map(requirement => ({ packId, kind: "sandboxRequirement" as const, id: requirement.id })),
 			];
 			const overrides = refs.map(ref => context.extensionSettingsStore.getTarget(ref));
 			if (refs.length > 0 && overrides.every(override => override?.enabled === false)) return { state: "present" as const, enabled: false, values: {} };
@@ -3076,7 +3093,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			? pack?.providers.find(candidate => candidate.id === id)
 			: kind === "hook"
 				? pack?.hooks.find(candidate => candidate.id === id)
-				: pack?.runtimes.find(candidate => candidate.id === id);
+				: kind === "runtime"
+					? pack?.runtimes.find(candidate => candidate.id === id)
+					: pack?.sandboxRequirements.find(candidate => candidate.id === id);
 		if (!contribution) return { state: "absent" as const };
 		const ref: ExtensionSettingsTargetRef = { packId, kind, id: id! };
 		try {
@@ -3153,6 +3172,14 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		},
 		extensionSettingsRuntimeLookup,
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).runtimes ?? [],
+		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).sandboxRequirements ?? [],
+		(projectId, packId) => {
+			const store = projectId
+				? projectContextManager.getOrCreate(projectId)?.projectConfigStore
+				: projectConfigStore;
+			return store?.getExtensionGrants().some(grant => (grant as { principal?: unknown }).principal === "pack"
+				&& grant.packId === packId && grant.capability === "sandbox:build") === true;
+		},
 	);
 	const contextTraceStore = new ContextTraceStore(bobbitStateDir(), gatewayDeps.fsImpl, (sessionId, entry) => {
 		broadcastToSession(sessionId, { type: "context_trace_updated", sessionId, ts: entry.ts });
@@ -4871,26 +4898,33 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				if (sandboxCfg !== "docker") return null;
 
 				const projectDir = project.rootPath;
-				const imageName = cfg.get("sandbox_image") || "bobbit-agent";
+				const plan = resolveProjectSandboxImagePlan(packContributionRegistry, cfg, projectId);
 
 				// Auto-build or rebuild image if missing or stale. Images are
 				// shared across projects (Docker image tags) so the first project
 				// to request a sandbox pays the build cost.
 				const dockerContextRoot = resolveSandboxDockerContext(config.defaultCwd);
-				const imageStatus = await checkDockerAvailability(imageName, dockerContextRoot ?? undefined, gatewayDeps.commandRunner);
+				const imageStatus = await checkDockerAvailability(plan, dockerContextRoot ?? undefined, gatewayDeps.commandRunner);
 				if (imageStatus.imageExists === false) {
 					if (!dockerContextRoot) {
-						throw new Error(`[sandbox] Docker image "${imageName}" is missing and docker/Dockerfile could not be found`);
+						throw new Error(`[sandbox] Docker image "${plan.imageName}" is missing and docker/Dockerfile could not be found`);
 					}
-					const buildResult = await buildSandboxImage(imageName, dockerContextRoot, gatewayDeps.commandRunner);
+					const buildResult = await buildSandboxImage(plan, dockerContextRoot, gatewayDeps.commandRunner);
 					if (!buildResult.success) {
-						throw new Error(`[sandbox] Auto-build failed for project ${projectId}: ${buildResult.error || "unknown error"}`);
+						sandboxImageRequirements.recordBuildFailure(projectId, plan.fingerprint);
+						throw new Error(`[sandbox] Auto-build failed for project ${projectId}`);
 					}
+					sandboxImageRequirements.recordBuildSuccess(projectId, plan.fingerprint);
 				} else if (imageStatus.imageExists === true) {
-					const imageReady = await ensureImageAgentVersion(imageName, dockerContextRoot ?? undefined, gatewayDeps.commandRunner);
+					const imageReady = await ensureImageAgentVersion(plan, dockerContextRoot ?? undefined, gatewayDeps.commandRunner);
 					if (!imageReady) {
-						throw new Error(`[sandbox] Docker image "${imageName}" is stale and could not be rebuilt`);
+						sandboxImageRequirements.recordBuildFailure(projectId, plan.fingerprint);
+						throw new Error(`[sandbox] Docker image "${plan.imageName}" is stale and could not be rebuilt`);
 					}
+					sandboxImageRequirements.recordBuildSuccess(projectId, plan.fingerprint);
+				} else {
+					sandboxImageRequirements.recordBuildFailure(projectId, plan.fingerprint);
+					throw new Error(`[sandbox] Docker is unavailable for project ${projectId}`);
 				}
 
 				const isRepo = await isGitRepo(projectDir, serverCommandRunner);
@@ -4996,7 +5030,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					projectDir,
 					repoUrl,
 					cloneSource,
-					image: imageName,
+					image: plan.imageName,
+					sandboxImageFingerprint: plan.fingerprint,
 					sandboxNetwork,
 					sandboxMounts: poolMounts,
 					sandboxCredentials: poolCredentials,
@@ -5630,6 +5665,11 @@ async function handleApiRoute(
 				const schema = runtime.settingsSchema;
 				targets.push({ ref: { packId: pack.packId, kind: "runtime", id: runtime.id }, packName: pack.packName, listName: runtime.listName, fields: schema?.fields ?? [], requiresConfig: schema?.requiresConfig ?? [], contribution: runtime });
 			}
+			for (const requirement of pack.sandboxRequirements) {
+				if (requirement.settingsSchemaDiagnostic !== undefined) continue;
+				const schema = requirement.settingsSchema;
+				targets.push({ ref: { packId: pack.packId, kind: "sandboxRequirement", id: requirement.id }, packName: pack.packName, listName: requirement.listName, fields: schema?.fields ?? [], requiresConfig: schema?.requiresConfig ?? [], contribution: requirement });
+			}
 		}
 		return targets;
 	};
@@ -5637,6 +5677,7 @@ async function handleApiRoute(
 		...pack.providers.filter(provider => provider.settingsSchemaDiagnostic !== undefined).map(provider => ({ packId: pack.packId, kind: "provider" as const, id: provider.id })),
 		...pack.hooks.filter(hook => hook.settingsSchemaDiagnostic !== undefined).map(hook => ({ packId: pack.packId, kind: "hook" as const, id: hook.id })),
 		...pack.runtimes.filter(runtime => runtime.settingsSchemaDiagnostic !== undefined).map(runtime => ({ packId: pack.packId, kind: "runtime" as const, id: runtime.id })),
+		...pack.sandboxRequirements.filter(requirement => requirement.settingsSchemaDiagnostic !== undefined).map(requirement => ({ packId: pack.packId, kind: "sandboxRequirement" as const, id: requirement.id })),
 	]);
 	const mutationDispatcher = requestMutationDispatcher!;
 	const resultFilterDispatcher = toolResultFilterDispatcher!;
@@ -5722,6 +5763,7 @@ async function handleApiRoute(
 		routeDispatcher.invalidate();
 		routeRegistry.invalidate();
 		packContributionRegistry.invalidate();
+		for (const project of projectRegistry.list()) sandboxImageRequirements.invalidateProject(project.id);
 		sessionManager.lifecycleHub?.cancelScheduledAdvisors?.();
 		closeUnavailableExtensionChannels();
 		for (const projectId of new Set(sessionManager.listSessions().map(session => session.projectId).filter((id): id is string => !!id))) {
@@ -5742,7 +5784,7 @@ async function handleApiRoute(
 		contributions: packContributionRegistry,
 	});
 	const extensionPackGrantCapabilities: readonly ExtensionCapability[] = [
-		"service.manage", "memory.read", "memory.write", "memory.reflect", "memory.invalidate", "memory.read.all",
+		"service.manage", "memory.read", "memory.write", "memory.reflect", "memory.invalidate", "memory.read.all", "sandbox:build",
 	];
 	const isPackExtensionGrant = (grant: ExtensionGrant): grant is Extract<ExtensionGrant, { principal: "pack" }> =>
 		(grant as { principal?: unknown }).principal === "pack";
@@ -5858,7 +5900,9 @@ async function handleApiRoute(
 				? pack?.providers.find(candidate => candidate.id === ref.id)
 				: ref.kind === "hook"
 					? pack?.hooks.find(candidate => candidate.id === ref.id)
-					: pack?.runtimes.find(candidate => candidate.id === ref.id);
+					: ref.kind === "runtime"
+						? pack?.runtimes.find(candidate => candidate.id === ref.id)
+						: pack?.sandboxRequirements.find(candidate => candidate.id === ref.id);
 			if (!pack || !contribution) continue;
 			targets.push({ ref, packName: pack.packName, listName: contribution.listName, enabled: { effective: false }, configuration: { state: "invalid-schema", missing: [] }, fields: [] });
 		}
@@ -6618,12 +6662,27 @@ async function handleApiRoute(
 		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
 		const scopedConfigStore = resolveProjectConfigStore(resolved.projectId);
 		const sandboxConfig = scopedConfigStore.get("sandbox") || "none";
-		const imageName = scopedConfigStore.get("sandbox_image") || "bobbit-agent";
 		const configured = sandboxConfig === "docker";
 		const dockerContextRoot = resolveSandboxDockerContext(resolved.project.rootPath);
+		let plan: SandboxImagePlan;
+		try {
+			plan = resolveProjectSandboxImagePlan(packContributionRegistry, scopedConfigStore, resolved.projectId);
+		} catch (error) {
+			if (!(error instanceof UnsupportedSandboxImagePlanError)) throw error;
+			const status = await checkDockerAvailability(undefined, dockerContextRoot ?? undefined, commandRunner);
+			json({ ...status, configured, error: "Unsupported sandbox image configuration" });
+			return;
+		}
 		// Docker must use this request's gateway-owned runner: test coordinators
 		// fence host commands through that seam rather than allowing direct spawns.
-		const status = await checkDockerAvailability(configured ? imageName : undefined, dockerContextRoot ?? undefined, commandRunner);
+		const status = await checkDockerAvailability(configured ? plan : undefined, dockerContextRoot ?? undefined, commandRunner);
+		const failure = sandboxImageRequirements.getBuildFailure(resolved.projectId, plan.fingerprint);
+		if (configured && status.available && failure && status.requirements) {
+			status.requirements = sandboxRequirementsStatus(plan, "failed", failure.code);
+		}
+		if (!configured && plan.requirements.length > 0) {
+			status.requirements = sandboxRequirementsStatus(plan, "unsupported");
+		}
 		json({ ...status, configured });
 		return;
 	}
@@ -6637,7 +6696,14 @@ async function handleApiRoute(
 		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
 		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
 		const scopedConfigStore = resolveProjectConfigStore(resolved.projectId);
-		const imageName = scopedConfigStore.get("sandbox_image") || "bobbit-agent";
+		let plan: SandboxImagePlan;
+		try {
+			plan = resolveProjectSandboxImagePlan(packContributionRegistry, scopedConfigStore, resolved.projectId);
+		} catch (error) {
+			if (!(error instanceof UnsupportedSandboxImagePlanError)) throw error;
+			json({ success: false, error: "Unsupported sandbox image configuration", code: "SANDBOX_IMAGE_UNSUPPORTED" }, 422);
+			return;
+		}
 		const dockerContextRoot = resolveSandboxDockerContext(resolved.project.rootPath);
 		if (!dockerContextRoot) {
 			json({ error: "Dockerfile not found at docker/Dockerfile" }, 404);
@@ -6647,11 +6713,13 @@ async function handleApiRoute(
 			json({ error: "Build already in progress" }, 409);
 			return;
 		}
-		const result = await buildSandboxImage(imageName, dockerContextRoot, commandRunner!);
+		const result = await buildSandboxImage(plan, dockerContextRoot, commandRunner!);
 		if (result.success) {
+			sandboxImageRequirements.recordBuildSuccess(resolved.projectId, plan.fingerprint);
 			json({ success: true });
 		} else {
-			json({ success: false, error: result.error }, 500);
+			sandboxImageRequirements.recordBuildFailure(resolved.projectId, plan.fingerprint);
+			json({ success: false, error: "Sandbox image build failed", code: "SANDBOX_IMAGE_BUILD_FAILED" }, 500);
 		}
 		return;
 	}
@@ -10663,7 +10731,7 @@ async function handleApiRoute(
 	// Extension settings are project-owned and always redacted. The outer gateway
 	// guard authenticates reads; browser prompt-operator proof is required before
 	// any request can deposit a secret or change a project's runtime enablement.
-	const extensionSettingsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/extension-settings(?:\/([^/]+)(?:\/(provider|hook|runtime)\/([^/]+))?)?$/);
+	const extensionSettingsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/extension-settings(?:\/([^/]+)(?:\/(provider|hook|runtime|sandboxRequirement)\/([^/]+))?)?$/);
 	if (extensionSettingsMatch && (req.method === "GET" || req.method === "PATCH")) {
 		let projectId: string;
 		let packId: string | undefined;
@@ -10673,7 +10741,7 @@ async function handleApiRoute(
 			packId = extensionSettingsMatch[2] === undefined ? undefined : decodeURIComponent(extensionSettingsMatch[2]);
 			id = extensionSettingsMatch[4] === undefined ? undefined : decodeURIComponent(extensionSettingsMatch[4]);
 		} catch { json({ error: "Invalid extension settings identity", code: "EXTENSION_SETTINGS_INVALID_IDENTITY" }, 400); return; }
-		const kind = extensionSettingsMatch[3] as "provider" | "hook" | "runtime" | undefined;
+		const kind = extensionSettingsMatch[3] as "provider" | "hook" | "runtime" | "sandboxRequirement" | undefined;
 		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
 		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
 		const context = projectContextManager.getOrCreate(resolved.projectId);
@@ -12533,7 +12601,7 @@ async function handleApiRoute(
 			store: PackOrderStore,
 			packName: string,
 			projectId?: string,
-		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "session-menu" | "route"; routeId?: string }>; providers?: string[]; hooks?: string[]; mcp?: Array<string | Record<string, unknown>>; piExtensions?: Array<string | Record<string, unknown>>; runtimes?: string[]; workflows?: string[]; systemPrompts?: string[]; descriptions: PackEntityDescriptions } | null => {
+		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "session-menu" | "route"; routeId?: string }>; providers?: string[]; hooks?: string[]; mcp?: Array<string | Record<string, unknown>>; piExtensions?: Array<string | Record<string, unknown>>; runtimes?: string[]; sandboxRequirements?: string[]; workflows?: string[]; systemPrompts?: string[]; descriptions: PackEntityDescriptions } | null => {
 			const base = scope === "server" ? headquartersDir() : scope === "global-user" ? os.homedir() : projectBase;
 			if (base === undefined) return null;
 			const packOrder = store.getPackOrder(scope);
@@ -12684,6 +12752,7 @@ async function handleApiRoute(
 				mcp: (c.mcp ?? []).map((listName) => mcpByListName.get(listName) ?? listName),
 				piExtensions: (c.piExtensions ?? []).map((listName) => piExtensionByListName.get(listName) ?? listName),
 				runtimes: [...(c.runtimes ?? [])],
+				sandboxRequirements: [...(c.sandboxRequirements ?? [])],
 				workflows: [...(c.workflows ?? [])],
 				systemPrompts: [...(c.systemPrompts ?? [])],
 				descriptions,
@@ -12745,7 +12814,7 @@ async function handleApiRoute(
 			const cfgStore = st.target.store as unknown as ProjectConfigStore;
 			const beforeActivation = cfgStore.getPackActivation(targetScope as PackOrderScope, packName);
 			const cataloguePiExtensionNames = normalisePiExtensionCatalogueRefs(catalogue.piExtensions);
-			const normaliseKind = (kind: "roles" | "tools" | "skills" | "entrypoints" | "providers" | "hooks" | "mcp" | "piExtensions" | "runtimes" | "workflows" | "systemPrompts", valid: Set<string>): string[] => {
+			const normaliseKind = (kind: "roles" | "tools" | "skills" | "entrypoints" | "providers" | "hooks" | "mcp" | "piExtensions" | "runtimes" | "sandboxRequirements" | "workflows" | "systemPrompts", valid: Set<string>): string[] => {
 				const raw = reqDisabled[kind];
 				if (!Array.isArray(raw)) return [];
 				return raw.filter((x): x is string => typeof x === "string" && valid.has(x));
@@ -12783,6 +12852,7 @@ async function handleApiRoute(
 				mcpOperations: normalizeMcpOperationsForCatalogue(),
 				piExtensions: normaliseKind("piExtensions", cataloguePiExtensionNames),
 				runtimes: normaliseKind("runtimes", new Set(catalogue.runtimes ?? [])),
+				sandboxRequirements: normaliseKind("sandboxRequirements", new Set(catalogue.sandboxRequirements ?? [])),
 				workflows: normaliseKind("workflows", new Set(catalogue.workflows ?? [])),
 				systemPrompts: normaliseKind("systemPrompts", new Set(catalogue.systemPrompts ?? [])),
 			};
