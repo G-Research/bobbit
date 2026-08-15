@@ -456,6 +456,45 @@ test.describe("extension capability grants API", () => {
 		expect(afterNoOp).toHaveLength(afterRecovery.length);
 	});
 
+	test("keeps checkout-supplied grants inert until an operator mutation binds them, then rejects stale or revoked provenance", async ({ gateway }) => {
+		const context = gateway.projectContextManager.getOrCreate(projectId);
+		expect(context).toBeTruthy();
+		const baseline = context.projectConfigStore.getExtensionGrants();
+		const tuple = { packId: PACK_NAME, hookId: OTHER_DECIDE_HOOK, capability: "decide" as const };
+		const imported = { ...tuple, grantedAt: "2026-02-01T00:00:00.000Z", grantedBy: "admin" };
+		const revokePath = `${grantsPath()}/${encodeURIComponent(PACK_NAME)}/${encodeURIComponent(OTHER_DECIDE_HOOK)}/decide`;
+		try {
+			// This models project.yaml supplied by a newly checked-out project. No
+			// server route has created an independent operator binding for it.
+			context.projectConfigStore.setExtensionGrants([
+				...baseline.filter((grant: any) => grant.packId !== tuple.packId || grant.hookId !== tuple.hookId || grant.capability !== tuple.capability),
+				imported,
+			]);
+			let projection = fixturePack(await json(await apiFetch(`/api/ext/contributions?projectId=${encodeURIComponent(projectId)}`)));
+			expect(hook(projection, OTHER_DECIDE_HOOK), `${REPRO}: checkout config alone must not make a hook runnable`).toMatchObject({ grants: [], runnable: false });
+
+			const bound = await apiFetch(grantsPath(), { method: "PUT", headers: operatorHeaders(), body: JSON.stringify(tuple) });
+			expect(bound.status).toBe(200);
+			projection = fixturePack(await json(await apiFetch(`/api/ext/contributions?projectId=${encodeURIComponent(projectId)}`)));
+			expect(hook(projection, OTHER_DECIDE_HOOK)).toMatchObject({ grants: ["decide"], runnable: true });
+
+			// A modified config row no longer equals the server-owned binding.
+			context.projectConfigStore.setExtensionGrants([{ ...imported, grantedAt: "2026-02-02T00:00:00.000Z" }]);
+			projection = fixturePack(await json(await apiFetch(`/api/ext/contributions?projectId=${encodeURIComponent(projectId)}`)));
+			expect(hook(projection, OTHER_DECIDE_HOOK), `${REPRO}: stale provenance must fail closed`).toMatchObject({ grants: [], runnable: false });
+
+			const rebound = await apiFetch(grantsPath(), { method: "PUT", headers: operatorHeaders(), body: JSON.stringify(tuple) });
+			expect(rebound.status).toBe(200);
+			const revoked = await apiFetch(revokePath, { method: "DELETE", headers: operatorHeaders() });
+			expect(revoked.status).toBe(200);
+			projection = fixturePack(await json(await apiFetch(`/api/ext/contributions?projectId=${encodeURIComponent(projectId)}`)));
+			expect(hook(projection, OTHER_DECIDE_HOOK), `${REPRO}: revocation must remove the registry binding and deny the row`).toMatchObject({ grants: [], runnable: false });
+		} finally {
+			context.projectConfigStore.setExtensionGrants(baseline);
+			await apiFetch(revokePath, { method: "DELETE", headers: operatorHeaders() }).catch(() => {});
+		}
+	});
+
 	test("keeps an append-only secret-free audit and excludes activation-disabled hooks", async () => {
 		const audit = await apiFetch(auditPath());
 		expect(audit.status).toBe(200);

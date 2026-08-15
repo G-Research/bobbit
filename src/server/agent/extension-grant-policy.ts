@@ -154,6 +154,8 @@ function cloneGrant(grant: ExtensionGrant): ExtensionGrant {
 export function createExtensionCapabilityGrantResolver(deps: {
 	contextForProject(projectId: string): { projectConfigStore: Pick<ProjectConfigStore, "getExtensionGrants"> } | undefined;
 	contributions: Pick<PackContributionResolver, "getPack">;
+	/** Gateway-owned provenance fence; omitted only for backwards-compatible callers. */
+	grantsForProject?: (projectId: string, raw: readonly ExtensionGrant[]) => readonly ExtensionGrant[];
 }): ExtensionCapabilityGrantResolver {
 	return (projectId, principal, capability) => {
 		if (!isSafeExtensionGrantIdentifier(projectId) || !isValidPrincipal(principal) || !isExtensionCapability(capability)) {
@@ -189,7 +191,8 @@ export function createExtensionCapabilityGrantResolver(deps: {
 		try {
 			// This read is deliberately after all eligibility checks and occurs for
 			// every use. Revocation therefore wins over stale awaited work.
-			grants = context.projectConfigStore.getExtensionGrants();
+			const raw = context.projectConfigStore.getExtensionGrants();
+			grants = deps.grantsForProject ? deps.grantsForProject(projectId, raw) : raw;
 		} catch {
 			return { allowed: false, reason: "project_unavailable" };
 		}

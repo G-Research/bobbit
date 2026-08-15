@@ -844,9 +844,14 @@ export class DecisionHookDispatcher implements DecisionContinuation {
 					: error instanceof DecisionHookContractError ? outcome(candidate.origin, "dropped", "Malformed result", ms)
 					: outcome(candidate.origin, "error", undefined, ms);
 			}
+			// Lack of a current exact grant is intentionally non-terminal. The
+			// registration snapshot remains pending so an authenticated operator
+			// grant can replay this same immutable import run; it never executes
+			// merely because the checkout supplied an extension_grants row.
+			const awaitingOperatorGrant = row.outcome === "denied" && row.reason === "Grant required";
 			const completion = row.outcome === "error" ? "error" : row.outcome === "denied" ? "denied"
 				: row.outcome === "dropped" ? "dropped" : row.outcome === "superseded" ? "superseded" : "applied";
-			if (this.deps.manager.completeImportHook(projectId, importId, candidate.key, completion)) outcomes.push(row);
+			if (awaitingOperatorGrant || this.deps.manager.completeImportHook(projectId, importId, candidate.key, completion)) outcomes.push(row);
 		}
 		return outcomes;
 	}
