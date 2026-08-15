@@ -90,11 +90,17 @@ interface GateStatusSummaryInput {
 	activeVerifications: ActiveVerification[];
 }
 
-function failedStepNames(gate: GateState): string[] | undefined {
-	if (gate.status !== "failed") return undefined;
-	const latest = gate.signals[gate.signals.length - 1];
-	const failed = latest?.verification?.steps
-		?.filter(step => !step.passed && !step.skipped)
+function mostRecentFailedSignal(gate: GateState): GateState["signals"][number] | undefined {
+	for (let index = gate.signals.length - 1; index >= 0; index--) {
+		const signal = gate.signals[index];
+		if (signal?.verification.status === "failed") return signal;
+	}
+	return undefined;
+}
+
+function failedStepNames(signal: GateState["signals"][number] | undefined): string[] | undefined {
+	const failed = signal?.verification.steps
+		.filter(step => !step.passed && !step.skipped)
 		.map(step => step.name) ?? [];
 	return failed.length > 0 ? failed : undefined;
 }
@@ -137,10 +143,13 @@ export function buildGateStatusSummary(input: GateStatusSummaryInput): GateStatu
 	const summaryGates: GateStatusSummaryGate[] = workflowGates.map(def => {
 		const stored = gateById.get(def.id);
 		const cancellation = stored ? latestCancellation(stored) : undefined;
-		// Defensive projection for a legacy/corrupt stored cancellation. The
-		// cancellation outcome is never product failure, even if an older server
-		// persisted the gate as failed before its finalizer was fixed.
-		const status = cancellation && stored?.status === "failed" ? "pending" : (stored?.status ?? "pending");
+		// A cancellation cannot itself fail a gate. It may, however, follow a
+		// genuine failed verification; retain that durable prior verdict instead of
+		// letting the latest run erase the failure from the summary.
+		const failedSignal = stored ? mostRecentFailedSignal(stored) : undefined;
+		const status = cancellation && stored?.status === "failed" && !failedSignal
+			? "pending"
+			: (stored?.status ?? "pending");
 		const running = (runningByGate.get(def.id) ?? 0) > 0;
 		const awaitingSignoffCount = awaitingByGate.get(def.id) ?? 0;
 		const gate: GateStatusSummaryGate = {
@@ -158,7 +167,7 @@ export function buildGateStatusSummary(input: GateStatusSummaryInput): GateStatu
 			gate.cancellation = cancellation;
 		}
 		if (stored?.signals.length) gate.updatedAt = stored.updatedAt;
-		const failedSteps = !cancellation && stored ? failedStepNames(stored) : undefined;
+		const failedSteps = status === "failed" ? failedStepNames(failedSignal) : undefined;
 		if (failedSteps) gate.failedSteps = failedSteps;
 		return gate;
 	});
