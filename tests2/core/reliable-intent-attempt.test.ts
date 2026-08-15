@@ -428,7 +428,7 @@ describe("reliable intent dispatch attempt settlement", () => {
 		expect(prompt).toHaveBeenCalledTimes(2);
 	});
 
-	it("cancels and marks a queued task notification failed only on success false", async () => {
+	it("returns a queued task notification to bounded recovery only on success false", async () => {
 		const prompt = vi.fn(async () => ({ success: false, error: "preflight rejected" }));
 		const { manager, session } = useHarness({
 			rpcClient: {
@@ -447,7 +447,7 @@ describe("reliable intent dispatch attempt settlement", () => {
 		expect(prompt).toHaveBeenCalledTimes(1);
 		expect(ledgerFor(session, intentId)).toBeUndefined();
 		expect(session.promptQueue.toArray()).toEqual([
-			expect.objectContaining({ id: intentId, deliveryState: "failed", retryable: true }),
+			expect.objectContaining({ id: intentId, deliveryState: "queued", retryable: false }),
 		]);
 		expect(readAuthorSidecar(session.id).at(-1)?.settlement?.outcome).toBe("cancelled");
 	});

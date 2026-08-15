@@ -3378,6 +3378,16 @@ export class SessionManager {
 		}
 	}
 
+	/** A process terminal rejects receipts without asserting anything about its attempted prompt. */
+	private rejectAllVerifierPromptReceipts(sessionId: string, reason: string): void {
+		const receiptStore = this._getVerifierPromptReceipts();
+		if (!receiptStore) return;
+		const receipts = receiptStore.get(sessionId);
+		if (!receipts) return;
+		receiptStore.delete(sessionId);
+		for (const pending of receipts.values()) pending.reject(new Error(reason));
+	}
+
 	/** Sessions that restoreSession's mid-turn branch has just re-prompted on
 	 *  boot. The team-manager boot-resume nudge consults `wasBootReprompted` to
 	 *  skip these leads so two prompts don't race the same cold agent. Entries
@@ -7792,6 +7802,47 @@ export class SessionManager {
 					// a false result means a concurrent Pi echo already owns it.
 					if (!this.cancelPromptAuthorDispatch(session, prepared)) return;
 					if (index !== -1) session.inFlightSteerTexts!.splice(index, 1);
+
+					const poisonOwned = session.poisonRecoveryPromptDispatchQueueIds?.includes(reliableRow.id) === true;
+					const directRecoveryOwner = poisonOwned
+						|| reliableRow.verifierOwned === true
+						|| reliableRow.source !== "user";
+					if (directRecoveryOwner) {
+						// Server-owned rows have an existing bounded recovery lifecycle. A
+						// definitive no-start is safe to return to that lifecycle; preserve
+						// the exact durable row and all of its envelope metadata.
+						this.enqueueReliableIntent(session, {
+							...reliableRow,
+							deliveryState: "queued",
+							deliveryReason: undefined,
+							deliveryError: undefined,
+							retryable: false,
+							attemptId: prepared.attemptId,
+							dispatchEpoch: prepared.dispatchEpoch,
+						}, { front: true });
+						this.recoverPromptDispatch(
+							session,
+							[{
+								id: reliableRow.id,
+								text: reliableRow.text,
+								images: reliableRow.images,
+								attachments: reliableRow.attachments,
+								isSteered: reliableRow.isSteered,
+								source: reliableRow.source,
+								verifierOwned: reliableRow.verifierOwned,
+								author: reliableRow.author,
+								streamingBehavior: reliableRow.streamingBehavior,
+								coldStart: reliableRow.coldStart,
+								suppressTitleGen: reliableRow.suppressTitleGen,
+							}],
+							error instanceof Error ? error.message : String(error),
+							reliableRow.verifierOwned === true ? "reliable verifier prompt" : "reliable automatic prompt",
+							[reliableRow.id],
+							poisonOwned,
+						);
+						throw error;
+					}
+
 					this.enqueueReliableIntent(session, {
 						...reliableRow,
 						deliveryState: "failed",
@@ -7802,11 +7853,6 @@ export class SessionManager {
 					}, { front: true });
 					this.rollbackRejectedPromptDispatch(session);
 					this.broadcastQueue(session);
-					// Browser-originated stable rows preserve the outbox-only admission
-					// result after a proven no-start rejection. Server-owned automatic
-					// prompts retain their established rejection contract for callers that
-					// apply their own bounded recovery policy.
-					if (reliableRow.source !== "user") throw error;
 					return;
 				}
 
@@ -8637,6 +8683,11 @@ export class SessionManager {
 				streamingStartedAt: undefined,
 			});
 			const reason = event.signal ? `signal ${event.signal}` : `code ${event.code}`;
+			const processExitError = `Agent process exited with ${reason}`;
+			// Process exit settles the verifier's receipt surface immediately, but it
+			// cannot prove whether the outstanding RPC write reached Pi. The later RPC
+			// rejection therefore still retains its exact in-flight carrier uncertain.
+			this.rejectAllVerifierPromptReceipts(session.id, processExitError);
 			this.rejectIdleWaiters(session.id, new Error(`Agent process exited unexpectedly (${reason}) for session ${session.id}`));
 			void this.closeExtensionChannelsForSession(session.id, "session-process-exit");
 			broadcastStatus(session, "terminated");
