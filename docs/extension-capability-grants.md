@@ -9,7 +9,7 @@ The single grant owner serves both legacy hooks and non-hook pack principals. It
 API capability, a general runtime permission, or a way for a pack to authorize itself.
 
 For pack installation and activation, see [Marketplace](marketplace.md). For the service
-lifecycle that consumes `service.manage`, see [Managed service-extension contract](service-extension-runtime.md).
+lifecycle that consumes `service.manage`, see [Managed service-extension contract](service-extension-runtime.md). For the sandbox image capability, see [Extension sandbox requirements](extension-sandbox-requirements.md).
 
 ## Exact durable union
 
@@ -50,9 +50,9 @@ The platform owns the closed vocabulary:
 - Hook-capable values: `decide`, `mutate`, `filter:tool-result`, `store`, `session`, `agents`,
   `prompt:system-static`, and `prompt:system-author`.
 - Pack-only values: `service.manage`, `memory.read`, `memory.write`, `memory.reflect`,
-  `memory.invalidate`, and `memory.read.all`.
+  `memory.invalidate`, `memory.read.all`, and `sandbox:build`.
 
-A hook cannot be granted any pack-only value. The six pack-only values are not manifest-declared
+A hook cannot be granted any pack-only value. Pack-only values are not manifest-declared
 capabilities: an installed active pack is eligible to receive them, but only a project operator
 can grant one. Unknown strings always deny; extensions cannot mint authority by adding a string
 to a pack file.
@@ -150,9 +150,11 @@ browser, agent, or gateway restart is needed for the next resolver call to see a
 
 Market → **Installed** → selected project uses the existing pack card and **Review grants**
 disclosure; it does not add a Hindsight permissions page or a second grant UI. The Pack row lists
-the six supported pack capabilities individually, with their exact strings, current state, a
+the supported pack capabilities individually, with their exact strings, current state, a
 confirmation before grant, busy/error state, and an exact Grant or Revoke action. In particular,
-`memory.read.all` is described as reading project memory outside the pack's ordinary scope.
+`memory.read.all` is described as reading project memory outside the pack's ordinary scope, while
+`sandbox:build` permits the pack's approved declarative requirements to affect the core sandbox
+image; it does not give the pack Docker control.
 
 The same project surface has **Grant history**, which renders the existing audit stream for both
 legacy hook and pack-principal changes. Server projections are authoritative: Market does not infer
@@ -160,6 +162,6 @@ capability support from a pack name or treat activation as consent.
 
 The Hindsight handoff is intentionally only this generic contract: the exported
 `ExtensionGrantPrincipal`, `ExtensionGrantDecision`, `ExtensionCapabilityGrantResolver`, and
-`createExtensionCapabilityGrantResolver()` factory, plus the six platform-owned strings. This slice
+`createExtensionCapabilityGrantResolver()` factory, plus the platform-owned strings. This slice
 does **not** implement Hindsight memory operations, start a Hindsight service, create Hindsight
 configuration, or introduce a Hindsight-specific endpoint, store, capability, or permission UI.

@@ -155,14 +155,16 @@ Each installed pack exposes per-entity **activation toggles** on the Market inst
 surface, so you can disable individual entities without uninstalling the pack. Schema-1 packs
 toggle user-facing roles, tools, skills, and entrypoints. Schema-2 packs also toggle pack-scoped
 contributions: providers, hooks (including those eligible for bounded advisors, decisions, or
-request mutation), MCP, and pi extensions. Support surfaces — panels,
-routes, stores, renderers, actions, `lib/` — are **not** independently toggleable (panels may be
-shown read-only as "support surfaces").
+request mutation), MCP, and pi extensions. Schema-3 packs can also toggle listed sandbox
+requirements; those remain inert until their project settings, exact `sandbox:build` grant, and
+Docker sandbox mode all permit them. See [Extension sandbox requirements](extension-sandbox-requirements.md).
+Support surfaces — panels, routes, stores, renderers, actions, `lib/` — are **not** independently
+toggleable (panels may be shown read-only as "support surfaces").
 
-> **Extension Platform (`schema: 2`).** The activation system covers `providers`, `hooks`,
-> `mcp`, `piExtensions`, declarative `runtimes`, static `systemPrompts`, and the reserved
-> `workflows` sibling. They are first-class in `DisabledRefs` and `ACTIVATION_KINDS`, and the
-> `pack-activation` catalogue includes their arrays only for schema-2 packs, so toggles
+> **Extension Platform (`schema: 2` and `schema: 3`).** The activation system covers `providers`, `hooks`,
+> `mcp`, `piExtensions`, declarative `runtimes`, static `systemPrompts`, schema-3
+> `sandboxRequirements`, and the reserved `workflows` sibling. They are first-class in `DisabledRefs` and `ACTIVATION_KINDS`, and the
+> `pack-activation` catalogue includes their arrays only for the applicable schema-2 or schema-3 packs, so toggles
 > round-trip through the same REST without changing schema-1 catalogue shapes. **Providers** and manifest-listed **hook metadata** load through
 > `PackContributionRegistry`; hook activation filters indexed declarations by manifest basename
 > (`listName`) only. **MCP** loads through `McpManager` discovery; **pi extensions** resolve to
@@ -176,10 +178,11 @@ shown read-only as "support surfaces").
 ### Exact grant controls
 
 Activation and authorization are deliberately separate. With a project selected, an installed
-schema-2 pack's existing **Project runtime** block has a Pack row with **Review grants**. It lists
-the six platform-owned non-hook capabilities individually and shows the exact capability string,
+schema-2 or schema-3 pack's existing **Project runtime** block has a Pack row with **Review grants**. It lists
+the platform-owned non-hook capabilities individually and shows the exact capability string,
 current server-projected state, and one confirmed Grant or Revoke action. `memory.read.all` is
-called out as broader project-memory access. No toggle, bulk grant, Hindsight-specific panel, or
+called out as broader project-memory access; `sandbox:build` permits only approved declarative
+requirements to affect the core image. No toggle, bulk grant, Hindsight-specific panel, or
 client-created capability is involved.
 
 The same Installed surface has **Grant history**, backed by the project grant audit. It shows both
@@ -819,10 +822,11 @@ Most schema-2 contribution paths are live: providers run through the Lifecycle H
 bounded advisors, decisions, request mutation, capability selection, static-prompt grants, and
 post-tool-result filtering; MCP and standalone Pi extensions load through their normal runtime
 owners. Market is the operator surface for activation, per-project settings, and exact grants.
-Its existing Pack row also exposes the six closed non-hook grants—`service.manage`, `memory.read`,
+Its existing Pack row also exposes the closed non-hook grants—`service.manage`, `memory.read`,
 `memory.write`, `memory.reflect`, `memory.invalidate`, and `memory.read.all`—through the same
-**Review grants** control and exact audit history used by hooks. The [Extension Platform overview](extension-platform.md)
-describes the complete install-to-removal lifecycle. The first built-in production provider,
+**Review grants** control and exact audit history used by hooks. Schema-3 packs additionally use
+`sandbox:build` only for [approved sandbox requirements](extension-sandbox-requirements.md), never
+for Docker control. The [Extension Platform overview](extension-platform.md) describes the complete install-to-removal lifecycle. The first built-in production provider,
 [Hindsight](hindsight-memory.md), remains inactive until its required project configuration is
 supplied.
 

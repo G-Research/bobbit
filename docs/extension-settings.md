@@ -1,8 +1,8 @@
 # Project extension settings
 
-Project extension settings give schema-2 pack contributions a typed, project-local configuration
-surface. They let a pack author declare the values a provider, hook, or declarative runtime needs without giving a
-pack its own settings API or exposing credentials through ordinary project configuration.
+Project extension settings give schema-2 and schema-3 pack contributions a typed, project-local configuration
+surface. They let a pack author declare the values a provider, hook, declarative runtime, or sandbox requirement
+needs without giving a pack its own settings API or exposing credentials through ordinary project configuration.
 
 The boundary is deliberately narrow: declarations are flat, values are primitives, and secrets
 are write-only. This keeps configuration reviewable in Market while ensuring an extension in one
@@ -12,10 +12,12 @@ make an installed contribution eligible to run, but never install a pack or conf
 
 ## For pack authors
 
-A provider, hook, or runtime in a schema-2 pack opts into typed settings by declaring descriptor-shaped
-entries under its contribution `config` mapping. The contribution loader remains the declaration
-owner; the gateway resolves the target identity from the installed winning pack and contribution,
-never from a browser-supplied record key.
+A provider, hook, or runtime in a schema-2 pack, and a sandbox requirement in a schema-3 pack,
+can opt into typed settings by declaring descriptor-shaped entries under its contribution `config`
+mapping. The contribution loader remains the declaration owner; the gateway resolves the target
+identity from the installed winning pack and contribution, never from a browser-supplied record key.
+Sandbox requirements use public fields only; secret descriptors are rejected. See [Extension sandbox
+requirements](extension-sandbox-requirements.md).
 
 ```yaml
 # providers/example.yaml
@@ -101,7 +103,8 @@ its diagnostic: pack declarations are publisher-controlled metadata, not secret 
 The public project YAML holds an `extension_settings` record with storage `schema: 1`, a monotonic
 `revision`, and server-created target rows. A target row contains only an optional `enabled`
 override and primitive non-secret `values`. Its internal key is derived from the pack id,
-`provider`, `hook`, or `runtime` kind, and contribution id; clients never create or choose that storage key.
+`provider`, `hook`, `runtime`, or `sandboxRequirement` kind, and contribution id; clients never
+create or choose that storage key.
 
 Secret bytes are kept separately in the project's state directory. The secret owner coalesces every
 secret-field change in one settings mutation into one owner-only, atomic file replacement. It exposes
@@ -176,20 +179,21 @@ write-only diagnostics as well as write-only values.
 Project settings add a local runtime switch after the normal winning-pack and install activation
 selection:
 
-- A project pack switch disables every declared provider, hook, and runtime in that pack for that project.
+- A project pack switch disables every declared provider, hook, runtime, and sandbox requirement in that pack for that project.
   Enabling it enables those declared targets together.
-- A provider, hook, or runtime switch disables only that target. Settings and grants are retained while it
+- A provider, hook, runtime, or sandbox-requirement switch disables only that target. Settings and grants are retained while it
   is off, so it can be repaired and re-enabled.
 - Install-scope `pack_activation` filtering happens first. Project settings cannot revive an
   uninstalled, shadowed, or install-disabled contribution.
-- A provider, hook, or runtime still needs a satisfied `requiresConfig` gate. A project settings read or
+- A provider, hook, runtime, or sandbox requirement still needs a satisfied `requiresConfig` gate. A project settings read or
   secret read failure is not treated as absent values or defaults; the resolver fails closed.
 - Extension grants remain exact, project-owned EP-6 records. A settings switch neither creates
-  nor bypasses one. This includes the active pack principal's six platform-owned non-hook values:
-  `service.manage`, `memory.read`, `memory.write`, `memory.reflect`, `memory.invalidate`, and
-  `memory.read.all`. Exact grants persist while their target is disabled, dormant, awaiting review,
+  nor bypasses one. This includes the active pack principal's platform-owned non-hook values:
+  `service.manage`, `memory.read`, `memory.write`, `memory.reflect`, `memory.invalidate`,
+  `memory.read.all`, and `sandbox:build`. Exact grants persist while their target is disabled, dormant, awaiting review,
   or unavailable; Market labels each such granted capability **Granted · inactive** until the
-  target is eligible again.
+  target is eligible again. A sandbox requirement additionally needs project Docker sandbox mode;
+  its grant cannot select that mode or control Docker.
 
 Every successful settings mutation invalidates resolver and related runtime caches before
 notifying the project. Newly spawned or resolved work therefore uses the new project state rather
@@ -205,7 +209,7 @@ prompt-operator cookie; bearer-only, sandbox, and agent-session credentials rece
 | Method | Path | Contract |
 |---|---|---|
 | `GET` | `/api/projects/:projectId/extension-settings` | Returns the redacted catalogue: `{ schema: 2, revision, targets }`. A target includes its server-resolved reference, effective enablement, configuration status, declared fields and non-secret effective values/default source, plus hook grant status where applicable and the active Pack row's non-hook grant status. |
-| `PATCH` | `/api/projects/:projectId/extension-settings/:packId/:kind/:id` | Changes one server-resolved `provider`, `hook`, or `runtime` target. Body is `{ expectedRevision, enabled?, values? }`. `values` maps declared keys to a valid primitive or `null` to clear. Returns `{ revision, target }`, with the target redacted. |
+| `PATCH` | `/api/projects/:projectId/extension-settings/:packId/:kind/:id` | Changes one server-resolved `provider`, `hook`, `runtime`, or `sandboxRequirement` target. Body is `{ expectedRevision, enabled?, values? }`. `values` maps declared keys to a valid primitive or `null` to clear. Returns `{ revision, target }`, with the target redacted. |
 | `PATCH` | `/api/projects/:projectId/extension-settings/:packId` | Changes a pack's project runtime switch. Body is exactly `{ expectedRevision, enabled }`. Returns `{ revision, targets }` for the affected declared targets. |
 
 A `GET` response uses the following field distinction:
@@ -264,9 +268,9 @@ falls back to the active project or the first visible project. Project-owned req
 forms, and the runtime block are cleared before another project can paint; this prevents a value
 from one project briefly appearing under another.
 
-Each installed pack card shows a project runtime block with separate pack, provider, hook, and runtime
-switches, configuration state, and grant state. The existing **Review grants** disclosure on the
-Pack row lists the six non-hook capabilities individually, requires a confirmation for each grant,
+Each installed pack card shows a project runtime block with separate pack, provider, hook, runtime, and
+sandbox-requirement switches, configuration state, and grant state. The existing **Review grants** disclosure on the
+Pack row lists the supported non-hook capabilities individually, requires a confirmation for each grant,
 and offers exact revoke actions; it is not a second permissions screen. **Grant history** in the
 same Installed surface shows both pack and legacy-hook audit records. A runtime setting controls
 declaration eligibility only until a core service consumer is wired; it does not launch a process
