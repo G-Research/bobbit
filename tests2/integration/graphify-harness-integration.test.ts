@@ -7,6 +7,7 @@ import {
 	createHarnessAnchor,
 	createHarnessCorpus,
 	GraphifyChainHarness,
+	GraphifyPublicationHarness,
 	validateHarnessCandidate,
 	type HarnessCorpus,
 	type HarnessCorpusFile,
@@ -27,10 +28,25 @@ type Benchmark = {
 	contractFixture: { identity: "contract-fixture"; command: string; fixtureRevision: string; rootDigest: string; measuredAt: string; graph: { nodes: number; edges: number } };
 	rows: Array<{ fixture: "contract-fixture"; operation: string; elapsedMs: number; bytes?: number; matches?: number }>;
 };
+type Timing = { samplesMs: number[]; p50Ms: number; p95Ms: number };
+type LinkedWorktreeBenchmark = {
+	installedGraphify: { available: boolean; version: string | null; probeCommand: string; reason: string };
+	measurement: { identity: "graphify-contract-fixture"; executable: string; notice: string };
+	scenarios: Record<"code-only" | "code-plus-docs", {
+		scanRoots: string[];
+		baseBuild: Timing;
+		clone: Timing;
+		deltaNoCluster: Timing;
+		query: Timing;
+		graph: { bytes: { samples: number[]; min: number; max: number }; nodes: number; edges: number };
+		guard: { linkedWorktreeGuardCalls: number; samples: number };
+	}>;
+};
 
 const fixtureRoot = path.resolve("tests2/fixtures/graphify-corpus");
 const fixture = JSON.parse(fs.readFileSync(path.join(fixtureRoot, "fixture.json"), "utf8")) as Fixture;
 const benchmark = JSON.parse(fs.readFileSync(path.resolve("tests2/fixtures/graphify-benchmarks/harness-contract.json"), "utf8")) as Benchmark;
+const linkedWorktreeBenchmark = JSON.parse(fs.readFileSync(path.resolve("tests2/fixtures/graphify-benchmarks/linked-worktree-contract.json"), "utf8")) as LinkedWorktreeBenchmark;
 
 function corpus(prefix: string, count: number) {
 	const files: HarnessCorpusFile[] = Array.from({ length: count }, (_, index) => ({
@@ -222,6 +238,42 @@ describe("Graphify correctness harness integration", () => {
 		expect(chain.current("child-E")?.parentId).toBe("parent-C");
 	});
 
+	it("keeps the accepted snapshot when either fixed validation trap rejects a candidate", () => {
+		const publication = new GraphifyPublicationHarness();
+		const complete = corpus("src", fixture.regressions.anchorCollapse.sourceFiles);
+		const acceptedGraph = graph(complete.files.map(file => file.path));
+		publication.stage({ id: "accepted", kind: "base", head: "main-A", graph: acceptedGraph, state: "fresh" });
+		expect(publication.promote("accepted", { ok: true, failures: [] })).toBe(true);
+
+		const anchorCollapsed = corpus("src", fixture.regressions.anchorCollapse.collapsedSourceFiles);
+		const anchorFailure = validateHarnessCandidate({
+			expectedAnchor: createHarnessAnchor(["src", "tests2", "defaults"]),
+			observedAnchor: createHarnessAnchor(["src"]),
+			expectedCorpus: complete,
+			observedCorpus: anchorCollapsed,
+			graph: graph(anchorCollapsed.files.map(file => file.path)),
+		});
+		expect(anchorFailure.failures).toContain("ANCHOR_MISMATCH");
+		publication.stage({ id: "anchor-collapse", kind: "branch", head: "bad-anchor", graph: graph(anchorCollapsed.files.map(file => file.path)), state: "fresh" });
+		expect(publication.promote("anchor-collapse", anchorFailure)).toBe(false);
+
+		const corpusDrifted = corpus("src", fixture.regressions.corpusDrift.driftedSourceFiles);
+		const corpusFailure = validateHarnessCandidate({
+			expectedAnchor: createHarnessAnchor(["src", "tests2", "defaults"]),
+			observedAnchor: createHarnessAnchor(["src", "tests2", "defaults"]),
+			expectedCorpus: complete,
+			observedCorpus: corpusDrifted,
+			graph: graph(corpusDrifted.files.map(file => file.path)),
+		});
+		expect(corpusFailure.failures).toContain("CORPUS_DRIFT");
+		publication.stage({ id: "corpus-drift", kind: "branch", head: "bad-corpus", graph: graph(corpusDrifted.files.map(file => file.path)), state: "fresh" });
+		expect(publication.promote("corpus-drift", corpusFailure)).toBe(false);
+
+		expect(publication.current()).toEqual({ id: "accepted", kind: "base", head: "main-A", graph: acceptedGraph, state: "fresh" });
+		expect(publication.hasCandidate("anchor-collapse")).toBe(false);
+		expect(publication.hasCandidate("corpus-drift")).toBe(false);
+	});
+
 	it("records actual contract-fixture timings while keeping installed Graphify availability separate", () => {
 		expect(benchmark.graphify).toMatchObject({ available: false, version: null });
 		expect(benchmark.graphify.reason).toMatch(/import graphify failed/);
@@ -234,5 +286,28 @@ describe("Graphify correctness harness integration", () => {
 			expect(row.fixture).toBe("contract-fixture");
 			expect(row.elapsedMs).toBeGreaterThanOrEqual(0);
 		}
+	});
+
+	it("records code-only and code-plus-docs linked-worktree measurements without calling an unavailable Graphify", () => {
+		expect(linkedWorktreeBenchmark.installedGraphify).toMatchObject({ available: false, version: null, probeCommand: "python3 -c 'import graphify'" });
+		expect(linkedWorktreeBenchmark.installedGraphify.reason).toMatch(/import graphify failed/);
+		expect(linkedWorktreeBenchmark.measurement).toMatchObject({ identity: "graphify-contract-fixture", executable: expect.stringContaining("graphify_fixture.py invoke") });
+		expect(linkedWorktreeBenchmark.measurement.notice).toMatch(/not Graphify performance/);
+		for (const [name, scenario] of Object.entries(linkedWorktreeBenchmark.scenarios)) {
+			expect(scenario.scanRoots.length, name).toBeGreaterThan(0);
+			for (const timing of [scenario.baseBuild, scenario.clone, scenario.deltaNoCluster, scenario.query]) {
+				expect(timing.samplesMs).toHaveLength(scenario.guard.samples);
+				expect(timing.samplesMs.every(sample => sample >= 0)).toBe(true);
+				expect(timing.p50Ms).toBeGreaterThanOrEqual(0);
+				expect(timing.p95Ms).toBeGreaterThanOrEqual(timing.p50Ms);
+			}
+			expect(scenario.graph.bytes.samples).toHaveLength(scenario.guard.samples);
+			expect(scenario.graph.bytes.min).toBeGreaterThan(0);
+			expect(scenario.graph.bytes.max).toBeGreaterThanOrEqual(scenario.graph.bytes.min);
+			expect(scenario.graph).toMatchObject({ nodes: expect.any(Number), edges: expect.any(Number) });
+			expect(scenario.guard).toEqual({ linkedWorktreeGuardCalls: 0, samples: 7 });
+		}
+		expect(linkedWorktreeBenchmark.scenarios["code-only"].scanRoots).toEqual(["src"]);
+		expect(linkedWorktreeBenchmark.scenarios["code-plus-docs"].scanRoots).toEqual(expect.arrayContaining(["src", "docs"]));
 	});
 });

@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-08-15T16:09:53Z",
+  "environment": {
+    "platform": "darwin",
+    "release": "27.0.0",
+    "machine": "arm64",
+    "python": "3.9.6",
+    "node": "v26.0.0"
+  },
+  "installedGraphify": {
+    "available": false,
+    "probeCommand": "python3 -c 'import graphify'",
+    "reason": "python3 import graphify failed in the measurement environment",
+    "version": null
+  },
+  "measurement": {
+    "identity": "graphify-contract-fixture",
+    "executable": "python3 tests2/fixtures/graphify-contract-fixture/graphify_fixture.py invoke",
+    "notice": "Installed Graphify was unavailable and did not execute. These are contract-fixture timings, not Graphify performance."
+  },
+  "scenarios": {
+    "code-only": {
+      "scanRoots": ["src"],
+      "baseBuild": { "samplesMs": [72.52, 64.144, 61.508, 75.666, 70.972, 71.397, 66.601], "p50Ms": 70.972, "p95Ms": 75.666 },
+      "clone": { "samplesMs": [0.704, 0.702, 0.606, 0.741, 0.741, 0.62, 0.782], "p50Ms": 0.704, "p95Ms": 0.782 },
+      "deltaNoCluster": { "samplesMs": [58.544, 62.247, 62.392, 84.948, 70.372, 65.951, 61.225], "p50Ms": 62.392, "p95Ms": 84.948 },
+      "query": { "samplesMs": [0.004, 0.004, 0.004, 0.004, 0.004, 0.007, 0.005], "p50Ms": 0.004, "p95Ms": 0.007 },
+      "graph": { "bytes": { "samples": [115, 115, 115, 115, 115, 115, 115], "min": 115, "max": 115 }, "nodes": 4, "edges": 3 },
+      "guard": { "linkedWorktreeGuardCalls": 0, "samples": 7 }
+    },
+    "code-plus-docs": {
+      "scanRoots": ["src", "docs", "tests2", "defaults"],
+      "baseBuild": { "samplesMs": [63.687, 60.212, 63.726, 59.396, 58.421, 59.575, 55.965], "p50Ms": 59.575, "p95Ms": 63.726 },
+      "clone": { "samplesMs": [0.715, 0.787, 0.837, 0.838, 0.778, 0.568, 0.577], "p50Ms": 0.778, "p95Ms": 0.838 },
+      "deltaNoCluster": { "samplesMs": [64.002, 62.138, 60.556, 62.317, 57.883, 65.24, 57.728], "p50Ms": 62.138, "p95Ms": 65.24 },
+      "query": { "samplesMs": [0.004, 0.004, 0.003, 0.004, 0.003, 0.003, 0.003], "p50Ms": 0.003, "p95Ms": 0.004 },
+      "graph": { "bytes": { "samples": [178, 178, 178, 178, 178, 178, 178], "min": 178, "max": 178 }, "nodes": 7, "edges": 6 },
+      "guard": { "linkedWorktreeGuardCalls": 0, "samples": 7 }
+    }
+  }
+}

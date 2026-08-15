@@ -10,6 +10,7 @@ import {
 	type GraphifyDeltaExecution,
 	type GraphifyDeltaRequest,
 } from "../../market-packs/code-intelligence/src/graphify-runner.ts";
+import { GraphifyChainHarness } from "../../market-packs/code-intelligence/src/graphify-harness.ts";
 
 const fixtureProgram = path.resolve("tests2/fixtures/graphify-contract-fixture/graphify_fixture.py");
 
@@ -43,7 +44,7 @@ function pythonFailure(cwd: string, payload: unknown): { status: number | null; 
 function writeCorpus(root: string): void {
 	for (const [relative, source] of Object.entries({
 		"src/entry.ts": "export const entry = () => 'base';\n",
-		"src/parent.ts": "export const parent = () => 'parent';\n",
+		"src/parent.ts": "export const parent = () => 'base';\n",
 		"tests2/entry.test.ts": "export const testEntry = true;\n",
 		"defaults/config.ts": "export const config = true;\n",
 	})) {
@@ -68,12 +69,17 @@ function telemetry(file: string): GuardTelemetry {
 	return JSON.parse(fs.readFileSync(file, "utf8")) as GuardTelemetry;
 }
 
+function graph(sourcePaths: string[]) {
+	return { sourcePaths, nodes: sourcePaths.length, edges: Math.max(sourcePaths.length - 1, 0) };
+}
+
 test.describe.configure({ mode: "serial" });
 
-test("GraphifyDeltaAdapter spawns the contract fixture from a real linked worktree without reaching its guard", async () => {
+test("GraphifyDeltaAdapter uses external state for a real primary → parent → child linked-worktree chain", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-graphify-worktree-"));
 	const primary = path.join(root, "primary");
-	const linked = path.join(root, "linked");
+	const parent = path.join(root, "parent");
+	const child = path.join(root, "child");
 	const hostState = path.join(root, "host-state");
 	const telemetryPath = path.join(hostState, "telemetry.json");
 	let publicDeltaCalls = 0;
@@ -86,28 +92,41 @@ test("GraphifyDeltaAdapter spawns the contract fixture from a real linked worktr
 		writeCorpus(primary);
 		git(primary, "add", ".");
 		git(primary, "commit", "--quiet", "-m", "base corpus");
-		git(primary, "worktree", "add", "--quiet", "-b", "feature/linked", linked, "HEAD");
+		const mainHead = git(primary, "rev-parse", "HEAD");
+		git(primary, "worktree", "add", "--quiet", "-b", "feature/parent", parent, "HEAD");
+		fs.writeFileSync(path.join(parent, "src", "parent.ts"), "export const parent = () => 'parent';\n");
+		git(parent, "add", ".");
+		git(parent, "commit", "--quiet", "-m", "parent delta");
+		const parentHead = git(parent, "rev-parse", "HEAD");
+		git(primary, "worktree", "add", "--quiet", "-b", "feature/child", child, "feature/parent");
 
-		// A real linked worktree starts byte-identical to its primary checkout.
-		expect(checkoutManifest(linked)).toEqual(checkoutManifest(primary));
-		fs.writeFileSync(path.join(linked, "src", "child.ts"), "export const child = () => 'linked';\n");
-		git(linked, "add", ".");
-		git(linked, "commit", "--quiet", "-m", "child delta");
+		// Each real linked checkout begins at its declared direct parent revision.
+		expect(checkoutManifest(child)).toEqual(checkoutManifest(parent));
+		fs.writeFileSync(path.join(child, "src", "child.ts"), "export const child = () => 'linked';\n");
+		git(child, "add", ".");
+		git(child, "commit", "--quiet", "-m", "child delta");
+		const childHead = git(child, "rev-parse", "HEAD");
+
+		const chain = new GraphifyChainHarness();
+		chain.addBase("main", mainHead, graph(["src/entry.ts"]));
+		chain.derive("parent", "derived-base", "main", parentHead, graph(["src/entry.ts", "src/parent.ts"]));
+		chain.derive("child", "branch", "parent", childHead, graph(["src/entry.ts", "src/parent.ts", "src/child.ts"]));
+		expect(chain.current("child")?.parentId).toBe("parent");
 
 		const request: GraphifyDeltaRequest = {
-			cwd: linked,
+			cwd: child,
 			candidateRoot: path.join(hostState, "graphs"),
 			scanRoots: ["src", "tests2", "defaults"],
 			changedPaths: ["src/child.ts"],
 			noCluster: true,
 		};
 
-		// Prove this is live guard telemetry rather than a fixture constant.
+		// This proves the counter is live: a checkout-local candidate takes the fixture guard path.
 		fs.mkdirSync(path.dirname(telemetryPath), { recursive: true });
 		fs.writeFileSync(telemetryPath, JSON.stringify({ compatibilityCalls: 0, linkedWorktreeGuardCalls: 0 }));
-		const blockedByLiveGuard = pythonFailure(linked, {
+		const blockedByLiveGuard = pythonFailure(child, {
 			telemetryPath,
-			request: { ...request, candidateRoot: path.join(linked, "graphify-out") },
+			request: { ...request, candidateRoot: path.join(child, "graphify-out") },
 		});
 		expect(blockedByLiveGuard).toMatchObject({ status: 2, stderr: expect.stringMatching(/linked-worktree guard invoked/) });
 		expect(telemetry(telemetryPath)).toMatchObject({ linkedWorktreeGuardCalls: 1 });
@@ -116,19 +135,18 @@ test("GraphifyDeltaAdapter spawns the contract fixture from a real linked worktr
 		const execution: GraphifyDeltaExecution = {
 			async probePublicDelta() { return null; },
 			async invokePublicDelta() { publicDeltaCalls++; throw new Error("public Graphify delta is unavailable in the contract fixture"); },
-			async probeCompatibility() { return python<FixtureProbe>(linked, "probe"); },
+			async probeCompatibility() { return python<FixtureProbe>(child, "probe"); },
 			async invokeCompatibility(_spec, deltaRequest) {
 				return python<FixtureResult>(deltaRequest.cwd, "invoke", { telemetryPath, request: deltaRequest });
 			},
 		};
 		const adapter = new GraphifyDeltaAdapter("0.0.0", execution, [rebuildCodeCompatibility("0.0.0", ["root", "changed_paths"])]);
 		const result = await adapter.invokeDelta(request);
-		const adapterReport = {
+		fs.writeFileSync(path.join(hostState, "adapter-report.json"), JSON.stringify({
 			invocation: "GraphifyDeltaAdapter -> spawned Python contract fixture",
 			compatibility: result.compatibility,
 			linkedWorktreeGuardCalls: telemetry(telemetryPath).linkedWorktreeGuardCalls,
-		};
-		fs.writeFileSync(path.join(hostState, "adapter-report.json"), JSON.stringify(adapterReport, null, 2));
+		}, null, 2));
 
 		expect(result.graphPath.startsWith(`${fs.realpathSync(hostState)}${path.sep}`)).toBe(true);
 		expect(result.sourcePaths).toEqual(["defaults/config.ts", "src/child.ts", "src/entry.ts", "src/parent.ts", "tests2/entry.test.ts"]);
@@ -136,13 +154,23 @@ test("GraphifyDeltaAdapter spawns the contract fixture from a real linked worktr
 		expect(publicDeltaCalls).toBe(0);
 		expect(telemetry(telemetryPath)).toEqual({ compatibilityCalls: 1, linkedWorktreeGuardCalls: 0 });
 		expect(JSON.parse(fs.readFileSync(path.join(hostState, "adapter-report.json"), "utf8"))).toMatchObject({ linkedWorktreeGuardCalls: 0 });
-		for (const checkout of [primary, linked]) {
+
+		// Advance the real direct parent. The child remains stale and cannot derive from it or fall back to main.
+		fs.writeFileSync(path.join(parent, "src", "parent.ts"), "export const parent = () => 'advanced';\n");
+		git(parent, "add", ".");
+		git(parent, "commit", "--quiet", "-m", "advance parent");
+		expect(chain.advanceParent("parent", git(parent, "rev-parse", "HEAD"))).toEqual(["parent", "child"]);
+		expect(chain.current("child")).toBeNull();
+		expect(() => chain.derive("blocked-child-rebuild", "branch", "parent", "unreachable", graph(["src/child.ts"]))).toThrow("cannot derive from stale snapshot: parent");
+
+		for (const checkout of [primary, parent, child]) {
 			expect(fs.existsSync(path.join(checkout, "graphify-out"))).toBe(false);
 			expect(fs.existsSync(path.join(checkout, ".graphify_root"))).toBe(false);
 			expect(fs.existsSync(path.join(checkout, "graphify-cache"))).toBe(false);
+			expect(fs.existsSync(path.join(checkout, "adapter-report.json"))).toBe(false);
 		}
 		const sentinel = path.join(root, "external-sentinel.ts");
-		const escapedSource = path.join(linked, "src", "external-sentinel.ts");
+		const escapedSource = path.join(child, "src", "external-sentinel.ts");
 		fs.writeFileSync(sentinel, "export const sentinel = true;\n");
 		fs.symlinkSync(sentinel, escapedSource, "file");
 		let accepted = false;
@@ -156,13 +184,14 @@ test("GraphifyDeltaAdapter spawns the contract fixture from a real linked worktr
 			fs.unlinkSync(escapedSource);
 		}
 		expect(accepted).toBe(false);
-		for (const checkout of [primary, linked]) {
+		for (const checkout of [primary, parent, child]) {
 			expect(fs.existsSync(path.join(checkout, "rejected-graphs"))).toBe(false);
 			expect(fs.existsSync(path.join(checkout, ".graphify_root"))).toBe(false);
+			expect(git(checkout, "status", "--porcelain")).toBe("");
 		}
-		expect(git(linked, "status", "--porcelain")).toBe("");
 	} finally {
-		try { git(primary, "worktree", "remove", "--force", linked); } catch { /* cleanup after a failed git setup */ }
+		try { git(primary, "worktree", "remove", "--force", child); } catch { /* cleanup after a failed git setup */ }
+		try { git(primary, "worktree", "remove", "--force", parent); } catch { /* cleanup after a failed git setup */ }
 		fs.rmSync(root, { recursive: true, force: true });
 	}
 });
