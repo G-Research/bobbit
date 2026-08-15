@@ -536,6 +536,10 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 				"persisted SDK session identity after first prompt",
 			);
 
+			// Keep this tool-free control turn before slash expansion to distinguish a
+			// generic multi-turn lifecycle failure from a slash payload failure.
+			await runTurn("Reply with exactly: SDK_SMOKE_SECOND_TURN. Do not use tools.", "plain second SDK turn");
+
 			// A project-local exact skill proves Bobbit owns expansion before a prompt
 			// crosses the SDK boundary. The test never records the expanded text.
 			const skillDir = join(projectRoot, ".claude", "skills", "sdk-dogfood");
