@@ -137,13 +137,34 @@ test.describe("Journey: Graph Extension Runtime", () => {
 			.toContainText("v1 has no cross-repo edges");
 		await expect(panel.getByTestId("code-intelligence-freshness"))
 			.toContainText(/STALE|BASE FALLBACK/i);
-		// Real host route envelopes must render; a JSON `{ ok: false }` is surfaced
-		// as an alert by the panel rather than being mistaken for an empty status.
+		// Wait for the completed host route, then prove it was the declared status
+		// envelope. A component may legitimately already have a published graph, so
+		// accept either its card or the honest zero state — never an error envelope.
+		const statusRoute = page.waitForResponse((response) =>
+			response.url().includes("/api/ext/route/status")
+			&& response.request().method() === "POST",
+		);
 		await panel.getByTestId("graph-status-load").click();
-		await expect(panel.getByTestId("graph-status-empty")).toBeVisible({ timeout: 15_000 });
-		await expect(panel.getByRole("alert")).toHaveCount(0);
+		const statusEnvelope = await (await statusRoute).json() as { components?: unknown };
+		expect(statusEnvelope).toEqual(expect.objectContaining({ components: expect.any(Array) }));
+		await expect(panel.getByTestId("graph-status-refresh")).toBeVisible();
+		await expect.poll(async () => {
+			const [cards, empty, alerts] = await Promise.all([
+				panel.getByTestId("graph-status-component").count(),
+				panel.getByTestId("graph-status-empty").count(),
+				panel.getByRole("alert").count(),
+			]);
+			return alerts === 0 && cards + empty > 0 ? "status-rendered" : "pending";
+		}).toBe("status-rendered");
+
+		const configRoute = page.waitForResponse((response) =>
+			response.url().includes("/api/ext/route/config")
+			&& response.request().method() === "POST",
+		);
 		await panel.getByTestId("graph-status-config").click();
-		await expect(panel.getByTestId("graph-status-config-value")).toContainText("host-only", { timeout: 15_000 });
+		const configEnvelope = await (await configRoute).json() as { storage?: unknown };
+		expect(configEnvelope).toEqual(expect.objectContaining({ storage: "host-only" }));
+		await expect(panel.getByTestId("graph-status-config-value")).toContainText("host-only");
 		await expect(panel.getByRole("alert")).toHaveCount(0);
 
 		// The direct manual route remains visible, but automatic lifecycle work is
