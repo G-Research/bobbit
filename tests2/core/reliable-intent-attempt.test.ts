@@ -393,7 +393,7 @@ describe("reliable intent dispatch attempt settlement", () => {
 	});
 
 	it("releases an ambiguous queued verifier receipt without retiring its prompt carrier", async () => {
-		const prompt = vi.fn(async () => { throw new Error("transport lost after write"); });
+		const prompt = vi.fn(async (): Promise<{ success: boolean }> => { throw new Error("transport lost after write"); });
 		const { manager, session } = useHarness({
 			status: "idle",
 			rpcClient: {
