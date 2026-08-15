@@ -15,6 +15,14 @@ export interface SandboxStatus {
 
 let _building = false;
 
+/**
+ * Image label for the Bobbit-owned global runtime import contract. Bump the
+ * fixed schema version only when the sandbox dispatcher runtime changes; it
+ * intentionally carries no provider or dependency-version data.
+ */
+export const SANDBOX_RUNTIME_SCHEMA_LABEL = "bobbit.runtime-schema";
+export const SANDBOX_RUNTIME_SCHEMA_VERSION = "1";
+
 export function isBuildingImage(): boolean {
 	return _building;
 }
@@ -81,21 +89,27 @@ export async function buildSandboxImage(imageName: string, dockerContextRoot?: s
 	}
 }
 
-/**
- * Check if the Docker image has the expected pi-coding-agent version baked in.
- * Returns the image version (or null if not labelled / image missing).
- */
-export async function getImageAgentVersion(imageName: string, commandRunner: CommandRunner = realCommandRunner): Promise<string | null> {
+async function getImageLabel(imageName: string, label: string, commandRunner: CommandRunner): Promise<string | null> {
 	try {
 		const { stdout } = await commandRunner.execFile(
-			"docker", ["inspect", "--format", "{{index .Config.Labels \"bobbit.pi-agent-version\"}}", imageName],
+			"docker", ["inspect", "--format", `{{index .Config.Labels ${JSON.stringify(label)}}}`, imageName],
 			{ timeout: 5000 },
 		);
-		const version = stdout.toString().trim();
-		return version && version !== "<no value>" ? version : null;
+		const value = stdout.toString().trim();
+		return value && value !== "<no value>" ? value : null;
 	} catch {
 		return null;
 	}
+}
+
+/** Check the image's baked-in pi-coding-agent version. */
+export async function getImageAgentVersion(imageName: string, commandRunner: CommandRunner = realCommandRunner): Promise<string | null> {
+	return getImageLabel(imageName, "bobbit.pi-agent-version", commandRunner);
+}
+
+/** Check the image's Bobbit-owned dispatcher runtime schema. */
+export async function getImageRuntimeSchemaVersion(imageName: string, commandRunner: CommandRunner = realCommandRunner): Promise<string | null> {
+	return getImageLabel(imageName, SANDBOX_RUNTIME_SCHEMA_LABEL, commandRunner);
 }
 
 /** Get the host's installed pi-coding-agent version. */
@@ -112,9 +126,9 @@ export function getHostAgentVersion(): string | null {
 }
 
 /**
- * Ensure the sandbox image has the correct pi-coding-agent version.
- * Rebuilds automatically if the version is stale or missing.
- * Returns true if the image is ready.
+ * Ensure the sandbox image has the correct pi-coding-agent version and
+ * Bobbit-owned dispatcher runtime schema. Rebuilds when either is stale or
+ * missing, so a previously matching Pi image cannot run an incompatible worker.
  */
 export async function ensureImageAgentVersion(imageName: string, dockerContextRoot?: string, commandRunner: CommandRunner = realCommandRunner): Promise<boolean> {
 	const hostVersion = getHostAgentVersion();
@@ -123,16 +137,27 @@ export async function ensureImageAgentVersion(imageName: string, dockerContextRo
 		return true;
 	}
 
-	const imageVersion = await getImageAgentVersion(imageName, commandRunner);
-	if (imageVersion === hostVersion) {
-		console.log(`[sandbox] Image "${imageName}" has pi-coding-agent@${imageVersion} (matches host)`);
+	const [imageVersion, runtimeSchemaVersion] = await Promise.all([
+		getImageAgentVersion(imageName, commandRunner),
+		getImageRuntimeSchemaVersion(imageName, commandRunner),
+	]);
+	if (imageVersion === hostVersion && runtimeSchemaVersion === SANDBOX_RUNTIME_SCHEMA_VERSION) {
+		console.log(`[sandbox] Image "${imageName}" has pi-coding-agent@${imageVersion} and current Bobbit runtime schema`);
 		return true;
 	}
 
-	const reason = imageVersion
-		? `image has v${imageVersion}, host has v${hostVersion}`
-		: `image missing version label, host has v${hostVersion}`;
-	console.log(`[sandbox] Rebuilding image "${imageName}": ${reason}`);
+	const reasons: string[] = [];
+	if (imageVersion !== hostVersion) {
+		reasons.push(imageVersion
+			? `image has pi-coding-agent@${imageVersion}, host has @${hostVersion}`
+			: `image missing pi-coding-agent version label, host has @${hostVersion}`);
+	}
+	if (runtimeSchemaVersion !== SANDBOX_RUNTIME_SCHEMA_VERSION) {
+		reasons.push(runtimeSchemaVersion
+			? `image has runtime schema ${runtimeSchemaVersion}, expected ${SANDBOX_RUNTIME_SCHEMA_VERSION}`
+			: `image missing ${SANDBOX_RUNTIME_SCHEMA_LABEL} label`);
+	}
+	console.log(`[sandbox] Rebuilding image "${imageName}": ${reasons.join("; ")}`);
 
 	const contextRoot = resolveSandboxDockerContext(dockerContextRoot);
 	if (!contextRoot) {
