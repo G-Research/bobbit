@@ -17,7 +17,7 @@ export type TraceOutcome = typeof TRACE_OUTCOMES[number];
 export const TRACE_OUTCOME_KINDS = ["decision", "advisory", "audit"] as const;
 export type TraceOutcomeKind = typeof TRACE_OUTCOME_KINDS[number];
 
-export const TRACE_OUTCOME_EVENTS = ["sessionSetup", "beforePrompt", "beforeToolCall", "afterToolResult", "afterTurn", "beforeCompact", "sessionShutdown", "decisionResolved"] as const;
+export const TRACE_OUTCOME_EVENTS = ["sessionSetup", "beforePrompt", "beforeToolCall", "afterToolResult", "afterTurn", "beforeCompact", "sessionShutdown", "projectImported", "decisionResolved"] as const;
 export type TraceOutcomeEvent = typeof TRACE_OUTCOME_EVENTS[number];
 
 /** Fixed startup capability-selection stages. Candidate names never enter the trace. */
@@ -135,6 +135,20 @@ export interface TraceEntry {
 	outcomes?: TraceOutcomeRow[];
 }
 
+/**
+ * A project import has no agent session. Keep its redacted diagnostics in a
+ * separate stream keyed by the durable project/import-run identity rather than
+ * fabricating a session id.
+ */
+export interface ProjectImportTraceEntry {
+	ts: number;
+	hook: "projectImported" | "decisionResolved";
+	projectId: string;
+	importId: string;
+	providers: TraceProviderRow[];
+	outcomes?: TraceOutcomeRow[];
+}
+
 const MAX_TRACE_BYTES = 2 * 1024 * 1024;
 const MAX_PROVIDERS_PER_ENTRY = 100;
 const MAX_OUTCOMES_PER_ENTRY = 50;
@@ -194,6 +208,23 @@ export class ContextTraceStore {
 		});
 	}
 
+	/** Persist one completed import-hook dispatch without a synthetic session. */
+	appendProjectImportTrace(projectId: string, importId: string, outcomes: readonly TraceDecisionOutcomeRow[]): void {
+		const persisted = sanitizeProjectImportTraceEntry({
+			ts: Date.now(), hook: "projectImported", projectId, importId, providers: [], outcomes: [...outcomes],
+		});
+		this.appendProjectImportEntry(persisted);
+	}
+
+	/** Append a delayed import-decision resolution to its durable import stream. */
+	appendProjectImportOutcome(projectId: string, importId: string, outcome: TraceDecisionOutcomeRow): void {
+		const persisted = sanitizeProjectImportTraceEntry({
+			ts: Date.now(), hook: "decisionResolved", projectId, importId, providers: [],
+			outcomes: [{ ...outcome, event: "decisionResolved" }],
+		});
+		this.appendProjectImportEntry(persisted);
+	}
+
 	readTrace(sessionId: string, limit?: number): TraceEntry[] {
 		const file = this.traceFile(sessionId);
 		if (!this.fs.existsSync(file)) return [];
@@ -209,8 +240,34 @@ export class ContextTraceStore {
 		return typeof limit === "number" ? entries.slice(-Math.max(0, limit)) : entries;
 	}
 
+	/** Read only the dedicated import stream; it is never mixed into session trace pagination. */
+	readProjectImportTrace(projectId: string, importId: string, limit?: number): ProjectImportTraceEntry[] {
+		const file = this.projectImportTraceFile(projectId, importId);
+		if (!this.fs.existsSync(file)) return [];
+		const entries: ProjectImportTraceEntry[] = [];
+		for (const line of this.fs.readFileSync(file, "utf-8").split("\n")) {
+			if (!line.trim()) continue;
+			try { entries.push(sanitizeProjectImportTraceEntry(JSON.parse(line) as ProjectImportTraceEntry)); }
+			catch { /* Skip corrupt partial lines rather than failing trace reads. */ }
+		}
+		return typeof limit === "number" ? entries.slice(-Math.max(0, limit)) : entries;
+	}
+
+	private appendProjectImportEntry(entry: ProjectImportTraceEntry): void {
+		const file = this.projectImportTraceFile(entry.projectId, entry.importId);
+		this.fs.mkdirSync(path.dirname(file), { recursive: true });
+		this.fs.appendFileSync(file, JSON.stringify(entry) + "\n");
+		this.enforceCap(file);
+	}
+
 	private traceFile(sessionId: string): string {
 		return path.join(this.traceDir, safeBasename(sessionId) + ".jsonl");
+	}
+
+	private projectImportTraceFile(projectId: string, importId: string): string {
+		// Separate path segments avoid ambiguous composite ids such as a/b--c vs
+		// a--b/c while safeBasename prevents either identity from escaping it.
+		return path.join(this.traceDir, "project-import", safeBasename(projectId), safeBasename(importId) + ".jsonl");
 	}
 
 	private enforceCap(file: string): void {
@@ -361,6 +418,18 @@ function sanitizeTraceEntry(entry: TraceEntry): TraceEntry {
 	const outcomes = sanitizeOutcomes(rawOutcomes);
 	// Do not spread entry: every durable trace field must be named here.
 	return { ts, hook, sessionId, providers, ...(outcomes.length > 0 ? { outcomes } : {}) };
+}
+
+/** Import traces retain only validated identities and standard redacted outcome rows. */
+function sanitizeProjectImportTraceEntry(entry: ProjectImportTraceEntry): ProjectImportTraceEntry {
+	const projectId = typeof entry.projectId === "string" && SAFE_IDENTIFIER.test(entry.projectId) ? entry.projectId : "unknown-project";
+	const importId = typeof entry.importId === "string" && SAFE_IDENTIFIER.test(entry.importId) ? entry.importId : "unknown-import";
+	const hook = entry.hook === "decisionResolved" ? "decisionResolved" : "projectImported";
+	const providers = sanitizeProviders(entry.providers);
+	const outcomes = sanitizeOutcomes(entry.outcomes);
+	// Do not spread entry: roots, components, language identifiers, question prose,
+	// Other text, proposal args, and thrown errors must never become durable trace data.
+	return { ts: finiteDisplayNumber(entry.ts) ?? Date.now(), hook, projectId, importId, providers, ...(outcomes.length > 0 ? { outcomes } : {}) };
 }
 
 function safeBasename(sessionId: string): string {

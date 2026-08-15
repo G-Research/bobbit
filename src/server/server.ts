@@ -97,6 +97,8 @@ import { isValidExtensionSettingValue, normalizeMultiEnumValue, reconcileExtensi
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
 import { DecisionHookDispatcher, DecisionRequestManager } from "./agent/decision-request-manager.js";
+import { ProjectImportDecisionCoordinator } from "./agent/project-import-decision-coordinator.js";
+import { buildProjectImportDecisionContext } from "./agent/project-import-decision-context.js";
 import { AdvisoryThinkingConsumer } from "./agent/advisory-thinking-consumer.js";
 import { isCurrentTrustedExtensionDecisionOperation } from "./agent/trusted-decision-operation.js";
 import { resolveConfiguredComponent, resolveHookScopeContext } from "./agent/hook-scope-context.js";
@@ -667,6 +669,8 @@ import {
 	ProjectConfigLoadError,
 	ProjectConfigStore,
 	isExtensionCapability,
+	type Component,
+	type InlineWorkflowDef,
 	isSafeExtensionGrantIdentifier,
 	type ExtensionCapability,
 	type ExtensionGrant,
@@ -2109,6 +2113,42 @@ function validateComponentsConfig(components: unknown): string | null {
 	return null;
 }
 
+/**
+ * POST retries must write the same complete component shape as initial project
+ * registration. A crash while the import marker is `configuring` must not
+ * turn a valid retry into a lossy rewrite.
+ */
+function normalizeProjectRegistrationComponents(raw: unknown): Component[] | undefined {
+	if (!Array.isArray(raw) || raw.length === 0) return undefined;
+	return raw.map(value => {
+		const component = value && typeof value === "object" && !Array.isArray(value)
+			? value as Record<string, unknown>
+			: {};
+		return {
+			name: String(component.name ?? ""),
+			repo: typeof component.repo === "string" && component.repo ? component.repo : ".",
+			relativePath: typeof component.relative_path === "string"
+				? component.relative_path
+				: typeof component.relativePath === "string" ? component.relativePath : undefined,
+			worktreeSetupCommand: typeof component.worktree_setup_command === "string"
+				? component.worktree_setup_command
+				: typeof component.worktreeSetupCommand === "string" ? component.worktreeSetupCommand : undefined,
+			commands: component.commands && typeof component.commands === "object" && !Array.isArray(component.commands)
+				? component.commands as Record<string, string>
+				: undefined,
+			config: component.config && typeof component.config === "object" && !Array.isArray(component.config)
+				? component.config as Record<string, string>
+				: undefined,
+		};
+	});
+}
+
+function projectRegistrationWorkflows(raw: unknown): Record<string, InlineWorkflowDef> | undefined {
+	return raw && typeof raw === "object" && !Array.isArray(raw)
+		? raw as Record<string, InlineWorkflowDef>
+		: undefined;
+}
+
 export async function getGitDiff(cwd: string, file?: string, containerId?: string, commit?: string, commandRunner?: CommandRunner): Promise<string> {
 	let hasHead = true;
 	try { await execGit("git rev-parse --verify HEAD", cwd, 5000, containerId, commandRunner); } catch { hasHead = false; }
@@ -2713,6 +2753,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	let requestMutationDispatcher!: RequestMutationDispatcher;
 	let toolResultFilterDispatcher!: ToolResultFilterDispatcher;
 	let decisionRequestManager!: DecisionRequestManager;
+	let projectImportDecisionCoordinator!: ProjectImportDecisionCoordinator;
+	let projectImportStartupReplay: Promise<void> | undefined;
 	let extensionChannelServices: ExtensionChannelServices | undefined;
 	let extensionChannelServicesInit: Promise<ExtensionChannelServices | undefined> | undefined;
 	// Slice B1: warm the process-singleton pack store (file-backed, pack-namespaced
@@ -3433,6 +3475,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		invalidateSession: (sessionId) => broadcastToSession(sessionId, {
 			type: "decision_requests_updated", sessionId, ts: gatewayDeps.clock.now(),
 		}),
+		invalidateProjectImport: (projectId: string) => broadcastToProject(projectId, {
+			type: "project_import_decision_requests_updated", projectId, ts: gatewayDeps.clock.now(),
+		}),
 	});
 	const advisoryThinkingConsumer = new AdvisoryThinkingConsumer({
 		sessionManager,
@@ -3466,6 +3511,15 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		thinkingConsumer: advisoryThinkingConsumer,
 	});
 	sessionManager.lifecycleHub?.setDecisionDispatcher(decisionHookDispatcher);
+	projectImportDecisionCoordinator = new ProjectImportDecisionCoordinator({
+		registry: projectRegistry,
+		projectContextManager,
+		dispatcher: decisionHookDispatcher,
+		buildContext: ({ project, importId, components }) => buildProjectImportDecisionContext({ project, importId, components }),
+		trace: contextTraceStore,
+		now: gatewayDeps.clock.now,
+		onError: (projectId, error) => console.warn(`[project-import-decisions] reconciliation failed project=${projectId}:`, error),
+	});
 
 	// One-shot migration: heal sessions that lost their `staffId` association
 	// before the staffId-persistence fix landed. Idempotent — sessions that
@@ -4282,7 +4336,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToProject, broadcastToUi, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, decisionRequestManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionSettingsCatalogue, requestMutationDispatcher, toolResultFilterDispatcher, contextTraceStore, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToProject, broadcastToUi, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, decisionRequestManager, projectImportDecisionCoordinator, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionSettingsCatalogue, requestMutationDispatcher, toolResultFilterDispatcher, contextTraceStore, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -4779,6 +4833,13 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	void decisionRequestManager.reconcile().catch((err) => {
 		console.warn("[decision-requests] startup reconciliation failed (non-fatal):", err);
 	});
+	// Replay only ready registrations after all project contexts and the shared
+	// decision owner exist. Configuring markers intentionally remain dormant.
+	// This promise is awaited before normal session restoration below; failures
+	// are still contained so a damaged project cannot stop gateway boot.
+	projectImportStartupReplay = projectImportDecisionCoordinator.reconcileAll().catch((err) => {
+		console.warn("[project-import-decisions] startup reconciliation failed (non-fatal):", err);
+	});
 	teamManager.setVerificationHarness(verificationHarness);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
 		const team = teamManager.getTeamState(goalId);
@@ -5125,6 +5186,13 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					publishedGatewayUrl = normalizePublishedGatewayUrl(callbackUrl, basePath);
 				}
 				persistPublishedGatewayUrl(stateDir, publishedGatewayUrl, gatewayDeps.fsImpl);
+
+			// Import decisions are project-owned and must replay before an ordinary
+			// agent session can resume. The coordinator isolates projects concurrently
+			// while awaiting their bounded hook dispatches, preserving startup ordering.
+			await bootPhase("replay-project-import-decisions", async () => {
+				await projectImportStartupReplay;
+			});
 
 			// Restore persisted teams before sessions so reconstructed records are available
 			// to session revival. Both complete before accepting connections.
@@ -5667,6 +5735,7 @@ async function handleApiRoute(
 	roleStore?: RoleStore,
 	inboxManager?: InboxManager,
 	decisionRequestManager?: DecisionRequestManager,
+	projectImportDecisionCoordinator?: ProjectImportDecisionCoordinator,
 	marketplaceSourceStore?: MarketplaceSourceStore,
 	marketplaceInstaller?: MarketplaceInstaller,
 	cookieStore?: CookieStore,
@@ -7190,6 +7259,18 @@ async function handleApiRoute(
 			const palette = typeof body.palette === "string" ? body.palette : undefined;
 			const colorLight = typeof body.colorLight === "string" ? body.colorLight : undefined;
 			const colorDark = typeof body.colorDark === "string" ? body.colorDark : undefined;
+			const configuredComponents = normalizeProjectRegistrationComponents((body as Record<string, unknown>).components);
+			const createWorkflows = projectRegistrationWorkflows((body as Record<string, unknown>).workflows);
+			const dispatchImportDecisionSafely = async (projectId: string, importId: string): Promise<void> => {
+				try {
+					await projectImportDecisionCoordinator?.dispatch(projectId, importId);
+				} catch (error) {
+					// Registration/configuration has already committed. Dispatch is a
+					// replayable best-effort boundary, never a reason to lie that the
+					// durable project failed to register.
+					console.warn(`[project-import-decisions] dispatch failed project=${projectId}:`, error);
+				}
+			};
 
 			if (isHeadquartersOwnedPath(body.rootPath)) {
 				const hq = headquartersProject();
@@ -7216,15 +7297,29 @@ async function handleApiRoute(
 			if (upsert) {
 				const existing = projectRegistry.getByPath(body.rootPath);
 				if (existing) {
-					// Ensure context is initialized
+					// Ensure context is initialized.
 					const ctx = projectContextManager.getOrCreate(existing.id);
 					if (ctx) {
 						ctx.gateStore.onStatusChange = () => {
 							ctx.goalStore.bumpGeneration();
 						};
 						wireGoalManagerResolvers(ctx, { sessionManager, projectContextManager, projectRegistry });
+						// A retry is the sole safe recovery for a registration that crashed
+						// while configuring. Persist the supplied/default components before
+						// publishing the original marker; never allocate a second run.
+						if (existing.importDecisionRun?.state === "configuring") {
+							if (configuredComponents) {
+								ctx.projectConfigStore.setComponents(configuredComponents);
+							} else if (ctx.projectConfigStore.getComponents().length === 0) {
+								ctx.projectConfigStore.setComponents([{ name: existing.name, repo: "." }]);
+							}
+							if (createWorkflows) ctx.projectConfigStore.setWorkflows(createWorkflows);
+							projectRegistry.markImportDecisionRunReady(existing.id, existing.importDecisionRun.id);
+						}
 					}
-					json(existing, 200);
+					const marker = existing.importDecisionRun;
+					if (marker?.state === "ready") await dispatchImportDecisionSafely(existing.id, marker.id);
+					json(projectRegistry.get(existing.id) ?? existing, 200);
 					return;
 				}
 			}
@@ -7263,16 +7358,14 @@ async function handleApiRoute(
 
 			// Multi-repo: accept optional components / workflows in the create body.
 			// Single-repo without components → fill default `[{name: <project name>, repo: "."}]`.
-			const createComponents = (body as Record<string, unknown>).components;
-			const createWorkflows = (body as Record<string, unknown>).workflows;
 			if (newCtx) {
-				if (Array.isArray(createComponents) && createComponents.length > 0) {
-					if (createWorkflows && typeof createWorkflows === "object" && !Array.isArray(createWorkflows)) {
+				if (configuredComponents) {
+					if (createWorkflows) {
 						try {
 							const { validateAllWorkflows } = await import("./agent/workflow-validator.js");
 							const errors = validateAllWorkflows(
 								createWorkflows as Parameters<typeof validateAllWorkflows>[0],
-								createComponents as Parameters<typeof validateAllWorkflows>[1],
+								configuredComponents,
 							);
 							if (errors.length > 0) {
 								projectRegistry.remove(project.id);
@@ -7281,18 +7374,8 @@ async function handleApiRoute(
 							}
 						} catch { /* best-effort */ }
 					}
-					const normalized = (createComponents as Array<Record<string, unknown>>).map(c => ({
-						name: String(c.name ?? ""),
-						repo: typeof c.repo === "string" && c.repo ? c.repo : ".",
-						relativePath: typeof c.relative_path === "string" ? c.relative_path : (typeof c.relativePath === "string" ? c.relativePath as string : undefined),
-						worktreeSetupCommand: typeof c.worktree_setup_command === "string" ? c.worktree_setup_command : (typeof c.worktreeSetupCommand === "string" ? c.worktreeSetupCommand as string : undefined),
-						commands: c.commands && typeof c.commands === "object" && !Array.isArray(c.commands) ? c.commands as Record<string, string> : undefined,
-						config: c.config && typeof c.config === "object" && !Array.isArray(c.config) ? c.config as Record<string, string> : undefined,
-					}));
-					newCtx.projectConfigStore.setComponents(normalized);
-					if (createWorkflows && typeof createWorkflows === "object" && !Array.isArray(createWorkflows)) {
-						newCtx.projectConfigStore.setWorkflows(createWorkflows as Record<string, import("./agent/project-config-store.js").InlineWorkflowDef>);
-					}
+					newCtx.projectConfigStore.setComponents(configuredComponents);
+					if (createWorkflows) newCtx.projectConfigStore.setWorkflows(createWorkflows);
 				} else {
 					// Default single-repo component named after the project.
 					if (newCtx.projectConfigStore.getComponents().length === 0) {
@@ -7301,6 +7384,12 @@ async function handleApiRoute(
 				}
 				// No default-workflow seeding. Workflows must be designed by the
 				// project assistant; a project may legitimately have zero workflows.
+			}
+			// Components are now durably configured. Publish exactly the marker made
+			// by register() before any hook can read the project context.
+			if (project.importDecisionRun?.state === "configuring") {
+				projectRegistry.markImportDecisionRunReady(project.id, project.importDecisionRun.id);
+				project = projectRegistry.get(project.id) ?? project;
 			}
 			// Pin base_ref from the live remote so new projects never have a blank,
 			// silently-resolved base. Best-effort: failures leave it blank (today's
@@ -7368,6 +7457,8 @@ async function handleApiRoute(
 			if (newCtx) {
 				wireGoalManagerResolvers(newCtx, { sessionManager, projectContextManager, projectRegistry });
 			}
+			const importMarker = project.importDecisionRun;
+			if (importMarker?.state === "ready") await dispatchImportDecisionSafely(project.id, importMarker.id);
 			json(project, 201);
 		} catch (err: any) {
 			jsonError(400, err);
@@ -8538,6 +8629,75 @@ async function handleApiRoute(
 				title: record.request.title,
 				question: record.request.question,
 				options: record.request.options.map((option) => ({ value: option.value, label: option.label })),
+			},
+			...(record.resolution ? { resolution: { value: record.resolution.value } } : {}),
+		} });
+		return;
+	}
+
+	// Project-import decisions have no session or transcript. This projection is
+	// strictly bound to the registered project's ready run and durable delivery.
+	const projectImportRequestsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/import-decision-requests$/);
+	if (projectImportRequestsMatch && req.method === "GET") {
+		let projectId: string;
+		try { projectId = decodeURIComponent(projectImportRequestsMatch[1]); } catch { json({ error: "Project not found" }, 404); return; }
+		const project = projectRegistry.get(projectId);
+		const marker = project?.importDecisionRun;
+		const state = url.searchParams.get("state");
+		if (!project || marker?.state !== "ready") { json({ error: "Project not found" }, 404); return; }
+		if (state !== null && state !== "pending") { json({ error: "state must be pending" }, 400); return; }
+		const store = projectContextManager.getOrCreate(projectId)?.decisionRequestStore;
+		const records = store?.list().filter(record => {
+			const delivery = (record as unknown as { delivery?: { kind?: string; importId?: string } }).delivery;
+			return delivery?.kind === "project-import" && delivery.importId === marker.id && (state !== "pending" || record.status === "pending");
+		}) ?? [];
+		json({ requests: records.map(record => ({
+			id: record.id,
+			status: record.status,
+			decisionClass: record.decisionClass ?? "deferrable",
+			classificationReason: record.classificationReason ?? "requested",
+			request: {
+				title: record.request.title,
+				question: record.request.question,
+				options: record.request.options.map(option => ({ value: option.value, label: option.label })),
+			},
+			...(record.resolution ? { resolution: { value: record.resolution.value } } : {}),
+		})) });
+		return;
+	}
+
+	const projectImportAnswerMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/import-decision-requests\/([^/]+)\/answer$/);
+	if (projectImportAnswerMatch && req.method === "POST") {
+		let projectId: string;
+		let requestId: string;
+		try {
+			projectId = decodeURIComponent(projectImportAnswerMatch[1]);
+			requestId = decodeURIComponent(projectImportAnswerMatch[2]);
+		} catch { json({ error: "Decision request not found" }, 404); return; }
+		const project = projectRegistry.get(projectId);
+		const marker = project?.importDecisionRun;
+		if (!project || marker?.state !== "ready" || !decisionRequestManager) { json({ error: "Decision request not found" }, 404); return; }
+		const current = decisionRequestManager.get(projectId, requestId);
+		const delivery = (current as unknown as { delivery?: { kind?: string; importId?: string } } | undefined)?.delivery;
+		if (!current || delivery?.kind !== "project-import" || delivery.importId !== marker.id) { json({ error: "Decision request not found" }, 404); return; }
+		const body = await readBody(req).catch(() => undefined);
+		if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1 || !("value" in body)) {
+			json({ error: "value is required" }, 400);
+			return;
+		}
+		const result = await decisionRequestManager.answer(projectId, requestId, (body as { value: unknown }).value);
+		if (result.status === "invalid") { json({ error: "Invalid decision answer" }, 400); return; }
+		if (!result.request) { json({ error: "Decision request not found" }, 404); return; }
+		const record = result.request;
+		json({ request: {
+			id: record.id,
+			status: record.status,
+			decisionClass: record.decisionClass ?? "deferrable",
+			classificationReason: record.classificationReason ?? "requested",
+			request: {
+				title: record.request.title,
+				question: record.request.question,
+				options: record.request.options.map(option => ({ value: option.value, label: option.label })),
 			},
 			...(record.resolution ? { resolution: { value: record.resolution.value } } : {}),
 		} });

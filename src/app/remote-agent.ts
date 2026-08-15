@@ -55,6 +55,7 @@ import { scheduleGateStatusRefreshForGoal, refreshSessions, scheduleSessionListR
 import { applySidePanelWorkspaceFromServer, hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
 import { notifyContextTraceUpdated, refreshContextTrace, syncContextTraceInspector } from "./context-trace.js";
 import { notifyDecisionRequestsUpdated } from "./extension-decisions.js";
+import { notifyProjectImportDecisionRequestsUpdated } from "./project-import-decisions.js";
 import { shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
 import { publishClientMessage, publishClientStatus } from "./session-event-bus.js";
 import { registerSessionPoster, unregisterSessionPoster, type SessionPostRequest } from "./session-write-bridge.js";
@@ -2298,6 +2299,10 @@ export class RemoteAgent {
 				if (typeof msg.sessionId === "string" && msg.sessionId === this._sessionId) {
 					notifyDecisionRequestsUpdated(msg.sessionId);
 				}
+				break;
+			case "project_import_decision_requests_updated":
+				// REST owns the import projection; this carries only the project identity.
+				if (typeof msg.projectId === "string") notifyProjectImportDecisionRequestsUpdated(msg.projectId);
 				break;
 			case "extension_settings_updated": {
 				// The WS frame is intentionally metadata-only. Fetch a fresh redacted

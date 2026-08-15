@@ -577,6 +577,24 @@ describe("schema-2 hook contribution declarations (EP-1)", () => {
 		assert.equal(contributions.hooks[0].packRoot, root);
 	});
 
+	it("admits projectImported only for unscheduled decide hooks", () => {
+		const root = packRoot("hooks-project-import", "import-pack");
+		w(path.join(root, "pack.yaml"), "name: import-pack\n");
+		w(path.join(root, "hooks", "valid.yaml"), hookYaml(["id: import.valid", "events: [projectImported]", "mode: decide"]));
+		w(path.join(root, "hooks", "observe.yaml"), hookYaml(["id: import.observe", "events: [projectImported]"]));
+		w(path.join(root, "hooks", "selectors.yaml"), hookYaml(["id: import.selectors", "events: [projectImported, sessionSetup]", "mode: decide", "selectors: [skills]"]));
+		w(path.join(root, "hooks", "scheduled.yaml"), hookYaml(["id: import.scheduled", "events: [projectImported]", "mode: decide", "schedule: { everyNTurns: 1 }"]));
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const hooks = loadHooks(root, { ...manifest("import-pack", { hooks: ["valid", "observe", "selectors", "scheduled"] }), schema: 2 });
+			assert.deepEqual(hooks.map(hook => hook.id), ["import.valid"]);
+			assert.deepEqual(hooks[0]!.events, ["projectImported"]);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
 	it("keeps opaque and bare-scalar hook config inert instead of treating it as settings", () => {
 		const root = packRoot("hooks-legacy-opaque", "legacy-hook-pack");
 		w(path.join(root, "pack.yaml"), "name: legacy-hook-pack\n");

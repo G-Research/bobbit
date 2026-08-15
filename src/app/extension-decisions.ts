@@ -13,9 +13,9 @@ export type DecisionValue =
 	| { kind: "option"; value: string }
 	| { kind: "other"; text: string };
 
-export interface DecisionRequestProjection {
+/** Shared bounded fields rendered by both session and project-owned decisions. */
+export interface DecisionRequestWidgetProjection {
 	id: string;
-	sessionId: string;
 	status: DecisionStatus;
 	/** Absent historical records are compatible deferrable decisions. */
 	decisionClass: DecisionClass;
@@ -23,6 +23,10 @@ export interface DecisionRequestProjection {
 	question: string;
 	options: DecisionOptionProjection[];
 	resolution?: { value: DecisionValue };
+}
+
+export interface DecisionRequestProjection extends DecisionRequestWidgetProjection {
+	sessionId: string;
 }
 
 type Listener = () => void;

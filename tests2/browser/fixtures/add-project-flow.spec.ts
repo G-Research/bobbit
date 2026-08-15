@@ -117,7 +117,88 @@ test.describe("Add Project flow (UI)", () => {
 		expect((await pathInput.inputValue()).length).toBeGreaterThan(0);
 	});
 
+	test("project import decisions preserve existing-project completion and use no ask transcript route", async ({ page }) => {
+		const dir = uniqueDir("import-decision");
+		mkdirSync(join(dir, ".bobbit", "config"), { recursive: true });
+		mkdirSync(join(dir, ".bobbit", "state"), { recursive: true });
+		writeFileSync(join(dir, ".bobbit", "config", "project.yaml"), "name: import-decision\n");
+		const requestId = "project-import-browser-request";
+		let projectId = "";
+		let answerPosts = 0;
+		let sessionPosts = 0;
+		let askPosts = 0;
+		page.on("request", (request) => {
+			if (request.method() !== "POST") return;
+			if (request.url().includes("/api/sessions")) sessionPosts++;
+			if (request.url().includes("/api/internal/user-question/submit")) askPosts++;
+		});
+		await page.route(/\/import-decision-requests\?state=pending$/, async (route) => {
+			const match = route.request().url().match(/\/api\/projects\/([^/]+)\/import-decision-requests/);
+			projectId = match?.[1] ?? projectId;
+			await route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify({ requests: [{
+					id: requestId,
+					status: "pending",
+					decisionClass: "deferrable",
+					title: "Browser import decision",
+					question: "Choose a safe import mode",
+					options: [{ value: "safe", label: "Safe mode" }, { value: "fast", label: "Fast mode" }],
+				}] }),
+			});
+		});
+		await page.route(/\/import-decision-requests\/[^/]+\/answer$/, async (route) => {
+			answerPosts++;
+			const body = route.request().postDataJSON();
+			expect(body).toEqual({ value: { kind: "option", value: "safe" } });
+			await route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify({ request: {
+					id: requestId,
+					status: "resolved",
+					decisionClass: "deferrable",
+					title: "Browser import decision",
+					question: "Choose a safe import mode",
+					options: [{ value: "safe", label: "Safe mode" }, { value: "fast", label: "Fast mode" }],
+					resolution: { value: { kind: "option", value: "safe" } },
+				} }),
+			});
+		});
+
+		try {
+			await openApp(page);
+			await page.locator("button").filter({ hasText: "Add Project" }).first().click();
+			const pathInput = page.locator('input[placeholder="/path/to/project"]');
+			await pathInput.fill(dir);
+			await page.locator("button").filter({ hasText: "Continue" }).first().click();
+
+			const decisions = page.locator('[data-testid="project-import-decisions"]');
+			await expect(decisions).toBeVisible({ timeout: 10_000 });
+			await expect(decisions).toContainText("Choose a safe import mode");
+			expect(projectId).toBeTruthy();
+			expect(sessionPosts).toBe(0);
+			expect(askPosts).toBe(0);
+
+			await decisions.locator("label.ask-option").filter({ hasText: "Safe mode" }).click();
+			await expect.poll(() => answerPosts).toBe(1);
+			await expect(pathInput).not.toBeVisible({ timeout: 10_000 });
+			expect(sessionPosts).toBe(0);
+			expect(askPosts).toBe(0);
+		} finally {
+			await page.unroute(/\/import-decision-requests\?state=pending$/).catch(() => {});
+			await page.unroute(/\/import-decision-requests\/[^/]+\/answer$/).catch(() => {});
+			if (projectId) await apiFetch(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => {});
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	test("auto-import project with existing .bobbit directory", async ({ page }) => {
+		let sessionPosts = 0;
+		page.on("request", (request) => {
+			if (request.method() === "POST" && request.url().includes("/api/sessions")) sessionPosts++;
+		});
 		// Create a temp dir with .bobbit/config/project.yaml — required for
 		// hasBobbit=true since commit 54d5b710 (project.yaml is now the source
 		// of truth, not the bare .bobbit/ directory).
@@ -142,6 +223,10 @@ test.describe("Add Project flow (UI)", () => {
 		// The dialog should close and the project should appear in the sidebar
 		// Wait for dialog to disappear
 		await expect(page.locator('input[placeholder="/path/to/project"]')).not.toBeVisible({ timeout: 10_000 });
+
+		// Existing-project registration previously ended at dialog cleanup; it
+		// must not manufacture a project-assistant session after an empty import projection.
+		expect(sessionPosts).toBe(0);
 
 		// Verify the project was registered via API
 		const res = await apiFetch("/api/projects");
