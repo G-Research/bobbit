@@ -1525,14 +1525,23 @@ export async function dispatchTrackedPrompt(
 		author?: MessageAuthor;
 		whenReady?: boolean;
 		streamingBehavior?: PromptStreamingBehavior;
+		/** Caller-owned durable occurrence identity for automatic retries. */
+		intentId?: string;
 		now?: () => number;
 	} = {},
 ): Promise<unknown> {
 	const source = opts.source ?? "system";
 	const now = opts.now ?? Date.now;
 	// Direct server prompts bypass PromptQueue, but still need the exact same
-	// occurrence reservation as queued work before their RPC is issued.
-	const intentId = `prompt:${randomUUID()}`;
+	// occurrence reservation as queued work before their RPC is issued. A caller
+	// that may retry supplies its occurrence identity; an ambiguous prior attempt
+	// then remains its owner and must never be sent to Pi a second time.
+	const intentId = opts.intentId || `prompt:${randomUUID()}`;
+	const existing = (session.inFlightSteerTexts as ReliableInFlightRecord[] | undefined)
+		?.find((record) => record.intentId === intentId);
+	if (existing) {
+		return { success: false, duplicate: true, uncertain: true, intentId, attemptId: existing.attemptId };
+	}
 	const promptId = intentId;
 	const author = resolveAcceptedPromptAuthor(source, opts.author);
 	session.lastPromptSource = source;
@@ -1554,6 +1563,7 @@ export async function dispatchTrackedPrompt(
 	(session.inFlightSteerTexts ??= []).push(ledgerRecord);
 	const activityBoundary = beginPreparedPromptActivity(session, prepared);
 
+	let definiteRejection = false;
 	try {
 		const response = opts.whenReady
 			? opts.streamingBehavior
@@ -1563,6 +1573,7 @@ export async function dispatchTrackedPrompt(
 				? await session.rpcClient.prompt(prepared.piText, undefined, undefined, opts.streamingBehavior)
 				: await session.rpcClient.prompt(prepared.piText);
 		if ((response as any)?.success === false) {
+			definiteRejection = true;
 			throw new Error((response as any).error || "prompt dispatch rejected");
 		}
 		if (!acceptPreparedPromptDispatch(session, prepared, activityBoundary)) {
@@ -1584,10 +1595,18 @@ export async function dispatchTrackedPrompt(
 			console.warn(`[session-manager] tracked prompt for ${session.id} reported a failure after its correlated user echo; treating the dispatch as accepted`);
 			return { success: true };
 		}
-		cancelSessionPromptActivity(session, activityBoundary);
-		cancelPromptAuthorBinding(session, prepared, now());
-		session.inFlightSteerTexts = session.inFlightSteerTexts?.filter((record) =>
-			record.intentId !== intentId || record.attemptId !== prepared.attemptId);
+		if (definiteRejection) {
+			// Pi explicitly rejected before opening a turn, so this exact attempt may
+			// be retired. Transport errors are different: RpcBridge can write before
+			// its acknowledgement is lost, and cancellation would permit a duplicate.
+			cancelSessionPromptActivity(session, activityBoundary);
+			cancelPromptAuthorBinding(session, prepared, now());
+			session.inFlightSteerTexts = session.inFlightSteerTexts?.filter((record) =>
+				record.intentId !== intentId || record.attemptId !== prepared.attemptId);
+		} else {
+			ledgerRecord.state = "uncertain";
+			ledgerRecord.retryable = false;
+		}
 		throw error;
 	}
 }
@@ -1600,6 +1619,7 @@ export function dispatchTrackedSystemPrompt(
 		source?: SystemPromptSource;
 		whenReady?: boolean;
 		streamingBehavior?: PromptStreamingBehavior;
+		intentId?: string;
 		now?: () => number;
 	} = {},
 ): Promise<unknown> {
@@ -1685,7 +1705,46 @@ export function reconcilePersistedIntentRestore(
 		}
 	}
 
+	// A crash can persist both a stale queued copy and the exact unresolved
+	// sidecar tuple. The tuple is the only evidence Pi may have seen work, so it
+	// becomes the one fail-closed uncertain owner; the queue copy must never drain.
+	const unsettledIntentIds = new Set<string>();
+	let collapsedUnsettledOwner = false;
+	for (const row of messageQueue ?? []) {
+		const latest = latestByIntent.get(row.id);
+		if (!latest || latest.settlement !== undefined || !latest.intentId || !latest.attemptId
+			|| latest.dispatchEpoch === undefined) continue;
+		const matching = normalizedLedger.find((record) =>
+			record.intentId === latest.intentId && record.attemptId === latest.attemptId);
+		if (matching) {
+			matching.state = "uncertain";
+			matching.retryable = false;
+		} else {
+			const recovered = row as ReliableQueuedMessage;
+			normalizedLedger.push({
+				text: row.text,
+				promptId: latest.promptId,
+				intentId: latest.intentId,
+				attemptId: latest.attemptId,
+				dispatchEpoch: latest.dispatchEpoch,
+				state: "uncertain",
+				targetTurn: recovered.targetTurn ?? "next-turn",
+				sequence: recovered.sequence,
+				kind: recovered.kind ?? (recovered.isSteered ? "steer" : "prompt"),
+				createdAt: recovered.createdAt ?? latest.dispatchEpoch,
+				retryable: false,
+				source: latest.source,
+				author: latest.author,
+				images: recovered.images,
+				attachments: recovered.attachments,
+				suppressTitleGen: recovered.suppressTitleGen,
+			});
+		}
+		unsettledIntentIds.add(latest.intentId);
+		collapsedUnsettledOwner = true;
+	}
 	const queue = messageQueue?.filter((row) => {
+		if (unsettledIntentIds.has(row.id)) return false;
 		const latest = latestByIntent.get(row.id);
 		if (latest?.settlement === undefined) return true;
 		// A proven-no-start recovery explicitly carries the retired attempt on its
@@ -1710,11 +1769,13 @@ export function reconcilePersistedIntentRestore(
 		return !terminalLegacyPromptIds.has(record.promptId);
 	});
 	const queueChanged = (queue?.length ?? 0) !== (messageQueue?.length ?? 0);
-	const ledgerChanged = (ledger?.length ?? 0) !== (inFlightSteerTexts?.length ?? 0)
+	const ledgerChanged = collapsedUnsettledOwner
+		|| (ledger?.length ?? 0) !== (inFlightSteerTexts?.length ?? 0)
 		|| normalizedLedger.some((record, index) => {
 			const original = inFlightSteerTexts?.[index];
 			return typeof original !== "object" || original === null || original.intentId !== record.intentId
-				|| original.attemptId !== record.attemptId || original.dispatchEpoch !== record.dispatchEpoch;
+				|| original.attemptId !== record.attemptId || original.dispatchEpoch !== record.dispatchEpoch
+				|| original.state !== record.state || original.retryable !== record.retryable;
 		});
 	return {
 		messageQueue: queue && queue.length > 0 ? [...queue] : undefined,
@@ -10528,12 +10589,21 @@ export class SessionManager {
 				"The infrastructure server restarted while you were mid-turn. " +
 				"Your previous work has been preserved. Please continue where you left off. " +
 				"Do NOT start over — review your recent messages and resume from the exact point of interruption.";
-			await dispatchTrackedSystemPrompt(session, continuationPrompt, {
+			const response = await dispatchTrackedSystemPrompt(session, continuationPrompt, {
 				source: "system",
 				whenReady: true,
 				streamingBehavior: "followUp",
+				// A boot retry must retain the first potentially-written occurrence.
+				intentId: `boot-continuation:${session.id}`,
 				now: () => this.clock.now(),
 			});
+			if ((response as any)?.uncertain === true) {
+				this._bootRepromptedSessions.delete(session.id);
+				if (this._sessionWriterIsCurrent(session) && session.status === "streaming") {
+					broadcastStatus(session, "idle");
+				}
+				return false;
+			}
 			// Keep the boot marker until agent_start so the team boot-resume pass cannot
 			// add a second continuation after restore returns. The pre-fence observer in
 			// handleAgentLifecycle clears it even when coordinator ownership suppresses
@@ -10551,6 +10621,10 @@ export class SessionManager {
 			}
 			console.error(`[session-manager] Failed to re-prompt interrupted session ${session.id}:`, err);
 			return false;
+		} finally {
+			// Direct dispatch bypasses PromptQueue, so persist and project its ledger
+			// explicitly. This preserves an ambiguous boot write across another crash.
+			if (this._sessionWriterIsCurrent(session)) this.broadcastQueue(session);
 		}
 	}
 
@@ -11960,10 +12034,16 @@ export class SessionManager {
 		// Preserve an authenticated owner's identity for orchestration-created
 		// delegates. Direct/server-created delegates omit provenance and remain
 		// system-authored; sendDelegatePrompt validates the pair fail-closed.
-		await sendDelegatePrompt(session, opts.instructions, DELEGATE_SPAWN_TIMEOUT_MS, {
-			source: opts.source,
-			author: opts.author,
-		});
+		try {
+			await sendDelegatePrompt(session, opts.instructions, DELEGATE_SPAWN_TIMEOUT_MS, {
+				source: opts.source,
+				author: opts.author,
+			});
+		} finally {
+			// Delegate bootstrap bypasses the queue; persist its direct occurrence
+			// before setup failure handling or a later restart can retry it.
+			this.broadcastQueue(session);
+		}
 
 		console.log(`[session-manager] Created delegate session ${id} (parent: ${parentSessionId}, status: ${session.status})`);
 		return session;

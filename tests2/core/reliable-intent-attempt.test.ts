@@ -144,6 +144,43 @@ describe("reliable intent dispatch attempt settlement", () => {
 		await dispatch;
 	});
 
+	it("collapses a restored stale queue row and unresolved sidecar tuple into one uncertain owner", () => {
+		const intentId = "automatic:restored-ambiguous";
+		const attemptId = "attempt:restored-ambiguous";
+		const dispatchEpoch = 42;
+		const restored = reconcilePersistedIntentRestore([{
+			id: intentId,
+			text: "automatic work that may have landed",
+			isSteered: false,
+			createdAt: dispatchEpoch,
+			kind: "prompt",
+			targetTurn: "next-turn",
+			deliveryState: "queued",
+			source: "system",
+		}], undefined, foldAuthorSidecarRecords([{
+			schemaVersion: 2,
+			type: "prompt-author",
+			promptId: intentId,
+			intentId,
+			attemptId,
+			dispatchEpoch,
+			dispatchedAt: dispatchEpoch,
+			modelTextDigest: TEST_MODEL_TEXT_DIGEST,
+			source: "system",
+			author: { kind: "system", id: "system:bobbit", label: "Bobbit" },
+		}]));
+
+		expect(restored.messageQueue).toBeUndefined();
+		expect(restored.inFlightSteerTexts).toEqual([expect.objectContaining({
+			intentId,
+			attemptId,
+			state: "uncertain",
+			retryable: false,
+		})]);
+		expect(new PromptQueue(restored.messageQueue).length).toBe(0);
+		expect(restored.changed).toBe(true);
+	});
+
 	it("serializes rapid identical steers and correlates each occurrence exactly once", async () => {
 		const firstAck = barrier<any>();
 		const secondAck = barrier<any>();

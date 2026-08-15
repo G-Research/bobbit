@@ -410,6 +410,64 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.deepEqual(restartBinding.author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
 	});
 
+	it("retains an ambiguous direct automatic prompt as one uncertain occurrence without cancellation", async () => {
+		const manager = makeManager();
+		const prompt = vi.fn(async () => {
+			throw new Error("rpc timeout after write");
+		});
+		const { session } = putSession(manager, {
+			id: "s-direct-ambiguous",
+			rpcClient: { prompt },
+		});
+		const intentId = "automatic:timeout-after-write";
+
+		await assert.rejects(
+			() => dispatchTrackedSystemPrompt(session, "Do the automatic work.", { intentId }),
+			/rpc timeout after write/,
+		);
+		assert.equal(prompt.mock.calls.length, 1);
+		assert.equal(session.inFlightSteerTexts?.length, 1);
+		assert.partialDeepStrictEqual(session.inFlightSteerTexts?.[0], {
+			intentId,
+			state: "uncertain",
+			retryable: false,
+		});
+		assert.equal(readAuthorSidecar(session.id).at(-1)?.settlement, undefined, "ambiguous transport must not write cancellation evidence");
+		const outbox = manager.projectDeliveryOutbox(session.id);
+		assert.equal(outbox.length, 1);
+		assert.partialDeepStrictEqual(outbox[0], {
+			id: intentId,
+			deliveryState: "uncertain",
+			retryable: false,
+		});
+
+		const replay: any = await dispatchTrackedSystemPrompt(session, "Do the automatic work.", { intentId });
+		assert.deepEqual(replay, {
+			success: false,
+			duplicate: true,
+			uncertain: true,
+			intentId,
+			attemptId: session.inFlightSteerTexts[0].attemptId,
+		});
+		assert.equal(prompt.mock.calls.length, 1, "retrying the same uncertain occurrence must not call Pi again");
+	});
+
+	it("cancels a direct automatic prompt only after an authoritative no-start rejection", async () => {
+		const manager = makeManager();
+		const prompt = vi.fn(async () => ({ success: false, error: "preflight rejected" }));
+		const { session } = putSession(manager, {
+			id: "s-direct-no-start",
+			rpcClient: { prompt },
+		});
+
+		await assert.rejects(
+			() => dispatchTrackedSystemPrompt(session, "Do not start.", { intentId: "automatic:no-start" }),
+			/preflight rejected/,
+		);
+		assert.equal(session.inFlightSteerTexts?.length ?? 0, 0);
+		assert.equal(readAuthorSidecar(session.id).at(-1)?.settlement?.outcome, "cancelled");
+	});
+
 	it.each([
 		{ ordering: "agent-start-before-echo", source: "verification", author: { kind: "system", id: "system:bobbit", label: "Bobbit" } },
 		{ ordering: "echo-before-rejection", source: "verification", author: { kind: "system", id: "system:bobbit", label: "Bobbit" } },
