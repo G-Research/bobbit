@@ -4,11 +4,12 @@ Project extension settings give schema-2 pack contributions a typed, project-loc
 surface. They let a pack author declare the values a provider, hook, or declarative runtime needs without giving a
 pack its own settings API or exposing credentials through ordinary project configuration.
 
-The boundary is deliberately narrow: declarations are flat, values are primitives, and secrets
-are write-only. This keeps configuration reviewable in Market while ensuring an extension in one
-project cannot inherit another project's configuration. It is separate from install-scope pack
-activation and from [extension capability grants](extension-capability-grants.md): settings can
-make an installed contribution eligible to run, but never install a pack or confer authority.
+The boundary is deliberately narrow: declarations are flat, values are primitives or one
+bounded allowlisted string-set kind (`multi-enum`), and secrets are write-only. This keeps
+configuration reviewable in Market while ensuring an extension in one project cannot inherit
+another project's configuration. It is separate from install-scope pack activation and from
+[extension capability grants](extension-capability-grants.md): settings can make an installed
+contribution eligible to run, but never install a pack or confer authority.
 
 ## For pack authors
 
@@ -36,6 +37,13 @@ config:
     type: enum
     values: [safe, fast]
     default: safe
+  languages:
+    type: multi-enum
+    label: Languages
+    description: Languages this provider should use.
+    values: [typescript, javascript, python, rust]
+    optional: true
+    default: [typescript, python]
   enabled:
     type: boolean
     default: true
@@ -56,16 +64,18 @@ unbounded settings form.
 
 | Property | Applies to | Meaning |
 |---|---|---|
-| `type` | all | Required: `string`, `secret`, `enum`, `boolean`, or `number`. |
+| `type` | all | Required: `string`, `secret`, `enum`, `multi-enum`, `boolean`, or `number`. |
 | `label`, `description` | all | Optional bounded text for Market's labelled, accessible control. |
 | `optional` | all | Optional boolean. Omitted means the field is required when no usable declared default remains. |
-| `default` | string, enum, boolean, number | Optional primitive default. It must satisfy the field's own type, enum list, and numeric bounds. A secret cannot have a default. |
-| `values` | enum | Required, non-empty, unique string list. |
+| `default` | string, enum, multi-enum, boolean, number | Optional value satisfying the field's type and bounds. A `multi-enum` default is a valid selected set; a secret cannot have a default. |
+| `values` | enum, multi-enum | Required, non-empty, declaration-order-preserving unique string allowlist. |
 | `min`, `max` | number | Optional finite inclusive bounds; `min` cannot exceed `max`. |
 
 `string` and `secret` accept bounded, well-formed UTF-8 text. `enum` accepts only a listed value;
-`boolean` accepts only a boolean; and `number` accepts only a finite number inside any declared
-bounds. Nested values, arrays, objects, and unknown descriptor properties are not supported.
+`multi-enum` accepts a selected set of listed values; `boolean` accepts only a boolean; and
+`number` accepts only a finite number inside any declared bounds. Nested values, objects, and
+unknown descriptor properties are not supported. Arrays are reserved for `multi-enum`; they do
+not make arbitrary array or JSON settings available.
 
 Existing contributions can still use `config` as an opaque static mapping. A mapping opts into
 this strict contract only when it contains a descriptor; once it does, every entry must be a
@@ -74,13 +84,33 @@ interpreted settings schema. Legal field names that happen to match inherited Ja
 names, such as `constructor` or `prototype`, are handled as own fields rather than by prototype
 lookup.
 
+### Multi-enum selected-set rules
+
+`values` is required for `multi-enum` (as it is for `enum`) and may contain 1–128 unique,
+non-empty, well-formed strings, with each member no larger than 256 UTF-8 bytes. Its order is
+publisher-owned and is the order Market presents to operators.
+
+A `multi-enum` default, project value, API value, and runtime value must be an actual string array
+of unique members from that allowlist. The server returns and persists a fresh canonical copy of
+every accepted set, sorted with JavaScript's default UTF-16 code-unit ordering. It never locale
+sorts, mutates, or retains a caller's array. A selected set has at most 64 members and at most
+16 KiB summed UTF-8 member bytes. A required field cannot use an empty set; an optional field may
+explicitly use `[]`. These rules reject scalars, objects, nested arrays, duplicates, unknown
+members, malformed UTF-16, and count or byte overflows. `string`, `secret`, `enum`, `boolean`,
+and `number` retain their existing primitive contracts; `multi-enum` is public-only and never
+changes write-only secret storage or redaction.
+
+A target still has the existing 64-field limit. Across all its multi-enum fields, it may contain at
+most 256 selected members and 64 KiB of summed UTF-8 member bytes. The aggregate limits prevent a
+collection of individually valid selections from creating an unbounded project record.
+
 ### Configuration gates and invalid declarations
 
 `activation.requiresConfig` is an optional array of unique, declared field keys. Each required
 value must be present in the effective configuration, and required strings must be non-blank after
-trimming. Typed contributions use their declaration defaults and project settings (including
-runtime-only secrets); an opaque static `config` mapping remains its compatible static runtime
-configuration.
+trimming. An empty multi-enum set is also not present for this gate. Typed contributions use their
+declaration defaults and project settings (including runtime-only secrets); an opaque static
+`config` mapping remains its compatible static runtime configuration.
 
 Until a provider satisfies the gate, it is omitted from runtime resolution, so no provider bridge,
 hook invocation, or provider network work is started. The same gate applies to hooks and declarative
@@ -98,10 +128,11 @@ its diagnostic: pack declarations are publisher-controlled metadata, not secret 
 
 ## Project persistence and effective values
 
-The public project YAML holds an `extension_settings` record with storage `schema: 1`, a monotonic
+The public project YAML holds an `extension_settings` record with storage `schema: 2`, a monotonic
 `revision`, and server-created target rows. A target row contains only an optional `enabled`
-override and primitive non-secret `values`. Its internal key is derived from the pack id,
-`provider`, `hook`, or `runtime` kind, and contribution id; clients never create or choose that storage key.
+override and non-secret `values`, including canonical multi-enum arrays. Its internal key is
+derived from the pack id, `provider`, `hook`, or `runtime` kind, and contribution id; clients never
+create or choose that storage key.
 
 Secret bytes are kept separately in the project's state directory. The secret owner coalesces every
 secret-field change in one settings mutation into one owner-only, atomic file replacement. It exposes
@@ -146,16 +177,45 @@ The effective non-secret value order is:
    provider; then
 3. the project's target values.
 
+Legacy PackStore fallback remains scalar-only. It cannot supply a multi-enum array, which avoids
+turning an opaque legacy value into a reviewed selection.
+
 A project row, including an empty row created by clearing a value, ends legacy fallback. This is
 important for migration: clearing a project override must not silently revive an old global
 setting. Runtime resolution additionally merges a secret only through the secret owner's
 runtime-only read.
 
-The public storage schema is intentionally distinct from the pack declaration schema and keeps
-valid primitive public values rather than serializing a declaration into project YAML. That lets
-packs add fields and defaults without a storage migration and prevents an old client from
+The public storage schema is intentionally distinct from the pack declaration schema and stores
+valid public values rather than serializing a declaration into project YAML. That lets packs add
+fields and defaults without a declaration-storage migration and prevents an old client from
 rewriting secret material. Consumers should always validate mutations against the current
 server-resolved declaration; unknown or no-longer-declared public values are not an API contract.
+
+### Multi-enum storage compatibility
+
+Schema 2 writes multi-enum selections as native YAML sequences, never JSON encoded strings:
+
+```yaml
+extension_settings:
+  schema: 2
+  revision: 7
+  targets:
+    "language-pack\u0000provider\u0000analyzer":
+      values:
+        languages: [python, typescript]
+```
+
+Schema 1 remains primitive-only. An array in a schema-1 target invalidates that target row; it is
+not coerced to a selected set or upgraded just because a newer server can read schema 2. A valid
+schema-1 record remains schema 1 until a successful settings mutation. That mutation publishes
+schema 2, preserving the row data and normal revision behavior. This explicit boundary makes
+hand-edited legacy data fail safely rather than acquiring unintended meaning.
+
+Malformed schema-2 arrays similarly isolate the affected target row under the existing durable
+settings recovery behavior, while an invalid root remains unavailable. Snapshots, mutation
+candidates, persistence/reload state, effective/runtime values, and public results use independent
+array copies. If a secret write requires compensation, rollback restores the exact prior public
+snapshot, including its storage schema, revision, selected arrays, and `commitId`.
 
 ### Schema evolution and review
 
@@ -205,7 +265,7 @@ prompt-operator cookie; bearer-only, sandbox, and agent-session credentials rece
 | Method | Path | Contract |
 |---|---|---|
 | `GET` | `/api/projects/:projectId/extension-settings` | Returns the redacted catalogue: `{ schema: 2, revision, targets }`. A target includes its server-resolved reference, effective enablement, configuration status, declared fields and non-secret effective values/default source, plus hook grant status where applicable and the active Pack row's non-hook grant status. |
-| `PATCH` | `/api/projects/:projectId/extension-settings/:packId/:kind/:id` | Changes one server-resolved `provider`, `hook`, or `runtime` target. Body is `{ expectedRevision, enabled?, values? }`. `values` maps declared keys to a valid primitive or `null` to clear. Returns `{ revision, target }`, with the target redacted. |
+| `PATCH` | `/api/projects/:projectId/extension-settings/:packId/:kind/:id` | Changes one server-resolved `provider`, `hook`, or `runtime` target. Body is `{ expectedRevision, enabled?, values? }`. `values` maps declared keys to a valid primitive, a valid multi-enum string array, or `null` to clear. Returns `{ revision, target }`, with the target redacted. |
 | `PATCH` | `/api/projects/:projectId/extension-settings/:packId` | Changes a pack's project runtime switch. Body is exactly `{ expectedRevision, enabled }`. Returns `{ revision, targets }` for the affected declared targets. |
 
 A `GET` response uses the following field distinction:
@@ -250,9 +310,18 @@ Other useful mutation outcomes include:
 | 422 | `EXTENSION_SETTINGS_INVALID_SCHEMA`, `EXTENSION_SETTINGS_UNKNOWN_FIELD`, `EXTENSION_SETTINGS_INVALID_FIELD_VALUE`, `EXTENSION_SETTINGS_REQUIRED_FIELD` | The declaration cannot be used, the key/value is invalid, or a required non-defaulted public field was cleared. |
 | 503 | `EXTENSION_SETTINGS_UNAVAILABLE`, `EXTENSION_SETTINGS_SECRET_READ_FAILED`, `EXTENSION_SETTINGS_PERSIST_FAILED` | Project public/secret state cannot safely be read or published. Repair or retry; the resolver remains fail-closed. |
 
-`null` clears an optional non-secret override so its declaration default can take effect again.
-It clears a secret. It cannot clear a required non-secret field that has no declared default.
-Omitting a field leaves it unchanged.
+For `multi-enum`, a PATCH accepts an unordered valid string array and returns the canonical
+code-unit-sorted array. `[]` is an explicit empty project override for an optional field; it is
+not the same as `null`. `null` removes an optional or defaulted non-secret override so its declared
+default can take effect again, and clears a secret. It cannot clear a required non-secret field
+that has no declared default, and it cannot create an empty required selected set. Omitting a field
+leaves it unchanged.
+
+Multi-enum values are public configuration: canonical copied arrays may appear in the target PATCH
+response, catalogue, and runtime effective configuration after current-declaration reconciliation.
+They never relax secret handling. Secret bytes remain absent from YAML, redacted API responses,
+logs, attributes, and metadata-only WebSocket invalidations; those frames continue to carry only
+refresh metadata.
 
 See [REST API — Project Config](rest-api.md#project-config) for authentication and common error
 format, and [WebSocket Protocol](websocket-protocol.md) for refresh delivery.
@@ -274,6 +343,18 @@ today. Declared fields use native labelled controls and an explicit revisioned S
 distinguishes disabled, needs configuration, grant required, granted but inactive, **Settings need
 review** for invalid schema or incompatible evolved non-secret values, unavailable, and active states.
 
+A `multi-enum` field is a native checkbox group: a labelled `fieldset` and visible `legend` contain
+one native checkbox per declared value in publisher order. Native label, Tab, and Space behavior,
+existing description/error linkage, invalid state, and busy/disabled handling make the group
+usable without an emulated ARIA listbox. Its summary distinguishes a selected count, `None selected`,
+and `Using default`. A required empty group shows `Select at least one option.` and blocks Save.
+
+For an optional multi-enum field, clearing every checkbox stages the explicit project value `[]`.
+**Use default** instead stages removal and sends PATCH `null`, allowing the declared default to be
+inherited. Save, reset, navigation, project switch, conflict reload, and page reload discard stale
+drafts and hydrate the checked state only from the latest project projection, so a selection cannot
+leak between projects.
+
 Secret controls are password inputs that begin empty. They show only presence (`Stored for this
 project` or `Not set`), offer an explicit removal action, and clear their DOM value after any
 save outcome, reset, navigation, project switch, or reload. A stale save tells the operator to
@@ -283,6 +364,24 @@ The projectless `#/market` compatibility surface remains usable for server-scope
 package onboarding, but it makes no project-owned settings request. Its Installed view explains
 that a project must be selected or created before providers, hooks, and settings can be
 configured.
+
+## Focused verification
+
+The selected-set contract is covered at boundaries where a shape or copy could otherwise drift:
+
+- `tests2/core/extension-settings-schema.test.ts` covers descriptor/default normalization,
+  canonical ordering, malformed and bounded selections, requiredness, primitive compatibility, and
+  defensive copies.
+- `tests2/core/extension-settings-store.test.ts` covers native schema-2 YAML, schema-1 rejection
+  and migration-on-save, malformed-row isolation, aggregate caps, clone safety, rollback, and
+  generation mismatch behavior.
+- `tests2/integration/extension-settings-api.test.ts` covers unordered PATCH canonicalization,
+  validation failures, reload/runtime projection, scalar-only legacy fallback, native persistence,
+  and secret redaction.
+- `tests2/dom/marketplace-extension-settings-multi-enum.test.ts` covers the labelled native group,
+  canonical draft PATCH behavior, empty versus default semantics, and projection replacement.
+- `tests2/browser/e2e/extension-settings.spec.ts` covers keyboard selection, save/reset/reload,
+  project isolation, and the continued absence of secret values from UI-visible responses.
 
 ## Hindsight migration and isolation
 
