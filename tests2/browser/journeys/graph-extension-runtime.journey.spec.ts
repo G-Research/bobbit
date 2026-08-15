@@ -97,7 +97,7 @@ test.afterEach(async () => {
 });
 
 test.describe("Journey: Graph Extension Runtime", () => {
-	test("disabled → enable/status/rebuild/stale warning → reload → disabled cleanup", async ({ page }) => {
+	test("disabled → enable/honest zero status/unavailable rebuild → reload → disabled cleanup", async ({ page }) => {
 		test.setTimeout(55_000);
 
 		// Default-off is a true golden path: no provider contribution, graph tools,
@@ -136,7 +136,7 @@ test.describe("Journey: Graph Extension Runtime", () => {
 		await expect(panel.getByTestId("code-intelligence-no-cross-repo-warning"))
 			.toContainText("v1 has no cross-repo edges");
 		await expect(panel.getByTestId("code-intelligence-freshness"))
-			.toContainText(/STALE|BASE FALLBACK/i);
+			.toContainText("No graph published");
 		// Wait for the completed host route, then prove it was the declared status
 		// envelope. A component may legitimately already have a published graph, so
 		// accept either its card or the honest zero state — never an error envelope.
@@ -167,16 +167,15 @@ test.describe("Journey: Graph Extension Runtime", () => {
 		await expect(panel.getByTestId("graph-status-config-value")).toContainText("host-only");
 		await expect(panel.getByRole("alert")).toHaveCount(0);
 
-		// The direct manual route remains visible, but automatic lifecycle work is
-		// explicitly unavailable until EP-8. Clicking it must not claim a queue or
-		// detached Graphify worker was started.
+		// The declared lifecycle contract is honest: no executor exists until EP-8,
+		// so the control is disabled instead of pretending a Graphify worker starts.
 		const rebuild = panel.getByTestId("code-intelligence-rebuild");
-		await expect(rebuild).toBeEnabled();
-		await rebuild.click();
+		await expect(rebuild).toBeDisabled();
+		await expect(rebuild).toHaveText("Rebuild unavailable");
 		await expect(panel.getByTestId("code-intelligence-rebuild-status"))
-			.toContainText(/unavailable pending EP-8|route-only/i, { timeout: 15_000 });
+			.toContainText("GRAPH_REBUILD_UNAVAILABLE_PENDING_EP8");
 		await expect(panel.getByTestId("code-intelligence-freshness"))
-			.toContainText(/STALE|BASE FALLBACK/i);
+			.toContainText("No graph published");
 
 		// A pack panel belongs to a session workspace. A reload at the bare `#/ext`
 		// route restores the route and activation registry, but has no selected
