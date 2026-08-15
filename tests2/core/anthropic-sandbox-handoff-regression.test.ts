@@ -85,6 +85,7 @@ describe("Anthropic sandbox OAuth handoff regressions", () => {
 		"CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE",
 		"CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE",
 		"CLAUDE_AGENT_SDK_AUTH_UNAVAILABLE",
+		"CLAUDE_AGENT_SDK_RATE_LIMITED",
 	] as const)("preserves the safe %s reason code while redacting embedded credentials and config paths", (category) => {
 		const secret = "sk-sandbox-diagnostic-secret";
 		const configPath = `/Users/operator/${category}/credentials.json`;

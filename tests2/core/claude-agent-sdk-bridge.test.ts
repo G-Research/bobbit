@@ -1,5 +1,5 @@
 // v2-native — deterministic Agent SDK bridge coverage through its production deps seam.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
 	ClaudeAgentSdkBridge,
@@ -294,6 +294,61 @@ describe("ClaudeAgentSdkBridge", () => {
 			expect.objectContaining({ type: "process_exit", code: 1, error: "SDK_SESSION_UNAVAILABLE" }),
 		]);
 		expect(observed.filter(event => event.type === "agent_end" || event.type.startsWith("message") || event.type.includes("tool"))).toEqual([]);
+	});
+
+	it("keeps SDK rate-limit admission updates lifecycle-neutral", async () => {
+		const fixture = bridgeFixture();
+		const observed: any[] = [];
+		const warn = vi.spyOn(console, "warn");
+		fixture.bridge.onEvent(event => observed.push(event));
+		await fixture.bridge.start();
+
+		fixture.query.emit({ type: "rate_limit_event", rate_limit_info: { status: "allowed", resetsAt: "provider-reset", utilization: 0.5 } });
+		fixture.query.emit({ type: "rate_limit_event", rate_limit_info: { status: "allowed_warning", rate_limit_type: "provider-limit" } });
+		await flushMicrotasks();
+
+		expect(fixture.bridge.running).toBe(true);
+		expect(fixture.query.closeCalls).toBe(0);
+		expect(observed).toEqual([]);
+		expect(warn).not.toHaveBeenCalled();
+		warn.mockRestore();
+		await fixture.bridge.stop();
+	});
+
+	it("fails a rejected SDK rate-limit admission without forwarding provider details", async () => {
+		const fixture = bridgeFixture();
+		const observed: any[] = [];
+		fixture.bridge.onEvent(event => observed.push(event));
+		await fixture.bridge.start();
+		const activeTurn = fixture.bridge.prompt("active user turn");
+		await fixture.query.nextInput();
+
+		fixture.query.emit({
+			type: "rate_limit_event",
+			rate_limit_info: {
+				status: "rejected", resetsAt: "provider-reset", utilization: 0.99, rate_limit_type: "provider-limit",
+			},
+			uuid: "provider-uuid", body: "provider-body",
+		});
+		await expect(activeTurn).rejects.toMatchObject({
+			code: "SDK_SESSION_UNAVAILABLE",
+			message: "SDK_SESSION_UNAVAILABLE",
+		});
+		const failure = await activeTurn.catch(error => error);
+		expect(claudeAgentSdkUnavailableDiagnostic(failure)).toBe("CLAUDE_AGENT_SDK_RATE_LIMITED");
+		await flushMicrotasks();
+
+		expect(fixture.query.closeCalls).toBe(1);
+		expect(fixture.bridge.running).toBe(false);
+		expect((fixture.bridge as any).state).toBe("failed");
+		expect(observed.filter(event => event.type === "process_exit")).toEqual([
+			{ type: "process_exit", code: 1, error: "SDK_SESSION_UNAVAILABLE" },
+		]);
+		expect(observed.some(event => event.type === "agent_end")).toBe(false);
+		const payload = JSON.stringify(observed);
+		for (const providerDetail of ["provider-reset", "provider-limit", "provider-uuid", "provider-body", "0.99"]) {
+			expect(payload).not.toContain(providerDetail);
+		}
 	});
 
 	it("becomes ready with the valid streamed system:init UUID as its only resumable identity", async () => {

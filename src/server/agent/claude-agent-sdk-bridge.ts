@@ -679,10 +679,32 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		return this.closed || this.state === "failed";
 	}
 
+	/** Rate-limit admission frames are lifecycle-neutral; rejected admission is terminal.
+	 * Deliberately leave malformed or future statuses to the translator's existing
+	 * nonfatal unknown-event path rather than guessing provider semantics. */
+	private handleRateLimitEvent(sdkEvent: unknown): boolean {
+		if (!sdkEvent || typeof sdkEvent !== "object" || (sdkEvent as { type?: unknown }).type !== "rate_limit_event") return false;
+		const rateLimitInfo = (sdkEvent as { rate_limit_info?: unknown }).rate_limit_info;
+		const status = rateLimitInfo && typeof rateLimitInfo === "object"
+			? (rateLimitInfo as { status?: unknown }).status
+			: undefined;
+		if (status === "allowed" || status === "allowed_warning") return true;
+		if (status === "rejected") {
+			// Never retain provider-controlled rate details such as reset times or utilization.
+			this.fail(new ClaudeAgentSdkUnavailableError("CLAUDE_AGENT_SDK_RATE_LIMITED"));
+			return true;
+		}
+		return false;
+	}
+
 	private async consume(query: Query): Promise<void> {
 		try {
 			for await (const sdkEvent of query) {
 				if (this.isClosedOrFailed()) return;
+				if (this.handleRateLimitEvent(sdkEvent)) {
+					if (this.isClosedOrFailed()) return;
+					continue;
+				}
 				this.observeInitializationIdentity(sdkEvent);
 				if (this.isClosedOrFailed()) return;
 				const translated = translateClaudeSdkEvent(this.translatorState, sdkEvent as unknown as Record<string, unknown>);
