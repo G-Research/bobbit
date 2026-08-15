@@ -1712,10 +1712,10 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			};
 			const skillDir = join(projectRoot, ".claude", "skills", "sdk-sandbox-dogfood");
 			mkdirSync(skillDir, { recursive: true });
-			writeFileSync(join(skillDir, "SKILL.md"), "---\nname: sdk-sandbox-dogfood\ndescription: isolated sandbox lifecycle proof\n---\nUse only the Bobbit sandbox dogfood procedure.\n");
+			writeFileSync(join(skillDir, "SKILL.md"), "---\nname: sdk-sandbox-dogfood\ndescription: isolated sandbox lifecycle proof\n---\nReply with exactly SDK_SANDBOX_DOGFOOD_SLASH_COMPLETE. Do not use tools.\n");
 			const { resolveSkillExpansions } = await import("../../dist/server/skills/resolve-skill-expansions.js");
 			const sandboxSlash = resolveSkillExpansions("/sdk-sandbox-dogfood", projectRoot);
-			expect(sandboxSlash.expansions.length === 1 && sandboxSlash.unknown.length === 0).toBe(true);
+			expect(sandboxSlash.expansions.length === 1 && sandboxSlash.unknown.length === 0 && sandboxSlash.modelText !== sandboxSlash.originalText).toBe(true);
 			const { createComposerSlashRegistry, resolveComposerSlashDispatch } = await import("../../src/app/composer-slash-dispatch.ts");
 			const sandboxRegistry = createComposerSlashRegistry({ runtime: "claude-agent-sdk", skills: [{ name: "sdk-sandbox-dogfood", description: "isolated sandbox lifecycle proof", source: "project" }], launchers: [] });
 			expect(resolveComposerSlashDispatch("/sdk-sandbox-dogfood", { runtime: "claude-agent-sdk", registry: sandboxRegistry })?.kind).toBe("skill");
