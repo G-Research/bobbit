@@ -25,6 +25,7 @@ import {
 	type HookContribution,
 	type SystemPromptSectionContribution,
 	type ServiceExtensionContribution,
+	type SandboxRequirementContribution,
 } from "../agent/pack-contributions.js";
 import type { PackEntry, PackScope } from "../agent/pack-types.js";
 
@@ -45,6 +46,9 @@ export interface PackContributionResolver {
 	/** List active declarative service extensions across winning packs. Optional so
 	 * existing resolver fakes remain source-compatible during adoption. */
 	listServiceExtensions?(projectId: string | undefined): ServiceExtensionContribution[];
+	/** List active, authorized core-toolchain requests. Optional preserves existing
+	 * resolver fakes until sandbox requirement consumers are wired. */
+	listSandboxRequirements?(projectId: string | undefined): ActiveSandboxRequirement[];
 	/** List active, runnable every-N-turn advisor declarations. */
 	listScheduledAdvisorHooks(projectId: string | undefined): HookContribution[];
 	/** List active scheduled decision declarations due at the server-owned turn index. */
@@ -66,6 +70,20 @@ export type DisabledEntrypointsLookup = (
 	projectId: string | undefined,
 	packName: string,
 ) => Iterable<string>;
+
+/** Exact live `sandbox:build` authorization for an installed winning pack.
+ * Missing lookup is denial: a declaration alone must never affect an image. */
+export type SandboxRequirementAuthorizationLookup = (
+	projectId: string | undefined,
+	packId: string,
+) => boolean;
+
+/** The public, deterministic projection supplied to the core image-plan resolver. */
+export interface ActiveSandboxRequirement {
+	packId: string;
+	requirementId: string;
+	profiles: readonly ("python")[];
+}
 
 /** Per-project EP-6 authorization for static prompt text. Absence is a denial;
  * activation alone must never make a pack's instructions effective. */
@@ -117,6 +135,13 @@ export type ProviderConfigOverrideLookup = (
  * control lookup only: persisted setting target identities remain provider/hook. */
 export type ProjectExtensionSettingsTargetKind = "pack" | "provider" | "hook" | "runtime";
 
+type ExtendedProjectExtensionSettingsLookup = (
+	projectId: string | undefined,
+	packId: string,
+	kind: ProjectExtensionSettingsTargetKind | "sandboxRequirement",
+	id?: string,
+) => ProjectExtensionSettingsReadResult | undefined;
+
 /** Runtime-only effective settings for one project target. `values` can contain
  * secret bytes, so this contract must never be used by a public/API projection. */
 export type ProjectExtensionSettingsReadResult =
@@ -166,6 +191,8 @@ export class PackContributionRegistry implements PackContributionResolver {
 		private readonly hasSystemPromptStaticAuthorization?: SystemPromptStaticAuthorizationLookup,
 		private readonly projectExtensionSettings?: ProjectExtensionSettingsLookup,
 		private readonly disabledRuntimes?: DisabledEntrypointsLookup,
+		private readonly disabledSandboxRequirements?: DisabledEntrypointsLookup,
+		private readonly hasSandboxRequirementAuthorization?: SandboxRequirementAuthorizationLookup,
 	) {}
 
 	/** Drop the per-project index cache (rebuilt lazily on next read). */
@@ -199,6 +226,18 @@ export class PackContributionRegistry implements PackContributionResolver {
 
 	listServiceExtensions(projectId: string | undefined): ServiceExtensionContribution[] {
 		return this.index(projectId).list.flatMap((pack) => pack.runtimes);
+	}
+
+	listSandboxRequirements(projectId: string | undefined): ActiveSandboxRequirement[] {
+		return this.index(projectId).list.flatMap(pack =>
+			[...pack.sandboxRequirements]
+				.sort((a, b) => a.id.localeCompare(b.id))
+				.map(requirement => ({
+					packId: pack.packId,
+					requirementId: requirement.id,
+					profiles: [...requirement.profiles].sort(),
+				})),
+		);
 	}
 
 	listScheduledAdvisorHooks(projectId: string | undefined): HookContribution[] {
@@ -411,6 +450,38 @@ export class PackContributionRegistry implements PackContributionResolver {
 			}
 			if (resolvedRuntimes.length !== contrib.runtimes.length) contrib = { ...contrib, runtimes: resolvedRuntimes };
 
+			// Sandbox requirements are inert catalog entries until every independent
+			// eligibility check succeeds. The final authorization lookup is mandatory
+			// and pack-principal-only at its server wiring boundary.
+			const disabledSandboxRequirements = this.disabledSandboxRequirements
+				? new Set(this.disabledSandboxRequirements(e.scope, projectId, contrib.packName))
+				: undefined;
+			const resolvedSandboxRequirements: SandboxRequirementContribution[] = [];
+			for (const requirement of contrib.sandboxRequirements) {
+				if (disabledSandboxRequirements?.has(requirement.listName)) continue;
+				const projectSettings = readSandboxRequirementSettings(
+					this.projectExtensionSettings,
+					projectId,
+					contrib.packId,
+					requirement.id,
+				);
+				if (projectSettings.state === "error") {
+					retryableConfigError ||= projectSettings.diagnostic.retryable;
+					console.warn(`[pack-contributions] project settings unavailable packId=${contrib.packId} sandboxRequirementId=${requirement.id} code=${safeDiagnosticCode(projectSettings.diagnostic)}`);
+					continue;
+				}
+				if (projectSettings.state === "present" && !projectSettings.enabled) continue;
+				const values = requirement.settingsSchema
+					? projectSettings.state === "present" ? projectSettings.values : settingsDefaults(requirement.settingsSchema.fields)
+					: emptySettings();
+				if (!activationSatisfied(requirement.activation, values)) continue;
+				if (this.hasSandboxRequirementAuthorization?.(projectId, contrib.packId) !== true) continue;
+				resolvedSandboxRequirements.push(requirement);
+			}
+			if (resolvedSandboxRequirements.length !== contrib.sandboxRequirements.length) {
+				contrib = { ...contrib, sandboxRequirements: resolvedSandboxRequirements };
+			}
+
 			// Static sections need both the ordinary manifest-list activation toggle
 			// and explicit EP-6 authorization. Missing authorization is deny-by-default;
 			// retain the pack row but never leak its prompt bytes into a projection.
@@ -476,16 +547,34 @@ function authorizeChannelCapabilities(_entry: PackEntry, channels: ChannelContri
 /** Read and defensively validate a runtime-only project settings target. Storage
  * implementations may throw on a public or secret read; the registry must never
  * turn that into defaults, and must not expose a backend error's message/path. */
-function readProjectExtensionSettings(
+function readSandboxRequirementSettings(
 	lookup: ProjectExtensionSettingsLookup | undefined,
 	projectId: string | undefined,
 	packId: string,
-	kind: ProjectExtensionSettingsTargetKind,
+	id: string,
+): ProjectExtensionSettingsReadResult {
+	// The live server wiring adds this target alongside the declaration catalogue.
+	// Keep this registry source-compatible with existing settings callbacks until
+	// then; an unwired callback yields the same fail-closed/absent semantics.
+	return readProjectExtensionSettings(
+		lookup as unknown as ExtendedProjectExtensionSettingsLookup | undefined,
+		projectId,
+		packId,
+		"sandboxRequirement",
+		id,
+	);
+}
+
+function readProjectExtensionSettings(
+	lookup: ProjectExtensionSettingsLookup | ExtendedProjectExtensionSettingsLookup | undefined,
+	projectId: string | undefined,
+	packId: string,
+	kind: ProjectExtensionSettingsTargetKind | "sandboxRequirement",
 	id?: string,
 ): ProjectExtensionSettingsReadResult {
 	if (!lookup) return { state: "absent" };
 	try {
-		const result = lookup(projectId, packId, kind, id);
+		const result = (lookup as ExtendedProjectExtensionSettingsLookup)(projectId, packId, kind, id);
 		if (!result || result.state === "absent") return { state: "absent" };
 		if (result.state === "error") {
 			return isStoreReadDiagnostic(result.diagnostic)

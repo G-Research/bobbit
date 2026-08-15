@@ -4,6 +4,7 @@ import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory, tryHostPathToC
 import { resolveGatewayDeps, realCommandRunner, type Clock, type CommandRunner, type FsLike, type GatewayDeps } from "./gateway-deps.js";
 import { parseTrustedGithubRemote, RemoteStateCoordinator, type PullRequestIdentity, type RemoteStateAddress, type RemoteStateIntent, type RemoteStateTelemetryEvent, type RepositorySnapshotBinding, type TrustedGithubRemote } from "./remote-state-coordinator.js";
 import { resolveLegacyTestRuntimeFlags } from "./legacy-test-runtime-flags.js";
+import { parseStrictBody, STRICT_UPDATE_BODY_KEYS, type StrictBody, type StrictBodyOptions } from "./strict-body.js";
 export type { Clock, CommandRunner, ExecFileResult, FsLike, GatewayDeps, ResolvedGatewayDeps, TimerHandle } from "./gateway-deps.js";
 export { defaultRpcBridgeFactory, realClock, realCommandRunner, realFetch, realFs, resolveGatewayDeps } from "./gateway-deps.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -89,6 +90,7 @@ import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
 import type { StorePutOptions } from "../shared/extension-host/host-api.js";
 import { PackContributionRegistry, type ProviderConfigOverrideReadResult } from "./extension-host/pack-contribution-registry.js";
+
 import { loadPackContributions, packIdFromRoot, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX, type PackContributions } from "./agent/pack-contributions.js";
 import { ExtensionSettingsUnavailableError, type ExtensionSettingsTargetRef } from "./agent/extension-settings-store.js";
 import { isValidExtensionSettingValue, reconcileExtensionSettingsValues, type ExtensionSettingDefinition, type ExtensionSettingValue } from "./agent/extension-settings-schema.js";
@@ -237,6 +239,20 @@ function formatWaitText(result: WaitResult): string {
 		lines.push(`➜ Process this result now, then call team_wait again to await the remaining children — pass child_session_ids: [${remainingIds.join(", ")}].`);
 	}
 	return lines.join("\n");
+}
+
+/** Resolve the sole Docker image plan from server-owned project configuration and
+ * the registry's active, grant-aware sandbox requirement projection. */
+function resolveProjectSandboxImagePlan(
+	registry: PackContributionRegistry,
+	projectConfig: ProjectConfigStore,
+	projectId: string | undefined,
+): SandboxImagePlan {
+	return resolveSandboxImagePlan({
+		baseImageName: projectConfig.get("sandbox_image") || "bobbit-agent",
+		requirements: registry.listSandboxRequirements(projectId),
+		piAgentVersion: getHostAgentVersion(),
+	});
 }
 
 function isMissingOptionalExtensionChannelModule(err: unknown): boolean {
@@ -568,7 +584,13 @@ import {
 	type GitStatusTarget,
 } from "./skills/git-status-envelope.js";
 export type { GitStatusResult } from "./skills/git-status-envelope.js";
-import { VerificationHarness, goalBranchContainer } from "./agent/verification-harness.js";
+import { VerificationHarness, goalBranchContainer, resolvePinnedSourceLayout } from "./agent/verification-harness.js";
+import {
+	computeVerificationContentDigest,
+	summarizeVerificationContentDigestError,
+	type VerificationContentDigest,
+	type VerificationContentDigestErrorSummary,
+} from "./agent/verification-content-digest.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
 import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
 import { THINKING_LEVELS, isKnownThinkingLevel } from "../shared/thinking-levels.js";
@@ -618,6 +640,7 @@ function copyHistoryForkSidecar(
 	return _historyForkSidecarCopyFake?.(kind, fromSessionId, toSessionId) ?? copy();
 }
 import { inlineFileImages } from "./agent/inline-file-images.js";
+import { readSessionMarkdownImage, SessionMarkdownImageError } from "./agent/session-markdown-image.js";
 import { StaffManager } from "./agent/staff-manager.js";
 import { buildStaffSystemPrompt } from "./agent/role-prompt.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
@@ -659,8 +682,9 @@ import {
 import { SecretsStorePersistenceError } from "./agent/secrets-store.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
-import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion, resolveSandboxDockerContext } from "./agent/sandbox-status.js";
-import { SandboxManager, type SandboxBootstrap } from "./agent/sandbox-manager.js";
+import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion, getHostAgentVersion, resolveSandboxDockerContext } from "./agent/sandbox-status.js";
+import { resolveSandboxImagePlan, sandboxImageRequirements, sandboxRequirementsStatus, UnsupportedSandboxImagePlanError, type SandboxImagePlan } from "./agent/sandbox-image-requirements.js";
+import { SandboxManager, type SandboxBootstrap, type SandboxPlanIdentityResolver } from "./agent/sandbox-manager.js";
 import { prepareSanitizedSandboxCloneSource, resolveSandboxCloneSource, type SandboxCloneSource } from "./agent/sandbox-clone-source.js";
 import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
@@ -3057,7 +3081,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 		return packs;
 	};
-	const extensionSettingsRuntimeLookup = (projectId: string | undefined, packId: string, kind: "pack" | "provider" | "hook" | "runtime", id?: string) => {
+	const extensionSettingsRuntimeLookup = (projectId: string | undefined, packId: string, kind: "pack" | "provider" | "hook" | "runtime" | "sandboxRequirement", id?: string) => {
 		const context = projectId ? projectContextManager.getOrCreate(projectId) : undefined;
 		if (!context) return { state: "absent" as const };
 		const pack = extensionSettingsCatalogue(projectId).find(candidate => candidate.packId === packId);
@@ -3066,6 +3090,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				...(pack?.providers ?? []).map(provider => ({ packId, kind: "provider" as const, id: provider.id })),
 				...(pack?.hooks ?? []).map(hook => ({ packId, kind: "hook" as const, id: hook.id })),
 				...(pack?.runtimes ?? []).map(runtime => ({ packId, kind: "runtime" as const, id: runtime.id })),
+				...(pack?.sandboxRequirements ?? []).map(requirement => ({ packId, kind: "sandboxRequirement" as const, id: requirement.id })),
 			];
 			const overrides = refs.map(ref => context.extensionSettingsStore.getTarget(ref));
 			if (refs.length > 0 && overrides.every(override => override?.enabled === false)) return { state: "present" as const, enabled: false, values: {} };
@@ -3076,7 +3101,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			? pack?.providers.find(candidate => candidate.id === id)
 			: kind === "hook"
 				? pack?.hooks.find(candidate => candidate.id === id)
-				: pack?.runtimes.find(candidate => candidate.id === id);
+				: kind === "runtime"
+					? pack?.runtimes.find(candidate => candidate.id === id)
+					: pack?.sandboxRequirements.find(candidate => candidate.id === id);
 		if (!contribution) return { state: "absent" as const };
 		const ref: ExtensionSettingsTargetRef = { packId, kind, id: id! };
 		try {
@@ -3153,6 +3180,14 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		},
 		extensionSettingsRuntimeLookup,
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).runtimes ?? [],
+		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).sandboxRequirements ?? [],
+		(projectId, packId) => {
+			const store = projectId
+				? projectContextManager.getOrCreate(projectId)?.projectConfigStore
+				: projectConfigStore;
+			return store?.getExtensionGrants().some(grant => (grant as { principal?: unknown }).principal === "pack"
+				&& grant.packId === packId && grant.capability === "sandbox:build") === true;
+		},
 	);
 	const contextTraceStore = new ContextTraceStore(bobbitStateDir(), gatewayDeps.fsImpl, (sessionId, entry) => {
 		broadcastToSession(sessionId, { type: "context_trace_updated", sessionId, ts: entry.ts });
@@ -4712,7 +4747,14 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	}
 
 	ck("pre-VerificationHarness");
-	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade, { commandRunner: gatewayDeps.commandRunner, commandStepRunner: gatewayDeps.commandStepRunner, clock: gatewayDeps.clock, skipLlmReview: gatewayRuntimeFlags.skipLlmReview });
+	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade, {
+		commandRunner: gatewayDeps.commandRunner,
+		commandStepRunner: gatewayDeps.commandStepRunner,
+		clock: gatewayDeps.clock,
+		pinnedCheckoutManager: gatewayDeps.pinnedCheckoutManager,
+		verificationExecutionBackend: gatewayDeps.verificationExecutionBackend,
+		skipLlmReview: gatewayRuntimeFlags.skipLlmReview,
+	});
 	ck("new VerificationHarness");
 	// Reconciliation may replay a durable consent pause, so wait until its
 	// canonical verification lifecycle dependency is initialized.
@@ -4857,7 +4899,21 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// runs the host-side plumbing (image build/version check, mounts,
 			// credentials, sandbox network, GitHub token) the first time each
 			// project's sandbox is requested by session/goal/staff creation.
-			const sandboxBootstrap: SandboxBootstrap = async (projectId) => {
+			const sandboxPlanIdentity: SandboxPlanIdentityResolver = (projectId) => {
+				// This must remain a synchronous config/projection-only check. It is used
+				// solely to avoid Docker, git, network, and mount setup for an unchanged
+				// ready sandbox; bootstrap remains authoritative when it cannot decide.
+				if (!projectRegistry.get(projectId)) return null;
+				const ctx = projectContextManager.getOrCreate(projectId);
+				if (!ctx || (ctx.projectConfigStore.get("sandbox") || "none") !== "docker") return null;
+				try {
+					const plan = resolveProjectSandboxImagePlan(packContributionRegistry, ctx.projectConfigStore, projectId);
+					return { image: plan.imageName, fingerprint: plan.fingerprint };
+				} catch {
+					return null;
+				}
+			};
+			const sandboxBootstrap: SandboxBootstrap = async (projectId, purpose = "session") => {
 				const project = projectRegistry.get(projectId);
 				if (!project) {
 					throw new Error(`[sandbox] bootstrap: project ${projectId} not registered`);
@@ -4868,29 +4924,49 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				}
 				const cfg = ctx.projectConfigStore;
 				const sandboxCfg = cfg.get("sandbox") || "none";
+				const projectDir = project.rootPath;
+				const plan = resolveProjectSandboxImagePlan(packContributionRegistry, cfg, projectId);
+				const dockerContextRoot = resolveSandboxDockerContext(config.defaultCwd);
+
+				if (purpose === "verification") {
+					// Frozen verification needs a prepared exact plan but must never build,
+					// clone, or inject project credentials as a side effect of a gate signal.
+					const imageStatus = await checkDockerAvailability(plan, dockerContextRoot ?? undefined, gatewayDeps.commandRunner);
+					if (!imageStatus.available || imageStatus.imageExists !== true) {
+						throw new Error("Frozen verification requires Docker and a prepared Bobbit sandbox image. Install Docker and build the configured sandbox image before signalling this gate.");
+					}
+					return {
+						projectId, projectDir, repoUrl: "", image: plan.imageName,
+						sandboxImageFingerprint: plan.fingerprint,
+						toolManager: ctx.toolManager,
+					};
+				}
+
 				if (sandboxCfg !== "docker") return null;
 
-				const projectDir = project.rootPath;
-				const imageName = cfg.get("sandbox_image") || "bobbit-agent";
-
-				// Auto-build or rebuild image if missing or stale. Images are
-				// shared across projects (Docker image tags) so the first project
-				// to request a sandbox pays the build cost.
-				const dockerContextRoot = resolveSandboxDockerContext(config.defaultCwd);
-				const imageStatus = await checkDockerAvailability(imageName, dockerContextRoot ?? undefined, gatewayDeps.commandRunner);
+				// Session sandboxes retain their existing image provisioning lifecycle.
+				const imageStatus = await checkDockerAvailability(plan, dockerContextRoot ?? undefined, gatewayDeps.commandRunner);
 				if (imageStatus.imageExists === false) {
 					if (!dockerContextRoot) {
-						throw new Error(`[sandbox] Docker image "${imageName}" is missing and docker/Dockerfile could not be found`);
+						throw new Error(`[sandbox] Docker image "${plan.imageName}" is missing and docker/Dockerfile could not be found`);
 					}
-					const buildResult = await buildSandboxImage(imageName, dockerContextRoot, gatewayDeps.commandRunner);
+					const buildResult = await buildSandboxImage(plan, dockerContextRoot, gatewayDeps.commandRunner);
 					if (!buildResult.success) {
-						throw new Error(`[sandbox] Auto-build failed for project ${projectId}: ${buildResult.error || "unknown error"}`);
+						sandboxImageRequirements.recordBuildFailure(projectId, plan.fingerprint);
+						throw new Error(`[sandbox] Auto-build failed for project ${projectId}`);
 					}
+					sandboxImageRequirements.recordBuildSuccess(projectId, plan.fingerprint);
 				} else if (imageStatus.imageExists === true) {
-					const imageReady = await ensureImageAgentVersion(imageName, dockerContextRoot ?? undefined, gatewayDeps.commandRunner);
+					const imageReady = await ensureImageAgentVersion(plan, dockerContextRoot ?? undefined, gatewayDeps.commandRunner);
 					if (!imageReady) {
-						throw new Error(`[sandbox] Docker image "${imageName}" is stale and could not be rebuilt`);
+						sandboxImageRequirements.recordBuildFailure(projectId, plan.fingerprint);
+						throw new Error(`[sandbox] Docker image "${plan.imageName}" is stale and could not be rebuilt`);
 					}
+					sandboxImageRequirements.recordBuildSuccess(projectId, plan.fingerprint);
+				} else {
+					// Docker was unavailable before a build could start. This is unsupported,
+					// not a failed exact plan, so retain no failure record.
+					throw new Error(`[sandbox] Docker is unavailable for project ${projectId}`);
 				}
 
 				const isRepo = await isGitRepo(projectDir, serverCommandRunner);
@@ -4996,7 +5072,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					projectDir,
 					repoUrl,
 					cloneSource,
-					image: imageName,
+					image: plan.imageName,
+					sandboxImageFingerprint: plan.fingerprint,
 					sandboxNetwork,
 					sandboxMounts: poolMounts,
 					sandboxCredentials: poolCredentials,
@@ -5014,7 +5091,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					baseRefResolver: () => cfg.get("base_ref"),
 				};
 			};
-			sandboxManager = new SandboxManager({ bootstrap: sandboxBootstrap, commandRunner: gatewayDeps.commandRunner, clock: gatewayDeps.clock, worktreeSetupRuntime });
+			sandboxManager = new SandboxManager({ bootstrap: sandboxBootstrap, planIdentity: sandboxPlanIdentity, commandRunner: gatewayDeps.commandRunner, clock: gatewayDeps.clock, worktreeSetupRuntime });
 			sessionManager.setSandboxManager(sandboxManager);
 			sessionManager.subscribeSandboxRecovery();
 
@@ -5536,6 +5613,9 @@ function parseGateInspectSelectionOptions(params: URLSearchParams): TextSelectio
 	};
 }
 
+const activeMarkdownImageReads = new Map<string, number>();
+const MAX_CONCURRENT_MARKDOWN_IMAGE_READS_PER_SESSION = 8;
+
 async function handleApiRoute(
 	url: URL,
 	req: http.IncomingMessage,
@@ -5629,6 +5709,12 @@ async function handleApiRoute(
 				if (runtime.settingsSchemaDiagnostic !== undefined) continue;
 				const schema = runtime.settingsSchema;
 				targets.push({ ref: { packId: pack.packId, kind: "runtime", id: runtime.id }, packName: pack.packName, listName: runtime.listName, fields: schema?.fields ?? [], requiresConfig: schema?.requiresConfig ?? [], contribution: runtime });
+			}
+			for (const requirement of pack.sandboxRequirements) {
+				// Sandbox requirement declarations are rejected by their closed loader
+				// rather than retained with a repair diagnostic.
+				const schema = requirement.settingsSchema;
+				targets.push({ ref: { packId: pack.packId, kind: "sandboxRequirement", id: requirement.id }, packName: pack.packName, listName: requirement.listName, fields: schema?.fields ?? [], requiresConfig: schema?.requiresConfig ?? [], contribution: requirement });
 			}
 		}
 		return targets;
@@ -5742,7 +5828,7 @@ async function handleApiRoute(
 		contributions: packContributionRegistry,
 	});
 	const extensionPackGrantCapabilities: readonly ExtensionCapability[] = [
-		"service.manage", "memory.read", "memory.write", "memory.reflect", "memory.invalidate", "memory.read.all",
+		"service.manage", "memory.read", "memory.write", "memory.reflect", "memory.invalidate", "memory.read.all", "sandbox:build",
 	];
 	const isPackExtensionGrant = (grant: ExtensionGrant): grant is Extract<ExtensionGrant, { principal: "pack" }> =>
 		(grant as { principal?: unknown }).principal === "pack";
@@ -5858,7 +5944,9 @@ async function handleApiRoute(
 				? pack?.providers.find(candidate => candidate.id === ref.id)
 				: ref.kind === "hook"
 					? pack?.hooks.find(candidate => candidate.id === ref.id)
-					: pack?.runtimes.find(candidate => candidate.id === ref.id);
+					: ref.kind === "runtime"
+						? pack?.runtimes.find(candidate => candidate.id === ref.id)
+						: pack?.sandboxRequirements.find(candidate => candidate.id === ref.id);
 			if (!pack || !contribution) continue;
 			targets.push({ ref, packName: pack.packName, listName: contribution.listName, enabled: { effective: false }, configuration: { state: "invalid-schema", missing: [] }, fields: [] });
 		}
@@ -5972,6 +6060,14 @@ async function handleApiRoute(
 		// leaking host paths, source line numbers, and implementation details.
 		console.error(`[api] ${status} error:`, e.stack ?? e.message);
 		json({ error: e.message, ...extra }, status);
+	};
+	const parseStrictUpdateBody = <K extends readonly string[]>(raw: unknown, keys: K, options?: StrictBodyOptions): StrictBody<K> | null => {
+		try {
+			return parseStrictBody(raw, keys, options);
+		} catch (error) {
+			json({ error: error instanceof Error ? error.message : String(error) }, 400);
+			return null;
+		}
 	};
 	const hasPagingParams = (): boolean => ["limit", "offset", "after", "cursor"].some(param => url.searchParams.has(param));
 	const parsePagingInt = (value: string | null, fallback: number, min: number, max: number): number => {
@@ -6618,12 +6714,27 @@ async function handleApiRoute(
 		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
 		const scopedConfigStore = resolveProjectConfigStore(resolved.projectId);
 		const sandboxConfig = scopedConfigStore.get("sandbox") || "none";
-		const imageName = scopedConfigStore.get("sandbox_image") || "bobbit-agent";
 		const configured = sandboxConfig === "docker";
 		const dockerContextRoot = resolveSandboxDockerContext(resolved.project.rootPath);
+		let plan: SandboxImagePlan;
+		try {
+			plan = resolveProjectSandboxImagePlan(packContributionRegistry, scopedConfigStore, resolved.projectId);
+		} catch (error) {
+			if (!(error instanceof UnsupportedSandboxImagePlanError)) throw error;
+			const status = await checkDockerAvailability(undefined, dockerContextRoot ?? undefined, commandRunner);
+			json({ ...status, configured, error: "Unsupported sandbox image configuration" });
+			return;
+		}
 		// Docker must use this request's gateway-owned runner: test coordinators
 		// fence host commands through that seam rather than allowing direct spawns.
-		const status = await checkDockerAvailability(configured ? imageName : undefined, dockerContextRoot ?? undefined, commandRunner);
+		const status = await checkDockerAvailability(configured ? plan : undefined, dockerContextRoot ?? undefined, commandRunner);
+		const failure = sandboxImageRequirements.getBuildFailure(resolved.projectId, plan.fingerprint);
+		if (configured && status.available && failure && status.requirements) {
+			status.requirements = sandboxRequirementsStatus(plan, "failed", failure.code);
+		}
+		if (!configured && plan.requirements.length > 0) {
+			status.requirements = sandboxRequirementsStatus(plan, "unsupported");
+		}
 		json({ ...status, configured });
 		return;
 	}
@@ -6637,7 +6748,18 @@ async function handleApiRoute(
 		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
 		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
 		const scopedConfigStore = resolveProjectConfigStore(resolved.projectId);
-		const imageName = scopedConfigStore.get("sandbox_image") || "bobbit-agent";
+		if ((scopedConfigStore.get("sandbox") || "none") !== "docker") {
+			json({ success: false, error: "Sandbox image builds require Docker sandbox mode", code: "SANDBOX_NOT_CONFIGURED" }, 409);
+			return;
+		}
+		let plan: SandboxImagePlan;
+		try {
+			plan = resolveProjectSandboxImagePlan(packContributionRegistry, scopedConfigStore, resolved.projectId);
+		} catch (error) {
+			if (!(error instanceof UnsupportedSandboxImagePlanError)) throw error;
+			json({ success: false, error: "Unsupported sandbox image configuration", code: "SANDBOX_IMAGE_UNSUPPORTED" }, 422);
+			return;
+		}
 		const dockerContextRoot = resolveSandboxDockerContext(resolved.project.rootPath);
 		if (!dockerContextRoot) {
 			json({ error: "Dockerfile not found at docker/Dockerfile" }, 404);
@@ -6647,11 +6769,13 @@ async function handleApiRoute(
 			json({ error: "Build already in progress" }, 409);
 			return;
 		}
-		const result = await buildSandboxImage(imageName, dockerContextRoot, commandRunner!);
+		const result = await buildSandboxImage(plan, dockerContextRoot, commandRunner!);
 		if (result.success) {
+			sandboxImageRequirements.recordBuildSuccess(resolved.projectId, plan.fingerprint);
 			json({ success: true });
 		} else {
-			json({ success: false, error: result.error }, 500);
+			sandboxImageRequirements.recordBuildFailure(resolved.projectId, plan.fingerprint);
+			json({ success: false, error: "Sandbox image build failed", code: "SANDBOX_IMAGE_BUILD_FAILED" }, 500);
 		}
 		return;
 	}
@@ -7279,7 +7403,9 @@ async function handleApiRoute(
 			json({ ok: false, code: "UNKNOWN_PROJECT", message: `Unknown project: ${projectGetMatch[1]}` }, 422);
 			return;
 		}
-		const body = await readBody(req);
+		const rawBody = await readBody(req);
+		const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.projects);
+		if (!body) return;
 		const updates: { name?: string; color?: string; rootPath?: string; palette?: string; colorLight?: string; colorDark?: string } = {};
 		if (typeof body?.name === "string") updates.name = body.name;
 		if (typeof body?.color === "string") updates.color = body.color;
@@ -10340,8 +10466,17 @@ async function handleApiRoute(
 		if (req.method === "PUT") {
 			const putGoal = getGoalAcrossProjects(id);
 			if (putGoal?.archived) { json({ error: "Goal is archived" }, 409); return; }
-			const body = await readBody(req);
-			if (!body) { json({ error: "Missing body" }, 400); return; }
+			const rawBody = await readBody(req);
+			if (!rawBody) { json({ error: "Missing body" }, 400); return; }
+			const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.goals, {
+				wrongEndpoint: {
+					subgoalsAllowed: "PATCH /api/goals/:id/policy",
+					maxNestingDepth: "PATCH /api/goals/:id/policy",
+					divergencePolicy: "PATCH /api/goals/:id/policy",
+					maxConcurrentChildren: "PATCH /api/goals/:id/policy",
+				},
+			});
+			if (!body) return;
 			const prevSpec = putGoal?.spec ?? "";
 			// The goal id already fixes the project scope; a caller-supplied cwd
 			// update must still be constrained to that scope (Headquarters dir for
@@ -10514,8 +10649,10 @@ async function handleApiRoute(
 		}
 
 		if (req.method === "PUT") {
-			const body = await readBody(req);
-			if (!body) { json({ error: "Missing body" }, 400); return; }
+			const rawBody = await readBody(req);
+			if (!rawBody) { json({ error: "Missing body" }, 400); return; }
+			const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.tools);
+			if (!body) return;
 			const projectScope = resolveRequiredConfigProjectScope(body.projectId ?? url.searchParams.get("projectId"));
 			if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
 			const targetToolManager = projectScope.context?.toolManager ?? toolManager;
@@ -10663,7 +10800,7 @@ async function handleApiRoute(
 	// Extension settings are project-owned and always redacted. The outer gateway
 	// guard authenticates reads; browser prompt-operator proof is required before
 	// any request can deposit a secret or change a project's runtime enablement.
-	const extensionSettingsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/extension-settings(?:\/([^/]+)(?:\/(provider|hook|runtime)\/([^/]+))?)?$/);
+	const extensionSettingsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/extension-settings(?:\/([^/]+)(?:\/(provider|hook|runtime|sandboxRequirement)\/([^/]+))?)?$/);
 	if (extensionSettingsMatch && (req.method === "GET" || req.method === "PATCH")) {
 		let projectId: string;
 		let packId: string | undefined;
@@ -10673,7 +10810,7 @@ async function handleApiRoute(
 			packId = extensionSettingsMatch[2] === undefined ? undefined : decodeURIComponent(extensionSettingsMatch[2]);
 			id = extensionSettingsMatch[4] === undefined ? undefined : decodeURIComponent(extensionSettingsMatch[4]);
 		} catch { json({ error: "Invalid extension settings identity", code: "EXTENSION_SETTINGS_INVALID_IDENTITY" }, 400); return; }
-		const kind = extensionSettingsMatch[3] as "provider" | "hook" | "runtime" | undefined;
+		const kind = extensionSettingsMatch[3] as "provider" | "hook" | "runtime" | "sandboxRequirement" | undefined;
 		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
 		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
 		const context = projectContextManager.getOrCreate(resolved.projectId);
@@ -12533,7 +12670,7 @@ async function handleApiRoute(
 			store: PackOrderStore,
 			packName: string,
 			projectId?: string,
-		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "session-menu" | "route"; routeId?: string }>; providers?: string[]; hooks?: string[]; mcp?: Array<string | Record<string, unknown>>; piExtensions?: Array<string | Record<string, unknown>>; runtimes?: string[]; workflows?: string[]; systemPrompts?: string[]; descriptions: PackEntityDescriptions } | null => {
+		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "session-menu" | "route"; routeId?: string }>; providers?: string[]; hooks?: string[]; mcp?: Array<string | Record<string, unknown>>; piExtensions?: Array<string | Record<string, unknown>>; runtimes?: string[]; sandboxRequirements?: string[]; workflows?: string[]; systemPrompts?: string[]; descriptions: PackEntityDescriptions } | null => {
 			const base = scope === "server" ? headquartersDir() : scope === "global-user" ? os.homedir() : projectBase;
 			if (base === undefined) return null;
 			const packOrder = store.getPackOrder(scope);
@@ -12684,6 +12821,7 @@ async function handleApiRoute(
 				mcp: (c.mcp ?? []).map((listName) => mcpByListName.get(listName) ?? listName),
 				piExtensions: (c.piExtensions ?? []).map((listName) => piExtensionByListName.get(listName) ?? listName),
 				runtimes: [...(c.runtimes ?? [])],
+				sandboxRequirements: [...(c.sandboxRequirements ?? [])],
 				workflows: [...(c.workflows ?? [])],
 				systemPrompts: [...(c.systemPrompts ?? [])],
 				descriptions,
@@ -12745,7 +12883,7 @@ async function handleApiRoute(
 			const cfgStore = st.target.store as unknown as ProjectConfigStore;
 			const beforeActivation = cfgStore.getPackActivation(targetScope as PackOrderScope, packName);
 			const cataloguePiExtensionNames = normalisePiExtensionCatalogueRefs(catalogue.piExtensions);
-			const normaliseKind = (kind: "roles" | "tools" | "skills" | "entrypoints" | "providers" | "hooks" | "mcp" | "piExtensions" | "runtimes" | "workflows" | "systemPrompts", valid: Set<string>): string[] => {
+			const normaliseKind = (kind: "roles" | "tools" | "skills" | "entrypoints" | "providers" | "hooks" | "mcp" | "piExtensions" | "runtimes" | "sandboxRequirements" | "workflows" | "systemPrompts", valid: Set<string>): string[] => {
 				const raw = reqDisabled[kind];
 				if (!Array.isArray(raw)) return [];
 				return raw.filter((x): x is string => typeof x === "string" && valid.has(x));
@@ -12783,6 +12921,7 @@ async function handleApiRoute(
 				mcpOperations: normalizeMcpOperationsForCatalogue(),
 				piExtensions: normaliseKind("piExtensions", cataloguePiExtensionNames),
 				runtimes: normaliseKind("runtimes", new Set(catalogue.runtimes ?? [])),
+				sandboxRequirements: normaliseKind("sandboxRequirements", new Set(catalogue.sandboxRequirements ?? [])),
 				workflows: normaliseKind("workflows", new Set(catalogue.workflows ?? [])),
 				systemPrompts: normaliseKind("systemPrompts", new Set(catalogue.systemPrompts ?? [])),
 			};
@@ -13578,8 +13717,10 @@ async function handleApiRoute(
 		}
 
 		if (req.method === "PUT") {
-			const body = await readBody(req);
-			if (!body) { json({ error: "Missing body" }, 400); return; }
+			const rawBody = await readBody(req);
+			if (!rawBody) { json({ error: "Missing body" }, 400); return; }
+			const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.roles);
+			if (!body) return;
 			const resolvedTarget = resolveRoleMutationTarget(body.projectId ?? url.searchParams.get("projectId"));
 			if (!resolvedTarget.ok) { writeConfigProjectScopeError(resolvedTarget); return; }
 			const target = resolvedTarget.target;
@@ -14495,10 +14636,13 @@ async function handleApiRoute(
 			goal.workflow = freezeResult.workflow;
 		}
 
+		// The un-offset branch container is the cache witness root and command root.
+		const branchContainer = goalBranchContainer(goal);
+
 		// Get commit SHA
 		let commitSha = "unknown";
 		try {
-			commitSha = await execGitSafe("git rev-parse HEAD", goal.cwd, "unknown");
+			commitSha = await execGitSafe("git rev-parse HEAD", branchContainer, "unknown");
 		} catch { /* ignore */ }
 
 		// Reject if verification is already running for this gate+commit
@@ -14534,14 +14678,50 @@ async function handleApiRoute(
 			}
 		}
 
-		// Auto-pass if a prior signal for the same commit already fully passed.
-		// The extracted decision core owns cache-boundary and response semantics so
-		// this route cannot drift from its deterministic store-level coverage.
-		const cachedResponse = reuseCachedGateSignal({
+		// Compute a preliminary witness before whole-gate cache reuse. The harness
+		// recomputes this after origin sync before step-cache/command execution.
+		let contentDigest: VerificationContentDigest | undefined;
+		let contentDigestError: VerificationContentDigestErrorSummary | undefined;
+		try {
+			contentDigest = await computeVerificationContentDigest(branchContainer, serverCommandRunner);
+		} catch (error) {
+			contentDigestError = summarizeVerificationContentDigestError(error);
+		}
+
+		// Cache a multi-repository gate only when the route independently observes
+		// the current ordered component identities. The aggregate digest alone does
+		// not prove that a component still names the same repository/commit.
+		let currentPinnedCheckout: import("./gate-signal-response.js").CurrentPinnedCheckoutWitness | undefined;
+		const repoWorktrees = (goal as { repoWorktrees?: Record<string, string> }).repoWorktrees;
+		if (repoWorktrees && Object.keys(repoWorktrees).length > 0) {
+			// Keep this sentinel when layout resolution fails: an authoritative
+			// multi-repo goal must not fall back to a prior v1 route-cache record.
+			currentPinnedCheckout = { layout: "multi-unavailable" };
+			try {
+				const layout = await resolvePinnedSourceLayout(goal, serverCommandRunner);
+				if (layout.version === 2) {
+					currentPinnedCheckout = {
+						version: 2,
+						repositories: layout.repositories.map(repository => ({ repoKey: repository.repoKey, commitSha: repository.commitSha })),
+					};
+				}
+			} catch {
+				// A malformed or unreadable authoritative layout must bypass cache reuse.
+			}
+		} else {
+			currentPinnedCheckout = { version: 1 };
+		}
+
+		// Auto-pass only if commit and live content/layout witnesses match. The extracted
+		// decision core owns cache-boundary and response semantics.
+		const cacheDecision = reuseCachedGateSignal({
 			gateStore,
 			goalId,
 			gate: gateDef,
 			commitSha,
+			contentDigest,
+			contentDigestError,
+			currentPinnedCheckout,
 			body,
 			notifier: {
 				signalReceived: (notifiedGoalId, notifiedGateId, signalId) => {
@@ -14555,9 +14735,12 @@ async function handleApiRoute(
 				},
 			},
 		});
-		if (cachedResponse) {
-			json(cachedResponse, 201);
+		if (cacheDecision.response) {
+			json(cacheDecision.response, 201);
 			return;
+		}
+		if (cacheDecision.missReason && cacheDecision.missReason !== "no-prior-passed-signal" && cacheDecision.missReason !== "unknown-commit") {
+			console.warn(`[api] Gate cache bypassed: ${cacheDecision.missReason}; priorSignalIds=${cacheDecision.priorSignalIds.join(",")}`);
 		}
 
 		// Compute content version
@@ -14601,6 +14784,7 @@ async function handleApiRoute(
 			metadata: body?.metadata,
 			content: body?.content,
 			contentVersion,
+			...(contentDigest ? { contentDigest } : { contentDigestError: contentDigestError! }),
 			verification: { status: "running" as const, steps: [] as any[] },
 		};
 
@@ -14653,7 +14837,6 @@ async function handleApiRoute(
 		// integration target; when unset, fall back to the repo's detected primary.
 		// `parseBaseRef` normalizes remote refs like `origin/master` to `master`
 		// for workflow variables such as `{{baseBranch}}` and legacy `{{master}}`.
-		const branchContainer = goalBranchContainer(goal);
 		const configuredBase = parseBaseRef(gateSignalCtx.projectConfigStore.get("base_ref") || "");
 		const primary = configuredBase.branch || (await detectPrimaryBranch(branchContainer, serverCommandRunner, serverRemoteGitPolicy).catch(() => "master"));
 		verificationHarness.verifyGateSignal(
@@ -14846,8 +15029,10 @@ async function handleApiRoute(
 
 		// PUT /api/tasks/:id
 		if (req.method === "PUT") {
-			const body = await readBody(req);
-			if (!body) { json({ error: "Missing body" }, 400); return; }
+			const rawBody = await readBody(req);
+			if (!rawBody) { json({ error: "Missing body" }, 400); return; }
+			const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.tasks);
+			if (!body) return;
 			try {
 				const record = getTaskRecordForTask(id);
 				if (!record) { json({ error: "Task not found" }, 404); return; }
@@ -16952,11 +17137,13 @@ async function handleApiRoute(
 	const patchMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
 	if (patchMatch && req.method === "PATCH") {
 		const id = patchMatch[1];
-		const body = await readBody(req);
-		if (!body || typeof body !== "object") {
+		const rawBody = await readBody(req);
+		if (!rawBody) {
 			json({ error: "Invalid body" }, 400);
 			return;
 		}
+		const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.sessions);
+		if (!body) return;
 
 		if (typeof body.title === "string") {
 			const ok = sessionManager.setTitle(id, body.title);
@@ -17765,6 +17952,53 @@ async function handleApiRoute(
 			json(result);
 		} catch (err) {
 			jsonError(400, err);
+		}
+		return;
+	}
+
+	// GET /api/sessions/:id/markdown-image?path=<relative-or-absolute-or-file-url>
+	// Authenticated, session-scoped image transport for local paths in assistant
+	// Markdown. The path must resolve beneath the session cwd (including through
+	// symlinks); sandboxed sessions are resolved and read inside their container.
+	const markdownImageMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/markdown-image$/);
+	if (req.method === "GET" && markdownImageMatch) {
+		const id = markdownImageMatch[1];
+		const session = sessionManager.getPersistedSession(id);
+		if (!session) { json({ error: "Session not found" }, 404); return; }
+		const imagePath = url.searchParams.get("path");
+		if (!imagePath) { json({ error: "Missing path parameter" }, 400); return; }
+		const activeReads = activeMarkdownImageReads.get(id) ?? 0;
+		if (activeReads >= MAX_CONCURRENT_MARKDOWN_IMAGE_READS_PER_SESSION) {
+			res.setHeader("Retry-After", "1");
+			json({ error: "Too many concurrent image requests" }, 429);
+			return;
+		}
+		activeMarkdownImageReads.set(id, activeReads + 1);
+		try {
+			const image = await readSessionMarkdownImage(session, imagePath, sandboxManager ?? null);
+			res.writeHead(200, {
+				"Content-Type": image.mimeType,
+				"Content-Length": String(image.data.length),
+				"Cache-Control": "private, no-store",
+				"Content-Disposition": "inline",
+				"X-Content-Type-Options": "nosniff",
+				"Content-Security-Policy": "default-src 'none'; sandbox",
+			});
+			res.end(image.data);
+		} catch (error) {
+			if (error instanceof SessionMarkdownImageError) {
+				const status = error.code === "forbidden" ? 403
+					: error.code === "not_found" ? 404
+						: error.code === "too_large" ? 413
+							: error.code === "unavailable" ? 503 : 400;
+				json({ error: error.message }, status);
+			} else {
+				jsonError(500, error);
+			}
+		} finally {
+			const remaining = (activeMarkdownImageReads.get(id) ?? 1) - 1;
+			if (remaining <= 0) activeMarkdownImageReads.delete(id);
+			else activeMarkdownImageReads.set(id, remaining);
 		}
 		return;
 	}
@@ -18805,8 +19039,10 @@ async function handleApiRoute(
 	// PUT /api/workflows/:id — requires projectId.
 	if (workflowMatch && req.method === "PUT") {
 		const id = decodeURIComponent(workflowMatch[1]);
-		const body = await readBody(req);
-		if (!body) { json({ error: "Missing body" }, 400); return; }
+		const rawBody = await readBody(req);
+		if (!rawBody) { json({ error: "Missing body" }, 400); return; }
+		const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.workflows);
+		if (!body) return;
 		const qProjectId = url.searchParams.get("projectId") || undefined;
 		if (!qProjectId) { json({ error: "projectId required" }, 400); return; }
 		const ctx = projectContextManager.getOrCreate(qProjectId);
@@ -19904,8 +20140,14 @@ async function handleApiRoute(
 		}
 
 		if (req.method === "PATCH") {
-			const body = await readBody(req);
-			if (!body || typeof body.projectId !== "string" || !body.projectId.trim()) {
+			const rawBody = await readBody(req);
+			if (!rawBody) {
+				json({ error: "Missing projectId" }, 400);
+				return;
+			}
+			const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.staffPatch);
+			if (!body) return;
+			if (typeof body.projectId !== "string" || !body.projectId.trim()) {
 				json({ error: "Missing projectId" }, 400);
 				return;
 			}
@@ -19936,8 +20178,10 @@ async function handleApiRoute(
 		}
 
 		if (req.method === "PUT") {
-			const body = await readBody(req);
-			if (!body) { json({ error: "Missing body" }, 400); return; }
+			const rawBody = await readBody(req);
+			if (!rawBody) { json({ error: "Missing body" }, 400); return; }
+			const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.staffPut);
+			if (!body) return;
 			// Defense-in-depth: roleId, when present, must be a string or null.
 			if (body.roleId !== undefined && body.roleId !== null && typeof body.roleId !== "string") {
 				json({ error: "roleId must be a string or null" }, 400);

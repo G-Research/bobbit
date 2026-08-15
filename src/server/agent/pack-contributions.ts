@@ -38,7 +38,14 @@ import { parse } from "yaml";
 import type { PackManifest } from "./pack-types.js";
 import { isSafeRelativePath, parseEntrypoints } from "./tool-contributions.js";
 import type { EntrypointIconId } from "../../shared/entrypoint-icons.js";
-import { isSafeBasename, isValidPackName } from "./pack-manifest.js";
+import {
+	isSafeBasename,
+	isValidPackName,
+	isValidSandboxRequirementId,
+	isValidSandboxRequirementListName,
+	MAX_SANDBOX_REQUIREMENT_CATALOGUE_ROWS_PER_PACK,
+	MAX_SANDBOX_REQUIREMENT_DECLARATION_FILE_BYTES,
+} from "./pack-manifest.js";
 import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
 import { validateServiceExtensionSpec, type ServiceExtensionSpec } from "../extension-host/service-extension-contract.js";
 import type { McpServerConfig } from "../mcp/mcp-types.js";
@@ -230,6 +237,18 @@ export interface ServiceExtensionContribution {
 	packRoot: string;
 }
 
+/** Schema-3 inert request for a core-owned sandbox toolchain. This declaration
+ * contains only approved profile IDs; it has no Docker/build execution surface. */
+export interface SandboxRequirementContribution {
+	id: string;
+	profiles: readonly ("python")[];
+	settingsSchema?: ExtensionSettingsSchema;
+	activation?: { requiresConfig: string[] };
+	listName: string;
+	sourceFile: string;
+	packRoot: string;
+}
+
 export interface ProviderContribution {
 	id: string;
 	kind: "memory" | "selector" | "generic";
@@ -389,6 +408,8 @@ export interface PackContributions {
 	providers: ProviderContribution[];
 	/** Declarative runtime files listed by contents.runtimes[]. */
 	runtimes: ServiceExtensionContribution[];
+	/** Schema-3 inert toolchain requests listed by contents.sandboxRequirements[]. */
+	sandboxRequirements: SandboxRequirementContribution[];
 	/** Channel handler files listed by contents.channels[]. */
 	channels: ChannelContribution[];
 	/** Schema-2 hook metadata files listed by contents.hooks[]. Never executable. */
@@ -429,6 +450,7 @@ export function loadPackContributions(packRoot: string, manifest: PackManifest):
 		entrypoints: loadEntrypoints(packRoot, manifest),
 		providers: loadProviders(packRoot, manifest),
 		runtimes: loadServiceExtensions(packRoot, manifest),
+		sandboxRequirements: loadSandboxRequirements(packRoot, manifest),
 		channels: loadChannels(packRoot, manifest),
 		hooks: loadHooks(packRoot, manifest),
 		systemPrompts: loadSystemPromptSections(packRoot, manifest),
@@ -1203,6 +1225,102 @@ export function loadServiceExtensions(packRoot: string, manifest: PackManifest):
 		}
 		seenIds.add(id);
 		out.push({ id, spec: validated.value, ...(settingsSchema ? { settingsSchema } : {}), ...(activation ? { activation } : {}), listName, sourceFile, packRoot });
+	}
+	return out;
+}
+
+const SANDBOX_REQUIREMENT_TOP_LEVEL_KEYS = new Set(["id", "profiles", "config", "activation"]);
+const SANDBOX_TOOLCHAIN_IDS = new Set(["python"] as const);
+const MAX_SANDBOX_REQUIREMENT_PROFILES = 8;
+
+/** Read a bounded declaration before YAML can allocate for attacker-controlled bytes. */
+function readSandboxRequirementYaml(file: string): unknown {
+	const stat = fs.statSync(file);
+	if (!stat.isFile()) throw new Error("declaration is not a regular file");
+	if (stat.size > MAX_SANDBOX_REQUIREMENT_DECLARATION_FILE_BYTES) {
+		throw new Error(`declaration exceeds ${MAX_SANDBOX_REQUIREMENT_DECLARATION_FILE_BYTES} bytes`);
+	}
+	return readYaml(file);
+}
+
+/** Load schema-3 inert sandbox requirements from manifest-listed files only.
+ * Reject rather than partially interpret every malformed declaration: only the
+ * core-owned profile vocabulary can reach later authorization and planning. */
+export function loadSandboxRequirements(packRoot: string, manifest: PackManifest): SandboxRequirementContribution[] {
+	if ((manifest.schema ?? 1) < 3) return [];
+	const listNames = manifest.contents.sandboxRequirements ?? [];
+	if (listNames.length > MAX_SANDBOX_REQUIREMENT_CATALOGUE_ROWS_PER_PACK) {
+		console.warn(`[pack-contributions] pack "${packIdFromRoot(packRoot)}" declares more than ${MAX_SANDBOX_REQUIREMENT_CATALOGUE_ROWS_PER_PACK} sandbox requirements; dropping catalogue`);
+		return [];
+	}
+	const dir = path.join(packRoot, "sandbox-requirements");
+	const out: SandboxRequirementContribution[] = [];
+	const seenListNames = new Set<string>();
+	const seenIds = new Set<string>();
+	for (const listName of listNames) {
+		if (!isValidSandboxRequirementListName(listName)) {
+			console.warn(`[pack-contributions] sandbox requirement listName ${JSON.stringify(listName)} is not a valid bounded basename; skipping`);
+			continue;
+		}
+		if (seenListNames.has(listName)) {
+			throw new PackContributionError(`pack "${packIdFromRoot(packRoot)}" declares sandbox requirement listName "${listName}" more than once; listNames must be unique within a pack`);
+		}
+		seenListNames.add(listName);
+		const sourceFile = resolveContributionFile(dir, listName);
+		if (!isPackPathWithinRoot(dir, sourceFile)) {
+			console.warn(`[pack-contributions] sandbox requirement '${listName}' resolves outside sandbox-requirements/ (${sourceFile}); skipping`);
+			continue;
+		}
+		let data: unknown;
+		try { data = readSandboxRequirementYaml(sourceFile); } catch (err) {
+			console.warn(`[pack-contributions] skipping missing/malformed/oversized sandbox requirement '${listName}' (${sourceFile}): ${String(err)}`);
+			continue;
+		}
+		if (!isPlainObject(data) || Object.keys(data).some(key => !SANDBOX_REQUIREMENT_TOP_LEVEL_KEYS.has(key))) {
+			console.warn(`[pack-contributions] sandbox requirement '${listName}' (${sourceFile}) has invalid top-level shape; dropping`);
+			continue;
+		}
+		const id = data.id;
+		if (!isValidSandboxRequirementId(id) || seenIds.has(id)) {
+			if (seenIds.has(id as string)) throw new PackContributionError(`pack "${packIdFromRoot(packRoot)}" declares sandbox requirement id "${String(id)}" more than once; ids must be unique within a pack`);
+			console.warn(`[pack-contributions] sandbox requirement '${listName}' (${sourceFile}) has invalid id; dropping`);
+			continue;
+		}
+		if (!Array.isArray(data.profiles) || data.profiles.length === 0 || data.profiles.length > MAX_SANDBOX_REQUIREMENT_PROFILES) {
+			console.warn(`[pack-contributions] sandbox requirement '${id}' (${sourceFile}) has invalid profiles; dropping`);
+			continue;
+		}
+		const profiles: ("python")[] = [];
+		const seenProfiles = new Set<string>();
+		let validProfiles = true;
+		for (const profile of data.profiles) {
+			if (typeof profile !== "string" || !SANDBOX_TOOLCHAIN_IDS.has(profile as "python") || seenProfiles.has(profile)) {
+				validProfiles = false;
+				break;
+			}
+			seenProfiles.add(profile);
+			profiles.push(profile as "python");
+		}
+		if (!validProfiles) {
+			console.warn(`[pack-contributions] sandbox requirement '${id}' (${sourceFile}) has unsupported or duplicate profiles; dropping`);
+			continue;
+		}
+		if (data.config === undefined && data.activation !== undefined) {
+			console.warn(`[pack-contributions] sandbox requirement '${id}' (${sourceFile}) has activation without config; dropping`);
+			continue;
+		}
+		let settingsSchema: ExtensionSettingsSchema | undefined;
+		if (data.config !== undefined) {
+			const normalized = normalizeExtensionSettingsSchema(data.config, data.activation);
+			if (!normalized.schema || normalized.schema.fields.some(field => field.type === "secret")) {
+				console.warn(`[pack-contributions] sandbox requirement '${id}' (${sourceFile}) has invalid public settings/activation declaration; dropping`);
+				continue;
+			}
+			settingsSchema = normalized.schema;
+		}
+		seenIds.add(id);
+		const activation = settingsSchema?.requiresConfig;
+		out.push({ id, profiles, ...(settingsSchema ? { settingsSchema } : {}), ...(activation && activation.length > 0 ? { activation: { requiresConfig: [...activation] } } : {}), listName, sourceFile, packRoot });
 	}
 	return out;
 }

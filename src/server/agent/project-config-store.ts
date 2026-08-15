@@ -259,18 +259,18 @@ export type ExtensionCapability =
 	| "decide" | "mutate" | "filter:tool-result" | "store" | "session" | "agents"
 	| "prompt:system-static" | "prompt:system-author"
 	| "service.manage" | "memory.read" | "memory.write" | "memory.reflect"
-	| "memory.invalidate" | "memory.read.all";
+	| "memory.invalidate" | "memory.read.all" | "sandbox:build";
 export const EXTENSION_CAPABILITIES: ReadonlySet<ExtensionCapability> = new Set([
 	"decide", "mutate", "filter:tool-result", "store", "session", "agents",
 	"prompt:system-static", "prompt:system-author",
 	"service.manage", "memory.read", "memory.write", "memory.reflect",
-	"memory.invalidate", "memory.read.all",
+	"memory.invalidate", "memory.read.all", "sandbox:build",
 ]);
 
 /** The platform-owned capabilities available only to a non-hook pack principal. */
 export const EXTENSION_PACK_CAPABILITIES: ReadonlySet<ExtensionCapability> = new Set([
 	"service.manage", "memory.read", "memory.write", "memory.reflect",
-	"memory.invalidate", "memory.read.all",
+	"memory.invalidate", "memory.read.all", "sandbox:build",
 ]);
 
 /** Server-derived hook identity. Wildcards are deliberately unsupported. */
@@ -371,7 +371,7 @@ export function normalizeExtensionSettings(raw: unknown): { value: ExtensionSett
 		const parts = targetKey.split("\u0000");
 		if (targetKey.length === 0 || targetKey.length > MAX_EXTENSION_SETTINGS_TARGET_KEY_LENGTH
 			|| parts.length !== 3 || parts.some(part => part.length === 0)
-			|| (parts[1] !== "provider" && parts[1] !== "hook" && parts[1] !== "runtime") || !isPlainObject(candidate)) continue;
+			|| (parts[1] !== "provider" && parts[1] !== "hook" && parts[1] !== "runtime" && parts[1] !== "sandboxRequirement") || !isPlainObject(candidate)) continue;
 		const enabled = candidate.enabled;
 		if (enabled !== undefined && typeof enabled !== "boolean") continue;
 		const rawValues = candidate.values === undefined ? {} : candidate.values;
@@ -462,6 +462,8 @@ export interface DisabledRefs {
 	mcpOperations?: Record<string, string[]>;
 	piExtensions?: string[];
 	runtimes?: string[];
+	/** Schema-3 inert sandbox requirement list names. */
+	sandboxRequirements?: string[];
 	workflows?: string[];
 	/** Schema-2 static system-prompt contribution list names. */
 	systemPrompts?: string[];
@@ -470,7 +472,7 @@ export interface DisabledRefs {
 /** scope → packName → disabled entity refs by kind. Default (absent) = all enabled. */
 export type PackActivationMap = Partial<Record<PackOrderScope, Record<string, DisabledRefs>>>;
 
-const ACTIVATION_KINDS = ["roles", "tools", "skills", "entrypoints", "providers", "hooks", "mcp", "piExtensions", "runtimes", "workflows", "systemPrompts"] as const;
+const ACTIVATION_KINDS = ["roles", "tools", "skills", "entrypoints", "providers", "hooks", "mcp", "piExtensions", "runtimes", "sandboxRequirements", "workflows", "systemPrompts"] as const;
 
 function normalizeMcpOperations(raw: unknown): Record<string, string[]> | undefined {
 	if (!isPlainObject(raw)) return undefined;

@@ -50,6 +50,50 @@ export function isSafeBasename(name: unknown): name is string {
 	);
 }
 
+/** Schema-3 sandbox declarations have tighter limits than generic catalogues. */
+export const MAX_SANDBOX_REQUIREMENT_CATALOGUE_ROWS_PER_PACK = 32;
+export const MAX_SANDBOX_REQUIREMENT_LIST_NAME_LENGTH = 64;
+export const MAX_SANDBOX_REQUIREMENT_LIST_NAME_UTF8_BYTES = 64;
+export const MAX_SANDBOX_REQUIREMENT_ID_LENGTH = 64;
+export const MAX_SANDBOX_REQUIREMENT_ID_UTF8_BYTES = 64;
+export const MAX_SANDBOX_REQUIREMENT_DECLARATION_FILE_BYTES = 64 * 1024;
+
+const SANDBOX_REQUIREMENT_LIST_NAME_RE = /^[a-z0-9][a-z0-9._-]*$/;
+const SANDBOX_REQUIREMENT_ID_RE = /^[a-z0-9][a-z0-9._-]*$/;
+
+function isBoundedSandboxRequirementToken(
+	value: unknown,
+	re: RegExp,
+	maxLength: number,
+	maxUtf8Bytes: number,
+): value is string {
+	return typeof value === "string"
+		&& isSafeBasename(value)
+		&& value.length <= maxLength
+		&& Buffer.byteLength(value, "utf8") <= maxUtf8Bytes
+		&& re.test(value);
+}
+
+/** Safe, bounded basename for a schema-3 sandbox declaration file. */
+export function isValidSandboxRequirementListName(value: unknown): value is string {
+	return isBoundedSandboxRequirementToken(
+		value,
+		SANDBOX_REQUIREMENT_LIST_NAME_RE,
+		MAX_SANDBOX_REQUIREMENT_LIST_NAME_LENGTH,
+		MAX_SANDBOX_REQUIREMENT_LIST_NAME_UTF8_BYTES,
+	);
+}
+
+/** Safe, bounded identifier exposed by a schema-3 sandbox declaration. */
+export function isValidSandboxRequirementId(value: unknown): value is string {
+	return isBoundedSandboxRequirementToken(
+		value,
+		SANDBOX_REQUIREMENT_ID_RE,
+		MAX_SANDBOX_REQUIREMENT_ID_LENGTH,
+		MAX_SANDBOX_REQUIREMENT_ID_UTF8_BYTES,
+	);
+}
+
 function nonEmptyString(v: unknown): v is string {
 	return typeof v === "string" && v.trim().length > 0;
 }
@@ -93,7 +137,7 @@ export function validateManifest(
 			return fail("pack.yaml: schema must be a positive integer");
 		}
 		schema = d.schema;
-		if (schema > 2) problems?.push(`pack.yaml: schema ${schema} is newer than supported (2)`);
+		if (schema > 3) problems?.push(`pack.yaml: schema ${schema} is newer than supported (3)`);
 	}
 
 	const parseCapabilities = (key: "provides" | "requires"): string[] | undefined | null => {
@@ -123,6 +167,9 @@ export function validateManifest(
 	// catalogue key only; no MCP loader is introduced in this PR.
 	if (schema < 2 && "mcp" in c) {
 		return fail("pack.yaml: contents.mcp is not allowed (MCP installs are out of scope in MVP)");
+	}
+	if (schema < 3 && "sandboxRequirements" in c) {
+		return fail("pack.yaml: contents.sandboxRequirements requires schema 3");
 	}
 	const roles = asStringArray(c.roles);
 	const tools = asStringArray(c.tools);
@@ -157,6 +204,7 @@ export function validateManifest(
 	let runtimes: string[] = [];
 	let workflows: string[] = [];
 	let systemPrompts: string[] = [];
+	let sandboxRequirements: string[] = [];
 	if (schemaSupportsExtensionKeys) {
 		const parsedProviders = parseContentsBasenames("providers", c.providers);
 		if (parsedProviders === null) return null;
@@ -187,12 +235,28 @@ export function validateManifest(
 		if (parsedSystemPrompts === null) return null;
 		systemPrompts = parsedSystemPrompts;
 	}
+	if (schema >= 3) {
+		const parsedSandboxRequirements = parseContentsBasenames("sandboxRequirements", c.sandboxRequirements);
+		if (parsedSandboxRequirements === null) return null;
+		if (parsedSandboxRequirements.length > MAX_SANDBOX_REQUIREMENT_CATALOGUE_ROWS_PER_PACK) {
+			return fail(`pack.yaml: contents.sandboxRequirements may contain at most ${MAX_SANDBOX_REQUIREMENT_CATALOGUE_ROWS_PER_PACK} entries`);
+		}
+		for (const entry of parsedSandboxRequirements) {
+			if (!isValidSandboxRequirementListName(entry)) {
+				return fail(
+					`pack.yaml: contents.sandboxRequirements entry ${JSON.stringify(entry)} must be a lowercase, bounded basename ` +
+						`(max ${MAX_SANDBOX_REQUIREMENT_LIST_NAME_LENGTH} characters / ${MAX_SANDBOX_REQUIREMENT_LIST_NAME_UTF8_BYTES} UTF-8 bytes)`,
+				);
+			}
+		}
+		sandboxRequirements = parsedSandboxRequirements;
+	}
 
 	const manifest: PackManifest = {
 		name: d.name as string,
 		description: (d.description as string).trim(),
 		version: (d.version as string).trim(),
-		contents: { roles, tools, skills, entrypoints, providers, channels, hooks, mcp, piExtensions, runtimes, workflows, systemPrompts },
+		contents: { roles, tools, skills, entrypoints, providers, channels, hooks, mcp, piExtensions, runtimes, workflows, systemPrompts, sandboxRequirements },
 	};
 	if (d.schema !== undefined) manifest.schema = schema;
 	// Ships-disabled-by-default flag (built-in first-party packs). Only `true`

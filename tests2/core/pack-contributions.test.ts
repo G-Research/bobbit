@@ -26,8 +26,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { createMemFs } from "../harness/mem-fs.js";
-import { validateManifest } from "../../src/server/agent/pack-manifest.ts";
-import { loadHooks, loadPackContributions, loadSystemPromptSections, packIdFromRoot, PackContributionError } from "../../src/server/agent/pack-contributions.ts";
+import {
+	MAX_SANDBOX_REQUIREMENT_CATALOGUE_ROWS_PER_PACK,
+	MAX_SANDBOX_REQUIREMENT_DECLARATION_FILE_BYTES,
+	MAX_SANDBOX_REQUIREMENT_ID_LENGTH,
+	MAX_SANDBOX_REQUIREMENT_LIST_NAME_LENGTH,
+	validateManifest,
+} from "../../src/server/agent/pack-manifest.ts";
+import { loadHooks, loadPackContributions, loadSandboxRequirements, loadSystemPromptSections, packIdFromRoot, PackContributionError } from "../../src/server/agent/pack-contributions.ts";
 import { DYNAMIC_CONTEXT_END, DYNAMIC_CONTEXT_START } from "../../src/server/agent/prompt-delimiters.ts";
 import { HOST_API_VERSION, HOST_CONTRACT_VERSION, type HostChannelFrame, type HostChannelsApi, type HostApi } from "../../src/shared/extension-host/host-api.ts";
 import { PackContributionRegistry } from "../../src/server/extension-host/pack-contribution-registry.ts";
@@ -44,7 +50,7 @@ const fsSpies: Array<{ mockRestore(): void }> = [];
 
 beforeAll(() => {
 	memoryFs.mkdirSync(tmp, { recursive: true });
-	for (const name of ["existsSync", "mkdirSync", "readFileSync", "readdirSync", "rmSync", "writeFileSync"] as const) {
+	for (const name of ["existsSync", "mkdirSync", "readFileSync", "readdirSync", "rmSync", "statSync", "writeFileSync"] as const) {
 		fsSpies.push(vi.spyOn(fs, name).mockImplementation(memoryFs[name].bind(memoryFs) as never));
 	}
 	fsSpies.push(vi.spyOn(fs, "realpathSync").mockImplementation(((file: fs.PathLike) => {
@@ -201,18 +207,28 @@ describe("validateManifest (§1.2)", () => {
 		}
 	});
 
-	it("rejects bad capability names and warns on newer schemas without failing", () => {
+	it("accepts schema-3 sandbox requirement catalogues only with safe basenames", () => {
+		const schema2Problems: string[] = [];
+		assert.equal(validateManifest({ ...ok, schema: 2, contents: { ...ok.contents, sandboxRequirements: ["python"] } }, schema2Problems), null);
+		assert.match(schema2Problems.join("\n"), /requires schema 3/);
+		const problems: string[] = [];
+		const m = validateManifest({ ...ok, schema: 3, contents: { ...ok.contents, sandboxRequirements: ["python-analysis"] } }, problems);
+		assert.ok(m);
+		assert.deepEqual(m.contents.sandboxRequirements, ["python-analysis"]);
+		assert.deepEqual(problems, []);
+		assert.equal(validateManifest({ ...ok, schema: 3, contents: { ...ok.contents, sandboxRequirements: ["../escape"] } }), null);
+	});
+
+	it("rejects bad capability names and warns on schemas newer than schema 3", () => {
 		const badProblems: string[] = [];
 		assert.equal(validateManifest({ ...ok, schema: 2, provides: ["Bad_Name"] }, badProblems), null);
 		assert.equal(badProblems[0], 'pack.yaml: provides entry "Bad_Name" must match /^[a-z0-9][a-z0-9-]*$/');
 
 		const problems: string[] = [];
-		const m = validateManifest({ ...ok, schema: 3, contents: { ...ok.contents, providers: ["memory"], channels: ["terminal"] } }, problems);
+		const m = validateManifest({ ...ok, schema: 4, contents: { ...ok.contents, providers: ["memory"], channels: ["terminal"] } }, problems);
 		assert.ok(m);
-		assert.equal(m.schema, 3);
-		assert.deepEqual(m.contents.providers, ["memory"]);
-		assert.deepEqual(m.contents.channels, ["terminal"]);
-		assert.deepEqual(problems, ["pack.yaml: schema 3 is newer than supported (2)"]);
+		assert.equal(m.schema, 4);
+		assert.deepEqual(problems, ["pack.yaml: schema 4 is newer than supported (3)"]);
 	});
 });
 
@@ -259,12 +275,90 @@ function manifest(name: string, opts: Partial<PackManifest["contents"]> & { rout
 			mcp: opts.mcp ?? [],
 			piExtensions: opts.piExtensions ?? [],
 			runtimes: opts.runtimes ?? [],
+			sandboxRequirements: opts.sandboxRequirements ?? [],
 			workflows: opts.workflows ?? [],
 			systemPrompts: opts.systemPrompts ?? [],
 		},
 		...(opts.routes ? { routes: opts.routes } : {}),
 	};
 }
+
+describe("schema-3 sandbox requirement declarations", () => {
+	it("loads only the closed, approved public-profile declaration shape", () => {
+		const root = packRoot("sandbox-requirements", "safe-tools");
+		w(path.join(root, "sandbox-requirements", "python.yaml"), "id: python-analysis\nprofiles: [python]\nconfig:\n  enabled: { type: boolean, default: true }\nactivation:\n  requiresConfig: [enabled]\n");
+		w(path.join(root, "sandbox-requirements", "injected.yaml"), "id: injected\nprofiles: [python, python]\ncommand: apt install anything\n");
+		const m = { ...manifest("safe-tools", { sandboxRequirements: ["python", "injected"] }), schema: 3 };
+		const requirements = loadSandboxRequirements(root, m);
+		assert.deepEqual(requirements.map(requirement => ({
+			id: requirement.id,
+			profiles: requirement.profiles,
+			settingsSchema: requirement.settingsSchema,
+			activation: requirement.activation,
+		})), [
+			{
+				id: "python-analysis",
+				profiles: ["python"],
+				settingsSchema: {
+					fields: [{ key: "enabled", type: "boolean", default: true }],
+					requiresConfig: ["enabled"],
+				},
+				activation: { requiresConfig: ["enabled"] },
+			},
+		]);
+	});
+
+	it("fails closed unless activation, settings, and exact pack authorization all permit the request", () => {
+		const root = packRoot("sandbox-requirements-registry", "safe-tools");
+		w(path.join(root, "sandbox-requirements", "python.yaml"), "id: python-analysis\nprofiles: [python]\nconfig:\n  enabled: { type: boolean, default: true }\nactivation:\n  requiresConfig: [enabled]\n");
+		const m = { ...manifest("safe-tools", { sandboxRequirements: ["python"] }), schema: 3 };
+		const registry = new PackContributionRegistry(
+			() => [entry(root, "server", m)],
+			undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+			(_projectId, packId) => packId === "safe-tools",
+		);
+		assert.deepEqual(registry.listSandboxRequirements(undefined), [{ packId: "safe-tools", requirementId: "python-analysis", profiles: ["python"] }]);
+
+		const denied = new PackContributionRegistry(() => [entry(root, "server", m)]);
+		assert.deepEqual(denied.listSandboxRequirements(undefined), []);
+	});
+
+	it("rejects sandbox catalogues and list basenames beyond their closed bounds", () => {
+		const base = { ...manifest("safe-tools"), schema: 3 };
+		const tooMany = Array.from({ length: MAX_SANDBOX_REQUIREMENT_CATALOGUE_ROWS_PER_PACK + 1 }, (_, index) => `entry-${index}`);
+		const countProblems: string[] = [];
+		assert.equal(validateManifest({ ...base, contents: { ...base.contents, sandboxRequirements: tooMany } }, countProblems), null);
+		assert.match(countProblems.join("\n"), /at most/);
+
+		for (const value of ["Uppercase", "a".repeat(MAX_SANDBOX_REQUIREMENT_LIST_NAME_LENGTH + 1)]) {
+			const problems: string[] = [];
+			assert.equal(validateManifest({ ...base, contents: { ...base.contents, sandboxRequirements: [value] } }, problems), null);
+			assert.match(problems.join("\n"), /lowercase, bounded basename/);
+		}
+		assert.equal(
+			validateManifest({ ...base, contents: { ...base.contents, sandboxRequirements: [`a${"é".repeat(MAX_SANDBOX_REQUIREMENT_LIST_NAME_LENGTH)}`] } }),
+			null,
+		);
+	});
+
+	it("drops direct-loader catalogues, oversized declarations, and invalid bounded IDs before activation or authorization", () => {
+		const root = packRoot("sandbox-requirements-limits", "safe-tools");
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const overCatalogue = { ...manifest("safe-tools", { sandboxRequirements: Array.from({ length: MAX_SANDBOX_REQUIREMENT_CATALOGUE_ROWS_PER_PACK + 1 }, (_, index) => `entry-${index}`) }), schema: 3 };
+			assert.deepEqual(loadSandboxRequirements(root, overCatalogue), []);
+
+			w(path.join(root, "sandbox-requirements", "oversized.yaml"), `id: oversized\nprofiles: [python]\n#${"x".repeat(MAX_SANDBOX_REQUIREMENT_DECLARATION_FILE_BYTES)}\n`);
+			w(path.join(root, "sandbox-requirements", "long-id.yaml"), `id: ${"a".repeat(MAX_SANDBOX_REQUIREMENT_ID_LENGTH + 1)}\nprofiles: [python]\n`);
+			w(path.join(root, "sandbox-requirements", "unknown.yaml"), "id: unknown\nprofiles: [unknown]\n");
+			w(path.join(root, "sandbox-requirements", "duplicate.yaml"), "id: duplicate\nprofiles: [python, python]\n");
+			const m = { ...manifest("safe-tools", { sandboxRequirements: ["oversized", "long-id", "unknown", "duplicate"] }), schema: 3 };
+			assert.deepEqual(loadSandboxRequirements(root, m), []);
+		} finally {
+			warning.mockRestore();
+		}
+	});
+});
 
 describe("loadPackContributions (§5.1) + pack-root containment (§2)", () => {
 	it("parses panels + entrypoints (filtered by contents.entrypoints, listName carried) + routes", () => {

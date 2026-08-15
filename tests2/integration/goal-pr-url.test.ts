@@ -1,9 +1,9 @@
 /**
- * E2E test: Goal.prUrl is dropped — PrStatusStore is the single source of truth
- * for the re-attempt-context PR URL line.
+ * E2E test: Goal.prUrl is rejected — PrStatusStore is the single source of
+ * truth for the re-attempt-context PR URL line.
  *
  * Verifies:
- *  A. PUT /api/goals/:id silently ignores `prUrl` (no 400, field not stored).
+ *  A. PUT /api/goals/:id rejects `prUrl` and does not store it.
  *  B. Re-attempt session prompt includes `**PR URL:**` line when PrStatusStore
  *     has a URL for that goal id (seeded via the in-process server's store).
  *  C. Empty PrStatusStore omits the line cleanly.
@@ -47,17 +47,17 @@ async function waitForReattemptPromptText(sessionId: string): Promise<string> {
 }
 
 test.describe("Goal.prUrl removal — PrStatusStore is source of truth", () => {
-	test("PUT /api/goals/:id silently ignores prUrl field", async () => {
+	test("PUT /api/goals/:id rejects and names prUrl", async () => {
 		const { id } = await createGoal();
 		try {
-			// Send PUT with prUrl — should be 200 and silently ignored.
 			const putResp = await apiFetch(`/api/goals/${id}`, {
 				method: "PUT",
 				body: JSON.stringify({ prUrl: "https://example/foo" }),
 			});
-			expect(putResp.status).toBe(200);
+			expect(putResp.status).toBe(400);
+			expect(await putResp.text()).toContain("prUrl");
 
-			// Subsequent GET should not include prUrl on the goal.
+			// Subsequent GET must not include prUrl on the goal.
 			const getResp = await apiFetch(`/api/goals/${id}`);
 			expect(getResp.status).toBe(200);
 			const goal = await getResp.json();
