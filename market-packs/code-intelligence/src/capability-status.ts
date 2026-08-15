@@ -102,6 +102,19 @@ export function deriveLanguageCapabilityStatus(
 		};
 	}
 
+	// A matrix declaration with no requirements has no evidence that the named
+	// service can run in this runtime. Never turn an empty declaration plus a
+	// readiness snapshot into a false ready result.
+	if (requirements.length === 0) {
+		return unavailableStatus(
+			detection,
+			language.id,
+			language.lsp.actions,
+			requirements,
+			`The ${options.runtime} LSP declaration has no named toolchain requirements; ${language.lsp.server.id} cannot be considered ready.`,
+		);
+	}
+
 	const available = new Set((options.availableToolchainIds ?? []).map(normalizeLanguageId));
 	const missing = requirements.filter((requirement) => !available.has(normalizeLanguageId(requirement.id)));
 	if (missing.length > 0) {
@@ -121,18 +134,7 @@ export function deriveLanguageCapabilityStatus(
 
 	const readiness = matchingReadyService(options, detection.component, language.id, language.lsp.server.id);
 	if (!readiness.ready) {
-		return {
-			component: detection.component,
-			languageId: language.id,
-			structuralSearch: detection.structuralSearch,
-			lsp: {
-				state: "unavailable",
-				actions: language.lsp.actions,
-				requirements,
-				missing: [],
-				reason: readiness.reason,
-			},
-		};
+		return unavailableStatus(detection, language.id, language.lsp.actions, requirements, readiness.reason);
 	}
 
 	return {
@@ -150,6 +152,21 @@ export function deriveLanguageCapabilityStatus(
 }
 
 export const deriveCapabilityStatus = deriveLanguageCapabilityStatus;
+
+function unavailableStatus(
+	detection: LanguageDetection,
+	languageId: string,
+	actions: readonly LspAction[],
+	requirements: readonly ToolchainRequirement[] | readonly SandboxLayerRequirement[],
+	reason: string,
+): LanguageCapabilityStatus {
+	return {
+		component: detection.component,
+		languageId,
+		structuralSearch: detection.structuralSearch,
+		lsp: { state: "unavailable", actions, requirements, missing: [], reason },
+	};
+}
 
 function matchingReadyService(
 	options: CapabilityStatusOptions,
@@ -169,13 +186,21 @@ function matchingReadyService(
 		return { ready: false, reason: "The managed LSP service snapshot is not bound to this exact project, component, worktree, and language." };
 	}
 	if (snapshot.state !== "ready") {
-		return { ready: false, reason: "The managed LSP service is not ready for this linked-worktree component." };
+		return { ready: false, reason: unavailableServiceReason(snapshot.state) };
 	}
 	if (typeof snapshot.serverId !== "string" || typeof snapshot.serverVersion !== "string"
 		|| normalizeLanguageId(snapshot.serverId) !== normalizeLanguageId(serverId) || !snapshot.serverVersion.trim() || !snapshot.versionCompatible) {
 		return { ready: false, reason: "The managed LSP service is not version-compatible with this language declaration." };
 	}
 	return { ready: true };
+}
+
+function unavailableServiceReason(state: Exclude<LspServiceReadinessSnapshot["state"], "ready">): string {
+	switch (state) {
+		case "starting": return "The managed LSP service is starting for this linked-worktree component.";
+		case "failed": return "The managed LSP service failed for this linked-worktree component.";
+		case "stopped": return "The managed LSP service is stopped for this linked-worktree component.";
+	}
 }
 
 function validServiceKey(key: LspServiceInstanceKey): boolean {
