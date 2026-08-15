@@ -337,6 +337,32 @@ describe("extension settings store", () => {
 		}
 	});
 
+	it("keeps sandbox requirements out of all secret-store projections", () => {
+		const memFs = createMemFs();
+		const configDir = "/memfs/settings-config";
+		const sandboxRef = { packId: "toolchain", kind: "sandboxRequirement" as const, id: "python" };
+		const sandboxKey = extensionSettingsTargetKey(sandboxRef);
+		const config = new ProjectConfigStore(configDir, memFs);
+		// A deliberately unpaired commit proves sandbox projections do not even
+		// probe the owner-only store when a caller supplies impossible fields.
+		config.setExtensionSettings({
+			schema: 1,
+			revision: 1,
+			commitId: "sandbox-public-commit",
+			targets: { [sandboxKey]: { values: { version: "3.12" } } },
+		});
+		const store = new ExtensionSettingsStore(config, new ExtensionSettingsSecretStore("/memfs/settings-state", memFs));
+
+		expect(store.getEffective(sandboxRef, { version: "3.11", credential: "must-stay-redacted" }, { secretFields: ["credential"] })).toEqual({
+			hasProjectRecord: true,
+			values: { version: "3.12" },
+			sources: { version: "project" },
+			secretSet: { credential: false },
+		});
+		expect(store.getForRuntime(sandboxRef, { version: "3.11", credential: "must-stay-redacted" }, { secretFields: ["credential"] }))
+			.toEqual({ version: "3.12" });
+	});
+
 	it("resolves public and owner-only values independently for each project", () => withTmpDir(root => {
 		const projectA = path.join(root, "a");
 		const projectB = path.join(root, "b");

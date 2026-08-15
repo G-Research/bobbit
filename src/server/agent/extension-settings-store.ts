@@ -146,6 +146,11 @@ function assertRef(ref: ExtensionSettingsTargetRef): void {
   }
 }
 
+/** Sandbox requirements are inert and cannot enter the owner-only secret path. */
+function isExtensionSettingsSecretTargetRef(ref: ExtensionSettingsTargetRef): ref is ExtensionSettingsSecretTargetRef {
+  return ref.kind === "provider" || ref.kind === "hook" || ref.kind === "runtime";
+}
+
 function assertState(state: unknown): asserts state is ExtensionSettingsState {
   // `isPlainObject` deliberately narrows to Record<string, unknown>; capture
   // the scalar before checking it so the assertion is sound rather than
@@ -177,10 +182,10 @@ function assertMutation(mutation: ExtensionSettingsMutation): void {
     }
   }
   if (mutation.secrets !== undefined) {
-    if (!isPlainObject(mutation.secrets) || mutation.ref.kind === "sandboxRequirement") throw new ExtensionSettingsMutationError();
+    if (!isPlainObject(mutation.secrets) || !isExtensionSettingsSecretTargetRef(mutation.ref)) throw new ExtensionSettingsMutationError();
     // Validate all secret values before publishing the public revision. The
     // secret owner repeats this defense at its persistence boundary.
-    validateExtensionSettingsSecretChanges(mutation.ref as ExtensionSettingsSecretTargetRef, mutation.secrets);
+    validateExtensionSettingsSecretChanges(mutation.ref, mutation.secrets);
   }
 }
 
@@ -227,8 +232,10 @@ export class ExtensionSettingsStore {
     const publicState = this.getPublicState();
     // A secret-presence projection is still a pairing observation. Do not show
     // it next to public settings from a different durable commit, even when the
-    // requested target has no declared secret fields.
-    this.secretStore.assertCommitId(publicState.commitId);
+    // requested target has no declared secret fields. Sandbox requirements are
+    // inert, so they must never query the owner-only secret store.
+    const secretRef = isExtensionSettingsSecretTargetRef(ref) ? ref : undefined;
+    if (secretRef) this.secretStore.assertCommitId(publicState.commitId);
     const storedRecord = publicState.targets[extensionSettingsTargetKey(ref)];
     const record = storedRecord ? cloneRecord(storedRecord) : undefined;
     const hasProjectRecord = record !== undefined;
@@ -255,7 +262,7 @@ export class ExtensionSettingsStore {
     }
 
     const secretSet: Record<string, boolean> = {};
-    for (const field of secretFields) secretSet[field] = this.secretStore.has(ref as ExtensionSettingsSecretTargetRef, field);
+    for (const field of secretFields) secretSet[field] = secretRef ? this.secretStore.has(secretRef, field) : false;
     return { ...(record?.enabled !== undefined ? { enabled: record.enabled } : {}), hasProjectRecord, values, sources, secretSet };
   }
 
@@ -273,9 +280,11 @@ export class ExtensionSettingsStore {
     // public overlay or secret-presence metadata.
     const effective = this.getEffective(ref, defaults, options);
     const values = { ...effective.values };
-    for (const field of options.secretFields ?? []) {
-      const value = this.secretStore.getForRuntime(ref as ExtensionSettingsSecretTargetRef, field);
-      if (value !== undefined) values[field] = value;
+    if (isExtensionSettingsSecretTargetRef(ref)) {
+      for (const field of options.secretFields ?? []) {
+        const value = this.secretStore.getForRuntime(ref, field);
+        if (value !== undefined) values[field] = value;
+      }
     }
     return values;
   }
@@ -304,7 +313,8 @@ export class ExtensionSettingsStore {
     // This is a value-free probe; a later owner-only persistence failure attempts
     // durable compensation of the already-published public candidate below.
     for (const mutation of mutations) {
-      for (const field of Object.keys(mutation.secrets ?? {})) this.secretStore.has(mutation.ref as ExtensionSettingsSecretTargetRef, field);
+      if (!isExtensionSettingsSecretTargetRef(mutation.ref)) continue;
+      for (const field of Object.keys(mutation.secrets ?? {})) this.secretStore.has(mutation.ref, field);
     }
 
     const current = this.getPublicState();
@@ -336,8 +346,8 @@ export class ExtensionSettingsStore {
     this.projectConfigStore.mutate(draft => draft.setExtensionSettings(candidate));
 
     const secretMutations = mutations.flatMap(mutation =>
-      mutation.secrets && Object.keys(mutation.secrets).length > 0
-        ? [{ ref: mutation.ref as ExtensionSettingsSecretTargetRef, changes: mutation.secrets }]
+      isExtensionSettingsSecretTargetRef(mutation.ref) && mutation.secrets && Object.keys(mutation.secrets).length > 0
+        ? [{ ref: mutation.ref, changes: mutation.secrets }]
         : [],
     );
     try {
