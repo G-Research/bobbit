@@ -39,6 +39,8 @@ export interface RegisteredProject {
   provisional?: boolean; // True while a project assistant is setting up this project
   /** Durable one-shot import decision lifecycle marker for newly registered normal projects. */
   importDecisionRun?: ImportDecisionRunMarker;
+  /** Server-owned operation key used only to collapse canonical mutation replays. */
+  canonicalMutationKey?: string;
   /**
    * Gateway-owned exact grant rows. Project config is untrusted input; a config
    * row authorizes only while this independently persisted operator binding
@@ -1420,6 +1422,16 @@ export class ProjectRegistry {
    * Clears `provisional` flag and optionally updates the name.
    * If rootPath now exists but wasn't scaffolded, scaffold it.
    */
+  /** Persist a server-derived mutation key without exposing it as normal project configuration. */
+  setCanonicalMutationKey(id: string, key: string | undefined): void {
+    const project = this.projects.get(id);
+    if (!project) throw new Error(`Project not found: ${id}`);
+    if (key) project.canonicalMutationKey = key;
+    else delete project.canonicalMutationKey;
+    this.projects.set(id, project);
+    this.save();
+  }
+
   promote(id: string, updates: { name?: string }): RegisteredProject {
     const project = this.projects.get(id);
     if (!project) throw new Error(`Project not found: ${id}`);

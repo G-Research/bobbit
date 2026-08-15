@@ -13,6 +13,10 @@ import type { Workflow, WorkflowStore } from "../agent/workflow-store.js";
 import { validateWorkflowDefinition, type WorkflowComponentRef } from "../agent/workflow-validator.js";
 import { ToolManager, __resetToolScanCache } from "../agent/tool-manager.js";
 
+/** Durable, server-owned idempotency marker. Callers must never take this from
+ * proposal metadata or another user controlled field. */
+export const CANONICAL_MUTATION_KEY = "bobbit.canonicalMutationKey";
+
 export class CanonicalMutationError extends Error {
 	constructor(public readonly status: 400 | 404 | 409 | 422, message: string, public readonly code?: string) {
 		super(message);
@@ -271,6 +275,158 @@ function targetLoaderAccepts(toolManager: ToolManager, name: string): boolean {
  * Update/delete deliberately only address a local override; inherited tool packs
  * are immutable through this operation.
  */
+/**
+ * The persistence boundary for goal creation. Route and proposal callers do
+ * their own authentication/transport validation, then pass the resolved
+ * workflow and policy-clamped options here. This keeps a replay from creating
+ * a second goal while deliberately retaining the public route's semantics.
+ */
+export async function createCanonicalGoal<T extends { id: string; workflow?: { gates: Array<{ id: string }> }; metadata?: Record<string, unknown> }>(
+	input: {
+		title: string;
+		cwd: string;
+		options: Record<string, unknown>;
+		projectId?: string;
+		reattemptOf?: string;
+		autoStartTeam: boolean;
+		applicationKey?: string;
+	},
+	deps: {
+		findByApplicationKey(key: string): T | undefined;
+		create(title: string, cwd: string, options: Record<string, unknown>): Promise<T>;
+		update(id: string, updates: Record<string, unknown>): void;
+		initGates(goalId: string, gateIds: string[]): void;
+		flush(): Promise<void>;
+		afterCreate(goal: T): void | Promise<void>;
+	},
+): Promise<{ goal: T; replayed: boolean }> {
+	if (input.applicationKey) {
+		const existing = deps.findByApplicationKey(input.applicationKey);
+		if (existing) return { goal: existing, replayed: true };
+	}
+	const metadata = input.options.metadata && typeof input.options.metadata === "object" && !Array.isArray(input.options.metadata)
+		? { ...(input.options.metadata as Record<string, unknown>) }
+		: {};
+	// Always overwrite the reserved field. A proposal cannot claim an operation
+	// identity by placing this key in its arbitrary metadata bag.
+	if (input.applicationKey) metadata[CANONICAL_MUTATION_KEY] = input.applicationKey;
+	const goal = await deps.create(input.title, input.cwd, {
+		...input.options,
+		...(Object.keys(metadata).length > 0 ? { metadata } : {}),
+	});
+	if (input.projectId) {
+		deps.update(goal.id, { projectId: input.projectId });
+		(goal as T & { projectId?: string }).projectId = input.projectId;
+	}
+	if (input.reattemptOf) {
+		deps.update(goal.id, { reattemptOf: input.reattemptOf });
+		(goal as T & { reattemptOf?: string }).reattemptOf = input.reattemptOf;
+	}
+	deps.update(goal.id, { autoStartTeam: input.autoStartTeam });
+	(goal as T & { autoStartTeam?: boolean }).autoStartTeam = input.autoStartTeam;
+	if (goal.workflow) deps.initGates(goal.id, goal.workflow.gates.map(gate => gate.id));
+	await deps.flush();
+	// The HTTP route publishes the creation response before its historical
+	// fire-and-forget setup/start work. Deferring retains that observable order
+	// while proposal callers still share the exact same lifecycle hook.
+	queueMicrotask(() => { void deps.afterCreate(goal); });
+	return { goal, replayed: false };
+}
+
+export type CanonicalProjectMode = "register" | "update" | "promote";
+
+/**
+ * Canonical project mutation transaction. Configuration is supplied as one
+ * already-validated callback because ProjectConfigStore owns the complex
+ * atomic config/secrets format; registration, replacement rollback and the
+ * durable idempotency marker stay in one reusable operation.
+ */
+export async function mutateCanonicalProject<T extends { id: string; rootPath: string; importDecisionRun?: { id: string; state: "configuring" | "ready" } }>(
+	input: {
+		mode: CanonicalProjectMode;
+		name?: string;
+		rootPath?: string;
+		updates?: Record<string, unknown>;
+		applicationKey?: string;
+		sameRootPath?(left: string, right: string): boolean;
+	},
+	deps: {
+		findByApplicationKey(key: string): T | undefined;
+		register(applicationKey?: string): T;
+		get(id: string): T | undefined;
+		update(id: string, updates: Record<string, unknown>): T;
+		promote(id: string, updates: { name?: string }): T;
+		configure(project: T): Promise<void> | void;
+		removeRegistered(project: T): void;
+		removeContext(projectId: string): Promise<void>;
+		openContext(projectId: string): Promise<boolean>;
+		suspendServices(projectId: string): Promise<void>;
+		stopServices(projectId: string): Promise<void>;
+		reconcileServices(projectId: string): Promise<void>;
+	},
+): Promise<{ project: T; replayed: boolean }> {
+	if (input.mode === "register") {
+		if (input.applicationKey) {
+			const existing = deps.findByApplicationKey(input.applicationKey);
+			if (existing) return { project: existing, replayed: true };
+		}
+		const project = deps.register(input.applicationKey);
+		try {
+			await deps.configure(project);
+			return { project, replayed: false };
+		} catch (error) {
+			// A rejected initial config must never leave a half-registered project.
+			deps.removeRegistered(project);
+			throw error;
+		}
+	}
+	if (!input.updates?.id || typeof input.updates.id !== "string") {
+		throw new CanonicalMutationError(400, "Project mutation target is required");
+	}
+	const projectId = input.updates.id;
+	const existing = deps.get(projectId);
+	if (!existing) throw new CanonicalMutationError(422, `Unknown project: ${projectId}`, "UNKNOWN_PROJECT");
+	// Registry implementations mutate their project record in place. Capture the
+	// old immutable scope before update so a failed root transaction can recover.
+	const previousRootPath = existing.rootPath;
+	if (input.mode === "promote") {
+		const project = deps.promote(projectId, { name: input.name });
+		await deps.configure(project);
+		return { project, replayed: false };
+	}
+	const updates = { ...input.updates };
+	delete updates.id;
+	const replacingRoot = typeof updates.rootPath === "string" && !(input.sameRootPath ?? ((left, right) => left === right))(updates.rootPath, existing.rootPath);
+	let removed = false;
+	let committed = false;
+	let replacementOpened = false;
+	try {
+		if (replacingRoot) {
+			await deps.suspendServices(projectId);
+			removed = true;
+			await deps.removeContext(projectId);
+		}
+		const project = deps.update(projectId, updates);
+		committed = true;
+		if (replacingRoot) {
+			replacementOpened = await deps.openContext(projectId);
+			if (!replacementOpened) throw new Error("Project context could not be reopened after root replacement");
+			await deps.stopServices(projectId);
+			await deps.reconcileServices(projectId);
+		}
+		await deps.configure(project);
+		return { project, replayed: false };
+	} catch (error) {
+		if (replacingRoot && removed) {
+			if (replacementOpened) await deps.removeContext(projectId).catch(() => undefined);
+			if (committed) { try { deps.update(projectId, { rootPath: previousRootPath }); } catch { /* original error wins */ } }
+			try { await deps.openContext(projectId); } catch { /* best effort recovery */ }
+			await deps.reconcileServices(projectId).catch(() => undefined);
+		}
+		throw error;
+	}
+}
+
 export function applyCanonicalToolProposal(proposal: ToolProposal, deps: { configDir: string; toolManager: ToolManager }): ToolProposalResult {
 	if (!proposal || !TOOL_NAME.test(proposal.tool || "")) throw new CanonicalMutationError(400, "Invalid tool name");
 	if (proposal.action !== "create" && proposal.action !== "update" && proposal.action !== "delete") throw new CanonicalMutationError(400, "Tool action must be create, update, or delete");

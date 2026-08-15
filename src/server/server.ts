@@ -794,6 +794,9 @@ import {
 import { ProposalSeedService, proposalDraftOwnerId } from "./proposals/proposal-seed-service.js";
 import {
 	CanonicalMutationError,
+	createCanonicalGoal,
+	mutateCanonicalProject,
+	CANONICAL_MUTATION_KEY,
 	applyCanonicalToolProposal,
 	createCanonicalRole,
 	createCanonicalStaff,
@@ -7521,7 +7524,30 @@ async function handleApiRoute(
 			const acceptCanonical = body.acceptCanonical === true;
 			let project;
 			try {
-				project = projectRegistry.register(body.name, body.rootPath, { color, palette, colorLight, colorDark, acceptCanonical });
+				({ project } = await mutateCanonicalProject({
+					mode: "register",
+					name: body.name,
+					rootPath: body.rootPath,
+				}, {
+					findByApplicationKey: (key) => projectRegistry.list().find(candidate => candidate.canonicalMutationKey === key),
+					register: (applicationKey) => {
+						const created = projectRegistry.register(body.name, body.rootPath, { color, palette, colorLight, colorDark, acceptCanonical });
+						if (applicationKey) projectRegistry.setCanonicalMutationKey(created.id, applicationKey);
+						return projectRegistry.get(created.id)!;
+					},
+					get: (id) => projectRegistry.get(id),
+					update: (id, updates) => projectRegistry.update(id, updates as Parameters<typeof projectRegistry.update>[1]),
+					promote: (id, updates) => projectRegistry.promote(id, updates),
+					// Route-owned configuration follows this durable registration boundary;
+					// proposal acceptance passes its full config callback to this same operation.
+					configure: () => undefined,
+					removeRegistered: (created) => projectRegistry.remove(created.id),
+					removeContext: (id) => projectContextManager.remove(id),
+					openContext: (id) => Promise.resolve(!!projectContextManager.getOrCreate(id)),
+					suspendServices: (id) => worktreeServices.suspendProject(id),
+					stopServices: (id) => worktreeServices.stopProject(id),
+					reconcileServices: (id) => worktreeServices.reconcileProject(id),
+				}));
 			} catch (regErr: any) {
 				if (regErr instanceof SymlinkProjectRootError) {
 					json({
@@ -7729,55 +7755,27 @@ async function handleApiRoute(
 			return;
 		}
 		const projectId = projectGetMatch[1];
-		const existing = projectRegistry.get(projectId);
-		// Registry updates mutate the stored project object, so keep the old root as
-		// a value before starting a transition that may need to roll it back.
-		const previousRootPath = existing?.rootPath;
-		const rootReplacement = !!updates.rootPath && !!existing && !samePath(updates.rootPath, existing.rootPath);
-		let contextRemoved = false;
-		let updateCommitted = false;
-		let replacementContextOpened = false;
 		try {
-			if (rootReplacement) {
-				// Do not delete old-root service state before the registry update commits.
-				// A failed transition reopens the original context and reconciles it.
-				await worktreeServices.suspendProject(projectId);
-				contextRemoved = true;
-				await projectContextManager.remove(projectId);
-			}
-			const updated = projectRegistry.update(projectId, updates);
-			updateCommitted = true;
-			if (rootReplacement) {
-				let reopened;
-				try { reopened = projectContextManager.getOrCreate(projectId); } catch { reopened = null; }
-				if (!reopened) throw new Error("Project context could not be reopened after root replacement");
-				replacementContextOpened = true;
-				// The new context is live and the root update committed: old derived data
-				// can now be removed, then the replacement scope can be reconciled.
-				await worktreeServices.stopProject(projectId);
-				await worktreeServices.reconcileProject(projectId);
-			}
+			const { project: updated } = await mutateCanonicalProject({
+				mode: "update",
+				updates: { id: projectId, ...updates },
+				sameRootPath: samePath,
+			}, {
+				findByApplicationKey: (key) => projectRegistry.list().find(project => project.canonicalMutationKey === key),
+				register: () => { throw new Error("Register is not available for a project update"); },
+				get: (id) => projectRegistry.get(id),
+				update: (id, next) => projectRegistry.update(id, next as Parameters<typeof projectRegistry.update>[1]),
+				promote: (id, next) => projectRegistry.promote(id, next),
+				configure: () => undefined,
+				removeRegistered: (project) => projectRegistry.remove(project.id),
+				removeContext: (id) => projectContextManager.remove(id),
+				openContext: (id) => Promise.resolve(!!projectContextManager.getOrCreate(id)),
+				suspendServices: (id) => worktreeServices.suspendProject(id),
+				stopServices: (id) => worktreeServices.stopProject(id),
+				reconcileServices: (id) => worktreeServices.reconcileProject(id),
+			});
 			json(updated);
 		} catch (err: any) {
-			if (rootReplacement && contextRemoved) {
-				// If a post-commit step failed, discard the replacement context before
-				// restoring the registry. Contexts retain the mutable project record.
-				if (replacementContextOpened) {
-					try { await projectContextManager.remove(projectId); } catch { /* original error wins */ }
-				}
-				// Restore the registry before reopening so every failed transition returns
-				// to a live old-root context, even when remove() or getOrCreate() throws.
-				if (updateCommitted) {
-					try { projectRegistry.update(projectId, { rootPath: previousRootPath! }); } catch { /* original error wins */ }
-				}
-				if (![...projectContextManager.all()].some(context => context.project.id === projectId)) {
-					try { projectContextManager.getOrCreate(projectId); } catch { /* original error wins */ }
-				}
-				// The pre-commit suspend preserved old-root data and ownership. Restore
-				// the old scope after rollback rather than leaving it fenced until another
-				// unrelated invalidation happens.
-				await worktreeServices.reconcileProject(projectId).catch(() => undefined);
-			}
 			if (writeSpecialProjectMutationError(err)) return;
 			jsonError(400, err);
 		}
@@ -7861,7 +7859,24 @@ async function handleApiRoute(
 		try {
 			const body = await readBody(req);
 			const name = typeof body?.name === "string" ? body.name : undefined;
-			let promoted = projectRegistry.promote(projectId, { name });
+			let { project: promoted } = await mutateCanonicalProject({
+				mode: "promote",
+				name,
+				updates: { id: projectId },
+			}, {
+				findByApplicationKey: (key) => projectRegistry.list().find(project => project.canonicalMutationKey === key),
+				register: () => { throw new Error("Register is not available for project promotion"); },
+				get: (id) => projectRegistry.get(id),
+				update: (id, updates) => projectRegistry.update(id, updates as Parameters<typeof projectRegistry.update>[1]),
+				promote: (id, updates) => projectRegistry.promote(id, updates),
+				configure: () => undefined,
+				removeRegistered: (project) => projectRegistry.remove(project.id),
+				removeContext: (id) => projectContextManager.remove(id),
+				openContext: (id) => Promise.resolve(!!projectContextManager.getOrCreate(id)),
+				suspendServices: (id) => worktreeServices.suspendProject(id),
+				stopServices: (id) => worktreeServices.stopProject(id),
+				reconcileServices: (id) => worktreeServices.reconcileProject(id),
+			});
 			// A provisional project deliberately has no run until its proposal
 			// configuration is complete. The acceptance client writes that config
 			// before this request; retain a defensive default for direct API users
@@ -10634,94 +10649,60 @@ async function handleApiRoute(
 					{ validateComponentReferences: false },
 				);
 			}
-			const goal = await targetGoalManager.createGoal(title, cwd, {
-				spec,
-				workflowId: resolvedWorkflowId,
-				workflowStore: targetCtx.workflowStore,
-				resolvedWorkflow,
-				sandboxed,
-				enabledOptionalSteps,
+			const { goal } = await createCanonicalGoal({
+				title,
+				cwd,
+				options: {
+					spec,
+					workflowId: resolvedWorkflowId,
+					workflowStore: targetCtx.workflowStore,
+					resolvedWorkflow,
+					sandboxed,
+					enabledOptionalSteps,
+					projectId: targetProjectId,
+					parentGoalId,
+					inlineRoles: bodyInlineRoles,
+					subgoalsAllowed: effSubgoalsAllowed,
+					maxNestingDepth: effMaxNestingDepth,
+					divergencePolicy: effDivergencePolicy,
+					maxConcurrentChildren: effMaxConcurrentChildren,
+					metadata,
+					worktree: explicitWorktree,
+				},
 				projectId: targetProjectId,
-				parentGoalId,
-				inlineRoles: bodyInlineRoles,
-				subgoalsAllowed: effSubgoalsAllowed,
-				maxNestingDepth: effMaxNestingDepth,
-				divergencePolicy: effDivergencePolicy,
-				maxConcurrentChildren: effMaxConcurrentChildren,
-				metadata,
-				worktree: explicitWorktree,
-			});
-			// Set projectId from the explicit request scope.
-			if (targetProjectId) {
-				targetGoalManager.updateGoal(goal.id, { projectId: targetProjectId });
-				goal.projectId = targetProjectId;
-			}
-			// Set reattemptOf if provided
-			if (body.reattemptOf && typeof body.reattemptOf === "string") {
-				targetGoalManager.updateGoal(goal.id, { reattemptOf: body.reattemptOf });
-				goal.reattemptOf = body.reattemptOf;
-			}
-			// Persist autoStartTeam flag
-			targetGoalManager.updateGoal(goal.id, { autoStartTeam });
-			goal.autoStartTeam = autoStartTeam;
-			// Initialize gate states for the workflow
-			if (goal.workflow) {
-				targetCtx.gateStore.initGatesForGoal(goal.id, goal.workflow.gates.map(g => g.id));
-			}
-			// A successful create response must never reference a goal or its
-			// initialized gates that vanish on an immediate process kill. Ordinary
-			// mutations still use each store's coalesced writer; this is the narrow
-			// external creation boundary that awaits its existing publication queue.
-			await Promise.all([
-				targetGoalManager.getGoalStore().flush(),
-				targetCtx.gateStore.flush(),
-			]);
-			json(goal, 201);
-
-			// Fire-and-forget async worktree setup (and optionally start team)
-			if (goal.autoStartTeam && parentGoalId) {
-				// Finding 2 — a child goal auto-start must go through the
-				// unified per-root scheduler so the concurrency cap applies to
-				// the `POST /api/goals` child path too (previously it started
-				// the team with NO permit). At cap the child is parked
-				// `state='blocked'` (capacity-blocked) and started later when a
-				// permit frees; the scheduler handles setup + broadcasts.
-				//
-				// Guard is `state !== "blocked"` (NOT `setupStatus ===
-				// "preparing"`): a data-only / non-git child is created with
-				// `setupStatus === "ready"` (no worktree), so gating on
-				// "preparing" silently skipped the start and its team never ran.
-				// `requestChildStart` → `_startScheduledChildTeam` handles both
-				// "preparing" (setup + start) and "ready" (start-only). A blocked
-				// child (deps unmet) is not started here — it starts on unblock.
-				if (goal.state !== "blocked") {
-					const outcome = verificationHarness.requestChildStart(goal.id);
-					if (outcome === "capacity-blocked") {
-						targetGoalManager.updateGoal(goal.id, { state: "blocked" });
-						broadcastToAll({ type: "goal_state_changed", goalId: goal.id });
-					}
-				}
-			} else if (goal.setupStatus === "preparing") {
-				if (goal.autoStartTeam) {
-					targetGoalManager.setupWorktreeAndStartTeam(goal.id, () => teamManager.startTeam(goal.id)).then(() => {
-						broadcastToAll({ type: "goal_setup_complete", goalId: goal.id });
-					}).catch((err) => {
-						const g = targetGoalManager.getGoal(goal.id);
-						if (g?.setupStatus === "ready") {
-							broadcastToAll({ type: "goal_setup_complete", goalId: goal.id });
-							console.error("[goal] Auto-start team failed (worktree ready):", err);
-						} else {
-							broadcastToAll({ type: "goal_setup_error", goalId: goal.id, error: String(err) });
+				reattemptOf: typeof body.reattemptOf === "string" ? body.reattemptOf : undefined,
+				autoStartTeam,
+			}, {
+				findByApplicationKey: (key) => targetGoalManager.listGoals().find(candidate =>
+					candidate.metadata?.[CANONICAL_MUTATION_KEY] === key,
+				),
+				create: (goalTitle, goalCwd, options) => targetGoalManager.createGoal(goalTitle, goalCwd, options as Parameters<typeof targetGoalManager.createGoal>[2]),
+				update: (goalId, updates) => { targetGoalManager.updateGoal(goalId, updates); },
+				initGates: (goalId, gateIds) => { targetCtx.gateStore.initGatesForGoal(goalId, gateIds); },
+				flush: () => Promise.all([targetGoalManager.getGoalStore().flush(), targetCtx.gateStore.flush()]).then(() => undefined),
+				afterCreate: (createdGoal) => {
+					// Worktree setup is intentionally post-publication and non-blocking.
+					if (createdGoal.autoStartTeam && parentGoalId) {
+						if (createdGoal.state !== "blocked") {
+							const outcome = verificationHarness.requestChildStart(createdGoal.id);
+							if (outcome === "capacity-blocked") {
+								targetGoalManager.updateGoal(createdGoal.id, { state: "blocked" });
+								broadcastToAll({ type: "goal_state_changed", goalId: createdGoal.id });
+							}
 						}
-					});
-				} else {
-					targetGoalManager.setupWorktree(goal.id).then(() => {
-						broadcastToAll({ type: "goal_setup_complete", goalId: goal.id });
-					}).catch((err) => {
-						broadcastToAll({ type: "goal_setup_error", goalId: goal.id, error: String(err) });
-					});
-				}
-			}
+					} else if (createdGoal.setupStatus === "preparing") {
+						const complete = () => broadcastToAll({ type: "goal_setup_complete", goalId: createdGoal.id });
+						const failed = (err: unknown) => broadcastToAll({ type: "goal_setup_error", goalId: createdGoal.id, error: String(err) });
+						if (createdGoal.autoStartTeam) {
+							targetGoalManager.setupWorktreeAndStartTeam(createdGoal.id, () => teamManager.startTeam(createdGoal.id)).then(complete).catch((err) => {
+								if (targetGoalManager.getGoal(createdGoal.id)?.setupStatus === "ready") { complete(); console.error("[goal] Auto-start team failed (worktree ready):", err); }
+								else failed(err);
+							});
+						} else targetGoalManager.setupWorktree(createdGoal.id).then(complete).catch(failed);
+					}
+				},
+			});
+			json(goal, 201);
 		} catch (err) {
 			jsonError(400, err);
 		}
