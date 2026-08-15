@@ -9271,6 +9271,23 @@ async function handleApiRoute(
 					if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
 				}
 			}
+			const terminalCancellationCause = putGoal && body.state !== putGoal.state
+				? body.state === "complete" ? "goal-complete" as const
+					: body.state === "shelved" ? "shelved" as const
+						: undefined
+				: undefined;
+			if (terminalCancellationCause) {
+				// Persist the cancellation fence before mutating terminal goal state.
+				// A failed fence leaves the goal live so an in-flight verifier cannot
+				// escape cleanup under a completed or shelved goal.
+				try {
+					await verificationHarness.cancelAllVerifications(id, terminalCancellationCause);
+				} catch (err) {
+					console.error(`[api] Failed to fence verification cancellation before ${body.state} for ${id}:`, err);
+					json({ error: "Could not durably cancel active verifications", code: "VERIFICATION_CANCELLATION_FENCE_FAILED", retryable: true }, 503);
+					return;
+				}
+			}
 			const goalMgr = getGoalManagerForGoal(id);
 			const ok = await goalMgr.updateGoal(id, {
 				title: body.title,
@@ -12503,11 +12520,15 @@ async function handleApiRoute(
 		}
 
 		const affectedGateIds = getGateAndTransitiveDependents(initialGoal.workflow, gateId);
+		const releaseGateMutationFence = verificationHarness.acquireGateMutationFence(goalId, affectedGateIds);
 		try {
-			await verificationHarness.cancelStaleVerificationsForGates(goalId, affectedGateIds, "gate-reset");
-		} catch (err) {
-			console.error(`[api] Error cancelling verifications for reset gates ${affectedGateIds.join(", ")}:`, err);
-		}
+			try {
+				await verificationHarness.cancelStaleVerificationsForGates(goalId, affectedGateIds, "gate-reset");
+			} catch (err) {
+				console.error(`[api] Error cancelling verifications for reset gates ${affectedGateIds.join(", ")}:`, err);
+				json({ error: "Could not durably cancel active verifications for gate reset", code: "VERIFICATION_CANCELLATION_FENCE_FAILED", retryable: true }, 503);
+				return;
+			}
 
 		// Cancellation is awaited, so re-read the project-owned record and reapply
 		// dormant guards before mutating either persistence store.
@@ -12720,6 +12741,9 @@ async function handleApiRoute(
 			teamLeadNotified,
 		});
 		return;
+		} finally {
+			releaseGateMutationFence();
+		}
 	}
 
 	// POST /api/goals/:goalId/gates/:gateId/bypass — human-only gate bypass.
@@ -12756,11 +12780,15 @@ async function handleApiRoute(
 		if (typeof whyBypassed !== "string" || !whyBypassed.trim()) { json({ error: "whyBypassed is required" }, 400); return; }
 		if (typeof whoAmI !== "string" || !whoAmI.trim()) { json({ error: "whoAmI is required" }, 400); return; }
 
+		const releaseGateMutationFence = verificationHarness.acquireGateMutationFence(goalId, [gateId]);
 		try {
-			await verificationHarness.cancelStaleVerificationsForGates(goalId, [gateId], "bypass");
-		} catch (err) {
-			console.error(`[api] Error cancelling verifications for bypassed gate ${gateId}:`, err);
-		}
+			try {
+				await verificationHarness.cancelStaleVerificationsForGates(goalId, [gateId], "bypass");
+			} catch (err) {
+				console.error(`[api] Error cancelling verifications for bypassed gate ${gateId}:`, err);
+				json({ error: "Could not durably cancel active verifications for gate bypass", code: "VERIFICATION_CANCELLATION_FENCE_FAILED", retryable: true }, 503);
+				return;
+			}
 
 		const bypassSignal = gateStore.bypassGate(goalId, gateId, { whyBypassed, whoAmI });
 		const bypassedAt = bypassSignal.metadata?.bypassedAt ?? String(bypassSignal.timestamp);
@@ -12797,6 +12825,9 @@ async function handleApiRoute(
 
 		json({ ok: true, gateId, status: "bypassed", whyBypassed, whoAmI, bypassedAt, teamLeadNotified });
 		return;
+		} finally {
+			releaseGateMutationFence();
+		}
 	}
 
 	// POST /api/goals/:goalId/gates/:gateId/signal — signal a gate
@@ -12816,6 +12847,10 @@ async function handleApiRoute(
 		const gateStore = gateSignalCtx.gateStore;
 		const gateDef = goal.workflow.gates.find(g => g.id === gateId);
 		if (!gateDef) { json({ error: `Unknown gate: ${gateId}` }, 404); return; }
+		if (verificationHarness.isGateMutationFenced(goalId, gateId)) {
+			json({ error: "Gate is being reset or bypassed; retry after that operation completes", code: "GATE_MUTATION_IN_PROGRESS", retryable: true }, 409);
+			return;
+		}
 
 		const body = await readBody(req);
 		const signalSessionId = body?.sessionId || "unknown";
@@ -12973,7 +13008,17 @@ async function handleApiRoute(
 			verification: { status: "running" as const, steps: [] as any[] },
 		};
 
-		const initialSteps = verificationHarness.beginVerification(signal as any, gateDef);
+		if (verificationHarness.isGateMutationFenced(goalId, gateId)) {
+			json({ error: "Gate is being reset or bypassed; retry after that operation completes", code: "GATE_MUTATION_IN_PROGRESS", retryable: true }, 409);
+			return;
+		}
+		let initialSteps: any[];
+		try {
+			initialSteps = verificationHarness.beginVerification(signal as any, gateDef);
+		} catch (err) {
+			json({ error: (err as Error).message, code: "GATE_MUTATION_IN_PROGRESS", retryable: true }, 409);
+			return;
+		}
 		signal.verification = { status: "running", steps: initialSteps };
 
 		gateStore.recordSignal(signal);
