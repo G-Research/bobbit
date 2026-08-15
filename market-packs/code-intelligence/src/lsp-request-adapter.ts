@@ -242,6 +242,17 @@ export function serializeLspRequest(input: LspToolRequest, options: LspRequestAd
 	if (componentName !== options.context.component.name) {
 		return { result: result(action, componentName, "unavailable", "component-unavailable", "The requested component is not available in this linked worktree.") };
 	}
+	// Canonicalize the linked component root once, including for status and
+	// workspace-wide actions. A removed worktree has no safe service identity.
+	const fileSystem = options.fs ?? fs;
+	let root: string;
+	try {
+		root = fileSystem.realpathSync(options.context.componentRoot);
+		if (!fileSystem.lstatSync(root).isDirectory()) throw new Error("component root is not a directory");
+	} catch {
+		return { result: result(action, componentName, "unavailable", "component-unavailable", "The linked-worktree component is unavailable.") };
+	}
+
 	const language = resolveLanguage(input, options.languages);
 	if (!language) {
 		const reason = input.language
@@ -249,10 +260,11 @@ export function serializeLspRequest(input: LspToolRequest, options: LspRequestAd
 			: "Specify a declared language when it cannot be determined unambiguously from the path.";
 		return { result: result(action, componentName, "unavailable", "unsupported-language", reason, typeof input.language === "string" ? input.language.trim().toLowerCase() : undefined) };
 	}
-	if (!language.lsp) {
+	const lsp = language.lsp;
+	if (!lsp) {
 		return { result: result(action, componentName, "unavailable", "unsupported-language", `${language.label} has no declared LSP capability.`, language.id) };
 	}
-	if (action !== "status" && !language.lsp.actions.includes(action)) {
+	if (action !== "status" && !lsp.actions.includes(action)) {
 		return { result: result(action, componentName, "unavailable", "unsupported-action", `${language.label} does not declare LSP ${action}.`, language.id) };
 	}
 
@@ -262,30 +274,33 @@ export function serializeLspRequest(input: LspToolRequest, options: LspRequestAd
 			return { result: result(action, componentName, "unavailable", "invalid-path", "path must be a non-empty relative file path inside the linked component root.", language.id) };
 		}
 		try {
-			const root = (options.fs ?? fs).realpathSync(options.context.componentRoot);
 			const candidate = path.resolve(root, input.path);
-			const stat = (options.fs ?? fs).lstatSync(candidate);
+			const stat = fileSystem.lstatSync(candidate);
 			if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("not a regular file");
-			const canonical = (options.fs ?? fs).realpathSync(candidate);
+			const canonical = fileSystem.realpathSync(candidate);
 			if (!isInside(root, canonical)) throw new Error("outside root");
 			uri = pathToFileURL(canonical).href;
 		} catch {
 			return { result: result(action, componentName, "unavailable", "invalid-path", "path must name a readable, non-symlink file inside the linked component root.", language.id) };
 		}
 	}
-	if (requiresPosition(action) && !validPosition(input.position)) {
-		return { result: result(action, componentName, "unavailable", "invalid-request", "position must contain non-negative integer line and character values.", language.id) };
+	let position: LspPosition | undefined;
+	if (requiresPosition(action)) {
+		if (!validPosition(input.position)) {
+			return { result: result(action, componentName, "unavailable", "invalid-request", "position must contain non-negative integer line and character values.", language.id) };
+		}
+		position = input.position;
 	}
 	if (action === "workspaceSymbols" && (typeof input.query !== "string" || input.query.length > MAX_QUERY_LENGTH)) {
 		return { result: result(action, componentName, "unavailable", "invalid-request", `query must be a string of at most ${MAX_QUERY_LENGTH} characters.`, language.id) };
 	}
 
 	const request: LspServiceRequest | undefined = action === "status" ? undefined : {
-		key: { projectId: options.context.projectId, component: options.context.component, worktreePath: (options.fs ?? fs).realpathSync(options.context.componentRoot), languageId: language.id },
-		language: { id: language.id, server: language.lsp.server, actions: language.lsp.actions },
+		key: { projectId: options.context.projectId, component: options.context.component, worktreePath: root, languageId: language.id },
+		language: { id: language.id, server: lsp.server, actions: lsp.actions },
 		action,
 		...(uri ? { uri } : {}),
-		...(input.position ? { position: input.position } : {}),
+		...(position ? { position } : {}),
 		...(action === "workspaceSymbols" ? { query: input.query } : {}),
 	};
 
@@ -294,10 +309,10 @@ export function serializeLspRequest(input: LspToolRequest, options: LspRequestAd
 		return { result: result(action, componentName, "disabled", "disabled", "LSP is disabled for this language. Enable it through the project language settings.", language.id), request };
 	}
 	if (runtime?.toolchain === "missing") {
-		return { result: result(action, componentName, "requires-toolchain", "requires-toolchain", missingToolchainGuidance(language.lsp, runtime), language.id), request };
+		return { result: result(action, componentName, "requires-toolchain", "requires-toolchain", missingToolchainGuidance(lsp, runtime), language.id), request };
 	}
 	if (runtime?.service === "failed") {
-		return { result: result(action, componentName, "failed", "service-failed", boundedReason(runtime.reason, `${language.lsp.server.id} failed to initialize.`), language.id), request };
+		return { result: result(action, componentName, "failed", "service-failed", boundedReason(runtime.reason, `${lsp.server.id} failed to initialize.`), language.id), request };
 	}
 	if (runtime?.service === "starting") {
 		return { result: result(action, componentName, "starting", "service-starting", "The language service is starting; retry shortly.", language.id), request };
