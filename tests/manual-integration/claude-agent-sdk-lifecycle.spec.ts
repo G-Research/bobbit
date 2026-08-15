@@ -267,7 +267,8 @@ function manualSdkModel(): string {
 
 /** SDK-supported wire aliases make the live control target deterministic. */
 function alternateManualSdkModel(configuredModel: string): string {
-	return configuredModel === "haiku" ? "sonnet" : "haiku";
+	const normalized = configuredModel.trim().toLowerCase();
+	return /(?:^|[-_])haiku(?:$|[-_])/.test(normalized) ? "sonnet" : "haiku";
 }
 
 function manualSdkAuthDir(): string {
@@ -533,6 +534,14 @@ test("Claude Agent SDK provider-unavailable failure is bounded and sanitized wit
 		if (existsSync(root)) rmSync(root, { recursive: true, force: true });
 		restoreSmokeEnvironment(originalEnvironment);
 	}
+});
+
+test("Claude Agent SDK manual live controls choose a distinct SDK wire alias", () => {
+	expect({
+		fullHaiku: alternateManualSdkModel("claude-haiku-4-5"),
+		aliasHaiku: alternateManualSdkModel("HaIkU"),
+		sonnet: alternateManualSdkModel("claude-sonnet-4-5"),
+	}).toEqual({ fullHaiku: "sonnet", aliasHaiku: "sonnet", sonnet: "haiku" });
 });
 
 test("Claude Agent SDK manual smoke setup installs the explicit auth directory and removes ambient API credentials", () => {
