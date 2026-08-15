@@ -3,7 +3,7 @@
  * Tests the new path-only dialog, directory detection/auto-import,
  * browse UI, and project assistant session creation.
  */
-import type { Page } from "@playwright/test";
+import type { Page, Route } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
 import { apiFetch } from "../e2e-setup.js";
 import { openApp } from "./ui-helpers.js";
@@ -125,6 +125,7 @@ test.describe("Add Project flow (UI)", () => {
 		const requestId = "project-import-browser-request";
 		let projectId = "";
 		let answerPosts = 0;
+		let pending = true;
 		let sessionPosts = 0;
 		let askPosts = 0;
 		page.on("request", (request) => {
@@ -138,18 +139,19 @@ test.describe("Add Project flow (UI)", () => {
 			await route.fulfill({
 				status: 200,
 				contentType: "application/json",
-				body: JSON.stringify({ requests: [{
+				body: JSON.stringify({ requests: pending ? [{
 					id: requestId,
 					status: "pending",
 					decisionClass: "deferrable",
 					title: "Browser import decision",
 					question: "Choose a safe import mode",
 					options: [{ value: "safe", label: "Safe mode" }, { value: "fast", label: "Fast mode" }],
-				}] }),
+				}] : [] }),
 			});
 		});
 		await page.route(/\/import-decision-requests\/[^/]+\/answer$/, async (route) => {
 			answerPosts++;
+			pending = false;
 			const body = route.request().postDataJSON();
 			expect(body).toEqual({ value: { kind: "option", value: "safe" } });
 			await route.fulfill({
@@ -193,6 +195,89 @@ test.describe("Add Project flow (UI)", () => {
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
+
+	for (const failure of [
+		{ label: "503", fail: async (route: Route) => route.fulfill({ status: 503, body: "unavailable" }) },
+		{ label: "network abort", fail: async (route: Route) => route.abort("failed") },
+	]) {
+		test(`does not continue an import when its settled projection returns ${failure.label}`, async ({ page }) => {
+			const dir = uniqueDir(`import-decision-${failure.label.replace(/\s/g, "-")}`);
+			mkdirSync(join(dir, ".bobbit", "config"), { recursive: true });
+			mkdirSync(join(dir, ".bobbit", "state"), { recursive: true });
+			writeFileSync(join(dir, ".bobbit", "config", "project.yaml"), "name: import-decision-failure\n");
+			const requestId = `project-import-${failure.label.replace(/\s/g, "-")}`;
+			let projectId = "";
+			let pending = true;
+			let failProjection = false;
+			let sessionPosts = 0;
+			page.on("request", (request) => {
+				if (request.method() === "POST" && request.url().includes("/api/sessions")) sessionPosts++;
+			});
+			await page.route(/\/import-decision-requests\?state=pending$/, async (route) => {
+				const match = route.request().url().match(/\/api\/projects\/([^/]+)\/import-decision-requests/);
+				projectId = match?.[1] ?? projectId;
+				if (failProjection) {
+					await failure.fail(route);
+					return;
+				}
+				await route.fulfill({
+					status: 200,
+					contentType: "application/json",
+					body: JSON.stringify({ requests: pending ? [{
+						id: requestId,
+						status: "pending",
+						decisionClass: "deferrable",
+						title: "Blocking import decision",
+						question: "Choose a safe import mode",
+						options: [{ value: "safe", label: "Safe mode" }, { value: "fast", label: "Fast mode" }],
+					}] : [] }),
+				});
+			});
+			await page.route(/\/import-decision-requests\/[^/]+\/answer$/, async (route) => {
+				pending = false;
+				failProjection = true;
+				await route.fulfill({
+					status: 200,
+					contentType: "application/json",
+					body: JSON.stringify({ request: {
+						id: requestId,
+						status: "resolved",
+						decisionClass: "deferrable",
+						title: "Blocking import decision",
+						question: "Choose a safe import mode",
+						options: [{ value: "safe", label: "Safe mode" }, { value: "fast", label: "Fast mode" }],
+						resolution: { value: { kind: "option", value: "safe" } },
+					} }),
+				});
+			});
+
+			try {
+				await openApp(page);
+				await page.locator("button").filter({ hasText: "Add Project" }).first().click();
+				await page.locator('input[placeholder="/path/to/project"]').fill(dir);
+				await page.locator("button").filter({ hasText: "Continue" }).first().click();
+				const decisions = page.locator('[data-testid="project-import-decisions"]');
+				await expect(decisions).toBeVisible({ timeout: 10_000 });
+				await decisions.locator("label.ask-option").filter({ hasText: "Safe mode" }).click();
+
+				const error = page.locator('[data-testid="project-import-decisions-error"]');
+				await expect(error).toBeVisible({ timeout: 10_000 });
+				await expect(error).toContainText("Retry to continue");
+				await expect(page.locator('[data-testid="add-project-dialog"]')).toBeVisible();
+				expect(sessionPosts).toBe(0);
+
+				failProjection = false;
+				await error.locator('[data-testid="project-import-decisions-retry"]').click();
+				await expect(page.locator('[data-testid="add-project-dialog"]')).not.toBeVisible({ timeout: 10_000 });
+				expect(sessionPosts).toBe(0);
+			} finally {
+				await page.unroute(/\/import-decision-requests\?state=pending$/).catch(() => {});
+				await page.unroute(/\/import-decision-requests\/[^/]+\/answer$/).catch(() => {});
+				if (projectId) await apiFetch(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => {});
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+	}
 
 	test("auto-import project with existing .bobbit directory", async ({ page }) => {
 		let sessionPosts = 0;

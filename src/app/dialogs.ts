@@ -55,8 +55,10 @@ import { gatewayRoute } from "../shared/base-path.js";
 import {
 	activateProjectImportDecisionRequests,
 	deactivateProjectImportDecisionRequests,
+	projectImportDecisionProjectionError,
 	projectImportDecisionRequestsForProject,
 	projectImportDecisionRequestsLoaded,
+	refreshProjectImportDecisionRequests,
 } from "./project-import-decisions.js";
 import { ProjectImportDecisionRenderer } from "../ui/tools/renderers/ProjectImportDecisionRenderer.js";
 // NOTE: session-manager imports from dialogs, so we use dynamic imports to break the cycle
@@ -2782,7 +2784,23 @@ export function showProjectDialog(): void {
 
 	const renderImportDecisionBody = () => {
 		const project = importProject;
-		if (!project || !projectImportDecisionRequestsLoaded(project.id)) {
+		if (!project) {
+			return html`<div class="flex items-center justify-center h-full text-sm text-muted-foreground" data-testid="project-import-decisions-loading">Checking project import decisions…</div>`;
+		}
+		const projectionError = projectImportDecisionProjectionError(project.id);
+		if (projectionError) {
+			return html`
+				<div class="flex flex-col items-center justify-center gap-3 h-full text-center" data-testid="project-import-decisions-error">
+					<p class="text-sm text-destructive">${projectionError.message}</p>
+					${Button({
+						variant: "default",
+						onClick: () => void refreshProjectImportDecisionRequests(project.id),
+						children: html`<span data-testid="project-import-decisions-retry">Retry</span>`,
+					})}
+				</div>
+			`;
+		}
+		if (!projectImportDecisionRequestsLoaded(project.id)) {
 			return html`<div class="flex items-center justify-center h-full text-sm text-muted-foreground" data-testid="project-import-decisions-loading">Checking project import decisions…</div>`;
 		}
 		const requests = projectImportDecisionRequestsForProject(project.id);
