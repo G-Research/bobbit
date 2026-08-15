@@ -1,5 +1,17 @@
 FROM node:22-slim
 
+# These values are generated only by sandbox-image-requirements.ts. The case
+# branch is intentionally closed: an extension can select `python`, but never
+# contribute packages, shell, registries, paths, or arbitrary Docker arguments.
+ARG BOBBIT_SANDBOX_TOOLCHAINS=""
+ARG BOBBIT_SANDBOX_REQUIREMENTS_FINGERPRINT=""
+RUN set -eu; \
+    case "$BOBBIT_SANDBOX_TOOLCHAINS" in \
+      "") ;; \
+      python) apt-get update && apt-get install -y --no-install-recommends python3-venv python3-pip && apt-get clean && rm -rf /var/lib/apt/lists/* ;; \
+      *) echo "unsupported Bobbit sandbox toolchain" >&2; exit 1 ;; \
+    esac
+
 # Install build tools, git, curl, gh CLI, ripgrep.
 #
 # NOTE: we deliberately do NOT install Debian's `fd-find` apt package — at the
@@ -55,7 +67,8 @@ RUN npx -y playwright@1.52.0 install-deps chromium 2>/dev/null \
 ARG PI_AGENT_VERSION=0.74.0
 RUN npm install -g @earendil-works/pi-coding-agent@${PI_AGENT_VERSION} --no-audit --no-fund 2>/dev/null \
     && ln -sf $(npm root -g) /node_modules
-LABEL bobbit.pi-agent-version=${PI_AGENT_VERSION}
+LABEL bobbit.pi-agent-version=${PI_AGENT_VERSION} \
+      bobbit.sandbox-requirements-fingerprint=${BOBBIT_SANDBOX_REQUIREMENTS_FINGERPRINT}
 
 # TypeScript compiler — needed for `npm run check` in worktrees.
 # Must run as root (before USER node) to write to /usr/local/lib/node_modules/.

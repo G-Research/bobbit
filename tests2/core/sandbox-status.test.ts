@@ -4,13 +4,25 @@
 
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { buildSandboxImage, checkDockerAvailability, ensureImageAgentVersion, getHostAgentVersion, resolveSandboxDockerContext } from "../../src/server/agent/sandbox-status.js";
+import {
+	buildSandboxImage,
+	checkDockerAvailability,
+	ensureImageAgentVersion,
+	getHostAgentVersion,
+	resolveSandboxDockerContext,
+} from "../../src/server/agent/sandbox-status.js";
+import { resolveSandboxImagePlan } from "../../src/server/agent/sandbox-image-requirements.js";
 
-const SERVER_SOURCE = readFileSync(new URL("../../src/server/server.ts", import.meta.url), "utf8");
 const DOCKER_FENCE_ERROR = "SANDBOX_DOCKER_RUNNER_FENCE";
+const root = resolve(import.meta.dirname, "..", "..");
+const plan = () => resolveSandboxImagePlan({
+	baseImageName: "bobbit-agent",
+	requirements: [{ packId: "core", requirementId: "python", profiles: ["python"] }],
+	piAgentVersion: getHostAgentVersion(),
+});
 
 function fencedDockerRunner(calls: Array<{ file: string; args: readonly string[] }>) {
 	return {
@@ -25,8 +37,7 @@ describe("sandbox Docker context resolution", () => {
 	it("falls back to Bobbit's bundled docker/ directory when the project cwd has none", () => {
 		const projectDir = mkdtempSync(join(tmpdir(), "bobbit-sandbox-project-without-docker-"));
 		try {
-			const context = resolveSandboxDockerContext(projectDir);
-			assert.equal(context, resolve(import.meta.dirname, "..", ".."));
+			assert.equal(resolveSandboxDockerContext(projectDir), root);
 		} finally {
 			rmSync(projectDir, { recursive: true, force: true });
 		}
@@ -37,9 +48,7 @@ describe("sandbox Docker context resolution", () => {
 		try {
 			mkdirSync(join(projectDir, "docker"), { recursive: true });
 			writeFileSync(join(projectDir, "docker", "Dockerfile"), "FROM scratch\n", "utf-8");
-
-			const context = resolveSandboxDockerContext(projectDir);
-			assert.equal(context, resolve(import.meta.dirname, "..", ".."));
+			assert.equal(resolveSandboxDockerContext(projectDir), root);
 		} finally {
 			rmSync(projectDir, { recursive: true, force: true });
 		}
@@ -47,13 +56,14 @@ describe("sandbox Docker context resolution", () => {
 
 	it("keeps Docker failures inside an injected command-runner seam", async () => {
 		const probeCalls: Array<{ file: string; args: readonly string[] }> = [];
-		const status = await checkDockerAvailability("fenced-image", undefined, fencedDockerRunner(probeCalls));
+		const status = await checkDockerAvailability(plan(), undefined, fencedDockerRunner(probeCalls));
 		assert.equal(status.available, false);
 		assert.match(status.error ?? "", new RegExp(DOCKER_FENCE_ERROR));
 		assert.deepEqual(probeCalls, [{ file: "docker", args: ["info", "--format", "{{.ServerVersion}}"] }]);
+		assert.equal(status.requirements?.entries[0]?.state, "unsupported");
 
 		const buildCalls: Array<{ file: string; args: readonly string[] }> = [];
-		const result = await buildSandboxImage("fenced-image", resolve(import.meta.dirname, "..", ".."), fencedDockerRunner(buildCalls));
+		const result = await buildSandboxImage(plan(), root, fencedDockerRunner(buildCalls));
 		assert.equal(result.success, false);
 		assert.match(result.error ?? "", new RegExp(DOCKER_FENCE_ERROR));
 		assert.equal(buildCalls.length, 1);
@@ -61,9 +71,60 @@ describe("sandbox Docker context resolution", () => {
 		assert.equal(buildCalls[0].args[0], "build");
 	});
 
-	it("uses its injected runner for image version inspection and rebuilding", async () => {
+	it("supplies only fixed core plan arguments to the injected Docker runner", async () => {
 		const hostVersion = getHostAgentVersion();
 		assert.ok(hostVersion, "the local pi-coding-agent package supplies a version");
+		const desiredPlan = plan();
+		const calls: Array<{ file: string; args: readonly string[] }> = [];
+		const recordingRunner = {
+			execFile: async (file: string, args: readonly string[]) => {
+				calls.push({ file, args });
+				return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+			},
+		};
+
+		assert.equal((await buildSandboxImage(desiredPlan, root, recordingRunner)).success, true);
+		assert.deepEqual(calls, [{
+			file: "docker",
+			args: [
+				"build",
+				"--build-arg", "BOBBIT_SANDBOX_TOOLCHAINS=python",
+				"--build-arg", `BOBBIT_SANDBOX_REQUIREMENTS_FINGERPRINT=${desiredPlan.fingerprint}`,
+				"--build-arg", `PI_AGENT_VERSION=${hostVersion}`,
+				"-t", desiredPlan.imageName,
+				join(root, "docker"),
+			],
+		}]);
+	});
+
+	it("requires both Pi and requirements labels before an image is available", async () => {
+		const desiredPlan = plan();
+		const calls: Array<readonly string[]> = [];
+		const matchingRunner = {
+			execFile: async (_file: string, args: readonly string[]) => {
+				calls.push(args);
+				if (args[0] === "info") return { stdout: Buffer.from("27.0"), stderr: Buffer.alloc(0) };
+				if (args[0] === "image") return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+				if (String(args[2]).includes("pi-agent")) return { stdout: Buffer.from(getHostAgentVersion()!), stderr: Buffer.alloc(0) };
+				return { stdout: Buffer.from(desiredPlan.fingerprint), stderr: Buffer.alloc(0) };
+			},
+		};
+		const available = await checkDockerAvailability(desiredPlan, root, matchingRunner);
+		assert.equal(available.requirements?.entries[0]?.state, "available");
+
+		const staleRunner = {
+			execFile: async (_file: string, args: readonly string[]) => {
+				if (args[0] === "info") return { stdout: Buffer.from("27.0"), stderr: Buffer.alloc(0) };
+				if (args[0] === "image") return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+				return { stdout: Buffer.from("<no value>"), stderr: Buffer.alloc(0) };
+			},
+		};
+		const pending = await checkDockerAvailability(desiredPlan, root, staleRunner);
+		assert.equal(pending.requirements?.entries[0]?.state, "pending");
+		assert.ok(calls.some((args) => args[0] === "inspect"));
+	});
+
+	it("rebuilds through its injected runner when either plan label is stale", async () => {
 		const calls: Array<{ file: string; args: readonly string[] }> = [];
 		const recordingRunner = {
 			execFile: async (file: string, args: readonly string[]) => {
@@ -74,21 +135,11 @@ describe("sandbox Docker context resolution", () => {
 			},
 		};
 
-		assert.equal(await ensureImageAgentVersion("fenced-image", resolve(import.meta.dirname, "..", ".."), recordingRunner), true);
+		assert.equal(await ensureImageAgentVersion(plan(), root, recordingRunner), true);
 		assert.deepEqual(calls.map(({ file, args }) => ({ file, command: args[0] })), [
+			{ file: "docker", command: "inspect" },
 			{ file: "docker", command: "inspect" },
 			{ file: "docker", command: "build" },
 		]);
-		assert.deepEqual(calls[0].args, ["inspect", "--format", "{{index .Config.Labels \"bobbit.pi-agent-version\"}}", "fenced-image"]);
-		assert.ok(calls[1].args.includes(`PI_AGENT_VERSION=${hostVersion}`));
-	});
-
-	it("threads the gateway runner to every sandbox Docker helper call site", () => {
-		assert.match(SERVER_SOURCE, /checkDockerAvailability\(imageName, dockerContextRoot \?\? undefined, gatewayDeps\.commandRunner\)/);
-		assert.match(SERVER_SOURCE, /buildSandboxImage\(imageName, dockerContextRoot, gatewayDeps\.commandRunner\)/);
-		assert.match(SERVER_SOURCE, /ensureImageAgentVersion\(imageName, dockerContextRoot \?\? undefined, gatewayDeps\.commandRunner\)/);
-		assert.match(SERVER_SOURCE, /checkDockerAvailability\(configured \? imageName : undefined, dockerContextRoot \?\? undefined, commandRunner\)/);
-		assert.match(SERVER_SOURCE, /buildSandboxImage\(imageName, dockerContextRoot, commandRunner!\)/);
-		assert.match(SERVER_SOURCE, /checkDockerAvailability\(undefined, undefined, commandRunner!\)/);
 	});
 });
