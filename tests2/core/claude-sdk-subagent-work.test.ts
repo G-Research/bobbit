@@ -247,6 +247,65 @@ describe("Claude SDK embedded subagent work", () => {
 		expect(projectedB.workByParent.get(parent)?.messages.map(message => message.id)).toEqual(["recovered-child"]);
 	});
 
+	it("preserves root and child partition prefixes as later recovery adds rows at exact parent boundaries", async () => {
+		const firstParent = "agent-use-one";
+		const secondParent = "agent-use-two";
+		const firstRoot = assistant("root-first", undefined, "", [{ type: "toolCall", id: firstParent, name: "Agent", arguments: {} }]);
+		const firstResult: ClaudeAgentSdkHistoryMessage = {
+			id: "root-first-result", role: "toolResult", toolCallId: firstParent, toolName: "Agent", isError: false, content: [], timestamp: 2,
+		};
+		const laterRoot = assistant("root-later", undefined, "", [{ type: "toolCall", id: secondParent, name: "Task", arguments: {} }]);
+		const laterResult: ClaudeAgentSdkHistoryMessage = {
+			id: "root-later-result", role: "toolResult", toolCallId: secondParent, toolName: "Task", isError: false, content: [], timestamp: 4,
+		};
+		const firstChild: SdkSessionMessage = {
+			type: "assistant", uuid: "child-one-first", session_id: SESSION_ID, parent_tool_use_id: firstParent, parent_agent_id: "child-one",
+			message: { content: [{ type: "text", text: "first recovered child row" }], stop_reason: "end_turn" },
+		};
+		const laterFirstChild: SdkSessionMessage = {
+			type: "assistant", uuid: "child-one-later", session_id: SESSION_ID, parent_tool_use_id: firstParent, parent_agent_id: "child-one",
+			message: { content: [{ type: "text", text: "later row for the same root parent" }], stop_reason: "end_turn" },
+		};
+		const secondChild: SdkSessionMessage = {
+			type: "assistant", uuid: "child-two-first", session_id: SESSION_ID, parent_tool_use_id: secondParent, parent_agent_id: "child-two",
+			message: { content: [{ type: "text", text: "separate child partition" }], stop_reason: "end_turn" },
+		};
+		let recoverySnapshot: "A" | "B" = "A";
+		const fixture = recoverySdk({}, {
+			listSubagents: vi.fn(async () => recoverySnapshot === "A" ? ["child-one"] : ["child-one", "child-two"]),
+			getSubagentMessages: vi.fn(async (_sessionId, agentId) => {
+				if (agentId === "child-one") return recoverySnapshot === "A" ? [firstChild] : [firstChild, laterFirstChild];
+				return agentId === "child-two" ? [secondChild] : [];
+			}),
+		});
+
+		const snapshotA = await recoverClaudeSdkEmbeddedWork([firstRoot, firstResult], { sessionId: SESSION_ID, cwd: "/workspace", access: fixture.deps });
+		recoverySnapshot = "B";
+		const snapshotB = await recoverClaudeSdkEmbeddedWork([firstRoot, firstResult, laterRoot, laterResult], { sessionId: SESSION_ID, cwd: "/workspace", access: fixture.deps });
+		const projectedA = projectClaudeSdkEmbeddedWork(snapshotA);
+		const projectedB = projectClaudeSdkEmbeddedWork(snapshotB);
+		const rootA = projectedA.rootMessages.map(message => ({ id: message.id, role: message.role }));
+		const rootB = projectedB.rootMessages.map(message => ({ id: message.id, role: message.role }));
+		const firstPartitionA = projectedA.workByParent.get(firstParent)?.messages ?? [];
+		const firstPartitionB = projectedB.workByParent.get(firstParent)?.messages ?? [];
+
+		expect(rootB.slice(0, rootA.length)).toEqual(rootA);
+		expect(firstPartitionB.slice(0, firstPartitionA.length)).toEqual(firstPartitionA);
+		expect(firstPartitionB.map(message => ({ id: message.id, role: message.role }))).toEqual([
+			{ id: "child-one-first", role: "assistant" },
+			{ id: "child-one-later", role: "assistant" },
+		]);
+		expect(projectedB.workByParent.get(secondParent)?.messages.map(message => message.id)).toEqual(["child-two-first"]);
+		// Child rows stay under their immutable root invocation, rather than being
+		// globally tailed after the later official root history.
+		expect(snapshotB.map(message => message.id)).toEqual([
+			"root-first", "child-one-first", "child-one-later", "root-first-result",
+			"root-later", "child-two-first", "root-later-result",
+		]);
+		expect(projectedA.workByParent.get(firstParent)).toMatchObject({ phase: "completed" });
+		expect(projectedB.workByParent.get(firstParent)).toMatchObject({ phase: "completed" });
+	});
+
 	it("keeps an unterminated recovered child before a later terminal and root tail", async () => {
 		const parent = "agent-use-late-terminal";
 		const root = assistant("root-agent", undefined, "", [{ type: "toolCall", id: parent, name: "Agent", arguments: {} }]);
