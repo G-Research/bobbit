@@ -277,6 +277,8 @@ describe("Gov-1: direct fix-up auto-pause via PATCH /plan handler", () => {
 		const deps: any = {
 			projectContextManager: { getContextForGoal: () => ctx },
 			verificationHarness: {
+				acquireGoalLifecycleFence: () => () => {},
+				fenceAndCancelAllVerifications: () => {},
 				getActiveVerifications: () => [],
 				cancelStaleVerifications: async () => {},
 				resolvePlanStepChild: () => ({}),
