@@ -11,6 +11,7 @@ import { createMemFs, type MemFs } from "../harness/mem-fs.js";
 
 let memfs: MemFs = createMemFs();
 let sequence = 0;
+const importFixtureRoot = path.resolve("memfs", "project-import-fixture");
 
 function stateDir(label: string): string {
 	const dir = path.resolve("/memfs/decision-request-store", `${label}-${sequence++}`);
@@ -128,14 +129,14 @@ describe("DecisionRequestStore", () => {
 			id: "import-1", projectId: "project-1", createdAt: "2026-01-01T00:00:00.000Z",
 			context: {
 				event: "projectImported" as const, projectId: "project-1", importId: "import-1",
-				projectRoot: "/work/project", ownedRoots: ["/work/project", "/work/project/api"],
-				components: [{ id: "component-1", root: "/work/project/api", languages: ["typescript"] }],
+				projectRoot: importFixtureRoot, ownedRoots: [importFixtureRoot, path.join(importFixtureRoot, "api")],
+				components: [{ id: "component-1", root: path.join(importFixtureRoot, "api"), languages: ["typescript"] }],
 			},
 			hooks: { "pack-1:hook-1": { state: "pending" as const } },
 		};
 		assert.equal(store.ensureImportRun(run)?.created, true);
 		assert.equal(store.ensureImportRun(run)?.created, false);
-		assert.equal(store.ensureImportRun({ ...run, context: { ...run.context, projectRoot: "/other" } }), undefined);
+		assert.equal(store.ensureImportRun({ ...run, context: { ...run.context, projectRoot: path.resolve("memfs", "other-project") } }), undefined);
 		assert.equal(store.completeImportHook("import-1", "pack-1:hook-1", "applied", "2026-01-01T00:01:00.000Z"), true);
 		assert.equal(store.completeImportHook("import-1", "pack-1:hook-1", "error", "2026-01-01T00:02:00.000Z"), false);
 		assert.equal(store.getImportRun("import-1")?.completedAt, "2026-01-01T00:01:00.000Z");
