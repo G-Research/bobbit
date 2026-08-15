@@ -433,7 +433,9 @@ function makeRecoveryHarness(
 		{
 			updateSignalVerification: (_signalId: string, update: any) => calls.push({ kind: "verification", status: update.status, update }),
 			updateGateStatus: (_goalId: string, _gateId: string, status: string) => calls.push({ kind: "gate", status }),
-			getGate: () => undefined,
+			// Model the persisted current generation. Restart cancellation must
+			// restore this eligible gate to pending after exact cleanup settles.
+			getGate: () => ({ status: "running", signals: [{ id: "signal", verification: { status: "running", steps: [] } }] }),
 		} as any,
 		() => {},
 		{ get: () => undefined, getAll: () => [] } as any,
@@ -768,7 +770,7 @@ describe("spawnTracked timeout cleanup", () => {
 		try {
 			await expectRecoveredContainerSentinelWait(stateDir, {
 				name: "No-verdict container", nonce: "no-verdict-nonce", deadlineMs: Date.now() + 10_000, recordTerm: false, events: ["reap"],
-				statuses: [{ kind: "verification", status: "cancelled" }],
+				statuses: [{ kind: "verification", status: "cancelled" }, { kind: "gate", status: "pending" }],
 			});
 		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });
