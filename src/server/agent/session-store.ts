@@ -116,6 +116,10 @@ export function normalizePersistedInFlightSteers(
 		// Migrate each persisted position into a stable, fail-closed carrier rather
 		// than trying to correlate it by body text. A completed modern tuple keeps
 		// its identity; malformed/old tuples get a deterministic legacy identity.
+		// An existing reliable occurrence identity is authoritative. A second
+		// persisted active record claiming it cannot be safely replayed, settled, or
+		// reminted as distinct work, so retain the first occurrence and drop it.
+		if (validLedgerKey(entry.intentId) && activeIntentIds.has(entry.intentId)) continue;
 		const baseIntentId = completeModernAttempt
 			? entry.intentId!
 			: validLedgerKey(entry.intentId)
