@@ -28,10 +28,10 @@ describe("sandbox requirement status UI", () => {
 
 		const statuses = root.querySelectorAll('[data-testid="sandbox-requirement-status"]');
 		expect(statuses).toHaveLength(4);
-		expect(statuses[0]).toHaveAttribute("aria-label", "Sandbox requirement alpha/pending: pending");
-		expect(statuses[1]).toHaveAttribute("data-state", "available");
-		expect(statuses[2]).toHaveAttribute("aria-label", "Sandbox requirement gamma/failed: failed (build-failed)");
-		expect(statuses[3]).toHaveAttribute("data-state", "unsupported");
+		expect(statuses[0]?.getAttribute("aria-label")).toBe("Sandbox requirement alpha/pending: pending");
+		expect(statuses[1]?.getAttribute("data-state")).toBe("available");
+		expect(statuses[2]?.getAttribute("aria-label")).toBe("Sandbox requirement gamma/failed: failed (build-failed)");
+		expect(statuses[3]?.getAttribute("data-state")).toBe("unsupported");
 		root.remove();
 	});
 
@@ -43,7 +43,7 @@ describe("sandbox requirement status UI", () => {
 		}))));
 
 		expect(root.querySelectorAll('[data-testid="sandbox-requirement-status"]')).toHaveLength(8);
-		expect(root.querySelector('[data-testid="sandbox-requirement-status-overflow"]')).toHaveTextContent("2 additional requirements");
+		expect(root.querySelector('[data-testid="sandbox-requirement-status-overflow"]')?.textContent).toContain("2 additional requirements");
 		root.remove();
 	});
 });
