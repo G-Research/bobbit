@@ -4,6 +4,7 @@
 // registered operation through a ServerHostApi that binds its session and pack.
 // This module deliberately contains no paths, endpoints, processes, or transport.
 
+import { isSafeExtensionGrantIdentifier } from "../agent/project-config-store.js";
 import type { ServiceState } from "./service-extension-contract.js";
 
 const SAFE_ID = /^[a-z][a-z0-9-]{0,63}$/;
@@ -114,7 +115,7 @@ export class ServiceToolAdapterRegistry {
 
 	resolve(packId: string, request: unknown): ResolvedServiceToolOperation {
 		const normalizedRequest = validateServiceToolRequest(request);
-		if (!isSafeId(packId)) throw new ServiceToolRpcError("operation_unavailable");
+		if (!isPlatformIdentifier(packId)) throw new ServiceToolRpcError("operation_unavailable");
 		const adapter = this.adapters.get(adapterKey(packId, normalizedRequest.serviceId, normalizedRequest.discriminator ?? "default"));
 		const operation = adapter?.operations[normalizedRequest.operation];
 		if (!adapter || !operation) throw new ServiceToolRpcError("operation_unavailable");
@@ -250,6 +251,11 @@ export class ServiceToolOperationScheduler {
 			if (!job) continue;
 			this.queued--;
 			if (queue.length === 0) this.queues.delete(key);
+			else {
+				// Rotate this queue behind its peers so one hot instance cannot monopolise slots.
+				this.queues.delete(key);
+				this.queues.set(key, queue);
+			}
 			return { key, job };
 		}
 		return undefined;
@@ -286,7 +292,7 @@ export class ServiceToolOperationScheduler {
 }
 
 function normalizeAdapter(adapter: ServiceToolAdapter): Readonly<ServiceToolAdapter> {
-	if (!isPlainRecord(adapter) || !isSafeId(adapter.packId) || !isSafeId(adapter.serviceId)
+	if (!isPlainRecord(adapter) || !isPlatformIdentifier(adapter.packId) || !isSafeId(adapter.serviceId)
 		|| (adapter.discriminator !== undefined && !isDiscriminator(adapter.discriminator))
 		|| !isPlainRecord(adapter.operations)) {
 		throw new Error("invalid service tool adapter");
@@ -355,8 +361,12 @@ function isSafeId(value: unknown): value is string {
 	return typeof value === "string" && SAFE_ID.test(value);
 }
 
+function isPlatformIdentifier(value: unknown): value is string {
+	return isSafeExtensionGrantIdentifier(value);
+}
+
 function isComponent(value: unknown): value is string {
-	return value === "." || isSafeId(value);
+	return value === "." || isPlatformIdentifier(value);
 }
 
 function isDiscriminator(value: unknown): value is string {

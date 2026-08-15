@@ -56,6 +56,7 @@ describe("service extension contract", () => {
 		expect(isServiceInstanceDiscriminator("A".repeat(33))).toBe(false);
 		expect(isServiceInstanceDiscriminator("../escape")).toBe(false);
 		expect(isServiceInstancePublicRef(ref)).toBe(true);
+		expect(isServiceInstancePublicRef({ ...ref, projectId: "3f7a1c2e-0000-4000-8000-000000000000", packId: "My_Pack.v2", component: "Api_Component.v2" })).toBe(true);
 		expect(isServiceInstancePublicRef({ ...ref, canonicalWorktreeRoot: "/host/repo" })).toBe(false);
 		expect(isServiceInstancePublicRef({ ...ref, worktreeKey: "/host/repo" })).toBe(false);
 	});

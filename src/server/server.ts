@@ -87,6 +87,7 @@ import { createServerHostApi } from "./extension-host/server-host-api.js";
 import { ServiceExtensionRuntimeManager } from "./extension-host/service-extension-runtime.js";
 import { ServiceExtensionRegistry } from "./extension-host/service-extension-registry.js";
 import { WorktreeServiceCoordinator } from "./extension-host/worktree-service-coordinator.js";
+import { ServiceToolAdapterRegistry, ServiceToolOperationScheduler } from "./extension-host/service-extension-tool-rpc.js";
 import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./extension-host/contract-adapter.js";
 import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
@@ -3200,6 +3201,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			return settings.state === "present" ? settings.values : {};
 		},
 	});
+	const serviceToolOperations = new ServiceToolAdapterRegistry();
+	const serviceToolScheduler = new ServiceToolOperationScheduler();
 	worktreeServices = new WorktreeServiceCoordinator({
 		sessions: {
 			get: (sessionId) => sessionManager.getPersistedSession(sessionId) ?? sessionManager.getSession(sessionId),
@@ -3230,6 +3233,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			return settings.state !== "error" && !(settings.state === "present" && !settings.enabled);
 		},
 		runtime: managedServiceRuntime,
+		operations: serviceToolOperations,
+		scheduler: serviceToolScheduler,
 	});
 
 	const contextTraceStore = new ContextTraceStore(bobbitStateDir(), gatewayDeps.fsImpl, (sessionId, entry) => {
@@ -4711,26 +4716,18 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	sessionManager.addWorktreeReadyListener((session) => {
 		void worktreeServices.reconcileSession(session.id).catch(() => undefined);
 	});
-	const stopManagedServicesForSession = async (info: import("./agent/session-manager.js").SessionTerminationInfo): Promise<void> => {
+	const stopManagedServicesForSession = async (sessionId: string, info: import("./agent/session-manager.js").SessionTerminationInfo): Promise<void> => {
 		if (!info.projectId) return;
-		const candidates = new Set<string>([
-			...(info.worktreePath ? [info.worktreePath] : []),
-			...(info.repoWorktrees?.map(worktree => worktree.worktreePath) ?? []),
-		]);
-		for (const candidate of candidates) {
-			try {
-				const result = await gatewayDeps.commandRunner.execFile("git", ["rev-parse", "--show-toplevel"], { cwd: candidate, timeout: 15_000 });
-				const canonicalRoot = await fs.promises.realpath(String(result.stdout).trim());
-				await worktreeServices.stopWorktree(info.projectId, canonicalRoot);
-			} catch { /* stale/deleted worktrees are already unavailable */ }
-		}
+		// Roots were captured by the coordinator while the worktree was valid. This
+		// works after purge deletes the directory and retains shared-root ownership.
+		await worktreeServices.stopSession(info.projectId, sessionId);
 	};
 	// Push a session_removed broadcast to ALL clients on terminate/archive/purge
 	// so sidebars and dashboards update instantly. Replaces a 5s polling tick
 	// for a documented class of races (e.g. clicking a stale sidebar entry just
 	// after another tab archived the session).
 	sessionManager.addTerminationListener(async (sessionId, info) => {
-		await stopManagedServicesForSession(info);
+		await stopManagedServicesForSession(sessionId, info);
 		try {
 			broadcastToAll({ type: "session_removed", sessionId, projectId: info.projectId, reason: info.reason });
 		} catch (err) {
@@ -7405,15 +7402,32 @@ async function handleApiRoute(
 		}
 		const projectId = projectGetMatch[1];
 		const existing = projectRegistry.get(projectId);
-		const hasLiveContext = [...projectContextManager.all()].some(context => context.project.id === projectId);
-		if (updates.rootPath && existing && !samePath(updates.rootPath, existing.rootPath) && hasLiveContext) {
-			json({ error: "Project root cannot be replaced while project state is active", code: "PROJECT_ROOT_REPLACEMENT_REQUIRES_CONTEXT_REMOVAL" }, 409);
-			return;
-		}
+		const rootReplacement = !!updates.rootPath && !!existing && !samePath(updates.rootPath, existing.rootPath);
+		let contextRemoved = false;
 		try {
+			if (rootReplacement) {
+				// Fence services before their owning context/root changes. Removing the
+				// context first ensures no stale root-backed store remains reachable.
+				await worktreeServices.stopProject(projectId);
+				await projectContextManager.remove(projectId);
+				contextRemoved = true;
+			}
 			const updated = projectRegistry.update(projectId, updates);
+			if (rootReplacement && !projectContextManager.getOrCreate(projectId)) {
+				// Do not leave a registry root with no matching live context if opening it
+				// failed. The old context is reopened from the restored registry value.
+				projectRegistry.update(projectId, { rootPath: existing!.rootPath });
+				projectContextManager.getOrCreate(projectId);
+				throw new Error("Project context could not be reopened after root replacement");
+			}
+			if (rootReplacement) void worktreeServices.reconcileProject(projectId).catch(() => undefined);
 			json(updated);
 		} catch (err: any) {
+			if (rootReplacement && contextRemoved && ![...projectContextManager.all()].some(context => context.project.id === projectId)) {
+				// projectRegistry.update may reject before the transition commits; restore
+				// the old live context rather than leaving the project half-transitioned.
+				try { projectContextManager.getOrCreate(projectId); } catch { /* original error wins */ }
+			}
 			if (writeSpecialProjectMutationError(err)) return;
 			jsonError(400, err);
 		}

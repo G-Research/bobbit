@@ -3,6 +3,8 @@
 // The deliberately small, declarative boundary for managed service extensions.
 // Packs describe a service; core owns commands, processes, paths, and diagnostics.
 
+import { isSafeExtensionGrantIdentifier } from "../agent/project-config-store.js";
+
 export type ServiceRunMode = "local" | "docker" | "compose";
 export type ServiceState = "stopped" | "starting" | "ready" | "unhealthy" | "failed";
 export type ServiceRestartPolicy = "never" | "on-failure";
@@ -129,10 +131,10 @@ export function isServiceInstanceDiscriminator(value: unknown): value is Service
 /** Validates a path-free status identity. It deliberately has no root/path field. */
 export function isServiceInstancePublicRef(value: unknown): value is ServiceInstancePublicRef {
 	if (!isRecord(value) || !hasOnlyKeys(value, PUBLIC_REF_KEYS, "", [])) return false;
-	return typeof value.projectId === "string" && SAFE_ID.test(value.projectId)
-		&& typeof value.component === "string" && (value.component === "." || SAFE_ID.test(value.component))
+	return isSafeExtensionGrantIdentifier(value.projectId)
+		&& (value.component === "." || isSafeExtensionGrantIdentifier(value.component))
 		&& typeof value.worktreeKey === "string" && WORKTREE_KEY.test(value.worktreeKey)
-		&& typeof value.packId === "string" && SAFE_ID.test(value.packId)
+		&& isSafeExtensionGrantIdentifier(value.packId)
 		&& typeof value.serviceId === "string" && SAFE_ID.test(value.serviceId)
 		&& isServiceInstanceDiscriminator(value.discriminator);
 }
