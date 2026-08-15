@@ -16,6 +16,10 @@ import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { manualTmpRoot } from "./manual-test-paths.ts";
 
+// This project-local role directive makes the native helper journey unambiguous
+// without modifying a shared/default role or exposing any private session data.
+const manualNativeAgentDirective = "When the user explicitly requests native `Agent`, call the retained native `Agent` tool exactly as requested. Never substitute an MCP or Bobbit helper and never claim completion without that tool.";
+
 const smokeEnvironmentKeys = [
 	"BOBBIT_DIR",
 	"BOBBIT_SECRETS_DIR",
@@ -518,20 +522,38 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			expect(roleCustomize.status).toBe(201);
 			const roleResponse = await api(`/api/roles/general?${roleScope}`);
 			expect(roleResponse.status).toBe(200);
-			const role = await roleResponse.json() as { toolPolicies?: Record<string, string> };
+			const role = await roleResponse.json() as { promptTemplate?: string; toolPolicies?: Record<string, string> };
+			expect(typeof role.promptTemplate).toBe("string");
+			if (typeof role.promptTemplate !== "string") throw new Error("Manual SDK role is missing its prompt template.");
+			const configuredRolePrompt = `${role.promptTemplate}\n\n${manualNativeAgentDirective}`;
 			const roleUpdate = await api(`/api/roles/general?${roleScope}`, {
 				method: "PUT",
-				body: JSON.stringify({ toolPolicies: { ...(role.toolPolicies ?? {}), Gates: "allow", grep: "ask", team_delegate: "never" } }),
+				body: JSON.stringify({
+					promptTemplate: configuredRolePrompt,
+					toolPolicies: { ...(role.toolPolicies ?? {}), Gates: "allow", grep: "ask", team_delegate: "never" },
+				}),
 			});
 			expect(roleUpdate.status).toBe(200);
 			const configuredRoleResponse = await api(`/api/roles/general?${roleScope}`);
 			expect(configuredRoleResponse.status).toBe(200);
-			const configuredRole = await configuredRoleResponse.json() as { toolPolicies?: Record<string, string> };
+			const configuredRole = await configuredRoleResponse.json() as { promptTemplate?: string; toolPolicies?: Record<string, string> };
 			expect({
+				promptPreservedAndAppended: configuredRole.promptTemplate === configuredRolePrompt,
+				promptIncludesNativeAgentDirective: configuredRole.promptTemplate?.includes(manualNativeAgentDirective) === true,
+				promptEndsWithNativeAgentDirective: configuredRole.promptTemplate?.endsWith(manualNativeAgentDirective) === true,
+				existingPoliciesPreserved: Object.entries(role.toolPolicies ?? {}).every(([tool, policy]) => configuredRole.toolPolicies?.[tool] === policy),
 				gates: configuredRole.toolPolicies?.Gates,
 				grep: configuredRole.toolPolicies?.grep,
 				teamDelegate: configuredRole.toolPolicies?.team_delegate,
-			}).toEqual({ gates: "allow", grep: "ask", teamDelegate: "never" });
+			}).toEqual({
+				promptPreservedAndAppended: true,
+				promptIncludesNativeAgentDirective: true,
+				promptEndsWithNativeAgentDirective: true,
+				existingPoliciesPreserved: true,
+				gates: "allow",
+				grep: "ask",
+				teamDelegate: "never",
+			});
 
 			const configuredModel = manualSdkModel();
 			const alternateModel = alternateManualSdkModel(configuredModel);
@@ -902,20 +924,38 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			expect(roleCustomize.status).toBe(201);
 			const roleResponse = await api(`/api/roles/general?${roleScope}`);
 			expect(roleResponse.status).toBe(200);
-			const role = await roleResponse.json() as { toolPolicies?: Record<string, string> };
+			const role = await roleResponse.json() as { promptTemplate?: string; toolPolicies?: Record<string, string> };
+			expect(typeof role.promptTemplate).toBe("string");
+			if (typeof role.promptTemplate !== "string") throw new Error("Manual SDK role is missing its prompt template.");
+			const configuredRolePrompt = `${role.promptTemplate}\n\n${manualNativeAgentDirective}`;
 			const roleUpdate = await api(`/api/roles/general?${roleScope}`, {
 				method: "PUT",
-				body: JSON.stringify({ toolPolicies: { ...(role.toolPolicies ?? {}), Gates: "allow", grep: "ask", team_delegate: "never" } }),
+				body: JSON.stringify({
+					promptTemplate: configuredRolePrompt,
+					toolPolicies: { ...(role.toolPolicies ?? {}), Gates: "allow", grep: "ask", team_delegate: "never" },
+				}),
 			});
 			expect(roleUpdate.status).toBe(200);
 			const configuredRoleResponse = await api(`/api/roles/general?${roleScope}`);
 			expect(configuredRoleResponse.status).toBe(200);
-			const configuredRole = await configuredRoleResponse.json() as { toolPolicies?: Record<string, string> };
+			const configuredRole = await configuredRoleResponse.json() as { promptTemplate?: string; toolPolicies?: Record<string, string> };
 			expect({
+				promptPreservedAndAppended: configuredRole.promptTemplate === configuredRolePrompt,
+				promptIncludesNativeAgentDirective: configuredRole.promptTemplate?.includes(manualNativeAgentDirective) === true,
+				promptEndsWithNativeAgentDirective: configuredRole.promptTemplate?.endsWith(manualNativeAgentDirective) === true,
+				existingPoliciesPreserved: Object.entries(role.toolPolicies ?? {}).every(([tool, policy]) => configuredRole.toolPolicies?.[tool] === policy),
 				gates: configuredRole.toolPolicies?.Gates,
 				grep: configuredRole.toolPolicies?.grep,
 				teamDelegate: configuredRole.toolPolicies?.team_delegate,
-			}).toEqual({ gates: "allow", grep: "ask", teamDelegate: "never" });
+			}).toEqual({
+				promptPreservedAndAppended: true,
+				promptIncludesNativeAgentDirective: true,
+				promptEndsWithNativeAgentDirective: true,
+				existingPoliciesPreserved: true,
+				gates: "allow",
+				grep: "ask",
+				teamDelegate: "never",
+			});
 			const config = await api(`/api/projects/${project.id}/config`, {
 				method: "PUT",
 				body: JSON.stringify({ sandbox: "docker", sandbox_tokens: [{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: true }] }),
