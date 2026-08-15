@@ -320,21 +320,36 @@ describe("RemoteAgent recovery snapshot delivery", () => {
 		});
 	});
 
-	it("preserves legacy in-flight snapshot rows as transcript recovery carriers", async () => {
+	it("keeps no-intent recovery projections out of the transcript while retaining outbox carriers", async () => {
 		const ra = makeAgent(OPEN);
 		await ra.handleServerMessage({
 			type: "messages",
-			data: [{
-				id: "inflight-steer:0:legacy",
-				role: "user",
-				content: [{ type: "text", text: "legacy" }],
-				_inFlightSteer: true,
-			}],
+			data: [
+				{
+					id: "inflight-steer:pre-intent-prompt",
+					role: "user",
+					content: [{ type: "text", text: "pre-intent structured recovery" }],
+					promptId: "pre-intent-prompt",
+					_deliveryRecoveryProjection: true,
+					_inFlightSteer: true,
+				},
+				{
+					id: "inflight-steer:0:bare-legacy",
+					role: "user",
+					content: [{ type: "text", text: "bare legacy recovery" }],
+					_inFlightSteer: true,
+				},
+			],
 		});
 
-		expect(ra.getQueue()).toHaveLength(0);
-		expect(ra._state.messages).toHaveLength(1);
-		expect(ra._state.messages[0]).toMatchObject({ id: "inflight-steer:0:legacy", _inFlightSteer: true });
+		expect(
+			ra._state.messages.filter((message: any) => message._inFlightSteer),
+			"RECOVERY_PROJECTIONS_MUST_NEVER_ENTER_TRANSCRIPT",
+		).toEqual([]);
+		expect(
+			ra.getQueue().map((row: any) => row.text).sort(),
+			"RECOVERY_PROJECTIONS_MUST_RETAIN_OUTBOX_CARRIERS",
+		).toEqual(["bare legacy recovery", "pre-intent structured recovery"]);
 	});
 });
 
