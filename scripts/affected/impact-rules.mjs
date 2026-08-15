@@ -881,7 +881,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		consumer: "tests2/integration/verification-restart-resignal.test.ts",
 		allowReason: "isolated integration gateway, project, or harness-owned output",
 		reads: frozen([
-			{ expression: "persistPath", count: 2 },
+			{ expression: "persistPath", count: 3 },
 		]),
 	},
 	{
