@@ -181,7 +181,7 @@ test.describe("Add Project flow (UI)", () => {
 			expect(sessionPosts).toBe(0);
 			expect(askPosts).toBe(0);
 
-			await decisions.getByRole("radio", { name: /Safe mode/ }).click();
+			await decisions.locator("label.ask-option").filter({ hasText: "Safe mode" }).click();
 			await expect.poll(() => answerPosts).toBe(1);
 			await expect.poll(() => sessionPosts).toBe(1);
 			expect(askPosts).toBe(0);

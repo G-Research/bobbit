@@ -1,5 +1,5 @@
 import type { HookScopeContext, TurnUsageSnapshot } from "./lifecycle-hub.js";
-import type { DetectedProjectLanguage, ProjectImportComponent } from "./project-import-decision-context.js";
+import type { ProjectImportComponent } from "./project-import-decision-context.js";
 import {
 	AdvisorySelectionContractError,
 	validateAdvisorySelectionProposal,
