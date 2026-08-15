@@ -305,7 +305,7 @@ test("no durable verdict is cancelled as gateway restart recovery without failin
 	await harness.resumeInterruptedVerifications();
 	const update = latestSignalUpdate(gateStoreCalls);
 	const step = stepByName(update, "No verdict");
-	assert.equal(latestGateStatus(gateStoreCalls), undefined);
+	assert.equal(latestGateStatus(gateStoreCalls), "pending");
 	assert.equal(update?.status, "cancelled");
 	assert.deepEqual(update?.cancellation && {
 		cause: update.cancellation.cause,
@@ -476,7 +476,7 @@ test("unsupported attached container recovery is cancelled with a durable restar
 	await harness.resumeInterruptedVerifications();
 	const update = latestSignalUpdate(gateStoreCalls);
 	const step = stepByName(update, "Container attached command");
-	assert.equal(latestGateStatus(gateStoreCalls), undefined);
+	assert.equal(latestGateStatus(gateStoreCalls), "pending");
 	assert.equal(update?.status, "cancelled");
 	assert.equal(update?.cancellation?.cause, "gateway-restart-recovery");
 	assert.equal(step?.status, "cancelled");

@@ -4296,11 +4296,26 @@ export class VerificationHarness {
 	}
 
 	/**
-	 * The exact sidecar is a durable resource barrier.  This method never throws:
-	 * callers may publish a terminal gate verdict, but can only forget its active
-	 * ownership after sidecar removal and pinned-checkout release both succeed.
+	 * The exact sidecar is a durable resource barrier. A signal has one release
+	 * owner, so a lifecycle fence and an awaitable cancellation cannot race two
+	 * sidecar/check-out releases for the same terminal record.
 	 */
 	private async _releaseTerminalVerificationResources(active: ActiveVerification): Promise<boolean> {
+		const existing = this._terminalCleanupPromises.get(active.signalId);
+		if (existing) return existing;
+		const release = this._releaseTerminalVerificationResourcesOnce(active);
+		this._terminalCleanupPromises.set(active.signalId, release);
+		try {
+			return await release;
+		} finally {
+			if (this._terminalCleanupPromises.get(active.signalId) === release) {
+				this._terminalCleanupPromises.delete(active.signalId);
+			}
+		}
+	}
+
+	/** Performs one strict release attempt; failures retain durable retry ownership. */
+	private async _releaseTerminalVerificationResourcesOnce(active: ActiveVerification): Promise<boolean> {
 		if (this._hasPendingCommandKillCleanup(active)) return false;
 		if (this.activeVerifications.get(active.signalId) !== active) return true;
 		try {
@@ -4812,6 +4827,8 @@ export class VerificationHarness {
 	private _cancelledCleanupPromises = new Map<string, Promise<void>>();
 	/** Keeps sidecar and pinned-checkout release owned after terminal publication. */
 	private _terminalCleanupRetryTimers = new Map<string, NodeJS.Timeout>();
+	/** One strict sidecar/check-out release attempt per terminal signal. */
+	private _terminalCleanupPromises = new Map<string, Promise<boolean>>();
 
 	/** Whether this exact signal is still the gate's current generation. */
 	private _isCurrentGateSignal(active: ActiveVerification): boolean {
@@ -4996,9 +5013,22 @@ export class VerificationHarness {
 			active.terminalVerdictPublished = true;
 			delete active.cancellationFinalizing;
 			this._persistActive();
-			// Do not mutate the gate state: cancellation leaves the current generation
-			// pending/eligible for a deterministic explicit re-signal. Historical
-			// superseded signals are likewise fenced from newer generations.
+			// Cancellation leaves the current, non-terminal generation eligible for a
+			// deterministic explicit re-signal. Historical superseded signals must not
+			// touch a newer gate generation, and terminal lifecycle routes retain their
+			// authoritative bypass/goal state.
+			const terminalLifecycleCancellation = verification.cancellation?.cause === "bypass"
+				|| verification.cancellation?.cause === "goal-complete"
+				|| verification.cancellation?.cause === "team-teardown"
+				|| verification.cancellation?.cause === "shelved"
+				|| verification.cancellation?.cause === "archive";
+			const currentGate = store?.getGate?.(active.goalId, active.gateId);
+			if (this._isCurrentGateSignal(active)
+				&& !terminalLifecycleCancellation
+				&& currentGate?.status !== "bypassed") {
+				store?.updateGateStatus(active.goalId, active.gateId, "pending");
+				broadcastGateStatusChanged(this.broadcastFn, active.goalId, active.gateId, "pending");
+			}
 			this.broadcastFn(active.goalId, {
 				type: "gate_verification_complete", goalId: active.goalId, gateId: active.gateId,
 				signalId: active.signalId, status: "cancelled", cancellation: verification.cancellation,
@@ -5381,7 +5411,9 @@ export class VerificationHarness {
 			this._drainPendingSignoffsForSignal(active.signalId);
 			void this._startCancelledVerificationCleanup(active);
 		}
-		return cancellations;
+		// Returning every resource owner lets the awaitable wrapper join terminal
+		// cleanup already in flight without making terminal lifecycle routes wait.
+		return [...terminalResourceCleanups, ...cancellations];
 	}
 
 	private _startCancelledVerificationCleanup(active: ActiveVerification): Promise<void> {
@@ -5457,9 +5489,13 @@ export class VerificationHarness {
 		goalId: string,
 		cause: VerificationCancellationCause = "goal-complete",
 	): Promise<boolean> {
-		const cancellations = this.fenceAndCancelAllVerifications(goalId, cause);
-		await Promise.all(cancellations.map(active => this._startCancelledVerificationCleanup(active)));
-		return !Array.from(this.activeVerifications.values()).some(active => active.goalId === goalId && active.cancelled);
+		const cleanupOwners = this.fenceAndCancelAllVerifications(goalId, cause);
+		await Promise.all(cleanupOwners.map(active => this._isTerminalResourceCleanup(active)
+			? this._releaseTerminalVerificationResources(active)
+			: this._startCancelledVerificationCleanup(active)));
+		return !Array.from(this.activeVerifications.values()).some(active =>
+			active.goalId === goalId && (active.cancelled || this._isTerminalResourceCleanup(active)),
+		);
 	}
 
 	/**
