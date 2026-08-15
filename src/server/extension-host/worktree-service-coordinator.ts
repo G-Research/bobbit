@@ -195,6 +195,16 @@ export class WorktreeServiceCoordinator implements ServiceExtensionToolRpc {
 		await this.reconcileProject(session.projectId);
 	}
 
+	/** Boot restore reconciles known project scopes serially to bound discovery I/O. */
+	async reconcileRestoredProjects(projectIds: Iterable<string>): Promise<void> {
+		const seen = new Set<string>();
+		for (const projectId of projectIds) {
+			if (seen.has(projectId) || !safePlatformIdentifier(projectId)) continue;
+			seen.add(projectId);
+			await this.reconcileProject(projectId);
+		}
+	}
+
 	/** Closure-bound broker entry point used by ServerHostApi. */
 	async request(input: { sessionId: string; packId: string; request: WorktreeServiceRequest }): Promise<WorktreeServiceResponse> {
 		if (this.closed || !safePlatformIdentifier(input.packId)) throw new WorktreeServiceCoordinatorError("SERVICE_OPERATION_INVALID");
@@ -213,9 +223,9 @@ export class WorktreeServiceCoordinator implements ServiceExtensionToolRpc {
 		const session = this.deps.sessions.get(input.sessionId);
 		if (!session?.projectId || session.archived) throw new WorktreeServiceCoordinatorError("SERVICE_UNAVAILABLE");
 		const projectGeneration = this.projectGeneration(session.projectId);
-		const scope = await this.resolveScope(session, resolved.request.component);
+		const scope = await this.resolveScope(session, resolved.request.component, projectGeneration);
 		if (!scope) throw new WorktreeServiceCoordinatorError("SERVICE_UNAVAILABLE");
-		const ref = await this.resolveActiveRef(scope, input.packId, resolved.request.serviceId, resolved.request.discriminator ?? "default");
+		const ref = await this.resolveActiveRef(scope, input.packId, resolved.request.serviceId, resolved.request.discriminator ?? "default", projectGeneration);
 		if (!ref || !this.isCurrent(projectGeneration, ref.projectId)) throw new WorktreeServiceCoordinatorError("SERVICE_UNAVAILABLE");
 
 		await this.deps.runtime.reconcile(ref);
@@ -268,12 +278,22 @@ export class WorktreeServiceCoordinator implements ServiceExtensionToolRpc {
 			if (![...candidates].some(candidate => removed.has(path.resolve(candidate)))) continue;
 			paths.delete(root);
 			roots.delete(root);
+			this.pruneMissingRootOwners(projectId, root);
 			if (!this.hasOtherRootOwner(this.sessionRoots, projectId, root)) await this.stopWorktree(projectId, root);
 		}
 		this.deleteEmptySessionRootMaps(sessionId, projectId);
 	}
 
-	/** Called only for authoritative project deletion or root replacement. */
+	/**
+	 * Fence and stop without deleting state. Root replacement uses this before its
+	 * registry commit, so a failed transition can reopen and reconcile the old root.
+	 */
+	async suspendProject(projectId: string): Promise<void> {
+		if (!safePlatformIdentifier(projectId)) return;
+		await this.stopNonDestructiveProject(projectId);
+	}
+
+	/** Called only after authoritative project deletion or a committed root replacement. */
 	async stopProject(projectId: string): Promise<void> {
 		if (!safePlatformIdentifier(projectId)) return;
 		this.advanceProjectGeneration(projectId);
@@ -344,7 +364,7 @@ export class WorktreeServiceCoordinator implements ServiceExtensionToolRpc {
 			for (const session of this.deps.sessions.list(projectId)) {
 				if (session.archived || session.projectId !== projectId) continue;
 				for (const component of components) {
-					const scope = await this.resolveScope(session, component);
+					const scope = await this.resolveScope(session, component, generation);
 					if (scope) scopes.set(scopeKey(scope), scope);
 				}
 			}
@@ -358,7 +378,7 @@ export class WorktreeServiceCoordinator implements ServiceExtensionToolRpc {
 				}
 				for (const discriminator of discriminators) {
 					const ref = this.makeRef(scope, declaration.packId, declaration.spec.id, discriminator);
-					if (this.isAuthorized(ref) && await this.isSettingsReadable(ref)) wanted.set(instanceKey(ref), ref);
+					if (this.isAuthorized(ref) && await this.isSettingsReadable(ref) && this.isAuthorized(ref)) wanted.set(instanceKey(ref), ref);
 				}
 			}
 		}
@@ -375,8 +395,9 @@ export class WorktreeServiceCoordinator implements ServiceExtensionToolRpc {
 		}
 	}
 
-	private async resolveScope(session: WorktreeServiceSession, requestedComponent: string): Promise<Scope | undefined> {
+	private async resolveScope(session: WorktreeServiceSession, requestedComponent: string, generation?: number): Promise<Scope | undefined> {
 		if (!session.projectId || !safePlatformIdentifier(session.projectId) || !this.eligibleComponents(session.projectId).includes(requestedComponent)) return undefined;
+		if (generation !== undefined && !this.isCurrent(generation, session.projectId)) return undefined;
 		const components = this.deps.components(session.projectId);
 		const multiRepo = components.some(component => component.repo !== ".");
 		const candidate = this.candidate(session, requestedComponent, multiRepo, components);
@@ -389,6 +410,12 @@ export class WorktreeServiceCoordinator implements ServiceExtensionToolRpc {
 				this.deps.filesystem.realpath(candidate), this.deps.filesystem.realpath(topLevel), this.deps.filesystem.isDirectory(topLevel),
 			]);
 			if (!isDirectory || !(cwdFallback ? contains(canonicalTopLevel, canonicalCandidate) : contains(canonicalCandidate, canonicalTopLevel))) return undefined;
+			// Git and realpath crossed an async boundary: a deletion/root replacement
+			// may have fenced this project while they were running. Re-read the
+			// server-owned session too, so a purged session cannot revive its root.
+			const currentSession = this.deps.sessions.get(session.id);
+			if (!currentSession || currentSession.projectId !== session.projectId || currentSession.archived) return undefined;
+			if (generation !== undefined && !this.isCurrent(generation, session.projectId)) return undefined;
 			this.recordSessionRoot(session.id, session.projectId, canonicalTopLevel, candidate, topLevel);
 			return { projectId: session.projectId, component: requestedComponent, canonicalWorktreeRoot: canonicalTopLevel, worktreeKey: worktreeKey(canonicalTopLevel) };
 		} catch {
@@ -413,13 +440,15 @@ export class WorktreeServiceCoordinator implements ServiceExtensionToolRpc {
 			: ["."];
 	}
 
-	private async resolveActiveRef(scope: Scope, packId: string, serviceId: string, discriminator: string): Promise<ServiceInstanceRef | undefined> {
+	private async resolveActiveRef(scope: Scope, packId: string, serviceId: string, discriminator: string, generation?: number): Promise<ServiceInstanceRef | undefined> {
 		let declarations: readonly WorktreeServiceDeclaration[];
 		try { declarations = await this.deps.listActive(scope.projectId); } catch { return undefined; }
+		if (generation !== undefined && !this.isCurrent(generation, scope.projectId)) return undefined;
 		const matches = declarations.filter(item => item.packId === packId && item.spec.id === serviceId);
 		if (matches.length !== 1 || !safePlatformIdentifier(packId) || !safeIdentifier(serviceId) || !normalizeDiscriminator(discriminator)) return undefined;
 		const ref = this.makeRef(scope, packId, serviceId, discriminator);
-		if (!this.isAuthorized(ref) || !await this.isSettingsReadable(ref)) return undefined;
+		if (!this.isAuthorized(ref) || !await this.isSettingsReadable(ref) || !this.isAuthorized(ref)) return undefined;
+		if (generation !== undefined && !this.isCurrent(generation, scope.projectId)) return undefined;
 		this.instances.set(instanceKey(ref), ref);
 		this.knownInstances.set(instanceKey(ref), ref);
 		return ref;
@@ -469,9 +498,12 @@ export class WorktreeServiceCoordinator implements ServiceExtensionToolRpc {
 		if (!this.isCurrent(generation, ref.projectId) || !this.instances.has(instanceKey(ref))) return false;
 		let declarations: readonly WorktreeServiceDeclaration[];
 		try { declarations = await this.deps.listActive(ref.projectId); } catch { return false; }
-		return declarations.filter(item => item.packId === ref.packId && item.spec.id === ref.serviceId).length === 1
+		if (!this.isCurrent(generation, ref.projectId)) return false;
+		const settingsReadable = await this.isSettingsReadable(ref);
+		return this.isCurrent(generation, ref.projectId)
+			&& declarations.filter(item => item.packId === ref.packId && item.spec.id === ref.serviceId).length === 1
 			&& this.isAuthorized(ref)
-			&& await this.isSettingsReadable(ref)
+			&& settingsReadable
 			&& this.deps.runtime.status(this.publicRef(ref))?.state === "ready";
 	}
 
@@ -531,6 +563,21 @@ export class WorktreeServiceCoordinator implements ServiceExtensionToolRpc {
 		const paths = this.sessionRootPaths.get(sessionId);
 		if (paths?.get(projectId)?.size === 0) paths.delete(projectId);
 		if (paths?.size === 0) this.sessionRootPaths.delete(sessionId);
+	}
+
+	private pruneMissingRootOwners(projectId: string, root: string): void {
+		for (const owners of [this.sessionRoots, this.activeSessionRoots]) {
+			for (const [sessionId, projects] of owners) {
+				if (this.deps.sessions.get(sessionId)) continue;
+				projects.get(projectId)?.delete(root);
+				if (projects.get(projectId)?.size === 0) projects.delete(projectId);
+				if (projects.size === 0) owners.delete(sessionId);
+				const paths = this.sessionRootPaths.get(sessionId);
+				paths?.get(projectId)?.delete(root);
+				if (paths?.get(projectId)?.size === 0) paths.delete(projectId);
+				if (paths?.size === 0) this.sessionRootPaths.delete(sessionId);
+			}
+		}
 	}
 
 	private hasOtherRootOwner(owners: ReadonlyMap<string, Map<string, Set<string>>>, projectId: string, root: string): boolean {

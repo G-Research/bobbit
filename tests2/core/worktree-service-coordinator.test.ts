@@ -109,6 +109,13 @@ describe("worktree service coordinator", () => {
 		expect(f.reconciled).toHaveLength(1);
 	});
 
+	it("reconciles restored project scopes once each in a bounded sequence", async () => {
+		const f = fixture();
+		await f.coordinator.reconcileRestoredProjects([projectId, projectId]);
+		expect(f.activeCalls()).toBe(1);
+		expect(f.reconciled).toHaveLength(1);
+	});
+
 	it("does no scope discovery for empty declarations but non-destructively stops stale instances", async () => {
 		let gitCalls = 0;
 		const f = fixture({ git: { topLevel: async cwd => { gitCalls++; return cwd; } } });
@@ -205,6 +212,54 @@ describe("worktree service coordinator", () => {
 		await f.coordinator.cleanupRemovedSessionWorktrees(projectId, shared.id, [root]);
 		expect(f.stopped).toHaveLength(1);
 		expect(f.removed).toHaveLength(1);
+	});
+
+	it("suspends old-root services without deleting data until replacement commits", async () => {
+		const f = fixture();
+		await f.coordinator.reconcileProject(projectId);
+		await f.coordinator.suspendProject(projectId);
+		expect(f.stopped).toHaveLength(1);
+		expect(f.removed).toHaveLength(0);
+
+		// A failed replacement can reconcile the still-owned old scope.
+		await f.coordinator.reconcileProject(projectId);
+		expect(f.reconciled).toHaveLength(2);
+		await f.coordinator.stopProject(projectId);
+		expect(f.removed).toHaveLength(1);
+	});
+
+	it("prunes purged shared-root owners before final cleanup", async () => {
+		const shared = { ...session, id: "session-b" };
+		let live = [session, shared];
+		const f = fixture({
+			sessions: {
+				get: id => live.find(candidate => candidate.id === id),
+				list: () => live,
+			},
+		});
+		await f.coordinator.reconcileProject(projectId);
+
+		// Session A was purged before its final worktree callback. Session B is
+		// now the final confirmed cleanup and must not be blocked by A's stale row.
+		live = [shared];
+		await f.coordinator.cleanupRemovedSessionWorktrees(projectId, shared.id, [root]);
+		expect(f.stopped).toHaveLength(1);
+		expect(f.removed).toHaveLength(1);
+	});
+
+	it("does not revive a root discovered after project deletion fenced it", async () => {
+		let releaseGit!: () => void;
+		let beganGit!: () => void;
+		const gitBlocked = new Promise<void>(resolve => { releaseGit = resolve; });
+		const gitBegan = new Promise<void>(resolve => { beganGit = resolve; });
+		const f = fixture({ git: { topLevel: async cwd => { beganGit(); await gitBlocked; return cwd; } } });
+		const pending = f.coordinator.reconcileProject(projectId);
+		await gitBegan;
+		await f.coordinator.stopProject(projectId);
+		releaseGit();
+		await pending;
+		expect(f.reconciled).toHaveLength(0);
+		expect(f.removed).toHaveLength(0);
 	});
 
 	it("keeps data on normal close or unconfirmed cleanup", async () => {

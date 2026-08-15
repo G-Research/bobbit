@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { test } from "./_e2e/in-process-harness.js";
 import { apiFetch, defaultProject } from "./_e2e/e2e-setup.js";
+import { WorktreeServiceCoordinator } from "../../src/server/extension-host/worktree-service-coordinator.ts";
 
 const temporaryRoots: string[] = [];
 test.afterEach(() => {
@@ -15,13 +16,32 @@ test.describe("managed-service gateway wiring", () => {
 		const replacement = fs.mkdtempSync(path.join(project.rootPath, ".managed-service-replacement-"));
 		temporaryRoots.push(replacement);
 
-		const response = await apiFetch(`/api/projects/${encodeURIComponent(project.id)}`, {
-			method: "PUT",
-			body: JSON.stringify({ rootPath: replacement }),
-		});
-		assert.equal(response.status, 200);
-		assert.equal((await response.json()).rootPath, replacement);
-		assert.ok(gateway.sessionManager.getProjectContextManager().getOrCreate(project.id));
+		const contexts = gateway.sessionManager.getProjectContextManager();
+		const calls: string[] = [];
+		const originalSuspend = WorktreeServiceCoordinator.prototype.suspendProject;
+		const originalStop = WorktreeServiceCoordinator.prototype.stopProject;
+		WorktreeServiceCoordinator.prototype.suspendProject = async function (this: WorktreeServiceCoordinator, id: string) {
+			calls.push(`suspend:${id}`);
+			return originalSuspend.call(this, id);
+		};
+		WorktreeServiceCoordinator.prototype.stopProject = async function (this: WorktreeServiceCoordinator, id: string) {
+			assert.ok([...contexts.all()].some(context => context.project.id === id), "old data is deleted only after the replacement context opens");
+			calls.push(`stop:${id}`);
+			return originalStop.call(this, id);
+		};
+		try {
+			const response = await apiFetch(`/api/projects/${encodeURIComponent(project.id)}`, {
+				method: "PUT",
+				body: JSON.stringify({ rootPath: replacement }),
+			});
+			assert.equal(response.status, 200);
+			assert.equal((await response.json()).rootPath, replacement);
+		} finally {
+			WorktreeServiceCoordinator.prototype.suspendProject = originalSuspend;
+			WorktreeServiceCoordinator.prototype.stopProject = originalStop;
+		}
+		assert.deepEqual(calls, [`suspend:${project.id}`, `stop:${project.id}`]);
+		assert.ok(contexts.getOrCreate(project.id));
 
 		// A second settings-like edit proves the replacement did not retain an old
 		// closed context or leave the project registry/context roots mismatched.
@@ -47,6 +67,12 @@ test.describe("managed-service gateway wiring", () => {
 		temporaryRoots.push(replacement);
 		const contexts: any = gateway.sessionManager.getProjectContextManager();
 		const originalGetOrCreate = contexts.getOrCreate.bind(contexts);
+		const originalStop = WorktreeServiceCoordinator.prototype.stopProject;
+		let stopCalls = 0;
+		WorktreeServiceCoordinator.prototype.stopProject = async function (this: WorktreeServiceCoordinator, id: string) {
+			stopCalls++;
+			return originalStop.call(this, id);
+		};
 		let failNextProjectOpen = true;
 		contexts.getOrCreate = (id: string) => {
 			if (id === project.id && failNextProjectOpen) {
@@ -63,7 +89,9 @@ test.describe("managed-service gateway wiring", () => {
 			assert.notEqual(response.status, 200);
 		} finally {
 			contexts.getOrCreate = originalGetOrCreate;
+			WorktreeServiceCoordinator.prototype.stopProject = originalStop;
 		}
+		assert.equal(stopCalls, 0, "a failed replacement preserves old-root managed-service data");
 		const projectAfterFailure = await apiFetch(`/api/projects/${encodeURIComponent(project.id)}`);
 		assert.equal((await projectAfterFailure.json()).rootPath, project.rootPath);
 		assert.ok(contexts.getOrCreate(project.id));

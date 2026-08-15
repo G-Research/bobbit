@@ -3270,8 +3270,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// registered consumer adapter yet, so every declared run mode fails closed.
 	const serviceExtensionRegistry = new ServiceExtensionRegistry(packContributionRegistry);
 	const managedServiceAuthorization = createExtensionCapabilityGrantResolver({
+		// A background reconcile must never recreate a context that project removal
+		// or root replacement just closed. Lifecycle work only authorizes against an
+		// already-owned context; its generation fence handles in-flight discovery.
 		contextForProject: (projectId) => {
-			const context = projectContextManager.getOrCreate(projectId);
+			const context = [...projectContextManager.all()].find(candidate => candidate.project.id === projectId);
 			return context ? { projectConfigStore: context.projectConfigStore } : undefined;
 		},
 		contributions: packContributionRegistry,
@@ -5325,6 +5328,18 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// to session revival. Both complete before accepting connections.
 			await bootPhase("restore-teams", () => teamManager.waitForRestore());
 			await bootPhase("restore-sessions", () => sessionManager.restoreSessions());
+			// Services are process-local. Reconcile only projects with a persisted
+			// live session after restore, one at a time, so boot cannot fan out an
+			// unbounded set of Git/realpath probes.
+			await bootPhase("reconcile-managed-services", async () => {
+				const relevantProjects = new Set<string>();
+				for (const context of projectContextManager.all()) {
+					for (const session of context.sessionStore.getLive()) {
+						if (session.projectId === context.project.id) relevantProjects.add(session.projectId);
+					}
+				}
+				await worktreeServices.reconcileRestoredProjects(relevantProjects);
+			});
 			await bootPhase("review-payload-recovery", async () => {
 				try {
 					const knownSessionIds = [...projectContextManager.all()]
@@ -7693,11 +7708,12 @@ async function handleApiRoute(
 		const rootReplacement = !!updates.rootPath && !!existing && !samePath(updates.rootPath, existing.rootPath);
 		let contextRemoved = false;
 		let updateCommitted = false;
+		let replacementContextOpened = false;
 		try {
 			if (rootReplacement) {
-				// Fence services before their owning context/root changes. `remove()` drops
-				// bookkeeping before close can reject, so rollback starts before awaiting it.
-				await worktreeServices.stopProject(projectId);
+				// Do not delete old-root service state before the registry update commits.
+				// A failed transition reopens the original context and reconciles it.
+				await worktreeServices.suspendProject(projectId);
 				contextRemoved = true;
 				await projectContextManager.remove(projectId);
 			}
@@ -7707,11 +7723,20 @@ async function handleApiRoute(
 				let reopened;
 				try { reopened = projectContextManager.getOrCreate(projectId); } catch { reopened = null; }
 				if (!reopened) throw new Error("Project context could not be reopened after root replacement");
-				void worktreeServices.reconcileProject(projectId).catch(() => undefined);
+				replacementContextOpened = true;
+				// The new context is live and the root update committed: old derived data
+				// can now be removed, then the replacement scope can be reconciled.
+				await worktreeServices.stopProject(projectId);
+				await worktreeServices.reconcileProject(projectId);
 			}
 			json(updated);
 		} catch (err: any) {
 			if (rootReplacement && contextRemoved) {
+				// If a post-commit step failed, discard the replacement context before
+				// restoring the registry. Contexts retain the mutable project record.
+				if (replacementContextOpened) {
+					try { await projectContextManager.remove(projectId); } catch { /* original error wins */ }
+				}
 				// Restore the registry before reopening so every failed transition returns
 				// to a live old-root context, even when remove() or getOrCreate() throws.
 				if (updateCommitted) {
@@ -7720,6 +7745,10 @@ async function handleApiRoute(
 				if (![...projectContextManager.all()].some(context => context.project.id === projectId)) {
 					try { projectContextManager.getOrCreate(projectId); } catch { /* original error wins */ }
 				}
+				// The pre-commit suspend preserved old-root data and ownership. Restore
+				// the old scope after rollback rather than leaving it fenced until another
+				// unrelated invalidation happens.
+				await worktreeServices.reconcileProject(projectId).catch(() => undefined);
 			}
 			if (writeSpecialProjectMutationError(err)) return;
 			jsonError(400, err);
