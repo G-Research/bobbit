@@ -81,9 +81,14 @@ test("re-signalling preserves a cause-labelled cancelled audit instead of fabric
 		status: "passed",
 		passed: true,
 		output: COMPLETED_OUTPUT,
-		duration_ms: 17,
+		durationMs: 17,
 	};
-	active.steps[1] = { ...active.steps[1], status: "running" };
+	// A human-signoff is legitimate live work without an owned process tree.
+	// Register its resolver so supersession must acknowledge the parked work
+	// before it can publish the cancelled audit.
+	const drainedSignoffs: any[] = [];
+	active.steps[1] = { ...active.steps[1], status: "running", awaitingHuman: true };
+	harness.pendingSignoffs.set(`${SIGNAL_ID}::Unfinished follow-up`, (outcome: any) => drainedSignoffs.push(outcome));
 	gateStore.updateSignalVerification(SIGNAL_ID, {
 		status: "running",
 		steps: [
@@ -93,6 +98,9 @@ test("re-signalling preserves a cause-labelled cancelled audit instead of fabric
 	});
 
 	await harness.cancelStaleVerifications(GOAL_ID, GATE_ID);
+	// The parked sign-off resolver is the cleanup acknowledgement for this
+	// process-free fixture; cancellation must drain it before final publication.
+	expect(drainedSignoffs).toEqual([{ cancelled: true }]);
 
 	const cancelledSignal = gateStore.getGate(GOAL_ID, GATE_ID)!.signals.find(entry => entry.id === SIGNAL_ID)!;
 	const verification = cancelledSignal.verification as any;
@@ -108,7 +116,8 @@ test("re-signalling preserves a cause-labelled cancelled audit instead of fabric
 			name: "Unfinished follow-up",
 			status: "cancelled",
 			passed: false,
-			cancellation: { cause: "superseded", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
+			cancellationCause: "superseded",
+			cancelledAt: expect.any(Number),
 		},
 	]);
 	expect(gateStore.getGate(GOAL_ID, GATE_ID)!.status,

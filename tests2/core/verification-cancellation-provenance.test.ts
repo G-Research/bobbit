@@ -35,7 +35,10 @@ const GATE: WorkflowGate = {
 	id: GATE_ID,
 	name: "Cancellation provenance fixture",
 	dependsOn: [],
-	verify: [{ name: "Long running command", type: "command", run: "echo fixture" }],
+	// A parked human sign-off is live work with no process tree. It can be
+	// cancelled only after its resolver is drained, making this fixture a valid
+	// cleanup-free cancellation boundary for every orchestration producer.
+	verify: [{ name: "Running sign-off", type: "human-signoff", prompt: "Awaiting cancellation" }],
 };
 const roots: string[] = [];
 
@@ -43,10 +46,10 @@ afterEach(async () => {
 	for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
-function makeFixture(signalId: string) {
+function makeFixture(signalId: string, persistence: "json" | "sqlite" = "json") {
 	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "verification-cancellation-provenance-"));
 	roots.push(stateDir);
-	const gateStore = new GateStore(stateDir, undefined, { persistence: "json" });
+	const gateStore = new GateStore(stateDir, undefined, { persistence });
 	gateStore.initGatesForGoal(GOAL_ID, [GATE_ID]);
 	const events: any[] = [];
 	const harness = new VerificationHarness(stateDir, gateStore, (_goalId, event) => events.push(event), ROLE_STORE as any);
@@ -62,8 +65,14 @@ function makeFixture(signalId: string) {
 		verification: { status: "running", steps: [] },
 	};
 	signal.verification.steps = harness.beginVerification(signal, GATE);
+	const active = (harness as any).activeVerifications.get(signal.id);
+	active.steps[0].awaitingHuman = true;
+	let signoffCancelled = false;
+	harness.pendingSignoffs.set(`${signal.id}::Running sign-off`, (outcome: any) => {
+		signoffCancelled = outcome.cancelled === true;
+	});
 	gateStore.recordSignal(signal);
-	return { stateDir, gateStore, harness, signal, events };
+	return { stateDir, gateStore, harness, signal, events, signoffCancelled: () => signoffCancelled };
 }
 
 async function cancelForProducer(cause: CancellationCause) {
@@ -77,7 +86,7 @@ async function cancelForProducer(cause: CancellationCause) {
 }
 
 test.each(CAUSES)("%s is durable, typed, and never becomes a failed gate", async (cause) => {
-	const { gateStore, signal, events } = await cancelForProducer(cause);
+	const { gateStore, signal, events, signoffCancelled } = await cancelForProducer(cause);
 	const gate = gateStore.getGate(GOAL_ID, GATE_ID)!;
 	const historical = gate.signals.find(entry => entry.id === signal.id)!;
 	const verification = historical.verification as any;
@@ -86,11 +95,13 @@ test.each(CAUSES)("%s is durable, typed, and never becomes a failed gate", async
 		status: "cancelled",
 		cancellation: { cause, requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
 		steps: [expect.objectContaining({
-			name: "Long running command",
+			name: "Running sign-off",
 			status: "cancelled",
-			cancellation: { cause, requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
+			cancellationCause: cause,
+			cancelledAt: expect.any(Number),
 		})],
 	});
+	expect(signoffCancelled(), `CANCELLATION_CAUSE_${cause}: cancellation must drain the live human-signoff resolver before final publication`).toBe(true);
 	expect(gate.status, `CANCELLATION_CAUSE_${cause}: orchestration cancellation leaves gate eligible to re-signal`).toBe("pending");
 	expect(events.filter(event => event.type === "gate_verification_complete"), `CANCELLATION_CAUSE_${cause}: exactly one terminal transport event`).toEqual([
 		expect.objectContaining({ signalId: signal.id, status: "cancelled", cancellation: expect.objectContaining({ cause }) }),
@@ -115,14 +126,17 @@ test("first cancellation writer is persisted before cleanup and cannot be overwr
 });
 
 test("legacy generic cancelled rows deserialize as unknown without inventing a historical cause", async () => {
-	const { stateDir, gateStore, signal } = makeFixture("legacy-unknown");
+	// JSON is intentionally a lightweight test adapter and does not run the
+	// production persistence validator. Use the durable SQLite adapter, which
+	// owns legacy-record normalization on write and reload.
+	const { stateDir, gateStore, signal } = makeFixture("legacy-unknown", "sqlite");
 	gateStore.updateSignalVerification(signal.id, {
 		status: "cancelled",
 		steps: [{ name: "Legacy cancelled", type: "command", passed: false, status: "cancelled", output: "Verification cancelled.", duration_ms: 0 }],
 	} as any);
 	await gateStore.close();
 
-	const reloaded = new GateStore(stateDir, undefined, { persistence: "json" });
+	const reloaded = new GateStore(stateDir, undefined, { persistence: "sqlite" });
 	const legacy = reloaded.getGate(GOAL_ID, GATE_ID)!.signals.find(entry => entry.id === signal.id)!.verification as any;
 	expect(legacy.cancellation,
 		"CANCELLATION_LEGACY_UNKNOWN: old records must remain readable but must never be guessed from generic kill text").toMatchObject({ cause: "unknown" });
@@ -150,7 +164,9 @@ test("restart preserves an already completed output and the persisted cause unti
 		cancelReason: "cancelled",
 		steps: [
 			{ name: "Completed evidence", type: "command", status: "passed", output: "retain this completed output", durationMs: 12, phase: 0, startedAt: Date.now() - 12 },
-			{ name: "Interrupted command", type: "command", status: "running", phase: 1, startedAt: Date.now() - 10 },
+			// A running human-signoff is process-free live work. Its durable
+			// cancellation requires no fabricated ownerless command cleanup.
+			{ name: "Interrupted sign-off", type: "human-signoff", status: "running", phase: 1, startedAt: Date.now() - 10, awaitingHuman: true },
 		],
 	};
 	(persisted as any).cancellation = { cause: "goal-pause", requestedAt: Date.now() - 10 };
@@ -164,7 +180,7 @@ test("restart preserves an already completed output and the persisted cause unti
 		cancellation: { cause: "goal-pause", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
 		steps: [
 			{ name: "Completed evidence", status: "passed", output: "retain this completed output" },
-			{ name: "Interrupted command", status: "cancelled", cancellation: { cause: "goal-pause" } },
+			{ name: "Interrupted sign-off", status: "cancelled", cancellationCause: "goal-pause", cancelledAt: expect.any(Number) },
 		],
 	});
 	expect(gateStore.getGate(GOAL_ID, GATE_ID)!.status).toBe("pending");
