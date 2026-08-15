@@ -543,8 +543,11 @@ Native `Task` and every `Task*` operation remain disallowed at registration,
 `canUseTool`, and `PreToolUse`; a legacy `Task` diagnostic label never grants a
 native task store or lifecycle.
 
-The active-child registry is bridge-local and is cleared on a root terminal,
-stop, failure, replacement, or disposal. Child frames retain their
+The active-child registry is bridge-local. A root result does not clear an
+active entry because the SDK can publish its authoritative native
+`task_notification` or `SubagentStop` afterward; the matching verified child
+terminal then settles and removes the entry. Bridge stop, failure, replacement,
+and disposal clear any remaining entry. Child frames retain their
 `parent_tool_use_id` / `parentToolUseId` / `parentAgentId` partitioning, so a
 child terminal cannot end the root turn. Bounded audit rows correlate the root
 session and Agent tool-use id with child id/type, partition, outcome, and

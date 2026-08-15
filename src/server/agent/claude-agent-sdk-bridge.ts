@@ -630,6 +630,30 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		));
 	}
 
+	/**
+	 * The public native-Agent completion frame carries its root `tool_use_id`,
+	 * but no child id. Accept it only when that exact id still belongs to the
+	 * bridge-local verified active registry; unrelated SDK tasks remain inert.
+	 * The SDK may emit this frame after the root result, so it must not depend on
+	 * translator partition state or on a prematurely-cleared policy.
+	 */
+	private emitVerifiedSubagentTaskTerminal(source: Record<string, unknown>): void {
+		if (source.type !== "system" || source.subtype !== "task_notification") return;
+		const parentToolUseId = typeof source.tool_use_id === "string" && source.tool_use_id ? source.tool_use_id : undefined;
+		const status = source.status;
+		if (!parentToolUseId || (status !== "completed" && status !== "failed" && status !== "stopped")) return;
+		const entry = [...(this.activeToolSurface?.subagentPolicy?.active.values() ?? [])]
+			.find(candidate => candidate.toolUseId === parentToolUseId);
+		if (!entry) return;
+		const phase = status === "completed" ? "completed" : status === "failed" ? "error" : "aborted";
+		this.emitSubagentWork(this.subagentWork.ingestTerminal(
+			entry.toolUseId,
+			{ phase, ...(phase === "error" ? { error: ClaudeAgentSdkBridge.SUBAGENT_FAILURE_DETAIL } : {}) },
+			{ parentToolUseId: entry.toolUseId, agentId: entry.agentId, agentType: entry.agentType },
+		));
+		this.activeToolSurface?.subagentPolicy?.settle({ agent_id: entry.agentId, agent_type: entry.agentType });
+	}
+
 	private attachSubagentLifecycle(surface: ClaudeSdkToolSurface): void {
 		this.releaseSubagentLifecycle();
 		this.activeToolSurface = surface;
@@ -730,9 +754,13 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 					} else this.emit(event);
 				}
 				this.emitSubagentTerminalFromSource(sdkEvent as Record<string, unknown>);
+				this.emitVerifiedSubagentTaskTerminal(sdkEvent as Record<string, unknown>);
 				const rootTurnEnd = events.some(event => event.type === "agent_end" && event.parentToolUseId === undefined);
 				this.translatorState = translated.state;
-				if (rootTurnEnd) this.activeToolSurface?.subagentPolicy?.clear();
+				// Native Agent's public task_notification/SubagentStop can follow the
+				// root result. Keep the verified entry until its own terminal frame,
+				// otherwise clear() converts a successful helper into an abort and
+				// rejects the late authoritative completion.
 				if (rootTurnEnd && this.state === "running") this.state = "ready";
 			}
 			if (!this.closed && !this.initializationComplete) this.fail(new Error("Claude Agent SDK ended before initialization"));

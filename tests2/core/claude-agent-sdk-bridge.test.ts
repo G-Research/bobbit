@@ -635,6 +635,37 @@ describe("ClaudeAgentSdkBridge", () => {
 		await fixture.bridge.stop();
 	});
 
+	it("accepts the verified native task completion that arrives after its root result", async () => {
+		const { policy, surface } = subagentSurfaceFixture();
+		const fixture = bridgeFixture({ claudeSdkToolSurface: surface });
+		const query = await startReady(fixture);
+		const nextTurn = fixture.bridge.prompt("run child work");
+		await query.nextInput();
+		await nextTurn;
+		const observed: any[] = [];
+		fixture.bridge.onEvent(event => observed.push(event));
+		const child = { agent_id: "child-1", agent_type: "bobbit-backend-parity-reviewer" };
+		expect(policy.admit("Agent", {
+			subagent_type: child.agent_type, prompt: "Inspect the bounded change", run_in_background: false,
+		}, { toolUseId: "agent-use-1", permissionMode: "default" })).toBe(true);
+		await (query.options.hooks as any).SubagentStart[0].hooks[0](child);
+
+		query.emit({ type: "result", subtype: "success" });
+		await flushMicrotasks();
+		expect(policy.active.size).toBe(1);
+		query.emit({ type: "system", subtype: "task_notification", tool_use_id: "agent-use-1", status: "completed" });
+		await flushMicrotasks();
+		expect(policy.active.size).toBe(0);
+
+		expect(observed.filter(event => event.type === "claude_sdk_subagent_work")).toEqual([
+			expect.objectContaining({ kind: "start", parentToolUseId: "agent-use-1" }),
+			expect.objectContaining({ kind: "terminal", parentToolUseId: "agent-use-1", terminal: { phase: "completed" } }),
+		]);
+		await (query.options.hooks as any).SubagentStop[0].hooks[0](child);
+		expect(policy.active.size).toBe(0);
+		await fixture.bridge.stop();
+	});
+
 	it("uses a fixed failure detail for provider-controlled child terminal errors", async () => {
 		const fixture = bridgeFixture();
 		const query = await startReady(fixture);
@@ -1015,12 +1046,16 @@ describe("ClaudeAgentSdkBridge", () => {
 				"doctor", "fewer-permission-prompts", "loop", "run", "run-skill-generator", "simplify", "update-config", "verify",
 			],
 			managedSettings: { autoMemoryEnabled: false },
+			forwardSubagentText: true,
 			permissionMode: "default",
 			mcpServers: { bobbit: expect.any(Object) },
 		});
 		expect(query.options.disallowedTools).toEqual(expect.arrayContaining([
-			"Bash", "Read", "ToolSearch", "Task", "TaskCreate", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "TaskUpdate",
+			"Bash", "Read", "ToolSearch", "TaskCreate", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "TaskUpdate",
 		]));
+		// Task is private alias transport rather than a registered/allowed SDK
+		// tool; PreToolUse and canUseTool deny it explicitly.
+		expect(query.options.disallowedTools).not.toContain("Task");
 		expect(query.options.disallowedTools).not.toContain("Agent");
 		expect(query.options.canUseTool).toEqual(expect.any(Function));
 		await expect((query.options.canUseTool as any)("Agent", {

@@ -522,6 +522,22 @@ function isTerminalEvent(type: string, input: Record<string, unknown>): boolean 
 	return type === "result" || (type === "assistant" && (input.aborted === true || typeof input.error === "string"));
 }
 
+/**
+ * These public SDK lifecycle frames describe native Agent work but are not
+ * transcript rows. The bridge validates their correlation against an active,
+ * already-admitted child before projecting any terminal state. Keeping them
+ * outside the translator prevents task progress from becoming root prose or
+ * noisy unknown-kind diagnostics, including when it follows a root result.
+ */
+function isNonTranscriptSubagentLifecycleEvent(input: Record<string, unknown>): boolean {
+	if (input.type === "tool_progress") return true;
+	return input.type === "system" && (
+		input.subtype === "task_started"
+		|| input.subtype === "task_progress"
+		|| input.subtype === "task_notification"
+	);
+}
+
 function terminalIsError(source: Record<string, unknown>): boolean {
 	return source.is_error === true || source.aborted === true || typeof source.error === "string"
 		|| /^error/.test(String(source.subtype ?? "")) || /^aborted/.test(String(source.terminal_reason ?? ""));
@@ -585,6 +601,9 @@ export function translateClaudeSdkEvent(state: ClaudeSdkTranslatorState, input: 
 	const diagnostics: ClaudeSdkTranslatorDiagnostic[] = [];
 	if (!isRecord(input)) {
 		return { state: { ...state, partitions: new Map(state.partitions) }, events, diagnostics: [diagnostic("malformed", ROOT, "SDK event must be an object")] };
+	}
+	if (isNonTranscriptSubagentLifecycleEvent(input)) {
+		return { state: { ...state, partitions: new Map(state.partitions) }, events, diagnostics };
 	}
 
 	const partitionKey = partitionFor(input);

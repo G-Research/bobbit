@@ -120,6 +120,8 @@ export interface ClaudeSdkSubagentPolicy {
 	/** Uses only the fields provided by the pinned SubagentStart hook. */
 	readonly onStart: (input: { agent_id?: unknown; agent_type?: unknown }) => boolean;
 	readonly onStop: (input: { agent_id?: unknown; agent_type?: unknown }) => void;
+	/** Settles a verified child from a public SDK task terminal before a late Stop hook. */
+	readonly settle: (input: { agent_id?: unknown; agent_type?: unknown }) => boolean;
 	/** Emits only facts derived from an already-admitted active registry entry. */
 	readonly subscribe: (listener: (event: ClaudeSdkSubagentLifecycleEvent) => void) => () => void;
 	readonly clear: () => void;
@@ -315,6 +317,10 @@ export function buildClaudeSdkSubagentPolicy(options: ClaudeSdkSubagentPolicyOpt
 	}
 
 	const active = new Map<string, ClaudeSdkSubagentRegistryEntry>();
+	// A public task terminal can precede the corresponding Stop hook. Remember
+	// only that bounded identity until that expected hook arrives, so it remains
+	// a no-op rather than a misleading diagnostic.
+	const taskSettled = new Map<string, string>();
 	const admissions = new Map<string, Readonly<{ agentType?: string; admitted: boolean }>>();
 	const lifecycleListeners = new Set<(event: ClaudeSdkSubagentLifecycleEvent) => void>();
 	const publishLifecycle = (kind: ClaudeSdkSubagentLifecycleEvent["kind"], entry: ClaudeSdkSubagentRegistryEntry): void => {
@@ -372,7 +378,7 @@ export function buildClaudeSdkSubagentPolicy(options: ClaudeSdkSubagentPolicyOpt
 	};
 	const onStart = (input: { agent_id?: unknown; agent_type?: unknown }): boolean => {
 		if (disposed || !boundedSubagentId(input.agent_id) || typeof input.agent_type !== "string" || !byType.has(input.agent_type)
-			|| !pending || pending.agentType !== input.agent_type || active.size !== 0 || active.has(input.agent_id)) {
+			|| !pending || pending.agentType !== input.agent_type || active.size !== 0 || active.has(input.agent_id) || taskSettled.has(input.agent_id)) {
 			record("diagnostic", { ...(typeof input.agent_type === "string" && byType.has(input.agent_type) ? { agentType: input.agent_type } : {}) });
 			return false;
 		}
@@ -387,6 +393,10 @@ export function buildClaudeSdkSubagentPolicy(options: ClaudeSdkSubagentPolicyOpt
 		if (!boundedSubagentId(input.agent_id) || typeof input.agent_type !== "string") { record("diagnostic"); return; }
 		const entry = active.get(input.agent_id);
 		if (!entry || entry.agentType !== input.agent_type) {
+			if (taskSettled.get(input.agent_id) === input.agent_type) {
+				taskSettled.delete(input.agent_id);
+				return;
+			}
 			record("diagnostic", { agentId: input.agent_id, ...(byType.has(input.agent_type) ? { agentType: input.agent_type } : {}) });
 			return;
 		}
@@ -398,6 +408,16 @@ export function buildClaudeSdkSubagentPolicy(options: ClaudeSdkSubagentPolicyOpt
 		// bounded id that originally admitted this exact child.
 		record("stopped", { toolUseId: entry.toolUseId, agentId: entry.agentId, agentType: entry.agentType, parentToolUseId: entry.toolUseId, durationMs: Math.max(0, Date.now() - entry.startedAt) });
 	};
+	const settle = (input: { agent_id?: unknown; agent_type?: unknown }): boolean => {
+		if (!boundedSubagentId(input.agent_id) || typeof input.agent_type !== "string") return false;
+		const entry = active.get(input.agent_id);
+		if (!entry || entry.agentType !== input.agent_type) return false;
+		active.delete(entry.agentId);
+		taskSettled.set(entry.agentId, entry.agentType);
+		while (taskSettled.size > MAX_ADMISSIONS) taskSettled.delete(taskSettled.keys().next().value!);
+		record("stopped", { toolUseId: entry.toolUseId, agentId: entry.agentId, agentType: entry.agentType, parentToolUseId: entry.toolUseId, durationMs: Math.max(0, Date.now() - entry.startedAt) });
+		return true;
+	};
 	const subscribe = (listener: (event: ClaudeSdkSubagentLifecycleEvent) => void): (() => void) => {
 		lifecycleListeners.add(listener);
 		return () => lifecycleListeners.delete(listener);
@@ -407,12 +427,13 @@ export function buildClaudeSdkSubagentPolicy(options: ClaudeSdkSubagentPolicyOpt
 		// Terminalize each currently active entry exactly once before removing it.
 		for (const entry of active.values()) publishLifecycle("aborted", entry);
 		active.clear();
+		taskSettled.clear();
 		admissions.clear();
 	};
 	return Object.freeze({
 		definitions: Object.freeze(definitions), byType, maxConcurrent: 1 as const,
 		get active() { return new Map(active); }, audit,
-		admit, authorizeChild, onStart, onStop, subscribe, clear,
+		admit, authorizeChild, onStart, onStop, settle, subscribe, clear,
 		dispose: () => { disposed = true; clear(); lifecycleListeners.clear(); },
 	});
 }
@@ -687,6 +708,10 @@ export function buildClaudeAgentSdkQueryOptions(
 		settingSources: [],
 		strictMcpConfig: true,
 		managedSettings: { autoMemoryEnabled: false },
+		// The SDK otherwise forwards child tool boundaries only. Nested helper cards
+		// require the official child transcript, still partitioned by its exact
+		// parent tool-use id and never promoted into root ordering.
+		forwardSubagentText: true,
 		permissionMode: "default",
 		canUseTool: surface.canUseTool,
 		hooks: {

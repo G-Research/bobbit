@@ -115,16 +115,51 @@ function hasSuccessfulRootToolResult(snapshot: unknown, toolName: string): boole
 	);
 }
 
-function hasOneNestedHelper(snapshot: unknown): boolean {
-	if (!snapshot || typeof snapshot !== "object") return false;
+type ManualNestedHelperPhase = "pending" | "running" | "completed" | "error" | "aborted" | "unknown" | "other";
+type ManualNestedHelperFacts = {
+	rootAgentCall: boolean;
+	subagentWorkCount: number;
+	phase: ManualNestedHelperPhase;
+	successfulChildRead: boolean;
+};
+
+/** Evaluate exact-parent helper completion without retaining IDs or model data in diagnostics. */
+function manualNestedHelperFacts(snapshot: unknown): ManualNestedHelperFacts {
+	if (!snapshot || typeof snapshot !== "object") return { rootAgentCall: false, subagentWorkCount: 0, phase: "other", successfulChildRead: false };
 	const value = snapshot as { messages?: unknown; subagentWork?: unknown };
-	if (!Array.isArray(value.subagentWork) || value.subagentWork.length !== 1) return false;
-	const helper = value.subagentWork[0] as { parentToolUseId?: unknown; agentType?: unknown; phase?: unknown };
-	if (typeof helper.parentToolUseId !== "string" || typeof helper.agentType !== "string") return false;
-	if (!Array.isArray(value.messages)) return false;
-	return value.messages.some((message: any) => Array.isArray(message?.content) && message.content.some((part: any) =>
-		part?.type === "toolCall" && part?.name === "Agent" && part?.id === helper.parentToolUseId,
-	));
+	const subagentWork = Array.isArray(value.subagentWork) ? value.subagentWork : [];
+	const helper = subagentWork.length === 1 && subagentWork[0] && typeof subagentWork[0] === "object"
+		? subagentWork[0] as { parentToolUseId?: unknown; phase?: unknown; messages?: unknown }
+		: undefined;
+	const parentToolUseId = typeof helper?.parentToolUseId === "string" ? helper.parentToolUseId : undefined;
+	const phase = ["pending", "running", "completed", "error", "aborted", "unknown"].includes(helper?.phase as string)
+		? helper!.phase as Exclude<ManualNestedHelperPhase, "other">
+		: "other";
+	const rootAgentCall = !!parentToolUseId && Array.isArray(value.messages) && value.messages.some((message: any) =>
+		Array.isArray(message?.content) && message.content.some((part: any) =>
+			part?.type === "toolCall" && part?.name === "Agent" && part?.id === parentToolUseId,
+		),
+	);
+	const childMessages = Array.isArray(helper?.messages) ? helper.messages : [];
+	const readCallIds = new Set(childMessages.flatMap((message: any) => Array.isArray(message?.content)
+		? message.content.flatMap((part: any) => part?.type === "toolCall" && part?.name === "read" && typeof part?.id === "string" ? [part.id] : [])
+		: []));
+	const successfulChildRead = readCallIds.size > 0 && childMessages.some((message: any) =>
+		message?.role === "toolResult" && message?.toolName === "read" && message?.isError !== true
+		&& typeof message?.toolCallId === "string" && readCallIds.has(message.toolCallId),
+	);
+	return {
+		rootAgentCall,
+		subagentWorkCount: Math.min(subagentWork.length, 1_000_000),
+		phase,
+		successfulChildRead,
+	};
+}
+
+function assertManualNestedHelper(snapshot: unknown): void {
+	const facts = manualNestedHelperFacts(snapshot);
+	if (facts.rootAgentCall && facts.subagentWorkCount === 1 && facts.phase === "completed" && facts.successfulChildRead) return;
+	throw new Error(JSON.stringify(facts));
 }
 
 function hasDurableSubscriptionUsage(cost: unknown): boolean {
@@ -322,6 +357,29 @@ test("Claude Agent SDK manual lifecycle waits for a root start followed by its t
 	expect(lifecycle.completed()).toBe(true);
 	lifecycle.unsubscribe();
 	expect(listener).toBeUndefined();
+});
+
+test("Claude Agent SDK manual helper oracle reports only fixed completion facts", () => {
+	const complete = {
+		messages: [{ content: [{ type: "toolCall", name: "Agent", id: "private-root-agent-id" }] }],
+		subagentWork: [{
+			parentToolUseId: "private-root-agent-id", phase: "completed",
+			messages: [
+				{ content: [{ type: "toolCall", name: "read", id: "private-child-read-id" }] },
+				{ role: "toolResult", toolName: "read", toolCallId: "private-child-read-id", isError: false },
+			],
+		}],
+	};
+	expect(manualNestedHelperFacts(complete)).toEqual({
+		rootAgentCall: true, subagentWorkCount: 1, phase: "completed", successfulChildRead: true,
+	});
+	let diagnostic = "";
+	try { assertManualNestedHelper({ messages: [], subagentWork: [] }); }
+	catch (error) { diagnostic = error instanceof Error ? error.message : ""; }
+	expect(JSON.parse(diagnostic)).toEqual({
+		rootAgentCall: false, subagentWorkCount: 0, phase: "other", successfulChildRead: false,
+	});
+	for (const privateValue of ["private-root-agent-id", "private-child-read-id"]) expect(diagnostic).not.toContain(privateValue);
 });
 
 test("Claude Agent SDK manual durable tool oracle retains only fixed booleans and event counts", () => {
@@ -754,7 +812,8 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 
 			await runTurn("Call the native Agent tool exactly once with run_in_background: false and subagent_type: \"bobbit-backend-parity-reviewer\". Its task must be: use the Bobbit read tool on README.md. Do not call any other root tool. Do not create or invoke an additional helper.", "constrained foreground helper");
 			transcript = await gateway.sessionManager.getMessagesSnapshotBase(session);
-			expect(transcript.success && hasOneNestedHelper(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, transcript.data))).toBe(true);
+			if (!transcript.success) throw new Error(JSON.stringify(manualNestedHelperFacts(undefined)));
+			assertManualNestedHelper(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, transcript.data));
 
 			// Use the production live-control transaction with the same isolated
 			// preferences store as the session. This must not retry or fall back.
@@ -1084,7 +1143,8 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			expect(sandboxTranscript.success && hasSuccessfulRootToolResult(visibleSandboxTranscript, "gate_list")).toBe(true);
 			await runSandboxTurn("Call the native Agent tool exactly once with run_in_background: false and subagent_type: \"bobbit-backend-parity-reviewer\". Its task must be: use the Bobbit read tool on README.md. Do not call any other root tool. Do not create or invoke an additional helper.", "sandbox constrained foreground helper");
 			sandboxTranscript = await gateway.sessionManager.getMessagesSnapshotBase(session);
-			expect(sandboxTranscript.success && hasOneNestedHelper(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data))).toBe(true);
+			if (!sandboxTranscript.success) throw new Error(JSON.stringify(manualNestedHelperFacts(undefined)));
+			assertManualNestedHelper(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data));
 			const { applyRuntimeSessionModelSelection } = await import("../../dist/server/ws/runtime-model-selection.js");
 			const beforeSandboxModelChange = await session.rpcClient.getState();
 			const sandboxThinking = beforeSandboxModelChange?.data?.thinkingLevel;

@@ -262,6 +262,20 @@ describe("Claude Agent SDK event translator", () => {
 		expect(late.diagnostics).toMatchObject([{ code: "late_event" }]);
 	});
 
+	it("keeps public native-Agent progress frames outside transcript translation without diagnostics", () => {
+		const state = createClaudeSdkTranslatorState();
+		for (const event of [
+			{ type: "system", subtype: "task_started", tool_use_id: "agent-root", subagent_type: "bobbit-backend-parity-reviewer" },
+			{ type: "system", subtype: "task_progress", tool_use_id: "agent-root", subagent_type: "bobbit-backend-parity-reviewer" },
+			{ type: "tool_progress", parent_tool_use_id: "agent-root", tool_use_id: "child-read" },
+			{ type: "system", subtype: "task_notification", tool_use_id: "agent-root", status: "completed" },
+		]) {
+			const translated = translateClaudeSdkEvent(state, event);
+			expect(translated.events).toEqual([]);
+			expect(translated.diagnostics).toEqual([]);
+		}
+	});
+
 	it("degrades unknown, malformed, permission-relevant, and cyclic input safely without fabricated identities", () => {
 		const record = fixture("terminal-and-permission.json");
 		const state = createClaudeSdkTranslatorState();
