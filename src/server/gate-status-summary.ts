@@ -1,4 +1,4 @@
-import type { GateState, GateStatus } from "./agent/gate-store.js";
+import type { GateState, GateStatus, VerificationCancellationCause } from "./agent/gate-store.js";
 import type { ActiveVerification } from "./agent/verification-harness.js";
 import type { Workflow } from "./agent/workflow-store.js";
 
@@ -42,6 +42,17 @@ export function projectGateForList<T extends { signals: any[] }>(gate: T): T {
 	return clone;
 }
 
+/**
+ * The latest terminal cancellation, projected without turning the gate itself
+ * into a failed state. `requestedAt` is optional only for legacy records that
+ * predate durable cancellation provenance.
+ */
+export interface GateStatusSummaryCancellation {
+	cause: VerificationCancellationCause;
+	requestedAt?: number;
+	finalizedAt?: number;
+}
+
 export interface GateStatusSummaryGate {
 	gateId: string;
 	name?: string;
@@ -53,6 +64,9 @@ export interface GateStatusSummaryGate {
 	signalCount: number;
 	updatedAt?: number;
 	failedSteps?: string[];
+	/** The latest signal was cancelled; gate `status` remains eligible/pending. */
+	verificationStatus?: "cancelled";
+	cancellation?: GateStatusSummaryCancellation;
 }
 
 export interface GateStatusSummary {
@@ -86,6 +100,19 @@ function failedStepNames(gate: GateState): string[] | undefined {
 }
 
 /**
+ * Old persisted cancellations did not retain provenance. Surface those records
+ * neutrally as `unknown` instead of deriving a cause from a kill reason.
+ */
+function latestCancellation(gate: GateState): GateStatusSummaryCancellation | undefined {
+	const verification = gate.signals[gate.signals.length - 1]?.verification as {
+		status?: string;
+		cancellation?: GateStatusSummaryCancellation;
+	} | undefined;
+	if (verification?.status !== "cancelled") return undefined;
+	return verification.cancellation ?? { cause: "unknown" };
+}
+
+/**
  * Build the authoritative gate progress summary from server truth.
  *
  * Stored gate state owns pass/fail/pending. ActiveVerification owns in-flight
@@ -109,7 +136,11 @@ export function buildGateStatusSummary(input: GateStatusSummaryInput): GateStatu
 
 	const summaryGates: GateStatusSummaryGate[] = workflowGates.map(def => {
 		const stored = gateById.get(def.id);
-		const status = stored?.status ?? "pending";
+		const cancellation = stored ? latestCancellation(stored) : undefined;
+		// Defensive projection for a legacy/corrupt stored cancellation. The
+		// cancellation outcome is never product failure, even if an older server
+		// persisted the gate as failed before its finalizer was fixed.
+		const status = cancellation && stored?.status === "failed" ? "pending" : (stored?.status ?? "pending");
 		const running = (runningByGate.get(def.id) ?? 0) > 0;
 		const awaitingSignoffCount = awaitingByGate.get(def.id) ?? 0;
 		const gate: GateStatusSummaryGate = {
@@ -122,8 +153,12 @@ export function buildGateStatusSummary(input: GateStatusSummaryInput): GateStatu
 			dependsOn: def.dependsOn || [],
 			signalCount: stored?.signals.length ?? 0,
 		};
+		if (cancellation) {
+			gate.verificationStatus = "cancelled";
+			gate.cancellation = cancellation;
+		}
 		if (stored?.signals.length) gate.updatedAt = stored.updatedAt;
-		const failedSteps = stored ? failedStepNames(stored) : undefined;
+		const failedSteps = !cancellation && stored ? failedStepNames(stored) : undefined;
 		if (failedSteps) gate.failedSteps = failedSteps;
 		return gate;
 	});
