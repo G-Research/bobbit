@@ -269,6 +269,12 @@ export interface LanguageDetectorFs {
 	opendirSync: typeof fs.opendirSync;
 }
 
+/** Truthful completion state for the bounded streamed traversal. */
+export interface LanguageDetectionTraversalReport {
+	/** True when a path or directory-entry budget prevented a complete scan. */
+	truncated: boolean;
+}
+
 interface DirectoryFrame {
 	directory: string;
 	stream: fs.Dir;
@@ -286,16 +292,17 @@ export function walkLanguageDetectionPaths(
 	roots: readonly string[],
 	seams: LanguageDetectorFs,
 	onFile: (filePath: string) => void,
-): void {
+): LanguageDetectionTraversalReport {
 	const orderedRoots = roots.slice(0, MAX_LANGUAGE_DETECTION_ENTRIES).sort(compareNames);
 	const directories: DirectoryFrame[] = [];
 	let rootIndex = 0;
 	let remaining = MAX_LANGUAGE_DETECTION_ENTRIES;
+	let truncated = roots.length > MAX_LANGUAGE_DETECTION_ENTRIES;
 
 	try {
 		while (remaining > 0) {
 			const current = nextPath();
-			if (!current) return;
+			if (!current) return { truncated };
 			remaining -= 1;
 
 			let stat: fs.Stats;
@@ -311,6 +318,9 @@ export function walkLanguageDetectionPaths(
 				directories.push({ directory: current, stream: seams.opendirSync(current, { bufferSize: 1 }), entries: [], entryIndex: 0 });
 			} catch { continue; }
 		}
+		// A scan that reaches its budget cannot prove there are no remaining paths.
+		truncated = true;
+		return { truncated };
 	} finally {
 		for (const frame of directories) {
 			try { frame.stream.closeSync(); } catch { /* already closed or unreadable */ }
@@ -337,7 +347,12 @@ export function walkLanguageDetectionPaths(
 		// Reserve one scan unit for lstat per yielded candidate. This prevents the
 		// stream itself from consuming the shared budget and starving inspection.
 		const batchSize = Math.floor(remaining / 2);
-		if (batchSize === 0) return false;
+		if (batchSize === 0) {
+			// The final unit cannot both enumerate and inspect another entry. We must
+			// expose this partial stream rather than claiming a complete scan.
+			truncated = true;
+			return false;
+		}
 		frame.entries = [];
 		frame.entryIndex = 0;
 		for (let index = 0; index < batchSize; index += 1) {

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { MAX_LANGUAGE_DETECTION_ENTRIES } from "../../market-packs/code-intelligence/lib/language-matrix.ts";
+import { MAX_LANGUAGE_DETECTION_ENTRIES, walkLanguageDetectionPaths } from "../../market-packs/code-intelligence/lib/language-matrix.ts";
 import { detectComponentLanguages } from "../../market-packs/code-intelligence/src/language-detection.ts";
 
 function fixture(): { root: string; dispose: () => void } {
@@ -43,6 +43,7 @@ describe("per-component LSP language detection", () => {
 				expect(detection.evidence.fileCount).toBeGreaterThan(0);
 				expect(detection.evidence.matchedGlobs.length).toBeGreaterThan(0);
 				expect(Array.isArray(detection.evidence.rootMarkers)).toBe(true);
+				expect(detection.evidence.truncated).toBe(false);
 				expect(detection.structuralSearch).toMatch(/^(available|unsupported)$/);
 				expect(JSON.parse(JSON.stringify(detection))).toEqual(detection);
 			}
@@ -70,7 +71,22 @@ describe("per-component LSP language detection", () => {
 		}
 	});
 
-	it("bounds each component scan before late entries can create evidence", () => {
+	it("reports root-path budget exhaustion from the streamed traversal", () => {
+		const roots = Array.from({ length: MAX_LANGUAGE_DETECTION_ENTRIES + 1 }, (_, index) => `/components/${index}.ts`);
+		let inspected = 0;
+		const report = walkLanguageDetectionPaths(roots, {
+			lstatSync: () => {
+				inspected += 1;
+				return { isSymbolicLink: () => false, isDirectory: () => false, isFile: () => true } as fs.Stats;
+			},
+			opendirSync: () => { throw new Error("files do not open directories"); },
+		}, () => undefined);
+
+		expect(inspected).toBe(MAX_LANGUAGE_DETECTION_ENTRIES);
+		expect(report).toEqual({ truncated: true });
+	});
+
+	it("marks each component offer as truncated when enumeration cannot complete", () => {
 		const root = "/component";
 		const entries = [fileEntry("first.ts"), ...Array.from({ length: MAX_LANGUAGE_DETECTION_ENTRIES }, (_, index) => fileEntry(`ignored-${index}.txt`)), fileEntry("late.py"), fileEntry("package.json")];
 		let reads = 0;
@@ -94,7 +110,11 @@ describe("per-component LSP language detection", () => {
 		const ids = result.map(detection => detection.languageId);
 		expect(ids).toContain("typescript");
 		expect(ids).not.toContain("python");
-		expect(result.find(detection => detection.languageId === "typescript")?.evidence.rootMarkers).toEqual([]);
+		expect(result.find(detection => detection.languageId === "typescript")?.evidence).toMatchObject({
+			rootMarkers: [],
+			truncated: true,
+		});
+		expect(result.every(detection => detection.evidence.truncated === true)).toBe(true);
 		expect(reads).toBeLessThan(MAX_LANGUAGE_DETECTION_ENTRIES);
 	});
 });
