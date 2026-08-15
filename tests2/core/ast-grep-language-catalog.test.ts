@@ -22,7 +22,7 @@ describe("ast-grep language catalogue", () => {
 		expect(normalizeAstGrepLanguage("not-a-language")).toBeUndefined();
 		expect(CODE_INTELLIGENCE_LANGUAGE_MATRIX.every((language) => !("alias" in language || "cliLanguage" in language || "extensions" in language))).toBe(true);
 
-		const structuralOnly = CODE_INTELLIGENCE_LANGUAGE_MATRIX.filter((language) => language.structuralSearch.state === "supported" && !language.lsp);
+		const structuralOnly = CODE_INTELLIGENCE_LANGUAGE_MATRIX.filter((language) => language.structuralSearch.state === "supported" && !("lsp" in language && language.lsp));
 		expect(structuralOnly.length).toBeGreaterThan(0);
 		expect(CODE_INTELLIGENCE_LANGUAGE_MATRIX.find((language) => language.id === "typescript")).toMatchObject({
 			structuralSearch: { state: "supported", astGrepGrammar: "TypeScript" },
