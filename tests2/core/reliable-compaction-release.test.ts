@@ -226,8 +226,13 @@ describe("post-terminal reliable drain settlement", () => {
 		{ label: "stable occurrence", intentId: "post-error-follow-up" },
 		{ label: "legacy occurrence", intentId: undefined },
 	])("fences a $label accepted after error agent_end until agent_settled", async ({ intentId }) => {
-		const prompt = vi.fn(async () => ({ success: true }));
-		const { manager, session } = useHarness({
+		const prompt = vi.fn(async (
+			_text: string,
+			_images?: unknown,
+			_options?: unknown,
+			_streamingBehavior?: unknown,
+		) => ({ success: true }));
+		const { manager, session, storeUpdates } = useHarness({
 			id: `post-error-settlement-${intentId ?? "legacy"}`,
 			status: "streaming",
 			prompt,
@@ -239,17 +244,69 @@ describe("post-terminal reliable drain settlement", () => {
 		});
 		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false, messages: [] });
 
-		await manager.enqueuePrompt(session.id, "recover after error", intentId ? { intentId } : undefined);
+		const modelText = "expanded recovery payload";
+		const images = [{ type: "image", data: "cGl4ZWw=", mimeType: "image/png" }];
+		const attachments = [{ name: "recovery.txt", mimeType: "text/plain", size: 8 }];
+		const admission = await manager.enqueuePrompt(session.id, "recover after error", {
+			...(intentId ? { intentId } : {}),
+			modelText,
+			images,
+			attachments,
+			streamingBehavior: "followUp",
+			suppressTitleGen: true,
+		});
 		await flushMicrotasks();
+		expect(admission).toEqual({ status: "queued" });
 		expect(prompt, "POST_ERROR_PROMPT_DISPATCHED_BEFORE_PI_SETTLED").not.toHaveBeenCalled();
 		expect(session.promptQueue.toArray()).toHaveLength(1);
-		expect(session.promptQueue.peek()?.text).toContain("recover after error");
+		const deferred = session.promptQueue.peek()!;
+		expect(deferred.text).toContain("terminal model failure");
+		expect(deferred.text).toContain(modelText);
+		expect(deferred.text).not.toBe(modelText);
+		expect(deferred).toMatchObject({
+			images,
+			attachments,
+			streamingBehavior: "followUp",
+			suppressTitleGen: true,
+		});
 		expect(session.lastTurnErrored).toBe(false);
+
+		if (intentId) {
+			const persistedRows = storeUpdates
+				.map((update: any) => update.messageQueue?.find((row: any) => row.id === intentId))
+				.filter(Boolean);
+			expect(persistedRows[0]?.text).toBe(modelText);
+			expect(persistedRows.at(-1)?.text).toBe(deferred.text);
+			for (const field of ["id", "kind", "targetTurn", "sequence", "createdAt", "deliveryState"] as const) {
+				expect(persistedRows.at(-1)?.[field], `${field} changed while preserving the deferred payload`)
+					.toEqual(persistedRows[0]?.[field]);
+			}
+		}
+
+		const later = session.promptQueue.enqueue("later FIFO occurrence");
+		expect(session.promptQueue.toArray().map((row: any) => row.id)).toEqual([deferred.id, later.id]);
 
 		manager.handleAgentLifecycle(session, { type: "agent_settled" });
 		await flushMicrotasks();
 		expect(prompt).toHaveBeenCalledTimes(1);
-		expect(session.promptQueue.toArray()).toEqual([]);
+		expect(prompt.mock.calls[0]?.[0]).toBe(deferred.text);
+		expect(prompt.mock.calls[0]?.[1]).toEqual(images);
+		expect(prompt.mock.calls[0]?.[3]).toBe("followUp");
+		expect(session.promptQueue.toArray().map((row: any) => row.id)).toEqual([later.id]);
+
+		manager.handleAgentLifecycle(session, { type: "agent_start" });
+		const piPromptText = prompt.mock.calls[0]![0];
+		for (const type of ["message_start", "message_end"] as const) {
+			const event = manager.prepareVisibleAgentEvent(session, {
+				type,
+				message: { id: `pi-user-${intentId ?? "legacy"}`, role: "user", content: piPromptText, timestamp: 1_700_000_000_030 },
+			});
+			manager.handleAgentLifecycle(session, event);
+		}
+		const settled = readAuthorSidecar(session.id).find((row) =>
+			intentId ? row.intentId === intentId : promptAuthorBindingMatchesText(row, piPromptText));
+		expect(settled?.settlement?.outcome).toBe("echoed");
+		expect(promptAuthorBindingMatchesText(settled!, piPromptText)).toBe(true);
 	});
 
 	it("rolls every status plane back to idle after a definite no-start rejection", async () => {
