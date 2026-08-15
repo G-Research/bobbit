@@ -174,6 +174,49 @@ describe("installed Pi runtime contract for reliable agent turns", () => {
 		expect(normalizer.normalize(postTerminalDelta)).not.toHaveProperty("message");
 	});
 
+	it("clears the active-run guard before emitting agent_settled to installed-runtime observers", async () => {
+		const observations: Array<{ observer: "extension" | "session"; type: string; isStreaming: boolean }> = [];
+		const receiver: any = Object.create(AgentSession.prototype);
+		Object.assign(receiver, {
+			_isAgentRunActive: false,
+			_eventListeners: [
+				(event: any) => observations.push({
+					observer: "session",
+					type: event.type,
+					isStreaming: receiver.isStreaming,
+				}),
+			],
+			_extensionRunner: {
+				emit: vi.fn(async (event: any) => {
+					observations.push({
+						observer: "extension",
+						type: event.type,
+						isStreaming: receiver.isStreaming,
+					});
+				}),
+			},
+			_flushPendingBashMessages: vi.fn(),
+			_handlePostAgentRun: vi.fn(async () => false),
+			agent: {
+				prompt: vi.fn(async () => {
+					receiver._emit({ type: "agent_end", messages: [] });
+				}),
+				continue: vi.fn(),
+			},
+		});
+
+		await (AgentSession.prototype as any)._runAgentPrompt.call(receiver, [userMessage("settlement contract")]);
+
+		expect(observations, "PI_CONTRACT_AGENT_SETTLED_BEFORE_ACTIVE_RUN_RELEASE").toEqual([
+			{ observer: "session", type: "agent_end", isStreaming: true },
+			{ observer: "extension", type: "agent_settled", isStreaming: false },
+			{ observer: "session", type: "agent_settled", isStreaming: false },
+		]);
+		expect(receiver.agent.prompt).toHaveBeenCalledOnce();
+		expect(receiver._handlePostAgentRun).toHaveBeenCalledOnce();
+		expect(receiver.isIdle).toBe(true);
+	});
+
 	it("orders manual compaction events and releases its controller before compaction_end", async () => {
 		const observations: Array<{ event: any; controllerReleased: boolean }> = [];
 		const receiver: any = {
