@@ -203,6 +203,7 @@ const inherited = {
   nonce: process.env.BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE,
   script: process.env.BOBBIT_POSIX_TREE_SENTINEL_CHILD_SCRIPT,
   payload: process.env.BOBBIT_POSIX_TREE_PAYLOAD,
+  signalWitness: process.env.BOBBIT_POSIX_SENTINEL_TEST_SIGNAL_WITNESS_FD,
   pgid: process.env.BOBBIT_POSIX_SENTINEL_PGID,
 };
 const nested = spawnTracked(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: ["ignore", "ignore", "ignore", "pipe"], posixSentinelIdentity: { file: process.env.BOBBIT_NESTED_SENTINEL_FILE, nonce: "nested-nonce" } });
@@ -217,22 +218,22 @@ process.exit(0);
 `;
 
 const NESTED_SENTINEL_PROBE = String.raw`
-import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnTracked } from ${JSON.stringify(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-nested-sentinel-"));
 const outerFile = path.join(dir, "outer.json"), nestedFile = path.join(dir, "nested.json"), resultFile = path.join(dir, "result.json");
-const tracked = spawnTracked(process.execPath, ["--import", "tsx", "--input-type=module", "-e", ${JSON.stringify(NESTED_SENTINEL_PAYLOAD)}], { stdio: ["ignore", "ignore", "ignore", "pipe"], env: { ...process.env, BOBBIT_OUTER_SENTINEL_FILE: outerFile, BOBBIT_NESTED_SENTINEL_FILE: nestedFile, BOBBIT_NESTED_SENTINEL_RESULT: resultFile }, posixSentinelIdentity: { file: outerFile, nonce: "outer-nonce" } });
+const tracked = spawnTracked(process.execPath, ["--import", "tsx", "--input-type=module", "-e", ${JSON.stringify(NESTED_SENTINEL_PAYLOAD)}], { stdio: ["ignore", "ignore", "ignore", "pipe"], env: { ...process.env, BOBBIT_OUTER_SENTINEL_FILE: outerFile, BOBBIT_NESTED_SENTINEL_FILE: nestedFile, BOBBIT_NESTED_SENTINEL_RESULT: resultFile }, posixSentinelIdentity: { file: outerFile, nonce: "outer-nonce" }, posixSentinelSignalWitnessFd: 4 });
 // The payload can exit before its outer sentinel's FD3 acknowledgement.
 // Subscribe before either event so a fast close cannot be lost between awaits.
 const closed = new Promise((resolve, reject) => { tracked.child.once("close", resolve); tracked.child.once("error", reject); });
+const signalWitness = tracked.child.stdio[4];
+const signalHandled = new Promise((resolve, reject) => { if (!signalWitness) return reject(new Error("missing sentinel signal witness")); signalWitness.once("data", resolve); signalWitness.once("error", reject); });
 await new Promise((resolve, reject) => { const ready = tracked.child.stdio[3]; if (!ready) return reject(new Error("missing outer ready")); ready.once("data", resolve); ready.once("error", reject); });
 const outer = JSON.parse(fs.readFileSync(outerFile, "utf8"));
 process.kill(outer.pid, "SIGTERM");
-await new Promise(resolve => setTimeout(resolve, 30));
-try { process.kill(outer.pid, 0); } catch (error) { assert.fail("sentinel must survive immediate post-ownership SIGTERM: " + error); }
+await signalHandled;
 await closed;
 const result = JSON.parse(fs.readFileSync(resultFile, "utf8"));
 process.stdout.write(JSON.stringify({ ...result, survivedImmediateSigterm: true }) + "\n", () => { fs.rmSync(dir, { recursive: true, force: true }); process.exit(0); });
@@ -791,7 +792,7 @@ describe("spawnTracked timeout cleanup", () => {
 			return;
 		}
 		const result = await runNativeJsonProbe(NESTED_SENTINEL_PROBE);
-		expect(result.inherited).toEqual({ file: undefined, nonce: undefined, script: undefined, payload: undefined, pgid: undefined });
+		expect(result.inherited).toEqual({ file: undefined, nonce: undefined, script: undefined, payload: undefined, signalWitness: undefined, pgid: undefined });
 		expect(result.outer.nonce).toBe("outer-nonce");
 		expect(result.nested.nonce).toBe("nested-nonce");
 		expect(result.nested.pid).not.toBe(result.outer.pid);

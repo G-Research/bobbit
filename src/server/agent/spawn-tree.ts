@@ -66,6 +66,8 @@ export interface SpawnTrackedOptions {
 	posixSentinelIdentity?: { file: string; nonce: string };
 	/** Test seam for validating a retained POSIX sentinel before its final signal. */
 	posixSentinelIdentityInspector?: (pid: number) => { pgid: number; startTokenKind: string; startToken: string; sentinelNonce?: string } | undefined;
+	/** Test-only inherited FD that acknowledges the sentinel handled SIGTERM. */
+	posixSentinelSignalWitnessFd?: number;
 	/**
 	 * Docker-exec transport only: retain the exact POSIX sentinel after its CLI
 	 * root exits so container payload cleanup can finish before host transport
@@ -413,6 +415,10 @@ export function spawnTracked(
 	// require PowerShell merely to exercise state transitions.
 	const posixTreeSentinel = opts.posixTreeSentinel ?? (!isWin && opts.spawnImpl == null);
 	const retainPosixSentinelForContainerTransport = !!opts.retainPosixSentinelForContainerTransport;
+	const posixSentinelSignalWitnessFd = opts.posixSentinelSignalWitnessFd;
+	if (posixSentinelSignalWitnessFd != null && (!Number.isSafeInteger(posixSentinelSignalWitnessFd) || posixSentinelSignalWitnessFd < 4)) {
+		throw new Error("POSIX sentinel signal witness must be an inherited FD after the readiness pipe.");
+	}
 	if (retainPosixSentinelForContainerTransport && (!posixTreeSentinel || !opts.posixSentinelIdentity)) {
 		throw new Error("Container transport sentinel retention requires a POSIX sentinel identity.");
 	}
@@ -441,6 +447,9 @@ export function spawnTracked(
 				BOBBIT_POSIX_SENTINEL_IDENTITY_FILE: opts.posixSentinelIdentity.file,
 				BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE: opts.posixSentinelIdentity.nonce,
 			} : {}),
+			// Always overwrite this private test seam so an inherited user environment
+			// can never make production sentinels emit a signal acknowledgement.
+			BOBBIT_POSIX_SENTINEL_TEST_SIGNAL_WITNESS_FD: posixSentinelSignalWitnessFd == null ? "" : String(posixSentinelSignalWitnessFd),
 		}
 		: opts.env;
 	let child: ChildProcess;

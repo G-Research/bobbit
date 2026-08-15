@@ -13,9 +13,10 @@ import { createRequire } from "node:module";
 const PAYLOAD_ENV = "BOBBIT_POSIX_TREE_PAYLOAD";
 const IDENTITY_FILE_ENV = "BOBBIT_POSIX_SENTINEL_IDENTITY_FILE";
 const IDENTITY_NONCE_ENV = "BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE";
+const SIGNAL_WITNESS_ENV = "BOBBIT_POSIX_SENTINEL_TEST_SIGNAL_WITNESS_FD";
 const SENTINEL_FLAG = "--bobbit-posix-tree-sentinel";
 const SENTINEL_ARGUMENT_PREFIX = "bobbit-posix-sentinel:";
-const INTERNAL_ENVIRONMENT = [PAYLOAD_ENV, IDENTITY_FILE_ENV, IDENTITY_NONCE_ENV] as const;
+const INTERNAL_ENVIRONMENT = [PAYLOAD_ENV, IDENTITY_FILE_ENV, IDENTITY_NONCE_ENV, SIGNAL_WITNESS_ENV] as const;
 
 type Payload = { file: string; args: string[]; stdioCount: number };
 type SentinelIdentity = { pgid: number; startTokenKind: string; startToken: string };
@@ -93,6 +94,13 @@ function sentinelArgs(): string[] {
 		: [entry, SENTINEL_FLAG, nonceArgument];
 }
 
+function signalWitnessFd(): number | undefined {
+	const value = process.env[SIGNAL_WITNESS_ENV];
+	if (!value) return undefined;
+	const fd = Number(value);
+	return Number.isSafeInteger(fd) && fd >= 4 ? fd : die();
+}
+
 function payloadEnvironment(): NodeJS.ProcessEnv {
 	const environment = { ...process.env };
 	for (const name of INTERNAL_ENVIRONMENT) delete environment[name];
@@ -103,7 +111,14 @@ function runSentinel(): void {
 	// Install this barrier before identity publication and FD-3 acknowledgement:
 	// a host cancellation that races either must not strand a live payload without
 	// the sentinel that owns its process group after root exit.
-	for (const signal of ["SIGHUP", "SIGINT", "SIGTERM"] as const) process.on(signal, () => {});
+	const witnessFd = signalWitnessFd();
+	for (const signal of ["SIGHUP", "SIGINT", "SIGTERM"] as const) process.on(signal, () => {
+		// Only the explicitly injected test FD observes this no-op handler. It is
+		// absent in production and never becomes part of the payload environment.
+		if (signal === "SIGTERM" && witnessFd != null) {
+			try { writeSync(witnessFd, "."); } catch { /* test witness may have closed */ }
+		}
+	});
 	if (!publishIdentity()) die();
 	try {
 		writeSync(3, ".");
@@ -118,9 +133,10 @@ function runSentinel(): void {
 
 function runSupervisor(): void {
 	const payload = parsePayload();
+	const witnessFd = signalWitnessFd();
 	const sentinel = spawn(process.execPath, sentinelArgs(), {
 		env: process.env,
-		stdio: ["ignore", "ignore", "ignore", 3],
+		stdio: witnessFd == null ? ["ignore", "ignore", "ignore", 3] : ["ignore", "ignore", "ignore", 3, witnessFd],
 	});
 	// A failed sentinel never acknowledges FD 3. Let the host's ownership
 	// barrier fail closed rather than running a payload without a durable group
