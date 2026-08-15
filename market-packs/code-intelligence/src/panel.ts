@@ -113,7 +113,7 @@ function evidenceText(capability: RecordValue): string | undefined {
 	if (!evidence) return undefined;
 	const details: string[] = [];
 	if (typeof evidence.fileCount === "number") details.push(`${evidence.fileCount} ${evidence.fileCount === 1 ? "file" : "files"}`);
-	const namedMarkers = Array.isArray(evidence.rootMarkers) ? evidence.rootMarkers.filter((item): item is string => typeof item === "string" && item.trim()) : [];
+	const namedMarkers = Array.isArray(evidence.rootMarkers) ? evidence.rootMarkers.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
 	if (namedMarkers.length) details.push(namedMarkers.join(", "));
 	return details.length ? `Detected from ${details.join(" · ")}` : undefined;
 }
@@ -136,7 +136,7 @@ function lspDetails(capability: RecordValue): { label: string; reason?: string; 
 		unsupported: "Structural search only",
 	};
 	const reason = typeof lsp.reason === "string" && lsp.reason.trim() ? lsp.reason : requirementText(lsp);
-	const actions = Array.isArray(lsp.actions) ? lsp.actions.filter((item): item is string => typeof item === "string" && item.trim()).join(", ") : undefined;
+	const actions = Array.isArray(lsp.actions) ? lsp.actions.filter((item): item is string => typeof item === "string" && item.trim().length > 0).join(", ") : undefined;
 	return { label: labels[state] ?? "Unavailable", reason, actions };
 }
 
