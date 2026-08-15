@@ -34,7 +34,7 @@ type Fixture = {
 	packDir: string;
 	baseUrl: string;
 	gateway: ReturnType<typeof createGateway>;
-	runner: CommandRunner & { calls: RunnerCall[]; images: Map<string, DockerImage> };
+	runner: CommandRunner & { calls: RunnerCall[]; images: Map<string, DockerImage>; failBuild: boolean };
 	projectA: string;
 	projectB: string;
 	operatorHeaders: Record<string, string>;
@@ -84,12 +84,13 @@ function writeFixturePack(root: string): string {
 	return packDir;
 }
 
-function fakeDockerRunner(): CommandRunner & { calls: RunnerCall[]; images: Map<string, DockerImage> } {
+function fakeDockerRunner(): CommandRunner & { calls: RunnerCall[]; images: Map<string, DockerImage>; failBuild: boolean } {
 	const calls: RunnerCall[] = [];
 	const images = new Map<string, DockerImage>();
-	return {
+	const runner: CommandRunner & { calls: RunnerCall[]; images: Map<string, DockerImage>; failBuild: boolean } = {
 		calls,
 		images,
+		failBuild: false,
 		async execFile(file: string, args: readonly string[], options?: ExecFileOptions) {
 			calls.push({ file, args, options });
 			if (file !== "docker") throw new Error(`SANDBOX_REQUIREMENTS_UNEXPECTED_COMMAND: ${file}`);
@@ -105,6 +106,7 @@ function fakeDockerRunner(): CommandRunner & { calls: RunnerCall[]; images: Map<
 				return { stdout: `${label}\n`, stderr: "" };
 			}
 			if (args[0] === "build") {
+				if (runner.failBuild) throw new Error("SANDBOX_REQUIREMENTS_FORCED_BUILD_FAILURE");
 				const tag = args[args.indexOf("-t") + 1];
 				const fingerprintArg = args.find(arg => arg.startsWith("BOBBIT_SANDBOX_REQUIREMENTS_FINGERPRINT="));
 				if (!tag || !fingerprintArg) throw new Error("SANDBOX_REQUIREMENTS_BUILD_ARGS_MISSING");
@@ -115,6 +117,7 @@ function fakeDockerRunner(): CommandRunner & { calls: RunnerCall[]; images: Map<
 			throw new Error(`SANDBOX_REQUIREMENTS_UNEXPECTED_DOCKER: ${args.join(" ")}`);
 		},
 	};
+	return runner;
 }
 
 async function responseJson(response: Response): Promise<any> {
@@ -248,6 +251,30 @@ describe.sequential("sandbox extension requirements integration", () => {
 		const available = requirementStatus(await status(fixture, fixture.projectA));
 		expect(available).toMatchObject({ fingerprint: pending.fingerprint, profiles: ["python"], entries: [{ packId: PACK_ID, requirementId: REQUIREMENT_ID, state: "available" }] });
 		expect(requirementStatus(await status(fixture, fixture.projectB))).toMatchObject({ profiles: [], entries: [] });
+
+		// An attempted build failure belongs to this exact fingerprint and must
+		// survive unrelated resolver cache invalidation.
+		fixture.runner.failBuild = true;
+		const failedBuild = await api(fixture, "/api/sandbox-image/build", { method: "POST", body: JSON.stringify({ projectId: fixture.projectA }) });
+		expect(failedBuild.status, await failedBuild.clone().text()).toBe(500);
+		expect(requirementStatus(await status(fixture, fixture.projectA))).toMatchObject({ entries: [{ state: "failed", code: "build-failed" }] });
+		const order = await api(fixture, "/api/marketplace/pack-order?scope=server");
+		expect(order.status, await order.clone().text()).toBe(200);
+		const unchangedOrder = await api(fixture, "/api/marketplace/pack-order", { method: "PUT", body: JSON.stringify({ scope: "server", order: (await responseJson(order)).order ?? [] }) });
+		expect(unchangedOrder.status, await unchangedOrder.clone().text()).toBe(200);
+		expect(requirementStatus(await status(fixture, fixture.projectA))).toMatchObject({ entries: [{ state: "failed", code: "build-failed" }] });
+		fixture.runner.failBuild = false;
+		const retry = await api(fixture, "/api/sandbox-image/build", { method: "POST", body: JSON.stringify({ projectId: fixture.projectA }) });
+		expect(retry.status, await retry.clone().text()).toBe(200);
+
+		// A disabled project must be rejected before plan resolution or any Docker call.
+		const disableProjectSandbox = await api(fixture, `/api/projects/${encodeURIComponent(fixture.projectB)}/config`, { method: "PUT", body: JSON.stringify({ sandbox: "none" }) });
+		expect(disableProjectSandbox.status, await disableProjectSandbox.clone().text()).toBe(200);
+		const callsBeforeDisabledBuild = fixture.runner.calls.length;
+		const disabledBuild = await api(fixture, "/api/sandbox-image/build", { method: "POST", body: JSON.stringify({ projectId: fixture.projectB }) });
+		expect(disabledBuild.status, await disabledBuild.clone().text()).toBe(409);
+		expect(await responseJson(disabledBuild)).toMatchObject({ code: "SANDBOX_NOT_CONFIGURED" });
+		expect(fixture.runner.calls).toHaveLength(callsBeforeDisabledBuild);
 	});
 
 	it("invalidates persisted plans on reload, grant revoke, settings disable, activation disable, and pack removal", async () => {
@@ -277,7 +304,7 @@ describe.sequential("sandbox extension requirements integration", () => {
 		expect(requirementStatus(await status(fixture, fixture.projectA))).toMatchObject({ profiles: [], entries: [] });
 	});
 
-	it("recreates only the sandbox whose resolved plan changes", async () => {
+	it("skips heavyweight bootstrap for an unchanged identity and recreates once when it changes", async () => {
 		const created: string[] = [];
 		const removed: string[] = [];
 		const generations = new Map<string, number>();
@@ -296,11 +323,26 @@ describe.sequential("sandbox extension requirements integration", () => {
 		const stop = vi.spyOn(ProjectSandbox.prototype, "stopHealthMonitor").mockImplementation(() => {});
 		try {
 			const plans = new Map([["project-a", { image: "agent:a", fingerprint: "a" }], ["project-b", { image: "agent:b", fingerprint: "b" }]]);
-			const manager = new SandboxManager({ bootstrap: async (projectId) => ({ projectId, projectDir: "/fixture", repoUrl: "file:///fixture", networkName: "fixture", image: plans.get(projectId)!.image, sandboxImageFingerprint: plans.get(projectId)!.fingerprint } as any) });
+			let bootstrapCalls = 0;
+			let dockerBootstrapCalls = 0;
+			const manager = new SandboxManager({
+				planIdentity: (projectId) => plans.get(projectId) ?? null,
+				bootstrap: async (projectId) => {
+					bootstrapCalls++;
+					dockerBootstrapCalls++; // the production bootstrap's Docker/image phase
+					const plan = plans.get(projectId)!;
+					return { projectId, projectDir: "/fixture", repoUrl: "file:///fixture", networkName: "fixture", image: plan.image, sandboxImageFingerprint: plan.fingerprint } as any;
+				},
+			});
 			await manager.ensureForProject("project-a");
 			await manager.ensureForProject("project-b");
+			await manager.ensureForProject("project-a");
+			expect(bootstrapCalls).toBe(2);
+			expect(dockerBootstrapCalls).toBe(2);
 			plans.set("project-a", { image: "agent:a-python", fingerprint: "a-python" });
 			await manager.ensureForProject("project-a");
+			expect(bootstrapCalls).toBe(3);
+			expect(dockerBootstrapCalls).toBe(3);
 			expect(created).toEqual(["project-a", "project-b", "project-a"]);
 			expect(removed).toEqual(["fixture-project-a-1"]);
 			expect(manager.get("project-a")?.getStatus().containerId).toBe("fixture-project-a-2");
