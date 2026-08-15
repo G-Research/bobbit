@@ -650,7 +650,8 @@ test.describe("remote-state coordinator routes", () => {
 			method: "PUT",
 			body: JSON.stringify({ branch: "17", repoPath: outsideRepo }),
 		});
-		expect(poisonedPut.status).toBe(200);
+		expect(poisonedPut.status).toBe(400);
+		expect(await poisonedPut.text()).toContain("repoPath");
 		const persistedGoal = await (await apiFetch(`/api/goals/${goalId}`)).json();
 		expect(persistedGoal.repoPath).toBe(ownedCwd);
 		expect(persistedGoal.repoPath).not.toBe(outsideRepo);
