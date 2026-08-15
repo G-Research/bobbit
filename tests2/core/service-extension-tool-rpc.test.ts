@@ -35,13 +35,15 @@ describe("service extension tool RPC", () => {
 	});
 
 	it("rejects caller-selected identity fields, paths, invalid discriminators, and unbounded JSON", () => {
+		let tooDeep: unknown = 1;
+		for (let depth = 0; depth <= 16; depth++) tooDeep = { nested: tooDeep };
 		for (const candidate of [
 			{ ...request(), packId: "other" },
 			request({ component: "../worktree" }),
 			request({ serviceId: "../service" }),
 			request({ discriminator: "TypeScript" }),
 			request({ operation: "http://127.0.0.1" }),
-			request({ payload: { query: "ok", nested: { a: { b: { c: { d: { e: { f: { g: { h: { i: { j: { k: { l: { m: { n: { o: { p: { q: 1 } } } } } } } } } } } } } } } } } }),
+			request({ payload: { query: "ok", nested: tooDeep } }),
 		]) expect(() => validateServiceToolRequest(candidate)).toThrow(ServiceToolRpcError);
 		expect(() => validateServiceToolResponse({ state: "ready", value: new Date() })).toThrow(ServiceToolRpcError);
 	});

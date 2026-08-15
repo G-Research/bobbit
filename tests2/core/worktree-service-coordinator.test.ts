@@ -19,7 +19,7 @@ function fixture(overrides: Partial<WorktreeServiceCoordinatorDeps> = {}) {
 	let activeCalls = 0;
 	const runtime = {
 		reconcile: async (ref: ServiceInstanceRef) => { reconciled.push(ref); },
-		status: () => ({ state: "ready" }),
+		status: (): { state: "ready" } => ({ state: "ready" }),
 		stop: async (ref?: ServiceInstanceRef) => { if (ref) stopped.push(ref); },
 	};
 	const deps: WorktreeServiceCoordinatorDeps = {

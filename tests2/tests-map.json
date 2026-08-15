@@ -3578,6 +3578,24 @@
       }
     },
     {
+      "path": "tests2/core/worktree-service-coordinator.test.ts",
+      "reason": "Gateway-owned linked-worktree scope, opaque data-directory, exact-instance, authorization, and cleanup coverage for managed services.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/service-extension-tool-rpc.test.ts",
+      "reason": "Closed managed-service tool RPC validation, exact adapter lookup, bounded payload/result, FIFO, and fence coverage.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/integration/service-extension-registry.test.ts",
       "reason": "Active winning-pack and project-settings isolation coverage for service extension declarations without secret projection.",
       "execution": {

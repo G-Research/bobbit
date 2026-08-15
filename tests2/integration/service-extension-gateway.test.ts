@@ -1,16 +1,16 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { afterEach, describe, it } from "vitest";
+import { test } from "./_e2e/in-process-harness.js";
 import { apiFetch, defaultProject } from "./_e2e/e2e-setup.js";
 
 const temporaryRoots: string[] = [];
-afterEach(() => {
+test.afterEach(() => {
 	for (const root of temporaryRoots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
-describe("managed-service gateway wiring", () => {
-	it("rejects project-root replacement while its live context owns managed-service state", async () => {
+test.describe("managed-service gateway wiring", () => {
+	test("rejects project-root replacement while its live context owns managed-service state", async () => {
 		const project = await defaultProject();
 		const replacement = fs.mkdtempSync(path.join(project.rootPath, ".managed-service-replacement-"));
 		temporaryRoots.push(replacement);

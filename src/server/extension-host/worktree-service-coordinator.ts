@@ -6,6 +6,11 @@
 
 import { createHash } from "node:crypto";
 import path from "node:path";
+import type { ServiceInstancePublicRef, ServiceInstanceRef, ServiceStatus } from "./service-extension-contract.js";
+import type { ServiceExtensionRuntime } from "./service-extension-runtime.js";
+import type { ServiceExtensionToolRpc, ServiceToolRequest, ServiceToolResponse } from "./service-extension-tool-rpc.js";
+
+export type { ServiceInstancePublicRef, ServiceInstanceRef } from "./service-extension-contract.js";
 
 const SAFE_ID = /^[a-z][a-z0-9-]{0,63}$/;
 const SAFE_DISCRIMINATOR = /^[a-z][a-z0-9-]{0,31}$/;
@@ -13,19 +18,6 @@ const MAX_DISCRIMINATOR_BYTES = 32;
 const MAX_OPERATION_BYTES = 64;
 const MAX_VALUE_BYTES = 64 * 1024;
 const MAX_VALUE_DEPTH = 16;
-
-/** Internal-only identity. canonicalWorktreeRoot must never leave core seams. */
-export interface ServiceInstanceRef {
-	projectId: string;
-	component: string;
-	canonicalWorktreeRoot: string;
-	worktreeKey: string;
-	packId: string;
-	serviceId: string;
-	discriminator: string;
-}
-
-export type ServiceInstancePublicRef = Omit<ServiceInstanceRef, "canonicalWorktreeRoot">;
 
 export interface WorktreeServiceSession {
 	id: string;
@@ -46,24 +38,13 @@ export interface WorktreeServiceDeclaration {
 	spec: { id: string; dataDir?: string };
 }
 
-export interface WorktreeServiceRequest {
-	component: string;
-	serviceId: string;
-	discriminator?: string;
-	operation: string;
-	payload?: unknown;
-}
-
-export interface WorktreeServiceResponse {
-	state: "ready";
-	value?: unknown;
-}
+/** Backward-compatible coordinator names alias the canonical broker contracts. */
+export type WorktreeServiceRequest = ServiceToolRequest;
+export type WorktreeServiceResponse = ServiceToolResponse;
 
 /** The lifecycle manager deliberately remains unaware of sessions and Git. */
-export interface WorktreeServiceRuntime {
-	reconcile(ref: ServiceInstanceRef): Promise<void>;
-	status(ref: ServiceInstancePublicRef): { state: string } | undefined;
-	stop(ref?: ServiceInstanceRef): Promise<void>;
+export interface WorktreeServiceRuntime extends Pick<ServiceExtensionRuntime, "reconcile" | "stop"> {
+	status: (ref: ServiceInstancePublicRef) => Pick<ServiceStatus, "state"> | undefined;
 }
 
 /** A core-registered adapter. It is never passed to extension code. */
@@ -185,7 +166,7 @@ function isBoundedJson(value: unknown): boolean {
  * Calls are intentionally exact: a request can never select a sibling pack,
  * component, or linked worktree by supplying a path.
  */
-export class WorktreeServiceCoordinator {
+export class WorktreeServiceCoordinator implements ServiceExtensionToolRpc {
 	private readonly instances = new Map<string, ServiceInstanceRef>();
 	private readonly reconcileStates = new Map<string, ReconcileState>();
 	/** Stop operations advance this fence so an older resolver cannot revive a root. */

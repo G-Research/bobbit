@@ -207,6 +207,9 @@ const PROXYABLE: Record<string, Set<string>> = {
 	// `ServerHostApi` with the bound owner/source scoping stays in the PARENT and
 	// services the proxied calls over the same channel.
 	agents: new Set(["spawn", "prompt", "dismiss", "list", "read", "status"]),
+	// Exact managed-service RPC remains closure-bound in the parent host. Workers
+	// may proxy only this closed call shape, never a process, path, or transport.
+	services: new Set(["call"]),
 };
 
 /** Invoke a proxied host method on the PARENT's live host, enforcing the
@@ -301,14 +304,14 @@ export class ModuleHost {
 		const { host: _liveProviderHost, ...ctxNoHost } = providerCtx;
 		const { gateway: _advisorGateway, ...advisorCtx } = ctxNoHost;
 		const serCtx = req.exportKind === "hooks" || req.exportKind === "result-filters"
-			? { ...ctxNoHost, capabilities: { callRoute: false, session: false, store: false, agents: false } }
+			? { ...ctxNoHost, capabilities: { callRoute: false, session: false, store: false, agents: false, services: false } }
 			: req.exportKind === "providers"
 				? {
 					...ctxNoHost,
 					workingDir: providerCtx.workingDir ?? req.workingDir,
 					hostVersion: (host as { version?: number } | undefined)?.version,
 					hostContractVersion: (host as { contractVersion?: number } | undefined)?.contractVersion,
-					capabilities: { callRoute: false, session: capSrc?.session === true, store: capSrc?.store === true, agents: capSrc?.agents === true },
+					capabilities: { callRoute: false, session: capSrc?.session === true, store: capSrc?.store === true, agents: capSrc?.agents === true, services: capSrc?.services === true },
 				}
 				: req.exportKind === "advisors"
 					? advisorCtx
@@ -328,6 +331,7 @@ export class ModuleHost {
 						session: capSrc?.session === true,
 						store: capSrc?.store === true,
 						agents: capSrc?.agents === true,
+						services: capSrc?.services === true,
 					},
 				};
 
