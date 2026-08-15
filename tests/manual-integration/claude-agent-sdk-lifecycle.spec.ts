@@ -40,6 +40,20 @@ function restoreSmokeEnvironment(environment: Map<string, string | undefined>): 
 	}
 }
 
+/** Configure the direct smoke without allowing ambient API credentials. */
+function configureDirectSmokeEnvironment(environment: Map<string, string | undefined>): void {
+	const approvedAgentDir = environment.get("BOBBIT_AGENT_DIR");
+	if (approvedAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;
+	else process.env.BOBBIT_AGENT_DIR = approvedAgentDir;
+	delete process.env.ANTHROPIC_API_KEY;
+	delete process.env.ANTHROPIC_AUTH_TOKEN;
+	process.env.BOBBIT_SKIP_MCP = "1";
+	process.env.BOBBIT_SKIP_AIGW_DISCOVERY = "1";
+	process.env.BOBBIT_SKIP_TITLE_GEN = "1";
+	process.env.BOBBIT_SKIP_WORKTREE_POOL = "1";
+	process.env.BOBBIT_NO_OPEN = "1";
+}
+
 /** Keep assertions diagnostic-safe: never stringify SDK-owned transcript rows. */
 function rootMessages(snapshot: unknown): Record<string, unknown>[] {
 	const messages = Array.isArray(snapshot)
@@ -159,6 +173,24 @@ test("Claude Agent SDK provider-unavailable failure is bounded and sanitized wit
 	}
 });
 
+test("Claude Agent SDK direct smoke setup removes ambient API credentials", () => {
+	const originalEnvironment = captureSmokeEnvironment();
+	try {
+		process.env.BOBBIT_AGENT_DIR = join(manualTmpRoot(), `approved-agent-dir-${process.pid}`);
+		process.env.ANTHROPIC_API_KEY = "ambient-api-key";
+		process.env.ANTHROPIC_AUTH_TOKEN = "ambient-auth-token";
+		const approvedEnvironment = captureSmokeEnvironment();
+		configureDirectSmokeEnvironment(approvedEnvironment);
+		expect({
+			agentDirRetained: process.env.BOBBIT_AGENT_DIR === approvedEnvironment.get("BOBBIT_AGENT_DIR"),
+			apiKeyRemoved: process.env.ANTHROPIC_API_KEY === undefined,
+			authTokenRemoved: process.env.ANTHROPIC_AUTH_TOKEN === undefined,
+		}).toEqual({ agentDirRetained: true, apiKeyRemoved: true, authTokenRemoved: true });
+	} finally {
+		restoreSmokeEnvironment(originalEnvironment);
+	}
+});
+
 test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 	test("uses Bobbit OAuth and supports ready, prompt, steer, soft interrupt, and termination", async () => {
 		test.skip(
@@ -190,16 +222,11 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			process.env.BOBBIT_SECRETS_DIR = secretsDir;
 			// Keep the user's existing Bobbit OAuth connection discoverable; do not
 			// copy it into this isolated gateway or SDK config root.
-			const existingAgentDir = originalEnvironment.get("BOBBIT_AGENT_DIR");
-			if (existingAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;
-			else process.env.BOBBIT_AGENT_DIR = existingAgentDir;
-			process.env.BOBBIT_SKIP_MCP = "1";
-			process.env.BOBBIT_SKIP_AIGW_DISCOVERY = "1";
-			process.env.BOBBIT_SKIP_TITLE_GEN = "1";
-			process.env.BOBBIT_SKIP_WORKTREE_POOL = "1";
-			process.env.BOBBIT_NO_OPEN = "1";
+			const approvedAgentDir = originalEnvironment.get("BOBBIT_AGENT_DIR");
+			const hasApprovedAgentDir = typeof approvedAgentDir === "string" && approvedAgentDir.trim().length > 0;
+			configureDirectSmokeEnvironment(originalEnvironment);
 
-			const { resetAgentDirStateForTests, setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
+			const { getAgentDirState, globalAgentDir, normalizeAgentDirInput, resetAgentDirStateForTests, setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
 			const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
 			const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
 			const { createGateway } = await import("../../dist/server/server.js");
@@ -220,6 +247,15 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			const port = await (gateway as any).start();
 			baseURL = `http://127.0.0.1:${port}`;
 
+			// Only assert the startup source/path if the operator explicitly supplied
+			// it. Keep diagnostics boolean-only so no local directory is exposed.
+			if (hasApprovedAgentDir && approvedAgentDir !== undefined) {
+				expect({
+					startupSourceIsExplicit: getAgentDirState().startup.source === "BOBBIT_AGENT_DIR",
+					startupResolvesToApprovedDir: globalAgentDir() === normalizeAgentDirInput(approvedAgentDir, bobbitDir),
+				}).toEqual({ startupSourceIsExplicit: true, startupResolvesToApprovedDir: true });
+			}
+
 			const api = (path: string, init: RequestInit = {}) => fetch(`${baseURL}${path}`, {
 				...init,
 				headers: {
@@ -237,6 +273,18 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 				}
 				throw new Error(`Timed out waiting for ${label}`);
 			};
+
+			// Fail before session creation when the isolated gateway cannot see a
+			// current Bobbit OAuth login. Read and assert only non-secret status fields.
+			const oauthStatusResponse = await api("/api/oauth/status?provider=anthropic");
+			expect(oauthStatusResponse.status).toBe(200);
+			const oauthStatus = await oauthStatusResponse.json() as { authenticated?: unknown; provider?: unknown };
+			expect({
+				authenticated: oauthStatus.authenticated === true,
+				anthropicProvider: oauthStatus.provider === "anthropic",
+			}).toEqual({ authenticated: true, anthropicProvider: true });
+			const { resolveDirectClaudeAgentSdkOAuthAccessToken } = await import("../../dist/server/agent/host-tokens.js");
+			await resolveDirectClaudeAgentSdkOAuthAccessToken();
 
 			const projectResponse = await api("/api/projects", {
 				method: "POST",
