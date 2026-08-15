@@ -6284,8 +6284,9 @@ export class SessionManager {
 					}
 				}
 				const prefixedDispatch = buildErrorRecoveryPrefix(errorSnippet, dispatchText);
+				const settlementFenced = session._piAgentRunSettled === false;
 				await this.dispatchDirectPrompt(session, prefixedDispatch, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, accepted.id, accepted.id, opts?.streamingBehavior, false, false, opts?.suppressTitleGen);
-				return { status: "dispatched" };
+				return { status: settlementFenced ? "queued" : "dispatched" };
 			}
 			if (session.status === "idle") {
 				this.drainQueue(session);
@@ -6488,8 +6489,9 @@ export class SessionManager {
 			// cleared).
 			// Inject the recovery prefix into the model-facing dispatch text.
 			const prefixedDispatch = buildErrorRecoveryPrefix(errSnippet, dispatchText);
+			const settlementFenced = session._piAgentRunSettled === false;
 			await this.dispatchDirectPrompt(session, prefixedDispatch, opts?.images, opts?.attachments, !!opts?.isSteered, !!opts?.coldStart, source, author, undefined, undefined, opts?.streamingBehavior, undefined, false, opts?.suppressTitleGen);
-			return { status: "dispatched" };
+			return { status: settlementFenced ? "queued" : "dispatched" };
 		}
 
 		// If agent is idle and queue is empty, dispatch directly. Mark streaming
@@ -7473,7 +7475,23 @@ export class SessionManager {
 			const existing = durableQueueRowId
 				? session.promptQueue.toArray().find((row) => row.id === durableQueueRowId)
 				: undefined;
-			if (!existing) {
+			if (existing) {
+				// Admission created this occurrence before the error-recovery envelope was
+				// known. Preserve its identity/lane/state while durably replacing only the
+				// model-facing payload and dispatch metadata that settlement must replay.
+				Object.assign(existing, {
+					text,
+					images,
+					attachments,
+					isSteered: isSteered ?? false,
+					source,
+					verifierOwned,
+					author,
+					streamingBehavior,
+					coldStart,
+					suppressTitleGen,
+				});
+			} else {
 				const deferred = {
 					id: durableQueueRowId ?? randomUUID(),
 					text,
@@ -8094,14 +8112,14 @@ export class SessionManager {
 				}
 				return;
 			}
-			if (session.turnTerminalHandled) return;
-			session.turnTerminalHandled = true;
-			// A synthetic hard-kill terminal has no later Pi settlement event. Graceful
-			// replacement replay still waits for the old bridge's real agent_settled;
-			// coordinator ownership alone must not bypass Pi's active-run guard.
+			// A synthetic hard-kill terminal has no later Pi settlement event. Synthesize
+			// settlement even when the real final agent_end already performed this turn's
+			// bookkeeping; graceful replacement replay still waits for agent_settled.
 			if (opts?.replacementOwnedTerminal && opts.abortAttemptOutcome !== undefined) {
 				session._piAgentRunSettled = true;
 			}
+			if (session.turnTerminalHandled) return;
+			session.turnTerminalHandled = true;
 
 			// Revoke one-time granted tools after the turn completes
 			if (session.oneTimeGrantedTools && session.oneTimeGrantedTools.length > 0) {
