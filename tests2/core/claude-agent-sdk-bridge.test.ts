@@ -256,9 +256,14 @@ describe("ClaudeAgentSdkBridge", () => {
 		expect(fixture.bridge.running).toBe(false);
 		expect((fixture.bridge as any).state).toBe("failed");
 		expect((await fixture.bridge.getState()).data.sessionId).toBeUndefined();
-		expect(observed.filter(event => event.type === "process_exit")).toHaveLength(1);
-		// Once init fails, no provider event may enter the canonical transcript.
-		expect(observed.filter(event => event.type !== "process_exit")).toEqual([]);
+		// Input delivery was accepted before the SDK rejected its streamed identity.
+		// Preserve that acceptance fence; only transcript-bearing provider frames are
+		// suppressed after the failure.
+		expect(observed).toEqual([
+			{ type: "agent_start" },
+			expect.objectContaining({ type: "process_exit", code: 1, error: "SDK_SESSION_UNAVAILABLE" }),
+		]);
+		expect(observed.filter(event => event.type === "agent_end" || event.type.startsWith("message") || event.type.includes("tool"))).toEqual([]);
 	});
 
 	it("becomes ready with the valid streamed system:init UUID as its only resumable identity", async () => {
