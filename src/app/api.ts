@@ -4171,8 +4171,8 @@ export function setMcpOperationActivation(opts: {
 // PROJECT EXTENSION SETTINGS API (schema 2 declarations, all secret values redacted)
 // ============================================================================
 
-export type ExtensionSettingKind = "string" | "secret" | "enum" | "boolean" | "number";
-export type ExtensionSettingValue = string | boolean | number;
+export type ExtensionSettingKind = "string" | "secret" | "enum" | "multi-enum" | "boolean" | "number";
+export type ExtensionSettingValue = string | boolean | number | string[];
 export type ExtensionSettingsTargetKind = "pack" | "provider" | "hook" | "runtime";
 
 export interface ExtensionSettingsTargetRef {

@@ -1505,6 +1505,51 @@
 	color: var(--foreground);
 }
 
+.market-settings-multi-enum {
+	width: min(100%, 28rem);
+	min-width: 0;
+	margin: 0;
+	padding: 0.5rem;
+	border: 1px solid var(--border);
+	border-radius: 0.375rem;
+}
+
+.market-settings-multi-enum > legend {
+	padding: 0 0.2rem;
+	font-size: 0.75rem;
+	font-weight: 600;
+	color: var(--foreground);
+}
+
+.market-settings-multi-enum-options {
+	display: grid;
+	gap: 0.25rem;
+	max-height: 12rem;
+	overflow: auto;
+	padding: 0.125rem;
+}
+
+.market-settings-multi-enum-option {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	min-height: 2.25rem;
+	font-size: 0.75rem;
+	color: var(--foreground);
+}
+
+.market-settings-multi-enum-option > input {
+	inline-size: 1rem;
+	block-size: 1rem;
+	flex: 0 0 auto;
+}
+
+.market-settings-multi-enum-summary {
+	margin-top: 0.375rem;
+	font-size: 0.6875rem;
+	color: var(--muted-foreground);
+}
+
 .market-settings-field-error {
 	font-size: 0.6875rem;
 	color: var(--negative, var(--destructive));
@@ -1544,7 +1589,10 @@
 	.market-capability-grant > .market-btn { width: fit-content; }
 	.market-grant-history-row { grid-template-columns: 1fr auto; }
 	.market-grant-history-row time { grid-column: 1; }
-	.market-settings-field > .market-input { width: 100%; min-height: 2.75rem; }
-	.market-settings-boolean { min-height: 2.75rem; }
+	.market-settings-field > .market-input,
+	.market-settings-multi-enum { width: 100%; }
+	.market-settings-field > .market-input,
+	.market-settings-boolean,
+	.market-settings-multi-enum-option { min-height: 2.75rem; }
 	.market-btn { min-height: 2.75rem; }
 }

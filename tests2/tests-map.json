@@ -3864,6 +3864,15 @@
         "tier": "browser",
         "project": "browser"
       }
+    },
+    {
+      "path": "tests2/dom/marketplace-extension-settings-multi-enum.test.ts",
+      "reason": "DOM coverage for accessible multi-enum extension-setting controls, canonical PATCH payloads, and required-empty rejection.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
     }
   ],
   "journeys": [
