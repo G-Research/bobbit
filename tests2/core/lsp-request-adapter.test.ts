@@ -10,7 +10,7 @@ import {
 	type LspLanguageDeclaration,
 	type LspRequestAdapterOptions,
 	type LspRuntimeSnapshot,
-} from "../../market-packs/code-intelligence/src/lsp-request-adapter.ts";
+} from "../../market-packs/code-intelligence/lib/lsp-request-adapter.ts";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -296,7 +296,7 @@ describe("LSP request adapter", () => {
 	});
 
 	it("remains a pure serializer with no process spawn, private manager, or lifecycle map", () => {
-		const source = fs.readFileSync(path.join(REPO_ROOT, "market-packs", "code-intelligence", "src", "lsp-request-adapter.ts"), "utf8");
+		const source = fs.readFileSync(path.join(REPO_ROOT, "market-packs", "code-intelligence", "lib", "lsp-request-adapter.ts"), "utf8");
 		for (const forbidden of ["node:child_process", "BgProcessManager", "spawn(", "exec(", "new Map(", "buildSandboxImage"]) {
 			expect(source).not.toContain(forbidden);
 		}

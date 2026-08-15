@@ -3,7 +3,7 @@ import {
 	type LspAction,
 	type SandboxLayerRequirement,
 	type ToolchainRequirement,
-} from "../lib/language-matrix.ts";
+} from "./language-matrix.ts";
 import type { LanguageDetection } from "./language-detection.ts";
 
 export type CapabilityRuntime = "host" | "sandbox";

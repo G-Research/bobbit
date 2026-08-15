@@ -6,8 +6,8 @@ import {
 	type CapabilityStatusOptions,
 	type LspServiceInstanceKey,
 	type LspServiceReadinessSnapshot,
-} from "../../market-packs/code-intelligence/src/capability-status.ts";
-import type { LanguageDetection } from "../../market-packs/code-intelligence/src/language-detection.ts";
+} from "../../market-packs/code-intelligence/lib/capability-status.ts";
+import type { LanguageDetection } from "../../market-packs/code-intelligence/lib/language-detection.ts";
 
 const typescriptDetection = {
 	component: "frontend",

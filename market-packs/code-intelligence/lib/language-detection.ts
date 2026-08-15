@@ -6,7 +6,7 @@ import {
 	type AstGrepLanguageAlias,
 	type CodeIntelligenceLanguage,
 	type LanguageDetectorFs,
-} from "../lib/language-matrix.ts";
+} from "./language-matrix.ts";
 
 export interface ComponentLanguageDetectionInput {
 	/** Stable configured component name; no absolute path is returned to callers. */

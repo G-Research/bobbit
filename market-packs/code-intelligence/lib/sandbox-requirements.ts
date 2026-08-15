@@ -1,4 +1,4 @@
-import { languageForId, type SandboxLayerRequirement } from "../lib/language-matrix.ts";
+import { languageForId, type SandboxLayerRequirement } from "./language-matrix.ts";
 import type { LanguageDetection } from "./language-detection.ts";
 
 export interface SandboxRequirementAttribution {

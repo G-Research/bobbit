@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { MAX_LANGUAGE_DETECTION_ENTRIES, walkLanguageDetectionPaths } from "../../market-packs/code-intelligence/lib/language-matrix.ts";
-import { detectComponentLanguages } from "../../market-packs/code-intelligence/src/language-detection.ts";
+import { detectComponentLanguages } from "../../market-packs/code-intelligence/lib/language-detection.ts";
 
 function fixture(): { root: string; dispose: () => void } {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "language-lsp-detection-"));

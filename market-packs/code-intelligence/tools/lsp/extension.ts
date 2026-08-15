@@ -8,7 +8,7 @@ import {
 	type LspResult,
 	type LspToolAction,
 	type LspToolRequest,
-} from "../../src/lsp-request-adapter.ts";
+} from "../../lib/lsp-request-adapter.ts";
 
 /** Platform-owned linked-worktree context. Without it, this extension is inert. */
 export interface LspExtensionOptions {
