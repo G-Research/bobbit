@@ -385,22 +385,31 @@ export async function tryHandleNestedGoalRoute(
 		targets: PersistedGoal[],
 		callerSessionId: string | undefined,
 	): Promise<number> {
-		const pausedIds = new Set<string>(targets.map(g => g.id));
+		const successfullyPausedIds = new Set<string>();
 		let count = 0;
-		for (const g of targets) {
-			// GoalManager may mutate this persisted target in place, so snapshot the
-			// idempotency/count decision before its authoritative paused write.
-			const wasPaused = g.paused === true;
-			await applyOperatorPause(getGoalManagerForGoal(g.id), g.id, wasPaused);
-			if (!wasPaused) count++;
-		}
-		for (const s of sessionManager.getAllSessionsRaw()) {
-			if (!s.goalId || !pausedIds.has(s.goalId)) continue;
-			if (s.status !== "streaming") continue;
-			if (s.id === callerSessionId) continue;
-			sessionManager.abortSessionTurn(s.id).catch((err) => {
-				console.warn(`[pause] abortSessionTurn failed for session=${s.id} goal=${s.goalId}:`, err);
-			});
+		try {
+			for (const g of targets) {
+				// GoalManager may mutate this persisted target in place, so snapshot the
+				// idempotency/count decision before its authoritative paused write.
+				const wasPaused = g.paused === true;
+				await applyOperatorPause(getGoalManagerForGoal(g.id), g.id, wasPaused);
+				// Include repeated pauses: their cancellation fence re-drove successfully
+				// and their already-durable paused state remains eligible for the abort sweep.
+				successfullyPausedIds.add(g.id);
+				if (!wasPaused) count++;
+			}
+		} finally {
+			// A later cascade member can fail its durable fence after earlier goals
+			// have committed paused. Abort only those completed members before the
+			// failure reaches the route; never abort the failed goal's live sessions.
+			for (const s of sessionManager.getAllSessionsRaw()) {
+				if (!s.goalId || !successfullyPausedIds.has(s.goalId)) continue;
+				if (s.status !== "streaming") continue;
+				if (s.id === callerSessionId) continue;
+				sessionManager.abortSessionTurn(s.id).catch((err) => {
+					console.warn(`[pause] abortSessionTurn failed for session=${s.id} goal=${s.goalId}:`, err);
+				});
+			}
 		}
 		return count;
 	}
