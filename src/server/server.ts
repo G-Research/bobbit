@@ -8981,7 +8981,7 @@ async function handleApiRoute(
 			}
 			await deleteProposalFile(bobbitStateDir(), draft.draftId, draft.type);
 			auditProposalDecision("dropped");
-			broadcastToProject(projectId, { type: "project_import_decision_requests_updated", projectId, ts: gatewayDeps.clock.now() });
+			broadcastToProject(projectId, { type: "project_import_decision_requests_updated", projectId, ts: clock?.now() ?? Date.now() });
 			json({ ok: true, status: "rejected" });
 			return;
 		}
@@ -9023,7 +9023,7 @@ async function handleApiRoute(
 			}
 			await deleteProposalFile(bobbitStateDir(), draft.draftId, draft.type);
 			auditProposalDecision("applied");
-			broadcastToProject(projectId, { type: "project_import_decision_requests_updated", projectId, ts: gatewayDeps.clock.now() });
+			broadcastToProject(projectId, { type: "project_import_decision_requests_updated", projectId, ts: clock?.now() ?? Date.now() });
 			json({ ok: true, status: "accepted", role: { name: role.name, label: role.label } }, 201);
 		} catch (error) {
 			jsonError(400, error);
