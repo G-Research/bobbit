@@ -24,7 +24,7 @@ describe("resolveModelStateMeta", () => {
 	it("returns the exact assembled cache row", async () => {
 		invalidateModelCache();
 		const models = await getAvailableModels(prefs);
-		const row = models.find(m => m.provider === "anthropic" && m.id === "claude-opus-4-1");
+		const row = models.find(m => m.provider === "anthropic" && m.id === "claude-opus-4-5");
 		assert.ok(row);
 
 		assert.deepEqual(resolveModelStateMeta(row.provider, row.id), {
@@ -66,9 +66,9 @@ describe("resolveModelStateMeta", () => {
 
 	it("returns the exact direct Pi row when the cache is empty", () => {
 		invalidateModelCache();
-		assert.deepEqual(resolveModelStateMeta("anthropic", "claude-opus-4-1"), {
+		assert.deepEqual(resolveModelStateMeta("anthropic", "claude-opus-4-5"), {
 			contextWindow: 200_000,
-			maxTokens: 32_000,
+			maxTokens: 64_000,
 			reasoning: true,
 			input: ["text", "image"],
 			source: "catalog",

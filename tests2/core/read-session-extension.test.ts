@@ -2,7 +2,7 @@ import { guardProcessEnv } from "./helpers/env-guard.js";
 guardProcessEnv();
 
 import assert from "node:assert/strict";
-import { Value } from "@sinclair/typebox/value";
+import * as Value from "typebox/value";
 import { afterAll, beforeAll, describe, it } from "vitest";
 import registerAgentExtension from "../../defaults/tools/agent/extension.ts";
 

@@ -21,7 +21,9 @@ const RETIRED_MODEL = {
 	id: "retired-browser-model",
 } as const;
 const HISTORY_MARKER = "MODEL_RECOVERY_HISTORY_MARKER";
-const BLOCKED_DRAFT = "MODEL_RECOVERY_BLOCKED_DRAFT";
+// Opt the in-process mock into Pi's production image-echo shape so the
+// recovered draft proves its attachment survives the full authoritative round trip.
+const BLOCKED_DRAFT = "MODEL_RECOVERY_BLOCKED_DRAFT ECHO_IMAGE_BLOCK";
 const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
 type PersistedSession = {

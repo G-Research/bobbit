@@ -1424,9 +1424,9 @@ interface AgentDirApiState {
 
 `GET /api/models` returns the current Bobbit session catalog. Each `ApiModel` includes provider, ID, API, limits, input modes, reasoning capability, authentication state, and `cost` in Pi's per-million-token shape: `{ input, output, cacheRead, cacheWrite }`; optional fields include `baseUrl`, `thinkingLevelMap`, `compat`, `sessionSelectable`, `upstreamProvider`, and tiered `cost.tiers[]`.
 
-#### Pi 0.82.1 Claude Opus 5 catalog
+#### Pi 0.84.1 Claude Opus 5 catalog
 
-Pi's published `0.82.1` catalog is authoritative for the direct Anthropic row and all five supported Amazon Bedrock profiles:
+Pi's published `0.84.1` catalog is authoritative for the direct Anthropic row and all five supported Amazon Bedrock profiles:
 
 | Exact provider/model | Published name | API | Base URL | Cost `{input, output, cacheRead, cacheWrite}` |
 |---|---|---|---|---|
@@ -1437,7 +1437,7 @@ Pi's published `0.82.1` catalog is authoritative for the direct Anthropic row an
 | `amazon-bedrock/jp.anthropic.claude-opus-5` | Claude Opus 5 (JP) | `bedrock-converse-stream` | `https://bedrock-runtime.us-east-1.amazonaws.com` | `{5, 25, 0.5, 6.25}` |
 | `amazon-bedrock/us.anthropic.claude-opus-5` | Claude Opus 5 (US) | `bedrock-converse-stream` | `https://bedrock-runtime.us-east-1.amazonaws.com` | `{5, 25, 0.5, 6.25}` |
 
-All six rows have a 1,000,000-token context window, 128,000-token output limit, `reasoning: true`, `input: ["text", "image"]`, and `thinkingLevelMap: { xhigh: "xhigh", max: "max" }`. Combined with the ordinary provider defaults, this exposes `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; the effective level is clamped against the exact selected row. Only the direct Anthropic row publishes `compat: { forceAdaptiveThinking: true, supportsTemperature: false, supportsStrictTools: true }`. The Bedrock rows have no model-level `compat`, so Bobbit does not invent one; Pi's Bedrock adapter owns their adaptive-thinking behavior. See [Pi runtime compatibility — Authoritative Claude Opus 5 catalog](pi-runtime-compatibility.md#authoritative-claude-opus-5-catalog).
+All six rows have a 1,000,000-token context window, 128,000-token output limit, `reasoning: true`, `input: ["text", "image"]`, and `thinkingLevelMap: { xhigh: "xhigh", max: "max" }`. Combined with the ordinary provider defaults, this exposes `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`; the effective level is clamped against the exact selected row. Only the direct Anthropic row publishes `compat: { forceAdaptiveThinking: true, supportsTemperature: false, supportsStrictTools: true }`. The Bedrock rows have no model-level `compat`, so Bobbit does not invent one; Pi's Bedrock adapter owns their adaptive-thinking behavior. See [Pi `0.84.1` reliable-turn compatibility](pi-runtime-compatibility.md#pi-0841-reliable-turn-compatibility) for the selected runtime contract.
 
 Bobbit omits the exact deferred provider `kimi-coding` from `/api/models` and `/api/pi-ai/providers`, and Bobbit-owned default, role, and session-selection paths reject that provider without changing durable state. This is an exact provider-identity boundary, not a model-ID filter: Kimi-named IDs remain valid under a session-selectable AIGW, custom/local, Moonshot, or legacy gateway provider.
 
@@ -2417,7 +2417,7 @@ Returns 400 if `section` is missing or invalid, regex compilation fails, line co
 
 Behaviour: while `lastTurnErrored` is `true`, an incoming prompt or steer **implicitly unsticks** the session (clears the flag, prepends a system-prefix, dispatches the new message without retrying the failed turn) as long as `consecutiveErrorTurns < MAX_CONSECUTIVE_ERROR_TURNS` (`3`). At or above the cap, the message is parked in `promptQueue` awaiting a human Retry click — which bypasses the cap. Both fields default to `false` / `0` for backward compatibility if the underlying session predates the feature.
 
-See [Error-state queue gating](prompt-queue.md#turn-errors-suppress-queue-draining), [Cancellation-shaped terminal recovery](prompt-queue.md#cancellation-shaped-terminal-recovery), and [Parked work is never silently idle](prompt-queue.md#parked-work-is-never-silently-idle). For diagnosis, see [Session wedged after errored turn](debugging.md#session-wedged-after-errored-turn).
+See [Errored turns](prompt-queue.md#errored-turns) and [Stop, failure, and recovery](prompt-queue.md#stop-failure-and-recovery). For diagnosis, see [Session wedged after errored turn](debugging.md#session-wedged-after-errored-turn).
 
 ### Archived child enrichment in session response
 

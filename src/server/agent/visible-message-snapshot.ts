@@ -162,12 +162,17 @@ function stripUntrustedSnapshotMetadata(messages: any[]): any[] {
 	let changed = false;
 	const stripped = messages.map((message) => {
 		if (!message || typeof message !== "object" || Array.isArray(message)
-			|| (!("author" in message) && !("_entryIdSource" in message))) {
+			|| (!("author" in message)
+				&& !("_entryIdSource" in message)
+				&& !("_inFlightSteer" in message)
+				&& !("_deliveryRecoveryProjection" in message))) {
 			return message;
 		}
 		const {
 			author: _untrustedAuthor,
 			_entryIdSource: _untrustedEntryIdSource,
+			_inFlightSteer: _untrustedInFlightSteer,
+			_deliveryRecoveryProjection: _untrustedDeliveryRecoveryProjection,
 			...withoutUntrustedMetadata
 		} = message;
 		changed = true;

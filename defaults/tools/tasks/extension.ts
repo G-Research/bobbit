@@ -7,7 +7,7 @@
  * Team-specific tools (team_spawn, team_dismiss, etc.) live in team-lead-tools.ts
  * and are only loaded for team lead sessions.
  */
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import fs from "node:fs";
 import path from "node:path";
