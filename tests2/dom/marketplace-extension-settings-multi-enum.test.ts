@@ -61,6 +61,9 @@ async function renderFixture(fields: any[]): Promise<void> {
 	await loadMarketplaceData(false);
 	await waitFor(() => root.querySelector('[data-testid="market-settings-toggle"]') !== null, "Market settings target");
 	root.querySelector<HTMLButtonElement>('[data-testid="market-settings-toggle"]')!.click();
+	// Market renders through the real requestAnimationFrame-debounced renderApp;
+	// wait for that production update rather than inspecting the pre-click DOM.
+	await waitFor(() => root.querySelector('[data-testid="market-settings-multi-enum"]') !== null, "multi-enum settings form");
 }
 
 beforeEach(() => {
@@ -93,8 +96,9 @@ describe("Market multi-enum extension settings", () => {
 		expect(options.map((option) => option.dataset.optionValue)).toEqual(["typescript", "go", "javascript"]);
 
 		options[2].click();
+		await waitFor(() => root.querySelector('[data-testid="market-settings-multi-enum-summary"]')?.textContent?.includes("1 option selected") === true, "first selected option");
 		root.querySelector<HTMLInputElement>('[data-testid="market-settings-multi-enum-option"][data-option-value="go"]')!.click();
-		expect(root.querySelector('[data-testid="market-settings-multi-enum-summary"]')?.textContent).toContain("2 options selected");
+		await waitFor(() => root.querySelector('[data-testid="market-settings-multi-enum-summary"]')?.textContent?.includes("2 options selected") === true, "selected options");
 		root.querySelector<HTMLButtonElement>('[data-testid="market-settings-save"]')!.click();
 		await waitFor(() => patches.length === 1, "canonical settings PATCH");
 		expect(patches[0]).toMatchObject({ expectedRevision: 1, values: { languages: ["go", "javascript"] } });
@@ -106,13 +110,15 @@ describe("Market multi-enum extension settings", () => {
 			values: ["typescript", "go"], default: ["go"], value: ["typescript"], source: "project",
 		}]);
 		root.querySelector<HTMLInputElement>('[data-testid="market-settings-multi-enum-option"][data-option-value="typescript"]')!.click();
+		await waitFor(() => root.querySelector('[data-testid="market-settings-multi-enum-summary"]')?.textContent?.includes("0 options selected") === true, "empty required selection");
 		root.querySelector<HTMLButtonElement>('[data-testid="market-settings-save"]')!.click();
+		await waitFor(() => root.querySelector('[data-testid="market-settings-error-summary"]') !== null, "required selection error");
 		expect(root.querySelector('[data-testid="market-settings-error-summary"]')?.textContent).toContain("Review the highlighted settings");
-		expect(root.querySelector('[data-testid="market-settings-field-error"]')?.textContent).toContain("Select at least one option.");
+		expect(root.querySelector('.market-settings-field-error')?.textContent).toContain("Select at least one option.");
 		expect(patches).toEqual([]);
 
 		root.querySelector<HTMLButtonElement>('[data-testid="market-settings-use-default"]')!.click();
-		expect(root.querySelector<HTMLInputElement>('[data-testid="market-settings-multi-enum-option"][data-option-value="go"]')?.checked).toBe(true);
+		await waitFor(() => root.querySelector<HTMLInputElement>('[data-testid="market-settings-multi-enum-option"][data-option-value="go"]')?.checked === true, "inherited default selection");
 		root.querySelector<HTMLButtonElement>('[data-testid="market-settings-save"]')!.click();
 		await waitFor(() => patches.length === 1, "Use default PATCH");
 		expect(patches[0]).toMatchObject({ values: { languages: null } });
@@ -124,7 +130,7 @@ describe("Market multi-enum extension settings", () => {
 			values: ["typescript", "go"], default: ["go"], value: ["typescript"], source: "project",
 		}]);
 		root.querySelector<HTMLInputElement>('[data-testid="market-settings-multi-enum-option"][data-option-value="typescript"]')!.click();
-		expect(root.querySelector('[data-testid="market-settings-multi-enum-summary"]')?.textContent).toContain("0 options selected");
+		await waitFor(() => root.querySelector('[data-testid="market-settings-multi-enum-summary"]')?.textContent?.includes("0 options selected") === true, "empty optional selection");
 		root.querySelector<HTMLButtonElement>('[data-testid="market-settings-save"]')!.click();
 		await waitFor(() => patches.length === 1, "empty-set PATCH");
 		expect(patches[0]).toMatchObject({ values: { languages: [] } });
