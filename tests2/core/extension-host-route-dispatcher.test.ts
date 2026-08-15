@@ -72,6 +72,30 @@ describe("RouteDispatcher — resolution + happy path (pack-level module)", () =
 		const d = new RouteDispatcher({ rate: null });
 		assert.deepEqual(await d.dispatch(modulePath, packRoot, "bundle", ctx(), { method: "GET" }), { via: "default" });
 	});
+
+	it("propagates only the server-provided route scope snapshot through the worker", async () => {
+		const { modulePath, packRoot } = writeRoutesModule(path.join(tmp, "verified-scope"), "p", "lib/routes.mjs",
+			`export const routes = { bundle: async (ctx) => ({ projectId: ctx.projectId, goalId: ctx.goalId, branch: ctx.branch, worktreeId: ctx.worktreeId, worktreePath: ctx.worktreePath, scopeProject: ctx.scopeContext?.project?.id, scopeGoal: ctx.scopeContext?.goal?.id, scopeComponent: ctx.scopeContext?.component?.name }) };`);
+		const d = new RouteDispatcher({ rate: null });
+		const result = await d.dispatch(modulePath, packRoot, "bundle", {
+			...ctx(),
+			projectId: "project-server",
+			goalId: "goal-server",
+			branch: "goal/server",
+			worktreeId: "/worktrees/server",
+			worktreePath: "/worktrees/server",
+			scopeContext: {
+				project: { id: "project-server" },
+				goal: { id: "goal-server" },
+				component: { name: "api", repo: "services/api" },
+			},
+		}, { method: "GET" });
+		assert.deepEqual(result, {
+			projectId: "project-server", goalId: "goal-server", branch: "goal/server",
+			worktreeId: "/worktrees/server", worktreePath: "/worktrees/server",
+			scopeProject: "project-server", scopeGoal: "goal-server", scopeComponent: "api",
+		});
+	});
 });
 
 describe("RouteDispatcher — error isolation + blast-radius", () => {

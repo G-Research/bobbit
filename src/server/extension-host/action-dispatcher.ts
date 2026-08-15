@@ -25,6 +25,7 @@ import { isPackPathWithinRoot } from "./path-guard.js";
 import { pathToFileURL } from "node:url";
 import type { ServerHostApi } from "./server-host-api.js";
 import { ModuleHost } from "./module-host-worker.js";
+import type { HookScopeContext } from "../agent/lifecycle-hub.js";
 
 /** The verified context handed to an action handler (design §4b). */
 export interface ActionHandlerCtx {
@@ -41,6 +42,16 @@ export interface ActionHandlerCtx {
 	 *  handler scope to the real project (e.g. a `project:<id>` recall tag filter)
 	 *  instead of fabricating one. Absent for global/server-scope sessions. */
 	projectId?: string;
+	/** Server-resolved scope only. Route callers cannot nominate this identity. */
+	scopeContext?: HookScopeContext;
+	/** Effective server-owned goal identity (`goalId ?? teamGoalId`). */
+	goalId?: string;
+	/** Server-owned source branch identity. */
+	branch?: string;
+	/** Server-owned worktree identity used for durable branch-slot selection. */
+	worktreeId?: string;
+	/** Server-owned worktree root, when the session has one. */
+	worktreePath?: string;
 	/** The session working dir — the worker's `process.cwd()` for tool parity (a
 	 *  tool/MCP server runs rooted at the session worktree). Populated by the endpoint
 	 *  from the persisted session. Absent for sessions with no resolvable cwd (the

@@ -62,6 +62,7 @@
 import { registerHooks, createRequire } from "node:module";
 import { parentPort, workerData } from "node:worker_threads";
 import { configure as configureConfinement, resolve as confinementResolve } from "./confinement-loader.js";
+import type { HookScopeContext } from "../agent/lifecycle-hub.js";
 
 interface BootstrapData {
 	/** The validated pack group root forwarded to the confinement hook so every
@@ -151,6 +152,13 @@ interface SerializableCtx {
 	sessionId: string;
 	toolUseId?: string;
 	tool: string;
+	projectId?: string;
+	/** Server-resolved identity snapshot for route handlers; never client input. */
+	scopeContext?: HookScopeContext;
+	goalId?: string;
+	branch?: string;
+	worktreeId?: string;
+	worktreePath?: string;
 	workingDir?: string;
 	sessionArchived?: boolean;
 	hostVersion?: number;
@@ -691,6 +699,12 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 				sessionId: msg.ctx.sessionId,
 				toolUseId: msg.ctx.toolUseId,
 				tool: msg.ctx.tool,
+				projectId: msg.ctx.projectId,
+				scopeContext: msg.ctx.scopeContext,
+				goalId: msg.ctx.goalId,
+				branch: msg.ctx.branch,
+				worktreeId: msg.ctx.worktreeId,
+				worktreePath: msg.ctx.worktreePath,
 				workingDir: msg.ctx.workingDir,
 				sessionArchived: msg.ctx.sessionArchived,
 			};

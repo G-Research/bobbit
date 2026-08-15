@@ -1,0 +1,12 @@
+name: graph_explain
+group: Graph
+summary: Explain a graph node, its component, revision, and relationships.
+description: Read-only Graphify node explanation with capped relationships and source snippets.
+params: [node, component, maxResults]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+examples:
+  - graph_explain node=src/server/agent/lifecycle-hub.ts maxResults=20
+notes:
+  - Returned explanations are leads requiring source verification.

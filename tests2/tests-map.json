@@ -2,16 +2,16 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1140,
+  "censusTotal": 1141,
   "buckets": {
     "daily": 64,
     "v2-browser": 216,
     "v2-core": 512,
     "v2-dom": 144,
-    "v2-integration": 204
+    "v2-integration": 205
   },
   "methods": {
-    "adapter": 277,
+    "adapter": 278,
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
@@ -2495,6 +2495,78 @@
         "runner": "playwright",
         "tier": "browser",
         "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/graph-query-tools.test.ts",
+      "reason": "Caps, tier defaults, component-labelled fan-out, freshness banners, and the six read-only graph tool operations.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/graph-routes.test.ts",
+      "reason": "Host route cap clamping, fixed public runtime failures, and graph tool route-error handling.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/graph-runtime.test.ts",
+      "reason": "EP-8 lifecycle boundary: non-scheduling hooks, bounded orientation, direct manual seam, and declared unavailable status.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/graph-store.test.ts",
+      "reason": "Host-only graph store containment, atomic last-good publication, lineage staleness, and lease-aware GC.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/graph-version.test.ts",
+      "reason": "Exact Graphify version resolution, pins, drift warnings, and capability-specific minimum-version failures.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/graph-extension-runtime.test.ts",
+      "reason": "Graph query tier/fan-out behavior plus facade slot authorization, sibling worktree isolation, direct-parent fallback, and fail-closed identity handling.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/graph-extension-runtime.journey.spec.ts",
+      "reason": "Disabled golden path and Marketplace enable/status/rebuild/reload/cleanup journey for the Graph Extension Runtime pack.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/dom/code-intelligence-panel.test.ts",
+      "reason": "Status-panel envelope parsing: empty component collections must never fabricate a card, while component revision/stale-reason labels and route-only rebuild feedback remain honest.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
       }
     }
   ],
@@ -17523,6 +17595,13 @@
     },
     {
       "file": "tests/e2e/graphify-linked-worktree.spec.ts",
+      "bucket": "v2-integration",
+      "method": "adapter",
+      "replacement": [],
+      "rationale": "API/integration E2E against a real gateway — gateway-per-worker integration tier."
+    },
+    {
+      "file": "tests/e2e/graph-extension-runtime.spec.ts",
       "bucket": "v2-integration",
       "method": "adapter",
       "replacement": [],

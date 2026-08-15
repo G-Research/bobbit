@@ -1,0 +1,12 @@
+name: graph_neighbors
+group: Graph
+summary: List bounded incoming or outgoing graph neighbours.
+description: Read-only Graphify neighbour lookup with component labels, revision banners, and source-verification guidance.
+params: [node, direction, component, maxResults, maxDepth]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+examples:
+  - graph_neighbors node=GraphQueryService direction=outgoing maxResults=25
+notes:
+  - direction is incoming, outgoing, or both.

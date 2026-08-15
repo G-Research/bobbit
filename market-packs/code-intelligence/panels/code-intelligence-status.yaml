@@ -1,0 +1,5 @@
+id: code-intelligence-status
+title: Code Intelligence
+# Auto-discovered pack panel. Dynamic status/config/rebuild data is available
+# only through the pack's host.callRoute boundary.
+entry: ../lib/panel.js

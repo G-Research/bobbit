@@ -1125,6 +1125,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/graph-store.test.ts",
+		allowReason: "test-owned external GraphStore candidate output",
+		reads: frozen([
+			{ expression: "path.join(clone.root, \"data\", \"graph.json\")", count: 1 },
+		]),
+	},
+	{
 		consumer: "tests2/core/worktree-setup-fallback.test.ts",
 		declarations: frozen(["scan:worktree-setup-source-guard"]),
 		reads: frozen([

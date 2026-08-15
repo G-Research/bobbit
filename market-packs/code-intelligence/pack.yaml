@@ -1,16 +1,19 @@
 schema: 2
 name: code-intelligence
 description: >-
-  Dormant Code Intelligence pack. This correctness-foundation slice contributes
-  only the isolated Graphify adapter and harness contract; it registers no
-  hooks, tools, routes, providers, settings, panels, or runtime services.
+  Host-side Graphify code intelligence for component-scoped code graphs. Graph
+  queries are read-only, default to code-tier results, and never expose graph
+  artifacts to agent sandboxes.
 version: 0.1.0
+# The pack ships inert. Enabling it is the sole activation switch for its
+# provider, graph tools, routes, and status panel.
+defaultDisabled: true
 contents:
   roles: []
-  tools: []
+  tools: [graph]
   skills: []
-  entrypoints: []
-  providers: []
+  entrypoints: [code-intelligence-route]
+  providers: [indexer]
   hooks: []
   mcp: []
   pi-extensions: []
@@ -18,3 +21,9 @@ contents:
   workflows: []
 provides: []
 requires: []
+# Pack-level routes are the host/RPC boundary. Their names intentionally remain
+# small: status carries read-only graph query operations, config declares the
+# effective runtime boundary, and rebuild is the bounded manual route surface.
+routes:
+  module: lib/routes.mjs
+  names: [status, config, rebuild]

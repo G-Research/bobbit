@@ -1,0 +1,12 @@
+name: graph_status
+group: Graph
+summary: Read graph freshness, lifecycle availability, versions, and measurements.
+description: Read-only Graphify component status, including stale/fallback banners and recent build/query latency measurements.
+params: [component, components]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+examples:
+  - graph_status
+notes:
+  - Status never returns filesystem paths or raw graph artifacts.

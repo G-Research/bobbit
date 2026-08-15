@@ -9642,12 +9642,15 @@ async function handleApiRoute(
 		const headerSessionId = req.headers["x-bobbit-session-id"] as string | string[] | undefined;
 		const routeHeaderSid = Array.isArray(headerSessionId) ? headerSessionId[0] : headerSessionId;
 		const routePs = routeHeaderSid ? sessionManager.getPersistedSession(routeHeaderSid) : undefined;
+		// Route identity comes exclusively from the authenticated session's live or
+		// persisted coordinates. In particular, neither `init` nor any route body may
+		// nominate a project, goal, branch, worktree, or component scope.
+		const routeSessionSource = routeHeaderSid
+			? (sessionManager.getSession(routeHeaderSid) ?? routePs)
+			: undefined;
 		// Resolve the tool through the SESSION's project-scoped tool manager (same
 		// no-split-brain resolution the action + store endpoints use).
-		const routeSessionProjectId = routeHeaderSid
-			? (sessionManager.getSession(routeHeaderSid)?.projectId
-				?? routePs?.projectId)
-			: undefined;
+		const routeSessionProjectId = routeSessionSource?.projectId;
 		const routeToolManager = resolveActionToolManager(
 			toolManager,
 			routeSessionProjectId ? projectContextManager.getOrCreate(routeSessionProjectId)?.toolManager : undefined,
@@ -9727,12 +9730,34 @@ async function handleApiRoute(
 		try {
 			// The session working dir the confined worker uses as its process.cwd()
 			// (tool parity — prefer the worktree path; fall back to the recorded cwd).
-			const routeWorkingDir = routePs?.worktreePath ?? routePs?.cwd;
+			const routeWorkingDir = routeSessionSource?.worktreePath ?? routeSessionSource?.cwd;
+			const routeRepoWorktrees = Array.isArray(routeSessionSource?.repoWorktrees)
+				? Object.fromEntries(routeSessionSource.repoWorktrees.map(({ repo, worktreePath }) => [repo, worktreePath]))
+				: routeSessionSource?.repoWorktrees;
+			const routeGoalId = routeSessionSource?.goalId ?? routeSessionSource?.teamGoalId;
+			// Reuse the lifecycle scope resolver with server-owned session coordinates.
+			// It fails closed for missing projects, special projects, ambiguous paths, and
+			// malformed component/worktree records; a pack cannot repair that from args.
+			const routeScopeContext = resolveHookScopeContext(projectContextManager, {
+				projectId: routeSessionProjectId,
+				goalId: routeGoalId,
+				cwd: routeSessionSource?.cwd ?? "",
+				worktreePath: routeSessionSource?.worktreePath,
+				repoPath: routeSessionSource?.repoPath,
+				repoWorktrees: routeRepoWorktrees,
+			});
 			const result = await routeDispatcher.dispatch(
 				resolved.modulePath,
 				resolved.packRoot,
 				routeName,
-				{ host, sessionId: guard.sessionId, toolUseId: toolUseId ?? "", tool: ident.contributionId, projectId: routeSessionProjectId, workingDir: routeWorkingDir, sessionArchived: routePs?.archived === true },
+				{
+					host, sessionId: guard.sessionId, toolUseId: toolUseId ?? "", tool: ident.contributionId,
+					projectId: routeSessionProjectId, scopeContext: routeScopeContext, goalId: routeGoalId,
+					branch: routeSessionSource?.branch,
+					worktreeId: routeSessionSource?.worktreePath ?? routeSessionSource?.cwd,
+					worktreePath: routeSessionSource?.worktreePath,
+					workingDir: routeWorkingDir, sessionArchived: routePs?.archived === true,
+				},
 				{ method, query, body: init.body },
 			);
 			const durationMs = Date.now() - start;
