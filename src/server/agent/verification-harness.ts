@@ -2579,12 +2579,7 @@ export class VerificationHarness {
 					// re-signal after exact cleanup settles.
 					console.warn(`[verification] Resume of ${v.signalId} was interrupted by restart recovery: ${errMsg}`);
 					try {
-						this._markVerificationCancelled(v, "gateway-restart-recovery");
-						if (!this._persistActive()) throw new Error(`Could not persist cancellation fence for ${v.signalId}`);
-						await this._terminateCancelledReviewersFor([v]);
-						const settled = await this._killPersistedCommandSteps(v, "SIGKILL", { markIntent: false });
-						if (settled) await this._finalizeCancelledVerification(v);
-						else this._scheduleCommandKillCleanupRetry(v.signalId);
+						await this._finalizeRestartInterruptedVerification(v);
 					} catch (cleanupErr) {
 						console.error(`[verification] Restart cancellation cleanup is pending for ${v.signalId}:`, cleanupErr);
 					}
@@ -2879,6 +2874,19 @@ export class VerificationHarness {
 
 			if (resumeResult) {
 				const resumedStep = { ...resumeResult, status: persistedStatusForStep(resumeResult), phase: step.phase ?? 0 };
+				// A reviewer/QA resume interruption must fence this still-running row
+				// before a transient result is persisted as a normal failed verdict.
+				// Do not cancel if an earlier or recovered row is a real failure: that
+				// remains the verification's product outcome.
+				if (shouldSuppressExplicitRestartInterrupt([...resolvedSteps, resumedStep])) {
+					// Keep the interruption diagnostic for the cancelled audit, while
+					// retaining `running` until _markVerificationCancelled snapshots it.
+					// This prevents a crash between recovery and finalization from making
+					// the step look like an ordinary failed reviewer verdict on next boot.
+					this._updateActiveStepFromResumedResult(v, step, { ...resumedStep, status: "running" });
+					await this._finalizeRestartInterruptedVerification(v);
+					return;
+				}
 				resolvedSteps.push(resumedStep);
 				this._updateActiveStepFromResumedResult(v, step, resumedStep);
 			} else {
@@ -2947,12 +2955,7 @@ export class VerificationHarness {
 		// only after its exact cleanup ownership settles.
 		const suppressedByRestart = !allPassed && shouldSuppressExplicitRestartInterrupt(resolvedSteps);
 		if (suppressedByRestart) {
-			this._markVerificationCancelled(v, "gateway-restart-recovery");
-			if (!this._persistActive()) throw new Error(`Could not persist cancellation fence for ${v.signalId}`);
-			await this._terminateCancelledReviewersFor([v]);
-			const settled = await this._killPersistedCommandSteps(v, "SIGKILL", { markIntent: false });
-			if (settled) await this._finalizeCancelledVerification(v);
-			else this._scheduleCommandKillCleanupRetry(v.signalId);
+			await this._finalizeRestartInterruptedVerification(v);
 			return;
 		}
 		const persistedStatus = allPassed ? "passed" as const : "failed" as const;
@@ -4056,6 +4059,20 @@ export class VerificationHarness {
 			steps.push(result);
 		}
 		return { status: "cancelled", steps, cancellation };
+	}
+
+	/**
+	 * Cancel a restart-interrupted generation through the normal cancellation
+	 * lifecycle. Callers must invoke this before accepting an interrupted
+	 * reviewer result as a failed step, so the durable audit retains its cause.
+	 */
+	private async _finalizeRestartInterruptedVerification(active: ActiveVerification): Promise<void> {
+		this._markVerificationCancelled(active, "gateway-restart-recovery");
+		if (!this._persistActive()) throw new Error(`Could not persist cancellation fence for ${active.signalId}`);
+		await this._terminateCancelledReviewersFor([active]);
+		const settled = await this._killPersistedCommandSteps(active, "SIGKILL", { markIntent: false });
+		if (settled) await this._finalizeCancelledVerification(active);
+		else this._scheduleCommandKillCleanupRetry(active.signalId);
 	}
 
 	/** One terminal cancellation path, invoked only after every cleanup phase settles. */
