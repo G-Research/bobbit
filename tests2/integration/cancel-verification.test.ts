@@ -547,6 +547,10 @@ test.describe("Cancel Verification API", () => {
 			expect(shelvedGoalBody.state).toBe("shelved");
 			const beforeCleanup = await getGateState(setup.goalId);
 			expect(beforeCleanup.status, "SHELVE_MUST_NOT_MANUFACTURE_A_FAILED_GATE_WHILE_EXACT_CLEANUP_IS_PENDING").toBe("pending");
+			expect(beforeCleanup.signals.at(-1)?.verification.status, "SHELVE_MUST_NOT_PUBLISH_CANCELLED_BEFORE_EXACT_CLEANUP").toBe("running");
+			expect((await getActiveVerifications(setup.goalId))[0]).toMatchObject({
+				cancellation: { cause: "shelved", requestedAt: expect.any(Number) },
+			});
 
 			runner.settle(0);
 			const gate = await observeUntil(
@@ -558,6 +562,49 @@ test.describe("Cancel Verification API", () => {
 			expect(gate.signals.at(-1)?.verification).toMatchObject({
 				status: "cancelled",
 				cancellation: { cause: "shelved", finalizedAt: expect.any(Number) },
+			});
+		} finally {
+			runner.settleAll();
+			await cleanupSlowWorkflowGoal(setup);
+		}
+	});
+
+	test("completing durably fences a running verification without awaiting exact cleanup", async ({ gateway }) => {
+		let setup: SlowWorkflowGoal | undefined;
+		const runner = new PendingExactCleanupRunner();
+		gateway.teamManager.verificationHarness!.commandStepRunner = runner;
+		try {
+			setup = await createSlowWorkflowGoal("Complete Running Verification");
+			expect((await signalSlowVerification(setup.goalId, "complete while running")).status).toBe(201);
+			await runner.waitForSpawn(0);
+
+			const completeRequest = apiFetch(`/api/goals/${setup.goalId}`, {
+				method: "PUT",
+				body: JSON.stringify({ state: "complete" }),
+			});
+			await runner.waitForKill(0);
+			const completeRes = await completeRequest;
+			expect(completeRes.status).toBe(200);
+			const completedGoal = await apiFetch(`/api/goals/${setup.goalId}`);
+			const completedGoalBody = await completedGoal.json() as { state: string };
+			expect(completedGoalBody.state).toBe("complete");
+			const beforeCleanup = await getGateState(setup.goalId);
+			expect(beforeCleanup.status).toBe("pending");
+			expect(beforeCleanup.signals.at(-1)?.verification.status).toBe("running");
+			expect((await getActiveVerifications(setup.goalId))[0]).toMatchObject({
+				cancellation: { cause: "goal-complete", requestedAt: expect.any(Number) },
+			});
+
+			runner.settle(0);
+			const gate = await observeUntil(
+				gateway.clock,
+				() => getGateState(setup!.goalId),
+				state => state.signals.at(-1)?.verification.status === "cancelled",
+				5_000,
+			);
+			expect(gate.signals.at(-1)?.verification).toMatchObject({
+				status: "cancelled",
+				cancellation: { cause: "goal-complete", finalizedAt: expect.any(Number) },
 			});
 		} finally {
 			runner.settleAll();

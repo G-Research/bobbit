@@ -9278,10 +9278,11 @@ async function handleApiRoute(
 				: undefined;
 			if (terminalCancellationCause) {
 				// Persist the cancellation fence before mutating terminal goal state.
-				// A failed fence leaves the goal live so an in-flight verifier cannot
-				// escape cleanup under a completed or shelved goal.
+				// Exact cleanup remains lifecycle-owned in the background; awaiting it
+				// here can deadlock a client that is intentionally holding the exact
+				// cleanup acknowledgement while it waits for this terminal response.
 				try {
-					await verificationHarness.cancelAllVerifications(id, terminalCancellationCause);
+					verificationHarness.fenceAndCancelAllVerifications(id, terminalCancellationCause);
 				} catch (err) {
 					console.error(`[api] Failed to fence verification cancellation before ${body.state} for ${id}:`, err);
 					json({ error: "Could not durably cancel active verifications", code: "VERIFICATION_CANCELLATION_FENCE_FAILED", retryable: true }, 503);

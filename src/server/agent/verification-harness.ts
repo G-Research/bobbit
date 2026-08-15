@@ -4009,6 +4009,10 @@ export class VerificationHarness {
 	}
 
 	private _commandKillRetryTimers = new Map<string, NodeJS.Timeout>();
+	/** Retries cancellation cleanup errors without letting a detached terminal request reject. */
+	private _cancelledCleanupRetryTimers = new Map<string, NodeJS.Timeout>();
+	/** One cleanup owner per cancelled signal; callers may either await or detach it. */
+	private _cancelledCleanupPromises = new Map<string, Promise<void>>();
 
 	/** Whether this exact signal is still the gate's current generation. */
 	private _isCurrentGateSignal(active: ActiveVerification): boolean {
@@ -4255,7 +4259,9 @@ export class VerificationHarness {
 			} catch (err) {
 				console.warn(`[verification] Command cleanup retry for ${signalId} did not settle: ${(err as Error).message}`);
 				this._persistActive();
-				if (this.activeVerifications.has(signalId)) this._scheduleCommandKillCleanupRetry(signalId);
+				const active = this.activeVerifications.get(signalId);
+				if (active?.cancelled) this._scheduleCancelledVerificationCleanupRetry(signalId);
+				else if (active) this._scheduleCommandKillCleanupRetry(signalId);
 			}
 		}, 1_000);
 		timer.unref?.();
@@ -4522,24 +4528,63 @@ export class VerificationHarness {
 	}
 
 	/**
-	 * Cancel ALL in-flight verifications for a goal (all gates).
-	 * Called when a goal completes, a team is torn down, or the goal is shelved.
+	 * Durably fence every active verification for a terminal goal transition.
+	 *
+	 * This method intentionally performs no await: a terminal route may commit
+	 * the goal state after the fence is on disk, while exact cleanup remains
+	 * owned by the detached lifecycle below. Terminal cancellation publication
+	 * still cannot occur until that cleanup settles.
 	 */
-	async cancelAllVerifications(
+	fenceAndCancelAllVerifications(
 		goalId: string,
 		cause: VerificationCancellationCause = "goal-complete",
-	): Promise<boolean> {
+	): ActiveVerification[] {
 		this._mergePersistedActiveVerifications(v => v.goalId === goalId);
 		const cancellations = Array.from(this.activeVerifications.values()).filter(active => active.goalId === goalId);
 		for (const active of cancellations) this._markVerificationCancelled(active, cause);
-		// Persist the cancellation fence before yielding, then snapshot and tear down
-		// all reviewer queues before any command-child ownership barrier can block.
 		if (cancellations.length > 0 && !this._persistActive()) {
 			throw new Error(`Could not persist cancellation fence for goal ${goalId}`);
 		}
-		await this._terminateCancelledReviewersFor(cancellations);
-
+		// Drain parked signoffs synchronously after the durable fence, then hand
+		// exact reviewer/process cleanup to its single owner. The owner catches and
+		// retries errors so this detached path never produces an unhandled rejection.
 		for (const active of cancellations) {
+			this._drainPendingSignoffsForSignal(active.signalId);
+			void this._startCancelledVerificationCleanup(active);
+		}
+		return cancellations;
+	}
+
+	private _startCancelledVerificationCleanup(active: ActiveVerification): Promise<void> {
+		const existing = this._cancelledCleanupPromises.get(active.signalId);
+		if (existing) return existing;
+		const cleanup = this._runCancelledVerificationCleanup(active);
+		this._cancelledCleanupPromises.set(active.signalId, cleanup);
+		void cleanup.then(
+			() => {
+				if (this._cancelledCleanupPromises.get(active.signalId) === cleanup) {
+					this._cancelledCleanupPromises.delete(active.signalId);
+				}
+			},
+			err => {
+				// _runCancelledVerificationCleanup handles operational failures itself,
+				// but keep the detached terminal path closed if that guarantee regresses.
+				console.warn(`[verification] Unexpected detached cancellation cleanup failure for ${active.signalId}: ${(err as Error).message}`);
+				if (this._cancelledCleanupPromises.get(active.signalId) === cleanup) {
+					this._cancelledCleanupPromises.delete(active.signalId);
+				}
+				this._persistActive();
+				if (this.activeVerifications.get(active.signalId) === active && active.cancelled) {
+					this._scheduleCancelledVerificationCleanupRetry(active.signalId);
+				}
+			},
+		);
+		return cleanup;
+	}
+
+	private async _runCancelledVerificationCleanup(active: ActiveVerification): Promise<void> {
+		try {
+			await this._terminateCancelledReviewersFor([active]);
 			const { signalId } = active;
 			// Partition siblings by ownership domain. A live docker-exec transport
 			// is never reaped through the recovered sentinel path.
@@ -4548,18 +4593,43 @@ export class VerificationHarness {
 			const liveTransportCleanupSettled = persistedCleanupSettled
 				? await this._killTrackedForSignal(signalId, step => !!step?.containerId)
 				: !Array.from(this._trackedCommandChildren.keys()).some(key => key.startsWith(`${signalId}:`));
-			const commandKillsSettled = liveHostCleanupSettled && persistedCleanupSettled && liveTransportCleanupSettled;
-			this._drainPendingSignoffsForSignal(signalId);
-
-			if (commandKillsSettled) {
+			if (liveHostCleanupSettled && persistedCleanupSettled && liveTransportCleanupSettled) {
 				await this._finalizeCancelledVerification(active);
 			} else {
 				this._persistActive();
 				this._scheduleCommandKillCleanupRetry(signalId);
 			}
-
-			console.log(`[verification] Cancelled verification ${signalId} for goal ${goalId} (goal completing)`);
+			console.log(`[verification] Cancelled verification ${signalId} for goal ${active.goalId} (${active.cancellation?.cause ?? "unknown"})`);
+		} catch (err) {
+			console.warn(`[verification] Cancellation cleanup for ${active.signalId} did not settle: ${(err as Error).message}`);
+			this._persistActive();
+			if (this.activeVerifications.get(active.signalId) === active && active.cancelled) {
+				this._scheduleCancelledVerificationCleanupRetry(active.signalId);
+			}
 		}
+	}
+
+	private _scheduleCancelledVerificationCleanupRetry(signalId: string): void {
+		if (this._cancelledCleanupRetryTimers.has(signalId)) return;
+		const timer = this.clock.setTimeout(() => {
+			this._cancelledCleanupRetryTimers.delete(signalId);
+			const active = this.activeVerifications.get(signalId);
+			if (active?.cancelled) void this._startCancelledVerificationCleanup(active);
+		}, 1_000);
+		timer.unref?.();
+		this._cancelledCleanupRetryTimers.set(signalId, timer);
+	}
+
+	/**
+	 * Cancel ALL in-flight verifications for a goal (all gates).
+	 * Callers that require exact cleanup completion retain this awaitable API.
+	 */
+	async cancelAllVerifications(
+		goalId: string,
+		cause: VerificationCancellationCause = "goal-complete",
+	): Promise<boolean> {
+		const cancellations = this.fenceAndCancelAllVerifications(goalId, cause);
+		await Promise.all(cancellations.map(active => this._startCancelledVerificationCleanup(active)));
 		return !Array.from(this.activeVerifications.values()).some(active => active.goalId === goalId && active.cancelled);
 	}
 
