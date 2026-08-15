@@ -7385,7 +7385,7 @@ export class SessionManager {
 			session.turnHadToolCalls = false;
 			session.recoverDrainAttempts = 0;
 			if (providerAuthFailure) this.surfaceProviderAuthFailure(session, reason, source);
-			else broadcastStatus(session, "idle");
+			else this.rollbackRejectedPromptDispatch(session);
 			this.broadcastQueue(session);
 			this.surfaceManualRetryRequired(session);
 			return;
