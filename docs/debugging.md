@@ -397,7 +397,7 @@ See [docs/archived-proposal-reopen.md](archived-proposal-reopen.md) for the full
 - **Coverage**: `tests2/core/reliable-intent-{queue,attempt}.test.ts`, `reliable-compaction-release.test.ts`, `tests2/integration/reliable-intent-recovery.test.ts`, and `tests2/browser/journeys/reliable-agent-turns.journey.spec.ts`.
 - **Draft lost on rapid session switch?** The client awaits any in-flight `_pendingSave` promise before loading the draft for the new session. If drafts are still lost, check that `_flushDraft()` is returning its save promise and that `_setupPromptDraftHandlers()` awaits it.
 - **Draft not restoring after session switch?** Draft restore uses a `requestAnimationFrame` retry loop (up to 5 frames) to survive Lit re-renders that reset the editor value. If the draft still doesn't appear, check that the rAF `reapply` callback is firing (add a `console.log` inside it) and that `_draftSessionId` hasn't been nulled by a concurrent session switch.
-- **`bash_bg wait` not returning after a dispatched steer?** The identified reliable branch of `_dispatchSteer()` calls `bgProcessManager.abortAllWaits(sessionId)` immediately before the Pi RPC. The wait should resolve with `{ aborted: true }`; the background process remains alive. If the steer is still queued behind compaction, Stop, or replacement, no interruption should happen yet. Internal/REST/tool steers without occurrence IDs use `_dispatchLegacySteer()` and currently do not interrupt waits. An interrupted wait is not delivery proof; the reliable steer still needs a correlated Pi user event. Coverage: `tests2/core/bg-process-manager.test.ts` and `tests2/integration/bg-wait-steer-abort.test.ts`.
+- **`bash_bg wait` not returning after a dispatched steer?** Browser, REST, tool, and automatic steers have server-owned occurrence identity and interrupt the wait only immediately before their actual Pi RPC. The wait should resolve with `{ aborted: true }`; the background process remains alive. A steer queued behind compaction, Stop, replacement, or the `agent_settled` fence does not interrupt yet. An interrupted wait is neither Pi receipt nor settlement; the occurrence still needs its correlated Pi and sidecar evidence. Coverage: `tests2/core/bg-process-manager.test.ts` and `tests2/integration/bg-wait-steer-abort.test.ts`.
 - See [prompt-queue.md](prompt-queue.md) for the lifecycle and Stop/recovery contract.
 
 ## Session wedged after errored turn
@@ -1293,12 +1293,12 @@ Fix: prompts now carry a `PromptSource` (declared in `src/server/agent/session-m
 
 ## `bash_bg wait` not interrupted by steer
 
-A steer should abort any in-flight `bash_bg wait` within ~100 ms. The bg process itself is **not** killed; only the wait call resolves with `{ aborted: true }`. Diagnose:
-1. The live-steer caller routes through `SessionManager.deliverLiveSteer()` — this invokes `bgProcessManager.abortAllWaits(sessionId)` before `rpcClient.steer()`.
+A browser, REST, tool, or automatic steer aborts an in-flight `bash_bg wait` only immediately before its actual Pi RPC. The background process is **not** killed; only the wait call resolves with `{ aborted: true }`. A steer fenced behind compaction, Stop, replacement, or `agent_settled` does not interrupt the wait. Diagnose:
+1. The source-identified steer reaches `SessionManager.deliverLiveSteer()` / `_dispatchSteer()`, which invokes `bgProcessManager.abortAllWaits(sessionId)` immediately before `rpcClient.steer()`.
 2. The wait registry on `BgProcessManager` — `registerWait`/`unregisterWait` from `/bg-processes/:pid/wait`; `abortAllWaits()` iterates the set.
 3. `terminateSession` also calls `abortAllWaits()` before `cleanup()` so terminating sessions never leak hung wait handlers.
 
-Tests: `tests/bg-process-manager.test.ts`, `tests/e2e/bg-wait-steer-abort.spec.ts`.
+Wait interruption is neither Pi receipt nor settlement; correlate the occurrence with its Pi row and sidecar before treating it as delivered. Tests: `tests/bg-process-manager.test.ts`, `tests/e2e/bg-wait-steer-abort.spec.ts`.
 
 ## `bash_bg wait` returns `fetch failed` on long-running processes
 
