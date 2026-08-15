@@ -12,6 +12,7 @@ import { packIdFromRoot, type HookContribution } from "./pack-contributions.js";
 import {
 	DecisionHookContractError,
 	validateDecisionHookOutput,
+	validatePersistedDecisionRequest,
 	validateProjectImportDecisionHookOutput,
 	type ProjectImportDecisionHookContext,
 	type ProjectImportDecisionResolutionContext,
@@ -398,13 +399,24 @@ export class DecisionRequestManager {
 	}
 
 	private async resolveTimeout(record: StoredDecisionRequest, actor: "deadline" | "headless"): Promise<StoredDecisionRequest | undefined> {
-		if (isConsent(record)) {
-			if (record.timeoutAction === "pause-goal" && record.goalId && this.deps.consentPauseLifecycle) return this.pauseConsent(record);
-			return (await this.denyConsent(record)).request;
+		// Re-read and revalidate at the settlement boundary. A record may have sat
+		// on a deadline queue across a restart or hostile disk mutation; no default
+		// can publish memory, proposals, continuations, or hook input unless its
+		// current controls and default still pass the shared strict contract.
+		const current = this.deps.storeForProject(record.projectId)?.get(record.id);
+		if (!current || current.status !== "pending") return current;
+		try {
+			validatePersistedDecisionRequest(current.request, current.decisionClass ?? "deferrable");
+		} catch { return undefined; }
+		if (isConsent(current)) {
+			if (current.timeoutAction === "pause-goal" && current.goalId && this.deps.consentPauseLifecycle) return this.pauseConsent(current);
+			return (await this.denyConsent(current)).request;
 		}
-		const defaultValue = record.request.default;
+		const defaultValue = current.request.default;
 		if (!defaultValue) return undefined; // Historical corrupt records fail closed.
-		const result = await this.resolve(record, defaultValue, actor, actor === "deadline" ? "deadline_elapsed" : "headless_default", "defaulted");
+		try { validateDecisionValue(defaultValue, current.request.options, current.request.other); }
+		catch { return undefined; }
+		const result = await this.resolve(current, defaultValue, actor, actor === "deadline" ? "deadline_elapsed" : "headless_default", "defaulted");
 		return result.written ? result.request : undefined;
 	}
 

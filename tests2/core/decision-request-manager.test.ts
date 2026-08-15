@@ -225,6 +225,37 @@ describe("DecisionRequestManager", () => {
 		assert.deepEqual(invalidations, ["session-1"]);
 	});
 
+	it("revalidates a stale request immediately before deadline and headless defaults", async () => {
+		for (const headless of [false, true]) {
+			let continuations = 0;
+			const first = fixture({ proposal: true, continuation: async () => { continuations++; return "delivered"; } });
+			const created = await first.manager.create(origin(), request(first.clock, {
+				effect: { kind: "proposal", proposals: {
+					quick: { proposalType: "goal", args: { title: "Quick" } },
+					thorough: { proposalType: "goal", args: { title: "Thorough" } },
+					other: { proposalType: "goal", args: { title: "Other" } },
+				} },
+			}));
+			const id = created.requestId!;
+			// Simulate an out-of-band mutation after the deadline queue captured its
+			// old record. The persisted-load validator catches this on restart; this
+			// path must also fail closed before any settlement side effect.
+			(first.store as unknown as { state: { requests: Record<string, any> } }).state.requests[id].request.default = { kind: "option", value: "forged" };
+			const settlingManager = headless
+				? new DecisionRequestManager({ storeForProject: () => first.store, clock: first.clock, isHeadless: () => true, proposalSeedService: {
+					seedFromDecision: async () => { throw new Error("must not seed"); },
+				}, continuation: { deliver: async () => { continuations++; return "delivered"; } } })
+				: first.manager;
+			settlingManager.registerProject("project-1");
+			if (!headless) first.clock.advance(30_000);
+			await settlingManager.reconcile();
+			assert.equal(first.store.get(id)?.status, "pending", `headless=${headless}`);
+			assert.equal(first.store.listMemories().length, 0, `headless=${headless}`);
+			assert.deepEqual(first.proposals, [], `headless=${headless}`);
+			assert.equal(continuations, 0, `headless=${headless}`);
+		}
+	});
+
 	it("claims continuation delivery so answer and reconciliation cannot invoke it concurrently", async () => {
 		let calls = 0;
 		let completed = 0;

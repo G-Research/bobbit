@@ -334,6 +334,44 @@ describe("DecisionRequestStore", () => {
 		assert.ok(store.getMemory(memory({ sourceRequestId: "old" })));
 	});
 
+	it("fails closed on persisted requests that violate the shared decision contract", () => {
+		const corruptions: Array<{ name: string; mutate: (snapshot: any) => void }> = [
+			{ name: "default outside options", mutate: state => { state.requests["request-1"].request.default = { kind: "option", value: "forged" }; } },
+			{ name: "malformed other schema", mutate: state => { state.requests["request-1"].request.other = { maxLength: 280, unexpected: true }; } },
+			{ name: "unsafe other regex", mutate: state => { state.requests["request-1"].request.other.pattern = "^(a+)+$"; } },
+			{ name: "inverted other bounds", mutate: state => { state.requests["request-1"].request.other = { minLength: 9, maxLength: 4 }; } },
+			{ name: "incomplete proposal effect partition", mutate: state => {
+				state.requests["request-1"].request.effect = { kind: "proposal", proposals: {
+					safe: { proposalType: "goal", args: { title: "Safe" } },
+					fast: { proposalType: "goal", args: { title: "Fast" } },
+				} };
+			} },
+			{ name: "resolution outside request controls", mutate: state => {
+				state.requests["request-1"].status = "resolved";
+				state.requests["request-1"].resolvedAt = "2026-01-01T00:01:00.000Z";
+				state.requests["request-1"].resolution = { value: { kind: "option", value: "forged" }, actor: "user", reason: "answered" };
+			} },
+			{ name: "resolution other violating regex", mutate: state => {
+				state.requests["request-1"].request.other.pattern = "^[A-Z]+$";
+				state.requests["request-1"].status = "resolved";
+				state.requests["request-1"].resolvedAt = "2026-01-01T00:01:00.000Z";
+				state.requests["request-1"].resolution = { value: { kind: "other", text: "lowercase" }, actor: "user", reason: "answered" };
+			} },
+		];
+		for (const { name, mutate } of corruptions) {
+			const dir = stateDir(`strict-replay-${name}`);
+			const store = new DecisionRequestStore(dir, memfs);
+			assert.equal(store.put(request("request-1")), true);
+			const file = path.join(dir, "extension-decision-requests.json");
+			const snapshot = JSON.parse(memfs.readFileSync(file, "utf-8"));
+			mutate(snapshot);
+			memfs.writeFileSync(file, JSON.stringify(snapshot), "utf-8");
+			const restarted = new DecisionRequestStore(dir, memfs);
+			assert.equal(restarted.isHealthy(), false, name);
+			assert.deepEqual(restarted.list(), [], `${name} must not partially load a request`);
+		}
+	});
+
 	it("fails closed on corrupt state without changing unrelated project state", () => {
 		const dir = stateDir("corrupt");
 		const file = path.join(dir, "extension-decision-requests.json");

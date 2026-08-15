@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { FsLike } from "../gateway-deps.js";
 import { realFs } from "../gateway-deps.js";
+import { validateDecisionValue, validatePersistedDecisionRequest } from "./decision-hook-contract.js";
 import { validateProjectImportDecisionContext } from "./project-import-decision-context.js";
 
 /** Terminal deferrable records remain available for semantic deduplication. */
@@ -50,7 +51,7 @@ export interface ValidatedExtensionDecisionRequest {
 	intent?: string;
 	/** Absent in historical v1 records and therefore interpreted as deferrable. */
 	requestedClass?: DecisionClass;
-	effect?: { kind: "none" } | { kind: "proposal"; proposals: Record<string, { proposalType: ProposalType; args: Record<string, unknown> }> };
+	effect?: { kind: "none" } | { kind: "proposal"; proposals: Record<string, { proposalType: ProposalType; args: Record<string, unknown> }>; noEffectValues?: readonly string[] };
 }
 
 /** Opaque core operation identity; the store never receives operation arguments. */
@@ -384,7 +385,9 @@ export class DecisionRequestStore {
 		const result = this.commit(next => {
 			const current = next.requests[id];
 			if (!current) return { written: false } as FirstTerminalWrite;
-			if (current.status !== "pending") return { written: false, request: clone(current) } as FirstTerminalWrite;
+			if (current.status !== "pending" || !isTerminalUpdateForRequest(update, current.request) || memory !== undefined && !isMemory(memory)) {
+				return { written: false, request: clone(current) } as FirstTerminalWrite;
+			}
 			current.status = update.status;
 			current.resolvedAt = update.resolvedAt;
 			if (update.resolution) current.resolution = clone(update.resolution);
@@ -620,8 +623,9 @@ function isStoredRequest(value: unknown): value is StoredDecisionRequest {
 		|| (value.sessionId !== undefined && !isString(value.sessionId))
 		|| (value.goalId !== undefined && !isString(value.goalId))
 		|| !isRecord(value.asker) || !isString(value.asker.packId) || !isString(value.asker.hookId) || !isStoredEvent(value.asker.event)
-		|| !isString(value.dedupeId) || !isString(value.questionId) || !isValidatedRequest(value.request)
+		|| !isString(value.dedupeId) || !isString(value.questionId)
 		|| (value.decisionClass !== undefined && !isDecisionClass(value.decisionClass))
+		|| !isValidatedRequest(value.request, value.decisionClass ?? "deferrable")
 		|| (value.classificationReason !== undefined && !isClassificationReason(value.classificationReason))
 		|| (value.protectedOperation !== undefined && !isProtectedOperation(value.protectedOperation))
 		|| (value.timeoutAction !== undefined && !isConsentTimeoutAction(value.timeoutAction))
@@ -629,7 +633,7 @@ function isStoredRequest(value: unknown): value is StoredDecisionRequest {
 		|| (value.consentInbox !== undefined && !isConsentInboxSurface(value.consentInbox))
 		|| !isDecisionStatus(value.status) || !isIsoInstant(value.createdAt) || !isIsoInstant(value.deadlineAt)
 		|| (value.resolvedAt !== undefined && !isIsoInstant(value.resolvedAt))
-		|| (value.resolution !== undefined && !isResolution(value.resolution))
+		|| (value.resolution !== undefined && !isResolution(value.resolution, value.request))
 		|| !isContinuationState(value.continuationState) || !isNonNegativeInteger(value.continuationAttempts)) return false;
 	if (value.delivery.kind === "session" && (value.sessionId !== value.delivery.sessionId || !isLifecycleEvent(value.asker.event))) return false;
 	if (value.delivery.kind === "project-import" && (value.sessionId !== undefined || value.goalId !== undefined || value.request.scope !== "project" || value.asker.event !== "projectImported")) return false;
@@ -675,27 +679,11 @@ function isSafeIdentifier(value: unknown): value is string {
 	return isString(value) && value.length > 0 && value.length <= 128 && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
 }
 
-function isValidatedRequest(value: unknown): value is ValidatedExtensionDecisionRequest {
-	if (!isRecord(value) || value.version !== 1 || !isString(value.key) || !isString(value.title) || !isString(value.question)
-		|| !Array.isArray(value.options) || !value.options.every(option => isRecord(option) && isString(option.value) && isString(option.label))
-		|| !isRecord(value.other) || !isNonNegativeInteger(value.other.maxLength)
-		|| (value.other.minLength !== undefined && !isNonNegativeInteger(value.other.minLength))
-		|| (value.other.pattern !== undefined && !isString(value.other.pattern))
-		|| (value.default !== undefined && !isDecisionValue(value.default))
-		|| (value.intent !== undefined && !isString(value.intent))
-		|| (value.requestedClass !== undefined && !isDecisionClass(value.requestedClass))
-		|| !isDecisionScope(value.scope) || !isIsoInstant(value.deadlineAt)) return false;
-	// A forced platform elevation may strip an originally deferrable default
-	// before storage, so only a directly requested consent class is decided here.
-	if (value.requestedClass === "consent-required" && value.default !== undefined) return false;
-	return value.effect === undefined || isEffect(value.effect);
-}
-
-function isEffect(value: unknown): boolean {
-	if (!isRecord(value) || !isString(value.kind)) return false;
-	if (value.kind === "none") return Object.keys(value).length === 1;
-	if (value.kind !== "proposal" || !isRecord(value.proposals)) return false;
-	return Object.values(value.proposals).every(seed => isRecord(seed) && isProposalType(seed.proposalType) && isJsonRecord(seed.args));
+function isValidatedRequest(value: unknown, decisionClass: DecisionClass): value is ValidatedExtensionDecisionRequest {
+	try {
+		validatePersistedDecisionRequest(value, decisionClass);
+		return true;
+	} catch { return false; }
 }
 
 function isMemory(value: unknown): value is DecisionMemory {
@@ -704,9 +692,13 @@ function isMemory(value: unknown): value is DecisionMemory {
 		&& isIsoInstant(value.validatedAt) && isString(value.sourceRequestId);
 }
 
-function isResolution(value: unknown): value is ValidatedDecisionResolution {
-	return isRecord(value) && isDecisionValue(value.value) && (value.actor === "user" || value.actor === "deadline" || value.actor === "headless")
-		&& (value.reason === "answered" || value.reason === "deadline_elapsed" || value.reason === "headless_default" || value.reason === "consent_denied");
+function isResolution(value: unknown, request: ValidatedExtensionDecisionRequest): value is ValidatedDecisionResolution {
+	if (!isRecord(value) || (value.actor !== "user" && value.actor !== "deadline" && value.actor !== "headless")
+		|| (value.reason !== "answered" && value.reason !== "deadline_elapsed" && value.reason !== "headless_default" && value.reason !== "consent_denied")) return false;
+	try {
+		validateDecisionValue(value.value, request.options, request.other);
+		return true;
+	} catch { return false; }
 }
 
 function isProtectedOperation(value: unknown): value is DecisionProtectedOperation {
@@ -727,10 +719,15 @@ function isConsentResume(value: unknown): boolean {
 }
 
 function isValidDecisionValueForRequest(value: unknown, request: ValidatedExtensionDecisionRequest): value is DecisionValue {
-	if (!isDecisionValue(value)) return false;
-	if (value.kind === "option") return request.options.some(option => option.value === value.value);
-	if (value.text.length < (request.other.minLength ?? 0) || value.text.length > request.other.maxLength) return false;
-	try { return request.other.pattern === undefined || new RegExp(request.other.pattern, "u").test(value.text); } catch { return false; }
+	try {
+		validateDecisionValue(value, request.options, request.other);
+		return true;
+	} catch { return false; }
+}
+
+function isTerminalUpdateForRequest(update: DecisionTerminalUpdate, request: ValidatedExtensionDecisionRequest): boolean {
+	return isDecisionStatus(update.status) && isTerminalStatus(update.status) && isIsoInstant(update.resolvedAt)
+		&& (update.resolution === undefined || isResolution(update.resolution, request));
 }
 
 function isConsentInboxSurface(value: unknown): value is DecisionConsentInboxSurface {
@@ -767,17 +764,6 @@ function isProposal(value: unknown): value is StoredDecisionProposal {
 
 function isDecisionValue(value: unknown): value is DecisionValue {
 	return isRecord(value) && ((value.kind === "option" && isString(value.value)) || (value.kind === "other" && isString(value.text)));
-}
-
-function isJsonRecord(value: unknown): value is Record<string, unknown> {
-	return isRecord(value) && isJson(value);
-}
-
-function isJson(value: unknown): boolean {
-	if (value === null || typeof value === "string" || typeof value === "boolean") return true;
-	if (typeof value === "number") return Number.isFinite(value);
-	if (Array.isArray(value)) return value.every(isJson);
-	return isRecord(value) && Object.values(value).every(isJson);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

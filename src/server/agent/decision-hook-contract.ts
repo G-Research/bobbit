@@ -432,7 +432,7 @@ function validateEffect(raw: unknown, optionValues: readonly string[]): Readonly
 	return Object.freeze({ kind: "proposal" as const, proposals: Object.freeze(proposals), ...(noEffect.size > 0 ? { noEffectValues: Object.freeze([...noEffect]) } : {}) });
 }
 
-function validateRequest(raw: unknown, now: number): ValidatedExtensionDecisionRequest {
+function validateRequest(raw: unknown, now: number, effectiveClass?: RequestedDecisionClass): ValidatedExtensionDecisionRequest {
 	const request = requireRecord(raw, "INVALID_REQUEST");
 	onlyKeys(request, REQUEST_KEYS, "UNKNOWN_REQUEST_FIELD");
 	if (request.version !== 1) fail("INVALID_REQUEST");
@@ -459,13 +459,17 @@ function validateRequest(raw: unknown, now: number): ValidatedExtensionDecisionR
 	if (requestedClass !== "deferrable" && requestedClass !== "consent-required") fail("INVALID_REQUESTED_CLASS");
 	const intent = request.intent === undefined ? undefined : identifier(request.intent, "INVALID_INTENT");
 	if (requestedClass === "consent-required" && Object.hasOwn(request, "default")) fail("CONSENT_DEFAULT_FORBIDDEN");
-	if (requestedClass === "deferrable" && !Object.hasOwn(request, "default")) fail("DEFAULT_REQUIRED");
+	// Core can elevate a deferrable request and deliberately erase its
+	// extension-supplied default before persistence. Replaying that durable form
+	// must retain every contract check without requiring the erased value.
+	if (effectiveClass === "consent-required" && Object.hasOwn(request, "default")) fail("CONSENT_DEFAULT_FORBIDDEN");
+	if (requestedClass === "deferrable" && effectiveClass !== "consent-required" && !Object.hasOwn(request, "default")) fail("DEFAULT_REQUIRED");
 	if (request.scope !== "session" && request.scope !== "goal" && request.scope !== "project") fail("INVALID_SCOPE");
 	const scope: DecisionScope = request.scope;
 	const deadlineAt = canonicalDeadline(request.deadlineAt, now);
 	const effect = validateEffect(request.effect, options.map(option => option.value));
 	const base = { key, version: 1 as const, title, question, options: Object.freeze(options), other, scope, deadlineAt, ...(intent === undefined ? {} : { intent }), effect };
-	if (requestedClass === "consent-required") return Object.freeze({ ...base, requestedClass });
+	if (requestedClass === "consent-required" || effectiveClass === "consent-required") return Object.freeze({ ...base, requestedClass });
 	const fallback = validateDecisionValue(request.default, options, other);
 	return Object.freeze({ ...base, requestedClass, default: fallback });
 }
@@ -490,6 +494,20 @@ function validateSelection(raw: unknown): ValidatedAdvisorySelectionProposal {
 		if (error instanceof AdvisorySelectionContractError) fail(error.code);
 		throw error;
 	}
+}
+
+/**
+ * Revalidate a request read from durable state. Its historical deadline is
+ * checked against a synthetic clock exactly one minimum interval earlier, so
+ * the hook contract still owns canonical timestamp and all nested schema
+ * checks without rejecting an otherwise valid elapsed request on restart.
+ */
+export function validatePersistedDecisionRequest(raw: unknown, decisionClass: RequestedDecisionClass = "deferrable"): ValidatedExtensionDecisionRequest {
+	if (!isRecord(raw)) fail("INVALID_REQUEST");
+	const deadline = raw.deadlineAt;
+	const deadlineMs = typeof deadline === "string" ? Date.parse(deadline) : Number.NaN;
+	if (!Number.isFinite(deadlineMs)) fail("INVALID_DEADLINE");
+	return validateRequest(raw, deadlineMs - DECISION_DEADLINE_MIN_MS, decisionClass);
 }
 
 /**
