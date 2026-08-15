@@ -9,8 +9,10 @@ import {
 	__resetProjectImportDecisionRequestsForTests,
 	activateProjectImportDecisionRequests,
 	answerProjectImportDecisionRequest,
+	projectImportDecisionProjectionError,
 	projectImportDecisionRequestsForProject,
 	projectImportDecisionRequestsLoaded,
+	refreshProjectImportDecisionRequests,
 	type ProjectImportDecisionRequestProjection,
 } from "../../src/app/project-import-decisions.js";
 import type { DecisionValue } from "../../src/app/extension-decisions.js";
@@ -73,34 +75,44 @@ describe("ProjectImportDecisionRenderer", () => {
 		expect(JSON.parse(String(init?.body))).toEqual({ value: { kind: "other", text: "A custom safe mode" } });
 	});
 
-	it("treats an unavailable projection as loaded with no requests", async () => {
-		const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("unavailable", { status: 500 }));
+	it("keeps a 503 projection failure distinct from an authoritative empty projection and retries", async () => {
+		const fetch = vi.spyOn(globalThis, "fetch")
+			.mockResolvedValueOnce(new Response("unavailable", { status: 503 }))
+			.mockResolvedValueOnce(new Response(JSON.stringify({ requests: [] }), { status: 200 }));
 		const changed = vi.fn();
 		const unsubscribe = activateProjectImportDecisionRequests(PROJECT_ID, changed);
 
-		await vi.waitFor(() => expect(projectImportDecisionRequestsLoaded(PROJECT_ID)).toBe(true));
+		await vi.waitFor(() => expect(projectImportDecisionProjectionError(PROJECT_ID)?.message).toContain("Retry"));
+		expect(projectImportDecisionRequestsLoaded(PROJECT_ID)).toBe(false);
 		expect(projectImportDecisionRequestsForProject(PROJECT_ID)).toEqual([]);
-		expect(fetch).toHaveBeenCalledTimes(1);
+
+		await refreshProjectImportDecisionRequests(PROJECT_ID);
+		expect(projectImportDecisionProjectionError(PROJECT_ID)).toBeNull();
+		expect(projectImportDecisionRequestsLoaded(PROJECT_ID)).toBe(true);
+		expect(fetch).toHaveBeenCalledTimes(2);
 		expect(changed).toHaveBeenCalled();
 		unsubscribe();
 	});
 
-	it("treats a network projection failure as loaded with no requests", async () => {
+	it("keeps a network projection failure blocked instead of treating it as empty", async () => {
 		const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("gateway restarted"));
 		const unsubscribe = activateProjectImportDecisionRequests(PROJECT_ID, vi.fn());
 
-		await vi.waitFor(() => expect(projectImportDecisionRequestsLoaded(PROJECT_ID)).toBe(true));
+		await vi.waitFor(() => expect(projectImportDecisionProjectionError(PROJECT_ID)).not.toBeNull());
+		expect(projectImportDecisionRequestsLoaded(PROJECT_ID)).toBe(false);
 		expect(projectImportDecisionRequestsForProject(PROJECT_ID)).toEqual([]);
 		expect(fetch).toHaveBeenCalledTimes(1);
 		unsubscribe();
 	});
 
-	it("reloads the durable pending projection and removes a settled request without a transcript", async () => {
+	it("reloads the durable pending projection and requires a settled refresh without a transcript", async () => {
 		const fetch = vi.spyOn(globalThis, "fetch")
 			.mockResolvedValueOnce(new Response(JSON.stringify({ requests: [PENDING] }), { status: 200 }))
 			.mockResolvedValueOnce(new Response(JSON.stringify({ requests: [PENDING] }), { status: 200 }))
 			.mockResolvedValueOnce(new Response(JSON.stringify(terminal({ kind: "option", value: "safe" })), { status: 200 }))
-			.mockResolvedValueOnce(new Response(JSON.stringify(terminal({ kind: "option", value: "safe" })), { status: 200 }));
+			.mockResolvedValueOnce(new Response(JSON.stringify({ requests: [] }), { status: 200 }))
+			.mockResolvedValueOnce(new Response(JSON.stringify(terminal({ kind: "option", value: "safe" })), { status: 200 }))
+			.mockResolvedValueOnce(new Response(JSON.stringify({ requests: [] }), { status: 200 }));
 		const changed = vi.fn();
 		let unsubscribe = activateProjectImportDecisionRequests(PROJECT_ID, changed);
 		await vi.waitFor(() => expect(projectImportDecisionRequestsForProject(PROJECT_ID)).toHaveLength(1));
@@ -111,10 +123,11 @@ describe("ProjectImportDecisionRenderer", () => {
 		await vi.waitFor(() => expect(projectImportDecisionRequestsForProject(PROJECT_ID)).toHaveLength(1));
 
 		await answerProjectImportDecisionRequest(PROJECT_ID, PENDING.id, { kind: "option", value: "safe" });
+		expect(projectImportDecisionRequestsLoaded(PROJECT_ID)).toBe(true);
 		expect(projectImportDecisionRequestsForProject(PROJECT_ID)).toEqual([]);
-		// A retry remains a route-level idempotent answer, not a session message.
+		// A retry remains a route-level idempotent answer plus authoritative refresh, not a session message.
 		await answerProjectImportDecisionRequest(PROJECT_ID, PENDING.id, { kind: "option", value: "safe" });
-		expect(fetch).toHaveBeenCalledTimes(4);
+		expect(fetch).toHaveBeenCalledTimes(6);
 		for (const [url] of fetch.mock.calls) expect(String(url)).not.toContain("/api/sessions/");
 		expect(changed).toHaveBeenCalled();
 		unsubscribe();

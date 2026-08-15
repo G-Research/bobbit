@@ -14,12 +14,19 @@ export interface ProjectImportDecisionRequestProjection extends DecisionRequestW
 
 type Listener = () => void;
 
+type ProjectionState = "loading" | "loaded" | "error";
+
+export type ProjectImportDecisionProjectionError = {
+	message: string;
+};
+
 type ActiveProjection = {
 	projectId: string;
 	requests: ProjectImportDecisionRequestProjection[];
 	listeners: Set<Listener>;
 	generation: number;
-	loaded: boolean;
+	state: ProjectionState;
+	error: ProjectImportDecisionProjectionError | null;
 	controller?: AbortController;
 };
 
@@ -132,17 +139,23 @@ function notify(current: ActiveProjection): void {
 	for (const listener of current.listeners) listener();
 }
 
-function setRequests(current: ActiveProjection, next: ProjectImportDecisionRequestProjection[]): void {
+function setProjectionState(
+	current: ActiveProjection,
+	next: { state: ProjectionState; requests?: ProjectImportDecisionRequestProjection[]; error?: ProjectImportDecisionProjectionError | null },
+): void {
 	if (active !== current) return;
-	current.requests = next;
+	current.state = next.state;
+	if (next.requests) current.requests = next.requests;
+	current.error = next.error ?? null;
 	notify(current);
 }
 
-/** Treat a failed initial or refresh projection as terminally empty for this UI flow. */
 function finishFailedProjection(current: ActiveProjection, generation: number): void {
 	if (active !== current || current.generation !== generation) return;
-	current.loaded = true;
-	setRequests(current, []);
+	setProjectionState(current, {
+		state: "error",
+		error: { message: "Could not load project import decisions. Retry to continue." },
+	});
 }
 
 /** The currently visible registered project's durable import decisions. */
@@ -151,7 +164,12 @@ export function projectImportDecisionRequestsForProject(projectId: string): read
 }
 
 export function projectImportDecisionRequestsLoaded(projectId: string): boolean {
-	return active?.projectId === projectId && active.loaded;
+	return active?.projectId === projectId && active.state === "loaded";
+}
+
+/** A projection error is distinct from an authoritative empty projection. */
+export function projectImportDecisionProjectionError(projectId: string): ProjectImportDecisionProjectionError | null {
+	return active?.projectId === projectId ? active.error : null;
 }
 
 /** Start the sole active project-owned projection. It never opens an agent transport. */
@@ -159,7 +177,7 @@ export function activateProjectImportDecisionRequests(projectId: string, listene
 	if (!projectId) return () => {};
 	if (!active || active.projectId !== projectId) {
 		active?.controller?.abort();
-		active = { projectId, requests: [], listeners: new Set(), generation: 0, loaded: false };
+		active = { projectId, requests: [], listeners: new Set(), generation: 0, state: "loading", error: null };
 		void refreshProjectImportDecisionRequests(projectId);
 	}
 	const current = active;
@@ -186,6 +204,7 @@ export async function refreshProjectImportDecisionRequests(projectId: string): P
 	const controller = new AbortController();
 	current.controller = controller;
 	const generation = ++current.generation;
+	setProjectionState(current, { state: "loading" });
 	try {
 		const response = await gatewayFetch(
 			gatewayRoute(`/api/projects/${encodeURIComponent(projectId)}/import-decision-requests?state=pending`),
@@ -197,11 +216,11 @@ export async function refreshProjectImportDecisionRequests(projectId: string): P
 		}
 		const payload: unknown = await response.json();
 		if (active !== current || current.generation !== generation) return;
-		current.loaded = true;
-		setRequests(current, actionableFromPayload(payload, projectId));
+		setProjectionState(current, {
+			state: "loaded",
+			requests: actionableFromPayload(payload, projectId),
+		});
 	} catch {
-		// A completed registration must not be stranded on a transient projection
-		// failure. REST remains authoritative; the next invalidation can reload it.
 		finishFailedProjection(current, generation);
 	}
 }
@@ -225,11 +244,10 @@ export async function answerProjectImportDecisionRequest(
 		throw new Error(message);
 	}
 	const terminal = responseRequest(await response.json(), projectId);
-	const current = active;
-	if (terminal && current?.projectId === projectId) {
-		// GET is pending-only. Removing a settled request lets the import flow move
-		// forward without turning the registration dialog into a transcript surface.
-		setRequests(current, current.requests.filter((request) => request.id !== terminal.id));
+	if (terminal) {
+		// A settlement is not itself proof that no other actionable request exists.
+		// Re-read the pending projection before permitting the import handoff.
+		await refreshProjectImportDecisionRequests(projectId);
 	}
 	return terminal;
 }
