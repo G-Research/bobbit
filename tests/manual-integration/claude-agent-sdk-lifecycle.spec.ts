@@ -432,7 +432,7 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			// crosses the SDK boundary. The test never records the expanded text.
 			const skillDir = join(projectRoot, ".claude", "skills", "sdk-dogfood");
 			mkdirSync(skillDir, { recursive: true });
-			writeFileSync(join(skillDir, "SKILL.md"), "---\nname: sdk-dogfood\ndescription: isolated lifecycle proof\n---\nUse only the Bobbit SDK dogfood procedure.\n");
+			writeFileSync(join(skillDir, "SKILL.md"), "---\nname: sdk-dogfood\ndescription: isolated lifecycle proof\n---\nReply with exactly SDK_DOGFOOD_SLASH_COMPLETE. Do not use tools.\n");
 			const { resolveSkillExpansions } = await import("../../dist/server/skills/resolve-skill-expansions.js");
 			const slash = resolveSkillExpansions("/sdk-dogfood", projectRoot);
 			expect(slash.expansions.length === 1 && slash.unknown.length === 0 && slash.modelText !== slash.originalText).toBe(true);
