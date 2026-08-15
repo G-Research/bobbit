@@ -3560,6 +3560,9 @@ export interface SandboxStatusResponse {
 	dockerVersion?: string;
 	imageName?: string;
 	imageExists?: boolean;
+	/** Exact resolved plan has matching Pi and requirements-fingerprint labels. */
+	imageReady?: boolean;
+	imageBuildable?: boolean;
 	dockerfileExists?: boolean;
 	buildCommand?: string;
 	requirements?: SandboxRequirementsStatus;

@@ -41,7 +41,19 @@ describe("sandbox image requirement plans", () => {
 	it("keeps the project-configured baseline image unchanged without profiles", () => {
 		const plan = resolve({ requirements: [] });
 		assert.equal(plan.imageName, "registry.example:5000/team/bobbit-agent:base");
+		assert.equal(plan.buildable, true);
 		assert.deepEqual(plan.profiles, []);
+	});
+
+	it("accepts Docker-legal repeated separators and marks a digest baseline build-not-applicable", () => {
+		const legal = resolve({ baseImageName: "registry.example/team/bobbit--agent__stable:base", requirements: [] });
+		assert.equal(legal.imageName, "registry.example/team/bobbit--agent__stable:base");
+		assert.equal(legal.buildable, true);
+
+		const digest = `registry.example/team/bobbit--agent@sha256:${"a".repeat(64)}`;
+		const pinned = resolve({ baseImageName: digest, requirements: [] });
+		assert.equal(pinned.imageName, digest);
+		assert.equal(pinned.buildable, false);
 	});
 
 	it("changes the fingerprint only for core build inputs", () => {
