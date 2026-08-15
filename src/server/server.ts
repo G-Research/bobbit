@@ -5666,7 +5666,8 @@ async function handleApiRoute(
 				targets.push({ ref: { packId: pack.packId, kind: "runtime", id: runtime.id }, packName: pack.packName, listName: runtime.listName, fields: schema?.fields ?? [], requiresConfig: schema?.requiresConfig ?? [], contribution: runtime });
 			}
 			for (const requirement of pack.sandboxRequirements) {
-				if (requirement.settingsSchemaDiagnostic !== undefined) continue;
+				// Sandbox requirement declarations are rejected by their closed loader
+				// rather than retained with a repair diagnostic.
 				const schema = requirement.settingsSchema;
 				targets.push({ ref: { packId: pack.packId, kind: "sandboxRequirement", id: requirement.id }, packName: pack.packName, listName: requirement.listName, fields: schema?.fields ?? [], requiresConfig: schema?.requiresConfig ?? [], contribution: requirement });
 			}
@@ -5677,7 +5678,6 @@ async function handleApiRoute(
 		...pack.providers.filter(provider => provider.settingsSchemaDiagnostic !== undefined).map(provider => ({ packId: pack.packId, kind: "provider" as const, id: provider.id })),
 		...pack.hooks.filter(hook => hook.settingsSchemaDiagnostic !== undefined).map(hook => ({ packId: pack.packId, kind: "hook" as const, id: hook.id })),
 		...pack.runtimes.filter(runtime => runtime.settingsSchemaDiagnostic !== undefined).map(runtime => ({ packId: pack.packId, kind: "runtime" as const, id: runtime.id })),
-		...pack.sandboxRequirements.filter(requirement => requirement.settingsSchemaDiagnostic !== undefined).map(requirement => ({ packId: pack.packId, kind: "sandboxRequirement" as const, id: requirement.id })),
 	]);
 	const mutationDispatcher = requestMutationDispatcher!;
 	const resultFilterDispatcher = toolResultFilterDispatcher!;

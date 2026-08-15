@@ -269,6 +269,7 @@ function manifest(name: string, opts: Partial<PackManifest["contents"]> & { rout
 			mcp: opts.mcp ?? [],
 			piExtensions: opts.piExtensions ?? [],
 			runtimes: opts.runtimes ?? [],
+			sandboxRequirements: opts.sandboxRequirements ?? [],
 			workflows: opts.workflows ?? [],
 			systemPrompts: opts.systemPrompts ?? [],
 		},
@@ -283,8 +284,21 @@ describe("schema-3 sandbox requirement declarations", () => {
 		w(path.join(root, "sandbox-requirements", "injected.yaml"), "id: injected\nprofiles: [python, python]\ncommand: apt install anything\n");
 		const m = { ...manifest("safe-tools", { sandboxRequirements: ["python", "injected"] }), schema: 3 };
 		const requirements = loadSandboxRequirements(root, m);
-		assert.deepEqual(requirements.map(requirement => ({ id: requirement.id, profiles: requirement.profiles, activation: requirement.activation })), [
-			{ id: "python-analysis", profiles: ["python"], activation: { requiresConfig: ["enabled"] } },
+		assert.deepEqual(requirements.map(requirement => ({
+			id: requirement.id,
+			profiles: requirement.profiles,
+			settingsSchema: requirement.settingsSchema,
+			activation: requirement.activation,
+		})), [
+			{
+				id: "python-analysis",
+				profiles: ["python"],
+				settingsSchema: {
+					fields: [{ key: "enabled", type: "boolean", default: true }],
+					requiresConfig: ["enabled"],
+				},
+				activation: { requiresConfig: ["enabled"] },
+			},
 		]);
 	});
 

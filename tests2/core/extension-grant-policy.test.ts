@@ -209,7 +209,9 @@ describe("live project capability grant resolver", () => {
 			.toEqual({ allowed: false, reason: "invalid_request" });
 		expect(resolver("project-a", { kind: "pack", packId: "pack-a" }, "decide"))
 			.toEqual({ allowed: false, reason: "unsupported_capability" });
-		expect(resolver("project-a", { kind: "hook", packId: "pack-a", hookId: "decider" }, "memory.read"))
-			.toEqual({ allowed: false, reason: "unsupported_capability" });
+		for (const capability of ["memory.read", "sandbox:build"] as const) {
+			expect(resolver("project-a", { kind: "hook", packId: "pack-a", hookId: "decider" }, capability))
+				.toEqual({ allowed: false, reason: "unsupported_capability" });
+		}
 	});
 });
