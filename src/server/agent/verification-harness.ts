@@ -5450,7 +5450,7 @@ export class VerificationHarness {
 			// the durable signal before any cache or checkout can observe it. A missing
 			// container HEAD is valid for an unborn or non-Git legacy container, so it
 			// remains unrepinned rather than failing the entire verification.
-			if (goalBranch && !pinnedLayout) {
+			if (goalBranch && !pinnedLayout && !isParentTargetReadyToMerge) {
 				let postSyncHead: string | undefined;
 				try {
 					const { stdout } = await this.commandRunner.execFile(
