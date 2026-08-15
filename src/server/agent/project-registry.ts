@@ -11,6 +11,14 @@ import { runPreflight, type PreflightReport } from "./project-preflight.js";
 
 export type ProjectKind = "normal" | "headquarters" | "system";
 
+export interface ImportDecisionRunMarker {
+  version: 1;
+  id: string;
+  createdAt: number;
+  /** Configuration is persisted by POST /api/projects before dispatch. */
+  state: "configuring" | "ready";
+}
+
 export interface RegisteredProject {
   id: string;           // UUID or stable built-in project id
   name: string;         // Display name
@@ -23,6 +31,8 @@ export interface RegisteredProject {
   colorDark: string;    // Accent color for dark mode (always present)
   position?: number;    // User-controlled normal-project ordering; hidden/system/HQ projects do not participate
   provisional?: boolean; // True while a project assistant is setting up this project
+  /** Durable one-shot import decision lifecycle marker for newly registered normal projects. */
+  importDecisionRun?: ImportDecisionRunMarker;
   /**
    * True for synthetic projects that should be filtered out of UI listings
    * but still resolvable by id (e.g. the "system" project used as the
@@ -963,12 +973,16 @@ export class ProjectRegistry {
     colorLight = colorLight || DEFAULT_PROJECT_COLOR_LIGHT;
     colorDark = colorDark || DEFAULT_PROJECT_COLOR_DARK;
 
+    const createdAt = Date.now();
     const project: RegisteredProject = {
       id: randomUUID(),
       name,
       rootPath,
-      createdAt: Date.now(),
+      createdAt,
       position: this.nextVisiblePosition(),
+      // This closes the registration/configuration crash gap. The route must
+      // persist components before flipping this marker and dispatching hooks.
+      importDecisionRun: { version: 1, id: randomUUID(), createdAt, state: "configuring" },
       color: colorLight, // backward compat
       colorLight,
       colorDark,
@@ -976,6 +990,22 @@ export class ProjectRegistry {
     };
 
     this.projects.set(project.id, project);
+    this.save();
+    return project;
+  }
+
+  /**
+   * Atomically publish a fully configured import run. The marker is immutable
+   * apart from its state: mismatched ids and legacy projects never gain a run.
+   */
+  markImportDecisionRunReady(projectId: string, importId: string): RegisteredProject {
+    const project = this.projects.get(projectId);
+    if (!project?.importDecisionRun || project.importDecisionRun.id !== importId) {
+      throw new Error(`Import decision run not found for project ${projectId}`);
+    }
+    if (project.importDecisionRun.state === "ready") return project;
+    project.importDecisionRun = { ...project.importDecisionRun, state: "ready" };
+    this.projects.set(projectId, project);
     this.save();
     return project;
   }
