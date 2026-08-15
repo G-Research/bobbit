@@ -309,11 +309,14 @@ export function buildClaudeSdkSubagentPolicy(options: ClaudeSdkSubagentPolicyOpt
 			// configured in this query so strict MCP mode cannot leave these literal
 			// raw tool names disconnected in the child.
 			mcpServers: ["bobbit"],
+			// Keep the backwards-compatible native Skill capability, but do not
+			// eagerly preload the root's bundled-skill inventory into a child.
+			// With strict isolated settings, the SDK preloads child `skills` while
+			// constructing the helper, before it can make its read-only MCP call.
 			tools: ["Skill", ...selectedRaw],
 			// `Task` is removed from the root disallow list solely as Agent's private
 			// alias target. It remains explicitly unavailable to every child.
 			disallowedTools: [PUBLIC_AGENT_TOOL, AGENT_TRANSPORT_TOOL, ...CLAUDE_NATIVE_TOOL_POLICY.disallowed, ...disallowedMcp],
-			skills: [...CLAUDE_BUNDLED_SKILLS_0_3_222],
 		});
 		const projection: ClaudeSdkSubagentDefinition = Object.freeze({ type: approved.type, sourceRole: approved.role, definition, childRawTools: Object.freeze(selectedRaw) });
 		byType.set(approved.type, projection);

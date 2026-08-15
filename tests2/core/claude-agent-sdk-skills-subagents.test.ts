@@ -93,7 +93,7 @@ describe("Claude Agent SDK D3/D4 skills and subagents", () => {
 		expect(sdkSurface.CLAUDE_NATIVE_TOOL_POLICY.disallowed).not.toContain("Agent");
 	});
 
-	it("projects exactly the three resolved Bobbit roles with immutable child bounds", () => {
+	it("projects exactly the three resolved Bobbit roles with immutable child bounds and no eager skill preload", () => {
 		const { policy } = policyFixture();
 		expect(Object.keys(policy.definitions).sort()).toEqual(Object.keys(PROJECTIONS).sort());
 		for (const [agentType, expected] of Object.entries(PROJECTIONS)) {
@@ -105,8 +105,10 @@ describe("Claude Agent SDK D3/D4 skills and subagents", () => {
 				permissionMode: "default",
 				mcpServers: ["bobbit"],
 				tools: ["Skill", ...CHILD_MCP_TOOLS],
-				skills: BUNDLED_SKILLS_0_3_222,
 			});
+			// The reviewed bundle belongs to the root query only. Do not make SDK
+			// eagerly resolve it while it constructs this isolated child.
+			expect(definition.skills, `${agentType} must not eagerly preload root skills`).toBeUndefined();
 			expect(definition.prompt).toBe(`Resolved ${expected.sourceRole}: sdk-root-sdk-session @ goal/immutable-projection`);
 			for (const forbidden of ["Agent", "Task", "Bash", "mcp__bobbit__bash"]) {
 				expect(definition.disallowedTools, `${agentType} must explicitly disallow ${forbidden}`).toContain(forbidden);

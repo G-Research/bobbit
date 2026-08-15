@@ -154,7 +154,7 @@ Every definition additionally has:
   tools: ["Skill", ...exactChildMcpRawNames],
   disallowedTools: ["Agent", "Task", ...nativeDisallowed,
                     ...allRootMcpRawNamesExceptExactChildMcpRawNames],
-  skills: [...CLAUDE_BUNDLED_SKILLS_0_3_222],
+  // Do not eagerly preload the root bundle into an isolated child.
   memory: undefined,
   mcpServers: undefined,
   initialPrompt: undefined,
@@ -167,10 +167,11 @@ The fixed projections deliberately omit optional `effort`: `model: "inherit"`
 keeps child thinking governed by the active root tuple and its SDK-advertised
 capabilities, rather than sending a possibly unsupported child effort. The
 explicit `Skill` entry follows the installed declaration's backwards-compatible
-`tools` contract; the same literal `skills` list is the current preferred
-enablement surface. Re-evaluate this duplicate only during a pinned
-SDK upgrade, with a real initialization test. The definitions never include
-`bash`, edit/write, web, question, Bobbit team/task/gate/verification tools,
+`tools` contract. The root query alone supplies the literal `skills` list;
+children deliberately omit it so strict isolated settings cannot eagerly resolve
+bundled skills during helper construction. Re-evaluate the compatibility posture
+only during a pinned SDK upgrade, with a real initialization test. The definitions
+never include `bash`, edit/write, web, question, Bobbit team/task/gate/verification tools,
 managed MCP aggregates, extension-host tools, or foreign MCP servers. An
 allowed child MCP raw name maps back through the existing reversible
 `mcp__bobbit__<canonical>` normalizer before dispatch; no raw identity is

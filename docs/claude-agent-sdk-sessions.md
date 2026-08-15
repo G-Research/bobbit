@@ -531,11 +531,14 @@ the existing role cascade and fixes the projection's prompt, `model: "inherit"`,
 optional child `effort`, so the inherited model uses the active root thinking
 selection and only SDK-advertised capability rather than a fixed level that a
 selected model may reject.
-Each has the bundled-skill pin and no memory, observer, custom MCP server, or
-caller override. Its read-only Bobbit-tool ceiling may include only root-selected
-and pre-allowed `mcp__bobbit__read`, `mcp__bobbit__find`, and
-`mcp__bobbit__grep`; it has no `bash`, write/edit, web, team, task, worktree,
-gate, or managed-MCP tool.
+The reviewed bundled-skill pin belongs to the root query only. Child definitions
+retain the native `Skill` capability for SDK compatibility, but deliberately omit
+a `skills` list: strict isolated settings can otherwise make the SDK eagerly
+resolve bundled skills while constructing a helper, before its read-only MCP
+call. Each has no memory, observer, custom MCP server, or caller override. Its
+read-only Bobbit-tool ceiling may include only root-selected and pre-allowed
+`mcp__bobbit__read`, `mcp__bobbit__find`, and `mcp__bobbit__grep`; it has no
+`bash`, write/edit, web, team, task, worktree, gate, or managed-MCP tool.
 
 Root `Agent` admission accepts only one of those exact types, a bounded prompt,
 and `run_in_background: false`. The call is correlated by its tool-use id with a
