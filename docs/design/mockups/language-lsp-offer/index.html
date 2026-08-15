@@ -1,0 +1,671 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Language intelligence enablement — interactive UX mockup</title>
+<style>
+	/*
+		Language LSP enablement mockup
+
+		Design rationale
+		- This follows the existing Add Project dialog grammar: fixed shell, compact
+		  labels, scrollable body, and a position-invariant footer.
+		- Structural search and LSP are separate selectable rows. Their visual
+		  treatment never implies that grammar support guarantees an LSP server.
+		- Installation is a named, explicit second decision. Enabling an LSP never
+		  silently installs a toolchain or falls back from Docker to the host.
+		- The prototype stores accepted state in localStorage so the Reload control
+		  demonstrates restart-safe configuration rather than a transient success.
+		- Scenario controls expose loading, error/degraded, restored, empty, and
+		  disabled states without requiring a real service.
+
+		Consistency rationale
+		- Buttons use the app's default/ghost/destructive hierarchy and 6–8px radii.
+		- Toggle geometry matches `.toggle-switch` in src/app/app.css (32 × 18px,
+		  14px thumb, 14px checked translation, 2px focus ring).
+		- Labels are 12px muted medium text; inputs, cards, borders, and focus states
+		  use the same Bobbit theme variables as Add Project and Settings.
+		- Capability controls remain in each detected-language card instead of a new
+		  global settings row, because readiness and install requirements differ per
+		  language. The fixed footer remains the only place for flow-level actions.
+	*/
+	* { box-sizing: border-box; }
+	body {
+		margin: 0;
+		min-height: 100vh;
+		background: var(--background);
+		color: var(--foreground);
+		font-family: inherit;
+		font-size: 14px;
+	}
+	button, input, select { font: inherit; }
+	button { color: inherit; }
+	button, label, select { -webkit-tap-highlight-color: transparent; }
+	button:focus-visible, select:focus-visible, input:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+	button:disabled { cursor: not-allowed; opacity: .45; }
+	.shell {
+		min-height: 100vh;
+		display: grid;
+		grid-template-rows: auto 1fr;
+	}
+	.prototype-bar {
+		width: 100%;
+		max-width: 100vw;
+		min-width: 0;
+		min-height: 52px;
+		padding: 8px clamp(12px, 2vw, 24px);
+		border-bottom: 1px solid var(--border);
+		background: var(--card);
+		color: var(--card-foreground);
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		position: sticky;
+		top: 0;
+		z-index: 20;
+	}
+	.prototype-title { display: flex; align-items: center; gap: 9px; min-width: 190px; }
+	.prototype-mark {
+		width: 26px;
+		height: 26px;
+		display: grid;
+		place-items: center;
+		border-radius: 7px;
+		background: color-mix(in oklch, var(--primary) 12%, transparent);
+		color: var(--primary);
+	}
+	.prototype-mark svg { width: 15px; height: 15px; }
+	.prototype-title strong { font-size: 13px; }
+	.prototype-title span { display: block; color: var(--muted-foreground); font-size: 11px; margin-top: 1px; }
+	.scenarios { display: flex; flex: 1; min-width: 0; justify-content: flex-end; gap: 4px; overflow-x: auto; padding: 2px; margin-left: auto; }
+	.scenario {
+		border: 0;
+		background: transparent;
+		color: var(--muted-foreground);
+		border-radius: 6px;
+		padding: 6px 9px;
+		font-size: 12px;
+		font-weight: 550;
+		white-space: nowrap;
+		cursor: pointer;
+	}
+	.scenario:hover { color: var(--foreground); background: color-mix(in oklch, var(--secondary) 65%, transparent); }
+	.scenario[aria-pressed="true"] { color: var(--foreground); background: var(--secondary); }
+	.workspace {
+		min-height: 0;
+		padding: clamp(14px, 2.5vw, 30px);
+		display: grid;
+		place-items: center;
+		background:
+			linear-gradient(var(--border) 1px, transparent 1px),
+			linear-gradient(90deg, var(--border) 1px, transparent 1px),
+			var(--muted);
+		background-size: 32px 32px;
+	}
+	.dialog {
+		width: min(960px, 96vw);
+		max-width: 100vw;
+		min-width: 0;
+		height: min(780px, calc(100vh - 100px));
+		min-height: 570px;
+		border: 1px solid var(--border);
+		border-radius: 11px;
+		background: var(--background);
+		box-shadow: 0 22px 72px color-mix(in oklch, var(--foreground) 18%, transparent);
+		overflow: hidden;
+		display: grid;
+		grid-template-rows: auto 1fr auto;
+		position: relative;
+	}
+	.dialog-header {
+		padding: 19px 22px 14px;
+		border-bottom: 1px solid var(--border);
+		display: flex;
+		align-items: flex-start;
+		gap: 18px;
+		background: var(--background);
+	}
+	.header-copy { flex: 1; min-width: 0; }
+	.eyebrow {
+		font-size: 10px;
+		line-height: 1;
+		text-transform: uppercase;
+		letter-spacing: .09em;
+		font-weight: 700;
+		color: var(--muted-foreground);
+		margin-bottom: 7px;
+	}
+	h1 { font-size: 19px; line-height: 1.2; margin: 0; letter-spacing: -.015em; }
+	.header-copy p { margin: 6px 0 0; color: var(--muted-foreground); line-height: 1.45; font-size: 12px; max-width: 72ch; }
+	.stepper { display: flex; align-items: center; gap: 5px; margin-top: 3px; }
+	.step { height: 4px; width: 28px; border-radius: 99px; background: var(--border); }
+	.step.done, .step.current { background: var(--primary); }
+	.header-close {
+		border: 0;
+		background: transparent;
+		color: var(--muted-foreground);
+		border-radius: 6px;
+		width: 30px;
+		height: 30px;
+		display: grid;
+		place-items: center;
+		cursor: pointer;
+	}
+	.header-close:hover { background: var(--secondary); color: var(--foreground); }
+	.header-close svg { width: 16px; height: 16px; }
+	.dialog-header, .dialog-body, .dialog-footer { min-width: 0; }
+	.dialog-body { overflow-y: auto; min-height: 0; padding: 17px 22px 22px; }
+	.dialog-footer {
+		min-height: 65px;
+		padding: 12px 22px;
+		border-top: 1px solid var(--border);
+		background: var(--background);
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 18px;
+	}
+	.footer-note { display: flex; align-items: flex-start; gap: 7px; color: var(--muted-foreground); font-size: 11px; line-height: 1.35; max-width: 55ch; }
+	.footer-note svg { width: 14px; height: 14px; margin-top: 1px; flex: none; }
+	.footer-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+	.btn {
+		min-height: 34px;
+		border-radius: 7px;
+		padding: 7px 12px;
+		font-size: 12px;
+		font-weight: 650;
+		border: 1px solid transparent;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 7px;
+		cursor: pointer;
+		transition: background 120ms ease, border-color 120ms ease, transform 100ms ease;
+	}
+	.btn:active:not(:disabled) { transform: translateY(1px); }
+	.btn svg { width: 14px; height: 14px; }
+	.btn-primary { background: var(--primary); color: var(--primary-foreground); }
+	.btn-primary:hover { background: color-mix(in oklch, var(--primary) 88%, var(--foreground)); }
+	.btn-secondary { background: var(--background); border-color: var(--border); color: var(--foreground); }
+	.btn-secondary:hover { background: var(--secondary); }
+	.btn-ghost { background: transparent; color: var(--muted-foreground); }
+	.btn-ghost:hover { background: var(--secondary); color: var(--foreground); }
+	.btn-danger { background: color-mix(in oklch, var(--negative) 10%, transparent); border-color: color-mix(in oklch, var(--negative) 40%, var(--border)); color: var(--negative); }
+	.btn-danger:hover { background: color-mix(in oklch, var(--negative) 16%, transparent); }
+	.btn-danger-quiet { background: transparent; border-color: color-mix(in oklch, var(--negative) 40%, var(--border)); color: var(--negative); }
+	.btn-danger-quiet:hover { background: color-mix(in oklch, var(--negative) 10%, transparent); }
+	.btn-inline { min-height: 28px; padding: 4px 8px; font-size: 11px; }
+	.summary-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; margin-bottom: 14px; }
+	.summary-card {
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 11px 12px;
+		background: var(--card);
+		color: var(--card-foreground);
+		display: grid;
+		grid-template-columns: auto 1fr;
+		gap: 9px;
+		align-items: start;
+	}
+	.summary-icon {
+		width: 27px;
+		height: 27px;
+		border-radius: 7px;
+		display: grid;
+		place-items: center;
+		color: var(--positive);
+		background: color-mix(in oklch, var(--positive) 12%, transparent);
+	}
+	.summary-card.install .summary-icon { color: var(--warning); background: color-mix(in oklch, var(--warning) 15%, transparent); }
+	.summary-icon svg { width: 14px; height: 14px; }
+	.summary-card strong { display: block; font-size: 12px; }
+	.summary-card p { margin: 3px 0 0; color: var(--muted-foreground); font-size: 11px; line-height: 1.4; }
+	.section-head { display: flex; align-items: end; justify-content: space-between; gap: 12px; margin: 14px 0 7px; }
+	.section-head h2 { margin: 0; font-size: 12px; }
+	.section-head span { color: var(--muted-foreground); font-size: 10px; }
+	.language-list { display: grid; gap: 8px; }
+	.language-card { border: 1px solid var(--border); border-radius: 9px; background: var(--card); color: var(--card-foreground); overflow: hidden; }
+	.language-top { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+	.lang-glyph {
+		width: 30px;
+		height: 30px;
+		border: 1px solid var(--border);
+		border-radius: 7px;
+		display: grid;
+		place-items: center;
+		font: 700 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+		color: var(--foreground);
+		background: var(--secondary);
+		flex: none;
+	}
+	.language-name { min-width: 0; flex: 1; }
+	.language-name strong { font-size: 12px; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+	.language-name small { display: block; color: var(--muted-foreground); font-size: 10px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.component-pill, .status-pill {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		border-radius: 999px;
+		padding: 2px 6px;
+		font-size: 9px;
+		line-height: 1.3;
+		font-weight: 650;
+		border: 1px solid var(--border);
+		color: var(--muted-foreground);
+		background: var(--background);
+	}
+	.status-pill.ready { color: var(--positive); border-color: color-mix(in oklch, var(--positive) 40%, var(--border)); background: color-mix(in oklch, var(--positive) 8%, transparent); }
+	.status-pill.warn { color: var(--warning); border-color: color-mix(in oklch, var(--warning) 45%, var(--border)); background: color-mix(in oklch, var(--warning) 9%, transparent); }
+	.status-pill.error { color: var(--negative); border-color: color-mix(in oklch, var(--negative) 42%, var(--border)); background: color-mix(in oklch, var(--negative) 8%, transparent); }
+	.status-pill.info { color: var(--info); border-color: color-mix(in oklch, var(--info) 42%, var(--border)); background: color-mix(in oklch, var(--info) 8%, transparent); }
+	.status-dot { width: 5px; height: 5px; border-radius: 99px; background: currentColor; }
+	.capabilities { display: grid; grid-template-columns: 1fr 1.35fr; }
+	.capability { padding: 10px 12px; display: flex; gap: 9px; align-items: flex-start; min-width: 0; }
+	.capability + .capability { border-left: 1px solid var(--border); }
+	.capability-copy { flex: 1; min-width: 0; }
+	.capability-label { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-weight: 650; font-size: 11px; }
+	.capability-copy p { margin: 3px 0 0; color: var(--muted-foreground); line-height: 1.4; font-size: 10px; }
+	.capability-copy code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9.5px; color: var(--foreground); }
+	.feature-list { margin: 5px 0 0; display: flex; flex-wrap: wrap; gap: 3px; }
+	.feature { font-size: 9px; color: var(--muted-foreground); border: 1px solid var(--border); background: var(--background); border-radius: 4px; padding: 2px 4px; }
+	.switch {
+		appearance: none;
+		position: relative;
+		width: 32px;
+		height: 18px;
+		border: 0;
+		border-radius: 9px;
+		background: var(--secondary);
+		box-shadow: inset 0 0 0 1px var(--border);
+		transition: background 180ms ease;
+		cursor: pointer;
+		flex: none;
+		margin: 1px 0 0;
+	}
+	.switch::after {
+		content: "";
+		position: absolute;
+		top: 2px;
+		left: 2px;
+		width: 14px;
+		height: 14px;
+		border-radius: 50%;
+		background: var(--muted-foreground);
+		transition: transform 180ms ease, background 180ms ease;
+	}
+	.switch:checked { background: var(--primary); box-shadow: none; }
+	.switch:checked::after { transform: translateX(14px); background: var(--primary-foreground); }
+	.switch:disabled { cursor: not-allowed; opacity: .42; }
+	.notice { border: 1px solid var(--border); border-radius: 8px; padding: 10px 11px; display: flex; align-items: flex-start; gap: 9px; font-size: 11px; line-height: 1.42; }
+	.notice svg { width: 15px; height: 15px; flex: none; margin-top: 1px; }
+	.notice.info { color: var(--foreground); border-color: color-mix(in oklch, var(--info) 40%, var(--border)); background: color-mix(in oklch, var(--info) 8%, transparent); }
+	.notice.info svg { color: var(--info); }
+	.notice.warn { border-color: color-mix(in oklch, var(--warning) 44%, var(--border)); background: color-mix(in oklch, var(--warning) 10%, transparent); }
+	.notice.warn svg { color: var(--warning); }
+	.notice.error { border-color: color-mix(in oklch, var(--negative) 45%, var(--border)); background: color-mix(in oklch, var(--negative) 8%, transparent); }
+	.notice.error svg { color: var(--negative); }
+	.notice strong { display: block; margin-bottom: 2px; }
+	.notice p { margin: 0; color: var(--muted-foreground); }
+	.notice p + p { margin-top: 4px; }
+	.toolchain-table { margin-top: 10px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+	.toolchain-row { display: grid; grid-template-columns: minmax(145px, .8fr) 1.6fr auto; align-items: center; gap: 10px; padding: 9px 11px; border-bottom: 1px solid var(--border); font-size: 11px; }
+	.toolchain-row:last-child { border-bottom: 0; }
+	.toolchain-name strong { display: block; }
+	.toolchain-name span, .toolchain-detail { color: var(--muted-foreground); font-size: 10px; }
+	.toolchain-detail code { color: var(--foreground); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+	.progress-list { display: grid; gap: 15px; padding: 14px 2px 4px; }
+	.progress-row { display: grid; grid-template-columns: 24px 1fr auto; gap: 10px; align-items: start; }
+	.progress-icon { width: 24px; height: 24px; border-radius: 50%; border: 1px solid var(--border); display: grid; place-items: center; color: var(--muted-foreground); }
+	.progress-icon svg { width: 13px; height: 13px; }
+	.progress-row.done .progress-icon { color: var(--positive); border-color: color-mix(in oklch, var(--positive) 45%, var(--border)); background: color-mix(in oklch, var(--positive) 9%, transparent); }
+	.progress-row.active .progress-icon { color: var(--primary); border-color: var(--primary); }
+	.progress-row strong { font-size: 12px; display: block; margin-top: 2px; }
+	.progress-row p { color: var(--muted-foreground); font-size: 10px; margin: 3px 0 0; }
+	.progress-state { color: var(--muted-foreground); font-size: 10px; margin-top: 4px; }
+	.spinner { width: 13px; height: 13px; border: 2px solid color-mix(in oklch, var(--primary) 25%, transparent); border-top-color: var(--primary); border-radius: 50%; animation: spin .8s linear infinite; }
+	.progress-track { height: 5px; background: var(--secondary); border-radius: 99px; margin-top: 9px; overflow: hidden; }
+	.progress-track span { display: block; height: 100%; width: 62%; background: var(--primary); border-radius: inherit; animation: breathe 1.3s ease-in-out infinite alternate; }
+	.active-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
+	.metric { border: 1px solid var(--border); border-radius: 8px; padding: 10px 11px; background: var(--card); }
+	.metric span { display: block; color: var(--muted-foreground); font-size: 10px; }
+	.metric strong { display: block; font-size: 16px; margin-top: 3px; }
+	.metric small { display: block; color: var(--muted-foreground); font-size: 9px; margin-top: 2px; }
+	.query-panel { margin-top: 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--card); overflow: hidden; }
+	.query-head { padding: 10px 12px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+	.query-head strong { font-size: 12px; }
+	.query-head span { color: var(--muted-foreground); font-size: 10px; }
+	.query-controls { padding: 10px 12px; display: grid; grid-template-columns: minmax(120px, .7fr) minmax(200px, 1.3fr) auto; gap: 8px; align-items: end; }
+	.field label { display: block; font-size: 10px; color: var(--muted-foreground); margin-bottom: 4px; font-weight: 600; }
+	.select, .fake-input { width: 100%; min-height: 32px; border: 1px solid var(--input); border-radius: 6px; background: var(--background); color: var(--foreground); padding: 6px 8px; font-size: 11px; }
+	.fake-input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.query-actions { padding: 0 12px 10px; display: flex; gap: 4px; flex-wrap: wrap; }
+	.action-chip { border: 1px solid var(--border); border-radius: 5px; background: var(--background); color: var(--muted-foreground); font-size: 9px; padding: 3px 6px; cursor: pointer; }
+	.action-chip:hover { background: var(--secondary); color: var(--foreground); }
+	.action-chip.active { color: var(--foreground); border-color: var(--primary); background: color-mix(in oklch, var(--primary) 9%, transparent); }
+	.query-output { border-top: 1px solid var(--border); padding: 10px 12px; background: var(--background); min-height: 75px; font-size: 10px; line-height: 1.48; }
+	.query-output code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+	.query-output .path { color: var(--info); }
+	.query-output .muted { color: var(--muted-foreground); }
+	.query-output .error-text { color: var(--negative); }
+	.restored-banner { margin-bottom: 11px; }
+	.empty-state { min-height: 390px; display: grid; place-items: center; text-align: center; padding: 30px; }
+	.empty-state .empty-icon { width: 44px; height: 44px; border-radius: 12px; background: var(--secondary); border: 1px solid var(--border); display: grid; place-items: center; margin: 0 auto 12px; color: var(--muted-foreground); }
+	.empty-state svg { width: 20px; height: 20px; }
+	.empty-state h2 { margin: 0; font-size: 15px; }
+	.empty-state p { max-width: 48ch; color: var(--muted-foreground); font-size: 11px; line-height: 1.5; margin: 7px auto 14px; }
+	.confirm-backdrop { position: absolute; inset: 0; background: color-mix(in oklch, var(--foreground) 35%, transparent); display: grid; place-items: center; padding: 20px; z-index: 12; }
+	.confirm { width: min(460px, 94%); border: 1px solid var(--border); border-radius: 10px; background: var(--background); box-shadow: 0 18px 60px color-mix(in oklch, var(--foreground) 22%, transparent); }
+	.confirm-head { padding: 17px 18px 11px; }
+	.confirm-head h2 { margin: 0; font-size: 15px; }
+	.confirm-head p { margin: 6px 0 0; color: var(--muted-foreground); font-size: 11px; line-height: 1.45; }
+	.confirm-body { padding: 0 18px 15px; }
+	.confirm-check { display: flex; gap: 8px; align-items: flex-start; font-size: 11px; line-height: 1.4; cursor: pointer; }
+	.confirm-check input { margin-top: 2px; accent-color: var(--primary); }
+	.confirm-check span span { display: block; color: var(--muted-foreground); font-size: 10px; margin-top: 2px; }
+	.confirm-footer { border-top: 1px solid var(--border); padding: 11px 18px; display: flex; justify-content: flex-end; gap: 8px; }
+	.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+	@keyframes spin { to { transform: rotate(360deg); } }
+	@keyframes breathe { from { width: 47%; } to { width: 72%; } }
+	@media (prefers-reduced-motion: reduce) {
+		*, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+	}
+	@media (max-width: 720px) {
+		.prototype-title span, .prototype-title strong { display: none; }
+		.prototype-title { min-width: 0; flex: none; }
+		.scenarios { justify-content: flex-start; }
+		.workspace { padding: 0; display: block; }
+		.dialog { width: 100vw; max-width: 100vw; height: calc(100vh - 52px); min-height: 0; border-radius: 0; border-left: 0; border-right: 0; }
+		.dialog-header, .dialog-body, .dialog-footer { padding-left: 14px; padding-right: 14px; }
+		.summary-grid, .active-summary { grid-template-columns: 1fr; }
+		.capabilities { grid-template-columns: 1fr; }
+		.capability + .capability { border-left: 0; border-top: 1px solid var(--border); }
+		.toolchain-row { grid-template-columns: 1fr auto; }
+		.toolchain-detail { grid-column: 1 / -1; grid-row: 2; }
+		.query-controls { grid-template-columns: 1fr; }
+		.dialog-footer { align-items: flex-end; }
+		.footer-note { display: none; }
+		.footer-actions { width: 100%; justify-content: flex-end; }
+	}
+</style>
+</head>
+<body>
+<div class="shell">
+	<header class="prototype-bar" aria-label="Prototype scenario controls">
+		<div class="prototype-title">
+			<div class="prototype-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3v3M16 3v3M5 8h14M6 11h3M6 15h3M13 11h5M13 15h5M5 19h14"/></svg></div>
+			<div><strong>Language intelligence</strong><span>Interactive import offer specification</span></div>
+		</div>
+		<nav class="scenarios" aria-label="Mockup scenarios" id="scenarioNav"></nav>
+	</header>
+	<main class="workspace">
+		<section class="dialog" id="dialog" role="dialog" aria-modal="true" aria-labelledby="dialogTitle"></section>
+	</main>
+</div>
+<script>
+(() => {
+	const icons = {
+		check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>',
+		info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>',
+		warn: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.3 4.5 2.8 17.3A2 2 0 0 0 4.5 20h15a2 2 0 0 0 1.7-2.7L13.7 4.5a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4M12 17h.01"/></svg>',
+		error: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m9 9 6 6m0-6-6 6"/></svg>',
+		close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>',
+		box: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="m21 8-9 5-9-5M3 8l9-5 9 5v8l-9 5-9-5Z"/><path d="M12 13v8"/></svg>',
+		search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>',
+		play: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="m8 5 11 7-11 7Z"/></svg>',
+		trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13"/></svg>',
+		reload: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 9A7 7 0 0 1 18 6l2 2M17.9 15A7 7 0 0 1 6 18l-2-2"/></svg>',
+		moon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M20 15.5A8.5 8.5 0 0 1 8.5 4 8.5 8.5 0 1 0 20 15.5Z"/></svg>'
+	};
+	const scenarios = [
+		['offer', 'Offer'], ['install', 'Install'], ['enabled', 'Enabled'],
+		['degraded', 'Degraded'], ['reloaded', 'Reloaded'], ['empty', 'Empty'], ['disabled', 'Disabled']
+	];
+	const selection = { tsAst: true, tsLsp: true, goAst: true, goLsp: true, yamlAst: true };
+	let state = localStorage.getItem('bobbit-language-intelligence-enabled') === 'true' ? 'reloaded' : 'offer';
+	let confirmMode = null;
+	let cleanupImage = false;
+	let queryLanguage = 'typescript';
+	let queryAction = 'definition';
+	let queryStatus = 'idle';
+	let installTimer = null;
+	const dialog = document.getElementById('dialog');
+	const nav = document.getElementById('scenarioNav');
+
+	const button = (label, cls, attrs = '', icon = '') => `<button type="button" class="btn ${cls}" ${attrs}>${icon}${label}</button>`;
+	const pill = (label, tone = '') => `<span class="status-pill ${tone}"><span class="status-dot"></span>${label}</span>`;
+	const header = (title, subtitle, eyebrow = 'Add project · Step 3 of 3', enabled = false) => `
+		<header class="dialog-header">
+			<div class="header-copy">
+				<div class="eyebrow">${eyebrow}</div>
+				<h1 id="dialogTitle">${title}</h1>
+				<p>${subtitle}</p>
+			</div>
+			${enabled ? pill('Enabled', 'ready') : '<div class="stepper" aria-label="Step 3 of 3"><span class="step done"></span><span class="step done"></span><span class="step current"></span></div>'}
+			<button type="button" class="header-close" aria-label="Close" title="Close">${icons.close}</button>
+		</header>`;
+	const footer = (note, actions) => `<footer class="dialog-footer"><div class="footer-note">${icons.info}<span>${note}</span></div><div class="footer-actions">${actions}</div></footer>`;
+	const featureList = (items) => `<div class="feature-list">${items.map(x => `<span class="feature">${x}</span>`).join('')}</div>`;
+	const toggle = (id, checked, disabled, label) => `<input class="switch" type="checkbox" id="${id}" data-select="${id}" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''} aria-label="${label}" />`;
+
+	function languageCard(data, mode = 'offer') {
+		const astChecked = selection[data.astKey];
+		const lspChecked = data.lspKey ? selection[data.lspKey] : false;
+		const active = mode !== 'offer';
+		let lspStatus = data.lspStatus;
+		let lspText = data.lspText;
+		if (mode === 'degraded' && data.id === 'go') {
+			lspStatus = pill('Unavailable', 'error');
+			lspText = 'Not running. Sandbox image lacks the requested Go layer; Bobbit did not fall back to the host.';
+		}
+		if (active && mode !== 'degraded' && data.lspKey) {
+			lspStatus = pill('Lazy · sleeping', 'info');
+			lspText = `Available in this worktree. Starts on the first query and stops after 10 minutes idle.`;
+		}
+		return `<article class="language-card">
+			<div class="language-top">
+				<div class="lang-glyph" aria-hidden="true">${data.glyph}</div>
+				<div class="language-name"><strong>${data.name}<span class="component-pill">${data.component}</span></strong><small>${data.evidence}</small></div>
+				${mode === 'degraded' && data.id === 'go' ? pill('Degraded', 'error') : data.cardStatus}
+			</div>
+			<div class="capabilities">
+				<div class="capability">
+					${mode === 'offer' ? toggle(data.astKey, astChecked, false, `Enable structural search for ${data.name}`) : pill('Available', 'ready')}
+					<div class="capability-copy"><div class="capability-label">Structural search ${mode === 'offer' ? pill('Starts now', 'ready') : ''}</div><p>Grammar <code>${data.grammar}</code>. Syntax-aware matching only; not definitions or references.</p></div>
+				</div>
+				<div class="capability">
+					${mode === 'offer' ? toggle(data.lspKey || `${data.id}Disabled`, lspChecked, !data.lspKey, `Enable language server for ${data.name}`) : (data.lspKey ? lspStatus : pill('Not declared'))}
+					<div class="capability-copy"><div class="capability-label">Language server ${mode === 'offer' ? lspStatus : ''}</div><p>${lspText}</p>${data.features ? featureList(data.features) : ''}</div>
+				</div>
+			</div>
+		</article>`;
+	}
+
+	const languages = [
+		{
+			id: 'typescript', glyph: 'TS', name: 'TypeScript', component: 'web', evidence: '312 tracked files · package.json · tsconfig.json',
+			astKey: 'tsAst', lspKey: 'tsLsp', grammar: 'typescript', cardStatus: pill('Ready in sandbox', 'ready'),
+			lspStatus: pill('Starts now', 'ready'),
+			lspText: '<code>typescript-language-server 4.3.x</code> · Node ≥20 and TypeScript ≥5.0 are already in the sandbox image.',
+			features: ['Definitions', 'References', 'Hover', 'Symbols', 'Diagnostics']
+		},
+		{
+			id: 'go', glyph: 'GO', name: 'Go', component: 'api', evidence: '86 tracked files · go.mod · go.work',
+			astKey: 'goAst', lspKey: 'goLsp', grammar: 'go', cardStatus: pill('Install required', 'warn'),
+			lspStatus: pill('Requires rebuild', 'warn'),
+			lspText: 'Adds named sandbox layer <code>go 1.22.x + gopls 0.16.x</code>. Docker is available; this layer is not installed.',
+			features: ['Definitions', 'References', 'Hover', 'Symbols', 'Diagnostics']
+		},
+		{
+			id: 'yaml', glyph: 'YML', name: 'YAML', component: 'root', evidence: '34 tracked files · workflows and project configuration',
+			astKey: 'yamlAst', lspKey: null, grammar: 'yaml', cardStatus: pill('Structural only'),
+			lspStatus: pill('Not supported'),
+			lspText: 'No YAML LSP is declared by this pack version. Enabling structural search will not add hover, symbols, or diagnostics.',
+			features: null
+		}
+	];
+
+	function offerView() {
+		const count = Object.values(selection).filter(Boolean).length;
+		const requiresBuild = selection.goLsp;
+		dialog.innerHTML = `${header('Enable language intelligence?', 'Bobbit detected languages per component. Choose each capability explicitly; nothing is installed or started until you confirm.')}
+			<div class="dialog-body">
+				<div class="summary-grid">
+					<div class="summary-card"><div class="summary-icon">${icons.search}</div><div><strong>Available immediately</strong><p>Structural search for TypeScript, Go, and YAML, plus TypeScript LSP. LSP processes remain lazy per linked worktree.</p></div></div>
+					<div class="summary-card install"><div class="summary-icon">${icons.box}</div><div><strong>One named sandbox install</strong><p>Go LSP needs <code>go 1.22.x</code> and <code>gopls 0.16.x</code> through the existing sandbox image build.</p></div></div>
+				</div>
+				<div class="section-head"><h2>Detected in /Users/aj/Documents/dev/acme</h2><span>3 languages · 2 components</span></div>
+				<div class="language-list">${languages.map(x => languageCard(x, 'offer')).join('')}</div>
+			</div>
+			${footer('Structural search and LSP are independent. LSP is read-only here: no rename or edit capability is requested.', `${button('Not now', 'btn-ghost', 'data-action="dismiss"')}${button(`Enable ${count} capabilities${requiresBuild ? ' · rebuild sandbox' : ''}`, 'btn-primary', 'data-action="enable"')}`)}`;
+	}
+
+	function installView() {
+		dialog.innerHTML = `${header('Preparing language intelligence', 'The project is already imported. Existing sessions keep using the current image while the replacement builds.', 'Project setup · Language intelligence')}
+			<div class="dialog-body">
+				<div class="notice info">${icons.info}<div><strong>Exactly what will start</strong><p>No LSP process starts during setup. TypeScript and Go servers start lazily, one per linked worktree and component, only after the first LSP query.</p></div></div>
+				<div class="progress-list" aria-live="polite">
+					<div class="progress-row done"><div class="progress-icon">${icons.check}</div><div><strong>Saved project capability settings</strong><p>3 structural-search grammars and 2 language servers approved.</p></div><span class="progress-state">Done</span></div>
+					<div class="progress-row done"><div class="progress-icon">${icons.check}</div><div><strong>Verified existing runtime</strong><p>Node 20.12.2 · TypeScript 5.5.4 · typescript-language-server 4.3.3</p></div><span class="progress-state">Done</span></div>
+					<div class="progress-row active"><div class="progress-icon"><span class="spinner"></span></div><div><strong>Building sandbox image</strong><p>Adding declared layer <code>code-intelligence-go:1.22</code> with Go 1.22.5 and gopls 0.16.2.</p><div class="progress-track" aria-hidden="true"><span></span></div></div><span class="progress-state">Building</span></div>
+					<div class="progress-row"><div class="progress-icon">4</div><div><strong>Verify versions and activate</strong><p>Will confirm the image meets the matrix constraints before LSP is reported available.</p></div><span class="progress-state">Waiting</span></div>
+				</div>
+			</div>
+			${footer('You can close this dialog. Build status and the approved selection persist across reloads.', `${button('Run in background', 'btn-secondary', 'data-action="enabled"')}${button('Cancel build', 'btn-ghost', 'data-action="offer"')}`)}`;
+	}
+
+	function queryOutput() {
+		if (queryStatus === 'loading') return `<div style="display:flex;align-items:center;gap:8px"><span class="spinner"></span><span>Starting <code>typescript-language-server</code> in <code>web · goal/de84aa67</code>…</span></div><div class="muted" style="margin-top:5px">Root: this linked worktree only · idle shutdown: 10 minutes</div>`;
+		if (queryStatus === 'unsupported') return `<div class="error-text"><strong>Language server unavailable for YAML.</strong></div><div class="muted">Structural search is available, but this pack version declares no YAML LSP. No query was attempted.</div>`;
+		if (queryStatus === 'result') {
+			const results = {
+				definition: '<span class="path">src/server/agent/lifecycle-hub.ts:164:8</span><br><code>export class LifecycleHub {</code>',
+				references: '<strong>12 references</strong> in this linked worktree<br><span class="path">src/server/agent/session-setup.ts:912</span> · <span class="path">tests2/core/lifecycle-hub.test.ts:88</span>',
+				hover: '<code>class LifecycleHub</code><br><span class="muted">Dispatches enabled extension providers non-fatally.</span>',
+				symbols: '<strong>24 document symbols</strong><br><span class="muted">LifecycleHub · dispatchGoalProvisioned · dispatchAfterTurn · …</span>',
+				diagnostics: '<strong>0 errors · 1 warning</strong><br><span class="path">src/server/agent/lifecycle-hub.ts:221</span> <span class="muted">Unused generic type parameter.</span>'
+			};
+			return `${results[queryAction]}<div class="muted" style="margin-top:6px">Source: typescript-language-server 4.3.3 · root: web worktree · server now active</div>`;
+		}
+		return `<span class="muted">Choose an action and run a query. The server is currently sleeping and consumes no process slot.</span>`;
+	}
+
+	function queryPanel() {
+		const actions = ['definition', 'references', 'hover', 'symbols', 'diagnostics'];
+		return `<section class="query-panel">
+			<div class="query-head"><div><strong>Try an LSP query</strong><br><span>Demonstrates lazy start and honest unsupported-language output.</span></div>${queryStatus === 'result' ? pill('Server active', 'ready') : pill('No server running')}</div>
+			<div class="query-controls">
+				<div class="field"><label for="queryLanguage">Language</label><select class="select" id="queryLanguage"><option value="typescript" ${queryLanguage === 'typescript' ? 'selected' : ''}>TypeScript · web</option><option value="go" ${queryLanguage === 'go' ? 'selected' : ''}>Go · api</option><option value="yaml" ${queryLanguage === 'yaml' ? 'selected' : ''}>YAML · root (structural only)</option></select></div>
+				<div class="field"><label>File and symbol</label><div class="fake-input">src/server/agent/lifecycle-hub.ts · LifecycleHub</div></div>
+				${button(queryStatus === 'loading' ? 'Starting…' : 'Run query', 'btn-primary', `data-action="query" ${queryStatus === 'loading' ? 'disabled' : ''}`, queryStatus === 'loading' ? '<span class="spinner"></span>' : icons.play)}
+			</div>
+			<div class="query-actions">${actions.map(a => `<button type="button" class="action-chip ${queryAction === a ? 'active' : ''}" data-query-action="${a}">${a[0].toUpperCase() + a.slice(1)}</button>`).join('')}</div>
+			<div class="query-output" aria-live="polite">${queryOutput()}</div>
+		</section>`;
+	}
+
+	function activeView(mode) {
+		const degraded = mode === 'degraded';
+		const restored = mode === 'reloaded';
+		const title = degraded ? 'Language intelligence is degraded' : 'Language intelligence';
+		const subtitle = degraded ? 'Structural search remains available. One selected LSP capability is unavailable and no fallback was used.' : 'Capabilities are enabled per project. Language servers start lazily in the exact linked worktree that receives the query.';
+		dialog.innerHTML = `${header(title, subtitle, restored ? 'Project settings · Restored after reload' : 'Project settings · Code intelligence', true)}
+			<div class="dialog-body">
+				${restored ? `<div class="notice info restored-banner">${icons.reload}<div><strong>Restored from project settings</strong><p>Your approved selection and sandbox image requirements survived reload. No LSP process was restarted; servers remain lazy until queried.</p></div></div>` : ''}
+				${degraded ? `<div class="notice error restored-banner">${icons.error}<div><strong>Go language server unavailable</strong><p>Sandbox build failed while verifying <code>gopls 0.16.2</code>: executable not found in the built layer. Go remains structural-search only.</p><p>No host fallback was attempted because this project runs agents in Docker.</p></div><button class="btn btn-secondary btn-inline" data-action="retry">Retry image build</button></div>` : ''}
+				<div class="active-summary">
+					<div class="metric"><span>Structural grammars</span><strong>3 / 3</strong><small>TypeScript, Go, YAML</small></div>
+					<div class="metric"><span>LSP capabilities</span><strong>${degraded ? '1 / 2' : '2 / 2'}</strong><small>${degraded ? 'Go unavailable' : 'Ready on first query'}</small></div>
+					<div class="metric"><span>Running servers</span><strong>${queryStatus === 'result' ? '1' : '0'}</strong><small>Global cap 4 · idle stop 10m</small></div>
+				</div>
+				<div class="section-head"><h2>Capability status by detected language</h2><span>Sandbox: Docker available · image ${degraded ? 'missing Go layer' : 'verified'}</span></div>
+				<div class="language-list">${languages.map(x => languageCard(x, degraded ? 'degraded' : 'active')).join('')}</div>
+				${queryPanel()}
+			</div>
+			${footer('Closing a worktree stops its LSP processes. Disabling removes grants and stops all servers; installed image layers remain until the next rebuild.', `${button('Reload prototype', 'btn-secondary', 'data-action="reload"', icons.reload)}${button('Disable…', 'btn-danger-quiet', 'data-action="disable"', icons.trash)}`)}`;
+	}
+
+	function emptyView() {
+		dialog.innerHTML = `${header('No supported languages detected', 'The project import can continue normally. Bobbit will not enable or install language intelligence for this project.')}
+			<div class="dialog-body empty-state"><div><div class="empty-icon">${icons.search}</div><h2>Nothing to enable</h2><p>Bobbit scanned 18 tracked files in <code>docs-site</code>. Markdown and plain text are not structural-search grammars in this pack, and no LSP server is declared.</p><div class="notice info" style="text-align:left">${icons.info}<div><strong>This is not an error</strong><p>No capability grant, server process, sandbox layer, or project setting will be created.</p></div></div></div></div>
+			${footer('Language detection is bounded to tracked component files. You can enable the pack later if supported source files are added.', `${button('Back', 'btn-ghost', 'data-action="offer"')}${button('Finish project setup', 'btn-primary', 'data-action="disabled"')}`)}`;
+	}
+
+	function disabledView() {
+		dialog.innerHTML = `${header('Language intelligence is off', 'The project remains imported, but code-intelligence capability grants are disabled.', 'Project settings · Code intelligence')}
+			<div class="dialog-body empty-state"><div><div class="empty-icon">${icons.moon}</div><h2>No language server processes are running</h2><p>Structural search and LSP tools are unavailable to agents. Project files are unchanged. Any installed Go sandbox layer remains until a future image rebuild.</p><div class="notice info" style="text-align:left">${icons.check}<div><strong>Cleanup complete</strong><p>Stopped 1 linked-worktree server · released 5 capability grants · removed persisted enablement state.</p></div></div></div></div>
+			${footer('Re-enabling will detect languages again and ask before installing any missing named toolchain.', `${button('Close', 'btn-ghost', 'data-action="dismiss"')}${button('Detect languages again', 'btn-primary', 'data-action="offer"')}`)}`;
+	}
+
+	function installConfirm() {
+		return `<div class="confirm-backdrop" role="presentation"><section class="confirm" role="alertdialog" aria-modal="true" aria-labelledby="confirmTitle">
+			<div class="confirm-head"><h2 id="confirmTitle">Build the sandbox image?</h2><p>Go LSP cannot start in this Docker project until its named toolchain is present. This uses the existing project sandbox-image build path.</p></div>
+			<div class="confirm-body">
+				<div class="toolchain-table">
+					<div class="toolchain-row"><div class="toolchain-name"><strong>Go toolchain</strong><span>Required by gopls</span></div><div class="toolchain-detail"><code>go 1.22.x</code> · matrix constraint ≥1.22 &lt;1.23</div>${pill('Install', 'warn')}</div>
+					<div class="toolchain-row"><div class="toolchain-name"><strong>gopls</strong><span>Go language server</span></div><div class="toolchain-detail"><code>gopls 0.16.x</code> · resolved 0.16.2</div>${pill('Install', 'warn')}</div>
+				</div>
+				<p style="font-size:10px;color:var(--muted-foreground);line-height:1.45;margin:10px 0 0">Docker is available. The current image remains usable during the build. Bobbit will activate Go LSP only after version verification succeeds.</p>
+			</div>
+			<div class="confirm-footer">${button('Back', 'btn-ghost', 'data-action="cancel-confirm"')}${button('Build image and enable', 'btn-primary', 'data-action="confirm-enable"')}</div>
+		</section></div>`;
+	}
+
+	function disableConfirm() {
+		return `<div class="confirm-backdrop" role="presentation"><section class="confirm" role="alertdialog" aria-modal="true" aria-labelledby="disableTitle">
+			<div class="confirm-head"><h2 id="disableTitle">Disable language intelligence?</h2><p>This immediately stops LSP servers in every worktree and removes the pack's capability grants for this project.</p></div>
+			<div class="confirm-body">
+				<div class="notice warn">${icons.warn}<div><strong>Project files are never removed</strong><p>The installed Go layer stays in the current sandbox image unless you request removal on the next rebuild.</p></div></div>
+				<label class="confirm-check" style="margin-top:12px"><input type="checkbox" id="cleanupImage" ${cleanupImage ? 'checked' : ''}/><span>Remove language toolchains on next sandbox rebuild<span>Does not trigger a rebuild now. Other extensions may still require these layers.</span></span></label>
+			</div>
+			<div class="confirm-footer">${button('Cancel', 'btn-ghost', 'data-action="cancel-confirm"')}${button('Disable and stop servers', 'btn-danger', 'data-action="confirm-disable"')}</div>
+		</section></div>`;
+	}
+
+	function renderNav() {
+		nav.innerHTML = scenarios.map(([id, label]) => `<button type="button" class="scenario" data-scenario="${id}" aria-pressed="${state === id}">${label}</button>`).join('');
+	}
+	function render() {
+		clearTimeout(installTimer);
+		renderNav();
+		if (state === 'offer') offerView();
+		else if (state === 'install') installView();
+		else if (state === 'enabled' || state === 'degraded' || state === 'reloaded') activeView(state);
+		else if (state === 'empty') emptyView();
+		else disabledView();
+		if (confirmMode) dialog.insertAdjacentHTML('beforeend', confirmMode === 'install' ? installConfirm() : disableConfirm());
+		bind();
+	}
+	function setState(next) { confirmMode = null; queryStatus = 'idle'; state = next; render(); }
+	function bind() {
+		document.querySelectorAll('[data-select]').forEach(el => el.addEventListener('change', e => { selection[e.target.dataset.select] = e.target.checked; offerView(); bind(); }));
+		document.querySelectorAll('[data-action]').forEach(el => el.addEventListener('click', () => {
+			const action = el.dataset.action;
+			if (action === 'enable') { selection.goLsp ? (confirmMode = 'install', render()) : setState('enabled'); }
+			else if (action === 'confirm-enable') { confirmMode = null; state = 'install'; render(); installTimer = setTimeout(() => { localStorage.setItem('bobbit-language-intelligence-enabled', 'true'); setState('enabled'); }, 2600); }
+			else if (action === 'cancel-confirm') { confirmMode = null; render(); }
+			else if (action === 'disable') { confirmMode = 'disable'; render(); }
+			else if (action === 'confirm-disable') { localStorage.removeItem('bobbit-language-intelligence-enabled'); setState('disabled'); }
+			else if (action === 'reload') { localStorage.setItem('bobbit-language-intelligence-enabled', 'true'); setState('reloaded'); }
+			else if (action === 'query') {
+				if (queryLanguage === 'yaml') { queryStatus = 'unsupported'; render(); return; }
+				queryStatus = 'loading'; render(); installTimer = setTimeout(() => { queryStatus = 'result'; render(); }, 900);
+			}
+			else if (action === 'retry') setState('install');
+			else if (action && scenarios.some(([id]) => id === action)) setState(action);
+		}));
+		document.querySelectorAll('[data-query-action]').forEach(el => el.addEventListener('click', () => { queryAction = el.dataset.queryAction; queryStatus = queryStatus === 'result' ? 'result' : 'idle'; render(); }));
+		const querySelect = document.getElementById('queryLanguage');
+		if (querySelect) querySelect.addEventListener('change', e => { queryLanguage = e.target.value; queryStatus = 'idle'; render(); });
+		const cleanup = document.getElementById('cleanupImage');
+		if (cleanup) cleanup.addEventListener('change', e => { cleanupImage = e.target.checked; });
+	}
+	nav.addEventListener('click', e => { const target = e.target.closest('[data-scenario]'); if (target) setState(target.dataset.scenario); });
+	render();
+})();
+</script>
+</body>
+</html>

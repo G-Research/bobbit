@@ -76,6 +76,25 @@ Verifier sessions are server-managed regular agent sessions with a narrower prom
 
 The distinction matters because the transcript is both the operator's audit trail and the agent's recovery context. Losing it can turn a completed review into an empty session that looks alive but cannot explain its verdict.
 
+## Verifier prompt dispatch and contention
+
+Every production `llm-review` and `agent-qa` kickoff, reminder, restart continuation, and same-session recovery prompt is admitted through the verifier queue. Pi receives `streamingBehavior: "followUp"`, which atomically appends an accepted verifier intent to an active SDK turn instead of rejecting it as already processing. The harness then waits for a receipt for that **exact durable queue row**; session-wide `streaming` state is not evidence that this particular prompt started, because it may describe the preceding turn.
+
+The row has two intentionally separate markers:
+
+- `source: "verification"` is attribution: it records where the prompt originated for audit and ordinary prompt policy.
+- `verifierOwned: true` is lifecycle ownership: only this explicit marker lets the harness cancel, restore-prune, or recover the exact verifier row and its receipt. A legacy row with verification source alone remains ordinary durable work.
+
+This separation prevents a cancellation or recovery from targeting an equal-text neighbouring prompt. It also gives exactly-once delivery semantics: a receipt is settled only when its row dispatches, is cancelled/superseded, or fails admission; the harness never sends a second direct copy while the row is pending. A verdict arriving before the acknowledgement wins over a new reminder or retry.
+
+Dispatch has a bounded transport budget separate from the active-review allowance: warm admission has 60 seconds; cold admission has a derived 215 seconds (90 seconds readiness + 120 seconds first-prompt acknowledgement + 5 seconds handoff margin). These budgets bound queue/bridge progress, not review thinking. A narrow raw bridge rejection — `Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.` — is infrastructure contention, not a reviewer finding, and enters the bounded verifier recovery policy. Similar text quoted inside reviewer content is not reclassified.
+
+Same-session recovery keeps the reviewer id, transcript, metadata, selected model/thinking settings, and existing title. Verifier prompts suppress automatic title generation, so recovery cannot replace the visible reviewer title. From-scratch retries remain the separate fresh-session path described below.
+
+Cancellation and re-signal fence each receipt by the owning goal, gate, and signal generation. Cancellation removes its still-pending exact row; a late result is accepted only for the current generation. A superseded run therefore cannot deliver a duplicate turn, retain a stale row, or overwrite the newer signal's verdict.
+
+For lifecycle diagnosis, grep `[verification][verifier-dispatch]`. Each line includes `goal`, `gate`, `signal`, `step`, `reviewerSession`, `verifier`, `prompt`, `attempt`, `dispatchBudgetMs`, `mode`, `decision`, and `row`. The fields identify lifecycle state without logging prompt or provider payloads. See [Debugging — Reviewer busy contention](debugging.md#reviewer-busy-contention-during-llm-review-or-agent-qa).
+
 ## Session lifecycle and transcript preservation
 
 Verifier steps depend on a live agent session, and that session's *transcript* is a first-class artifact: an operator can open `/session/<id>` to read exactly what the verifier saw and concluded. Two lifecycle rules protect that transcript. Both fix a regression where a long, sometimes already-complete verifier run was silently destroyed.
@@ -107,8 +126,9 @@ Classification lives in `src/server/agent/verification-logic.ts`.
 - connection reset/refused/closed/lost/terminated messages
 - `Agent process not running` and process exit/death/termination variants
 - streamed tool-call JSON glitches and `Validation failed for tool`
+- the exact bridge `Agent is already processing... Specify streamingBehavior...` contention envelope, including a verifier receipt that timed out while its durable row remained queued
 
-These use bounded retry. The goal is to absorb flakes without hiding a broken runtime forever.
+These use bounded retry. The goal is to absorb flakes without hiding a broken runtime forever. The busy classifier is deliberately exact so a reviewer finding that merely quotes a similar phrase remains review content.
 
 ### Retryable generic runtime failures
 
@@ -217,6 +237,7 @@ Verifier lifecycle events emit structured, greppable log lines so a future failu
 
 - **`[verification][reviewer-lifecycle]`** — verifier spawn/attempt (attempt N/max, session id, goal, timeout), from-scratch retry lineage (retired id → fresh id), `llm-review` reminders, termination reason (for example `reason=reminder-exhausted`), late-verdict-honored-during-teardown, and `verification_result` POST accept vs 404-drop.
 - **`[verification][verifier-lifecycle]`** — shared verifier behavior, especially `agent-qa` reminders and same-session process-death resurrection attempts. Look for `resurrection N/3`, `preserving same session id/history`, `freshAllowanceMs=...`, `termination reason=reminder-exhausted`, and `not issuing duplicate resurrection prompts`.
+- **`[verification][verifier-dispatch]`** — durable prompt-row admission. Match `goal`, `gate`, `signal`, `step`, `reviewerSession`, `verifier`, `prompt`, `attempt`, `dispatchBudgetMs`, `mode`, `decision`, and `row` to determine whether the exact row dispatched, was fenced by cancellation, hit busy contention, or timed out. These lifecycle-only fields intentionally exclude prompt and provider payloads.
 - **`[session-manager][session-id-clobber]`** — a caller tried to reuse a live or archived session id without `allowSessionReuse`; the transcript-clobber guard fired.
 
 Grep these prefixes in the gateway log to reconstruct a verifier's full lifecycle and transcript lineage across attempts.
@@ -288,7 +309,7 @@ Relevant unit coverage:
 - `tests2/core/auto-retry-policy.test.ts` — session-level auto-retry policy and schedules.
 - `tests2/core/verification-reminder-race.test.ts` — restart-aware continuation prompt selection, ordinary idle reminder behavior, and the reminder `waitForStreaming()` guard.
 - `tests2/core/verification-harness-review-reliability.test.ts` — fresh session id per from-scratch attempt (attempt 1's transcript preserved), late-`verification_result`-during-teardown honored (not 404-dropped), and the "did not call after reminder" non-transient classification.
-- `tests2/core/verification-verifier-lifecycle-repro.test.ts` — `agent-qa` same-session retryable fetch recovery, dead `llm-review` process resurrection up to 3 attempts, fresh per-recovery timeout allowances, no fake resurrection attempts after alive-idle recovery, and `agent-qa` reminder/grace parity.
+- `tests2/core/verification-verifier-lifecycle-repro.test.ts` — `agent-qa` same-session retryable fetch recovery, dead `llm-review` process resurrection up to 3 attempts, fresh per-recovery timeout allowances, no fake resurrection attempts after alive-idle recovery, `agent-qa` reminder/grace parity, and busy-verifier dispatch/recovery without duplicate delivery or verdicts.
 - `tests2/core/session-id-clobber-guard.test.ts` — `createSession` refuses to clobber a live session id, while `allowSessionReuse` bypasses the guard for the sanctioned resume path.
 - `tests2/core/verification-resume-restart-prompt.test.ts` — cold restart resume prompt timeout routes to pending instead of hard failure.
 - `tests2/core/verification-resume-restart-recovery.test.ts` — cold verifier readiness wait and transient resume failure rerun path.

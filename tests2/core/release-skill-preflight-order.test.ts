@@ -9,6 +9,7 @@ import {
 	buildRestrictedNpmEnv,
 	evaluatePackedConsumerAudit,
 	packedConsumerInstallArgs,
+	packedConsumerNativeRebuildArgs,
 	packedConsumerPackArgs,
 	packedConsumerTempPrefix,
 	parseAuditJson,
@@ -35,6 +36,7 @@ import {
 import { assertDistTagAdvances } from "../../scripts/release/dist-tag-guard.mjs";
 
 const skill = readFileSync(resolve(process.cwd(), ".claude/skills/release/SKILL.md"), "utf8");
+const releaseDocs = readFileSync(resolve(process.cwd(), "docs/releasing.md"), "utf8");
 
 type WorkflowStep = { name?: string; uses?: string; with?: Record<string, unknown>; run?: string };
 type WorkflowJob = {
@@ -195,9 +197,11 @@ describe("push-triggered release workflow", () => {
 		);
 	});
 
-	it("decides that a push is a release by the version bump, not by its message", () => {
+	it("releases only when a push advances the version, not by its message", () => {
 		const detect = releaseStep("detect", "Did this commit bump the version?").run ?? "";
 		assert.match(detect, /HEAD\^:package\.json/);
+		assert.match(detect, /compareReleaseVersions/);
+		assert.match(detect, /> 0/);
 		assert.match(detect, /is-release=true/);
 		assert.match(detect, /is-release=false/);
 		assert.equal(releaseJob("verify").needs, "detect");
@@ -228,11 +232,11 @@ describe("push-triggered release workflow", () => {
 		assert.match(steps[validateIndex]?.run ?? "", /validate-release-commit\.mjs --mode merged/);
 	});
 
-	it("builds, type-checks, and unit-tests the release commit before anything ships", () => {
+	it("builds and type-checks the release commit without rerunning the PR unit gate", () => {
 		const runs = (releaseJob("verify").steps ?? []).map(step => step.run ?? "");
 		assert.ok(runs.some(run => run.includes("npm run build")));
 		assert.ok(runs.some(run => run.includes("npm run check")));
-		assert.ok(runs.some(run => run.includes("npm run test:unit")));
+		assert.ok(!runs.some(run => run.includes("npm run test:unit")));
 		assert.ok(!runs.some(run => /npm audit|audit:packed-consumer/.test(run)));
 		assert.equal(releaseJob("publish").needs, "verify");
 	});
@@ -256,8 +260,12 @@ describe("push-triggered release workflow", () => {
 			`release verify runs Node ${release.node}, which the PR gate never exercises (${gateNodes.join(", ")})`,
 		);
 
-		// The commands themselves must not drift.
-		assert.deepEqual(release.runs, toolchainOf(gate).runs);
+		// Build and type-check must not drift. The PR additionally runs the unit
+		// suite, which is deliberately not repeated after merge approval.
+		const gateRuns = toolchainOf(gate).runs;
+		for (const run of release.runs) assert.ok(gateRuns.includes(run), `${run} is not exercised by the PR gate`);
+		assert.ok(gateRuns.some(run => run.includes("npm run test:unit")));
+		assert.ok(!release.runs.some(run => run.includes("npm run test:unit")));
 		assert.equal(release.cache, toolchainOf(gate).cache);
 	});
 
@@ -299,6 +307,9 @@ describe("push-triggered release workflow", () => {
 		assert.match(tagStep, /git\/ref\/tags\/\$TAG/);
 		assert.match(tagStep, /points at \$existing, not \$GITHUB_SHA/);
 		assert.match(tagStep, /-f ref="refs\/tags\/\$TAG" -f sha="\$GITHUB_SHA"/);
+		assert.match(tagStep, /existing=""/);
+		assert.match(tagStep, /if found="\$\(gh api/);
+		assert.doesNotMatch(tagStep, /gh api[^\n]*\|\| true/);
 
 		assert.match(releaseStep("release", "Create release").run ?? "", /--verify-tag/);
 
@@ -357,7 +368,7 @@ describe("push-triggered release workflow", () => {
 			releaseStep("publish", "Publish verified artifact (OIDC trusted publishing)").run ?? "";
 		assert.match(
 			publish,
-			/npm publish release-artifact\/bobbit\.tgz --ignore-scripts --provenance --tag "\$DIST_TAG"/,
+			/npm publish \.\/release-artifact\/bobbit\.tgz --ignore-scripts --provenance --tag "\$DIST_TAG"/,
 		);
 		assert.doesNotMatch(publish, /NODE_AUTH_TOKEN|NPM_TOKEN/);
 		assert.equal(distTagFor("0.16.0"), "latest");
@@ -368,6 +379,7 @@ describe("push-triggered release workflow", () => {
 		assert.deepEqual(releaseJob("release").needs, ["verify", "tag"]);
 		const release = releaseStep("release", "Create release").run ?? "";
 		assert.match(release, /gh release create "\$TAG"/);
+		assert.match(release, /--repo "\$GITHUB_REPOSITORY"/);
 		assert.match(release, /--notes-file release-artifact\/release-notes\.md/);
 		assert.match(release, /--generate-notes/);
 		assert.match(release, /PRERELEASE=\(\)/);
@@ -740,27 +752,28 @@ describe("release contract rules", () => {
 });
 
 describe("release skill pre-flight order", () => {
-	it("audits the built tarball consumer before type-checking and tests", () => {
+	it("runs deterministic quality gates without runtime registry audits", () => {
 		assert.equal(
 			packageJson.scripts?.["audit:packed-consumer"],
 			"node scripts/release-packed-consumer-audit.mjs",
 		);
-		assert.ok(position("npm ci") < position("npm audit --omit=dev"));
-		assert.ok(position("npm audit --omit=dev") < position("npm run build"));
-		assert.ok(position("npm run build") < position("npm run audit:packed-consumer"));
-		assert.ok(position("npm run audit:packed-consumer") < position("npm run check"));
+		assert.doesNotMatch(skill, /^npm audit|^npm run audit:packed-consumer/gm);
+		assert.ok(position("npm ci") < position("npm run build"));
+		assert.ok(position("npm run build") < position("npm run check"));
 		assert.ok(position("npm run check") < position("npm run test:unit"));
-		assert.ok(position("npm run test:unit") < position("npm run test:e2e"));
+		assert.ok(position("npm run test:unit") < position("npm run test:browser"));
+		assert.ok(position("npm run test:browser") < position("npm run test:e2e"));
 	});
 
-	it("keeps mutable advisory availability release-only and blocks every finding", () => {
-		assert.match(skill, /Registry advisory availability is deliberately release-only/);
-		assert.match(skill, /Any finding blocks publish; there are no release exceptions/);
+	it("documents runtime registry audits as optional diagnostics only", () => {
+		assert.match(skill, /Runtime registry audits are deliberately outside the release process/);
+		assert.match(releaseDocs, /## Optional manual packed-consumer audit/);
+		assert.match(releaseDocs, /advisory findings do not determine release eligibility/);
 	});
 });
 
 describe("packed-consumer audit subprocess isolation", () => {
-	it("disables lifecycle scripts for both pack and consumer installation", () => {
+	it("disables lifecycle scripts for pack/install and enables only the targeted native rebuild", () => {
 		const packArgs = packedConsumerPackArgs("isolated-pack-dir");
 		assert.equal(packArgs[0], "pack");
 		assert.equal(packArgs.filter((arg: string) => arg === "--ignore-scripts").length, 1);
@@ -769,6 +782,11 @@ describe("packed-consumer audit subprocess isolation", () => {
 			"install",
 			"--ignore-scripts",
 			"bobbit.tgz",
+		]);
+		assert.deepEqual(packedConsumerNativeRebuildArgs(), [
+			"rebuild",
+			"better-sqlite3",
+			"--foreground-scripts",
 		]);
 	});
 
@@ -794,6 +812,7 @@ describe("packed-consumer audit subprocess isolation", () => {
 			cwd: string;
 			env: Record<string, string>;
 		}> = [];
+		const nativeCalls: Array<{ command: string; args: string[]; cwd: string; env: Record<string, string> }> = [];
 		const npmRunner = async (
 			args: string[],
 			options: { cwd: string; env: Record<string, string> },
@@ -810,6 +829,8 @@ describe("packed-consumer audit subprocess isolation", () => {
 				result.stdout = "true\n";
 			} else if (args[0] === "install") {
 				writeFileSync(join(options.cwd, "package-lock.json"), "{}\n");
+			} else if (args[0] === "rebuild") {
+				assert.deepEqual(args, ["rebuild", "better-sqlite3", "--foreground-scripts"]);
 			} else if (args[0] === "audit") {
 				result.stdout = JSON.stringify({
 					auditReportVersion: 2,
@@ -822,11 +843,25 @@ describe("packed-consumer audit subprocess isolation", () => {
 			return result;
 		};
 
+		const commandRunner = async (
+			command: string,
+			args: string[],
+			options: { cwd: string; env: Record<string, string> },
+		) => {
+			assert.equal(readFileSync(options.env.npm_config_userconfig, "utf8"), "\n");
+			assert.equal(readFileSync(options.env.npm_config_globalconfig, "utf8"), "\n");
+			nativeCalls.push({ command, args, cwd: options.cwd, env: { ...options.env } });
+			return { code: 0, stdout: "", stderr: "", rendered: `${command} ${args.join(" ")}` };
+		};
+
 		try {
 			Object.assign(process.env, secretEnv);
-			await runPackedConsumerAudit({ npmRunner });
+			await runPackedConsumerAudit({ npmRunner, commandRunner });
 
-			assert.deepEqual(calls.map(call => call.args[0]), ["pack", "config", "install", "audit"]);
+			assert.deepEqual(calls.map(call => call.args[0]), ["pack", "config", "install", "rebuild", "audit"]);
+			assert.equal(nativeCalls.length, 1);
+			assert.equal(nativeCalls[0].command, process.execPath);
+			assert.ok(nativeCalls[0].args.join(" ").includes("better-sqlite3"));
 			assert.notEqual(calls[0].cwd, resolve(process.cwd()), "pack must not inherit repository project config");
 			for (const call of calls) {
 				const childKeys = new Set(Object.keys(call.env).map(key => key.toLowerCase()));
@@ -837,7 +872,7 @@ describe("packed-consumer audit subprocess isolation", () => {
 					assert.equal(childKeys.has(forbiddenKey), false, `${forbiddenKey} reached ${call.args[0]}`);
 				}
 				assert.equal(call.env.npm_config_registry, "https://registry.npmjs.org/");
-				assert.equal(call.env.npm_config_ignore_scripts, "true");
+				assert.equal(call.env.npm_config_ignore_scripts, call.args[0] === "rebuild" ? "false" : "true");
 				assert.notEqual(call.env.npm_config_userconfig, secretEnv.npm_config_userconfig);
 				assert.notEqual(call.env.npm_config_globalconfig, secretEnv.npm_config_globalconfig);
 				assert.match(call.env.npm_config_userconfig, /user\.npmrc$/);
@@ -845,6 +880,14 @@ describe("packed-consumer audit subprocess isolation", () => {
 				assert.ok(call.env.npm_config_cache);
 				assert.ok(call.env.HOME);
 				assert.equal(call.env.USERPROFILE, call.env.HOME);
+			}
+			for (const call of nativeCalls) {
+				const childKeys = new Set(Object.keys(call.env).map(key => key.toLowerCase()));
+				for (const forbiddenKey of Object.keys(secretEnv).map(key => key.toLowerCase())) {
+					if (["npm_config_userconfig", "npm_config_globalconfig", "npm_config_registry"].includes(forbiddenKey)) continue;
+					assert.equal(childKeys.has(forbiddenKey), false, `${forbiddenKey} reached native smoke`);
+				}
+				assert.equal(call.env.npm_config_registry, "https://registry.npmjs.org/");
 			}
 			assert.ok(calls[0].args.includes("--ignore-scripts"));
 			assert.ok(calls[2].args.includes("--ignore-scripts"));

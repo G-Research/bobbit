@@ -4,6 +4,7 @@ __syncBeforeAll(() => __syncCE());
 
 import { render } from "lit";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { initialState, reduce } from "../../src/app/message-reducer.js";
 import {
 	NO_PROMPT_AUTHOR_LABELS,
 	presentPromptAuthor,
@@ -131,11 +132,44 @@ describe("prompt author presentation selector", () => {
 });
 
 describe("prompt author badge DOM", () => {
+	it("reflects only explicit validated delivery occurrence identity on transcript rows", async () => {
+		const correlated = { ...prompt("modern", USER), deliveryIntentId: "intent-modern" };
+		const fallback = { ...prompt("fallback", USER), intentId: "intent-fallback" };
+		const legacy = prompt("legacy", USER);
+		const invalid = { ...prompt("invalid", USER), deliveryIntentId: "x".repeat(257) };
+		const list = await renderMessageList([correlated, fallback, legacy, invalid]);
+
+		expect(list.querySelectorAll('user-message[data-intent-id="intent-modern"]')).toHaveLength(1);
+		expect(list.querySelectorAll('user-message[data-intent-id="intent-fallback"]')).toHaveLength(1);
+		expect(Array.from(list.querySelectorAll("user-message")).map((row) => row.getAttribute("data-intent-id")))
+			.toEqual(["intent-modern", "intent-fallback", null, null]);
+	});
+
+	it("renders one user-message host for duplicate modern snapshot occurrences", async () => {
+		const intentId = "intent-duplicate-host";
+		const legacyA = prompt("legacy-a", USER);
+		const legacyB = { ...prompt("legacy-b", USER), content: legacyA.content };
+		const state = reduce(initialState(), {
+			type: "snapshot",
+			messages: [
+				{ ...prompt("authoritative", USER), deliveryIntentId: intentId },
+				legacyA,
+				legacyB,
+				{ ...prompt("recovery-copy", USER), intentId },
+			],
+		});
+		const list = await renderMessageList(state.messages);
+
+		expect(list.querySelectorAll(`user-message[data-intent-id="${intentId}"]`)).toHaveLength(1);
+		expect(list.querySelector(`user-message[data-intent-id="${intentId}"]`)?.textContent).toContain("authoritative");
+		expect(list.querySelectorAll("user-message")).toHaveLength(3);
+	});
+
 	it("leaves all-human markup unlabelled", async () => {
 		const list = await renderMessageList([prompt("human", USER)]);
 		expect(list.querySelector(".prompt-author-badge")).toBeNull();
 		expect(list.querySelector(".prompt-bubble-shell")).toBeNull();
-		expect(list.querySelector("user-message > div")?.className).toBe("flex justify-start mx-2 sm:mx-4 my-1");
+		expect(list.querySelector("user-message > div")?.className).toBe("prompt-row flex justify-start mx-2 sm:mx-4 my-1");
 	});
 
 	it("renders exact contextual User, exact System, and agent label/kind strings", async () => {

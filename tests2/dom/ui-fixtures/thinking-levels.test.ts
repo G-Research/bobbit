@@ -23,10 +23,10 @@ const OPUS_45 = "anthropic/claude-opus-4-5-20250920";
 const GPT_4O = "openai/gpt-4o";
 
 const MODELS = [
-	{ id: "claude-opus-4-8-20260528", provider: "anthropic", reasoning: true },
-	{ id: "claude-opus-4.8-20260528", provider: "anthropic", reasoning: true },
-	{ id: "claude-opus-4-8-20260528", provider: "aigw", reasoning: true },
-	{ id: "claude-opus-4.8-20260528", provider: "aigw", reasoning: true },
+	{ id: "claude-opus-4-8-20260528", provider: "anthropic", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
+	{ id: "claude-opus-4.8-20260528", provider: "anthropic", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
+	{ id: "claude-opus-4-8-20260528", provider: "aigw", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
+	{ id: "claude-opus-4.8-20260528", provider: "aigw", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
 	{ id: "claude-opus-4-7-20251101", provider: "anthropic", reasoning: true },
 	{ id: "claude-opus-4-5-20250920", provider: "anthropic", reasoning: true },
 	{ id: "gpt-4o", provider: "openai", reasoning: false },
@@ -119,7 +119,7 @@ afterEach(() => {
 });
 
 describe("Per-model thinking-level dropdown", () => {
-	it("Opus 4.8 exposes Extra high; selection persists across reload", async () => {
+	it("an explicit Opus 4.8 map exposes Extra high; selection persists across reload", async () => {
 		await renderWithModel(OPUS_48);
 
 		openThinking();
@@ -140,18 +140,18 @@ describe("Per-model thinking-level dropdown", () => {
 	});
 
 	for (const [label, model] of [
-		["dotted Opus 4.8", OPUS_48_DOTTED],
-		["AIGW-routed Opus 4.8", AIGW_OPUS_48],
-		["AIGW-routed dotted Opus 4.8", AIGW_OPUS_48_DOTTED],
+		["dotted direct model map", OPUS_48_DOTTED],
+		["AIGW-routed model map", AIGW_OPUS_48],
+		["AIGW-routed dotted model map", AIGW_OPUS_48_DOTTED],
 	] as const) {
-		it(`${label} exposes Extra high`, async () => {
+		it(`${label} explicitly exposes Extra high`, async () => {
 			await renderWithModel(model);
 			openThinking();
 			expect(optionTexts()).toContain("Extra high");
 		});
 	}
 
-	it("Switching to Opus 4.5 clamps xhigh down to High and persists", async () => {
+	it("switching from an explicit xhigh map to a mapless model clamps to High and persists", async () => {
 		await renderWithModel(OPUS_48);
 		await pickThinking("Extra high");
 		expect(readThinkingLabel()).toBe("Extra high");

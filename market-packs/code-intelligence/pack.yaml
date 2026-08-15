@@ -3,7 +3,8 @@ name: code-intelligence
 description: >-
   Host-side Graphify code intelligence for component-scoped code graphs. Graph
   queries are read-only, default to code-tier results, and never expose graph
-  artifacts to agent sandboxes.
+  artifacts to agent sandboxes. Structural-search and bounded LSP adapter source
+  remains staged pending its public Extension Platform integration.
 version: 0.1.0
 # The pack ships inert. Enabling it is the sole activation switch for its
 # provider, graph tools, routes, and status panel.

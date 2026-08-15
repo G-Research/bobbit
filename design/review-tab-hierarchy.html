@@ -1,0 +1,802 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Review tab hierarchy UX prototype</title>
+<style>
+	/*
+		Review tab hierarchy — interactive UX specification
+
+		Information architecture
+		- A review is the workspace-level object. Each review gets exactly one primary,
+		  closable tab in the muted workspace strip. Closing it removes the review and
+		  every file beneath it; another review remains untouched.
+		- Files are navigation within the selected review. They live only in the secondary
+		  row, have no close affordance, and remember their active file independently.
+		- A one-file review would omit .review-file-bar entirely. The primary tab already
+		  provides enough context, so repeating the filename adds noise rather than value.
+		- Review decisions and the final comment remain review-level actions in the footer.
+
+		Consistency rationale
+		- Primary tabs deliberately reuse the product's goal-tab-bar / goal-tab-pill /
+		  goal-tab-pill-label / goal-tab-close class vocabulary, 13px type, 8px top radii,
+		  muted strip, active content-colour merge, and circular close affordance.
+		- Secondary tabs reuse the existing review-tab vocabulary, 13px type, 6px radius,
+		  compact padding, active border, and annotation-count badge. The previous file-close
+		  affordance is intentionally removed because files are not independently closable.
+		- The overflow trigger is a normal secondary tab-height button. Its menu is portalled
+		  to #popover-layer and position:fixed, outside every scrolling/clipping container.
+		- Existing button hierarchy is retained: quiet Dismiss, outlined Reject, primary
+		  Approve. No new product component is introduced by this prototype.
+
+		Responsive and geometry decisions
+		- Primary labels own min-width:0 and text-overflow:ellipsis; close buttons are
+		  flex:none and remain within each tab's max-width. The whole strip may scroll.
+		- Desktop exposes four files before overflow; narrow exposes two, preserving a large
+		  touch target for More tabs without squeezing filenames into unreadable fragments.
+		- At <=640px (or Narrow simulation), review content and footer use 16px gutters,
+		  44px minimum touch targets, and footer actions stack without covering content.
+
+		Keyboard and dismissal contract
+		- Left/Right arrows move primary or secondary tab focus; Home/End jump to bounds.
+		- More tabs opens with Enter/Space/click; ArrowDown opens and focuses the first item.
+		- Overflow menu items support Up/Down/Home/End. Selection activates the file, closes
+		  the menu, and returns focus to More tabs. Escape and outside click dismiss it.
+		- The close confirmation traps focus, closes on Escape, and restores focus to the
+		  initiating review close button on cancel.
+	*/
+	* { box-sizing: border-box; }
+	html { min-height: 100%; background: var(--background); color: var(--foreground); }
+	body {
+		margin: 0;
+		min-height: 100vh;
+		background: var(--background);
+		color: var(--foreground);
+		font-family: var(--font-sans, ui-sans-serif, system-ui, sans-serif);
+		font-size: 14px;
+	}
+	button, textarea { font: inherit; color: inherit; }
+	button { cursor: pointer; }
+	button:focus-visible, textarea:focus-visible, [role="tab"]:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 2px;
+	}
+	button:disabled { cursor: not-allowed; opacity: .55; }
+	.sr-only {
+		position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+		overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+	}
+	.prototype-page { min-height: 100vh; padding: 20px; }
+	.prototype-controls {
+		max-width: 1120px;
+		margin: 0 auto 12px;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+	}
+	.prototype-title { min-width: 0; }
+	.prototype-title strong { display: block; font-size: 13px; }
+	.prototype-title span { color: var(--muted-foreground); font-size: 12px; }
+	.control-group {
+		display: inline-flex;
+		padding: 3px;
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		background: var(--muted);
+		flex: none;
+	}
+	.control-button {
+		min-height: 30px;
+		padding: 4px 10px;
+		border: 0;
+		border-radius: 5px;
+		background: transparent;
+		color: var(--muted-foreground);
+		font-size: 12px;
+	}
+	.control-button[aria-pressed="true"] {
+		background: var(--background);
+		color: var(--foreground);
+		box-shadow: 0 1px 2px color-mix(in oklch, var(--foreground) 12%, transparent);
+	}
+	.control-button--reset { margin-left: 4px; border-left: 1px solid var(--border); border-radius: 0 5px 5px 0; }
+
+	.app-shell {
+		width: min(1120px, 100%);
+		height: min(790px, calc(100vh - 88px));
+		min-height: 600px;
+		margin: 0 auto;
+		display: flex;
+		flex-direction: column;
+		border: 1px solid var(--border);
+		border-radius: 12px;
+		overflow: hidden;
+		background: var(--background);
+		box-shadow: 0 18px 50px color-mix(in oklch, var(--foreground) 10%, transparent);
+		transition: width 180ms ease, height 180ms ease;
+	}
+	.prototype-page[data-mode="narrow"] .app-shell {
+		width: min(390px, 100%);
+		height: min(800px, calc(100vh - 88px));
+	}
+	.app-header {
+		height: 44px;
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		padding: 0 14px;
+		border-bottom: 1px solid var(--border);
+		background: var(--background);
+		flex: none;
+	}
+	.brand-mark {
+		width: 24px; height: 24px; display: grid; place-items: center;
+		border-radius: 6px; background: var(--primary); color: var(--primary-foreground);
+		font-size: 12px; font-weight: 700;
+	}
+	.app-header strong { font-size: 13px; }
+	.header-separator { width: 1px; height: 16px; background: var(--border); }
+	.session-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted-foreground); font-size: 12px; }
+	.session-status { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; color: var(--muted-foreground); font-size: 12px; flex: none; }
+	.session-status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--positive); }
+
+	/* Primary workspace tabs — mirrors the existing product primitive. */
+	.goal-tab-bar {
+		flex: none;
+		overflow-x: auto;
+		overflow-y: hidden;
+		scrollbar-width: thin;
+		background: var(--muted);
+	}
+	.primary-tabs {
+		display: flex;
+		align-items: end;
+		gap: 4px;
+		min-width: max-content;
+		padding: 4px 12px 0;
+	}
+	.goal-tab-pill {
+		display: flex;
+		align-items: center;
+		min-width: 0;
+		max-width: 280px;
+		height: 32px;
+		border-radius: 8px 8px 0 0;
+		color: var(--muted-foreground);
+		background: transparent;
+		position: relative;
+		transition: background 150ms ease, color 150ms ease;
+	}
+	.goal-tab-pill:hover { background: color-mix(in oklch, var(--background) 50%, transparent); color: var(--foreground); }
+	.goal-tab-pill--active, .goal-tab-pill--active:hover { background: var(--background); color: var(--foreground); }
+	.goal-tab-pill-target {
+		align-self: stretch;
+		min-width: 0;
+		max-width: 100%;
+		padding: 3px 8px 4px 12px;
+		border: 0;
+		background: transparent;
+		color: inherit;
+		font-size: 13px;
+		font-weight: 500;
+		line-height: 1.4;
+		text-align: left;
+	}
+	.goal-tab-pill--closable .goal-tab-pill-target { flex: 1 1 auto; padding-right: 4px; }
+	.goal-tab-pill-label {
+		display: block;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.goal-tab-close {
+		display: inline-grid;
+		place-items: center;
+		width: 24px;
+		height: 24px;
+		margin-right: 5px;
+		padding: 0;
+		border: 0;
+		border-radius: 999px;
+		background: transparent;
+		color: currentColor;
+		opacity: .68;
+		flex: 0 0 24px;
+	}
+	.goal-tab-close:hover { background: color-mix(in oklch, currentColor 14%, transparent); opacity: 1; }
+	.goal-tab-close svg { width: 14px; height: 14px; }
+
+	.workspace { min-height: 0; flex: 1; display: flex; flex-direction: column; background: var(--background); }
+	.review-file-bar {
+		position: relative;
+		z-index: 1;
+		display: flex;
+		align-items: center;
+		gap: 3px;
+		min-height: 45px;
+		padding: 6px 16px;
+		border-bottom: 1px solid var(--border);
+		background: var(--background);
+		flex: none;
+		overflow-x: auto;
+		scrollbar-width: thin;
+	}
+	.review-file-bar[hidden] { display: none; }
+	.file-tabs { display: contents; }
+	.review-tab {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		min-width: 0;
+		max-width: 190px;
+		min-height: 32px;
+		padding: 4px 11px;
+		border: 1px solid transparent;
+		border-radius: 6px;
+		background: transparent;
+		color: var(--muted-foreground);
+		font-size: 13px;
+		white-space: nowrap;
+		flex: 0 1 auto;
+	}
+	.review-tab:hover { background: var(--muted); color: var(--foreground); }
+	.review-tab[aria-selected="true"], .review-tab--overflow-active {
+		background: var(--muted);
+		color: var(--foreground);
+		border-color: var(--border);
+		font-weight: 500;
+	}
+	.review-tab-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+	.review-tab-badge {
+		display: inline-grid; place-items: center;
+		min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
+		background: var(--primary); color: var(--primary-foreground);
+		font-size: 11px; font-weight: 600; line-height: 1; flex: none;
+	}
+	.review-tab-overflow-trigger { max-width: none; flex: none; }
+	.chevron { width: 14px; height: 14px; transition: transform 120ms ease; }
+	.review-tab-overflow-trigger[aria-expanded="true"] .chevron { transform: rotate(180deg); }
+	.overflow-active-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--primary); flex: none; }
+
+	/* Portalled: this layer is a sibling of the app shell, never clipped by it. */
+	#popover-layer { position: relative; z-index: 1000; }
+	.review-tab-overflow {
+		position: fixed;
+		z-index: 1000;
+		min-width: 220px;
+		max-width: min(320px, calc(100vw - 16px));
+		max-height: min(360px, calc(100vh - 16px));
+		overflow-y: auto;
+		padding: 5px;
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		background: var(--popover);
+		color: var(--popover-foreground);
+		box-shadow: 0 10px 30px color-mix(in oklch, var(--foreground) 18%, transparent);
+	}
+	.review-tab-overflow[hidden] { display: none; }
+	.menu-label { padding: 7px 9px 5px; color: var(--muted-foreground); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+	.review-tab-overflow-item {
+		display: grid;
+		grid-template-columns: 18px minmax(0, 1fr) auto;
+		align-items: center;
+		gap: 8px;
+		width: 100%;
+		min-height: 36px;
+		padding: 6px 9px;
+		border: 0;
+		border-radius: 5px;
+		background: transparent;
+		color: inherit;
+		font-size: 13px;
+		text-align: left;
+	}
+	.review-tab-overflow-item:hover, .review-tab-overflow-item:focus-visible { background: var(--muted); }
+	.review-tab-overflow-item[aria-checked="true"] { background: var(--muted); font-weight: 500; }
+	.menu-check { width: 15px; height: 15px; color: var(--primary); visibility: hidden; }
+	.review-tab-overflow-item[aria-checked="true"] .menu-check { visibility: visible; }
+	.menu-item-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+	.document-scroll { min-height: 0; flex: 1; overflow-y: auto; }
+	.document {
+		width: min(760px, 100%);
+		margin: 0 auto;
+		padding: 30px 32px 42px;
+		line-height: 1.62;
+	}
+	.document-kicker { margin: 0 0 6px; color: var(--muted-foreground); font-size: 12px; }
+	.document h1 { margin: 0 0 16px; font-size: 24px; line-height: 1.25; letter-spacing: -.02em; }
+	.document h2 { margin: 26px 0 8px; font-size: 17px; }
+	.document p, .document ul { margin: 8px 0; }
+	.document ul { padding-left: 22px; }
+	.document code { padding: 2px 5px; border-radius: 4px; background: var(--muted); font-family: var(--font-mono, ui-monospace, monospace); font-size: .9em; }
+	.document pre { padding: 14px 16px; overflow-x: auto; border: 1px solid var(--border); border-radius: 7px; background: var(--muted); }
+	.document pre code { padding: 0; background: transparent; font-size: 12px; }
+	.review-note {
+		margin: 16px 0;
+		padding: 10px 12px;
+		border-left: 3px solid var(--primary);
+		background: color-mix(in oklch, var(--primary) 8%, transparent);
+		border-radius: 0 6px 6px 0;
+	}
+	.review-note strong { display: block; font-size: 12px; }
+	.review-note span { color: var(--muted-foreground); font-size: 12px; }
+
+	.review-footer {
+		flex: none;
+		display: grid;
+		grid-template-columns: minmax(180px, 1fr) auto;
+		gap: 10px 16px;
+		align-items: end;
+		padding: 12px 16px;
+		border-top: 1px solid var(--border);
+		background: var(--background);
+		box-shadow: 0 -8px 20px color-mix(in oklch, var(--foreground) 4%, transparent);
+	}
+	.comment-label { display: grid; gap: 5px; min-width: 0; }
+	.comment-label span { color: var(--muted-foreground); font-size: 11px; font-weight: 600; }
+	.comment-label textarea {
+		width: 100%; min-height: 38px; max-height: 96px; resize: vertical;
+		padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px;
+		background: var(--background); font-size: 12px;
+	}
+	.review-actions { display: flex; align-items: center; gap: 8px; }
+	.action-button { min-height: 36px; padding: 7px 13px; border: 1px solid var(--border); border-radius: 6px; background: var(--background); font-size: 12px; font-weight: 500; }
+	.action-button:hover { background: var(--muted); }
+	.action-button--quiet { border-color: transparent; color: var(--muted-foreground); }
+	.action-button--primary { border-color: var(--primary); background: var(--primary); color: var(--primary-foreground); }
+	.action-button--primary:hover { background: color-mix(in oklch, var(--primary) 88%, var(--foreground)); }
+
+	.status-toast {
+		position: fixed; left: 50%; bottom: 20px; z-index: 1200; transform: translate(-50%, 12px);
+		padding: 8px 12px; border: 1px solid var(--border); border-radius: 7px;
+		background: var(--popover); color: var(--popover-foreground); box-shadow: 0 6px 20px color-mix(in oklch, var(--foreground) 16%, transparent);
+		font-size: 12px; opacity: 0; pointer-events: none; transition: opacity 140ms ease, transform 140ms ease;
+	}
+	.status-toast[data-show="true"] { opacity: 1; transform: translate(-50%, 0); }
+
+	.dialog-backdrop { position: fixed; inset: 0; z-index: 1500; display: grid; place-items: center; padding: 16px; background: color-mix(in oklch, var(--foreground) 34%, transparent); }
+	.dialog-backdrop[hidden] { display: none; }
+	.dialog {
+		width: min(430px, 100%); padding: 20px; border: 1px solid var(--border); border-radius: 10px;
+		background: var(--popover); color: var(--popover-foreground); box-shadow: 0 18px 60px color-mix(in oklch, var(--foreground) 24%, transparent);
+	}
+	.dialog h2 { margin: 0 0 8px; font-size: 17px; }
+	.dialog p { margin: 0; color: var(--muted-foreground); line-height: 1.5; }
+	.dialog-actions { display: flex; justify-content: end; gap: 8px; margin-top: 20px; }
+	.action-button--danger { border-color: var(--negative); background: var(--negative); color: var(--negative-foreground); }
+
+	.prototype-page[data-mode="narrow"] .goal-tab-pill { max-width: 230px; }
+	.prototype-page[data-mode="narrow"] .primary-tabs { padding-left: 8px; padding-right: 8px; }
+	.prototype-page[data-mode="narrow"] .review-file-bar { min-height: 53px; padding: 7px 10px; }
+	.prototype-page[data-mode="narrow"] .review-tab { min-height: 40px; max-width: 132px; padding-inline: 10px; }
+	.prototype-page[data-mode="narrow"] .document { padding: 22px 16px 32px; }
+	.prototype-page[data-mode="narrow"] .document h1 { font-size: 21px; }
+	.prototype-page[data-mode="narrow"] .review-footer { grid-template-columns: 1fr; padding: 10px 12px 12px; }
+	.prototype-page[data-mode="narrow"] .review-actions { justify-content: stretch; }
+	.prototype-page[data-mode="narrow"] .action-button { flex: 1; min-height: 42px; padding-inline: 10px; }
+	.prototype-page[data-mode="narrow"] .goal-tab-close { width: 28px; height: 28px; flex-basis: 28px; margin-right: 3px; }
+	.prototype-page[data-mode="narrow"] .session-status { display: none; }
+
+	@media (max-width: 640px) {
+		.prototype-page { padding: 0; }
+		.prototype-controls { padding: 10px; margin: 0; }
+		.prototype-title span { display: none; }
+		.app-shell { width: 100%; height: calc(100vh - 54px); min-height: 560px; border-left: 0; border-right: 0; border-bottom: 0; border-radius: 0; }
+		.goal-tab-pill { max-width: 230px; }
+		.review-file-bar { min-height: 53px; padding: 7px 10px; }
+		.review-tab { min-height: 40px; max-width: 132px; }
+		.document { padding: 22px 16px 32px; }
+		.review-footer { grid-template-columns: 1fr; padding: 10px 12px 12px; }
+		.review-actions { justify-content: stretch; }
+		.action-button { flex: 1; min-height: 42px; }
+		.session-status { display: none; }
+	}
+	@media (prefers-reduced-motion: reduce) {
+		*, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
+	}
+</style>
+</head>
+<body>
+<div class="prototype-page" data-mode="desktop" id="prototype">
+	<div class="prototype-controls" aria-label="Prototype controls">
+		<div class="prototype-title">
+			<strong>Review hierarchy prototype</strong>
+			<span>Switch viewport, reviews, files, overflow, and close states.</span>
+		</div>
+		<div class="control-group">
+			<button class="control-button" id="desktop-mode" type="button" aria-pressed="true">Desktop</button>
+			<button class="control-button" id="narrow-mode" type="button" aria-pressed="false">Narrow</button>
+			<button class="control-button control-button--reset" id="reset-demo" type="button">Reset</button>
+		</div>
+	</div>
+
+	<main class="app-shell" aria-label="Bobbit review workspace prototype">
+		<header class="app-header">
+			<span class="brand-mark" aria-hidden="true">B</span>
+			<strong>Bobbit</strong>
+			<span class="header-separator" aria-hidden="true"></span>
+			<span class="session-label">goal/markdown-review-tabs</span>
+			<span class="session-status">Session live</span>
+		</header>
+
+		<nav class="goal-tab-bar" aria-label="Workspace tabs">
+			<div class="primary-tabs" role="tablist" aria-label="Open workspaces" id="primary-tabs"></div>
+		</nav>
+
+		<section class="workspace" id="workspace" aria-live="polite">
+			<nav class="review-file-bar" id="review-file-bar" aria-label="Files in selected review">
+				<div class="file-tabs" role="tablist" aria-label="Review files" id="file-tabs"></div>
+				<button class="review-tab review-tab-overflow-trigger" id="more-tabs" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="overflow-menu">
+					<span class="overflow-active-dot" id="overflow-active-dot" hidden aria-hidden="true"></span>
+					<span>More tabs</span>
+					<span class="review-tab-badge" id="overflow-count" aria-hidden="true"></span>
+					<svg class="chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m6 8 4 4 4-4"/></svg>
+				</button>
+			</nav>
+
+			<div class="document-scroll" tabindex="0">
+				<article class="document" id="document" role="tabpanel"></article>
+			</div>
+
+			<footer class="review-footer">
+				<label class="comment-label">
+					<span>FINAL COMMENT · APPLIES TO ENTIRE REVIEW</span>
+					<textarea id="final-comment" rows="1" placeholder="Optional for approval; required to reject without inline comments."></textarea>
+				</label>
+				<div class="review-actions">
+					<button class="action-button action-button--quiet" type="button" data-demo-action="Dismiss">Dismiss</button>
+					<button class="action-button" type="button" data-demo-action="Reject">Reject</button>
+					<button class="action-button action-button--primary" type="button" data-demo-action="Approve">Approve</button>
+				</div>
+			</footer>
+		</section>
+	</main>
+</div>
+
+<div id="popover-layer">
+	<div class="review-tab-overflow" id="overflow-menu" role="menu" aria-label="More files" hidden>
+		<div class="menu-label">More files in this review</div>
+		<div id="overflow-items"></div>
+	</div>
+</div>
+
+<div class="status-toast" id="status-toast" role="status" aria-live="polite"></div>
+
+<div class="dialog-backdrop" id="close-dialog" hidden>
+	<div class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="dialog-title" aria-describedby="dialog-description">
+		<h2 id="dialog-title">Close review?</h2>
+		<p id="dialog-description"></p>
+		<div class="dialog-actions">
+			<button class="action-button" id="cancel-close" type="button">Cancel</button>
+			<button class="action-button action-button--danger" id="confirm-close" type="button">Close review</button>
+		</div>
+	</div>
+</div>
+
+<script>
+(() => {
+	const initialReviews = [
+		{
+			id: "auth-refactor",
+			title: "Review: Authentication refactor and session lifecycle hardening",
+			activeFile: "overview",
+			finalComment: "",
+			files: [
+				{ id: "overview", title: "Overview", badge: 1, heading: "Authentication refactor", kicker: "Design review · Overview", body: `<p>This review consolidates the authentication flow and clarifies ownership between browser sessions, the gateway, and provider adapters.</p><div class="review-note"><strong>1 inline comment in this file</strong><span>Review decisions will aggregate this with comments from every other file.</span></div><h2>Goals</h2><ul><li>Keep session state durable across gateway restarts.</li><li>Make token refresh ownership explicit.</li><li>Preserve background-session isolation.</li></ul><h2>Compatibility</h2><p>Existing single-provider projects continue to use the same configuration and reconnect behavior.</p>` },
+				{ id: "session-manager", title: "session-manager.ts", badge: 2, heading: "Session manager changes", kicker: "Implementation · src/server/agent/session-manager.ts", body: `<p>The manager now guards refresh work by session identity and refuses stale writes after a reconnect.</p><pre><code>if (currentGeneration &lt; requestedGeneration) {
+  await refreshSession(sessionId);
+}</code></pre><div class="review-note"><strong>2 inline comments in this file</strong><span>Use the gutter annotations to discuss race handling.</span></div><h2>Lifecycle</h2><p>Background events update only their owning session. Selecting that session hydrates its already-persisted workspace.</p>` },
+				{ id: "token-store", title: "token-store.ts", badge: 0, heading: "Token store boundaries", kicker: "Implementation · src/server/auth/token-store.ts", body: `<p>Provider tokens remain server-owned. UI state receives status only and never receives token values.</p><h2>Write contract</h2><p>Writes use a compare-and-swap generation so an older refresh cannot overwrite a newer credential.</p>` },
+				{ id: "migration", title: "migration-notes.md", badge: 0, heading: "Migration notes", kicker: "Documentation · migration-notes.md", body: `<p>No manual migration is required. Existing state is upgraded the first time the gateway loads it.</p><h2>Rollback</h2><p>The previous state shape remains readable for one release window.</p>` },
+				{ id: "api", title: "API reference", badge: 1, heading: "Authentication API reference", kicker: "Reference · docs/auth-api.md", body: `<p>Session-scoped endpoints return a stable status envelope and explicit retry guidance.</p><pre><code>GET /api/sessions/&lt;session-id&gt;/auth
+POST /api/sessions/&lt;session-id&gt;/refresh</code></pre><div class="review-note"><strong>1 inline comment in this file</strong><span>This file is selected from the unclipped overflow menu.</span></div>` },
+				{ id: "security", title: "Security considerations", badge: 0, heading: "Security considerations", kicker: "Threat model · security.md", body: `<p>Refresh credentials never cross the browser boundary. Logs redact provider responses before persistence.</p><h2>Failure handling</h2><p>A failed refresh keeps the last valid session and exposes a retryable status.</p>` },
+				{ id: "tests", title: "Regression matrix", badge: 0, heading: "Regression matrix", kicker: "Verification · tests/auth-matrix.md", body: `<p>The matrix covers restart recovery, stale refresh suppression, background isolation, and provider error handling.</p><h2>Required environments</h2><ul><li>Desktop browser</li><li>Narrow viewport</li><li>Gateway reconnect</li></ul>` }
+			]
+		},
+		{
+			id: "mobile-review",
+			title: "Review: Mobile commenting, narrow panel ergonomics, and accessible focus recovery",
+			activeFile: "mobile-spec",
+			finalComment: "",
+			files: [
+				{ id: "mobile-spec", title: "Mobile specification", badge: 0, heading: "Mobile review ergonomics", kicker: "UX review · Mobile specification", body: `<p>The narrow layout prioritizes readable filenames, 44px interaction targets, and stable focus after commenting.</p><h2>Tab behavior</h2><p>Primary reviews remain horizontally scrollable. Secondary file tabs expose two files before the More tabs control.</p>` },
+				{ id: "gesture", title: "gesture-handling.ts", badge: 1, heading: "Gesture handling", kicker: "Implementation · gesture-handling.ts", body: `<p>Horizontal tab-strip gestures do not steal vertical document scrolling.</p><div class="review-note"><strong>1 inline comment in this file</strong><span>The comment remains with this review when another primary tab is selected.</span></div>` },
+				{ id: "focus", title: "Focus order", badge: 0, heading: "Keyboard and focus order", kicker: "Accessibility · focus-order.md", body: `<p>Tab reaches each interactive control once. Arrow keys provide optional movement within tablists and menus.</p>` },
+				{ id: "screen-reader", title: "Screen reader notes", badge: 0, heading: "Screen reader notes", kicker: "Accessibility · screen-reader.md", body: `<p>Review and file tablists have distinct labels. More tabs exposes expanded state and menu ownership.</p>` },
+				{ id: "viewport", title: "Viewport matrix", badge: 0, heading: "Viewport matrix", kicker: "Verification · viewport-matrix.md", body: `<p>Close-button containment is checked at 1280px, 768px, 390px, and 320px widths with long localized titles.</p>` },
+				{ id: "copy", title: "UI copy", badge: 0, heading: "UI copy", kicker: "Content design · ui-copy.md", body: `<p>Close language always names the review-level consequence. File navigation never uses destructive verbs.</p>` }
+			]
+		}
+	];
+
+	const cloneReviews = () => JSON.parse(JSON.stringify(initialReviews));
+	let reviews = cloneReviews();
+	let activeReviewId = reviews[0].id;
+	let pendingCloseId = null;
+	let closeReturnFocus = null;
+	let toastTimer = 0;
+
+	const $ = (selector) => document.querySelector(selector);
+	const primaryTabs = $("#primary-tabs");
+	const fileTabs = $("#file-tabs");
+	const fileBar = $("#review-file-bar");
+	const moreButton = $("#more-tabs");
+	const overflowMenu = $("#overflow-menu");
+	const overflowItems = $("#overflow-items");
+	const documentNode = $("#document");
+	const finalComment = $("#final-comment");
+	const closeDialog = $("#close-dialog");
+	const closeIcon = `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m6 6 8 8M14 6l-8 8"/></svg>`;
+	const checkIcon = `<svg class="menu-check" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m4 10 4 4 8-8"/></svg>`;
+
+	function activeReview() { return reviews.find(review => review.id === activeReviewId); }
+	function visibleFileCount() { return $("#prototype").dataset.mode === "narrow" || matchMedia("(max-width: 640px)").matches ? 2 : 4; }
+	function commentCount(review) { return review.files.reduce((sum, file) => sum + file.badge, 0) + (review.finalComment.trim() ? 1 : 0); }
+	function showToast(message) {
+		const toast = $("#status-toast");
+		toast.textContent = message;
+		toast.dataset.show = "true";
+		clearTimeout(toastTimer);
+		toastTimer = setTimeout(() => { toast.dataset.show = "false"; }, 2400);
+	}
+
+	function renderPrimaryTabs() {
+		primaryTabs.innerHTML = "";
+		const chat = document.createElement("div");
+		chat.className = "goal-tab-pill";
+		chat.innerHTML = `<button class="goal-tab-pill-target" type="button" role="tab" aria-selected="false" tabindex="-1"><span class="goal-tab-pill-label">Chat</span></button>`;
+		chat.querySelector("button").addEventListener("click", () => showToast("Chat is pinned in the production workspace; this prototype keeps focus on review hierarchy."));
+		primaryTabs.append(chat);
+
+		for (const review of reviews) {
+			const wrapper = document.createElement("div");
+			wrapper.className = `goal-tab-pill goal-tab-pill--closable${review.id === activeReviewId ? " goal-tab-pill--active" : ""}`;
+			wrapper.dataset.reviewId = review.id;
+			const target = document.createElement("button");
+			target.className = "goal-tab-pill-target";
+			target.type = "button";
+			target.role = "tab";
+			target.id = `primary-${review.id}`;
+			target.setAttribute("aria-selected", review.id === activeReviewId ? "true" : "false");
+			target.tabIndex = review.id === activeReviewId ? 0 : -1;
+			target.title = review.title;
+			target.innerHTML = `<span class="goal-tab-pill-label"></span>`;
+			target.querySelector("span").textContent = review.title;
+			target.addEventListener("click", () => selectReview(review.id));
+			const close = document.createElement("button");
+			close.className = "goal-tab-close";
+			close.type = "button";
+			close.setAttribute("aria-label", `Close ${review.title}`);
+			close.title = `Close ${review.title}`;
+			close.innerHTML = closeIcon;
+			close.addEventListener("click", () => requestClose(review.id, close));
+			wrapper.append(target, close);
+			primaryTabs.append(wrapper);
+		}
+	}
+
+	function renderFiles() {
+		closeOverflow(false);
+		const review = activeReview();
+		if (!review) {
+			fileBar.hidden = true;
+			documentNode.innerHTML = `<h1>No review selected</h1><p>Use Reset to restore the prototype reviews.</p>`;
+			$(".review-footer").hidden = true;
+			return;
+		}
+		$(".review-footer").hidden = false;
+		finalComment.value = review.finalComment;
+		fileBar.hidden = review.files.length <= 1;
+		fileTabs.innerHTML = "";
+		const maxVisible = visibleFileCount();
+		const visible = review.files.slice(0, maxVisible);
+		const overflow = review.files.slice(maxVisible);
+		for (const file of visible) fileTabs.append(makeFileTab(file));
+		moreButton.hidden = overflow.length === 0;
+		$("#overflow-count").textContent = String(overflow.length);
+		const activeInOverflow = overflow.some(file => file.id === review.activeFile);
+		moreButton.classList.toggle("review-tab--overflow-active", activeInOverflow);
+		$("#overflow-active-dot").hidden = !activeInOverflow;
+		moreButton.title = activeInOverflow
+			? `More tabs; active file: ${review.files.find(file => file.id === review.activeFile).title}`
+			: `${overflow.length} more files`;
+		renderOverflow(overflow);
+		renderDocument();
+	}
+
+	function makeFileTab(file) {
+		const review = activeReview();
+		const button = document.createElement("button");
+		button.className = "review-tab";
+		button.type = "button";
+		button.role = "tab";
+		button.id = `file-${review.id}-${file.id}`;
+		button.setAttribute("aria-selected", file.id === review.activeFile ? "true" : "false");
+		button.tabIndex = file.id === review.activeFile ? 0 : -1;
+		button.title = file.title;
+		button.innerHTML = `<span class="review-tab-label"></span>${file.badge ? `<span class="review-tab-badge" aria-label="${file.badge} inline comment${file.badge === 1 ? "" : "s"}">${file.badge}</span>` : ""}`;
+		button.querySelector(".review-tab-label").textContent = file.title;
+		button.addEventListener("click", () => selectFile(file.id));
+		return button;
+	}
+
+	function renderOverflow(files) {
+		overflowItems.innerHTML = "";
+		const review = activeReview();
+		for (const file of files) {
+			const item = document.createElement("button");
+			item.className = "review-tab-overflow-item";
+			item.type = "button";
+			item.role = "menuitemradio";
+			item.setAttribute("aria-checked", file.id === review.activeFile ? "true" : "false");
+			item.tabIndex = -1;
+			item.innerHTML = `${checkIcon}<span class="menu-item-label"></span>${file.badge ? `<span class="review-tab-badge" aria-label="${file.badge} inline comment${file.badge === 1 ? "" : "s"}">${file.badge}</span>` : "<span></span>"}`;
+			item.querySelector(".menu-item-label").textContent = file.title;
+			item.addEventListener("click", () => { selectFile(file.id); moreButton.focus(); });
+			overflowItems.append(item);
+		}
+	}
+
+	function renderDocument() {
+		const review = activeReview();
+		if (!review) return;
+		const file = review.files.find(candidate => candidate.id === review.activeFile) || review.files[0];
+		documentNode.setAttribute("aria-labelledby", `primary-${review.id}`);
+		documentNode.innerHTML = `<p class="document-kicker">${file.kicker}</p><h1>${file.heading}</h1>${file.body}`;
+	}
+
+	function selectReview(id) {
+		if (id === activeReviewId) return;
+		activeReviewId = id;
+		renderPrimaryTabs();
+		renderFiles();
+		showToast(`Selected ${activeReview().title.replace(/^Review: /, "")}`);
+	}
+
+	function selectFile(id) {
+		const review = activeReview();
+		if (!review || review.activeFile === id) { closeOverflow(true); return; }
+		review.activeFile = id;
+		renderFiles();
+		showToast(`Opened ${review.files.find(file => file.id === id).title}`);
+	}
+
+	function positionOverflow() {
+		const rect = moreButton.getBoundingClientRect();
+		const menuWidth = Math.min(320, Math.max(220, rect.width + 120));
+		const margin = 8;
+		let left = Math.min(rect.left, innerWidth - menuWidth - margin);
+		left = Math.max(margin, left);
+		overflowMenu.style.width = `${menuWidth}px`;
+		overflowMenu.style.left = `${left}px`;
+		overflowMenu.style.top = `${Math.min(rect.bottom + 5, innerHeight - overflowMenu.offsetHeight - margin)}px`;
+	}
+
+	function openOverflow(focusFirst = false) {
+		if (moreButton.hidden) return;
+		overflowMenu.hidden = false;
+		moreButton.setAttribute("aria-expanded", "true");
+		requestAnimationFrame(() => {
+			positionOverflow();
+			if (focusFirst) overflowItems.querySelector("button")?.focus();
+		});
+	}
+	function closeOverflow(returnFocus = false) {
+		if (overflowMenu.hidden) return;
+		overflowMenu.hidden = true;
+		moreButton.setAttribute("aria-expanded", "false");
+		if (returnFocus && !moreButton.hidden) moreButton.focus();
+	}
+
+	function requestClose(id, trigger) {
+		const review = reviews.find(item => item.id === id);
+		if (!review) return;
+		pendingCloseId = id;
+		closeReturnFocus = trigger;
+		const count = commentCount(review);
+		$("#dialog-title").textContent = `Close “${review.title.replace(/^Review: /, "")}”?`;
+		$("#dialog-description").textContent = `${count} unsent comment${count === 1 ? "" : "s"} across ${review.files.length} files will be lost. This closes the whole review; other open reviews remain available.`;
+		closeDialog.hidden = false;
+		$("#cancel-close").focus();
+	}
+	function cancelClose() {
+		closeDialog.hidden = true;
+		pendingCloseId = null;
+		closeReturnFocus?.focus();
+		closeReturnFocus = null;
+	}
+	function confirmClose() {
+		const closing = reviews.find(review => review.id === pendingCloseId);
+		const index = reviews.findIndex(review => review.id === pendingCloseId);
+		reviews = reviews.filter(review => review.id !== pendingCloseId);
+		if (pendingCloseId === activeReviewId) activeReviewId = reviews[Math.min(index, reviews.length - 1)]?.id || "";
+		closeDialog.hidden = true;
+		pendingCloseId = null;
+		closeReturnFocus = null;
+		renderPrimaryTabs();
+		renderFiles();
+		showToast(`${closing.title.replace(/^Review: /, "")} closed; other reviews preserved.`);
+	}
+
+	function reset() {
+		reviews = cloneReviews();
+		activeReviewId = reviews[0].id;
+		pendingCloseId = null;
+		closeDialog.hidden = true;
+		renderPrimaryTabs();
+		renderFiles();
+		showToast("Prototype reset");
+	}
+	function setMode(mode) {
+		$("#prototype").dataset.mode = mode;
+		$("#desktop-mode").setAttribute("aria-pressed", mode === "desktop" ? "true" : "false");
+		$("#narrow-mode").setAttribute("aria-pressed", mode === "narrow" ? "true" : "false");
+		renderFiles();
+	}
+
+	function moveFocus(items, current, key) {
+		const list = [...items].filter(item => !item.hidden && item.offsetParent !== null);
+		let index = Math.max(0, list.indexOf(current));
+		if (key === "ArrowRight" || key === "ArrowDown") index = (index + 1) % list.length;
+		if (key === "ArrowLeft" || key === "ArrowUp") index = (index - 1 + list.length) % list.length;
+		if (key === "Home") index = 0;
+		if (key === "End") index = list.length - 1;
+		list[index]?.focus();
+	}
+
+	primaryTabs.addEventListener("keydown", event => {
+		if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+		event.preventDefault();
+		moveFocus(primaryTabs.querySelectorAll('[role="tab"]'), event.target, event.key);
+	});
+	fileBar.addEventListener("keydown", event => {
+		if (event.target === moreButton && event.key === "ArrowDown") { event.preventDefault(); openOverflow(true); return; }
+		if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+		event.preventDefault();
+		moveFocus(fileBar.querySelectorAll('[role="tab"], #more-tabs'), event.target, event.key);
+	});
+	overflowMenu.addEventListener("keydown", event => {
+		if (event.key === "Escape") { event.preventDefault(); closeOverflow(true); return; }
+		if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+		event.preventDefault();
+		moveFocus(overflowItems.querySelectorAll("button"), event.target, event.key);
+	});
+	moreButton.addEventListener("click", event => {
+		event.stopPropagation();
+		overflowMenu.hidden ? openOverflow(false) : closeOverflow(false);
+	});
+	document.addEventListener("pointerdown", event => {
+		if (!overflowMenu.hidden && !overflowMenu.contains(event.target) && !moreButton.contains(event.target)) closeOverflow(false);
+	});
+	document.addEventListener("keydown", event => {
+		if (event.key === "Escape" && !overflowMenu.hidden) { event.preventDefault(); closeOverflow(true); }
+		else if (event.key === "Escape" && !closeDialog.hidden) { event.preventDefault(); cancelClose(); }
+	});
+	closeDialog.addEventListener("keydown", event => {
+		if (event.key !== "Tab") return;
+		const controls = [$("#cancel-close"), $("#confirm-close")];
+		const index = controls.indexOf(document.activeElement);
+		event.preventDefault();
+		controls[(index + (event.shiftKey ? -1 : 1) + controls.length) % controls.length].focus();
+	});
+	finalComment.addEventListener("input", () => { const review = activeReview(); if (review) review.finalComment = finalComment.value; });
+	$("#cancel-close").addEventListener("click", cancelClose);
+	$("#confirm-close").addEventListener("click", confirmClose);
+	$("#desktop-mode").addEventListener("click", () => setMode("desktop"));
+	$("#narrow-mode").addEventListener("click", () => setMode("narrow"));
+	$("#reset-demo").addEventListener("click", reset);
+	document.querySelectorAll("[data-demo-action]").forEach(button => button.addEventListener("click", () => showToast(`${button.dataset.demoAction} applies to the entire selected review.`)));
+	addEventListener("resize", () => { if (!overflowMenu.hidden) positionOverflow(); renderFiles(); });
+	addEventListener("scroll", () => { if (!overflowMenu.hidden) positionOverflow(); }, true);
+
+	renderPrimaryTabs();
+	renderFiles();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+id: file-explorer.session-menu
+kind: session-menu
+label: Open file explorer
+icon: folder-tree
+target:
+  panelId: file-explorer.panel

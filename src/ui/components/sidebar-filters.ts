@@ -1,232 +1,200 @@
 /**
- * Sidebar Filters popover — replaces the legacy "See Archived" button.
+ * Shared By Project / By Status sidebar Filters control.
  *
- * Contains three toggle switches (Show Archived, Show Busy, Show Read), each
- * persisted to localStorage and wired to keyboard shortcuts.
- *
- *   - bobbit-show-archived (default OFF)
- *   - bobbit-show-busy     (default ON)
- *   - bobbit-show-read     (default ON)
- *
- * Exports the popover renderer (called from both desktop and mobile sidebars)
- * and three pure toggle functions used by the keyboard shortcut handlers.
+ * Existing keyboard shortcuts continue to call the exported toggle functions;
+ * the preference adapter routes Show archived, Show busy, and Show read to the
+ * active view's independent values.
  */
-import { html, type TemplateResult } from "lit";
+import { html, nothing, type TemplateResult } from "lit";
 import { icon } from "@mariozechner/mini-lit";
-import { Archive, Eye, Filter, Zap } from "lucide";
+import { Archive, Eye, Filter, Users, Zap } from "lucide";
 import { renderApp, state } from "../../app/state.js";
 import { shortcutHint } from "../../app/shortcut-registry.js";
-// Static cycle with sidebar.ts (which statically imports renderFiltersButton).
-// Both sides only reference the imported symbols inside function bodies, so
-// ESM live-binding resolves at call time.
-import { clearArchivedBySearch } from "../../app/sidebar.js";
-import { fetchArchivedSessions, fetchArchivedGoalsPaginated, clearArchivedSessionsState } from "../../app/api.js";
-import { safeSetItem } from "../../app/safe-storage.js";
+import {
+	archivedGoalsLoaded,
+	archivedSessionsLoaded,
+	clearArchivedSessionsState,
+	fetchArchivedGoalsPaginated,
+	fetchArchivedSessions,
+} from "../../app/api.js";
+import {
+	getSidebarViewFilters,
+	isSidebarViewFilterActive,
+	setActiveSidebarViewFilter,
+	setSidebarViewFilter,
+	sidebarNeedsArchivedSessions,
+	type SidebarViewFilterKey,
+} from "../../app/sidebar-view-preferences.js";
 
-// ---------------------------------------------------------------------------
-// Shared toggle handlers (used by both popover clicks and keyboard shortcuts)
-// ---------------------------------------------------------------------------
+function activeFilters() {
+	return getSidebarViewFilters(state, state.sidebarSessionView);
+}
 
-/** Toggle Show Archived. Persists, lazy-loads/clears archived data, re-renders. */
+function updateFilter(key: SidebarViewFilterKey, value: boolean): void {
+	setSidebarViewFilter(state, state.sidebarSessionView, key, value);
+}
+
+/** Toggle Show Archived for the active view and reuse production archive ownership. */
 export function toggleShowArchived(): void {
-	state.showArchived = !state.showArchived;
-	safeSetItem("bobbit-show-archived", String(state.showArchived));
-	// Manual toggle takes precedence over search-driven auto-open.
-	clearArchivedBySearch();
-	if (state.showArchived) {
-		fetchArchivedSessions();
-		fetchArchivedGoalsPaginated();
-	} else {
-		// Hiding archived rows may unload fetched archive data, but must not
-		// clear explicit persisted tree expansion choices.
+	const next = !activeFilters().showArchived;
+	updateFilter("showArchived", next);
+	if (next) {
+		// Both views consume the same normal archive pages. Only a cold resource
+		// should use its reset-capable first-page loader here.
+		if (!archivedSessionsLoaded()) void fetchArchivedSessions();
+		if (!archivedGoalsLoaded()) void fetchArchivedGoalsPaginated();
+	} else if (!sidebarNeedsArchivedSessions(state, state.archivedSearchDemand)) {
 		clearArchivedSessionsState();
 	}
 	renderApp();
 }
 
-/** Toggle Show Busy. Persists, re-renders. */
+/** Toggle Show Busy for the active view. */
 export function toggleShowBusy(): void {
-	state.showBusy = !state.showBusy;
-	safeSetItem("bobbit-show-busy", String(state.showBusy));
+	setActiveSidebarViewFilter(state, "showBusy", !activeFilters().showBusy);
 	renderApp();
 }
 
-/** Toggle Show Read. Persists, re-renders. */
+/** Toggle Show Read for the active view. */
 export function toggleShowRead(): void {
-	state.showRead = !state.showRead;
-	safeSetItem("bobbit-show-read", String(state.showRead));
+	setActiveSidebarViewFilter(state, "showRead", !activeFilters().showRead);
 	renderApp();
 }
 
-// ---------------------------------------------------------------------------
-// Popover anchor + outside-click handling
-// ---------------------------------------------------------------------------
+function toggleShowTeams(): void {
+	updateFilter("showTeams", !activeFilters().showTeams);
+	renderApp();
+}
 
-let _filtersAnchorRect: { top: number; right: number; bottom: number; left: number } | null = null;
+let filtersAnchor: HTMLElement | null = null;
+let filtersAnchorRect: { top: number; right: number; bottom: number; left: number } | null = null;
 
-function _openFiltersPopover(e: Event): void {
-	e.stopPropagation();
+export function closeSidebarFiltersPopover(restoreFocus = false): void {
+	if (!state.filtersPopoverOpen) return;
+	state.filtersPopoverOpen = false;
+	const anchor = filtersAnchor;
+	renderApp();
+	if (restoreFocus && anchor?.isConnected) requestAnimationFrame(() => anchor.focus());
+}
+
+function toggleFiltersPopover(event: Event): void {
+	event.stopPropagation();
 	if (state.filtersPopoverOpen) {
-		state.filtersPopoverOpen = false;
-		renderApp();
+		closeSidebarFiltersPopover();
 		return;
 	}
-	const btn = e.currentTarget as HTMLElement | null;
-	if (btn) {
-		const r = btn.getBoundingClientRect();
-		_filtersAnchorRect = { top: r.top, right: r.right, bottom: r.bottom, left: r.left };
-	} else {
-		_filtersAnchorRect = null;
-	}
+	filtersAnchor = event.currentTarget as HTMLElement;
+	const rect = filtersAnchor.getBoundingClientRect();
+	filtersAnchorRect = { top: rect.top, right: rect.right, bottom: rect.bottom, left: rect.left };
 	state.filtersPopoverOpen = true;
 	renderApp();
 }
 
-// Close on any outside click. The popover root stops propagation, so clicks
-// inside it won't trigger this.
 if (typeof document !== "undefined") {
-	document.addEventListener("click", () => {
-		if (state.filtersPopoverOpen) {
-			state.filtersPopoverOpen = false;
-			renderApp();
-		}
-	});
-	document.addEventListener("keydown", (e: KeyboardEvent) => {
-		if (e.key === "Escape" && state.filtersPopoverOpen) {
-			state.filtersPopoverOpen = false;
-			renderApp();
-		}
-	});
+	document.addEventListener("click", () => closeSidebarFiltersPopover());
+	document.addEventListener("keydown", (event: KeyboardEvent) => {
+		if (event.key !== "Escape" || !state.filtersPopoverOpen) return;
+		event.preventDefault();
+		event.stopPropagation();
+		closeSidebarFiltersPopover(true);
+	}, true);
 }
 
-// ---------------------------------------------------------------------------
-// Render
-// ---------------------------------------------------------------------------
-
-/** Returns true when any filter differs from its default (used for active styling). */
-function _anyFilterActive(): boolean {
-	return state.showArchived || !state.showBusy || !state.showRead;
-}
-
-/** Render a single toggle row inside the popover. */
-function _renderToggleRow(opts: {
+function renderToggleRow(options: {
 	id: string;
 	icon: typeof Archive;
 	label: string;
-	shortcut: string;
+	shortcut?: string;
 	checked: boolean;
 	onToggle: () => void;
 }): TemplateResult {
 	return html`
-		<label
-			class="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-secondary/50 transition-colors"
-			data-testid="sidebar-filter-${opts.id}"
-		>
+		<label class="sidebar-filter-row" data-testid="sidebar-filter-${options.id}">
 			<input
 				type="checkbox"
 				class="w-4 h-4 rounded border-input accent-primary cursor-pointer"
-				.checked=${opts.checked}
-				@change=${(e: Event) => { e.stopPropagation(); opts.onToggle(); }}
-				@click=${(e: Event) => e.stopPropagation()}
+				.checked=${options.checked}
+				@change=${(event: Event) => { event.stopPropagation(); options.onToggle(); }}
+				@click=${(event: Event) => event.stopPropagation()}
 			/>
-			<span class="shrink-0 text-muted-foreground">${icon(opts.icon, "sm")}</span>
-			<span class="flex-1 text-sm font-medium text-foreground">${opts.label}</span>
-			<span class="text-xs text-muted-foreground/70 font-mono">${opts.shortcut}</span>
+			<span class="sidebar-filter-row-icon">${icon(options.icon, "sm")}</span>
+			<span class="sidebar-filter-row-label">${options.label}</span>
+			${options.shortcut ? html`<span class="sidebar-filter-shortcut">${options.shortcut}</span>` : nothing}
 		</label>
 	`;
 }
 
-/** Render the popover panel (anchored to the trigger button). */
-function _renderPopover(): TemplateResult | "" {
-	if (!state.filtersPopoverOpen) return "";
-
-	const MARGIN = 8;
-	const POPOVER_WIDTH = 280;
-	const anchor = _filtersAnchorRect ?? { top: 40, right: 260, bottom: 56, left: 0 };
-
-	// Prefer anchoring above the trigger (the trigger lives in the sidebar footer).
-	const spaceAbove = anchor.top - MARGIN;
-	const spaceBelow = (typeof window !== "undefined" ? window.innerHeight : 800) - anchor.bottom - MARGIN;
-	const useAbove = spaceAbove > 200 || spaceAbove > spaceBelow;
-
-	const vpW = typeof window !== "undefined" ? window.innerWidth : 1024;
-	const width = Math.min(POPOVER_WIDTH, vpW - MARGIN * 2);
-	// Anchor the popover's left edge to the trigger's left edge, clamped to viewport.
-	const left = Math.max(MARGIN, Math.min(anchor.left, vpW - width - MARGIN));
-	const verticalStyle = useAbove
-		? `bottom: ${(typeof window !== "undefined" ? window.innerHeight : 800) - anchor.top + 4}px`
-		: `top: ${anchor.bottom + 4}px`;
-
+function renderPopover(): TemplateResult | typeof nothing {
+	if (!state.filtersPopoverOpen) return nothing;
+	const margin = 8;
+	const viewportWidth = typeof window === "undefined" ? 1024 : window.innerWidth;
+	const width = Math.min(236, viewportWidth - margin * 2);
+	const anchor = filtersAnchorRect ?? { top: 40, right: 260, bottom: 56, left: 0 };
+	const left = Math.max(margin, Math.min(anchor.right - width, viewportWidth - width - margin));
+	const filters = activeFilters();
+	const title = state.sidebarSessionView === "project" ? "By Project filters" : "By Status filters";
 	return html`
 		<div
-			class="fixed z-50 rounded-md shadow-lg py-1"
-			style="background: var(--popover); border: 1px solid var(--border); width: ${width}px; left: ${left}px; ${verticalStyle};"
+			class="sidebar-filters-popover"
+			style="width:${width}px;left:${left}px;top:${anchor.bottom + 4}px;"
 			role="dialog"
-			aria-label="Sidebar filters"
+			aria-label=${title}
 			data-testid="sidebar-filters-popover"
-			@click=${(e: Event) => e.stopPropagation()}
+			@click=${(event: Event) => event.stopPropagation()}
 		>
-			<div class="px-3 pt-2 pb-1 text-muted-foreground uppercase tracking-wider font-medium" style="font-size: 0.75em;">
-				Sidebar filters
-			</div>
-			${_renderToggleRow({
+			<div class="sidebar-filter-title">${title}</div>
+			${renderToggleRow({
 				id: "archived",
 				icon: Archive,
-				label: "Show Archived",
+				label: "Show archived",
 				shortcut: shortcutHint("ui.toggle-show-archived", { prefix: "", suffix: "" }) || "Alt+Shift+A",
-				checked: state.showArchived,
+				checked: filters.showArchived,
 				onToggle: toggleShowArchived,
 			})}
-			${_renderToggleRow({
+			${renderToggleRow({
 				id: "busy",
 				icon: Zap,
-				label: "Show Busy",
+				label: "Show busy",
 				shortcut: shortcutHint("ui.toggle-show-busy", { prefix: "", suffix: "" }) || "Alt+Shift+B",
-				checked: state.showBusy,
+				checked: filters.showBusy,
 				onToggle: toggleShowBusy,
 			})}
-			${_renderToggleRow({
+			${renderToggleRow({
 				id: "read",
 				icon: Eye,
-				label: "Show Read",
+				label: "Show read",
 				shortcut: shortcutHint("ui.toggle-show-read", { prefix: "", suffix: "" }) || "Alt+Shift+R",
-				checked: state.showRead,
+				checked: filters.showRead,
 				onToggle: toggleShowRead,
 			})}
+			${state.sidebarSessionView === "status" ? renderToggleRow({
+				id: "teams",
+				icon: Users,
+				label: "Show teams",
+				checked: filters.showTeams === true,
+				onToggle: toggleShowTeams,
+			}) : nothing}
 		</div>
 	`;
 }
 
-/**
- * Render the Filters trigger button + its popover. Variant controls the
- * tailwind class string so it visually matches the previous "See Archived"
- * button in each surface.
- */
+/** Render the compact Filters trigger used beside the view selector. */
 export function renderFiltersButton(variant: "desktop" | "mobile"): TemplateResult {
-	const active = _anyFilterActive();
-	const baseClasses = variant === "mobile"
-		? "flex items-center gap-1.5 px-2 py-2.5 text-xs rounded transition-colors"
-		: "flex items-center gap-1.5 px-2 py-2 rounded transition-colors";
-	const stateClasses = active
-		? "text-primary bg-primary/10 font-medium"
-		: variant === "mobile"
-			? "text-muted-foreground active:bg-secondary/50"
-			: "text-muted-foreground hover:text-foreground hover:bg-secondary/50";
-	const title = active
-		? "Sidebar filters (active)"
-		: "Sidebar filters";
+	const active = isSidebarViewFilterActive(activeFilters(), state.sidebarSessionView);
 	return html`
 		<button
-			class="${baseClasses} ${stateClasses}"
-			@click=${_openFiltersPopover}
-			title="${title}"
+			type="button"
+			class="sidebar-mode-filter ${variant === "mobile" ? "sidebar-mode-filter--mobile" : ""}"
+			data-active=${active || state.filtersPopoverOpen ? "true" : "false"}
+			@click=${toggleFiltersPopover}
+			title=${active ? "Filters (active)" : "Filters"}
 			data-testid="sidebar-filters-button"
 			aria-haspopup="dialog"
 			aria-expanded=${state.filtersPopoverOpen ? "true" : "false"}
 		>
-			${icon(Filter, "sm")}
+			<span class="sidebar-view-control-icon">${icon(Filter, "xs")}</span>
 			<span>Filters</span>
 		</button>
-		${_renderPopover()}
+		${renderPopover()}
 	`;
 }

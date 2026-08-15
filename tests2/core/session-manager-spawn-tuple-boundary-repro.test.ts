@@ -161,7 +161,7 @@ function startDynamicAigw(): Promise<{ url: string; close: () => Promise<void> }
 								name: "Discovered gateway reasoner",
 								reasoning: true,
 								tool_call: true,
-								variants: { off: {}, low: {}, high: {}, xhigh: {}, max: {} },
+								variants: { none: {}, low: {}, high: {}, xhigh: {}, max: {} },
 								limit: { context: 64_000, output: 8_192 },
 								modalities: { input: ["text"] },
 							},
@@ -358,11 +358,12 @@ describe("actual SessionManager spawn tuple boundaries", () => {
 			assert.ok(row, "well-known discovery must expose the arbitrary AIGW row");
 			assert.equal(row.reasoning, true);
 			assert.deepEqual(row.thinkingLevelMap, {
-				off: "none",
+				none: "none",
 				low: "low",
 				high: "high",
 				xhigh: "xhigh",
 				max: "max",
+				off: "none",
 			});
 
 			const store = new RecordingStore();
@@ -570,7 +571,7 @@ describe("actual SessionManager spawn tuple boundaries", () => {
 		);
 	});
 
-	it("pins extension-only team spawns while preserving the generic raw-argument exemption", async () => {
+	it("pins extension-only team spawns and removes the generic raw-argument exemption", async () => {
 		const prefs = makePreferences("team-extension-model");
 		invalidateModelCache();
 		const expectedModel = expectedDefaultModel(await getAvailableModels(prefs));
@@ -610,10 +611,83 @@ describe("actual SessionManager spawn tuple boundaries", () => {
 			},
 			{
 				teamInitialModel: expectedModel,
-				rawInitialModel: undefined,
+				rawInitialModel: expectedModel,
 			},
-			"TEAM_EXTENSION_ARGS_EXPLICIT_PIN: Bobbit-owned extension-only team spawns must bind the current catalog default before Pi starts, without removing the existing generic raw-argument exemption",
+			"FINAL_ARGV_CATALOG_PIN: all spawns must bind the current catalog before Pi starts; unrelated raw arguments cannot exempt a process from final tuple validation",
 		);
+	});
+
+	it("canonicalizes raw model/provider/thinking overrides against the exact final catalog row", async () => {
+		const prefs = makePreferences("raw-final-tuple");
+		invalidateModelCache();
+		const models = await getAvailableModels(prefs);
+		const target = models.find((model) => model.provider === "anthropic"
+			&& model.sessionSelectable !== false
+			&& `${model.provider}/${model.id}` !== SELECTABLE_DEFAULT);
+		assert.ok(target, "fixture requires a second selectable Anthropic row");
+		const store = new RecordingStore();
+		const optionsSeen: Record<string, any>[] = [];
+		registerRpcBridgeFactory((options: Record<string, any>) => {
+			optionsSeen.push({ ...options, args: [...(options.args ?? [])] });
+			return makeBridge(options, "raw-final-tuple");
+		});
+		const manager: any = new SessionManager({ preferencesStore: prefs, stateDir });
+		manager._testStore = store;
+		managers.push(manager);
+
+		const targetModel = `${target.provider}/${target.id}`;
+		const expectedThinking = clampThinkingLevelForModel("xhigh", target.provider, target.id);
+		await manager.createSession(tmpRoot, [
+			"--provider", target.provider,
+			"--model", target.id,
+			"--thinking", "xhigh",
+			"--extension", "/fixture/final.ts",
+		], undefined, undefined, {
+			sessionId: "raw-final-tuple",
+			initialModel: SELECTABLE_DEFAULT,
+			initialThinkingLevel: "low",
+		});
+
+		assert.deepEqual({
+			requestedModel: optionsSeen[0]?.requestedModel,
+			effectiveModel: optionsSeen[0]?.initialModel,
+			requestedThinking: optionsSeen[0]?.requestedThinkingLevel,
+			effectiveThinking: optionsSeen[0]?.initialThinkingLevel,
+			hasFixtureExtension: optionsSeen[0]?.args?.includes("/fixture/final.ts"),
+			hasRawSelectionFlag: optionsSeen[0]?.args?.some((arg: string) =>
+				arg === "--provider" || arg === "--model" || arg === "--thinking"),
+		}, {
+			requestedModel: SELECTABLE_DEFAULT,
+			effectiveModel: targetModel,
+			requestedThinking: "low",
+			effectiveThinking: expectedThinking,
+			hasFixtureExtension: true,
+			hasRawSelectionFlag: false,
+		});
+	});
+
+	it("rejects a fabricated raw final tuple before bridge construction or persistence", async () => {
+		const prefs = makePreferences("raw-final-tuple-reject");
+		invalidateModelCache();
+		const store = new RecordingStore();
+		const tracker = trackConstructedBridges();
+		const manager: any = new SessionManager({ preferencesStore: prefs, stateDir });
+		manager._testStore = store;
+		managers.push(manager);
+
+		await assert.rejects(
+			manager.createSession(tmpRoot, [
+				"--provider", "retired-custom",
+				"--model", "fabricated-model",
+			], undefined, undefined, {
+				sessionId: "raw-final-tuple-reject",
+				initialModel: SELECTABLE_DEFAULT,
+			}),
+			/not currently available for session selection/i,
+		);
+		assert.equal(tracker.options.length, 0);
+		assert.equal(tracker.getStartCount(), 0);
+		assert.equal(store.get("raw-final-tuple-reject"), undefined);
 	});
 
 	it("pins the current catalog default when cold-restoring a legacy row with no durable tuple", async () => {

@@ -52,10 +52,10 @@ Header control rules:
 
 ## Launchers and open/focus semantics
 
-### Session menu: `Open Terminal`
+### Session menu: `Open terminal`
 
 - Render as a normal session-menu entry in the existing session actions overflow, near other session-level actions.
-- Label: `Open Terminal`.
+- Label: `Open terminal`.
 - On click:
   1. Open or focus the terminal side-panel tab for the selected session.
   2. Resolve/open the session-persistent terminal channel for that session. The bridge asks the server for a one-shot open grant, and the server mints it only after validating the surface token and the pack's declared `terminal` channel.

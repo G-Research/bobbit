@@ -34,7 +34,7 @@ import {
 import { fetchProjects, gatewayFetch, refreshSessions, resetPrPollThrottle } from "./api.js";
 import { getRouteFromHash, setHashRoute } from "./routing.js";
 import { revealSidebarTargetForRoute } from "./sidebar-reveal.js";
-import { authenticateGateway, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft, flushPendingDraft } from "./session-manager.js";
+import { authenticateGateway, backToSessions, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft, flushPendingDraft } from "./session-manager.js";
 import { selectProposalWorkspaceTab } from "./preview-panel.js";
 import { migrateLegacyVisitedMap } from "./render-helpers.js";
 import { installPwaLifecycleRecovery, markAppBooted } from "./pwa-lifecycle.js";
@@ -364,11 +364,10 @@ async function handleHashChange(): Promise<void> {
 				revealSidebarTargetForRoute(route);
 				return;
 			}
-			if (state.remoteAgent) {
-				state.remoteAgent.disconnect();
-				state.remoteAgent = null;
-				state.connectionStatus = "disconnected";
-			}
+			// Keep the outgoing session connection owned until connectToSession runs.
+			// Its synchronous select phase transfers the exact panel/agent pair into
+			// the session cache; disconnecting here would drop live background events
+			// emitted after the route switch but before the user returns.
 			state.goalDashboardId = null;
 			const checkRes = await gatewayFetch(`/api/sessions/${route.sessionId}`);
 			if (checkRes.ok) {
@@ -376,10 +375,11 @@ async function handleHashChange(): Promise<void> {
 				await restoreSessionPanelRoute(route.sessionId, route.panelTabId);
 				revealSidebarTargetForRoute(route);
 			} else {
-				setHashRoute("landing");
-				state.appView = "authenticated";
-				renderApp();
-				await refreshSessions();
+				// The outgoing agent stayed active until the target lookup resolved so a
+				// valid switch could transfer it into the background cache. A missing
+				// target has no connectToSession select phase, so release that foreground
+				// ownership explicitly before showing the landing page.
+				backToSessions();
 			}
 		} else if (route.view === "goal-dashboard" && route.goalId) {
 			// Preserve prior UI state so a missing goal can keep the current view.
@@ -1001,7 +1001,7 @@ async function initApp() {
 	});
 
 	registerShortcut({
-		id: "ui.toggle-show-archived", label: "Toggle Show Archived", category: "UI",
+		id: "ui.toggle-show-archived", label: "Toggle show archived", category: "UI",
 		defaultBindings: [{ key: "a", ctrlOrMeta: false, shift: true, alt: true }],
 		allowInInput: true,
 		handler: () => {
@@ -1010,7 +1010,7 @@ async function initApp() {
 	});
 
 	registerShortcut({
-		id: "ui.toggle-show-busy", label: "Toggle Show Busy", category: "UI",
+		id: "ui.toggle-show-busy", label: "Toggle show busy", category: "UI",
 		defaultBindings: [{ key: "b", ctrlOrMeta: false, shift: true, alt: true }],
 		allowInInput: true,
 		handler: () => {
@@ -1019,7 +1019,7 @@ async function initApp() {
 	});
 
 	registerShortcut({
-		id: "ui.toggle-show-read", label: "Toggle Show Read", category: "UI",
+		id: "ui.toggle-show-read", label: "Toggle show read", category: "UI",
 		defaultBindings: [{ key: "r", ctrlOrMeta: false, shift: true, alt: true }],
 		allowInInput: true,
 		handler: () => {
@@ -1105,9 +1105,36 @@ async function initApp() {
 
 initApp();
 
-// Register the worker below the runtime mount so it cannot claim sibling apps.
+// Production registers the offline worker below the runtime mount. In dev,
+// unregister it instead: a worker controlling Vite intercepts and cache-writes
+// every source-module request, turning each full reload into a long grey boot.
 if ('serviceWorker' in navigator) {
-	navigator.serviceWorker.register(appUrl('/sw.js'), { scope: `${runtimeBasePath()}/` }).catch(() => {});
+	const scopePath = `${runtimeBasePath()}/`;
+	if ((globalThis as any).__BOBBIT_DEV__) {
+		const scopeUrl = new URL(scopePath, window.location.origin).href;
+		void navigator.serviceWorker.getRegistrations()
+			.then((registrations) => Promise.all(
+				registrations
+					.filter((registration) => registration.scope === scopeUrl)
+					.map((registration) => registration.unregister()),
+			))
+			.catch(() => {});
+
+		// Remove only this Bobbit mount's superseded worker caches. The current
+		// controller releases the page on the next navigation after unregister.
+		if ('caches' in window) {
+			const cachePrefix = `bobbit:${encodeURIComponent(runtimeBasePath() || "/")}:`;
+			void caches.keys()
+				.then((keys) => Promise.all(
+					keys
+						.filter((key) => key.startsWith(cachePrefix) || (!runtimeBasePath() && key.startsWith("bobbit-")))
+						.map((key) => caches.delete(key)),
+				))
+				.catch(() => {});
+		}
+	} else {
+		navigator.serviceWorker.register(appUrl('/sw.js'), { scope: scopePath }).catch(() => {});
+	}
 }
 
 // iOS PWA grey-screen recovery (frozen/killed standalone snapshot on relaunch).

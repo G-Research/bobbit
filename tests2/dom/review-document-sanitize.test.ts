@@ -14,6 +14,50 @@ import {
 afterEach(() => { document.body.innerHTML = ""; });
 
 describe("review document markdown sanitization", () => {
+	it.each([
+		{
+			form: "inline",
+			markdown: "Compare `left < right` inline.",
+		},
+		{
+			form: "delimiter-aware fenced",
+			markdown: "````text\n```\nleft < right\n````",
+			expectedDelimiter: "```",
+		},
+		{
+			form: "indented",
+			markdown: "Indented code:\n\n    left < right",
+		},
+		{
+			form: "nested-list",
+			markdown: "- List item\n\n      left < right",
+		},
+		{
+			form: "blockquote",
+			markdown: ">     left < right",
+		},
+	])("REVIEW_CODE_LITERAL_LT renders a literal angle bracket in $form code", ({ markdown, expectedDelimiter }) => {
+		const html = renderReviewMarkdownToHtml(markdown);
+		const container = document.createElement("div");
+		container.innerHTML = html;
+		const code = container.querySelector("code");
+
+		expect(code).not.toBeNull();
+		expect(code?.textContent).toContain("left < right");
+		if (expectedDelimiter) expect(code?.textContent).toContain(expectedDelimiter);
+		expect(html).not.toContain("&amp;lt;");
+	});
+
+	it("escapes an otherwise allowed raw HTML tag instead of rendering it", () => {
+		const html = renderReviewMarkdownToHtml("Before <strong>unsafe emphasis</strong> after");
+		const container = document.createElement("div");
+		container.innerHTML = html;
+
+		expect(container.querySelector("strong")).toBeNull();
+		expect(container.textContent).toContain("<strong>unsafe emphasis</strong>");
+		expect(html).toContain("&lt;strong&gt;unsafe emphasis&lt;/strong&gt;");
+	});
+
 	it("escapes raw HTML gadgets before markdown reaches innerHTML", () => {
 		const markdown = `# Safe heading
 

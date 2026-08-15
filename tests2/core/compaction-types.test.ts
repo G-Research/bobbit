@@ -10,10 +10,12 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import type {
-	AgentHarnessEvent,
+	BranchBounds,
 	BranchSummaryEntry as HarnessBranchSummaryEntry,
 	CompactionEntry as HarnessCompactionEntry,
-	SessionEntryCursorOptions,
+	EntryCursor,
+	EntryQuery,
+	HarnessSpanStartAttributes,
 	SessionStorage,
 } from "@earendil-works/pi-agent-core";
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
@@ -22,6 +24,7 @@ import {
 	COMPACTION_ACTIVE_TOOLCALL_ID,
 	buildCompactionSummaryMessages,
 	buildInProgressCompactionPayload,
+	isContextOverflowError,
 	parseOverflowTokenCount,
 } from "../../src/app/compaction-types.ts";
 import { readOrphanedBeforeCompaction } from "../../src/server/agent/transcript-reader.ts";
@@ -38,6 +41,13 @@ const RICH_USAGE = {
 };
 
 describe("compaction-types", () => {
+	it("recognizes provider-specific context overflow errors without matching unrelated failures", () => {
+		assert.strictEqual(isContextOverflowError("prompt is too long: 202592 tokens > 200000 maximum"), true);
+		assert.strictEqual(isContextOverflowError("Codex error: Your input exceeds the context window of this model. Please adjust your input and try again."), true);
+		assert.strictEqual(isContextOverflowError("rate limited while opening a context window"), false);
+		assert.strictEqual(isContextOverflowError(undefined), false);
+	});
+
 	it("parseOverflowTokenCount: canonical Anthropic 400 string", () => {
 		assert.strictEqual(
 			parseOverflowTokenCount("prompt is too long: 202592 tokens > 200000 maximum"),
@@ -101,13 +111,14 @@ describe("compaction-types", () => {
 	});
 });
 
-describe("Pi 0.81 compaction contracts", () => {
-	it("accepts retained-tail checkpoints, summary usage, and the expanded SessionStorage API", async () => {
+describe("Pi 0.84 compaction contracts", () => {
+	it("accepts retained-tail checkpoints, summary usage, and the current SessionStorage query API", async () => {
 		const compaction: HarnessCompactionEntry = {
 			type: "compaction",
 			id: "compact",
+			seq: 5,
 			parentId: "before",
-			timestamp: "2026-07-21T00:00:00.000Z",
+			timestamp: Date.parse("2026-07-21T00:00:00.000Z"),
 			summary: "summary",
 			tokensBefore: 100,
 			retainedTail: [{ role: "user", content: "kept", timestamp: 1 }],
@@ -117,50 +128,53 @@ describe("Pi 0.81 compaction contracts", () => {
 		const branchSummary: HarnessBranchSummaryEntry = {
 			type: "branch_summary",
 			id: "branch",
+			seq: 6,
 			parentId: "compact",
-			timestamp: "2026-07-21T00:00:01.000Z",
+			timestamp: Date.parse("2026-07-21T00:00:01.000Z"),
 			fromId: "abandoned",
 			summary: "branch summary",
 			usage: RICH_USAGE,
 		};
-		const cursor = { afterEntrySeq: 4, limit: 2 } satisfies SessionEntryCursorOptions;
+		const cursor = { afterSeq: 4 } satisfies EntryCursor;
+		const entryQuery = { cursor, limit: 2, order: "oldestFirst" } satisfies EntryQuery;
+		const branchQuery = {
+			start: "branch",
+			stopAtType: "compaction",
+			order: "oldestFirst",
+		} satisfies EntryQuery & BranchBounds & { start: string };
 		const storage = {
-			getSessionName: async () => "fixture",
-			getSessionStats: async () => ({
+			getName: async () => "fixture",
+			getStats: async () => ({
 				messageCount: 1,
 				cachedTokens: 3,
 				uncachedTokens: 13,
 				totalTokens: 23,
 				costTotal: 0.33,
 			}),
-			getPathToRootOrCompaction: async (_leafId: string | null) => [compaction, branchSummary],
-			getEntries: async (_options?: SessionEntryCursorOptions) => [compaction, branchSummary],
-		} satisfies Pick<SessionStorage,
-			"getSessionName" | "getSessionStats" | "getPathToRootOrCompaction" | "getEntries">;
+			findEntriesOnBranch: async (_query: EntryQuery & BranchBounds & { start: string }) => [
+				compaction,
+				branchSummary,
+			],
+			findEntries: async (_query?: EntryQuery) => [compaction, branchSummary],
+		} satisfies Pick<SessionStorage, "getName" | "getStats" | "findEntriesOnBranch" | "findEntries">;
 
-		assert.equal(compaction.firstKeptEntryId, undefined, "retainedTail makes the legacy boundary optional");
-		assert.equal(compaction.retainedTail?.[0].role, "user");
+		assert.equal("firstKeptEntryId" in compaction, false, "retainedTail replaces the legacy boundary");
+		assert.equal(compaction.retainedTail[0].role, "user");
 		assert.equal(branchSummary.usage?.reasoning, 4);
-		assert.deepEqual(cursor, { afterEntrySeq: 4, limit: 2 });
-		assert.equal(await storage.getSessionName(), "fixture");
-		assert.equal((await storage.getSessionStats()).totalTokens, 23);
-		assert.deepEqual(await storage.getPathToRootOrCompaction("branch"), [compaction, branchSummary]);
-		assert.deepEqual(await storage.getEntries(cursor), [compaction, branchSummary]);
+		assert.deepEqual(entryQuery, { cursor: { afterSeq: 4 }, limit: 2, order: "oldestFirst" });
+		assert.equal(await storage.getName(), "fixture");
+		assert.equal((await storage.getStats()).totalTokens, 23);
+		assert.deepEqual(await storage.findEntriesOnBranch(branchQuery), [compaction, branchSummary]);
+		assert.deepEqual(await storage.findEntries(entryQuery), [compaction, branchSummary]);
 	});
 
 	it("accepts compaction and branch-summary retry lifecycle events without dropping terminal usage", () => {
-		const harnessRetryEvents = [
-			{
-				type: "retry_scheduled",
-				operation: "compaction",
-				attempt: 1,
-				maxAttempts: 3,
-				delayMs: 50,
-				errorMessage: "transient",
-			},
-			{ type: "retry_attempt_start", operation: "branch_summary" },
-			{ type: "retry_finished", operation: "compaction" },
-		] satisfies AgentHarnessEvent[];
+		type HarnessEventType = HarnessSpanStartAttributes<"pi.harness.event_handler">["pi.event.type"];
+		const harnessRetryEventTypes = [
+			"retry_scheduled",
+			"retry_start",
+			"retry_end",
+		] satisfies HarnessEventType[];
 		const codingAgentEvents = [
 			{
 				type: "summarization_retry_scheduled",
@@ -187,9 +201,7 @@ describe("Pi 0.81 compaction contracts", () => {
 			},
 		] satisfies AgentSessionEvent[];
 
-		assert.deepEqual(harnessRetryEvents.map((event) => event.type), [
-			"retry_scheduled", "retry_attempt_start", "retry_finished",
-		]);
+		assert.deepEqual(harnessRetryEventTypes, ["retry_scheduled", "retry_start", "retry_end"]);
 		const terminal = codingAgentEvents[codingAgentEvents.length - 1];
 		assert.equal(terminal.type, "compaction_end");
 		if (terminal.type !== "compaction_end") assert.fail("expected compaction_end");

@@ -30,6 +30,7 @@ import {
 	createTranscriptRootPolicy,
 	sanitizeTranscriptContent,
 	sanitizeAgentTranscriptFile,
+	restoreAgentTranscriptSnapshot,
 	rebaseTranscriptCwdMetadataContent,
 	isWithinAgentSessionsDir,
 	resolveReadablePersistedAgentSessionFile,
@@ -529,6 +530,23 @@ describe("transcript write path validation", () => {
 		message: { role: "user", content: [{ type: "text", text: "" }, { type: "image", source: { data: "AAAA" } }] },
 	});
 
+	function rollbackTempsFor(file: string): string[] {
+		const prefix = `.${path.basename(file)}.bobbit-rollback-`;
+		return fs.readdirSync(path.dirname(file)).filter((entry) => entry.startsWith(prefix));
+	}
+
+	function makeRollbackTarget(name: string, content: string): string {
+		const dir = path.join(sessionsRoot, "--rollback--");
+		fs.mkdirSync(dir, { recursive: true });
+		const file = path.join(dir, name);
+		fs.writeFileSync(file, content, "utf-8");
+		return file;
+	}
+
+	function readFixture(file: string): string {
+		return fs.readFileSync(file, "utf-8");
+	}
+
 	it("isWithinAgentSessionsDir accepts a path inside the sessions root", () => {
 		const active = path.join(sessionsRoot, "--slug--", "2026_x.jsonl");
 		const historical = path.join(historicalSessionsRoot, "--slug--", "2025_x.jsonl");
@@ -551,7 +569,83 @@ describe("transcript write path validation", () => {
 
 		const rewritten = await sanitizeAgentTranscriptFile({ sandboxed: false }, file, null, rootPolicy);
 		assert.equal(rewritten, 1);
-		assert.equal(JSON.parse(fs.readFileSync(file, "utf-8")).message.content[0].text, "Attachments:");
+		assert.equal(JSON.parse(readFixture(file)).message.content[0].text, "Attachments:");
+	});
+
+	it("atomically restores an exact transcript snapshot without leaking staging files", () => {
+		const original = "provisional sanitizer bytes\n";
+		const snapshot = "original historical bytes\nwith a second record\n";
+		const file = makeRollbackTarget("restore-success.jsonl", original);
+
+		assert.equal(restoreAgentTranscriptSnapshot({ sandboxed: false }, file, snapshot, rootPolicy), true);
+		assert.equal(readFixture(file), snapshot);
+		assert.deepEqual(rollbackTempsFor(file), []);
+	});
+
+	it("keeps the original transcript byte-identical and cleans staging after a partial write failure", () => {
+		const original = "current transcript bytes must survive\n";
+		const snapshot = "rollback snapshot bytes that must never publish partially\n";
+		const file = makeRollbackTarget("restore-write-failure.jsonl", original);
+		const realWriteSync = fs.writeSync.bind(fs);
+		let stagingWrites = 0;
+		const writeFailure = Object.assign(new Error("injected staging device failure"), { code: "EIO" });
+		const writeSpy = vi.spyOn(fs, "writeSync").mockImplementation(((fd: number, buffer: Uint8Array, offset: number, length: number, position: number | null) => {
+			stagingWrites += 1;
+			if (stagingWrites === 1) return realWriteSync(fd, buffer, offset, Math.min(7, length), position);
+			throw writeFailure;
+		}) as typeof fs.writeSync);
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			assert.equal(restoreAgentTranscriptSnapshot({ sandboxed: false }, file, snapshot, rootPolicy), false);
+		} finally {
+			writeSpy.mockRestore();
+			warning.mockRestore();
+		}
+
+		assert.equal(stagingWrites, 2, "fixture must fail after a real partial staging write");
+		assert.equal(readFixture(file), original);
+		assert.deepEqual(rollbackTempsFor(file), []);
+	});
+
+	it("keeps the original transcript byte-identical and cleans staging when atomic replacement fails", () => {
+		const original = "destination remains authoritative\n";
+		const snapshot = "fully staged but unpublished rollback bytes\n";
+		const file = makeRollbackTarget("restore-rename-failure.jsonl", original);
+		const realRenameSync = fs.renameSync.bind(fs);
+		let replacementAttempts = 0;
+		const renameFailure = Object.assign(new Error("injected replacement denial"), { code: "EACCES" });
+		const renameSpy = vi.spyOn(fs, "renameSync").mockImplementation(((from: fs.PathLike, to: fs.PathLike) => {
+			if (path.resolve(String(to)) === path.resolve(file)) {
+				replacementAttempts += 1;
+				throw renameFailure;
+			}
+			return realRenameSync(from, to);
+		}) as typeof fs.renameSync);
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			assert.equal(restoreAgentTranscriptSnapshot({ sandboxed: false }, file, snapshot, rootPolicy), false);
+		} finally {
+			renameSpy.mockRestore();
+			warning.mockRestore();
+		}
+
+		assert.equal(replacementAttempts, 1, "fixture must reach the atomic publish boundary");
+		assert.equal(readFixture(file), original);
+		assert.deepEqual(rollbackTempsFor(file), []);
+	});
+
+	it("snapshot restoration rejects a final symlink without touching its target or staging a file", async () => {
+		const target = path.join(agentDir, "rollback-symlink-target.jsonl");
+		const targetBytes = "outside target bytes\n";
+		fs.writeFileSync(target, targetBytes, "utf-8");
+		const link = path.join(sessionsRoot, "rollback-symlink.jsonl");
+		const assertRejected = async () => {
+			assert.equal(restoreAgentTranscriptSnapshot({ sandboxed: false }, link, "replacement\n", rootPolicy), false);
+			assert.equal(readFixture(target), targetBytes);
+			assert.deepEqual(rollbackTempsFor(link), []);
+		};
+		if (trySymlink(target, link)) await assertRejected();
+		else await withSymbolicLinkAt(link, assertRejected);
 	});
 
 	it("sanitizeAgentTranscriptFile refuses to clobber a file OUTSIDE the sessions root", async () => {

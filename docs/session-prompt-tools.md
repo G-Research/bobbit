@@ -16,7 +16,13 @@ For startup, restart, and broken override fallback behavior, see [Tool override 
 | `prompt` | Enqueues a normal prompt behind current work. | Starts a normal turn immediately when possible, otherwise queues normally. | New work or follow-up tasks that should run as a fresh turn. |
 | `steer` | Uses the live-steer path (`SessionManager.deliverLiveSteer`). | Queues a steered prompt with `isSteered: true`. | Current-turn corrections, urgent nudges, or preserving steered recovery semantics. |
 
-Steered delivery is not a silent downgrade to a normal prompt. If the target is not currently streaming, the queued row remains steered, so it keeps steered priority and the existing abort/restart recovery behavior described in [Prompt Queue & Message Dispatch](prompt-queue.md).
+Steered delivery is not a silent downgrade to a normal prompt, but these tool routes currently omit browser-style `intentId` metadata and therefore use the legacy queue/dispatch compatibility path. An idle target retains legacy steered priority; a streaming target routes through live steer dispatch. The stable occurrence/outbox guarantees in [Reliable prompt and steer delivery](prompt-queue.md) apply only when the admission boundary supplies an occurrence ID.
+
+## Unavailable-model admission fence
+
+A target with `condition.code === "MODEL_SELECTION_REQUIRED"` is readable but processless. The shared delivery boundary returns HTTP `409` with code `MODEL_SELECTION_REQUIRED` before ordinary terminated/error handling or prompt/steer acceptance. It creates no queue or transcript work and performs no prompt-related persistence write or RPC dispatch. The caller must first activate an exact selectable replacement through the session picker/`set_model` path; attachment or another tool call does not revive the target. See [Restored session requires a model](debugging.md#restored-session-requires-a-model).
+
+This is a conditioned-session exception only. Authorization, `GOAL_PAUSED`, non-interactive, ordinary terminated-session, and poisoned-history behavior below remain unchanged.
 
 ## Errored-idle recovery
 
@@ -38,7 +44,7 @@ The behavior is shared by goal-team `team_prompt`, direct child goal lead prompt
 
 ## `session_prompt`
 
-`session_prompt` sends a message to any live Bobbit agent session by session id.
+`session_prompt` sends a message to a Bobbit agent session by id. Ordinary delivery requires a live target; a processless `MODEL_SELECTION_REQUIRED` target is found only to return the actionable recovery error above.
 
 The chat transcript uses a dedicated `session_prompt` tool renderer instead of showing the raw JSON response. The card summarizes the action and target in its header, then shows:
 
@@ -47,13 +53,13 @@ The chat transcript uses a dedicated `session_prompt` tool renderer instead of s
 - the delivery mode (`prompt` by default, or `steer`);
 - the prompt/steer message body, preserving line breaks while relying on Lit template escaping for safety.
 
-Prompt cards use the chat/message icon and a `Prompted` header. Steer cards use a lightning-style icon and a `Steered` header. Completed cards include the delivery outcome: `queued`, `dispatched`, or `live steer dispatched`. Failed and aborted cards follow the normal tool-renderer error conventions and surface the server error text.
+Prompt cards use the chat/message icon and a `Prompted` header. Steer cards use a lightning-style icon and a `Steered` header. Completed cards include the routing outcome: `queued`, `dispatched`, or `live steer dispatched`. These legacy tool-route values confirm gateway routing, not durable occurrence admission, wait interruption, or transcript delivery. Failed and aborted cards follow the normal tool-renderer error conventions and surface the server error text.
 
 Parameters:
 
 | Name | Type | Required | Default | Notes |
 |---|---|---|---|---|
-| `session_id` | string | Yes | — | Target session id. Archived and ordinary terminated targets are rejected; only a terminated poisoned-history rollback capsule may be recovered in place. |
+| `session_id` | string | Yes | — | Target session id. A `MODEL_SELECTION_REQUIRED` target returns the recovery fence above. Archived and ordinary terminated targets are rejected; only a terminated poisoned-history rollback capsule may be recovered in place. |
 | `message` | string | Yes | — | User message delivered to the target. |
 | `mode` | `"prompt" \| "steer"` | No | `"prompt"` | Selects normal prompt delivery or steer delivery. |
 
@@ -68,7 +74,7 @@ Server-side authorization is caller-based:
 3. The caller's resolved allowed-tool list must include `session_prompt`.
 4. Only then does the server deliver to the target session id.
 
-Target authorization is deliberately broad after the caller is authorized: any live target id is valid. Missing, archived, or terminated targets are rejected before delivery.
+Target authorization is deliberately broad after the caller is authorized: any live target id is valid. Missing, archived, or ordinary terminated targets are rejected before delivery; a conditioned recovery capsule returns `MODEL_SELECTION_REQUIRED` before the ordinary terminated check.
 
 ### Result metadata
 
@@ -147,7 +153,7 @@ Use `mode: "prompt"` when the agent should treat the message as a fresh next-tur
 
 ## REST surfaces
 
-- `POST /api/sessions/:id/prompt` backs `session_prompt`. Body: `{ message, mode? }`; `:id` is the target session. The caller is authenticated by session secret and must have the `session_prompt` tool allowed. Returns `409 { code: "GOAL_PAUSED" }` when the target session's goal is paused; sessions with no associated goal are unaffected.
+- `POST /api/sessions/:id/prompt` backs `session_prompt`. Body: `{ message, mode? }`; `:id` is the target session. The caller is authenticated by session secret and must have the `session_prompt` tool allowed. A conditioned target returns `409 { code: "MODEL_SELECTION_REQUIRED" }` before acceptance or mutation. The existing `409 { code: "GOAL_PAUSED" }` behavior remains unchanged; sessions with no associated goal are unaffected.
 - `POST /api/goals/:id/team/prompt` backs goal-team `team_prompt`. Body: `{ sessionId, message, mode?, workflowGateId?, inputGateIds? }`; `:id` is the caller's goal. Returns `409 { code: "GOAL_PAUSED" }` when the goal is paused — this check fires before team membership verification.
 - `POST /api/sessions/:id/orchestrate/prompt` backs own-child `team_prompt`. Body includes the child session id and message; `:id` is the owner session.
 
@@ -157,9 +163,9 @@ See [REST API](rest-api.md) for the route table and [Orchestration](orchestratio
 
 Focused coverage lives in:
 
-- `tests/session-prompt-delivery.test.ts` — shared helper mode selection, streaming vs idle behavior, missing/terminated targets, result `target.sessionId`/optional `target.title` metadata, and non-interactive rules.
-- `tests2/integration/team-steer-prompt.test.ts` — goal-team `team_prompt` recovery for retryable `fetch failed`, blocked/action-required behavior for provider-auth failures, exactly-once queued-intent preservation, and workflow context injection.
-- `tests/session-prompt-policy.test.ts` — real `session_prompt` YAML `grantPolicy: never` and absence from default allowed tools until explicitly re-granted.
-- `tests/session-prompt-renderer.spec.ts` with `tests/fixtures/session-prompt-renderer.html` — browser fixture coverage for default prompt mode, steer mode with distinct icon/label, multiline escaped message text, missing-title fallback to shortened id, session link rendering, and server error display.
-- `tests/e2e/session-prompt.spec.ts` — caller authorization, arbitrary live target prompting, returned target metadata, and steer-mode interruption of `bash_bg wait` through the live-steer path.
-- `tests/e2e/team-steer-prompt.spec.ts` — `team_prompt` default steer behavior, `mode: "prompt"` normal queue semantics, and workflow context injection in both modes.
+- `tests2/core/session-prompt-delivery.test.ts` — shared helper mode selection, streaming vs idle behavior, missing/terminated targets, target metadata, and non-interactive rules.
+- `tests2/integration/team-steer-prompt.test.ts` — goal-team recovery, blocked/action-required behavior, queued-intent preservation, and workflow context injection.
+- `tests2/core/session-prompt-policy.test.ts` — `session_prompt` policy and default-tool exclusion.
+- `tests2/dom/session-prompt-renderer.test.ts` — prompt/steer card rendering and server errors.
+- `tests/e2e/session-prompt.spec.ts` — legacy API/tool-route behavior. Its historical wait-interruption expectation should not be treated as proof for the current metadata-free `_dispatchLegacySteer()` path.
+- `tests2/core/model-selection-required-prompt-boundary.test.ts` and `tests2/browser/journeys/model-selection-recovery.journey.spec.ts` — conditioned delivery is rejected before acceptance, and the browser retains its text and attachment draft through model recovery.

@@ -1,9 +1,10 @@
 import { exec } from "node:child_process";
 import { isDeepStrictEqual, promisify } from "node:util";
-import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory } from "./agent/rpc-bridge.js";
+import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory, tryHostPathToContainer } from "./agent/rpc-bridge.js";
 import { resolveGatewayDeps, realCommandRunner, type Clock, type CommandRunner, type FsLike, type GatewayDeps } from "./gateway-deps.js";
 import { parseTrustedGithubRemote, RemoteStateCoordinator, type PullRequestIdentity, type RemoteStateAddress, type RemoteStateIntent, type RemoteStateTelemetryEvent, type RepositorySnapshotBinding, type TrustedGithubRemote } from "./remote-state-coordinator.js";
 import { resolveLegacyTestRuntimeFlags } from "./legacy-test-runtime-flags.js";
+import { parseStrictBody, STRICT_UPDATE_BODY_KEYS, type StrictBody, type StrictBodyOptions } from "./strict-body.js";
 export type { Clock, CommandRunner, ExecFileResult, FsLike, GatewayDeps, ResolvedGatewayDeps, TimerHandle } from "./gateway-deps.js";
 export { defaultRpcBridgeFactory, realClock, realCommandRunner, realFetch, realFs, resolveGatewayDeps } from "./gateway-deps.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -36,19 +37,21 @@ import { recordBootTiming, readBootTimings, BOOT_TIMING_FILE } from "./dev-boot-
 import { bootLog, bootMark, makePhaseTimer, SLOW_PHASE_MS } from "./boot-profile.js";
 import { touchGatewayRestartSentinel } from "./harness-signal.js";
 import { BOBBIT_APP_INFO } from "./app-info.js";
+import { API_CORS_ALLOWED_HEADERS, API_CORS_ALLOWED_METHODS, API_CORS_PREFLIGHT_MAX_AGE_SECONDS } from "./cors.js";
 import { isSetupComplete } from "./setup-status.js";
 export { isSetupComplete };
 import { WebSocketServer, type WebSocket } from "ws";
 import { ColorStore } from "./agent/color-store.js";
 import { bfsEnrichArchivedIndexed } from "./agent/archived-session-bfs.js";
 import { PrStatusStore, type PrStatusEntry } from "./agent/pr-status-store.js";
-import { SessionManager, type ExtensionChannelServices, type SessionInfo } from "./agent/session-manager.js";
+import { SessionManager, SessionPinNotFoundError, SharedSandboxWorktreeInUseError, type ExtensionChannelServices, type SessionInfo } from "./agent/session-manager.js";
 import { WorktreeInventoryService } from "./agent/worktree-inventory.js";
 import { executeCleanupWorktreesRequest } from "./maintenance/cleanup-worktrees-request.js";
 import { RateLimiter } from "./auth/rate-limit.js";
 import { readToken, validateToken } from "./auth/token.js";
 import { OAuthBusyError, getOAuthCredentialStore, oauthCancelAndWait, oauthComplete, oauthFinalize, oauthFlowStatus, oauthLogout, oauthStart, oauthStatus, shutdownOAuthFlows } from "./auth/oauth.js";
 import { handleWebSocketConnection, hasUiWebSocketPrincipal } from "./ws/handler.js";
+import { isSocketSendable } from "./ws/socket-sendability.js";
 import type { GateResetReopenOutcome, ServerMessage } from "./ws/protocol.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { DEFAULT_OVERFLOW_GUARD, describeWsPayload, guardWebSocketOverflow } from "./ws-overflow-guard.js";
@@ -106,6 +109,16 @@ import {
 	validateRetainedArtifactPath,
 } from "./gate-artifacts.js";
 import { handleSidePanelWorkspaceRoute, openSidePanelWorkspaceTab } from "./side-panel-workspace-routes.js";
+import { reviewArtifactTabId } from "../shared/review-artifact-identity.js";
+import { createReviewPayloadSessionCoordinator, handleReviewPayloadRoute, type ReviewPayloadSessionCoordinator } from "./review-payload-routes.js";
+import {
+	MAX_REVIEW_PAYLOAD_REQUEST_BYTES,
+	readReviewPayload,
+	removeReviewPayloads,
+	ReviewPayloadError,
+	sweepReviewPayloads,
+	type CanonicalReviewPayload,
+} from "./review-payload-store.js";
 import {
 	TextSelectionError,
 	selectText,
@@ -119,7 +132,11 @@ import { cpuDiagnosticsEnabled, getCpuDiagnostics, shutdownEventLoopLagMonitor, 
 import { SearchUnavailableError } from "./search/search-service.js";
 import { resolveGrantPolicy, computeEffectiveAllowedTools } from "./agent/tool-activation.js";
 import { parseMcpToolName } from "./mcp/mcp-meta.js";
-import { initSkillSidecarDir } from "./skills/skill-sidecar.js";
+import {
+	copySkillSidecarForTranscript,
+	initSkillSidecarDir,
+	purgeSkillSidecar,
+} from "./skills/skill-sidecar.js";
 import {
 	copyAuthorSidecar,
 	initAuthorSidecarDir,
@@ -129,18 +146,35 @@ import {
 import { agentAuthorForSession, BOBBIT_SYSTEM_AUTHOR } from "./agent/message-author.js";
 import { LOCAL_USER_AUTHOR } from "../shared/message-author.js";
 import {
+	copyCompactionSidecarForTranscript,
 	initCompactionSidecarDir,
 	findCompactionSidecarEntry,
+	purgeCompactionSidecar,
 } from "./agent/compaction-sidecar.js";
-import { projectOwnTranscriptJsonl, readOrphanedBeforeCompaction } from "./agent/transcript-reader.js";
+import {
+	projectOwnTranscriptJsonl,
+	readAgentTranscript,
+	readOrphanedBeforeCompaction,
+	readTranscript,
+	TranscriptReaderError,
+} from "./agent/transcript-reader.js";
 import { buildActivationHeader } from "./skills/skill-manifest.js";
 import type { PersistedTask, TaskState } from "./agent/task-store.js";
 import { TaskManager } from "./agent/task-manager.js";
 import { TaskStore } from "./agent/task-store.js";
 import { BgProcessCreateError, BgProcessManager } from "./agent/bg-process-manager.js";
 import { streamBgWaitResponse } from "./agent/bg-wait-response.js";
-import { sessionFileRead, sessionFsContextForAgentFile } from "./agent/session-fs.js";
-import { readTranscript, TranscriptReaderError } from "./agent/transcript-reader.js";
+import {
+	sessionFileDeleteContainerOnly,
+	sessionFileRead,
+	sessionFileWriteAtomic,
+	sessionFsContextForAgentFile,
+} from "./agent/session-fs.js";
+import {
+	HistoryForkValidationError,
+	materializeHistoryForkTranscript,
+	type HistoryForkMaterialization,
+} from "./agent/history-fork.js";
 
 import { isGitRepo, getRepoRoot, resolveSandboxMountRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef, detectBaseRefFromRemote, resolveBaseRef, refExistsInRepo, type RemoteGitPolicy } from "./skills/git.js";
 import {
@@ -532,6 +566,40 @@ import { isSessionSelectableModelString } from "./agent/google-code-assist.js";
 // Entries are also refilled from the transcript check, so survive process
 // restarts via the transcript fallback in findAskResponseAnswers.
 const askSubmittedToolUseIds = new Set<string>();
+// One process-wide reservation per exact history-fork request tuple.
+const historyForkReservations = new Set<string>();
+
+class HistoryForkSourceUnavailableError extends Error {
+	readonly code = "HISTORY_FORK_SOURCE_UNAVAILABLE";
+
+	constructor() {
+		super("The source session is no longer available for history forking");
+		this.name = "HistoryForkSourceUnavailableError";
+	}
+}
+
+type HistoryForkSidecarKind = "skill" | "compaction" | "author";
+type HistoryForkSidecarCopyFake = (
+	kind: HistoryForkSidecarKind,
+	fromSessionId: string,
+	toSessionId: string,
+) => boolean | undefined;
+let _historyForkSidecarCopyFake: HistoryForkSidecarCopyFake | undefined;
+/** Test seam for deterministic destination-sidecar write failures. */
+export function __setHistoryForkSidecarCopyFake(fake: HistoryForkSidecarCopyFake): void {
+	_historyForkSidecarCopyFake = fake;
+}
+export function __clearHistoryForkSidecarCopyFake(): void {
+	_historyForkSidecarCopyFake = undefined;
+}
+function copyHistoryForkSidecar(
+	kind: HistoryForkSidecarKind,
+	fromSessionId: string,
+	toSessionId: string,
+	copy: () => boolean,
+): boolean {
+	return _historyForkSidecarCopyFake?.(kind, fromSessionId, toSessionId) ?? copy();
+}
 import { inlineFileImages } from "./agent/inline-file-images.js";
 import { StaffManager } from "./agent/staff-manager.js";
 import { buildStaffSystemPrompt } from "./agent/role-prompt.js";
@@ -564,9 +632,8 @@ import { getGoogleAccessToken, ensureCodeAssistProject, hasGoogleCodeAssistCrede
 import * as previewMount from "./preview/mount.js";
 import * as previewArtifacts from "./preview/artifacts.js";
 import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/events.js";
-import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, writeContextWindowOverrides, configureAigwRuntimeFlags, normalizeAigwModelString } from "./agent/aigw-manager.js";
+import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, configureAigwRuntimeFlags, normalizeAigwModelString } from "./agent/aigw-manager.js";
 import { aigwUserAgentHeaders } from "./agent/aigw-user-agent.js";
-import { writeOpenAIModelAdditions } from "./agent/openai-model-additions.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
 import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, findSessionSelectableModel } from "./agent/model-registry.js";
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
@@ -607,11 +674,11 @@ import { resolveScalarConfig } from "./agent/config-resolver.js";
 import { BuiltinConfigProvider } from "./agent/builtin-config.js";
 import { ConfigCascade, normalizeConfigProjectId, type MarketPackProvider } from "./agent/config-cascade.js";
 import { MarketplaceSourceStore, isValidSourceId, type MarketplaceSource } from "./agent/marketplace-source-store.js";
-import { BUILTIN_PACK_SCOPE, activeBuiltinFirstPartyPackEntries, builtinFirstPartyPackEntries, isPackEffectivelyEnabled, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
+import { BUILTIN_PACK_SCOPE, activeBuiltinFirstPartyPackEntries, builtinFirstPartyPackEntries, invalidateBuiltinPackScanCache, isPackEffectivelyEnabled, resolveBuiltinPacksDir } from "./agent/builtin-packs.js";
 import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions, type BrowsePack } from "./agent/marketplace-install.js";
 import type { MarketplaceMcpResolver, McpReloadResult, McpToolRouteSnapshot, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
 import type { MarketplacePiExtensionResolver, ResolvedPiExtensionContribution, PiExtensionDiagnostic } from "./agent/session-setup.js";
-import { scopeMarketPackEntries } from "./agent/pack-list.js";
+import { scopeMarketPackEntries, invalidateMarketPackScanCache } from "./agent/pack-list.js";
 import { buildConflictsFor, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
 import { isSafeBasename } from "./agent/pack-manifest.js";
 import { gatewayMcpActivationContributionId, gatewayMcpRuntimeKey } from "./agent/mcp-gateway-runtime-identity.js";
@@ -1081,6 +1148,11 @@ let _dockerAvailCache: { available: boolean; error?: string; ts: number } | null
 const _prCache = new Map<string, { data: any; ts: number; ttl: number }>();
 const PR_NULL_CACHE_TTL_MS = 30_000; // 30 seconds for null (no-PR) results
 const _prInFlight = new Map<string, Promise<any | null>>();
+// GoalManager owns setup single-flight. This smaller route-owned guard owns
+// only the follow-on retry side effects (scheduler/team start), so duplicate
+// retry HTTP requests cannot attach a second start callback while still letting
+// a persisted retrying goal recover after a process restart.
+const _retrySetupRouteFlights = new WeakMap<object, Set<string>>();
 const PR_STATUS_FIELDS = "state,url,number,title,mergeable,headRefName,baseRefName,reviewDecision";
 const PR_HEAD_LIST_FIELDS = `${PR_STATUS_FIELDS},updatedAt,headRepository,headRepositoryOwner,isCrossRepository`;
 const PR_MERGE_PERMISSIONS_QUERY = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){viewerPermission pullRequest(number:$number){viewerCanMergeAsAdmin}}}";
@@ -1617,6 +1689,14 @@ let _gitStatusFake: ((cwd: string, containerId?: string, opts?: { untracked?: bo
 export function __setGitStatusFake(fn: typeof _gitStatusFake): void { _gitStatusFake = fn; }
 export function __clearGitStatusFake(): void { _gitStatusFake = undefined; }
 
+/** Test-only monotonic clock for the explicit remote-read burst marker. The
+ * production path always uses performance.now(); tests must install and clear
+ * the override explicitly. */
+let _remoteStateForceNowFake: (() => number) | undefined;
+export function __setRemoteStateForceNowFake(fn: () => number): void { _remoteStateForceNowFake = fn; }
+export function __clearRemoteStateForceNowFake(): void { _remoteStateForceNowFake = undefined; }
+function remoteStateForceNow(): number { return _remoteStateForceNowFake?.() ?? performance.now(); }
+
 function gitStatusCacheKey(cwd: string, containerId?: string, untracked?: boolean): string {
 	return `${containerId ?? 'host'}::${cwd}::${untracked ? 'u' : 's'}`;
 }
@@ -2044,6 +2124,83 @@ export async function shutdownCpuDiagnostics(diagnostics: Pick<CpuDiagnostics, "
 	try { await diagnostics.shutdown(); } catch { /* best-effort */ }
 }
 
+interface ShutdownWorktreePool {
+	stop(): Promise<void>;
+	drain(): Promise<void>;
+}
+
+const SHUTDOWN_WORKTREE_POOL_OPERATION_TIMEOUT_MS = 15_000;
+
+type ShutdownOperationResult =
+	| { status: "fulfilled" }
+	| { status: "rejected"; reason: unknown }
+	| { status: "timeout" };
+
+/** Settle a shutdown operation without allowing a stuck best-effort cleanup to block teardown. */
+function runShutdownOperation(
+	operation: () => Promise<void>,
+	timeoutMs: number,
+): Promise<ShutdownOperationResult> {
+	return new Promise(resolve => {
+		let settled = false;
+		const timer = setTimeout(() => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			resolve({ status: "timeout" });
+		}, timeoutMs);
+		(timer as { unref?: () => void }).unref?.();
+
+		// Both handlers remain attached after a timeout so late settlement, including
+		// rejection, is consumed rather than becoming an unhandled rejection.
+		Promise.resolve().then(operation).then(
+			() => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				resolve({ status: "fulfilled" });
+			},
+			(reason: unknown) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				resolve({ status: "rejected", reason });
+			},
+		);
+	});
+}
+
+/** Stop every current pool before draining any of them, isolating failures per pool. */
+export async function drainWorktreePoolsForShutdown(
+	pools: ReadonlyMap<string, ShutdownWorktreePool>,
+	timeoutMs = SHUTDOWN_WORKTREE_POOL_OPERATION_TIMEOUT_MS,
+): Promise<void> {
+	const snapshot = Array.from(pools.entries());
+	const stopResults = await Promise.all(
+		snapshot.map(([, pool]) => runShutdownOperation(() => pool.stop(), timeoutMs)),
+	);
+
+	for (let index = 0; index < snapshot.length; index++) {
+		const [projectId, pool] = snapshot[index]!;
+		const stopResult = stopResults[index]!;
+		if (stopResult.status === "rejected") {
+			try { console.warn(`[shutdown] worktree pool stop failed for project ${projectId}:`, stopResult.reason); } catch { /* best-effort */ }
+			continue;
+		}
+		if (stopResult.status === "timeout") {
+			try { console.warn(`[shutdown] worktree pool stop timed out for project ${projectId} after ${timeoutMs}ms`); } catch { /* best-effort */ }
+			continue;
+		}
+
+		const drainResult = await runShutdownOperation(() => pool.drain(), timeoutMs);
+		if (drainResult.status === "rejected") {
+			try { console.warn(`[shutdown] worktree pool drain failed for project ${projectId}:`, drainResult.reason); } catch { /* best-effort */ }
+		} else if (drainResult.status === "timeout") {
+			try { console.warn(`[shutdown] worktree pool drain timed out for project ${projectId} after ${timeoutMs}ms`); } catch { /* best-effort */ }
+		}
+	}
+}
+
 /**
  * Serialize the boot-time worktree ownership transition. The sweeper rechecks
  * live durable owners at every mutation boundary, while a pool entry must not
@@ -2200,6 +2357,8 @@ export function installGatewayBridgeDeps(deps?: GatewayDeps) {
 }
 
 export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
+	let standaloneTaskStore: TaskStore | undefined;
+	try {
 	// Construction checkpoint timer — createGateway runs fully synchronously
 	// before start(), and earlier profiling showed ~19s of unattributed time
 	// here. Log cumulative elapsed at each major subsystem so the heavy step is
@@ -2429,6 +2588,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const cookieStore = new CookieStore(cookieSigningKey, { clock: gatewayDeps.clock });
 	const previewOperations = createPreviewSessionOperationQueue();
 	const withPreviewSessionOperation = previewOperations.run;
+	const reviewPayloadOperations = createReviewPayloadSessionCoordinator();
 	const sessionManager = new SessionManager({
 		stateDir,
 		agentCliPath: config.agentCliPath,
@@ -2970,7 +3130,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		intentValue: string | null,
 		binding?: RepositorySnapshotBinding,
 	) => {
-		const forceRequestedAt = performance.now();
+		const forceRequestedAt = remoteStateForceNow();
 		const legacyFetch = intentValue === "force";
 		const force = legacyFetch || intentValue === "explicit";
 		const readOpts = {
@@ -3351,7 +3511,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		address: RemoteStateAddress,
 		intentValue: string | null,
 	) => {
-		const forceRequestedAt = performance.now();
+		const forceRequestedAt = remoteStateForceNow();
 		const effectiveAddress: RemoteStateAddress = intentValue === "sidebar" && address.kind === "goal"
 			? { kind: "sidebar", id: address.id }
 			: address;
@@ -3415,7 +3575,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// first registered project's store is used when available, otherwise a server-
 	// scoped store is instantiated solely so construction doesn't require a project.
 	const firstCtxForInit = projectContextManager.all().next().value as import("./agent/project-context.js").ProjectContext | undefined;
-	const taskStore = firstCtxForInit ? firstCtxForInit.taskStore : new TaskStore(stateDir);
+	standaloneTaskStore = firstCtxForInit ? undefined : new TaskStore(stateDir);
+	const taskStore = firstCtxForInit?.taskStore ?? standaloneTaskStore!;
 	// OrchestrationCore (docs/design/orchestration-core.md) — the ONE goal-agnostic
 	// child-agent lifecycle implementation. Constructed near teamManager and wired
 	// back into sessionManager (boot index rebuild + restart reminder) and into
@@ -3583,10 +3744,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const corsOrigin = config.staticDir ? (req.headers.origin || "*") : "*";
 			res.setHeader("Access-Control-Allow-Origin", corsOrigin);
 			if (corsOrigin !== "*") res.setHeader("Vary", "Origin");
-			res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-			res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Bobbit-Session-Id, X-Bobbit-Spawning-Session");
+			res.setHeader("Access-Control-Allow-Methods", API_CORS_ALLOWED_METHODS.join(", "));
+			res.setHeader("Access-Control-Allow-Headers", API_CORS_ALLOWED_HEADERS.join(", "));
 
 			if (req.method === "OPTIONS") {
+				res.setHeader("Access-Control-Max-Age", API_CORS_PREFLIGHT_MAX_AGE_SECONDS);
 				res.writeHead(204);
 				res.end();
 				return;
@@ -3597,12 +3759,22 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Content-Length over the cap is refused with a definitive 413;
 			// chunked/streamed bodies without a length are bounded by the
 			// streaming cap inside readBody().
-			if (bodyLimitExceeded(req.headers["content-length"])) {
+			const reviewPayloadUpload = req.method === "POST"
+				&& /^\/api\/sessions\/[^/]+\/review-payloads$/.test(url.pathname);
+			const requestBodyLimit = reviewPayloadUpload ? MAX_REVIEW_PAYLOAD_REQUEST_BYTES : MAX_REQUEST_BODY_BYTES;
+			if (bodyLimitExceeded(req.headers["content-length"], requestBodyLimit)) {
 				res.writeHead(413, { "Content-Type": "application/json" });
-				res.end(JSON.stringify({
+				res.end(JSON.stringify(reviewPayloadUpload ? {
+					ok: false,
+					status: "failed",
+					code: "REVIEW_PAYLOAD_TOO_LARGE",
+					retryable: false,
+					message: "Review upload exceeds the bounded request limit",
+					limit: requestBodyLimit,
+				} : {
 					error: "Request body too large",
 					code: "BODY_TOO_LARGE",
-					limit: MAX_REQUEST_BODY_BYTES,
+					limit: requestBodyLimit,
 				}));
 				return;
 			}
@@ -3703,7 +3875,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, oauthCancellationRetryState, remoteStateRoutes);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToUi, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -3806,7 +3978,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			const data = JSON.stringify(event);
 			const baseMeta = describeWsPayload(event, data);
 			for (const ws of wss.clients) {
-				if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) continue;
+				if (!(ws as any).authenticated || !isSocketSendable(ws)) continue;
 				const sid = (ws as any).sessionId as string | undefined;
 				if (sid) {
 					const session = sessionManager.getSession(sid);
@@ -3854,7 +4026,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		let skippedViewerUnsubscribed = 0;
 		for (const ws of wss.clients) {
 			scanned++;
-			if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) { skipped++; continue; }
+			if (!(ws as any).authenticated || !isSocketSendable(ws)) { skipped++; continue; }
 			const sid = (ws as any).sessionId as string | undefined;
 			if (sid) {
 				const session = sessionManager.getSession(sid);
@@ -3922,7 +4094,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		if (!cpuDiagnosticsEnabled()) {
 			const data = JSON.stringify(event);
 			for (const ws of wss.clients) {
-				if ((ws as any).authenticated && ws.readyState === 1 /* OPEN */) {
+				if ((ws as any).authenticated && isSocketSendable(ws)) {
 					ws.send(data);
 				}
 			}
@@ -3938,7 +4110,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		let skipped = 0;
 		for (const ws of wss.clients) {
 			scanned++;
-			if ((ws as any).authenticated && ws.readyState === 1 /* OPEN */) {
+			if ((ws as any).authenticated && isSocketSendable(ws)) {
 				ws.send(data);
 				recipients++;
 			} else {
@@ -3965,7 +4137,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	function broadcastToUi(event: any): void {
 		const isRecipient = (ws: WebSocket): boolean =>
 			(ws as any).authenticated === true
-			&& ws.readyState === 1 /* OPEN */
+			&& isSocketSendable(ws)
 			&& hasUiWebSocketPrincipal(ws);
 		if (!cpuDiagnosticsEnabled()) {
 			const data = JSON.stringify(event);
@@ -4012,7 +4184,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		if (!cpuDiagnosticsEnabled()) {
 			const data = JSON.stringify(event);
 			for (const ws of wss.clients) {
-				if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) continue;
+				if (!(ws as any).authenticated || !isSocketSendable(ws)) continue;
 				const sid = (ws as any).sessionId as string | undefined;
 				if (sid) {
 					const session = sessionManager.getSession(sid);
@@ -4033,7 +4205,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		let skipped = 0;
 		for (const ws of wss.clients) {
 			scanned++;
-			if (!(ws as any).authenticated || ws.readyState !== 1 /* OPEN */) { skipped++; continue; }
+			if (!(ws as any).authenticated || !isSocketSendable(ws)) { skipped++; continue; }
 			const sid = (ws as any).sessionId as string | undefined;
 			if (sid) {
 				const session = sessionManager.getSession(sid);
@@ -4113,12 +4285,18 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 		if (info.reason === "purged") {
 			purgeAuthorSidecar(sessionId);
-			try {
-				await previewOperations.purge(sessionId, () => previewArtifacts.removeArtifacts(sessionId));
-			} catch (err) {
+			// Install both permanent fences before awaiting either cleanup. This keeps
+			// a stalled request from entering review persistence during preview purge.
+			const reviewPayloadCleanup = reviewPayloadOperations.purge(sessionId, () => removeReviewPayloads(sessionId));
+			const previewCleanup = previewOperations.purge(sessionId, () => previewArtifacts.removeArtifacts(sessionId));
+			const [previewResult, reviewPayloadResult] = await Promise.allSettled([previewCleanup, reviewPayloadCleanup]);
+			if (previewResult.status === "rejected") {
 				// This listener owns preview-artifact cleanup errors; SessionManager
 				// only awaits the listener contract and must not duplicate this log.
-				console.error(`[preview/artifacts] remove failed for ${sessionId}:`, err);
+				console.error(`[preview/artifacts] remove failed for ${sessionId}:`, previewResult.reason);
+			}
+			if (reviewPayloadResult.status === "rejected") {
+				console.error(`[review-payloads] remove failed for ${sessionId}:`, reviewPayloadResult.reason);
 			}
 		}
 	});
@@ -4147,7 +4325,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		if (!cpuDiagnosticsEnabled()) {
 			const data = JSON.stringify(event);
 			for (const ws of session.clients) {
-				if ((ws as any).readyState === 1 /* OPEN */) ws.send(data);
+				if (isSocketSendable(ws)) ws.send(data);
 			}
 			return;
 		}
@@ -4161,7 +4339,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		let skipped = 0;
 		for (const ws of session.clients) {
 			scanned++;
-			if ((ws as any).readyState === 1 /* OPEN */) {
+			if (isSocketSendable(ws)) {
 				ws.send(data);
 				recipients++;
 			} else {
@@ -4300,8 +4478,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Runs before session restore so models.json is written before
 			// any agent subprocesses start.
 			await bootPhase("aigw-check", () => startupAigwCheck(preferencesStore));
-			writeContextWindowOverrides();
-			writeOpenAIModelAdditions();
 			await bootPhase("extension-channels", () => initExtensionChannelsOnce());
 
 			// Initialize MCP servers (skip when disabled by gateway runtime config)
@@ -4500,6 +4676,15 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// to session revival. Both complete before accepting connections.
 			await bootPhase("restore-teams", () => teamManager.waitForRestore());
 			await bootPhase("restore-sessions", () => sessionManager.restoreSessions());
+			await bootPhase("review-payload-recovery", async () => {
+				try {
+					const knownSessionIds = [...projectContextManager.all()]
+						.flatMap((context) => context.sessionStore.getAll().map((session) => session.id));
+					await sweepReviewPayloads(knownSessionIds);
+				} catch (err) {
+					console.warn("[review-payloads] startup recovery failed (non-fatal):", err);
+				}
+			});
 
 			// One-shot legacy cost backfill: stamp `goalId` on cost entries
 			// that pre-date the forward-stamp fix (commit a4050f59). Runs
@@ -4777,28 +4962,19 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				if (bootBackgroundTask) {
 					await phase("boot-background", () => bootBackgroundTask!);
 				}
+				// Only drain ready entries held by these live pool instances. Claimed
+				// worktrees have already left their pools, and stale disk entries are
+				// never discovered or adopted during shutdown.
+				await phase("worktree-pools", () => drainWorktreePoolsForShutdown(sessionManager.getAllWorktreePools()));
 				await phase("extension-channels", () => disposeExtensionChannelServices(extensionChannelServices, "gateway-shutdown"));
 				await phase("cpu-diagnostics", () => shutdownCpuDiagnostics());
 				shutdownEventLoopLagMonitor();
 				try { verificationHarness?.shutdown(); } catch { /* best-effort */ }
-				// Worktree pools are intentionally NOT drained on shutdown.
-				//
-				// Pool entries are pre-built worktrees on `pool/_pool-*` branches
-				// created `pushPolicy: "local-only"` — they never exist on the remote.
-				// The old `drain()` here ran, serially across every project's pool,
-				// `git worktree remove --force` + `git branch -D` + a pointless
-				// `git push origin --delete` (a network round-trip, up to a 15s
-				// timeout each, to delete a branch that was never pushed). That both
-				// slowed shutdown AND destroyed exactly the worktrees the next boot
-				// then had to rebuild from scratch (`git worktree add` + `npm ci`),
-				// leaving new sessions on the cold path for minutes after start.
-				//
-				// Leaving them on disk lets `WorktreePool.reclaimOrphaned` re-adopt
-				// them instantly at the next boot (the sweeper skips pool branches,
-				// and reclaim is capped at the pool's target size, so they don't
-				// accumulate). Explicit teardown still drains: project removal
-				// (`removeWorktreePool`) and the Settings → Maintenance cleanup.
 				await phase("session-manager", () => sessionManager.shutdown());
+				const ownedTaskStore = standaloneTaskStore;
+				if (ownedTaskStore) {
+					await phase("standalone-task-store", () => ownedTaskStore.close());
+				}
 				await phase("project-contexts", () => projectContextManager.closeAll());
 				if (sandboxManager) {
 					await phase("sandbox-manager", () => sandboxManager!.shutdownAll());
@@ -4813,6 +4989,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			}
 		},
 	};
+	} catch (error) {
+		standaloneTaskStore?.dispose();
+		throw error;
+	}
 }
 
 // isSetupComplete now lives in ./setup-status.ts (re-exported at top of file).
@@ -5017,6 +5197,7 @@ async function handleApiRoute(
 	groupPolicyStore: ToolGroupPolicyStore,
 	broadcastToGoal: (goalId: string, event: any) => void,
 	broadcastToAll: (event: any) => void,
+	broadcastToUi: (event: any) => void,
 	sandboxManager: SandboxManager | null,
 	projectRegistry: ProjectRegistry,
 	configCascade: ConfigCascade,
@@ -5039,6 +5220,7 @@ async function handleApiRoute(
 	fsImpl?: FsLike,
 	clock?: Clock,
 	withPreviewSessionOperation: PreviewSessionOperation = async (_sessionId, operation) => operation(),
+	reviewPayloadOperations: ReviewPayloadSessionCoordinator = createReviewPayloadSessionCoordinator(),
 	oauthCancellationRetryState: { anthropicFlowId?: string } = {},
 	remoteStateRoutes?: any,
 ) {
@@ -5124,7 +5306,7 @@ async function handleApiRoute(
 			console.warn("[extension-channels] closeUnavailablePacks failed after resolver invalidation:", err);
 		});
 	};
-	const invalidateResolverCaches = (): void => { invalidateSlashSkillsCache(); __resetToolScanCache(); toolManager.clearScopedPiExtensionTools(); piExtensionDiscoveryCache.clear(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); closeUnavailableExtensionChannels(); };
+	const invalidateResolverCaches = (): void => { invalidateMarketPackScanCache(); invalidateBuiltinPackScanCache(); invalidateSlashSkillsCache(); __resetToolScanCache(); toolManager.clearScopedPiExtensionTools(); piExtensionDiscoveryCache.clear(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); closeUnavailableExtensionChannels(); };
 	const refreshMcpExternalTools = (): void => {
 		sessionManager.refreshExternalMcpToolRegistrations();
 	};
@@ -5172,6 +5354,14 @@ async function handleApiRoute(
 		// leaking host paths, source line numbers, and implementation details.
 		console.error(`[api] ${status} error:`, e.stack ?? e.message);
 		json({ error: e.message, ...extra }, status);
+	};
+	const parseStrictUpdateBody = <K extends readonly string[]>(raw: unknown, keys: K, options?: StrictBodyOptions): StrictBody<K> | null => {
+		try {
+			return parseStrictBody(raw, keys, options);
+		} catch (error) {
+			json({ error: error instanceof Error ? error.message : String(error) }, 400);
+			return null;
+		}
 	};
 	const hasPagingParams = (): boolean => ["limit", "offset", "after", "cursor"].some(param => url.searchParams.has(param));
 	const parsePagingInt = (value: string | null, fallback: number, min: number, max: number): number => {
@@ -5243,6 +5433,84 @@ async function handleApiRoute(
 		readBody,
 		broadcastToSession: _broadcastToSession,
 		packContributionRegistry,
+	})) return;
+
+	const resolveExistingReviewPayload = async (
+		sessionId: string,
+		title: string,
+		incomingReviewId: string,
+		replace: boolean,
+	): Promise<{ reviewId: string; payload?: CanonicalReviewPayload; activeFileId?: string }> => {
+		if (!replace) return { reviewId: incomingReviewId };
+		const workspace = sessionManager.getPersistedSession(sessionId)?.sidePanelWorkspace;
+		for (const tab of workspace?.tabs ?? []) {
+			if (tab.kind !== "review" || tab.source.type !== "review" || tab.source.title !== title) continue;
+			const reviewId = typeof tab.source.reviewId === "string" && tab.source.reviewId ? tab.source.reviewId : incomingReviewId;
+			const activeFileId = typeof tab.state?.activeFileId === "string" ? tab.state.activeFileId : undefined;
+			const source = tab.source as unknown as Record<string, unknown>;
+			if (typeof source.payloadId === "string" && typeof source.toolCallId === "string" && typeof source.contentHash === "string") {
+				try {
+					const prior = await readReviewPayload(sessionId, source.payloadId);
+					if (prior.reviewId === reviewId && prior.toolCallId === source.toolCallId && prior.hash === source.contentHash) {
+						return { reviewId, payload: prior, activeFileId };
+					}
+				} catch { /* Preserve stable review identity even when old content expired. */ }
+			}
+			return { reviewId };
+		}
+		return { reviewId: incomingReviewId };
+	};
+	const openReviewPayload = async (payload: CanonicalReviewPayload) => {
+		const source = {
+			type: "review",
+			sessionId: payload.sessionId,
+			reviewId: payload.reviewId,
+			title: payload.title,
+			toolCallId: payload.toolCallId,
+			toolUseId: payload.toolCallId,
+			payloadId: payload.payloadId,
+			contentHash: payload.hash,
+		};
+		// Tombstones suppress passive replay only when this authoritative primary is
+		// absent. An explicit open publishes the primary without editing annotation
+		// storage, so a workspace failure cannot erase close/submit suppression.
+		// The saved file selection is a read-only hint for a closed review; a live
+		// workspace selection still wins under the workspace lock below.
+		const tombstonedActiveFileId = reviewAnnotationStore?.getReviewActiveFile(payload.sessionId, payload.reviewId);
+		const activeFileId = tombstonedActiveFileId && payload.files.some((file) => file.fileId === tombstonedActiveFileId)
+			? tombstonedActiveFileId
+			: payload.activeFileId;
+		const tabId = reviewArtifactTabId(payload.reviewId);
+		if (!tabId) throw new ReviewPayloadError(400, "REVIEW_PAYLOAD_INVALID", "Review identity is invalid");
+		const workspace = await openSidePanelWorkspaceTab({
+			sessionManager,
+			readBody,
+			broadcastToSession: _broadcastToSession,
+			packContributionRegistry,
+		}, payload.sessionId, {
+			id: tabId,
+			kind: "review",
+			title: `Review: ${payload.title}`,
+			label: `Review: ${payload.title}`,
+			source,
+			state: { activeFileId },
+			updatedAt: Date.now(),
+		}, {
+			focus: true,
+			placeAfterActive: true,
+			// Resolve the current selection while holding the authoritative workspace
+			// lock so a manual Re-open cannot reset live file navigation.
+			preserveActiveFileIds: new Set(payload.files.map((file) => file.fileId)),
+		});
+		if (!workspace) throw new ReviewPayloadError(404, "REVIEW_PAYLOAD_SESSION_UNAVAILABLE", "Review session is unavailable");
+		return workspace;
+	};
+	if (await handleReviewPayloadRoute(url, req, res, {
+		sessionManager,
+		readBody,
+		openReview: openReviewPayload,
+		operations: reviewPayloadOperations,
+		resolveExistingReview: resolveExistingReviewPayload,
 	})) return;
 
 	if (await handlePrWalkthroughApiRoute(url, req, res, {
@@ -6396,7 +6664,9 @@ async function handleApiRoute(
 			json({ ok: false, code: "UNKNOWN_PROJECT", message: `Unknown project: ${projectGetMatch[1]}` }, 422);
 			return;
 		}
-		const body = await readBody(req);
+		const rawBody = await readBody(req);
+		const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.projects);
+		if (!body) return;
 		const updates: { name?: string; color?: string; rootPath?: string; palette?: string; colorLight?: string; colorDark?: string } = {};
 		if (typeof body?.name === "string") updates.name = body.name;
 		if (typeof body?.color === "string") updates.color = body.color;
@@ -6432,12 +6702,36 @@ async function handleApiRoute(
 		const project = projectRegistry.get(projectId);
 		try {
 			if (project) assertNormalMutableProject(project, "removed");
-			// Drain the project's worktree pool before removing
+			// Drain the project's worktree pool before removing.
 			await sessionManager.removeWorktreePool(projectId);
-			// Terminate all live sessions belonging to the removed project
-			const liveSessions = sessionManager.listSessions().filter(s => s.projectId === projectId);
-			for (const s of liveSessions) {
-				try { await sessionManager.terminateSession(s.id); } catch {}
+			// Borrowers must stop before the sandbox session that owns their shared
+			// worktree. terminateSession() serializes both sides through the existing
+			// per-owner FIFO, so a concurrently registered borrower either finishes
+			// first and makes owner teardown reject, or observes the terminated owner.
+			const liveSessions = sessionManager.getAllSessionsRaw()
+				.map(session => ({ session, persisted: sessionManager.getPersistedSession(session.id) }))
+				.filter(({ session, persisted }) => (persisted?.projectId ?? session.projectId) === projectId);
+			const borrowers = liveSessions.filter(({ session, persisted }) =>
+				persisted?.borrowsWorktree ?? session.borrowsWorktree,
+			);
+			const ownersAndIndependent = liveSessions.filter(entry => !borrowers.includes(entry));
+			for (const { session } of [...borrowers, ...ownersAndIndependent]) {
+				await sessionManager.terminateSession(session.id);
+			}
+			// Never remove a project context/store while a replacement or concurrent
+			// launch has left a live session behind.
+			const survivors = sessionManager.getAllSessionsRaw()
+				.filter(session =>
+					(sessionManager.getPersistedSession(session.id)?.projectId ?? session.projectId) === projectId,
+				)
+				.map(session => session.id);
+			if (survivors.length > 0) {
+				json({
+					error: "Project still has active sessions",
+					code: "PROJECT_SESSIONS_STILL_ACTIVE",
+					sessionIds: survivors,
+				}, 409);
+				return;
 			}
 			await sessionManager.cleanupScopedMcpManagersForProject(projectId, project?.rootPath);
 			await projectContextManager.remove(projectId);
@@ -6448,6 +6742,10 @@ async function handleApiRoute(
 			}
 			json({ ok: true });
 		} catch (err: any) {
+			if (err instanceof SharedSandboxWorktreeInUseError) {
+				json({ error: err.message, code: err.code }, 409);
+				return;
+			}
 			if (writeSpecialProjectMutationError(err)) return;
 			jsonError(400, err);
 		}
@@ -6950,7 +7248,12 @@ async function handleApiRoute(
 
 	function* visibleArchivedRaw() {
 		for (const ctx of projectContextManager.visible()) {
-			for (const session of ctx.sessionStore.getArchived()) yield session;
+			for (const session of ctx.sessionStore.getArchived()) {
+				yield sessionManager.serializeSessionListTags(
+					{ ...session, status: "archived", isCompacting: false },
+					{ archived: true },
+				);
+			}
 		}
 	}
 
@@ -7006,7 +7309,13 @@ async function handleApiRoute(
 			for (const ctx of projectContextManager.visible()) {
 				const store = ctx.sessionStore;
 				for (const s of store.getArchived()) {
-					allArchived.push({ ...s, colorIndex: colorStore.get(s.id), status: "archived" } as any);
+					allArchived.push({
+						...sessionManager.serializeSessionListTags(
+							{ ...s, status: "archived", isCompacting: false },
+							{ archived: true },
+						),
+						colorIndex: colorStore.get(s.id),
+					} as any);
 				}
 			}
 			// Sort by archivedAt descending
@@ -7466,7 +7775,11 @@ async function handleApiRoute(
 			spawnPinnedModel: session.spawnPinnedModel,
 			spawnPinnedThinkingLevel: session.spawnPinnedThinkingLevel,
 			restoreError: session.restoreError,
+			condition: session.condition,
 			lastTurnErrored: session.lastTurnErrored ?? false,
+			manualRetryRequired: session.manualRetryRequired ?? sessionPs?.manualRetryRequired ?? false,
+			transientRetryAttempts: session.transientRetryAttempts ?? 0,
+			recoverDrainAttempts: session.recoverDrainAttempts ?? 0,
 			consecutiveErrorTurns: session.consecutiveErrorTurns ?? 0,
 			completedTurnCount: session.completedTurnCount ?? 0,
 			imageGenerationModel: sessionManager.getImageModelForSession(session.id),
@@ -7646,6 +7959,20 @@ async function handleApiRoute(
 				json({ error: "Forbidden: reattempt goal is outside the sandbox scope", code: "SANDBOX_SCOPE_VIOLATION" }, 403);
 				return;
 			}
+		}
+
+		// Goal-scoped sessions are another start path, independent of team mode.
+		// Never let one race worktree setup: GoalStore migrates legacy records to
+		// ready on load, while every newly-created goal must be exactly ready.
+		if (goalId && goalForSession?.setupStatus !== undefined && goalForSession.setupStatus !== "ready") {
+			json({
+				error: goalForSession.setupStatus === "error"
+					? "Goal setup failed. Retry setup before starting a session."
+					: "Goal setup is still in progress. Wait for verified readiness before starting a session.",
+				code: "GOAL_SETUP_INCOMPLETE",
+				goalId,
+			}, 409);
+			return;
 		}
 
 		let resolvedProjectId = explicitProjectId;
@@ -8076,7 +8403,13 @@ async function handleApiRoute(
 				if (filterProjectId && ctx.project.id !== filterProjectId) continue;
 				allArchived.push(...ctx.goalStore.getArchived());
 				for (const s of ctx.sessionStore.getArchived()) {
-					sessionsForGoalQuery.push({ ...s, colorIndex: colorStore.get(s.id), status: "archived" });
+					sessionsForGoalQuery.push({
+						...sessionManager.serializeSessionListTags(
+							{ ...s, status: "archived", isCompacting: false },
+							{ archived: true },
+						),
+						colorIndex: colorStore.get(s.id),
+					});
 				}
 			}
 			if (archivedQuery) {
@@ -8102,7 +8435,13 @@ async function handleApiRoute(
 				for (const s of ctx.sessionStore.getArchived()) {
 					if (!seenSessionIds.has(s.id) && (goalIdsInPage.has((s as any).teamGoalId) || goalIdsInPage.has((s as any).goalId))) {
 						seenSessionIds.add(s.id);
-						affiliatedSessions.push({ ...s, colorIndex: colorStore.get(s.id), status: "archived" });
+						affiliatedSessions.push({
+							...sessionManager.serializeSessionListTags(
+								{ ...s, status: "archived", isCompacting: false },
+								{ archived: true },
+							),
+							colorIndex: colorStore.get(s.id),
+						});
 					}
 				}
 			}
@@ -8600,37 +8939,105 @@ async function handleApiRoute(
 		return;
 	}
 
-	// POST /api/goals/:id/retry-setup � retry worktree setup for a goal in error state
+	// POST /api/goals/:id/retry-setup — retry worktree setup for a failed goal.
 	const retrySetupMatch = url.pathname.match(/^\/api\/goals\/([^/]+)\/retry-setup$/);
 	if (retrySetupMatch && req.method === "POST") {
 		const goalId = retrySetupMatch[1];
 		const retryGoalManager = getGoalManagerForGoal(goalId);
-		const ok = retryGoalManager.retrySetup(goalId);
-		if (!ok) {
-			json({ error: "Goal not found or not in error state" }, 400);
+		const current = retryGoalManager.getGoal(goalId);
+		if (!current) {
+			json({ error: "Goal not found" }, 404);
 			return;
 		}
-		json({ ok: true });
-		// Fire-and-forget async worktree setup (and optionally start team)
+		const currentStatus: string | undefined = current.setupStatus;
+		const routeFlights = _retrySetupRouteFlights.get(retryGoalManager as object);
+		// This request already owns the setup/start continuation. The GoalManager
+		// will coalesce the setup promise; this guard also coalesces the route's
+		// scheduler/team side effect.
+		if (routeFlights?.has(goalId)) {
+			broadcastToAll({ type: "goal_state_changed", goalId });
+			json({ ok: true, coalesced: true, setupStatus: currentStatus });
+			return;
+		}
+
+		const ok = retryGoalManager.retrySetup(goalId);
+		if (!ok) {
+			// `preparing` only joins when GoalManager has a live setup promise. A
+			// persisted preparing row with no promise is an interrupted setup, not a
+			// successful coalesced retry; report it truthfully instead of stranding it.
+			const error = currentStatus === "preparing"
+				? "Goal setup is preparing but no active setup flight exists; restart recovery must mark it failed before it can be retried"
+				: "Goal setup is not in an actionable error state";
+			json({ error, setupStatus: currentStatus ?? "ready" }, 409);
+			return;
+		}
+		// A live preparing setup is owned by the create/scheduler path. Joining it
+		// must not add a second Team Lead start callback.
+		if (currentStatus === "preparing") {
+			broadcastToAll({ type: "goal_state_changed", goalId });
+			json({ ok: true, coalesced: true, setupStatus: currentStatus });
+			return;
+		}
+
 		const retryGoal = retryGoalManager.getGoal(goalId);
+		const retryStatus: string = retryGoal?.setupStatus ?? "preparing";
+		// Publish the persisted retrying transition before returning so every
+		// client invalidates stale error banners and controls.
+		broadcastToAll({ type: "goal_state_changed", goalId });
+		json({ ok: true, coalesced: false, setupStatus: retryStatus });
+
+		const ownedFlights = routeFlights ?? new Set<string>();
+		if (!routeFlights) _retrySetupRouteFlights.set(retryGoalManager as object, ownedFlights);
+		const trackRetryFlight = (flight: Promise<void>): void => {
+			ownedFlights.add(goalId);
+			void flight.then(
+				() => ownedFlights.delete(goalId),
+				() => ownedFlights.delete(goalId),
+			);
+		};
+		const publishSettledRetry = (err?: unknown): void => {
+			const settled = retryGoalManager.getGoal(goalId);
+			broadcastToAll({ type: "goal_state_changed", goalId });
+			if (settled?.setupStatus === "ready") {
+				broadcastToAll({ type: "goal_setup_complete", goalId });
+				if (err) console.error("[goal] Auto-start team failed after verified retry setup:", err);
+			} else {
+				broadcastToAll({ type: "goal_setup_error", goalId, error: String(err ?? settled?.setupError ?? "Goal setup failed") });
+			}
+		};
+
+		// Children must retain the unified per-root scheduler permit. It waits for
+		// their own setup flight before TeamManager can create a lead. A
+		// dependency-blocked child still repairs its worktree, but must remain
+		// teamless until the dependency scheduler explicitly unblocks it.
+		if (retryGoal?.autoStartTeam && retryGoal.parentGoalId) {
+			if (retryGoal.state === "blocked") {
+				const flight = retryGoalManager.setupWorktree(goalId);
+				trackRetryFlight(flight);
+				void flight.then(() => publishSettledRetry(), (err) => publishSettledRetry(err));
+				return;
+			}
+			const outcome = verificationHarness.requestChildStart(goalId);
+			if (outcome === "capacity-blocked") {
+				retryGoalManager.updateGoal(goalId, { state: "blocked" })
+					.then(() => broadcastToAll({ type: "goal_state_changed", goalId }))
+					.catch((err) => console.warn(`[goal] failed to mark retrying child ${goalId} capacity-blocked:`, err));
+				return;
+			}
+			// The scheduler started the authoritative setup flight. Track it so a
+			// second POST coalesces instead of requesting another child-team start.
+			const flight = retryGoalManager.setupWorktree(goalId);
+			trackRetryFlight(flight);
+			return;
+		}
 		if (retryGoal?.autoStartTeam) {
-			retryGoalManager.setupWorktreeAndStartTeam(goalId, () => teamManager.startTeam(goalId)).then(() => {
-				broadcastToAll({ type: "goal_setup_complete", goalId });
-			}).catch((err) => {
-				const g = retryGoalManager.getGoal(goalId);
-				if (g?.setupStatus === "ready") {
-					broadcastToAll({ type: "goal_setup_complete", goalId });
-					console.error("[goal] Auto-start team failed on retry (worktree ready):", err);
-				} else {
-					broadcastToAll({ type: "goal_setup_error", goalId, error: String(err) });
-				}
-			});
+			const flight = retryGoalManager.setupWorktreeAndStartTeam(goalId, () => teamManager.startTeam(goalId));
+			trackRetryFlight(flight);
+			void flight.then(() => publishSettledRetry(), (err) => publishSettledRetry(err));
 		} else {
-			retryGoalManager.setupWorktree(goalId).then(() => {
-				broadcastToAll({ type: "goal_setup_complete", goalId });
-			}).catch((err) => {
-				broadcastToAll({ type: "goal_setup_error", goalId, error: String(err) });
-			});
+			const flight = retryGoalManager.setupWorktree(goalId);
+			trackRetryFlight(flight);
+			void flight.then(() => publishSettledRetry(), (err) => publishSettledRetry(err));
 		}
 		return;
 	}
@@ -8841,8 +9248,17 @@ async function handleApiRoute(
 		if (req.method === "PUT") {
 			const putGoal = getGoalAcrossProjects(id);
 			if (putGoal?.archived) { json({ error: "Goal is archived" }, 409); return; }
-			const body = await readBody(req);
-			if (!body) { json({ error: "Missing body" }, 400); return; }
+			const rawBody = await readBody(req);
+			if (!rawBody) { json({ error: "Missing body" }, 400); return; }
+			const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.goals, {
+				wrongEndpoint: {
+					subgoalsAllowed: "PATCH /api/goals/:id/policy",
+					maxNestingDepth: "PATCH /api/goals/:id/policy",
+					divergencePolicy: "PATCH /api/goals/:id/policy",
+					maxConcurrentChildren: "PATCH /api/goals/:id/policy",
+				},
+			});
+			if (!body) return;
 			const prevSpec = putGoal?.spec ?? "";
 			// The goal id already fixes the project scope; a caller-supplied cwd
 			// update must still be constrained to that scope (Headquarters dir for
@@ -9015,8 +9431,10 @@ async function handleApiRoute(
 		}
 
 		if (req.method === "PUT") {
-			const body = await readBody(req);
-			if (!body) { json({ error: "Missing body" }, 400); return; }
+			const rawBody = await readBody(req);
+			if (!rawBody) { json({ error: "Missing body" }, 400); return; }
+			const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.tools);
+			if (!body) return;
 			const projectScope = resolveRequiredConfigProjectScope(body.projectId ?? url.searchParams.get("projectId"));
 			if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
 			const targetToolManager = projectScope.context?.toolManager ?? toolManager;
@@ -11554,8 +11972,10 @@ async function handleApiRoute(
 		}
 
 		if (req.method === "PUT") {
-			const body = await readBody(req);
-			if (!body) { json({ error: "Missing body" }, 400); return; }
+			const rawBody = await readBody(req);
+			if (!rawBody) { json({ error: "Missing body" }, 400); return; }
+			const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.roles);
+			if (!body) return;
 			const resolvedTarget = resolveRoleMutationTarget(body.projectId ?? url.searchParams.get("projectId"));
 			if (!resolvedTarget.ok) { writeConfigProjectScopeError(resolvedTarget); return; }
 			const target = resolvedTarget.target;
@@ -12822,8 +13242,10 @@ async function handleApiRoute(
 
 		// PUT /api/tasks/:id
 		if (req.method === "PUT") {
-			const body = await readBody(req);
-			if (!body) { json({ error: "Missing body" }, 400); return; }
+			const rawBody = await readBody(req);
+			if (!rawBody) { json({ error: "Missing body" }, 400); return; }
+			const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.tasks);
+			if (!body) return;
 			try {
 				const record = getTaskRecordForTask(id);
 				if (!record) { json({ error: "Task not found" }, 404); return; }
@@ -13841,7 +14263,16 @@ async function handleApiRoute(
 				json({ ok: true });
 				return;
 			}
-			const terminated = await sessionManager.terminateSession(id);
+			let terminated: boolean;
+			try {
+				terminated = await sessionManager.terminateSession(id);
+			} catch (err) {
+				if (err instanceof SharedSandboxWorktreeInUseError) {
+					json({ error: err.message, code: err.code }, 409);
+					return;
+				}
+				throw err;
+			}
 			if (!terminated) {
 				// Session not live. It may still exist as a dormant / store-only entry
 				// (e.g. a completed delegate parent, or a parent that went dormant after
@@ -13857,7 +14288,15 @@ async function handleApiRoute(
 				}
 				// storeArchive → archiveWithCascade → cascadeReapOwner(children) then archive,
 				// so the dormant parent's live children are reaped before it is archived.
-				await sessionManager.storeArchive(id);
+				try {
+					await sessionManager.storeArchive(id);
+				} catch (err) {
+					if (err instanceof SharedSandboxWorktreeInUseError) {
+						json({ error: err.message, code: err.code }, 409);
+						return;
+					}
+					throw err;
+				}
 				if (purge) {
 					await sessionManager.purgeArchivedSession(id);
 				}
@@ -13873,172 +14312,393 @@ async function handleApiRoute(
 		}
 	}
 
-	// POST /api/sessions/:id/fork — fork a live plain session: clone the source
-	// transcript (and tool-content / proposal drafts) into a fresh session and
-	// preserve its project/goal/task/model/role context. The caller chooses
-	// whether to spin up a new worktree (default) or reuse the source's worktree.
+	// POST /api/sessions/:id/fork — fork a live plain session. Whole-session
+	// requests clone the transcript; entryId requests materialize the active
+	// history strictly before that prompt. Both preserve the established context
+	// and let the caller choose a fresh (default) or reused source worktree.
 	const forkMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/fork$/);
 	if (forkMatch && req.method === "POST") {
 		const sourceId = forkMatch[1];
 		const forkBody = await readBody(req).catch(() => ({} as any));
-		// Default to a NEW worktree when the flag is omitted.
-		const newWorktree = forkBody?.newWorktree === undefined ? true : !!forkBody.newWorktree;
-
-		const source = sessionManager.getSession(sourceId);
-		const ps = sessionManager.getPersistedSession(sourceId);
-		if (!ps) { json({ error: "session not found" }, 404); return; }
-		if (ps.archived) { json({ error: "archived sessions cannot be forked" }, 422); return; }
-		if (!source) { json({ error: "only live sessions can be forked" }, 422); return; }
-
-		const unsupported = isUnsupportedForkSource(source, ps);
-		if (unsupported) { json({ error: unsupported }, 422); return; }
-
-		const projectId = ps.projectId || source.projectId;
-		if (!projectId || !projectRegistry.get(projectId)) {
-			json({ error: "source project no longer registered" }, 410);
+		const hasEntryId = forkBody != null
+			&& typeof forkBody === "object"
+			&& Object.prototype.hasOwnProperty.call(forkBody, "entryId");
+		const entryId = hasEntryId ? forkBody.entryId : undefined;
+		if (
+			hasEntryId
+			&& (typeof entryId !== "string"
+				|| entryId.length === 0
+				|| entryId.length > 256
+				|| entryId.trim() !== entryId)
+		) {
+			json({ error: "Invalid history fork entry id", code: "HISTORY_FORK_CURSOR_INVALID" }, 400);
 			return;
 		}
-		const forkSourceTuple = resolveServerInitialModelTuple(ps, source);
-		const forkStaff = ps.staffId ? staffManager.getStaff(ps.staffId) : undefined;
-		const forkRole = !forkStaff && ps.role ? resolveRoleForProject(ps.role, projectId) : undefined;
-		const forkInitialModel = forkSourceTuple.initialModel
-			?? (typeof forkRole?.model === "string" && /^[^/]+\/.+$/.test(forkRole.model) ? forkRole.model : undefined);
-		if (forkInitialModel && !(await requireCurrentSessionModel(forkInitialModel, "Fork model"))) return;
-
-		const goal = ps.goalId ? getGoalAcrossProjects(ps.goalId) : undefined;
-		if (ps.goalId && !goal) { json({ error: "source goal not found" }, 410); return; }
-		if (goal?.state === "todo") {
-			await getGoalManagerForGoal(goal.id).updateGoal(goal.id, { state: "in-progress" });
+		if (
+			forkBody != null
+			&& typeof forkBody === "object"
+			&& Object.prototype.hasOwnProperty.call(forkBody, "newWorktree")
+			&& typeof forkBody.newWorktree !== "boolean"
+		) {
+			json({ error: "Invalid newWorktree flag" }, 400);
+			return;
 		}
+		// Whole-session omission remains backward-compatible. The prompt surface
+		// sends its history default (`false`) explicitly.
+		const newWorktree = forkBody?.newWorktree === undefined ? true : forkBody.newWorktree;
+		let historyReservationKey: string | undefined;
+		let historyReservationAcquired = false;
 
-		const { sessionFileCopy, CrossRealmCopyError } = await import("./agent/session-fs.js");
-		const { formatAgentSessionFilePath } = await import("./agent/agent-session-path.js");
-		const { copyToolContentDirIfPresent, copyProposalDirIfPresent, cleanupFailedContinue } = await import("./agent/continue-archived.js");
+		try {
+			let source = sessionManager.getSession(sourceId);
+			const ps = sessionManager.getPersistedSession(sourceId);
+			if (!ps) { json({ error: "session not found" }, 404); return; }
+			if (ps.archived) { json({ error: "archived sessions cannot be forked" }, 422); return; }
+			if (!source) { json({ error: "only live sessions can be forked" }, 422); return; }
 
-		// Resolve the source `.jsonl`, with the recovery-scan fallback for legacy
-		// rows that never persisted `agentSessionFile`.
-		let sourceJsonl = ps.agentSessionFile;
-		if (!sourceJsonl) {
-			const recovered = sessionManager.recoverSessionFile(ps);
-			if (recovered) sourceJsonl = recovered;
-		}
-		if (!sourceJsonl) { json({ error: "source transcript missing or empty" }, 404); return; }
-		if (!ps.sandboxed) {
-			try {
-				const st = fs.statSync(sourceJsonl);
-				if (!st.isFile() || st.size === 0) { json({ error: "source transcript missing or empty" }, 404); return; }
-			} catch {
-				json({ error: "source transcript missing or empty" }, 404);
+			const unsupported = isUnsupportedForkSource(source, ps);
+			if (unsupported) { json({ error: unsupported }, 422); return; }
+
+			const projectId = ps.projectId || source.projectId;
+			if (!projectId || !projectRegistry.get(projectId)) {
+				json({ error: "source project no longer registered" }, 410);
 				return;
 			}
-		}
+			const sharedSandboxReuse = hasEntryId && !newWorktree && ps.sandboxed === true;
+			const sharedSandboxOwnerSessionId = sharedSandboxReuse
+				? sessionManager.resolveSandboxWorktreeOwnerSessionId(sourceId)
+				: undefined;
+			if (sharedSandboxReuse && !sharedSandboxOwnerSessionId) {
+				json({
+					error: "The source sandbox worktree owner is unavailable for history forking",
+					code: "HISTORY_FORK_SOURCE_UNAVAILABLE",
+				}, 422);
+				return;
+			}
+			const sharedSandboxSourceCwd = sharedSandboxReuse ? source.cwd : undefined;
+			const sharedSandboxPersistedCwd = sharedSandboxReuse ? ps.cwd : undefined;
+			const forkSourceTuple = resolveServerInitialModelTuple(ps, source);
+			const forkStaff = ps.staffId ? staffManager.getStaff(ps.staffId) : undefined;
+			const forkRole = !forkStaff && ps.role ? resolveRoleForProject(ps.role, projectId) : undefined;
+			const forkInitialModel = forkSourceTuple.initialModel
+				?? (typeof forkRole?.model === "string" && /^[^/]+\/.+$/.test(forkRole.model) ? forkRole.model : undefined);
+			if (forkInitialModel && !(await requireCurrentSessionModel(forkInitialModel, "Fork model"))) return;
 
-		const projCwd = projectRegistry.get(projectId)!.rootPath;
-		const forkId = randomUUID();
-		// Use the project root for the cloned `.jsonl` slug (same as /continue);
-		// worktree-backed sessions rotate to the final cwd-derived file after the
-		// worktree is ready, adopting this clone via switch_session.
-		const destJsonl = formatAgentSessionFilePath(projCwd, Date.now(), forkId);
+			const goal = ps.goalId ? getGoalAcrossProjects(ps.goalId) : undefined;
+			if (ps.goalId && !goal) { json({ error: "source goal not found" }, 410); return; }
 
-		const srcCtx = sessionFsContextForAgentFile(ps, sourceJsonl);
-		const dstCtx = sessionFsContextForAgentFile({ sandboxed: !!ps.sandboxed, projectId }, destJsonl);
-		let clonedTranscript: string | null = null;
-		try {
-			await sessionFileCopy(srcCtx, sourceJsonl, dstCtx, destJsonl, sandboxManager ?? null);
-			clonedTranscript = await sessionFileRead(dstCtx, destJsonl, sandboxManager ?? null);
-		} catch (err) {
-			if (err instanceof CrossRealmCopyError) { json({ error: "cross-realm fork not supported" }, 422); return; }
-			cleanupFailedContinue(destJsonl, forkId, bobbitStateDir());
-			jsonError(500, err, { error: `failed to clone session file: ${err instanceof Error ? err.message : String(err)}` });
-			return;
-		}
-		try { copyToolContentDirIfPresent(sourceId, forkId, bobbitStateDir()); } catch (err) {
-			console.warn(`[fork] tool-content copy failed (non-fatal): ${err}`);
-		}
-		try { copyProposalDirIfPresent(sourceId, forkId, bobbitStateDir()); } catch (err) {
-			console.warn(`[fork] proposal-dir copy failed (non-fatal): ${err}`);
-		}
+			const { sessionFileCopy, CrossRealmCopyError } = await import("./agent/session-fs.js");
+			const { formatAgentSessionFilePath } = await import("./agent/agent-session-path.js");
+			const { copyToolContentDirIfPresent, copyProposalDirIfPresent, cleanupFailedContinue } = await import("./agent/continue-archived.js");
 
-		try {
-			// The destination id is fixed before creation. Copy author bindings now so
-			// switch_session replay is normalized correctly on its first pass and the
-			// resulting EventBuffer never captures fallback authors.
-			copyAuthorSidecar(sourceId, forkId, { transcript: clonedTranscript });
-			const launched = await launchSidebarSessionFork({
-				forkId,
-				projectId,
-				projectRoot: projCwd,
-				destJsonl,
-				newWorktree,
-				source,
-				persisted: ps,
-			}, {
-				resolveNewWorktreeRepoPath: async projectRoot => {
-					try {
-						return await isGitRepo(projectRoot, serverCommandRunner)
-							? await getRepoRoot(projectRoot, serverCommandRunner)
-							: undefined;
-					} catch {
-						return undefined;
+			// Resolve or recover the source `.jsonl` authoritatively. Never let a raw
+			// persisted path bypass host/container transcript-path validation.
+			const sourceJsonl = sessionManager.recoverSessionFile(ps);
+			if (!sourceJsonl) { json({ error: "source transcript missing or empty" }, 404); return; }
+
+			const srcCtx = sessionFsContextForAgentFile(ps, sourceJsonl);
+			let historyMaterialization: HistoryForkMaterialization | undefined;
+			let clonedTranscript: string | null = null;
+			if (hasEntryId) {
+				historyReservationKey = `${sourceId}\0${entryId}\0${newWorktree ? "1" : "0"}`;
+				if (historyForkReservations.has(historyReservationKey)) {
+					json({
+						error: "A fork from this prompt is already being created",
+						code: "HISTORY_FORK_IN_PROGRESS",
+					}, 409);
+					return;
+				}
+				historyForkReservations.add(historyReservationKey);
+				historyReservationAcquired = true;
+
+				const sourceContent = await sessionFileRead(srcCtx, sourceJsonl, sandboxManager ?? null);
+				if (!sourceContent) {
+					json({ error: "source transcript missing or empty" }, 404);
+					return;
+				}
+
+				// Source eligibility is authoritative at launch time too. The immutable
+				// read is retained, but a source that stopped being live cannot be forked.
+				const currentSource = sessionManager.getSession(sourceId);
+				const currentPersisted = sessionManager.getPersistedSession(sourceId);
+				if (!currentSource || !currentPersisted) {
+					json({ error: "only live sessions can be forked" }, 422);
+					return;
+				}
+				const currentUnsupported = isUnsupportedForkSource(currentSource, currentPersisted);
+				if (currentUnsupported) {
+					json({ error: currentUnsupported }, 422);
+					return;
+				}
+				source = currentSource;
+
+				try {
+					historyMaterialization = materializeHistoryForkTranscript(
+						sourceContent,
+						entryId,
+					);
+					clonedTranscript = historyMaterialization.content;
+				} catch (err) {
+					if (err instanceof HistoryForkValidationError) {
+						json({ error: err.message, code: err.code }, err.status);
+						return;
 					}
-				},
-				buildCreateOptions: ({ worktreeOpts, oldTranscriptCwds }) => {
-					const createOpts: any = {
-						sessionId: forkId,
-						projectId,
-						sandboxed: !!ps.sandboxed,
-						worktreeOpts,
-						preExistingAgentSessionFile: destJsonl,
-						preExistingAgentSessionOldCwds: oldTranscriptCwds,
-						taskId: ps.taskId,
-						reattemptGoalId: ps.reattemptGoalId,
-						staffId: ps.staffId,
-						allowedTools: ps.allowedTools,
-					};
-					if (ps.sandboxed && !worktreeOpts && !ps.goalId && !ps.assistantType) {
-						createOpts.sandboxBranch = `session/${forkId.slice(0, 8)}`;
-					}
+					jsonError(500, err, {
+						error: `failed to materialize history fork: ${err instanceof Error ? err.message : String(err)}`,
+					});
+					return;
+				}
+			}
 
-					if (forkStaff) {
-						createOpts.rolePrompt = buildStaffSystemPrompt(forkStaff, roleManager, resolveRoleForProject);
-						createOpts.roleName = forkStaff.roleId;
-						createOpts.accessory = forkStaff.accessory;
-						createOpts.env = { BOBBIT_STAFF_ID: ps.staffId };
-					} else {
-						if (forkRole) {
-							const opts = roleCreateOptions(forkRole);
-							if (createOpts.initialModel) delete opts.initialModel;
-							Object.assign(createOpts, opts);
-						} else if (ps.role) {
-							createOpts.role = ps.role;
-							createOpts.roleName = ps.role;
-							if (ps.accessory) createOpts.accessory = ps.accessory;
-						} else if (ps.accessory) {
-							createOpts.accessory = ps.accessory;
+			// History validation must complete before any goal state or destination
+			// state changes. Whole-session forks retain the established transition.
+			if (goal?.state === "todo") {
+				await getGoalManagerForGoal(goal.id).updateGoal(goal.id, { state: "in-progress" });
+			}
+
+			const projCwd = projectRegistry.get(projectId)!.rootPath;
+			const forkId = randomUUID();
+			// Use the project root for the cloned `.jsonl` slug (same as /continue);
+			// worktree-backed sessions rotate to the final cwd-derived file after the
+			// worktree is ready, adopting this clone via switch_session.
+			const formattedDestJsonl = formatAgentSessionFilePath(projCwd, Date.now(), forkId);
+			const sandboxHistoryDestination = hasEntryId && ps.sandboxed === true;
+			const sandboxDestJsonl = sandboxHistoryDestination
+				? tryHostPathToContainer(formattedDestJsonl)
+				: null;
+			if (sandboxHistoryDestination && !sandboxDestJsonl) {
+				json({ error: "failed to resolve sandbox transcript destination" }, 500);
+				return;
+			}
+			const destJsonl = sandboxDestJsonl ?? formattedDestJsonl;
+			const dstCtx = sessionFsContextForAgentFile({ sandboxed: !!ps.sandboxed, projectId }, destJsonl);
+			const cleanupFailedFork = async (): Promise<void> => {
+				let failedRecord = sessionManager.getPersistedSession(forkId);
+				const failedTranscripts = new Set<string>([destJsonl]);
+				if (failedRecord?.agentSessionFile) failedTranscripts.add(failedRecord.agentSessionFile);
+				try {
+					if (sessionManager.getSession(forkId)) {
+						await sessionManager.terminateSession(forkId);
+					} else if (failedRecord && !failedRecord.archived) {
+						await sessionManager.storeArchive(forkId);
+					}
+					failedRecord = sessionManager.getPersistedSession(forkId);
+					if (failedRecord?.agentSessionFile) failedTranscripts.add(failedRecord.agentSessionFile);
+					if (sandboxHistoryDestination && failedRecord?.archived) {
+						for (const transcript of failedTranscripts) {
+							await sessionFileDeleteContainerOnly(dstCtx, transcript, sandboxManager ?? null);
 						}
+						// purgeArchivedSession uses compatibility deletion with host fallback.
+						// Hide this newly generated container path from that legacy path; if
+						// container deletion failed, trusted orphan cleanup owns it instead.
+						failedRecord.agentSessionFile = "";
 					}
-					if (forkSourceTuple.initialModel) {
-						delete createOpts.initialThinkingLevel;
-						Object.assign(createOpts, forkSourceTuple);
+					if (sessionManager.getArchivedSession(forkId)) {
+						await sessionManager.purgeArchivedSession(forkId);
 					}
-					return createOpts;
-				},
-				createSession: ({ cwd, goalId, assistantType, options }) => sessionManager.createSession(cwd, undefined, goalId, assistantType, options),
-				setTitle: (sessionId, title) => sessionManager.setTitle(sessionId, title, { markGenerated: true }),
-			});
-			if (ps.staffId) launched.fork.staffId = ps.staffId;
-			json({
-				id: launched.fork.id,
-				cwd: launched.fork.cwd,
-				status: launched.fork.status,
-				projectId: launched.projectId,
-				goalId: launched.goalId,
-				title: launched.title,
-			}, 201);
-		} catch (err) {
-			cleanupFailedContinue(destJsonl, forkId, bobbitStateDir());
-			purgeAuthorSidecar(forkId);
-			jsonError(500, err, { error: `failed to fork session: ${err instanceof Error ? err.message : String(err)}` });
+				} catch (cleanupErr) {
+					console.warn(`[fork] failed-session lifecycle cleanup failed for ${forkId}: ${cleanupErr}`);
+				}
+				failedRecord = sessionManager.getPersistedSession(forkId);
+				if (failedRecord?.agentSessionFile) failedTranscripts.add(failedRecord.agentSessionFile);
+				if (sandboxHistoryDestination) {
+					for (const transcript of failedTranscripts) {
+						await sessionFileDeleteContainerOnly(dstCtx, transcript, sandboxManager ?? null);
+					}
+					// State sidecars and proposal/tool directories remain host-owned. Never
+					// pass a container transcript path to direct-host cleanup.
+					cleanupFailedContinue(undefined, forkId, bobbitStateDir());
+				} else {
+					for (const transcript of failedTranscripts) {
+						cleanupFailedContinue(transcript, forkId, bobbitStateDir());
+					}
+				}
+				purgeAuthorSidecar(forkId);
+				purgeSkillSidecar(forkId);
+				purgeCompactionSidecar(forkId);
+			};
+
+			try {
+				if (hasEntryId) {
+					await sessionFileWriteAtomic(dstCtx, destJsonl, clonedTranscript!, sandboxManager ?? null);
+				} else {
+					await sessionFileCopy(srcCtx, sourceJsonl, dstCtx, destJsonl, sandboxManager ?? null);
+					clonedTranscript = await sessionFileRead(dstCtx, destJsonl, sandboxManager ?? null);
+				}
+			} catch (err) {
+				if (err instanceof CrossRealmCopyError) {
+					await cleanupFailedFork();
+					json({ error: "cross-realm fork not supported" }, 422);
+					return;
+				}
+				await cleanupFailedFork();
+				jsonError(500, err, { error: `failed to clone session file: ${err instanceof Error ? err.message : String(err)}` });
+				return;
+			}
+
+			try {
+				// Positional tool caches are safe only for an uncut transcript. History
+				// forks retain their exact tool content in JSONL and build fresh caches.
+				if (hasEntryId) {
+					// A partial proposal/sidecar copy must fail the history fork so cleanup
+					// cannot leave discarded-entry references in a successful destination.
+					copyProposalDirIfPresent(sourceId, forkId, bobbitStateDir());
+					if (!copyHistoryForkSidecar("skill", sourceId, forkId, () =>
+						copySkillSidecarForTranscript(
+							sourceId,
+							forkId,
+							historyMaterialization!.retainedEntryIds,
+						))) {
+						throw new Error("failed to copy filtered skill sidecar");
+					}
+					if (!copyHistoryForkSidecar("compaction", sourceId, forkId, () =>
+						copyCompactionSidecarForTranscript(
+							sourceId,
+							forkId,
+							historyMaterialization!.retainedCompactions,
+							historyMaterialization!.retainedEntryIds,
+						))) {
+						throw new Error("failed to copy filtered compaction sidecar");
+					}
+				} else {
+					try { copyToolContentDirIfPresent(sourceId, forkId, bobbitStateDir()); } catch (err) {
+						console.warn(`[fork] tool-content copy failed (non-fatal): ${err}`);
+					}
+					try { copyProposalDirIfPresent(sourceId, forkId, bobbitStateDir()); } catch (err) {
+						console.warn(`[fork] proposal-dir copy failed (non-fatal): ${err}`);
+					}
+				}
+				// The destination id is fixed before creation. Copy author bindings now so
+				// switch_session replay is normalized correctly on its first pass and the
+				// resulting EventBuffer never captures fallback authors.
+				const authorCopied = hasEntryId
+					? copyHistoryForkSidecar("author", sourceId, forkId, () =>
+						copyAuthorSidecar(sourceId, forkId, {
+							transcript: clonedTranscript,
+							strictExactIdentity: true,
+						}))
+					: copyAuthorSidecar(sourceId, forkId, { transcript: clonedTranscript });
+				if (hasEntryId && !authorCopied) {
+					throw new Error("failed to copy filtered author sidecar");
+				}
+				const launchFork = () => launchSidebarSessionFork({
+					forkId,
+					projectId,
+					projectRoot: projCwd,
+					destJsonl,
+					newWorktree,
+					source: source!,
+					persisted: ps,
+				}, {
+					resolveNewWorktreeRepoPath: async projectRoot => {
+						try {
+							return await isGitRepo(projectRoot, serverCommandRunner)
+								? await getRepoRoot(projectRoot, serverCommandRunner)
+								: undefined;
+						} catch {
+							return undefined;
+						}
+					},
+					buildCreateOptions: ({ worktreeOpts, oldTranscriptCwds }) => {
+						const createOpts: any = {
+							sessionId: forkId,
+							projectId,
+							sandboxed: !!ps.sandboxed,
+							worktreeOpts,
+							preExistingAgentSessionFile: destJsonl,
+							preExistingAgentSessionOldCwds: oldTranscriptCwds,
+							// A cut-before history fork is writable in the exact source cwd, but
+							// the flattened original owner retains the worktree lifecycle.
+							borrowsWorktree: (hasEntryId && !newWorktree) || undefined,
+							borrowedWorktreeOwnerSessionId: sharedSandboxOwnerSessionId,
+							taskId: ps.taskId,
+							reattemptGoalId: ps.reattemptGoalId,
+							staffId: ps.staffId,
+							allowedTools: ps.allowedTools,
+						};
+						// A fresh Git fork must not return the temporary project-root cwd
+						// from the preparing SessionInfo. Reuse and non-Git fresh forks
+						// retain their established lifecycle.
+						if (worktreeOpts) createOpts.awaitWorktreeSetup = true;
+						if (newWorktree && ps.sandboxed && !worktreeOpts && !ps.goalId && !ps.assistantType) {
+							createOpts.sandboxBranch = `session/${forkId.slice(0, 8)}`;
+						}
+
+						if (forkStaff) {
+							createOpts.rolePrompt = buildStaffSystemPrompt(forkStaff, roleManager, resolveRoleForProject);
+							createOpts.roleName = forkStaff.roleId;
+							createOpts.accessory = forkStaff.accessory;
+							createOpts.env = { BOBBIT_STAFF_ID: ps.staffId };
+						} else {
+							if (forkRole) {
+								const opts = roleCreateOptions(forkRole);
+								if (createOpts.initialModel) delete opts.initialModel;
+								Object.assign(createOpts, opts);
+							} else if (ps.role) {
+								createOpts.role = ps.role;
+								createOpts.roleName = ps.role;
+								if (ps.accessory) createOpts.accessory = ps.accessory;
+							} else if (ps.accessory) {
+								createOpts.accessory = ps.accessory;
+							}
+						}
+						if (forkSourceTuple.initialModel) {
+							delete createOpts.initialThinkingLevel;
+							Object.assign(createOpts, forkSourceTuple);
+						}
+						return createOpts;
+					},
+					createSession: ({ cwd, goalId, assistantType, options }) => sessionManager.createSession(cwd, undefined, goalId, assistantType, options),
+					setTitle: (sessionId, title) => sessionManager.setTitle(sessionId, title, { markGenerated: true }),
+				});
+				const launchSharedSandboxFork = async () => {
+					const currentSource = sessionManager.getSession(sourceId);
+					const currentPersisted = sessionManager.getPersistedSession(sourceId);
+					const currentOwnerSessionId = sessionManager.resolveSandboxWorktreeOwnerSessionId(sourceId);
+					if (
+						!currentSource
+						|| !currentPersisted
+						|| currentPersisted.archived
+						|| currentSource.cwd !== sharedSandboxSourceCwd
+						|| currentPersisted.cwd !== sharedSandboxPersistedCwd
+						|| currentOwnerSessionId !== sharedSandboxOwnerSessionId
+						|| isUnsupportedForkSource(currentSource, currentPersisted)
+					) {
+						throw new HistoryForkSourceUnavailableError();
+					}
+					source = currentSource;
+					return launchFork();
+				};
+				const launched = sharedSandboxReuse
+					? await sessionManager.withSandboxWorktreeOwnerLifecycle(
+						sharedSandboxOwnerSessionId!,
+						launchSharedSandboxFork,
+					)
+					: await launchFork();
+				if (ps.staffId) (launched.fork as SessionInfo).staffId = ps.staffId;
+				json({
+					id: launched.fork.id,
+					cwd: launched.fork.cwd,
+					status: launched.fork.status,
+					projectId: launched.projectId,
+					goalId: launched.goalId,
+					title: launched.title,
+				}, 201);
+			} catch (err) {
+				// The shared owner FIFO has released before cleanup. A failed destination
+				// may itself be a borrower, so terminating it while holding the owner key
+				// would re-enter the same queue.
+				await cleanupFailedFork();
+				if (err instanceof HistoryForkSourceUnavailableError) {
+					json({ error: err.message, code: err.code }, 422);
+				} else {
+					jsonError(500, err, { error: `failed to fork session: ${err instanceof Error ? err.message : String(err)}` });
+				}
+			}
+		} finally {
+			if (historyReservationAcquired && historyReservationKey) {
+				historyForkReservations.delete(historyReservationKey);
+			}
 		}
 		return;
 	}
@@ -14650,15 +15310,53 @@ async function handleApiRoute(
 		return;
 	}
 
+	// PUT /api/sessions/:id/pin — narrow durable Pin / Unpin mutation.
+	const pinMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/pin$/);
+	if (pinMatch && req.method === "PUT") {
+		let id: string;
+		try { id = decodeURIComponent(pinMatch[1]); }
+		catch { json({ error: "Invalid session ID" }, 400); return; }
+		const body = await readBody(req);
+		if (
+			!body
+			|| typeof body !== "object"
+			|| Array.isArray(body)
+			|| typeof body.pinned !== "boolean"
+			|| Object.keys(body).some(key => key !== "pinned")
+		) {
+			json({ error: "Body must be an object containing only boolean pinned" }, 400);
+			return;
+		}
+		try {
+			const user_tags = await sessionManager.setSessionPinned(id, body.pinned);
+			const projectId = sessionManager.getPersistedSession(id)?.projectId;
+			try {
+				broadcastToUi({ type: "sessions_changed", sessionId: id, projectId, user_tags });
+			} catch (err) {
+				console.error(`[broadcast] sessions_changed failed for ${id}:`, err);
+			}
+			json({ user_tags });
+		} catch (err) {
+			if (err instanceof SessionPinNotFoundError) {
+				json({ error: "Session not found" }, 404);
+				return;
+			}
+			jsonError(500, err);
+		}
+		return;
+	}
+
 	// PATCH /api/sessions/:id — update session properties (title, colorIndex, etc.)
 	const patchMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
 	if (patchMatch && req.method === "PATCH") {
 		const id = patchMatch[1];
-		const body = await readBody(req);
-		if (!body || typeof body !== "object") {
+		const rawBody = await readBody(req);
+		if (!rawBody) {
 			json({ error: "Invalid body" }, 400);
 			return;
 		}
+		const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.sessions);
+		if (!body) return;
 
 		if (typeof body.title === "string") {
 			const ok = sessionManager.setTitle(id, body.title);
@@ -14779,9 +15477,13 @@ async function handleApiRoute(
 	const markReadMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/mark-read$/);
 	if (markReadMatch && req.method === "POST") {
 		const id = markReadMatch[1];
-		const ok = sessionManager.markSessionRead(id);
-		if (!ok) { json({ error: "session not found" }, 404); return; }
-		json({ ok: true });
+		try {
+			const ok = await sessionManager.markSessionRead(id);
+			if (!ok) { json({ error: "session not found" }, 404); return; }
+			json({ ok: true });
+		} catch (err) {
+			jsonError(500, err);
+		}
 		return;
 	}
 
@@ -15659,27 +16361,51 @@ async function handleApiRoute(
 			throw new TranscriptReaderError("invalid_params", `${foundName} must be a boolean`);
 		}
 		try {
-			const params = {
-				offset: parseIntParam("offset"),
-				limit: parseIntParam("limit"),
-				pattern: qp.get("pattern") ?? undefined,
-				caseSensitive: qp.get("case_sensitive") === "1" || qp.get("case_sensitive") === "true",
-				context: parseIntParam("context"),
-				verbose: qp.get("verbose") === "1" || qp.get("verbose") === "true",
-				includeToolResults: parseBoolParam("include_tool_results", "includeToolResults"),
-			};
 			const ctx = sessionFsContextForAgentFile(targetPs, targetPs.agentSessionFile);
-			const envelope = await readTranscript(params, {
+			const options = {
 				readContent: () => sessionFileRead(ctx, targetPs.agentSessionFile, sandboxManager),
 				authorContext: {
 					session: targetPs,
 					sidecarEntries: readAuthorSidecar(targetId),
 					agentDeps: {
-						getStaff: (id) => staffManager.getStaff(id),
-						getRole: (name) => resolveRoleForProject(name, targetPs.projectId),
+						getStaff: (id: string) => staffManager.getStaff(id),
+						getRole: (name: string) => resolveRoleForProject(name, targetPs.projectId),
 					},
 				},
-			});
+			};
+			const operation = qp.get("operation");
+			let envelope;
+			if (operation === "list") {
+				envelope = await readAgentTranscript({
+					operation: "list",
+					offset: parseIntParam("offset"),
+					limit: parseIntParam("limit"),
+					pattern: qp.get("pattern") ?? undefined,
+					caseSensitive: qp.get("case_sensitive") === "1" || qp.get("case_sensitive") === "true",
+					context: parseIntParam("context"),
+				}, options);
+			} else if (operation === "inspect") {
+				envelope = await readAgentTranscript({
+					operation: "inspect",
+					messageIndex: parseIntParam("message_index") as number,
+					resultIndex: parseIntParam("result_index"),
+					offset: parseIntParam("offset"),
+					limit: parseIntParam("limit"),
+				}, options);
+			} else if (operation !== null) {
+				throw new TranscriptReaderError("invalid_params", "operation must be list or inspect");
+			} else {
+				// Direct REST/UI compatibility path. Agent reads always supply an operation.
+				envelope = await readTranscript({
+					offset: parseIntParam("offset"),
+					limit: parseIntParam("limit"),
+					pattern: qp.get("pattern") ?? undefined,
+					caseSensitive: qp.get("case_sensitive") === "1" || qp.get("case_sensitive") === "true",
+					context: parseIntParam("context"),
+					verbose: qp.get("verbose") === "1" || qp.get("verbose") === "true",
+					includeToolResults: parseBoolParam("include_tool_results", "includeToolResults"),
+				}, options);
+			}
 			json(envelope);
 		} catch (err) {
 			if (err instanceof TranscriptReaderError) {
@@ -16327,8 +17053,10 @@ async function handleApiRoute(
 	// PUT /api/workflows/:id — requires projectId.
 	if (workflowMatch && req.method === "PUT") {
 		const id = decodeURIComponent(workflowMatch[1]);
-		const body = await readBody(req);
-		if (!body) { json({ error: "Missing body" }, 400); return; }
+		const rawBody = await readBody(req);
+		if (!rawBody) { json({ error: "Missing body" }, 400); return; }
+		const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.workflows);
+		if (!body) return;
 		const qProjectId = url.searchParams.get("projectId") || undefined;
 		if (!qProjectId) { json({ error: "projectId required" }, 400); return; }
 		const ctx = projectContextManager.getOrCreate(qProjectId);
@@ -17160,18 +17888,13 @@ async function handleApiRoute(
 				}
 			}
 		}
-		// If `submitted` is omitted (or non-boolean), preserve whatever is
-		// already on disk. This is critical: the page-unload beacon historically
-		// sent `submitted: false` whenever the local cache hadn't observed a
-		// `true`, which clobbered out-of-band PUT(submitted=true) calls (other
-		// tabs, REST clients, the test harness) on the next page reload (RP-09).
-		// The client now omits the field unless it positively wants to write
-		// `true`; the legacy clear path still goes through the dedicated
-		// /review/submitted PUT.
-		const submitted = typeof body.submitted === "boolean"
-			? body.submitted
-			: reviewAnnotationStore.isSubmitted(sessionId);
-		reviewAnnotationStore.writeAll(sessionId, annotations, submitted);
+		// writeAll merges with the latest persisted state so this annotation-only
+		// unload payload can never clobber per-review submitted/closed tombstones.
+		reviewAnnotationStore.writeAll(
+			sessionId,
+			annotations,
+			typeof body.submitted === "boolean" ? body.submitted : undefined,
+		);
 		json({ ok: true });
 		return;
 	}
@@ -17228,21 +17951,103 @@ async function handleApiRoute(
 		return;
 	}
 
-	// GET /api/sessions/:id/review/submitted
+	// GET /api/sessions/:id/review/tombstones[/:reviewId]
+	// Collection reads expose every durable ID. Exact reads also perform the
+	// one-time migration from a legacy session-wide submitted flag.
+	const reviewTombstoneMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/review\/tombstones(?:\/([^/]+))?$/);
+	if (reviewTombstoneMatch && req.method === "GET") {
+		const sessionId = reviewTombstoneMatch[1];
+		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
+		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
+		if (!reviewTombstoneMatch[2]) {
+			json(reviewAnnotationStore.getReviewTombstones(sessionId));
+			return;
+		}
+		let reviewId: string;
+		try { reviewId = decodeURIComponent(reviewTombstoneMatch[2]); }
+		catch { json({ error: "Invalid reviewId" }, 400); return; }
+		if (!reviewId.trim()) { json({ error: "reviewId is required" }, 400); return; }
+		const state = reviewAnnotationStore.getReviewTombstone(sessionId, reviewId);
+		json({ reviewId, state: state ?? null, submitted: state === "submitted", closed: state === "closed" });
+		return;
+	}
+
+	// PUT /api/sessions/:id/review/tombstones[/:reviewId]
+	if (reviewTombstoneMatch && req.method === "PUT") {
+		const sessionId = reviewTombstoneMatch[1];
+		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
+		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
+		const body = await readBody(req);
+		let pathReviewId: string | undefined;
+		try { pathReviewId = reviewTombstoneMatch[2] ? decodeURIComponent(reviewTombstoneMatch[2]) : undefined; }
+		catch { json({ error: "Invalid reviewId" }, 400); return; }
+		const reviewId = pathReviewId ?? body?.reviewId;
+		const tombstoneState = body?.state;
+		const activeFileId = body?.activeFileId;
+		if (typeof reviewId !== "string" || !reviewId.trim()) { json({ error: "reviewId is required" }, 400); return; }
+		if (tombstoneState !== "submitted" && tombstoneState !== "closed") {
+			json({ error: "state must be submitted or closed" }, 400);
+			return;
+		}
+		if (activeFileId !== undefined && (typeof activeFileId !== "string" || !activeFileId.trim() || Buffer.byteLength(activeFileId, "utf8") > 300 || /[\x00-\x1f\x7f\\/]/.test(activeFileId))) {
+			json({ error: "activeFileId is invalid" }, 400);
+			return;
+		}
+		reviewAnnotationStore.setReviewTombstone(sessionId, reviewId, tombstoneState, activeFileId);
+		json({ ok: true });
+		return;
+	}
+
+	// DELETE /api/sessions/:id/review/tombstones[/:reviewId]
+	if (reviewTombstoneMatch && req.method === "DELETE") {
+		const sessionId = reviewTombstoneMatch[1];
+		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
+		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
+		const body = reviewTombstoneMatch[2] ? undefined : await readBody(req);
+		let pathReviewId: string | undefined;
+		try { pathReviewId = reviewTombstoneMatch[2] ? decodeURIComponent(reviewTombstoneMatch[2]) : undefined; }
+		catch { json({ error: "Invalid reviewId" }, 400); return; }
+		const reviewId = pathReviewId ?? url.searchParams.get("reviewId") ?? body?.reviewId;
+		if (typeof reviewId !== "string" || !reviewId.trim()) { json({ error: "reviewId is required" }, 400); return; }
+		reviewAnnotationStore.clearReviewTombstone(sessionId, reviewId, {
+			clearLegacySubmitted: url.searchParams.get("clearLegacySubmitted") === "true" || body?.clearLegacySubmitted === true,
+		});
+		json({ ok: true });
+		return;
+	}
+
+	// GET /api/sessions/:id/review/submitted[?reviewId=...] — legacy session
+	// boolean when omitted; exact per-review compatibility when supplied.
 	if (req.method === "GET" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/review/submitted")) {
 		const sessionId = url.pathname.split("/")[3];
 		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
 		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
+		const reviewId = url.searchParams.get("reviewId");
+		if (reviewId !== null) {
+			if (!reviewId.trim()) { json({ error: "reviewId is required" }, 400); return; }
+			json({ submitted: reviewAnnotationStore.getReviewTombstone(sessionId, reviewId) === "submitted" });
+			return;
+		}
 		json({ submitted: reviewAnnotationStore.isSubmitted(sessionId) });
 		return;
 	}
 
-	// PUT /api/sessions/:id/review/submitted
+	// PUT /api/sessions/:id/review/submitted — legacy, or exact when reviewId is present.
 	if (req.method === "PUT" && url.pathname.startsWith("/api/sessions/") && url.pathname.endsWith("/review/submitted")) {
 		const sessionId = url.pathname.split("/")[3];
 		if (!sessionManager.getSession(sessionId)) { json({ error: "Session not found" }, 404); return; }
 		if (!reviewAnnotationStore) { json({ error: "Review annotation store not available" }, 500); return; }
 		const body = await readBody(req);
+		if (typeof body?.reviewId === "string") {
+			if (!body.reviewId.trim() || typeof body.submitted !== "boolean") {
+				json({ error: "reviewId and boolean submitted are required" }, 400);
+				return;
+			}
+			if (body.submitted) reviewAnnotationStore.setReviewTombstone(sessionId, body.reviewId, "submitted");
+			else reviewAnnotationStore.clearReviewTombstone(sessionId, body.reviewId);
+			json({ ok: true });
+			return;
+		}
 		reviewAnnotationStore.setSubmitted(sessionId, !!body?.submitted);
 		json({ ok: true });
 		return;
@@ -17349,8 +18154,14 @@ async function handleApiRoute(
 		}
 
 		if (req.method === "PATCH") {
-			const body = await readBody(req);
-			if (!body || typeof body.projectId !== "string" || !body.projectId.trim()) {
+			const rawBody = await readBody(req);
+			if (!rawBody) {
+				json({ error: "Missing projectId" }, 400);
+				return;
+			}
+			const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.staffPatch);
+			if (!body) return;
+			if (typeof body.projectId !== "string" || !body.projectId.trim()) {
 				json({ error: "Missing projectId" }, 400);
 				return;
 			}
@@ -17381,8 +18192,10 @@ async function handleApiRoute(
 		}
 
 		if (req.method === "PUT") {
-			const body = await readBody(req);
-			if (!body) { json({ error: "Missing body" }, 400); return; }
+			const rawBody = await readBody(req);
+			if (!rawBody) { json({ error: "Missing body" }, 400); return; }
+			const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.staffPut);
+			if (!body) return;
 			// Defense-in-depth: roleId, when present, must be a string or null.
 			if (body.roleId !== undefined && body.roleId !== null && typeof body.roleId !== "string") {
 				json({ error: "roleId must be a string or null" }, 400);

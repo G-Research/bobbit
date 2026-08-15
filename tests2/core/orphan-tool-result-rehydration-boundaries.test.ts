@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { createMemFs } from "../harness/mem-fs.js";
+import { SandboxSessionFilesystem } from "../harness/sandbox-session-filesystem.js";
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "orphan-rehydration-boundaries-"));
 const stateDir = path.join(tmpRoot, "state");
@@ -370,6 +371,7 @@ function writeLegacyAigwCatalog(url: string): void {
 					maxTokens: 16_384,
 					reasoning: false,
 					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 				}],
 			},
 		},
@@ -698,6 +700,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 				message: { role: "assistant", content: [{ type: "text", text: "queued done" }], stopReason: "stop" },
 			});
 			listener?.({ type: "agent_end", messages: [] });
+			listener?.({ type: "agent_settled" });
 			return { success: true };
 		});
 		const ps = persisted("boot-continuation-dispatch-fence", file, { wasStreaming: true });
@@ -717,11 +720,14 @@ describe("executable SessionManager rehydration boundaries", () => {
 			message: { role: "assistant", content: [{ type: "text", text: "continued" }], stopReason: "stop" },
 		});
 		listener?.({ type: "agent_end", messages: [] });
-		const canonicalBeforeAck = manager.sessions.get(ps.id);
-		expect(canonicalBeforeAck?.status).toBe("idle");
-		expect(canonicalBeforeAck?.completedTurnCount).toBe(1);
-		expect(canonicalBeforeAck?.promptQueue.toArray().map((row: any) => row.text))
+		const canonicalBeforeSettlement = manager.sessions.get(ps.id);
+		expect(canonicalBeforeSettlement?.status).toBe("idle");
+		expect(canonicalBeforeSettlement?.completedTurnCount).toBe(1);
+		expect(canonicalBeforeSettlement?.promptQueue.toArray().map((row: any) => row.text))
 			.toEqual(["accepted while boot prompt is pending"]);
+		expect(bridge.prompt).not.toHaveBeenCalled();
+
+		listener?.({ type: "agent_settled" });
 		expect(bridge.prompt).not.toHaveBeenCalled();
 
 		bootAccepted.resolve();
@@ -745,12 +751,33 @@ describe("executable SessionManager rehydration boundaries", () => {
 			listener = next;
 			return () => { listener = undefined; };
 		});
-		bridge.promptWhenReady = vi.fn(async () => {
+		bridge.promptWhenReady = vi.fn(async (text: string) => {
 			bootEntered.resolve();
+			// A generic terminal sequence cannot prove which dispatch Pi observed.
+			// Emit the exact pending prompt echo before the late negative ack.
+			listener?.({
+				type: "message_end",
+				message: { id: "boot-continuation-echo", role: "user", content: text },
+			});
 			await rejectAck.promise;
 			throw new Error("Command timed out: prompt");
 		});
 		const ps = persisted("boot-continuation-terminal-before-rejection", file, { wasStreaming: true });
+		// Exercise the existing non-empty compatibility path. The sidecar reader has
+		// no completeness metadata for partially readable files; explicit zero-row
+		// restores alone enter the new fail-closed raw-text mode.
+		appendPromptAuthorDispatch(ps.id, {
+			promptId: "historical-boot-correlation",
+			dispatchedAt: 1,
+			modelText: "unrelated historical prompt",
+			source: "user",
+			author: { kind: "user", id: "user:local", label: "User" },
+		});
+		appendPromptAuthorSettlement(ps.id, {
+			promptId: "historical-boot-correlation",
+			settledAt: 2,
+			outcome: "echoed",
+		});
 		const manager = makeManager(ps, bridge);
 		vi.spyOn(console, "warn").mockImplementation(() => {});
 
@@ -874,6 +901,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(roleBridge.promptWhenReady).toHaveBeenCalledWith(
 			expect.stringMatching(/server restarted while you were mid-turn/i),
 			undefined,
+			{ streamingBehavior: "followUp" },
 		);
 		expect(roleBridge.prompt).not.toHaveBeenCalled();
 		const canonical = manager.sessions.get(ps.id);
@@ -901,13 +929,31 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(manager.sessions.get(ps.id)?.id).toBe(ps.id);
 	});
 
-	it("repairs assignRole refresh history before switch_session", async () => {
+	it("repairs assignRole history and replaces the old bridge cursor projection", async () => {
 		const file = hostTranscript("assign-role");
 		const switches: string[] = [];
 		const replacement = recordingBridge((sessionPath) => {
 			switches.push(sessionPath);
 			assertOrphanRewritten(fs.readFileSync(file, "utf8"));
 		});
+		const replacementMessages = {
+			messages: [
+				{ id: "replacement-user-message", role: "user", content: "replacement prompt" },
+				{ id: "replacement-answer-message", role: "assistant", content: "replacement answer" },
+			],
+		};
+		replacement.getMessages = vi.fn(async () => ({ success: true, data: replacementMessages }));
+		replacement.getTranscriptCursorSnapshot = vi.fn(async () => ({
+			success: true,
+			data: {
+				entries: [
+					{ id: "replacement-cursor", parentId: null, type: "message", message: { role: "user", content: [{ type: "text", text: "replacement prompt" }] } },
+					{ id: "replacement-answer", parentId: "replacement-cursor", type: "message", message: { role: "assistant", content: [{ type: "text", text: "replacement answer" }] } },
+				],
+				leafId: "replacement-answer",
+				forkMessages: [{ entryId: "replacement-cursor", text: "replacement prompt" }],
+			},
+		}));
 		const ps = persisted("assign-role", file);
 		const manager = makeManager(ps, replacement);
 		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
@@ -916,7 +962,11 @@ describe("executable SessionManager rehydration boundaries", () => {
 		oldBridge.getState = async () => ({ success: false, error: "fixture state unavailable" });
 		oldBridge.stop = vi.fn(async () => {});
 		const oldUnsubscribe = vi.fn();
-		manager.sessions.set(ps.id, liveSession(ps.id, oldBridge, { unsubscribe: oldUnsubscribe }));
+		const oldData = { messages: [{ role: "user", content: "old prompt" }] };
+		const live = liveSession(ps.id, oldBridge, { unsubscribe: oldUnsubscribe });
+		live.messagesSnapshotCache = { seq: 0, promise: Promise.resolve({ success: true, data: oldData }) };
+		live.messagesSnapshotCursorProjection = { seq: 0, data: oldData, entryIds: ["old-bridge-cursor"] };
+		manager.sessions.set(ps.id, live);
 
 		const assigned = await manager.assignRole(ps.id, {
 			name: "boundary-role",
@@ -929,6 +979,15 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(oldBridge.stop).toHaveBeenCalledTimes(1);
 		expect(oldUnsubscribe).toHaveBeenCalledTimes(1);
 		expect(manager.sessions.get(ps.id)?.rpcClient).toBe(replacement);
+		expect(replacement.getMessages).toHaveBeenCalledTimes(1);
+		expect(replacement.getTranscriptCursorSnapshot).toHaveBeenCalledTimes(1);
+		const current = await live.messagesSnapshotCache.promise;
+		const visible = manager.buildVisibleMessageSnapshot(ps.id, current.data);
+		expect(visible.messages[0]).toMatchObject({
+			entryId: "replacement-cursor",
+			_entryIdSource: "pi-transcript",
+		});
+		expect(JSON.stringify(visible)).not.toContain("old-bridge-cursor");
 	});
 
 	it("durably queues prompts during assignRole staging and dispatches them only after commit", async () => {
@@ -1709,7 +1768,13 @@ describe("executable SessionManager rehydration boundaries", () => {
 		});
 		manager.sessions.set(ps.id, session);
 
-		const selection = applyRuntimeSessionThinkingSelection(manager, session, "medium");
+		const selection = applyRuntimeSessionThinkingSelection(
+			manager,
+			session,
+			"medium",
+			undefined,
+			racePreferences,
+		);
 		const selectionOutcome = selection.then(
 			(value) => ({ value, error: undefined as unknown }),
 			(error) => ({ value: undefined, error }),
@@ -1862,7 +1927,13 @@ describe("executable SessionManager rehydration boundaries", () => {
 		});
 		manager.sessions.set(ps.id, session);
 
-		const selection = applyRuntimeSessionThinkingSelection(manager, session, "medium");
+		const selection = applyRuntimeSessionThinkingSelection(
+			manager,
+			session,
+			"medium",
+			undefined,
+			racePreferences,
+		);
 		const selectionOutcome = selection.then(
 			(value) => ({ value, error: undefined as unknown }),
 			(error) => ({ value: undefined, error }),
@@ -2542,6 +2613,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 		const manager = makeManager(ps, replacement);
 		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
 		oldBridge.stop = vi.fn(async () => {});
+		oldBridge.prompt = vi.fn(async () => ({ success: true }));
 		const original = liveSession(ps.id, oldBridge, { unsubscribe: vi.fn() });
 		manager.sessions.set(ps.id, original);
 
@@ -2563,6 +2635,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(canonical.lifecycleFenced).not.toBe(true);
 		expect(canonical.rpcClient).toBe(oldBridge);
 		expect(canonical.status).toBe("idle");
+		expect(oldBridge.prompt).not.toHaveBeenCalled();
 		expect(replacement.stop).toHaveBeenCalledTimes(1);
 		expect(replacement.prompt).not.toHaveBeenCalled();
 		expect(canonical.promptQueue.toArray().map((row: any) => row.text))
@@ -3585,18 +3658,15 @@ describe("executable continue-archived/live-fork setup boundary", () => {
 
 	it("rewrites an orphan in a sandbox container-path clone before switching the sandbox process", async () => {
 		const containerFile = "/home/node/.bobbit/agent/sessions/--orphan-boundaries--/continue-sandbox.jsonl";
-		const hostFile = containerPathToHost(containerFile);
+		const sandbox = new SandboxSessionFilesystem({
+			root: path.join(tmpRoot, "continue-sandbox-container"),
+			hostAgentSessionsDir: activeAgentSessionsDir(),
+		});
+		vi.spyOn(sandbox, "exec");
+		const hostFile = sandbox.hostPath(containerFile);
 		fs.mkdirSync(path.dirname(hostFile), { recursive: true });
 		fs.writeFileSync(hostFile, orphanTranscript(), "utf8");
 		createdFiles.push(hostFile);
-		const sandbox = {
-			exec: vi.fn(async (args: string[]) => {
-				if (args[0] === "cat") return fs.readFileSync(hostFile, "utf8");
-				if (args[0] === "test") return "";
-				if (args[0] === "echo") return "ok";
-				throw new Error(`unexpected sandbox exec: ${args.join(" ")}`);
-			}),
-		};
 		const sandboxManager = {
 			ensureForProject: vi.fn(async () => sandbox),
 			get: vi.fn(() => sandbox),

@@ -30,6 +30,8 @@ const MATERIALIZED_PATHS = [
 	"tests2/integration/affected-runner-boundary.test.ts",
 	"tests2/integration/ast-grep-docker-worktree.test.ts",
 	"tests2/integration/ast-grep-worktree.test.ts",
+	"tests2/integration/language-lsp-docker.test.ts",
+	"tests2/integration/language-lsp-worktree.test.ts",
 	"tests2/integration/base-path-cli-entrypoint.test.ts",
 	"tests2/integration/team-spawn-multi-repo-real-git.test.ts",
 ] as const;
@@ -96,6 +98,8 @@ describe("tests-map execution metadata", () => {
 			"tests2/integration/ast-grep-docker-worktree.test.ts",
 			"tests2/integration/ast-grep-worktree.test.ts",
 			"tests2/integration/base-path-cli-entrypoint.test.ts",
+			"tests2/integration/language-lsp-docker.test.ts",
+			"tests2/integration/language-lsp-worktree.test.ts",
 			"tests2/integration/team-spawn-multi-repo-real-git.test.ts",
 		]);
 	});

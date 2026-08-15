@@ -10,7 +10,7 @@
 
 Gateway maintenance used to run synchronous filesystem calls and one synchronous Git subprocess on the Node.js thread. Moving that work after `listen()` did not make it non-blocking: a large artifact tree, stale worktree root, mutation directory, or archive set could still delay unrelated health checks and session creation.
 
-This design makes the scoped call graphs promise-only, bounded, and awaitably owned while preserving their cleanup policy. It is intentionally a focused slice rather than a claim that all gateway synchronous I/O is gone.
+This design makes the scoped call graphs promise-only, bounded, and awaitably owned. It originally preserved the then-current cleanup policy; the current worktree mutation boundary is defined by [Preserve user worktrees](preserve-user-worktrees.md). It is intentionally a focused slice rather than a claim that all gateway synchronous I/O is gone.
 
 ## Scoped before/after inventory
 
@@ -18,7 +18,7 @@ This design makes the scoped call graphs promise-only, bounded, and awaitably ow
 |---|---|---|
 | Shared tree work | Recursive synchronous walks, copies, hashes, and removals could monopolize the gateway thread or materialize wide trees. | `src/server/agent/bounded-async-work.ts` provides ordered bounded mapping, a backpressured dynamic queue, streaming traversal, descriptor-based file I/O, and targeted iterative removal. |
 | Preview artifacts | `removeArtifacts`, `sweepOrphanArtifacts`, `findPreviewArtifactByHash`, metadata reads, candidate validation, recursive listing, hashing, copy, restore, and mount deletion reached synchronous filesystem APIs. | `src/server/preview/artifacts.ts` and `src/server/preview/mount.ts` use promise-only seams. Candidate discovery and metadata reads are streamed and bounded; hashing and copies are chunked; restore and mount replacement are transactional. Preview API, restore, snapshot, SSE, and purge callers await the new contracts. |
-| Worktrees | `sweepOrphanedWorktrees` performed synchronous path checks; `WorktreePool` ran synchronous Git in its constructor and synchronously reclaimed startup entries; inventory and shared cleanup used synchronous discovery/removal checks. | `src/server/agent/worktree-sweeper.ts`, `worktree-pool.ts`, and `worktree-inventory.ts` use async filesystem/Git seams and bounded phases. Pool construction is pure; `initialize()` resolves the repository and reclaims entries asynchronously. `src/server/skills/git.ts::cleanupWorktree` uses targeted async removal. |
+| Worktrees | `sweepOrphanedWorktrees` performed synchronous path checks; `WorktreePool` ran synchronous Git in its constructor and synchronously reclaimed startup entries; inventory and shared cleanup used synchronous discovery/removal checks. | `src/server/agent/worktree-sweeper.ts`, `worktree-pool.ts`, and `worktree-inventory.ts` use async filesystem/Git seams and bounded phases. The boot sweep is diagnostic-only, pool construction is pure, and `initialize()` fills only entries created by the current instance rather than reclaiming discovered leftovers. Exact archived-record cleanup retains targeted async removal. Graceful shutdown stops all live pools before locally draining current-instance ready entries. |
 | Plan mutations | `PlanMutationStore.pruneExpired` and its interval reached synchronous directory, read, write, and unlink helpers. Ticks could overlap and stop did not join a run. | `src/server/agent/plan-mutation-store.ts` streams the directory, processes bounded batches, serializes each goal's mutations, coalesces ticks, and exposes an awaited `stopSweep()`. Route CRUD uses the same async serialization. |
 | Archive purge | `getExpiredArchiveStats` synchronously statted transcripts. `purgeOneSession` reached synchronous sidecar, prompt, mount, artifact, worktree, color, session, team, and tombstone persistence. The artifact listener had a synchronous contract. | `src/server/agent/session-manager.ts` uses bounded stats, per-session purge ownership, async cleanup/persistence seams, and awaited listeners. Manual and scheduled expiry purges coalesce. Shutdown joins both expiry and immediate purges. |
 | Orphan cleanup | A legacy synchronous transcript scanner remained beside the bounded async scanner, and `shouldKeepDespiteOrphan` synchronously checked the worktree and transcript. | `src/server/agent/orphan-cleanup.ts` has one streaming async scanner and one async preservation gate. All restore/archive decisions await the gate; the synchronous twins were removed. |
@@ -116,25 +116,27 @@ There is a known portable boundary: Node exposes pathname-based `rename`, `unlin
 
 ### Boot and pool lifecycle
 
-`src/server/server.ts::runBootBackgroundTasks` starts only after the listener is available. `coordinateBootWorktreeLifecycle` awaits the orphan sweep before pool initialization, preventing a pool claim from renaming an entry while the sweep is reconciling its old listing. Pool initialization then proceeds project by project so candidate-level limits are not multiplied across projects. The gateway retains this boot promise and awaits it during shutdown.
+`src/server/server.ts::runBootBackgroundTasks` starts only after the listener is available. `coordinateBootWorktreeLifecycle` awaits the diagnostic sweep before pool initialization. Pool initialization then proceeds project by project so candidate-level limits are not multiplied across projects. The gateway retains this boot promise and awaits it during shutdown.
 
-`WorktreePool` construction performs no Git or filesystem I/O. Coalesced `initialize()` asynchronously resolves the Git top-level, derives the worktree root, reclaims eligible pool entries, and starts fill. Claims of explicitly registered legacy entries remain compatible only before initialization has ever started. Once an attempt starts, claims use the existing cold-create fallback throughout the pending and failed-attempt windows until a successful explicit retry completes. Failed repository-path resolution is uncached, with matching-promise fencing so an earlier rejection cannot clear a newer retry. `stop()` prevents new work and repeatedly joins every in-flight fill, freshen, claim, and late failure-cleanup operation; `drain()` stops first and removes entries with bounded, per-item-isolated cleanup.
+`WorktreePool` construction performs no Git or filesystem I/O. Coalesced `initialize()` asynchronously resolves the Git top-level, derives the worktree root, and starts ordinary current-instance fill. It does not scan for or adopt a pool-shaped worktree left by an earlier process. Once initialization starts, claims use the cold-create fallback throughout pending and failed-attempt windows until an explicit retry succeeds. Failed repository-path resolution remains uncached, with matching-promise fencing so an earlier rejection cannot clear a newer retry. `stop()` prevents new work and repeatedly joins every tracked fill, freshen, claim, and late claim-failure cleanup operation.
 
-Normal gateway shutdown intentionally does not drain ready pool entries: they remain local-only and are reclaimed next boot. Project removal and explicit maintenance use the awaited drain barrier.
+On graceful gateway shutdown, the retained boot promise settles before the pool snapshot. The gateway starts a bounded `stop()` for every live pool before the first cleanup, then runs a separately bounded `drain()` for each pool whose stop succeeded. A failure or timeout is isolated to that pool. `drain()` snapshots only ready entries still held by that live instance; claimed session and goal worktrees have already left the pool. Drain and tracked claim-failure cleanup force `skipRemotePush: true`, so pool cleanup is local-only. Project removal continues to use the same awaited stop/drain barrier.
 
-### Live ownership revalidation
+A crash, forced termination, or failed bounded drain may leak an entry. A later boot reports it diagnostically and neither repairs, removes, nor adopts it by branch/path/root shape. See [Preserve user worktrees](preserve-user-worktrees.md) for the authoritative ownership and failure contract.
 
-The boot sweeper uses an initial durable-owner snapshot for deterministic candidate classification and counts, but that snapshot never authorizes a mutation. Immediately before each repair or cleanup call, `sweepOrphanedWorktrees` synchronously rebuilds in-memory goal, session, team, and staff ownership in the same uninterrupted JavaScript turn. A branch, path, `cwd`, component worktree, team container, or archive reference that appeared while async scanning was pending therefore blocks or narrows the mutation.
+### Worktree mutation authority
 
-Maintenance cleanup is stricter still. `WorktreeInventoryService.cleanup` performs a fresh scan, serializes mutations per repository through the module-level repository queue, and performs a serial revalidation scan for each selected item. Ownership is the final scan phase, and no await occurs between its actionability decision and starting `cleanupWorktree`. Removal is verified against both the path and Git metadata; branch deletion then rebuilds live and archived guards under the repository mutation queue.
+The boot sweeper uses durable-owner snapshots only to classify and report candidates. It never repairs, removes, or deletes branches for worktrees discovered from Git metadata, branch naming, root placement, or a branch-only record match.
 
-The preserved safety boundary is:
+`WorktreeInventoryService.cleanup` performs a fresh scan and serializes mutations per repository. An unverified Git worktree is non-actionable in canonical and legacy cleanup modes. Ordinary Maintenance cleanup remains available only when an archived session record exactly matches the current repository, worktree path, and non-empty branch; a final serial scan must reproduce the originally selected triple before `cleanupWorktree` starts. Branch deletion then rebuilds live and archived guards under the repository mutation queue.
+
+The current safety boundary is:
 
 - skip primary, detached, live-owned, shared/delegate, team/staff, Headquarters/system, and container-internal worktrees;
-- leave current and legacy pool branches to `WorktreePool`;
-- preserve branches still referenced by archived records;
-- classify filesystem-only directories for attention rather than automatically deleting them;
-- keep cleanup targeted—never run blanket `git worktree prune`; and
+- treat current and legacy pool-shaped leftovers from prior processes as diagnostic-only;
+- preserve branches still referenced by live or archived records;
+- classify unverified Git worktrees and filesystem-only directories for attention rather than automatically deleting them;
+- keep normal exact-owned lifecycle cleanup and exact archived-record Maintenance cleanup targeted—never run blanket `git worktree prune`; and
 - keep per-repository Git mutations sequential while bounding independent repositories and preserving result order.
 
 ## Plan-mutation pruning and decisions
@@ -176,7 +178,7 @@ The archive schedule starts after session restoration, is idempotent, and does n
 |---|---|---|
 | `PlanMutationStore` | Construction installs a daily interval and calls `unref()`, but performs no startup prune. Handle and generation checks fence stale queued callbacks; `runScheduledSweep` coalesces overlapping ticks. | `stopSweep()` marks stopped, advances the generation, clears the interval, then joins the active prune. Project-context removal and shutdown await it. |
 | `SessionManager` archive purge | `startPurgeSchedule()` is called after restore, is idempotent, and performs no startup purge. Scheduled and manual expiry requests share one owner; immediate requests also share per-session owners. | `stopPurgeSchedule()` clears the interval, joins the expiry owner, then joins every immediate purge. `shutdown()` awaits it before other teardown. |
-| Post-listen boot work | This is one retained promise rather than an interval. The sweep precedes pool initialization, and pool projects initialize sequentially. | Gateway shutdown awaits the retained boot promise. Explicit pool `stop()`/`drain()` prevents new work and joins mutation-capable operations. |
+| Post-listen boot work and pools | This is one retained promise rather than an interval. The diagnostic sweep precedes pool initialization, and pool projects initialize sequentially without adopting discovered leftovers. | Gateway shutdown awaits the retained boot promise, starts bounded `stop()` on every live pool before any drain, then locally drains only current-instance ready entries with per-pool failure isolation. |
 
 The rule is consistent: stop future scheduling first, fence callbacks already queued, then await work already owned.
 
@@ -217,7 +219,7 @@ The guard rejects direct, aliased, destructured, bound, injected, or wrapped syn
 Behavioral coverage is split by invariant:
 
 - Preview unit suites cover wide/deep traversal, ordered batched candidates, corruption and missing entries, exact hash/file-list parity, catalog bounds and generation races, descriptor/root/parent identity substitution, transactional install/rollback, quarantine restoration, cleanup idempotency, and per-item failure isolation.
-- Worktree suites cover deferred event-loop progress, shared ceilings, pure pool construction and initialization/stop/drain barriers, boot sweep-before-pool ordering, deterministic inventory results, live ownership arriving during a scan, archived-branch and shared/container/pool protections, and targeted symlink-safe deletion.
+- Worktree suites cover deferred event-loop progress, shared ceilings, pure pool construction, same-instance fill/claim, stop/drain barriers, diagnostic boot sweep-before-pool ordering, stale pool non-adoption, exact archived-record revalidation, shared/container protections, local-only graceful drain, and targeted symlink-safe deletion.
 - Plan-mutation, archive-purge, and orphan suites use deferred fake I/O to pin event-loop progress, bounded read-ahead, goal serialization, atomic decisions, timer single-flight, stale callback fencing, awaited stop/shutdown, retention boundaries, listener ownership, scanner sampling, and every orphan-preservation decision.
 - `tests2/integration/search-preview-api.test.ts` holds artifact validation and purge deletion while `GET /api/health` and `POST /api/sessions` complete, then proves the preview operation itself still waits and selects the first valid artifact from a controlled `Dir.read()` stream. It also pins SSE bootstrap-before-live ordering.
 - `tests2/integration/preview-purge-listener-error.test.ts` proves the awaited listener owns an artifact deletion failure without making the gateway unhealthy. Existing preview route and browser journeys preserve POST, restore, reload, and historical artifact behavior.

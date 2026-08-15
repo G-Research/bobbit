@@ -35,7 +35,7 @@ async function mount(streaming = false): Promise<any> {
 
 const textarea = (el: any) => el.querySelector("textarea") as HTMLTextAreaElement;
 const sendBtn = (el: any) => el.querySelector('button[title="Send message"]') as HTMLButtonElement;
-const abortBtn = (el: any) => el.querySelector('button[title="Stop streaming"]') as HTMLButtonElement | null;
+const abortBtn = (el: any) => el.querySelector('button[title="Stop current turn"]') as HTMLButtonElement | null;
 
 async function typeInto(el: any, text: string) {
 	const ta = textarea(el);

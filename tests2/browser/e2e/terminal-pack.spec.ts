@@ -44,7 +44,7 @@ test.describe("terminal pack panel", () => {
 		const contributions = await listContributions();
 		const terminal = contributions.find((p) => p.packId === "terminal");
 		expect(terminal?.panels?.some((p) => p.id === "terminal.panel")).toBe(true);
-		expect(terminal?.entrypoints?.some((e) => e.kind === "session-menu" && e.label === "Open Terminal")).toBe(true);
+		expect(terminal?.entrypoints?.some((e) => e.kind === "session-menu" && e.label === "Open terminal")).toBe(true);
 
 		await openApp(page);
 		sessionId = await createSessionViaUI(page);
@@ -875,7 +875,7 @@ async function openTerminalFromSessionMenu(page: import("@playwright/test").Page
 	await expect(trigger, "chat header session-actions menu must be available").toBeVisible({ timeout: 10_000 });
 	await trigger.click();
 	await expect(page.locator("sidebar-actions-popover [role='menu']")).toBeVisible({ timeout: 5_000 });
-	const launcher = page.locator('sidebar-actions-popover [role="menuitem"]', { hasText: "Open Terminal" }).first();
+	const launcher = page.locator('sidebar-actions-popover [role="menuitem"]', { hasText: "Open terminal" }).first();
 	await expect(launcher, "the terminal launcher must render in the session menu").toBeVisible({ timeout: 10_000 });
 	await launcher.click();
 	await expect(page.locator("sidebar-actions-popover")).toHaveCount(0, { timeout: 5_000 });

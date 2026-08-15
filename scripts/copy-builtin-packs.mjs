@@ -26,7 +26,7 @@ import path from "node:path";
 // Code Intelligence ships default-disabled; the built-in band still needs its
 // manifest, ordinary tools, panel, provider, and host route assets so the
 // Marketplace can explicitly enable it.
-const FIRST_PARTY_PACKS = ["code-intelligence", "pr-walkthrough", "terminal"]; // explicit allowlist
+const FIRST_PARTY_PACKS = ["code-intelligence", "file-explorer", "pr-walkthrough", "terminal"]; // explicit allowlist
 const SRC = "market-packs";
 const DEST = "dist/server/builtin-packs/market-packs";
 

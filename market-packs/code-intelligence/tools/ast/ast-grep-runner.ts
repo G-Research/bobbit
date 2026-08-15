@@ -191,7 +191,9 @@ export async function executeAstGrep(
 	const root = seams.realpathSync(cwd);
 	const requestedLanguage = typeof input.language === "string" ? normalizeAstGrepLanguage(input.language) : undefined;
 	if (input.language !== undefined && !requestedLanguage) error(`unsupported language: ${String(input.language)}`);
-	const languages = requestedLanguage ? [requestedLanguage.id] : (options.detectLanguages ?? detectAstGrepLanguages)(paths);
+	const languages: AstGrepLanguageAlias[] = requestedLanguage
+		? [requestedLanguage.id]
+		: (options.detectLanguages ?? detectAstGrepLanguages)(paths);
 	if (languages.length === 0) error("no supported source languages were found in paths");
 
 	const exec = options.exec ?? spawnAstGrep;

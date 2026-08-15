@@ -117,8 +117,8 @@ function signals(): GateSignal[] {
 test.beforeEach(() => {
 	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "gate-resignal-core-"));
 	clock = createManualClock(START_TIME);
-	goalStore = new GoalStore(stateDir);
-	gateStore = new GateStore(stateDir);
+	goalStore = new GoalStore(stateDir, undefined, { persistence: "json" });
+	gateStore = new GateStore(stateDir, undefined, { persistence: "json" });
 	goalStore.put(makeGoal());
 	gateStore.initGatesForGoal(GOAL_ID, WORKFLOW.gates.map((gate) => gate.id));
 	events = [];
@@ -156,7 +156,8 @@ test.beforeEach(() => {
 	harness.setTeamLeadNotifier((goalId, message) => notifications.push({ goalId, message }));
 });
 
-test.afterEach(() => {
+test.afterEach(async () => {
+	await Promise.allSettled([goalStore.close(), gateStore.close()]);
 	fs.rmSync(stateDir, { recursive: true, force: true });
 });
 

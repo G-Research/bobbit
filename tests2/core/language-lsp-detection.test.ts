@@ -1,0 +1,135 @@
+import { describe, expect, it } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { MAX_LANGUAGE_DETECTION_ENTRIES, walkLanguageDetectionPaths } from "../../market-packs/code-intelligence/lib/language-matrix.ts";
+import { detectComponentLanguages } from "../../market-packs/code-intelligence/lib/language-detection.ts";
+
+function fixture(): { root: string; dispose: () => void } {
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), "language-lsp-detection-"));
+	return { root, dispose: () => fs.rmSync(root, { recursive: true, force: true }) };
+}
+
+function detect(component: string, root: string, seams?: unknown): any[] {
+	return detectComponentLanguages({ component, root, componentRoot: root } as never, seams as never) as any[];
+}
+
+function fileEntry(name: string): fs.Dirent {
+	return { name, isFile: () => true, isDirectory: () => false, isSymbolicLink: () => false } as fs.Dirent;
+}
+
+function directoryStream(entries: readonly fs.Dirent[]): fs.Dir {
+	let index = 0;
+	return {
+		readSync: () => entries[index++] ?? null,
+		closeSync: () => undefined,
+	} as fs.Dir;
+}
+
+/** Preserve Node's full stat overload contract while supplying normal stats to the walker. */
+function fakeLstatSync(statForPath: (file: fs.PathLike) => fs.Stats): typeof fs.lstatSync {
+	function lstatSync(file: fs.PathLike, options?: undefined): fs.Stats;
+	function lstatSync(file: fs.PathLike, options?: fs.StatSyncOptions & { bigint?: false; throwIfNoEntry: false }): fs.Stats | undefined;
+	function lstatSync(file: fs.PathLike, options: fs.StatSyncOptions & { bigint: true; throwIfNoEntry: false }): fs.BigIntStats | undefined;
+	function lstatSync(file: fs.PathLike, options?: fs.StatSyncOptions & { bigint?: false }): fs.Stats;
+	function lstatSync(file: fs.PathLike, options: fs.StatSyncOptions & { bigint: true }): fs.BigIntStats;
+	function lstatSync(file: fs.PathLike, options: fs.StatSyncOptions & { bigint: boolean; throwIfNoEntry?: false }): fs.Stats | fs.BigIntStats;
+	function lstatSync(file: fs.PathLike, options?: fs.StatSyncOptions): fs.Stats | fs.BigIntStats | undefined;
+	function lstatSync(file: fs.PathLike, options?: fs.StatSyncOptions): fs.Stats | fs.BigIntStats | undefined {
+		return options?.bigint ? fs.lstatSync(file, options) : statForPath(file);
+	}
+	return lstatSync;
+}
+
+describe("per-component LSP language detection", () => {
+	it("returns serializable component-local evidence and keeps detection disabled by default", () => {
+		const f = fixture();
+		try {
+			fs.writeFileSync(path.join(f.root, "package.json"), "{}\n");
+			fs.mkdirSync(path.join(f.root, "src"));
+			fs.writeFileSync(path.join(f.root, "src", "app.ts"), "export const app = true;\n");
+			fs.writeFileSync(path.join(f.root, "src", "view.tsx"), "export const View = () => <main />;\n");
+			fs.writeFileSync(path.join(f.root, "src", "worker.py"), "print('ready')\n");
+
+			const result = detect("frontend", f.root);
+			expect(result.map(detection => detection.component)).toEqual(Array(result.length).fill("frontend"));
+			expect(result.map(detection => detection.languageId)).toEqual(expect.arrayContaining(["python", "typescript", "tsx"]));
+			for (const detection of result) {
+				expect(detection.evidence.fileCount).toBeGreaterThan(0);
+				expect(detection.evidence.matchedGlobs.length).toBeGreaterThan(0);
+				expect(Array.isArray(detection.evidence.rootMarkers)).toBe(true);
+				expect(detection.evidence.truncated).toBe(false);
+				expect(detection.structuralSearch).toMatch(/^(available|unsupported)$/);
+				expect(JSON.parse(JSON.stringify(detection))).toEqual(detection);
+			}
+			for (const languageId of ["python", "typescript", "tsx"]) {
+				expect(result.find(detection => detection.languageId === languageId)).toMatchObject({ lsp: "disabled" });
+			}
+		} finally { f.dispose(); }
+	});
+
+	it("does not follow linked files or linked directories outside the component", () => {
+		const f = fixture();
+		const external = fs.mkdtempSync(path.join(os.tmpdir(), "language-lsp-external-"));
+		try {
+			fs.writeFileSync(path.join(f.root, "app.ts"), "export {};\n");
+			fs.writeFileSync(path.join(external, "outside.rs"), "fn main() {}\n");
+			fs.symlinkSync(path.join(external, "outside.rs"), path.join(f.root, "linked.rs"));
+			fs.symlinkSync(external, path.join(f.root, "linked-directory"), process.platform === "win32" ? "junction" : "dir");
+
+			const ids = detect("safe-component", f.root).map(detection => detection.languageId);
+			expect(ids).toContain("typescript");
+			expect(ids).not.toContain("rust");
+		} finally {
+			f.dispose();
+			fs.rmSync(external, { recursive: true, force: true });
+		}
+	});
+
+	it("reports root-path budget exhaustion from the streamed traversal", () => {
+		const roots = Array.from({ length: MAX_LANGUAGE_DETECTION_ENTRIES + 1 }, (_, index) => `/components/${index}.ts`);
+		let inspected = 0;
+		const report = walkLanguageDetectionPaths(roots, {
+			lstatSync: fakeLstatSync(() => {
+				inspected += 1;
+				return { isSymbolicLink: () => false, isDirectory: () => false, isFile: () => true } as fs.Stats;
+			}),
+			opendirSync: () => { throw new Error("files do not open directories"); },
+		}, () => undefined);
+
+		expect(inspected).toBe(MAX_LANGUAGE_DETECTION_ENTRIES);
+		expect(report).toEqual({ truncated: true });
+	});
+
+	it("marks each component offer as truncated when enumeration cannot complete", () => {
+		const root = "/component";
+		const entries = [fileEntry("first.ts"), ...Array.from({ length: MAX_LANGUAGE_DETECTION_ENTRIES }, (_, index) => fileEntry(`ignored-${index}.txt`)), fileEntry("late.py"), fileEntry("package.json")];
+		let reads = 0;
+		const seams = {
+			lstatSync: fakeLstatSync((file) => {
+				const value = String(file);
+				return { isSymbolicLink: () => false, isDirectory: () => value === root, isFile: () => value !== root } as fs.Stats;
+			}),
+			opendirSync() {
+				const stream = directoryStream(entries);
+				const readSync = stream.readSync.bind(stream);
+				stream.readSync = () => {
+					reads += 1;
+					return readSync();
+				};
+				return stream;
+			},
+		};
+
+		const result = detect("bounded", root, seams);
+		const ids = result.map(detection => detection.languageId);
+		expect(ids).toContain("typescript");
+		expect(ids).not.toContain("python");
+		expect(result.find(detection => detection.languageId === "typescript")?.evidence).toMatchObject({
+			rootMarkers: [],
+			truncated: true,
+		});
+		expect(result.every(detection => detection.evidence.truncated === true)).toBe(true);
+		expect(reads).toBeLessThan(MAX_LANGUAGE_DETECTION_ENTRIES);
+	});
+});

@@ -1,0 +1,12 @@
+name: lsp_symbols
+description: "List document or workspace symbols through an enabled language service."
+summary: "Read-only LSP symbol queries"
+params: ["component?", language, "scope: document | workspace", "path (document) | query (workspace)"]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Code Intelligence
+docs: |-
+  Use `scope: document` with `path` to list symbols in one file. Use
+  `scope: workspace` with `query` to search the selected language workspace.
+  Both require an enabled, ready LSP service and never start or install one.

@@ -243,23 +243,29 @@ describe("startupAigwCheck — models.json refresh on startup", () => {
 		}
 	});
 
-	it("aigw not configured → returns false, models.json untouched", async () => {
-		const sentinel = { providers: { anthropic: { apiKey: "sk-test" } } };
-		writeFileSync(path.join(tmp, "models.json"), JSON.stringify(sentinel, null, 2));
-		const before = readFileSync(path.join(tmp, "models.json"));
+	it("aigw not configured → returns false and leaves every user-owned models.json shape byte-identical", async () => {
+		const modelsPath = path.join(tmp, "models.json");
+		const fixtures = [
+			JSON.stringify({ providers: { anthropic: { apiKey: "sk-test" } } }, null, 2),
+			'{\n  // jsonc comment\n  "providers": {},\n  "unknown": { "keep": true },\n}\n',
+			'{ "providers": { /* malformed */ ',
+			'{"providers":{},"providers":{"unknown":{"keep":true}}}',
+			'{"providers":{"aigw":{"baseUrl":"https://user.invalid","models":[]}},"duplicateRich":[1,1]}',
+		];
 
-		// Skip the no-internet probe path — it would otherwise try localhost candidates.
 		configureAigwRuntimeFlags({ skipAigwDiscovery: true });
 		try {
-
-		const prefs = new PreferencesStore(stateDir);
-		// No aigw.url set.
-
-		const result = await startupAigwCheck(prefs as any);
-		assert.equal(result, false, "should return false when aigw is not configured");
-
-		const after = readFileSync(path.join(tmp, "models.json"));
-		assert.deepEqual(after, before, "models.json must be untouched when aigw is not configured");
+			for (const fixture of fixtures) {
+				writeFileSync(modelsPath, fixture);
+				const prefs = new PreferencesStore(stateDir);
+				const result = await startupAigwCheck(prefs as any);
+				assert.equal(result, false, "should return false when aigw is not configured");
+				assert.equal(readFileSync(modelsPath, "utf-8"), fixture);
+			}
+			rmSync(modelsPath);
+			const prefs = new PreferencesStore(stateDir);
+			assert.equal(await startupAigwCheck(prefs as any), false);
+			assert.equal(existsSync(modelsPath), false, "absent models.json must remain absent");
 		} finally {
 			configureAigwRuntimeFlags({ skipAigwDiscovery: false });
 		}

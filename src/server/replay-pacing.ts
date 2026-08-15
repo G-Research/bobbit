@@ -14,7 +14,12 @@ export const RESUME_REPLAY_DRAIN_TIMEOUT_MS = 250;
 export interface PaceableClient {
 	readyState: number;
 	bufferedAmount: number;
+	streamBackpressureCutover?: boolean;
 	send(data: string): void;
+}
+
+function canSendReplay(client: Pick<PaceableClient, "readyState" | "streamBackpressureCutover">): boolean {
+	return client.readyState === 1 && client.streamBackpressureCutover !== true;
 }
 
 export interface ReplayFrameBudget {
@@ -35,14 +40,15 @@ export function decideResumeReplay(frames: ReplayFrameBudget[], maxBytes: number
 }
 
 export async function waitForReplayDrain(
-	client: Pick<PaceableClient, "readyState" | "bufferedAmount">,
+	client: Pick<PaceableClient, "readyState" | "bufferedAmount" | "streamBackpressureCutover">,
 	deadlineEpochMs: number,
 	sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
 ): Promise<boolean> {
-	while (client.readyState === 1 && client.bufferedAmount > PACE_THRESHOLD_BYTES && Date.now() < deadlineEpochMs) {
+	while (canSendReplay(client) && client.bufferedAmount > PACE_THRESHOLD_BYTES && Date.now() < deadlineEpochMs) {
 		await sleep(10);
+		if (!canSendReplay(client)) return false;
 	}
-	return client.readyState === 1 && client.bufferedAmount <= PACE_THRESHOLD_BYTES;
+	return canSendReplay(client) && client.bufferedAmount <= PACE_THRESHOLD_BYTES;
 }
 
 export async function paceAndSend(
@@ -50,10 +56,13 @@ export async function paceAndSend(
 	data: string,
 	deadlineEpochMs: number,
 	sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
-): Promise<void> {
-	if (client.readyState !== 1) return;
+): Promise<boolean> {
+	if (!canSendReplay(client)) return false;
 	while (client.bufferedAmount > PACE_THRESHOLD_BYTES && Date.now() < deadlineEpochMs) {
 		await sleep(10);
+		if (!canSendReplay(client)) return false;
 	}
+	if (!canSendReplay(client)) return false;
 	client.send(data);
+	return true;
 }
