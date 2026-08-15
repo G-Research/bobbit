@@ -81,17 +81,10 @@ describe("spliceInFlightMessage (H3 server splice)", () => {
 });
 
 /**
- * Steer continuity splice — regression coverage for the dispatch→echo
- * window.
- *
- * `_dispatchSteer()` removes the queue row and broadcasts the empty queue
- * *before* awaiting `rpcClient.steer()`. The SDK eventually echoes the
- * text back as `message_end(role:user)`, but until then the agent's
- * `.jsonl` doesn't contain a user-message row for the steer. A
- * `get_messages` snapshot taken in that window must include the in-flight
- * steer text as a synthetic user row — otherwise the client sees neither
- * a queue pill nor a transcript row (the steer text appears to vanish
- * and reappear).
+ * Recovery projection splice — regression coverage for the dispatch→echo
+ * window. Recovery rows are identity-bearing outbox carriers, never
+ * canonical transcript entries; the real Pi echo remains the only authority
+ * for transcript settlement.
  */
 describe("spliceInFlightSteers (steer continuity splice)", () => {
 	const userRow = (id: string, text: string) => ({
@@ -111,60 +104,68 @@ describe("spliceInFlightSteers (steer continuity splice)", () => {
 		assert.strictEqual(spliceInFlightSteers(messages, []), messages);
 	});
 
-	it("appends synthetic user rows for each in-flight steer text", () => {
+	it("appends identity-bearing, non-retryable uncertain outbox carriers", () => {
 		const messages = [assistantRow("a1", "working...")];
 		const out = spliceInFlightSteers(messages, ["please reroute", "also do X"]);
 		assert.strictEqual(out.length, 3);
 		assert.notStrictEqual(out, messages, "returns a new array when appending");
-		assert.strictEqual(out[1].role, "user");
-		assert.strictEqual(out[1].content[0].text, "please reroute");
-		assert.match(out[1].id, /^inflight-steer:/);
-		assert.strictEqual((out[1] as any)._inFlightSteer, true);
-		assert.strictEqual(out[2].role, "user");
-		assert.strictEqual(out[2].content[0].text, "also do X");
-		assert.notStrictEqual(out[1].id, out[2].id);
+		for (const [index, text] of ["please reroute", "also do X"].entries()) {
+			const row = out[index + 1] as any;
+			const intentId = `legacy-inflight-steer:${index}`;
+			assert.strictEqual(row.role, "user");
+			assert.strictEqual(row.content[0].text, text);
+			assert.strictEqual(row.id, `inflight-steer:${intentId}`);
+			assert.strictEqual(row.deliveryIntentId, intentId);
+			assert.strictEqual(row.deliveryAttemptId, `attempt:legacy-inflight:${intentId}`);
+			assert.strictEqual(row.deliveryState, "uncertain");
+			assert.strictEqual(row.retryable, false);
+			assert.strictEqual(row._inFlightSteer, true);
+			assert.strictEqual(row._deliveryRecoveryProjection, true);
+		}
 	});
 
-	it("is a no-op when the echo has already flushed to .jsonl (defensive dedup)", () => {
+	it("does not let a same-text transcript row settle an unproven recovery carrier", () => {
 		const messages = [
 			assistantRow("a1", "sure"),
 			userRow("u-real", "please reroute"),
 		];
 		const out = spliceInFlightSteers(messages, ["please reroute"]);
-		assert.strictEqual(out, messages, "no new row when text already present");
+		assert.strictEqual(out.length, 3, "raw text is not occurrence evidence");
+		assert.strictEqual((out[2] as any).deliveryIntentId, "legacy-inflight-steer:0");
+		assert.strictEqual((out[2] as any)._deliveryRecoveryProjection, true);
 	});
 
-	it("dedupes one entry but still splices distinct unrepresented ones", () => {
+	it("retains every unproven carrier even when transcript text matches", () => {
 		const messages = [userRow("u1", "already echoed")];
 		const out = spliceInFlightSteers(messages, ["already echoed", "not yet echoed"]);
-		assert.strictEqual(out.length, 2);
-		assert.strictEqual(out[1].content[0].text, "not yet echoed");
+		assert.strictEqual(out.length, 3);
+		assert.deepStrictEqual(out.slice(1).map((row: any) => row.deliveryIntentId), [
+			"legacy-inflight-steer:0",
+			"legacy-inflight-steer:1",
+		]);
 	});
 
-	it("handles string-content user messages in the snapshot", () => {
-		const messages = [{ id: "u1", role: "user", content: "please reroute" }];
-		const out = spliceInFlightSteers(messages, ["please reroute"]);
-		assert.strictEqual(out, messages);
+	it("does not use string-content or attachment rows as settlement identity", () => {
+		const stringMessages = [{ id: "u1", role: "user", content: "please reroute" }];
+		const attachmentMessages = [{
+			id: "u2",
+			role: "user-with-attachments",
+			content: [{ type: "text", text: "with file" }],
+		}];
+		const stringOut = spliceInFlightSteers(stringMessages, ["please reroute"]);
+		const attachmentOut = spliceInFlightSteers(attachmentMessages, ["with file"]);
+		assert.strictEqual(stringOut.length, 2);
+		assert.strictEqual(attachmentOut.length, 2);
+		assert.strictEqual((stringOut[1] as any).deliveryState, "uncertain");
+		assert.strictEqual((attachmentOut[1] as any).deliveryState, "uncertain");
 	});
 
-	it("recognises user-with-attachments role for dedup", () => {
-		const messages = [
-			{
-				id: "u1",
-				role: "user-with-attachments",
-				content: [{ type: "text", text: "with file" }],
-			},
-		];
-		const out = spliceInFlightSteers(messages, ["with file"]);
-		assert.strictEqual(out, messages, "matches user-with-attachments text");
-	});
-
-	it("appended synthetic ids encode ledger position", () => {
+	it("appended synthetic ids derive only from durable occurrence identity", () => {
 		const out = spliceInFlightSteers([], ["first", "second", "third"]);
 		assert.strictEqual(out.length, 3);
-		assert.strictEqual(out[0].id, "inflight-steer:0:first");
-		assert.strictEqual(out[1].id, "inflight-steer:1:second");
-		assert.strictEqual(out[2].id, "inflight-steer:2:third");
+		assert.strictEqual(out[0].id, "inflight-steer:legacy-inflight-steer:0");
+		assert.strictEqual(out[1].id, "inflight-steer:legacy-inflight-steer:1");
+		assert.strictEqual(out[2].id, "inflight-steer:legacy-inflight-steer:2");
 	});
 
 	it("is a no-op when given a non-array messages value", () => {
@@ -172,23 +173,27 @@ describe("spliceInFlightSteers (steer continuity splice)", () => {
 		assert.strictEqual(spliceInFlightSteers(notArr as any, ["x"]), notArr);
 	});
 
-	it("S42: two identical-text steers each splice a distinct row (multiset, not Set)", () => {
+	it("S42: duplicate text preserves two distinct occurrence identities", () => {
 		const out = spliceInFlightSteers([], ["reroute", "reroute"]);
-		// Master (Set-based) returned 1; multiset returns 2 distinct rows.
 		assert.strictEqual(out.length, 2);
-		assert.strictEqual(out[0].id, "inflight-steer:0:reroute");
-		assert.strictEqual(out[1].id, "inflight-steer:1:reroute");
-		assert.strictEqual(out[0].content[0].text, "reroute");
-		assert.strictEqual(out[1].content[0].text, "reroute");
+		assert.deepStrictEqual(out.map((row: any) => row.id), [
+			"inflight-steer:legacy-inflight-steer:0",
+			"inflight-steer:legacy-inflight-steer:1",
+		]);
+		assert.deepStrictEqual(out.map((row: any) => row.deliveryIntentId), [
+			"legacy-inflight-steer:0",
+			"legacy-inflight-steer:1",
+		]);
+		assert.ok(out.every((row: any) => row.retryable === false));
 	});
 
-	it("S42: one identical text already in the snapshot consumes exactly one ledger entry", () => {
+	it("S42: a same-text snapshot row consumes no unproven ledger occurrence", () => {
 		const messages = [{ role: "user", content: [{ type: "text", text: "reroute" }] }];
 		const out = spliceInFlightSteers(messages, ["reroute", "reroute"]);
-		// One real row + one spliced (the other is represented by the snapshot row).
-		assert.strictEqual(out.length, 2);
+		assert.strictEqual(out.length, 3);
 		const synthetic = out.filter((m: any) => m._inFlightSteer);
-		assert.strictEqual(synthetic.length, 1);
+		assert.strictEqual(synthetic.length, 2);
+		assert.ok(synthetic.every((row: any) => row._deliveryRecoveryProjection === true));
 	});
 
 	it("does not leave duplicate bare-string recovery carriers as transcript-owned rows", () => {
@@ -196,8 +201,8 @@ describe("spliceInFlightSteers (steer continuity splice)", () => {
 
 		expect(out).toHaveLength(2);
 		expect(out.map((row: any) => row.id)).toEqual([
-			"inflight-steer:0:same legacy notification",
-			"inflight-steer:1:same legacy notification",
+			"inflight-steer:legacy-inflight-steer:0",
+			"inflight-steer:legacy-inflight-steer:1",
 		]);
 		expect(out.map((row: any) => row.deliveryIntentId)).toEqual([
 			"legacy-inflight-steer:0",

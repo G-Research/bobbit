@@ -261,7 +261,7 @@ describe("message author primitives", () => {
 		expect(invalid.peek()?.author).toBeUndefined();
 	});
 
-	it("normalizes legacy and structured in-flight steer ledgers without inventing tool authors", () => {
+	it("migrates legacy and pre-intent ledgers into stable, non-retryable uncertain carriers", () => {
 		const systemAuthor: MessageAuthor = { kind: "system", id: "system:bobbit", label: "Bobbit" };
 		const restored = normalizePersistedInFlightSteers([
 			"legacy human steer",
@@ -272,11 +272,47 @@ describe("message author primitives", () => {
 			{
 				text: "legacy human steer",
 				promptId: "legacy-inflight-steer:0",
+				intentId: "legacy-inflight-steer:0",
+				attemptId: "attempt:legacy-inflight:legacy-inflight-steer:0",
+				dispatchEpoch: 0,
+				state: "uncertain",
+				targetTurn: "continuation",
+				sequence: 1,
+				kind: "steer",
+				createdAt: 0,
+				retryable: false,
 				source: "user",
 				author: LOCAL_USER_AUTHOR,
 			},
-			{ text: "server steer", promptId: "prompt-system", source: "auto-nudge", author: systemAuthor },
-			{ text: "invalid author", promptId: "prompt-invalid", source: "system" },
+			{
+				text: "server steer",
+				promptId: "prompt-system",
+				intentId: "legacy-inflight-steer:prompt-system",
+				attemptId: "attempt:legacy-inflight:legacy-inflight-steer:prompt-system",
+				dispatchEpoch: 1,
+				state: "uncertain",
+				targetTurn: "continuation",
+				sequence: 2,
+				kind: "steer",
+				createdAt: 1,
+				retryable: false,
+				source: "auto-nudge",
+				author: systemAuthor,
+			},
+			{
+				text: "invalid author",
+				promptId: "prompt-invalid",
+				intentId: "legacy-inflight-steer:prompt-invalid",
+				attemptId: "attempt:legacy-inflight:legacy-inflight-steer:prompt-invalid",
+				dispatchEpoch: 2,
+				state: "uncertain",
+				targetTurn: "continuation",
+				sequence: 3,
+				kind: "steer",
+				createdAt: 2,
+				retryable: false,
+				source: "system",
+			},
 		]);
 	});
 
