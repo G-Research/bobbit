@@ -38,6 +38,11 @@ function goalCwd(tag: string): string {
 	return mkdtempSync(join(nonGitCwd(), `gate-bypass-${tag}-${process.pid}-`));
 }
 
+function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void } {
+	let resolve!: (value: T) => void;
+	return { promise: new Promise<T>(done => { resolve = done; }), resolve };
+}
+
 async function createWorkflow(id: string, gates: Array<Record<string, unknown>>): Promise<void> {
 	const res = await apiFetch("/api/workflows", {
 		method: "POST",
@@ -136,6 +141,86 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/bypass", () => {
 		} finally {
 			conn?.close();
 			if (sessionId) await deleteSession(sessionId).catch(() => {});
+			await deleteGoal(goalId).catch(() => {});
+			await deleteWorkflow(wf);
+		}
+	});
+
+	test("bypass fences signal admission until cancellation settles and remains authoritative", async ({ gateway }) => {
+		const wf = workflowId("gate-bypass-admission-race");
+		await createWorkflow(wf, [
+			{ id: "root", name: "Root", dependsOn: [], verify: [{ name: "ordinary verification", type: "command", run: "echo ordinary" }] },
+		]);
+		const goal = await createGoal({ title: `Gate Bypass Admission Race ${Date.now()}`, cwd: goalCwd("admission-race"), workflowId: wf, worktree: false, team: false, autoStartTeam: false });
+		const goalId = goal.id;
+		const verificationHarness = gateway.teamManager.verificationHarness as any;
+		if (!verificationHarness) throw new Error("verification harness was not wired before bypass admission race test");
+		const originalCancel = verificationHarness.cancelStaleVerificationsForGates;
+		const cancellationEntered = deferred<void>();
+		const releaseCancellation = deferred<void>();
+		try {
+			await waitForGoalSetupReady(goalId);
+			verificationHarness.cancelStaleVerificationsForGates = async (...args: any[]) => {
+				cancellationEntered.resolve();
+				await releaseCancellation.promise;
+				return originalCancel.apply(verificationHarness, args);
+			};
+
+			const bypassRequest = bypassGate(goalId, "root", HUMAN);
+			await cancellationEntered.promise;
+
+			const rejectedSignal = await apiFetch(`/api/goals/${goalId}/gates/root/signal`, {
+				method: "POST",
+				body: JSON.stringify({ content: "must not be admitted while bypass owns the mutation fence" }),
+			});
+			const rejectedBody = await rejectedSignal.json();
+			expect(rejectedSignal.status).toBe(409);
+			expect(rejectedBody.code).toBe("GATE_MUTATION_IN_PROGRESS");
+			expect((await getGate(goalId, "root")).signals).toHaveLength(0);
+			expect(verificationHarness.getActiveVerifications(goalId)).toHaveLength(0);
+
+			releaseCancellation.resolve();
+			const bypass = await bypassRequest;
+			expect(bypass.status, JSON.stringify(bypass.body)).toBe(200);
+
+			const gate = await getGate(goalId, "root");
+			expect(gate.status).toBe("bypassed");
+			expect(gate.signals).toHaveLength(1);
+			expect(gate.signals[0].metadata.bypass).toBe("true");
+			expect(gate.signals[0].verification?.status).not.toBe("failed");
+			expect(verificationHarness.getActiveVerifications(goalId)).toHaveLength(0);
+		} finally {
+			releaseCancellation.resolve();
+			verificationHarness.cancelStaleVerificationsForGates = originalCancel;
+			await deleteGoal(goalId).catch(() => {});
+			await deleteWorkflow(wf);
+		}
+	});
+
+	test("does not mutate a gate when bypass cancellation fence fails", async ({ gateway }) => {
+		const wf = workflowId("gate-bypass-cancellation-failure");
+		await createWorkflow(wf, [
+			{ id: "root", name: "Root", dependsOn: [], verify: [{ name: "ordinary verification", type: "command", run: "echo ordinary" }] },
+		]);
+		const goal = await createGoal({ title: `Gate Bypass Cancellation Failure ${Date.now()}`, cwd: goalCwd("cancellation-failure"), workflowId: wf, worktree: false, team: false, autoStartTeam: false });
+		const goalId = goal.id;
+		const verificationHarness = gateway.teamManager.verificationHarness as any;
+		if (!verificationHarness) throw new Error("verification harness was not wired before bypass cancellation failure test");
+		const originalCancel = verificationHarness.cancelStaleVerificationsForGates;
+		try {
+			await waitForGoalSetupReady(goalId);
+			verificationHarness.cancelStaleVerificationsForGates = async () => {
+				throw new Error("intentional cancellation fence failure");
+			};
+
+			const response = await bypassGate(goalId, "root", HUMAN);
+			expect(response.status).toBe(503);
+			expect(response.body.code).toBe("VERIFICATION_CANCELLATION_FENCE_FAILED");
+			const gate = await getGate(goalId, "root");
+			expect(gate.status).toBe("pending");
+			expect(gate.signals).toHaveLength(0);
+		} finally {
+			verificationHarness.cancelStaleVerificationsForGates = originalCancel;
 			await deleteGoal(goalId).catch(() => {});
 			await deleteWorkflow(wf);
 		}
