@@ -123,6 +123,45 @@ describe("DecisionRequestStore", () => {
 		assert.deepEqual(restarted.getMemory(memory()), memory());
 	});
 
+	it.each(["accepted", "rejected"] as const)("restores a %s import proposal decision after restart", (status) => {
+		const dir = stateDir(`proposal-${status}`);
+		const store = new DecisionRequestStore(dir, memfs);
+		assert.equal(store.put(request("request-1")), true);
+		assert.equal(store.writeTerminalFirst("request-1", {
+			status: "resolved",
+			resolvedAt: "2026-01-01T00:01:00.000Z",
+			resolution: { value: { kind: "option", value: "safe" }, actor: "user", reason: "answered" },
+		}).written, true);
+		assert.equal(store.updateProposal("request-1", { status: "created", type: "role", rev: 1 }), true);
+		const proposal = { status, type: "role" as const, rev: 1, decidedAt: "2026-01-01T00:02:00.000Z" };
+		assert.equal(store.updateProposal("request-1", proposal), true);
+
+		const restarted = new DecisionRequestStore(dir, memfs);
+		assert.equal(restarted.isHealthy(), true);
+		assert.deepEqual(restarted.get("request-1")?.proposal, proposal);
+	});
+
+	it("fails closed on malformed tagged proposal states", () => {
+		const malformed = [
+			{ status: "created", type: "role" },
+			{ status: "created", type: "role", rev: 1, decidedAt: "2026-01-01T00:02:00.000Z" },
+			{ status: "failed", type: "role" },
+			{ status: "failed", type: "role", code: "PROPOSAL_SEED_FAILED", decidedAt: "2026-01-01T00:02:00.000Z" },
+			{ status: "accepted", type: "role", rev: 0, decidedAt: "2026-01-01T00:02:00.000Z" },
+			{ status: "rejected", type: "role", rev: 1, decidedAt: "not-an-instant", code: "PROPOSAL_SEED_FAILED" },
+		];
+		for (const proposal of malformed) {
+			const dir = stateDir("malformed-proposal");
+			const store = new DecisionRequestStore(dir, memfs);
+			assert.equal(store.put(request("request-1", { status: "resolved", resolvedAt: "2026-01-01T00:01:00.000Z" })), true);
+			const file = path.join(dir, "extension-decision-requests.json");
+			const snapshot = JSON.parse(memfs.readFileSync(file, "utf-8"));
+			snapshot.requests["request-1"].proposal = proposal;
+			memfs.writeFileSync(file, JSON.stringify(snapshot), "utf-8");
+			assert.equal(new DecisionRequestStore(dir, memfs).isHealthy(), false);
+		}
+	});
+
 	it("persists immutable import runs and completes each hook once", () => {
 		const store = new DecisionRequestStore(stateDir("import-run"), memfs);
 		const run = {

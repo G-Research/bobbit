@@ -171,16 +171,15 @@ export interface StoredDecisionRequest {
 	 * Terminal review states are durable so an import replay cannot resurrect a
 	 * rejected draft or apply the same reviewed draft twice.
 	 */
-	proposal?: {
-		status: "created" | "failed" | "accepted" | "rejected";
-		type: ProposalType;
-		rev?: number;
-		decidedAt?: string;
-		code?: "PROPOSAL_SEED_FAILED";
-	};
+	proposal?: StoredDecisionProposal;
 	continuationState: "pending" | "delivered" | "skipped";
 	continuationAttempts: number;
 }
+
+export type StoredDecisionProposal =
+	| { status: "created"; type: ProposalType; rev: number }
+	| { status: "failed"; type: ProposalType; code: "PROPOSAL_SEED_FAILED" }
+	| { status: "accepted" | "rejected"; type: ProposalType; rev: number; decidedAt: string };
 
 export interface DecisionRequestStoreState {
 	version: typeof DECISION_REQUEST_STORE_VERSION;
@@ -754,10 +753,16 @@ function isConsentInboxTransition(from: ConsentInboxSurfaceStatus, to: ConsentIn
 	return from === "surfaced" && (to === "completed" || to === "cancelled");
 }
 
-function isProposal(value: unknown): boolean {
-	return isRecord(value) && (value.status === "created" || value.status === "failed") && isProposalType(value.type)
-		&& (value.rev === undefined || isNonNegativeInteger(value.rev))
-		&& (value.code === undefined || value.code === "PROPOSAL_SEED_FAILED");
+function isProposal(value: unknown): value is StoredDecisionProposal {
+	if (!isRecord(value) || !isProposalType(value.type)) return false;
+	if (value.status === "created") {
+		return isPositiveInteger(value.rev) && value.decidedAt === undefined && value.code === undefined;
+	}
+	if (value.status === "failed") {
+		return value.rev === undefined && value.decidedAt === undefined && value.code === "PROPOSAL_SEED_FAILED";
+	}
+	return (value.status === "accepted" || value.status === "rejected")
+		&& isPositiveInteger(value.rev) && isIsoInstant(value.decidedAt) && value.code === undefined;
 }
 
 function isDecisionValue(value: unknown): value is DecisionValue {
@@ -787,6 +792,7 @@ function isIsoInstant(value: unknown): value is string {
 	return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
 }
 function isNonNegativeInteger(value: unknown): value is number { return typeof value === "number" && Number.isInteger(value) && value >= 0; }
+function isPositiveInteger(value: unknown): value is number { return typeof value === "number" && Number.isInteger(value) && value > 0; }
 function isDecisionStatus(value: unknown): value is DecisionStatus { return value === "pending" || value === "resolved" || value === "rejected" || value === "expired" || value === "superseded" || value === "defaulted" || value === "denied" || value === "paused-awaiting-consent"; }
 function isTerminalStatus(value: DecisionStatus): value is DecisionTerminalStatus { return value !== "pending" && value !== "paused-awaiting-consent"; }
 function isDecisionClass(value: unknown): value is DecisionClass { return value === "deferrable" || value === "consent-required"; }
