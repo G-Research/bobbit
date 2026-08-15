@@ -164,6 +164,11 @@ function manualSdkModel(): string {
 	return configuredModel;
 }
 
+/** Keep live control coverage deterministic and reject an unavailable SDK target. */
+function alternateManualSdkModel(configuredModel: string): string {
+	return configuredModel === "claude-haiku-4-5" ? "claude-sonnet-4-5" : "claude-haiku-4-5";
+}
+
 function manualSdkAuthDir(): string {
 	const authDir = process.env.MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR?.trim();
 	if (!authDir) throw new Error("Missing required environment variable: MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR.");
@@ -520,6 +525,8 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			expect(roleUpdate.status).toBe(200);
 
 			const configuredModel = manualSdkModel();
+			const alternateModel = alternateManualSdkModel(configuredModel);
+			expect(alternateModel).not.toBe(configuredModel);
 			const sessionModel = `claude-agent-sdk/${configuredModel}`;
 			const { claudeAgentSdkUnavailableRouteDiagnostic } = await import("../../dist/server/agent/claude-agent-sdk-error.js");
 			const providerResponse = await api("/api/custom-providers", {
@@ -529,7 +536,10 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 					name: "claude-agent-sdk",
 					type: "manual",
 					baseUrl: "http://127.0.0.1:9",
-					models: [{ id: configuredModel, name: "Manual Claude Agent SDK smoke" }],
+					models: [
+						{ id: configuredModel, name: "Manual Claude Agent SDK smoke" },
+						{ id: alternateModel, name: "Manual Claude Agent SDK live-control target" },
+					],
 				}),
 			});
 			expect(providerResponse.status).toBe(200);
@@ -685,6 +695,32 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			expect(transcript.success && hasRootCanonicalToolCall(visibleTranscript, "gate_list")).toBe(true);
 			expect(transcript.success && hasSuccessfulRootToolResult(visibleTranscript, "gate_list")).toBe(true);
 
+			// Use the production live-control transaction with the same isolated
+			// preferences store as the session. This must not retry or fall back.
+			const { applyRuntimeSessionModelSelection } = await import("../../dist/server/ws/runtime-model-selection.js");
+			const beforeModelChange = await session.rpcClient.getState();
+			const currentThinking = beforeModelChange?.data?.thinkingLevel;
+			expect({
+				provider: beforeModelChange?.data?.model?.provider,
+				id: beforeModelChange?.data?.model?.id,
+				thinkingLevel: currentThinking,
+			}).toEqual({ provider: "claude-agent-sdk", id: configuredModel, thinkingLevel: "off" });
+			const selectedModel = await applyRuntimeSessionModelSelection(
+				gateway.sessionManager,
+				session,
+				"claude-agent-sdk",
+				alternateModel,
+				currentThinking,
+				gateway.sessionManager.preferencesStore,
+			);
+			expect(selectedModel).toEqual({ provider: "claude-agent-sdk", id: alternateModel, thinkingLevel: currentThinking });
+			const afterModelChange = await session.rpcClient.getState();
+			expect({
+				provider: afterModelChange?.data?.model?.provider,
+				id: afterModelChange?.data?.model?.id,
+				thinkingLevel: afterModelChange?.data?.thinkingLevel,
+			}).toEqual(selectedModel);
+
 			await runTurn("Call the native Agent tool exactly once with run_in_background: false and subagent_type: \"bobbit-backend-parity-reviewer\". Its task must be: use the Bobbit read tool on README.md. Do not call any other root tool. Do not create or invoke an additional helper.", "constrained foreground helper");
 			transcript = await gateway.sessionManager.getMessagesSnapshotBase(session);
 			expect(transcript.success && hasOneNestedHelper(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, transcript.data))).toBe(true);
@@ -704,6 +740,8 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 				await expect(applyRuntimeSessionThinkingSelection(gateway.sessionManager, session, "low")).rejects.toThrow(/unavailable/i);
 			}
 
+			const expectedResumeTuple = await session.rpcClient.getState();
+			expect(expectedResumeTuple?.data?.model?.id).toBe(alternateModel);
 			const beforeRestart = await gateway.sessionManager.getMessagesSnapshotBase(session);
 			expect(beforeRestart.success && hasDurableSubscriptionUsage(gateway.sessionManager.getSessionCost(created.id))).toBe(true);
 			// Automatic SDK compaction is intentionally observation-only: this smoke
@@ -715,6 +753,16 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			session = await waitFor(() => gateway!.sessionManager.getSession(created.id), "SDK gateway restart/resume", 120_000);
 			await session.rpcClient.waitForReady(90_000);
 			expect(gateway.sessionManager.getPersistedSession(created.id)?.claudeAgentSdkSessionId).toBe(persistedSdkSessionId);
+			const resumedModel = await session.rpcClient.getState();
+			expect({
+				provider: resumedModel?.data?.model?.provider,
+				id: resumedModel?.data?.model?.id,
+				thinkingLevel: resumedModel?.data?.thinkingLevel,
+			}).toEqual({
+				provider: expectedResumeTuple?.data?.model?.provider,
+				id: expectedResumeTuple?.data?.model?.id,
+				thinkingLevel: expectedResumeTuple?.data?.thinkingLevel,
+			});
 			const reloaded = await api(`/api/sessions/${created.id}/transcript`);
 			expect(reloaded.status).toBe(200);
 			const afterRestart = await gateway.sessionManager.getMessagesSnapshotBase(session);
@@ -768,6 +816,8 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			throw new Error("Claude Agent SDK sandbox smoke requires Docker and a rebuilt bobbit-agent image.");
 		}
 		const configuredModel = manualSdkModel();
+		const alternateModel = alternateManualSdkModel(configuredModel);
+		expect(alternateModel).not.toBe(configuredModel);
 		const nonce = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 		const root = join(manualTmpRoot(), `bobbit-claude-agent-sdk-sandbox-${nonce}`);
 		const bobbitDir = join(root, ".bobbit");
@@ -865,7 +915,10 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 					name: "claude-agent-sdk",
 					type: "manual",
 					baseUrl: "http://127.0.0.1:9",
-					models: [{ id: configuredModel, name: "Manual Claude Agent SDK sandbox smoke" }],
+					models: [
+						{ id: configuredModel, name: "Manual Claude Agent SDK sandbox smoke" },
+						{ id: alternateModel, name: "Manual Claude Agent SDK sandbox live-control target" },
+					],
 				}),
 			});
 			expect(providerResponse.status).toBe(200);
@@ -945,19 +998,44 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 				: undefined;
 			expect(sandboxTranscript.success && hasRootCanonicalToolCall(visibleSandboxTranscript, "gate_list")).toBe(true);
 			expect(sandboxTranscript.success && hasSuccessfulRootToolResult(visibleSandboxTranscript, "gate_list")).toBe(true);
+			const { applyRuntimeSessionModelSelection } = await import("../../dist/server/ws/runtime-model-selection.js");
+			const beforeSandboxModelChange = await session.rpcClient.getState();
+			const sandboxThinking = beforeSandboxModelChange?.data?.thinkingLevel;
+			expect({
+				provider: beforeSandboxModelChange?.data?.model?.provider,
+				id: beforeSandboxModelChange?.data?.model?.id,
+				thinkingLevel: sandboxThinking,
+			}).toEqual({ provider: "claude-agent-sdk", id: configuredModel, thinkingLevel: "off" });
+			const selectedSandboxModel = await applyRuntimeSessionModelSelection(
+				gateway.sessionManager,
+				session,
+				"claude-agent-sdk",
+				alternateModel,
+				sandboxThinking,
+				gateway.sessionManager.preferencesStore,
+			);
+			expect(selectedSandboxModel).toEqual({ provider: "claude-agent-sdk", id: alternateModel, thinkingLevel: sandboxThinking });
+			const afterSandboxModelChange = await session.rpcClient.getState();
+			expect({
+				provider: afterSandboxModelChange?.data?.model?.provider,
+				id: afterSandboxModelChange?.data?.model?.id,
+				thinkingLevel: afterSandboxModelChange?.data?.thinkingLevel,
+			}).toEqual(selectedSandboxModel);
 			await runSandboxTurn("Call the native Agent tool exactly once with run_in_background: false and subagent_type: \"bobbit-backend-parity-reviewer\". Its task must be: use the Bobbit read tool on README.md. Do not call any other root tool. Do not create or invoke an additional helper.", "sandbox constrained foreground helper");
 			sandboxTranscript = await gateway.sessionManager.getMessagesSnapshotBase(session);
 			expect(sandboxTranscript.success && hasOneNestedHelper(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data))).toBe(true);
 			const { applyRuntimeSessionThinkingSelection } = await import("../../dist/server/ws/runtime-model-selection.js");
 			const sandboxState = await session.rpcClient.getState();
 			const sandboxModel = sandboxState?.data?.model as { thinkingLevelMap?: Record<string, string | null>; reasoning?: boolean } | undefined;
-			const sandboxThinking = sandboxModel?.reasoning === true ? Object.entries(sandboxModel.thinkingLevelMap ?? {}).find(([level, value]) => level !== "off" && typeof value === "string")?.[0] : undefined;
-			if (sandboxThinking) {
-				const effective = await applyRuntimeSessionThinkingSelection(gateway.sessionManager, session, sandboxThinking);
-				expect(effective.thinkingLevel === sandboxThinking).toBe(true);
+			const supportedSandboxThinking = sandboxModel?.reasoning === true ? Object.entries(sandboxModel.thinkingLevelMap ?? {}).find(([level, value]) => level !== "off" && typeof value === "string")?.[0] : undefined;
+			if (supportedSandboxThinking) {
+				const effective = await applyRuntimeSessionThinkingSelection(gateway.sessionManager, session, supportedSandboxThinking);
+				expect(effective.thinkingLevel === supportedSandboxThinking).toBe(true);
 			} else {
 				await expect(applyRuntimeSessionThinkingSelection(gateway.sessionManager, session, "low")).rejects.toThrow(/unavailable/i);
 			}
+			const expectedSandboxResumeTuple = await session.rpcClient.getState();
+			expect(expectedSandboxResumeTuple?.data?.model?.id).toBe(alternateModel);
 			const beforeReplacement = await gateway.sessionManager.getMessagesSnapshotBase(session);
 			expect(beforeReplacement.success && hasDurableSubscriptionUsage(gateway.sessionManager.getSessionCost(created.id))).toBe(true);
 			// Automatic compaction remains SDK-managed and is only observed if it occurs.
@@ -979,6 +1057,16 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			session = await waitFor(() => gateway!.sessionManager.getSession(created.id), "sandbox SDK gateway restart");
 			await session.rpcClient.waitForReady(120_000);
 			expect(gateway.sessionManager.getPersistedSession(created.id)?.claudeAgentSdkSessionId).toBe(persistedSdkSessionId);
+			const resumedSandboxModel = await session.rpcClient.getState();
+			expect({
+				provider: resumedSandboxModel?.data?.model?.provider,
+				id: resumedSandboxModel?.data?.model?.id,
+				thinkingLevel: resumedSandboxModel?.data?.thinkingLevel,
+			}).toEqual({
+				provider: expectedSandboxResumeTuple?.data?.model?.provider,
+				id: expectedSandboxResumeTuple?.data?.model?.id,
+				thinkingLevel: expectedSandboxResumeTuple?.data?.thinkingLevel,
+			});
 			const sandboxReload = await api(`/api/sessions/${created.id}/transcript`);
 			expect(sandboxReload.status).toBe(200);
 			const afterRestart = await gateway.sessionManager.getMessagesSnapshotBase(session);
