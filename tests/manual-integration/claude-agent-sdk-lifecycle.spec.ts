@@ -1306,8 +1306,9 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			expect(session.sandboxed).toBe(true);
 			expect(session.cwd).toBe("/workspace");
 			await session.rpcClient.waitForReady(120_000);
-			const persistedSdkSessionId = gateway.sessionManager.getPersistedSession(created.id)?.claudeAgentSdkSessionId;
-			expect(typeof persistedSdkSessionId).toBe("string");
+			// The SDK establishes its persistent identity from the first accepted real
+			// user turn; readiness alone must not synthesize a bootstrap session.
+			expect(gateway.sessionManager.getPersistedSession(created.id)?.claudeAgentSdkSessionId).toBeUndefined();
 			const runSandboxTurn = async (text: string, label: string, options: Record<string, unknown> = {}) => {
 				// Subscribe before enqueue to correlate this accepted prompt rather than
 				// treating the prior idle status as proof of completion.
@@ -1330,6 +1331,9 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			expect(resolveComposerSlashDispatch("/sdk-sandbox-dogfood", { runtime: "claude-agent-sdk", registry: sandboxRegistry })?.kind).toBe("skill");
 			expect(resolveComposerSlashDispatch("/compact", { runtime: "claude-agent-sdk", registry: sandboxRegistry })?.kind).toBe("unsupported-compact");
 			await runSandboxTurn(sandboxSlash.originalText, "sandbox Bobbit-owned slash prompt", { modelText: sandboxSlash.modelText, skillExpansions: sandboxSlash.expansions });
+			const persistedSdkSessionId = gateway.sessionManager.getPersistedSession(created.id)?.claudeAgentSdkSessionId;
+			expect(typeof persistedSdkSessionId).toBe("string");
+			if (typeof persistedSdkSessionId !== "string") throw new Error("SDK session identity was not persisted after the first accepted sandbox turn.");
 
 			await runSandboxTurn("Reply with exactly: SDK_SANDBOX_READY", "first sandbox SDK prompt");
 
