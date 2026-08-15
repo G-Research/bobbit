@@ -2,11 +2,12 @@
  * Strict, flat schema-2 extension-settings declarations.
  *
  * This module deliberately has no persistence or secret-store dependency: it
- * normalizes pack-owned declarations and validates only public primitive values.
+ * normalizes pack-owned declarations and validates public setting values.
  */
 
-export type ExtensionSettingKind = "string" | "secret" | "enum" | "boolean" | "number";
-export type ExtensionSettingValue = string | boolean | number;
+export type ExtensionSettingKind = "string" | "secret" | "enum" | "multi-enum" | "boolean" | "number";
+export type ExtensionSettingScalar = string | boolean | number;
+export type ExtensionSettingValue = ExtensionSettingScalar | string[];
 
 export interface ExtensionSettingDefinition {
 	key: string;
@@ -67,6 +68,15 @@ export function reconcileExtensionSettingsValues(
 		// Undefined is absent; optional/new fields remain absent until an operator
 		// supplies a value or a valid declaration default fills it in upstream.
 		if (value === undefined) continue;
+		if (definition.type === "multi-enum") {
+			const normalized = normalizeMultiEnumValue(definition, value);
+			if (!normalized) {
+				invalidKeys.push(definition.key);
+				continue;
+			}
+			values[definition.key] = normalized;
+			continue;
+		}
 		if (!isValidExtensionSettingValue(definition, value)) {
 			invalidKeys.push(definition.key);
 			continue;
@@ -84,8 +94,12 @@ export const MAX_EXTENSION_SETTING_STRING_BYTES = 4 * 1024;
 export const MAX_EXTENSION_SETTING_SECRET_BYTES = 16 * 1024;
 export const MAX_EXTENSION_SETTING_ENUM_VALUES = 128;
 export const MAX_EXTENSION_SETTING_ENUM_VALUE_BYTES = 256;
+export const MAX_EXTENSION_SETTING_MULTI_ENUM_SELECTED_VALUES = 64;
+export const MAX_EXTENSION_SETTING_MULTI_ENUM_SELECTED_BYTES = 16 * 1024;
+export const MAX_EXTENSION_SETTINGS_MULTI_ENUM_SELECTED_VALUES_PER_TARGET = 256;
+export const MAX_EXTENSION_SETTINGS_MULTI_ENUM_SELECTED_BYTES_PER_TARGET = 64 * 1024;
 
-const SETTING_KINDS: ReadonlySet<ExtensionSettingKind> = new Set(["string", "secret", "enum", "boolean", "number"]);
+const SETTING_KINDS: ReadonlySet<ExtensionSettingKind> = new Set(["string", "secret", "enum", "multi-enum", "boolean", "number"]);
 const DESCRIPTOR_KEYS = new Set(["key", "type", "label", "description", "optional", "default", "values", "min", "max"]);
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -114,8 +128,49 @@ function isBoundedText(value: unknown, maxBytes: number, allowEmpty: boolean): v
 		&& Buffer.byteLength(value, "utf8") <= maxBytes;
 }
 
+/**
+ * Validate and copy a selected set that came from durable storage. Declaration
+ * membership and requiredness are deliberately checked by normalizeMultiEnumValue.
+ */
+export function normalizeDurableMultiEnumValue(value: unknown): string[] | undefined {
+	if (!Array.isArray(value)
+		|| value.length > MAX_EXTENSION_SETTING_MULTI_ENUM_SELECTED_VALUES) return undefined;
+	const seen = new Set<string>();
+	let totalBytes = 0;
+	for (const member of value) {
+		if (!isBoundedText(member, MAX_EXTENSION_SETTING_ENUM_VALUE_BYTES, false) || seen.has(member)) return undefined;
+		seen.add(member);
+		totalBytes += Buffer.byteLength(member, "utf8");
+		if (totalBytes > MAX_EXTENSION_SETTING_MULTI_ENUM_SELECTED_BYTES) return undefined;
+	}
+	return [...value].sort();
+}
+
+/**
+ * Validate a selected set against a normalized multi-enum descriptor, returning
+ * a fresh canonical array. The supplied value is never mutated or retained.
+ */
+export function normalizeMultiEnumValue(
+	definition: ExtensionSettingDefinition,
+	value: unknown,
+	options: { allowEmpty?: boolean } = {},
+): string[] | undefined {
+	if (definition.type !== "multi-enum") return undefined;
+	const normalized = normalizeDurableMultiEnumValue(value);
+	if (!normalized) return undefined;
+	// Required multi-enums may never be cleared. The optional option only makes
+	// an already-optional descriptor explicit; it cannot relax requiredness.
+	if (normalized.length === 0 && definition.optional !== true) return undefined;
+	if (normalized.length === 0 && options.allowEmpty === false) return undefined;
+	if (!definition.values || normalized.some(member => !definition.values!.includes(member))) return undefined;
+	return normalized;
+}
+
 export function isExtensionSettingValue(value: unknown): value is ExtensionSettingValue {
-	return typeof value === "string" || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value));
+	return typeof value === "string"
+		|| typeof value === "boolean"
+		|| (typeof value === "number" && Number.isFinite(value))
+		|| normalizeDurableMultiEnumValue(value) !== undefined;
 }
 
 /** Validates a value after the field descriptor has already been normalized. */
@@ -127,6 +182,8 @@ export function isValidExtensionSettingValue(definition: ExtensionSettingDefinit
 			return isBoundedText(value, MAX_EXTENSION_SETTING_SECRET_BYTES, true);
 		case "enum":
 			return typeof value === "string" && definition.values?.includes(value) === true;
+		case "multi-enum":
+			return normalizeMultiEnumValue(definition, value) !== undefined;
 		case "boolean":
 			return typeof value === "boolean";
 		case "number":
@@ -173,7 +230,7 @@ function normalizeField(key: string, raw: unknown): ExtensionSettingDefinition |
 		if (raw.max !== undefined) field.max = raw.max as number;
 	}
 	if (raw.values !== undefined) {
-		if (type !== "enum") return `field ${JSON.stringify(key)} values are only valid for enum`;
+		if (type !== "enum" && type !== "multi-enum") return `field ${JSON.stringify(key)} values are only valid for enum or multi-enum`;
 		if (!Array.isArray(raw.values) || raw.values.length === 0 || raw.values.length > MAX_EXTENSION_SETTING_ENUM_VALUES) return `field ${JSON.stringify(key)} enum values must be a bounded non-empty string array`;
 		const values: string[] = [];
 		const seen = new Set<string>();
@@ -183,14 +240,20 @@ function normalizeField(key: string, raw: unknown): ExtensionSettingDefinition |
 			values.push(value);
 		}
 		field.values = values;
-	} else if (type === "enum") {
-		return `field ${JSON.stringify(key)} enum requires values`;
+	} else if (type === "enum" || type === "multi-enum") {
+		return `field ${JSON.stringify(key)} ${type} requires values`;
 	}
 	if (raw.default !== undefined) {
 		if (type === "secret") return `field ${JSON.stringify(key)} secret must not have a default`;
-		// Validate against the fully-normalized bounds and enum list.
-		if (!isValidExtensionSettingValue(field, raw.default)) return `field ${JSON.stringify(key)} has an invalid default`;
-		field.default = raw.default;
+		if (type === "multi-enum") {
+			const normalized = normalizeMultiEnumValue(field, raw.default);
+			if (!normalized) return `field ${JSON.stringify(key)} has an invalid default`;
+			field.default = normalized;
+		} else {
+			// Validate against the fully-normalized bounds and enum list.
+			if (!isValidExtensionSettingValue(field, raw.default)) return `field ${JSON.stringify(key)} has an invalid default`;
+			field.default = raw.default;
+		}
 	}
 	return field;
 }
