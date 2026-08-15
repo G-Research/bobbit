@@ -140,7 +140,7 @@ describe("Market multi-enum extension settings", () => {
 	it("keeps a primitive Use default draft blank until its PATCH null is saved", async () => {
 		await renderFixture([
 			{ key: "languages", type: "multi-enum", label: "Languages", optional: true, values: ["go"], default: [], value: [], source: "default" },
-			{ key: "bank", type: "string", label: "Bank", default: "default-bank", value: "project-bank", source: "project" },
+			{ key: "bank", type: "string", label: "Bank", optional: true, default: "default-bank", value: "project-bank", source: "project" },
 		]);
 		root.querySelector<HTMLButtonElement>('[data-testid="market-settings-use-default"][data-field-key="bank"]')!.click();
 		await waitFor(() => root.querySelector<HTMLInputElement>('[data-testid="market-settings-input"][data-field-key="bank"]')?.value === "", "cleared primitive default draft");
