@@ -117,7 +117,9 @@ export function normalizeProjectImportDecisionRequest(value: unknown, projectId:
 }
 
 function importActivityFromPayload(payload: unknown): ProjectImportDecisionActivity[] {
-	const entries = Array.isArray(record(payload)?.entries) ? record(payload)!.entries : [];
+	const root = record(payload);
+	const entries = Array.isArray(root?.activity) ? root.activity
+		: Array.isArray(root?.entries) ? root.entries : [];
 	const rows: ProjectImportDecisionActivity[] = [];
 	for (const rawEntry of entries.slice(-50)) {
 		const outcomes = Array.isArray(record(rawEntry)?.outcomes) ? record(rawEntry)!.outcomes : [];
@@ -248,22 +250,14 @@ export async function refreshProjectImportDecisionRequests(projectId: string): P
 			return;
 		}
 		const payload: unknown = await response.json();
-		// Trace visibility is diagnostic only. A stale/unauthorized activity view
-		// must never turn an otherwise actionable decision projection into an
-		// empty success or block the user from answering it.
-		let activity: ProjectImportDecisionActivity[] = [];
-		try {
-			const trace = await gatewayFetch(
-				gatewayRoute(`/api/projects/${encodeURIComponent(projectId)}/import-decision-trace?limit=50`),
-				{ signal: controller.signal },
-			);
-			if (trace.ok) activity = importActivityFromPayload(await trace.json());
-		} catch { /* trace remains an optional, bounded activity projection */ }
 		if (active !== current || current.generation !== generation) return;
+		// One project-owned response is the complete decision projection. Keeping
+		// its optional trace rows on that response avoids a second GET racing the
+		// pending snapshot or consuming a settlement refresh.
 		setProjectionState(current, {
 			state: "loaded",
 			requests: actionableFromPayload(payload, projectId),
-			activity,
+			activity: importActivityFromPayload(payload),
 		});
 	} catch {
 		finishFailedProjection(current, generation);
