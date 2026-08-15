@@ -233,7 +233,7 @@ test.describe("Journey: Fork before this point prompt actions", () => {
 			// At agent_start the authoritative cursor refresh makes the current
 			// durable prompt actionable while the assistant is still working.
 			await sendMessage(page, `STAY_BUSY:4000 ${IN_FLIGHT}`);
-			await expect(page.locator("button[title='Stop streaming']")).toBeVisible({ timeout: 20_000 });
+			await expect(page.getByRole("button", { name: "Stop current turn" })).toBeVisible({ timeout: 20_000 });
 			await expect(promptRow(page, IN_FLIGHT)).toBeVisible({ timeout: 10_000 });
 			await expect(promptTrigger(page, IN_FLIGHT)).toBeVisible({ timeout: 10_000 });
 			await expect(promptTrigger(page, LATER)).toBeVisible();

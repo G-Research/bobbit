@@ -1,5 +1,7 @@
 # Bobbit Real-Time Comms Stack — Master Remediation Plan (Step 3)
 
+> Historical remediation plan, not current runtime reference. Stable occurrence identity and delivery settlement are documented in [Reliable prompt and steer delivery](../../prompt-queue.md).
+
 > Derived from [01-understanding.md](01-understanding.md) (architecture map, file:line anchors) and
 > [02-analysis.md](02-analysis.md) (the 41 confirmed defects, refutations, test-fidelity report §4,
 > and the eight root-cause clusters RC1–RC8 in §5). Every step below is concrete enough for a

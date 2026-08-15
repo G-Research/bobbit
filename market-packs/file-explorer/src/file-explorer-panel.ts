@@ -185,11 +185,29 @@ type ExplorerState = {
 	pendingIdleRefresh: boolean;
 	statusDispose?: () => void;
 	resizeObserver?: ResizeObserver;
-	detachObserver?: MutationObserver;
 	treePaneWidth?: number;
 	storeTimer?: number;
 	lastFocusedElement?: HTMLElement;
 };
+
+const EXPLORER_ROOT_TAG = "bobbit-file-explorer-root";
+
+type ExplorerRootElement = HTMLElement & { onDetached?: () => void };
+
+function createExplorerRoot(): ExplorerRootElement {
+	if (!customElements.get(EXPLORER_ROOT_TAG)) {
+		customElements.define(EXPLORER_ROOT_TAG, class extends HTMLElement {
+			onDetached?: () => void;
+
+			disconnectedCallback(): void {
+				window.setTimeout(() => {
+					if (!this.isConnected) this.onDetached?.();
+				}, 0);
+			}
+		});
+	}
+	return document.createElement(EXPLORER_ROOT_TAG) as ExplorerRootElement;
+}
 
 export default function createFileExplorerPanel() {
 	installStyles();
@@ -225,8 +243,10 @@ export default function createFileExplorerPanel() {
 }
 
 function createState(sid: string): ExplorerState {
-	const root = el("section", "bb-explorer");
+	const root = createExplorerRoot();
+	root.className = "bb-explorer";
 	root.dataset.testid = "file-explorer-panel";
+	root.setAttribute("role", "region");
 	root.setAttribute("aria-label", "File explorer");
 
 	const pathBar = el("header", "bb-explorer-pathbar");
@@ -300,6 +320,7 @@ function createState(sid: string): ExplorerState {
 		initialized: false, initializing: false, uiStateRestored: false, durableMutationGeneration: 0, initializationQueued: false, lifecycleGeneration: 0,
 		active: false, narrow: false, narrowPane: "tree", pendingIdleRefresh: false,
 	};
+	root.onDetached = () => deactivate(state);
 	backButton.addEventListener("click", () => showTree(state!, true));
 	splitter.addEventListener("pointerdown", (event) => beginSplitResize(state!, event));
 	splitter.addEventListener("keydown", (event) => resizeSplitByKeyboard(state!, event));
@@ -399,13 +420,6 @@ function activate(state: ExplorerState): void {
 		state.resizeObserver.observe(state.root);
 	}
 	subscribeToStatus(state);
-	if (typeof MutationObserver !== "undefined") {
-		state.detachObserver = new MutationObserver(() => {
-			if (state.root.isConnected) return;
-			window.setTimeout(() => { if (!state.root.isConnected) deactivate(state); }, 0);
-		});
-		state.detachObserver.observe(document.documentElement, { childList: true, subtree: true });
-	}
 }
 
 function deactivate(state: ExplorerState): void {
@@ -447,8 +461,6 @@ function deactivate(state: ExplorerState): void {
 	state.pendingIdleRefresh = false;
 	state.resizeObserver?.disconnect();
 	state.resizeObserver = undefined;
-	state.detachObserver?.disconnect();
-	state.detachObserver = undefined;
 	if (state.storeTimer !== undefined) window.clearTimeout(state.storeTimer);
 	state.storeTimer = undefined;
 }

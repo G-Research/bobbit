@@ -336,14 +336,20 @@ test.describe("WebSocket frame size routing", () => {
 			expect(Buffer.byteLength(promptText, "utf8")).toBeLessThan(MAX_AUTHENTICATED_PROMPT_TEXT_BYTES);
 
 			const cursor = conn.messageCount();
-			conn.send({ type: "prompt", text: promptText });
+			const intentId = "intent-file-mention-admission-overflow";
+			conn.send({ type: "prompt", text: promptText, intentId });
 			const outcome = await conn.waitForFrom(
 				cursor,
 				(m) => m.type === "error" || messageEndPredicate("user")(m),
 				5_000,
 			);
 
-			expect(outcome).toMatchObject({ type: "error", code: "FILE_MENTION_CANDIDATE_LIMIT" });
+			expect(outcome).toMatchObject({
+				type: "error",
+				code: "FILE_MENTION_CANDIDATE_LIMIT",
+				intentId,
+				retryable: true,
+			});
 			expect(outcome.message ?? "").toMatch(/8192.*non-code file-mention candidates/i);
 			expect(
 				existsSpy.mock.calls.filter(([target]) => path.resolve(String(target)).startsWith(path.resolve(skillDir))).length,
@@ -1020,7 +1026,11 @@ test.describe("WebSocket frame size routing", () => {
 				steerDispatched,
 				"live steer dispatch while prompt mention preprocessing is still pending",
 			);
-			expect(steerSpy).toHaveBeenCalledWith(sessionId, "LIVE_STEER");
+			expect(steerSpy).toHaveBeenCalledWith(
+				sessionId,
+				"LIVE_STEER",
+				expect.objectContaining({ intentId: expect.any(String), source: "user" }),
+			);
 			expect(probeReleased).toBe(false);
 
 			releasePendingProbe();

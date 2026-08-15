@@ -10,6 +10,7 @@ import { bobbitDir, bobbitStateDir, headquartersDir, globalAgentDir } from "../b
 import { caCertPath } from "../auth/tls.js";
 import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { TOOLS_DIR, type ToolManager } from "./tool-manager.js";
+import { PiAssistantStreamNormalizer } from "../../shared/assistant-stream-delta.js";
 import { THINKING_LEVELS, type ThinkingLevel } from "../../shared/thinking-levels.js";
 import { resolveBuiltinPacksDir } from "./builtin-packs.js";
 import { scopePaths } from "./pack-types.js";
@@ -156,11 +157,13 @@ export type RpcEventListener = (event: any) => void;
  * interface (`IRpcBridge`). The production code is unchanged: it still
  * calls `new RpcBridge(opts)` and the factory intercepts transparently.
  */
+export type PromptStreamingBehavior = "steer" | "followUp";
+
 export interface IRpcBridge {
 	start(): Promise<void>;
 	stop(): Promise<void>;
-	prompt(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, timeoutMs?: number): Promise<any>;
-	promptWhenReady(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number }): Promise<any>;
+	prompt(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, timeoutMs?: number, streamingBehavior?: PromptStreamingBehavior): Promise<any>;
+	promptWhenReady(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number; streamingBehavior?: PromptStreamingBehavior }): Promise<any>;
 	steer(text: string): Promise<any>;
 	abort(): Promise<any>;
 	getState(): Promise<any>;
@@ -506,6 +509,8 @@ export class RpcBridge {
 	private stderrDecoder = new StringDecoder("utf8");
 	/** Ring buffer of last stderr lines — included in exit error messages for diagnostics. */
 	private stderrTail: string[] = [];
+	/** Rebuilds Pi 0.84 delta-only RPC updates for Bobbit's cumulative pipeline. */
+	private readonly assistantStreamNormalizer = new PiAssistantStreamNormalizer();
 	private readonly clock: Clock = realClock;
 
 	constructor(
@@ -732,6 +737,7 @@ export class RpcBridge {
 		// Handle spawn errors (e.g. ENOENT when executable not found) — without this
 		// the error becomes an uncaught exception and crashes the gateway.
 		this.process!.on("error", (err: NodeJS.ErrnoException) => {
+			this.assistantStreamNormalizer.reset();
 			console.error(`[rpc-bridge] Process error: ${err.code || err.message}${this.options.cwd ? ` cwd=${this.options.cwd}` : ""}`);
 			for (const [, p] of this.pending) {
 				this.clock.clearTimeout(p.timeout);
@@ -742,6 +748,7 @@ export class RpcBridge {
 		});
 
 		this.process!.on("exit", (code, signal) => {
+			this.assistantStreamNormalizer.reset();
 			const reason = signal ? `signal ${signal}` : `code ${code}`;
 			const stderrContext = this.stderrTail.length > 0
 				? `\n  Last stderr:\n    ${this.stderrTail.slice(-5).join("\n    ")}`
@@ -800,7 +807,12 @@ export class RpcBridge {
 
 	// --- Convenience methods matching the RPC protocol ---
 
-	prompt(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>, timeoutMs?: number) {
+	prompt(
+		text: string,
+		images?: Array<{ type: "image"; data: string; mimeType: string }>,
+		timeoutMs?: number,
+		streamingBehavior?: PromptStreamingBehavior,
+	) {
 		// Defensive backstop: if a prompt carries image(s) but blank text, the
 		// model API rejects the blank ContentBlock. The primary fix synthesizes
 		// text upstream in session-manager.enqueuePrompt (where non-image
@@ -810,7 +822,12 @@ export class RpcBridge {
 		if (images?.length) {
 			console.log(`[rpc-bridge] Sending prompt with ${images.length} image(s), first image: type=${images[0].type}, mimeType=${images[0].mimeType}, data length=${images[0].data?.length}`);
 		}
-		return this.sendCommand({ type: "prompt", message: effectiveText, ...(images?.length ? { images } : {}) }, timeoutMs);
+		return this.sendCommand({
+			type: "prompt",
+			message: effectiveText,
+			...(images?.length ? { images } : {}),
+			...(streamingBehavior ? { streamingBehavior } : {}),
+		}, timeoutMs);
 	}
 
 	/** Wait for a (possibly cold) agent to become responsive, then prompt with a
@@ -820,10 +837,15 @@ export class RpcBridge {
 	async promptWhenReady(
 		text: string,
 		images?: Array<{ type: "image"; data: string; mimeType: string }>,
-		opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number },
+		opts?: { readyTimeoutMs?: number; promptTimeoutMs?: number; streamingBehavior?: PromptStreamingBehavior },
 	): Promise<any> {
 		await this.waitForReady(opts?.readyTimeoutMs ?? COLD_REPROMPT_READY_TIMEOUT_MS);
-		return this.prompt(text, images, opts?.promptTimeoutMs ?? COLD_REPROMPT_PROMPT_TIMEOUT_MS);
+		return this.prompt(
+			text,
+			images,
+			opts?.promptTimeoutMs ?? COLD_REPROMPT_PROMPT_TIMEOUT_MS,
+			opts?.streamingBehavior,
+		);
 	}
 
 	steer(text: string) {
@@ -1131,8 +1153,9 @@ export class RpcBridge {
 			this.pending.delete(parsed.id);
 			p.resolve(parsed);
 		} else {
-			this.recordPiExtensionLoadFailureFromEvent(parsed);
-			const normalized = normalizeToolResultErrorEvent(parsed);
+			const streamNormalized = this.assistantStreamNormalizer.normalize(parsed);
+			this.recordPiExtensionLoadFailureFromEvent(streamNormalized);
+			const normalized = normalizeToolResultErrorEvent(streamNormalized);
 			// Agent event — forward to listeners
 			for (const listener of this.eventListeners) {
 				listener(normalized);

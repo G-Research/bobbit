@@ -19,7 +19,7 @@
  *
  * See docs/design/bobbit-gateway-tool.md for the authoritative design.
  */
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import fs from "node:fs";
 import path from "node:path";
