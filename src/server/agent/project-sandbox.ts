@@ -13,13 +13,12 @@
  * - Init sequence (clone, npm ci, build) runs only on first create
  */
 
-import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
-import { buildDockerRunArgs, projectSandboxVolumeCreateArgs, projectSandboxVolumeNames, SANDBOX_STATE_MOUNTS, validatedE2ERunId } from "./docker-args.js";
+import { buildDockerRunArgs, projectSandboxVolumeCreateArgsByKey, projectSandboxVolumeNames, SANDBOX_STATE_MOUNTS, validatedE2ERunId, type ProjectSandboxVolumeKey } from "./docker-args.js";
 import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { globalAgentDir } from "../bobbit-dir.js";
 import { toDockerPath } from "./rpc-bridge.js";
@@ -46,11 +45,6 @@ interface DockerMountInfo {
 	RW?: boolean;
 	Mode?: string;
 }
-
-type FreshSandboxVolumes = {
-	workspace: boolean;
-	worktrees: boolean;
-};
 
 export interface AgentDirMountExpectation {
 	sessionsDir: string;
@@ -1069,6 +1063,7 @@ export class ProjectSandbox {
 				// Validate with a simple exec
 				try {
 					await this._dockerExec(existingId, ["echo", "ok"]);
+					await this._initializeSandboxVolumeRoots(existingId);
 					this.containerId = existingId;
 					// Audit worktree state on reconnect — helps debug disappearing worktrees
 					try {
@@ -1092,6 +1087,7 @@ export class ProjectSandbox {
 					});
 					// Validate after start
 					await this._dockerExec(existingId, ["echo", "ok"]);
+					await this._initializeSandboxVolumeRoots(existingId);
 					this.containerId = existingId;
 					// Audit worktree state after restart — overlay FS data may have been lost
 					try {
@@ -1157,11 +1153,9 @@ export class ProjectSandbox {
 		addMount(this.options.cloneSource);
 		for (const src of Object.values(this.options.cloneSourceByName ?? {})) addMount(src);
 
-		// Docker-created named volumes start root-owned, but init and agents run as
-		// `node`. Explicit creation also gives every Bobbit-owned volume an owner
-		// label. Capture which ones this attempt actually created so a replacement
-		// container never changes ownership of an existing workspace.
-		const freshVolumes = await this._createFreshSandboxVolumes(e2eRunId);
+		// Explicit creation labels volumes so teardown can identify them even after
+		// their container is gone. Existing volumes are deliberately retained.
+		await this._ensureSandboxVolumes(e2eRunId);
 		const dockerArgs = buildDockerRunArgs({
 			image,
 			workspaceDir: "", // unused for /workspace — named volume instead
@@ -1203,7 +1197,7 @@ export class ProjectSandbox {
 
 		this.containerId = containerId;
 
-		await this._initializeFreshSandboxVolumes(containerId, freshVolumes);
+		await this._initializeSandboxVolumeRoots(containerId);
 
 		// Defense-in-depth: mask /proc/1/environ
 		try {
@@ -1218,29 +1212,15 @@ export class ProjectSandbox {
 		console.log(`[project-sandbox] Created container ${containerId.substring(0, 12)} for project ${projectId}`);
 	}
 
-	/**
-	 * Create named volumes before `docker run` so their ownership labels identify
-	 * Bobbit's resources. The per-attempt initialization marker is checked after
-	 * creation because Docker returns success when a same-named volume already
-	 * exists; only a marker matching this exact attempt proves it is safe to
-	 * initialize.
-	 */
-	private async _createFreshSandboxVolumes(e2eRunId: string | undefined): Promise<FreshSandboxVolumes> {
+	/** Create missing named volumes without coupling their mounts to argument order. */
+	private async _ensureSandboxVolumes(e2eRunId: string | undefined): Promise<void> {
 		const runId = e2eRunId ?? "";
 		const names = projectSandboxVolumeNames(this.options.projectId, runId);
-		const initializationId = randomUUID();
-		const createArgs = projectSandboxVolumeCreateArgs(this.options.projectId, runId, initializationId);
-		const fresh: FreshSandboxVolumes = { workspace: false, worktrees: false };
-
-		for (const [key, name] of Object.entries(names) as Array<[keyof FreshSandboxVolumes, string]>) {
-			if (await this._sandboxVolumeExists(name)) continue;
-			await this.execDocker(createArgs[key === "workspace" ? 0 : 1], { timeout: 15_000, env: DOCKER_ENV });
-			fresh[key] = await this._hasFreshSandboxVolumeLabel(name, runId, initializationId);
-			if (!fresh[key]) {
-				console.warn(`[project-sandbox] Volume ${name} appeared during creation; preserving its existing ownership`);
-			}
+		const createArgs = projectSandboxVolumeCreateArgsByKey(this.options.projectId, runId);
+		for (const key of ["workspace", "worktrees"] as const satisfies readonly ProjectSandboxVolumeKey[]) {
+			if (await this._sandboxVolumeExists(names[key])) continue;
+			await this.execDocker(createArgs[key], { timeout: 15_000, env: DOCKER_ENV });
 		}
-		return fresh;
 	}
 
 	private async _sandboxVolumeExists(name: string): Promise<boolean> {
@@ -1252,31 +1232,16 @@ export class ProjectSandbox {
 		}
 	}
 
-	private async _hasFreshSandboxVolumeLabel(name: string, runId: string, initializationId: string): Promise<boolean> {
-		try {
-			const { stdout } = await this.execDocker([
-				"volume", "inspect", "--format", "{{json .Labels}}", name,
-			], { timeout: 10_000, env: DOCKER_ENV });
-			const labels = JSON.parse(stdout.trim()) as Record<string, string> | null;
-			return labels?.["bobbit-project"] === this.options.projectId
-				&& labels?.["bobbit-volume-initialization"] === initializationId
-				&& (!runId || labels?.["bobbit-e2e-run"] === runId);
-		} catch {
-			return false;
-		}
-	}
-
-	/** Assign writable roots only to volumes proven new by this lifecycle attempt. */
-	private async _initializeFreshSandboxVolumes(containerId: string, fresh: FreshSandboxVolumes): Promise<void> {
-		const directories = [
-			fresh.workspace ? "/workspace" : undefined,
-			fresh.worktrees ? "/workspace-wt" : undefined,
-		].filter((directory): directory is string => Boolean(directory));
-		if (directories.length === 0) return;
-
-		const command = directories.map(directory => `mkdir -p ${directory} && chown node:node ${directory}`).join(" && ");
+	/**
+	 * Docker creates named-volume roots as root. Repair those two stable mount
+	 * points on every container creation so a previous interrupted initialization
+	 * cannot strand later agents. This intentionally does not recurse: existing
+	 * workspace and worktree contents retain their original ownership.
+	 */
+	private async _initializeSandboxVolumeRoots(containerId: string): Promise<void> {
 		await this.execDocker([
-			"exec", "-u", "root", containerId, "sh", "-c", command,
+			"exec", "-u", "root", containerId, "sh", "-c",
+			"mkdir -p /workspace /workspace-wt && chown node:node /workspace /workspace-wt",
 		], { timeout: 10_000, env: DOCKER_ENV });
 	}
 
