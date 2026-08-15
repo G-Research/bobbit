@@ -1,4 +1,4 @@
-import type { AgentDefinition, CanUseTool, McpSdkServerConfigWithInstance, Options, PermissionResult, PreToolUseHookInput } from "@anthropic-ai/claude-agent-sdk";
+import type { AgentDefinition, CanUseTool, McpSdkServerConfigWithInstance, Options, PermissionResult, PreToolUseHookInput, SyncHookJSONOutput } from "@anthropic-ai/claude-agent-sdk";
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z, type ZodTypeAny } from "zod";
 
@@ -31,7 +31,7 @@ export const CLAUDE_NATIVE_TOOL_POLICY = Object.freeze({
 
 const SDK_PREFIX = "mcp__bobbit__";
 const CANONICAL_NAME = /^[a-z][a-z0-9_-]*$/;
-const MAX_APPROVALS = 256;
+const MAX_ADMISSIONS = 256;
 
 export type ClaudeSdkToolPolicy = "allow" | "ask" | "never";
 export type ClaudeSdkToolHandler = (args: Record<string, unknown>, context: { signal?: AbortSignal; toolUseId?: string }) => Promise<unknown>;
@@ -188,10 +188,6 @@ function isCurrentGrant(grant: ClaudeSdkGrantResolution, entry: ClaudeSdkToolEnt
 function deny(message: string): PermissionResult { return { behavior: "deny", message: message.slice(0, 300) }; }
 function allow(): PermissionResult { return { behavior: "allow", updatedInput: undefined }; }
 
-function approvalKey(toolUseId: string | undefined, canonicalName: string): string | undefined {
-	return toolUseId ? `${toolUseId}\u0000${canonicalName.toLowerCase()}` : undefined;
-}
-
 const APPROVED_SUBAGENTS = [
 	{ type: "bobbit-protocol-scout", role: "claude-protocol-scout", description: "Investigate the installed Claude Agent SDK protocol with bounded empirical evidence.", effort: "high", maxTurns: 6 },
 	{ type: "bobbit-backend-parity-reviewer", role: "backend-parity-reviewer", description: "Review a narrowly scoped Claude SDK and Pi runtime parity question.", effort: "medium", maxTurns: 4 },
@@ -282,7 +278,7 @@ export function buildClaudeSdkSubagentPolicy(options: ClaudeSdkSubagentPolicyOpt
 		audit({ sessionId: options.sessionId.slice(0, 128), outcome, ...values });
 	const rememberAdmission = (toolUseId: string, agentType: string | undefined, admitted: boolean): void => {
 		admissions.set(toolUseId, Object.freeze({ agentType, admitted }));
-		while (admissions.size > MAX_APPROVALS) admissions.delete(admissions.keys().next().value!);
+		while (admissions.size > MAX_ADMISSIONS) admissions.delete(admissions.keys().next().value!);
 	};
 	const admit = (rawName: unknown, input: unknown, context: { agentId?: unknown; toolUseId?: string; permissionMode?: unknown }): boolean => {
 		const toolUseId = context.toolUseId;
@@ -483,21 +479,14 @@ export function buildClaudeSdkToolSurface(options: ClaudeSdkToolSurfaceOptions):
 		byRaw.set(rawLower, entry);
 	}
 
-	const approvals = new Set<string>();
 	let disposed = false;
-	const rememberApproval = (toolUseId: string | undefined, canonicalName: string): void => {
-		const key = approvalKey(toolUseId, canonicalName);
-		if (!key) return;
-		approvals.add(key);
-		while (approvals.size > MAX_APPROVALS) approvals.delete(approvals.values().next().value!);
-	};
 	const normalized = (raw: unknown) => normalizeClaudeSdkMcpToolName(raw, byRaw);
 	const eligible = (entry: ClaudeSdkToolEntry | undefined) => !disposed && !!entry && entry.policy !== "never";
 
-	const preDecision = (permissionDecision: "allow" | "ask" | "deny", reason?: string) => ({
+	const preDecision = (permissionDecision: "allow" | "ask" | "deny", reason?: string): SyncHookJSONOutput => ({
 		continue: true,
 		hookSpecificOutput: {
-			hookEventName: "PreToolUse" as const,
+			hookEventName: "PreToolUse",
 			permissionDecision,
 			...(reason ? { permissionDecisionReason: reason } : {}),
 		},
@@ -527,12 +516,10 @@ export function buildClaudeSdkToolSurface(options: ClaudeSdkToolSurfaceOptions):
 			return deny("Tool permission was not granted.");
 		}
 		if (disposed || context.signal.aborted || !isCurrentGrant(grant, normalizedTool!.definition)) return deny("Tool permission was not granted.");
-		// Approval is bound to both the exact SDK call and canonical Bobbit identity.
-		rememberApproval(context.toolUseID, normalizedTool!.canonicalName);
 		return allow();
 	};
 
-	const preToolUse = async (input: PreToolUseHookInput) => {
+	const preToolUse = async (input: PreToolUseHookInput): Promise<SyncHookJSONOutput> => {
 		// agent_id and agent_type are the only subagent fields supplied by the
 		// pinned PreToolUse hook. Root mode is fixed by query options below.
 		const hookInput = input as PreToolUseHookInput & { agent_id?: unknown; agent_type?: unknown };
@@ -546,11 +533,11 @@ export function buildClaudeSdkToolSurface(options: ClaudeSdkToolSurfaceOptions):
 		if (typeof input.tool_name === "string" && input.tool_name.toLowerCase() === "skill") return preDecision("allow");
 		const normalizedTool = normalized(input.tool_name);
 		if (!eligible(normalizedTool?.definition)) return preDecision("deny", "Tool is not in the Bobbit surface.");
-		const key = approvalKey(input.tool_use_id, normalizedTool!.canonicalName);
-		if (normalizedTool!.definition.policy === "ask" && !(key && approvals.delete(key))) {
-			// SDK invokes this hook before canUseTool. Ask lets the documented
-			// permission callback obtain a Bobbit-bound approval; re-entry consumes it.
-			return preDecision("ask");
+		if (normalizedTool!.definition.policy === "ask") {
+			// Do not set a hook permission decision for an interactive root tool.
+			// The SDK must reach canUseTool, which is the sole authority that waits
+			// for and validates the current Bobbit permission-card grant.
+			return { continue: true };
 		}
 		return preDecision("allow");
 	};
@@ -609,7 +596,7 @@ export function buildClaudeSdkToolSurface(options: ClaudeSdkToolSurfaceOptions):
 		subagentStopMatcher: [{ hooks: [subagentStop] }] as any,
 		invoke,
 		renderToolName: (rawName: string) => normalized(rawName)?.canonicalName,
-		dispose: () => { disposed = true; approvals.clear(); options.subagentPolicy?.dispose(); },
+		dispose: () => { disposed = true; options.subagentPolicy?.dispose(); },
 	});
 }
 

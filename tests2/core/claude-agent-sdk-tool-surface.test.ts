@@ -108,7 +108,7 @@ describe("Claude Agent SDK tool surface", () => {
 
 		expect(await (surface.canUseTool as any)("mcp__bobbit__read", {}, permissionContext())).toMatchObject({ behavior: "allow" });
 		const hook = (surface.preToolUseMatcher as any)[0].hooks[0];
-		expect((await hook({ tool_name: "mcp__bobbit__ask_tool", tool_use_id: "use-1" })).hookSpecificOutput.permissionDecision).toBe("ask");
+		expect(await hook({ tool_name: "mcp__bobbit__ask_tool", tool_use_id: "use-1" })).toEqual({ continue: true });
 		expect(await (surface.canUseTool as any)("mcp__bobbit__ask_tool", {}, permissionContext())).toMatchObject({ behavior: "allow" });
 		expect(grants).toEqual([["ask_tool", "Browser"]]);
 		for (const raw of ["mcp__bobbit__never_tool", "Bash", "Agent", "mcp__foreign__read"]) {
@@ -119,6 +119,37 @@ describe("Claude Agent SDK tool surface", () => {
 		expect((await hook({ tool_name: "mcp__bobbit__never_tool", tool_use_id: "never" })).hookSpecificOutput.permissionDecision).toBe("deny");
 		expect((await hook({ tool_name: "Bash", tool_use_id: "native" })).hookSpecificOutput.permissionDecision).toBe("deny");
 		expect((await hook({ tool_name: "mcp__bobbit__read", tool_use_id: "allow" })).hookSpecificOutput.permissionDecision).toBe("allow");
+	});
+
+	it("leaves root ask hooks neutral and makes canUseTool the sole current-grant authority", async () => {
+		const resolutions = [
+			{ granted: false },
+			{ granted: true, tools: ["ask_tool"], group: "Browser", mode: "one-time" as const },
+			{ granted: true, tools: ["ask_tool"], group: "Files", mode: "one-time" as const },
+		];
+		const requested: Array<[string, string]> = [];
+		const surface = build({
+			requestToolGrant: async (name, group) => {
+				requested.push([name, group]);
+				return resolutions.shift()!;
+			},
+		});
+		const hook = (surface.preToolUseMatcher as any)[0].hooks[0];
+
+		expect(surface.sdkAllowNames).toEqual(["mcp__bobbit__read"]);
+		expect(surface.sdkAllowNames).not.toContain("mcp__bobbit__ask_tool");
+		expect(await hook({ tool_name: "mcp__bobbit__ask_tool", tool_use_id: "ask" })).toEqual({ continue: true });
+		await expect((surface.canUseTool as any)("mcp__bobbit__ask_tool", {}, permissionContext({ toolUseID: "denied" }))).resolves.toMatchObject({ behavior: "deny" });
+		await expect((surface.canUseTool as any)("mcp__bobbit__ask_tool", {}, permissionContext({ toolUseID: "granted" }))).resolves.toMatchObject({ behavior: "allow" });
+		await expect((surface.canUseTool as any)("mcp__bobbit__ask_tool", {}, permissionContext({ toolUseID: "wrong-scope" }))).resolves.toMatchObject({ behavior: "deny" });
+		expect(requested).toEqual([["ask_tool", "Browser"], ["ask_tool", "Browser"], ["ask_tool", "Browser"]]);
+		// A neutral hook stays neutral after a grant; no replay or re-entry state exists.
+		expect(await hook({ tool_name: "mcp__bobbit__ask_tool", tool_use_id: "granted" })).toEqual({ continue: true });
+
+		const controller = new AbortController();
+		controller.abort();
+		await expect((surface.canUseTool as any)("mcp__bobbit__ask_tool", {}, permissionContext({ signal: controller.signal, toolUseID: "aborted" }))).resolves.toMatchObject({ behavior: "deny" });
+		expect(requested).toHaveLength(3);
 	});
 
 	it("projects only always-allow tools into the strict isolated SDK query", () => {

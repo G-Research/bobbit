@@ -112,19 +112,19 @@ describe("Claude SDK Bobbit tool permission integration", () => {
 		let calls = 0;
 		const { surface } = fixture(async () => { calls++; return { granted: true, tools: ["ask_user_choices"], group: "Ask", mode: "one-time" }; });
 		await expect(canUse(surface, "mcp__bobbit__ask_user_choices", { toolUseID: "one" })).resolves.toMatchObject({ behavior: "allow" });
-		expect((await preUse(surface, "mcp__bobbit__ask_user_choices", "one")).hookSpecificOutput.permissionDecision).toBe("allow");
+		expect(await preUse(surface, "mcp__bobbit__ask_user_choices", "one")).toEqual({ continue: true });
 		await expect(canUse(surface, "mcp__bobbit__ask_user_choices", { toolUseID: "two" })).resolves.toMatchObject({ behavior: "allow" });
 		expect(calls).toBe(2);
-		// PreToolUse runs before canUseTool, so it must preserve the ask ceiling.
-		expect((await preUse(surface, "mcp__bobbit__ask_user_choices", "bypass")).hookSpecificOutput.permissionDecision).toBe("ask");
+		// Root ask hooks are neutral, so canUseTool alone owns every current grant.
+		expect(await preUse(surface, "mcp__bobbit__ask_user_choices", "bypass")).toEqual({ continue: true });
 	});
 
-	it("binds approvals to their canonical tool and denies subagent hook calls", async () => {
+	it("keeps root ask hooks neutral without replay state and denies subagent hook calls", async () => {
 		const { surface } = fixture(async () => ({ granted: true, tools: ["ask_user_choices"], group: "Ask", mode: "one-time" }));
 		await canUse(surface, "mcp__bobbit__ask_user_choices", { toolUseID: "shared" });
-		// A malicious same tool-use id cannot replay an ask approval for another tool.
-		expect((await preUse(surface, "mcp__bobbit__ask_other", "shared")).hookSpecificOutput.permissionDecision).toBe("ask");
-		expect((await preUse(surface, "mcp__bobbit__ask_user_choices", "shared")).hookSpecificOutput.permissionDecision).toBe("allow");
+		// A prior callback grant cannot alter either root ask hook.
+		expect(await preUse(surface, "mcp__bobbit__ask_other", "shared")).toEqual({ continue: true });
+		expect(await preUse(surface, "mcp__bobbit__ask_user_choices", "shared")).toEqual({ continue: true });
 		expect((await (surface.preToolUseMatcher as any)[0].hooks[0]({ tool_name: "mcp__bobbit__read", tool_use_id: "native", agent_id: "child" })).hookSpecificOutput.permissionDecision).toBe("deny");
 	});
 

@@ -111,8 +111,8 @@ describe("Claude SDK permission-card journey", () => {
 		await expect(blocked).resolves.toMatchObject({ behavior: "allow" });
 		expect(resolutions).toContainEqual(expect.objectContaining({ granted: true, tools: ["ask_user_choices"], group: "Ask", mode: "one-time" }));
 		expect(harness.client.sent).toContainEqual(expect.objectContaining({ type: "tool_permission_settled", status: "granted" }));
-		expect((await preUse(surface, "mcp__bobbit__ask_user_choices", "one-time-call")).hookSpecificOutput.permissionDecision).toBe("allow");
-		expect((await preUse(surface, "mcp__bobbit__ask_user_choices", "one-time-call")).hookSpecificOutput.permissionDecision).toBe("ask");
+		expect(await preUse(surface, "mcp__bobbit__ask_user_choices", "one-time-call")).toEqual({ continue: true });
+		expect(await preUse(surface, "mcp__bobbit__ask_user_choices", "one-time-call")).toEqual({ continue: true });
 
 		const nextCall = canUse(surface, "requires-another-card");
 		expect(pending(harness).id).not.toBe(request.id);
@@ -132,7 +132,7 @@ describe("Claude SDK permission-card journey", () => {
 		// A new SDK invocation asks the manager again; its session-owned grant decides it without a second card.
 		await expect(canUse(sessionSurface, "session-grant-next")).resolves.toMatchObject({ behavior: "allow" });
 		expect(sessionHarness.session.pendingGrantRequest).toBeUndefined();
-		expect((await preUse(sessionSurface, "mcp__bobbit__ask_user_choices", "session-grant-next")).hookSpecificOutput.permissionDecision).toBe("allow");
+		expect(await preUse(sessionSurface, "mcp__bobbit__ask_user_choices", "session-grant-next")).toEqual({ continue: true });
 
 		const persistentHarness = makeHarness();
 		const { surface: persistentSurface, resolutions: persistentResolutions } = surfaceFor(persistentHarness);
@@ -142,8 +142,8 @@ describe("Claude SDK permission-card journey", () => {
 		await expect(persistentCall).resolves.toMatchObject({ behavior: "allow" });
 		expect(persistentResolutions.at(-1)).toMatchObject({ granted: true, mode: "persistent", tools: ["ask_user_choices"] });
 		expect(persistentHarness.role.toolPolicies).toMatchObject({ ask_user_choices: "allow" });
-		// The existing surface remains ask-gated; a recomputed/restarted surface owns the policy change.
-		expect((await preUse(persistentSurface, "mcp__bobbit__ask_user_choices", "callback-bypass")).hookSpecificOutput.permissionDecision).toBe("ask");
+		// The existing surface remains neutral; a recomputed/restarted surface owns the policy change.
+		expect(await preUse(persistentSurface, "mcp__bobbit__ask_user_choices", "callback-bypass")).toEqual({ continue: true });
 	});
 
 	it("settles aborts, timeouts, stale actions, and disposed surfaces without leaving actionable cards", async () => {
@@ -196,12 +196,12 @@ describe("Claude SDK permission-card journey", () => {
 			await mismatchHarness.manager.grantToolPermission(mismatchHarness.session.id, "ask_user_choices", "tool", "Ask", "one-time", request.id);
 			await expect(mismatched).resolves.toMatchObject({ behavior: "deny" });
 			expect(resolutions.at(-1)).toMatchObject({ granted: true, tools: ["ask_user_choices"], group: "Ask" });
-			expect((await preUse(surface, "mcp__bobbit__ask_user_choices", label)).hookSpecificOutput.permissionDecision).toBe("ask");
+			expect(await preUse(surface, "mcp__bobbit__ask_user_choices", label)).toEqual({ continue: true });
 		}
 
 		const defenceHarness = makeHarness();
 		const { surface } = surfaceFor(defenceHarness);
-		expect((await preUse(surface, "mcp__bobbit__ask_user_choices", "bypass")).hookSpecificOutput.permissionDecision).toBe("ask");
+		expect(await preUse(surface, "mcp__bobbit__ask_user_choices", "bypass")).toEqual({ continue: true });
 		for (const name of ["Bash", "mcp__foreign__ask_user_choices", "mcp__bobbit__bash"]) {
 			await expect((surface.canUseTool as any)(name, {}, { signal: new AbortController().signal, toolUseID: name })).resolves.toMatchObject({ behavior: "deny" });
 			expect((await preUse(surface, name, name)).hookSpecificOutput.permissionDecision).toBe("deny");
