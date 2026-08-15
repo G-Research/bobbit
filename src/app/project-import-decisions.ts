@@ -132,7 +132,8 @@ function importActivityFromPayload(payload: unknown): ProjectImportDecisionActiv
 		: Array.isArray(root?.entries) ? root.entries : [];
 	const rows: ProjectImportDecisionActivity[] = [];
 	for (const rawEntry of entries.slice(-50)) {
-		const outcomes = Array.isArray(record(rawEntry)?.outcomes) ? record(rawEntry)!.outcomes : [];
+		const entry = record(rawEntry);
+		const outcomes = Array.isArray(entry?.outcomes) ? entry.outcomes : [];
 		for (const raw of outcomes.slice(0, 50)) {
 			const outcome = record(raw);
 			const hookId = string(outcome?.hookId, 128);
