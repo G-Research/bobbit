@@ -1,4 +1,5 @@
 import type { HookScopeContext, TurnUsageSnapshot } from "./lifecycle-hub.js";
+import type { DetectedProjectLanguage, ProjectImportComponent } from "./project-import-decision-context.js";
 import {
 	AdvisorySelectionContractError,
 	validateAdvisorySelectionProposal,
@@ -96,6 +97,18 @@ export interface DecisionHookContext {
 	readonly priorDecision?: DecisionValue;
 }
 
+/** Bounded server-derived context for the project registration lifecycle only. */
+export interface ProjectImportDecisionHookContext {
+	readonly event: "projectImported";
+	readonly projectId: string;
+	readonly importId: string;
+	readonly projectRoot: string;
+	readonly ownedRoots: readonly string[];
+	readonly components: readonly ProjectImportComponent[];
+}
+
+export type { DetectedProjectLanguage, ProjectImportComponent } from "./project-import-decision-context.js";
+
 /** Extended host context for typed advisory selection hooks. */
 export interface AdvisorySelectionHookContext extends DecisionHookContext {
 	/** Present only for afterTurn and copied from the terminal usage snapshot. */
@@ -105,6 +118,11 @@ export interface AdvisorySelectionHookContext extends DecisionHookContext {
 }
 
 export interface DecisionResolutionContext extends DecisionHookContext {
+	readonly requestId: string;
+	readonly resolution: ValidatedDecisionResolution;
+}
+
+export interface ProjectImportDecisionResolutionContext extends ProjectImportDecisionHookContext {
 	readonly requestId: string;
 	readonly resolution: ValidatedDecisionResolution;
 }
@@ -120,8 +138,8 @@ export interface RequestMutationHookContext {
 }
 
 export interface DecisionHookModule {
-	decide(ctx: DecisionHookContext): Promise<DecisionHookOutput | null | undefined> | DecisionHookOutput | null | undefined;
-	onDecision?(ctx: DecisionResolutionContext): Promise<void> | void;
+	decide(ctx: DecisionHookContext | ProjectImportDecisionHookContext): Promise<DecisionHookOutput | null | undefined> | DecisionHookOutput | null | undefined;
+	onDecision?(ctx: DecisionResolutionContext | ProjectImportDecisionResolutionContext): Promise<void> | void;
 }
 
 export interface ValidateDecisionHookOutputOptions {
@@ -507,4 +525,17 @@ export function validateDecisionHookOutput(raw: unknown, options: ValidateDecisi
 		}
 	}
 	fail("INVALID_HOOK_OUTPUT");
+}
+
+/**
+ * Project-import hooks retain the shared output validator, then apply the one
+ * lifecycle-specific scope fence before any request can reach persistence.
+ */
+export function validateProjectImportDecisionHookOutput(raw: unknown, options: ValidateDecisionHookOutputOptions = {}): ValidatedDecisionHookOutput | null {
+	// A mutation is unavailable at this lifecycle boundary regardless of whether
+	// its nested proposal would be valid for a prompt/tool request.
+	if (isRecord(raw) && raw.kind === "request-mutation") fail("DECISION_OUTPUT_UNAVAILABLE");
+	const output = validateDecisionHookOutput(raw, options);
+	if (output?.kind === "request" && output.request.scope !== "project") fail("DECISION_SCOPE_UNAVAILABLE");
+	return output;
 }
