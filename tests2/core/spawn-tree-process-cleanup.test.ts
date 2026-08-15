@@ -257,6 +257,30 @@ process.stdout.write(JSON.stringify({ acknowledged, reaped }) + "\n", () => {
 });
 `;
 
+const POSIX_COMMAND_INJECTION_PROBE = String.raw`
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawnTracked } from ${JSON.stringify(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-posix-command-injection-"));
+const injected = path.join(dir, "injected");
+try {
+  // If this command were assembled into shell source, the trailing redirect
+  // would create `injected`. The tracked launcher must instead try to execute
+  // this complete string as one shell-free executable path.
+  const command = process.execPath + "; printf injected > " + JSON.stringify(injected);
+  const tracked = spawnTracked(command, [], { stdio: ["ignore", "ignore", "ignore", "pipe"] });
+  await tracked.ownershipReady;
+  await new Promise((resolve, reject) => { tracked.child.once("close", resolve); tracked.child.once("error", reject); });
+  assert.equal(fs.existsSync(injected), false, "configured command must not be interpreted by a shell");
+  assert.equal(await tracked.waitForTreeExit(1_500), true);
+  process.stdout.write(JSON.stringify({ injected: fs.existsSync(injected) }) + "\n");
+} finally {
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+`;
+
 type FakeReadyPipe = EventEmitter & { unrefCalls: number; unref(): void };
 type FakeChild = ChildProcess & { killCalls: NodeJS.Signals[]; readyPipe: FakeReadyPipe };
 
@@ -760,6 +784,18 @@ describe("spawnTracked timeout cleanup", () => {
 		}
 		const result = await runNativeJsonProbe(IDENTITY_FAILURE_PROBE);
 		expect(result).toEqual({ acknowledged: false, reaped: true });
+	});
+
+	it("keeps configured POSIX commands outside every shell boundary", async () => {
+		if (process.platform === "win32") {
+			expect(process.platform).toBe("win32");
+			return;
+		}
+		const result = await runNativeJsonProbe(POSIX_COMMAND_INJECTION_PROBE);
+		expect(result).toEqual({ injected: false });
+		expect(SPAWN_TREE_SOURCE).toContain("withPosixSentinelPipes");
+		expect(SPAWN_TREE_SOURCE).toContain("/dev/fd/${posixPipes!.scriptFd}");
+		expect(SPAWN_TREE_SOURCE).toContain('exec \\"$@\\"');
 	});
 
 	it("refuses a reused POSIX sentinel PID before it can signal a group", async () => {
