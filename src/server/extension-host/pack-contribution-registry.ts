@@ -451,8 +451,8 @@ export class PackContributionRegistry implements PackContributionResolver {
 			if (resolvedRuntimes.length !== contrib.runtimes.length) contrib = { ...contrib, runtimes: resolvedRuntimes };
 
 			// Sandbox requirements are inert catalog entries until every independent
-			// eligibility check succeeds. The final grant lookup is mandatory and is
-			// pack-principal-only at its server wiring boundary.
+			// eligibility check succeeds. The final authorization lookup is mandatory
+			// and pack-principal-only at its server wiring boundary.
 			const disabledSandboxRequirements = this.disabledSandboxRequirements
 				? new Set(this.disabledSandboxRequirements(e.scope, projectId, contrib.packName))
 				: undefined;
