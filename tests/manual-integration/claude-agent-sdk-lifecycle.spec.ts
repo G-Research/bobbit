@@ -226,14 +226,14 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			const hasApprovedAgentDir = typeof approvedAgentDir === "string" && approvedAgentDir.trim().length > 0;
 			configureDirectSmokeEnvironment(originalEnvironment);
 
+			// Reset and set the directory before loading anything that can import the
+			// OAuth credential boundary. Those modules may cache startup-derived state.
 			const { getAgentDirState, globalAgentDir, normalizeAgentDirInput, resetAgentDirStateForTests, setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
+			resetAgentDirStateForTests();
+			setProjectRoot(bobbitDir);
 			const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
 			const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
 			const { createGateway } = await import("../../dist/server/server.js");
-			// Playwright workers can initialize this startup-pinned singleton before
-			// this fixture reinstalls the operator-owned agent directory.
-			resetAgentDirStateForTests();
-			setProjectRoot(bobbitDir);
 			scaffoldBobbitDir(bobbitDir);
 			token = loadOrCreateToken();
 			gateway = createGateway({
@@ -539,14 +539,14 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			process.env.BOBBIT_SKIP_TITLE_GEN = "1";
 			process.env.BOBBIT_SKIP_WORKTREE_POOL = "1";
 			process.env.BOBBIT_NO_OPEN = "1";
+			// Reset and set the directory before loading anything that can import the
+			// OAuth credential boundary. Those modules may cache startup-derived state.
 			const { resetAgentDirStateForTests, setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
+			resetAgentDirStateForTests();
+			setProjectRoot(bobbitDir);
 			const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
 			const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
 			const { createGateway } = await import("../../dist/server/server.js");
-			// Re-resolve the startup-pinned directory after restoring the operator's
-			// isolated agent directory, before gateway startup can read it.
-			resetAgentDirStateForTests();
-			setProjectRoot(bobbitDir);
 			scaffoldBobbitDir(bobbitDir);
 			token = loadOrCreateToken();
 			gateway = createGateway({ host: "127.0.0.1", port: 0, portExplicit: true, authToken: token, defaultCwd: root, forceAuth: true });
