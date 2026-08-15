@@ -259,6 +259,17 @@ type ManualTranscriptPrefixFacts = {
 	afterHasAtLeastBeforeRows: boolean;
 	beforeRowsHaveNonemptySdkIdAndRole: boolean;
 	prefixIdsAndRolesPreserved: boolean;
+	firstPrefixMismatchIndex: number;
+	positionalIdMismatchCount: number;
+	positionalRoleMismatchCount: number;
+	allBeforeIdsRemainAfter: boolean;
+	beforeIdsAreOrderedSubsequence: boolean;
+	rolesAreExactPrefix: boolean;
+	rolesAreOrderedSubsequence: boolean;
+	beforeHasDuplicateIds: boolean;
+	afterHasDuplicateIds: boolean;
+	beforeDuplicateIdCount: number;
+	afterDuplicateIdCount: number;
 };
 
 /** Preserve finalized history while allowing the SDK to append shutdown-tail rows. */
@@ -280,12 +291,51 @@ function manualTranscriptPrefixFacts(before: unknown, after: unknown): ManualTra
 	const afterCount = right?.length ?? 0;
 	const hasNonemptySdkIdAndRole = (row: Record<string, unknown> | undefined): boolean =>
 		typeof row?.id === "string" && row.id.length > 0 && typeof row.role === "string" && row.role.length > 0;
+	const hasNonemptyId = (row: Record<string, unknown> | undefined): row is Record<string, unknown> & { id: string } =>
+		typeof row?.id === "string" && row.id.length > 0;
+	const hasNonemptyRole = (row: Record<string, unknown> | undefined): row is Record<string, unknown> & { role: string } =>
+		typeof row?.role === "string" && row.role.length > 0;
+	const duplicateIdCount = (entries: Array<Record<string, unknown> | undefined> | undefined): number => {
+		if (!entries) return 0;
+		const counts = new Map<string, number>();
+		for (const row of entries) {
+			if (hasNonemptyId(row)) counts.set(row.id, (counts.get(row.id) ?? 0) + 1);
+		}
+		return [...counts.values()].filter(count => count > 1).length;
+	};
+	const orderedSubsequence = (expected: string[], actual: string[]): boolean => {
+		let cursor = 0;
+		for (const value of actual) {
+			if (value === expected[cursor]) cursor += 1;
+		}
+		return cursor === expected.length;
+	};
 	const beforeRowsHaveNonemptySdkIdAndRole = !!left && left.every(hasNonemptySdkIdAndRole);
+	const positionalIdMismatchCount = left && right
+		? left.reduce((count, row, index) => count + (row?.id === right[index]?.id ? 0 : 1), 0)
+		: beforeCount;
+	const positionalRoleMismatchCount = left && right
+		? left.reduce((count, row, index) => count + (row?.role === right[index]?.role ? 0 : 1), 0)
+		: beforeCount;
+	const firstPrefixMismatchIndex = left && right
+		? left.findIndex((row, index) => row?.id !== right[index]?.id || row?.role !== right[index]?.role)
+		: beforeCount > 0 ? 0 : -1;
 	const prefixIdsAndRolesPreserved = !!left && !!right
 		&& left.every((row, index) => hasNonemptySdkIdAndRole(row)
 			&& hasNonemptySdkIdAndRole(right[index])
 			&& row?.id === right[index]?.id
 			&& row?.role === right[index]?.role);
+	const beforeIds = left && left.every(hasNonemptyId) ? left.map(row => row.id) : undefined;
+	const afterIds = right && right.every(hasNonemptyId) ? right.map(row => row.id) : undefined;
+	const beforeRoles = left && left.every(hasNonemptyRole) ? left.map(row => row.role) : undefined;
+	const afterRoles = right && right.every(hasNonemptyRole) ? right.map(row => row.role) : undefined;
+	const allBeforeIdsRemainAfter = !!beforeIds && !!afterIds && beforeIds.every(id => afterIds.includes(id));
+	const beforeIdsAreOrderedSubsequence = !!beforeIds && !!afterIds && orderedSubsequence(beforeIds, afterIds);
+	const rolesAreExactPrefix = !!beforeRoles && !!afterRoles
+		&& beforeRoles.every((role, index) => role === afterRoles[index]);
+	const rolesAreOrderedSubsequence = !!beforeRoles && !!afterRoles && orderedSubsequence(beforeRoles, afterRoles);
+	const beforeDuplicateIdCount = duplicateIdCount(left);
+	const afterDuplicateIdCount = duplicateIdCount(right);
 	return {
 		beforeArray: !!left,
 		afterArray: !!right,
@@ -295,6 +345,17 @@ function manualTranscriptPrefixFacts(before: unknown, after: unknown): ManualTra
 		afterHasAtLeastBeforeRows: afterCount >= beforeCount,
 		beforeRowsHaveNonemptySdkIdAndRole,
 		prefixIdsAndRolesPreserved,
+		firstPrefixMismatchIndex,
+		positionalIdMismatchCount,
+		positionalRoleMismatchCount,
+		allBeforeIdsRemainAfter,
+		beforeIdsAreOrderedSubsequence,
+		rolesAreExactPrefix,
+		rolesAreOrderedSubsequence,
+		beforeHasDuplicateIds: beforeDuplicateIdCount > 0,
+		afterHasDuplicateIds: afterDuplicateIdCount > 0,
+		beforeDuplicateIdCount,
+		afterDuplicateIdCount,
 	};
 }
 
@@ -780,7 +841,54 @@ test("Claude Agent SDK manual restart transcript oracle preserves a nonempty fin
 		afterHasAtLeastBeforeRows: true,
 		beforeRowsHaveNonemptySdkIdAndRole: true,
 		prefixIdsAndRolesPreserved: true,
+		firstPrefixMismatchIndex: -1,
+		positionalIdMismatchCount: 0,
+		positionalRoleMismatchCount: 0,
+		allBeforeIdsRemainAfter: true,
+		beforeIdsAreOrderedSubsequence: true,
+		rolesAreExactPrefix: true,
+		rolesAreOrderedSubsequence: true,
+		beforeHasDuplicateIds: false,
+		afterHasDuplicateIds: false,
+		beforeDuplicateIdCount: 0,
+		afterDuplicateIdCount: 0,
 	});
+});
+
+test("Claude Agent SDK manual restart transcript facts distinguish shifted history without exposing rows", () => {
+	const secret = "manual-transcript-secret-sentinel";
+	const before = {
+		messages: [
+			{ id: `${secret}-one`, role: `${secret}-user`, content: secret },
+			{ id: `${secret}-two`, role: `${secret}-assistant`, path: `/${secret}` },
+			{ id: `${secret}-one`, role: `${secret}-user`, providerData: secret },
+		],
+	};
+	const after = {
+		messages: [
+			{ id: `${secret}-inserted`, role: `${secret}-tool`, content: secret },
+			{ id: `${secret}-one`, role: `${secret}-user`, content: secret },
+			{ id: `${secret}-two`, role: `${secret}-assistant`, content: secret },
+			{ id: `${secret}-one`, role: `${secret}-user`, content: secret },
+		],
+	};
+	const facts = manualTranscriptPrefixFacts(before, after);
+	expect(facts).toMatchObject({
+		firstPrefixMismatchIndex: 0,
+		positionalIdMismatchCount: 3,
+		positionalRoleMismatchCount: 3,
+		allBeforeIdsRemainAfter: true,
+		beforeIdsAreOrderedSubsequence: true,
+		rolesAreExactPrefix: false,
+		rolesAreOrderedSubsequence: true,
+		beforeHasDuplicateIds: true,
+		afterHasDuplicateIds: true,
+		beforeDuplicateIdCount: 1,
+		afterDuplicateIdCount: 1,
+	});
+	const serialized = JSON.stringify(facts);
+	expect(serialized).not.toContain(secret);
+	for (const privateValue of ["content", "path", "providerData"]) expect(serialized).not.toContain(privateValue);
 });
 
 test("Claude Agent SDK manual restart transcript oracle rejects removed, reordered, changed, and empty history", () => {
@@ -809,7 +917,10 @@ test("Claude Agent SDK manual restart transcript oracle rejects removed, reorder
 		const facts = JSON.parse(diagnostic) as ManualTranscriptPrefixFacts;
 		expect(Object.keys(facts)).toEqual([
 			"beforeArray", "afterArray", "beforeCount", "afterCount", "beforeNonempty", "afterHasAtLeastBeforeRows",
-			"beforeRowsHaveNonemptySdkIdAndRole", "prefixIdsAndRolesPreserved",
+			"beforeRowsHaveNonemptySdkIdAndRole", "prefixIdsAndRolesPreserved", "firstPrefixMismatchIndex",
+			"positionalIdMismatchCount", "positionalRoleMismatchCount", "allBeforeIdsRemainAfter",
+			"beforeIdsAreOrderedSubsequence", "rolesAreExactPrefix", "rolesAreOrderedSubsequence",
+			"beforeHasDuplicateIds", "afterHasDuplicateIds", "beforeDuplicateIdCount", "afterDuplicateIdCount",
 		]);
 		expect(
 			facts.beforeNonempty
