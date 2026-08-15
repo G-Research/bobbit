@@ -148,9 +148,10 @@ async function expectCauseAcrossSurfaces(page: any, goalId: string, teamLeadId: 
 
 	const pill = page.locator("[data-testid='goal-status-widget-pill']").first();
 	await expect(pill).toBeVisible({ timeout: 15_000 });
+	await expect(pill, "widget status pill renders the durable cancellation cause").toContainText(cancelledCause);
+	await expect(pill).not.toContainText(failed);
 	await pill.click();
 	const widget = page.locator(`#goal-status-dropdown [data-testid="goal-widget-gate"][data-gate-id="${GATE_ID}"]`).first();
-	await expect(widget, "widget renders the same cancellation cause").toContainText(cancelledCause);
 	await expect(widget).toHaveAttribute("data-gate-status", "pending");
 	await expect(widget).not.toContainText(failed);
 
