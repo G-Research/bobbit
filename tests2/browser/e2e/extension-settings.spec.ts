@@ -230,7 +230,6 @@ test.describe("Market extension settings", () => {
 		const typescript = languages.locator('[data-testid="market-settings-multi-enum-option"][data-option-value="typescript"]');
 		const javascript = languages.locator('[data-testid="market-settings-multi-enum-option"][data-option-value="javascript"]');
 		const python = languages.locator('[data-testid="market-settings-multi-enum-option"][data-option-value="python"]');
-		const rust = languages.locator('[data-testid="market-settings-multi-enum-option"][data-option-value="rust"]');
 		await expect(typescript).toBeChecked();
 		await expect(python).toBeChecked();
 		await expect(javascript).not.toBeChecked();
