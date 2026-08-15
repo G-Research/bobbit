@@ -676,7 +676,7 @@ import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
 import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion, getHostAgentVersion, resolveSandboxDockerContext } from "./agent/sandbox-status.js";
 import { resolveSandboxImagePlan, sandboxImageRequirements, sandboxRequirementsStatus, UnsupportedSandboxImagePlanError, type SandboxImagePlan } from "./agent/sandbox-image-requirements.js";
-import { SandboxManager, type SandboxBootstrap } from "./agent/sandbox-manager.js";
+import { SandboxManager, type SandboxBootstrap, type SandboxPlanIdentityResolver } from "./agent/sandbox-manager.js";
 import { prepareSanitizedSandboxCloneSource, resolveSandboxCloneSource, type SandboxCloneSource } from "./agent/sandbox-clone-source.js";
 import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
@@ -4884,6 +4884,20 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// runs the host-side plumbing (image build/version check, mounts,
 			// credentials, sandbox network, GitHub token) the first time each
 			// project's sandbox is requested by session/goal/staff creation.
+			const sandboxPlanIdentity: SandboxPlanIdentityResolver = (projectId) => {
+				// This must remain a synchronous config/projection-only check. It is used
+				// solely to avoid Docker, git, network, and mount setup for an unchanged
+				// ready sandbox; bootstrap remains authoritative when it cannot decide.
+				if (!projectRegistry.get(projectId)) return null;
+				const ctx = projectContextManager.getOrCreate(projectId);
+				if (!ctx || (ctx.projectConfigStore.get("sandbox") || "none") !== "docker") return null;
+				try {
+					const plan = resolveProjectSandboxImagePlan(packContributionRegistry, ctx.projectConfigStore, projectId);
+					return { image: plan.imageName, fingerprint: plan.fingerprint };
+				} catch {
+					return null;
+				}
+			};
 			const sandboxBootstrap: SandboxBootstrap = async (projectId) => {
 				const project = projectRegistry.get(projectId);
 				if (!project) {
@@ -4923,7 +4937,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					}
 					sandboxImageRequirements.recordBuildSuccess(projectId, plan.fingerprint);
 				} else {
-					sandboxImageRequirements.recordBuildFailure(projectId, plan.fingerprint);
+					// Docker was unavailable before a build could start. This is unsupported,
+					// not a failed exact plan, so retain no failure record.
 					throw new Error(`[sandbox] Docker is unavailable for project ${projectId}`);
 				}
 
@@ -5049,7 +5064,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					baseRefResolver: () => cfg.get("base_ref"),
 				};
 			};
-			sandboxManager = new SandboxManager({ bootstrap: sandboxBootstrap, commandRunner: gatewayDeps.commandRunner, clock: gatewayDeps.clock, worktreeSetupRuntime });
+			sandboxManager = new SandboxManager({ bootstrap: sandboxBootstrap, planIdentity: sandboxPlanIdentity, commandRunner: gatewayDeps.commandRunner, clock: gatewayDeps.clock, worktreeSetupRuntime });
 			sessionManager.setSandboxManager(sandboxManager);
 			sessionManager.subscribeSandboxRecovery();
 
@@ -5763,7 +5778,6 @@ async function handleApiRoute(
 		routeDispatcher.invalidate();
 		routeRegistry.invalidate();
 		packContributionRegistry.invalidate();
-		for (const project of projectRegistry.list()) sandboxImageRequirements.invalidateProject(project.id);
 		sessionManager.lifecycleHub?.cancelScheduledAdvisors?.();
 		closeUnavailableExtensionChannels();
 		for (const projectId of new Set(sessionManager.listSessions().map(session => session.projectId).filter((id): id is string => !!id))) {
@@ -6696,6 +6710,10 @@ async function handleApiRoute(
 		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
 		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
 		const scopedConfigStore = resolveProjectConfigStore(resolved.projectId);
+		if ((scopedConfigStore.get("sandbox") || "none") !== "docker") {
+			json({ success: false, error: "Sandbox image builds require Docker sandbox mode", code: "SANDBOX_NOT_CONFIGURED" }, 409);
+			return;
+		}
 		let plan: SandboxImagePlan;
 		try {
 			plan = resolveProjectSandboxImagePlan(packContributionRegistry, scopedConfigStore, resolved.projectId);

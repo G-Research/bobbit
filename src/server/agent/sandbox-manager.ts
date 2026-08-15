@@ -44,6 +44,10 @@ export interface SandboxManagerStats {
  */
 export type SandboxBootstrap = (projectId: string) => Promise<ProjectSandboxOptions | null>;
 
+/** Cheap, synchronous desired-image projection used only to skip a ready sandbox's heavyweight bootstrap. */
+export type SandboxPlanIdentity = { readonly image: string; readonly fingerprint?: string };
+export type SandboxPlanIdentityResolver = (projectId: string) => SandboxPlanIdentity | null;
+
 export interface SandboxManagerOptions {
 	/**
 	 * Called by `ensureForProject(projectId)` the first time a project's sandbox
@@ -52,6 +56,8 @@ export interface SandboxManagerOptions {
 	 * just coordinates lifecycle.
 	 */
 	bootstrap?: SandboxBootstrap;
+	/** Must avoid Docker, filesystem setup, and other bootstrap work. Null falls back to bootstrap. */
+	planIdentity?: SandboxPlanIdentityResolver;
 	commandRunner?: CommandRunner;
 	clock?: Clock;
 	worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string };
@@ -73,16 +79,23 @@ export class SandboxManager {
 	/** Applied server-owned image identity for each live project sandbox. */
 	private _appliedImagePlans = new Map<string, { image: string; fingerprint?: string }>();
 	private _bootstrap: SandboxBootstrap | null;
+	private _planIdentity: SandboxPlanIdentityResolver | null;
 	private readonly deps: { commandRunner?: CommandRunner; clock?: Clock; worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string } };
 
 	constructor(opts: SandboxManagerOptions = {}) {
 		this._bootstrap = opts.bootstrap ?? null;
+		this._planIdentity = opts.planIdentity ?? null;
 		this.deps = { commandRunner: opts.commandRunner, clock: opts.clock, worktreeSetupRuntime: opts.worktreeSetupRuntime };
 	}
 
 	/** Set or replace the bootstrap function post-construction. */
 	setBootstrap(bootstrap: SandboxBootstrap | null): void {
 		this._bootstrap = bootstrap;
+	}
+
+	/** Set or replace the cheap desired-image projection post-construction. */
+	setPlanIdentityResolver(resolver: SandboxPlanIdentityResolver | null): void {
+		this._planIdentity = resolver;
 	}
 
 	/** Subscribe to container recovery events across all projects. Returns unsubscribe function. */
@@ -122,14 +135,26 @@ export class SandboxManager {
 		const bootstrap = this._bootstrap;
 
 		const p = (async () => {
-			// Bootstrap resolves the desired image plan before the ready fast path.
-			// This lets activation/grant changes replace only the affected container.
+			const existing = this.sandboxes.get(projectId);
+			// A ready sandbox can skip all Docker/image/network/git bootstrap work only
+			// when the server supplies an exact, synchronous desired identity. Resolver
+			// absence, unsupported plans, and resolver errors deliberately fall through
+			// to bootstrap, which remains the authoritative comparison.
+			if (existing?.getStatus().status === "ready" && this._planIdentity) {
+				let desired: SandboxPlanIdentity | null = null;
+				try { desired = this._planIdentity(projectId); } catch { /* bootstrap is authoritative */ }
+				const applied = this._appliedImagePlans.get(projectId);
+				if (desired && applied?.image === desired.image && applied.fingerprint === desired.fingerprint) return;
+			}
+
+			// Bootstrap resolves the desired image plan before the authoritative ready
+			// comparison. This lets activation/grant changes replace only the affected
+			// container when the cheap identity cannot prove it is unchanged.
 			const opts = await bootstrap(projectId);
 			if (!opts) {
 				// Sandbox not applicable (disabled, not a git repo). Not an error.
 				return;
 			}
-			const existing = this.sandboxes.get(projectId);
 			if (existing?.getStatus().status === "ready") {
 				const applied = this._appliedImagePlans.get(projectId);
 				if (applied?.image === opts.image && applied.fingerprint === opts.sandboxImageFingerprint) return;
