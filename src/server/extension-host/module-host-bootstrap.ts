@@ -163,7 +163,7 @@ interface SerializableCtx {
 	sessionArchived?: boolean;
 	hostVersion?: number;
 	hostContractVersion?: number;
-	capabilities?: { callRoute: boolean; session: boolean; store: boolean; agents: boolean };
+	capabilities?: { callRoute: boolean; session: boolean; store: boolean; agents: boolean; services: boolean };
 }
 
 interface ChannelSerializableCtx {
@@ -469,7 +469,7 @@ function callHost(path: [string, string], args: unknown[]): Promise<unknown> {
  *  marshalled to the parent (authorized there — these cross-pack/cross-session
  *  boundaries ARE enforced); identity + flags are local. */
 function buildHostProxy(ctx: SerializableCtx): unknown {
-	const flags = ctx.capabilities ?? { callRoute: false, session: false, store: false, agents: false };
+	const flags = ctx.capabilities ?? { callRoute: false, session: false, store: false, agents: false, services: false };
 	return {
 		version: ctx.hostVersion,
 		contractVersion: ctx.hostContractVersion,
@@ -478,6 +478,7 @@ function buildHostProxy(ctx: SerializableCtx): unknown {
 			session: flags.session,
 			store: flags.store,
 			agents: flags.agents,
+			services: flags.services,
 			has: (name: string) => (flags as Record<string, boolean>)[name] === true,
 		},
 		store: {
@@ -506,6 +507,9 @@ function buildHostProxy(ctx: SerializableCtx): unknown {
 			list: () => callHost(["agents", "list"], []),
 			read: (childSessionId: string, opts?: unknown) => callHost(["agents", "read"], [childSessionId, opts]),
 			status: (childSessionId: string) => callHost(["agents", "status"], [childSessionId]),
+		},
+		services: {
+			call: (request: unknown) => callHost(["services", "call"], [request]),
 		},
 	};
 }
@@ -702,7 +706,7 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 			return;
 		}
 		const ctx = msg.exportKind === "hooks" || msg.exportKind === "result-filters"
-			? { ...msg.ctx, capabilities: { callRoute: false, session: false, store: false, agents: false } }
+			? { ...msg.ctx, capabilities: { callRoute: false, session: false, store: false, agents: false, services: false } }
 			: msg.exportKind === "providers"
 				? { ...msg.ctx, host: buildHostProxy(msg.ctx), workingDir: msg.ctx.workingDir }
 				: msg.exportKind === "advisors"

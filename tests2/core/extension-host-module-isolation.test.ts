@@ -772,3 +772,29 @@ describe.concurrent("ModuleHost — host.agents proxy (Sub-goal C)", () => {
 		}
 	});
 });
+
+describe.concurrent("ModuleHost — host.services proxy", () => {
+	it("marshals only the closed services.call request to the parent-bound host", async () => {
+		const calls: unknown[] = [];
+		const host = {
+			version: 1,
+			contractVersion: 1,
+			capabilities: { callRoute: false, session: false, store: false, agents: false, services: true, has: (name: string) => name === "services" },
+			store: { get: async () => null, put: async () => {}, list: async () => [] },
+			session: { readTranscript: async () => ({}), readToolCall: async () => null },
+			agents: { spawn: async () => ({ childSessionId: "unused" }), prompt: async () => ({ status: "dispatched" }), dismiss: async () => ({ ok: true }), list: async () => [], read: async () => ({}), status: async () => ({ status: "idle" }) },
+			services: { call: async (request: unknown) => { calls.push(request); return { count: 1 }; } },
+		} as unknown as ActionHandlerCtx["host"];
+		const ctx: ActionHandlerCtx = { host, sessionId: "owner-1", toolUseId: "tu", tool: "demo_tool" };
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			const url = writeModule(
+				`export const actions = { search: async (ctx) => ({ hasServices: ctx.host.capabilities.has("services"), result: await ctx.host.services.call({ component: ".", serviceId: "language", operation: "search", payload: { query: "x" } }), hasProcess: typeof ctx.host.services.process }) };`,
+			);
+			assert.deepEqual(await mh.invoke(req(url, "search", ctx)), { hasServices: true, result: { count: 1 }, hasProcess: "undefined" });
+			assert.deepEqual(calls, [{ component: ".", serviceId: "language", operation: "search", payload: { query: "x" } }]);
+		} finally {
+			mh.dispose();
+		}
+	});
+});

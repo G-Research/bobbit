@@ -3,6 +3,8 @@
 // The deliberately small, declarative boundary for managed service extensions.
 // Packs describe a service; core owns commands, processes, paths, and diagnostics.
 
+import { isServicePlatformIdentifier } from "./service-platform-identifier.js";
+
 export type ServiceRunMode = "local" | "docker" | "compose";
 export type ServiceState = "stopped" | "starting" | "ready" | "unhealthy" | "failed";
 export type ServiceRestartPolicy = "never" | "on-failure";
@@ -32,9 +34,29 @@ export interface ServiceExtensionSpec {
 	dataDir?: string;
 }
 
-/** The only service state that can leave the runtime. It intentionally has no logs. */
+/** Runtime-selected, bounded instance discriminator; it is never a filesystem path. */
+export type ServiceInstanceDiscriminator = string;
+
+/**
+ * All fields are derived by core. `canonicalWorktreeRoot` is internal-only and
+ * must never be serialized into status, host APIs, logs, or worker context.
+ */
+export interface ServiceInstanceRef {
+	projectId: string;
+	component: string;
+	canonicalWorktreeRoot: string;
+	worktreeKey: string;
+	packId: string;
+	serviceId: string;
+	discriminator: ServiceInstanceDiscriminator;
+}
+
+/** The path-free projection which is permitted to leave core lifecycle code. */
+export type ServiceInstancePublicRef = Omit<ServiceInstanceRef, "canonicalWorktreeRoot">;
+
+/** The only service state that can leave the runtime. It intentionally has no logs or host paths. */
 export interface ServiceStatus {
-	id: string;
+	ref: ServiceInstancePublicRef;
 	state: ServiceState;
 	updatedAt: string;
 	detail?: ServiceStatusDetail;
@@ -65,6 +87,7 @@ export type ServiceSpecValidation =
 
 const SPEC_KEYS = new Set(["id", "runMode", "readiness", "stopGraceMs", "restart", "ports", "dataDir"]);
 const READINESS_KEYS = new Set(["url", "command", "timeoutMs"]);
+const PUBLIC_REF_KEYS = new Set(["projectId", "component", "worktreeKey", "packId", "serviceId", "discriminator"]);
 const RUN_MODES = new Set<ServiceRunMode>(["local", "docker", "compose"]);
 const RESTART_POLICIES = new Set<ServiceRestartPolicy>(["never", "on-failure"]);
 const STATES = new Set<ServiceState>(["stopped", "starting", "ready", "unhealthy", "failed"]);
@@ -75,6 +98,8 @@ const DETAILS = new Set<ServiceStatusDetail>([
 const MIN_DURATION_MS = 100;
 const MAX_DURATION_MS = 60_000;
 const SAFE_ID = /^[a-z][a-z0-9-]{0,63}$/;
+const SAFE_DISCRIMINATOR = /^[a-z][a-z0-9-]{0,31}$/;
+const WORKTREE_KEY = /^[A-Za-z0-9_-]{22}$/;
 // The string names a core probe adapter; it is not a command line or executable path.
 const SAFE_COMMAND = /^[a-z][a-z0-9-]{0,63}$/;
 const SHELL_COMMANDS = new Set(["sh", "bash", "zsh", "cmd", "powershell", "pwsh", "node", "python", "curl"]);
@@ -96,6 +121,22 @@ function hasOnlyKeys(value: Record<string, unknown>, allowed: ReadonlySet<string
 
 function boundedDuration(value: unknown): value is number {
 	return typeof value === "number" && Number.isInteger(value) && value >= MIN_DURATION_MS && value <= MAX_DURATION_MS;
+}
+
+/** Only core chooses this value; consumers can validate, but never derive, it. */
+export function isServiceInstanceDiscriminator(value: unknown): value is ServiceInstanceDiscriminator {
+	return typeof value === "string" && SAFE_DISCRIMINATOR.test(value);
+}
+
+/** Validates a path-free status identity. It deliberately has no root/path field. */
+export function isServiceInstancePublicRef(value: unknown): value is ServiceInstancePublicRef {
+	if (!isRecord(value) || !hasOnlyKeys(value, PUBLIC_REF_KEYS, "", [])) return false;
+	return isServicePlatformIdentifier(value.projectId)
+		&& (value.component === "." || isServicePlatformIdentifier(value.component))
+		&& typeof value.worktreeKey === "string" && WORKTREE_KEY.test(value.worktreeKey)
+		&& isServicePlatformIdentifier(value.packId)
+		&& typeof value.serviceId === "string" && SAFE_ID.test(value.serviceId)
+		&& isServiceInstanceDiscriminator(value.discriminator);
 }
 
 function isSafeDataDir(value: string): boolean {
@@ -191,7 +232,7 @@ export function isServiceStateTransitionAllowed(from: ServiceState, to: ServiceS
 
 /** Normalize an untrusted status projection, dropping anything not public-safe. */
 export function normalizeServiceStatus(input: unknown): ServiceStatus | undefined {
-	if (!isRecord(input) || typeof input.id !== "string" || !SAFE_ID.test(input.id)
+	if (!isRecord(input) || !isServiceInstancePublicRef(input.ref)
 		|| typeof input.state !== "string" || !STATES.has(input.state as ServiceState)
 		|| typeof input.updatedAt !== "string" || !Number.isFinite(Date.parse(input.updatedAt))) return undefined;
 	if (input.detail !== undefined && (typeof input.detail !== "string" || !DETAILS.has(input.detail as ServiceStatusDetail))) return undefined;
@@ -203,7 +244,20 @@ export function normalizeServiceStatus(input: unknown): ServiceStatus | undefine
 			|| (state === "unhealthy" && (detail === "readiness-timeout" || detail === "port-conflict"))
 			|| (state === "failed" && (detail === "process-exited" || detail === "configuration-unavailable"));
 	if (!validDetail) return undefined;
-	return { id: input.id, state, updatedAt: input.updatedAt, ...(detail === undefined ? {} : { detail }) };
+	const ref = input.ref;
+	return {
+		ref: {
+			projectId: ref.projectId,
+			component: ref.component,
+			worktreeKey: ref.worktreeKey,
+			packId: ref.packId,
+			serviceId: ref.serviceId,
+			discriminator: ref.discriminator,
+		},
+		state,
+		updatedAt: input.updatedAt,
+		...(detail === undefined ? {} : { detail }),
+	};
 }
 
 /** Remove supplied secret values and clip diagnostic text before local use. Never expose it in ServiceStatus. */

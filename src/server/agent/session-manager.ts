@@ -467,6 +467,24 @@ interface GitWorktreeRef {
 
 interface GitWorktreeRefs {
 	entries: GitWorktreeRef[];
+	/** False when Git could not authoritatively enumerate worktree metadata. */
+	verified: boolean;
+}
+
+type PostCleanupPathState = "absent" | "present" | "unconfirmed";
+
+/**
+ * Confirm removal after a destructive operation without treating inaccessible
+ * paths as missing. Only lstat's definitive missing-path errors prove absence.
+ */
+async function postCleanupPathState(candidatePath: string): Promise<PostCleanupPathState> {
+	try {
+		await fsp.lstat(candidatePath);
+		return "present";
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException | undefined)?.code;
+		return code === "ENOENT" || code === "ENOTDIR" ? "absent" : "unconfirmed";
+	}
 }
 
 interface ArchivedWorktreeGuardRef {
@@ -2920,6 +2938,10 @@ export interface SessionTerminationInfo {
 }
 
 export type SessionTerminationListener = (sessionId: string, info: SessionTerminationInfo) => void | Promise<void>;
+/** Fired only after host worktree removal has been confirmed, never for a skipped or failed cleanup. */
+export type SessionWorktreeRemovedListener = (sessionId: string, info: { projectId?: string; worktreePaths: readonly string[] }) => void | Promise<void>;
+/** Fired only after a worktree-backed session has persisted its final coordinates. */
+export type SessionWorktreeReadyListener = (session: SessionInfo) => void | Promise<void>;
 
 /** Purge-only entry into the gateway's per-session preview operation queue. */
 export type SessionPreviewPurgeOperation = <T>(sessionId: string, operation: () => Promise<T>) => Promise<T>;
@@ -3124,7 +3146,9 @@ export class SessionManager {
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
 	private _terminationListeners: SessionTerminationListener[] = [];
+	private _worktreeRemovedListeners: SessionWorktreeRemovedListener[] = [];
 	private _creationListeners: Array<(session: SessionInfo) => void> = [];
+	private _worktreeReadyListeners: SessionWorktreeReadyListener[] = [];
 	private _extensionChannels?: ExtensionChannelServices;
 	/**
 	 * Count of agent-CLI `*.jsonl` transcripts on disk that don't match any
@@ -3595,9 +3619,36 @@ export class SessionManager {
 		this._terminationListeners.push(fn);
 	}
 
+	/** Subscribe to authoritative host worktree-removal completions. */
+	addWorktreeRemovedListener(fn: SessionWorktreeRemovedListener): void {
+		this._worktreeRemovedListeners.push(fn);
+	}
+
+	private async notifyWorktreeRemoved(sessionId: string, projectId: string | undefined, worktreePaths: readonly string[]): Promise<void> {
+		if (worktreePaths.length === 0) return;
+		for (const listener of this._worktreeRemovedListeners) {
+			try { await listener(sessionId, { projectId, worktreePaths }); } catch (err) {
+				console.error(`[session ${sessionId}] worktree removal listener failed:`, err);
+			}
+		}
+	}
+
 	/** Subscribe to newly created visible sessions. Listeners are invoked after initial persistence. */
 	addCreationListener(fn: (session: SessionInfo) => void): void {
 		this._creationListeners.push(fn);
+	}
+
+	/** Subscribe to the durable worktree-ready boundary in the setup pipeline. */
+	addWorktreeReadyListener(fn: SessionWorktreeReadyListener): void {
+		this._worktreeReadyListeners.push(fn);
+	}
+
+	private async notifyWorktreeReady(session: SessionInfo): Promise<void> {
+		for (const fn of this._worktreeReadyListeners) {
+			try { await fn(session); } catch (err) {
+				console.error(`[session-manager] worktree-ready listener failed for ${session.id}:`, err);
+			}
+		}
 	}
 
 	private notifySessionCreated(session: SessionInfo): void {
@@ -4327,6 +4378,7 @@ export class SessionManager {
 			commandRunner: this.commandRunner,
 			assemblePrompt: (id, parts) => this.assemblePrompt(id, parts),
 			resolveStaticPromptSections: (targetProjectId) => this.resolveStaticPromptSections(targetProjectId ?? projectId),
+			onWorktreeReady: (session) => this.notifyWorktreeReady(session),
 
 			applySandboxWiring: (opts, id, sandboxOpts) => this.applySandboxWiring(opts, id, sandboxOpts),
 			finalizeSpawnOptions: (opts, requested) => this.finalizeSpawnOptions(opts, requested),
@@ -15024,7 +15076,7 @@ export class SessionManager {
 
 			try {
 				const { cleanupWorktree } = await import("../skills/git.js");
-				await cleanupWorktree(item.repoPath, item.path, item.branch, false);
+				await cleanupWorktree(item.repoPath, item.path, item.branch, false, this.commandRunner, this.remoteGitPolicy);
 
 				const worktreeRemoved = await this.archivedWorktreeRemoved(item);
 				if (!worktreeRemoved) {
@@ -15033,6 +15085,7 @@ export class SessionManager {
 					continue;
 				}
 
+				await this.notifyWorktreeRemoved(item.sessionId, item.projectId, [item.path]);
 				const branchDeleted = await this.deleteArchivedWorktreeBranchIfAllowed(item);
 				recordResult({
 					...base,
@@ -15385,6 +15438,14 @@ export class SessionManager {
 		let pathExists = false;
 		try { pathExists = fs.existsSync(spec.worktreePath); } catch { pathExists = false; }
 		const gitRefs = await this.readGitWorktreeRefs(spec.repoPath, ctx);
+		if (!gitRefs.verified) {
+			return base({
+				pathExists,
+				status: "skipped",
+				reason: "scan-error",
+				detail: "Could not verify git worktree metadata; archived-session cleanup will preserve this path for retry.",
+			});
+		}
 		const normalizedCandidate = normalizeWorktreeHostPath(spec.worktreePath);
 		const gitWorktreeMetadataExists = this.gitWorktreeMetadataMatches(gitRefs, normalizedCandidate, spec.branch);
 		const localBranchExists = await this.localBranchExists(spec.repoPath, spec.branch, ctx);
@@ -15474,12 +15535,15 @@ export class SessionManager {
 	}
 
 	private async archivedWorktreeRemoved(item: ArchivedSessionWorktreeItem): Promise<boolean> {
-		let pathExists = false;
-		try { pathExists = fs.existsSync(item.path); } catch { pathExists = false; }
-		const gitRefs = await this.readGitWorktreeRefsUncached(item.repoPath);
+		// Both observations are authoritative removal fences: an inaccessible path
+		// or failed Git listing is not evidence that cleanup completed.
+		const [pathState, gitRefs] = await Promise.all([
+			postCleanupPathState(item.path),
+			this.readGitWorktreeRefsUncached(item.repoPath),
+		]);
+		if (pathState !== "absent" || !gitRefs.verified) return false;
 		const normalizedCandidate = normalizeWorktreeHostPath(item.path);
-		const gitWorktreeMetadataExists = this.gitWorktreeMetadataMatches(gitRefs, normalizedCandidate, item.branch);
-		return !pathExists && !gitWorktreeMetadataExists;
+		return !this.gitWorktreeMetadataMatches(gitRefs, normalizedCandidate, item.branch);
 	}
 
 	private async deleteArchivedWorktreeBranchIfAllowed(item: ArchivedSessionWorktreeItem): Promise<boolean> {
@@ -15529,9 +15593,9 @@ export class SessionManager {
 				if (!normalizedPath) continue;
 				entries.push({ path: normalizedPath, branch: branchMatch?.[1] });
 			}
-			return { entries };
+			return { entries, verified: true };
 		} catch {
-			return { entries: [] };
+			return { entries: [], verified: false };
 		}
 	}
 
@@ -15693,6 +15757,7 @@ export class SessionManager {
 		// are container-internal (start with /workspace) — those have no host counterpart.
 		// Skip delegates and non-sandboxed polyrepo leads — both borrow worktrees owned elsewhere.
 		const goalOwnsTeamLeadWorktrees = hasGoalOwnedTeamLeadWorktrees(ps);
+		const removedWorktreePaths: string[] = [];
 		if (ps.worktreePath && ps.repoPath && !ps.worktreePath.startsWith("/workspace") && !ps.delegateOf && !goalOwnsTeamLeadWorktrees) {
 			try {
 				const { cleanupWorktree, removeEmptyWorktreeSetContainer } = await import("../skills/git.js");
@@ -15708,10 +15773,11 @@ export class SessionManager {
 						const repoPath = repo === "." ? ps.repoPath! : path.join(ps.repoPath!, repo);
 						try {
 							await cleanupWorktree(repoPath, wt, ps.branch, true, this.commandRunner, this.remoteGitPolicy);
-							try {
-								await fsp.access(wt);
-								console.error(`[session-manager] Component "${repo}" cleanup left worktree for ${ps.id}: ${wt}`);
-							} catch { /* removed */ }
+							if (await postCleanupPathState(wt) === "absent") {
+								removedWorktreePaths.push(wt);
+							} else {
+								console.error(`[session-manager] Component "${repo}" cleanup did not confirm worktree removal for ${ps.id}: ${wt}`);
+							}
 						} catch (err) {
 							console.error(`[session-manager] Failed to clean up component "${repo}" worktree for ${ps.id}:`, err);
 						}
@@ -15723,6 +15789,11 @@ export class SessionManager {
 					}
 				} else if (!isWorktreePathReferencedByLiveSession(ps.worktreePath, allPersisted, { ignoreSessionId: ps.id })) {
 					await cleanupWorktree(ps.repoPath, ps.worktreePath, ps.branch, true, this.commandRunner, this.remoteGitPolicy);
+					if (await postCleanupPathState(ps.worktreePath) === "absent") {
+						removedWorktreePaths.push(ps.worktreePath);
+					} else {
+						console.error(`[session-manager] Cleanup did not confirm worktree removal for ${ps.id}: ${ps.worktreePath}`);
+					}
 				} else {
 					console.log(`[session-manager] Skipping shared worktree cleanup for purged session ${ps.id}: ${ps.worktreePath}`);
 				}
@@ -15732,6 +15803,7 @@ export class SessionManager {
 		} else if (goalOwnsTeamLeadWorktrees) {
 			console.log(`[session-manager] Skipping goal-owned component worktree cleanup for purged team lead ${ps.id}.`);
 		}
+		await this.notifyWorktreeRemoved(ps.id, ps.projectId, removedWorktreePaths);
 
 		// Remove color
 		try {
@@ -15768,10 +15840,17 @@ export class SessionManager {
 		await this.cleanupScopedMcpManagersForSessionScope({ projectId: ps.projectId, cwd: ps.cwd });
 
 		// Notify termination listeners (sidebar broadcast etc.) so cached UI lists
-		// drop the entry without waiting for a polling tick.
+		// drop the entry without waiting for a polling tick. Preserve worktree
+		// coordinates for lifecycle owners that must stop state before deletion.
 		for (const listener of this._terminationListeners) {
 			try {
-				await listener(ps.id, { projectId: ps.projectId, reason: "purged" });
+				await listener(ps.id, {
+					projectId: ps.projectId,
+					reason: "purged",
+					cwd: ps.cwd,
+					worktreePath: ps.worktreePath,
+					repoWorktrees: ps.repoWorktrees ? Object.values(ps.repoWorktrees).map(worktreePath => ({ worktreePath })) : undefined,
+				});
 			} catch (err) {
 				console.error(`[session ${ps.id}] purge listener failed:`, err);
 			}

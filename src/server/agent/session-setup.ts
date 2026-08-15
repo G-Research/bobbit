@@ -533,6 +533,8 @@ export interface PipelineContext {
 	assemblePrompt: (id: string, parts: PromptParts) => string | undefined;
 	/** Resolves the current project-effective static extension region. */
 	resolveStaticPromptSections?: (projectId: string | undefined) => ResolvedSystemPromptSection[];
+	/** Called after a worktree-backed session's durable coordinates are valid. */
+	onWorktreeReady?: (session: SessionInfo) => void | Promise<void>;
 
 	applySandboxWiring: (opts: RpcBridgeOptions, id: string, sandboxOpts?: SandboxWiringOptions) => Promise<boolean>;
 	/** Validate and canonicalize the fully assembled Pi tuple before bridge creation. */
@@ -1695,6 +1697,11 @@ export async function executeWorktreeAsync(
 			);
 		}
 		ctx.store.update(session.id, persistFields);
+		// Managed-service reconciliation begins only after these coordinates have
+		// been persisted. Listener failures are isolated from session setup.
+		try { await ctx.onWorktreeReady?.(session); } catch (err) {
+			console.warn(`[session-setup] worktree-ready listener failed for ${session.id}:`, err);
+		}
 		console.log(`[session-setup] Worktree ready for session ${session.id}: ${worktreeCwd} (branch: ${plan.branch})`);
 	}
 
