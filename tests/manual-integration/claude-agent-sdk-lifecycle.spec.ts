@@ -397,6 +397,7 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 
 		try {
 			mkdirSync(projectRoot, { recursive: true });
+			writeFileSync(join(projectRoot, "README.md"), "Bobbit SDK manual smoke\n");
 			mkdirSync(join(bobbitDir, "state"), { recursive: true });
 			writeFileSync(join(bobbitDir, "state", "projects.json"), "[]");
 			writeFileSync(join(bobbitDir, "state", "setup-complete"), "manual-sdk-smoke\n");
@@ -779,7 +780,7 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			execFileSync("git", ["init"], { cwd: projectRoot, stdio: "ignore" });
 			execFileSync("git", ["config", "user.email", "manual-smoke@example.invalid"], { cwd: projectRoot });
 			execFileSync("git", ["config", "user.name", "Manual SDK Smoke"], { cwd: projectRoot });
-			writeFileSync(join(projectRoot, "README.md"), "sandbox SDK manual smoke\n");
+			writeFileSync(join(projectRoot, "README.md"), "Bobbit SDK manual smoke\n");
 			execFileSync("git", ["add", "README.md"], { cwd: projectRoot, stdio: "ignore" });
 			execFileSync("git", ["commit", "-m", "manual sandbox smoke"], { cwd: projectRoot, stdio: "ignore" });
 			mkdirSync(join(bobbitDir, "state"), { recursive: true });
