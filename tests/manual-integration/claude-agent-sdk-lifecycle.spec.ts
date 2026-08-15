@@ -397,8 +397,7 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			expect(session.runtime, `default session model ${sessionModel} must select the Claude Agent SDK runtime`).toBe("claude-agent-sdk");
 			await session.rpcClient.waitForReady(90_000);
 			expect(session.rpcClient.running, "SDK query must remain usable after readiness").toBe(true);
-			const persistedSdkSessionId = gateway.sessionManager.getPersistedSession(created.id)?.claudeAgentSdkSessionId;
-			expect(typeof persistedSdkSessionId).toBe("string");
+			expect(gateway.sessionManager.getPersistedSession(created.id)?.claudeAgentSdkSessionId).toBeUndefined();
 			const runTurn = async (text: string, label: string, options: Record<string, unknown> = {}) => {
 				const before = session.agentObservedTurnVersion ?? 0;
 				await gateway!.sessionManager.enqueuePrompt(created.id, text, { source: "user", ...options });
@@ -420,6 +419,13 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 				() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined,
 				"first SDK prompt to settle",
 				120_000,
+			);
+			const persistedSdkSessionId = await waitFor(
+				() => {
+					const id = gateway!.sessionManager.getPersistedSession(created.id)?.claudeAgentSdkSessionId;
+					return typeof id === "string" ? id : undefined;
+				},
+				"persisted SDK session identity after first prompt",
 			);
 
 			// A project-local exact skill proves Bobbit owns expansion before a prompt
