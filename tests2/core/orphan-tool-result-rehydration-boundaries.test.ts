@@ -2827,7 +2827,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 			containerId: "container-role-boundary",
 			sandboxed: true,
 			cwd: "/workspace",
-			gatewayUrl: "http://127.0.0.1:7890",
+			gatewayUrl: "http://host.docker.internal:7890",
 		});
 		expect(switches).toEqual([containerFile]);
 		expect(sendCommand).toHaveBeenCalledWith(
