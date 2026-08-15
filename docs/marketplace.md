@@ -166,7 +166,11 @@ shown read-only as "support surfaces").
 > round-trip through the same REST without changing schema-1 catalogue shapes. **Providers** and manifest-listed **hook metadata** load through
 > `PackContributionRegistry`; hook activation filters indexed declarations by manifest basename
 > (`listName`) only. **MCP** loads through `McpManager` discovery; **pi extensions** resolve to
-> standalone pi `--extension` entries. `runtimes` are validated and activation/settings-filtered declarative service contributions, but remain dormant until a core consumer wires the lifecycle manager; `workflows` remains catalogue-only reserved. Hook indexing imports or dispatches nothing and grants no authority. The only bounded
+> standalone pi `--extension` entries. The gateway constructs the `runtimes` lifecycle manager and
+> worktree coordinator, which use fresh settings and deny-wins `service.manage` checks; packs receive
+> no service path, process, socket, or transport. No built-in consumer has registered a closed adapter
+> and compatible launcher, so declarations fail closed and activation never launches a service.
+> `workflows` remains catalogue-only reserved. Hook indexing imports or dispatches nothing and grants no authority. The only bounded
 > runtime consumers are a due exact-granted every-N-turn advisor, the exact-granted `mode: decide`
 > decision dispatcher, and [gated request mutation](request-mutation.md) for a `mode: decide` hook
 > that declares `mutate` and has its separate exact `mutate` grant; see [Extension decision requests](extension-decision-requests.md),
@@ -826,9 +830,12 @@ describes the complete install-to-removal lifecycle. The first built-in producti
 [Hindsight](hindsight-memory.md), remains inactive until its required project configuration is
 supplied.
 
-The sole intentionally dormant schema-2 contribution is `runtimes`: its declaration, settings
-filtering, and core-owned lifecycle contract are implemented, but no gateway consumer starts a
-managed service yet. See [Managed service extensions](service-extension-runtime.md).
+Managed-service infrastructure is production-wired: the gateway constructs its lifecycle manager
+and worktree coordinator, derives an exact worktree instance, and provides closure-bound
+`host.services.call()` to server hosts. The only intentionally unregistered part is the built-in
+consumer adapter and compatible launcher. Until a future core consumer registers both, declarations
+fail closed; listing, activation, settings, and grants do not launch a service. See [Managed service
+extensions](service-extension-runtime.md).
 
 #### The `schema` field and back-compat
 
@@ -865,11 +872,11 @@ each defaults to `[]` when absent:
 | `hooks` | `hooks` | **Yes** | Manifest-listed `hooks/<name>.yaml|yml` declarations are validated and indexed without runtime execution. Bounded consumers are eligible every-N-turn advisors, active exact-granted `mode: decide` decision hooks, and [gated request mutation](request-mutation.md) for `mode: decide` hooks that declare and are separately granted `mutate`; see [Extension decision requests](extension-decision-requests.md). |
 | `mcp` | `mcp` | **Yes** | `mcp/<id>.yaml|yml|json` MCP server contributions. |
 | `piExtensions` | `pi-extensions` | **Yes** | Standalone pi runtime extension basenames under `pi-extensions/`. Note the YAML key is **`pi-extensions`** (kebab-case) but the parsed field is `piExtensions` (camelCase). |
-| `runtimes` | `runtimes` | **Yes** | Declarative managed-service basenames under `runtimes/`. They are activation/settings-filtered but dormant until a core consumer instantiates the lifecycle manager; see [Managed service-extension contract](service-extension-runtime.md). |
+| `runtimes` | `runtimes` | **Yes** | Declarative managed-service basenames under `runtimes/`. The gateway lifecycle manager and worktree coordinator reconcile eligible worktree instances, but no built-in consumer has registered a closed adapter and compatible launcher; declarations therefore fail closed. See [Managed service-extension contract](service-extension-runtime.md). |
 | `system-prompts` (parsed as `systemPrompts`) | `system-prompts` | **Yes** | Literal static prompt-section basenames under `system-prompts/`. Activation plus an exact static-prompt grant is required before a section reaches the effective prompt. |
 | `workflows` | `workflows` | No (reserved) | Workflow contribution basenames. |
 
-**`providers`, `hooks`, `runtimes`, `system-prompts`, `mcp`, and `pi-extensions` have loaders.** Providers, hooks, declarative runtimes, and static prompt sections load through the Extension-Host contribution registry. Hook indexing alone never imports a module, dispatches an event, grants authority, evaluates configuration, or creates UI; bounded consumers separately require their exact live grants. Runtime loading validates and filters declarations but starts no process until an explicit core consumer wires the lifecycle manager. Static prompt sections are literal text and require activation plus an exact `prompt:system-static` grant; see [Static system-prompt sections](extension-host-authoring.md#static-system-prompt-sections-system-promptsnameyaml--schema-2). `mcp` loads through the Marketplace MCP path described above; `pi-extensions` resolve to standalone pi `--extension` entries described in [Marketplace pi extensions](#marketplace-pi-extensions). Only `workflows` remains an accepted, normalised, activation-catalogue-only reserved key. See [Managed service-extension contract](service-extension-runtime.md).
+**`providers`, `hooks`, `runtimes`, `system-prompts`, `mcp`, and `pi-extensions` have loaders.** Providers, hooks, declarative runtimes, and static prompt sections load through the Extension-Host contribution registry. Hook indexing alone never imports a module, dispatches an event, grants authority, evaluates configuration, or creates UI; bounded consumers separately require their exact live grants. The gateway's runtime manager and worktree coordinator reconcile eligible managed-service declarations with fresh settings and deny-wins `service.manage` checks. They fail closed because no built-in consumer has registered a closed operation adapter and compatible launcher: a declaration, listing, activation toggle, settings change, or grant does not launch a process. Static prompt sections are literal text and require activation plus an exact `prompt:system-static` grant; see [Static system-prompt sections](extension-host-authoring.md#static-system-prompt-sections-system-promptsnameyaml--schema-2). `mcp` loads through the Marketplace MCP path described above; `pi-extensions` resolve to standalone pi `--extension` entries described in [Marketplace pi extensions](#marketplace-pi-extensions). Only `workflows` remains an accepted, normalised, activation-catalogue-only reserved key. See [Managed service-extension contract](service-extension-runtime.md).
 
 #### Minimal schema-2 example
 
@@ -889,7 +896,7 @@ contents:
   hooks:     [turn-audit]     # validates/indexes hooks/turn-audit.yaml; bounded dispatch needs an exact grant
   mcp:       [github]         # loads mcp/github.yaml (see Marketplace MCP)
   pi-extensions: [demo]       # loads pi-extensions/demo/ or pi-extensions/demo.ts
-  runtimes:  [memory-service] # declarative service; dormant until core lifecycle wiring
+  runtimes:  [memory-service] # declarative service; gateway-wired but fails closed without a core adapter + launcher
   system-prompts: [review-rules] # literal static section; needs activation + exact grant
   # workflows remain reserved.
 ```

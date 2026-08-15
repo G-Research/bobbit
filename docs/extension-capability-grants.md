@@ -98,10 +98,12 @@ an allow result. Every call re-resolves active identity and reads current durabl
 checks. After awaited work, a consumer calls it again immediately before applying an effect. That
 application fence makes a revocation win over stale scheduled work or a late worker result.
 
-`ServiceExtensionRuntimeManager` uses this seam for `service.manage`: it checks before lifecycle
-work and at its asynchronous run fences. The manager remains a generic core-owned lifecycle
-contract; a runtime declaration still starts nothing until an explicit gateway consumer wires
-`reconcile()`.
+The gateway-owned `ServiceExtensionRuntimeManager` and `WorktreeServiceCoordinator` use this seam
+for `service.manage`: they check before lifecycle and RPC work and again at asynchronous fences.
+The gateway constructs and reconciles them for exact worktree instances, alongside fresh runtime
+settings checks. The registered operation-adapter and launch-adapter seams are intentionally empty,
+so declarations fail closed until a future core consumer registers a closed adapter and compatible
+launcher. A grant is an authorization gate, not a process launch.
 
 ## Administrative REST API
 

@@ -29,7 +29,7 @@ This guide is the practical how-to.
 - [docs/extension-capability-grants.md](extension-capability-grants.md) — project operator grants. Exact active `decide` grants enable bounded decision/advisor paths; a hook that declares `mutate` needs a separate exact `mutate` grant for [gated request mutation](request-mutation.md). The active pack principal can separately receive the six closed non-hook platform capabilities, including `service.manage` and memory access; grants never change the Extension Host API.
 - [docs/design/extension-host.md](design/extension-host.md) — the contribution-point model, two-host architecture, the frozen Host API, the security guard sequence, the adapter layer, and the isolation model. The *why* and the contract. (Its per-tool schema examples predate V1 — read them through [pack-schema-v1-rationalisation.md](design/pack-schema-v1-rationalisation.md).)
 - [docs/design/extension-channels-host-channels.md](design/extension-channels-host-channels.md) and [docs/design/extension-channels-terminal-ux.md](design/extension-channels-terminal-ux.md) — the design record for generic channels and the first-party terminal pack.
-- [Managed service-extension contract](service-extension-runtime.md) — schema-2 declarative services. The contract is implemented but dormant until an explicit core consumer wires it; it does not change the existing Hindsight external provider.
+- [Managed service-extension contract](service-extension-runtime.md) — schema-2 declarative services. The gateway runtime, worktree coordinator, and closure-bound `host.services.call()` are wired, but no built-in consumer has registered a closed adapter and compatible launcher. Declarations therefore fail closed; this does not change the existing Hindsight external provider.
 - [Staff-improvement proposal fixture](staff-improvement-proposals.md) — the test-only scheduled decision/consented draft example; it is not a production transcript classifier.
 
 **Status:** renderers, actions, panels, channels, routes, entrypoints, implicit stores, session access, and worker isolation are all **implemented**. `HOST_API_VERSION` is `1`; `HOST_CONTRACT_VERSION` is `4`; `host.capabilities` reports all flags `true` on a current host.
@@ -48,7 +48,7 @@ The renderer+action working example lives at `tests/fixtures/market-sources/retr
 | **Entrypoints** | `entrypoints/<ep>.yaml` (listed in `contents`) | Browser (launchers + deep-link routes) | `host.ui.navigate` / `openPanel` |
 | **Pack store** | *implicit* — no declaration | Gateway | `host.store.{get,read,put,list,delete,deletePrefix,stats}` (pack-namespaced; `read` returns a tri-state durable-read outcome, while `get` is legacy and lossy) |
 | **Providers** *(schema 2; all hooks wired via the Lifecycle Hub)* | `providers/<id>.yaml` (listed in `contents.providers`) | Server (Lifecycle Hub, worker tier) | default-export hook object — see [docs/lifecycle-hub.md](lifecycle-hub.md) |
-| **Managed service extension** *(schema 2; declarative and currently dormant)* | `runtimes/<name>.yaml` (listed in `contents.runtimes`) | Core-owned lifecycle manager when a future consumer wires it | Closed service declaration only; packs never receive a process handle — see [Managed service-extension contract](service-extension-runtime.md) |
+| **Managed service extension** *(schema 2; declarative and gateway-wired)* | `runtimes/<name>.yaml` (listed in `contents.runtimes`) | Gateway-owned lifecycle manager and worktree coordinator for an authorized worktree scope | Closed declaration plus server-host `ctx.host.services.call()`; packs receive no service path, process, socket, or transport. No built-in consumer has registered the required closed adapter and compatible launcher, so declarations fail closed — see [Managed service-extension contract](service-extension-runtime.md) |
 | **Static system-prompt section** *(schema 2)* | `system-prompts/<name>.yaml` (listed in `contents.system-prompts`) | Gateway prompt layout | Literal text only; active and explicitly granted sections are placed in the protected static extension region. See [Static system-prompt sections](#static-system-prompt-sections-system-promptsnameyaml--schema-2). |
 | **Hooks** *(schema 2; metadata-first)* | `hooks/<name>.yaml` (listed in `contents.hooks`) | Registry metadata; bounded consumers are eligible scheduled advisors, the exact-granted decision dispatcher, [gated request mutation](request-mutation.md), and the core-owned [post-tool-result filter](design/ep-14-tool-result-filter.md) | Inactive or ungranted hooks do not load a module or create a general runtime surface; see [Extension decision requests](extension-decision-requests.md) |
 | **Standalone pi extensions** *(schema 2; not Extension Host surfaces)* | `pi-extensions/<id>/` or `pi-extensions/<id>.ts/.js/.mjs/.cjs` (listed in `contents.pi-extensions`) | Agent runtime via pi `--extension` | Plain pi extension API — see [Marketplace pi extensions](marketplace.md#marketplace-pi-extensions) |
@@ -103,7 +103,7 @@ A pack is a directory with a `pack.yaml` plus an entity payload. The full V1 lay
   channels/<name>.yaml            # pack-scoped long-lived channel handlers (listed in contents.channels)
   entrypoints/<ep>.yaml           # pack-scoped launcher/deep-link definitions, one file each
   providers/<id>.yaml             # schema-2 provider contributions (listed in contents.providers; dispatched via the Lifecycle Hub)
-  runtimes/<name>.yaml            # schema-2 declarative managed-service contract (listed in contents.runtimes; dormant until core wiring)
+  runtimes/<name>.yaml            # schema-2 declarative managed-service contract (gateway-wired; fails closed without a core adapter + launcher)
   system-prompts/<id>.yaml        # schema-2 static prompt sections (listed in contents.system-prompts)
   hooks/<name>.yaml               # schema-2 metadata-first hooks; may declare advisors, decision hooks, or gated request mutation hooks
   pi-extensions/<id>/             # schema-2 standalone pi extensions (listed in contents.pi-extensions)
@@ -161,8 +161,10 @@ Rules:
   authoring text still requires explicit project grants and approval. See [Static system-prompt
   sections](#static-system-prompt-sections-system-promptsnameyaml--schema-2).
 - **`contents.runtimes: string[]`** — schema-2 managed-service declaration basenames under
-  `runtimes/<name>.yaml`. These are validated and activation/settings-filtered declarations only;
-  they currently start nothing because no gateway consumer has wired the lifecycle manager. See
+  `runtimes/<name>.yaml`. The gateway's lifecycle manager and worktree coordinator reconcile
+  eligible declarations using fresh settings and deny-wins `service.manage` checks. Listing,
+  activation, settings, and grants do not launch a service; the built-in adapter/launcher registry
+  is empty, so a future core consumer must register a closed adapter and compatible launcher. See
   [Managed service-extension contract](service-extension-runtime.md).
 - **`contents.panels` does not exist** — panels are auto-discovered from `panels/*.yaml`. They
   are support surfaces, not activation points, so there is nothing to list or toggle.

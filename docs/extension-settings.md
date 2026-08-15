@@ -85,10 +85,12 @@ configuration.
 Until a provider satisfies the gate, it is omitted from runtime resolution, so no provider bridge,
 hook invocation, or provider network work is started. The same gate applies to hooks and declarative
 runtimes at the central contribution registry boundary. A dormant hook is omitted before EP-4
-request-mutation or EP-10 dynamic selector dispatch can see it; a dormant runtime is omitted before
-any future service lifecycle consumer can see it. Configuration alone never grants a hook capability;
-the hook must still satisfy its exact activation and grant rules. Runtimes remain dormant until a core
-consumer wires the lifecycle manager; see [Managed service-extension contract](service-extension-runtime.md).
+request-mutation or EP-10 dynamic selector dispatch can see it; an ineligible runtime is omitted
+before the gateway-owned worktree coordinator can select it. Configuration alone never grants a hook
+capability; the hook must still satisfy its exact activation and grant rules. The coordinator reads
+runtime settings freshly at lifecycle and RPC fences, but settings never launch a service: no built-in
+consumer has registered the required closed adapter and compatible launcher. See [Managed
+service-extension contract](service-extension-runtime.md).
 
 Malformed descriptor schemas, an unknown activation property, or a `requiresConfig` key that is
 not declared are surfaced as `invalid-schema` in the settings catalogue and fail closed at
@@ -269,8 +271,10 @@ switches, configuration state, and grant state. The existing **Review grants** d
 Pack row lists the six non-hook capabilities individually, requires a confirmation for each grant,
 and offers exact revoke actions; it is not a second permissions screen. **Grant history** in the
 same Installed surface shows both pack and legacy-hook audit records. A runtime setting controls
-declaration eligibility only until a core service consumer is wired; it does not launch a process
-today. Declared fields use native labelled controls and an explicit revisioned Save action. Status
+declaration eligibility and causes gateway reconciliation; it never launches a process by itself.
+The production-wired coordinator fails closed because no built-in consumer has registered the required
+closed adapter and compatible launcher. Declared fields use native labelled controls and an explicit
+revisioned Save action. Status
 distinguishes disabled, needs configuration, grant required, granted but inactive, **Settings need
 review** for invalid schema or incompatible evolved non-secret values, unavailable, and active states.
 
