@@ -2,6 +2,8 @@
 
 `ast_grep` is the Code Intelligence pack's read-only structural-search tool. It uses the upstream ast-grep executable to match source syntax rather than text, so an agent can find constructs such as a function call without treating comments or string contents as code. It complements `grep` and `read`; it does not replace them or provide structural editing.
 
+Code Intelligence is disabled by default and enabled after project import with a server-scoped Marketplace switch. Structural search is one capability beside graph leads and dormant LSP declarations; it is not a language-server fallback. See [Code Intelligence](code-intelligence.md) for activation, status, review, and cleanup behavior.
+
 ## When to use it
 
 Use `ast_grep` when the query is a valid fragment of a source language and syntax matters:
@@ -15,7 +17,7 @@ ast_grep({
 })
 ```
 
-Use `grep` for literal text, regular expressions, and broad discovery. Use `read` to inspect a known file or the context around a match. `ast_grep` never rewrites files.
+Use `grep` for literal text, regular expressions, and broad discovery. Use `read` to inspect a known file or the context around a match. `ast_grep` never rewrites files. Treat every structural match as a lead and read the cited source before changing or approving code.
 
 ## Inputs
 
