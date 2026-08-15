@@ -2980,6 +2980,7 @@ export class VerificationHarness {
 				// A pre-typed persisted cancellation has no recoverable provenance.
 				this._markVerificationCancelled(active, active.cancellation?.cause ?? "unknown");
 				if (!this._persistActive()) throw new Error(`Could not persist cancellation fence for ${active.signalId}`);
+				this._notifyCancellationFenceCommitted(active);
 				await this._terminateCancelledReviewersFor([active]);
 				const settled = await this._killPersistedCommandSteps(active, "SIGKILL", { markIntent: false });
 				if (settled) {
@@ -3026,6 +3027,7 @@ export class VerificationHarness {
 					// A retry after the crash window must delete this record, not resume it.
 					this._markVerificationCancelled(v, goal.state === "shelved" ? "shelved" : "goal-complete");
 					if (!this._persistActive()) throw new Error(`Could not persist cancellation fence for ${v.signalId}`);
+					this._notifyCancellationFenceCommitted(v);
 					await this._terminateCancelledReviewersFor([v]);
 					const settled = await this._killPersistedCommandSteps(v, "SIGKILL", { markIntent: false });
 					if (settled) {
@@ -3037,6 +3039,9 @@ export class VerificationHarness {
 					continue;
 				}
 				await this._resumeOneVerification(v);
+				// A restart-resume path can return after discovering a replacement.
+				// Apply the same durable supersession guard before any fallback path.
+				if (this._cancellationOwnsTerminalPublication(v)) continue;
 			} catch (err) {
 				const errMsg = (err as Error).message;
 				if (!this._isResumeStillActive(v)) {
@@ -3063,19 +3068,21 @@ export class VerificationHarness {
 						console.error(`[verification] Restart cancellation cleanup is pending for ${v.signalId}:`, cleanupErr);
 					}
 				} else {
+					if (this._cancellationOwnsTerminalPublication(v)) continue;
 					console.error(`[verification] Failed to resume verification ${v.signalId}:`, err);
 					// Best-effort: mark as failed. Wrap each external store call in
 					// try/catch so a missing goal/gate doesn't stop us from cleaning
 					// up the in-memory entry below (HTTP 409 lock-after-restart bug).
 					try {
-						v.overallStatus = "failed";
-						v.terminalVerdictPublished = true;
-						this._persistActive();
 						this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
 							status: "failed",
 							steps: [{ name: "Resume Error", type: "command", passed: false, status: "failed", phase: 0, output: `Failed to resume after restart: ${errMsg}`, duration_ms: 0 }],
 						});
+						if (this._cancellationOwnsTerminalPublication(v)) continue;
 						this.resolveGateStore(v.goalId).updateGateStatus(v.goalId, v.gateId, "failed");
+						v.overallStatus = "failed";
+						v.terminalVerdictPublished = true;
+						if (!this._persistActive()) throw new Error(`Could not persist restart failure publication for ${v.signalId}`);
 					} catch (storeErr) {
 						console.error(`[verification] Failed to update gate store for ${v.signalId} during resume cleanup:`, storeErr);
 					}
@@ -3096,9 +3103,9 @@ export class VerificationHarness {
 				// generation, and cancelled rows remain owned by their finalizer.
 				if (this.activeVerifications.get(v.signalId) === v
 					&& !v.cancelled
+					&& v.overallStatus !== "running"
 					&& !this._hasPendingCommandKillCleanup(v)
 					&& !v.reviewerCleanupPending) {
-					if (v.overallStatus === "running") v.overallStatus = "failed";
 					await this._releaseTerminalVerificationResources(v);
 				}
 				this._persistActive();
@@ -3485,7 +3492,7 @@ export class VerificationHarness {
 		const persistedStatus = allPassed ? "passed" as const : "failed" as const;
 		const gateStatus = persistedStatus;
 
-		if (!this._isResumeStillActive(v)) return;
+		if (this._cancellationOwnsTerminalPublication(v)) return;
 
 		this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
 			status: persistedStatus,
@@ -4366,9 +4373,16 @@ export class VerificationHarness {
 	private async _releaseTerminalVerificationResourcesOnce(active: ActiveVerification): Promise<boolean> {
 		if (active.cancelled && !active.terminalVerdictPublished) {
 			await this._finalizeCancelledVerification(active);
-			return this.activeVerifications.get(active.signalId) !== active;
+			// Finalization may have been invoked by this release owner. It deliberately
+			// does not join our promise (that would self-deadlock); now that it has
+			// published, fall through so this exact owner settles and removes the row.
+			if (this.activeVerifications.get(active.signalId) !== active) return true;
 		}
 		if (!await this._settleTerminalVerificationResources(active)) return false;
+		// An asynchronous sidecar/checkout release may overlap a replacement or a
+		// restart-recovered object with the same signal ID. Never clear its retry
+		// timer, delete its active row, or persist its state through this stale owner.
+		if (this.activeVerifications.get(active.signalId) !== active) return false;
 		const timer = this._terminalCleanupRetryTimers.get(active.signalId);
 		if (timer) {
 			this.clock.clearTimeout(timer);
@@ -4387,7 +4401,10 @@ export class VerificationHarness {
 		const timer = this.clock.setTimeout(async () => {
 			this._terminalCleanupRetryTimers.delete(signalId);
 			const pending = this.activeVerifications.get(signalId);
-			if (!pending || this._hasPendingCommandKillCleanup(pending)) return;
+			// A retry timer belongs to the exact object that scheduled it. A
+			// replacement/recovered object sharing an ID must schedule and own its
+			// own cleanup rather than inheriting this stale owner's terminal actions.
+			if (!pending || pending !== active || this._hasPendingCommandKillCleanup(pending)) return;
 			if (pending.cancelled && !pending.terminalVerdictPublished) {
 				await this._finalizeCancelledVerification(pending);
 				return;
@@ -4544,7 +4561,7 @@ export class VerificationHarness {
 	}
 
 	private _isResumeStillActive(v: ActiveVerification): boolean {
-		return this.activeVerifications.get(v.signalId) === v && !v.cancelled;
+		return this.activeVerifications.get(v.signalId) === v && !v.cancelled && this._isCurrentGateSignal(v);
 	}
 
 	private _commandIdentityNonce(step: ActiveVerification["steps"][number]): string | undefined {
@@ -4866,13 +4883,20 @@ export class VerificationHarness {
 	private _terminalCleanupRetryTimers = new Map<string, NodeJS.Timeout>();
 	/** One strict sidecar/check-out release attempt per terminal signal. */
 	private _terminalCleanupPromises = new Map<string, Promise<boolean>>();
+	/** Ephemeral only: prevents a catch-path retry after an uncommitted stale fence. */
+	private _failedCancellationFences = new WeakSet<ActiveVerification>();
+
+	/** Whether this exact signal is still the gate's current generation. */
+	private _isCurrentSignal(goalId: string, gateId: string, signalId: string): boolean {
+		const gate = this.resolveGateStore(goalId)?.getGate?.(goalId, gateId);
+		const signals = gate?.signals;
+		// Lightweight unit seams do not expose signal history; production does.
+		return !Array.isArray(signals) || signals.length === 0 || signals[signals.length - 1]?.id === signalId;
+	}
 
 	/** Whether this exact signal is still the gate's current generation. */
 	private _isCurrentGateSignal(active: ActiveVerification): boolean {
-		const gate = this.resolveGateStore(active.goalId)?.getGate?.(active.goalId, active.gateId);
-		const signals = gate?.signals;
-		// Lightweight unit seams do not expose signal history; production does.
-		return !Array.isArray(signals) || signals.length === 0 || signals[signals.length - 1]?.id === active.signalId;
+		return this._isCurrentSignal(active.goalId, active.gateId, active.signalId);
 	}
 
 	/**
@@ -4885,10 +4909,25 @@ export class VerificationHarness {
 		if (this.activeVerifications.get(active.signalId) !== active
 			|| active.terminalVerdictPublished
 			|| active.overallStatus === "passed"
-			|| active.overallStatus === "failed") return true;
+			|| active.overallStatus === "failed"
+			|| this._failedCancellationFences.has(active)) return true;
 		if (!active.cancelled && !this._isCurrentGateSignal(active)) {
+			// A stale generation may not publish a product verdict. Fence it first,
+			// but leave it completely live if the fence cannot become durable.
+			const snapshot = structuredClone(active);
+			const wasFenced = this.cancelledVerificationSignals.has(active.signalId);
 			this._markVerificationCancelled(active, "superseded");
-			if (!this._persistActive()) throw new Error(`Could not persist supersession fence for ${active.signalId}`);
+			if (!this._persistActive()) {
+				for (const key of Object.keys(active)) delete (active as any)[key];
+				Object.assign(active, snapshot);
+				if (wasFenced) this.cancelledVerificationSignals.add(active.signalId);
+				else this.cancelledVerificationSignals.delete(active.signalId);
+				// The catch path must not retry this failed fence and accidentally
+				// interrupt reviewers after the caller has observed the failure.
+				this._failedCancellationFences.add(active);
+				return true;
+			}
+			this._notifyCancellationFenceCommitted(active);
 		}
 		if (!active.cancelled) return false;
 		void this._startCancelledVerificationCleanup(active);
@@ -4920,10 +4959,19 @@ export class VerificationHarness {
 		// share the same SIGKILL mechanics.
 		active.cancelRequestedAt ??= active.cancellation.requestedAt;
 		this.cancelledVerificationSignals.add(active.signalId);
+		this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
+	}
+
+	/**
+	 * Irreversible waiter/signoff effects happen only after the cancellation fence
+	 * is on disk. This is deliberately separate from _markVerificationCancelled:
+	 * promises cannot be "unresolved" if a re-signal fence returns 503.
+	 */
+	private _notifyCancellationFenceCommitted(active: ActiveVerification): void {
 		const waiters = this.verifierDispatchCancellationWaiters.get(active.signalId);
 		this.verifierDispatchCancellationWaiters.delete(active.signalId);
 		for (const notify of waiters ?? []) notify(`Verifier prompt signal ${active.signalId} was cancelled or superseded`);
-		this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
+		this._drainPendingSignoffsForSignal(active.signalId);
 	}
 
 	/** Snapshot every live reviewer before any asynchronous command cleanup can yield. */
@@ -5036,6 +5084,7 @@ export class VerificationHarness {
 	private async _finalizeRestartInterruptedVerification(active: ActiveVerification): Promise<void> {
 		this._markVerificationCancelled(active, "gateway-restart-recovery");
 		if (!this._persistActive()) throw new Error(`Could not persist cancellation fence for ${active.signalId}`);
+		this._notifyCancellationFenceCommitted(active);
 		await this._terminateCancelledReviewersFor([active]);
 		const settled = await this._killPersistedCommandSteps(active, "SIGKILL", { markIntent: false });
 		if (settled) await this._finalizeCancelledVerification(active);
@@ -5079,15 +5128,11 @@ export class VerificationHarness {
 					store.updateSignalVerification(active.signalId, verification);
 				}
 			}
-			// Keep the active record until its exact sidecar and pinned-checkout
-			// resources settle; retry ownership survives a restart.
-			active.terminalVerdictPublished = true;
-			delete active.cancellationFinalizing;
-			if (!this._persistActive()) throw new Error(`Could not persist cancellation publication for ${active.signalId}`);
 			// Cancellation leaves the current, non-terminal generation eligible for a
 			// deterministic explicit re-signal. Historical superseded signals must not
 			// touch a newer gate generation, and terminal lifecycle routes retain their
-			// authoritative bypass/goal state.
+			// authoritative bypass/goal state. Re-check after the strict signal write:
+			// a replacement may have arrived while that durable operation was awaiting.
 			const terminalLifecycleCancellation = verification.cancellation?.cause === "bypass"
 				|| verification.cancellation?.cause === "goal-complete"
 				|| verification.cancellation?.cause === "team-teardown"
@@ -5097,14 +5142,21 @@ export class VerificationHarness {
 			const goal = this.projectContextManager?.getContextForGoal(active.goalId)?.goalStore.get(active.goalId);
 			const legacyTerminalGoal = verification.cancellation?.cause === "unknown"
 				&& (goal?.state === "complete" || goal?.state === "shelved" || goal?.archived === true);
-			if (this._isCurrentGateSignal(active)
+			const resetCurrentGate = this._isCurrentGateSignal(active)
 				&& !terminalLifecycleCancellation
 				&& !legacyTerminalGoal
 				&& currentGate?.status !== "bypassed"
-				&& store?.updateGateStatus) {
-				store.updateGateStatus(active.goalId, active.gateId, "pending");
-				broadcastGateStatusChanged(this.broadcastFn, active.goalId, active.gateId, "pending");
-			}
+				&& !!store?.updateGateStatus;
+			if (resetCurrentGate) store!.updateGateStatus(active.goalId, active.gateId, "pending");
+
+			// This marker means the whole durable product outcome is committed: the
+			// historical signal is cancelled and (when still current) its gate is
+			// eligible again. Do not set it before the gate write; a crash/retry must
+			// retain this owner until both writes converge.
+			active.terminalVerdictPublished = true;
+			delete active.cancellationFinalizing;
+			if (!this._persistActive()) throw new Error(`Could not persist cancellation publication for ${active.signalId}`);
+			if (resetCurrentGate) broadcastGateStatusChanged(this.broadcastFn, active.goalId, active.gateId, "pending");
 			this.broadcastFn(active.goalId, {
 				type: "gate_verification_complete", goalId: active.goalId, gateId: active.gateId,
 				signalId: active.signalId, status: "cancelled", cancellation: verification.cancellation,
@@ -5125,8 +5177,12 @@ export class VerificationHarness {
 				}
 			}
 			// Resources were settled before publication; this only removes the durable
-			// owner after the exactly-once signal/gate/WS transaction completed.
-			await this._releaseTerminalVerificationResources(active);
+			// owner after the exactly-once signal/gate/WS transaction completed. When
+			// called by that release owner, do not await its own promise; it falls
+			// through to settle/delete immediately after this finalizer returns.
+			if (!this._terminalCleanupPromises.has(active.signalId)) {
+				await this._releaseTerminalVerificationResources(active);
+			}
 		} catch (error) {
 			delete active.cancellationFinalizing;
 			this._persistActive();
@@ -5482,11 +5538,11 @@ export class VerificationHarness {
 		// A terminal route must not await cleanup before committing its lifecycle
 		// write. Each resource release owns its own durable retry.
 		for (const active of terminalResourceCleanups) void this._releaseTerminalVerificationResources(active);
-		// Drain parked signoffs synchronously after the durable fence, then hand
-		// exact reviewer/process cleanup to its single owner. The owner catches and
-		// retries errors so this detached path never produces an unhandled rejection.
+		// Notify parked waiters only after the durable fence, then hand exact
+		// reviewer/process cleanup to its single owner. The owner catches and retries
+		// errors so this detached path never produces an unhandled rejection.
 		for (const active of cancellations) {
-			this._drainPendingSignoffsForSignal(active.signalId);
+			this._notifyCancellationFenceCommitted(active);
 			void this._startCancelledVerificationCleanup(active);
 		}
 		// Returning every resource owner lets the awaitable wrapper join terminal
@@ -5596,13 +5652,10 @@ export class VerificationHarness {
 			if (this._isTerminalResourceCleanup(active)) terminalResourceCleanups.push(active);
 			else cancellations.push(active);
 		}
-		// _markVerificationCancelled also updates step kill intent, the in-process
-		// generation fence, and verifier-admission waiters. Restore every mutable
-		// owner if persistence cannot make that fence durable; cleanup must not run.
+		// Marking changes only reversible in-memory state. If persistence fails, no
+		// waiter/signoff/reviewer/process side effect has started.
 		const before = cancellations.map(active => ({ active, value: structuredClone(active) }));
 		const cancelledSignalsBefore = new Set(this.cancelledVerificationSignals);
-		const waiterBefore = new Map<string, Set<(reason: string) => void> | undefined>();
-		for (const active of cancellations) waiterBefore.set(active.signalId, this.verifierDispatchCancellationWaiters.get(active.signalId));
 		for (const active of cancellations) this._markVerificationCancelled(active, cause);
 		if (cancellations.length > 0 && !this._persistActive()) {
 			for (const snapshot of before) {
@@ -5610,16 +5663,11 @@ export class VerificationHarness {
 				Object.assign(snapshot.active, snapshot.value);
 			}
 			this.cancelledVerificationSignals = cancelledSignalsBefore;
-			for (const active of cancellations) {
-				const waiters = waiterBefore.get(active.signalId);
-				if (waiters) this.verifierDispatchCancellationWaiters.set(active.signalId, waiters);
-				else this.verifierDispatchCancellationWaiters.delete(active.signalId);
-			}
 			throw new Error(`Could not persist cancellation fence for goal ${goalId}`);
 		}
 		for (const active of terminalResourceCleanups) void this._releaseTerminalVerificationResources(active);
 		for (const active of cancellations) {
-			this._drainPendingSignoffsForSignal(active.signalId);
+			this._notifyCancellationFenceCommitted(active);
 			void this._startCancelledVerificationCleanup(active);
 		}
 		return [...terminalResourceCleanups, ...cancellations];
@@ -5734,6 +5782,9 @@ export class VerificationHarness {
 				this.resolveGateStore(signal.goalId).updateSignalContentDigest?.(signal.id, signal.contentDigest);
 				this.resolveGateStore(signal.goalId).updateSignalPinnedCheckout?.(signal.id, signal.pinnedCheckout);
 				await this.pinnedCheckoutManager.assertUnchanged(checkout);
+				// No active record exists for a zero-step gate, but an asynchronous
+				// checkout attestation may still race a replacement signal.
+				if (!this._isCurrentSignal(signal.goalId, signal.gateId, signal.id)) return;
 				this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, { status: "passed", steps: [] });
 				this.resolveGateStore(signal.goalId).updateGateStatus(signal.goalId, signal.gateId, "passed");
 				this.broadcastFn(signal.goalId, {
@@ -5746,6 +5797,7 @@ export class VerificationHarness {
 				broadcastGateStatusChanged(this.broadcastFn, signal.goalId, signal.gateId, "passed");
 				this.notifyTeamLead(signal.goalId, signal.gateId, "passed");
 			} catch (error) {
+				if (!this._isCurrentSignal(signal.goalId, signal.gateId, signal.id)) return;
 				const pinnedError = publicPinnedCheckoutError(error);
 				signal.pinnedCheckoutError = pinnedError;
 				this.resolveGateStore(signal.goalId).updateSignalPinnedCheckout?.(signal.id, pinnedError);
