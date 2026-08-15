@@ -30,6 +30,24 @@
       }
     },
     {
+      "path": "tests2/core/session-markdown-image.test.ts",
+      "reason": "Core security and filesystem regression coverage for authenticated session-scoped Markdown images, including cwd containment, symlink and traversal rejection, MIME and size limits, file URLs, and sandbox-realm reads.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/system-prompt-markdown-image.test.ts",
+      "reason": "Core prompt regression coverage ensuring agents are taught the session-relative local-image syntax while avoiding base64 and raw HTML output.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/large-write-stream-bounds.test.ts",
       "reason": "Core regression coverage proving cumulative large write snapshots remain bounded in retained events and capable-client wire frames.",
       "execution": {
