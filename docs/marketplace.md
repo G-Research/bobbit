@@ -790,27 +790,37 @@ A source repo's top level is a collection of pack directories. Each pack is one 
 Authored by the publisher; copied verbatim on install. Parsed and validated by `pack-manifest.ts`.
 
 ```yaml
+schema: 3                        # OPTIONAL. Schema 2 unlocks the extension keys below; schema 3 adds sandboxRequirements.
 name: research-pack              # REQUIRED. /^[a-z0-9][a-z0-9-]*$/ — used as the install dir name.
 description: >                   # REQUIRED. One-paragraph summary shown in the browse UI.
   Deep-research role, web tools, and a literature-review skill.
 version: 1.2.0                   # REQUIRED. Semver-ish string; shown in provenance.
 author: jane@example.com         # OPTIONAL.
 homepage: https://...            # OPTIONAL.
+provides: [research]             # OPTIONAL — schema 2+ capability metadata.
+requires: []                     # OPTIONAL — schema 2+ capability metadata.
 contents:                        # REQUIRED. roles/tools/skills required; each MAY be empty.
   roles:       [researcher]      #   Drives the browse-UI declared-entity chips.
   tools:       [research]        #   tools[] are tool GROUP dir names under tools/; activation expands them to concrete tool names.
   skills:      [lit-review]      #   (No per-pack gate keys off tools[]; trust is
-  entrypoints: [open-review]      #    decided once when adding a source.)
+  entrypoints: [open-review]     #    decided once when adding a source.)
                                  #   OPTIONAL — entrypoints/<name>.yaml basenames (toggleable).
-  # schema: 2 only:
-  mcp:         [github]          #   OPTIONAL — mcp/<name>.yaml|yml|json basenames (toggleable).
-  pi-extensions: [demo]          #   OPTIONAL — pi-extensions/<name>/ or <name>.ts/.js/.mjs/.cjs (toggleable).
+  # schema: 2+ only:
+  providers: [research]          #   OPTIONAL — providers/<name>.yaml basenames.
+  hooks: [turn-audit]            #   OPTIONAL — hooks/<name>.yaml|yml basenames.
+  mcp: [github]                  #   OPTIONAL — mcp/<name>.yaml|yml|json basenames.
+  pi-extensions: [demo]          #   OPTIONAL — pi-extensions/<name>/ or <name>.ts/.js/.mjs/.cjs.
+  runtimes: [indexer]            #   OPTIONAL — runtimes/<name>.yaml basenames.
+  system-prompts: [review-rules] #   OPTIONAL — system-prompts/<name>.yaml basenames.
+  workflows: [review]            #   OPTIONAL — reserved workflow basenames.
+  # schema: 3 only:
+  sandboxRequirements: [python]  #   OPTIONAL — approved toolchain declarations; see extension-sandbox-requirements.md.
 routes:                          # OPTIONAL top-level block — Extension-Host pack routes.
   module: lib/routes.mjs         #   relative to pack.yaml, contained in the pack root.
-  names:  [bundle, publish]       #   exported route-name allowlist.
+  names:  [bundle, publish]      #   exported route-name allowlist.
 ```
 
-Validation rules: `name`, `description`, `version` must be non-empty; `name` must match the pattern (rejects path separators, `..`, leading dots); `contents` is required with the `roles`/`tools`/`skills` array keys present (each may be empty). `contents.tools` lists tool **group** directory names, while activation catalogues expand those groups to concrete tool names. `contents.entrypoints` is optional and lists the basenames of `entrypoints/<name>.yaml` files (the Extension-Host activation catalogue — see [authoring guide](extension-host-authoring.md#entrypoints--non-chat-launchers--deep-link-routes-hostuinavigate)). The optional top-level `routes:` block declares pack-level Extension-Host routes. Panels are **auto-discovered** from `panels/*.yaml` and are not listed here. `contents.mcp` and `contents.pi-extensions` are **rejected at schema 1** (the absent-or-`1` default) and **accepted at `schema: 2`**; schema-2 MCP basenames load pack-owned MCP contribution files from `mcp/<name>.yaml|yml|json` (see [Marketplace MCP](#marketplace-mcp)), and schema-2 pi-extension basenames resolve standalone pi entries from `pi-extensions/<name>/` or `pi-extensions/<name>.ts/.js/.mjs/.cjs` (see [Marketplace pi extensions](#marketplace-pi-extensions)). There is **no `stores` key** (Extension-Host stores are implicit, namespaced by the server-derived `packId`) and **no `permissions` key** (trusted pack code has ambient OS access — there is no permission system). Unknown top-level keys are ignored (forward-compat). A pack whose `pack.yaml` is missing or invalid is skipped with a warning, never fatal.
+Validation rules: `name`, `description`, `version` must be non-empty; `name` must match the pattern (rejects path separators, `..`, leading dots); `contents` is required with the `roles`/`tools`/`skills` array keys present (each may be empty). `contents.tools` lists tool **group** directory names, while activation catalogues expand those groups to concrete tool names. `contents.entrypoints` is optional and lists the basenames of `entrypoints/<name>.yaml` files (the Extension-Host activation catalogue — see [authoring guide](extension-host-authoring.md#entrypoints--non-chat-launchers--deep-link-routes-hostuinavigate)). The optional top-level `routes:` block declares pack-level Extension-Host routes. Panels are **auto-discovered** from `panels/*.yaml` and are not listed here. Schema 2 accepts its seven extension `contents` keys and the top-level `provides`/`requires` metadata; schema 3 retains those and additionally accepts `contents.sandboxRequirements`. There is **no `stores` key** (Extension-Host stores are implicit, namespaced by the server-derived `packId`) and **no `permissions` key** (trusted pack code has ambient OS access — there is no permission system). Unknown top-level keys are ignored (forward-compat). A pack whose `pack.yaml` is missing or invalid is skipped with a warning, never fatal.
 
 ### `pack.yaml` schema 2 (Extension Platform)
 
@@ -840,11 +850,14 @@ managed service yet. See [Managed service extensions](service-extension-runtime.
   keeps verbatim v1 validation, including the `contents.mcp` rejection below. Other stray
   schema-2 `contents` keys and top-level `provides`/`requires` are ignored, so v1 packs cannot
   load providers and their `pack-activation` catalogue remains the old shape.
-- **`schema: 2`** unlocks the seven new `contents` keys and the `provides`/`requires` arrays.
-- **`schema: 3` or higher** is *not* fatal: the pack loads its **schema-2 subset** and one
-  forward-compat warning is recorded (`pack.yaml: schema N is newer than supported (2)`).
-  This keeps a newer pack installable on an older Bobbit rather than vanishing — the publisher
-  gets a warning, the supported keys still resolve, and unknown keys are ignored as always.
+- **`schema: 2`** unlocks the seven `contents` keys documented below and the
+  `provides`/`requires` arrays.
+- **`schema: 3`** retains every schema-2 key and adds `contents.sandboxRequirements`.
+  It is supported and does not emit a forward-compatibility warning.
+- **`schema > 3`** is *not* fatal: the pack loads the supported **schema-3 subset** and one
+  forward-compatibility warning is recorded (`pack.yaml: schema N is newer than supported (3)`).
+  This keeps a newer pack installable rather than vanishing — the supported keys still resolve,
+  while unknown keys are ignored.
 
 #### `provides` / `requires` capability names
 
@@ -857,7 +870,7 @@ They are **metadata only** today (recorded on the parsed manifest, surfaced nowh
 behaviourally yet) — the dependency/capability graph that consumes them belongs to a later
 goal. They are validated now so packs can declare them ahead of that work.
 
-#### Seven new `contents` keys
+#### Seven schema-2 `contents` keys
 
 Schema 2 adds seven optional `contents` keys. Each is a `string[]` of **safe basenames** (same
 guard as `contents.entrypoints` — no path separators, no `..`, no absolute/drive forms), and
@@ -874,6 +887,11 @@ each defaults to `[]` when absent:
 | `workflows` | `workflows` | No (reserved) | Workflow contribution basenames. |
 
 **`providers`, `hooks`, `runtimes`, `system-prompts`, `mcp`, and `pi-extensions` have loaders.** Providers, hooks, declarative runtimes, and static prompt sections load through the Extension-Host contribution registry. Hook indexing alone never imports a module, dispatches an event, grants authority, evaluates configuration, or creates UI; bounded consumers separately require their exact live grants. Runtime loading validates and filters declarations but starts no process until an explicit core consumer wires the lifecycle manager. Static prompt sections are literal text and require activation plus an exact `prompt:system-static` grant; see [Static system-prompt sections](extension-host-authoring.md#static-system-prompt-sections-system-promptsnameyaml--schema-2). `mcp` loads through the Marketplace MCP path described above; `pi-extensions` resolve to standalone pi `--extension` entries described in [Marketplace pi extensions](#marketplace-pi-extensions). Only `workflows` remains an accepted, normalised, activation-catalogue-only reserved key. See [Managed service-extension contract](service-extension-runtime.md).
+
+#### Schema-3 sandbox requirements
+
+Schema 3 adds `contents.sandboxRequirements` to the schema-2 contract. It names approved,
+manifest-listed toolchain declarations; see [Extension sandbox requirements](extension-sandbox-requirements.md).
 
 #### Minimal schema-2 example
 
