@@ -194,8 +194,8 @@
 	.btn-secondary:hover { background: var(--secondary); }
 	.btn-ghost { background: transparent; color: var(--muted-foreground); }
 	.btn-ghost:hover { background: var(--secondary); color: var(--foreground); }
-	.btn-danger { background: var(--negative); color: var(--negative-foreground); }
-	.btn-danger:hover { background: color-mix(in oklch, var(--negative) 86%, var(--foreground)); }
+	.btn-danger { background: color-mix(in oklch, var(--negative) 10%, transparent); border-color: color-mix(in oklch, var(--negative) 40%, var(--border)); color: var(--negative); }
+	.btn-danger:hover { background: color-mix(in oklch, var(--negative) 16%, transparent); }
 	.btn-danger-quiet { background: transparent; border-color: color-mix(in oklch, var(--negative) 40%, var(--border)); color: var(--negative); }
 	.btn-danger-quiet:hover { background: color-mix(in oklch, var(--negative) 10%, transparent); }
 	.btn-inline { min-height: 28px; padding: 4px 8px; font-size: 11px; }
