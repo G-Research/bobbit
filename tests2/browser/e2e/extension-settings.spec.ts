@@ -299,7 +299,7 @@ test.describe("Market extension settings", () => {
 		await emptyTypescript.focus();
 		await page.keyboard.press("Space");
 		await expect(emptyTypescript).not.toBeChecked();
-		await expect(emptyLanguages.getByTestId("market-settings-multi-enum-summary")).toHaveText("No options selected");
+		await expect(emptyLanguages.getByTestId("market-settings-multi-enum-summary")).toHaveText("None selected");
 		const emptyResponse = page.waitForResponse(response => response.url().endsWith(patchPath) && response.request().method() === "PATCH");
 		await emptyForm.getByTestId("market-settings-save").click();
 		const emptied = await emptyResponse;
