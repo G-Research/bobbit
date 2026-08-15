@@ -22,7 +22,7 @@ const PI_PACKAGES = [
 	"@earendil-works/pi-coding-agent",
 ] as const;
 const INSPECTED_PACKAGES = [...PI_PACKAGES, "brace-expansion", "protobufjs"];
-const REQUIRED_PI_VERSION = "0.82.1";
+const REQUIRED_PI_VERSION = "0.84.1";
 
 interface JsonRecord {
 	[key: string]: unknown;

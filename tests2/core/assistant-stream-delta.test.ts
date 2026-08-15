@@ -3,6 +3,7 @@ import { describe, it } from "vitest";
 import {
 	compactAssistantStreamDelta,
 	parsePartialToolArguments,
+	PiAssistantStreamNormalizer,
 	reconstructAssistantStreamDelta,
 } from "../../src/shared/assistant-stream-delta.ts";
 
@@ -68,6 +69,45 @@ function roundTrip(events: AnyObject[]): AnyObject[] {
 }
 
 describe("assistant stream delta compaction", () => {
+	it("reconstructs Pi delta-only text and defers final content to terminal authority", () => {
+		const normalizer = new PiAssistantStreamNormalizer();
+		const baseline = message([]);
+		normalizer.normalize({ type: "message_start", message: baseline });
+
+		const start = normalizer.normalize({
+			type: "message_update",
+			assistantMessageEvent: { type: "text_start", contentIndex: 0 },
+		}) as AnyObject;
+		const first = normalizer.normalize({
+			type: "message_update",
+			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "first" },
+		}) as AnyObject;
+		const second = normalizer.normalize({
+			type: "message_update",
+			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: " + second" },
+		}) as AnyObject;
+
+		assert.equal(start.message.content[0].text, "");
+		assert.equal(first.message.content[0].text, "first");
+		assert.equal(second.message.content[0].text, "first + second");
+		assert.deepEqual(second.assistantMessageEvent.partial, second.message);
+
+		const terminal: AnyObject = {
+			type: "message_end",
+			message: { ...message([{ type: "text", text: "exact provider terminal" }]), stopReason: "stop" },
+		};
+		assert.strictEqual(normalizer.normalize(terminal), terminal);
+		assert.equal(terminal.message.content[0].text, "exact provider terminal");
+		assert.equal(
+			"message" in (normalizer.normalize({
+				type: "message_update",
+				assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "orphan" },
+			}) as AnyObject),
+			false,
+			"terminal must reset the reconstruction baseline",
+		);
+	});
+
 	it("round-trips text start, deltas, and end while preserving baseline metadata", () => {
 		const current = message([{ type: "text", text: "" }]);
 		const events = [update(current, { type: "text_start", contentIndex: 0 })];

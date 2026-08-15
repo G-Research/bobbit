@@ -411,7 +411,7 @@ describe("SessionManager snapshot memo", () => {
 		value.schedulePromptCursorRefresh = vi.fn();
 		const live = session(async () => ({ success: true, data: [] }));
 		live.status = "streaming";
-		live.promptQueue = { dequeueAllSteered: () => [] };
+		live.promptQueue = { dequeueAllSteered: () => [], toArray: () => [] };
 		value.sessions.set(live.id, live);
 
 		value.handleAgentLifecycle(live, { type: "agent_start" });

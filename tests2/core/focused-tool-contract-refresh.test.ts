@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { gunzipSync } from "node:zlib";
 import { validateToolArguments } from "@earendil-works/pi-ai";
-import { Value } from "@sinclair/typebox/value";
+import * as Value from "typebox/value";
 import { afterEach, describe, it } from "vitest";
 
 import agentExtension from "../../defaults/tools/agent/extension.ts";
