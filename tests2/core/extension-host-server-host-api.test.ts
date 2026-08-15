@@ -62,6 +62,49 @@ describe("createServerHostApi — durable v1 (no gateway passthrough)", () => {
 	});
 });
 
+describe("createServerHostApi — closure-bound managed services", () => {
+	it("binds every call to the server-derived session and pack, without exposing a process", async () => {
+		const calls: unknown[] = [];
+		const host = createServerHostApi({
+			sessionId: "session-owned", packId: "winning-pack", contributionId: "tools/run",
+			serviceToolRpc: {
+				request: async input => {
+					calls.push(input);
+					return { state: "ready", value: { count: 1 } };
+				},
+			},
+		});
+		assert.equal(host.capabilities.services, true);
+		assert.equal(host.capabilities.has("services"), true);
+		assert.equal((host.services as unknown as Record<string, unknown>).process, undefined);
+		assert.deepEqual(
+			await host.services.call({ component: ".", serviceId: "language", operation: "search", payload: { query: "x" } }),
+			{ count: 1 },
+		);
+		assert.deepEqual(calls, [{
+			sessionId: "session-owned", packId: "winning-pack",
+			request: { component: ".", serviceId: "language", discriminator: "default", operation: "search", payload: { query: "x" } },
+		}]);
+	});
+
+	it("fails closed without an exact gateway broker or a ready result", async () => {
+		const unavailable = createServerHostApi({ sessionId: "s", packId: "p", contributionId: "g/t" });
+		assert.equal(unavailable.capabilities.services, false);
+		await assert.rejects(
+			unavailable.services.call({ component: ".", serviceId: "language", operation: "search" }),
+			/host\.services capability is not available/,
+		);
+		const notReady = createServerHostApi({
+			sessionId: "s", packId: "p", contributionId: "g/t",
+			serviceToolRpc: { request: async () => ({ state: "starting" }) },
+		});
+		await assert.rejects(
+			notReady.services.call({ component: ".", serviceId: "language", operation: "search" }),
+			/not ready/,
+		);
+	});
+});
+
 describe("createServerHostApi — Fix B: NO server-side session.postMessage", () => {
 	it("the server host session API does NOT expose postMessage (driving the agent is client-only)", () => {
 		const host = createServerHostApi({ sessionId: "s", toolUseId: "tu", packId: "p", contributionId: "g/t" });
