@@ -1,202 +1,136 @@
 # Reliable prompt and steer delivery
 
-Bobbit treats each identified browser/WebSocket prompt or steer as a durable occurrence. The delivery outbox bridges the browser, gateway, and Pi transcript so a message remains visible until its correlated user row reaches chat. A WebSocket write or Pi RPC acknowledgement is transport progress, not delivery.
+Bobbit separates **delivery state** from the **conversation transcript**. A prompt or steer may be accepted, queued, sent, or uncertain before Pi has durably written its user row. Keeping that work in the delivery outbox prevents it from being mistaken for a completed chat message and keeps a newly accepted human prompt visible through acknowledgement, reconnect, and hard reload.
 
-This lifecycle extends the existing `PromptQueue`, in-flight ledger, prompt-author sidecar, snapshot splice, and queue-pill UI. It does not introduce a second mailbox or event log.
+This contract covers browser input and server-originated work. It extends the existing `PromptQueue`, dispatch ledger, prompt-author sidecar, snapshot handling, and queue-pill UI; it is not a second mailbox or transcript.
 
-## Occurrence identity and admission
+## Ownership boundary
 
-The browser assigns every composer submission a random `intentId`. This identifies one occurrence, not its text: two identical messages have different IDs and settle independently.
+The transcript is ordered exclusively by real, settled Pi transcript rows. Synthetic recovery rows, RPC acknowledgements, WebSocket writes, and lifecycle events do not create or settle transcript bubbles.
 
-Before sending, the browser:
+The delivery outbox owns every occurrence until exact Pi evidence transfers ownership:
 
-1. adds a `local` row to the visible outbox;
-2. persists the exact frame and row in the IndexedDB `delivery-intents` store; and
-3. sends the frame when the session WebSocket is authenticated.
+- The queue and in-flight ledger are server-owned durable delivery state.
+- Queue pills show pending, dispatched, failed, cancelled, or uncertain work without claiming it is chat history.
+- A real correlated Pi user row is the only route into the conversation. Its exact sidecar settlement makes the transfer durable.
+- A snapshot may contain a user-shaped recovery projection to preserve delivery information. The client removes every explicitly marked projection from the transcript reducer and places it in the outbox instead. It never settles an occurrence.
 
-`WebSocket.send()` records only that an attempt was made on the current connection. It never settles or hides the row.
+This distinction is deliberate. A projection exists because Bobbit knows it handed work toward Pi, not because Pi recorded the work. Rendering it after the canonical transcript can make new user messages appear to disappear above System cards. Keeping it in the outbox preserves transcript order and makes reload reproduce the same truthful state.
 
-The local spool fails visibly instead of evicting accepted work. Its bounds are 50 occurrences per session, 40 MiB per occurrence, and 128 MiB total. A storage or size failure produces a non-retryable **Not delivered** row.
+## Stable occurrence identity
 
-The authenticated server accepts `intentId` values that are non-empty strings of at most 256 characters. Legacy clients may omit the field; the WebSocket boundary supplies an ID. Browser-originated frames cannot choose their author: the server assigns the local-user author and provenance.
+Each accepted occurrence has a server-owned stable `intentId`. It identifies one submission, rather than its body: identical prompts are independent occurrences and must never be correlated, deduplicated, or settled by text.
 
-Server admission is idempotent for `(sessionId, intentId)`:
+Browser submissions create and persist an ID before transport. The gateway supplies an ID when an older browser omits one. All newly created server-generated work also uses the reliable model, including:
 
-- the exact queue occurrence is persisted before any Pi call;
-- replay returns the existing queue or in-flight projection;
-- replay of an already surfaced or dismissed occurrence returns its body-free terminal disposition; and
-- the same text under another ID remains a separate occurrence.
+- task-complete notifications and other task notifications;
+- auto-nudges and inbox wake-ups;
+- verification messages and verifier follow-ups;
+- kickoff, continuation, recovery, and other system prompts, including batched system prompts; and
+- server/API/tool-originated local-user prompts and live steers.
 
-Prompt preprocessing for skills and file mentions happens before server admission. If Stop cancels that preparation, the correlated local row becomes actionable with `INTENT_PREPARATION_CANCELLED`; an error without a valid `intentId` cannot settle an unrelated row.
+A direct server prompt reserves its occurrence before its Pi RPC. A queued or live steer reserves the same occurrence before leaving `PromptQueue`. Reliable steers are dispatched serially, rather than newline-batched, so equal-text steers retain separate identities. A source or author describes provenance; it is not an identity key.
+
+An occurrence keeps its `intentId` while moving between browser storage, `PromptQueue`, the in-flight ledger, delivery projections, and the user row. Every dispatch creates a distinct `attemptId` and monotonic dispatch epoch. The prompt-author sidecar records the exact occurrence and attempt, model-text digest/prefix evidence, accountable author, and terminal disposition. These sidecar facts—not matching text, display text, or arrival order—are the evidence used to settle or retire an attempt.
 
 ## Lifecycle
 
-| State | Owner and evidence | Visible behavior |
+| State | Meaning | Visible surface |
 | --- | --- | --- |
-| `local` | Browser IndexedDB; server has not acknowledged durable admission. | **Waiting for connection**. Reload and reconnect restore the row and resend the same ID. |
-| `queued` | Persisted `PromptQueue`; eligible lane and sequence are known. | **Queued for next turn** or **Steer queued for current turn**. During compaction the label explains that delivery is fenced. |
-| `dispatching` | Persisted in-flight ledger with `intentId`, a new `attemptId`, and `dispatchEpoch`; Pi RPC has been invoked. | **Sending…**. RPC acknowledgement does not remove it. |
-| `received` | A correlated Pi user `message_start` has been observed. | The real user row is inserted and the outbox carrier transitions without a blank frame; a server projection may briefly read **Adding to chat…**. |
-| `uncertain` | Dispatch may have crossed the Pi boundary, but no exact terminal proof is available. | **Awaiting delivery confirmation**. Automatic replay and Retry are disabled; Dismiss is available. |
-| `failed` | Pi gave a definite negative acknowledgement, or local admission failed before server ownership. | **Not delivered** with Retry when the exact occurrence is retryable, plus Edit and Dismiss. |
-| `cancelled` | A body-free dismissal or fail-closed cancellation disposition is durable. | **Cancelled** until the terminal update removes it or the retained fail-closed row is dismissed. |
-| surfaced | The correlated user row is in the transcript; the exact prompt-author settlement is fsynced. | The transcript is the carrier. Late queue/outbox projections cannot resurrect the occurrence. |
+| `local` | Browser storage accepted the occurrence but the gateway has not durably admitted it. | **Waiting for connection**. Reload resends the same ID. |
+| `queued` | The gateway durably owns it in a lane. | Queue pill, including next-turn or continuation context. |
+| `dispatching` | A durable in-flight attempt exists and Pi RPC has been called. | **Sending…**; an RPC acknowledgement is not settlement. |
+| `received` | A correlated Pi user start was observed. | The real Pi row can be surfaced while the durable terminal sidecar is awaited. |
+| `uncertain` | Pi may have received the exact attempt but Bobbit cannot prove its terminal result. | **Awaiting delivery confirmation**; no automatic replay or Retry. |
+| `failed` | Pi definitively rejected before starting the attempt, with the required cancellation evidence. | **Not delivered**, with Retry only when that occurrence is eligible. |
+| `cancelled` | A cancellation disposition is durable. | **Cancelled** / dismissal state, never a transcript message. |
+| `surfaced` | The exact Pi user row and echoed sidecar settlement are durable. | The settled Pi transcript row becomes the carrier. |
 
-The wire-level `DeliveryState` omits `local` because that state is browser-owned. `intent_update.settlement` uses `surfaced`, `failed`, or `cancelled` for occurrence dispositions.
+The browser persists local work before sending. The server persists accepted queue work, or an in-flight reservation, before calling Pi. Admission and replay are idempotent by `(sessionId, intentId)`: a reconnect or another tab returns the same carrier, while equal text under another ID remains separate.
 
-## Durable handoff and settlement
+## Receipt, settlement, and snapshots
 
-Dispatch moves one reliable occurrence from `PromptQueue` to the persisted in-flight ledger in the same server-owned update before invoking Pi. The attempt records the stable `intentId`, one-call `attemptId`, monotonic `dispatchEpoch`, lane, sequence, author, and attachment metadata.
+Pi receipt has two distinct boundaries:
 
-Reliable steers are serialized and dispatched one occurrence at a time. They are not newline-batched, so repeated identical text retains independent identity and acknowledgement. Internal/REST/tool callers that omit occurrence IDs still use the legacy metadata-free path, where batching and older recovery semantics remain for compatibility; tool result statuses such as `dispatched` describe routing, not transcript settlement.
+1. A correlated user `message_start` is receipt evidence. It lets the client surface the real Pi user row and transition the delivery carrier without a blank frame.
+2. A correlated user `message_end` settles only after the sidecar has durably recorded the matching `intentId` and `attemptId` as echoed. Only then may the dispatch reservation be pruned.
 
-Pi receipt has two boundaries:
+The sidecar matters across restarts and races. It binds the Pi row to the intended occurrence using exact occurrence/attempt evidence and dispatch metadata; it never infers a match from text. A late transcript row can still settle its original attempt after a reconnect or replacement. Conversely, a missing ledger/outbox row is not proof of settlement because the matching Pi event may be arriving on the same connection.
 
-1. A correlated user `message_start` changes the attempt to `received`. The browser first reduces the real user row into chat, then removes the matching outbox carrier by `intentId`.
-2. A correlated user `message_end` settles the attempt only after the prompt-author sidecar contains the fsynced exact `echoed` record. The server can then remove the in-flight reservation.
+A hard reload reconstructs the same division of ownership: settled Pi rows form the transcript, and queued, dispatching, received, uncertain, failed, or cancelled occurrences form the outbox. Recovery-only rows are excluded from `state.messages` even when their presentation resembles a user or System message. They cannot overtake the transcript tail or become settled merely by being rehydrated.
 
-The sidecar is the durable restart boundary; the browser's visible transfer happens at `message_start` to match Pi's pending-message behavior. Snapshot and live reducers replace/deduplicate user rows by `deliveryIntentId`, never by raw text. Text fallback exists only for legacy records without occurrence identity.
+## Lanes, compaction, and settlement fences
 
-The gateway projects the persisted queue and ledger as one ordered delivery outbox. On attach it sends both `queue_update` and `delivery_outbox`; current clients accept either projection. Missing from a later projection is not settlement, because the correlated transcript event may follow immediately on the same socket.
+An occurrence has a `kind` (`prompt` or `steer`), a target lane, and FIFO sequence within that lane:
 
-## Lanes and ordering
+- prompts use `next-turn`;
+- a steer uses `continuation` only while a streaming turn can accept it; otherwise it is next-turn work; and
+- reordering changes only queued rows in their lane. A dispatched attempt is never reordered.
 
-Each accepted row has:
+Compaction is active turn work, not an idle gap. It accepts and shows new work but fences every prompt, steer, retry, queue-drain, and tool-end dispatch path. Continuation steers retain their affinity where Pi can continue the turn; other work waits for the appropriate release owner.
 
-- `kind`: `prompt` or `steer`;
-- `targetTurn`: `continuation` or `next-turn`; and
-- `sequence`: FIFO position within that lane.
+Final `agent_end` finishes user-visible turn bookkeeping but is not a fresh-prompt admission boundary. Pi can still run compaction or continuation work. `agent_settled` is the boundary that proves Pi has cleared its active-run guard and may drain next-turn work. It is **not** a prompt echo: every in-flight attempt without a correlated Pi start remains non-retryable `uncertain` at settlement and is never automatically replayed.
 
-A steer targets `continuation` only while a turn is streaming, including threshold or overflow compaction that will continue that turn. A steer accepted while idle or during manual compaction targets `next-turn`. Prompts target `next-turn`.
+See [Context compaction](compaction.md#reliable-turn-fence-and-release) for release ownership, overflow handling, and Stop during compaction.
 
-Release rules are lane-aware:
+## Failure, Stop, and recovery
 
-- live continuation steers dispatch serially while the current turn can accept them;
-- final non-retry `agent_end` retargets undispatched continuation rows once with `continuation-ended`, but next-turn work remains parked;
-- `agent_end(willRetry: true)` is not a turn boundary;
-- `agent_settled` proves Pi's active run has ended and drains next-turn work by lane sequence;
-- Stop retargets queued continuation rows with `continuation-aborted`; and
-- a proven-no-start in-flight occurrence may be restored once, retaining its ID and relative priority.
+The central safety rule is that a post-write handoff is ambiguous until exact evidence says otherwise. A timeout, thrown RPC, bridge loss, restart, abort, or replacement after the write may mean Pi received the message. Bobbit retains that exact intent/attempt as non-retryable `uncertain`; it does not invent a new occurrence, replay it automatically, or turn it into a transcript row.
 
-Drag reorder updates the queued order and resequences only the affected queued rows within their existing lane. It does not reorder an already-dispatched attempt.
+A `{ success: false }` response is authoritative no-start evidence only when the matching prompt-author dispatch can also be durably cancelled. This second condition prevents a racing Pi echo from being retired and replayed. Once both facts hold, Bobbit may retire that attempt and perform its bounded recovery for the same durable occurrence:
 
-Promoting a queued prompt to a steer changes its kind and assigns a continuation sequence when the active turn can accept it. During manual compaction it remains next-turn work.
+- ordinary user-owned work can become an actionable, retryable failed row; and
+- server-owned automatic or verifier work returns only to its existing bounded recovery policy, retaining the same occurrence and envelope.
 
-## Compaction
+A received attempt, a failed sidecar cancellation, or any ambiguous outcome cannot use this recovery path. Explicit Dismiss writes a cancellation tombstone before removing an actionable carrier; it does not assert that Pi never saw the message.
 
-Compaction is active turn work, not an idle gap. Admission remains open and visible, but all prompt, steer, retry, queue-drain, and tool-end dispatch paths check `session.isCompacting` before calling Pi.
+Stop follows the same rule. Queued work remains visible and continuation rows retarget to next-turn. Graceful replacement waits through `agent_settled`; hard replacement synthesizes the missing lifecycle boundary, reconciles exact evidence, then releases eligible work once. Old callbacks are generation-fenced. No Stop/restart path may blindly replay a dispatched occurrence.
 
-Manual-compaction input is next-turn work. Threshold and overflow compaction preserve continuation affinity for steers; next-turn prompts remain parked. The sole release behavior and overflow retry contract are documented in [Context compaction](compaction.md#reliable-turn-fence-and-release).
+### Restart and legacy records
 
-Pi's canonical “compaction active” rejection proves that no turn began. Bobbit restores that exact occurrence to the queue front with `deliveryReason: "compaction-active"`; the compaction finisher remains the only redrain owner.
+Queue rows, modern in-flight attempts, and prompt-author settlements survive restart. Restore folds terminal sidecar evidence before a queue becomes live, preventing an echoed or dismissed occurrence from returning as pending work. A modern unsettled handoff restores as uncertain.
 
-## Stop, failure, and recovery
+Older persisted ledgers may contain bare text strings or structured rows without a complete occurrence tuple. On load and at the trusted restore boundary, Bobbit converts each position into a deterministic, non-retryable uncertain carrier with server-owned compatibility identity. It does not compare legacy text against the transcript—equal strings are especially unsafe. A pre-identity structured record can be retired only by its own durable sidecar evidence; a bare record without that proof fails closed as uncertain. This migration avoids silent loss, duplicate delivery, accidental settlement, and false transcript cards while allowing users/operators to dismiss unresolved historical work.
 
-### Stop and abort
+## Errored turns
 
-Stop never silently deletes accepted work.
+A genuine model/provider error parks accepted work while normal retry policy runs. A new prompt or steer below the consecutive-error cap can implicitly unstick an ordinary errored turn. Bobbit prepends a short recovery prefix to the **model-facing dispatch payload**, without changing the occurrence identity, original user text, lane, or FIFO position.
 
-- Work still in `PromptQueue` remains visible. Continuation rows become next-turn work.
-- A dispatched attempt whose Pi start cannot be proved either way becomes non-retryable `uncertain`; it is not automatically replayed.
-- If canonical recovery proves the attempt did not start, Bobbit restores it once. If a late exact user start arrives, it settles the original attempt instead.
-- If administrative abort recovery cannot preserve or prove an attempt, Bobbit retains a non-retryable `cancelled` row with `abort-recovery-failed`; it does not claim the model did not see it.
-- Explicit Dismiss writes a cancellation tombstone before removing a queued or uncertain carrier. A stale second tab cannot delete a newer Retry because IndexedDB mutations use revision checks.
-
-The `aborting` session status is broadcast immediately while graceful Stop or force replacement owns the lifecycle. Queue and compaction callbacks do not drain around that owner. Graceful Stop waits through `agent_settled` and replays the captured terminal sequence before its coordinator drains once. A hard Stop synthesizes the missing settlement, finalizes any interrupted compaction as aborted, rehydrates a replacement, and releases only after exact transcript reconciliation. See [Stop across the settlement boundary](compaction.md#stop-across-the-settlement-boundary).
-
-### Definite rejection versus ambiguity
-
-A `{ success: false }` Pi response is a definite pre-receipt rejection. Bobbit restores the exact row at the queue front as retryable `failed`. **Retry** keeps the same `intentId` and creates a new attempt only when dispatch resumes. Bobbit also reverses its optimistic live and persisted streaming state, but only while that attempt still owns `streaming`; a late rejection cannot overwrite `aborting`, replacement, or a newer lifecycle owner.
-
-A thrown call or transport loss is ambiguous: Pi may have received it even though Bobbit missed the acknowledgement. Bobbit keeps the ledger row as `uncertain`, disables Retry, and waits for exact transcript evidence or explicit Dismiss. This fail-closed rule prefers visible uncertainty over duplicate model input.
-
-### Gateway restart and bridge replacement
-
-Queue rows, modern in-flight attempts, and prompt-author settlements survive gateway restart. Restore folds terminal sidecar evidence before exposing state:
-
-- an echoed or dismissed exact attempt cannot reappear;
-- a nonterminal modern attempt restores as visible uncertainty, not permission to replay;
-- old lifecycle generations are fenced so late callbacks cannot mutate the replacement; and
-- legacy records without occurrence identity retain their compatibility recovery path.
-
-Reload, reconnect, and a second tab combine the IndexedDB local spool with the server outbox. Server projections replace local ownership by ID, terminal IDs dominate stale projections, and revision-checked local Retry/Dismiss operations prevent an older tab from overwriting newer intent.
-
-### Errored turns
-
-A genuine model/provider error parks accepted work while Bobbit applies its bounded auto-retry and manual-retry policies. A new prompt can implicitly unstick ordinary errors below the consecutive-error cap; at the cap the visible queue remains parked until explicit Retry.
-
-If that prompt arrives after final `agent_end` but before `agent_settled`, Bobbit does not call Pi. It keeps one durable occurrence in place and replaces only its model-facing payload and dispatch metadata with the error-recovery envelope. Stable identity and FIFO fields remain unchanged; images, attachments, source/author, and dispatch flags travel with the deferred payload. Settlement dispatches that exact row once before later FIFO work. See [Deferred error-recovery occurrence](compaction.md#deferred-error-recovery-occurrence), [Auto-Retry](auto-retry.md), and [Session wedged after errored turn](debugging.md#session-wedged-after-errored-turn).
+At the error cap, incoming work stays visibly parked until a human uses Retry or resolves the upstream problem. This prevents a broken provider from consuming unlimited automatic redrives while ensuring accepted work is not lost. A prompt arriving between final `agent_end` and `agent_settled` is retained as its one deferred occurrence and dispatched once at settlement, ahead of later eligible work.
 
 ## `bash_bg wait` interaction
 
-Dispatching an identified reliable continuation steer interrupts any current `bash_bg wait` so Pi can observe the steer at a tool boundary. Only the wait HTTP request is aborted; the background process keeps running. A steer merely queued behind compaction, Stop, or a replacement does not interrupt the wait until the dispatch boundary is reached.
+Dispatching a reliable automatic continuation steer interrupts a registered active `bash_bg wait` request so Pi can observe the steer at a tool boundary. The background process is not killed; only the wait request is aborted. Work still fenced behind compaction, Stop, replacement, or the settlement boundary does not interrupt a wait until it actually dispatches.
 
-Legacy internal/REST/tool steers that omit occurrence identity currently use `_dispatchLegacySteer()` and do not share this wait-interruption call. This compatibility limitation is observable even if a tool result says the steer was dispatched.
+Wait interruption is transport/liveness behavior, not delivery evidence. It neither proves Pi receipt nor settles the occurrence; the exact Pi row and sidecar are still required.
 
-Wait interruption is distinct from intent delivery: an interrupted wait proves neither Pi receipt nor transcript settlement. See [Background process persistence](bg-process-persistence.md#wait-interruption-versus-intent-delivery).
+## UI actions and operational invariants
 
-## UI actions
+- Queue rows can be reordered, edited, promoted, retried, or dismissed only when their state permits it. Uncertain work is dismiss-only.
+- Browser drafts are separate from delivery. Once Send or Steer creates an occurrence, the outbox owns it.
+- Multi-tab and reconnect projection merges use occurrence IDs and revision-checked local mutations. A stale tab cannot replace a newer Retry or Dismiss.
+- Delivery state is body-free in diagnostics. Operators should use session, intent, attempt, epoch, state, reason, and outcome—not prompt bodies—to investigate recovery.
 
-Actions depend on state:
-
-- queued next-turn prompts can be reordered, edited, promoted to steer, or dismissed;
-- failed retryable rows offer Retry, Edit, and Dismiss;
-- uncertain rows offer Dismiss but not Retry;
-- in-flight rows remain visible and are not editable; and
-- cancellation and transcript surfacing converge all attached tabs through exact ID updates.
-
-Draft persistence is separate. Composer text and attachments survive navigation, but once Send or Steer creates an occurrence, the delivery outbox—not the draft—is responsible for it.
-
-## Scope boundaries
-
-This delivery reuses the existing session store, prompt-author sidecar fsync points, and lifecycle-generation fencing. It does not introduce a new hard-kill fsync/generation protocol beyond those owners. Likewise, the IndexedDB spool limits protect browser-local admission, but this change does not add an aggregate authenticated server-side durable-steer budget. Do not infer either guarantee from the occurrence lifecycle above.
-
-## Diagnostics
-
-The reliable-turn lifecycle diagnostics below are body-free. Useful server lines include:
-
-```text
-[session-manager] intent dispatch restored session=<id> intent=<intentId> attempt=<attemptId> outcome=compaction-active
-[session-manager] intent dispatch failed session=<id> intent=<intentId> attempt=<attemptId> outcome=<failed|uncertain>
-[ws-handler] intent delivery did not settle session=<id> intent=<intentId> outcome=<state>
-```
-
-With `BOBBIT_DEBUG=1`, replacement and proven-no-start reconciliation add bounded lifecycle details. These reliable-turn lines include session, intent, attempt, generation/epoch, state, reason, and outcome. The broader debug mode also contains a pre-existing truncated prompt-receipt preview, so enable it only in a trusted environment and do not attach those general logs to a report. Reliable-turn diagnostics must not add message bodies, attachment data, provider request bodies, credentials, or raw transcripts.
-
-See [Debugging reliable delivery](debugging.md#reliable-prompt-and-steer-delivery) for operator checks.
+The result is intentionally conservative: an acknowledged prompt remains discoverable immediately, and a recovery record remains visible without ever rewriting conversation history. Visible uncertainty is preferable to duplicate model side effects or a misleading transcript.
 
 ## Protocol summary
 
 | Direction | Type | Purpose |
 | --- | --- | --- |
-| Client → server | `prompt`, `steer` | Submit one occurrence with optional `intentId`. |
-| Client → server | `retry_intent` | Retry one definitely failed occurrence by stable ID. |
-| Client → server | `steer_queued` | Promote an accepted queued prompt to steer intent. |
+| Client → server | `prompt`, `steer` | Submit one occurrence with an optional `intentId`. |
+| Client → server | `retry_intent` | Retry one definitely failed eligible occurrence by stable ID. |
+| Client → server | `steer_queued` | Promote an accepted queued occurrence to a steer. |
 | Client → server | `remove_queued` | Durably dismiss one queued or uncertain occurrence. |
-| Client → server | `reorder_queue` | Reorder queued IDs and persist lane order. |
+| Client → server | `reorder_queue` | Reorder queued IDs within their lanes. |
 | Client → server | `abort` | Stop the active turn without deleting accepted work. |
 | Server → client | `intent_update` | Exact occurrence projection or terminal disposition. |
-| Server → client | `queue_update`, `delivery_outbox` | Full server-authoritative visible outbox projection. |
-| Server → client | correlated user event | Pi receipt/transcript row carrying `deliveryIntentId` and attempt metadata. |
+| Server → client | `queue_update`, `delivery_outbox` | Server-authoritative visible outbox projection. |
+| Server → client | correlated Pi user event | Receipt/transcript evidence carrying delivery identity. |
 
-## Verification map
+## Related documentation
 
-- `tests2/core/reliable-intent-queue.test.ts` — identity, idempotent admission, lane order, identical occurrences, and retargeting.
-- `tests2/core/reliable-intent-attempt.test.ts` — delayed acknowledgement/echo, failure ambiguity, Stop timing, and persisted recovery.
-- `tests2/core/reliable-compaction-release.test.ts` — admission fencing and one release across compaction outcomes.
-- `tests2/integration/reliable-intent-recovery.test.ts` and `steer-gateway-restart.test.ts` — barrier-driven reconnect, restart, failure, and exactly-once recovery.
-- `tests2/browser/journeys/reliable-agent-turns.journey.spec.ts` — visible carrier continuity through composer, Stop, compaction, reload, reconnect, second tab, and failure.
-- `tests/manual-integration/reliable-agent-context-pressure.spec.ts` — opt-in real-model pressure smoke; see [Pi runtime compatibility](pi-runtime-compatibility.md#real-model-context-pressure-smoke).
-
-## Key modules
-
-| Module | Responsibility |
-| --- | --- |
-| `src/ui/storage/app-storage.ts` | IndexedDB pre-admission occurrence spool and revision-checked mutation. |
-| `src/app/remote-agent.ts` | ID creation, local/server outbox merge, monotonic projection, transcript transfer, Retry/Dismiss. |
-| `src/app/message-reducer.ts` | `deliveryIntentId` transcript replacement and snapshot deduplication. |
-| `src/server/agent/prompt-queue.ts` | Persisted accepted rows, lane sequencing, reorder, and retarget. |
-| `src/server/agent/session-manager.ts` | Admission, dispatch ledger, compaction/Stop fences, settlement, and recovery. |
-| `src/server/agent/author-sidecar.ts` | Exact author/intent/attempt correlation plus echoed/cancelled settlements. |
-| `src/server/agent/splice-inflight-message.ts` | Snapshot continuity for unresolved attempts. |
-| `src/server/ws/handler.ts` and `protocol.ts` | Validation, idempotent receipts, attach projections, and commands. |
+- [Context compaction](compaction.md#reliable-turn-fence-and-release)
+- [Auto-retry](auto-retry.md)
+- [Background process persistence](bg-process-persistence.md#wait-interruption-versus-intent-delivery)
+- [Debugging reliable delivery](debugging.md#reliable-prompt-and-steer-delivery)
+- [WebSocket protocol](websocket-protocol.md)
