@@ -62,6 +62,12 @@ class FakeOfficialQuery implements AsyncIterable<unknown> {
 						? content.filter((block: any) => block?.type === "text").map((block: any) => block.text).join("\n")
 						: "";
 				this.inputs.push(text);
+				// Queries stay inert until the first genuine user input. Model availability
+				// therefore settles through that initialization boundary, not session creation.
+				if (this.sdk.unavailableModels.has(String(this.args.options.model))) {
+					await this.initializationResult();
+					return;
+				}
 				const { assistant, result } = this.sdk.appendFinalizedTurn(text);
 				this.emitSdkEvent({
 					type: "assistant",
@@ -430,11 +436,19 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 				expect(fakeSdk.preCompactRuns).toBe(1);
 				expect(fakeSdk.history).toEqual(historyBeforeCompact);
 				// A changed official history, not PreCompact alone, resolves the durable
-				// checkpoint. Replay the root result to exercise its normal observation seam.
+				// checkpoint. Reconcile the SDK-owned history through the normal snapshot seam.
 				fakeSdk.completeCompaction();
-				fakeSdk.replayRootResult(fakeSdk.queries[0], 2);
-				await compactionConnection.waitForFrom(cursor, message => message.type === "event"
+				expect(compactionConnection.messages.slice(cursor).filter(message => message.type === "event"
+					&& (message.data?.type === "compaction_end" || message.data?.type === "agent_end"))).toHaveLength(0);
+				const reconciledCompact = await gateway.sessionManager.getMessagesSnapshotBase(sdkLive!);
+				expect(reconciledCompact.success).toBe(true);
+				const compactionEnd = await compactionConnection.waitForFrom(cursor, message => message.type === "event"
 					&& message.data?.type === "compaction_end", 15_000);
+				expect(compactionEnd.data?.type).toBe("compaction_end");
+				expect(compactionConnection.messages.slice(cursor).filter(message => message.type === "event"
+					&& message.data?.type === "compaction_end")).toHaveLength(1);
+				expect(compactionConnection.messages.slice(cursor).filter(message => message.type === "event"
+					&& message.data?.type === "agent_end")).toHaveLength(0);
 			} finally {
 				compactionConnection.close();
 			}
@@ -484,10 +498,31 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 			expect(afterRestart.data).toEqual(afterCompact.data);
 			expect(JSON.stringify(afterRestart.data)).toContain("SDK_TRANSLATED:SDK_BEFORE_RESTART_TWO");
 
-			// The replacement bridge can replay the terminal SDK result. Its durable
-			// source UUID ledger must leave cost, per-model totals, and context intact.
-			fakeSdk.replayRootResult(fakeSdk.queries[1], 2);
-			await expect.poll(() => gateway.sessionManager.getSessionCost(sdkId)?.inputTokens, { timeout: 5_000 }).toBe(30);
+			// The replacement bridge has a fresh translator, so its first terminal replay
+			// restores the one root boundary but never a new model turn. A repeated replay
+			// is late traffic and must not duplicate that boundary or authoritative usage.
+			const postRestartReplayConnection = await connectWs(sdkId);
+			try {
+				const cursor = postRestartReplayConnection.messageCount();
+				const costBeforeReplay = structuredClone(gateway.sessionManager.getSessionCost(sdkId));
+				expect(costBeforeReplay).toMatchObject({ inputTokens: 30 });
+				fakeSdk.replayRootResult(fakeSdk.queries[1], 2);
+				await postRestartReplayConnection.waitForFrom(cursor, message => message.type === "event"
+					&& message.data?.type === "agent_end", 15_000);
+				expect(postRestartReplayConnection.messages.slice(cursor).filter(message => message.type === "event"
+					&& message.data?.type === "agent_end")).toHaveLength(1);
+				expect(postRestartReplayConnection.messages.slice(cursor).filter(message => message.type === "event"
+					&& message.data?.type === "agent_start")).toHaveLength(0);
+				const replayCursor = postRestartReplayConnection.messageCount();
+				fakeSdk.replayRootResult(fakeSdk.queries[1], 2);
+				await expect(postRestartReplayConnection.waitForFrom(replayCursor, message => message.type === "event"
+					&& message.data?.type === "agent_end", 250)).rejects.toThrow("WS waitForFrom timed out");
+				await expect.poll(() => gateway.sessionManager.getSessionCost(sdkId), { timeout: 5_000 }).toEqual(costBeforeReplay);
+				expect(postRestartReplayConnection.messages.slice(cursor).filter(message => message.type === "event"
+					&& message.data?.type === "agent_end")).toHaveLength(1);
+			} finally {
+				postRestartReplayConnection.close();
+			}
 			expect(gateway.sessionManager.getSessionCost(sdkId)).toMatchObject({
 				outputTokens: 12,
 				notionalCostUsd: 0.003,
@@ -554,17 +589,25 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 				method: "POST",
 				body: JSON.stringify({ cwd: nonGitCwd(), worktree: false }),
 			});
-			const unavailableBody = await unavailableCreate.text();
-			expect(unavailableCreate.status).toBe(503);
-			expect(JSON.parse(unavailableBody)).toEqual({
-				error: "SDK_SESSION_UNAVAILABLE",
-				code: "SDK_SESSION_UNAVAILABLE",
-			});
-			expect(unavailableBody).not.toContain("DETERMINISTIC_SDK_PROVIDER_UNAVAILABLE");
+			expect(unavailableCreate.status, await unavailableCreate.clone().text()).toBe(201);
+			const unavailableId = (await unavailableCreate.json()).id as string;
+			await waitForSessionStatus(unavailableId, "idle");
 			expect(fakeSdk.queries).toHaveLength(unavailableQueriesBefore + 1);
 			expect(fakeSdk.queries.at(-1)?.args.options.model).toBe("unavailable-test");
-			// Returning a stable unavailable category proves it settled instead of
-			// leaving a live prompt/queue hung or leaking provider diagnostics.
+			const unavailableConnection = await connectWs(unavailableId);
+			try {
+				const cursor = unavailableConnection.messageCount();
+				unavailableConnection.send({ type: "prompt", text: "SDK_UNAVAILABLE" });
+				const exit = await unavailableConnection.waitForFrom(cursor, message => message.type === "event"
+					&& message.data?.type === "process_exit", 15_000);
+				expect(String(exit.data?.error)).toContain("SDK_SESSION_UNAVAILABLE");
+				expect(String(exit.data?.error)).not.toContain("DETERMINISTIC_SDK_PROVIDER_UNAVAILABLE");
+			} finally {
+				unavailableConnection.close();
+			}
+			expect(gateway.sessionManager.getSession(unavailableId)?.runtime).toBe("claude-agent-sdk");
+			// The genuine first input returns a stable unavailable category instead of
+			// hanging the queue, leaking provider diagnostics, or falling back to Pi.
 		} finally {
 			if (fidelityGoalId) await deleteGoal(fidelityGoalId);
 			if (fidelityWorkflow && fidelityProjectId) {
