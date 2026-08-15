@@ -4,9 +4,10 @@
 
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import ts from "typescript";
 import {
 	buildSandboxImage,
 	checkDockerAvailability,
@@ -20,6 +21,36 @@ import {
 const SERVER_SOURCE = readFileSync(new URL("../../src/server/server.ts", import.meta.url), "utf8");
 const DOCKERFILE = readFileSync(new URL("../../docker/Dockerfile", import.meta.url), "utf8");
 const DOCKER_FENCE_ERROR = "SANDBOX_DOCKER_RUNNER_FENCE";
+const BUILTIN_TOOLS_DIR = new URL("../../defaults/tools/", import.meta.url);
+
+/**
+ * Extract package specifiers from every trusted built-in extension factory with
+ * TypeScript's parser, not a source-text regex. These factories are loaded by
+ * the sandbox dispatcher from arbitrary project workspaces.
+ */
+function trustedBuiltinExtensionBareImports(): string[] {
+	const imports = new Set<string>();
+	for (const entry of readdirSync(BUILTIN_TOOLS_DIR, { withFileTypes: true })) {
+		if (!entry.isDirectory()) continue;
+		const extensionUrl = new URL(`${entry.name}/extension.ts`, BUILTIN_TOOLS_DIR);
+		let source: string;
+		try {
+			source = readFileSync(extensionUrl, "utf8");
+		} catch {
+			continue;
+		}
+		const file = ts.createSourceFile(extensionUrl.pathname, source, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+		const visit = (node: ts.Node): void => {
+			if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+				const specifier = node.moduleSpecifier.text;
+				if (!specifier.startsWith(".") && !specifier.startsWith("/") && !specifier.startsWith("node:")) imports.add(specifier);
+			}
+			ts.forEachChild(node, visit);
+		};
+		visit(file);
+	}
+	return [...imports].sort();
+}
 
 function fencedDockerRunner(calls: Array<{ file: string; args: readonly string[] }>) {
 	return {
@@ -70,8 +101,17 @@ describe("sandbox Docker context resolution", () => {
 		assert.equal(buildCalls[0].args[0], "build");
 	});
 
-	it("pins the global dispatcher runtime imports and stamps their schema", () => {
-		assert.match(DOCKERFILE, /npm install -g jiti@2\.7\.0 typebox@1\.1\.38 --no-audit --no-fund/);
+	it("packages every trusted built-in extension import in the global dispatcher runtime", () => {
+		const extensionImports = trustedBuiltinExtensionBareImports();
+		assert.deepEqual(extensionImports, [
+			"@earendil-works/pi-coding-agent",
+			"@sinclair/typebox",
+		]);
+
+		assert.match(DOCKERFILE, /npm install -g jiti@2\.7\.0 typebox@1\.1\.38 @sinclair\/typebox@0\.34\.41 --no-audit --no-fund/);
+		for (const specifier of extensionImports) {
+			assert.match(DOCKERFILE, new RegExp(`await import\\(${JSON.stringify(specifier)}\\)`));
+		}
 		assert.match(DOCKERFILE, /await import\("jiti\/static"\); await import\("typebox\/value"\)/);
 		assert.match(DOCKERFILE, new RegExp(`LABEL ${SANDBOX_RUNTIME_SCHEMA_LABEL}\\=\\$\\{BOBBIT_RUNTIME_SCHEMA_VERSION\\}`));
 		assert.match(DOCKERFILE, new RegExp(`ARG BOBBIT_RUNTIME_SCHEMA_VERSION=${SANDBOX_RUNTIME_SCHEMA_VERSION}`));
