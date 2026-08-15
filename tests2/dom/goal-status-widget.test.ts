@@ -48,6 +48,7 @@ class MockWebSocket extends EventTarget {
 }
 
 let gateRows: any[] = [];
+let summaryGateRows: any[] | undefined;
 let activeVerifications: any[] = [];
 let signalsByGate = new Map<string, any[]>();
 let signalFetchOverride: ((gateId: string) => Response | Promise<Response>) | undefined;
@@ -64,6 +65,7 @@ const onOpenReview = (event: Event) => { openReviewEvents.push((event as CustomE
 
 beforeEach(() => {
 	gateRows = [];
+	summaryGateRows = undefined;
 	activeVerifications = [];
 	signalsByGate = new Map();
 	signalFetchOverride = undefined;
@@ -85,6 +87,12 @@ beforeEach(() => {
 			});
 		}
 		if (textUrl.endsWith("/verifications/active")) return jsonResponse({ verifications: activeVerifications });
+		if (textUrl.includes("/gates?view=summary")) {
+			// Undefined models an unavailable summary endpoint so cache-fallback tests
+			// remain distinct from the widget's self-contained summary path.
+			if (summaryGateRows === undefined) return jsonResponse({ error: "summary unavailable" }, 503);
+			return jsonResponse({ gates: summaryGateRows, summary: { gates: summaryGateRows } });
+		}
 		if (textUrl.endsWith("/gates")) return jsonResponse({ gates: gateRows });
 		if (/\/reset$/.test(textUrl)) {
 			resetRequests.push(textUrl);
@@ -118,11 +126,13 @@ async function mountGoalStatusWidget(fixture: {
 	gates: any[];
 	verifications?: any[];
 	signals?: Record<string, any[]>;
+	summaryGates?: any[];
 	cache?: { passed: number; total: number; bypassed?: number; gates?: any[] };
 	goalState?: string;
 }): Promise<HTMLElement> {
 	openReviewEvents = [];
 	gateRows = fixture.gates;
+	summaryGateRows = fixture.summaryGates;
 	activeVerifications = fixture.verifications || [];
 	signalsByGate = new Map(Object.entries(fixture.signals || {}));
 	state.gateStatusCache.clear();
@@ -374,6 +384,48 @@ describe("GoalStatusWidget fixture", () => {
 
 		expect(row.getAttribute("data-gate-status")).toBe("pending");
 		expect(dropdown()!.querySelector('[data-testid="goal-widget-gate-cancellation"]')).toBeNull();
+	});
+
+	it("fetches cancellation directly from the summary and clears it after a newer summary", async () => {
+		const el = await mountGoalStatusWidget({
+			goalId: GOAL_ID,
+			gates: [{ gateId: "implementation", name: "Implementation", status: "pending", whyBypassed: "full-row metadata" }],
+			summaryGates: [{
+				gateId: "implementation",
+				status: "pending",
+				effectiveStatus: "pending",
+				running: false,
+				awaitingSignoffCount: 0,
+				dependsOn: [],
+				signalCount: 1,
+				verificationStatus: "cancelled",
+				cancellation: { cause: "goal-pause", requestedAt: 1 },
+			}],
+		});
+		await openDropdown(el);
+
+		// No global cache is populated: the widget's own full + summary snapshot is
+		// sufficient to show cancellation provenance.
+		expect(state.gateStatusCache.has(GOAL_ID)).toBe(false);
+		expect(dropdown()!.querySelector('[data-testid="goal-widget-gate-cancellation"]')?.textContent).toContain("cancelled · Goal paused");
+
+		summaryGateRows = [{
+			gateId: "implementation",
+			status: "pending",
+			effectiveStatus: "pending",
+			running: false,
+			awaitingSignoffCount: 0,
+			dependsOn: [],
+			signalCount: 2,
+		}];
+		await (el as any)._refreshGates();
+		await (el as any).updateComplete;
+
+		// The summary is current-signal authoritative: its newer non-cancelled row
+		// must clear stale provenance without replacing the full gate row.
+		expect(dropdown()!.querySelector('[data-testid="goal-widget-gate-cancellation"]')).toBeNull();
+		const row = dropdown()!.querySelector('[data-testid="goal-widget-gate"][data-gate-id="implementation"]');
+		expect(row?.textContent).toContain("Implementation");
 	});
 
 	it("passed, failed, bypassed, and completed states expose the right lightweight actions", async () => {

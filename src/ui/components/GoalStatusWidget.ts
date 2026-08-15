@@ -17,7 +17,7 @@
  *   - Passed gate View / Reset controls and a top-right Goal Dashboard button.
  *
  * Data:
- *   - Initial: `GET /api/goals/:id/gates` and `GET /api/goals/:id/verifications/active`.
+ *   - Initial: `GET /api/goals/:id/gates`, `?view=summary`, and active-verification reads.
  *   - Live: viewer WebSocket subscription using the centralized gate event
  *     refresh contract in `app/gate-status-events.ts`.
  *
@@ -105,6 +105,8 @@ export class GoalStatusWidget extends LitElement {
 	private _wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	private _dropdownEl: HTMLElement | null = null;
 	private _closeToken = 0;
+	/** Fences overlapping full/summary reads so an older pair cannot overwrite a newer snapshot. */
+	private _gateRefreshGeneration = 0;
 	private _onHashChange = () => {
 		if (this._expanded) this._closeDropdown();
 	};
@@ -167,6 +169,7 @@ export class GoalStatusWidget extends LitElement {
 		window.removeEventListener(GATE_STATUS_CLIENT_EVENT, this._onGateStatusClientEvent);
 		this._stopGoalStateWatch();
 		this._closeToken++;
+		this._gateRefreshGeneration++;
 		this._removeDropdown();
 		this._disconnectWs();
 		this._closing = false;
@@ -176,6 +179,9 @@ export class GoalStatusWidget extends LitElement {
 	override updated(changed: Map<string, unknown>) {
 		super.updated(changed);
 		if (changed.has("goalId")) {
+			// Invalidate outstanding snapshots for the previous goal before fetching
+			// the new one.
+			this._gateRefreshGeneration++;
 			// Goal switched (rare — the host AgentInterface re-mounts per session,
 			// but defensive).
 			this._gates = [];
@@ -210,38 +216,45 @@ export class GoalStatusWidget extends LitElement {
 	// ── Data fetch ───────────────────────────────────────────────────
 
 	private async _fetchInitial(): Promise<void> {
+		const goalId = this.goalId;
 		this._loading = true;
-		scheduleGateStatusRefreshForGoal(this.goalId, 0);
 		try {
-			const [gatesResp, vActiveResp] = await Promise.all([
-				this._fetch(`/api/goals/${this.goalId}/gates`),
-				this._fetch(`/api/goals/${this.goalId}/verifications/active`),
-			]);
-			if (gatesResp?.ok) {
-				const data = await gatesResp.json().catch(() => null);
-				if (data?.gates) this._gates = this._normalizeGates(data.gates);
-			}
-			if (vActiveResp?.ok) {
-				const data = await vActiveResp.json().catch(() => null);
-				if (data?.verifications) {
-					this._awaitingSignoffs = this._extractSignoffs(data.verifications);
-					this._activeGateIds = this._extractActiveGateIds(data.verifications);
-				}
-			}
-		} catch {
-			// non-fatal — WS events will rehydrate
+			await Promise.all([this._refreshGates(), this._refreshActive()]);
+		} finally {
+			// A prior goal's initial request must not hide the new goal's loading UI.
+			if (this.goalId === goalId) this._loading = false;
 		}
-		this._loading = false;
 	}
 
 	private async _refreshGates(): Promise<void> {
-		scheduleGateStatusRefreshForGoal(this.goalId, 0);
+		const goalId = this.goalId;
+		const generation = ++this._gateRefreshGeneration;
+		scheduleGateStatusRefreshForGoal(goalId, 0);
 		try {
-			const resp = await this._fetch(`/api/goals/${this.goalId}/gates`);
-			if (!resp?.ok) return;
-			const data = await resp.json().catch(() => null);
-			if (data?.gates) this._gates = this._normalizeGates(data.gates);
-		} catch { /* non-fatal */ }
+			// The full endpoint owns all row/action metadata; the compact summary owns
+			// the latest signal projection. Read them as one fenced snapshot so neither
+			// response can independently publish a partial or stale row list.
+			const [fullResp, summaryResp] = await Promise.all([
+				this._fetch(`/api/goals/${goalId}/gates`),
+				this._fetch(`/api/goals/${goalId}/gates?view=summary`),
+			]);
+			const [fullData, summaryData] = await Promise.all([
+				fullResp?.ok ? fullResp.json().catch(() => null) : Promise.resolve(null),
+				summaryResp?.ok ? summaryResp.json().catch(() => null) : Promise.resolve(null),
+			]);
+			if (generation !== this._gateRefreshGeneration || goalId !== this.goalId) return;
+
+			const fullGates = Array.isArray(fullData?.gates) ? fullData.gates : undefined;
+			const summaryGates = this._summaryGates(summaryData);
+			const summaryByGateId = summaryGates === undefined ? undefined : this._gateMap(summaryGates);
+			if (fullGates) {
+				this._gates = this._normalizeGates(this._mergeSummaryIntoGates(fullGates, summaryByGateId), summaryByGateId);
+			} else if (summaryByGateId) {
+				// Keep the last usable full rows if only the full read failed, while still
+				// applying the newer authoritative cancellation projection.
+				this._gates = this._normalizeGates(this._mergeSummaryIntoGates(this._gates, summaryByGateId), summaryByGateId);
+			}
+		} catch { /* non-fatal — retain existing rows */ }
 	}
 
 	private async _refreshActive(): Promise<void> {
@@ -299,7 +312,41 @@ export class GoalStatusWidget extends LitElement {
 		}
 	}
 
-	private _normalizeGates(rawGates: unknown[]): GateSummary[] {
+	private _summaryGates(data: unknown): unknown[] | undefined {
+		if (!data || typeof data !== "object") return undefined;
+		const response = data as Record<string, unknown>;
+		if (response.summary && typeof response.summary === "object") {
+			const summaryGates = (response.summary as Record<string, unknown>).gates;
+			if (Array.isArray(summaryGates)) return summaryGates;
+		}
+		return Array.isArray(response.gates) ? response.gates : undefined;
+	}
+
+	private _gateMap(rawGates: unknown[]): Map<string, Record<string, unknown>> {
+		const gates = new Map<string, Record<string, unknown>>();
+		for (const gate of rawGates) {
+			if (!gate || typeof gate !== "object") continue;
+			const row = gate as Record<string, unknown>;
+			const id = typeof row.gateId === "string" ? row.gateId : typeof row.id === "string" ? row.id : undefined;
+			if (id) gates.set(id, row);
+		}
+		return gates;
+	}
+
+	private _mergeSummaryIntoGates(rawGates: unknown[], summaryByGateId?: ReadonlyMap<string, Record<string, unknown>>): unknown[] {
+		if (!summaryByGateId) return rawGates;
+		return rawGates.map(gate => {
+			if (!gate || typeof gate !== "object") return gate;
+			const row = gate as Record<string, unknown>;
+			const id = typeof row.gateId === "string" ? row.gateId : typeof row.id === "string" ? row.id : undefined;
+			const summary = id ? summaryByGateId.get(id) : undefined;
+			// Preserve the full row's action metadata while allowing the current
+			// summary projection to win where the two read models overlap.
+			return summary ? { ...row, ...summary } : row;
+		});
+	}
+
+	private _normalizeGates(rawGates: unknown[], authoritativeSummary?: ReadonlyMap<string, Record<string, unknown>>): GateSummary[] {
 		const out: GateSummary[] = [];
 		for (const g of rawGates) {
 			if (!g || typeof g !== "object") continue;
@@ -329,10 +376,11 @@ export class GoalStatusWidget extends LitElement {
 				}
 			}
 			const gateCancellation = this._latestCancellation(obj);
-			const summaryGate = appState.gateStatusCache.get(this.goalId)?.gates?.find(gate => gate.gateId === id);
-			// A hydrated summary is the current-signal authority. Prefer its
-			// cancellation projection when present, and clear a stale local caption
-			// when the newer summary says the latest signal is not cancelled.
+			const summaryGate = authoritativeSummary?.get(id)
+				?? (authoritativeSummary === undefined ? appState.gateStatusCache.get(this.goalId)?.gates?.find(gate => gate.gateId === id) : undefined);
+			// A directly fetched summary is the current-signal authority. The shared
+			// cache remains a fallback only when that read was unavailable; this lets a
+			// newer non-cancelled summary clear an older full-row cancellation.
 			const latestCancellation = summaryGate
 				? summaryGate.verificationStatus === "cancelled"
 					? this._normalizeCancellation(summaryGate.cancellation) ?? {}
