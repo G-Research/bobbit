@@ -3894,6 +3894,15 @@
       }
     },
     {
+      "path": "tests2/dom/marketplace-extension-settings-multi-enum.test.ts",
+      "reason": "DOM coverage for accessible multi-enum extension-setting controls, canonical PATCH payloads, and required-empty rejection.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
       "path": "tests2/integration/strict-update-body-routes.test.ts",
       "reason": "Regression contract for strict finite-shape update bodies: exact route allow-lists, accepted representative updates, unknown-key rejection, no mutation, goal policy guidance, and immutable staff sandboxing.",
       "execution": {

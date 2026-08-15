@@ -79,6 +79,7 @@ import {
 	type ExtensionCapabilityWire,
 	type ExtensionGrantAuditEntryWire,
 	type ExtensionSettingsResponse,
+	type ExtensionSettingValue,
 } from "./api.js";
 
 // ============================================================================
@@ -154,15 +155,16 @@ const expandedConflicts = new Set<string>();
 // activation. Secret drafts never enter this state: they only exist in their
 // password input until the save request is serialized.
 type ExtensionSettingPrimitive = string | number | boolean | null;
+type ExtensionSettingDraftValue = ExtensionSettingPrimitive | string[];
 type ExtensionSettingField = {
 	key: string;
-	type: "string" | "secret" | "enum" | "boolean" | "number" | string;
+	type: "string" | "secret" | "enum" | "multi-enum" | "boolean" | "number" | string;
 	label?: string;
 	description?: string;
 	placeholder?: string;
 	required?: boolean;
-	default?: ExtensionSettingPrimitive;
-	value?: ExtensionSettingPrimitive;
+	default?: ExtensionSettingDraftValue;
+	value?: ExtensionSettingDraftValue;
 	secretSet?: boolean;
 	source?: "default" | "legacy" | "project";
 	options?: Array<{ value: string; label?: string }>;
@@ -188,7 +190,7 @@ let extensionSettingsLoading = false;
 let extensionSettingsError = "";
 let extensionSettingsProjectId: string | undefined;
 let expandedSettingsOwner = "";
-let settingsDrafts = new Map<string, Map<string, ExtensionSettingPrimitive | undefined>>();
+let settingsDrafts = new Map<string, Map<string, ExtensionSettingDraftValue | undefined>>();
 // Password contents remain solely in their native input. This records only that
 // a secret input is non-empty so its owner can be saved without retaining bytes.
 const secretDrafts = new Set<string>();
@@ -355,12 +357,17 @@ function capabilityGrantKey(projectId: string, tuple: ExtensionCapabilityGrantTu
 		: `${projectId}:${tuple.packId}:hook:${tuple.hookId}:${tuple.capability}`;
 }
 
-function clearExtensionSettingsUi(clearCapabilityGrantState = true): void {
-	expandedSettingsOwner = "";
+function discardExtensionSettingsDrafts(): void {
 	settingsDrafts.clear();
 	secretDrafts.clear();
 	settingsErrors.clear();
 	settingsFormErrors.clear();
+	clearSecretInputs();
+}
+
+function clearExtensionSettingsUi(clearCapabilityGrantState = true): void {
+	expandedSettingsOwner = "";
+	discardExtensionSettingsDrafts();
 	settingsBusy.clear();
 	settingsStatus = "";
 	if (clearCapabilityGrantState) {
@@ -397,18 +404,19 @@ function normalizeExtensionSettings(data: ExtensionSettingsResponse, projectId: 
 				? `Enabled, but inactive until ${target.configuration.missing.join(", ")} is saved.`
 				: undefined,
 			fields: target.fields.map((field) => {
-				// `default` is part of the public schema declaration. Keep this
-				// compatibility read local until all client/server API consumers have
-				// adopted the expanded wire type.
+				// `default` is part of the public schema declaration. Keep the legacy
+				// fallback while preserving canonical copies for the array-capable wire.
 				const defaultValue = (field as unknown as { default?: unknown }).default;
-				const declaredDefault = typeof defaultValue === "string" || typeof defaultValue === "number" || typeof defaultValue === "boolean"
-					? defaultValue
-					// Older servers expose the same public default as an effective value
-					// with a `default` source, but not yet as its own descriptor field.
-					: field.source === "default" ? field.value : undefined;
+				const declaredDefault = cloneSettingValue(
+					typeof defaultValue === "string" || typeof defaultValue === "number" || typeof defaultValue === "boolean" || Array.isArray(defaultValue)
+						? defaultValue as ExtensionSettingDraftValue
+						// Older servers expose the same public default as an effective value
+						// with a `default` source, but not yet as its own descriptor field.
+						: field.source === "default" ? field.value : undefined,
+				);
 				return {
 					key: field.key, type: field.type, label: field.label, description: field.description,
-					required: !field.optional, default: declaredDefault, value: field.value, secretSet: field.secretSet,
+					required: !field.optional, default: declaredDefault, value: cloneSettingValue(field.value), secretSet: field.secretSet,
 					source: field.source, options: field.values?.map((value) => ({ value })), min: field.min, max: field.max,
 				};
 			}),
@@ -483,7 +491,7 @@ async function loadGrantAudit(projectId = currentProjectId()): Promise<void> {
 	}
 }
 
-async function loadExtensionSettings(projectId = currentProjectId()): Promise<void> {
+async function loadExtensionSettings(projectId = currentProjectId(), discardDrafts = false): Promise<void> {
 	if (!projectId) {
 		extensionSettings = null;
 		extensionSettingsProjectId = undefined;
@@ -498,6 +506,10 @@ async function loadExtensionSettings(projectId = currentProjectId()): Promise<vo
 		const response = await getExtensionSettings(requestedProjectId);
 		if (!response.ok) throw new Error("Extension settings are unavailable.");
 		if (currentProjectId() !== requestedProjectId) return;
+		// Passive metadata, grant, and activation refreshes update only the server
+		// projection; do not erase an in-progress settings form. Explicit reloads,
+		// successful saves, and project replacement deliberately discard drafts.
+		if (discardDrafts) discardExtensionSettingsDrafts();
 		extensionSettings = normalizeExtensionSettings(response.data, requestedProjectId);
 	} catch {
 		if (currentProjectId() !== requestedProjectId) return;
@@ -2233,15 +2245,58 @@ function fieldLabel(field: ExtensionSettingField): string {
 	return field.label || field.key.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[-_]+/g, " ").replace(/^./, (letter) => letter.toUpperCase());
 }
 
-function draftFor(owner: string, field: ExtensionSettingField): ExtensionSettingPrimitive | undefined {
-	const draft = settingsDrafts.get(owner);
-	return draft?.has(field.key) ? draft.get(field.key) : field.value;
+function canonicalMultiEnum(value: unknown): string[] | undefined {
+	if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) return undefined;
+	return [...new Set(value)].sort();
 }
 
-function setDraft(owner: string, key: string, value: ExtensionSettingPrimitive | undefined): void {
+/** Clone retained setting values so wire, projection, draft, and request arrays never alias. */
+function cloneSettingValue(value: ExtensionSettingDraftValue | undefined): ExtensionSettingDraftValue | undefined {
+	return Array.isArray(value) ? canonicalMultiEnum(value) : value;
+}
+
+function sameSettingValue(left: ExtensionSettingDraftValue | undefined, right: ExtensionSettingDraftValue | undefined): boolean {
+	if (Array.isArray(left) || Array.isArray(right)) {
+		const canonicalLeft = canonicalMultiEnum(left);
+		const canonicalRight = canonicalMultiEnum(right);
+		return canonicalLeft !== undefined && canonicalRight !== undefined
+			&& canonicalLeft.length === canonicalRight.length
+			&& canonicalLeft.every((item, index) => item === canonicalRight[index]);
+	}
+	return left === right;
+}
+
+function draftFor(owner: string, field: ExtensionSettingField): ExtensionSettingDraftValue | undefined {
+	const draft = settingsDrafts.get(owner);
+	// Only multi-enum previews its inherited selections for an explicit
+	// "Use default" draft. Primitive controls retain their established cleared
+	// state until the PATCH null mutation is saved.
+	const staged = draft?.has(field.key) ? draft.get(field.key) : undefined;
+	const value = draft?.has(field.key)
+		? staged === undefined && field.type === "multi-enum" ? field.default : staged
+		: field.value;
+	return cloneSettingValue(value);
+}
+
+function setDraft(owner: string, key: string, value: ExtensionSettingDraftValue | undefined): void {
 	const draft = new Map(settingsDrafts.get(owner));
-	draft.set(key, value);
+	draft.set(key, cloneSettingValue(value));
 	settingsDrafts.set(owner, draft);
+}
+
+function settingsTargetIsDirty(target: ExtensionSettingsTarget, owner: string): boolean {
+	const draft = settingsDrafts.get(owner);
+	if (draft) {
+		for (const field of target.fields ?? []) {
+			if (field.type === "secret" && draft.get(`__clear__${field.key}`) === true) return true;
+			if (!draft.has(field.key)) continue;
+			const staged = draft.get(field.key);
+			if (staged === undefined) {
+				if (field.source === "project" || field.source === "legacy") return true;
+			} else if (!sameSettingValue(staged, field.value)) return true;
+		}
+	}
+	return (target.fields ?? []).some((field) => secretDrafts.has(secretDraftKey(owner, field.key)));
 }
 
 function secretDraftKey(owner: string, key: string): string {
@@ -2260,10 +2315,15 @@ function clearSecretDraft(owner: string, key: string): void {
 	}
 }
 
-function validateField(field: ExtensionSettingField, value: ExtensionSettingPrimitive | undefined): string | undefined {
+function validateField(field: ExtensionSettingField, value: ExtensionSettingDraftValue | undefined): string | undefined {
 	if (field.type === "secret") return undefined;
-	// Resetting a project override may leave `undefined`, which is valid when a
-	// declared default supplies the effective required value.
+	if (field.type === "multi-enum") {
+		const selected = canonicalMultiEnum(value);
+		if (field.required && (!selected || selected.length === 0)) return "Select at least one option.";
+		return undefined;
+	}
+	// A cleared draft means "Use default". It remains valid when that declared
+	// default supplies the required effective value.
 	if (field.required && field.default === undefined && (value === undefined || value === null || value === "")) return "This setting is required.";
 	if (field.type === "number" && value !== undefined && value !== null && value !== "") {
 		const number = typeof value === "number" ? value : Number(value);
@@ -2283,14 +2343,17 @@ function setFieldError(owner: string, key: string, error?: string): void {
 function renderSettingsField(target: ExtensionSettingsTarget, field: ExtensionSettingField): TemplateResult {
 	const owner = settingsOwnerKey(target);
 	const value = draftFor(owner, field);
-	const error = settingsErrors.get(owner)?.get(field.key);
+	// Empty required sets are invalid even before a user interaction; surface the
+	// same error used to block save rather than hiding an unusable configuration.
+	const error = settingsErrors.get(owner)?.get(field.key)
+		?? (field.type === "multi-enum" ? validateField(field, value) : undefined);
 	const fieldId = `market-settings-${owner.replace(/[^a-zA-Z0-9_-]/g, "-")}-${field.key.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 	const errorId = `${fieldId}-error`;
 	const helpId = `${fieldId}-help`;
 	const busyOwner = settingsBusy.has(owner);
-	const change = (next: ExtensionSettingPrimitive | undefined): void => {
+	const change = (next: ExtensionSettingDraftValue | undefined): void => {
 		setDraft(owner, field.key, next);
-		setFieldError(owner, field.key, validateField(field, next));
+		setFieldError(owner, field.key, validateField(field, draftFor(owner, field)));
 		renderApp();
 	};
 	const ariaDescribedBy = [field.description ? helpId : "", error ? errorId : ""].filter(Boolean).join(" ") || undefined;
@@ -2305,6 +2368,23 @@ function renderSettingsField(target: ExtensionSettingsTarget, field: ExtensionSe
 			${selected && !valid ? html`<option value=${selected} disabled>Unsupported: ${selected}</option>` : ""}
 			${(field.options ?? []).map((option) => html`<option value=${option.value}>${option.label || option.value}</option>`)}
 		</select>`;
+	} else if (field.type === "multi-enum") {
+		const selected = canonicalMultiEnum(value) ?? [];
+		const draft = settingsDrafts.get(owner);
+		const usingDefault = draft?.has(field.key) === true && draft.get(field.key) === undefined;
+		const toggle = (option: string, checked: boolean): void => {
+			change(checked ? [...selected, option] : selected.filter((value) => value !== option));
+		};
+		control = html`<fieldset id=${fieldId} class="market-settings-multi-enum" data-testid="market-settings-multi-enum" data-field-key=${field.key} ?disabled=${busyOwner} aria-invalid=${error ? "true" : "false"} aria-describedby=${ariaDescribedBy}>
+			<legend>${fieldLabel(field)}${field.required ? html` <span aria-hidden="true">*</span>` : ""}</legend>
+			<div class="market-settings-multi-enum-options">
+				${(field.options ?? []).map((option, index) => {
+					const optionId = `${fieldId}-option-${index}`;
+					return html`<label class="market-settings-multi-enum-option" for=${optionId}><input id=${optionId} type="checkbox" data-testid="market-settings-multi-enum-option" data-option-value=${option.value} ?disabled=${busyOwner} .checked=${selected.includes(option.value)} @change=${(event: Event) => toggle(option.value, (event.target as HTMLInputElement).checked)} /><span>${option.label || option.value}</span></label>`;
+				})}
+			</div>
+			<div class="market-settings-multi-enum-summary" data-testid="market-settings-multi-enum-summary">${usingDefault ? "Using default" : selected.length === 0 ? "None selected" : selected.length === 1 ? "1 selected" : `${selected.length} selected`}</div>
+		</fieldset>`;
 	} else if (field.type === "boolean") {
 		const checked = value === true;
 		control = html`<label class="market-settings-boolean"><span class="market-toggle-switch"><input id=${fieldId} type="checkbox" data-testid="market-settings-input" data-field-key=${field.key} ?disabled=${busyOwner} aria-invalid=${error ? "true" : "false"} aria-describedby=${ariaDescribedBy} .checked=${checked} @change=${(event: Event) => change((event.target as HTMLInputElement).checked)} /><span class="market-toggle-slider"></span></span><span>${checked ? "On" : "Off"}</span></label>`;
@@ -2315,12 +2395,13 @@ function renderSettingsField(target: ExtensionSettingsTarget, field: ExtensionSe
 	} else {
 		control = html`<div class="market-error" role="alert">Unsupported setting type.</div>`;
 	}
+	const defaultLabel = Array.isArray(field.default) ? field.default.join(", ") : String(field.default);
 	return html`<div class="market-settings-field" data-testid="market-settings-field" data-field-key=${field.key} data-field-type=${field.type}>
-		<label for=${fieldId}>${fieldLabel(field)}${field.required ? html` <span aria-hidden="true">*</span>` : ""}</label>
+		${field.type !== "multi-enum" ? html`<label for=${fieldId}>${fieldLabel(field)}${field.required ? html` <span aria-hidden="true">*</span>` : ""}</label>` : ""}
 		${field.description ? html`<div id=${helpId} class="market-settings-help">${field.description}</div>` : ""}
 		${control}
 		${field.type === "secret" ? html`<div class="market-settings-secret-row"><span class="market-settings-secret-state" data-testid="market-settings-secret-state" data-state=${field.secretSet ? "set" : "unset"}>${field.secretSet ? "Stored for this project" : "Not set"}</span>${field.secretSet ? html`<button type="button" class="market-btn market-btn--danger" data-testid="market-settings-secret-remove" data-field-key=${field.key} ?disabled=${busyOwner} @click=${() => { setDraft(owner, `__clear__${field.key}`, true); clearSecretDraft(owner, field.key); renderApp(); }}>Remove secret</button>` : ""}</div>` : ""}
-		${field.type !== "secret" ? html`<div class="market-settings-source">${settingsDrafts.get(owner)?.has(field.key) || field.source === "project" ? html`<button type="button" class="market-link-button" data-testid="market-settings-use-default" data-field-key=${field.key} ?disabled=${busyOwner} @click=${() => { setDraft(owner, field.key, undefined); setFieldError(owner, field.key, validateField(field, undefined)); renderApp(); }}>Use default</button>` : field.default !== undefined ? `Default: ${String(field.default)}` : field.source === "legacy" ? "Legacy setting" : ""}</div>` : ""}
+		${field.type !== "secret" ? html`<div class="market-settings-source">${settingsDrafts.get(owner)?.has(field.key) || field.source === "project" ? html`<button type="button" class="market-link-button" data-testid="market-settings-use-default" data-field-key=${field.key} ?disabled=${busyOwner} @click=${() => { setDraft(owner, field.key, undefined); setFieldError(owner, field.key, validateField(field, draftFor(owner, field))); renderApp(); }}>Use default</button>` : field.default !== undefined ? `Default: ${defaultLabel}` : field.source === "legacy" ? "Legacy setting" : ""}</div>` : ""}
 		${error ? html`<div id=${errorId} class="market-settings-field-error" role="alert">${error}</div>` : ""}
 	</div>`;
 }
@@ -2343,7 +2424,7 @@ async function resetSettingsTarget(target: ExtensionSettingsTarget): Promise<voi
 			clearSecretDraft(owner, field.key);
 		} else {
 			setDraft(owner, field.key, undefined);
-			setFieldError(owner, field.key, validateField(field, undefined));
+			setFieldError(owner, field.key, validateField(field, draftFor(owner, field)));
 		}
 	}
 	renderApp();
@@ -2359,7 +2440,7 @@ async function saveSettingsTarget(target: ExtensionSettingsTarget): Promise<void
 		const error = validateField(field, draftFor(owner, field));
 		if (error) errors.set(field.key, error);
 	}
-	if (errors.size || (target.fields ?? []).some((field) => !["string", "secret", "enum", "boolean", "number"].includes(field.type))) {
+	if (errors.size || (target.fields ?? []).some((field) => !["string", "secret", "enum", "multi-enum", "boolean", "number"].includes(field.type))) {
 		settingsErrors.set(owner, errors);
 		settingsFormErrors.set(owner, "Review the highlighted settings before saving.");
 		// A rejected save is still an outcome: discard DOM-only passwords and
@@ -2369,7 +2450,7 @@ async function saveSettingsTarget(target: ExtensionSettingsTarget): Promise<void
 		return;
 	}
 	const draft = settingsDrafts.get(owner) ?? new Map();
-	const values: Record<string, string | number | boolean | null> = {};
+	const values: Record<string, ExtensionSettingValue | null> = {};
 	for (const field of target.fields ?? []) {
 		if (field.type === "secret") {
 			const replacement = secretInputValue(owner, field.key);
@@ -2377,7 +2458,9 @@ async function saveSettingsTarget(target: ExtensionSettingsTarget): Promise<void
 			if (draft.get(`__clear__${field.key}`) === true) values[field.key] = null;
 		} else if (draft.has(field.key)) {
 			const value = draft.get(field.key);
-			values[field.key] = value === undefined ? null : field.type === "number" && typeof value === "string" ? Number(value) : value;
+			values[field.key] = value === undefined ? null
+				: field.type === "number" && typeof value === "string" ? Number(value)
+				: cloneSettingValue(value) as ExtensionSettingValue;
 		}
 	}
 	settingsBusy.add(owner);
@@ -2394,7 +2477,7 @@ async function saveSettingsTarget(target: ExtensionSettingsTarget): Promise<void
 		}
 		clearExtensionSettingsUi(false);
 		settingsStatus = `Settings saved for ${state.projects.find((project) => project.id === projectId)?.name || "this project"}.`;
-		await loadExtensionSettings(projectId);
+		await loadExtensionSettings(projectId, true);
 	} catch {
 		settingsFormErrors.set(owner, "Settings were not saved. Secret values were cleared; re-enter them and retry.");
 	} finally {
@@ -2561,7 +2644,7 @@ function renderSettingsTarget(target: ExtensionSettingsTarget): TemplateResult {
 	const status = targetStatus(target);
 	const panelId = `market-settings-panel-${owner.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 	const formError = settingsFormErrors.get(owner);
-	const dirty = (settingsDrafts.get(owner)?.size ?? 0) > 0 || (target.fields ?? []).some((field) => secretDrafts.has(secretDraftKey(owner, field.key)));
+	const dirty = settingsTargetIsDirty(target, owner);
 	const configurable = target.kind !== "pack";
 	const packControllable = target.kind !== "pack"
 		|| (extensionSettings?.targets.some((candidate) => candidate.packId === target.packId && candidate.kind !== "pack") ?? false);
@@ -2571,7 +2654,7 @@ function renderSettingsTarget(target: ExtensionSettingsTarget): TemplateResult {
 		<span class="market-lozenge ${status.className}" data-testid="market-runtime-status" data-state=${status.state}>${status.label}</span>
 		${configurable ? html`<button type="button" class="market-btn" data-testid="market-settings-toggle" data-owner-kind=${target.kind} data-owner-id=${target.id} aria-expanded=${open ? "true" : "false"} aria-controls=${panelId} @click=${() => { expandedSettingsOwner = open ? "" : owner; renderApp(); }}>${open ? "Close settings" : "Configure"}</button>` : ""}
 		${renderExtensionGrants(target)}
-		${open && configurable ? html`<fieldset id=${panelId} class="market-settings-form" data-testid="market-settings-form" data-owner-kind=${target.kind} data-owner-id=${target.id} data-revision=${extensionSettings?.revision ?? 0} aria-busy=${busyOwner ? "true" : "false"}><legend>${target.label || target.id} ${target.kind} settings</legend><div class="market-settings-project">Project: ${state.projects.find((project) => project.id === currentProjectId())?.name || "Unknown"}</div><p class="market-settings-status-copy">${status.message}</p>${formError ? html`<div class="market-settings-error-summary" data-testid="market-settings-error-summary" role="alert">${formError}${formError.includes("changed elsewhere") ? html` <button type="button" class="market-btn" @click=${() => loadExtensionSettings(currentProjectId())}>Reload latest</button>` : ""}</div>` : ""}<div class="market-settings-fields">${(target.fields ?? []).map((field) => renderSettingsField(target, field))}</div><div class="market-settings-actions"><button type="button" class="market-btn market-btn--danger" data-testid="market-settings-reset" ?disabled=${busyOwner} @click=${() => resetSettingsTarget(target)}>Reset project settings</button><button type="button" class="market-btn market-btn--primary" data-testid="market-settings-save" ?disabled=${!dirty || busyOwner} @click=${() => saveSettingsTarget(target)}>${busyOwner ? "Saving…" : "Save"}</button></div></fieldset>` : ""}
+		${open && configurable ? html`<fieldset id=${panelId} class="market-settings-form" data-testid="market-settings-form" data-owner-kind=${target.kind} data-owner-id=${target.id} data-revision=${extensionSettings?.revision ?? 0} aria-busy=${busyOwner ? "true" : "false"}><legend>${target.label || target.id} ${target.kind} settings</legend><div class="market-settings-project">Project: ${state.projects.find((project) => project.id === currentProjectId())?.name || "Unknown"}</div><p class="market-settings-status-copy">${status.message}</p>${formError ? html`<div class="market-settings-error-summary" data-testid="market-settings-error-summary" role="alert">${formError}${formError.includes("changed elsewhere") ? html` <button type="button" class="market-btn" @click=${() => loadExtensionSettings(currentProjectId(), true)}>Reload latest</button>` : ""}</div>` : ""}<div class="market-settings-fields">${(target.fields ?? []).map((field) => renderSettingsField(target, field))}</div><div class="market-settings-actions"><button type="button" class="market-btn market-btn--danger" data-testid="market-settings-reset" ?disabled=${busyOwner} @click=${() => resetSettingsTarget(target)}>Reset project settings</button><button type="button" class="market-btn market-btn--primary" data-testid="market-settings-save" ?disabled=${!dirty || busyOwner} @click=${() => saveSettingsTarget(target)}>${busyOwner ? "Saving…" : "Save"}</button></div></fieldset>` : ""}
 	</div>`;
 }
 
@@ -2579,7 +2662,7 @@ function renderProjectRuntime(pack: InstalledPackWire): TemplateResult {
 	const projectId = currentProjectId();
 	if (!projectId) return html``;
 	if (extensionSettingsLoading && extensionSettingsProjectId === projectId) return html`<div class="market-project-runtime market-project-runtime--loading" data-testid="market-project-runtime" data-project-id=${projectId} data-pack-id=${pack.packName}>Loading project runtime…</div>`;
-	if (extensionSettingsError) return html`<div class="market-project-runtime" data-testid="market-project-runtime" data-project-id=${projectId} data-pack-id=${pack.packName}><span class="market-lozenge market-lozenge--error" data-testid="market-runtime-status" data-state="unavailable">Unavailable</span><button class="market-btn" @click=${() => loadExtensionSettings(projectId)}>Retry</button></div>`;
+	if (extensionSettingsError) return html`<div class="market-project-runtime" data-testid="market-project-runtime" data-project-id=${projectId} data-pack-id=${pack.packName}><span class="market-lozenge market-lozenge--error" data-testid="market-runtime-status" data-state="unavailable">Unavailable</span><button class="market-btn" @click=${() => loadExtensionSettings(projectId, true)}>Retry</button></div>`;
 	const targets = extensionSettings?.targets.filter((target) => target.packId === pack.packName) ?? [];
 	if (!targets.length) return html``;
 	const project = state.projects.find((item) => item.id === projectId);
