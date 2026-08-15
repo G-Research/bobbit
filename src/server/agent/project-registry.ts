@@ -1424,9 +1424,16 @@ export class ProjectRegistry {
     const project = this.projects.get(id);
     if (!project) throw new Error(`Project not found: ${id}`);
     assertNormalMutableProject(project, "promoted");
-    // Idempotent — if already promoted, just update the name and return
+    // Idempotent — if already promoted, just update the name and return.
+    // The import run is deliberately allocated here (rather than while the
+    // project is provisional): proposal acceptance persists final components
+    // before POST /promote, so the snapshot can never describe a scaffold.
+    const wasProvisional = project.provisional === true;
     delete project.provisional;
     if (updates.name !== undefined) project.name = updates.name;
+    if (wasProvisional && !project.importDecisionRun) {
+      project.importDecisionRun = { version: 1, id: randomUUID(), createdAt: Date.now(), state: "configuring" };
+    }
 
     // Scaffold .bobbit directories if they don't exist yet (e.g. scaffolding path)
     if (fs.existsSync(project.rootPath)) {

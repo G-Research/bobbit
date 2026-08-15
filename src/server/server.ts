@@ -787,7 +787,7 @@ import {
 	getProposalTypePlugin,
 	type ProposalType,
 } from "./proposals/proposal-files.js";
-import { ProposalSeedService } from "./proposals/proposal-seed-service.js";
+import { ProposalSeedService, proposalDraftOwnerId } from "./proposals/proposal-seed-service.js";
 
 const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "complete", "skipped"]);
 
@@ -3431,6 +3431,16 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		broadcastToSession,
 		packContributionRegistry,
 		readBody,
+		// Project imports have no agent session. Publish a project-owned workspace
+		// invalidation only after the draft has been persisted, so clients query the
+		// durable projection rather than trusting a transient hook payload.
+		openProjectImportProposalWorkspace: (workspace) => {
+			broadcastToProject(workspace.owner.projectId, {
+				type: "project_import_decision_requests_updated",
+				projectId: workspace.owner.projectId,
+				ts: gatewayDeps.clock.now(),
+			});
+		},
 	});
 	decisionRequestManager = new DecisionRequestManager({
 		storeForProject: (projectId) => projectContextManager.getOrCreate(projectId)?.decisionRequestStore,
@@ -7634,7 +7644,26 @@ async function handleApiRoute(
 		try {
 			const body = await readBody(req);
 			const name = typeof body?.name === "string" ? body.name : undefined;
-			const promoted = projectRegistry.promote(projectId, { name });
+			let promoted = projectRegistry.promote(projectId, { name });
+			// A provisional project deliberately has no run until its proposal
+			// configuration is complete. The acceptance client writes that config
+			// before this request; retain a defensive default for direct API users
+			// so the server-derived snapshot is never component-less.
+			const promotionContext = projectContextManager.getOrCreate(projectId);
+			if (promotionContext && promotionContext.projectConfigStore.getComponents().length === 0) {
+				promotionContext.projectConfigStore.setComponents([{ name: promoted.name, repo: "." }]);
+			}
+			if (promoted.importDecisionRun?.state === "configuring") {
+				projectRegistry.markImportDecisionRunReady(projectId, promoted.importDecisionRun.id);
+				promoted = projectRegistry.get(projectId) ?? promoted;
+				try {
+					await projectImportDecisionCoordinator?.dispatch(projectId, promoted.importDecisionRun.id);
+				} catch (error) {
+					// The ready marker is the recovery boundary. A restart/retry reuses
+					// it and dispatches the exact durable snapshot without re-asking.
+					console.warn(`[project-import-decisions] promotion dispatch failed project=${projectId}:`, error);
+				}
+			}
 			// Pin base_ref from the live remote (best-effort) now that the
 			// promoted project's rootPath is a real git repo. Mirrors the
 			// add-time pin in POST /api/projects. See docs/design/base-ref.md.
@@ -8651,6 +8680,64 @@ async function handleApiRoute(
 		return;
 	}
 
+	// GET /api/projects/:id/import-decision-trace?limit=N — bounded, redacted
+	// project-owned activity. Unlike session traces this has no ambient session
+	// authorization surface, so require a verified operator and bind the durable
+	// import id to the requested registered project before opening its file.
+	const projectImportTraceMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/import-decision-trace$/);
+	if (projectImportTraceMatch && req.method === "GET") {
+		if (!requireVerifiedPromptOperator()) return;
+		let projectId: string;
+		try { projectId = decodeURIComponent(projectImportTraceMatch[1]); }
+		catch { json({ error: "Project not found" }, 404); return; }
+		const marker = projectRegistry.get(projectId)?.importDecisionRun;
+		if (!marker || marker.version !== 1 || marker.state !== "ready") {
+			json({ error: "Project not found" }, 404);
+			return;
+		}
+		const rawLimit = url.searchParams.get("limit");
+		const parsed = rawLimit === null ? 100 : Number.parseInt(rawLimit, 10);
+		const limit = Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 200) : 100;
+		try {
+			const entries = new ContextTraceStore(bobbitStateDir(), fsImpl)
+				.readProjectImportTrace(projectId, marker.id, limit);
+			json({ entries });
+		} catch {
+			json({ error: "Project import trace is unavailable", code: "PROJECT_IMPORT_TRACE_UNAVAILABLE" }, 503);
+		}
+		return;
+	}
+
+	// GET /api/projects/:id/import-proposals — project-owned, durable proposal
+	// workspace projection. It derives draft ids from the decision record rather
+	// than accepting a caller-supplied path or session id, so a completed import
+	// remains inspectable without a live agent session.
+	const projectImportProposalsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/import-proposals$/);
+	if (projectImportProposalsMatch && req.method === "GET") {
+		if (!requireVerifiedPromptOperator()) return;
+		let projectId: string;
+		try { projectId = decodeURIComponent(projectImportProposalsMatch[1]); }
+		catch { json({ error: "Project not found" }, 404); return; }
+		const project = projectRegistry.get(projectId);
+		const marker = project?.importDecisionRun;
+		if (!project || marker?.state !== "ready" || !decisionRequestManager) { json({ error: "Project not found" }, 404); return; }
+		const proposals: Array<{ requestId: string; proposalType: ProposalType; rev: number; fields: Record<string, unknown> }> = [];
+		for (const record of decisionRequestManager.listImportRequests(projectId, marker.id)) {
+			if (record.proposal?.status !== "created" || !record.resolution) continue;
+			const owner = { kind: "project-import" as const, projectId, importId: marker.id, requestId: record.id };
+			try {
+				const parsed = await parseProposalFile(bobbitStateDir(), proposalDraftOwnerId(owner), record.proposal.type);
+				if (!parsed.ok) continue;
+				proposals.push({ requestId: record.id, proposalType: record.proposal.type, rev: record.proposal.rev ?? 0, fields: parsed.value.fields });
+			} catch {
+				// A missing/corrupt draft is never projected as created. The durable
+				// decision remains auditable, but a caller cannot act on an orphan.
+			}
+		}
+		json({ proposals });
+		return;
+	}
+
 	// Project-import decisions have no session or transcript. This projection is
 	// strictly bound to the registered project's ready run and durable delivery.
 	const projectImportRequestsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/import-decision-requests$/);
@@ -8662,11 +8749,9 @@ async function handleApiRoute(
 		const state = url.searchParams.get("state");
 		if (!project || marker?.state !== "ready") { json({ error: "Project not found" }, 404); return; }
 		if (state !== null && state !== "pending") { json({ error: "state must be pending" }, 400); return; }
-		const store = projectContextManager.getOrCreate(projectId)?.decisionRequestStore;
-		const records = store?.list().filter(record => {
-			const delivery = (record as unknown as { delivery?: { kind?: string; importId?: string } }).delivery;
-			return delivery?.kind === "project-import" && delivery.importId === marker.id && (state !== "pending" || record.status === "pending");
-		}) ?? [];
+		const records = state === "pending"
+			? decisionRequestManager?.listPendingImportRequests(projectId, marker.id) ?? []
+			: decisionRequestManager?.listImportRequests(projectId, marker.id) ?? [];
 		json({ requests: records.map(record => ({
 			id: record.id,
 			status: record.status,
@@ -8693,9 +8778,8 @@ async function handleApiRoute(
 		const project = projectRegistry.get(projectId);
 		const marker = project?.importDecisionRun;
 		if (!project || marker?.state !== "ready" || !decisionRequestManager) { json({ error: "Decision request not found" }, 404); return; }
-		const current = decisionRequestManager.get(projectId, requestId);
-		const delivery = (current as unknown as { delivery?: { kind?: string; importId?: string } } | undefined)?.delivery;
-		if (!current || delivery?.kind !== "project-import" || delivery.importId !== marker.id) { json({ error: "Decision request not found" }, 404); return; }
+		const current = decisionRequestManager.getImportRequest(projectId, marker.id, requestId);
+		if (!current) { json({ error: "Decision request not found" }, 404); return; }
 		const body = await readBody(req).catch(() => undefined);
 		if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1 || !("value" in body)) {
 			json({ error: "value is required" }, 400);
@@ -9011,6 +9095,7 @@ async function handleApiRoute(
 		}
 		return;
 	}
+
 
 	// GET /api/sessions/:id/context-trace?limit=N — per-turn provider dispatch trace.
 	const contextTraceMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/context-trace$/);
