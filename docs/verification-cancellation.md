@@ -66,7 +66,7 @@ The public active-verifications endpoint deliberately hides a run once it has en
 
 Each signal is one generation. On re-signal, Bobbit fences the old generation as `superseded` before admitting the replacement. Old cleanup may continue, but its finalizer can update only its own historical signal; it cannot publish a result into the replacement generation or change the current gate status.
 
-A paused goal rejects new signals while paused. Resuming does not automatically replay a cancelled verification: automatic replay could run a changed commit, workflow, goal lineage, or a superseded signal. Instead, after the goal is eligible again, use the explicit **Re-signal verification** action once. That creates a new generation under current admission checks.
+A paused goal rejects new signals while paused. Resuming does not automatically replay a cancelled verification: automatic replay could run a changed commit, workflow, goal lineage, or a superseded signal. Instead, after the goal is eligible again, use the explicit **Re-signal gate** action once. That creates a new generation under current admission checks.
 
 Manual cancellation follows the same model: the interrupted run is terminal history, and a later explicit re-signal is allowed. Goal completion, shelving, archival, and team teardown similarly cancel active work without manufacturing a failed gate. Reset and bypass first cancel affected active generations, then apply their own gate-state transaction.
 
