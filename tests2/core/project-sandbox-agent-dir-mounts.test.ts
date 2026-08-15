@@ -2,7 +2,7 @@
 // Source: tests/project-sandbox-agent-dir-mounts.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { describe, it } from "vitest";
+import { describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { ProjectSandbox, getAgentDirMountStaleness, getModelsJsonContentStaleness, getStateDirMountStaleness } from "../../src/server/agent/project-sandbox.js";
@@ -193,6 +193,53 @@ describe("ProjectSandbox agent-dir mount staleness", () => {
 		assert.deepEqual(calls, [["remove", "old-container-id"], "create", "init"]);
 		assert.equal((sandbox as any).containerId, "new-container-id");
 	});
+
+	for (const { lifecycle, running } of [
+		{ lifecycle: "reconnect", running: true },
+		{ lifecycle: "restart", running: false },
+	] as const) {
+		it(`keeps a healthy container on transient volume-root repair failure during ${lifecycle}`, async () => {
+			const sandbox = makeSandbox();
+			const calls: string[] = [];
+			const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+			try {
+				(sandbox as any)._findContainerByLabel = async () => "healthy-container-id";
+				(sandbox as any)._hasStaleAgentDirMounts = async () => false;
+				(sandbox as any)._hasStaleStateDirMounts = async () => false;
+				(sandbox as any)._isContainerImageStale = async () => false;
+				(sandbox as any)._isContainerRunning = async () => running;
+				(sandbox as any)._dockerExec = async (_containerId: string, args: string[]) => {
+					calls.push(`exec:${args[0]}`);
+					return "";
+				};
+				(sandbox as any)._initializeSandboxVolumeRoots = async () => {
+					calls.push("repair");
+					throw new Error("injected ownership exec failure");
+				};
+				(sandbox as any).execDocker = async (args: string[]) => {
+					calls.push(`docker:${args[0]}`);
+					return { stdout: "", stderr: "" };
+				};
+				(sandbox as any)._removeContainer = async () => { calls.push("remove"); };
+				(sandbox as any)._createContainer = async () => { calls.push("create"); };
+				(sandbox as any)._runInitSequence = async () => { calls.push("init"); };
+
+				await (sandbox as any)._initContainer();
+
+				assert.equal((sandbox as any).containerId, "healthy-container-id");
+				assert.equal(calls.includes("remove"), false);
+				assert.equal(calls.includes("create"), false);
+				assert.equal(calls.includes("init"), false);
+				assert.equal(calls.filter((call) => call === "repair").length, 1);
+				if (running) assert.equal(calls.includes("docker:start"), false);
+				else assert.equal(calls.includes("docker:start"), true);
+				assert.equal(warn.mock.calls.length, 1);
+				assert.match(String(warn.mock.calls[0][0]), new RegExp(`during ${lifecycle}`));
+			} finally {
+				warn.mockRestore();
+			}
+		});
+	}
 });
 
 describe("SandboxManager atomic model refresh", () => {

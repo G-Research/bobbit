@@ -1060,10 +1060,12 @@ export class ProjectSandbox {
 			// Check if running
 			const running = await this._isContainerRunning(existingId);
 			if (running) {
-				// Validate with a simple exec
+				// Validate with a simple exec. Volume-root repair is intentionally
+				// best-effort here: a transient root exec failure must not discard a
+				// healthy long-lived container and its persisted worktrees.
 				try {
 					await this._dockerExec(existingId, ["echo", "ok"]);
-					await this._initializeSandboxVolumeRoots(existingId);
+					await this._repairSandboxVolumeRootsOnExistingContainer(existingId, "reconnect");
 					this.containerId = existingId;
 					// Audit worktree state on reconnect — helps debug disappearing worktrees
 					try {
@@ -1085,9 +1087,10 @@ export class ProjectSandbox {
 						timeout: 30_000,
 						env: DOCKER_ENV,
 					});
-					// Validate after start
+					// Validate after start. As with a running reconnect, retain a healthy
+					// container when a transient ownership repair cannot run.
 					await this._dockerExec(existingId, ["echo", "ok"]);
-					await this._initializeSandboxVolumeRoots(existingId);
+					await this._repairSandboxVolumeRootsOnExistingContainer(existingId, "restart");
 					this.containerId = existingId;
 					// Audit worktree state after restart — overlay FS data may have been lost
 					try {
@@ -1243,6 +1246,21 @@ export class ProjectSandbox {
 			"exec", "-u", "root", containerId, "sh", "-c",
 			"mkdir -p /workspace /workspace-wt && chown node:node /workspace /workspace-wt",
 		], { timeout: 10_000, env: DOCKER_ENV });
+	}
+
+	/**
+	 * A newly created container cannot proceed without establishing ownership of
+	 * its named-volume roots. Reconnects and restarts, however, already passed a
+	 * health check and may retry worktree creation later, so an ownership-repair
+	 * exec failure must not turn them into destructive container recreation.
+	 */
+	private async _repairSandboxVolumeRootsOnExistingContainer(containerId: string, lifecycle: "reconnect" | "restart"): Promise<void> {
+		try {
+			await this._initializeSandboxVolumeRoots(containerId);
+		} catch (err) {
+			const detail = err instanceof Error ? err.message : String(err);
+			console.warn(`[project-sandbox] Failed to repair volume-root ownership during ${lifecycle} for healthy container ${containerId.substring(0, 12)}; continuing with worktree retry fallback: ${detail}`);
+		}
 	}
 
 	private async _runInitSequence(): Promise<void> {
