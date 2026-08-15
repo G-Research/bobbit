@@ -267,10 +267,10 @@ const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-posix-command-injectio
 const injected = path.join(dir, "injected");
 try {
   // If this command were assembled into shell source, the trailing redirect
-  // would create `injected`. The tracked launcher must instead try to execute
+  // would create the marker. The tracked launcher must instead try to execute
   // this complete string as one shell-free executable path.
   const command = process.execPath + "; printf injected > " + JSON.stringify(injected);
-  const tracked = spawnTracked(command, [], { stdio: ["ignore", "ignore", "ignore", "pipe"] });
+  const tracked = spawnTracked(command, [], { stdio: ["ignore", "ignore", "ignore"] });
   await tracked.ownershipReady;
   await new Promise((resolve, reject) => { tracked.child.once("close", resolve); tracked.child.once("error", reject); });
   assert.equal(fs.existsSync(injected), false, "configured command must not be interpreted by a shell");
