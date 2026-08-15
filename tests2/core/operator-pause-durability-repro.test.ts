@@ -48,17 +48,18 @@ async function restartWith(goals: GoalWithPauseSource[]): Promise<GoalStore> {
 	return afterRestart;
 }
 
-function createPauseRouteFixture() {
+function createPauseRouteFixture(options: { goals?: GoalWithPauseSource[] } = {}) {
 	const memfs = createMemFs();
 	const stateDir = path.resolve("/memfs/operator-pause-fence/state");
 	memfs.mkdirSync(stateDir);
 	const goalStore = new GoalStore(stateDir, memfs);
 	const goalManager = new GoalManager(goalStore);
-	const pausedGoal = goal("pause-target");
-	goalStore.put(pausedGoal);
+	const pauseGoals = options.goals ?? [goal("pause-target")];
+	const pausedGoal = pauseGoals[0];
+	for (const pauseGoal of pauseGoals) goalStore.put(pauseGoal);
 
 	let fenceDepth = 0;
-	let failFence: Error | undefined;
+	let failFence: { error: Error; goalId?: string } | undefined;
 	let updateCalls = 0;
 	const fenceCalls: Array<{ goalId: string; cause: string; depth: number }> = [];
 	const broadcasts: any[] = [];
@@ -77,7 +78,7 @@ function createPauseRouteFixture() {
 		},
 		fenceAndCancelAllVerifications: (goalId: string, cause: string) => {
 			fenceCalls.push({ goalId, cause, depth: fenceDepth });
-			if (failFence) throw failFence;
+			if (failFence && (!failFence.goalId || failFence.goalId === goalId)) throw failFence.error;
 		},
 		getActiveVerifications: () => [],
 		cancelStaleVerifications: async () => {},
@@ -101,7 +102,9 @@ function createPauseRouteFixture() {
 		verificationHarness,
 		teamManager: { teardownTeam: async () => {}, getTeamState: () => undefined },
 		sessionManager: {
-			getAllSessionsRaw: () => [{ id: "streaming-session", goalId: pausedGoal.id, status: "streaming" }],
+			getAllSessionsRaw: () => pauseGoals.map(pauseGoal => ({
+				id: `streaming-session-${pauseGoal.id}`, goalId: pauseGoal.id, status: "streaming",
+			})),
 			abortSessionTurn: async (sessionId: string) => { abortCalls.push(sessionId); },
 			getSession: () => undefined, deliverLiveSteer: async () => {}, enqueuePrompt: async () => {},
 			sessionSecretStore: { resolveSessionIdBySecret: () => undefined },
@@ -117,12 +120,12 @@ function createPauseRouteFixture() {
 		getSubgoalNestingPrefs: () => ({ subgoalsEnabled: true, maxNestingDepth: 5 }),
 	} as unknown as NestedGoalRouteDeps;
 
-	async function post(): Promise<RouteResult> {
+	async function post({ goalId = pausedGoal.id, cascade = false }: { goalId?: string; cascade?: boolean } = {}): Promise<RouteResult> {
 		let status = 0;
 		let payload: any;
 		const handled = await tryHandleNestedGoalRoute(
-			{ method: "POST", headers: { cookie: "bobbit_session=human" }, _body: { cascade: false } } as any as http.IncomingMessage,
-			new URL(`http://test/api/goals/${pausedGoal.id}/pause`),
+			{ method: "POST", headers: { cookie: "bobbit_session=human" }, _body: { cascade } } as any as http.IncomingMessage,
+			new URL(`http://test/api/goals/${goalId}/pause`),
 			{
 				...deps,
 				json: (responseBody, responseStatus) => { payload = responseBody; status = responseStatus ?? 200; },
@@ -134,6 +137,7 @@ function createPauseRouteFixture() {
 
 	return {
 		goal: pausedGoal,
+		goals: pauseGoals,
 		goalStore,
 		post,
 		fenceCalls,
@@ -142,7 +146,9 @@ function createPauseRouteFixture() {
 		abortCalls,
 		get fenceDepth() { return fenceDepth; },
 		get updateCalls() { return updateCalls; },
-		failCancellationFence(error = new Error("simulated durable fence failure")) { failFence = error; },
+		failCancellationFence(error = new Error("simulated durable fence failure"), goalId?: string) {
+			failFence = { error, goalId };
+		},
 		stallPausedWrite() {
 			stallWrite = { started: deferred(), release: deferred() };
 			return stallWrite;
@@ -325,6 +331,22 @@ describe("canonical operator pause lifecycle", () => {
 		assert.equal(fx.broadcasts.length, 0, "a failed fence must not publish a successful pause");
 		assert.deepEqual(fx.abortCalls, [], "a failed fence must not abort goal sessions");
 		assert.equal(fx.fenceDepth, 0, "the lifecycle admission fence must release after failure");
+	});
+
+	it("aborts only earlier committed goals when a later cascade fence fails", async () => {
+		const parent = goal("cascade-parent");
+		const child = goal("cascade-child", { parentGoalId: parent.id, rootGoalId: parent.id });
+		const fx = createPauseRouteFixture({ goals: [parent, child] });
+		fx.failCancellationFence(new Error("child fence persistence failed"), child.id);
+
+		const result = await fx.post({ cascade: true });
+
+		assert.equal(result.status, 503);
+		assert.equal(fx.goalStore.get(parent.id)!.paused, true, "the earlier parent remains durably paused");
+		assert.notEqual(fx.goalStore.get(child.id)!.paused, true, "the failed child remains unpaused");
+		assert.deepEqual(fx.broadcasts, [{ type: "goal_state_changed", goalId: parent.id }]);
+		assert.deepEqual(fx.abortCalls, ["streaming-session-cascade-parent"], "only the committed parent may be aborted");
+		assert.deepEqual(fx.fenceCalls.map(call => call.goalId), [parent.id, child.id]);
 	});
 
 	it("holds goal-wide admission through the paused write", async () => {
