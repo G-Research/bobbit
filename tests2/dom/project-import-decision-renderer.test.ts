@@ -10,6 +10,7 @@ import {
 	activateProjectImportDecisionRequests,
 	answerProjectImportDecisionRequest,
 	projectImportDecisionRequestsForProject,
+	projectImportDecisionRequestsLoaded,
 	type ProjectImportDecisionRequestProjection,
 } from "../../src/app/project-import-decisions.js";
 import type { DecisionValue } from "../../src/app/extension-decisions.js";
@@ -70,6 +71,28 @@ describe("ProjectImportDecisionRenderer", () => {
 		expect(String(url)).not.toContain("/api/sessions/");
 		expect(String(url)).not.toContain("ask-user");
 		expect(JSON.parse(String(init?.body))).toEqual({ value: { kind: "other", text: "A custom safe mode" } });
+	});
+
+	it("treats an unavailable projection as loaded with no requests", async () => {
+		const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("unavailable", { status: 500 }));
+		const changed = vi.fn();
+		const unsubscribe = activateProjectImportDecisionRequests(PROJECT_ID, changed);
+
+		await vi.waitFor(() => expect(projectImportDecisionRequestsLoaded(PROJECT_ID)).toBe(true));
+		expect(projectImportDecisionRequestsForProject(PROJECT_ID)).toEqual([]);
+		expect(fetch).toHaveBeenCalledTimes(1);
+		expect(changed).toHaveBeenCalled();
+		unsubscribe();
+	});
+
+	it("treats a network projection failure as loaded with no requests", async () => {
+		const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("gateway restarted"));
+		const unsubscribe = activateProjectImportDecisionRequests(PROJECT_ID, vi.fn());
+
+		await vi.waitFor(() => expect(projectImportDecisionRequestsLoaded(PROJECT_ID)).toBe(true));
+		expect(projectImportDecisionRequestsForProject(PROJECT_ID)).toEqual([]);
+		expect(fetch).toHaveBeenCalledTimes(1);
+		unsubscribe();
 	});
 
 	it("reloads the durable pending projection and removes a settled request without a transcript", async () => {
