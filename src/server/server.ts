@@ -7538,36 +7538,7 @@ async function handleApiRoute(
 					get: (id) => projectRegistry.get(id),
 					update: (id, updates) => projectRegistry.update(id, updates as Parameters<typeof projectRegistry.update>[1]),
 					promote: (id, updates) => projectRegistry.promote(id, updates),
-					// Route-owned configuration follows this durable registration boundary;
-					// proposal acceptance passes its full config callback to this same operation.
-					configure: () => undefined,
-					removeRegistered: (created) => projectRegistry.remove(created.id),
-					removeContext: (id) => projectContextManager.remove(id),
-					openContext: (id) => Promise.resolve(!!projectContextManager.getOrCreate(id)),
-					suspendServices: (id) => worktreeServices.suspendProject(id),
-					stopServices: (id) => worktreeServices.stopProject(id),
-					reconcileServices: (id) => worktreeServices.reconcileProject(id),
-				}));
-			} catch (regErr: any) {
-				if (regErr instanceof SymlinkProjectRootError) {
-					json({
-						error: "Project root is a symlink",
-						code: "symlink_root",
-						rootPath: regErr.rootPath,
-						canonical: regErr.canonical,
-					}, 400);
-					return;
-				}
-				if (regErr instanceof PreflightFailedError) {
-					json({
-						error: regErr.message,
-						code: "preflight_failed",
-						report: regErr.report,
-					}, 400);
-					return;
-				}
-				throw regErr;
-			}
+					configure: async (project) => {
 			// Initialize project context for the new project
 			const newCtx = projectContextManager.getOrCreate(project.id);
 			if (newCtx) {
@@ -7588,9 +7559,7 @@ async function handleApiRoute(
 								configuredComponents,
 							);
 							if (errors.length > 0) {
-								projectRegistry.remove(project.id);
-								json({ error: "Workflow validation failed", details: errors }, 400);
-								return;
+								throw new CanonicalMutationError(400, "Workflow validation failed", "WORKFLOW_VALIDATION_FAILED", errors);
 							}
 						} catch { /* best-effort */ }
 					}
@@ -7679,6 +7648,39 @@ async function handleApiRoute(
 			}
 			const importMarker = project.importDecisionRun;
 			if (importMarker?.state === "ready") await dispatchImportDecisionSafely(project.id, importMarker.id);
+					},
+					rollbackRegistration: (created) => projectContextManager.remove(created.id),
+					removeRegistered: (created) => projectRegistry.remove(created.id),
+					removeContext: (id) => projectContextManager.remove(id),
+					openContext: (id) => Promise.resolve(!!projectContextManager.getOrCreate(id)),
+					suspendServices: (id) => worktreeServices.suspendProject(id),
+					stopServices: (id) => worktreeServices.stopProject(id),
+					reconcileServices: (id) => worktreeServices.reconcileProject(id),
+				}));
+			} catch (regErr: any) {
+				if (regErr instanceof CanonicalMutationError && regErr.code === "WORKFLOW_VALIDATION_FAILED") {
+					json({ error: regErr.message, details: regErr.details }, regErr.status);
+					return;
+				}
+				if (regErr instanceof SymlinkProjectRootError) {
+					json({
+						error: "Project root is a symlink",
+						code: "symlink_root",
+						rootPath: regErr.rootPath,
+						canonical: regErr.canonical,
+					}, 400);
+					return;
+				}
+				if (regErr instanceof PreflightFailedError) {
+					json({
+						error: regErr.message,
+						code: "preflight_failed",
+						report: regErr.report,
+					}, 400);
+					return;
+				}
+				throw regErr;
+			}
 			json(project, 201);
 		} catch (err: any) {
 			jsonError(400, err);
@@ -7869,14 +7871,7 @@ async function handleApiRoute(
 				get: (id) => projectRegistry.get(id),
 				update: (id, updates) => projectRegistry.update(id, updates as Parameters<typeof projectRegistry.update>[1]),
 				promote: (id, updates) => projectRegistry.promote(id, updates),
-				configure: () => undefined,
-				removeRegistered: (project) => projectRegistry.remove(project.id),
-				removeContext: (id) => projectContextManager.remove(id),
-				openContext: (id) => Promise.resolve(!!projectContextManager.getOrCreate(id)),
-				suspendServices: (id) => worktreeServices.suspendProject(id),
-				stopServices: (id) => worktreeServices.stopProject(id),
-				reconcileServices: (id) => worktreeServices.reconcileProject(id),
-			});
+				configure: async (promoted) => {
 			// A provisional project deliberately has no run until its proposal
 			// configuration is complete. The acceptance client writes that config
 			// before this request; retain a defensive default for direct API users
@@ -7922,6 +7917,14 @@ async function handleApiRoute(
 					}
 				}
 			} catch { /* best-effort — leave base_ref blank */ }
+				},
+				removeRegistered: (project) => projectRegistry.remove(project.id),
+				removeContext: (id) => projectContextManager.remove(id),
+				openContext: (id) => Promise.resolve(!!projectContextManager.getOrCreate(id)),
+				suspendServices: (id) => worktreeServices.suspendProject(id),
+				stopServices: (id) => worktreeServices.stopProject(id),
+				reconcileServices: (id) => worktreeServices.reconcileProject(id),
+			});
 			json(promoted);
 		} catch (err: any) {
 			if (writeSpecialProjectMutationError(err)) return;
@@ -10680,6 +10683,10 @@ async function handleApiRoute(
 				update: (goalId, updates) => { targetGoalManager.updateGoal(goalId, updates); },
 				initGates: (goalId, gateIds) => { targetCtx.gateStore.initGatesForGoal(goalId, gateIds); },
 				flush: () => Promise.all([targetGoalManager.getGoalStore().flush(), targetCtx.gateStore.flush()]).then(() => undefined),
+				onAfterCreateError: (error, createdGoal) => {
+					console.error("[goal] Post-create lifecycle scheduling failed:", error);
+					broadcastToAll({ type: "goal_setup_error", goalId: createdGoal.id, error: String(error) });
+				},
 				afterCreate: (createdGoal) => {
 					// Worktree setup is intentionally post-publication and non-blocking.
 					if (createdGoal.autoStartTeam && parentGoalId) {

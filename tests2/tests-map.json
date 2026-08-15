@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/canonical-mutations.test.ts",
+      "reason": "Canonical goal/project mutation replay, metadata ownership, rollback, and lifecycle coverage.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/extension-grant-provenance.test.ts",
       "reason": "Fail-closed operator provenance coverage for checkout-supplied extension grants.",
       "execution": {

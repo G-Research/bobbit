@@ -698,6 +698,11 @@ export class ProjectRegistry {
     let changed = false;
     this.projects.clear();
     for (const p of arr) {
+      // Operation keys are gateway-owned durable identity, never free-form
+      // project metadata. Invalid/migrated values cannot become replay keys.
+      if (typeof p?.canonicalMutationKey !== "string" || !/^[A-Za-z0-9_.:-]{1,256}$/.test(p.canonicalMutationKey)) {
+        if (p?.canonicalMutationKey !== undefined) { delete p.canonicalMutationKey; changed = true; }
+      }
       // A registry is gateway-owned, but malformed/migrated binding rows still
       // fail closed rather than becoming a source of authority.
       if (Array.isArray(p?.extensionGrantBindings)) {
@@ -1426,8 +1431,10 @@ export class ProjectRegistry {
   setCanonicalMutationKey(id: string, key: string | undefined): void {
     const project = this.projects.get(id);
     if (!project) throw new Error(`Project not found: ${id}`);
-    if (key) project.canonicalMutationKey = key;
-    else delete project.canonicalMutationKey;
+    if (key) {
+      if (!/^[A-Za-z0-9_.:-]{1,256}$/.test(key)) throw new Error("Invalid canonical mutation key");
+      project.canonicalMutationKey = key;
+    } else delete project.canonicalMutationKey;
     this.projects.set(id, project);
     this.save();
   }

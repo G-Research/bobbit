@@ -16,9 +16,16 @@ import { ToolManager, __resetToolScanCache } from "../agent/tool-manager.js";
 /** Durable, server-owned idempotency marker. Callers must never take this from
  * proposal metadata or another user controlled field. */
 export const CANONICAL_MUTATION_KEY = "bobbit.canonicalMutationKey";
+const CANONICAL_APPLICATION_KEY = /^[A-Za-z0-9_.:-]{1,256}$/;
+
+function assertCanonicalApplicationKey(value: string | undefined): void {
+	if (value !== undefined && !CANONICAL_APPLICATION_KEY.test(value)) {
+		throw new CanonicalMutationError(400, "Invalid canonical application key");
+	}
+}
 
 export class CanonicalMutationError extends Error {
-	constructor(public readonly status: 400 | 404 | 409 | 422, message: string, public readonly code?: string) {
+	constructor(public readonly status: 400 | 404 | 409 | 422, message: string, public readonly code?: string, public readonly details?: unknown) {
 		super(message);
 	}
 }
@@ -298,8 +305,10 @@ export async function createCanonicalGoal<T extends { id: string; workflow?: { g
 		initGates(goalId: string, gateIds: string[]): void;
 		flush(): Promise<void>;
 		afterCreate(goal: T): void | Promise<void>;
+		onAfterCreateError?(error: unknown, goal: T): void;
 	},
 ): Promise<{ goal: T; replayed: boolean }> {
+	assertCanonicalApplicationKey(input.applicationKey);
 	if (input.applicationKey) {
 		const existing = deps.findByApplicationKey(input.applicationKey);
 		if (existing) return { goal: existing, replayed: true };
@@ -329,7 +338,12 @@ export async function createCanonicalGoal<T extends { id: string; workflow?: { g
 	// The HTTP route publishes the creation response before its historical
 	// fire-and-forget setup/start work. Deferring retains that observable order
 	// while proposal callers still share the exact same lifecycle hook.
-	queueMicrotask(() => { void deps.afterCreate(goal); });
+	queueMicrotask(() => {
+		Promise.resolve().then(() => deps.afterCreate(goal)).catch(error => {
+			// Lifecycle scheduling must never surface as an unhandled microtask.
+			deps.onAfterCreateError?.(error, goal);
+		});
+	});
 	return { goal, replayed: false };
 }
 
@@ -357,6 +371,8 @@ export async function mutateCanonicalProject<T extends { id: string; rootPath: s
 		update(id: string, updates: Record<string, unknown>): T;
 		promote(id: string, updates: { name?: string }): T;
 		configure(project: T): Promise<void> | void;
+		/** Clear transient context/config state when registration config rejects. */
+		rollbackRegistration?(project: T): Promise<void> | void;
 		removeRegistered(project: T): void;
 		removeContext(projectId: string): Promise<void>;
 		openContext(projectId: string): Promise<boolean>;
@@ -365,6 +381,7 @@ export async function mutateCanonicalProject<T extends { id: string; rootPath: s
 		reconcileServices(projectId: string): Promise<void>;
 	},
 ): Promise<{ project: T; replayed: boolean }> {
+	assertCanonicalApplicationKey(input.applicationKey);
 	if (input.mode === "register") {
 		if (input.applicationKey) {
 			const existing = deps.findByApplicationKey(input.applicationKey);
@@ -376,7 +393,8 @@ export async function mutateCanonicalProject<T extends { id: string; rootPath: s
 			return { project, replayed: false };
 		} catch (error) {
 			// A rejected initial config must never leave a half-registered project.
-			deps.removeRegistered(project);
+			try { await deps.rollbackRegistration?.(project); } catch { /* original validation error wins */ }
+			try { deps.removeRegistered(project); } catch { /* original validation error wins */ }
 			throw error;
 		}
 	}
