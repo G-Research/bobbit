@@ -16009,6 +16009,7 @@ async function handleApiRoute(
 		if (!imagePath) { json({ error: "Missing path parameter" }, 400); return; }
 		const activeReads = activeMarkdownImageReads.get(id) ?? 0;
 		if (activeReads >= MAX_CONCURRENT_MARKDOWN_IMAGE_READS_PER_SESSION) {
+			res.setHeader("Retry-After", "1");
 			json({ error: "Too many concurrent image requests" }, 429);
 			return;
 		}

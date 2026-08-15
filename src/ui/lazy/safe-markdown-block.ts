@@ -258,6 +258,50 @@ function escapeHtml(value: string): string {
 		.replace(/"/g, "&quot;");
 }
 
+type MarkdownImageFetch = (route: string, init: RequestInit) => Promise<Response>;
+type MarkdownImageDelay = (milliseconds: number, signal: AbortSignal) => Promise<void>;
+
+function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void> {
+	return new Promise((resolve, reject) => {
+		if (signal.aborted) {
+			reject(new DOMException("Aborted", "AbortError"));
+			return;
+		}
+		const timer = setTimeout(done, milliseconds);
+		function done() {
+			signal.removeEventListener("abort", aborted);
+			resolve();
+		}
+		function aborted() {
+			clearTimeout(timer);
+			signal.removeEventListener("abort", aborted);
+			reject(new DOMException("Aborted", "AbortError"));
+		}
+		signal.addEventListener("abort", aborted, { once: true });
+	});
+}
+
+/** Retry transient per-session concurrency responses until capacity is free or
+ * the image element disconnects. A 429 must never become a permanent broken
+ * image merely because several visible Markdown images loaded together. */
+export async function fetchSessionMarkdownImageResponse(
+	route: string,
+	signal: AbortSignal,
+	fetchImpl: MarkdownImageFetch = gatewayFetch,
+	delay: MarkdownImageDelay = abortableDelay,
+): Promise<Response> {
+	for (;;) {
+		const response = await fetchImpl(route, { signal });
+		if (response.status !== 429) return response;
+		void response.body?.cancel().catch(() => {});
+		const retryAfterSeconds = Number(response.headers.get("retry-after"));
+		const retryMilliseconds = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+			? Math.min(5_000, Math.max(100, retryAfterSeconds * 1_000))
+			: 500;
+		await delay(retryMilliseconds, signal);
+	}
+}
+
 class SessionMarkdownImage extends LitElement {
 	static properties = {
 		sessionId: { type: String, attribute: "session-id" },
@@ -338,9 +382,9 @@ class SessionMarkdownImage extends LitElement {
 		this._error = false;
 		if (!this.sessionId || !this.imagePath) return;
 		try {
-			const response = await gatewayFetch(
+			const response = await fetchSessionMarkdownImageResponse(
 				`/api/sessions/${encodeURIComponent(this.sessionId)}/markdown-image?path=${encodeURIComponent(this.imagePath)}`,
-				{ signal: this._abort.signal },
+				this._abort.signal,
 			);
 			if (!response.ok) throw new Error(`Image request failed (${response.status})`);
 			const contentType = response.headers.get("content-type")?.split(";", 1)[0].toLowerCase() ?? "";
