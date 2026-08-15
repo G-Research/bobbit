@@ -116,8 +116,7 @@ test("re-signalling preserves a cause-labelled cancelled audit instead of fabric
 			name: "Unfinished follow-up",
 			status: "cancelled",
 			passed: false,
-			cancellationCause: "superseded",
-			cancelledAt: expect.any(Number),
+			cancellation: { cause: "superseded", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
 		},
 	]);
 	expect(gateStore.getGate(GOAL_ID, GATE_ID)!.status,

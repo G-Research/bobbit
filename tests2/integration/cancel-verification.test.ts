@@ -43,7 +43,12 @@ type SlowGateState = {
 		verification: {
 			status: string;
 			cancellation?: { cause: string; requestedAt: number; finalizedAt?: number };
-			steps: Array<{ name: string; status?: string; output?: string; cancellationCause?: string; cancelledAt?: number }>;
+			steps: Array<{
+				name: string;
+				status?: string;
+				output?: string;
+				cancellation?: { cause: string; requestedAt: number; finalizedAt?: number };
+			}>;
 		};
 	}>;
 };
@@ -457,7 +462,11 @@ test.describe("Cancel Verification API", () => {
 			expect(gate.signals.at(-1)?.verification, "MANUAL_CANCEL_MUST_BE_DURABLE_AND_NEVER_A_PRODUCT_FAILURE").toMatchObject({
 				status: "cancelled",
 				cancellation: { cause: "manual", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
-				steps: [expect.objectContaining({ name: "Slow check", status: "cancelled", cancellationCause: "manual", cancelledAt: expect.any(Number) })],
+				steps: [expect.objectContaining({
+					name: "Slow check",
+					status: "cancelled",
+					cancellation: { cause: "manual", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
+				})],
 			});
 		} finally {
 			await cleanupSlowWorkflowGoal(setup);
@@ -652,7 +661,11 @@ test.describe("Cancel Verification API", () => {
 				cause: "manual", requestedAt: expect.any(Number), finalizedAt: expect.any(Number),
 			});
 			expect(cancelledSignals[0]?.verification.steps, "EXACT_CLEANUP_MUST_KEEP_REAL_WORKFLOW_ROWS").toEqual([
-				expect.objectContaining({ name: "Slow check", status: "cancelled", cancellationCause: "manual", cancelledAt: expect.any(Number) }),
+				expect.objectContaining({
+					name: "Slow check",
+					status: "cancelled",
+					cancellation: { cause: "manual", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
+				}),
 			]);
 			expect(finalized.status, "EXACT_CLEANUP_MUST_NOT_MANUFACTURE_A_FAILED_GATE").toBe("pending");
 			expect(conn.messages.slice(eventCursor).filter((event: any) =>
@@ -735,7 +748,11 @@ test.describe("Cancel Verification API", () => {
 				cancellation: { cause: "manual", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
 				steps: [
 					{ name: "Completed prerequisite", status: "passed", output: "completed output survives restart cancellation" },
-					{ name: "Exact cleanup", status: "cancelled", cancellationCause: "manual", cancelledAt: expect.any(Number) },
+					{
+						name: "Exact cleanup",
+						status: "cancelled",
+						cancellation: { cause: "manual", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
+					},
 				],
 			});
 			expect(firstState.completionEvents, "RESTART_CANCEL_FIRST_RESUME_MUST_EMIT_ONE_COMPLETION").toEqual([

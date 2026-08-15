@@ -97,8 +97,7 @@ test.each(CAUSES)("%s is durable, typed, and never becomes a failed gate", async
 		steps: [expect.objectContaining({
 			name: "Running sign-off",
 			status: "cancelled",
-			cancellationCause: cause,
-			cancelledAt: expect.any(Number),
+			cancellation: { cause, requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
 		})],
 	});
 	expect(signoffCancelled(), `CANCELLATION_CAUSE_${cause}: cancellation must drain the live human-signoff resolver before final publication`).toBe(true);
@@ -180,7 +179,11 @@ test("restart preserves an already completed output and the persisted cause unti
 		cancellation: { cause: "goal-pause", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
 		steps: [
 			{ name: "Completed evidence", status: "passed", output: "retain this completed output" },
-			{ name: "Interrupted sign-off", status: "cancelled", cancellationCause: "goal-pause", cancelledAt: expect.any(Number) },
+			{
+				name: "Interrupted sign-off",
+				status: "cancelled",
+				cancellation: { cause: "goal-pause", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
+			},
 		],
 	});
 	expect(gateStore.getGate(GOAL_ID, GATE_ID)!.status).toBe("pending");
