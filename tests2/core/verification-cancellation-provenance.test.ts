@@ -197,6 +197,8 @@ function makeExactResourceFixture(signalId: string, cause: CancellationCause | "
 test("failed supersession fence restores state without interrupting verifier waiters, signoffs, or cleanup", () => {
 	const { harness, signal, signoffCancelled } = makeFixture("terminal-fence-persistence-failure");
 	const active = (harness as any).activeVerifications.get(signal.id) as ActiveVerification;
+	const steps = active.steps;
+	const runningStep = active.steps[0]!;
 	const waiter = vi.fn();
 	const cleanup = vi.spyOn(harness as any, "_startCancelledVerificationCleanup");
 	(harness as any).verifierDispatchCancellationWaiters.set(signal.id, new Set([waiter]));
@@ -211,6 +213,8 @@ test("failed supersession fence restores state without interrupting verifier wai
 	expect(active).toMatchObject({ overallStatus: "running" });
 	expect(active.cancelled).toBeUndefined();
 	expect(active.cancellation).toBeUndefined();
+	expect(active.steps, "FAILED_SUPERSESSION_FENCE_MUST_RETAIN_THE_LIVE_STEP_ARRAY").toBe(steps);
+	expect(active.steps[0], "FAILED_SUPERSESSION_FENCE_MUST_RETAIN_IN_FLIGHT_STEP_IDENTITY").toBe(runningStep);
 	expect(active.steps[0]?.cancellation, "FAILED_SUPERSESSION_FENCE_MUST_RESTORE_STEP_INTERRUPTION_INTENT").toBeUndefined();
 	expect(waiter, "FAILED_SUPERSESSION_FENCE_MUST_NOT_RESOLVE_VERIFIER_ADMISSION_WAITERS").not.toHaveBeenCalled();
 	expect(signoffCancelled(), "FAILED_SUPERSESSION_FENCE_MUST_NOT_DRAIN_HUMAN_SIGNOFFS").toBe(false);
@@ -286,6 +290,110 @@ test("release-owner finalization does not self-join and concurrent cancellation 
 	expect((fixture.harness as any)._cancelledCleanupPromises.size,
 		"CONCURRENT_CANCEL_CALLERS_MUST_RELEASE_THEIR_CLEANUP_OWNER").toBe(0);
 	expect(fixture.harness.activeVerifications.has(fixture.active.signalId)).toBe(false);
+});
+
+test("direct cancellation finalization owns resource settlement while a release owner arrives later", async () => {
+	const fixture = makeExactResourceFixture("direct-finalizer-owns-settlement", "manual");
+	let releaseSidecar!: () => void;
+	(fixture.harness as any).sessionManager.getSandboxManager().get().removeVerificationSidecar = async () => {
+		fixture.order.push("sidecar:held");
+		await new Promise<void>(resolve => { releaseSidecar = resolve; });
+	};
+	fixture.checkoutManager.release = async (signalId, projectId) => {
+		fixture.order.push("checkout:once");
+		await FakePinnedCheckoutManager.prototype.release.call(fixture.checkoutManager, signalId, projectId);
+	};
+	const strict = vi.spyOn(fixture.gateStore, "updateSignalVerificationStrict").mockRejectedValueOnce(new Error("strict signal rejects once"));
+	const finalizer = vi.spyOn(fixture.harness, "_finalizeCancelledVerification");
+
+	const directFinalizer = fixture.harness._finalizeCancelledVerification(fixture.active);
+	for (let turn = 0; turn < 4 && !releaseSidecar; turn++) await new Promise<void>(resolve => setImmediate(resolve));
+	const releaseOwner = fixture.harness._releaseTerminalVerificationResources(fixture.active);
+	await expect(releaseOwner).resolves.toBe(false);
+	expect(fixture.order, "COMPETING_RELEASE_MUST_NOT_REMOVE_THE_SIDECAR_TWICE").toEqual(["sidecar:held"]);
+	expect(fixture.harness.activeVerifications.get(fixture.active.signalId),
+		"COMPETING_RELEASE_MUST_RETAIN_THE_FINALIZER_OWNER_UNTIL_PUBLICATION").toBe(fixture.active);
+
+	releaseSidecar();
+	await expect(directFinalizer).rejects.toThrow(/strict signal rejects once/i);
+	expect(fixture.order, "DIRECT_FINALIZER_MUST_SETTLE_EACH_RESOURCE_EXACTLY_ONCE").toEqual(["sidecar:held", "checkout:once"]);
+	expect(fixture.harness.activeVerifications.get(fixture.active.signalId),
+		"STRICT_SIGNAL_REJECTION_MUST_NOT_EVICT_THE_DURABLE_RETRY_OWNER").toBe(fixture.active);
+	expect((fixture.harness as any)._terminalCleanupRetryTimers.has(fixture.active.signalId),
+		"COMPETING_RELEASE_MUST_LEAVE_A_RETRY_OWNER_AFTER_DIRECT_FINALIZER_REJECTION").toBe(true);
+
+	const retryStart = finalizer.mock.results.length;
+	fixture.clock.advance(1_000);
+	await Promise.all(finalizer.mock.results.slice(retryStart).map(result => result.value));
+	expect(strict).toHaveBeenCalledTimes(2);
+	expect(fixture.order).toEqual(["sidecar:held", "checkout:once"]);
+	expect(fixture.events.filter(event => event.type === "gate_verification_complete")).toHaveLength(1);
+	expect(fixture.harness.activeVerifications.has(fixture.active.signalId)).toBe(false);
+});
+
+test("terminal cleanup retry catches strict publication rejection and schedules its next owner", async () => {
+	const fixture = makeExactResourceFixture("terminal-retry-strict-rejection", "manual");
+	fixture.checkoutManager.release = async (signalId, projectId) => {
+		fixture.order.push("checkout:success");
+		await FakePinnedCheckoutManager.prototype.release.call(fixture.checkoutManager, signalId, projectId);
+	};
+	const strict = vi.spyOn(fixture.gateStore, "updateSignalVerificationStrict").mockRejectedValueOnce(new Error("retry strict signal rejects once"));
+	const finalizer = vi.spyOn(fixture.harness, "_finalizeCancelledVerification");
+	const unhandled: unknown[] = [];
+	const onUnhandled = (reason: unknown) => unhandled.push(reason);
+	process.on("unhandledRejection", onUnhandled);
+	try {
+		await fixture.harness._finalizeCancelledVerification(fixture.active);
+		expect(fixture.order).toEqual(["sidecar:1"]);
+
+		const retryStart = finalizer.mock.results.length;
+		fixture.clock.advance(1_000);
+		await Promise.all(finalizer.mock.results.slice(retryStart).map(result => result.value.catch(() => {})));
+		await new Promise<void>(resolve => setImmediate(resolve));
+		expect(strict).toHaveBeenCalledTimes(1);
+		expect(unhandled, "DETACHED_TERMINAL_RETRY_MUST_NOT_LEAK_A_STRICT_WRITE_REJECTION").toEqual([]);
+		expect((fixture.harness as any)._cancelledCleanupRetryTimers.has(fixture.active.signalId),
+			"STRICT_PUBLICATION_REJECTION_MUST_SCHEDULE_A_FOLLOW_UP_CANCELLATION_OWNER").toBe(true);
+
+		fixture.clock.advance(1_000);
+		await Promise.all([...(fixture.harness as any)._cancelledCleanupPromises.values()]);
+		expect(strict).toHaveBeenCalledTimes(2);
+		expect(fixture.events.filter(event => event.type === "gate_verification_complete")).toHaveLength(1);
+		expect(fixture.harness.activeVerifications.has(fixture.active.signalId)).toBe(false);
+	} finally {
+		process.off("unhandledRejection", onUnhandled);
+	}
+});
+
+test("failed stale publication fence keeps step identity and retries durable supersession", async () => {
+	const fixture = makeExactResourceFixture("stale-fence-retry", "superseded");
+	fixture.gateStore.recordSignal({
+		id: "stale-fence-retry-newer", goalId: GOAL_ID, gateId: GATE_ID, sessionId: "newer-owner", timestamp: Date.now(),
+		commitSha: "0123456789abcdef0123456789abcdef01234567", content: "newer generation", contentVersion: 1,
+		verification: { status: "running", steps: [] },
+	});
+	fixture.active.overallStatus = "running";
+	delete fixture.active.cancelled;
+	const steps = fixture.active.steps;
+	const step = fixture.active.steps[0]!;
+	(fixture.harness as any).sessionManager.getSandboxManager().get().removeVerificationSidecar = async () => {};
+	fixture.checkoutManager.release = async (signalId, projectId) => {
+		await FakePinnedCheckoutManager.prototype.release.call(fixture.checkoutManager, signalId, projectId);
+	};
+	const persist = vi.spyOn(fixture.harness, "_persistActive").mockReturnValueOnce(false);
+
+	expect((fixture.harness as any)._cancellationOwnsTerminalPublication(fixture.active)).toBe(true);
+	expect(fixture.active.steps).toBe(steps);
+	expect(fixture.active.steps[0]).toBe(step);
+	expect(fixture.active.cancelled).toBeUndefined();
+	expect((fixture.harness as any)._failedCancellationFenceRetryTimers.has(fixture.active.signalId)).toBe(true);
+
+	fixture.clock.advance(1_000);
+	await new Promise<void>(resolve => setImmediate(resolve));
+	await Promise.all([...(fixture.harness as any)._cancelledCleanupPromises.values()]);
+	expect(persist.mock.calls.length, "STALE_FENCE_RETRY_MUST_RETRY_DURABLE_PERSISTENCE").toBeGreaterThanOrEqual(2);
+	expect(fixture.harness.activeVerifications.has(fixture.active.signalId),
+		"STALE_FENCE_RETRY_MUST_EVENTUALLY_TRANSFER_TO_CANCELLED_CLEANUP").toBe(false);
 });
 
 test("stale terminal release cannot evict a replacement active object or its retry timer", async () => {

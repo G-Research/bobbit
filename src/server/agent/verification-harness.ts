@@ -4326,7 +4326,7 @@ export class VerificationHarness {
 	/** Settle exact sidecar and checkout ownership without publishing a verdict. */
 	private async _settleTerminalVerificationResources(active: ActiveVerification): Promise<boolean> {
 		if (this._hasPendingCommandKillCleanup(active)) return false;
-		if (this.activeVerifications.get(active.signalId) !== active) return true;
+		if (this.activeVerifications.get(active.signalId) !== active) return false;
 		// A sidecar/checkout release cannot be undone, so require its durable
 		// checkpoint to be readable before allowing terminal publication.
 		if (active.terminalResourcesSettledAt) {
@@ -4345,6 +4345,9 @@ export class VerificationHarness {
 			this._scheduleTerminalCleanupRetry(active.signalId);
 			return false;
 		}
+		// Do not release a checkout after another generation took ownership while
+		// sidecar cleanup was in flight.
+		if (this.activeVerifications.get(active.signalId) !== active) return false;
 
 		const projectId = active.projectId ?? active.pinnedCheckout?.projectId;
 		if (active.pinnedCheckout) {
@@ -4360,6 +4363,7 @@ export class VerificationHarness {
 				this._scheduleTerminalCleanupRetry(active.signalId);
 				return false;
 			}
+			if (this.activeVerifications.get(active.signalId) !== active) return false;
 		}
 		delete active.cleanupPending;
 		active.terminalResourcesSettledAt = Date.now();
@@ -4372,11 +4376,16 @@ export class VerificationHarness {
 
 	private async _releaseTerminalVerificationResourcesOnce(active: ActiveVerification): Promise<boolean> {
 		if (active.cancelled && !active.terminalVerdictPublished) {
+			const finalizationWasInFlight = !!active.cancellationFinalizing;
 			await this._finalizeCancelledVerification(active);
-			// Finalization may have been invoked by this release owner. It deliberately
-			// does not join our promise (that would self-deadlock); now that it has
-			// published, fall through so this exact owner settles and removes the row.
 			if (this.activeVerifications.get(active.signalId) !== active) return true;
+			// A direct cancellation finalizer owns settlement/publication while this
+			// release owner is waiting. Never run a second sidecar/check-out release
+			// before that owner publishes; its retry will return here after the marker.
+			if (finalizationWasInFlight && !active.terminalVerdictPublished) {
+				this._scheduleTerminalCleanupRetry(active.signalId);
+				return false;
+			}
 		}
 		if (!await this._settleTerminalVerificationResources(active)) return false;
 		// An asynchronous sidecar/checkout release may overlap a replacement or a
@@ -4405,12 +4414,26 @@ export class VerificationHarness {
 			// replacement/recovered object sharing an ID must schedule and own its
 			// own cleanup rather than inheriting this stale owner's terminal actions.
 			if (!pending || pending !== active || this._hasPendingCommandKillCleanup(pending)) return;
-			if (pending.cancelled && !pending.terminalVerdictPublished) {
-				await this._finalizeCancelledVerification(pending);
-				return;
+			try {
+				if (pending.cancelled && !pending.terminalVerdictPublished) {
+					await this._finalizeCancelledVerification(pending);
+					return;
+				}
+				if (pending.overallStatus === "running") return;
+				await this._releaseTerminalVerificationResources(pending);
+			} catch (err) {
+				console.warn(`[verification] Terminal cleanup retry for ${signalId} did not settle: ${(err as Error).message}`);
+				// Strict signal/gate writes can fail after resources settle. Keep this
+				// exact owner durable and retry the appropriate phase without leaking a
+				// detached timer rejection.
+				if (this.activeVerifications.get(signalId) !== pending) return;
+				this._persistActive();
+				if (pending.cancelled && !pending.terminalVerdictPublished) {
+					this._scheduleCancelledVerificationCleanupRetry(signalId);
+				} else if (pending.overallStatus !== "running") {
+					this._scheduleTerminalCleanupRetry(signalId);
+				}
 			}
-			if (pending.overallStatus === "running") return;
-			await this._releaseTerminalVerificationResources(pending);
 		}, delayMs);
 		timer.unref?.();
 		this._terminalCleanupRetryTimers.set(signalId, timer as NodeJS.Timeout);
@@ -4883,8 +4906,11 @@ export class VerificationHarness {
 	private _terminalCleanupRetryTimers = new Map<string, NodeJS.Timeout>();
 	/** One strict sidecar/check-out release attempt per terminal signal. */
 	private _terminalCleanupPromises = new Map<string, Promise<boolean>>();
-	/** Ephemeral only: prevents a catch-path retry after an uncommitted stale fence. */
+	/** Ephemeral fence while a stale-generation cancellation retry owns persistence. */
 	private _failedCancellationFences = new WeakSet<ActiveVerification>();
+	/** One bounded-backoff persistence retry owner for a stale-generation fence. */
+	private _failedCancellationFenceRetryTimers = new Map<string, NodeJS.Timeout>();
+	private _failedCancellationFenceRetryAttempts = new Map<string, number>();
 
 	/** Whether this exact signal is still the gate's current generation. */
 	private _isCurrentSignal(goalId: string, gateId: string, signalId: string): boolean {
@@ -4897,6 +4923,73 @@ export class VerificationHarness {
 	/** Whether this exact signal is still the gate's current generation. */
 	private _isCurrentGateSignal(active: ActiveVerification): boolean {
 		return this._isCurrentSignal(active.goalId, active.gateId, active.signalId);
+	}
+
+	/** Restore a failed cancellation fence without replacing in-flight step objects. */
+	private _restoreActiveVerification(active: ActiveVerification, snapshot: ActiveVerification): void {
+		const steps = active.steps;
+		for (const key of Object.keys(active)) {
+			if (key !== "steps" && !Object.prototype.hasOwnProperty.call(snapshot, key)) delete (active as any)[key];
+		}
+		for (const [key, value] of Object.entries(snapshot)) {
+			if (key !== "steps") (active as any)[key] = value;
+		}
+		for (let index = 0; index < snapshot.steps.length; index++) {
+			const previous = steps[index];
+			const restored = snapshot.steps[index]!;
+			if (!previous) {
+				steps[index] = restored;
+				continue;
+			}
+			for (const key of Object.keys(previous)) {
+				if (!Object.prototype.hasOwnProperty.call(restored, key)) delete (previous as any)[key];
+			}
+			Object.assign(previous, restored);
+		}
+		steps.length = snapshot.steps.length;
+		active.steps = steps;
+	}
+
+	/** Retry a stale fence that lost only its synchronous persistence race. */
+	private _retryFailedCancellationFence(active: ActiveVerification): void {
+		if (this.activeVerifications.get(active.signalId) !== active || active.cancelled || this._isCurrentGateSignal(active)) {
+			this._failedCancellationFences.delete(active);
+			this._failedCancellationFenceRetryAttempts.delete(active.signalId);
+			return;
+		}
+		const snapshot = structuredClone(active);
+		const wasFenced = this.cancelledVerificationSignals.has(active.signalId);
+		this._markVerificationCancelled(active, "superseded");
+		if (!this._persistActive()) {
+			this._restoreActiveVerification(active, snapshot);
+			if (wasFenced) this.cancelledVerificationSignals.add(active.signalId);
+			else this.cancelledVerificationSignals.delete(active.signalId);
+			this._failedCancellationFences.add(active);
+			this._scheduleFailedCancellationFenceRetry(active);
+			return;
+		}
+		this._failedCancellationFences.delete(active);
+		this._failedCancellationFenceRetryAttempts.delete(active.signalId);
+		this._notifyCancellationFenceCommitted(active);
+		void this._startCancelledVerificationCleanup(active);
+	}
+
+	private _scheduleFailedCancellationFenceRetry(active: ActiveVerification): void {
+		if (this._failedCancellationFenceRetryTimers.has(active.signalId)) return;
+		const attempts = (this._failedCancellationFenceRetryAttempts.get(active.signalId) ?? 0) + 1;
+		this._failedCancellationFenceRetryAttempts.set(active.signalId, attempts);
+		const delayMs = Math.min(30_000, 1_000 * 2 ** Math.max(0, attempts - 1));
+		const timer = this.clock.setTimeout(() => {
+			this._failedCancellationFenceRetryTimers.delete(active.signalId);
+			try {
+				this._retryFailedCancellationFence(active);
+			} catch (err) {
+				console.warn(`[verification] Stale cancellation fence retry for ${active.signalId} did not settle: ${(err as Error).message}`);
+				if (this.activeVerifications.get(active.signalId) === active) this._scheduleFailedCancellationFenceRetry(active);
+			}
+		}, delayMs);
+		timer.unref?.();
+		this._failedCancellationFenceRetryTimers.set(active.signalId, timer as NodeJS.Timeout);
 	}
 
 	/**
@@ -4918,13 +5011,13 @@ export class VerificationHarness {
 			const wasFenced = this.cancelledVerificationSignals.has(active.signalId);
 			this._markVerificationCancelled(active, "superseded");
 			if (!this._persistActive()) {
-				for (const key of Object.keys(active)) delete (active as any)[key];
-				Object.assign(active, snapshot);
+				this._restoreActiveVerification(active, snapshot);
 				if (wasFenced) this.cancelledVerificationSignals.add(active.signalId);
 				else this.cancelledVerificationSignals.delete(active.signalId);
-				// The catch path must not retry this failed fence and accidentally
-				// interrupt reviewers after the caller has observed the failure.
+				// A stale generation may not publish a product verdict while its fence is
+				// retrying, but a transient write failure must not strand live work forever.
 				this._failedCancellationFences.add(active);
+				this._scheduleFailedCancellationFenceRetry(active);
 				return true;
 			}
 			this._notifyCancellationFenceCommitted(active);
@@ -5115,6 +5208,12 @@ export class VerificationHarness {
 				this._persistActive();
 				return;
 			}
+			// Settlement awaits sidecar and checkout ownership. A replacement may have
+			// won while either was settling, so this finalizer may no longer publish.
+			if (this.activeVerifications.get(active.signalId) !== active) {
+				delete active.cancellationFinalizing;
+				return;
+			}
 			const verification = this._cancelledVerificationResult(active);
 			// Persist the final timestamp and full audit before terminal publication.
 			if (!this._persistActive()) throw new Error(`Could not persist cancellation finalization for ${active.signalId}`);
@@ -5127,6 +5226,10 @@ export class VerificationHarness {
 				} else {
 					store.updateSignalVerification(active.signalId, verification);
 				}
+			}
+			if (this.activeVerifications.get(active.signalId) !== active) {
+				delete active.cancellationFinalizing;
+				return;
 			}
 			// Cancellation leaves the current, non-terminal generation eligible for a
 			// deterministic explicit re-signal. Historical superseded signals must not
@@ -5156,6 +5259,10 @@ export class VerificationHarness {
 					// Lightweight legacy unit seams do not expose strict persistence.
 					store!.updateGateStatus(active.goalId, active.gateId, "pending");
 				}
+			}
+			if (this.activeVerifications.get(active.signalId) !== active) {
+				delete active.cancellationFinalizing;
+				return;
 			}
 
 			// This marker means the whole durable product outcome is committed: the
@@ -5194,7 +5301,12 @@ export class VerificationHarness {
 			}
 		} catch (error) {
 			delete active.cancellationFinalizing;
-			this._persistActive();
+			// A competing release must never evict the only retry owner after strict
+			// publication rejects. Do not overwrite a real replacement generation.
+			if (!this.activeVerifications.has(active.signalId)) {
+				this.activeVerifications.set(active.signalId, active);
+			}
+			if (this.activeVerifications.get(active.signalId) === active) this._persistActive();
 			throw error;
 		}
 	}
@@ -5537,8 +5649,7 @@ export class VerificationHarness {
 		for (const active of cancellations) this._markVerificationCancelled(active, cause);
 		if (cancellations.length > 0 && !this._persistActive()) {
 			for (const snapshot of before) {
-				for (const key of Object.keys(snapshot.active)) delete (snapshot.active as any)[key];
-				Object.assign(snapshot.active, snapshot.value);
+				this._restoreActiveVerification(snapshot.active, snapshot.value);
 				if (snapshot.wasFenced) this.cancelledVerificationSignals.add(snapshot.active.signalId);
 				else this.cancelledVerificationSignals.delete(snapshot.active.signalId);
 			}
@@ -5667,11 +5778,9 @@ export class VerificationHarness {
 		const cancelledSignalsBefore = new Set(this.cancelledVerificationSignals);
 		for (const active of cancellations) this._markVerificationCancelled(active, cause);
 		if (cancellations.length > 0 && !this._persistActive()) {
-			for (const snapshot of before) {
-				for (const key of Object.keys(snapshot.active)) delete (snapshot.active as any)[key];
-				Object.assign(snapshot.active, snapshot.value);
-			}
-			this.cancelledVerificationSignals = cancelledSignalsBefore;
+			for (const snapshot of before) this._restoreActiveVerification(snapshot.active, snapshot.value);
+			this.cancelledVerificationSignals.clear();
+			for (const signalId of cancelledSignalsBefore) this.cancelledVerificationSignals.add(signalId);
 			throw new Error(`Could not persist cancellation fence for goal ${goalId}`);
 		}
 		for (const active of terminalResourceCleanups) void this._releaseTerminalVerificationResources(active);
