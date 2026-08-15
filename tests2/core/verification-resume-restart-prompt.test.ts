@@ -90,7 +90,15 @@ function makeHarness() {
 	const stubGateStore = {
 		updateSignalVerification: (...args: any[]) => { gateStoreCalls.push({ kind: "updateSignalVerification", args }); },
 		updateGateStatus: (...args: any[]) => { gateStoreCalls.push({ kind: "updateGateStatus", args }); },
-		getGate: () => undefined,
+		// The persisted signal is still the current generation. Recovery may
+		// explicitly restore it to eligible pending, but must never fail it.
+		getGate: () => ({
+			status: "running",
+			signals: [{
+				id: SIGNAL_ID,
+				verification: { status: "running", steps: [{ name: "Doc review", type: "llm-review", status: "running", output: "", duration_ms: 0 }] },
+			}],
+		}),
 		getGatesForGoal: () => [],
 	} as any;
 
@@ -166,8 +174,12 @@ test("a restart-induced resume-prompt timeout is durably cancelled without a Res
 		.map(c => c.args[2]); // updateGateStatus(goalId, gateId, status)
 	assert.deepStrictEqual(
 		gateStatusCalls,
-		[],
-		`Restart recovery must not update the existing pending gate, especially not to failed. Recorded updateGateStatus values: ${JSON.stringify(gateStatusCalls)}.`,
+		["pending"],
+		`Restart recovery may restore the current eligible gate to pending, but must never publish a product failure. Recorded updateGateStatus values: ${JSON.stringify(gateStatusCalls)}.`,
+	);
+	assert.ok(
+		gateStatusCalls.every(status => status !== "failed"),
+		`Restart recovery must never mark the gate failed. Recorded updateGateStatus values: ${JSON.stringify(gateStatusCalls)}.`,
 	);
 
 	const verificationUpdate = gateStoreCalls
@@ -177,9 +189,10 @@ test("a restart-induced resume-prompt timeout is durably cancelled without a Res
 	assert.strictEqual(verificationUpdate?.status, "cancelled");
 	assert.strictEqual(verificationUpdate?.cancellation?.cause, "gateway-restart-recovery");
 	const interruptedReview = verificationUpdate?.steps?.find((step: any) => step?.name === "Doc review");
+	assert.strictEqual(interruptedReview?.name, "Doc review", "restart cancellation must preserve the real review audit row");
+	assert.strictEqual(interruptedReview?.type, "llm-review");
 	assert.strictEqual(interruptedReview?.status, "cancelled");
 	assert.strictEqual(interruptedReview?.cancellation?.cause, "gateway-restart-recovery");
-	assert.match(interruptedReview?.output ?? "", /timed out|restart|re-signal/i);
 
 	// No "Resume Error" step may be recorded — that is the symptom of the
 	// uncaught-timeout-as-hard-failure bug.

@@ -172,8 +172,8 @@ describe("pinned gate verification lifecycle (real Git and commands)", () => {
 		const { harness, gateStore } = harnessFixture({ state: f.state, goal: goal("goal", f.source, workflow), manager });
 		manager.release = async (...args: Parameters<typeof release>) => {
 			const step = gateStore.getGate("goal", "verify")?.signals[0]?.verification.steps[0];
-			releaseSawTerminalCommand = step?.status !== "running";
-			assert.ok(releaseSawTerminalCommand, "the command step must be terminal/reaped before its pinned lease releases");
+			releaseSawTerminalCommand = step?.status === "cancelled";
+			assert.ok(releaseSawTerminalCommand, "the cancelled command step must be terminal/reaped before its pinned lease releases");
 			assert.ok(Number.isSafeInteger(heldPid) && heldPid > 0, "held command identity must be captured before a liveness check");
 			assert.throws(() => process.kill(heldPid, 0), (error: NodeJS.ErrnoException) => error.code === "ESRCH", "the held command process must be reaped before its pinned lease releases");
 			released = true;
@@ -187,7 +187,15 @@ describe("pinned gate verification lifecycle (real Git and commands)", () => {
 			assert.ok(Number.isSafeInteger(heldPid) && heldPid > 0, "fixture must capture the held command process identity");
 			await harness.cancelStaleVerifications("goal", "verify");
 			await verification;
-			assert.equal(gateStore.getGate("goal", "verify")!.signals[0]!.verification.status, "failed", "a killed command cannot publish a pass");
+			const storedGate = gateStore.getGate("goal", "verify")!;
+			const storedVerification = storedGate.signals[0]!.verification;
+			assert.equal(storedVerification.status, "cancelled", "a stale killed command is an orchestration cancellation, never a product verdict");
+			assert.equal(storedVerification.cancellation?.cause, "superseded", "the stale-cancellation boundary must retain its default typed cause");
+			assert.equal(storedVerification.steps[0]?.status, "cancelled", "the held command audit row must be preserved as cancelled");
+			assert.equal(storedVerification.steps[0]?.cancellation?.cause, "superseded", "the interrupted command row must retain cancellation provenance");
+			assert.notEqual(storedVerification.status, "passed", "a killed command cannot fabricate a pass");
+			assert.notEqual(storedVerification.status, "failed", "a stale cancellation cannot fabricate a product failure");
+			assert.equal(storedGate.status, "pending", "the current gate remains eligible for an explicit re-signal");
 			assert.ok(released && releaseSawTerminalCommand, "terminal cancellation releases only after command cleanup");
 			await assert.rejects(lstat(acquiredPath), /ENOENT/);
 		} finally {
