@@ -27,7 +27,7 @@ The authoritative external contract is the installed
 [SDK subagents guide](https://platform.claude.com/docs/en/agent-sdk/subagents):
 `agents` is `Record<string, AgentDefinition>`; definitions support `tools`,
 `disallowedTools`, `prompt`, `model`, `skills`, `maxTurns`, `background`,
-`effort`, and `permissionMode`; native delegation is performed through `Agent`.
+optional `effort`, and `permissionMode`; native delegation is performed through `Agent`.
 The guide also records the version compatibility hazard: current Claude Code
 emits `Agent` in tool-use blocks but can report `Task` in initialization and
 permission-denial inventories. Consequently inventory labels never bypass the
@@ -135,11 +135,11 @@ session setup, then checked against this table. The projection uses its resolved
 `promptTemplate`, expands only the existing `{{GOAL_BRANCH}}` and `{{AGENT_ID}}`
 values, and never accepts a model/prompt/tool override in the Agent request.
 
-| SDK agent type | Source Bobbit role | Model | Effort | Max turns | Native/Bobbit tools | Permissions |
-| --- | --- | --- | ---: | ---: | --- | --- |
-| `bobbit-protocol-scout` | `claude-protocol-scout` | `inherit` | `high` | 6 | `Skill`; `mcp__bobbit__read`, `mcp__bobbit__find`, `mcp__bobbit__grep` | `default`; each MCP call must also pass the per-child surface and D1 grant ceiling |
-| `bobbit-backend-parity-reviewer` | `backend-parity-reviewer` | `inherit` | `medium` | 4 | `Skill`; `mcp__bobbit__read`, `mcp__bobbit__find`, `mcp__bobbit__grep` | `default`; same ceiling |
-| `bobbit-billing-safety-auditor` | `billing-safety-auditor` | `inherit` | `medium` | 4 | `Skill`; `mcp__bobbit__read`, `mcp__bobbit__find`, `mcp__bobbit__grep` | `default`; same ceiling |
+| SDK agent type | Source Bobbit role | Model | Max turns | Native/Bobbit tools | Permissions |
+| --- | --- | --- | ---: | --- | --- |
+| `bobbit-protocol-scout` | `claude-protocol-scout` | `inherit` | 6 | `Skill`; `mcp__bobbit__read`, `mcp__bobbit__find`, `mcp__bobbit__grep` | `default`; each MCP call must also pass the per-child surface and D1 grant ceiling |
+| `bobbit-backend-parity-reviewer` | `backend-parity-reviewer` | `inherit` | 4 | `Skill`; `mcp__bobbit__read`, `mcp__bobbit__find`, `mcp__bobbit__grep` | `default`; same ceiling |
+| `bobbit-billing-safety-auditor` | `billing-safety-auditor` | `inherit` | 4 | `Skill`; `mcp__bobbit__read`, `mcp__bobbit__find`, `mcp__bobbit__grep` | `default`; same ceiling |
 
 Every definition additionally has:
 
@@ -148,7 +148,6 @@ Every definition additionally has:
   description: /* static, role-specific routing description */,
   prompt: resolvedAndExpandedRolePrompt,
   model: "inherit",
-  effort: /* table value */,
   maxTurns: /* table value */,
   background: false,
   permissionMode: "default",
@@ -164,9 +163,12 @@ Every definition additionally has:
 }
 ```
 
-The explicit `Skill` entry follows the installed declaration's backwards-
-compatible `tools` contract; the same literal `skills` list is the current
-preferred enablement surface. Re-evaluate this duplicate only during a pinned
+The fixed projections deliberately omit optional `effort`: `model: "inherit"`
+keeps child thinking governed by the active root tuple and its SDK-advertised
+capabilities, rather than sending a possibly unsupported child effort. The
+explicit `Skill` entry follows the installed declaration's backwards-compatible
+`tools` contract; the same literal `skills` list is the current preferred
+enablement surface. Re-evaluate this duplicate only during a pinned
 SDK upgrade, with a real initialization test. The definitions never include
 `bash`, edit/write, web, question, Bobbit team/task/gate/verification tools,
 managed MCP aggregates, extension-host tools, or foreign MCP servers. An
@@ -306,7 +308,7 @@ the correct surface. D2 remains the command owner.
 1. **Literal D3/D4 options (core).** Assert exactly: `tools` is
    `["Skill", "Agent"]`; `skills` equals the 15-name literal list;
    `agents` has exactly the three `bobbit-*` definitions; each definition has
-   exact `inherit` model, effort, max turns, foreground/default permissions,
+   exact `inherit` model, omitted effort, max turns, foreground/default permissions,
    literal skills, MCP subset, no memory/MCP-server/observer/initial prompt,
    no Agent/Task, and no omitted-tool inheritance. Assert `Task` plus all D1
    suppressions stay disallowed for children, root `Agent` is the sole public

@@ -18,9 +18,9 @@ const ROOT_NATIVE_DISALLOWED = [
 
 const CHILD_MCP_TOOLS = ["mcp__bobbit__read", "mcp__bobbit__find", "mcp__bobbit__grep"] as const;
 const PROJECTIONS = {
-	"bobbit-protocol-scout": { sourceRole: "claude-protocol-scout", effort: "high", maxTurns: 6 },
-	"bobbit-backend-parity-reviewer": { sourceRole: "backend-parity-reviewer", effort: "medium", maxTurns: 4 },
-	"bobbit-billing-safety-auditor": { sourceRole: "billing-safety-auditor", effort: "medium", maxTurns: 4 },
+	"bobbit-protocol-scout": { sourceRole: "claude-protocol-scout", maxTurns: 6 },
+	"bobbit-backend-parity-reviewer": { sourceRole: "backend-parity-reviewer", maxTurns: 4 },
+	"bobbit-billing-safety-auditor": { sourceRole: "billing-safety-auditor", maxTurns: 4 },
 } as const;
 
 type BuildPolicy = (input: {
@@ -100,7 +100,6 @@ describe("Claude Agent SDK D3/D4 skills and subagents", () => {
 			const definition = policy.definitions[agentType];
 			expect(definition).toMatchObject({
 				model: "inherit",
-				effort: expected.effort,
 				maxTurns: expected.maxTurns,
 				background: false,
 				permissionMode: "default",
@@ -115,6 +114,9 @@ describe("Claude Agent SDK D3/D4 skills and subagents", () => {
 			for (const childTool of CHILD_MCP_TOOLS) {
 				expect(definition.disallowedTools, `${agentType} must not shadow an approved child tool`).not.toContain(childTool);
 			}
+			// Fixed child effort is incompatible with models that do not support it;
+			// inherit the root's active thinking/capability instead.
+			expect(definition.effort, `${agentType} must not force an SDK effort level`).toBeUndefined();
 			for (const absent of ["memory", "initialPrompt", "observer", "observerMessage"]) {
 				expect(definition[absent], `${agentType} must not inherit ${absent}`).toBeUndefined();
 			}

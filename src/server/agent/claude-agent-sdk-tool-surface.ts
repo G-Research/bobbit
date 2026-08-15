@@ -208,9 +208,9 @@ function deny(message: string): PermissionResult { return { behavior: "deny", me
 function allow(input: Record<string, unknown>): PermissionResult { return { behavior: "allow", updatedInput: input }; }
 
 const APPROVED_SUBAGENTS = [
-	{ type: "bobbit-protocol-scout", role: "claude-protocol-scout", description: "Investigate the installed Claude Agent SDK protocol with bounded empirical evidence.", effort: "high", maxTurns: 6 },
-	{ type: "bobbit-backend-parity-reviewer", role: "backend-parity-reviewer", description: "Review a narrowly scoped Claude SDK and Pi runtime parity question.", effort: "medium", maxTurns: 4 },
-	{ type: "bobbit-billing-safety-auditor", role: "billing-safety-auditor", description: "Review a narrowly scoped Claude SDK subscription-safety question.", effort: "medium", maxTurns: 4 },
+	{ type: "bobbit-protocol-scout", role: "claude-protocol-scout", description: "Investigate the installed Claude Agent SDK protocol with bounded empirical evidence.", maxTurns: 6 },
+	{ type: "bobbit-backend-parity-reviewer", role: "backend-parity-reviewer", description: "Review a narrowly scoped Claude SDK and Pi runtime parity question.", maxTurns: 4 },
+	{ type: "bobbit-billing-safety-auditor", role: "billing-safety-auditor", description: "Review a narrowly scoped Claude SDK subscription-safety question.", maxTurns: 4 },
 ] as const;
 const CHILD_CANONICAL_TOOLS = ["read", "find", "grep"] as const;
 const MAX_SUBAGENT_PROMPT_BYTES = 8 * 1024;
@@ -301,7 +301,6 @@ export function buildClaudeSdkSubagentPolicy(options: ClaudeSdkSubagentPolicyOpt
 			description: approved.description,
 			prompt,
 			model: "inherit",
-			effort: approved.effort,
 			maxTurns: approved.maxTurns,
 			background: false,
 			permissionMode: "default",

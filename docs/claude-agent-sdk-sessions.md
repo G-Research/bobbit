@@ -519,15 +519,18 @@ requires review and an intentional inventory update.
 existing scoped Bobbit roles. They are query-local helpers, not Bobbit sessions,
 team members, tasks, worktrees, or cost accounts.
 
-| SDK type | Source role | Model | Effort | Max turns |
-| --- | --- | --- | --- | ---: |
-| `bobbit-protocol-scout` | `claude-protocol-scout` | `inherit` | `high` | 6 |
-| `bobbit-backend-parity-reviewer` | `backend-parity-reviewer` | `inherit` | `medium` | 4 |
-| `bobbit-billing-safety-auditor` | `billing-safety-auditor` | `inherit` | `medium` | 4 |
+| SDK type | Source role | Model | Max turns |
+| --- | --- | --- | ---: |
+| `bobbit-protocol-scout` | `claude-protocol-scout` | `inherit` | 6 |
+| `bobbit-backend-parity-reviewer` | `backend-parity-reviewer` | `inherit` | 4 |
+| `bobbit-billing-safety-auditor` | `billing-safety-auditor` | `inherit` | 4 |
 
 For every bridge generation, session setup resolves the source prompt through
 the existing role cascade and fixes the projection's prompt, `model: "inherit"`,
-effort, `maxTurns`, `background: false`, and `permissionMode: "default"`.
+`maxTurns`, `background: false`, and `permissionMode: "default"`. It omits
+optional child `effort`, so the inherited model uses the active root thinking
+selection and only SDK-advertised capability rather than a fixed level that a
+selected model may reject.
 Each has the bundled-skill pin and no memory, observer, custom MCP server, or
 caller override. Its read-only Bobbit-tool ceiling may include only root-selected
 and pre-allowed `mcp__bobbit__read`, `mcp__bobbit__find`, and
