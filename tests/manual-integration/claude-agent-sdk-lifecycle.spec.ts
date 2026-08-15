@@ -685,7 +685,7 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			expect(transcript.success && hasRootCanonicalToolCall(visibleTranscript, "gate_list")).toBe(true);
 			expect(transcript.success && hasSuccessfulRootToolResult(visibleTranscript, "gate_list")).toBe(true);
 
-			await runTurn("Use exactly one foreground bobbit-backend-parity-reviewer helper to read README.md. Do not create a Bobbit task, team, worktree, or another helper.", "constrained foreground helper");
+			await runTurn("Call the native Agent tool exactly once with run_in_background: false and subagent_type: \"bobbit-backend-parity-reviewer\". Its task must be: use the Bobbit read tool on README.md. Do not call any other root tool. Do not create or invoke an additional helper.", "constrained foreground helper");
 			transcript = await gateway.sessionManager.getMessagesSnapshotBase(session);
 			expect(transcript.success && hasOneNestedHelper(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, transcript.data))).toBe(true);
 
@@ -945,7 +945,7 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 				: undefined;
 			expect(sandboxTranscript.success && hasRootCanonicalToolCall(visibleSandboxTranscript, "gate_list")).toBe(true);
 			expect(sandboxTranscript.success && hasSuccessfulRootToolResult(visibleSandboxTranscript, "gate_list")).toBe(true);
-			await runSandboxTurn("Use exactly one foreground bobbit-backend-parity-reviewer helper to read README.md. Do not create a Bobbit task, team, worktree, or another helper.", "sandbox constrained foreground helper");
+			await runSandboxTurn("Call the native Agent tool exactly once with run_in_background: false and subagent_type: \"bobbit-backend-parity-reviewer\". Its task must be: use the Bobbit read tool on README.md. Do not call any other root tool. Do not create or invoke an additional helper.", "sandbox constrained foreground helper");
 			sandboxTranscript = await gateway.sessionManager.getMessagesSnapshotBase(session);
 			expect(sandboxTranscript.success && hasOneNestedHelper(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data))).toBe(true);
 			const { applyRuntimeSessionThinkingSelection } = await import("../../dist/server/ws/runtime-model-selection.js");
