@@ -65,7 +65,9 @@ describe("language LSP Go degradation in a real Docker linked worktree", () => {
 		]));
 
 		const language = CODE_INTELLIGENCE_LANGUAGE_MATRIX.find(entry => entry.id === "go");
-		expect(language?.lsp).toBeTruthy();
+		expect(language?.lsp, "the matrix must declare Go LSP sandbox requirements").toBeTruthy();
+		const missingSandboxRequirements = language!.lsp!.sandbox.filter(({ id }) => id === "go" || id === "gopls");
+		expect(missingSandboxRequirements.map(({ id }) => id)).toEqual(["go", "gopls"]);
 		const prepared = serializeLspRequest({
 			action: "definition",
 			component: "go-api",
@@ -79,7 +81,12 @@ describe("language LSP Go degradation in a real Docker linked worktree", () => {
 				componentRoot: source,
 			},
 			languages: [language!],
-			runtime: { enabled: true, toolchain: "missing" },
+			runtime: {
+				enabled: true,
+				toolchain: "missing",
+				runtime: "sandbox",
+				missingToolchainIds: missingSandboxRequirements.map(({ id }) => id),
+			},
 		});
 		expect(prepared).toMatchObject({
 			result: {
@@ -91,7 +98,9 @@ describe("language LSP Go degradation in a real Docker linked worktree", () => {
 			},
 			request: { key: { languageId: "go" } },
 		});
-		expect(prepared.result.reason).toContain("Go toolchain");
+		expect(prepared.result.reason).toBe(
+			`The sandbox runtime is missing sandbox requirement IDs: ${missingSandboxRequirements.map(({ id, layerId }) => `${id} (layer ${layerId})`).join(", ")}. ${missingSandboxRequirements.map(({ installHint }) => installHint).join(" ")}`,
+		);
 
 		const projectId = `language-lsp-go-${randomUUID()}`;
 		sandbox = new ProjectSandbox({

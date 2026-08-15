@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -120,14 +120,22 @@ describe("language LSP adapter in a real linked worktree component", () => {
 		});
 		expect(escaped.request).toBeUndefined();
 
+		const requirement = typescriptLanguage().lsp!.host.find(({ id }) => id === "typescript-language-server");
+		expect(requirement, "the TypeScript matrix must declare the TypeScript Language Server host requirement").toBeTruthy();
 		const missingRuntime = serializeLspRequest({
 			action: "hover",
 			language: "typescript",
 			path: "src/linked.ts",
 			position: { line: 0, character: 0 },
-		}, { ...options, runtime: { enabled: true, toolchain: "missing" } });
-		const requirement = typescriptLanguage().lsp!.host[0] ?? typescriptLanguage().lsp!.sandbox[0];
-		expect(requirement, "the declared TypeScript LSP must name a toolchain requirement").toBeTruthy();
+		}, {
+			...options,
+			runtime: {
+				enabled: true,
+				toolchain: "missing",
+				runtime: "host",
+				missingToolchainIds: [requirement!.id],
+			},
+		});
 		expect(missingRuntime).toMatchObject({
 			result: {
 				capability: "lsp",
@@ -138,7 +146,8 @@ describe("language LSP adapter in a real linked worktree component", () => {
 				key: { worktreePath: realpathSync(componentRoot), languageId: "typescript" },
 			},
 		});
-		expect(missingRuntime.result.reason).toContain(requirement!.label);
-		expect(missingRuntime.result.reason).toMatch(/required/i);
+		expect(missingRuntime.result.reason).toBe(
+			`The host runtime is missing host requirement IDs: ${requirement!.id}. ${requirement!.installHint}`,
+		);
 	});
 });
