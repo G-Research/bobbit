@@ -97,9 +97,11 @@ export interface ClaudeSdkSubagentLifecycleEvent {
 	readonly at: number;
 }
 
+const SUBAGENT_AUDIT_OUTCOMES = ["admitted", "denied", "started", "stopped", "diagnostic"] as const;
+
 export type ClaudeSdkSubagentAuditEvent = Readonly<{
 	sessionId: string;
-	outcome: "admitted" | "denied" | "started" | "stopped" | "diagnostic";
+	outcome: typeof SUBAGENT_AUDIT_OUTCOMES[number];
 	toolUseId?: string;
 	agentId?: string;
 	agentType?: string;
@@ -211,7 +213,39 @@ const APPROVED_SUBAGENTS = [
 const CHILD_CANONICAL_TOOLS = ["read", "find", "grep"] as const;
 const MAX_SUBAGENT_PROMPT_BYTES = 8 * 1024;
 const MAX_SUBAGENT_ID_BYTES = 512;
+const MAX_SUBAGENT_AUDIT_DURATION_MS = 24 * 60 * 60 * 1_000;
 const SUBAGENT_DENIAL = "Subagent request is not available in this Bobbit session.";
+
+/**
+ * The default diagnostic sink is intentionally correlation-free. Callers that
+ * explicitly inject `audit` retain the full typed event for lifecycle wiring.
+ */
+type ClaudeSdkSanitizedSubagentAuditEvent = Readonly<{
+	outcome: ClaudeSdkSubagentAuditEvent["outcome"];
+	agentType?: string;
+	hasToolUseId: boolean;
+	hasAgentId: boolean;
+	hasParentToolUseId: boolean;
+	durationMs?: number;
+}>;
+
+/** Produce the fixed, safe console representation of a subagent audit event. */
+function sanitizeClaudeSdkSubagentAuditEvent(event: ClaudeSdkSubagentAuditEvent): ClaudeSdkSanitizedSubagentAuditEvent {
+	const approvedAgentType = typeof event.agentType === "string" && APPROVED_SUBAGENTS.some(({ type }) => type === event.agentType)
+		? event.agentType : undefined;
+	const durationMs = typeof event.durationMs === "number" && Number.isFinite(event.durationMs)
+		? Math.min(MAX_SUBAGENT_AUDIT_DURATION_MS, Math.max(0, Math.trunc(event.durationMs))) : undefined;
+	return Object.freeze({
+		// `audit` is exposed for integration seams; retain a safe fixed category
+		// even if an untyped caller invokes it with a fabricated runtime value.
+		outcome: SUBAGENT_AUDIT_OUTCOMES.includes(event.outcome) ? event.outcome : "diagnostic",
+		...(approvedAgentType ? { agentType: approvedAgentType } : {}),
+		hasToolUseId: typeof event.toolUseId === "string",
+		hasAgentId: typeof event.agentId === "string",
+		hasParentToolUseId: typeof event.parentToolUseId === "string",
+		...(durationMs === undefined ? {} : { durationMs }),
+	});
+}
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -236,7 +270,7 @@ export function buildClaudeSdkSubagentPolicy(options: ClaudeSdkSubagentPolicyOpt
 		const row = Object.freeze({ ...event });
 		try {
 			if (options.audit) options.audit(row);
-			else console.info("[claude-agent-sdk] subagent", row);
+			else console.info("[claude-agent-sdk] subagent", sanitizeClaudeSdkSubagentAuditEvent(row));
 		} catch { /* audit isolation */ }
 	};
 	const byType = new Map<string, ClaudeSdkSubagentDefinition>();

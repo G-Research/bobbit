@@ -1,5 +1,5 @@
 // v2-native — D3/D4 literal skills, constrained SDK subagents, and fail-closed admission contract.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import * as sdkSurface from "../../src/server/agent/claude-agent-sdk-tool-surface.ts";
 import { createClaudeSdkTranslatorState, translateClaudeSdkEvent } from "../../src/server/agent/claude-sdk-event-translator.ts";
@@ -35,10 +35,10 @@ type BuildPolicy = (input: {
 		policy: "allow" | "ask" | "never";
 		invoke: () => Promise<string>;
 	}[];
-	audit: (event: Record<string, unknown>) => void;
+	audit?: (event: Record<string, unknown>) => void;
 }) => any;
 
-function policyFixture() {
+function policyFixture(options: { useAudit?: boolean } = {}) {
 	const audit: Array<Record<string, unknown>> = [];
 	const buildPolicy = (sdkSurface as Record<string, unknown>).buildClaudeSdkSubagentPolicy;
 	expect(buildPolicy, "D4 must expose the pure policy factory used by the session-setup preflight").toBeTypeOf("function");
@@ -56,7 +56,7 @@ function policyFixture() {
 			{ name: "grep", description: "grep", group: "Files", inputSchema: { type: "object", properties: {} }, policy: "allow", invoke: async () => "ok" },
 			{ name: "bash", description: "bash", group: "Shell", inputSchema: { type: "object", properties: {} }, policy: "never", invoke: async () => "ok" },
 		],
-		audit: event => audit.push(event),
+		...(options.useAudit === false ? {} : { audit: event => audit.push(event) }),
 	});
 	return { policy, audit };
 }
@@ -306,6 +306,53 @@ describe("Claude Agent SDK D3/D4 skills and subagents", () => {
 		policy.onStart(child);
 		policy.onStop(child);
 		expect(events.map(event => event.kind)).toEqual(["start", "aborted"]);
+	});
+
+	it("logs a fixed privacy-safe lifecycle summary by default while injected audits retain correlations", () => {
+		const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+		const child = { agent_id: "private-agent-id", agent_type: "bobbit-backend-parity-reviewer" };
+		try {
+			const { policy } = policyFixture({ useAudit: false });
+			// Invalid lifecycle hooks are still useful diagnostically, but cannot
+			// disclose their supplied identity through the default console sink.
+			expect(policy.onStart(child)).toBe(false);
+			expect(policy.admit("Agent", {
+				subagent_type: child.agent_type, prompt: "private prompt/input", run_in_background: false,
+			}, { toolUseId: "private-tool-use-id", permissionMode: "default" })).toBe(true);
+			expect(policy.onStart(child)).toBe(true);
+			policy.onStop(child);
+
+			const rows = info.mock.calls
+				.filter(([label]) => label === "[claude-agent-sdk] subagent")
+				.map(([, row]) => row as Record<string, unknown>);
+			expect(rows.map(row => row.outcome)).toEqual(["diagnostic", "admitted", "started", "stopped"]);
+			expect(rows).toEqual([
+				{ outcome: "diagnostic", agentType: child.agent_type, hasToolUseId: false, hasAgentId: false, hasParentToolUseId: false },
+				{ outcome: "admitted", agentType: child.agent_type, hasToolUseId: true, hasAgentId: false, hasParentToolUseId: false },
+				{ outcome: "started", agentType: child.agent_type, hasToolUseId: true, hasAgentId: true, hasParentToolUseId: false },
+				expect.objectContaining({ outcome: "stopped", agentType: child.agent_type, hasToolUseId: true, hasAgentId: true, hasParentToolUseId: true, durationMs: expect.any(Number) }),
+			]);
+			const logged = JSON.stringify(rows);
+			for (const privateValue of ["root-sdk-session", "private-agent-id", "private-tool-use-id", "private prompt/input", "/private/path", "provider-body"]) {
+				expect(logged).not.toContain(privateValue);
+			}
+		} finally {
+			info.mockRestore();
+		}
+
+		const { policy, audit } = policyFixture();
+		expect(policy.onStart(child)).toBe(false);
+		expect(policy.admit("Agent", {
+			subagent_type: child.agent_type, prompt: "private prompt/input", run_in_background: false,
+		}, { toolUseId: "private-tool-use-id", permissionMode: "default" })).toBe(true);
+		expect(policy.onStart(child)).toBe(true);
+		policy.onStop(child);
+		expect(audit).toEqual([
+			{ sessionId: "root-sdk-session", outcome: "diagnostic", agentType: child.agent_type },
+			{ sessionId: "root-sdk-session", outcome: "admitted", toolUseId: "private-tool-use-id", agentType: child.agent_type },
+			{ sessionId: "root-sdk-session", outcome: "started", toolUseId: "private-tool-use-id", agentId: "private-agent-id", agentType: child.agent_type },
+			expect.objectContaining({ sessionId: "root-sdk-session", outcome: "stopped", toolUseId: "private-tool-use-id", agentId: "private-agent-id", agentType: child.agent_type, parentToolUseId: "private-tool-use-id", durationMs: expect.any(Number) }),
+		]);
 	});
 
 	it("requires a registered matching child, keeps its tool subset read-only, audits bounded fields, and clears on stop", async () => {
