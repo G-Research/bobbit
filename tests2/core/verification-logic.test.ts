@@ -162,6 +162,8 @@ describe("substituteVars", () => {
 });
 
 describe("substituteCommandVars", () => {
+	const builtins = { branch: "feat/x", baseBranch: "master", master: "master", cwd: "/work", commit: "abc123", goal_spec: "Fix the bug" };
+
 	it("resolves only fixed execution identifiers", () => {
 		assert.equal(
 			substituteCommandVars("git fetch origin {{baseBranch}} && git show {{commit}}", builtins),
