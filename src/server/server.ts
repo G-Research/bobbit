@@ -16463,8 +16463,6 @@ async function handleApiRoute(
 		// Resolve target session (live or persisted).
 		const targetPs = sessionManager.getPersistedSession(targetId);
 		if (!targetPs) { json({ error: "session_not_found" }, 404); return; }
-		if (!targetPs.agentSessionFile) { json({ error: "transcript_unavailable" }, 404); return; }
-
 
 		// Parse query params.
 		const qp = url.searchParams;

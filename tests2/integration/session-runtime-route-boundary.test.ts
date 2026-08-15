@@ -443,46 +443,64 @@ test.describe("session runtime route boundary", () => {
 		}
 	});
 
-	test("returns only the stable unavailable category when SDK transcript access rejects", async ({ gateway }) => {
+	test("returns only the stable unavailable category for invalid or unavailable SDK history without a Pi file", async ({ gateway }) => {
 		const sdkSessionId = "00000000-0000-4000-8000-000000000008";
 		const sessionId = sessions.add(seedArchivedSession(gateway, {
 			runtime: "claude-agent-sdk",
 			claudeAgentSdkSessionId: sdkSessionId,
 			modelProvider: SDK_PROVIDER,
 			modelId: SDK_MODEL,
+			agentSessionFile: undefined,
 		}));
+		const invalidSessionId = sessions.add(seedArchivedSession(gateway, {
+			runtime: "claude-agent-sdk",
+			claudeAgentSdkSessionId: "not-an-sdk-session-id",
+			modelProvider: SDK_PROVIDER,
+			modelId: SDK_MODEL,
+			agentSessionFile: undefined,
+		}));
+		expect(gateway.sessionManager.getPersistedSession(sessionId)?.agentSessionFile).toBeFalsy();
+		expect(gateway.sessionManager.getPersistedSession(invalidSessionId)?.agentSessionFile).toBeFalsy();
 		const manager = gateway.sessionManager as any;
 		const original = manager.getSdkSessionAccessDeps;
 		const providerFailure = "Authorization: Bearer sk-route-secret abcdefgh.abcdefgh.ijklmnop /Users/aj/.claude/credentials.json opaque_12345678901234567890123456789012";
-		manager.getSdkSessionAccessDeps = () => ({ loadSdk: async () => { throw new Error(providerFailure); } });
+		let accessCalls = 0;
+		manager.getSdkSessionAccessDeps = () => {
+			accessCalls++;
+			return { loadSdk: async () => { throw new Error(providerFailure); } };
+		};
 		const logged: unknown[][] = [];
 		const errorSpy = vi.spyOn(console, "error").mockImplementation((...args) => { logged.push(args); });
 		try {
-			const response = await localApiFetch(gateway, `/api/sessions/${sessionId}/transcript`);
-			expect(response.status).toBe(503);
-			const body = await response.json();
-			expect(body).toEqual({ error: "SDK_SESSION_UNAVAILABLE", code: "SDK_SESSION_UNAVAILABLE" });
-			const logText = JSON.stringify(logged);
-			for (const secret of ["sk-route-secret", "abcdefgh.abcdefgh.ijklmnop", "/Users/aj/.claude/credentials.json", "opaque_12345678901234567890123456789012", sessionId, sdkSessionId]) {
-				expect(JSON.stringify(body)).not.toContain(secret);
-				expect(logText).not.toContain(secret);
+			for (const id of [invalidSessionId, sessionId]) {
+				const response = await localApiFetch(gateway, `/api/sessions/${id}/transcript`);
+				expect(response.status).toBe(503);
+				const body = await response.json();
+				expect(body).toEqual({ error: "SDK_SESSION_UNAVAILABLE", code: "SDK_SESSION_UNAVAILABLE" });
+				const logText = JSON.stringify(logged);
+				for (const secret of ["sk-route-secret", "abcdefgh.abcdefgh.ijklmnop", "/Users/aj/.claude/credentials.json", "opaque_12345678901234567890123456789012", id, sdkSessionId]) {
+					expect(JSON.stringify(body)).not.toContain(secret);
+					expect(logText).not.toContain(secret);
+				}
 			}
-			expect(logText).toContain("[GET /api/sessions/transcript] SDK unavailable: SDK_SESSION_UNAVAILABLE");
+			expect(accessCalls).toBe(1);
+			expect(JSON.stringify(logged)).toContain("[GET /api/sessions/transcript] SDK unavailable: SDK_SESSION_UNAVAILABLE");
 		} finally {
 			errorSpy.mockRestore();
 			manager.getSdkSessionAccessDeps = original;
 		}
 	});
 
-	test("reads an SDK transcript through the session manager's injected SDK access seam", async ({ gateway }) => {
+	test("reads SDK official history without a Pi session file", async ({ gateway }) => {
 		const sdkSessionId = "00000000-0000-4000-8000-000000000007";
 		const sessionId = sessions.add(seedArchivedSession(gateway, {
 			runtime: "claude-agent-sdk",
 			claudeAgentSdkSessionId: sdkSessionId,
 			modelProvider: SDK_PROVIDER,
 			modelId: SDK_MODEL,
-			agentSessionFile: "/must-not-read.jsonl",
+			agentSessionFile: undefined,
 		}));
+		expect(gateway.sessionManager.getPersistedSession(sessionId)?.agentSessionFile).toBeFalsy();
 		const manager = gateway.sessionManager as any;
 		const original = manager.getSdkSessionAccessDeps;
 		const calls: string[] = [];
@@ -507,5 +525,14 @@ test.describe("session runtime route boundary", () => {
 		} finally {
 			manager.getSdkSessionAccessDeps = original;
 		}
+	});
+
+	test("keeps Pi transcripts without a session file unavailable", async ({ gateway }) => {
+		const sessionId = sessions.add(seedArchivedSession(gateway, { agentSessionFile: undefined }));
+		expect(gateway.sessionManager.getPersistedSession(sessionId)?.agentSessionFile).toBeFalsy();
+
+		const response = await localApiFetch(gateway, `/api/sessions/${sessionId}/transcript`);
+		expect(response.status).toBe(404);
+		expect(await response.json()).toEqual({ error: "transcript_unavailable" });
 	});
 });
