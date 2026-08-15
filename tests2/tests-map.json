@@ -3129,7 +3129,7 @@
     },
     {
       "path": "tests2/core/pi-installed-contract.test.ts",
-      "reason": "Installed-runtime contract coverage for the aligned Pi trio version, delta-only streaming with terminal authority, compaction event order and retry metadata, manual-compaction prompt rejection, recoverable-length overflow retry, queue release, and steer acknowledgement before user echo.",
+      "reason": "Installed-runtime contract coverage for the aligned Pi trio version, active-run release before agent_settled observers, delta-only streaming with terminal authority, compaction event order and retry metadata, manual-compaction prompt rejection, recoverable-length overflow retry, queue release, and steer acknowledgement before user echo.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
