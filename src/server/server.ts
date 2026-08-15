@@ -792,6 +792,18 @@ import {
 	type ProposalType,
 } from "./proposals/proposal-files.js";
 import { ProposalSeedService, proposalDraftOwnerId } from "./proposals/proposal-seed-service.js";
+import {
+	CanonicalMutationError,
+	applyCanonicalToolProposal,
+	createCanonicalRole,
+	createCanonicalStaff,
+	createCanonicalWorkflow,
+	deleteCanonicalRole,
+	deleteCanonicalStaff,
+	updateCanonicalRole,
+	updateCanonicalStaff,
+	updateCanonicalWorkflow,
+} from "./proposals/canonical-mutations.js";
 
 const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "complete", "skipped"]);
 
@@ -11235,6 +11247,31 @@ async function handleApiRoute(
 		return;
 	}
 
+	// POST /api/tools/proposal — canonical public application path for a
+	// project-scoped propose_tool draft. The stored draft is intentionally not
+	// trusted here; callers submit the same complete operation a proposal UI
+	// accepts, and the shared service owns parsing, containment and persistence.
+	if (url.pathname === "/api/tools/proposal" && req.method === "POST") {
+		const body = await readBody(req);
+		const projectId = typeof body?.projectId === "string" ? body.projectId.trim() : "";
+		if (!projectId) { json({ error: "projectId required" }, 400); return; }
+		const context = projectContextManager.getOrCreate(projectId);
+		if (!context) { json({ error: "Project not found" }, 404); return; }
+		try {
+			const result = applyCanonicalToolProposal({
+				action: body?.action,
+				tool: body?.tool,
+				content: body?.content,
+			}, { configDir: context.configDir, toolManager: context.toolManager });
+			__resetToolScanCache();
+			json({ ok: true, ...result }, result.action === "create" ? 201 : 200);
+		} catch (error) {
+			if (error instanceof CanonicalMutationError) json({ error: error.message, ...(error.code ? { code: error.code } : {}) }, error.status);
+			else jsonError(500, error);
+		}
+		return;
+	}
+
 	// Routes with tool :name parameter
 	const toolMatch = url.pathname.match(/^\/api\/tools\/([^/]+)$/);
 	if (toolMatch) {
@@ -14302,36 +14339,14 @@ async function handleApiRoute(
 			// Preserve legacy malformed-value dropping, but reject every well-formed
 			// model that is absent from Bobbit's current session-selectable catalog.
 			if (modelStr && /^[^/]+\/.+$/.test(modelStr) && !(await requireCurrentSessionModel(modelStr, "Role model"))) return;
-			if (target.scope === "server") {
-				const role = target.manager.createRole({
-					name: body?.name,
-					label: body?.label,
-					promptTemplate: body?.promptTemplate || "",
-					accessory: body?.accessory,
-					toolPolicies: body?.toolPolicies,
-					model: modelStr,
-					thinkingLevel: normalizeRoleThinking(body?.thinkingLevel),
-				});
-				json(role, 201);
-			} else {
-				const now = Date.now();
-				const role = {
-					name: body?.name,
-					label: body?.label ?? body?.name,
-					promptTemplate: body?.promptTemplate || "",
-					accessory: body?.accessory ?? "none",
-					toolPolicies: body?.toolPolicies,
-					model: modelStr,
-					thinkingLevel: normalizeRoleThinking(body?.thinkingLevel),
-					createdAt: now,
-					updatedAt: now,
-				};
-				if (!role.name || typeof role.name !== "string") throw new Error("Missing name");
-				const NAME_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
-				if (!NAME_PATTERN.test(role.name)) throw new Error("Role name must be lowercase alphanumeric + hyphens");
-				target.store.put(role);
-				json(role, 201);
-			}
+			const role = await createCanonicalRole(body ?? {}, target, {
+				normalizeThinking: normalizeRoleThinking,
+				// The public route performs the catalog check above so it can retain
+				// its established response body; the canonical service owns all
+				// remaining defaulting and persistence.
+				validateModel: async () => true,
+			});
+			json(role, 201);
 		} catch (err: any) {
 			jsonError(400, err);
 		}
@@ -14423,80 +14438,12 @@ async function handleApiRoute(
 				? body.model.trim()
 				: undefined;
 			if (requestedModel && /^[^/]+\/.+$/.test(requestedModel) && !(await requireCurrentSessionModel(requestedModel, "Role model"))) return;
-			if (target.scope === "project") {
-				const existing = target.store.get(name);
-				if (!existing) { json({ error: "Role not found in project" }, 404); return; }
-				const validPolicies = new Set(['allow', 'ask', 'never', 'always-allow', 'ask-once', 'always-ask', 'never-ask']);
-				let toolPolicies = existing.toolPolicies;
-				if (body.toolPolicies !== undefined) {
-					const cleaned: Record<string, any> = {};
-					if (body.toolPolicies && typeof body.toolPolicies === 'object') {
-						for (const [k, v] of Object.entries(body.toolPolicies)) {
-							if (typeof v === 'string' && validPolicies.has(v)) cleaned[k] = v;
-						}
-					}
-					toolPolicies = cleaned;
-				}
-				// model / thinkingLevel: explicit empty string clears the field; absent leaves unchanged.
-				let model = existing.model;
-				if (body.model !== undefined) {
-					model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : undefined;
-				}
-				let thinkingLevel = existing.thinkingLevel;
-				if (body.thinkingLevel !== undefined) {
-					thinkingLevel = normalizeRoleThinking(body.thinkingLevel);
-				}
-				const updated = {
-					...existing,
-					label: body.label ?? existing.label,
-					promptTemplate: body.promptTemplate ?? existing.promptTemplate,
-					accessory: body.accessory ?? existing.accessory,
-					toolPolicies,
-					model,
-					thinkingLevel,
-					name,
-					updatedAt: Date.now(),
-				};
-				target.store.put(updated);
+			try {
+				await updateCanonicalRole(name, body, target, { normalizeThinking: normalizeRoleThinking, validateModel: async () => true });
 				json({ ok: true });
-			} else {
-				// model / thinkingLevel: explicit empty string clears the field; absent leaves unchanged.
-				const modelUpdate = body.model !== undefined
-					? (typeof body.model === "string" && body.model.trim() ? body.model.trim() : "")
-					: undefined;
-				const thinkingUpdate = body.thinkingLevel !== undefined
-					? (normalizeRoleThinking(body.thinkingLevel) ?? "")
-					: undefined;
-				// Apply model/thinking via direct store update to support clearing (yaml-store update treats undefined as "don't change").
-				if (modelUpdate !== undefined || thinkingUpdate !== undefined) {
-					const existing = target.manager.getRole(name);
-					if (existing) {
-						const patched = {
-							...existing,
-							model: modelUpdate !== undefined ? (modelUpdate || undefined) : existing.model,
-							thinkingLevel: thinkingUpdate !== undefined ? (thinkingUpdate || undefined) : existing.thinkingLevel,
-							updatedAt: Date.now(),
-						};
-						target.store.put(patched);
-					}
-				}
-				const ok = target.manager.updateRole(name, {
-					label: body.label,
-					promptTemplate: body.promptTemplate,
-					accessory: body.accessory,
-					toolPolicies: body.toolPolicies !== undefined ? (() => {
-						const validPolicies = new Set(['allow', 'ask', 'never', 'always-allow', 'ask-once', 'always-ask', 'never-ask']);
-						const cleaned: Record<string, import("./agent/role-store.js").GrantPolicy> = {};
-						if (body.toolPolicies && typeof body.toolPolicies === 'object') {
-							for (const [k, v] of Object.entries(body.toolPolicies)) {
-								if (typeof v === 'string' && validPolicies.has(v)) cleaned[k] = v as import("./agent/role-store.js").GrantPolicy;
-							}
-						}
-						return cleaned;
-					})() : undefined,
-				});
-				if (!ok) { json({ error: "Role not found" }, 404); return; }
-				json({ ok: true });
+			} catch (error) {
+				if (error instanceof CanonicalMutationError) json({ error: error.message }, error.status);
+				else jsonError(500, error);
 			}
 			return;
 		}
@@ -14505,13 +14452,12 @@ async function handleApiRoute(
 			const resolvedTarget = resolveRoleMutationTarget(url.searchParams.get("projectId"));
 			if (!resolvedTarget.ok) { writeConfigProjectScopeError(resolvedTarget); return; }
 			const target = resolvedTarget.target;
-			if (target.scope === "project") {
-				target.store.remove(name);
+			try {
+				deleteCanonicalRole(name, target);
 				json({ ok: true });
-			} else {
-				const ok = target.manager.deleteRole(name);
-				if (!ok) { json({ error: "Role not found" }, 404); return; }
-				json({ ok: true });
+			} catch (error) {
+				if (error instanceof CanonicalMutationError) json({ error: error.message }, error.status);
+				else jsonError(500, error);
 			}
 			return;
 		}
@@ -19664,20 +19610,9 @@ async function handleApiRoute(
 		try {
 			const ctx = projectContextManager.getOrCreate(targetProjectId);
 			if (!ctx) { json({ error: "Project not found" }, 404); return; }
-			const now = Date.now();
-			const workflow = {
-				id: body.id as string,
-				name: (body.name as string) ?? body.id,
-				description: (body.description as string) ?? "",
-				gates: body.gates || [],
-				createdAt: now,
-				updatedAt: now,
-			};
-			if (!workflow.id || typeof workflow.id !== "string") throw new Error("Missing id");
-			ctx.workflowStore.put(workflow);
-			json(workflow, 201);
+			json(createCanonicalWorkflow(body, ctx.workflowStore), 201);
 		} catch (err: any) {
-			jsonError(400, err);
+			jsonError(err instanceof CanonicalMutationError ? err.status : 400, err);
 		}
 		return;
 	}
@@ -19742,18 +19677,12 @@ async function handleApiRoute(
 		if (!qProjectId) { json({ error: "projectId required" }, 400); return; }
 		const ctx = projectContextManager.getOrCreate(qProjectId);
 		if (!ctx) { json({ error: "Project not found" }, 404); return; }
-		const existing = ctx.workflowStore.get(id);
-		if (!existing) { json({ error: "Workflow not found in project" }, 404); return; }
-		const updated = {
-			...existing,
-			name: body.name ?? existing.name,
-			description: body.description ?? existing.description,
-			gates: Array.isArray(body.gates) ? body.gates : existing.gates,
-			id,
-			updatedAt: Date.now(),
-		};
-		ctx.workflowStore.put(updated);
-		json(updated);
+		try {
+			json(updateCanonicalWorkflow(id, body, ctx.workflowStore));
+		} catch (error) {
+			if (error instanceof CanonicalMutationError) json({ error: error.message }, error.status);
+			else jsonError(500, error);
+		}
 		return;
 	}
 
@@ -20792,27 +20721,22 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			const staff = await staffManager.createStaff(
-				body.name,
-				body.description || "",
-				body.systemPrompt,
+			const staff = await createCanonicalStaff({
+				name: body.name,
+				description: body.description || "",
+				systemPrompt: body.systemPrompt,
 				cwd,
-				sessionManager,
-				{
-					triggers: body.triggers,
-					roleId: body.roleId,
-					accessory: body.accessory,
-					projectId,
-					sandboxed: body.sandboxed === true,
-					...(typeof body.worktree === "boolean" ? { worktree: body.worktree } : {}),
-				},
-			);
-			broadcastStaffChanged({
-				type: "staff_changed",
-				reason: "created",
-				staffId: staff.id,
 				projectId,
-				sessionId: staff.currentSessionId,
+				triggers: body.triggers,
+				roleId: body.roleId,
+				accessory: body.accessory,
+				sandboxed: body.sandboxed === true,
+				worktree: body.worktree,
+			}, {
+				create: (name, description, prompt, staffCwd, options) => staffManager.createStaff(name, description, prompt, staffCwd, sessionManager, options as any),
+				broadcast: (staff, staffProjectId) => broadcastStaffChanged({
+					type: "staff_changed", reason: "created", staffId: staff.id, projectId: staffProjectId, sessionId: staff.currentSessionId,
+				}),
 			});
 			json(staff, 201);
 		} catch (err: any) {
@@ -20936,23 +20860,27 @@ async function handleApiRoute(
 			}
 
 			const hasAccessoryUpdate = Object.prototype.hasOwnProperty.call(body, "accessory");
-			const ok = staffManager.updateStaff(id, {
-				name: body.name,
-				description: body.description,
-				systemPrompt: body.systemPrompt,
-				cwd: cwdUpdate,
-				state: body.state,
-				triggers: body.triggers,
-				memory: body.memory,
-				roleId: body.roleId,
-				accessory: hasAccessoryUpdate ? body.accessory : undefined,
-				contextPolicy:
-					body.contextPolicy === "preserve" || body.contextPolicy === "compact"
-						? body.contextPolicy
-						: undefined,
-			});
-			if (!ok) { json({ error: "Staff agent not found" }, 404); return; }
-			const staff = staffManager.getStaff(id);
+			let staff;
+			try {
+				staff = updateCanonicalStaff(id, {
+					name: body.name,
+					description: body.description,
+					systemPrompt: body.systemPrompt,
+					cwd: cwdUpdate,
+					state: body.state,
+					triggers: body.triggers,
+					memory: body.memory,
+					roleId: body.roleId,
+					accessory: hasAccessoryUpdate ? body.accessory : undefined,
+					contextPolicy: body.contextPolicy === "preserve" || body.contextPolicy === "compact" ? body.contextPolicy : undefined,
+				}, {
+					update: (staffId, updates) => staffManager.updateStaff(staffId, updates as any),
+					read: (staffId) => staffManager.getStaff(staffId),
+				});
+			} catch (error) {
+				if (error instanceof CanonicalMutationError) { json({ error: error.message }, error.status); return; }
+				throw error;
+			}
 			if (hasAccessoryUpdate && staff?.currentSessionId) {
 				sessionManager.updateSessionMeta(staff.currentSessionId, { accessory: staff.accessory });
 			}
@@ -20970,19 +20898,22 @@ async function handleApiRoute(
 		}
 
 		if (req.method === "DELETE") {
-			const previousStaff = staffManager.getStaff(id);
-			const ok = await staffManager.deleteStaff(id, sessionManager);
-			if (!ok) { json({ error: "Staff agent not found" }, 404); return; }
-			if (previousStaff) {
-				broadcastStaffChanged({
-					type: "staff_changed",
-					reason: "deleted",
-					staffId: previousStaff.id,
-					projectId: previousStaff.projectId ?? SYSTEM_PROJECT_ID,
-					sessionId: previousStaff.currentSessionId,
+			try {
+				const previousStaff = await deleteCanonicalStaff(id, {
+					read: (staffId) => staffManager.getStaff(staffId),
+					remove: (staffId) => staffManager.deleteStaff(staffId, sessionManager),
 				});
+				if (previousStaff) {
+					broadcastStaffChanged({
+						type: "staff_changed", reason: "deleted", staffId: previousStaff.id,
+						projectId: previousStaff.projectId ?? SYSTEM_PROJECT_ID, sessionId: previousStaff.currentSessionId,
+					});
+				}
+				json({ ok: true });
+			} catch (error) {
+				if (error instanceof CanonicalMutationError) json({ error: error.message }, error.status);
+				else jsonError(500, error);
 			}
-			json({ ok: true });
 			return;
 		}
 	}
