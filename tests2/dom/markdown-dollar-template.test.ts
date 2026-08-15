@@ -33,6 +33,8 @@ const MATH_MARKDOWN = [
 	"\\]",
 ].join("\n");
 
+let resolveMarkdownImageSource: typeof import("../../src/ui/lazy/safe-markdown-block.js").resolveMarkdownImageSource;
+
 type LinkSnapshot = { text: string; href: string | null; target: string | null; rel: string | null };
 type MarkdownSnapshot = {
 	headings: string[];
@@ -135,7 +137,7 @@ beforeAll(async () => {
 	// See markdown-throttle.test.ts + _setup/custom-elements.ts: the shared bridge
 	// records markdown-block's define and syncCustomElements() replays it into this
 	// file's fresh happy-dom window and lit-html's pinned window.
-	await import("../../src/ui/lazy/safe-markdown-block.js");
+	({ resolveMarkdownImageSource } = await import("../../src/ui/lazy/safe-markdown-block.js"));
 	syncCustomElements();
 	if (!document.getElementById("container")) {
 		const c = document.createElement("div");
@@ -169,6 +171,29 @@ describe("markdown-block dollar template literal regression", () => {
 		expect(rendered.mathCount, "inline and display math should render through KaTeX").toBeGreaterThanOrEqual(4);
 		expect(rendered.displayMathCount, "$$...$$ and \\[...\\] should render as display math").toBeGreaterThanOrEqual(2);
 		expect(rendered.inlineCode).toBe("");
+	});
+
+	it("routes local image destinations through a session while preserving safe remote images", () => {
+		expect(resolveMarkdownImageSource(".bobbit-qa/screenshots/shot.png", "session-1")).toEqual({
+			kind: "local",
+			path: ".bobbit-qa/screenshots/shot.png",
+		});
+		expect(resolveMarkdownImageSource("file:///workspace/shot.png", "session-1")).toEqual({
+			kind: "local",
+			path: "file:///workspace/shot.png",
+		});
+		expect(resolveMarkdownImageSource("C:/workspace/shot.png", "session-1")).toEqual({
+			kind: "local",
+			path: "C:/workspace/shot.png",
+		});
+		expect(resolveMarkdownImageSource("https://example.com/shot.png", "session-1")).toEqual({
+			kind: "remote",
+			href: "https://example.com/shot.png",
+		});
+		expect(resolveMarkdownImageSource(".bobbit-qa/screenshots/shot.png", "")).toBeNull();
+		expect(resolveMarkdownImageSource("javascript:alert(1)", "session-1")).toBeNull();
+		expect(resolveMarkdownImageSource("data:text/html,<script>alert(1)</script>", "session-1")).toBeNull();
+		expect(resolveMarkdownImageSource("//evil.example/shot.png", "session-1")).toBeNull();
 	});
 
 	it("sanitizes unsafe link schemes", async () => {
