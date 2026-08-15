@@ -497,7 +497,7 @@ test("restart retains an ambiguous spawning command as a durable cleanup owner",
 	await harness.resumeInterruptedVerifications();
 
 	const active = (harness as any).activeVerifications.get(signalId);
-	const persisted = JSON.parse(fs.readFileSync(path.join(stateDir, "active-verifications.json"), "utf8")).verifications[0];
+	const persisted = (harness as any)._loadActive().find((verification: ActiveVerification) => verification.signalId === signalId);
 	assert.ok(active, `${MARKER}: a spawn-window command must retain its active cleanup owner`);
 	assert.equal(active.overallStatus, "cancelled");
 	assert.equal(active.steps[0].status, "running", `${MARKER}: cleanup must not invent command completion`);
@@ -512,7 +512,7 @@ test("restart retains an ambiguous spawning command as a durable cleanup owner",
 });
 
 test("spawning and spawned commands fail closed while queued commands finalize immediately", async () => {
-	const { stateDir, harness, gateStoreCalls, broadcasts } = makeHarnessForStateDir();
+	const { harness, gateStoreCalls, broadcasts } = makeHarnessForStateDir();
 	const startedAt = Date.now();
 	const spawning = activeVerification("sig-spawning-cancel", [{
 		...commandStepFixture({ name: "Spawning", startedAt, restartRecoveryMode: "pending-retry" }),
@@ -550,8 +550,8 @@ test("spawning and spawned commands fail closed while queued commands finalize i
 	assert.ok(broadcasts.some(entry => entry.event?.signalId === queued.signalId && entry.event?.status === "cancelled"));
 	assert.equal(broadcasts.some(entry => (entry.event?.signalId === spawning.signalId || entry.event?.signalId === spawned.signalId) && entry.event?.type === "gate_verification_complete"), false, `${MARKER}: ambiguous old generations must not publish terminal completion`);
 
-	const persisted = JSON.parse(fs.readFileSync(path.join(stateDir, "active-verifications.json"), "utf8")).verifications;
-	assert.deepEqual(persisted.map((verification: any) => verification.signalId).sort(), [spawning.signalId, spawned.signalId].sort(), `${MARKER}: later supersession must not discard ambiguous cleanup owners`);
+	const persisted = (harness as any)._loadActive();
+	assert.deepEqual(persisted.map((verification: ActiveVerification) => verification.signalId).sort(), [spawning.signalId, spawned.signalId].sort(), `${MARKER}: later supersession must not discard ambiguous cleanup owners`);
 });
 
 test("completed spawned rows preserve history without acquiring cancellation cleanup", async () => {
