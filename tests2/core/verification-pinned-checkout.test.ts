@@ -10,6 +10,7 @@ import {
 	type VerificationSourceInventoryEntry,
 } from "../../src/server/agent/verification-content-digest.ts";
 import {
+	canonicalPinnedFilesystemIdentity,
 	PinnedCheckoutError,
 	VerificationPinnedCheckoutManager,
 } from "../../src/server/agent/verification-pinned-checkout.ts";
@@ -183,6 +184,19 @@ const isPinnedError = (code: PinnedCheckoutError["code"]) =>
 	(error: unknown) => error instanceof PinnedCheckoutError && error.code === code;
 
 describe("VerificationPinnedCheckoutManager", () => {
+	it("serializes full-width filesystem identities without Number coercion", () => {
+		const dev = BigInt(Number.MAX_SAFE_INTEGER) + 2n;
+		const ino = dev + 2n;
+		assert.deepEqual(canonicalPinnedFilesystemIdentity({
+			dev,
+			ino,
+			isSymbolicLink: () => false,
+		}), {
+			dev: "9007199254740993",
+			ino: "9007199254740995",
+		});
+	});
+
 	it("prefixes independent repository inventories into a deterministic aggregate witness", async () => {
 		const source = await fixture();
 		const container = path.join(source.base, "branch-container");
@@ -598,6 +612,14 @@ describe("VerificationPinnedCheckoutManager", () => {
 		const git = fakeGit(source);
 		const checkout = await new VerificationPinnedCheckoutManager(source.state, { commandRunner: git.runner })
 			.acquire({ signal: signal(source.head), sourceRoot: source.root, projectId: "test-project-id" });
+		const onDisk = await lstat(checkout.path, { bigint: true });
+		const persisted = JSON.parse(await readFile(path.join(source.state, "verification-checkouts.json"), "utf8")) as Array<{
+			publishedRootIdentity?: { dev: unknown; ino: unknown };
+		}>;
+		assert.deepEqual(persisted[0]?.publishedRootIdentity, {
+			dev: onDisk.dev.toString(10),
+			ino: onDisk.ino.toString(10),
+		}, "the restart lease retains bigint filesystem identity as exact decimal text");
 		git.calls.splice(0);
 		await writeFile(path.join(source.root, "raw.txt"), "live tree changed after signal\n");
 

@@ -1,4 +1,4 @@
-import { constants, readFileSync, type Stats } from "node:fs";
+import { constants, readFileSync, type BigIntStats, type Stats } from "node:fs";
 import {
 	chmod,
 	lstat,
@@ -36,10 +36,16 @@ export type PinnedCheckoutErrorCode =
 
 type CleanupErrorCode = "GIT_REMOVE_FAILED" | "PATH_BUSY";
 
-/** Durable filesystem identity of the one root published for a lease. */
+/**
+ * Durable, JSON-safe filesystem identity of the one root published for a lease.
+ *
+ * Node exposes Windows file IDs beyond Number.MAX_SAFE_INTEGER. Persist the
+ * decimal representation captured from bigint stats so a restart never rounds
+ * the identity it must later compare before auditing or deleting a checkout.
+ */
 export interface PinnedCheckoutRootIdentity {
-	dev: number;
-	ino: number;
+	dev: string;
+	ino: string;
 }
 
 /** Durable no-follow identity for a multi-layout container directory. */
@@ -264,35 +270,56 @@ function samePath(left: string, right: string): boolean {
 	return comparablePath(left) === comparablePath(right);
 }
 
-function sameIdentity(left: Stats, right: Stats): boolean {
-	return Number.isSafeInteger(left.dev) && Number.isSafeInteger(left.ino)
-		&& Number.isSafeInteger(right.dev) && Number.isSafeInteger(right.ino)
-		&& left.dev === right.dev && left.ino === right.ino;
+function canonicalFilesystemIdentityPart(value: bigint): string {
+	if (value < 0n) throw new Error("unsafe filesystem identity");
+	return value.toString(10);
 }
 
-function filesystemIdentity(info: Stats): PinnedCheckoutRootIdentity {
-	if (info.isSymbolicLink() || !Number.isSafeInteger(info.dev) || !Number.isSafeInteger(info.ino)) {
-		throw new Error("unsafe filesystem identity");
-	}
-	return { dev: info.dev, ino: info.ino };
+function isCanonicalFilesystemIdentityPart(value: unknown): value is string {
+	if (typeof value !== "string" || !/^(?:0|[1-9][0-9]*)$/.test(value)) return false;
+	try { return BigInt(value).toString(10) === value; }
+	catch { return false; }
 }
 
-function rootIdentity(info: Stats): PinnedCheckoutRootIdentity {
+/** Convert bigint stat identity into its exact, durable decimal representation. */
+export function canonicalPinnedFilesystemIdentity(info: Pick<BigIntStats, "dev" | "ino" | "isSymbolicLink">): PinnedCheckoutRootIdentity {
+	if (info.isSymbolicLink()) throw new Error("unsafe filesystem identity");
+	return { dev: canonicalFilesystemIdentityPart(info.dev), ino: canonicalFilesystemIdentityPart(info.ino) };
+}
+
+function sameIdentity(left: BigIntStats, right: BigIntStats): boolean {
+	return left.dev === right.dev && left.ino === right.ino;
+}
+
+function filesystemIdentity(info: BigIntStats): PinnedCheckoutRootIdentity {
+	return canonicalPinnedFilesystemIdentity(info);
+}
+
+function rootIdentity(info: BigIntStats): PinnedCheckoutRootIdentity {
 	if (!info.isDirectory()) throw new Error("unsafe published checkout root");
 	return filesystemIdentity(info);
 }
 
 function hasRootIdentity(value: unknown): value is PinnedCheckoutRootIdentity {
 	const identity = value as PinnedCheckoutRootIdentity | undefined;
-	return Number.isSafeInteger(identity?.dev) && Number.isSafeInteger(identity?.ino);
+	return isCanonicalFilesystemIdentityPart(identity?.dev) && isCanonicalFilesystemIdentityPart(identity?.ino);
 }
 
-function sameFilesystemIdentity(identity: PinnedCheckoutRootIdentity, info: Stats): boolean {
-	return !info.isSymbolicLink() && identity.dev === info.dev && identity.ino === info.ino;
+function sameFilesystemIdentity(identity: PinnedCheckoutRootIdentity, info: BigIntStats): boolean {
+	return !info.isSymbolicLink() && identity.dev === canonicalFilesystemIdentityPart(info.dev) && identity.ino === canonicalFilesystemIdentityPart(info.ino);
 }
 
-function sameRootIdentity(identity: PinnedCheckoutRootIdentity, info: Stats): boolean {
+function sameRootIdentity(identity: PinnedCheckoutRootIdentity, info: BigIntStats): boolean {
 	return info.isDirectory() && sameFilesystemIdentity(identity, info);
+}
+
+/** Identity comparisons must never consume lossy number-backed Stats. */
+async function lstatExact(location: string): Promise<BigIntStats> {
+	return lstat(location, { bigint: true });
+}
+
+async function statExact(location: string): Promise<BigIntStats> {
+	return stat(location, { bigint: true });
 }
 
 function isMissing(error: unknown): boolean {
@@ -542,7 +569,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 				await this.makePublicExecutionTree(candidate);
 				lease.digest = contentDigest;
 				acquisitionStage = "capture-root-identity";
-				lease.publishedRootIdentity = rootIdentity(await lstat(candidate));
+				lease.publishedRootIdentity = rootIdentity(await lstatExact(candidate));
 				// Persist identity before the candidate is renamed into the sandbox
 				// namespace, so crash recovery never authorizes a replacement root.
 				acquisitionStage = "persist-root-identity";
@@ -654,7 +681,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 			await this.installPublicGitBarrier(candidate!);
 			const aggregateInventory = prefixVerificationSourceInventory(repositories.map(repository => ({ repoKey: repository.repoKey, inventory: restoreInventory(repository.sourceInventory) })));
 			lease.digest = await computeVerificationContentDigestFromInventory(candidate!, aggregateInventory);
-			lease.publishedRootIdentity = rootIdentity(await lstat(candidate!));
+			lease.publishedRootIdentity = rootIdentity(await lstatExact(candidate!));
 			lease.publicDirectoryIdentities = await this.captureMultiDirectoryIdentities(candidate!, repositories);
 			await this.persist(); await this.makePublicExecutionTree(candidate!, this.multiContainerAncestorPaths(repositories)); await this.publishCandidate(lease, candidate!);
 			lease.state = "ready"; lease.publicationState = "public"; await this.persist();
@@ -705,7 +732,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		const identities: PinnedCheckoutDirectoryIdentity[] = [];
 		for (const relativePath of [...paths].sort()) {
 			const location = this.inventoryPath(root, relativePath);
-			const info = await lstat(location);
+			const info = await lstatExact(location);
 			if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("unsafe multi checkout directory");
 			identities.push({ relativePath, identity: rootIdentity(info) });
 		}
@@ -726,9 +753,9 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		const identities = lease.publicDirectoryIdentities;
 		if (!identities || identities.length !== expectedPaths.size || identities.some((entry, index) => !expectedPaths.has(entry.relativePath)
 			|| !hasRootIdentity(entry.identity) || (index > 0 && identities[index - 1]!.relativePath >= entry.relativePath))) throw new Error("invalid multi checkout identities");
-		this.assertPublishedRootIdentity(lease, root, await lstat(root));
+		this.assertPublishedRootIdentity(lease, root, await lstatExact(root));
 		for (const entry of identities) {
-			const info = await lstat(this.inventoryPath(root, entry.relativePath));
+			const info = await lstatExact(this.inventoryPath(root, entry.relativePath));
 			if (!sameRootIdentity(entry.identity, info)) {
 				throw new PinnedCheckoutError("PINNED_CHECKOUT_MUTATED", "Pinned checkout changed during verification");
 			}
@@ -1027,25 +1054,25 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		if (!targetInfo) return undefined;
 		await this.makePublishedRootWritable(lease, target, targetInfo);
 		await rename(target, audit);
-		this.assertPublishedRootIdentity(lease, audit, await lstat(audit));
+		this.assertPublishedRootIdentity(lease, audit, await lstatExact(audit));
 		lease.publicationState = "quarantined";
 		await this.persist();
 		return audit;
 	}
 
 	/** Clear the public root attribute before moving it into private quarantine. */
-	private async makePublishedRootWritable(lease: PinnedCheckoutLease, root: string, info?: Stats): Promise<void> {
-		this.assertPublishedRootIdentity(lease, root, info ?? await lstat(root));
+	private async makePublishedRootWritable(lease: PinnedCheckoutLease, root: string, info?: BigIntStats): Promise<void> {
+		this.assertPublishedRootIdentity(lease, root, info ?? await lstatExact(root));
 		await chmod(root, 0o700);
-		this.assertPublishedRootIdentity(lease, root, await lstat(root));
+		this.assertPublishedRootIdentity(lease, root, await lstatExact(root));
 	}
 
 	private async removePublishedAudit(lease: PinnedCheckoutLease, audit: string): Promise<void> {
-		this.assertPublishedRootIdentity(lease, audit, await lstat(audit));
+		this.assertPublishedRootIdentity(lease, audit, await lstatExact(audit));
 		await this.makeWritable(audit);
 		// Recheck after chmod: an untrusted replacement must never be traversed or
 		// deleted just because it won a pathname race during cleanup.
-		this.assertPublishedRootIdentity(lease, audit, await lstat(audit));
+		this.assertPublishedRootIdentity(lease, audit, await lstatExact(audit));
 		await rm(audit, { recursive: true, force: true });
 	}
 
@@ -1069,8 +1096,8 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		await rm(tree, { recursive: true, force: true });
 	}
 
-	private async lstatIfPresent(location: string): Promise<Stats | undefined> {
-		try { return await lstat(location); }
+	private async lstatIfPresent(location: string): Promise<BigIntStats | undefined> {
+		try { return await lstatExact(location); }
 		catch (error) { if (isMissing(error)) return undefined; throw error; }
 	}
 
@@ -1084,7 +1111,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		}
 	}
 
-	private assertPublishedRootIdentity(lease: PinnedCheckoutLease, location: string, info: Stats): void {
+	private assertPublishedRootIdentity(lease: PinnedCheckoutLease, location: string, info: BigIntStats): void {
 		if (!hasRootIdentity(lease.publishedRootIdentity) || !sameRootIdentity(lease.publishedRootIdentity, info)) {
 			throw new Error(`published checkout root identity changed: ${location}`);
 		}
@@ -1242,9 +1269,9 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 			if (!await this.isIgnoredTopLevelDirectory(sourceRoot, name)) continue;
 			const source = path.join(sourceRoot, name);
 			const target = path.join(targetRoot, name);
-			let before: Stats;
+			let before: BigIntStats;
 			try {
-				before = await lstat(source);
+				before = await lstatExact(source);
 			} catch (error) {
 				if (isMissing(error)) continue;
 				throw error;
@@ -1260,12 +1287,12 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 			}
 			try {
 				await symlink(canonicalSource, target, process.platform === "win32" ? "junction" : "dir");
-				const [linkedTarget, after] = await Promise.all([realpath(target), lstat(source)]);
+				const [linkedTarget, after] = await Promise.all([realpath(target), lstatExact(source)]);
 				if (!samePath(linkedTarget, canonicalSource) || !after.isDirectory() || after.isSymbolicLink() || !sameIdentity(before, after)) {
 					throw new Error("ignored setup directory changed during exposure");
 				}
 				// stat follows the just-created link and binds it to the directory checked above.
-				if (!sameIdentity(before, await stat(target))) throw new Error("ignored setup directory changed during exposure");
+				if (!sameIdentity(before, await statExact(target))) throw new Error("ignored setup directory changed during exposure");
 			} catch (error) {
 				try { await unlink(target); } catch (cleanupError) { if (!isMissing(cleanupError)) throw cleanupError; }
 				throw error;
@@ -1308,10 +1335,10 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
 		const sourceHandle = await open(source, constants.O_RDONLY | noFollow);
 		try {
-			const opened = await sourceHandle.stat();
+			const opened = await sourceHandle.stat({ bigint: true });
 			if (!opened.isFile() || opened.isSymbolicLink()) throw new Error("unsafe source file");
 			await this.assertDirectoryAncestors(sourceRoot, source);
-			const named = await lstat(source);
+			const named = await lstatExact(source);
 			if (!named.isFile() || named.isSymbolicLink() || !sameIdentity(opened, named)) throw new Error("source replacement");
 			await this.ensureTargetParents(targetRoot, target);
 			const targetHandle = await open(target, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
@@ -1330,14 +1357,14 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 					position += bytesRead;
 				}
 			} finally { await targetHandle.close(); }
-			const after = await lstat(source);
+			const after = await lstatExact(source);
 			if (!after.isFile() || after.isSymbolicLink() || !sameIdentity(opened, after)) throw new Error("source replacement");
-			await chmod(target, (opened.mode & 0o111) ? 0o755 : 0o644);
+			await chmod(target, (opened.mode & 0o111n) ? 0o755 : 0o644);
 		} finally { await sourceHandle.close(); }
 	}
 
 	private async copySymlink(sourceRoot: string, source: string, targetRoot: string, target: string): Promise<void> {
-		const before = await lstat(source);
+		const before = await lstatExact(source);
 		if (!before.isSymbolicLink()) throw new Error("source replacement");
 		const rawTarget = await readlink(source, { encoding: "buffer" }) as Buffer;
 		let text: string;
@@ -1348,7 +1375,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		try { if ((await lstat(resolved)).isSymbolicLink()) throw new Error("symlink chain"); } catch (error) { if (!isMissing(error)) throw error; }
 		await this.ensureTargetParents(targetRoot, target);
 		await symlink(rawTarget, target);
-		const after = await lstat(source);
+		const after = await lstatExact(source);
 		if (!after.isSymbolicLink() || !sameIdentity(before, after)) throw new Error("source replacement");
 	}
 
@@ -1557,9 +1584,9 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 
 	private async publishCandidate(lease: PinnedCheckoutLease, candidate: string): Promise<void> {
 		const target = await this.targetPath(lease.projectId, lease.signalId);
-		this.assertPublishedRootIdentity(lease, candidate, await lstat(candidate));
+		this.assertPublishedRootIdentity(lease, candidate, await lstatExact(candidate));
 		await rename(candidate, target);
-		this.assertPublishedRootIdentity(lease, target, await lstat(target));
+		this.assertPublishedRootIdentity(lease, target, await lstatExact(target));
 		lease.publicationState = "public";
 		// A crash after rename must recover by quarantining this exact public root,
 		// never by treating it as an unowned path.
@@ -1570,7 +1597,7 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		const target = await this.targetPath(lease.projectId, lease.signalId);
 		const audit = await this.auditPath(lease.projectId, lease.signalId);
 		try {
-			const auditInfo = await lstat(audit);
+			const auditInfo = await lstatExact(audit);
 			this.assertPublishedRootIdentity(lease, audit, auditInfo);
 			// Recover the crash window after rename and before durable state publication.
 			try { await lstat(target); throw new Error("conflicting checkout roots"); }
@@ -1585,11 +1612,11 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 		}
 		await this.makePublishedRootWritable(lease, target);
 		await rename(target, audit);
-		this.assertPublishedRootIdentity(lease, audit, await lstat(audit));
+		this.assertPublishedRootIdentity(lease, audit, await lstatExact(audit));
 		// The barrier audit also validates the public-root sticky bit. Restore it
 		// after the cross-platform move precondition and before traversing bytes.
 		await chmod(audit, 0o1777);
-		this.assertPublishedRootIdentity(lease, audit, await lstat(audit));
+		this.assertPublishedRootIdentity(lease, audit, await lstatExact(audit));
 		lease.publicationState = "quarantined";
 		await this.persist();
 		return audit;
@@ -1598,18 +1625,18 @@ export class VerificationPinnedCheckoutManager implements PinnedCheckoutManager 
 	private async republishQuarantine(lease: PinnedCheckoutLease, audit: string): Promise<void> {
 		const target = await this.targetPath(lease.projectId, lease.signalId);
 		try {
-			this.assertPublishedRootIdentity(lease, audit, await lstat(audit));
+			this.assertPublishedRootIdentity(lease, audit, await lstatExact(audit));
 		} catch (error) {
 			if (!isMissing(error)) throw error;
 			// Recover the inverse crash window: the public rename completed before
 			// the lease state did. Do not accept an attacker-created replacement.
-			this.assertPublishedRootIdentity(lease, target, await lstat(target));
+			this.assertPublishedRootIdentity(lease, target, await lstatExact(target));
 			lease.publicationState = "public";
 			await this.persist();
 			return;
 		}
 		await rename(audit, target);
-		this.assertPublishedRootIdentity(lease, target, await lstat(target));
+		this.assertPublishedRootIdentity(lease, target, await lstatExact(target));
 		lease.publicationState = "public";
 		await this.persist();
 	}
