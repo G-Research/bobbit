@@ -52,7 +52,7 @@ describe("extension settings store", () => {
 		expect(store.getPublicState().targets[targetKey].values.endpoint).toBe("https://one.example");
 		const onDisk = yaml.parse(fs.readFileSync(path.join(configDir, "project.yaml"), "utf-8")) as Record<string, unknown>;
 		expect(onDisk.extension_settings).toMatchObject({
-			schema: 1,
+			schema: 2,
 			revision: 5,
 			commitId: expect.any(String),
 			targets: { [targetKey]: { enabled: true, values: { endpoint: "https://one.example", enabled: true, limit: 7 } } },
@@ -184,7 +184,7 @@ describe("extension settings store", () => {
 		}
 		expect(thrown).toBeInstanceOf(ExtensionSettingsUnavailableError);
 		expect(thrown).toMatchObject({ code: "EXTENSION_SETTINGS_UNAVAILABLE", committedRevision: 1 });
-		expect(store.getPublicState()).toMatchObject({ schema: 1, revision: 1, targets: { [targetKey]: { values: {} } } });
+		expect(store.getPublicState()).toMatchObject({ schema: 2, revision: 1, targets: { [targetKey]: { values: {} } } });
 		expect(String(thrown)).not.toContain("must-not-escape");
 		expect(JSON.stringify(thrown)).not.toContain("must-not-escape");
 		expect(thrown).not.toHaveProperty("cause");
@@ -335,6 +335,64 @@ describe("extension settings store", () => {
 			expect(memFs.readFileSync(path.resolve(configDir, "project.yaml"), "utf-8")).toBe(publicBytes);
 			expect(memFs.readFileSync(path.resolve(stateDir, "extension-settings-secrets.json"), "utf-8")).toBe(secretBytes);
 		}
+	});
+
+	it("normalizes native schema-2 arrays and defensively clones every public boundary", () => withTmpDir(configDir => {
+		const config = new ProjectConfigStore(configDir);
+		const secrets = new ExtensionSettingsSecretStore(path.join(configDir, "state"));
+		const store = new ExtensionSettingsStore(config, secrets);
+		const raw = ["typescript", "python"];
+		config.setExtensionSettings({ schema: 2, revision: 3, targets: { [targetKey]: { values: { languages: raw } } } });
+		raw[0] = "mutated-after-save";
+
+		const first = store.getPublicState();
+		expect(first).toMatchObject({ schema: 2, revision: 3, targets: { [targetKey]: { values: { languages: ["python", "typescript"] } } } });
+		(first.targets[targetKey].values.languages as string[])[0] = "mutated-snapshot";
+		expect((store.getTarget(ref)?.values.languages as string[])).toEqual(["python", "typescript"]);
+		expect(store.getEffective(ref, { languages: ["typescript", "python"] }).values.languages).toEqual(["python", "typescript"]);
+		expect(yaml.parse(fs.readFileSync(path.join(configDir, "project.yaml"), "utf-8"))).toMatchObject({
+			extension_settings: { schema: 2, targets: { [targetKey]: { values: { languages: ["python", "typescript"] } } } },
+		});
+	}));
+
+	it("preserves schema-1 scalar state until save and rejects legacy arrays", () => withTmpDir(configDir => {
+		const legacy = { schema: 1 as const, revision: 4, targets: { [targetKey]: { values: { endpoint: "https://legacy.example" } } } };
+		const config = new ProjectConfigStore(configDir);
+		config.setExtensionSettings(legacy);
+		const store = new ExtensionSettingsStore(config, new ExtensionSettingsSecretStore(path.join(configDir, "state")));
+		expect(store.getPublicState()).toEqual(legacy);
+		store.compareAndSwap(ref, 4, { values: { endpoint: "https://saved.example" } });
+		expect(store.getPublicState()).toMatchObject({ schema: 2, revision: 5 });
+
+		const rejected = normalizeExtensionSettings({ schema: 1, revision: 1, targets: { [targetKey]: { values: { languages: ["python"] } } } });
+		expect(rejected).toEqual({ value: { schema: 1, revision: 1, targets: {} }, ok: true });
+	}));
+
+	it("isolates malformed schema-2 arrays and target aggregate overflow", () => {
+		const normal = normalizeExtensionSettings({
+			schema: 2,
+			revision: 1,
+			targets: {
+				[targetKey]: { values: { languages: ["typescript", "python"] } },
+				"other\u0000provider\u0000bad": { values: { languages: ["python", "python"] } },
+			},
+		});
+		expect(normal).toEqual({ value: { schema: 2, revision: 1, targets: { [targetKey]: { values: { languages: ["python", "typescript"] } } } }, ok: true });
+
+		const selection = Array.from({ length: 64 }, (_, index) => `value-${index}`);
+		const overflow = normalizeExtensionSettings({
+			schema: 2,
+			revision: 1,
+			targets: { [targetKey]: { values: Object.fromEntries(Array.from({ length: 5 }, (_, index) => [`field${index}`, selection])) } },
+		});
+		expect(overflow).toEqual({ value: { schema: 2, revision: 1, targets: {} }, ok: true });
+
+		const config = new ProjectConfigStore("/memfs/aggregate-settings", createMemFs());
+		const store = new ExtensionSettingsStore(config, new ExtensionSettingsSecretStore("/memfs/aggregate-secrets", createMemFs()));
+		expect(() => store.compareAndSwap(ref, 0, {
+			values: Object.fromEntries(Array.from({ length: 5 }, (_, index) => [`field${index}`, selection])),
+		})).toThrow();
+		expect(store.getPublicState()).toEqual({ schema: 2, revision: 0, targets: {} });
 	});
 
 	it("resolves public and owner-only values independently for each project", () => withTmpDir(root => {

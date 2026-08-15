@@ -23,6 +23,9 @@ import {
 import {
 	isExtensionSettingValue,
 	isWellFormedExtensionSettingsText,
+	normalizeDurableMultiEnumValue,
+	MAX_EXTENSION_SETTINGS_MULTI_ENUM_SELECTED_BYTES_PER_TARGET,
+	MAX_EXTENSION_SETTINGS_MULTI_ENUM_SELECTED_VALUES_PER_TARGET,
 	type ExtensionSettingValue,
 } from "./extension-settings-schema.js";
 
@@ -314,7 +317,7 @@ export type ExtensionSettingsMap = Record<string, ExtensionSettingsRecord>;
 
 /** Storage schema (not contribution schema); revision supports CAS at the API boundary. */
 export interface ExtensionSettingsState {
-	schema: 1;
+	schema: 1 | 2;
 	revision: number;
 	/** Opaque identity paired with the owner-only extension-secret envelope. */
 	commitId?: string;
@@ -322,7 +325,7 @@ export interface ExtensionSettingsState {
 }
 
 export const EMPTY_EXTENSION_SETTINGS_STATE: Readonly<ExtensionSettingsState> = Object.freeze({
-	schema: 1,
+	schema: 2,
 	revision: 0,
 	targets: Object.freeze({}) as ExtensionSettingsMap,
 });
@@ -332,33 +335,38 @@ const MAX_EXTENSION_SETTINGS_VALUES_PER_TARGET = 64;
 const MAX_EXTENSION_SETTINGS_TARGET_KEY_LENGTH = 512;
 const EXTENSION_SETTINGS_COMMIT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
+function cloneExtensionSettingValue(value: ExtensionSettingValue): ExtensionSettingValue {
+	return Array.isArray(value) ? [...value] as ExtensionSettingValue : value;
+}
+
 function cloneExtensionSettings(state: ExtensionSettingsState): ExtensionSettingsState {
 	const targets: ExtensionSettingsMap = {};
 	for (const [target, record] of Object.entries(state.targets)) {
-		targets[target] = {
-			...(record.enabled === undefined ? {} : { enabled: record.enabled }),
-			values: { ...record.values },
-		};
+		const values: Record<string, ExtensionSettingValue> = {};
+		for (const [key, value] of Object.entries(record.values)) values[key] = cloneExtensionSettingValue(value);
+		targets[target] = { ...(record.enabled === undefined ? {} : { enabled: record.enabled }), values };
 	}
-	return { schema: 1, revision: state.revision, ...(state.commitId === undefined ? {} : { commitId: state.commitId }), targets };
+	return { schema: state.schema, revision: state.revision, ...(state.commitId === undefined ? {} : { commitId: state.commitId }), targets };
+}
+
+function isPrimitiveExtensionSettingValue(value: unknown): value is Exclude<ExtensionSettingValue, string[]> {
+	return !Array.isArray(value) && isExtensionSettingValue(value);
 }
 
 /**
  * Defensive storage normalization. Malformed rows are isolated and dropped so
  * one stale target cannot hide valid project settings; an invalid root returns
- * a safe empty state. Values are deliberately schema-agnostic here so a pack
- * can evolve without discarding a now-unknown, still-public override.
+ * a safe empty state. Schema 1 is deliberately primitive-only; schema 2 adds
+ * bounded, canonical native string arrays for declared multi-enum fields.
  */
 export function normalizeExtensionSettings(raw: unknown): { value: ExtensionSettingsState; ok: boolean } {
-	const empty = (): ExtensionSettingsState => ({ schema: 1, revision: 0, targets: {} });
+	const empty = (): ExtensionSettingsState => ({ schema: 2, revision: 0, targets: {} });
 	if (!isPlainObject(raw)) return { value: empty(), ok: false };
-	// Keep untrusted scalar values in locals. `Record<string, unknown>` is the
-	// correct boundary type for parsed YAML, so property reads must be narrowed
-	// before they can enter the persisted settings state.
+	const schema = raw.schema;
 	const revision = raw.revision;
 	const commitId = raw.commitId;
 	const rawTargets = raw.targets;
-	if (raw.schema !== 1 || typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0
+	if ((schema !== 1 && schema !== 2) || typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0
 		|| (commitId !== undefined && (typeof commitId !== "string" || !EXTENSION_SETTINGS_COMMIT_ID_RE.test(commitId)))
 		|| !isPlainObject(rawTargets)) {
 		return { value: empty(), ok: false };
@@ -379,19 +387,31 @@ export function normalizeExtensionSettings(raw: unknown): { value: ExtensionSett
 		const valueEntries = Object.entries(rawValues);
 		if (valueEntries.length > MAX_EXTENSION_SETTINGS_VALUES_PER_TARGET) continue;
 		const values: Record<string, ExtensionSettingValue> = {};
+		let selectedCount = 0;
+		let selectedBytes = 0;
 		let valid = true;
 		for (const [key, value] of valueEntries) {
-			if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(key) || !isExtensionSettingValue(value)
+			if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(key)) { valid = false; break; }
+			if (Array.isArray(value)) {
+				// Never give an old malformed array a meaning after upgrading the reader.
+				if (schema === 1) { valid = false; break; }
+				const selected = normalizeDurableMultiEnumValue(value);
+				if (!selected) { valid = false; break; }
+				selectedCount += selected.length;
+				selectedBytes += selected.reduce((total, member) => total + Buffer.byteLength(member, "utf8"), 0);
+				if (selectedCount > MAX_EXTENSION_SETTINGS_MULTI_ENUM_SELECTED_VALUES_PER_TARGET
+					|| selectedBytes > MAX_EXTENSION_SETTINGS_MULTI_ENUM_SELECTED_BYTES_PER_TARGET) { valid = false; break; }
+				values[key] = selected as ExtensionSettingValue;
+			} else if (!isPrimitiveExtensionSettingValue(value)
 				|| (typeof value === "string" && (!isWellFormedExtensionSettingsText(value) || Buffer.byteLength(value, "utf8") > 4 * 1024))) {
 				valid = false;
 				break;
-			}
-			values[key] = value;
+			} else values[key] = value;
 		}
 		if (!valid) continue;
 		targets[targetKey] = { ...(enabled === undefined ? {} : { enabled }), values };
 	}
-	return { value: { schema: 1, revision, ...(commitId === undefined ? {} : { commitId }), targets }, ok: true };
+	return { value: { schema, revision, ...(commitId === undefined ? {} : { commitId }), targets }, ok: true };
 }
 
 /** Shared strict bound for stored hook refs and server-derived principal labels. */

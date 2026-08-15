@@ -1,5 +1,12 @@
 import { randomUUID } from "node:crypto";
 import {
+  MAX_EXTENSION_SETTINGS_MULTI_ENUM_SELECTED_BYTES_PER_TARGET,
+  MAX_EXTENSION_SETTINGS_MULTI_ENUM_SELECTED_VALUES_PER_TARGET,
+  isExtensionSettingValue,
+  normalizeDurableMultiEnumValue,
+  type ExtensionSettingValue,
+} from "./extension-settings-schema.js";
+import {
   ExtensionSettingsSecretPersistenceError,
   ExtensionSettingsSecretStore,
   isExtensionSettingsCommitId,
@@ -8,8 +15,7 @@ import {
   type ExtensionSettingsSecretTargetRef,
 } from "./extension-settings-secret-store.js";
 
-/** Values admitted by the flat, schema-2 extension-settings contract. */
-export type ExtensionSettingValue = string | boolean | number;
+export type { ExtensionSettingValue } from "./extension-settings-schema.js";
 export type ExtensionSettingsTargetKind = "provider" | "hook" | "runtime";
 export interface ExtensionSettingsTargetRef extends ExtensionSettingsSecretTargetRef {
   kind: ExtensionSettingsTargetKind;
@@ -23,7 +29,7 @@ export interface ExtensionSettingsRecord {
 
 /** Native project.yaml state. Its storage schema is deliberately independent of pack schema. */
 export interface ExtensionSettingsState {
-  schema: 1;
+  schema: 1 | 2;
   revision: number;
   /** Opaque identity paired with the owner-only secret envelope. */
   commitId?: string;
@@ -106,8 +112,20 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-function isPrimitiveValue(value: unknown): value is ExtensionSettingValue {
-  return typeof value === "string" || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value));
+function isPrimitiveValue(value: unknown): value is Exclude<ExtensionSettingValue, string[]> {
+  return !Array.isArray(value) && isExtensionSettingValue(value);
+}
+
+function cloneValue(value: ExtensionSettingValue): ExtensionSettingValue {
+  return Array.isArray(value) ? [...value] : value;
+}
+
+function normalizeStoredValue(value: unknown, schema: 1 | 2): ExtensionSettingValue | undefined {
+  if (Array.isArray(value)) {
+    if (schema !== 2) return undefined;
+    return normalizeDurableMultiEnumValue(value);
+  }
+  return isPrimitiveValue(value) ? value : undefined;
 }
 
 const SETTING_FIELD_RE = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
@@ -120,7 +138,7 @@ function cloneRecord(record: ExtensionSettingsRecord): ExtensionSettingsRecord {
   // Keep unknown future public keys intact when publishing a new revision. The
   // public-state normalizer remains responsible for rejecting unsafe values.
   const copy = structuredClone(record) as ExtensionSettingsRecord;
-  copy.values = { ...record.values };
+  copy.values = Object.fromEntries(Object.entries(record.values).map(([key, value]) => [key, cloneValue(value)]));
   return copy;
 }
 
@@ -148,7 +166,8 @@ function assertState(state: unknown): asserts state is ExtensionSettingsState {
   // relying on a property access that remains `unknown` to TypeScript.
   const revision = isPlainObject(state) ? state.revision : undefined;
   const commitId = isPlainObject(state) ? state.commitId : undefined;
-  if (!isPlainObject(state) || state.schema !== 1 || typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0
+  const schema = isPlainObject(state) ? state.schema : undefined;
+  if (!isPlainObject(state) || (schema !== 1 && schema !== 2) || typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0
     || (commitId !== undefined && !isExtensionSettingsCommitId(commitId)) || !isPlainObject(state.targets)) {
     throw new ExtensionSettingsUnavailableError();
   }
@@ -156,7 +175,21 @@ function assertState(state: unknown): asserts state is ExtensionSettingsState {
     if (!isPlainObject(record) || (record.enabled !== undefined && typeof record.enabled !== "boolean") || !isPlainObject(record.values)) {
       throw new ExtensionSettingsUnavailableError();
     }
-    if (!Object.values(record.values).every(isPrimitiveValue)) throw new ExtensionSettingsUnavailableError();
+    const entries = Object.entries(record.values);
+    if (entries.length > 64) throw new ExtensionSettingsUnavailableError();
+    let selectedCount = 0;
+    let selectedBytes = 0;
+    for (const [key, value] of entries) {
+      if (!isSafeSettingField(key)) throw new ExtensionSettingsUnavailableError();
+      const normalized = normalizeStoredValue(value, schema);
+      if (normalized === undefined) throw new ExtensionSettingsUnavailableError();
+      if (Array.isArray(normalized)) {
+        selectedCount += normalized.length;
+        selectedBytes += normalized.reduce((total, member) => total + Buffer.byteLength(member, "utf8"), 0);
+      }
+    }
+    if (selectedCount > MAX_EXTENSION_SETTINGS_MULTI_ENUM_SELECTED_VALUES_PER_TARGET
+      || selectedBytes > MAX_EXTENSION_SETTINGS_MULTI_ENUM_SELECTED_BYTES_PER_TARGET) throw new ExtensionSettingsUnavailableError();
   }
 }
 
@@ -168,9 +201,20 @@ function assertMutation(mutation: ExtensionSettingsMutation): void {
   if (mutation.enabled !== undefined && typeof mutation.enabled !== "boolean") throw new ExtensionSettingsMutationError();
   if (mutation.values !== undefined) {
     if (!isPlainObject(mutation.values)) throw new ExtensionSettingsMutationError();
+    let selectedCount = 0;
+    let selectedBytes = 0;
     for (const [key, value] of Object.entries(mutation.values)) {
-      if (!isSafeSettingField(key) || (value !== undefined && !isPrimitiveValue(value))) throw new ExtensionSettingsMutationError();
+      if (!isSafeSettingField(key)) throw new ExtensionSettingsMutationError();
+      if (value === undefined) continue;
+      const normalized = normalizeStoredValue(value, 2);
+      if (normalized === undefined) throw new ExtensionSettingsMutationError();
+      if (Array.isArray(normalized)) {
+        selectedCount += normalized.length;
+        selectedBytes += normalized.reduce((total, member) => total + Buffer.byteLength(member, "utf8"), 0);
+      }
     }
+    if (selectedCount > MAX_EXTENSION_SETTINGS_MULTI_ENUM_SELECTED_VALUES_PER_TARGET
+      || selectedBytes > MAX_EXTENSION_SETTINGS_MULTI_ENUM_SELECTED_BYTES_PER_TARGET) throw new ExtensionSettingsMutationError();
   }
   if (mutation.secrets !== undefined) {
     if (!isPlainObject(mutation.secrets)) throw new ExtensionSettingsMutationError();
@@ -233,12 +277,15 @@ export class ExtensionSettingsStore {
     const sources: EffectiveExtensionSettings["sources"] = Object.create(null) as EffectiveExtensionSettings["sources"];
 
     for (const [key, value] of Object.entries(defaults)) {
-      if (!isSafeSettingField(key) || !isPrimitiveValue(value) || secretFields.has(key)) continue;
-      values[key] = value;
+      const normalized = normalizeStoredValue(value, 2);
+      if (!isSafeSettingField(key) || normalized === undefined || secretFields.has(key)) continue;
+      values[key] = cloneValue(normalized);
       sources[key] = "default";
     }
     if (!hasProjectRecord) {
       for (const [key, value] of Object.entries(options.legacyValues ?? {})) {
+        // Legacy PackStore state is scalar-only: arrays have no reviewed
+        // descriptor meaning before a project target record exists.
         if (!isSafeSettingField(key) || !isPrimitiveValue(value) || secretFields.has(key)) continue;
         values[key] = value;
         sources[key] = "legacy";
@@ -246,7 +293,7 @@ export class ExtensionSettingsStore {
     }
     for (const [key, value] of Object.entries(record?.values ?? {})) {
       if (!isSafeSettingField(key) || secretFields.has(key)) continue;
-      values[key] = value;
+      values[key] = cloneValue(value);
       sources[key] = "project";
     }
 
@@ -268,7 +315,7 @@ export class ExtensionSettingsStore {
     // getEffective performs the project-wide pairing check before exposing any
     // public overlay or secret-presence metadata.
     const effective = this.getEffective(ref, defaults, options);
-    const values = { ...effective.values };
+    const values = Object.fromEntries(Object.entries(effective.values).map(([key, value]) => [key, cloneValue(value)])) as Record<string, ExtensionSettingValue>;
     for (const field of options.secretFields ?? []) {
       const value = this.secretStore.getForRuntime(ref, field);
       if (value !== undefined) values[field] = value;
@@ -310,6 +357,9 @@ export class ExtensionSettingsStore {
     this.secretStore.assertCommitId(current.commitId);
     if (current.revision !== expectedRevision) throw new ExtensionSettingsRevisionConflictError();
     const candidate = cloneState(current);
+    // Schema 1 remains readable for legacy public/secret pairs, but every
+    // successful mutation publishes the native-array-capable schema 2.
+    candidate.schema = 2;
     candidate.revision++;
     // Every mutation, including a public-only one, gets a fresh identity. The
     // secret store publishes an envelope even if none of its field bytes change.
@@ -321,10 +371,16 @@ export class ExtensionSettingsStore {
       if (mutation.enabled !== undefined) next.enabled = mutation.enabled;
       for (const [field, value] of Object.entries(mutation.values ?? {})) {
         if (value === undefined) delete next.values[field];
-        else next.values[field] = value;
+        else {
+          const normalized = normalizeStoredValue(value, 2);
+          // assertMutation validated this before any public publication.
+          if (normalized === undefined) throw new ExtensionSettingsMutationError();
+          next.values[field] = cloneValue(normalized);
+        }
       }
       candidate.targets[key] = next;
     }
+    assertState(candidate);
 
     // The config store owns atomic YAML persistence and preserves unrelated
     // fields. Public state is deliberately published before secrets: reversing
