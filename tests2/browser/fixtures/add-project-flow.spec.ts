@@ -52,7 +52,10 @@ export default { decide(ctx) {
   return { kind: "request", request: {
     version: 1, key: "add-project-browser", title: "Choose import mode", question: ${JSON.stringify(REAL_IMPORT_QUESTION)},
     options: [{ value: "safe", label: "Safe mode" }, { value: "fast", label: "Fast mode" }], other: { maxLength: 40 },
-    default: { kind: "option", value: "safe" }, scope: "project", deadlineAt: deadline(), effect: { kind: "none" },
+    requestedClass: "consent-required", scope: "project", deadlineAt: deadline(),
+    effect: { kind: "proposal", proposals: {
+      safe: { proposalType: "role", args: { name: "browser-import-role", label: "Browser import role", prompt: "A role applied after import review." } },
+    }, noEffectValues: ["fast", "other"] },
   } };
 } };
 `);
@@ -232,7 +235,10 @@ test.describe("Add Project flow (UI)", () => {
 			expect(askPosts).toBe(0);
 
 			await decisions.locator("label.ask-option").filter({ hasText: "Safe mode" }).click();
-			await expect(pathInput).not.toBeVisible({ timeout: 10_000 });
+			const proposal = decisions.locator('[data-testid="project-import-proposal"]');
+			await expect(proposal).toBeVisible({ timeout: 10_000 });
+			await expect(proposal).toContainText("browser-import-role");
+			await expect(proposal.locator('[data-testid="project-import-proposal-fields"]')).toContainText("Browser import role");
 			const audit = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-decision-requests`);
 			expect(audit.status).toBe(200);
 			const records = (await audit.json()).requests;
@@ -240,8 +246,15 @@ test.describe("Add Project flow (UI)", () => {
 				expect.objectContaining({ status: "resolved", request: expect.objectContaining({ question: REAL_IMPORT_QUESTION }), resolution: { value: { kind: "option", value: "safe" } } }),
 			]));
 
+			await proposal.getByRole("button", { name: "Apply proposal" }).click();
+			await expect(proposal).toHaveCount(0, { timeout: 10_000 });
+			const roles = await apiFetch(`/api/roles?projectId=${encodeURIComponent(projectId)}`);
+			expect((await roles.json()).roles).toEqual(expect.arrayContaining([
+				expect.objectContaining({ name: "browser-import-role", label: "Browser import role" }),
+			]));
+
 			// Startup reconciliation and an HTTP retry use the same completed run;
-			// neither may ask again after the durable answer has been recorded.
+			// neither may ask again after the durable answer and review are recorded.
 			await gateway.restart();
 			const recovered = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-decision-requests`);
 			expect(recovered.status).toBe(200);

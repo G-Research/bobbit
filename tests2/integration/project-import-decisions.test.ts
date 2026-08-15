@@ -60,7 +60,7 @@ export default { decide(ctx) {
     options: [{ value: "draft", label: "Create draft" }, { value: "skip", label: "Skip" }], other: { maxLength: 40 },
     requestedClass: "consent-required", scope: "project", deadlineAt: deadline(),
     effect: { kind: "proposal", proposals: {
-      draft: { proposalType: "project", args: { name: "Imported project draft", projectId: ctx.projectId, build_command: "echo imported-draft" } },
+      draft: { proposalType: "role", args: { name: "imported-role", label: "Imported role", prompt: "A reviewed import role." } },
     }, noEffectValues: ["skip", "other"] },
   } };
 } };
@@ -231,25 +231,70 @@ test.describe("project import decisions — real gateway lifecycle", () => {
 			cookie = await mintOperatorCookie();
 			const proposals = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-proposals`, { headers: { Cookie: cookie } });
 			expect(proposals.status, await proposals.clone().text()).toBe(200);
-			const projected = (await readJson<{ proposals: Array<{ requestId: string; proposalType: string; fields: Record<string, unknown> }> }>(proposals)).proposals;
+			const projected = (await readJson<{ proposals: Array<{ requestId: string; proposalType: string; rev: number; fields: Record<string, unknown> }> }>(proposals)).proposals;
+			const draft = projected[0]!;
 			expect(projected).toEqual([
-				expect.objectContaining({ requestId: request!.id, proposalType: "project", fields: expect.objectContaining({ projectId, build_command: "echo imported-draft" }) }),
+				expect.objectContaining({ requestId: request!.id, proposalType: "role", rev: expect.any(Number), fields: expect.objectContaining({ projectId, name: "imported-role" }) }),
 			]);
-			// The extension has only seeded a project-owned draft. The established
-			// registered-project proposal acceptance primitives remain the sole
-			// mutation path and apply the projected fields only after this user action.
-			const fields = projected[0]!.fields;
-			const beforeAcceptance = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/config`);
-			expect((await readJson<any>(beforeAcceptance)).build_command).toBeUndefined();
-			const rename = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}`, {
-				method: "PUT", body: JSON.stringify({ name: fields.name }),
+			// Review identities come only from the durable project/import/request tuple.
+			// Neither a stale revision nor another project can apply this proposal.
+			const stale = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-proposals/${encodeURIComponent(draft.requestId)}/role/accept`, {
+				method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ rev: draft.rev + 1 }),
 			});
-			expect(rename.status).toBe(200);
-			const accepted = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/config`, {
-				method: "PUT", body: JSON.stringify({ build_command: fields.build_command }),
+			expect(stale.status).toBe(409);
+			expect(await readJson<any>(stale)).toMatchObject({ code: "STALE_PROPOSAL" });
+			const otherRoot = path.join(gateway.bobbitDir, `import-other-${Date.now()}`);
+			fs.mkdirSync(otherRoot, { recursive: true });
+			const other = await apiFetch("/api/projects", {
+				method: "POST", body: JSON.stringify({ name: `import-other-${Date.now()}`, rootPath: otherRoot, __e2e_seed_skip__: true }),
 			});
-			expect(accepted.status).toBe(200);
-			expect((await readJson<any>(await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/config`))).build_command).toBe("echo imported-draft");
+			const otherProject = await readJson<any>(other);
+			try {
+				const crossProject = await apiFetch(`/api/projects/${encodeURIComponent(otherProject.id)}/import-proposals/${encodeURIComponent(draft.requestId)}/role/accept`, {
+					method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ rev: draft.rev }),
+				});
+				expect(crossProject.status).toBe(404);
+			} finally {
+				await apiFetch(`/api/projects/${encodeURIComponent(otherProject.id)}`, { method: "DELETE" }).catch(() => {});
+				fs.rmSync(otherRoot, { recursive: true, force: true });
+			}
+			const accepted = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-proposals/${encodeURIComponent(draft.requestId)}/role/accept`, {
+				method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ rev: draft.rev }),
+			});
+			expect(accepted.status, await accepted.clone().text()).toBe(201);
+			expect(await readJson<any>(accepted)).toMatchObject({ status: "accepted", role: { name: "imported-role", label: "Imported role" } });
+			const roles = await apiFetch(`/api/roles?projectId=${encodeURIComponent(projectId)}`);
+			expect((await readJson<any>(roles)).roles).toEqual(expect.arrayContaining([expect.objectContaining({ name: "imported-role", label: "Imported role" })]));
+			expect((await readJson<any>(await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-proposals`, { headers: { Cookie: cookie } }))).proposals).toEqual([]);
+
+			// A second independently registered import proves reject removes only its
+			// own draft and never applies its proposed role.
+			const rejectRoot = path.join(gateway.bobbitDir, `import-reject-${Date.now()}`);
+			fs.mkdirSync(rejectRoot, { recursive: true });
+			const rejecting = await apiFetch("/api/projects", {
+				method: "POST", body: JSON.stringify({ name: `import-reject-${Date.now()}`, rootPath: rejectRoot, __e2e_seed_skip__: true }),
+			});
+			const rejectingProject = await readJson<any>(rejecting);
+			try {
+				expect((await apiFetch(`/api/projects/${encodeURIComponent(rejectingProject.id)}/extension-grants`, {
+					method: "PUT", body: JSON.stringify({ packId: PACK_ID, hookId: PROPOSAL_HOOK, capability: "decide" }),
+				})).status).toBe(200);
+				const rejectRequest = (await importRequests(rejectingProject.id)).find(candidate => candidate.request.question === TRACE_SECRET)!;
+				expect((await apiFetch(`/api/projects/${encodeURIComponent(rejectingProject.id)}/import-decision-requests/${encodeURIComponent(rejectRequest.id)}/answer`, {
+					method: "POST", body: JSON.stringify({ value: { kind: "option", value: "draft" } }),
+				})).status).toBe(200);
+				const rejectedDraft = (await readJson<any>(await apiFetch(`/api/projects/${encodeURIComponent(rejectingProject.id)}/import-proposals`, { headers: { Cookie: cookie } }))).proposals[0];
+				const rejected = await apiFetch(`/api/projects/${encodeURIComponent(rejectingProject.id)}/import-proposals/${encodeURIComponent(rejectedDraft.requestId)}/role/reject`, {
+					method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ rev: rejectedDraft.rev }),
+				});
+				expect(rejected.status).toBe(200);
+				expect(await readJson<any>(rejected)).toMatchObject({ status: "rejected" });
+				expect((await readJson<any>(await apiFetch(`/api/roles?projectId=${encodeURIComponent(rejectingProject.id)}`))).roles)
+					.not.toEqual(expect.arrayContaining([expect.objectContaining({ name: "imported-role" })]));
+			} finally {
+				await apiFetch(`/api/projects/${encodeURIComponent(rejectingProject.id)}`, { method: "DELETE" }).catch(() => {});
+				fs.rmSync(rejectRoot, { recursive: true, force: true });
+			}
 
 			const trace = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-decision-trace?limit=1`, { headers: { Cookie: cookie } });
 			expect(trace.status, await trace.clone().text()).toBe(200);
