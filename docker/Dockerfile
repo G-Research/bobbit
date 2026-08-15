@@ -68,32 +68,40 @@ RUN npm install -g jiti@2.7.0 typebox@1.1.38 @sinclair/typebox@0.34.41 --no-audi
 ARG BOBBIT_RUNTIME_SCHEMA_VERSION=2
 LABEL bobbit.runtime-schema=${BOBBIT_RUNTIME_SCHEMA_VERSION}
 
-# The sandbox SDK launcher is deliberately pinned to the server dependency.
-# It discovers only the installed package's bundled platform binary; it never
-# falls back to a globally installed `claude` command.
-ARG CLAUDE_AGENT_SDK_VERSION=0.3.222
-RUN npm install -g @anthropic-ai/claude-agent-sdk@${CLAUDE_AGENT_SDK_VERSION} --no-audit --no-fund 2>/dev/null \
-    && printf '%s\n' '#!/bin/sh' 'set -eu' 'case "$(dpkg --print-architecture)" in' \
-      '  amd64) package="@anthropic-ai/claude-agent-sdk-linux-x64" ;;' \
-      '  arm64) package="@anthropic-ai/claude-agent-sdk-linux-arm64" ;;' \
-      '  *) echo "unsupported SDK sandbox architecture" >&2; exit 127 ;;' 'esac' \
-      'binary="$(npm root -g)/$package/claude"' 'if [ ! -x "$binary" ]; then' \
-      '  echo "Bobbit Claude Agent SDK binary is unavailable in the sandbox image" >&2' '  exit 127' 'fi' \
-      'exec "$binary" "$@"' > /usr/local/bin/bobbit-claude-agent-sdk \
-    && mkdir -p /usr/local/lib/bobbit \
-    && printf '%s\n' 'export * from "@anthropic-ai/claude-agent-sdk";' > /usr/local/lib/bobbit/claude-agent-sdk.mjs \
-    && chmod 0755 /usr/local/bin/bobbit-claude-agent-sdk
-LABEL bobbit.claude-agent-sdk-version=${CLAUDE_AGENT_SDK_VERSION}
-
-# TypeScript compiler — needed for `npm run check` in worktrees.
-# Must run as root (before USER node) to write to /usr/local/lib/node_modules/.
-RUN npm install -g typescript --no-audit --no-fund 2>/dev/null
-
 # Keep subscription-bearing Claude SDK processes on a distinct, fixed
 # unprivileged UID. Model-invocable Pi/tool processes remain `node`; Linux
 # same-UID /proc access must not expose the SDK process environment to them.
 RUN groupadd --gid 1001 bobbit-sdk \
     && useradd --uid 1001 --gid bobbit-sdk --create-home --shell /usr/sbin/nologin bobbit-sdk
+
+# The sandbox SDK launcher is deliberately pinned to the server dependency.
+# npm nests this optional architecture package below the SDK package, so resolve
+# its exact installed path at build time, copy it into Bobbit-owned storage, and
+# make the wrapper independent of both project and global package layout.
+ARG CLAUDE_AGENT_SDK_VERSION=0.3.222
+ARG CLAUDE_CODE_VERSION=2.1.222
+RUN npm install -g @anthropic-ai/claude-agent-sdk@${CLAUDE_AGENT_SDK_VERSION} --no-audit --no-fund 2>/dev/null \
+    && sdk_root="$(npm root -g)/@anthropic-ai/claude-agent-sdk" \
+    && case "$(dpkg --print-architecture)" in \
+      amd64) package="@anthropic-ai/claude-agent-sdk-linux-x64" ;; \
+      arm64) package="@anthropic-ai/claude-agent-sdk-linux-arm64" ;; \
+      *) echo "unsupported SDK sandbox architecture" >&2; exit 127 ;; \
+    esac \
+    && binary="$sdk_root/node_modules/$package/claude" \
+    && node -e 'const root = process.argv[1], pkg = process.argv[2], expected = process.argv[3]; for (const file of [`${root}/package.json`, `${root}/node_modules/${pkg}/package.json`]) { if (require(file).version !== expected) process.exit(1); }' "$sdk_root" "$package" "$CLAUDE_AGENT_SDK_VERSION" \
+    && test -x "$binary" \
+    && install -D -m 0755 "$binary" /usr/local/lib/bobbit/claude-agent-sdk/claude \
+    && printf '%s\n' '#!/bin/sh' 'set -eu' 'exec /usr/local/lib/bobbit/claude-agent-sdk/claude "$@"' > /usr/local/bin/bobbit-claude-agent-sdk \
+    && printf '%s\n' 'export * from "@anthropic-ai/claude-agent-sdk";' > /usr/local/lib/bobbit/claude-agent-sdk.mjs \
+    && chmod 0755 /usr/local/bin/bobbit-claude-agent-sdk \
+    && version="$(su -s /bin/sh -c '/usr/local/bin/bobbit-claude-agent-sdk --version' bobbit-sdk)" \
+    && test "$version" = "$CLAUDE_CODE_VERSION (Claude Code)"
+LABEL bobbit.claude-agent-sdk-version=${CLAUDE_AGENT_SDK_VERSION} \
+      bobbit.claude-code-version=${CLAUDE_CODE_VERSION}
+
+# TypeScript compiler — needed for `npm run check` in worktrees.
+# Must run as root (before USER node) to write to /usr/local/lib/node_modules/.
+RUN npm install -g typescript --no-audit --no-fund 2>/dev/null
 
 # The SDK runs as bobbit-sdk with a separate HOME, so give that user the same
 # fixed repository trust scope as node without copying any user config/credentials.
