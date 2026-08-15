@@ -166,7 +166,18 @@ export interface StoredDecisionRequest {
 	deadlineAt: string;
 	resolvedAt?: string;
 	resolution?: ValidatedDecisionResolution;
-	proposal?: { status: "created" | "failed"; type: ProposalType; rev?: number; code?: "PROPOSAL_SEED_FAILED" };
+	/**
+	 * A proposal is independently reviewable after the decision has settled.
+	 * Terminal review states are durable so an import replay cannot resurrect a
+	 * rejected draft or apply the same reviewed draft twice.
+	 */
+	proposal?: {
+		status: "created" | "failed" | "accepted" | "rejected";
+		type: ProposalType;
+		rev?: number;
+		decidedAt?: string;
+		code?: "PROPOSAL_SEED_FAILED";
+	};
 	continuationState: "pending" | "delivered" | "skipped";
 	continuationAttempts: number;
 }
@@ -487,6 +498,11 @@ export class DecisionRequestStore {
 		return this.commit(next => {
 			const current = next.requests[id];
 			if (!current || !isTerminalStatus(current.status)) return false;
+			// A reviewed import draft has one terminal human decision. Keep seed
+			// bookkeeping flexible, but make accept/reject a compare-and-set from
+			// the exact created draft so retries cannot overwrite a prior outcome.
+			if ((proposal?.status === "accepted" || proposal?.status === "rejected")
+				&& (current.proposal?.status !== "created" || current.proposal.rev !== proposal.rev)) return false;
 			current.proposal = proposal ? clone(proposal) : undefined;
 			return true;
 		}) ?? false;
