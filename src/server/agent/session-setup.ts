@@ -35,7 +35,7 @@ import { EventBuffer } from "./event-buffer.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { applyPromptConditionals } from "./prompt-conditionals.js";
 import { getLegacyTestRuntimeFlags } from "../legacy-test-runtime-flags.js";
-import type { PersistedSession, SessionStore } from "./session-store.js";
+import type { PersistedSession, SessionStore, VerificationContainerReference } from "./session-store.js";
 import {
 	sessionFileRead,
 	sessionFileRenameAtomic,
@@ -268,6 +268,8 @@ export const DELEGATE_SPAWN_TIMEOUT_MS = 30_000;
 export interface SandboxWiringOptions {
 	projectId?: string;
 	goalId?: string;
+	/** Internal-only frozen-source sidecar identity for verification reviewers. */
+	verificationContainer?: VerificationContainerReference;
 	sandboxBranch?: string;
 	sandboxBaseBranch?: string;
 	/** Repo/worktree-relative cwd offset to preserve after remapping into /workspace* paths. */
@@ -354,6 +356,8 @@ export interface SessionSetupPlan {
 	branch?: string;
 	repoWorktrees?: Record<string, string>;
 	sandboxed?: boolean;
+	/** Internal-only frozen-source sidecar identity for verification reviewers. */
+	verificationContainer?: VerificationContainerReference;
 	role?: string;
 	staffId?: string;
 	accessory?: string;
@@ -1178,6 +1182,7 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		accessory: plan.accessory,
 		nonInteractive: plan.nonInteractive,
 		sandboxed: plan.sandboxed,
+		verificationContainer: plan.verificationContainer,
 		delegateOf: plan.delegateOf,
 		// Durable delegate task — restored into the system prompt on reboot so the
 		// delegate comes back live with its task intact (mirrors a worker's goal spec).
@@ -1230,6 +1235,7 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 				sandboxBranch: plan.sandboxBranch,
 				sandboxBaseBranch: plan.sandboxBaseBranch,
 				sandboxCwdOffset: plan.sandboxCwdOffset,
+				verificationContainer: plan.verificationContainer,
 			}),
 			{ retries: 1, delays: [1000], label: "wireSandbox", sessionId: plan.id, nonRetryable: isUnresolvedHeadWorktreeError },
 		).then(applied => {
@@ -1481,6 +1487,7 @@ export async function executeWorktreeAsync(
 				sandboxBranch: plan.sandboxBranch,
 				sandboxBaseBranch: plan.sandboxBaseBranch,
 				sandboxCwdOffset: plan.sandboxCwdOffset,
+				verificationContainer: plan.verificationContainer,
 			}),
 			{ retries: 1, delays: [1000], label: "wireSandbox", sessionId: plan.id, nonRetryable: isUnresolvedHeadWorktreeError },
 		).then(applied => {
