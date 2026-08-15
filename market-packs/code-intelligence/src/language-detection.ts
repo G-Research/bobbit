@@ -19,6 +19,8 @@ export interface LanguageDetectionEvidence {
 	fileCount: number;
 	matchedGlobs: readonly string[];
 	rootMarkers: readonly string[];
+	/** The bounded scan ended before it could prove this component was complete. */
+	truncated?: boolean;
 }
 
 /**
@@ -51,7 +53,7 @@ export function detectComponentLanguages(
 	const globs = new Map<AstGrepLanguageAlias, Set<string>>();
 	const rootMarkers = new Set<string>();
 	const rootPath = path.resolve(input.root);
-	walkLanguageDetectionPaths([input.root], seams, (filePath) => {
+	const traversal = walkLanguageDetectionPaths([input.root], seams, (filePath) => {
 		if (path.dirname(path.resolve(filePath)) === rootPath) rootMarkers.add(path.basename(filePath));
 		collectFileEvidence(filePath, counts, globs);
 	});
@@ -69,6 +71,7 @@ export function detectComponentLanguages(
 				fileCount,
 				matchedGlobs: [...(globs.get(language.id as AstGrepLanguageAlias) ?? [])].sort(),
 				rootMarkers: matchedMarkers,
+				truncated: traversal.truncated,
 			},
 			structuralSearch: language.structuralSearch.state === "supported" ? "available" : "unsupported",
 			lsp: language.lsp ? "disabled" : "unsupported",
