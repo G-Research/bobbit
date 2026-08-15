@@ -1,5 +1,5 @@
 name: lsp_references
-description: "Find references through an enabled language service."
+description: "Read-only precise reference navigation through a ready LSP; read cited source and callers before review findings."
 summary: "Read-only LSP reference lookup"
 params: ["component?", "language?", path, position]
 provider:

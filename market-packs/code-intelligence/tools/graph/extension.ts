@@ -6,6 +6,14 @@ import os from "node:os";
 import path from "node:path";
 
 const MAX_OUTPUT_BYTES = 48 * 1024;
+const GRAPH_REVIEW_SNIPPET = "Graph: read-only breadth leads only; stale/base-fallback results cannot establish current impact—read cited source and callers.";
+const GRAPH_REVIEW_GUIDELINES = [
+	"Graph tools are read-only and return bounded component-labelled results.",
+	"Use graph results as breadth leads, not proof of current impact.",
+	"Stale or base-fallback results cannot establish current impact; verify current source before relying on them.",
+	"Before a finding or approval, use read on every cited source and caller.",
+	"v1 has no cross-repository edges; follow results only within their labelled component.",
+] as const;
 
 type Json = Record<string, unknown>;
 
@@ -119,6 +127,8 @@ function registerGraphTool(pi: any, sessionId: string, spec: {
 		name: spec.name,
 		label: spec.label,
 		description: spec.description,
+		promptSnippet: GRAPH_REVIEW_SNIPPET,
+		promptGuidelines: GRAPH_REVIEW_GUIDELINES,
 		parameters: spec.parameters,
 		async execute(_toolCallId: string, args: Record<string, unknown>) {
 			try {
@@ -146,32 +156,32 @@ const extension: ExtensionFactory = (pi: any) => {
 	const maxDepth = Type.Optional(Type.Number({ minimum: 1, maximum: GRAPH_QUERY_CAPS.depth }));
 	registerGraphTool(pi, sessionId, {
 		name: "graph_affected", label: "Graph Affected", operation: "affected",
-		description: "Read-only affected callers and likely impact for a graph symbol. Results are leads requiring source verification.",
+		description: "Read-only graph breadth leads for affected callers and likely impact; read cited source and callers before review findings.",
 		parameters: Type.Object({ symbol: Type.String({ minLength: 1, maxLength: 2_000 }), component, maxResults, maxDepth }, { additionalProperties: false }),
 	});
 	registerGraphTool(pi, sessionId, {
 		name: "graph_explain", label: "Graph Explain", operation: "explain",
-		description: "Read-only graph node explanation with component, revision, freshness, and bounded relationships.",
+		description: "Read-only graph breadth leads for node relationships; read cited source and callers before review findings.",
 		parameters: Type.Object({ node: Type.String({ minLength: 1, maxLength: 2_000 }), component, maxResults }, { additionalProperties: false }),
 	});
 	registerGraphTool(pi, sessionId, {
 		name: "graph_path", label: "Graph Path", operation: "path",
-		description: "Read-only bounded graph paths between two nodes; v1 never creates cross-repository edges.",
+		description: "Read-only graph breadth leads for bounded component paths; read cited source and callers before review findings.",
 		parameters: Type.Object({ from: Type.String({ minLength: 1, maxLength: 2_000 }), to: Type.String({ minLength: 1, maxLength: 2_000 }), component, maxDepth }, { additionalProperties: false }),
 	});
 	registerGraphTool(pi, sessionId, {
 		name: "graph_neighbors", label: "Graph Neighbors", operation: "neighbors",
-		description: "Read-only bounded incoming or outgoing neighbours for a graph node.",
+		description: "Read-only graph breadth leads for node neighbours; read cited source and callers before review findings.",
 		parameters: Type.Object({ node: Type.String({ minLength: 1, maxLength: 2_000 }), direction: Type.Optional(Type.Union([Type.Literal("incoming"), Type.Literal("outgoing"), Type.Literal("both")])), component, maxResults, maxDepth }, { additionalProperties: false }),
 	});
 	registerGraphTool(pi, sessionId, {
 		name: "graph_query", label: "Graph Query", operation: "query",
-		description: "Read-only graph search. Code-tier results are default; includeDocs opts into documentation for this request only.",
+		description: "Read-only graph breadth search; read cited source and callers before review findings. Code-tier results are default.",
 		parameters: Type.Object({ query: Type.String({ minLength: 1, maxLength: 2_000 }), component, components: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 256 }), { maxItems: GRAPH_QUERY_CAPS.components })), includeDocs: Type.Optional(Type.Boolean()), maxResults }, { additionalProperties: false }),
 	});
 	registerGraphTool(pi, sessionId, {
 		name: "graph_status", label: "Graph Status", operation: "status",
-		description: "Read-only graph freshness, lifecycle availability, version, and timing status without exposing graph artifacts.",
+		description: "Read-only graph freshness; stale or base-fallback status cannot prove current impact.",
 		parameters: Type.Object({ component, components: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 256 }), { maxItems: GRAPH_QUERY_CAPS.components })) }, { additionalProperties: false }),
 	});
 };

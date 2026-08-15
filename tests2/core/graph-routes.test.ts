@@ -120,6 +120,10 @@ describe("graph routes — host boundary caps and errors", () => {
 				const properties = tool.parameters.properties as Record<string, { maximum?: number }>;
 				if (properties.maxResults) assert.equal(properties.maxResults.maximum, GRAPH_QUERY_CAPS.results);
 				if (properties.maxDepth) assert.equal(properties.maxDepth.maximum, GRAPH_QUERY_CAPS.depth);
+				assert.ok(tool.description.includes("Read-only"));
+				assert.ok(tool.promptSnippet.length <= 160, `${tool.name} prompt snippet must remain bounded`);
+				assert.match(tool.promptSnippet, /breadth leads only; stale\/base-fallback results cannot establish current impact/);
+				assert.ok(tool.promptGuidelines.includes("Before a finding or approval, use read on every cited source and caller."));
 			}
 			assert.equal("maxPaths" in byName.get("graph_path").parameters.properties, false);
 

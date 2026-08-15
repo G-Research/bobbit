@@ -1,5 +1,5 @@
 name: ast_grep
-description: "Search syntax trees read-only. Prefer grep for text/regex and read for a known file."
+description: "Read-only structural search; read cited source and callers before review findings or approval."
 summary: "Read-only structural code search"
 params: [paths?, pattern, language?, strictness?]
 provider:

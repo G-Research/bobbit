@@ -1,7 +1,7 @@
 name: graph_affected
 group: Graph
 summary: Find bounded callers and likely impact for a symbol or source node.
-description: Read-only Graphify affected-caller and impact lookup. Results are component-labelled leads that require source verification.
+description: Read-only Graphify breadth leads for affected callers and likely impact; read cited source and callers before review findings.
 params: [symbol, component, maxResults, maxDepth]
 provider:
   type: bobbit-extension

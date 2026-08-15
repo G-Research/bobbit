@@ -1,5 +1,5 @@
 name: lsp_status
-description: "Report the truthful language-service status for a component and language."
+description: "Read-only LSP readiness; only ready results support precise navigation, then read cited source."
 summary: "Read-only LSP capability status"
 params: ["component?", language]
 provider:

@@ -55,18 +55,22 @@ const positionParameter = Type.Object({
 	line: Type.Integer({ minimum: 0, maximum: 1_000_000 }),
 	character: Type.Integer({ minimum: 0, maximum: 1_000_000 }),
 }, { description: "Zero-based LSP position." });
+const LSP_REVIEW_SNIPPET = "LSP: read-only precise navigation only when ready; read cited source and callers before findings or approval.";
+const LSP_REVIEW_GUIDELINES = [
+	"LSP is read-only: it never edits files, starts, or installs a language server.",
+	"Use LSP for precise navigation only when the returned capability is lsp and status is ready.",
+	"An unavailable LSP never falls back to structural search; use grep, read, or ast_grep separately.",
+	"Before a finding or approval, use read on every cited definition, reference, source, and caller.",
+	"Paths must stay below the linked-worktree component root.",
+];
 
 function register(pi: Parameters<ExtensionFactory>[0], name: string, label: string, description: string, action: LspToolAction, parameters: ReturnType<typeof Type.Object>, options: LspExtensionOptions) {
 	pi.registerTool({
 		name,
 		label,
 		description,
-		promptSnippet: "Read-only LSP query. It never edits files, starts, or installs a language server.",
-		promptGuidelines: [
-			"Use LSP results only when the returned capability is lsp and status is ready.",
-			"An unavailable LSP never falls back to structural search; use grep, read, or ast_grep separately.",
-			"Paths must stay below the linked-worktree component root.",
-		],
+		promptSnippet: LSP_REVIEW_SNIPPET,
+		promptGuidelines: LSP_REVIEW_GUIDELINES,
 		parameters,
 		async execute(_toolCallId, params) {
 			const result = response(action, params as Record<string, unknown>, options);
@@ -81,15 +85,18 @@ function register(pi: Parameters<ExtensionFactory>[0], name: string, label: stri
  */
 export const createLspExtension = (options: LspExtensionOptions = {}): ExtensionFactory => (pi) => {
 	if (!options.adapterOptions) return;
-	register(pi, "lsp_definition", "LSP Definition", "Find a definition through an enabled language service.", "definition", Type.Object({ component: componentParameter, language: languageParameter, path: pathParameter, position: positionParameter }), options);
-	register(pi, "lsp_references", "LSP References", "Find references through an enabled language service.", "references", Type.Object({ component: componentParameter, language: languageParameter, path: pathParameter, position: positionParameter }), options);
-	register(pi, "lsp_hover", "LSP Hover", "Read hover information through an enabled language service.", "hover", Type.Object({ component: componentParameter, language: languageParameter, path: pathParameter, position: positionParameter }), options);
+	register(pi, "lsp_definition", "LSP Definition", "Read-only precise definition navigation through an enabled, ready LSP; read cited source before review findings.", "definition", Type.Object({ component: componentParameter, language: languageParameter, path: pathParameter, position: positionParameter }), options);
+	register(pi, "lsp_references", "LSP References", "Read-only precise reference navigation through an enabled, ready LSP; read cited source and callers before review findings.", "references", Type.Object({ component: componentParameter, language: languageParameter, path: pathParameter, position: positionParameter }), options);
+	register(pi, "lsp_hover", "LSP Hover", "Read-only precise navigation through an enabled, ready LSP; read cited source before review findings.", "hover", Type.Object({ component: componentParameter, language: languageParameter, path: pathParameter, position: positionParameter }), options);
 	pi.registerTool({
 		name: "lsp_symbols",
 		label: "LSP Symbols",
-		description: "List document or workspace symbols through an enabled language service.",
-		promptSnippet: "Read-only LSP symbol query. It never edits files, starts, or installs a language server.",
-		promptGuidelines: ["Set scope to document with a path for one file, or workspace with a query for the selected language workspace."],
+		description: "Read-only precise symbol navigation through an enabled, ready LSP; read cited source before review findings.",
+		promptSnippet: LSP_REVIEW_SNIPPET,
+		promptGuidelines: [
+			...LSP_REVIEW_GUIDELINES,
+			"Set scope to document with a path for one file, or workspace with a query for the selected language workspace.",
+		],
 		parameters: Type.Union([
 			Type.Object({ component: componentParameter, language: languageParameter, scope: Type.Literal("document", { description: "List symbols in the specified path." }), path: pathParameter }),
 			Type.Object({ component: componentParameter, language: Type.String({ maxLength: 80 }), scope: Type.Literal("workspace", { description: "Search workspace symbols using query." }), query: Type.String({ maxLength: 500 }) }),
@@ -100,8 +107,8 @@ export const createLspExtension = (options: LspExtensionOptions = {}): Extension
 			return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }], details: result };
 		},
 	});
-	register(pi, "lsp_diagnostics", "LSP Diagnostics", "Read the last published diagnostics for one file; it never invents a clean result.", "diagnostics", Type.Object({ component: componentParameter, language: languageParameter, path: pathParameter }), options);
-	register(pi, "lsp_status", "LSP Status", "Report the truthful language-service status for this component and language.", "status", Type.Object({ component: componentParameter, language: Type.String({ maxLength: 80, description: "Declared language id." }) }), options);
+	register(pi, "lsp_diagnostics", "LSP Diagnostics", "Read-only diagnostics from an enabled, ready LSP; read the cited source before review findings.", "diagnostics", Type.Object({ component: componentParameter, language: languageParameter, path: pathParameter }), options);
+	register(pi, "lsp_status", "LSP Status", "Read-only LSP readiness; only ready results support precise navigation, then read cited source.", "status", Type.Object({ component: componentParameter, language: Type.String({ maxLength: 80, description: "Declared language id." }) }), options);
 };
 
 export default createLspExtension();

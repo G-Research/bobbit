@@ -39,11 +39,12 @@ export const createAstGrepExtension = (
 	pi.registerTool({
 		name: "ast_grep",
 		label: "AST Grep",
-		description: "Search syntax trees read-only. Prefer grep for text/regex and read for a known file.",
-		promptSnippet: "ast_grep: Read-only syntax-aware search; use grep for plain text and read for source context.",
+		description: "Read-only structural search; read cited source and callers before review findings or approval.",
+		promptSnippet: "ast_grep: Read-only structural leads; read cited source and callers before findings or approval.",
 		promptGuidelines: [
 			"Use ast_grep for syntax-aware patterns such as console.log($$$ARGS), never for edits.",
 			"Use grep for plain text, regex, or broad discovery; use read for a small known file or source context.",
+			"Before a finding or approval, use read on every cited source and caller; matches are leads, not proof.",
 			"Patterns must parse in the selected language. Results are relative to the session working directory.",
 		],
 		parameters: Type.Object({

@@ -1,7 +1,7 @@
 name: graph_explain
 group: Graph
 summary: Explain a graph node, its component, revision, and relationships.
-description: Read-only Graphify node explanation with capped relationships and source snippets.
+description: Read-only Graphify breadth leads for node relationships; read cited source and callers before review findings.
 params: [node, component, maxResults]
 provider:
   type: bobbit-extension

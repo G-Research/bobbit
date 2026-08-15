@@ -1,5 +1,5 @@
 name: lsp_definition
-description: "Find a definition through an enabled language service."
+description: "Read-only precise definition navigation through a ready LSP; read cited source before review findings."
 summary: "Read-only LSP definition lookup"
 params: ["component?", "language?", path, position]
 provider:
