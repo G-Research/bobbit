@@ -5949,9 +5949,9 @@ export class SessionManager {
 		// sessions map may already point at a staged successor, so deduping there
 		// would miss an occurrence still owned by promptOwner.
 		const source = opts?.source ?? "user";
-		// Server admissions always identify their source. Retain the historical
-		// no-options path solely for pre-reliable local callers and restored rows.
-		const reliableIntentId = opts?.intentId ?? (opts?.source === undefined ? undefined : randomUUID());
+		// Server admissions always identify their source. Compaction also requires
+		// a durable occurrence for historical no-options callers.
+		const reliableIntentId = opts?.intentId ?? (opts?.source !== undefined || session.isCompacting ? randomUUID() : undefined);
 		if (reliableIntentId) {
 			const existing = this.reliableIntentById(session, reliableIntentId);
 			if (existing || this.reliableIntentWasSettled(session, reliableIntentId)) {
@@ -6334,8 +6334,9 @@ export class SessionManager {
 		// synthesizeAttachmentText for the exact rule.
 		const dispatchText = synthesizeAttachmentText(opts?.modelText ?? text, opts?.images, opts?.attachments);
 		// A caller-provided ID always owns its occurrence. Server-originated calls
-		// identify their source; retain only the historical no-options local path.
-		const reliableIntentId = opts?.intentId ?? (opts?.source === undefined ? undefined : randomUUID());
+		// and compaction admissions mint one; retain only the historical idle
+		// no-options local path.
+		const reliableIntentId = opts?.intentId ?? (opts?.source !== undefined || session.isCompacting ? randomUUID() : undefined);
 		if (reliableIntentId) {
 			const duplicate = this.reliableIntentById(session, reliableIntentId);
 			if (duplicate || this.reliableIntentWasSettled(session, reliableIntentId)) {
@@ -6773,9 +6774,22 @@ export class SessionManager {
 		session.lastPromptSource = source;
 
 		// Every source-identified live steer carries a durable occurrence before
-		// its RPC can create an in-flight recovery record. The no-options branch is
-		// retained only for historical local callers.
-		const reliableIntentId = opts?.intentId ?? (opts?.source === undefined ? undefined : randomUUID());
+		// its RPC can create an in-flight recovery record. Compaction has the same
+		// durable boundary even for historical no-options callers.
+		const reliableIntentId = opts?.intentId ?? (opts?.source !== undefined || session.isCompacting ? randomUUID() : undefined);
+
+		// Error recovery owns admission before a reliable row can enter the live
+		// steer drain. Route through enqueuePrompt so its cap parking, timer
+		// cancellation, prefixing, and direct prompt dispatch keep this exact ID.
+		if (session.lastTurnErrored) {
+			return this.enqueuePrompt(sessionId, message, {
+				isSteered: true,
+				source,
+				author,
+				intentId: reliableIntentId,
+			});
+		}
+
 		if (reliableIntentId) {
 			const duplicate = this.reliableIntentById(session, reliableIntentId);
 			if (duplicate || this.reliableIntentWasSettled(session, reliableIntentId)) {
@@ -6794,31 +6808,6 @@ export class SessionManager {
 			if (targetTurn === "continuation" && session.status === "streaming") return this._dispatchSteer(session, [queued]);
 			if (session.status === "idle") this.drainQueue(session);
 			return Promise.resolve({ queued: true, id: queued.id });
-		}
-
-		// ERROR STATE GATING: same cap as enqueuePrompt. Idle-but-errored means
-		// there is no live turn to inject into, so we either dispatch a regular
-		// prefixed prompt (unstick) or park the steer in the queue (cap).
-		if (session.lastTurnErrored) {
-			const consec = session.consecutiveErrorTurns ?? 0;
-			if (consec >= MAX_CONSECUTIVE_ERROR_TURNS) {
-				console.log(
-					`[session-manager] Session ${sessionId} has ${consec} consecutive errored turns; parking live-steer. Human action required.`
-				);
-				// Persist to promptQueue so it survives Stop/Retry. drainQueue will
-				// pick it up after user Retry.
-				const queued = session.promptQueue.enqueue(message, { isSteered: true, source, author });
-				this.broadcastQueue(session);
-				return Promise.resolve({ queued: true, parked: true, id: queued.id });
-			}
-
-			const errSnippet = (session.lastTurnErrorMessage || "").slice(0, 200);
-			console.log(
-				`[session-manager] Session ${sessionId} implicit unstick from deliverLiveSteer (consecutiveErrorTurns=${consec}). Error: ${errSnippet}`
-			);
-			// enqueuePrompt handles its own state-clear + pending-timer cancel +
-			// prefix application; we just route through it with the raw message.
-			return this.enqueuePrompt(sessionId, message, { isSteered: true, source, author, intentId: reliableIntentId });
 		}
 
 		// Happy path: enqueue then dispatch via the single _dispatchSteer site.

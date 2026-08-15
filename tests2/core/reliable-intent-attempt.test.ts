@@ -144,6 +144,102 @@ describe("reliable intent dispatch attempt settlement", () => {
 		await dispatch;
 	});
 
+	it("parks a task-notification steer at the error cap without invoking Pi", async () => {
+		const { manager, session, prompt, steer, storeUpdates } = useHarness({
+			status: "idle",
+			lastTurnErrored: true,
+			lastTurnErrorMessage: "provider failure",
+			consecutiveErrorTurns: 3,
+		});
+
+		const result = await manager.deliverLiveSteer(session.id, "Task T completed", { source: "system" });
+		const [parked] = session.promptQueue.toArray() as any[];
+
+		expect(result).toMatchObject({ status: "queued" });
+		expect(parked).toMatchObject({
+			id: expect.any(String),
+			text: "Task T completed",
+			kind: "steer",
+			targetTurn: "next-turn",
+			deliveryState: "queued",
+			source: "system",
+		});
+		expect(session.inFlightSteerTexts).toEqual([]);
+		expect(prompt).not.toHaveBeenCalled();
+		expect(steer).not.toHaveBeenCalled();
+		expect(storeUpdates.some((patch) =>
+			Array.isArray(patch.messageQueue)
+			&& (patch.messageQueue as any[]).some((row) => row.id === parked.id),
+		)).toBe(true);
+	});
+
+	it("routes an errored task-notification steer through one prefixed reliable prompt", async () => {
+		const { manager, session, clock, prompt, steer } = useHarness({
+			status: "idle",
+			lastTurnErrored: true,
+			lastTurnErrorMessage: "provider retryable fault",
+			consecutiveErrorTurns: 2,
+		});
+		session.pendingAutoRetryTimer = clock.setTimeout(() => {
+			throw new Error("cancelled auto retry fired");
+		}, 60_000);
+
+		const result = await manager.deliverLiveSteer(session.id, "Task T completed", { source: "system" });
+		const [inFlight] = session.inFlightSteerTexts as any[];
+		const dispatchedText = prompt.mock.calls[0]?.[0];
+
+		expect(result).toMatchObject({ status: "dispatched" });
+		expect(inFlight).toMatchObject({
+			intentId: expect.any(String),
+			promptId: expect.any(String),
+			state: "dispatching",
+			kind: "steer",
+			source: "system",
+		});
+		expect(inFlight.promptId).toBe(inFlight.intentId);
+		expect(session.promptQueue.toArray()).toEqual([]);
+		expect(session.pendingAutoRetryTimer).toBeUndefined();
+		expect(session.lastTurnErrored).toBe(false);
+		expect(prompt).toHaveBeenCalledTimes(1);
+		expect(steer).not.toHaveBeenCalled();
+		expect(dispatchedText).toContain("[SYSTEM: previous turn failed with: provider retryable fault.");
+		expect(dispatchedText).toContain("Task T completed");
+	});
+
+	it("gives source-less prompt and steer admissions reliable carriers while compacting", async () => {
+		const { manager, session, prompt, steer } = useHarness({
+			status: "idle",
+			isCompacting: true,
+		});
+
+		await manager.enqueuePrompt(session.id, "queued while compacting");
+		await manager.deliverLiveSteer(session.id, "steer while compacting");
+		const rows = session.promptQueue.toArray() as any[];
+
+		expect(rows).toHaveLength(2);
+		expect(rows).toEqual(expect.arrayContaining([
+			expect.objectContaining({
+				id: expect.any(String),
+				text: "queued while compacting",
+				kind: "prompt",
+				targetTurn: "next-turn",
+				deliveryState: "queued",
+				sequence: expect.any(Number),
+			}),
+			expect.objectContaining({
+				id: expect.any(String),
+				text: "steer while compacting",
+				kind: "steer",
+				targetTurn: "next-turn",
+				deliveryState: "queued",
+				sequence: expect.any(Number),
+			}),
+		]));
+		expect(new Set(rows.map((row) => row.id)).size).toBe(2);
+		expect(prompt).not.toHaveBeenCalled();
+		expect(steer).not.toHaveBeenCalled();
+	});
+
 	it("gives a caller-intent-less live user steer one authoritative carrier that exact Pi echo settles", async () => {
 		const ack = barrier<any>();
 		const steer = vi.fn(() => ack.hold());
