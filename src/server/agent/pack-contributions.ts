@@ -38,7 +38,14 @@ import { parse } from "yaml";
 import type { PackManifest } from "./pack-types.js";
 import { isSafeRelativePath, parseEntrypoints } from "./tool-contributions.js";
 import type { EntrypointIconId } from "../../shared/entrypoint-icons.js";
-import { isSafeBasename, isValidPackName } from "./pack-manifest.js";
+import {
+	isSafeBasename,
+	isValidPackName,
+	isValidSandboxRequirementId,
+	isValidSandboxRequirementListName,
+	MAX_SANDBOX_REQUIREMENT_CATALOGUE_ROWS_PER_PACK,
+	MAX_SANDBOX_REQUIREMENT_DECLARATION_FILE_BYTES,
+} from "./pack-manifest.js";
 import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
 import { validateServiceExtensionSpec, type ServiceExtensionSpec } from "../extension-host/service-extension-contract.js";
 import type { McpServerConfig } from "../mcp/mcp-types.js";
@@ -1226,18 +1233,33 @@ const SANDBOX_REQUIREMENT_TOP_LEVEL_KEYS = new Set(["id", "profiles", "config", 
 const SANDBOX_TOOLCHAIN_IDS = new Set(["python"] as const);
 const MAX_SANDBOX_REQUIREMENT_PROFILES = 8;
 
+/** Read a bounded declaration before YAML can allocate for attacker-controlled bytes. */
+function readSandboxRequirementYaml(file: string): unknown {
+	const stat = fs.statSync(file);
+	if (!stat.isFile()) throw new Error("declaration is not a regular file");
+	if (stat.size > MAX_SANDBOX_REQUIREMENT_DECLARATION_FILE_BYTES) {
+		throw new Error(`declaration exceeds ${MAX_SANDBOX_REQUIREMENT_DECLARATION_FILE_BYTES} bytes`);
+	}
+	return readYaml(file);
+}
+
 /** Load schema-3 inert sandbox requirements from manifest-listed files only.
  * Reject rather than partially interpret every malformed declaration: only the
  * core-owned profile vocabulary can reach later authorization and planning. */
 export function loadSandboxRequirements(packRoot: string, manifest: PackManifest): SandboxRequirementContribution[] {
 	if ((manifest.schema ?? 1) < 3) return [];
+	const listNames = manifest.contents.sandboxRequirements ?? [];
+	if (listNames.length > MAX_SANDBOX_REQUIREMENT_CATALOGUE_ROWS_PER_PACK) {
+		console.warn(`[pack-contributions] pack "${packIdFromRoot(packRoot)}" declares more than ${MAX_SANDBOX_REQUIREMENT_CATALOGUE_ROWS_PER_PACK} sandbox requirements; dropping catalogue`);
+		return [];
+	}
 	const dir = path.join(packRoot, "sandbox-requirements");
 	const out: SandboxRequirementContribution[] = [];
 	const seenListNames = new Set<string>();
 	const seenIds = new Set<string>();
-	for (const listName of manifest.contents.sandboxRequirements ?? []) {
-		if (!isSafeBasename(listName)) {
-			console.warn(`[pack-contributions] sandbox requirement listName ${JSON.stringify(listName)} is not a safe basename; skipping`);
+	for (const listName of listNames) {
+		if (!isValidSandboxRequirementListName(listName)) {
+			console.warn(`[pack-contributions] sandbox requirement listName ${JSON.stringify(listName)} is not a valid bounded basename; skipping`);
 			continue;
 		}
 		if (seenListNames.has(listName)) {
@@ -1250,8 +1272,8 @@ export function loadSandboxRequirements(packRoot: string, manifest: PackManifest
 			continue;
 		}
 		let data: unknown;
-		try { data = readYaml(sourceFile); } catch (err) {
-			console.warn(`[pack-contributions] skipping missing/malformed sandbox requirement '${listName}' (${sourceFile}): ${String(err)}`);
+		try { data = readSandboxRequirementYaml(sourceFile); } catch (err) {
+			console.warn(`[pack-contributions] skipping missing/malformed/oversized sandbox requirement '${listName}' (${sourceFile}): ${String(err)}`);
 			continue;
 		}
 		if (!isPlainObject(data) || Object.keys(data).some(key => !SANDBOX_REQUIREMENT_TOP_LEVEL_KEYS.has(key))) {
@@ -1259,7 +1281,7 @@ export function loadSandboxRequirements(packRoot: string, manifest: PackManifest
 			continue;
 		}
 		const id = data.id;
-		if (typeof id !== "string" || !HOOK_ID_RE.test(id) || seenIds.has(id)) {
+		if (!isValidSandboxRequirementId(id) || seenIds.has(id)) {
 			if (seenIds.has(id as string)) throw new PackContributionError(`pack "${packIdFromRoot(packRoot)}" declares sandbox requirement id "${String(id)}" more than once; ids must be unique within a pack`);
 			console.warn(`[pack-contributions] sandbox requirement '${listName}' (${sourceFile}) has invalid id; dropping`);
 			continue;

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isValidSandboxRequirementId } from "./pack-manifest.js";
 
 /** The small, core-owned vocabulary that can alter the sandbox image. */
 export type SandboxToolchainId = "python";
@@ -55,6 +56,8 @@ export class UnsupportedSandboxImagePlanError extends Error {
 const PLAN_FORMAT_VERSION = 1;
 const RECIPE_SET_VERSION = 1;
 const FINGERPRINT_LENGTH = 16;
+/** Bounds the derived plan and every status projection from all active packs. */
+export const MAX_SANDBOX_IMAGE_PLAN_REQUIREMENT_ROWS = 256;
 const SHA256_DIGEST = /^[a-f0-9]{64}$/;
 const REPOSITORY_COMPONENT = /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
 const TAG = /^[\w][\w.-]{0,127}$/;
@@ -109,10 +112,12 @@ function canonicalProfiles(requirements: readonly SandboxImageRequirement[]): Sa
 		if (!requirement || !Array.isArray(requirement.profiles)) {
 			throw new UnsupportedSandboxImagePlanError();
 		}
+		const requirementProfiles = new Set<SandboxToolchainId>();
 		for (const profile of requirement.profiles) {
-			if (typeof profile !== "string" || !(profile in SANDBOX_TOOLCHAIN_RECIPES)) {
+			if (typeof profile !== "string" || !(profile in SANDBOX_TOOLCHAIN_RECIPES) || requirementProfiles.has(profile as SandboxToolchainId)) {
 				throw new UnsupportedSandboxImagePlanError();
 			}
+			requirementProfiles.add(profile as SandboxToolchainId);
 			profiles.add(profile as SandboxToolchainId);
 		}
 	}
@@ -122,7 +127,7 @@ function canonicalProfiles(requirements: readonly SandboxImageRequirement[]): Sa
 function orderedRequirements(requirements: readonly SandboxImageRequirement[]): readonly SandboxImageRequirement[] {
 	return requirements
 		.map((requirement) => {
-			if (!requirement || typeof requirement.packId !== "string" || typeof requirement.requirementId !== "string") {
+			if (!requirement || typeof requirement.packId !== "string" || !isValidSandboxRequirementId(requirement.requirementId)) {
 				throw new UnsupportedSandboxImagePlanError();
 			}
 			return Object.freeze({
@@ -136,6 +141,9 @@ function orderedRequirements(requirements: readonly SandboxImageRequirement[]): 
 
 /** Resolve authorized profile ids into a canonical, core-derived Docker plan. */
 export function resolveSandboxImagePlan(input: SandboxImagePlanInput): SandboxImagePlan {
+	if (!Array.isArray(input.requirements) || input.requirements.length > MAX_SANDBOX_IMAGE_PLAN_REQUIREMENT_ROWS) {
+		throw new UnsupportedSandboxImagePlanError();
+	}
 	const base = parseSandboxBaseImageReference(input.baseImageName);
 	if (!base) throw new UnsupportedSandboxImagePlanError("Unsupported configured sandbox image");
 	if (input.piAgentVersion !== null && (typeof input.piAgentVersion !== "string" || input.piAgentVersion.length > 128)) {

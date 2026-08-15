@@ -4,6 +4,7 @@ import {
 	parseSandboxBaseImageReference,
 	resolveSandboxImagePlan,
 	sandboxImageBuildArgs,
+	MAX_SANDBOX_IMAGE_PLAN_REQUIREMENT_ROWS,
 	SandboxImageRequirementFailureStore,
 	UnsupportedSandboxImagePlanError,
 } from "../../src/server/agent/sandbox-image-requirements.js";
@@ -53,7 +54,7 @@ describe("sandbox image requirement plans", () => {
 		);
 	});
 
-	it("rejects invalid image references and unknown profile values before a Docker argument exists", () => {
+	it("rejects invalid image references and unknown or duplicate profile values before a Docker argument exists", () => {
 		for (const value of ["", "bobbit-agent; touch /tmp/pwn", "https://registry/bobbit", "bobbit-agent:tag with spaces", "repo@sha256:abc"]) {
 			assert.equal(parseSandboxBaseImageReference(value), null, value);
 		}
@@ -62,10 +63,20 @@ describe("sandbox image requirement plans", () => {
 			repository: "registry.example:5000/team/bobbit-agent",
 			normalized: digested,
 		});
-		assert.throws(
-			() => resolve({ requirements: [{ packId: "attacker", requirementId: "anything", profiles: ["python --build-arg X=Y"] as any }] }),
-			UnsupportedSandboxImagePlanError,
+		for (const profiles of [["python --build-arg X=Y"], ["python", "python"]] as const) {
+			assert.throws(
+				() => resolve({ requirements: [{ packId: "attacker", requirementId: "anything", profiles: profiles as any }] }),
+				UnsupportedSandboxImagePlanError,
+			);
+		}
+	});
+
+	it("rejects aggregate requirement rows rather than truncating status metadata", () => {
+		const requirements = Array.from(
+			{ length: MAX_SANDBOX_IMAGE_PLAN_REQUIREMENT_ROWS + 1 },
+			(_, index) => ({ packId: `pack-${index}`, requirementId: `requirement-${index}`, profiles: ["python"] as const }),
 		);
+		assert.throws(() => resolve({ requirements }), UnsupportedSandboxImagePlanError);
 	});
 
 	it("keeps failed build state bounded, project-local, and free of Docker output", () => {
