@@ -447,6 +447,49 @@ function normalizeManualBridgeState(value: unknown): "new" | "starting" | "ready
 		: "other";
 }
 
+/** Build terminal smoke facts without retaining turn, provider, or bridge payloads. */
+function manualTerminalTurnFacts({
+	eventTypeCounts,
+	lifecycle,
+	bridge,
+	bridgeRunning,
+	pendingToolPermission,
+	routeDiagnostic,
+}: {
+	eventTypeCounts: Record<ManualTurnEventType, number>;
+	lifecycle: { diagnostics(): { rootAgentStarted: boolean; rootAgentTerminal: boolean } };
+	bridge: Record<string, unknown>;
+	bridgeRunning: boolean;
+	pendingToolPermission: boolean;
+	routeDiagnostic(error: unknown): string;
+}): {
+	eventTypeCounts: Record<ManualTurnEventType, number>;
+	rootLifecycle: { rootAgentStarted: boolean; rootAgentTerminal: boolean };
+	bridgeRunning: boolean;
+	bridgeLifecycleState: ReturnType<typeof normalizeManualBridgeState>;
+	sdkTerminalDiagnostic: string;
+	pendingToolPermission: boolean;
+	bridgeInputQueue: { hasQueuedRows: boolean; hasWaitingReader: boolean };
+	initializationComplete: boolean;
+	queryHandlePresent: boolean;
+} {
+	const input = diagnosticValue(() => bridge.input) as Record<string, unknown> | undefined;
+	return {
+		eventTypeCounts,
+		rootLifecycle: lifecycle.diagnostics(),
+		bridgeRunning,
+		bridgeLifecycleState: normalizeManualBridgeState(diagnosticValue(() => bridge.state)),
+		sdkTerminalDiagnostic: routeDiagnostic(diagnosticValue(() => bridge.terminalError)),
+		pendingToolPermission,
+		bridgeInputQueue: {
+			hasQueuedRows: diagnosticBoolean(() => Array.isArray(input?.rows) && input.rows.length > 0),
+			hasWaitingReader: diagnosticBoolean(() => input?.reader !== undefined),
+		},
+		initializationComplete: diagnosticBoolean(() => bridge.initializationComplete),
+		queryHandlePresent: diagnosticBoolean(() => bridge.queryHandle !== undefined),
+	};
+}
+
 test("Claude Agent SDK manual timeout event diagnostics retain only fixed event categories", () => {
 	const counts = createManualTurnEventCounts();
 	countManualTurnEvent(counts, { type: "agent_start", privatePayload: "must-not-appear" });
@@ -559,6 +602,56 @@ test("Claude Agent SDK manual terminal diagnostics expose only route-safe catego
 	expect(diagnostic).not.toContain("private-token");
 	expect(diagnostic).not.toContain("private-request");
 	expect(diagnostic).not.toContain("/private/provider/path");
+});
+
+test("Claude Agent SDK manual Docker terminal facts retain only safe schema and route category", async () => {
+	const { ClaudeAgentSdkUnavailableError, claudeAgentSdkUnavailableRouteDiagnostic } = await import("../../dist/server/agent/claude-agent-sdk-error.js");
+	const privateValue = "must-not-appear";
+	const eventTypeCounts = createManualTurnEventCounts();
+	countManualTurnEvent(eventTypeCounts, { type: "agent_start", prompt: privateValue });
+	const facts = manualTerminalTurnFacts({
+		eventTypeCounts,
+		lifecycle: { diagnostics: () => ({ rootAgentStarted: true, rootAgentTerminal: true }) },
+		bridge: {
+			state: "failed",
+			terminalError: new ClaudeAgentSdkUnavailableError(`provider body=${privateValue} CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE`),
+			input: { rows: [{ prompt: privateValue }], reader: { id: privateValue } },
+			initializationComplete: true,
+			queryHandle: { id: privateValue },
+		},
+		bridgeRunning: false,
+		pendingToolPermission: true,
+		routeDiagnostic: claudeAgentSdkUnavailableRouteDiagnostic,
+	});
+	expect(facts).toEqual({
+		eventTypeCounts,
+		rootLifecycle: { rootAgentStarted: true, rootAgentTerminal: true },
+		bridgeRunning: false,
+		bridgeLifecycleState: "failed",
+		sdkTerminalDiagnostic: "SDK_SESSION_UNAVAILABLE: CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE",
+		pendingToolPermission: true,
+		bridgeInputQueue: { hasQueuedRows: true, hasWaitingReader: true },
+		initializationComplete: true,
+		queryHandlePresent: true,
+	});
+	const serialized = JSON.stringify(facts);
+	for (const secret of [privateValue, "provider body"]) expect(serialized).not.toContain(secret);
+});
+
+test("Claude Agent SDK manual Docker terminal facts normalize unknown bridge data", async () => {
+	const { claudeAgentSdkUnavailableRouteDiagnostic } = await import("../../dist/server/agent/claude-agent-sdk-error.js");
+	const facts = manualTerminalTurnFacts({
+		eventTypeCounts: createManualTurnEventCounts(),
+		lifecycle: { diagnostics: () => ({ rootAgentStarted: false, rootAgentTerminal: false }) },
+		bridge: { state: "private-state", terminalError: new Error("private provider failure") },
+		bridgeRunning: false,
+		pendingToolPermission: false,
+		routeDiagnostic: claudeAgentSdkUnavailableRouteDiagnostic,
+	});
+	expect(facts.bridgeLifecycleState).toBe("other");
+	expect(facts.sdkTerminalDiagnostic).toBe("SDK_SESSION_UNAVAILABLE");
+	const serialized = JSON.stringify(facts);
+	for (const secret of ["private-state", "private provider failure"]) expect(serialized).not.toContain(secret);
 });
 
 test("Claude Agent SDK provider-unavailable failure is bounded and sanitized without an alternative runtime", async () => {
@@ -1279,6 +1372,7 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			const savedConfig = await savedConfigResponse.json() as { sandbox_tokens?: Array<{ key: string; enabled: boolean; value: string }> };
 			expect(savedConfig.sandbox_tokens).toEqual([{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: true, value: "" }]);
 			const sessionModel = `claude-agent-sdk/${configuredModel}`;
+			const { claudeAgentSdkUnavailableRouteDiagnostic } = await import("../../dist/server/agent/claude-agent-sdk-error.js");
 			const providerResponse = await api("/api/custom-providers", {
 				method: "POST",
 				body: JSON.stringify({
@@ -1310,13 +1404,28 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			// user turn; readiness alone must not synthesize a bootstrap session.
 			expect(gateway.sessionManager.getPersistedSession(created.id)?.claudeAgentSdkSessionId).toBeUndefined();
 			const runSandboxTurn = async (text: string, label: string, options: Record<string, unknown> = {}) => {
+				const eventTypeCounts = createManualTurnEventCounts();
+				const bridge = session.rpcClient as unknown as Record<string, unknown>;
 				// Subscribe before enqueue to correlate this accepted prompt rather than
 				// treating the prior idle status as proof of completion.
 				const lifecycle = observeManualRootTurnLifecycle(session.rpcClient);
+				const unsubscribeCounts = session.rpcClient.onEvent(event => countManualTurnEvent(eventTypeCounts, event));
 				try {
 					await gateway!.sessionManager.enqueuePrompt(created.id, text, { source: "user", ...options });
 					await waitFor(() => lifecycle.completed() ? true : undefined, `${label} root terminal`, 120_000);
+				} catch {
+					// Terminal failures can happen before a root lifecycle terminal arrives.
+					// Retain only fixed facts and the route-safe bridge category.
+					throw new Error(JSON.stringify(manualTerminalTurnFacts({
+						eventTypeCounts,
+						lifecycle,
+						bridge,
+						bridgeRunning: diagnosticBoolean(() => session.rpcClient.running),
+						pendingToolPermission: diagnosticBoolean(() => gateway!.sessionManager.getPendingToolPermission(created.id) !== undefined),
+						routeDiagnostic: claudeAgentSdkUnavailableRouteDiagnostic,
+					})));
 				} finally {
+					unsubscribeCounts();
 					lifecycle.unsubscribe();
 				}
 			};
