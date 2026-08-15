@@ -4099,6 +4099,15 @@
         "tier": "unit",
         "project": "core"
       }
+    },
+    {
+      "path": "tests2/integration/project-import-decisions.test.ts",
+      "reason": "Real gateway acceptance coverage for durable project-import decisions: persisted component snapshots, inert checkout grants, explicit grant replay, provisional promotion, proposal drafts, and redacted import traces.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
     }
   ],
   "journeys": [
