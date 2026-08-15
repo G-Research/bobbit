@@ -350,8 +350,11 @@ async function composeAigwTargetModels(
 		const models = runtime.getModels()
 			.filter((model) => model.provider === "aigw")
 			.map((model) => {
-				const row = { ...model, authenticated: true } as ApiModel;
+				const row = { ...model, authenticated: true } as ApiModel & { samplingParams?: unknown };
 				if (row.headers === undefined) delete row.headers;
+				// Pi 0.84's ModelRuntime materializes this optional field as an
+				// enumerable undefined value. Keep retained/discovered rows JSON-exact.
+				if (row.samplingParams === undefined) delete row.samplingParams;
 				const upstreamProvider = published.get(row.id);
 				if (upstreamProvider) row.upstreamProvider = upstreamProvider;
 				return row;

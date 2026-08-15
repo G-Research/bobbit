@@ -179,6 +179,7 @@ function harness(options?: {
 					},
 				});
 				manager.handleAgentLifecycle(restored, { type: "agent_end", messages: [] });
+				manager.handleAgentLifecycle(restored, { type: "agent_settled" });
 				const call = promptCallCount++;
 				if (call === 0 && options.rejectRedriveWith) {
 					return options.throwRedriveRejection
@@ -724,10 +725,12 @@ describe("SessionManager poisoned-history recovery", () => {
 		assert.equal(rollback.lastPromptSource, "agent");
 	});
 
-	it("reports queued after parking behind a failed shared recovery and drains that accepted envelope once", async () => {
+	it("preserves and idempotently drains a stable intent parked behind failed shared recovery", async () => {
 		const h = harness();
 		const failedRecovery = Promise.reject(new Error("fixture shared recovery failed"));
 		h.manager._poisonedHistoryRecoveries.set(h.session.id, failedRecovery);
+		const intentId = "poison-fallback-stable-intent";
+		const author = { kind: "agent", id: "session:caller", label: "Caller" };
 		const skillExpansions = [{
 			name: "mockup",
 			args: "hero",
@@ -736,24 +739,51 @@ describe("SessionManager poisoned-history recovery", () => {
 			range: [0, 7],
 			expanded: "expanded mockup instructions",
 		}];
-
-		const result = await h.manager.enqueuePrompt(h.session.id, "/mockup hero", {
+		const fileMentions = [{
+			path: "fixture.txt",
+			range: [13, 24],
+			kind: "text",
+			content: "fixture content",
+		}];
+		const opts = {
+			intentId,
 			modelText: "expanded mockup instructions\n\nhero",
 			skillExpansions,
+			fileMentions,
 			images: [{ type: "image", data: "fixture-image", mimeType: "image/png" }],
 			attachments: [{ name: "fixture.txt" }],
+			isSteered: true,
+			suppressTitleGen: true,
 			source: "agent",
-		});
+			author,
+		};
+
+		const result = await h.manager.enqueuePrompt(h.session.id, "/mockup hero", opts);
+		const replay = await h.manager.enqueuePrompt(h.session.id, "/mockup hero", opts);
 
 		assert.deepEqual(result, { status: "queued" }, "durably accepted intent must not reject and invite caller resubmission");
+		assert.deepEqual(replay, { status: "queued" }, "same-ID replay must return the existing queued projection");
 		const rollback = h.manager.sessions.get(h.session.id);
 		const queued = rollback.promptQueue.toArray();
-		assert.equal(queued.length, 1);
-		assert.equal(queued[0].text, "expanded mockup instructions\n\nhero");
-		assert.deepEqual(queued[0].images, [{ type: "image", data: "fixture-image", mimeType: "image/png" }]);
-		assert.deepEqual(queued[0].attachments, [{ name: "fixture.txt" }]);
-		assert.equal(h.persistedRecord.messageQueue[0].id, queued[0].id, "durable parking must preserve the queue row identity");
-		assert.equal(rollback.pendingSkillExpansions.length, 1);
+		assert.equal(queued.length, 1, "same-ID replay must not append another reliable row");
+		assert.deepEqual(queued[0], {
+			id: intentId,
+			text: "expanded mockup instructions\n\nhero",
+			isSteered: true,
+			createdAt: queued[0].createdAt,
+			kind: "steer",
+			targetTurn: "next-turn",
+			sequence: 1,
+			deliveryState: "queued",
+			images: [{ type: "image", data: "fixture-image", mimeType: "image/png" }],
+			attachments: [{ name: "fixture.txt" }],
+			suppressTitleGen: true,
+			source: "agent",
+			author,
+		});
+		assert.equal(h.persistedRecord.messageQueue.length, 1);
+		assert.equal(h.persistedRecord.messageQueue[0].id, intentId, "durable parking must retain the browser occurrence identity");
+		assert.equal(rollback.pendingSkillExpansions.length, 1, "same-ID replay must not duplicate the display envelope");
 		const skillRecordId = rollback.pendingSkillExpansions[0].recordId;
 		assert.match(
 			skillRecordId,
@@ -765,28 +795,30 @@ describe("SessionManager poisoned-history recovery", () => {
 			modelText: "expanded mockup instructions\n\nhero",
 			originalText: "/mockup hero",
 			skillExpansions,
+			fileMentions,
 		}]);
 		assert.equal(rollback.lastPromptSource, "agent");
 
-		// The queued result is the acceptance contract: the caller does not resubmit.
-		// Once recovery gating clears, the one durable row must drain exactly once.
+		// Once recovery gating clears, repeated drains still hand this occurrence to
+		// Pi once and bind its original envelope to the same durable intent ID.
 		h.manager._poisonedHistoryRecoveries.delete(h.session.id);
 		rollback.lastTurnErrored = false;
 		h.manager.drainQueue(rollback);
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		h.manager.drainQueue(rollback);
 		assert.deepEqual(h.oldPrompts.map((entry) => entry.text), [
-			systemProviderText("expanded mockup instructions\n\nhero"),
+			"[Caller (caller)]: expanded mockup instructions\n\nhero",
 		]);
 		assert.equal(rollback.promptQueue.isEmpty, true);
 		assert.deepEqual(h.persistedRecord.messageQueue, []);
 		assert.deepEqual(rollback.pendingSkillExpansions, [{
 			recordId: skillRecordId,
-			promptId: queued[0].id,
+			promptId: intentId,
 			modelText: "expanded mockup instructions\n\nhero",
 			originalText: "/mockup hero",
 			skillExpansions,
-		}], "recovery dispatch must retain the same skill record identity and payload");
+			fileMentions,
+		}], "recovery dispatch must retain the same intent and envelope payload");
 	});
 
 	it("preserves a slash-skill envelope across follow-up respawn for the live echo", async () => {

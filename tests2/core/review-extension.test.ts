@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { Value } from "@sinclair/typebox/value";
+import * as Value from "typebox/value";
 import { afterAll, beforeAll, beforeEach, describe, it } from "vitest";
 import reviewExtension, {
 	createReviewExtension,

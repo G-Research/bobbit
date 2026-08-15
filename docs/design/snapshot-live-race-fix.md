@@ -1,5 +1,7 @@
 # Snapshot ↔ Live-Event Race Fix (H3)
 
+> Historical implementation record. Current prompt/steer snapshot continuity uses `deliveryIntentId` and the authoritative delivery outbox; see [Reliable prompt and steer delivery](../prompt-queue.md).
+
 Status: implemented on `goal/fix-snapsh-af9b8672`, two passes (`c2eeeb73`,
 `d62fc795`). Companion to [`unified-message-ordering-reducer.md`](./unified-message-ordering-reducer.md)
 (which gives the reducer its `_order` invariant), [`streaming-dedup-reorder.md`](./streaming-dedup-reorder.md)
