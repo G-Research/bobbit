@@ -1,7 +1,7 @@
 # Extension sandbox requirements
 
-**Status:** implementation contract  
-**Baseline inspected:** `abaa642bc`  
+**Status:** implementation contract
+**Baseline inspected:** `abaa642bc`
 **Scope:** declarative extension requests for approved sandbox toolchains. This adds no extension process runtime and no image-builder parallel to the Docker build path.
 
 ## 1. Current seams
