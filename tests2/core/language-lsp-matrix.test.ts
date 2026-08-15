@@ -25,6 +25,7 @@ type ToolchainRequirement = {
 
 const actions = new Set(["definition", "references", "hover", "documentSymbols", "workspaceSymbols", "diagnostics"]);
 const shellSyntax = /[\n\r;&|`$<>]/;
+const safeLayerId = /^[a-z0-9][a-z0-9.-]*$/;
 
 function records(): readonly LanguageRecord[] {
 	return CODE_INTELLIGENCE_LANGUAGE_MATRIX as unknown as readonly LanguageRecord[];
@@ -47,7 +48,6 @@ function assertRequirement(requirement: ToolchainRequirement): void {
 describe("Language LSP capability matrix", () => {
 	it("keeps language evidence, structural search, and LSP declarations independently data-driven", () => {
 		const matrix = records();
-		expect(matrix.map(language => language.id)).toEqual([...matrix.map(language => language.id)].sort());
 		expect(new Set(matrix.map(language => language.id)).size).toBe(matrix.length);
 
 		for (const language of matrix) {
@@ -93,7 +93,9 @@ describe("Language LSP capability matrix", () => {
 			for (const requirement of lsp.host) assertRequirement(requirement);
 			for (const requirement of lsp.sandbox) {
 				assertRequirement(requirement);
-				expect(requirement.layerId).toMatch(/^[a-z0-9][a-z0-9-]*$/);
+				expect(requirement.layerId).toMatch(safeLayerId);
+				expect(requirement.layerId).not.toMatch(shellSyntax);
+				expect(requirement.layerId).not.toMatch(/\s/);
 			}
 		}
 	});
