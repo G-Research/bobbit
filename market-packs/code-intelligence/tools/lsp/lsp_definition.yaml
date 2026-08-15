@@ -1,0 +1,12 @@
+name: lsp_definition
+description: "Find a definition through an enabled language service."
+summary: "Read-only LSP definition lookup"
+params: ["component?", "language?", path, position]
+provider:
+  type: bobbit-extension
+  extension: extension.ts
+group: Code Intelligence
+docs: |-
+  Looks up a definition only through an enabled, ready LSP service rooted at the
+  current linked-worktree component. It never starts a server or falls back to
+  structural search.
