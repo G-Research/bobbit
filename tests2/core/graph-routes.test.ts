@@ -1,6 +1,15 @@
+import { guardProcessEnv } from "./helpers/env-guard.js";
+import { enableTsWorkerResolver } from "./helpers/enable-ts-worker.js";
+guardProcessEnv();
+enableTsWorkerResolver();
+
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { afterEach, describe, it } from "vitest";
 
+import { RouteDispatcher, type RouteHandlerCtx } from "../../src/server/extension-host/route-dispatcher.ts";
+import { makeTmpDir } from "../../tests/helpers/tmp.ts";
 import { GRAPH_QUERY_CAPS, GraphQueryService } from "../../market-packs/code-intelligence/src/graph-query.ts";
 import { __setGraphRuntimeForTests, routes } from "../../market-packs/code-intelligence/src/routes.ts";
 import extension from "../../market-packs/code-intelligence/tools/graph/extension.ts";
@@ -57,6 +66,40 @@ describe("graph routes — host boundary caps and errors", () => {
 		const response = await routes.status(context, { body: { op: "query", query: "graph" } });
 		assert.deepEqual(response, { ok: false, error: "GRAPH_RUNTIME_UNAVAILABLE" });
 		assert.doesNotMatch(JSON.stringify(response), /private|graph-store|candidate/);
+	});
+
+	it("carries verified scope through the real route worker and fails closed for missing or spoofed scope", async () => {
+		const originalBobbitDir = process.env.BOBBIT_DIR;
+		const hostRoot = makeTmpDir("graph-real-route-");
+		process.env.BOBBIT_DIR = hostRoot;
+		const modulePath = path.resolve(process.cwd(), "market-packs/code-intelligence/lib/routes.mjs");
+		const packRoot = path.resolve(process.cwd(), "market-packs/code-intelligence");
+		const dispatcher = new RouteDispatcher({ rate: null });
+		const verified: RouteHandlerCtx = {
+			host: {} as RouteHandlerCtx["host"], sessionId: "route-session", toolUseId: "", tool: "code-intelligence",
+			projectId: "project-a", goalId: "goal-a", branch: "goal/a", worktreeId: "/worktrees/a", worktreePath: "/worktrees/a", workingDir: "/worktrees/a",
+			scopeContext: { project: { id: "project-a" }, goal: { id: "goal-a" }, component: { name: "api", repo: "." } },
+		};
+		try {
+			const config = await dispatcher.dispatch(modulePath, packRoot, "config", verified, { method: "GET" }) as Record<string, unknown>;
+			assert.equal(config.storage, "host-only");
+			assert.equal(config.noCrossRepoEdges, true);
+			const status = await dispatcher.dispatch(modulePath, packRoot, "status", verified, { method: "GET" }) as Record<string, unknown>;
+			assert.ok(Array.isArray(status.components), "real status route returns its declared components envelope");
+
+			const missingScope = await dispatcher.dispatch(modulePath, packRoot, "config", { ...verified, scopeContext: undefined }, { method: "GET" });
+			assert.deepEqual(missingScope, { ok: false, error: "GRAPH_CONTEXT_PROJECT_REQUIRED" });
+
+			// A caller cannot cross-project spoof a scope snapshot: project A never falls
+			// back to a matching graph cache/store for project B.
+			const crossProjectScope = await dispatcher.dispatch(modulePath, packRoot, "config", {
+				...verified, scopeContext: { project: { id: "project-b" }, goal: { id: "goal-a" }, component: { name: "api", repo: "." } },
+			}, { method: "GET" });
+			assert.deepEqual(crossProjectScope, { ok: false, error: "GRAPH_CONTEXT_PROJECT_REQUIRED" });
+		} finally {
+			if (originalBobbitDir === undefined) delete process.env.BOBBIT_DIR; else process.env.BOBBIT_DIR = originalBobbitDir;
+			fs.rmSync(hostRoot, { recursive: true, force: true });
+		}
 	});
 
 	it("publishes only service-supported TypeBox limits and marks JSON route failures as tool errors", async () => {

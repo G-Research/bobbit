@@ -80,11 +80,16 @@ function method(req: RouteReq): string {
 	return (req?.method ?? "GET").toUpperCase();
 }
 
-async function safely<T>(run: () => Promise<T>): Promise<T | { ok: false; error: "GRAPH_RUNTIME_UNAVAILABLE" }> {
+type GraphRouteFailure = { ok: false; error: "GRAPH_CONTEXT_PROJECT_REQUIRED" | "GRAPH_RUNTIME_UNAVAILABLE" };
+
+async function safely<T>(run: () => Promise<T>): Promise<T | GraphRouteFailure> {
 	try { return await run(); }
-	catch {
-		// GraphRuntime records durable diagnostics. Never return host exception text,
-		// which can disclose filesystem paths or implementation details across RPC.
+	catch (error) {
+		// Preserve the one actionable, path-free identity failure. All other runtime
+		// errors remain deliberately opaque so route responses never disclose host paths.
+		if (error instanceof Error && error.message === "GRAPH_CONTEXT_PROJECT_REQUIRED") {
+			return { ok: false, error: "GRAPH_CONTEXT_PROJECT_REQUIRED" };
+		}
 		return { ok: false, error: "GRAPH_RUNTIME_UNAVAILABLE" };
 	}
 }

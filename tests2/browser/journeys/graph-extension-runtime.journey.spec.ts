@@ -137,6 +137,14 @@ test.describe("Journey: Graph Extension Runtime", () => {
 			.toContainText("v1 has no cross-repo edges");
 		await expect(panel.getByTestId("code-intelligence-freshness"))
 			.toContainText(/STALE|BASE FALLBACK/i);
+		// Real host route envelopes must render; a JSON `{ ok: false }` is surfaced
+		// as an alert by the panel rather than being mistaken for an empty status.
+		await panel.getByTestId("graph-status-load").click();
+		await expect(panel.getByTestId("graph-status-empty")).toBeVisible({ timeout: 15_000 });
+		await expect(panel.getByRole("alert")).toHaveCount(0);
+		await panel.getByTestId("graph-status-config").click();
+		await expect(panel.getByTestId("graph-status-config-value")).toContainText("host-only", { timeout: 15_000 });
+		await expect(panel.getByRole("alert")).toHaveCount(0);
 
 		// The direct manual route remains visible, but automatic lifecycle work is
 		// explicitly unavailable until EP-8. Clicking it must not claim a queue or

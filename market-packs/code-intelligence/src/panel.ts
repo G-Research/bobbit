@@ -81,6 +81,11 @@ export default function createCodeIntelligencePanel({ html, nothing }: any) {
 					state.error = undefined;
 					repaint(host);
 					const response = await host.callRoute(route, route === "rebuild" ? { method: "POST", body: { scope: "eligible" } } : { method: "GET" });
+					const failure = response && typeof response === "object" && (response as Record<string, unknown>).ok === false;
+					if (failure) {
+						const error = (response as Record<string, unknown>).error;
+						throw new Error(typeof error === "string" && error ? error : "Code Intelligence route request failed.");
+					}
 					if (route === "status") state.status = response;
 					if (route === "config") state.config = response;
 					if (route === "rebuild") {

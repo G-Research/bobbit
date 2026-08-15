@@ -104,4 +104,13 @@ describe("Code Intelligence status panel", () => {
 		pending.resolve({ status: { state: "stale", components: [] } });
 		await waitFor(() => expect(panel.root.querySelector('[data-testid="code-intelligence-rebuild"]')?.textContent).toContain("Rebuild"));
 	});
+
+	it("renders a route error envelope instead of masking it as an empty status", async () => {
+		const panel = mount({ ok: false, error: "GRAPH_CONTEXT_PROJECT_REQUIRED" }, "panel-error-envelope");
+		await panel.load();
+		await waitFor(() => {
+			expect(panel.root.querySelector('[role="alert"]')?.textContent).toContain("GRAPH_CONTEXT_PROJECT_REQUIRED");
+			expect(panel.root.querySelector('[data-testid="graph-status-empty"]')).toBeNull();
+		});
+	});
 });
