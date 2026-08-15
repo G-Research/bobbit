@@ -16,9 +16,15 @@ export const CLAUDE_BUNDLED_SKILLS_0_3_222 = [
 	"doctor", "fewer-permission-prompts", "loop", "run", "run-skill-generator", "simplify", "update-config", "verify",
 ] as const;
 
-const RETAINED_NATIVE_TOOLS = ["Skill", "Agent"] as const;
-const RESERVED_NATIVE_TOOLS = ["Agent"] as const;
-const SUPPRESSED_NATIVE_TOOLS = CLAUDE_NATIVE_TOOL_FLOOR.filter((name) => name !== "Skill");
+// `Agent` is the only public model-visible delegation name. In SDK 0.3.222 it
+// aliases to the actual native Task resolver before native name resolution.
+const PUBLIC_AGENT_TOOL = "Agent";
+const AGENT_TRANSPORT_TOOL = "Task";
+const RETAINED_NATIVE_TOOLS = ["Skill", PUBLIC_AGENT_TOOL] as const;
+const RESERVED_NATIVE_TOOLS = [PUBLIC_AGENT_TOOL] as const;
+// Task is not public or auto-allowed. It must merely remain resolvable as the
+// private target of the Agent alias; every other native task surface is denied.
+const SUPPRESSED_NATIVE_TOOLS = CLAUDE_NATIVE_TOOL_FLOOR.filter((name) => name !== "Skill" && name !== AGENT_TRANSPORT_TOOL);
 
 /** True only for the native tools retained by the Claude SDK root surface. */
 export function isClaudeSdkRetainedNativeTool(name: unknown): boolean {
@@ -264,7 +270,9 @@ export function buildClaudeSdkSubagentPolicy(options: ClaudeSdkSubagentPolicyOpt
 			background: false,
 			permissionMode: "default",
 			tools: ["Skill", ...selectedRaw],
-			disallowedTools: ["Agent", ...CLAUDE_NATIVE_TOOL_POLICY.disallowed, ...disallowedMcp],
+			// `Task` is removed from the root disallow list solely as Agent's private
+			// alias target. It remains explicitly unavailable to every child.
+			disallowedTools: [PUBLIC_AGENT_TOOL, AGENT_TRANSPORT_TOOL, ...CLAUDE_NATIVE_TOOL_POLICY.disallowed, ...disallowedMcp],
 			skills: [...CLAUDE_BUNDLED_SKILLS_0_3_222],
 		});
 		const projection: ClaudeSdkSubagentDefinition = Object.freeze({ type: approved.type, sourceRole: approved.role, definition, childRawTools: Object.freeze(selectedRaw) });
@@ -506,10 +514,10 @@ export function buildClaudeSdkToolSurface(options: ClaudeSdkToolSurfaceOptions):
 		if (agentId) {
 			return options.subagentPolicy?.authorizeChild(rawName, agentId) ? allow(input) : deny(SUBAGENT_DENIAL);
 		}
-		if (typeof rawName === "string" && rawName.toLowerCase() === "agent") {
-			// Query options fix the root permission mode to default; the pinned
-			// CanUseTool context does not expose it, so never infer caller input.
-			return options.subagentPolicy?.admit(rawName, input, { toolUseId: context.toolUseID, permissionMode: "default" }) ? allow(input) : deny(SUBAGENT_DENIAL);
+		if (typeof rawName === "string" && rawName.toLowerCase() === PUBLIC_AGENT_TOOL.toLowerCase()) {
+			// Only the public name reaches this callback. The private Task target is
+			// intentionally neither model-visible nor auto-allowed.
+			return options.subagentPolicy?.admit(PUBLIC_AGENT_TOOL, input, { toolUseId: context.toolUseID, permissionMode: "default" }) ? allow(input) : deny(SUBAGENT_DENIAL);
 		}
 		if (typeof rawName === "string" && rawName.toLowerCase() === "skill") return allow(input);
 		const normalizedTool = normalized(rawName);
@@ -535,8 +543,12 @@ export function buildClaudeSdkToolSurface(options: ClaudeSdkToolSurfaceOptions):
 		if (disposed) return preDecision("deny", "Tool is not available in this Bobbit session.");
 		if (hookInput.agent_id) return options.subagentPolicy?.authorizeChild(input.tool_name, hookInput.agent_id, hookInput.agent_type)
 			? preDecision("allow") : preDecision("deny", SUBAGENT_DENIAL);
-		if (typeof input.tool_name === "string" && input.tool_name.toLowerCase() === "agent") {
-			return options.subagentPolicy?.admit(input.tool_name, input.tool_input, { toolUseId: input.tool_use_id, permissionMode: "default" })
+		if (typeof input.tool_name === "string" && [PUBLIC_AGENT_TOOL, AGENT_TRANSPORT_TOOL].some(name => name.toLowerCase() === input.tool_name.toLowerCase())) {
+			// toolAliases resolves public Agent to native Task before this hook in the
+			// pinned SDK. Preserve the same tool-use id and validate it as Agent; raw
+			// Task remains unavailable because it is absent from tools/allowedTools and
+			// is denied by canUseTool above.
+			return options.subagentPolicy?.admit(PUBLIC_AGENT_TOOL, input.tool_input, { toolUseId: input.tool_use_id, permissionMode: "default" })
 				? preDecision("allow") : preDecision("deny", SUBAGENT_DENIAL);
 		}
 		if (typeof input.tool_name === "string" && input.tool_name.toLowerCase() === "skill") return preDecision("allow");
@@ -629,10 +641,12 @@ export function buildClaudeAgentSdkQueryOptions(
 		...base,
 		tools: [...RETAINED_NATIVE_TOOLS],
 		disallowedTools: [...surface.sdkDisallowNames],
-		// Agent is an SDK 0.3.222 programmatic-agent contract requirement. Its
-		// bare allowlist entry shadows canUseTool, so PreToolUse remains the sole
-		// bounded admission authority for every root Agent request.
-		allowedTools: ["Agent", ...surface.sdkAllowNames],
+		// Agent is public-only. The pinned SDK aliases it to Task before native
+		// resolution; Task itself is never exposed or auto-allowed. The bare Agent
+		// allowlist entry shadows canUseTool, so PreToolUse remains the sole bounded
+		// admission authority for every root Agent request.
+		allowedTools: [PUBLIC_AGENT_TOOL, ...surface.sdkAllowNames],
+		toolAliases: { [PUBLIC_AGENT_TOOL]: AGENT_TRANSPORT_TOOL },
 		agents: surface.subagentPolicy?.definitions ?? {},
 		skills: [...CLAUDE_BUNDLED_SKILLS_0_3_222],
 		mcpServers: { bobbit: surface.server },

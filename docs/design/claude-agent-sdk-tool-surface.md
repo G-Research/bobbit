@@ -167,7 +167,8 @@ The required table is:
 | `WebSearch`                                                                                              | suppress                       | `web_search`.                                                                                                                                                                                                                                                                                                                                             |
 | `AskUserQuestion`                                                                                        | suppress                       | `ask_user_choices`; preserves Bobbit UI/question ownership.                                                                                                                                                                                                                                                                                               |
 | `EnterPlanMode`, `ExitPlanMode`                                                                          | suppress                       | No Claude plan-mode state. Bobbit goals/gates and normal prompts remain authoritative.                                                                                                                                                                                                                                                                    |
-| `Task`, `TaskCreate`, `TaskGet`, `TaskList`, `TaskOutput`, `TaskStop`, `TaskUpdate`                      | suppress                       | Bobbit owns durable task/team lifecycle; no Claude task/subagent store may be created.                                                                                                                                                                                                                                                                     |
+| `Task`                                                                                                    | private `Agent` alias target    | Pinned SDK `toolAliases` resolves public `Agent` to `Task`; it is never model-visible or auto-allowed. |
+| `TaskCreate`, `TaskGet`, `TaskList`, `TaskOutput`, `TaskStop`, `TaskUpdate`                              | suppress                       | Bobbit owns durable task/team lifecycle; no Claude task/subagent store may be created. |
 | `EnterWorktree`, `ExitWorktree`                                                                          | suppress                       | Bobbit worktree/session manager owns worktrees.                                                                                                                                                                                                                                                                                                           |
 | `Monitor`, `ScheduleWakeup`, `PushNotification`, `RemoteTrigger`, `CronCreate`, `CronDelete`, `CronList` | suppress                       | No Bobbit analogue is exposed in this runtime; unavailable is safer than a second scheduler/notification owner.                                                                                                                                                                                                                                           |
 | `Skill`                                                                                                  | retain (D3)                    | Listed in `Options.tools` with the reviewed literal bundled-skill inventory. No Bobbit alias is invented.                                                                                                                                                                                                                                                 |
@@ -175,17 +176,17 @@ The required table is:
 | `ToolSearch`                                                                                             | suppress for the `0.3.222` pin | The Bobbit server and every adapter tool set `alwaysLoad: true`; all SDK MCP definitions are already role-filtered, so deferred tool search is not required. If a future SDK pin demonstrably requires it, the policy table—not an ad-hoc option—may change to retain it only for this filtered server, with a new real-SDK snapshot and security review. |
 
 `Agent` is not in the measured floor but is explicitly retained by D4, rather
-than reserved and disallowed. `tools` is exactly `["Skill", "Agent"]`; no
-native preset or `toolAliases` is used. `allowedTools` contains `Agent` plus
-eligible Bobbit MCP raw names. `agents` contains only the immutable policy
+than reserved and disallowed. `tools` is exactly `["Skill", "Agent"]`, and
+pinned SDK `toolAliases: { Agent: "Task" }` resolves that public name before
+native name resolution. `allowedTools` contains `Agent` plus eligible Bobbit
+MCP raw names—never `Task`. `agents` contains only the immutable policy
 definitions for `bobbit-protocol-scout`, `bobbit-backend-parity-reviewer`, and
 `bobbit-billing-safety-auditor`; it never discovers filesystem, built-in, or
-user-defined agents. `disallowedTools` remains the full suppressed inventory,
-including `Task` and every `Task*` operation. It is not treated as redundant
-with `tools`, because the SDK declaration explicitly says it also blocks
-harness-internal direct calls holding a tool object. See the [D3/D4
-design](claude-agent-sdk-skills-subagents.md) for the literal definitions and
-admission grammar.
+user-defined agents. `Task` is omitted from `disallowedTools` only so the alias
+target resolves; all `Task*` operations remain suppressed, and both public
+callback and UI/history projection deny or normalize raw Task away from the
+model surface. See the [D3/D4 design](claude-agent-sdk-skills-subagents.md) for
+the literal definitions and admission grammar.
 
 A suppressed tool must not be replaced by an SDK alias. A replacement means the
 model receives the distinct Bobbit MCP raw name and one Bobbit owner, not two

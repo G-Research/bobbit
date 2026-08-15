@@ -39,10 +39,13 @@ function annotations(message: SdkSessionMessage): Pick<ClaudeAgentSdkHistoryMess
  * SDK history is durable after a session's selected tool surface may have
  * changed. `mcp__bobbit__` is Bobbit's reserved server identity, so retain its
  * canonical suffix for historical projection without trying to re-create an
- * old tool surface. Foreign MCP and native names remain unchanged.
+ * old tool surface. The pinned Agent alias can persist its resolved `Task`
+ * transport name; project that one private native name back to public `Agent`.
+ * Foreign MCP and all other native names remain unchanged.
  */
 export function canonicalizeClaudeSdkHistoryToolName(name: unknown): unknown {
 	if (typeof name !== "string") return name;
+	if (name === "Task") return "Agent";
 	const match = /^mcp__bobbit__([a-z][a-z0-9_-]*)$/i.exec(name);
 	return match ? match[1] : name;
 }

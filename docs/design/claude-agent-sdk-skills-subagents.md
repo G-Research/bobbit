@@ -85,8 +85,8 @@ Replace D1's `agents: {}` / reserved-`Agent` posture only for this SDK runtime:
 ```ts
 const rootNativeTools = ["Skill", "Agent"] as const;
 const nativeDisallowed = [
-  // D1 suppressed inventory, except Skill and Agent:
-  "Task", "Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch",
+  // D1 suppressed inventory, except Skill and private Task alias target:
+  "Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch",
   "WebSearch", "NotebookEdit", "AskUserQuestion", "EnterPlanMode",
   "ExitPlanMode", "EnterWorktree", "ExitWorktree", "Monitor",
   "ScheduleWakeup", "PushNotification", "RemoteTrigger", "CronCreate",
@@ -98,6 +98,7 @@ const nativeDisallowed = [
   tools: rootNativeTools,
   disallowedTools: nativeDisallowed,
   allowedTools: ["Agent", ...rootAllowMcpRawNames],
+  toolAliases: { Agent: "Task" },
   agents: approvedAgentDefinitions,
   skills: [...CLAUDE_BUNDLED_SKILLS_0_3_222],
   settingSources: [], strictMcpConfig: true,
@@ -106,12 +107,14 @@ const nativeDisallowed = [
 }
 ```
 
-`Task` stays in `disallowedTools`, is never in `allowedTools`, and is denied by
-both `canUseTool` and `PreToolUse`. An initialization frame spelling the native
-agent facility as `Task` is a legacy diagnostic label only; it is not a usable
-Task store, task tool, or authorization. `TaskCreate`, `TaskGet`, `TaskList`,
-`TaskOutput`, `TaskStop`, and `TaskUpdate` remain denied. No native task state
-is read, written, persisted, or rendered.
+The pinned declaration applies `toolAliases` before native name resolution, so
+public `Agent` resolves to `Task`. `Task` is omitted from `disallowedTools` only
+for that private resolver target and is never in `tools` or `allowedTools`.
+`canUseTool` denies raw `Task`; `PreToolUse` treats its resolved transport name
+as public `Agent`, preserving the same tool-use id and strict admission grammar.
+`TaskCreate`, `TaskGet`, `TaskList`, `TaskOutput`, `TaskStop`, and `TaskUpdate`
+remain denied. UI/history projects the resolved root call back to `Agent`; no
+native task state is read, written, persisted, or rendered.
 
 `Agent` is allowed only as an admission point. It is not a general native tool:
 root `canUseTool` and `PreToolUse` validate its input before it can execute, and
@@ -306,14 +309,17 @@ the correct surface. D2 remains the command owner.
    exact `inherit` model, effort, max turns, foreground/default permissions,
    literal skills, MCP subset, no memory/MCP-server/observer/initial prompt,
    no Agent/Task, and no omitted-tool inheritance. Assert `Task` plus all D1
-   suppressions stay disallowed, `Agent` is the sole added root native allow,
-   aliases/bypass flags are absent, and Pi still builds no SDK surface.
+   suppressions stay disallowed for children, root `Agent` is the sole public
+   native allow, and root `toolAliases.Agent === "Task"` is the only alias.
+   Pi still builds no SDK surface.
 2. **Admission and tool ceiling (core + integration).** Exercise valid each-role
-   foreground Agent input; unknown/built-in/case-collision names; Task; child
-   Agent/Task; missing/extra input; background/omitted background; prompt over
-   8 KiB; duplicate live child; lifecycle id/type mismatch; child native and
-   foreign/MCP tool calls; denied/aborted grants; and a malicious pre-allowed
-   path. `canUseTool` and `PreToolUse` must both reject every forbidden path.
+   foreground Agent input through resolved Task hook transport; unknown/built-in/
+   case-collision names; raw Task callback; child Agent/Task; missing/extra
+   input; background/omitted background; prompt over 8 KiB; duplicate live child;
+   lifecycle id/type mismatch; child native and foreign/MCP tool calls;
+   denied/aborted grants; and a malicious pre-allowed path. `canUseTool` must
+   reject every unavailable public path, while `PreToolUse` admits only the
+   exact foreground Agent grammar under either public or resolved alias name.
 3. **Partition and audit (core).** Feed interleaved root/two-child frames plus
    `SubagentStart`/`SubagentStop`; assert parent partitions, local child drain,
    one root terminal, bounded audit fields, no raw prompt/path/credential, and
@@ -328,8 +334,9 @@ the correct surface. D2 remains the command owner.
    sources; strict MCP; and disabled auto-memory. The tool assertion separately
    records the observed compatibility `Task` initialization label, `Skill`,
    `Agent` when reported by the pin, and exactly selected
-   `mcp__bobbit__<name>` tools, while asserting `Task ∉ allowedTools`,
-   `Task ∈ disallowedTools`, and no Task execution. Hostile user/project/local
+   `mcp__bobbit__<name>` tools, while asserting `toolAliases.Agent === "Task"`,
+   `Task ∉ allowedTools`, `Task ∉ disallowedTools` only as that alias target,
+   and no raw Task execution. Hostile user/project/local
    skills, agents, commands, plugins, MCP, memory, and credentials remain
    absent. Any SDK/binary drift requires human review of the literal fixture.
 5. **Deterministic runtime/E2E journey.** Extend that process-isolated real-SDK

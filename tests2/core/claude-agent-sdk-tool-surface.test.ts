@@ -19,7 +19,7 @@ const NATIVE_FLOOR_0_3_222 = [
 ] as const;
 
 const SUPPRESSED_NATIVE_0_3_222 = [
-	"Task", "Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch",
+	"Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch",
 	"NotebookEdit", "AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "EnterWorktree", "ExitWorktree",
 	"Monitor", "ScheduleWakeup", "PushNotification", "RemoteTrigger", "CronCreate", "CronDelete", "CronList",
 	"TaskCreate", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "TaskUpdate", "ToolSearch",
@@ -50,7 +50,7 @@ function opaqueInput(): Record<string, unknown> {
 }
 
 describe("Claude Agent SDK tool surface", () => {
-	it("pins the complete 0.3.222 native floor, retaining only approved Skill and Agent while denying Task", () => {
+	it("pins Task as Agent's private alias target without exposing native task tools", () => {
 		expect(CLAUDE_NATIVE_TOOL_FLOOR).toEqual(NATIVE_FLOOR_0_3_222);
 		expect(new Set(CLAUDE_NATIVE_TOOL_FLOOR).size).toBe(30);
 		expect(CLAUDE_NATIVE_TOOL_POLICY.retained).toEqual(["Skill", "Agent"]);
@@ -59,7 +59,8 @@ describe("Claude Agent SDK tool surface", () => {
 		expect(CLAUDE_NATIVE_TOOL_POLICY.disallowed).toEqual(SUPPRESSED_NATIVE_0_3_222);
 		expect(CLAUDE_NATIVE_TOOL_POLICY.disallowed).not.toContain("Skill");
 		expect(CLAUDE_NATIVE_TOOL_POLICY.disallowed).not.toContain("Agent");
-		expect(CLAUDE_NATIVE_TOOL_POLICY.disallowed).toContain("Task");
+		// Task must resolve only as Agent's SDK alias target, never as a public tool.
+		expect(CLAUDE_NATIVE_TOOL_POLICY.disallowed).not.toContain("Task");
 		expect(CLAUDE_NATIVE_TOOL_POLICY.disallowed).toContain("ToolSearch");
 	});
 
@@ -206,7 +207,7 @@ describe("Claude Agent SDK tool surface", () => {
 		} as any) as any;
 		expect(options.tools).toEqual(["Skill", "Agent"]);
 		expect(options.disallowedTools).toEqual(SUPPRESSED_NATIVE_0_3_222);
-		expect(options.disallowedTools).toContain("Task");
+		expect(options.disallowedTools).not.toContain("Task");
 		expect(options.disallowedTools).not.toContain("Agent");
 		// Agent is required by the official SDK programmatic-agent contract. Its
 		// bare allow shadows canUseTool, so its strict PreToolUse gate is pinned below.
@@ -217,18 +218,19 @@ describe("Claude Agent SDK tool surface", () => {
 		expect(isClaudeSdkRetainedNativeTool("Agent")).toBe(true);
 		expect(isClaudeSdkRetainedNativeTool("Skill")).toBe(true);
 		expect(isClaudeSdkRetainedNativeTool("Task")).toBe(false);
+		expect(isClaudeSdkRetainedNativeTool("mcp__bobbit__Agent")).toBe(false);
 		expect(options.agents).toEqual({});
 		expect(options.mcpServers).toEqual({ bobbit: surface.server });
 		expect(options.settingSources).toEqual([]);
 		expect(options.strictMcpConfig).toBe(true);
 		expect(options.managedSettings).toEqual({ autoMemoryEnabled: false });
 		expect(options.permissionMode).toBe("default");
-		expect(options.toolAliases).toBeUndefined();
+		expect(options.toolAliases).toEqual({ Agent: "Task" });
 		expect(options.bypassPermissions).toBeUndefined();
 		expect(options.allowDangerouslySkipPermissions).toBeUndefined();
 	});
 
-	it("keeps the literal Agent allow entry behind the strict PreToolUse policy", async () => {
+	it("keeps the public Agent allow entry behind the strict alias-aware PreToolUse policy", async () => {
 		const calls: Array<{ rawName: unknown; input: unknown; context: unknown }> = [];
 		const surface = build({
 			subagentPolicy: {
@@ -253,12 +255,21 @@ describe("Claude Agent SDK tool surface", () => {
 		expect(calls).toHaveLength(1);
 		expect(calls[0]!.rawName).toBe("Agent");
 		expect(calls[0]!.input).toBe(input);
+		// The 0.3.222 hook sees the resolved Task target, but it must retain the
+		// public Agent's exact id/input and admission policy.
+		expect((await options.hooks.PreToolUse[0].hooks[0]({ tool_name: "Task", tool_use_id: "agent-alias", tool_input: input })).hookSpecificOutput.permissionDecision).toBe("allow");
+		expect(calls[calls.length - 1]).toMatchObject({ rawName: "Agent", input, context: { toolUseId: "agent-alias", permissionMode: "default" } });
+		// Raw Task is not model-visible or auto-allowed, so its callback path stays
+		// denied even though Task is the private alias target.
+		expect(await options.canUseTool("Task", input, permissionContext({ toolUseID: "raw-task" }))).toMatchObject({ behavior: "deny" });
 		// SDK bare allowlists can bypass canUseTool; a root without an admitted
 		// policy is still denied at PreToolUse rather than becoming a native escape.
 		const noPolicy = buildClaudeAgentSdkQueryOptions(build(), {
 			cwd: "/workspace/project", env: { PATH: "/bin" }, abortController: new AbortController(),
 		} as any) as any;
 		const preToolUse = noPolicy.hooks.PreToolUse[0].hooks[0];
-		expect((await preToolUse({ tool_name: "Agent", tool_use_id: "unadmitted", tool_input: input })).hookSpecificOutput.permissionDecision).toBe("deny");
+		for (const name of ["Agent", "Task"]) {
+			expect((await preToolUse({ tool_name: name, tool_use_id: `unadmitted-${name}`, tool_input: input })).hookSpecificOutput.permissionDecision).toBe("deny");
+		}
 	});
 });

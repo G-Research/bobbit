@@ -552,7 +552,11 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 	private canonicalizeToolNames(events: readonly any[]): readonly any[] {
 		const surface = this.options.claudeSdkToolSurface;
 		if (!surface) return events;
-		const canonical = (name: unknown) => normalizeClaudeSdkMcpToolName(name, surface.entriesBySdkRawLower)?.canonicalName ?? name;
+		// The 0.3.222 Agent alias reports its resolved Task transport name in live
+		// events. Project the public name before UI/session-manager ownership checks.
+		const canonical = (name: unknown) => name === "Task"
+			? "Agent"
+			: normalizeClaudeSdkMcpToolName(name, surface.entriesBySdkRawLower)?.canonicalName ?? name;
 		return events.map((event) => {
 			const toolName = canonical(event.toolName);
 			const content = event.message?.content;

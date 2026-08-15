@@ -63,13 +63,14 @@ class FixtureSdkQuery implements AsyncIterable<unknown> {
 			prompt: "Render only this bounded SDK child fixture.",
 			run_in_background: false,
 		};
-		// The root Agent call establishes the sole card that may own child work.
+		// The SDK reports Agent's resolved Task transport name. The bridge must
+		// retain this exact root id while displaying the public Agent card.
 		this.emit({
 			type: "assistant", uuid: "root-agent-card", session_id: SDK_SESSION_ID,
-			message: { content: [{ type: "tool_use", id: PARENT_TOOL_USE_ID, name: "Agent", input: parentInput }], stop_reason: "tool_use" },
+			message: { content: [{ type: "tool_use", id: PARENT_TOOL_USE_ID, name: "Task", input: parentInput }], stop_reason: "tool_use" },
 		});
 		await this.args.options.hooks.PreToolUse[0].hooks[0]({
-			hook_event_name: "PreToolUse", session_id: SDK_SESSION_ID, tool_name: "Agent",
+			hook_event_name: "PreToolUse", session_id: SDK_SESSION_ID, tool_name: "Task",
 			tool_use_id: PARENT_TOOL_USE_ID, tool_input: parentInput,
 		});
 		await this.args.options.hooks.SubagentStart[0].hooks[0]({ hook_event_name: "SubagentStart", session_id: SDK_SESSION_ID, ...child });
@@ -101,9 +102,9 @@ class FixtureSdkQuery implements AsyncIterable<unknown> {
 		});
 	}
 
-	/** The official history ends the real root Agent call with a safe result.
-	 * This is distinct from the child terminal frame, which is not durable SDK
-	 * session history and therefore cannot be the source of reload state. */
+	/** The official history ends the resolved Task transport call with a safe
+	 * result. The adapter projects it to Agent; the child terminal remains live
+	 * only and cannot become reload state. */
 	emitRootFailureResult(): void {
 		this.emit({
 			type: "user", uuid: "root-agent-safe-failure", session_id: SDK_SESSION_ID,
@@ -199,7 +200,7 @@ async function expectNoRootChildProse(page: any): Promise<void> {
 }
 
 test.describe("Claude SDK embedded subagent card", () => {
-	test("keeps SDK child lifecycle, errors, reload, and resumed frames inside the real Agent card", async ({ page }) => {
+	test("projects the resolved Task transport as one Agent card with exact root correlation", async ({ page }) => {
 		test.setTimeout(60_000);
 		queries.length = 0;
 		sdkHistory.length = 0;

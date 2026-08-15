@@ -10,7 +10,7 @@ const BUNDLED_SKILLS_0_3_222 = [
 ] as const;
 
 const ROOT_NATIVE_DISALLOWED = [
-	"Task", "Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch", "NotebookEdit",
+	"Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch", "NotebookEdit",
 	"AskUserQuestion", "EnterPlanMode", "ExitPlanMode", "EnterWorktree", "ExitWorktree", "Monitor",
 	"ScheduleWakeup", "PushNotification", "RemoteTrigger", "CronCreate", "CronDelete", "CronList", "TaskCreate",
 	"TaskGet", "TaskList", "TaskOutput", "TaskStop", "TaskUpdate", "ToolSearch",
@@ -87,7 +87,8 @@ describe("Claude Agent SDK D3/D4 skills and subagents", () => {
 		expect((sdkSurface as Record<string, unknown>).CLAUDE_BUNDLED_SKILLS_0_3_222).toEqual(BUNDLED_SKILLS_0_3_222);
 		expect(sdkSurface.CLAUDE_NATIVE_TOOL_POLICY.retained).toEqual(["Skill", "Agent"]);
 		expect(sdkSurface.CLAUDE_NATIVE_TOOL_POLICY.disallowed).toEqual(ROOT_NATIVE_DISALLOWED);
-		expect(sdkSurface.CLAUDE_NATIVE_TOOL_POLICY.disallowed).toContain("Task");
+		// Task is only the private Agent alias target; it is not public or allowed.
+		expect(sdkSurface.CLAUDE_NATIVE_TOOL_POLICY.disallowed).not.toContain("Task");
 		expect(sdkSurface.CLAUDE_NATIVE_TOOL_POLICY.disallowed).not.toContain("Skill");
 		expect(sdkSurface.CLAUDE_NATIVE_TOOL_POLICY.disallowed).not.toContain("Agent");
 	});
@@ -151,7 +152,7 @@ describe("Claude Agent SDK D3/D4 skills and subagents", () => {
 		expect(options.settingSources).toEqual([]);
 		expect(options.strictMcpConfig).toBe(true);
 		expect(options.managedSettings).toEqual({ autoMemoryEnabled: false });
-		expect(options.toolAliases).toBeUndefined();
+		expect(options.toolAliases).toEqual({ Agent: "Task" });
 		expect(options.commands).toBeUndefined();
 		expect(options.skills).not.toContain("bobbit");
 	});
@@ -170,14 +171,18 @@ describe("Claude Agent SDK D3/D4 skills and subagents", () => {
 		const preToolUse = (surface.preToolUseMatcher as any)[0].hooks[0];
 
 		for (const subagent_type of Object.keys(PROJECTIONS)) {
-			const admitted = hookInput({ tool_input: { subagent_type, prompt: "Inspect this change", run_in_background: false } });
+			const admitted = hookInput({ tool_name: "Task", tool_input: { subagent_type, prompt: "Inspect this change", run_in_background: false } });
+			// Public Agent is the only callable model name; PreToolUse receives the
+			// resolved Task transport name without changing the root tool-use id.
 			await expect((surface.canUseTool as any)("Agent", admitted.tool_input, permissionContext())).resolves.toMatchObject({ behavior: "allow" });
 			expect(permissionDecision(await preToolUse(admitted))).toBe("allow");
+			expect(policy.active.size).toBe(0);
 			// Keep each projection's positive admission independent of the
 			// one-pending-child cap exercised below.
 			policy.clear();
 		}
 		for (const denied of [
+			// The alias-target hook must still reject malformed Task transport input.
 			hookInput({ tool_name: "Task", tool_input: {} }),
 			hookInput({ tool_input: { subagent_type: "general-purpose", prompt: "escape", run_in_background: false } }),
 			hookInput({ tool_input: { subagent_type: "Bobbit-Backend-Parity-Reviewer", prompt: "case collision", run_in_background: false } }),
