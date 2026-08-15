@@ -134,29 +134,37 @@ Unordered input is valid but is sorted before compare-and-swap, so callers recei
 
 `src/app/marketplace-page.ts` adds `string[]` to its local non-secret draft/wire value type. Every state boundary (`normalizeExtensionSettings()`, `draftFor()`, `setDraft()`, request assembly, clear/reset, successful replacement) clones arrays and normalizes a selected array with `const normalized = [...selected].sort()`. Draft comparison is element-by-element after canonicalization, not reference equality.
 
-For `field.type === "multi-enum"`, `renderSettingsField()` renders a native control:
+For `field.type === "multi-enum"`, `renderSettingsField()` renders a native checkbox group, not `select[multiple]` or a custom ARIA listbox:
 
 ```html
-<select multiple class="market-input" data-testid="market-settings-input"
+<fieldset class="market-settings-multi-enum" data-testid="market-settings-multi-enum"
   data-field-key="languages" aria-describedby="…">
-  <!-- descriptor values in declaration order -->
-</select>
+  <legend>Languages</legend>
+  <label>
+    <input type="checkbox" data-testid="market-settings-multi-enum-option"
+      data-field-key="languages" data-option-value="typescript">
+    TypeScript
+  </label>
+  <span data-testid="market-settings-multi-enum-summary">2 selected</span>
+</fieldset>
 ```
 
-Retain the existing generic input test id and distinguish the kind through its wrapper. The concrete selector contract is:
+The concrete selector contract is:
 
 ```text
 [data-testid="market-settings-field"][data-field-type="multi-enum"]
-[data-testid="market-settings-input"][data-field-key="languages"]
+[data-testid="market-settings-multi-enum"][data-field-key="languages"]
+[data-testid="market-settings-multi-enum-option"][data-option-value="typescript"]
+[data-testid="market-settings-multi-enum-summary"]
 ```
 
-The native `<select multiple>` has the existing visible `<label for>`, description/error `aria-describedby`, `aria-invalid`, disabled/busy state, and a visible instruction such as “Select one or more languages.” It exposes declaration values in declaration order, applies the normalized selected values with Lit's selected-option handling (not a string `.value`), and on `change` reads `Array.from(select.selectedOptions, option => option.value)`, clones/sorts it, validates it, and marks that owner dirty. Do not invent a custom checkbox/listbox widget.
+The group has a visible `<legend>` (the field label), description/error `aria-describedby`, disabled/busy state, and declaration-order option labels. Each option is a native checkbox, so Tab reaches the group in normal document order and Space toggles the focused option with native checked semantics; no keyboard handler or role emulation is added. On `change`, rebuild the selection from the checked options, use `const normalized = [...selected].sort()`, store only that fresh array, validate it, update the summary, and mark the owner dirty. A group-level required error sets the existing field `aria-invalid`/error linkage without turning checkboxes into an ARIA widget.
 
-For optional fields, **Use default** stages `undefined`; an explicit empty selection is a project-owned empty set and remains distinguishable from fallback/default. For required fields the client reports “Select at least one option.” before Save. Client validation also reports a fixed safe error for a selection no longer declared; server validation remains authoritative. Source/default text states a count and list of selected display values without exposing any secret (for example, `Default: python, typescript`).
+For optional fields, selecting no boxes stages an explicit `[]` project override; **Use default** stages `undefined`, which serializes as `null` on PATCH and removes that override. The two operations must remain visibly and semantically distinct in the summary/source text (`No options selected` versus `Using default`), and reset follows the existing explicit default/removal path. For required fields the client reports “Select at least one option.” before Save. Client validation also reports a fixed safe error for a selection no longer declared; server validation remains authoritative. Source/default text states the selected count and declaration labels without exposing any secret (for example, `Default: python, typescript`).
 
-On success, navigation, project switch, reload, conflict reload, reset, and form close, discard drafts and hydrate selections solely from the returned canonical projection. A reload must show the persisted selected options and no stale selection from the preceding project/owner. Keep existing secret input clearing unchanged.
+On success, navigation, project switch, reload, conflict reload, reset, and form close, discard drafts and hydrate checked states solely from the returned canonical projection. A reload must restore the persisted checked options and no stale selection from the preceding project/owner. Keep existing secret input clearing unchanged.
 
-Add narrow `src/app/marketplace.css` rules for the native multi-select only: match `.market-input` sizing/focus/disabled styles, give it a usable minimum height for several rows, and preserve the existing 36 px desktop/44 px narrow-screen targets. Do not change existing primitive controls or create a new palette.
+Add narrow `src/app/marketplace.css` rules for `.market-settings-multi-enum` and its native checkbox labels only: match existing field spacing, focus/disabled treatment, and preserve the existing 36 px desktop/44 px narrow-screen targets. Do not change existing primitive controls or create a new palette.
 
 ## Focused verification
 
@@ -167,8 +175,8 @@ Extend existing registered tests; add a `tests2/tests-map.json` entry only if a 
 | Core | `tests2/core/extension-settings-schema.test.ts` | Valid descriptor/default/runtime multi-enum values normalize to code-unit order; reject missing/non-array/default secret, duplicate/unknown/ill-formed/over-member/over-count/over-byte values, empty required set, `values` on a non-enum kind, and invalid `requiresConfig`. Assert enum and all primitive outcomes stay unchanged. Test defaults, reconciliation outputs, and input arrays cannot be mutated through aliases. |
 | Core | `tests2/core/extension-settings-store.test.ts` | Native YAML schema-2 round trip uses sorted arrays; a schema-1 primitive record migrates only on save; schema-1 array is rejected rather than upgraded; schema-2 malformed array row isolation; all per-field/aggregate limits; snapshots/effective/update/runtime result arrays are independent copies; a secret-save failure restores the original schema/revision/commitId/array snapshot; generation mismatch remains unavailable. |
 | Integration | `tests2/integration/extension-settings-api.test.ts` | Fixture declares `languages: { type: multi-enum, values: [typescript, python, rust], optional: true }`. PATCH accepts an unordered valid selection and GET/PATCH/reload return sorted `['python', 'typescript']`; reject duplicate, undeclared, scalar/object/nested arrays, required empty set, and caps with safe fixed errors. Assert YAML native sequence, legacy PackStore arrays do not supply a value, cache-invalidated runtime sees a valid selected set, and primitive/secret API contracts are unchanged. |
-| DOM | `tests2/dom/marketplace-active-project.test.ts` (or a focused new `tests2/dom/marketplace-extension-settings-multi-enum.test.ts`) | Stub wire field and assert native `select[multiple]`, labelled/error/busy attributes, declared-order options, canonical multi-selection draft PATCH body, optional default reset versus explicit empty selection, and replacement on project switch/reload without cross-project draft leakage. |
-| Browser | `tests2/browser/e2e/extension-settings.spec.ts` | Extend the isolated Hindsight fixture with `languages`; keyboard-select two entries from the labelled native select, save, assert the redacted PATCH/GET response and re-opened/reloaded control contain the sorted values, switch projects and verify no flash/leak, then return/reload and restore A's choices. Include an invalid required fixture case or API-assisted setup proving the visible error/blocked Save behavior. Preserve the existing no-secret-sentinel assertions. |
+| DOM | `tests2/dom/marketplace-active-project.test.ts` (or a focused new `tests2/dom/marketplace-extension-settings-multi-enum.test.ts`) | Stub a wire field and assert a labelled `fieldset`/`legend`, native declaration-order checkbox options, the three multi-enum test ids, checked/error/busy attributes, Space keyboard toggling, canonical cloned draft PATCH body, **Use default**/`null` versus explicit `[]`, and replacement on project switch/reload without cross-project draft leakage. |
+| Browser | `tests2/browser/e2e/extension-settings.spec.ts` | Extend the isolated Hindsight fixture with `languages`; Tab/Space-toggle two labelled native checkboxes, save, assert the redacted PATCH/GET response and re-opened/reloaded group contain the sorted checked values and summary, switch projects and verify no flash/leak, then return/reload and restore A's choices. Assert explicit no-selection differs from **Use default**, and include an invalid required fixture case or API-assisted setup proving the visible error/blocked Save behavior. Preserve the existing no-secret-sentinel assertions. |
 
 Run after implementation:
 
