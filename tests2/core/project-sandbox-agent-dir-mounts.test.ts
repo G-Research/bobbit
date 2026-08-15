@@ -798,7 +798,6 @@ describe("ProjectSandbox state mount staleness", () => {
 		assert.equal(result.stale, true);
 		assert.match(result.reason ?? "", /verification checkout source/);
 	});
-	});
 
 	it("marks pre-upgrade containers stale when the tool-result-error bridge mount is missing", () => {
 		const stateDir = path.resolve("/project/.bobbit/state");
