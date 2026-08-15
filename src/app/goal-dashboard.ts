@@ -2972,6 +2972,9 @@ function renderGateChecklist(): TemplateResult {
 				// summary so re-signaled passed gates render as running everywhere.
 				const effectiveStatus = effectiveGateStatus(gs, summaryGate);
 				const hasRunning = effectiveStatus === "running";
+				const latestSignal = gs?.signals?.slice(-1)[0];
+				const showLatestCancellation = effectiveStatus === "pending"
+					&& latestSignal?.verification.status === "cancelled";
 
 				let dotClass: string;
 				let dotContent: string;
@@ -3003,6 +3006,7 @@ function renderGateChecklist(): TemplateResult {
 							</div>
 						</div>
 						<span class="wf-checklist-status-label gate-status-label--${effectiveStatus === "running" ? "pending" : status}">${hasRunning ? "verifying" : status}</span>
+						${showLatestCancellation ? html`<span class="wf-checklist-status-label gate-status-label--pending">cancelled · ${cancellationCauseLabel(latestSignal?.verification.cancellation)}</span>` : nothing}
 						${signalCount > 0 ? html`<span class="gate-signal-badge">${signalCount} signal${signalCount !== 1 ? "s" : ""}</span>` : nothing}
 						<span class="wf-checklist-view">${isExpanded ? "Hide" : "View"}</span>
 					</div>
