@@ -50,7 +50,9 @@ Input affinity depends on the compaction type:
 
 - during **manual** compaction, prompts and steers target the next turn;
 - during **threshold** or **overflow** compaction, steers target the continuing turn while prompts target the next turn; and
-- when Pi reports `willRetry: true`, only continuation steers may re-enter the interrupted turn. Next-turn work waits for its final `agent_end`.
+- when Pi reports `willRetry: true`, only continuation steers may re-enter the interrupted turn. Next-turn work waits for `agent_settled` after the final `agent_end`.
+
+Pi's final `agent_end` is not a fresh-prompt admission boundary. Pi may still perform threshold compaction and queued-continuation processing while its active-run guard remains set; it clears that guard immediately before `agent_settled`. Bobbit therefore completes user-visible terminal bookkeeping at `agent_end` but fences queue draining and idle-time prompt admission until `agent_settled`. A definite no-start RPC rejection also rolls back both the live and persisted optimistic streaming state.
 
 Every occurrence remains in the visible delivery outbox while fenced. See [Reliable prompt and steer delivery](prompt-queue.md) for identity, settlement, and recovery.
 
@@ -62,7 +64,8 @@ Every occurrence remains in the visible delivery outbox while fenced. See [Relia
 | --- | --- |
 | Manual success | Clear the fence once. If the session is safely idle, drain next-turn work normally. |
 | Threshold/overflow continues, or `willRetry: true` | Clear once and release queued continuation steers in FIFO order. Keep next-turn work parked. |
-| Final non-retry turn boundary | Retarget any remaining continuation rows once with `continuation-ended`, then drain next-turn work. |
+| Final non-retry `agent_end` | Retarget any remaining continuation rows once with `continuation-ended`; keep next-turn work parked while Pi performs post-run work. |
+| `agent_settled` | Clear the active-run admission fence and drain next-turn work. |
 | Automatic compaction failure | Clear the compaction epoch but do not inject continuation work into a possibly failed/interrupted turn. The final safe turn boundary owns later release. |
 | Stop near compaction end | Record the compaction finish, defer release to Stop/replacement ownership, reconcile the in-flight attempt, and retarget undispatched continuation work. |
 

@@ -179,6 +179,7 @@ function harness(options?: {
 					},
 				});
 				manager.handleAgentLifecycle(restored, { type: "agent_end", messages: [] });
+				manager.handleAgentLifecycle(restored, { type: "agent_settled" });
 				const call = promptCallCount++;
 				if (call === 0 && options.rejectRedriveWith) {
 					return options.throwRedriveRejection

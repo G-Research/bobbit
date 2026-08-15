@@ -3156,7 +3156,7 @@
     },
     {
       "path": "tests2/core/reliable-compaction-release.test.ts",
-      "reason": "Core reliable-turn compaction coverage for admission fencing, single release across manual, threshold, overflow, failure, and abort outcomes, continuation-versus-next-turn ordering, and Stop interleavings, using the shared deterministic reliable-intent fixture.",
+      "reason": "Core reliable-turn compaction coverage for admission fencing, agent_end-to-agent_settled next-turn release, definite-rejection status rollback, single release across manual, threshold, overflow, failure, and abort outcomes, continuation-versus-next-turn ordering, and Stop interleavings, using the shared deterministic reliable-intent fixture.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -3165,7 +3165,7 @@
     },
     {
       "path": "tests2/integration/reliable-intent-recovery.test.ts",
-      "reason": "In-process gateway and mock-Pi integration coverage for barrier-driven compaction, durable ID-keyed admission, ordered identical steers, delayed acknowledgement and echo, reconnect, restart, abort, failure, and exactly-once transcript recovery, with helper-owned deterministic runtime barriers.",
+      "reason": "In-process gateway and mock-Pi integration coverage for agent_end-to-agent_settled admission fencing, barrier-driven compaction, durable ID-keyed admission, ordered identical steers, delayed acknowledgement and echo, reconnect, restart, abort, failure, and exactly-once transcript recovery, with helper-owned deterministic runtime barriers.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -3174,7 +3174,7 @@
     },
     {
       "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
-      "reason": "Browser journey covering the reliable-turn visible-carrier invariant across idle and busy prompts, rapid identical steers, delayed acknowledgement and echo, manual, threshold, and overflow compaction, Stop races, reload, reconnect, second-tab convergence, and actionable delivery failure through its dedicated runtime fixture.",
+      "reason": "Browser journey covering the reliable-turn visible-carrier invariant across idle and busy prompts, agent_end-to-agent_settled release, rapid identical steers, delayed acknowledgement and echo, manual, threshold, and overflow compaction, Stop races, reload, reconnect, second-tab convergence, and actionable delivery failure through its dedicated runtime fixture.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",

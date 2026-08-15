@@ -45,6 +45,50 @@ async function closeConnection(conn: WsConnection): Promise<void> {
 test.setTimeout(30_000);
 
 test.describe("Reliable intent recovery protocol", () => {
+	test("holds next-turn intent after agent_end until Pi emits agent_settled", async ({ gateway }) => {
+		const sessionId = await createSession();
+		const conn = await connectWs(sessionId);
+		const core = reliableMockCore(gateway, sessionId);
+		const intent = "intent-post-agent-end-settled-0001";
+		const text = "DELIVER_ONLY_AFTER_AGENT_SETTLED";
+		try {
+			core.armBarrier("turn:before-agent-end");
+			core.armBarrier("turn:after-agent-end");
+			core.armBarrier("prompt:2:received");
+			const cursor = conn.messageCount();
+			conn.send({ type: "prompt", text: "FIRST_TURN_BEFORE_SETTLEMENT" });
+			await core.waitForBarrier("turn:before-agent-end");
+
+			conn.send({ type: "prompt", text, intentId: intent });
+			const queued = await conn.waitForFrom(cursor, (frame) => frameHasIntentIds(frame, [intent]));
+			expect(intentRows(queued)).toEqual([
+				expect.objectContaining({ id: intent, deliveryState: "queued", targetTurn: "next-turn" }),
+			]);
+			expect(commandTexts(core).filter((command) => command === text)).toHaveLength(0);
+			expect((gateway.sessionManager.getSession(sessionId) as any)?._piAgentRunSettled,
+				"agent_start must install the Pi settlement fence").toBe(false);
+
+			core.releaseBarrier("turn:before-agent-end");
+			await core.waitForBarrier("turn:after-agent-end");
+			expect(commandTexts(core).filter((command) => command === text),
+				"agent_end must not call prompt while Pi still owns finishRun").toHaveLength(0);
+
+			core.releaseBarrier("turn:after-agent-end");
+			await core.waitForBarrier("prompt:2:received");
+			expect(commandTexts(core).filter((command) => command === text)).toHaveLength(1);
+			core.releaseBarrier("prompt:2:received");
+			await conn.waitForFrom(cursor, (frame) => frame.type === "event"
+				&& frame.data?.type === "message_end"
+				&& deliveryIntentId(frame) === intent);
+			await conn.waitForFrom(cursor, statusPredicate("idle"));
+			expect(userMessageEnds(conn.messages.slice(cursor), text).map(deliveryIntentId)).toEqual([intent]);
+		} finally {
+			core.releaseAllBarriers();
+			await closeConnection(conn);
+			await deleteSession(sessionId);
+		}
+	});
+
 	test("mock runtime exposes threshold failure and overflow retry barriers without sleeps", async ({ gateway }) => {
 		const sessionId = await createSession();
 		const conn = await connectWs(sessionId);

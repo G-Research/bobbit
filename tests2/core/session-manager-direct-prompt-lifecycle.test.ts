@@ -1406,12 +1406,12 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		await Promise.resolve();
 		await Promise.resolve();
 
-		assert.equal(session.status, "idle");
+		assert.equal(session.status, "aborting", "late prompt rejection must not steal Stop's status ownership");
 		assert.equal(session.promptQueue.length, 1);
 		assert.equal(session.promptQueue.peek()?.text, "recover after abort-before-acceptance");
 		assert.deepEqual(
 			client.sent.filter((msg: any) => msg.type === "session_status").map((msg: any) => msg.status),
-			["streaming", "aborting", "idle"],
+			["streaming", "aborting"],
 		);
 	});
 

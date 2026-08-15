@@ -265,6 +265,9 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 			status: "streaming",
 			statusVersion: 1,
 			streamingStartedAt: Date.now(),
+			isCompacting: true,
+			_reliableCompactionId: "graceful-stop-compaction",
+			_reliableCompactionReason: "threshold",
 			createdAt: Date.now(),
 			lastActivity: Date.now(),
 			clients: new Set(),
@@ -279,10 +282,20 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 			rpcClient: {
 				abort: async () => {
 					emit({
+						type: "compaction_end",
+						reason: "threshold",
+						compactionId: "graceful-stop-compaction",
+						aborted: true,
+						success: false,
+						error: "aborted",
+					});
+					emit({
 						type: "message_end",
 						message: { role: "assistant", content: [{ type: "text", text: "stopped" }], stopReason: "error", errorMessage: "aborted" },
 					});
 					emit({ type: "agent_end", messages: [] });
+					assert.equal(drainQueue.mock.calls.length, 0, "agent_end cannot release queued work before Pi settles");
+					emit({ type: "agent_settled" });
 				},
 				onEvent: (listener: (event: any) => void) => {
 					listeners.add(listener);
@@ -304,6 +317,7 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 		assert.equal(session.lastTurnErrored, false, "user Stop clears the synthetic abort error");
 		assert.equal(session.lastTurnErrorMessage, undefined);
 		assert.equal(session.streamingStartedAt, undefined);
+		assert.equal(session.isCompacting, false, "graceful Stop replays compaction_end before release");
 		assert.equal(session.status, "idle");
 		assert.equal(resolveIdleWaiters.mock.calls.length, 1, "idle waiters settle exactly once");
 		assert.equal(drainQueue.mock.calls.length, 1, "only coordinator release drains");
@@ -342,6 +356,9 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 			status: "streaming",
 			statusVersion: 1,
 			streamingStartedAt: Date.now(),
+			isCompacting: true,
+			_reliableCompactionId: "hard-stop-compaction",
+			_reliableCompactionReason: "threshold",
 			createdAt: Date.now(),
 			lastActivity: Date.now(),
 			clients: new Set(),
@@ -379,6 +396,7 @@ describe("SessionManager.forceAbort grace race (S8)", () => {
 		assert.equal(session.lastTurnErrorMessage, undefined);
 		assert.equal(session.consecutiveErrorTurns, 0);
 		assert.equal(session.streamingStartedAt, undefined);
+		assert.equal(session.isCompacting, false, "hard Stop synthesizes an aborted compaction end");
 		assert.equal(resolveIdleWaiters.mock.calls.length, 1);
 		assert.ok(update.mock.calls.some(([, patch]: any[]) =>
 			patch.wasStreaming === false && patch.streamingStartedAt === undefined

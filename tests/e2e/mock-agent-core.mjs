@@ -297,12 +297,9 @@ export class MockAgentCore {
 		if (event?.type === "message_end" && event.message && typeof event.message === "object") {
 			this._appendTranscriptMessage(event.message);
 		}
-		// Pi 0.82 distinguishes a low-level agent_end from the fully durable,
-		// no-more-continuations settlement boundary. History cursor enrichment must
-		// observe the latter, after every terminal message has been persisted.
-		if (event?.type === "agent_end" && event.willRetry !== true) {
-			this._onEvent({ type: "agent_settled" });
-		}
+		// Pi emits agent_settled explicitly only after post-agent compaction and
+		// continuation handling completes. Terminal call sites below preserve that
+		// ordering instead of synthesizing settlement inside agent_end emission.
 	}
 
 	_nextTranscriptEntryId() {
@@ -1118,6 +1115,7 @@ export class MockAgentCore {
 			}
 			this.currentAbortController = null;
 			this.emit({ type: "agent_end" });
+			this.emit({ type: "agent_settled" });
 			this.emit({ type: "session_status", status: "idle" });
 			return;
 		}
@@ -1143,6 +1141,7 @@ export class MockAgentCore {
 				this._reliableOverflowRetryActive = false;
 				this.currentAbortController = null;
 				this.emit({ type: "agent_end", willRetry: false });
+				this.emit({ type: "agent_settled" });
 				this.emit({ type: "session_status", status: "idle" });
 				return;
 			}
@@ -1154,6 +1153,7 @@ export class MockAgentCore {
 			await this._crossBarrier(`${reason}:before-final-agent-end`, { reason });
 			this.currentAbortController = null;
 			this.emit({ type: "agent_end", willRetry: false });
+			this.emit({ type: "agent_settled" });
 			this._reliableOverflowRetryActive = false;
 			this.emit({ type: "session_status", status: "idle" });
 			return;
@@ -1177,6 +1177,7 @@ export class MockAgentCore {
 			}
 			this.currentAbortController = null;
 			this.emit({ type: "agent_end" });
+			this.emit({ type: "agent_settled" });
 			this.emit({ type: "session_status", status: "idle" });
 			return;
 		}
@@ -1228,6 +1229,7 @@ export class MockAgentCore {
 			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "bash_bg", isError: false });
 			this.currentAbortController = null;
 			this.emit({ type: "agent_end" });
+			this.emit({ type: "agent_settled" });
 			this.emit({ type: "session_status", status: "idle" });
 			return;
 		}
@@ -1260,6 +1262,7 @@ export class MockAgentCore {
 			this.emit({ type: "tool_execution_end", toolCallId: toolId, toolName: "bash_bg", isError: false });
 			this.currentAbortController = null;
 			this.emit({ type: "agent_end" });
+			this.emit({ type: "agent_settled" });
 			this.emit({ type: "session_status", status: "idle" });
 			return;
 		}
@@ -1281,6 +1284,7 @@ export class MockAgentCore {
 			}
 			this.currentAbortController = null;
 			this.emit({ type: "agent_end" });
+			this.emit({ type: "agent_settled" });
 			this.emit({ type: "session_status", status: "idle" });
 			return;
 		}
@@ -1441,6 +1445,7 @@ export class MockAgentCore {
 		await this._crossBarrier("turn:before-agent-end");
 		this.emit({ type: "agent_end" });
 		await this._crossBarrier("turn:after-agent-end");
+		this.emit({ type: "agent_settled" });
 		this.emit({ type: "session_status", status: "idle" });
 	}
 
@@ -2272,6 +2277,7 @@ export class MockAgentCore {
 			this.emit({ type: "message_end", message: toolResultMsg });
 			this.emit({ type: "tool_execution_end", toolId, toolName: deniedTool, isError: true });
 			this.emit({ type: "agent_end" });
+			this.emit({ type: "agent_settled" });
 			this.emit({ type: "session_status", status: "idle" });
 			return;
 		}
@@ -3435,6 +3441,7 @@ export class MockAgentCore {
 				}
 				this.emit({ type: "agent_end" });
 				await this._crossBarrier(`abort:${occurrence}:after-agent-end`, commandReceipt);
+				this.emit({ type: "agent_settled" });
 				this.emit({ type: "session_status", status: "idle" });
 				return { success: true };
 			}
