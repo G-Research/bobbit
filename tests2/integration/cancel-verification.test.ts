@@ -332,12 +332,41 @@ function restartCancellationState(fixture: RestartCancellationFixture) {
 	};
 }
 
-async function flushRestartCleanup(): Promise<void> {
-	// The manual clock dispatches callbacks synchronously, while each retry
-	// still crosses several promise boundaries (reaper, strict persistence, and
-	// terminal publication). Drain those turns without advancing real time.
-	for (let turn = 0; turn < 4; turn++) {
-		await new Promise<void>(resolve => setImmediate(resolve));
+function waitForNextRestartFinalization(harness: VerificationHarness): Promise<Promise<void>> {
+	const original = (harness as any)._finalizeCancelledVerification.bind(harness);
+	let finalizer: ReturnType<typeof vi.spyOn>;
+	return new Promise((resolve, reject) => {
+		finalizer = vi.spyOn(harness as any, "_finalizeCancelledVerification").mockImplementation((...args: any[]) => {
+			try {
+				const publication = original(...args) as Promise<void>;
+				finalizer.mockRestore();
+				resolve(publication);
+				return publication;
+			} catch (error) {
+				finalizer.mockRestore();
+				reject(error);
+				throw error;
+			}
+		});
+	});
+}
+
+async function disposeRestartCancellationFixture(fixture: RestartCancellationFixture): Promise<void> {
+	try {
+		// If an assertion exits while the retry owner still exists, finish that
+		// exact owner before closing its store. Do not delete a state directory
+		// beneath a coalesced GateStore write or an owned cleanup retry.
+		const commandRetryTimers = (fixture.harness as any)._commandKillRetryTimers as Map<string, unknown>;
+		if (commandRetryTimers.has(fixture.oldSignalId)) {
+			fixture.setCleanupReady();
+			const finalization = waitForNextRestartFinalization(fixture.harness);
+			fixture.clock.advance(1_000);
+			await (await finalization);
+		}
+		await Promise.all([...(fixture.harness as any)._terminalCleanupPromises.values()]);
+		await fixture.gateStore.close();
+	} finally {
+		fs.rmSync(fixture.stateDir, { recursive: true, force: true });
 	}
 }
 
@@ -1153,12 +1182,12 @@ test.describe("Cancel Verification API", () => {
 				completionEvents: [],
 			});
 			pendingThenRetry.setCleanupReady();
+			const finalization = waitForNextRestartFinalization(pendingThenRetry.harness);
 			pendingThenRetry.clock.advance(1_000);
-			await flushRestartCleanup();
-			// The exact reaper acknowledged; wait for the durable terminal write
-			// before checking that the active retry record was removed.
-			await pendingThenRetry.gateStore.flush();
-			await flushRestartCleanup();
+			// The manual clock dispatches the retry callback but cannot return its
+			// promise. Await the owned finalizer through strict signal/gate writes
+			// and exact resource release before observing active-record removal.
+			await (await finalization);
 
 			const retryState = restartCancellationState(pendingThenRetry);
 			expect(pendingThenRetry.cleanupAttempts(), "RESTART_CANCEL_RETRY_MUST_REUSE_THE_EXACT_CLEANUP_AUTHORITY").toBe(2);
@@ -1171,8 +1200,8 @@ test.describe("Cancel Verification API", () => {
 				firstState.completionEvents.map(event => event.status),
 			);
 		} finally {
-			fs.rmSync(firstAttempt.stateDir, { recursive: true, force: true });
-			fs.rmSync(pendingThenRetry.stateDir, { recursive: true, force: true });
+			await disposeRestartCancellationFixture(firstAttempt);
+			await disposeRestartCancellationFixture(pendingThenRetry);
 		}
 	});
 
@@ -1198,7 +1227,7 @@ test.describe("Cancel Verification API", () => {
 			expect(fixture.events.filter(event => event.type === "gate_verification_complete" && event.signalId === fixture.newSignalId),
 			"RESTART_CANCEL_MUST_NOT_EMIT_A_NEW_SIGNAL_COMPLETION").toHaveLength(0);
 		} finally {
-			fs.rmSync(fixture.stateDir, { recursive: true, force: true });
+			await disposeRestartCancellationFixture(fixture);
 		}
 	});
 
