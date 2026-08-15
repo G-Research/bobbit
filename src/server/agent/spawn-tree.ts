@@ -37,6 +37,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, watch, type FSWatcher } 
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import { connect } from "node:net";
 import { randomUUID } from "node:crypto";
 import type { Clock } from "../gateway-deps.js";
@@ -379,7 +380,9 @@ const POSIX_TREE_PAYLOAD_ENV = "BOBBIT_POSIX_TREE_PAYLOAD";
 function posixSupervisorArgs(): string[] {
 	const extension = extname(fileURLToPath(import.meta.url));
 	const supervisor = fileURLToPath(new URL(`./posix-tree-supervisor${extension}`, import.meta.url));
-	return extension === ".ts" ? ["--import", "tsx", supervisor] : [supervisor];
+	// Source-mode tests may launch from an arbitrary command cwd. Resolve tsx
+	// relative to this module, never through that configured cwd or its PATH.
+	return extension === ".ts" ? ["--import", createRequire(import.meta.url).resolve("tsx"), supervisor] : [supervisor];
 }
 
 function withPosixSentinelReadyPipe(stdio: StdioOptions | undefined): { stdio: StdioOptions; payloadStdioCount: number } {

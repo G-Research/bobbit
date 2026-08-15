@@ -8,11 +8,13 @@
 
 import { execFileSync, spawn } from "node:child_process";
 import { closeSync, readFileSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { createRequire } from "node:module";
 
 const PAYLOAD_ENV = "BOBBIT_POSIX_TREE_PAYLOAD";
 const IDENTITY_FILE_ENV = "BOBBIT_POSIX_SENTINEL_IDENTITY_FILE";
 const IDENTITY_NONCE_ENV = "BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE";
 const SENTINEL_FLAG = "--bobbit-posix-tree-sentinel";
+const SENTINEL_ARGUMENT_PREFIX = "bobbit-posix-sentinel:";
 const INTERNAL_ENVIRONMENT = [PAYLOAD_ENV, IDENTITY_FILE_ENV, IDENTITY_NONCE_ENV] as const;
 
 type Payload = { file: string; args: string[]; stdioCount: number };
@@ -45,9 +47,15 @@ function inspectSelf(): SentinelIdentity | undefined {
 			return Number.isFinite(pgid) && !!startToken ? { pgid, startTokenKind: "linux-proc-stat-22", startToken } : undefined;
 		}
 		if (process.platform === "darwin") {
+			const nonce = process.env[IDENTITY_NONCE_ENV];
+			if (!nonce || /[\s\0]/.test(nonce)) return undefined;
 			const startToken = execFileSync("ps", ["-o", "lstart=", "-p", String(process.pid)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
 			const pgid = Number(execFileSync("ps", ["-o", "pgid=", "-p", String(process.pid)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim());
-			return Number.isFinite(pgid) && !!startToken ? { pgid, startTokenKind: "darwin-lstart-argv-nonce", startToken } : undefined;
+			const command = execFileSync("ps", ["-o", "command=", "-p", String(process.pid)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+			const nonceArgument = `${SENTINEL_ARGUMENT_PREFIX}${nonce}`;
+			return Number.isFinite(pgid) && !!startToken && command.trim().split(/\s+/).includes(nonceArgument)
+				? { pgid, startTokenKind: "darwin-lstart-argv-nonce", startToken }
+				: undefined;
 		}
 	} catch { /* unsupported or unavailable process inspection fails closed */ }
 	return undefined;
@@ -79,9 +87,10 @@ function supervisorPath(): string {
 
 function sentinelArgs(): string[] {
 	const entry = supervisorPath();
+	const nonceArgument = `${SENTINEL_ARGUMENT_PREFIX}${process.env[IDENTITY_NONCE_ENV] ?? ""}`;
 	return entry.endsWith(".ts")
-		? ["--import", "tsx", entry, SENTINEL_FLAG]
-		: [entry, SENTINEL_FLAG];
+		? ["--import", createRequire(import.meta.url).resolve("tsx"), entry, SENTINEL_FLAG, nonceArgument]
+		: [entry, SENTINEL_FLAG, nonceArgument];
 }
 
 function payloadEnvironment(): NodeJS.ProcessEnv {
@@ -91,6 +100,10 @@ function payloadEnvironment(): NodeJS.ProcessEnv {
 }
 
 function runSentinel(): void {
+	// Install this barrier before identity publication and FD-3 acknowledgement:
+	// a host cancellation that races either must not strand a live payload without
+	// the sentinel that owns its process group after root exit.
+	for (const signal of ["SIGHUP", "SIGINT", "SIGTERM"] as const) process.on(signal, () => {});
 	if (!publishIdentity()) die();
 	try {
 		writeSync(3, ".");
@@ -99,8 +112,7 @@ function runSentinel(): void {
 		die();
 	}
 	// The sentinel is the group member that survives root exit until the host's
-	// final negative-PGID signal. It intentionally ignores graceful signals.
-	for (const signal of ["SIGHUP", "SIGINT", "SIGTERM"] as const) process.on(signal, () => {});
+	// final negative-PGID signal.
 	setInterval(() => {}, 2_147_483_647);
 }
 
@@ -123,7 +135,10 @@ function runSupervisor(): void {
 	// FD 3 is exclusively the parent/sentinel readiness channel. Preserve every
 	// caller-provided descriptor after it (for example a durable exit witness)
 	// at its original shifted position without exposing FD 3 to the payload.
-	const child = spawn(payload.file, payload.args, {
+	// `/usr/bin/env --` is a fixed, shell-free execvp boundary on supported
+	// POSIX hosts. It receives the configured executable only as a subsequent
+	// argv element, avoiding an environment-tainted executable sink here.
+	const child = spawn("/usr/bin/env", ["--", payload.file, ...payload.args], {
 		env: payloadEnvironment(),
 		stdio: ["inherit", "inherit", "inherit", "ignore", ...Array.from({ length: payload.stdioCount - 4 }, (_, index) => index + 4)],
 	});
@@ -132,6 +147,10 @@ function runSupervisor(): void {
 		if (settled) return;
 		settled = true;
 		if (signal) {
+			// Preserve the payload's signal result. Setting a nonzero fallback first
+			// prevents a blocked or otherwise undeliverable re-raise from returning a
+			// false successful supervisor result.
+			process.exitCode = 125;
 			try { process.kill(process.pid, signal); } catch { process.exit(125); }
 			return;
 		}

@@ -11,6 +11,7 @@ import { createManualClock } from "../harness/clock.js";
 import { FakePinnedCheckoutManager, pinnedCheckoutReference } from "../harness/fake-pinned-checkout-manager.js";
 
 const SPAWN_TREE_SOURCE = readFileSync(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url), "utf8");
+const POSIX_SUPERVISOR_SOURCE = readFileSync(new URL("../../src/server/agent/posix-tree-supervisor.ts", import.meta.url), "utf8");
 
 type NativeSpawn = typeof import("node:child_process").spawn;
 
@@ -201,6 +202,7 @@ const inherited = {
   file: process.env.BOBBIT_POSIX_SENTINEL_IDENTITY_FILE,
   nonce: process.env.BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE,
   script: process.env.BOBBIT_POSIX_TREE_SENTINEL_CHILD_SCRIPT,
+  payload: process.env.BOBBIT_POSIX_TREE_PAYLOAD,
   pgid: process.env.BOBBIT_POSIX_SENTINEL_PGID,
 };
 const nested = spawnTracked(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: ["ignore", "ignore", "ignore", "pipe"], posixSentinelIdentity: { file: process.env.BOBBIT_NESTED_SENTINEL_FILE, nonce: "nested-nonce" } });
@@ -215,6 +217,7 @@ process.exit(0);
 `;
 
 const NESTED_SENTINEL_PROBE = String.raw`
+import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -226,9 +229,13 @@ const tracked = spawnTracked(process.execPath, ["--import", "tsx", "--input-type
 // Subscribe before either event so a fast close cannot be lost between awaits.
 const closed = new Promise((resolve, reject) => { tracked.child.once("close", resolve); tracked.child.once("error", reject); });
 await new Promise((resolve, reject) => { const ready = tracked.child.stdio[3]; if (!ready) return reject(new Error("missing outer ready")); ready.once("data", resolve); ready.once("error", reject); });
+const outer = JSON.parse(fs.readFileSync(outerFile, "utf8"));
+process.kill(outer.pid, "SIGTERM");
+await new Promise(resolve => setTimeout(resolve, 30));
+try { process.kill(outer.pid, 0); } catch (error) { assert.fail("sentinel must survive immediate post-ownership SIGTERM: " + error); }
 await closed;
 const result = JSON.parse(fs.readFileSync(resultFile, "utf8"));
-process.stdout.write(JSON.stringify(result) + "\n", () => { fs.rmSync(dir, { recursive: true, force: true }); process.exit(0); });
+process.stdout.write(JSON.stringify({ ...result, survivedImmediateSigterm: true }) + "\n", () => { fs.rmSync(dir, { recursive: true, force: true }); process.exit(0); });
 `;
 
 const IDENTITY_FAILURE_PROBE = String.raw`
@@ -270,7 +277,7 @@ try {
   // would create the marker. The tracked launcher must instead try to execute
   // this complete string as one shell-free executable path.
   const command = process.execPath + "; printf injected > " + JSON.stringify(injected);
-  const tracked = spawnTracked(command, [], { stdio: ["ignore", "ignore", "ignore"] });
+  const tracked = spawnTracked(command, [], { cwd: dir, stdio: ["ignore", "ignore", "ignore"] });
   await tracked.ownershipReady;
   await new Promise((resolve, reject) => { tracked.child.once("close", resolve); tracked.child.once("error", reject); });
   assert.equal(fs.existsSync(injected), false, "configured command must not be interpreted by a shell");
@@ -765,16 +772,30 @@ describe("spawnTracked timeout cleanup", () => {
 		expect(result.identity.startToken).toEqual(expect.any(String));
 	});
 
-	it("scrubs outer sentinel identity before a nested tracked spawn", async () => {
-		if (process.platform !== "linux") {
-			expect(process.platform).not.toBe("linux");
+	it("records a nonce-bound Darwin sentinel identity from the live supervisor argv", async () => {
+		if (process.platform !== "darwin") {
+			expect(process.platform).not.toBe("darwin");
+			return;
+		}
+		const result = await runNativeJsonProbe(FAST_EXIT_SENTINEL_PROBE);
+		expect(result.identity).toMatchObject({
+			nonce: "fast-exit-nonce",
+			pgid: result.rootPid,
+			startTokenKind: "darwin-lstart-argv-nonce",
+		});
+	});
+
+	it("keeps the post-ownership sentinel alive and scrubs its envelope before a nested tracked spawn", async () => {
+		if (process.platform === "win32") {
+			expect(process.platform).toBe("win32");
 			return;
 		}
 		const result = await runNativeJsonProbe(NESTED_SENTINEL_PROBE);
-		expect(result.inherited).toEqual({ file: undefined, nonce: undefined, script: undefined, pgid: undefined });
+		expect(result.inherited).toEqual({ file: undefined, nonce: undefined, script: undefined, payload: undefined, pgid: undefined });
 		expect(result.outer.nonce).toBe("outer-nonce");
 		expect(result.nested.nonce).toBe("nested-nonce");
 		expect(result.nested.pid).not.toBe(result.outer.pid);
+		expect(result.survivedImmediateSigterm).toBe(true);
 	});
 
 	it("does not acknowledge or leak when sentinel identity publishing fails", async () => {
@@ -797,6 +818,8 @@ describe("spawnTracked timeout cleanup", () => {
 		expect(SPAWN_TREE_SOURCE).toContain("POSIX_TREE_PAYLOAD_ENV");
 		expect(SPAWN_TREE_SOURCE).not.toContain('"/bin/sh"');
 		expect(SPAWN_TREE_SOURCE).not.toContain("/dev/fd/");
+		expect(POSIX_SUPERVISOR_SOURCE).toContain('spawn("/usr/bin/env", ["--", payload.file, ...payload.args]');
+		expect(POSIX_SUPERVISOR_SOURCE).toContain("process.exitCode = 125;");
 	});
 
 	it("refuses a reused POSIX sentinel PID before it can signal a group", async () => {
