@@ -27,7 +27,16 @@ class LiveControlsQuery implements AsyncIterable<unknown> {
 	private initialized = false;
 	private reader?: (result: IteratorResult<unknown>) => void;
 
-	constructor(readonly args: SdkQueryArgs) {}
+	constructor(readonly args: SdkQueryArgs) {
+		// The official SDK pulls the prompt stream before bridge-side capability
+		// initialization settles. Consume the first test prompt the same way, so
+		// this fake proves controls only after a real input is admitted.
+		void this.consumeFirstPrompt();
+	}
+
+	private async consumeFirstPrompt(): Promise<void> {
+		await this.args.prompt[Symbol.asyncIterator]().next();
+	}
 
 	async initializationResult(): Promise<{ models: SdkModel[] }> {
 		return { models: Object.values(CLAUDE_LIVE_MODELS) };
