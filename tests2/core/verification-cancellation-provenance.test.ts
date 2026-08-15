@@ -46,13 +46,23 @@ afterEach(async () => {
 	for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
-function makeFixture(signalId: string, persistence: "json" | "sqlite" = "json") {
+function makeFixture(
+	signalId: string,
+	persistence: "json" | "sqlite" = "json",
+	goal?: { state: "todo" | "in-progress" | "complete" | "shelved" | "blocked"; archived?: boolean },
+) {
 	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "verification-cancellation-provenance-"));
 	roots.push(stateDir);
 	const gateStore = new GateStore(stateDir, undefined, { persistence });
 	gateStore.initGatesForGoal(GOAL_ID, [GATE_ID]);
 	const events: any[] = [];
-	const harness = new VerificationHarness(stateDir, gateStore, (_goalId, event) => events.push(event), ROLE_STORE as any);
+	const projectContextManager = goal ? {
+		getContextForGoal: (goalId: string) => goalId === GOAL_ID ? { gateStore, goalStore: { get: () => goal } } : undefined,
+	} : undefined;
+	const harness = new VerificationHarness(
+		stateDir, gateStore, (_goalId, event) => events.push(event), ROLE_STORE as any,
+		undefined, undefined, undefined, undefined, projectContextManager as any,
+	);
 	const signal: GateSignal = {
 		id: signalId,
 		goalId: GOAL_ID,
@@ -188,6 +198,40 @@ test("legacy generic cancelled rows deserialize as unknown without inventing a h
 		"CANCELLATION_LEGACY_UNKNOWN: old records must remain readable but must never be guessed from generic kill text").toMatchObject({ cause: "unknown" });
 	expect(legacy.cancellation).not.toMatchObject({ cause: "manual" });
 	await reloaded.close();
+});
+
+test.each([
+	["completed", { state: "complete" as const }],
+	["shelved", { state: "shelved" as const }],
+	["archived", { state: "in-progress" as const, archived: true }],
+])("legacy unknown cancellation preserves a terminal %s goal gate status", async (_terminal, goal) => {
+	const { gateStore, harness, signal } = makeFixture(`legacy-terminal-${_terminal}`, "json", goal);
+	gateStore.updateGateStatus(GOAL_ID, GATE_ID, "passed");
+
+	const active = (harness as any).activeVerifications.get(signal.id) as ActiveVerification;
+	active.cancelled = true;
+	active.overallStatus = "cancelled";
+	active.cancellation = { cause: "unknown", requestedAt: Date.now() };
+	active.steps[0].cancellation = { ...active.cancellation };
+	await (harness as any)._finalizeCancelledVerification(active);
+
+	const verification = gateStore.getGate(GOAL_ID, GATE_ID)!.signals.find(entry => entry.id === signal.id)!.verification as any;
+	expect(verification.cancellation).toMatchObject({ cause: "unknown" });
+	expect(gateStore.getGate(GOAL_ID, GATE_ID)!.status).toBe("passed");
+});
+
+test("legacy unknown cancellation keeps a live eligible goal pending", async () => {
+	const { gateStore, harness, signal } = makeFixture("legacy-live", "json", { state: "in-progress" });
+	gateStore.updateGateStatus(GOAL_ID, GATE_ID, "passed");
+	const active = (harness as any).activeVerifications.get(signal.id) as ActiveVerification;
+	active.cancelled = true;
+	active.overallStatus = "cancelled";
+	active.cancellation = { cause: "unknown", requestedAt: Date.now() };
+	active.steps[0].cancellation = { ...active.cancellation };
+
+	await (harness as any)._finalizeCancelledVerification(active);
+
+	expect(gateStore.getGate(GOAL_ID, GATE_ID)!.status).toBe("pending");
 });
 
 test("restart preserves an already completed output and the persisted cause until exact cleanup finalizes", async () => {

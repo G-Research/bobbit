@@ -5023,10 +5023,15 @@ export class VerificationHarness {
 				|| verification.cancellation?.cause === "shelved"
 				|| verification.cancellation?.cause === "archive";
 			const currentGate = store?.getGate?.(active.goalId, active.gateId);
+			const goal = this.projectContextManager?.getContextForGoal(active.goalId)?.goalStore.get(active.goalId);
+			const legacyTerminalGoal = verification.cancellation?.cause === "unknown"
+				&& (goal?.state === "complete" || goal?.state === "shelved" || goal?.archived === true);
 			if (this._isCurrentGateSignal(active)
 				&& !terminalLifecycleCancellation
-				&& currentGate?.status !== "bypassed") {
-				store?.updateGateStatus(active.goalId, active.gateId, "pending");
+				&& !legacyTerminalGoal
+				&& currentGate?.status !== "bypassed"
+				&& store?.updateGateStatus) {
+				store.updateGateStatus(active.goalId, active.gateId, "pending");
 				broadcastGateStatusChanged(this.broadcastFn, active.goalId, active.gateId, "pending");
 			}
 			this.broadcastFn(active.goalId, {
