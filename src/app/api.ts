@@ -3537,11 +3537,39 @@ export async function postBootTiming(sample: unknown): Promise<void> {
 // SANDBOX STATUS API
 // ============================================================================
 
-export async function fetchSandboxStatus(projectId?: string) {
+export type SandboxRequirementState = "pending" | "available" | "failed" | "unsupported";
+
+export interface SandboxRequirementStatusEntry {
+	packId: string;
+	requirementId: string;
+	state: SandboxRequirementState;
+	code?: string;
+}
+
+export interface SandboxRequirementsStatus {
+	fingerprint: string;
+	profiles: string[];
+	entries: SandboxRequirementStatusEntry[];
+}
+
+/** Server-owned Docker probe result. `imageName` is the exact image Docker checked. */
+export interface SandboxStatusResponse {
+	available: boolean;
+	configured: boolean;
+	error?: string;
+	dockerVersion?: string;
+	imageName?: string;
+	imageExists?: boolean;
+	dockerfileExists?: boolean;
+	buildCommand?: string;
+	requirements?: SandboxRequirementsStatus;
+}
+
+export async function fetchSandboxStatus(projectId?: string): Promise<SandboxStatusResponse | null> {
 	const apiProjectId = configApiProjectId(projectId);
 	const res = await gatewayFetch(`/api/sandbox-status?projectId=${encodeURIComponent(apiProjectId)}`);
 	if (!res.ok) return null;
-	return res.json();
+	return res.json() as Promise<SandboxStatusResponse>;
 }
 
 // ============================================================================

@@ -13,6 +13,8 @@ export interface SandboxStatus {
 	available: boolean;
 	error?: string;
 	dockerVersion?: string;
+	/** Exact core-resolved image whose availability was checked. */
+	imageName?: string;
 	imageExists?: boolean;
 	dockerfileExists?: boolean;
 	buildCommand?: string;
@@ -171,7 +173,11 @@ export async function ensureImageAgentVersion(plan: SandboxImagePlan, dockerCont
 export async function checkDockerAvailability(plan?: SandboxImagePlan, dockerContextRoot?: string, commandRunner: CommandRunner = realCommandRunner): Promise<SandboxStatus> {
 	try {
 		const { stdout } = await commandRunner.execFile("docker", ["info", "--format", "{{.ServerVersion}}"], { timeout: 5000 });
-		const status: SandboxStatus = { available: true, dockerVersion: stdout.toString().trim() };
+		const status: SandboxStatus = {
+			available: true,
+			dockerVersion: stdout.toString().trim(),
+			...(plan ? { imageName: plan.imageName } : {}),
+		};
 		if (!plan) return status;
 
 		try {
@@ -202,7 +208,10 @@ export async function checkDockerAvailability(plan?: SandboxImagePlan, dockerCon
 		return {
 			available: false,
 			error: String(err),
-			...(plan ? { requirements: sandboxRequirementsStatus(plan, "unsupported") } : {}),
+			...(plan ? {
+				imageName: plan.imageName,
+				requirements: sandboxRequirementsStatus(plan, "unsupported"),
+			} : {}),
 		};
 	}
 }

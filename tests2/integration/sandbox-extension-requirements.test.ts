@@ -228,11 +228,15 @@ describe.sequential("sandbox extension requirements integration", () => {
 
 	it("resolves only the selected project's authorized requirement, ignores client build inputs, and reports pending to available", async () => {
 		await setPackActivation(fixture, { enabled: true, sandboxRequirements: [] });
-		const beforeGrant = requirementStatus(await status(fixture, fixture.projectA));
+		const beforeGrantResponse = await status(fixture, fixture.projectA);
+		expect(beforeGrantResponse.imageName).toBe("registry.example.test/team/agent:a");
+		const beforeGrant = requirementStatus(beforeGrantResponse);
 		expect(beforeGrant).toMatchObject({ profiles: [], entries: [] });
 
 		await grant(fixture);
-		const pending = requirementStatus(await status(fixture, fixture.projectA));
+		const pendingResponse = await status(fixture, fixture.projectA);
+		expect(pendingResponse.imageName).toMatch(/^registry\.example\.test\/team\/agent:bobbit-req-[a-f0-9]{16}$/);
+		const pending = requirementStatus(pendingResponse);
 		expect(pending).toMatchObject({ profiles: ["python"], entries: [{ packId: PACK_ID, requirementId: REQUIREMENT_ID, state: "pending" }] });
 		const otherProject = requirementStatus(await status(fixture, fixture.projectB));
 		expect(otherProject).toMatchObject({ profiles: [], entries: [] });

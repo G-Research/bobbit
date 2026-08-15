@@ -37,12 +37,15 @@ function json<T>(response: BrowserResponse): T {
 	catch { throw new Error(`Expected JSON from ${response.status}: ${response.text}`); }
 }
 
-function expectUnbuiltPythonRequirement(response: BrowserResponse): void {
-	const requirements = json<{ requirements: { profiles: string[]; entries: Array<{ packId: string; requirementId: string; state: string }> } }>(response).requirements;
+function expectUnbuiltPythonRequirement(response: BrowserResponse): string {
+	const body = json<{ imageName?: string; requirements: { profiles: string[]; entries: Array<{ packId: string; requirementId: string; state: string }> } }>(response);
+	expect(body.imageName).toMatch(/^registry\.example\.test\/team\/browser-agent:bobbit-req-[a-f0-9]{16}$/);
+	const requirements = body.requirements;
 	expect(requirements.profiles).toEqual(["python"]);
 	expect(requirements.entries).toHaveLength(1);
 	expect(requirements.entries[0]).toMatchObject({ packId: PACK_ID, requirementId: REQUIREMENT_ID });
 	expect(["pending", "unsupported"]).toContain(requirements.entries[0].state);
+	return body.imageName!;
 }
 
 function writeFixturePack(bobbitDir: string): string {
@@ -126,7 +129,13 @@ test.describe("sandbox extension requirements browser API journey", () => {
 		await expect(page.locator("body[data-shortcuts-ready='1']")).toBeVisible({ timeout: 20_000 });
 		response = await browserApi(page, { path: statusPath });
 		expect(response.status, response.text).toBe(200);
-		expectUnbuiltPythonRequirement(response);
+		const resolvedImageName = expectUnbuiltPythonRequirement(response);
+
+		await page.evaluate((id) => { window.location.hash = `#/settings/${id}/general`; }, projectId);
+		await expect(page.getByText("Docker Sandbox")).toBeVisible({ timeout: 15_000 });
+		await expect(page.getByTestId("sandbox-resolved-image")).toHaveText(`Resolved image "${resolvedImageName}"`);
+		const requirementStatus = page.getByTestId("sandbox-requirement-status");
+		await expect(requirementStatus).toHaveAccessibleName(new RegExp(`Sandbox requirement ${PACK_ID}/${REQUIREMENT_ID}: (pending|unsupported)`));
 
 		response = await browserApi(page, { path: revokePath, method: "DELETE" });
 		expect(response.status, response.text).toBe(200);
