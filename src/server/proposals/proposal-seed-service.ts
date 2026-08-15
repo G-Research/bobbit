@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type http from "node:http";
 import type { PersistedGoal } from "../agent/goal-store.js";
 import type { ProjectContextManager } from "../agent/project-context-manager.js";
@@ -33,10 +34,16 @@ export type ProposalDraftOwner =
 	| { kind: "session"; sessionId: string }
 	| { kind: "project-import"; projectId: string; importId: string; requestId: string };
 
-/** Stable, path-safe draft bucket for a proposal owner. */
+/**
+ * Stable, path-safe draft bucket for a proposal owner. Import ids identify a
+ * replay run rather than an individual answer, so each draft also binds its
+ * project and durable request identity. Hashing keeps arbitrary durable ids
+ * out of paths and holds the bucket to a fixed size.
+ */
 export function proposalDraftOwnerId(owner: ProposalDraftOwner): string {
 	if (owner.kind === "session") return owner.sessionId;
-	return `project-import-${owner.importId}`;
+	const identity = JSON.stringify([owner.projectId, owner.importId, owner.requestId]);
+	return `project-import-v1-${createHash("sha256").update(identity, "utf8").digest("hex")}`;
 }
 
 /** Payload for the project-owned proposal workspace projection. */
