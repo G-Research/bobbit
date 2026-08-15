@@ -234,7 +234,7 @@ function createRestartCancellationFixture(options: { pendingFirst?: boolean; new
 				phase: 0,
 				startedAt: clock.now() - 10,
 				output: "completed output survives restart cancellation",
-				duration_ms: 10,
+				durationMs: 10,
 			},
 			{
 				name: "Exact cleanup",

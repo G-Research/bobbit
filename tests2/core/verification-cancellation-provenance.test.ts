@@ -149,8 +149,8 @@ test("restart preserves an already completed output and the persisted cause unti
 		cancelRequestedAt: Date.now() - 10,
 		cancelReason: "cancelled",
 		steps: [
-			{ name: "Completed evidence", type: "command", status: "passed", output: "retain this completed output", duration_ms: 12, phase: 0 },
-			{ name: "Interrupted command", type: "command", status: "running", phase: 1 },
+			{ name: "Completed evidence", type: "command", status: "passed", output: "retain this completed output", durationMs: 12, phase: 0, startedAt: Date.now() - 12 },
+			{ name: "Interrupted command", type: "command", status: "running", phase: 1, startedAt: Date.now() - 10 },
 		],
 	};
 	(persisted as any).cancellation = { cause: "goal-pause", requestedAt: Date.now() - 10 };

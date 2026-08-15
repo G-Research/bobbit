@@ -170,11 +170,13 @@ test.describe("Journey: pause cancels verification without failing the gate", ()
 
 			const second = await signal(fixture, "Explicit, deterministic re-signal after resume.");
 			expect(second.status, "one explicit re-signal is eligible after cancellation").toBe(201);
-			await expect.poll(() => gate(fixture).then(state => state.signals?.length ?? 0), {
+			if (!fixture) throw new Error("CANCELLATION_FIXTURE_REQUIRED: fixture must exist before polling the re-signal");
+			const reSignalledFixture = fixture;
+			await expect.poll(() => gate(reSignalledFixture).then(state => state.signals?.length ?? 0), {
 				timeout: 15_000,
 				message: "explicit resume action creates exactly one new signal generation",
 			}).toBe(2);
-			await waitForBothLiveSteps(fixture);
+			await waitForBothLiveSteps(reSignalledFixture);
 		} finally {
 			if (fixture) await apiFetch(`/api/goals/${fixture.goalId}/gates/${GATE_ID}/cancel-verification`, { method: "POST" }).catch(() => {});
 			if (fixture) await teardownTeam(fixture.goalId).catch(() => {});
