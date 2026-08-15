@@ -254,7 +254,7 @@ describe("Claude Agent SDK sandbox spawn", () => {
 		const inspect = vi.fn(async (args: string[]) => ({
 			stdout: args[0] === "image"
 				? `${CLAUDE_AGENT_SDK_SANDBOX_VERSION}\n`
-				: args.includes("bobbit-claude-agent-sdk")
+				: args[5] === "/usr/local/bin/bobbit-claude-agent-sdk"
 					? `${CLAUDE_AGENT_SDK_SANDBOX_CLAUDE_VERSION} (Claude Code)\n`
 					: "",
 			stderr: "",
@@ -277,7 +277,7 @@ describe("Claude Agent SDK sandbox spawn", () => {
 		});
 		await expect(sandbox.hasClaudeAgentSdkCapability()).resolves.toBe(false);
 		(sandbox as any).execDocker = async (args: string[]) => {
-			if (args.includes("bobbit-claude-agent-sdk")) throw Object.assign(new Error("wrapper exited"), { code: 127, stdout: "secret", stderr: "secret" });
+			if (args[5] === "/usr/local/bin/bobbit-claude-agent-sdk") throw Object.assign(new Error("wrapper exited"), { code: 127, stdout: "secret", stderr: "secret" });
 			return { stdout: `${CLAUDE_AGENT_SDK_SANDBOX_VERSION}\n`, stderr: "" };
 		};
 		await expect(sandbox.hasClaudeAgentSdkCapability()).resolves.toBe(false);
