@@ -7217,7 +7217,10 @@ async function handleApiRoute(
 					if (createWorkflows) {
 						try {
 							const { validateAllWorkflows } = await import("./agent/workflow-validator.js");
-							const errors = validateAllWorkflows(createWorkflows, configuredComponents);
+							const errors = validateAllWorkflows(
+								createWorkflows as Parameters<typeof validateAllWorkflows>[0],
+								configuredComponents,
+							);
 							if (errors.length > 0) {
 								projectRegistry.remove(project.id);
 								json({ error: "Workflow validation failed", details: errors }, 400);
