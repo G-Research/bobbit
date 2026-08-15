@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, base } from "./_e2e/e2e-setup.js";
+import { apiFetch } from "./_e2e/e2e-setup.js";
 
 const PACK_ID = `project-import-decisions-${process.pid}-${Date.now()}`;
 const QUESTION_HOOK = "import.question";
