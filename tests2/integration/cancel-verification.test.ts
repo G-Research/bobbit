@@ -36,7 +36,17 @@ type SlowWorkflowGoal = {
 	goalId: string;
 };
 type SlowGateSignal = { signal: { id: string } };
-type SlowGateState = { status: string; signals: Array<{ id: string; verification: { status: string } }> };
+type SlowGateState = {
+	status: string;
+	signals: Array<{
+		id: string;
+		verification: {
+			status: string;
+			cancellation?: { cause: string; requestedAt: number; finalizedAt?: number };
+			steps: Array<{ name: string; status?: string; output?: string; cancellation?: { cause: string } }>;
+		};
+	}>;
+};
 
 function makeSlowWorkflowId(): string {
 	return `test-cancel-verif-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -178,7 +188,10 @@ function restartCancellationSignal(id: string, contentVersion: number): GateSign
 		contentVersion,
 		verification: {
 			status: "running",
-			steps: [{ name: "Exact cleanup", type: "command", passed: false, status: "running", phase: 0, output: "", duration_ms: 0 }],
+			steps: [
+				{ name: "Completed prerequisite", type: "command", passed: true, status: "passed", phase: 0, output: "completed output survives restart cancellation", duration_ms: 10 },
+				{ name: "Exact cleanup", type: "command", passed: false, status: "running", phase: 1, output: "", duration_ms: 0 },
+			],
 		},
 	};
 }
@@ -207,21 +220,36 @@ function createRestartCancellationFixture(options: { pendingFirst?: boolean; new
 		signalId: oldSignalId,
 		overallStatus: "cancelled",
 		cancelled: true,
-		cancelReason: "explicit cancellation before restart",
+		// Process kill mechanics remain separate from durable orchestration
+		// provenance. The typed cancellation field is assigned through `any` until
+		// the production contract lands on this testing branch.
+		cancelReason: "cancelled",
 		cancelRequestedAt: clock.now(),
 		startedAt: clock.now(),
-		steps: [{
-			name: "Exact cleanup",
-			type: "command",
-			status: "running",
-			phase: 0,
-			startedAt: clock.now(),
-			sentinelFile: path.join(stateDir, "exact-owner.sentinel.json"),
-			killRequestedAt: clock.now(),
-			killReason: "cancelled",
-			killSignal: "SIGKILL",
-		}],
+		steps: [
+			{
+				name: "Completed prerequisite",
+				type: "command",
+				status: "passed",
+				phase: 0,
+				startedAt: clock.now() - 10,
+				output: "completed output survives restart cancellation",
+				duration_ms: 10,
+			},
+			{
+				name: "Exact cleanup",
+				type: "command",
+				status: "running",
+				phase: 1,
+				startedAt: clock.now(),
+				sentinelFile: path.join(stateDir, "exact-owner.sentinel.json"),
+				killRequestedAt: clock.now(),
+				killReason: "cancelled",
+				killSignal: "SIGKILL",
+			},
+		],
 	};
+	(persisted as any).cancellation = { cause: "manual", requestedAt: clock.now() };
 	fs.writeFileSync(path.join(stateDir, "active-verifications.json"), JSON.stringify({ verifications: [persisted] }));
 
 	let cleanupReady = !options.pendingFirst;
@@ -402,7 +430,7 @@ test.describe("Cancel Verification API", () => {
 			});
 			expect(cancelRes.status).toBe(200);
 			const cancelBody = await cancelRes.json();
-			expect(cancelBody.cancelled).toBe(true);
+			expect(cancelBody).toMatchObject({ cancelled: true, cancellation: { cause: "manual", requestedAt: expect.any(Number) } });
 
 			// Cancellation bookkeeping is synchronous; drive any queued cleanup with
 			// the gateway's manual clock instead of sleeping between REST reads.
@@ -412,6 +440,13 @@ test.describe("Cancel Verification API", () => {
 				(v) => !v.some(a => a.gateId === "slow-gate" && a.overallStatus === "running"),
 				5000,
 			);
+			const gate = await getGateState(goalId);
+			expect(gate.status, "MANUAL_CANCEL_MUST_LEAVE_GATE_ELIGIBLE_TO_RUN_AGAIN").toBe("pending");
+			expect(gate.signals.at(-1)?.verification, "MANUAL_CANCEL_MUST_BE_DURABLE_AND_NEVER_A_PRODUCT_FAILURE").toMatchObject({
+				status: "cancelled",
+				cancellation: { cause: "manual", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
+				steps: [expect.objectContaining({ name: "Slow check", status: "cancelled", cancellation: { cause: "manual" } })],
+			});
 		} finally {
 			await cleanupSlowWorkflowGoal(setup);
 		}
@@ -526,6 +561,11 @@ test.describe("Cancel Verification API", () => {
 				(v) => !v.some(a => a.gateId === "slow-gate" && a.overallStatus === "running"),
 				5000,
 			);
+			const cancelledGate = await getGateState(goalId);
+			expect(cancelledGate.status, "MANUAL_CANCEL_MUST_NOT_REQUIRE_A_RESET_BEFORE_RESIGNAL").toBe("pending");
+			expect(cancelledGate.signals.at(-1)?.verification).toMatchObject({
+				status: "cancelled", cancellation: { cause: "manual" },
+			});
 
 			// Re-signal — should succeed, not 409
 			const signal2Res = await apiFetch(`/api/goals/${goalId}/gates/slow-gate/signal`, {
@@ -588,12 +628,18 @@ test.describe("Cancel Verification API", () => {
 			expect((await cancelRes.json()).cancelled).toBe(true);
 
 			const finalized = await getGateState(setup.goalId);
-			const cancelledSignals = finalized.signals.filter(signal => signal.id === signalId && signal.verification.status === "failed");
+			const cancelledSignals = finalized.signals.filter(signal => signal.id === signalId && signal.verification.status === "cancelled");
 			expect(cancelledSignals, "EXACT_CLEANUP_MUST_FINALIZE_CURRENT_SIGNAL_ONCE").toHaveLength(1);
-			expect(finalized.status).toBe("failed");
+			expect(cancelledSignals[0]?.verification.cancellation, "EXACT_CLEANUP_MUST_PRESERVE_MANUAL_CAUSE").toMatchObject({
+				cause: "manual", requestedAt: expect.any(Number), finalizedAt: expect.any(Number),
+			});
+			expect(cancelledSignals[0]?.verification.steps, "EXACT_CLEANUP_MUST_KEEP_REAL_WORKFLOW_ROWS").toEqual([
+				expect.objectContaining({ name: "Slow check", status: "cancelled", cancellation: expect.objectContaining({ cause: "manual" }) }),
+			]);
+			expect(finalized.status, "EXACT_CLEANUP_MUST_NOT_MANUFACTURE_A_FAILED_GATE").toBe("pending");
 			expect(conn.messages.slice(eventCursor).filter((event: any) =>
-				event.type === "gate_verification_complete" && event.signalId === signalId && event.status === "cancelled"),
-				"EXACT_CLEANUP_MUST_PUBLISH_ONE_COMPLETION").toHaveLength(1);
+				event.type === "gate_verification_complete" && event.signalId === signalId && event.status === "cancelled" && event.cancellation?.cause === "manual"),
+				"EXACT_CLEANUP_MUST_PUBLISH_ONE_CAUSE_LABELLED_COMPLETION").toHaveLength(1);
 		} finally {
 			runner.settleAll();
 			await cancelRequest?.catch(() => {});
@@ -639,7 +685,9 @@ test.describe("Cancel Verification API", () => {
 			expect(resignalRes.status).toBe(201);
 
 			const afterOldCleanup = await getGateState(setup.goalId);
-			expect(afterOldCleanup.signals.find(signal => signal.id === firstSignalId)?.verification.status).toBe("failed");
+			expect(afterOldCleanup.signals.find(signal => signal.id === firstSignalId)?.verification.status).toBe("cancelled");
+			expect(afterOldCleanup.signals.find(signal => signal.id === firstSignalId)?.verification.cancellation,
+				"SUPERSEDED_GENERATION_MUST_RETAIN_ITS_OWN_CAUSE").toMatchObject({ cause: "superseded" });
 			expect(afterOldCleanup.signals.find(signal => signal.id === secondSignalId)?.verification.status,
 				"LATE_CANCEL_MUST_NOT_FINALIZE_NEW_SIGNAL").toBe("running");
 			expect(afterOldCleanup.status, "LATE_CANCEL_MUST_NOT_OVERWRITE_NEW_GATE_STATE").toBe("pending");
@@ -660,9 +708,17 @@ test.describe("Cancel Verification API", () => {
 			const firstState = restartCancellationState(firstAttempt);
 			expect(firstAttempt.cleanupAttempts(), "RESTART_CANCEL_FIRST_RESUME_MUST_USE_EXACT_CLEANUP_ONCE").toBe(1);
 			expect(firstState, "RESTART_CANCEL_FIRST_RESUME_MUST_FINALIZE_CURRENT_SIGNAL_BEFORE_REMOVAL").toMatchObject({
-				gateStatus: "failed",
-				oldVerificationStatus: "failed",
+				gateStatus: "pending",
+				oldVerificationStatus: "cancelled",
 				active: false,
+			});
+			const firstSignal = firstAttempt.gateStore.getGate(RESTART_CANCEL_GOAL_ID, RESTART_CANCEL_GATE_ID)!.signals.find(signal => signal.id === firstAttempt.oldSignalId)!;
+			expect((firstSignal.verification as any), "RESTART_CANCEL_MUST_KEEP_TYPED_CAUSE_AND_COMPLETED_OUTPUT").toMatchObject({
+				cancellation: { cause: "manual", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
+				steps: [
+					{ name: "Completed prerequisite", status: "passed", output: "completed output survives restart cancellation" },
+					{ name: "Exact cleanup", status: "cancelled", cancellation: { cause: "manual" } },
+				],
 			});
 			expect(firstState.completionEvents, "RESTART_CANCEL_FIRST_RESUME_MUST_EMIT_ONE_COMPLETION").toEqual([
 				expect.objectContaining({ status: "cancelled" }),
@@ -705,7 +761,9 @@ test.describe("Cancel Verification API", () => {
 			const state = restartCancellationState(fixture);
 
 			expect(fixture.cleanupAttempts()).toBe(1);
-			expect(oldSignal.verification.status, "RESTART_CANCEL_MUST_FINALIZE_THE_OLD_SIGNAL").toBe("failed");
+			expect(oldSignal.verification.status, "RESTART_CANCEL_MUST_FINALIZE_THE_OLD_SIGNAL").toBe("cancelled");
+			expect((oldSignal.verification as any).cancellation,
+				"RESTART_CANCEL_MUST_KEEP_OLD_GENERATION_CAUSE").toMatchObject({ cause: "manual" });
 			expect(newSignal.verification.status, "RESTART_CANCEL_MUST_NOT_FINALIZE_THE_NEW_SIGNAL").toBe("running");
 			expect(gate.status, "RESTART_CANCEL_MUST_NOT_OVERWRITE_THE_NEW_GATE_STATE").toBe("pending");
 			expect(state.active, "RESTART_CANCEL_MUST_REMOVE_THE_FINALIZED_OLD_ACTIVE_RECORD").toBe(false);
