@@ -1,21 +1,35 @@
 import { describe, expect, it } from "vitest";
-import { CODE_INTELLIGENCE_LANGUAGE_MATRIX } from "../../market-packs/code-intelligence/lib/language-matrix.ts";
-import { deriveSandboxRequirements } from "../../market-packs/code-intelligence/src/sandbox-requirements.ts";
-
-type Detection = { component: string; languageId: string };
-type Layer = { layerId: string; languageIds?: readonly string[]; languages?: readonly string[]; reasons?: readonly string[] };
-type Language = { id: string; lsp?: { host: readonly unknown[]; sandbox: readonly unknown[] } };
+import { CODE_INTELLIGENCE_LANGUAGE_MATRIX, type AstGrepLanguageAlias, type LspCapability } from "../../market-packs/code-intelligence/lib/language-matrix.ts";
+import type { LanguageDetection } from "../../market-packs/code-intelligence/src/language-detection.ts";
+import {
+	deriveSandboxRequirements,
+	type DerivedSandboxLayerRequirement,
+} from "../../market-packs/code-intelligence/src/sandbox-requirements.ts";
 
 const shellOrDockerfile = /(?:\bRUN\b|\bFROM\b|\bCOPY\b|\bdocker\b|\bsh\b|\bbash\b|\n|\r|;|&&|\|\|)/i;
 
-function derive(detected: readonly Detection[], enabled: readonly string[]): readonly Layer[] {
-	return deriveSandboxRequirements(detected as never, enabled) as readonly Layer[];
+function detection(component: string, languageId: AstGrepLanguageAlias): LanguageDetection {
+	return {
+		component,
+		languageId,
+		evidence: { fileCount: 1, matchedGlobs: [], rootMarkers: [] },
+		structuralSearch: "available",
+		lsp: "disabled",
+		missing: [],
+	};
+}
+
+function hasLsp<T extends object>(language: T): language is T & { lsp: LspCapability } {
+	return "lsp" in language && language.lsp !== undefined;
+}
+
+function derive(detected: readonly LanguageDetection[], enabled: readonly string[]): readonly DerivedSandboxLayerRequirement[] {
+	return deriveSandboxRequirements(detected, enabled);
 }
 
 describe("LSP sandbox requirements", () => {
 	it("derives only enabled, detected LSP languages and keeps host and sandbox declarations independent", () => {
-		const matrix = CODE_INTELLIGENCE_LANGUAGE_MATRIX as unknown as readonly Language[];
-		const lspEntries = matrix.filter((language): language is Language & { lsp: NonNullable<Language["lsp"]> } => Boolean(language.lsp));
+		const lspEntries = CODE_INTELLIGENCE_LANGUAGE_MATRIX.filter(hasLsp);
 		expect(lspEntries.length).toBeGreaterThan(0);
 		for (const language of lspEntries) {
 			expect(Array.isArray(language.lsp.host)).toBe(true);
@@ -24,9 +38,9 @@ describe("LSP sandbox requirements", () => {
 		}
 
 		const detected = [
-			{ component: "web", languageId: "typescript" },
-			{ component: "api", languageId: "python" },
-		] as const;
+			detection("web", "typescript"),
+			detection("api", "python"),
+		];
 		const typescriptOnly = derive(detected, ["typescript"]);
 		expect(typescriptOnly.length).toBeGreaterThan(0);
 		expect(JSON.stringify(typescriptOnly)).toContain("typescript");
@@ -37,22 +51,27 @@ describe("LSP sandbox requirements", () => {
 
 	it("deduplicates only declared named layers while preserving language attribution", () => {
 		const detected = [
-			{ component: "web", languageId: "typescript" },
-			{ component: "api", languageId: "typescript" },
-			{ component: "cli", languageId: "javascript" },
-		] as const;
+			detection("web", "typescript"),
+			detection("api", "typescript"),
+			detection("cli", "javascript"),
+		];
 		const requirements = derive(detected, ["typescript", "javascript"]);
 		expect(requirements.length).toBeGreaterThan(0);
 		expect(new Set(requirements.map(requirement => requirement.layerId)).size).toBe(requirements.length);
 		expect(requirements.every(requirement => /^[a-z0-9][a-z0-9-]*$/.test(requirement.layerId))).toBe(true);
 
-		const rendered = JSON.stringify(requirements);
-		expect(rendered).toContain("typescript");
-		expect(rendered).toContain("javascript");
+		expect(requirements.some(requirement => requirement.languageIds.includes("typescript"))).toBe(true);
+		expect(requirements.some(requirement => requirement.languageIds.includes("javascript"))).toBe(true);
+		for (const requirement of requirements) {
+			expect(requirement.reasons).toEqual(expect.arrayContaining([
+				expect.objectContaining({ languageId: expect.any(String), label: expect.any(String), reason: expect.any(String) }),
+			]));
+			expect(requirement.reasons.map(reason => reason.languageId)).toEqual(requirement.languageIds);
+		}
 	});
 
 	it("returns pure build-contract data rather than a shell fragment, Dockerfile, mount, or build invocation", () => {
-		const requirements = derive([{ component: "web", languageId: "typescript" }], ["typescript"]);
+		const requirements = derive([detection("web", "typescript")], ["typescript"]);
 		for (const requirement of requirements) {
 			expect(requirement.layerId).not.toMatch(shellOrDockerfile);
 		}
