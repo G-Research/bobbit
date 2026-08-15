@@ -4,6 +4,7 @@ import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory, tryHostPathToC
 import { resolveGatewayDeps, realCommandRunner, type Clock, type CommandRunner, type FsLike, type GatewayDeps } from "./gateway-deps.js";
 import { parseTrustedGithubRemote, RemoteStateCoordinator, type PullRequestIdentity, type RemoteStateAddress, type RemoteStateIntent, type RemoteStateTelemetryEvent, type RepositorySnapshotBinding, type TrustedGithubRemote } from "./remote-state-coordinator.js";
 import { resolveLegacyTestRuntimeFlags } from "./legacy-test-runtime-flags.js";
+import { parseStrictBody, STRICT_UPDATE_BODY_KEYS, type StrictBody, type StrictBodyOptions } from "./strict-body.js";
 export type { Clock, CommandRunner, ExecFileResult, FsLike, GatewayDeps, ResolvedGatewayDeps, TimerHandle } from "./gateway-deps.js";
 export { defaultRpcBridgeFactory, realClock, realCommandRunner, realFetch, realFs, resolveGatewayDeps } from "./gateway-deps.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -600,6 +601,7 @@ function copyHistoryForkSidecar(
 	return _historyForkSidecarCopyFake?.(kind, fromSessionId, toSessionId) ?? copy();
 }
 import { inlineFileImages } from "./agent/inline-file-images.js";
+import { readSessionMarkdownImage, SessionMarkdownImageError } from "./agent/session-markdown-image.js";
 import { StaffManager } from "./agent/staff-manager.js";
 import { buildStaffSystemPrompt } from "./agent/role-prompt.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
@@ -5175,6 +5177,9 @@ function parseGateInspectSelectionOptions(params: URLSearchParams): TextSelectio
 	};
 }
 
+const activeMarkdownImageReads = new Map<string, number>();
+const MAX_CONCURRENT_MARKDOWN_IMAGE_READS_PER_SESSION = 8;
+
 async function handleApiRoute(
 	url: URL,
 	req: http.IncomingMessage,
@@ -5353,6 +5358,14 @@ async function handleApiRoute(
 		// leaking host paths, source line numbers, and implementation details.
 		console.error(`[api] ${status} error:`, e.stack ?? e.message);
 		json({ error: e.message, ...extra }, status);
+	};
+	const parseStrictUpdateBody = <K extends readonly string[]>(raw: unknown, keys: K, options?: StrictBodyOptions): StrictBody<K> | null => {
+		try {
+			return parseStrictBody(raw, keys, options);
+		} catch (error) {
+			json({ error: error instanceof Error ? error.message : String(error) }, 400);
+			return null;
+		}
 	};
 	const hasPagingParams = (): boolean => ["limit", "offset", "after", "cursor"].some(param => url.searchParams.has(param));
 	const parsePagingInt = (value: string | null, fallback: number, min: number, max: number): number => {
@@ -6655,7 +6668,9 @@ async function handleApiRoute(
 			json({ ok: false, code: "UNKNOWN_PROJECT", message: `Unknown project: ${projectGetMatch[1]}` }, 422);
 			return;
 		}
-		const body = await readBody(req);
+		const rawBody = await readBody(req);
+		const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.projects);
+		if (!body) return;
 		const updates: { name?: string; color?: string; rootPath?: string; palette?: string; colorLight?: string; colorDark?: string } = {};
 		if (typeof body?.name === "string") updates.name = body.name;
 		if (typeof body?.color === "string") updates.color = body.color;
@@ -9237,8 +9252,17 @@ async function handleApiRoute(
 		if (req.method === "PUT") {
 			const putGoal = getGoalAcrossProjects(id);
 			if (putGoal?.archived) { json({ error: "Goal is archived" }, 409); return; }
-			const body = await readBody(req);
-			if (!body) { json({ error: "Missing body" }, 400); return; }
+			const rawBody = await readBody(req);
+			if (!rawBody) { json({ error: "Missing body" }, 400); return; }
+			const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.goals, {
+				wrongEndpoint: {
+					subgoalsAllowed: "PATCH /api/goals/:id/policy",
+					maxNestingDepth: "PATCH /api/goals/:id/policy",
+					divergencePolicy: "PATCH /api/goals/:id/policy",
+					maxConcurrentChildren: "PATCH /api/goals/:id/policy",
+				},
+			});
+			if (!body) return;
 			const prevSpec = putGoal?.spec ?? "";
 			// The goal id already fixes the project scope; a caller-supplied cwd
 			// update must still be constrained to that scope (Headquarters dir for
@@ -9411,8 +9435,10 @@ async function handleApiRoute(
 		}
 
 		if (req.method === "PUT") {
-			const body = await readBody(req);
-			if (!body) { json({ error: "Missing body" }, 400); return; }
+			const rawBody = await readBody(req);
+			if (!rawBody) { json({ error: "Missing body" }, 400); return; }
+			const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.tools);
+			if (!body) return;
 			const projectScope = resolveRequiredConfigProjectScope(body.projectId ?? url.searchParams.get("projectId"));
 			if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
 			const targetToolManager = projectScope.context?.toolManager ?? toolManager;
@@ -11925,8 +11951,10 @@ async function handleApiRoute(
 		}
 
 		if (req.method === "PUT") {
-			const body = await readBody(req);
-			if (!body) { json({ error: "Missing body" }, 400); return; }
+			const rawBody = await readBody(req);
+			if (!rawBody) { json({ error: "Missing body" }, 400); return; }
+			const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.roles);
+			if (!body) return;
 			const resolvedTarget = resolveRoleMutationTarget(body.projectId ?? url.searchParams.get("projectId"));
 			if (!resolvedTarget.ok) { writeConfigProjectScopeError(resolvedTarget); return; }
 			const target = resolvedTarget.target;
@@ -13193,8 +13221,10 @@ async function handleApiRoute(
 
 		// PUT /api/tasks/:id
 		if (req.method === "PUT") {
-			const body = await readBody(req);
-			if (!body) { json({ error: "Missing body" }, 400); return; }
+			const rawBody = await readBody(req);
+			if (!rawBody) { json({ error: "Missing body" }, 400); return; }
+			const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.tasks);
+			if (!body) return;
 			try {
 				const record = getTaskRecordForTask(id);
 				if (!record) { json({ error: "Task not found" }, 404); return; }
@@ -15299,11 +15329,13 @@ async function handleApiRoute(
 	const patchMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)$/);
 	if (patchMatch && req.method === "PATCH") {
 		const id = patchMatch[1];
-		const body = await readBody(req);
-		if (!body || typeof body !== "object") {
+		const rawBody = await readBody(req);
+		if (!rawBody) {
 			json({ error: "Invalid body" }, 400);
 			return;
 		}
+		const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.sessions);
+		if (!body) return;
 
 		if (typeof body.title === "string") {
 			const ok = sessionManager.setTitle(id, body.title);
@@ -15960,6 +15992,53 @@ async function handleApiRoute(
 			json(result);
 		} catch (err) {
 			jsonError(400, err);
+		}
+		return;
+	}
+
+	// GET /api/sessions/:id/markdown-image?path=<relative-or-absolute-or-file-url>
+	// Authenticated, session-scoped image transport for local paths in assistant
+	// Markdown. The path must resolve beneath the session cwd (including through
+	// symlinks); sandboxed sessions are resolved and read inside their container.
+	const markdownImageMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/markdown-image$/);
+	if (req.method === "GET" && markdownImageMatch) {
+		const id = markdownImageMatch[1];
+		const session = sessionManager.getPersistedSession(id);
+		if (!session) { json({ error: "Session not found" }, 404); return; }
+		const imagePath = url.searchParams.get("path");
+		if (!imagePath) { json({ error: "Missing path parameter" }, 400); return; }
+		const activeReads = activeMarkdownImageReads.get(id) ?? 0;
+		if (activeReads >= MAX_CONCURRENT_MARKDOWN_IMAGE_READS_PER_SESSION) {
+			res.setHeader("Retry-After", "1");
+			json({ error: "Too many concurrent image requests" }, 429);
+			return;
+		}
+		activeMarkdownImageReads.set(id, activeReads + 1);
+		try {
+			const image = await readSessionMarkdownImage(session, imagePath, sandboxManager ?? null);
+			res.writeHead(200, {
+				"Content-Type": image.mimeType,
+				"Content-Length": String(image.data.length),
+				"Cache-Control": "private, no-store",
+				"Content-Disposition": "inline",
+				"X-Content-Type-Options": "nosniff",
+				"Content-Security-Policy": "default-src 'none'; sandbox",
+			});
+			res.end(image.data);
+		} catch (error) {
+			if (error instanceof SessionMarkdownImageError) {
+				const status = error.code === "forbidden" ? 403
+					: error.code === "not_found" ? 404
+						: error.code === "too_large" ? 413
+							: error.code === "unavailable" ? 503 : 400;
+				json({ error: error.message }, status);
+			} else {
+				jsonError(500, error);
+			}
+		} finally {
+			const remaining = (activeMarkdownImageReads.get(id) ?? 1) - 1;
+			if (remaining <= 0) activeMarkdownImageReads.delete(id);
+			else activeMarkdownImageReads.set(id, remaining);
 		}
 		return;
 	}
@@ -17000,8 +17079,10 @@ async function handleApiRoute(
 	// PUT /api/workflows/:id — requires projectId.
 	if (workflowMatch && req.method === "PUT") {
 		const id = decodeURIComponent(workflowMatch[1]);
-		const body = await readBody(req);
-		if (!body) { json({ error: "Missing body" }, 400); return; }
+		const rawBody = await readBody(req);
+		if (!rawBody) { json({ error: "Missing body" }, 400); return; }
+		const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.workflows);
+		if (!body) return;
 		const qProjectId = url.searchParams.get("projectId") || undefined;
 		if (!qProjectId) { json({ error: "projectId required" }, 400); return; }
 		const ctx = projectContextManager.getOrCreate(qProjectId);
@@ -18099,8 +18180,14 @@ async function handleApiRoute(
 		}
 
 		if (req.method === "PATCH") {
-			const body = await readBody(req);
-			if (!body || typeof body.projectId !== "string" || !body.projectId.trim()) {
+			const rawBody = await readBody(req);
+			if (!rawBody) {
+				json({ error: "Missing projectId" }, 400);
+				return;
+			}
+			const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.staffPatch);
+			if (!body) return;
+			if (typeof body.projectId !== "string" || !body.projectId.trim()) {
 				json({ error: "Missing projectId" }, 400);
 				return;
 			}
@@ -18131,8 +18218,10 @@ async function handleApiRoute(
 		}
 
 		if (req.method === "PUT") {
-			const body = await readBody(req);
-			if (!body) { json({ error: "Missing body" }, 400); return; }
+			const rawBody = await readBody(req);
+			if (!rawBody) { json({ error: "Missing body" }, 400); return; }
+			const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.staffPut);
+			if (!body) return;
 			// Defense-in-depth: roleId, when present, must be a string or null.
 			if (body.roleId !== undefined && body.roleId !== null && typeof body.roleId !== "string") {
 				json({ error: "roleId must be a string or null" }, 400);

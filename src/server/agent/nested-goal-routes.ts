@@ -44,6 +44,7 @@ import { resolveChildWorkflow } from "./spawn-child-workflow.js";
 import { authorizeChildrenMutation, type ChildrenMutationClass } from "../auth/children-mutation-authz.js";
 import { tryAuth as cookieTryAuth, type CookieStore } from "../auth/cookie.js";
 import { HEADQUARTERS_PROJECT_ID } from "./project-registry.js";
+import { parseStrictBody, STRICT_UPDATE_BODY_KEYS } from "../strict-body.js";
 
 export interface NestedGoalRouteDeps {
 	projectContextManager: ProjectContextManager;
@@ -1515,8 +1516,15 @@ export async function tryHandleNestedGoalRoute(
 		const id = policyMatch[1];
 		const goal = getGoalAcrossProjects(id);
 		if (!goal) { json({ error: "Goal not found" }, 404); return true; }
-		const body = await readBody(req).catch(() => null);
-		if (!body) { json({ error: "Missing body" }, 400); return true; }
+		const rawBody = await readBody(req).catch(() => null);
+		if (!rawBody) { json({ error: "Missing body" }, 400); return true; }
+		let body;
+		try {
+			body = parseStrictBody(rawBody, STRICT_UPDATE_BODY_KEYS.goalPolicy);
+		} catch (error) {
+			json({ error: error instanceof Error ? error.message : String(error) }, 400);
+			return true;
+		}
 		// S1 (split authz): the per-goal sub-goal opt-in fields
 		// (`subgoalsAllowed` / `maxNestingDepth`) are HUMAN-OPERATOR settings the
 		// goal dashboard drives — they only relax/tighten this goal's own
