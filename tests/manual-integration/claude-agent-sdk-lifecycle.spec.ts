@@ -1298,7 +1298,7 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 				body: JSON.stringify({ "default.sessionModel": sessionModel, "default.sessionThinkingLevel": "off" }),
 			});
 			expect(preferencesResponse.status).toBe(200);
-			const createdResponse = await api("/api/sessions", { method: "POST", body: JSON.stringify({ projectId: project.id, goalId: goal.id, cwd: projectRoot, worktree: false }) });
+			const createdResponse = await api("/api/sessions", { method: "POST", body: JSON.stringify({ projectId: project.id, goalId: goal.id, cwd: projectRoot, sandboxed: true, worktree: false }) });
 			expect(createdResponse.status).toBe(201);
 			const created = await createdResponse.json() as { id: string };
 			let session = await waitFor(() => gateway!.sessionManager.getSession(created.id), "sandbox SDK bridge installation");
