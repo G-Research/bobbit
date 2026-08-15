@@ -41,6 +41,41 @@ See [Extension Host authoring — fenced mutations and lifecycle delivery](exten
 - **Secret persistence failure**: 500 `SANDBOX_SECRET_PERSIST_FAILED` means `project.yaml` was already published but its secret-value update failed. The published value-free token descriptors remain; `SecretsStore` bytes and getters retain their prior values. Fix state-directory permissions and retry the request; this two-file sequence cannot roll back the published descriptor.
 - **Response safety**: persistence responses deliberately exclude YAML contents, token values, and raw filesystem errors. See [Project Config](rest-api.md#project-config) and [Durable publication and repair](internals.md#durable-publication-and-repair).
 
+## Child scheduler stopped work or shows a recovery action
+
+- **Symptom**: a child or root dashboard shows **Scheduler recovery**, a Plan
+  node has a retry action, or logs contain a terminal child-start failure / root
+  retry circuit-breaker message. This is an intentional bounded stop: it keeps
+  a failing child from starving the gateway or disappearing silently.
+- **First look**: open the affected root or child dashboard and read the
+  recovery reason. The record is persisted and broadcast, so it remains visible
+  across reloads and restart. A child record identifies a terminal start failure
+  or exhausted transient retries; a root record identifies an immediate
+  re-drive storm contained for that root only.
+- **Repair**: resolve the stated prerequisite, then use **Scheduler recovery:
+  retry**. Resume paused work; let dependency integration clear unresolved
+  dependencies; enable or reopen work when applicable. The dashboard indicates
+  that retry is unavailable while the goal is paused, blocked, complete, or
+  shelved, and the route rejects it until that condition is resolved. It goes
+  through the scheduler and therefore preserves root concurrency limits.
+- **Do not use retry as a lifecycle bypass**: a paused child with tracked
+  scheduler intent wakes on resume. Dependency-blocked work is re-requested
+  when its final dependency integrates. Resume does not create starts for
+  children configured for manual start, torn-down teams, unresolved dependencies, or children
+  behind a still-paused ancestor.
+- **Expected automatic repair**: an already-live non-terminated team lead is
+  adopted by the scheduled start. A stale terminated lead is torn down and gets
+  exactly one retry; failure after that is surfaced as an operator action.
+  Transient setup/worktree failures back off on real timers for no more than
+  eight start attempts before surfacing the same action.
+- **If the root breaker reappears**: capture the scheduler error record and
+  inspect the failing child/start adapter. The breaker is inline because an
+  event-loop-starving microtask loop cannot rely on a timer watchdog; it counts
+  only unproductive immediate re-drives, not normal scheduling volume. Delayed
+  retries are retained and the record clears after progress or a later
+  scheduler entry outside the breaker window.
+- **Reference**: [Nested sub-goals — Bounded scheduled-start recovery](nested-goals.md#bounded-scheduled-start-recovery) and [Scheduled child-start recovery](rest-api.md#scheduled-child-start-recovery).
+
 ## Resource update returns `400` for request body fields
 
 - **Symptom**: a finite-shape resource update returns `400` with `Unknown request body field` and one or more field names instead of `{ ok: true }`.

@@ -864,6 +864,7 @@ Finite-shape resource update routes accept only their documented request keys. A
 | `GET` | `/api/goals/:id/github-link` | PR URL or sanitized GitHub branch fallback. No-worktree goals return `200 { available: false, reason: "no-worktree", message }`. Still available, but the sidebar `Open on GitHub` item now mirrors the goal-row PR badge instead of gating on this endpoint. See [Goal GitHub link endpoint](#goal-github-link-endpoint) |
 | `POST` | `/api/goals/:id/pr-merge` | Merge PR for goal branch (`{ method? }`). No-worktree goals return `409 { code: "GOAL_GIT_UNAVAILABLE" }`. |
 | `POST` | `/api/goals/:id/integrate-child/:childId` | Locally merge a direct child's branch into the parent and auto-archive it on success. Body `{ force?: boolean }`. Never pushes either branch. See [Child-goal integration](#child-goal-integration). |
+| `POST` | `/api/goals/:id/retry-scheduled-start` | Consume a current retryable child or root scheduler-recovery record and retry through the child scheduler. See [Scheduled child-start recovery](#scheduled-child-start-recovery). |
 
 `PUT /api/goals/:id` rejects the four policy keys with `400`, names all of them in the response, and directs callers to `PATCH /api/goals/:id/policy`. That routing changes neither policy nor authorization: `subgoalsAllowed` and `maxNestingDepth` are operator-class, while `divergencePolicy` and `maxConcurrentChildren` are orchestration-class and remain team-lead-only. A mixed policy body uses the stricter orchestration class.
 
@@ -1000,6 +1001,36 @@ merge, preserves the child, and returns `409` with
 A missing/unpassed gate returns `409 RTM_NOT_PASSED`; goals without usable Git
 worktrees return `409 GOAL_GIT_UNAVAILABLE`. Responses intentionally omit the
 legacy `pushed` field because integration has no remote side effect.
+
+### Scheduled child-start recovery
+
+`POST /api/goals/:id/retry-scheduled-start` is the operator recovery action for
+a visible, bounded scheduled-start stop. It accepts no body. The target must
+have a current retryable `schedulerRecovery` record and be an active,
+start-eligible goal; paused, blocked, complete, and shelved goals return
+`409 SCHEDULER_RETRY_INELIGIBLE` until their lifecycle condition is resolved.
+Archived or unknown goals return `404`.
+
+The route requires the same operator authorization as pause/resume. A child
+recovery is consumed before entering the scheduler, so a replay or double-click
+returns `409 NO_SCHEDULER_RECOVERY` rather than starting duplicate work. A root
+recovery first validates and re-requests its durable affected-child targets;
+if none remain actionable it retains the recovery and returns
+`409 SCHEDULER_ROOT_RETRY_INELIGIBLE`. A child retry creates a fresh scheduler
+request generation and returns:
+
+```json
+{ "childGoalId": "…", "outcome": "started" }
+```
+
+`outcome` may instead be `"capacity-blocked"` when the root is already at its
+concurrency cap. A root circuit-breaker record persists its affected child IDs,
+then re-requests only the still-eligible children after a restart and returns
+`{ "rootGoalId": "…", "outcomes": ["started" | "capacity-blocked", "…"] }`.
+The route never bypasses scheduler permits or directly creates a team.
+
+See [Bounded scheduled-start recovery](nested-goals.md#bounded-scheduled-start-recovery)
+for failure classification, re-entry, and operator workflow.
 
 ### Goal workflow replacement
 

@@ -1124,6 +1124,8 @@ export class GoalManager {
 		spawnedBySessionId?: string;
 		/** Durable merge-conflict flag for child goals (Plan-tab data contract). */
 		mergeConflict?: boolean;
+		/** Visible scheduler terminal/circuit-breaker recovery state. */
+		schedulerRecovery?: PersistedGoal["schedulerRecovery"];
 	}): Promise<boolean> {
 		const existing = this.store.get(id);
 		if (!existing) return false;
@@ -1149,6 +1151,11 @@ export class GoalManager {
 		}
 
 		return this.store.update(id, updates);
+	}
+
+	/** Narrow explicit deletion because GoalStore.update deliberately ignores undefined fields. */
+	async clearSchedulerRecovery(id: string): Promise<boolean> {
+		return this.store.clearSchedulerRecovery(id);
 	}
 
 	async deleteGoal(id: string): Promise<boolean> {

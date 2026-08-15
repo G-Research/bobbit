@@ -8,6 +8,7 @@ __syncBeforeAll(() => __syncCE());
 // identical banner-transition and polling-lifecycle behaviours. Element presence
 // == visibility here because the render swaps innerHTML wholesale.
 import { afterEach, describe, expect, it } from "vitest";
+import { clearSchedulerRecoveryForGoal, retryPlanNodeSchedulerStart } from "../../src/app/goal-dashboard-plan-tab.ts";
 
 type Status = "preparing" | "ready" | "error";
 
@@ -88,6 +89,49 @@ async function waitFor(predicate: () => boolean, timeout = 5000) {
 
 let model: ReturnType<typeof createModel> | null = null;
 afterEach(() => { model?.stopAllPolling(); model = null; document.body.innerHTML = ""; });
+
+describe("Plan scheduler recovery retry reconciliation", () => {
+	it("clears the retried child from both Plan sources only after a successful POST", async () => {
+		const recovery = { kind: "child" as const, code: "RETRY_EXHAUSTED", reason: "worktree busy", retryable: true, updatedAt: 1 };
+		const liveGoals = [
+			{ id: "child", schedulerRecovery: recovery },
+			{ id: "sibling", schedulerRecovery: recovery },
+		];
+		const descendants = [{ id: "child", schedulerRecovery: recovery }];
+		const completed: string[] = [];
+		const requests: Array<{ url: string; init: RequestInit }> = [];
+
+		const succeeded = await retryPlanNodeSchedulerStart(
+			"child",
+			recovery,
+			async (url, init) => { requests.push({ url, init }); return { ok: true }; },
+			goalId => completed.push(goalId),
+		);
+
+		expect(succeeded).toBe(true);
+		expect(requests).toEqual([{ url: "/api/goals/child/retry-scheduled-start", init: { method: "POST" } }]);
+		expect(completed).toEqual(["child"]);
+		const reconciledLive = clearSchedulerRecoveryForGoal(liveGoals, completed[0], recovery);
+		const reconciledDescendants = clearSchedulerRecoveryForGoal(descendants, completed[0], recovery);
+		expect("schedulerRecovery" in reconciledLive[0]).toBe(false);
+		expect("schedulerRecovery" in reconciledDescendants[0]).toBe(false);
+		expect(reconciledLive[1]).toBe(liveGoals[1]);
+		expect(liveGoals[0].schedulerRecovery).toBe(recovery);
+	});
+
+	it("keeps recovery visible when the retry POST fails", async () => {
+		const completed: string[] = [];
+		const failed = await retryPlanNodeSchedulerStart(
+			"child",
+			{ kind: "child", code: "RETRY_EXHAUSTED", reason: "worktree busy", retryable: true, updatedAt: 1 },
+			async () => ({ ok: false }),
+			goalId => completed.push(goalId),
+		);
+
+		expect(failed).toBe(false);
+		expect(completed).toEqual([]);
+	});
+});
 
 describe("Goal dashboard setup status polling", () => {
 	it("banner auto-updates when server status changes from preparing to ready", async () => {

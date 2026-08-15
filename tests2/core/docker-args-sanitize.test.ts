@@ -74,12 +74,15 @@ describe("buildDockerRunArgs — token sanitization", () => {
 		assert.equal(env["PI_CODING_AGENT_DIR"], "/home/node/.bobbit/agent");
 	});
 
-	it("includes sandbox credentials but not gateway token", () => {
+	it("passes sandbox credential names without placing values in Docker argv", () => {
+		const sentinel = "credential-sentinel-must-not-leak";
 		const args = buildDockerRunArgs(baseConfig({
-			sandboxCredentials: { ANTHROPIC_API_KEY: "sk-test-123" },
+			sandboxCredentials: { ANTHROPIC_API_KEY: sentinel },
 		}));
 		const env = extractEnvVars(args);
-		assert.equal(env["ANTHROPIC_API_KEY"], "sk-test-123");
+		assert.equal(env["ANTHROPIC_API_KEY"], "");
+		assert.ok(args.includes("ANTHROPIC_API_KEY"), "Docker inherits the named credential from its child environment");
+		assert.ok(!args.join(" ").includes(sentinel), "credential values must not reach Docker argv");
 		assert.equal(env["BOBBIT_TOKEN"], undefined);
 		assert.equal(env["BOBBIT_GATEWAY_URL"], undefined);
 	});

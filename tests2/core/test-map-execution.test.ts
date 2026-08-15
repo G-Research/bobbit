@@ -30,7 +30,11 @@ const MATERIALIZED_PATHS = [
 	"tests2/integration/affected-runner-boundary.test.ts",
 	"tests2/integration/base-path-cli-entrypoint.test.ts",
 	"tests2/integration/service-runtime-docker.test.ts",
+	"tests2/integration/pinned-gate-verification-e2e.test.ts",
 	"tests2/integration/team-spawn-multi-repo-real-git.test.ts",
+	"tests2/integration/verification-pinned-checkout-npm.test.ts",
+	"tests2/integration/verification-pinned-checkout-real-git.test.ts",
+	"tests2/integration/verification-pinned-checkout-multi-repo-real-git.test.ts",
 ] as const;
 let root: string;
 let mapPath: string;
@@ -93,8 +97,12 @@ describe("tests-map execution metadata", () => {
 			"tests2/core/team-manager.test.ts",
 			"tests2/integration/affected-runner-boundary.test.ts",
 			"tests2/integration/base-path-cli-entrypoint.test.ts",
+			"tests2/integration/pinned-gate-verification-e2e.test.ts",
 			"tests2/integration/service-runtime-docker.test.ts",
 			"tests2/integration/team-spawn-multi-repo-real-git.test.ts",
+			"tests2/integration/verification-pinned-checkout-multi-repo-real-git.test.ts",
+			"tests2/integration/verification-pinned-checkout-npm.test.ts",
+			"tests2/integration/verification-pinned-checkout-real-git.test.ts",
 		]);
 	});
 
@@ -110,6 +118,7 @@ describe("tests-map execution metadata", () => {
 		["tests2/integration/base-path-cli-entrypoint.test.ts", { runner: "vitest", tier: "unit", project: "integration" }],
 		["tests2/integration/service-runtime-docker.test.ts", { runner: "vitest", tier: "unit", project: "integration" }],
 		["tests2/integration/team-spawn-multi-repo-real-git.test.ts", { runner: "vitest", tier: "unit", project: "integration" }],
+		["tests2/integration/verification-pinned-checkout-multi-repo-real-git.test.ts", { runner: "vitest", tier: "unit", project: "integration" }],
 	])("rejects cross-tagging %s", (path, execution) => {
 		const { root, mapPath, map } = makeFixture();
 		record(map, path).execution = execution;
