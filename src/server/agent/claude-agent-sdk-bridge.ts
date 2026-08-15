@@ -650,13 +650,14 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		this.subagentLifecycleGeneration++;
 	}
 
-	private observeInitializationIdentity(sdkEvent: unknown): void {
+	/** Validate every SDK system:init frame, then keep it outside transcript translation. */
+	private observeInitializationIdentity(sdkEvent: unknown): boolean {
 		const event = sdkEvent as { type?: unknown; subtype?: unknown; session_id?: unknown };
-		if (event.type !== "system" || event.subtype !== "init") return;
+		if (event.type !== "system" || event.subtype !== "init") return false;
 		if (!isClaudeAgentSdkSessionId(event.session_id)) {
 			// Never include provider-controlled identity data in an exposed error.
 			this.fail(new ClaudeAgentSdkUnavailableError("Claude Agent SDK did not provide a valid resumable session id"));
-			return;
+			return true;
 		}
 		if (this.initializedSessionId) {
 			// Current SDK versions repeat system:init before later turns. A matching
@@ -664,15 +665,16 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 			if (event.session_id !== this.initializedSessionId) {
 				this.fail(new ClaudeAgentSdkUnavailableError("Claude Agent SDK initialization identity changed"));
 			}
-			return;
+			return true;
 		}
 		if (this.options.claudeAgentSdkSessionId && event.session_id !== this.options.claudeAgentSdkSessionId) {
 			// A resumed query must not silently replace its persisted conversation.
 			this.fail(new ClaudeAgentSdkUnavailableError("Claude Agent SDK resume identity did not match"));
-			return;
+			return true;
 		}
 		this.initializedSessionId = event.session_id;
 		this.initializationIdentity.resolve(event.session_id);
+		return true;
 	}
 
 	private isClosedOrFailed(): boolean {
@@ -705,8 +707,10 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 					if (this.isClosedOrFailed()) return;
 					continue;
 				}
-				this.observeInitializationIdentity(sdkEvent);
+				const initializationEvent = this.observeInitializationIdentity(sdkEvent);
 				if (this.isClosedOrFailed()) return;
+				// `system:init` is an SDK transport/control frame, never a transcript row.
+				if (initializationEvent) continue;
 				const translated = translateClaudeSdkEvent(this.translatorState, sdkEvent as unknown as Record<string, unknown>);
 				this.reportDiagnostics(translated.diagnostics);
 				const events = this.canonicalizeToolNames(translated.events);
@@ -723,7 +727,7 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 				}
 				this.emitSubagentTerminalFromSource(sdkEvent as Record<string, unknown>);
 				const rootTurnEnd = events.some(event => event.type === "agent_end" && event.parentToolUseId === undefined);
-				this.translatorState = rootTurnEnd ? createClaudeSdkTranslatorState() : translated.state;
+				this.translatorState = translated.state;
 				if (rootTurnEnd) this.activeToolSurface?.subagentPolicy?.clear();
 				if (rootTurnEnd && this.state === "running") this.state = "ready";
 			}
@@ -813,6 +817,9 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		// timeout/stop/failure cannot advance SessionManager's acceptance fence.
 		const turn = this.state === "ready" ? Symbol("claude-sdk-turn") : undefined;
 		if (turn) {
+			// A root result terminates its translator state. Reset only at this
+			// authoritative ready-to-running boundary, before the SDK can pull input.
+			this.translatorState = createClaudeSdkTranslatorState();
 			this.state = "running";
 			this.pendingTurnStart = turn;
 		}

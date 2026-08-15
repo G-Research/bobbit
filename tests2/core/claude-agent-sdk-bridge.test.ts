@@ -413,6 +413,64 @@ describe("ClaudeAgentSdkBridge", () => {
 		expect(observed.some(event => event.type === "process_exit")).toBe(false);
 	});
 
+	it("starts a fresh translator for a second SDK turn while consuming repeated init frames", async () => {
+		const sessionId = "00000000-0000-4000-8000-000000000012";
+		const fixture = bridgeFixture();
+		const observed: any[] = [];
+		const warn = vi.spyOn(console, "warn");
+		fixture.bridge.onEvent(event => observed.push(event));
+		await fixture.bridge.start();
+
+		const first = fixture.bridge.prompt("first user prompt");
+		await fixture.query.nextInput();
+		fixture.query.initialization.resolve({});
+		fixture.query.emitSystemInit(sessionId);
+		await first;
+		fixture.query.emit({
+			type: "assistant", uuid: "first-assistant", message: { content: [{ type: "text", text: "first response" }] },
+		});
+		fixture.query.emit({
+			type: "result", subtype: "success", uuid: "first-result", session_id: sessionId,
+			usage: { input_tokens: 1, output_tokens: 2, cache_read_input_tokens: 3, cache_creation_input_tokens: 4 },
+			modelUsage: { "claude-sonnet-test": { inputTokens: 1, outputTokens: 2, cacheReadInputTokens: 3, cacheCreationInputTokens: 4 } },
+		});
+		await flushMicrotasks();
+
+		const second = fixture.bridge.prompt("second user prompt");
+		await fixture.query.nextInput();
+		fixture.query.emitSystemInit(sessionId);
+		fixture.query.emit({
+			type: "assistant", uuid: "second-assistant", message: {
+				content: [{ type: "tool_use", id: "second-tool", name: "Read", input: { path: "two.txt" } }],
+			},
+		});
+		fixture.query.emit({
+			type: "user", message: { content: [{ type: "tool_result", tool_use_id: "second-tool", content: "second result" }] },
+		});
+		fixture.query.emit({
+			type: "result", subtype: "success", uuid: "second-result", session_id: sessionId,
+			usage: { input_tokens: 5, output_tokens: 6, cache_read_input_tokens: 7, cache_creation_input_tokens: 8 },
+			modelUsage: { "claude-sonnet-test": { inputTokens: 5, outputTokens: 6, cacheReadInputTokens: 7, cacheCreationInputTokens: 8 } },
+		});
+		await second;
+		await flushMicrotasks();
+		expect(warn).not.toHaveBeenCalled();
+		warn.mockRestore();
+
+		expect(observed.map(event => event.type)).toEqual([
+			"agent_start", "message_end", "agent_end",
+			"agent_start", "message_end", "tool_execution_start", "message_end", "tool_execution_end", "agent_end",
+		]);
+		expect(observed).toEqual(expect.arrayContaining([
+			expect.objectContaining({ type: "tool_execution_start", toolCallId: "second-tool", toolName: "Read", args: { path: "two.txt" } }),
+			expect.objectContaining({ type: "message_end", message: expect.objectContaining({ role: "toolResult", toolCallId: "second-tool", toolName: "Read" }) }),
+			expect.objectContaining({ type: "tool_execution_end", toolCallId: "second-tool", toolName: "Read", isError: false }),
+			expect.objectContaining({ type: "agent_end", claudeSdkUsage: expect.objectContaining({ sourceResultId: `${sessionId}:first-result` }) }),
+			expect.objectContaining({ type: "agent_end", claudeSdkUsage: expect.objectContaining({ sourceResultId: `${sessionId}:second-result` }) }),
+		]));
+		expect(observed.some(event => event.type === "process_exit")).toBe(false);
+	});
+
 	it("fails closed when a repeated SDK init changes or invalidates the established identity", async () => {
 		const establishedId = "00000000-0000-4000-8000-000000000002";
 		const changedId = "00000000-0000-4000-8000-000000000003";
@@ -547,6 +605,11 @@ describe("ClaudeAgentSdkBridge", () => {
 		const { policy, surface } = subagentSurfaceFixture();
 		const fixture = bridgeFixture({ claudeSdkToolSurface: surface });
 		const query = await startReady(fixture);
+		// The child runs in the next root turn, whose enqueue boundary resets the
+		// terminal translator state left by startReady's first turn.
+		const nextTurn = fixture.bridge.prompt("run child work");
+		await query.nextInput();
+		await nextTurn;
 		const observed: any[] = [];
 		fixture.bridge.onEvent(event => observed.push(event));
 		const child = { agent_id: "child-1", agent_type: "bobbit-backend-parity-reviewer" };
@@ -626,6 +689,9 @@ describe("ClaudeAgentSdkBridge", () => {
 	it("forwards only root-result usage annotations without reconstructing accounting from messages", async () => {
 		const fixture = bridgeFixture();
 		const query = await startReady(fixture);
+		const nextTurn = fixture.bridge.prompt("account this turn");
+		await query.nextInput();
+		await nextTurn;
 		const observed: any[] = [];
 		fixture.bridge.onEvent(event => observed.push(event));
 
