@@ -250,125 +250,197 @@ function hasDurableSubscriptionUsage(cost: unknown): boolean {
 		&& has(contextValue, "currentTokens") && isNullableNumber(contextValue.currentTokens);
 }
 
-type ManualTranscriptPrefixFacts = {
-	beforeArray: boolean;
-	afterArray: boolean;
-	beforeCount: number;
-	afterCount: number;
-	beforeNonempty: boolean;
-	afterHasAtLeastBeforeRows: boolean;
-	beforeRowsHaveNonemptySdkIdAndRole: boolean;
+type ManualTranscriptPartitionFacts = {
+	beforeSnapshot: boolean;
+	afterSnapshot: boolean;
+	beforeRootRowCount: number;
+	afterRootRowCount: number;
+	beforeChildPartitionCount: number;
+	afterChildPartitionCount: number;
+	beforePartitionCount: number;
+	afterPartitionCount: number;
+	beforeRootNonempty: boolean;
+	beforeRowsHaveNonemptyIdAndRole: boolean;
+	afterRowsHaveNonemptyIdAndRole: boolean;
+	beforeHasInvalidChildPartitions: boolean;
+	afterHasInvalidChildPartitions: boolean;
+	missingPartitionCount: number;
 	prefixIdsAndRolesPreserved: boolean;
 	firstPrefixMismatchIndex: number;
-	positionalIdMismatchCount: number;
-	positionalRoleMismatchCount: number;
-	allBeforeIdsRemainAfter: boolean;
-	beforeIdsAreOrderedSubsequence: boolean;
-	rolesAreExactPrefix: boolean;
-	rolesAreOrderedSubsequence: boolean;
 	beforeHasDuplicateIds: boolean;
 	afterHasDuplicateIds: boolean;
 	beforeDuplicateIdCount: number;
 	afterDuplicateIdCount: number;
+	terminalPhasesPreserved: boolean;
+	terminalPhaseRegressionCount: number;
 };
 
-/** Preserve finalized history while allowing the SDK to append shutdown-tail rows. */
-function manualTranscriptPrefixFacts(before: unknown, after: unknown): ManualTranscriptPrefixFacts {
-	const rows = (value: unknown): Array<Record<string, unknown> | undefined> | undefined => {
-		if (Array.isArray(value)) {
-			return value.map(row => row && typeof row === "object" && !Array.isArray(row)
-				? row as Record<string, unknown>
-				: undefined);
+type ManualTranscriptPartition = {
+	rows: Array<Record<string, unknown> | undefined>;
+	phase: unknown;
+};
+
+type ManualTranscriptPartitionSnapshot = {
+	valid: boolean;
+	root: Array<Record<string, unknown> | undefined>;
+	children: Map<string, ManualTranscriptPartition>;
+	invalidChildPartitionCount: number;
+};
+
+const manualTranscriptTerminalPhases = new Set(["completed", "error", "aborted"]);
+const manualTranscriptFactLimit = 1_000_000;
+
+function manualBoundedCount(value: number): number {
+	return Math.min(Math.max(0, value), manualTranscriptFactLimit);
+}
+
+/** Keep root history and each exact-parent helper history in separate restart partitions. */
+function manualTranscriptPartitions(snapshot: unknown): ManualTranscriptPartitionSnapshot {
+	const toRows = (value: unknown): Array<Record<string, unknown> | undefined> | undefined => Array.isArray(value)
+		? value.map(row => row && typeof row === "object" && !Array.isArray(row)
+			? row as Record<string, unknown>
+			: undefined)
+		: undefined;
+	const root = Array.isArray(snapshot)
+		? toRows(snapshot)
+		: snapshot && typeof snapshot === "object" ? toRows((snapshot as { messages?: unknown }).messages) : undefined;
+	const work = !Array.isArray(snapshot) && snapshot && typeof snapshot === "object"
+		? (snapshot as { subagentWork?: unknown }).subagentWork
+		: undefined;
+	const children = new Map<string, ManualTranscriptPartition>();
+	let invalidChildPartitionCount = 0;
+	if (work !== undefined && !Array.isArray(work)) invalidChildPartitionCount++;
+	if (Array.isArray(work)) {
+		for (const entry of work) {
+			const value = entry && typeof entry === "object" && !Array.isArray(entry)
+				? entry as { parentToolUseId?: unknown; messages?: unknown; phase?: unknown }
+				: undefined;
+			const parentToolUseId = typeof value?.parentToolUseId === "string" && value.parentToolUseId.length > 0
+				? value.parentToolUseId
+				: undefined;
+			const rows = toRows(value?.messages);
+			if (!parentToolUseId || !rows || children.has(parentToolUseId)) {
+				invalidChildPartitionCount++;
+				continue;
+			}
+			children.set(parentToolUseId, { rows, phase: value?.phase });
 		}
-		if (value && typeof value === "object" && Array.isArray((value as { messages?: unknown }).messages)) {
-			return rows((value as { messages: unknown }).messages);
-		}
-		return undefined;
-	};
-	const left = rows(before);
-	const right = rows(after);
-	const beforeCount = left?.length ?? 0;
-	const afterCount = right?.length ?? 0;
-	const hasNonemptySdkIdAndRole = (row: Record<string, unknown> | undefined): boolean =>
-		typeof row?.id === "string" && row.id.length > 0 && typeof row.role === "string" && row.role.length > 0;
-	const hasNonemptyId = (row: Record<string, unknown> | undefined): row is Record<string, unknown> & { id: string } =>
-		typeof row?.id === "string" && row.id.length > 0;
-	const hasNonemptyRole = (row: Record<string, unknown> | undefined): row is Record<string, unknown> & { role: string } =>
-		typeof row?.role === "string" && row.role.length > 0;
-	const duplicateIdCount = (entries: Array<Record<string, unknown> | undefined> | undefined): number => {
-		if (!entries) return 0;
+	}
+	return { valid: !!root, root: root ?? [], children, invalidChildPartitionCount };
+}
+
+function manualTranscriptRowsHaveNonemptyIdAndRole(rows: Array<Record<string, unknown> | undefined>): boolean {
+	return rows.every(row => typeof row?.id === "string" && row.id.length > 0 && typeof row.role === "string" && row.role.length > 0);
+}
+
+function manualTranscriptDuplicateIdCount(partitions: Iterable<ManualTranscriptPartition>): number {
+	let duplicateIdCount = 0;
+	for (const { rows } of partitions) {
 		const counts = new Map<string, number>();
-		for (const row of entries) {
-			if (hasNonemptyId(row)) counts.set(row.id, (counts.get(row.id) ?? 0) + 1);
+		for (const row of rows) {
+			if (typeof row?.id === "string" && row.id.length > 0) counts.set(row.id, (counts.get(row.id) ?? 0) + 1);
 		}
-		return [...counts.values()].filter(count => count > 1).length;
-	};
-	const orderedSubsequence = (expected: string[], actual: string[]): boolean => {
-		let cursor = 0;
-		for (const value of actual) {
-			if (value === expected[cursor]) cursor += 1;
+		for (const count of counts.values()) if (count > 1) duplicateIdCount++;
+	}
+	return manualBoundedCount(duplicateIdCount);
+}
+
+/** Preserve terminal helper status; non-terminal recovery may legitimately complete. */
+function manualTranscriptTerminalPhasePreserved(before: unknown, after: unknown): boolean {
+	return !manualTranscriptTerminalPhases.has(before as string) || before === after;
+}
+
+/**
+ * Restart history is partition-aware: root messages and every exact-parent
+ * subagent transcript retain independent immutable prefixes. No partition key,
+ * row data, phase name, or content is included in the diagnostic facts.
+ */
+function manualTranscriptPartitionFacts(before: unknown, after: unknown): ManualTranscriptPartitionFacts {
+	const left = manualTranscriptPartitions(before);
+	const right = manualTranscriptPartitions(after);
+	const leftPartitions = [
+		{ key: "root", rows: left.root, phase: undefined },
+		...Array.from(left.children, ([key, partition]) => ({ key, ...partition })),
+	];
+	const rightPartitions = new Map<string, ManualTranscriptPartition>([
+		["root", { rows: right.root, phase: undefined }],
+		...right.children,
+	]);
+	let missingPartitionCount = 0;
+	let prefixIdsAndRolesPreserved = true;
+	let firstPrefixMismatchIndex = -1;
+	let terminalPhasesPreserved = true;
+	let terminalPhaseRegressionCount = 0;
+	for (const partition of leftPartitions) {
+		const recovered = rightPartitions.get(partition.key);
+		if (!recovered) {
+			missingPartitionCount++;
+			continue;
 		}
-		return cursor === expected.length;
-	};
-	const beforeRowsHaveNonemptySdkIdAndRole = !!left && left.every(hasNonemptySdkIdAndRole);
-	const positionalIdMismatchCount = left && right
-		? left.reduce((count, row, index) => count + (row?.id === right[index]?.id ? 0 : 1), 0)
-		: beforeCount;
-	const positionalRoleMismatchCount = left && right
-		? left.reduce((count, row, index) => count + (row?.role === right[index]?.role ? 0 : 1), 0)
-		: beforeCount;
-	const firstPrefixMismatchIndex = left && right
-		? left.findIndex((row, index) => row?.id !== right[index]?.id || row?.role !== right[index]?.role)
-		: beforeCount > 0 ? 0 : -1;
-	const prefixIdsAndRolesPreserved = !!left && !!right
-		&& left.every((row, index) => hasNonemptySdkIdAndRole(row)
-			&& hasNonemptySdkIdAndRole(right[index])
-			&& row?.id === right[index]?.id
-			&& row?.role === right[index]?.role);
-	const beforeIds = left && left.every(hasNonemptyId) ? left.map(row => row.id) : undefined;
-	const afterIds = right && right.every(hasNonemptyId) ? right.map(row => row.id) : undefined;
-	const beforeRoles = left && left.every(hasNonemptyRole) ? left.map(row => row.role) : undefined;
-	const afterRoles = right && right.every(hasNonemptyRole) ? right.map(row => row.role) : undefined;
-	const allBeforeIdsRemainAfter = !!beforeIds && !!afterIds && beforeIds.every(id => afterIds.includes(id));
-	const beforeIdsAreOrderedSubsequence = !!beforeIds && !!afterIds && orderedSubsequence(beforeIds, afterIds);
-	const rolesAreExactPrefix = !!beforeRoles && !!afterRoles
-		&& beforeRoles.every((role, index) => role === afterRoles[index]);
-	const rolesAreOrderedSubsequence = !!beforeRoles && !!afterRoles && orderedSubsequence(beforeRoles, afterRoles);
-	const beforeDuplicateIdCount = duplicateIdCount(left);
-	const afterDuplicateIdCount = duplicateIdCount(right);
+		if (!manualTranscriptTerminalPhasePreserved(partition.phase, recovered.phase)) {
+			terminalPhasesPreserved = false;
+			terminalPhaseRegressionCount++;
+		}
+		for (let index = 0; index < partition.rows.length; index++) {
+			const expected = partition.rows[index];
+			const actual = recovered.rows[index];
+			if (
+				typeof expected?.id !== "string" || expected.id.length === 0
+				|| typeof expected.role !== "string" || expected.role.length === 0
+				|| expected.id !== actual?.id || expected.role !== actual?.role
+			) {
+				prefixIdsAndRolesPreserved = false;
+				if (firstPrefixMismatchIndex < 0) firstPrefixMismatchIndex = manualBoundedCount(index);
+				break;
+			}
+		}
+	}
+	const leftPartitionRows = leftPartitions.map(partition => partition.rows);
+	const rightPartitionRows = Array.from(rightPartitions.values(), partition => partition.rows);
+	const beforeDuplicateIdCount = manualTranscriptDuplicateIdCount(leftPartitions);
+	const afterDuplicateIdCount = manualTranscriptDuplicateIdCount(rightPartitions.values());
 	return {
-		beforeArray: !!left,
-		afterArray: !!right,
-		beforeCount,
-		afterCount,
-		beforeNonempty: beforeCount > 0,
-		afterHasAtLeastBeforeRows: afterCount >= beforeCount,
-		beforeRowsHaveNonemptySdkIdAndRole,
+		beforeSnapshot: left.valid,
+		afterSnapshot: right.valid,
+		beforeRootRowCount: manualBoundedCount(left.root.length),
+		afterRootRowCount: manualBoundedCount(right.root.length),
+		beforeChildPartitionCount: manualBoundedCount(left.children.size),
+		afterChildPartitionCount: manualBoundedCount(right.children.size),
+		beforePartitionCount: manualBoundedCount(leftPartitions.length),
+		afterPartitionCount: manualBoundedCount(rightPartitions.size),
+		beforeRootNonempty: left.root.length > 0,
+		beforeRowsHaveNonemptyIdAndRole: leftPartitionRows.every(manualTranscriptRowsHaveNonemptyIdAndRole),
+		afterRowsHaveNonemptyIdAndRole: rightPartitionRows.every(manualTranscriptRowsHaveNonemptyIdAndRole),
+		beforeHasInvalidChildPartitions: left.invalidChildPartitionCount > 0,
+		afterHasInvalidChildPartitions: right.invalidChildPartitionCount > 0,
+		missingPartitionCount: manualBoundedCount(missingPartitionCount),
 		prefixIdsAndRolesPreserved,
 		firstPrefixMismatchIndex,
-		positionalIdMismatchCount,
-		positionalRoleMismatchCount,
-		allBeforeIdsRemainAfter,
-		beforeIdsAreOrderedSubsequence,
-		rolesAreExactPrefix,
-		rolesAreOrderedSubsequence,
 		beforeHasDuplicateIds: beforeDuplicateIdCount > 0,
 		afterHasDuplicateIds: afterDuplicateIdCount > 0,
 		beforeDuplicateIdCount,
 		afterDuplicateIdCount,
+		terminalPhasesPreserved,
+		terminalPhaseRegressionCount: manualBoundedCount(terminalPhaseRegressionCount),
 	};
 }
 
-/** Emit only counts and fixed booleans if restart/reload violates prefix preservation. */
+/** Emit only fixed booleans, counts, and bounded row indexes on recovery drift. */
 function assertManualTranscriptPrefixProjection(before: unknown, after: unknown): void {
-	const facts = manualTranscriptPrefixFacts(before, after);
+	const facts = manualTranscriptPartitionFacts(before, after);
 	if (
-		facts.beforeArray
-		&& facts.afterArray
-		&& facts.beforeNonempty
-		&& facts.afterHasAtLeastBeforeRows
-		&& facts.beforeRowsHaveNonemptySdkIdAndRole
+		facts.beforeSnapshot
+		&& facts.afterSnapshot
+		&& facts.beforeRootNonempty
+		&& facts.beforeRowsHaveNonemptyIdAndRole
+		&& facts.afterRowsHaveNonemptyIdAndRole
+		&& !facts.beforeHasInvalidChildPartitions
+		&& !facts.afterHasInvalidChildPartitions
+		&& facts.missingPartitionCount === 0
 		&& facts.prefixIdsAndRolesPreserved
+		&& !facts.beforeHasDuplicateIds
+		&& !facts.afterHasDuplicateIds
+		&& facts.terminalPhasesPreserved
 	) return;
 	throw new Error(JSON.stringify(facts));
 }
@@ -923,126 +995,99 @@ test("Claude Agent SDK manual live controls choose a distinct SDK wire alias", (
 	}).toEqual({ fullHaiku: "sonnet", aliasHaiku: "sonnet", sonnet: "haiku" });
 });
 
-test("Claude Agent SDK manual restart transcript oracle preserves a nonempty finalized prefix and permits an additive tail", () => {
-	const before = {
-		messages: [
-			{ id: "private-user-id", role: "user" },
-			{ id: "private-assistant-id", role: "assistant" },
-		],
-	};
-	const exact = {
-		messages: [
-			{ id: "private-user-id", role: "user" },
-			{ id: "private-assistant-id", role: "assistant" },
-		],
-	};
-	const additiveTail = {
-		messages: [
-			...exact.messages,
-			{ id: "private-finalized-tail-id", role: "toolResult" },
-		],
-	};
-	expect(() => assertManualTranscriptPrefixProjection(before, exact)).not.toThrow();
-	expect(() => assertManualTranscriptPrefixProjection(before, additiveTail)).not.toThrow();
-	expect(manualTranscriptPrefixFacts(before, additiveTail)).toEqual({
-		beforeArray: true,
-		afterArray: true,
-		beforeCount: 2,
-		afterCount: 3,
-		beforeNonempty: true,
-		afterHasAtLeastBeforeRows: true,
-		beforeRowsHaveNonemptySdkIdAndRole: true,
-		prefixIdsAndRolesPreserved: true,
-		firstPrefixMismatchIndex: -1,
-		positionalIdMismatchCount: 0,
-		positionalRoleMismatchCount: 0,
-		allBeforeIdsRemainAfter: true,
-		beforeIdsAreOrderedSubsequence: true,
-		rolesAreExactPrefix: true,
-		rolesAreOrderedSubsequence: true,
-		beforeHasDuplicateIds: false,
-		afterHasDuplicateIds: false,
-		beforeDuplicateIdCount: 0,
-		afterDuplicateIdCount: 0,
+test("Claude Agent SDK manual restart transcript oracle preserves stable and additive root history", () => {
+	const before = { messages: [{ id: "private-user-id", role: "user" }, { id: "private-assistant-id", role: "assistant" }] };
+	const additiveRoot = { messages: [...before.messages, { id: "private-tail-id", role: "toolResult" }] };
+	expect(() => assertManualTranscriptPrefixProjection(before, before)).not.toThrow();
+	expect(() => assertManualTranscriptPrefixProjection(before, additiveRoot)).not.toThrow();
+	expect(manualTranscriptPartitionFacts(before, additiveRoot)).toMatchObject({
+		beforeRootRowCount: 2, afterRootRowCount: 3, beforeChildPartitionCount: 0, afterChildPartitionCount: 0,
+		missingPartitionCount: 0, prefixIdsAndRolesPreserved: true, firstPrefixMismatchIndex: -1,
+		terminalPhasesPreserved: true,
 	});
 });
 
-test("Claude Agent SDK manual restart transcript facts distinguish shifted history without exposing rows", () => {
+test("Claude Agent SDK manual restart transcript oracle admits recovered and appended child partitions", () => {
+	const root = [{ id: "private-root-id", role: "assistant" }];
+	const recoveredChild = { parentToolUseId: "private-parent-id", phase: "running", messages: [{ id: "private-child-id", role: "assistant" }] };
+	const before = { messages: root };
+	const withNewChild = { messages: root, subagentWork: [recoveredChild] };
+	const withChildTail = {
+		messages: root,
+		subagentWork: [{ ...recoveredChild, phase: "completed", messages: [...recoveredChild.messages, { id: "private-child-tail-id", role: "toolResult" }] }],
+	};
+	const unknownChild = { messages: root, subagentWork: [{ ...recoveredChild, phase: "unknown" }] };
+	expect(() => assertManualTranscriptPrefixProjection(before, withNewChild)).not.toThrow();
+	expect(() => assertManualTranscriptPrefixProjection(withNewChild, withChildTail)).not.toThrow();
+	expect(() => assertManualTranscriptPrefixProjection(unknownChild, withChildTail)).not.toThrow();
+	expect(manualTranscriptPartitionFacts(withNewChild, withChildTail)).toMatchObject({
+		beforeChildPartitionCount: 1, afterChildPartitionCount: 1, beforePartitionCount: 2, afterPartitionCount: 2,
+		missingPartitionCount: 0, prefixIdsAndRolesPreserved: true, terminalPhasesPreserved: true,
+	});
+	for (const phase of ["completed", "error", "aborted"]) {
+		const terminal = { messages: root, subagentWork: [{ ...recoveredChild, phase }] };
+		expect(() => assertManualTranscriptPrefixProjection(terminal, terminal)).not.toThrow();
+	}
+});
+
+test("Claude Agent SDK manual restart transcript oracle rejects child prefix and partition regressions", () => {
 	const secret = "manual-transcript-secret-sentinel";
 	const before = {
-		messages: [
-			{ id: `${secret}-one`, role: `${secret}-user`, content: secret },
-			{ id: `${secret}-two`, role: `${secret}-assistant`, path: `/${secret}` },
-			{ id: `${secret}-one`, role: `${secret}-user`, providerData: secret },
-		],
-	};
-	const after = {
-		messages: [
-			{ id: `${secret}-inserted`, role: `${secret}-tool`, content: secret },
-			{ id: `${secret}-one`, role: `${secret}-user`, content: secret },
-			{ id: `${secret}-two`, role: `${secret}-assistant`, content: secret },
-			{ id: `${secret}-one`, role: `${secret}-user`, content: secret },
-		],
-	};
-	const facts = manualTranscriptPrefixFacts(before, after);
-	expect(facts).toMatchObject({
-		firstPrefixMismatchIndex: 0,
-		positionalIdMismatchCount: 3,
-		positionalRoleMismatchCount: 3,
-		allBeforeIdsRemainAfter: true,
-		beforeIdsAreOrderedSubsequence: true,
-		rolesAreExactPrefix: false,
-		rolesAreOrderedSubsequence: true,
-		beforeHasDuplicateIds: true,
-		afterHasDuplicateIds: true,
-		beforeDuplicateIdCount: 1,
-		afterDuplicateIdCount: 1,
-	});
-	const serialized = JSON.stringify(facts);
-	expect(serialized).not.toContain(secret);
-	for (const privateValue of ["content", "path", "providerData"]) expect(serialized).not.toContain(privateValue);
-});
-
-test("Claude Agent SDK manual restart transcript oracle rejects removed, reordered, changed, and empty history", () => {
-	const before = {
-		messages: [
-			{ id: "private-user-id", role: "user" },
-			{ id: "private-assistant-id", role: "assistant" },
-		],
+		messages: [{ id: `${secret}-root`, role: `${secret}-assistant`, content: secret }],
+		subagentWork: [{
+			parentToolUseId: `${secret}-parent`, phase: "completed",
+			messages: [{ id: `${secret}-child-one`, role: `${secret}-assistant` }, { id: `${secret}-child-two`, role: `${secret}-toolResult` }],
+		}],
 	};
 	const invalidSnapshots = [
-		{ messages: [{ id: "private-user-id", role: "user" }] },
-		{ messages: [{ id: "private-assistant-id", role: "assistant" }, { id: "private-user-id", role: "user" }] },
-		{ messages: [{ id: "private-changed-id", role: "user" }, { id: "private-assistant-id", role: "assistant" }] },
-		{ messages: [{ id: "private-user-id", role: "toolResult" }, { id: "private-assistant-id", role: "assistant" }] },
-		{ messages: [] },
-		{ messages: [{ id: "", role: "user" }, { id: "private-assistant-id", role: "assistant" }] },
+		{ messages: before.messages, subagentWork: [{ ...before.subagentWork[0], messages: [{ id: `${secret}-inserted`, role: "user" }, ...before.subagentWork[0].messages] }] },
+		{ messages: before.messages, subagentWork: [{ ...before.subagentWork[0], messages: [before.subagentWork[0].messages[0]] }] },
+		{ messages: before.messages, subagentWork: [] },
+		{ messages: before.messages, subagentWork: [{ ...before.subagentWork[0], messages: [...before.subagentWork[0].messages].reverse() }] },
+		{ messages: before.messages, subagentWork: [{ ...before.subagentWork[0], messages: [{ ...before.subagentWork[0].messages[0], role: "user" }, before.subagentWork[0].messages[1]] }] },
+		{ messages: before.messages, subagentWork: [{ ...before.subagentWork[0], parentToolUseId: `${secret}-wrong-parent` }] },
+		{ messages: before.messages, subagentWork: [{ ...before.subagentWork[0], phase: "running" }] },
+		{ messages: before.messages, subagentWork: [{ ...before.subagentWork[0], messages: [before.subagentWork[0].messages[0], before.subagentWork[0].messages[0]] }] },
 	];
-	for (const after of invalidSnapshots) {
+	const assertRedactedFailure = (left: unknown, right: unknown): ManualTranscriptPartitionFacts => {
 		let diagnostic = "";
-		try {
-			assertManualTranscriptPrefixProjection(before, after);
-		} catch (error) {
-			diagnostic = error instanceof Error ? error.message : "";
-		}
+		try { assertManualTranscriptPrefixProjection(left, right); }
+		catch (error) { diagnostic = error instanceof Error ? error.message : ""; }
 		expect(diagnostic).not.toBe("");
-		const facts = JSON.parse(diagnostic) as ManualTranscriptPrefixFacts;
+		const facts = JSON.parse(diagnostic) as ManualTranscriptPartitionFacts;
 		expect(Object.keys(facts)).toEqual([
-			"beforeArray", "afterArray", "beforeCount", "afterCount", "beforeNonempty", "afterHasAtLeastBeforeRows",
-			"beforeRowsHaveNonemptySdkIdAndRole", "prefixIdsAndRolesPreserved", "firstPrefixMismatchIndex",
-			"positionalIdMismatchCount", "positionalRoleMismatchCount", "allBeforeIdsRemainAfter",
-			"beforeIdsAreOrderedSubsequence", "rolesAreExactPrefix", "rolesAreOrderedSubsequence",
-			"beforeHasDuplicateIds", "afterHasDuplicateIds", "beforeDuplicateIdCount", "afterDuplicateIdCount",
+			"beforeSnapshot", "afterSnapshot", "beforeRootRowCount", "afterRootRowCount", "beforeChildPartitionCount", "afterChildPartitionCount",
+			"beforePartitionCount", "afterPartitionCount", "beforeRootNonempty", "beforeRowsHaveNonemptyIdAndRole", "afterRowsHaveNonemptyIdAndRole",
+			"beforeHasInvalidChildPartitions", "afterHasInvalidChildPartitions", "missingPartitionCount", "prefixIdsAndRolesPreserved",
+			"firstPrefixMismatchIndex", "beforeHasDuplicateIds", "afterHasDuplicateIds", "beforeDuplicateIdCount", "afterDuplicateIdCount",
+			"terminalPhasesPreserved", "terminalPhaseRegressionCount",
 		]);
-		expect(
-			facts.beforeNonempty
-			&& facts.afterHasAtLeastBeforeRows
-			&& facts.beforeRowsHaveNonemptySdkIdAndRole
-			&& facts.prefixIdsAndRolesPreserved,
-		).toBe(false);
-		for (const privateValue of ["private-user-id", "private-assistant-id", "private-changed-id"]) {
-			expect(diagnostic).not.toContain(privateValue);
-		}
+		expect(diagnostic).not.toContain(secret);
+		for (const privateValue of ["content", "parentToolUseId", "completed", "running", "assistant", "toolResult"]) expect(diagnostic).not.toContain(privateValue);
+		return facts;
+	};
+	for (const after of invalidSnapshots) assertRedactedFailure(before, after);
+	const duplicateBefore = {
+		...before,
+		subagentWork: [{ ...before.subagentWork[0], messages: [before.subagentWork[0].messages[0], before.subagentWork[0].messages[0]] }],
+	};
+	expect(assertRedactedFailure(duplicateBefore, duplicateBefore).beforeHasDuplicateIds).toBe(true);
+});
+
+test("Claude Agent SDK manual restart transcript oracle preserves every terminal child phase", () => {
+	for (const phase of ["completed", "error", "aborted"]) {
+		const before = {
+			messages: [{ id: "private-root-id", role: "assistant" }],
+			subagentWork: [{ parentToolUseId: "private-parent-id", phase, messages: [{ id: "private-child-id", role: "assistant" }] }],
+		};
+		const stable = { ...before, subagentWork: [{ ...before.subagentWork[0] }] };
+		const regression = { ...before, subagentWork: [{ ...before.subagentWork[0], phase: "running" }] };
+		expect(() => assertManualTranscriptPrefixProjection(before, stable)).not.toThrow();
+		expect(() => assertManualTranscriptPrefixProjection(before, regression)).toThrow();
+		expect(manualTranscriptPartitionFacts(before, regression)).toMatchObject({
+			terminalPhasesPreserved: false,
+			terminalPhaseRegressionCount: 1,
+		});
 	}
 });
 
@@ -1456,6 +1501,9 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			const expectedResumeTuple = await session.rpcClient.getState();
 			expect(expectedResumeTuple?.data?.model?.id).toBe(alternateModel);
 			const beforeRestart = await gateway.sessionManager.getMessagesSnapshotBase(session);
+			const visibleBeforeRestart = beforeRestart.success
+				? gateway.sessionManager.buildVisibleMessageSnapshot(created.id, beforeRestart.data)
+				: undefined;
 			expect(beforeRestart.success && hasDurableSubscriptionUsage(gateway.sessionManager.getSessionCost(created.id))).toBe(true);
 			// Automatic SDK compaction is intentionally observation-only: this smoke
 			// never invokes a manual/fabricated compaction command.
@@ -1479,8 +1527,11 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			const reloaded = await api(manualTranscriptReloadPath(created.id, project.id));
 			expect(reloaded.status).toBe(200);
 			const afterRestart = await gateway.sessionManager.getMessagesSnapshotBase(session);
+			const visibleAfterRestart = afterRestart.success
+				? gateway.sessionManager.buildVisibleMessageSnapshot(created.id, afterRestart.data)
+				: undefined;
 			expect(beforeRestart.success && afterRestart.success).toBe(true);
-			assertManualTranscriptPrefixProjection(beforeRestart.data, afterRestart.data);
+			assertManualTranscriptPrefixProjection(visibleBeforeRestart, visibleAfterRestart);
 			expect(hasDurableSubscriptionUsage(gateway.sessionManager.getSessionCost(created.id))).toBe(true);
 
 			const interruptedTurnLifecycle = observeManualRootTurnLifecycle(session.rpcClient);
@@ -1817,6 +1868,9 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			const expectedSandboxResumeTuple = await session.rpcClient.getState();
 			expect(expectedSandboxResumeTuple?.data?.model?.id).toBe(alternateModel);
 			const beforeReplacement = await gateway.sessionManager.getMessagesSnapshotBase(session);
+			const visibleBeforeReplacement = beforeReplacement.success
+				? gateway.sessionManager.buildVisibleMessageSnapshot(created.id, beforeReplacement.data)
+				: undefined;
 			expect(beforeReplacement.success && hasDurableSubscriptionUsage(gateway.sessionManager.getSessionCost(created.id))).toBe(true);
 			// Automatic compaction remains SDK-managed and is only observed if it occurs.
 			const interruptedSandboxTurnLifecycle = observeManualRootTurnLifecycle(session.rpcClient);
@@ -1893,8 +1947,11 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			const sandboxReload = await api(manualTranscriptReloadPath(created.id, project.id));
 			expect(sandboxReload.status).toBe(200);
 			const afterRestart = await gateway.sessionManager.getMessagesSnapshotBase(session);
+			const visibleAfterRestart = afterRestart.success
+				? gateway.sessionManager.buildVisibleMessageSnapshot(created.id, afterRestart.data)
+				: undefined;
 			expect(beforeReplacement.success && afterRestart.success).toBe(true);
-			assertManualTranscriptPrefixProjection(beforeReplacement.data, afterRestart.data);
+			assertManualTranscriptPrefixProjection(visibleBeforeReplacement, visibleAfterRestart);
 			expect(hasDurableSubscriptionUsage(gateway.sessionManager.getSessionCost(created.id))).toBe(true);
 			const terminated = await gateway.sessionManager.terminateSession(created.id);
 			expect(terminated).toBe(true);
