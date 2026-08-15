@@ -364,7 +364,10 @@ export async function tryHandleNestedGoalRoute(
 			// Repeated pause requests re-drive durable cancellation and detached exact
 			// cleanup, but remain idempotent for the goal-state write and broadcast.
 			if (!alreadyPaused) {
-				await pauseGoalManager.updateGoal(goalId, { paused: true });
+				// Persist operator provenance in the same authoritative write as the
+				// pause flag. A restart must not mistake this operator decision for a
+				// legacy dependency pause and migrate it away.
+				await pauseGoalManager.updateGoal(goalId, { paused: true, pauseSource: "operator" });
 				broadcastToAll({ type: "goal_state_changed", goalId });
 			}
 		} finally {
