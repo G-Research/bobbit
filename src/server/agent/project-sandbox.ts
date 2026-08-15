@@ -277,6 +277,8 @@ export interface ProjectSandboxOptions {
 	 */
 	cloneSource?: SandboxCloneSource;
 	image: string;             // Docker image name
+	/** Server-derived exact image-plan identity for manager lifecycle comparison. */
+	sandboxImageFingerprint?: string;
 	sandboxNetwork?: string;
 	sandboxMounts?: string[];
 	sandboxCredentials?: Record<string, string>;
@@ -949,6 +951,29 @@ export class ProjectSandbox {
 		} finally {
 			if (this._modelRefreshPromise === refresh) this._modelRefreshPromise = null;
 		}
+	}
+
+	/**
+	 * Replace the container while preserving the project's named workspace volume.
+	 * The manager calls this only after a server-owned image plan has changed.
+	 */
+	async recreate(options: ProjectSandboxOptions): Promise<void> {
+		await this._withContainerLifecycle(async () => {
+			if (this._status === "starting" && this._readyPromise) await this._readyPromise;
+			const oldContainerId = this.containerId;
+			this._recovering = true;
+			this._status = "error";
+			if (oldContainerId) this._emitHealthEvent({ type: "container-died", projectId: this.options.projectId, containerId: oldContainerId });
+			try {
+				if (oldContainerId) await this._removeContainer(oldContainerId);
+				this.containerId = null;
+				this.options = options;
+				await this.init();
+				this._emitHealthEvent({ type: "container-recovered", projectId: options.projectId, containerId: this.containerId! });
+			} finally {
+				this._recovering = false;
+			}
+		});
 	}
 
 	/** Graceful shutdown: stop the container (don't remove — named volume persists). */
