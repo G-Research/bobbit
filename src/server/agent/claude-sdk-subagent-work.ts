@@ -487,11 +487,6 @@ export async function recoverClaudeSdkEmbeddedWork(
 	const invocationBoundaries = rootAgentParentBoundaries(messages);
 	if (invocationBoundaries.size === 0) return [...messages];
 	const parents = new Set(invocationBoundaries.keys());
-	const terminalBoundaries = new Map<string, number>();
-	for (const [index, message] of messages.entries()) {
-		const terminal = rootSubagentTerminal(message, parents);
-		if (terminal && !terminalBoundaries.has(terminal.parentToolUseId)) terminalBoundaries.set(terminal.parentToolUseId, index);
-	}
 	const existing = new Set(messages.flatMap((message) => {
 		const parent = boundedId(message.parentToolUseId) ? message.parentToolUseId : undefined;
 		const id = sourceId(message);
@@ -499,8 +494,7 @@ export async function recoverClaudeSdkEmbeddedWork(
 	}));
 	const recovered = await recoverSubagentRows(parents, recovery);
 	const recoveredAtBoundary = new Map<number, ClaudeAgentSdkHistoryMessage[]>();
-	for (const [parent, invocationBoundary] of invocationBoundaries) {
-		const boundary = terminalBoundaries.get(parent) ?? invocationBoundary;
+	for (const [parent, boundary] of invocationBoundaries) {
 		const accepted = (recovered.rowsByParent.get(parent) ?? []).filter((message) => {
 			const id = sourceId(message);
 			if (!id || existing.has(`${parent}:${id}`)) return false;
@@ -517,11 +511,11 @@ export async function recoverClaudeSdkEmbeddedWork(
 	const combined: ClaudeAgentSdkHistoryMessage[] = [];
 	for (const [index, message] of messages.entries()) {
 		combined.push(message);
-		// A finalized parent uses its exact root Agent/Task result boundary. A live
-		// parent has no terminal authority yet, so its immutable invocation boundary
-		// is the conservative fallback. Both preserve root ordering after projection
-		// and keep every parent's recovered rows in official child-source order,
-		// rather than appending a global child tail.
+		// The verified root Agent/Task invocation is the immutable parent boundary.
+		// A terminal result can arrive in a later official snapshot; using it would
+		// move previously recovered children and break restart prefixes. Root
+		// projection strips children, so terminal authority and root order remain
+		// root-only while recovered rows retain official child-source order.
 		combined.push(...(recoveredAtBoundary.get(index) ?? []));
 	}
 	return combined;
