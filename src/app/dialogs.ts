@@ -59,9 +59,11 @@ import {
 	projectImportDecisionActivityForProject,
 	projectImportDecisionRequestsForProject,
 	projectImportDecisionRequestsLoaded,
+	projectImportProposalsForProject,
 	refreshProjectImportDecisionRequests,
 } from "./project-import-decisions.js";
 import { ProjectImportDecisionRenderer } from "../ui/tools/renderers/ProjectImportDecisionRenderer.js";
+import { ProjectImportProposalRenderer } from "../ui/tools/renderers/ProjectImportProposalRenderer.js";
 // NOTE: session-manager imports from dialogs, so we use dynamic imports to break the cycle
 
 // ============================================================================
@@ -2162,6 +2164,9 @@ export function showProjectDialog(): void {
 	let importContinuation: ImportContinuation | null = null;
 	let importHandoffStarted = false;
 	const importDecisionRenderer = new ProjectImportDecisionRenderer();
+	const importProposalRenderer = new ProjectImportProposalRenderer();
+	const onImportProposalUpdated = () => { if (importProject) void refreshProjectImportDecisionRequests(importProject.id); };
+	document.addEventListener("bobbit-project-import-proposal-updated", onImportProposalUpdated);
 	let pathValue = "";
 
 	let detectionResult: { exists: boolean; hasBobbit: boolean; isEmpty: boolean; name: string } | null = null;
@@ -2205,6 +2210,7 @@ export function showProjectDialog(): void {
 		importDecisionUnsubscribe?.();
 		importDecisionUnsubscribe = null;
 		if (importProject) deactivateProjectImportDecisionRequests(importProject.id);
+		document.removeEventListener("bobbit-project-import-proposal-updated", onImportProposalUpdated);
 		if (detectDebounceTimer) {
 			clearTimeout(detectDebounceTimer);
 			detectDebounceTimer = null;
@@ -2216,7 +2222,9 @@ export function showProjectDialog(): void {
 	const completeImportDecisionStep = async () => {
 		const project = importProject;
 		if (!project || step !== "import-decisions" || importHandoffStarted) return;
-		if (!projectImportDecisionRequestsLoaded(project.id) || projectImportDecisionRequestsForProject(project.id).length > 0) return;
+		if (!projectImportDecisionRequestsLoaded(project.id)
+			|| projectImportDecisionRequestsForProject(project.id).length > 0
+			|| projectImportProposalsForProject(project.id).length > 0) return;
 		importHandoffStarted = true;
 		await importContinuation?.();
 	};
@@ -2805,19 +2813,21 @@ export function showProjectDialog(): void {
 			return html`<div class="flex items-center justify-center h-full text-sm text-muted-foreground" data-testid="project-import-decisions-loading">Checking project import decisions…</div>`;
 		}
 		const requests = projectImportDecisionRequestsForProject(project.id);
+		const proposals = projectImportProposalsForProject(project.id);
 		const activity = projectImportDecisionActivityForProject(project.id);
 		const activityPanel = activity.length ? html`
 			<details class="text-xs text-muted-foreground" data-testid="project-import-decision-activity">
 				<summary>Extension activity (${activity.length})</summary>
 				<ul class="mt-2 space-y-1">${activity.map(row => html`<li>${row.packId ? `${row.packId}/` : ""}${row.hookId}: ${row.outcome}${row.reason ? ` — ${row.reason}` : ""}</li>`)}</ul>
 			</details>` : nothing;
-		if (requests.length === 0) {
+		if (requests.length === 0 && proposals.length === 0) {
 			return html`<div class="flex flex-col items-center justify-center gap-3 h-full text-sm text-muted-foreground" data-testid="project-import-decisions-complete"><div>Completing project import…</div>${activityPanel}</div>`;
 		}
 		return html`
 			<div class="flex flex-col gap-4 h-full min-h-0 overflow-y-auto" data-testid="project-import-decisions">
 				<p class="text-sm text-muted-foreground">Review these project import decisions before continuing.</p>
 				${requests.map((request) => importDecisionRenderer.render(request))}
+				${proposals.map((proposal) => importProposalRenderer.render(proposal))}
 				${activityPanel}
 			</div>
 		`;

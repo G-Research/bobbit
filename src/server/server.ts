@@ -8738,33 +8738,141 @@ async function handleApiRoute(
 		return;
 	}
 
-	// GET /api/projects/:id/import-proposals — project-owned, durable proposal
-	// workspace projection. It derives draft ids from the decision record rather
-	// than accepting a caller-supplied path or session id, so a completed import
-	// remains inspectable without a live agent session.
-	const projectImportProposalsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/import-proposals$/);
-	if (projectImportProposalsMatch && req.method === "GET") {
+	// Project-import proposals are project-owned records, never surrogate
+	// sessions. Keep every lookup anchored to (project, durable import run,
+	// request, proposal type) so an opaque draft id cannot be replayed across a
+	// project boundary.
+	const projectImportProposalsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/import-proposals(?:\/([^/]+)\/([^/]+)(\/(accept|reject))?)?$/);
+	if (projectImportProposalsMatch) {
 		if (!requireVerifiedPromptOperator()) return;
 		let projectId: string;
-		try { projectId = decodeURIComponent(projectImportProposalsMatch[1]); }
-		catch { json({ error: "Project not found" }, 404); return; }
+		let requestId: string | undefined;
+		try {
+			projectId = decodeURIComponent(projectImportProposalsMatch[1]);
+			requestId = projectImportProposalsMatch[2] ? decodeURIComponent(projectImportProposalsMatch[2]) : undefined;
+		} catch { json({ error: "Project import proposal not found" }, 404); return; }
 		const project = projectRegistry.get(projectId);
 		const marker = project?.importDecisionRun;
-		if (!project || marker?.state !== "ready" || !decisionRequestManager) { json({ error: "Project not found" }, 404); return; }
-		const proposals: Array<{ requestId: string; proposalType: ProposalType; rev: number; fields: Record<string, unknown> }> = [];
-		for (const record of decisionRequestManager.listImportRequests(projectId, marker.id)) {
-			if (record.proposal?.status !== "created" || !record.resolution) continue;
-			const owner = { kind: "project-import" as const, projectId, importId: marker.id, requestId: record.id };
-			try {
-				const parsed = await parseProposalFile(bobbitStateDir(), proposalDraftOwnerId(owner), record.proposal.type);
-				if (!parsed.ok) continue;
-				proposals.push({ requestId: record.id, proposalType: record.proposal.type, rev: record.proposal.rev ?? 0, fields: parsed.value.fields });
-			} catch {
-				// A missing/corrupt draft is never projected as created. The durable
-				// decision remains auditable, but a caller cannot act on an orphan.
+		if (!project || marker?.state !== "ready" || !decisionRequestManager) { json({ error: "Project import proposal not found" }, 404); return; }
+
+		const safeFields = (value: unknown, depth = 0): unknown => {
+			if (depth > 6) return "[truncated]";
+			if (typeof value === "string") return value.length <= 16_384 ? value : `${value.slice(0, 16_384)}…`;
+			if (typeof value === "number" || typeof value === "boolean" || value === null) return value;
+			if (Array.isArray(value)) return value.slice(0, 100).map(item => safeFields(item, depth + 1));
+			if (!value || typeof value !== "object") return undefined;
+			const redacted = new Set(["token", "tokens", "secret", "secrets", "password", "credentials", "apiKey", "api_key"]);
+			return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+				.slice(0, 100)
+				.map(([key, item]) => [key, redacted.has(key) ? "[redacted]" : safeFields(item, depth + 1)]));
+		};
+		const resolveDraft = async (id: string, type: string) => {
+			if (!isProposalType(type)) return undefined;
+			const record = decisionRequestManager!.getImportRequest(projectId, marker.id, id);
+			if (!record || record.proposal?.status !== "created" || record.proposal.type !== type) return undefined;
+			const owner = { kind: "project-import" as const, projectId, importId: marker.id, requestId: id };
+			const draftId = proposalDraftOwnerId(owner);
+			const parsed = await parseProposalFile(bobbitStateDir(), draftId, type).catch(() => undefined);
+			if (!parsed?.ok) return undefined;
+			const rev = await latestRev(bobbitStateDir(), draftId, type).catch(() => -1);
+			if (!Number.isInteger(rev) || rev < 1 || rev !== record.proposal.rev) return undefined;
+			return { record, draftId, parsed, rev, type };
+		};
+
+		if (!requestId && req.method === "GET") {
+			const proposals: Array<{ requestId: string; proposalType: ProposalType; rev: number; fields: Record<string, unknown> }> = [];
+			for (const record of decisionRequestManager.listImportRequests(projectId, marker.id)) {
+				if (record.proposal?.status !== "created") continue;
+				const draft = await resolveDraft(record.id, record.proposal.type);
+				if (draft) proposals.push({ requestId: record.id, proposalType: record.proposal.type, rev: draft.rev, fields: safeFields(draft.parsed.value.fields) as Record<string, unknown> });
 			}
+			json({ proposals });
+			return;
 		}
-		json({ proposals });
+
+		const type = projectImportProposalsMatch[3];
+		const action = projectImportProposalsMatch[5];
+		if (!requestId || !type) { json({ error: "Method not allowed" }, 405); return; }
+		const draft = await resolveDraft(requestId, type);
+		if (!draft) { json({ error: "Project import proposal not found" }, 404); return; }
+		if (!action && req.method === "GET") {
+			json({ requestId, proposalType: draft.type, rev: draft.rev, fields: safeFields(draft.parsed.value.fields) });
+			return;
+		}
+		if ((action !== "accept" && action !== "reject") || req.method !== "POST") { json({ error: "Method not allowed" }, 405); return; }
+		const body = await readBody(req).catch(() => undefined);
+		if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1 || !Number.isInteger((body as { rev?: unknown }).rev)) {
+			json({ error: "rev is required" }, 400);
+			return;
+		}
+		if ((body as { rev: number }).rev !== draft.rev) {
+			json({ error: "Proposal revision is stale", code: "STALE_PROPOSAL" }, 409);
+			return;
+		}
+		const store = projectContextManager.getOrCreate(projectId)?.decisionRequestStore;
+		if (!store) { json({ error: "Project import proposal not found" }, 404); return; }
+		const auditProposalDecision = (outcome: "applied" | "dropped") => {
+			try {
+				new ContextTraceStore(bobbitStateDir(), fsImpl).appendProjectImportOutcome(projectId, marker.id, {
+					kind: "decision", packId: draft.record.asker.packId, hookId: draft.record.asker.hookId,
+					outcome, requestId, questionId: draft.record.questionId, actor: "user",
+				});
+			} catch { /* Audit availability never changes an already-decided proposal. */ }
+		};
+		if (action === "reject") {
+			if (!store.updateProposal(requestId, { status: "rejected", type: draft.type, rev: draft.rev, decidedAt: new Date().toISOString() })) {
+				json({ error: "Proposal could not be rejected" }, 409);
+				return;
+			}
+			await deleteProposalFile(bobbitStateDir(), draft.draftId, draft.type);
+			auditProposalDecision("dropped");
+			broadcastToProject(projectId, { type: "project_import_decision_requests_updated", projectId, ts: gatewayDeps.clock.now() });
+			json({ ok: true, status: "rejected" });
+			return;
+		}
+
+		// A project-import proposal must declare its own project target. The stored
+		// draft, not client input, is the only source for the existing role apply
+		// validation below.
+		if (draft.type !== "role" || draft.parsed.value.fields.projectId !== projectId) {
+			json({ error: "This project import proposal cannot be applied", code: "UNSUPPORTED_IMPORT_PROPOSAL" }, 422);
+			return;
+		}
+		try {
+			const fields = draft.parsed.value.fields;
+			const target = resolveRoleMutationTarget(projectId);
+			if (!target.ok || target.target.scope !== "project" || target.target.projectId !== projectId) {
+				json({ error: "Project import proposal target is unavailable", code: "PROJECT_ID_MISMATCH" }, 409);
+				return;
+			}
+			const model = typeof fields.model === "string" && fields.model.trim() ? fields.model.trim() : undefined;
+			if (model && /^[^/]+\/.+$/.test(model) && !(await requireCurrentSessionModel(model, "Role model"))) return;
+			const name = fields.name;
+			const label = fields.label;
+			const prompt = fields.prompt;
+			if (typeof name !== "string" || typeof label !== "string" || typeof prompt !== "string") throw new Error("Invalid role proposal");
+			const role = {
+				name, label, promptTemplate: prompt,
+				accessory: typeof fields.accessory === "string" ? fields.accessory : "none",
+				toolPolicies: fields.toolPolicies,
+				model,
+				thinkingLevel: normalizeRoleThinking(fields.thinkingLevel),
+				createdAt: Date.now(), updatedAt: Date.now(),
+			};
+			const NAME_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
+			if (!NAME_PATTERN.test(role.name)) throw new Error("Role name must be lowercase alphanumeric + hyphens");
+			target.target.store.put(role as Role);
+			if (!store.updateProposal(requestId, { status: "accepted", type: draft.type, rev: draft.rev, decidedAt: new Date().toISOString() })) {
+				json({ error: "Proposal could not be accepted" }, 409);
+				return;
+			}
+			await deleteProposalFile(bobbitStateDir(), draft.draftId, draft.type);
+			auditProposalDecision("applied");
+			broadcastToProject(projectId, { type: "project_import_decision_requests_updated", projectId, ts: gatewayDeps.clock.now() });
+			json({ ok: true, status: "accepted", role: { name: role.name, label: role.label } }, 201);
+		} catch (error) {
+			jsonError(400, error);
+		}
 		return;
 	}
 
