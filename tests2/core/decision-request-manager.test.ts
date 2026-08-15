@@ -65,7 +65,7 @@ function fixture(opts: { headless?: boolean; continuation?: () => Promise<"deliv
 		} : undefined,
 		continuation: opts.continuation ? { deliver: () => opts.continuation!(), complete: opts.continuationComplete } : undefined,
 	});
-	return { fs, store, clock, manager, invalidations, proposals, projectImportTrace };
+	return { fs, dir, store, clock, manager, invalidations, proposals, projectImportTrace };
 }
 
 function origin(overrides: Partial<DecisionRequestOrigin> = {}): DecisionRequestOrigin {
@@ -499,6 +499,53 @@ describe("DecisionRequestManager", () => {
 		await manager.reconcile();
 		assert.equal(resumeCalls, 3);
 		assert.equal(store.get(created.requestId!)?.status, "resolved");
+	});
+
+	it("does not replay a tampered durable claimed consent value", async () => {
+		const initial = fixture();
+		const initialManager = new DecisionRequestManager({
+			storeForProject: () => initial.store, clock: initial.clock, isHeadless: () => false,
+			recheckConsentOperation: () => true,
+			consentPauseLifecycle: { pause: async () => "paused", resume: async () => "resumed" },
+		});
+		const created = await initialManager.create(origin(), request(initial.clock, {
+			effect: { kind: "proposal", proposals: {
+				quick: { proposalType: "goal", args: { title: "Quick" } },
+				thorough: { proposalType: "goal", args: { title: "Thorough" } },
+				other: { proposalType: "goal", args: { title: "Other" } },
+			} },
+		}), { id: "tampered-recovery", kind: "tool", toolSafety: "unsafe", timeoutAction: "pause-goal" });
+		initial.clock.advance(30_000);
+		await initialManager.reconcile();
+		const paused = initial.store.get(created.requestId!)!;
+		assert.equal(initial.store.claimConsentResume(created.requestId!, {
+			pause: paused.consentPause!, claimedAt: new Date(initial.clock.now()).toISOString(), value: { kind: "option", value: "quick" },
+		}).claimed, true);
+		const file = path.join(initial.dir, "extension-decision-requests.json");
+		const snapshot = JSON.parse(initial.fs.readFileSync(file, "utf-8"));
+		snapshot.requests[created.requestId!].consentPause.resume.value = { kind: "option", value: "forged" };
+		initial.fs.writeFileSync(file, JSON.stringify(snapshot), "utf-8");
+		const restarted = new DecisionRequestStore(initial.dir, initial.fs);
+		let continuationCalls = 0;
+		let proposalCalls = 0;
+		let traceCalls = 0;
+		let onDecisionCalls = 0;
+		const manager = new DecisionRequestManager({
+			storeForProject: () => restarted, projectIds: () => ["project-1"], clock: initial.clock, isHeadless: () => false,
+			recheckConsentOperation: () => true,
+			consentPauseLifecycle: { pause: async () => "paused", resume: async () => "resumed" },
+			proposalSeedService: { seedFromDecision: async () => { proposalCalls++; return { ok: true as const, status: 200 as const, rev: 1, fields: {} }; } },
+			continuation: { deliver: async () => { continuationCalls++; onDecisionCalls++; return "delivered"; } },
+			trace: { appendOutcome: () => { traceCalls++; }, appendProjectImportOutcome: () => {} },
+		});
+
+		await manager.reconcile();
+		assert.equal(restarted.isHealthy(), false);
+		assert.equal(restarted.get(created.requestId!), undefined, "the forged record must not become resolved");
+		assert.equal(onDecisionCalls, 0);
+		assert.equal(proposalCalls, 0);
+		assert.equal(continuationCalls, 0);
+		assert.equal(traceCalls, 0);
 	});
 
 	it("rechecks authorization before releasing a restarted claimed consent", async () => {

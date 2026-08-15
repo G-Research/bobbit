@@ -451,7 +451,7 @@ export class DecisionRequestStore {
 			if (current.status !== "paused-awaiting-consent" || !pause || !isIsoInstant(completion.completedAt) || !samePauseIdentity(pause, completion.pause) || claimedResume?.status !== "claimed") {
 				return { completed: false, request: clone(current) } as ConsentResumeCompletionResult;
 			}
-			if (!completion.terminal || !isDecisionStatus(completion.terminal.status) || !isTerminalStatus(completion.terminal.status) || !isIsoInstant(completion.terminal.resolvedAt)
+			if (!completion.terminal || !isTerminalUpdateForRequest(completion.terminal, current.request)
 				|| ((completion.outcome === "resumed" || completion.outcome === "already-resumed") !== (completion.terminal.status === "resolved" && completion.terminal.resolution !== undefined))
 				|| ((completion.outcome === "denied" || completion.outcome === "not-matching") !== (completion.terminal.status === "denied" && completion.terminal.resolution === undefined))) {
 				return { completed: false, request: clone(current) } as ConsentResumeCompletionResult;
@@ -629,7 +629,7 @@ function isStoredRequest(value: unknown): value is StoredDecisionRequest {
 		|| (value.classificationReason !== undefined && !isClassificationReason(value.classificationReason))
 		|| (value.protectedOperation !== undefined && !isProtectedOperation(value.protectedOperation))
 		|| (value.timeoutAction !== undefined && !isConsentTimeoutAction(value.timeoutAction))
-		|| (value.consentPause !== undefined && !isConsentPause(value.consentPause))
+		|| (value.consentPause !== undefined && !isConsentPause(value.consentPause, value.request))
 		|| (value.consentInbox !== undefined && !isConsentInboxSurface(value.consentInbox))
 		|| !isDecisionStatus(value.status) || !isIsoInstant(value.createdAt) || !isIsoInstant(value.deadlineAt)
 		|| (value.resolvedAt !== undefined && !isIsoInstant(value.resolvedAt))
@@ -705,17 +705,17 @@ function isProtectedOperation(value: unknown): value is DecisionProtectedOperati
 	return isRecord(value) && isString(value.id) && isString(value.kind);
 }
 
-function isConsentPause(value: unknown): value is DecisionConsentPause {
+function isConsentPause(value: unknown, request: ValidatedExtensionDecisionRequest): value is DecisionConsentPause {
 	return isRecord(value) && isString(value.goalId) && isRecord(value.reason)
 		&& value.reason.kind === "awaiting-extension-consent" && isString(value.reason.requestId) && isIsoInstant(value.reason.createdAt)
 		&& isIsoInstant(value.pausedAt) && (value.pauseAppliedAt === undefined || isIsoInstant(value.pauseAppliedAt))
-		&& (value.resume === undefined || isConsentResume(value.resume));
+		&& (value.resume === undefined || isConsentResume(value.resume, request));
 }
 
-function isConsentResume(value: unknown): boolean {
+function isConsentResume(value: unknown, request: ValidatedExtensionDecisionRequest): boolean {
 	return isRecord(value) && isConsentResumeStatus(value.status) && isIsoInstant(value.claimedAt)
 		&& (value.completedAt === undefined || isIsoInstant(value.completedAt))
-		&& (value.value === undefined || isDecisionValue(value.value));
+		&& (value.value === undefined || isValidDecisionValueForRequest(value.value, request));
 }
 
 function isValidDecisionValueForRequest(value: unknown, request: ValidatedExtensionDecisionRequest): value is DecisionValue {

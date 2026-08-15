@@ -221,9 +221,35 @@ describe("DecisionRequestStore", () => {
 		assert.equal(store.claimConsentResume("request-1", { pause: pause("request-1"), claimedAt: "2026-01-01T00:03:01.000Z", value: { kind: "option", value: "safe" } }).claimed, false);
 		assert.equal(store.completeConsentResume("request-1", {
 			pause: pause("request-1"), completedAt: "2026-01-01T00:04:00.000Z", outcome: "resumed",
+			terminal: { status: "resolved", resolvedAt: "2026-01-01T00:04:00.000Z", resolution: { value: { kind: "option", value: "forged" }, actor: "user", reason: "answered" } },
+		}).completed, false);
+		assert.equal(store.get("request-1")?.status, "paused-awaiting-consent");
+		assert.equal(store.get("request-1")?.consentPause?.resume?.status, "claimed");
+		assert.equal(store.completeConsentResume("request-1", {
+			pause: pause("request-1"), completedAt: "2026-01-01T00:04:00.000Z", outcome: "resumed",
 			terminal: { status: "resolved", resolvedAt: "2026-01-01T00:04:00.000Z", resolution: { value: { kind: "option", value: "safe" }, actor: "user", reason: "answered" } },
 		}).completed, true);
 		assert.equal(store.get("request-1")?.status, "resolved");
+	});
+
+	it("fails closed at load for a claimed consent value outside its request", () => {
+		const dir = stateDir("forged-claimed-consent");
+		const store = new DecisionRequestStore(dir, memfs);
+		assert.equal(store.put(consentRequest("request-1")), true);
+		assert.equal(store.writeConsentPauseFirst("request-1", {
+			pausedAt: "2026-01-01T00:02:00.000Z", pause: pause("request-1"), inbox: inbox(),
+		}).written, true);
+		assert.equal(store.claimConsentResume("request-1", {
+			pause: pause("request-1"), claimedAt: "2026-01-01T00:03:00.000Z", value: { kind: "option", value: "safe" },
+		}).claimed, true);
+		const file = path.join(dir, "extension-decision-requests.json");
+		const snapshot = JSON.parse(memfs.readFileSync(file, "utf-8"));
+		snapshot.requests["request-1"].consentPause.resume.value = { kind: "option", value: "forged" };
+		memfs.writeFileSync(file, JSON.stringify(snapshot), "utf-8");
+
+		const restarted = new DecisionRequestStore(dir, memfs);
+		assert.equal(restarted.isHealthy(), false);
+		assert.deepEqual(restarted.list(), []);
 	});
 
 	it("fails closed on a non-matching consent resume and source-key updates remain deduplicated", () => {
