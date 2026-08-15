@@ -20,6 +20,7 @@ function fixture(overrides: Partial<WorktreeServiceCoordinatorDeps> = {}) {
 	const stopped: ServiceInstanceRef[] = [];
 	const removed: string[] = [];
 	let activeCalls = 0;
+	let declarations: readonly typeof declaration[] = [declaration];
 	const operations = new ServiceToolAdapterRegistry();
 	const queryOperation = {
 		validatePayload: (value: unknown) => value === undefined || (typeof value === "object" && value !== null && (value as { query?: unknown }).query === "ok"),
@@ -38,7 +39,7 @@ function fixture(overrides: Partial<WorktreeServiceCoordinatorDeps> = {}) {
 		stateDir: () => "/state/project-a",
 		git: { topLevel: async cwd => cwd },
 		filesystem: { realpath: async target => target, isDirectory: async () => true, removeDirectory: async target => { removed.push(target); } },
-		listActive: async () => { activeCalls++; return [declaration]; },
+		listActive: async () => { activeCalls++; return declarations; },
 		authorize: () => ({ allowed }),
 		settingsReadable: () => settingsReadable,
 		runtime,
@@ -50,6 +51,7 @@ function fixture(overrides: Partial<WorktreeServiceCoordinatorDeps> = {}) {
 	return {
 		coordinator: new WorktreeServiceCoordinator(deps), reconciled, stopped, removed,
 		activeCalls: () => activeCalls,
+		setDeclarations: (value: readonly typeof declaration[]) => { declarations = value; },
 		setAllowed: (value: boolean) => { allowed = value; },
 		setSettingsReadable: (value: boolean) => { settingsReadable = value; },
 	};
@@ -107,6 +109,18 @@ describe("worktree service coordinator", () => {
 		expect(f.reconciled).toHaveLength(1);
 	});
 
+	it("does no scope discovery for empty declarations but non-destructively stops stale instances", async () => {
+		let gitCalls = 0;
+		const f = fixture({ git: { topLevel: async cwd => { gitCalls++; return cwd; } } });
+		await f.coordinator.reconcileProject(projectId);
+		f.setDeclarations([]);
+		gitCalls = 0;
+		await f.coordinator.reconcileProject(projectId);
+		expect(gitCalls).toBe(0);
+		expect(f.stopped).toHaveLength(1);
+		expect(f.removed).toHaveLength(0);
+	});
+
 	it("schema-gates closed operations before an adapter is invoked", async () => {
 		let calls = 0;
 		const f = fixture({ adapter: () => ({ request: async () => { calls++; return {}; } }) });
@@ -122,6 +136,19 @@ describe("worktree service coordinator", () => {
 		f.setSettingsReadable(true);
 		f.setAllowed(false);
 		await expect(f.coordinator.request(request())).rejects.toMatchObject({ code: "SERVICE_UNAVAILABLE" });
+	});
+
+	it("keeps an in-flight RPC ready across a concurrent same-key reconciliation", async () => {
+		let release!: () => void;
+		let started!: () => void;
+		const paused = new Promise<void>(resolve => { release = resolve; });
+		const began = new Promise<void>(resolve => { started = resolve; });
+		const f = fixture({ adapter: () => ({ request: async () => { started(); await paused; return { done: true }; } }) });
+		const pending = f.coordinator.request(request());
+		await began;
+		await f.coordinator.reconcileProject(projectId);
+		release();
+		await expect(pending).resolves.toMatchObject({ state: "ready" });
 	});
 
 	it("aborts active RPC work and preserves data when a revoke reconciles the instance away", async () => {
@@ -152,21 +179,35 @@ describe("worktree service coordinator", () => {
 		expect(f.removed).toHaveLength(0);
 	});
 
-	it("stops only a final captured worktree owner and cleans its derived directory", async () => {
-		const shared = { ...session, id: "session-b" };
-		const f = fixture({
-			sessions: { get: id => id === session.id ? session : id === shared.id ? shared : undefined, list: () => [session, shared] },
-		});
+	it("archives the final owner without deleting data, then cleans only after confirmed worktree removal", async () => {
+		const f = fixture();
 		await f.coordinator.reconcileProject(projectId);
-		await f.coordinator.stopSession(projectId, session.id);
-		expect(f.stopped).toHaveLength(0);
-		await f.coordinator.stopSession(projectId, shared.id);
+		await f.coordinator.releaseSession(projectId, session.id);
+		expect(f.stopped).toHaveLength(1);
+		expect(f.removed).toHaveLength(0);
+		await f.coordinator.cleanupRemovedSessionWorktrees(projectId, session.id, [root]);
 		expect(f.stopped).toHaveLength(1);
 		expect(f.removed).toHaveLength(1);
 		expect(f.removed[0]).toContain("/managed-services/v1/");
 	});
 
-	it("uses roots captured before worktree deletion and keeps data on normal close", async () => {
+	it("retains a shared archived cleanup owner until its own worktree is confirmed removed", async () => {
+		const shared = { ...session, id: "session-b" };
+		const f = fixture({
+			sessions: { get: id => id === session.id ? session : id === shared.id ? shared : undefined, list: () => [session, shared] },
+		});
+		await f.coordinator.reconcileProject(projectId);
+		await f.coordinator.releaseSession(projectId, session.id);
+		await f.coordinator.cleanupRemovedSessionWorktrees(projectId, session.id, [root]);
+		expect(f.stopped).toHaveLength(0);
+		expect(f.removed).toHaveLength(0);
+		await f.coordinator.releaseSession(projectId, shared.id);
+		await f.coordinator.cleanupRemovedSessionWorktrees(projectId, shared.id, [root]);
+		expect(f.stopped).toHaveLength(1);
+		expect(f.removed).toHaveLength(1);
+	});
+
+	it("keeps data on normal close or unconfirmed cleanup", async () => {
 		const f = fixture();
 		await f.coordinator.reconcileProject(projectId);
 		await f.coordinator.close();
@@ -175,8 +216,9 @@ describe("worktree service coordinator", () => {
 
 		const afterDeletion = fixture();
 		await afterDeletion.coordinator.reconcileProject(projectId);
-		await afterDeletion.coordinator.stopSession(projectId, session.id);
+		await afterDeletion.coordinator.releaseSession(projectId, session.id);
+		await afterDeletion.coordinator.cleanupRemovedSessionWorktrees(projectId, session.id, ["/different/worktree"]);
 		expect(afterDeletion.stopped).toHaveLength(1);
-		expect(afterDeletion.removed).toHaveLength(1);
+		expect(afterDeletion.removed).toHaveLength(0);
 	});
 });

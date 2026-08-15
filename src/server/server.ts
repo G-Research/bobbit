@@ -4716,18 +4716,22 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	sessionManager.addWorktreeReadyListener((session) => {
 		void worktreeServices.reconcileSession(session.id).catch(() => undefined);
 	});
-	const stopManagedServicesForSession = async (sessionId: string, info: import("./agent/session-manager.js").SessionTerminationInfo): Promise<void> => {
+	const releaseManagedServicesForSession = async (sessionId: string, info: import("./agent/session-manager.js").SessionTerminationInfo): Promise<void> => {
 		if (!info.projectId) return;
-		// Roots were captured by the coordinator while the worktree was valid. This
-		// works after purge deletes the directory and retains shared-root ownership.
-		await worktreeServices.stopSession(info.projectId, sessionId);
+		// Archive fences the live owner without deleting state: a later confirmed
+		// worktree-removal event owns destructive cleanup.
+		await worktreeServices.releaseSession(info.projectId, sessionId);
 	};
+	sessionManager.addWorktreeRemovedListener(async (sessionId, info) => {
+		if (!info.projectId) return;
+		await worktreeServices.cleanupRemovedSessionWorktrees(info.projectId, sessionId, info.worktreePaths);
+	});
 	// Push a session_removed broadcast to ALL clients on terminate/archive/purge
 	// so sidebars and dashboards update instantly. Replaces a 5s polling tick
 	// for a documented class of races (e.g. clicking a stale sidebar entry just
 	// after another tab archived the session).
 	sessionManager.addTerminationListener(async (sessionId, info) => {
-		await stopManagedServicesForSession(sessionId, info);
+		await releaseManagedServicesForSession(sessionId, info);
 		try {
 			broadcastToAll({ type: "session_removed", sessionId, projectId: info.projectId, reason: info.reason });
 		} catch (err) {
@@ -7402,31 +7406,39 @@ async function handleApiRoute(
 		}
 		const projectId = projectGetMatch[1];
 		const existing = projectRegistry.get(projectId);
+		// Registry updates mutate the stored project object, so keep the old root as
+		// a value before starting a transition that may need to roll it back.
+		const previousRootPath = existing?.rootPath;
 		const rootReplacement = !!updates.rootPath && !!existing && !samePath(updates.rootPath, existing.rootPath);
 		let contextRemoved = false;
+		let updateCommitted = false;
 		try {
 			if (rootReplacement) {
-				// Fence services before their owning context/root changes. Removing the
-				// context first ensures no stale root-backed store remains reachable.
+				// Fence services before their owning context/root changes. `remove()` drops
+				// bookkeeping before close can reject, so rollback starts before awaiting it.
 				await worktreeServices.stopProject(projectId);
-				await projectContextManager.remove(projectId);
 				contextRemoved = true;
+				await projectContextManager.remove(projectId);
 			}
 			const updated = projectRegistry.update(projectId, updates);
-			if (rootReplacement && !projectContextManager.getOrCreate(projectId)) {
-				// Do not leave a registry root with no matching live context if opening it
-				// failed. The old context is reopened from the restored registry value.
-				projectRegistry.update(projectId, { rootPath: existing!.rootPath });
-				projectContextManager.getOrCreate(projectId);
-				throw new Error("Project context could not be reopened after root replacement");
+			updateCommitted = true;
+			if (rootReplacement) {
+				let reopened;
+				try { reopened = projectContextManager.getOrCreate(projectId); } catch { reopened = null; }
+				if (!reopened) throw new Error("Project context could not be reopened after root replacement");
+				void worktreeServices.reconcileProject(projectId).catch(() => undefined);
 			}
-			if (rootReplacement) void worktreeServices.reconcileProject(projectId).catch(() => undefined);
 			json(updated);
 		} catch (err: any) {
-			if (rootReplacement && contextRemoved && ![...projectContextManager.all()].some(context => context.project.id === projectId)) {
-				// projectRegistry.update may reject before the transition commits; restore
-				// the old live context rather than leaving the project half-transitioned.
-				try { projectContextManager.getOrCreate(projectId); } catch { /* original error wins */ }
+			if (rootReplacement && contextRemoved) {
+				// Restore the registry before reopening so every failed transition returns
+				// to a live old-root context, even when remove() or getOrCreate() throws.
+				if (updateCommitted) {
+					try { projectRegistry.update(projectId, { rootPath: previousRootPath! }); } catch { /* original error wins */ }
+				}
+				if (![...projectContextManager.all()].some(context => context.project.id === projectId)) {
+					try { projectContextManager.getOrCreate(projectId); } catch { /* original error wins */ }
+				}
 			}
 			if (writeSpecialProjectMutationError(err)) return;
 			jsonError(400, err);

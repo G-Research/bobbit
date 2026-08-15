@@ -242,6 +242,17 @@ describe("asynchronous archive purge lifecycle", () => {
 		}
 	});
 
+	it("emits worktree removal only for confirmed cleanup coordinates", async () => {
+		const { manager } = makeManager({ records: [archivedSession("archive-worktree-removal", 20 * DAY_MS)] });
+		managers.push(manager);
+		const removals: Array<{ sessionId: string; projectId?: string; worktreePaths: readonly string[] }> = [];
+		manager.addWorktreeRemovedListener((sessionId, info) => { removals.push({ sessionId, ...info }); });
+		await (manager as any).notifyWorktreeRemoved("archive-worktree-removal", "project-archive", []);
+		assert.deepEqual(removals, []);
+		await (manager as any).notifyWorktreeRemoved("archive-worktree-removal", "project-archive", ["/worktree/removed"]);
+		assert.deepEqual(removals, [{ sessionId: "archive-worktree-removal", projectId: "project-archive", worktreePaths: ["/worktree/removed"] }]);
+	});
+
 	it("awaits termination listeners and isolates a rejected purge listener", async () => {
 		const now = 20 * DAY_MS;
 		const listenerRelease = heldDeferred();

@@ -158,8 +158,12 @@ export class WorktreeServiceCoordinator implements ServiceExtensionToolRpc {
 	private readonly instances = new Map<string, ServiceInstanceRef>();
 	/** Retained after a non-destructive stop so final worktree cleanup knows its exact owned directory. */
 	private readonly knownInstances = new Map<string, ServiceInstanceRef>();
-	/** Roots are captured while Git and the worktree still exist. */
+	/** Cleanup coordinates survive archive until a confirmed worktree removal. */
 	private readonly sessionRoots = new Map<string, Map<string, Set<string>>>();
+	/** Active owners keep an instance running; archived owners intentionally do not. */
+	private readonly activeSessionRoots = new Map<string, Map<string, Set<string>>>();
+	/** Candidate paths bind a trusted cleanup completion to the captured canonical root. */
+	private readonly sessionRootPaths = new Map<string, Map<string, Map<string, Set<string>>>>();
 	private readonly reconcileStates = new Map<string, ReconcileState>();
 	/** Stop operations advance this fence so an older resolver cannot revive a root. */
 	private readonly projectGenerations = new Map<string, number>();
@@ -240,15 +244,33 @@ export class WorktreeServiceCoordinator implements ServiceExtensionToolRpc {
 		await Promise.all(targets.map(ref => this.stopInstance(ref, true)));
 	}
 
-	/** Captured-root cleanup for a removed session. Shared roots remain alive until their last owner is removed. */
-	async stopSession(projectId: string, sessionId: string): Promise<void> {
+	/** Archive releases a live owner and fences its final instance, but preserves data ownership for later cleanup. */
+	async releaseSession(projectId: string, sessionId: string): Promise<void> {
 		if (!safePlatformIdentifier(projectId)) return;
-		const roots = this.sessionRoots.get(sessionId)?.get(projectId);
-		this.deleteSessionRoots(sessionId, projectId);
+		const roots = this.activeSessionRoots.get(sessionId)?.get(projectId);
+		this.deleteActiveSessionRoots(sessionId, projectId);
 		if (!roots) return;
 		for (const root of roots) {
-			if (!this.hasOtherRootOwner(projectId, root)) await this.stopWorktree(projectId, root);
+			if (!this.hasOtherRootOwner(this.activeSessionRoots, projectId, root)) {
+				await Promise.all(this.refsFor(projectId, root).map(ref => this.stopInstance(ref, false)));
+			}
 		}
+	}
+
+	/** Destructive cleanup is allowed only after the owning worktree removal succeeded. */
+	async cleanupRemovedSessionWorktrees(projectId: string, sessionId: string, worktreePaths: readonly string[]): Promise<void> {
+		if (!safePlatformIdentifier(projectId) || worktreePaths.length === 0) return;
+		const roots = this.sessionRoots.get(sessionId)?.get(projectId);
+		const paths = this.sessionRootPaths.get(sessionId)?.get(projectId);
+		if (!roots || !paths) return;
+		const removed = new Set(worktreePaths.map(candidate => path.resolve(candidate)));
+		for (const [root, candidates] of [...paths]) {
+			if (![...candidates].some(candidate => removed.has(path.resolve(candidate)))) continue;
+			paths.delete(root);
+			roots.delete(root);
+			if (!this.hasOtherRootOwner(this.sessionRoots, projectId, root)) await this.stopWorktree(projectId, root);
+		}
+		this.deleteEmptySessionRootMaps(sessionId, projectId);
 	}
 
 	/** Called only for authoritative project deletion or root replacement. */
@@ -257,9 +279,15 @@ export class WorktreeServiceCoordinator implements ServiceExtensionToolRpc {
 		this.advanceProjectGeneration(projectId);
 		const targets = this.refsFor(projectId);
 		await Promise.all(targets.map(ref => this.stopInstance(ref, true)));
-		for (const [sessionId, projects] of this.sessionRoots) {
+		for (const owners of [this.sessionRoots, this.activeSessionRoots]) {
+			for (const [sessionId, projects] of owners) {
+				projects.delete(projectId);
+				if (projects.size === 0) owners.delete(sessionId);
+			}
+		}
+		for (const [sessionId, projects] of this.sessionRootPaths) {
 			projects.delete(projectId);
-			if (projects.size === 0) this.sessionRoots.delete(sessionId);
+			if (projects.size === 0) this.sessionRootPaths.delete(sessionId);
 		}
 	}
 
@@ -307,15 +335,20 @@ export class WorktreeServiceCoordinator implements ServiceExtensionToolRpc {
 		let declarations: readonly WorktreeServiceDeclaration[];
 		try { declarations = await this.deps.listActive(projectId); } catch { await this.stopNonDestructiveProject(projectId); return; }
 		if (!this.isCurrent(generation, projectId)) return;
+		const active = this.uniqueActive(declarations);
 		const scopes = new Map<string, Scope>();
-		for (const session of this.deps.sessions.list(projectId)) {
-			if (session.archived || session.projectId !== projectId) continue;
-			for (const component of this.eligibleComponents(projectId)) {
-				const scope = await this.resolveScope(session, component);
-				if (scope) scopes.set(scopeKey(scope), scope);
+		// Empty declarations are common today. Stop stale instances below, but do not
+		// spawn git/realpath work for every session on an invalidation that cannot start one.
+		if (active.length > 0) {
+			const components = this.eligibleComponents(projectId);
+			for (const session of this.deps.sessions.list(projectId)) {
+				if (session.archived || session.projectId !== projectId) continue;
+				for (const component of components) {
+					const scope = await this.resolveScope(session, component);
+					if (scope) scopes.set(scopeKey(scope), scope);
+				}
 			}
 		}
-		const active = this.uniqueActive(declarations);
 		const wanted = new Map<string, ServiceInstanceRef>();
 		for (const scope of scopes.values()) {
 			for (const declaration of active) {
@@ -356,7 +389,7 @@ export class WorktreeServiceCoordinator implements ServiceExtensionToolRpc {
 				this.deps.filesystem.realpath(candidate), this.deps.filesystem.realpath(topLevel), this.deps.filesystem.isDirectory(topLevel),
 			]);
 			if (!isDirectory || !(cwdFallback ? contains(canonicalTopLevel, canonicalCandidate) : contains(canonicalCandidate, canonicalTopLevel))) return undefined;
-			this.recordSessionRoot(session.id, session.projectId, canonicalTopLevel);
+			this.recordSessionRoot(session.id, session.projectId, canonicalTopLevel, candidate, topLevel);
 			return { projectId: session.projectId, component: requestedComponent, canonicalWorktreeRoot: canonicalTopLevel, worktreeKey: worktreeKey(canonicalTopLevel) };
 		} catch {
 			return undefined;
@@ -433,7 +466,7 @@ export class WorktreeServiceCoordinator implements ServiceExtensionToolRpc {
 	}
 
 	private async isReadyAndCurrent(generation: number, ref: ServiceInstanceRef): Promise<boolean> {
-		if (!this.isCurrent(generation, ref.projectId) || this.instances.get(instanceKey(ref)) !== ref) return false;
+		if (!this.isCurrent(generation, ref.projectId) || !this.instances.has(instanceKey(ref))) return false;
 		let declarations: readonly WorktreeServiceDeclaration[];
 		try { declarations = await this.deps.listActive(ref.projectId); } catch { return false; }
 		return declarations.filter(item => item.packId === ref.packId && item.spec.id === ref.serviceId).length === 1
@@ -456,31 +489,52 @@ export class WorktreeServiceCoordinator implements ServiceExtensionToolRpc {
 	private async stopInstance(ref: ServiceInstanceRef, removeData: boolean): Promise<void> {
 		const key = instanceKey(ref);
 		this.deps.scheduler.invalidate(key);
-		this.instances.delete(key);
-		try { await this.deps.runtime.stop(ref); } catch { /* cleanup is best effort */ }
+		const wasRunning = this.instances.delete(key);
+		if (wasRunning) {
+			try { await this.deps.runtime.stop(ref); } catch { /* cleanup is best effort */ }
+		}
 		if (removeData) {
 			this.knownInstances.delete(key);
 			await this.removeDataDir(ref);
 		}
 	}
 
-	private recordSessionRoot(sessionId: string, projectId: string, root: string): void {
-		const projects = this.sessionRoots.get(sessionId) ?? new Map<string, Set<string>>();
-		const roots = projects.get(projectId) ?? new Set<string>();
-		roots.add(root);
+	private recordSessionRoot(sessionId: string, projectId: string, root: string, candidate: string, topLevel: string): void {
+		for (const owners of [this.sessionRoots, this.activeSessionRoots]) {
+			const projects = owners.get(sessionId) ?? new Map<string, Set<string>>();
+			const roots = projects.get(projectId) ?? new Set<string>();
+			roots.add(root);
+			projects.set(projectId, roots);
+			owners.set(sessionId, projects);
+		}
+		const projects = this.sessionRootPaths.get(sessionId) ?? new Map<string, Map<string, Set<string>>>();
+		const roots = projects.get(projectId) ?? new Map<string, Set<string>>();
+		const candidates = roots.get(root) ?? new Set<string>();
+		candidates.add(candidate);
+		candidates.add(topLevel);
+		roots.set(root, candidates);
 		projects.set(projectId, roots);
-		this.sessionRoots.set(sessionId, projects);
+		this.sessionRootPaths.set(sessionId, projects);
 	}
 
-	private deleteSessionRoots(sessionId: string, projectId: string): void {
-		const projects = this.sessionRoots.get(sessionId);
+	private deleteActiveSessionRoots(sessionId: string, projectId: string): void {
+		const projects = this.activeSessionRoots.get(sessionId);
 		if (!projects) return;
 		projects.delete(projectId);
-		if (projects.size === 0) this.sessionRoots.delete(sessionId);
+		if (projects.size === 0) this.activeSessionRoots.delete(sessionId);
 	}
 
-	private hasOtherRootOwner(projectId: string, root: string): boolean {
-		for (const projects of this.sessionRoots.values()) if (projects.get(projectId)?.has(root)) return true;
+	private deleteEmptySessionRootMaps(sessionId: string, projectId: string): void {
+		const roots = this.sessionRoots.get(sessionId);
+		if (roots?.get(projectId)?.size === 0) roots.delete(projectId);
+		if (roots?.size === 0) this.sessionRoots.delete(sessionId);
+		const paths = this.sessionRootPaths.get(sessionId);
+		if (paths?.get(projectId)?.size === 0) paths.delete(projectId);
+		if (paths?.size === 0) this.sessionRootPaths.delete(sessionId);
+	}
+
+	private hasOtherRootOwner(owners: ReadonlyMap<string, Map<string, Set<string>>>, projectId: string, root: string): boolean {
+		for (const projects of owners.values()) if (projects.get(projectId)?.has(root)) return true;
 		return false;
 	}
 

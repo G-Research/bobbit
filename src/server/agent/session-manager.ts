@@ -2869,6 +2869,8 @@ export interface SessionTerminationInfo {
 }
 
 export type SessionTerminationListener = (sessionId: string, info: SessionTerminationInfo) => void | Promise<void>;
+/** Fired only after host worktree removal has been confirmed, never for a skipped or failed cleanup. */
+export type SessionWorktreeRemovedListener = (sessionId: string, info: { projectId?: string; worktreePaths: readonly string[] }) => void | Promise<void>;
 /** Fired only after a worktree-backed session has persisted its final coordinates. */
 export type SessionWorktreeReadyListener = (session: SessionInfo) => void | Promise<void>;
 
@@ -3075,6 +3077,7 @@ export class SessionManager {
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
 	private _terminationListeners: SessionTerminationListener[] = [];
+	private _worktreeRemovedListeners: SessionWorktreeRemovedListener[] = [];
 	private _creationListeners: Array<(session: SessionInfo) => void> = [];
 	private _worktreeReadyListeners: SessionWorktreeReadyListener[] = [];
 	private _extensionChannels?: ExtensionChannelServices;
@@ -3545,6 +3548,20 @@ export class SessionManager {
 	/** Subscribe to session termination events. Listeners settle in registration order. */
 	addTerminationListener(fn: SessionTerminationListener): void {
 		this._terminationListeners.push(fn);
+	}
+
+	/** Subscribe to authoritative host worktree-removal completions. */
+	addWorktreeRemovedListener(fn: SessionWorktreeRemovedListener): void {
+		this._worktreeRemovedListeners.push(fn);
+	}
+
+	private async notifyWorktreeRemoved(sessionId: string, projectId: string | undefined, worktreePaths: readonly string[]): Promise<void> {
+		if (worktreePaths.length === 0) return;
+		for (const listener of this._worktreeRemovedListeners) {
+			try { await listener(sessionId, { projectId, worktreePaths }); } catch (err) {
+				console.error(`[session ${sessionId}] worktree removal listener failed:`, err);
+			}
+		}
 	}
 
 	/** Subscribe to newly created visible sessions. Listeners are invoked after initial persistence. */
@@ -14922,6 +14939,7 @@ export class SessionManager {
 					continue;
 				}
 
+				await this.notifyWorktreeRemoved(item.sessionId, item.projectId, [item.path]);
 				const branchDeleted = await this.deleteArchivedWorktreeBranchIfAllowed(item);
 				recordResult({
 					...base,
@@ -15582,6 +15600,7 @@ export class SessionManager {
 		// are container-internal (start with /workspace) — those have no host counterpart.
 		// Skip delegates and non-sandboxed polyrepo leads — both borrow worktrees owned elsewhere.
 		const goalOwnsTeamLeadWorktrees = hasGoalOwnedTeamLeadWorktrees(ps);
+		const removedWorktreePaths: string[] = [];
 		if (ps.worktreePath && ps.repoPath && !ps.worktreePath.startsWith("/workspace") && !ps.delegateOf && !goalOwnsTeamLeadWorktrees) {
 			try {
 				const { cleanupWorktree, removeEmptyWorktreeSetContainer } = await import("../skills/git.js");
@@ -15600,7 +15619,7 @@ export class SessionManager {
 							try {
 								await fsp.access(wt);
 								console.error(`[session-manager] Component "${repo}" cleanup left worktree for ${ps.id}: ${wt}`);
-							} catch { /* removed */ }
+							} catch { removedWorktreePaths.push(wt); }
 						} catch (err) {
 							console.error(`[session-manager] Failed to clean up component "${repo}" worktree for ${ps.id}:`, err);
 						}
@@ -15612,6 +15631,7 @@ export class SessionManager {
 					}
 				} else if (!isWorktreePathReferencedByLiveSession(ps.worktreePath, allPersisted, { ignoreSessionId: ps.id })) {
 					await cleanupWorktree(ps.repoPath, ps.worktreePath, ps.branch, true, this.commandRunner, this.remoteGitPolicy);
+					try { await fsp.access(ps.worktreePath); } catch { removedWorktreePaths.push(ps.worktreePath); }
 				} else {
 					console.log(`[session-manager] Skipping shared worktree cleanup for purged session ${ps.id}: ${ps.worktreePath}`);
 				}
@@ -15621,6 +15641,7 @@ export class SessionManager {
 		} else if (goalOwnsTeamLeadWorktrees) {
 			console.log(`[session-manager] Skipping goal-owned component worktree cleanup for purged team lead ${ps.id}.`);
 		}
+		await this.notifyWorktreeRemoved(ps.id, ps.projectId, removedWorktreePaths);
 
 		// Remove color
 		try {
