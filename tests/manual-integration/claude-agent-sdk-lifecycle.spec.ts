@@ -20,6 +20,7 @@ const smokeEnvironmentKeys = [
 	"BOBBIT_DIR",
 	"BOBBIT_SECRETS_DIR",
 	"BOBBIT_AGENT_DIR",
+	"MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR",
 	"BOBBIT_SKIP_MCP",
 	"BOBBIT_SKIP_AIGW_DISCOVERY",
 	"BOBBIT_SKIP_TITLE_GEN",
@@ -40,11 +41,9 @@ function restoreSmokeEnvironment(environment: Map<string, string | undefined>): 
 	}
 }
 
-/** Configure the direct smoke without allowing ambient API credentials. */
-function configureDirectSmokeEnvironment(environment: Map<string, string | undefined>): void {
-	const approvedAgentDir = environment.get("BOBBIT_AGENT_DIR");
-	if (approvedAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;
-	else process.env.BOBBIT_AGENT_DIR = approvedAgentDir;
+/** Configure an opt-in SDK smoke without allowing ambient API credentials. */
+function configureManualSdkSmokeEnvironment(authDir: string): void {
+	process.env.BOBBIT_AGENT_DIR = authDir;
 	delete process.env.ANTHROPIC_API_KEY;
 	delete process.env.ANTHROPIC_AUTH_TOKEN;
 	process.env.BOBBIT_SKIP_MCP = "1";
@@ -165,6 +164,12 @@ function manualSdkModel(): string {
 	return configuredModel;
 }
 
+function manualSdkAuthDir(): string {
+	const authDir = process.env.MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR?.trim();
+	if (!authDir) throw new Error("Missing required environment variable: MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR.");
+	return authDir;
+}
+
 test("Claude Agent SDK provider-unavailable failure is bounded and sanitized without an alternative runtime", async () => {
 	test.setTimeout(15_000);
 	const nonce = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -195,19 +200,20 @@ test("Claude Agent SDK provider-unavailable failure is bounded and sanitized wit
 	}
 });
 
-test("Claude Agent SDK direct smoke setup removes ambient API credentials", () => {
+test("Claude Agent SDK manual smoke setup installs the explicit auth directory and removes ambient API credentials", () => {
 	const originalEnvironment = captureSmokeEnvironment();
 	try {
-		process.env.BOBBIT_AGENT_DIR = join(manualTmpRoot(), `approved-agent-dir-${process.pid}`);
+		const explicitManualAuthDir = join(manualTmpRoot(), `manual-sdk-auth-dir-${process.pid}`);
+		process.env.MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR = explicitManualAuthDir;
+		process.env.BOBBIT_AGENT_DIR = join(manualTmpRoot(), `playwright-worker-agent-dir-${process.pid}`);
 		process.env.ANTHROPIC_API_KEY = "ambient-api-key";
 		process.env.ANTHROPIC_AUTH_TOKEN = "ambient-auth-token";
-		const approvedEnvironment = captureSmokeEnvironment();
-		configureDirectSmokeEnvironment(approvedEnvironment);
+		configureManualSdkSmokeEnvironment(manualSdkAuthDir());
 		expect({
-			agentDirRetained: process.env.BOBBIT_AGENT_DIR === approvedEnvironment.get("BOBBIT_AGENT_DIR"),
+			explicitManualDirWins: process.env.BOBBIT_AGENT_DIR === explicitManualAuthDir,
 			apiKeyRemoved: process.env.ANTHROPIC_API_KEY === undefined,
 			authTokenRemoved: process.env.ANTHROPIC_AUTH_TOKEN === undefined,
-		}).toEqual({ agentDirRetained: true, apiKeyRemoved: true, authTokenRemoved: true });
+		}).toEqual({ explicitManualDirWins: true, apiKeyRemoved: true, authTokenRemoved: true });
 	} finally {
 		restoreSmokeEnvironment(originalEnvironment);
 	}
@@ -220,6 +226,7 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			"Set BOBBIT_RUN_CLAUDE_AGENT_SDK_SMOKE=1 to use a local Claude subscription.",
 		);
 		test.setTimeout(420_000);
+		const manualAuthDir = manualSdkAuthDir();
 
 		const nonce = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 		const root = join(manualTmpRoot(), `bobbit-claude-agent-sdk-smoke-${nonce}`);
@@ -242,11 +249,9 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			// must instead use Bobbit's locked OAuth resolver without copying config.
 			process.env.BOBBIT_DIR = bobbitDir;
 			process.env.BOBBIT_SECRETS_DIR = secretsDir;
-			// Keep the user's existing Bobbit OAuth connection discoverable; do not
-			// copy it into this isolated gateway or SDK config root.
-			const approvedAgentDir = originalEnvironment.get("BOBBIT_AGENT_DIR");
-			const hasApprovedAgentDir = typeof approvedAgentDir === "string" && approvedAgentDir.trim().length > 0;
-			configureDirectSmokeEnvironment(originalEnvironment);
+			// Use the explicit manual OAuth root, never Playwright's worker-owned
+			// BOBBIT_AGENT_DIR. Do not copy it into this isolated gateway or SDK root.
+			configureManualSdkSmokeEnvironment(manualAuthDir);
 
 			// Reset and set the directory before loading anything that can import the
 			// OAuth credential boundary. Those modules may cache startup-derived state.
@@ -269,14 +274,11 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			const port = await (gateway as any).start();
 			baseURL = `http://127.0.0.1:${port}`;
 
-			// Only assert the startup source/path if the operator explicitly supplied
-			// it. Keep diagnostics boolean-only so no local directory is exposed.
-			if (hasApprovedAgentDir && approvedAgentDir !== undefined) {
-				expect({
-					startupSourceIsExplicit: getAgentDirState().startup.source === "BOBBIT_AGENT_DIR",
-					startupResolvesToApprovedDir: globalAgentDir() === normalizeAgentDirInput(approvedAgentDir, bobbitDir),
-				}).toEqual({ startupSourceIsExplicit: true, startupResolvesToApprovedDir: true });
-			}
+			// Keep diagnostics boolean-only so no local directory is exposed.
+			expect({
+				startupSourceIsExplicit: getAgentDirState().startup.source === "BOBBIT_AGENT_DIR",
+				startupResolvesToManualDir: globalAgentDir() === normalizeAgentDirInput(manualAuthDir, bobbitDir),
+			}).toEqual({ startupSourceIsExplicit: true, startupResolvesToManualDir: true });
 
 			const api = (path: string, init: RequestInit = {}) => fetch(`${baseURL}${path}`, {
 				...init,
@@ -540,6 +542,7 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			"Set BOBBIT_RUN_CLAUDE_AGENT_SDK_SANDBOX_SMOKE=1 with Docker, a rebuilt bobbit-agent image, and a local Claude subscription.",
 		);
 		test.setTimeout(600_000);
+		const manualAuthDir = manualSdkAuthDir();
 		try {
 			execFileSync("docker", ["image", "inspect", "bobbit-agent"], { stdio: "ignore", timeout: 10_000 });
 		} catch {
@@ -568,18 +571,9 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			writeFileSync(join(bobbitDir, "state", "setup-complete"), "manual-sdk-sandbox-smoke\n");
 			process.env.BOBBIT_DIR = bobbitDir;
 			process.env.BOBBIT_SECRETS_DIR = join(root, ".secrets");
-			// Keep the user's Bobbit OAuth connection discoverable without copying it
-			// into the isolated gateway, sandbox volume, or SDK config root.
-			const existingAgentDir = originalEnvironment.get("BOBBIT_AGENT_DIR");
-			if (existingAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;
-			else process.env.BOBBIT_AGENT_DIR = existingAgentDir;
-			delete process.env.ANTHROPIC_API_KEY;
-			delete process.env.ANTHROPIC_AUTH_TOKEN;
-			process.env.BOBBIT_SKIP_MCP = "1";
-			process.env.BOBBIT_SKIP_AIGW_DISCOVERY = "1";
-			process.env.BOBBIT_SKIP_TITLE_GEN = "1";
-			process.env.BOBBIT_SKIP_WORKTREE_POOL = "1";
-			process.env.BOBBIT_NO_OPEN = "1";
+			// Use the explicit manual OAuth root, never Playwright's worker-owned
+			// BOBBIT_AGENT_DIR. Do not copy it into the gateway, sandbox, or SDK root.
+			configureManualSdkSmokeEnvironment(manualAuthDir);
 			// Reset and set the directory before loading anything that can import the
 			// OAuth credential boundary. Those modules may cache startup-derived state.
 			const { resetAgentDirStateForTests, setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
