@@ -794,7 +794,7 @@ A source repo's top level is a collection of pack directories. Each pack is one 
 Authored by the publisher; copied verbatim on install. Parsed and validated by `pack-manifest.ts`.
 
 ```yaml
-schema: 3                        # OPTIONAL. Schema 2 unlocks the extension keys below; schema 3 adds sandboxRequirements.
+schema: 3                        # OPTIONAL. Schema 2 unlocks the extension keys below; schema 3 adds sandbox-requirements.
 name: research-pack              # REQUIRED. /^[a-z0-9][a-z0-9-]*$/ — used as the install dir name.
 description: >                   # REQUIRED. One-paragraph summary shown in the browse UI.
   Deep-research role, web tools, and a literature-review skill.
@@ -818,7 +818,7 @@ contents:                        # REQUIRED. roles/tools/skills required; each M
   system-prompts: [review-rules] #   OPTIONAL — system-prompts/<name>.yaml basenames.
   workflows: [review]            #   OPTIONAL — reserved workflow basenames.
   # schema: 3 only:
-  sandboxRequirements: [python]  #   OPTIONAL — approved toolchain declarations; see extension-sandbox-requirements.md.
+  sandbox-requirements: [python] #   OPTIONAL — approved toolchain declarations; see extension-sandbox-requirements.md.
 routes:                          # OPTIONAL top-level block — Extension-Host pack routes.
   module: lib/routes.mjs         #   relative to pack.yaml, contained in the pack root.
   names:  [bundle, publish]      #   exported route-name allowlist.
@@ -859,8 +859,9 @@ extensions](service-extension-runtime.md).
   load providers and their `pack-activation` catalogue remains the old shape.
 - **`schema: 2`** unlocks the seven `contents` keys documented below and the
   `provides`/`requires` arrays.
-- **`schema: 3`** retains every schema-2 key and adds `contents.sandboxRequirements`.
-  It is supported and does not emit a forward-compatibility warning.
+- **`schema: 3`** retains every schema-2 key and adds canonical `contents.sandbox-requirements`
+  (`contents.sandboxRequirements` remains an input alias). It is supported and does not emit a
+  forward-compatibility warning.
 - **`schema > 3`** is *not* fatal: the pack loads the supported **schema-3 subset** and one
   forward-compatibility warning is recorded (`pack.yaml: schema N is newer than supported (3)`).
   This keeps a newer pack installable rather than vanishing — the supported keys still resolve,
@@ -897,8 +898,9 @@ each defaults to `[]` when absent:
 
 #### Schema-3 sandbox requirements
 
-Schema 3 adds `contents.sandboxRequirements` to the schema-2 contract. It names approved,
-manifest-listed toolchain declarations; see [Extension sandbox requirements](extension-sandbox-requirements.md).
+Schema 3 adds the canonical `contents.sandbox-requirements` key to the schema-2 contract.
+The legacy `contents.sandboxRequirements` spelling is accepted as an input alias. It names
+approved, manifest-listed toolchain declarations; see [Extension sandbox requirements](extension-sandbox-requirements.md).
 
 #### Minimal schema-2 example
 

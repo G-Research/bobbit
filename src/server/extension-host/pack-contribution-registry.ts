@@ -132,15 +132,8 @@ export type ProviderConfigOverrideLookup = (
 ) => ProviderConfigOverrideLookupResult;
 
 /** Project settings targets the contribution registry may activate. `pack` is a
- * control lookup only: persisted setting target identities remain provider/hook. */
-export type ProjectExtensionSettingsTargetKind = "pack" | "provider" | "hook" | "runtime";
-
-type ExtendedProjectExtensionSettingsLookup = (
-	projectId: string | undefined,
-	packId: string,
-	kind: ProjectExtensionSettingsTargetKind | "sandboxRequirement",
-	id?: string,
-) => ProjectExtensionSettingsReadResult | undefined;
+ * control lookup only; persisted setting targets are contribution-specific. */
+export type ProjectExtensionSettingsTargetKind = "pack" | "provider" | "hook" | "runtime" | "sandboxRequirement";
 
 /** Runtime-only effective settings for one project target. `values` can contain
  * secret bytes, so this contract must never be used by a public/API projection. */
@@ -459,10 +452,11 @@ export class PackContributionRegistry implements PackContributionResolver {
 			const resolvedSandboxRequirements: SandboxRequirementContribution[] = [];
 			for (const requirement of contrib.sandboxRequirements) {
 				if (disabledSandboxRequirements?.has(requirement.listName)) continue;
-				const projectSettings = readSandboxRequirementSettings(
+				const projectSettings = readProjectExtensionSettings(
 					this.projectExtensionSettings,
 					projectId,
 					contrib.packId,
+					"sandboxRequirement",
 					requirement.id,
 				);
 				if (projectSettings.state === "error") {
@@ -544,37 +538,19 @@ function authorizeChannelCapabilities(_entry: PackEntry, channels: ChannelContri
 	return channels;
 }
 
-/** Read and defensively validate a runtime-only project settings target. Storage
- * implementations may throw on a public or secret read; the registry must never
- * turn that into defaults, and must not expose a backend error's message/path. */
-function readSandboxRequirementSettings(
+/** Read and defensively validate one project settings target. Storage implementations
+ * may throw on a public or secret read; the registry must never turn that into
+ * defaults, and must not expose a backend error's message/path. */
+function readProjectExtensionSettings(
 	lookup: ProjectExtensionSettingsLookup | undefined,
 	projectId: string | undefined,
 	packId: string,
-	id: string,
-): ProjectExtensionSettingsReadResult {
-	// The live server wiring adds this target alongside the declaration catalogue.
-	// Keep this registry source-compatible with existing settings callbacks until
-	// then; an unwired callback yields the same fail-closed/absent semantics.
-	return readProjectExtensionSettings(
-		lookup as unknown as ExtendedProjectExtensionSettingsLookup | undefined,
-		projectId,
-		packId,
-		"sandboxRequirement",
-		id,
-	);
-}
-
-function readProjectExtensionSettings(
-	lookup: ProjectExtensionSettingsLookup | ExtendedProjectExtensionSettingsLookup | undefined,
-	projectId: string | undefined,
-	packId: string,
-	kind: ProjectExtensionSettingsTargetKind | "sandboxRequirement",
+	kind: ProjectExtensionSettingsTargetKind,
 	id?: string,
 ): ProjectExtensionSettingsReadResult {
 	if (!lookup) return { state: "absent" };
 	try {
-		const result = (lookup as ExtendedProjectExtensionSettingsLookup)(projectId, packId, kind, id);
+		const result = lookup(projectId, packId, kind, id);
 		if (!result || result.state === "absent") return { state: "absent" };
 		if (result.state === "error") {
 			return isStoreReadDiagnostic(result.diagnostic)

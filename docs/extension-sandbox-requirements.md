@@ -24,7 +24,7 @@ contents:
   tools: []
   skills: []
   entrypoints: []
-  sandboxRequirements: [analysis]
+  sandbox-requirements: [analysis]
 ```
 
 ```yaml
@@ -48,8 +48,10 @@ The declaration has exactly these top-level fields:
 | `config` | Optional flat, public extension-settings descriptor map. It uses the [project settings descriptor contract](extension-settings.md#descriptor-contract); secret fields are not allowed. |
 | `activation` | Optional `requiresConfig` gate for keys declared in `config`. |
 
-Manifest list names and declaration identifiers are bounded safe basenames. Catalogues,
-declaration files, profile lists, and the final aggregate plan are also bounded. Unknown
+The canonical authored catalogue key is `sandbox-requirements`; schema 3 also accepts
+`camelCase` `sandboxRequirements` as a compatibility alias. Manifest list names and declaration
+identifiers are bounded safe basenames. Catalogues, declaration files, profile lists, and the
+final aggregate plan are also bounded. Unknown
 top-level fields, malformed IDs, duplicate profiles or IDs, unknown profiles, invalid
 settings, and unsafe or unlisted files are rejected rather than partly interpreted. The
 exact limits and profile vocabulary are core implementation details so they can be

@@ -168,8 +168,8 @@ export function validateManifest(
 	if (schema < 2 && "mcp" in c) {
 		return fail("pack.yaml: contents.mcp is not allowed (MCP installs are out of scope in MVP)");
 	}
-	if (schema < 3 && "sandboxRequirements" in c) {
-		return fail("pack.yaml: contents.sandboxRequirements requires schema 3");
+	if (schema < 3 && ("sandbox-requirements" in c || "sandboxRequirements" in c)) {
+		return fail("pack.yaml: contents.sandbox-requirements requires schema 3");
 	}
 	const roles = asStringArray(c.roles);
 	const tools = asStringArray(c.tools);
@@ -236,15 +236,19 @@ export function validateManifest(
 		systemPrompts = parsedSystemPrompts;
 	}
 	if (schema >= 3) {
-		const parsedSandboxRequirements = parseContentsBasenames("sandboxRequirements", c.sandboxRequirements);
+		// Authored catalogues use the kebab-case key. Keep the earlier camelCase
+		// spelling as an input alias for generic YAML serializers; the parsed type
+		// remains camelCase like the other TypeScript contribution fields.
+		const rawSandboxRequirements = c["sandbox-requirements"] ?? c.sandboxRequirements;
+		const parsedSandboxRequirements = parseContentsBasenames("sandbox-requirements", rawSandboxRequirements);
 		if (parsedSandboxRequirements === null) return null;
 		if (parsedSandboxRequirements.length > MAX_SANDBOX_REQUIREMENT_CATALOGUE_ROWS_PER_PACK) {
-			return fail(`pack.yaml: contents.sandboxRequirements may contain at most ${MAX_SANDBOX_REQUIREMENT_CATALOGUE_ROWS_PER_PACK} entries`);
+			return fail(`pack.yaml: contents.sandbox-requirements may contain at most ${MAX_SANDBOX_REQUIREMENT_CATALOGUE_ROWS_PER_PACK} entries`);
 		}
 		for (const entry of parsedSandboxRequirements) {
 			if (!isValidSandboxRequirementListName(entry)) {
 				return fail(
-					`pack.yaml: contents.sandboxRequirements entry ${JSON.stringify(entry)} must be a lowercase, bounded basename ` +
+					`pack.yaml: contents.sandbox-requirements entry ${JSON.stringify(entry)} must be a lowercase, bounded basename ` +
 						`(max ${MAX_SANDBOX_REQUIREMENT_LIST_NAME_LENGTH} characters / ${MAX_SANDBOX_REQUIREMENT_LIST_NAME_UTF8_BYTES} UTF-8 bytes)`,
 				);
 			}
