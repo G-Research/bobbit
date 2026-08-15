@@ -388,8 +388,11 @@ export async function tryHandleNestedGoalRoute(
 		const pausedIds = new Set<string>(targets.map(g => g.id));
 		let count = 0;
 		for (const g of targets) {
-			await applyOperatorPause(getGoalManagerForGoal(g.id), g.id, g.paused === true);
-			if (!g.paused) count++;
+			// GoalManager may mutate this persisted target in place, so snapshot the
+			// idempotency/count decision before its authoritative paused write.
+			const wasPaused = g.paused === true;
+			await applyOperatorPause(getGoalManagerForGoal(g.id), g.id, wasPaused);
+			if (!wasPaused) count++;
 		}
 		for (const s of sessionManager.getAllSessionsRaw()) {
 			if (!s.goalId || !pausedIds.has(s.goalId)) continue;
