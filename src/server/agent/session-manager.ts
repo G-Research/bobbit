@@ -5748,19 +5748,19 @@ export class SessionManager {
 	): ReliableQueuedMessage {
 		const existing = this.reliableIntentById(session, row.id);
 		if (existing) return existing as ReliableQueuedMessage;
-		const queue = session.promptQueue as any;
-		if (opts?.front && typeof queue.enqueueExistingAtFront === "function") queue.enqueueExistingAtFront(row);
-		else if (!opts?.front && typeof queue.enqueueExisting === "function") queue.enqueueExisting(row);
-		else {
-			const previousIds = session.promptQueue.toArray().map((item) => item.id);
-			const inserted = opts?.front
-				? session.promptQueue.enqueueAtFront(row.text, row)
-				: session.promptQueue.enqueue(row.text, row);
-			Object.assign(inserted, row);
-			// Legacy PromptQueue eagerly prioritizes isSteered. Reliable lanes own order.
-			session.promptQueue.reorderByIds(opts?.front ? [row.id, ...previousIds] : [...previousIds, row.id]);
+		if (opts?.front) {
+			return session.promptQueue.enqueueExistingAtFront(row) as ReliableQueuedMessage;
 		}
-		return row;
+		// Admission must create the durable row through the queue's normal enqueue
+		// boundary. Besides retaining its stable intent ID, this preserves the legacy
+		// acceptance-row ownership relied on by poison repair when a later replacement
+		// must recover the exact first accepted occurrence.
+		const previousIds = session.promptQueue.toArray().map((item) => item.id);
+		const inserted = session.promptQueue.enqueue(row.text, { intentId: row.id }) as ReliableQueuedMessage;
+		Object.assign(inserted, row);
+		// Legacy PromptQueue eagerly prioritizes isSteered. Reliable lanes own order.
+		session.promptQueue.reorderByIds([...previousIds, row.id]);
+		return inserted;
 	}
 
 	private makeReliableIntentRow(
@@ -7722,11 +7722,16 @@ export class SessionManager {
 					return;
 				}
 
-				// A proven rejection must retain the historical direct-recovery path,
-				// even after server work gained a reliable queue row. Verifier-owned
-				// rows also treat an unacknowledged transport throw as recoverable: their
-				// receipt-bound, bounded retry contract cannot leave them uncertain.
-				if (definiteRejection || reliableRow.verifierOwned === true) {
+				// Server-owned automatic rows retain the established direct recovery
+				// contract. Poison repair is stricter: its accepted user action must stop
+				// after an unobserved rejection until a later canonical turn releases its
+				// exact row. Verifier receipts likewise cannot be left uncertain because
+				// their receipt has a bounded retry lifecycle.
+				const poisonOwned = session.poisonRecoveryPromptDispatchQueueIds?.includes(reliableRow.id) === true;
+				const retainDirectRecovery = poisonOwned
+					|| reliableRow.verifierOwned === true
+					|| reliableRow.source !== "user";
+				if (retainDirectRecovery) {
 					if (index !== -1) session.inFlightSteerTexts!.splice(index, 1);
 					this.cancelPromptAuthorDispatch(session, prepared);
 					this.enqueueReliableIntent(session, {
@@ -7754,8 +7759,9 @@ export class SessionManager {
 							suppressTitleGen: reliableRow.suppressTitleGen,
 						}],
 						error instanceof Error ? error.message : String(error),
-						reliableRow.verifierOwned === true ? "reliable verifier prompt" : "reliable prompt",
+						reliableRow.verifierOwned === true ? "reliable verifier prompt" : "reliable poison prompt",
 						[reliableRow.id],
+						poisonOwned,
 					);
 					throw error;
 				}
@@ -7772,6 +7778,13 @@ export class SessionManager {
 						dispatchEpoch: prepared.dispatchEpoch,
 					}, { front: true });
 					this.rollbackRejectedPromptDispatch(session);
+					this.broadcastQueue(session);
+					// Browser-originated stable rows preserve the outbox-only admission
+					// result after a proven no-start rejection. Server-owned automatic
+					// prompts retain their established rejection contract for callers that
+					// apply their own bounded recovery policy.
+					if (reliableRow.source !== "user") throw error;
+					return;
 				} else if (index !== -1) {
 					attempt.state = "uncertain";
 					attempt.retryable = false;
@@ -7880,6 +7893,15 @@ export class SessionManager {
 			if (!reliableNext.suppressTitleGen) this.tryGenerateTitleFromPrompt(session.id, reliableNext.text);
 			const promptSource = reliableNext.source ?? "user";
 			const promptAuthor = resolveAcceptedPromptAuthor(promptSource, reliableNext.author);
+			if (session.poisonRecoveryPromptDispatchQueueIds?.includes(reliableNext.id)) {
+				// A recovered poison occurrence may be redriven from the reliable lane
+				// without a fresh agent_start. Rotate the prior terminal fence before
+				// dispatch so its eventual terminal can release the next queued row.
+				session.abortShapedTerminal = undefined;
+				session.assistantTerminalIdentities = undefined;
+				session.lastAssistantTerminalIdentity = undefined;
+				session.turnTerminalHandled = false;
+			}
 			void this.dispatchDirectPrompt(
 				session,
 				reliableNext.text,
