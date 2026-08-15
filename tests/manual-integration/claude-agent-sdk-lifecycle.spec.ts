@@ -201,6 +201,44 @@ function countManualTurnEvent(counts: Record<ManualTurnEventType, number>, event
 	counts[type] = Math.min(counts[type] + 1, 1_000_000);
 }
 
+type ManualCanonicalToolCategory = "read" | "ask_user_choices" | "other";
+type ManualCanonicalToolExecutionCounts = Record<ManualCanonicalToolCategory, { starts: number; ends: number }>;
+
+function createManualCanonicalToolExecutionCounts(): ManualCanonicalToolExecutionCounts {
+	return {
+		read: { starts: 0, ends: 0 },
+		ask_user_choices: { starts: 0, ends: 0 },
+		other: { starts: 0, ends: 0 },
+	};
+}
+
+/** Classify tool names to fixed diagnostic categories without retaining tool data. */
+function manualCanonicalToolCategory(toolName: unknown): ManualCanonicalToolCategory {
+	return toolName === "read" || toolName === "ask_user_choices" ? toolName : "other";
+}
+
+/** Count only canonical tool boundaries; never inspect arguments, results, content, or IDs. */
+function countManualCanonicalToolExecution(counts: ManualCanonicalToolExecutionCounts, event: unknown): void {
+	if (!event || typeof event !== "object") return;
+	const { type, toolName } = event as { type?: unknown; toolName?: unknown };
+	if (type !== "tool_execution_start" && type !== "tool_execution_end") return;
+	const category = manualCanonicalToolCategory(toolName);
+	const boundary = type === "tool_execution_start" ? "starts" : "ends";
+	counts[category][boundary] = Math.min(counts[category][boundary] + 1, 1_000_000);
+}
+
+function assertManualCanonicalToolExecution(counts: ManualCanonicalToolExecutionCounts): void {
+	if (
+		counts.read.starts < 1 || counts.read.ends < 1
+		|| counts.ask_user_choices.starts < 1 || counts.ask_user_choices.ends < 1
+	) {
+		throw new Error(JSON.stringify({
+			code: "MANUAL_CANONICAL_TOOL_EXECUTION_INCOMPLETE",
+			counts,
+		}));
+	}
+}
+
 function diagnosticBoolean(read: () => unknown): boolean {
 	try { return read() === true; } catch { return false; }
 }
@@ -228,6 +266,19 @@ test("Claude Agent SDK manual timeout event diagnostics retain only fixed event 
 	expect(Object.keys(counts)).toEqual(manualTurnEventTypes);
 	expect(counts.agent_start).toBe(1);
 	expect(counts.other).toBe(1);
+});
+
+test("Claude Agent SDK manual canonical tool diagnostics retain fixed categories and counts", () => {
+	const counts = createManualCanonicalToolExecutionCounts();
+	countManualCanonicalToolExecution(counts, { type: "tool_execution_start", toolName: "read", args: { private: "must-not-appear" } });
+	countManualCanonicalToolExecution(counts, { type: "tool_execution_end", toolName: "read", result: { private: "must-not-appear" } });
+	countManualCanonicalToolExecution(counts, { type: "tool_execution_start", toolName: "ask_user_choices", toolCallId: "must-not-appear" });
+	countManualCanonicalToolExecution(counts, { type: "tool_execution_end", toolName: "unexpected_tool", content: "must-not-appear" });
+	expect(counts).toEqual({
+		read: { starts: 1, ends: 1 },
+		ask_user_choices: { starts: 1, ends: 0 },
+		other: { starts: 0, ends: 1 },
+	});
 });
 
 test("Claude Agent SDK manual terminal diagnostics expose only route-safe categories", async () => {
@@ -559,18 +610,25 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			await runTurn(slash.originalText, "Bobbit-owned slash prompt", { modelText: slash.modelText, skillExpansions: slash.expansions });
 
 			// The model is asked to make one safe allowed canonical call and one ask
-			// call. Settle the manager-owned card without exposing arguments/results.
+			// call. Count only fixed tool categories while the manager-owned card settles.
 			const toolTurnVersion = session.agentObservedTurnVersion ?? 0;
-			await gateway.sessionManager.enqueuePrompt(created.id, "Use Bobbit read on README.md, then use Bobbit ask_user_choices for one harmless lifecycle confirmation.", { source: "user" });
-			const permission = await waitFor(
-				() => gateway!.sessionManager.getPendingToolPermission(created.id),
-				"canonical ask-tool permission card",
-				90_000,
-			);
-			expect(permission.toolName === "ask_user_choices" && permission.group === "Ask").toBe(true);
-			await gateway.sessionManager.grantToolPermission(created.id, "ask_user_choices", "tool", "Ask", "one-time", permission.id);
-			await waitFor(() => (session.agentObservedTurnVersion ?? 0) > toolTurnVersion ? true : undefined, "canonical Bobbit tool turn", 120_000);
-			await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined, "canonical Bobbit tool turn to settle", 120_000);
+			const canonicalToolExecution = createManualCanonicalToolExecutionCounts();
+			const unsubscribeCanonicalToolExecution = session.rpcClient.onEvent(event => countManualCanonicalToolExecution(canonicalToolExecution, event));
+			try {
+				await gateway.sessionManager.enqueuePrompt(created.id, "Use Bobbit read on README.md, then use Bobbit ask_user_choices for one harmless lifecycle confirmation.", { source: "user" });
+				const permission = await waitFor(
+					() => gateway!.sessionManager.getPendingToolPermission(created.id),
+					"canonical ask-tool permission card",
+					90_000,
+				);
+				expect(permission.toolName === "ask_user_choices" && permission.group === "Ask").toBe(true);
+				await gateway.sessionManager.grantToolPermission(created.id, "ask_user_choices", "tool", "Ask", "one-time", permission.id);
+				await waitFor(() => (session.agentObservedTurnVersion ?? 0) > toolTurnVersion ? true : undefined, "canonical Bobbit tool turn", 120_000);
+				await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined, "canonical Bobbit tool turn to settle", 120_000);
+			} finally {
+				unsubscribeCanonicalToolExecution();
+			}
+			assertManualCanonicalToolExecution(canonicalToolExecution);
 			let transcript = await gateway.sessionManager.getMessagesSnapshotBase(session);
 			expect(transcript.success && hasRootCanonicalToolCall(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, transcript.data), "read")).toBe(true);
 			expect(transcript.success && hasRootCanonicalToolCall(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, transcript.data), "ask_user_choices")).toBe(true);
@@ -807,12 +865,19 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined, "sandbox SDK prompt to settle", 120_000);
 
 			const toolTurnVersion = session.agentObservedTurnVersion ?? 0;
-			await gateway.sessionManager.enqueuePrompt(created.id, "Use Bobbit read on README.md, then use Bobbit ask_user_choices for one harmless sandbox lifecycle confirmation.", { source: "user" });
-			const permission = await waitFor(() => gateway!.sessionManager.getPendingToolPermission(created.id), "sandbox canonical ask-tool permission card", 90_000);
-			expect(permission.toolName === "ask_user_choices" && permission.group === "Ask").toBe(true);
-			await gateway.sessionManager.grantToolPermission(created.id, "ask_user_choices", "tool", "Ask", "one-time", permission.id);
-			await waitFor(() => (session.agentObservedTurnVersion ?? 0) > toolTurnVersion ? true : undefined, "sandbox canonical Bobbit tool turn", 120_000);
-			await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined, "sandbox canonical Bobbit tool turn to settle", 120_000);
+			const sandboxCanonicalToolExecution = createManualCanonicalToolExecutionCounts();
+			const unsubscribeSandboxCanonicalToolExecution = session.rpcClient.onEvent(event => countManualCanonicalToolExecution(sandboxCanonicalToolExecution, event));
+			try {
+				await gateway.sessionManager.enqueuePrompt(created.id, "Use Bobbit read on README.md, then use Bobbit ask_user_choices for one harmless sandbox lifecycle confirmation.", { source: "user" });
+				const permission = await waitFor(() => gateway!.sessionManager.getPendingToolPermission(created.id), "sandbox canonical ask-tool permission card", 90_000);
+				expect(permission.toolName === "ask_user_choices" && permission.group === "Ask").toBe(true);
+				await gateway.sessionManager.grantToolPermission(created.id, "ask_user_choices", "tool", "Ask", "one-time", permission.id);
+				await waitFor(() => (session.agentObservedTurnVersion ?? 0) > toolTurnVersion ? true : undefined, "sandbox canonical Bobbit tool turn", 120_000);
+				await waitFor(() => gateway!.sessionManager.getSession(created.id)?.status === "idle" ? true : undefined, "sandbox canonical Bobbit tool turn to settle", 120_000);
+			} finally {
+				unsubscribeSandboxCanonicalToolExecution();
+			}
+			assertManualCanonicalToolExecution(sandboxCanonicalToolExecution);
 			let sandboxTranscript = await gateway.sessionManager.getMessagesSnapshotBase(session);
 			expect(sandboxTranscript.success && hasRootCanonicalToolCall(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data), "read")).toBe(true);
 			expect(sandboxTranscript.success && hasRootCanonicalToolCall(gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data), "ask_user_choices")).toBe(true);
