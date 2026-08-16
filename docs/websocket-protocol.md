@@ -14,7 +14,9 @@ The goal dashboard uses `wss://<host>:<port>/ws/viewer` when no agent session is
 
 After `auth_ok`, a viewer socket is authenticated but not associated with a session and is not added to `SessionManager` clients. It accepts only viewer subscription messages and `ping`; messages outside that set have no effect.
 
-Goal-scoped broadcasts (`gate_*`, `team_*`, `goal_*`) reach viewer sockets only when they are subscribed to the matching `goalId`. Session sockets for agents that belong to that goal still receive those same events. Search/index broadcasts (`index:*`) are project broadcasts rather than goal broadcasts, so they still reach authenticated viewer sockets regardless of goal subscription.
+Goal-scoped broadcasts, including `gate_*`, `team_*`, and targeted `goal_*` events, reach viewer sockets only when they are subscribed to the matching `goalId`. Session sockets for agents that belong to that goal still receive those same events. Search/index broadcasts (`index:*`) are project broadcasts rather than goal broadcasts, so they still reach authenticated viewer sockets regardless of goal subscription.
+
+> **Known limitation:** the current UI does not send `unsubscribe_goal` or `clear_goal_subscriptions` while navigating between goals. A viewer socket can therefore retain prior goal subscriptions until it closes. This lifecycle issue is separate from `goal_state_changed` delivery.
 
 ### Gateway readiness and retry
 
@@ -36,6 +38,12 @@ The frame contains no session, project, or credential information and is sent be
 Gateway boot also returns HTTP `503` with `Retry-After: 1` for mounted HTTP routes until the same readiness boundary opens. Search indexing does not delay this boundary because its worker starts lazily; see [Search worker and persistence](search-worker-persistence.md#diagnostics-and-session-admission).
 
 Session-list invalidations (`session_created`, `sessions_changed`, and `session_removed`) are global. The browser keeps a lightweight `/ws/viewer` connection open even when no session `RemoteAgent` is active, so desktop sidebars, mobile landing pages, and dashboards can refresh `GET /api/sessions` promptly instead of waiting for the periodic poll. Session sockets also handle the same invalidations for already-open chats. Every frame remains a refresh trigger and the session list REST response remains authoritative. A `sessions_changed` frame may additionally carry `sessionId` and `user_tags` so an idle client can patch a loaded row before refresh; a client with a newer queued pin intent defers that additive payload until its mutation queue settles.
+
+### Goal-state invalidation audience
+
+`goal_state_changed` invalidates the browser's goal and session-list state after a persisted goal lifecycle or setup transition. Direct goal-list invalidations use `broadcastToUi`: they reach authenticated UI principals (`admin` or `localhost`) and do not reach sandbox-token sockets for unrelated goals. This gives browser sidebars and dashboards the same complete goal-list view without exposing it to scoped sandbox connections.
+
+Goal-scoped runtime paths continue to use `broadcastToGoal`, so a session or subscribed viewer still receives the state change for its own goal where that targeted delivery is required. The UI handles a `goal_state_changed` frame through the existing session-list push debounce (`scheduleSessionListRefreshFromPush()`). Bursts coalesce into one authoritative REST refresh without changing the debounce window, keeping sidebars and dashboards promptly fresh while avoiding redundant fetches.
 
 ## Frame size routing and limits
 
@@ -446,7 +454,7 @@ semantics and the shared clamp order.
 | `gate_verification_complete` | `goalId`, `gateId`, `signalId`, `status` | All verification steps finished |
 | `gate_status_changed` | `goalId`, `gateId`, `status` | Gate status changed |
 | `gate_reset` | `goalId`, `gateId`, `affectedGateIds`, `changedGateIds`, `unchangedGateIds`, `reopen` | A gate reset invalidated the requested gate and downstream dependents. `reopen` is the lifecycle outcome described below. Clients should refresh gate summaries for all affected ids. |
-| `goal_state_changed` | `goalId` | A persisted goal state or setup-lifecycle transition changed. Treat it as an invalidation and refresh goal-list state, including retry transitions that clear stale setup errors and controls; reset-driven reopening emits this globally only when it performs `complete` → `in-progress`. |
+| `goal_state_changed` | `goalId` | A persisted goal state or setup-lifecycle transition changed. UI-principal recipients treat it as a goal-list invalidation; bursts use the existing session-list push debounce. See [Goal-state invalidation audience](#goal-state-invalidation-audience). |
 | `goal_setup_complete` | `goalId` | Worktree setup was verified ready. It does not guarantee that a Team Lead or team has started. |
 | `goal_setup_error` | `goalId`, `error` | Current setup failed; starting remains blocked until a retry or recovery reaches verified ready. |
 | `team_agent_spawned` | `goalId`, `sessionId`, `role`, `name` | Team agent was spawned |
@@ -484,7 +492,7 @@ A new successful reset emits `gate_reset`, including a no-op retry after a previ
 
 A retry that resumes a retained write-ahead intent is different: its job is to finish runtime rearm or intent cleanup after the goal and gates already committed. It returns the original affected scope and reopen outcome through REST, but suppresses duplicate `gate_status_changed`, `gate_reset`, `goal_state_changed`, and lead notification. This makes transport effects idempotent as well as persistence.
 
-On an actual reopen, `goal_state_changed { goalId }` is broadcast globally so sidebar, dashboard, status widget, and other browser contexts refresh their goal-list cache immediately. Goal-scoped `gate_status_changed` and `gate_reset` events update gate views. The widget's own viewer subscription refreshes goals, gates, and active verifications on `goal_state_changed`, so an external reopen reconciles even without an active chat socket.
+On an actual reopen, `goal_state_changed { goalId }` is sent to UI principals so sidebar, dashboard, status widget, and other browser contexts refresh their goal-list cache promptly. Sandbox-token sockets do not receive this unrelated goal-list invalidation; unchanged goal-scoped delivery preserves own-goal runtime updates. Goal-scoped `gate_status_changed` and `gate_reset` events update gate views. The widget's own viewer subscription refreshes goals, gates, and active verifications on `goal_state_changed`, so an external reopen reconciles even without an active chat socket.
 
 The widget does not treat completion as a permanent local latch. While its popover is open it mirrors the authoritative app goal cache, so an external `team_complete` observed by the normal goal refresh/poll switches it to completed; the same mirror can later switch back on reopen. For an initiating reset it applies the REST `reopen.state` and affected pending gates immediately, then performs authoritative goal/gate/verification reads. The response is therefore a latency optimization, not a second source of lifecycle truth.
 
