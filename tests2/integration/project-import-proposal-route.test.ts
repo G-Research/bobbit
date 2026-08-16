@@ -2,6 +2,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { expect, test } from "./_e2e/in-process-harness.js";
 import { apiFetch } from "./_e2e/e2e-setup.js";
+import { projectImportApplicationKey, projectImportSnapshotSha256 } from "../../src/server/proposals/project-import-proposal-application.ts";
+import { proposalDraftOwnerId } from "../../src/server/proposals/proposal-seed-service.ts";
+import { readSnapshot } from "../../src/server/proposals/proposal-files.ts";
+function auditRows(stateDir: string, projectId: string, importId: string): Array<{ auditKey?: string }> {
+	const file = path.join(stateDir, "session-context-trace", "project-import", projectId, `${importId}.jsonl`);
+	return fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line) as { auditKey?: string }) : [];
+}
 
 const PACK_ID = `project-import-route-proof-${process.pid}-${Date.now()}`;
 const EFFECTS = [
@@ -125,6 +132,52 @@ test.describe("project-import proposal route — canonical effects", () => {
 		} finally {
 			await Promise.all(projectIds.map(projectId => apiFetch(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => {})));
 			for (const root of roots) fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("crash-restart adopts an exact applying import claim once without context warmup", async ({ gateway }) => {
+		const root = path.join(gateway.bobbitDir, `route-recovery-${Date.now()}`);
+		fs.mkdirSync(root, { recursive: true });
+		let projectId = "";
+		try {
+			const created = await apiFetch("/api/projects", { method: "POST", body: JSON.stringify({ name: "route-recovery", rootPath: root, components: [{ name: "app", repo: "." }], __e2e_seed_skip__: true }) });
+			expect(created.status, await created.clone().text()).toBe(201);
+			projectId = (await json<{ id: string }>(created)).id;
+			expect((await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/extension-grants`, { method: "PUT", body: JSON.stringify({ packId: PACK_ID, hookId: "route-role", capability: "decide" }) })).status).toBe(200);
+			const requests = await json<{ requests: Array<{ id: string }> }>(await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-decision-requests?state=pending`));
+			const requestId = requests.requests.find(item => item.id)?.id;
+			expect(requestId).toBeTruthy();
+			expect((await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-decision-requests/${encodeURIComponent(requestId!)}/answer`, { method: "POST", body: JSON.stringify({ value: { kind: "option", value: "apply" } }) })).status).toBe(200);
+			const cookie = await operatorCookie();
+			const [draft] = await proposals(projectId, cookie);
+			expect(draft).toMatchObject({ requestId, proposalType: "role" });
+			// Claim through the real project owner, then terminate before the canonical effect.
+			const context = gateway.projectContextManager.getOrCreate(projectId)!;
+			const record = context.decisionRequestStore.get(requestId!);
+			const importId = record.delivery.importId;
+			const owner = proposalDraftOwnerId({ kind: "project-import", projectId, importId, requestId: requestId! });
+			const snapshot = await readSnapshot(path.join(gateway.bobbitDir, "state"), owner, "role", draft!.rev);
+			expect(snapshot).toBeTruthy();
+			const identity = { projectId, importId, requestId: requestId!, type: "role" as const, rev: draft!.rev, snapshotSha256: projectImportSnapshotSha256(snapshot!), key: projectImportApplicationKey({ projectId, importId, requestId: requestId!, type: "role", rev: draft!.rev, snapshot: snapshot! }) };
+			expect(context.decisionRequestStore.claimImportProposal(identity, new Date().toISOString()).claimed).toBe(true);
+			await gateway.crash();
+			await gateway.restart();
+			// Recovery happens during boot: this is the first request/context access after restart.
+			expect((await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-proposals`, { headers: { Cookie: cookie } })).status).toBe(200);
+			const restarted = gateway.projectContextManager.getOrCreate(projectId)!;
+			const settled = restarted.decisionRequestStore.get(requestId!);
+			expect(settled.proposal).toMatchObject({ status: "accepted", application: { key: identity.key } });
+			expect(settled.proposal.auditedAt).toEqual(expect.any(String));
+			expect(restarted.roleStore.get("route-import-role")).toMatchObject({ label: "Route import role" });
+			expect(auditRows(path.join(gateway.bobbitDir, "state"), projectId, importId).filter(entry => entry.auditKey === identity.key)).toHaveLength(1);
+			await gateway.crash();
+			await gateway.restart();
+			const again = gateway.projectContextManager.getOrCreate(projectId)!;
+			expect(again.roleStore.get("route-import-role")).toMatchObject({ label: "Route import role" });
+			expect(auditRows(path.join(gateway.bobbitDir, "state"), projectId, importId).filter(entry => entry.auditKey === identity.key)).toHaveLength(1);
+		} finally {
+			if (projectId) await apiFetch(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => {});
+			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});
 });

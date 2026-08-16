@@ -121,6 +121,10 @@ export interface GatewayFixture {
 	connectWs(suffix: string, opts?: { goalId?: string; clientKind?: string }): Promise<WebSocket>;
 	/** Snapshot live entity counts (used by the leak detector). */
 	countEntities(): EntityCounts;
+	/** Stop the live process while preserving its durable state for recovery tests. */
+	crash(): Promise<void>;
+	/** Start a fresh gateway process over the preserved durable state. */
+	restart(): Promise<void>;
 	/** Re-create/reseed the default project after a test deletes or mutates it. */
 	restoreDefaultProject(): Promise<void>;
 	/** Restore process-global runtime singletons after fork-mate tests reset them. */
@@ -319,34 +323,27 @@ async function boot(): Promise<BootedGateway> {
 	};
 	if (useFakeCommandStep) console.log(`[tests2/gateway] fork ${process.pid}: injecting FAKE verification command-step runner (no shell spawns)`);
 
-	const gw = createGateway({
-		host: "127.0.0.1",
-		port: 0,
-		portExplicit: true,
-		authToken: token,
-		defaultCwd: bobbitDir,
-		forceAuth: true,
-		agentCliPath: MOCK_AGENT,
-		// Explicit config replaces the legacy env flags. Remote/network fencing
-		// is enforced structurally by the fenced CommandRunner/fetch above; these
-		// keep the in-process git helpers on the no-remote fast path too.
-		skipMcp: true,
-		skipWorktreePool: true,
-		skipTitleGeneration: true,
-		skipRemotePush: true,
-		skipNonLocalRemoteGit: true,
-		builtinsDir: BUILTINS_DIR,
-		builtinPacksDir: prepareBuiltinPacksDir(bobbitDir),
-	}, deps);
-
-	// Suppress the startup internet probe / aigw auto-discovery without env flags.
-	// createGateway seeds these from env (all false here); override before start().
-	configureAigwRuntimeFlags({ skipAigwDiscovery: true, testNoExternal: true, e2e: true });
-
-	const port = await gw.start();
-	const baseURL = `http://127.0.0.1:${port}`;
-	const wsBase = `ws://127.0.0.1:${port}`;
-	writeFileSync(join(stateDir, "gateway-url"), baseURL, "utf-8");
+	const gatewayOptions = {
+		host: "127.0.0.1", port: 0, portExplicit: true, authToken: token,
+		defaultCwd: bobbitDir, forceAuth: true, agentCliPath: MOCK_AGENT,
+		// Explicit config replaces legacy env flags; the injected deps fence IO.
+		skipMcp: true, skipWorktreePool: true, skipTitleGeneration: true,
+		skipRemotePush: true, skipNonLocalRemoteGit: true,
+		builtinsDir: BUILTINS_DIR, builtinPacksDir: prepareBuiltinPacksDir(bobbitDir),
+	};
+	const startGateway = async (): Promise<any> => {
+		// Suppress startup discovery without test-only environment flags.
+		configureAigwRuntimeFlags({ skipAigwDiscovery: true, testNoExternal: true, e2e: true });
+		const next = createGateway(gatewayOptions, deps);
+		const port = await next.start();
+		baseURL = `http://127.0.0.1:${port}`;
+		wsBase = `ws://127.0.0.1:${port}`;
+		writeFileSync(join(stateDir, "gateway-url"), baseURL, "utf-8");
+		return next;
+	};
+	let baseURL = "";
+	let wsBase = "";
+	let gw = await startGateway();
 
 	const defaultProjectId = await registerDefaultProject(baseURL, token, defaultProjectRoot);
 	await seedDefaultWorkflows(baseURL, token, defaultProjectId);
@@ -379,17 +376,17 @@ async function boot(): Promise<BootedGateway> {
 	const authHeaders = (extra?: HeadersInit): HeadersInit => ({ Authorization: `Bearer ${token}`, ...(extra ?? {}) });
 
 	const fixture: BootedGateway = {
-		baseURL,
-		wsBase,
+		get baseURL() { return baseURL; },
+		get wsBase() { return wsBase; },
 		token,
 		bobbitDir,
 		get defaultProjectId() { return currentDefaultProjectId; },
 		clock,
-		sessionManager: gw.sessionManager,
-		teamManager: (gw as any).teamManager,
-		orchestrationCore: (gw as any).orchestrationCore,
-		bgProcessManager: gw.bgProcessManager,
-		projectContextManager: gw.projectContextManager,
+		get sessionManager() { return gw.sessionManager; },
+		get teamManager() { return (gw as any).teamManager; },
+		get orchestrationCore() { return (gw as any).orchestrationCore; },
+		get bgProcessManager() { return gw.bgProcessManager; },
+		get projectContextManager() { return gw.projectContextManager; },
 		restoreAgentDirRuntime,
 		async api(path, init) {
 			restoreAgentDirRuntime();
@@ -476,6 +473,13 @@ async function boot(): Promise<BootedGateway> {
 			// (e.g. inline-workflow-goal-flow's `default`) can't linger and break the
 			// component-linked verification steps of seeded workflows.
 			if (!componentOk) { try { cfg.setComponents([TEST_DEFAULT_COMPONENT]); } catch { /* best-effort */ } }
+		},
+		async crash() {
+			await gw.shutdown();
+		},
+		async restart() {
+			restoreAgentDirRuntime();
+			gw = await startGateway();
 		},
 		async restoreDefaultProject() {
 			// If the default still exists (test only mutated it), keep its id — do NOT
