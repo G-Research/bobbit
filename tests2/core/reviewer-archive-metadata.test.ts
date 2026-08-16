@@ -148,8 +148,8 @@ describe("reviewer archive metadata persistence", () => {
 		);
 		assert.match(
 			llmReviewStep,
-			/return this\.runLlmReviewViaSession\(step, cwd, goalId, role, combinedPrompt, kickoff, timeoutMs, sessionId, verificationContainer, verificationContext\);/,
-			"LLM review must delegate exactly once to the visible SessionManager-backed execution path with its frozen sidecar identity and active verification context",
+			/return this\.runLlmReviewViaSession\(step, cwd, goalId, role, combinedPrompt, kickoff, timeoutMs, sessionId, verificationContext\);/,
+			"LLM review must delegate exactly once to the visible SessionManager-backed execution path with its active verification context",
 		);
 	});
 

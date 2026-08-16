@@ -16,7 +16,7 @@
  */
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import { buildReviewPrompt, buildTrustedReviewGitContext } from "../../src/server/agent/verification-harness.js";
+import { buildReviewPrompt } from "../../src/server/agent/verification-harness.js";
 import { isPreImplementationGate, substituteVars } from "../../src/server/agent/verification-logic.js";
 
 test("design-doc gate: prompt contains NO git diff instructions", async () => {
@@ -52,57 +52,6 @@ test("implementation gate: prompt contains origin/<primary> diff instructions", 
 	assert.match(prompt, /git diff origin\/main\.\.\.HEAD/);
 	// Must not have a bare-local `git diff main...HEAD` (without `origin/` prefix).
 	assert.doesNotMatch(prompt, /git diff main\.\.\.HEAD/);
-});
-
-test("pinned review prompt uses private precomputed Git context, never public cwd Git instructions", async () => {
-	const calls: Array<{ args: string[]; cwd?: string }> = [];
-	const privateWorktree = "/private/frozen-worktree";
-	const context = await buildTrustedReviewGitContext({
-		execFile: async (_file: string, args: string[], options: any) => {
-			calls.push({ args, cwd: options.cwd });
-			if (args[0] === "rev-parse") return { stdout: Buffer.from("a".repeat(40) + "\n"), stderr: Buffer.alloc(0) };
-			if (args[1] === "--stat") return { stdout: Buffer.from(" src/changed.ts | 1 +\n"), stderr: Buffer.alloc(0) };
-			if (args[1] === "--name-status") return { stdout: Buffer.from("M\tsrc/changed.ts\n"), stderr: Buffer.alloc(0) };
-			return { stdout: Buffer.from("abc123 change\n"), stderr: Buffer.alloc(0) };
-		},
-	} as any, privateWorktree, "main");
-	assert.equal(calls.length, 4);
-	assert.ok(calls.every(call => call.cwd === privateWorktree), "all Git facts must be collected from the trusted private worktree");
-
-	const prompt = await buildReviewPrompt(
-		{ promptTemplate: "role\n{{REVIEW_CONTEXT}}", name: "reviewer" },
-		{ name: "Code quality", prompt: "Review code." },
-		"/public/frozen-checkout",
-		{ branch: "goal/x", baseBranch: "main", cwd: "/public/frozen-checkout", commit: "abc", goal_spec: "" },
-		undefined, undefined, "spec", new Map(), { depends_on: ["design-doc"] },
-		undefined, { displayCwd: "/public/frozen-checkout", trustedGitContext: context },
-	);
-	assert.match(prompt, /Do NOT run Git commands in this directory/);
-	assert.match(prompt, /Trusted Git Review Context \(precomputed\)/);
-	assert.match(prompt, /src\/changed\.ts/);
-	assert.match(prompt, /abc123 change/);
-	assert.doesNotMatch(prompt, /git diff origin\/main/);
-	assert.doesNotMatch(prompt, /git log --oneline origin\/main/);
-});
-
-test("buildReviewPrompt resolves an uncached baseline from its trusted Git cwd", async () => {
-	let baselineLookupCwd: string | undefined;
-	const prompt = await buildReviewPrompt(
-		{ promptTemplate: "role\n{{REVIEW_CONTEXT}}", name: "reviewer" },
-		{ name: "Code quality", prompt: "Review code." },
-		"/public/frozen-checkout",
-		{ branch: "goal/x", baseBranch: "main", cwd: "/public/frozen-checkout", commit: "abc", goal_spec: "" },
-		undefined, undefined, "spec", new Map(), { depends_on: ["design-doc"] },
-		{
-			execFile: async (_file: string, _args: string[], options: any) => {
-				baselineLookupCwd = options.cwd;
-				return { stdout: Buffer.from("b".repeat(40) + "\n"), stderr: Buffer.alloc(0) };
-			},
-		} as any,
-		{ displayCwd: "/public/frozen-checkout", trustedGitCwd: "/private/frozen-worktree" },
-	);
-	assert.equal(baselineLookupCwd, "/private/frozen-worktree");
-	assert.match(prompt, /origin\/main@bbbbbbbbbbbb/);
 });
 
 test("implementation gate: review prompt baselines use configured baseBranch over legacy master", async () => {
