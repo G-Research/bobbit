@@ -4370,6 +4370,16 @@ export class VerificationHarness {
 			const verification = this._cancelledVerificationResult(active);
 			if (!this._persistActive()) throw new Error(`Could not persist cancellation finalization for ${active.signalId}`);
 			const store = this.resolveGateStore(active.goalId);
+			// Some restart-only cleanup seams (and a goal already removed from its
+			// project context) no longer have a gate store to publish into. Exact
+			// cleanup still owns and must retire this persisted active row; production
+			// records always retain a store and take the strict path below.
+			if (!store) {
+				delete active.cancellationFinalizing;
+				this.activeVerifications.delete(active.signalId);
+				this._persistActive();
+				return;
+			}
 			if (typeof (store as Partial<GateStore>).updateSignalVerificationStrict === "function") {
 				await store.updateSignalVerificationStrict(active.signalId, verification);
 			} else {
