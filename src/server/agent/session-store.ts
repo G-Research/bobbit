@@ -714,8 +714,16 @@ export class SessionStore {
 		for (let n = 0; ; n++) {
 			const retained = n === 0 ? base : `${base}.${n}`;
 			try {
-				// Exclusive creation makes collision handling safe across processes and
-				// ensures an existing forensic snapshot can never be overwritten.
+				// An identical retained source is already durable migration evidence.
+				// This makes retry/restart and racing stores idempotent without ever
+				// overwriting a distinct forensic snapshot.
+				if (await this.fs.promises.readFile(retained, "utf-8") === snapshot.raw) return;
+				continue;
+			} catch (err) {
+				if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+			}
+			try {
+				// Exclusive creation closes the read/write race with another store.
 				await this.fs.promises.writeFile(retained, snapshot.raw, { encoding: "utf-8", flag: "wx" });
 				return;
 			} catch (err) {
@@ -728,11 +736,25 @@ export class SessionStore {
 	private async writeTransitionIntent(entries: readonly TransitionEntry[]): Promise<void> {
 		if (!entries.length) return;
 		const tmp = `${this.transitionFile}.tmp`;
-		await this.fs.promises.writeFile(tmp, JSON.stringify({ version: 1, entries }), "utf-8");
-		await this.fs.promises.rename(tmp, this.transitionFile);
+		const payload = JSON.stringify({ version: 1, entries });
+		try {
+			if (this.fs.promises.open) {
+				const handle = await this.fs.promises.open(tmp, "w");
+				try {
+					await handle.writeFile(payload, "utf-8");
+					try { await handle.sync(); } catch { /* non-fatal */ }
+				} finally { await handle.close(); }
+			} else {
+				await this.fs.promises.writeFile(tmp, payload, "utf-8");
+			}
+			await this.fs.promises.rename(tmp, this.transitionFile);
+		} catch (err) {
+			try { await this.fs.promises.unlink(tmp); } catch { /* ignore cleanup failure */ }
+			throw err;
+		}
 	}
 
-	private async saveTierUnlockedAsync(tier: SessionTier, json: string): Promise<void> {
+	private async saveTierUnlockedAsync(tier: SessionTier, rowsJson: string): Promise<number> {
 		const state = this.tiers[tier];
 		if (state.staleGuardTripped) throw new Error(`Session persistence refused: stale-snapshot guard is active for ${tier} tier`);
 		const fingerprint = await this.currentDiskFingerprintAsync(tier);
@@ -744,7 +766,10 @@ export class SessionStore {
 			throw new Error(`Session persistence refused: on-disk epoch ${onDiskEpoch} is newer than loaded epoch ${state.loadedEpoch}`);
 		}
 		const epoch = Math.max(state.loadedEpoch, state.writtenEpoch, onDiskEpoch < 0 ? 0 : onDiskEpoch) + 1;
-		const payload = JSON.stringify({ version: 3, epoch, sessions: JSON.parse(json) });
+		// rowsJson is the sole JSON.stringify traversal of this tier's rows.
+		// Add the compact envelope without parse/stringify cloning the archive.
+		const payload = `{"version":3,"epoch":${epoch},"sessions":${rowsJson}}`;
+		const payloadBytes = Buffer.byteLength(payload);
 		const tmp = this.tierTmpPath(tier);
 		try {
 			await this.rotateBackupsAsync(tier);
@@ -755,11 +780,13 @@ export class SessionStore {
 			await this.fs.promises.rename(tmp, state.file);
 			state.writtenEpoch = epoch;
 			state.diskFingerprint = await this.currentDiskFingerprintAsync(tier);
+			return payloadBytes;
 		} catch (err) { try { await this.fs.promises.unlink(tmp); } catch { /* ignore */ } throw err; }
 	}
 
 	/** Serialize only dirty tiers; the archive tier is never touched by live activity. */
 	private async saveNowAsync(): Promise<number> {
+		const startedAt = performance.now();
 		// Yield before snapshotting so synchronous structural bursts coalesce into
 		// the same tier payload, as the original single-file drain did.
 		await this.fs.promises.mkdir(this.storeDir, { recursive: true });
@@ -778,21 +805,23 @@ export class SessionStore {
 		for (const tier of selected) json[tier] = JSON.stringify(rows[tier]);
 		const serializedGeneration = this.generation;
 		const fenced = transition ? ["live", "archived"] as SessionTier[] : selected;
-		const startedAt = performance.now();
 		return this.withTierWriteFences(fenced, async () => {
 			if (mustMigrate) await this.retainLegacySnapshotAsync();
 			if (transition) await this.writeTransitionIntent(transitionEntries);
-			for (const tier of selected) await this.saveTierUnlockedAsync(tier, json[tier]!);
+			const persistedBytes: Partial<Record<SessionTier, number>> = {};
+			for (const tier of selected) persistedBytes[tier] = await this.saveTierUnlockedAsync(tier, json[tier]!);
 			if (transition) {
-				try { await this.fs.promises.unlink(this.transitionFile); } catch { /* ignore */ }
+				try {
+					await this.fs.promises.unlink(this.transitionFile);
+				} catch (err) {
+					if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+				}
 				for (const entry of transitionEntries) if (this.pendingTransitions.get(entry.id) === entry) this.pendingTransitions.delete(entry.id);
 			}
 			for (const tier of selected) this.tiers[tier].publishedGeneration = Math.max(this.tiers[tier].publishedGeneration, serializedGeneration);
 			this.migrationNeeded = false;
-			const persistedBytes = (tier: SessionTier) => json[tier]
-				? Buffer.byteLength(JSON.stringify({ version: 3, epoch: this.tiers[tier].writtenEpoch, sessions: JSON.parse(json[tier]!) })) : 0;
-			const liveBytes = persistedBytes("live");
-			const archivedBytes = persistedBytes("archived");
+			const liveBytes = persistedBytes.live ?? 0;
+			const archivedBytes = persistedBytes.archived ?? 0;
 			this.lastPersistenceMetrics = { bytes: liveBytes + archivedBytes, liveBytes, archivedBytes, durationMs: performance.now() - startedAt };
 			return serializedGeneration;
 		});
@@ -878,7 +907,8 @@ export class SessionStore {
 
 	remove(id: string): void {
 		const existing = this.sessions.get(id);
-		if (!existing) return;
+		// Preserve the legacy hard-delete contract: an unknown id still records a
+		// tombstone, preventing stale migration sources from resurrecting it.
 		this.generation++;
 		this.sessions.delete(id);
 		this.markMutation(existing, undefined);

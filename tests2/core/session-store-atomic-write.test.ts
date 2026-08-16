@@ -153,6 +153,23 @@ describe("SessionStore atomic write", () => {
 		assert.deepEqual(restored.getAll(), parsed.sessions);
 	});
 
+	it("stringifies each dirty tier's rows exactly once", async () => {
+		const originalStringify = JSON.stringify;
+		let rowTraversals = 0;
+		JSON.stringify = ((value: unknown, ...args: unknown[]) => {
+			if (Array.isArray(value) || (value !== null && typeof value === "object" && "sessions" in value)) rowTraversals++;
+			return originalStringify(value, ...(args as []));
+		}) as typeof JSON.stringify;
+		try {
+			const store = new SessionStore(stateDir, memfs);
+			store.put(makeSession("single-pass"));
+			await store.flushAsync();
+		} finally {
+			JSON.stringify = originalStringify;
+		}
+		assert.equal(rowTraversals, 1, "the envelope must not stringify parsed rows a second time");
+	});
+
 	it("fully validates the first async save, then skips reads while its own fingerprint is unchanged", async () => {
 		const fs = createFingerprintTrackingFs(STORE_FILE);
 		fs.mkdirSync(stateDir, { recursive: true });
@@ -346,7 +363,10 @@ describe("SessionStore atomic write", () => {
 		assert.equal(first.epoch, 1);
 		assert.equal(first.sessions.length, 3);
 		const metrics = store.getPersistenceMetrics();
-		assert.ok(metrics && metrics.bytes === Buffer.byteLength(JSON.stringify(first)) && metrics.durationMs >= 0);
+		assert.ok(metrics && metrics.durationMs >= 0);
+		assert.equal(metrics.bytes, Buffer.byteLength(memfs.readFileSync(STORE_FILE, "utf-8")), "metrics must report the bytes actually published");
+		assert.equal(metrics.liveBytes, metrics.bytes);
+		assert.equal(metrics.archivedBytes, 0);
 
 		store.put(makeSession("s4"));
 		await store.flushAsync();
@@ -429,8 +449,15 @@ describe("SessionStore atomic write", () => {
 
 		assert.equal(store.archive("move"), true);
 		await store.flushAsync();
-		let live = JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8"));
-		let archived = JSON.parse(memfs.readFileSync(ARCHIVED_FILE, "utf-8"));
+		const archivedMoveLiveRaw = memfs.readFileSync(STORE_FILE, "utf-8");
+		const archivedMoveArchiveRaw = memfs.readFileSync(ARCHIVED_FILE, "utf-8");
+		const moveMetrics = store.getPersistenceMetrics();
+		assert.ok(moveMetrics);
+		assert.equal(moveMetrics.liveBytes, Buffer.byteLength(archivedMoveLiveRaw));
+		assert.equal(moveMetrics.archivedBytes, Buffer.byteLength(archivedMoveArchiveRaw));
+		assert.equal(moveMetrics.bytes, moveMetrics.liveBytes! + moveMetrics.archivedBytes!);
+		let live = JSON.parse(archivedMoveLiveRaw);
+		let archived = JSON.parse(archivedMoveArchiveRaw);
 		assert.deepEqual(live.sessions.map((s: PersistedSession) => s.id), []);
 		assert.deepEqual(archived.sessions.map((s: PersistedSession) => s.id), ["move"]);
 
@@ -443,6 +470,49 @@ describe("SessionStore atomic write", () => {
 		const reloaded = new SessionStore(stateDir, memfs);
 		assert.equal(reloaded.get("move")?.archived, false);
 		assert.deepEqual(reloaded.getArchived(), []);
+	});
+
+	it("fsyncs a membership transition intent before publishing either tier", async () => {
+		const asyncFs = memfs as any;
+		const baseOpen = asyncFs.promises.open;
+		const synced: string[] = [];
+		asyncFs.promises.open = async (file: PathLike, ...args: unknown[]) => {
+			const handle = await baseOpen(file, ...args);
+			return { ...handle, sync: async () => { synced.push(path.resolve(String(file))); await handle.sync(); } };
+		};
+		const store = new SessionStore(stateDir, memfs);
+		store.put(makeSession("move"));
+		await store.flushAsync();
+		synced.length = 0;
+
+		store.archive("move");
+		await store.flushAsync();
+		assert.ok(synced.includes(path.resolve(`${STORE_FILE}.split-transition.tmp`)), "the durable pair intent must fsync before either tier rename");
+	});
+
+	it("retains a transition intent when its durability-critical unlink is busy", async () => {
+		const store = new SessionStore(stateDir, memfs);
+		store.put(makeSession("move"));
+		await store.flushAsync();
+		const asyncFs = memfs as any;
+		const baseUnlink = asyncFs.promises.unlink;
+		let failTransitionUnlink = true;
+		asyncFs.promises.unlink = async (file: PathLike) => {
+			if (failTransitionUnlink && path.resolve(String(file)) === path.resolve(`${STORE_FILE}.split-transition`)) {
+				failTransitionUnlink = false;
+				throw Object.assign(new Error("EBUSY: transition intent is still open"), { code: "EBUSY" });
+			}
+			return baseUnlink(file);
+		};
+		try {
+			store.archive("move");
+			await assert.rejects(store.flushAsync(), /EBUSY/);
+			assert.equal(memfs.existsSync(`${STORE_FILE}.split-transition`), true, "a failed unlink must preserve recovery intent");
+			await store.flushAsync();
+			assert.equal(memfs.existsSync(`${STORE_FILE}.split-transition`), false, "a retry clears intent only after durable unlink");
+		} finally {
+			asyncFs.promises.unlink = baseUnlink;
+		}
 	});
 
 	it("recovers an archive transition after the second tier publication fails", async () => {

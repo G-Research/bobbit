@@ -46,6 +46,34 @@ function deferred<T = void>() {
 	return { promise, resolve };
 }
 
+function fsWithFailedFirstLivePublish(storeFile: string) {
+	const resolvedStoreFile = path.resolve(storeFile);
+	let fail = true;
+	const failingPromises = new Proxy(fs.promises, {
+		get(target, property, receiver) {
+			if (property === "rename") {
+				return async (from: fs.PathLike, to: fs.PathLike) => {
+					if (fail && path.resolve(String(to)) === resolvedStoreFile) {
+						fail = false;
+						throw new Error("injected live publication failure");
+					}
+					return fs.promises.rename(from, to);
+				};
+			}
+			const value = Reflect.get(target, property, receiver);
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	});
+	const fsImpl = new Proxy(fs, {
+		get(target, property, receiver) {
+			if (property === "promises") return failingPromises;
+			const value = Reflect.get(target, property, receiver);
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	});
+	return { fsImpl, allowLivePublish: () => { fail = false; } };
+}
+
 function fsWithDeferredFirstOpen() {
 	const entered = deferred();
 	const release = deferred();
@@ -229,6 +257,12 @@ describe("SessionStore real filesystem fidelity", () => {
 			true,
 			"remove must tombstone the id (baseline)",
 		);
+		store.remove("never-created");
+		assert.equal(
+			readDeletionTombstones(stateDir, "sessions.json").has("never-created"),
+			true,
+			"remove must retain its legacy tombstone guarantee even for an unknown id",
+		);
 
 		store.archive("s-purge");
 		assert.equal(store.purge("s-purge"), true);
@@ -387,6 +421,46 @@ describe("SessionStore real filesystem fidelity", () => {
 		assert.equal(result!.count, 2);
 		assert.deepEqual(result!.paths.map(p => path.relative(transcriptsDir, p)).sort(), expected);
 		assert.ok(warns.every(w => !w.includes("tracked.jsonl") && !w.includes("old-orphan.jsonl")));
+	});
+
+	it("retains legacy migration evidence exactly once across a failed publish and restart", async () => {
+		const root = freshRoot();
+		const stateDir = path.join(root, "state");
+		const storeFile = path.join(stateDir, "sessions.json");
+		const source = JSON.stringify({ version: 2, epoch: 4, sessions: [
+			makeSession("live"),
+			makeSession("archived", { archived: true, archivedAt: 1 }),
+		] });
+		fs.mkdirSync(stateDir, { recursive: true });
+		fs.writeFileSync(storeFile, source, "utf-8");
+		fs.writeFileSync(`${storeFile}.pre-archived-split`, "unrelated forensic evidence", "utf-8");
+		const failing = fsWithFailedFirstLivePublish(storeFile);
+		const first = new SessionStore(stateDir, failing.fsImpl as any);
+		await assert.rejects(first.flushAsync(), /injected live publication failure/);
+		assert.equal(fs.readFileSync(`${storeFile}.pre-archived-split.1`, "utf-8"), source);
+
+		// The v2 primary remains authoritative after the interrupted split. A
+		// restart must recognize its exact retained bytes rather than creating .2.
+		failing.allowLivePublish();
+		const restarted = new SessionStore(stateDir);
+		await restarted.flushAsync();
+		assert.equal(fs.readFileSync(`${storeFile}.pre-archived-split.1`, "utf-8"), source);
+		assert.equal(fs.existsSync(`${storeFile}.pre-archived-split.2`), false);
+	});
+
+	it("shares an exact retained legacy source between concurrent migrating stores", async () => {
+		const root = freshRoot();
+		const stateDir = path.join(root, "state");
+		const storeFile = path.join(stateDir, "sessions.json");
+		const source = JSON.stringify({ version: 2, epoch: 4, sessions: [makeSession("live")] });
+		fs.mkdirSync(stateDir, { recursive: true });
+		fs.writeFileSync(storeFile, source, "utf-8");
+		const first = new SessionStore(stateDir);
+		const second = new SessionStore(stateDir);
+		const results = await Promise.allSettled([first.flushAsync(), second.flushAsync()]);
+		assert.ok(results.some(result => result.status === "fulfilled"), "one fenced migration must complete");
+		assert.equal(fs.readFileSync(`${storeFile}.pre-archived-split`, "utf-8"), source);
+		assert.equal(fs.existsSync(`${storeFile}.pre-archived-split.1`), false, "identical evidence must not consume a suffix");
 	});
 
 	it("migrates a 1,234-row v2 snapshot exactly once and retains the recoverable source", async () => {
