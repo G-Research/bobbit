@@ -11045,8 +11045,15 @@ export class SessionManager {
 			if (before?.model?.provider !== provider || before?.model?.id !== modelId) {
 				throw new Error(`model read-back changed before thinking selection for ${modelString}`);
 			}
+			// A cold SDK query has not exposed controls or capabilities yet. Its
+			// deliberately conservative off-only state must not overwrite the exact
+			// durable effort already projected into immutable query options. Once the
+			// first input initializes controls, use only its live capability map.
+			const sdkControlsReady = before?.sdkControlsReady === true;
 			const effectiveThinking = provider === "claude-agent-sdk"
-				? this.resolveLiveSdkThinkingLevel(before.model, requestedThinking)
+				? sdkControlsReady
+					? this.resolveLiveSdkThinkingLevel(before.model, requestedThinking)
+					: isKnownThinkingLevel(before?.thinkingLevel) ?? isKnownThinkingLevel(requestedThinking)
 				: await this.resolveCurrentCatalogPreferredThinkingLevel(
 					modelString,
 					session.role,
@@ -11349,8 +11356,11 @@ export class SessionManager {
 			const provider = typeof before?.model?.provider === "string" ? before.model.provider : undefined;
 			const modelId = typeof before?.model?.id === "string" ? before.model.id : undefined;
 			if (!provider || !modelId) throw new Error("get_state returned no exact model before thinking selection");
+			const sdkControlsReady = before?.sdkControlsReady === true;
 			const effective = provider === "claude-agent-sdk"
-				? this.resolveLiveSdkThinkingLevel(before.model, candidate)
+				? sdkControlsReady
+					? this.resolveLiveSdkThinkingLevel(before.model, candidate)
+					: isKnownThinkingLevel(before?.thinkingLevel) ?? isKnownThinkingLevel(candidate)
 				: await this.resolveCurrentCatalogThinkingLevel(
 					`${provider}/${modelId}`,
 					session.role,

@@ -949,6 +949,11 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 			provider: "claude-agent-sdk",
 			model: this.modelState(),
 			thinkingLevel: this.thinkingLevel,
+			// Before the first real input, `modelState()` intentionally has only
+			// fail-closed off metadata. Expose its lifecycle separately so restore
+			// can retain the immutable projected tuple without mistaking it for a
+			// live capability read-back.
+			sdkControlsReady: this.initializationComplete,
 			sessionId: this.resolvedHistorySessionId(),
 		} };
 	}
