@@ -139,22 +139,22 @@ export class StaffStore {
 	}
 
 	private save(): void {
+		if (!fs.existsSync(this.storeDir)) fs.mkdirSync(this.storeDir, { recursive: true });
+		const temporary = `${this.storeFile}.${process.pid}.${Date.now()}.tmp`;
 		try {
-			if (!fs.existsSync(this.storeDir)) {
-				fs.mkdirSync(this.storeDir, { recursive: true });
-			}
-			const data = Array.from(this.staff.values());
-			fs.writeFileSync(this.storeFile, JSON.stringify(data, null, 2), "utf-8");
-		} catch (err) {
-			console.error("[staff-store] Failed to save staff:", err);
+			fs.writeFileSync(temporary, JSON.stringify(Array.from(this.staff.values()), null, 2), "utf-8");
+			fs.renameSync(temporary, this.storeFile);
+		} finally {
+			try { fs.rmSync(temporary, { force: true }); } catch { /* best effort */ }
 		}
 	}
 
 	put(staff: PersistedStaff): void {
 		// Normalise on every write so the in-memory record always carries
 		// real values. Mirrors the load-side normalisation.
+		const previous = this.staff.get(staff.id);
 		this.staff.set(staff.id, normalizeStaffRecord(staff));
-		this.save();
+		try { this.save(); } catch (error) { previous ? this.staff.set(staff.id, previous) : this.staff.delete(staff.id); throw error; }
 	}
 
 	get(id: string): PersistedStaff | undefined {
@@ -162,8 +162,9 @@ export class StaffStore {
 	}
 
 	remove(id: string): void {
+		const previous = this.staff.get(id);
 		this.staff.delete(id);
-		this.save();
+		try { this.save(); } catch (error) { if (previous) this.staff.set(id, previous); throw error; }
 		// Durably tombstone this hard-delete so the boot-time headquarters
 		// migration does not resurrect the record from a stale
 		// `.pre-headquarters-id-migration` backup on the next restart.
@@ -189,8 +190,9 @@ export class StaffStore {
 			}
 		}
 		existing.updatedAt = Date.now();
+		const previous = structuredClone(existing);
 		normalizeStaffRecord(existing);
-		this.save();
+		try { this.save(); } catch (error) { this.staff.set(id, previous); throw error; }
 		return true;
 	}
 }
