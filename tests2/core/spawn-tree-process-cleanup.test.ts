@@ -702,7 +702,7 @@ describe("spawnTracked timeout cleanup", () => {
 		try {
 			await expectRecoveredContainerSentinelWait(stateDir, {
 				name: "No-verdict container", nonce: "no-verdict-nonce", deadlineMs: Date.now() + 10_000, recordTerm: false, events: ["reap"],
-				statuses: [{ kind: "verification", status: "failed" }, { kind: "gate", status: "pending" }],
+				statuses: [{ kind: "verification", status: "cancelled" }, { kind: "gate", status: "pending" }],
 			});
 		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });
