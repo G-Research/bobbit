@@ -10,7 +10,7 @@ const EFFECTS = [
 	["workflow", { id: "route-import-workflow", name: "Route import workflow", gates: [{ id: "implementation", name: "Implementation", verify: [] }] }],
 	["role", { name: "route-import-role", label: "Route import role", prompt: "Created by the canonical import route." }],
 	["tool", { tool: "route-import-tool", action: "create", content: "name: route-import-tool\ndescription: A route-import tool\ngroup: import-route\nparams: []\n" }],
-	["staff", { name: "route-import-staff", prompt: "Created by the canonical import route." }],
+	["staff", { name: "route-import-staff", prompt: "Created by the canonical import route.", role: "route-staff-prerequisite" }],
 ] as const;
 type EffectType = typeof EFFECTS[number][0];
 
@@ -105,6 +105,13 @@ test.describe("project-import proposal route — canonical effects", () => {
 					expect(statuses).toContain(201);
 					expect(statuses.every(status => status === 200 || status === 201 || status === 202)).toBe(true);
 					expect((await accept()).status).toBe(200);
+				} else if (type === "staff") {
+					// A deterministic canonical rejection releases the durable claim.
+					// The identical immutable snapshot succeeds once its real shared-owner
+					// prerequisite is installed through the public role route.
+					expect((await accept()).status).toBe(404);
+					expect((await apiFetch("/api/roles", { method: "POST", body: JSON.stringify({ projectId, name: "route-staff-prerequisite", label: "Staff prerequisite", promptTemplate: "A role installed after the first accept." }) })).status).toBe(201);
+					expect((await accept()).status).toBe(201);
 				} else expect((await accept()).status).toBe(201);
 				const context = gateway.projectContextManager.getOrCreate(projectId)!;
 				if (type === "goal") expect(context.goalManager.listGoals().filter((item: any) => item.title === "Route import goal")).toHaveLength(1);
