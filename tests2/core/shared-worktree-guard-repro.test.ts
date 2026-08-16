@@ -306,6 +306,68 @@ describe("shared worktree guard reproductions", () => {
 		}
 	});
 
+	it("goal archive reads an archived-tier-only worktree reference when no live resolver is installed", async () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "shared-wt-guard-goal-archive-tier-fallback-"));
+		try {
+			const root = path.join(tmp, "project");
+			const api = path.join(root, "api");
+			const web = path.join(root, "web");
+			fs.mkdirSync(path.join(api, ".git"), { recursive: true });
+			fs.mkdirSync(path.join(web, ".git"), { recursive: true });
+
+			const branch = "goal/archive-tier-fallback";
+			const apiWorktree = path.join(tmp, "project-wt", "goal-archive", "api");
+			const webWorktree = path.join(tmp, "project-wt", "goal-archive", "web");
+			makeWorktree(apiWorktree);
+			makeWorktree(webWorktree);
+
+			const goalState = path.join(tmp, "goal-state");
+			const goalStore = new GoalStore(goalState, undefined, { persistence: "json" });
+			fs.writeFileSync(path.join(goalState, "sessions.json"), "{corrupt live tier", "utf8");
+			fs.writeFileSync(path.join(goalState, "sessions.archived.json"), JSON.stringify({
+				version: 3,
+				epoch: 1,
+				sessions: [makeSession("archived-tier-live-owner", {
+					archived: false,
+					cwd: equivalentPath(apiWorktree),
+					branch: "session/live-api-owner",
+				})],
+			}), "utf8");
+			const goalManager = new GoalManager(goalStore, undefined, undefined, {
+				commandRunner: fakeGitRunner,
+				remotePolicy: { skipRemotePush: true },
+			});
+			goalStore.put({
+				id: "goal-archive-tier-fallback",
+				title: "goal archive tier fallback",
+				cwd: path.join(tmp, "project-wt", "goal-archive"),
+				state: "complete",
+				spec: "",
+				createdAt: Date.now(),
+				updatedAt: Date.now(),
+				repoPath: root,
+				branch,
+				worktreePath: path.join(tmp, "project-wt", "goal-archive"),
+				repoWorktrees: { api: apiWorktree, web: webWorktree },
+			});
+
+			const archived = await goalManager.archiveGoal("goal-archive-tier-fallback");
+			await Promise.resolve();
+			assert.equal(archived, true, "goal should be archived by the test setup");
+			assert.ok(
+				fs.existsSync(apiWorktree),
+				"SHARED_WORKTREE_GUARD_GOAL_ARCHIVE_ARCHIVED_TIER_REGRESSION: goal archive removed a worktree referenced only by sessions.archived.json",
+			);
+			assert.equal(fs.existsSync(webWorktree), false, "unshared goal repoWorktree should remain cleanable");
+			assert.deepEqual(
+				fakeGitState.commands.filter(call => call.args[0] === "worktree").map(call => call.args[2]),
+				[webWorktree],
+			);
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
 	it("setup failure must not clean a worktree path already owned by another live persisted session", () => {
 		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "shared-wt-guard-setup-failure-"));
 		try {
