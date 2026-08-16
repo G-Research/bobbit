@@ -6,6 +6,7 @@ import path from "node:path";
 import { afterEach, describe, it } from "vitest";
 import {
 	computeVerificationContentDigest,
+	sameVerificationFileIdentity,
 	VerificationContentDigestError,
 } from "../../src/server/agent/verification-content-digest.ts";
 
@@ -39,6 +40,26 @@ const TRACKED = [".gitignore", ".gitattributes", "text.txt", "source.txt"];
 const failedDigest = (error: unknown) => error instanceof VerificationContentDigestError && error.code === "VERIFICATION_CONTENT_DIGEST_FAILED";
 
 describe("computeVerificationContentDigest", () => {
+	it("compares full-width filesystem identities without Number precision loss", () => {
+		const wide = 2n ** 53n;
+		assert.equal(
+			sameVerificationFileIdentity({ dev: wide + 10n, ino: wide + 1n }, { dev: wide + 10n, ino: wide + 1n }),
+			true,
+			"equal identities above Number.MAX_SAFE_INTEGER must remain valid",
+		);
+		assert.equal(Number(wide), Number(wide + 1n), "the regression values must alias when coerced to Number");
+		assert.equal(
+			sameVerificationFileIdentity({ dev: wide + 10n, ino: wide }, { dev: wide + 10n, ino: wide + 1n }),
+			false,
+			"distinct wide file IDs must still detect pathname replacement",
+		);
+		assert.equal(
+			sameVerificationFileIdentity({ dev: wide, ino: wide + 20n }, { dev: wide + 1n, ino: wide + 20n }),
+			false,
+			"distinct wide device IDs must still detect pathname replacement",
+		);
+	});
+
 	it("witnesses raw source bytes, additions, modes, and excludes ignored files", async () => {
 		const root = await fixture();
 		const initial = await computeVerificationContentDigest(root, inventory(TRACKED));

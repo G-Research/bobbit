@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { constants, type Stats } from "node:fs";
+import { constants, type BigIntStats, type Stats } from "node:fs";
 import { lstat, open, readlink, realpath } from "node:fs/promises";
 import path from "node:path";
 import { Writable } from "node:stream";
@@ -92,13 +92,12 @@ function isWithin(root: string, candidate: string): boolean {
 	return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }
 
-function sameIdentity(left: Stats, right: Stats): boolean {
-	return Number.isSafeInteger(left.dev)
-		&& Number.isSafeInteger(left.ino)
-		&& Number.isSafeInteger(right.dev)
-		&& Number.isSafeInteger(right.ino)
-		&& left.dev === right.dev
-		&& left.ino === right.ino;
+/** Identity comparisons must use full-width stat values; Windows file IDs can exceed 2^53. */
+export function sameVerificationFileIdentity(
+	left: Pick<BigIntStats, "dev" | "ino">,
+	right: Pick<BigIntStats, "dev" | "ino">,
+): boolean {
+	return left.dev === right.dev && left.ino === right.ino;
 }
 
 /** Reject every symlink or non-directory component below the canonical root. */
@@ -157,17 +156,17 @@ async function hashRegularFile(root: string, absolutePath: string): Promise<{ di
 		| (typeof constants.O_NONBLOCK === "number" ? constants.O_NONBLOCK : 0);
 	const handle = await open(absolutePath, flags);
 	try {
-		const openedStats = await handle.stat();
+		const openedStats = await handle.stat({ bigint: true });
 		if (!openedStats.isFile() || openedStats.isSymbolicLink()) throw digestFailure();
 
 		// Repeat validation after open, then tie the pathname to the descriptor.
 		await validateDirectoryAncestors(root, absolutePath);
-		const pathnameStats = await lstat(absolutePath);
-		if (!pathnameStats.isFile() || pathnameStats.isSymbolicLink() || !sameIdentity(openedStats, pathnameStats)) throw digestFailure();
+		const pathnameStats = await lstat(absolutePath, { bigint: true });
+		if (!pathnameStats.isFile() || pathnameStats.isSymbolicLink() || !sameVerificationFileIdentity(openedStats, pathnameStats)) throw digestFailure();
 
 		return {
 			digest: await hashOpenedFile(handle),
-			executable: (openedStats.mode & 0o111) !== 0,
+			executable: (openedStats.mode & 0o111n) !== 0n,
 		};
 	} finally {
 		await handle.close();
