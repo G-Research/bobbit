@@ -280,6 +280,7 @@ describe("shared worktree guard reproductions", () => {
 				title: "goal archive",
 				cwd: path.join(tmp, "project-wt", "goal-archive"),
 				state: "complete",
+				team: false,
 				spec: "",
 				createdAt: Date.now(),
 				updatedAt: Date.now(),
@@ -301,6 +302,55 @@ describe("shared worktree guard reproductions", () => {
 				fakeGitState.commands.filter(call => call.args[0] === "worktree").map(call => call.args[2]),
 				[webWorktree],
 			);
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("team goal archive retry preserves multi-repo recovery evidence after ownership rows are gone", async () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "team-goal-archive-retry-"));
+		try {
+			const root = path.join(tmp, "project");
+			const api = path.join(root, "api");
+			const web = path.join(root, "web");
+			fs.mkdirSync(path.join(api, ".git"), { recursive: true });
+			fs.mkdirSync(path.join(web, ".git"), { recursive: true });
+
+			const apiWorktree = path.join(tmp, "project-wt", "team-goal", "api");
+			const webWorktree = path.join(tmp, "project-wt", "team-goal", "web");
+			makeWorktree(apiWorktree);
+			makeWorktree(webWorktree);
+
+			const goalStore = new GoalStore(path.join(tmp, "goal-state"), undefined, { persistence: "json" });
+			const goalManager = new GoalManager(goalStore, undefined, undefined, {
+				commandRunner: fakeGitRunner,
+				remotePolicy: { skipRemotePush: true },
+			});
+			let reconciliation = 0;
+			goalManager.setGoalArchiveReconciler(async () => reconciliation++ === 0
+				? { archivedSessionIds: ["lead"], teamRemoved: true }
+				: { archivedSessionIds: [], suppressedSessionIds: [], teamRemoved: false, teamEntryRetained: false });
+			goalStore.put({
+				id: "team-goal",
+				title: "team goal",
+				cwd: path.join(tmp, "project-wt", "team-goal"),
+				state: "complete",
+				team: true,
+				spec: "",
+				createdAt: Date.now(),
+				updatedAt: Date.now(),
+				repoPath: root,
+				branch: "goal/team-goal",
+				worktreePath: path.join(tmp, "project-wt", "team-goal"),
+				repoWorktrees: { api: apiWorktree, web: webWorktree },
+			});
+
+			assert.equal(await goalManager.archiveGoal("team-goal"), true);
+			assert.equal(await goalManager.archiveGoal("team-goal"), true, "archived retry should replay reconciliation");
+			assert.equal(reconciliation, 2);
+			assert.ok(fs.existsSync(apiWorktree));
+			assert.ok(fs.existsSync(webWorktree));
+			assert.deepEqual(fakeGitState.commands, [], "durable team mode must suppress generic worktree/branch cleanup on retry");
 		} finally {
 			fs.rmSync(tmp, { recursive: true, force: true });
 		}

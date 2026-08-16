@@ -374,9 +374,8 @@ export class GoalManager {
 	 * Create a goal instantly — persists to disk and returns immediately.
 	 * Does NOT create the worktree. Call setupWorktree() separately after responding.
 	 */
-	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string; parentGoalId?: string; inlineRoles?: Record<string, import("./role-store.js").Role>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; metadata?: Record<string, unknown>; worktree?: boolean; adoptedWorkspace?: AdoptedGoalWorkspace }): Promise<PersistedGoal> {
-		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, projectId, parentGoalId, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, metadata, adoptedWorkspace } = opts ?? {};
-		const team = true;
+	async createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; workflowStore?: WorkflowStore; resolvedWorkflow?: Workflow; sandboxed?: boolean; enabledOptionalSteps?: string[]; projectId?: string; parentGoalId?: string; inlineRoles?: Record<string, import("./role-store.js").Role>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; metadata?: Record<string, unknown>; worktree?: boolean; adoptedWorkspace?: AdoptedGoalWorkspace; team?: boolean }): Promise<PersistedGoal> {
+		const { spec = "", workflowId, workflowStore = this.workflowStore, resolvedWorkflow, sandboxed, enabledOptionalSteps, projectId, parentGoalId, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, metadata, adoptedWorkspace, team = true } = opts ?? {};
 		const headquartersGoal = isHeadquartersProject(projectId);
 		if (adoptedWorkspace) {
 			assertAdoptedGoalWorkspace(adoptedWorkspace);
@@ -961,9 +960,9 @@ export class GoalManager {
 	 *      short-circuits on `archived && state === "complete"` and
 	 *      returns success terminal — without this stamp the rescue path
 	 *      reads `state="in-progress"` on a stale record and re-spawns.
-	 *   2. Archive (soft-delete) — sets archived=true / archivedAt.
-	 *   3. (Caller may invoke teamManager.teardownTeam afterwards; this
-	 *      method is a pure data-layer operation.)
+	 *   2. Archive (soft-delete) — sets archived=true / archivedAt and invokes
+	 *      the authoritative team reconciliation boundary. Callers must not
+	 *      destructively tear down the team before this boundary snapshots it.
 	 *
 	 * Idempotent: safe to call twice — a second invocation finds the row
 	 * already complete + archived and silently returns.
@@ -1080,10 +1079,10 @@ export class GoalManager {
 			}
 		}
 		// Multi-repo cleanup: best-effort per-repo worktree + remote-branch
-		// removal for standalone goals. Archived team reconciliation is a soft
-		// lifecycle boundary: its goal/member worktrees and branches are recovery
-		// evidence and remain until the ordinary purge lifecycle owns deletion.
-		if (archived && !reconciledTeamOwnership && goal.repoWorktrees && goal.repoPath && goal.branch && Object.keys(goal.repoWorktrees).length > 0) {
+		// removal for standalone goals. Durable team mode remains authoritative
+		// recovery evidence after reconciliation removes every live session/team
+		// row, so retries must never fall back to generic destructive cleanup.
+		if (archived && goal.team !== true && !reconciledTeamOwnership && goal.repoWorktrees && goal.repoPath && goal.branch && Object.keys(goal.repoWorktrees).length > 0) {
 			const { cleanupWorktree } = await import("../skills/git.js");
 			const entries = Object.entries(goal.repoWorktrees);
 			const sessions = this.getSessionsForWorktreeGuard();
