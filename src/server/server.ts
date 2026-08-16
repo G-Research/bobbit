@@ -13317,7 +13317,7 @@ async function handleApiRoute(
 					json({
 						error: "step is no longer awaiting human input",
 						stepName: histStep.name,
-						status: histStep.passed ? "passed" : (histStep.skipped ? "skipped" : "failed"),
+						status: histStep.status === "cancelled" ? "cancelled" : (histStep.passed ? "passed" : (histStep.skipped ? "skipped" : "failed")),
 					}, 409);
 					return;
 				}
