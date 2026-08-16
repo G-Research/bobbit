@@ -800,7 +800,13 @@ export class TeamManager {
 	 * are restored). Event subscriptions deferred to resubscribeTeamEvents().
 	 */
 	private async restoreTeams(): Promise<void> {
-		await this.reconcileAdoptedGoalReservations();
+		// Promotion provenance only exists in project-context stores. Keep the
+		// non-PCM restore path synchronous through persisted entry hydration: local
+		// callers have always been able to inspect restored teams immediately after
+		// construction, and awaiting a no-op promise would defer that hydration.
+		if (this.config.projectContextManager) {
+			await this.reconcileAdoptedGoalReservations();
+		}
 
 		// orphan team-store cleanup — Boot-time orphan cleanup. Walk every persisted team
 		// entry FIRST and drop entries whose `goalId` is not present in the
