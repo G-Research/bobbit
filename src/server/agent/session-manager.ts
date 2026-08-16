@@ -10459,23 +10459,28 @@ export class SessionManager {
 		const terminalSuppressed = new Set(suppressedSessionIds);
 		if (this.projectContextManager) {
 			for (const context of this.projectContextManager.all()) {
+				// Minimal SessionManager fixtures intentionally provide session state only.
+				// Without a goal resolver there is no authoritative archived-owner fact,
+				// so preserve the legacy full eager restore instead of guessing from metadata.
+				if (!context.goalStore?.get) continue;
 				const contextLive = context.sessionStore.getLive();
+				const teamEntries = context.teamStore?.getAll?.() ?? [];
 				const archivedGoalIds = new Set<string>();
 				for (const session of contextLive) {
 					if (session.teamGoalId && context.goalStore.get(session.teamGoalId)?.archived) archivedGoalIds.add(session.teamGoalId);
 				}
-				for (const entry of context.teamStore.getAll()) {
+				for (const entry of teamEntries) {
 					if (context.goalStore.get(entry.goalId)?.archived) archivedGoalIds.add(entry.goalId);
 				}
 				for (const goalId of archivedGoalIds) {
-					const entry = context.teamStore.getAll().find((candidate) => candidate.goalId === goalId);
+					const entry = teamEntries.find((candidate) => candidate.goalId === goalId);
 					const references = new Set<string>();
 					if (entry?.teamLeadSessionId) references.add(entry.teamLeadSessionId);
 					for (const agent of entry?.agents ?? []) references.add(agent.sessionId);
 					for (const id of collectTeamOwnedSessionClosure(goalId, contextLive, references)) terminalSuppressed.add(id);
 				}
 			}
-		} else {
+		} else if (this._testGoalManager) {
 			const archivedGoalIds = new Set(livePersisted
 				.map((session) => session.teamGoalId)
 				.filter((goalId): goalId is string => !!goalId && this.resolveGoal(goalId)?.archived === true));

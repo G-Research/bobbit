@@ -131,7 +131,7 @@ describe("delegate restore — source guards", () => {
 	it("restoreSessions restores surviving delegates LIVE, not as dormant husks", () => {
 		const idx = src.indexOf("async restoreSessions(): Promise<void>");
 		assert.ok(idx > 0, "restoreSessions declaration not found");
-		const window = src.slice(idx, idx + 6_000);
+		const window = src.slice(idx, idx + 7_500);
 
 		// Survivors are collected and routed through the live restore path.
 		assert.match(window, /const delegateSurvivors: PersistedSession\[\] = \[\];/);
