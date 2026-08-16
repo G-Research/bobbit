@@ -1,0 +1,14 @@
+services:
+  service:
+    image: bobbit-service-runtime-e2e:latest
+    depends_on:
+      - sidecar
+    environment:
+      SERVICE_RUNTIME_PORT: "8888"
+      SERVICE_RUNTIME_DATA_DIR: /data
+    ports:
+      - "127.0.0.1::8888"
+    volumes:
+      - "${SERVICE_RUNTIME_DATA_DIR}:/data"
+  sidecar:
+    image: bobbit-service-runtime-e2e:latest

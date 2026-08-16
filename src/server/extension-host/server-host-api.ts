@@ -22,7 +22,7 @@
 
 import { HOST_API_VERSION, HOST_CONTRACT_VERSION } from "../../shared/extension-host/host-api.js";
 import type { PackStore } from "./pack-store.js";
-import type { ReadTranscriptOpts, StorePutOptions, StoreReadResult, StoreStats, TranscriptEnvelope, ToolCallRecord } from "../../shared/extension-host/host-api.js";
+import type { ReadTranscriptOpts, StoreMutationOptions, StoreMutationResult, StorePutOptions, StoreReadResult, StoreStats, TranscriptEnvelope, ToolCallRecord } from "../../shared/extension-host/host-api.js";
 import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./contract-adapter.js";
 // SUB-GOAL C: the ambient `host.agents` capability is backed by the SAME shared
 // OrchestrationCore that services the agent-tool `/orchestrate/*` routes. The type
@@ -34,6 +34,7 @@ export interface ServerHostStoreApi {
 	get<T = unknown>(key: string): Promise<T | null>;
 	read<T = unknown>(key: string): Promise<StoreReadResult<T>>;
 	put<T = unknown>(key: string, value: T, opts?: StorePutOptions): Promise<void>;
+	mutate<T = unknown>(key: string, value: T, opts?: StoreMutationOptions): Promise<StoreMutationResult<T>>;
 	list(prefix?: string): Promise<string[]>;
 	delete(key: string): Promise<boolean>;
 	deletePrefix(prefix: string): Promise<number>;
@@ -109,6 +110,12 @@ export interface ServerHostSessionApi {
 	readToolCall(toolUseId: string): Promise<ToolCallRecord | null>;
 }
 
+/** Pack-bound, server-resolved capability check. It intentionally accepts no
+ * project, session, or pack identity; those remain closed over by the gateway. */
+export interface ServerHostMemoryApi {
+	requireCapability(capability: string): Promise<void>;
+}
+
 /** Readonly capability map — the SINGLE SOURCE OF TRUTH for what is IMPLEMENTED on the
  *  server host. On a Phase-1 server host only the bound identity is available; the
  *  scoped Phase-2 capabilities are `false`.
@@ -124,6 +131,9 @@ export interface ServerHostCapabilities {
 	/** Ambient child-agent orchestration (sub-goal C). True once `host.agents` is
 	 *  wired to the injected OrchestrationCore. */
 	readonly agents: boolean;
+	/** Pack-bound memory capability adapter. False outside an explicitly injected
+	 * memory route/action host. */
+	readonly memory: boolean;
 	/** Convenience: feature-detect by name; returns the flag, or false for unknown names. */
 	has(name: string): boolean;
 }
@@ -146,6 +156,12 @@ export interface ServerHostApi {
 	readonly session: ServerHostSessionApi;
 	/** Ambient child-agent orchestration (sub-goal C) — own host.agents children only. */
 	readonly agents: ServerHostAgentsApi;
+	/** Server-derived memory capability checks. */
+	readonly memory: ServerHostMemoryApi;
+	/** EP-7 effective provider configuration, confined to an authorized typed route. */
+	readonly providerConfig?: Readonly<Record<string, unknown>>;
+	/** Bounded server-derived completion snapshot, injected only by a typed server route. */
+	readonly completedOutcome?: unknown;
 }
 
 export interface CreateServerHostApiOptions {
@@ -194,7 +210,14 @@ export interface CreateServerHostApiOptions {
 	 *  worker tier gets `capabilities.store === true` while `session`/`agents` stay
 	 *  false AND unavailable. Omitted ⇒ the full implemented capability set
 	 *  (store/session/agents all true) — the existing route/action host behaviour. */
-	capabilityMask?: { store?: boolean; session?: boolean; agents?: boolean };
+	capabilityMask?: { store?: boolean; session?: boolean; agents?: boolean; memory?: boolean };
+	/** Optional pack-bound memory policy adapter. The gateway resolves its project,
+	 * session and pack identity before constructing this host. */
+	memory?: { requireCapability(capability: string): void | Promise<void> };
+	/** Effective EP-7 values for an authorized typed route; never serialize this host field. */
+	providerConfig?: Readonly<Record<string, unknown>>;
+	/** Bounded completion data selected by the server for retain-outcome. */
+	completedOutcome?: unknown;
 }
 
 /**
@@ -235,8 +258,8 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 	// capability is unavailable, not merely flagged false.
 	const mask = opts.capabilityMask;
 	const flags = mask
-		? { session: mask.session === true, store: mask.store === true, agents: mask.agents === true }
-		: { session: true, store: true, agents: true };
+		? { session: mask.session === true, store: mask.store === true, agents: mask.agents === true, memory: mask.memory === true && !!opts.memory }
+		: { session: true, store: true, agents: true, memory: !!opts.memory };
 	const capabilities: ServerHostCapabilities = {
 		...flags,
 		has: (name: string) => (flags as Record<string, boolean>)[name] === true,
@@ -258,6 +281,13 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 			// activation caches (e.g. provider-config writes). Never let it affect the
 			// put result.
 			try { onStoreWrite?.(key); } catch { /* non-fatal */ }
+		},
+		mutate: async (key, value, mutationOpts) => {
+			const result = await requireStore().mutate(packId, key, value, mutationOpts);
+			if (result.status === "committed") {
+				try { onStoreWrite?.(key); } catch { /* non-fatal */ }
+			}
+			return result;
 		},
 		list: (prefix) => requireStore().list(packId, prefix),
 		delete: (key) => requireStore().delete(packId, key),
@@ -324,6 +354,13 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 			default: return "preparing";
 		}
 	};
+	const memory: ServerHostMemoryApi = {
+		requireCapability: async (capability) => {
+			if (!opts.memory) throw new Error("host.memory backend unavailable");
+			await opts.memory.requireCapability(capability);
+		},
+	};
+
 	const agents: ServerHostAgentsApi = {
 		spawn: async (spawnOpts) => {
 			const c = requireCore();
@@ -382,6 +419,9 @@ export function createServerHostApi(opts: CreateServerHostApiOptions): ServerHos
 		store: flags.store ? store : denyNamespace("store", store),
 		session: flags.session ? session : denyNamespace("session", session),
 		agents: flags.agents ? agents : denyNamespace("agents", agents),
+		memory: flags.memory ? memory : denyNamespace("memory", memory),
+		...(opts.providerConfig ? { providerConfig: structuredClone(opts.providerConfig) } : {}),
+		...(opts.completedOutcome === undefined ? {} : { completedOutcome: structuredClone(opts.completedOutcome) }),
 	};
 }
 

@@ -58,6 +58,8 @@ function panelKey(packId: string, panelId: string): string {
  *  a lit value — it MUST NOT auto-invoke actions / navigate on mount (design §6,
  *  v1 §5 v). Conventions enforced by review: theme tokens only, iframe `sandbox`
  *  preserved. */
+export type PackPanelDisposeReason = "uninstall" | "project-change" | "pack-update";
+
 export interface PackPanel {
 	/** PURE projection of the typed `PanelTarget.params` onto a lit value. The second
 	 *  arg is the per-session Host API (scoped capabilities — callRoute / store / session)
@@ -65,6 +67,9 @@ export interface PackPanel {
 	 *  in a non-DOM/unit context or when no session is active; a panel MUST tolerate
 	 *  that and MUST NOT auto-invoke on mount. */
 	render(params?: Record<string, unknown>, host?: HostApi): TemplateResult | unknown;
+	/** Optional generic lifecycle cleanup before a cached module is superseded.
+	 * It is for ephemeral work only; durable pack state is never deleted here. */
+	dispose?(reason: PackPanelDisposeReason): void;
 	/** Optional user-initiated reload hook surfaced by Bobbit's tab controls. */
 	refresh?(params?: Record<string, unknown>, host?: HostApi): void | Promise<void>;
 }
@@ -189,8 +194,9 @@ const loadGeneration = new Map<string, number>();
 /** Invalidate any cached/in-flight load for `key`: bump its generation (so a
  *  superseded load becomes a no-op on resolve) and drop the cached instance +
  *  shared in-flight promise so the next open re-fetches under the new scope. */
-function invalidatePanel(key: string): void {
+function invalidatePanel(key: string, reason: PackPanelDisposeReason): void {
 	loadGeneration.set(key, (loadGeneration.get(key) ?? 0) + 1);
+	try { loadedPanels.get(key)?.dispose?.(reason); } catch { /* cleanup is best-effort */ }
 	loadedPanels.delete(key);
 	inFlight.delete(key);
 }
@@ -231,13 +237,13 @@ export function registerPackPanels(
 		const incoming = next.get(key);
 		if (!incoming) {
 			// Uninstall / precedence change → invalidate + drop its tab.
-			invalidatePanel(key);
+			invalidatePanel(key, "uninstall");
 			removePackPanelTab(prev.packId, prev.panelId);
 		} else if (incoming.projectId !== prev.projectId || opts?.invalidateLoaded) {
 			// Project change OR a forced pack-mutation re-register (update/reinstall):
 			// drop the cached/in-flight module so the next open/render re-imports the
 			// fresh bytes from the (same) serving URL.
-			invalidatePanel(key);
+			invalidatePanel(key, opts?.invalidateLoaded ? "pack-update" : "project-change");
 		}
 	}
 	panels.clear();

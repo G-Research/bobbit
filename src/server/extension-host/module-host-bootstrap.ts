@@ -61,6 +61,7 @@
 
 import { registerHooks, createRequire } from "node:module";
 import { parentPort, workerData } from "node:worker_threads";
+import type { HookScopeContext } from "../agent/lifecycle-hub.js";
 import { configure as configureConfinement, resolve as confinementResolve } from "./confinement-loader.js";
 
 interface BootstrapData {
@@ -78,6 +79,8 @@ interface BootstrapData {
 	 *  is clamped BELOW this cap so Node SIGKILLs the sync child before the parent's
 	 *  terminate-on-timeout reaps the thread — it cannot orphan past the cap. */
 	wallCapMs?: number;
+	/** Host-owned absolute deadline for this one invocation. */
+	deadlineEpochMs?: number;
 }
 
 /** Headroom (ms) reserved below the worker wall-cap when bounding a SYNCHRONOUS
@@ -106,6 +109,8 @@ interface InvokeMessage {
 	/** Serializable handler context (identity + capability flags; NO live host). */
 	ctx: SerializableCtx;
 	arg: unknown;
+	/** Host-owned absolute deadline; no parent AbortSignal is structured-cloned. */
+	deadlineEpochMs?: number;
 }
 interface ChannelOpenMessage {
 	kind: "channel-open";
@@ -151,11 +156,39 @@ interface SerializableCtx {
 	sessionId: string;
 	toolUseId?: string;
 	tool: string;
+	/** Host-resolved, structured-cloned advisory scope for route handlers. */
+	scopeContext?: HookScopeContext;
+	/** Generic service runtime projection supplied by the server route boundary. */
+	runtime?: { endpoint?: string; state: "stopped" | "starting" | "ready" | "degraded" | "blocked" | "unavailable"; diagnostic?: { code: string; retryAt?: string } };
 	workingDir?: string;
 	sessionArchived?: boolean;
+	/** Bounded, server-derived completed-goal snapshot for retain-outcome only. */
+	outcome?: unknown;
+	/** EP-7 effective configuration and bounded outcome copied from the server host. */
+	providerConfig?: Readonly<Record<string, unknown>>;
+	completedOutcome?: unknown;
 	hostVersion?: number;
 	hostContractVersion?: number;
-	capabilities: { callRoute: boolean; session: boolean; store: boolean; agents: boolean };
+	capabilities: { callRoute: boolean; session: boolean; store: boolean; agents: boolean; memory: boolean };
+}
+
+/** Recreate the parent-owned absolute deadline as a worker-local AbortSignal.
+ * The worker receives no arbitrary abort reason and cannot extend this budget. */
+function lifecycleContext(deadlineEpochMs: number | undefined): { signal?: AbortSignal; deadline?: { deadlineEpochMs: number; remainingMs: () => number; isExpired: () => boolean } } {
+	if (typeof deadlineEpochMs !== "number") return {};
+	const controller = new AbortController();
+	const remaining = Math.max(0, deadlineEpochMs - Date.now());
+	const abort = (): void => controller.abort(new Error("lifecycle deadline exceeded"));
+	if (remaining === 0) abort();
+	else setTimeout(abort, remaining);
+	return {
+		signal: controller.signal,
+		deadline: {
+			deadlineEpochMs,
+			remainingMs: () => Math.max(0, deadlineEpochMs - Date.now()),
+			isExpired: () => controller.signal.aborted || Date.now() >= deadlineEpochMs,
+		},
+	};
 }
 
 interface ChannelSerializableCtx {
@@ -458,6 +491,18 @@ function callHost(path: [string, string], args: unknown[]): Promise<unknown> {
 /** Build the proxied `ctx.host` handed to pack code. Store/session methods are
  *  marshalled to the parent (authorized there — these cross-pack/cross-session
  *  boundaries ARE enforced); identity + flags are local. */
+function workerStoreOptions(opts: unknown): Record<string, unknown> {
+	const supplied = opts && typeof opts === "object" && !Array.isArray(opts)
+		? opts as Record<string, unknown>
+		: {};
+	// AbortSignal cannot cross MessagePort, and a worker is never trusted to extend
+	// its host-owned deadline. The parent repeats this replacement before mutation.
+	const { signal: _signal, deadlineEpochMs: _deadline, ...safeOpts } = supplied;
+	return data.deadlineEpochMs === undefined
+		? safeOpts
+		: { ...safeOpts, deadlineEpochMs: data.deadlineEpochMs };
+}
+
 function buildHostProxy(ctx: SerializableCtx): unknown {
 	const flags = ctx.capabilities;
 	return {
@@ -468,6 +513,7 @@ function buildHostProxy(ctx: SerializableCtx): unknown {
 			session: flags.session,
 			store: flags.store,
 			agents: flags.agents,
+			memory: flags.memory,
 			has: (name: string) => (flags as Record<string, boolean>)[name] === true,
 		},
 		store: {
@@ -475,7 +521,8 @@ function buildHostProxy(ctx: SerializableCtx): unknown {
 			// Durable reads preserve absent/present/error across the worker boundary;
 			// packs must not treat an unreadable store as an empty one.
 			read: (key: string) => callHost(["store", "read"], [key]),
-			put: (key: string, value: unknown, opts?: unknown) => callHost(["store", "put"], [key, value, opts]),
+			put: (key: string, value: unknown, opts?: unknown) => callHost(["store", "put"], [key, value, workerStoreOptions(opts)]),
+			mutate: (key: string, value: unknown, opts?: unknown) => callHost(["store", "mutate"], [key, value, workerStoreOptions(opts)]),
 			list: (prefix?: string) => callHost(["store", "list"], [prefix]),
 		},
 		// `session` is READ-ONLY for server modules: `postMessage` is intentionally
@@ -489,6 +536,11 @@ function buildHostProxy(ctx: SerializableCtx): unknown {
 		// SUB-GOAL C: the ambient `host.agents` namespace. Each verb marshals to the
 		// PARENT's live ServerHostApi (where owner/source scoping + recursion denial are
 		// enforced). Poll-based only — NO blocking `wait`.
+		memory: {
+			requireCapability: (capability: string) => callHost(["memory", "requireCapability"], [capability]),
+		},
+		...(ctx.providerConfig === undefined ? {} : { providerConfig: ctx.providerConfig }),
+		...(ctx.completedOutcome === undefined ? {} : { completedOutcome: ctx.completedOutcome }),
 		agents: {
 			spawn: (spawnOpts: unknown) => callHost(["agents", "spawn"], [spawnOpts]),
 			prompt: (childSessionId: string, message: string) => callHost(["agents", "prompt"], [childSessionId, message]),
@@ -684,13 +736,16 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 			port!.postMessage({ kind: "result", ok: false, status: 404, error: `unknown ${msg.exportKind} member "${msg.member}"` });
 			return;
 		}
+		const lifecycle = lifecycleContext(msg.deadlineEpochMs ?? data.deadlineEpochMs);
 		const ctx = msg.exportKind === "providers"
-			? { ...msg.ctx, host: buildHostProxy(msg.ctx), workingDir: msg.ctx.workingDir }
+			? { ...msg.ctx, ...lifecycle, host: buildHostProxy(msg.ctx), workingDir: msg.ctx.workingDir }
 			: {
 				host: buildHostProxy(msg.ctx),
 				sessionId: msg.ctx.sessionId,
 				toolUseId: msg.ctx.toolUseId,
 				tool: msg.ctx.tool,
+				...(msg.ctx.scopeContext === undefined ? {} : { scopeContext: msg.ctx.scopeContext }),
+				...(msg.ctx.runtime === undefined ? {} : { runtime: msg.ctx.runtime }),
 				workingDir: msg.ctx.workingDir,
 				sessionArchived: msg.ctx.sessionArchived,
 			};

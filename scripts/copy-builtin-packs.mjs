@@ -20,10 +20,9 @@
 import fs from "node:fs";
 import path from "node:path";
 
-// NOTE: `hindsight` intentionally omitted — the pack does not work yet, so it is
-// hidden (not shipped as a built-in band, no marketplace row/toggle). Its source
-// stays under market-packs/hindsight/ so it can be re-added here later.
-const FIRST_PARTY_PACKS = ["file-explorer", "pr-walkthrough", "terminal"]; // explicit allowlist
+// Hindsight's managed runtime/settings integration is available alongside the
+// file explorer, so ship both first-party packs.
+const FIRST_PARTY_PACKS = ["file-explorer", "hindsight", "pr-walkthrough", "terminal"]; // explicit allowlist
 const SRC = "market-packs";
 const DEST = "dist/server/builtin-packs/market-packs";
 

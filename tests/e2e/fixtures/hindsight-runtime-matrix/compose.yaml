@@ -1,0 +1,11 @@
+services:
+  hindsight:
+    image: HINDSIGHT_RUNTIME_MATRIX_IMAGE
+    restart: "no"
+    environment:
+      HINDSIGHT_FIXTURE_PORT: "8888"
+      HINDSIGHT_FIXTURE_DATA_DIR: /data
+    ports:
+      - "127.0.0.1::8888"
+    volumes:
+      - "${HINDSIGHT_FIXTURE_HOST_DATA_DIR}:/data"

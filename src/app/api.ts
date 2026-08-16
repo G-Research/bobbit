@@ -3219,10 +3219,44 @@ export interface PackEntrypointWire {
 	listName: string;
 }
 
+/** Public vocabulary for exact, project-owned extension capability grants. */
+export type ExtensionCapabilityWire = "decide" | "mutate" | "store" | "session" | "agents"
+	| "service.manage" | "memory.read" | "memory.write" | "memory.reflect" | "memory.invalidate" | "memory.read.all";
+
+/** A durable authority always names one exact hook or the active pack principal. */
+export type ExtensionCapabilityGrantTuple =
+	| { packId: string; hookId: string; capability: ExtensionCapabilityWire }
+	| { packId: string; principal: "pack"; capability: ExtensionCapabilityWire };
+
+/** Server-resolved non-hook capability status for one active pack principal. */
+export interface PackGrantStatusWire {
+	packId: string;
+	requestedCapabilities: ExtensionCapabilityWire[];
+	grants: ExtensionCapabilityWire[];
+}
+
+/** Backward-readable project grant audit record. */
+export type ExtensionGrantAuditEntryWire =
+	| { at: string; actor: string; action: "granted" | "revoked"; packId: string; hookId: string; capability: ExtensionCapabilityWire }
+	| { at: string; actor: string; action: "granted" | "revoked"; packId: string; principal: "pack"; capability: ExtensionCapabilityWire };
+
+/** Grant-state metadata for an active inert hook declaration. */
+export interface HookGrantStatusWire {
+	id: string;
+	listName: string;
+	mode: "observe" | "decide";
+	events: string[];
+	requestedCapabilities: ExtensionCapabilityWire[];
+	grants: ExtensionCapabilityWire[];
+	runnable: boolean;
+	status: "observe" | "grant-required" | "granted";
+}
+
 /** All pack-scoped contributions for ONE installed + active pack (§6.4). */
 export interface PackContributionsWire {
 	packId: string;
 	packName: string;
+	hooks?: HookGrantStatusWire[];
 	panels: PackPanelWire[];
 	entrypoints: PackEntrypointWire[];
 	/** Pack-local channel names only; module/handler paths stay server-side. */
@@ -4053,4 +4087,155 @@ export function setMcpOperationActivation(opts: {
 	expectedRevision?: string;
 }): Promise<MarketResult<PackActivationResponse>> {
 	return marketFetch("/api/marketplace/pack-activation/mcp-operation", jsonInit("PATCH", opts));
+}
+
+// ============================================================================
+// PROJECT EXTENSION SETTINGS API (schema 2 declarations, all secret values redacted)
+// ============================================================================
+
+export type ExtensionSettingKind = "string" | "secret" | "enum" | "boolean" | "number";
+export type ExtensionSettingValue = string | boolean | number;
+export type ExtensionSettingsTargetKind = "pack" | "provider" | "hook";
+
+export interface ExtensionSettingsTargetRef {
+	packId: string;
+	kind: ExtensionSettingsTargetKind;
+	id: string;
+}
+
+/** A declared field and its redacted effective value. `value` is never present for secrets. */
+export interface ExtensionSettingsFieldWire {
+	key: string;
+	type: ExtensionSettingKind;
+	label?: string;
+	description?: string;
+	optional?: boolean;
+	values?: string[];
+	min?: number;
+	max?: number;
+	/** Public declared default for a non-secret field. Secrets never expose a default. */
+	default?: ExtensionSettingValue;
+	value?: ExtensionSettingValue;
+	secretSet?: boolean;
+	source: "default" | "legacy" | "project";
+}
+
+export interface ExtensionSettingsTargetWire {
+	ref: ExtensionSettingsTargetRef;
+	packName: string;
+	listName: string;
+	enabled: {
+		effective: boolean;
+		projectOverride?: boolean;
+		blockedBy?: "pack-activation" | "missing-or-shadowed";
+	};
+	configuration: {
+		state: "ready" | "requires-config" | "disabled" | "invalid-schema" | "unavailable";
+		missing: string[];
+	};
+	fields: ExtensionSettingsFieldWire[];
+	hookGrant?: HookGrantStatusWire;
+	/** Present on the server's active pack owner projection. */
+	packGrant?: PackGrantStatusWire;
+}
+
+export interface ExtensionSettingsResponse {
+	schema: 2;
+	revision: number;
+	targets: ExtensionSettingsTargetWire[];
+}
+
+export interface PatchExtensionSettingsTargetRequest {
+	expectedRevision: number;
+	enabled?: boolean;
+	/** `null` clears an optional or secret value; omitted values are unchanged. */
+	values?: Record<string, ExtensionSettingValue | null>;
+}
+
+export interface PatchExtensionSettingsPackRequest {
+	expectedRevision: number;
+	enabled: boolean;
+}
+
+export function getExtensionSettings(projectId: string): Promise<MarketResult<ExtensionSettingsResponse>> {
+	return marketFetch(`/api/projects/${encodeURIComponent(projectId)}/extension-settings`);
+}
+
+export function patchExtensionSettingsTarget(
+	projectId: string,
+	ref: ExtensionSettingsTargetRef,
+	request: PatchExtensionSettingsTargetRequest,
+): Promise<MarketResult<{ revision: number; target: ExtensionSettingsTargetWire }>> {
+	return marketFetch(
+		`/api/projects/${encodeURIComponent(projectId)}/extension-settings/${encodeURIComponent(ref.packId)}/${ref.kind}/${encodeURIComponent(ref.id)}`,
+		jsonInit("PATCH", request),
+	);
+}
+
+export function patchExtensionSettingsPack(
+	projectId: string,
+	packId: string,
+	request: PatchExtensionSettingsPackRequest,
+): Promise<MarketResult<{ revision: number; targets: ExtensionSettingsTargetWire[] }>> {
+	return marketFetch(
+		`/api/projects/${encodeURIComponent(projectId)}/extension-settings/${encodeURIComponent(packId)}`,
+		jsonInit("PATCH", request),
+	);
+}
+
+// Generic runtime projection shared by pack panels. It deliberately has no
+// settings or secret fields; those stay on the redacted EP-7 settings wire.
+export type ServiceRuntimeObservedState = "stopped" | "starting" | "ready" | "degraded" | "blocked" | "unavailable";
+export type ServiceRuntimeMode = "external" | "local" | "docker" | "compose";
+export interface ServiceRuntimeStatusWire {
+	identity: { packId: string; runtimeId: string };
+	desired: "stopped" | "running";
+	mode?: ServiceRuntimeMode;
+	state: ServiceRuntimeObservedState;
+	endpoint?: string;
+	diagnostic?: { code: string; retryAt?: string };
+}
+
+/** Runtime route payloads carry the settings revision that produced the status,
+ * never secret bytes. Pack panels call these through their scoped host route. */
+export interface HindsightRuntimeStatusWire {
+	settingsRevision: number;
+	status: ServiceRuntimeStatusWire;
+}
+export interface HindsightRuntimeControlRequest {
+	action: "start" | "stop" | "restart";
+	/** Explicit consent is required by the pack route before control is invoked. */
+	consent: true;
+}
+
+/** Grant one exact capability tuple through the authenticated project policy route. */
+export function grantExtensionCapability(
+	projectId: string,
+	tuple: ExtensionCapabilityGrantTuple,
+): Promise<MarketResult<{ grant: ExtensionCapabilityGrantTuple }>> {
+	return marketFetch(
+		`/api/projects/${encodeURIComponent(projectId)}/extension-grants`,
+		jsonInit("PUT", tuple),
+	);
+}
+
+/** Revoke one exact capability tuple through the authenticated project policy route. */
+export function revokeExtensionCapability(
+	projectId: string,
+	tuple: ExtensionCapabilityGrantTuple,
+): Promise<MarketResult<{ revoked: boolean }>> {
+	const principalPath = "principal" in tuple
+		? `principals/pack/${encodeURIComponent(tuple.capability)}`
+		: `${encodeURIComponent(tuple.hookId)}/${encodeURIComponent(tuple.capability)}`;
+	return marketFetch(
+		`/api/projects/${encodeURIComponent(projectId)}/extension-grants/${encodeURIComponent(tuple.packId)}/${principalPath}`,
+		jsonInit("DELETE"),
+	);
+}
+
+/** Read bounded, project-owned grant history without requesting mutation authority. */
+export function getExtensionGrantAudit(
+	projectId: string,
+): Promise<MarketResult<{ entries: ExtensionGrantAuditEntryWire[] }>> {
+	return marketFetch(`/api/projects/${encodeURIComponent(projectId)}/extension-grant-audit`);
 }

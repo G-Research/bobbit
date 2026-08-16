@@ -1,0 +1,730 @@
+<!doctype html>
+<!--
+  Hindsight service runtime — high-fidelity interactive UX prototype.
+
+  PURPOSE
+  This prototype is the visual/interaction specification for Hindsight as the
+  first external-service extension. It uses mock data only and implements no
+  runtime, memory, settings, or permission business logic.
+
+  PLATFORM ALIGNMENT (normative)
+  - Settings are presented as an Extension Platform EP-7 settings contribution.
+    Hindsight does not own a private settings store or settings page.
+  - Capability/tool policy and grants are presented through Extension Platform
+    EP-6 and Bobbit's existing allow / ask / never + permission-card grammar.
+    Hindsight does not own a private permission system.
+  - Marketplace remains the front door. The native extension panel is the
+    workbench for runtime diagnostics and memory operations.
+  - Changing run mode saves configuration only. Starting a managed service is a
+    distinct, explicit, consented action.
+  - Secrets are write-only: the interface shows only set / not set state, never
+    the stored value. An untouched field preserves the existing secret.
+
+  CONSISTENCY RATIONALE
+  - Card, button, input, lozenge, activation toggle, and policy-select metrics
+    match src/app/marketplace.css, src/app/tool-manager.css, and the current
+    Marketplace installed-row anatomy.
+  - Tabs match the existing role/tool inspector tabs. Policy rows use the same
+    group header, monospace tool names, and Allow / Ask / Never vocabulary as
+    Tools and role access.
+  - Runtime consent extends the existing Marketplace trust/consent disclosure;
+    it does not introduce a second confirmation language.
+  - Status always combines icon + label + explanatory text, never colour alone.
+  - All colours reference Bobbit bridge variables directly. This document does
+    not define or override a custom palette.
+
+  RESPONSIVE BEHAVIOUR
+  - >= 900px: two-column runtime/settings and memory list/detail layouts.
+  - < 900px: cards stack; sticky memory detail is released.
+  - < 620px: header controls and mode cards stack; action rows remain wrapping.
+
+  INTERACTION/STATES INCLUDED
+  Healthy, starting, unhealthy, service down, Docker unavailable, port conflict,
+  stopped with retained data; local/Docker/Compose/external modes; write-only
+  secret replacement/clear; explicit consent; start/stop/restart/logs; memory
+  browse/search/detail/invalidate/reflect; empty/searching/error states; shared
+  agent tool policies, grants, permission request, denial, and grant settlement.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hindsight service runtime — UX prototype</title>
+<style>
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html { min-height: 100%; background: var(--background); }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--background);
+    color: var(--foreground);
+    font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  button, input, select, textarea { font: inherit; }
+  button, select, input[type="checkbox"] { cursor: pointer; }
+  button:disabled, input:disabled, select:disabled { cursor: not-allowed; }
+  code, .mono { font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); }
+  .icon { width: 16px; height: 16px; flex: none; stroke-width: 1.8; }
+  .icon-sm { width: 14px; height: 14px; }
+  .icon-xs { width: 12px; height: 12px; }
+  .spin { animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes pulse { 50% { opacity: .48; } }
+  @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } }
+
+  .shell { min-height: 100vh; display: flex; flex-direction: column; }
+  .topbar {
+    position: sticky; top: 0; z-index: 20;
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    min-height: 56px; padding: 9px 20px;
+    border-bottom: 1px solid var(--border); background: var(--background);
+  }
+  .brand { display: flex; align-items: center; gap: 11px; min-width: 0; }
+  .brand-mark {
+    width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center;
+    background: color-mix(in oklch, var(--chart-4) 14%, transparent); color: var(--chart-4);
+    border: 1px solid color-mix(in oklch, var(--chart-4) 28%, var(--border));
+  }
+  .title-wrap { min-width: 0; }
+  h1 { font-size: 15px; line-height: 1.2; margin: 0; font-weight: 650; }
+  .breadcrumb { color: var(--muted-foreground); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .top-actions { display: flex; align-items: center; gap: 8px; }
+  .prototype-control { display: flex; align-items: center; gap: 7px; color: var(--muted-foreground); font-size: 11px; }
+
+  .tabs { display: flex; gap: 0; padding: 0 20px; border-bottom: 1px solid var(--border); overflow-x: auto; background: var(--background); }
+  .tab {
+    appearance: none; border: 0; border-bottom: 2px solid transparent; background: none;
+    color: var(--muted-foreground); padding: 10px 14px 9px; margin-bottom: -1px;
+    font-size: 12px; font-weight: 520; white-space: nowrap;
+  }
+  .tab:hover { color: var(--foreground); }
+  .tab[aria-selected="true"] { color: var(--foreground); border-bottom-color: var(--primary); }
+  .tab:focus-visible, .btn:focus-visible, .mode-card:focus-visible, .memory-row:focus-visible, .policy-select:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+    outline: 2px solid var(--ring); outline-offset: 2px;
+  }
+
+  main { width: min(1180px, 100%); margin: 0 auto; padding: 18px 20px 40px; }
+  .panel[hidden] { display: none; }
+  .section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+  .section-head h2 { margin: 0; font-size: 16px; font-weight: 650; }
+  .section-head p { margin: 3px 0 0; color: var(--muted-foreground); font-size: 12px; }
+  .grid-2 { display: grid; grid-template-columns: minmax(0, 1.06fr) minmax(320px, .94fr); gap: 14px; align-items: start; }
+  .stack { display: flex; flex-direction: column; gap: 12px; }
+  .card { border: 1px solid var(--border); border-radius: 8px; background: var(--card); overflow: hidden; }
+  .card-pad { padding: 13px 14px; }
+  .card-title { display: flex; align-items: center; gap: 7px; margin: 0; font-size: 13px; font-weight: 650; }
+  .card-sub { margin: 3px 0 0; font-size: 11.5px; color: var(--muted-foreground); }
+  .card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--border); }
+  .card-body { padding: 13px 14px; }
+
+  .lozenge {
+    display: inline-flex; align-items: center; gap: 5px; padding: 3px 7px;
+    border-radius: 6px; border: 1px solid var(--border); background: var(--muted);
+    color: var(--muted-foreground); font-size: 11px; font-weight: 600; line-height: 1.3; white-space: nowrap;
+  }
+  .lozenge.positive { border-color: color-mix(in oklch, var(--positive) 35%, transparent); background: color-mix(in oklch, var(--positive) 12%, transparent); color: var(--positive); }
+  .lozenge.warning { border-color: color-mix(in oklch, var(--warning) 35%, transparent); background: color-mix(in oklch, var(--warning) 12%, transparent); color: var(--warning); }
+  .lozenge.negative { border-color: color-mix(in oklch, var(--negative) 35%, transparent); background: color-mix(in oklch, var(--negative) 12%, transparent); color: var(--negative); }
+  .lozenge.info { border-color: color-mix(in oklch, var(--info) 35%, transparent); background: color-mix(in oklch, var(--info) 12%, transparent); color: var(--info); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
+
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+    min-height: 29px; padding: 5px 10px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--background); color: var(--foreground); font-size: 11px; font-weight: 520;
+    transition: background .15s, border-color .15s, color .15s, opacity .15s;
+  }
+  .btn:hover:not(:disabled) { background: var(--secondary); }
+  .btn.primary { border-color: color-mix(in oklch, var(--primary) 40%, transparent); background: color-mix(in oklch, var(--primary) 12%, transparent); color: var(--primary); }
+  .btn.primary:hover:not(:disabled) { background: color-mix(in oklch, var(--primary) 20%, transparent); }
+  .btn.solid { border-color: var(--primary); background: var(--primary); color: var(--primary-foreground); }
+  .btn.danger { border-color: color-mix(in oklch, var(--negative) 35%, transparent); color: var(--negative); }
+  .btn.danger:hover:not(:disabled) { background: color-mix(in oklch, var(--negative) 10%, transparent); }
+  .btn.ghost { border-color: transparent; background: transparent; color: var(--muted-foreground); }
+  .btn:disabled { opacity: .42; }
+  .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+
+  .callout { display: flex; align-items: flex-start; gap: 9px; padding: 10px 11px; border: 1px solid var(--border); border-radius: 7px; background: var(--muted); color: var(--foreground); font-size: 11.5px; }
+  .callout.info { border-color: color-mix(in oklch, var(--info) 30%, var(--border)); background: color-mix(in oklch, var(--info) 8%, var(--card)); }
+  .callout.warning { border-color: color-mix(in oklch, var(--warning) 35%, var(--border)); background: color-mix(in oklch, var(--warning) 9%, var(--card)); }
+  .callout.negative { border-color: color-mix(in oklch, var(--negative) 35%, var(--border)); background: color-mix(in oklch, var(--negative) 8%, var(--card)); }
+  .callout.positive { border-color: color-mix(in oklch, var(--positive) 32%, var(--border)); background: color-mix(in oklch, var(--positive) 8%, var(--card)); }
+  .callout strong { font-weight: 650; }
+  .callout-copy { min-width: 0; flex: 1; }
+  .callout-copy p { margin: 2px 0 0; color: var(--muted-foreground); }
+
+  .runtime-hero { padding: 15px 14px 13px; }
+  .runtime-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+  .runtime-name { display: flex; gap: 10px; align-items: flex-start; }
+  .runtime-icon { width: 32px; height: 32px; border-radius: 8px; display: grid; place-items: center; background: color-mix(in oklch, var(--chart-4) 12%, transparent); color: var(--chart-4); }
+  .runtime-status-copy { margin: 9px 0 0 42px; color: var(--muted-foreground); font-size: 12px; }
+  .meter { margin: 11px 0 0 42px; height: 4px; border-radius: 99px; overflow: hidden; background: var(--muted); }
+  .meter > span { display: block; height: 100%; width: 100%; background: var(--positive); border-radius: inherit; transition: width .25s, background .25s; }
+  .facts { display: grid; grid-template-columns: 1fr 1fr; margin-top: 13px; border-top: 1px solid var(--border); }
+  .fact { padding: 10px 12px 0 0; min-width: 0; }
+  .fact:nth-child(even) { padding-left: 12px; border-left: 1px solid var(--border); }
+  .fact-label { color: var(--muted-foreground); font-size: 10px; text-transform: uppercase; letter-spacing: .055em; font-weight: 650; }
+  .fact-value { margin-top: 3px; font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .runtime-actions { padding: 11px 14px; border-top: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .retained { display: inline-flex; align-items: center; gap: 5px; color: var(--muted-foreground); font-size: 11px; }
+
+  .diag { border-top: 1px solid var(--border); }
+  .diag[hidden] { display: none; }
+  .diag-toolbar { display: flex; justify-content: space-between; align-items: center; padding: 8px 11px; background: color-mix(in oklch, var(--muted) 65%, transparent); }
+  pre { margin: 0; max-height: 220px; overflow: auto; padding: 11px 12px; background: var(--background); color: var(--muted-foreground); font: 10.5px/1.55 var(--font-mono, ui-monospace, monospace); white-space: pre-wrap; }
+  .log-ok { color: var(--positive); } .log-warn { color: var(--warning); } .log-bad { color: var(--negative); }
+
+  .market-card { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: var(--background); }
+  .market-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+  .pack-title { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+  .pack-name { font-size: 13px; font-weight: 650; }
+  .builtin { padding: 1px 6px; border-radius: 4px; background: color-mix(in oklch, var(--primary) 14%, transparent); color: var(--primary); font-size: 10px; font-weight: 550; }
+  .version { font-size: 10.5px; color: var(--muted-foreground); }
+  .pack-desc { margin: 3px 0 0; font-size: 11.5px; color: var(--muted-foreground); }
+  .activation { display: flex; align-items: center; gap: 6px; color: var(--muted-foreground); font-size: 11px; }
+  .switch { width: 34px; height: 20px; display: inline-block; position: relative; }
+  .switch input { position: absolute; inset: 0; opacity: 0; margin: 0; z-index: 1; }
+  .switch span { position: absolute; inset: 0; border: 1px solid color-mix(in oklch, var(--primary) 60%, var(--border)); border-radius: 99px; background: var(--primary); }
+  .switch span::after { content: ""; position: absolute; width: 16px; height: 16px; left: 15px; top: 1px; border-radius: 50%; background: var(--primary-foreground); transition: transform .15s; }
+  .market-status-strip { margin-top: 9px; padding-top: 9px; border-top: 1px dashed var(--border); display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+  .strip-copy { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; font-size: 11.5px; }
+
+  .mode-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .mode-card { position: relative; appearance: none; text-align: left; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--background); color: var(--foreground); min-height: 107px; }
+  .mode-card:hover { background: var(--secondary); }
+  .mode-card.selected { border-color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); background: color-mix(in oklch, var(--primary) 6%, var(--background)); }
+  .mode-title { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 650; }
+  .mode-meta { margin-top: 5px; color: var(--muted-foreground); font-size: 10.5px; line-height: 1.4; }
+  .mode-foot { margin-top: 7px; font-size: 10px; color: var(--info); }
+  .recommended { margin-left: auto; padding: 1px 5px; border-radius: 4px; color: var(--positive); background: color-mix(in oklch, var(--positive) 11%, transparent); font-size: 9px; text-transform: uppercase; letter-spacing: .04em; }
+
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .field.full { grid-column: 1 / -1; }
+  .label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  label, .label { color: var(--foreground); font-size: 11px; font-weight: 550; }
+  .hint { color: var(--muted-foreground); font-size: 10.5px; line-height: 1.4; }
+  .input, .select, textarea {
+    width: 100%; min-height: 31px; border: 1px solid var(--input, var(--border)); border-radius: 6px;
+    padding: 6px 8px; background: var(--background); color: var(--foreground); font-size: 11.5px;
+  }
+  textarea { min-height: 78px; resize: vertical; }
+  .input::placeholder, textarea::placeholder { color: var(--muted-foreground); }
+  .input.error { border-color: var(--negative); box-shadow: 0 0 0 1px color-mix(in oklch, var(--negative) 25%, transparent); }
+  .secret-wrap { position: relative; }
+  .secret-wrap .input { padding-right: 84px; }
+  .secret-state { position: absolute; right: 7px; top: 50%; transform: translateY(-50%); color: var(--positive); font-size: 10px; display: inline-flex; align-items: center; gap: 4px; pointer-events: none; }
+  .form-divider { grid-column: 1 / -1; height: 1px; background: var(--border); margin: 2px 0; }
+  .toggle-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 8px 0; }
+  .toggle-row + .toggle-row { border-top: 1px solid color-mix(in oklch, var(--border) 60%, transparent); }
+  .tiny-switch { width: 28px; height: 16px; position: relative; flex: none; }
+  .tiny-switch input { position: absolute; inset: 0; opacity: 0; z-index: 1; margin: 0; }
+  .tiny-switch span { position: absolute; inset: 0; border: 1px solid var(--border); border-radius: 99px; background: var(--muted); }
+  .tiny-switch span::after { content: ""; position: absolute; top: 1px; left: 1px; width: 12px; height: 12px; border-radius: 50%; background: var(--muted-foreground); transition: transform .15s; }
+  .tiny-switch input:checked + span { background: var(--primary); border-color: var(--primary); }
+  .tiny-switch input:checked + span::after { transform: translateX(12px); background: var(--primary-foreground); }
+  .consent { margin-top: 11px; }
+  .consent-check { display: flex; align-items: flex-start; gap: 8px; margin-top: 8px; color: var(--foreground); font-size: 11px; }
+  .consent-check input { margin: 2px 0 0; accent-color: var(--primary); }
+  .form-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 11px; margin-top: 11px; border-top: 1px solid var(--border); }
+  .saved-note { color: var(--muted-foreground); font-size: 10.5px; }
+
+  .memory-layout { display: grid; grid-template-columns: minmax(330px, .92fr) minmax(0, 1.08fr); gap: 14px; align-items: start; }
+  .searchbar { display: flex; gap: 7px; padding: 11px; border-bottom: 1px solid var(--border); }
+  .search-input-wrap { position: relative; flex: 1; }
+  .search-input-wrap .icon { position: absolute; left: 8px; top: 8px; color: var(--muted-foreground); }
+  .search-input-wrap input { padding-left: 29px; }
+  .result-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 11px; color: var(--muted-foreground); font-size: 10.5px; background: color-mix(in oklch, var(--muted) 55%, transparent); }
+  .memory-list { max-height: 616px; overflow-y: auto; }
+  .memory-row { width: 100%; appearance: none; display: block; text-align: left; border: 0; border-top: 1px solid var(--border); padding: 11px; background: var(--card); color: var(--foreground); }
+  .memory-row:first-child { border-top: 0; }
+  .memory-row:hover { background: var(--accent); }
+  .memory-row.selected { background: color-mix(in oklch, var(--primary) 8%, var(--card)); box-shadow: inset 3px 0 0 var(--primary); }
+  .memory-row.invalidated { opacity: .55; }
+  .memory-topline { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .memory-kind { font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--chart-3); font-weight: 700; }
+  .memory-time { color: var(--muted-foreground); font-size: 10px; }
+  .memory-snippet { margin-top: 5px; font-size: 11.5px; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
+  .tag { padding: 1px 5px; border-radius: 4px; background: var(--muted); color: var(--muted-foreground); font-size: 9.5px; }
+  .detail { position: sticky; top: 105px; }
+  .detail-content { font-size: 12.5px; line-height: 1.65; white-space: pre-wrap; }
+  .detail-grid { display: grid; grid-template-columns: 110px minmax(0,1fr); gap: 7px 12px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 11px; }
+  .detail-grid dt { color: var(--muted-foreground); }
+  .detail-grid dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+  .reflect-box { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+  .reflection { margin-top: 9px; padding: 10px; border-left: 2px solid var(--chart-4); background: color-mix(in oklch, var(--chart-4) 7%, transparent); font-size: 11.5px; line-height: 1.55; }
+  .empty { display: grid; place-items: center; min-height: 260px; padding: 24px; text-align: center; color: var(--muted-foreground); }
+  .empty .icon { width: 28px; height: 28px; margin-bottom: 7px; }
+  .skeleton { animation: pulse 1.2s ease-in-out infinite; background: var(--muted); border-radius: 5px; height: 12px; margin: 8px 11px; }
+
+  .platform-banner { margin-bottom: 12px; }
+  .policy-group { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .policy-head { display: flex; align-items: center; gap: 9px; padding: 10px 12px; background: color-mix(in oklch, var(--secondary) 40%, transparent); color: var(--muted-foreground); font-size: 10.5px; font-weight: 650; text-transform: uppercase; letter-spacing: .05em; }
+  .policy-count { padding: 1px 6px; border-radius: 99px; background: color-mix(in oklch, var(--muted-foreground) 15%, transparent); font-size: 9.5px; }
+  .policy-head .group-policy { margin-left: auto; display: flex; align-items: center; gap: 6px; text-transform: none; letter-spacing: normal; font-weight: 450; }
+  .policy-select { min-width: 115px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--background); color: var(--foreground); font-size: 10.5px; }
+  .policy-row { display: grid; grid-template-columns: minmax(170px,.8fr) minmax(190px,1.2fr) 130px; gap: 12px; align-items: center; padding: 10px 12px; border-top: 1px solid var(--border); }
+  .policy-name { font-size: 11.5px; font-weight: 550; }
+  .policy-desc { color: var(--muted-foreground); font-size: 10.5px; }
+  .effective { display: block; margin-top: 2px; color: var(--muted-foreground); font-size: 9.5px; }
+  .grant-list { width: 100%; border-collapse: collapse; font-size: 11px; }
+  .grant-list th, .grant-list td { padding: 8px 10px; border-top: 1px solid var(--border); text-align: left; }
+  .grant-list th { border-top: 0; color: var(--muted-foreground); font-size: 9.5px; text-transform: uppercase; letter-spacing: .05em; }
+  .permission-card { border: 1px solid color-mix(in oklch, var(--warning) 32%, var(--border)); background: color-mix(in oklch, var(--warning) 8%, var(--card)); border-radius: 8px; padding: 11px; }
+  .permission-title { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 650; color: var(--warning); }
+  .permission-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin-top: 10px; }
+  .choice { min-width: 0; text-align: left; padding: 9px; border: 1px solid var(--border); border-radius: 8px; background: var(--background); color: var(--foreground); }
+  .choice:hover { background: var(--secondary); }
+  .choice strong { display: block; font-size: 11.5px; }
+  .choice span { display: block; margin-top: 2px; font-size: 9.5px; color: var(--muted-foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .settled { display: flex; align-items: center; gap: 8px; border: 1px solid var(--border); border-radius: 7px; padding: 9px 10px; font-size: 11.5px; }
+  .settled.positive { color: var(--positive); background: color-mix(in oklch, var(--positive) 8%, var(--card)); border-color: color-mix(in oklch, var(--positive) 30%, var(--border)); }
+  .settled.negative { color: var(--negative); background: color-mix(in oklch, var(--negative) 8%, var(--card)); border-color: color-mix(in oklch, var(--negative) 30%, var(--border)); }
+
+  .modal-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 18px; background: color-mix(in oklch, var(--foreground) 25%, transparent); }
+  .modal-backdrop[hidden] { display: none; }
+  .modal { width: min(430px, 100%); border: 1px solid var(--border); border-radius: 10px; background: var(--popover); color: var(--popover-foreground); box-shadow: 0 18px 55px color-mix(in oklch, var(--foreground) 22%, transparent); }
+  .modal h3 { margin: 0; font-size: 14px; }
+  .modal p { margin: 7px 0 0; color: var(--muted-foreground); font-size: 11.5px; }
+  .modal-body { padding: 15px; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 7px; padding: 11px 15px; border-top: 1px solid var(--border); }
+  .toast { position: fixed; right: 18px; bottom: 18px; z-index: 70; max-width: 360px; display: flex; gap: 8px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--popover); color: var(--popover-foreground); box-shadow: 0 10px 32px color-mix(in oklch, var(--foreground) 18%, transparent); animation: toast-in .18s ease-out; font-size: 11.5px; }
+  .toast[hidden] { display: none; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+
+  @media (max-width: 900px) {
+    .grid-2, .memory-layout { grid-template-columns: 1fr; }
+    .detail { position: static; }
+    .memory-list { max-height: 420px; }
+  }
+  @media (max-width: 620px) {
+    .topbar { align-items: flex-start; padding: 9px 12px; }
+    .top-actions { flex-direction: column; align-items: flex-end; }
+    .prototype-control > span { display: none; }
+    .tabs { padding: 0 6px; }
+    main { padding: 14px 12px 30px; }
+    .mode-grid, .form-grid, .permission-actions { grid-template-columns: 1fr; }
+    .facts { grid-template-columns: 1fr; }
+    .fact:nth-child(even) { padding-left: 0; border-left: 0; }
+    .field.full, .form-divider { grid-column: 1; }
+    .policy-row { grid-template-columns: 1fr; gap: 6px; }
+    .policy-select { width: 100%; }
+    .runtime-status-copy, .meter { margin-left: 0; }
+  }
+</style>
+</head>
+<body>
+<svg aria-hidden="true" width="0" height="0" style="position:absolute"><defs>
+  <symbol id="i-brain" viewBox="0 0 24 24"><path d="M9.5 4.5A3.5 3.5 0 0 0 6 8v.3a3.5 3.5 0 0 0-1 6.7v.5A3.5 3.5 0 0 0 8.5 19H10V5.5a2 2 0 0 0-.5-1Z" fill="none" stroke="currentColor"/><path d="M14.5 4.5A3.5 3.5 0 0 1 18 8v.3a3.5 3.5 0 0 1 1 6.7v.5a3.5 3.5 0 0 1-3.5 3.5H14V5.5a2 2 0 0 1 .5-1ZM7 9.5h3M14 14h3M8 16.5l2-1.5M16 7.5 14 9" fill="none" stroke="currentColor" stroke-linecap="round"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3 2.7 20h18.6L12 3Z" fill="none" stroke="currentColor" stroke-linejoin="round"/><path d="M12 9v4m0 3h.01" fill="none" stroke="currentColor" stroke-linecap="round"/></symbol>
+  <symbol id="i-loader" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-6.2-8.56" fill="none" stroke="currentColor" stroke-linecap="round"/></symbol>
+  <symbol id="i-square" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2" fill="none" stroke="currentColor"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7V5Z" fill="none" stroke="currentColor" stroke-linejoin="round"/></symbol>
+  <symbol id="i-rotate" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5M6.1 8A7 7 0 0 1 18 6l2 1M4 17l2 1a7 7 0 0 0 11.9-2" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><path d="m5 7 4 4-4 4m6 1h7" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3" fill="none" stroke="currentColor"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6" fill="none" stroke="currentColor"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" fill="none" stroke="currentColor"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.9l.06.06-2.84 2.84-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1v.1h-4v-.1a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.9.34l-.06.06-2.84-2.84.06-.06A1.7 1.7 0 0 0 4.1 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1-.4h-.1v-4h.1a1.7 1.7 0 0 0 1.6-1.1 1.7 1.7 0 0 0-.34-1.9l-.06-.06L6.54 3.7l.06.06A1.7 1.7 0 0 0 8.5 4.1a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1v-.1h4v.1A1.7 1.7 0 0 0 15 4.1a1.7 1.7 0 0 0 1.9-.34l.06-.06 2.84 2.84-.06.06A1.7 1.7 0 0 0 19.4 8.5a1.7 1.7 0 0 0 .6 1 1.7 1.7 0 0 0 1 .4h.1v4H21a1.7 1.7 0 0 0-1.6 1.1Z" fill="none" stroke="currentColor" stroke-linecap="round"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor"/><path d="m20 20-4-4" fill="none" stroke="currentColor" stroke-linecap="round"/></symbol>
+  <symbol id="i-sparkles" viewBox="0 0 24 24"><path d="m12 3 1.2 3.8L17 8l-3.8 1.2L12 13l-1.2-3.8L7 8l3.8-1.2L12 3Zm6 9 .8 2.2L21 15l-2.2.8L18 18l-.8-2.2L15 15l2.2-.8L18 12ZM6 13l1 3 3 1-3 1-1 3-1-3-3-1 3-1 1-3Z" fill="none" stroke="currentColor" stroke-linejoin="round"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16m-10 4v6m4-6v6M6 7l1 14h10l1-14M9 7V4h6v3" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 4 6v5c0 5 3.4 8.4 8 10 4.6-1.6 8-5 8-10V6l-8-3Z" fill="none" stroke="currentColor" stroke-linejoin="round"/><path d="m9 12 2 2 4-4" fill="none" stroke="currentColor" stroke-linecap="round"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="11" rx="2" fill="none" stroke="currentColor"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" fill="none" stroke="currentColor"/></symbol>
+  <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6m0-6-9 9M20 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="2" fill="none" stroke="currentColor"/><path d="M8 10V7a4 4 0 0 1 8 0v3" fill="none" stroke="currentColor"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18" fill="none" stroke="currentColor" stroke-linecap="round"/></symbol>
+  <symbol id="i-box" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5 9-5Z" fill="none" stroke="currentColor"/><path d="m3 8 9 5 9-5v9l-9 5-9-5V8Z" fill="none" stroke="currentColor"/></symbol>
+  <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.1.1l2-2A5 5 0 0 0 12 4l-1.1 1.1M14 11a5 5 0 0 0-7.1-.1l-2 2A5 5 0 0 0 12 20l1.1-1.1" fill="none" stroke="currentColor" stroke-linecap="round"/></symbol>
+</defs></svg>
+
+<div class="shell">
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark"><svg class="icon"><use href="#i-brain"/></svg></div>
+      <div class="title-wrap">
+        <div class="breadcrumb">Marketplace / Built-in / hindsight</div>
+        <h1>Hindsight Memory</h1>
+      </div>
+    </div>
+    <div class="top-actions">
+      <span id="headerStatus" class="lozenge positive"><svg class="icon icon-xs"><use href="#i-check"/></svg> Healthy</span>
+      <label class="prototype-control"><span>Prototype state</span>
+        <select id="scenario" class="select" aria-label="Prototype runtime state">
+          <option value="healthy">Healthy</option>
+          <option value="starting">Starting</option>
+          <option value="unhealthy">Unhealthy</option>
+          <option value="down">Service down</option>
+          <option value="docker">Docker unavailable</option>
+          <option value="port">Port conflict</option>
+          <option value="retained">Stopped · data retained</option>
+        </select>
+      </label>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist" aria-label="Hindsight sections">
+    <button class="tab" role="tab" aria-selected="true" aria-controls="overview" id="tab-overview" data-tab="overview">Overview &amp; settings</button>
+    <button class="tab" role="tab" aria-selected="false" aria-controls="memory" id="tab-memory" data-tab="memory">Memory</button>
+    <button class="tab" role="tab" aria-selected="false" aria-controls="access" id="tab-access" data-tab="access">Agent access <span class="lozenge info" style="margin-left:5px;padding:1px 5px">3 tools</span></button>
+  </nav>
+
+  <main>
+    <section class="panel" id="overview" role="tabpanel" aria-labelledby="tab-overview">
+      <div class="section-head">
+        <div><h2>Service overview</h2><p>Run Hindsight where it fits your environment. Configuration never starts a service by itself.</p></div>
+        <button class="btn" id="refreshBtn"><svg class="icon icon-sm"><use href="#i-rotate"/></svg> Refresh</button>
+      </div>
+
+      <div id="stateCallout" class="callout positive" style="margin-bottom:12px">
+        <svg class="icon"><use href="#i-check"/></svg>
+        <div class="callout-copy"><strong>Hindsight is healthy</strong><p>Health probe passed 12 seconds ago. Recall and retain are available to agents.</p></div>
+      </div>
+
+      <div class="grid-2">
+        <div class="stack">
+          <article class="card" aria-labelledby="runtimeTitle">
+            <div class="runtime-hero">
+              <div class="runtime-top">
+                <div class="runtime-name">
+                  <div class="runtime-icon"><svg class="icon"><use href="#i-database"/></svg></div>
+                  <div><h3 class="card-title" id="runtimeTitle">Hindsight service</h3><p class="card-sub" id="runtimeModeText">Docker · Bobbit managed</p></div>
+                </div>
+                <span id="runtimeBadge" class="lozenge positive"><svg class="icon icon-xs"><use href="#i-check"/></svg> Running</span>
+              </div>
+              <p class="runtime-status-copy" id="runtimeDescription">Ready for recall, retain, and reflect. Last health check completed in 82 ms.</p>
+              <div class="meter" aria-hidden="true"><span id="healthMeter"></span></div>
+              <div class="facts">
+                <div class="fact"><div class="fact-label">API endpoint</div><div class="fact-value mono" id="endpointValue">http://127.0.0.1:9177</div></div>
+                <div class="fact"><div class="fact-label">Bank / namespace</div><div class="fact-value mono">bobbit / default</div></div>
+                <div class="fact"><div class="fact-label">Storage</div><div class="fact-value mono" id="storageValue">~/.hindsight · 38.4 MB</div></div>
+                <div class="fact"><div class="fact-label">Restart policy</div><div class="fact-value" id="restartValue">On failure · max 3 attempts</div></div>
+              </div>
+            </div>
+            <div class="runtime-actions">
+              <span class="retained" id="retainedNote"><svg class="icon icon-sm"><use href="#i-database"/></svg> Data survives service and Bobbit restarts</span>
+              <div class="actions" id="runtimeButtons">
+                <button class="btn" id="logsBtn"><svg class="icon icon-sm"><use href="#i-terminal"/></svg> View logs</button>
+                <button class="btn" id="restartBtn"><svg class="icon icon-sm"><use href="#i-rotate"/></svg> Restart</button>
+                <button class="btn danger" id="stopBtn"><svg class="icon icon-sm"><use href="#i-square"/></svg> Stop</button>
+                <button class="btn solid" id="startBtn" hidden><svg class="icon icon-sm"><use href="#i-play"/></svg> Start service</button>
+              </div>
+            </div>
+            <div class="diag" id="logsPanel" hidden>
+              <div class="diag-toolbar"><span class="mono" style="font-size:10.5px">hindsight / last 200 lines</span><button class="btn ghost" id="closeLogs" aria-label="Close logs"><svg class="icon icon-sm"><use href="#i-x"/></svg></button></div>
+              <pre id="logOutput"><span class="log-ok">12:41:03 INFO</span>  api listening on 127.0.0.1:9177
+<span class="log-ok">12:41:03 INFO</span>  connected to postgres · migrations current
+12:41:07 INFO  bank=bobbit recall query completed · 82ms · 6 results
+12:41:12 INFO  bank=bobbit retained 1 memory asynchronously
+12:41:18 INFO  health probe passed</pre>
+            </div>
+          </article>
+
+          <article class="card card-pad">
+            <h3 class="card-title"><svg class="icon"><use href="#i-box"/></svg> Marketplace activation</h3>
+            <p class="card-sub">The Marketplace remains the front door. Activation controls whether the extension exists; runtime state is separate.</p>
+            <div class="market-card" style="margin-top:10px">
+              <div class="market-row">
+                <div><div class="pack-title"><span class="pack-name">hindsight</span><span class="builtin">Built-in</span><span class="version">v1.0.0</span></div><p class="pack-desc">Persistent agent memory backed by Hindsight.</p></div>
+                <label class="activation">Enabled <span class="switch"><input type="checkbox" checked aria-label="Enable Hindsight extension"><span></span></span></label>
+              </div>
+              <div class="market-status-strip">
+                <div class="strip-copy"><span id="marketBadge" class="lozenge positive"><span class="dot"></span> Running</span><span id="marketIdentity">Docker · <span class="mono">127.0.0.1:9177</span></span></div>
+                <button class="btn primary" data-tab-jump="overview"><svg class="icon icon-sm"><use href="#i-settings"/></svg> Configure</button>
+              </div>
+            </div>
+          </article>
+        </div>
+
+        <div class="stack">
+          <article class="card">
+            <div class="card-head"><div><h3 class="card-title"><svg class="icon"><use href="#i-settings"/></svg> Extension settings</h3><p class="card-sub">Contributed to the shared settings surface by Extension Platform EP-7.</p></div><span class="lozenge info"><svg class="icon icon-xs"><use href="#i-link"/></svg> EP-7</span></div>
+            <div class="card-body">
+              <div class="label" style="margin-bottom:7px">Run mode</div>
+              <div class="mode-grid" id="modeGrid">
+                <button class="mode-card" data-mode="local"><div class="mode-title"><svg class="icon icon-sm"><use href="#i-terminal"/></svg> Local process</div><div class="mode-meta"><strong>Bobbit manages:</strong> process lifecycle and health<br><strong>You provide:</strong> installed command</div><div class="mode-foot">No containers · data stays local</div></button>
+                <button class="mode-card selected" data-mode="docker"><div class="mode-title"><svg class="icon icon-sm"><use href="#i-box"/></svg> Docker <span class="recommended">Recommended</span></div><div class="mode-meta"><strong>Bobbit manages:</strong> Hindsight + Postgres containers<br><strong>You provide:</strong> LLM key</div><div class="mode-foot">Loopback ports · persistent volume</div></button>
+                <button class="mode-card" data-mode="compose"><div class="mode-title"><svg class="icon icon-sm"><use href="#i-database"/></svg> Docker Compose</div><div class="mode-meta"><strong>Bobbit manages:</strong> selected Compose service<br><strong>You provide:</strong> compose file + service</div><div class="mode-foot">Uses your existing stack</div></button>
+                <button class="mode-card" data-mode="external"><div class="mode-title"><svg class="icon icon-sm"><use href="#i-external"/></svg> External service</div><div class="mode-meta"><strong>Bobbit manages:</strong> connection health only<br><strong>You manage:</strong> service lifecycle + storage</div><div class="mode-foot">No local process or container</div></button>
+              </div>
+
+              <div class="callout info" style="margin-top:10px"><svg class="icon"><use href="#i-lock"/></svg><div class="callout-copy"><strong>Mode changes do not start Hindsight</strong><p>Save configuration first. A separate consented Start action controls managed lifecycle.</p></div></div>
+
+              <div class="form-grid" style="margin-top:11px">
+                <div class="field full" id="modeSpecificField">
+                  <div class="label-row"><label for="managedPath">Data directory</label><span class="lozenge">Persistent</span></div>
+                  <input class="input mono" id="managedPath" value="~/.hindsight">
+                  <span class="hint">Owned by your user account. Bobbit never deletes retained data when the service stops.</span>
+                </div>
+                <div class="field"><label for="bank">Bank</label><input class="input mono" id="bank" value="bobbit"></div>
+                <div class="field"><label for="namespace">Namespace</label><input class="input mono" id="namespace" value="default"></div>
+                <div class="field full">
+                  <div class="label-row"><label for="secretInput">Hindsight LLM API key</label><button class="btn ghost" id="clearSecret" type="button">Clear saved key</button></div>
+                  <div class="secret-wrap"><input class="input mono" id="secretInput" type="password" autocomplete="new-password" placeholder="Enter a new key to replace the saved key"><span class="secret-state" id="secretState"><svg class="icon icon-xs"><use href="#i-check"/></svg> Key set</span></div>
+                  <span class="hint">Write-only. The stored value is never returned to this page, logs, or images. Leave blank to preserve it.</span>
+                </div>
+                <div class="form-divider"></div>
+                <div class="field full">
+                  <div class="toggle-row"><div><div class="label">Auto-recall</div><div class="hint">Bring relevant memory into agent context automatically.</div></div><label class="tiny-switch"><input type="checkbox" checked aria-label="Auto-recall"><span></span></label></div>
+                  <div class="toggle-row"><div><div class="label">Auto-retain</div><div class="hint">Save turn summaries asynchronously; failures enter the durable retry queue.</div></div><label class="tiny-switch"><input type="checkbox" checked aria-label="Auto-retain"><span></span></label></div>
+                </div>
+              </div>
+
+              <div class="consent callout warning" id="consentBox">
+                <svg class="icon"><use href="#i-alert"/></svg>
+                <div class="callout-copy"><strong id="consentTitle">Before Docker starts</strong><p id="consentText">Bobbit will pull the approved Hindsight image, run the API and Postgres on loopback-only allocated ports, and mount <span class="mono">~/.hindsight</span>. Stop preserves data.</p><label class="consent-check"><input id="consentCheck" type="checkbox"> I understand what will run and where data will persist.</label></div>
+              </div>
+
+              <div class="form-footer"><span class="saved-note" id="saveNote">Loaded from persisted extension settings</span><div class="actions"><button class="btn">Discard</button><button class="btn primary" id="saveBtn">Save configuration</button><button class="btn solid" id="configStartBtn" disabled><svg class="icon icon-sm"><use href="#i-play"/></svg> Start Docker service</button></div></div>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" id="memory" role="tabpanel" aria-labelledby="tab-memory" hidden>
+      <div class="section-head">
+        <div><h2>Memory</h2><p>Browse, search, inspect, invalidate, and reflect across the active Hindsight bank.</p></div>
+        <div class="actions"><span class="lozenge positive"><span class="dot"></span> bobbit / default</span><button class="btn" id="memoryRefresh"><svg class="icon icon-sm"><use href="#i-rotate"/></svg> Refresh</button></div>
+      </div>
+      <div class="memory-layout">
+        <article class="card">
+          <div class="searchbar">
+            <div class="search-input-wrap"><svg class="icon icon-sm"><use href="#i-search"/></svg><input id="memorySearch" class="input" placeholder="Search memories by meaning…" aria-label="Search memories"></div>
+            <select id="scopeSelect" class="select" style="width:auto" aria-label="Memory scope"><option>All projects</option><option>This project</option><option>This goal</option></select>
+          </div>
+          <div class="result-meta"><span id="resultCount">6 memories</span><span>Semantic relevance</span></div>
+          <div class="memory-list" id="memoryList"></div>
+          <div class="empty" id="memoryEmpty" hidden><div><svg class="icon"><use href="#i-search"/></svg><strong style="display:block;color:var(--foreground)">No memories matched</strong><span>Try broader wording or search all projects.</span><div style="margin-top:10px"><button class="btn" id="clearSearch">Clear search</button></div></div></div>
+          <div id="memoryLoading" hidden aria-live="polite"><div class="skeleton" style="width:70%"></div><div class="skeleton"></div><div class="skeleton" style="width:84%"></div><div class="skeleton" style="width:64%"></div></div>
+        </article>
+        <article class="card detail" id="memoryDetail"></article>
+      </div>
+    </section>
+
+    <section class="panel" id="access" role="tabpanel" aria-labelledby="tab-access" hidden>
+      <div class="section-head"><div><h2>Agent access</h2><p>See how Hindsight tools and lifecycle capabilities resolve for agents.</p></div><button class="btn" id="simulateRequest"><svg class="icon icon-sm"><use href="#i-shield"/></svg> Simulate permission request</button></div>
+      <div class="platform-banner callout info"><svg class="icon"><use href="#i-link"/></svg><div class="callout-copy"><strong>Shared Extension Platform controls</strong><p>Capability grants come from EP-6; these settings and tool policy rows use EP-7 and Bobbit's existing Tools surface. Hindsight contributes declarations only—there is no Hindsight-specific grant or settings store.</p></div><span class="lozenge info">EP-6 / EP-7</span></div>
+
+      <div class="grid-2">
+        <div class="stack">
+          <article class="card">
+            <div class="card-head"><div><h3 class="card-title"><svg class="icon"><use href="#i-shield"/></svg> Agent tool policy</h3><p class="card-sub">Allow runs immediately. Ask uses the standard permission card. Never blocks the tool.</p></div><button class="btn">Open in Tools <svg class="icon icon-xs"><use href="#i-external"/></svg></button></div>
+            <div class="card-body" style="padding:0">
+              <div class="policy-group" style="border:0;border-radius:0">
+                <div class="policy-head">Hindsight <span class="policy-count">3 tools</span><span class="group-policy">Group policy <select id="groupPolicy" class="policy-select"><option value="">Allow (default)</option><option value="allow">Allow</option><option value="ask">Ask</option><option value="never">Never</option></select></span></div>
+                <div class="policy-row"><div><div class="policy-name mono">hindsight_recall</div><span class="effective">Effective: Allow · group default</span></div><div class="policy-desc">Search relevant memories in the configured bank.</div><select class="policy-select tool-policy" data-tool="recall"><option value="">Use group default</option><option value="allow">Allow</option><option value="ask">Ask</option><option value="never">Never</option></select></div>
+                <div class="policy-row"><div><div class="policy-name mono">hindsight_retain</div><span class="effective">Effective: Ask · tool override</span></div><div class="policy-desc">Add a user-directed memory with visible provenance.</div><select class="policy-select tool-policy" data-tool="retain"><option value="">Use group default</option><option value="allow">Allow</option><option value="ask" selected>Ask</option><option value="never">Never</option></select></div>
+                <div class="policy-row"><div><div class="policy-name mono">hindsight_reflect</div><span class="effective">Effective: Ask · tool override</span></div><div class="policy-desc">Synthesize an answer across stored memories.</div><select class="policy-select tool-policy" data-tool="reflect"><option value="">Use group default</option><option value="allow">Allow</option><option value="ask" selected>Ask</option><option value="never">Never</option></select></div>
+              </div>
+            </div>
+          </article>
+
+          <article class="card">
+            <div class="card-head"><div><h3 class="card-title">Extension capability grants</h3><p class="card-sub">Resolved by EP-6 before hooks run; runtime state cannot expand these grants.</p></div><span class="lozenge positive"><svg class="icon icon-xs"><use href="#i-check"/></svg> Granted</span></div>
+            <div class="card-body" style="padding:0">
+              <table class="grant-list"><thead><tr><th>Capability</th><th>Mode</th><th>Purpose</th></tr></thead><tbody>
+                <tr><td class="mono">context.read</td><td><span class="lozenge">Observe</span></td><td>Recall against prompt scope</td></tr>
+                <tr><td class="mono">memory.write</td><td><span class="lozenge warning">Decide</span></td><td>Queue turn/compaction retains</td></tr>
+                <tr><td class="mono">store.scoped</td><td><span class="lozenge">Observe</span></td><td>Durable retry queue only</td></tr>
+              </tbody></table>
+            </div>
+          </article>
+        </div>
+
+        <div class="stack">
+          <article class="card">
+            <div class="card-head"><div><h3 class="card-title">Current session grants</h3><p class="card-sub">Temporary grants are visible and expire predictably.</p></div><span class="lozenge">ScoutPost · coder</span></div>
+            <div class="card-body" style="padding:0"><table class="grant-list"><thead><tr><th>Tool / group</th><th>Scope</th><th>Expires</th></tr></thead><tbody id="grantRows"><tr><td class="mono">hindsight_recall</td><td>This session</td><td>When session ends</td></tr><tr id="emptyGrantRow" hidden><td colspan="3" style="color:var(--muted-foreground);text-align:center;padding:18px">No temporary grants in this session.</td></tr></tbody></table></div>
+          </article>
+
+          <article class="card">
+            <div class="card-head"><div><h3 class="card-title">Shared permission-card preview</h3><p class="card-sub">The same card appears pinned above the composer when an agent is blocked.</p></div></div>
+            <div class="card-body" id="permissionHost">
+              <div class="permission-card" id="permissionCard">
+                <div class="permission-title"><svg class="icon"><use href="#i-shield"/></svg> Role “Coder” doesn't have access to <span class="mono">hindsight_reflect</span></div>
+                <div style="display:flex;align-items:center;gap:7px;margin-top:8px"><label for="duration">Duration</label><select id="duration" class="policy-select"><option value="session">This session</option><option value="once">Just for now</option><option value="persistent">For all future sessions</option></select></div>
+                <div class="permission-actions">
+                  <button class="choice" data-grant="group"><strong>Allow all tools</strong><span>in Hindsight</span></button>
+                  <button class="choice" data-grant="tool"><strong>Allow just this tool</strong><span>hindsight_reflect</span></button>
+                  <button class="choice" data-grant="deny"><strong>Deny</strong><span>Do not run it</span></button>
+                </div>
+              </div>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="modal-backdrop" id="invalidateModal" hidden role="presentation">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="invalidateTitle">
+    <div class="modal-body"><h3 id="invalidateTitle">Invalidate this memory?</h3><p>It will stop appearing in recall results. The audit record and provenance remain visible, and the action can be reversed from Hindsight's operator UI.</p><div class="callout warning" style="margin-top:10px"><svg class="icon"><use href="#i-alert"/></svg><div class="callout-copy"><strong>This does not delete retained data</strong><p>Invalidation changes recall eligibility; it is not destructive storage cleanup.</p></div></div></div>
+    <div class="modal-actions"><button class="btn" id="cancelInvalidate">Cancel</button><button class="btn danger" id="confirmInvalidate"><svg class="icon icon-sm"><use href="#i-trash"/></svg> Invalidate memory</button></div>
+  </div>
+</div>
+<div class="toast" id="toast" hidden role="status" aria-live="polite"><svg class="icon"><use href="#i-check"/></svg><span id="toastText"></span></div>
+
+<script>
+  const $ = (s, root = document) => root.querySelector(s);
+  const $$ = (s, root = document) => [...root.querySelectorAll(s)];
+  const icon = (id, cls = "icon icon-sm") => `<svg class="${cls}" aria-hidden="true"><use href="#${id}"/></svg>`;
+  let currentMode = "docker";
+  let currentScenario = "healthy";
+  let selectedMemory = "m1";
+  let pendingInvalidate = null;
+  let toastTimer;
+
+  const memories = [
+    { id:"m1", kind:"Decision", age:"18 min", score:"96%", text:"For external-service extensions, changing run mode persists configuration only. Starting a managed service must remain a separate, explicit, consented action.", tags:["project:bobbit","goal:hindsight-runtime","decision"], project:"Bobbit", source:"Goal 35f56c0e · team lead synthesis", retained:"2026-06-17 12:23:04", agent:"Bea Holder", invalidated:false },
+    { id:"m2", kind:"Pattern", age:"Yesterday", score:"91%", text:"Secrets are write-only on settings surfaces: show only whether a value is set, omit untouched fields on save, and never return stored values to the client.", tags:["project:bobbit","security","extensions"], project:"Bobbit", source:"Extension Platform EP-7 review", retained:"2026-06-16 16:08:51", agent:"Security reviewer", invalidated:false },
+    { id:"m3", kind:"Finding", age:"2 days", score:"88%", text:"A stopped Hindsight runtime must retain its volume. Stop, crash restart, and Bobbit restart must not imply deletion; storage ownership should be visible before first start.", tags:["project:bobbit","runtime","durability"], project:"Bobbit", source:"Hindsight service contract audit", retained:"2026-06-15 09:42:17", agent:"Runtime reviewer", invalidated:false },
+    { id:"m4", kind:"Preference", age:"4 days", score:"82%", text:"Marketplace is the extension front door. Detailed runtime diagnostics and memory operations belong in the native extension panel, while tool policy remains in Tools.", tags:["project:bobbit","ux","marketplace"], project:"Bobbit", source:"UX review of PR #820", retained:"2026-06-13 14:12:06", agent:"UX designer", invalidated:false },
+    { id:"m5", kind:"Solution", age:"1 week", score:"76%", text:"When a preferred port is occupied, keep the user's config intact, report the owning process when known, and offer an allocated replacement port rather than hanging startup.", tags:["project:bobbit","networking","failure-mode"], project:"Bobbit", source:"Runtime failure-mode workshop", retained:"2026-06-10 11:05:43", agent:"Coder", invalidated:false },
+    { id:"m6", kind:"Context", age:"2 weeks", score:"69%", text:"Agent-facing hindsight_recall, hindsight_retain, and hindsight_reflect use the standard Allow / Ask / Never policy cascade and shared permission-card duration choices.", tags:["project:bobbit","tools","permissions"], project:"Bobbit", source:"Extension Platform EP-6 notes", retained:"2026-06-03 10:17:22", agent:"Platform designer", invalidated:false }
+  ];
+
+  const stateMap = {
+    healthy: { tone:"positive", icon:"i-check", header:"Healthy", badge:"Running", callout:"Hindsight is healthy", detail:"Health probe passed 12 seconds ago. Recall and retain are available to agents.", desc:"Ready for recall, retain, and reflect. Last health check completed in 82 ms.", meter:"100%", color:"var(--positive)", buttons:"running", log:`<span class="log-ok">12:41:03 INFO</span>  api listening on 127.0.0.1:9177\n<span class="log-ok">12:41:03 INFO</span>  connected to postgres · migrations current\n12:41:07 INFO  bank=bobbit recall query completed · 82ms · 6 results\n12:41:12 INFO  bank=bobbit retained 1 memory asynchronously\n12:41:18 INFO  health probe passed` },
+    starting: { tone:"warning", icon:"i-loader", spin:true, header:"Starting", badge:"Starting…", callout:"Hindsight is starting", detail:"The session remains usable while Bobbit waits. Memory features degrade cleanly until health passes.", desc:"Starting containers and waiting for the API health check. Attempt 4 of 20.", meter:"58%", color:"var(--warning)", buttons:"starting", log:`12:41:03 INFO  pulling ghcr.io/vectorize-io/hindsight:latest\n<span class="log-ok">12:41:09 INFO</span>  postgres container ready\n12:41:11 INFO  hindsight api container started\n<span class="log-warn">12:41:13 WAIT</span>  health probe /health · attempt 4/20` },
+    unhealthy: { tone:"negative", icon:"i-alert", header:"Unhealthy", badge:"Unhealthy", callout:"Service is running but unhealthy", detail:"Agents continue without memory instead of hanging. Inspect the failing health probe or restart the service.", desc:"Process is up, but three consecutive health probes failed with HTTP 503.", meter:"34%", color:"var(--negative)", buttons:"running", log:`12:40:56 INFO  api process is running\n<span class="log-bad">12:41:03 ERROR</span> health probe returned HTTP 503\n<span class="log-bad">12:41:08 ERROR</span> postgres connection pool exhausted\n<span class="log-warn">12:41:13 WARN</span>  recall skipped; session continued without memory` },
+    down: { tone:"negative", icon:"i-alert", header:"Down", badge:"Service down", callout:"Hindsight is not reachable", detail:"The service exited after its restart budget. Agent sessions continue without recall; failed retains stay queued durably.", desc:"Process exited with code 1 after 3 automatic restart attempts.", meter:"0%", color:"var(--negative)", buttons:"stopped", log:`<span class="log-bad">12:39:51 ERROR</span> process exited with code 1\n12:39:52 INFO  restarting · attempt 3/3\n<span class="log-bad">12:39:55 ERROR</span> process exited with code 1\n<span class="log-warn">12:39:55 WARN</span>  restart budget exhausted; manual action required` },
+    docker: { tone:"negative", icon:"i-alert", header:"Docker unavailable", badge:"Blocked", callout:"Docker is unavailable", detail:"Docker mode cannot start because the daemon is not reachable. Choose Local, Compose on another engine, or External—or start Docker and retry.", desc:"Docker CLI was found, but the daemon socket is unavailable.", meter:"0%", color:"var(--negative)", buttons:"blocked", log:`12:41:03 INFO  checking Docker capability\n<span class="log-bad">12:41:03 ERROR</span> Cannot connect to the Docker daemon\n<span class="log-warn">12:41:03 HINT</span>  Start Docker Desktop or choose another run mode` },
+    port: { tone:"warning", icon:"i-alert", header:"Port conflict", badge:"Needs attention", callout:"Port 9177 is already in use", detail:"Nothing was replaced or killed. Use Bobbit's allocated port 54122, stop the conflicting process, or edit the preferred port.", desc:"Startup paused safely before service creation. Existing process pid 8421 owns 127.0.0.1:9177.", meter:"8%", color:"var(--warning)", buttons:"conflict", log:`12:41:03 INFO  reserving loopback port 9177\n<span class="log-warn">12:41:03 WARN</span>  EADDRINUSE 127.0.0.1:9177 · owner pid 8421\n12:41:03 INFO  allocated replacement candidate 127.0.0.1:54122\n12:41:03 INFO  waiting for user confirmation` },
+    retained: { tone:"info", icon:"i-square", header:"Stopped", badge:"Stopped", callout:"Service stopped · data retained", detail:"No Hindsight process is running. 38.4 MB of memories remain in ~/.hindsight and will be reused on the next start.", desc:"Stopped by AJ at 12:32. No restart is scheduled.", meter:"0%", color:"var(--muted-foreground)", buttons:"stopped", log:`12:32:08 INFO  graceful shutdown requested\n12:32:08 INFO  waiting for in-flight retain · complete\n12:32:09 INFO  api stopped\n<span class="log-ok">12:32:09 INFO</span>  persistent data retained at ~/.hindsight` }
+  };
+
+  function showToast(text, tone = "positive") {
+    clearTimeout(toastTimer);
+    $("#toastText").textContent = text;
+    $("#toast svg use").setAttribute("href", tone === "negative" ? "#i-alert" : "#i-check");
+    $("#toast").style.color = tone === "negative" ? "var(--negative)" : "var(--positive)";
+    $("#toast").hidden = false;
+    toastTimer = setTimeout(() => $("#toast").hidden = true, 3000);
+  }
+
+  function setTab(name) {
+    $$(".tab").forEach(t => { const active = t.dataset.tab === name; t.setAttribute("aria-selected", String(active)); });
+    $$(".panel").forEach(p => p.hidden = p.id !== name);
+    if (name === "memory") renderMemories();
+  }
+  $$(".tab").forEach(t => t.addEventListener("click", () => setTab(t.dataset.tab)));
+  $$('[data-tab-jump]').forEach(b => b.addEventListener("click", () => setTab(b.dataset.tabJump)));
+
+  function updateScenario(value) {
+    currentScenario = value;
+    const s = stateMap[value];
+    const statusIcon = `<svg class="icon icon-xs ${s.spin ? "spin" : ""}"><use href="#${s.icon}"/></svg>`;
+    $("#headerStatus").className = `lozenge ${s.tone}`; $("#headerStatus").innerHTML = statusIcon + s.header;
+    $("#runtimeBadge").className = `lozenge ${s.tone}`; $("#runtimeBadge").innerHTML = statusIcon + s.badge;
+    $("#marketBadge").className = `lozenge ${s.tone}`; $("#marketBadge").innerHTML = `<span class="dot"></span>${s.badge}`;
+    $("#stateCallout").className = `callout ${s.tone}`;
+    $("#stateCallout").innerHTML = `<svg class="icon ${s.spin ? "spin" : ""}"><use href="#${s.icon}"/></svg><div class="callout-copy"><strong>${s.callout}</strong><p>${s.detail}</p></div>`;
+    $("#runtimeDescription").textContent = s.desc;
+    $("#healthMeter").style.width = s.meter; $("#healthMeter").style.background = s.color;
+    $("#logOutput").innerHTML = s.log;
+    $("#endpointValue").textContent = value === "port" ? "127.0.0.1:9177 · occupied" : value === "docker" ? "Not allocated" : "http://127.0.0.1:9177";
+    $("#retainedNote").innerHTML = `${icon("i-database")} ${value === "retained" ? "38.4 MB retained · safe to start again" : "Data survives service and Bobbit restarts"}`;
+    $("#stopBtn").hidden = !["healthy","starting","unhealthy"].includes(value);
+    $("#restartBtn").hidden = !["healthy","unhealthy"].includes(value);
+    $("#startBtn").hidden = !["down","retained","port"].includes(value);
+    $("#startBtn").innerHTML = value === "port" ? `${icon("i-play")} Use port 54122 & start` : `${icon("i-play")} Start service`;
+    if (s.buttons === "blocked") {
+      $("#startBtn").hidden = false; $("#startBtn").disabled = true; $("#startBtn").innerHTML = `${icon("i-play")} Start unavailable`;
+    } else $("#startBtn").disabled = false;
+    $("#marketIdentity").innerHTML = value === "retained" ? `Docker · <span class="mono">data retained</span>` : value === "docker" ? `Docker · daemon unavailable` : `Docker · <span class="mono">127.0.0.1:9177</span>`;
+  }
+  $("#scenario").addEventListener("change", e => updateScenario(e.target.value));
+
+  function modeFields(mode) {
+    const field = $("#modeSpecificField");
+    const consent = $("#consentBox");
+    const start = $("#configStartBtn");
+    const content = {
+      local: { label:"Command", value:"hindsight-api", help:"Started as a supervised child process in your user context.", title:"Before the local process starts", text:"Bobbit will run hindsight-api as your user, allocate a loopback port, monitor health, and stop it gracefully. Data remains in ~/.hindsight.", action:"Start local process" },
+      docker: { label:"Data directory", value:"~/.hindsight", help:"Owned by your user account. Bobbit never deletes retained data when the service stops.", title:"Before Docker starts", text:"Bobbit will pull the approved Hindsight image, run the API and Postgres on loopback-only allocated ports, and mount ~/.hindsight. Stop preserves data.", action:"Start Docker service" },
+      compose: { label:"Compose file / service", value:"./compose.yaml · hindsight", help:"Bobbit invokes the selected service; your Compose file owns dependent services and volumes.", title:"Before Compose starts", text:"Bobbit will run docker compose up for service hindsight from ./compose.yaml, monitor its health endpoint, and stop only that managed service.", action:"Start Compose service" },
+      external: { label:"Hindsight API URL", value:"http://localhost:9177", help:"Data-plane API only. Bobbit monitors health but never starts or stops this service.", title:"External service ownership", text:"Bobbit only connects to this URL. You own lifecycle, networking, logs, and storage. Saving or testing never changes the external service.", action:"Test connection" }
+    }[mode];
+    field.innerHTML = `<div class="label-row"><label for="managedPath">${content.label}</label><span class="lozenge">${mode === "external" ? "Required" : "Persisted"}</span></div><input class="input mono" id="managedPath" value="${content.value}"><span class="hint">${content.help}</span>`;
+    $("#consentTitle").textContent = content.title; $("#consentText").textContent = content.text;
+    $("#consentCheck").checked = false;
+    $("#consentCheck").parentElement.lastChild.textContent = mode === "external" ? " I understand Bobbit will not manage this service." : " I understand what will run and where data will persist.";
+    start.innerHTML = `${icon(mode === "external" ? "i-search" : "i-play")} ${content.action}`;
+    start.disabled = true;
+    $("#runtimeModeText").textContent = mode === "local" ? "Local process · Bobbit managed" : mode === "compose" ? "Docker Compose · Bobbit managed" : mode === "external" ? "External · user managed" : "Docker · Bobbit managed";
+    $("#marketIdentity").innerHTML = mode === "external" ? `External · <span class="mono">localhost:9177</span>` : `${mode === "local" ? "Local" : mode === "compose" ? "Compose" : "Docker"} · <span class="mono">127.0.0.1:9177</span>`;
+  }
+  $$(".mode-card").forEach(b => b.addEventListener("click", () => {
+    currentMode = b.dataset.mode; $$(".mode-card").forEach(x => x.classList.toggle("selected", x === b)); modeFields(currentMode);
+  }));
+  $("#consentCheck").addEventListener("change", e => $("#configStartBtn").disabled = !e.target.checked);
+  $("#saveBtn").addEventListener("click", () => { $("#saveNote").textContent = "Saving changed fields only…"; setTimeout(() => { $("#saveNote").textContent = "Saved just now · service state unchanged"; showToast("Configuration saved. Hindsight was not started."); }, 650); });
+  $("#configStartBtn").addEventListener("click", () => {
+    if (currentMode === "external") { showToast("Connection healthy · /health responded in 82 ms"); updateScenario("healthy"); $("#scenario").value="healthy"; return; }
+    updateScenario("starting"); $("#scenario").value="starting"; setTab("overview"); showToast("Start requested. Watching readiness without blocking sessions.");
+  });
+  $("#clearSecret").addEventListener("click", () => { $("#secretInput").value = ""; $("#secretState").innerHTML = `${icon("i-alert", "icon icon-xs")} Will clear on save`; $("#secretState").style.color = "var(--warning)"; showToast("Saved key will be cleared only after Save configuration."); });
+  $("#secretInput").addEventListener("input", e => { $("#secretState").innerHTML = e.target.value ? `${icon("i-lock", "icon icon-xs")} Replacement ready` : `${icon("i-check", "icon icon-xs")} Key set`; $("#secretState").style.color = e.target.value ? "var(--info)" : "var(--positive)"; });
+
+  $("#logsBtn").addEventListener("click", () => $("#logsPanel").hidden = false);
+  $("#closeLogs").addEventListener("click", () => $("#logsPanel").hidden = true);
+  $("#refreshBtn").addEventListener("click", e => { e.currentTarget.innerHTML = `${icon("i-loader", "icon icon-sm spin")} Refreshing`; setTimeout(() => { e.currentTarget.innerHTML = `${icon("i-rotate")} Refresh`; showToast("Configuration and runtime status refreshed together."); }, 700); });
+  $("#restartBtn").addEventListener("click", () => { $("#scenario").value="starting"; updateScenario("starting"); showToast("Graceful restart requested. Data remains mounted."); });
+  $("#stopBtn").addEventListener("click", () => { $("#scenario").value="retained"; updateScenario("retained"); showToast("Service stopped gracefully. 38.4 MB retained."); });
+  $("#startBtn").addEventListener("click", () => { $("#scenario").value="starting"; updateScenario("starting"); showToast("Service starting. Readiness checks are bounded."); });
+
+  function filteredMemories() {
+    const q = $("#memorySearch").value.trim().toLowerCase();
+    if (!q) return memories;
+    return memories.filter(m => [m.text,m.kind,m.project,...m.tags].join(" ").toLowerCase().includes(q));
+  }
+  function renderMemories() {
+    const items = filteredMemories();
+    $("#resultCount").textContent = `${items.length} memor${items.length === 1 ? "y" : "ies"}`;
+    $("#memoryEmpty").hidden = items.length !== 0;
+    $("#memoryList").hidden = items.length === 0;
+    $("#memoryList").innerHTML = items.map(m => `<button class="memory-row ${m.id===selectedMemory?"selected":""} ${m.invalidated?"invalidated":""}" data-id="${m.id}" ${m.invalidated?'aria-label="Invalidated memory"':''}><div class="memory-topline"><span class="memory-kind">${m.invalidated ? "Invalidated" : m.kind}</span><span class="memory-time">${m.score} · ${m.age}</span></div><div class="memory-snippet">${m.text}</div><div class="tags">${m.tags.slice(0,3).map(t=>`<span class="tag">${t}</span>`).join("")}</div></button>`).join("");
+    $$(".memory-row").forEach(r => r.addEventListener("click", () => { selectedMemory=r.dataset.id; renderMemories(); }));
+    renderDetail();
+  }
+  function renderDetail() {
+    const m = memories.find(x => x.id === selectedMemory) || memories[0];
+    $("#memoryDetail").innerHTML = `<div class="card-head"><div><div class="memory-kind">${m.invalidated ? "Invalidated" : m.kind}</div><h3 class="card-title" style="margin-top:4px">Memory detail</h3></div><span class="lozenge ${m.invalidated?"warning":"positive"}">${m.invalidated?icon("i-alert"):icon("i-check")} ${m.invalidated?"Excluded from recall":m.score+" relevance"}</span></div><div class="card-body"><div class="detail-content">${m.text}</div><div class="tags">${m.tags.map(t=>`<span class="tag">${t}</span>`).join("")}</div><dl class="detail-grid"><dt>Memory ID</dt><dd class="mono">${m.id}-6f827db0</dd><dt>Retained</dt><dd>${m.retained}</dd><dt>Project</dt><dd>${m.project}</dd><dt>Agent</dt><dd>${m.agent}</dd><dt>Provenance</dt><dd>${m.source}</dd></dl><div class="reflect-box"><div class="actions"><button class="btn primary" id="reflectBtn">${icon("i-sparkles")} Reflect on this</button><button class="btn">${icon("i-copy")} Copy text</button><button class="btn danger" id="invalidateBtn" ${m.invalidated?"disabled":""}>${icon("i-trash")} ${m.invalidated?"Invalidated":"Invalidate"}</button></div><div id="reflectForm" hidden style="margin-top:10px"><label for="reflectPrompt">Reflection prompt</label><textarea id="reflectPrompt" placeholder="What should Hindsight synthesize from this and related memories?">What should we preserve when implementing the service runtime?</textarea><div class="actions" style="margin-top:7px"><button class="btn solid" id="runReflect">${icon("i-sparkles")} Reflect across memory</button></div></div><div id="reflectionResult"></div></div></div>`;
+    $("#reflectBtn").addEventListener("click", () => $("#reflectForm").hidden = false);
+    if (!m.invalidated) $("#invalidateBtn").addEventListener("click", () => { pendingInvalidate=m.id; $("#invalidateModal").hidden=false; $("#cancelInvalidate").focus(); });
+    $("#runReflect").addEventListener("click", e => { e.currentTarget.disabled=true; e.currentTarget.innerHTML=`${icon("i-loader","icon icon-sm spin")} Reflecting…`; setTimeout(()=>{ $("#reflectionResult").innerHTML=`<div class="reflection"><strong>Reflection</strong><br>Preserve explicit lifecycle consent, bounded readiness checks, write-only secret handling, durable storage ownership, and clean degradation when the service is unavailable. Keep policy and settings on the shared Extension Platform surfaces so LangFlow can adopt the same contract.</div>`; e.currentTarget.hidden=true; },900); });
+  }
+  let searchTimer;
+  $("#memorySearch").addEventListener("input", () => { clearTimeout(searchTimer); $("#memoryList").hidden=true; $("#memoryEmpty").hidden=true; $("#memoryLoading").hidden=false; searchTimer=setTimeout(()=>{ $("#memoryLoading").hidden=true; renderMemories(); },420); });
+  $("#clearSearch").addEventListener("click", () => { $("#memorySearch").value=""; renderMemories(); $("#memorySearch").focus(); });
+  $("#memoryRefresh").addEventListener("click", () => showToast("Memory index refreshed · 6 records"));
+  $("#cancelInvalidate").addEventListener("click", () => $("#invalidateModal").hidden=true);
+  $("#confirmInvalidate").addEventListener("click", () => { const m=memories.find(x=>x.id===pendingInvalidate); if(m)m.invalidated=true; $("#invalidateModal").hidden=true; renderMemories(); showToast("Memory invalidated. Provenance retained."); });
+  $("#invalidateModal").addEventListener("click", e => { if(e.target === e.currentTarget) e.currentTarget.hidden=true; });
+
+  function updateEffectivePolicies() {
+    const gp = $("#groupPolicy").value || "allow";
+    $$(".tool-policy").forEach(sel => { const effective = sel.value || gp; const source = sel.value ? "tool override" : gp === "allow" && !$("#groupPolicy").value ? "group default" : "group override"; sel.closest(".policy-row").querySelector(".effective").textContent = `Effective: ${effective[0].toUpperCase()+effective.slice(1)} · ${source}`; });
+  }
+  $("#groupPolicy").addEventListener("change", updateEffectivePolicies);
+  $$(".tool-policy").forEach(s => s.addEventListener("change", () => { updateEffectivePolicies(); showToast("Tool policy updated on the shared Tools surface."); }));
+  function resetPermission() {
+    $("#permissionHost").innerHTML = `<div class="permission-card" id="permissionCard"><div class="permission-title">${icon("i-shield","icon")} Role “Coder” doesn't have access to <span class="mono">hindsight_reflect</span></div><div style="display:flex;align-items:center;gap:7px;margin-top:8px"><label for="duration">Duration</label><select id="duration" class="policy-select"><option value="session">This session</option><option value="once">Just for now</option><option value="persistent">For all future sessions</option></select></div><div class="permission-actions"><button class="choice" data-grant="group"><strong>Allow all tools</strong><span>in Hindsight</span></button><button class="choice" data-grant="tool"><strong>Allow just this tool</strong><span>hindsight_reflect</span></button><button class="choice" data-grant="deny"><strong>Deny</strong><span>Do not run it</span></button></div></div>`;
+    $$('[data-grant]', $("#permissionHost")).forEach(b => b.addEventListener("click", settlePermission));
+  }
+  function settlePermission(e) {
+    const action=e.currentTarget.dataset.grant; const duration=$("#duration").value;
+    $("#permissionHost").innerHTML = `<div class="settled ${action==="deny"?"negative":"positive"}">${icon(action==="deny"?"i-alert":"i-check","icon")} ${action==="deny"?"Permission denied. The tool did not run.":"Permission granted — the blocked tool is resuming."}</div>`;
+    if(action!=="deny") { const label=action==="group"?"Hindsight (all tools)":"hindsight_reflect"; const scope=duration==="once"?"One call":duration==="persistent"?"Persistent policy":"This session"; $("#grantRows").insertAdjacentHTML("beforeend", `<tr><td class="mono">${label}</td><td>${scope}</td><td>${duration==="once"?"After use":duration==="persistent"?"Until changed":"When session ends"}</td></tr>`); }
+  }
+  $$('[data-grant]').forEach(b => b.addEventListener("click", settlePermission));
+  $("#simulateRequest").addEventListener("click", () => { resetPermission(); showToast("Permission request shown through the shared card lifecycle."); });
+
+  updateScenario("healthy");
+  renderMemories();
+</script>
+</body>
+</html>

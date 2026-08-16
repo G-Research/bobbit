@@ -1,0 +1,68 @@
+# Hindsight's generic service-runtime descriptor. This is declarative only:
+# settings are resolved on explicit control and neither this file nor the provider
+# starts/probes/pulls a service during settings save or status reads.
+apiVersion: 1
+id: hindsight
+title: Hindsight
+endpoint:
+  protocol: http
+  servicePort: 8888
+  health:
+    path: /health
+    expectedStatus: 200
+    requestTimeoutMs: 1500
+    intervalMs: 1000
+    startupTimeoutMs: 120000
+lifecycle:
+  startPolicy: manual
+  restart:
+    policy: on-failure
+    maxAttempts: 3
+    windowMs: 300000
+    initialBackoffMs: 1000
+    maxBackoffMs: 30000
+environment:
+  # All local-model fields are materialized by the EP-7 bridge only after an
+  # explicit control request. No fallback provider is declared.
+  HINDSIGHT_LOCAL_LLM_PROVIDER:
+    setting: HINDSIGHT_LOCAL_LLM_PROVIDER
+  HINDSIGHT_LOCAL_LLM_MODEL_ID:
+    setting: HINDSIGHT_LOCAL_LLM_MODEL_ID
+  HINDSIGHT_LOCAL_LLM_BASE_URL:
+    setting: HINDSIGHT_LOCAL_LLM_BASE_URL
+  HINDSIGHT_LOCAL_LLM_CONTEXT_TOKENS:
+    setting: HINDSIGHT_LOCAL_LLM_CONTEXT_TOKENS
+  HINDSIGHT_LOCAL_LLM_MAX_OUTPUT_TOKENS:
+    setting: HINDSIGHT_LOCAL_LLM_MAX_OUTPUT_TOKENS
+  HINDSIGHT_LOCAL_LLM_KEEP_ALIVE:
+    setting: HINDSIGHT_LOCAL_LLM_KEEP_ALIVE
+  HINDSIGHT_OCI_IMAGE:
+    setting: HINDSIGHT_OCI_IMAGE
+  HINDSIGHT_DATABASE_MODE:
+    setting: HINDSIGHT_DATABASE_MODE
+  # The generic runtime secret owner receives these only for explicit starts.
+  HINDSIGHT_API_LLM_API_KEY:
+    secret: localLlmApiKey
+    optional: true
+  HINDSIGHT_API_DATABASE_URL:
+    secret: externalDatabaseUrl
+    optional: true
+  HINDSIGHT_DB_PASSWORD:
+    generatedSecret: databasePassword
+  HINDSIGHT_API_PORT:
+    endpointPort: true
+  # Local children are forcibly bound to loopback by the generic runner.
+  HINDSIGHT_API_HOST:
+    value: 127.0.0.1
+modes:
+  local:
+    command: hindsight
+    args: [serve]
+    portEnv: HINDSIGHT_API_PORT
+    hostEnv: HINDSIGHT_API_HOST
+  docker:
+    image: ghcr.io/vectorize-io/hindsight:0.8.6@sha256:274704505b2720ac9a5c816c559044c1e8c6b51d47017317ae049ed2952f5ab1
+  compose:
+    file: ../runtime/compose.yaml
+    service: api
+    projectName: bobbit-${serverIdentity}-${packId}-${runtimeId}

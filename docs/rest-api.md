@@ -130,6 +130,113 @@ These endpoints expose restart support only for gateways launched through `npm r
 
 `POST /api/harness/restart` is gated on the server, not just hidden by the UI. On success it touches `.bobbit/state/gateway-restart`, the same sentinel used by `npm run restart-server`; the harness observes that file change, rebuilds the server, and relaunches the gateway.
 
+### Marketplace adoptions
+
+The Market adoption routes reference unmodified stock MCP servers and Claude-style skill
+directories. They are separate from Marketplace source/pack routes: a returned adoption always
+has `provenance.class: "adopted"`, never inferred pack provenance. See [Adopt stock extensions](marketplace.md#adopt-stock-extensions-without-a-pack)
+for lifecycle, precedence, and permission behavior.
+
+#### Authentication and scope
+
+`GET` follows the gateway's normal API authentication. Every mutation (`POST`, `PATCH`,
+refresh, and `DELETE`) requires either an admin `Authorization: Bearer` credential or a valid
+signed browser cookie accompanied by same-origin browser mutation evidence. Localhost trust by
+itself is insufficient because an adoption can start a host command or contact a remote
+endpoint. Sandbox credentials are explicitly denied for these mutations, including when
+otherwise presented alongside a request. The API does not provide fields for command
+environment values, HTTP headers, or an adoption-owned working directory.
+
+`scope` is one of `"server"`, `"global-user"`, or `"project"`. `projectId` is required for
+`"project"` scope, and the project must exist. A project-scoped list only includes that
+project's records; server/global-user records remain visible in the normal scope order.
+
+#### Routes
+
+| Method | Path | Request / response contract |
+|---|---|---|
+| `GET` | `/api/marketplace/adoptions?projectId=` | Returns `{ adoptions }` across visible scopes. `projectId` is optional; an invalid value is `400`. |
+| `POST` | `/api/marketplace/adoptions` | Body `{ kind: "mcp" \| "skills", scope, projectId?, source }`. Creates an adoption and returns `201 { adoption }`; an exact normalized private identity returns `200 { adoption }`. |
+| `POST` | `/api/marketplace/adoptions/:id/refresh?scope=&projectId=` | Re-scans a skills directory or reloads/reconnects MCP and returns `200 { adoption }`. Only an authoritative connected MCP tool list reconciles durable operation state; unavailable, pending, or disabled refreshes retain it. |
+| `PATCH` | `/api/marketplace/adoptions/:id` | Body `{ scope, projectId?, enabled?, operations? }`. Only enablement and known MCP operation selections may change; source/kind/namespace cannot change. A full `operations` list is permitted, but only a changed `selected` value is recorded as an explicit user choice. Returns `200 { adoption }`. |
+| `DELETE` | `/api/marketplace/adoptions/:id?scope=&projectId=` | Deletes the ledger record, invalidates/reloads runtime state as needed, and returns `204`. It never removes the source asset, manual MCP configuration, or policy rows. |
+
+`source` accepts exactly one of these shapes:
+
+```json
+{ "transport": "stdio", "command": "npx", "args": ["-y", "example-mcp"] }
+```
+
+```json
+{ "transport": "http", "url": "https://mcp.example.com/mcp" }
+```
+
+```json
+{ "directory": "/absolute/path/to/skills" }
+```
+
+The stdio form requires a non-empty command and string arguments. The HTTP URL must be
+`http:` or `https:` and has no credentials, query, or fragment. The skills directory must be
+absolute. `operations`, when patching an MCP adoption, is an array of known
+`{ name, selected }` choices; unknown operation names and any operation update for a skills
+adoption return `400`. Unsupported source fields and invalid requests return `400`; a missing
+project or adoption returns `404`.
+
+The server derives public ids and namespaces only from secret-free fields: scope/project owner,
+kind, and the normalized directory, HTTP URL, or stdio command. Its private exact identity also
+includes stdio arguments. Thus an exact repeat is idempotent, while distinct argument lists that
+share a command receive deterministic collision-suffixed ids instead of exposing arguments or an
+argument-derived hash.
+
+#### Safe adoption wire shape
+
+List and mutation responses return a redacted adoption record. Stdio command arguments are
+accepted only on create and are omitted from every response; endpoints have already rejected
+credential-bearing URL components. The internal automatic-versus-explicit selection provenance is
+also omitted. This prevents identifiers and routine list/update responses from becoming a secret
+or permission-grant channel. The public shape includes the safe source form, generated
+id/namespace, scope/project, enabled state, MCP operation classifications/selections, and:
+
+```json
+{
+  "provenance": {
+    "class": "adopted",
+    "sourceType": "stdio",
+    "sourceLocation": "npx",
+    "createdAt": "2026-01-01T00:00:00.000Z",
+    "updatedAt": "2026-01-01T00:00:00.000Z"
+  },
+  "conformance": {
+    "state": "partial",
+    "checkedAt": "2026-01-01T00:00:00.000Z",
+    "mcp": {
+      "requestedProtocol": "2025-03-26",
+      "negotiatedProtocol": "2025-03-26",
+      "serverName": "example",
+      "serverVersion": "1.0.0",
+      "loadedTools": ["read_document"],
+      "rejectedTools": [{ "name": "write_document", "reason": "invalid_operation_schema" }]
+    },
+    "failures": []
+  }
+}
+```
+
+For a skills adoption, `conformance.skills` instead carries `loadedSkills` (the generated
+`adopt-<id>--<skill>` names) and `rejectedSkills` (`path` plus a controlled reason).
+Conformance state is `pending`, `loaded`, `partial`, `rejected`, or `unreachable`. MCP fields
+for negotiation and server identity are optional because they exist only after a successful
+handshake. Failure and rejection text uses controlled, sanitized categories; clients must not
+expect raw process, transport, header, credential, or command-argument details.
+
+Refreshing or creating an unreachable/partial asset still returns its durable record when the
+ledger mutation succeeded. This lets clients show a recoverable state without concealing
+unrelated extensions or treating a connection failure as a startup failure. An authoritative,
+connected `tools/list` response is required before MCP operations are reconciled; a disabled,
+pending, or failed refresh preserves the durable operation list and selection provenance. Automatic
+selections are revoked when that authoritative evidence ceases to be positively read-only, while
+explicit changes remain subject to the normal policy cascade.
+
 ### Sessions
 
 | Method | Path | Description |
@@ -148,6 +255,8 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `PUT` | `/api/sessions/:id/pin` | Set or remove the durable `pinned=true` user tag. The body must be exactly `{ "pinned": boolean }`; success returns `{ "user_tags": string[] }`. See [Session list tags and pinning](#session-list-tags-and-pinning). |
 | `POST` | `/api/sessions/:archivedId/continue` | Create a new session whose agent CLI rehydrates from a clone of the archived `.jsonl` while preserving user-visible transcript content losslessly. See [Continue-Archived endpoint](#continue-archived-endpoint) |
 | `GET` | `/api/sessions/:id/output` | Get final assistant output from the last turn |
+| `GET` | `/api/sessions/:id/prompt-sections` | Inspect the persisted effective system-prompt snapshot. Static extension sections include contributor identity and byte attribution; the response also exposes stable-prefix/cache-boundary metadata. |
+| `GET` | `/api/sessions/:id/prompt-extension-audit?limit=N` | Read authorized, durable static-prompt authoring detail. Requires a verified signed `bobbit_session` prompt-operator cookie; a bearer token, sandbox credential, or agent session credential receives `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. Bounded to 1–200 rows (default 100). This is separate from the redacted Context trace. |
 | `GET` | `/api/sessions/:id/draft?type=:type` | Read a persisted UI draft. Missing drafts return `404` by default; `optional=1` returns empty `204` for expected absence when the session exists. |
 | `GET` | `/api/sessions/:id/git-status` | Read-only Git status for the session working directory (branch, upstream, ahead/behind, dirty files). Never publishes or updates a remote branch. See [Coordinated remote-state status](#coordinated-remote-state-status). |
 | `GET` | `/api/sessions/:id/commits` | Commit list for the session branch. Supports `direction=behind` and `vs=primary`; includes changed files for each commit. See [Git commit lists and commit-scoped diffs](#git-commit-lists-and-commit-scoped-diffs) |
@@ -167,8 +276,184 @@ These endpoints expose restart support only for gateways launched through `npm r
 | `GET` | `/api/sessions/:id/transcript/before-compaction` | Paginated read of the orphaned pre-compaction entries for a single compaction event. Query params: `compactionId` (required, sidecar entry id), `cursor` (from previous response's `nextCursor`), `limit` (default 50, clamped 1..200). Response envelope `{ total, returned, nextCursor, messages[] }`. Requires normal bearer/session authentication, then resolves the target session across gateway-accessible projects; any authenticated same-gateway caller that can reach the target session may read it, matching `read_session` / `GET /api/sessions/:id/transcript`. Errors: `session_not_found` (404), `transcript_unavailable` (404), `compaction_not_found` (404), `invalid_params` (400), `internal_error` (500). Split resolution order is sidecar `firstKeptEntryId`, then the in-file compaction entry's `firstKeptEntryId`, then the inline `type:"compaction"` marker itself for retained-tail-only or unresolvable-id checkpoints. Reader: `readOrphanedBeforeCompaction` in `src/server/agent/transcript-reader.ts` using the target session's sandbox-aware transcript read path. See [docs/compaction-history.md](compaction-history.md). |
 | `POST` | `/api/sessions/:id/provider-hooks/before-prompt` | Per-turn lifecycle dispatch, called only by the generated provider-bridge pi extension. Body `{ prompt?, turn?: { index } }`. Dispatches the `beforePrompt` hook and returns `{ content, tail, blocks }` — `content` is the fenced dynamic-context text delivered by the bridge as a hidden `bobbit:dynamic-context` custom/user-side message (or `""`), `tail` is temporary legacy system-prompt-tail back-compat for old bridges, and `blocks` is metadata-only `{ id, providerId, title, tokenEstimate }[]`. The endpoint also refreshes the prompt inspector's Dynamic Context snapshot best-effort; current bridges consume `content` and filter stale persisted dynamic-context custom messages from future LLM contexts instead of using `message_end` scrub. `404` for unknown session; `{ content: "", tail: "", blocks: [] }` when no Lifecycle Hub is configured. See [docs/lifecycle-hub.md](lifecycle-hub.md#per-turn--lifecycle-wiring-g14). |
 | `POST` | `/api/sessions/:id/provider-hooks/before-compact` | Per-turn dispatch from the provider-bridge extension before transcript compaction. Dispatches `beforeCompact` and returns `{}` once provider flushes settle (bounded by per-provider timeouts). `404` for unknown session. |
-| `GET` | `/api/sessions/:id/context-trace?limit=N` | Per-turn provider-dispatch trace for diagnostics. Returns `{ entries }` oldest→newest from `ContextTraceStore`; `limit` keeps the most recent N (clamped to 1000). Each entry records the hook, timestamp, and per-provider timing / blocks-kept / omitted / error. See [docs/lifecycle-hub.md](lifecycle-hub.md#the-trace-store). |
+| `GET` | `/api/sessions/:id/context-trace?limit=N` | Bounded lifecycle provider and optional extension-activity metadata for diagnostics. Returns `{ entries }` oldest→newest from `ContextTraceStore`; a positive `limit` keeps the most recent N, capped at 1000. See [Context trace endpoint](#context-trace-endpoint) and [Lifecycle Hub](lifecycle-hub.md#context-trace-inspector). |
 | `GET` | `/api/sessions/:id/google-code-assist/token` | Short-lived runtime material for the agent-side Code Assist (`google-gemini-cli`) provider extension: `{ accessToken, projectId }`. Refreshes the stored Google OAuth token per request; **never** returns the OAuth refresh token. `401 { code: "GOOGLE_CODE_ASSIST_REAUTH" }` when no account is signed in or the token can't be refreshed (prompts re-auth, not an API key); `502 { code: "GOOGLE_CODE_ASSIST_PROJECT" }` when the token is valid but project onboarding failed. `projectId` honors `GOOGLE_CLOUD_PROJECT` / `GOOGLE_CLOUD_PROJECT_ID` when set. See [Google OAuth & Gemini models](google-oauth-models.md#per-request-token--project-endpoint). |
+
+### Extension decision requests
+
+Schema-2 extension decision hooks have a server-owned actionable conversation
+projection. It includes ordinary pending requests and a durable
+`paused-awaiting-consent` request whose exact goal pause still needs an answer.
+The surface reuses the Ask User Choices widget but never submits an ask envelope,
+appends a transcript message, or enqueues an agent prompt. See
+[Extension decision requests](extension-decision-requests.md) for the hook
+contract, grant, deadlines, scoped memories, and privacy boundary.
+
+| Method | Path | Body | Result |
+|---|---|---|---|
+| `GET` | `/api/sessions/:sessionId/decision-requests?state=pending` | — | `200 { requests }`, containing actionable requests owned by that session. `state`, when supplied, must be `pending`. |
+| `POST` | `/api/sessions/:sessionId/decision-requests/:requestId/answer` | `{ value: { kind: "option", value } \| { kind: "other", text } }` | `200 { request }`, the authoritative settlement projection. |
+
+Each projected request contains only its `id`, `sessionId`, `status`,
+`decisionClass`, bounded classification/pause metadata, and `request` display
+fields (`title`, `question`, option `value`/`label`), plus a terminal
+`resolution.value` when applicable. Deadline, scope, default, effects,
+memories, internal dedupe data, protected-operation identity, continuation
+state, and proposal seeds are not projected.
+
+The answer body must contain exactly `value`. Invalid answer shapes return
+`400`; unknown request ids and request ids belonging to another session return
+`404`. A valid late or duplicate answer receives the current terminal request,
+so clients must treat the returned record as authoritative. The request id alone
+is never authority: the route checks ownership against `:sessionId` before it
+passes an answer to the decision manager.
+
+`decision_requests_updated` is a metadata-only WebSocket invalidation with a
+session id and timestamp. Clients re-fetch the GET route; no question or answer
+payload is sent over WebSocket.
+
+### Context trace endpoint
+
+`GET /api/sessions/:id/context-trace?limit=N` reads durable lifecycle-dispatch metadata for one
+active or archived persisted session. It backs the read-only **Context trace** side-panel inspector;
+it does not return context blocks or prompt content delivered to an agent.
+
+A successful response is:
+
+```ts
+type TraceOutcome = "advised" | "applied" | "denied" | "dropped" | "error" | "superseded";
+type TraceOutcomeKind = "decision" | "advisory" | "audit";
+type TraceOutcomeEvent = "sessionSetup" | "beforePrompt" | "afterTurn"
+  | "beforeCompact" | "sessionShutdown" | "decisionResolved";
+type TraceOutcomeReason = "Grant required" | "User pin" | "Unavailable value"
+  | "Malformed result" | "Timed out" | "Overlapping invocation" | "Cancelled"
+  | "Disabled or revoked" | "Budget exhausted" | "Deadline elapsed"
+  | "Headless default" | "Invalid answer" | "Duplicate" | "Capability revoked"
+  | "Proposal failed" | "Budget enforcement" | "Lower-priority selection";
+type TraceSelectionKind = "model" | "thinking" | "role" | "workflow";
+type TraceOutcomeActor = "extension" | "user" | "deadline" | "headless";
+type TraceDecisionClass = "deferrable" | "consent-required";
+type TraceDecisionStatus = "resolved" | "defaulted" | "denied"
+  | "paused-awaiting-consent";
+type TraceDecisionClassificationReason = "requested" | "core-hard-cap"
+  | "core-unsafe-tool" | "core-capability-change" | "core-grant-change"
+  | "core-configuration-change";
+type TraceConsentTimeoutAction = "deny-operation" | "pause-goal";
+type TraceConsentResumeStatus = "claimed" | "resumed" | "already-resumed"
+  | "not-matching" | "denied";
+
+{
+  entries: Array<{
+    ts: number;          // epoch milliseconds
+    hook: string;
+    sessionId: string;
+    providers: Array<{
+      id: string;
+      ms: number;
+      blocks: number;    // kept after budgeting
+      omitted: number;   // omitted or malformed blocks
+      error?: string;    // safe diagnostic category
+    }>;
+    outcomes?: Array<{
+      kind: TraceOutcomeKind;
+      packId?: string; // server-derived; required for advisory afterTurn rows
+      hookId: string;
+      event: TraceOutcomeEvent;
+      outcome: TraceOutcome;
+      reason?: TraceOutcomeReason;
+      value?: string;          // legacy EP-5 safe identifier field
+      ms?: number;
+      requestId?: string;
+      questionId?: string;     // SHA-256 hex/base32 fingerprint, not prose
+      answer?: string;         // safe option id or literal "other", not Other text
+      defaultApplied?: boolean;
+      actor?: TraceOutcomeActor;
+      decisionClass?: TraceDecisionClass;
+      decisionStatus?: TraceDecisionStatus;
+      classificationReason?: TraceDecisionClassificationReason;
+      timeoutAction?: TraceConsentTimeoutAction;
+      resumeStatus?: TraceConsentResumeStatus;
+      selectionKind?: TraceSelectionKind;
+      selectionValue?: string; // verified model tuple or safe identifier; omitted unless advised/applied
+    }>;
+  }>;
+}
+```
+
+`outcomes` is an additive optional field, so clients must accept entries without it. Each outcome
+stays nested in its lifecycle entry so the result window cannot split extension activity from the
+event that produced it. The core validation, grant, or application owner—not extension code—emits
+these rows. The field records only bounded public metadata: whether a suggestion was advised,
+applied, denied, dropped, errored, or superseded, and whether it is decision, advisory, or audit
+activity.
+
+Entries are always ordered oldest→newest. With a positive `limit`, the store returns the most
+recent N entries, capped at 1,000. The built-in inspector starts at `limit=100` and expands by 100
+only when the user selects **Load 100 earlier**, to a maximum of 1,000. It renders that response
+newest-first but preserves provider and outcome order within each event. An omitted, invalid, or
+non-positive `limit` leaves the endpoint's full result unwindowed.
+
+The endpoint resolves live sessions and persisted records, including archived sessions. An unknown
+session, or a session path segment that cannot be URI-decoded, returns
+`404 { error: "Session not found" }`. A valid `200` response with missing or malformed entries is
+safely treated by the inspector as no activity; the UI never interpolates arbitrary response fields.
+
+Provider rows are sanitized before persistence and again when the store reads JSONL: at most 100
+rows per entry; identifiers match `/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/` or become `Unknown
+provider`; counts and durations are finite non-negative integers capped at 1,000,000,000; and an
+error maps only to `Timed out`, `Malformed blocks omitted`, or `Provider error`.
+
+At most 50 outcome rows per entry are retained. A row is omitted unless its kind, lifecycle event,
+and terminal outcome exactly match the enumerations above and its `hookId` is the same safe
+identifier form. Advisory `afterTurn` rows additionally require a safe, server-derived `packId`.
+`reason` is retained only from the fixed catalog above. `value` is the legacy EP-5 field, retained
+only for `advised`, `applied`, or `superseded` outcomes and only as a safe identifier; new
+decision-resolution rows use `answer` instead. For decision/advisory activity, optional `packId`
+and `requestId` are safe identifiers, `questionId` is a SHA-256 hexadecimal or base32 fingerprint
+rather than question prose, and `answer` is a safe selected option id or the literal `other` rather
+than Other text. `answer` and `defaultApplied` survive only for `applied` or `superseded`
+resolutions; `actor`, when present, is one of the fixed actor labels above. Consent class,
+status, classification, timeout, and resume fields likewise survive only when they match their
+closed vocabularies; they never carry an operation identity or payload. `selectionKind` is limited
+to the four advisory-selection categories. `selectionValue` is retained only for an `advised` or
+`applied` selection: for model it is the verified `provider/modelId` tuple, and for the other
+kinds it is a safe identifier. A rejected, dropped, failed, or superseded proposal retains no
+selection value; a lost tie instead has the fixed `Lower-priority selection` reason. This excludes question
+prose and labels, extension-provided rationale, answer/Other text, arbitrary error text, prompts,
+raw context, tool arguments, patches, configuration values, paths, stacks, tokens, and secrets
+from durable diagnostics and REST data.
+
+### Static prompt inspection and authoring audit
+
+`GET /api/sessions/:id/prompt-sections` returns the snapshot used for the session when available;
+otherwise it reconstructs the current layout for older sessions. An extension section carries
+`kind: "extension"`, pack and section identity, display title, authored-content bytes,
+wrapper-inclusive rendered bytes, and the total prompt bytes. The response also reports
+`extensionRegionStartByteOffset`, `stablePrefixSha256`, and `extensionRegionBytes`. These make the
+post-core cache boundary inspectable without treating a token estimate as a budget.
+
+`GET /api/sessions/:id/prompt-extension-audit?limit=N` is the authorized detail endpoint for
+agent-authored static-section changes. It requires a verified signed `bobbit_session` prompt-operator
+cookie; a bearer token, sandbox credential, or agent session credential receives
+`403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. Its `{ entries }` rows record contributor and actor,
+trigger, target section, proposal/approval status, baseline digest, exact
+unified diff, authoring model/provider and thinking level, terminal token and cost delta,
+duration, and section/total-byte share. Diffs are redacted before durable storage and response, so
+credentials do not become a second audit copy. The Context trace intentionally retains only safe
+status and identifier metadata; it never exposes this prose, diff, usage body, or secrets.
+
+The REST response remains untrusted browser input. The bundled inspector applies its own
+allow-list before rendering and uses fixed local labels for unknown or unsafe data. It shows no raw
+errors, context blocks, prompts, stacks, paths, secrets, or gateway tokens. The Context tab gets
+live freshness only from the metadata-only `context_trace_updated` WebSocket invalidation; an open
+active inspector performs a bounded REST refetch, while inactive sessions revalidate on their next
+open/sync. No trace payload is carried over WebSocket and there is no polling loop.
+
+Trace retention is **2 MiB per session JSONL file**. After an append exceeds that cap, the store
+keeps the newest complete rows that fit and rotates out older complete rows by temporary-file
+rename. It is bounded diagnostic retention, not an audit archive. See
+[The trace store and Context Trace Inspector](lifecycle-hub.md#the-trace-store) for the retention
+and live-update model.
 
 ### Standard session role resolution
 
@@ -272,14 +557,14 @@ Mutations for one session are serialized in admitted order while different sessi
 
 ### Side-panel workspace
 
-The side-panel workspace endpoints persist the right-side panel tab set for a session: open tabs, active tab, tab order, and size mode. The server workspace is authoritative; closed tabs are absence and are not re-derived from render/content caches or localStorage. See [Side-panel workspace](side-panel-workspace.md) for the full lifecycle and identity rules.
+The side-panel workspace endpoints persist the right-side panel tab set for a session: open tabs, active tab, tab order, and size mode. The server workspace is authoritative; closed tabs are absence and are not re-derived from render/content caches or localStorage. The singleton Context tab is not inferred from trace rows: those remain `ContextTraceStore`/`context-trace` endpoint data, not a separate panel content artifact. After close, only **Session actions → View context trace** explicitly reopens it. See [Side-panel workspace](side-panel-workspace.md) for the full lifecycle and identity rules.
 
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/sessions/:id/side-panel-workspace` | Return the canonical workspace, creating an empty default (`tabs: []`, `activeTabId: ""`, `sizeMode: "split"`, `revision: 0`) if none was persisted. |
 | `POST` | `/api/sessions/:id/side-panel-workspace/open` | Validate and upsert a tab by id. Body `{ tab, focus?, placeAfterActive?, baseRevision?, baseActiveTabId?, strictRevision? }`. Opening an already-open id updates/focuses that tab instead of duplicating it. When an open request is rebased over a newer workspace revision, `baseActiveTabId` lets the server detect that another device changed the active tab and open/update without stealing focus. |
 | `PATCH` | `/api/sessions/:id/side-panel-workspace/tabs/:tabId` | Patch an already-open tab. Body may be `{ patch }` or direct `title` / `label` / `source` / `state` fields. Returns `404 TAB_NOT_FOUND` for a closed/missing tab; this route never creates tabs. |
-| `DELETE` | `/api/sessions/:id/side-panel-workspace/tabs/:tabId` | Close a tab. Missing tabs are idempotent; underlying preview/proposal/review/pack/inbox content is preserved for explicit reopen. |
+| `DELETE` | `/api/sessions/:id/side-panel-workspace/tabs/:tabId` | Close a tab. Missing tabs are idempotent; underlying preview/proposal/review/pack/inbox content is preserved for explicit reopen. Context trace metadata remains endpoint/store data rather than a panel content artifact, and its closed tab stays absent until **Session actions → View context trace** explicitly reopens it. |
 | `POST` | `/api/sessions/:id/side-panel-workspace/active` | Body `{ activeTabId }`. The id must be open, or empty. |
 | `POST` | `/api/sessions/:id/side-panel-workspace/reorder` | Body `{ tabIds, baseRevision }`; `If-Match: <revision>` is also accepted. The request must include each open tab exactly once. Stale revisions return `409` with the latest workspace. |
 | `POST` | `/api/sessions/:id/side-panel-workspace/resize` | Body `{ sizeMode }`, where size mode is `collapsed`, `split`, or `fullscreen`. |
@@ -483,6 +768,7 @@ In-flight `propose_*` payloads are mirrored to `.bobbit/state/proposal-drafts/<s
 | `GET` | `/api/sessions/:id/proposal/:type/snapshot?rev=N` | Read a historical revision without mutating the live draft. Parses `<type>.history/<rev>.<ext>` through the per-type plugin and returns `200 {ok:true, rev, fields}`. Does not broadcast `proposal_update` and does not update `state.activeProposals`. `400 {ok:false, code:"INVALID_BODY"}` for invalid rev; `404 {ok:false, code:"SNAPSHOT_NOT_FOUND", message}` if the snapshot file is missing; `400` with `ParseError` shape if the snapshot fails to parse. Used by read-only historical proposal tabs. |
 | `POST` | `/api/sessions/:id/proposal/:type/seed` | Called by `propose_*` tool `execute()`. Body `{ args: <propose-args object> }`. Serialises args via the per-type plugin, atomically writes the file, parses, attempts to open/focus `proposal:<type>` in the side-panel workspace, then broadcasts `proposal_update {source:"seed", rev}`. `200 {ok:true, rev}` on success; `400` with structured error on parse/validate failure. For `type=goal`, the named `workflow` and `options` are validated against the project's workflows **before** writing. When project workflows are resolvable and non-empty, omitted, empty, or whitespace-only `workflow` is rejected with `400 {ok:false, code:"MISSING_WORKFLOW", message, availableWorkflows: [{ id, name }]}` so agents can retry with a valid workflow. Unknown values are rejected with `400 {ok:false, code:"UNKNOWN_WORKFLOW", availableWorkflows}` or `400 {ok:false, code:"UNKNOWN_OPTIONAL_STEP", validOptionalSteps}`. A rejected goal workflow seed writes no draft, creates no rev, emits no `__proposal_rev_v1__` success marker, and broadcasts no `proposal_update`; the real `propose_goal` tool call must persist/broadcast an errored tool result (`isError: true`) so the UI can render/open the failed attempt from the transcript tool-call input plus the validation result. Workflow validation is skipped only when there are genuinely no resolvable workflows. See [goals-workflows-tasks.md — Validating a proposed workflow at proposal time](goals-workflows-tasks.md#validating-a-proposed-workflow-at-proposal-time). |
 | `POST` | `/api/sessions/:id/proposal/:type/edit` | Surgical content edit. Body `{ old_text: string, new_text: string }`. Exact-string replacement, first-and-only-occurrence rule, empty `new_text` deletes. On success: writes atomically, broadcasts `proposal_update {source:"edit", rev}`, returns `200 {ok:true, newContent, rev}`. Does not open or focus side-panel tabs; already-open proposal tabs refresh from the content slot. On failure: file unchanged, returns 4xx with structured error. |
+| `POST` | `/api/sessions/:id/proposal/project/accept-extension-sections` | Sole approval path for static prompt overrides. Body `{ projectId }`; requires a verified signed `bobbit_session` prompt-operator cookie. A bearer token, sandbox credential, or agent session credential receives `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. It reads the stored project proposal, never replacement text from the request, then revalidates active section identity, static grant, UTF-8 budgets, delimiters, and each `expectedRevision` compare-and-set before atomically publishing; stale, revoked, invalid, or over-budget candidates leave the effective prompt unchanged. |
 | `POST` | `/api/sessions/:id/proposal/:type/restore` | Mutating rollback endpoint for explicit API restore flows. Body `{ rev: number }` (positive integer). Copies `<type>.history/<rev>.<ext>` back to the live draft AND writes a NEW snapshot at `currentRev+1` so the rollback appears in the timeline. Attempts to open/focus `proposal:<type>` in the side-panel workspace, then broadcasts `proposal_update {source:"restore", rev: newRev}`. `200 {ok:true, newRev, fields}` on success; `400 {ok:false, code:"INVALID_BODY"}` if `rev` is not a positive integer; `404 {ok:false, code:"SNAPSHOT_NOT_FOUND", message}` if the requested snapshot file is missing; `400` with `ParseError` shape if the snapshot fails to parse. Historical chat-card tabs use `GET /snapshot` instead so browsing old revisions is non-mutating. |
 | `DELETE` | `/api/sessions/:id/proposal/:type` | Delete the draft. Broadcasts `proposal_cleared`. `204` on success (idempotent — `204` even if the file was absent). Called by accept handlers after a successful save. The per-session `<type>.history/` directory is cleaned with the rest of the per-session draft dir on the 7-day purge (deferred from archive so the [archived-proposal-reopen flows](archived-proposal-reopen.md) can read drafts after the source session is archived). |
 | `GET` | `/api/sessions/:id/proposals` | List every parsed proposal draft for the session in one call. Returns `200 { proposals: Array<{ proposalType, fields, rev }> }`; `proposals` is empty when the per-session directory is absent or empty. Mirrors the WS `proposal_update {source:"rehydrate"}` broadcast as a one-shot REST call — used by fast-path session switch-backs (no fresh WS auth, so the broadcast doesn't run) and by the archived-session footer to decide whether to surface a "Resubmit `<type>` proposal" button (see [docs/archived-proposal-reopen.md](archived-proposal-reopen.md)). This is content hydration only and does not open or focus side-panel tabs. `400` on invalid sessionId; `500` on unexpected enumeration failure. |
@@ -1289,6 +1575,15 @@ Per-project overrides are scoped to a registered project. Headquarters is specia
 
 `PUT /api/projects/:id/config` is a generic KV writer. It accepts any scalar `project.yaml` field — including `build_command`, `test_command`, `typecheck_command`, `test_unit_command`, `test_e2e_command`, `worktree_setup_command`, `sandbox`, `base_ref`, and any custom keys the project defines — and the only validation is that keys must not contain `.`. `base_ref` carries extra rules: tags, SHAs, non-`origin` remote prefixes, and (for `sandbox = docker` projects) local refs are rejected with 400 and a structured `{ field: "base_ref", error, details? }` payload; multi-repo saves additionally `git rev-parse --verify` the ref in every component repo and return per-component bullets in `details[]` when missing. Validation only runs when `base_ref` is present in the body. See [design/base-ref.md](design/base-ref.md). Two fields (`config_directories`, `sandbox_tokens`) are sent as structured native types (arrays of mappings); legacy JSON-string payloads for these keys are rejected with 400. The seven legacy top-level QA keys (`qa_start_command`, `qa_build_command`, `qa_health_check`, `qa_browser_entry`, `qa_env`, `qa_max_duration_minutes`, `qa_max_scenarios`) are **rejected** with 400 — they live on `components[<name>].config[<key>]` now (see [internals.md — Multi-repo & components](internals.md#multi-repo--components)). Inline env vars directly into `qa_start_command`. See [internals.md — Native-YAML project.yaml fields](internals.md#native-yaml-projectyaml-fields). This endpoint is what the settings UI and the mid-session project-proposal accept path both write through (see [internals.md — Per-project config](internals.md#per-project-config)). The project's display `name` is **not** a `project.yaml` field — update it via `PUT /api/projects/:id`. Model preferences (`session_model`, `review_model`, `naming_model`) are **not** project-scoped either; they live in the preferences store.
 
+#### Static prompt policy restrictions
+
+The generic `PUT /api/projects/:id/config` writer rejects both YAML and API aliases for
+`extension_grants`, `prompt_extension_budget`, and `extension_prompt_sections` with `422`.
+Section text reports `PROMPT_EXTENSION_PROPOSAL_REQUIRED`; grants and budgets report
+`PROMPT_EXTENSION_CONFIG_FORBIDDEN`. This prevents an ordinary config save from granting an
+extension, changing recurring prompt limits, or applying agent-authored text without approval.
+Use the exact grant and proposal paths below.
+
 #### Persistence failure contract
 
 Both settings writers (`PUT /api/projects/:id/config` and `PUT /api/project-config`) validate their request before publishing one complete configuration candidate. A publication failure leaves the previous `project.yaml` bytes and all committed config getters unchanged; neither endpoint returns `{ "ok": true }` in that case.
@@ -1321,6 +1616,125 @@ These responses deliberately omit filesystem error details and configuration con
 ```
 
 The value-free descriptor changes remain in `project.yaml`; secret values remain at their prior values and the caller must retry. Token values never appear in `project.yaml` or its temporary candidate. For store load and publication mechanics, see [Durable publication and repair](internals.md#durable-publication-and-repair).
+
+#### Project extension settings
+
+Schema-2 pack providers and hooks may declare typed, project-scoped settings. This is a separate
+API from the generic project-config writer: `extension_settings` is native public YAML state,
+while secret values are held only by the project secret owner. Reads use normal gateway
+authentication and always redact secrets; mutations require a verified signed
+`bobbit_session` prompt-operator cookie. Bearer-only, sandbox, and agent-session credentials
+receive `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/projects/:id/extension-settings` | Returns `{ schema: 2, revision, targets }`, a redacted server-resolved catalogue of declared provider/hook settings, effective enablement/configuration state, and visible hook grant state. Secrets are represented only by `secretSet`. |
+| `PATCH` | `/api/projects/:id/extension-settings/:packId/:kind/:targetId` | Revisioned (`expectedRevision`) update of one `provider` or `hook` target's enabled override and/or declared values. `null` clears an optional public override or a secret. Returns a redacted target projection. |
+| `PATCH` | `/api/projects/:id/extension-settings/:packId` | Revisioned pack runtime switch with exact body `{ expectedRevision, enabled }`; updates all declared targets in that pack and returns their redacted projections. |
+
+A stale revision returns `409 EXTENSION_SETTINGS_REVISION_CONFLICT`; callers must reload and
+review rather than overwrite. A mutation persists public YAML before one coalesced owner-only
+secret-file save, so the two files are not a crash-atomic transaction. If that secret save fails,
+the server restores the exact prior public settings and revision before returning the generic,
+sanitized `503 EXTENSION_SETTINGS_PERSIST_FAILED`. The original revision is retryable, and the
+prior public projection and runtime values remain authoritative; no retry projection claims that
+the secret was saved. If the compensating public save fails, the route returns
+`503 EXTENSION_SETTINGS_UNAVAILABLE` rather than claiming success or a determinate state. Each
+successful mutation invalidates resolver caches and emits only the metadata-only project WebSocket
+refresh frame documented in [Project extension settings](extension-settings.md).
+
+See [Project extension settings](extension-settings.md) for declaration syntax, value validation,
+error codes, storage isolation, Market behavior, and Hindsight migration.
+
+#### Extension capability grants
+
+Extension grants are a separate, project-owned native YAML field (`extension_grants`), not a
+value accepted by the generic config writer. The `GET` grant and grant-audit routes use normal
+gateway authentication. The server, not the caller, assigns the actor and timestamp. Grants are
+exact and fail closed for active schema-2 hooks or active pack principals; they do not replace pack
+activation, Host API guards, or session policy. A pack-principal grant and a hook `mutate` grant
+require a verified signed `bobbit_session` prompt-operator cookie; bearer-only, sandbox, and agent
+session credentials receive `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. Other hook grants use normal
+gateway authentication. Static prompt sections require `prompt:system-static`; `prompt:system-author`
+permits only an authenticated owning agent session to create or edit an approval proposal, never a
+direct write. See the [non-hook extension-grants design](design/non-hook-extension-grants.md) for
+the configuration, audit-outbox, live-revocation, and extension-author contract.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/projects/:id/extension-grants` | Normal-auth read of durable exact grants plus active hook and pack grant-status projections. |
+| `PUT` | `/api/projects/:id/extension-grants` | Grant one active exact tuple. A hook body is exactly `{ packId, hookId, capability }`; a pack-principal body is exactly `{ packId, principal: "pack", capability }`. Pack grants require the verified operator cookie, name an active pack, and accept only pack capabilities; malformed input is `400`, an inactive principal/hook is `404`, and an unsupported capability is `422 EXTENSION_CAPABILITY_UNSUPPORTED`. |
+| `DELETE` | `/api/projects/:id/extension-grants/:packId/:hookId/:capability` | Revoke a hook tuple, including one for a removed hook. |
+| `DELETE` | `/api/projects/:id/extension-grants/:packId/principals/pack/:capability` | Revoke a pack-principal tuple; requires the verified operator cookie. |
+| `GET` | `/api/projects/:id/extension-grant-audit?limit=N` | Normal-auth read of bounded (1–200, default 100) append-only safe audit rows. |
+
+A completed repeat revoke is an audit-free no-op. An exact retry after a
+`503 EXTENSION_GRANT_AUDIT_UNAVAILABLE` revoke recovers its pending durable audit row without
+restoring authority. These routes have no Marketplace settings or audit-viewer UI in EP-6; that UI
+is deferred to EP-7.
+
+#### Hindsight typed pack routes
+
+The built-in Hindsight panel and its five agent tools use the pack-scoped route endpoint rather
+than a Hindsight-specific public server API. A client calls `host.callRoute(name, init)`; the host
+sends `POST /api/ext/route/:name` with a server-minted surface token and the header-bound session.
+The server derives the pack and authoritative project/goal scope from those bindings, so callers do
+not supply a pack id, project id, goal id, or endpoint. See [Extension Host routes](extension-host-authoring.md#routes--the-packs-own-server-endpoints-hostcallroute) for the transport contract,
+[Hindsight memory pack](hindsight-memory.md), and [Project extension settings](extension-settings.md).
+
+All Hindsight routes are scoped to the session's project; normal memory reads also include its goal
+when present. `scope: "all"` is an explicit all-project read only; it is never inferred from tags,
+an id, or a missing scope. Settings revisions and secrets remain owned by the EP-7 settings route:
+settings saves validate and persist but do not probe, pull, or start a runtime.
+
+`runtime-control` and `migration-execute` are prompt-operator actions. Each requires a live
+`service.manage` grant, a verified signed `bobbit_session` prompt-operator cookie, and its required
+body value (`consent: true` or the exact plan `confirmation`). That body value is not authentication.
+Bearer-only, sandbox, and agent-session callers receive `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`.
+`migration-plan` remains `service.manage` grant-only because it is non-destructive.
+
+| Route name | Request body inside `init.body` | Capability | Response summary |
+|---|---|---|---|
+| `runtime-status` | None | — | `{ settingsRevision, runtime }`, where `runtime` is the generic `ServiceRuntimeStatus`: identity, desired state, optional mode/endpoint, observed state, and safe diagnostic. External mode is reported as ready only with a valid configured endpoint. |
+| `runtime-logs` | `{ tail? }` | — | `{ settingsRevision, lines }`; `tail` is an integer clamped to 1–200 and defaults to 100. |
+| `runtime-control` | `{ action: "start" \| "stop" \| "restart", consent: true }` | Live `service.manage` grant and verified prompt-operator cookie | `{ settingsRevision, runtime }` from the exact settings snapshot used for control. `consent: true` is required but is not authentication. |
+| `migration-plan` | `{ target: "managed-volume" \| "external" }` | `service.manage` | `{ settingsRevision, ok: true, plan }` or `{ settingsRevision, ok: false, code }`. Planning is redacted and does not run a command, start a service, pull an image, or mutate storage. |
+| `migration-execute` | `{ plan, confirmation }` | Live `service.manage` grant and verified prompt-operator cookie | `{ settingsRevision, ok: true, planId, fingerprint }` or `{ settingsRevision, ok: false, code, rolledBack? }`. The confirmation must equal the plan confirmation; it is required but is not authentication. The current built-in bridge returns `HINDSIGHT_MIGRATION_CONNECTOR_UNAVAILABLE` rather than executing a migration. |
+| `browse`, `search` | `{ query?, cursor?, limit?, scope? }` | `memory.read`; `memory.read.all` for `scope: "all"` | `{ configured, memories, cursor? }`. `limit` defaults to 25 and is capped at 100. |
+| `detail` | `{ id, scope? }` | `memory.read`; `memory.read.all` for `scope: "all"` | `{ configured, memory }` or a typed result without `memory`. The returned record is checked against the authoritative scope. |
+| `history` | `{ id, scope? }` | `memory.read`; `memory.read.all` for `scope: "all"` | `{ configured, history }`; the route verifies the scoped record before reading its history. |
+| `recall` | `{ query, scope? }` | `memory.read`; `memory.read.all` for `scope: "all"` | `{ configured, memories }`. |
+| `retain` | `{ content, sync? }` | `memory.write` | `{ ok, configured }`. Tags are derived by the route; request tags do not select scope. |
+| `reflect` | `{ prompt }` | `memory.reflect` and `memory.read` | `{ configured, text }`. Reflection is always limited to the current project/goal; `scope: "all"` cannot broaden it. |
+| `invalidate` | `{ id, confirmation, reason? }` | `memory.invalidate` | `{ ok, configured, id }`. `confirmation` must exactly equal `id`; the route checks the selected record's scope before invalidating it. |
+| `retain-outcome` | Ignored | `memory.write` | `{ ok, configured, outcomeId? }`. The route accepts only a server-derived, completed-goal outcome; body content and goal identifiers are ignored. |
+
+The `hindsight_recall`, `hindsight_retain`, `hindsight_reflect`, `hindsight_invalidate`, and
+`hindsight_retain_outcome` tools are thin adapters for `recall`, `retain`, `reflect`, `invalidate`,
+and `retain-outcome`, respectively. Grant the listed capabilities with the pack-principal grant
+form above; the Hindsight capability set is `service.manage`, `memory.read`, `memory.write`,
+`memory.reflect`, `memory.invalidate`, and `memory.read.all`.
+
+Hindsight rechecks a live grant immediately before the provider request, so revocation wins over a
+request already in progress. A pre-dispatch missing grant is HTTP
+`403 EXTENSION_CAPABILITY_DENIED` with the required `capability`; a revocation observed by the
+worker is a typed `EXTENSION_CAPABILITY_DENIED` route result. Invalid runtime control consent/action is
+`422 HINDSIGHT_CONTROL_CONSENT_REQUIRED`; a required migration/continuity transition is
+`409 HINDSIGHT_STORAGE_CONTINUITY_REQUIRED`; and local/Docker starts without the required external
+database setting return `422 HINDSIGHT_EXTERNAL_DATABASE_SETTING_REQUIRED`. Unavailable runtime
+infrastructure returns `503 HINDSIGHT_RUNTIME_UNAVAILABLE`.
+
+Data-plane availability and validation failures are typed **200** responses, so a panel can keep
+its form state rather than treat an expected down service as a transport failure. Common codes are
+`SERVICE_UNHEALTHY`, `HINDSIGHT_CONFIG_UNAVAILABLE`, `HINDSIGHT_SCOPE_UNAVAILABLE`,
+`MEMORY_QUERY_REQUIRED`, `MEMORY_CONTENT_REQUIRED`, `MEMORY_PROMPT_REQUIRED`,
+`MEMORY_ID_REQUIRED`, `INVALIDATION_CONFIRMATION_REQUIRED`, `OUTCOME_UNAVAILABLE`,
+`MEMORY_NOT_FOUND`, `MEMORY_API_UNSUPPORTED`, and `MEMORY_RESPONSE_INVALID`. A service-down,
+degraded, or timed-out data-plane request returns its typed unhealthy result without constructing a
+fallback client or falling back to another provider. Migration failures are returned in their typed
+result (`HINDSIGHT_MIGRATION_*`) rather than as a new empty bank. The current built-in bridge
+returns `HINDSIGHT_MIGRATION_CONNECTOR_UNAVAILABLE`; it does not change storage. See the
+[Hindsight migration execution limit](hindsight-memory.md#protect-existing-memories-and-postgresql-data).
 
 Server-level fallback, labelled Headquarters in the UI (applied when no normal project override is set):
 

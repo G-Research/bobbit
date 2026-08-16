@@ -76,6 +76,16 @@ export interface InvokeRequest {
 	 *  `chdir`, so the bootstrap overrides `process.cwd` to this). Relative spawns +
 	 *  bare-relative fs paths resolve under it. Absent ⇒ the worker's real cwd. */
 	workingDir?: string;
+	/** Host-owned absolute lifecycle deadline forwarded to the worker. */
+	deadlineEpochMs?: number;
+}
+
+/** Optional lifecycle controls for one worker invocation. The legacy numeric
+ * timeout remains supported for action/route dispatchers. */
+export interface InvokeOptions {
+	timeoutMs?: number;
+	deadlineEpochMs?: number;
+	signal?: AbortSignal;
 }
 
 /** Flag NAMES safe to forward to a `worker_threads.Worker` execArgv. Node rejects
@@ -110,7 +120,7 @@ function workerSafeExecArgv(argv: readonly string[]): string[] {
  *  ONLY drive these exact `host.<ns>.<method>` calls — never arbitrary property
  *  access on the live host object (no `constructor`, no prototype walk). */
 const PROXYABLE: Record<string, Set<string>> = {
-	store: new Set(["get", "read", "put", "list"]),
+	store: new Set(["get", "read", "put", "mutate", "list"]),
 	// `session` is READ-ONLY for server modules. `postMessage` is intentionally
 	// EXCLUDED: the parent `ServerHostApi` omits it (server modules have no user
 	// gesture), so proxying it would always throw — authors get reads only.
@@ -120,12 +130,27 @@ const PROXYABLE: Record<string, Set<string>> = {
 	// `ServerHostApi` with the bound owner/source scoping stays in the PARENT and
 	// services the proxied calls over the same channel.
 	agents: new Set(["spawn", "prompt", "dismiss", "list", "read", "status"]),
+	memory: new Set(["requireCapability"]),
 };
+
+interface HostCallBudget {
+	deadlineEpochMs?: number;
+	/** Parent-local signal: never supplied by the worker or structured-cloned. */
+	signal?: AbortSignal;
+}
+
+function assertHostCallBudget(budget: HostCallBudget | undefined, phase: "before" | "during"): void {
+	if (budget?.signal?.aborted) throw new ActionError(499, `pack server module aborted ${phase} host call`);
+	if (budget?.deadlineEpochMs !== undefined && Date.now() >= budget.deadlineEpochMs) {
+		throw new ActionError(504, `lifecycle deadline exceeded ${phase} host call`);
+	}
+}
 
 /** Invoke a proxied host method on the PARENT's live host, enforcing the
  *  allowlist. The worker has no ambient access; this is the single sanctioned
  *  worker→parent capability channel (host calls are authorized here). */
-async function invokeHostMethod(host: unknown, path: unknown, args: unknown[]): Promise<unknown> {
+async function invokeHostMethod(host: unknown, path: unknown, args: unknown[], budget?: HostCallBudget): Promise<unknown> {
+	assertHostCallBudget(budget, "before");
 	if (!Array.isArray(path) || path.length !== 2 || typeof path[0] !== "string" || typeof path[1] !== "string") {
 		throw new Error("invalid host-call path");
 	}
@@ -138,7 +163,34 @@ async function invokeHostMethod(host: unknown, path: unknown, args: unknown[]): 
 	if (typeof fn !== "function") {
 		throw new Error(`host.${ns}.${method} is unavailable`);
 	}
-	return await (fn as (...a: unknown[]) => unknown).apply(target, args);
+
+	// A worker is untrusted to describe its cancellation budget. Lifecycle writes
+	// always cross the parent through the fenced mutation primitive, with the
+	// invocation's immutable deadline and a parent-local abort signal replacing any
+	// worker-supplied fields. Legacy action/route puts without a deadline keep their
+	// existing API semantics.
+	if (ns === "store" && (method === "put" || method === "mutate") && budget?.deadlineEpochMs !== undefined) {
+		const [key, value, rawOpts] = args;
+		const supplied = rawOpts && typeof rawOpts === "object" && !Array.isArray(rawOpts)
+			? rawOpts as Record<string, unknown>
+			: {};
+		const { deadlineEpochMs: _untrustedDeadline, signal: _untrustedSignal, ...safeOpts } = supplied;
+		const mutate = target?.mutate;
+		if (typeof mutate !== "function") throw new Error("host.store.mutate is unavailable");
+		const result = await (mutate as (...a: unknown[]) => unknown).call(target, key, value, {
+			...safeOpts,
+			deadlineEpochMs: budget.deadlineEpochMs,
+			signal: budget.signal,
+		}) as { status?: string; diagnostic?: { code?: string } };
+		assertHostCallBudget(budget, "during");
+		if (method === "mutate") return result;
+		if (result.status === "committed" || result.status === "replayed") return undefined;
+		throw new ActionError(409, `lifecycle store.put did not commit (${result.diagnostic?.code ?? "STORE_MUTATION_WRITE_FAILED"})`);
+	}
+
+	const value = await (fn as (...a: unknown[]) => unknown).apply(target, args);
+	assertHostCallBudget(budget, "during");
+	return value;
 }
 
 /**
@@ -181,11 +233,19 @@ export class ModuleHost {
 	 *     dispatcher passes its own per-call timeout).
 	 * The worker is ALWAYS terminated before this settles (no zombie threads).
 	 */
-	invoke(req: InvokeRequest, timeoutMs?: number): Promise<unknown> {
+	invoke(req: InvokeRequest, timeout?: number | InvokeOptions): Promise<unknown> {
 		if (this.disposed) return Promise.reject(new ActionError(500, "module host disposed"));
-		const limit = timeoutMs ?? this.defaultTimeoutMs;
+		const options: InvokeOptions = typeof timeout === "number" ? { timeoutMs: timeout } : (timeout ?? {});
+		const deadlineEpochMs = options.deadlineEpochMs ?? req.deadlineEpochMs;
+		if (options.signal?.aborted) return Promise.reject(new ActionError(499, "pack server module aborted"));
+		const configuredLimit = options.timeoutMs ?? this.defaultTimeoutMs;
+		const remaining = deadlineEpochMs === undefined ? configuredLimit : deadlineEpochMs - Date.now();
+		if (remaining <= 0) return Promise.reject(new ActionError(504, "pack server module timed out"));
+		const limit = Math.min(configuredLimit, remaining);
 		const host = (req.ctx as { host?: unknown } | undefined)?.host;
 		const capSrc = (host as { capabilities?: Record<string, unknown> } | undefined)?.capabilities;
+		const hostProviderConfig = (host as { providerConfig?: unknown } | undefined)?.providerConfig;
+		const hostCompletedOutcome = (host as { completedOutcome?: unknown } | undefined)?.completedOutcome;
 		const providerCtx = req.ctx as unknown as Record<string, unknown>;
 		// The LIVE host stays in the PARENT (it services proxied store calls); it is a
 		// function-bearing object that cannot cross the MessagePort, so strip it from
@@ -193,11 +253,15 @@ export class ModuleHost {
 		// provider-scoped host: `store` reflects the (least-privilege) host so the
 		// worker tier gets `capabilities.store === true`; `callRoute` is always false
 		// (a server module reaches its own routes directly).
-		const { host: _liveProviderHost, ...providerCtxNoHost } = providerCtx;
+		// Lifecycle signals/deadline helpers are parent-local objects and cannot be
+		// structured-cloned. The worker rebuilds both from `deadlineEpochMs` below.
+		const { host: _liveProviderHost, signal: _parentSignal, deadline: _parentDeadline, ...providerCtxNoHost } = providerCtx;
 		const serCtx = req.exportKind === "providers"
 			? {
 				...providerCtxNoHost,
 				workingDir: providerCtx.workingDir ?? req.workingDir,
+				...(hostProviderConfig === undefined ? {} : { providerConfig: hostProviderConfig }),
+				...(hostCompletedOutcome === undefined ? {} : { completedOutcome: hostCompletedOutcome }),
 				hostVersion: (host as { version?: number } | undefined)?.version,
 				hostContractVersion: (host as { contractVersion?: number } | undefined)?.contractVersion,
 				capabilities: {
@@ -205,15 +269,24 @@ export class ModuleHost {
 					session: capSrc?.session === true,
 					store: capSrc?.store === true,
 					agents: capSrc?.agents === true,
+					memory: capSrc?.memory === true,
 				},
 			}
 			: {
 				sessionId: req.ctx?.sessionId,
 				toolUseId: req.ctx?.toolUseId,
 				tool: req.ctx?.tool,
-				// The calling session's project id (when resolvable) so a route handler
-				// can scope to the real project instead of fabricating one.
+				// Flat projectId is compatibility-only. The host-resolved scope snapshot is
+				// structured-cloned to the worker for routes that require rich identity.
 				projectId: (req.ctx as { projectId?: unknown } | undefined)?.projectId,
+				scopeContext: (req.ctx as { scopeContext?: unknown } | undefined)?.scopeContext,
+				// Route data-plane adapters receive the server-resolved generic runtime
+				// projection. It is configuration-free and contains no authority or
+				// secrets; omitting it would make every managed-mode route appear down.
+				runtime: (req.ctx as { runtime?: unknown } | undefined)?.runtime,
+				outcome: (req.ctx as { outcome?: unknown } | undefined)?.outcome,
+				...(hostProviderConfig === undefined ? {} : { providerConfig: hostProviderConfig }),
+				...(hostCompletedOutcome === undefined ? {} : { completedOutcome: hostCompletedOutcome }),
 				sessionArchived: (req.ctx as { sessionArchived?: unknown } | undefined)?.sessionArchived === true,
 				workingDir: req.ctx?.workingDir,
 				hostVersion: (host as { version?: number } | undefined)?.version,
@@ -223,9 +296,14 @@ export class ModuleHost {
 					session: capSrc?.session === true,
 					store: capSrc?.store === true,
 					agents: capSrc?.agents === true,
+					memory: capSrc?.memory === true,
 				},
 			};
 
+		// This controller belongs to the parent invocation. It is cancelled before
+		// worker teardown, so already-queued store operations observe the same fence
+		// even after their worker has been terminated.
+		const hostCallAbort = new AbortController();
 		const worker = new Worker(this.bootstrapUrl(), {
 			// No `env` option: the worker inherits a full copy of the gateway env
 			// (full-env parity — trusted pack code is the tool/MCP tier).
@@ -236,7 +314,7 @@ export class ModuleHost {
 			// frozen for the call's whole duration), so Node's own timeout must SIGKILL
 			// the child before this terminate-on-timeout reaps the (blocked) thread —
 			// otherwise the OS child (a child of the MAIN process) orphans past the cap.
-			workerData: { packRoot: req.packRoot, workingDir: req.workingDir, wallCapMs: limit },
+			workerData: { packRoot: req.packRoot, workingDir: req.workingDir, wallCapMs: limit, deadlineEpochMs },
 			// Memory caps.
 			resourceLimits: {
 				maxOldGenerationSizeMb: this.maxOldGenerationSizeMb,
@@ -252,10 +330,16 @@ export class ModuleHost {
 
 		return new Promise<unknown>((resolve, reject) => {
 			let settled = false;
+			const abortInvocation = (): void => {
+				hostCallAbort.abort();
+				finish(() => reject(new ActionError(499, "pack server module aborted")));
+			};
 			const finish = (fn: () => void): void => {
 				if (settled) return;
 				settled = true;
+				hostCallAbort.abort();
 				clearTimeout(timer);
+				options.signal?.removeEventListener("abort", abortInvocation);
 				this.live.delete(worker);
 				// True terminate-on-timeout (and unconditional teardown so a completed
 				// worker never lingers). terminate() is fire-and-forget.
@@ -271,10 +355,13 @@ export class ModuleHost {
 			const timer = setTimeout(() => {
 				finish(() => reject(new ActionError(504, "pack server module timed out")));
 			}, limit);
+			options.signal?.addEventListener("abort", abortInvocation, { once: true });
+			if (options.signal?.aborted) abortInvocation();
 
 			worker.on("message", (msg: { kind?: string; ok?: boolean; value?: unknown; status?: number; error?: string; id?: number; path?: unknown; args?: unknown[]; pid?: number }) => {
 				if (msg?.kind === "result") {
-					if (msg.ok) finish(() => resolve(msg.value));
+					if (msg.ok && (deadlineEpochMs === undefined || Date.now() < deadlineEpochMs)) finish(() => resolve(msg.value));
+					else if (msg.ok) finish(() => reject(new ActionError(504, "pack server module timed out")));
 					else finish(() => reject(new ActionError(typeof msg.status === "number" ? msg.status : 500, msg.error ?? "pack server module failed")));
 					return;
 				}
@@ -290,7 +377,10 @@ export class ModuleHost {
 					// Service the proxied host call on the parent's LIVE host, then
 					// reply over the same channel. Errors are surfaced to the worker's
 					// awaiting proxy (never crash the parent).
-					void invokeHostMethod(host, msg.path, Array.isArray(msg.args) ? msg.args : []).then(
+					void invokeHostMethod(host, msg.path, Array.isArray(msg.args) ? msg.args : [], {
+						deadlineEpochMs,
+						signal: hostCallAbort.signal,
+					}).then(
 						(value) => { if (!settled) worker.postMessage({ kind: "host-reply", id: msg.id, ok: true, value }); },
 						(err: unknown) => { if (!settled) worker.postMessage({ kind: "host-reply", id: msg.id, ok: false, error: err instanceof Error ? err.message : String(err) }); },
 					);
@@ -306,8 +396,9 @@ export class ModuleHost {
 				finish(() => reject(new ActionError(500, `pack server module worker exited (code ${code}) before producing a result`)));
 			});
 
+			if (settled) return;
 			try {
-				worker.postMessage({ kind: "invoke", url: req.url, epoch: req.epoch, exportKind: req.exportKind, member: req.member, ctx: serCtx, arg: req.arg });
+				worker.postMessage({ kind: "invoke", url: req.url, epoch: req.epoch, exportKind: req.exportKind, member: req.member, ctx: serCtx, arg: req.arg, deadlineEpochMs });
 			} catch (err) {
 				finish(() => reject(new ActionError(500, `failed to dispatch to worker: ${err instanceof Error ? err.message : String(err)}`)));
 			}

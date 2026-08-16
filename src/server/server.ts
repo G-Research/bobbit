@@ -86,9 +86,13 @@ import { createServerHostApi } from "./extension-host/server-host-api.js";
 import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./extension-host/contract-adapter.js";
 import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
-import type { StorePutOptions } from "../shared/extension-host/host-api.js";
+import type { StoreMutationOptions, StorePutOptions } from "../shared/extension-host/host-api.js";
 import { PackContributionRegistry, type ProviderConfigOverrideReadResult } from "./extension-host/pack-contribution-registry.js";
-import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
+import { loadPackContributions, packIdFromRoot, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX, type PackContributions } from "./agent/pack-contributions.js";
+import { type ExtensionSettingsTargetRef } from "./agent/extension-settings-store.js";
+import { HindsightCapabilityError, HindsightRuntimeBridge, HindsightRuntimeSettingsResolver, isHindsightCapability } from "./agent/hindsight-runtime-bridge.js";
+import { isValidExtensionSettingValue, type ExtensionSettingDefinition, type ExtensionSettingValue } from "./agent/extension-settings-schema.js";
+import { ComposeServiceRunner, DockerServiceRunner, LocalServiceRunner, ServiceRuntimeStore, ServiceRuntimeSupervisor, type ServiceRuntimeContext } from "./service-runtime/index.js";
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
 import { resolveConfiguredComponent, resolveHookScopeContext } from "./agent/hook-scope-context.js";
@@ -616,7 +620,24 @@ import { InboxManager, type InboxEntry } from "./agent/inbox-manager.js";
 import { InboxNudger } from "./agent/inbox-nudger.js";
 import type { InboxStore } from "./agent/inbox-store.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
-import { ProjectConfigLoadError, ProjectConfigStore, type PackOrderScope } from "./agent/project-config-store.js";
+import {
+	ProjectConfigLoadError,
+	ProjectConfigStore,
+	isExtensionCapability,
+	isExtensionPackCapability,
+	isSafeExtensionGrantIdentifier,
+	type ExtensionCapability,
+	type ExtensionGrant,
+	type ExtensionPackCapability,
+	type PackOrderScope,
+} from "./agent/project-config-store.js";
+import { ExtensionGrantAuditStore } from "./agent/extension-grant-audit-store.js";
+import {
+	createExtensionCapabilityGrantResolver,
+	resolveExtensionGrant,
+	type ExtensionCapabilityGrantResolver,
+	type ResolvedHook,
+} from "./agent/extension-grant-policy.js";
 import { SecretsStorePersistenceError } from "./agent/secrets-store.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
@@ -686,7 +707,7 @@ import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, typ
 import type { MarketplaceMcpResolver, McpReloadResult, McpToolRouteSnapshot, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
 import type { MarketplacePiExtensionResolver, ResolvedPiExtensionContribution, PiExtensionDiagnostic } from "./agent/session-setup.js";
 import { scopeMarketPackEntries, invalidateMarketPackScanCache } from "./agent/pack-list.js";
-import { buildConflictsFor, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
+import { buildConflictsFor, scopePaths, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
 import { isSafeBasename } from "./agent/pack-manifest.js";
 import { gatewayMcpActivationContributionId, gatewayMcpRuntimeKey } from "./agent/mcp-gateway-runtime-identity.js";
 
@@ -724,6 +745,18 @@ let serverCommandRunner: CommandRunner = realCommandRunner;
 let serverRemoteGitPolicy: RemoteGitPolicy = {};
 export function __setServerRemoteGitPolicy(p: RemoteGitPolicy): RemoteGitPolicy { const prev = serverRemoteGitPolicy; serverRemoteGitPolicy = p; return prev; }
 let serverRuntimeFlags = { e2e: false, testNoExternal: false };
+// Audit rows are append-only events. Keep timestamps unique per injected clock
+// so deterministic clocks cannot collapse distinct administrative transitions.
+const extensionGrantAuditTimestampFloors = new WeakMap<Clock, number>();
+let extensionGrantAuditDefaultTimestampFloor = Number.NEGATIVE_INFINITY;
+function nextExtensionGrantAuditTimestamp(clock?: Clock): string {
+	const now = clock?.now() ?? Date.now();
+	const previous = clock ? extensionGrantAuditTimestampFloors.get(clock) : extensionGrantAuditDefaultTimestampFloor;
+	const timestamp = Math.max(now, (previous ?? Number.NEGATIVE_INFINITY) + 1);
+	if (clock) extensionGrantAuditTimestampFloors.set(clock, timestamp);
+	else extensionGrantAuditDefaultTimestampFloor = timestamp;
+	return new Date(timestamp).toISOString();
+}
 
 function oneLineDescription(value: unknown): string | undefined {
 	if (typeof value !== "string") return undefined;
@@ -1104,6 +1137,78 @@ const GENERIC_NO_WORKTREE_GOAL_GIT_MESSAGE = "This goal runs without a git workt
 
 function hasGoalGitWorktree<T extends Pick<PersistedGoal, "branch" | "worktreePath">>(goal: T): goal is T & { branch: string; worktreePath: string } {
 	return !!goal.branch && !!goal.worktreePath;
+}
+
+const GOAL_COMPLETION_TEXT_LIMIT = 4_000;
+const GOAL_COMPLETION_ITEMS_LIMIT = 100;
+const GOAL_COMPLETION_METADATA_LIMIT = 40;
+
+/**
+ * Construct the only completion payload extension providers may receive. Keep
+ * the source snapshot deliberately narrow and bounded: raw stores, managers,
+ * workflows, sessions, and arbitrary goal data never cross this boundary.
+ */
+function boundedGoalCompletionOutcome(
+	goal: PersistedGoal,
+	tasks: readonly {
+		id: string; title: string; type: string; state: string; updatedAt: number;
+		completedAt?: number; resultSummary?: string; headSha?: string; workflowGateId?: string;
+	}[],
+	gates: readonly {
+		gateId: string; status: string; updatedAt: number; currentContent?: string;
+		currentContentVersion?: number; currentMetadata?: Record<string, string>;
+	}[],
+): Record<string, unknown> {
+	const clip = (value: unknown, limit = GOAL_COMPLETION_TEXT_LIMIT): string | undefined => {
+		if (typeof value !== "string") return undefined;
+		return value.length <= limit ? value : value.slice(0, limit);
+	};
+	const metadata = (value: Record<string, string> | undefined): Record<string, string> | undefined => {
+		if (!value) return undefined;
+		const out: Record<string, string> = {};
+		for (const [key, item] of Object.entries(value).slice(0, GOAL_COMPLETION_METADATA_LIMIT)) {
+			if (typeof item === "string") out[key.slice(0, 200)] = item.slice(0, 1_000);
+		}
+		return Object.keys(out).length ? out : undefined;
+	};
+	return {
+		version: 1,
+		goal: {
+			id: goal.id,
+			title: clip(goal.title, 1_000) ?? "",
+			...(clip(goal.spec) ? { spec: clip(goal.spec) } : {}),
+			state: goal.state,
+			updatedAt: goal.updatedAt,
+			...(goal.workflowId ? { workflowId: goal.workflowId.slice(0, 200) } : {}),
+		},
+		tasks: tasks
+			.slice()
+			.sort((a, b) => a.updatedAt - b.updatedAt || a.id.localeCompare(b.id))
+			.slice(0, GOAL_COMPLETION_ITEMS_LIMIT)
+			.map((task) => ({
+				id: task.id,
+				title: clip(task.title, 1_000) ?? "",
+				type: task.type,
+				state: task.state,
+				updatedAt: task.updatedAt,
+				...(task.completedAt ? { completedAt: task.completedAt } : {}),
+				...(clip(task.resultSummary) ? { resultSummary: clip(task.resultSummary) } : {}),
+				...(clip(task.headSha, 200) ? { headSha: clip(task.headSha, 200) } : {}),
+				...(clip(task.workflowGateId, 200) ? { workflowGateId: clip(task.workflowGateId, 200) } : {}),
+			})),
+		gates: gates
+			.slice()
+			.sort((a, b) => a.updatedAt - b.updatedAt || a.gateId.localeCompare(b.gateId))
+			.slice(0, GOAL_COMPLETION_ITEMS_LIMIT)
+			.map((gate) => ({
+				id: gate.gateId,
+				status: gate.status,
+				updatedAt: gate.updatedAt,
+				...(gate.currentContentVersion !== undefined ? { contentVersion: gate.currentContentVersion } : {}),
+				...(clip(gate.currentContent) ? { content: clip(gate.currentContent) } : {}),
+				...(metadata(gate.currentMetadata) ? { metadata: metadata(gate.currentMetadata) } : {}),
+			})),
+	};
 }
 
 function noWorktreeGoalGitMessage(goal: Pick<PersistedGoal, "projectId">): string {
@@ -2751,6 +2856,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			setGoalProvisionedDispatcher?: (
 				fn: (dctx: { goalId: string; projectId?: string; worktreePath: string; cwd: string; branch?: string; metadata: Record<string, unknown> }) => Promise<void>,
 			) => void;
+			setGoalCompletedDispatcher?: (
+				fn: (dctx: { goalId: string; goal: PersistedGoal; completedAt: number }) => Promise<void>,
+			) => void;
 		};
 		if (typeof gm.setGoalProvisionedDispatcher === "function") {
 			gm.setGoalProvisionedDispatcher(async (dctx) => {
@@ -2760,6 +2868,47 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				if (hub && typeof hub.dispatchGoalProvisioned === "function") {
 					await hub.dispatchGoalProvisioned(dctx);
 				}
+			});
+		}
+		// Completion is configured per owning ProjectContext, exactly like worktree
+		// provisioning. The TeamManager obtains this GoalManager only after its
+		// durable state transition, so no session/body fields can redirect scope.
+		if (typeof gm.setGoalCompletedDispatcher === "function") {
+			gm.setGoalCompletedDispatcher(async ({ goalId, goal, completedAt }) => {
+				if (goal.projectId && goal.projectId !== ctx.project.id) {
+					console.warn(`[server] goalCompleted skipped: goal ${goalId} project ownership mismatch`);
+					return;
+				}
+				const hub = sessionManager.lifecycleHub;
+				if (!hub) return;
+				const scopeContext = resolveHookScopeContext(projectContextManager, {
+					projectId: ctx.project.id,
+					goalId,
+					cwd: goal.cwd,
+					worktreePath: goal.worktreePath,
+					repoPath: goal.repoPath,
+					repoWorktrees: goal.repoWorktrees,
+				});
+				if (!scopeContext?.project || scopeContext.project.id !== ctx.project.id) {
+					console.warn(`[server] goalCompleted skipped: authoritative scope unavailable for goal ${goalId}`);
+					return;
+				}
+				await hub.dispatchGoalCompleted({
+					goalId,
+					projectId: ctx.project.id,
+					cwd: goal.cwd,
+					worktreePath: goal.worktreePath,
+					repoPath: goal.repoPath,
+					repoWorktrees: goal.repoWorktrees,
+					scopeContext,
+					outcome: boundedGoalCompletionOutcome(
+						goal,
+						ctx.taskStore.getByGoalId(goalId),
+						ctx.gateStore.getGatesForGoal(goalId),
+					),
+					completedAt,
+					completionRevision: completedAt,
+				});
 			});
 		}
 	});
@@ -2926,12 +3075,104 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		toolManager.setScopedPiExtensionTools(scopedContext, piExtensionExternalTools(contributions));
 		return contributions;
 	};
+	/**
+	 * The editable settings catalogue intentionally bypasses the runtime registry:
+	 * a disabled or config-dormant declaration has to remain visible so an
+	 * operator can repair it. It still applies the registry's winning-pack rule.
+	 */
+	const extensionSettingsCatalogue = (projectId: string | undefined): PackContributions[] => {
+		const winning = new Map<string, PackEntry>();
+		for (const entry of marketPackEntriesForProject(projectId)) {
+			if (!entry.manifest || (entry.manifest.schema ?? 1) < 2) continue;
+			const packId = packIdFromRoot(entry.path);
+			if (packId) winning.set(packId, entry);
+		}
+		const packs: PackContributions[] = [];
+		for (const entry of winning.values()) {
+			try {
+				packs.push(loadPackContributions(entry.path, entry.manifest!));
+			} catch {
+				// Contribution errors are represented as unavailable by the public
+				// projection; never surface a parser/path diagnostic from this route.
+			}
+		}
+		return packs;
+	};
+	const extensionSettingsRuntimeLookup: ExtensionSettingsRuntimeLookup = (projectId: string | undefined, packId: string, kind: "pack" | "provider" | "hook", id?: string) => {
+		const context = projectId ? projectContextManager.getOrCreate(projectId) : undefined;
+		if (!context) return { state: "absent" as const };
+		const pack = extensionSettingsCatalogue(projectId).find(candidate => candidate.packId === packId);
+		if (kind === "pack") {
+			const refs: ExtensionSettingsTargetRef[] = [
+				...(pack?.providers ?? []).map(provider => ({ packId, kind: "provider" as const, id: provider.id })),
+				...(pack?.hooks ?? []).map(hook => ({ packId, kind: "hook" as const, id: hook.id })),
+			];
+			const overrides = refs.map(ref => context.extensionSettingsStore.getTarget(ref));
+			if (refs.length > 0 && overrides.every(override => override?.enabled === false)) return { state: "present" as const, enabled: false, values: {} };
+			if (refs.length > 0 && overrides.every(override => override?.enabled === true)) return { state: "present" as const, enabled: true, values: {} };
+			return { state: "absent" as const };
+		}
+		const contribution = kind === "provider"
+			? pack?.providers.find(candidate => candidate.id === id)
+			: pack?.hooks.find(candidate => candidate.id === id);
+		if (!contribution) return { state: "absent" as const };
+		const ref: ExtensionSettingsTargetRef = { packId, kind, id: id! };
+		try {
+			const store = context.extensionSettingsStore;
+			const hasProjectRecord = store.hasTargetRecord(ref);
+			const fields = (contribution as { settingsSchema?: { fields?: ExtensionSettingDefinition[] } }).settingsSchema?.fields ?? [];
+			const legacy = !hasProjectRecord ? readDeclaredLegacyProviderSettings(ref, fields) : undefined;
+			// Hindsight has typed EP-7 defaults even before an override exists. Other
+			// providers preserve the existing absent-state fallback when no declared
+			// legacy snapshot exists, while any declared snapshot is projected here.
+			const canonicalHindsightProvider = packId === "hindsight" && kind === "provider" && id === "memory";
+			if (!canonicalHindsightProvider && !hasProjectRecord && legacy === undefined) return { state: "absent" as const };
+			const secretFields = fields.filter(field => field.type === "secret").map(field => field.key);
+			const defaults = kind === "provider" ? ((contribution as any).config ?? {}) : {};
+			return { state: "present" as const, enabled: store.getTarget(ref)?.enabled !== false, values: store.getForRuntime(ref, defaults, { legacyValues: legacy?.values, legacySecrets: legacy?.secrets, secretFields }) };
+		} catch {
+			return { state: "error" as const, diagnostic: { code: "SETTINGS_READ_UNAVAILABLE", retryable: true } };
+		}
+	};
 	sessionManager.setMarketplaceMcpResolver(marketplaceMcpResolver);
 	sessionManager.setMarketplacePiExtensionResolver(marketplacePiExtensionResolver);
 	packContributionRegistry = new PackContributionRegistry(
 		marketPackEntriesForProject,
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).entrypoints ?? [],
-		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).providers ?? [],
+		(scope, projectId, packName) => {
+			const disabled = [...(packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).providers ?? [])];
+			// Hindsight settings/routes stay catalogue-visible without a grant. Only its
+			// automatic lifecycle provider is costly, so suppress that one provider until
+			// the owning project has a live EP-6 memory grant. The canonical resolver
+			// normally proves a pack through this registry; this callback runs while the
+			// active Hindsight pack is being indexed, so provide that already-proven pack
+			// directly and avoid recursively rebuilding the index.
+			if (packName !== "hindsight" || disabled.includes("memory")) return disabled;
+			if (!projectId) return [...disabled, "memory"];
+			let context: ReturnType<typeof projectContextManager.getOrCreate>;
+			try { context = projectContextManager.getOrCreate(projectId); }
+			catch { return disabled; } // Grant storage/context unavailable: provider enforces fail-closed access itself.
+			if (!context) return [...disabled, "memory"];
+			let grantsReadable = true;
+			const activationGrants = createExtensionCapabilityGrantResolver({
+				contextForProject: (id) => id === projectId ? {
+					projectConfigStore: {
+						getExtensionGrants: () => {
+							try { return context.projectConfigStore.getExtensionGrants(); }
+							catch { grantsReadable = false; throw new Error("EXTENSION_GRANTS_UNAVAILABLE"); }
+						},
+					},
+				} : undefined,
+				contributions: {
+					getPack: (_id, id) => id === "hindsight"
+						? ({ packId: "hindsight", hooks: [] } as unknown as PackContributions)
+						: undefined,
+				},
+			});
+			const granted = activationGrants(projectId, { kind: "pack", packId: "hindsight" }, "memory.read").allowed
+				|| activationGrants(projectId, { kind: "pack", packId: "hindsight" }, "memory.write").allowed;
+			return granted || !grantsReadable ? disabled : [...disabled, "memory"];
+		},
 		// Config-gated provider activation + effective-config overlay: read the
 		// provider's PERSISTED flat config (written by the pack's `config` route to
 		// the pack-scoped store under providerConfigStoreKey) synchronously, so a
@@ -2957,7 +3198,57 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			return result;
 		},
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).hooks ?? [],
+		undefined,
+		undefined,
+		extensionSettingsRuntimeLookup,
 	);
+	// Hindsight uses the existing project-scoped settings and live EP-6 resolver.
+	// Construction is inert: it neither resolves settings nor touches a service.
+	const hindsightServiceRunners = [new LocalServiceRunner(), new DockerServiceRunner(), new ComposeServiceRunner()];
+	const hindsightServerIdentity = `hindsight-${createHash("sha256").update(stateDir).digest("hex").slice(0, 24)}`;
+	const hindsightRuntimeBridge = new HindsightRuntimeBridge({
+		contributions: packContributionRegistry,
+		// The lifecycle registry filters Hindsight's provider by live memory grants;
+		// settings and authorized runtime status/control retain their catalogue source.
+		providerForProject: (projectId) => extensionSettingsCatalogue(projectId)
+			.find(pack => pack.packId === "hindsight")?.providers.find(provider => provider.id === "memory"),
+		contextForProject: (projectId) => {
+			const context = projectContextManager.getOrCreate(projectId);
+			return context ? { stateDir: context.stateDir, extensionSettingsStore: context.extensionSettingsStore } : undefined;
+		},
+		grants: (projectId, principal, capability) => createExtensionCapabilityGrantResolver({
+			contextForProject: (id) => {
+				const context = projectContextManager.getOrCreate(id);
+				return context ? { projectConfigStore: context.projectConfigStore } : undefined;
+			},
+			contributions: packContributionRegistry,
+		})(projectId, principal, capability),
+		supervisorForProject: (projectId, settings: HindsightRuntimeSettingsResolver) => {
+			const context = projectContextManager.getOrCreate(projectId);
+			if (!context) throw new Error("PROJECT_NOT_FOUND");
+			return new ServiceRuntimeSupervisor({
+				registry: packContributionRegistry,
+				// ServiceRuntimeStore supplies the collision-safe runtime namespace;
+				// the project SecretsStore is the durable owner of generated values.
+				store: new ServiceRuntimeStore({
+					stateDir: context.stateDir,
+					serverIdentity: hindsightServerIdentity,
+					generatedSecrets: context.secretsStore,
+				}),
+				runners: hindsightServiceRunners,
+				authorizer: { authorize: request => createExtensionCapabilityGrantResolver({
+					contextForProject: (id) => {
+						const current = projectContextManager.getOrCreate(id);
+						return current ? { projectConfigStore: current.projectConfigStore } : undefined;
+					},
+					contributions: packContributionRegistry,
+				})(projectId, { kind: "pack", packId: request.packId }, "service.manage").allowed },
+				settings,
+				serverIdentity: hindsightServerIdentity,
+				logger: { warn: (message, details) => console.warn(`[hindsight-runtime] ${message}`, details?.code ?? "") },
+			});
+		},
+	});
 	sessionManager.lifecycleHub = new LifecycleHub({
 		registry: packContributionRegistry,
 		moduleHost,
@@ -2980,16 +3271,28 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		// only coordinates owned by the dispatched session and never falls back to
 		// another project by goal id.
 		scopeContextResolver: (input) => resolveHookScopeContext(projectContextManager, input),
-		// Least-privilege, store-only host for provider hooks (capabilities.store ===
-		// true; session/agents denied) — gives a provider its own pack-scoped durable
-		// store via the same parent-authorized path routes use.
-		providerHostApi: ({ sessionId, packId }) => createServerHostApi({
+		// Lifecycle providers receive only their pack store plus Hindsight's exact
+		// live EP-6 check. The resolver is re-read by the provider immediately before
+		// each automatic read/write, so an absent, denied, or revoked grant is a
+		// non-fatal no-op before queue mutation or network work.
+		providerHostApi: ({ sessionId, packId, projectId }) => createServerHostApi({
 			sessionId,
 			packId,
 			contributionId: "",
 			packStore: getPackStore(),
-			capabilityMask: { store: true, session: false, agents: false },
+			...(packId === "hindsight" && projectId && hindsightRuntimeBridge ? {
+				memory: {
+					requireCapability: (capability: string) => {
+						if (capability !== "memory.read" && capability !== "memory.write") throw new HindsightCapabilityError("memory.read");
+						hindsightRuntimeBridge.require(projectId, capability);
+					},
+				},
+			} : {}),
+			capabilityMask: { store: true, session: false, agents: false, memory: packId === "hindsight" && !!projectId },
 		}),
+		runtimeContextResolver: (input) => hindsightRuntimeBridge
+			? hindsightRuntimeBridge.context(input)
+			: { state: "unavailable", diagnostic: { code: "SERVICE_UNAVAILABLE" } },
 		gatewayInfo: () => {
 			try {
 				const baseUrl = publishedGatewayUrl || process.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
@@ -3882,7 +4185,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToUi, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToProject, broadcastToUi, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionSettingsCatalogue, extensionSettingsRuntimeLookup, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes, hindsightRuntimeBridge);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -4949,9 +5252,24 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			});
 			gatewayReady = true;
 			bootLog(`[boot] start() ready on port ${actualPort} at ${Date.now() - bootStart}ms`);
-			bootBackgroundTask = runBootBackgroundTasks().catch((err) => {
-				console.warn("[boot] background tasks failed (non-fatal):", err);
-			});
+			// Startup-only runtime reconciliation is deliberately detached from all
+			// status/read/discovery paths. It runs after the gateway is usable, and
+			// its bounded supervisor outcome cannot prevent ordinary sessions.
+			const runtimeReconciliationTask = (async () => {
+				for (const ctx of projectContextManager.all()) {
+					try {
+						await hindsightRuntimeBridge.reconcile(ctx.project.id);
+					} catch {
+						// Do not surface adapter/configuration text here because it can contain a secret.
+						console.warn("[hindsight-runtime] startup reconciliation failed", "SERVICE_UNAVAILABLE");
+					}
+				}
+			})();
+			bootBackgroundTask = Promise.all([runBootBackgroundTasks(), runtimeReconciliationTask])
+				.then(() => undefined)
+				.catch((err) => {
+					console.warn("[boot] background tasks failed (non-fatal):", err);
+				});
 			return actualPort;
 			} catch (error) {
 				await closeBoundServer();
@@ -5202,6 +5520,39 @@ function parseGateInspectSelectionOptions(params: URLSearchParams): TextSelectio
 	};
 }
 
+/**
+ * Read the old pack-scoped provider configuration at the EP-7 boundary. Only
+ * fields still declared by the target participate: retired and unknown keys
+ * cannot enter a runtime, public projection, project.yaml, or secret owner.
+ */
+function readDeclaredLegacyProviderSettings(
+	ref: ExtensionSettingsTargetRef,
+	fields: readonly ExtensionSettingDefinition[],
+): { values: Record<string, ExtensionSettingValue>; secrets: Record<string, string> } | undefined {
+	if (ref.kind !== "provider") return undefined;
+	const legacy = getPackStore().readSync<Record<string, unknown>>(ref.packId, providerConfigStoreKey(ref.id));
+	if (legacy.state !== "present" || !legacy.value || typeof legacy.value !== "object" || Array.isArray(legacy.value)) return undefined;
+	const values: Record<string, ExtensionSettingValue> = {};
+	const secrets: Record<string, string> = {};
+	for (const field of fields) {
+		const value = legacy.value[field.key];
+		if (value === undefined || !isValidExtensionSettingValue(field, value)) continue;
+		if (field.type === "secret" && typeof value === "string") secrets[field.key] = value;
+		else if (field.type !== "secret") values[field.key] = value;
+	}
+	return Object.keys(values).length > 0 || Object.keys(secrets).length > 0 ? { values, secrets } : undefined;
+}
+
+type ExtensionSettingsRuntimeLookup = (
+	projectId: string | undefined,
+	packId: string,
+	kind: "pack" | "provider" | "hook",
+	id?: string,
+) =>
+	| { state: "absent" }
+	| { state: "present"; enabled: boolean; values: Record<string, unknown> }
+	| { state: "error"; diagnostic: { code: string; retryable: boolean } };
+
 const activeMarkdownImageReads = new Map<string, number>();
 const MAX_CONCURRENT_MARKDOWN_IMAGE_READS_PER_SESSION = 8;
 
@@ -5226,6 +5577,7 @@ async function handleApiRoute(
 	groupPolicyStore: ToolGroupPolicyStore,
 	broadcastToGoal: (goalId: string, event: any) => void,
 	broadcastToAll: (event: any) => void,
+	broadcastToProject: (projectId: string, event: ServerMessage) => void,
 	broadcastToUi: (event: any) => void,
 	sandboxManager: SandboxManager | null,
 	projectRegistry: ProjectRegistry,
@@ -5243,6 +5595,8 @@ async function handleApiRoute(
 	routeDispatcherArg?: RouteDispatcher,
 	routeRegistryArg?: RouteRegistry,
 	packContributionRegistryArg?: PackContributionRegistry,
+	extensionSettingsCatalogue?: (projectId: string | undefined) => PackContributions[],
+	extensionSettingsRuntimeLookup?: ExtensionSettingsRuntimeLookup,
 	extensionChannelServices?: ExtensionChannelServices,
 	fetchImpl: typeof fetch = fetch,
 	commandRunner: CommandRunner = realCommandRunner,
@@ -5252,6 +5606,7 @@ async function handleApiRoute(
 	reviewPayloadOperations: ReviewPayloadSessionCoordinator = createReviewPayloadSessionCoordinator(),
 	oauthCancellationRetryState: { anthropicFlowId?: string } = {},
 	remoteStateRoutes?: any,
+	hindsightRuntimeBridge?: HindsightRuntimeBridge,
 ) {
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
@@ -5265,6 +5620,42 @@ async function handleApiRoute(
 	// pack-schema-v1 §5.2: the project-scoped pack-contribution registry (panels /
 	// entrypoints / routes), always wired by the sole caller.
 	const packContributionRegistry = packContributionRegistryArg!;
+	const settingsCatalogue = extensionSettingsCatalogue!;
+	const settingsRuntimeLookup = extensionSettingsRuntimeLookup!;
+	type SettingsField = ExtensionSettingDefinition;
+	type SettingsTarget = { ref: ExtensionSettingsTargetRef; packName: string; listName: string; fields: SettingsField[]; requiresConfig: string[]; contribution: any };
+	const isSettingsIdentifier = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value);
+	// Declarations are normalized exactly once by the contribution loader. In
+	// particular, legacy opaque `config:` maps are runtime configuration rather
+	// than an attempted settings schema; re-normalizing raw config here would
+	// incorrectly make them invalid and split catalogue/runtime truth.
+	const settingsTargets = (projectId: string): SettingsTarget[] => {
+		const targets: SettingsTarget[] = [];
+		for (const pack of settingsCatalogue(projectId)) {
+			for (const provider of pack.providers) {
+				// Every valid contribution is project-switchable. Opaque and absent
+				// config declarations intentionally expose an empty editable schema.
+				if (provider.settingsSchemaDiagnostic !== undefined) continue;
+				const schema = provider.settingsSchema;
+				targets.push({ ref: { packId: pack.packId, kind: "provider", id: provider.id }, packName: pack.packName, listName: provider.listName, fields: schema?.fields ?? [], requiresConfig: schema?.requiresConfig ?? [], contribution: provider });
+			}
+			for (const hook of pack.hooks) {
+				if (hook.settingsSchemaDiagnostic !== undefined) continue;
+				const schema = hook.settingsSchema;
+				targets.push({ ref: { packId: pack.packId, kind: "hook", id: hook.id }, packName: pack.packName, listName: hook.listName, fields: schema?.fields ?? [], requiresConfig: schema?.requiresConfig ?? [], contribution: hook });
+			}
+		}
+		return targets;
+	};
+	const invalidSettingsTargetRefs = (projectId: string): ExtensionSettingsTargetRef[] => settingsCatalogue(projectId).flatMap(pack => [
+		...pack.providers.filter(provider => provider.settingsSchemaDiagnostic !== undefined).map(provider => ({ packId: pack.packId, kind: "provider" as const, id: provider.id })),
+		...pack.hooks.filter(hook => hook.settingsSchemaDiagnostic !== undefined).map(hook => ({ packId: pack.packId, kind: "hook" as const, id: hook.id })),
+	]);
+	// Legacy configuration remains usable only until a target becomes project
+	// owned. This single declaration-aware reader prevents retired and unknown
+	// keys from being projected, persisted, or offered to the runtime.
+	const declaredLegacyProviderSettings = (target: SettingsTarget) =>
+		target.ref.kind !== "provider" ? undefined : readDeclaredLegacyProviderSettings(target.ref, target.fields);
 	/** Serialize a cascade-resolved item with origin/overrides + market-pack tags (design §5.2). */
 	const withOrigin = (r: { item: Record<string, unknown>; origin: unknown; overrides?: unknown; originPackId?: string | null; originPackName?: string | null }): Record<string, unknown> => ({
 		...r.item,
@@ -5336,6 +5727,208 @@ async function handleApiRoute(
 		});
 	};
 	const invalidateResolverCaches = (): void => { invalidateMarketPackScanCache(); invalidateBuiltinPackScanCache(); invalidateSlashSkillsCache(); __resetToolScanCache(); toolManager.clearScopedPiExtensionTools(); piExtensionDiscoveryCache.clear(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); closeUnavailableExtensionChannels(); };
+
+	/**
+	 * The runtime descriptor is needed to prove runner ownership, so cleanup must
+	 * happen while the old contribution remains active. A failed cleanup rejects
+	 * the marketplace mutation before its activation/install state changes,
+	 * leaving the record and descriptor available for a later retry.
+	 */
+	const removeHindsightRuntimeBeforeContributionChange = async (
+		packName: string,
+		targetScope: InstallScope,
+		targetProjectId: string | undefined,
+		targetPackRoot: string,
+	): Promise<void> => {
+		if (packName !== "hindsight" || !hindsightRuntimeBridge) return;
+		const projectIds = targetScope === "project"
+			? (targetProjectId ? [targetProjectId] : [])
+			: [...projectContextManager.all()].map((context) => context.project.id);
+		for (const projectId of projectIds) {
+			const runtime = packContributionRegistry.getRuntime(projectId, "hindsight", "hindsight");
+			// A higher-precedence contribution with the same pack id belongs to a
+			// different scope and is not affected by this mutation.
+			if (!runtime || path.resolve(runtime.packRoot) !== path.resolve(targetPackRoot)) continue;
+			await hindsightRuntimeBridge.removeOwnedRuntimeForContributionChange(projectId);
+		}
+	};
+	const marketplacePackRoot = (scope: InstallScope, projectBase: string | undefined, packName: string, builtin = false): string => {
+		if (builtin) return path.join(resolveBuiltinPacksDir(config.builtinPacksDir), packName);
+		const base = scope === "project" ? projectBase : scope === "global-user" ? os.homedir() : headquartersDir();
+		return path.join(scopePaths(scope as PackScope, base ?? "").marketPacksRoot, packName);
+	};
+
+	const extensionGrantActor = !config.forceAuth && isLoopbackHost(config.host) ? "localhost" : "admin";
+	const extensionGrantNow = (): string => nextExtensionGrantAuditTimestamp(clock);
+	// This is the one application-time resolver for server-owned pack principals.
+	// It deliberately holds no grant snapshot: every decision reads the current
+	// project store, so a revoke wins over work that was already scheduled.
+	const extensionCapabilityGrantResolver: ExtensionCapabilityGrantResolver = createExtensionCapabilityGrantResolver({
+		contextForProject: (projectId) => {
+			const context = projectContextManager.getOrCreate(projectId);
+			return context ? { projectConfigStore: context.projectConfigStore } : undefined;
+		},
+		contributions: packContributionRegistry,
+	});
+	const hindsightRouteCapability = (routeName: string, body: unknown): "service.manage" | "memory.read" | "memory.write" | "memory.reflect" | "memory.invalidate" | "memory.read.all" | undefined => {
+		if (["runtime-control", "migration-plan", "migration-execute", "migration-rollback", "migration-purge"].includes(routeName)) return "service.manage";
+		if (["retain", "retain-outcome"].includes(routeName)) return "memory.write";
+		if (routeName === "reflect") return "memory.reflect";
+		if (routeName === "invalidate") return "memory.invalidate";
+		if (["browse", "search", "detail", "history", "recall"].includes(routeName)) {
+			const allScope = !!body && typeof body === "object" && !Array.isArray(body)
+				&& ((body as Record<string, unknown>).scope === "all" || (body as Record<string, unknown>).allScope === true);
+			return allScope ? "memory.read.all" : "memory.read";
+		}
+		return undefined;
+	};
+	const extensionPackGrantCapabilities: readonly ExtensionPackCapability[] = [
+		"service.manage", "memory.read", "memory.write", "memory.reflect", "memory.invalidate", "memory.read.all",
+	];
+	const isPackExtensionGrant = (grant: ExtensionGrant): grant is Extract<ExtensionGrant, { principal: "pack" }> =>
+		"principal" in grant && grant.principal === "pack";
+	const extensionGrantStatus = (projectId: string | undefined, store: ProjectConfigStore) => {
+		const grants = store.getExtensionGrants();
+		const packs = packContributionRegistry.list(projectId);
+		const activeHooks: ResolvedHook[] = packs.flatMap(pack => pack.hooks.map(hook => ({
+			packId: pack.packId,
+			hookId: hook.id,
+			mode: hook.mode,
+			capabilities: hook.capabilities,
+		})));
+		return packs.map((pack) => ({
+			packId: pack.packId,
+			packName: pack.packName,
+			hooks: pack.hooks.map((hook) => {
+				const requestedCapabilities: ExtensionCapability[] = hook.mode === "decide"
+					? ["decide", ...hook.capabilities]
+					: [...hook.capabilities];
+				const hookGrants = requestedCapabilities.filter(capability => resolveExtensionGrant(
+					activeHooks,
+					grants,
+					{ packId: pack.packId, hookId: hook.id },
+					capability,
+				).allowed);
+				const runnable = hook.mode === "decide" && hookGrants.includes("decide");
+				return {
+					id: hook.id,
+					listName: hook.listName,
+					mode: hook.mode,
+					events: hook.events,
+					requestedCapabilities,
+					grants: hookGrants,
+					runnable,
+					status: hook.mode === "observe" ? "observe" : runnable ? "granted" : "grant-required",
+				};
+			}),
+		}));
+	};
+	const extensionPackGrantStatus = (projectId: string | undefined) =>
+		packContributionRegistry.list(projectId).map(pack => ({
+			packId: pack.packId,
+			packName: pack.packName,
+			requestedCapabilities: [...extensionPackGrantCapabilities],
+			grants: projectId === undefined ? [] : extensionPackGrantCapabilities.filter(capability =>
+				extensionCapabilityGrantResolver(projectId, { kind: "pack", packId: pack.packId }, capability).allowed,
+			),
+		}));
+	const extensionGrantProjection = (projectId: string | undefined, store: ProjectConfigStore) => ({
+		hooks: extensionGrantStatus(projectId, store),
+		packs: extensionPackGrantStatus(projectId),
+	});
+	const extensionSettingsProjection = (projectId: string) => {
+		const context = projectContextManager.getOrCreate(projectId);
+		if (!context) throw new Error("PROJECT_NOT_FOUND");
+		const store = context.extensionSettingsStore;
+		const publicState = store.getPublicState();
+		const targets = settingsTargets(projectId).map(target => {
+			const secretFields = target.fields.filter(field => field.type === "secret").map(field => field.key);
+			const defaults = Object.fromEntries(target.fields.filter(field => field.default !== undefined).map(field => [field.key, field.default!])) as Record<string, ExtensionSettingValue>;
+			const legacy = !store.hasTargetRecord(target.ref) ? declaredLegacyProviderSettings(target) : undefined;
+			const effective = store.getEffective(target.ref, defaults, { legacyValues: legacy?.values, legacySecrets: legacy?.secrets, secretFields });
+			const missing = target.requiresConfig.filter(key => {
+				if (secretFields.includes(key)) return !effective.secretSet[key];
+				const value = effective.values[key];
+				return value === undefined || value === null || typeof value === "string" && value.trim().length === 0;
+			});
+			const enabled = effective.enabled !== false;
+			const hookGrant = target.ref.kind === "hook" ? (() => {
+				const hook = target.contribution as { mode: "observe" | "decide"; capabilities: ExtensionCapability[]; events: string[] };
+				const requestedCapabilities: ExtensionCapability[] = hook.mode === "decide" ? ["decide", ...hook.capabilities] : [...hook.capabilities];
+				const grants = context.projectConfigStore.getExtensionGrants();
+				const granted = requestedCapabilities.filter(capability => grants.some(grant => grant.packId === target.ref.packId && grant.hookId === target.ref.id && grant.capability === capability));
+				const runnable = hook.mode === "decide" && granted.includes("decide");
+				return { id: target.ref.id, listName: target.listName, mode: hook.mode, events: hook.events, requestedCapabilities, grants: granted, runnable, status: hook.mode === "observe" ? "observe" : runnable ? "granted" : "grant-required" };
+			})() : undefined;
+			return {
+				ref: target.ref,
+				packName: target.packName,
+				listName: target.listName,
+				enabled: { effective: enabled, ...(effective.enabled !== undefined ? { projectOverride: effective.enabled } : {}) },
+				configuration: { state: enabled ? missing.length > 0 ? "requires-config" : "ready" : "disabled", missing },
+				fields: target.fields.map(field => ({
+					key: field.key, type: field.type, ...(field.label ? { label: field.label } : {}), ...(field.description ? { description: field.description } : {}), ...(field.optional ? { optional: true } : {}), ...(field.values ? { values: field.values } : {}), ...(field.min !== undefined ? { min: field.min } : {}), ...(field.max !== undefined ? { max: field.max } : {}),
+					// Defaults are declaration metadata for public controls only. Secrets
+					// cannot have a declaration default and never expose one on the wire.
+					...(field.type !== "secret" && field.default !== undefined ? { default: field.default } : {}),
+					...(field.type === "secret" ? { secretSet: effective.secretSet[field.key] === true } : effective.values[field.key] !== undefined ? { value: effective.values[field.key] } : {}),
+					source: effective.sources[field.key] ?? "default",
+				})),
+				...(hookGrant ? { hookGrant } : {}),
+			};
+		});
+		for (const ref of invalidSettingsTargetRefs(projectId)) {
+			const pack = settingsCatalogue(projectId).find(candidate => candidate.packId === ref.packId);
+			const contribution = ref.kind === "provider" ? pack?.providers.find(candidate => candidate.id === ref.id) : pack?.hooks.find(candidate => candidate.id === ref.id);
+			if (!pack || !contribution) continue;
+			targets.push({ ref, packName: pack.packName, listName: contribution.listName, enabled: { effective: false }, configuration: { state: "invalid-schema", missing: [] }, fields: [] });
+		}
+		// The Market's existing Pack target is an administrative owner rather than
+		// a durable settings record. Publish it from the same active resolver used
+		// by grant application, so a revoked, inactive, or shadowed pack grant is
+		// never displayed as actionable authority.
+		const packTargets = extensionPackGrantStatus(projectId).map(pack => {
+			const ownedTargets = targets.filter(target => target.ref.packId === pack.packId);
+			const allOwnedTargetsDisabled = ownedTargets.length > 0 && ownedTargets.every(target => target.enabled.effective === false);
+			return {
+				ref: { packId: pack.packId, kind: "pack" as const, id: pack.packId },
+				packName: pack.packName,
+				listName: pack.packName,
+				enabled: { effective: !allOwnedTargetsDisabled },
+				configuration: { state: allOwnedTargetsDisabled ? "disabled" as const : "ready" as const, missing: [] },
+				fields: [],
+				packGrant: {
+					requestedCapabilities: pack.requestedCapabilities,
+					grants: pack.grants,
+				},
+			};
+		});
+		return { schema: 2 as const, revision: publicState.revision, targets: [...targets, ...packTargets] };
+	};
+	const extensionSettingsMutationFailure = (error: unknown): { status: number; body: Record<string, unknown> } => {
+		const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
+		if (code === "EXTENSION_SETTINGS_REVISION_CONFLICT") return { status: 409, body: { error: "Extension settings changed elsewhere. Reload and review before saving.", code } };
+		if (code === "EXTENSION_SETTINGS_UNAVAILABLE" || code === "EXTENSION_SETTINGS_SECRET_READ_FAILED" || code === "EXTENSION_SETTINGS_SECRET_COMMIT_MISMATCH") return { status: 503, body: { error: "Extension settings are unavailable. Retry after repairing project state.", code } };
+		if (code === "EXTENSION_SETTINGS_INVALID" || code === "EXTENSION_SETTINGS_SECRET_INVALID") return { status: 422, body: { error: "Invalid extension settings mutation", code } };
+		return { status: 503, body: { error: "Extension settings could not be saved", code: "EXTENSION_SETTINGS_PERSIST_FAILED" } };
+	};
+	const broadcastExtensionSettingsInvalidation = (projectId: string, revision: number): void => {
+		invalidateResolverCaches();
+		broadcastToProject(projectId, { type: "extension_settings_updated", projectId, revision, ts: clock?.now() ?? Date.now() });
+	};
+	const extensionGrantHook = (projectId: string | undefined, packId: string, hookId: string) => {
+		const pack = packContributionRegistry.list(projectId).find(candidate => candidate.packId === packId);
+		return pack?.hooks.find(hook => hook.id === hookId);
+	};
+	const supportsExtensionGrantCapability = (hook: { mode: "observe" | "decide"; capabilities: readonly string[] }, capability: ExtensionCapability): boolean =>
+		!isExtensionPackCapability(capability)
+		&& capability !== "mutate"
+		&& ((capability === "decide" && hook.mode === "decide") || hook.capabilities.includes(capability));
+	const extensionGrantAudit = (stateDir: string) => new ExtensionGrantAuditStore(stateDir, fsImpl);
+	const broadcastExtensionGrantInvalidation = (projectId: string): void => {
+		invalidateResolverCaches();
+		broadcastToProject(projectId, { type: "extension_grants_updated", projectId, ts: clock?.now() ?? Date.now() });
+	};
 	const refreshMcpExternalTools = (): void => {
 		sessionManager.refreshExternalMcpToolRegistrations();
 	};
@@ -5376,6 +5969,12 @@ async function handleApiRoute(
 	const noContent = () => {
 		res.writeHead(204);
 		res.end();
+	};
+	const isVerifiedPromptOperator = (): boolean => !!cookieStore && cookieTryAuth(req, cookieStore);
+	const requireVerifiedPromptOperator = (): boolean => {
+		if (isVerifiedPromptOperator()) return true;
+		json({ error: "A verified signed operator cookie is required", code: "PROMPT_EXTENSION_OPERATOR_REQUIRED" }, 403);
+		return false;
 	};
 	const jsonError = (status: number, err: unknown, extra?: Record<string, unknown>) => {
 		const e = err instanceof Error ? err : new Error(String(err));
@@ -6902,6 +7501,10 @@ async function handleApiRoute(
 			// the wire. Migration removes them on boot; strip again here in case
 			// a stale on-disk value slipped through.
 			for (const k of LEGACY_QA_TOP_LEVEL_KEYS) delete config[k];
+			// Generic config surfaces must never serialize extension settings: even
+			// their redacted metadata belongs exclusively to the dedicated API.
+			delete config.extension_settings;
+			delete config.extensionSettings;
 			mergeSecretsIntoTokens(config, ctx.secretsStore);
 			json(redactSandboxSecrets(config));
 			return;
@@ -6941,6 +7544,8 @@ async function handleApiRoute(
 			result.sandbox_tokens = { value: ctx.projectConfigStore.getSandboxTokens(), source: migratedSource("sandbox_tokens") };
 			// Defence in depth: strip legacy top-level qa_* keys.
 			for (const k of LEGACY_QA_TOP_LEVEL_KEYS) delete result[k];
+			delete result.extension_settings;
+			delete result.extensionSettings;
 			// Merge secrets into sandbox_tokens (structured) for the resolved response.
 			if (Array.isArray(result.sandbox_tokens.value)) {
 				const tempConfig: Record<string, unknown> = { sandbox_tokens: result.sandbox_tokens.value };
@@ -6953,6 +7558,13 @@ async function handleApiRoute(
 		if (req.method === "PUT" && !suffix) {
 			const body = await readBody(req);
 			if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
+			const privilegedPromptConfigKey = Object.keys(body as Record<string, unknown>).find(key => new Set([
+				"extension_prompt_sections", "extensionPromptSections", "extension_grants", "extensionGrants", "prompt_extension_budget", "promptExtensionBudget", "extension_settings", "extensionSettings",
+			]).has(key));
+			if (privilegedPromptConfigKey) {
+				json({ error: `${privilegedPromptConfigKey} is managed by the prompt extension policy endpoints`, code: privilegedPromptConfigKey === "extension_prompt_sections" || privilegedPromptConfigKey === "extensionPromptSections" ? "PROMPT_EXTENSION_PROPOSAL_REQUIRED" : "PROMPT_EXTENSION_CONFIG_FORBIDDEN" }, 422);
+				return;
+			}
 
 			// Reject legacy top-level qa_* keys — they have moved into
 			// `components[<name>].config`. Done before any other parsing so the
@@ -9608,6 +10220,338 @@ async function handleApiRoute(
 		return;
 	}
 
+	// Extension settings are project-owned and always redacted. The outer gateway
+	// guard authenticates reads; browser prompt-operator proof is required before
+	// any request can deposit a secret or change a project's runtime enablement.
+	const extensionSettingsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/extension-settings(?:\/([^/]+)(?:\/(provider|hook)\/([^/]+))?)?$/);
+	if (extensionSettingsMatch && (req.method === "GET" || req.method === "PATCH")) {
+		let projectId: string;
+		let packId: string | undefined;
+		let id: string | undefined;
+		try {
+			projectId = decodeURIComponent(extensionSettingsMatch[1]);
+			packId = extensionSettingsMatch[2] === undefined ? undefined : decodeURIComponent(extensionSettingsMatch[2]);
+			id = extensionSettingsMatch[4] === undefined ? undefined : decodeURIComponent(extensionSettingsMatch[4]);
+		} catch { json({ error: "Invalid extension settings identity", code: "EXTENSION_SETTINGS_INVALID_IDENTITY" }, 400); return; }
+		const kind = extensionSettingsMatch[3] as "provider" | "hook" | undefined;
+		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
+		const context = projectContextManager.getOrCreate(resolved.projectId);
+		if (!context) { json({ error: "Project not found", code: "PROJECT_NOT_FOUND" }, 404); return; }
+		if (req.method === "GET") {
+			if (packId !== undefined) { json({ error: "Method not allowed" }, 405); return; }
+			try { json(extensionSettingsProjection(resolved.projectId)); }
+			catch (error) { const failure = extensionSettingsMutationFailure(error); json(failure.body, failure.status); }
+			return;
+		}
+		if (!requireVerifiedPromptOperator()) return;
+		if (!packId || !isSettingsIdentifier(packId) || id !== undefined && !isSettingsIdentifier(id)) {
+			json({ error: "Invalid extension settings identity", code: "EXTENSION_SETTINGS_INVALID_IDENTITY" }, 400); return;
+		}
+		const body = await readBody(req).catch(() => null);
+		if (!body || typeof body !== "object" || Array.isArray(body) || !Number.isSafeInteger((body as { expectedRevision?: unknown }).expectedRevision) || (body as { expectedRevision: number }).expectedRevision < 0) {
+			json({ error: "expectedRevision is required", code: "EXTENSION_SETTINGS_EXPECTED_REVISION_REQUIRED" }, 400); return;
+		}
+		const input = body as { expectedRevision: number; enabled?: unknown; values?: unknown };
+		if (Object.keys(input).some(key => key !== "expectedRevision" && key !== "enabled" && key !== "values") || input.enabled !== undefined && typeof input.enabled !== "boolean") {
+			json({ error: "Invalid extension settings request", code: "EXTENSION_SETTINGS_INVALID_REQUEST" }, 400); return;
+		}
+		const allTargets = settingsTargets(resolved.projectId);
+		const invalidRefs = invalidSettingsTargetRefs(resolved.projectId);
+		const emitMutation = (result: { outcome: "updated" | "secret-persist-failed"; revision: number }, responseTargets: ExtensionSettingsTargetRef[], warnings: readonly string[] = []) => {
+			broadcastExtensionSettingsInvalidation(resolved.projectId, result.revision);
+			let projection: ReturnType<typeof extensionSettingsProjection>;
+			try { projection = extensionSettingsProjection(resolved.projectId); }
+			catch (error) { const failure = extensionSettingsMutationFailure(error); json(failure.body, failure.status); return; }
+			const targets = projection.targets.filter(target => responseTargets.some(ref => ref.packId === target.ref.packId && ref.kind === target.ref.kind && ref.id === target.ref.id));
+			if (result.outcome === "secret-persist-failed") {
+				json({ error: "Extension settings saved but the secret was not persisted; re-enter it and retry.", code: "EXTENSION_SETTINGS_SECRET_PERSIST_FAILED", revision: result.revision, ...(warnings.length ? { warnings } : {}), ...(targets.length === 1 ? { target: targets[0] } : { targets }) }, 503);
+				return;
+			}
+			json({ revision: result.revision, ...(warnings.length ? { warnings } : {}), ...(targets.length === 1 ? { target: targets[0] } : { targets }) });
+		};
+		if (kind) {
+			if (!id) { json({ error: "Invalid extension settings identity", code: "EXTENSION_SETTINGS_INVALID_IDENTITY" }, 400); return; }
+			const ref: ExtensionSettingsTargetRef = { packId, kind, id };
+			const target = allTargets.find(candidate => candidate.ref.packId === ref.packId && candidate.ref.kind === ref.kind && candidate.ref.id === ref.id);
+			if (!target) {
+				if (invalidRefs.some(candidate => candidate.packId === ref.packId && candidate.kind === ref.kind && candidate.id === ref.id)) json({ error: "Settings declaration requires review", code: "EXTENSION_SETTINGS_INVALID_SCHEMA" }, 422);
+				else json({ error: "Extension settings target not found", code: "EXTENSION_SETTINGS_TARGET_NOT_FOUND" }, 404);
+				return;
+			}
+			if (input.values !== undefined && (!input.values || typeof input.values !== "object" || Array.isArray(input.values))) { json({ error: "values must be an object", code: "EXTENSION_SETTINGS_INVALID_VALUES" }, 400); return; }
+			if (input.enabled === undefined && input.values === undefined) { json({ error: "No extension settings changes supplied", code: "EXTENSION_SETTINGS_EMPTY_MUTATION" }, 400); return; }
+			const publicValues: Record<string, ExtensionSettingValue | undefined> = {};
+			const secrets: Record<string, string | undefined> = {};
+			for (const [key, value] of Object.entries((input.values ?? {}) as Record<string, unknown>)) {
+				const field = target.fields.find(candidate => candidate.key === key);
+				if (!field) { json({ error: "Unknown extension settings field", code: "EXTENSION_SETTINGS_UNKNOWN_FIELD" }, 422); return; }
+				if (value === null) {
+					// Clearing a required field is valid only when its declaration can
+					// supply the effective value again via a non-secret default.
+					if (field.type !== "secret" && !field.optional && field.default === undefined) { json({ error: "Required extension settings fields cannot be cleared", code: "EXTENSION_SETTINGS_REQUIRED_FIELD" }, 422); return; }
+					if (field.type === "secret") secrets[key] = undefined; else publicValues[key] = undefined;
+					continue;
+				}
+				if (!isValidExtensionSettingValue(field, value)) { json({ error: "Invalid extension settings field value", code: "EXTENSION_SETTINGS_INVALID_FIELD_VALUE" }, 422); return; }
+				if (field.type === "secret") secrets[key] = value as string; else publicValues[key] = value as ExtensionSettingValue;
+			}
+			const legacy = !context.extensionSettingsStore.hasTargetRecord(ref)
+				? declaredLegacyProviderSettings(target)
+				: undefined;
+			try {
+				// Settings targets are resolved from the installed-pack catalogue above,
+				// not the active runtime registry. This keeps a disabled Hindsight
+				// target repairable without starting or otherwise consulting its provider.
+				const hindsightValidation = ref.packId === "hindsight" && ref.kind === "provider" && ref.id === "memory" && hindsightRuntimeBridge
+					? hindsightRuntimeBridge.validateSettingsSave(
+						resolved.projectId,
+						{
+							...(Object.fromEntries(target.fields.filter(field => field.default !== undefined).map(field => [field.key, field.default!])) as Record<string, ExtensionSettingValue>),
+							...legacy?.values,
+						},
+						publicValues,
+					)
+					: undefined;
+				if (hindsightValidation && !hindsightValidation.ok) {
+					json({ error: "Invalid Hindsight runtime settings", code: hindsightValidation.code }, 422);
+					return;
+				}
+				const result = context.extensionSettingsStore.compareAndSwap(ref, input.expectedRevision, {
+					...(input.enabled !== undefined ? { enabled: input.enabled as boolean } : {}),
+					...(Object.keys(publicValues).length ? { values: publicValues } : {}),
+					...(Object.keys(secrets).length ? { secrets } : {}),
+					...(legacy?.values !== undefined ? { legacyValues: legacy.values } : {}),
+					...(legacy?.secrets !== undefined ? { legacySecrets: legacy.secrets } : {}),
+				});
+				emitMutation(result, [ref], hindsightValidation?.ok ? hindsightValidation.warnings : []);
+			} catch (error) { const failure = extensionSettingsMutationFailure(error); json(failure.body, failure.status); }
+			return;
+		}
+		if (input.values !== undefined || input.enabled === undefined) { json({ error: "Pack settings changes require enabled", code: "EXTENSION_SETTINGS_INVALID_PACK_MUTATION" }, 400); return; }
+		const packTargets = allTargets.filter(target => target.ref.packId === packId);
+		if (packTargets.length === 0) {
+			if (invalidRefs.some(ref => ref.packId === packId)) json({ error: "Settings declaration requires review", code: "EXTENSION_SETTINGS_INVALID_SCHEMA" }, 422);
+			else json({ error: "Extension settings pack not found", code: "EXTENSION_SETTINGS_PACK_NOT_FOUND" }, 404);
+			return;
+		}
+		try {
+			const refs = packTargets.map(target => target.ref);
+			const result = context.extensionSettingsStore.compareAndSwapMany(packTargets.map(target => {
+				const legacy = !context.extensionSettingsStore.hasTargetRecord(target.ref)
+					? declaredLegacyProviderSettings(target)
+					: undefined;
+				return {
+					ref: target.ref,
+					enabled: input.enabled as boolean,
+					...(legacy?.values !== undefined ? { legacyValues: legacy.values } : {}),
+					...(legacy?.secrets !== undefined ? { legacySecrets: legacy.secrets } : {}),
+				};
+			}), input.expectedRevision);
+			emitMutation(result, refs);
+		} catch (error) { const failure = extensionSettingsMutationFailure(error); json(failure.body, failure.status); }
+		return;
+	}
+
+	// Extension grants are project-owned administrative state. The only authority
+	// accepted here is the authenticated gateway principal; sandbox credentials are
+	// blocked by the outer sandbox route guard before this handler is reached.
+	const extensionGrantAuditMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/extension-grant-audit$/);
+	if (extensionGrantAuditMatch && req.method === "GET") {
+		let projectId: string;
+		try { projectId = decodeURIComponent(extensionGrantAuditMatch[1]); } catch { json({ error: "Invalid project id" }, 400); return; }
+		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
+		const context = projectContextManager.getOrCreate(resolved.projectId);
+		if (!context) { json({ error: `Project not found: ${resolved.projectId}`, code: "PROJECT_NOT_FOUND" }, 404); return; }
+		const requestedLimit = Number(url.searchParams.get("limit") ?? "100");
+		const limit = Number.isInteger(requestedLimit) ? Math.max(1, Math.min(200, requestedLimit)) : 100;
+		try {
+			json({ entries: extensionGrantAudit(context.stateDir).list(limit) });
+		} catch {
+			json({ error: "Extension grant audit is unavailable", code: "EXTENSION_GRANT_AUDIT_UNAVAILABLE" }, 503);
+		}
+		return;
+	}
+
+	const extensionGrantsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/extension-grants$/);
+	if (extensionGrantsMatch && (req.method === "GET" || req.method === "PUT")) {
+		let projectId: string;
+		try { projectId = decodeURIComponent(extensionGrantsMatch[1]); } catch { json({ error: "Invalid project id" }, 400); return; }
+		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
+		const context = projectContextManager.getOrCreate(resolved.projectId);
+		if (!context) { json({ error: `Project not found: ${resolved.projectId}`, code: "PROJECT_NOT_FOUND" }, 404); return; }
+		const store = context.projectConfigStore;
+		if (req.method === "GET") {
+			json({ grants: store.getExtensionGrants(), ...extensionGrantProjection(resolved.projectId, store) });
+			return;
+		}
+
+		const body = await readBody(req);
+		if (!body || typeof body !== "object" || Array.isArray(body)) {
+			json({ error: "Expected an exact extension grant tuple" }, 400);
+			return;
+		}
+		const tuple = body as Record<string, unknown>;
+		const isPackPrincipal = tuple.principal === "pack";
+		const expectedKeys = isPackPrincipal
+			? new Set(["packId", "principal", "capability"])
+			: new Set(["packId", "hookId", "capability"]);
+		if (Object.keys(tuple).some(key => !expectedKeys.has(key))) {
+			json({ error: "Expected an exact extension grant tuple" }, 400);
+			return;
+		}
+		const { packId, capability } = tuple;
+		const hookId = tuple.hookId;
+		if (!isSafeExtensionGrantIdentifier(packId) || !isExtensionCapability(capability)
+			|| (isPackPrincipal ? hookId !== undefined : !isSafeExtensionGrantIdentifier(hookId))) {
+			json({ error: "Invalid extension grant tuple" }, 400);
+			return;
+		}
+		const requiresOperator = isPackPrincipal || capability === "mutate";
+		if (requiresOperator && !requireVerifiedPromptOperator()) return;
+
+		// Keep the raw request tuple narrowed in the principal branch that owns it.
+		// A pack grant's capability must pass the smaller pack vocabulary before it
+		// can become an ExtensionPackGrant; hook-only authority never crosses over.
+		let grant: ExtensionGrant;
+		if (isPackPrincipal) {
+			if (!packContributionRegistry.getPack(resolved.projectId, packId)) {
+				json({ error: "Active extension principal not found", code: "EXTENSION_GRANT_PRINCIPAL_NOT_FOUND" }, 404);
+				return;
+			}
+			if (!isExtensionPackCapability(capability)) {
+				json({ error: "Capability is not supported by this pack principal", code: "EXTENSION_CAPABILITY_UNSUPPORTED" }, 422);
+				return;
+			}
+			grant = { packId, principal: "pack", capability, grantedAt: extensionGrantNow(), grantedBy: extensionGrantActor };
+		} else {
+			// Recheck inside this branch so TypeScript narrows the untrusted request
+			// value to string without asserting a hook identity.
+			if (!isSafeExtensionGrantIdentifier(hookId)) {
+				json({ error: "Invalid extension grant tuple" }, 400);
+				return;
+			}
+			const hook = extensionGrantHook(resolved.projectId, packId, hookId);
+			if (!hook) {
+				json({ error: "Active hook not found", code: "EXTENSION_HOOK_NOT_FOUND" }, 404);
+				return;
+			}
+			if (!supportsExtensionGrantCapability(hook, capability)) {
+				json({ error: "Capability is not supported by this hook", code: "EXTENSION_CAPABILITY_UNSUPPORTED" }, 422);
+				return;
+			}
+			grant = { packId, hookId, capability, grantedAt: extensionGrantNow(), grantedBy: extensionGrantActor };
+		}
+		try {
+			const retained = store.getExtensionGrants().filter(current => isPackExtensionGrant(grant)
+				? !isPackExtensionGrant(current) || current.packId !== grant.packId || current.capability !== grant.capability
+				: isPackExtensionGrant(current) || current.packId !== grant.packId || current.hookId !== grant.hookId || current.capability !== grant.capability,
+			);
+			store.setExtensionGrants([...retained, grant]);
+		} catch (err) {
+			jsonError(503, err);
+			return;
+		}
+		const auditEntry = isPackExtensionGrant(grant)
+			? { at: grant.grantedAt, actor: grant.grantedBy, action: "granted" as const, packId: grant.packId, principal: "pack" as const, capability: grant.capability }
+			: { at: grant.grantedAt, actor: grant.grantedBy, action: "granted" as const, packId: grant.packId, hookId: grant.hookId, capability: grant.capability };
+		let auditAvailable = true;
+		try {
+			extensionGrantAudit(context.stateDir).appendOrQueue(auditEntry);
+		} catch {
+			auditAvailable = false;
+			console.warn(`[extension-grants] audit unavailable action=granted project=${resolved.projectId} pack=${grant.packId} principal=${isPackExtensionGrant(grant) ? "pack" : grant.hookId} capability=${grant.capability}`);
+		}
+		broadcastExtensionGrantInvalidation(resolved.projectId);
+		const projection = extensionGrantProjection(resolved.projectId, store);
+		if (!auditAvailable) {
+			json({ error: "Extension grant changed but audit is unavailable", code: "EXTENSION_GRANT_AUDIT_UNAVAILABLE", grant, ...projection }, 503);
+			return;
+		}
+		json({ grant, ...projection });
+		return;
+	}
+
+	const extensionPackGrantRevokeMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/extension-grants\/([^/]+)\/principals\/pack\/([^/]+)$/);
+	const extensionHookGrantRevokeMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/extension-grants\/([^/]+)\/([^/]+)\/([^/]+)$/);
+	if ((extensionPackGrantRevokeMatch || extensionHookGrantRevokeMatch) && req.method === "DELETE") {
+		const match = extensionPackGrantRevokeMatch ?? extensionHookGrantRevokeMatch!;
+		const isPackPrincipal = !!extensionPackGrantRevokeMatch;
+		let projectId: string;
+		let packId: string;
+		let hookId: string | undefined;
+		let capability: string;
+		try {
+			projectId = decodeURIComponent(match[1]);
+			packId = decodeURIComponent(match[2]);
+			hookId = isPackPrincipal ? undefined : decodeURIComponent(match[3]);
+			capability = decodeURIComponent(match[isPackPrincipal ? 3 : 4]);
+		} catch { json({ error: "Invalid extension grant tuple" }, 400); return; }
+		if (!isSafeExtensionGrantIdentifier(packId) || !isExtensionCapability(capability)
+			|| (!isPackPrincipal && !isSafeExtensionGrantIdentifier(hookId))) {
+			json({ error: "Invalid extension grant tuple" }, 400);
+			return;
+		}
+		const validHookId = hookId as string;
+		const requiresOperator = isPackPrincipal || capability === "mutate";
+		if (requiresOperator && !requireVerifiedPromptOperator()) return;
+		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
+		const context = projectContextManager.getOrCreate(resolved.projectId);
+		if (!context) { json({ error: `Project not found: ${resolved.projectId}`, code: "PROJECT_NOT_FOUND" }, 404); return; }
+		const store = context.projectConfigStore;
+		const audit = extensionGrantAudit(context.stateDir);
+		const grants = store.getExtensionGrants();
+		const matchesGrant = (grant: ExtensionGrant): boolean => isPackPrincipal
+			? isPackExtensionGrant(grant) && grant.packId === packId && grant.capability === capability
+			: !isPackExtensionGrant(grant) && grant.packId === packId && grant.hookId === validHookId && grant.capability === capability;
+		const revoked = grants.some(matchesGrant);
+		const auditRef = isPackPrincipal
+			? { action: "revoked" as const, packId, principal: "pack" as const, capability }
+			: { action: "revoked" as const, packId, hookId: validHookId, capability };
+		if (revoked) {
+			try {
+				store.setExtensionGrants(grants.filter(grant => !matchesGrant(grant)));
+			} catch (err) {
+				jsonError(503, err);
+				return;
+			}
+			const at = extensionGrantNow();
+			let auditAvailable = true;
+			try {
+				audit.appendOrQueue({ at, actor: extensionGrantActor, ...auditRef });
+			} catch {
+				auditAvailable = false;
+				console.warn(`[extension-grants] audit unavailable action=revoked project=${resolved.projectId} pack=${packId} principal=${isPackPrincipal ? "pack" : hookId} capability=${capability}`);
+			}
+			broadcastExtensionGrantInvalidation(resolved.projectId);
+			const projection = extensionGrantProjection(resolved.projectId, store);
+			if (!auditAvailable) {
+				json({ error: "Extension grant changed but audit is unavailable", code: "EXTENSION_GRANT_AUDIT_UNAVAILABLE", revoked: true, ...projection }, 503);
+				return;
+			}
+			json({ revoked: true, ...projection });
+			return;
+		}
+		// A revoke whose config mutation succeeded but audit append failed is
+		// recovered only by an exact retry. Ordinary idempotent no-op DELETEs do
+		// not create audit records.
+		try {
+			if (audit.recoverPending(auditRef)) {
+				json({ revoked: true, ...extensionGrantProjection(resolved.projectId, store) });
+				return;
+			}
+		} catch {
+			console.warn(`[extension-grants] audit unavailable action=revoked project=${resolved.projectId} pack=${packId} principal=${isPackPrincipal ? "pack" : hookId} capability=${capability}`);
+			json({ error: "Extension grant changed but audit is unavailable", code: "EXTENSION_GRANT_AUDIT_UNAVAILABLE", revoked: true, ...extensionGrantProjection(resolved.projectId, store) }, 503);
+			return;
+		}
+		json({ revoked: false, ...extensionGrantProjection(resolved.projectId, store) });
+		return;
+	}
+
 	// GET /api/ext/contributions?projectId= — project-scoped pack-contribution
 	// metadata for the client registries (pack-schema-v1 §6.4). Activation filtering
 	// is already applied by the registry (disabled entrypoints omitted). EVERY
@@ -9616,9 +10560,14 @@ async function handleApiRoute(
 	if (url.pathname === "/api/ext/contributions" && req.method === "GET") {
 		const contribScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
 		if (!contribScope.ok) { writeConfigProjectScopeError(contribScope); return; }
+		const hooksByPack = new Map(extensionGrantStatus(
+			contribScope.effectiveProjectId,
+			contribScope.context?.projectConfigStore ?? projectConfigStore,
+		).map(pack => [pack.packId, pack.hooks]));
 		const packs = packContributionRegistry.list(contribScope.effectiveProjectId).map((p) => ({
 			packId: p.packId,
 			packName: p.packName,
+			hooks: hooksByPack.get(p.packId) ?? [],
 			panels: p.panels.map((panel) => {
 				const out: Record<string, unknown> = { id: panel.id };
 				if (panel.title !== undefined) out.title = panel.title;
@@ -9749,6 +10698,14 @@ async function handleApiRoute(
 			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,
 			// Drop activation caches when an action persists provider config (host-owned).
 			onStoreWrite: notePackStoreWrite,
+			...(ident.packId === "hindsight" && actionSessionProjectId && hindsightRuntimeBridge ? {
+				memory: {
+					requireCapability: (capability: string) => {
+						if (!isHindsightCapability(capability)) throw new HindsightCapabilityError("memory.read");
+						hindsightRuntimeBridge.require(actionSessionProjectId, capability);
+					},
+				},
+			} : {}),
 		});
 		// The session working dir the confined worker uses as its process.cwd() (tool
 		// parity — prefer the worktree path; fall back to the recorded cwd).
@@ -9898,7 +10855,7 @@ async function handleApiRoute(
 	const storeMatch = url.pathname.match(/^\/api\/ext\/store\/([^/]+)$/);
 	if (storeMatch && req.method === "POST") {
 		const op = decodeURIComponent(storeMatch[1]);
-		if (op !== "get" && op !== "read" && op !== "put" && op !== "list" && op !== "delete" && op !== "deletePrefix" && op !== "stats") {
+		if (op !== "get" && op !== "read" && op !== "put" && op !== "mutate" && op !== "list" && op !== "delete" && op !== "deletePrefix" && op !== "stats") {
 			json({ error: `Unknown store op "${op}"`, code: "STORE_OP_UNKNOWN" }, 404);
 			return;
 		}
@@ -9964,10 +10921,17 @@ async function handleApiRoute(
 					`store ${op}`,
 				);
 			} else if (op === "put") {
-				await withStoreTimeout(packStore.put(ident.packId, key as string, (body as { value?: unknown }).value, (body as { opts?: StorePutOptions }).opts), undefined, `store ${op}`);
+				await withStoreTimeout(packStore.put(ident.packId, key as string, (body as { value?: unknown }).value, (body as { opts?: StorePutOptions | null }).opts ?? undefined), undefined, `store ${op}`);
 				// Host-owned: a direct provider-config write must drop activation caches too.
 				notePackStoreWrite(key);
 				result = { ok: true };
+			} else if (op === "mutate") {
+				result = await withStoreTimeout(
+					packStore.mutate(ident.packId, key as string, (body as { value?: unknown }).value, (body as { opts?: StoreMutationOptions | null }).opts ?? undefined),
+					undefined,
+					`store ${op}`,
+				);
+				if ((result as { status?: string }).status === "committed") notePackStoreWrite(key);
 			} else if (op === "delete") {
 				result = await withStoreTimeout(packStore.delete(ident.packId, key as string), undefined, `store ${op}`);
 			} else if (op === "deletePrefix") {
@@ -10088,13 +11052,12 @@ async function handleApiRoute(
 		const body = (await readBody(req)) ?? {};
 		const headerSessionId = req.headers["x-bobbit-session-id"] as string | string[] | undefined;
 		const routeHeaderSid = Array.isArray(headerSessionId) ? headerSessionId[0] : headerSessionId;
+		const routeLive = routeHeaderSid ? sessionManager.getSession(routeHeaderSid) : undefined;
 		const routePs = routeHeaderSid ? sessionManager.getPersistedSession(routeHeaderSid) : undefined;
+		const routeSession = routeLive ?? routePs;
 		// Resolve the tool through the SESSION's project-scoped tool manager (same
 		// no-split-brain resolution the action + store endpoints use).
-		const routeSessionProjectId = routeHeaderSid
-			? (sessionManager.getSession(routeHeaderSid)?.projectId
-				?? routePs?.projectId)
-			: undefined;
+		const routeSessionProjectId = routeSession?.projectId;
 		const routeToolManager = resolveActionToolManager(
 			toolManager,
 			routeSessionProjectId ? projectContextManager.getOrCreate(routeSessionProjectId)?.toolManager : undefined,
@@ -10155,6 +11118,130 @@ async function handleApiRoute(
 			const jsonl = await sessionFileRead(fsCtx, ps.agentSessionFile, sandboxManager);
 			return projectOwnTranscriptJsonl(guard.sessionId, jsonl);
 		};
+		// Resolve rich route scope only from the authenticated session's own live or
+		// persisted coordinates. This is the same host resolver used by lifecycle
+		// hooks; route bodies and flat compatibility fields cannot substitute for it.
+		const authenticatedRouteSession = sessionManager.getSession(guard.sessionId)
+			?? sessionManager.getPersistedSession(guard.sessionId);
+		const routeRepoWorktrees = authenticatedRouteSession
+			? (Array.isArray(authenticatedRouteSession.repoWorktrees)
+				? Object.fromEntries(authenticatedRouteSession.repoWorktrees.map(({ repo, worktreePath }) => [repo, worktreePath]))
+				: authenticatedRouteSession.repoWorktrees)
+			: undefined;
+		const routeScopeContext = authenticatedRouteSession
+			? resolveHookScopeContext(projectContextManager, {
+				projectId: authenticatedRouteSession.projectId,
+				goalId: authenticatedRouteSession.goalId ?? authenticatedRouteSession.teamGoalId,
+				roleName: authenticatedRouteSession.role,
+				cwd: authenticatedRouteSession.cwd ?? process.cwd(),
+				worktreePath: authenticatedRouteSession.worktreePath,
+				repoPath: authenticatedRouteSession.repoPath,
+				repoWorktrees: routeRepoWorktrees,
+			})
+			: undefined;
+		// Retain-outcome receives the same bounded durable snapshot used by the
+		// goal-completion lifecycle hook. The request body can never choose a goal
+		// or supply replacement outcome content.
+		const routeOutcome = (() => {
+			if (ident.packId !== "hindsight" || routeName !== "retain-outcome") return undefined;
+			const goalId = authenticatedRouteSession?.goalId ?? authenticatedRouteSession?.teamGoalId;
+			const projectId = authenticatedRouteSession?.projectId;
+			if (!goalId || !projectId) return undefined;
+			const context = projectContextManager.getContextForGoal(goalId);
+			const goal = context?.goalManager.getGoal(goalId);
+			if (!context || !goal || context.project.id !== projectId || goal.state !== "complete") return undefined;
+			return {
+				outcome: boundedGoalCompletionOutcome(goal, context.taskStore.getByGoalId(goalId), context.gateStore.getGatesForGoal(goalId)),
+				completedAt: goal.updatedAt,
+				completionRevision: goal.updatedAt,
+			};
+		})();
+		let routeRuntime: ServiceRuntimeContext | undefined;
+		// This value stays inside the server→worker route context. It intentionally
+		// includes EP-7 write-only values for authenticated Hindsight calls, but no
+		// response/status/log/diagnostic serializes this field.
+		let routeProviderConfig: Record<string, unknown> | undefined;
+		try {
+			if (ident.packId === "hindsight") {
+				const capability = hindsightRouteCapability(routeName, init.body);
+				if (capability) {
+					if (!authenticatedRouteSession?.projectId) throw new ActionError(403, "Hindsight project scope is unavailable");
+					hindsightRuntimeBridge?.require(authenticatedRouteSession.projectId, capability);
+				}
+				// A capability grant permits this pack operation, but it cannot stand in
+				// for a browser-confirmed operator before a route changes runtime or
+				// migration state. Body consent only confirms the requested shape.
+				if ((routeName === "runtime-control" || routeName === "migration-execute") && !requireVerifiedPromptOperator()) return;
+				const projectId = authenticatedRouteSession?.projectId;
+				if (projectId) {
+					const providerSettings = settingsRuntimeLookup(projectId, "hindsight", "provider", "memory");
+					if (providerSettings.state === "error") throw new Error("HINDSIGHT_CONFIG_UNAVAILABLE");
+					if (providerSettings.state === "present" && providerSettings.enabled) routeProviderConfig = { ...providerSettings.values };
+				}
+				if (projectId && routeName === "runtime-status") {
+					json({ settingsRevision: hindsightRuntimeBridge?.settingsRevision(projectId), runtime: await hindsightRuntimeBridge?.status(projectId) });
+					return;
+				}
+				if (projectId && routeName === "runtime-logs") {
+					const body = init.body;
+					const requestedTail = body && typeof body === "object" && !Array.isArray(body) ? (body as { tail?: unknown }).tail : undefined;
+					const tail = typeof requestedTail === "number" && Number.isSafeInteger(requestedTail)
+						? Math.min(200, Math.max(1, requestedTail)) : 100;
+					const logs = await hindsightRuntimeBridge?.logs(projectId) ?? "";
+					json({ settingsRevision: hindsightRuntimeBridge?.settingsRevision(projectId), lines: logs.split("\n").filter(Boolean).slice(-tail) });
+					return;
+				}
+				if (projectId && routeName === "runtime-control") {
+					const body = init.body;
+					const action = body && typeof body === "object" && !Array.isArray(body) ? (body as { action?: unknown }).action : undefined;
+					const consent = body && typeof body === "object" && !Array.isArray(body) ? (body as { consent?: unknown }).consent : undefined;
+					if ((action !== "start" && action !== "stop" && action !== "restart") || consent !== true) {
+						json({ error: "Explicit runtime control consent is required", code: "HINDSIGHT_CONTROL_CONSENT_REQUIRED" }, 422);
+						return;
+					}
+					const controlled = await hindsightRuntimeBridge?.control(projectId, action);
+					json(controlled ?? { error: "Hindsight runtime is unavailable", code: "HINDSIGHT_RUNTIME_UNAVAILABLE" }, controlled ? 200 : 503);
+					return;
+				}
+				if (projectId && routeName === "migration-plan") {
+					json({ settingsRevision: hindsightRuntimeBridge?.settingsRevision(projectId), ...(hindsightRuntimeBridge?.migrationPlan(projectId, init.body) ?? { ok: false, code: "HINDSIGHT_RUNTIME_UNAVAILABLE" }) });
+					return;
+				}
+				if (projectId && routeName === "migration-execute") {
+					json({ settingsRevision: hindsightRuntimeBridge?.settingsRevision(projectId), ...(await hindsightRuntimeBridge?.migrationExecute(projectId, init.body) ?? { ok: false, code: "HINDSIGHT_RUNTIME_UNAVAILABLE" }) });
+					return;
+				}
+				// Runtime status is advisory for data-plane routes. A transient generic
+				// store/runner read must degrade to the typed no-service response below,
+				// not turn an otherwise granted recall into an HTTP 503 or trigger a
+				// provider fallback. Capability checks above remain strict and fail closed.
+				try {
+					routeRuntime = await hindsightRuntimeBridge?.context({
+						packId: ident.packId,
+						runtimeId: "hindsight",
+						providerId: "memory",
+						projectId,
+					});
+				} catch {
+					routeRuntime = { state: "unavailable", diagnostic: { code: "SERVICE_UNAVAILABLE" } };
+				}
+			}
+		} catch (err) {
+			const runtimeCode = err && typeof err === "object" && "code" in err ? (err as { code?: unknown }).code : undefined;
+			const continuityRequired = runtimeCode === "SERVICE_CONTINUITY_REQUIRED";
+			const externalDatabaseRequired = runtimeCode === "HINDSIGHT_EXTERNAL_DATABASE_SETTING_REQUIRED";
+			const status = continuityRequired ? 409 : externalDatabaseRequired ? 422 : err instanceof HindsightCapabilityError || err instanceof ActionError ? 403 : 503;
+			json({
+				error: continuityRequired
+					? "Hindsight storage continuity requires a migration"
+					: externalDatabaseRequired
+						? "Local and Docker Hindsight runtimes require a configured external PostgreSQL database."
+						: status === 403 ? "Hindsight capability is required" : "Hindsight runtime is unavailable",
+				code: continuityRequired ? "HINDSIGHT_STORAGE_CONTINUITY_REQUIRED" : externalDatabaseRequired ? runtimeCode : err instanceof HindsightCapabilityError ? "EXTENSION_CAPABILITY_DENIED" : "HINDSIGHT_RUNTIME_UNAVAILABLE",
+				...(err instanceof HindsightCapabilityError ? { capability: err.capability } : {}),
+			}, status);
+			return;
+		}
 		const host = createServerHostApi({
 			sessionId: guard.sessionId,
 			toolUseId,
@@ -10162,24 +11249,42 @@ async function handleApiRoute(
 			contributionId: ident.contributionId,
 			packStore: getPackStore(),
 			readOwnTranscript,
-			// Sub-goal A seam — sub-goal C consumes this to back `host.agents`.
 			orchestrationCore,
-			// Sub-goal C: live status reader for host.agents.status/list (the core has
-			// no public status accessor).
 			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,
-			// Drop activation caches when a route persists provider config (host-owned).
 			onStoreWrite: notePackStoreWrite,
+			...(ident.packId === "hindsight" && authenticatedRouteSession?.projectId && hindsightRuntimeBridge ? {
+				memory: {
+					requireCapability: (capability: string) => {
+						if (!isHindsightCapability(capability)) throw new HindsightCapabilityError("memory.read");
+						hindsightRuntimeBridge.require(authenticatedRouteSession.projectId!, capability);
+					},
+				},
+				...(routeProviderConfig ? { providerConfig: routeProviderConfig } : {}),
+				// The route gets the same completion envelope as lifecycle delivery so
+				// both paths derive an identical revision-stable document identity.
+				...(routeOutcome ? { completedOutcome: routeOutcome } : {}),
+			} : {}),
 		});
 		const start = Date.now();
 		try {
 			// The session working dir the confined worker uses as its process.cwd()
 			// (tool parity — prefer the worktree path; fall back to the recorded cwd).
-			const routeWorkingDir = routePs?.worktreePath ?? routePs?.cwd;
+			const routeWorkingDir = authenticatedRouteSession?.worktreePath ?? authenticatedRouteSession?.cwd;
 			const result = await routeDispatcher.dispatch(
 				resolved.modulePath,
 				resolved.packRoot,
 				routeName,
-				{ host, sessionId: guard.sessionId, toolUseId: toolUseId ?? "", tool: ident.contributionId, projectId: routeSessionProjectId, workingDir: routeWorkingDir, sessionArchived: routePs?.archived === true },
+				{
+					host,
+					sessionId: guard.sessionId,
+					toolUseId: toolUseId ?? "",
+					tool: ident.contributionId,
+					projectId: authenticatedRouteSession?.projectId,
+					...(routeScopeContext ? { scopeContext: routeScopeContext } : {}),
+					...(routeRuntime ? { runtime: routeRuntime } : {}),
+					workingDir: routeWorkingDir,
+					sessionArchived: sessionManager.getArchivedSession(guard.sessionId) !== undefined,
+				},
 				{ method, query, body: init.body },
 			);
 			const durationMs = Date.now() - start;
@@ -10813,6 +11918,7 @@ async function handleApiRoute(
 				const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
 				const prior = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }]).find((p) => p.scope === targetScope && p.packName === body.packName);
 				const hadMcp = (prior?.manifest.contents.mcp?.length ?? 0) > 0;
+				await removeHindsightRuntimeBeforeContributionChange(body.packName, targetScope, targetProjectId, marketplacePackRoot(targetScope, st.target.projectBase, body.packName));
 				const installed = await installer.updateMarketplacePack({ packName: body.packName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
 				invalidateResolverCaches();
 				const hasMcp = (installed.manifest.contents.mcp?.length ?? 0) > 0;
@@ -10840,6 +11946,7 @@ async function handleApiRoute(
 				const targetScope = st.target.scope;
 				const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
 				const prior = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }]).find((p) => p.scope === targetScope && p.packName === body.packName);
+				await removeHindsightRuntimeBeforeContributionChange(body.packName, targetScope, targetProjectId, marketplacePackRoot(targetScope, st.target.projectBase, body.packName));
 				installer.uninstallPack({ packName: body.packName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
 				invalidateResolverCaches();
 				if (prior?.manifest.contents.mcp?.length) await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId);
@@ -11216,6 +12323,21 @@ async function handleApiRoute(
 			};
 			const before = beforeActivation.mcp ?? [];
 			const beforeOps = beforeActivation.mcpOperations ?? {};
+			const disablingHindsightRuntime = packName === "hindsight"
+				&& catalogue.runtimes?.includes("hindsight")
+				&& !beforeActivation.runtimes?.includes("hindsight")
+				&& normalized.runtimes.includes("hindsight");
+			if (disablingHindsightRuntime) {
+				const builtin = isBuiltinPackName(packName) && !hasUserInstall(targetScope, packName, targetProjectId);
+				try {
+					await removeHindsightRuntimeBeforeContributionChange(packName, targetScope, targetProjectId, marketplacePackRoot(targetScope, st.target.projectBase, packName, builtin));
+				} catch (err) {
+					// Leave the activation record unchanged so the old descriptor remains
+					// resolvable and the operator can retry the failed owned cleanup.
+					jsonError(409, err);
+					return;
+				}
+			}
 			cfgStore.setPackActivation(targetScope as PackOrderScope, packName, normalized);
 			invalidateResolverCaches();
 			const mcpChanged = JSON.stringify([...before].sort()) !== JSON.stringify([...normalized.mcp].sort()) || JSON.stringify(beforeOps) !== JSON.stringify(normalized.mcpOperations ?? {});

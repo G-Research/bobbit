@@ -3171,6 +3171,31 @@ export class TeamManager {
 		await this.resolveGoalManager(goalId).updateGoal(goalId, { state: "complete" });
 		this.rearmedCompletedTeams.delete(goalId);
 
+		// This is the authoritative completion edge. Re-read after the durable
+		// mutation so the dispatcher receives the stable completed-state revision,
+		// not stale pre-dismissal outcome data. Delivery is intentionally isolated:
+		// a provider outage cannot undo a successfully completed goal.
+		const completedGoal = this.resolveGoal(goalId);
+		if (!completedGoal || completedGoal.state !== "complete") {
+			console.warn(`[team-manager] goalCompleted dispatch skipped for goal ${goalId}: durable completed snapshot unavailable`);
+		} else {
+			const completingGoalManager = this.resolveGoalManager(goalId) as GoalManager & {
+				dispatchGoalCompleted?: (ctx: { goalId: string; goal: PersistedGoal; completedAt: number }) => Promise<void>;
+			};
+			const dispatchGoalCompleted = completingGoalManager.dispatchGoalCompleted;
+			if (typeof dispatchGoalCompleted === "function") {
+				try {
+					await dispatchGoalCompleted.call(completingGoalManager, {
+						goalId,
+						goal: completedGoal,
+						completedAt: completedGoal.updatedAt,
+					});
+				} catch (err) {
+					console.warn(`[team-manager] goalCompleted dispatch failed for goal ${goalId} (non-fatal):`, err);
+				}
+			}
+		}
+
 		// Notify parent team lead when a child goal completes, regardless of workflow shape.
 		// This ensures the parent is woken up even if the child's workflow has no
 		// ready-to-merge gate (which is the only prior notification path).

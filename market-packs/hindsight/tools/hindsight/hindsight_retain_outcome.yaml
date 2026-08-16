@@ -1,0 +1,8 @@
+name: hindsight_retain_outcome
+group: Hindsight
+description: Retain the host-supplied completed outcome when available. Requires the memory.write capability grant.
+summary: Retain a completed outcome
+params: []
+provider:
+  type: bobbit-extension
+  extension: ../../lib/tools.mjs

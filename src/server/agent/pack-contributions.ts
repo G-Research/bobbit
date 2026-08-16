@@ -38,11 +38,14 @@ import { isSafeRelativePath, parseEntrypoints } from "./tool-contributions.js";
 import type { EntrypointIconId } from "../../shared/entrypoint-icons.js";
 import { isSafeBasename, isValidPackName } from "./pack-manifest.js";
 import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
+import { parseServiceManifest, type ServiceRuntimeManifest } from "../service-runtime/service-manifest.js";
 import type { McpServerConfig } from "../mcp/mcp-types.js";
+import { normalizeExtensionSettingsSchema, type ExtensionSettingsSchema } from "./extension-settings-schema.js";
 
 // Panel ids may use dotted namespaces (e.g. `artifacts.viewer`).
 const PANEL_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
 const PROVIDER_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
+const RUNTIME_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
 const CHANNEL_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
 const CHANNEL_HANDLER_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 const ROUTE_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
@@ -58,9 +61,12 @@ const PROVIDER_HOOKS = new Set([
 	// provider apply per-goal filesystem treatments (content-addressed marker/
 	// cache) without per-turn cost. See docs/design/goal-metadata.md.
 	"goalProvisioned",
+	// Host-only completion delivery. This is dispatched by TeamManager after its
+	// durable state transition; it is never an agent-routable HookCtx event.
+	"goalCompleted",
 ]);
 const HOOK_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
-const HOOK_EVENTS = new Set(["sessionSetup", "beforePrompt", "afterTurn", "beforeCompact", "sessionShutdown", "goalProvisioned"] as const);
+const HOOK_EVENTS = new Set(["sessionSetup", "beforePrompt", "afterTurn", "beforeCompact", "sessionShutdown", "goalProvisioned", "goalCompleted"] as const);
 const HOOK_CAPABILITIES = new Set(["store", "session", "agents"] as const);
 const HOOK_TOP_LEVEL_KEYS = new Set(["id", "module", "events", "mode", "capabilities", "budget", "config", "activation"]);
 
@@ -203,6 +209,18 @@ export interface ChannelContribution {
 	packRoot: string;
 }
 
+/** A pack-scoped runtime descriptor loaded only from `contents.runtimes` after
+ * strict validation by the generic service manifest parser. */
+export interface RuntimeContribution {
+	/** Canonical lower-case runtime id, matching a provider's optional runtime. */
+	id: string;
+	/** Fully validated generic service descriptor; raw YAML is never exposed. */
+	manifest: ServiceRuntimeManifest;
+	listName: string;
+	sourceFile: string;
+	packRoot: string;
+}
+
 export interface ProviderContribution {
 	id: string;
 	kind: "memory" | "selector" | "generic";
@@ -220,6 +238,10 @@ export interface ProviderContribution {
 	/** The RAW config schema descriptors (the verbatim `config` mapping) preserved
 	 *  for route-side validation; never handed to the provider as `ctx.config`. */
 	configSchema?: Record<string, unknown>;
+	/** Strict settings declaration derived from `configSchema`, when editable. */
+	settingsSchema?: ExtensionSettingsSchema;
+	/** Safe declaration diagnostic. A present value makes the target fail closed. */
+	settingsSchemaDiagnostic?: string;
 	/** Config-gated activation: the provider is omitted from the active provider
 	 *  listing until the EFFECTIVE flat config has a non-empty value for every
 	 *  key in `requiresConfig` (DisabledRefs/pack activation still wins). Enables a
@@ -232,7 +254,7 @@ export interface ProviderContribution {
 }
 
 /** Supported inert hook declaration events. Declaring one does not register or execute it. */
-export type HookEvent = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown" | "goalProvisioned";
+export type HookEvent = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown" | "goalProvisioned" | "goalCompleted";
 export type HookMode = "observe" | "decide";
 export type HookCapability = "store" | "session" | "agents";
 
@@ -245,7 +267,11 @@ export interface HookContribution {
 	mode: HookMode;
 	capabilities: HookCapability[];
 	budget: { maxTokens: number; timeoutMs: number };
+	/** Opaque static config remains inert unless it validates as a settings schema. */
 	config?: Record<string, unknown>;
+	settingsSchema?: ExtensionSettingsSchema;
+	/** Only descriptor-shaped malformed hook config is surfaced as invalid. */
+	settingsSchemaDiagnostic?: string;
 	activation?: { requiresConfig: string[] };
 	listName: string;
 	sourceFile: string;
@@ -262,19 +288,18 @@ export function providerConfigStoreKey(providerId: string): string {
 	return `${PROVIDER_CONFIG_KEY_PREFIX}${providerId}`;
 }
 
-/** Collapse a provider `config` SCHEMA mapping to FLAT default values: a
- *  descriptor object contributes its `.default` (omitted when it has none — an
- *  optional field with no default stays `undefined`); a bare scalar is treated as
- *  the literal default. Never recurses — provider config is a flat key→descriptor
- *  surface. */
+/** Collapse a provider `config` mapping to flat runtime values. A
+ * descriptor-shaped object contributes its `.default` (omitted when it has none
+ * — an optional field with no default stays `undefined`); scalar and opaque
+ * object values are historic literal defaults. Never recurses. */
 export function resolveProviderConfigDefaults(schema: Record<string, unknown>): Record<string, unknown> {
 	const out: Record<string, unknown> = {};
 	for (const [key, descriptor] of Object.entries(schema)) {
-		if (isPlainObject(descriptor)) {
+		if (isPlainObject(descriptor) && "type" in descriptor) {
 			if ("default" in descriptor) out[key] = descriptor.default;
 			// optional with no default → omitted (effective value is `undefined`).
 		} else {
-			out[key] = descriptor; // bare-scalar shorthand = the literal default
+			out[key] = descriptor; // scalar or opaque static config = literal default
 		}
 	}
 	return out;
@@ -292,6 +317,29 @@ function parseProviderActivation(raw: unknown): { requiresConfig: string[] } | u
 	return { requiresConfig: keys };
 }
 
+/** An explicit config gate opts into strict validation even if the tolerant
+ * runtime parser cannot interpret it. Other legacy activation metadata remains
+ * inert and does not become a settings declaration. */
+function hasOwnRequiresConfig(raw: unknown): raw is Record<string, unknown> {
+	return isPlainObject(raw) && Object.prototype.hasOwnProperty.call(raw, "requiresConfig");
+}
+
+/** A config-free target cannot declare a satisfiable config gate. Normalize it
+ * to preserve the canonical diagnostic; an empty array otherwise normalizes as
+ * an empty schema, so explicitly retain the invalid declaration state. */
+function configlessActivationDiagnostic(rawActivation: unknown): string {
+	const settings = normalizeExtensionSettingsSchema({}, rawActivation);
+	return settings.diagnostic ?? "activation.requiresConfig must reference declared fields";
+}
+
+/** A config map opts into strict project settings only when at least one field
+ * is descriptor-shaped. Historic providers and inert hooks also use `config:`
+ * for arbitrary static maps, so scalar and opaque values remain runtime config,
+ * not a malformed settings declaration. */
+function hasSettingsDescriptor(config: Record<string, unknown>): boolean {
+	return Object.values(config).some(value => isPlainObject(value) && "type" in value);
+}
+
 /** All pack-scoped contributions for ONE installed pack. */
 export interface PackContributions {
 	packId: string; // structural, from the pack root dir name
@@ -306,6 +354,8 @@ export interface PackContributions {
 	hooks: HookContribution[];
 	/** Schema-2 MCP contribution files listed by contents.mcp[]. */
 	mcp?: McpPackContribution[];
+	/** Schema-2 runtime descriptor files listed by contents.runtimes[]. */
+	runtimes: RuntimeContribution[];
 	routes?: RouteContribution;
 }
 
@@ -340,6 +390,7 @@ export function loadPackContributions(packRoot: string, manifest: PackManifest):
 		channels: loadChannels(packRoot, manifest),
 		hooks: loadHooks(packRoot, manifest),
 		mcp: loadMcpContributions(packRoot, manifest),
+		runtimes: loadRuntimes(packRoot, manifest),
 	};
 	const routes = loadRoutes(packRoot, manifest);
 	if (routes) out.routes = routes;
@@ -445,6 +496,53 @@ function loadEntrypoints(packRoot: string, manifest: PackManifest): EntrypointCo
 		}
 		seenId.add(base.id);
 		out.push({ ...base, listName, sourceFile, packRoot });
+	}
+	return out;
+}
+
+/** Load only schema-2 `runtimes/<name>.yaml` descriptors listed by the manifest.
+ * Descriptor parse failures are intentionally warn-and-drop: discovery must never
+ * leave an unvalidated command/path surface available to a caller. */
+function loadRuntimes(packRoot: string, manifest: PackManifest): RuntimeContribution[] {
+	if ((manifest.schema ?? 1) < 2) return [];
+	const listNames = manifest.contents.runtimes ?? [];
+	const dir = path.join(packRoot, "runtimes");
+	const out: RuntimeContribution[] = [];
+	const seenListName = new Set<string>();
+	const seenId = new Set<string>();
+	for (const listName of listNames) {
+		if (typeof listName !== "string" || listName.length === 0) continue;
+		if (!isSafeBasename(listName)) {
+			console.warn(`[pack-contributions] runtime listName ${JSON.stringify(listName)} is not a safe basename; skipping`);
+			continue;
+		}
+		if (seenListName.has(listName)) {
+			throw new PackContributionError(`pack "${packIdFromRoot(packRoot)}" declares runtime basename "${listName}" more than once`);
+		}
+		seenListName.add(listName);
+		const sourceFile = resolveContributionFile(dir, listName);
+		if (!isPackPathWithinRoot(dir, sourceFile)) {
+			console.warn(`[pack-contributions] runtime '${listName}' resolves outside runtimes/ (${sourceFile}); skipping`);
+			continue;
+		}
+		let data: unknown;
+		try {
+			data = readYaml(sourceFile);
+		} catch (err) {
+			console.warn(`[pack-contributions] skipping missing/malformed runtime '${listName}' (${sourceFile}): ${String(err)}`);
+			continue;
+		}
+		const problems: string[] = [];
+		const parsed = parseServiceManifest(data, { sourceFile, packRoot }, problems);
+		if (!parsed) {
+			console.warn(`[pack-contributions] runtime '${listName}' (${sourceFile}) is invalid; dropping: ${problems.join("; ")}`);
+			continue;
+		}
+		if (seenId.has(parsed.id)) {
+			throw new PackContributionError(`pack "${packIdFromRoot(packRoot)}" declares runtime id "${parsed.id}" more than once; runtime ids must be unique within a pack`);
+		}
+		seenId.add(parsed.id);
+		out.push({ id: parsed.id, manifest: parsed, listName, sourceFile, packRoot });
 	}
 	return out;
 }
@@ -752,7 +850,8 @@ export function loadHooks(packRoot: string, manifest: PackManifest): HookContrib
 			config = data.config;
 		}
 		const parsedActivation = parseHookActivation(data.activation);
-		if (parsedActivation.error) {
+		const configlessConfigGate = config === undefined && hasOwnRequiresConfig(data.activation);
+		if (parsedActivation.error && !configlessConfigGate) {
 			console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) ${parsedActivation.error}; dropping`);
 			continue;
 		}
@@ -777,7 +876,19 @@ export function loadHooks(packRoot: string, manifest: PackManifest): HookContrib
 			sourceFile,
 			packRoot,
 		};
-		if (config !== undefined) hook.config = config;
+		if (config !== undefined) {
+			hook.config = config;
+			if (hasSettingsDescriptor(config)) {
+				const settings = normalizeExtensionSettingsSchema(config, data.activation);
+				if (settings.schema) hook.settingsSchema = settings.schema;
+				else hook.settingsSchemaDiagnostic = settings.diagnostic;
+			}
+		} else if (configlessConfigGate) {
+			// Keep every explicit, config-free gate visible for repair, including
+			// malformed scalar/empty/mixed requiresConfig forms that the tolerant
+			// parser cannot retain as runtime activation metadata.
+			hook.settingsSchemaDiagnostic = configlessActivationDiagnostic(data.activation);
+		}
 		if (parsedActivation.activation) hook.activation = parsedActivation.activation;
 		out.push(hook);
 	}
@@ -869,12 +980,29 @@ export function loadProviders(packRoot: string, manifest: PackManifest): Provide
 			sourceFile,
 			packRoot,
 		};
-		if (typeof data.runtime === "string" && data.runtime.length > 0) provider.runtime = data.runtime;
+		if (data.runtime !== undefined) {
+			if (typeof data.runtime !== "string" || !RUNTIME_ID_RE.test(data.runtime)) {
+				console.warn(`[pack-contributions] provider '${id}' (${sourceFile}) has invalid runtime id; dropping`);
+				continue;
+			}
+			provider.runtime = data.runtime.toLowerCase();
+		}
+		const activation = parseProviderActivation(data.activation);
+		const configlessConfigGate = data.config === undefined && hasOwnRequiresConfig(data.activation);
 		if (isPlainObject(data.config)) {
 			provider.configSchema = data.config;
 			provider.config = resolveProviderConfigDefaults(data.config);
+			if (hasSettingsDescriptor(data.config)) {
+				const settings = normalizeExtensionSettingsSchema(data.config, data.activation);
+				if (settings.schema) provider.settingsSchema = settings.schema;
+				else provider.settingsSchemaDiagnostic = settings.diagnostic;
+			}
+		} else if (configlessConfigGate) {
+			// Preserve opaque/bare-scalar config compatibility and tolerate unrelated
+			// legacy activation metadata, but an explicit gate with no declaration is
+			// invalid and must fail closed while remaining repairable in Market.
+			provider.settingsSchemaDiagnostic = configlessActivationDiagnostic(data.activation);
 		}
-		const activation = parseProviderActivation(data.activation);
 		if (activation) provider.activation = activation;
 		out.push(provider);
 	}

@@ -1,0 +1,8 @@
+name: hindsight_reflect
+group: Hindsight
+description: Produce a scoped reflection from stored memories. Requires the memory.reflect capability grant.
+summary: Reflect on scoped memories
+params: [prompt, memoryIds?]
+provider:
+  type: bobbit-extension
+  extension: ../../lib/tools.mjs

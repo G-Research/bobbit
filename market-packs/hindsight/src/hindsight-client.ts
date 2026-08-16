@@ -1,222 +1,196 @@
 /**
- * Hindsight REST client (EP G2 / external mode).
- *
- * A thin, faithful mapping over the Hindsight HTTP API
- * (`/v1/{namespace}/banks/{bank}/…`, default namespace `default`, port 8888).
- * Request/response bodies are mapped per the upstream `openapi.json`
- * (Hindsight 0.8.x) — see docs/design/hindsight-pack-external.md §3.
- *
- * Design rules (do not soften — they are pinned by tests/hindsight-client.test.ts):
- *   - Every method arms an AbortController with `cfg.timeoutMs` (default 1500ms);
- *     an abort surfaces as `HindsightError{ kind:"timeout" }` thrown WITHIN budget.
- *   - Non-2xx ⇒ `HindsightError{ kind:"http", status }`.
- *   - DNS/connection/socket failure ⇒ `HindsightError{ kind:"network" }`.
- *   - The `Authorization: Bearer <apiKey>` header is sent ONLY when `cfg.apiKey`
- *     is set.
- *   - With the SOLE exception of `health()` (a pure reachability probe that maps
- *     every failure to `{ ok:false }`), the client never swallows errors —
- *     dormancy and skip-on-failure are the PROVIDER's job, so the client surface
- *     stays a faithful mapping.
- *
- * This module is hand-authored TS compiled to confined-worker Node ESM
- * (`lib/hindsight-client.mjs`) via scripts/build-market-packs.mjs.
+ * Bounded Hindsight 0.8.x REST client.  This is the only HTTP boundary used by
+ * the pack routes: a response is never parsed after its deadline, cancellation,
+ * or byte budget has expired.
  */
 
-export type HindsightErrorKind = "timeout" | "http" | "network";
-
-/** Typed error surfaced by every data operation (see module header). */
+export type HindsightErrorKind = "timeout" | "http" | "network" | "response";
 export class HindsightError extends Error {
 	readonly kind: HindsightErrorKind;
-	/** Present for `kind:"http"` — the upstream HTTP status code. */
 	readonly status?: number;
-
 	constructor(kind: HindsightErrorKind, message: string, status?: number) {
-		super(message);
-		this.name = "HindsightError";
-		this.kind = kind;
-		this.status = status;
-		// Restore prototype chain for `instanceof` after transpilation to ES5-ish.
+		super(message); this.name = "HindsightError"; this.kind = kind; this.status = status;
 		Object.setPrototypeOf(this, HindsightError.prototype);
 	}
 }
 
-export interface RecallMemory {
-	text: string;
-	score?: number;
-	id?: string;
-}
-
-export interface RecallResult {
-	memories: RecallMemory[];
-}
-
-export interface RecallOptions {
-	maxTokens?: number;
-	tags?: Record<string, string>;
-	tagsMatch?: "any" | "all" | "any_strict" | "all_strict";
-}
-
-export interface RetainOptions {
-	tags?: Record<string, string>;
-	/** When true the upstream extraction runs synchronously (`async:false`). */
-	sync?: boolean;
-}
+export type Tags = Record<string, string>;
+export type TagsMatch = "any" | "all" | "any_strict" | "all_strict";
+export interface RecallMemory { text: string; score?: number; id?: string }
+export interface RecallOptions { maxTokens?: number; tags?: Tags; tagsMatch?: TagsMatch }
+export interface RetainOptions { tags?: Tags; id?: string; sync?: boolean }
+export interface BrowseOptions { query?: string; cursor?: string; limit?: number; tags?: Tags; tagsMatch?: TagsMatch }
+export interface ScopedOptions { tags?: Tags; tagsMatch?: TagsMatch }
+export interface InvalidateOptions extends ScopedOptions { reason?: string }
+export interface BrowseResult { memories: Record<string, unknown>[]; cursor?: string }
 
 export interface HindsightClient {
 	health(): Promise<{ ok: boolean }>;
-	/** Idempotent create-or-update — call before the first retain. PUT …/banks/{bank}. */
 	ensureBank(bank: string): Promise<void>;
-	recall(bank: string, query: string, opts?: RecallOptions): Promise<RecallResult>;
-	/** POST …/memories. Resolves on a 2xx (extraction is async upstream). */
+	recall(bank: string, query: string, opts?: RecallOptions): Promise<{ memories: RecallMemory[] }>;
 	retain(bank: string, content: string, opts?: RetainOptions): Promise<void>;
 	reflect(bank: string, prompt: string): Promise<{ text: string }>;
+	/** The scoped form is required by typed routes; it maps to Hindsight's tag-aware reflect API. */
+	reflectScoped(bank: string, prompt: string, opts: ScopedOptions): Promise<{ text: string }>;
 	listBanks(): Promise<{ banks: string[] }>;
+	/** GET /memories/list in the published Hindsight 0.8.6 OpenAPI. */
+	browse(bank: string, opts?: BrowseOptions): Promise<BrowseResult>;
+	detail(bank: string, id: string): Promise<Record<string, unknown> | null>;
+	history(bank: string, id: string): Promise<{ history: Record<string, unknown>[] }>;
+	invalidateMemory(bank: string, id: string, opts?: InvalidateOptions): Promise<void>;
 }
 
 export interface HindsightClientConfig {
 	baseUrl: string;
 	apiKey?: string;
-	/** Default `default`. */
 	namespace?: string;
-	/** Per-request abort budget in ms. Default 1500. */
 	timeoutMs?: number;
+	/** Parent route/lifecycle cancellation. This is never serialized or persisted. */
+	signal?: AbortSignal;
 }
 
-const DEFAULT_TIMEOUT_MS = 1500;
+const DEFAULT_TIMEOUT_MS = 1_500;
+const MAX_TIMEOUT_MS = 10_000;
+const MAX_RESPONSE_BYTES = 512 * 1024;
+const MAX_RESULT_ITEMS = 100;
 const DEFAULT_NAMESPACE = "default";
 
-/** Flatten `{ "project": "abc" }` → `["project:abc"]`, sorted for determinism. */
-function flattenTags(tags?: Record<string, string>): string[] {
-	if (!tags) return [];
-	return Object.keys(tags)
-		.sort()
-		.map((k) => `${k}:${tags[k]}`);
+function flattenTags(tags?: Tags): string[] {
+	return !tags ? [] : Object.keys(tags).sort().map(key => `${key}:${tags[key]}`);
 }
+function finitePositive(value: number | undefined, fallback: number): number {
+	return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.min(Math.floor(value), MAX_TIMEOUT_MS) : fallback;
+}
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+	return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+function boundedRecords(value: unknown): Record<string, unknown>[] {
+	return Array.isArray(value) ? value.slice(0, MAX_RESULT_ITEMS).flatMap(item => asRecord(item) ? [item] : []) : [];
+}
+function cursorOffset(cursor?: string): number | undefined {
+	if (!cursor || !/^(?:0|[1-9]\d{0,8})$/.test(cursor)) return undefined;
+	const offset = Number(cursor); return Number.isSafeInteger(offset) ? offset : undefined;
+}
+
+interface Attempt { response: Response; controller: AbortController; finish(): void; timedOut(): boolean }
 
 export function createClient(cfg: HindsightClientConfig): HindsightClient {
 	const baseUrl = cfg.baseUrl.replace(/\/+$/, "");
-	const namespace = cfg.namespace && cfg.namespace.length > 0 ? cfg.namespace : DEFAULT_NAMESPACE;
-	const timeoutMs = cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+	const namespace = cfg.namespace?.trim() || DEFAULT_NAMESPACE;
+	const timeoutMs = finitePositive(cfg.timeoutMs, DEFAULT_TIMEOUT_MS);
 	const nsSeg = encodeURIComponent(namespace);
+	const bankBase = (bank: string) => `${baseUrl}/v1/${nsSeg}/banks/${encodeURIComponent(bank)}`;
+	const headers = (body: unknown): Record<string, string> => ({
+		...(body === undefined ? {} : { "Content-Type": "application/json" }),
+		...(cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {}),
+	});
 
-	function bankBase(bank: string): string {
-		return `${baseUrl}/v1/${nsSeg}/banks/${encodeURIComponent(bank)}`;
-	}
-
-	function buildHeaders(hasBody: boolean): Record<string, string> {
-		const headers: Record<string, string> = {};
-		if (hasBody) headers["Content-Type"] = "application/json";
-		// Auth header ONLY when an api key is configured (pinned both branches).
-		if (cfg.apiKey) headers["Authorization"] = `Bearer ${cfg.apiKey}`;
-		return headers;
-	}
-
-	/** Single fetch wrapper: arms the timeout, maps transport failures to typed errors. */
-	async function rawFetch(
-		method: string,
-		url: string,
-		body?: unknown,
-	): Promise<Response> {
+	async function rawFetch(method: string, url: string, body?: unknown): Promise<Attempt> {
 		const controller = new AbortController();
 		let timedOut = false;
-		const timer = setTimeout(() => {
-			timedOut = true;
-			controller.abort();
-		}, timeoutMs);
+		const onParentAbort = () => controller.abort(cfg.signal?.reason);
+		if (cfg.signal?.aborted) onParentAbort(); else cfg.signal?.addEventListener("abort", onParentAbort, { once: true });
+		const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+		const finish = () => { clearTimeout(timer); cfg.signal?.removeEventListener("abort", onParentAbort); };
 		try {
-			return await fetch(url, {
-				method,
-				headers: buildHeaders(body !== undefined),
-				body: body !== undefined ? JSON.stringify(body) : undefined,
-				signal: controller.signal,
-			});
-		} catch (err) {
-			if (timedOut) {
-				throw new HindsightError("timeout", `Hindsight request timed out after ${timeoutMs}ms`);
-			}
-			const message = err instanceof Error ? err.message : String(err);
-			throw new HindsightError("network", `Hindsight network error: ${message}`);
-		} finally {
-			clearTimeout(timer);
+			const response = await fetch(url, { method, headers: headers(body), ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: controller.signal });
+			return { response, controller, finish, timedOut: () => timedOut };
+		} catch (error) {
+			finish();
+			if (timedOut) throw new HindsightError("timeout", `Hindsight request timed out after ${timeoutMs}ms`);
+			throw new HindsightError("network", `Hindsight network error: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
 
-	/** Fetch + 2xx assertion; returns the Response for the caller to parse. */
-	async function request(method: string, url: string, body?: unknown): Promise<Response> {
-		const res = await rawFetch(method, url, body);
-		if (!res.ok) {
-			throw new HindsightError("http", `Hindsight HTTP ${res.status} for ${method} ${url}`, res.status);
+	async function responseText(attempt: Attempt): Promise<string> {
+		const { response, controller } = attempt;
+		const declared = Number(response.headers.get("content-length"));
+		if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+			controller.abort(); throw new HindsightError("response", "Hindsight response exceeds byte limit");
 		}
-		return res;
+		try {
+			if (!response.body) return "";
+			const reader = response.body.getReader();
+			const chunks: Uint8Array[] = []; let bytes = 0;
+			try {
+				for (;;) {
+					const next = await reader.read();
+					if (next.done) break;
+					bytes += next.value.byteLength;
+					if (bytes > MAX_RESPONSE_BYTES) {
+						controller.abort(); await reader.cancel().catch(() => {});
+						throw new HindsightError("response", "Hindsight response exceeds byte limit");
+					}
+					chunks.push(next.value);
+				}
+			} finally { reader.releaseLock(); }
+			const joined = new Uint8Array(bytes); let offset = 0;
+			for (const chunk of chunks) { joined.set(chunk, offset); offset += chunk.byteLength; }
+			return new TextDecoder().decode(joined);
+		} catch (error) {
+			if (error instanceof HindsightError) throw error;
+			if (attempt.timedOut()) throw new HindsightError("timeout", `Hindsight request timed out after ${timeoutMs}ms`);
+			throw new HindsightError("network", `Hindsight response interrupted: ${error instanceof Error ? error.message : String(error)}`);
+		}
 	}
 
-	async function requestJson<T>(method: string, url: string, body?: unknown): Promise<T> {
-		const res = await request(method, url, body);
-		return (await res.json()) as T;
+	async function json<T>(method: string, url: string, body?: unknown): Promise<T> {
+		const attempt = await rawFetch(method, url, body);
+		try {
+			if (!attempt.response.ok) throw new HindsightError("http", `Hindsight HTTP ${attempt.response.status} for ${method} ${url}`, attempt.response.status);
+			const text = await responseText(attempt);
+			try { return JSON.parse(text) as T; }
+			catch { throw new HindsightError("response", "Hindsight returned invalid JSON"); }
+		} finally { attempt.controller.abort(); attempt.finish(); }
+	}
+	async function ok(method: string, url: string, body?: unknown): Promise<void> {
+		const attempt = await rawFetch(method, url, body);
+		try {
+			if (!attempt.response.ok) throw new HindsightError("http", `Hindsight HTTP ${attempt.response.status} for ${method} ${url}`, attempt.response.status);
+		} finally { attempt.controller.abort(); attempt.finish(); }
+	}
+	function tagBody(base: Record<string, unknown>, opts?: ScopedOptions): Record<string, unknown> {
+		const tags = flattenTags(opts?.tags);
+		return tags.length ? { ...base, tags, tags_match: opts?.tagsMatch ?? "any" } : base;
 	}
 
 	return {
-		async health(): Promise<{ ok: boolean }> {
-			// Pure reachability probe: every failure (http, timeout, network) maps to
-			// `{ ok:false }` so the provider gets a clean boolean without try/catch.
-			try {
-				const res = await rawFetch("GET", `${baseUrl}/health`);
-				return { ok: res.ok };
-			} catch {
-				return { ok: false };
-			}
-		},
-
-		async ensureBank(bank: string): Promise<void> {
-			// CreateBankRequest fields all auto-fill ⇒ minimal idempotent body.
-			await request("PUT", bankBase(bank), {});
-		},
-
-		async recall(bank: string, query: string, opts?: RecallOptions): Promise<RecallResult> {
-			const tags = flattenTags(opts?.tags);
-			const body: Record<string, unknown> = { query };
-			if (opts?.maxTokens !== undefined) body.max_tokens = opts.maxTokens;
-			if (tags.length > 0) {
-				body.tags = tags;
-				body.tags_match = opts?.tagsMatch ?? "any";
-			}
-			const data = await requestJson<{ results?: Array<{ id?: string; text: string; score?: number }> }>(
-				"POST",
-				`${bankBase(bank)}/memories/recall`,
-				body,
-			);
-			const memories: RecallMemory[] = (data.results ?? []).map((r) => ({
-				text: r.text,
-				id: r.id,
-				score: r.score,
-			}));
+		async health() { try { const attempt = await rawFetch("GET", `${baseUrl}/health`); try { return { ok: attempt.response.ok }; } finally { attempt.controller.abort(); attempt.finish(); } } catch { return { ok: false }; } },
+		async ensureBank(bank) { await ok("PUT", bankBase(bank), {}); },
+		async recall(bank, query, opts) {
+			const body = tagBody({ query, ...(opts?.maxTokens === undefined ? {} : { max_tokens: opts.maxTokens }) }, opts);
+			const data = await json<{ results?: unknown }>("POST", `${bankBase(bank)}/memories/recall`, body);
+			const memories = boundedRecords(data.results).flatMap(item => typeof item.text === "string" ? [{ text: item.text, ...(typeof item.id === "string" ? { id: item.id } : {}), ...(typeof item.score === "number" ? { score: item.score } : {}) }] : []);
 			return { memories };
 		},
-
-		async retain(bank: string, content: string, opts?: RetainOptions): Promise<void> {
-			const tags = flattenTags(opts?.tags);
-			const item: Record<string, unknown> = { content };
-			if (tags.length > 0) item.tags = tags;
-			// Hindsight `async` defaults to false (synchronous). `sync:true` ⇒ async:false.
-			await request("POST", `${bankBase(bank)}/memories`, {
-				items: [item],
-				async: !opts?.sync,
-			});
+		async retain(bank, content, opts) { await ok("POST", `${bankBase(bank)}/memories`, { items: [{ content, ...(opts?.id ? { id: opts.id } : {}), ...(flattenTags(opts?.tags).length ? { tags: flattenTags(opts?.tags) } : {}) }], async: !opts?.sync }); },
+		async reflect(bank, prompt) { return json<{ text: string }>("POST", `${bankBase(bank)}/reflect`, { query: prompt }); },
+		async reflectScoped(bank, prompt, opts) { return json<{ text: string }>("POST", `${bankBase(bank)}/reflect`, tagBody({ query: prompt }, opts)); },
+		async listBanks() { const data = await json<{ banks?: unknown }>("GET", `${baseUrl}/v1/${nsSeg}/banks`); return { banks: boundedRecords(data.banks).flatMap(bank => typeof bank.bank_id === "string" ? [bank.bank_id] : []) }; },
+		async browse(bank, opts) {
+			const params = new URLSearchParams();
+			if (opts?.query) params.set("q", opts.query);
+			const offset = cursorOffset(opts?.cursor); if (offset !== undefined) params.set("offset", String(offset));
+			const limit = Math.min(MAX_RESULT_ITEMS, Math.max(1, Math.floor(opts?.limit ?? 25))); params.set("limit", String(limit));
+			const tags = flattenTags(opts?.tags); for (const tag of tags) params.append("tags", tag);
+			if (tags.length) params.set("tags_match", opts?.tagsMatch ?? "any");
+			const data = await json<{ items?: unknown; total?: unknown; offset?: unknown }>("GET", `${bankBase(bank)}/memories/list?${params}`);
+			const memories = boundedRecords(data.items);
+			const currentOffset = typeof data.offset === "number" && Number.isSafeInteger(data.offset) ? data.offset : offset ?? 0;
+			return { memories, ...(typeof data.total === "number" && currentOffset + memories.length < data.total ? { cursor: String(currentOffset + memories.length) } : {}) };
 		},
-
-		async reflect(bank: string, prompt: string): Promise<{ text: string }> {
-			const data = await requestJson<{ text: string }>("POST", `${bankBase(bank)}/reflect`, {
-				query: prompt,
-			});
-			return { text: data.text };
+		async detail(bank, id) {
+			const attempt = await rawFetch("GET", `${bankBase(bank)}/memories/${encodeURIComponent(id)}`);
+			try {
+				if (attempt.response.status === 404) return null;
+				if (!attempt.response.ok) throw new HindsightError("http", `Hindsight HTTP ${attempt.response.status} for GET memory`, attempt.response.status);
+				return asRecord(JSON.parse(await responseText(attempt))) ?? null;
+			} catch (error) {
+				if (error instanceof HindsightError) throw error;
+				throw new HindsightError("response", "Hindsight returned invalid JSON");
+			} finally { attempt.controller.abort(); attempt.finish(); }
 		},
-
-		async listBanks(): Promise<{ banks: string[] }> {
-			const data = await requestJson<{ banks?: Array<{ bank_id: string }> }>(
-				"GET",
-				`${baseUrl}/v1/${nsSeg}/banks`,
-			);
-			return { banks: (data.banks ?? []).map((b) => b.bank_id) };
-		},
+		async history(bank, id) { const data = await json<{ history?: unknown }>("GET", `${bankBase(bank)}/memories/${encodeURIComponent(id)}/history`); return { history: boundedRecords(data.history) }; },
+		async invalidateMemory(bank, id, opts) { await ok("PATCH", `${bankBase(bank)}/memories/${encodeURIComponent(id)}`, { state: "invalidated", ...(opts?.reason ? { reason: opts.reason } : {}) }); },
 	};
 }

@@ -30,7 +30,7 @@ import path from "node:path";
 import { createServerHostApi } from "../../src/server/extension-host/server-host-api.ts";
 import { createPackStore } from "../../src/server/extension-host/pack-store.ts";
 
-const noopStore = { get: async () => null, read: async () => ({ state: "absent" as const }), put: async () => {}, list: async () => [], delete: async () => false, deletePrefix: async () => 0, stats: async () => ({ keys: 0, bytes: 0 }), getSync: () => null, readSync: () => ({ state: "absent" as const }) };
+const noopStore = { get: async () => null, read: async () => ({ state: "absent" as const }), put: async () => {}, mutate: async <T>(_packId: string, _key: string, value: T) => ({ status: "committed" as const, committed: true as const, value, version: 1 }), list: async () => [], delete: async () => false, deletePrefix: async () => 0, stats: async () => ({ keys: 0, bytes: 0 }), getSync: () => null, readSync: () => ({ state: "absent" as const }) };
 
 describe("createServerHostApi — durable v1 (no gateway passthrough)", () => {
 	it("capabilities reports the server-host caps (session + store) — callRoute/ui are client-only", () => {
@@ -60,6 +60,18 @@ describe("createServerHostApi — durable v1 (no gateway passthrough)", () => {
 		const host = createServerHostApi({ sessionId: "s", packId: "", contributionId: "g/t" });
 		assert.equal((host as unknown as Record<string, unknown>).gateway, undefined);
 	});
+
+	it("confines injected provider secrets to the host context rather than capability projections", () => {
+		const secret = "hindsight-internal-api-key";
+		const host = createServerHostApi({
+			sessionId: "s", packId: "hindsight", contributionId: "routes/memory",
+			providerConfig: { externalUrl: "https://memory.test", apiKey: secret },
+			completedOutcome: { goal: { id: "goal-1", state: "complete" } },
+		});
+		assert.equal(host.providerConfig?.apiKey, secret, "the confined worker host receives the effective EP-7 auth material");
+		assert.deepEqual(host.completedOutcome, { goal: { id: "goal-1", state: "complete" } });
+		assert.doesNotMatch(JSON.stringify({ version: host.version, capabilities: host.capabilities }), new RegExp(secret));
+	});
 });
 
 describe("createServerHostApi — Fix B: NO server-side session.postMessage", () => {
@@ -79,6 +91,7 @@ describe("createServerHostApi — store delegates to the injected PackStore scop
 			get: async (packId: string, key: string) => { calls.push({ op: "get", packId, key }); return null; },
 			read: async (packId: string, key: string) => { calls.push({ op: "read", packId, key }); return { state: "absent" as const }; },
 			put: async (packId: string, key: string, value: unknown, opts?: unknown) => { calls.push({ op: "put", packId, key, value, opts }); },
+			mutate: async <T>(packId: string, key: string, value: T, opts?: unknown) => { calls.push({ op: "mutate", packId, key, value, opts }); return { status: "committed" as const, committed: true as const, value, version: 1 }; },
 			list: async (packId: string, prefix?: string) => { calls.push({ op: "list", packId, prefix }); return ["a"]; },
 			delete: async (packId: string, key: string) => { calls.push({ op: "delete", packId, key }); return true; },
 			deletePrefix: async (packId: string, prefix: string) => { calls.push({ op: "deletePrefix", packId, prefix }); return 2; },
@@ -91,6 +104,7 @@ describe("createServerHostApi — store delegates to the injected PackStore scop
 		await host.store.get("k1");
 		assert.deepEqual(await host.store.read("k-read"), { state: "absent" });
 		await host.store.put("k2", { n: 1 }, { quotaScope: { prefix: "k", profile: "review-final" } });
+		assert.deepEqual(await host.store.mutate("k3", { n: 2 }, { expectedVersion: null, idempotencyKey: "request-1" }), { status: "committed", committed: true, value: { n: 2 }, version: 1 });
 		assert.deepEqual(await host.store.list("pre"), ["a"]);
 		assert.equal(await host.store.delete("k2"), true);
 		assert.equal(await host.store.deletePrefix("pre"), 2);
@@ -99,6 +113,7 @@ describe("createServerHostApi — store delegates to the injected PackStore scop
 			{ op: "get", packId: "my-pack", key: "k1" },
 			{ op: "read", packId: "my-pack", key: "k-read" },
 			{ op: "put", packId: "my-pack", key: "k2", value: { n: 1 }, opts: { quotaScope: { prefix: "k", profile: "review-final" } } },
+			{ op: "mutate", packId: "my-pack", key: "k3", value: { n: 2 }, opts: { expectedVersion: null, idempotencyKey: "request-1" } },
 			{ op: "list", packId: "my-pack", prefix: "pre" },
 			{ op: "delete", packId: "my-pack", key: "k2" },
 			{ op: "deletePrefix", packId: "my-pack", prefix: "pre" },

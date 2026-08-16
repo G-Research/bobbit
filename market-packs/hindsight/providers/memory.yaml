@@ -1,25 +1,38 @@
 id: memory
 kind: memory
-# Lifecycle provider module (bundled, REST client inlined) — resolves to
-# market-packs/hindsight/lib/provider.mjs, contained in the pack root.
+# The host resolves this descriptor's public, mode-free runtime context and
+# injects it into the provider. This declaration never grants lifecycle control.
+runtime: hindsight
 module: ../lib/provider.mjs
-hooks: [sessionSetup, beforePrompt, afterTurn, beforeCompact, sessionShutdown]
+hooks: [sessionSetup, beforePrompt, afterTurn, beforeCompact, sessionShutdown, goalCompleted]
 budget: { maxTokens: 1200, timeoutMs: 1500 }
-# Activation is additionally gated on `externalUrl` (see `activation` below); the
-# provider also enforces the same dormancy gate defensively at runtime.
 defaultEnabled: true
+# Schema-2 project settings are owned by EP-7. Secret fields are write-only and
+# therefore appear in public projections only as `secretSet` booleans. Saving
+# these fields is inert: it cannot probe a model, contact a registry, pull an
+# image, or start/restart a runtime.
 config:
-  mode: { type: enum, values: [external, managed], default: external } # managed reserved for G3
-  externalUrl: { type: string, optional: true }
-  apiKey: { type: secret, optional: true }
-  bank: { type: string, default: bobbit }
-  namespace: { type: string, default: default }
-  recallScope: { type: enum, values: [project, all], default: all }
-  autoRecall: { type: boolean, default: true }
-  autoRetain: { type: boolean, default: true }
-  recallBudget: { type: number, default: 1200 }
-  timeoutMs: { type: number, default: 1500 }
-activation:
-  # Host omits the provider entirely (no bridge injection, no per-turn hook calls)
-  # until the effective config has a non-empty externalUrl.
-  requiresConfig: [externalUrl]
+  runtimeMode: { type: enum, label: Runtime mode, description: Select the generic service adapter; managed modes require an explicit runtime start., values: [external, local, docker, compose], default: external }
+  externalUrl: { type: string, label: Hindsight URL, description: Base URL for an external Hindsight service., optional: true }
+  apiKey: { type: secret, label: API key, description: Optional bearer token for the external Hindsight service., optional: true }
+  dataDir: { type: string, label: Runtime state directory, description: Generic runtime-owned state path. Never point this at a live legacy pg0 directory., default: "${stateDir}/service-data/hindsight" }
+  bank: { type: string, label: Bank, description: Hindsight bank used for retained memories., default: bobbit }
+  namespace: { type: string, label: Namespace, description: Hindsight API namespace., default: default }
+  autoRecall: { type: boolean, label: Automatic recall, description: Add relevant project memories before prompts., default: true }
+  autoRetain: { type: boolean, label: Automatic retention, description: Retain turn and compaction summaries., default: true }
+  recallBudget: { type: number, label: Recall budget, description: Maximum tokens requested for recalled memories., min: 1, default: 1200 }
+  timeoutMs: { type: number, label: Request timeout, description: External service request timeout in milliseconds., min: 1, default: 1500 }
+  retainEveryNTurns: { type: number, label: Retain cadence, description: Flush a durable turn batch after this many turns., min: 1, default: 1 }
+  retainMaxDelayMs: { type: number, label: Retain maximum delay, description: Flush a pending turn batch after this delay., min: 1, default: 60000 }
+  localLlmProvider: { type: enum, label: Local model provider, description: Provider-generic local inference API; no model request is made when this setting is saved., values: [openai-compatible, ollama], default: openai-compatible }
+  localLlmModelId: { type: string, label: Local model ID, description: Model identifier used only for an explicitly started managed runtime., optional: true }
+  localLlmBaseUrl: { type: string, label: Local model URL, description: HTTP(S) OpenAI-compatible or Ollama endpoint. Loopback HTTP endpoints need no API key., optional: true }
+  localLlmApiKey: { type: secret, label: Local model API key, description: Optional write-only model credential. Loopback HTTP endpoints require no placeholder key., optional: true }
+  localLlmContextTokens: { type: number, label: Local context tokens, description: Positive model context limit forwarded only during explicit runtime start., min: 1, default: 32768 }
+  localLlmMaxOutputTokens: { type: number, label: Local output tokens, description: Positive model output limit forwarded only during explicit runtime start., min: 1, default: 4096 }
+  localLlmResidency: { type: enum, label: Local model residency, description: Resident keeps the selected local model loaded across Hindsight requests., values: [resident], default: resident }
+  localLlmKeepAlive: { type: number, label: Local keep-alive seconds, description: Positive residency keep-alive value for providers that support it., min: 1, default: 3600 }
+  ociImage: { type: string, label: Hindsight OCI image, description: Offline/private registry OCI reference. Saving validates syntax only; mutable tags warn and pull only on explicit start., default: "ghcr.io/vectorize-io/hindsight:0.8.6@sha256:274704505b2720ac9a5c816c559044c1e8c6b51d47017317ae049ed2952f5ab1" }
+  registryCredentials: { type: secret, label: Registry credentials, description: Optional write-only credential used only for an explicit Docker or Compose start., optional: true }
+  databaseMode: { type: enum, label: PostgreSQL storage, description: Use the managed durable volume or a separately operated external database. Mode switches require a logical migration plan., values: [managed-volume, external], default: managed-volume }
+  externalDatabaseUrl: { type: secret, label: External PostgreSQL URL, description: Write-only external database connection URL. Required only when external storage is selected., optional: true }

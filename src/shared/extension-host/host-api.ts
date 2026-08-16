@@ -206,6 +206,40 @@ export interface StorePutOptions {
 	quotaScope?: StoreQuotaScope;
 }
 
+/** Preconditions for a fenced durable mutation. `null` means the key must be absent. */
+export interface StoreMutationOptions extends StorePutOptions {
+	/** Compare against the version returned by an earlier mutation/read. */
+	expectedVersion?: number | null;
+	/** A non-empty caller-generated key makes an immediate retry replay its first result. */
+	idempotencyKey?: string;
+	/** Host-owned absolute deadline. A mutation never starts its commit after this instant. */
+	deadlineEpochMs?: number;
+	/** Server-host only: an already-aborted operation is never committed. */
+	signal?: AbortSignal;
+}
+
+/** Safe, stable diagnostics for a mutation that did not commit. */
+export type StoreMutationDiagnosticCode =
+	| "STORE_MUTATION_ABORTED"
+	| "STORE_MUTATION_DEADLINE_EXCEEDED"
+	| "STORE_MUTATION_EXPECTED_VERSION_CONFLICT"
+	| "STORE_MUTATION_IDEMPOTENCY_MISMATCH"
+	| "STORE_MUTATION_INVALID"
+	| "STORE_MUTATION_READ_FAILED"
+	| "STORE_MUTATION_WRITE_FAILED"
+	| "STORE_MUTATION_QUOTA_EXCEEDED";
+
+export interface StoreMutationDiagnostic {
+	code: StoreMutationDiagnosticCode;
+	retryable: boolean;
+}
+
+/** A fenced mutation outcome. Only `committed` means this invocation published a value. */
+export type StoreMutationResult<T = unknown> =
+	| { status: "committed"; committed: true; value: T; version: number }
+	| { status: "replayed"; committed: false; value: T; version: number }
+	| { status: "conflict" | "rejected" | "aborted" | "error"; committed: false; diagnostic: StoreMutationDiagnostic };
+
 export interface StoreStats {
 	keys: number;
 	bytes: number;
@@ -229,7 +263,7 @@ export interface StoreReadDiagnostic {
 /** A lossless durable read: stored `null` is present, not an absent key. */
 export type StoreReadResult<T = unknown> =
 	| { state: "absent" }
-	| { state: "present"; value: T }
+	| { state: "present"; value: T; /** Present only for values committed through `mutate`. */ version?: number }
 	| { state: "error"; diagnostic: StoreReadDiagnostic };
 
 export interface HostStoreApi {
@@ -237,6 +271,7 @@ export interface HostStoreApi {
 	get<T = unknown>(key: string): Promise<T | null>;
 	read<T = unknown>(key: string): Promise<StoreReadResult<T>>;
 	put<T = unknown>(key: string, value: T, opts?: StorePutOptions): Promise<void>;
+	mutate<T = unknown>(key: string, value: T, opts?: StoreMutationOptions): Promise<StoreMutationResult<T>>;
 	list(prefix?: string): Promise<string[]>;
 	delete(key: string): Promise<boolean>;
 	deletePrefix(prefix: string): Promise<number>;

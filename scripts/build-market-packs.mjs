@@ -115,15 +115,16 @@ const PACKS = [
 	{
 		pack: "hindsight",
 		entries: [
-			// SERVER-side modules for the confined NODE worker (provider hooks + pack
-			// routes), each authored in TS and bundled to lib/*.mjs with the REST client
-			// inlined (provider.ts / routes.ts dynamic-import ./hindsight-client.js, which
-			// esbuild inlines into each single self-contained file). platform:"node" so
-			// Buffer + node:* stay node globals/builtins. No CLIENT contributions yet
-			// (panel + tools land in G2.3).
+			// Browser panel plus confined Node provider, typed routes, tool adapters,
+			// and pure runtime/migration contracts. All shipped references resolve into
+			// lib/ because the built-in pack copier intentionally excludes src/.
+			{ in: "panel.ts", out: "lib/panel.js" },
 			{ in: "hindsight-client.ts", out: "lib/hindsight-client.mjs", platform: "node" },
 			{ in: "provider.ts", out: "lib/provider.mjs", platform: "node" },
 			{ in: "routes.ts", out: "lib/routes.mjs", platform: "node" },
+			{ in: "tools.ts", out: "lib/tools.mjs", platform: "node" },
+			{ in: "runtime-settings.ts", out: "lib/runtime-settings.mjs", platform: "node" },
+			{ in: "migration.ts", out: "lib/migration.mjs", platform: "node" },
 		],
 	},
 	{

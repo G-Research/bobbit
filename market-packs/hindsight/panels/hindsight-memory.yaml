@@ -1,0 +1,5 @@
+id: hindsight.memory
+# The singleton panel is opened in the current session by the session-menu launcher.
+title: Hindsight Memory
+entry: ../lib/panel.js
+instanceMode: singleton

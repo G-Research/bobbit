@@ -1,0 +1,45 @@
+apiVersion: 1
+id: fixture-service
+title: Service runtime E2E fixture
+endpoint:
+  protocol: http
+  servicePort: 8888
+  health:
+    path: /health
+    expectedStatus: 200
+    requestTimeoutMs: 500
+    intervalMs: 100
+    startupTimeoutMs: 5000
+lifecycle:
+  startPolicy: manual
+  restart:
+    policy: never
+    maxAttempts: 0
+    windowMs: 1000
+    initialBackoffMs: 100
+    maxBackoffMs: 100
+environment:
+  SERVICE_RUNTIME_PORT:
+    endpointPort: true
+  SERVICE_RUNTIME_HOST:
+    value: 127.0.0.1
+  SERVICE_RUNTIME_DATA_DIR:
+    setting: fixtureDataDir
+storage:
+  setting: fixtureDataDir
+  target: /data
+  survival: preserve
+modes:
+  local:
+    command: node
+    args:
+      - server.mjs
+    cwd: .
+    portEnv: SERVICE_RUNTIME_PORT
+    hostEnv: SERVICE_RUNTIME_HOST
+  docker:
+    image: bobbit-service-runtime-e2e:latest
+  compose:
+    file: compose.yaml
+    service: service
+    projectName: "bobbit-runtime-fixture-${serverIdentity}"

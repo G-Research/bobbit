@@ -1,277 +1,309 @@
-# Hindsight memory pack (external mode)
+# Hindsight memory
 
-Bobbit ships a built-in [first-party pack](marketplace.md#built-in-first-party-packs) named
-**`hindsight`** that gives agents persistent, cross-session **memory** backed by a running
-Hindsight instance (an external memory/recall service you host yourself). It is the first production
-[lifecycle provider](lifecycle-hub.md): instead of every session starting cold, the provider
-**recalls** relevant past memories into the prompt and **retains** a compact summary of each turn,
-so knowledge accrues across goals, sessions, and (optionally) projects.
+The built-in **Hindsight** pack gives agents durable, project-scoped memory. It uses the
+Extension Platform rather than its own control plane:
 
-This page documents how the pack behaves and how to turn it on. The implementation blueprint —
-exact request/response body mapping, the test plan, and the host-side seams it depends on — lives
-in [docs/design/hindsight-pack-external.md](design/hindsight-pack-external.md), whose §7 also
-covers the topology rationale (one shared bank, tag-scoped) summarised under
-[Bank & tag taxonomy](#bank--tag-taxonomy) below.
+- **EP-7 project settings** own configuration, revisions, and write-only secrets.
+- **EP-6 capability grants** decide each privileged action at the time it runs.
+- The generic **service runtime** owns managed-service state, lifecycle, readiness, and logs.
+- Typed pack routes are the shared data plane for the native panel and the five agent tools.
 
-> **Scope of this release (Extension Platform G2.1 + G2.2).** Only **external mode** ships — you
-> point the pack at a Hindsight URL you already run. The managed Docker/Postgres runtime, the
-> explicit `hindsight_recall/retain/reflect` agent tools, the native memory panel, the reflect UI,
-> and cross-engine dedupe are **out of scope** here — see [Non-goals](#non-goals).
+This separation keeps a configuration save harmless, prevents a panel or tool from escalating
+its own authority, and makes the external, local, Docker, and Compose paths behave consistently.
 
-## Installed but dormant by default
+## Open and configure Hindsight
 
-The pack is in the built-in band, so it is **present and active by default** on a fresh install —
-but it does **nothing** until a Hindsight URL is configured. This is a hard, tested guarantee, not
-a soft default:
+Hindsight is shipped in the built-in Marketplace band. Enable it for the project, then configure
+the **Hindsight / memory** provider in that project's Marketplace settings. Settings are
+project-local: changing one project's URL, database, image, or secret never changes another
+project's configuration.
 
-- The provider declares `activation.requiresConfig: [externalUrl]` in
-  `providers/memory.yaml`. The host omits the provider entirely from
-  `listProviders(projectId)` until the effective config has a **non-empty `externalUrl`**.
-- Consequently, on an unconfigured install there is **no active provider**: no provider-bridge
-  pi extension is spawned, no per-turn `/provider-hooks/*` calls are made, the assembled
-  system-prompt text is **byte-identical** to a no-pack baseline, and **no Hindsight network is
-  touched**.
-- The provider also re-checks the same gate defensively at runtime (`isActive(cfg)` in
-  `market-packs/hindsight/src/shared.ts`): unless `mode === "external"` **and** `externalUrl` is a
-  non-empty string, every hook returns immediately (`{ blocks: [] }` for recall hooks, a no-op for
-  retain hooks) and constructs no client.
+To work with memories interactively, open **Hindsight Memory** from the session menu. The
+singleton panel belongs to the current session. It is a workbench, not a settings editor; use
+Marketplace for configuration and grants.
 
-**Why dormant-by-default?** Memory is only useful if a backing store exists, and Bobbit must never
-make outbound calls or change prompts for users who have not opted in. Shipping the pack dormant
-means the feature is one config field away without imposing any cost — latency, network, or prompt
-drift — on everyone else.
+Opening the panel, saving settings, reading status, reading logs, automatic recall, and every
+memory read do **not** start a service. A managed service starts only after an operator with a live
+`service.manage` grant and a verified signed `bobbit_session` prompt-operator cookie confirms
+**Start** or **Restart** in the panel. The confirmation is required but is not authentication.
 
-Like any first-party pack, you can also fully **disable** it from the Market UI; disabling is the
-only opt-out (there is no uninstall for built-in packs). See
-[built-in first-party packs](marketplace.md#built-in-first-party-packs).
+### Settings and secrets
 
-## Turning it on
+Marketplace saves each change against the current EP-7 revision. Reload the settings view and
+try again if a save reports a revision conflict. A secret field is always blank in the form and
+only reports whether a value is stored. Leaving an untouched secret blank preserves its stored
+value; clearing it removes the stored value. API keys, registry credentials, and database URLs
+are never returned in settings, runtime status, diagnostics, route results, or logs.
 
-Set the provider config (via the `config` pack route — see [Pack routes](#pack-routes)) with at
-least `externalUrl` pointing at your Hindsight base URL (default Hindsight port is `8888`). Once
-the effective config has a non-empty URL, the provider activates on the next session spawn and
-starts recalling and retaining.
-
-### Configuration keys
-
-The config surface is declared in `market-packs/hindsight/providers/memory.yaml` and mirrored as
-flat defaults in `market-packs/hindsight/src/shared.ts` (`CONFIG_DEFAULTS`). Store overrides are
-overlaid on these defaults by the loader, so `ctx.config` is the single source of truth the
-provider reads.
-
-| Key | Type | Default | Meaning |
-|---|---|---|---|
-| `mode` | enum `external` \| `managed` | `external` | Deployment mode. **`managed` is reserved for G3** and does nothing here; only `external` activates the provider. |
-| `externalUrl` | string (optional) | — | Base URL of your running Hindsight. **Empty ⇒ dormant.** This is the single field that switches the pack on. |
-| `apiKey` | secret (optional) | — | Bearer token. Sent as `Authorization: Bearer <apiKey>` **only when set**; never echoed back (the `config` GET surface collapses it to a boolean `apiKeySet`). |
-| `bank` | string | `bobbit` | The shared memory bank id (see [Bank & tag taxonomy](#bank--tag-taxonomy)). |
-| `namespace` | string | `default` | Hindsight namespace path segment. |
-| `recallScope` | enum `project` \| `all` | `all` | `all` recalls across the whole bank (cross-project); `project` adds a `project:<id>` tag filter. |
-| `autoRecall` | boolean | `true` | When false, the recall hooks contribute no blocks. |
-| `autoRetain` | boolean | `true` | When false, the retain hooks store nothing. |
-| `recallBudget` | number | `1200` | Token budget passed as `max_tokens` to recall (bounds the upstream payload; host-side budgeting still applies). |
-| `timeoutMs` | number | `1500` | Per-request abort budget for the REST client. |
-
-The `config` route validates overrides against this schema before persisting; an empty string
-clears an optional string (`externalUrl`/`apiKey`), and numeric keys must be positive.
-
-### Durable configuration availability
-
-The activation lookup uses the server's synchronous tri-state store read, while routes use the
-matching asynchronous Host API read. A **proven absent** config key starts from schema defaults;
-a valid stored object overlays those defaults. An unreadable or malformed stored config is neither
-case: the provider remains unavailable rather than activating with defaults, and `config` GET/SET
-returns `HINDSIGHT_CONFIG_UNAVAILABLE` with a safe diagnostic. This prevents a configuration change
-from overwriting a snapshot that the gateway could not establish was absent.
-
-This distinction does not change dormancy. A valid empty/default configuration is available but
-remains dormant until it has a non-empty `externalUrl`. See [durable store reads in the Extension
-Host guide](extension-host-authoring.md#durable-reads-distinguish-absence-from-an-unknown-value) for
-the shared store contract and recovery behavior.
-
-## Bank & tag taxonomy
-
-**One shared, tag-scoped bank.** All Bobbit memory lives in a single Hindsight bank, id from
-`config.bank` (default **`bobbit`**) in namespace `config.namespace` (default **`default`**).
-Multiple Bobbit instances pointed at one Hindsight **share** the `bobbit` bank by default; isolate
-them only by configuring a different bank id.
-
-**Why one bank instead of per-project banks?** Hindsight banks are isolated and cross-bank search
-is unsupported — you can only recall within a single bank. A per-project bank fan-out would make
-the headline value prop ("have we solved this anywhere before?") impossible as one native query.
-So Bobbit uses **one bank + tags**: scope is expressed as recall-time tag filters, not as separate
-banks. Full rationale: [docs/design/hindsight-pack-external.md §7](design/hindsight-pack-external.md).
-
-**Auto-tags on retain.** The agent never hand-tags; the provider derives tags from the hook
-context and flattens them to Hindsight's `string[]` item tags as `"<key>:<value>"`:
-
-| Tag | Source | Notes |
+| Setting group | Settings | Notes |
 |---|---|---|
-| `project:<projectId>` | `ctx.projectId` | Omitted when there is no project (global/server-scope session). |
-| `goal:<goalId>` | `ctx.goalId` | |
-| `agent:<roleName>` | `ctx.roleName` | The contributing agent's role. |
-| `session:<sessionId>` | `ctx.sessionId` | |
-| `kind:turn` / `kind:compaction` | derived | `turn` for `afterTurn`, `compaction` for `beforeCompact`. The `retain` pack route tags manual writes `kind:manual`. |
+| Service endpoint | `runtimeMode`, `externalUrl`, `apiKey` | `externalUrl` is used in `external` mode. `apiKey` is an optional **external-service-only** Hindsight bearer token: it is never sent to a local, Docker, or Compose runtime, and is never shown after saving. |
+| Memory behavior | `bank`, `namespace`, `autoRecall`, `autoRetain`, `recallBudget`, `timeoutMs`, `retainEveryNTurns`, `retainMaxDelayMs` | Defaults are bank `bobbit`, namespace `default`, automatic recall/retain enabled, a 1200-token recall request budget, a 1500 ms client timeout, one turn per retain batch, and a 60-second maximum batch delay. |
+| Local inference | `localLlmProvider`, `localLlmModelId`, `localLlmBaseUrl`, `localLlmApiKey`, `localLlmContextTokens`, `localLlmMaxOutputTokens`, `localLlmResidency`, `localLlmKeepAlive` | The provider is `openai-compatible` or `ollama`. Settings select a model; saving them does not contact it. |
+| Image and registry | `ociImage`, `registryCredentials` | Used by Docker or Compose only when an explicit start/restart resolves the image. |
+| PostgreSQL storage | `databaseMode`, `externalDatabaseUrl` | Select the Compose-owned durable volume or an independently operated PostgreSQL database. |
+| Compatibility setting | `dataDir` | A generic runtime-owned state path. It must **not** point at a live legacy PostgreSQL `pg0` directory and is not evidence that Hindsight uses that directory for database storage. |
 
-**Recall scope.**
+All numeric limits must be positive. Empty optional URL and secret fields clear their override.
 
-- `all` (default) — recall across the whole `bobbit` bank with **no project filter**. This is the
-  cross-project value: a query like "how did we configure X?" can surface a memory from any
-  project.
-- `project` — add a `project:<projectId>` tag filter (`tags_match: "any"`, so untagged org-wide
-  memories still surface). The filter is applied **only when configured**; the default never
-  narrows.
+## Choose a runtime mode
 
-The provider calls the idempotent `client.ensureBank(bank)` before each retain path, so
-correctness never depends on once-per-session in-memory state (provider workers are per-hook and
-stateless).
+`runtimeMode` selects an endpoint source. It does not start, probe, pull, or allocate anything.
+A provider is active only with a usable endpoint.
 
-## Provider lifecycle behaviour
-
-The provider implements the five [Lifecycle Hub](lifecycle-hub.md) hooks. It runs on the Extension
-Host worker tier, reads merged config from `ctx.config`, builds a REST client per hook, and keeps
-all durable state in the pack-scoped `ctx.host.store`. Every Hindsight condition is **non-fatal**
-to the main turn: recalls skip, and a failed retain attempts a durable retry entry. That failure is
-recoverable only after the queue snapshot is persisted; a compound retain-and-queue persistence
-failure emits a fixed lifecycle diagnostic while the main turn remains available.
-
-| Hook | Behaviour |
-|---|---|
-| `sessionSetup` | If `autoRecall`: recall against the goal/task spec (`ctx.prompt`) and inject the results as a **"Relevant memory"** context block (`authority: "memory"`) in the spawn-time system prompt. On error/timeout ⇒ no block + a diagnostic. |
-| `beforePrompt` | If `autoRecall`: recall against the current user turn (`ctx.prompt`) under the provider `timeoutMs` deadline; skip on timeout (non-fatal). Same block mapping, delivered for that turn as a hidden `bobbit:dynamic-context` custom/user-side message rather than a `systemPrompt` append. |
-| `afterTurn` | If `autoRetain`: build a compact turn summary (user + final assistant text, capped ~2000 chars) and **async** retain it (fire-and-forget). On remote failure, attempt a durable enqueue; only a persisted queue snapshot creates a retry. A compound failure reports `HINDSIGHT_RETAIN_QUEUE_PERSISTENCE_FAILED` without failing the turn. Also drains one [retry-queue](#retry-queue--diagnostics) head per call. |
-| `beforeCompact` | If `autoRetain`: **synchronously** retain a summary of the about-to-be-lost span, so the memory lands before context is dropped. On remote failure, use the same durable-enqueue contract and non-fatal compound-failure diagnostic. |
-| `sessionShutdown` | Best-effort **one-pass** drain of the retry queue. Never throws. |
-
-The recall hooks return `ContextBlock[]` only — **fencing and `providerId` are the host's job**
-(see [Lifecycle Hub → fencing](lifecycle-hub.md#fencing)). Each block is titled "Relevant memory",
-`authority: "memory"`, `priority: 50`, with `content` a bulleted list of recalled memory text. An
-empty recall produces no block.
-
-### Retry queue & diagnostics
-
-After a retain fails (network/timeout/HTTP), the provider attempts to append
-`{ content, tags, ts }` to the durable pack-store queue (key `retain-queue`). The failure is
-recoverable only when that queue snapshot persists. If the remote retain and queue persistence both
-fail, no durable retry exists and the provider/lifecycle path emits the fixed, non-secret
-`HINDSIGHT_RETAIN_QUEUE_PERSISTENCE_FAILED` diagnostic; the main turn still remains available.
-
-- **Empty versus unknown** — a proven absent queue and a valid stored `[]` are available, with
-  depth `0`; they are the only empty states. A read error or a present non-array queue is unknown.
-  It is never replaced with `[]`, drained, or reported as having no work.
-- **Retry behavior** — when the queue is unknown, `afterTurn` and `sessionShutdown` leave it intact
-  and record the fixed `HINDSIGHT_QUEUE_UNAVAILABLE` condition when diagnostics can be persisted.
-  A later hook retries the read. A failed remote retain still attempts enqueue, but enqueue returns
-  not-durable rather than overwriting the unknown snapshot, causing the fixed retain-and-queue
-  diagnostic above.
-- **Cap 100** — a durable append past 100 entries drops the oldest (FIFO eviction).
-- **Drain safety** — `afterTurn` retries one queue head; `sessionShutdown` makes one best-effort
-  full pass. A remotely successful retry is removed only after the shortened queue snapshot
-  persists. If that save fails, the durable queue remains the retry decision, the provider records
-  `HINDSIGHT_QUEUE_DRAIN_PERSISTENCE_FAILED`, and a later retry may send the entry again rather
-  than silently losing it.
-
-The queue is durable (not in-memory) precisely because provider workers terminate after every hook
-invocation, so an in-memory queue would lose everything between turns. Once the queue snapshot has
-persisted, its retry remains valid even if the optional `last-error` write fails. Recall skips,
-retain failures, queue availability, and health flips are non-fatal diagnostics through `last-error`
-when it can be written and the Hub's [context-trace](lifecycle-hub.md#the-trace-store). The
-`status` route makes unknown queue state explicit for operators rather than presenting it as an
-empty backlog.
-
-## Pack routes
-
-The pack ships server routes (`market-packs/hindsight/src/routes.ts`, declared in `pack.yaml`
-under `routes.names`) for diagnostics and config persistence, reached via
-`host.callRoute(<name>)` and executed in the confined worker. They share the **same pack-scoped
-store** as the provider, so `status` observes the provider's real queue and last error. When the
-pack is not configured, every route returns a clean structured signal (`configured: false` / empty
-list) rather than erroring.
-
-| Route | Contract |
-|---|---|
-| `config` | GET → merged effective config with secrets redacted (`apiKey` collapsed to `apiKeySet`). SET (with body) → validate against the schema, persist overrides, return the new effective config. If the persisted snapshot is unreadable or invalid, both return `HINDSIGHT_CONFIG_UNAVAILABLE` rather than defaults or an overwrite. |
-| `status` | `{ configured, mode, healthy, bank, namespace, recallScope, autoRecall, autoRetain, queueDepth, queueState, lastError? }`. `healthy` is a fresh `client.health()` probe when configured (short timeout), else `false`. `queueState: "available"` has numeric `queueDepth` (including `0`); `queueState: "unavailable"` has `queueDepth: null` and a safe `queueError` diagnostic. |
-| `recall` | `{ query, scope? }` → resolves bank + tags and calls `client.recall`; returns `{ memories }`. Manual/diagnostic surface. |
-| `retain` | `{ content, tags?, sync? }` → `ensureBank` + `client.retain` with merged auto-tags (`kind:manual`); returns `{ ok }`. |
-| `reflect` | `{ prompt }` → `client.reflect` → `{ text }`. |
-| `banks` | Diagnostic: `client.listBanks()` → `{ banks }`. The pack itself uses one bank. |
-
-## REST client
-
-`market-packs/hindsight/src/hindsight-client.ts` is a thin, faithful mapping over the Hindsight
-HTTP API (`/v1/{namespace}/banks/{bank}/…`). Body shapes are mapped per the upstream `openapi.json`
-(Hindsight 0.8.x); see [the design doc §3](design/hindsight-pack-external.md) for the exact request
-and response mapping. Behaviour pinned by `tests/hindsight-client.test.ts`:
-
-- Every method arms an `AbortController` with `timeoutMs` (default 1500); an abort surfaces as
-  `HindsightError{ kind: "timeout" }` thrown **within budget**.
-- Non-2xx ⇒ `HindsightError{ kind: "http", status }`; DNS/connection/socket failure ⇒
-  `HindsightError{ kind: "network" }`.
-- The `Authorization: Bearer` header is sent **only when `apiKey` is set**.
-- `health()` is the sole exception that swallows errors — it is a pure reachability probe mapping
-  every failure to `{ ok: false }`. Dormancy and skip-on-failure are the **provider's** job, so the
-  client surface stays a faithful mapping.
-
-## Testing
-
-| Test | Phase | What it pins |
+| Mode | Endpoint and start behavior | Storage requirements |
 |---|---|---|
-| `tests/hindsight-client.test.ts` | unit | Client round-trips, typed errors, timeout-within-budget, auth-header-only-when-set, namespace path-building (vs the in-process stub). |
-| `tests/hindsight-provider.test.ts` | unit | Dormancy (no URL ⇒ no client constructed), auto-tag taxonomy, `recallScope` filter, retry-queue retry + cap, block shape. |
-| `tests/e2e/hindsight-external.spec.ts` | E2E | sessionSetup + beforePrompt blocks appear; a turn retains on the stub with bank `bobbit` + correct tags; unhealthy ⇒ session unaffected + diagnostic + `status` unhealthy; recovery flushes the queue; per-project disable ⇒ no injection; persists across reload. |
-| `tests/manual-integration/hindsight-external.test.ts` | manual | Real local Hindsight round-trip. |
+| `external` | Set a valid HTTP(S) `externalUrl`. It is used directly; managed runtime controls do not apply. | The operator owns the remote service and database. |
+| `local` | An explicit start runs the local `hindsight serve` adapter. Set a local model ID and HTTP(S) local-model URL first. | Configure `databaseMode: external` and a write-only `externalDatabaseUrl` before starting. A local managed volume is deliberately not accepted because storage continuity cannot be proven. |
+| `docker` | An explicit start resolves/pulls the configured OCI image and runs the Docker adapter. | Configure an external PostgreSQL database before starting for the same continuity reason as local mode. |
+| `compose` | An explicit start uses the Hindsight Compose asset and publishes the API on a dynamically allocated loopback port. | `managed-volume` is supported: Compose owns a durable `hindsight-postgres` named volume. An external database is also supported when its secret URL is configured. |
 
-The shared in-process stub `tests/e2e/hindsight-stub.mjs` (`startHindsightStub`) backs the
-automated tests deterministically — no network. It records every call, serves seeded memories
-filtered by request tags, records retained items, and `setHealthy(false)` flips `/health` to 503 so
-the provider's skip/queue paths are exercised.
+For every managed mode, the runtime status is one of `stopped`, `starting`, `ready`, `degraded`,
+`blocked`, or `unavailable`. Only `ready` supplies an endpoint to the memory provider. A down,
+unhealthy, blocked, or unavailable runtime does not fall back to an external or paid provider;
+reads return an explicit unavailable result and writes fail or use their existing durable
+provider queue where applicable. The agent session stays usable instead of waiting for recovery.
 
-### Manual integration against a real Hindsight
+`apiKey` has no managed-mode fallback. The Hindsight client attaches it only when
+`runtimeMode: external`; local, Docker, and Compose use their ready runtime endpoint without
+that bearer token. Managed credentials are limited to their separately declared write-only model,
+registry, and database secret fields.
 
-`tests/manual-integration/hindsight-external.test.ts` talks directly to a running Hindsight over
-HTTP (no Bobbit gateway) and exercises `ensureBank → retain → recall`, polling up to ~30 s to
-tolerate Hindsight's asynchronous fact-extraction pipeline. It **skips cleanly** (never fails) when
-the health probe shows Hindsight is unreachable, so the manual suite stays green on machines
-without a local Hindsight.
+The service descriptor probes `/health` with a bounded request and has manual start policy. It
+may retry a failed managed start within its bounded runtime policy, but it never begins work merely
+because a setting or panel was read.
 
-Environment:
+### Local model configuration and residency
 
-| Var | Default | Purpose |
-|---|---|---|
-| `HINDSIGHT_URL` | `http://localhost:8888` | Base URL of the running Hindsight. |
-| `HINDSIGHT_NS` | `default` | Namespace path segment. |
-| `HINDSIGHT_BANK` | `bobbit-it` | **Dedicated** bank id so the test never pollutes the shared production `bobbit` bank. |
-| `HINDSIGHT_API_KEY` | — | Optional bearer token; sent only when set. |
+Hindsight supports the resident Qwen3-Coder MLX OpenAI-compatible service delivered separately
+by Apple Model Lab, but the integration is provider-generic. Configure either an
+OpenAI-compatible or Ollama HTTP(S) endpoint and its model ID. The Hindsight pack neither starts
+nor probes that model service when settings are saved.
 
-```bash
-npm run build && node --import tsx --test tests/manual-integration/hindsight-external.test.ts
+A managed start requires:
+
+- a model ID and valid local-model HTTP(S) endpoint;
+- `localLlmResidency: resident` (request-scoped residency is rejected);
+- a positive context limit, output limit, and keep-alive value; and
+- `localLlmApiKey` only for a non-loopback endpoint.
+
+A loopback HTTP endpoint (`localhost`, `127.0.0.1`, or `::1`) needs no placeholder key. Runtime
+diagnostics can identify the selected provider, safe endpoint host, model ID, limits, residency,
+keep-alive, and a post-start observed load ID. They never expose a URL path, query, credential, or
+secret. Resident operation is configured to reuse the selected local model across sequential
+requests; no fallback model is configured.
+
+### OCI images and offline deployments
+
+The default image is the reviewed Hindsight 0.8.6 digest reference:
+
+```text
+ghcr.io/vectorize-io/hindsight:0.8.6@sha256:274704505b2720ac9a5c816c559044c1e8c6b51d47017317ae049ed2952f5ab1
 ```
 
-## Build & packaging
+You may replace it with a syntactically valid private-registry reference, tag, or SHA-256 digest.
+Saving validates syntax only; it does not discover a release, log in to a registry, inspect or
+pull an image, or start a container. This makes an offline manual reference usable even when
+online discovery is unavailable.
 
-The pack is built like any [first-party pack](marketplace.md#built-in-first-party-packs): the three
-server modules (`hindsight-client`, `provider`, `routes`) are hand-authored TS bundled to
-confined-worker Node ESM under `lib/*.mjs` by `scripts/build-market-packs.mjs` (the `hindsight`
-entry in `PACKS`, `platform: "node"`), and `scripts/copy-builtin-packs.mjs` lists `"hindsight"` in
-`FIRST_PARTY_PACKS` so it ships in the built-in band. The shared `src/shared.ts` is inlined into
-both `provider.mjs` and `routes.mjs`; only `lib/` ships, never `src/`.
+A reference with a digest is pinned. A tag without a digest is accepted but surfaces the
+`OCI_REFERENCE_MUTABLE_TAG` warning because a later pull can produce different bytes. Registry
+credentials are write-only and are used only in memory for an explicit Docker/Compose start or
+restart.
 
-## Non-goals
+## Protect existing memories and PostgreSQL data
 
-Tracked in later Extension Platform goals, **not** in this release:
+Do not bind-mount a live PostgreSQL `pg0` data directory into Hindsight. The supplied Compose
+configuration uses its own named `hindsight-postgres` volume, which ordinary stop, restart, and
+pack cleanup retain. It does not use `down -v`.
 
-- Explicit agent tools `hindsight_recall/retain/reflect`, the native memory panel, and entry
-  points — **G2.3**.
-- Managed Docker runtime + Postgres + `~/.hindsight` bind-mount + deployment-mode selection
-  (`mode: managed`) — **G3**.
-- Mental-models / reflect UI / cross-engine dedupe / cost surfacing — **G4**.
+Changing a mode or database target must preserve the bank already in use. The Service tab can
+create a redacted logical migration plan that identifies source and target storage, a custom dump
+artifact, compatibility checks, rollback routing, and an exact confirmation phrase. Plan creation
+is non-destructive and requires `service.manage`.
+
+**Current execution limit:** the installed runtime intentionally has no PostgreSQL migration
+connector. Applying a plan returns `HINDSIGHT_MIGRATION_CONNECTOR_UNAVAILABLE`; no source,
+target, or backup is changed. Do not treat a planned migration as completed and do not switch to a
+new managed store expecting memories to appear. Keep the existing external database configured,
+or perform an audited logical `pg_dump`/restore using your database operations procedure before
+changing the active storage. The intended logical sequence is: stop writers, make and validate a
+custom-format dump, create the target, restore it, verify Hindsight health plus retain/recall/
+reflect, then switch routing. On failure, retain the source and backup and restore source routing.
+
+This fail-closed behavior is intentional: it is safer to block a potentially destructive switch
+than silently begin with an empty bank.
+
+## Grants and scope
+
+Grant capabilities to the `hindsight` pack for the project in Marketplace. The route boundary
+checks the live EP-6 decision before dispatch and again before remote work where a grant could
+have changed. A previous allow does not survive a later revoke.
+
+| Capability | Required for |
+|---|---|
+| `service.manage` | Start, stop, restart, create a migration plan, and attempt migration execution. |
+| `memory.read` | Project/goal-scoped browse, search, detail, history, and ordinary recall. |
+| `memory.write` | Manual retain and retaining a completed goal outcome. |
+| `memory.reflect` | Scoped reflection. |
+| `memory.invalidate` | Confirmed invalidation of a selected memory. |
+| `memory.read.all` | An explicit `scope: all` browse, search, detail, history, or recall request. |
+
+Normal memory operations derive the project and, when available, goal from the authenticated
+session. A request body cannot select another project. Normal reads use strict matching tags for
+that project and goal; all-scope is never an implicit fallback. `memory.read.all` is required only
+when the caller explicitly requests all scope, and it does not replace the ordinary read grant
+needed by reflection.
+
+A denied or missing grant fails closed with a structured capability error. `runtime-control` and
+`migration-execute` additionally require a verified signed `bobbit_session` prompt-operator cookie:
+bearer-only, sandbox, and agent-session callers receive
+`403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. Their body `consent` or `confirmation` is required but
+is not authentication. `migration-plan` is non-destructive and remains `service.manage` grant-only.
+The Hindsight panel's **Access** tab shows these six capabilities and links back to Marketplace; it
+cannot create its own grants.
+
+## Use the Hindsight Memory panel
+
+The session-menu entry opens the `hindsight.memory` panel for the active session. The panel uses
+only pack-bound typed routes and keeps its request, selection, search, dialog, and focus state in
+memory. Closing it, changing sessions, disabling the pack, or uninstalling the pack clears that
+state and prevents a late route result from painting into another session.
+
+### Service tab
+
+The **Service** tab shows the generic runtime state, configured mode, desired state, ready
+endpoint, and bounded diagnostic logs. Refreshing status and reading logs are read-only. Start,
+stop, and restart open a confirmation dialog; the resulting control route requires a live
+`service.manage` grant, a verified signed `bobbit_session` prompt-operator cookie, and
+`consent: true`. Consent is not authentication; bearer-only, sandbox, and agent-session callers
+receive `403 PROMPT_EXTENSION_OPERATOR_REQUIRED`. External mode has no managed service to control.
+
+The tab also exposes migration planning. It explains that migration is logical rather than a live
+PostgreSQL-directory mount and shows the exact confirmation text on a successful plan. See
+[Protect existing memories and PostgreSQL data](#protect-existing-memories-and-postgresql-data)
+for the current execution limitation.
+
+### Memories tab
+
+The **Memories** tab provides:
+
+- browse/search within the current project and goal;
+- a selected-memory detail request;
+- a quick manual retain field;
+- a scoped reflection prompt for the active project/goal;
+- a required invalidation reason followed by a confirmation dialog; and
+- **Retain completed outcome**, which asks the host for the current completed goal's bounded
+  outcome rather than accepting manually supplied outcome text.
+
+The panel's invalidation request carries the selected ID as the exact confirmation value. The
+route verifies that the memory belongs to the current project/goal before invalidating it. A
+completed-outcome request succeeds only when the session has a completed goal and the host can
+produce its trusted goal/task/gate snapshot; otherwise it returns `OUTCOME_UNAVAILABLE`.
+
+The panel does not automatically read memories on open. Its empty state asks the user to search
+or browse. It provides a live status region for results and errors, keyboard-operable tabs, visible
+focus styling, and a focus-trapped confirmation dialog that supports Escape and restores focus on
+close.
+
+## Automatic provider behavior
+
+When enabled and granted `memory.read`, the memory provider adds a bounded **Relevant memory**
+context block during session setup and before prompts. It remains inactive until external mode has
+a URL or a managed runtime is ready. Setting `autoRecall: false` disables those blocks. Automatic
+turn and compaction retention also needs `memory.write`; `autoRetain: false` disables it.
+
+Hindsight does not create a bank per project. Projects that use the same configured bank and
+namespace (by default, `bobbit` and `default`) share that Hindsight bank; authoritative tags keep
+normal project and goal operations narrow:
+
+| Tag | Use |
+|---|---|
+| `project:<projectId>` | Required for normal retain and recall. |
+| `goal:<goalId>` | Added when the session has a resolved goal. |
+| `agent:<role>` and `session:<sessionId>` | Retention provenance when available. |
+| `kind:turn`, `kind:compaction`, `kind:outcome` | Automatic retention record type. |
+| `kind:manual` | Typed manual retain route record type. |
+
+The provider batches primary-turn summaries according to the configured cadence and persists its
+queue so work is not lost when a short-lived worker exits. It retains a host-built completion
+outcome on goal completion. Remote failure is non-fatal only after the retry item has been written
+durably; unreadable durable state is reported as unavailable rather than mistaken for an empty
+queue.
+
+### Epic completion map
+
+| Item | Delivered surface | Key invariant |
+|---|---|---|
+| H-2 — IDs, cleanup, stray memories | Collision-safe, project-partitioned pending/queue identities; deadline-bound sweep and scope-preserving stranded recovery. | A prefix/list result is revalidated against the complete identity, so records cannot cross projects, goals, banks, or namespaces. |
+| H-3 — remaining hardening | Generic Extension Host mutation, deadline, lifecycle-delivery, and tri-state-read foundations. | A failed or unreadable durable operation is never reported as a committed or empty result. See [foundation provenance](design/hindsight-foundation-provenance.md). |
+| H-4 — panel, tools, managed runtime | This panel, the five tools, typed routes, and the mode-independent local/Docker/Compose runtime. | UI and tools consume redacted EP-7 settings, live EP-6 grants, and the shared ready-endpoint contract; they do not own a client lifecycle. |
+| H-5 — goal completion | Host-originated `goalCompleted` delivery and `hindsight_retain_outcome`. | The durable completion marker follows remote success or a confirmed durable queue entry, never a failed/unknown write. |
+| H-6 — goal recall | Authoritative session project/goal scope for normal browse, recall, and reflection. | Missing scope fails closed before a remote call; `scope: all` is explicit and needs `memory.read.all`. |
+
+The H-2, H-5, and H-6 mechanics are detailed in [Hindsight memory completion](design/hindsight-memory-completion.md). H-3 is an outcome audit rather than a replay of the old hardening package; H-4 is the operational surface documented here.
+
+## Agent tools
+
+Hindsight contributes exactly these data-plane tools. Each is a thin adapter over the same
+authenticated typed route used by the panel; it has no direct Hindsight client, settings, secret,
+Docker, runtime-control, or migration implementation. None of the five tools invokes
+`runtime-control`, `migration-plan`, or `migration-execute`.
+
+| Tool | Parameters | Behavior |
+|---|---|---|
+| `hindsight_recall` | `query`, optional `scope: project | all` | Recalls scoped memories. `project` is the default; `all` requires `memory.read.all`. |
+| `hindsight_retain` | `content`, optional `kind` | Retains text in the current project/goal and requires `memory.write`. The current route derives the stored `kind:manual` tag; `kind` is accepted by the tool adapter but does not choose route tags. |
+| `hindsight_reflect` | `prompt`, optional `memoryIds` | Produces a reflection over the authoritative current project/goal and requires `memory.reflect` plus ordinary read access. The current route scopes the whole resolved project/goal; supplied IDs do not broaden or select a different scope. |
+| `hindsight_invalidate` | `id`, `confirmation`, optional `reason` | Invalidates one in-scope memory only when `confirmation` exactly equals `id`; requires `memory.invalidate`. |
+| `hindsight_retain_outcome` | none | Retains the host-supplied outcome of the current completed goal; requires `memory.write`. It ignores caller-supplied outcome content. |
+
+Tool and route requests have bounded text and result sizes. A missing session credential or
+pack-surface token yields `HINDSIGHT_ROUTE_UNAVAILABLE`; service-down data operations return
+structured unavailable/unhealthy results instead of hanging.
+
+## Typed route reference
+
+The Hindsight pack registers the following routes for its bound panel and tool surfaces. These are
+not a second public lifecycle API: callers receive the current session's authenticated project
+scope, EP-7 settings projection, runtime context, and live capability decision from the host.
+
+| Route | Purpose |
+|---|---|
+| `runtime-status` | Returns the project runtime projection and settings revision without secrets. |
+| `runtime-control` | Takes `{ action: "start" | "stop" | "restart", consent: true }`; requires a live `service.manage` grant and a verified signed `bobbit_session` prompt-operator cookie. Consent is not authentication. |
+| `runtime-logs` | Returns a bounded trailing log list; `tail` is clamped to 1–200 lines. |
+| `migration-plan` | Creates a redacted logical migration plan; requires `service.manage` only. |
+| `migration-execute` | Attempts a confirmed plan; requires a live `service.manage` grant, a verified signed `bobbit_session` prompt-operator cookie, and the exact plan confirmation. Confirmation is not authentication. |
+| `browse` / `search` | Lists current-scope memories with optional query, cursor, and limit. `scope: "all"` requires `memory.read.all`. |
+| `detail` / `history` | Reads one memory or its history only after scope validation. The current panel uses `detail`; `history` is available to typed route consumers. |
+| `recall` | Requires a non-empty query and returns recalled memories under the resolved scope. |
+| `retain` | Requires non-empty content and derives the project/goal/manual tags server-side. |
+| `reflect` | Requires a prompt and produces a current project/goal-scoped reflection. |
+| `invalidate` | Requires an in-scope ID and exact ID confirmation. |
+| `retain-outcome` | Retains only the host-derived completed-goal snapshot. |
+
+Data-plane routes stop within their bounded route deadline. An inactive external configuration
+returns an empty inactive result for reads; a managed runtime that is not ready returns
+`SERVICE_UNHEALTHY`. Neither case constructs a client, starts a runtime, or falls back to a
+different endpoint.
+
+## Release hold: human managed-mode verification
+
+Automated coverage proves the generic adapter matrix and degraded behavior, but this epic must
+not merge to `main` until a human has tested **both Hindsight Docker and Hindsight Compose** on
+the target environment. For each mode, explicitly start the service, verify a ready state and a
+retain/recall round trip, stop and restart it, and confirm the expected storage survives. Record
+that result in the parent PR. A Docker/Compose prerequisite failure or an automated skip is not a
+substitute for this hold.
 
 ## See also
 
-- [Lifecycle Hub](lifecycle-hub.md) — the seam that runs the provider's hooks and fences its
-  blocks.
-- [Marketplace → built-in first-party packs](marketplace.md#built-in-first-party-packs) and
-  [provider contributions](marketplace.md#provider-contributions-providersidyaml).
-- [docs/design/hindsight-pack-external.md](design/hindsight-pack-external.md) — implementation
-  blueprint (REST body mapping, host seams, full test plan, and the bank-topology rationale in §7).
+- [Project extension settings](extension-settings.md) — revisions, field semantics, and write-only
+  secrets.
+- [Extension capability grants](rest-api.md#extension-capability-grants) — project-owned EP-6
+  grants and administrative API.
+- [Managed service runtimes](managed-runtimes.md) — generic runtime state and lifecycle contract.
+- [Lifecycle Hub](lifecycle-hub.md) — how provider context blocks are delivered.
+- [Historical external-mode design](design/hindsight-pack-external.md) — REST mapping and original
+  bank-topology rationale; it is not the current configuration or authorization contract.

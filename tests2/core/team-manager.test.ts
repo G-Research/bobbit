@@ -779,6 +779,74 @@ describe("TeamManager", () => {
 			assert.equal(sm._sessions.has(session.id), true);
 		});
 
+		it("dispatches goalCompleted only after the durable complete state", async () => {
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal();
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const dispatched = vi.fn(async ({ goal: snapshot }: any) => {
+				assert.equal(snapshot.state, "complete", "host completion delivery must observe durable state");
+			});
+			sm.goalManager.dispatchGoalCompleted = dispatched;
+			const team = createTeamManager(sm);
+			await team.startTeam(goal.id);
+
+			await team.completeTeam(goal.id);
+
+			assert.equal(dispatched.mock.calls.length, 1);
+			assert.equal(dispatched.mock.calls[0][0].goalId, goal.id);
+			assert.equal(goal.state, "complete");
+		});
+
+		it("skips goalCompleted delivery rather than dispatching a pre-completion snapshot", async () => {
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal();
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			const team = createTeamManager(sm);
+			await team.startTeam(goal.id);
+
+			const originalUpdateGoal = sm.goalManager.updateGoal;
+			let completedMutation = false;
+			sm.goalManager.updateGoal = vi.fn((id: string, updates: any) => {
+				const updated = originalUpdateGoal(id, updates);
+				completedMutation = true;
+				return updated;
+			});
+			sm.goalManager.getGoal = vi.fn(() => completedMutation ? undefined : goal);
+			const dispatched = vi.fn(async () => {});
+			sm.goalManager.dispatchGoalCompleted = dispatched;
+			const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+			try {
+				await team.completeTeam(goal.id);
+				assert.equal(goal.state, "complete");
+				assert.equal(dispatched.mock.calls.length, 0, "must not fall back to the stale pre-completion goal");
+				assert.equal(warn.mock.calls.length, 1);
+				assert.match(String(warn.mock.calls[0][0]), /goalCompleted dispatch skipped.*durable completed snapshot unavailable/);
+			} finally {
+				warn.mockRestore();
+			}
+		});
+
+		it("keeps a goal complete when goalCompleted delivery fails", async () => {
+			const goals = new Map<string, MockGoal>();
+			const goal = createMockGoal();
+			goals.set(goal.id, goal);
+			const sm = createMockSessionManager(goals);
+			sm.goalManager.dispatchGoalCompleted = vi.fn(async () => { throw new Error("provider unavailable"); });
+			const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+			try {
+				const team = createTeamManager(sm);
+				await team.startTeam(goal.id);
+				await team.completeTeam(goal.id);
+				assert.equal(goal.state, "complete");
+				assert.equal(warn.mock.calls.length, 1);
+				assert.match(String(warn.mock.calls[0][0]), /goalCompleted dispatch failed/);
+			} finally {
+				warn.mockRestore();
+			}
+		});
+
 		it("should dismiss all role agents during completion", async () => {
 			const goals = new Map<string, MockGoal>();
 			const goal = createMockGoal();

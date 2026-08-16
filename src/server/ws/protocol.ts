@@ -349,6 +349,10 @@ export type ServerMessage =
 	/** Sent to ALL authenticated clients when staff records change so staff and session sidebars can invalidate together. */
 	| { type: "staff_changed"; reason: StaffChangedReason; staffId: string; projectId: string; previousProjectId?: string; sessionId?: string }
 	| { type: "session_title"; sessionId: string; title: string }
+	/** Metadata-only invalidation after a project's extension grants change. */
+	| { type: "extension_grants_updated"; projectId: string; ts: number }
+	/** Metadata-only invalidation after a project's extension settings change. */
+	| { type: "extension_settings_updated"; projectId: string; revision: number; ts: number }
 	| { type: "pong" }
 	| { type: "cost_update"; sessionId: string; goalId?: string; taskId?: string; cost: SessionCostSnapshot }
 	| { type: "queue_update"; sessionId: string; queue: QueuedMessage[] }

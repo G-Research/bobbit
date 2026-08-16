@@ -124,7 +124,7 @@ index 930c1a1..42a57d0 100644
    sessionId: string;
 +  showChangedOnly?: boolean;
  }
- 
+
  export async function openExplorer(host: HostApi, options: ExplorerOptions) {
 @@ -13,5 +14,6 @@ export async function openExplorer(host: HostApi, options: ExplorerOptions) {
      ...result,

@@ -178,4 +178,3 @@ function runSupervisor(): void {
 
 if (process.argv[2] === SENTINEL_FLAG) runSentinel();
 else runSupervisor();
-

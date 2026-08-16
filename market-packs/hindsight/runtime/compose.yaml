@@ -1,0 +1,40 @@
+# Hindsight's managed Compose asset. Data is owned by the named volume below;
+# it deliberately never bind-mounts a live legacy pg0 directory. Runtime stop,
+# restart, and ordinary uninstall retain this volume (`down -v` is never used).
+services:
+  api:
+    # The EP-7 adapter syntax-validates this offline-safe OCI override. Resolving
+    # or pulling it happens only on explicit generic runtime start/restart.
+    image: ${HINDSIGHT_OCI_IMAGE}
+    restart: "no"
+    environment:
+      HINDSIGHT_API_LLM_API_KEY: ${HINDSIGHT_API_LLM_API_KEY:-}
+      HINDSIGHT_LOCAL_LLM_PROVIDER: ${HINDSIGHT_LOCAL_LLM_PROVIDER}
+      HINDSIGHT_LOCAL_LLM_MODEL_ID: ${HINDSIGHT_LOCAL_LLM_MODEL_ID}
+      HINDSIGHT_LOCAL_LLM_BASE_URL: ${HINDSIGHT_LOCAL_LLM_BASE_URL}
+      HINDSIGHT_LOCAL_LLM_CONTEXT_TOKENS: ${HINDSIGHT_LOCAL_LLM_CONTEXT_TOKENS}
+      HINDSIGHT_LOCAL_LLM_MAX_OUTPUT_TOKENS: ${HINDSIGHT_LOCAL_LLM_MAX_OUTPUT_TOKENS}
+      HINDSIGHT_LOCAL_LLM_KEEP_ALIVE: ${HINDSIGHT_LOCAL_LLM_KEEP_ALIVE}
+      # An optional external URL is supplied only for explicit external-DB
+      # starts. Otherwise Compose uses its own durable named-volume database.
+      HINDSIGHT_API_DATABASE_URL: ${HINDSIGHT_API_DATABASE_URL:-postgresql://hindsight:${HINDSIGHT_DB_PASSWORD}@db:5432/hindsight}
+    ports:
+      - "127.0.0.1::8888"
+    depends_on:
+      - db
+
+  db:
+    image: pgvector/pgvector:pg18@sha256:c8a919765f2ef63681329fa21021b830cd4d79d1165bdca730dd016014e4da84
+    restart: "no"
+    environment:
+      POSTGRES_USER: hindsight
+      POSTGRES_PASSWORD: ${HINDSIGHT_DB_PASSWORD}
+      POSTGRES_DB: hindsight
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - hindsight-postgres:/var/lib/postgresql/data
+
+volumes:
+  # Compose scopes this durable named volume by its server/pack/runtime project.
+  # It persists across restarts and is never a legacy host pg0 bind mount.
+  hindsight-postgres: {}

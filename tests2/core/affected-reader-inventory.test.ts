@@ -62,6 +62,13 @@ const INDIRECT_READ_PAIRS = [
 	{ consumer: "tests2/core/extension-host-channel-substrate.test.ts", input: "src/server/extension-host/channel-types.ts" },
 	{ consumer: "tests2/core/file-mentions-authenticated-boundary.test.ts", input: "src/server/skills/resolve-file-mentions.ts" },
 	{ consumer: "tests2/integration/hindsight-external.test.ts", input: "tests/e2e/hindsight-stub.mjs" },
+	{ consumer: "tests2/core/hindsight-service-runtime.test.ts", input: "market-packs/hindsight/runtimes/hindsight.yaml" },
+	{ consumer: "tests2/core/hindsight-service-runtime.test.ts", input: "market-packs/hindsight/runtime/compose.yaml" },
+	{ consumer: "tests2/core/hindsight-service-runtime.test.ts", input: "market-packs/hindsight/providers/memory.yaml" },
+	{ consumer: "tests2/integration/service-runtime-docker.test.ts", input: "tests2/fixtures/service-runtime/compose.yaml" },
+	{ consumer: "tests2/integration/service-runtime-docker.test.ts", input: "tests2/fixtures/service-runtime/Dockerfile" },
+	{ consumer: "tests2/integration/service-runtime-docker.test.ts", input: "tests2/fixtures/service-runtime/runtime.yaml" },
+	{ consumer: "tests2/integration/service-runtime-docker.test.ts", input: "tests2/fixtures/service-runtime/server.mjs" },
 	{ consumer: "tests2/core/hung-test-reporter.test.ts", input: "tests2/core/helpers/hung-test-reporter.mjs" },
 	{ consumer: "tests2/core/image-generate-no-model-param.test.ts", input: "defaults/tools/images/extension.ts" },
 	{ consumer: "tests2/core/ledger-lease-bridge-interop.test.ts", input: "scripts/testing-v2/ledger.mjs" },
@@ -215,7 +222,7 @@ describe("affected repository reader inventory", () => {
 			consumer: string;
 			inputs: readonly string[];
 		}) => rule.inputs.map((input) => ({ consumer: rule.consumer, input })));
-		expect(declared).toHaveLength(60);
+		expect(declared).toHaveLength(67);
 		expect(declared).toEqual(INDIRECT_READ_PAIRS);
 		expect(graph.meta.indirectRepositoryReadValidation.issues).toEqual([]);
 	});
@@ -302,17 +309,17 @@ describe("affected repository reader inventory", () => {
 	it("pins the exact dynamic-operation and computed-scan inventories", () => {
 		const audit = DYNAMIC_EXECUTABLE_CONSUMER_AUDIT as readonly DynamicAuditEntry[];
 		const observedOperations = graph.meta.dynamicExecutableConsumerAudit.actual as Map<string, Map<string, number>>;
-		expect(audit).toHaveLength(45);
-		expect(audit.reduce((count, entry) => count + entry.operations.length, 0)).toBe(59);
+		expect(audit).toHaveLength(47);
+		expect(audit.reduce((count, entry) => count + entry.operations.length, 0)).toBe(61);
 		expect([...observedOperations.values()].reduce(
 			(count, operations) => count + [...operations.values()].reduce((sum, occurrences) => sum + occurrences, 0),
 			0,
-		)).toBe(64);
+		)).toBe(66);
 		expect(REPOSITORY_SCAN_RULES).toHaveLength(17);
 		expect(REPOSITORY_SCAN_RULES.map((rule: { id: string }) => rule.id)).toEqual(REPOSITORY_SCAN_RULE_IDS);
 		expect(graph.meta.dynamicExecutableConsumerAudit.issues).toEqual([]);
-		expect(observedOperations.size).toBe(45);
-		expect(graph.meta.dynamicExecutableConsumerAudit.auditedConsumers.size).toBe(45);
+		expect(observedOperations.size).toBe(47);
+		expect(graph.meta.dynamicExecutableConsumerAudit.auditedConsumers.size).toBe(47);
 		expect(graph.meta.repositoryScanValidation.issues).toEqual([]);
 		for (const entry of audit) {
 			for (const operation of entry.operations) {

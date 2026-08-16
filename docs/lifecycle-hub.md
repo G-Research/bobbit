@@ -1,6 +1,6 @@
 # The Lifecycle Hub
 
-> **Status — all five hooks wired (Extension Platform G1.3 + G1.4).**
+> **Status — session hooks and host goal completion are wired (Extension Platform G1.3 + G1.4).**
 > New sessions dispatch `sessionSetup` through the `LifecycleHub`, and the blocks it returns
 > render as a **Dynamic Context** prompt section — see
 > [Session-setup wiring (G1.3)](#session-setup-wiring-g13). The per-turn `beforePrompt` /
@@ -15,7 +15,7 @@
 
 The Lifecycle Hub is the server-side seam that lets **pack-contributed providers** inject
 *ambient context* into an agent session at well-defined moments — when a session starts, before
-each prompt, after a turn, before a compaction, and at shutdown. A provider is trusted,
+each prompt, after a turn, before a compaction, at shutdown, and when the host completes a goal. A provider is trusted,
 pack-shipped code (see [provider contributions](marketplace.md#provider-contributions-providersidyaml)
 and the [authoring guide](extension-host-authoring.md)); the Hub is what eventually *runs* that
 code and folds its output into the prompt.
@@ -63,6 +63,7 @@ A **lifecycle hook** is a named moment in a session's life. The hook set is:
 | `afterTurn` | After a turn completes. | Server-side, from the gateway's `agent_end` event. | G1.4 | **wired** |
 | `sessionShutdown` | When a session is torn down. | Server-side, from the session archive path. | G1.4 | **wired** |
 | `goalProvisioned` | Every time a worktree in a goal's subtree is provisioned (goal worktree, team-member / delegate worktree, pooled worktree, sandbox worktree). | Server-side `dispatchGoalProvisioned`; fire-and-forget, returns no `ContextBlock`s. | — | **wired** |
+| `goalCompleted` | After the owning host has durably marked a goal complete. | Server-side `dispatchGoalCompleted`; bounded host snapshot, no `ContextBlock`s. | — | **wired** |
 
 A provider declares which hooks it wants in its YAML `hooks:` list; the Hub only dispatches a
 hook to providers that declared it. The hooks split by **where** they fire:
@@ -84,6 +85,24 @@ hook to providers that declared it. The hooks split by **where** they fire:
   provider error is logged and swallowed so it never blocks goal/session start. For sandboxed
   sessions it is dispatched with **host** worktree coordinates, not the container path. See
   [Hierarchical goal metadata → Extension goal-lifecycle hook](design/goal-metadata.md#6-extension-goal-lifecycle-hook).
+
+### Host goal completion delivery
+
+`goalCompleted` is deliberately not ordinary session dispatch: the host owns the completed-goal
+state transition, resolves the immutable owning-project `scopeContext`, and supplies only a bounded
+outcome snapshot. A provider can summarize that snapshot but cannot use it to resolve a different
+project or goal. The event fires after the durable completion state is written; provider failure is
+logged and never rolls that state back.
+
+The Hub delivers each provider/event identity through `deliverLifecycleOnce`. Concurrent callers
+join one in-flight delivery, while a durable marker suppresses replay after restart. The marker is
+written only after the provider returns before the shared deadline. A provider may count a confirmed
+durable retry queue as completion, but a remote failure plus failed or unknown queue write leaves no
+marker. This favors an at-least-once retry over falsely claiming an outcome was retained.
+
+Use `tests2/core/lifecycle-delivery-foundation.test.ts` for the generic single-flight, deadline,
+and marker contract; `tests2/integration/hindsight-memory-completion.test.ts` covers the Hindsight
+worker boundary, queued outcome success, and the no-marker compound-failure case.
 
 **Per-goal provider filtering.** When a goal sets `bobbit.disabledProviders: ["<id>"]` in its
 metadata, the Hub drops those providers from `dispatch`, `hasProvidersForHooks`, and
@@ -210,9 +229,11 @@ class LifecycleHub {
    project and goal coordinates. A resolver failure is non-fatal and leaves the field absent.
    The result is one detached, deeply frozen snapshot shared by every provider invoked for that
    event; the Hub never resolves it per provider.
-3. **Build a `HookCtx` per provider** by merging the caller's `base` context, that one optional
-   snapshot, the provider's YAML `config`, the provider's clamped `budget.maxTokens`, and the
-   gateway coordinates from `gatewayInfo()`. The full `HookCtx` shape is:
+3. **Build a `HookCtx` per provider.** The Hub merges the caller's `base` context, that one
+   optional snapshot, the provider's YAML `config`, the provider's clamped `budget.maxTokens`, and
+   the gateway coordinates from `gatewayInfo()`. For a provider that declares `runtime`, it also
+   asks the host-injected read-only runtime resolver for that provider's pack/runtime identity. The
+   full `HookCtx` shape is:
 
    ```ts
    interface HookScopeAncestryEntry {
@@ -239,12 +260,19 @@ class LifecycleHub {
      };
    }
 
+   interface ServiceRuntimeContext {
+     endpoint?: string;
+     state: "stopped" | "starting" | "ready" | "degraded" | "blocked" | "unavailable";
+     diagnostic?: { code: string; retryAt?: string };
+   }
+
    interface HookCtx {
      sessionId: string; projectId?: string; scope: "project" | "global"; cwd: string;
-     goalId?: string; roleName?: string; prompt?: string; turn?: { index: number };
+     goalId?: string; roleName?: string; prompt?: string; userText?: string; assistantText?: string;
+     span?: string; summary?: string; turn?: { index: number };
      budget: { maxTokens: number };
      config: Record<string, unknown>;
-     runtime?: { baseUrl: string; headers: Record<string, string>; status: string };
+     runtime?: ServiceRuntimeContext;
      gateway: { baseUrl: string; token: string };
      readonly scopeContext?: HookScopeContext;
    }
@@ -260,14 +288,37 @@ class LifecycleHub {
 8. **Return** the kept blocks plus a list of diagnostics. `dispatch` **never throws** because
    of a provider — provider faults become diagnostics.
 
+### `runtime`: mode-free, read-only service context
+
+A provider can optionally declare `runtime: <id>` in its schema-2 provider contribution. During a
+normal lifecycle dispatch, the Hub gives the host resolver only the server-derived `{ packId,
+runtimeId, projectId?, providerId }` coordinates and injects its result as `ctx.runtime`. This
+links a provider to a runtime descriptor without giving provider code a supervisor, runner,
+settings, secret, selected adapter, or start/stop/purge operation.
+
+`ctx.runtime` is absent when the provider declares no runtime or the host has no resolver. If the
+read-only resolver fails, the Hub injects `{ state: "unavailable", diagnostic: { code:
+"SERVICE_UNAVAILABLE" } }` instead; an ordinary hook still runs and the session stays usable.
+`endpoint` is meaningful only when `state === "ready"`. Providers must treat every other state as
+not ready and return their normal bounded dormant/degraded behavior. They must never try to start
+or allocate a runtime from a hook, status read, provider dispatch, or client endpoint selection.
+
+The separation keeps one client contract across externally hosted services and the host's local,
+Docker, and Compose adapters: the client receives an endpoint, never an adapter mode. Runtime
+resolution is a per-provider read; it does not reconcile, inspect for allocation, resolve settings
+or secrets, write durable state, or start a service. See [Service runtimes](managed-runtimes.md)
+for descriptor and supervisor ownership.
+
 ### `scopeContext`: bounded advisory scope
 
 `scopeContext` is optional, read-only context for lifecycle providers. Its sections are emitted
 only when independently resolvable; an identifier is required only when its enclosing section is
 present. It helps a provider label or tailor its own advisory output, but grants **no** capability:
-it does not authorize filesystem, session, agent, store, or cross-project access. The Host API
-version and schema, provider activation, hook scheduling, invocation counts, ordering, budgets,
-and context blocks are unchanged for providers that ignore the field.
+it does not authorize filesystem, session, agent, store, or cross-project access. A provider that
+uses rich scope for its own labels or remote filters must fail closed when the required section is
+absent; it must not reconstruct scope from flat compatibility fields. The Host API version and
+schema, provider activation, hook scheduling, invocation counts, ordering, budgets, and context
+blocks are unchanged for providers that ignore the field.
 
 The resolver has a strict trust and privacy boundary: it reads from the session's declared project
 only, through that project's context and goal store. It never searches another project for a goal
@@ -346,7 +397,9 @@ This is why the worker's member-resolution has an explicit `providers` branch: f
 `exportKind: "providers"` the hook *group* is the **default export object itself**
 (`mod.default ?? mod`), and the hook name is one of its members. For `actions`/`routes` the
 group is still `mod[exportKind] ?? mod.default?.[exportKind]` — that path is unchanged, so the
-existing route/action dispatchers are unaffected.
+existing route/action dispatchers are unaffected. A runtime-declaring provider may use
+`ctx.runtime` only as the read-only endpoint/status input described above; it does not alter this
+module loading or hook invocation path.
 
 ## Session-setup wiring (G1.3)
 
@@ -418,8 +471,9 @@ produces a byte-identical prompt to before this wiring — the invariant a unit 
 ### What ships out of the box
 
 The [Hindsight memory pack](hindsight-memory.md) ships in the built-in band as the first production
-provider, but it is **dormant until a Hindsight URL is configured** — so a fresh install contributes
-no Dynamic Context until you opt in. The wiring itself is also exercised by a
+provider, but it is **dormant until an external endpoint is configured or its selected managed
+runtime reaches ready**. Saving or selecting a managed mode does not start it, so a fresh install
+contributes no Dynamic Context until you opt in. The wiring itself is also exercised by a
 deterministic fixture pack, `tests/fixtures/packs/provider-demo/`, whose `sessionSetup` returns a
 `DEMO_SETUP_BLOCK` and a throwing variant proves the failure path still spawns the session. The
 E2E test (`tests/e2e/provider-session-setup.spec.ts`) **copies that fixture into the per-gateway
@@ -432,8 +486,8 @@ the whole worker-scoped gateway and broke sibling specs. Installing any schema-2
 
 ## Per-turn + lifecycle wiring (G1.4)
 
-G1.4 wires the remaining four hooks. They divide cleanly by **where they have to run**, and that
-division dictates the mechanism:
+G1.4 wires the four remaining session-lifecycle hooks. They divide cleanly by **where they have to
+run**, and that division dictates the mechanism:
 
 | Hook | Mechanism | Why |
 |---|---|---|
@@ -625,15 +679,19 @@ ambient context a session received and why blocks were dropped.
   `dispatch("sessionSetup", …)` during session setup, rendering kept blocks as the
   `PromptParts.dynamicContext` → **Dynamic Context** system-prompt section — see
   [Session-setup wiring (G1.3)](#session-setup-wiring-g13).
-- **G1.4 (done)** wires the remaining four hooks: the per-turn `beforePrompt` / `beforeCompact`
-  via the generated [provider-bridge extension](#the-provider-bridge-extension), and the
-  server-side `afterTurn` / `sessionShutdown` from the gateway's agent-event stream; plus the
-  REST surface (`/provider-hooks/*`, `/context-trace`) — see
+- **G1.4 (done)** wires the per-turn `beforePrompt` / `beforeCompact` hooks via the generated
+  [provider-bridge extension](#the-provider-bridge-extension), and the server-side `afterTurn` /
+  `sessionShutdown` hooks from the gateway's agent-event stream; plus the REST surface
+  (`/provider-hooks/*`, `/context-trace`) — see
   [Per-turn + lifecycle wiring (G1.4)](#per-turn--lifecycle-wiring-g14).
+- **Host goal completion (done)** dispatches `goalCompleted` only after the durable goal state
+  transition, with bounded outcome data and durable delivery fencing — see
+  [Host goal completion delivery](#host-goal-completion-delivery).
 - **G2** ships the first built-in production provider, the [Hindsight memory pack](hindsight-memory.md).
-  It is dormant until a Hindsight URL is configured, so out of the box behaviour is unchanged —
-  with no active provider, no Dynamic Context section is added and the per-turn bridge is never
-  spawned.
+  It is dormant until an external endpoint is configured or its selected managed runtime reaches
+  ready. Saving or selecting a managed mode does not start it, so out of the box behaviour is
+  unchanged — with no active provider, no Dynamic Context section is added and the per-turn bridge
+  is never spawned.
 - Selector hooks (`beforeGoalCreate` / `beforeSessionSpawn`) are a separate, later goal (G8).
 
 ## See also

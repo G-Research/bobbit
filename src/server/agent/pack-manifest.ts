@@ -134,6 +134,7 @@ export function validateManifest(
 		if (raw === undefined) return [];
 		const parsed = asStringArray(raw);
 		if (parsed === null) return fail(`pack.yaml: contents.${yamlKey} must be an array of strings`);
+		const seen = new Set<string>();
 		// Path-traversal guard: each entry is a file basename joined into a
 		// contribution subdir — reject separators, `..`, absolute/drive forms.
 		for (const e of parsed) {
@@ -143,6 +144,8 @@ export function validateManifest(
 						`(must match /^[A-Za-z0-9._-]+$/ with no path separators or ".." segments)`,
 				);
 			}
+			if (seen.has(e)) return fail(`pack.yaml: contents.${yamlKey} contains duplicate basename ${JSON.stringify(e)}`);
+			seen.add(e);
 		}
 		return parsed;
 	};

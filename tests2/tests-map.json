@@ -8,10 +8,10 @@
     "v2-browser": 216,
     "v2-core": 512,
     "v2-dom": 144,
-    "v2-integration": 202
+    "v2-integration": 203
   },
   "methods": {
-    "adapter": 275,
+    "adapter": 276,
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
@@ -3292,6 +3292,276 @@
     {
       "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "reason": "Browser journey covering the reliable-turn visible-carrier invariant across idle and busy prompts, agent_end-to-agent_settled release, rapid identical steers, delayed acknowledgement and echo, manual, threshold, and overflow compaction, Stop races, reload, reconnect, second-tab convergence, and actionable delivery failure through its dedicated runtime fixture.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/extension-grant-policy.test.ts",
+      "reason": "Fail-closed extension-grant policy coverage for exact active tuples, malformed or wildcard-looking grants, unsupported capability requests, and defensive grant snapshots.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/extension-grant-config-store.test.ts",
+      "reason": "Project-owned extension_grants YAML persistence coverage for normalized exact tuples, malformed-row rejection, defensive reads, empty replacement cleanup, and atomic-publication failure safety.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/extension-grant-audit-store.test.ts",
+      "reason": "Append-only project extension-grant audit coverage for normalized secret-free rows, bounded chronological reads, corrupt-history filtering, and redacted persistence failures.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/extension-capability-grants.test.ts",
+      "reason": "Authenticated gateway integration coverage for exact grant and revoke routes, server-derived administrative metadata, live contribution invalidation, activation ceilings, and durable secret-free audit history.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/extension-capability-grants.spec.ts",
+      "reason": "Authenticated browser journey through the existing Market Pack and Hook grant controls, proving exact non-hook pack grant/revoke persistence, browser-operator confirmation, server-refetched audit attribution, and retained legacy hook compatibility.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/adopt-vanilla-extensions.journey.spec.ts",
+      "reason": "EP-9 browser journey through Market adoption inspection, least-privilege conformance display, durable reload, and confirmed cleanup for project-scoped skills and MCP assets.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/extension-settings-schema.test.ts",
+      "reason": "Strict schema normalization and flat string, secret, enum, boolean, and number value validation, including fail-closed malformed descriptors and requires-config metadata.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/extension-settings-store.test.ts",
+      "reason": "Project-scoped revision/CAS public YAML overlays, owner-only secret persistence, redacted projections, and safe partial-publication behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/extension-settings-api.test.ts",
+      "reason": "Authenticated gateway settings API coverage for redaction, prompt-operator writes, target validation, cache/WS invalidation, legacy fallback, and two-project runtime isolation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/extension-settings.spec.ts",
+      "reason": "Production Market browser journey for project-scoped Hindsight settings: accessible save and clear controls, redacted secrets, disablement isolation, reload, navigation, and mobile layout.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/extension-host-pack-store-mutations.test.ts",
+      "reason": "Registered current service-runtime coverage retained during EP-7 integration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/hindsight-memory-completion.test.ts",
+      "reason": "Registered current service-runtime coverage retained during EP-7 integration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/hindsight-service-runtime.test.ts",
+      "reason": "Registered current service-runtime coverage retained during EP-7 integration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/lifecycle-delivery-foundation.test.ts",
+      "reason": "Registered current service-runtime coverage retained during EP-7 integration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/service-runtime-health.test.ts",
+      "reason": "Registered current service-runtime coverage retained during EP-7 integration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/service-runtime-manifest.test.ts",
+      "reason": "Registered current service-runtime coverage retained during EP-7 integration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/service-runtime-runners.test.ts",
+      "reason": "Registered current service-runtime coverage retained during EP-7 integration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/service-runtime-security.test.ts",
+      "reason": "Registered current service-runtime coverage retained during EP-7 integration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/service-runtime-store.test.ts",
+      "reason": "Registered current service-runtime coverage retained during EP-7 integration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/service-runtime-supervisor.test.ts",
+      "reason": "Registered current service-runtime coverage retained during EP-7 integration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/extension-host-lifecycle-foundation.test.ts",
+      "reason": "Registered current service-runtime coverage retained during EP-7 integration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/hindsight-memory-completion.test.ts",
+      "reason": "Registered current service-runtime coverage retained during EP-7 integration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/hindsight-runtime-context.test.ts",
+      "reason": "Registered current service-runtime coverage retained during EP-7 integration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/service-runtime-docker.test.ts",
+      "reason": "Registered current service-runtime coverage retained during EP-7 integration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "e2e",
+        "project": "e2e"
+      }
+    },
+    {
+      "path": "tests2/core/hindsight-experience-routes.test.ts",
+      "reason": "Typed Hindsight route and thin-tool adapter contract: canonical surface registration, live capability enforcement, authoritative scope, and bounded unavailable behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/hindsight-runtime-settings.test.ts",
+      "reason": "Hindsight EP-7 runtime settings contract for redacted local-model, OCI, and database configuration without save-time activation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/hindsight-migration.test.ts",
+      "reason": "Logical PostgreSQL migration contract: owned volume, compatibility and fingerprint confirmation, backup, rollback, and no legacy pg0 bind mount.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/hindsight-experience-api.test.ts",
+      "reason": "Gateway integration coverage for Hindsight EP-7 revisions/redaction, EP-6 grants, and typed runtime and memory routes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/hindsight-local-residency.test.ts",
+      "reason": "Integration contract for resident local-model diagnostics, sequential typed operations, no fallback, and bounded unhealthy behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/hindsight-experience.spec.ts",
+      "reason": "Browser journey for Hindsight configuration, grants, runtime controls, scoped memory actions, accessibility, and close/reload/uninstall cleanup.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",

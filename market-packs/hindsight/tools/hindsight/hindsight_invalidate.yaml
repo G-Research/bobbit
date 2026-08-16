@@ -1,0 +1,8 @@
+name: hindsight_invalidate
+group: Hindsight
+description: Invalidate one selected memory after exact confirmation. Requires the memory.invalidate capability grant.
+summary: Confirm and invalidate a memory
+params: [id, confirmation, reason?]
+provider:
+  type: bobbit-extension
+  extension: ../../lib/tools.mjs

@@ -1,7 +1,7 @@
 # File explorer interaction specification
 
-Status: design handoff  
-Scope: editable path bar, recursive filename search, tree controls, read-only path actions  
+Status: design handoff
+Scope: editable path bar, recursive filename search, tree controls, read-only path actions
 Baseline inspected: `market-packs/file-explorer/src/file-explorer-panel.ts`, its model/routes, current DOM and browser tests, and `docs/file-explorer.md`
 
 <!--

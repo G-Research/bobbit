@@ -1,28 +1,23 @@
 schema: 2
 name: hindsight
 description: >-
-  Persistent agent memory backed by Hindsight (recall/retain/reflect over a shared,
-  tag-scoped bank). Dormant until a Hindsight URL is configured. See
-  docs/design/hindsight-pack-external.md and docs/design/agent-memory.md.
+  Persistent agent memory backed by Hindsight with explicitly consented runtime
+  controls and project-scoped recall, retain, reflection, and invalidation.
 version: 1.0.0
 contents:
   roles: []
-  tools: [] # explicit hindsight_* tools land in G2.3
+  tools: [hindsight]
   skills: []
-  entrypoints: [] # panel + deep link land in G2.3
-  providers: [memory] # → providers/memory.yaml
+  entrypoints: [hindsight-session-menu]
+  providers: [memory]
   hooks: []
   mcp: []
   pi-extensions: []
-  runtimes: [] # managed runtime lands in G3
+  runtimes: [hindsight]
   workflows: []
 provides: []
 requires: []
-# Pack routes re-express the memory surface for diagnostics + config persistence.
-# Reached via host.callRoute(<name>); executed in the confined worker. The route
-# module is bundled (with the REST client inlined) to lib/routes.mjs by
-# scripts/build-market-packs.mjs. `module` resolves relative to THIS pack.yaml and
-# stays inside the pack root.
+# Pack routes are the shared, typed data-plane surface for the panel and tools.
 routes:
   module: lib/routes.mjs
-  names: [status, recall, retain, reflect, banks, config]
+  names: [runtime-status, runtime-control, runtime-logs, migration-plan, migration-execute, browse, search, detail, history, recall, retain, reflect, invalidate, retain-outcome]

@@ -1,8 +1,9 @@
 /**
- * Browser E2E — "Hide/Disable PR & Hindsight" acceptance journey.
+ * Browser E2E — PR Walkthrough default-OFF acceptance journey.
  *
- * Part 1 (pr-walkthrough default-OFF, still toggleable) + Part 2 (hindsight fully
- * hidden) from the goal spec. This is the FRESH-STATE counterpart to
+ * Hindsight is a normal enabled first-party built-in. This fresh-state journey
+ * verifies that its built-in presence does not change PR Walkthrough's separate
+ * opt-in activation contract. It is the counterpart to
  * pr-walkthrough-pack.spec.ts (which persists an explicit `{ enabled: true }`
  * baseline to exercise the LIVE feature): here we START from NO stored activation
  * override and prove the shipped default is OFF, then drive the marketplace master
@@ -17,13 +18,10 @@
  * the active-filtered band), and flipping that toggle persists `{ enabled: true }`
  * at server scope so all contributions light up — surviving a full reload.
  *
- * hindsight was dropped from the FIRST_PARTY_PACKS allowlist, so it must NOT appear
- * as a built-in row and must NOT be present as a builtin in /api/marketplace/installed.
- *
  * Coverage:
  *   J-1. FRESH DEFAULT-OFF — no contributions, no reviewer tools, deep-link
- *        unavailable, master toggle rendered + UNCHECKED. Hindsight absent from the
- *        built-in group + the installed list.
+ *        unavailable, master toggle rendered + UNCHECKED. Hindsight remains a
+ *        visible built-in row in the same Marketplace group.
  *   J-2. ENABLE via master toggle → contributions + tools resolve, toggle checked.
  *   J-3. RELOAD persists enabled — after a full reload the toggle is still checked
  *        and the contributions remain resolved.
@@ -123,20 +121,20 @@ test.afterEach(async () => {
 	await clearPrWalkthroughActivation().catch(() => {});
 });
 
-test.describe("pr-walkthrough default-OFF journey + hindsight hidden", () => {
-	test("J — fresh default-off → enable via master toggle → reload persists → disable; hindsight absent", async ({ page }) => {
+test.describe("pr-walkthrough default-OFF journey", () => {
+	test("J — fresh default-off → enable via master toggle → reload persists → disable; Hindsight remains built in", async ({ page }) => {
 		const masterToggle = `[data-testid="market-toggle-pack-${PACK}"]`;
 
 		// ── J-1: FRESH DEFAULT-OFF. No contributions, no reviewer tools. ──
 		await expectPrwContributionsAbsent();
 
-		// The built-in pack is NOT force-resolved as a builtin in the installed list
-		// while OFF? It still LISTS (raw enumerator) — but hindsight must be gone.
+		// The raw built-in listing is independent of PR Walkthrough's default-OFF
+		// contribution activation. Hindsight is an enabled first-party pack.
 		const installed = await listInstalled();
 		expect(
 			installed.some((p) => p.packName === HINDSIGHT && p.builtin),
-			"hindsight must NOT appear as a built-in pack in /api/marketplace/installed",
-		).toBe(false);
+			"hindsight must appear as a built-in pack in /api/marketplace/installed",
+		).toBe(true);
 		expect(
 			installed.some((p) => p.packName === PACK && p.builtin),
 			"pr-walkthrough must still LIST as a built-in row (toggleable) even while OFF",
@@ -154,8 +152,8 @@ test.describe("pr-walkthrough default-OFF journey + hindsight hidden", () => {
 		await expect(unavailable, "the disabled deep-link must show the unavailable empty state").toBeVisible({ timeout: 15_000 });
 		await expect(page.locator('[data-testid="prw-panel-root"]')).toHaveCount(0);
 
-		// ── Market "Built-in" group: pr-walkthrough row present + master toggle OFF;
-		//    hindsight row absent. ──
+		// ── Market "Built-in" group: PR Walkthrough stays default-OFF while
+		//    Hindsight remains visible as a shipped built-in. ──
 		await navigateToHash(page, "#/market");
 		const builtinGroup = page.locator('[data-testid="market-builtin-group"]');
 		await expect(builtinGroup, "the Market Installed tab must show a Built-in group").toBeVisible({ timeout: 20_000 });
@@ -164,9 +162,9 @@ test.describe("pr-walkthrough default-OFF journey + hindsight hidden", () => {
 			.first();
 		await expect(prwCard, "the built-in PR walkthrough card must render even while default-OFF").toBeVisible({ timeout: 15_000 });
 		await expect(
-			builtinGroup.locator('[data-testid="market-installed-pack"][data-pack-name="hindsight"]'),
-			"hindsight must NOT render a row in the built-in group",
-		).toHaveCount(0);
+			builtinGroup.locator('[data-testid="market-installed-pack"][data-builtin="true"][data-pack-name="hindsight"]'),
+			"hindsight must render as a built-in row without a server-market fixture",
+		).toBeVisible({ timeout: 15_000 });
 
 		const toggle = prwCard.locator(masterToggle);
 		await expect(toggle, "the pr-walkthrough master toggle must render").toBeVisible({ timeout: 15_000 });

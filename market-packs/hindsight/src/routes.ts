@@ -2,8 +2,10 @@
 // contract so an unreadable queue/config is never presented as an empty/default
 // snapshot or overwritten by a route mutation.
 
+import { memoryRoutes, type MemoryRouteHostAdapter } from "./memory-routes.js";
 import {
 	clientConfig,
+	isActive,
 	isConfigured,
 	loadEffectiveConfig,
 	loadQueue,
@@ -16,17 +18,21 @@ import {
 	CONFIG_KEY,
 	LAST_ERROR_KEY,
 	type EffectiveConfig,
+	type RuntimeContext,
 	type StoreLike,
 	type StoreReadDiagnostic,
-	type Tags,
 } from "./shared.js";
 
 export { __setClientFactory } from "./shared.js";
 
 interface RouteCtx {
-	host: { store: StoreLike };
+	host: { store: StoreLike; memory?: MemoryRouteHostAdapter; providerConfig?: unknown; completedOutcome?: unknown };
 	sessionId?: string;
+	/** Authoritative host snapshot; flat projectId is compatibility-only. */
+	scopeContext?: { project?: { id?: string }; goal?: { id?: string } };
 	projectId?: string;
+	runtime?: RuntimeContext;
+	signal?: AbortSignal;
 }
 interface RouteReq {
 	method?: string;
@@ -36,10 +42,6 @@ interface RouteReq {
 
 function isObj(v: unknown): v is Record<string, unknown> {
 	return !!v && typeof v === "object" && !Array.isArray(v);
-}
-
-function strOf(v: unknown): string | undefined {
-	return typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined;
 }
 
 /** Keep externally visible durable-store diagnostics stable, useful, and free of
@@ -74,11 +76,8 @@ function routeConfigUnavailable(diagnostic: StoreReadDiagnostic) {
 	return { configured: false, error: "HINDSIGHT_CONFIG_UNAVAILABLE", diagnostic: safeDiagnostic(diagnostic) };
 }
 
-function manualTags(extra: Tags | undefined): Tags {
-	return { kind: "manual", ...(extra ?? {}) };
-}
-
 export const routes = {
+	...memoryRoutes,
 	config: async (ctx: RouteCtx, req: RouteReq) => {
 		const store = ctx.host.store;
 		const method = (req?.method ?? "GET").toUpperCase();
@@ -100,7 +99,11 @@ export const routes = {
 
 	status: async (ctx: RouteCtx) => {
 		const store = ctx.host.store;
-		const [configResult, queue, error] = await Promise.all([loadEffectiveConfig(store), queueStatus(store), lastError(store)]);
+		const injectedConfig = ctx.host.providerConfig;
+		const [configResult, queue, error] = await Promise.all([
+			injectedConfig === undefined ? loadEffectiveConfig(store) : Promise.resolve({ available: true as const, config: resolveConfig(injectedConfig), overrides: {} }),
+			queueStatus(store), lastError(store),
+		]);
 		if (!configResult.available) {
 			return {
 				...routeConfigUnavailable(configResult.diagnostic),
@@ -112,7 +115,7 @@ export const routes = {
 		const cfg = configResult.config;
 		const base = {
 			configured: isConfigured(cfg),
-			mode: cfg.mode,
+			runtimeMode: cfg.runtimeMode,
 			bank: cfg.bank,
 			namespace: cfg.namespace,
 			recallScope: cfg.recallScope,
@@ -122,76 +125,24 @@ export const routes = {
 			...(error.value ? { lastError: error.value } : {}),
 			...(error.unavailable ? { lastErrorUnavailable: error.unavailable } : {}),
 		};
-		if (!isConfigured(cfg)) return { ...base, healthy: false };
+		if (!isActive(cfg, ctx.runtime)) return { ...base, healthy: false };
 		try {
-			const client = await makeClient(clientConfig(cfg));
+			const client = await makeClient(clientConfig(cfg, ctx.runtime));
 			return { ...base, healthy: (await client.health()).ok === true };
 		} catch {
 			return { ...base, healthy: false };
 		}
 	},
 
-	recall: async (ctx: RouteCtx, req: RouteReq) => {
-		const loaded = await loadEffectiveConfig(ctx.host.store);
-		if (!loaded.available) return { ...routeConfigUnavailable(loaded.diagnostic), memories: [] };
-		const cfg = loaded.config;
-		if (!isConfigured(cfg)) return { configured: false, memories: [] };
-		const body = isObj(req?.body) ? req!.body : {};
-		const query = strOf(body.query) ?? strOf(req?.query?.query);
-		if (!query) return { configured: true, memories: [] };
-		const scope = body.scope === "project" || body.scope === "all" ? body.scope : cfg.recallScope;
-		const projectId = strOf(ctx.projectId);
-		const tags: Tags | undefined = scope === "project" && projectId ? { project: projectId } : undefined;
-		try {
-			const client = await makeClient(clientConfig(cfg));
-			const res = await client.recall(cfg.bank, query, { maxTokens: cfg.recallBudget, ...(tags ? { tags, tagsMatch: "any" as const } : {}) });
-			return { configured: true, memories: res?.memories ?? [] };
-		} catch (e) {
-			return { configured: true, memories: [], error: String((e as { message?: unknown })?.message ?? e) };
-		}
-	},
-
-	retain: async (ctx: RouteCtx, req: RouteReq) => {
-		const loaded = await loadEffectiveConfig(ctx.host.store);
-		if (!loaded.available) return { ...configUnavailable(loaded.diagnostic), configured: false };
-		const cfg = loaded.config;
-		if (!isConfigured(cfg)) return { ok: false, configured: false };
-		const body = isObj(req?.body) ? req!.body : {};
-		const content = strOf(body.content);
-		if (!content) return { ok: false, configured: true, error: "content is required" };
-		try {
-			const client = await makeClient(clientConfig(cfg));
-			await client.ensureBank(cfg.bank);
-			await client.retain(cfg.bank, content, { tags: manualTags(isObj(body.tags) ? (body.tags as Tags) : undefined), sync: body.sync === true });
-			return { ok: true, configured: true };
-		} catch (e) {
-			return { ok: false, configured: true, error: String((e as { message?: unknown })?.message ?? e) };
-		}
-	},
-
-	reflect: async (ctx: RouteCtx, req: RouteReq) => {
-		const loaded = await loadEffectiveConfig(ctx.host.store);
-		if (!loaded.available) return { ...routeConfigUnavailable(loaded.diagnostic), text: "" };
-		const cfg = loaded.config;
-		if (!isConfigured(cfg)) return { configured: false, text: "" };
-		const body = isObj(req?.body) ? req!.body : {};
-		const prompt = strOf(body.prompt);
-		if (!prompt) return { configured: true, text: "" };
-		try {
-			const client = await makeClient(clientConfig(cfg));
-			return { configured: true, text: (await client.reflect(cfg.bank, prompt))?.text ?? "" };
-		} catch (e) {
-			return { configured: true, text: "", error: String((e as { message?: unknown })?.message ?? e) };
-		}
-	},
-
 	banks: async (ctx: RouteCtx) => {
-		const loaded = await loadEffectiveConfig(ctx.host.store);
+		const loaded = ctx.host.providerConfig === undefined
+			? await loadEffectiveConfig(ctx.host.store)
+			: { available: true as const, config: resolveConfig(ctx.host.providerConfig), overrides: {} };
 		if (!loaded.available) return { ...routeConfigUnavailable(loaded.diagnostic), banks: [] };
 		const cfg: EffectiveConfig = loaded.config;
-		if (!isConfigured(cfg)) return { configured: false, banks: [] };
+		if (!isActive(cfg, ctx.runtime)) return { configured: isConfigured(cfg), banks: [] };
 		try {
-			const client = await makeClient(clientConfig(cfg));
+			const client = await makeClient(clientConfig(cfg, ctx.runtime));
 			return { configured: true, banks: (await client.listBanks())?.banks ?? [] };
 		} catch (e) {
 			return { configured: true, banks: [], error: String((e as { message?: unknown })?.message ?? e) };

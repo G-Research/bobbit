@@ -29,6 +29,7 @@ const MATERIALIZED_PATHS = [
 	"tests2/core/team-manager.test.ts",
 	"tests2/integration/affected-runner-boundary.test.ts",
 	"tests2/integration/base-path-cli-entrypoint.test.ts",
+	"tests2/integration/service-runtime-docker.test.ts",
 	"tests2/integration/pinned-gate-verification-e2e.test.ts",
 	"tests2/integration/team-spawn-multi-repo-real-git.test.ts",
 	"tests2/integration/verification-pinned-checkout-npm.test.ts",
@@ -97,6 +98,7 @@ describe("tests-map execution metadata", () => {
 			"tests2/integration/affected-runner-boundary.test.ts",
 			"tests2/integration/base-path-cli-entrypoint.test.ts",
 			"tests2/integration/pinned-gate-verification-e2e.test.ts",
+			"tests2/integration/service-runtime-docker.test.ts",
 			"tests2/integration/team-spawn-multi-repo-real-git.test.ts",
 			"tests2/integration/verification-pinned-checkout-multi-repo-real-git.test.ts",
 			"tests2/integration/verification-pinned-checkout-npm.test.ts",
@@ -114,6 +116,7 @@ describe("tests-map execution metadata", () => {
 		["tests2/core/team-manager.test.ts", { runner: "vitest", tier: "unit", project: "core" }],
 		["tests2/integration/affected-runner-boundary.test.ts", { runner: "vitest", tier: "unit", project: "integration" }],
 		["tests2/integration/base-path-cli-entrypoint.test.ts", { runner: "vitest", tier: "unit", project: "integration" }],
+		["tests2/integration/service-runtime-docker.test.ts", { runner: "vitest", tier: "unit", project: "integration" }],
 		["tests2/integration/team-spawn-multi-repo-real-git.test.ts", { runner: "vitest", tier: "unit", project: "integration" }],
 		["tests2/integration/verification-pinned-checkout-multi-repo-real-git.test.ts", { runner: "vitest", tier: "unit", project: "integration" }],
 	])("rejects cross-tagging %s", (path, execution) => {

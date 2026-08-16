@@ -1052,3 +1052,498 @@
 .market-entity-desc-text::before {
 	content: "— ";
 }
+
+/* ── Stock-extension adoption (EP-9) ─────────────────────────────────────── */
+.market-adopt-form,
+.market-adoption-card {
+	display: flex;
+	flex-direction: column;
+	gap: 0.625rem;
+}
+
+.market-adopt-form {
+	padding-bottom: 0.875rem;
+	border-bottom: 1px dashed var(--border);
+}
+
+.market-adopt-subtitle,
+.market-adopt-field > span,
+.market-adoption-version,
+.market-adoption-assets,
+.market-adoption-removal-note,
+.market-adoption-operation-note {
+	font-size: 0.6875rem;
+	line-height: 1.4;
+	color: var(--muted-foreground);
+}
+
+.market-adopt-modes {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.375rem;
+}
+
+.market-adopt-mode {
+	padding: 0.3125rem 0.5rem;
+	border: 1px solid var(--border);
+	border-radius: 0.375rem;
+	background: var(--background);
+	color: var(--muted-foreground);
+	font-size: 0.6875rem;
+	cursor: pointer;
+}
+
+.market-adopt-mode:hover,
+.market-adopt-mode--selected {
+	border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
+	background: color-mix(in oklch, var(--primary) 10%, transparent);
+	color: var(--primary);
+}
+
+.market-adopt-field {
+	display: flex;
+	flex-direction: column;
+	gap: 0.25rem;
+	font-size: 0.6875rem;
+	font-weight: 600;
+	color: var(--foreground);
+}
+
+.market-adopt-field > .market-input {
+	width: 100%;
+}
+
+.market-adopt-textarea {
+	min-height: 4rem;
+	resize: vertical;
+	font-family: var(--font-mono, monospace);
+}
+
+.market-adopt-safety {
+	padding: 0.5rem 0.625rem;
+	border: 1px solid color-mix(in oklch, var(--info, var(--chart-4)) 28%, var(--border));
+	border-radius: 0.5rem;
+	background: color-mix(in oklch, var(--info, var(--chart-4)) 8%, transparent);
+	font-size: 0.6875rem;
+	line-height: 1.4;
+	color: var(--foreground);
+}
+
+.market-adoption-list {
+	display: flex;
+	flex-direction: column;
+	gap: 0.5rem;
+}
+
+.market-adoption-card {
+	padding: 0.75rem;
+	border: 1px solid var(--border);
+	border-radius: 0.5rem;
+	background: var(--background);
+}
+
+.market-adopted-badge {
+	display: inline-flex;
+	align-items: center;
+	padding: 1px 6px;
+	border-radius: 4px;
+	background: color-mix(in oklch, var(--chart-5) 14%, transparent);
+	color: var(--chart-5);
+	font-size: 10px;
+	font-weight: 600;
+	line-height: 1.4;
+}
+
+.market-adoption-provenance,
+.market-adoption-assets,
+.market-adoption-failures {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.25rem 0.625rem;
+	min-width: 0;
+	font-size: 0.625rem;
+	color: var(--muted-foreground);
+}
+
+.market-adoption-provenance > span:last-of-type {
+	min-width: 0;
+	max-width: 25rem;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.market-adoption-provenance code,
+.market-adoption-assets > span:last-child {
+	max-width: 20rem;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-family: var(--font-mono, monospace);
+}
+
+.market-adoption-failures {
+	color: var(--negative, var(--destructive));
+}
+
+.market-adoption-removal-note {
+	padding-top: 0.5rem;
+	border-top: 1px dashed var(--border);
+}
+
+.market-adoption-operations {
+	display: flex;
+	flex-direction: column;
+	gap: 0.25rem;
+	padding: 0.375rem;
+	border: 1px dashed var(--border);
+	border-radius: 0.5rem;
+	background: color-mix(in oklch, var(--muted) 45%, transparent);
+}
+
+.market-link-button {
+	padding: 0;
+	border: 0;
+	background: transparent;
+	color: var(--primary);
+	font: inherit;
+	cursor: pointer;
+	text-decoration: underline;
+}
+
+/* ── Project-scoped extension settings ──────────────────────────────────── */
+.market-project-scope-row {
+	display: flex;
+	align-items: center;
+	gap: 0.625rem;
+	padding: 0.5rem 1rem;
+	border-bottom: 1px solid var(--border);
+	overflow-x: auto;
+	scrollbar-width: thin;
+}
+
+.market-project-scope-label,
+.market-project-runtime-heading,
+.market-runtime-kind {
+	flex: 0 0 auto;
+	font-size: 0.6875rem;
+	font-weight: 700;
+	letter-spacing: 0.055em;
+	text-transform: uppercase;
+	color: var(--muted-foreground);
+}
+
+.market-project-scopes {
+	display: flex;
+	gap: 0.375rem;
+	min-width: max-content;
+}
+
+.market-project-scope {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.375rem;
+	min-height: 2.25rem;
+	padding: 0.375rem 0.625rem;
+	border: 1px solid transparent;
+	border-radius: 0.375rem;
+	background: transparent;
+	color: var(--muted-foreground);
+	font-size: 0.75rem;
+	cursor: pointer;
+}
+
+.market-project-scope:hover,
+.market-project-scope:focus-visible,
+.market-project-scope--active {
+	border-color: var(--border);
+	background: var(--background);
+	color: var(--foreground);
+	outline: none;
+}
+
+.market-project-scope:focus-visible,
+.market-settings-form :focus-visible,
+.market-runtime-target :focus-visible {
+	box-shadow: 0 0 0 2px color-mix(in oklch, var(--ring) 55%, transparent);
+}
+
+.market-project-scope-dot {
+	width: 0.5rem;
+	height: 0.5rem;
+	border-radius: 999px;
+}
+
+.market-project-runtime {
+	margin-top: 0.625rem;
+	padding: 0.625rem;
+	border: 1px solid var(--border);
+	border-radius: 0.5rem;
+	background: color-mix(in oklch, var(--card) 72%, transparent);
+}
+
+.market-project-runtime--loading {
+	font-size: 0.75rem;
+	color: var(--muted-foreground);
+}
+
+.market-project-runtime-heading {
+	display: flex;
+	align-items: center;
+	gap: 0.375rem;
+	margin-bottom: 0.5rem;
+}
+
+.market-project-runtime-heading > span {
+	font-size: 0.75rem;
+	font-weight: 600;
+	letter-spacing: normal;
+	text-transform: none;
+	color: var(--foreground);
+}
+
+.market-runtime-grid {
+	display: grid;
+	gap: 0.4375rem;
+}
+
+.market-runtime-target {
+	display: grid;
+	grid-template-columns: minmax(8rem, 1fr) auto auto auto;
+	align-items: center;
+	gap: 0.5rem;
+	padding: 0.4375rem 0.5rem;
+	border: 1px solid var(--border);
+	border-radius: 0.5rem;
+	background: var(--background);
+}
+
+.market-runtime-target-main {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 0.375rem;
+	min-width: 0;
+	font-size: 0.75rem;
+	font-weight: 600;
+	color: var(--foreground);
+}
+
+.market-runtime-kind {
+	font-size: 0.625rem;
+}
+
+.market-runtime-target > .market-extension-grants,
+.market-runtime-target > .market-settings-form {
+	grid-column: 1 / -1;
+}
+
+.market-extension-grants,
+.market-hook-grants {
+	font-size: 0.6875rem;
+	color: var(--muted-foreground);
+}
+
+.market-extension-grants > summary,
+.market-hook-grants > summary {
+	width: fit-content;
+	cursor: pointer;
+}
+
+.market-capability-grant {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.375rem 0.625rem;
+	margin-top: 0.25rem;
+	padding: 0.375rem 0.5rem;
+	border-left: 2px solid var(--border);
+}
+
+.market-capability-copy {
+	display: flex;
+	flex: 1 1 16rem;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 0.1875rem 0.375rem;
+	min-width: 0;
+}
+
+.market-capability-copy strong {
+	color: var(--foreground);
+}
+
+.market-capability-copy code,
+.market-grant-history-row code {
+	padding: 0 0.1875rem;
+	border-radius: 0.1875rem;
+	background: var(--muted);
+	color: var(--foreground);
+	font-family: var(--font-mono, monospace);
+}
+
+.market-capability-description {
+	flex-basis: 100%;
+	line-height: 1.35;
+	color: var(--muted-foreground);
+}
+
+.market-capability-grant > .market-error {
+	flex-basis: 100%;
+}
+
+.market-grant-history {
+	margin-top: 0.5rem;
+	padding-top: 0.625rem;
+	border-top: 1px dashed var(--border);
+	font-size: 0.6875rem;
+	color: var(--muted-foreground);
+}
+
+.market-grant-history > summary {
+	width: fit-content;
+	cursor: pointer;
+	color: var(--foreground);
+	font-weight: 600;
+}
+
+.market-grant-history-empty {
+	margin: 0.5rem 0 0;
+}
+
+.market-grant-history-list {
+	display: flex;
+	flex-direction: column;
+	gap: 0.25rem;
+	margin: 0.5rem 0 0;
+	padding: 0;
+	list-style: none;
+}
+
+.market-grant-history-row {
+	display: grid;
+	grid-template-columns: minmax(9rem, auto) auto minmax(8rem, auto) minmax(10rem, 1fr) auto;
+	gap: 0.375rem 0.625rem;
+	align-items: baseline;
+	padding: 0.25rem 0.375rem;
+	border: 1px solid var(--border);
+	border-radius: 0.375rem;
+	background: var(--background);
+	color: var(--foreground);
+}
+
+.market-grant-history-row time,
+.market-grant-history-row > span:last-child {
+	color: var(--muted-foreground);
+}
+.market-settings-form {
+	display: flex;
+	flex-direction: column;
+	gap: 0.625rem;
+	margin: 0.125rem 0 0;
+	padding: 0.625rem;
+	border: 1px dashed var(--border);
+	border-radius: 0.5rem;
+	min-width: 0;
+}
+
+.market-settings-form > legend {
+	padding: 0 0.25rem;
+	font-size: 0.75rem;
+	font-weight: 700;
+	color: var(--foreground);
+}
+
+.market-settings-project,
+.market-settings-status-copy,
+.market-settings-source,
+.market-settings-help,
+.market-settings-secret-state {
+	font-size: 0.6875rem;
+	line-height: 1.4;
+	color: var(--muted-foreground);
+}
+
+.market-settings-status-copy { margin: -0.25rem 0 0; }
+
+.market-settings-fields {
+	display: grid;
+	gap: 0.625rem;
+}
+
+.market-settings-field {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 0.25rem;
+	min-width: 0;
+}
+
+.market-settings-field > label {
+	font-size: 0.75rem;
+	font-weight: 600;
+	color: var(--foreground);
+}
+
+.market-settings-field > .market-input {
+	width: min(100%, 28rem);
+	min-height: 2.25rem;
+}
+
+.market-settings-boolean,
+.market-settings-secret-row,
+.market-settings-actions {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+}
+
+.market-settings-boolean {
+	min-height: 2.25rem;
+	font-size: 0.75rem;
+	color: var(--foreground);
+}
+
+.market-settings-field-error {
+	font-size: 0.6875rem;
+	color: var(--negative, var(--destructive));
+}
+
+.market-settings-error-summary {
+	padding: 0.5rem 0.625rem;
+	border: 1px solid color-mix(in oklch, var(--negative, var(--destructive)) 35%, transparent);
+	border-radius: 0.375rem;
+	background: color-mix(in oklch, var(--negative, var(--destructive)) 8%, transparent);
+	font-size: 0.75rem;
+	color: var(--negative, var(--destructive));
+}
+
+.market-settings-status {
+	margin-top: 0.625rem;
+	font-size: 0.6875rem;
+	color: var(--positive, var(--chart-2));
+}
+
+/* The live outcome is project-scoped, so do not reserve one blank region per pack. */
+.market-settings-status:empty {
+	display: none;
+}
+
+@media (max-width: 640px) {
+	.market-project-scope-row { align-items: flex-start; flex-direction: column; gap: 0.25rem; }
+	.market-project-scopes { width: 100%; }
+	.market-project-scope { min-height: 2.75rem; }
+	.market-runtime-target { grid-template-columns: 1fr auto; align-items: start; }
+	.market-runtime-target-main { grid-column: 1 / -1; }
+	.market-runtime-target .market-lozenge { grid-column: 1; width: fit-content; }
+	.market-runtime-target > .market-settings-form,
+	.market-runtime-target > .market-hook-grants,
+	.market-runtime-target > .market-extension-grants { grid-column: 1 / -1; }
+	.market-capability-grant { align-items: stretch; }
+	.market-capability-grant > .market-btn { width: fit-content; }
+	.market-grant-history-row { grid-template-columns: 1fr auto; }
+	.market-grant-history-row time { grid-column: 1; }
+	.market-settings-field > .market-input { width: 100%; min-height: 2.75rem; }
+	.market-settings-boolean { min-height: 2.75rem; }
+	.market-btn { min-height: 2.75rem; }
+}

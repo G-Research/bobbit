@@ -72,6 +72,32 @@ describe("RouteDispatcher — resolution + happy path (pack-level module)", () =
 		const d = new RouteDispatcher({ rate: null });
 		assert.deepEqual(await d.dispatch(modulePath, packRoot, "bundle", ctx(), { method: "GET" }), { via: "default" });
 	});
+
+	it("structured-clones the host-resolved scope snapshot into the route worker", async () => {
+		const { modulePath, packRoot } = writeRoutesModule(path.join(tmp, "scope-context"), "p", "lib/routes.mjs",
+			`export const routes = { bundle: async (ctx) => ({ scope: ctx.scopeContext, projectId: ctx.projectId }) };`);
+		const scopeContext = Object.freeze({
+			project: Object.freeze({ id: "project:authoritative", name: "Authoritative" }),
+			goal: Object.freeze({ id: "goal:authoritative", ancestry: Object.freeze([Object.freeze({ id: "goal:root" }), Object.freeze({ id: "goal:authoritative" })]) }),
+		});
+		const d = new RouteDispatcher({ rate: null });
+		const result = await d.dispatch(modulePath, packRoot, "bundle", {
+			...ctx(),
+			projectId: "forged-flat-project",
+			scopeContext,
+		}, { method: "GET" });
+		assert.deepEqual(result, {
+			projectId: undefined,
+			scope: {
+				project: { id: "project:authoritative", name: "Authoritative" },
+				goal: { id: "goal:authoritative", ancestry: [{ id: "goal:root" }, { id: "goal:authoritative" }] },
+			},
+		});
+		assert.deepEqual(scopeContext, {
+			project: { id: "project:authoritative", name: "Authoritative" },
+			goal: { id: "goal:authoritative", ancestry: [{ id: "goal:root" }, { id: "goal:authoritative" }] },
+		});
+	});
 });
 
 describe("RouteDispatcher — error isolation + blast-radius", () => {
@@ -113,7 +139,16 @@ describe("RouteDispatcher — error isolation + blast-radius", () => {
 
 	it("handler exceeding the per-call timeout → 504", async () => {
 		const { modulePath, packRoot } = writeRoutesModule(path.join(tmp, "timeout"), "p", "lib/routes.mjs", `export const routes = { bundle: () => new Promise(() => {}) };`);
-		const d = new RouteDispatcher({ rate: null, timeoutMs: 40 });
+		// Timeout GENEROUSLY larger than worker spawn+load (mirrors the action-dispatcher
+		// hung-eval convention) so the terminate bounds the HUNG HANDLER, not spawn/parse
+		// latency. A short cap (≈40ms < the ~70-110ms worker load) fires `worker.terminate()`
+		// while the worker is still SYNCHRONOUSLY inside the native CJS lexer
+		// (`node::cjs_lexer::Parse` during ESM `syncLink`), which on Node 26 crashes the
+		// whole process with `v8::ToLocalChecked Empty MaybeLocal` — and never even reaches
+		// the handler, so it wasn't proving the intended 504-on-hung-handler semantic. With
+		// the larger cap the worker loads, invokes the (never-resolving) handler, and the
+		// terminate lands on an idle event-loop-parked worker (the safe termination path).
+		const d = new RouteDispatcher({ rate: null, timeoutMs: 800 });
 		await assert.rejects(() => d.dispatch(modulePath, packRoot, "bundle", ctx(), { method: "GET" }), (e) => e instanceof ActionError && e.status === 504);
 	});
 
@@ -146,6 +181,7 @@ function contribResolver(packs: PackContributions[]): PackContributionResolver {
 		getPanel: (_pid, packId, panelId) => byId.get(packId)?.panels.find((p) => p.id === panelId),
 		getEntrypoint: (_pid, packId, id) => byId.get(packId)?.entrypoints.find((e) => e.id === id),
 		getChannel: () => undefined,
+		getRuntime: () => undefined,
 		listProviders: () => packs.flatMap((p) => p.providers),
 		listHooks: () => packs.flatMap((p) => p.hooks),
 		hasRoute: (_pid, packId, name) => !!byId.get(packId)?.routes?.names.includes(name),
@@ -155,7 +191,7 @@ function contribResolver(packs: PackContributions[]): PackContributionResolver {
 function packWithRoutes(packId: string, packRoot: string, module: string, names: string[]): PackContributions {
 	return {
 		packId, packName: packId, packRoot,
-		panels: [], entrypoints: [], providers: [], channels: [], hooks: [],
+		panels: [], entrypoints: [], providers: [], channels: [], hooks: [], runtimes: [],
 		routes: { module, names, sourceFile: path.join(packRoot, "pack.yaml"), packRoot },
 	};
 }
@@ -192,7 +228,7 @@ describe("RouteRegistry — pack-level resolution + allowlist + namespacing", ()
 	it("a pack with no routes ref → undefined; empty/unknown packId → undefined", () => {
 		const packRoot = path.join(tmp, "noroutes", "market-packs", "mypack");
 		const reg = new RouteRegistry(contribResolver([
-			{ packId: "mypack", packName: "mypack", packRoot, panels: [], entrypoints: [], providers: [], channels: [], hooks: [] },
+			{ packId: "mypack", packName: "mypack", packRoot, panels: [], entrypoints: [], providers: [], channels: [], hooks: [], runtimes: [] },
 		]));
 		assert.equal(reg.resolve("mypack", "bundle", undefined), undefined);
 		assert.equal(reg.resolve("", "bundle", undefined), undefined);

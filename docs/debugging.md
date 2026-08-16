@@ -2,6 +2,23 @@
 
 Scannable checklists for common issues. Each entry: symptom → where to look → key detail.
 
+## Extension lifecycle mutation or delivery is not committed
+
+- **Symptom**: a provider reports a failed, duplicate, timed-out, aborted, or conflict outcome; a retry does not publish expected durable state; or a lifecycle hook appears to run again after a restart.
+- **First distinction**: inspect the typed `host.store.mutate` result. Only `status: "committed"` with `committed: true` published this call. `replayed` confirms a matching earlier commit; `conflict`, `rejected`, `aborted`, and `error` did not publish. Use the stable diagnostic code and `retryable` flag, never a raw filesystem message, to choose repair versus retry.
+- **Read boundary**: if a decision depends on existing durable state, use `host.store.read`, not lossy `get`. `error` means the old state is unknown and must not be replaced as if absent. This preserves the #1106 tri-state read boundary.
+- **Deadline boundary**: lifecycle deadlines belong to the host. Confirm the worker received the host deadline metadata and local signal; worker-supplied deadline or signal values are intentionally replaced at the parent proxy. A late queued write must not become committed after cancellation or expiry.
+- **Delivery boundary**: a durable lifecycle marker is written only after provider delivery succeeds within its deadline. `completed` or `duplicate` means the marker is present; `retryable`, `terminal`, `timed_out`, and `aborted` do not write one. A concurrent caller joins a successful owner as `duplicate`, but joins a failing owner with that failure result so it can be observed or retried.
+- **No-regression boundary**: a remote retain plus failed durable enqueue must remain an observable failure, never a success. This preserves #1091; do not hide it with a generic lifecycle retry wrapper.
+- **Focused evidence**: `tests2/core/extension-host-pack-store-mutations.test.ts`, `tests2/core/lifecycle-delivery-foundation.test.ts`, `tests2/core/lifecycle-hub.test.ts`, and `tests2/integration/extension-host-lifecycle-foundation.test.ts` cover the store, delivery, Hub, and actual worker boundary. `tests2/core/extension-host-pack-store.test.ts` and `tests2/core/hindsight-provider.test.ts` pin the #1106/#1091 boundaries.
+- **Focused command**:
+
+  ```bash
+  npm run test:unit -- tests2/core/extension-host-pack-store-mutations.test.ts tests2/core/lifecycle-delivery-foundation.test.ts tests2/core/lifecycle-hub.test.ts tests2/integration/extension-host-lifecycle-foundation.test.ts tests2/core/extension-host-pack-store.test.ts tests2/core/hindsight-provider.test.ts
+  ```
+
+See [Extension Host authoring — fenced mutations and lifecycle delivery](extension-host-authoring.md#fenced-mutations-and-lifecycle-delivery) for the contract and [Hindsight Foundation Provenance Audit](design/hindsight-foundation-provenance.md) for the outcome matrix.
+
 ## Dev UI stays grey after a source edit or pull
 
 - **Symptom**: after a TypeScript edit, `git pull`, or checkout, Vite reloads but the inline grey shell remains for tens of seconds. A proxy `ECONNABORTED` / `ECONNRESET` may appear during navigation.

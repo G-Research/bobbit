@@ -21,6 +21,7 @@ import {
 	type PanelContribution,
 	type EntrypointContribution,
 	type ProviderContribution,
+	type RuntimeContribution,
 	type ChannelContribution,
 	type HookContribution,
 } from "../agent/pack-contributions.js";
@@ -38,6 +39,8 @@ export interface PackContributionResolver {
 	getEntrypoint(projectId: string | undefined, packId: string, entrypointId: string): EntrypointContribution | undefined;
 	/** List active provider contributions across all active packs. */
 	listProviders(projectId: string | undefined): ProviderContribution[];
+	/** Resolve a managed runtime descriptor within a pack. */
+	getRuntime(projectId: string | undefined, packId: string, runtimeId: string): RuntimeContribution | undefined;
 	/** List active inert hook metadata across all active packs. */
 	listHooks(projectId: string | undefined): HookContribution[];
 	/** Resolve a channel handler within a pack. */
@@ -84,6 +87,30 @@ export type ProviderConfigOverrideLookup = (
 	providerId: string,
 ) => ProviderConfigOverrideLookupResult;
 
+/** Project settings targets the contribution registry may activate. `pack` is a
+ * control lookup only: persisted setting target identities remain provider/hook. */
+export type ProjectExtensionSettingsTargetKind = "pack" | "provider" | "hook";
+
+/** Runtime-only effective settings for one project target. `values` can contain
+ * secret bytes, so this contract must never be used by a public/API projection. */
+export type ProjectExtensionSettingsReadResult =
+	| { state: "absent" }
+	| { state: "present"; enabled: boolean; values: Record<string, unknown> }
+	| { state: "error"; diagnostic: { code: string; retryable: boolean } };
+
+/** Optional synchronous bridge to project-scoped extension settings. `absent`
+ * means there is no project target record, which deliberately permits the legacy
+ * provider config fallback. `error` is fail-closed and is never treated as
+ * defaults/absent. The lookup owns project isolation and may merge runtime-only
+ * secret values into its returned `values`. */
+export type ProjectExtensionSettingsLookup = (
+	projectId: string | undefined,
+	packId: string,
+	kind: ProjectExtensionSettingsTargetKind,
+	/** Omitted for the pack-level enablement control. */
+	id?: string,
+) => ProjectExtensionSettingsReadResult | undefined;
+
 interface IndexedScope {
 	list: PackContributions[];
 	byId: Map<string, PackContributions>;
@@ -109,6 +136,11 @@ export class PackContributionRegistry implements PackContributionResolver {
 		private readonly disabledProviders?: DisabledEntrypointsLookup,
 		private readonly providerConfigOverrides?: ProviderConfigOverrideLookup,
 		private readonly disabledHooks?: DisabledEntrypointsLookup,
+		// Reserved positional EP-6 seams remain intentionally inert here; this
+		// integration only consumes the public EP-7 settings lookup.
+		_unusedDisabledSystemPrompts?: DisabledEntrypointsLookup,
+		_unusedSystemPromptAuthorization?: unknown,
+		private readonly projectExtensionSettings?: ProjectExtensionSettingsLookup,
 	) {}
 
 	/** Drop the per-project index cache (rebuilt lazily on next read). */
@@ -134,6 +166,12 @@ export class PackContributionRegistry implements PackContributionResolver {
 
 	listProviders(projectId: string | undefined): ProviderContribution[] {
 		return this.index(projectId).list.flatMap((pack) => pack.providers);
+	}
+
+	getRuntime(projectId: string | undefined, packId: string, runtimeId: string): RuntimeContribution | undefined {
+		// Runtime ids are canonicalised by the schema-2 loader and provider loader;
+		// keep this read-only registry lookup equally case-stable for host callers.
+		return this.getPack(projectId, packId)?.runtimes.find((runtime) => runtime.id === runtimeId.toLowerCase());
 	}
 
 	listHooks(projectId: string | undefined): HookContribution[] {
@@ -185,6 +223,23 @@ export class PackContributionRegistry implements PackContributionResolver {
 				}
 				throw err;
 			}
+			// Project settings are evaluated only after installed-pack enumeration has
+			// selected the winning pack, so they can never revive an uninstalled or
+			// pack_activation-disabled contribution. A failed public settings read is
+			// fail-closed for the entire pack (including its panels/routes).
+			const packSettings = readProjectExtensionSettings(
+				this.projectExtensionSettings,
+				projectId,
+				contrib.packId,
+				"pack",
+			);
+			if (packSettings.state === "error") {
+				retryableConfigError = true;
+				console.warn(`[pack-contributions] project settings unavailable packId=${contrib.packId} code=${safeDiagnosticCode(packSettings.diagnostic)}`);
+				continue;
+			}
+			if (packSettings.state === "present" && !packSettings.enabled) continue;
+
 			// Activation filtering (§7): drop disabled entrypoints by listName.
 			const disabled = this.disabledEntrypoints
 				? new Set(this.disabledEntrypoints(e.scope, projectId, contrib.packName))
@@ -203,9 +258,33 @@ export class PackContributionRegistry implements PackContributionResolver {
 				: undefined;
 			const resolvedProviders: ProviderContribution[] = [];
 			for (const p of contrib.providers) {
+				// The loader owns schema validation. A rejected declaration is never
+				// allowed to reach config overlays, activation, or runtime authorization consumers.
+				// Deliberately do not log its diagnostic: it can contain pack-controlled text.
+				if (p.settingsSchemaDiagnostic !== undefined) continue;
 				if (disabledProviders?.has(p.listName)) continue; // DisabledRefs kill-switch
+
+				// A project target, when present, supersedes legacy PackStore overrides.
+				// This is specifically important for clearing a migrated setting: a
+				// project-owned empty target must not resurrect its old global value.
+				const projectSettings = readProjectExtensionSettings(
+					this.projectExtensionSettings,
+					projectId,
+					contrib.packId,
+					"provider",
+					p.id,
+				);
+				if (projectSettings.state === "error") {
+					retryableConfigError = true;
+					console.warn(`[pack-contributions] project settings unavailable packId=${contrib.packId} providerId=${p.id} code=${safeDiagnosticCode(projectSettings.diagnostic)}`);
+					continue;
+				}
+				if (projectSettings.state === "present" && !projectSettings.enabled) continue;
+
 				const defaults = p.config ?? {};
-				const configRead = this.providerConfigOverrides?.(e.scope, projectId, contrib.packId, p.id);
+				const configRead = projectSettings.state === "present"
+					? { state: "present" as const, value: projectSettings.values }
+					: this.providerConfigOverrides?.(e.scope, projectId, contrib.packId, p.id);
 				const normalized = normalizeProviderConfigRead(configRead);
 				if (normalized.state === "error") {
 					// Fail closed: an unreadable durable config is not the same as an
@@ -233,6 +312,19 @@ export class PackContributionRegistry implements PackContributionResolver {
 			if (disabledHooks && disabledHooks.size > 0) {
 				contrib = { ...contrib, hooks: contrib.hooks.filter((hook) => !disabledHooks.has(hook.listName)) };
 			}
+			const resolvedHooks: HookContribution[] = [];
+			for (const hook of contrib.hooks) {
+				if (hook.settingsSchemaDiagnostic !== undefined) continue;
+				const projectSettings = readProjectExtensionSettings(this.projectExtensionSettings, projectId, contrib.packId, "hook", hook.id);
+				if (projectSettings.state === "error") {
+					retryableConfigError = true;
+					console.warn(`[pack-contributions] project settings unavailable packId=${contrib.packId} hookId=${hook.id} code=${safeDiagnosticCode(projectSettings.diagnostic)}`);
+					continue;
+				}
+				if (projectSettings.state !== "present" || projectSettings.enabled) resolvedHooks.push(hook);
+			}
+			if (resolvedHooks.length !== contrib.hooks.length) contrib = { ...contrib, hooks: resolvedHooks };
+
 			const authorizedChannels = authorizeChannelCapabilities(e, contrib.channels);
 			if (authorizedChannels !== contrib.channels) contrib = { ...contrib, channels: authorizedChannels };
 			loaded.push(contrib);
@@ -278,6 +370,37 @@ export class PackContributionRegistry implements PackContributionResolver {
  *  runtime session restrictions remain in ChannelPtyService. */
 function authorizeChannelCapabilities(_entry: PackEntry, channels: ChannelContribution[]): ChannelContribution[] {
 	return channels;
+}
+
+/** Read and defensively validate a runtime-only project settings target. Storage
+ * implementations may throw on a public or secret read; the registry must never
+ * turn that into defaults, and must not expose a backend error's message/path. */
+function readProjectExtensionSettings(
+	lookup: ProjectExtensionSettingsLookup | undefined,
+	projectId: string | undefined,
+	packId: string,
+	kind: ProjectExtensionSettingsTargetKind,
+	id?: string,
+): ProjectExtensionSettingsReadResult {
+	if (!lookup) return { state: "absent" };
+	try {
+		const result = lookup(projectId, packId, kind, id);
+		if (!result || result.state === "absent") return { state: "absent" };
+		if (result.state === "error") {
+			return isStoreReadDiagnostic(result.diagnostic)
+				? result
+				: { state: "error", diagnostic: { code: "SETTINGS_READ_UNAVAILABLE", retryable: true } };
+		}
+		if (result.state === "present") {
+			return typeof result.enabled === "boolean" && isFlatConfig(result.values)
+				? result
+				: { state: "error", diagnostic: { code: "SETTINGS_READ_INVALID", retryable: false } };
+		}
+	} catch {
+		// Deliberately do not log the thrown error: secret-store implementations can
+		// include user-controlled bytes in their error messages.
+	}
+	return { state: "error", diagnostic: { code: "SETTINGS_READ_UNAVAILABLE", retryable: true } };
 }
 
 /** True when a provider's `activation.requiresConfig` is satisfied by its EFFECTIVE

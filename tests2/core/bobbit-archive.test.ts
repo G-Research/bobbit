@@ -103,6 +103,8 @@ test("isPreserved matches dir-roots and prefix patterns", () => {
 	assert.deepEqual(isPreserved("state/tls/ca.crt", GATEWAY_OWNED_FILES), { preserved: true, isDirRoot: false });
 	assert.deepEqual(isPreserved("state/gateway-url", GATEWAY_OWNED_FILES), { preserved: true, isDirRoot: false });
 	assert.deepEqual(isPreserved("state/model-name-foo.txt", GATEWAY_OWNED_FILES), { preserved: true, isDirRoot: false });
+	assert.deepEqual(isPreserved("state/service-runtimes", GATEWAY_OWNED_FILES), { preserved: true, isDirRoot: true });
+	assert.deepEqual(isPreserved("state/service-runtimes/pack/runtime/runtime.env", GATEWAY_OWNED_FILES), { preserved: true, isDirRoot: false });
 	assert.deepEqual(isPreserved("config/system-prompt.md", GATEWAY_OWNED_FILES).preserved, false);
 	assert.deepEqual(isPreserved("state/goals/goals.json", GATEWAY_OWNED_FILES).preserved, false);
 });

@@ -26,6 +26,8 @@ import {
 	type PostMessageInput,
 	type HostSessionEventName,
 	type HostSessionEventMap,
+	type StoreMutationOptions,
+	type StoreMutationResult,
 	type StorePutOptions,
 	type StoreReadResult,
 	type StoreStats,
@@ -210,7 +212,7 @@ export function getHostApi(
 	};
 	// POST a store op to /api/ext/store/:op carrying the SERVER-MINTED surface
 	// token (NOT a raw `tool`) so the server derives the trusted packId.
-	const storeOp = async (op: "get" | "read" | "put" | "list" | "delete" | "deletePrefix" | "stats", payload: Record<string, unknown>): Promise<unknown> => {
+	const storeOp = async (op: "get" | "read" | "put" | "mutate" | "list" | "delete" | "deletePrefix" | "stats", payload: Record<string, unknown>): Promise<unknown> => {
 		if (!surface) throw new Error("host.store requires a pack-served renderer context");
 		const resp = await scopedFetch((token) => ({
 			path: `/api/ext/store/${op}`,
@@ -391,6 +393,12 @@ export function getHostApi(
 				await storeOp("read", { key }) as StoreReadResult<T>,
 			put: async (key: string, value: unknown, opts?: StorePutOptions) => {
 				await storeOp("put", { key, value, opts });
+			},
+			// AbortSignal is process-local; client callers carry the absolute deadline and
+			// the server checks it again immediately before the durable rename.
+			mutate: async <T = unknown>(key: string, value: T, opts?: StoreMutationOptions): Promise<StoreMutationResult<T>> => {
+				const { signal: _signal, ...serializableOpts } = opts ?? {};
+				return await storeOp("mutate", { key, value, opts: serializableOpts }) as StoreMutationResult<T>;
 			},
 			list: async (prefix?: string) => (await storeOp("list", { prefix })) as string[],
 			delete: async (key: string) => (await storeOp("delete", { key })) as boolean,

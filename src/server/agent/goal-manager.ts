@@ -38,6 +38,13 @@ export interface GoalProvisionedContext {
 	metadata: GoalMetadata;
 }
 
+/** Completion coordinates passed through the host-injected lifecycle seam. */
+export interface GoalCompletedContext {
+	goalId: string;
+	goal: PersistedGoal;
+	completedAt: number;
+}
+
 /**
  * Sanitize a goal title into a valid git branch name.
  * Lowercase, replace non-alphanumeric with hyphens, truncate, trim.
@@ -161,6 +168,21 @@ export class GoalManager {
 	private goalProvisionedDispatcher?: (ctx: GoalProvisionedContext) => Promise<void>;
 	setGoalProvisionedDispatcher(dispatcher: (ctx: GoalProvisionedContext) => Promise<void>): void {
 		this.goalProvisionedDispatcher = dispatcher;
+	}
+
+	/** Host-installed completion dispatcher; invoked by TeamManager after state persistence. */
+	private goalCompletedDispatcher?: (ctx: GoalCompletedContext) => Promise<void>;
+	setGoalCompletedDispatcher(dispatcher: (ctx: GoalCompletedContext) => Promise<void>): void {
+		this.goalCompletedDispatcher = dispatcher;
+	}
+
+	/**
+	 * Deliver the completed-goal lifecycle event through this goal's owning
+	 * context. TeamManager intentionally owns the durable state transition and
+	 * catches failures, so this method does not swallow them.
+	 */
+	async dispatchGoalCompleted(ctx: GoalCompletedContext): Promise<void> {
+		await this.goalCompletedDispatcher?.(ctx);
 	}
 
 	/**
