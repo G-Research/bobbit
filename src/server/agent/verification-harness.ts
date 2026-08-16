@@ -5273,10 +5273,14 @@ export class VerificationHarness {
 
 				// Broadcast phase started — transition waiting steps in this phase to running
 				active.currentPhase = phase;
-				for (const { index } of phaseSteps) {
-					if (active.steps[index]?.status === "waiting") {
-						active.steps[index].status = "running";
-						active.steps[index].startedAt = Date.now();
+				for (const { step, index } of phaseSteps) {
+					const activeStep = active.steps[index];
+					if (activeStep?.status === "waiting") {
+						activeStep.status = "running";
+						activeStep.startedAt = Date.now();
+						// A persisted waiting row has not entered command execution. Upgrade
+						// legacy records here without overwriting durable spawn ownership.
+						if (step.type === "command") activeStep.commandSpawnState ??= "queued";
 					}
 				}
 				this._persistActive();
