@@ -238,7 +238,7 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 
 		const createSandboxSdkSession = async (worktree = true, cwd = gitCwd()): Promise<Response> => apiFetch("/api/sessions", {
 			method: "POST",
-			body: JSON.stringify({ projectId, cwd, sandboxed: true, worktree, initialModel: "claude-agent-sdk/controlled-sandbox" }),
+			body: JSON.stringify({ projectId, cwd, sandboxed: true, worktree, initialModel: "claude-agent-sdk/sonnet" }),
 		});
 		const expectAsyncUnavailable = async (code: string, secret: string): Promise<void> => {
 			const response = await createSandboxSdkSession();
@@ -257,19 +257,25 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 		expect(preferencesResponse.status, await preferencesResponse.clone().text()).toBe(200);
 		const originalPreferences = await preferencesResponse.json() as Record<string, unknown>;
 		try {
+			// The production SDK aliases are built into the catalog and authenticate
+			// through complete Anthropic OAuth; reserved custom providers cannot seed
+			// this runtime.
+			writeFileSync(authFile, JSON.stringify({
+				anthropic: { type: "oauth", access, refresh: randomUUID(), expires: Date.now() + 60 * 60_000 },
+			}));
 			const config = await apiFetch(`/api/projects/${projectId}/config`, {
 				method: "PUT",
 				body: JSON.stringify({ sandbox: "docker", sandbox_tokens: [{ key: OAUTH_POLICY, enabled: true }] }),
 			});
 			expect(config.status, await config.text()).toBe(200);
-			const provider = await apiFetch("/api/custom-providers", { method: "POST", body: JSON.stringify({
-				id: "claude-agent-sdk", name: "claude-agent-sdk", type: "manual", baseUrl: "http://127.0.0.1:9",
-				models: [{ id: "controlled-sandbox", name: "Controlled sandbox SDK" }],
-			}) });
-			expect(provider.status, await provider.text()).toBe(200);
+			const catalog = await apiFetch("/api/models");
+			expect(catalog.status, await catalog.clone().text()).toBe(200);
+			expect((await catalog.json() as Array<Record<string, unknown>>).find(model =>
+				model.provider === "claude-agent-sdk" && model.id === "sonnet",
+			)).toMatchObject({ authenticated: true, runtime: "claude-agent-sdk" });
 			const preferences = await apiFetch("/api/preferences", {
 				method: "PUT",
-				body: JSON.stringify({ "default.sessionModel": "claude-agent-sdk/controlled-sandbox", "default.sessionThinkingLevel": "off" }),
+				body: JSON.stringify({ "default.sessionModel": "claude-agent-sdk/sonnet", "default.sessionThinkingLevel": "off" }),
 			});
 			expect(preferences.status, await preferences.text()).toBe(200);
 
@@ -291,6 +297,7 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 			const { id } = await response.json() as { id: string };
 			await waitForSessionStatus(id, "idle", 30_000);
 			expect(sdk.queries).toHaveLength(1);
+			expect(sdk.queries[0].args.options.model).toBe("sonnet");
 			expect(bridgeLaunches).toHaveLength(1);
 			expect(bridgeLaunches[0].containerId).toBe("controlled-sdk-container-a");
 			expect(bridgeLaunches[0].cwd).toMatch(/^\/workspace\/\.e2e-workspaces\/non-git-/);
@@ -356,7 +363,6 @@ test.describe.serial("Claude Agent SDK controlled Docker sandbox", () => {
 			sandboxPrototype.ensureForProject = originalEnsure;
 			sandboxPrototype.get = originalGet;
 			sandboxPrototype.getStats = originalGetStats;
-			await apiFetch("/api/custom-providers/claude-agent-sdk", { method: "DELETE" }).catch(() => undefined);
 			await apiFetch("/api/preferences", {
 				method: "PUT",
 				body: JSON.stringify({

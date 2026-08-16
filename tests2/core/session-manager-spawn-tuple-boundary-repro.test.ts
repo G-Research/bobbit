@@ -23,7 +23,7 @@ const { resetAgentDirStateForTests } = await import("../../src/server/bobbit-dir
 resetAgentDirStateForTests?.();
 const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
 const { PreferencesStore } = await import("../../src/server/agent/preferences-store.ts");
-const { getAvailableModels, invalidateModelCache } = await import("../../src/server/agent/model-registry.ts");
+const { getAvailableModels, invalidateModelCache, clearOAuthCache } = await import("../../src/server/agent/model-registry.ts");
 const { modelRecencyRank } = await import("../../src/shared/model-ranks.ts");
 const { clampThinkingLevelForModel } = await import("../../src/server/agent/thinking-level-clamp.ts");
 const { registerRpcBridgeFactory } = await import("../../src/server/agent/rpc-bridge.ts");
@@ -120,22 +120,33 @@ function makePreferences(label: string): InstanceType<typeof PreferencesStore> {
 	return prefs;
 }
 
-const SDK_DEFAULT_MODEL = "claude-agent-sdk/sdk-default";
+const SDK_DEFAULT_MODEL = "claude-agent-sdk/sonnet";
 
 async function makeSdkDefaultPreferences(label: string): Promise<InstanceType<typeof PreferencesStore>> {
 	const prefs = makePreferences(label);
-	prefs.set("customProviders", [{
-		id: "claude-agent-sdk",
-		name: "claude-agent-sdk",
-		type: "manual",
-		baseUrl: "http://127.0.0.1:9",
-		models: [{ id: "sdk-default", name: "SDK default" }],
-	}]);
+	// The SDK runtime owns a fixed alias catalog. Seed the same complete OAuth
+	// shape its production authentication check consumes; custom providers are
+	// forbidden from impersonating this reserved runtime namespace.
+	fs.writeFileSync(path.join(agentDir, "auth.json"), JSON.stringify({
+		anthropic: {
+			type: "oauth",
+			access: `sdk-catalog-access-${label}`,
+			refresh: `sdk-catalog-refresh-${label}`,
+			expires: Date.now() + 60_000,
+		},
+	}));
 	prefs.set("default.sessionModel", SDK_DEFAULT_MODEL);
-	invalidateModelCache();
-	assert.ok(
-		(await getAvailableModels(prefs)).some((model) => `${model.provider}/${model.id}` === SDK_DEFAULT_MODEL),
-		"fixture requires a selectable SDK default model",
+	clearOAuthCache();
+	const sdkAlias = (await getAvailableModels(prefs)).find((model) =>
+		`${model.provider}/${model.id}` === SDK_DEFAULT_MODEL,
+	);
+	assert.deepEqual(
+		{
+			authenticated: sdkAlias?.authenticated,
+			runtime: sdkAlias?.runtime,
+		},
+		{ authenticated: true, runtime: "claude-agent-sdk" },
+		"fixture requires the built-in authenticated SDK alias catalog row",
 	);
 	return prefs;
 }
@@ -836,7 +847,7 @@ describe("actual SessionManager spawn tuple boundaries", () => {
 		const missingResumeRecord = {
 			...legacySessionRecord("sdk-runtime-without-resume"),
 			modelProvider: "claude-agent-sdk",
-			modelId: "sdk-default",
+			modelId: "sonnet",
 			runtime: "claude-agent-sdk" as const,
 			sandboxed: true,
 		};
@@ -867,7 +878,7 @@ describe("actual SessionManager spawn tuple boundaries", () => {
 		const originalRoleBridge = roleSession.rpcClient;
 		tracker.reset();
 		await expect(manager.assignRole(roleId, {
-			name: "sdk-default-role",
+			name: "sdk-alias-role",
 			promptTemplate: "must not change runtime",
 			accessory: "none",
 		})).rejects.toThrow(/would change session runtime from pi to claude-agent-sdk/i);

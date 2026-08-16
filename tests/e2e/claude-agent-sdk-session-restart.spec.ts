@@ -11,11 +11,11 @@ import {
 	nonGitCwd,
 	waitForSessionStatus,
 } from "./e2e-setup.js";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-const SDK_MODEL = "claude-agent-sdk/sonnet-test";
-const SDK_UNAVAILABLE_MODEL = "claude-agent-sdk/unavailable-test";
+const SDK_MODEL = "claude-agent-sdk/sonnet";
+const SDK_UNAVAILABLE_MODEL = "claude-agent-sdk/opus";
 const SDK_SESSION_ID = "11111111-1111-4111-8111-111111111111";
 const FIDELITY_GATE_ID = "sdk-fidelity-proof";
 
@@ -286,29 +286,28 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 		const preferencesResponse = await apiFetch("/api/preferences");
 		expect(preferencesResponse.status, await preferencesResponse.clone().text()).toBe(200);
 		const originalPreferences = await preferencesResponse.json() as Record<string, unknown>;
-		const providersResponse = await apiFetch("/api/custom-providers");
-		expect(providersResponse.status, await providersResponse.clone().text()).toBe(200);
-		const originalSdkProvider = (await providersResponse.json() as Array<Record<string, unknown>>)
-			.find(provider => provider.id === "claude-agent-sdk");
+		const authFile = join(gateway.bobbitDir, "agent", "auth.json");
+		const originalAuth = readFileSync(authFile, "utf8");
 		let fidelityGoalId: string | undefined;
 		let fidelityWorkflow: string | undefined;
 		let fidelityProjectId: string | undefined;
 
 		try {
-			const provider = await apiFetch("/api/custom-providers", {
-				method: "POST",
-				body: JSON.stringify({
-					id: "claude-agent-sdk",
-					name: "claude-agent-sdk",
-					type: "manual",
-					baseUrl: "http://127.0.0.1:9",
-					models: [
-						{ id: "sonnet-test", name: "Deterministic Claude SDK" },
-						{ id: "unavailable-test", name: "Deterministic unavailable Claude SDK" },
-					],
-				}),
-			});
-			expect(provider.status, await provider.text()).toBe(200);
+			// SDK model selection is supplied by the built-in alias catalog, which
+			// authenticates only complete OAuth credentials (not custom providers).
+			writeFileSync(authFile, JSON.stringify({
+				anthropic: {
+					type: "oauth",
+					access: "deterministic-sdk-catalog-access",
+					refresh: "deterministic-sdk-catalog-refresh",
+					expires: Date.now() + 60_000,
+				},
+			}));
+			const catalog = await apiFetch("/api/models");
+			expect(catalog.status, await catalog.clone().text()).toBe(200);
+			expect((await catalog.json() as Array<Record<string, unknown>>).find(model =>
+				model.provider === "claude-agent-sdk" && model.id === "sonnet",
+			)).toMatchObject({ authenticated: true, runtime: "claude-agent-sdk" });
 
 			const sdkDefault = await apiFetch("/api/preferences", {
 				method: "PUT",
@@ -337,6 +336,7 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 			const sdkLive = gateway.sessionManager.getSession(sdkId);
 			expect(sdkLive?.runtime, JSON.stringify({ runtime: sdkLive?.runtime, model: sdkLive?.spawnPinnedModel })).toBe("claude-agent-sdk");
 			expect(fakeSdk.queries, "SDK selection must construct the production bridge Query").toHaveLength(1);
+			expect(fakeSdk.queries[0].args.options.model).toBe("sonnet");
 
 			const piDefault = await apiFetch("/api/preferences", {
 				method: "PUT",
@@ -587,7 +587,7 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 			}
 
 			// A provider start failure must settle rather than leave a queued session.
-			fakeSdk.unavailableModels.add("unavailable-test");
+			fakeSdk.unavailableModels.add("opus");
 			const unavailableDefault = await apiFetch("/api/preferences", {
 				method: "PUT",
 				body: JSON.stringify({ "default.sessionModel": SDK_UNAVAILABLE_MODEL, "default.sessionThinkingLevel": "off" }),
@@ -602,7 +602,7 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 			const unavailableId = (await unavailableCreate.json()).id as string;
 			await waitForSessionStatus(unavailableId, "idle");
 			expect(fakeSdk.queries).toHaveLength(unavailableQueriesBefore + 1);
-			expect(fakeSdk.queries.at(-1)?.args.options.model).toBe("unavailable-test");
+			expect(fakeSdk.queries.at(-1)?.args.options.model).toBe("opus");
 			const unavailableConnection = await connectWs(unavailableId);
 			try {
 				const cursor = unavailableConnection.messageCount();
@@ -622,13 +622,7 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 			if (fidelityWorkflow && fidelityProjectId) {
 				await apiFetch(`/api/workflows/${encodeURIComponent(fidelityWorkflow)}?projectId=${encodeURIComponent(fidelityProjectId)}`, { method: "DELETE" }).catch(() => undefined);
 			}
-			await apiFetch("/api/custom-providers/claude-agent-sdk", { method: "DELETE" }).catch(() => undefined);
-			if (originalSdkProvider) {
-				await apiFetch("/api/custom-providers", {
-					method: "POST",
-					body: JSON.stringify(originalSdkProvider),
-				}).catch(() => undefined);
-			}
+			writeFileSync(authFile, originalAuth);
 			await apiFetch("/api/preferences", {
 				method: "PUT",
 				body: JSON.stringify({
