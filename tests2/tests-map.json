@@ -30,6 +30,15 @@
       }
     },
     {
+      "path": "tests2/core/staff-persistence-compensation.test.ts",
+      "reason": "Staff-store rollback and worktree compensation coverage for persistence failures.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/extension-grant-provenance.test.ts",
       "reason": "Fail-closed operator provenance coverage for checkout-supplied extension grants.",
       "execution": {

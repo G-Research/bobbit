@@ -386,13 +386,17 @@ export class StaffManager {
 		}
 
 		const store = this.getStore(projectId);
-		store.put(staff);
-
 		const searchIndex = this.pcm.getOrCreate(projectId)?.searchIndex;
-		searchIndex?.indexStaff(staff, projectId);
+		let persisted = false;
 
-		// Create the permanent session for this staff agent
+		// Staff persistence is part of the creation transaction: a failed write
+		// must release a worktree that was already provisioned, just like a
+		// later session-creation failure.
 		try {
+			store.put(staff);
+			persisted = true;
+			searchIndex?.indexStaff(staff, projectId);
+
 			// Prepend the role's prompt context (when roleId set) ahead of the
 			// staff's own systemPrompt + pinned memory. roleManager comes from the
 			// session manager so the staff path reuses the regular-session resolver.
@@ -439,15 +443,26 @@ export class StaffManager {
 			store.update(id, { currentSessionId: session.id });
 			staff.currentSessionId = session.id;
 		} catch (err) {
-			// Clean up the orphaned worktree on failure
+			// Cleanup is compensating work. It must never replace the operation
+			// failure, especially when a second persistence attempt also fails.
 			try {
 				await this.cleanupStaffWorktree(staff, projectId);
 				if (staff.worktreePath) console.log(`[staff-manager] Cleaned up orphaned worktree after createStaff failure: ${staff.worktreePath}`);
 			} catch (cleanupErr) {
 				console.error(`[staff-manager] Failed to clean up orphaned worktree ${staff.worktreePath}:`, cleanupErr);
 			}
-			store.remove(id);
-			searchIndex?.removeStaff(id);
+			if (persisted) {
+				try {
+					store.remove(id);
+				} catch (cleanupErr) {
+					console.error(`[staff-manager] Failed to remove staff ${id} while compensating createStaff:`, cleanupErr);
+				}
+			}
+			try {
+				searchIndex?.removeStaff(id);
+			} catch (cleanupErr) {
+				console.error(`[staff-manager] Failed to remove staff ${id} from search while compensating createStaff:`, cleanupErr);
+			}
 			throw err;
 		}
 

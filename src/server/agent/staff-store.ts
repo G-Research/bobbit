@@ -178,9 +178,15 @@ export class StaffStore {
 	update(id: string, updates: Partial<Omit<PersistedStaff, "id" | "createdAt">>): boolean {
 		const existing = this.staff.get(id);
 		if (!existing) return false;
+
+		// Build and persist a replacement record. Mutating the live record before
+		// capturing its rollback state made a failed write retain the requested
+		// update (including its new updatedAt) in memory.
+		const previous = structuredClone(existing);
+		const next = structuredClone(existing) as PersistedStaff;
 		// Strip undefined values to avoid overwriting existing fields.
 		// null is treated as "clear this field" (delete the key).
-		const rec = existing as unknown as Record<string, unknown>;
+		const rec = next as unknown as Record<string, unknown>;
 		for (const [k, v] of Object.entries(updates)) {
 			if (v === undefined) continue;
 			if (v === null) {
@@ -189,10 +195,15 @@ export class StaffStore {
 				rec[k] = v;
 			}
 		}
-		existing.updatedAt = Date.now();
-		const previous = structuredClone(existing);
-		normalizeStaffRecord(existing);
-		try { this.save(); } catch (error) { this.staff.set(id, previous); throw error; }
+		next.updatedAt = Date.now();
+		normalizeStaffRecord(next);
+		this.staff.set(id, next);
+		try {
+			this.save();
+		} catch (error) {
+			this.staff.set(id, previous);
+			throw error;
+		}
 		return true;
 	}
 }
