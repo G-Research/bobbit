@@ -1051,6 +1051,7 @@ export class GoalManager {
 		// adopted-goal archival before its promoted lead can be terminated.
 		if (!goal.archived) this.store.archive(id);
 		const archived = await this.store.archiveStrict(id);
+		let reconciledTeamOwnership = false;
 		if (archived) {
 			try {
 				await cleanupGateDiagnosticsForGoal(id, this.diagnosticsStateDir);
@@ -1058,16 +1059,32 @@ export class GoalManager {
 				console.warn(`[goal-manager] Failed to clean gate diagnostics for archived goal ${id}:`, err);
 			}
 			try {
-				await this.goalArchiveReconciler?.(id);
+				const result = await this.goalArchiveReconciler?.(id) as {
+					archivedSessionIds?: unknown[];
+					suppressedSessionIds?: unknown[];
+					teamRemoved?: boolean;
+					teamEntryRetained?: boolean;
+				} | undefined;
+				reconciledTeamOwnership = !!result && (
+					(result.archivedSessionIds?.length ?? 0) > 0
+					|| (result.suppressedSessionIds?.length ?? 0) > 0
+					|| result.teamRemoved === true
+					|| result.teamEntryRetained === true
+				);
 			} catch (err) {
+				// A failed reconciliation may already have selected team-owned evidence;
+				// conservatively leave goal worktrees for the retry/purge lifecycle.
+				reconciledTeamOwnership = true;
 				// Archive is already committed. Cleanup remains reconstructable from
 				// teamGoalId/team-state and must never roll back a successful merge.
 				console.error(`[goal-manager] Archived-goal reconciliation blocked for ${id}:`, err);
 			}
 		}
 		// Multi-repo cleanup: best-effort per-repo worktree + remote-branch
-		// removal. Single-repo cleanup remains owned by session purge.
-		if (archived && goal.repoWorktrees && goal.repoPath && goal.branch && Object.keys(goal.repoWorktrees).length > 0) {
+		// removal for standalone goals. Archived team reconciliation is a soft
+		// lifecycle boundary: its goal/member worktrees and branches are recovery
+		// evidence and remain until the ordinary purge lifecycle owns deletion.
+		if (archived && !goal.team && !reconciledTeamOwnership && goal.repoWorktrees && goal.repoPath && goal.branch && Object.keys(goal.repoWorktrees).length > 0) {
 			const { cleanupWorktree } = await import("../skills/git.js");
 			const entries = Object.entries(goal.repoWorktrees);
 			const sessions = this.getSessionsForWorktreeGuard();

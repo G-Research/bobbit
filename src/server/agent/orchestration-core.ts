@@ -339,6 +339,8 @@ export interface OrchestrationSessionView {
 		assistantType: string | undefined,
 		opts?: Record<string, unknown>,
 	): Promise<{ id: string }>;
+	/** Team-owned child publication joins TeamManager's terminal admission queue. */
+	runWithTeamGoalAdmission?<T>(goalId: string, operation: () => Promise<T>): Promise<T>;
 	enqueuePrompt(sessionId: string, text: string, opts?: Record<string, unknown>): Promise<{ status: string }>;
 	deliverLiveSteer(sessionId: string, message: string, opts?: Record<string, unknown>): Promise<unknown>;
 	getErroredPromptRecoveryDecision?(sessionId: string): ErroredPromptRecoveryDecision;
@@ -537,7 +539,16 @@ export class OrchestrationCore {
 
 	async spawn(opts: SpawnOpts): Promise<ChildHandle> {
 		this.assertCanSpawn(opts.ownerSessionId);
+		const ownerPs = this.deps.sessionManager.getPersistedSession(opts.ownerSessionId);
+		const operation = () => this.spawnAdmitted(opts, ownerPs);
+		// teamGoalId is the trusted durable ownership predicate. goalId-only
+		// standalone owners remain outside team terminal admission.
+		return ownerPs?.teamGoalId && this.deps.sessionManager.runWithTeamGoalAdmission
+			? this.deps.sessionManager.runWithTeamGoalAdmission(ownerPs.teamGoalId, operation)
+			: operation();
+	}
 
+	private async spawnAdmitted(opts: SpawnOpts, ownerPs: PersistedSessionLike | undefined): Promise<ChildHandle> {
 		const childKind: ChildKind = opts.childKind ?? "delegate";
 		const model = opts.model ?? this.deps.resolveSessionModel(opts.ownerSessionId);
 		const thinkingLevel = opts.thinkingLevel ?? this.deps.resolveSessionThinking?.(opts.ownerSessionId);
@@ -588,7 +599,6 @@ export class OrchestrationCore {
 			// sandboxed / project-scoped owner could be created OUTSIDE that scope — a
 			// privilege escalation. This inherits the owner's scope verbatim and never
 			// widens it (there is no per-call option that could).
-			const ownerPs = this.deps.sessionManager.getPersistedSession(opts.ownerSessionId);
 			const ownerSandboxed = ownerPs?.sandboxed === true;
 			const worktreeOpts = opts.worktree?.mode === "sub-branch"
 				? { repoPath: opts.worktree.repoPath }
@@ -605,6 +615,9 @@ export class OrchestrationCore {
 			const createOpts: Record<string, unknown> = {
 				parentSessionId: opts.ownerSessionId,
 				childKind,
+				// Structural ownership is part of the initial persisted row, before
+				// createSession can await worktree setup or start an agent process.
+				teamGoalId: ownerPs?.teamGoalId,
 				// Visible session title (Decision A.5 / launch-ux §5.3). createSession
 				// otherwise defaults to "New session"; thread it so a launcher-supplied
 				// title (e.g. "PR Walkthrough") names the sidebar entry.
