@@ -218,7 +218,7 @@ describe("MessageEditor Ctrl/Cmd+Enter steer shortcut", () => {
 		// Enter history browsing so _historyIndex is non -1, then steer.
 		el._history = ["old one", "old two"];
 		el._historyIndex = 0;
-		el._savedDraft = "draft";
+		el._historyEditBuffer = new Map([[-1, "draft"], [0, "edited old one"]]);
 		const recorded: string[] = [];
 		el.addToHistory = async (t: string) => { recorded.push(t); };
 		await setValue(el, "steer me");
@@ -226,7 +226,7 @@ describe("MessageEditor Ctrl/Cmd+Enter steer shortcut", () => {
 
 		expect(spies.onSteerSend).toEqual(["steer me"]);
 		expect(el._historyIndex).toBe(-1);
-		expect(el._savedDraft).toBe("");
+		expect(el._historyEditBuffer).toEqual(new Map());
 		expect(recorded).toEqual(["steer me"]);
 	});
 
