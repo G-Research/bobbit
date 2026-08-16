@@ -960,10 +960,10 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 	},
 	{
 		consumer: "tests2/integration/session-goal-promotion.test.ts",
-		allowReason: "isolated integration session worktree files created to prove staged and untracked content survives promotion",
+		allowReason: "isolated integration session worktree files created to prove staged and untracked content survives promotion and restart",
 		reads: frozen([
-			{ expression: "staged", count: 1 },
-			{ expression: "untracked", count: 1 },
+			{ expression: "staged", count: 2 },
+			{ expression: "untracked", count: 2 },
 		]),
 	},
 	{
