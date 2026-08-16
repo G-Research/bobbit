@@ -192,4 +192,74 @@ describe("SessionStore stale-snapshot guard", () => {
 		assert.equal(JSON.parse(memfs.readFileSync(ARCHIVED_FILE, "utf-8")).sessions[0].title, "archive must still publish");
 		assert.deepEqual(JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8")), liveExternal);
 	});
+
+	it("rejects a stale live-to-archive writer before it can publish an intent or erase winner ownership metadata", async () => {
+		const initial = { ...makeSession("shared"), title: "unprivileged original", projectId: "old-project", teamGoalId: "old-goal", role: "coder", sandboxed: false };
+		const seed = new SessionStore(stateDir, memfs);
+		seed.put(initial);
+		await seed.flushAsync();
+
+		const winner = new SessionStore(stateDir, memfs);
+		const stale = new SessionStore(stateDir, memfs);
+		const winnerFields = { title: "secured live winner", projectId: "secure-project", teamGoalId: "secure-goal", role: "team-lead", sandboxed: true, assistantType: "goal" };
+		winner.update("shared", winnerFields);
+		await winner.flushAsync();
+		const winningLiveBytes = memfs.readFileSync(STORE_FILE, "utf-8");
+		const winningLive = JSON.parse(winningLiveBytes);
+		assert.equal(winningLive.epoch, 2);
+		assert.equal(memfs.existsSync(ARCHIVED_FILE), false);
+
+		const originalError = console.error;
+		console.error = () => {};
+		try {
+			assert.equal(stale.archive("shared"), true);
+			await assert.rejects(stale.flushAsync(), /stale-snapshot|newer than loaded epoch/i);
+		} finally {
+			console.error = originalError;
+		}
+
+		assert.equal(stale.isTierStaleGuardTripped("live"), true);
+		assert.equal(stale.isTierStaleGuardTripped("archived"), false);
+		assert.equal(stale.getTierWrittenEpoch("live"), 0);
+		assert.equal(stale.getTierWrittenEpoch("archived"), 0);
+		assert.equal(memfs.readFileSync(STORE_FILE, "utf-8"), winningLiveBytes, "rejected stale store must not alter winner live bytes");
+		assert.equal(memfs.existsSync(ARCHIVED_FILE), false, "rejected pair must not create an archive tier");
+		assert.equal(memfs.existsSync(`${STORE_FILE}.split-transition`), false, "rejected pair must not publish stale transition authority");
+		assert.deepEqual(winningLive.sessions, [{ ...initial, ...winnerFields }], "winner security and ownership metadata survives");
+	});
+
+	it("rejects a stale archived-to-live writer before it can publish an intent or resurrect a live row", async () => {
+		const initial = { ...makeSession("shared"), title: "unprivileged archive", archived: true, archivedAt: 10, projectId: "old-project", teamGoalId: "old-goal", role: "coder", sandboxed: false };
+		const seed = new SessionStore(stateDir, memfs);
+		seed.put(initial);
+		await seed.flushAsync();
+
+		const winner = new SessionStore(stateDir, memfs);
+		const stale = new SessionStore(stateDir, memfs);
+		const winnerFields = { title: "secured archived winner", projectId: "secure-project", teamGoalId: "secure-goal", role: "reviewer", sandboxed: true, assistantType: "role" };
+		winner.update("shared", winnerFields);
+		await winner.flushAsync();
+		const winningArchiveBytes = memfs.readFileSync(ARCHIVED_FILE, "utf-8");
+		const winningArchive = JSON.parse(winningArchiveBytes);
+		assert.equal(winningArchive.epoch, 2);
+		assert.equal(memfs.existsSync(STORE_FILE), false);
+
+		const originalError = console.error;
+		console.error = () => {};
+		try {
+			stale.update("shared", { archived: false });
+			await assert.rejects(stale.flushAsync(), /stale-snapshot|newer than loaded epoch/i);
+		} finally {
+			console.error = originalError;
+		}
+
+		assert.equal(stale.isTierStaleGuardTripped("archived"), true);
+		assert.equal(stale.isTierStaleGuardTripped("live"), false);
+		assert.equal(stale.getTierWrittenEpoch("live"), 0);
+		assert.equal(stale.getTierWrittenEpoch("archived"), 0);
+		assert.equal(memfs.readFileSync(ARCHIVED_FILE, "utf-8"), winningArchiveBytes, "rejected stale store must not alter winner archive bytes");
+		assert.equal(memfs.existsSync(STORE_FILE), false, "rejected pair must not resurrect a live row");
+		assert.equal(memfs.existsSync(`${STORE_FILE}.split-transition`), false, "rejected pair must not publish stale transition authority");
+		assert.deepEqual(winningArchive.sessions, [{ ...initial, ...winnerFields }], "winner security and ownership metadata survives");
+	});
 });
