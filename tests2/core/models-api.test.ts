@@ -74,13 +74,78 @@ describe("Model registry", () => {
 		}
 	});
 
-	it("derives Claude Agent SDK runtime on manual discovery rows without making runtime selectable", async () => {
-		const [model] = await discoverModelsForConfig({
-			id: "sdk", name: "claude-agent-sdk", type: "manual", baseUrl: "http://localhost:1",
-			models: [{ id: "sonnet", name: "Sonnet" }],
-		});
-		assert.equal(model.runtime, "claude-agent-sdk");
-		assert.equal(model.provider, "claude-agent-sdk");
+	it("offers only deterministic Claude Agent SDK aliases derived from canonical Anthropic rows", () => {
+		const aliases = [
+			["sonnet", "claude-sonnet-5"],
+			["opus", "claude-opus-5"],
+			["fable", "claude-fable-5"],
+			["haiku", "claude-haiku-4-5"],
+		] as const;
+		const sdkModels = models.filter((model) => model.provider === "claude-agent-sdk");
+
+		assert.deepEqual(sdkModels.map((model) => model.id), aliases.map(([alias]) => alias));
+		assert.equal(new Set(sdkModels.map((model) => model.id)).size, aliases.length);
+		assert.ok(sdkModels.every((model) => !model.id.startsWith("claude-")), "canonical Claude IDs must not be SDK selection identities");
+
+		for (const [alias, canonicalId] of aliases) {
+			const canonical = getBuiltinModel("anthropic" as any, canonicalId as any);
+			const sdk = sdkModels.find((model) => model.id === alias);
+			assert.ok(canonical, `Pi should contain anthropic/${canonicalId}`);
+			assert.ok(sdk, `SDK should contain alias ${alias}`);
+			const { authenticated, runtime, ...sdkMetadata } = sdk;
+			assert.equal(runtime, "claude-agent-sdk");
+			assert.equal(typeof authenticated, "boolean");
+			assert.deepEqual(
+				sdkMetadata,
+				{ ...canonical, id: alias, provider: "claude-agent-sdk" },
+				`${alias} must retain Pi's exact canonical display, capability, and cost metadata`,
+			);
+		}
+	});
+
+	it("reserves the Claude Agent SDK provider namespace from custom discovery", async () => {
+		const reservedConfigs = [
+			{ id: "claude-agent-sdk", name: "other", type: "manual", baseUrl: "http://localhost:1" },
+			{ id: "other", name: "claude-agent-sdk", type: "manual", baseUrl: "http://localhost:1" },
+		] as const;
+		for (const config of reservedConfigs) {
+			const discovered = await discoverModelsForConfig({
+				...config,
+				models: [{ id: "claude-haiku-4-5", name: "Canonical Haiku" }],
+			});
+			assert.deepEqual(discovered, [], "custom SDK identities must not reintroduce unsupported canonical rows");
+		}
+
+		try {
+			prefs.set("customProviders", [{
+				...reservedConfigs[1],
+				models: [{ id: "claude-haiku-4-5", name: "Canonical Haiku" }],
+			}]);
+			invalidateModelCache();
+			const sdkModels = (await getAvailableModels(prefs)).filter((model) => model.provider === "claude-agent-sdk");
+			assert.deepEqual(sdkModels.map((model) => model.id), ["sonnet", "opus", "fable", "haiku"]);
+			assert.ok(sdkModels.every((model) => !model.id.startsWith("claude-")));
+		} finally {
+			prefs.remove("customProviders");
+			invalidateModelCache();
+		}
+	});
+
+	it("does not authenticate Claude Agent SDK aliases from an Anthropic provider key", async () => {
+		const before = (await getAvailableModels(prefs))
+			.filter((model) => model.provider === "claude-agent-sdk")
+			.map((model) => model.authenticated);
+		try {
+			prefs.set("providerKey.anthropic", "not-an-oauth-credential");
+			invalidateModelCache();
+			const after = (await getAvailableModels(prefs))
+				.filter((model) => model.provider === "claude-agent-sdk")
+				.map((model) => model.authenticated);
+			assert.deepEqual(after, before, "SDK aliases authenticate only from the Anthropic OAuth credential state");
+		} finally {
+			prefs.remove("providerKey.anthropic");
+			invalidateModelCache();
+		}
 	});
 
 	it("does not add any direct OpenAI rows beyond Pi's current catalogs", () => {
