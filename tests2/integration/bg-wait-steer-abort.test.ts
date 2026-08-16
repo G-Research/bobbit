@@ -11,6 +11,8 @@ import { writeFileSync } from "node:fs";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { readE2EToken, nonGitCwd, injectDefaultProjectId } from "./_e2e/e2e-setup.js";
 import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
+import { readAuthorSidecar } from "../../src/server/agent/author-sidecar.js";
+import { reliableMockCore } from "./helpers/reliable-turn-barriers.js";
 
 interface FakeBgChild extends EventEmitter {
 	pid: number;
@@ -178,6 +180,108 @@ test.describe("bash_bg wait — steer abort", () => {
 		await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes/${bg.id}`, { method: "DELETE" });
 		await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}`, { method: "DELETE" });
 	});
+
+	for (const source of ["task-notification", "auto-nudge"] as const) {
+		test(`automatic ${source} live steer aborts a registered wait and settles its minted occurrence once`, async ({ gateway }) => {
+			let sessionId: string | undefined;
+			let bgId: string | undefined;
+			let core: ReturnType<typeof reliableMockCore> | undefined;
+			try {
+				const sessionRes = await adminFetch(gateway.baseURL, "/api/sessions", {
+					method: "POST",
+					body: JSON.stringify({ cwd: nonGitCwd() }),
+				});
+				expect(sessionRes.status).toBe(201);
+				({ id: sessionId } = await sessionRes.json());
+				if (!sessionId) throw new Error("automatic-steer test session was not created");
+
+				const live = gateway.sessionManager.getSession(sessionId) as any;
+				expect(live, "live session is required for the real delivery path").toBeTruthy();
+				core = reliableMockCore(gateway, sessionId);
+				// Hold the real mock RPC immediately after its receipt so the assertion
+				// observes the server's dispatch→echo seam, not a synthetic ledger.
+				core.armBarrier("steer:1:received");
+				core.armBarrier("steer:1:before-user-start");
+				live.status = "streaming";
+
+				const bgRes = await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes`, {
+					method: "POST",
+					body: JSON.stringify({ command: "fake long-running automatic-steer command", name: "automatic steer sleeper" }),
+				});
+				expect(bgRes.status).toBe(201);
+				({ id: bgId } = await bgRes.json());
+
+				const waitPromise = adminFetch(
+					gateway.baseURL,
+					`/api/sessions/${sessionId}/bg-processes/${bgId}/wait?timeout=60`,
+				).then(async response => ({ status: response.status, body: await response.json() }));
+				await pollUntil(
+					() => ((gateway.bgProcessManager as any).waits as Map<string, Set<unknown>>).get(sessionId!)?.size ? true : false,
+					{ timeoutMs: 5_000, intervalMs: 25, label: "automatic-steer bg wait registered" },
+				);
+
+				const text = `AUTOMATIC_${source.toUpperCase().replace(/-/g, "_")}_WAIT_INTERRUPT`;
+				const interruptStartedAt = Date.now();
+				const delivery = gateway.sessionManager.deliverLiveSteer(sessionId, text, { source });
+				await core.waitForBarrier("steer:1:received");
+				const waitResult = await waitPromise;
+				const interruptElapsedMs = Date.now() - interruptStartedAt;
+
+				expect(waitResult.status).toBe(200);
+				expect(waitResult.body).toMatchObject({ aborted: true, timedOut: false, info: { status: "running" } });
+				expect(interruptElapsedMs, "the dispatched automatic steer must promptly interrupt bash_bg wait").toBeLessThan(500);
+
+				const attempt = live.inFlightSteerTexts?.find((row: any) => row.text === text);
+				expect(attempt, "automatic no-intent callers must mint a reliable occurrence before RPC dispatch").toMatchObject({
+					intentId: expect.any(String),
+					attemptId: expect.stringMatching(/^attempt:/),
+					state: "dispatching",
+					targetTurn: "continuation",
+					source,
+				});
+				expect(live.inFlightSteerTexts?.some((row: any) => row.text === text && !row.intentId),
+					"the automatic steer must never create a legacy/no-intent in-flight record").toBe(false);
+
+				const running = await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes`);
+				const runningProcess = (await running.json()).processes.find((process: any) => process.id === bgId);
+				expect(runningProcess?.status).toBe("running");
+
+				core.releaseBarrier("steer:1:received");
+				await delivery;
+				await core.waitForBarrier("steer:1:before-user-start");
+				core.releaseBarrier("steer:1:before-user-start");
+				await pollUntil(
+					() => !live.inFlightSteerTexts?.some((row: any) => row.intentId === attempt.intentId),
+					{ timeoutMs: 5_000, intervalMs: 25, label: "automatic steer Pi echo settlement" },
+				);
+
+				const commandDeliveries = (core as any).commandJournal.filter((entry: any) =>
+					entry.kind === "steer" && entry.text === `[System]: ${text}`,
+				);
+				expect(commandDeliveries, "one minted occurrence must produce one Pi steer RPC").toHaveLength(1);
+				const echoDeliveries = live.eventBuffer.getAll().filter((entry: any) =>
+					entry.event?.type === "message_end"
+					&& (entry.event?.deliveryIntentId === attempt.intentId
+						|| entry.event?.message?.deliveryIntentId === attempt.intentId),
+				);
+				expect(echoDeliveries, "the exact minted occurrence must have one correlated Pi user echo").toHaveLength(1);
+				const settled = readAuthorSidecar(sessionId).filter(binding => binding.intentId === attempt.intentId);
+				expect(settled).toEqual([
+					expect.objectContaining({ attemptId: attempt.attemptId, settlement: expect.objectContaining({ outcome: "echoed" }) }),
+				]);
+				expect(live.inFlightSteerTexts?.some((row: any) => row.text === text),
+					"settlement removes the reliable carrier rather than leaving a recovery transcript projection").toBe(false);
+				expect(live.inFlightSteerTexts?.some((row: any) => !row.intentId),
+					"the settled automatic occurrence leaves no legacy/no-intent recovery ledger row").toBe(false);
+			} finally {
+				core?.releaseAllBarriers();
+				if (sessionId && bgId) {
+					await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}/bg-processes/${bgId}`, { method: "DELETE" }).catch(() => {});
+				}
+				if (sessionId) await adminFetch(gateway.baseURL, `/api/sessions/${sessionId}`, { method: "DELETE" }).catch(() => {});
+			}
+		});
+	}
 
 	test("session termination releases hanging wait handlers", async ({ gateway }) => {
 		const res = await adminFetch(gateway.baseURL, "/api/sessions", {

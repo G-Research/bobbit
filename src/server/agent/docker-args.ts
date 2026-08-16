@@ -78,8 +78,10 @@ export function projectSandboxVolumeNames(projectId: string, runId = process.env
 /**
  * Explicitly create project sandbox volumes before the container. This gives
  * every new volume an owner label; Docker's implicit named-volume creation
- * cannot attach labels. The keyed shape keeps callers from coupling a mount to
- * the incidental ordering of another helper's argument list.
+ * cannot attach labels. `initializationId` is an unguessable per-attempt marker
+ * used by ProjectSandbox to prove it created the volume before changing its
+ * ownership. It must never be supplied for an existing volume. The keyed shape
+ * keeps callers from coupling a mount to incidental argument ordering.
  */
 export function projectSandboxVolumeCreateArgsByKey(
 	projectId: string,

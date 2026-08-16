@@ -149,6 +149,11 @@ export async function startTailPhaseTracker(page: Page, key: string, markers: st
 		if (!el || !content) throw new Error("tail phase tracker: chat content container not found");
 
 		const expected = new Set(phaseMarkers);
+		const expectedIndex = new Map(phaseMarkers.map((marker, index) => [marker, index]));
+		// Marker delivery and layout settlement are independent browser phases.
+		// Queue markers in protocol order, then publish one later settled geometry
+		// per marker so a fast later stream frame cannot overwrite the earlier
+		// phase's proof.
 		const pending = new Map<string, number>();
 		const evidence = new Map<string, ScrollProbe>();
 		const waiters = new Map<string, Array<{ resolve: (sample: ScrollProbe) => void; reject: (reason: Error) => void }>>();
@@ -156,6 +161,7 @@ export async function startTailPhaseTracker(page: Page, key: string, markers: st
 		const markerOccurrences = new Map<string, number>();
 		const pendingDomEchoes = new Set<string>();
 		let visibleMarkers = new Set<string>();
+		let nextExpectedMarkerIndex = 0;
 		let lastEvidenceHeight = el.scrollHeight;
 		let failure: Error | null = null;
 		let active = true;
@@ -196,10 +202,12 @@ export async function startTailPhaseTracker(page: Page, key: string, markers: st
 					fail(`duplicate exact marker ${marker}`);
 					continue;
 				}
-				if (pending.size !== 0) {
-					fail(`overlapping marker ${marker} arrived before ${pending.keys().next().value} settled`);
+				const index = expectedIndex.get(marker)!;
+				if (index !== nextExpectedMarkerIndex) {
+					fail(`marker ${marker} arrived out of protocol order; expected ${phaseMarkers[nextExpectedMarkerIndex] ?? "no further marker"}`);
 					continue;
 				}
+				nextExpectedMarkerIndex++;
 				if (eventId) {
 					markerEventIds.set(marker, eventId);
 					pendingDomEchoes.add(marker);
@@ -213,27 +221,32 @@ export async function startTailPhaseTracker(page: Page, key: string, markers: st
 		};
 		const detectMarkersAtCommit = () => detectMarkers(textAtMutation(), true);
 		const publishSettledEvidence = () => {
-			for (const [marker, heightAtMarker] of pending) {
-				const growth = el.scrollHeight - heightAtMarker;
-				const sample = {
-					overflow: el.scrollHeight - el.clientHeight,
-					distance: el.scrollHeight - el.scrollTop - el.clientHeight,
-					scrollTop: el.scrollTop,
-					scrollHeight: el.scrollHeight,
-					clientHeight: el.clientHeight,
-					growth,
-				};
-				if (growth <= 0 || sample.distance > pinnedTailPx) continue;
-				if (sample.scrollHeight <= lastEvidenceHeight) {
-					fail(`marker ${marker} reused or regressed settled height ${sample.scrollHeight} (previous ${lastEvidenceHeight})`);
-					continue;
-				}
-				lastEvidenceHeight = sample.scrollHeight;
-				pending.delete(marker);
-				evidence.set(marker, sample);
-				for (const waiter of waiters.get(marker) ?? []) waiter.resolve(sample);
-				waiters.delete(marker);
+			// Consume only the head of the protocol queue. Multiple markers can arrive
+			// before the browser completes two re-pin frames; letting them share this
+			// geometry would either reject a valid fast stream or falsely give both
+			// phases one height. The next mutation/resize/scroll settles the next phase.
+			const next = pending.entries().next().value as [string, number] | undefined;
+			if (!next) return;
+			const [marker, heightAtMarker] = next;
+			const growth = el.scrollHeight - heightAtMarker;
+			const sample = {
+				overflow: el.scrollHeight - el.clientHeight,
+				distance: el.scrollHeight - el.scrollTop - el.clientHeight,
+				scrollTop: el.scrollTop,
+				scrollHeight: el.scrollHeight,
+				clientHeight: el.clientHeight,
+				growth,
+			};
+			if (growth <= 0 || sample.distance > pinnedTailPx) return;
+			if (sample.scrollHeight <= lastEvidenceHeight) {
+				fail(`marker ${marker} reused or regressed settled height ${sample.scrollHeight} (previous ${lastEvidenceHeight})`);
+				return;
 			}
+			lastEvidenceHeight = sample.scrollHeight;
+			pending.delete(marker);
+			evidence.set(marker, sample);
+			for (const waiter of waiters.get(marker) ?? []) waiter.resolve(sample);
+			waiters.delete(marker);
 		};
 		const settle = () => {
 			if (!active || framePending) return;
@@ -318,7 +331,7 @@ export async function awaitTailGrowthPhase(page: Page, key: string, marker: stri
 	}, { trackerKey: key, phaseMarker: marker });
 }
 
-/** Stop the tracker only after every exact marker has one non-overlapping proof. */
+/** Stop the tracker only after every exact marker has one ordered, distinct proof. */
 export async function stopTailPhaseTracker(page: Page, key: string): Promise<ScrollProbe[]> {
 	return await page.evaluate((trackerKey) => {
 		const w = window as any;
@@ -345,8 +358,8 @@ export async function stopTailPhaseTracker(page: Page, key: string): Promise<Scr
  * therefore assertions about every *settled* observable growth state, not
  * arbitrary points in time.
  */
-export async function startTailSampler(page: Page, key: string): Promise<void> {
-	await page.evaluate(({ scrollSel, sampleKey }) => {
+export async function startTailSampler(page: Page, key: string, tailPx = TAIL_PX): Promise<void> {
+	await page.evaluate(({ scrollSel, sampleKey, pinnedTailPx }) => {
 		const w = window as any;
 		const samplerKey = `${sampleKey}Sampler`;
 		w[samplerKey]?.disconnect?.();
@@ -365,10 +378,20 @@ export async function startTailSampler(page: Page, key: string): Promise<void> {
 		const recordSettledGrowth = () => {
 			const current = el.scrollHeight;
 			const growth = current - lastSettledHeight;
-			// A shrink resets the comparison point but is not a stream-growth
-			// sample. A later grow is still measured from this settled geometry.
+			if (growth <= 0) {
+				// A shrink resets the comparison point but is not a stream-growth
+				// sample. A later grow is still measured from this settled geometry.
+				lastSettledHeight = current;
+				return;
+			}
+			const distance = current - el.scrollTop - el.clientHeight;
+			if (distance > pinnedTailPx) {
+				// Keep the same baseline until the matching follow-tail scroll lands.
+				// Discarding this observation would hide a real drift; publishing it
+				// now would call an intermediate layout a settled user-visible state.
+				return;
+			}
 			lastSettledHeight = current;
-			if (growth <= 0) return;
 			w[sampleKey].push({
 				t: Math.round(performance.now() - start),
 				scrollTop: el.scrollTop,
@@ -389,9 +412,10 @@ export async function startTailSampler(page: Page, key: string): Promise<void> {
 						framePending = false;
 						return;
 					}
-					// More transcript/layout growth can arrive while the two-frame
-					// re-pin boundary is pending. Restart from that latest event;
-					// otherwise this callback could read its intentional transient.
+					// More transcript/layout growth or its programmatic follow-tail
+					// scroll can arrive while the two-frame boundary is pending.
+					// Restart at that latest lifecycle event rather than publishing
+					// its intermediate geometry.
 					if (version !== settleVersion) {
 						waitForLatestGrowth(settleVersion);
 						return;
@@ -407,12 +431,17 @@ export async function startTailSampler(page: Page, key: string): Promise<void> {
 		mutations.observe(content, { childList: true, subtree: true, characterData: true });
 		const growth = new ResizeObserver(sampleAfterRepinFrames);
 		growth.observe(content);
+		// A transcript resize and AgentInterface's programmatic scroll are separate
+		// browser events. Retain a pending positive delta until this follow-tail
+		// event has completed its own two-frame lifecycle.
+		el.addEventListener("scroll", sampleAfterRepinFrames);
 
 		w[samplerKey] = {
 			disconnect: () => {
 				active = false;
 				mutations.disconnect();
 				growth.disconnect();
+				el.removeEventListener("scroll", sampleAfterRepinFrames);
 			},
 			flush: () => new Promise<void>((resolve) => {
 				// Stop observing first so this flush is a stable final state, then
@@ -421,13 +450,14 @@ export async function startTailSampler(page: Page, key: string): Promise<void> {
 				active = false;
 				mutations.disconnect();
 				growth.disconnect();
+				el.removeEventListener("scroll", sampleAfterRepinFrames);
 				requestAnimationFrame(() => requestAnimationFrame(() => {
 					recordSettledGrowth();
 					resolve();
 				}));
 			}),
 		};
-	}, { scrollSel: SCROLL_SEL, sampleKey: key });
+	}, { scrollSel: SCROLL_SEL, sampleKey: key, pinnedTailPx: tailPx });
 }
 
 export async function stopTailSampler(page: Page, key: string): Promise<TailSample[]> {

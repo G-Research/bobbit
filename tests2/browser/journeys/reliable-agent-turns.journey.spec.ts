@@ -64,6 +64,16 @@ async function expectTarget(
 	await expect(row).toHaveAttribute("data-target-turn", target);
 }
 
+async function expectCanonicalHumanReplyTail(page: Page, prompt: string): Promise<void> {
+	await expect.poll(() => page.locator("user-message, assistant-message").evaluateAll((nodes) =>
+		nodes.slice(-2).map((node) => ({ tag: node.tagName, text: node.textContent?.trim() ?? "" })),
+	), { timeout: 20_000, message: "the settled human prompt and Pi reply must remain the canonical transcript tail" })
+		.toEqual([
+			{ tag: "USER-MESSAGE", text: expect.stringContaining(prompt) },
+			{ tag: "ASSISTANT-MESSAGE", text: expect.stringContaining("OK") },
+		]);
+}
+
 test.describe("Journey: Reliable Agent Turns", () => {
 	test.setTimeout(120_000);
 
@@ -420,6 +430,51 @@ test.describe("Journey: Reliable Agent Turns", () => {
 		} finally {
 			await context.setOffline(false).catch(() => {});
 			await secondPage?.close().catch(() => {});
+			await scenario.cleanup();
+		}
+	});
+
+	test("large pending task notifications stay in the outbox while the human prompt and reply remain the reload tail", async ({ page, gateway }) => {
+		const scenario = await createScenario(page, gateway);
+		try {
+			const prompt = "RAT_VISIBLE_HUMAN_PROMPT_AFTER_LARGE_TASK_NOTIFICATIONS";
+			const notifications = ["alpha", "beta", "gamma"].map((task) =>
+				`Task complete: ${task} — RAT_PENDING_TASK_NOTIFICATION_${task.toUpperCase()}\n${"Detailed worker result retained for reliable recovery. ".repeat(90)}`,
+			);
+			const humanEcho = scenario.runtime.holdEcho(prompt);
+			const notificationEchoes = notifications.map((text) => scenario.runtime.holdTaskNotificationEcho(text));
+
+			await submit(page, prompt);
+			await humanEcho.entered;
+			const [humanIntentId] = await captureIntentIds(page, prompt);
+			await expectOneCarrier(page, humanIntentId, "outbox");
+
+			// These are server-generated task-complete steers: the browser does not
+			// provide their occurrence IDs. They must still receive durable delivery
+			// identity and stay in the delivery surface, not the transcript.
+			await scenario.runtime.dispatchTaskNotifications(notifications);
+			const notificationIntentIds = (await Promise.all(notifications.map((text) => captureIntentIds(page, text)))).flat();
+			for (const id of notificationIntentIds) await expectOneCarrier(page, id, "outbox");
+			await expectOneCarrier(page, humanIntentId, "outbox");
+
+			humanEcho.release();
+			await notificationEchoes[0].entered;
+			await expectTranscriptText(page, humanIntentId, prompt);
+			await expectOneCarrier(page, humanIntentId, "transcript");
+			await expectCanonicalHumanReplyTail(page, prompt);
+			for (const text of notifications) {
+				await expect(page.locator("user-message").filter({ hasText: text })).toHaveCount(0);
+			}
+
+			await page.reload({ waitUntil: "domcontentloaded" });
+			await expect(editor(page)).toBeVisible({ timeout: 20_000 });
+			await expectOneCarrier(page, humanIntentId, "transcript");
+			for (const id of notificationIntentIds) await expectOneCarrier(page, id, "outbox");
+			await expectCanonicalHumanReplyTail(page, prompt);
+			for (const text of notifications) {
+				await expect(page.locator("user-message").filter({ hasText: text })).toHaveCount(0);
+			}
+		} finally {
 			await scenario.cleanup();
 		}
 	});

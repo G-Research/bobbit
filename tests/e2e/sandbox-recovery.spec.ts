@@ -296,91 +296,58 @@ test.describe("atomic models.json bind mount", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Named-volume ownership recovery. This requires a live Docker daemon because
-// Docker itself creates the root-owned volume roots we must repair.
+// Empty root-owned named volumes are recoverable after a failed create.
 // ---------------------------------------------------------------------------
 
-test.describe("named volume ownership recovery", () => {
-	test("repairs pre-existing root-owned volume roots without changing their contents", async () => {
+test.describe("sandbox ownership recovery", () => {
+	test("repairs a pre-created empty root-owned worktrees volume", async () => {
 		test.skip(!isDockerAvailable(), "Docker not available");
-		const root = mkdtempSync(path.join(tmpdir(), "bobbit-volume-ownership-"));
+		const root = mkdtempSync(path.join(tmpdir(), "bobbit-worktrees-recovery-"));
 		const source = path.join(root, "source");
-		const projectId = `ownership-${randomUUID()}`;
-		const runId = `ownership-run-${randomUUID()}`;
+		const projectId = `worktrees-recovery-${randomUUID()}`;
+		const runId = `run-${randomUUID()}`;
+		const priorRunId = process.env.BOBBIT_E2E_RUN_ID;
 		const volumes = projectSandboxVolumeNames(projectId, runId);
-		const originalRunId = process.env.BOBBIT_E2E_RUN_ID;
 		const docker = (args: string[]): string => execFileSync("docker", args, { encoding: "utf-8" }).trim();
-		const rootOwnership = (containerId: string, directory: string): string => docker([
-			"exec", containerId, "stat", "-c", "%U:%G", directory,
-		]);
-		const removeResources = (): void => {
-			try {
-				const containers = docker([
-					"ps", "-aq", "--filter", `label=bobbit-project=${projectId}`,
-					"--filter", `label=bobbit-e2e-run=${runId}`,
-				]).split(/\s+/).filter(Boolean);
-				for (const containerId of containers) docker(["rm", "-f", containerId]);
-			} catch { /* Cleanup remains best-effort after failed Docker assertions. */ }
-			for (const volume of Object.values(volumes)) {
-				try { docker(["volume", "rm", "-f", volume]); } catch { /* Already removed. */ }
-			}
-		};
-
+		let sandbox: ProjectSandbox | undefined;
 		try {
-			mkdirSync(source, { recursive: true });
 			docker(["image", "inspect", "bobbit-agent"]);
-			execFileSync("git", ["init", "-b", "main"], { cwd: source, stdio: "ignore" });
+			mkdirSync(source, { recursive: true });
+			execFileSync("git", ["init"], { cwd: source, stdio: "ignore" });
 			writeFileSync(path.join(source, "README.md"), "sandbox source\n");
 			execFileSync("git", ["add", "README.md"], { cwd: source, stdio: "ignore" });
 			execFileSync("git", ["-c", "user.name=Bobbit", "-c", "user.email=bobbit@bobbit.ai", "commit", "-m", "sandbox source"], { cwd: source, stdio: "ignore" });
 
-			for (const volume of Object.values(volumes)) {
-				docker([
-					"volume", "create", "--label", `bobbit-project=${projectId}`,
-					"--label", `bobbit-e2e-run=${runId}`, volume,
-				]);
-			}
-			// Simulate an initialization that created volumes but failed before its
-			// root-ownership setup. The sentinel must remain root-owned afterwards,
-			// proving recovery never recursively chowns persisted worktree contents.
+			// This models a first create which allocated the volume but died before
+			// its ownership-repair exec. Docker initializes named-volume roots as root.
 			docker([
-				"run", "--rm", "-u", "root",
-				"-v", `${volumes.workspace}:/workspace`,
-				"-v", `${volumes.worktrees}:/workspace-wt`,
-				"bobbit-agent", "sh", "-c",
-				"touch /workspace-wt/pre-existing && chown root:root /workspace /workspace-wt /workspace-wt/pre-existing",
+				"volume", "create",
+				"--label", `bobbit-project=${projectId}`,
+				"--label", `bobbit-e2e-run=${runId}`,
+				"--label", `bobbit-volume-initialization=${randomUUID()}`,
+				volumes.worktrees,
 			]);
 
 			process.env.BOBBIT_E2E_RUN_ID = runId;
-			const sandboxOptions = {
+			sandbox = new ProjectSandbox({
 				projectId,
 				projectDir: root,
 				repoUrl: "file:///workspace-src",
-				cloneSource: { kind: "mounted" as const, hostPath: source, mountPath: "/workspace-src", cloneUrl: "file:///workspace-src" },
+				cloneSource: { kind: "mounted", hostPath: source, mountPath: "/workspace-src", cloneUrl: "file:///workspace-src" },
 				image: "bobbit-agent",
-			};
-			const sandbox = new ProjectSandbox(sandboxOptions);
+			});
 			await sandbox.init();
 			const containerId = await sandbox.getContainerId();
-			expect(rootOwnership(containerId, "/workspace")).toBe("node:node");
-			expect(rootOwnership(containerId, "/workspace-wt")).toBe("node:node");
 
-			// A retry can find the incomplete container itself, not merely the
-			// volumes. Recreate that condition and prove reconnect repairs the same
-			// two roots while retaining all existing child ownership.
-			docker(["exec", "-u", "root", containerId, "sh", "-c", "chown root:root /workspace /workspace-wt"]);
-			const recoveredSandbox = new ProjectSandbox(sandboxOptions);
-			await recoveredSandbox.init();
-			expect(containerId.startsWith(await recoveredSandbox.getContainerId())).toBe(true);
-			expect(rootOwnership(containerId, "/workspace")).toBe("node:node");
-			expect(rootOwnership(containerId, "/workspace-wt")).toBe("node:node");
-			expect(rootOwnership(containerId, "/workspace-wt/pre-existing")).toBe("root:root");
-			expect(await recoveredSandbox.createWorktree("ownership-recovery", "ownership/recovery", "origin/main"))
-				.toBe("/workspace-wt/ownership-recovery");
+			expect(docker(["exec", containerId, "stat", "-c", "%U:%G", "/workspace-wt"])).toBe("node:node");
+			expect(docker(["exec", containerId, "find", "/workspace-wt", "-mindepth", "1", "-maxdepth", "1", "-print", "-quit"])).toBe("");
 		} finally {
-			removeResources();
-			if (originalRunId === undefined) delete process.env.BOBBIT_E2E_RUN_ID;
-			else process.env.BOBBIT_E2E_RUN_ID = originalRunId;
+			await sandbox?.destroy().catch(() => {});
+			for (const volume of Object.values(volumes)) {
+				try { docker(["volume", "rm", "-f", volume]); } catch { /* best-effort cleanup */ }
+			}
+			if (priorRunId === undefined) delete process.env.BOBBIT_E2E_RUN_ID;
+			else process.env.BOBBIT_E2E_RUN_ID = priorRunId;
 			rmSync(root, { recursive: true, force: true });
 		}
 	});

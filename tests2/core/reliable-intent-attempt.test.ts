@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { normalizePersistedInFlightSteers } from "../../src/server/agent/session-store.js";
 import { PromptQueue } from "../../src/server/agent/prompt-queue.js";
 import { reconcilePersistedIntentRestore } from "../../src/server/agent/session-manager.js";
-import { foldAuthorSidecarRecords, initAuthorSidecarDir } from "../../src/server/agent/author-sidecar.js";
+import { foldAuthorSidecarRecords, initAuthorSidecarDir, readAuthorSidecar } from "../../src/server/agent/author-sidecar.js";
 import { LOCAL_USER_AUTHOR } from "../../src/shared/message-author.js";
 import {
 	barrier,
@@ -111,6 +111,274 @@ describe("reliable intent dispatch attempt settlement", () => {
 		manager.handleAgentLifecycle(session, terminal);
 		expect(terminal.deliveryIntentId ?? terminal.message?.deliveryIntentId).toBe("intent-held");
 		expect(ledgerFor(session, "intent-held")).toBeUndefined();
+	});
+
+	it("assigns automatic system steers a stable reliable occurrence before dispatch", async () => {
+		const ack = barrier<any>();
+		const steer = vi.fn(() => ack.hold());
+		const { manager, session } = useHarness({
+			rpcClient: {
+				steer,
+				prompt: vi.fn(async () => ({ success: true })),
+				getState: vi.fn(async () => ({ success: true, data: {} })),
+			},
+		});
+
+		const dispatch = manager.deliverLiveSteer(session.id, "task T completed", { source: "system" });
+		await ack.entered;
+
+		const [pending] = session.inFlightSteerTexts;
+		expect(pending, "automatic system steers must have a reliable occurrence identity").toMatchObject({
+			intentId: expect.any(String),
+			attemptId: expect.stringMatching(/^attempt:/),
+			state: "dispatching",
+			targetTurn: "continuation",
+			source: "system",
+		});
+		expect(pending.promptId).toBe(pending.intentId);
+		expect(manager.projectDeliveryOutbox(session.id)).toEqual([
+			expect.objectContaining({ id: pending.intentId, deliveryState: "dispatching" }),
+		]);
+
+		ack.release({ success: true });
+		await dispatch;
+	});
+
+	it("parks a task-notification steer at the error cap without invoking Pi", async () => {
+		const { manager, session, prompt, steer, storeUpdates } = useHarness({
+			status: "idle",
+			lastTurnErrored: true,
+			lastTurnErrorMessage: "provider failure",
+			consecutiveErrorTurns: 3,
+		});
+
+		const result = await manager.deliverLiveSteer(session.id, "Task T completed", { source: "system" });
+		const [parked] = session.promptQueue.toArray() as any[];
+
+		expect(result).toMatchObject({ status: "queued" });
+		expect(parked).toMatchObject({
+			id: expect.any(String),
+			text: "Task T completed",
+			kind: "steer",
+			targetTurn: "next-turn",
+			deliveryState: "queued",
+			source: "system",
+		});
+		expect(session.inFlightSteerTexts).toEqual([]);
+		expect(prompt).not.toHaveBeenCalled();
+		expect(steer).not.toHaveBeenCalled();
+		expect(storeUpdates.some((patch) =>
+			Array.isArray(patch.messageQueue)
+			&& (patch.messageQueue as any[]).some((row) => row.id === parked.id),
+		)).toBe(true);
+	});
+
+	it("routes an errored task-notification steer through one prefixed reliable prompt", async () => {
+		const { manager, session, clock, prompt, steer } = useHarness({
+			status: "idle",
+			lastTurnErrored: true,
+			lastTurnErrorMessage: "provider retryable fault",
+			consecutiveErrorTurns: 2,
+		});
+		session.pendingAutoRetryTimer = clock.setTimeout(() => {
+			throw new Error("cancelled auto retry fired");
+		}, 60_000);
+
+		const result = await manager.deliverLiveSteer(session.id, "Task T completed", { source: "system" });
+		const [inFlight] = session.inFlightSteerTexts as any[];
+		const dispatchedText = prompt.mock.calls[0]?.[0];
+
+		expect(result).toMatchObject({ status: "dispatched" });
+		expect(inFlight).toMatchObject({
+			intentId: expect.any(String),
+			promptId: expect.any(String),
+			state: "dispatching",
+			kind: "steer",
+			source: "system",
+		});
+		expect(inFlight.promptId).toBe(inFlight.intentId);
+		expect(session.promptQueue.toArray()).toEqual([]);
+		expect(session.pendingAutoRetryTimer).toBeUndefined();
+		expect(session.lastTurnErrored).toBe(false);
+		expect(prompt).toHaveBeenCalledTimes(1);
+		expect(steer).not.toHaveBeenCalled();
+		expect(dispatchedText).toContain("[SYSTEM: previous turn failed with: provider retryable fault.");
+		expect(dispatchedText).toContain("Task T completed");
+	});
+
+	it("gives source-less prompt and steer admissions reliable carriers while compacting", async () => {
+		const { manager, session, prompt, steer } = useHarness({
+			status: "idle",
+			isCompacting: true,
+		});
+
+		await manager.enqueuePrompt(session.id, "queued while compacting");
+		await manager.deliverLiveSteer(session.id, "steer while compacting");
+		const rows = session.promptQueue.toArray() as any[];
+
+		expect(rows).toHaveLength(2);
+		expect(rows).toEqual(expect.arrayContaining([
+			expect.objectContaining({
+				id: expect.any(String),
+				text: "queued while compacting",
+				kind: "prompt",
+				targetTurn: "next-turn",
+				deliveryState: "queued",
+				sequence: expect.any(Number),
+			}),
+			expect.objectContaining({
+				id: expect.any(String),
+				text: "steer while compacting",
+				kind: "steer",
+				targetTurn: "next-turn",
+				deliveryState: "queued",
+				sequence: expect.any(Number),
+			}),
+		]));
+		expect(new Set(rows.map((row) => row.id)).size).toBe(2);
+		expect(prompt).not.toHaveBeenCalled();
+		expect(steer).not.toHaveBeenCalled();
+	});
+
+	it("gives a caller-intent-less live user steer one authoritative carrier that exact Pi echo settles", async () => {
+		const ack = barrier<any>();
+		const steer = vi.fn(() => ack.hold());
+		const { manager, session } = useHarness({
+			rpcClient: {
+				steer,
+				prompt: vi.fn(async () => ({ success: true })),
+				getState: vi.fn(async () => ({ success: true, data: {} })),
+			},
+		});
+
+		const dispatch = manager.deliverLiveSteer(session.id, "local live steer", { source: "user" });
+		await ack.entered;
+		const [carrier] = session.inFlightSteerTexts;
+		expect(carrier).toMatchObject({
+			intentId: expect.any(String),
+			attemptId: expect.stringMatching(/^attempt:/),
+			promptId: expect.any(String),
+			state: "dispatching",
+			source: "user",
+		});
+		expect(carrier.promptId).toBe(carrier.intentId);
+		expect(manager.projectDeliveryOutbox(session.id)).toEqual([
+			expect.objectContaining({ id: carrier.intentId, deliveryState: "dispatching" }),
+		]);
+		expect(session.inFlightSteerTexts.some((row: any) => !row.intentId)).toBe(false);
+
+		ack.release({ success: true });
+		await dispatch;
+		const start = manager.prepareVisibleAgentEvent(session, userStart("local live steer", "pi-local-live"));
+		manager.handleAgentLifecycle(session, start);
+		expect(start.deliveryIntentId).toBe(carrier.intentId);
+		const end = manager.prepareVisibleAgentEvent(session, userEnd("local live steer", "pi-local-live"));
+		manager.handleAgentLifecycle(session, end);
+		expect(session.inFlightSteerTexts).toEqual([]);
+		expect(manager.projectDeliveryOutbox(session.id)).toEqual([]);
+	});
+
+	it("keeps same-text local and team steers distinct while deduping a replayed occurrence", async () => {
+		const ack = barrier<any>();
+		const steer = vi.fn(() => ack.hold());
+		const { manager, session } = useHarness({
+			rpcClient: {
+				steer,
+				prompt: vi.fn(async () => ({ success: true })),
+				getState: vi.fn(async () => ({ success: true, data: {} })),
+			},
+		});
+
+		const first = manager.deliverLiveSteer(session.id, "same local-team text", { source: "user" });
+		await ack.entered;
+		const firstId = session.inFlightSteerTexts[0].intentId;
+		const replay = await manager.deliverLiveSteer(session.id, "same local-team text", {
+			source: "user",
+			intentId: firstId,
+		});
+		const second = manager.deliverLiveSteer(session.id, "same local-team text", { source: "agent" });
+		await flushMicrotasks();
+
+		expect(replay).toMatchObject({ duplicate: true, id: firstId });
+		expect(steer).toHaveBeenCalledTimes(1);
+		ack.release({ success: true });
+		await first;
+		await vi.waitFor(() => expect(steer).toHaveBeenCalledTimes(2));
+		expect(session.inFlightSteerTexts.map((row: any) => row.intentId)).toEqual([
+			firstId,
+			expect.any(String),
+		]);
+		expect(session.inFlightSteerTexts[1].intentId).not.toBe(firstId);
+		await second;
+	});
+
+	it("retries a minted local occurrence without collapsing a same-text team steer", async () => {
+		const steer = vi.fn()
+			.mockResolvedValueOnce({ success: false, error: "rejected before start" })
+			.mockResolvedValueOnce({ success: true })
+			.mockResolvedValueOnce({ success: true });
+		const { manager, session } = useHarness({
+			rpcClient: {
+				steer,
+				prompt: vi.fn(async () => ({ success: true })),
+				getState: vi.fn(async () => ({ success: true, data: {} })),
+			},
+		});
+		vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await expect(manager.deliverLiveSteer(session.id, "same local-team retry text", { source: "user" }))
+			.rejects.toThrow(/rejected before start/i);
+		const localId = session.promptQueue.peek()?.id;
+		expect(localId).toEqual(expect.any(String));
+		expect(session.promptQueue.peek()).toMatchObject({ id: localId, deliveryState: "failed" });
+
+		await manager.deliverLiveSteer(session.id, "same local-team retry text", { source: "agent" });
+		const teamId = session.inFlightSteerTexts.find((row: any) => row.intentId !== localId)?.intentId;
+		expect(teamId).toEqual(expect.any(String));
+		expect(teamId).not.toBe(localId);
+
+		expect(manager.retryIntent(session.id, localId)).toBe(true);
+		await vi.waitFor(() => expect(steer).toHaveBeenCalledTimes(3));
+		expect(session.inFlightSteerTexts.map((row: any) => row.intentId)).toEqual(
+			expect.arrayContaining([localId, teamId]),
+		);
+	});
+
+	it("collapses a restored stale queue row and unresolved sidecar tuple into one uncertain owner", () => {
+		const intentId = "automatic:restored-ambiguous";
+		const attemptId = "attempt:restored-ambiguous";
+		const dispatchEpoch = 42;
+		const restored = reconcilePersistedIntentRestore([{
+			id: intentId,
+			text: "automatic work that may have landed",
+			isSteered: false,
+			createdAt: dispatchEpoch,
+			kind: "prompt",
+			targetTurn: "next-turn",
+			deliveryState: "queued",
+			source: "system",
+		}], undefined, foldAuthorSidecarRecords([{
+			schemaVersion: 2,
+			type: "prompt-author",
+			promptId: intentId,
+			intentId,
+			attemptId,
+			dispatchEpoch,
+			dispatchedAt: dispatchEpoch,
+			modelTextDigest: TEST_MODEL_TEXT_DIGEST,
+			source: "system",
+			author: { kind: "system", id: "system:bobbit", label: "Bobbit" },
+		}]));
+
+		expect(restored.messageQueue).toBeUndefined();
+		expect(restored.inFlightSteerTexts).toEqual([expect.objectContaining({
+			intentId,
+			attemptId,
+			state: "uncertain",
+			retryable: false,
+		})]);
+		expect(new PromptQueue(restored.messageQueue).length).toBe(0);
+		expect(restored.changed).toBe(true);
 	});
 
 	it("serializes rapid identical steers and correlates each occurrence exactly once", async () => {
@@ -286,6 +554,128 @@ describe("reliable intent dispatch attempt settlement", () => {
 			state: "uncertain",
 			retryable: false,
 		});
+	});
+
+	it("keeps a queued task notification uncertain after an ambiguous prompt transport failure", async () => {
+		const prompt = vi.fn(async () => { throw new Error("socket closed after write"); });
+		const { manager, session, clock, storeUpdates } = useHarness({
+			rpcClient: {
+				prompt,
+				steer: vi.fn(async () => ({ success: true })),
+				getState: vi.fn(async () => ({ success: true, data: {} })),
+			},
+		});
+		const cancel = vi.spyOn(manager, "cancelPromptAuthorDispatch");
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const intentId = "task-complete:ambiguous";
+
+		await manager.enqueuePrompt(session.id, "Task T completed.", { source: "system", intentId });
+		expect(session.promptQueue.peek()).toMatchObject({ id: intentId, deliveryState: "queued" });
+		session.status = "idle";
+		manager.drainQueue(session);
+		await flushMicrotasks();
+
+		expect(prompt).toHaveBeenCalledTimes(1);
+		expect(session.promptQueue.toArray()).toEqual([]);
+		expect(ledgerFor(session, intentId)).toMatchObject({ intentId, state: "uncertain", retryable: false });
+		expect(manager.projectDeliveryOutbox(session.id)).toEqual([
+			expect.objectContaining({ id: intentId, deliveryState: "uncertain", retryable: false }),
+		]);
+		expect(cancel).not.toHaveBeenCalled();
+		expect(readAuthorSidecar(session.id).at(-1)?.settlement).toBeUndefined();
+		expect(storeUpdates.at(-1)).toMatchObject({
+			inFlightSteerTexts: [expect.objectContaining({ intentId, state: "uncertain", retryable: false })],
+		});
+
+		clock.advance(60_000);
+		await flushMicrotasks();
+		expect(prompt).toHaveBeenCalledTimes(1);
+	});
+
+	it("releases an ambiguous queued verifier receipt without retiring its prompt carrier", async () => {
+		const prompt = vi.fn(async (): Promise<{ success: boolean }> => { throw new Error("transport lost after write"); });
+		const { manager, session } = useHarness({
+			status: "idle",
+			rpcClient: {
+				prompt,
+				steer: vi.fn(async () => ({ success: true })),
+				getState: vi.fn(async () => ({ success: true, data: {} })),
+			},
+		});
+		const cancel = vi.spyOn(manager, "cancelPromptAuthorDispatch");
+		vi.spyOn(console, "error").mockImplementation(() => {});
+
+		const first = manager.enqueueVerifierPrompt(session.id, "Run verification.");
+		await expect(first.dispatched).rejects.toThrow(/transport outcome is uncertain/);
+		expect(prompt).toHaveBeenCalledTimes(1);
+		expect(ledgerFor(session, first.rowId)).toMatchObject({
+			intentId: first.rowId,
+			state: "uncertain",
+			retryable: false,
+		});
+		expect(session.promptQueue.toArray()).toEqual([]);
+		expect(cancel).not.toHaveBeenCalled();
+		expect(readAuthorSidecar(session.id).at(-1)?.settlement).toBeUndefined();
+
+		// The receipt is independent from the uncertain carrier: the verifier can
+		// start a new lifecycle occurrence while the original remains outbox-owned.
+		prompt.mockResolvedValueOnce({ success: true });
+		session.status = "idle";
+		const second = manager.enqueueVerifierPrompt(session.id, "Run verification again.");
+		await expect(second.dispatched).resolves.toBeUndefined();
+		expect(second.rowId).not.toBe(first.rowId);
+		expect(ledgerFor(session, first.rowId)).toMatchObject({ state: "uncertain", retryable: false });
+		expect(prompt).toHaveBeenCalledTimes(2);
+	});
+
+	it("returns a queued task notification to bounded recovery only on success false", async () => {
+		const prompt = vi.fn(async () => ({ success: false, error: "preflight rejected" }));
+		const { manager, session } = useHarness({
+			rpcClient: {
+				prompt,
+				steer: vi.fn(async () => ({ success: true })),
+				getState: vi.fn(async () => ({ success: true, data: {} })),
+			},
+		});
+		const intentId = "task-complete:no-start";
+
+		await manager.enqueuePrompt(session.id, "Task T could not start.", { source: "system", intentId });
+		session.status = "idle";
+		manager.drainQueue(session);
+		await flushMicrotasks();
+
+		expect(prompt).toHaveBeenCalledTimes(1);
+		expect(ledgerFor(session, intentId)).toBeUndefined();
+		expect(session.promptQueue.toArray()).toEqual([
+			expect.objectContaining({ id: intentId, deliveryState: "queued", retryable: false }),
+		]);
+		expect(readAuthorSidecar(session.id).at(-1)?.settlement?.outcome).toBe("cancelled");
+	});
+
+	it("hard-stops a queued success false response when its author binding is already consumed", async () => {
+		const prompt = vi.fn(async () => ({ success: false, error: "preflight rejected" }));
+		const { manager, session, clock } = useHarness({
+			rpcClient: {
+				prompt,
+				steer: vi.fn(async () => ({ success: true })),
+				getState: vi.fn(async () => ({ success: true, data: {} })),
+			},
+		});
+		const intentId = "task-complete:consumed";
+		vi.spyOn(manager, "cancelPromptAuthorDispatch").mockReturnValue(false);
+
+		await manager.enqueuePrompt(session.id, "Task T may already have started.", { source: "system", intentId });
+		session.status = "idle";
+		manager.drainQueue(session);
+		await flushMicrotasks();
+
+		expect(prompt).toHaveBeenCalledTimes(1);
+		expect(session.promptQueue.toArray()).toEqual([]);
+		expect(ledgerFor(session, intentId)).toMatchObject({ state: "dispatching" });
+		expect(readAuthorSidecar(session.id).at(-1)?.settlement).toBeUndefined();
+		clock.advance(60_000);
+		await flushMicrotasks();
+		expect(prompt).toHaveBeenCalledTimes(1);
 	});
 });
 

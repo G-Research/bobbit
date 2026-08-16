@@ -1887,8 +1887,8 @@ export async function sendDelegatePrompt(
 		session,
 		"Execute the task described in your system prompt. Follow the instructions carefully.",
 		ownerAgent
-			? { source: "agent", author: ownerAgent }
-			: { source: "system", author: BOBBIT_SYSTEM_AUTHOR },
+			? { source: "agent", author: ownerAgent, intentId: `delegate-bootstrap:${session.id}` }
+			: { source: "system", author: BOBBIT_SYSTEM_AUTHOR, intentId: `delegate-bootstrap:${session.id}` },
 	);
 
 	// Wait for agent_start event (session.status becomes "streaming")
