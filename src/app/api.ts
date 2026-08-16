@@ -2154,7 +2154,16 @@ export async function createGoal(title: string, cwd: string, opts?: { spec?: str
 		});
 		if (!res.ok) throw await errorFromResponse(res, `Failed to create goal: ${res.status}`);
 		const goal = await res.json() as Goal;
-		return await finishGoalCreate(goal);
+		await refreshSessions();
+		const goalsById = new Map(state.goals.map(g => [g.id, g]));
+		let cursor: Goal | undefined = goalsById.get(goal.id) ?? goal;
+		const seenGoalIds = new Set<string>();
+		while (cursor && !seenGoalIds.has(cursor.id)) {
+			seenGoalIds.add(cursor.id);
+			expandSidebarTreeNode({ kind: "goal", goalId: cursor.id }, { explicit: false });
+			cursor = cursor.parentGoalId ? goalsById.get(cursor.parentGoalId) : undefined;
+		}
+		return goal;
 	} catch (err) {
 		const { message, code, stack } = errorDetails(err);
 		showConnectionError("Failed to create goal", message, { code, stack });
