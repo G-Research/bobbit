@@ -137,8 +137,8 @@ function modelSelectionRequiredCondition(value: unknown): ModelSelectionRequired
 // ───────────────────────────────────────────────────────────
 // Goal-state subscription fanout — additive bridge so renderer-level
 // custom elements (e.g. <children-goal-state-pill>) can subscribe to
-// `goal_state_changed` / `goal_child_spawned` events without coupling to
-// the dashboard or adding a DOM event type. See subgoals design doc.
+// `goal_state_changed` events without coupling to the dashboard or adding a
+// DOM event type. See subgoals design doc.
 // ───────────────────────────────────────────────────────────
 
 export interface GoalStateChangeEvent {
@@ -148,7 +148,7 @@ export interface GoalStateChangeEvent {
 
 const _goalStateSubscribers = new Set<(evt: GoalStateChangeEvent) => void>();
 
-/** Subscribe to goal_state_changed / goal_child_spawned WS broadcasts.
+/** Subscribe to goal_state_changed WS broadcasts.
  *  Returns an unsubscribe function. Safe to call any number of times. */
 export function subscribeGoalStateChanges(cb: (evt: GoalStateChangeEvent) => void): () => void {
 	_goalStateSubscribers.add(cb);
@@ -2716,14 +2716,10 @@ export class RemoteAgent {
 				this.onGoalSetupEvent?.(typeof (msg as any).goalId === "string" ? (msg as any).goalId : undefined);
 				break;
 
-			case "goal_state_changed":
-			case "goal_child_spawned":
-			case "cost_changed": {
-				// Phase 5b: bump dashboard plan-tab re-render and re-fetch the
-				// goal list so the sidebar nesting + tree-cost reflect the change.
-				// Throttling lives inside the dashboard (`schedulePlanRerender`).
+			case "goal_state_changed": {
+				// Bump dashboard plan-tab re-render and coalesce sidebar list refreshes.
 				import("./goal-dashboard.js").then(m => m.notifyGoalEventForDashboard?.()).catch(() => {});
-				refreshSessions();
+				scheduleSessionListRefreshFromPush();
 				// Fan out to any renderer-level subscribers (e.g. <children-goal-state-pill>).
 				notifyGoalStateSubscribers({ goalId: (msg as any).goalId, type: msg.type });
 				break;
