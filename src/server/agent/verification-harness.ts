@@ -4366,6 +4366,9 @@ export class VerificationHarness {
 	private async _finalizeCancelledVerification(active: ActiveVerification): Promise<void> {
 		const existing = this._cancelledFinalizationPromises.get(active.signalId);
 		if (existing) return existing;
+		// Do not let a pre-cleanup caller own a resolved no-op promise. The cleanup
+		// retry that settles later must be able to become the publication owner.
+		if (this._hasPendingCommandKillCleanup(active) || active.reviewerCleanupPending || active.cancellationFinalizing) return;
 		const finalization = this._finalizeCancelledVerificationOnce(active);
 		this._cancelledFinalizationPromises.set(active.signalId, finalization);
 		try {
