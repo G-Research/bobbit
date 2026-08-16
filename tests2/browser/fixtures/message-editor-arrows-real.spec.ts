@@ -65,7 +65,7 @@ interface EditorState {
 	selectionStart: number;
 	historyIndex: number;
 	history: string[];
-	savedDraft: string;
+	liveDraft: string;
 }
 
 test.beforeAll(() => {
@@ -180,7 +180,7 @@ test.describe("MessageEditor caret-row geometry (composer history recall)", () =
 		const recalled = await state(page);
 		expect(recalled.value, `${TAG} ArrowUp from offset 0 must recall the newest history entry`).toBe("seed message");
 		expect(recalled.historyIndex, `${TAG} ArrowUp from offset 0 must enter history browsing`).toBe(0);
-		expect(recalled.savedDraft, `${TAG} entering history must save the draft`).toBe("\n\nHello");
+		expect(recalled.liveDraft, `${TAG} entering history must retain the live draft`).toBe("\n\nHello");
 
 		await setCaret(page, recalled.textareaValue.length);
 		await press(page, ta, "ArrowDown");
@@ -583,7 +583,7 @@ test.describe("MessageEditor caret-row geometry (composer history recall)", () =
 		const after = await state(page);
 		expect(after.value, `${TAG} ArrowUp after Home at a wrap boundary must not destroy the draft`).toBe(long);
 		expect(after.historyIndex, `${TAG} ArrowUp after Home at a wrap boundary must not enter history browsing`).toBe(-1);
-		expect(after.savedDraft, `${TAG} ArrowUp after Home at a wrap boundary must not save a draft`).toBe("");
+		expect(after.liveDraft, `${TAG} ArrowUp after Home at a wrap boundary must not retain a live draft`).toBe("");
 		expect(after.selectionStart, `${TAG} ArrowUp after Home at a wrap boundary must move the caret up instead`)
 			.toBeLessThan(boundary);
 	});

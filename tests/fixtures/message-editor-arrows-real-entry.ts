@@ -188,7 +188,7 @@ function mount(sessionId: string, box?: Partial<BoxStyle>) {
 		selectionStart: ta.selectionStart,
 		historyIndex: el["_historyIndex"] as number,
 		history: (el["_history"] as string[]).slice(),
-		savedDraft: el["_savedDraft"] as string,
+		liveDraft: (el["_historyEditBuffer"] as Map<number, string>).get(-1) ?? "",
 	};
 };
 
@@ -204,7 +204,7 @@ function mount(sessionId: string, box?: Partial<BoxStyle>) {
 (window as any).__injectHistory = (entries: string[]) => {
 	current["_history"] = entries.slice();
 	current["_historyIndex"] = -1;
-	current["_savedDraft"] = "";
+	(current["_historyEditBuffer"] as Map<number, string>).clear();
 };
 
 /** Set the composer buffer + caret without going through keystrokes. Used for
