@@ -270,10 +270,10 @@ describe("SessionStore real filesystem fidelity", () => {
 		assert.equal(await purge, true);
 
 		const persisted = JSON.parse(fs.readFileSync(storeFile, "utf-8"));
-		assert.equal(persisted.epoch, 4, "purge and the folded put each advance the durable epoch");
+		assert.equal(persisted.epoch, 3, "archived-only purge must not advance the live epoch before the folded put");
 		assert.deepEqual(persisted.sessions.map((session: PersistedSession) => session.id), ["survivor"]);
 		const backup = JSON.parse(fs.readFileSync(`${storeFile}.bak.1`, "utf-8"));
-		assert.equal(backup.epoch, 3, ".bak.1 retains the completed purge snapshot before the folded put");
+		assert.equal(backup.epoch, 2, ".bak.1 retains the live snapshot before the folded put");
 		assert.deepEqual(backup.sessions, []);
 		assert.equal(fs.existsSync(`${storeFile}.tmp`), false);
 		assert.equal(readDeletionTombstones(stateDir, "sessions.json").has("victim"), true);
@@ -284,12 +284,13 @@ describe("SessionStore real filesystem fidelity", () => {
 		const root = freshRoot();
 		const stateDir = path.join(root, "state");
 		const storeFile = path.join(stateDir, "sessions.json");
+		const archivedFile = path.join(stateDir, "sessions.archived.json");
 		const seed = new SessionStore(stateDir);
 		seed.put(makeSession("victim"));
 		await seed.flushAsync();
 		seed.archive("victim");
 		await seed.flushAsync();
-		const deferredFs = fsWithDeferredFinalFingerprint(storeFile);
+		const deferredFs = fsWithDeferredFinalFingerprint(archivedFile);
 		const store = new SessionStore(stateDir, deferredFs.fsImpl as any);
 
 		const purge = store.purgeAsync("victim");
@@ -304,7 +305,7 @@ describe("SessionStore real filesystem fidelity", () => {
 		await store.flushAsync();
 
 		const persisted = JSON.parse(fs.readFileSync(storeFile, "utf-8"));
-		assert.equal(persisted.epoch, 4, "the settle-boundary mutation must advance the durable epoch");
+		assert.equal(persisted.epoch, 3, "the settle-boundary live mutation must advance only the live epoch");
 		assert.deepEqual(
 			persisted.sessions.map((session: PersistedSession) => session.id),
 			["settlement-survivor"],
