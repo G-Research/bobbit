@@ -3654,7 +3654,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			await resumeOperatorPausedGoal(
 				goal,
 				context.goalManager,
-				(resumedGoalId) => broadcastToAll({ type: "goal_state_changed", goalId: resumedGoalId }),
+				(resumedGoalId) => broadcastToUi({ type: "goal_state_changed", goalId: resumedGoalId }),
 			);
 		},
 		commandRunner: gatewayDeps.commandRunner,
@@ -8324,6 +8324,7 @@ async function handleApiRoute(
 		json,
 		jsonError,
 		broadcastToAll,
+		broadcastToUi,
 		getSubgoalNestingPrefs: () => readSubgoalNestingPrefs((k) => preferencesStore.get(k)),
 	})) return;
 
@@ -8864,7 +8865,7 @@ async function handleApiRoute(
 					const outcome = verificationHarness.requestChildStart(goal.id);
 					if (outcome === "capacity-blocked") {
 						targetGoalManager.updateGoal(goal.id, { state: "blocked" });
-						broadcastToAll({ type: "goal_state_changed", goalId: goal.id });
+						broadcastToUi({ type: "goal_state_changed", goalId: goal.id });
 					}
 				}
 			} else if (goal.setupStatus === "preparing") {
@@ -8963,7 +8964,7 @@ async function handleApiRoute(
 		};
 		(workflowCtx.gateStore as typeof workflowCtx.gateStore & WorkflowGateReconciler)
 			.reconcileGatesForGoal(goalId, newById.keys(), modifiedOrRemoved);
-		broadcastToAll({ type: "goal_state_changed", goalId });
+		broadcastToUi({ type: "goal_state_changed", goalId });
 		json(frozen);
 		return;
 	}
@@ -8984,7 +8985,7 @@ async function handleApiRoute(
 		// will coalesce the setup promise; this guard also coalesces the route's
 		// scheduler/team side effect.
 		if (routeFlights?.has(goalId)) {
-			broadcastToAll({ type: "goal_state_changed", goalId });
+			broadcastToUi({ type: "goal_state_changed", goalId });
 			json({ ok: true, coalesced: true, setupStatus: currentStatus });
 			return;
 		}
@@ -9003,7 +9004,7 @@ async function handleApiRoute(
 		// A live preparing setup is owned by the create/scheduler path. Joining it
 		// must not add a second Team Lead start callback.
 		if (currentStatus === "preparing") {
-			broadcastToAll({ type: "goal_state_changed", goalId });
+			broadcastToUi({ type: "goal_state_changed", goalId });
 			json({ ok: true, coalesced: true, setupStatus: currentStatus });
 			return;
 		}
@@ -9012,7 +9013,7 @@ async function handleApiRoute(
 		const retryStatus: string = retryGoal?.setupStatus ?? "preparing";
 		// Publish the persisted retrying transition before returning so every
 		// client invalidates stale error banners and controls.
-		broadcastToAll({ type: "goal_state_changed", goalId });
+		broadcastToUi({ type: "goal_state_changed", goalId });
 		json({ ok: true, coalesced: false, setupStatus: retryStatus });
 
 		const ownedFlights = routeFlights ?? new Set<string>();
@@ -9026,7 +9027,7 @@ async function handleApiRoute(
 		};
 		const publishSettledRetry = (err?: unknown): void => {
 			const settled = retryGoalManager.getGoal(goalId);
-			broadcastToAll({ type: "goal_state_changed", goalId });
+			broadcastToUi({ type: "goal_state_changed", goalId });
 			if (settled?.setupStatus === "ready") {
 				broadcastToAll({ type: "goal_setup_complete", goalId });
 				if (err) console.error("[goal] Auto-start team failed after verified retry setup:", err);
@@ -9049,7 +9050,7 @@ async function handleApiRoute(
 			const outcome = verificationHarness.requestChildStart(goalId);
 			if (outcome === "capacity-blocked") {
 				retryGoalManager.updateGoal(goalId, { state: "blocked" })
-					.then(() => broadcastToAll({ type: "goal_state_changed", goalId }))
+					.then(() => broadcastToUi({ type: "goal_state_changed", goalId }))
 					.catch((err) => console.warn(`[goal] failed to mark retrying child ${goalId} capacity-blocked:`, err));
 				return;
 			}
@@ -12649,7 +12650,7 @@ async function handleApiRoute(
 		}
 
 		if (reopened && !resumedIntent) {
-			broadcastToAll({ type: "goal_state_changed", goalId });
+			broadcastToUi({ type: "goal_state_changed", goalId });
 		}
 
 		const affectedGates = resetResult.affectedGateIds.map(affectedGateId => {
