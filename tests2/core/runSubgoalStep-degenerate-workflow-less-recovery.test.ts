@@ -22,9 +22,14 @@ import assert from "node:assert/strict";
 import { buildFixture, buildActive, buildSubgoalStep } from "../../tests/helpers/run-subgoal-step-fixture.ts";
 
 describe("runSubgoalStep — workflow-less complete-child recovery", () => {
-	it("on workflow-less complete child → mergeChild + teardownTeam + archiveAfterMerge are invoked", async () => {
+	it("on workflow-less complete child → mergeChild + reconciliation-owned archive are invoked", async () => {
 		const fx = await buildFixture();
 		afterAll(() => fx.cleanup());
+		const reconciled: string[] = [];
+		fx.goalManager.setGoalArchiveReconciler(async (goalId) => {
+			reconciled.push(goalId);
+			return { archivedSessionIds: ["lead"], teamRemoved: true };
+		});
 
 		const planId = "p-degen";
 		fx.goalStore.put({
@@ -41,18 +46,18 @@ describe("runSubgoalStep — workflow-less complete-child recovery", () => {
 		assert.equal(result.passed, true);
 		assert.match(result.output, /workflow-less complete child/i);
 
-		// All three recovery actions ran.
+		// Merge and authoritative archive ran without destructive pre-teardown.
 		const merged = fx.calls.find(c => c.kind === "mergeChild");
 		assert.ok(merged && merged.kind === "mergeChild");
 		assert.equal(merged.parentId, fx.parent.id);
 		assert.equal(merged.childId, "degen");
 
-		const tornDown = fx.calls.find(c => c.kind === "teardownTeam");
-		assert.ok(tornDown);
+		assert.equal(fx.calls.find(c => c.kind === "teardownTeam"), undefined);
 
 		const archived = fx.calls.find(c => c.kind === "archiveGoalAfterMerge");
 		assert.ok(archived && archived.kind === "archiveGoalAfterMerge");
 		assert.equal(archived.childId, "degen");
+		assert.deepEqual(reconciled, ["degen"]);
 	});
 
 	it("on conflict during workflow-less recovery → step fails with manual-recovery message", async () => {

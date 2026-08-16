@@ -8491,7 +8491,7 @@ export class VerificationHarness {
 			try {
 				const outcome = await goalManager.mergeChild(parentGoalId, childId);
 				if (outcome.merged || outcome.alreadyMerged) {
-					try { await teamManager?.teardownTeam(childId); } catch { /* non-fatal */ }
+					// Authoritative archival reconciles the team without deleting recovery evidence.
 					await goalManager.archiveGoalAfterMerge(childId);
 					return { passed: true, output: `Recovered workflow-less complete child ${childId} (${outcome.merged ? "merged" : "already merged"})` };
 				}
@@ -8803,7 +8803,7 @@ export class VerificationHarness {
 						this.broadcastFn?.(childGoalId, { type: "goal_state_changed", goalId: childGoalId });
 					} catch (err) { console.warn(`[verification] failed to clear mergeConflict for ${childGoalId} (non-fatal):`, err); }
 				}
-				try { await teamManager?.teardownTeam(childGoalId); } catch { /* non-fatal */ }
+				// Authoritative archival reconciles the team without deleting recovery evidence.
 				await goalManager.archiveGoalAfterMerge(childGoalId);
 				// dependsOn scheduling — auto-unblock any sibling whose deps are now
 				// ALL complete after this merge. Harness equivalent of the

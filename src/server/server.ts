@@ -8861,6 +8861,7 @@ async function handleApiRoute(
 				maxConcurrentChildren: effMaxConcurrentChildren,
 				metadata,
 				worktree: explicitWorktree,
+				team: body?.team !== false,
 			});
 			// Set projectId from the explicit request scope.
 			if (targetProjectId) {
@@ -9184,7 +9185,8 @@ async function handleApiRoute(
 			// Snapshot before reconciliation archives the authoritative rows and may
 			// remove TeamStore. Remote branches are recovery evidence for every team
 			// cleanup shape, including store-only and blocked reconciliation.
-			const preserveRemoteBranchEvidence = !!teamEntry
+			const preserveRemoteBranchEvidence = g.team === true
+				|| !!teamEntry
 				|| !!goalProjectCtx?.sessionStore.getLive().some((session) => session.teamGoalId === g.id);
 			const agentBranches: string[] = [];
 			if (teamEntry?.agents) {

@@ -41,6 +41,8 @@ interface Harness {
 	parent: PersistedGoal;
 	resizeCalls: Array<{ rootGoalId: string; newMax: number }>;
 	teamLeadByGoal: Record<string, string | null>;
+	teardownCalls: string[];
+	reconciledGoals: string[];
 	/** A verifier-accepted, signed-wire-shaped cookie header for the human/UI path. */
 	humanCookieHeader: string;
 	/**
@@ -105,6 +107,12 @@ async function makeHarness(): Promise<Harness> {
 
 	const resizeCalls: Array<{ rootGoalId: string; newMax: number }> = [];
 	const teamLeadByGoal: Record<string, string | null> = {};
+	const teardownCalls: string[] = [];
+	const reconciledGoals: string[] = [];
+	goalManager.setGoalArchiveReconciler(async (goalId) => {
+		reconciledGoals.push(goalId);
+		return { archivedSessionIds: ["lead"], teamRemoved: true };
+	});
 
 	const ctx = {
 		goalStore, goalManager, gateStore, workflowStore: wf,
@@ -118,7 +126,7 @@ async function makeHarness(): Promise<Harness> {
 	};
 	const teamManager: any = {
 		startTeam: async () => ({}),
-		teardownTeam: async () => {},
+		teardownTeam: async (goalId: string) => { teardownCalls.push(goalId); },
 		getTeamState: (gid: string) =>
 			gid in teamLeadByGoal ? { teamLeadSessionId: teamLeadByGoal[gid] } : undefined,
 	};
@@ -181,7 +189,7 @@ async function makeHarness(): Promise<Harness> {
 	}
 
 	return {
-		tmpRoot, goalStore, goalManager, parent, resizeCalls, teamLeadByGoal,
+		tmpRoot, goalStore, goalManager, parent, resizeCalls, teamLeadByGoal, teardownCalls, reconciledGoals,
 		humanCookieHeader,
 		authAs(sessionId: string) {
 			return {
@@ -408,6 +416,40 @@ describe("S1 — ORCHESTRATION authorization on spawn-child / policy (cookie doe
 		}, { cookie: h.humanCookieHeader });
 		assert.equal(r.status, 403);
 		assert.equal(r.payload.code, "NOT_TEAM_LEAD");
+	});
+});
+
+describe("integrate-child archive ownership", () => {
+	it("successful merge skips ordinary teardown and reconciles through archiveGoalAfterMerge", async () => {
+		h.teamLeadByGoal[h.parent.id] = TL;
+		await h.goalManager.updateGoal(h.parent.id, {
+			branch: "goal/parent",
+			worktreePath: "/memfs/nested-findings/parent-wt",
+			repoPath: "/memfs/nested-findings/repo",
+		} as any);
+		h.goalStore.put({
+			id: "merged-child",
+			title: "Merged child",
+			cwd: h.tmpRoot,
+			state: "in-progress",
+			team: true,
+			spec: "",
+			createdAt: 1,
+			updatedAt: 1,
+			parentGoalId: h.parent.id,
+			branch: "goal/child",
+			worktreePath: "/memfs/nested-findings/child-wt",
+			repoPath: "/memfs/nested-findings/repo",
+		} as any);
+		(h.goalManager as any).mergeChild = async () => ({ merged: true, alreadyMerged: false, conflict: false, output: "" });
+
+		const r = await h.call("POST", `/api/goals/${h.parent.id}/integrate-child/merged-child`, { force: true }, h.authAs(TL));
+
+		assert.equal(r.status, 200, JSON.stringify(r.payload));
+		assert.deepEqual(h.teardownCalls, [], "ordinary teardown must not erase team evidence before archival reconciliation");
+		assert.deepEqual(h.reconciledGoals, ["merged-child"]);
+		assert.equal(h.goalStore.get("merged-child")?.state, "complete", "complete state remains durable before archive");
+		assert.equal(h.goalStore.get("merged-child")?.archived, true);
 	});
 });
 

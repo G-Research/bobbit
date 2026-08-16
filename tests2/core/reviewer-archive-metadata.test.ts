@@ -169,6 +169,8 @@ describe("reviewer archive metadata persistence", () => {
 		const snapshot = archiveEndpoint.indexOf("const preserveRemoteBranchEvidence");
 		const archive = archiveEndpoint.indexOf("await gm.archiveGoal(g.id)");
 		assert.ok(snapshot >= 0 && snapshot < archive, "team ownership must be snapshotted before reconciliation removes live/team rows");
+		assert.match(archiveEndpoint, /preserveRemoteBranchEvidence = g\.team === true/,
+			"durable team mode must preserve remote branch evidence after reconciliation removes live/team rows");
 		assert.match(archiveEndpoint, /sessionStore\.getLive\(\)\.some\(\(session\) => session\.teamGoalId === g\.id\)/);
 		assert.match(archiveEndpoint, /archivedGoal\?\.repoPath && !preserveRemoteBranchEvidence/);
 	});

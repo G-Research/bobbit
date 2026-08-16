@@ -1128,9 +1128,8 @@ export async function tryHandleNestedGoalRoute(
 						console.warn(`[integrate-child] failed to clear mergeConflict (non-fatal):`, err);
 					}
 				}
-				try { await teamManager.teardownTeam(childId); } catch (err) {
-					console.warn(`[api] integrate-child: teardownTeam error (non-fatal):`, err);
-				}
+				// Archive first: the durable reconciliation boundary owns verifier stop,
+				// evidence-preserving session termination, and final team-state removal.
 				await goalManager.archiveGoalAfterMerge(childId);
 				// Finding 2 — terminal event: release the per-root permit this
 				// child held (if it was started under the scheduler) so the next
