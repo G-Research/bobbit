@@ -403,7 +403,7 @@ let dashboardMutationsInFlight = false;
 /** requestIds with an in-flight approve/reject POST (disables their buttons). */
 const dashboardMutationDecisionInFlight = new Set<string>();
 
-/** Throttle Plan-tab re-renders on goal_state_changed / goal_child_spawned. */
+/** Throttle Plan-tab re-renders on goal_state_changed. */
 let _planRerenderTimer: ReturnType<typeof setTimeout> | null = null;
 const PLAN_RERENDER_THROTTLE_MS = 250;
 
