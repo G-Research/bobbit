@@ -5025,6 +5025,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				if (record.delivery.kind !== "project-import" || record.delivery.importId !== marker.id || record.proposal?.status !== "accepted") continue;
 				const draftId = proposalDraftOwnerId({ kind: "project-import", projectId: context.project.id, importId: marker.id, requestId: record.id });
 				await deleteProposalFile(bobbitStateDir(), draftId, record.proposal.type).catch(() => {});
+				if (record.proposal.application && context.decisionRequestStore.markImportProposalAudited(record.id, record.proposal.application, new Date(gatewayDeps.clock.now()).toISOString())) {
+					try { contextTraceStore.appendProjectImportOutcome(context.project.id, marker.id, { kind: "decision", packId: record.asker.packId, hookId: record.asker.hookId, event: "decisionResolved", outcome: "applied", requestId: record.id, questionId: record.questionId, actor: "user" }); } catch {}
+				}
 			}
 			for (const record of context.decisionRequestStore.listApplyingImportProposals(marker.id)) {
 				const application = record.proposal?.status === "applying" ? record.proposal.application : undefined;
@@ -5035,7 +5038,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					const draftId = proposalDraftOwnerId({ kind: "project-import", projectId: application.projectId, importId: application.importId, requestId: application.requestId });
 					await deleteProposalFile(bobbitStateDir(), draftId, application.type).catch(() => {});
 					// One durable accepted transition produces one redacted audit row.
-					try { contextTraceStore.appendProjectImportOutcome(application.projectId, application.importId, { kind: "decision", packId: record.asker.packId, hookId: record.asker.hookId, event: "decisionResolved", outcome: "applied", requestId: record.id, questionId: record.questionId, actor: "user" }); } catch {}
+					if (context.decisionRequestStore.markImportProposalAudited(record.id, application, new Date(gatewayDeps.clock.now()).toISOString())) {
+						if (context.decisionRequestStore.markImportProposalAudited(record.id, application, new Date(gatewayDeps.clock.now()).toISOString())) {
+						try { contextTraceStore.appendProjectImportOutcome(application.projectId, application.importId, { kind: "decision", packId: record.asker.packId, hookId: record.asker.hookId, event: "decisionResolved", outcome: "applied", requestId: record.id, questionId: record.questionId, actor: "user" }); } catch {}
+					}
+					}
 				} catch (error) { console.warn(`[project-import-proposals] applying replay failed project=${context.project.id} request=${record.id}:`, error); }
 			}
 		}
@@ -9103,7 +9110,8 @@ async function handleApiRoute(
 				const settled = store.get(requestId)?.proposal;
 				if (settled?.status !== "accepted" || settled.application?.key !== identity.key) throw new ProjectImportApplicationError(500, "FINALIZE_FAILED", "Proposal effect applied but finalization could not be persisted");
 			}
-			await deleteProposalFile(bobbitStateDir(), draft.draftId, draft.type); audit("applied");
+			await deleteProposalFile(bobbitStateDir(), draft.draftId, draft.type);
+			if (store.markImportProposalAudited(requestId, identity, new Date().toISOString())) audit("applied");
 			broadcastToProject(projectId, { type: "project_import_decision_requests_updated", projectId, ts: clock?.now() ?? Date.now() }); json({ ok: true, status: "accepted", outcome: result.outcome }, 201);
 		} catch (error) {
 			if (error instanceof ProjectImportApplicationError || error instanceof CanonicalMutationError) json({ error: error.message, code: error.code }, error.status);

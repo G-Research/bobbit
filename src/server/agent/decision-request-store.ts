@@ -191,7 +191,7 @@ export type StoredDecisionProposal =
 	| { status: "created"; type: ProposalType; rev: number }
 	| { status: "applying"; type: ProposalType; rev: number; applyingAt: string; application: ProposalApplicationIdentity }
 	| { status: "failed"; type: ProposalType; code: "PROPOSAL_SEED_FAILED" }
-	| { status: "accepted"; type: ProposalType; rev: number; decidedAt: string; application?: ProposalApplicationIdentity; outcome?: Record<string, string> }
+	| { status: "accepted"; type: ProposalType; rev: number; decidedAt: string; application?: ProposalApplicationIdentity; outcome?: Record<string, string>; auditedAt?: string }
 	| { status: "rejected"; type: ProposalType; rev: number; decidedAt: string };
 
 export interface DecisionRequestStoreState {
@@ -539,6 +539,16 @@ export class DecisionRequestStore {
 		}) ?? false;
 	}
 
+	/** First durable audit marker wins, so restart cleanup cannot duplicate activity. */
+	markImportProposalAudited(id: string, application: ProposalApplicationIdentity, auditedAt: string): boolean {
+		return this.commit(next => {
+			const proposal = next.requests[id]?.proposal;
+			if (proposal?.status !== "accepted" || !proposal.application || !sameApplication(proposal.application, application) || proposal.auditedAt || !isIsoInstant(auditedAt)) return false;
+			proposal.auditedAt = auditedAt;
+			return true;
+		}) ?? false;
+	}
+
 	/** Record a reviewed rejection only while no apply operation has been claimed. */
 	updateProposal(id: string, proposal: StoredDecisionRequest["proposal"]): boolean {
 		return this.commit(next => {
@@ -806,7 +816,8 @@ function isProposal(value: unknown): value is StoredDecisionProposal {
 	if (value.status === "accepted") return isPositiveInteger(value.rev) && isIsoInstant(value.decidedAt)
 		&& value.code === undefined && (value.application === undefined || isProposalApplicationIdentity(value.application)
 			&& value.application.type === value.type && value.application.rev === value.rev)
-		&& (value.outcome === undefined || isRecord(value.outcome) && Object.entries(value.outcome).every(([key, item]) => isBoundedString(key, 128) && isBoundedString(item, 256)));
+		&& (value.outcome === undefined || isRecord(value.outcome) && Object.entries(value.outcome).every(([key, item]) => isBoundedString(key, 128) && isBoundedString(item, 256)))
+		&& (value.auditedAt === undefined || isIsoInstant(value.auditedAt));
 	return value.status === "rejected" && isPositiveInteger(value.rev) && isIsoInstant(value.decidedAt) && value.code === undefined;
 }
 
