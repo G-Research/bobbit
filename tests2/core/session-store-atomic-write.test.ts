@@ -108,6 +108,7 @@ function createFingerprintTrackingFs(storeFile: string): FingerprintTrackingFs {
 
 const stateDir = path.resolve("/memfs/session-store-atomic/state");
 const STORE_FILE = path.join(stateDir, "sessions.json");
+const ARCHIVED_FILE = path.join(stateDir, "sessions.archived.json");
 const BAK_1 = `${STORE_FILE}.bak.1`;
 const TMP = `${STORE_FILE}.tmp`;
 
@@ -130,7 +131,7 @@ describe("SessionStore atomic write", () => {
 		memfs.mkdirSync(stateDir, { recursive: true });
 	});
 
-	it("writes compact v2 JSON with a coalesced epoch and reloads identically", async () => {
+	it("writes compact v3 live JSON with a coalesced epoch and reloads identically", async () => {
 		const store = new SessionStore(stateDir, memfs);
 		store.put(makeSession("s1"));
 		store.put(makeSession("s2"));
@@ -140,7 +141,7 @@ describe("SessionStore atomic write", () => {
 		const raw = memfs.readFileSync(STORE_FILE, "utf-8");
 		const parsed = JSON.parse(raw);
 		assert.equal(raw, JSON.stringify(parsed), "sessions.json must contain no pretty-print whitespace");
-		assert.equal(parsed.version, 2);
+		assert.equal(parsed.version, 3);
 		assert.equal(typeof parsed.epoch, "number");
 		assert.equal(parsed.epoch, 1, "three queued put()s coalesce into one publish epoch");
 		assert.equal(parsed.sessions.length, 3);
@@ -155,7 +156,7 @@ describe("SessionStore atomic write", () => {
 	it("fully validates the first async save, then skips reads while its own fingerprint is unchanged", async () => {
 		const fs = createFingerprintTrackingFs(STORE_FILE);
 		fs.mkdirSync(stateDir, { recursive: true });
-		fs.externalWrite(JSON.stringify({ version: 2, epoch: 7, sessions: [makeSession("seed")] }, null, 2));
+		fs.externalWrite(JSON.stringify({ version: 3, epoch: 7, sessions: [makeSession("seed")] }, null, 2));
 		const store = new SessionStore(stateDir, fs);
 		fs.resetPrimaryReads();
 
@@ -177,7 +178,7 @@ describe("SessionStore atomic write", () => {
 		store.put(makeSession("s1"));
 		await store.flushAsync();
 
-		fs.externalWrite(JSON.stringify({ version: 2, epoch: 40, sessions: [makeSession("external")] }));
+		fs.externalWrite(JSON.stringify({ version: 3, epoch: 40, sessions: [makeSession("external")] }));
 		fs.resetPrimaryReads();
 		store.put(makeSession("s2"));
 		await store.flushAsync();
@@ -359,7 +360,7 @@ describe("SessionStore atomic write", () => {
 
 	it("flushAsync retains the stale-epoch guard instead of overwriting a newer external snapshot", async () => {
 		const store = new SessionStore(stateDir, memfs);
-		memfs.writeFileSync(STORE_FILE, JSON.stringify({ version: 2, epoch: 99, sessions: [makeSession("external")] }), "utf-8");
+		memfs.writeFileSync(STORE_FILE, JSON.stringify({ version: 3, epoch: 99, sessions: [makeSession("external")] }), "utf-8");
 		store.put(makeSession("local"));
 		await assert.rejects(store.flushAsync(), /stale-snapshot|newer than loaded epoch/i);
 
@@ -367,5 +368,101 @@ describe("SessionStore atomic write", () => {
 		assert.equal(store.isStaleGuardTripped(), true, "a newer external epoch must latch the stale-snapshot guard");
 		assert.equal(onDisk.epoch, 99);
 		assert.deepEqual(onDisk.sessions.map((session: PersistedSession) => session.id), ["external"]);
+	});
+
+	it("keeps the live v3 payload size independent of the archived population", async () => {
+		const writePopulation = async (archivedCount: number) => {
+			memfs = createSessionStoreMemFs();
+			memfs.mkdirSync(stateDir, { recursive: true });
+			const store = new SessionStore(stateDir, memfs);
+			for (let i = 0; i < 3; i++) store.put(makeSession(`live-${i}`));
+			for (let i = 0; i < archivedCount; i++) store.put({ ...makeSession(`archived-${i}`), archived: true, archivedAt: i + 1 });
+			await store.flushAsync();
+			return {
+				live: memfs.readFileSync(STORE_FILE, "utf-8"),
+				archive: JSON.parse(memfs.readFileSync(ARCHIVED_FILE, "utf-8")),
+			};
+		};
+
+		const withoutArchives = await writePopulation(0);
+		const withArchives = await writePopulation(200);
+		assert.equal(withoutArchives.live, withArchives.live, "archived rows must not change bytes serialized to sessions.json");
+		const live = JSON.parse(withArchives.live);
+		assert.equal(live.version, 3);
+		assert.equal(live.sessions.length, 3);
+		assert.equal(withArchives.archive.version, 3);
+		assert.equal(withArchives.archive.sessions.length, 200);
+	});
+
+	it("does not open or advance the archived tier for a live-only mutation", async () => {
+		const writes: string[] = [];
+		const asyncFs = memfs as any;
+		const baseOpen = asyncFs.promises.open;
+		asyncFs.promises.open = async (file: PathLike, ...args: unknown[]) => {
+			writes.push(path.resolve(String(file)));
+			return baseOpen(file, ...args);
+		};
+		const store = new SessionStore(stateDir, memfs);
+		store.put(makeSession("live"));
+		store.put({ ...makeSession("archived"), archived: true, archivedAt: 1 });
+		await store.flushAsync();
+		const archiveBefore = JSON.parse(memfs.readFileSync(ARCHIVED_FILE, "utf-8"));
+		writes.length = 0;
+
+		store.update("live", { title: "live activity" });
+		await store.flushAsync();
+
+		assert.ok(writes.some(file => file === path.resolve(`${STORE_FILE}.tmp`)));
+		assert.ok(!writes.some(file => file === path.resolve(`${ARCHIVED_FILE}.tmp`)), "live activity must not rewrite archive tmp");
+		assert.equal(JSON.parse(memfs.readFileSync(ARCHIVED_FILE, "utf-8")).epoch, archiveBefore.epoch);
+	});
+
+	it("publishes both tiers for archive and unarchive and reloads the final membership", async () => {
+		const store = new SessionStore(stateDir, memfs);
+		store.put(makeSession("move"));
+		await store.flushAsync();
+
+		assert.equal(store.archive("move"), true);
+		await store.flushAsync();
+		let live = JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8"));
+		let archived = JSON.parse(memfs.readFileSync(ARCHIVED_FILE, "utf-8"));
+		assert.deepEqual(live.sessions.map((s: PersistedSession) => s.id), []);
+		assert.deepEqual(archived.sessions.map((s: PersistedSession) => s.id), ["move"]);
+
+		store.update("move", { archived: false });
+		await store.flushAsync();
+		live = JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8"));
+		archived = JSON.parse(memfs.readFileSync(ARCHIVED_FILE, "utf-8"));
+		assert.deepEqual(live.sessions.map((s: PersistedSession) => s.id), ["move"]);
+		assert.deepEqual(archived.sessions, []);
+		const reloaded = new SessionStore(stateDir, memfs);
+		assert.equal(reloaded.get("move")?.archived, false);
+		assert.deepEqual(reloaded.getArchived(), []);
+	});
+
+	it("recovers an archive transition after the second tier publication fails", async () => {
+		const store = new SessionStore(stateDir, memfs);
+		store.put(makeSession("move"));
+		await store.flushAsync();
+		const asyncFs = memfs as any;
+		const baseRename = asyncFs.promises.rename;
+		let failLivePublication = true;
+		asyncFs.promises.rename = async (from: PathLike, to: PathLike) => {
+			if (failLivePublication && path.resolve(String(from)) === path.resolve(`${STORE_FILE}.tmp`) && path.resolve(String(to)) === path.resolve(STORE_FILE)) {
+				failLivePublication = false;
+				throw new Error("injected live publication crash");
+			}
+			return baseRename(from, to);
+		};
+		try {
+			store.archive("move");
+			await assert.rejects(store.flushAsync(), /injected live publication crash/);
+		} finally {
+			asyncFs.promises.rename = baseRename;
+		}
+
+		const reloaded = new SessionStore(stateDir, memfs);
+		assert.equal(reloaded.get("move")?.archived, true, "the durable pair intent must resolve a half-published move");
+		assert.deepEqual(reloaded.getArchived().map(session => session.id), ["move"]);
 	});
 });

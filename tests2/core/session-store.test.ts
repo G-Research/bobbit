@@ -44,6 +44,7 @@ function createSessionStoreMemFs(): SessionStoreMemFs {
 
 const stateDir = path.join("/state", "session-store-test");
 const STORE_FILE = path.join(stateDir, "sessions.json");
+const ARCHIVED_FILE = path.join(stateDir, "sessions.archived.json");
 let memfs: SessionStoreMemFs;
 
 function makeSession(overrides: Partial<PersistedSession> = {}): PersistedSession {
@@ -479,6 +480,27 @@ describe("SessionStore", () => {
 			memfs.writeFileSync(STORE_FILE, '{"not": "an array"}', "utf-8");
 			const store = freshStore();
 			assert.equal(store.getAll().length, 0);
+		});
+
+		it("eagerly merges both v3 tiers with unchanged archived pagination", async () => {
+			const rows = [
+				makeSession({ id: "live", title: "still live" }),
+				makeSession({ id: "a-old", archived: true, archivedAt: 10 }),
+				makeSession({ id: "a-mid", archived: true, archivedAt: 20 }),
+				makeSession({ id: "a-new", archived: true, archivedAt: 30 }),
+			];
+			memfs.writeFileSync(STORE_FILE, JSON.stringify({ version: 2, epoch: 7, sessions: rows }), "utf-8");
+			const before = freshStore();
+			const expectedArchived = before.getArchived();
+			const expectedPages = [before.listArchivedSessionsPaginated(2), before.listArchivedSessionsPaginated(2, 20)];
+			await before.flushAsync();
+			assert.ok(memfs.existsSync(ARCHIVED_FILE), "migration must eagerly persist the archive tier");
+
+			const after = freshStore();
+			assert.deepEqual(after.getLive(), [rows[0]]);
+			assert.deepEqual(after.getArchived(), expectedArchived);
+			assert.deepEqual(after.listArchivedSessionsPaginated(2), expectedPages[0]);
+			assert.deepEqual(after.listArchivedSessionsPaginated(2, 20), expectedPages[1]);
 		});
 
 		it("skips sessions without id but loads sessions without agentSessionFile", () => {

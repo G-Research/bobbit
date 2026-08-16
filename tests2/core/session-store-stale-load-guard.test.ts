@@ -48,6 +48,7 @@ function createSessionStoreMemFs(): SessionStoreMemFs {
 
 const stateDir = path.join("/state", "session-store-stale");
 const STORE_FILE = path.join(stateDir, "sessions.json");
+const ARCHIVED_FILE = path.join(stateDir, "sessions.archived.json");
 let memfs: SessionStoreMemFs;
 
 function makeSession(id: string): PersistedSession {
@@ -73,7 +74,7 @@ describe("SessionStore stale-snapshot guard", () => {
 
 		// External writer puts a v2 file with epoch 50 after we constructed.
 		const externalPayload = {
-			version: 2,
+			version: 3,
 			epoch: 50,
 			sessions: [{
 				id: "external-1",
@@ -161,5 +162,34 @@ describe("SessionStore stale-snapshot guard", () => {
 		const after6 = JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8"));
 		assert.equal(after6.epoch, 2);
 		assert.equal(store.isStaleGuardTripped(), false);
+	});
+
+	it("isolates stale guards and epoch validation between live and archived tiers", async () => {
+		const seed = new SessionStore(stateDir, memfs);
+		seed.put(makeSession("live"));
+		seed.put({ ...makeSession("archived"), archived: true, archivedAt: 1 });
+		await seed.flushAsync();
+
+		const liveWriter = new SessionStore(stateDir, memfs);
+		const archiveWriter = new SessionStore(stateDir, memfs);
+		const archiveExternal = { version: 3, epoch: 99, sessions: [{ ...makeSession("archived"), archived: true, archivedAt: 1 }] };
+		memfs.writeFileSync(ARCHIVED_FILE, JSON.stringify(archiveExternal), "utf-8");
+
+		liveWriter.update("live", { title: "live must still publish" });
+		await liveWriter.flushAsync();
+		assert.equal(liveWriter.isStaleGuardTripped(), false, "an archive rewrite must not trip the live latch");
+		assert.equal(JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8")).sessions[0].title, "live must still publish");
+
+		archiveWriter.update("archived", { title: "stale archive writer" });
+		await assert.rejects(archiveWriter.flushAsync(), /stale-snapshot|newer than loaded epoch/i);
+		assert.deepEqual(JSON.parse(memfs.readFileSync(ARCHIVED_FILE, "utf-8")), archiveExternal);
+
+		const archiveOnlyWriter = new SessionStore(stateDir, memfs);
+		const liveExternal = { version: 3, epoch: 123, sessions: [makeSession("live")] };
+		memfs.writeFileSync(STORE_FILE, JSON.stringify(liveExternal), "utf-8");
+		archiveOnlyWriter.update("archived", { title: "archive must still publish" });
+		await archiveOnlyWriter.flushAsync();
+		assert.equal(JSON.parse(memfs.readFileSync(ARCHIVED_FILE, "utf-8")).sessions[0].title, "archive must still publish");
+		assert.deepEqual(JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8")), liveExternal);
 	});
 });
