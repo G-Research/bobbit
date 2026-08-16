@@ -360,6 +360,15 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 						15_000,
 					);
 					await sdkConnection.waitForFrom(cursor, message => message.type === "event" && message.data?.type === "agent_end", 15_000);
+					const turnEvents = sdkConnection.messages.slice(cursor)
+						.filter(message => message.type === "event")
+						.map(message => message.data);
+					const acceptedUser = turnEvents.filter(event => event?.type === "message_end"
+						&& event.message?.role === "user"
+						&& JSON.stringify(event.message.content).includes(text));
+					expect(acceptedUser, "one canonical root user frame per accepted SDK prompt").toHaveLength(1);
+					expect(turnEvents.findIndex(event => event?.type === "agent_start")).toBeLessThan(turnEvents.indexOf(acceptedUser[0]));
+					expect(turnEvents.indexOf(acceptedUser[0])).toBeLessThan(turnEvents.findIndex(event => event?.type === "message_end" && event.message?.role === "assistant"));
 				}
 			} finally {
 				sdkConnection.close();
