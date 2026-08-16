@@ -133,6 +133,26 @@ function readTier(file: string): { version: number; epoch: number; sessions: Per
 	return JSON.parse(memfs.readFileSync(file, "utf-8"));
 }
 
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+	let resolve!: () => void;
+	return { promise: new Promise<void>(done => { resolve = done; }), resolve };
+}
+
+/** A timeout is a test failure only; it never lets a blocked writer pass. */
+async function settleWithin<T>(promise: Promise<T>, label: string): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<never>((_resolve, reject) => {
+				timer = setTimeout(() => reject(new Error(`Timed out waiting for ${label}`)), 1_000);
+			}),
+		]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+}
+
 describe("SessionStore atomic write", () => {
 	beforeEach(() => {
 		memfs = createSessionStoreMemFs();
@@ -620,5 +640,164 @@ describe("SessionStore atomic write", () => {
 		assert.deepEqual(readTier(STORE_FILE), { version: 3, epoch: 8, sessions: [durable] });
 		assert.deepEqual(readTier(ARCHIVED_FILE), { version: 3, epoch: 3, sessions: [] });
 		assert.equal(memfs.existsSync(`${STORE_FILE}.split-transition`), true, "unbound evidence is retained but never authoritative");
+	});
+
+	it("repairs a paused partial unarchive from frozen rows, then drains a later reverse archive", async () => {
+		const recoveredLive = { ...makeSession("move"), title: "unarchive snapshot", archived: false };
+		writeTier(STORE_FILE, 10, []);
+		writeTier(ARCHIVED_FILE, 21, []);
+		memfs.writeFileSync(`${STORE_FILE}.split-transition`, JSON.stringify({
+			version: 2,
+			entries: [{ id: "move", tier: "live", session: recoveredLive }],
+			epochs: { live: { base: 10, target: 11 }, archived: { base: 20, target: 21 } },
+		}), "utf-8");
+
+		const asyncFs = memfs as any;
+		const baseMkdir = asyncFs.promises.mkdir;
+		const repairStarted = deferred();
+		const releaseRepair = deferred();
+		let pauseRepair = true;
+		asyncFs.promises.mkdir = async (...args: any[]) => {
+			if (pauseRepair) {
+				pauseRepair = false;
+				repairStarted.resolve();
+				await releaseRepair.promise;
+			}
+			return baseMkdir(...args);
+		};
+		const publications: Record<string, PersistedSession[][]> = { live: [], archived: [] };
+		const baseRename = asyncFs.promises.rename;
+		asyncFs.promises.rename = async (from: PathLike, to: PathLike) => {
+			const destination = path.resolve(String(to));
+			if (destination === path.resolve(STORE_FILE) || destination === path.resolve(ARCHIVED_FILE)) {
+				const tier = destination === path.resolve(STORE_FILE) ? "live" : "archived";
+				publications[tier].push(JSON.parse(memfs.readFileSync(String(from), "utf-8")).sessions);
+			}
+			return baseRename(from, to);
+		};
+		try {
+			const restored = new SessionStore(stateDir, memfs);
+			await settleWithin(repairStarted.promise, "constructor recovery barrier");
+			assert.equal(restored.get("move")?.archived, false, "the partial unarchive is visible before its repair publishes");
+
+			restored.update("move", { archived: true, archivedAt: 999, title: "later reverse archive" });
+			releaseRepair.resolve();
+			await settleWithin(restored.flushAsync(), "frozen repair followed by trailing archive");
+
+			assert.deepEqual(publications.live[0], [recoveredLive], "the repair must publish its constructor-frozen unarchive row, not the later mutation");
+			assert.deepEqual(readTier(STORE_FILE).sessions, []);
+			assert.deepEqual(readTier(ARCHIVED_FILE).sessions.map(session => ({ id: session.id, title: session.title, archived: session.archived })), [
+				{ id: "move", title: "later reverse archive", archived: true },
+			]);
+			assert.equal(memfs.existsSync(`${STORE_FILE}.split-transition`), false);
+
+			const secondReload = new SessionStore(stateDir, memfs);
+			await settleWithin(secondReload.flushAsync(), "second reload after reverse archive");
+			assert.equal(secondReload.get("move")?.title, "later reverse archive");
+			assert.deepEqual(secondReload.getArchived().map(session => session.id), ["move"]);
+		} finally {
+			asyncFs.promises.mkdir = baseMkdir;
+			asyncFs.promises.rename = baseRename;
+		}
+	});
+
+	it("converges after a peer clears a base/base intent whose first archive publication failed", async () => {
+		const original = new SessionStore(stateDir, memfs);
+		original.put(makeSession("move"));
+		await original.flushAsync();
+
+		const asyncFs = memfs as any;
+		const baseRename = asyncFs.promises.rename;
+		let failFirstArchivePublication = true;
+		asyncFs.promises.rename = async (from: PathLike, to: PathLike) => {
+			if (failFirstArchivePublication
+				&& path.resolve(String(from)) === path.resolve(`${ARCHIVED_FILE}.tmp`)
+				&& path.resolve(String(to)) === path.resolve(ARCHIVED_FILE)) {
+				failFirstArchivePublication = false;
+				throw new Error("injected first archive publication failure");
+			}
+			return baseRename(from, to);
+		};
+		try {
+			original.archive("move");
+			await assert.rejects(original.flushAsync(), /injected first archive publication failure/);
+			assert.equal(memfs.existsSync(`${STORE_FILE}.split-transition`), true, "failed first publication leaves base/base evidence");
+		} finally {
+			asyncFs.promises.rename = baseRename;
+		}
+
+		const baseUnlink = asyncFs.promises.unlink;
+		const peerRemovedIntent = deferred();
+		asyncFs.promises.unlink = async (file: PathLike) => {
+			const result = await baseUnlink(file);
+			if (path.resolve(String(file)) === path.resolve(`${STORE_FILE}.split-transition`)) peerRemovedIntent.resolve();
+			return result;
+		};
+		try {
+			const peer = new SessionStore(stateDir, memfs);
+			await settleWithin(peerRemovedIntent.promise, "peer base/base cleanup");
+			assert.equal(memfs.existsSync(`${STORE_FILE}.split-transition`), false);
+			assert.notEqual(peer.get("move")?.archived, true, "base/base cleanup must not replay the failed archive");
+
+			await settleWithin(original.flushAsync(), "original base/base retry after peer cleanup");
+			assert.deepEqual(original.getArchived().map(session => session.id), ["move"], "the original pending transition must retry under a fresh intent");
+			assert.equal(memfs.existsSync(`${STORE_FILE}.split-transition`), false);
+
+			original.update("move", { title: "after base peer cleanup" });
+			await settleWithin(original.flushAsync(), "post-cleanup archive mutation");
+			const secondReload = new SessionStore(stateDir, memfs);
+			await settleWithin(secondReload.flushAsync(), "second reload after base/base convergence");
+			assert.equal(secondReload.get("move")?.title, "after base peer cleanup");
+			assert.equal(secondReload.get("move")?.archived, true);
+		} finally {
+			asyncFs.promises.unlink = baseUnlink;
+		}
+	});
+
+	it("converges after a peer clears a target/target intent left by an unlink failure", async () => {
+		const original = new SessionStore(stateDir, memfs);
+		original.put(makeSession("move"));
+		await original.flushAsync();
+
+		const asyncFs = memfs as any;
+		const baseUnlink = asyncFs.promises.unlink;
+		let failOriginalIntentUnlink = true;
+		asyncFs.promises.unlink = async (file: PathLike) => {
+			if (failOriginalIntentUnlink && path.resolve(String(file)) === path.resolve(`${STORE_FILE}.split-transition`)) {
+				failOriginalIntentUnlink = false;
+				throw Object.assign(new Error("injected completed transition unlink failure"), { code: "EBUSY" });
+			}
+			return baseUnlink(file);
+		};
+		try {
+			original.archive("move");
+			await assert.rejects(original.flushAsync(), /injected completed transition unlink failure/);
+			const durableLive = readTier(STORE_FILE);
+			const durableArchive = readTier(ARCHIVED_FILE);
+			assert.equal(memfs.existsSync(`${STORE_FILE}.split-transition`), true, "both target tiers retain an intent until unlink succeeds");
+
+			const peerRemovedIntent = deferred();
+			asyncFs.promises.unlink = async (file: PathLike) => {
+				const result = await baseUnlink(file);
+				if (path.resolve(String(file)) === path.resolve(`${STORE_FILE}.split-transition`)) peerRemovedIntent.resolve();
+				return result;
+			};
+			const peer = new SessionStore(stateDir, memfs);
+			await settleWithin(peerRemovedIntent.promise, "peer target/target cleanup");
+			assert.equal(peer.get("move")?.archived, true);
+
+			await settleWithin(original.flushAsync(), "original target/target retry after peer cleanup");
+			assert.deepEqual(readTier(STORE_FILE), durableLive, "already durable live target must not be republished");
+			assert.deepEqual(readTier(ARCHIVED_FILE), durableArchive, "already durable archive target must not be republished");
+
+			original.update("move", { title: "after target peer cleanup" });
+			await settleWithin(original.flushAsync(), "post-cleanup target mutation");
+			const secondReload = new SessionStore(stateDir, memfs);
+			await settleWithin(secondReload.flushAsync(), "second reload after target/target convergence");
+			assert.equal(secondReload.get("move")?.title, "after target peer cleanup");
+			assert.equal(secondReload.get("move")?.archived, true);
+		} finally {
+			asyncFs.promises.unlink = baseUnlink;
+		}
 	});
 });
