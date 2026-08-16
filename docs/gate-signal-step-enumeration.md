@@ -178,14 +178,24 @@ metadata:
 
 | Field | Values | When set |
 |---|---|---|
-| `status` | `"waiting" \| "running" \| "passed" \| "failed" \| "skipped"` | On initial enumeration, during execution, and on terminal rows. Terminal rows preserve the explicit verdict instead of requiring clients to infer from booleans. |
+| `status` | `"waiting" \| "running" \| "passed" \| "failed" \| "timeout" \| "skipped" \| "cancelled"` | On initial enumeration, during execution, and on terminal rows. Terminal rows preserve the explicit outcome instead of requiring clients to infer from booleans. |
 | `phase` | `number` (default 0) | Mirrored from the workflow `VerifyStep` for ordering and phase grouping. |
 | `skipped` | `boolean` | `true` for disabled optional steps, command auto-skips, and downstream phase steps skipped after an earlier phase failed. |
+| `cancellation` | `{ cause: VerificationCancellationCause; requestedAt: number; finalizedAt?: number }` | Optional durable audit metadata on interrupted rows. See [Verification cancellation lifecycle](verification-cancellation.md#durable-cancellation-record) for causes and the legacy `unknown` label. |
 
 The explicit fields make persisted/API data the source of truth for both live
 and historical rendering. A freshly seeded row with `status: "running"` must
 not render as failed just because `passed` is not true yet; a terminal row with
 `status: "skipped"` and `skipped: true` must not render as an ordinary pass.
+A `cancelled` row is an orchestration interruption, not a failed verification
+verdict.
+
+Cancellation preserves the enumerated step list for audit: completed rows keep
+their real status, result, output, duration, diagnostics, and artifacts. Only
+rows interrupted while waiting or running become `status: "cancelled"` and
+receive the optional `cancellation` object. See [Verification cancellation
+lifecycle](verification-cancellation.md#outcome-and-audit-semantics) for the
+signal and gate outcome rules.
 
 Skipped rows remain non-blocking for the aggregate gate result: the harness's
 `computeAllPassed()` semantics ignore skipped steps while still failing the
@@ -214,8 +224,10 @@ Any future call site that signals a gate must follow the same pattern: initiate 
 
 - **Per-step transition logic.** As individual steps run, the harness
   still flips their `status` from `"running"` to `"passed"`/`"failed"`/
-  `"skipped"` and broadcasts `gate_verification_step_started` /
-  `gate_verification_step_complete`. None of that path moved.
+  `"timeout"`/`"skipped"` or `"cancelled"` and broadcasts
+  `gate_verification_step_started` / `gate_verification_step_complete`.
+  Cancellation retains completed rows and marks only interrupted rows; none of
+  the ordinary execution path moved.
 - **Resume-on-restart.** `resumeInterruptedVerifications` reads the
   persisted `active-verifications.json` exactly as before. The per-step
   `status`, `phase`, and `skipped` fields are additive; older persisted
@@ -230,11 +242,11 @@ Any future call site that signals a gate must follow the same pattern: initiate 
 | `src/server/agent/verification-harness.ts` | `beginVerification(signal, gate)` | Synchronous step enumeration + `activeVerifications` seed. Returns `GateSignalStep[]` ready to assign to `signal.verification.steps`. No WS broadcast. |
 | `src/server/agent/verification-harness.ts` | `getActiveVerification(signalId)` | Public lookup so the REST handler can read back `startedAt` after `beginVerification` to emit `gate_verification_started` in the correct order. |
 | `src/server/agent/verification-harness.ts` | `verifyGateSignal(signal, gate, …)` | Reuses the pre-seeded `activeVerifications` entry when present; falls back to legacy inline construction (and its own `gate_verification_started` broadcast) only for callers that bypass the REST handler. |
-| `src/server/agent/gate-store.ts` | `GateSignalStep.status` / `phase` / `skipped` | Persisted lifecycle and terminal-verdict fields. |
+| `src/server/agent/gate-store.ts` | `GateSignalStep.status` / `phase` / `skipped` / `cancellation` | Persisted lifecycle, terminal-outcome, and interrupted-step audit fields. |
 | `src/server/server.ts` | `/api/goals/:id/gates/:gateId/signal` POST handler | Initiates stale cancellation, then orchestrates begin → record → ordered broadcasts; old cleanup is owned asynchronously while the new generation starts. Returns initialized/persisted step metadata for fresh and cached responses. |
 | `src/app/goal-dashboard.ts` | Signal-entry renderer | Consults `step.status` first for in-flight signals so seeded `running`/`waiting` rows don't render as failed. |
 | `src/ui/tools/renderers/GateToolRenderers.ts` | `gate_signal` renderer | Passes `initialSteps` to `<gate-verification-live>` for both running and completed cards. |
-| `src/app/api.ts` | `GateSignalStep` client shape | Mirrors the server `status`/`phase`/`skipped` additions. |
+| `src/app/api.ts` | `GateSignalStep` client shape | Mirrors the server `status`/`phase`/`skipped`/`cancellation` additions. |
 | `tests/gate-signal-step-enumeration.test.ts` | Unit | Asserts the gate-store signal and `activeVerifications` agree on `steps[]` immediately after `recordSignal`. |
 | `tests/e2e/gate-signal-progress.spec.ts` | API E2E | Pins fresh `POST` and cached responses, persisted terminal skipped steps, and phase/status preservation across summary / inspect / active endpoints. |
 | `tests/gate-signal-renderer.spec.ts` | Browser fixture | Asserts completed `gate_signal` cards pass terminal `verification.steps` as `initialSteps` alongside `finalStatus`. |
