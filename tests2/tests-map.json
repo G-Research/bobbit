@@ -2,9 +2,9 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1141,
+  "censusTotal": 1142,
   "buckets": {
-    "daily": 67,
+    "daily": 68,
     "v2-browser": 216,
     "v2-core": 512,
     "v2-dom": 144,
@@ -15,7 +15,7 @@
     "codemod": 512,
     "legacy-pending": 153,
     "port": 2,
-    "relocate": 52,
+    "relocate": 53,
     "rewrite": 145,
     "vitest-e2e": 2
   },
@@ -3301,6 +3301,33 @@
     {
       "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "reason": "Browser journey covering the reliable-turn visible-carrier invariant across idle and busy prompts, agent_end-to-agent_settled release, rapid identical steers, delayed acknowledgement and echo, manual, threshold, and overflow compaction, Stop races, reload, reconnect, second-tab convergence, and actionable delivery failure through its dedicated runtime fixture.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/archived-goal-reconciliation.test.ts",
+      "reason": "Core lifecycle coverage for authoritative archived-goal team ownership reconciliation: teamGoalId and current team references, recursive child closure, standalone-session exclusion, durable fallback and suppression, passive retry evidence, admission fencing, bounded audit output, and clean-repeat idempotence.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/archived-team-reconciliation.test.ts",
+      "reason": "In-process gateway integration coverage for operator archive and boot repair, proving team lead and worker soft archival, missing-team-state repair, termination fallback, pre-restore and pre-resubscription ordering, eager restoration of unrelated sessions, and preserved transcripts and sidebar hierarchy.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/e2e/archived-team-reconciliation-restart.spec.ts",
+      "reason": "Hard-restart Playwright E2E coverage proving archived team-owned sessions are repaired before dispatch, goalId-only controls still restore eagerly, team state and health remain clean, and a second boot performs no reconciliation writes while reporting comparative boot metrics.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
