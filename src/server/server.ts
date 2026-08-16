@@ -7541,6 +7541,8 @@ async function handleApiRoute(
 					update: (id, updates) => projectRegistry.update(id, updates as Parameters<typeof projectRegistry.update>[1]),
 					promote: (id, updates) => projectRegistry.promote(id, updates),
 					markReady: (id, importId) => projectRegistry.markImportDecisionRunReady(id, importId),
+					captureRegistryRecord: (id) => projectRegistry.captureExactRecord(id),
+					restoreRegistryRecord: (id, snapshot) => projectRegistry.restoreExactRecord(id, snapshot),
 					afterConfigured: async (project) => {
 			// Initialize project context for the new project
 			const newCtx = projectContextManager.getOrCreate(project.id);
@@ -7743,6 +7745,8 @@ async function handleApiRoute(
 				get: (id) => projectRegistry.get(id),
 				update: (id, next) => projectRegistry.update(id, next as Parameters<typeof projectRegistry.update>[1]),
 				promote: (id, next) => projectRegistry.promote(id, next),
+				captureRegistryRecord: (id) => projectRegistry.captureExactRecord(id),
+				restoreRegistryRecord: (id, snapshot) => projectRegistry.restoreExactRecord(id, snapshot),
 				removeRegistered: (project) => projectRegistry.remove(project.id),
 				removeContext: (id) => projectContextManager.remove(id),
 				openContext: async (id) => {
@@ -7850,6 +7854,8 @@ async function handleApiRoute(
 				update: (id, updates) => projectRegistry.update(id, updates as Parameters<typeof projectRegistry.update>[1]),
 				promote: (id, updates) => projectRegistry.promote(id, updates),
 				markReady: (id, importId) => projectRegistry.markImportDecisionRunReady(id, importId),
+				captureRegistryRecord: (id) => projectRegistry.captureExactRecord(id),
+				restoreRegistryRecord: (id, snapshot) => projectRegistry.restoreExactRecord(id, snapshot),
 				afterConfigured: async (promoted) => {
 			// A provisional project deliberately has no run until its proposal
 			// configuration is complete. The acceptance client writes that config

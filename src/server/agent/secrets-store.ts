@@ -65,7 +65,9 @@ export class SecretsStore {
     restoreAll(snapshot: Record<string, string>): void {
         const candidate: Record<string, string> = {};
         for (const [key, value] of Object.entries(snapshot)) {
-            if (typeof value === "string" && value) candidate[key] = value;
+            // Empty strings are meaningful: they are exact prior persisted
+            // state and must survive a cross-store rollback.
+            if (typeof value === "string") candidate[key] = value;
         }
         this.commit(candidate);
     }

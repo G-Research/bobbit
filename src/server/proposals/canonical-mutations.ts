@@ -41,6 +41,8 @@ import {
 } from "../agent/project-config-store.js";
 import type { SecretsStore } from "../agent/secrets-store.js";
 import { validateAllWorkflows } from "../agent/workflow-validator.js";
+import { parseSandboxBaseImageReference } from "../agent/sandbox-image-requirements.js";
+import { validateBaseRefShape } from "../base-ref-validation.js";
 
 /** Durable, server-owned idempotency marker. Callers must never take this from
  * proposal metadata or another user controlled field. */
@@ -882,6 +884,14 @@ export interface CanonicalProjectProposal {
   configDirectories?: unknown;
   sandboxTokens?: unknown;
   applicationKey?: string;
+  // Legacy top-level command fields remain part of project proposal/config
+  // payloads. The canonical owner folds them into the default component.
+  build_command?: unknown;
+  test_command?: unknown;
+  typecheck_command?: unknown;
+  test_unit_command?: unknown;
+  test_e2e_command?: unknown;
+  worktree_setup_command?: unknown;
 }
 
 type CanonicalProjectContext = {
@@ -909,6 +919,9 @@ export interface CanonicalProjectProposalDeps<T extends CanonicalProjectRecord> 
   stopServices(projectId: string): Promise<void>;
   reconcileServices(projectId: string): Promise<void>;
   markReady?(projectId: string, importId: string): T;
+  /** Exact registry undo; production wires ProjectRegistry's atomic API. */
+  captureRegistryRecord?(projectId: string): T | undefined;
+  restoreRegistryRecord?(projectId: string, snapshot: T | undefined): void;
   /** Runtime worktree/import dispatch is outside persistence but remains ordered. */
   afterConfigured?(project: T, context: CanonicalProjectContext): Promise<void>;
   sameRootPath?(left: string, right: string): boolean;
@@ -949,13 +962,62 @@ function projectComponent(value: unknown): Component {
   return component;
 }
 
-function validateProjectConfiguration(proposal: CanonicalProjectProposal, current: Pick<ProjectConfigStore, "getComponents">): ValidatedProjectConfiguration {
-  const components = proposal.components === undefined ? undefined : (() => {
+const PRIVILEGED_PROJECT_CONFIG_KEYS = new Set([
+  "extension_prompt_sections", "extensionPromptSections", "extension_grants", "extensionGrants",
+  "prompt_extension_budget", "promptExtensionBudget", "extension_settings", "extensionSettings",
+]);
+const LEGACY_COMPONENT_COMMANDS: Record<string, string> = {
+  build_command: "build", test_command: "test", typecheck_command: "check",
+  test_unit_command: "unit", test_e2e_command: "e2e",
+};
+
+function validateProjectConfiguration(proposal: CanonicalProjectProposal, current: Pick<ProjectConfigStore, "getComponents"> & { getWithDefaults?: () => Record<string, string> }): ValidatedProjectConfiguration {
+  let components = proposal.components === undefined ? undefined : (() => {
     if (!Array.isArray(proposal.components)) throw new CanonicalMutationError(400, "components must be an array");
+    // An empty registration payload retains the historical default component.
+    if (proposal.mode === "register" && proposal.components.length === 0) return undefined;
     const candidate = proposal.components.map(projectComponent);
     if (new Set(candidate.map(component => component.name)).size !== candidate.length) throw new CanonicalMutationError(400, "Component names must be unique");
     return candidate;
   })();
+  const flat: Record<string, string | null> = {};
+  if (proposal.config !== undefined) {
+    if (!proposal.config || typeof proposal.config !== "object" || Array.isArray(proposal.config)) throw new CanonicalMutationError(400, "config must be an object");
+    for (const [key, value] of Object.entries(proposal.config as Record<string, unknown>)) {
+      if (!key || key.includes(".")) throw new CanonicalMutationError(400, `Invalid project config key \"${key}\"`);
+      if (PRIVILEGED_PROJECT_CONFIG_KEYS.has(key)) {
+        const code = key === "extension_prompt_sections" || key === "extensionPromptSections"
+          ? "PROMPT_EXTENSION_PROPOSAL_REQUIRED" : "PROMPT_EXTENSION_CONFIG_FORBIDDEN";
+        throw new CanonicalMutationError(422, `${key} is managed by the prompt extension policy endpoints`, code);
+      }
+      // PUT /config has always ignored stale/non-string form values. Preserve
+      // that tolerant public contract instead of bricking a proposal panel.
+      if (value !== null && value !== "" && typeof value !== "string") continue;
+      flat[key] = value === null || value === "" ? null : value;
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(flat, "sandbox_image") && flat.sandbox_image !== null && !parseSandboxBaseImageReference(flat.sandbox_image)) {
+    throw new CanonicalMutationError(400, "sandbox_image must be a valid Docker image reference");
+  }
+  if (Object.prototype.hasOwnProperty.call(flat, "base_ref") && flat.base_ref !== null) {
+    const shape = validateBaseRefShape({ value: flat.base_ref, sandbox: current.getWithDefaults?.().sandbox || "none" });
+    if (shape) throw new CanonicalMutationError(400, shape.error, undefined, shape);
+  }
+  const legacyCommands: Record<string, string> = {};
+  for (const [legacy, command] of Object.entries(LEGACY_COMPONENT_COMMANDS)) {
+    const value = flat[legacy];
+    if (typeof value === "string" && value.trim()) legacyCommands[command] = value.trim();
+  }
+  const legacySetup = flat.worktree_setup_command;
+  if (!components && (Object.keys(legacyCommands).length > 0 || (typeof legacySetup === "string" && legacySetup.trim()))) {
+    const existing = current.getComponents();
+    const first = existing[0] ?? { name: typeof proposal.name === "string" && proposal.name.trim() ? proposal.name.trim() : "default", repo: "." };
+    components = [{
+      ...first,
+      commands: { ...(first.commands ?? {}), ...legacyCommands },
+      ...(typeof legacySetup === "string" && legacySetup.trim() ? { worktreeSetupCommand: legacySetup.trim() } : {}),
+    }, ...existing.slice(1)];
+  }
   let workflows: Record<string, InlineWorkflowDef> | undefined;
   if (proposal.workflows !== undefined) {
     if (!proposal.workflows || typeof proposal.workflows !== "object" || Array.isArray(proposal.workflows)) throw new CanonicalMutationError(400, "workflows must be an object");
@@ -965,14 +1027,6 @@ function validateProjectConfiguration(proposal: CanonicalProjectProposal, curren
       (components ?? current.getComponents()) as Parameters<typeof validateAllWorkflows>[1],
     );
     if (errors.length) throw new CanonicalMutationError(400, "Workflow validation failed", "WORKFLOW_VALIDATION_FAILED", errors);
-  }
-  const flat: Record<string, string | null> = {};
-  if (proposal.config !== undefined) {
-    if (!proposal.config || typeof proposal.config !== "object" || Array.isArray(proposal.config)) throw new CanonicalMutationError(400, "config must be an object");
-    for (const [key, value] of Object.entries(proposal.config as Record<string, unknown>)) {
-      if (!key || key.includes(".") || (value !== null && value !== "" && typeof value !== "string")) throw new CanonicalMutationError(400, `Invalid project config key \"${key}\"`);
-      flat[key] = value === null || value === "" ? null : value as string;
-    }
   }
   let configDirectories: ConfigDirectoryEntry[] | undefined;
   if (proposal.configDirectories !== undefined) {
@@ -994,9 +1048,11 @@ function validateProjectConfiguration(proposal: CanonicalProjectProposal, curren
   return { components, workflows, flat, configDirectories, sandboxTokens, secretUpdates };
 }
 
-function publishProjectConfiguration(context: CanonicalProjectContext, candidate: ValidatedProjectConfiguration): { config: ProjectConfigRollbackSnapshot; secrets?: Record<string, string> } {
-  const config = context.projectConfigStore.captureRollbackSnapshot();
-  const secrets = context.secretsStore?.getAll();
+function captureProjectConfiguration(context: CanonicalProjectContext): { config: ProjectConfigRollbackSnapshot; secrets?: Record<string, string> } {
+  return { config: context.projectConfigStore.captureRollbackSnapshot(), secrets: context.secretsStore?.getAll() };
+}
+
+function publishProjectConfiguration(context: CanonicalProjectContext, candidate: ValidatedProjectConfiguration): void {
   context.projectConfigStore.mutate(draft => {
     for (const [key, value] of Object.entries(candidate.flat)) value === null ? draft.remove(key) : draft.set(key, value);
     if (candidate.components) draft.setComponents(candidate.components);
@@ -1005,12 +1061,18 @@ function publishProjectConfiguration(context: CanonicalProjectContext, candidate
     if (candidate.sandboxTokens) draft.setSandboxTokens(candidate.sandboxTokens);
   });
   if (Object.keys(candidate.secretUpdates).length > 0) context.secretsStore?.update(candidate.secretUpdates);
-  return { config, secrets };
 }
 
 async function restoreProjectConfiguration(context: CanonicalProjectContext, snapshot: { config: ProjectConfigRollbackSnapshot; secrets?: Record<string, string> }): Promise<void> {
-  context.projectConfigStore.restoreRollbackSnapshot(snapshot.config);
-  if (snapshot.secrets) context.secretsStore?.restoreAll(snapshot.secrets);
+  // Attempt both independent durable restores even if one filesystem write
+  // faults. A rollback must not strand secret authority just because project
+  // YAML restoration also reports an error.
+  let failure: unknown;
+  try { context.projectConfigStore.restoreRollbackSnapshot(snapshot.config); }
+  catch (error) { failure = error; }
+  try { if (snapshot.secrets) context.secretsStore?.restoreAll(snapshot.secrets); }
+  catch (error) { failure ??= error; }
+  if (failure) throw failure;
 }
 
 /**
@@ -1019,62 +1081,95 @@ async function restoreProjectConfiguration(context: CanonicalProjectContext, sna
  * config in one store transaction, and compensates every later failure.
  */
 export async function applyCanonicalProjectProposal<T extends CanonicalProjectRecord>(proposal: CanonicalProjectProposal, deps: CanonicalProjectProposalDeps<T>): Promise<{ project: T; replayed: boolean }> {
-  assertCanonicalApplicationKey(proposal.applicationKey);
+  // Legacy fields may arrive top-level from propose_project or nested under
+  // config from the REST shape; normalize once so every caller shares it.
+  const legacyConfig = Object.fromEntries(Object.keys(LEGACY_COMPONENT_COMMANDS)
+    .concat("worktree_setup_command")
+    .flatMap(key => proposal[key as keyof CanonicalProjectProposal] !== undefined ? [[key, proposal[key as keyof CanonicalProjectProposal]]] : []));
+  const input: CanonicalProjectProposal = Object.keys(legacyConfig).length > 0
+    ? { ...proposal, config: { ...(proposal.config && typeof proposal.config === "object" && !Array.isArray(proposal.config) ? proposal.config as Record<string, unknown> : {}), ...legacyConfig } }
+    : proposal;
+  assertCanonicalApplicationKey(input.applicationKey);
   const name = typeof proposal.name === "string" ? proposal.name.trim() : undefined;
   const rootPath = typeof proposal.rootPath === "string" ? proposal.rootPath : undefined;
-  if (proposal.mode === "register" && (!name || !rootPath || !(path.posix.isAbsolute(rootPath) || path.win32.isAbsolute(rootPath)))) throw new CanonicalMutationError(400, "Project name and absolute rootPath are required");
-  if (proposal.mode !== "register" && (typeof proposal.projectId !== "string" || !proposal.projectId)) throw new CanonicalMutationError(400, "Project mutation target is required");
+  if (input.mode === "register" && (!name || !rootPath || !(path.posix.isAbsolute(rootPath) || path.win32.isAbsolute(rootPath)))) throw new CanonicalMutationError(400, "Project name and absolute rootPath are required");
+  if (input.mode !== "register" && (typeof input.projectId !== "string" || !input.projectId)) throw new CanonicalMutationError(400, "Project mutation target is required");
+  if (input.mode !== "register" && rootPath !== undefined && !(path.posix.isAbsolute(rootPath) || path.win32.isAbsolute(rootPath))) throw new CanonicalMutationError(400, "Project rootPath must be an absolute path");
   const apply = async (): Promise<{ project: T; replayed: boolean }> => {
     if (proposal.applicationKey) {
       const replay = deps.findByApplicationKey(proposal.applicationKey);
       if (replay) return { project: replay, replayed: true };
     }
-    // Registration must reject a malformed complete candidate before it can
-    // allocate a registry row or scaffold a root. Existing projects validate
-    // against their actual component set below.
-    if (proposal.mode === "register") {
-      validateProjectConfiguration(proposal, {
-        getComponents: () => name ? [{ name, repo: "." }] : [],
-      } as Pick<ProjectConfigStore, "getComponents">);
+    // Validate the complete candidate before registry/root/service mutation.
+    // Existing contexts are read-only at this stage; registration uses its
+    // deterministic default component because no project context exists yet.
+    let preProject: T | undefined;
+    let preContext: CanonicalProjectContext | undefined;
+    let candidate: ValidatedProjectConfiguration;
+    if (input.mode === "register") {
+      candidate = validateProjectConfiguration(input, { getComponents: () => name ? [{ name, repo: "." }] : [] });
+    } else {
+      preProject = deps.get(input.projectId as string);
+      if (!preProject) throw new CanonicalMutationError(422, `Unknown project: ${input.projectId}`, "UNKNOWN_PROJECT");
+      preContext = await deps.openContext(preProject.id);
+      if (!preContext) throw new Error("Project context could not be opened");
+      candidate = validateProjectConfiguration(input, preContext.projectConfigStore);
     }
-    let project: T;
+    let project: T | undefined;
     let created = false;
     let oldProject: T | undefined;
+    let registrySnapshot: T | undefined;
     let oldContext: CanonicalProjectContext | undefined;
     let context: CanonicalProjectContext | undefined;
     let snapshot: { config: ProjectConfigRollbackSnapshot; secrets?: Record<string, string> } | undefined;
     let rootRemoved = false;
     try {
-      if (proposal.mode === "register") {
-        project = deps.register({ name: name!, rootPath: rootPath!, color: typeof proposal.color === "string" ? proposal.color : undefined, palette: typeof proposal.palette === "string" ? proposal.palette : undefined, colorLight: typeof proposal.colorLight === "string" ? proposal.colorLight : undefined, colorDark: typeof proposal.colorDark === "string" ? proposal.colorDark : undefined, acceptCanonical: proposal.acceptCanonical === true, applicationKey: proposal.applicationKey });
+      if (input.mode === "register") {
+        // Capture before register so even a later context/config failure can
+        // restore exact registry absence rather than a derived delete.
+        registrySnapshot = undefined;
+        project = deps.register({ name: name!, rootPath: rootPath!, color: typeof input.color === "string" ? input.color : undefined, palette: typeof input.palette === "string" ? input.palette : undefined, colorLight: typeof input.colorLight === "string" ? input.colorLight : undefined, colorDark: typeof input.colorDark === "string" ? input.colorDark : undefined, acceptCanonical: input.acceptCanonical === true, applicationKey: input.applicationKey });
         created = true;
         context = await deps.openContext(project.id);
       } else {
-        project = deps.get(proposal.projectId as string)!;
-        if (!project) throw new CanonicalMutationError(422, `Unknown project: ${proposal.projectId}`, "UNKNOWN_PROJECT");
-        oldProject = structuredClone(project);
+        project = preProject!;
+        registrySnapshot = deps.captureRegistryRecord?.(project.id) ?? structuredClone(project);
+        oldProject = registrySnapshot;
         const replacingRoot = typeof rootPath === "string" && !(deps.sameRootPath ?? ((a, b) => a === b))(rootPath, project.rootPath);
-        oldContext = await deps.openContext(project.id);
+        oldContext = preContext;
         if (replacingRoot) { await deps.suspendServices(project.id); await deps.removeContext(project.id); rootRemoved = true; }
-        if (proposal.mode === "promote") project = deps.promote(project.id, { name });
-        else project = deps.update(project.id, { ...(name ? { name } : {}), ...(rootPath ? { rootPath } : {}), ...(typeof proposal.color === "string" ? { color: proposal.color } : {}), ...(typeof proposal.palette === "string" ? { palette: proposal.palette } : {}), ...(typeof proposal.colorLight === "string" ? { colorLight: proposal.colorLight } : {}), ...(typeof proposal.colorDark === "string" ? { colorDark: proposal.colorDark } : {}) });
+        if (input.mode === "promote") project = deps.promote(project.id, { name });
+        else project = deps.update(project.id, { ...(name ? { name } : {}), ...(rootPath ? { rootPath } : {}), ...(typeof input.color === "string" ? { color: input.color } : {}), ...(typeof input.palette === "string" ? { palette: input.palette } : {}), ...(typeof input.colorLight === "string" ? { colorLight: input.colorLight } : {}), ...(typeof input.colorDark === "string" ? { colorDark: input.colorDark } : {}) });
         context = replacingRoot ? await deps.openContext(project.id) : oldContext;
         if (!context) throw new Error("Project context could not be opened");
         if (replacingRoot) { await deps.stopServices(project.id); await deps.reconcileServices(project.id); }
       }
-      if (!context) throw new Error("Project context could not be opened");
-      const candidate = validateProjectConfiguration(proposal, context.projectConfigStore);
-      if (proposal.mode !== "update" && candidate.components === undefined && context.projectConfigStore.getComponents().length === 0) candidate.components = [{ name: project.name, repo: "." }];
-      snapshot = publishProjectConfiguration(context, candidate);
+      if (!context || !project) throw new Error("Project context could not be opened");
+      if (input.mode !== "update" && candidate.components === undefined && context.projectConfigStore.getComponents().length === 0) candidate.components = [{ name: project.name, repo: "." }];
+      // Capture caller rollback state before either durable store publishes.
+      snapshot = captureProjectConfiguration(context);
+      publishProjectConfiguration(context, candidate);
       if (project.importDecisionRun?.state === "configuring" && deps.markReady) project = deps.markReady(project.id, project.importDecisionRun.id);
       await deps.afterConfigured?.(project, context);
       return { project, replayed: false };
     } catch (error) {
+      // Both durable stores roll back from snapshots captured before their first
+      // publication. Restore secrets even when the failed write was update().
       if (snapshot && context) await restoreProjectConfiguration(context, snapshot).catch(() => undefined);
-      if (created) { if (project!) await deps.removeContext(project.id).catch(() => undefined); if (project!) deps.removeRegistered(project); }
-      else if (oldProject && project!) {
-        try { deps.update(project.id, { name: oldProject.name, rootPath: oldProject.rootPath, color: (oldProject as any).color, palette: (oldProject as any).palette ?? "", colorLight: (oldProject as any).colorLight, colorDark: (oldProject as any).colorDark }); } catch { /* original error wins */ }
-        if (rootRemoved) { await deps.removeContext(project.id).catch(() => undefined); await deps.openContext(project.id).catch(() => undefined); await deps.reconcileServices(project.id).catch(() => undefined); }
+      if (project) {
+        if (deps.restoreRegistryRecord) {
+          try { deps.restoreRegistryRecord(project.id, created ? undefined : registrySnapshot); } catch { /* original error wins */ }
+        } else if (created) {
+          try { deps.removeRegistered(project); } catch { /* original error wins */ }
+        } else if (oldProject) {
+          try { deps.update(project.id, { name: oldProject.name, rootPath: oldProject.rootPath, color: (oldProject as any).color, palette: (oldProject as any).palette ?? "", colorLight: (oldProject as any).colorLight, colorDark: (oldProject as any).colorDark }); } catch { /* original error wins */ }
+        }
+        if (created) await deps.removeContext(project.id).catch(() => undefined);
+        if (rootRemoved) {
+          await deps.removeContext(project.id).catch(() => undefined);
+          await deps.openContext(project.id).catch(() => undefined);
+          await deps.reconcileServices(project.id).catch(() => undefined);
+        }
       }
       throw error;
     }

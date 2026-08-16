@@ -873,6 +873,31 @@ export class ProjectRegistry {
     return this.projects.get(id);
   }
 
+  /**
+   * Capture one registry row exactly for a higher-level transaction. This is
+   * intentionally gateway-owned rather than exposing the backing map: fields
+   * such as import runs and canonical mutation keys are durable authority.
+   */
+  captureExactRecord(id: string): RegisteredProject | undefined {
+    const project = this.projects.get(id);
+    return project ? structuredClone(project) : undefined;
+  }
+
+  /**
+   * Restore a captured row (or its absence) in one durable registry write.
+   * Do not route this through update()/promote(): those APIs intentionally
+   * derive fields and would lose provisional/import authority on rollback.
+   */
+  restoreExactRecord(id: string, snapshot: RegisteredProject | undefined): void {
+    if (snapshot) {
+      if (snapshot.id !== id) throw new Error("Registry snapshot id mismatch");
+      this.projects.set(id, structuredClone(snapshot));
+    } else {
+      this.projects.delete(id);
+    }
+    this.save();
+  }
+
   /** Find a project whose rootPath matches its canonical identity. Excludes
    * hidden synthetic projects (e.g. "system") so that real-project lookups don't
    * accidentally match the install-dir anchor of the hidden system project. */

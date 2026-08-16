@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ProjectRegistry } from "../../src/server/agent/project-registry.js";
+import { SecretsStore } from "../../src/server/agent/secrets-store.js";
 import {
 	CANONICAL_MUTATION_KEY,
 	applyCanonicalGoalProposal,
@@ -189,6 +190,22 @@ test("project registry persists and reloads only a valid server-owned canonical 
 	}
 });
 
+test("ProjectRegistry exact snapshots restore provisional and import authority", () => {
+	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-registry-snapshot-"));
+	const root = path.join(stateDir, "project");
+	fs.mkdirSync(root);
+	try {
+		const registry = new ProjectRegistry(stateDir);
+		const provisional = registry.registerProvisional("Draft", root);
+		registry.setCanonicalMutationKey(provisional.id, "draft-key");
+		const snapshot = registry.captureExactRecord(provisional.id)!;
+		registry.promote(provisional.id, { name: "Published" });
+		registry.markImportDecisionRunReady(provisional.id, registry.get(provisional.id)!.importDecisionRun!.id);
+		registry.restoreExactRecord(provisional.id, snapshot);
+		expect(new ProjectRegistry(stateDir).get(provisional.id)).toEqual(snapshot);
+	} finally { fs.rmSync(stateDir, { recursive: true, force: true }); }
+});
+
 test("canonical project proposal validates before registration, publishes full config, and replays one keyed application", async () => {
 	const projects: any[] = [];
 	let mutations = 0;
@@ -208,6 +225,7 @@ test("canonical project proposal validates before registration, publishes full c
 		openContext: async () => ({ projectConfigStore: store }), suspendServices: async () => undefined, stopServices: async () => undefined, reconcileServices: async () => undefined,
 	};
 	await expect(applyCanonicalProjectProposal({ mode: "register", name: "Bad", rootPath: "/project", components: [{ name: "bad", repo: "../escape" }] }, deps)).rejects.toThrow("unsafe");
+	await expect(applyCanonicalProjectProposal({ mode: "register", name: "Forbidden", rootPath: "/project", config: { extension_grants: "[]" } }, deps)).rejects.toMatchObject({ code: "PROMPT_EXTENSION_CONFIG_FORBIDDEN", status: 422 });
 	expect(projects).toHaveLength(0);
 	const input = { mode: "register" as const, name: "Project", rootPath: "/project", applicationKey: "project-proposal-1", components: [{ name: "app", repo: ".", commands: { check: "npm run check" }, config: { qa_start_command: "npm start" } }] };
 	const [first, replay] = await Promise.all([applyCanonicalProjectProposal(input, deps), applyCanonicalProjectProposal(input, deps)]);
@@ -234,6 +252,54 @@ test("canonical project proposal restores config and registry state after post-c
 	await expect(applyCanonicalProjectProposal({ mode: "update", projectId: "project", name: "New", components: [{ name: "new", repo: "." }] }, deps)).rejects.toThrow("runtime failed");
 	expect(project).toMatchObject({ name: "Old", rootPath: "/old", color: "old" });
 	expect(store.components).toEqual([{ name: "old", repo: "." }]);
+});
+
+test("canonical project proposal restores config and exact secrets when secret publication fails", async () => {
+	const project: any = { id: "project", name: "Old", rootPath: "/old", provisional: true, importDecisionRun: { id: "run", state: "configuring" }, canonicalMutationKey: "old-key" };
+	const store: any = {
+		components: [{ name: "old", repo: "." }], getComponents() { return this.components; }, getWithDefaults: () => ({ sandbox: "none" }),
+		captureRollbackSnapshot() { return { components: structuredClone(this.components) }; }, restoreRollbackSnapshot(snapshot: any) { this.components = structuredClone(snapshot.components); },
+		mutate(fn: any) { fn({ setComponents: (value: any) => { this.components = value; }, set: () => undefined, remove: () => undefined, setWorkflows: () => undefined, setConfigDirectories: () => undefined, setSandboxTokens: () => undefined }); },
+	};
+	const secrets = { data: { KEEP: "", OLD: "old" } as Record<string, string>, getAll() { return { ...this.data }; }, update: () => { throw new Error("secrets write failed"); }, restoreAll(snapshot: Record<string, string>) { this.data = { ...snapshot }; } };
+	const deps: any = {
+		findByApplicationKey: () => undefined, register: () => project, get: () => project, update: (_id: string, updates: any) => Object.assign(project, updates), promote: () => project, removeRegistered: () => undefined,
+		captureRegistryRecord: () => structuredClone(project), restoreRegistryRecord: (_id: string, snapshot: any) => { Object.keys(project).forEach(key => delete project[key]); Object.assign(project, snapshot); },
+		removeContext: async () => undefined, openContext: async () => ({ projectConfigStore: store, secretsStore: secrets }), suspendServices: async () => undefined, stopServices: async () => undefined, reconcileServices: async () => undefined,
+	};
+	await expect(applyCanonicalProjectProposal({ mode: "update", projectId: "project", components: [{ name: "new", repo: "." }], sandboxTokens: [{ key: "NEW", value: "secret" }] }, deps)).rejects.toThrow("secrets write failed");
+	expect(store.components).toEqual([{ name: "old", repo: "." }]);
+	expect(secrets.data).toEqual({ KEEP: "", OLD: "old" });
+	expect(project).toEqual({ id: "project", name: "Old", rootPath: "/old", provisional: true, importDecisionRun: { id: "run", state: "configuring" }, canonicalMutationKey: "old-key" });
+});
+
+test("SecretsStore exact restore retains empty secret values", () => {
+	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-secret-restore-"));
+	try {
+		const secrets = new SecretsStore(stateDir);
+		secrets.set("empty", "");
+		secrets.set("value", "before");
+		const snapshot = secrets.getAll();
+		secrets.update({ empty: "changed", added: "new" });
+		secrets.restoreAll(snapshot);
+		expect(secrets.getAll()).toEqual({ empty: "", value: "before" });
+		expect(JSON.parse(fs.readFileSync(path.join(stateDir, "secrets.json"), "utf8"))).toEqual({ empty: "", value: "before" });
+	} finally { fs.rmSync(stateDir, { recursive: true, force: true }); }
+});
+
+test("canonical project proposal restores the exact provisional registry row when mark-ready fails", async () => {
+	const project: any = { id: "project", name: "Draft", rootPath: "/project", provisional: true, importDecisionRun: { id: "run", state: "configuring", createdAt: 1 }, canonicalMutationKey: "exact-key", color: "before", palette: "amber" };
+	const store: any = { getComponents: () => [{ name: "draft", repo: "." }], getWithDefaults: () => ({ sandbox: "none" }), captureRollbackSnapshot: () => ({}), restoreRollbackSnapshot: () => undefined, mutate: () => undefined };
+	const deps: any = {
+		findByApplicationKey: () => undefined, register: () => project, get: () => project, update: (_id: string, updates: any) => Object.assign(project, updates),
+		promote: (_id: string, updates: any) => { delete project.provisional; Object.assign(project, updates); project.importDecisionRun = { ...project.importDecisionRun, state: "configuring" }; return project; },
+		markReady: () => { project.importDecisionRun.state = "ready"; throw new Error("marker failed"); }, removeRegistered: () => undefined,
+		captureRegistryRecord: () => structuredClone(project), restoreRegistryRecord: (_id: string, snapshot: any) => { Object.keys(project).forEach(key => delete project[key]); Object.assign(project, snapshot); },
+		removeContext: async () => undefined, openContext: async () => ({ projectConfigStore: store }), suspendServices: async () => undefined, stopServices: async () => undefined, reconcileServices: async () => undefined,
+	};
+	const before = structuredClone(project);
+	await expect(applyCanonicalProjectProposal({ mode: "promote", projectId: "project", name: "Published" }, deps)).rejects.toThrow("marker failed");
+	expect(project).toEqual(before);
 });
 
 test("canonical project proposal restores the old root when replacement services fail", async () => {
