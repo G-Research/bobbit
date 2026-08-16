@@ -133,6 +133,44 @@ describe("reliable compaction admission fences", () => {
 });
 
 describe("post-terminal reliable drain settlement", () => {
+	it("dispatches SDK next-turn intent at agent_end without waiting for Pi-only settlement", async () => {
+		const prompt = vi.fn(async (
+			_text: string,
+			_images?: unknown,
+			_options?: unknown,
+			_streamingBehavior?: unknown,
+		) => ({ success: true }));
+		const { manager, session } = useHarness({
+			id: "sdk-post-terminal-drain",
+			runtime: "claude-agent-sdk",
+			status: "streaming",
+			prompt,
+		});
+
+		manager.handleAgentLifecycle(session, { type: "agent_start" });
+		expect(session._piAgentRunSettled, "SDK turns must not install Pi's settlement fence").toBeUndefined();
+
+		await manager.enqueuePrompt(session.id, "second SDK turn", { intentId: "sdk-turn-2" });
+		await manager.enqueuePrompt(session.id, "third SDK turn", { intentId: "sdk-turn-3" });
+		expect(prompt).not.toHaveBeenCalled();
+		expect(session.promptQueue.toArray().map((row: any) => row.id)).toEqual(["sdk-turn-2", "sdk-turn-3"]);
+
+		manager.handleAgentLifecycle(session, {
+			type: "message_end",
+			message: { id: "sdk-first-terminal", role: "assistant", stopReason: "stop", content: "done" },
+		});
+		manager.handleAgentLifecycle(session, { type: "agent_end", willRetry: false, messages: [] });
+		await flushMicrotasks();
+
+		expect(prompt).toHaveBeenCalledTimes(1);
+		expect(prompt.mock.calls[0]?.[0]).toBe("second SDK turn");
+		expect(session.promptQueue.toArray().map((row: any) => row.id)).toEqual(["sdk-turn-3"]);
+		expect(session.inFlightSteerTexts).toMatchObject([{
+			intentId: "sdk-turn-2",
+			state: "dispatching",
+		}]);
+	});
+
 	it("waits through post-agent compaction and dispatches next-turn work only after agent_settled", async () => {
 		const promptRpc = barrier<any>();
 		const prompt = vi.fn(() => promptRpc.hold());

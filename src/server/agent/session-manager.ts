@@ -8526,8 +8526,11 @@ export class SessionManager {
 
 		if (event.type === "agent_start") {
 			// Pi's run remains active through agent_end post-processing. A later
-			// agent_settled is the sole fresh-prompt admission boundary.
-			session._piAgentRunSettled = false;
+			// agent_settled is its sole fresh-prompt admission boundary. The Claude
+			// SDK has no separate settlement frame: its root agent_end is already the
+			// completed query turn, so installing this Pi-only fence would park every
+			// subsequent accepted intent forever before the bridge input handoff.
+			if ((session.runtime ?? "pi") === "pi") session._piAgentRunSettled = false;
 			// The session has begun its turn — clear the boot re-prompt marker so
 			// the set doesn't leak across the process lifetime (restoreSession is
 			// also re-invoked on in-place respawn).
