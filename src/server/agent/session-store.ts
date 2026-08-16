@@ -918,9 +918,17 @@ export class SessionStore {
 		for (const tier of ["live", "archived"] as const) {
 			if (this.tiers[tier].staleGuardTripped) throw new Error(`Session persistence refused: stale-snapshot guard is active for ${tier} tier`);
 			const diskEpoch = await this.peekDiskEpochAsync(tier);
-			// A never-created tier has the same virtual epoch zero used by the
-			// writer. A corrupt existing file remains outside the binding instead.
-			const observed = diskEpoch < 0 && !this.fs.existsSync(this.tierFile(tier)) ? 0 : diskEpoch;
+			let observed = diskEpoch;
+			if (diskEpoch < 0) {
+				try {
+					await this.fs.promises.access(this.tierFile(tier));
+					// An existing file that could not be parsed is not transition evidence.
+				} catch (err) {
+					// A never-created tier has the same virtual epoch zero used by the writer.
+					// Other access failures remain outside the binding rather than appearing empty.
+					if ((err as NodeJS.ErrnoException).code === "ENOENT") observed = 0;
+				}
+			}
 			const epochs = intent.epochs[tier];
 			result[tier] = observed === epochs.base ? "base" : observed === epochs.target ? "target" : null;
 		}
@@ -967,12 +975,15 @@ export class SessionStore {
 		const startedAt = performance.now();
 		await this.fs.promises.mkdir(this.storeDir, { recursive: true });
 		const mustMigrate = this.migrationNeeded;
-		const selected = (Object.keys(this.tiers) as SessionTier[]).filter(t => mustMigrate || this.tiers[t].dirtyGeneration > this.tiers[t].publishedGeneration);
+		let selected = (Object.keys(this.tiers) as SessionTier[]).filter(t => mustMigrate || this.tiers[t].dirtyGeneration > this.tiers[t].publishedGeneration);
 		const freshEntries = [...this.pendingTransitions.values()];
 		const activeRecovery = this.activeTransitionIntent;
 		const activeIntent = activeRecovery?.intent ?? null;
 		const freshTransition = freshEntries.length > 0 && !activeIntent;
 		const cleanupIntent = this.transitionIntentCleanup;
+		// A fresh membership transition must prepare and publish a complete pair,
+		// even if a coalesced prior write advanced one tier's dirty watermark.
+		if (freshTransition) selected = [...new Set<SessionTier>([...selected, "live", "archived"])];
 		// A legacy source is kept authoritative until archive publication succeeds;
 		// pair transitions remain archive-first after both tiers have been prepared.
 		if (mustMigrate || freshTransition || activeIntent) selected.sort((a, b) => a === "archived" ? -1 : b === "archived" ? 1 : 0);
