@@ -322,6 +322,7 @@ describe("shared worktree guard reproductions", () => {
 			makeWorktree(webWorktree);
 
 			const goalState = path.join(tmp, "goal-state");
+			fs.mkdirSync(goalState, { recursive: true });
 			const goalStore = new GoalStore(goalState, undefined, { persistence: "json" });
 			fs.writeFileSync(path.join(goalState, "sessions.json"), "{corrupt live tier", "utf8");
 			fs.writeFileSync(path.join(goalState, "sessions.archived.json"), JSON.stringify({
