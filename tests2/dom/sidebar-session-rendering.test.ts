@@ -10,8 +10,19 @@ __syncBeforeAll(() => __syncCE());
 // so they are kept as byte-identical replicas of the legacy fixture, preserving
 // every assertion (SB-05..08, SB-15, SB-34, SB-36).
 import { html, render } from "lit";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { terseRelativeTime, formatSessionAge, renderModelUnavailableBadge, renderReservedSessionTimestamp, renderSessionRow, renderArchivedSessionRow } from "../../src/app/render-helpers.js";
+
+// Sidebar row renderers include a decorative Bobbit canvas. Happy-dom provides
+// no 2D context, so retain the real rows while stubbing only that unsupported
+// drawing API; these tests assert row markup, not sprite pixels.
+beforeEach(() => {
+	const canvasContext = new Proxy({}, { get: () => () => {}, set: () => true });
+	vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(canvasContext as CanvasRenderingContext2D);
+	vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockReturnValue("data:image/png;base64,c3RhdGlj");
+});
+
+afterEach(() => vi.restoreAllMocks());
 
 function hasUnseenActivity(session: any, activeId: string, goals: any[], visitedMap: Record<string, number>): boolean {
 	if (session.status === "streaming" || session.status === "busy") return false;
