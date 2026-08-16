@@ -378,8 +378,13 @@ describe("SessionStore atomic write", () => {
 			for (let i = 0; i < 3; i++) store.put(makeSession(`live-${i}`));
 			for (let i = 0; i < archivedCount; i++) store.put({ ...makeSession(`archived-${i}`), archived: true, archivedAt: i + 1 });
 			await store.flushAsync();
+			const live = memfs.readFileSync(STORE_FILE, "utf-8");
+			if (archivedCount === 0) {
+				assert.equal(memfs.existsSync(ARCHIVED_FILE), false, "an unchanged empty archive tier is not persisted");
+				return { live, archive: undefined };
+			}
 			return {
-				live: memfs.readFileSync(STORE_FILE, "utf-8"),
+				live,
 				archive: JSON.parse(memfs.readFileSync(ARCHIVED_FILE, "utf-8")),
 			};
 		};
