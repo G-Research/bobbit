@@ -39,7 +39,10 @@ export const GATEWAY_OWNED_FILES: readonly string[] = [
 	"state/setup-complete",       // src/server/setup-status.ts
 	"state/gateway-restart",      // src/server/harness.ts SENTINEL
 	"state/token",                // src/server/auth/token.ts (admin token)
-	"state/sessions.json",        // global session registry (spans projects)
+	"state/sessions.json",        // live global session registry (spans projects)
+	"state/sessions.archived.json", // eagerly loaded archived session registry
+	"state/sessions.json.split-transition", // in-flight live/archive membership publication
+	"state/sessions.json.pre-archived-split*", // retained v1/v2 split-migration evidence
 	"state/projects.json",        // global project registry (spans projects)
 
 	// TLS / OAuth / DNS challenge
@@ -112,12 +115,12 @@ function matchesAllowlistEntry(relPath: string, entry: string): { match: boolean
 		if (norm.startsWith(dir + "/")) return { match: true, isDirRoot: false };
 		return { match: false, isDirRoot: false };
 	}
-	if (entry.includes("*")) {
-		// Single-segment wildcard at the tail, e.g. "state/model-name-*"
-		const star = entry.indexOf("*");
-		const prefix = entry.slice(0, star);
-		const suffix = entry.slice(star + 1);
-		if (norm.startsWith(prefix) && norm.endsWith(suffix) && !norm.slice(prefix.length).includes("/")) {
+	if (entry.endsWith("*") && entry.indexOf("*") === entry.length - 1) {
+		// Single-segment suffix wildcard, e.g. "state/model-name-*". The
+		// suffix may be empty, so a retained base file and its numbered copies
+		// are both protected by "state/sessions.json.pre-archived-split*".
+		const prefix = entry.slice(0, -1);
+		if (norm.startsWith(prefix) && !norm.slice(prefix.length).includes("/")) {
 			return { match: true, isDirRoot: false };
 		}
 		return { match: false, isDirRoot: false };

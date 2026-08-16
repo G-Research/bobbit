@@ -142,6 +142,13 @@ function isCoveredByAllowlist(segment: string): boolean {
 	return false;
 }
 
+test("split-session recovery artifacts use exact entries plus a suffix wildcard", () => {
+	assert.ok(GATEWAY_OWNED_FILES.includes("state/sessions.archived.json"));
+	assert.ok(GATEWAY_OWNED_FILES.includes("state/sessions.json.split-transition"));
+	assert.ok(GATEWAY_OWNED_FILES.includes("state/sessions.json.pre-archived-split*"));
+	assert.ok(!GATEWAY_OWNED_FILES.includes("state/sessions.json.pre-archived-split"));
+});
+
 test("every bobbitStateDir() write site segment is in GATEWAY_OWNED_FILES or annotated `// archive-safe`", () => {
 	const sites = findWriteSites();
 	assert.ok(sites.length > 0, "regex should have found SOME write sites; check pattern drift");
