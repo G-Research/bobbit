@@ -472,6 +472,22 @@ function alternateManualSdkModel(configuredModel: string): string {
 	return /(?:^|[-_])haiku(?:$|[-_])/.test(normalized) ? "sonnet" : "haiku";
 }
 
+/** The authenticated built-in SDK aliases replace the retired custom-provider fixture. */
+async function expectManualSdkCatalogAliases(
+	api: (path: string, init?: RequestInit) => Promise<Response>,
+	configuredModel: string,
+	alternateModel: string,
+): Promise<void> {
+	const response = await api("/api/models");
+	expect(response.status).toBe(200);
+	const models = await response.json() as Array<{ provider?: unknown; id?: unknown; authenticated?: unknown }>;
+	const find = (id: string) => models.find(model => model.provider === "claude-agent-sdk" && model.id === id);
+	expect({
+		configuredAliasAuthenticated: find(configuredModel)?.authenticated === true,
+		alternateAliasAuthenticated: find(alternateModel)?.authenticated === true,
+	}).toEqual({ configuredAliasAuthenticated: true, alternateAliasAuthenticated: true });
+}
+
 function manualSdkAuthDir(): string {
 	const authDir = process.env.MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR?.trim();
 	if (!authDir) throw new Error("Missing required environment variable: MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR.");
@@ -1362,20 +1378,7 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			}
 			const sessionModel = `claude-agent-sdk/${configuredModel}`;
 			const { claudeAgentSdkUnavailableRouteDiagnostic } = await import("../../dist/server/agent/claude-agent-sdk-error.js");
-			const providerResponse = await api("/api/custom-providers", {
-				method: "POST",
-				body: JSON.stringify({
-					id: "claude-agent-sdk",
-					name: "claude-agent-sdk",
-					type: "manual",
-					baseUrl: "http://127.0.0.1:9",
-					models: [
-						{ id: configuredModel, name: "Manual Claude Agent SDK smoke" },
-						{ id: alternateModel, name: "Manual Claude Agent SDK live-control target" },
-					],
-				}),
-			});
-			expect(providerResponse.status).toBe(200);
+			await expectManualSdkCatalogAliases(api, configuredModel, alternateModel);
 			const preferencesResponse = await api("/api/preferences", {
 				method: "PUT",
 				body: JSON.stringify({ "default.sessionModel": sessionModel, "default.sessionThinkingLevel": "off" }),
@@ -1771,20 +1774,7 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			expect(savedConfig.sandbox_tokens).toEqual([{ key: "ANTHROPIC_OAUTH_TOKEN", enabled: true, value: "" }]);
 			const sessionModel = `claude-agent-sdk/${configuredModel}`;
 			const { claudeAgentSdkUnavailableRouteDiagnostic } = await import("../../dist/server/agent/claude-agent-sdk-error.js");
-			const providerResponse = await api("/api/custom-providers", {
-				method: "POST",
-				body: JSON.stringify({
-					id: "claude-agent-sdk",
-					name: "claude-agent-sdk",
-					type: "manual",
-					baseUrl: "http://127.0.0.1:9",
-					models: [
-						{ id: configuredModel, name: "Manual Claude Agent SDK sandbox smoke" },
-						{ id: alternateModel, name: "Manual Claude Agent SDK sandbox live-control target" },
-					],
-				}),
-			});
-			expect(providerResponse.status).toBe(200);
+			await expectManualSdkCatalogAliases(api, configuredModel, alternateModel);
 			const preferencesResponse = await api("/api/preferences", {
 				method: "PUT",
 				body: JSON.stringify({ "default.sessionModel": sessionModel, "default.sessionThinkingLevel": "off" }),
