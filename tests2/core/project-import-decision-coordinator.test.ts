@@ -6,6 +6,7 @@ describe("ProjectImportDecisionCoordinator", () => {
 		const run = { version: 1 as const, id: "import-1", createdAt: Date.parse("2026-01-01T00:00:00.000Z"), state: "ready" as const };
 		const storedRuns = new Map<string, any>();
 		const traces: Array<{ projectId: string; importId: string; outcomes: readonly unknown[] }> = [];
+		let runCreations = 0;
 		let dispatches = 0;
 		const coordinator = new ProjectImportDecisionCoordinator({
 			registry: {
@@ -16,7 +17,7 @@ describe("ProjectImportDecisionCoordinator", () => {
 				getOrCreate: () => ({
 					decisionRequestStore: {
 						getImportRun: (id: string) => storedRuns.get(id),
-						ensureImportRun: (value: any) => { storedRuns.set(value.id, value); return { created: true, run: value }; },
+						ensureImportRun: (value: any) => { runCreations++; storedRuns.set(value.id, value); return { created: true, run: value }; },
 					},
 					projectConfigStore: { getComponents: () => [] },
 				}),
@@ -38,6 +39,7 @@ describe("ProjectImportDecisionCoordinator", () => {
 
 		expect(first).toEqual(second);
 		expect(dispatches).toBe(1);
+		expect(runCreations).toBe(1, "the ready marker creates one durable import store before dispatch");
 		expect(storedRuns.get("import-1")?.context).toMatchObject({ event: "projectImported", projectId: "project-1", importId: "import-1" });
 		expect(traces).toEqual([{
 			projectId: "project-1", importId: "import-1",

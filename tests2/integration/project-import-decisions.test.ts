@@ -263,7 +263,9 @@ test.describe("project import decisions — real gateway lifecycle", () => {
 				method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ rev: draft.rev }),
 			});
 			expect(accepted.status, await accepted.clone().text()).toBe(201);
-			expect(await readJson<any>(accepted)).toMatchObject({ status: "accepted", role: { name: "imported-role", label: "Imported role" } });
+			// The import-proposal accept route returns the canonical mutation result
+			// under `outcome`; role application identifies the created role by name.
+			expect(await readJson<any>(accepted)).toMatchObject({ status: "accepted", outcome: { role: "imported-role" } });
 			const roles = await apiFetch(`/api/roles?projectId=${encodeURIComponent(projectId)}`);
 			expect((await readJson<any>(roles)).roles).toEqual(expect.arrayContaining([expect.objectContaining({ name: "imported-role", label: "Imported role" })]));
 			expect((await readJson<any>(await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-proposals`, { headers: { Cookie: cookie } }))).proposals).toEqual([]);

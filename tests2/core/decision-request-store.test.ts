@@ -126,19 +126,31 @@ describe("DecisionRequestStore", () => {
 	it.each(["accepted", "rejected"] as const)("restores a %s import proposal decision after restart", (status) => {
 		const dir = stateDir(`proposal-${status}`);
 		const store = new DecisionRequestStore(dir, memfs);
-		assert.equal(store.put(request("request-1")), true);
+		const imported = request("request-1", {
+			sessionId: undefined,
+			goalId: undefined,
+			delivery: { kind: "project-import", importId: "import-1" },
+			asker: { packId: "pack-1", hookId: "hook-1", event: "projectImported" },
+			request: { ...request("seed").request, scope: "project" },
+		});
+		assert.equal(store.put(imported), true);
 		assert.equal(store.writeTerminalFirst("request-1", {
 			status: "resolved",
 			resolvedAt: "2026-01-01T00:01:00.000Z",
 			resolution: { value: { kind: "option", value: "safe" }, actor: "user", reason: "answered" },
 		}).written, true);
 		assert.equal(store.updateProposal("request-1", { status: "created", type: "role", rev: 1 }), true);
-		const proposal = { status, type: "role" as const, rev: 1, decidedAt: "2026-01-01T00:02:00.000Z" };
-		assert.equal(store.updateProposal("request-1", proposal), true);
+		const application = { projectId: "project-1", importId: "import-1", requestId: "request-1", type: "role" as const, rev: 1, snapshotSha256: "a".repeat(64), key: `import-proposal-v1:${"b".repeat(64)}` };
+		if (status === "accepted") {
+			assert.equal(store.claimImportProposal(application, "2026-01-01T00:02:00.000Z").claimed, true);
+			assert.equal(store.finalizeImportProposal(application, "2026-01-01T00:03:00.000Z"), true);
+		} else {
+			assert.equal(store.updateProposal("request-1", { status: "rejected", type: "role", rev: 1, decidedAt: "2026-01-01T00:02:00.000Z" }), true);
+		}
 
 		const restarted = new DecisionRequestStore(dir, memfs);
 		assert.equal(restarted.isHealthy(), true);
-		assert.deepEqual(restarted.get("request-1")?.proposal, proposal);
+		assert.equal(restarted.get("request-1")?.proposal?.status, status);
 	});
 
 	it("claims and finalizes exactly one immutable import proposal application", () => {
@@ -162,7 +174,8 @@ describe("DecisionRequestStore", () => {
 		assert.equal(store.markImportProposalAudited("request-1", application, "2026-01-01T00:03:02.000Z"), false);
 		const restarted = new DecisionRequestStore(dir, memfs);
 		assert.equal(restarted.get("request-1")?.proposal?.status, "accepted");
-		assert.equal(restarted.listApplyingImportProposals("import-1"), []);
+		assert.equal(restarted.get("request-1")?.proposal?.auditedAt, "2026-01-01T00:03:01.000Z", "restart replay observes the durable audit fence");
+		assert.deepEqual(restarted.listApplyingImportProposals("import-1"), []);
 	});
 
 	it("fails closed on malformed tagged proposal states", () => {

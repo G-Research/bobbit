@@ -5040,9 +5040,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					await deleteProposalFile(bobbitStateDir(), draftId, application.type).catch(() => {});
 					// One durable accepted transition produces one redacted audit row.
 					if (context.decisionRequestStore.markImportProposalAudited(record.id, application, new Date(gatewayDeps.clock.now()).toISOString())) {
-						if (context.decisionRequestStore.markImportProposalAudited(record.id, application, new Date(gatewayDeps.clock.now()).toISOString())) {
 						try { contextTraceStore.appendProjectImportOutcome(application.projectId, application.importId, { kind: "decision", packId: record.asker.packId, hookId: record.asker.hookId, event: "decisionResolved", outcome: "applied", requestId: record.id, questionId: record.questionId, actor: "user" }); } catch {}
-					}
 					}
 				} catch (error) { console.warn(`[project-import-proposals] applying replay failed project=${context.project.id} request=${record.id}:`, error); }
 			}
@@ -7979,12 +7977,14 @@ async function handleApiRoute(
 			if (promotionContext && promotionContext.projectConfigStore.getComponents().length === 0) {
 				promotionContext.projectConfigStore.setComponents([{ name: promoted.name, repo: "." }]);
 			}
-			if (promoted.importDecisionRun?.state === "configuring") {
-				const importId = promoted.importDecisionRun.id;
-				projectRegistry.markImportDecisionRunReady(projectId, importId);
-				promoted = projectRegistry.get(projectId) ?? promoted;
+			// Canonical promotion publishes the ready marker only after the complete
+			// configuration is durable. Dispatch that marker here; checking for
+			// `configuring` would strand the run because canonical mutation has
+			// already performed the state transition before this callback.
+			const importRun = promoted.importDecisionRun;
+			if (importRun?.state === "ready") {
 				try {
-					await projectImportDecisionCoordinator?.dispatch(projectId, importId);
+					await projectImportDecisionCoordinator?.dispatch(projectId, importRun.id);
 				} catch (error) {
 					// The ready marker is the recovery boundary. A restart/retry reuses
 					// it and dispatches the exact durable snapshot without re-asking.
