@@ -922,6 +922,20 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
  */
 export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 	{
+		consumer: "tests2/core/canonical-mutations.test.ts",
+		allowReason: "test-owned temporary SecretsStore persistence state",
+		reads: frozen([
+			{ expression: "path.join(stateDir, \"secrets.json\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/canonical-proposal-mutations.test.ts",
+		allowReason: "test-owned temporary project tool override fixture",
+		reads: frozen([
+			{ expression: "file", count: 1 },
+		]),
+	},
+	{
 		consumer: "tests2/core/adopted-extension-ledger.test.ts",
 		allowReason: "test-owned temporary adoption-ledger config file",
 		reads: frozen([
@@ -1122,6 +1136,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "isolated integration gateway, project, or harness-owned output",
 		reads: frozen([
 			{ expression: "join(gateway.bobbitDir, \"state\", \"projects.json\")", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/project-import-decisions.test.ts",
+		allowReason: "isolated integration gateway project decision-request state",
+		reads: frozen([
+			{ expression: "path.join(rootPath, \".bobbit\", \"state\", \"extension-decision-requests.json\")", count: 1 },
 		]),
 	},
 	{
