@@ -68,6 +68,28 @@ function canonicalizeHistoryRow(row: ClaudeAgentSdkHistoryMessage): ClaudeAgentS
 		: { ...row, ...(toolName !== row.toolName ? { toolName } : {}), content };
 }
 
+function isToolResultOnlyUserFrame(message: SdkSessionMessage): boolean {
+	if (!isRecord(message.message) || !Array.isArray(message.message.content)) return false;
+	let foundToolResult = false;
+	for (const block of message.message.content) {
+		if (isRecord(block) && (
+			block.type === "tool_result"
+			|| block.type === "toolResult"
+			|| block.role === "toolResult"
+			|| block.role === "tool_result"
+			|| block.role === "tool"
+		)) {
+			foundToolResult = true;
+			continue;
+		}
+		// SDK history can retain an empty text companion beside a tool result.
+		// It is not a user prompt and would still render as an empty bubble.
+		if (isRecord(block) && block.type === "text" && typeof block.text === "string" && !block.text.trim()) continue;
+		return false;
+	}
+	return foundToolResult;
+}
+
 function userMessage(message: SdkSessionMessage): ClaudeAgentSdkHistoryMessage | undefined {
 	if (!isRecord(message.message) || !("content" in message.message)) return undefined;
 	return {
@@ -116,7 +138,11 @@ export function adaptSdkSessionMessages(messages: readonly SdkSessionMessage[]):
 			const translated = messagesFromTranslation(state, message);
 			state = translated.state;
 			if (translated.messages.length > 0) snapshot.push(...translated.messages);
-			else {
+			// An unmatched SDK tool result is transport history, not a user prompt.
+			// Do not expose it through the raw-user fallback: visible snapshots would
+			// otherwise render an empty prompt bubble after reload. Mixed frames retain
+			// the fallback so an unexpected genuine user payload is never discarded.
+			else if (!isToolResultOnlyUserFrame(message)) {
 				const row = userMessage(message);
 				if (row) snapshot.push(canonicalizeHistoryRow(row));
 			}
