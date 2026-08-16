@@ -282,6 +282,8 @@ test.describe("project import decisions — real gateway lifecycle", () => {
 			expect(await readJson<any>(accepted)).toMatchObject({ status: "accepted", outcome: { role: "imported-role" } });
 			// A lost 201 response retries from the durable accepted application, not
 			// from the deleted draft. It must never repeat the effect or keyed audit.
+			const traceBeforeAcceptedRetry = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-decision-trace?limit=10`, { headers: { Cookie: cookie } });
+			const traceCountBeforeAcceptedRetry = (await readJson<{ entries: unknown[] }>(traceBeforeAcceptedRetry)).entries.length;
 			const acceptedRetry = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-proposals/${encodeURIComponent(draft.requestId)}/role/accept`, {
 				method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ rev: draft.rev }),
 			});
@@ -291,7 +293,7 @@ test.describe("project import decisions — real gateway lifecycle", () => {
 				method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ rev: draft.rev }),
 			});
 			expect(acceptedWrongType.status).toBe(409);
-			expect(await readJson<any>(acceptedWrongType)).toMatchObject({ code: "STALE_PROPOSAL" });
+			expect(await readJson<any>(acceptedWrongType)).toMatchObject({ code: "PROPOSAL_IDENTITY_MISMATCH" });
 			const acceptedWrongRevision = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-proposals/${encodeURIComponent(draft.requestId)}/role/accept`, {
 				method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ rev: draft.rev + 1 }),
 			});
@@ -300,8 +302,8 @@ test.describe("project import decisions — real gateway lifecycle", () => {
 			const roles = await apiFetch(`/api/roles?projectId=${encodeURIComponent(projectId)}`);
 			const importedRoles = (await readJson<any>(roles)).roles.filter((role: { name: string }) => role.name === "imported-role");
 			expect(importedRoles).toEqual([expect.objectContaining({ name: "imported-role", label: "Imported role" })]);
-			const acceptedTrace = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-decision-trace?limit=10`, { headers: { Cookie: cookie } });
-			expect((await readJson<{ entries: unknown[] }>(acceptedTrace)).entries).toHaveLength(1);
+			const traceAfterAcceptedRetry = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-decision-trace?limit=10`, { headers: { Cookie: cookie } });
+			expect((await readJson<{ entries: unknown[] }>(traceAfterAcceptedRetry)).entries).toHaveLength(traceCountBeforeAcceptedRetry);
 			expect((await readJson<any>(await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-proposals`, { headers: { Cookie: cookie } }))).proposals).toEqual([]);
 
 			// A second independently registered import proves reject removes only its

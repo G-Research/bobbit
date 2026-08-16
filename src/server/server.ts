@@ -9147,7 +9147,10 @@ async function handleApiRoute(
 		// it must neither recreate the draft nor rerun its canonical mutation.
 		const completed = action === "accept" ? decisionRequestManager.getImportRequest(projectId, marker.id, requestId) : undefined;
 		if (completed?.proposal?.status === "accepted") {
-			if (completed.proposal.type !== type || requestedRev !== completed.proposal.rev) {
+			if (completed.proposal.type !== type) {
+				json({ error: "Proposal application identity is invalid", code: "PROPOSAL_IDENTITY_MISMATCH" }, 409); return;
+			}
+			if (requestedRev !== completed.proposal.rev) {
 				json({ error: "Proposal revision is stale", code: "STALE_PROPOSAL" }, 409); return;
 			}
 			const application = completed.proposal.application;
