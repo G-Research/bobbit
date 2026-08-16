@@ -2335,6 +2335,15 @@
       }
     },
     {
+      "path": "tests2/core/message-author-lazy-role-resolution.test.ts",
+      "reason": "Focused core regression coverage pinning lazy role lookup on the streamed-message author hot path while preserving exact staff, title, role-label, role-name, bare-role, and Agent label precedence.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/message-author.test.ts",
       "reason": "Subprocess-free pure/memfs core coverage for PromptSource mapping, identity construction, legacy/tool-result inference, queue and in-flight steer restore compatibility, and authored assistant/steer snapshot splices.",
       "execution": {
