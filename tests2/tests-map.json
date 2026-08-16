@@ -2362,6 +2362,15 @@
       }
     },
     {
+      "path": "tests2/core/session-setup-team-tool-runtime.test.ts",
+      "reason": "Pins unified team-lead role tool selection across Pi extension activation and the isolated Claude SDK surface.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/team-store-consistency-async-io.test.ts",
       "reason": "Native v2 unit coverage for bounded asynchronous team consistency scans, per-item isolation, deterministic ordering, and exact recovered session parity.",
       "execution": {

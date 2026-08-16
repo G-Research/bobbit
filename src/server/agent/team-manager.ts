@@ -277,7 +277,6 @@ export function formatElapsed(sinceMs: number): string {
 	return `${h}h ${m}m`;
 }
 
-// Team lead extension path is resolved lazily via ToolManager.getExtensionPath().
 import { TaskManager } from "./task-manager.js";
 import type { DismissResult, OrchestrationCore } from "./orchestration-core.js";
 
@@ -2078,8 +2077,8 @@ export class TeamManager {
 			{ subGoalsEnabled: this.sessionManager.isSubgoalsEnabled },
 		);
 
-		// Create the team lead session with the team tools extension.
-		// The extension registers first-class tools (team_spawn, task_create, etc.) in the agent.
+		// Create the team lead session. Tool activation is resolved uniformly from
+		// the team-lead role during session setup for every supported runtime.
 		// When sandboxed, create a worktree inside the per-project container for the goal branch.
 		const sandboxed = goal.sandboxed ?? this.sessionManager.isSandboxEnabled;
 		const goalOwnedWorktreeMeta = !sandboxed
@@ -2094,17 +2093,9 @@ export class TeamManager {
 			}
 			: undefined;
 
-		// Resolve team-lead extension via cascade (ToolManager) or fall back to deprecated TOOLS_DIR
-		let teamLeadExtPath: string;
-		if (this.config.toolManager) {
-			teamLeadExtPath = this.config.toolManager.getExtensionPath("team", "extension.ts");
-		} else {
-			const { TOOLS_DIR } = await import("./tool-manager.js");
-			teamLeadExtPath = path.join(TOOLS_DIR, "team", "extension.ts");
-		}
 		const session = await this.sessionManager.createSession(
 			cwd,
-			["--extension", teamLeadExtPath],
+			undefined,
 			goalId,
 			undefined,
 			{
