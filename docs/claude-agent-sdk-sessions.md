@@ -9,32 +9,53 @@ persistence, and recovery rules.
 
 ## Selecting the runtime
 
-The Agent SDK runtime is opt-in. It is not added to Bobbit's model catalog and
-session creation does not use a per-request `initialModel` selector. First,
-register a **Custom Provider** whose exact id is `claude-agent-sdk` and add the
-SDK model id you intend to use. Then select it through existing configuration:
-set the default session model or a role's `model` to:
+The Agent SDK runtime is opt-in through Bobbit's built-in model catalog. Its
+only selectable models are the stable aliases:
 
-```
-claude-agent-sdk/<model-id>
+```text
+claude-agent-sdk/sonnet
+claude-agent-sdk/opus
+claude-agent-sdk/fable
+claude-agent-sdk/haiku
 ```
 
-The custom-provider display name must also leave `claude-agent-sdk` as the
-provider prefix exposed to selection. Only that exact provider selects this
-runtime. All other providers, including every existing `anthropic/*` selection,
-remain Pi-backed. This explicit split prevents an existing Anthropic session
-from changing runtime merely because an SDK is installed.
+Select one as the default session model or a role's `model`. Bobbit sends the
+alias to the SDK and derives its display, capability, and pricing metadata from
+the matching pinned Anthropic catalog row. The alias stays the configured and
+persisted public model identity even if the SDK reports a resolved model behind
+it. This keeps SDK routing stable without exposing dated Pi Anthropic IDs as SDK
+selections.
+
+A complete, usable Anthropic OAuth subscription credential is the only way an
+SDK alias becomes authenticated and runnable. Without it, the picker marks the
+alias as requiring Anthropic subscription OAuth. An Anthropic API key, a partial
+or rejected OAuth row, and a native Claude CLI login do not satisfy that
+requirement. All other providers, including `anthropic/*` and `aigw/*`, remain
+Pi-backed. This explicit split prevents an existing Anthropic session from
+changing runtime merely because an SDK is installed.
+
+The `claude-agent-sdk` provider namespace is reserved case-insensitively. A
+custom provider whose id **or name** claims it is ignored, including a legacy
+saved provider; it cannot add arbitrary SDK models or impersonate the runtime.
+Remove that obsolete custom-provider entry rather than attempting to repair it.
+
+An AI Gateway is separate from this runtime. With the default
+`aigw.exclusive` setting, a configured gateway hides all direct built-in rows,
+including SDK aliases; the gateway's own models remain selectable and Pi-backed.
+Set `aigw.exclusive` to `false` only when direct upstream access is intentional
+to show the built-ins alongside AIGW. AIGW never routes or authenticates the SDK
+runtime.
 
 `MANUAL_CLAUDE_AGENT_SDK_MODEL` and `MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR` are
-only opt-in manual-smoke-test inputs. The model value is the unprefixed model id
-(for example, `claude-sonnet-4-5`). The auth-directory value identifies the
+only opt-in manual-smoke-test inputs. The model value is an unprefixed built-in
+alias (for example, `sonnet`). The auth-directory value identifies the
 owner-only, temporary `BOBBIT_AGENT_DIR` used by the isolated smoke gateway.
 The lifecycle spec maps it to `BOBBIT_AGENT_DIR` before resetting agent-directory
 state or importing auth-sensitive server modules, because those modules can cache
-startup-derived directory state. It then registers a Custom Provider and default
-session model in temporary Bobbit state; removing that state removes the
-configuration. Neither variable registers a provider or changes a developer's
-production gateway; use the configuration above for production selection.
+startup-derived directory state. The smoke uses the built-in alias catalog and a
+temporary default session model; it never registers a custom provider. Neither
+variable changes a developer's production gateway; use the configuration above
+for production selection.
 
 ### Manual OAuth isolation
 
@@ -199,6 +220,16 @@ archived SDK history, `GET /api/sessions/:id/transcript`, `read_session`, and
 identity-addressed SDK tool-content reads use one official-history projection;
 none creates or falls back to a Pi transcript. Pi history remains JSONL-backed.
 
+### Partial streaming and durable history
+
+Bobbit opts into the SDK's pinned partial stream so the active turn can render
+assistant deltas. Once the input is accepted, its user row is emitted before
+those deltas; the final SDK assistant frame supplies the single finalized
+assistant message. Partial frames are live UI transport only: they are not
+transcript rows, restart state, or accounting input. Official history is
+projected from finalized messages, so reload and resume do not reconstruct a
+conversation from transient deltas or duplicate a streamed response.
+
 The projection preserves SDK UUID row identity, tool-use IDs,
 `parentToolUseId`, and `parentAgentId`. It applies the same server-side Bobbit
 MCP-name resolver to live events and history: for example,
@@ -240,8 +271,10 @@ for the complete projection, recovery, renderer, and debugging contract.
 A finalized root SDK `result` is the only SDK accounting authority. Bobbit
 normalizes its usage, model usage, context, SDK session/result identity, and
 notional cost into a non-rendering internal record. It does not count assistant
-`message_end` frames, stream updates, child partitions, replayed snapshots, or
-`agent_end` without that record.
+`message_end` frames, partial stream updates, child partitions, replayed
+snapshots, or `agent_end` without that record. If the root result omits a value,
+Bobbit preserves it as unknown rather than deriving it from streamed text or
+child metadata.
 
 `CostTracker` durably records the opaque source-result ID and the resulting
 aggregate in one atomic mutation. That mutation includes root totals, exact
@@ -387,9 +420,9 @@ supported SDK control is implemented.
 
 ### Capability authority and model identity
 
-Configured custom-provider rows remain the picker's source of available session
+The built-in SDK alias catalog remains the picker's source of available session
 models. After the query initializes, however, the live `Query` is the authority for
-whether an SDK model and its reasoning controls can actually run. The bridge reads
+whether a selected alias and its reasoning controls can actually run. The bridge reads
 its initialization `models` and prefers `supportedModels()` when that method is
 available. It converts those SDK rows into capability records owned by that one
 bridge; it does not seed a process-wide catalog or mutate `model-registry` caches.
@@ -401,16 +434,16 @@ A capability record uses the SDK's `value`, optional `resolvedModel`,
 It matches a requested id against both `value` and `resolvedModel`, but preserves the
 SDK `value` as the private wire value passed to `Query.setModel()`. The requested
 configured identity remains the public identity in live state and the durable tuple.
-For example, a picker can retain `sonnet` while the SDK receives that alias as its
-wire value, or it can retain `claude-sonnet-5` while resolving it to the SDK wire
-alias. Bobbit never silently rewrites either form to the other during verified
-read-back.
+For example, the picker retains `sonnet` while the SDK receives that alias as
+its wire value, even when the SDK resolves it to a concrete model. Bobbit never
+adds a resolved model to the picker or silently rewrites the selected alias during
+verified read-back.
 
 The bridge publishes `reasoning` and `thinkingLevelMap` with its live model state.
 Reasoning is true only when SDK metadata proves effort or adaptive-thinking support.
 The map marks `off` and each canonical control as advertised or unavailable; it
 never borrows Pi family heuristics or invents `minimal`. This live metadata overrides the
-conservative manual provider row for an active SDK session, so clients see the
+conservative built-in catalog row for an active SDK session, so clients see the
 capabilities that the query, rather than the registry, has verified.
 
 ### Applying controls
@@ -441,9 +474,9 @@ lacks `applyFlagSettings()`, advertised effort is rejected rather than emulated;
 controls visible while keeping a direct or stale client request safe.
 
 Initial SDK thinking is not an interactive rejection path. Before Query
-initialization, Bobbit retains the role/default candidate because the configured
-manual provider row is deliberately conservative. After initialization, it
-normalizes that candidate only from the bridge's live `reasoning` and
+initialization, Bobbit retains the role/default candidate because the built-in
+catalog row is deliberately conservative. After initialization, it normalizes
+that candidate only from the bridge's live `reasoning` and
 `thinkingLevelMap` metadata. A missing map, missing reasoning proof, or otherwise
 insufficient SDK metadata yields the conservative effective value `off`; Bobbit never
 falls back to Pi model-family heuristics or invents an SDK effort level.
@@ -619,6 +652,16 @@ registry or an HTTP callback: session setup resolves the ordinary scoped
 routes first. It then adapts that immutable selection to the official SDK
 `createSdkMcpServer()` / `tool()` APIs. Existing Bobbit builtin and extension
 handlers remain the execution owners.
+
+### Unified tool activation
+
+Pi activation and the SDK surface consume the same resolved role and session
+selection. A team tool such as `team_spawn` is available to an SDK session only
+when its normal policy and goal/team authorization allow it; it is exposed as the
+canonical Bobbit tool through `mcp__bobbit__team_spawn`, not as an SDK-native
+team feature. The same rule applies to every scoped builtin, extension, gate,
+and managed MCP operation. This avoids a runtime-specific role loophole while
+leaving the established handler, grant card, audit, and team lifecycle in charge.
 
 This gives the model one owner for each capability. Claude native `Bash`, file
 and search/editor tools, web tools, question and plan tools, worktree,
@@ -814,9 +857,14 @@ account or credentials:
   history access, cwd scoping, sanitized unavailable errors, valid empty history,
   and snapshot adaptation without Pi transcript access.
 - `tests2/core/claude-agent-sdk-bridge.test.ts` covers initialization UUID
-  validation, unavailable startup settlement, live official-history reads, and
-  session-local SDK capability discovery, alias wire selection, effort/fixed/off
-  transitions, unsupported controls, and failure-safe read-back state.
+  validation, unavailable startup settlement, partial live streaming followed by
+  one final assistant message, live official-history reads, and session-local SDK
+  capability discovery, alias wire selection, effort/fixed/off transitions,
+  unsupported controls, and failure-safe read-back state.
+- `tests2/core/models-api.test.ts` covers the built-in SDK alias catalog,
+  OAuth-only authentication, and the reserved custom-provider namespace.
+- `tests2/integration/models-api.test.ts` covers AIGW-exclusive visibility and
+  the separate AIGW routing boundary.
 - `tests2/integration/claude-agent-sdk-runtime-persistence.test.ts` covers the
   minimal SessionStore tuple, strict metadata persistence, and dormant recovery
   that retains queued prompts and in-flight steers.
@@ -930,17 +978,17 @@ Playwright before it can reset directory state or import auth-sensitive modules.
 Run only with Docker, a rebuilt `bobbit-agent` image satisfying the exact SDK,
 Claude, Pi, schema, wrapper, image-owned dependency, workspace-ownership, and
 callback-translation checks above; a local active Anthropic OAuth subscription;
-and an unprefixed SDK model id. The scenario creates an isolated Custom Provider
-and default session model only for its temporary test gateway, then creates a
-Docker-sandbox project with the required enabled empty `ANTHROPIC_OAUTH_TOKEN`
-policy. It does not configure a production gateway. It checks lazy idle creation
+and an unprefixed built-in SDK alias. The scenario selects that alias as the
+temporary gateway's default session model, then creates a Docker-sandbox project
+with the required enabled empty `ANTHROPIC_OAUTH_TOKEN` policy. It does not
+configure a custom provider or a production gateway. It checks lazy idle creation
 and first-input startup, prompt, steer, soft interrupt, stop, force-abort
 replacement, gateway-restart resume, and same-UUID survival. It does not use or
 log API-key credentials.
 
 ```bash
 BOBBIT_RUN_CLAUDE_AGENT_SDK_SANDBOX_SMOKE=1 \
-MANUAL_CLAUDE_AGENT_SDK_MODEL=claude-sonnet-4-5 \
+MANUAL_CLAUDE_AGENT_SDK_MODEL=sonnet \
 MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR="$MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR" \
 npm run test:manual -- --grep "Docker sandbox lifecycle"
 ```
@@ -949,7 +997,7 @@ The direct, non-Docker subscription smoke remains separately opt-in:
 
 ```bash
 BOBBIT_RUN_CLAUDE_AGENT_SDK_SMOKE=1 \
-MANUAL_CLAUDE_AGENT_SDK_MODEL=claude-sonnet-4-5 \
+MANUAL_CLAUDE_AGENT_SDK_MODEL=sonnet \
 MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR="$MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR" \
 npm run test:manual -- --grep "Claude Agent SDK lifecycle"
 ```
