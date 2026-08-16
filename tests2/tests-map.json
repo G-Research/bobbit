@@ -4074,6 +4074,15 @@
       }
     },
     {
+      "path": "tests2/integration/project-import-proposal-route.test.ts",
+      "reason": "Authenticated project-import proposal projection and acceptance invoke each canonical owner exactly once, including concurrent acceptance and a retry.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
       "path": "tests2/core/canonical-proposal-mutations.test.ts",
       "reason": "Canonical proposal mutation coverage for loader-validated tool override create/update/delete, non-mutating invalid inputs, rollback preservation, and pre-persistence workflow validation.",
       "execution": {

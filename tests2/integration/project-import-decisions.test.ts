@@ -42,7 +42,7 @@ function writeFixturePack(headquartersDir: string): string {
 		].join("\n") + "\n");
 	}
 	fs.writeFileSync(path.join(packDir, "lib", "import-question.mjs"), `
-const deadline = () => new Date(Date.now() + 60_000).toISOString();
+const deadline = () => new Date(Date.now() + 10 * 60_000).toISOString();
 export default { decide(ctx) {
   if (ctx.event !== "projectImported" || ctx.components.length !== 1) throw new Error("components were not persisted before import dispatch");
   return { kind: "request", request: {
@@ -54,7 +54,7 @@ export default { decide(ctx) {
 } };
 `);
 	fs.writeFileSync(path.join(packDir, "lib", "import-proposal.mjs"), `
-const deadline = () => new Date(Date.now() + 60_000).toISOString();
+const deadline = () => new Date(Date.now() + 10 * 60_000).toISOString();
 export default { decide(ctx) {
   return { kind: "request", request: {
     version: 1, key: "import-project-draft", title: "Draft import config", question: "${TRACE_SECRET}",
@@ -67,7 +67,7 @@ export default { decide(ctx) {
 } };
 `);
 	fs.writeFileSync(path.join(packDir, "lib", "import-project-proposal.mjs"), `
-const deadline = () => new Date(Date.now() + 60_000).toISOString();
+const deadline = () => new Date(Date.now() + 10 * 60_000).toISOString();
 export default { decide(ctx) {
   return { kind: "request", request: {
     version: 1, key: "import-project-config-draft", title: "Draft project configuration", question: "Update imported config?",
