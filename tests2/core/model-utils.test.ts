@@ -13,8 +13,8 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { inferLegacyAigwMeta } from "../../src/server/agent/aigw-manager.ts";
-import { modelRecencyRank as serverModelRecencyRank } from "../../src/server/agent/model-registry.ts";
-import { modelRecencyRank } from "../../src/shared/model-ranks.ts";
+import { modelRecencyRank as serverModelRecencyRank, modelRecencyRankFor as serverModelRecencyRankFor } from "../../src/server/agent/model-registry.ts";
+import { modelRecencyRank, modelRecencyRankFor } from "../../src/shared/model-ranks.ts";
 
 // ── Legacy /v1/models inference tests ─────────────────────────────
 
@@ -243,6 +243,10 @@ describe("modelRecencyRank()", () => {
 		for (const id of ["claude-fable-5", "claude-opus-5", "claude-sonnet-5", "claude-opus-4-100", "gpt-5.5"]) {
 			assert.equal(serverModelRecencyRank(id), modelRecencyRank(id), id);
 		}
+		assert.equal(
+			serverModelRecencyRankFor("claude-agent-sdk", "opus"),
+			modelRecencyRankFor("claude-agent-sdk", "opus"),
+		);
 	});
 
 	it("orders Fable 5 > Opus 5 > Sonnet 5 > every older Opus", () => {
@@ -261,6 +265,20 @@ describe("modelRecencyRank()", () => {
 	it("does not assign Claude 5 ranks to arbitrary containing text", () => {
 		assert.notEqual(modelRecencyRank("vendor-super-opus-5-model"), 112);
 		assert.notEqual(modelRecencyRank("vendor.claude-opus-5"), 112);
+	});
+
+	it("orders only exact Claude Agent SDK aliases by their pinned canonical rows", () => {
+		const aliases = ["sonnet", "opus", "fable", "haiku"];
+		const ordered = [...aliases].sort(
+			(a, b) => modelRecencyRankFor("claude-agent-sdk", b) - modelRecencyRankFor("claude-agent-sdk", a),
+		);
+		assert.deepEqual(ordered, ["fable", "opus", "sonnet", "haiku"]);
+		assert.equal(modelRecencyRankFor("claude-agent-sdk", "fable"), modelRecencyRank("claude-fable-5"));
+		assert.equal(modelRecencyRankFor("claude-agent-sdk", "opus"), modelRecencyRank("claude-opus-5"));
+		assert.equal(modelRecencyRankFor("claude-agent-sdk", "sonnet"), modelRecencyRank("claude-sonnet-5"));
+		assert.equal(modelRecencyRankFor("claude-agent-sdk", "haiku"), modelRecencyRank("claude-haiku-4-5"));
+		assert.equal(modelRecencyRankFor("aigw", "opus"), modelRecencyRank("opus"));
+		assert.equal(modelRecencyRankFor("claude-agent-sdk", "OPUS"), modelRecencyRank("OPUS"));
 	});
 
 	it("Claude: opus-4-6 > sonnet-4-6 > opus-4-5", () => {

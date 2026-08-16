@@ -6,6 +6,18 @@
 /** Recency rank for the speculative GPT-5.5 tier. Higher = newer/better. */
 export const GPT_55_RECENCY_RANK = 104;
 
+/**
+ * Fixed aliases accepted only by the Claude Agent SDK. Keep this provider-aware:
+ * other providers may legitimately expose similarly named models with unrelated
+ * semantics.
+ */
+const CLAUDE_AGENT_SDK_RECENCY_IDS: Readonly<Record<string, string>> = {
+	sonnet: "claude-sonnet-5",
+	opus: "claude-opus-5",
+	fable: "claude-fable-5",
+	haiku: "claude-haiku-4-5",
+};
+
 function claudeOpus4Minor(id: string): number | undefined {
 	// Limit the minor capture to version-looking values so date-only IDs like
 	// claude-opus-4-20250514 remain in the generic Opus 4 tier.
@@ -121,4 +133,15 @@ export function modelRecencyRank(id: string): number {
 	if (s.includes("llama")) return 50;
 
 	return 0;
+}
+
+/**
+ * Rank a provider/model pair. Claude Agent SDK aliases inherit the rank of
+ * their pinned canonical catalog rows; every other provider preserves generic
+ * ID-only ranking.
+ */
+export function modelRecencyRankFor(provider: string, id: string): number {
+	return modelRecencyRank(
+		provider === "claude-agent-sdk" ? (CLAUDE_AGENT_SDK_RECENCY_IDS[id] ?? id) : id,
+	);
 }

@@ -794,4 +794,4 @@ function httpGetJson(url: string, apiKey?: string, timeoutMs = 10_000): Promise<
 // ── Model Recency Ranking ──────────────────────────────────────────
 
 // Preserve the server import path while using the browser-safe shared source.
-export { GPT_55_RECENCY_RANK, modelRecencyRank } from "../../shared/model-ranks.js";
+export { GPT_55_RECENCY_RANK, modelRecencyRank, modelRecencyRankFor } from "../../shared/model-ranks.js";

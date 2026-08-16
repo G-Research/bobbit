@@ -24,7 +24,7 @@ resetAgentDirStateForTests?.();
 const { SessionManager } = await import("../../src/server/agent/session-manager.ts");
 const { PreferencesStore } = await import("../../src/server/agent/preferences-store.ts");
 const { getAvailableModels, invalidateModelCache, clearOAuthCache } = await import("../../src/server/agent/model-registry.ts");
-const { modelRecencyRank } = await import("../../src/shared/model-ranks.ts");
+const { modelRecencyRankFor } = await import("../../src/shared/model-ranks.ts");
 const { clampThinkingLevelForModel } = await import("../../src/server/agent/thinking-level-clamp.ts");
 const { registerRpcBridgeFactory } = await import("../../src/server/agent/rpc-bridge.ts");
 const { applyRuntimeSessionThinkingSelection } = await import("../../src/server/ws/runtime-model-selection.ts");
@@ -217,7 +217,7 @@ function expectedDefaultModel(models: any[]): string {
 		.sort((a, b) => {
 			const authDelta = Number(Boolean(b.authenticated)) - Number(Boolean(a.authenticated));
 			if (authDelta !== 0) return authDelta;
-			const rankDelta = modelRecencyRank(b.id) - modelRecencyRank(a.id);
+			const rankDelta = modelRecencyRankFor(b.provider, b.id) - modelRecencyRankFor(a.provider, a.id);
 			if (rankDelta !== 0) return rankDelta;
 			return a.provider.localeCompare(b.provider) || a.id.localeCompare(b.id);
 		});
@@ -330,6 +330,21 @@ afterAll(() => {
 });
 
 describe("actual SessionManager spawn tuple boundaries", () => {
+	it("ranks SDK aliases by their pinned canonical catalog rows for default spawn selection", async () => {
+		const prefs = makePreferences("sdk-alias-default-ranking");
+		const manager: any = new SessionManager({ preferencesStore: prefs, stateDir });
+		managers.push(manager);
+
+		const selected = await manager.resolveCurrentCatalogSpawnModel([], [
+			{ provider: "claude-agent-sdk", id: "sonnet", authenticated: true },
+			{ provider: "claude-agent-sdk", id: "opus", authenticated: true },
+			{ provider: "claude-agent-sdk", id: "fable", authenticated: true },
+			{ provider: "claude-agent-sdk", id: "haiku", authenticated: true },
+		]);
+
+		assert.equal(selected, "claude-agent-sdk/fable");
+	});
+
 	it("uses the exact dynamic catalog row for create and cold-restore thinking clamps", async () => {
 		const prefs = await makeDynamicReasoningPreferences("dynamic-reasoning-create-restore");
 		const store = new RecordingStore();

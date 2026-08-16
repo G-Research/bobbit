@@ -86,6 +86,26 @@ describe("ModelSelector Opus ordering", () => {
 	});
 });
 
+describe("ModelSelector Claude Agent SDK alias ordering", () => {
+	it("orders stable SDK aliases by their pinned canonical recency", async () => {
+		models = [
+			["sonnet", "Claude Sonnet 5"],
+			["opus", "Claude Opus 5"],
+			["fable", "Claude Fable 5"],
+			["haiku", "Claude Haiku 4.5"],
+		].map(([id, name]) => ({
+			id, name, provider: "claude-agent-sdk", runtime: "claude-agent-sdk",
+			api: "anthropic-messages", contextWindow: 1_000_000, maxTokens: 128_000,
+			reasoning: true, input: ["text", "image"], cost, authenticated: true,
+		}));
+		const el = await openSelector();
+		const orderedIds = Array.from(el.querySelectorAll("[data-model-item]")).map(
+			(node) => (node as HTMLElement).dataset.modelId,
+		);
+		expect(orderedIds).toEqual(["fable", "opus", "sonnet", "haiku"]);
+	});
+});
+
 describe("ModelSelector runtime identity", () => {
 	it("renders registry-projected Pi and Claude Agent SDK badges without changing selectability", async () => {
 		models = [

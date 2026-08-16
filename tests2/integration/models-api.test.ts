@@ -133,6 +133,7 @@ test.describe("GET /api/models with AI Gateway", () => {
 
 		const providers = new Set(models.map((m: any) => m.provider));
 		expect(providers.has("aigw")).toBe(true);
+		expect(providers.has("claude-agent-sdk")).toBe(false);
 		expect(providers.has("anthropic")).toBe(false);
 		expect(providers.has("amazon-bedrock")).toBe(false);
 		expect(providers.has("openai")).toBe(false);

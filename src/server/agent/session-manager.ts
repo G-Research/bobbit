@@ -148,7 +148,7 @@ import {
 } from "./truncate-large-content.js";
 import { getAigwUrl, discoverAigwModels, deriveName, normalizeAigwModelString, writeAigwDnsGuardExtension } from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
-import { findSessionSelectableModel, getAvailableModels, modelRecencyRank, resolveModelStateMeta } from "./model-registry.js";
+import { findSessionSelectableModel, getAvailableModels, modelRecencyRank, modelRecencyRankFor, resolveModelStateMeta } from "./model-registry.js";
 import { isSessionSelectableModelString, isSpawnPinnableModelString } from "./google-code-assist.js";
 import { clampThinkingLevel, isKnownThinkingLevel, type ThinkingLevel } from "../../shared/thinking-levels.js";
 import { clampThinkingLevelForModel } from "./thinking-level-clamp.js";
@@ -13018,7 +13018,7 @@ export class SessionManager {
 			.sort((a, b) => {
 				const authDelta = Number(Boolean(b.authenticated)) - Number(Boolean(a.authenticated));
 				if (authDelta !== 0) return authDelta;
-				const rankDelta = modelRecencyRank(b.id) - modelRecencyRank(a.id);
+				const rankDelta = modelRecencyRankFor(b.provider, b.id) - modelRecencyRankFor(a.provider, a.id);
 				if (rankDelta !== 0) return rankDelta;
 				return a.provider.localeCompare(b.provider) || a.id.localeCompare(b.id);
 			})[0];

@@ -10,7 +10,7 @@ import { createRef, ref } from "lit/directives/ref.js";
 import { Brain, Image as ImageIcon, KeyRound } from "lucide";
 import { gatewayFetch } from "../../app/gateway-fetch.js";
 import { gatewayRoute } from "../../shared/base-path.js";
-import { modelRecencyRank } from "../../shared/model-ranks.js";
+import { modelRecencyRankFor } from "../../shared/model-ranks.js";
 import { Input } from "../components/Input.js";
 import { formatModelCost } from "../utils/format.js";
 import { i18n } from "../utils/i18n.js";
@@ -206,8 +206,8 @@ export class ModelSelector extends DialogBase {
 			if (!aHasKey && bHasKey) return 1;
 
 			// Sort by model recency/tier (higher = newer/better)
-			const aRank = modelRecencyRank(a.id);
-			const bRank = modelRecencyRank(b.id);
+			const aRank = modelRecencyRankFor(a.provider, a.id);
+			const bRank = modelRecencyRankFor(b.provider, b.id);
 			if (aRank !== bRank) return bRank - aRank;
 
 			return a.provider.localeCompare(b.provider) || a.id.localeCompare(b.id);
