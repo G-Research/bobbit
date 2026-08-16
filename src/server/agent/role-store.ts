@@ -87,6 +87,8 @@ export interface Role {
 	thinkingLevel?: string;
 	createdAt: number;
 	updatedAt: number;
+	/** Server-owned replay marker for an atomic proposal application. */
+	canonicalMutationKey?: string;
 }
 
 function parseRole(data: Record<string, unknown>): Role | null {
@@ -101,6 +103,7 @@ function parseRole(data: Record<string, unknown>): Role | null {
 		thinkingLevel: validateThinkingLevel(data.thinkingLevel),
 		createdAt: (data.createdAt as number) ?? 0,
 		updatedAt: (data.updatedAt as number) ?? 0,
+		canonicalMutationKey: typeof data.canonicalMutationKey === "string" ? data.canonicalMutationKey : undefined,
 	};
 }
 
@@ -118,6 +121,7 @@ function serializeRole(role: Role): Record<string, unknown> {
 	obj.createdAt = role.createdAt;
 	obj.updatedAt = role.updatedAt;
 	obj.promptTemplate = role.promptTemplate;
+	if (role.canonicalMutationKey) obj.canonicalMutationKey = role.canonicalMutationKey;
 	return obj;
 }
 

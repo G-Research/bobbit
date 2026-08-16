@@ -177,10 +177,22 @@ export interface StoredDecisionRequest {
 	continuationAttempts: number;
 }
 
+export type ProposalApplicationIdentity = {
+	projectId: string;
+	importId: string;
+	requestId: string;
+	type: ProposalType;
+	rev: number;
+	snapshotSha256: string;
+	key: string;
+};
+
 export type StoredDecisionProposal =
 	| { status: "created"; type: ProposalType; rev: number }
+	| { status: "applying"; type: ProposalType; rev: number; applyingAt: string; application: ProposalApplicationIdentity }
 	| { status: "failed"; type: ProposalType; code: "PROPOSAL_SEED_FAILED" }
-	| { status: "accepted" | "rejected"; type: ProposalType; rev: number; decidedAt: string };
+	| { status: "accepted"; type: ProposalType; rev: number; decidedAt: string; application?: ProposalApplicationIdentity; outcome?: Record<string, string> }
+	| { status: "rejected"; type: ProposalType; rev: number; decidedAt: string };
 
 export interface DecisionRequestStoreState {
 	version: typeof DECISION_REQUEST_STORE_VERSION;
@@ -495,16 +507,40 @@ export class DecisionRequestStore {
 		}) ?? false;
 	}
 
-	/** Record an optional proposal outcome after its independently isolated work. */
+	/** Atomically claim one exact immutable import proposal before any external mutation. */
+	claimImportProposal(application: ProposalApplicationIdentity, applyingAt: string): { claimed: boolean; proposal?: StoredDecisionProposal } {
+		const result = this.commit(next => {
+			const current = next.requests[application.requestId];
+			if (!current || !isTerminalStatus(current.status) || current.projectId !== application.projectId
+				|| current.delivery.kind !== "project-import" || current.delivery.importId !== application.importId
+				|| !isIsoInstant(applyingAt)) return { claimed: false, proposal: current?.proposal };
+			const proposal = current.proposal;
+			if (proposal?.status === "applying" && sameApplication(proposal.application, application)) return { claimed: false, proposal: clone(proposal) };
+			if (proposal?.status !== "created" || proposal.type !== application.type || proposal.rev !== application.rev) return { claimed: false, proposal: proposal ? clone(proposal) : undefined };
+			current.proposal = { status: "applying", type: application.type, rev: application.rev, applyingAt, application: clone(application) };
+			return { claimed: true, proposal: clone(current.proposal) };
+		});
+		return result ?? { claimed: false, proposal: this.get(application.requestId)?.proposal };
+	}
+
+	/** Finalize only the exact persisted application claim. */
+	finalizeImportProposal(application: ProposalApplicationIdentity, decidedAt: string, outcome?: Record<string, string>): boolean {
+		return this.commit(next => {
+			const current = next.requests[application.requestId];
+			const proposal = current?.proposal;
+			if (!current || !isTerminalStatus(current.status) || proposal?.status !== "applying" || !sameApplication(proposal.application, application) || !isIsoInstant(decidedAt)) return false;
+			current.proposal = { status: "accepted", type: application.type, rev: application.rev, decidedAt, application: clone(application), ...(outcome ? { outcome: clone(outcome) } : {}) };
+			return true;
+		}) ?? false;
+	}
+
+	/** Record a reviewed rejection only while no apply operation has been claimed. */
 	updateProposal(id: string, proposal: StoredDecisionRequest["proposal"]): boolean {
 		return this.commit(next => {
 			const current = next.requests[id];
 			if (!current || !isTerminalStatus(current.status)) return false;
-			// A reviewed import draft has one terminal human decision. Keep seed
-			// bookkeeping flexible, but make accept/reject a compare-and-set from
-			// the exact created draft so retries cannot overwrite a prior outcome.
-			if ((proposal?.status === "accepted" || proposal?.status === "rejected")
-				&& (current.proposal?.status !== "created" || current.proposal.rev !== proposal.rev)) return false;
+			if (proposal?.status === "rejected" && (current.proposal?.status !== "created" || current.proposal.rev !== proposal.rev)) return false;
+			if (proposal?.status === "accepted") return false;
 			current.proposal = proposal ? clone(proposal) : undefined;
 			return true;
 		}) ?? false;
@@ -755,11 +791,30 @@ function isProposal(value: unknown): value is StoredDecisionProposal {
 	if (value.status === "created") {
 		return isPositiveInteger(value.rev) && value.decidedAt === undefined && value.code === undefined;
 	}
+	if (value.status === "applying") {
+		return isPositiveInteger(value.rev) && isIsoInstant(value.applyingAt) && isProposalApplicationIdentity(value.application)
+			&& value.application.type === value.type && value.application.rev === value.rev;
+	}
 	if (value.status === "failed") {
 		return value.rev === undefined && value.decidedAt === undefined && value.code === "PROPOSAL_SEED_FAILED";
 	}
-	return (value.status === "accepted" || value.status === "rejected")
-		&& isPositiveInteger(value.rev) && isIsoInstant(value.decidedAt) && value.code === undefined;
+	if (value.status === "accepted") return isPositiveInteger(value.rev) && isIsoInstant(value.decidedAt)
+		&& value.code === undefined && (value.application === undefined || isProposalApplicationIdentity(value.application)
+			&& value.application.type === value.type && value.application.rev === value.rev)
+		&& (value.outcome === undefined || isRecord(value.outcome) && Object.entries(value.outcome).every(([key, item]) => isBoundedString(key, 128) && isBoundedString(item, 256)));
+	return value.status === "rejected" && isPositiveInteger(value.rev) && isIsoInstant(value.decidedAt) && value.code === undefined;
+}
+
+function isProposalApplicationIdentity(value: unknown): value is ProposalApplicationIdentity {
+	return isRecord(value) && isBoundedString(value.projectId, 128) && isBoundedString(value.importId, 128)
+		&& isBoundedString(value.requestId, 128) && isProposalType(value.type) && isPositiveInteger(value.rev)
+		&& typeof value.snapshotSha256 === "string" && /^[a-f0-9]{64}$/.test(value.snapshotSha256)
+		&& typeof value.key === "string" && /^import-proposal-v1:[a-f0-9]{64}$/.test(value.key);
+}
+
+function sameApplication(left: ProposalApplicationIdentity, right: ProposalApplicationIdentity): boolean {
+	return left.projectId === right.projectId && left.importId === right.importId && left.requestId === right.requestId
+		&& left.type === right.type && left.rev === right.rev && left.snapshotSha256 === right.snapshotSha256 && left.key === right.key;
 }
 
 function isDecisionValue(value: unknown): value is DecisionValue {

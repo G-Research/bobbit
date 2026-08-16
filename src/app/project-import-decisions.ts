@@ -16,9 +16,10 @@ export interface ProjectImportDecisionRequestProjection extends DecisionRequestW
 export type ProjectImportProposalProjection = {
 	projectId: string;
 	requestId: string;
-	proposalType: "goal" | "project" | "role" | "tool" | "staff";
+	proposalType: "goal" | "project" | "workflow" | "role" | "tool" | "staff";
 	rev: number;
 	fields: Record<string, unknown>;
+	status?: "created" | "applying";
 };
 
 type Listener = () => void;
@@ -282,9 +283,11 @@ export async function refreshProjectImportDecisionRequests(projectId: string): P
 			const proposalType = candidate?.proposalType;
 			const rev = candidate?.rev;
 			const fields = record(candidate?.fields);
-			if (requestId && (proposalType === "goal" || proposalType === "project" || proposalType === "role" || proposalType === "tool" || proposalType === "staff")
-				&& typeof rev === "number" && Number.isInteger(rev) && rev > 0 && fields) {
-				proposals.push({ projectId, requestId, proposalType, rev, fields });
+			const proposalStatus = candidate?.status;
+			if (requestId && (proposalType === "goal" || proposalType === "project" || proposalType === "workflow" || proposalType === "role" || proposalType === "tool" || proposalType === "staff")
+				&& typeof rev === "number" && Number.isInteger(rev) && rev > 0 && fields
+				&& (proposalStatus === undefined || proposalStatus === "created" || proposalStatus === "applying")) {
+				proposals.push({ projectId, requestId, proposalType, rev, fields, ...(proposalStatus ? { status: proposalStatus } : {}) });
 			}
 		}
 		// One project-owned response is the complete decision projection. Keeping

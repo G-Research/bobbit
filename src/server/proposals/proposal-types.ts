@@ -389,6 +389,14 @@ const projectPlugin = makeYamlPlugin({
 	validateFields: validateProjectExtensionPromptSections,
 });
 
+const workflowPlugin = makeYamlPlugin({
+	type: "workflow",
+	requiredFields: ["id", "name", "gates"],
+	validateFields: (fields) => Array.isArray(fields.gates)
+		? null
+		: { ok: false, code: "STRUCTURAL_VALIDATION_FAILED", message: "workflow.gates must be an array" },
+});
+
 const rolePlugin = makeYamlPlugin({
 	type: "role",
 	requiredFields: ["name", "label", "prompt"],
@@ -407,6 +415,7 @@ const staffPlugin = makeYamlPlugin({
 const REGISTRY: Record<ProposalType, ProposalTypePlugin> = {
 	goal: goalPlugin,
 	project: projectPlugin,
+	workflow: workflowPlugin,
 	role: rolePlugin,
 	tool: toolPlugin,
 	staff: staffPlugin,

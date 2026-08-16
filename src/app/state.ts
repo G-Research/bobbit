@@ -440,7 +440,7 @@ export const state = {
 	 * tool). See `src/app/proposal-registry.ts` for `ProposalSlot`.
 	 */
 	activeProposals: {} as Partial<Record<
-		"goal" | "project" | "role" | "tool" | "staff",
+		"goal" | "project" | "workflow" | "role" | "tool" | "staff",
 		{
 			sessionId: string;
 			fields: Record<string, unknown>;

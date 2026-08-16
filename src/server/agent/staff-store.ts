@@ -102,6 +102,8 @@ export interface PersistedStaff {
 	 * docs/design/staff-inbox.md §10.
 	 */
 	contextPolicy?: "preserve" | "compact";
+	/** Server-owned replay marker for an atomic proposal application. */
+	canonicalMutationKey?: string;
 }
 
 /**

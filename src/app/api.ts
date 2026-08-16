@@ -3672,7 +3672,7 @@ export async function deleteDraftFromServer(sessionId: string, type: string): Pr
  */
 export async function notifyProposalDecision(
 	sessionId: string,
-	type: "goal" | "project" | "role" | "tool" | "staff",
+	type: "goal" | "project" | "workflow" | "role" | "tool" | "staff",
 	decision: "accepted" | "rejected",
 	summary: string,
 ): Promise<void> {

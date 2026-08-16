@@ -18,7 +18,7 @@ import { proposalPanelTabId } from "./panel-workspace.js";
 // the state object via a getter that's threaded through at call time. See
 // `getStateForFirstEmit` below.
 
-export type ProposalType = "goal" | "project" | "role" | "tool" | "staff";
+export type ProposalType = "goal" | "project" | "workflow" | "role" | "tool" | "staff";
 
 export const PROPOSAL_TYPES: readonly ProposalType[] = ["goal", "project", "role", "tool", "staff"];
 

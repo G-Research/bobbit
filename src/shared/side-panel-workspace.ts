@@ -1,6 +1,6 @@
 export type SidePanelSizeMode = "collapsed" | "split" | "fullscreen";
 export type SidePanelKind = "preview" | "proposal" | "review" | "inbox" | "context" | "pack";
-export type SidePanelProposalType = "goal" | "project" | "role" | "tool" | "staff";
+export type SidePanelProposalType = "goal" | "project" | "workflow" | "role" | "tool" | "staff";
 
 export type SidePanelWorkspaceSource =
 	| {

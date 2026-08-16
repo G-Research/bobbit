@@ -324,13 +324,17 @@ export class StaffManager {
 		systemPrompt: string,
 		cwd: string,
 		sessionManager: SessionManager,
-		opts?: { triggers?: StaffTrigger[]; roleId?: string; projectId?: string; sandboxed?: boolean; worktree?: boolean; accessory?: string },
+		opts?: { triggers?: StaffTrigger[]; roleId?: string; projectId?: string; sandboxed?: boolean; worktree?: boolean; accessory?: string; applicationKey?: string },
 	): Promise<PersistedStaff> {
 		const now = Date.now();
 		const id = randomUUID();
 		const projectId = opts?.projectId;
 		if (!projectId) {
 			throw new Error("Cannot create staff: projectId is required");
+		}
+		if (opts?.applicationKey) {
+			const replay = this.getStore(projectId).getAll().find(staff => staff.canonicalMutationKey === opts.applicationKey);
+			if (replay) return replay;
 		}
 
 		// Auto-assign UUIDs to triggers missing IDs
@@ -370,6 +374,7 @@ export class StaffManager {
 			// directly on every spawn/wake. The project's sandbox config is
 			// NEVER consulted anywhere in the staff path.
 			sandboxed: opts?.sandboxed ?? false,
+			...(opts?.applicationKey ? { canonicalMutationKey: opts.applicationKey } : {}),
 		};
 
 		const worktreePlan = await this.provisionStaffWorktree(projectId, name, id, cwd, opts?.worktree);

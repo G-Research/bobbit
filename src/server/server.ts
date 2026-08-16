@@ -786,6 +786,7 @@ import {
 	type ProposalType,
 } from "./proposals/proposal-files.js";
 import { ProposalSeedService, proposalDraftOwnerId } from "./proposals/proposal-seed-service.js";
+import { ProjectImportProposalApplicationService, ProjectImportApplicationError, projectImportApplicationKey, projectImportSnapshotSha256 } from "./proposals/project-import-proposal-application.js";
 import {
 	CanonicalMutationError,
 	CanonicalProjectConfigPersistenceError,
@@ -8967,140 +8968,109 @@ async function handleApiRoute(
 		return;
 	}
 
-	// Project-import proposals are project-owned records, never surrogate
-	// sessions. Keep every lookup anchored to (project, durable import run,
-	// request, proposal type) so an opaque draft id cannot be replayed across a
-	// project boundary.
+	// Project-import proposals are project-owned records. A durable application
+	// claim is made before a canonical mutation can observe draft fields.
 	const projectImportProposalsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/import-proposals(?:\/([^/]+)\/([^/]+)(\/(accept|reject))?)?$/);
 	if (projectImportProposalsMatch) {
 		if (!requireVerifiedPromptOperator()) return;
 		let projectId: string;
 		let requestId: string | undefined;
-		try {
-			projectId = decodeURIComponent(projectImportProposalsMatch[1]);
-			requestId = projectImportProposalsMatch[2] ? decodeURIComponent(projectImportProposalsMatch[2]) : undefined;
-		} catch { json({ error: "Project import proposal not found" }, 404); return; }
+		try { projectId = decodeURIComponent(projectImportProposalsMatch[1]); requestId = projectImportProposalsMatch[2] ? decodeURIComponent(projectImportProposalsMatch[2]) : undefined; }
+		catch { json({ error: "Project import proposal not found" }, 404); return; }
 		const project = projectRegistry.get(projectId);
 		const marker = project?.importDecisionRun;
 		if (!project || marker?.state !== "ready" || !decisionRequestManager) { json({ error: "Project import proposal not found" }, 404); return; }
-
-		const safeFields = (value: unknown, depth = 0): unknown => {
-			if (depth > 6) return "[truncated]";
-			if (typeof value === "string") return value.length <= 16_384 ? value : `${value.slice(0, 16_384)}…`;
-			if (typeof value === "number" || typeof value === "boolean" || value === null) return value;
-			if (Array.isArray(value)) return value.slice(0, 100).map(item => safeFields(item, depth + 1));
-			if (!value || typeof value !== "object") return undefined;
-			const redacted = new Set(["token", "tokens", "secret", "secrets", "password", "credentials", "apiKey", "api_key"]);
-			return Object.fromEntries(Object.entries(value as Record<string, unknown>)
-				.slice(0, 100)
-				.map(([key, item]) => [key, redacted.has(key) ? "[redacted]" : safeFields(item, depth + 1)]));
+		const safeFields = (value: unknown, depth = 0): Record<string, unknown> => {
+			if (!value || typeof value !== "object" || Array.isArray(value) || depth > 6) return {};
+			const sensitive = new Set(["token", "tokens", "secret", "secrets", "password", "credentials", "apiKey", "api_key"]);
+			return Object.fromEntries(Object.entries(value as Record<string, unknown>).slice(0, 100).map(([key, item]) => [key,
+				sensitive.has(key) ? "[redacted]" : typeof item === "string" ? item.slice(0, 16_384)
+					: Array.isArray(item) ? item.slice(0, 100).map(entry => typeof entry === "string" ? entry.slice(0, 16_384) : entry)
+						: item && typeof item === "object" ? safeFields(item, depth + 1) : item,
+			]));
 		};
-		const resolveDraft = async (id: string, type: string) => {
+		const resolveDraft = async (id: string, type: string, allowApplying = false) => {
 			if (!isProposalType(type)) return undefined;
 			const record = decisionRequestManager!.getImportRequest(projectId, marker.id, id);
-			if (!record || record.proposal?.status !== "created" || record.proposal.type !== type) return undefined;
+			if (!record || !record.proposal || record.proposal.type !== type || (record.proposal.status !== "created" && (!allowApplying || record.proposal.status !== "applying"))) return undefined;
 			const owner = { kind: "project-import" as const, projectId, importId: marker.id, requestId: id };
 			const draftId = proposalDraftOwnerId(owner);
-			const parsed = await parseProposalFile(bobbitStateDir(), draftId, type).catch(() => undefined);
-			if (!parsed?.ok) return undefined;
-			const rev = await latestRev(bobbitStateDir(), draftId, type).catch(() => -1);
-			if (!Number.isInteger(rev) || rev < 1 || rev !== record.proposal.rev) return undefined;
-			return { record, draftId, parsed, rev, type };
+			const rev = record.proposal.rev;
+			if (!Number.isInteger(rev) || rev < 1) return undefined;
+			const snapshot = await readSnapshot(bobbitStateDir(), draftId, type, rev).catch(() => undefined);
+			if (snapshot === undefined) return undefined;
+			const parsed = getProposalTypePlugin(type).parse(snapshot);
+			if (!parsed.ok) return undefined;
+			return { record, draftId, parsed, snapshot, rev, type };
 		};
-
 		if (!requestId && req.method === "GET") {
-			const proposals: Array<{ requestId: string; proposalType: ProposalType; rev: number; fields: Record<string, unknown> }> = [];
+			const proposals: Array<{ requestId: string; proposalType: ProposalType; rev: number; fields: Record<string, unknown>; status?: string }> = [];
 			for (const record of decisionRequestManager.listImportRequests(projectId, marker.id)) {
-				if (record.proposal?.status !== "created") continue;
-				const draft = await resolveDraft(record.id, record.proposal.type);
-				if (draft) proposals.push({ requestId: record.id, proposalType: draft.type, rev: draft.rev, fields: safeFields(draft.parsed.value.fields) as Record<string, unknown> });
+				if (!record.proposal || (record.proposal.status !== "created" && record.proposal.status !== "applying")) continue;
+				const draft = await resolveDraft(record.id, record.proposal.type, true);
+				if (draft) proposals.push({ requestId: record.id, proposalType: draft.type, rev: draft.rev, fields: safeFields(draft.parsed.value.fields), status: record.proposal.status });
 			}
-			json({ proposals });
-			return;
+			json({ proposals }); return;
 		}
-
 		const type = projectImportProposalsMatch[3];
 		const action = projectImportProposalsMatch[5];
 		if (!requestId || !type) { json({ error: "Method not allowed" }, 405); return; }
-		const draft = await resolveDraft(requestId, type);
+		const draft = await resolveDraft(requestId, type, action === "accept" || action === undefined);
 		if (!draft) { json({ error: "Project import proposal not found" }, 404); return; }
-		if (!action && req.method === "GET") {
-			json({ requestId, proposalType: draft.type, rev: draft.rev, fields: safeFields(draft.parsed.value.fields) });
-			return;
-		}
+		if (!action && req.method === "GET") { json({ requestId, proposalType: draft.type, rev: draft.rev, fields: safeFields(draft.parsed.value.fields), status: draft.record.proposal?.status }); return; }
 		if ((action !== "accept" && action !== "reject") || req.method !== "POST") { json({ error: "Method not allowed" }, 405); return; }
 		const body = await readBody(req).catch(() => undefined);
-		if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1 || !Number.isInteger((body as { rev?: unknown }).rev)) {
-			json({ error: "rev is required" }, 400);
-			return;
-		}
-		if ((body as { rev: number }).rev !== draft.rev) {
-			json({ error: "Proposal revision is stale", code: "STALE_PROPOSAL" }, 409);
-			return;
-		}
+		if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1 || !Number.isInteger((body as { rev?: unknown }).rev)) { json({ error: "rev is required" }, 400); return; }
+		if ((body as { rev: number }).rev !== draft.rev) { json({ error: "Proposal revision is stale", code: "STALE_PROPOSAL" }, 409); return; }
 		const store = projectContextManager.getOrCreate(projectId)?.decisionRequestStore;
 		if (!store) { json({ error: "Project import proposal not found" }, 404); return; }
-		const auditProposalDecision = (outcome: "applied" | "dropped") => {
-			try {
-				new ContextTraceStore(bobbitStateDir(), fsImpl).appendProjectImportOutcome(projectId, marker.id, {
-					kind: "decision", packId: draft.record.asker.packId, hookId: draft.record.asker.hookId,
-					event: "decisionResolved", outcome, requestId, questionId: draft.record.questionId, actor: "user",
-				});
-			} catch { /* Audit availability never changes an already-decided proposal. */ }
-		};
+		const audit = (outcome: "applied" | "dropped") => { try { new ContextTraceStore(bobbitStateDir(), fsImpl).appendProjectImportOutcome(projectId, marker.id, { kind: "decision", packId: draft.record.asker.packId, hookId: draft.record.asker.hookId, event: "decisionResolved", outcome, requestId, questionId: draft.record.questionId, actor: "user" }); } catch {} };
 		if (action === "reject") {
-			if (!store.updateProposal(requestId, { status: "rejected", type: draft.type, rev: draft.rev, decidedAt: new Date().toISOString() })) {
-				json({ error: "Proposal could not be rejected" }, 409);
-				return;
-			}
-			await deleteProposalFile(bobbitStateDir(), draft.draftId, draft.type);
-			auditProposalDecision("dropped");
-			broadcastToProject(projectId, { type: "project_import_decision_requests_updated", projectId, ts: clock?.now() ?? Date.now() });
-			json({ ok: true, status: "rejected" });
-			return;
+			if (!store.updateProposal(requestId, { status: "rejected", type: draft.type, rev: draft.rev, decidedAt: new Date().toISOString() })) { json({ error: "Proposal is already applying", code: "PROPOSAL_LOCKED" }, 409); return; }
+			await deleteProposalFile(bobbitStateDir(), draft.draftId, draft.type); audit("dropped");
+			broadcastToProject(projectId, { type: "project_import_decision_requests_updated", projectId, ts: clock?.now() ?? Date.now() }); json({ ok: true, status: "rejected" }); return;
 		}
-
-		// A project-import proposal must declare its own project target. The stored
-		// draft, not client input, is the only source for the existing role apply
-		// validation below.
-		if (draft.type !== "role" || draft.parsed.value.fields.projectId !== projectId) {
-			json({ error: "This project import proposal cannot be applied", code: "UNSUPPORTED_IMPORT_PROPOSAL" }, 422);
-			return;
-		}
+		const identity = { projectId, importId: marker.id, requestId, type: draft.type, rev: draft.rev, snapshotSha256: projectImportSnapshotSha256(draft.snapshot), key: projectImportApplicationKey({ projectId, importId: marker.id, requestId, type: draft.type, rev: draft.rev, snapshot: draft.snapshot }) };
+		const claim = store.claimImportProposal(identity, new Date().toISOString());
+		if (!claim.claimed && claim.proposal?.status === "accepted") { json({ ok: true, status: "accepted" }, 200); return; }
+		if (!claim.claimed && claim.proposal?.status === "created") { json({ error: "Proposal claim could not be persisted", code: "PROPOSAL_CLAIM_FAILED" }, 503); return; }
+		// Only the request that durably changed created→applying may execute.
+		// Another live submit observes the lock and must never adopt it; boot alone
+		// adopts an applying record after the prior process has exited.
+		if (!claim.claimed) { json({ ok: true, status: "applying" }, 202); return; }
 		try {
-			const fields = draft.parsed.value.fields;
-			const target = resolveRoleMutationTarget(projectId);
-			if (!target.ok || target.target.scope !== "project" || target.target.projectId !== projectId) {
-				json({ error: "Project import proposal target is unavailable", code: "PROJECT_ID_MISMATCH" }, 409);
-				return;
+			const service = new ProjectImportProposalApplicationService({
+				goal: async (fields, application) => {
+					const result = await applyCanonicalGoalProposal({ ...fields, projectId }, {
+						resolveProject: () => ({ id: projectId, name: project.name, rootPath: project.rootPath }),
+						validateCwd: (_id, cwd) => { const check = validateExecutionCwd(projectRegistry, projectContextManager, projectId, cwd, { kind: "user-input" }); if (!check.ok) throw new CanonicalMutationError(check.status, check.error, check.code); },
+						getContext: id => projectContextManager.getOrCreate(id) ?? undefined,
+						findGoalAcrossProjects: getGoalAcrossProjects, getNestingPrefs: () => readSubgoalNestingPrefs(key => preferencesStore.get(key)),
+						findCascadeWorkflow: (id, workflowId) => configCascade.resolveWorkflows(id).find(row => row.item.id === workflowId)?.item,
+						afterCreate: () => {}, applicationKey: application.applicationKey,
+					});
+					return { outcome: { goalId: result.goal.id } };
+				},
+				project: async (fields, application) => {
+					const result = await applyCanonicalProjectProposal({ mode: "update", projectId, name: fields.name, rootPath: fields.root_path ?? fields.rootPath, components: fields.components, workflows: fields.workflows, config: fields.config, configDirectories: fields.configDirectories ?? fields.config_directories, sandboxTokens: fields.sandboxTokens ?? fields.sandbox_tokens, applicationKey: application.applicationKey }, {
+						findByApplicationKey: key => projectRegistry.list().find(candidate => candidate.canonicalMutationKey === key), register: () => { throw new Error("Register unavailable"); }, get: id => projectRegistry.get(id), update: (id, updates) => projectRegistry.update(id, updates as Parameters<typeof projectRegistry.update>[1]), promote: (id, updates) => projectRegistry.promote(id, updates), removeRegistered: item => projectRegistry.remove(item.id), removeContext: id => projectContextManager.remove(id), openContext: async id => { const ctx = projectContextManager.getOrCreate(id); return ctx ? { projectConfigStore: ctx.projectConfigStore, secretsStore: ctx.secretsStore } : undefined; }, suspendServices: id => worktreeServices.suspendProject(id), stopServices: id => worktreeServices.stopProject(id), reconcileServices: id => worktreeServices.reconcileProject(id), validateBaseRef: validateCanonicalBaseRef, invalidateSandboxImageRequirements: id => sandboxImageRequirements.invalidateProject(id), captureRegistryRecord: id => projectRegistry.captureExactRecord(id), restoreRegistryRecord: (id, snapshot) => projectRegistry.restoreExactRecord(id, snapshot), sameRootPath: samePath,
+					}); return { outcome: { projectId: result.project.id } };
+				},
+				workflow: async (fields, application) => { const ctx = projectContextManager.getOrCreate(projectId); if (!ctx) throw new CanonicalMutationError(404, "Project not found"); const workflow = createCanonicalWorkflow(fields, ctx.workflowStore, ctx.projectConfigStore.getComponents(), application.applicationKey); return { outcome: { workflowId: workflow.id } }; },
+				role: async (fields, application) => { const target = resolveRoleMutationTarget(projectId); if (!target.ok || target.target.scope !== "project") throw new CanonicalMutationError(409, "Project import proposal target is unavailable", "PROJECT_ID_MISMATCH"); const role = await createCanonicalRole({ ...fields, promptTemplate: fields.prompt }, target.target, { normalizeThinking: normalizeRoleThinking, validateModel: async () => true, applicationKey: application.applicationKey }); return { outcome: { role: role.name } }; },
+				tool: async (fields) => { const context = projectContextManager.getOrCreate(projectId); if (!context) throw new CanonicalMutationError(404, "Project not found"); const result = applyCanonicalToolProposal({ action: fields.action as any, tool: fields.tool as any, content: fields.content as any }, { toolManager: context.toolManager }); __resetToolScanCache(); return { outcome: { tool: result.tool, action: result.action } }; },
+				staff: async (fields, application) => { const staff = await createCanonicalStaff({ ...fields, systemPrompt: fields.prompt, roleId: fields.role ?? fields.roleId, projectId }, { applicationKey: application.applicationKey, resolveProject: () => ({ projectId, rootPath: project.rootPath }), validateCwd: (_id, cwd) => { const check = validateExecutionCwd(projectRegistry, projectContextManager, projectId, cwd, { kind: "user-input" }); if (!check.ok) throw new CanonicalMutationError(check.status, check.error, check.code); }, validateTriggers: value => staffManager.validateTriggers(value as any), validateRole: (roleId, id) => { if (!resolveRoleForProject(roleId, id)) throw new CanonicalMutationError(404, "Role not found"); }, create: (name, description, prompt, cwd, options) => staffManager.createStaff(name, description, prompt, cwd, sessionManager, options as any), broadcast: (staff, staffProjectId) => broadcastStaffChanged({ type: "staff_changed", reason: "created", staffId: staff.id, projectId: staffProjectId, sessionId: staff.currentSessionId }) }); return { outcome: { staffId: staff.id } }; },
+			});
+			const result = await service.apply({ projectId, importId: marker.id, requestId, type: draft.type, rev: draft.rev, snapshot: draft.snapshot, proposal: draft.parsed.value });
+			if (!store.finalizeImportProposal(identity, new Date().toISOString(), result.outcome)) {
+				const settled = store.get(requestId)?.proposal;
+				if (settled?.status !== "accepted" || settled.application?.key !== identity.key) throw new ProjectImportApplicationError(500, "FINALIZE_FAILED", "Proposal effect applied but finalization could not be persisted");
 			}
-			const model = typeof fields.model === "string" && fields.model.trim() ? fields.model.trim() : undefined;
-			if (model && /^[^/]+\/.+$/.test(model) && !(await requireCurrentSessionModel(model, "Role model"))) return;
-			const name = fields.name;
-			const label = fields.label;
-			const prompt = fields.prompt;
-			if (typeof name !== "string" || typeof label !== "string" || typeof prompt !== "string") throw new Error("Invalid role proposal");
-			const role = {
-				name, label, promptTemplate: prompt,
-				accessory: typeof fields.accessory === "string" ? fields.accessory : "none",
-				toolPolicies: fields.toolPolicies,
-				model,
-				thinkingLevel: normalizeRoleThinking(fields.thinkingLevel),
-				createdAt: Date.now(), updatedAt: Date.now(),
-			};
-			const NAME_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
-			if (!NAME_PATTERN.test(role.name)) throw new Error("Role name must be lowercase alphanumeric + hyphens");
-			target.target.store.put(role as Role);
-			if (!store.updateProposal(requestId, { status: "accepted", type: draft.type, rev: draft.rev, decidedAt: new Date().toISOString() })) {
-				json({ error: "Proposal could not be accepted" }, 409);
-				return;
-			}
-			await deleteProposalFile(bobbitStateDir(), draft.draftId, draft.type);
-			auditProposalDecision("applied");
-			broadcastToProject(projectId, { type: "project_import_decision_requests_updated", projectId, ts: clock?.now() ?? Date.now() });
-			json({ ok: true, status: "accepted", role: { name: role.name, label: role.label } }, 201);
+			await deleteProposalFile(bobbitStateDir(), draft.draftId, draft.type); audit("applied");
+			broadcastToProject(projectId, { type: "project_import_decision_requests_updated", projectId, ts: clock?.now() ?? Date.now() }); json({ ok: true, status: "accepted", outcome: result.outcome }, 201);
 		} catch (error) {
-			jsonError(400, error);
+			if (error instanceof ProjectImportApplicationError || error instanceof CanonicalMutationError) json({ error: error.message, code: error.code }, error.status);
+			else jsonError(500, error);
 		}
 		return;
 	}

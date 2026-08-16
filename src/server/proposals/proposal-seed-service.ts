@@ -214,7 +214,7 @@ export class ProposalSeedService {
 			? this.deps.sessionManager.getSession(owner.sessionId) ?? this.deps.sessionManager.getPersistedSession(owner.sessionId)
 			: undefined;
 		const ownerProjectId = owner.kind === "project-import" ? owner.projectId : proposalSession?.projectId;
-		if (proposalType === "goal" || proposalType === "staff" || proposalType === "role" || proposalType === "tool") {
+		if (proposalType === "goal" || proposalType === "workflow" || proposalType === "staff" || proposalType === "role" || proposalType === "tool") {
 			const explicitProjectId = typeof enrichedArgs.projectId === "string" && enrichedArgs.projectId.trim().length > 0
 				? enrichedArgs.projectId.trim()
 				: undefined;

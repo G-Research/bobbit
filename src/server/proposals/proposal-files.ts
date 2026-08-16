@@ -16,7 +16,7 @@ import path from "node:path";
 import { getProposalTypePlugin, type ProposalTypePlugin } from "./proposal-types.js";
 import { validatePromptExtensionProposalSections, type PromptExtensionProposalSection } from "../agent/prompt-extension-overrides.js";
 
-export type ProposalType = "goal" | "project" | "role" | "tool" | "staff";
+export type ProposalType = "goal" | "project" | "workflow" | "role" | "tool" | "staff";
 
 export interface TypedProposal {
 	type: ProposalType;
@@ -85,6 +85,7 @@ export type EditResult = EditSuccess | ParseError | EditError;
 export const PROPOSAL_TYPES: readonly ProposalType[] = [
 	"goal",
 	"project",
+	"workflow",
 	"role",
 	"tool",
 	"staff",

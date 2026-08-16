@@ -116,8 +116,14 @@ export type RoleTarget =
 export async function createCanonicalRole(
 	body: Record<string, any>,
 	target: RoleTarget,
-	deps: { normalizeThinking(value: unknown): string | undefined; validateModel(model: string): Promise<boolean> },
+	deps: { normalizeThinking(value: unknown): string | undefined; validateModel(model: string): Promise<boolean>; applicationKey?: string },
 ): Promise<Role> {
+	const applicationKey = deps.applicationKey;
+	assertCanonicalApplicationKey(applicationKey);
+	if (applicationKey && target.scope === "project") {
+		const replay = target.store.getAllLocal().find(role => role.canonicalMutationKey === applicationKey);
+		if (replay) return replay;
+	}
 	const model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : undefined;
 	if (model && /^[^/]+\/.+$/.test(model) && !(await deps.validateModel(model))) {
 		throw new CanonicalMutationError(422, "Role model is not available", "MODEL_UNAVAILABLE");
@@ -142,6 +148,7 @@ export async function createCanonicalRole(
 		toolPolicies: body.toolPolicies,
 		model,
 		thinkingLevel: deps.normalizeThinking(body.thinkingLevel),
+		...(applicationKey ? { canonicalMutationKey: applicationKey } : {}),
 		createdAt: now,
 		updatedAt: now,
 	};
@@ -212,11 +219,15 @@ function freezeCanonicalWorkflow(candidate: Workflow, components: WorkflowCompon
 	}
 }
 
-export function createCanonicalWorkflow(body: Record<string, any>, workflowStore: WorkflowStore, components: WorkflowComponentRef[]): Workflow {
+export function createCanonicalWorkflow(body: Record<string, any>, workflowStore: WorkflowStore, components: WorkflowComponentRef[], applicationKey?: string): Workflow {
+	assertCanonicalApplicationKey(applicationKey);
 	const id = body.id as string;
-	if ((workflowStore as any).getLocal?.(id)) throw new CanonicalMutationError(400, `Workflow "${id}" already exists`);
+	const local = (workflowStore as any).getLocal?.(id) as Workflow | undefined;
+	if (local && applicationKey && local.canonicalMutationKey === applicationKey) return local;
+	if (local) throw new CanonicalMutationError(400, `Workflow "${id}" already exists`);
 	const now = Date.now();
 	const workflow: Workflow = freezeCanonicalWorkflow({ id, name: (body.name as string) ?? id, description: (body.description as string) ?? "", gates: body.gates || [], createdAt: now, updatedAt: now }, components, id);
+	if (applicationKey) workflow.canonicalMutationKey = applicationKey;
 	workflowStore.put(workflow);
 	return workflow;
 }
@@ -233,7 +244,7 @@ export function updateCanonicalWorkflow(id: string, body: Record<string, any>, w
 /** Staff persistence and all of its observable side effects are one operation.
  * Routes supply project/cwd policy, while proposal imports use the same contract. */
 export async function createCanonicalStaff<T>(
-	input: { name?: unknown; description?: unknown; systemPrompt?: unknown; cwd?: unknown; projectId?: unknown; triggers?: unknown; roleId?: unknown; accessory?: unknown; sandboxed?: unknown; worktree?: unknown },
+	input: { name?: unknown; description?: unknown; systemPrompt?: unknown; cwd?: unknown; projectId?: unknown; triggers?: unknown; roleId?: unknown; accessory?: unknown; sandboxed?: unknown; worktree?: unknown; applicationKey?: unknown },
 	deps: {
 		resolveProject(projectId: unknown): { projectId: string; rootPath: string };
 		validateCwd(projectId: string, cwd: string): void;
@@ -241,6 +252,7 @@ export async function createCanonicalStaff<T>(
 		validateRole?(roleId: string, projectId: string): void;
 		create(name: string, description: string, prompt: string, cwd: string, options: Record<string, unknown>): Promise<T>;
 		broadcast(staff: T, projectId: string): void;
+		applicationKey?: string;
 	},
 ): Promise<T> {
 	if (!input.name || typeof input.name !== "string") throw new CanonicalMutationError(400, "Missing name");
@@ -250,6 +262,8 @@ export async function createCanonicalStaff<T>(
 	}
 	try { deps.validateTriggers?.(input.triggers); }
 	catch (error) { throw new CanonicalMutationError(400, error instanceof Error ? error.message : String(error)); }
+	const applicationKey = deps.applicationKey;
+	assertCanonicalApplicationKey(applicationKey);
 	const scope = deps.resolveProject(input.projectId);
 	const cwd = typeof input.cwd === "string" && input.cwd.trim().length > 0 ? input.cwd.trim() : scope.rootPath;
 	deps.validateCwd(scope.projectId, cwd);
@@ -261,6 +275,7 @@ export async function createCanonicalStaff<T>(
 		projectId: scope.projectId,
 		sandboxed: input.sandboxed === true,
 		...(typeof input.worktree === "boolean" ? { worktree: input.worktree } : {}),
+		...(applicationKey ? { applicationKey } : {}),
 	});
 	deps.broadcast(staff, scope.projectId);
 	return staff;
