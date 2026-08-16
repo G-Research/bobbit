@@ -264,6 +264,10 @@ describe("Gov-1: direct fix-up auto-pause via PATCH /plan handler", () => {
 	): Promise<{ responses: { body: any; status: number }[] }> {
 		const goalManager: any = {
 			updateGoal: async (_id: string, partial: any) => { Object.assign(goal, partial); },
+			updateGoalStrict: async (_id: string, partial: any) => {
+				Object.assign(goal, partial);
+				return true;
+			},
 			getGoalStore: () => ({ update: (_id: string, partial: any) => { Object.assign(goal, partial); } }),
 		};
 		const ctx: any = {
