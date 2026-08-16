@@ -9122,27 +9122,51 @@ async function handleApiRoute(
 		const type = projectImportProposalsMatch[3];
 		const action = projectImportProposalsMatch[5];
 		if (!requestId || !type) { json({ error: "Method not allowed" }, 405); return; }
-		const draft = await resolveDraft(requestId, type, action === "accept" || action === undefined);
-		if (!draft) { json({ error: "Project import proposal not found" }, 404); return; }
-		if (!action && req.method === "GET") { json({ requestId, proposalType: draft.type, rev: draft.rev, fields: safeFields(draft.parsed.value.fields), status: draft.record.proposal?.status }); return; }
+		if (!action && req.method === "GET") {
+			const draft = await resolveDraft(requestId, type, true);
+			if (!draft) { json({ error: "Project import proposal not found" }, 404); return; }
+			json({ requestId, proposalType: draft.type, rev: draft.rev, fields: safeFields(draft.parsed.value.fields), status: draft.record.proposal?.status }); return;
+		}
 		if ((action !== "accept" && action !== "reject") || req.method !== "POST") { json({ error: "Method not allowed" }, 405); return; }
 		const body = await readBody(req).catch(() => undefined);
 		if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1 || !Number.isInteger((body as { rev?: unknown }).rev)) { json({ error: "rev is required" }, 400); return; }
-		if ((body as { rev: number }).rev !== draft.rev) { json({ error: "Proposal revision is stale", code: "STALE_PROPOSAL" }, 409); return; }
+		const requestedRev = (body as { rev: number }).rev;
 		const store = projectContextManager.getOrCreate(projectId)?.decisionRequestStore;
 		if (!store) { json({ error: "Project import proposal not found" }, 404); return; }
-		const audit = (outcome: "applied" | "dropped", applicationKey?: string): boolean => {
+		const audit = (record: import("./agent/decision-request-store.js").StoredDecisionRequest, outcome: "applied" | "dropped", applicationKey?: string): boolean => {
 			try {
 				const trace = new ContextTraceStore(bobbitStateDir(), fsImpl);
-				const row = { kind: "decision" as const, packId: draft.record.asker.packId, hookId: draft.record.asker.hookId, event: "decisionResolved" as const, outcome, requestId, questionId: draft.record.questionId, actor: "user" as const };
+				const row = { kind: "decision" as const, packId: record.asker.packId, hookId: record.asker.hookId, event: "decisionResolved" as const, outcome, requestId, questionId: record.questionId, actor: "user" as const };
 				if (applicationKey) { trace.appendProjectImportOutcomeOnce(projectId, marker.id, applicationKey, row); return true; }
 				trace.appendProjectImportOutcome(projectId, marker.id, row);
 				return true;
 			} catch { return false; }
 		};
+		// Accepted proposals have already consumed their immutable draft snapshot.
+		// A lost success response retries against only the durable application tuple;
+		// it must neither recreate the draft nor rerun its canonical mutation.
+		const completed = action === "accept" ? decisionRequestManager.getImportRequest(projectId, marker.id, requestId) : undefined;
+		if (completed?.proposal?.status === "accepted") {
+			if (completed.proposal.type !== type || requestedRev !== completed.proposal.rev) {
+				json({ error: "Proposal revision is stale", code: "STALE_PROPOSAL" }, 409); return;
+			}
+			const application = completed.proposal.application;
+			if (!application || application.projectId !== projectId || application.importId !== marker.id
+				|| application.requestId !== requestId || application.type !== type || application.rev !== requestedRev) {
+				json({ error: "Proposal application identity is invalid", code: "PROPOSAL_IDENTITY_MISMATCH" }, 409); return;
+			}
+			if (!completed.proposal.auditedAt) {
+				if (!audit(completed, "applied", application.key)) { json({ error: "Proposal audit is unavailable", code: "AUDIT_FAILED" }, 503); return; }
+				store.markImportProposalAudited(requestId, application, new Date().toISOString());
+			}
+			json({ ok: true, status: "accepted", ...(completed.proposal.outcome ? { outcome: completed.proposal.outcome } : {}) }, 200); return;
+		}
+		const draft = await resolveDraft(requestId, type, action === "accept");
+		if (!draft) { json({ error: "Project import proposal not found" }, 404); return; }
+		if (requestedRev !== draft.rev) { json({ error: "Proposal revision is stale", code: "STALE_PROPOSAL" }, 409); return; }
 		if (action === "reject") {
 			if (!store.updateProposal(requestId, { status: "rejected", type: draft.type, rev: draft.rev, decidedAt: new Date().toISOString() })) { json({ error: "Proposal is already applying", code: "PROPOSAL_LOCKED" }, 409); return; }
-			await deleteProposalFile(bobbitStateDir(), draft.draftId, draft.type); audit("dropped");
+			await deleteProposalFile(bobbitStateDir(), draft.draftId, draft.type); audit(draft.record, "dropped");
 			broadcastToProject(projectId, { type: "project_import_decision_requests_updated", projectId, ts: clock?.now() ?? Date.now() }); json({ ok: true, status: "rejected" }); return;
 		}
 		const toolBeforeSha256 = draft.type === "tool"
@@ -9162,7 +9186,7 @@ async function handleApiRoute(
 			// A previous process may have finalized just before crashing. Finish its
 			// keyed audit hand-off instead of reporting a clean acceptance forever.
 			if (!claim.proposal.auditedAt) {
-				if (!audit("applied", identity.key)) { json({ error: "Proposal audit is unavailable", code: "AUDIT_FAILED" }, 503); return; }
+				if (!audit(draft.record, "applied", identity.key)) { json({ error: "Proposal audit is unavailable", code: "AUDIT_FAILED" }, 503); return; }
 				store.markImportProposalAudited(requestId, identity, new Date().toISOString());
 			}
 			json({ ok: true, status: "accepted" }, 200); return;
@@ -9182,7 +9206,7 @@ async function handleApiRoute(
 			await deleteProposalFile(bobbitStateDir(), draft.draftId, draft.type);
 			// Append is keyed before the decision-store marker. A crash between them
 			// replays without a duplicate; an append fault leaves the marker unset.
-			if (!audit("applied", identity.key)) throw new ProjectImportApplicationError(500, "AUDIT_FAILED", "Proposal applied but audit persistence failed");
+			if (!audit(draft.record, "applied", identity.key)) throw new ProjectImportApplicationError(500, "AUDIT_FAILED", "Proposal applied but audit persistence failed");
 			store.markImportProposalAudited(requestId, identity, new Date().toISOString());
 			broadcastToProject(projectId, { type: "project_import_decision_requests_updated", projectId, ts: clock?.now() ?? Date.now() }); json({ ok: true, status: "accepted", outcome: result.outcome }, 201);
 		} catch (error) {

@@ -280,8 +280,28 @@ test.describe("project import decisions — real gateway lifecycle", () => {
 			// The import-proposal accept route returns the canonical mutation result
 			// under `outcome`; role application identifies the created role by name.
 			expect(await readJson<any>(accepted)).toMatchObject({ status: "accepted", outcome: { role: "imported-role" } });
+			// A lost 201 response retries from the durable accepted application, not
+			// from the deleted draft. It must never repeat the effect or keyed audit.
+			const acceptedRetry = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-proposals/${encodeURIComponent(draft.requestId)}/role/accept`, {
+				method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ rev: draft.rev }),
+			});
+			expect(acceptedRetry.status, await acceptedRetry.clone().text()).toBe(200);
+			expect(await readJson<any>(acceptedRetry)).toMatchObject({ ok: true, status: "accepted", outcome: { role: "imported-role" } });
+			const acceptedWrongType = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-proposals/${encodeURIComponent(draft.requestId)}/goal/accept`, {
+				method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ rev: draft.rev }),
+			});
+			expect(acceptedWrongType.status).toBe(409);
+			expect(await readJson<any>(acceptedWrongType)).toMatchObject({ code: "STALE_PROPOSAL" });
+			const acceptedWrongRevision = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-proposals/${encodeURIComponent(draft.requestId)}/role/accept`, {
+				method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ rev: draft.rev + 1 }),
+			});
+			expect(acceptedWrongRevision.status).toBe(409);
+			expect(await readJson<any>(acceptedWrongRevision)).toMatchObject({ code: "STALE_PROPOSAL" });
 			const roles = await apiFetch(`/api/roles?projectId=${encodeURIComponent(projectId)}`);
-			expect((await readJson<any>(roles)).roles).toEqual(expect.arrayContaining([expect.objectContaining({ name: "imported-role", label: "Imported role" })]));
+			const importedRoles = (await readJson<any>(roles)).roles.filter((role: { name: string }) => role.name === "imported-role");
+			expect(importedRoles).toEqual([expect.objectContaining({ name: "imported-role", label: "Imported role" })]);
+			const acceptedTrace = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-decision-trace?limit=10`, { headers: { Cookie: cookie } });
+			expect((await readJson<{ entries: unknown[] }>(acceptedTrace)).entries).toHaveLength(1);
 			expect((await readJson<any>(await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-proposals`, { headers: { Cookie: cookie } }))).proposals).toEqual([]);
 
 			// A second independently registered import proves reject removes only its
@@ -306,6 +326,10 @@ test.describe("project import decisions — real gateway lifecycle", () => {
 				});
 				expect(rejected.status).toBe(200);
 				expect(await readJson<any>(rejected)).toMatchObject({ status: "rejected" });
+				const rejectedAcceptRetry = await apiFetch(`/api/projects/${encodeURIComponent(rejectingProject.id)}/import-proposals/${encodeURIComponent(rejectedDraft.requestId)}/role/accept`, {
+					method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ rev: rejectedDraft.rev }),
+				});
+				expect(rejectedAcceptRetry.status).toBe(404);
 				expect((await readJson<any>(await apiFetch(`/api/roles?projectId=${encodeURIComponent(rejectingProject.id)}`))).roles)
 					.not.toEqual(expect.arrayContaining([expect.objectContaining({ name: "imported-role" })]));
 			} finally {
