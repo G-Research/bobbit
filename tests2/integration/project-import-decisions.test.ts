@@ -6,6 +6,7 @@ import { apiFetch } from "./_e2e/e2e-setup.js";
 const PACK_ID = `project-import-decisions-${process.pid}-${Date.now()}`;
 const QUESTION_HOOK = "import.question";
 const PROPOSAL_HOOK = "import.proposal";
+const PROJECT_PROPOSAL_HOOK = "import.project-proposal";
 const QUESTION = "PROJECT_IMPORT_QUESTION_SECRET_choose_safe_mode";
 const TRACE_SECRET = "PROJECT_IMPORT_TRACE_SECRET_must_be_redacted";
 
@@ -32,9 +33,9 @@ function writeFixturePack(headquartersDir: string): string {
 	fs.writeFileSync(path.join(packDir, "pack.yaml"), [
 		"schema: 2", `name: ${PACK_ID}`, "description: Project-import lifecycle fixture", "version: 1.0.0",
 		"contents:", "  roles: []", "  tools: []", "  skills: []", "  entrypoints: []", "  providers: []",
-		"  hooks: [import-question, import-proposal]", "  mcp: []", "  pi-extensions: []", "  runtimes: []", "  workflows: []",
+		"  hooks: [import-question, import-proposal, import-project-proposal]", "  mcp: []", "  pi-extensions: []", "  runtimes: []", "  workflows: []",
 	].join("\n") + "\n");
-	for (const [file, id, module] of [["import-question", QUESTION_HOOK, "import-question.mjs"], ["import-proposal", PROPOSAL_HOOK, "import-proposal.mjs"]] as const) {
+	for (const [file, id, module] of [["import-question", QUESTION_HOOK, "import-question.mjs"], ["import-proposal", PROPOSAL_HOOK, "import-proposal.mjs"], ["import-project-proposal", PROJECT_PROPOSAL_HOOK, "import-project-proposal.mjs"]] as const) {
 		fs.writeFileSync(path.join(packDir, "hooks", `${file}.yaml`), [
 			`id: ${id}`, `module: ../lib/${module}`, "events: [projectImported]", "mode: decide", "capabilities: []",
 			"budget: { maxTokens: 64, timeoutMs: 1000 }",
@@ -61,6 +62,19 @@ export default { decide(ctx) {
     requestedClass: "consent-required", scope: "project", deadlineAt: deadline(),
     effect: { kind: "proposal", proposals: {
       draft: { proposalType: "role", args: { name: "imported-role", label: "Imported role", prompt: "A reviewed import role." } },
+    }, noEffectValues: ["skip", "other"] },
+  } };
+} };
+`);
+	fs.writeFileSync(path.join(packDir, "lib", "import-project-proposal.mjs"), `
+const deadline = () => new Date(Date.now() + 60_000).toISOString();
+export default { decide() {
+  return { kind: "request", request: {
+    version: 1, key: "import-project-config-draft", title: "Draft project configuration", question: "Update imported config?",
+    options: [{ value: "draft", label: "Create draft" }, { value: "skip", label: "Skip" }], other: { maxLength: 40 },
+    requestedClass: "consent-required", scope: "project", deadlineAt: deadline(),
+    effect: { kind: "proposal", proposals: {
+      draft: { proposalType: "project", args: { name: "Updated import project", config: { build_command: "echo imported" } } },
     }, noEffectValues: ["skip", "other"] },
   } };
 } };
@@ -306,6 +320,61 @@ test.describe("project import decisions — real gateway lifecycle", () => {
 			expect(JSON.stringify(entries)).not.toContain(TRACE_SECRET);
 			expect(JSON.stringify(entries)).not.toContain(rootPath);
 		} finally {
+			if (projectId) await apiFetch(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => {});
+			fs.rmSync(rootPath, { recursive: true, force: true });
+		}
+	});
+
+	test("maps typed project-config persistence errors and releases the exact import claim", async ({ gateway }) => {
+		const rootPath = path.join(gateway.bobbitDir, `import-project-config-failure-${Date.now()}`);
+		fs.mkdirSync(rootPath, { recursive: true });
+		let projectId = "";
+		let restoreFs: (() => void) | undefined;
+		try {
+			const created = await apiFetch("/api/projects", {
+				method: "POST",
+				body: JSON.stringify({ name: `import-project-config-failure-${Date.now()}`, rootPath, __e2e_seed_skip__: true }),
+			});
+			expect(created.status, await created.clone().text()).toBe(201);
+			projectId = (await readJson<any>(created)).id;
+			expect((await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/extension-grants`, {
+				method: "PUT", body: JSON.stringify({ packId: PACK_ID, hookId: PROJECT_PROPOSAL_HOOK, capability: "decide" }),
+			})).status).toBe(200);
+			const request = (await importRequests(projectId)).find(candidate => candidate.request.question === "Update imported config?");
+			expect(request).toBeTruthy();
+			expect((await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-decision-requests/${encodeURIComponent(request!.id)}/answer`, {
+				method: "POST", body: JSON.stringify({ value: { kind: "option", value: "draft" } }),
+			})).status).toBe(200);
+			const cookie = await mintOperatorCookie();
+			const proposals = await readJson<{ proposals: Array<{ requestId: string; proposalType: string; rev: number }> }>(await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-proposals`, { headers: { Cookie: cookie } }));
+			const draft = proposals.proposals.find(candidate => candidate.proposalType === "project");
+			expect(draft).toBeTruthy();
+
+			const configStore = gateway.projectContextManager.getOrCreate(projectId)!.projectConfigStore as any;
+			const originalFs = configStore.fs;
+			const configFile = configStore.configFile as string;
+			configStore.fs = new Proxy(originalFs, {
+				get(target, property) {
+					if (property === "writeFileSync") return (candidate: unknown, ...args: unknown[]) => {
+						const candidatePath = String(candidate);
+						if (candidatePath.startsWith(`${configFile}.`) && candidatePath.endsWith(".tmp")) throw new Error("injected import config persistence failure");
+						return target.writeFileSync(candidate, ...args);
+					};
+					const value = Reflect.get(target, property);
+					return typeof value === "function" ? value.bind(target) : value;
+				},
+			});
+			restoreFs = () => { configStore.fs = originalFs; };
+
+			const accepted = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-proposals/${encodeURIComponent(draft!.requestId)}/project/accept`, {
+				method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ rev: draft!.rev }),
+			});
+			expect(accepted.status).toBeGreaterThanOrEqual(400);
+			expect(await readJson<any>(accepted)).toMatchObject({ code: "PROJECT_CONFIG_PERSIST_FAILED" });
+			const released = await readJson<any>(await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-proposals/${encodeURIComponent(draft!.requestId)}/project`, { headers: { Cookie: cookie } }));
+			expect(released).toMatchObject({ status: "created" });
+		} finally {
+			restoreFs?.();
 			if (projectId) await apiFetch(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => {});
 			fs.rmSync(rootPath, { recursive: true, force: true });
 		}

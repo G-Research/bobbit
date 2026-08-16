@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { ProjectRegistry } from "../../src/server/agent/project-registry.js";
 import { SecretsStore } from "../../src/server/agent/secrets-store.js";
+import { createGoalCreationLifecycle } from "../../src/server/proposals/goal-creation-lifecycle.js";
 import {
 	CANONICAL_MUTATION_KEY,
 	applyCanonicalGoalProposal,
@@ -141,6 +142,49 @@ test("canonical goal reports lifecycle scheduling failures instead of leaking an
 	await new Promise(resolve => setTimeout(resolve, 0));
 	expect(errors).toHaveLength(1);
 	expect(errors[0]).toBeInstanceOf(Error);
+});
+
+test("shared goal lifecycle reports setup scheduling failures and preserves ready worktrees", async () => {
+	const broadcasts: Array<Record<string, unknown>> = [];
+	const updates: Array<Record<string, unknown>> = [];
+	let childStart = "started";
+	let setupStatus = "ready";
+	const goal = {
+		id: "goal-lifecycle", projectId: "project", autoStartTeam: true,
+		setupStatus: "preparing", state: "in-progress",
+	} as any;
+	const lifecycle = createGoalCreationLifecycle({
+		getContextForGoal: () => ({ goalManager: {
+			getGoal: () => ({ ...goal, setupStatus }),
+			updateGoal: (_id, update) => { updates.push(update); },
+			setupWorktree: async () => undefined,
+			setupWorktreeAndStartTeam: async () => { throw new Error("team failed after worktree setup"); },
+		} }),
+		getContext: () => undefined,
+		requestChildStart: () => childStart,
+		startTeam: async () => undefined,
+		broadcast: message => broadcasts.push(message),
+		logLifecycleSchedulingError: () => undefined,
+	});
+	lifecycle.afterCreate(goal);
+	await new Promise(resolve => setTimeout(resolve, 0));
+	expect(broadcasts).toEqual([{ type: "goal_setup_complete", goalId: goal.id }]);
+
+	childStart = "capacity-blocked";
+	broadcasts.length = 0;
+	lifecycle.afterCreate(goal, "parent-goal");
+	expect(updates).toEqual([{ state: "blocked" }]);
+	expect(broadcasts).toEqual([{ type: "goal_state_changed", goalId: goal.id }]);
+
+	setupStatus = "failed";
+	broadcasts.length = 0;
+	lifecycle.afterCreate(goal);
+	await new Promise(resolve => setTimeout(resolve, 0));
+	expect(broadcasts).toEqual([{ type: "goal_setup_error", goalId: goal.id, error: "Error: team failed after worktree setup" }]);
+
+	broadcasts.length = 0;
+	lifecycle.onAfterCreateError(new Error("scheduler unavailable"), goal);
+	expect(broadcasts).toEqual([{ type: "goal_setup_error", goalId: goal.id, error: "Error: scheduler unavailable" }]);
 });
 
 test("canonical goal single-flight shares failures and permits retry", async () => {

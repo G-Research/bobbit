@@ -781,10 +781,12 @@ import {
 } from "./proposals/proposal-files.js";
 import { ProposalSeedService, proposalDraftOwnerId } from "./proposals/proposal-seed-service.js";
 import { ProjectImportProposalApplicationService, ProjectImportApplicationError, projectImportApplicationKey, projectImportSnapshotSha256 } from "./proposals/project-import-proposal-application.js";
+import { createGoalCreationLifecycle } from "./proposals/goal-creation-lifecycle.js";
 import {
 	CanonicalMutationError,
 	CanonicalProjectConfigPersistenceError,
 	CanonicalSandboxSecretPersistenceError,
+	type CanonicalGoalProposalDeps,
 	applyCanonicalGoalProposal,
 	applyCanonicalProjectProposal,
 	validateProjectBaseRef,
@@ -3652,38 +3654,54 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		thinkingConsumer: advisoryThinkingConsumer,
 	});
 	sessionManager.lifecycleHub?.setDecisionDispatcher(decisionHookDispatcher);
+	const createCanonicalGoalProposalDependencies = (input: {
+		resolveProject: CanonicalGoalProposalDeps["resolveProject"];
+		authorizeChild?: CanonicalGoalProposalDeps["authorizeChild"];
+		applicationKey?: string;
+	}): CanonicalGoalProposalDeps => {
+		const lifecycle = createGoalCreationLifecycle({
+			getContextForGoal: goalId => projectContextManager.getContextForGoal(goalId) ?? undefined,
+			getContext: projectId => projectContextManager.getOrCreate(projectId) ?? undefined,
+			requestChildStart: goalId => verificationHarness.requestChildStart(goalId),
+			startTeam: goalId => teamManager.startTeam(goalId),
+			broadcast: message => broadcastToAll(message),
+			logLifecycleSchedulingError: error => console.error("[goal] Post-create lifecycle scheduling failed:", error),
+		});
+		return {
+			resolveProject: input.resolveProject,
+			validateCwd: (projectId, cwd) => {
+				const validation = validateExecutionCwd(projectRegistry, projectContextManager, projectId, cwd, { kind: "user-input" });
+				if (!validation.ok) throw new CanonicalMutationError(validation.status, validation.error, validation.code);
+			},
+			getContext: projectId => projectContextManager.getOrCreate(projectId) ?? undefined,
+			ensureSandbox: sandboxManager ? projectId => sandboxManager.ensureForProject(projectId) : undefined,
+			findGoalAcrossProjects: goalId => {
+				for (const project of projectRegistry.list()) {
+					const goal = projectContextManager.getOrCreate(project.id)?.goalManager.getGoal(goalId);
+					if (goal) return goal;
+				}
+				return undefined;
+			},
+			getNestingPrefs: () => readSubgoalNestingPrefs(key => preferencesStore.get(key)),
+			authorizeChild: input.authorizeChild,
+			findCascadeWorkflow: (projectId, workflowId) => configCascade.resolveWorkflows(projectId).find(row => row.item.id === workflowId)?.item,
+			...lifecycle,
+			applicationKey: input.applicationKey,
+		};
+	};
 	// One gateway-owned composition is shared by HTTP acceptance and boot replay.
 	// It receives only project-owned stores and the public canonical mutations.
 	projectImportProposalApplicationService = new ProjectImportProposalApplicationService({
 		goal: async (fields, application) => {
 			const project = projectRegistry.get(application.projectId);
 			if (!project) throw new CanonicalMutationError(404, "Project not found");
-			const result = await applyCanonicalGoalProposal({ ...fields, projectId: application.projectId }, {
-				resolveProject: () => ({ id: project.id, name: project.name, rootPath: project.rootPath }),
-				validateCwd: (_id, cwd) => { const check = validateExecutionCwd(projectRegistry, projectContextManager, project.id, cwd, { kind: "user-input" }); if (!check.ok) throw new CanonicalMutationError(check.status, check.error, check.code); },
-				getContext: id => projectContextManager.getOrCreate(id) ?? undefined,
-				ensureSandbox: sandboxManager ? id => sandboxManager!.ensureForProject(id) : undefined,
-				findGoalAcrossProjects: id => projectContextManager.getContextForGoal(id)?.goalManager.getGoal(id),
-				getNestingPrefs: () => readSubgoalNestingPrefs(key => preferencesStore.get(key)),
-				findCascadeWorkflow: (id, workflowId) => configCascade.resolveWorkflows(id).find(row => row.item.id === workflowId)?.item,
-				afterCreate: (createdGoal, parentGoalId) => {
-					const ctx = projectContextManager.getContextForGoal(createdGoal.id) ?? projectContextManager.getOrCreate(application.projectId);
-					if (!ctx) throw new Error(`Goal project context is unavailable for ${createdGoal.id}`);
-					if (createdGoal.autoStartTeam && parentGoalId && createdGoal.state !== "blocked") {
-						if (verificationHarness.requestChildStart(createdGoal.id) === "capacity-blocked") {
-							ctx.goalManager.updateGoal(createdGoal.id, { state: "blocked" });
-							broadcastToAll({ type: "goal_state_changed", goalId: createdGoal.id });
-						}
-						return;
-					}
-					if (createdGoal.setupStatus !== "preparing") return;
-					const complete = () => broadcastToAll({ type: "goal_setup_complete", goalId: createdGoal.id });
-					const failed = (error: unknown) => broadcastToAll({ type: "goal_setup_error", goalId: createdGoal.id, error: String(error) });
-					if (createdGoal.autoStartTeam) {
-						void ctx.goalManager.setupWorktreeAndStartTeam(createdGoal.id, () => teamManager.startTeam(createdGoal.id)).then(complete).catch(failed);
-					} else void ctx.goalManager.setupWorktree(createdGoal.id).then(complete).catch(failed);
-				}, applicationKey: application.applicationKey,
-			});
+			const result = await applyCanonicalGoalProposal(
+				{ ...fields, projectId: application.projectId },
+				createCanonicalGoalProposalDependencies({
+					resolveProject: () => ({ id: project.id, name: project.name, rootPath: project.rootPath }),
+					applicationKey: application.applicationKey,
+				}),
+			);
 			return { outcome: { goalId: result.goal.id } };
 		},
 		project: async (fields, application) => {
@@ -9167,7 +9185,8 @@ async function handleApiRoute(
 			// Typed canonical rejections are deterministic and occur before an
 			// observable effect (or compensate it); unlock this exact claim for a
 			// corrected retry. Unknown failures remain applying for boot recovery.
-			if (error instanceof CanonicalMutationError) store.releaseImportProposal(identity);
+			if (error instanceof CanonicalMutationError || error instanceof CanonicalProjectConfigPersistenceError || error instanceof CanonicalSandboxSecretPersistenceError) store.releaseImportProposal(identity);
+			if (writeCanonicalProjectMutationError(error)) return;
 			if (error instanceof ProjectImportApplicationError || error instanceof CanonicalMutationError) json({ error: error.message, code: error.code }, error.status);
 			else jsonError(500, error);
 		}
@@ -10435,154 +10454,27 @@ async function handleApiRoute(
 	if (url.pathname === "/api/goals" && req.method === "POST") {
 		const body = await readBody(req);
     try {
-      const { goal, replayed } = await applyCanonicalGoalProposal(body ?? {}, {
-        resolveProject: (projectId) => {
-          const resolved = resolveProjectForRequest(projectRegistry, {
-            projectId,
-          });
-          if (!resolved.ok)
-            throw new CanonicalMutationError(
-              resolved.status,
-              resolved.error,
-              resolved.code,
-            );
-          return {
-            id: resolved.projectId,
-            name: resolved.project.name,
-            rootPath: resolved.project.rootPath,
-          };
-        },
-        validateCwd: (projectId, cwd) => {
-          const validation = validateExecutionCwd(
-            projectRegistry,
-            projectContextManager,
-            projectId,
-            cwd,
-            { kind: "user-input" },
-          );
-          if (!validation.ok)
-            throw new CanonicalMutationError(
-              validation.status,
-              validation.error,
-              validation.code,
-            );
-        },
-        getContext: (projectId) =>
-          projectContextManager.getOrCreate(projectId) ?? undefined,
-        ensureSandbox: sandboxManager
-          ? (projectId) => sandboxManager.ensureForProject(projectId)
-          : undefined,
-        findGoalAcrossProjects: getGoalAcrossProjects,
-        getNestingPrefs: () =>
-          readSubgoalNestingPrefs((key) => preferencesStore.get(key)),
-        authorizeChild: (parent) => {
-          const h = req.headers as Record<
-            string,
-            string | string[] | undefined
-          >;
-          const rawSecret = h["x-bobbit-session-secret"];
-          const secret = Array.isArray(rawSecret) ? rawSecret[0] : rawSecret;
-          const rootGoalId = parent.rootGoalId ?? parent.id;
-          const authz = authorizeChildrenMutation({
-            mutationClass: "operator",
-            isHumanOperator: cookieTryAuth(req, cookieStore!),
-            authenticCallerSessionId:
-              sessionManager.sessionSecretStore.resolveSessionIdBySecret(
-                typeof secret === "string" && secret.trim()
-                  ? secret.trim()
-                  : undefined,
-              ),
-            teamLeadSessionId:
-              teamManager.getTeamState(rootGoalId)?.teamLeadSessionId,
-          });
-          if (!authz.ok)
-            throw new CanonicalMutationError(
-              403,
-              "Caller session is not the team-lead for this goal",
-              "NOT_TEAM_LEAD",
-              { goalId: parent.id },
-            );
-        },
-        findCascadeWorkflow: (projectId, workflowId) =>
-          configCascade
-            .resolveWorkflows(projectId)
-            .find((record) => record.item.id === workflowId)?.item,
-        onAfterCreateError: (error, createdGoal) => {
-          console.error(
-            "[goal] Post-create lifecycle scheduling failed:",
-            error,
-          );
-          broadcastToAll({
-            type: "goal_setup_error",
-            goalId: createdGoal.id,
-            error: String(error),
-          });
-        },
-        afterCreate: (createdGoal, parentGoalId) => {
-          const targetCtx =
-            projectContextManager.getContextForGoal(createdGoal.id) ??
-            (createdGoal.projectId
-              ? projectContextManager.getOrCreate(createdGoal.projectId)
-              : null);
-          // Never leave a durable goal preparing just because its just-created
-          // context has not been indexed by goal id yet.
-          if (!targetCtx)
-            throw new Error(
-              `Goal project context is unavailable for ${createdGoal.id}`,
-            );
-          if (createdGoal.autoStartTeam && parentGoalId) {
-            if (createdGoal.state !== "blocked") {
-              const outcome = verificationHarness.requestChildStart(
-                createdGoal.id,
-              );
-              if (outcome === "capacity-blocked") {
-                targetCtx.goalManager.updateGoal(createdGoal.id, {
-                  state: "blocked",
-                });
-                broadcastToAll({
-                  type: "goal_state_changed",
-                  goalId: createdGoal.id,
-                });
-              }
-            }
-          } else if (createdGoal.setupStatus === "preparing") {
-            const complete = () =>
-              broadcastToAll({
-                type: "goal_setup_complete",
-                goalId: createdGoal.id,
-              });
-            const failed = (error: unknown) =>
-              broadcastToAll({
-                type: "goal_setup_error",
-                goalId: createdGoal.id,
-                error: String(error),
-              });
-            if (createdGoal.autoStartTeam) {
-              targetCtx.goalManager
-                .setupWorktreeAndStartTeam(createdGoal.id, () =>
-                  teamManager.startTeam(createdGoal.id),
-                )
-                .then(complete)
-                .catch((error) => {
-                  if (
-                    targetCtx.goalManager.getGoal(createdGoal.id)
-                      ?.setupStatus === "ready"
-                  ) {
-                    complete();
-                    console.error(
-                      "[goal] Auto-start team failed (worktree ready):",
-                      error,
-                    );
-                  } else failed(error);
-                });
-            } else
-              targetCtx.goalManager
-                .setupWorktree(createdGoal.id)
-                .then(complete)
-                .catch(failed);
-          }
-        },
-      });
+      const { goal, replayed } = await applyCanonicalGoalProposal(
+        body ?? {},
+        createCanonicalGoalProposalDependencies({
+          resolveProject: (projectId) => {
+            const resolved = resolveProjectForRequest(projectRegistry, { projectId });
+            if (!resolved.ok) throw new CanonicalMutationError(resolved.status, resolved.error, resolved.code);
+            return { id: resolved.projectId, name: resolved.project.name, rootPath: resolved.project.rootPath };
+          },
+          authorizeChild: (parent) => {
+            const rawSecret = (req.headers as Record<string, string | string[] | undefined>)["x-bobbit-session-secret"];
+            const secret = Array.isArray(rawSecret) ? rawSecret[0] : rawSecret;
+            const authz = authorizeChildrenMutation({
+              mutationClass: "operator",
+              isHumanOperator: cookieTryAuth(req, cookieStore!),
+              authenticCallerSessionId: sessionManager.sessionSecretStore.resolveSessionIdBySecret(typeof secret === "string" && secret.trim() ? secret.trim() : undefined),
+              teamLeadSessionId: teamManager.getTeamState(parent.rootGoalId ?? parent.id)?.teamLeadSessionId,
+            });
+            if (!authz.ok) throw new CanonicalMutationError(403, "Caller session is not the team-lead for this goal", "NOT_TEAM_LEAD", { goalId: parent.id });
+          },
+        }),
+      );
       json(goal, replayed ? 200 : 201);
     } catch (err) {
       if (err instanceof CanonicalMutationError) {

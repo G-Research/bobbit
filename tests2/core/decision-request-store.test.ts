@@ -168,6 +168,11 @@ describe("DecisionRequestStore", () => {
 		const application = { projectId: "project-1", importId: "import-1", requestId: "request-1", type: "role" as const, rev: 1, snapshotSha256: "a".repeat(64), key: `import-proposal-v1:${"b".repeat(64)}` };
 		assert.equal(store.claimImportProposal(application, "2026-01-01T00:02:00.000Z").claimed, true);
 		assert.equal(store.claimImportProposal(application, "2026-01-01T00:02:01.000Z").claimed, false);
+		// The applying claim is immutable through the generic update surface.
+		// Only the identity-fenced release/finalize methods may transition it.
+		assert.equal(store.updateProposal("request-1", undefined), false);
+		assert.equal(store.updateProposal("request-1", { status: "created", type: "role", rev: 1 }), false);
+		assert.equal(store.updateProposal("request-1", { status: "failed", type: "role", code: "PROPOSAL_SEED_FAILED" }), false);
 		assert.equal(store.updateProposal("request-1", { status: "rejected", type: "role", rev: 1, decidedAt: "2026-01-01T00:02:01.000Z" }), false);
 		// A deterministic pre-effect failure releases only its exact durable claim.
 		assert.equal(store.releaseImportProposal({ ...application, key: `import-proposal-v1:${"c".repeat(64)}` }), false);

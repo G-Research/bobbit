@@ -572,6 +572,9 @@ export class DecisionRequestStore {
 		return this.commit(next => {
 			const current = next.requests[id];
 			if (!current || !isTerminalStatus(current.status)) return false;
+			// Applying is an immutable durable claim. Only its exact release/finalize
+			// methods may change it; generic updates must never reopen or overwrite it.
+			if (current.proposal?.status === "applying") return false;
 			if (proposal?.status === "rejected" && (current.proposal?.status !== "created" || current.proposal.rev !== proposal.rev)) return false;
 			if (proposal?.status === "accepted") return false;
 			current.proposal = proposal ? clone(proposal) : undefined;
