@@ -396,14 +396,16 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 		args.push("-e", `PI_OFFLINE=${process.env.PI_OFFLINE}`);
 	}
 
-	// Sandbox credentials
+	// Sandbox credentials inherit from the Docker CLI child's environment. Values
+	// must never appear in argv: execFile errors and process inspection can expose
+	// argv to logs, gate history, and other local users.
 	if (sandboxCredentials) {
-		for (const [key, value] of Object.entries(sandboxCredentials)) {
+		for (const key of Object.keys(sandboxCredentials)) {
 			if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
 				console.warn(`[docker-args] Skipping invalid credential key: ${key}`);
 				continue;
 			}
-			args.push("-e", `${key}=${value}`);
+			args.push("-e", key);
 		}
 	}
 

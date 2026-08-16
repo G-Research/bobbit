@@ -1188,15 +1188,16 @@ export class ProjectSandbox {
 			extraReadonlyMounts: extraReadonlyMounts.length ? extraReadonlyMounts : undefined,
 		}, this.commandRunner);
 
-		// Inject GITHUB_TOKEN for git push/PR inside container
+		// Inject GITHUB_TOKEN for git push/PR inside container. Only the name goes
+		// into argv; the value reaches Docker through the CLI child's environment.
 		if (githubToken) {
 			const insertIdx = dockerArgs.length - 3; // before image + sleep + infinity
-			dockerArgs.splice(insertIdx, 0, "-e", `GITHUB_TOKEN=${githubToken}`);
+			dockerArgs.splice(insertIdx, 0, "-e", "GITHUB_TOKEN");
 		}
 
 		const { stdout } = await this.execDocker(dockerArgs, {
 			timeout: 60_000,
-			env: DOCKER_ENV,
+			env: this._dockerRunEnvironment(),
 		});
 
 		const containerId = stdout.trim();
@@ -1569,6 +1570,20 @@ export class ProjectSandbox {
 		} catch {
 			return false;
 		}
+	}
+
+	/**
+	 * Environment for the `docker run` child. Credential and token VALUES are
+	 * handed to Docker here, never through argv, so `-e NAME` inherits them from
+	 * this process. Keeps secrets out of `ps`, execFile error messages, and logs.
+	 */
+	private _dockerRunEnvironment(): NodeJS.ProcessEnv {
+		const env: NodeJS.ProcessEnv = { ...DOCKER_ENV };
+		for (const [key, value] of Object.entries(this.options.sandboxCredentials ?? {})) {
+			if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) env[key] = value;
+		}
+		if (this.options.githubToken) env.GITHUB_TOKEN = this.options.githubToken;
+		return env;
 	}
 
 	private async _removeContainer(containerId: string): Promise<void> {
