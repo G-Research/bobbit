@@ -952,10 +952,12 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		consumer: "tests2/integration/session-store-real-fs.test.ts",
 		allowReason: "isolated integration gateway, project, or harness-owned output",
 		reads: frozen([
-			{ expression: "storeFile", count: 5 },
+			{ expression: "storeFile", count: 8 },
 			{ expression: "bak1", count: 1 },
 			{ expression: "bak2", count: 1 },
 			{ expression: "`${storeFile}.bak.1`", count: 1 },
+			{ expression: "`${storeFile}.pre-archived-split`", count: 1 },
+			{ expression: "archivedFile", count: 3 },
 		]),
 	},
 	{
