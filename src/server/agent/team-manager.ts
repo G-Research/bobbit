@@ -603,6 +603,11 @@ export class TeamManager {
 		this.recoveryFs = config.recoveryFs ?? realRecoveryFs;
 		this.recoverySidecars = config.recoverySidecars ?? createRealTeamRecoverySidecars(this.recoveryFs);
 		this.recoveryCheckpoints = config.recoveryCheckpoints ?? new FileTeamRecoveryCheckpointStore();
+		// OrchestrationCore is constructed before TeamManager, so bridge its
+		// team-owned child admission through SessionManager without adding another
+		// goal-lifecycle owner. The whole child publication runs on this same queue.
+		this.sessionManager.setTeamGoalAdmissionFence?.((goalId, operation) =>
+			this.withGoalAdmission(goalId, false, operation));
 		if (config.projectContextManager) {
 			this.localStore = null;
 		} else {
@@ -2602,14 +2607,19 @@ export class TeamManager {
 			const { TOOLS_DIR } = await import("./tool-manager.js");
 			teamLeadExtPath = path.join(TOOLS_DIR, "team", "extension.ts");
 		}
+		const teamLeadAccessory = storedRole.accessory ?? "crown";
 		const session = await this.sessionManager.createSession(
 			cwd,
 			["--extension", teamLeadExtPath],
 			goalId,
 			undefined,
 			{
+				// Durable ownership and known role structure must be present in the
+				// initial row: createSession persists before later naming/team-state work.
+				teamGoalId: goalId,
 				rolePrompt: teamLeadPrompt,
 				roleName: "team-lead",
+				accessory: teamLeadAccessory,
 				env: { BOBBIT_GOAL_ID: goalId },
 				sandboxed,
 				// For sandboxed goals, create a worktree at the goal branch inside the container.
@@ -2630,7 +2640,6 @@ export class TeamManager {
 		const teamLeadName = await generateTeamName("team-lead");
 		this.sessionManager.setTitle(session.id, `Team Lead: ${teamLeadName}`);
 		session.titleGenerated = true;
-		const teamLeadAccessory = storedRole?.accessory ?? "crown";
 		this.sessionManager.updateSessionMeta(session.id, {
 			role: "team-lead",
 			teamGoalId: goalId,
@@ -3035,7 +3044,11 @@ export class TeamManager {
 				goalId,
 				undefined,
 				{
-					rolePrompt, roleName: role, workflowContext, sandboxed: memberSandboxed,
+					// Persist team ownership before any later title/base-SHA/team-state await.
+					teamGoalId: goalId,
+					teamLeadSessionId: entry.teamLeadSessionId ?? undefined,
+					rolePrompt, roleName: role, accessory: storedRoleDef.accessory,
+					workflowContext, sandboxed: memberSandboxed,
 					// A host worker worktree is already fully provisioned. Thread every
 					// ownership coordinate into createSession so the initial persisted
 					// row proves its exact repo/path/branch identity before return.
@@ -3753,11 +3766,11 @@ export class TeamManager {
 						continue;
 					}
 					try {
-						const terminated = await this.sessionManager.terminateSession(id);
-						if (!terminated) await this.sessionManager.storeArchive(id);
+						const terminated = await this.sessionManager.terminateSession(id, { preserveEvidence: true });
+						if (!terminated) await this.sessionManager.storeArchive(id, { preserveEvidence: true });
 					} catch (err) {
 						errors.push(`stop ${id}: ${err instanceof Error ? err.message : String(err)}`);
-						try { await this.sessionManager.storeArchive(id); }
+						try { await this.sessionManager.storeArchive(id, { preserveEvidence: true }); }
 						catch (archiveErr) { errors.push(`archive ${id}: ${archiveErr instanceof Error ? archiveErr.message : String(archiveErr)}`); }
 					}
 					if (this.sessionManager.getPersistedSession(id)?.archived === true) archivedSessionIds.add(id);
@@ -3769,8 +3782,10 @@ export class TeamManager {
 			const suppressedSessionIds = [...selectedIds].filter((id) => this.sessionManager.getPersistedSession(id)?.archived !== true);
 			let teamRemoved = false;
 			let teamEntryRetained = !!teamStore?.get(goalId);
-			const ownershipConflict = errors.some((error) => error.startsWith("ownership conflict:"));
-			if (suppressedSessionIds.length === 0 && !ownershipConflict && teamEntryRetained) {
+			// Ownership conflicts protect the foreign session, not stale archived-goal
+			// bookkeeping. Once every session actually owned by this goal is archived,
+			// remove its TeamStore row so the bounded repair is idempotent.
+			if (suppressedSessionIds.length === 0 && teamEntryRetained) {
 				try {
 					await teamStore.removeAsync(goalId);
 					teamRemoved = teamStore.get(goalId) === undefined;

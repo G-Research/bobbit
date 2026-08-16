@@ -3741,8 +3741,19 @@ export class SessionManager {
 	 * rebuild the in-memory child index + remind owners of live children on boot.
 	 */
 	private orchestrationCore: OrchestrationCore | null = null;
+	private teamGoalAdmissionFence?: <T>(goalId: string, operation: () => Promise<T>) => Promise<T>;
 	setOrchestrationCore(core: OrchestrationCore | null): void {
 		this.orchestrationCore = core;
+	}
+
+	/** Late-bound bridge onto TeamManager's authoritative per-goal admission queue. */
+	setTeamGoalAdmissionFence(fence: (<T>(goalId: string, operation: () => Promise<T>) => Promise<T>) | undefined): void {
+		this.teamGoalAdmissionFence = fence;
+	}
+
+	/** Run publication of a team-owned orchestration child under terminal admission. */
+	runWithTeamGoalAdmission<T>(goalId: string, operation: () => Promise<T>): Promise<T> {
+		return this.teamGoalAdmissionFence ? this.teamGoalAdmissionFence(goalId, operation) : operation();
 	}
 
 	setInboxNudger(nudger: import("./inbox-nudger.js").InboxNudger | null): void {
@@ -14920,7 +14931,7 @@ export class SessionManager {
 	 * dormant/not-live or was archived while the server was down. The boot-reap
 	 * (`shouldReapChildOnBoot`) remains as defense-in-depth.
 	 */
-	private async cascadeReapOwner(id: string): Promise<void> {
+	private async cascadeReapOwner(id: string, options: { preserveEvidence?: boolean } = {}): Promise<void> {
 		// Cascade: terminate all live child sessions first. Children are linked via
 		// `delegateOf` (delegate kind) OR `parentSessionId`+`childKind` (team /
 		// pr-walkthrough / host-agents / any future kind) — otherwise a child
@@ -14928,7 +14939,7 @@ export class SessionManager {
 		const children = [...this.sessions.values()].filter(s => s.delegateOf === id || (!!s.childKind && s.parentSessionId === id));
 		for (const child of children) {
 			console.log(`[session ${id}] Cascading terminate to child ${child.id}`);
-			await this.terminateSession(child.id);
+			await this.terminateSession(child.id, options);
 		}
 		// Also archive persisted-but-not-in-memory children of any kind.
 		const allLiveForTerminate = this.projectContextManager
@@ -14958,11 +14969,11 @@ export class SessionManager {
 	 * (`shouldReapChildOnBoot`) stays as defense-in-depth for the server-was-down
 	 * case.
 	 */
-	private async archiveWithCascade(id: string, store?: SessionStore): Promise<boolean> {
+	private async archiveWithCascade(id: string, store?: SessionStore, options: { preserveEvidence?: boolean } = {}): Promise<boolean> {
 		// Defense in depth for internal recovery and maintenance callers. Ordered
 		// goal archival has already made the canonical guard return undefined here.
 		this.assertPromotedSessionRecoveryAllowed(id, "archive its session record");
-		await this.cascadeReapOwner(id);
+		await this.cascadeReapOwner(id, options);
 		// Extension Platform G1.4: notify lifecycle providers the session is
 		// shutting down. Best-effort and bounded by the hub's per-provider
 		// timeouts; wrapped in try/catch so archival always completes even if a
@@ -14994,7 +15005,7 @@ export class SessionManager {
 		try { return await target.archiveAsync(id); } catch { return false; }
 	}
 
-	async terminateSession(id: string, _opts?: { allowPromotedGoalLifecycle?: boolean }): Promise<boolean> {
+	async terminateSession(id: string, options: { preserveEvidence?: boolean; allowPromotedGoalLifecycle?: boolean } = {}): Promise<boolean> {
 		this.assertSessionGoalPromotionMutationAllowed(id);
 		// Legacy callers may still pass the old option, but canonical goal state —
 		// never a caller boolean — is the only authority for promoted teardown.
@@ -15021,22 +15032,25 @@ export class SessionManager {
 			const current = this.sessions.get(id);
 			const currentPersisted = this.getPersistedSession(id);
 			if (
-				(current?.sandboxed || currentPersisted?.sandboxed)
+				!options.preserveEvidence
+				&& (current?.sandboxed || currentPersisted?.sandboxed)
 				&& !(current?.borrowsWorktree || currentPersisted?.borrowsWorktree)
 			) {
 				this.assertSandboxOwnerHasNoLiveBorrowers(id);
 			}
 			if (coordinator) coordinator.terminalRequest = "terminate";
 			return this._coordinateSessionReplacement(id, "terminate", (token) =>
-				this._terminateSessionOwned(id, token), { coalesceKey: "terminate", drainOnRelease: false });
+				this._terminateSessionOwned(id, token, options), { coalesceKey: "terminate", drainOnRelease: false });
 		};
 
-		return lifecycleOwnerId
+		// Evidence-preserving archival never mutates the sandbox worktree, so it
+		// must not enter the owner lock recursively while cascading borrowed children.
+		return lifecycleOwnerId && !options.preserveEvidence
 			? this.withSandboxWorktreeOwnerLifecycle(lifecycleOwnerId, terminate)
 			: terminate();
 	}
 
-	private async _terminateSessionOwned(id: string, token: SessionReplacementToken): Promise<boolean> {
+	private async _terminateSessionOwned(id: string, token: SessionReplacementToken, options: { preserveEvidence?: boolean }): Promise<boolean> {
 		const session = this.sessions.get(id);
 		if (!session) return false;
 		if (!this._replacementTokenIsCurrent(id, token)) {
@@ -15044,7 +15058,7 @@ export class SessionManager {
 		}
 
 		// Cascade-reap this owner's child agents (extracted seam — §6).
-		await this.cascadeReapOwner(id);
+		await this.cascadeReapOwner(id, options);
 
 		await this.closeExtensionChannelsForSession(id, "session-terminated");
 
@@ -15119,7 +15133,7 @@ export class SessionManager {
 		// Skip sessions that share another owner's worktree: delegates, read-only
 		// children, and explicit writable history forks (`borrowsWorktree`). Only the
 		// session that provisioned the sandbox worktree may remove it.
-		if (session.sandboxed && !session.borrowsWorktree && !session.delegateOf && !(session.readOnly && session.parentSessionId) && session.cwd?.startsWith("/workspace-wt/") && this.sandboxManager && session.projectId) {
+		if (!options.preserveEvidence && session.sandboxed && !session.borrowsWorktree && !session.delegateOf && !(session.readOnly && session.parentSessionId) && session.cwd?.startsWith("/workspace-wt/") && this.sandboxManager && session.projectId) {
 			const removalAuthority = this.getPersistedSession(id) ?? session;
 			const coordinates = sandboxWorktreeOwnerCoordinates(removalAuthority);
 			if (!coordinates) {
@@ -15197,26 +15211,28 @@ export class SessionManager {
 		// purgeOneSession at the 7-day mark. Fire-and-forget — never blocks.
 		// branch/repoPath live on PersistedSession (not SessionInfo), so we read
 		// the persisted record we just archived.
-		const persistedForBranchDelete = terminateStore.get(id);
-		const sessionBranch = persistedForBranchDelete?.branch;
-		const repoPathForBranchDelete = persistedForBranchDelete?.repoPath;
-		const skipRemoteBranchDelete = shouldSkipRemotePush(this.remoteGitPolicy) || !repoPathForBranchDelete || await shouldSkipRemoteGitForTests(repoPathForBranchDelete, "origin", this.commandRunner, this.remoteGitPolicy);
-		eagerDeleteRemoteSessionBranch({
-			branch: sessionBranch,
-			repoPath: repoPathForBranchDelete,
-			delegateOf: session.delegateOf,
-			skipPush: skipRemoteBranchDelete,
-			detectPrimary: (cwd) => detectPrimaryBranch(cwd, this.commandRunner, this.remoteGitPolicy),
-			runGit: async (args, cwd) => {
-				await this.commandRunner.execFile("git", args, { cwd, timeout: 15_000 });
-			},
-		}).then(result => {
-			if (result.deleted) {
-				console.log(`[session-manager] Deleted merged remote session branch: ${sessionBranch}`);
-			}
-		}).catch(err => {
-			console.warn(`[session-manager] Eager remote-delete failed for ${id}:`, err);
-		});
+		if (!options.preserveEvidence) {
+			const persistedForBranchDelete = terminateStore.get(id);
+			const sessionBranch = persistedForBranchDelete?.branch;
+			const repoPathForBranchDelete = persistedForBranchDelete?.repoPath;
+			const skipRemoteBranchDelete = shouldSkipRemotePush(this.remoteGitPolicy) || !repoPathForBranchDelete || await shouldSkipRemoteGitForTests(repoPathForBranchDelete, "origin", this.commandRunner, this.remoteGitPolicy);
+			eagerDeleteRemoteSessionBranch({
+				branch: sessionBranch,
+				repoPath: repoPathForBranchDelete,
+				delegateOf: session.delegateOf,
+				skipPush: skipRemoteBranchDelete,
+				detectPrimary: (cwd) => detectPrimaryBranch(cwd, this.commandRunner, this.remoteGitPolicy),
+				runGit: async (args, cwd) => {
+					await this.commandRunner.execFile("git", args, { cwd, timeout: 15_000 });
+				},
+			}).then(result => {
+				if (result.deleted) {
+					console.log(`[session-manager] Deleted merged remote session branch: ${sessionBranch}`);
+				}
+			}).catch(err => {
+				console.warn(`[session-manager] Eager remote-delete failed for ${id}:`, err);
+			});
+		}
 
 		// Notify termination listeners (e.g. user-question harness cleanup, sidebar broadcast).
 		// Pass cwd/worktreePath/repoWorktrees in the info so listeners
@@ -15254,7 +15270,7 @@ export class SessionManager {
 	 * Routes through the runtime archive seam (§6) so a dormant parent's live
 	 * children are cascade-reaped before it is archived.
 	 */
-	async storeArchive(id: string, _opts?: { allowPromotedGoalLifecycle?: boolean }): Promise<boolean> {
+	async storeArchive(id: string, options: { preserveEvidence?: boolean; allowPromotedGoalLifecycle?: boolean } = {}): Promise<boolean> {
 		this.assertSessionGoalPromotionMutationAllowed(id);
 		// Preserve the legacy call shape without preserving its authority bypass.
 		this.assertPromotedSessionLifecycleAllowed(id, "archive");
@@ -15268,12 +15284,12 @@ export class SessionManager {
 			: undefined;
 		const archive = async () => {
 			const current = this.getPersistedSession(id);
-			if (current?.sandboxed && !current.borrowsWorktree) {
+			if (!options.preserveEvidence && current?.sandboxed && !current.borrowsWorktree) {
 				this.assertSandboxOwnerHasNoLiveBorrowers(id);
 			}
-			return this.archiveWithCascade(id);
+			return this.archiveWithCascade(id, undefined, options);
 		};
-		return lifecycleOwnerId
+		return lifecycleOwnerId && !options.preserveEvidence
 			? this.withSandboxWorktreeOwnerLifecycle(lifecycleOwnerId, archive)
 			: archive();
 	}

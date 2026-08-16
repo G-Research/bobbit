@@ -13,6 +13,7 @@ vi.mock("../../src/server/agent/orphan-cleanup.ts", async (importOriginal) => {
 });
 
 import { SessionManager } from "../../src/server/agent/session-manager.ts";
+import { OrchestrationCore } from "../../src/server/agent/orchestration-core.ts";
 import { TeamManager, TeamStartError } from "../../src/server/agent/team-manager.ts";
 
 interface GoalRow {
@@ -146,8 +147,10 @@ function makeFixture(options: {
 	}
 
 	const terminateCalls: string[] = [];
+	const terminateOptions: Array<Record<string, unknown>> = [];
 	const archiveCalls: string[] = [];
 	const createCalls: string[] = [];
+	let admissionFence: (<T>(goalId: string, operation: () => Promise<T>) => Promise<T>) | undefined;
 	let fixture!: any;
 	const goalStore = {
 		get: (id: string) => goals.get(id),
@@ -177,8 +180,12 @@ function makeFixture(options: {
 		getPersistedSession: (id: string) => sessionStore.get(id),
 		getSession: (id: string) => live.get(id),
 		getSessionInfo: (id: string) => live.get(id),
-		terminateSession: vi.fn(async (id: string) => {
+		setTeamGoalAdmissionFence: (fence: typeof admissionFence) => { admissionFence = fence; },
+		runWithTeamGoalAdmission: <T>(goalId: string, operation: () => Promise<T>) =>
+			admissionFence ? admissionFence(goalId, operation) : operation(),
+		terminateSession: vi.fn(async (id: string, terminateOpts: Record<string, unknown> = {}) => {
 			terminateCalls.push(id);
+			terminateOptions.push(terminateOpts);
 			if (options.terminate) return options.terminate(id, fixture);
 			sessionStore.archive(id);
 			live.delete(id);
@@ -240,6 +247,7 @@ function makeFixture(options: {
 		live,
 		subscriptions,
 		terminateCalls,
+		terminateOptions,
 		archiveCalls,
 		createCalls,
 	};
@@ -296,6 +304,28 @@ describe("archived goal reconciliation", () => {
 		);
 	});
 
+	it("removes stale archived-goal team state while leaving a conflicting foreign owner live", async () => {
+		const archivedGoal = goal("goal-stale-reference");
+		const foreignGoal = goal("goal-foreign-owner", false);
+		const foreign = session("foreign-team-session", { teamGoalId: foreignGoal.id });
+		const fixture = makeFixture({
+			goals: [archivedGoal, foreignGoal],
+			sessions: [foreign],
+			teams: [teamEntry(archivedGoal.id, foreign.id)],
+		});
+		await fixture.manager.waitForRestore();
+
+		const result = await fixture.manager.reconcileArchivedGoal(archivedGoal.id, { audit: false });
+
+		assert.equal(result.status, "complete");
+		assert.equal(fixture.sessionStore.get(foreign.id).archived, false, "foreign ownership wins over a stale team reference");
+		assert.equal(fixture.teamStore.get(archivedGoal.id), undefined, "stale archived-goal team state is still removed");
+		assert.match(result.errors.join("\n"), /ownership conflict/);
+		const writes = fixture.teamStore.removals.length;
+		await fixture.manager.reconcileArchivedGoal(archivedGoal.id, { audit: false });
+		assert.equal(fixture.teamStore.removals.length, writes, "the clean retry performs no TeamStore write");
+	});
+
 	it("recursively archives descendants through direct fallback when termination fails", async () => {
 		const archivedGoal = goal("goal-recursive-closure");
 		const root = session("team-root", { teamGoalId: archivedGoal.id, goalId: archivedGoal.id });
@@ -314,6 +344,10 @@ describe("archived goal reconciliation", () => {
 		assert.equal(result.status, "complete");
 		assert.deepEqual(new Set(result.archivedSessionIds), new Set([root.id, delegate.id, visibleChild.id]));
 		assert.deepEqual(new Set(fixture.archiveCalls), new Set([root.id, delegate.id, visibleChild.id]));
+		assert.ok(
+			fixture.terminateOptions.every((options: Record<string, unknown>) => options.preserveEvidence === true),
+			"reconciliation propagates evidence-preserving termination to every selected descendant",
+		);
 		assert.equal(fixture.sessionStore.get(standalone.id).archived, false);
 		assert.equal(fixture.sessionStore.get(delegate.id).modelId, "model", "soft archive preserves session metadata");
 	});
@@ -384,11 +418,11 @@ describe("archived goal reconciliation", () => {
 		const createReleased = new Promise<void>((resolve) => { releaseCreate = resolve; });
 		let signalCreateEntered!: () => void;
 		const createEntered = new Promise<void>((resolve) => { signalCreateEntered = resolve; });
-		fixture.sessionManager.createSession = vi.fn(async (cwd: string, _args: unknown, goalId: string) => {
+		fixture.sessionManager.createSession = vi.fn(async (cwd: string, _args: unknown, goalId: string, _assistant: unknown, createOpts: Record<string, unknown>) => {
 			fixture.createCalls.push(goalId);
 			signalCreateEntered();
 			await createReleased;
-			const row = session("racing-team-lead", { cwd, goalId });
+			const row = session("racing-team-lead", { cwd, goalId, ...createOpts });
 			fixture.sessionStore.put(row);
 			const active = {
 				...row,
@@ -409,6 +443,11 @@ describe("archived goal reconciliation", () => {
 		const result = await reconciling;
 
 		assert.equal(result.status, "complete");
+		assert.equal(
+			fixture.sessionStore.get("racing-team-lead").teamGoalId,
+			racingGoal.id,
+			"lead ownership is present in the initial durable row before TeamStore publication",
+		);
 		assert.deepEqual(result.archivedSessionIds, ["racing-team-lead"]);
 		assert.equal(fixture.sessionStore.get("racing-team-lead").archived, true, "work admitted before closure is included");
 		await assert.rejects(
@@ -416,6 +455,56 @@ describe("archived goal reconciliation", () => {
 			(error: unknown) => error instanceof TeamStartError && error.code === "GOAL_ARCHIVED",
 		);
 		assert.equal(fixture.createCalls.length, 1, "post-terminal admission creates no session");
+	});
+
+	it("admits full-lifecycle team children on the shared fence and stamps ownership before publication", async () => {
+		const racingGoal = goal("goal-full-child-race", false);
+		const owner = session("team-owner", { teamGoalId: racingGoal.id, role: "team-lead" });
+		const standalone = session("standalone-owner", { goalId: racingGoal.id });
+		const fixture = makeFixture({ goals: [racingGoal], sessions: [owner, standalone] });
+		await fixture.manager.waitForRestore();
+
+		let releaseCreate!: () => void;
+		const createReleased = new Promise<void>((resolve) => { releaseCreate = resolve; });
+		let signalCreateEntered!: () => void;
+		const createEntered = new Promise<void>((resolve) => { signalCreateEntered = resolve; });
+		let childSequence = 0;
+		fixture.sessionManager.createSession = vi.fn(async (cwd: string, _args: unknown, goalId: string | undefined, _assistant: unknown, createOpts: Record<string, unknown>) => {
+			const id = `full-child-${++childSequence}`;
+			fixture.createCalls.push(id);
+			if (id === "full-child-1") {
+				signalCreateEntered();
+				await createReleased;
+			}
+			const row = session(id, { cwd, goalId, ...createOpts });
+			fixture.sessionStore.put(row);
+			fixture.live.set(id, { ...row, status: "idle", clients: new Set(), rpcClient: { onEvent: vi.fn(() => () => {}) } });
+			return fixture.live.get(id);
+		});
+		const core = new OrchestrationCore({
+			sessionManager: fixture.sessionManager,
+			resolveSessionModel: () => undefined,
+		});
+
+		const spawning = core.spawn({ ownerSessionId: owner.id, instructions: "team child", lifecycle: "full" });
+		await createEntered;
+		racingGoal.archived = true;
+		const reconciling = fixture.manager.reconcileArchivedGoal(racingGoal.id, { audit: false });
+		releaseCreate();
+		const child = await spawning;
+		const result = await reconciling;
+
+		assert.equal(fixture.sessionStore.get(child.sessionId).teamGoalId, racingGoal.id, "initial full-child row carries trusted parent ownership");
+		assert.equal(fixture.sessionStore.get(child.sessionId).archived, true, "child admitted before terminal closure is reconciled");
+		assert.ok(result.archivedSessionIds.includes(child.sessionId));
+		await assert.rejects(
+			() => core.spawn({ ownerSessionId: owner.id, instructions: "too late", lifecycle: "full" }),
+			(error: unknown) => error instanceof TeamStartError && error.code === "GOAL_ARCHIVED",
+		);
+		assert.equal(fixture.createCalls.length, 1, "post-terminal full spawn creates no row or process");
+
+		const unrelated = await core.spawn({ ownerSessionId: standalone.id, instructions: "standalone child", lifecycle: "full" });
+		assert.equal(fixture.sessionStore.get(unrelated.sessionId).teamGoalId, undefined, "goalId-only owners are not broadened into team ownership");
 	});
 
 	it("caps boot audit error samples while suppressing every failed row", async () => {
