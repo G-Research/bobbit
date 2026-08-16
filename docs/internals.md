@@ -3262,9 +3262,21 @@ Follow-up not in this fix: `BgProcessRenderer.getCallStart` keys its start-time 
 
 Regression tests: `tests/dual-render-noid-message.test.ts` (id=undefined/null/numeric/empty-string cases), `tests/message-reducer.test.ts`, `tests/e2e/ui/bg-wait-no-dup.spec.ts`.
 
+### Composer command-history edit retention
+
+Command history in `MessageEditor` is a recall-and-edit aid, not a way to rewrite stored commands. ArrowUp and ArrowDown browse prior messages when the caret is on the applicable visual edge; the caret-row rules are documented in [Composer caret-row invariant](#composer-caret-row-invariant).
+
+During one browsing session, the composer retains the text for every position the user leaves, including the live draft. An edit to a recalled message therefore survives moving to other history entries and returning. Entries the user has not edited still display their exact stored text. Moving down past the newest recalled entry restores the retained live draft, including changes made to that draft during the same browsing session.
+
+This retained text is transient. Sending through any composer send path, adding or reloading history, and switching sessions reset the browsing state. A later recall then shows the stored command rather than a previous in-memory edit. Editing a recalled entry never changes persisted command history; storage is updated only when a message is sent.
+
+The implementation has one transient owner for text in the browsing session, covering both recalled entries and the live draft. Before navigation it records the outgoing composer text, then resolves the destination from that retained text when available or from immutable history otherwise. Keeping a single owner prevents separate draft and history-edit caches from disagreeing, while keeping the behavior deliberately local to the active session.
+
+Regression coverage lives in `tests2/dom/command-history-edits.test.ts`; it covers recalled-entry edits, untouched neighbors, live-draft round trips, reset after send, and storage immutability.
+
 ### Composer caret-row invariant
 
-**Purpose.** In `MessageEditor` (`src/ui/components/MessageEditor.ts`), ArrowUp and ArrowDown have two roles. Within a multiline draft, they move the caret; at the first or last *visual* row, they browse command history. ArrowUp recalls the prior message and ArrowDown walks forward, eventually restoring the saved draft. The synchronous keydown predicate `_isCursorOnVisualTopRow()` / `_isCursorOnVisualBottomRow()` must therefore answer whether the caret is at a visual edge. A soft-wrapped line spans multiple visual rows without a newline, so this is a layout question, not a string question.
+**Purpose.** In `MessageEditor` (`src/ui/components/MessageEditor.ts`), ArrowUp and ArrowDown have two roles. Within a multiline draft, they move the caret; at the first or last *visual* row, they browse command history. ArrowUp recalls the prior message and ArrowDown walks forward, eventually restoring the retained live draft. The synchronous keydown predicate `_isCursorOnVisualTopRow()` / `_isCursorOnVisualBottomRow()` must therefore answer whether the caret is at a visual edge. A soft-wrapped line spans multiple visual rows without a newline, so this is a layout question, not a string question.
 
 **Why geometry is necessary.** CSS text layout makes several otherwise-obvious implementations incorrect, often only at particular widths, fonts, or offsets:
 
@@ -3290,7 +3302,7 @@ Chromium scenario S12 pins both predicates below 100 ms for a 200 KB / 100 K-row
 
 That fixture covers leading, interior, and trailing newlines; soft wraps; fractional line heights; the real-key `Home` boundary cases; and history behavior. Its independent oracle uses `Range.getClientRects()` on an unsplit text node in a plain div. The width/font/content sweep covers every textarea width from 240–340 px, proportional and monospace stacks, break-word content, and space-wrapped prose. Per-pixel coverage is intentional: the marker-split regression occurred at scattered widths that a coarse grid missed.
 
-When changing this area, keep both predicates on `_measureCaretRowGeometry()` so newline arithmetic cannot drift; do not insert content into measured text; retain the structural short-circuits and bounded wrap search; and do not change the history state machine (`_historyIndex`, `_savedDraft`, modifier guards, or autocomplete precedence) as part of geometry work. For symptoms and the focused command, see [Composer ArrowUp recalls history one press too early](debugging.md#composer-arrowup-recalls-history-one-press-too-early--arrowdown-leaves-history-early).
+When changing this area, keep both predicates on `_measureCaretRowGeometry()` so newline arithmetic cannot drift; do not insert content into measured text; retain the structural short-circuits and bounded wrap search; and do not change the history state machine, modifier guards, or autocomplete precedence as part of geometry work. For symptoms and the focused command, see [Composer ArrowUp recalls history one press too early](debugging.md#composer-arrowup-recalls-history-one-press-too-early--arrowdown-leaves-history-early).
 
 ---
 
