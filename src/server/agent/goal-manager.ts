@@ -159,8 +159,14 @@ export class GoalManager {
 	 * no-op for the hook (current behaviour).
 	 */
 	private goalProvisionedDispatcher?: (ctx: GoalProvisionedContext) => Promise<void>;
+	private goalArchiveReconciler?: (goalId: string) => Promise<unknown>;
 	setGoalProvisionedDispatcher(dispatcher: (ctx: GoalProvisionedContext) => Promise<void>): void {
 		this.goalProvisionedDispatcher = dispatcher;
+	}
+
+	/** Late-bound cross-store cleanup invoked only after archive intent is durable. */
+	setGoalArchiveReconciler(reconciler: ((goalId: string) => Promise<unknown>) | undefined): void {
+		this.goalArchiveReconciler = reconciler;
 	}
 
 	/**
@@ -924,19 +930,13 @@ export class GoalManager {
 			console.warn(`[goal-manager] archiveGoalAfterMerge: child ${childId} not found`);
 			return;
 		}
-		// Idempotent — already complete and archived.
-		if (goal.archived && goal.state === "complete") {
-			return;
-		}
-
 		// 1. State first.
 		if (goal.state !== "complete") {
 			this.store.update(childId, { state: "complete" });
 		}
-		// 2. Archive.
-		if (!goal.archived) {
-			await this.archiveGoal(childId);
-		}
+		// 2. Archive. Always replay the boundary for an already-archived child:
+		// a prior crash may have committed goal intent but not session cleanup.
+		await this.archiveGoal(childId);
 		console.log(`[goal-manager] archiveGoalAfterMerge: child ${childId} complete + archived`);
 	}
 
@@ -1002,12 +1002,22 @@ export class GoalManager {
 	async archiveGoal(id: string): Promise<boolean> {
 		const goal = this.store.get(id);
 		if (!goal) return false;
-		const archived = this.store.archive(id);
+		// Preserve GoalStore's canonical transition hooks, then fence that exact
+		// mutation before any runtime/session cleanup.
+		if (!goal.archived) this.store.archive(id);
+		const archived = await this.store.archiveStrict(id);
 		if (archived) {
 			try {
 				await cleanupGateDiagnosticsForGoal(id, this.diagnosticsStateDir);
 			} catch (err) {
 				console.warn(`[goal-manager] Failed to clean gate diagnostics for archived goal ${id}:`, err);
+			}
+			try {
+				await this.goalArchiveReconciler?.(id);
+			} catch (err) {
+				// Archive is already committed. Cleanup remains reconstructable from
+				// teamGoalId/team-state and must never roll back a successful merge.
+				console.error(`[goal-manager] Archived-goal reconciliation blocked for ${id}:`, err);
 			}
 		}
 		// Multi-repo cleanup: best-effort per-repo worktree + remote-branch

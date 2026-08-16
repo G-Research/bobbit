@@ -859,6 +859,38 @@ export class GoalStore {
 		return true;
 	}
 
+	/**
+	 * Durably publish terminal archive intent before cross-store cleanup starts.
+	 * Replays fence an already-archived row without changing its archive time.
+	 */
+	async archiveStrict(id: string): Promise<boolean> {
+		this.assertAcceptingMutations();
+		const existing = this.goals.get(id);
+		if (!existing) return false;
+		if (existing.archived === true) {
+			await this.saveStrict([id]);
+			return true;
+		}
+
+		const previous = { ...existing };
+		this.generation++;
+		existing.archived = true;
+		existing.archivedAt = Date.now();
+		try {
+			await this.saveStrict([id]);
+		} catch (err) {
+			this.generation--;
+			for (const key of Object.keys(existing)) {
+				if (!(key in previous)) delete (existing as unknown as Record<string, unknown>)[key];
+			}
+			Object.assign(existing, previous);
+			throw err;
+		}
+		this.onIndexUpdate?.(existing);
+		this.onGoalArchived?.(existing);
+		return true;
+	}
+
 	getLive(): PersistedGoal[] {
 		return Array.from(this.goals.values()).filter(g => !g.archived);
 	}

@@ -666,7 +666,6 @@ import { ProjectContextManager } from "./agent/project-context-manager.js";
 import type { ProjectContext } from "./agent/project-context.js";
 import { resolveProjectForRequest, validateExecutionCwd, type CwdOwnershipSource } from "./agent/resolve-project.js";
 import { GoalManager } from "./agent/goal-manager.js";
-import { cleanupGateDiagnosticsForGoal } from "./agent/gate-diagnostics-cleanup.js";
 import type { WorktreeReferenceRecord } from "./agent/worktree-reference-guard.js";
 import { worktreeRoot as resolveWorktreeRoot } from "./skills/worktree-paths.js";
 import { computePlanFreezeUpdate } from "./agent/parent-workflow-freeze.js";
@@ -3659,6 +3658,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		},
 		commandRunner: gatewayDeps.commandRunner,
 	}, undefined, gatewayDeps.clock);
+	// One archive boundary for every existing and future project context. Goal
+	// intent is durable before this callback is entered.
+	projectContextManager.setGoalArchiveReconciler((goalId) => teamManager.reconcileArchivedGoal(goalId));
 	const bgProcessManager = new BgProcessManager(
 		(sessionId: string) => {
 			const session = sessionManager.getSession(sessionId);
@@ -4701,7 +4703,11 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Restore persisted teams before sessions so reconstructed records are available
 			// to session revival. Both complete before accepting connections.
 			await bootPhase("restore-teams", () => teamManager.waitForRestore());
-			await bootPhase("restore-sessions", () => sessionManager.restoreSessions());
+			const archivedTeamSuppression = await bootPhase(
+				"reconcile-archived-team-ownership",
+				() => teamManager.reconcileArchivedTeamOwnership(),
+			);
+			await bootPhase("restore-sessions", () => sessionManager.restoreSessions(archivedTeamSuppression));
 			await bootPhase("review-payload-recovery", async () => {
 				try {
 					const knownSessionIds = [...projectContextManager.all()]
@@ -9109,23 +9115,9 @@ async function handleApiRoute(
 		const mergedManually = url.searchParams.get("mergedManually") === "true";
 
 		const archiveOne = async (g: import("./agent/goal-store.js").PersistedGoal): Promise<boolean> => {
-			if (g.archived) {
-				try {
-					await cleanupGateDiagnosticsForGoal(g.id, projectContextManager.getContextForGoal(g.id)?.stateDir);
-				} catch (err) {
-					console.warn(`[api] archive: gate diagnostics cleanup failed for already-archived goal ${g.id}:`, err);
-				}
-				return false;
-			}
+			const wasArchived = g.archived === true;
 			if (mergedManually && g.id === id && g.state !== "complete") {
 				await getGoalManagerForGoal(g.id).updateGoal(g.id, { state: "complete" });
-			}
-			for (const active of verificationHarness.getActiveVerifications(g.id)) {
-				try {
-					await verificationHarness.cancelStaleVerifications(g.id, active.gateId);
-				} catch (err) {
-					console.error(`[api] archive: error cancelling verification for ${g.id}/${active.gateId}:`, err);
-				}
 			}
 			const goalProjectCtx = projectContextManager.getContextForGoal(g.id);
 			const teamEntry = goalProjectCtx?.teamStore.get(g.id);
@@ -9138,9 +9130,6 @@ async function handleApiRoute(
 			if (teamEntry?.teamLeadSessionId) {
 				const tl = goalProjectCtx?.sessionStore.get(teamEntry.teamLeadSessionId);
 				if (tl?.branch) agentBranches.push(tl.branch);
-			}
-			if (teamManager.getTeamState(g.id)) {
-				await teamManager.teardownTeam(g.id);
 			}
 			// Finding 2 — terminal event: release any per-root scheduler permit
 			// this child held (or drop it from the capacity queue) so the next
@@ -9159,7 +9148,7 @@ async function handleApiRoute(
 					console.warn(`[api] archive: remote branch cleanup failed for ${g.id}:`, err);
 				});
 			}
-			return true;
+			return !wasArchived;
 		};
 
 		if (!cascade) {

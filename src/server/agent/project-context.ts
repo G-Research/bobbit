@@ -192,6 +192,11 @@ export class ProjectContext {
     this.applyGoalTriggerDispatcher();
   }
 
+  /** Wire the authoritative post-archive cross-store reconciliation boundary. */
+  setGoalArchiveReconciler(reconciler: ((goalId: string) => Promise<unknown>) | undefined): void {
+    this.goalManager.setGoalArchiveReconciler(reconciler);
+  }
+
   private applyGoalTriggerDispatcher(): void {
     const d = this.goalTriggerDispatcher;
     if (!d) {
