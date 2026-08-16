@@ -3434,6 +3434,15 @@
       }
     },
     {
+      "path": "tests2/dom/project-import-proposal-renderer.test.ts",
+      "reason": "Project import proposal cards retain per-request pending and retry feedback without duplicate submissions.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
       "path": "tests2/dom/consent-inbox-reference.test.ts",
       "reason": "Consent inbox references remain non-destructive and focus the existing typed decision card rather than creating an answer route.",
       "execution": {

@@ -2164,9 +2164,9 @@ export function showProjectDialog(): void {
 	let importContinuation: ImportContinuation | null = null;
 	let importHandoffStarted = false;
 	const importDecisionRenderer = new ProjectImportDecisionRenderer();
-	const importProposalRenderer = new ProjectImportProposalRenderer();
-	const onImportProposalUpdated = () => { if (importProject) void refreshProjectImportDecisionRequests(importProject.id); };
-	document.addEventListener("bobbit-project-import-proposal-updated", onImportProposalUpdated);
+	// The renderer owns bounded per-request feedback; this callback makes its
+	// synchronous pending/error transitions visible before the REST refresh.
+	const importProposalRenderer = new ProjectImportProposalRenderer(() => renderDialog());
 	let pathValue = "";
 
 	let detectionResult: { exists: boolean; hasBobbit: boolean; isEmpty: boolean; name: string } | null = null;
@@ -2210,7 +2210,7 @@ export function showProjectDialog(): void {
 		importDecisionUnsubscribe?.();
 		importDecisionUnsubscribe = null;
 		if (importProject) deactivateProjectImportDecisionRequests(importProject.id);
-		document.removeEventListener("bobbit-project-import-proposal-updated", onImportProposalUpdated);
+		importProposalRenderer.clear();
 		if (detectDebounceTimer) {
 			clearTimeout(detectDebounceTimer);
 			detectDebounceTimer = null;
@@ -2814,6 +2814,7 @@ export function showProjectDialog(): void {
 		}
 		const requests = projectImportDecisionRequestsForProject(project.id);
 		const proposals = projectImportProposalsForProject(project.id);
+		importProposalRenderer.reconcile(proposals);
 		const activity = projectImportDecisionActivityForProject(project.id);
 		const activityPanel = activity.length ? html`
 			<details class="text-xs text-muted-foreground" data-testid="project-import-decision-activity">
