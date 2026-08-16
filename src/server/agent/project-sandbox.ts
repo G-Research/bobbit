@@ -19,7 +19,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
-import { buildDockerRunArgs, isVerificationSignalId, projectSandboxVolumeCreateArgsByKey, projectSandboxVolumeNames, SANDBOX_STATE_MOUNTS, validatedE2ERunId, type ProjectSandboxVolumeKey } from "./docker-args.js";
+import { buildDockerRunArgs, isVerificationSignalId, projectSandboxVolumeCreateArgs, projectSandboxVolumeNames, SANDBOX_STATE_MOUNTS, validatedE2ERunId } from "./docker-args.js";
 import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { bobbitStateDir, globalAgentDir } from "../bobbit-dir.js";
 import { verificationCheckoutProjectDir } from "./verification-checkout-scope.js";
@@ -1444,12 +1444,9 @@ export class ProjectSandbox {
 			// Check if running
 			const running = await this._isContainerRunning(existingId);
 			if (running) {
-				// Validate with a simple exec. Volume-root repair is intentionally
-				// best-effort here: a transient root exec failure must not discard a
-				// healthy long-lived container and its persisted worktrees.
+				// Validate with a simple exec
 				try {
 					await this._dockerExec(existingId, ["echo", "ok"]);
-					await this._repairSandboxVolumeRootsOnExistingContainer(existingId, "reconnect");
 					this.containerId = existingId;
 					// Audit worktree state on reconnect — helps debug disappearing worktrees
 					try {
@@ -1471,10 +1468,8 @@ export class ProjectSandbox {
 						timeout: 30_000,
 						env: DOCKER_ENV,
 					});
-					// Validate after start. As with a running reconnect, retain a healthy
-					// container when a transient ownership repair cannot run.
+					// Validate after start
 					await this._dockerExec(existingId, ["echo", "ok"]);
-					await this._repairSandboxVolumeRootsOnExistingContainer(existingId, "restart");
 					this.containerId = existingId;
 					// Audit worktree state after restart — overlay FS data may have been lost
 					try {
@@ -1539,8 +1534,10 @@ export class ProjectSandbox {
 		for (const src of Object.values(this.options.cloneSourceByName ?? {})) addMount(src);
 
 		// Docker-created named volumes start root-owned, but init and agents run as
-		// `node`. Persisted initialization evidence permits only the safe repair of
-		// a Bobbit-owned empty workspace after an interrupted creation.
+		// `node`. Explicit creation also gives every Bobbit-owned volume an owner
+		// label. Keep the workspace's persistent initialization evidence so a
+		// replacement can repair a failed prior initialization without taking over
+		// an unproven pre-existing workspace volume.
 		const volumeEvidence = await this._createSandboxVolumes(e2eRunId);
 		const dockerArgs = buildDockerRunArgs({
 			image,
@@ -1581,13 +1578,7 @@ export class ProjectSandbox {
 
 		this.containerId = containerId;
 
-		try {
-			await this._repairSandboxVolumeOwnership(containerId, volumeEvidence);
-		} catch (err: any) {
-			// A replacement can retry this evidence-gated repair. Do not discard the
-			// new container solely because Docker interrupted the ownership exec.
-			console.warn(`[project-sandbox] Could not repair volume ownership for ${containerId.substring(0, 12)}: ${err?.message || err}`);
-		}
+		await this._repairSandboxVolumeOwnership(containerId, volumeEvidence);
 
 		// Defense-in-depth: mask /proc/1/environ
 		try {
@@ -1611,12 +1602,16 @@ export class ProjectSandbox {
 	private async _createSandboxVolumes(e2eRunId: string | undefined): Promise<SandboxVolumeOwnershipEvidence> {
 		const runId = e2eRunId ?? "";
 		const names = projectSandboxVolumeNames(this.options.projectId, runId);
-		const createArgs = projectSandboxVolumeCreateArgsByKey(this.options.projectId, runId, randomUUID());
-		for (const key of ["workspace", "worktrees"] as const satisfies readonly ProjectSandboxVolumeKey[]) {
-			if (await this._sandboxVolumeExists(names[key])) continue;
-			await this.execDocker(createArgs[key], { timeout: 15_000, env: DOCKER_ENV });
+		const createArgs = projectSandboxVolumeCreateArgs(this.options.projectId, runId, randomUUID());
+
+		for (const [key, name] of Object.entries(names) as Array<[keyof typeof names, string]>) {
+			if (await this._sandboxVolumeExists(name)) continue;
+			await this.execDocker(createArgs[key === "workspace" ? 0 : 1], { timeout: 15_000, env: DOCKER_ENV });
 		}
-		return this._sandboxVolumeOwnershipEvidence(e2eRunId);
+
+		return {
+			workspaceInitializedByBobbit: await this._hasSandboxVolumeInitializationEvidence(names.workspace, runId),
+		};
 	}
 
 	private async _sandboxVolumeExists(name: string): Promise<boolean> {
@@ -1640,25 +1635,6 @@ export class ProjectSandbox {
 				&& (!runId || labels?.["bobbit-e2e-run"] === runId);
 		} catch {
 			return false;
-		}
-	}
-
-	private async _sandboxVolumeOwnershipEvidence(e2eRunId: string | undefined): Promise<SandboxVolumeOwnershipEvidence> {
-		const runId = e2eRunId ?? "";
-		const names = projectSandboxVolumeNames(this.options.projectId, runId);
-		return {
-			workspaceInitializedByBobbit: await this._hasSandboxVolumeInitializationEvidence(names.workspace, runId),
-		};
-	}
-
-	/** Preserve reconnect/restart ownership recovery without adopting a foreign
-	 * or non-empty named volume. A repair interruption is not a health failure
-	 * for an already usable container. */
-	private async _repairSandboxVolumeRootsOnExistingContainer(containerId: string, lifecycle: "reconnect" | "restart"): Promise<void> {
-		try {
-			await this._repairSandboxVolumeOwnership(containerId, await this._sandboxVolumeOwnershipEvidence(this.e2eRunId));
-		} catch (err: any) {
-			console.warn(`[project-sandbox] Failed to repair volume-root ownership during ${lifecycle} for healthy container ${containerId.substring(0, 12)}; continuing with worktree retry fallback: ${err?.message || err}`);
 		}
 	}
 
@@ -1688,9 +1664,16 @@ export class ProjectSandbox {
 			"repair_empty_root_owned_dir /workspace-wt",
 			workspaceRepair,
 		].filter(Boolean).join("\n");
-		await this.execDocker([
-			"exec", "-u", "root", containerId, "sh", "-c", command,
-		], { timeout: 10_000, env: DOCKER_ENV });
+
+		try {
+			await this.execDocker([
+				"exec", "-u", "root", containerId, "sh", "-c", command,
+			], { timeout: 10_000, env: DOCKER_ENV });
+		} catch (err: any) {
+			// The container remains usable if the repair itself is interrupted. A
+			// future replacement reruns this evidence-based, idempotent repair.
+			console.warn(`[project-sandbox] Could not repair volume ownership for ${containerId.substring(0, 12)}: ${err?.message || err}`);
+		}
 	}
 
 	private async _runInitSequence(): Promise<void> {
