@@ -1084,7 +1084,7 @@ export class GoalManager {
 		// removal for standalone goals. Archived team reconciliation is a soft
 		// lifecycle boundary: its goal/member worktrees and branches are recovery
 		// evidence and remain until the ordinary purge lifecycle owns deletion.
-		if (archived && !goal.team && !reconciledTeamOwnership && goal.repoWorktrees && goal.repoPath && goal.branch && Object.keys(goal.repoWorktrees).length > 0) {
+		if (archived && !reconciledTeamOwnership && goal.repoWorktrees && goal.repoPath && goal.branch && Object.keys(goal.repoWorktrees).length > 0) {
 			const { cleanupWorktree } = await import("../skills/git.js");
 			const entries = Object.entries(goal.repoWorktrees);
 			const sessions = this.getSessionsForWorktreeGuard();

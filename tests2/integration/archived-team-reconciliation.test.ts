@@ -131,7 +131,7 @@ test.describe("archived team reconciliation", () => {
 		let restoreSpy: ReturnType<typeof vi.spyOn> | undefined;
 		try {
 			await archiveGoal(goal.id);
-			expect(terminateSpy).toHaveBeenCalledWith(leadId);
+			expect(terminateSpy).toHaveBeenCalledWith(leadId, { preserveEvidence: true });
 			expect(sessionManager.getPersistedSession(leadId)?.archived, "fallback must publish archival despite stop failure").toBe(true);
 			expect(gateway.projectContextManager.getContextForGoal(goal.id)!.teamStore.get(goal.id)).toBeUndefined();
 
