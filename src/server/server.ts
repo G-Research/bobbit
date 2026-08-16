@@ -201,14 +201,7 @@ import {
 } from "./agent/history-fork.js";
 
 import { isGitRepo, getRepoRoot, resolveSandboxMountRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef, detectBaseRefFromRemote, resolveBaseRef, refExistsInRepo, type RemoteGitPolicy } from "./skills/git.js";
-import {
-	baseRefMissingInReposError,
-	baseRefSkippedRepoWarning,
-	baseRefTagError,
-	isValidBaseRefBranchGrammar,
-	normalizeBaseRefValue,
-	validateBaseRefShape,
-} from "./base-ref-validation.js";
+import { isValidBaseRefBranchGrammar } from "./base-ref-validation.js";
 
 /**
  * Render the `team_wait` result text (orchestration-core design §9). Returns on
@@ -793,8 +786,11 @@ import {
 import { ProposalSeedService, proposalDraftOwnerId } from "./proposals/proposal-seed-service.js";
 import {
 	CanonicalMutationError,
+	CanonicalProjectConfigPersistenceError,
+	CanonicalSandboxSecretPersistenceError,
 	applyCanonicalGoalProposal,
 	applyCanonicalProjectProposal,
+	validateProjectBaseRef,
 	applyCanonicalToolProposal,
 	createCanonicalRole,
 	createCanonicalStaff,
@@ -6405,6 +6401,39 @@ async function handleApiRoute(
 		json({ error: err.message, code: err.code }, err.status);
 		return true;
 	};
+	const validateCanonicalBaseRef = (input: Parameters<typeof validateProjectBaseRef>[0]) =>
+		validateProjectBaseRef(input, {
+			isGitRepo: async (repoPath) => isGitRepo(repoPath, serverCommandRunner).catch(() => false),
+			isTag: async (repoPath, ref) => {
+				try { await serverCommandRunner.execFile("git", ["rev-parse", "--verify", `refs/tags/${ref}`], { cwd: repoPath, timeout: 5_000 }); return true; }
+				catch { return false; }
+			},
+			hasRef: async (repoPath, ref) => refExistsInRepo(repoPath, ref, serverCommandRunner).catch(() => false),
+		});
+	const writeCanonicalProjectMutationError = (err: unknown): boolean => {
+		if (err instanceof CanonicalMutationError) {
+			// The Settings UI has a long-standing structured base_ref contract.
+			// Preserve it byte-for-byte while routing every other canonical failure
+			// through the typed, sanitized envelope below.
+			if (err.details && typeof err.details === "object" && (err.details as { field?: unknown }).field === "base_ref") {
+				json(err.details, err.status);
+				return true;
+			}
+			json({ error: err.message, ...(err.code ? { code: err.code } : {}), ...(err.details !== undefined ? { details: err.details } : {}) }, err.status);
+			return true;
+		}
+		if (err instanceof CanonicalProjectConfigPersistenceError || err instanceof ProjectConfigLoadError) {
+			const failure = projectConfigPersistenceFailure(err instanceof CanonicalProjectConfigPersistenceError ? err.cause : err);
+			json(failure.body, failure.status);
+			return true;
+		}
+		if (err instanceof CanonicalSandboxSecretPersistenceError || err instanceof SecretsStorePersistenceError) {
+			const failure = sandboxSecretPersistenceFailure(err instanceof CanonicalSandboxSecretPersistenceError ? err.cause : err);
+			json(failure.body, failure.status);
+			return true;
+		}
+		return false;
+	};
 
 	/** Subgoals feature gate. Writes 403 SUBGOALS_DISABLED + returns false when off. */
 	function requireSubgoalsEnabled(): boolean {
@@ -7521,8 +7550,9 @@ async function handleApiRoute(
 
 			const acceptCanonical = body.acceptCanonical === true;
 			let project;
+			let baseRefWarnings: string[] | undefined;
 			try {
-				({ project } = await applyCanonicalProjectProposal({
+				({ project, warnings: baseRefWarnings } = await applyCanonicalProjectProposal({
 					mode: "register", name: body.name, rootPath: body.rootPath,
 					color, palette, colorLight, colorDark, acceptCanonical,
 					components: (body as Record<string, unknown>).components,
@@ -7632,6 +7662,8 @@ async function handleApiRoute(
 					suspendServices: (id) => worktreeServices.suspendProject(id),
 					stopServices: (id) => worktreeServices.stopProject(id),
 					reconcileServices: (id) => worktreeServices.reconcileProject(id),
+					validateBaseRef: validateCanonicalBaseRef,
+					invalidateSandboxImageRequirements: (id) => sandboxImageRequirements.invalidateProject(id),
 				}));
 			} catch (regErr: any) {
 				if (regErr instanceof CanonicalMutationError && regErr.code === "WORKFLOW_VALIDATION_FAILED") {
@@ -7639,27 +7671,19 @@ async function handleApiRoute(
 					return;
 				}
 				if (regErr instanceof SymlinkProjectRootError) {
-					json({
-						error: "Project root is a symlink",
-						code: "symlink_root",
-						rootPath: regErr.rootPath,
-						canonical: regErr.canonical,
-					}, 400);
+					json({ error: "Project root is a symlink", code: "symlink_root" }, 400);
 					return;
 				}
 				if (regErr instanceof PreflightFailedError) {
-					json({
-						error: regErr.message,
-						code: "preflight_failed",
-						report: regErr.report,
-					}, 400);
+					json({ error: "Project preflight failed", code: "preflight_failed", report: { hasFail: true } }, 400);
 					return;
 				}
 				throw regErr;
 			}
-			json(project, 201);
+			json({ ...project, ...(baseRefWarnings?.length ? { warnings: baseRefWarnings } : {}) }, 201);
 		} catch (err: any) {
-			jsonError(400, err);
+			if (writeCanonicalProjectMutationError(err)) return;
+			jsonError(500, err, { error: "Project mutation failed" });
 		}
 		return;
 	}
@@ -7734,7 +7758,7 @@ async function handleApiRoute(
 		}
 		const projectId = projectGetMatch[1];
 		try {
-			const { project: updated } = await applyCanonicalProjectProposal({
+			const { project: updated, warnings } = await applyCanonicalProjectProposal({
 				mode: "update", projectId, name: updates.name, rootPath: updates.rootPath,
 				color: updates.color, palette: updates.palette, colorLight: updates.colorLight, colorDark: updates.colorDark,
 				config: body.config, components: body.components, workflows: body.workflows,
@@ -7756,12 +7780,15 @@ async function handleApiRoute(
 				suspendServices: (id) => worktreeServices.suspendProject(id),
 				stopServices: (id) => worktreeServices.stopProject(id),
 				reconcileServices: (id) => worktreeServices.reconcileProject(id),
+				validateBaseRef: validateCanonicalBaseRef,
+				invalidateSandboxImageRequirements: (id) => sandboxImageRequirements.invalidateProject(id),
 				sameRootPath: samePath,
 			});
-			json(updated);
+			json({ ...updated, ...(warnings?.length ? { warnings } : {}) });
 		} catch (err: any) {
 			if (writeSpecialProjectMutationError(err)) return;
-			jsonError(400, err);
+			if (writeCanonicalProjectMutationError(err)) return;
+			jsonError(500, err, { error: "Project mutation failed" });
 		}
 		return;
 	}
@@ -7843,7 +7870,7 @@ async function handleApiRoute(
 		try {
 			const body = await readBody(req);
 			const name = typeof body?.name === "string" ? body.name : undefined;
-			let { project: promoted } = await applyCanonicalProjectProposal({
+			let { project: promoted, warnings } = await applyCanonicalProjectProposal({
 				mode: "promote", projectId, name,
 				config: body?.config, components: body?.components, workflows: body?.workflows,
 				configDirectories: body?.configDirectories, sandboxTokens: body?.sandboxTokens,
@@ -7912,11 +7939,14 @@ async function handleApiRoute(
 				suspendServices: (id) => worktreeServices.suspendProject(id),
 				stopServices: (id) => worktreeServices.stopProject(id),
 				reconcileServices: (id) => worktreeServices.reconcileProject(id),
+				validateBaseRef: validateCanonicalBaseRef,
+				invalidateSandboxImageRequirements: (id) => sandboxImageRequirements.invalidateProject(id),
 			});
-			json(promoted);
+			json({ ...promoted, ...(warnings?.length ? { warnings } : {}) });
 		} catch (err: any) {
 			if (writeSpecialProjectMutationError(err)) return;
-			jsonError(400, err);
+			if (writeCanonicalProjectMutationError(err)) return;
+			jsonError(500, err, { error: "Project mutation failed" });
 		}
 		return;
 	}
@@ -8095,67 +8125,26 @@ async function handleApiRoute(
 				if (err) { json({ error: err }, 400); return; }
 			}
 
-			// `base_ref` validation — runs only when the field is present in the PUT body.
-			// On any failure we return HTTP 400 with `{ field: "base_ref", error, details? }`
-			// so the Settings UI can render the error inline. Non-fatal warnings (component
-			// paths that aren't git repos) bubble up via `baseRefWarnings` and are attached
-			// to the success response below. See docs/design/base-ref.md.
+			// `base_ref` validation — shared with canonical project proposal
+			// application, before any mutable config effect. Non-git components keep
+			// the documented warning semantics rather than blocking a save.
 			const baseRefWarnings: string[] = [];
 			if ("base_ref" in (body as Record<string, unknown>)) {
-				const rawBaseRef = (body as Record<string, unknown>).base_ref;
-				const baseRefValue = normalizeBaseRefValue(rawBaseRef);
-				if (baseRefValue) {
-					const sandboxResolved = ctx.projectConfigStore.getWithDefaults().sandbox || "none";
-					const shapeError = validateBaseRefShape({ value: rawBaseRef, sandbox: sandboxResolved });
-					if (shapeError) {
-						json(shapeError, 400);
-						return;
-					}
-					// Multi-repo ref existence — `git rev-parse --verify` against every
-					//    component repo. Also detect tags up-front: a value that resolves
-					//    via `refs/tags/<value>` in ANY component is rejected as a tag.
-					const componentsForCheck = ctx.projectConfigStore.getComponents();
-					const componentsToCheck = componentsForCheck.length > 0
-						? componentsForCheck
-						: [{ name: ctx.project.name || "default", repo: "." }];
-					const failures: Array<{ component: string; message: string }> = [];
-					let checkedRepoCount = 0;
-					let tagDetected = false;
-					for (const c of componentsToCheck) {
-						const repoPath = path.join(ctx.project.rootPath, c.repo);
-						const gitRepoCheck = await isGitRepo(repoPath, serverCommandRunner).catch(() => false);
-						if (!gitRepoCheck) {
-							baseRefWarnings.push(baseRefSkippedRepoWarning(c.name, repoPath));
-							continue;
-						}
-						checkedRepoCount++;
-						// Tag check first — if the value resolves as a tag in any component
-						// repo, fail with the tag-specific message rather than the generic
-						// "not present" error.
-						try {
-							await serverCommandRunner.execFile("git", ["rev-parse", "--verify", `refs/tags/${baseRefValue}`], { cwd: repoPath, timeout: 5_000 });
-							tagDetected = true;
-							break;
-						} catch {
-							// Not a tag in this repo — continue with branch-ref check below.
-						}
-						try {
-							await serverCommandRunner.execFile("git", ["rev-parse", "--verify", baseRefValue], { cwd: repoPath, timeout: 5_000 });
-						} catch {
-							failures.push({
-								component: c.name,
-								message: `ref not found. Try: cd ${c.repo} && git fetch origin`,
-							});
-						}
-					}
-					if (tagDetected) {
-						json(baseRefTagError(baseRefValue), 400);
-						return;
-					}
-					if (failures.length > 0) {
-						json(baseRefMissingInReposError(baseRefValue, failures, checkedRepoCount), 400);
-						return;
-					}
+				const candidateSandbox = (body as Record<string, unknown>).sandbox === null
+					? "none"
+					: typeof (body as Record<string, unknown>).sandbox === "string"
+						? (body as Record<string, unknown>).sandbox as string
+						: ctx.projectConfigStore.getWithDefaults().sandbox || "none";
+				try {
+					baseRefWarnings.push(...await validateCanonicalBaseRef({
+						value: (body as Record<string, unknown>).base_ref,
+						sandbox: candidateSandbox,
+						rootPath: ctx.project.rootPath,
+						components: ctx.projectConfigStore.getComponents(),
+					}));
+				} catch (error) {
+					if (writeCanonicalProjectMutationError(error)) return;
+					throw error;
 				}
 			}
 

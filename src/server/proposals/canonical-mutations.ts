@@ -42,7 +42,13 @@ import {
 import type { SecretsStore } from "../agent/secrets-store.js";
 import { validateAllWorkflows } from "../agent/workflow-validator.js";
 import { parseSandboxBaseImageReference } from "../agent/sandbox-image-requirements.js";
-import { validateBaseRefShape } from "../base-ref-validation.js";
+import {
+  baseRefMissingInReposError,
+  baseRefSkippedRepoWarning,
+  baseRefTagError,
+  normalizeBaseRefValue,
+  validateBaseRefShape,
+} from "../base-ref-validation.js";
 
 /** Durable, server-owned idempotency marker. Callers must never take this from
  * proposal metadata or another user controlled field. */
@@ -89,6 +95,16 @@ export class CanonicalMutationError extends Error {
 	constructor(public readonly status: 400 | 403 | 404 | 409 | 422 | 500, message: string, public readonly code?: string, public readonly details?: unknown) {
 		super(message);
 	}
+}
+
+/** Typed boundaries let route owners map durable-store failures without exposing
+ * filesystem paths or store implementation details to API clients. */
+export class CanonicalProjectConfigPersistenceError extends Error {
+  constructor(readonly cause: unknown) { super("Project configuration persistence failed"); }
+}
+
+export class CanonicalSandboxSecretPersistenceError extends Error {
+  constructor(readonly cause: unknown) { super("Sandbox secret persistence failed"); }
 }
 
 export const ROLE_POLICIES = new Set(["allow", "ask", "never", "always-allow", "ask-once", "always-ask", "never-ask"]);
@@ -867,6 +883,66 @@ export async function createCanonicalGoal<
 
 export type CanonicalProjectMode = "register" | "update" | "promote";
 
+export type ProjectBaseRefRepository = {
+  isGitRepo(repoPath: string): Promise<boolean>;
+  isTag(repoPath: string, ref: string): Promise<boolean>;
+  hasRef(repoPath: string, ref: string): Promise<boolean>;
+};
+
+export type ProjectBaseRefValidationInput = {
+  value: unknown;
+  sandbox: string;
+  rootPath: string;
+  components: Array<Pick<Component, "name" | "repo">>;
+};
+
+/**
+ * Shared save-time base-ref validation. Both the public config endpoint and
+ * canonical proposal mutations use this exact shape/tag/repository check so a
+ * proposal cannot publish a ref the Settings UI would reject.
+ */
+export async function validateProjectBaseRef(
+  input: ProjectBaseRefValidationInput,
+  repositories: ProjectBaseRefRepository,
+): Promise<string[]> {
+  const ref = normalizeBaseRefValue(input.value);
+  if (!ref) return [];
+  const shape = validateBaseRefShape({ value: input.value, sandbox: input.sandbox });
+  if (shape) throw new CanonicalMutationError(400, shape.error, undefined, shape);
+
+  const warnings: string[] = [];
+  const failures: Array<{ component: string; message: string }> = [];
+  let checkedRepoCount = 0;
+  const components = input.components.length > 0
+    ? input.components
+    : [{ name: "default", repo: "." }];
+  for (const component of components) {
+    const repoPath = path.join(input.rootPath, component.repo);
+    if (!(await repositories.isGitRepo(repoPath))) {
+      warnings.push(baseRefSkippedRepoWarning(component.name, repoPath));
+      continue;
+    }
+    checkedRepoCount++;
+    if (await repositories.isTag(repoPath, ref)) {
+      const error = baseRefTagError(ref);
+      throw new CanonicalMutationError(400, error.error, undefined, error);
+    }
+    if (!(await repositories.hasRef(repoPath, ref))) {
+      failures.push({ component: component.name, message: `ref not found. Try: cd ${component.repo} && git fetch origin` });
+    }
+  }
+  if (failures.length > 0) {
+    const error = baseRefMissingInReposError(ref, failures, checkedRepoCount);
+    throw new CanonicalMutationError(400, error.error, undefined, error);
+  }
+  return warnings;
+}
+
+const LEGACY_QA_TOP_LEVEL_KEYS = new Set([
+  "qa_start_command", "qa_build_command", "qa_health_check", "qa_browser_entry",
+  "qa_env", "qa_max_duration_minutes", "qa_max_scenarios",
+]);
+
 /** Proposal-shaped input for every project create/edit/promotion surface. */
 export interface CanonicalProjectProposal {
   mode: CanonicalProjectMode;
@@ -918,6 +994,10 @@ export interface CanonicalProjectProposalDeps<T extends CanonicalProjectRecord> 
   suspendServices(projectId: string): Promise<void>;
   stopServices(projectId: string): Promise<void>;
   reconcileServices(projectId: string): Promise<void>;
+  /** Validate a proposed base_ref against the actual candidate configuration. */
+  validateBaseRef?(input: ProjectBaseRefValidationInput): Promise<string[]>;
+  /** A changed image authority must not retain a stale failed requirement. */
+  invalidateSandboxImageRequirements?(projectId: string): void;
   markReady?(projectId: string, importId: string): T;
   /** Exact registry undo; production wires ProjectRegistry's atomic API. */
   captureRegistryRecord?(projectId: string): T | undefined;
@@ -971,7 +1051,7 @@ const LEGACY_COMPONENT_COMMANDS: Record<string, string> = {
   test_unit_command: "unit", test_e2e_command: "e2e",
 };
 
-function validateProjectConfiguration(proposal: CanonicalProjectProposal, current: Pick<ProjectConfigStore, "getComponents"> & { getWithDefaults?: () => Record<string, string> }): ValidatedProjectConfiguration {
+function validateProjectConfiguration(proposal: CanonicalProjectProposal, current: Pick<ProjectConfigStore, "getComponents"> & { getWithDefaults?: () => Record<string, string> }, projectName?: string): ValidatedProjectConfiguration {
   let components = proposal.components === undefined ? undefined : (() => {
     if (!Array.isArray(proposal.components)) throw new CanonicalMutationError(400, "components must be an array");
     // An empty registration payload retains the historical default component.
@@ -985,6 +1065,7 @@ function validateProjectConfiguration(proposal: CanonicalProjectProposal, curren
     if (!proposal.config || typeof proposal.config !== "object" || Array.isArray(proposal.config)) throw new CanonicalMutationError(400, "config must be an object");
     for (const [key, value] of Object.entries(proposal.config as Record<string, unknown>)) {
       if (!key || key.includes(".")) throw new CanonicalMutationError(400, `Invalid project config key \"${key}\"`);
+      if (LEGACY_QA_TOP_LEVEL_KEYS.has(key)) throw new CanonicalMutationError(400, `${key} settings have moved to components[].config[]; set components[<name>].config.${key} instead`);
       if (PRIVILEGED_PROJECT_CONFIG_KEYS.has(key)) {
         const code = key === "extension_prompt_sections" || key === "extensionPromptSections"
           ? "PROMPT_EXTENSION_PROPOSAL_REQUIRED" : "PROMPT_EXTENSION_CONFIG_FORBIDDEN";
@@ -1000,7 +1081,11 @@ function validateProjectConfiguration(proposal: CanonicalProjectProposal, curren
     throw new CanonicalMutationError(400, "sandbox_image must be a valid Docker image reference");
   }
   if (Object.prototype.hasOwnProperty.call(flat, "base_ref") && flat.base_ref !== null) {
-    const shape = validateBaseRefShape({ value: flat.base_ref, sandbox: current.getWithDefaults?.().sandbox || "none" });
+    // Repository presence is checked by the route-supplied validator before any
+    // mutation. Keep candidate sandbox semantics here so `sandbox: docker` and
+    // a local ref are rejected in the same proposal, not after persistence.
+    const sandbox = flat.sandbox === null ? "none" : (flat.sandbox ?? current.getWithDefaults?.().sandbox ?? "none");
+    const shape = validateBaseRefShape({ value: flat.base_ref, sandbox });
     if (shape) throw new CanonicalMutationError(400, shape.error, undefined, shape);
   }
   const legacyCommands: Record<string, string> = {};
@@ -1011,7 +1096,7 @@ function validateProjectConfiguration(proposal: CanonicalProjectProposal, curren
   const legacySetup = flat.worktree_setup_command;
   if (!components && (Object.keys(legacyCommands).length > 0 || (typeof legacySetup === "string" && legacySetup.trim()))) {
     const existing = current.getComponents();
-    const first = existing[0] ?? { name: typeof proposal.name === "string" && proposal.name.trim() ? proposal.name.trim() : "default", repo: "." };
+    const first = existing[0] ?? { name: projectName || (typeof proposal.name === "string" && proposal.name.trim() ? proposal.name.trim() : "default"), repo: "." };
     components = [{
       ...first,
       commands: { ...(first.commands ?? {}), ...legacyCommands },
@@ -1060,7 +1145,10 @@ function publishProjectConfiguration(context: CanonicalProjectContext, candidate
     if (candidate.configDirectories) draft.setConfigDirectories(candidate.configDirectories);
     if (candidate.sandboxTokens) draft.setSandboxTokens(candidate.sandboxTokens);
   });
-  if (Object.keys(candidate.secretUpdates).length > 0) context.secretsStore?.update(candidate.secretUpdates);
+  if (Object.keys(candidate.secretUpdates).length > 0) {
+    try { context.secretsStore?.update(candidate.secretUpdates); }
+    catch (error) { throw new CanonicalSandboxSecretPersistenceError(error); }
+  }
 }
 
 async function restoreProjectConfiguration(context: CanonicalProjectContext, snapshot: { config: ProjectConfigRollbackSnapshot; secrets?: Record<string, string> }): Promise<void> {
@@ -1080,7 +1168,12 @@ async function restoreProjectConfiguration(context: CanonicalProjectContext, sna
  * configuration candidate before registry/context/service writes, publishes
  * config in one store transaction, and compensates every later failure.
  */
-export async function applyCanonicalProjectProposal<T extends CanonicalProjectRecord>(proposal: CanonicalProjectProposal, deps: CanonicalProjectProposalDeps<T>): Promise<{ project: T; replayed: boolean }> {
+export async function applyCanonicalProjectProposal<T extends CanonicalProjectRecord>(proposal: CanonicalProjectProposal, deps: CanonicalProjectProposalDeps<T>): Promise<{ project: T; replayed: boolean; warnings?: string[] }> {
+  for (const key of LEGACY_QA_TOP_LEVEL_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(proposal, key)) {
+      throw new CanonicalMutationError(400, `${key} settings have moved to components[].config[]; set components[<name>].config.${key} instead`);
+    }
+  }
   // Legacy fields may arrive top-level from propose_project or nested under
   // config from the REST shape; normalize once so every caller shares it.
   const legacyConfig = Object.fromEntries(Object.keys(LEGACY_COMPONENT_COMMANDS)
@@ -1095,7 +1188,7 @@ export async function applyCanonicalProjectProposal<T extends CanonicalProjectRe
   if (input.mode === "register" && (!name || !rootPath || !(path.posix.isAbsolute(rootPath) || path.win32.isAbsolute(rootPath)))) throw new CanonicalMutationError(400, "Project name and absolute rootPath are required");
   if (input.mode !== "register" && (typeof input.projectId !== "string" || !input.projectId)) throw new CanonicalMutationError(400, "Project mutation target is required");
   if (input.mode !== "register" && rootPath !== undefined && !(path.posix.isAbsolute(rootPath) || path.win32.isAbsolute(rootPath))) throw new CanonicalMutationError(400, "Project rootPath must be an absolute path");
-  const apply = async (): Promise<{ project: T; replayed: boolean }> => {
+  const apply = async (): Promise<{ project: T; replayed: boolean; warnings?: string[] }> => {
     if (proposal.applicationKey) {
       const replay = deps.findByApplicationKey(proposal.applicationKey);
       if (replay) return { project: replay, replayed: true };
@@ -1107,14 +1200,30 @@ export async function applyCanonicalProjectProposal<T extends CanonicalProjectRe
     let preContext: CanonicalProjectContext | undefined;
     let candidate: ValidatedProjectConfiguration;
     if (input.mode === "register") {
-      candidate = validateProjectConfiguration(input, { getComponents: () => name ? [{ name, repo: "." }] : [] });
+      candidate = validateProjectConfiguration(input, { getComponents: () => name ? [{ name, repo: "." }] : [] }, name);
     } else {
       preProject = deps.get(input.projectId as string);
       if (!preProject) throw new CanonicalMutationError(422, `Unknown project: ${input.projectId}`, "UNKNOWN_PROJECT");
       preContext = await deps.openContext(preProject.id);
       if (!preContext) throw new Error("Project context could not be opened");
-      candidate = validateProjectConfiguration(input, preContext.projectConfigStore);
+      candidate = validateProjectConfiguration(input, preContext.projectConfigStore, preProject.name);
     }
+    const candidateRootPath = rootPath ?? preProject!.rootPath;
+    const candidateSandbox = candidate.flat.sandbox === null
+      ? "none"
+      : candidate.flat.sandbox ?? preContext?.projectConfigStore.getWithDefaults?.().sandbox ?? "none";
+    const hasBaseRef = Object.prototype.hasOwnProperty.call(candidate.flat, "base_ref") && candidate.flat.base_ref !== null;
+    if (hasBaseRef && !deps.validateBaseRef) {
+      throw new CanonicalMutationError(500, "Base ref validation is unavailable", "BASE_REF_VALIDATION_UNAVAILABLE");
+    }
+    const baseRefWarnings = hasBaseRef
+      ? await deps.validateBaseRef!({
+        value: candidate.flat.base_ref,
+        sandbox: candidateSandbox,
+        rootPath: candidateRootPath,
+        components: candidate.components ?? preContext?.projectConfigStore.getComponents() ?? (name ? [{ name, repo: "." }] : []),
+      })
+      : [];
     let project: T | undefined;
     let created = false;
     let oldProject: T | undefined;
@@ -1146,29 +1255,50 @@ export async function applyCanonicalProjectProposal<T extends CanonicalProjectRe
       }
       if (!context || !project) throw new Error("Project context could not be opened");
       if (input.mode !== "update" && candidate.components === undefined && context.projectConfigStore.getComponents().length === 0) candidate.components = [{ name: project.name, repo: "." }];
-      // Capture caller rollback state before either durable store publishes.
-      snapshot = captureProjectConfiguration(context);
-      publishProjectConfiguration(context, candidate);
+      const hasConfigurationChanges = Object.keys(candidate.flat).length > 0
+        || candidate.components !== undefined
+        || candidate.workflows !== undefined
+        || candidate.configDirectories !== undefined
+        || candidate.sandboxTokens !== undefined;
+      if (hasConfigurationChanges) {
+        // Capture caller rollback state before either durable store publishes.
+        try {
+          snapshot = captureProjectConfiguration(context);
+        } catch (error) {
+          throw new CanonicalProjectConfigPersistenceError(error);
+        }
+        try {
+          publishProjectConfiguration(context, candidate);
+        } catch (error) {
+          if (error instanceof CanonicalSandboxSecretPersistenceError) throw error;
+          throw new CanonicalProjectConfigPersistenceError(error);
+        }
+        if (Object.prototype.hasOwnProperty.call(candidate.flat, "sandbox") || Object.prototype.hasOwnProperty.call(candidate.flat, "sandbox_image")) {
+          deps.invalidateSandboxImageRequirements?.(project.id);
+        }
+      }
       if (project.importDecisionRun?.state === "configuring" && deps.markReady) project = deps.markReady(project.id, project.importDecisionRun.id);
       await deps.afterConfigured?.(project, context);
-      return { project, replayed: false };
+      return { project, replayed: false, ...(baseRefWarnings.length > 0 ? { warnings: baseRefWarnings } : {}) };
     } catch (error) {
       // Both durable stores roll back from snapshots captured before their first
       // publication. Restore secrets even when the failed write was update().
-      if (snapshot && context) await restoreProjectConfiguration(context, snapshot).catch(() => undefined);
+      if (snapshot && context) await restoreProjectConfiguration(context, snapshot).catch(() => {
+        console.warn("[canonical-project] configuration rollback failed");
+      });
       if (project) {
         if (deps.restoreRegistryRecord) {
-          try { deps.restoreRegistryRecord(project.id, created ? undefined : registrySnapshot); } catch { /* original error wins */ }
+          try { deps.restoreRegistryRecord(project.id, created ? undefined : registrySnapshot); } catch { console.warn("[canonical-project] registry rollback failed"); }
         } else if (created) {
-          try { deps.removeRegistered(project); } catch { /* original error wins */ }
+          try { deps.removeRegistered(project); } catch { console.warn("[canonical-project] registry rollback failed"); }
         } else if (oldProject) {
-          try { deps.update(project.id, { name: oldProject.name, rootPath: oldProject.rootPath, color: (oldProject as any).color, palette: (oldProject as any).palette ?? "", colorLight: (oldProject as any).colorLight, colorDark: (oldProject as any).colorDark }); } catch { /* original error wins */ }
+          try { deps.update(project.id, { name: oldProject.name, rootPath: oldProject.rootPath, color: (oldProject as any).color, palette: (oldProject as any).palette ?? "", colorLight: (oldProject as any).colorLight, colorDark: (oldProject as any).colorDark }); } catch { console.warn("[canonical-project] registry rollback failed"); }
         }
-        if (created) await deps.removeContext(project.id).catch(() => undefined);
+        if (created) await deps.removeContext(project.id).catch(() => { console.warn("[canonical-project] context rollback failed"); });
         if (rootRemoved) {
-          await deps.removeContext(project.id).catch(() => undefined);
-          await deps.openContext(project.id).catch(() => undefined);
-          await deps.reconcileServices(project.id).catch(() => undefined);
+          await deps.removeContext(project.id).catch(() => { console.warn("[canonical-project] context rollback failed"); });
+          await deps.openContext(project.id).catch(() => { console.warn("[canonical-project] context rollback failed"); });
+          await deps.reconcileServices(project.id).catch(() => { console.warn("[canonical-project] service rollback failed"); });
         }
       }
       throw error;

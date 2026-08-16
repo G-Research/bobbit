@@ -9,6 +9,7 @@ import {
 	applyCanonicalGoalProposal,
 	applyCanonicalProjectProposal,
 	createCanonicalGoal,
+	validateProjectBaseRef,
 } from "../../src/server/proposals/canonical-mutations.js";
 
 test("canonical goal stamps a server key, overrides caller metadata, and replays one durable goal", async () => {
@@ -267,10 +268,62 @@ test("canonical project proposal restores config and exact secrets when secret p
 		captureRegistryRecord: () => structuredClone(project), restoreRegistryRecord: (_id: string, snapshot: any) => { Object.keys(project).forEach(key => delete project[key]); Object.assign(project, snapshot); },
 		removeContext: async () => undefined, openContext: async () => ({ projectConfigStore: store, secretsStore: secrets }), suspendServices: async () => undefined, stopServices: async () => undefined, reconcileServices: async () => undefined,
 	};
-	await expect(applyCanonicalProjectProposal({ mode: "update", projectId: "project", components: [{ name: "new", repo: "." }], sandboxTokens: [{ key: "NEW", value: "secret" }] }, deps)).rejects.toThrow("secrets write failed");
+	await expect(applyCanonicalProjectProposal({ mode: "update", projectId: "project", components: [{ name: "new", repo: "." }], sandboxTokens: [{ key: "NEW", value: "secret" }] }, deps)).rejects.toThrow("Sandbox secret persistence failed");
 	expect(store.components).toEqual([{ name: "old", repo: "." }]);
 	expect(secrets.data).toEqual({ KEEP: "", OLD: "old" });
 	expect(project).toEqual({ id: "project", name: "Old", rootPath: "/old", provisional: true, importDecisionRun: { id: "run", state: "configuring" }, canonicalMutationKey: "old-key" });
+});
+
+test("canonical project validates tag and missing base refs before any mutation", async () => {
+	for (const scenario of [
+		{ label: "tag", isTag: true, hasRef: true, expected: "not a tag" },
+		{ label: "missing", isTag: false, hasRef: false, expected: "not present" },
+	]) {
+		const project: any = { id: `project-${scenario.label}`, name: "Old", rootPath: "/project" };
+		let registryMutations = 0;
+		let configMutations = 0;
+		const store: any = {
+			getComponents: () => [{ name: "app", repo: "." }],
+			getWithDefaults: () => ({ sandbox: "none" }),
+			captureRollbackSnapshot: () => ({}), restoreRollbackSnapshot: () => undefined,
+			mutate: () => { configMutations++; },
+		};
+		const deps: any = {
+			findByApplicationKey: () => undefined, register: () => project, get: () => project,
+			update: (_id: string, updates: any) => { registryMutations++; Object.assign(project, updates); }, promote: () => project,
+			removeRegistered: () => undefined, removeContext: async () => undefined,
+			openContext: async () => ({ projectConfigStore: store }), suspendServices: async () => undefined,
+			stopServices: async () => undefined, reconcileServices: async () => undefined,
+			validateBaseRef: (input: any) => validateProjectBaseRef(input, {
+				isGitRepo: async () => true,
+				isTag: async () => scenario.isTag,
+				hasRef: async () => scenario.hasRef,
+			}),
+		};
+		await expect(applyCanonicalProjectProposal({ mode: "update", projectId: project.id, name: "New", config: { base_ref: "origin/develop" } }, deps))
+			.rejects.toMatchObject({ message: expect.stringContaining(scenario.expected), status: 400 });
+		expect(registryMutations, `${scenario.label} base_ref must not mutate the registry`).toBe(0);
+		expect(configMutations, `${scenario.label} base_ref must not publish config`).toBe(0);
+		expect(project.name).toBe("Old");
+	}
+});
+
+test("rename-only canonical project updates do not touch a corrupt config store", async () => {
+	const project: any = { id: "project", name: "Old", rootPath: "/project" };
+	let captures = 0;
+	const store: any = {
+		getComponents: () => [{ name: "Old", repo: "." }], getWithDefaults: () => ({ sandbox: "none" }),
+		captureRollbackSnapshot: () => { captures++; throw new Error("corrupt project.yaml at /private/project/project.yaml"); },
+	};
+	const deps: any = {
+		findByApplicationKey: () => undefined, register: () => project, get: () => project,
+		update: (_id: string, updates: any) => Object.assign(project, updates), promote: () => project,
+		removeRegistered: () => undefined, removeContext: async () => undefined,
+		openContext: async () => ({ projectConfigStore: store }), suspendServices: async () => undefined,
+		stopServices: async () => undefined, reconcileServices: async () => undefined,
+	};
+	await expect(applyCanonicalProjectProposal({ mode: "update", projectId: "project", name: "Renamed" }, deps)).resolves.toMatchObject({ project: { name: "Renamed" } });
+	expect(captures).toBe(0);
 });
 
 test("SecretsStore exact restore retains empty secret values", () => {
