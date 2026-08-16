@@ -125,6 +125,14 @@ function makeSession(id: string): PersistedSession {
 	};
 }
 
+function writeTier(file: string, epoch: number, sessions: PersistedSession[]): void {
+	memfs.writeFileSync(file, JSON.stringify({ version: 3, epoch, sessions }), "utf-8");
+}
+
+function readTier(file: string): { version: number; epoch: number; sessions: PersistedSession[] } {
+	return JSON.parse(memfs.readFileSync(file, "utf-8"));
+}
+
 describe("SessionStore atomic write", () => {
 	beforeEach(() => {
 		memfs = createSessionStoreMemFs();
@@ -539,5 +547,78 @@ describe("SessionStore atomic write", () => {
 		const reloaded = new SessionStore(stateDir, memfs);
 		assert.equal(reloaded.get("move")?.archived, true, "the durable pair intent must resolve a half-published move");
 		assert.deepEqual(reloaded.getArchived().map(session => session.id), ["move"]);
+	});
+
+	it("applies the exact epoch-bound transition intent truth table", async () => {
+		const liveWinner = { ...makeSession("move"), title: "live disk winner", projectId: "secure-project", teamGoalId: "goal-winner", role: "team-lead", sandboxed: true };
+		const archivedWinner = { ...makeSession("move"), title: "archived disk winner", archived: true, archivedAt: 200, projectId: "secure-project", teamGoalId: "goal-winner", role: "reviewer", sandboxed: true };
+		const staleArchive = { ...makeSession("move"), title: "stale archive intent", archived: true, archivedAt: 100 };
+		const scenarios = [
+			{
+				name: "base/base never replays entries",
+				live: { epoch: 10, sessions: [liveWinner] }, archived: { epoch: 20, sessions: [] },
+				intent: { version: 2, entries: [{ id: "move", tier: "archived", session: staleArchive }], epochs: { live: { base: 10, target: 11 }, archived: { base: 20, target: 21 } } },
+				expected: liveWinner, expectedLive: { epoch: 10, sessions: [liveWinner] }, expectedArchived: { epoch: 20, sessions: [] }, intentRemains: false,
+			},
+			{
+				name: "outside epochs never replay superseded entries",
+				live: { epoch: 12, sessions: [liveWinner] }, archived: { epoch: 22, sessions: [] },
+				intent: { version: 2, entries: [{ id: "move", tier: "archived", session: staleArchive }], epochs: { live: { base: 10, target: 11 }, archived: { base: 20, target: 21 } } },
+				expected: liveWinner, expectedLive: { epoch: 12, sessions: [liveWinner] }, expectedArchived: { epoch: 22, sessions: [] }, intentRemains: true,
+			},
+			{
+				name: "target/target cleans up an already spent authoritative intent",
+				live: { epoch: 11, sessions: [] }, archived: { epoch: 21, sessions: [archivedWinner] },
+				intent: { version: 2, entries: [{ id: "move", tier: "archived", session: archivedWinner }], epochs: { live: { base: 10, target: 11 }, archived: { base: 20, target: 21 } } },
+				expected: archivedWinner, expectedLive: { epoch: 11, sessions: [] }, expectedArchived: { epoch: 21, sessions: [archivedWinner] }, intentRemains: false,
+			},
+			{
+				name: "live base/archive target repairs only the live tier",
+				live: { epoch: 10, sessions: [liveWinner] }, archived: { epoch: 21, sessions: [archivedWinner] },
+				intent: { version: 2, entries: [{ id: "move", tier: "archived", session: archivedWinner }], epochs: { live: { base: 10, target: 11 }, archived: { base: 20, target: 21 } } },
+				expected: archivedWinner, expectedLive: { epoch: 11, sessions: [] }, expectedArchived: { epoch: 21, sessions: [archivedWinner] }, intentRemains: false,
+			},
+			{
+				name: "live target/archive base repairs only the archived tier",
+				live: { epoch: 11, sessions: [liveWinner] }, archived: { epoch: 20, sessions: [archivedWinner] },
+				intent: { version: 2, entries: [{ id: "move", tier: "live", session: liveWinner }], epochs: { live: { base: 10, target: 11 }, archived: { base: 20, target: 21 } } },
+				expected: liveWinner, expectedLive: { epoch: 11, sessions: [liveWinner] }, expectedArchived: { epoch: 21, sessions: [] }, intentRemains: false,
+			},
+		];
+
+		for (const scenario of scenarios) {
+			memfs = createSessionStoreMemFs();
+			memfs.mkdirSync(stateDir, { recursive: true });
+			writeTier(STORE_FILE, scenario.live.epoch, scenario.live.sessions);
+			writeTier(ARCHIVED_FILE, scenario.archived.epoch, scenario.archived.sessions);
+			memfs.writeFileSync(`${STORE_FILE}.split-transition`, JSON.stringify(scenario.intent), "utf-8");
+
+			const store = new SessionStore(stateDir, memfs);
+			await store.flushAsync();
+			// Constructor recovery schedules intent cleanup independently of the
+			// generation barrier; yield once for that durability task to settle.
+			await new Promise<void>(resolve => setTimeout(resolve, 0));
+
+			assert.deepEqual(store.get("move"), scenario.expected, scenario.name);
+			assert.deepEqual(readTier(STORE_FILE), { version: 3, ...scenario.expectedLive }, `${scenario.name}: live rows and epoch`);
+			assert.deepEqual(readTier(ARCHIVED_FILE), { version: 3, ...scenario.expectedArchived }, `${scenario.name}: archive rows and epoch`);
+			assert.equal(memfs.existsSync(`${STORE_FILE}.split-transition`), scenario.intentRemains, `${scenario.name}: intent cleanup authority`);
+		}
+	});
+
+	it("never lets a legacy unbound transition intent override durable rows", async () => {
+		const durable = { ...makeSession("move"), title: "durable secure owner", projectId: "secure-project", teamGoalId: "goal-winner", role: "team-lead", sandboxed: true };
+		const stale = { ...makeSession("move"), title: "legacy stale archive", archived: true, archivedAt: 1 };
+		writeTier(STORE_FILE, 8, [durable]);
+		writeTier(ARCHIVED_FILE, 3, []);
+		memfs.writeFileSync(`${STORE_FILE}.split-transition`, JSON.stringify({ version: 1, entries: [{ id: "move", tier: "archived", session: stale }] }), "utf-8");
+
+		const store = new SessionStore(stateDir, memfs);
+		await store.flushAsync();
+
+		assert.deepEqual(store.get("move"), durable);
+		assert.deepEqual(readTier(STORE_FILE), { version: 3, epoch: 8, sessions: [durable] });
+		assert.deepEqual(readTier(ARCHIVED_FILE), { version: 3, epoch: 3, sessions: [] });
+		assert.equal(memfs.existsSync(`${STORE_FILE}.split-transition`), true, "unbound evidence is retained but never authoritative");
 	});
 });
