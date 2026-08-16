@@ -199,19 +199,38 @@ export class GoalManager {
 
 	private getSessionsForWorktreeGuard(): WorktreeReferenceRecord[] {
 		if (this.liveSessionResolver) return this.liveSessionResolver();
-		try {
-			const storeDir = (this.store as unknown as { storeDir?: string }).storeDir;
-			if (!storeDir) return [];
-			const sessionFile = path.join(storeDir, "sessions.json");
-			if (!fs.existsSync(sessionFile)) return [];
-			const raw = JSON.parse(fs.readFileSync(sessionFile, "utf8"));
-			if (Array.isArray(raw)) return raw as WorktreeReferenceRecord[];
-			if (Array.isArray(raw?.sessions)) return raw.sessions as WorktreeReferenceRecord[];
-			if (raw && typeof raw === "object") return Object.values(raw).filter(Array.isArray).flat() as WorktreeReferenceRecord[];
-		} catch {
-			// Best-effort guard; missing/corrupt session store should not block archive.
+		const storeDir = (this.store as unknown as { storeDir?: string }).storeDir;
+		if (!storeDir) return [];
+
+		// The two persistence tiers are independently recoverable. A damaged or
+		// missing tier must not discard usable references from its sibling.
+		const sessions = new Map<string, WorktreeReferenceRecord>();
+		const anonymousSessions: WorktreeReferenceRecord[] = [];
+		for (const fileName of ["sessions.json", "sessions.archived.json"]) {
+			try {
+				const raw = JSON.parse(fs.readFileSync(path.join(storeDir, fileName), "utf8"));
+				const rows = Array.isArray(raw)
+					? raw
+					: Array.isArray(raw?.sessions)
+						? raw.sessions
+						: raw && typeof raw === "object"
+							? Object.values(raw).filter(Array.isArray).flat()
+							: [];
+				for (const row of rows) {
+					if (!row || typeof row !== "object") continue;
+					const session = row as WorktreeReferenceRecord;
+					if (typeof session.id === "string" && session.id) {
+						// Live wins when a transition leaves a duplicate in both tiers.
+						if (!sessions.has(session.id)) sessions.set(session.id, session);
+					} else {
+						anonymousSessions.push(session);
+					}
+				}
+			} catch {
+				// Best-effort guard; a missing/corrupt tier must not block the other.
+			}
 		}
-		return [];
+		return [...sessions.values(), ...anonymousSessions];
 	}
 
 	private forceHeadquartersNoWorktree(goal: PersistedGoal): void {
