@@ -313,6 +313,58 @@ test.describe("human-signoff verification step", () => {
 		}
 	});
 
+	test("a cancelled parked sign-off remains idempotent with its durable cancellation cause", async ({ gateway }) => {
+		const workflowId = makeWorkflowId();
+		await createSignoffWorkflow(workflowId);
+		const goal = await createGoal({
+			title: `Human Sign-off Cancelled ${Date.now()}`,
+			workflowId,
+		});
+		const goalId = goal.id;
+
+		try {
+			const signalRes = await apiFetch(`/api/goals/${goalId}/gates/design/signal`, {
+				method: "POST",
+				body: JSON.stringify({ content: "## Design\n\nWaiting for cancellation." }),
+			});
+			expect(signalRes.status).toBe(201);
+			const signalId = (await signalRes.json()).signal.id;
+
+			// Establish the real parked resolver before cancelling it. The harness
+			// cancellation promise owns its exact cleanup and resolves only after the
+			// durable cancelled record has been published.
+			await waitForAwaitingHuman(goalId, signalId, "approve-design");
+			await gateway.teamManager.verificationHarness!.cancelStaleVerifications(goalId, "design", "goal-pause");
+
+			// A delayed click from the original sign-off card must remain an
+			// idempotent historical response rather than becoming a generic failure.
+			const staleSignoff = await apiFetch(`/api/goals/${goalId}/gates/design/signoff`, {
+				method: "POST",
+				body: JSON.stringify({
+					signalId,
+					stepName: "approve-design",
+					decision: "pass",
+				}),
+			});
+			expect(staleSignoff.status).toBe(409);
+			expect(await staleSignoff.json()).toMatchObject({
+				error: expect.stringMatching(/no longer awaiting human/i),
+				stepName: "approve-design",
+				status: "cancelled",
+			});
+
+			const gate = await (await apiFetch(`/api/goals/${goalId}/gates/design`)).json();
+			const signal = gate.signals.find((candidate: any) => candidate.id === signalId);
+			expect(signal?.verification).toMatchObject({
+				status: "cancelled",
+				cancellation: { cause: "goal-pause" },
+			});
+		} finally {
+			await deleteGoal(goalId);
+			await deleteSignoffWorkflow(workflowId);
+		}
+	});
+
 	test("body validation: bad payloads return 400", async () => {
 		const workflowId = makeWorkflowId();
 		await createSignoffWorkflow(workflowId);
