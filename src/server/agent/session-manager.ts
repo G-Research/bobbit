@@ -10237,7 +10237,9 @@ export class SessionManager {
 	 * Restore sessions from disk on startup.
 	 * Re-spawns agent processes and uses switch_session to resume each one.
 	 */
-	async restoreSessions(): Promise<void> {
+	async restoreSessions(): Promise<void>;
+	async restoreSessions(suppressedSessionIds: ReadonlySet<string>): Promise<void>;
+	async restoreSessions(suppressedSessionIds: ReadonlySet<string> = new Set()): Promise<void> {
 		// Initialize search service (skip when ProjectContextManager is active —
 		// ProjectContext.open() already opens the service and wires callbacks)
 		if (!this.projectContextManager && this._testSearchIndex && this._testStore && this._testGoalManager) {
@@ -10268,9 +10270,22 @@ export class SessionManager {
 			}
 		}
 
-		const persisted = this.projectContextManager
+		const livePersisted = this.projectContextManager
 			? [...this.projectContextManager.getAllLiveSessions()]
 			: (this._testStore?.getLive() ?? []);
+		// Defensive terminal-owner fence. Production repairs these rows through
+		// TeamManager before entering restore; this check ensures an archived
+		// teamGoalId can never reach restoreOneSession even in narrow bootstraps.
+		const terminalSuppressed = new Set(suppressedSessionIds);
+		for (const session of livePersisted) {
+			if (session.teamGoalId && this.resolveGoal(session.teamGoalId)?.archived) {
+				terminalSuppressed.add(session.id);
+			}
+		}
+		const persisted = livePersisted.filter((session) => !terminalSuppressed.has(session.id));
+		if (terminalSuppressed.size > 0) {
+			console.warn(`[session-manager] Suppressed ${terminalSuppressed.size} archived-team session(s) from boot dispatch`);
+		}
 		if (persisted.length === 0) return;
 
 		// Separate regular sessions from delegate sessions
@@ -12059,11 +12074,15 @@ export class SessionManager {
 		const id = randomUUID();
 		// Resolve projectId from parent session
 		const parentStore = this.resolveStoreForId(parentSessionId);
-		const parentProjectId = this.sessions.get(parentSessionId)?.projectId
-			?? parentStore?.get(parentSessionId)?.projectId;
+		const parentSession = this.sessions.get(parentSessionId);
+		const parentMeta = parentStore?.get(parentSessionId);
+		const parentProjectId = parentSession?.projectId ?? parentMeta?.projectId;
+		const parentTeamGoalId = parentSession?.teamGoalId ?? parentMeta?.teamGoalId;
+		if (parentTeamGoalId && this.resolveGoal(parentTeamGoalId)?.archived) {
+			throw new Error("Cannot create a delegate for an archived team goal");
+		}
 
 		// ── Sandbox propagation from parent ──
-		const parentMeta = parentStore?.get(parentSessionId);
 		let delegateSandboxed = false;
 		if (parentMeta?.sandboxed && !(parentProjectId && isSandboxExemptProject(parentProjectId))) {
 			// Always use the parent's validated host-side cwd — never trust the
@@ -12083,7 +12102,6 @@ export class SessionManager {
 
 		// Inherit tool access from parent session, unless the caller passes an
 		// explicit allowedTools override (OrchestrationCore strips spawn verbs).
-		const parentSession = this.sessions.get(parentSessionId);
 
 		// ── Goal-metadata inheritance (anti-asymmetry invariant) ──
 		// A `team_delegate` sub-agent natively carries only `delegateOf`; it has no
@@ -12204,11 +12222,23 @@ export class SessionManager {
 		);
 		let session: SessionInfo;
 		try {
+			if (parentTeamGoalId && this.resolveGoal(parentTeamGoalId)?.archived) {
+				throw new Error("Cannot create a delegate for an archived team goal");
+			}
 			session = await executePlan(plan, ctx);
 		} finally {
 			releaseSetupThinkingAuthority();
 		}
 		if (parentProjectId) session.projectId = parentProjectId;
+		if (parentTeamGoalId && this.resolveGoal(parentTeamGoalId)?.archived) {
+			// The setup crossed terminal intent. Its initial row already carries
+			// teamGoalId, so boot can reconstruct cleanup even if this stop fails.
+			try {
+				const terminated = await this.terminateSession(session.id);
+				if (!terminated) await this.storeArchive(session.id);
+			} catch { try { await this.storeArchive(session.id); } catch { /* boot repair retries */ } }
+			throw new Error("Delegate creation was cancelled because its team goal was archived");
+		}
 		// Persist the effective-goal stamp on BOTH the live session and the store
 		// record so it survives restart/respawn (the initial structural put happens
 		// inside executePlan; this guarantees the field regardless of plan

@@ -41,6 +41,7 @@ export class ProjectContextManager {
    * ProjectContext gets the same dispatcher reference.
    */
   private goalTriggerDispatcher: GoalTriggerDispatcher | null = null;
+  private goalArchiveReconciler: ((goalId: string) => Promise<unknown>) | undefined;
   /**
    * Optional post-create configurator applied to every context (existing and
    * lazily-created). `server.ts` uses it to wire each context's `toolManager`
@@ -107,6 +108,9 @@ export class ProjectContextManager {
     if (this.goalTriggerDispatcher) {
       ctx.setGoalTriggerDispatcher(this.goalTriggerDispatcher);
     }
+    if (this.goalArchiveReconciler) {
+      ctx.setGoalArchiveReconciler(this.goalArchiveReconciler);
+    }
     // Apply any post-boot context configurator (e.g. market tool roots).
     if (this.contextConfigurator) {
       try { this.contextConfigurator(ctx); } catch (err) { console.warn("[pcm] context configurator failed:", err); }
@@ -125,6 +129,14 @@ export class ProjectContextManager {
     this.goalTriggerDispatcher = dispatcher;
     for (const ctx of this.contexts.values()) {
       ctx.setGoalTriggerDispatcher(dispatcher);
+    }
+  }
+
+  /** Apply archive reconciliation to every existing and future context. */
+  setGoalArchiveReconciler(reconciler: ((goalId: string) => Promise<unknown>) | undefined): void {
+    this.goalArchiveReconciler = reconciler;
+    for (const ctx of this.contexts.values()) {
+      ctx.setGoalArchiveReconciler(reconciler);
     }
   }
 

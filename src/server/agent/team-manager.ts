@@ -6,6 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { PromptSource, SessionManager, SessionInfo } from "./session-manager.js";
+import type { PersistedSession } from "./session-store.js";
 import { isNonRetryableAgentError, isProviderBackoffError, isRetryableGenericAgentError, isTransientReviewError } from "./verification-logic.js";
 import { GoalManager } from "./goal-manager.js";
 import { GoalStore, type PersistedGoal } from "./goal-store.js";
@@ -322,6 +323,16 @@ export interface TeamState {
 	maxConcurrent: number;
 }
 
+export interface ArchivedGoalReconciliationResult {
+	goalId: string;
+	status: "complete" | "blocked";
+	archivedSessionIds: string[];
+	suppressedSessionIds: string[];
+	teamRemoved: boolean;
+	teamEntryRetained: boolean;
+	errors: string[];
+}
+
 /** Start behaviour selected by the caller. Scheduler starts retain pause guards. */
 export interface StartTeamOptions {
 	/**
@@ -484,6 +495,8 @@ export class TeamManager {
 
 	/** In-flight startTeam operations, including their immutable caller semantics. */
 	private startTeamLocks = new Map<string, StartTeamLock>();
+	/** Serializes team admission and terminal reconciliation per goal. */
+	private goalAdmissionTails = new Map<string, Promise<void>>();
 	private readonly commandRunner: CommandRunner;
 	private readonly recoveryFs: RecoveryFs;
 	private readonly recoverySidecars: TeamRecoverySidecars;
@@ -619,6 +632,25 @@ export class TeamManager {
 		return undefined;
 	}
 
+	private async withGoalAdmission<T>(goalId: string, allowArchived: boolean, operation: () => Promise<T>): Promise<T> {
+		const previous = this.goalAdmissionTails.get(goalId) ?? Promise.resolve();
+		let release!: () => void;
+		const turn = new Promise<void>((resolve) => { release = resolve; });
+		const tail = previous.catch(() => {}).then(() => turn);
+		this.goalAdmissionTails.set(goalId, tail);
+		await previous.catch(() => {});
+		try {
+			const goal = this.resolveGoal(goalId);
+			if (!allowArchived && goal?.archived) {
+				throw new TeamStartError("GOAL_ARCHIVED", "Goal is archived and cannot create team sessions");
+			}
+			return await operation();
+		} finally {
+			release();
+			if (this.goalAdmissionTails.get(goalId) === tail) this.goalAdmissionTails.delete(goalId);
+		}
+	}
+
 	/** Set the broadcastToGoal function (called after WebSocket server is created). */
 	setBroadcastToGoal(fn: (goalId: string, event: any) => void): void {
 		this.config.broadcastToGoal = fn;
@@ -673,6 +705,8 @@ export class TeamManager {
 	 * Persist the current state of a team entry to disk.
 	 */
 	private persistEntry(goalId: string): void {
+		// Durable terminal intent wins over stale runtime callbacks.
+		if (this.resolveGoal(goalId)?.archived) return;
 		const entry = this.teams.get(goalId);
 		if (entry) {
 			this.resolveTeamStore(goalId).put(this.toPersistedEntry(entry));
@@ -1121,6 +1155,11 @@ export class TeamManager {
 	 * restoreSessions() — needs live session objects.
 	 */
 	resubscribeTeamEvents(): void {
+		// Defense-in-depth: a retained TeamStore row is passive retry evidence,
+		// never authority to reactivate an archived goal's runtime.
+		for (const [goalId, entry] of [...this.teams]) {
+			if (this.resolveGoal(goalId)?.archived) this.deactivateArchivedTeamRuntime(goalId, entry);
+		}
 		// zombie-reviewer sweep — Zombie-reviewer sweep. After a server restart, reviewer
 		// sessions belonging to a verification that was running mid-flight are
 		// torn down by the harness's resume logic. The persisted `team-state.json`
@@ -1915,7 +1954,7 @@ export class TeamManager {
 				}
 			}
 
-			const promise = this._startTeamImpl(goalId, normalizedOptions);
+			const promise = this.withGoalAdmission(goalId, false, () => this._startTeamImpl(goalId, normalizedOptions));
 			const lock: StartTeamLock = { options: normalizedOptions, promise };
 			this.startTeamLocks.set(goalId, lock);
 			try {
@@ -1944,6 +1983,9 @@ export class TeamManager {
 	}
 
 	private assertGoalCanStart(goal: PersistedGoal): void {
+		if (goal.archived) {
+			throw new TeamStartError("GOAL_ARCHIVED", "Goal is archived and cannot start a team");
+		}
 		if (!goal.team) {
 			throw new TeamStartError("TEAM_DISABLED", `Goal "${goal.title}" does not have team mode enabled`);
 		}
@@ -2261,6 +2303,15 @@ export class TeamManager {
 		task: string,
 		opts?: { workflowGateId?: string; inputGateIds?: string[] },
 	): Promise<{ sessionId: string; worktreePath?: string }> {
+		return this.withGoalAdmission(goalId, false, () => this._spawnRoleImpl(goalId, role, task, opts));
+	}
+
+	private async _spawnRoleImpl(
+		goalId: string,
+		role: string,
+		task: string,
+		opts?: { workflowGateId?: string; inputGateIds?: string[] },
+	): Promise<{ sessionId: string; worktreePath?: string }> {
 		// Resolve via the goal's inline-roles snapshot first, then the
 		// config cascade (project→server→builtin→market-packs). See resolveRole()
 		// and the PersistedGoal.inlineRoles field doc for the precedence rule.
@@ -2293,6 +2344,9 @@ export class TeamManager {
 		const goal = this.resolveGoal(goalId);
 		if (!goal) {
 			throw new Error(`Goal not found: ${goalId}`);
+		}
+		if (goal.archived) {
+			throw new TeamStartError("GOAL_ARCHIVED", "Goal is archived and cannot create team sessions");
 		}
 		// A stale/preparing goal must not be able to create a worker through an
 		// in-process caller that bypasses the REST spawn route.
@@ -2988,6 +3042,15 @@ export class TeamManager {
 	 * Silently returns if no team exists for the goal (handles manual gate signals).
 	 */
 	registerReviewerSession(goalId: string, sessionId: string, stepName: string): void {
+		if (this.resolveGoal(goalId)?.archived) {
+			// Stamp durable ownership before asynchronous cleanup so a crash cannot
+			// turn a late verifier into an unrelated goalId-only live session.
+			this.sessionManager.updateSessionMeta(sessionId, { role: "reviewer", teamGoalId: goalId });
+			void this.sessionManager.terminateSession(sessionId).then(async (terminated) => {
+				if (!terminated) await this.sessionManager.storeArchive(sessionId);
+			}).catch(async () => { try { await this.sessionManager.storeArchive(sessionId); } catch { /* boot repair retries */ } });
+			return;
+		}
 		const entry = this.teams.get(goalId);
 		if (!entry) return; // No active team — skip registration silently
 
@@ -3115,6 +3178,183 @@ export class TeamManager {
 		this.rearmedCompletedTeams.add(goalId);
 		console.log(`[team-manager] Rearmed completed team for reopened goal ${goalId}; team lead remains ${entry.teamLeadSessionId}`);
 		return true;
+	}
+
+	private deactivateArchivedTeamRuntime(goalId: string, entry: TeamEntry | undefined): void {
+		this.clearIdleNudgeTimer(goalId);
+		try { entry?.unsubscribeTeamLeadEvents?.(); } catch (err) {
+			console.warn(`[team-manager] Failed to unsubscribe archived team lead for ${goalId}:`, err);
+		}
+		if (entry) {
+			for (const agent of entry.agents) {
+				try { agent.unsubscribeEvent?.(); } catch { /* terminal cleanup is best-effort */ }
+				this.sessionToGoal.delete(agent.sessionId);
+				const idleTimer = this.pendingIdleNotify.get(agent.sessionId);
+				if (idleTimer) this.clock.clearTimeout(idleTimer);
+				this.pendingIdleNotify.delete(agent.sessionId);
+			}
+			if (entry.teamLeadSessionId) this.sessionToGoal.delete(entry.teamLeadSessionId);
+		}
+		this.teams.delete(goalId);
+		this.leadIdleSinceByGoal.delete(goalId);
+		this.lastNudgeAtPerGoal.delete(goalId);
+		this.lastSpecNudgeTs.delete(goalId);
+		this.rearmedCompletedTeams.delete(goalId);
+	}
+
+	private collectArchivedGoalClosure(
+		goalId: string,
+		live: PersistedSession[],
+		referencedIds: ReadonlySet<string>,
+		errors: string[],
+	): Set<string> {
+		const byId = new Map(live.map((session) => [session.id, session]));
+		const selected = new Set(live.filter((session) => session.teamGoalId === goalId).map((session) => session.id));
+		for (const id of referencedIds) {
+			const session = byId.get(id);
+			if (!session) continue;
+			if (session.teamGoalId && session.teamGoalId !== goalId) {
+				errors.push(`ownership conflict: ${id} belongs to ${session.teamGoalId}`);
+				continue;
+			}
+			selected.add(id);
+		}
+		let changed = true;
+		while (changed) {
+			changed = false;
+			for (const session of live) {
+				const parentId = session.delegateOf ?? (session.childKind ? session.parentSessionId : undefined);
+				if (parentId && selected.has(parentId) && !selected.has(session.id)) {
+					selected.add(session.id);
+					changed = true;
+				}
+			}
+		}
+		return selected;
+	}
+
+	/**
+	 * Reconcile every durable team-owned session after goal archive intent is
+	 * committed. Runtime deactivation is independent of TeamStore publication.
+	 */
+	async reconcileArchivedGoal(
+		goalId: string,
+		options: { audit?: boolean } = {},
+	): Promise<ArchivedGoalReconciliationResult> {
+		return this.withGoalAdmission(goalId, true, async () => {
+			const startedAt = this.clock.now();
+			const goal = this.resolveGoal(goalId);
+			if (!goal?.archived) {
+				return { goalId, status: "complete", archivedSessionIds: [], suppressedSessionIds: [], teamRemoved: false, teamEntryRetained: false, errors: [] };
+			}
+
+			const context = this.config.projectContextManager?.getContextForGoal(goalId);
+			const teamStore = context?.teamStore ?? this.localStore!;
+			const sessionStore = context?.sessionStore ?? (this.sessionManager as any)._testStore;
+			const persistedEntry = teamStore?.get(goalId);
+			const runtimeEntry = this.teams.get(goalId);
+			const referencedIds = new Set<string>();
+			for (const entry of [persistedEntry, runtimeEntry]) {
+				if (entry?.teamLeadSessionId) referencedIds.add(entry.teamLeadSessionId);
+				for (const agent of entry?.agents ?? []) referencedIds.add(agent.sessionId);
+			}
+
+			this.deactivateArchivedTeamRuntime(goalId, runtimeEntry);
+			const errors: string[] = [];
+			try { await this.verificationHarness?.cancelAllVerifications(goalId); }
+			catch (err) { errors.push(`verification cancellation: ${err instanceof Error ? err.message : String(err)}`); }
+
+			const archivedSessionIds = new Set<string>();
+			const selectedIds = new Set<string>();
+			const attempted = new Set<string>();
+			const liveRows = (): PersistedSession[] => sessionStore?.getLive?.() ?? [];
+			// Admission is closed, so this bounded final scan reaches a fixed point;
+			// the extra pass catches descendants published by work admitted earlier.
+			const maxPasses = Math.max(1, liveRows().length + 1);
+			for (let pass = 0; pass < maxPasses; pass++) {
+				const closure = this.collectArchivedGoalClosure(goalId, liveRows(), referencedIds, errors);
+				for (const id of closure) selectedIds.add(id);
+				const pending = [...closure].filter((id) => !attempted.has(id));
+				if (pending.length === 0) break;
+				for (const id of pending) {
+					attempted.add(id);
+					if (this.sessionManager.getPersistedSession(id)?.archived === true) {
+						archivedSessionIds.add(id);
+						continue;
+					}
+					try {
+						const terminated = await this.sessionManager.terminateSession(id);
+						if (!terminated) await this.sessionManager.storeArchive(id);
+					} catch (err) {
+						errors.push(`stop ${id}: ${err instanceof Error ? err.message : String(err)}`);
+						try { await this.sessionManager.storeArchive(id); }
+						catch (archiveErr) { errors.push(`archive ${id}: ${archiveErr instanceof Error ? archiveErr.message : String(archiveErr)}`); }
+					}
+					if (this.sessionManager.getPersistedSession(id)?.archived === true) archivedSessionIds.add(id);
+				}
+			}
+
+			const finalClosure = this.collectArchivedGoalClosure(goalId, liveRows(), referencedIds, errors);
+			for (const id of finalClosure) selectedIds.add(id);
+			const suppressedSessionIds = [...selectedIds].filter((id) => this.sessionManager.getPersistedSession(id)?.archived !== true);
+			let teamRemoved = false;
+			let teamEntryRetained = !!teamStore?.get(goalId);
+			const ownershipConflict = errors.some((error) => error.startsWith("ownership conflict:"));
+			if (suppressedSessionIds.length === 0 && !ownershipConflict && teamEntryRetained) {
+				try {
+					await teamStore.removeAsync(goalId);
+					teamRemoved = teamStore.get(goalId) === undefined;
+					teamEntryRetained = !teamRemoved;
+				} catch (err) {
+					errors.push(`team state: ${err instanceof Error ? err.message : String(err)}`);
+					teamEntryRetained = true;
+				}
+			}
+
+			const result: ArchivedGoalReconciliationResult = {
+				goalId,
+				status: suppressedSessionIds.length > 0 || teamEntryRetained ? "blocked" : "complete",
+				archivedSessionIds: [...archivedSessionIds],
+				suppressedSessionIds,
+				teamRemoved,
+				teamEntryRetained,
+				errors: errors.slice(0, 10),
+			};
+			if (options.audit !== false && (selectedIds.size > 0 || persistedEntry || runtimeEntry)) {
+				console.log(`[team-manager] Archived-team reconciliation ${result.status}: goal=${goalId} archived=${result.archivedSessionIds.length} suppressed=${result.suppressedSessionIds.length} teamRemoved=${teamRemoved} retained=${teamEntryRetained} errors=${errors.length} elapsedMs=${this.clock.now() - startedAt}`);
+			}
+			return result;
+		});
+	}
+
+	/** Bounded boot repair over current live sessions and current team entries. */
+	async reconcileArchivedTeamOwnership(): Promise<Set<string>> {
+		const suppressed = new Set<string>();
+		const candidates = new Set<string>();
+		for (const context of this.config.projectContextManager?.all() ?? []) {
+			for (const session of context.sessionStore.getLive()) {
+				if (session.teamGoalId && context.goalStore.get(session.teamGoalId)?.archived) candidates.add(session.teamGoalId);
+			}
+			for (const entry of context.teamStore.getAll()) {
+				if (context.goalStore.get(entry.goalId)?.archived) candidates.add(entry.goalId);
+			}
+		}
+		let archived = 0;
+		let removed = 0;
+		let blocked = 0;
+		const errors: string[] = [];
+		for (const goalId of candidates) {
+			const result = await this.reconcileArchivedGoal(goalId, { audit: false });
+			archived += result.archivedSessionIds.length;
+			if (result.teamRemoved) removed++;
+			if (result.status === "blocked") blocked++;
+			for (const id of result.suppressedSessionIds) suppressed.add(id);
+			errors.push(...result.errors);
+		}
+		if (candidates.size > 0) {
+			console.log(`[team-manager] Boot archived-team repair: goals=${candidates.size} sessionsArchived=${archived} teamsRemoved=${removed} blocked=${blocked} suppressed=${suppressed.size} errors=${errors.length}${errors.length ? ` samples=${JSON.stringify(errors.slice(0, 10))}` : ""}`);
+		}
+		return suppressed;
 	}
 
 	/**
