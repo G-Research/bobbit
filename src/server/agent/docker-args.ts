@@ -64,9 +64,7 @@ export function isVerificationSignalId(value: string): boolean {
  * run suffix so concurrent coordinators cannot attach the same workspace.
  * Normal production callers retain the longstanding names exactly.
  */
-export type ProjectSandboxVolumeKey = "workspace" | "worktrees";
-
-export function projectSandboxVolumeNames(projectId: string, runId = process.env.BOBBIT_E2E_RUN_ID): Record<ProjectSandboxVolumeKey, string> {
+export function projectSandboxVolumeNames(projectId: string, runId = process.env.BOBBIT_E2E_RUN_ID): { workspace: string; worktrees: string } {
 	const validatedRunId = validatedE2ERunId(runId);
 	const suffix = validatedRunId ? `-e2e-${validatedRunId}` : "";
 	return {
@@ -80,17 +78,15 @@ export function projectSandboxVolumeNames(projectId: string, runId = process.env
  * every new volume an owner label; Docker's implicit named-volume creation
  * cannot attach labels. `initializationId` is an unguessable per-attempt marker
  * used by ProjectSandbox to prove it created the volume before changing its
- * ownership. It must never be supplied for an existing volume. The keyed shape
- * keeps callers from coupling a mount to incidental argument ordering.
+ * ownership. It must never be supplied for an existing volume.
  */
-export function projectSandboxVolumeCreateArgsByKey(
+export function projectSandboxVolumeCreateArgs(
 	projectId: string,
 	runId = process.env.BOBBIT_E2E_RUN_ID,
 	initializationId?: string,
-): Record<ProjectSandboxVolumeKey, string[]> {
+): string[][] {
 	const validatedRunId = validatedE2ERunId(runId);
-	const volumeNames = projectSandboxVolumeNames(projectId, validatedRunId);
-	const createArgs = (name: string): string[] => {
+	return Object.values(projectSandboxVolumeNames(projectId, validatedRunId)).map((name) => {
 		const args = [
 			"volume", "create",
 			"--label", `bobbit-project=${projectId}`,
@@ -99,21 +95,7 @@ export function projectSandboxVolumeCreateArgsByKey(
 		if (initializationId) args.push("--label", `bobbit-volume-initialization=${initializationId}`);
 		args.push(name);
 		return args;
-	};
-	return {
-		workspace: createArgs(volumeNames.workspace),
-		worktrees: createArgs(volumeNames.worktrees),
-	};
-}
-
-/** Backwards-compatible ordered form for legacy E2E setup callers. */
-export function projectSandboxVolumeCreateArgs(
-	projectId: string,
-	runId = process.env.BOBBIT_E2E_RUN_ID,
-	initializationId?: string,
-): string[][] {
-	const args = projectSandboxVolumeCreateArgsByKey(projectId, runId, initializationId);
-	return [args.workspace, args.worktrees];
+	});
 }
 
 /**
