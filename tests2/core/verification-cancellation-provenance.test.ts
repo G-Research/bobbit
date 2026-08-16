@@ -184,6 +184,46 @@ test("cancelled result coerces any residual live step to cancelled audit state",
 	});
 });
 
+test("a cleanup-settled finalizer retry publishes after an earlier cleanup-pending no-op", async () => {
+	const { gateStore, harness, signal } = makeFixture("finalizer-cleanup-race");
+	const active = (harness as any).activeVerifications.get(signal.id) as ActiveVerification;
+	const requestedAt = 1_700_000_000_000;
+	const cleanupCompletedAt = requestedAt + 1;
+
+	active.cancelled = true;
+	active.overallStatus = "cancelled";
+	active.cancellation = { cause: "manual", requestedAt };
+	Object.assign(active.steps[0], {
+		type: "command",
+		status: "running",
+		commandSpawnState: "spawned",
+		killRequestedAt: requestedAt,
+		killReason: "cancelled",
+		cancellation: { cause: "manual", requestedAt },
+	});
+	// Prove that finalization resets an otherwise eligible current gate, rather
+	// than merely observing the fixture's initial pending state.
+	gateStore.updateGateStatus(GOAL_ID, GATE_ID, "passed");
+
+	// The first call must be a no-op while exact command cleanup is durable but
+	// unsettled. Do not yield: this leaves its returned async wrapper in flight,
+	// reproducing the duplicate-finalizer ownership race deterministically.
+	const cleanupPendingFinalizer = (harness as any)._finalizeCancelledVerification(active);
+	(active.steps[0] as any).killCompletedAt = cleanupCompletedAt;
+	const cleanupSettledFinalizer = (harness as any)._finalizeCancelledVerification(active);
+	await Promise.all([cleanupPendingFinalizer, cleanupSettledFinalizer]);
+
+	const verification = gateStore.getGate(GOAL_ID, GATE_ID)!.signals.find(entry => entry.id === signal.id)!.verification as any;
+	expect(verification, "CLEANUP_SETTLED_FINALIZER_RETRY: terminal publication must not share a prior no-op promise").toMatchObject({
+		status: "cancelled",
+		cancellation: { cause: "manual", requestedAt, finalizedAt: expect.any(Number) },
+	});
+	expect(gateStore.getGate(GOAL_ID, GATE_ID)!.status,
+		"CLEANUP_SETTLED_FINALIZER_RETRY: a cancelled eligible gate must be re-signalable").toBe("pending");
+	expect(harness.getActiveVerification(signal.id),
+		"CLEANUP_SETTLED_FINALIZER_RETRY: terminal publication must retire its active owner").toBeUndefined();
+});
+
 test("first cancellation writer is persisted before cleanup and cannot be overwritten by a later lifecycle event", () => {
 	const { stateDir, harness, signal } = makeFixture("first-writer-wins");
 	const active = (harness as any).activeVerifications.get(signal.id) as ActiveVerification;
