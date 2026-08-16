@@ -597,7 +597,7 @@ export class SessionStore {
 				if (parsed && typeof parsed === "object" && (parsed as { version?: unknown }).version === 3 && Array.isArray((parsed as { sessions?: unknown[] }).sessions)) {
 					const obj = parsed as { epoch?: unknown; sessions: unknown[] };
 					state.loadedEpoch = typeof obj.epoch === "number" ? obj.epoch : 0;
-					if (file !== state.file) console.warn(`[session-store] Loaded ${tier} tier from backup ${path.basename(file)} (epoch ${state.loadedEpoch}) — primary missing/corrupt`);
+					if (file !== state.file) console.warn(`[session-store] Loaded from backup ${path.basename(file)} (${tier} tier, epoch ${state.loadedEpoch}) — primary missing/corrupt`);
 					return { rows: obj.sessions };
 				}
 				if (tier === "live" && (Array.isArray(parsed) || (parsed && typeof parsed === "object" && (parsed as { version?: unknown }).version === 2 && Array.isArray((parsed as { sessions?: unknown[] }).sessions)))) {
@@ -733,12 +733,24 @@ export class SessionStore {
 		void this.requestAsyncSave();
 	}
 
-	private retainLegacySnapshot(): void {
-		if (!this.legacySnapshot) return;
-		let retained = `${this.storeFile}.pre-archived-split`;
-		for (let n = 1; this.fs.existsSync(retained); n++) retained = `${this.storeFile}.pre-archived-split.${n}`;
-		this.fs.mkdirSync(this.storeDir, { recursive: true });
-		this.fs.writeFileSync(retained, this.legacySnapshot.raw, "utf-8");
+	/** Retain the exact legacy source without blocking an async persistence barrier. */
+	private async retainLegacySnapshotAsync(): Promise<void> {
+		const snapshot = this.legacySnapshot;
+		if (!snapshot) return;
+		await this.fs.promises.mkdir(this.storeDir, { recursive: true });
+		const base = `${this.storeFile}.pre-archived-split`;
+		for (let n = 0; ; n++) {
+			const retained = n === 0 ? base : `${base}.${n}`;
+			try {
+				// Exclusive creation makes collision handling safe across processes and
+				// ensures an existing forensic snapshot can never be overwritten.
+				await this.fs.promises.writeFile(retained, snapshot.raw, { encoding: "utf-8", flag: "wx" });
+				return;
+			} catch (err) {
+				if ((err as NodeJS.ErrnoException).code === "EEXIST") continue;
+				throw err;
+			}
+		}
 	}
 
 	private async writeTransitionIntent(entries: readonly TransitionEntry[]): Promise<void> {
@@ -796,7 +808,7 @@ export class SessionStore {
 		const fenced = transition ? ["live", "archived"] as SessionTier[] : selected;
 		const startedAt = performance.now();
 		return this.withTierWriteFences(fenced, async () => {
-			if (mustMigrate) this.retainLegacySnapshot();
+			if (mustMigrate) await this.retainLegacySnapshotAsync();
 			if (transition) await this.writeTransitionIntent(transitionEntries);
 			for (const tier of selected) await this.saveTierUnlockedAsync(tier, json[tier]!);
 			if (transition) {
