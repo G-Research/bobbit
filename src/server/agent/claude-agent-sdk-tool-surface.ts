@@ -141,6 +141,8 @@ export interface ClaudeSdkToolSurfaceOptions {
 	restriction: "unrestricted" | "restricted";
 	entries: readonly ClaudeSdkToolEntryInput[];
 	subagentPolicy?: ClaudeSdkSubagentPolicy;
+	/** Aggregate-only worker failure facts for private/manual diagnostics. */
+	getToolFailureCounts?: () => Readonly<Record<"unavailable" | "invalid-arguments" | "handler-failed", number>>;
 	/** The existing SessionManager grant seam. It must cancel the UI waiter on abort. */
 	requestToolGrant: (toolName: string, toolGroup: string, options: { signal: AbortSignal; toolUseId?: string }) => Promise<ClaudeSdkGrantResolution>;
 }
@@ -167,6 +169,8 @@ export interface ClaudeSdkToolSurface {
 	readonly subagentStopMatcher: NonNullable<Options["hooks"]>["SubagentStop"] extends (infer V)[] | undefined ? V : never;
 	/** Testable canonical dispatch boundary used by SDK adapters. */
 	readonly invoke: (rawName: string, args: Record<string, unknown>, context?: { signal?: AbortSignal; toolUseId?: string }) => Promise<unknown>;
+	/** Aggregate-only worker failure facts; never render or send them to the SDK. */
+	readonly getToolFailureCounts?: () => Readonly<Record<"unavailable" | "invalid-arguments" | "handler-failed", number>>;
 	readonly renderToolName: (rawName: string) => string | undefined;
 	readonly dispose?: () => void;
 }
@@ -678,6 +682,7 @@ export function buildClaudeSdkToolSurface(options: ClaudeSdkToolSurfaceOptions):
 		subagentStartMatcher: [{ hooks: [subagentStart] }] as any,
 		subagentStopMatcher: [{ hooks: [subagentStop] }] as any,
 		invoke,
+		...(options.getToolFailureCounts ? { getToolFailureCounts: options.getToolFailureCounts } : {}),
 		renderToolName: (rawName: string) => normalized(rawName)?.canonicalName,
 		dispose: () => { disposed = true; options.subagentPolicy?.dispose(); },
 	});

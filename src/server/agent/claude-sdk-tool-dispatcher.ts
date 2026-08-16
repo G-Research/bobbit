@@ -59,6 +59,33 @@ type Pending = {
 	abort?: () => void;
 };
 
+/** Fixed worker-failure vocabulary safe for aggregate diagnostics only. */
+export const CLAUDE_SDK_TOOL_FAILURE_CATEGORIES = ["unavailable", "invalid-arguments", "handler-failed"] as const;
+export type ClaudeSdkToolFailureCategory = typeof CLAUDE_SDK_TOOL_FAILURE_CATEGORIES[number];
+export type ClaudeSdkToolFailureCounts = Record<ClaudeSdkToolFailureCategory, number>;
+
+const MAX_CLAUDE_SDK_TOOL_FAILURE_COUNT = 1_000_000;
+
+function emptyClaudeSdkToolFailureCounts(): ClaudeSdkToolFailureCounts {
+	return { unavailable: 0, "invalid-arguments": 0, "handler-failed": 0 };
+}
+
+/** Never reflect worker-controlled error text into an SDK-facing exception. */
+class ClaudeSdkToolExecutionError extends Error {
+	constructor(readonly category: ClaudeSdkToolFailureCategory) {
+		super("Bobbit tool execution failed");
+		this.name = "ClaudeSdkToolExecutionError";
+	}
+}
+
+/** Collapse the wire's fixed worker error tokens into the public diagnostic vocabulary. */
+function workerFailureCategory(error: unknown): ClaudeSdkToolFailureCategory {
+	if (error === "unavailable" || error === "invalid-arguments") return error;
+	// `failed` is the trusted worker's handler exception token. Unknown values are
+	// deliberately collapsed here rather than becoming caller-controlled diagnostics.
+	return "handler-failed";
+}
+
 // The agent extension owns these child-session verbs outside goals; the team
 // extension owns the same canonical verbs for goal teams. Both are trusted
 // ToolManager providers, but exactly one branch registers at runtime.
@@ -205,8 +232,14 @@ export class ClaudeSdkExtensionDispatcher {
 	private disposed = false;
 	private schemas: readonly ClaudeSdkExtensionSchema[] = [];
 	private readonly pending = new Map<number, Pending>();
+	private readonly toolFailureCounts = emptyClaudeSdkToolFailureCounts();
 
 	constructor(private readonly options: ClaudeSdkExtensionDispatcherOptions) {}
+
+	/** Aggregate-only failure facts for private diagnostics; no tool identity or payload survives. */
+	getToolFailureCounts(): ClaudeSdkToolFailureCounts {
+		return { ...this.toolFailureCounts };
+	}
 
 	/** Load only the trusted manifest and return exact TypeBox JSON schemas before SDK registration. */
 	async start(): Promise<readonly ClaudeSdkExtensionSchema[]> {
@@ -382,8 +415,11 @@ export class ClaudeSdkExtensionDispatcher {
 			if (!pending) return;
 			this.pending.delete(message.id);
 			pending.abort?.();
-			if (message.error) pending.reject(new Error("Bobbit tool execution failed"));
-			else pending.resolve(message.result);
+			if (message.error) {
+				const category = workerFailureCategory(message.error);
+				this.toolFailureCounts[category] = Math.min(this.toolFailureCounts[category] + 1, MAX_CLAUDE_SDK_TOOL_FAILURE_COUNT);
+				pending.reject(new ClaudeSdkToolExecutionError(category));
+			} else pending.resolve(message.result);
 		};
 		if (worker instanceof Worker) worker.on("message", onMessage);
 		else {

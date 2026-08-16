@@ -194,6 +194,23 @@ describe("ClaudeAgentSdkBridge", () => {
 		["malformed", "not-an-sdk-uuid"],
 	];
 
+	it("exposes only bounded allowlisted worker failure counts to manual diagnostics", () => {
+		const fixture = bridgeFixture({
+			claudeSdkToolSurface: {
+				getToolFailureCounts: () => ({
+					unavailable: 2,
+					"invalid-arguments": -4,
+					"handler-failed": 1_000_009,
+					privateWorkerText: "/private/path private-token",
+				}),
+			} as any,
+		});
+		const facts = fixture.bridge.getToolFailureCounts();
+		expect(facts).toEqual({ unavailable: 2, "invalid-arguments": 0, "handler-failed": 1_000_000 });
+		expect(Object.keys(facts)).toEqual(["unavailable", "invalid-arguments", "handler-failed"]);
+		expect(JSON.stringify(facts)).not.toContain("private-token");
+	});
+
 	it("starts an idle bridge without consuming an input or requiring streamed initialization", async () => {
 		const fixture = bridgeFixture({ autoPullInputs: false });
 		await expect(fixture.bridge.start()).resolves.toBeUndefined();

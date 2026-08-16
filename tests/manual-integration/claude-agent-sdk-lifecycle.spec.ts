@@ -163,10 +163,13 @@ function hasRootCanonicalToolCall(snapshot: unknown, toolName: string): boolean 
 type ManualCanonicalToolCategory = "read" | "grep" | "other";
 type ManualCanonicalToolResultState = "absent" | "error" | "success";
 type ManualCanonicalToolExecutionCounts = Record<ManualCanonicalToolCategory, { starts: number; ends: number }>;
+type ManualCanonicalToolFailureCategory = "unavailable" | "invalid-arguments" | "handler-failed";
+type ManualCanonicalToolFailureCounts = Record<ManualCanonicalToolFailureCategory, number>;
 type ManualCanonicalToolDiagnostic = {
 	callPresent: boolean;
 	resultState: ManualCanonicalToolResultState;
 	executionCounts: ManualCanonicalToolExecutionCounts;
+	failureCounts: ManualCanonicalToolFailureCounts;
 };
 
 /** Classify the matching durable result without retaining IDs, result data, or tool arguments. */
@@ -587,6 +590,31 @@ function createManualCanonicalToolExecutionCounts(): ManualCanonicalToolExecutio
 	};
 }
 
+function createManualCanonicalToolFailureCounts(): ManualCanonicalToolFailureCounts {
+	return { unavailable: 0, "invalid-arguments": 0, "handler-failed": 0 };
+}
+
+/** Read the bridge's fixed aggregate seam; never inspect transcript or worker payloads. */
+function manualCanonicalToolFailureCounts(source: unknown): ManualCanonicalToolFailureCounts {
+	const bridge = source && typeof source === "object" ? source as { getToolFailureCounts?: unknown } : undefined;
+	const getCounts = typeof bridge?.getToolFailureCounts === "function" ? bridge.getToolFailureCounts : undefined;
+	let counts: unknown;
+	try { counts = getCounts?.call(bridge); } catch { /* The diagnostic remains fixed-zero. */ }
+	const value = counts && typeof counts === "object" ? counts as Record<string, unknown> : {};
+	const count = (category: ManualCanonicalToolFailureCategory) => typeof value[category] === "number" && Number.isFinite(value[category])
+		? manualBoundedCount(Math.trunc(value[category] as number)) : 0;
+	return { unavailable: count("unavailable"), "invalid-arguments": count("invalid-arguments"), "handler-failed": count("handler-failed") };
+}
+
+/** Isolate one tool turn without exposing timing, identities, or result payloads. */
+function manualCanonicalToolFailureCountDelta(
+	before: ManualCanonicalToolFailureCounts,
+	after: ManualCanonicalToolFailureCounts,
+): ManualCanonicalToolFailureCounts {
+	const delta = (category: ManualCanonicalToolFailureCategory) => manualBoundedCount(Math.max(0, after[category] - before[category]));
+	return { unavailable: delta("unavailable"), "invalid-arguments": delta("invalid-arguments"), "handler-failed": delta("handler-failed") };
+}
+
 /** Classify tool names to fixed diagnostic categories without retaining tool data. */
 function manualCanonicalToolCategory(toolName: unknown): ManualCanonicalToolCategory {
 	return toolName === "read" || toolName === "grep" ? toolName : "other";
@@ -619,10 +647,12 @@ function manualCanonicalToolDiagnostic(
 	snapshot: unknown,
 	toolName: Exclude<ManualCanonicalToolCategory, "other">,
 	counts: ManualCanonicalToolExecutionCounts,
+	failureCounts: ManualCanonicalToolFailureCounts = createManualCanonicalToolFailureCounts(),
 ): ManualCanonicalToolDiagnostic {
 	return {
 		...manualRootCanonicalToolResultState(snapshot, toolName),
 		executionCounts: manualCanonicalToolExecutionFacts(counts),
+		failureCounts: manualCanonicalToolFailureCounts({ getToolFailureCounts: () => failureCounts }),
 	};
 }
 
@@ -630,8 +660,9 @@ function assertManualDurableCanonicalToolExecution(
 	snapshot: unknown,
 	toolName: Exclude<ManualCanonicalToolCategory, "other">,
 	counts: ManualCanonicalToolExecutionCounts = createManualCanonicalToolExecutionCounts(),
+	failureCounts: ManualCanonicalToolFailureCounts = createManualCanonicalToolFailureCounts(),
 ): void {
-	const diagnostic = manualCanonicalToolDiagnostic(snapshot, toolName, counts);
+	const diagnostic = manualCanonicalToolDiagnostic(snapshot, toolName, counts, failureCounts);
 	if (diagnostic.callPresent && diagnostic.resultState === "success") return;
 	throw new Error(JSON.stringify(diagnostic));
 }
@@ -967,12 +998,17 @@ test("Claude Agent SDK manual canonical tool diagnostics distinguish absent and 
 			{ role: "toolResult", toolName: "read", toolCallId: privateValues[0], isError: true, content: privateValues[4], correlationId: privateValues[6] },
 		],
 	};
+	const failureCounts = manualCanonicalToolFailureCountDelta(
+		{ unavailable: 9, "invalid-arguments": 4, "handler-failed": 2 },
+		{ unavailable: 11, "invalid-arguments": 7, "handler-failed": 1_000_009 },
+	);
 	const assertAllowlistedDiagnostic = (snapshot: unknown, expected: Pick<ManualCanonicalToolDiagnostic, "callPresent" | "resultState">): void => {
-		const facts = manualCanonicalToolDiagnostic(snapshot, "read", counts);
-		expect(facts).toEqual({ ...expected, executionCounts: counts });
-		expect(Object.keys(facts)).toEqual(["callPresent", "resultState", "executionCounts"]);
+		const facts = manualCanonicalToolDiagnostic(snapshot, "read", counts, failureCounts);
+		expect(facts).toEqual({ ...expected, executionCounts: counts, failureCounts: { unavailable: 2, "invalid-arguments": 3, "handler-failed": 1_000_000 } });
+		expect(Object.keys(facts)).toEqual(["callPresent", "resultState", "executionCounts", "failureCounts"]);
 		expect(Object.keys(facts.executionCounts)).toEqual(["read", "grep", "other"]);
 		for (const category of Object.values(facts.executionCounts)) expect(Object.keys(category)).toEqual(["starts", "ends"]);
+		expect(Object.keys(facts.failureCounts)).toEqual(["unavailable", "invalid-arguments", "handler-failed"]);
 		const serialized = JSON.stringify(facts);
 		for (const privateValue of privateValues) expect(serialized).not.toContain(privateValue);
 	};
@@ -980,10 +1016,10 @@ test("Claude Agent SDK manual canonical tool diagnostics distinguish absent and 
 	assertAllowlistedDiagnostic(missingReadResultHistory, { callPresent: true, resultState: "absent" });
 	assertAllowlistedDiagnostic(errorReadResultHistory, { callPresent: true, resultState: "error" });
 	assertAllowlistedDiagnostic(undefined, { callPresent: false, resultState: "absent" });
-	expect(() => assertManualDurableCanonicalToolExecution(successfulReadHistory, "read", counts)).not.toThrow();
+	expect(() => assertManualDurableCanonicalToolExecution(successfulReadHistory, "read", counts, failureCounts)).not.toThrow();
 	for (const snapshot of [missingReadResultHistory, errorReadResultHistory, undefined]) {
 		let diagnostic = "";
-		try { assertManualDurableCanonicalToolExecution(snapshot, "read", counts); }
+		try { assertManualDurableCanonicalToolExecution(snapshot, "read", counts, failureCounts); }
 		catch (error) { diagnostic = error instanceof Error ? error.message : ""; }
 		for (const privateValue of privateValues) expect(diagnostic).not.toContain(privateValue);
 	}
@@ -1617,6 +1653,7 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			// An allowed read is one complete turn before the permission-gated grep.
 			// Keep only fixed execution boundaries for the durable-settlement diagnostic.
 			const canonicalReadExecution = createManualCanonicalToolExecutionCounts();
+			const canonicalReadFailuresBefore = manualCanonicalToolFailureCounts(session.rpcClient);
 			const unsubscribeCanonicalReadExecution = session.rpcClient.onEvent(event => countManualCanonicalToolExecution(canonicalReadExecution, event));
 			try {
 				await runTurn("Use only Bobbit read on README.md. Do not use any other tools.", "canonical Bobbit read turn");
@@ -1627,7 +1664,12 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			const visibleCanonicalReadTranscript = transcript.success
 				? gateway.sessionManager.buildVisibleMessageSnapshot(created.id, transcript.data)
 				: undefined;
-			assertManualDurableCanonicalToolExecution(visibleCanonicalReadTranscript, "read", canonicalReadExecution);
+			assertManualDurableCanonicalToolExecution(
+				visibleCanonicalReadTranscript,
+				"read",
+				canonicalReadExecution,
+				manualCanonicalToolFailureCountDelta(canonicalReadFailuresBefore, manualCanonicalToolFailureCounts(session.rpcClient)),
+			);
 
 			// Count only fixed tool categories for the separate permission-card turn.
 			const canonicalGrepExecution = createManualCanonicalToolExecutionCounts();
@@ -1995,6 +2037,7 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			// An allowed read is one complete turn before the permission-gated grep.
 			// Keep only fixed execution boundaries for the durable-settlement diagnostic.
 			const sandboxCanonicalReadExecution = createManualCanonicalToolExecutionCounts();
+			const sandboxCanonicalReadFailuresBefore = manualCanonicalToolFailureCounts(session.rpcClient);
 			const unsubscribeSandboxCanonicalReadExecution = session.rpcClient.onEvent(event => countManualCanonicalToolExecution(sandboxCanonicalReadExecution, event));
 			try {
 				await runSandboxTurn("Use only Bobbit read on README.md. Do not use any other tools.", "read");
@@ -2005,7 +2048,12 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			const visibleSandboxCanonicalReadTranscript = sandboxTranscript.success
 				? gateway.sessionManager.buildVisibleMessageSnapshot(created.id, sandboxTranscript.data)
 				: undefined;
-			assertManualDurableCanonicalToolExecution(visibleSandboxCanonicalReadTranscript, "read", sandboxCanonicalReadExecution);
+			assertManualDurableCanonicalToolExecution(
+				visibleSandboxCanonicalReadTranscript,
+				"read",
+				sandboxCanonicalReadExecution,
+				manualCanonicalToolFailureCountDelta(sandboxCanonicalReadFailuresBefore, manualCanonicalToolFailureCounts(session.rpcClient)),
+			);
 
 			// Count only fixed tool categories for the separate permission-card turn.
 			const sandboxCanonicalGrepExecution = createManualCanonicalToolExecutionCounts();

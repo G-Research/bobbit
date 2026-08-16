@@ -1287,6 +1287,9 @@ async function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineConte
 					restriction: allowed === undefined ? "unrestricted" : "restricted",
 					entries,
 					subagentPolicy,
+					// This one-way aggregate seam is private to bridge/manual diagnostics.
+					// It cannot expose tool names, arguments, results, paths, or worker text.
+					getToolFailureCounts: () => extensionDispatcher.getToolFailureCounts(),
 					requestToolGrant: (toolName, group, options) => ctx.requestToolGrant!(plan.id, toolName, group, options),
 				});
 			},

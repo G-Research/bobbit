@@ -252,6 +252,28 @@ describe("Claude SDK Bobbit tool permission integration", () => {
 		}
 	});
 
+	it("maps worker failures to fixed aggregate categories without reflecting worker text", async () => {
+		const { dispatcher, emit, received } = sandboxDispatcherFixture();
+		const invokeFailure = async (error: unknown) => {
+			const pending = dispatcher.invoke("read", {}, {});
+			await vi.waitFor(() => expect(received.at(-1)?.type).toBe("invoke"));
+			emit({ type: "result", id: received.at(-1)!.id, error });
+			await expect(pending).rejects.toThrow("Bobbit tool execution failed");
+		};
+		try {
+			await dispatcher.start();
+			await invokeFailure("unavailable");
+			await invokeFailure("invalid-arguments");
+			await invokeFailure("failed");
+			await invokeFailure("provider body /private/path token=private-token");
+			expect(dispatcher.getToolFailureCounts()).toEqual({ unavailable: 1, "invalid-arguments": 1, "handler-failed": 2 });
+			const serialized = JSON.stringify(dispatcher.getToolFailureCounts());
+			for (const privateValue of ["/private/path", "private-token", "provider body"]) expect(serialized).not.toContain(privateValue);
+		} finally {
+			dispatcher.dispose();
+		}
+	});
+
 	it("absorbs early sandbox dispatcher stdin closure and drains its stderr", async () => {
 		const { child, dispatcher } = sandboxDispatcherFixture({ ready: false });
 		const starting = dispatcher.start();

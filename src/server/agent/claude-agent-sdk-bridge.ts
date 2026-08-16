@@ -365,6 +365,20 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 
 	get running(): boolean { return this.queryHandle !== undefined && this.state !== "failed" && this.state !== "stopped"; }
 
+	/**
+	 * Private/manual diagnostic seam for trusted worker failures. It deliberately
+	 * returns only fixed, bounded counters: canonical transcript events retain
+	 * their normal generic error result and no tool data crosses this boundary.
+	 */
+	getToolFailureCounts(): Readonly<Record<"unavailable" | "invalid-arguments" | "handler-failed", number>> {
+		const source = (this.activeToolSurface ?? this.allocatedToolSurface ?? this.options.claudeSdkToolSurface)?.getToolFailureCounts?.();
+		const count = (category: "unavailable" | "invalid-arguments" | "handler-failed") => {
+			const value = source?.[category];
+			return typeof value === "number" && Number.isFinite(value) ? Math.min(1_000_000, Math.max(0, Math.trunc(value))) : 0;
+		};
+		return { unavailable: count("unavailable"), "invalid-arguments": count("invalid-arguments"), "handler-failed": count("handler-failed") };
+	}
+
 	onEvent(listener: RpcEventListener): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
 	private emit(event: any): void { for (const listener of this.listeners) { try { listener(event); } catch { /* listener isolation */ } } }
 
