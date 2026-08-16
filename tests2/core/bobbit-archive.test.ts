@@ -20,6 +20,13 @@ let activeMemFs: MemFs | undefined;
 let memRootId = 0;
 let originalFsMethods: Partial<Record<(typeof PATCHED_FS_METHODS)[number], (...args: any[]) => any>> = {};
 
+const SPLIT_SESSION_ARTIFACTS = [
+	"sessions.archived.json",
+	"sessions.json.split-transition",
+	"sessions.json.pre-archived-split",
+	"sessions.json.pre-archived-split.1",
+] as const;
+
 function createArchiveMemFs(): MemFs {
 	const mem = createMemFs();
 	mem.renameSync = ((from: fs.PathLike, to: fs.PathLike) => {
@@ -93,6 +100,9 @@ function seedMixedBobbit(root: string) {
 	fs.writeFileSync(path.join(bobbit, "state", "watchdog.json"), "{}");
 	fs.writeFileSync(path.join(bobbit, "state", "tls", "ca.crt"), "cert");
 	fs.writeFileSync(path.join(bobbit, "state", "model-name-abc.txt"), "claude");
+	for (const artifact of SPLIT_SESSION_ARTIFACTS) {
+		fs.writeFileSync(path.join(bobbit, "state", artifact), "split-state");
+	}
 }
 
 test("isPreserved matches dir-roots and prefix patterns", () => {
@@ -102,6 +112,15 @@ test("isPreserved matches dir-roots and prefix patterns", () => {
 	assert.deepEqual(isPreserved("state/model-name-foo.txt", GATEWAY_OWNED_FILES), { preserved: true, isDirRoot: false });
 	assert.deepEqual(isPreserved("config/system-prompt.md", GATEWAY_OWNED_FILES).preserved, false);
 	assert.deepEqual(isPreserved("state/goals/goals.json", GATEWAY_OWNED_FILES).preserved, false);
+});
+
+test("isPreserved protects split-session artifacts with a single-segment suffix wildcard", () => {
+	assert.deepEqual(isPreserved("state/sessions.archived.json", GATEWAY_OWNED_FILES), { preserved: true, isDirRoot: false });
+	assert.deepEqual(isPreserved("state/sessions.json.split-transition", GATEWAY_OWNED_FILES), { preserved: true, isDirRoot: false });
+	assert.deepEqual(isPreserved("state/sessions.json.pre-archived-split", GATEWAY_OWNED_FILES), { preserved: true, isDirRoot: false });
+	assert.deepEqual(isPreserved("state/sessions.json.pre-archived-split.42", GATEWAY_OWNED_FILES), { preserved: true, isDirRoot: false });
+	assert.deepEqual(isPreserved("state/sessions.json.pre-archived-spilt.42", GATEWAY_OWNED_FILES), { preserved: false, isDirRoot: false });
+	assert.deepEqual(isPreserved("state/sessions.json.pre-archived-split.42/child", GATEWAY_OWNED_FILES), { preserved: false, isDirRoot: false });
 });
 
 test("throws no-bobbit-dir when .bobbit/ is absent", () => {
@@ -170,6 +189,20 @@ test("gatewayOwned=true → preserves allowlist files, archives the rest", () =>
 		assert.match(ps, /state\/watchdog\.json/);
 		assert.match(ps, /state\/tls/);
 		assert.match(ps, /model-name-abc\.txt/);
+	} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test("gateway-owned split-session state survives start fresh", () => {
+	const tmp = mkTmp();
+	try {
+		seedMixedBobbit(tmp);
+		const res = archiveProjectBobbitDir(tmp, { gatewayOwned: true });
+		for (const artifact of SPLIT_SESSION_ARTIFACTS) {
+			assert.ok(fs.existsSync(path.join(tmp, ".bobbit", "state", artifact)), `${artifact} should remain live`);
+			assert.ok(!fs.existsSync(path.join(res.archiveDir, "state", artifact)), `${artifact} must not be archived`);
+			assert.ok(res.preservedPaths.includes(`state/${artifact}`), `${artifact} should be recorded as preserved`);
+		}
+		assert.ok(fs.existsSync(path.join(res.archiveDir, "state", "some-random-state.json")), "project state should still be archived");
 	} finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 });
 
