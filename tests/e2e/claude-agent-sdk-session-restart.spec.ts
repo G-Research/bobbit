@@ -36,6 +36,7 @@ type OfficialSessionMessage = {
  */
 class FakeOfficialQuery implements AsyncIterable<unknown> {
 	readonly inputs: string[] = [];
+	readonly thinkingBudgets: Array<number | null> = [];
 	private readonly events: unknown[] = [];
 	private readonly readers: Array<(value: IteratorResult<unknown>) => void> = [];
 	private closed = false;
@@ -45,11 +46,14 @@ class FakeOfficialQuery implements AsyncIterable<unknown> {
 		void this.consumePrompts();
 	}
 
-	async initializationResult(): Promise<Record<string, never>> {
+	async initializationResult(): Promise<{ models: Array<{ value: string; supportsAdaptiveThinking: true }> }> {
 		if (this.sdk.unavailableModels.has(String(this.args.options.model))) {
 			throw new Error("DETERMINISTIC_SDK_PROVIDER_UNAVAILABLE");
 		}
-		return {};
+		// The bridge starts cold and exposes only fail-closed off metadata. This
+		// official post-input capability proves that the durable high tuple is
+		// valid and must survive a lazy restart unchanged.
+		return { models: [{ value: "sonnet", supportsAdaptiveThinking: true }] };
 	}
 
 	private async consumePrompts(): Promise<void> {
@@ -90,7 +94,7 @@ class FakeOfficialQuery implements AsyncIterable<unknown> {
 
 	async interrupt(): Promise<void> {}
 	async setModel(): Promise<void> {}
-	async setMaxThinkingTokens(): Promise<void> {}
+	async setMaxThinkingTokens(budget: number | null): Promise<void> { this.thinkingBudgets.push(budget); }
 	async close(): Promise<void> {
 		this.closed = true;
 		for (const reader of this.readers.splice(0)) reader({ done: true, value: undefined });
@@ -311,7 +315,7 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 
 			const sdkDefault = await apiFetch("/api/preferences", {
 				method: "PUT",
-				body: JSON.stringify({ "default.sessionModel": SDK_MODEL, "default.sessionThinkingLevel": "off" }),
+				body: JSON.stringify({ "default.sessionModel": SDK_MODEL, "default.sessionThinkingLevel": "high" }),
 			});
 			expect(sdkDefault.status, await sdkDefault.text()).toBe(200);
 			const projectId = await defaultProjectId();
@@ -337,6 +341,7 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 			expect(sdkLive?.runtime, JSON.stringify({ runtime: sdkLive?.runtime, model: sdkLive?.spawnPinnedModel })).toBe("claude-agent-sdk");
 			expect(fakeSdk.queries, "SDK selection must construct the production bridge Query").toHaveLength(1);
 			expect(fakeSdk.queries[0].args.options.model).toBe("sonnet");
+			expect(fakeSdk.queries[0].args.options.thinking).toEqual({ type: "enabled", budgetTokens: 8_192 });
 
 			const piDefault = await apiFetch("/api/preferences", {
 				method: "PUT",
@@ -395,8 +400,19 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 			}
 			await waitForSessionStatus(piId, "idle");
 
+			const initializedSdkState = await sdkLive!.rpcClient.getState();
+			expect(initializedSdkState.data).toMatchObject({
+				sdkControlsReady: true,
+				thinkingLevel: "high",
+				model: expect.objectContaining({ reasoning: true }),
+			});
+
 			const persisted = gateway.sessionManager.getPersistedSession(sdkId);
-			expect(persisted).toMatchObject({ runtime: "claude-agent-sdk", claudeAgentSdkSessionId: SDK_SESSION_ID });
+			expect(persisted).toMatchObject({
+				runtime: "claude-agent-sdk",
+				claudeAgentSdkSessionId: SDK_SESSION_ID,
+				effectiveThinkingLevel: "high",
+			});
 
 			// This is the normal SessionManager snapshot path. It must read finalized
 			// SDK-owned rows, rather than a live Query's in-memory event stream.
@@ -481,7 +497,11 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 			await gateway.sessionManager.getSessionStore(persisted.projectId).flushAsync();
 			const onDisk = JSON.parse(readFileSync(join(harnessDefaultProjectRoot(), ".bobbit", "state", "sessions.json"), "utf8"));
 			const onDiskSession = (Array.isArray(onDisk) ? onDisk : onDisk.sessions).find((session: any) => session.id === sdkId);
-			expect(onDiskSession).toMatchObject({ runtime: "claude-agent-sdk", claudeAgentSdkSessionId: SDK_SESSION_ID });
+			expect(onDiskSession).toMatchObject({
+				runtime: "claude-agent-sdk",
+				claudeAgentSdkSessionId: SDK_SESSION_ID,
+				effectiveThinkingLevel: "high",
+			});
 
 			const preRestartReloadConnection = await connectWs(sdkId);
 			let preRestartReloadTranscript: unknown[];
@@ -499,6 +519,8 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 
 			expect(fakeSdk.queries).toHaveLength(2);
 			expect(fakeSdk.queries[1].args.options.resume).toBe(SDK_SESSION_ID);
+			expect(fakeSdk.queries[1].args.options.thinking).toEqual({ type: "enabled", budgetTokens: 8_192 });
+			expect(fakeSdk.queries[1].thinkingBudgets).toEqual([]);
 			expect(gateway.sessionManager.getSession(sdkId)?.runtime).toBe("claude-agent-sdk");
 			expect(gateway.sessionManager.getSession(piId)?.runtime).toBe("pi");
 
@@ -567,6 +589,15 @@ test.describe.serial("Claude Agent SDK session restart", () => {
 				resumedSdkConnection.close();
 			}
 			expect(fakeSdk.queries[1].inputs).toContain("SDK_AFTER_RESTART");
+			expect((await restoredSdk.rpcClient.getState()).data).toMatchObject({
+				sdkControlsReady: true,
+				thinkingLevel: "high",
+				model: expect.objectContaining({ reasoning: true }),
+			});
+			expect(gateway.sessionManager.getPersistedSession(sdkId)).toMatchObject({
+				runtime: "claude-agent-sdk",
+				effectiveThinkingLevel: "high",
+			});
 			const afterRestartPrompt = await gateway.sessionManager.getMessagesSnapshotBase(restoredSdk);
 			expect(afterRestartPrompt.success).toBe(true);
 			expect(JSON.stringify(afterRestartPrompt.data)).toContain("SDK_TRANSLATED:SDK_AFTER_RESTART");
