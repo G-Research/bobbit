@@ -91,24 +91,61 @@ describe("ModelSelector runtime identity", () => {
 		models = [
 			{ ...DEFAULT_MODELS[0], runtime: "pi" },
 			{
-				id: "claude-opus-4-6", name: "Claude Opus 4.6 (SDK)", provider: "claude-agent-sdk", runtime: "claude-agent-sdk",
+				id: "claude-sdk-sonnet-latest", name: "Claude Sonnet 5", provider: "claude-agent-sdk", runtime: "claude-agent-sdk",
 				api: "anthropic-messages", contextWindow: 1_000_000, maxTokens: 128_000, reasoning: true, input: ["text", "image"], cost, authenticated: true,
 			},
 		];
 		const el = await openSelector();
 		const pi = el.querySelector('[data-model-id="claude-opus-4-7"] [data-runtime-badge="pi"]') as HTMLElement;
-		const sdk = el.querySelector('[data-model-id="claude-opus-4-6"] [data-runtime-badge="claude-agent-sdk"]') as HTMLElement;
+		const sdk = el.querySelector('[data-model-id="claude-sdk-sonnet-latest"] [data-runtime-badge="claude-agent-sdk"]') as HTMLElement;
 		expect(pi?.getAttribute("aria-label")).toBe("Session runtime: Pi");
 		expect(sdk?.getAttribute("aria-label")).toBe("Session runtime: Claude Agent SDK");
 
-		const sdkRow = el.querySelector('[data-model-id="claude-opus-4-6"]') as HTMLElement;
+		const sdkRow = el.querySelector('[data-model-id="claude-sdk-sonnet-latest"]') as HTMLElement;
 		expect(sdkRow.getAttribute("data-session-unavailable")).toBe("false");
+		expect(sdkRow.textContent).toContain("Claude Sonnet 5");
+		expect(sdkRow.textContent).not.toContain("claude-sdk-sonnet-latest");
 		sdkRow.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 		expect(selectedModel?.provider).toBe("claude-agent-sdk");
+		expect(selectedModel?.id).toBe("claude-sdk-sonnet-latest");
+	});
+});
+
+describe("ModelSelector SDK selection identity", () => {
+	it("passes the SDK alias rather than its display name for click and keyboard selection", async () => {
+		models = [{
+			id: "haiku", name: "Claude Haiku 4.5", provider: "claude-agent-sdk", runtime: "claude-agent-sdk",
+			api: "anthropic-messages", contextWindow: 200_000, maxTokens: 64_000, reasoning: true, input: ["text", "image"], cost, authenticated: true,
+		}];
+
+		const clickSelector = await openSelector();
+		const clickRow = clickSelector.querySelector('[data-model-id="haiku"]') as HTMLElement;
+		expect(clickRow.textContent).toContain("Claude Haiku 4.5");
+		clickRow.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+		expect(selectedModel).toMatchObject({ provider: "claude-agent-sdk", id: "haiku", name: "Claude Haiku 4.5" });
+		clickSelector.remove();
+
+		const keyboardSelector = await openSelector();
+		keyboardSelector.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+		expect(selectedModel).toMatchObject({ provider: "claude-agent-sdk", id: "haiku", name: "Claude Haiku 4.5" });
 	});
 });
 
 describe("ModelSelector unauthenticated tooltip (Settings-drift regression)", () => {
+	it("guides unauthenticated SDK rows to Anthropic subscription OAuth", async () => {
+		models = [{
+			id: "claude-sdk-sonnet-latest", name: "Claude Sonnet 5", provider: "claude-agent-sdk", runtime: "claude-agent-sdk",
+			api: "anthropic-messages", contextWindow: 1_000_000, maxTokens: 64_000, reasoning: true, input: ["text", "image"], cost, authenticated: false,
+		}];
+		const el = await openSelector();
+		const row = el.querySelector('[data-model-id="claude-sdk-sonnet-latest"]') as HTMLElement;
+		expect(row.getAttribute("title")).toContain("Anthropic subscription OAuth");
+		expect(row.getAttribute("title")).not.toContain("API key");
+
+		const key = row.querySelector('span[title="Anthropic subscription OAuth required"]');
+		expect(key).toBeTruthy();
+	});
+
 	it("locked model row tooltip avoids the dead 'Settings > Providers' path", async () => {
 		models = [{
 			id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", provider: "google", api: "google-generative-ai",
