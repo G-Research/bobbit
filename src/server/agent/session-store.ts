@@ -684,8 +684,12 @@ export class SessionStore {
 
 	private applyTransitionEntries(entries: readonly TransitionEntry[]): void {
 		for (const entry of entries) {
-			if (entry.session) this.sessions.set(entry.id, entry.session);
-			else this.sessions.delete(entry.id);
+			if (entry.session) {
+				// The retained intent is immutable recovery evidence. Its row can contain
+				// nested persisted state, so a shallow copy would still let later session
+				// mutations corrupt the intent needed to repair a second interrupted write.
+				this.sessions.set(entry.id, structuredClone(entry.session));
+			} else this.sessions.delete(entry.id);
 		}
 	}
 
