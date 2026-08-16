@@ -45,7 +45,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { ColorStore } from "./agent/color-store.js";
 import { bfsEnrichArchivedIndexed } from "./agent/archived-session-bfs.js";
 import { PrStatusStore, type PrStatusEntry } from "./agent/pr-status-store.js";
-import { SessionManager, SessionPinNotFoundError, SharedSandboxWorktreeInUseError, type ExtensionChannelServices, type SessionInfo } from "./agent/session-manager.js";
+import { PromotedSessionLifecycleConflictError, SessionManager, SessionPinNotFoundError, SharedSandboxWorktreeInUseError, type ExtensionChannelServices, type SessionInfo } from "./agent/session-manager.js";
 import { WorktreeInventoryService } from "./agent/worktree-inventory.js";
 import { executeCleanupWorktreesRequest } from "./maintenance/cleanup-worktrees-request.js";
 import { RateLimiter } from "./auth/rate-limit.js";
@@ -428,6 +428,18 @@ function collectVisibleSessionWorktreeReferences(projectContextManager: ProjectC
 		sessions.push(...ctx.sessionStore.getAll());
 	}
 	return sessions;
+}
+
+function promotedSessionLifecycleConflictReason(
+	projectContextManager: ProjectContextManager,
+	sessionId: string,
+): string | undefined {
+	const liveAdoptedGoal = projectContextManager.getAllGoals().find(goal =>
+		!goal.archived && goal.worktreeOwnerSessionId === sessionId,
+	);
+	return liveAdoptedGoal
+		? `promoted goal ${liveAdoptedGoal.id} is still active; archive the goal first`
+		: undefined;
 }
 
 function wireGoalManagerResolvers(
@@ -2629,6 +2641,12 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		previewPurgeOperation: previewOperations.purge,
 	});
 	sessionManager.sandboxTokenStore = sandboxTokenStore;
+	// A promoted source remains the workspace lifecycle owner until its goal has
+	// been durably archived. Resolve that authority only from canonical goal
+	// records so session archive/purge APIs cannot bypass the ordered goal flow.
+	sessionManager.setPromotedSessionLifecycleGuard((sessionId) =>
+		promotedSessionLifecycleConflictReason(projectContextManager, sessionId),
+	);
 
 	// Wire sessionManager into the project context manager so the search
 	// orphan filter can resolve sessions across projects (live, dormant,
@@ -5376,6 +5394,11 @@ async function handleApiRoute(
 		// leaking host paths, source line numbers, and implementation details.
 		console.error(`[api] ${status} error:`, e.stack ?? e.message);
 		json({ error: e.message, ...extra }, status);
+	};
+	const writeSessionLifecycleConflict = (err: unknown): boolean => {
+		if (!(err instanceof PromotedSessionLifecycleConflictError)) return false;
+		json({ error: err.message, code: err.code }, err.statusCode);
+		return true;
 	};
 	const parseStrictUpdateBody = <K extends readonly string[]>(raw: unknown, keys: K, options?: StrictBodyOptions): StrictBody<K> | null => {
 		try {
@@ -14279,7 +14302,10 @@ async function handleApiRoute(
 			// Check if it's an archived session — purge immediately
 			const archivedSession = sessionManager.getArchivedSession(id);
 			if (archivedSession) {
-				await sessionManager.purgeArchivedSession(id);
+				try { await sessionManager.purgeArchivedSession(id); } catch (err) {
+					if (writeSessionLifecycleConflict(err)) return;
+					throw err;
+				}
 				json({ ok: true });
 				return;
 			}
@@ -14287,6 +14313,7 @@ async function handleApiRoute(
 			try {
 				terminated = await sessionManager.terminateSession(id);
 			} catch (err) {
+				if (writeSessionLifecycleConflict(err)) return;
 				if (err instanceof SharedSandboxWorktreeInUseError) {
 					json({ error: err.message, code: err.code }, 409);
 					return;
@@ -14311,6 +14338,7 @@ async function handleApiRoute(
 				try {
 					await sessionManager.storeArchive(id);
 				} catch (err) {
+					if (writeSessionLifecycleConflict(err)) return;
 					if (err instanceof SharedSandboxWorktreeInUseError) {
 						json({ error: err.message, code: err.code }, 409);
 						return;
@@ -14318,14 +14346,20 @@ async function handleApiRoute(
 					throw err;
 				}
 				if (purge) {
-					await sessionManager.purgeArchivedSession(id);
+					try { await sessionManager.purgeArchivedSession(id); } catch (err) {
+						if (writeSessionLifecycleConflict(err)) return;
+						throw err;
+					}
 				}
 				json({ ok: true });
 				return;
 			}
 			// If purge requested, also purge the now-archived session immediately
 			if (purge) {
-				await sessionManager.purgeArchivedSession(id);
+				try { await sessionManager.purgeArchivedSession(id); } catch (err) {
+					if (writeSessionLifecycleConflict(err)) return;
+					throw err;
+				}
 			}
 			json({ ok: true });
 			return;
@@ -15377,6 +15411,15 @@ async function handleApiRoute(
 		}
 		const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.sessions);
 		if (!body) return;
+		// Fail before applying any sibling PATCH fields; SessionManager rechecks at
+		// the destructive boundary to close races with concurrent goal creation.
+		if (body.archived === true) {
+			const reason = promotedSessionLifecycleConflictReason(projectContextManager, id);
+			if (reason) {
+				writeSessionLifecycleConflict(new PromotedSessionLifecycleConflictError(id, reason));
+				return;
+			}
+		}
 
 		if (typeof body.title === "string") {
 			const ok = sessionManager.setTitle(id, body.title);
@@ -15482,10 +15525,16 @@ async function handleApiRoute(
 			// Try to terminate live session first (which archives it)
 			const session = sessionManager.getSession(id);
 			if (session) {
-				try { await sessionManager.terminateSession(id); } catch {}
+				try { await sessionManager.terminateSession(id); } catch (err) {
+					if (writeSessionLifecycleConflict(err)) return;
+					// Preserve the legacy best-effort behavior for unrelated failures.
+				}
 			} else {
 				// Dormant/store-only session — archive directly in the store
-				await sessionManager.storeArchive(id);
+				try { await sessionManager.storeArchive(id); } catch (err) {
+					if (writeSessionLifecycleConflict(err)) return;
+					throw err;
+				}
 			}
 		}
 
@@ -15655,7 +15704,10 @@ async function handleApiRoute(
 				json(draft, draft.code === "FILE_NOT_FOUND" ? 404 : 400);
 				return;
 			}
-			const writeResult = await writeProposalFile(proposalStateDir, ownerSessionId, "goal", { ...draft.fields, worktreeMode: body.mode });
+			const nextFields = { ...draft.fields };
+			if (body.mode === "current-session") nextFields.worktreeMode = body.mode;
+			else delete nextFields.worktreeMode;
+			const writeResult = await writeProposalFile(proposalStateDir, ownerSessionId, "goal", nextFields);
 			const parsed = await parseProposalFile(proposalStateDir, ownerSessionId, "goal");
 			if (!parsed.ok) { json(parsed, 400); return; }
 			if (_broadcastToSession) {

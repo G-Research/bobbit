@@ -12,9 +12,17 @@ async function jsonResponse(response: Response): Promise<any> {
 }
 
 async function sessionRecord(id: string): Promise<any> {
-	const response = await apiFetch(`/api/sessions/${id}?include=archived`);
+	const response = await apiFetch("/api/sessions?include=archived");
 	expect(response.status).toBe(200);
-	return jsonResponse(response);
+	const body = await jsonResponse(response);
+	const record = body.sessions?.find((session: any) => session.id === id);
+	expect(record, `session ${id} missing from list`).toBeTruthy();
+	return record;
+}
+
+async function expectPromotionLifecycleConflict(response: Response): Promise<void> {
+	expect(response.status).toBe(409);
+	expect((await jsonResponse(response)).code).toBe("PROMOTED_SESSION_LIFECYCLE_CONFLICT");
 }
 
 test.describe("current-session goal promotion API", () => {
@@ -57,15 +65,34 @@ test.describe("current-session goal promotion API", () => {
 		expect(initialBody.eligibility.eligible, JSON.stringify(initialBody)).toBe(true);
 		expect(initialBody.eligibility.coordinates.branch).toBe(before.branch);
 		expect(initialBody.eligibility.coordinates.worktreePath).toBe(before.worktreePath);
+		const legacyDraft = await (await apiFetch(`/api/sessions/${ownerId}/proposal/goal`)).text();
+		expect(legacyDraft).not.toContain("worktreeMode:");
 
-		const update = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/worktree-mode`, {
+		const explicitNew = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/worktree-mode`, {
+			method: "PUT",
+			body: JSON.stringify({ mode: "new-worktree" }),
+		});
+		expect(explicitNew.status).toBe(200);
+		expect((await jsonResponse(explicitNew)).mode).toBe("new-worktree");
+		expect(await (await apiFetch(`/api/sessions/${ownerId}/proposal/goal`)).text()).toBe(legacyDraft);
+
+		const selectCurrent = async () => apiFetch(`/api/sessions/${ownerId}/proposal/goal/worktree-mode`, {
 			method: "PUT",
 			body: JSON.stringify({ mode: "current-session" }),
 		});
+		const update = await selectCurrent();
 		expect(update.status).toBe(200);
 		expect((await jsonResponse(update)).mode).toBe("current-session");
-		const rawDraft = await (await apiFetch(`/api/sessions/${ownerId}/proposal/goal`)).text();
-		expect(rawDraft).toContain("worktreeMode: current-session");
+		expect(await (await apiFetch(`/api/sessions/${ownerId}/proposal/goal`)).text()).toContain("worktreeMode: current-session");
+
+		const resetToNew = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/worktree-mode`, {
+			method: "PUT",
+			body: JSON.stringify({ mode: "new-worktree" }),
+		});
+		expect(resetToNew.status).toBe(200);
+		expect((await jsonResponse(resetToNew)).mode).toBe("new-worktree");
+		expect(await (await apiFetch(`/api/sessions/${ownerId}/proposal/goal`)).text()).toBe(legacyDraft);
+		expect((await selectCurrent()).status).toBe(200);
 
 		const rejected = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
 			method: "POST",
@@ -116,5 +143,46 @@ test.describe("current-session goal promotion API", () => {
 		const goals = Array.isArray(goalsBody) ? goalsBody : goalsBody.goals;
 		expect(goals.filter((candidate: any) => candidate.worktreeOwnerSessionId === ownerId)).toHaveLength(1);
 		expect((await apiFetch(`/api/sessions/${ownerId}/proposal/goal`)).status).toBe(404);
+
+		const transcriptPath = gateway.sessionManager.getPersistedSession(ownerId)?.agentSessionFile;
+		expect(transcriptPath).toBeTruthy();
+		expect(fs.existsSync(transcriptPath)).toBe(true);
+		const teamBeforeConflict = await jsonResponse(await apiFetch(`/api/goals/${goal.id}/team`));
+		expect(teamBeforeConflict.teamLeadSessionId).toBe(ownerId);
+
+		await expectPromotionLifecycleConflict(await apiFetch(`/api/sessions/${ownerId}`, {
+			method: "PATCH",
+			body: JSON.stringify({ title: "must-not-apply", archived: true }),
+		}));
+		await expectPromotionLifecycleConflict(await apiFetch(`/api/sessions/${ownerId}`, { method: "DELETE" }));
+		await expectPromotionLifecycleConflict(await apiFetch(`/api/sessions/${ownerId}?purge=true`, { method: "DELETE" }));
+
+		const preserved = await sessionRecord(ownerId);
+		expect(preserved.archived).not.toBe(true);
+		expect(preserved.title).toBe(after.title);
+		expect(preserved.goalId).toBe(goal.id);
+		expect(preserved.teamGoalId).toBe(goal.id);
+		expect(preserved.worktreePath).toBe(before.worktreePath);
+		expect(gateway.sessionManager.getPersistedSession(ownerId)?.agentSessionFile).toBe(transcriptPath);
+		expect(fs.existsSync(transcriptPath)).toBe(true);
+		expect(fs.readFileSync(staged, "utf8")).toBe("staged before promotion\n");
+		expect(fs.readFileSync(untracked, "utf8")).toBe("untracked before promotion\n");
+		expect(String((await runner.execFile("git", ["status", "--porcelain"], { cwd: worktree })).stdout)).toBe(statusBefore);
+		const teamAfterConflict = await jsonResponse(await apiFetch(`/api/goals/${goal.id}/team`));
+		expect(teamAfterConflict.teamLeadSessionId).toBe(ownerId);
+
+		// Goal archival publishes the durable archived bit before team teardown, so
+		// the same production guard now permits termination of the adopted source.
+		const archivedGoalResponse = await apiFetch(`/api/goals/${goal.id}?cascade=true`, { method: "DELETE" });
+		expect(archivedGoalResponse.status, await archivedGoalResponse.clone().text()).toBe(200);
+		const archivedGoal = await jsonResponse(await apiFetch(`/api/goals/${goal.id}`));
+		expect(archivedGoal.archived).toBe(true);
+		expect((await apiFetch(`/api/goals/${goal.id}/team`)).status).toBe(404);
+		expect((await sessionRecord(ownerId)).archived).toBe(true);
+
+		const permittedPurge = await apiFetch(`/api/sessions/${ownerId}?purge=true`, { method: "DELETE" });
+		expect(permittedPurge.status).toBe(200);
+		const sessionsAfterPurge = await jsonResponse(await apiFetch("/api/sessions?include=archived"));
+		expect(sessionsAfterPurge.sessions.some((session: any) => session.id === ownerId)).toBe(false);
 	});
 });
