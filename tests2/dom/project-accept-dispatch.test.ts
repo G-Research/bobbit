@@ -23,7 +23,8 @@ type Call = {
 
 let calls: Call[];
 let registryProjects: any[];
-let configFailuresRemaining: number;
+let registrationFailuresRemaining: number;
+let promotionFailuresRemaining: number;
 let createdSequence: number;
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -50,6 +51,10 @@ function installFetchStub(): void {
 		calls.push({ path, method, body });
 
 		if (path === "/api/projects" && method === "POST") {
+			if (registrationFailuresRemaining > 0) {
+				registrationFailuresRemaining -= 1;
+				return jsonResponse({ error: "registration failed", code: "REGISTRATION_FAILED" }, 500);
+			}
 			createdSequence += 1;
 			const created = {
 				id: `created-${createdSequence}`,
@@ -69,9 +74,9 @@ function installFetchStub(): void {
 		if (path === "/api/goals" && method === "GET") {
 			return jsonResponse({ goals: [], generation: 1 });
 		}
-		if (/\/api\/projects\/[^/]+\/config$/.test(path) && method === "PUT" && configFailuresRemaining > 0) {
-			configFailuresRemaining -= 1;
-			return jsonResponse({ error: "config failed", code: "CONFIG_FAILED" }, 500);
+		if (/\/api\/projects\/[^/]+\/promote$/.test(path) && method === "POST" && promotionFailuresRemaining > 0) {
+			promotionFailuresRemaining -= 1;
+			return jsonResponse({ error: "promotion failed", code: "PROMOTION_FAILED" }, 500);
 		}
 		return jsonResponse({ ok: true });
 	});
@@ -79,7 +84,8 @@ function installFetchStub(): void {
 
 beforeEach(() => {
 	calls = [];
-	configFailuresRemaining = 0;
+	registrationFailuresRemaining = 0;
+	promotionFailuresRemaining = 0;
 	createdSequence = 0;
 	registryProjects = [
 		{ id: "headquarters", name: "Headquarters", rootPath: "C:/hq", provisional: false },
@@ -151,8 +157,14 @@ function exactCalls(path: string, method: string): Call[] {
 function expectDirectCreateChain(sourceProjectId: string): void {
 	const creates = exactCalls("/api/projects", "POST");
 	expect(creates).toHaveLength(1);
-	expect(creates[0]!.body).toEqual({ name: "Target", rootPath: "C:/new-project" });
-	expect(exactCalls("/api/projects/created-1/config", "PUT")).toHaveLength(1);
+	// Registration is the atomic project proposal application boundary: all
+	// proposed config travels with the registration, not in a second PUT.
+	expect(creates[0]!.body).toEqual({
+		name: "Target",
+		rootPath: "C:/new-project",
+		config: { test_command: "npm test" },
+	});
+	expect(exactCalls("/api/projects/created-1/config", "PUT")).toHaveLength(0);
 	expect(projectMutations().some(call => call.path.startsWith(`/api/projects/${sourceProjectId}`))).toBe(false);
 }
 
@@ -187,8 +199,10 @@ describe("acceptProjectProposalFromPanel target dispatch", () => {
 		expect(await acceptProjectProposalFromPanel()).toBe(true);
 
 		expect(exactCalls("/api/projects", "POST")).toHaveLength(0);
-		expect(exactCalls("/api/projects/registered-target", "PUT")).toHaveLength(1);
-		expect(exactCalls("/api/projects/registered-target/config", "PUT")).toHaveLength(1);
+		const updates = exactCalls("/api/projects/registered-target", "PUT");
+		expect(updates).toHaveLength(1);
+		expect(updates[0]!.body).toEqual({ name: "Target", config: { test_command: "npm test" } });
+		expect(exactCalls("/api/projects/registered-target/config", "PUT")).toHaveLength(0);
 		expect(projectMutations().some(call => call.path.includes("registered-source"))).toBe(false);
 	});
 
@@ -225,8 +239,10 @@ describe("acceptProjectProposalFromPanel target dispatch", () => {
 		expect(await acceptProjectProposalFromPanel()).toBe(true);
 
 		expect(exactCalls("/api/projects", "POST")).toHaveLength(0);
-		expect(exactCalls("/api/projects/provisional-source/promote", "POST")).toHaveLength(1);
-		expect(exactCalls("/api/projects/provisional-source/config", "PUT")).toHaveLength(1);
+		const promotions = exactCalls("/api/projects/provisional-source/promote", "POST");
+		expect(promotions).toHaveLength(1);
+		expect(promotions[0]!.body).toEqual({ name: "Target", config: { test_command: "npm test" } });
+		expect(exactCalls("/api/projects/provisional-source/config", "PUT")).toHaveLength(0);
 		expect(exactCalls(`/api/sessions/${PROP_SESSION}`, "DELETE")).toHaveLength(1);
 		expect(exactCalls("/api/sessions", "GET")).not.toHaveLength(0);
 		expect(exactCalls("/api/projects", "GET")).not.toHaveLength(0);
@@ -235,7 +251,7 @@ describe("acceptProjectProposalFromPanel target dispatch", () => {
 	});
 
 	it("recomputes stale stored mode from current explicit provisional fields", async () => {
-		configFailuresRemaining = 1;
+		promotionFailuresRemaining = 1;
 		seedProposal({
 			sourceProjectId: "registered-source",
 			fields: { projectId: "provisional-target" },
@@ -245,23 +261,25 @@ describe("acceptProjectProposalFromPanel target dispatch", () => {
 		expect(await acceptProjectProposalFromPanel()).toBe(false);
 
 		expect(exactCalls("/api/projects", "POST")).toHaveLength(0);
-		expect(exactCalls("/api/projects/provisional-target/promote", "POST")).toHaveLength(1);
-		expect(exactCalls("/api/projects/provisional-target/config", "PUT")).toHaveLength(1);
+		const promotions = exactCalls("/api/projects/provisional-target/promote", "POST");
+		expect(promotions).toHaveLength(1);
+		expect(promotions[0]!.body).toEqual({ name: "Target", config: { test_command: "npm test" } });
+		expect(exactCalls("/api/projects/provisional-target/config", "PUT")).toHaveLength(0);
 	});
 
-	it("retries config from the partial-create checkpoint without registering twice", async () => {
-		configFailuresRemaining = 1;
+	it("retries a failed atomic registration without retaining a partial-create checkpoint", async () => {
+		registrationFailuresRemaining = 1;
 		const proposal = seedProposal({ sourceProjectId: "registered-source" });
 
 		expect(await acceptProjectProposalFromPanel()).toBe(false);
 		expect(state.activeProposals.project).toBe(proposal);
-		expect(state.activeProposals.project?.createdProjectId).toBe("created-1");
+		expect(state.activeProposals.project?.createdProjectId).toBeUndefined();
 		expect(exactCalls("/api/projects", "POST")).toHaveLength(1);
-		expect(exactCalls("/api/projects/created-1/config", "PUT")).toHaveLength(1);
+		expect(exactCalls("/api/projects/created-1/config", "PUT")).toHaveLength(0);
 
 		expect(await acceptProjectProposalFromPanel()).toBe(true);
-		expect(exactCalls("/api/projects", "POST")).toHaveLength(1);
-		expect(exactCalls("/api/projects/created-1/config", "PUT")).toHaveLength(2);
+		expect(exactCalls("/api/projects", "POST")).toHaveLength(2);
+		expect(exactCalls("/api/projects/created-1/config", "PUT")).toHaveLength(0);
 		expect(state.activeProposals.project).toBeUndefined();
 	});
 });

@@ -44,10 +44,8 @@ type ProjectRecord = {
 };
 type ProjectRouteControls = {
 	renameAttempts: () => number;
-	configAttempts: () => number;
 	promoteAttempts: () => number;
 	releaseRename: () => void;
-	releaseConfig: () => void;
 	releasePromote: () => void;
 };
 type ProjectMutationCapture = {
@@ -366,17 +364,13 @@ async function setupProvisionalProposal(page: Page): Promise<{
 
 async function routeProjectMutations(page: Page, projectId: string, opts?: {
 	rename?: "ok" | "delay" | "abort";
-	config?: "ok" | "delay" | "abort";
 	promote?: "ok" | "delay" | "abort";
 }): Promise<ProjectRouteControls> {
 	let renameAttempts = 0;
-	let configAttempts = 0;
 	let promoteAttempts = 0;
 	let releaseRename = () => {};
-	let releaseConfig = () => {};
 	let releasePromote = () => {};
 	const renameGate = new Promise<void>((resolve) => { releaseRename = resolve; });
-	const configGate = new Promise<void>((resolve) => { releaseConfig = resolve; });
 	const promoteGate = new Promise<void>((resolve) => { releasePromote = resolve; });
 
 	async function finish(route: Route, behavior: "ok" | "delay" | "abort" | undefined, gate: Promise<void>, body: Record<string, unknown>): Promise<void> {
@@ -401,11 +395,6 @@ async function routeProjectMutations(page: Page, projectId: string, opts?: {
 			await finish(route, opts?.rename ?? "ok", renameGate, { id: projectId, name: "renamed" });
 			return;
 		}
-		if (path === `/api/projects/${projectId}/config` && request.method() === "PUT") {
-			configAttempts += 1;
-			await finish(route, opts?.config ?? "ok", configGate, { ok: true });
-			return;
-		}
 		if (path === `/api/projects/${projectId}/promote` && request.method() === "POST") {
 			promoteAttempts += 1;
 			await finish(route, opts?.promote ?? "ok", promoteGate, { id: projectId, name: "promoted", provisional: false });
@@ -416,10 +405,8 @@ async function routeProjectMutations(page: Page, projectId: string, opts?: {
 
 	return {
 		renameAttempts: () => renameAttempts,
-		configAttempts: () => configAttempts,
 		promoteAttempts: () => promoteAttempts,
 		releaseRename,
-		releaseConfig,
 		releasePromote,
 	};
 }
@@ -462,8 +449,7 @@ test.describe("Journey: real project proposal acceptance", () => {
 			const button = panel.locator('[data-testid="proposal-primary-submit"] button').first();
 			await expect(button).toBeEnabled({ timeout: 10_000 });
 			const registerProject = mutations.waitForMutation("POST", "/api/projects");
-			const writeProjectConfig = mutations.waitForMutation("PUT", /\/api\/projects\/[^/]+\/config$/);
-			await Promise.all([registerProject, writeProjectConfig, button.click()]);
+			await Promise.all([registerProject, button.click()]);
 
 			let created: ProjectRecord | undefined;
 			await expect.poll(async () => {
@@ -486,7 +472,7 @@ test.describe("Journey: real project proposal acceptance", () => {
 			});
 			expect(await projectConfig(source.id)).toEqual(sourceConfigBefore);
 			expect(mutations.mutations).toContain("POST /api/projects");
-			expect(mutations.mutations).toContain(`PUT /api/projects/${createdProjectId}/config`);
+			expect(mutations.mutations).not.toContain(`PUT /api/projects/${createdProjectId}/config`);
 			expect(mutations.mutations.some((entry) => entry.includes(`/api/projects/${source.id}`))).toBe(false);
 			await expect.poll(() => page.evaluate((id) => (window as any).bobbitState?.projects?.some((project: any) => project.id === id), createdProjectId), {
 				timeout: 10_000,
@@ -578,9 +564,8 @@ test.describe("Journey: real project proposal acceptance", () => {
 			}, "registered");
 			await expect(panel.locator('[data-testid="accept-label"]')).toContainText("Apply Changes");
 			const button = panel.locator('[data-testid="proposal-primary-submit"] button').first();
-			const renameProject = mutations.waitForMutation("PUT", `/api/projects/${target.id}`);
-			const writeProjectConfig = mutations.waitForMutation("PUT", `/api/projects/${target.id}/config`);
-			await Promise.all([renameProject, writeProjectConfig, button.click()]);
+			const updateProject = mutations.waitForMutation("PUT", `/api/projects/${target.id}`);
+			await Promise.all([updateProject, button.click()]);
 
 			await expect.poll(async () => (await listProjects()).find((project) => project.id === target.id)?.name, {
 				timeout: 15_000,
@@ -588,7 +573,7 @@ test.describe("Journey: real project proposal acceptance", () => {
 			}).toBe(renamed);
 			await expectProjectConfigValue(target.id, "test_command", "echo explicit-edit");
 			expect(mutations.mutations).toContain(`PUT /api/projects/${target.id}`);
-			expect(mutations.mutations).toContain(`PUT /api/projects/${target.id}/config`);
+			expect(mutations.mutations).not.toContain(`PUT /api/projects/${target.id}/config`);
 			expect(mutations.mutations).not.toContain("POST /api/projects");
 			expect((await listProjects()).find((project) => project.id === source.id)).toMatchObject(sourceBefore);
 			expect(await projectConfig(source.id)).toEqual(sourceConfigBefore);
@@ -662,8 +647,7 @@ test.describe("Journey: real project proposal acceptance", () => {
 			}, "create");
 			const button = panel.locator('[data-testid="proposal-primary-submit"] button').first();
 			const promoteProject = mutations.waitForMutation("POST", `/api/projects/${provisionalProjectId}/promote`);
-			const writeProjectConfig = mutations.waitForMutation("PUT", `/api/projects/${provisionalProjectId}/config`);
-			await Promise.all([promoteProject, writeProjectConfig, button.click()]);
+			await Promise.all([promoteProject, button.click()]);
 
 			await expect.poll(async () => {
 				const matches = (await listProjects()).filter((project) => samePath(project.rootPath, rootPath));
@@ -674,7 +658,7 @@ test.describe("Journey: real project proposal acceptance", () => {
 			}).toBe(true);
 			await expectProjectConfigValue(provisionalProjectId!, "test_command", "echo promoted-config");
 			expect(mutations.mutations).toContain(`POST /api/projects/${provisionalProjectId}/promote`);
-			expect(mutations.mutations).toContain(`PUT /api/projects/${provisionalProjectId}/config`);
+			expect(mutations.mutations).not.toContain(`PUT /api/projects/${provisionalProjectId}/config`);
 			expect(mutations.mutations).not.toContain("POST /api/projects");
 			await expect.poll(async () => {
 				const resp = await apiFetch("/api/sessions");
@@ -701,7 +685,7 @@ test.describe("Journey: project proposal accept/apply no-op regression", () => {
 	test("registered Apply Changes shows pending feedback and suppresses duplicate rename while in flight", async ({ page }) => {
 		test.setTimeout(60_000);
 		const { projectId, button, label } = await setupRegisteredProposal(page, "pending");
-		const routes = await routeProjectMutations(page, projectId, { rename: "delay", config: "ok" });
+		const routes = await routeProjectMutations(page, projectId, { rename: "delay" });
 
 		try {
 			await button.click();
@@ -720,14 +704,13 @@ test.describe("Journey: project proposal accept/apply no-op regression", () => {
 			}).toBe(1);
 		} finally {
 			routes.releaseRename();
-			routes.releaseConfig();
 		}
 	});
 
 	test("registered rename failure surfaces an error and leaves the proposal actionable", async ({ page }) => {
 		test.setTimeout(60_000);
 		const { projectId, button } = await setupRegisteredProposal(page, "rename-failure");
-		const routes = await routeProjectMutations(page, projectId, { rename: "abort", config: "ok" });
+		const routes = await routeProjectMutations(page, projectId, { rename: "abort" });
 
 		await button.click();
 		await expect.poll(routes.renameAttempts, {
@@ -742,21 +725,21 @@ test.describe("Journey: project proposal accept/apply no-op regression", () => {
 		await expectProjectProposalStillActionable(page, "registered");
 	});
 
-	test("provisional config failure surfaces an error and does not clear the project proposal", async ({ page }) => {
+	test("provisional canonical promotion failure surfaces an error and keeps the project proposal", async ({ page }) => {
 		test.setTimeout(60_000);
 		const { sessionId, projectId, rootPath, button } = await setupProvisionalProposal(page);
-		const routes = await routeProjectMutations(page, projectId, { promote: "ok", config: "abort" });
+		const routes = await routeProjectMutations(page, projectId, { promote: "abort" });
 
 		try {
 			await button.click();
-			await expect.poll(routes.configAttempts, {
+			await expect.poll(routes.promoteAttempts, {
 				timeout: 10_000,
-				message: "provisional config write should be attempted after promote",
+				message: "provisional promotion should carry and apply the complete config",
 			}).toBe(1);
 
 			await expect(
-				page.getByText(/Config write failed|Failed to (write|save|apply).*config|Project proposal accept failed/i).first(),
-				"PROJECT_PROPOSAL_ACCEPT_FAILURE_BUG: provisional config failure must show a clear connection error",
+				page.getByText(/Failed to promote project|Project proposal accept failed/i).first(),
+				"PROJECT_PROPOSAL_ACCEPT_FAILURE_BUG: provisional promotion failure must show a clear connection error",
 			).toBeVisible({ timeout: 10_000 });
 			await expectProjectProposalStillActionable(page, "create");
 		} finally {
@@ -770,7 +753,7 @@ test.describe("Journey: project proposal accept/apply no-op regression", () => {
 	test("registered Apply Changes success clears the proposal panel", async ({ page }) => {
 		test.setTimeout(60_000);
 		const { projectId, button } = await setupRegisteredProposal(page, "success");
-		await routeProjectMutations(page, projectId, { rename: "ok", config: "ok" });
+		await routeProjectMutations(page, projectId, { rename: "ok" });
 
 		await button.click();
 		await expect.poll(() => page.evaluate(() => Boolean((window as any).bobbitState?.activeProposals?.project)), {

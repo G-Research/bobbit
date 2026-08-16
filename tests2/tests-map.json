@@ -1553,7 +1553,7 @@
     },
     {
       "path": "tests2/browser/journeys/project-proposal-accept.journey.spec.ts",
-      "reason": "Failing-first browser journey for Project Proposal Accept no-op: registered Apply shows pending/disabled duplicate-click guard, registered rename failures surface a connection error without clearing the proposal, provisional config failures surface an error without cleanup, and registered success closes the proposal. Deterministic repro opts out of the retry bridge with retries:0. FAILS on HEAD until project proposal accept pending/error handling is fixed.",
+      "reason": "Browser regression coverage for atomic project proposal acceptance: registration, update, and promotion each carry the complete config in their canonical mutation; registered Apply shows pending/disabled duplicate-click guard; failed update or promotion retains the proposal; and a successful update closes it. Deterministic repro opts out of the retry bridge with retries:0.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
