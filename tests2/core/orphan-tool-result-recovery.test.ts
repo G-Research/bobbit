@@ -388,9 +388,23 @@ describe("SessionManager poisoned-history recovery", () => {
 		);
 
 		let restored = h.manager.sessions.get(h.session.id);
+		const acceptedId = enqueue.mock.results[0]?.value.id;
+		if (rejection === "throw") {
+			// A transport throw follows a possible write. It must retain the exact
+			// occurrence as an outbox carrier, not reconstruct a poison-recovery row
+			// that Pi may already be executing.
+			assert.deepEqual(restored.promptQueue.toArray().map((row: any) => row.text), ["older parked intent"]);
+			const ambiguous = restored.inFlightSteerTexts?.filter((row: any) => row.intentId === acceptedId) ?? [];
+			assert.equal(ambiguous.length, 1);
+			assert.partialDeepStrictEqual(ambiguous[0], { intentId: acceptedId, state: "uncertain", retryable: false });
+			h.manager.handleAgentLifecycle(restored, { type: "agent_end", messages: [] });
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			assert.deepEqual(h.newPrompts.map((entry) => entry.text), [piText], "ambiguous poison work must not replay");
+			return;
+		}
 		const rejectedRows = restored.promptQueue.toArray();
 		const rejectedId = rejectedRows[0].id;
-		assert.equal(rejectedId, enqueue.mock.results[0]?.value.id, "rejection must retain the originally accepted queue row");
+		assert.equal(rejectedId, acceptedId, "rejection must retain the originally accepted queue row");
 		assert.deepEqual(rejectedRows.map((row: any) => row.text), [modelText, "older parked intent"]);
 		assert.deepEqual(rejectedRows[0].images, images);
 		assert.deepEqual(rejectedRows[0].attachments, attachments);
@@ -507,6 +521,19 @@ describe("SessionManager poisoned-history recovery", () => {
 		);
 
 		const restored = h.manager.sessions.get(h.session.id);
+		if (rejection === "throw" && initiator === "follow-up") {
+			// A post-write transport failure has no no-start proof. Preserve this
+			// exact poison occurrence only in the delivery outbox and never let a
+			// later generic unstick redrive it.
+			assert.deepEqual(restored.promptQueue.toArray().map((row: any) => row.text), ["older parked intent"]);
+			const ambiguous = restored.inFlightSteerTexts?.filter((row: any) => row.text === poisonModelText) ?? [];
+			assert.equal(ambiguous.length, 1);
+			assert.partialDeepStrictEqual(ambiguous[0], { state: "uncertain", retryable: false });
+			h.manager.handleAgentLifecycle(restored, { type: "agent_end", messages: [] });
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			assert.deepEqual(h.newPrompts.map((entry) => entry.text), [poisonPiText], "ambiguous poison work must not replay");
+			return;
+		}
 		const rejectedRows = restored.promptQueue.toArray();
 		const rejectedId = rejectedRows[0].id;
 		assert.deepEqual(rejectedRows.map((row: any) => row.text), [poisonModelText, "older parked intent"]);

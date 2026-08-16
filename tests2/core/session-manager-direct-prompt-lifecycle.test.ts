@@ -425,6 +425,64 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.deepEqual(restartBinding.author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
 	});
 
+	it("retains an ambiguous direct automatic prompt as one uncertain occurrence without cancellation", async () => {
+		const manager = makeManager();
+		const prompt = vi.fn(async () => {
+			throw new Error("rpc timeout after write");
+		});
+		const { session } = putSession(manager, {
+			id: "s-direct-ambiguous",
+			rpcClient: { prompt },
+		});
+		const intentId = "automatic:timeout-after-write";
+
+		await assert.rejects(
+			() => dispatchTrackedSystemPrompt(session, "Do the automatic work.", { intentId }),
+			/rpc timeout after write/,
+		);
+		assert.equal(prompt.mock.calls.length, 1);
+		assert.equal(session.inFlightSteerTexts?.length, 1);
+		assert.partialDeepStrictEqual(session.inFlightSteerTexts?.[0], {
+			intentId,
+			state: "uncertain",
+			retryable: false,
+		});
+		assert.equal(readAuthorSidecar(session.id).at(-1)?.settlement, undefined, "ambiguous transport must not write cancellation evidence");
+		const outbox = manager.projectDeliveryOutbox(session.id);
+		assert.equal(outbox.length, 1);
+		assert.partialDeepStrictEqual(outbox[0], {
+			id: intentId,
+			deliveryState: "uncertain",
+			retryable: false,
+		});
+
+		const replay: any = await dispatchTrackedSystemPrompt(session, "Do the automatic work.", { intentId });
+		assert.deepEqual(replay, {
+			success: false,
+			duplicate: true,
+			uncertain: true,
+			intentId,
+			attemptId: session.inFlightSteerTexts[0].attemptId,
+		});
+		assert.equal(prompt.mock.calls.length, 1, "retrying the same uncertain occurrence must not call Pi again");
+	});
+
+	it("cancels a direct automatic prompt only after an authoritative no-start rejection", async () => {
+		const manager = makeManager();
+		const prompt = vi.fn(async () => ({ success: false, error: "preflight rejected" }));
+		const { session } = putSession(manager, {
+			id: "s-direct-no-start",
+			rpcClient: { prompt },
+		});
+
+		await assert.rejects(
+			() => dispatchTrackedSystemPrompt(session, "Do not start.", { intentId: "automatic:no-start" }),
+			/preflight rejected/,
+		);
+		assert.equal(session.inFlightSteerTexts?.length ?? 0, 0);
+		assert.equal(readAuthorSidecar(session.id).at(-1)?.settlement?.outcome, "cancelled");
+	});
+
 	it.each([
 		{ ordering: "agent-start-before-echo", source: "verification", author: { kind: "system", id: "system:bobbit", label: "Bobbit" } },
 		{ ordering: "echo-before-rejection", source: "verification", author: { kind: "system", id: "system:bobbit", label: "Bobbit" } },
@@ -1964,7 +2022,7 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		assert.doesNotMatch(JSON.stringify(client.sent), new RegExp(AUTH_SECRET));
 	});
 
-	it("rejects a verifier receipt when bounded non-busy delivery retries exhaust", async () => {
+	it("rejects an ambiguous verifier receipt without scheduling delivery retries", async () => {
 		const manager = makeManager();
 		const prompt = vi.fn(async () => { throw new TypeError("fetch failed"); });
 		const { session } = putSession(manager, {
@@ -1973,50 +2031,41 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 		});
 
 		const receipt = manager.enqueueVerifierPrompt(session.id, "deliver one generic-failure review verdict");
-		const outcome = receipt.dispatched.then(
-			() => assert.fail("exhausted verifier delivery must reject its receipt"),
-			(error: Error) => error,
-		);
-		await flushAsyncWork();
-		for (let attempt = 0; attempt < 3; attempt += 1) {
-			const pending = autoRetryPendingEvents(session).at(-1);
-			assert.ok(pending, `expected bounded retry ${attempt + 1}`);
-			manager._testClock.advance(pending.retryDelayMs);
-			await flushAsyncWork();
-		}
-
-		const error = await outcome;
-		assert.match(error.message, /fetch failed/);
-		assert.equal(prompt.mock.calls.length, 4, "one verifier intent gets only the bounded provider attempts");
-		assert.equal(session.promptQueue.length, 0, "exhausted verifier work cannot remain parked for manual Retry");
+		await assert.rejects(receipt.dispatched, /transport outcome is uncertain/);
+		assert.equal(prompt.mock.calls.length, 1, "a possible write must not be retried");
+		assert.equal(session.promptQueue.length, 0, "the uncertain occurrence is carried by the outbox, not the queue");
 		assert.equal(session.pendingAutoRetryTimer, undefined);
+		assert.partialDeepStrictEqual(session.inFlightSteerTexts?.[0], {
+			intentId: receipt.rowId,
+			state: "uncertain",
+			retryable: false,
+		});
 	});
 
-	it("retains one verifier session and settles the same receipt after a transient redrive", async () => {
+	it("starts a fresh verifier receipt after an ambiguous prior occurrence", async () => {
 		const manager = makeManager();
-		let calls = 0;
-		const prompt = vi.fn(async () => {
-			calls += 1;
-			if (calls === 1) throw new TypeError("fetch failed");
-			return { success: true };
-		});
+		const prompt = vi.fn(async (): Promise<{ success: boolean }> => { throw new TypeError("fetch failed"); });
 		const { session } = putSession(manager, {
 			id: "s-verifier-one-session-redrive",
 			rpcClient: { prompt },
 		});
-		const createSession = vi.spyOn(manager, "createSession");
 
-		const receipt = manager.enqueueVerifierPrompt(session.id, "redrive this exact verifier intent");
-		await flushAsyncWork();
-		const pending = autoRetryPendingEvents(session).at(-1);
-		assert.ok(pending, "the first transient failure must schedule the bounded retry");
-		manager._testClock.advance(pending.retryDelayMs);
-		await receipt.dispatched;
+		const first = manager.enqueueVerifierPrompt(session.id, "first verifier occurrence");
+		await assert.rejects(first.dispatched, /transport outcome is uncertain/);
+		const firstCarrier = session.inFlightSteerTexts?.find((row: any) => row.intentId === first.rowId);
+		assert.partialDeepStrictEqual(firstCarrier, { state: "uncertain", retryable: false });
 
-		assert.equal(prompt.mock.calls.length, 2, "VERIFIER_BUSY_RACE_REPRO: one intent is retried, not duplicated");
-		assert.equal(createSession.mock.calls.length, 0, "a healthy verifier is redriven in its original session");
-		assert.equal(session.promptQueue.length, 0, "acceptance consumes the original durable verifier row");
-		assert.equal(session.id, "s-verifier-one-session-redrive");
+		prompt.mockResolvedValueOnce({ success: true });
+		session.status = "idle";
+		const second = manager.enqueueVerifierPrompt(session.id, "fresh verifier occurrence");
+		await second.dispatched;
+
+		assert.notEqual(second.rowId, first.rowId, "a new verifier lifecycle needs a new occurrence identity");
+		assert.equal(prompt.mock.calls.length, 2, "the prior ambiguous occurrence is never redriven");
+		assert.partialDeepStrictEqual(session.inFlightSteerTexts?.find((row: any) => row.intentId === first.rowId), {
+			state: "uncertain",
+			retryable: false,
+		});
 	});
 
 	it("dedupes staged stable-ID admission on promptOwner before envelope side effects and release", async () => {
@@ -2146,7 +2195,12 @@ describe("SessionManager direct idle prompt lifecycle", () => {
 
 		assert.match(error.message, /Agent process exited with code 17/);
 		assert.equal(session.status, "terminated");
-		assert.equal(session.promptQueue.length, 0, "the dead verifier's exact row must be removed");
+		assert.equal(session.promptQueue.length, 0, "the dead verifier's exact row must not be replayed");
+		assert.partialDeepStrictEqual(session.inFlightSteerTexts?.find((row: any) => row.intentId === receipt.rowId), {
+			intentId: receipt.rowId,
+			state: "uncertain",
+			retryable: false,
+		});
 		manager._testClock.advance(0);
 		await flushAsyncWork();
 		assert.equal(prompt.mock.calls.length, 1, "VERIFIER_BUSY_RACE_REPRO: terminal recovery cannot spawn a replacement delivery");

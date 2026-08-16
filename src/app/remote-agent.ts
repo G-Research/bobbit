@@ -441,33 +441,59 @@ function deliveryIntentId(value: any): string | undefined {
 
 /**
  * A user-shaped in-flight steer spliced into a server snapshot is continuity
- * evidence, not Pi's correlated user-message echo. Older servers expose only
- * `_inFlightSteer`; current servers also stamp the explicit recovery marker.
+ * evidence, never Pi's correlated user-message echo. Both markers are
+ * explicit server-owned recovery metadata: modern rows carry an intent while
+ * older persisted rows may carry only a prompt id or synthetic snapshot id.
  */
 function isDeliveryRecoveryProjection(value: any): boolean {
-	return value?._inFlightSteer === true && !!deliveryIntentId(value);
+	return value?._deliveryRecoveryProjection === true || value?._inFlightSteer === true;
+}
+
+/**
+ * Recovery rows must retain an occurrence key without correlating by text.
+ * Prefer the durable intent (so a real Pi echo settles the existing carrier),
+ * then the pre-intent prompt id. Snapshot/attempt ids are server-issued
+ * compatibility fallbacks for legacy records that have neither.
+ */
+function deliveryRecoveryOccurrenceId(value: any): string | undefined {
+	const candidates = [
+		deliveryIntentId(value),
+		value?.promptId,
+		value?.id,
+		value?.deliveryAttemptId ?? value?.attemptId,
+	];
+	return candidates.find((candidate): candidate is string =>
+		typeof candidate === "string" && candidate.length > 0,
+	);
 }
 
 function deliveryRecoveryOutboxRow(message: any): QueuedMessage | undefined {
-	const id = deliveryIntentId(message);
-	const text = extractText(message);
-	if (!id || !text) return undefined;
+	const id = deliveryRecoveryOccurrenceId(message);
+	if (!id) return undefined;
 	const sequence = Number.isSafeInteger(message?.sequence) && message.sequence >= 0
 		? message.sequence
 		: undefined;
+	const rawState = message?.deliveryState ?? message?.state;
+	const deliveryState = rawState === "local" || rawState === "queued" || rawState === "dispatching"
+		|| rawState === "received" || rawState === "uncertain" || rawState === "failed" || rawState === "cancelled"
+		? rawState as DeliveryState
+		// A recovery-only record proves neither Pi admission nor settlement. Keep
+		// it visible as an uncertain delivery carrier rather than a transcript row.
+		: "uncertain" as const;
 	return {
+		...message,
 		id,
-		text,
-		isSteered: true,
+		text: extractText(message),
+		isSteered: message?.isSteered === true || message?.kind === "steer",
 		createdAt: typeof message?.createdAt === "number" && Number.isFinite(message.createdAt)
 			? message.createdAt
 			: sequence ?? 0,
-		kind: "steer",
+		kind: message?.kind === "prompt" || message?.kind === "steer" ? message.kind : "steer",
+		deliveryState,
 		...(message?.targetTurn === "continuation" || message?.targetTurn === "next-turn"
 			? { targetTurn: message.targetTurn }
 			: {}),
 		...(sequence === undefined ? {} : { sequence }),
-		...(message?.deliveryState ? { deliveryState: message.deliveryState } : {}),
 		...(message?.deliveryReason ? { deliveryReason: message.deliveryReason } : {}),
 		...(message?.deliveryError ? { deliveryError: message.deliveryError } : {}),
 		...(typeof message?.retryable === "boolean" ? { retryable: message.retryable } : {}),
@@ -2404,13 +2430,11 @@ export class RemoteAgent {
 					bootTimingMeta({ sessionId: this._sessionId, transcriptMessages: msgs.length });
 					bootMark(`snapshot-received(${msgs.length} msgs)`);
 
-					// Structured in-flight rows are server recovery projections, not
-					// correlated Pi user-message surfacing. Project them into the durable
-					// outbox by occurrence identity and keep them out of the transcript;
-					// legacy rows (which have no identity) retain their historical
-					// transcript fallback. Install the replacement carrier before the
-					// reducer drops any prior snapshot artifact, then notify once after
-					// both state owners have converged so no blank or duplicate frame is
+					// In-flight rows are server recovery projections, never correlated Pi
+					// user-message surfacing. Project every explicitly marked row into the
+					// durable outbox by server-owned occurrence identity before excluding it
+					// from the reducer, including pre-intent and legacy records. Notify once
+					// after both state owners converge so no blank or duplicate frame is
 					// observable.
 					const recoveryRows: QueuedMessage[] = [];
 					const transcriptRows: any[] = [];

@@ -2855,7 +2855,7 @@ explicit `sweepOrphanArtifacts(knownIds)` maintenance helper.
 
 Prompts and steers use a stable occurrence identity across the browser outbox, persisted `PromptQueue`, in-flight dispatch ledger, prompt-author sidecar, WebSocket projections, and transcript metadata. This closes the ownership gaps between composer submission, socket transport, Pi acknowledgement, and the real user row.
 
-**Admission.** The browser persists `{intentId, frame, row, revision}` in IndexedDB before send. `SessionManager` then persists the accepted queue row before Pi invocation and broadcasts the same ID. Admission replay is idempotent, including reload, reconnect, and a second tab. Identical text is not an identity key.
+**Admission.** The browser persists `{intentId, frame, row, revision}` in IndexedDB before send. `SessionManager` then persists the accepted queue row before Pi invocation and broadcasts the same ID. Documented server, REST, tool, and automatic sources receive a server-owned stable identity at the same boundary; callers do not supply it. Admission replay is idempotent, including reload, reconnect, and a second tab. Identical text is not an identity key.
 
 **Handoff.** A reliable dispatch atomically moves the row from the queue owner to an in-flight ledger record carrying `intentId`, a new per-call `attemptId`, `dispatchEpoch`, lane, sequence, author, and attachment metadata. Queue and ledger are projected together as the delivery outbox. Pi/socket acknowledgement is not settlement, so the projected occurrence remains visible while acknowledgement or user echo is delayed.
 
@@ -3074,13 +3074,13 @@ Long waits made the agent feel unresponsive: users would type a correction, see 
 
 ### Dispatch boundary
 
-Live-steer delivery converges on `SessionManager._dispatchSteer()`. Fresh steers and streaming `steer_queued` promotions first become durable accepted rows. Reliable occurrences then dispatch serially with independent `intentId`/`attemptId` records; legacy metadata-free rows retain their compatibility batching path.
+Live-steer delivery converges on `SessionManager._dispatchSteer()`. Fresh steers and streaming `steer_queued` promotions first become durable accepted rows. Documented browser, REST, tool, and automatic steers are source-identified and dispatch serially with independent `intentId`/`attemptId` records.
 
-Only actual dispatch interrupts the wait. For an identified reliable occurrence, `_dispatchSteer()` first persists the queue-to-ledger handoff, then calls `bgProcessManager.abortAllWaits(sessionId)` immediately before `rpcClient.steer()`. A steer that is merely queued behind compaction, Stop, or bridge replacement does not interrupt the wait yet.
+Only actual dispatch interrupts the wait. `_dispatchSteer()` first persists the queue-to-ledger handoff, then calls `bgProcessManager.abortAllWaits(sessionId)` immediately before `rpcClient.steer()`. A steer queued behind compaction, Stop, bridge replacement, or the `agent_settled` fence does not interrupt the wait yet.
 
-The wait result proves only that Pi can leave the tool boundary. It does not prove that Pi received or surfaced the steer. The delivery ledger remains visible until the correlated Pi user event and exact sidecar settlement described in [Reliable prompt and steer delivery](prompt-queue.md#durable-handoff-and-settlement).
+The wait result proves only that Pi can leave the tool boundary. It does not prove Pi receipt, settlement, or transcript delivery. The delivery ledger remains visible until the correlated Pi user event and exact sidecar settlement described in [Reliable prompt and steer delivery](prompt-queue.md#receipt-settlement-and-snapshots).
 
-Browser/WebSocket steers carry occurrence IDs and use this boundary. Internal/REST/tool steers that omit IDs still enter `_dispatchLegacySteer()`, whose compatibility path does not call `abortAllWaits()`; their routing result must not be documented as wait interruption or transcript delivery. Termination separately calls `abortAllWaits()` so long-poll handlers cannot leak.
+`_dispatchLegacySteer()` remains only for restored/private no-options compatibility records. It is not a documented API route. Termination separately calls `abortAllWaits()` so long-poll handlers cannot leak.
 
 ### Termination cleanup
 

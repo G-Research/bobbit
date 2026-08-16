@@ -262,6 +262,35 @@ describe("RemoteAgent recovery snapshot delivery", () => {
 		expect(ra._state.messages.map((message: any) => message.deliveryIntentId)).toEqual(["intent-a", "intent-b"]);
 	});
 
+	it("keeps a recovery carrier out of the transcript and clears it when its live Pi echo arrives", async () => {
+		const ra = makeAgent(OPEN);
+		await ra.handleServerMessage({
+			type: "messages",
+			data: [recoveryRow("intent-recovery-live", "attempt-recovery-live", 1)],
+		});
+
+		expect(ra._state.messages).toEqual([]);
+		expect(ra.getQueue()).toEqual([
+			expect.objectContaining({ id: "intent-recovery-live", deliveryState: "dispatching" }),
+		]);
+
+		ra.handleAgentEvent({
+			type: "message_start",
+			message: {
+				id: "pi-recovery-live",
+				role: "user",
+				content: [{ type: "text", text: "same steer" }],
+				deliveryIntentId: "intent-recovery-live",
+				deliveryAttemptId: "attempt-recovery-live",
+			},
+		});
+
+		expect(ra.getQueue()).toEqual([]);
+		expect(ra._state.messages).toEqual([
+			expect.objectContaining({ id: "pi-recovery-live", deliveryIntentId: "intent-recovery-live" }),
+		]);
+	});
+
 	it("keeps hard-abort cancellation visible in both tabs and refuses stale-tab Retry", async () => {
 		const tabs = [makeAgent(OPEN), makeAgent(OPEN)];
 		for (const ra of tabs) {
@@ -320,21 +349,36 @@ describe("RemoteAgent recovery snapshot delivery", () => {
 		});
 	});
 
-	it("preserves legacy in-flight snapshot rows as transcript recovery carriers", async () => {
+	it("keeps no-intent recovery projections out of the transcript while retaining outbox carriers", async () => {
 		const ra = makeAgent(OPEN);
 		await ra.handleServerMessage({
 			type: "messages",
-			data: [{
-				id: "inflight-steer:0:legacy",
-				role: "user",
-				content: [{ type: "text", text: "legacy" }],
-				_inFlightSteer: true,
-			}],
+			data: [
+				{
+					id: "inflight-steer:pre-intent-prompt",
+					role: "user",
+					content: [{ type: "text", text: "pre-intent structured recovery" }],
+					promptId: "pre-intent-prompt",
+					_deliveryRecoveryProjection: true,
+					_inFlightSteer: true,
+				},
+				{
+					id: "inflight-steer:0:bare-legacy",
+					role: "user",
+					content: [{ type: "text", text: "bare legacy recovery" }],
+					_inFlightSteer: true,
+				},
+			],
 		});
 
-		expect(ra.getQueue()).toHaveLength(0);
-		expect(ra._state.messages).toHaveLength(1);
-		expect(ra._state.messages[0]).toMatchObject({ id: "inflight-steer:0:legacy", _inFlightSteer: true });
+		expect(
+			ra._state.messages.filter((message: any) => message._inFlightSteer),
+			"RECOVERY_PROJECTIONS_MUST_NEVER_ENTER_TRANSCRIPT",
+		).toEqual([]);
+		expect(
+			ra.getQueue().map((row: any) => row.text).sort(),
+			"RECOVERY_PROJECTIONS_MUST_RETAIN_OUTBOX_CARRIERS",
+		).toEqual(["bare legacy recovery", "pre-intent structured recovery"]);
 	});
 });
 

@@ -13,12 +13,13 @@
  * - Init sequence (clone, npm ci, build) runs only on first create
  */
 
+import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
-import { buildDockerRunArgs, e2eSandboxVolumeCreateArgs, isVerificationSignalId, projectSandboxVolumeNames, SANDBOX_STATE_MOUNTS, validatedE2ERunId } from "./docker-args.js";
+import { buildDockerRunArgs, isVerificationSignalId, projectSandboxVolumeCreateArgs, projectSandboxVolumeNames, SANDBOX_STATE_MOUNTS, validatedE2ERunId } from "./docker-args.js";
 import { activeAgentSessionsDir } from "./agent-session-path.js";
 import { bobbitStateDir, globalAgentDir } from "../bobbit-dir.js";
 import { verificationCheckoutProjectDir } from "./verification-checkout-scope.js";
@@ -57,6 +58,11 @@ interface DockerMountInfo {
 	RW?: boolean;
 	Mode?: string;
 }
+
+type SandboxVolumeOwnershipEvidence = {
+	/** The workspace volume carries Bobbit's persistent creation marker. */
+	workspaceInitializedByBobbit: boolean;
+};
 
 interface DockerMountSpec {
 	Type?: string;
@@ -822,10 +828,11 @@ export class ProjectSandbox {
 		try {
 			await this._dockerExec(containerId, ["mkdir", "-p", "/workspace-wt"]);
 		} catch {
-			// Permission denied — create as root and chown to node
+			// Permission denied — repair only an empty root-owned mount root. Do
+			// not take over a non-empty pre-existing worktrees volume here.
 			await this.execDocker([
 				"exec", "-u", "root", containerId, "sh", "-c",
-				"mkdir -p /workspace-wt && chown node:node /workspace-wt",
+				"mkdir -p /workspace-wt && [ \"$(stat -c %u /workspace-wt)\" = 0 ] && [ -z \"$(find /workspace-wt -mindepth 1 -maxdepth 1 -print -quit)\" ] && chown node:node /workspace-wt",
 			], { timeout: 10_000, env: DOCKER_ENV });
 		}
 
@@ -1613,12 +1620,12 @@ export class ProjectSandbox {
 		addMount(this.options.cloneSource);
 		for (const src of Object.values(this.options.cloneSourceByName ?? {})) addMount(src);
 
-		// Docker only labels volumes when explicitly creating them. The labels let
-		// E2E teardown find its resources even after a spec has removed the
-		// container that would otherwise reveal the project ID.
-		for (const volumeArgs of e2eSandboxVolumeCreateArgs(projectId, e2eRunId)) {
-			await this.execDocker(volumeArgs, { timeout: 15_000, env: DOCKER_ENV });
-		}
+		// Docker-created named volumes start root-owned, but init and agents run as
+		// `node`. Explicit creation also gives every Bobbit-owned volume an owner
+		// label. Keep the workspace's persistent initialization evidence so a
+		// replacement can repair a failed prior initialization without taking over
+		// an unproven pre-existing workspace volume.
+		const volumeEvidence = await this._createSandboxVolumes(e2eRunId);
 		const dockerArgs = buildDockerRunArgs({
 			image,
 			workspaceDir: "", // unused for /workspace — named volume instead
@@ -1626,7 +1633,7 @@ export class ProjectSandbox {
 			label: projectId,
 			labelPrefix: "bobbit-project",
 			additionalLabels: e2eRunId ? { "bobbit-e2e-run": e2eRunId } : undefined,
-			e2eRunId,
+			e2eRunId: e2eRunId ?? "",
 			projectId,
 			stateDir,
 			memoryLimit: `${totalMemGB}g`,
@@ -1658,17 +1665,7 @@ export class ProjectSandbox {
 
 		this.containerId = containerId;
 
-		// Named volumes start root-owned even though the image runs as `node`.
-		// Give the image user access to their mount roots before the init clone;
-		// do not recurse so persisted workspace contents retain their ownership.
-		try {
-			await this.execDocker([
-				"exec", "-u", "root", containerId, "sh", "-c",
-				"mkdir -p /workspace /workspace-wt && chown node:node /workspace /workspace-wt",
-			], { timeout: 10_000, env: DOCKER_ENV });
-		} catch {
-			// Non-fatal — createWorktree will retry its own worktree-root setup.
-		}
+		await this._repairSandboxVolumeOwnership(containerId, volumeEvidence);
 
 		// Defense-in-depth: mask /proc/1/environ
 		try {
@@ -1681,6 +1678,89 @@ export class ProjectSandbox {
 		}
 
 		console.log(`[project-sandbox] Created container ${containerId.substring(0, 12)} for project ${projectId}`);
+	}
+
+	/**
+	 * Create named volumes before `docker run` so their ownership labels identify
+	 * Bobbit's resources. A marker created by this attempt proves a fresh volume;
+	 * the same marker surviving a failed attempt proves Bobbit owns a retried,
+	 * still-empty workspace. That is intentionally stronger than a name match.
+	 */
+	private async _createSandboxVolumes(e2eRunId: string | undefined): Promise<SandboxVolumeOwnershipEvidence> {
+		const runId = e2eRunId ?? "";
+		const names = projectSandboxVolumeNames(this.options.projectId, runId);
+		const createArgs = projectSandboxVolumeCreateArgs(this.options.projectId, runId, randomUUID());
+
+		for (const [key, name] of Object.entries(names) as Array<[keyof typeof names, string]>) {
+			if (await this._sandboxVolumeExists(name)) continue;
+			await this.execDocker(createArgs[key === "workspace" ? 0 : 1], { timeout: 15_000, env: DOCKER_ENV });
+		}
+
+		return {
+			workspaceInitializedByBobbit: await this._hasSandboxVolumeInitializationEvidence(names.workspace, runId),
+		};
+	}
+
+	private async _sandboxVolumeExists(name: string): Promise<boolean> {
+		try {
+			await this.execDocker(["volume", "inspect", name], { timeout: 10_000, env: DOCKER_ENV });
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	private async _hasSandboxVolumeInitializationEvidence(name: string, runId: string): Promise<boolean> {
+		try {
+			const { stdout } = await this.execDocker([
+				"volume", "inspect", "--format", "{{json .Labels}}", name,
+			], { timeout: 10_000, env: DOCKER_ENV });
+			const labels = JSON.parse(stdout.trim()) as Record<string, string> | null;
+			return labels?.["bobbit-project"] === this.options.projectId
+				&& typeof labels?.["bobbit-volume-initialization"] === "string"
+				&& /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(labels["bobbit-volume-initialization"])
+				&& (!runId || labels?.["bobbit-e2e-run"] === runId);
+		} catch {
+			return false;
+		}
+	}
+
+	/**
+	 * Repair only empty root-owned mount roots. Worktrees are always safe to
+	 * repair when empty, including a volume left behind after a failed first
+	 * container create. The workspace additionally requires Bobbit's creation
+	 * evidence: a same-named, unlabelled volume must never be adopted.
+	 */
+	private async _repairSandboxVolumeOwnership(
+		containerId: string,
+		evidence: SandboxVolumeOwnershipEvidence,
+	): Promise<void> {
+		const workspaceRepair = evidence.workspaceInitializedByBobbit
+			? "repair_empty_root_owned_dir /workspace"
+			: "";
+		const command = [
+			"repair_empty_root_owned_dir() {",
+			"  dir=\"$1\"",
+			"  [ -d \"$dir\" ] || return 0",
+			"  owner=$(stat -c %u \"$dir\") || return 1",
+			"  [ \"$owner\" = 0 ] || return 0",
+			"  entry=$(find \"$dir\" -mindepth 1 -maxdepth 1 -print -quit) || return 1",
+			"  [ -z \"$entry\" ] || return 0",
+			"  chown node:node \"$dir\"",
+			"}",
+			"repair_empty_root_owned_dir /workspace-wt",
+			workspaceRepair,
+		].filter(Boolean).join("\n");
+
+		try {
+			await this.execDocker([
+				"exec", "-u", "root", containerId, "sh", "-c", command,
+			], { timeout: 10_000, env: DOCKER_ENV });
+		} catch (err: any) {
+			// The container remains usable if the repair itself is interrupted. A
+			// future replacement reruns this evidence-based, idempotent repair.
+			console.warn(`[project-sandbox] Could not repair volume ownership for ${containerId.substring(0, 12)}: ${err?.message || err}`);
+		}
 	}
 
 	private async _runInitSequence(): Promise<void> {

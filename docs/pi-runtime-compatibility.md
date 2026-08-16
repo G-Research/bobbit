@@ -50,7 +50,7 @@ For a recoverable assistant `stopReason: "length"`, Pi removes the first truncat
 
 ### Steer acknowledgement boundary
 
-Pi's `Agent.steer()` acknowledgement means the steer entered Pi's pending queue; it does not mean a user message entered the transcript. Pi keeps queued steers until the current response releases and emits each user start before the next model call. Bobbit therefore retains the occurrence in its delivery outbox until the correlated Pi user event is surfaced. See [Reliable prompt and steer delivery](prompt-queue.md#durable-handoff-and-settlement).
+Pi's `Agent.steer()` acknowledgement means the steer entered Pi's pending queue; it does not mean a user message entered the transcript. Pi keeps queued steers until the current response releases and emits each user start before the next model call. Bobbit assigns documented server-originated steers a server-owned stable occurrence identity at admission and retains that occurrence in its delivery outbox until the correlated Pi user event is surfaced. See [Reliable prompt and steer delivery](prompt-queue.md#receipt-settlement-and-snapshots).
 
 ### TypeBox v1 boundary
 

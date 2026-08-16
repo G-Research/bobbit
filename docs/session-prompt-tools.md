@@ -16,7 +16,7 @@ For startup, restart, and broken override fallback behavior, see [Tool override 
 | `prompt` | Enqueues a normal prompt behind current work. | Starts a normal turn immediately when possible, otherwise queues normally. | New work or follow-up tasks that should run as a fresh turn. |
 | `steer` | Uses the live-steer path (`SessionManager.deliverLiveSteer`). | Queues a steered prompt with `isSteered: true`. | Current-turn corrections, urgent nudges, or preserving steered recovery semantics. |
 
-Steered delivery is not a silent downgrade to a normal prompt, but these tool routes currently omit browser-style `intentId` metadata and therefore use the legacy queue/dispatch compatibility path. An idle target retains legacy steered priority; a streaming target routes through live steer dispatch. The stable occurrence/outbox guarantees in [Reliable prompt and steer delivery](prompt-queue.md) apply only when the admission boundary supplies an occurrence ID.
+Steered delivery is not a silent downgrade to a normal prompt. The shared delivery boundary assigns every documented tool-route prompt or steer a server-owned stable occurrence identity before it can enter the queue or Pi RPC path; callers do not supply an `intentId`. An idle target retains steered priority; a streaming target routes through live steer dispatch. The [reliable delivery](prompt-queue.md) lifecycle, including durable outbox, sidecar, restart, and ambiguity handling, applies to both modes.
 
 ## Unavailable-model admission fence
 
@@ -53,7 +53,7 @@ The chat transcript uses a dedicated `session_prompt` tool renderer instead of s
 - the delivery mode (`prompt` by default, or `steer`);
 - the prompt/steer message body, preserving line breaks while relying on Lit template escaping for safety.
 
-Prompt cards use the chat/message icon and a `Prompted` header. Steer cards use a lightning-style icon and a `Steered` header. Completed cards include the routing outcome: `queued`, `dispatched`, or `live steer dispatched`. These legacy tool-route values confirm gateway routing, not durable occurrence admission, wait interruption, or transcript delivery. Failed and aborted cards follow the normal tool-renderer error conventions and surface the server error text.
+Prompt cards use the chat/message icon and a `Prompted` header. Steer cards use a lightning-style icon and a `Steered` header. Completed cards include the routing outcome: `queued`, `dispatched`, or `live steer dispatched`. The outcome reports routing, not Pi receipt, settlement, wait interruption, or transcript delivery; those require the reliable lifecycle's correlated Pi and sidecar evidence. Failed and aborted cards follow the normal tool-renderer error conventions and surface the server error text.
 
 Parameters:
 
@@ -167,5 +167,5 @@ Focused coverage lives in:
 - `tests2/integration/team-steer-prompt.test.ts` — goal-team recovery, blocked/action-required behavior, queued-intent preservation, and workflow context injection.
 - `tests2/core/session-prompt-policy.test.ts` — `session_prompt` policy and default-tool exclusion.
 - `tests2/dom/session-prompt-renderer.test.ts` — prompt/steer card rendering and server errors.
-- `tests/e2e/session-prompt.spec.ts` — legacy API/tool-route behavior. Its historical wait-interruption expectation should not be treated as proof for the current metadata-free `_dispatchLegacySteer()` path.
+- `tests/e2e/session-prompt.spec.ts` — API/tool-route behavior, including reliable delivery routing.
 - `tests2/core/model-selection-required-prompt-boundary.test.ts` and `tests2/browser/journeys/model-selection-recovery.journey.spec.ts` — conditioned delivery is rejected before acceptance, and the browser retains its text and attachment draft through model recovery.
