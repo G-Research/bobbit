@@ -60,14 +60,14 @@ type Pending = {
 };
 
 /** Fixed worker-failure vocabulary safe for aggregate diagnostics only. */
-export const CLAUDE_SDK_TOOL_FAILURE_CATEGORIES = ["unavailable", "invalid-arguments", "handler-failed"] as const;
+export const CLAUDE_SDK_TOOL_FAILURE_CATEGORIES = ["unavailable", "invalid-arguments", "handler-failed", "handler-error-result"] as const;
 export type ClaudeSdkToolFailureCategory = typeof CLAUDE_SDK_TOOL_FAILURE_CATEGORIES[number];
 export type ClaudeSdkToolFailureCounts = Record<ClaudeSdkToolFailureCategory, number>;
 
 const MAX_CLAUDE_SDK_TOOL_FAILURE_COUNT = 1_000_000;
 
 function emptyClaudeSdkToolFailureCounts(): ClaudeSdkToolFailureCounts {
-	return { unavailable: 0, "invalid-arguments": 0, "handler-failed": 0 };
+	return { unavailable: 0, "invalid-arguments": 0, "handler-failed": 0, "handler-error-result": 0 };
 }
 
 /** Never reflect worker-controlled error text into an SDK-facing exception. */
@@ -84,6 +84,12 @@ function workerFailureCategory(error: unknown): ClaudeSdkToolFailureCategory {
 	// `failed` is the trusted worker's handler exception token. Unknown values are
 	// deliberately collapsed here rather than becoming caller-controlled diagnostics.
 	return "handler-failed";
+}
+
+/** Inspect only the fixed public error flag, never a successful result's contents. */
+function handlerReturnedErrorResult(result: unknown): boolean {
+	return !!result && typeof result === "object" && !Array.isArray(result)
+		&& (result as { isError?: unknown }).isError === true;
 }
 
 // The agent extension owns these child-session verbs outside goals; the team
@@ -419,7 +425,14 @@ export class ClaudeSdkExtensionDispatcher {
 				const category = workerFailureCategory(message.error);
 				this.toolFailureCounts[category] = Math.min(this.toolFailureCounts[category] + 1, MAX_CLAUDE_SDK_TOOL_FAILURE_COUNT);
 				pending.reject(new ClaudeSdkToolExecutionError(category));
-			} else pending.resolve(message.result);
+			} else {
+				// Pi/Bobbit handlers may return a normal transport result carrying the
+				// public `isError` flag. Count that fixed fact without retaining content.
+				if (handlerReturnedErrorResult(message.result)) {
+					this.toolFailureCounts["handler-error-result"] = Math.min(this.toolFailureCounts["handler-error-result"] + 1, MAX_CLAUDE_SDK_TOOL_FAILURE_COUNT);
+				}
+				pending.resolve(message.result);
+			}
 		};
 		if (worker instanceof Worker) worker.on("message", onMessage);
 		else {

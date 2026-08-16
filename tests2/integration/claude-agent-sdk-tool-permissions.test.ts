@@ -266,7 +266,11 @@ describe("Claude SDK Bobbit tool permission integration", () => {
 			await invokeFailure("invalid-arguments");
 			await invokeFailure("failed");
 			await invokeFailure("provider body /private/path token=private-token");
-			expect(dispatcher.getToolFailureCounts()).toEqual({ unavailable: 1, "invalid-arguments": 1, "handler-failed": 2 });
+			const pendingErrorResult = dispatcher.invoke("read", {}, {});
+			await vi.waitFor(() => expect(received.at(-1)?.type).toBe("invoke"));
+			emit({ type: "result", id: received.at(-1)!.id, result: { isError: true, content: "private handler result /private/path" } });
+			await expect(pendingErrorResult).resolves.toMatchObject({ isError: true });
+			expect(dispatcher.getToolFailureCounts()).toEqual({ unavailable: 1, "invalid-arguments": 1, "handler-failed": 2, "handler-error-result": 1 });
 			const serialized = JSON.stringify(dispatcher.getToolFailureCounts());
 			for (const privateValue of ["/private/path", "private-token", "provider body"]) expect(serialized).not.toContain(privateValue);
 		} finally {

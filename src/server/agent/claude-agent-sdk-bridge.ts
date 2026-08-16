@@ -370,13 +370,18 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 	 * returns only fixed, bounded counters: canonical transcript events retain
 	 * their normal generic error result and no tool data crosses this boundary.
 	 */
-	getToolFailureCounts(): Readonly<Record<"unavailable" | "invalid-arguments" | "handler-failed", number>> {
+	getToolFailureCounts(): Readonly<Record<"unavailable" | "invalid-arguments" | "handler-failed" | "handler-error-result", number>> {
 		const source = (this.activeToolSurface ?? this.allocatedToolSurface ?? this.options.claudeSdkToolSurface)?.getToolFailureCounts?.();
-		const count = (category: "unavailable" | "invalid-arguments" | "handler-failed") => {
+		const count = (category: "unavailable" | "invalid-arguments" | "handler-failed" | "handler-error-result") => {
 			const value = source?.[category];
 			return typeof value === "number" && Number.isFinite(value) ? Math.min(1_000_000, Math.max(0, Math.trunc(value))) : 0;
 		};
-		return { unavailable: count("unavailable"), "invalid-arguments": count("invalid-arguments"), "handler-failed": count("handler-failed") };
+		return {
+			unavailable: count("unavailable"),
+			"invalid-arguments": count("invalid-arguments"),
+			"handler-failed": count("handler-failed"),
+			"handler-error-result": count("handler-error-result"),
+		};
 	}
 
 	onEvent(listener: RpcEventListener): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }

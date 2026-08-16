@@ -163,13 +163,15 @@ function hasRootCanonicalToolCall(snapshot: unknown, toolName: string): boolean 
 type ManualCanonicalToolCategory = "read" | "grep" | "other";
 type ManualCanonicalToolResultState = "absent" | "error" | "success";
 type ManualCanonicalToolExecutionCounts = Record<ManualCanonicalToolCategory, { starts: number; ends: number }>;
-type ManualCanonicalToolFailureCategory = "unavailable" | "invalid-arguments" | "handler-failed";
+type ManualCanonicalToolFailureCategory = "unavailable" | "invalid-arguments" | "handler-failed" | "handler-error-result";
 type ManualCanonicalToolFailureCounts = Record<ManualCanonicalToolFailureCategory, number>;
 type ManualCanonicalToolDiagnostic = {
 	callPresent: boolean;
 	resultState: ManualCanonicalToolResultState;
 	executionCounts: ManualCanonicalToolExecutionCounts;
 	failureCounts: ManualCanonicalToolFailureCounts;
+	/** Present only for the sandbox's same-session private read preflight. */
+	sameSessionReadPreflightSucceeded?: boolean;
 };
 
 /** Classify the matching durable result without retaining IDs, result data, or tool arguments. */
@@ -591,7 +593,26 @@ function createManualCanonicalToolExecutionCounts(): ManualCanonicalToolExecutio
 }
 
 function createManualCanonicalToolFailureCounts(): ManualCanonicalToolFailureCounts {
-	return { unavailable: 0, "invalid-arguments": 0, "handler-failed": 0 };
+	return { unavailable: 0, "invalid-arguments": 0, "handler-failed": 0, "handler-error-result": 0 };
+}
+
+/**
+ * Test-only access to the bridge-local surface avoids making a runtime surface
+ * public. Consume the handler result privately and retain only its error flag.
+ */
+async function manualSameSessionReadPreflight(source: unknown): Promise<boolean> {
+	const bridge = source && typeof source === "object" ? source as { activeToolSurface?: unknown } : undefined;
+	const surface = bridge?.activeToolSurface && typeof bridge.activeToolSurface === "object"
+		? bridge.activeToolSurface as { invoke?: unknown }
+		: undefined;
+	if (typeof surface?.invoke !== "function") return false;
+	try {
+		const result = await surface.invoke("mcp__bobbit__read", { path: "README.md" });
+		return !(result && typeof result === "object" && !Array.isArray(result)
+			&& (result as { isError?: unknown }).isError === true);
+	} catch {
+		return false;
+	}
 }
 
 /** Read the bridge's fixed aggregate seam; never inspect transcript or worker payloads. */
@@ -603,7 +624,12 @@ function manualCanonicalToolFailureCounts(source: unknown): ManualCanonicalToolF
 	const value = counts && typeof counts === "object" ? counts as Record<string, unknown> : {};
 	const count = (category: ManualCanonicalToolFailureCategory) => typeof value[category] === "number" && Number.isFinite(value[category])
 		? manualBoundedCount(Math.trunc(value[category] as number)) : 0;
-	return { unavailable: count("unavailable"), "invalid-arguments": count("invalid-arguments"), "handler-failed": count("handler-failed") };
+	return {
+		unavailable: count("unavailable"),
+		"invalid-arguments": count("invalid-arguments"),
+		"handler-failed": count("handler-failed"),
+		"handler-error-result": count("handler-error-result"),
+	};
 }
 
 /** Isolate one tool turn without exposing timing, identities, or result payloads. */
@@ -612,7 +638,12 @@ function manualCanonicalToolFailureCountDelta(
 	after: ManualCanonicalToolFailureCounts,
 ): ManualCanonicalToolFailureCounts {
 	const delta = (category: ManualCanonicalToolFailureCategory) => manualBoundedCount(Math.max(0, after[category] - before[category]));
-	return { unavailable: delta("unavailable"), "invalid-arguments": delta("invalid-arguments"), "handler-failed": delta("handler-failed") };
+	return {
+		unavailable: delta("unavailable"),
+		"invalid-arguments": delta("invalid-arguments"),
+		"handler-failed": delta("handler-failed"),
+		"handler-error-result": delta("handler-error-result"),
+	};
 }
 
 /** Classify tool names to fixed diagnostic categories without retaining tool data. */
@@ -648,11 +679,13 @@ function manualCanonicalToolDiagnostic(
 	toolName: Exclude<ManualCanonicalToolCategory, "other">,
 	counts: ManualCanonicalToolExecutionCounts,
 	failureCounts: ManualCanonicalToolFailureCounts = createManualCanonicalToolFailureCounts(),
+	sameSessionReadPreflightSucceeded?: boolean,
 ): ManualCanonicalToolDiagnostic {
 	return {
 		...manualRootCanonicalToolResultState(snapshot, toolName),
 		executionCounts: manualCanonicalToolExecutionFacts(counts),
 		failureCounts: manualCanonicalToolFailureCounts({ getToolFailureCounts: () => failureCounts }),
+		...(sameSessionReadPreflightSucceeded === undefined ? {} : { sameSessionReadPreflightSucceeded }),
 	};
 }
 
@@ -661,8 +694,9 @@ function assertManualDurableCanonicalToolExecution(
 	toolName: Exclude<ManualCanonicalToolCategory, "other">,
 	counts: ManualCanonicalToolExecutionCounts = createManualCanonicalToolExecutionCounts(),
 	failureCounts: ManualCanonicalToolFailureCounts = createManualCanonicalToolFailureCounts(),
+	sameSessionReadPreflightSucceeded?: boolean,
 ): void {
-	const diagnostic = manualCanonicalToolDiagnostic(snapshot, toolName, counts, failureCounts);
+	const diagnostic = manualCanonicalToolDiagnostic(snapshot, toolName, counts, failureCounts, sameSessionReadPreflightSucceeded);
 	if (diagnostic.callPresent && diagnostic.resultState === "success") return;
 	throw new Error(JSON.stringify(diagnostic));
 }
@@ -999,16 +1033,17 @@ test("Claude Agent SDK manual canonical tool diagnostics distinguish absent and 
 		],
 	};
 	const failureCounts = manualCanonicalToolFailureCountDelta(
-		{ unavailable: 9, "invalid-arguments": 4, "handler-failed": 2 },
-		{ unavailable: 11, "invalid-arguments": 7, "handler-failed": 1_000_009 },
+		{ unavailable: 9, "invalid-arguments": 4, "handler-failed": 2, "handler-error-result": 5 },
+		{ unavailable: 11, "invalid-arguments": 7, "handler-failed": 1_000_009, "handler-error-result": 8 },
 	);
+	const expectedFailureCounts = { unavailable: 2, "invalid-arguments": 3, "handler-failed": 1_000_000, "handler-error-result": 3 };
 	const assertAllowlistedDiagnostic = (snapshot: unknown, expected: Pick<ManualCanonicalToolDiagnostic, "callPresent" | "resultState">): void => {
 		const facts = manualCanonicalToolDiagnostic(snapshot, "read", counts, failureCounts);
-		expect(facts).toEqual({ ...expected, executionCounts: counts, failureCounts: { unavailable: 2, "invalid-arguments": 3, "handler-failed": 1_000_000 } });
+		expect(facts).toEqual({ ...expected, executionCounts: counts, failureCounts: expectedFailureCounts });
 		expect(Object.keys(facts)).toEqual(["callPresent", "resultState", "executionCounts", "failureCounts"]);
 		expect(Object.keys(facts.executionCounts)).toEqual(["read", "grep", "other"]);
 		for (const category of Object.values(facts.executionCounts)) expect(Object.keys(category)).toEqual(["starts", "ends"]);
-		expect(Object.keys(facts.failureCounts)).toEqual(["unavailable", "invalid-arguments", "handler-failed"]);
+		expect(Object.keys(facts.failureCounts)).toEqual(["unavailable", "invalid-arguments", "handler-failed", "handler-error-result"]);
 		const serialized = JSON.stringify(facts);
 		for (const privateValue of privateValues) expect(serialized).not.toContain(privateValue);
 	};
@@ -1016,6 +1051,13 @@ test("Claude Agent SDK manual canonical tool diagnostics distinguish absent and 
 	assertAllowlistedDiagnostic(missingReadResultHistory, { callPresent: true, resultState: "absent" });
 	assertAllowlistedDiagnostic(errorReadResultHistory, { callPresent: true, resultState: "error" });
 	assertAllowlistedDiagnostic(undefined, { callPresent: false, resultState: "absent" });
+	const preflightFacts = manualCanonicalToolDiagnostic(errorReadResultHistory, "read", counts, failureCounts, false);
+	expect(preflightFacts).toEqual({
+		callPresent: true, resultState: "error", executionCounts: counts, failureCounts: expectedFailureCounts,
+		sameSessionReadPreflightSucceeded: false,
+	});
+	expect(Object.keys(preflightFacts)).toEqual(["callPresent", "resultState", "executionCounts", "failureCounts", "sameSessionReadPreflightSucceeded"]);
+	expect(JSON.stringify(preflightFacts)).not.toContain(privateValues[4]);
 	expect(() => assertManualDurableCanonicalToolExecution(successfulReadHistory, "read", counts, failureCounts)).not.toThrow();
 	for (const snapshot of [missingReadResultHistory, errorReadResultHistory, undefined]) {
 		let diagnostic = "";
@@ -1023,6 +1065,25 @@ test("Claude Agent SDK manual canonical tool diagnostics distinguish absent and 
 		catch (error) { diagnostic = error instanceof Error ? error.message : ""; }
 		for (const privateValue of privateValues) expect(diagnostic).not.toContain(privateValue);
 	}
+});
+
+test("Claude Agent SDK manual same-session read preflight retains only a boolean", async () => {
+	const privateResult = "private read result /private/path private-token";
+	const calls: Array<{ name: unknown; args: unknown }> = [];
+	const successful = await manualSameSessionReadPreflight({
+		activeToolSurface: {
+			invoke: async (name: unknown, args: unknown) => {
+				calls.push({ name, args });
+				return { isError: false, content: privateResult };
+			},
+		},
+	});
+	const error = await manualSameSessionReadPreflight({
+		activeToolSurface: { invoke: async () => ({ isError: true, content: privateResult }) },
+	});
+	expect(calls).toEqual([{ name: "mcp__bobbit__read", args: { path: "README.md" } }]);
+	expect({ successful, error }).toEqual({ successful: true, error: false });
+	expect(JSON.stringify({ successful, error })).not.toContain(privateResult);
 });
 
 test("Claude Agent SDK manual terminal diagnostics expose only route-safe categories", async () => {
@@ -2034,6 +2095,9 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 
 			await runSandboxTurn("Reply with exactly: SDK_SANDBOX_READY", "control");
 
+			// Probe the already-created sandbox surface before asking the model to use it.
+			// This consumes only the handler result locally and retains a single boolean.
+			const sandboxSameSessionReadPreflightSucceeded = await manualSameSessionReadPreflight(session.rpcClient);
 			// An allowed read is one complete turn before the permission-gated grep.
 			// Keep only fixed execution boundaries for the durable-settlement diagnostic.
 			const sandboxCanonicalReadExecution = createManualCanonicalToolExecutionCounts();
@@ -2053,6 +2117,7 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 				"read",
 				sandboxCanonicalReadExecution,
 				manualCanonicalToolFailureCountDelta(sandboxCanonicalReadFailuresBefore, manualCanonicalToolFailureCounts(session.rpcClient)),
+				sandboxSameSessionReadPreflightSucceeded,
 			);
 
 			// Count only fixed tool categories for the separate permission-card turn.

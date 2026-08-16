@@ -201,13 +201,14 @@ describe("ClaudeAgentSdkBridge", () => {
 					unavailable: 2,
 					"invalid-arguments": -4,
 					"handler-failed": 1_000_009,
+					"handler-error-result": 3,
 					privateWorkerText: "/private/path private-token",
 				}),
 			} as any,
 		});
 		const facts = fixture.bridge.getToolFailureCounts();
-		expect(facts).toEqual({ unavailable: 2, "invalid-arguments": 0, "handler-failed": 1_000_000 });
-		expect(Object.keys(facts)).toEqual(["unavailable", "invalid-arguments", "handler-failed"]);
+		expect(facts).toEqual({ unavailable: 2, "invalid-arguments": 0, "handler-failed": 1_000_000, "handler-error-result": 3 });
+		expect(Object.keys(facts)).toEqual(["unavailable", "invalid-arguments", "handler-failed", "handler-error-result"]);
 		expect(JSON.stringify(facts)).not.toContain("private-token");
 	});
 
