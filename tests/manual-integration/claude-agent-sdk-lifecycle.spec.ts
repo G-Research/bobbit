@@ -13,10 +13,14 @@
  * it never copies credential values into the test gateway, SDK options,
  * assertions, or logs. A native Claude CLI login alone is insufficient.
  *
- * Direct run:
- *   BOBBIT_RUN_CLAUDE_AGENT_SDK_SMOKE=1 MANUAL_CLAUDE_AGENT_SDK_MODEL=<unprefixed-model> MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR="$MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR" npm run test:manual -- --grep "Claude Agent SDK lifecycle"
- * Sandbox run:
- *   BOBBIT_RUN_CLAUDE_AGENT_SDK_SANDBOX_SMOKE=1 MANUAL_CLAUDE_AGENT_SDK_MODEL=<unprefixed-model> MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR="$MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR" npm run test:manual -- --grep "Docker sandbox lifecycle"
+ * The smoke defaults to the stable, low-cost `haiku` SDK alias. Set
+ * MANUAL_CLAUDE_AGENT_SDK_MODEL to an unprefixed alias only when deliberately
+ * overriding that default.
+ *
+ * Direct run (uses the default `haiku`):
+ *   BOBBIT_RUN_CLAUDE_AGENT_SDK_SMOKE=1 MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR="$MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR" npm run test:manual -- --grep "Claude Agent SDK lifecycle"
+ * Sandbox run (uses the default `haiku`):
+ *   BOBBIT_RUN_CLAUDE_AGENT_SDK_SANDBOX_SMOKE=1 MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR="$MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR" npm run test:manual -- --grep "Docker sandbox lifecycle"
  */
 import { test, expect } from "@playwright/test";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -455,7 +459,8 @@ function assertManualTranscriptPrefixProjection(before: unknown, after: unknown)
 
 function manualSdkModel(): string {
 	const configuredModel = process.env.MANUAL_CLAUDE_AGENT_SDK_MODEL?.trim();
-	if (!configuredModel || configuredModel.startsWith("claude-agent-sdk/")) {
+	if (!configuredModel) return "haiku";
+	if (configuredModel.startsWith("claude-agent-sdk/")) {
 		throw new Error("Claude Agent SDK smoke requires MANUAL_CLAUDE_AGENT_SDK_MODEL without the provider prefix.");
 	}
 	return configuredModel;
@@ -995,6 +1000,48 @@ test("Claude Agent SDK provider-unavailable failure is bounded and sanitized wit
 	}
 });
 
+test("Claude Agent SDK manual model defaults to the stable low-cost haiku alias", () => {
+	const originalModel = process.env.MANUAL_CLAUDE_AGENT_SDK_MODEL;
+	try {
+		delete process.env.MANUAL_CLAUDE_AGENT_SDK_MODEL;
+		expect(manualSdkModel()).toBe("haiku");
+		process.env.MANUAL_CLAUDE_AGENT_SDK_MODEL = "   ";
+		expect(manualSdkModel()).toBe("haiku");
+		process.env.MANUAL_CLAUDE_AGENT_SDK_MODEL = "  sonnet  ";
+		expect(manualSdkModel()).toBe("sonnet");
+	} finally {
+		if (originalModel === undefined) delete process.env.MANUAL_CLAUDE_AGENT_SDK_MODEL;
+		else process.env.MANUAL_CLAUDE_AGENT_SDK_MODEL = originalModel;
+	}
+});
+
+test("Claude Agent SDK manual model rejects provider-prefixed overrides", () => {
+	const originalModel = process.env.MANUAL_CLAUDE_AGENT_SDK_MODEL;
+	try {
+		process.env.MANUAL_CLAUDE_AGENT_SDK_MODEL = "claude-agent-sdk/haiku";
+		expect(manualSdkModel).toThrow("Claude Agent SDK smoke requires MANUAL_CLAUDE_AGENT_SDK_MODEL without the provider prefix.");
+	} finally {
+		if (originalModel === undefined) delete process.env.MANUAL_CLAUDE_AGENT_SDK_MODEL;
+		else process.env.MANUAL_CLAUDE_AGENT_SDK_MODEL = originalModel;
+	}
+});
+
+test("Claude Agent SDK manual default live control switches aliases from haiku to sonnet", () => {
+	const originalModel = process.env.MANUAL_CLAUDE_AGENT_SDK_MODEL;
+	try {
+		delete process.env.MANUAL_CLAUDE_AGENT_SDK_MODEL;
+		const primary = manualSdkModel();
+		expect({
+			primary,
+			alternate: alternateManualSdkModel(primary),
+			initialSessionModel: `claude-agent-sdk/${primary}`,
+		}).toEqual({ primary: "haiku", alternate: "sonnet", initialSessionModel: "claude-agent-sdk/haiku" });
+	} finally {
+		if (originalModel === undefined) delete process.env.MANUAL_CLAUDE_AGENT_SDK_MODEL;
+		else process.env.MANUAL_CLAUDE_AGENT_SDK_MODEL = originalModel;
+	}
+});
+
 test("Claude Agent SDK manual live controls choose a distinct SDK wire alias", () => {
 	expect({
 		fullHaiku: alternateManualSdkModel("claude-haiku-4-5"),
@@ -1307,6 +1354,12 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			const configuredModel = manualSdkModel();
 			const alternateModel = alternateManualSdkModel(configuredModel);
 			expect(alternateModel).not.toBe(configuredModel);
+			// The documented no-override path is an alias-only live control
+			// regression: start with cheap `haiku`, then read back `sonnet`.
+			// An explicit unprefixed override remains supported for targeted runs.
+			if (!process.env.MANUAL_CLAUDE_AGENT_SDK_MODEL?.trim()) {
+				expect({ configuredModel, alternateModel }).toEqual({ configuredModel: "haiku", alternateModel: "sonnet" });
+			}
 			const sessionModel = `claude-agent-sdk/${configuredModel}`;
 			const { claudeAgentSdkUnavailableRouteDiagnostic } = await import("../../dist/server/agent/claude-agent-sdk-error.js");
 			const providerResponse = await api("/api/custom-providers", {
@@ -1590,6 +1643,11 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 		const configuredModel = manualSdkModel();
 		const alternateModel = alternateManualSdkModel(configuredModel);
 		expect(alternateModel).not.toBe(configuredModel);
+		// Keep the default Docker proof on SDK aliases, never canonical IDs:
+		// `haiku` at creation must live-switch and read back as `sonnet` below.
+		if (!process.env.MANUAL_CLAUDE_AGENT_SDK_MODEL?.trim()) {
+			expect({ configuredModel, alternateModel }).toEqual({ configuredModel: "haiku", alternateModel: "sonnet" });
+		}
 		const nonce = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 		const root = join(manualTmpRoot(), `bobbit-claude-agent-sdk-sandbox-${nonce}`);
 		const bobbitDir = join(root, ".bobbit");
