@@ -170,8 +170,6 @@ type ManualCanonicalToolDiagnostic = {
 	resultState: ManualCanonicalToolResultState;
 	executionCounts: ManualCanonicalToolExecutionCounts;
 	failureCounts: ManualCanonicalToolFailureCounts;
-	/** Present only for the sandbox's same-session private read preflight. */
-	sameSessionReadPreflightSucceeded?: boolean;
 };
 
 /** Classify the matching durable result without retaining IDs, result data, or tool arguments. */
@@ -596,25 +594,6 @@ function createManualCanonicalToolFailureCounts(): ManualCanonicalToolFailureCou
 	return { unavailable: 0, "invalid-arguments": 0, "handler-failed": 0, "handler-error-result": 0 };
 }
 
-/**
- * Test-only access to the bridge-local surface avoids making a runtime surface
- * public. Consume the handler result privately and retain only its error flag.
- */
-async function manualSameSessionReadPreflight(source: unknown): Promise<boolean> {
-	const bridge = source && typeof source === "object" ? source as { activeToolSurface?: unknown } : undefined;
-	const surface = bridge?.activeToolSurface && typeof bridge.activeToolSurface === "object"
-		? bridge.activeToolSurface as { invoke?: unknown }
-		: undefined;
-	if (typeof surface?.invoke !== "function") return false;
-	try {
-		const result = await surface.invoke("mcp__bobbit__read", { path: "README.md" });
-		return !(result && typeof result === "object" && !Array.isArray(result)
-			&& (result as { isError?: unknown }).isError === true);
-	} catch {
-		return false;
-	}
-}
-
 /** Read the bridge's fixed aggregate seam; never inspect transcript or worker payloads. */
 function manualCanonicalToolFailureCounts(source: unknown): ManualCanonicalToolFailureCounts {
 	const bridge = source && typeof source === "object" ? source as { getToolFailureCounts?: unknown } : undefined;
@@ -679,13 +658,11 @@ function manualCanonicalToolDiagnostic(
 	toolName: Exclude<ManualCanonicalToolCategory, "other">,
 	counts: ManualCanonicalToolExecutionCounts,
 	failureCounts: ManualCanonicalToolFailureCounts = createManualCanonicalToolFailureCounts(),
-	sameSessionReadPreflightSucceeded?: boolean,
 ): ManualCanonicalToolDiagnostic {
 	return {
 		...manualRootCanonicalToolResultState(snapshot, toolName),
 		executionCounts: manualCanonicalToolExecutionFacts(counts),
 		failureCounts: manualCanonicalToolFailureCounts({ getToolFailureCounts: () => failureCounts }),
-		...(sameSessionReadPreflightSucceeded === undefined ? {} : { sameSessionReadPreflightSucceeded }),
 	};
 }
 
@@ -694,9 +671,8 @@ function assertManualDurableCanonicalToolExecution(
 	toolName: Exclude<ManualCanonicalToolCategory, "other">,
 	counts: ManualCanonicalToolExecutionCounts = createManualCanonicalToolExecutionCounts(),
 	failureCounts: ManualCanonicalToolFailureCounts = createManualCanonicalToolFailureCounts(),
-	sameSessionReadPreflightSucceeded?: boolean,
 ): void {
-	const diagnostic = manualCanonicalToolDiagnostic(snapshot, toolName, counts, failureCounts, sameSessionReadPreflightSucceeded);
+	const diagnostic = manualCanonicalToolDiagnostic(snapshot, toolName, counts, failureCounts);
 	if (diagnostic.callPresent && diagnostic.resultState === "success") return;
 	throw new Error(JSON.stringify(diagnostic));
 }
@@ -1051,13 +1027,6 @@ test("Claude Agent SDK manual canonical tool diagnostics distinguish absent and 
 	assertAllowlistedDiagnostic(missingReadResultHistory, { callPresent: true, resultState: "absent" });
 	assertAllowlistedDiagnostic(errorReadResultHistory, { callPresent: true, resultState: "error" });
 	assertAllowlistedDiagnostic(undefined, { callPresent: false, resultState: "absent" });
-	const preflightFacts = manualCanonicalToolDiagnostic(errorReadResultHistory, "read", counts, failureCounts, false);
-	expect(preflightFacts).toEqual({
-		callPresent: true, resultState: "error", executionCounts: counts, failureCounts: expectedFailureCounts,
-		sameSessionReadPreflightSucceeded: false,
-	});
-	expect(Object.keys(preflightFacts)).toEqual(["callPresent", "resultState", "executionCounts", "failureCounts", "sameSessionReadPreflightSucceeded"]);
-	expect(JSON.stringify(preflightFacts)).not.toContain(privateValues[4]);
 	expect(() => assertManualDurableCanonicalToolExecution(successfulReadHistory, "read", counts, failureCounts)).not.toThrow();
 	for (const snapshot of [missingReadResultHistory, errorReadResultHistory, undefined]) {
 		let diagnostic = "";
@@ -1065,25 +1034,6 @@ test("Claude Agent SDK manual canonical tool diagnostics distinguish absent and 
 		catch (error) { diagnostic = error instanceof Error ? error.message : ""; }
 		for (const privateValue of privateValues) expect(diagnostic).not.toContain(privateValue);
 	}
-});
-
-test("Claude Agent SDK manual same-session read preflight retains only a boolean", async () => {
-	const privateResult = "private read result /private/path private-token";
-	const calls: Array<{ name: unknown; args: unknown }> = [];
-	const successful = await manualSameSessionReadPreflight({
-		activeToolSurface: {
-			invoke: async (name: unknown, args: unknown) => {
-				calls.push({ name, args });
-				return { isError: false, content: privateResult };
-			},
-		},
-	});
-	const error = await manualSameSessionReadPreflight({
-		activeToolSurface: { invoke: async () => ({ isError: true, content: privateResult }) },
-	});
-	expect(calls).toEqual([{ name: "mcp__bobbit__read", args: { path: "README.md" } }]);
-	expect({ successful, error }).toEqual({ successful: true, error: false });
-	expect(JSON.stringify({ successful, error })).not.toContain(privateResult);
 });
 
 test("Claude Agent SDK manual terminal diagnostics expose only route-safe categories", async () => {
@@ -1717,7 +1667,7 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			const canonicalReadFailuresBefore = manualCanonicalToolFailureCounts(session.rpcClient);
 			const unsubscribeCanonicalReadExecution = session.rpcClient.onEvent(event => countManualCanonicalToolExecution(canonicalReadExecution, event));
 			try {
-				await runTurn("Use only Bobbit read on README.md. Do not use any other tools.", "canonical Bobbit read turn");
+				await runTurn("Use exactly one Bobbit read with path README.md, no offset or limit, and no other tools.", "canonical Bobbit read turn");
 			} finally {
 				unsubscribeCanonicalReadExecution();
 			}
@@ -2095,16 +2045,13 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 
 			await runSandboxTurn("Reply with exactly: SDK_SANDBOX_READY", "control");
 
-			// Probe the already-created sandbox surface before asking the model to use it.
-			// This consumes only the handler result locally and retains a single boolean.
-			const sandboxSameSessionReadPreflightSucceeded = await manualSameSessionReadPreflight(session.rpcClient);
 			// An allowed read is one complete turn before the permission-gated grep.
 			// Keep only fixed execution boundaries for the durable-settlement diagnostic.
 			const sandboxCanonicalReadExecution = createManualCanonicalToolExecutionCounts();
 			const sandboxCanonicalReadFailuresBefore = manualCanonicalToolFailureCounts(session.rpcClient);
 			const unsubscribeSandboxCanonicalReadExecution = session.rpcClient.onEvent(event => countManualCanonicalToolExecution(sandboxCanonicalReadExecution, event));
 			try {
-				await runSandboxTurn("Use only Bobbit read on README.md. Do not use any other tools.", "read");
+				await runSandboxTurn("Use exactly one Bobbit read with path README.md, no offset or limit, and no other tools.", "read");
 			} finally {
 				unsubscribeSandboxCanonicalReadExecution();
 			}
@@ -2117,7 +2064,6 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 				"read",
 				sandboxCanonicalReadExecution,
 				manualCanonicalToolFailureCountDelta(sandboxCanonicalReadFailuresBefore, manualCanonicalToolFailureCounts(session.rpcClient)),
-				sandboxSameSessionReadPreflightSucceeded,
 			);
 
 			// Count only fixed tool categories for the separate permission-card turn.
