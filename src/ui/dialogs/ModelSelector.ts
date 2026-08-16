@@ -286,6 +286,7 @@ export class ModelSelector extends DialogBase {
 						const isCurrent = modelsAreEqual(this.currentModel, model);
 						const isSelected = index === this.selectedIndex;
 						const hasKey = model.authenticated ?? false;
+						const isClaudeAgentSdk = provider === "claude-agent-sdk";
 						const providerBadge = provider === "aigw" && model.upstreamProvider ? model.upstreamProvider : provider;
 						const providerTitle = provider === "aigw" && model.upstreamProvider ? `AIGW provider: ${model.upstreamProvider}` : provider;
 						const sessionUnavailable = this.isSessionUnavailable(model);
@@ -293,7 +294,11 @@ export class ModelSelector extends DialogBase {
 						const rowTitle = sessionUnavailable
 							? (model.sessionUnavailableReason
 								?? "This model can't be used in agent sessions yet.")
-							: (hasKey ? "" : "API key or account login required — set up in Settings → Account, or add a key under Settings → Models.");
+							: (hasKey
+								? ""
+								: isClaudeAgentSdk
+									? "Anthropic subscription OAuth required — connect Anthropic OAuth in Settings → Account."
+									: "API key or account login required — set up in Settings → Account, or add a key under Settings → Models.");
 						return html`
 							<div
 								data-model-item
@@ -313,12 +318,12 @@ export class ModelSelector extends DialogBase {
 							>
 								<div class="flex items-center justify-between gap-2 mb-1">
 									<div class="flex items-center gap-2 flex-1 min-w-0">
-										<span class="text-sm font-medium text-foreground truncate">${id}</span>
+										<span class="text-sm font-medium text-foreground truncate">${isClaudeAgentSdk ? model.name : id}</span>
 										${isCurrent ? html`<span class="text-green-500">✓</span>` : ""}
 									</div>
 									<div class="flex items-center gap-1.5">
 										${sessionUnavailable ? Badge("Account only", "secondary") : ""}
-										${!hasKey && !sessionUnavailable ? html`<span class="text-muted-foreground" title=${"Authentication required"}>${icon(KeyRound, "sm")}</span>` : ""}
+										${!hasKey && !sessionUnavailable ? html`<span class="text-muted-foreground" title=${isClaudeAgentSdk ? "Anthropic subscription OAuth required" : "Authentication required"}>${icon(KeyRound, "sm")}</span>` : ""}
 										${this.renderRuntimeBadge(model.runtime)}
 										<span title=${providerTitle}>${Badge(providerBadge, "outline")}</span>
 									</div>
