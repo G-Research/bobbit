@@ -1046,10 +1046,9 @@ export class GoalManager {
 	async archiveGoal(id: string): Promise<boolean> {
 		const goal = this.store.get(id);
 		if (!goal) return false;
-		// Preserve GoalStore's canonical transition hooks, then durably fence that
-		// exact mutation before any runtime/session cleanup. This also publishes
-		// adopted-goal archival before its promoted lead can be terminated.
-		if (!goal.archived) this.store.archive(id);
+		// Publish terminal intent exactly once and durably before any cross-store
+		// cleanup. archiveStrict rolls memory back on persistence failure, and also
+		// publishes adopted-goal archival before its promoted lead is terminated.
 		const archived = await this.store.archiveStrict(id);
 		let reconciledTeamOwnership = false;
 		if (archived) {

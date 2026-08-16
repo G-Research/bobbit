@@ -5384,6 +5384,9 @@ export class VerificationHarness {
 		const dispatchBudgetMs = verifierPromptDispatchTimeoutMs(args.whenReady);
 		const fields = `goal=${args.goalId ?? "-"} gate=${args.gateId ?? "-"} signal=${args.signalId ?? "-"} step=${args.stepName} reviewerSession=${session.id} verifier=${args.verifierKind} prompt=${args.promptKind} attempt=${args.attempt ?? 1} dispatchBudgetMs=${dispatchBudgetMs}`;
 		const signalIsCurrent = () => {
+			if (args.goalId && this.projectContextManager?.getContextForGoal(args.goalId)?.goalStore.get(args.goalId)?.archived) {
+				return false;
+			}
 			if (!args.signalId) return true;
 			const active = this.activeVerifications.get(args.signalId);
 			return !this.cancelledVerificationSignals.has(args.signalId)
@@ -5818,42 +5821,43 @@ export class VerificationHarness {
 			const goalProjectId = this.projectContextManager?.getContextForGoal(goalId)?.project.id;
 			if (!goalProjectId) throw new Error(`Cannot create verification review session: goal "${goalId}" has no projectId`);
 
-			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
-				rolePrompt: combinedPrompt,
-				roleName,
-				...reviewerMeta,
-				sandboxed: isSandboxed,
-				projectId: goalProjectId,
-				sessionId,
-				skipAutoModel: true,
-				skipAutoThinking: true,
-				initialModel: _preInitialModel,
-				initialThinkingLevel: _preInitialThinking,
-			});
+			const publishReviewer = async () => {
+				const created = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
+					rolePrompt: combinedPrompt,
+					roleName,
+					...reviewerMeta,
+					sandboxed: isSandboxed,
+					projectId: goalProjectId,
+					sessionId,
+					skipAutoModel: true,
+					skipAutoThinking: true,
+					initialModel: _preInitialModel,
+					initialThinkingLevel: _preInitialThinking,
+				});
 
-			// Set title and metadata. `step.name` is optional — many inline
-			// workflows skip it. Fall back to step.role / "Review" so the
-			// sidebar never shows "undefined: <name>" as the title prefix.
-			const funName = await generateTeamName("verification");
-			const titlePrefix = step.name?.trim()
-				|| (step.role ? `Review (${step.role})` : "Review");
-			this.sessionManager!.setTitle(sessionId, `${titlePrefix}: ${funName}`);
-			// Stamp teamLeadSessionId so the sidebar can nest this reviewer
-			// under the team-lead that triggered the verification. Without
-			// this, reviewer sessions persist with teamLeadSessionId=undefined
-			// and the archived render path lumps them under "unmapped" — they
-			// only surface under the LAST archived team-lead. Pure-helper
-			// contract pinned by tests/verification-reviewer-meta.test.ts.
-			this.sessionManager!.updateSessionMeta(sessionId, reviewerMeta);
-
-			// Register in team store (if team manager available)
-			if (this.teamManager) {
-				try {
-					await this.teamManager.registerReviewerSession(goalId, sessionId, step.name);
-				} catch (err) {
-					// Non-fatal — session still works even if team registration fails
-					console.warn(`[verification] Failed to register reviewer session in team:`, err);
+				// Publish ownership and initial sidebar metadata before releasing the
+				// shared terminal-admission turn. Reconciliation then either waits for
+				// this durable row or rejects creation before any row/process exists.
+				const funName = await generateTeamName("verification");
+				const titlePrefix = step.name?.trim()
+					|| (step.role ? `Review (${step.role})` : "Review");
+				this.sessionManager!.setTitle(sessionId, `${titlePrefix}: ${funName}`);
+				this.sessionManager!.updateSessionMeta(sessionId, reviewerMeta);
+				if (this.teamManager) {
+					try {
+						await this.teamManager.registerReviewerSession(goalId, sessionId, step.name);
+					} catch (err) {
+						console.warn(`[verification] Failed to register reviewer session in team:`, err);
+					}
 				}
+				await this.sessionManager!.getSessionStore?.(created.projectId)?.flushAsync?.();
+				return created;
+			};
+			const session = typeof this.sessionManager!.runWithTeamGoalAdmission === "function"
+				? await this.sessionManager!.runWithTeamGoalAdmission(goalId, publishReviewer)
+				: await publishReviewer();
+			if (this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.archived) {
+				throw new Error(`Reviewer creation was cancelled because goal ${goalId} was archived`);
 			}
 
 			// Resolve role overrides so they win over default.reviewModel/Thinking.
@@ -6284,38 +6288,41 @@ export class VerificationHarness {
 			const qaGoalProjectId = this.projectContextManager?.getContextForGoal(goalId)?.project.id;
 			if (!qaGoalProjectId) throw new Error(`Cannot create verification QA session: goal "${goalId}" has no projectId`);
 
-			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
-				rolePrompt: combinedPrompt,
-				roleName: qaRoleName,
-				...qaReviewerMeta,
-				sandboxed: qaIsSandboxed,
-				projectId: qaGoalProjectId,
-				sessionId: qaSessionId,
-				skipAutoModel: true,
-				skipAutoThinking: true,
-				initialModel: _preQaInitialModel,
-				initialThinkingLevel: _preQaInitialThinking,
-			});
-			qaSessionId = session.id;
+			const publishQaReviewer = async () => {
+				const created = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
+					rolePrompt: combinedPrompt,
+					roleName: qaRoleName,
+					...qaReviewerMeta,
+					sandboxed: qaIsSandboxed,
+					projectId: qaGoalProjectId,
+					sessionId: qaSessionId,
+					skipAutoModel: true,
+					skipAutoThinking: true,
+					initialModel: _preQaInitialModel,
+					initialThinkingLevel: _preQaInitialThinking,
+				});
+				qaSessionId = created.id;
 
-			// Set title and metadata — same fallback as llm-review above.
-			// Same teamLeadSessionId stamp so the sidebar can nest this QA
-			// session under its triggering team-lead (see runLlmReviewStep
-			// for the rationale; without this, QA sessions surface as
-			// orphaned "unmapped" members).
-			const qaFunName = await generateTeamName("verification");
-			const qaTitlePrefix = step.name?.trim()
-				|| (step.role ? `QA (${step.role})` : "QA");
-			this.sessionManager!.setTitle(qaSessionId, `${qaTitlePrefix}: ${qaFunName}`);
-			this.sessionManager!.updateSessionMeta(qaSessionId, qaReviewerMeta);
-
-			// Register in team store
-			if (this.teamManager) {
-				try {
-					await this.teamManager.registerReviewerSession(goalId, qaSessionId, step.name);
-				} catch (err) {
-					console.warn(`[verification] Failed to register QA session in team:`, err);
+				const qaFunName = await generateTeamName("verification");
+				const qaTitlePrefix = step.name?.trim()
+					|| (step.role ? `QA (${step.role})` : "QA");
+				this.sessionManager!.setTitle(qaSessionId, `${qaTitlePrefix}: ${qaFunName}`);
+				this.sessionManager!.updateSessionMeta(qaSessionId, qaReviewerMeta);
+				if (this.teamManager) {
+					try {
+						await this.teamManager.registerReviewerSession(goalId, qaSessionId, step.name);
+					} catch (err) {
+						console.warn(`[verification] Failed to register QA session in team:`, err);
+					}
 				}
+				await this.sessionManager!.getSessionStore?.(created.projectId)?.flushAsync?.();
+				return created;
+			};
+			const session = typeof this.sessionManager!.runWithTeamGoalAdmission === "function"
+				? await this.sessionManager!.runWithTeamGoalAdmission(goalId, publishQaReviewer)
+				: await publishQaReviewer();
+			if (this.projectContextManager?.getContextForGoal(goalId)?.goalStore.get(goalId)?.archived) {
+				throw new Error(`QA reviewer creation was cancelled because goal ${goalId} was archived`);
 			}
 
 			// Resolve role overrides for QA — role wins over default.reviewModel/Thinking.

@@ -304,6 +304,49 @@ describe("archived goal reconciliation", () => {
 		);
 	});
 
+	it("does not treat legacy effective-goal metadata on a standalone delegate chain as team ownership", async () => {
+		const archivedGoal = goal("goal-standalone-delegate");
+		const foreignGoal = goal("goal-foreign-descendant", false);
+		const standalone = session("standalone-root", { goalId: archivedGoal.id });
+		const delegate = session("standalone-delegate", { delegateOf: standalone.id, teamGoalId: archivedGoal.id });
+		const grandchild = session("standalone-grandchild", {
+			parentSessionId: delegate.id,
+			childKind: "review",
+			teamGoalId: archivedGoal.id,
+		});
+		const worker = session("genuine-worker", { teamGoalId: archivedGoal.id, role: "coder" });
+		const mixedLinkChild = session("mixed-link-child", {
+			delegateOf: standalone.id,
+			parentSessionId: worker.id,
+			childKind: "host-agents",
+		});
+		const foreignChild = session("foreign-owner-child", {
+			delegateOf: worker.id,
+			teamGoalId: foreignGoal.id,
+		});
+		const foreignGrandchild = session("foreign-owner-grandchild", { delegateOf: foreignChild.id });
+		const fixture = makeFixture({
+			goals: [archivedGoal, foreignGoal],
+			sessions: [standalone, delegate, grandchild, worker, mixedLinkChild, foreignChild, foreignGrandchild],
+		});
+		await fixture.manager.waitForRestore();
+
+		const result = await fixture.manager.reconcileArchivedGoal(archivedGoal.id, { audit: false });
+
+		assert.equal(fixture.sessionStore.get(standalone.id).archived, false);
+		assert.equal(fixture.sessionStore.get(delegate.id).archived, false, "inherited teamGoalId is metadata, not standalone-chain ownership");
+		assert.equal(fixture.sessionStore.get(grandchild.id).archived, false, "standalone metadata ancestry remains live recursively");
+		assert.equal(fixture.sessionStore.get(worker.id).archived, true, "genuine non-child teamGoalId row remains authoritative");
+		assert.equal(fixture.sessionStore.get(mixedLinkChild.id).archived, true, "either canonical child link reaches a selected team parent");
+		assert.equal(fixture.sessionStore.get(foreignChild.id).archived, false, "foreign non-empty team ownership wins over descendant discovery");
+		assert.equal(fixture.sessionStore.get(foreignGrandchild.id).archived, false, "foreign-owned subtrees are not traversed");
+		const workerOptions = fixture.terminateOptions[fixture.terminateCalls.indexOf(worker.id)];
+		const cascadeIds = workerOptions.cascadeSessionIds as ReadonlySet<string>;
+		assert.equal(cascadeIds.has(mixedLinkChild.id), true, "canonical selected descendants remain in the termination cascade");
+		assert.equal(cascadeIds.has(foreignChild.id), false, "foreign conflicts are excluded from canonical cascade termination");
+		assert.match(result.errors.join("\n"), /ownership conflict/);
+	});
+
 	it("removes stale archived-goal team state while leaving a conflicting foreign owner live", async () => {
 		const archivedGoal = goal("goal-stale-reference");
 		const foreignGoal = goal("goal-foreign-owner", false);

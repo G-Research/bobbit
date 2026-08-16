@@ -52,21 +52,21 @@ describe("runSubgoalStep — merge + archive flow", () => {
 	it("R-028: archiveGoalAfterMerge sets state=complete BEFORE archiving (stale-pointer invalidation rescue path)", async () => {
 		// Order is load-bearing: the archived snapshot must have
 		// state=complete on disk so the rescue-path tier-2 short-circuit fires.
-		// Wrap goalStore.update to log the state stamp; wrap goalStore.archive
-		// to log the archive call. Assert state-complete < archive.
+		// Wrap goalStore.update to log the state stamp; wrap the strict durable
+		// archive boundary to log publication. Assert state-complete < archive.
 		const fx = await buildFixture();
 		afterAll(() => fx.cleanup());
 
 		const storeCalls: string[] = [];
 		const origUpdate = fx.goalStore.update.bind(fx.goalStore);
-		const origArchive = fx.goalStore.archive.bind(fx.goalStore);
+		const origArchiveStrict = fx.goalStore.archiveStrict.bind(fx.goalStore);
 		(fx.goalStore as any).update = (id: string, updates: any) => {
 			if (updates && updates.state === "complete") storeCalls.push(`state-complete:${id}`);
 			return origUpdate(id, updates);
 		};
-		(fx.goalStore as any).archive = (id: string) => {
-			storeCalls.push(`archive:${id}`);
-			return origArchive(id);
+		(fx.goalStore as any).archiveStrict = async (id: string) => {
+			storeCalls.push(`archive-strict:${id}`);
+			return origArchiveStrict(id);
 		};
 
 		const step = buildSubgoalStep({ planId: "p-order" });
@@ -75,11 +75,11 @@ describe("runSubgoalStep — merge + archive flow", () => {
 		assert.equal(result.passed, true);
 
 		const stateIdx = storeCalls.findIndex(c => c.startsWith("state-complete:"));
-		const archiveIdx = storeCalls.findIndex(c => c.startsWith("archive:"));
+		const archiveIdx = storeCalls.findIndex(c => c.startsWith("archive-strict:"));
 		assert.notEqual(stateIdx, -1, `expected state-complete log entry, got: ${storeCalls.join(", ")}`);
 		assert.notEqual(archiveIdx, -1, `expected archive log entry, got: ${storeCalls.join(", ")}`);
 		assert.ok(stateIdx < archiveIdx,
-			`state=complete must be set BEFORE archive(). order: ${storeCalls.join(" → ")}`);
+			`state=complete must be set BEFORE archiveStrict(). order: ${storeCalls.join(" → ")}`);
 	});
 
 	it("alreadyMerged child → still tears down + archives, returns passed=true", async () => {
