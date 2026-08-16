@@ -4,26 +4,18 @@ import { gatewayFetch } from "../../app/gateway-fetch.js";
 import { gatewayRoute } from "../../shared/base-path.js";
 import { formatCost, formatTokenCount } from "../utils/format.js";
 
-interface SessionCostEntry {
-	sessionId: string;
-	title: string;
-	role?: string;
-	delegateOf?: string;
-	assistantType?: string;
-	taskId?: string;
-	inputTokens: number;
-	outputTokens: number;
-	cacheReadTokens: number;
-	cacheWriteTokens: number;
-	totalCost: number;
-}
+type CostBasis = "api-billed" | "api-notional" | "subscription-notional" | "unknown";
 
-interface CostAggregate {
+interface CostSnapshot {
 	inputTokens: number;
 	outputTokens: number;
 	cacheReadTokens: number;
 	cacheWriteTokens: number;
-	totalCost: number;
+	/** A billed API amount only. Subscription sessions intentionally return null. */
+	totalCost: number | null;
+	/** Provider estimate, kept separate from billed totals and rollups. */
+	notionalCostUsd?: number | null;
+	costBasis?: CostBasis;
 	/**
 	 * Derived ratio `cacheReadTokens / (cacheReadTokens + inputTokens)`. The server
 	 * derives this on every cost snapshot. Older servers may omit the field — in
@@ -32,6 +24,17 @@ interface CostAggregate {
 	 */
 	cacheHitRate?: number | null;
 }
+
+interface SessionCostEntry extends CostSnapshot {
+	sessionId: string;
+	title: string;
+	role?: string;
+	delegateOf?: string;
+	assistantType?: string;
+	taskId?: string;
+}
+
+type CostAggregate = CostSnapshot;
 
 /**
  * Format a cache-hit ratio for display. Returns an em dash for missing/null/
@@ -42,6 +45,25 @@ function formatCacheHitRate(rate: number | null | undefined): string {
 		return "\u2014";
 	}
 	return `${Math.round(rate * 100)}%`;
+}
+
+/** Preserve small SDK estimates rather than rounding a non-zero amount to `$0`. */
+function formatEstimatedApiEquivalent(cost: number): string {
+	return cost < 0.1
+		? `$${cost.toFixed(6).replace(/0+$/, "").replace(/\.$/, "")}`
+		: formatCost(cost);
+}
+
+function billedCost(cost: number | null | undefined): string {
+	return typeof cost === "number" && Number.isFinite(cost) ? formatCost(cost) : "\u2014";
+}
+
+function subscriptionNotional(cost: CostSnapshot): number | null {
+	return cost.costBasis === "subscription-notional"
+		&& typeof cost.notionalCostUsd === "number"
+		&& Number.isFinite(cost.notionalCostUsd)
+		? cost.notionalCostUsd
+		: null;
 }
 
 @customElement("cost-popover")
@@ -102,19 +124,28 @@ export class CostPopover extends LitElement {
 			</div>`;
 	}
 
-	private _renderSessionEntry(s: SessionCostEntry) {
+	private _renderSessionEntry(s: SessionCostEntry, showSubscriptionNotional = true) {
 		const label = s.role
 			? html`<span style="font-weight:500">${s.title}</span> <span style="opacity:0.6;font-size:11px">${s.role}</span>`
 			: s.assistantType === "goal"
 				? html`<span style="font-weight:500">${s.title}</span> <span style="opacity:0.6;font-size:11px">goal assistant</span>`
 				: html`<span style="font-weight:500">${s.title}</span>`;
 		const totalTokens = s.inputTokens + s.outputTokens + s.cacheReadTokens + s.cacheWriteTokens;
+		const estimate = showSubscriptionNotional ? subscriptionNotional(s) : null;
 		return html`
 			<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;gap:8px;">
 				<div style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;">${label}</div>
 				<div style="display:flex;gap:12px;flex-shrink:0;font-variant-numeric:tabular-nums;">
 					<span style="opacity:0.6;font-size:11px;">${formatTokenCount(totalTokens)}</span>
-					<span style="font-weight:500;min-width:50px;text-align:right;">${formatCost(s.totalCost)}</span>
+					${estimate === null ? html`
+						<span style="font-weight:500;min-width:50px;text-align:right;">${billedCost(s.totalCost)}</span>
+					` : html`
+						<span
+							data-testid="cost-entry-subscription-notional"
+							style="font-weight:500;min-width:50px;text-align:right;"
+							aria-label="Estimated API-equivalent amount ${formatEstimatedApiEquivalent(estimate)}. This subscription estimate is not a billed API cost."
+						>Est. ${formatEstimatedApiEquivalent(estimate)}</span>
+					`}
 				</div>
 			</div>`;
 	}
@@ -124,6 +155,25 @@ export class CostPopover extends LitElement {
 			<div data-testid="cost-cache-hit" style="display:flex;justify-content:space-between;align-items:center;padding:2px 0;">
 				<span style="color:var(--muted-foreground)">Cache hit</span>
 				<span style="font-variant-numeric:tabular-nums;">${formatCacheHitRate(rate)}</span>
+			</div>`;
+	}
+
+	private _renderSubscriptionNotional(snapshot: CostSnapshot) {
+		const estimate = subscriptionNotional(snapshot);
+		if (estimate === null) return nothing;
+		const amount = formatEstimatedApiEquivalent(estimate);
+		return html`
+			<div
+				data-testid="cost-subscription-notional"
+				role="note"
+				aria-label="Estimated API-equivalent amount ${amount}. This is a subscription estimate, not a billed API cost, and is excluded from billed totals and goal rollups."
+				style="border-bottom:1px solid var(--border);margin-bottom:8px;padding-bottom:8px;"
+			>
+				<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
+					<span style="font-weight:600;">Estimated API equivalent</span>
+					<span style="font-weight:700;font-variant-numeric:tabular-nums;">Est. ${amount}</span>
+				</div>
+				<div style="color:var(--muted-foreground);margin-top:3px;">Subscription estimate — not a billed API cost.</div>
 			</div>`;
 	}
 
@@ -166,9 +216,11 @@ export class CostPopover extends LitElement {
 				${this._error ? html`<div style="color:var(--destructive)">${this._error}</div>` : nothing}
 				${!this._loading && !this._error && this._aggregate ? html`
 					<div style="font-weight:600;font-size:13px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;">
-						<span>Cost Breakdown</span>
-						<span style="font-size:14px;font-weight:700;">${formatCost(this._aggregate.totalCost)}</span>
+						<span>Billed API cost</span>
+						<span data-testid="cost-billed-total" style="font-size:14px;font-weight:700;">${billedCost(this._aggregate.totalCost)}</span>
 					</div>
+
+					${!this.goalId ? this._renderSubscriptionNotional(this._aggregate) : nothing}
 
 					<div style="border-bottom:1px solid var(--border);margin-bottom:8px;padding-bottom:8px;">
 						${this._renderBreakdown(this._aggregate)}
@@ -177,7 +229,7 @@ export class CostPopover extends LitElement {
 					${this._sessions.length > 0 ? html`
 						<div style="font-weight:600;margin-bottom:4px;">By Agent</div>
 						<div style="max-height:200px;overflow-y:auto;margin-bottom:4px;">
-							${this._sessions.map(s => this._renderSessionEntry(s))}
+							${this._sessions.map(s => this._renderSessionEntry(s, !this.goalId))}
 						</div>
 					` : nothing}
 

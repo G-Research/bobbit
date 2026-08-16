@@ -67,6 +67,13 @@ import type { StreamingMessageContainer } from "./StreamingMessageContainer.js";
 import type { GitRepoKnown } from "../../app/git-status-refresh.js";
 import { selectPromptAuthorDisplayMode } from "../message-author-presentation.js";
 
+/** Keep a small SDK subscription estimate visible instead of rounding it to `$0`. */
+function formatEstimatedApiEquivalent(cost: number): string {
+	return cost < 0.1
+		? `$${cost.toFixed(6).replace(/0+$/, "").replace(/\.$/, "")}`
+		: formatCost(cost);
+}
+
 interface PromptHistoryForkDetail {
 	entryId: string;
 	newWorktree: boolean;
@@ -2297,7 +2304,17 @@ export class AgentInterface extends LitElement {
 		const serverCostTotal = typeof serverCost?.totalCost === "number" && Number.isFinite(serverCost.totalCost)
 			? serverCost.totalCost
 			: undefined;
+		// SDK subscription usage is an API-equivalent estimate, never a bill. Keep
+		// it separate from the authoritative billed total and goal rollups.
+		const subscriptionNotional = serverCost?.costBasis === "subscription-notional"
+			&& typeof serverCost?.notionalCostUsd === "number"
+			&& Number.isFinite(serverCost.notionalCostUsd)
+			? serverCost.notionalCostUsd
+			: undefined;
 		const costText = serverCostTotal && serverCostTotal > 0 ? formatCost(serverCostTotal) : "";
+		const subscriptionNotionalText = subscriptionNotional !== undefined && subscriptionNotional > 0
+			? formatEstimatedApiEquivalent(subscriptionNotional)
+			: "";
 
 		// Compute context usage from the last assistant message's usage
 		let contextHtml = html``;
@@ -2528,7 +2545,8 @@ export class AgentInterface extends LitElement {
 						<div style="font-weight:600;margin-bottom:6px;">Session</div>
 						${row("Messages", msgCount)}
 						${row("Turns", turnCount)}
-						${row("Total cost", serverCostTotal && serverCostTotal > 0 ? formatCost(serverCostTotal) : "—")}
+						${row("Billed API cost", serverCostTotal && serverCostTotal > 0 ? formatCost(serverCostTotal) : "—")}
+						${subscriptionNotionalText ? row("Estimated API equivalent", `Est. ${subscriptionNotionalText} (subscription; not billed)`) : nothing}
 						${row("Total input", formatTokenCount(totals.input))}
 						${row("Total output", formatTokenCount(totals.output))}
 						${totals.cacheRead ? row("Total cache read", formatTokenCount(totals.cacheRead)) : nothing}
@@ -2567,15 +2585,20 @@ export class AgentInterface extends LitElement {
 						@click=${(e: Event) => { e.stopPropagation(); togglePopover(); }}>
 						${contextHtml}
 					</span>
-					${costText ? html`
+					${costText || subscriptionNotionalText ? html`
 						<span style="position:relative;">
-							<span class="cursor-pointer hover:text-foreground transition-colors"
+							<span
+								class="cursor-pointer hover:text-foreground transition-colors"
+								data-testid=${costText ? "footer-billed-cost" : "footer-subscription-notional"}
+								aria-label=${costText
+									? `Billed API cost ${costText}`
+									: `Estimated API-equivalent amount ${subscriptionNotionalText}. This subscription estimate is not a billed API cost.`}
 								@click=${(e: Event) => {
 									e.stopPropagation();
 									this._costPopoverOpen = !this._costPopoverOpen;
 									this._contextPopoverOpen = false;
 									this.requestUpdate();
-								}}>${costText}</span>
+								}}>${costText || `Est. API equivalent ${subscriptionNotionalText}`}</span>
 							<cost-popover
 								.open=${this._costPopoverOpen}
 								.sessionId=${this.session?.sessionId || ""}
