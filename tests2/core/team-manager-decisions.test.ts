@@ -186,6 +186,21 @@ afterEach(() => {
 });
 
 describe("TeamManager seam decisions", () => {
+	it("starts a team lead without Pi-only extension arguments", async () => {
+		const { goals } = addGoal();
+		const { manager, sessions } = makeTeam(goals);
+
+		await manager.startTeam("goal-1");
+
+		assert.equal(sessions.createSession.mock.calls.length, 1);
+		assert.equal(
+			sessions.createSession.mock.calls[0]![1],
+			undefined,
+			"TeamManager must leave tool activation to session setup instead of injecting a Pi --extension argument",
+		);
+		assert.equal(sessions.createSession.mock.calls[0]![4].roleName, "team-lead");
+	});
+
 	it("spawns a role without a host worktree and preserves role policy in session metadata", async () => {
 		const { goals } = addGoal();
 		const { manager, sessions } = makeTeam(goals);
