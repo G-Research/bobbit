@@ -775,7 +775,19 @@ export class RemoteAgent {
 			modelAvailable: undefined as boolean | undefined,
 			isCompacting: false,
 			archivedAt: null as number | null,
-			serverCost: null as { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; totalCost: number; cacheHitRate?: number | null } | null,
+			// Provider estimates remain separate from actual billed cost. Subscription
+			// sessions deliberately report `totalCost: null` alongside their notional
+			// API-equivalent amount; consumers must never add the latter to billed totals.
+			serverCost: null as {
+				inputTokens: number;
+				outputTokens: number;
+				cacheReadTokens: number;
+				cacheWriteTokens: number;
+				totalCost: number | null;
+				notionalCostUsd?: number | null;
+				costBasis?: "api-billed" | "api-notional" | "subscription-notional" | "unknown";
+				cacheHitRate?: number | null;
+			} | null,
 			streamingMessage: null as BobbitMessage<AgentMessage> | null,
 			subagentWorkByParent: this.subagentWorkByParent,
 			pendingToolCalls: new Set<string>(),
