@@ -27,9 +27,11 @@ function extractSourceSlice(source: string, startMarker: string, endMarker: stri
 function createSessionOptionsSlice(methodBody: string): string {
 	const createIndex = methodBody.indexOf(".createSession(");
 	assert.notEqual(createIndex, -1, "REVIEWER_ARCHIVE_METADATA verifier path must call SessionManager.createSession");
-	const end = methodBody.indexOf("\n\t\t\t});", createIndex);
+	const nestedEnd = methodBody.indexOf("\n\t\t\t\t});", createIndex);
+	const ordinaryEnd = methodBody.indexOf("\n\t\t\t});", createIndex);
+	const end = nestedEnd >= 0 && (ordinaryEnd < 0 || nestedEnd < ordinaryEnd) ? nestedEnd : ordinaryEnd;
 	assert.notEqual(end, -1, "REVIEWER_ARCHIVE_METADATA could not locate createSession options object");
-	return methodBody.slice(createIndex, end + "\n\t\t\t});".length);
+	return methodBody.slice(createIndex, end + (end === nestedEnd ? "\n\t\t\t\t});" : "\n\t\t\t});").length);
 }
 
 function assertVerifierCreateSessionIsPreStamped(methodBody: string, kind: "llm-review" | "agent-qa"): void {
@@ -129,6 +131,46 @@ describe("reviewer archive metadata persistence", () => {
 
 		assertVerifierCreateSessionIsPreStamped(llmReviewBody, "llm-review");
 		assertVerifierCreateSessionIsPreStamped(agentQaBody, "agent-qa");
+	});
+
+	it("publishes both verifier kinds under terminal team admission before prompting", () => {
+		const harness = src("verification-harness.ts");
+		const cases = [
+			{
+				kind: "llm-review",
+				body: extractSourceSlice(harness, "private async runLlmReviewViaSession(", "static buildQaKickoffMessage("),
+				publication: "publishReviewer",
+			},
+			{
+				kind: "agent-qa",
+				body: extractSourceSlice(harness, "private async runAgentQaStep(", "private substituteVars("),
+				publication: "publishQaReviewer",
+			},
+		];
+		for (const { kind, body, publication } of cases) {
+			const create = body.indexOf(".createSession(");
+			const admission = body.indexOf(`runWithTeamGoalAdmission(goalId, ${publication})`);
+			const flush = body.indexOf(".flushAsync?.()", create);
+			const archivedCheck = body.indexOf("?.archived", admission);
+			const prompt = body.indexOf("dispatchVerifierPrompt(", admission);
+			assert.ok(create >= 0 && admission > create, `${kind} creation must be released through shared goal admission`);
+			assert.ok(flush > create && flush < admission, `${kind} initial row must flush before admission release`);
+			assert.ok(archivedCheck > admission && archivedCheck < prompt, `${kind} must re-check terminal intent before kickoff prompt`);
+		}
+	});
+
+	it("fences direct team delegates and preserves team branch evidence at operator archive", () => {
+		const server = fs.readFileSync(path.resolve(process.cwd(), "src", "server", "server.ts"), "utf-8");
+		const directDelegate = extractSourceSlice(server, "// ── Delegate session creation", "// ── Normal/assistant session creation");
+		assert.match(directDelegate, /parentTeamGoalId\s*=\s*parentSession\?\.teamGoalId\s*\?\?\s*parentPersisted\?\.teamGoalId/);
+		assert.match(directDelegate, /parentTeamGoalId\s*\?\s*await sessionManager\.runWithTeamGoalAdmission\(parentTeamGoalId, createDelegate\)\s*:\s*await createDelegate\(\)/);
+
+		const archiveEndpoint = extractSourceSlice(server, "const archiveGoalEndpoint = async", "// Routes with goal :id parameter");
+		const snapshot = archiveEndpoint.indexOf("const preserveRemoteBranchEvidence");
+		const archive = archiveEndpoint.indexOf("await gm.archiveGoal(g.id)");
+		assert.ok(snapshot >= 0 && snapshot < archive, "team ownership must be snapshotted before reconciliation removes live/team rows");
+		assert.match(archiveEndpoint, /sessionStore\.getLive\(\)\.some\(\(session\) => session\.teamGoalId === g\.id\)/);
+		assert.match(archiveEndpoint, /archivedGoal\?\.repoPath && !preserveRemoteBranchEvidence/);
 	});
 
 	it("uses only SessionManager-backed LLM review execution", () => {

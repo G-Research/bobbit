@@ -47,7 +47,17 @@ describe("archived team ownership cold-restore guard", () => {
 			// goalId alone is affiliation, not durable team ownership.
 			goalId: archivedGoal.id,
 		});
-		const rows = [leakedTeamWorker, standaloneControl];
+		const standaloneDelegate = persisted("standalone-metadata-delegate", {
+			delegateOf: standaloneControl.id,
+			teamGoalId: archivedGoal.id,
+		});
+		const standaloneGrandchild = persisted("standalone-metadata-grandchild", {
+			delegateOf: standaloneDelegate.id,
+			parentSessionId: standaloneDelegate.id,
+			childKind: "review",
+			teamGoalId: archivedGoal.id,
+		});
+		const rows = [leakedTeamWorker, standaloneControl, standaloneDelegate, standaloneGrandchild];
 		const byId = new Map(rows.map((row) => [row.id, row]));
 		const sessionStore = {
 			getLive: () => rows.filter((row) => row.archived !== true),
@@ -93,8 +103,8 @@ describe("archived team ownership cold-restore guard", () => {
 
 		assert.deepEqual(
 			dispatched,
-			[standaloneControl.id],
-			"ARCHIVED_TEAM_RESTORE_DISPATCHED: cold restore must suppress a live teamGoalId row owned by an archived goal while preserving a goalId-only standalone session",
+			[standaloneControl.id, standaloneDelegate.id, standaloneGrandchild.id],
+			"ARCHIVED_TEAM_RESTORE_DISPATCHED: cold restore must suppress genuine team ownership while preserving a standalone metadata-inheritance chain",
 		);
 	});
 });

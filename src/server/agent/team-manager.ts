@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { PromptSource, SessionManager, SessionInfo } from "./session-manager.js";
+import { collectTeamOwnedSessionClosure, type PromptSource, type SessionManager, type SessionInfo } from "./session-manager.js";
 import type { PersistedSession } from "./session-store.js";
 import { isNonRetryableAgentError, isProviderBackoffError, isRetryableGenericAgentError, isTransientReviewError } from "./verification-logic.js";
 import { GoalManager } from "./goal-manager.js";
@@ -3524,14 +3524,18 @@ export class TeamManager {
 	 * The verification harness manages the session lifecycle — no agent_end subscription is needed.
 	 * Silently returns if no team exists for the goal (handles manual gate signals).
 	 */
-	registerReviewerSession(goalId: string, sessionId: string, stepName: string): void {
+	async registerReviewerSession(goalId: string, sessionId: string, stepName: string): Promise<void> {
 		if (this.resolveGoal(goalId)?.archived) {
-			// Stamp durable ownership before asynchronous cleanup so a crash cannot
-			// turn a late verifier into an unrelated goalId-only live session.
+			// Defensive evidence path for resume/legacy callers outside the admission
+			// boundary. Await the soft archive so returning never implies publication
+			// succeeded while leaving a late verifier live.
 			this.sessionManager.updateSessionMeta(sessionId, { role: "reviewer", teamGoalId: goalId });
-			void this.sessionManager.terminateSession(sessionId).then(async (terminated) => {
-				if (!terminated) await this.sessionManager.storeArchive(sessionId);
-			}).catch(async () => { try { await this.sessionManager.storeArchive(sessionId); } catch { /* boot repair retries */ } });
+			try {
+				const terminated = await this.sessionManager.terminateSession(sessionId, { preserveEvidence: true });
+				if (!terminated) await this.sessionManager.storeArchive(sessionId, { preserveEvidence: true });
+			} catch {
+				await this.sessionManager.storeArchive(sessionId, { preserveEvidence: true });
+			}
 			return;
 		}
 		const entry = this.teams.get(goalId);
@@ -3685,37 +3689,6 @@ export class TeamManager {
 		this.rearmedCompletedTeams.delete(goalId);
 	}
 
-	private collectArchivedGoalClosure(
-		goalId: string,
-		live: PersistedSession[],
-		referencedIds: ReadonlySet<string>,
-		errors: string[],
-	): Set<string> {
-		const byId = new Map(live.map((session) => [session.id, session]));
-		const selected = new Set(live.filter((session) => session.teamGoalId === goalId).map((session) => session.id));
-		for (const id of referencedIds) {
-			const session = byId.get(id);
-			if (!session) continue;
-			if (session.teamGoalId && session.teamGoalId !== goalId) {
-				errors.push(`ownership conflict: ${id} belongs to ${session.teamGoalId}`);
-				continue;
-			}
-			selected.add(id);
-		}
-		let changed = true;
-		while (changed) {
-			changed = false;
-			for (const session of live) {
-				const parentId = session.delegateOf ?? (session.childKind ? session.parentSessionId : undefined);
-				if (parentId && selected.has(parentId) && !selected.has(session.id)) {
-					selected.add(session.id);
-					changed = true;
-				}
-			}
-		}
-		return selected;
-	}
-
 	/**
 	 * Reconcile every durable team-owned session after goal archive intent is
 	 * committed. Runtime deactivation is independent of TeamStore publication.
@@ -3755,7 +3728,7 @@ export class TeamManager {
 			// the extra pass catches descendants published by work admitted earlier.
 			const maxPasses = Math.max(1, liveRows().length + 1);
 			for (let pass = 0; pass < maxPasses; pass++) {
-				const closure = this.collectArchivedGoalClosure(goalId, liveRows(), referencedIds, errors);
+				const closure = collectTeamOwnedSessionClosure(goalId, liveRows(), referencedIds, errors);
 				for (const id of closure) selectedIds.add(id);
 				const pending = [...closure].filter((id) => !attempted.has(id));
 				if (pending.length === 0) break;
@@ -3765,19 +3738,20 @@ export class TeamManager {
 						archivedSessionIds.add(id);
 						continue;
 					}
+					const archiveOptions = { preserveEvidence: true, cascadeSessionIds: selectedIds };
 					try {
-						const terminated = await this.sessionManager.terminateSession(id, { preserveEvidence: true });
-						if (!terminated) await this.sessionManager.storeArchive(id, { preserveEvidence: true });
+						const terminated = await this.sessionManager.terminateSession(id, archiveOptions);
+						if (!terminated) await this.sessionManager.storeArchive(id, archiveOptions);
 					} catch (err) {
 						errors.push(`stop ${id}: ${err instanceof Error ? err.message : String(err)}`);
-						try { await this.sessionManager.storeArchive(id, { preserveEvidence: true }); }
+						try { await this.sessionManager.storeArchive(id, archiveOptions); }
 						catch (archiveErr) { errors.push(`archive ${id}: ${archiveErr instanceof Error ? archiveErr.message : String(archiveErr)}`); }
 					}
 					if (this.sessionManager.getPersistedSession(id)?.archived === true) archivedSessionIds.add(id);
 				}
 			}
 
-			const finalClosure = this.collectArchivedGoalClosure(goalId, liveRows(), referencedIds, errors);
+			const finalClosure = collectTeamOwnedSessionClosure(goalId, liveRows(), referencedIds, errors);
 			for (const id of finalClosure) selectedIds.add(id);
 			const suppressedSessionIds = [...selectedIds].filter((id) => this.sessionManager.getPersistedSession(id)?.archived !== true);
 			let teamRemoved = false;

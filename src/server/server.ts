@@ -7877,6 +7877,7 @@ async function handleApiRoute(
 				return;
 			}
 			const parentProjectId = parentSession?.projectId ?? parentPersisted?.projectId;
+			const parentTeamGoalId = parentSession?.teamGoalId ?? parentPersisted?.teamGoalId;
 			if (!parentProjectId) {
 				json({ error: "Delegate parent session is missing projectId", code: "PROJECT_ID_REQUIRED" }, 422);
 				return;
@@ -7901,12 +7902,18 @@ async function handleApiRoute(
 			const parentInitialModel = resolveServerInitialModelTuple(parentPersisted, parentSession).initialModel;
 			if (parentInitialModel && !(await requireCurrentSessionModel(parentInitialModel, "Delegate parent model"))) return;
 			try {
-				const session = await sessionManager.createDelegateSession(parentId, {
+				const createDelegate = () => sessionManager.createDelegateSession(parentId, {
 					instructions: body.instructions,
 					cwd,
 					title: body.title,
 					context: body.context,
 				});
+				// Direct REST delegates do not pass through OrchestrationCore. Join the
+				// shared terminal-admission turn only for trusted team-owned parents;
+				// OrchestrationCore keeps its existing outer fence without nesting.
+				const session = parentTeamGoalId
+					? await sessionManager.runWithTeamGoalAdmission(parentTeamGoalId, createDelegate)
+					: await createDelegate();
 				// Register delegate as child in parent's sandbox scope
 				if (sandboxScope && sandboxTokenStore) {
 					sandboxTokenStore.addSession(sandboxScope.projectId, session.id);
@@ -7924,7 +7931,11 @@ async function handleApiRoute(
 					delegateOf: session.delegateOf,
 				}, 201);
 			} catch (err) {
-				jsonError(500, err);
+				if (err instanceof TeamStartError) {
+					json({ error: err.message, code: err.code, goalId: parentTeamGoalId }, err.status);
+				} else {
+					jsonError(500, err);
+				}
 			}
 			return;
 		}
@@ -9170,6 +9181,11 @@ async function handleApiRoute(
 			}
 			const goalProjectCtx = projectContextManager.getContextForGoal(g.id);
 			const teamEntry = goalProjectCtx?.teamStore.get(g.id);
+			// Snapshot before reconciliation archives the authoritative rows and may
+			// remove TeamStore. Remote branches are recovery evidence for every team
+			// cleanup shape, including store-only and blocked reconciliation.
+			const preserveRemoteBranchEvidence = !!teamEntry
+				|| !!goalProjectCtx?.sessionStore.getLive().some((session) => session.teamGoalId === g.id);
 			const agentBranches: string[] = [];
 			if (teamEntry?.agents) {
 				for (const a of teamEntry.agents) {
@@ -9194,9 +9210,9 @@ async function handleApiRoute(
 			}
 			prStatusStore.remove(g.id);
 			const archivedGoal = gm.getGoal(g.id);
-			// An adopted branch is session-owned provenance, not a goal-provisioned
-			// branch. Its remote lifecycle stays with the source session.
-			if (archivedGoal?.repoPath && !archivedGoal.worktreeOwnerSessionId) {
+			// Adopted branches and team branches are recovery evidence. Their remote
+			// lifecycle remains with the source session or the retained team records.
+			if (archivedGoal?.repoPath && !archivedGoal.worktreeOwnerSessionId && !preserveRemoteBranchEvidence) {
 				deleteRemoteGoalBranches(archivedGoal, agentBranches, archivedGoal.repoPath, commandRunner!, serverRemoteGitPolicy).catch(err => {
 					console.warn(`[api] archive: remote branch cleanup failed for ${g.id}:`, err);
 				});
