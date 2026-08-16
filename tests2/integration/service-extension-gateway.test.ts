@@ -67,13 +67,40 @@ test.describe("managed-service gateway wiring", () => {
 		assert.equal(followUp.status, 200);
 		assert.equal((await followUp.json()).name, "Replacement remains live");
 
-		// Restore the shared default fixture root before its temporary replacement is
-		// removed, so the harness does not self-heal it into a leaked project.
+		// Restore the complete shared default-project identity before its temporary
+		// replacement is removed. Leaving the temporary name behind makes every
+		// later defaultProjectId() lookup enter the self-heal path; each heal reseeds
+		// project.yaml and can erase a workflow between POST and immediate GET.
 		const restored = await apiFetch(`/api/projects/${encodeURIComponent(project.id)}`, {
 			method: "PUT",
-			body: JSON.stringify({ rootPath: project.rootPath }),
+			body: JSON.stringify({ name: project.name, rootPath: project.rootPath }),
 		});
 		assert.equal(restored.status, 200);
+		const restoredProject = await restored.json();
+		assert.equal(restoredProject.name, project.name);
+		assert.equal(restoredProject.rootPath, project.rootPath);
+
+		// Focused regression for the full-tier failure: both calls omit projectId,
+		// exactly like the shared workflow helpers. If the name remains mutated,
+		// each lookup self-heals/reseeds and the GET loses the just-created record.
+		const workflowId = `managed-service-restored-${process.pid}-${Date.now()}`;
+		const createWorkflow = await apiFetch("/api/workflows", {
+			method: "POST",
+			body: JSON.stringify({
+				id: workflowId,
+				name: "Restored default project workflow",
+				description: "Pins default-project identity isolation after root replacement.",
+				gates: [{ id: "check", name: "Check", dependsOn: [], verify: [] }],
+			}),
+		});
+		assert.equal(createWorkflow.status, 201);
+		try {
+			const readWorkflow = await apiFetch(`/api/workflows/${encodeURIComponent(workflowId)}`);
+			assert.equal(readWorkflow.status, 200);
+			assert.equal((await readWorkflow.json()).id, workflowId);
+		} finally {
+			await apiFetch(`/api/workflows/${encodeURIComponent(workflowId)}`, { method: "DELETE" });
+		}
 	});
 
 	test("rolls the registry and live context back when reopening a replacement root fails", async ({ gateway }) => {
