@@ -349,6 +349,17 @@ describe("ContextTraceStore", () => {
 		expect(persisted).not.toContain(secret);
 	});
 
+	it("deduplicates keyed import-proposal audit appends without exposing the receipt", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs);
+		const key = `import-proposal-v1:${"a".repeat(64)}`;
+		const row = { kind: "decision" as const, packId: "extension-pack", hookId: "import-hook", event: "decisionResolved" as const, outcome: "applied" as const, requestId: "request-1", questionId: "a".repeat(64), actor: "user" as const };
+		expect(store.appendProjectImportOutcomeOnce("project-1", "import-1", key, row)).toBe(true);
+		expect(store.appendProjectImportOutcomeOnce("project-1", "import-1", key, row)).toBe(false);
+		expect(store.readProjectImportTrace("project-1", "import-1")).toHaveLength(1);
+		expect(JSON.stringify(store.readProjectImportTrace("project-1", "import-1"))).not.toContain(key);
+	});
+
 	it("persists only fixed consent audit metadata and rejects raw protected payloads", () => {
 		const memfs = createMemFs();
 		const store = new ContextTraceStore(STATE_DIR, memfs);

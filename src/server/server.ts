@@ -816,6 +816,18 @@ const execAsync = promisify(exec);
 let serverCommandRunner: CommandRunner = realCommandRunner;
 let serverRemoteGitPolicy: RemoteGitPolicy = {};
 
+/** One public-equivalent base-ref validator shared by route and import apply paths. */
+function createCanonicalBaseRefValidator(commandRunner: CommandRunner) {
+	return (input: Parameters<typeof validateProjectBaseRef>[0]) => validateProjectBaseRef(input, {
+		isGitRepo: async (repoPath) => isGitRepo(repoPath, commandRunner).catch(() => false),
+		isTag: async (repoPath, ref) => {
+			try { await commandRunner.execFile("git", ["rev-parse", "--verify", `refs/tags/${ref}`], { cwd: repoPath, timeout: 5_000 }); return true; }
+			catch { return false; }
+		},
+		hasRef: async (repoPath, ref) => refExistsInRepo(repoPath, ref, commandRunner).catch(() => false),
+	});
+}
+
 /**
  * Resolve the project-effective EP-13 prompt projection at every server
  * boundary that needs it. Registry order is already deterministic; overrides
@@ -3650,22 +3662,44 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				resolveProject: () => ({ id: project.id, name: project.name, rootPath: project.rootPath }),
 				validateCwd: (_id, cwd) => { const check = validateExecutionCwd(projectRegistry, projectContextManager, project.id, cwd, { kind: "user-input" }); if (!check.ok) throw new CanonicalMutationError(check.status, check.error, check.code); },
 				getContext: id => projectContextManager.getOrCreate(id) ?? undefined,
+				ensureSandbox: sandboxManager ? id => sandboxManager!.ensureForProject(id) : undefined,
 				findGoalAcrossProjects: id => projectContextManager.getContextForGoal(id)?.goalManager.getGoal(id),
 				getNestingPrefs: () => readSubgoalNestingPrefs(key => preferencesStore.get(key)),
 				findCascadeWorkflow: (id, workflowId) => configCascade.resolveWorkflows(id).find(row => row.item.id === workflowId)?.item,
-				afterCreate: () => {}, applicationKey: application.applicationKey,
+				afterCreate: (createdGoal, parentGoalId) => {
+					const ctx = projectContextManager.getContextForGoal(createdGoal.id) ?? projectContextManager.getOrCreate(application.projectId);
+					if (!ctx) throw new Error(`Goal project context is unavailable for ${createdGoal.id}`);
+					if (createdGoal.autoStartTeam && parentGoalId && createdGoal.state !== "blocked") {
+						if (verificationHarness.requestChildStart(createdGoal.id) === "capacity-blocked") {
+							ctx.goalManager.updateGoal(createdGoal.id, { state: "blocked" });
+							broadcastToAll({ type: "goal_state_changed", goalId: createdGoal.id });
+						}
+						return;
+					}
+					if (createdGoal.setupStatus !== "preparing") return;
+					const complete = () => broadcastToAll({ type: "goal_setup_complete", goalId: createdGoal.id });
+					const failed = (error: unknown) => broadcastToAll({ type: "goal_setup_error", goalId: createdGoal.id, error: String(error) });
+					if (createdGoal.autoStartTeam) {
+						void ctx.goalManager.setupWorktreeAndStartTeam(createdGoal.id, () => teamManager.startTeam(createdGoal.id)).then(complete).catch(failed);
+					} else void ctx.goalManager.setupWorktree(createdGoal.id).then(complete).catch(failed);
+				}, applicationKey: application.applicationKey,
 			});
 			return { outcome: { goalId: result.goal.id } };
 		},
 		project: async (fields, application) => {
 			const result = await applyCanonicalProjectProposal({ mode: "update", projectId: application.projectId, name: fields.name, rootPath: fields.root_path ?? fields.rootPath, components: fields.components, workflows: fields.workflows, config: fields.config, configDirectories: fields.configDirectories ?? fields.config_directories, sandboxTokens: fields.sandboxTokens ?? fields.sandbox_tokens, applicationKey: application.applicationKey }, {
-				findByApplicationKey: key => projectRegistry.list().find(candidate => candidate.canonicalMutationKey === key), register: () => { throw new Error("Register unavailable"); }, get: id => projectRegistry.get(id), update: (id, updates) => projectRegistry.update(id, updates as Parameters<typeof projectRegistry.update>[1]), promote: (id, updates) => projectRegistry.promote(id, updates), removeRegistered: item => projectRegistry.remove(item.id), removeContext: id => projectContextManager.remove(id), openContext: async id => { const ctx = projectContextManager.getOrCreate(id); return ctx ? { projectConfigStore: ctx.projectConfigStore, secretsStore: ctx.secretsStore } : undefined; }, suspendServices: id => worktreeServices.suspendProject(id), stopServices: id => worktreeServices.stopProject(id), reconcileServices: id => worktreeServices.reconcileProject(id), captureRegistryRecord: id => projectRegistry.captureExactRecord(id), restoreRegistryRecord: (id, snapshot) => projectRegistry.restoreExactRecord(id, snapshot), sameRootPath: (left, right) => path.resolve(left) === path.resolve(right),
+				findByApplicationKey: key => projectRegistry.list().find(candidate => projectRegistry.hasCanonicalMutationReceipt(candidate.id, key)),
+				recordApplicationReceipt: (id, key) => projectRegistry.recordCanonicalMutationReceipt(id, key),
+				register: () => { throw new Error("Register unavailable"); }, get: id => projectRegistry.get(id), update: (id, updates) => projectRegistry.update(id, updates as Parameters<typeof projectRegistry.update>[1]), promote: (id, updates) => projectRegistry.promote(id, updates), removeRegistered: item => projectRegistry.remove(item.id), removeContext: id => projectContextManager.remove(id), openContext: async id => { const ctx = projectContextManager.getOrCreate(id); return ctx ? { projectConfigStore: ctx.projectConfigStore, secretsStore: ctx.secretsStore } : undefined; }, suspendServices: id => worktreeServices.suspendProject(id), stopServices: id => worktreeServices.stopProject(id), reconcileServices: id => worktreeServices.reconcileProject(id), captureRegistryRecord: id => projectRegistry.captureExactRecord(id), restoreRegistryRecord: (id, snapshot) => projectRegistry.restoreExactRecord(id, snapshot), sameRootPath: (left, right) => path.resolve(left) === path.resolve(right),
+				validateBaseRef: createCanonicalBaseRefValidator(serverCommandRunner),
+				invalidateSandboxImageRequirements: id => sandboxImageRequirements.invalidateProject(id),
 			}); return { outcome: { projectId: result.project.id } };
 		},
 		workflow: async (fields, application) => { const ctx = projectContextManager.getOrCreate(application.projectId); if (!ctx) throw new CanonicalMutationError(404, "Project not found"); const workflow = createCanonicalWorkflow(fields, ctx.workflowStore, ctx.projectConfigStore.getComponents(), application.applicationKey); return { outcome: { workflowId: workflow.id } }; },
-		role: async (fields, application) => { const ctx = projectContextManager.getOrCreate(application.projectId); if (!ctx) throw new CanonicalMutationError(404, "Project not found"); const role = await createCanonicalRole({ ...fields, promptTemplate: fields.prompt }, { scope: "project", store: ctx.roleStore, projectId: application.projectId }, { normalizeThinking: normalizeRoleThinking, validateModel: async () => true, applicationKey: application.applicationKey }); return { outcome: { role: role.name } }; },
+		role: async (fields, application) => { const ctx = projectContextManager.getOrCreate(application.projectId); if (!ctx) throw new CanonicalMutationError(404, "Project not found"); const role = await createCanonicalRole({ ...fields, promptTemplate: fields.prompt }, { scope: "project", store: ctx.roleStore, projectId: application.projectId }, { normalizeThinking: normalizeRoleThinking, validateModel: async (model) => { const normalized = normalizeAigwModelString(model); const slash = normalized.indexOf("/"); if (slash <= 0 || slash === normalized.length - 1) return false; return !!findSessionSelectableModel(await getAvailableModels(preferencesStore), normalized.slice(0, slash), normalized.slice(slash + 1)); }, applicationKey: application.applicationKey }); return { outcome: { role: role.name } }; },
+
 		tool: async (fields, application) => { const ctx = projectContextManager.getOrCreate(application.projectId); if (!ctx) throw new CanonicalMutationError(404, "Project not found"); const result = applyCanonicalToolProposal({ action: fields.action as any, tool: fields.tool as any, content: fields.content as any, expectedBeforeSha256: application.toolBeforeSha256 }, { toolManager: ctx.toolManager }); __resetToolScanCache(); return { outcome: { tool: result.tool, action: result.action } }; },
-		staff: async (fields, application) => { const project = projectRegistry.get(application.projectId); if (!project) throw new CanonicalMutationError(404, "Project not found"); const staff = await createCanonicalStaff({ ...fields, systemPrompt: fields.prompt, roleId: fields.role ?? fields.roleId, projectId: application.projectId }, { applicationKey: application.applicationKey, resolveProject: () => ({ projectId: project.id, rootPath: project.rootPath }), validateCwd: (_id, cwd) => { const check = validateExecutionCwd(projectRegistry, projectContextManager, project.id, cwd, { kind: "user-input" }); if (!check.ok) throw new CanonicalMutationError(check.status, check.error, check.code); }, validateTriggers: value => staffManager.validateTriggers(value as any), validateRole: (roleId, id) => { if (!projectContextManager.getOrCreate(id)?.roleStore.get(roleId)) throw new CanonicalMutationError(404, "Role not found"); }, create: (name, description, prompt, cwd, options) => staffManager.createStaff(name, description, prompt, cwd, sessionManager, options as any), broadcast: () => {} }); return { outcome: { staffId: staff.id } }; },
+		staff: async (fields, application) => { const project = projectRegistry.get(application.projectId); if (!project) throw new CanonicalMutationError(404, "Project not found"); const staff = await createCanonicalStaff({ ...fields, systemPrompt: fields.prompt, roleId: fields.role ?? fields.roleId, projectId: application.projectId }, { applicationKey: application.applicationKey, resolveProject: () => ({ projectId: project.id, rootPath: project.rootPath }), validateCwd: (_id, cwd) => { const check = validateExecutionCwd(projectRegistry, projectContextManager, project.id, cwd, { kind: "user-input" }); if (!check.ok) throw new CanonicalMutationError(check.status, check.error, check.code); }, validateTriggers: value => staffManager.validateTriggers(value as any), validateRole: (roleId, id) => { if (!resolveRoleForProject(roleId, id)) throw new CanonicalMutationError(404, "Role not found"); }, create: (name, description, prompt, cwd, options) => staffManager.createStaff(name, description, prompt, cwd, sessionManager, options as any), broadcast: (created, projectId) => broadcastToAll({ type: "staff_changed", reason: "created", staffId: created.id, projectId, sessionId: created.currentSessionId }) }); return { outcome: { staffId: staff.id } }; },
 	});
 	projectImportDecisionCoordinator = new ProjectImportDecisionCoordinator({
 		registry: projectRegistry,
@@ -5009,17 +5043,24 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// This promise is awaited before normal session restoration below; failures
 	// are still contained so a damaged project cannot stop gateway boot.
 	const reconcileApplyingImportProposals = async () => {
-		for (const context of projectContextManager.all()) {
-			const marker = projectRegistry.get(context.project.id)?.importDecisionRun;
+		// Contexts are lazy. Enumerate the durable registry and open each ready
+		// import owner so replay never depends on a prior list route or session.
+		for (const project of projectRegistry.list()) {
+			const marker = project.importDecisionRun;
 			if (marker?.state !== "ready") continue;
+			const context = projectContextManager.getOrCreate(project.id);
+			if (!context) continue;
 			// Accepted effects may have finalized just before a crash; cleanup is
 			// idempotent and never re-emits an audit row.
 			for (const record of context.decisionRequestStore.list()) {
 				if (record.delivery.kind !== "project-import" || record.delivery.importId !== marker.id || record.proposal?.status !== "accepted") continue;
 				const draftId = proposalDraftOwnerId({ kind: "project-import", projectId: context.project.id, importId: marker.id, requestId: record.id });
 				await deleteProposalFile(bobbitStateDir(), draftId, record.proposal.type).catch(() => {});
-				if (record.proposal.application && context.decisionRequestStore.markImportProposalAudited(record.id, record.proposal.application, new Date(gatewayDeps.clock.now()).toISOString())) {
-					try { contextTraceStore.appendProjectImportOutcome(context.project.id, marker.id, { kind: "decision", packId: record.asker.packId, hookId: record.asker.hookId, event: "decisionResolved", outcome: "applied", requestId: record.id, questionId: record.questionId, actor: "user" }); } catch {}
+				if (record.proposal.application) {
+					try {
+						contextTraceStore.appendProjectImportOutcomeOnce(context.project.id, marker.id, record.proposal.application.key, { kind: "decision", packId: record.asker.packId, hookId: record.asker.hookId, event: "decisionResolved", outcome: "applied", requestId: record.id, questionId: record.questionId, actor: "user" });
+						context.decisionRequestStore.markImportProposalAudited(record.id, record.proposal.application, new Date(gatewayDeps.clock.now()).toISOString());
+					} catch { /* leave audit marker unset for retry */ }
 				}
 			}
 			for (const record of context.decisionRequestStore.listApplyingImportProposals(marker.id)) {
@@ -5030,10 +5071,12 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					if (!result || !context.decisionRequestStore.finalizeImportProposal(application, new Date(gatewayDeps.clock.now()).toISOString(), result.outcome)) continue;
 					const draftId = proposalDraftOwnerId({ kind: "project-import", projectId: application.projectId, importId: application.importId, requestId: application.requestId });
 					await deleteProposalFile(bobbitStateDir(), draftId, application.type).catch(() => {});
-					// One durable accepted transition produces one redacted audit row.
-					if (context.decisionRequestStore.markImportProposalAudited(record.id, application, new Date(gatewayDeps.clock.now()).toISOString())) {
-						try { contextTraceStore.appendProjectImportOutcome(application.projectId, application.importId, { kind: "decision", packId: record.asker.packId, hookId: record.asker.hookId, event: "decisionResolved", outcome: "applied", requestId: record.id, questionId: record.questionId, actor: "user" }); } catch {}
-					}
+					// A keyed audit append precedes its decision-store marker; replay
+					// deduplicates a crash between them without marking a failed append.
+					try {
+						contextTraceStore.appendProjectImportOutcomeOnce(application.projectId, application.importId, application.key, { kind: "decision", packId: record.asker.packId, hookId: record.asker.hookId, event: "decisionResolved", outcome: "applied", requestId: record.id, questionId: record.questionId, actor: "user" });
+						context.decisionRequestStore.markImportProposalAudited(record.id, application, new Date(gatewayDeps.clock.now()).toISOString());
+					} catch { /* leave audit marker unset for retry */ }
 				} catch (error) { console.warn(`[project-import-proposals] applying replay failed project=${context.project.id} request=${record.id}:`, error); }
 			}
 		}
@@ -6446,15 +6489,7 @@ async function handleApiRoute(
 		json({ error: err.message, code: err.code }, err.status);
 		return true;
 	};
-	const validateCanonicalBaseRef = (input: Parameters<typeof validateProjectBaseRef>[0]) =>
-		validateProjectBaseRef(input, {
-			isGitRepo: async (repoPath) => isGitRepo(repoPath, serverCommandRunner).catch(() => false),
-			isTag: async (repoPath, ref) => {
-				try { await serverCommandRunner.execFile("git", ["rev-parse", "--verify", `refs/tags/${ref}`], { cwd: repoPath, timeout: 5_000 }); return true; }
-				catch { return false; }
-			},
-			hasRef: async (repoPath, ref) => refExistsInRepo(repoPath, ref, serverCommandRunner).catch(() => false),
-		});
+	const validateCanonicalBaseRef = createCanonicalBaseRefValidator(serverCommandRunner);
 	const writeProjectRegistrationError = (err: unknown): boolean => {
 		if (err instanceof ProjectRootNotFoundError || err instanceof ProjectRootAlreadyRegisteredError) {
 			json({ error: err.message, code: err.code }, 400);
@@ -7613,10 +7648,11 @@ async function handleApiRoute(
 					configDirectories: (body as Record<string, unknown>).configDirectories ?? (body as Record<string, unknown>).config_directories,
 					sandboxTokens: (body as Record<string, unknown>).sandboxTokens ?? (body as Record<string, unknown>).sandbox_tokens,
 				}, {
-					findByApplicationKey: (key) => projectRegistry.list().find(candidate => candidate.canonicalMutationKey === key),
+					findByApplicationKey: (key) => projectRegistry.list().find(candidate => projectRegistry.hasCanonicalMutationReceipt(candidate.id, key)),
+					recordApplicationReceipt: (id, key) => projectRegistry.recordCanonicalMutationReceipt(id, key),
 					register: (input) => {
 						const created = projectRegistry.register(input.name, input.rootPath, { color: input.color, palette: input.palette, colorLight: input.colorLight, colorDark: input.colorDark, acceptCanonical: input.acceptCanonical });
-						if (input.applicationKey) projectRegistry.setCanonicalMutationKey(created.id, input.applicationKey);
+						if (input.applicationKey) projectRegistry.recordCanonicalMutationReceipt(created.id, input.applicationKey);
 						return projectRegistry.get(created.id)!;
 					},
 					get: (id) => projectRegistry.get(id),
@@ -7826,7 +7862,8 @@ async function handleApiRoute(
 				config: body.config, components: body.components, workflows: body.workflows,
 				configDirectories: body.configDirectories, sandboxTokens: body.sandboxTokens,
 			}, {
-				findByApplicationKey: (key) => projectRegistry.list().find(project => project.canonicalMutationKey === key),
+				findByApplicationKey: (key) => projectRegistry.list().find(project => projectRegistry.hasCanonicalMutationReceipt(project.id, key)),
+				recordApplicationReceipt: (id, key) => projectRegistry.recordCanonicalMutationReceipt(id, key),
 				register: () => { throw new Error("Register is not available for a project update"); },
 				get: (id) => projectRegistry.get(id),
 				update: (id, next) => projectRegistry.update(id, next as Parameters<typeof projectRegistry.update>[1]),
@@ -7938,7 +7975,8 @@ async function handleApiRoute(
 				config: body?.config, components: body?.components, workflows: body?.workflows,
 				configDirectories: body?.configDirectories, sandboxTokens: body?.sandboxTokens,
 			}, {
-				findByApplicationKey: (key) => projectRegistry.list().find(project => project.canonicalMutationKey === key),
+				findByApplicationKey: (key) => projectRegistry.list().find(project => projectRegistry.hasCanonicalMutationReceipt(project.id, key)),
+				recordApplicationReceipt: (id, key) => projectRegistry.recordCanonicalMutationReceipt(id, key),
 				register: () => { throw new Error("Register is not available for project promotion"); },
 				get: (id) => projectRegistry.get(id),
 				update: (id, updates) => projectRegistry.update(id, updates as Parameters<typeof projectRegistry.update>[1]),
@@ -9024,15 +9062,18 @@ async function handleApiRoute(
 		const project = projectRegistry.get(projectId);
 		const marker = project?.importDecisionRun;
 		if (!project || marker?.state !== "ready" || !decisionRequestManager) { json({ error: "Project import proposal not found" }, 404); return; }
-		const safeFields = (value: unknown, depth = 0): Record<string, unknown> => {
-			if (!value || typeof value !== "object" || Array.isArray(value) || depth > 6) return {};
-			const sensitive = new Set(["token", "tokens", "secret", "secrets", "password", "credentials", "apiKey", "api_key"]);
-			return Object.fromEntries(Object.entries(value as Record<string, unknown>).slice(0, 100).map(([key, item]) => [key,
-				sensitive.has(key) ? "[redacted]" : typeof item === "string" ? item.slice(0, 16_384)
-					: Array.isArray(item) ? item.slice(0, 100).map(entry => typeof entry === "string" ? entry.slice(0, 16_384) : entry)
-						: item && typeof item === "object" ? safeFields(item, depth + 1) : item,
+		const sensitive = new Set(["token", "tokens", "secret", "secrets", "password", "credentials", "apiKey", "api_key"]);
+		const safeValue = (value: unknown, depth = 0): unknown => {
+			if (depth > 6) return "[truncated]";
+			if (typeof value === "string") return value.slice(0, 16_384);
+			if (value === null || typeof value !== "object") return value;
+			if (Array.isArray(value)) return value.slice(0, 100).map(item => safeValue(item, depth + 1));
+			return Object.fromEntries(Object.entries(value as Record<string, unknown>).slice(0, 100).map(([key, item]) => [
+				key, sensitive.has(key) ? "[redacted]" : safeValue(item, depth + 1),
 			]));
 		};
+		const safeFields = (value: unknown): Record<string, unknown> =>
+			value && typeof value === "object" && !Array.isArray(value) ? safeValue(value) as Record<string, unknown> : {};
 		const resolveDraft = async (id: string, type: string, allowApplying = false) => {
 			if (!isProposalType(type)) return undefined;
 			const record = decisionRequestManager!.getImportRequest(projectId, marker.id, id);
@@ -9068,7 +9109,15 @@ async function handleApiRoute(
 		if ((body as { rev: number }).rev !== draft.rev) { json({ error: "Proposal revision is stale", code: "STALE_PROPOSAL" }, 409); return; }
 		const store = projectContextManager.getOrCreate(projectId)?.decisionRequestStore;
 		if (!store) { json({ error: "Project import proposal not found" }, 404); return; }
-		const audit = (outcome: "applied" | "dropped") => { try { new ContextTraceStore(bobbitStateDir(), fsImpl).appendProjectImportOutcome(projectId, marker.id, { kind: "decision", packId: draft.record.asker.packId, hookId: draft.record.asker.hookId, event: "decisionResolved", outcome, requestId, questionId: draft.record.questionId, actor: "user" }); } catch {} };
+		const audit = (outcome: "applied" | "dropped", applicationKey?: string): boolean => {
+			try {
+				const trace = new ContextTraceStore(bobbitStateDir(), fsImpl);
+				const row = { kind: "decision" as const, packId: draft.record.asker.packId, hookId: draft.record.asker.hookId, event: "decisionResolved" as const, outcome, requestId, questionId: draft.record.questionId, actor: "user" as const };
+				if (applicationKey) { trace.appendProjectImportOutcomeOnce(projectId, marker.id, applicationKey, row); return true; }
+				trace.appendProjectImportOutcome(projectId, marker.id, row);
+				return true;
+			} catch { return false; }
+		};
 		if (action === "reject") {
 			if (!store.updateProposal(requestId, { status: "rejected", type: draft.type, rev: draft.rev, decidedAt: new Date().toISOString() })) { json({ error: "Proposal is already applying", code: "PROPOSAL_LOCKED" }, 409); return; }
 			await deleteProposalFile(bobbitStateDir(), draft.draftId, draft.type); audit("dropped");
@@ -9078,8 +9127,24 @@ async function handleApiRoute(
 			? canonicalToolProposalState(String(draft.parsed.value.fields.tool ?? ""), { toolManager: projectContextManager.getOrCreate(projectId)?.toolManager ?? toolManager }) ?? null
 			: undefined;
 		const identity = { projectId, importId: marker.id, requestId, type: draft.type, rev: draft.rev, snapshotSha256: projectImportSnapshotSha256(draft.snapshot), ...(draft.type === "tool" ? { toolBeforeSha256 } : {}), key: projectImportApplicationKey({ projectId, importId: marker.id, requestId, type: draft.type, rev: draft.rev, snapshot: draft.snapshot }) };
+		// All trusted identity checks happen before the durable created→applying
+		// claim. A malformed/cross-project draft must not strand an applying lock.
+		try { importApplicationService.validate({ projectId, importId: marker.id, requestId, type: draft.type, rev: draft.rev, snapshot: draft.snapshot, ...(draft.type === "tool" ? { toolBeforeSha256 } : {}), proposal: draft.parsed.value }); }
+		catch (error) {
+			if (error instanceof ProjectImportApplicationError) json({ error: error.message, code: error.code }, error.status);
+			else jsonError(500, error);
+			return;
+		}
 		const claim = store.claimImportProposal(identity, new Date().toISOString());
-		if (!claim.claimed && claim.proposal?.status === "accepted") { json({ ok: true, status: "accepted" }, 200); return; }
+		if (!claim.claimed && claim.proposal?.status === "accepted") {
+			// A previous process may have finalized just before crashing. Finish its
+			// keyed audit hand-off instead of reporting a clean acceptance forever.
+			if (!claim.proposal.auditedAt) {
+				if (!audit("applied", identity.key)) { json({ error: "Proposal audit is unavailable", code: "AUDIT_FAILED" }, 503); return; }
+				store.markImportProposalAudited(requestId, identity, new Date().toISOString());
+			}
+			json({ ok: true, status: "accepted" }, 200); return;
+		}
 		if (!claim.claimed && claim.proposal?.status === "created") { json({ error: "Proposal claim could not be persisted", code: "PROPOSAL_CLAIM_FAILED" }, 503); return; }
 		// Only the request that durably changed created→applying may execute.
 		// Another live submit observes the lock and must never adopt it; boot alone
@@ -9093,9 +9158,16 @@ async function handleApiRoute(
 				if (settled?.status !== "accepted" || settled.application?.key !== identity.key) throw new ProjectImportApplicationError(500, "FINALIZE_FAILED", "Proposal effect applied but finalization could not be persisted");
 			}
 			await deleteProposalFile(bobbitStateDir(), draft.draftId, draft.type);
-			if (store.markImportProposalAudited(requestId, identity, new Date().toISOString())) audit("applied");
+			// Append is keyed before the decision-store marker. A crash between them
+			// replays without a duplicate; an append fault leaves the marker unset.
+			if (!audit("applied", identity.key)) throw new ProjectImportApplicationError(500, "AUDIT_FAILED", "Proposal applied but audit persistence failed");
+			store.markImportProposalAudited(requestId, identity, new Date().toISOString());
 			broadcastToProject(projectId, { type: "project_import_decision_requests_updated", projectId, ts: clock?.now() ?? Date.now() }); json({ ok: true, status: "accepted", outcome: result.outcome }, 201);
 		} catch (error) {
+			// Typed canonical rejections are deterministic and occur before an
+			// observable effect (or compensate it); unlock this exact claim for a
+			// corrected retry. Unknown failures remain applying for boot recovery.
+			if (error instanceof CanonicalMutationError) store.releaseImportProposal(identity);
 			if (error instanceof ProjectImportApplicationError || error instanceof CanonicalMutationError) json({ error: error.message, code: error.code }, error.status);
 			else jsonError(500, error);
 		}

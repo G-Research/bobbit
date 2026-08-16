@@ -43,9 +43,11 @@ export type ProjectImportMutationOperations = {
  * composition supplies the same canonical mutation functions used publicly;
  * no session, HTTP request, or import-specific config writer exists here.
  */
-const inFlightApplications = new Map<string, Promise<ProjectImportApplicationResult>>();
-
 export class ProjectImportProposalApplicationService {
+	/** Per-gateway single-flight state. A process-global map leaked completed work
+	 * between isolated gateway instances and made test/server lifetimes overlap. */
+	private readonly inFlightApplications = new Map<string, Promise<ProjectImportApplicationResult>>();
+
 	constructor(private readonly operations: ProjectImportMutationOperations) {}
 
 	validate(input: ProjectImportApplication): void {
@@ -53,7 +55,9 @@ export class ProjectImportProposalApplicationService {
 			throw new ProjectImportApplicationError(422, "INVALID_PROPOSAL", "Proposal identity is invalid");
 		}
 		const target = input.proposal.fields.projectId;
-		if (target !== input.projectId) {
+		// Import ownership supplies the project target. Older, valid project
+		// drafts may omit it, but a declared target must never cross that boundary.
+		if (target !== undefined && target !== input.projectId) {
 			throw new ProjectImportApplicationError(409, "PROJECT_ID_MISMATCH", "Project import proposal target does not match its owner");
 		}
 	}
@@ -72,11 +76,11 @@ export class ProjectImportProposalApplicationService {
 	async apply(input: ProjectImportApplication): Promise<ProjectImportApplicationResult> {
 		this.validate(input);
 		const application = { ...input, applicationKey: projectImportApplicationKey(input) };
-		const existing = inFlightApplications.get(application.applicationKey);
+		const existing = this.inFlightApplications.get(application.applicationKey);
 		if (existing) return existing;
 		const work = Promise.resolve(this.operations[input.type](input.proposal.fields, application));
-		inFlightApplications.set(application.applicationKey, work);
+		this.inFlightApplications.set(application.applicationKey, work);
 		try { return await work; }
-		finally { if (inFlightApplications.get(application.applicationKey) === work) inFlightApplications.delete(application.applicationKey); }
+		finally { if (this.inFlightApplications.get(application.applicationKey) === work) this.inFlightApplications.delete(application.applicationKey); }
 	}
 }

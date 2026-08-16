@@ -154,6 +154,10 @@ const MAX_PROVIDERS_PER_ENTRY = 100;
 const MAX_OUTCOMES_PER_ENTRY = 50;
 const MAX_DISPLAY_NUMBER = 1_000_000_000;
 const SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+// Server-generated import application identities are opaque SHA-256 keys, not
+// user labels. Keep this separate from display identifiers so audit dedupe can
+// retain its full collision-resistant key without exposing it through reads.
+const SAFE_IMPORT_AUDIT_KEY = /^import-proposal-v1:[a-f0-9]{64}$/;
 const TRACE_EVENTS = new Set<string>(TRACE_OUTCOME_EVENTS);
 const OUTCOMES = new Set<string>(TRACE_OUTCOMES);
 const OUTCOME_KINDS = new Set<string>(TRACE_OUTCOME_KINDS);
@@ -225,6 +229,33 @@ export class ContextTraceStore {
 		this.appendProjectImportEntry(persisted);
 	}
 
+	/**
+	 * Append one import-proposal audit outcome at most once. The opaque key is
+	 * stored only in the JSONL write form (never returned by read APIs), letting
+	 * callers safely mark their separate decision-store audit fence *after* a
+	 * successful append. This closes both crash windows: append-before-marker
+	 * replays are deduplicated, while append failures leave no marker behind.
+	 */
+	appendProjectImportOutcomeOnce(projectId: string, importId: string, auditKey: string, outcome: TraceDecisionOutcomeRow): boolean {
+		if (!SAFE_IMPORT_AUDIT_KEY.test(auditKey)) throw new Error("Invalid import audit key");
+		const file = this.projectImportTraceFile(projectId, importId);
+		if (this.fs.existsSync(file)) {
+			for (const line of this.fs.readFileSync(file, "utf-8").split("\n")) {
+				if (!line.trim()) continue;
+				try {
+					const parsed = JSON.parse(line) as { auditKey?: unknown };
+					if (parsed.auditKey === auditKey) return false;
+				} catch { /* a torn/invalid line cannot establish a durable audit */ }
+			}
+		}
+		const persisted = sanitizeProjectImportTraceEntry({
+			ts: Date.now(), hook: "decisionResolved", projectId, importId, providers: [],
+			outcomes: [{ ...outcome, event: "decisionResolved" }],
+		});
+		this.appendProjectImportEntry({ ...persisted, auditKey } as ProjectImportTraceEntry & { auditKey: string });
+		return true;
+	}
+
 	readTrace(sessionId: string, limit?: number): TraceEntry[] {
 		const file = this.traceFile(sessionId);
 		if (!this.fs.existsSync(file)) return [];
@@ -253,7 +284,7 @@ export class ContextTraceStore {
 		return typeof limit === "number" ? entries.slice(-Math.max(0, limit)) : entries;
 	}
 
-	private appendProjectImportEntry(entry: ProjectImportTraceEntry): void {
+	private appendProjectImportEntry(entry: ProjectImportTraceEntry & { auditKey?: string }): void {
 		const file = this.projectImportTraceFile(entry.projectId, entry.importId);
 		this.fs.mkdirSync(path.dirname(file), { recursive: true });
 		this.fs.appendFileSync(file, JSON.stringify(entry) + "\n");

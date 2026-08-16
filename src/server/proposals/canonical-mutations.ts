@@ -1000,6 +1000,8 @@ type CanonicalProjectRecord = {
 
 export interface CanonicalProjectProposalDeps<T extends CanonicalProjectRecord> {
   findByApplicationKey(key: string): T | undefined;
+  /** Persist a bounded replay receipt after the canonical mutation commits. */
+  recordApplicationReceipt?(projectId: string, key: string): void;
   register(input: { name: string; rootPath: string; color?: string; palette?: string; colorLight?: string; colorDark?: string; acceptCanonical?: boolean; applicationKey?: string }): T;
   get(id: string): T | undefined;
   update(id: string, updates: Record<string, unknown>): T;
@@ -1295,6 +1297,10 @@ export async function applyCanonicalProjectProposal<T extends CanonicalProjectRe
       }
       if (project.importDecisionRun?.state === "configuring" && deps.markReady) project = deps.markReady(project.id, project.importDecisionRun.id);
       await deps.afterConfigured?.(project, context);
+      // Receipt recording is part of the canonical operation rather than an
+      // import-route afterthought. It preserves every bounded prior receipt so
+      // a later project proposal cannot erase the replay identity of this one.
+      if (input.applicationKey) deps.recordApplicationReceipt?.(project.id, input.applicationKey);
       return { project, replayed: false, ...(baseRefWarnings.length > 0 ? { warnings: baseRefWarnings } : {}) };
     } catch (error) {
       // Both durable stores roll back from snapshots captured before their first

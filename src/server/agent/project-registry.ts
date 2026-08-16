@@ -39,8 +39,10 @@ export interface RegisteredProject {
   provisional?: boolean; // True while a project assistant is setting up this project
   /** Durable one-shot import decision lifecycle marker for newly registered normal projects. */
   importDecisionRun?: ImportDecisionRunMarker;
-  /** Server-owned operation key used only to collapse canonical mutation replays. */
+  /** @deprecated Legacy single replay receipt, migrated to canonicalMutationReceipts on load. */
   canonicalMutationKey?: string;
+  /** Bounded append-only server-owned replay receipts for canonical mutations. */
+  canonicalMutationReceipts?: string[];
   /**
    * Gateway-owned exact grant rows. Project config is untrusted input; a config
    * row authorizes only while this independently persisted operator binding
@@ -716,11 +718,22 @@ export class ProjectRegistry {
     let changed = false;
     this.projects.clear();
     for (const p of arr) {
-      // Operation keys are gateway-owned durable identity, never free-form
-      // project metadata. Invalid/migrated values cannot become replay keys.
-      if (typeof p?.canonicalMutationKey !== "string" || !/^[A-Za-z0-9_.:-]{1,256}$/.test(p.canonicalMutationKey)) {
-        if (p?.canonicalMutationKey !== undefined) { delete p.canonicalMutationKey; changed = true; }
-      }
+      // Replay receipts are gateway-owned durable identity, never free-form
+      // project metadata. Migrate the old one-slot key into the bounded
+      // collection so a newer application cannot erase an older replay fence.
+      const hadLegacyReceipt = p?.canonicalMutationKey !== undefined;
+      const legacyReceipt = typeof p?.canonicalMutationKey === "string" && /^[A-Za-z0-9_.:-]{1,256}$/.test(p.canonicalMutationKey)
+        ? p.canonicalMutationKey : undefined;
+      const hadReceiptProperty = p?.canonicalMutationReceipts !== undefined;
+      const hadReceiptCollection = Array.isArray(p?.canonicalMutationReceipts);
+      const rawReceipts = hadReceiptCollection ? p.canonicalMutationReceipts : [];
+      const receipts = rawReceipts.filter((key: unknown): key is string => typeof key === "string" && /^[A-Za-z0-9_.:-]{1,256}$/.test(key));
+      if (legacyReceipt) receipts.unshift(legacyReceipt);
+      const normalizedReceipts = [...new Set(receipts)].slice(-128);
+      if (normalizedReceipts.length > 0) p.canonicalMutationReceipts = normalizedReceipts;
+      else delete p.canonicalMutationReceipts;
+      if (p?.canonicalMutationKey !== undefined) delete p.canonicalMutationKey;
+      if (hadLegacyReceipt || hadReceiptProperty && !hadReceiptCollection || rawReceipts.length !== normalizedReceipts.length || rawReceipts.some((key: unknown, index: number) => key !== normalizedReceipts[index])) changed = true;
       // A registry is gateway-owned, but malformed/migrated binding rows still
       // fail closed rather than becoming a source of authority.
       if (Array.isArray(p?.extensionGrantBindings)) {
@@ -971,7 +984,7 @@ export class ProjectRegistry {
   register(
     name: string,
     rootPath: string,
-    opts?: { color?: string; palette?: string; colorLight?: string; colorDark?: string; acceptCanonical?: boolean },
+    opts?: { color?: string; palette?: string; colorLight?: string; colorDark?: string; acceptCanonical?: boolean; applicationKey?: string },
   ): RegisteredProject {
     if (!path.isAbsolute(rootPath)) {
       throw new Error(`rootPath must be absolute, got: ${rootPath}`);
@@ -1060,6 +1073,7 @@ export class ProjectRegistry {
       colorLight,
       colorDark,
       ...(palette ? { palette } : {}),
+      ...(opts?.applicationKey ? { canonicalMutationReceipts: [this.assertCanonicalMutationReceipt(opts.applicationKey)] } : {}),
     };
 
     this.projects.set(project.id, project);
@@ -1465,16 +1479,30 @@ export class ProjectRegistry {
     return project;
   }
 
-  /** Persist a server-derived mutation key without exposing it as normal project configuration. */
-  setCanonicalMutationKey(id: string, key: string | undefined): void {
+  /** Whether a durable canonical application receipt belongs to this project. */
+  hasCanonicalMutationReceipt(id: string, key: string): boolean {
+    return this.projects.get(id)?.canonicalMutationReceipts?.includes(key) === true;
+  }
+
+  /** Append an immutable canonical replay receipt without erasing prior work. */
+  recordCanonicalMutationReceipt(id: string, key: string): void {
     const project = this.projects.get(id);
     if (!project) throw new Error(`Project not found: ${id}`);
-    if (key) {
-      if (!/^[A-Za-z0-9_.:-]{1,256}$/.test(key)) throw new Error("Invalid canonical mutation key");
-      project.canonicalMutationKey = key;
-    } else delete project.canonicalMutationKey;
+    key = this.assertCanonicalMutationReceipt(key);
+    if (project.canonicalMutationReceipts?.includes(key)) return;
+    project.canonicalMutationReceipts = [...(project.canonicalMutationReceipts ?? []), key].slice(-128);
     this.projects.set(id, project);
     this.save();
+  }
+
+  /** @deprecated Use recordCanonicalMutationReceipt; retained for package compatibility. */
+  setCanonicalMutationKey(id: string, key: string | undefined): void {
+    if (key !== undefined) this.recordCanonicalMutationReceipt(id, key);
+  }
+
+  private assertCanonicalMutationReceipt(key: string): string {
+    if (!/^[A-Za-z0-9_.:-]{1,256}$/.test(key)) throw new Error("Invalid canonical mutation key");
+    return key;
   }
 
   /**

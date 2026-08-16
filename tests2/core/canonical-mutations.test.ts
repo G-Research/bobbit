@@ -175,17 +175,22 @@ test("durable canonical goal replay does not re-run gates or lifecycle setup", a
 	expect(lifecycle).toBe(0);
 });
 
-test("project registry persists and reloads only a valid server-owned canonical mutation key", () => {
+test("project registry migrates legacy replay keys and keeps bounded append-only receipts", () => {
 	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-canonical-key-"));
 	const root = path.join(stateDir, "project");
 	fs.mkdirSync(root);
 	try {
 		const registry = new ProjectRegistry(stateDir);
 		const project = registry.register("project", root);
-		registry.setCanonicalMutationKey(project.id, "server-key:1");
-		expect(new ProjectRegistry(stateDir).get(project.id)?.canonicalMutationKey).toBe("server-key:1");
-		fs.writeFileSync(path.join(stateDir, "projects.json"), JSON.stringify([{ ...project, canonicalMutationKey: "not allowed spaces" }]));
-		expect(new ProjectRegistry(stateDir).get(project.id)?.canonicalMutationKey).toBeUndefined();
+		registry.recordCanonicalMutationReceipt(project.id, "server-key:1");
+		registry.recordCanonicalMutationReceipt(project.id, "server-key:2");
+		const reloaded = new ProjectRegistry(stateDir);
+		expect(reloaded.hasCanonicalMutationReceipt(project.id, "server-key:1")).toBe(true);
+		expect(reloaded.hasCanonicalMutationReceipt(project.id, "server-key:2")).toBe(true);
+		fs.writeFileSync(path.join(stateDir, "projects.json"), JSON.stringify([{ ...project, canonicalMutationKey: "legacy-key:1" }]));
+		const migrated = new ProjectRegistry(stateDir);
+		expect(migrated.hasCanonicalMutationReceipt(project.id, "legacy-key:1")).toBe(true);
+		expect(migrated.get(project.id)?.canonicalMutationKey).toBeUndefined();
 	} finally {
 		fs.rmSync(stateDir, { recursive: true, force: true });
 	}

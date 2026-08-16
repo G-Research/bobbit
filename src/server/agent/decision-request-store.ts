@@ -530,6 +530,22 @@ export class DecisionRequestStore {
 		return result ?? { claimed: false, proposal: this.get(application.requestId)?.proposal };
 	}
 
+	/**
+	 * Release an exact applying claim only after a caller has established that a
+	 * deterministic failure made no effect (or fully compensated one). Unknown
+	 * failures deliberately remain applying for boot recovery rather than
+	 * pretending that an approval can safely be retried.
+	 */
+	releaseImportProposal(application: ProposalApplicationIdentity): boolean {
+		return this.commit(next => {
+			const current = next.requests[application.requestId];
+			const proposal = current?.proposal;
+			if (!current || !isTerminalStatus(current.status) || proposal?.status !== "applying" || !sameApplication(proposal.application, application)) return false;
+			current.proposal = { status: "created", type: application.type, rev: application.rev };
+			return true;
+		}) ?? false;
+	}
+
 	/** Finalize only the exact persisted application claim. */
 	finalizeImportProposal(application: ProposalApplicationIdentity, decidedAt: string, outcome?: Record<string, string>): boolean {
 		return this.commit(next => {

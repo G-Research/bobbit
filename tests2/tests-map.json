@@ -30,6 +30,15 @@
       }
     },
     {
+      "path": "tests2/core/project-import-proposal-application.test.ts",
+      "reason": "Atomic import proposal identity validation and per-gateway single-flight isolation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/staff-persistence-compensation.test.ts",
       "reason": "Staff-store rollback and worktree compensation coverage for persistence failures.",
       "execution": {

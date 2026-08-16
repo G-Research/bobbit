@@ -169,6 +169,11 @@ describe("DecisionRequestStore", () => {
 		assert.equal(store.claimImportProposal(application, "2026-01-01T00:02:00.000Z").claimed, true);
 		assert.equal(store.claimImportProposal(application, "2026-01-01T00:02:01.000Z").claimed, false);
 		assert.equal(store.updateProposal("request-1", { status: "rejected", type: "role", rev: 1, decidedAt: "2026-01-01T00:02:01.000Z" }), false);
+		// A deterministic pre-effect failure releases only its exact durable claim.
+		assert.equal(store.releaseImportProposal({ ...application, key: `import-proposal-v1:${"c".repeat(64)}` }), false);
+		assert.equal(store.releaseImportProposal(application), true);
+		assert.equal(store.get("request-1")?.proposal?.status, "created");
+		assert.equal(store.claimImportProposal(application, "2026-01-01T00:02:02.000Z").claimed, true);
 		assert.equal(store.finalizeImportProposal(application, "2026-01-01T00:03:00.000Z", { role: "imported" }), true);
 		assert.equal(store.markImportProposalAudited("request-1", application, "2026-01-01T00:03:01.000Z"), true);
 		assert.equal(store.markImportProposalAudited("request-1", application, "2026-01-01T00:03:02.000Z"), false);
