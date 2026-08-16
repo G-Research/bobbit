@@ -223,14 +223,14 @@ export function buildClaudeAgentSdkEnv(options: Pick<ClaudeAgentSdkBridgeOptions
 }
 
 class AsyncInputQueue implements AsyncIterable<SDKUserMessage> {
-	private rows: Array<{ message: SDKUserMessage; resolve: () => void; reject: (error: Error) => void; clock: Clock; timer?: ReturnType<typeof setTimeout> }> = [];
+	private rows: Array<{ message: SDKUserMessage; onDelivered?: () => void; resolve: () => void; reject: (error: Error) => void; clock: Clock; timer?: ReturnType<typeof setTimeout> }> = [];
 	private reader?: { resolve: (result: IteratorResult<SDKUserMessage>) => void };
 	private closed?: Error;
 
-	push(message: SDKUserMessage, deadlineMs: number, clock: Clock): Promise<void> {
+	push(message: SDKUserMessage, deadlineMs: number, clock: Clock, onDelivered?: () => void): Promise<void> {
 		if (this.closed) return Promise.reject(this.closed);
 		return new Promise<void>((resolve, reject) => {
-			const row = { message, resolve, reject, clock } as typeof this.rows[number];
+			const row = { message, onDelivered, resolve, reject, clock } as typeof this.rows[number];
 			if (deadlineMs > 0) row.timer = clock.setTimeout(() => {
 				const index = this.rows.indexOf(row);
 				if (index >= 0) this.rows.splice(index, 1);
@@ -243,6 +243,9 @@ class AsyncInputQueue implements AsyncIterable<SDKUserMessage> {
 
 	private settle(row: typeof this.rows[number]): void {
 		if (row.timer) row.clock.clearTimeout(row.timer);
+		// The queue is the handoff boundary: publish the accepted user turn before
+		// resolving the SDK reader, which may synchronously emit assistant/result rows.
+		row.onDelivered?.();
 		row.resolve();
 	}
 
@@ -800,6 +803,11 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 		this.emit({ type: "agent_start" });
 	}
 
+	/** Emit Bobbit's canonical root echo at the one successful input handoff. */
+	private emitAcceptedRootUserTurn(text: string): void {
+		this.emit({ type: "message_end", message: { role: "user", content: [{ type: "text", text }] } });
+	}
+
 	private clearPendingTurnStart(turn?: symbol): void {
 		if (!turn || this.pendingTurnStart === turn) this.pendingTurnStart = undefined;
 	}
@@ -881,8 +889,13 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 			this.pendingTurnStart = turn;
 		}
 		try {
-			await this.input.push(message, timeoutMs, this.deps.clock);
-			if (turn) this.emitPendingTurnStart(turn);
+			await this.input.push(message, timeoutMs, this.deps.clock, () => {
+				// Publish both root lifecycle boundaries before the SDK reader receives
+				// the row. This keeps optimistic prompts chronological even for a
+				// synchronous assistant/result response.
+				if (turn) this.emitPendingTurnStart(turn);
+				this.emitAcceptedRootUserTurn(body);
+			});
 			// This is deliberately after input delivery: an idle AsyncIterable must not
 			// receive a synthetic/bootstrap row merely to obtain system:init.
 			if (firstInitialization) await this.initializeFromFirstInput(timeoutMs);

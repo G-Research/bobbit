@@ -291,9 +291,12 @@ describe("ClaudeAgentSdkBridge", () => {
 		// suppressed after the failure.
 		expect(observed).toEqual([
 			{ type: "agent_start" },
+			{ type: "message_end", message: { role: "user", content: [{ type: "text", text: "must not be accepted" }] } },
 			expect.objectContaining({ type: "process_exit", code: 1, error: "SDK_SESSION_UNAVAILABLE" }),
 		]);
-		expect(observed.filter(event => event.type === "agent_end" || event.type.startsWith("message") || event.type.includes("tool"))).toEqual([]);
+		expect(observed.filter(event => event.type === "agent_end"
+			|| (event.type.startsWith("message") && event.message?.role !== "user")
+			|| event.type.includes("tool"))).toEqual([]);
 	});
 
 	it("keeps SDK rate-limit admission updates lifecycle-neutral", async () => {
@@ -409,7 +412,8 @@ describe("ClaudeAgentSdkBridge", () => {
 
 		expect((fixture.bridge as any).state).toBe("ready");
 		expect((await fixture.bridge.getState()).data.sessionId).toBe(sessionId);
-		expect(observed.map(event => event.type)).toEqual(["agent_start", "agent_end"]);
+		expect(observed.map(event => event.type)).toEqual(["agent_start", "message_end", "agent_end"]);
+		expect(observed[1]).toEqual({ type: "message_end", message: { role: "user", content: [{ type: "text", text: "second user prompt" }] } });
 		expect(observed.some(event => event.type === "process_exit")).toBe(false);
 	});
 
@@ -458,8 +462,12 @@ describe("ClaudeAgentSdkBridge", () => {
 		warn.mockRestore();
 
 		expect(observed.map(event => event.type)).toEqual([
-			"agent_start", "message_end", "agent_end",
-			"agent_start", "message_end", "tool_execution_start", "message_end", "tool_execution_end", "agent_end",
+			"agent_start", "message_end", "message_end", "agent_end",
+			"agent_start", "message_end", "message_end", "tool_execution_start", "message_end", "tool_execution_end", "agent_end",
+		]);
+		expect(observed.filter(event => event.type === "message_end" && event.message?.role === "user").map(event => event.message.content)).toEqual([
+			[{ type: "text", text: "first user prompt" }],
+			[{ type: "text", text: "second user prompt" }],
 		]);
 		expect(observed).toEqual(expect.arrayContaining([
 			expect.objectContaining({ type: "tool_execution_start", toolCallId: "second-tool", toolName: "Read", args: { path: "two.txt" } }),
@@ -905,7 +913,11 @@ describe("ClaudeAgentSdkBridge", () => {
 		await flushMicrotasks();
 
 		expect((fixture.bridge as any).state).toBe("ready");
-		expect(observed.map(event => event.type)).toEqual(["agent_start", "agent_end"]);
+		expect(observed.map(event => event.type)).toEqual(["agent_start", "message_end", "agent_end"]);
+		expect(observed[1]).toEqual({
+			type: "message_end",
+			message: { role: "user", content: [{ type: "text", text: "complete immediately" }] },
+		});
 	});
 
 	it("soft-interrupts without closing, but terminal stop closes once, rejects unsent work, and clears running", async () => {

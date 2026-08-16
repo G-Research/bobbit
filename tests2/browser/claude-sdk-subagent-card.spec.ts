@@ -220,6 +220,16 @@ test.describe("Claude SDK embedded subagent card", () => {
 			const parentCard = page.locator(`[data-subagent-parent-tool-use-id="${PARENT_TOOL_USE_ID}"]`);
 			await expect(parentCard).toBeVisible({ timeout: 20_000 });
 			await expect(parentCard).toContainText("Agent");
+			// The bridge's queue handoff must replace the optimistic prompt before
+			// this synchronous fixture can publish its root assistant/tool frames.
+			await expect.poll(() => page.evaluate(() => {
+				const messages = (window as any).__bobbitState?.remoteAgent?._state?.messages ?? [];
+				return messages.filter((message: any) =>
+					message?.role === "user"
+					&& Array.isArray(message.content)
+					&& message.content.some((block: any) => block?.type === "text" && block.text === "start embedded SDK child fixture"),
+				).length;
+			})).toBe(1);
 			await expect(parentCard.locator(`[data-subagent-agent-id="${CHILD_AGENT_ID}"]`)).toContainText(CHILD_TEXT);
 			await expect(parentCard.locator('[data-tool-name="read"]')).toContainText("fixture read result");
 			await expect(parentCard).toContainText("Working");
