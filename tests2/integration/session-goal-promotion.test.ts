@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { copyGitTemplate } from "../harness/git-template.js";
 import { apiFetch, createSession, registerProject, waitForSessionStatus } from "./_e2e/e2e-setup.js";
+import { SandboxSessionFilesystem } from "../harness/sandbox-session-filesystem.js";
 
 async function jsonResponse(response: Response): Promise<any> {
 	const text = await response.text();
@@ -184,5 +185,154 @@ test.describe("current-session goal promotion API", () => {
 		expect(permittedPurge.status).toBe(200);
 		const sessionsAfterPurge = await jsonResponse(await apiFetch("/api/sessions?include=archived"));
 		expect(sessionsAfterPurge.sessions.some((session: any) => session.id === ownerId)).toBe(false);
+	});
+
+	test("probes a sandbox owner's transcript in its container realm before promotion", async ({ gateway, scope }) => {
+		const projectRoot = path.join(gateway.bobbitDir, `promotion-sandbox-${randomUUID()}`);
+		copyGitTemplate(projectRoot);
+		const project = await registerProject({
+			name: `promotion-sandbox-${Date.now()}`,
+			rootPath: projectRoot,
+			components: [{ name: "app", repo: "." }],
+		});
+		const ownerId = await createSession({ projectId: project.id, cwd: projectRoot });
+		await waitForSessionStatus(ownerId, "idle", 30_000);
+
+		const manager = gateway.sessionManager as any;
+		const sandboxManager = manager.sandboxManager as any;
+		const live = manager.getSession(ownerId) as any;
+		const persisted = manager.getPersistedSession(ownerId) as any;
+		expect(live).toBeTruthy();
+		expect(persisted).toBeTruthy();
+
+		const branch = `session/promotion-sandbox-${randomUUID().slice(0, 8)}`;
+		const worktreePath = `/workspace-wt/${branch}`;
+		const transcriptPath = `/home/node/.bobbit/agent/sessions/--workspace--/${ownerId}.jsonl`;
+		const containerId = `promotion-container-${randomUUID()}`;
+		const sandboxFs = new SandboxSessionFilesystem({
+			root: path.join(gateway.bobbitDir, `promotion-container-fs-${randomUUID()}`),
+			hostAgentSessionsDir: path.join(gateway.bobbitDir, "agent-sessions"),
+		});
+		const baseExec = sandboxFs.exec.bind(sandboxFs);
+		const sandbox = sandboxFs as any;
+		sandbox.getStatus = () => ({ status: "ready", projectId: project.id, containerId });
+		sandbox.getContainerId = async () => containerId;
+		sandbox.exec = async (args: string[]) => {
+			if (args[0] === "git" && args[1] === "branch" && args[2] === "--show-current") return `${branch}\n`;
+			if (args[0] === "git" && args[1] === "rev-parse" && args[2] === "--is-inside-work-tree") return "true\n";
+			return baseExec(args);
+		};
+
+		const store = manager.getSessionStore(project.id);
+		store.update(ownerId, {
+			agentSessionFile: transcriptPath,
+			cwd: worktreePath,
+			worktreePath,
+			repoPath: "/workspace",
+			branch,
+			sandboxed: true,
+		});
+		Object.assign(live, {
+			cwd: worktreePath,
+			worktreePath,
+			repoPath: "/workspace",
+			branch,
+			sandboxed: true,
+			containerId,
+		});
+		live.rpcClient.getState = async () => ({ success: true, data: { sessionFile: transcriptPath } });
+
+		const originalGet = sandboxManager.get.bind(sandboxManager);
+		const originalEnsure = sandboxManager.ensureForProject.bind(sandboxManager);
+		const originalApplySandboxWiring = manager.applySandboxWiring.bind(manager);
+		let provisioningCalls = 0;
+		let acceptedGoalId: string | undefined;
+		sandboxManager.get = (candidateProjectId: string) => candidateProjectId === project.id ? sandbox : originalGet(candidateProjectId);
+		sandboxManager.ensureForProject = async () => { provisioningCalls += 1; throw new Error("promotion must not provision a sandbox"); };
+		manager.applySandboxWiring = async (options: any) => {
+			options.sandboxed = true;
+			options.containerId = containerId;
+			return true;
+		};
+
+		try {
+			const seed = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/seed`, {
+				method: "POST",
+				body: JSON.stringify({
+					args: {
+						title: "Promote sandbox owner",
+						spec: "Keep the exact sandbox session.",
+						workflow: "general",
+						projectId: project.id,
+					},
+				}),
+			});
+			expect(seed.status, await seed.clone().text()).toBe(200);
+
+			const missing = await jsonResponse(await apiFetch(`/api/sessions/${ownerId}/proposal/goal/worktree-mode`));
+			expect(missing.eligibility).toMatchObject({ eligible: false, code: "TRANSCRIPT_UNAVAILABLE" });
+			expect(sandboxFs.calls.some(call => call.args[0] === "test" && call.args[1] === "-f" && call.args[2] === transcriptPath)).toBe(true);
+
+			const transcriptHostPath = sandboxFs.hostPath(transcriptPath);
+			fs.mkdirSync(path.dirname(transcriptHostPath), { recursive: true });
+			fs.writeFileSync(transcriptHostPath, '{"type":"message","message":{"role":"user","content":"sandbox history"}}\n');
+
+			const projection = await jsonResponse(await apiFetch(`/api/sessions/${ownerId}/proposal/goal/worktree-mode`));
+			expect(projection.eligibility.eligible, JSON.stringify(projection)).toBe(true);
+			expect(projection.eligibility.coordinates).toMatchObject({
+				branch,
+				worktreePath,
+				sandboxed: true,
+			});
+
+			const selection = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/worktree-mode`, {
+				method: "PUT",
+				body: JSON.stringify({ mode: "current-session" }),
+			});
+			expect(selection.status, await selection.clone().text()).toBe(200);
+			const sessionCountBefore = (await jsonResponse(await apiFetch("/api/sessions?include=archived"))).sessions
+				.filter((session: any) => session.projectId === project.id).length;
+
+			const accepted = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
+				method: "POST",
+				body: JSON.stringify({ title: "Promote sandbox owner", spec: "Keep the exact sandbox session." }),
+			});
+			expect(accepted.status, await accepted.clone().text()).toBe(201);
+			const goal = await jsonResponse(accepted);
+			acceptedGoalId = goal.id;
+			scope.trackGoal(goal.id);
+
+			const promoted = manager.getSession(ownerId);
+			expect(promoted.id).toBe(ownerId);
+			expect(promoted.containerId).toBe(containerId);
+			expect(promoted.worktreePath).toBe(worktreePath);
+			expect(promoted.branch).toBe(branch);
+			expect(manager.getPersistedSession(ownerId).agentSessionFile).toBe(transcriptPath);
+			expect(goal).toMatchObject({
+				worktreeOwnerSessionId: ownerId,
+				worktreePath,
+				branch,
+				sandboxed: true,
+			});
+			const sessionCountAfter = (await jsonResponse(await apiFetch("/api/sessions?include=archived"))).sessions
+				.filter((session: any) => session.projectId === project.id).length;
+			expect(sessionCountAfter).toBe(sessionCountBefore);
+			expect(provisioningCalls).toBe(0);
+			expect(sandboxFs.calls.some(call => call.args[0] === "mkdir" || (call.args[0] === "git" && call.args.includes("worktree")))).toBe(false);
+
+			const archived = await apiFetch(`/api/goals/${goal.id}?cascade=true`, { method: "DELETE" });
+			expect(archived.status, await archived.clone().text()).toBe(200);
+			acceptedGoalId = undefined;
+			const purged = await apiFetch(`/api/sessions/${ownerId}?purge=true`, { method: "DELETE" });
+			expect(purged.status, await purged.clone().text()).toBe(200);
+		} finally {
+			if (acceptedGoalId) {
+				await apiFetch(`/api/goals/${acceptedGoalId}?cascade=true`, { method: "DELETE" }).catch(() => undefined);
+				await apiFetch(`/api/sessions/${ownerId}?purge=true`, { method: "DELETE" }).catch(() => undefined);
+			}
+			manager.applySandboxWiring = originalApplySandboxWiring;
+			sandboxManager.ensureForProject = originalEnsure;
+			sandboxManager.get = originalGet;
+		}
 	});
 });

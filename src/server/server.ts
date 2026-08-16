@@ -167,6 +167,7 @@ import { BgProcessCreateError, BgProcessManager } from "./agent/bg-process-manag
 import { streamBgWaitResponse } from "./agent/bg-wait-response.js";
 import {
 	sessionFileDeleteContainerOnly,
+	sessionFileExists,
 	sessionFileRead,
 	sessionFileWriteAtomic,
 	sessionFsContextForAgentFile,
@@ -15624,7 +15625,13 @@ async function handleApiRoute(
 			const project = proposalProjectId ? projectRegistry.get(proposalProjectId) : undefined;
 			const targetCtx = proposalProjectId ? projectContextManager.getOrCreate(proposalProjectId) : undefined;
 			const fileSystem = fsImpl ?? fs;
-			const transcriptAvailable = !!persisted?.agentSessionFile && fileSystem.existsSync(persisted.agentSessionFile);
+			let transcriptAvailable = false;
+			if (persisted?.agentSessionFile) {
+				const transcriptContext = sessionFsContextForAgentFile(persisted, persisted.agentSessionFile);
+				transcriptAvailable = transcriptContext.sandboxed
+					? await sessionFileExists(transcriptContext, persisted.agentSessionFile, sandboxManager ?? null)
+					: fileSystem.existsSync(persisted.agentSessionFile);
+			}
 			let workspaceAvailable = false;
 			let sandboxReachable: boolean | undefined;
 			if (live?.cwd && live.branch) {
