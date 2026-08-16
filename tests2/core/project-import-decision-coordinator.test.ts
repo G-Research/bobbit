@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { describe, expect, it } from "vitest";
 import { ProjectImportDecisionCoordinator } from "../../src/server/agent/project-import-decision-coordinator.ts";
 
@@ -39,7 +40,7 @@ describe("ProjectImportDecisionCoordinator", () => {
 
 		expect(first).toEqual(second);
 		expect(dispatches).toBe(1);
-		expect(runCreations).toBe(1, "the ready marker creates one durable import store before dispatch");
+		assert.equal(runCreations, 1, "the ready marker creates one durable import store before dispatch");
 		expect(storedRuns.get("import-1")?.context).toMatchObject({ event: "projectImported", projectId: "project-1", importId: "import-1" });
 		expect(traces).toEqual([{
 			projectId: "project-1", importId: "import-1",

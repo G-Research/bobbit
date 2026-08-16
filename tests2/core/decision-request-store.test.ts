@@ -173,8 +173,9 @@ describe("DecisionRequestStore", () => {
 		assert.equal(store.markImportProposalAudited("request-1", application, "2026-01-01T00:03:01.000Z"), true);
 		assert.equal(store.markImportProposalAudited("request-1", application, "2026-01-01T00:03:02.000Z"), false);
 		const restarted = new DecisionRequestStore(dir, memfs);
-		assert.equal(restarted.get("request-1")?.proposal?.status, "accepted");
-		assert.equal(restarted.get("request-1")?.proposal?.auditedAt, "2026-01-01T00:03:01.000Z", "restart replay observes the durable audit fence");
+		const restartedProposal = restarted.get("request-1")?.proposal;
+		assert.ok(restartedProposal?.status === "accepted");
+		assert.equal(restartedProposal.auditedAt, "2026-01-01T00:03:01.000Z", "restart replay observes the durable audit fence");
 		assert.deepEqual(restarted.listApplyingImportProposals("import-1"), []);
 	});
 
