@@ -275,6 +275,16 @@ describe("buildDockerRunArgs", () => {
 			);
 			const cloneIndex = calls.findIndex((args) => args.includes("git") && args.includes("clone"));
 
+			const volumeCreates = calls.filter((args) => args[0] === "volume" && args[1] === "create");
+			assert.deepEqual(
+				volumeCreates.map((args) => args.at(-1)),
+				Object.values(projectSandboxVolumeNames("fresh-volume-owner")),
+				"must explicitly create and label workspace, worktrees, and private SDK-state volumes",
+			);
+			for (const args of volumeCreates) {
+				assert.ok(args.includes("--label"));
+				assert.ok(args.includes("bobbit-project=fresh-volume-owner"));
+			}
 			assert.ok(runIndex >= 0, "expected a sandbox container to be created");
 			assert.ok(ownershipIndex > runIndex, "must repair named-volume ownership after creating the container");
 			assert.ok(cloneIndex > ownershipIndex, "must repair named-volume ownership before cloning as the image user");

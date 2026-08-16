@@ -1571,9 +1571,10 @@ export class ProjectSandbox {
 		const names = projectSandboxVolumeNames(this.options.projectId, runId);
 		const createArgs = projectSandboxVolumeCreateArgs(this.options.projectId, runId, randomUUID());
 
-		for (const [key, name] of Object.entries(names) as Array<[keyof typeof names, string]>) {
+		for (const args of createArgs) {
+			const name = args.at(-1)!;
 			if (await this._sandboxVolumeExists(name)) continue;
-			await this.execDocker(createArgs[key === "workspace" ? 0 : 1], { timeout: 15_000, env: DOCKER_ENV });
+			await this.execDocker(args, { timeout: 15_000, env: DOCKER_ENV });
 		}
 
 		return {
