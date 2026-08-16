@@ -8861,8 +8861,17 @@ async function handleApiRoute(
 				maxConcurrentChildren: effMaxConcurrentChildren,
 				metadata,
 				worktree: explicitWorktree,
-				team: body?.team !== false,
+				...(body?.team !== false ? { team: true } : {}),
 			});
+			// `team: false` historically meant "do not auto-enable yet", not a
+			// durable prohibition on a later manual start. GoalManager defaults new
+			// goals to team mode, so remove that default from this explicit legacy
+			// shape while retaining `team: true` as archive-retry evidence for goals
+			// that were actually enabled at creation.
+			if (body?.team === false) {
+				delete goal.team;
+				targetCtx.goalStore.put(goal);
+			}
 			// Set projectId from the explicit request scope.
 			if (targetProjectId) {
 				targetGoalManager.updateGoal(goal.id, { projectId: targetProjectId });
@@ -13517,6 +13526,17 @@ async function handleApiRoute(
 			}
 		}
 		try {
+			// Legacy and explicit `team: false` creates omit the durable capability
+			// bit so they remain standalone until the user manually starts a team.
+			// Publish that explicit enablement before dispatch so archive retries can
+			// preserve team worktree/branch evidence after TeamStore is reconciled.
+			if (startGoal.team === undefined) {
+				const startContext = projectContextManager.getContextForGoal(goalId);
+				if (!startContext?.goalStore.update(goalId, { team: true })) {
+					throw new Error(`Unable to enable team mode for goal ${goalId}`);
+				}
+				await startContext.goalStore.flush();
+			}
 			// REST retries are idempotent even after the first paused request has
 			// resumed the goal. Resume authority remains limited to the paused
 			// snapshot that passed operator authorization above.
