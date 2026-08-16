@@ -152,6 +152,28 @@ function createPauseRouteFixture(options: { goals?: GoalWithPauseSource[] } = {}
 		failCancellationFence(error = new Error("simulated durable fence failure"), goalId?: string) {
 			failFence = { error, goalId };
 		},
+		holdStrictGoalPublication() {
+			// Exercise GoalStore's real strict-publication seam. The held wrapper
+			// delegates to it after release, so a successful pause still crosses the
+			// production coalesced-writer barrier rather than a test-only fake.
+			const persistence = (goalStore as any).persistence;
+			const publishStrict = persistence.publishStrict.bind(persistence);
+			const started = deferred();
+			const release = deferred();
+			persistence.publishStrict = async (ids: Iterable<string>) => {
+				started.resolve();
+				await release.promise;
+				return publishStrict(ids);
+			};
+			return { started, release };
+		},
+		failStrictGoalPublication(error = new Error("injected strict goal publication failure")) {
+			// GoalStore.updateStrict owns the rollback around this exact seam.
+			// Replacing it makes the route's success/error handling observable without
+			// timing a debounced ordinary save.
+			const persistence = (goalStore as any).persistence;
+			persistence.publishStrict = async () => { throw error; };
+		},
 		stallPausedWrite() {
 			stallWrite = { started: deferred(), release: deferred() };
 			return stallWrite;
@@ -386,6 +408,58 @@ describe("canonical operator pause lifecycle", () => {
 		assert.equal(fx.fenceDepth, 0, "admission reopens only after the paused write and broadcast settle");
 		assert.deepEqual(fx.fenceCalls, [{ goalId: fx.goal.id, cause: "goal-pause", depth: 1 }]);
 		assert.deepEqual(fx.broadcastFenceDepths, [1], "the paused broadcast must remain inside the lifecycle fence");
+	});
+
+	it("does not report or broadcast an operator pause before GoalStore strict publication settles", async () => {
+		const fx = createPauseRouteFixture();
+		const publication = fx.holdStrictGoalPublication();
+		const pause = fx.post();
+		const firstBoundary = await Promise.race([
+			publication.started.promise.then(() => "strict-publication" as const),
+			pause.then(() => "route-response" as const),
+		]);
+
+		assert.equal(
+			firstBoundary,
+			"strict-publication",
+			"OPERATOR_PAUSE_STRICT_PUBLICATION: the route must enter GoalStore's strict publication barrier before it can return success",
+		);
+		let responseSettled = false;
+		void pause.then(() => { responseSettled = true; });
+		await Promise.resolve();
+		assert.equal(responseSettled, false, "the held strict publication barrier must keep the pause response pending");
+		assert.deepEqual(fx.broadcasts, [], "the paused state must not broadcast before strict publication completes");
+
+		publication.release.resolve();
+		assert.deepEqual(await pause, { handled: true, status: 200, payload: { paused: 1 } });
+		assert.deepEqual(fx.broadcasts, [{ type: "goal_state_changed", goalId: fx.goal.id }]);
+		assert.equal(fx.goalStore.get(fx.goal.id)!.paused, true, "the successful response follows one durable pause/provenance publication");
+		assert.equal(fx.goalStore.get(fx.goal.id)!.pauseSource, "operator", "the successful response follows one durable pause/provenance publication");
+	});
+
+	it("maps a strict GoalStore pause publication failure to the retryable lifecycle error and restores memory", async () => {
+		const fx = createPauseRouteFixture();
+		fx.failStrictGoalPublication();
+
+		const result = await fx.post();
+
+		assert.equal(result.handled, true);
+		assert.deepEqual(result, {
+			handled: true,
+			status: 503,
+			payload: {
+				error: "Could not durably cancel active verifications",
+				code: "VERIFICATION_CANCELLATION_FENCE_FAILED",
+				retryable: true,
+			},
+		});
+		assert.notEqual(fx.goalStore.get(fx.goal.id)!.paused, true, "GoalStore strict rollback must restore paused memory ownership");
+		assert.notEqual(fx.goalStore.get(fx.goal.id)!.pauseSource, "operator", "GoalStore strict rollback must restore provenance memory ownership");
+		assert.notEqual(fx.goal.paused, true, "the route's live goal object must observe the rollback, not retain a stale pause");
+		assert.notEqual(fx.goal.pauseSource, "operator", "the route's live goal object must observe the provenance rollback");
+		assert.deepEqual(fx.broadcasts, [], "a rejected strict publication must not announce a successful pause");
+		assert.deepEqual(fx.abortCalls, [], "a rejected strict publication must not abort sessions as if pause succeeded");
+		assert.equal(fx.fenceDepth, 0, "the lifecycle fence must release after the strict publication failure");
 	});
 
 	it("repeated pause re-drives durable cancellation without duplicating state work", async () => {
