@@ -1,14 +1,22 @@
 /**
  * Opt-in smoke for the official Claude Agent SDK runtime.
  *
- * This deliberately runs against the user's Bobbit Anthropic OAuth
- * subscription. It never copies auth files or credential values into the test
- * gateway, SDK options, assertions, or logs. The SDK receives only a current
- * access token from Bobbit's OAuth resolver and a Bobbit-owned config root.
- * A native Claude CLI login alone is insufficient.
+ * First create an owner-only temporary BOBBIT_AGENT_DIR and connect Anthropic
+ * OAuth through a separate loopback Bobbit gateway using that directory. Export
+ * the same directory as MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR before Playwright
+ * resets agent-directory state or imports auth-sensitive server modules. Never
+ * copy/paste tokens or auth files, and do not co-locate this OAuth flow with
+ * enterprise Anthropic OAuth in a normal Bobbit instance. Preserve the temporary
+ * directory until sanitized evidence and user signoff are complete.
  *
- * Run only when Bobbit Anthropic OAuth is connected:
- *   BOBBIT_RUN_CLAUDE_AGENT_SDK_SMOKE=1 npm run test:manual -- --grep "Claude Agent SDK lifecycle"
+ * The smoke receives only a current access token from Bobbit's OAuth resolver;
+ * it never copies credential values into the test gateway, SDK options,
+ * assertions, or logs. A native Claude CLI login alone is insufficient.
+ *
+ * Direct run:
+ *   BOBBIT_RUN_CLAUDE_AGENT_SDK_SMOKE=1 MANUAL_CLAUDE_AGENT_SDK_MODEL=<unprefixed-model> MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR="$MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR" npm run test:manual -- --grep "Claude Agent SDK lifecycle"
+ * Sandbox run:
+ *   BOBBIT_RUN_CLAUDE_AGENT_SDK_SANDBOX_SMOKE=1 MANUAL_CLAUDE_AGENT_SDK_MODEL=<unprefixed-model> MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR="$MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR" npm run test:manual -- --grep "Docker sandbox lifecycle"
  */
 import { test, expect } from "@playwright/test";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";

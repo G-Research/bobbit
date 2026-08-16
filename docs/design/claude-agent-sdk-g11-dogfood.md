@@ -71,14 +71,21 @@ Add helper functions in that file only when they keep direct and sandbox cases
 readable; do not create test credentials, copy a Claude auth directory, or log
 model output.
 
-The manual suite must set a bounded timeout and skip unless its explicit flag and
-unprefixed `MANUAL_CLAUDE_AGENT_SDK_MODEL` are present. It must retain the current
-rule that the temporary Custom Provider/default model disappears with the isolated
-test state and does not alter a production gateway.
+The manual suite must set a bounded timeout and skip unless its explicit flag,
+unprefixed `MANUAL_CLAUDE_AGENT_SDK_MODEL`, and
+`MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR` are present. The auth directory is an
+owner-only temporary `BOBBIT_AGENT_DIR` authenticated through a separate
+loopback Bobbit gateway. Playwright must receive it before agent-directory reset
+or auth-sensitive server imports, which can cache startup-derived state. The
+suite must never copy/paste tokens or auth files, co-locate this subscription
+OAuth with enterprise Anthropic OAuth in a normal instance, or remove the
+isolated directory before evidence review and user signoff. Its temporary Custom
+Provider/default model disappears with the isolated test state and does not alter
+a production gateway.
 
 | Journey action | Production seam exercised | Manual assertion/evidence |
 | --- | --- | --- |
-| Start SDK session | provider preference → `resolveSessionRuntime` → `createSessionBridge` → `waitForReady` | Runtime is SDK; readiness settles within bound; no credential details are printed. |
+| Start SDK session | provider preference → `resolveSessionRuntime` → `createSessionBridge` → first accepted input | Idle bridge creation is bounded but SDK initialization is lazy. The first accepted input is the canonical auth/provider startup boundary and must settle with a sanitized failure or a live SDK result. |
 | Bobbit tool and permission card | tool surface → `requestToolGrant` → existing UI event/card path → dispatcher | Prompt requests an allowed canonical `read`; separately configure an `ask` safe tool and record card requested/settled and canonical name/group, without raw arguments/results. |
 | Workflow gate | normal Bobbit `gate_list`/`gate_status` surface under current session scope | Record the observed gate action and normal rendered result; do not signal/alter a real release gate merely to satisfy smoke coverage. Use an isolated fixture goal/gate or read-only gate query. |
 | Bobbit slash | composer → `resolveSkillExpansions` → prompt queue | Create/use a scoped exact Bobbit skill in isolated state; verify it is selected/expanded before SDK delivery. Also verify SDK `/compact` is consumed locally and does not reach the SDK. |
@@ -93,6 +100,7 @@ The direct test command remains:
 ```bash
 BOBBIT_RUN_CLAUDE_AGENT_SDK_SMOKE=1 \
 MANUAL_CLAUDE_AGENT_SDK_MODEL=claude-sonnet-4-5 \
+MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR="$MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR" \
 npm run test:manual -- --grep "Claude Agent SDK lifecycle"
 ```
 
@@ -101,6 +109,7 @@ The sandbox test command remains:
 ```bash
 BOBBIT_RUN_CLAUDE_AGENT_SDK_SANDBOX_SMOKE=1 \
 MANUAL_CLAUDE_AGENT_SDK_MODEL=claude-sonnet-4-5 \
+MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR="$MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR" \
 npm run test:manual -- --grep "Docker sandbox lifecycle"
 ```
 
@@ -166,21 +175,28 @@ record. Manual test success alone is insufficient.
 
 ### Direct host run
 
-- Explicit `BOBBIT_RUN_CLAUDE_AGENT_SDK_SMOKE=1` and a non-empty, unprefixed
-  `MANUAL_CLAUDE_AGENT_SDK_MODEL` selected from a reviewed Custom Provider.
-- An active Anthropic OAuth connection in Bobbit. A native Claude CLI login
-  alone is insufficient.
-- Built server/test artifacts and an isolated temporary Bobbit state.
-- No `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` as a workaround; no auth-file
-  copy, environment dump, or credential logging.
+- Explicit `BOBBIT_RUN_CLAUDE_AGENT_SDK_SMOKE=1`, a non-empty, unprefixed
+  `MANUAL_CLAUDE_AGENT_SDK_MODEL`, and `MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR`.
+- The auth directory is a fresh owner-only temporary `BOBBIT_AGENT_DIR` whose
+  OAuth was completed through a separate loopback Bobbit gateway. Export it to
+  Playwright before directory reset or auth-sensitive imports; do not copy/paste
+  tokens/auth files or mix it with enterprise Anthropic OAuth in a normal
+  instance.
+- Built server/test artifacts and isolated temporary Bobbit state. A native
+  Claude CLI login alone is insufficient.
+- No `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` workaround, environment dump,
+  credential logging, or cleanup before evidence review and user signoff.
 
 ### Docker sandbox run
 
 All direct prerequisites, plus:
 
-- Docker available to the user and a rebuilt `bobbit-agent` image whose Agent SDK
-  package, bundled Claude binary, capability label, and
-  `/usr/local/bin/bobbit-claude-agent-sdk` launcher match the server pin.
+- Docker available and a rebuilt `bobbit-agent` image with Agent SDK `0.3.222`,
+  bundled Claude `2.1.222`, Pi `0.82.1`, runtime schema `2`, the image-owned SDK
+  dependency, and executable `/usr/local/bin/bobbit-claude-agent-sdk` wrapper
+  under the `bobbit-sdk` identity. It must pass Bobbit's workspace-root ownership
+  and container-reachable callback-translation checks; host binaries, dependency
+  mounts, or manually rewritten callbacks are not substitutes.
 - A project Docker sandbox with an explicit enabled empty
   `ANTHROPIC_OAUTH_TOKEN` sandbox-token policy entry.
 - The Bobbit Anthropic OAuth connection is refreshable; only the current
@@ -196,22 +212,23 @@ smoke pass.
 
 ## Sanitized final-tip evidence snapshot
 
-This snapshot records implementation evidence only. It is not a real-session
-record and must not be used for a readiness decision.
+This snapshot records final implementation evidence only. It omits credentials,
+tokens, IDs, auth/workspace paths, callback authorities, correlation/container
+IDs, prompts, tool arguments/results, provider/model output, and launch-log
+content. Launch logs were redacted. It is not a release-readiness declaration or
+user dogfood signoff.
 
 | Area | Sanitized outcome |
 | --- | --- |
-| Automated unavailable-provider case | Passed at final tip: the expected unavailable category settled without a hang, Pi fallback, replacement conversation, or model turn. |
-| Direct-run discovery and repair | The initial attempt exposed a role-scope rejection before SDK startup. The role scope was repaired; a separate unavailable-route log-redaction defect was also repaired. |
-| Retried direct startup | The retry reached official SDK startup, but no usable local subscription or resumable SDK session was discoverable. It returned a bounded `503`; no Pi fallback or model turn occurred. |
-| Docker attempted/unavailable | The current image supplied SDK `0.3.222`; its isolated service identity and locking prerequisites were present. It reached official SDK startup, then returned the same bounded `503` because no usable local OAuth subscription or resumable SDK session was discoverable; no Pi fallback or model turn occurred. |
-| Focused regression evidence | All 25 focused checks passed. The implementation gate also passed. |
-| Direct real-model row | Pending a locally discoverable OAuth subscription and user-run confirmation. |
-| Docker real-model row | Docker was attempted; a usable local OAuth subscription and user-run confirmation remain pending. |
+| Implementation tip | Clean tip `53c5038b92ab00ef8c805d70e9fe724950928078`. |
+| Credential-free manual suite | 20 tests passed; 2 opt-in subscription smokes skipped. |
+| Direct OAuth smoke | Exact-tip smoke passed in 46.0 seconds. |
+| Pooled Docker OAuth smoke | Exact-tip smoke passed in about 1 minute. |
+| Verification | Build, type, unit, browser, E2E, security, and the implementation gate passed. |
 
-**Readiness remains prohibited.** Direct and Docker real-model evidence, including
-user signoff, are still required; automated passes and bounded unavailable results
-do not substitute for them.
+**Readiness remains prohibited.** Explicit user execution and signoff are still
+pending. These sanitized runs do not establish release readiness or complete
+G11 dogfood signoff.
 
 ## Recorded manual matrix template
 

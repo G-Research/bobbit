@@ -25,13 +25,32 @@ runtime. All other providers, including every existing `anthropic/*` selection,
 remain Pi-backed. This explicit split prevents an existing Anthropic session
 from changing runtime merely because an SDK is installed.
 
-`MANUAL_CLAUDE_AGENT_SDK_MODEL` is only the opt-in manual-smoke-test input. Its
-value is the unprefixed model id (for example, `claude-sonnet-4-5`). The manual
-lifecycle spec uses it to register a Custom Provider and default session model
-inside its isolated temporary Bobbit state before creating a session; removing
-that state removes the test-local configuration. It does not register a provider
-or change the model selection of a developer's production gateway; use the
-configuration above for production selection.
+`MANUAL_CLAUDE_AGENT_SDK_MODEL` and `MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR` are
+only opt-in manual-smoke-test inputs. The model value is the unprefixed model id
+(for example, `claude-sonnet-4-5`). The auth-directory value identifies the
+owner-only, temporary `BOBBIT_AGENT_DIR` used by the isolated smoke gateway.
+The lifecycle spec maps it to `BOBBIT_AGENT_DIR` before resetting agent-directory
+state or importing auth-sensitive server modules, because those modules can cache
+startup-derived directory state. It then registers a Custom Provider and default
+session model in temporary Bobbit state; removing that state removes the
+configuration. Neither variable registers a provider or changes a developer's
+production gateway; use the configuration above for production selection.
+
+### Manual OAuth isolation
+
+For an opt-in smoke, create a fresh owner-only temporary agent directory and
+connect Anthropic OAuth through a separate Bobbit gateway bound only to loopback
+with that directory as `BOBBIT_AGENT_DIR`. Export the same directory to the
+Playwright process as `MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR` before it starts. This
+keeps the test's OAuth state separate while letting Bobbit's normal locked OAuth
+resolver supply the current access token; never copy or paste tokens, auth files,
+or credential values.
+
+Do not place subscription OAuth alongside enterprise Anthropic OAuth in one
+normal Bobbit instance for this run. Keep the temporary directory until the
+sanitized run evidence has been reviewed and the user has signed off, then remove
+it through the normal cleanup process. Do not clean it early merely because a
+smoke process ended.
 
 Bobbit derives and persists runtime from the selected provider; the runtime is
 not a separate preference. Replacement cannot change an existing session between
@@ -119,12 +138,20 @@ Bobbit MCP server, so tools, permissions, queues, model/thinking controls,
 steers, interrupts, and stop retain their established owners. SDK arguments are
 opaque to Bobbit and do not use Pi command remapping.
 
-The sandbox image must contain the exact Agent SDK version expected by the
-server (currently `0.3.222`), its architecture-appropriate bundled binary, and
-the fixed `/usr/local/bin/bobbit-claude-agent-sdk` launcher. Bobbit checks both
-the image capability label and launcher before the SDK query starts. Rebuild the
-`bobbit-agent` image after an SDK/server upgrade or any Dockerfile UID/launcher
-change; a host or globally installed `claude` binary is never a substitute.
+The sandbox image prerequisites are exact: Agent SDK `0.3.222`, bundled Claude
+`2.1.222`, Pi `0.82.1`, Bobbit runtime schema `2`, the architecture-appropriate
+SDK binary, and the fixed executable `/usr/local/bin/bobbit-claude-agent-sdk`
+wrapper running as the image-owned `bobbit-sdk` identity. The image, rather than
+the host, owns these dependencies. Bobbit verifies the SDK label, wrapper
+identity/version, SDK module, separate UID, and runtime schema before launch.
+It also prepares node-owned workspace roots, requires the selected workspace to
+be owned/readable/executable as appropriate, and translates the scoped gateway
+callback to the container-reachable address. These checks prevent a host binary,
+a stale image, or an untrusted workspace/callback from receiving SDK authority.
+
+Rebuild the `bobbit-agent` image after an SDK, Claude, Pi, schema, UID, or
+launcher change. A host/global `claude`, a bind-mounted dependency tree, or a
+manually rewritten callback is never a substitute.
 
 Each Bobbit project uses a deterministic private Docker named volume at
 `/bobbit-state/claude-agent-sdk`, separate from the host project state bind
@@ -279,16 +306,25 @@ response `503 { error: "SDK_SESSION_UNAVAILABLE", code:
 "SDK_SESSION_UNAVAILABLE" }`. Provider errors, credential locations, SDK
 session paths, and resume IDs remain private diagnostics. The same category
 settles startup, readiness, and prompt delivery instead of hanging or falling
-back to Pi. See [REST API — Claude SDK unavailable responses](rest-api.md#claude-sdk-unavailable-responses).
+back to Pi. See [REST API — Transcript reader and `read_session`](rest-api.md#transcript-reader-and-read_session).
 
 ## Lifecycle and input delivery
 
-Starting an SDK session creates the query, begins event consumption, and waits for
-SDK initialization before the session is ready. Readiness is bounded (90 seconds)
-and startup, iterator, import, authentication, or provider failures settle pending
-calls with the sanitized `SDK_SESSION_UNAVAILABLE` category. A provider that is
-not installed or cannot authenticate therefore fails when an SDK session is
-started, without delaying Pi sessions or leaving a session hung.
+Starting an SDK session creates an idle query handle and begins event consumption;
+that lightweight readiness is bounded, but SDK query initialization is lazy. An
+idle session can therefore be created before provider construction or OAuth is
+exercised. The first accepted user input is the canonical startup boundary: it
+causes initialization, identity/capability discovery, and any auth, import,
+iterator, or provider failure. Those failures settle the input with
+`SDK_SESSION_UNAVAILABLE` rather than hanging or falling back to Pi.
+
+Operators may see only sanitized categories such as
+`CLAUDE_AGENT_SDK_AUTH_UNAVAILABLE`, `CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE`,
+`CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE`, or `CLAUDE_AGENT_SDK_RATE_LIMITED`; public
+REST remains opaque. Reconnect OAuth, repair the explicit sandbox policy or
+matching image/workspace/callback prerequisite, and retry the existing session.
+Do not expose diagnostics, start a replacement conversation, copy SDK state, or
+add an API key.
 
 A prompt resolves only after its exact input row is accepted by the SDK input
 stream. Delivery has a deadline, so a row that the SDK does not pull fails instead
@@ -887,20 +923,25 @@ npm run check
 ### Pending credentialed Docker dogfood
 
 The following is an opt-in manual scenario, not automated evidence and not a
-claim that it has been executed. Run it only on a developer machine with Docker
-available, a rebuilt `bobbit-agent` image matching the current server SDK pin, a
-local active Anthropic OAuth subscription, and an unprefixed SDK model id. The
-scenario creates an isolated Custom Provider and default session model only for
-its temporary test gateway, then creates a Docker-sandbox project with the
-required enabled empty `ANTHROPIC_OAUTH_TOKEN` policy. It does not configure a
-production gateway; follow [Selecting the runtime](#selecting-the-runtime) for
-production selection. The scenario then checks readiness, prompt, steer, soft
-interrupt, stop, force-abort replacement, gateway-restart resume, and that the
-same SDK UUID survives. It does not use or log API-key credentials.
+claim that it has been executed. Follow [Manual OAuth isolation](#manual-oauth-isolation)
+first: authenticate through the separate loopback gateway and export its
+owner-only temporary agent directory as `MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR` to
+Playwright before it can reset directory state or import auth-sensitive modules.
+Run only with Docker, a rebuilt `bobbit-agent` image satisfying the exact SDK,
+Claude, Pi, schema, wrapper, image-owned dependency, workspace-ownership, and
+callback-translation checks above; a local active Anthropic OAuth subscription;
+and an unprefixed SDK model id. The scenario creates an isolated Custom Provider
+and default session model only for its temporary test gateway, then creates a
+Docker-sandbox project with the required enabled empty `ANTHROPIC_OAUTH_TOKEN`
+policy. It does not configure a production gateway. It checks lazy idle creation
+and first-input startup, prompt, steer, soft interrupt, stop, force-abort
+replacement, gateway-restart resume, and same-UUID survival. It does not use or
+log API-key credentials.
 
 ```bash
 BOBBIT_RUN_CLAUDE_AGENT_SDK_SANDBOX_SMOKE=1 \
 MANUAL_CLAUDE_AGENT_SDK_MODEL=claude-sonnet-4-5 \
+MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR="$MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR" \
 npm run test:manual -- --grep "Docker sandbox lifecycle"
 ```
 
@@ -909,6 +950,7 @@ The direct, non-Docker subscription smoke remains separately opt-in:
 ```bash
 BOBBIT_RUN_CLAUDE_AGENT_SDK_SMOKE=1 \
 MANUAL_CLAUDE_AGENT_SDK_MODEL=claude-sonnet-4-5 \
+MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR="$MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR" \
 npm run test:manual -- --grep "Claude Agent SDK lifecycle"
 ```
 
