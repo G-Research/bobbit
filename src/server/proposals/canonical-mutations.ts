@@ -30,6 +30,17 @@ import {
   requireAncestorsNotPaused,
 } from "../agent/goal-paused-guard.js";
 import { ToolManager, __resetToolScanCache, copyToolGroupWithSharedDependencies } from "../agent/tool-manager.js";
+import {
+  isSafeRelPath,
+  type Component,
+  type ConfigDirectoryEntry,
+  type InlineWorkflowDef,
+  type ProjectConfigRollbackSnapshot,
+  type ProjectConfigStore,
+  type SandboxTokenEntry,
+} from "../agent/project-config-store.js";
+import type { SecretsStore } from "../agent/secrets-store.js";
+import { validateAllWorkflows } from "../agent/workflow-validator.js";
 
 /** Durable, server-owned idempotency marker. Callers must never take this from
  * proposal metadata or another user controlled field. */
@@ -854,6 +865,223 @@ export async function createCanonicalGoal<
 
 export type CanonicalProjectMode = "register" | "update" | "promote";
 
+/** Proposal-shaped input for every project create/edit/promotion surface. */
+export interface CanonicalProjectProposal {
+  mode: CanonicalProjectMode;
+  projectId?: unknown;
+  name?: unknown;
+  rootPath?: unknown;
+  color?: unknown;
+  palette?: unknown;
+  colorLight?: unknown;
+  colorDark?: unknown;
+  acceptCanonical?: unknown;
+  components?: unknown;
+  workflows?: unknown;
+  config?: unknown;
+  configDirectories?: unknown;
+  sandboxTokens?: unknown;
+  applicationKey?: string;
+}
+
+type CanonicalProjectContext = {
+  projectConfigStore: ProjectConfigStore;
+  secretsStore?: SecretsStore;
+};
+
+type CanonicalProjectRecord = {
+  id: string;
+  name: string;
+  rootPath: string;
+  importDecisionRun?: { id: string; state: "configuring" | "ready" };
+};
+
+export interface CanonicalProjectProposalDeps<T extends CanonicalProjectRecord> {
+  findByApplicationKey(key: string): T | undefined;
+  register(input: { name: string; rootPath: string; color?: string; palette?: string; colorLight?: string; colorDark?: string; acceptCanonical?: boolean; applicationKey?: string }): T;
+  get(id: string): T | undefined;
+  update(id: string, updates: Record<string, unknown>): T;
+  promote(id: string, updates: { name?: string }): T;
+  removeRegistered(project: T): void;
+  removeContext(projectId: string): Promise<void>;
+  openContext(projectId: string): Promise<CanonicalProjectContext | undefined>;
+  suspendServices(projectId: string): Promise<void>;
+  stopServices(projectId: string): Promise<void>;
+  reconcileServices(projectId: string): Promise<void>;
+  markReady?(projectId: string, importId: string): T;
+  /** Runtime worktree/import dispatch is outside persistence but remains ordered. */
+  afterConfigured?(project: T, context: CanonicalProjectContext): Promise<void>;
+  sameRootPath?(left: string, right: string): boolean;
+}
+
+type ValidatedProjectConfiguration = {
+  components?: Component[];
+  workflows?: Record<string, InlineWorkflowDef>;
+  flat: Record<string, string | null>;
+  configDirectories?: ConfigDirectoryEntry[];
+  sandboxTokens?: SandboxTokenEntry[];
+  secretUpdates: Record<string, string>;
+};
+
+function projectComponent(value: unknown): Component {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new CanonicalMutationError(400, "Each component must be an object");
+  const raw = value as Record<string, unknown>;
+  if (typeof raw.name !== "string" || !raw.name.trim()) throw new CanonicalMutationError(400, "Each component requires a name");
+  const repo = raw.repo === undefined || raw.repo === "" ? "." : raw.repo;
+  if (typeof repo !== "string" || (repo !== "." && !isSafeRelPath(repo))) throw new CanonicalMutationError(400, `Component \"${raw.name}\" has an unsafe repo path`);
+  const relativePath = raw.relative_path ?? raw.relativePath;
+  if (relativePath !== undefined && (typeof relativePath !== "string" || !isSafeRelPath(relativePath))) throw new CanonicalMutationError(400, `Component \"${raw.name}\" has an unsafe relative path`);
+  const component: Component = { name: raw.name.trim(), repo };
+  if (typeof relativePath === "string" && relativePath) component.relativePath = relativePath;
+  const setup = raw.worktree_setup_command ?? raw.worktreeSetupCommand;
+  if (setup !== undefined && typeof setup !== "string") throw new CanonicalMutationError(400, `Component \"${raw.name}\" worktree setup command must be a string`);
+  if (typeof setup === "string" && setup) component.worktreeSetupCommand = setup;
+  if (raw.commands !== undefined) {
+    if (!raw.commands || typeof raw.commands !== "object" || Array.isArray(raw.commands) || Object.values(raw.commands).some(command => typeof command !== "string")) throw new CanonicalMutationError(400, `Component \"${raw.name}\" commands must be a string map`);
+    component.commands = { ...(raw.commands as Record<string, string>) };
+  }
+  if (raw.config !== undefined) {
+    if (!raw.config || typeof raw.config !== "object" || Array.isArray(raw.config)) throw new CanonicalMutationError(400, `components[${raw.name}].config must be an object`);
+    const entries = Object.entries(raw.config as Record<string, unknown>);
+    if (entries.length > 100 || entries.some(([key, entry]) => !key || typeof entry !== "string")) throw new CanonicalMutationError(400, `components[${raw.name}].config must contain at most 100 string entries`);
+    component.config = Object.fromEntries(entries) as Record<string, string>;
+  }
+  return component;
+}
+
+function validateProjectConfiguration(proposal: CanonicalProjectProposal, current: Pick<ProjectConfigStore, "getComponents">): ValidatedProjectConfiguration {
+  const components = proposal.components === undefined ? undefined : (() => {
+    if (!Array.isArray(proposal.components)) throw new CanonicalMutationError(400, "components must be an array");
+    const candidate = proposal.components.map(projectComponent);
+    if (new Set(candidate.map(component => component.name)).size !== candidate.length) throw new CanonicalMutationError(400, "Component names must be unique");
+    return candidate;
+  })();
+  let workflows: Record<string, InlineWorkflowDef> | undefined;
+  if (proposal.workflows !== undefined) {
+    if (!proposal.workflows || typeof proposal.workflows !== "object" || Array.isArray(proposal.workflows)) throw new CanonicalMutationError(400, "workflows must be an object");
+    workflows = proposal.workflows as Record<string, InlineWorkflowDef>;
+    const errors = validateAllWorkflows(
+      workflows as Parameters<typeof validateAllWorkflows>[0],
+      (components ?? current.getComponents()) as Parameters<typeof validateAllWorkflows>[1],
+    );
+    if (errors.length) throw new CanonicalMutationError(400, "Workflow validation failed", "WORKFLOW_VALIDATION_FAILED", errors);
+  }
+  const flat: Record<string, string | null> = {};
+  if (proposal.config !== undefined) {
+    if (!proposal.config || typeof proposal.config !== "object" || Array.isArray(proposal.config)) throw new CanonicalMutationError(400, "config must be an object");
+    for (const [key, value] of Object.entries(proposal.config as Record<string, unknown>)) {
+      if (!key || key.includes(".") || (value !== null && value !== "" && typeof value !== "string")) throw new CanonicalMutationError(400, `Invalid project config key \"${key}\"`);
+      flat[key] = value === null || value === "" ? null : value as string;
+    }
+  }
+  let configDirectories: ConfigDirectoryEntry[] | undefined;
+  if (proposal.configDirectories !== undefined) {
+    if (!Array.isArray(proposal.configDirectories) || proposal.configDirectories.some(entry => !entry || typeof entry !== "object" || typeof (entry as any).path !== "string" || !Array.isArray((entry as any).types) || (entry as any).types.some((type: unknown) => typeof type !== "string"))) throw new CanonicalMutationError(400, "configDirectories must be an array of path/type entries");
+    configDirectories = proposal.configDirectories.map(entry => ({ path: (entry as any).path, types: [...(entry as any).types] }));
+  }
+  let sandboxTokens: SandboxTokenEntry[] | undefined;
+  const secretUpdates: Record<string, string> = {};
+  if (proposal.sandboxTokens !== undefined) {
+    if (!Array.isArray(proposal.sandboxTokens)) throw new CanonicalMutationError(400, "sandboxTokens must be an array");
+    sandboxTokens = proposal.sandboxTokens.map(entry => {
+      if (!entry || typeof entry !== "object" || typeof (entry as any).key !== "string" || !(entry as any).key) throw new CanonicalMutationError(400, "Each sandbox token requires a key");
+      const value = (entry as any).value;
+      if (value !== undefined && value !== "__REDACTED__" && typeof value !== "string") throw new CanonicalMutationError(400, "Sandbox token values must be strings");
+      if (typeof value === "string" && value !== "__REDACTED__") secretUpdates[(entry as any).key] = value;
+      return { key: (entry as any).key, enabled: (entry as any).enabled !== false };
+    });
+  }
+  return { components, workflows, flat, configDirectories, sandboxTokens, secretUpdates };
+}
+
+function publishProjectConfiguration(context: CanonicalProjectContext, candidate: ValidatedProjectConfiguration): { config: ProjectConfigRollbackSnapshot; secrets?: Record<string, string> } {
+  const config = context.projectConfigStore.captureRollbackSnapshot();
+  const secrets = context.secretsStore?.getAll();
+  context.projectConfigStore.mutate(draft => {
+    for (const [key, value] of Object.entries(candidate.flat)) value === null ? draft.remove(key) : draft.set(key, value);
+    if (candidate.components) draft.setComponents(candidate.components);
+    if (candidate.workflows !== undefined) draft.setWorkflows(candidate.workflows);
+    if (candidate.configDirectories) draft.setConfigDirectories(candidate.configDirectories);
+    if (candidate.sandboxTokens) draft.setSandboxTokens(candidate.sandboxTokens);
+  });
+  if (Object.keys(candidate.secretUpdates).length > 0) context.secretsStore?.update(candidate.secretUpdates);
+  return { config, secrets };
+}
+
+async function restoreProjectConfiguration(context: CanonicalProjectContext, snapshot: { config: ProjectConfigRollbackSnapshot; secrets?: Record<string, string> }): Promise<void> {
+  context.projectConfigStore.restoreRollbackSnapshot(snapshot.config);
+  if (snapshot.secrets) context.secretsStore?.restoreAll(snapshot.secrets);
+}
+
+/**
+ * The only project proposal application operation. It validates the whole
+ * configuration candidate before registry/context/service writes, publishes
+ * config in one store transaction, and compensates every later failure.
+ */
+export async function applyCanonicalProjectProposal<T extends CanonicalProjectRecord>(proposal: CanonicalProjectProposal, deps: CanonicalProjectProposalDeps<T>): Promise<{ project: T; replayed: boolean }> {
+  assertCanonicalApplicationKey(proposal.applicationKey);
+  const name = typeof proposal.name === "string" ? proposal.name.trim() : undefined;
+  const rootPath = typeof proposal.rootPath === "string" ? proposal.rootPath : undefined;
+  if (proposal.mode === "register" && (!name || !rootPath || !(path.posix.isAbsolute(rootPath) || path.win32.isAbsolute(rootPath)))) throw new CanonicalMutationError(400, "Project name and absolute rootPath are required");
+  if (proposal.mode !== "register" && (typeof proposal.projectId !== "string" || !proposal.projectId)) throw new CanonicalMutationError(400, "Project mutation target is required");
+  const apply = async (): Promise<{ project: T; replayed: boolean }> => {
+    if (proposal.applicationKey) {
+      const replay = deps.findByApplicationKey(proposal.applicationKey);
+      if (replay) return { project: replay, replayed: true };
+    }
+    // Registration must reject a malformed complete candidate before it can
+    // allocate a registry row or scaffold a root. Existing projects validate
+    // against their actual component set below.
+    if (proposal.mode === "register") {
+      validateProjectConfiguration(proposal, {
+        getComponents: () => name ? [{ name, repo: "." }] : [],
+      } as Pick<ProjectConfigStore, "getComponents">);
+    }
+    let project: T;
+    let created = false;
+    let oldProject: T | undefined;
+    let oldContext: CanonicalProjectContext | undefined;
+    let context: CanonicalProjectContext | undefined;
+    let snapshot: { config: ProjectConfigRollbackSnapshot; secrets?: Record<string, string> } | undefined;
+    let rootRemoved = false;
+    try {
+      if (proposal.mode === "register") {
+        project = deps.register({ name: name!, rootPath: rootPath!, color: typeof proposal.color === "string" ? proposal.color : undefined, palette: typeof proposal.palette === "string" ? proposal.palette : undefined, colorLight: typeof proposal.colorLight === "string" ? proposal.colorLight : undefined, colorDark: typeof proposal.colorDark === "string" ? proposal.colorDark : undefined, acceptCanonical: proposal.acceptCanonical === true, applicationKey: proposal.applicationKey });
+        created = true;
+        context = await deps.openContext(project.id);
+      } else {
+        project = deps.get(proposal.projectId as string)!;
+        if (!project) throw new CanonicalMutationError(422, `Unknown project: ${proposal.projectId}`, "UNKNOWN_PROJECT");
+        oldProject = structuredClone(project);
+        const replacingRoot = typeof rootPath === "string" && !(deps.sameRootPath ?? ((a, b) => a === b))(rootPath, project.rootPath);
+        oldContext = await deps.openContext(project.id);
+        if (replacingRoot) { await deps.suspendServices(project.id); await deps.removeContext(project.id); rootRemoved = true; }
+        if (proposal.mode === "promote") project = deps.promote(project.id, { name });
+        else project = deps.update(project.id, { ...(name ? { name } : {}), ...(rootPath ? { rootPath } : {}), ...(typeof proposal.color === "string" ? { color: proposal.color } : {}), ...(typeof proposal.palette === "string" ? { palette: proposal.palette } : {}), ...(typeof proposal.colorLight === "string" ? { colorLight: proposal.colorLight } : {}), ...(typeof proposal.colorDark === "string" ? { colorDark: proposal.colorDark } : {}) });
+        context = replacingRoot ? await deps.openContext(project.id) : oldContext;
+        if (!context) throw new Error("Project context could not be opened");
+        if (replacingRoot) { await deps.stopServices(project.id); await deps.reconcileServices(project.id); }
+      }
+      if (!context) throw new Error("Project context could not be opened");
+      const candidate = validateProjectConfiguration(proposal, context.projectConfigStore);
+      if (proposal.mode !== "update" && candidate.components === undefined && context.projectConfigStore.getComponents().length === 0) candidate.components = [{ name: project.name, repo: "." }];
+      snapshot = publishProjectConfiguration(context, candidate);
+      if (project.importDecisionRun?.state === "configuring" && deps.markReady) project = deps.markReady(project.id, project.importDecisionRun.id);
+      await deps.afterConfigured?.(project, context);
+      return { project, replayed: false };
+    } catch (error) {
+      if (snapshot && context) await restoreProjectConfiguration(context, snapshot).catch(() => undefined);
+      if (created) { if (project!) await deps.removeContext(project.id).catch(() => undefined); if (project!) deps.removeRegistered(project); }
+      else if (oldProject && project!) {
+        try { deps.update(project.id, { name: oldProject.name, rootPath: oldProject.rootPath, color: (oldProject as any).color, palette: (oldProject as any).palette ?? "", colorLight: (oldProject as any).colorLight, colorDark: (oldProject as any).colorDark }); } catch { /* original error wins */ }
+        if (rootRemoved) { await deps.removeContext(project.id).catch(() => undefined); await deps.openContext(project.id).catch(() => undefined); await deps.reconcileServices(project.id).catch(() => undefined); }
+      }
+      throw error;
+    }
+  };
+  return proposal.applicationKey ? applySingleFlight(`project:${proposal.mode}:${rootPath ?? proposal.projectId}:${proposal.applicationKey}`, apply) : apply();
+}
+
 /**
  * Canonical project mutation transaction. The configuration application is an
  * explicit persistence primitive: callers must validate and atomically publish
@@ -861,116 +1089,6 @@ export type CanonicalProjectMode = "register" | "update" | "promote";
  * promotion and replay ownership live here so proposal application never has
  * to recreate route lifecycle semantics.
  */
-export async function mutateCanonicalProject<T extends { id: string; rootPath: string; importDecisionRun?: { id: string; state: "configuring" | "ready" } }>(
-	input: {
-		mode: CanonicalProjectMode;
-		name?: string;
-		rootPath?: string;
-		updates?: Record<string, unknown>;
-		applicationKey?: string;
-		sameRootPath?(left: string, right: string): boolean;
-	},
-	deps: {
-		findByApplicationKey(key: string): T | undefined;
-		register(applicationKey?: string): T;
-		get(id: string): T | undefined;
-		update(id: string, updates: Record<string, unknown>): T;
-		promote(id: string, updates: { name?: string }): T;
-		applyConfiguration(project: T): Promise<void> | void;
-		/** Clear transient context/config state when registration config rejects. */
-		rollbackRegistration?(project: T): Promise<void> | void;
-		removeRegistered(project: T): void;
-		removeContext(projectId: string): Promise<void>;
-		openContext(projectId: string): Promise<boolean>;
-		suspendServices(projectId: string): Promise<void>;
-		stopServices(projectId: string): Promise<void>;
-		reconcileServices(projectId: string): Promise<void>;
-	},
-): Promise<{ project: T; replayed: boolean }> {
-	if (input.mode === "register") {
-		if (typeof input.name !== "string" || !input.name.trim()) {
-			throw new CanonicalMutationError(400, "Project name is required");
-		}
-		if (typeof input.rootPath !== "string" || !(path.posix.isAbsolute(input.rootPath) || path.win32.isAbsolute(input.rootPath))) {
-			throw new CanonicalMutationError(400, "Project rootPath must be an absolute path");
-		}
-	}
-	if (input.mode === "update" && input.updates?.rootPath !== undefined
-		&& (typeof input.updates.rootPath !== "string" || !(path.posix.isAbsolute(input.updates.rootPath) || path.win32.isAbsolute(input.updates.rootPath)))) {
-		throw new CanonicalMutationError(400, "Project rootPath must be an absolute path");
-	}
-	assertCanonicalApplicationKey(input.applicationKey);
-	if (input.mode === "register") {
-		const register = async (): Promise<{ project: T; replayed: boolean }> => {
-			if (input.applicationKey) {
-				const existing = deps.findByApplicationKey(input.applicationKey);
-				if (existing) return { project: existing, replayed: true };
-			}
-			const project = deps.register(input.applicationKey);
-			try {
-				await deps.applyConfiguration(project);
-				return { project, replayed: false };
-			} catch (error) {
-				// A rejected initial config must never leave a half-registered project.
-				try { await deps.rollbackRegistration?.(project); } catch { /* original validation error wins */ }
-				try { deps.removeRegistered(project); } catch { /* original validation error wins */ }
-				throw error;
-			}
-		};
-		return input.applicationKey
-			? applySingleFlight(
-				`project:register:${input.rootPath}:${input.applicationKey}`,
-				register,
-			)
-			: register();
-	}
-	if (!input.updates?.id || typeof input.updates.id !== "string") {
-		throw new CanonicalMutationError(400, "Project mutation target is required");
-	}
-	const projectId = input.updates.id;
-	const existing = deps.get(projectId);
-	if (!existing) throw new CanonicalMutationError(422, `Unknown project: ${projectId}`, "UNKNOWN_PROJECT");
-	// Registry implementations mutate their project record in place. Capture the
-	// old immutable scope before update so a failed root transaction can recover.
-	const previousRootPath = existing.rootPath;
-	if (input.mode === "promote") {
-		const project = deps.promote(projectId, { name: input.name });
-		await deps.applyConfiguration(project);
-		return { project, replayed: false };
-	}
-	const updates = { ...input.updates };
-	delete updates.id;
-	const replacingRoot = typeof updates.rootPath === "string" && !(input.sameRootPath ?? ((left, right) => left === right))(updates.rootPath, existing.rootPath);
-	let removed = false;
-	let committed = false;
-	let replacementOpened = false;
-	try {
-		if (replacingRoot) {
-			await deps.suspendServices(projectId);
-			removed = true;
-			await deps.removeContext(projectId);
-		}
-		const project = deps.update(projectId, updates);
-		committed = true;
-		if (replacingRoot) {
-			replacementOpened = await deps.openContext(projectId);
-			if (!replacementOpened) throw new Error("Project context could not be reopened after root replacement");
-			await deps.stopServices(projectId);
-			await deps.reconcileServices(projectId);
-		}
-		await deps.applyConfiguration(project);
-		return { project, replayed: false };
-	} catch (error) {
-		if (replacingRoot && removed) {
-			if (replacementOpened) await deps.removeContext(projectId).catch(() => undefined);
-			if (committed) { try { deps.update(projectId, { rootPath: previousRootPath }); } catch { /* original error wins */ } }
-			try { await deps.openContext(projectId); } catch { /* best effort recovery */ }
-			await deps.reconcileServices(projectId).catch(() => undefined);
-		}
-		throw error;
-	}
-}
-
 export function applyCanonicalToolProposal(proposal: ToolProposal, deps: { toolManager: ToolManager }): ToolProposalResult {
 	if (!proposal || !TOOL_NAME.test(proposal.tool || "")) throw new CanonicalMutationError(400, "Invalid tool name");
 	if (proposal.action !== "create" && proposal.action !== "update" && proposal.action !== "delete") throw new CanonicalMutationError(400, "Tool action must be create, update, or delete");

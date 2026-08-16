@@ -6,8 +6,8 @@ import { ProjectRegistry } from "../../src/server/agent/project-registry.js";
 import {
 	CANONICAL_MUTATION_KEY,
 	applyCanonicalGoalProposal,
+	applyCanonicalProjectProposal,
 	createCanonicalGoal,
-	mutateCanonicalProject,
 } from "../../src/server/proposals/canonical-mutations.js";
 
 test("canonical goal stamps a server key, overrides caller metadata, and replays one durable goal", async () => {
@@ -173,61 +173,6 @@ test("durable canonical goal replay does not re-run gates or lifecycle setup", a
 	expect(lifecycle).toBe(0);
 });
 
-test("canonical project registration replays by server key and rolls back rejected configuration", async () => {
-	const projects: Array<any> = [];
-	let removed = 0;
-	const deps = {
-		findByApplicationKey: (key: string) => projects.find(project => project.key === key),
-		register: (key?: string) => { const project = { id: `project-${projects.length}`, rootPath: "/project", key }; projects.push(project); return project; },
-		get: (id: string) => projects.find(project => project.id === id),
-		update: (id: string, updates: any) => Object.assign(projects.find(project => project.id === id), updates),
-		promote: (id: string) => projects.find(project => project.id === id),
-		applyConfiguration: () => undefined,
-		removeRegistered: (project: any) => { removed++; projects.splice(projects.indexOf(project), 1); },
-		removeContext: async () => undefined,
-		openContext: async () => true,
-		suspendServices: async () => undefined,
-		stopServices: async () => undefined,
-		reconcileServices: async () => undefined,
-	};
-	const input = { mode: "register" as const, name: "Project", rootPath: "/project", applicationKey: "project-key" };
-	expect((await mutateCanonicalProject(input, deps)).replayed).toBe(false);
-	expect((await mutateCanonicalProject(input, deps)).replayed).toBe(true);
-	expect(projects).toHaveLength(1);
-	await expect(mutateCanonicalProject({ mode: "register", name: "Project", rootPath: "/project" }, { ...deps, applyConfiguration: () => { throw new Error("invalid config"); } })).rejects.toThrow("invalid config");
-	expect(removed).toBe(1);
-	await expect(mutateCanonicalProject({ mode: "register", name: "Project", rootPath: "relative" }, deps)).rejects.toThrow("absolute");
-});
-
-test("canonical project registration single-flights success and failure", async () => {
-	let projects: Array<any> = [];
-	let registrations = 0;
-	let fail = false;
-	const deps = {
-		findByApplicationKey: (key: string) => projects.find(project => project.key === key),
-		register: (key?: string) => { registrations++; const project = { id: `project-${registrations}`, rootPath: "/project", key }; projects.push(project); return project; },
-		get: () => undefined, update: () => undefined, promote: () => { throw new Error("unused"); },
-		applyConfiguration: async () => { if (fail) throw new Error("configuration failed"); },
-		removeRegistered: (project: any) => { projects = projects.filter(candidate => candidate !== project); }, removeContext: async () => undefined,
-		openContext: async () => true, suspendServices: async () => undefined, stopServices: async () => undefined, reconcileServices: async () => undefined,
-	};
-	const input = { mode: "register" as const, name: "Project", rootPath: "/project", applicationKey: "key" };
-	const [first, second] = await Promise.all([mutateCanonicalProject(input, deps), mutateCanonicalProject(input, deps)]);
-	expect(registrations).toBe(1);
-	expect(first.replayed).toBe(false);
-	expect(second).toMatchObject({ project: first.project, replayed: true });
-	projects = [];
-	registrations = 0;
-	fail = true;
-	const failed = await Promise.allSettled([mutateCanonicalProject(input, deps), mutateCanonicalProject(input, deps)]);
-	expect(registrations).toBe(1);
-	expect(failed.map(result => result.status)).toEqual(["rejected", "rejected"]);
-	expect((failed[0] as PromiseRejectedResult).reason).toBe((failed[1] as PromiseRejectedResult).reason);
-	fail = false;
-	expect((await mutateCanonicalProject(input, deps)).replayed).toBe(false);
-	expect(registrations).toBe(2);
-});
-
 test("project registry persists and reloads only a valid server-owned canonical mutation key", () => {
 	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-canonical-key-"));
 	const root = path.join(stateDir, "project");
@@ -244,22 +189,62 @@ test("project registry persists and reloads only a valid server-owned canonical 
 	}
 });
 
-test("canonical root replacement restores the immutable old root after a service failure", async () => {
-	const project = { id: "project", rootPath: "/old" };
-	const deps = {
-		findByApplicationKey: () => undefined,
-		register: () => project,
-		get: () => project,
-		update: (_id: string, updates: any) => Object.assign(project, updates),
-		promote: () => project,
-		applyConfiguration: () => undefined,
-		removeRegistered: () => undefined,
-		removeContext: async () => undefined,
-		openContext: async () => true,
-		suspendServices: async () => undefined,
-		stopServices: async () => { throw new Error("service failure"); },
-		reconcileServices: async () => undefined,
+test("canonical project proposal validates before registration, publishes full config, and replays one keyed application", async () => {
+	const projects: any[] = [];
+	let mutations = 0;
+	const store = {
+		components: [] as any[], workflows: undefined as any,
+		getComponents() { return this.components; },
+		captureRollbackSnapshot() { return { components: [...this.components], workflows: this.workflows }; },
+		restoreRollbackSnapshot(snapshot: any) { this.components = [...snapshot.components]; this.workflows = snapshot.workflows; },
+		mutate(fn: any) { mutations++; fn({ setComponents: (value: any) => { this.components = value; }, setWorkflows: (value: any) => { this.workflows = value; }, set: () => undefined, remove: () => undefined, setConfigDirectories: () => undefined, setSandboxTokens: () => undefined }); },
 	};
-	await expect(mutateCanonicalProject({ mode: "update", updates: { id: "project", rootPath: "/new" } }, deps)).rejects.toThrow("service failure");
+	const deps: any = {
+		findByApplicationKey: (key: string) => projects.find(project => project.key === key),
+		register: (input: any) => { const project = { id: `project-${projects.length}`, name: input.name, rootPath: input.rootPath, key: input.applicationKey }; projects.push(project); return project; },
+		get: (id: string) => projects.find(project => project.id === id), update: (id: string, updates: any) => Object.assign(projects.find(project => project.id === id), updates),
+		promote: (id: string, updates: any) => Object.assign(projects.find(project => project.id === id), updates),
+		removeRegistered: (project: any) => projects.splice(projects.indexOf(project), 1), removeContext: async () => undefined,
+		openContext: async () => ({ projectConfigStore: store }), suspendServices: async () => undefined, stopServices: async () => undefined, reconcileServices: async () => undefined,
+	};
+	await expect(applyCanonicalProjectProposal({ mode: "register", name: "Bad", rootPath: "/project", components: [{ name: "bad", repo: "../escape" }] }, deps)).rejects.toThrow("unsafe");
+	expect(projects).toHaveLength(0);
+	const input = { mode: "register" as const, name: "Project", rootPath: "/project", applicationKey: "project-proposal-1", components: [{ name: "app", repo: ".", commands: { check: "npm run check" }, config: { qa_start_command: "npm start" } }] };
+	const [first, replay] = await Promise.all([applyCanonicalProjectProposal(input, deps), applyCanonicalProjectProposal(input, deps)]);
+	expect(first.replayed).toBe(false);
+	expect(replay.replayed).toBe(true);
+	expect(projects).toHaveLength(1);
+	expect(store.components).toEqual([expect.objectContaining({ name: "app", commands: { check: "npm run check" } })]);
+	expect(mutations).toBe(1);
+});
+
+test("canonical project proposal restores config and registry state after post-config failure", async () => {
+	const project: any = { id: "project", name: "Old", rootPath: "/old", color: "old" };
+	const store = {
+		components: [{ name: "old", repo: "." }] as any[], getComponents() { return this.components; },
+		captureRollbackSnapshot() { return { components: [...this.components] }; },
+		restoreRollbackSnapshot(snapshot: any) { this.components = [...snapshot.components]; },
+		mutate(fn: any) { fn({ setComponents: (value: any) => { this.components = value; }, set: () => undefined, remove: () => undefined, setWorkflows: () => undefined, setConfigDirectories: () => undefined, setSandboxTokens: () => undefined }); },
+	};
+	const deps: any = {
+		findByApplicationKey: () => undefined, register: () => project, get: () => project, update: (_id: string, updates: any) => Object.assign(project, updates), promote: () => project, removeRegistered: () => undefined,
+		removeContext: async () => undefined, openContext: async () => ({ projectConfigStore: store }), suspendServices: async () => undefined, stopServices: async () => undefined, reconcileServices: async () => undefined,
+		afterConfigured: async () => { throw new Error("runtime failed"); },
+	};
+	await expect(applyCanonicalProjectProposal({ mode: "update", projectId: "project", name: "New", components: [{ name: "new", repo: "." }] }, deps)).rejects.toThrow("runtime failed");
+	expect(project).toMatchObject({ name: "Old", rootPath: "/old", color: "old" });
+	expect(store.components).toEqual([{ name: "old", repo: "." }]);
+});
+
+test("canonical project proposal restores the old root when replacement services fail", async () => {
+	const project: any = { id: "project", name: "Project", rootPath: "/old" };
+	const store: any = { getComponents: () => [], captureRollbackSnapshot: () => ({}), restoreRollbackSnapshot: () => undefined, mutate: () => undefined };
+	const deps: any = {
+		findByApplicationKey: () => undefined, register: () => project, get: () => project,
+		update: (_id: string, updates: any) => Object.assign(project, updates), promote: () => project, removeRegistered: () => undefined,
+		removeContext: async () => undefined, openContext: async () => ({ projectConfigStore: store }), suspendServices: async () => undefined,
+		stopServices: async () => { throw new Error("service failure"); }, reconcileServices: async () => undefined,
+	};
+	await expect(applyCanonicalProjectProposal({ mode: "update", projectId: "project", rootPath: "/new" }, deps)).rejects.toThrow("service failure");
 	expect(project.rootPath).toBe("/old");
 });

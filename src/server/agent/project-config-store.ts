@@ -683,7 +683,7 @@ type PresentFields = {
 	extension_prompt_sections: boolean;
 };
 
-type ConfigStoreState = {
+export type ProjectConfigRollbackSnapshot = {
 	data: ProjectConfig;
 	components: Component[];
 	workflows: Record<string, InlineWorkflowDef> | undefined;
@@ -955,7 +955,7 @@ export class ProjectConfigStore {
 		}
 	}
 
-	private snapshot(): ConfigStoreState {
+	private snapshot(): ProjectConfigRollbackSnapshot {
 		return {
 			data: { ...this.data },
 			components: cloneComponents(this.components),
@@ -974,7 +974,7 @@ export class ProjectConfigStore {
 		};
 	}
 
-	private apply(state: ConfigStoreState): void {
+	private apply(state: ProjectConfigRollbackSnapshot): void {
 		this.data = state.data;
 		this.components = state.components;
 		this.workflows = state.workflows;
@@ -995,7 +995,7 @@ export class ProjectConfigStore {
 		if (this.loadFailed) throw new ProjectConfigLoadError(this.configFile);
 	}
 
-	private serialize(state: ConfigStoreState): string {
+	private serialize(state: ProjectConfigRollbackSnapshot): string {
 		const out: Record<string, unknown> = {};
 		for (const [k, v] of Object.entries(state.data)) {
 			if (!MIGRATED_KEYS.has(k)) out[k] = v;
@@ -1031,7 +1031,7 @@ export class ProjectConfigStore {
 		}
 	}
 
-	private publish(state: ConfigStoreState): void {
+	private publish(state: ProjectConfigRollbackSnapshot): void {
 		const dir = path.dirname(this.configFile);
 		const temp = `${this.configFile}.${process.pid}.${randomUUID()}.tmp`;
 		try {
@@ -1051,11 +1051,22 @@ export class ProjectConfigStore {
 		}
 	}
 
-	private commit(candidate: ConfigStoreState): void {
+	private commit(candidate: ProjectConfigRollbackSnapshot): void {
 		this.assertCanSave();
 		this.publish(candidate);
 		candidate.dirty = false;
 		this.apply(candidate);
+	}
+
+	/** Capture an opaque, deep-cloned durable state for a higher-level transaction. */
+	captureRollbackSnapshot(): ProjectConfigRollbackSnapshot {
+		return structuredClone(this.snapshot());
+	}
+
+	/** Restore a prior durable state. Used only to compensate a later transaction step. */
+	restoreRollbackSnapshot(snapshot: ProjectConfigRollbackSnapshot): void {
+		const candidate = structuredClone(snapshot);
+		this.commit(candidate);
 	}
 
 	/** Apply several changes as one durable, all-or-nothing publication. */
@@ -1118,7 +1129,7 @@ export class ProjectConfigStore {
 		this.commit(candidate);
 	}
 
-	private setStateValue(state: ConfigStoreState, key: string, value: string): void {
+	private setStateValue(state: ProjectConfigRollbackSnapshot, key: string, value: string): void {
 		if (key.includes(".")) {
 			throw new Error(`Project config key "${key}" must not contain dots — dots are reserved for namespace separators in {{project.key}} template variables`);
 		}
@@ -1129,7 +1140,7 @@ export class ProjectConfigStore {
 		state.data[key] = value;
 	}
 
-	private setMigratedStateFromString(state: ConfigStoreState, key: string, value: string): void {
+	private setMigratedStateFromString(state: ProjectConfigRollbackSnapshot, key: string, value: string): void {
 		if (value === "") { this.removeStateValue(state, key); return; }
 		try {
 			const parsed = JSON.parse(value);
@@ -1170,7 +1181,7 @@ export class ProjectConfigStore {
 		}
 	}
 
-	private removeStateValue(state: ConfigStoreState, key: string): void {
+	private removeStateValue(state: ProjectConfigRollbackSnapshot, key: string): void {
 		if (!MIGRATED_KEYS.has(key)) { delete state.data[key]; return; }
 		switch (key) {
 			case "config_directories": state.configDirectories = []; state.present.config_directories = false; return;
@@ -1185,7 +1196,7 @@ export class ProjectConfigStore {
 		}
 	}
 
-	private setStatePackActivation(state: ConfigStoreState, scope: PackOrderScope, packName: string, disabled: DisabledRefs): void {
+	private setStatePackActivation(state: ProjectConfigRollbackSnapshot, scope: PackOrderScope, packName: string, disabled: DisabledRefs): void {
 		const norm = normalizeDisabledRefs(disabled);
 		const scopeMap = { ...(state.packActivation[scope] ?? {}) };
 		if (Object.keys(norm).length === 0) delete scopeMap[packName];

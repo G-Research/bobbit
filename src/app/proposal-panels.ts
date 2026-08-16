@@ -3035,10 +3035,19 @@ async function invalidateProjectProposalConfig(projectId: string): Promise<void>
 	m.invalidateProjectScopeConfig(projectId);
 }
 
-async function promoteProjectProposal(projectId: string, name: string): Promise<boolean> {
+async function promoteProjectProposal(projectId: string, name: string, fields?: Record<string, unknown>): Promise<boolean> {
 	try {
 		const body: Record<string, unknown> = {};
 		if (name) body.name = name;
+		if (fields) {
+			const diff = buildProjectConfigDiff(fields);
+			if (Array.isArray(diff.components)) body.components = diff.components;
+			if (diff.workflows && typeof diff.workflows === "object") body.workflows = diff.workflows;
+			if (Array.isArray(diff.config_directories)) body.configDirectories = diff.config_directories;
+			if (Array.isArray(diff.sandbox_tokens)) body.sandboxTokens = diff.sandbox_tokens;
+			const flatConfig = Object.fromEntries(Object.entries(diff).filter(([key]) => !["components", "workflows", "config_directories", "sandbox_tokens"].includes(key)));
+			if (Object.keys(flatConfig).length > 0) body.config = flatConfig;
+		}
 		const res = await gatewayFetch(`/api/projects/${projectId}/promote`, {
 			method: "POST",
 			body: JSON.stringify(body),
@@ -3059,11 +3068,12 @@ async function writeProjectProposalConfig(
 	fields: Record<string, unknown>,
 	proposalSessionId: string,
 	errorContext?: { title: string; messagePrefix: string },
+	skipGenericConfig = false,
 ): Promise<boolean> {
 	const diff = buildProjectConfigDiff(fields);
 	const title = errorContext?.title ?? "Failed to save project config";
 	try {
-		if (Object.keys(diff).length > 0) {
+		if (!skipGenericConfig && Object.keys(diff).length > 0) {
 			const res = await gatewayFetch(`/api/projects/${projectId}/config`, {
 				method: "PUT",
 				body: JSON.stringify(diff),
@@ -3227,8 +3237,13 @@ async function acceptNewProjectProposalFromPanel(proposal: ActiveProjectProposal
 			// never observe the temporary default component before this panel writes
 			// the remaining project config.
 			const registration: Record<string, unknown> = { name, rootPath };
-			if (Array.isArray(fields.components)) registration.components = fields.components;
-			if (fields.workflows && typeof fields.workflows === "object") registration.workflows = fields.workflows;
+			const configDiff = buildProjectConfigDiff(fields as Record<string, unknown>);
+			if (Array.isArray(configDiff.components)) registration.components = configDiff.components;
+			if (configDiff.workflows && typeof configDiff.workflows === "object") registration.workflows = configDiff.workflows;
+			if (Array.isArray(configDiff.config_directories)) registration.configDirectories = configDiff.config_directories;
+			if (Array.isArray(configDiff.sandbox_tokens)) registration.sandboxTokens = configDiff.sandbox_tokens;
+			const flatConfig = Object.fromEntries(Object.entries(configDiff).filter(([key]) => !["components", "workflows", "config_directories", "sandbox_tokens"].includes(key)));
+			if (Object.keys(flatConfig).length > 0) registration.config = flatConfig;
 			res = await gatewayFetch("/api/projects", {
 				method: "POST",
 				body: JSON.stringify(registration),
@@ -3261,7 +3276,7 @@ async function acceptNewProjectProposalFromPanel(proposal: ActiveProjectProposal
 	if (!await writeProjectProposalConfig(projectId, fields as Record<string, unknown>, propSessionId, {
 		title: "Project registered; configuration incomplete",
 		messagePrefix: partialMessage,
-	})) return false;
+	}, true)) return false;
 
 	await refreshProjectProposalProjects();
 	void invalidateProjectProposalConfig(projectId);
@@ -3281,12 +3296,10 @@ async function acceptProvisionalProjectProposalFromPanel(
 ): Promise<boolean> {
 	const { fields, sessionId: propSessionId } = proposal;
 	const fieldNameStr = typeof fields.name === "string" ? fields.name : "";
-	// Persist the complete proposal configuration while the project is still
-	// provisional. POST /promote is the one durable import boundary and only
-	// creates/publishes its marker after this succeeds; retrying either request
-	// reuses the same project/run and cannot ask extensions twice.
-	if (!await writeProjectProposalConfig(projectId, fields as Record<string, unknown>, propSessionId)) return false;
-	if (!await promoteProjectProposal(projectId, fieldNameStr)) return false;
+	// Promotion receives the complete proposal and is the one durable import
+	// boundary: config is validated and committed before the marker is published.
+	if (!await promoteProjectProposal(projectId, fieldNameStr, fields as Record<string, unknown>)) return false;
+	if (!await writeProjectProposalConfig(projectId, fields as Record<string, unknown>, propSessionId, undefined, true)) return false;
 
 	await refreshProjectProposalProjects();
 	void invalidateProjectProposalConfig(projectId);
@@ -3311,22 +3324,25 @@ async function acceptRegisteredProjectProposalFromPanel(
 ): Promise<boolean> {
 	const { fields, sessionId: propSessionId } = proposal;
 	const fieldNameStr = typeof fields.name === "string" ? fields.name : "";
-	if (fieldNameStr) {
-		try {
-			const res = await gatewayFetch(`/api/projects/${projectId}`, {
-				method: "PUT",
-				body: JSON.stringify({ name: fieldNameStr }),
-			});
-			if (!res.ok) {
-				await showProjectProposalResponseError(res, "Failed to rename project", "Project rename failed");
-				return false;
-			}
-		} catch (err) {
-			showProjectProposalCaughtError("Failed to rename project", err);
-			return false;
+	try {
+		const diff = buildProjectConfigDiff(fields as Record<string, unknown>);
+		const payload: Record<string, unknown> = {};
+		if (fieldNameStr) payload.name = fieldNameStr;
+		if (Array.isArray(diff.components)) payload.components = diff.components;
+		if (diff.workflows && typeof diff.workflows === "object") payload.workflows = diff.workflows;
+		if (Array.isArray(diff.config_directories)) payload.configDirectories = diff.config_directories;
+		if (Array.isArray(diff.sandbox_tokens)) payload.sandboxTokens = diff.sandbox_tokens;
+		const flatConfig = Object.fromEntries(Object.entries(diff).filter(([key]) => !["components", "workflows", "config_directories", "sandbox_tokens"].includes(key)));
+		if (Object.keys(flatConfig).length > 0) payload.config = flatConfig;
+		if (Object.keys(payload).length > 0) {
+			const res = await gatewayFetch(`/api/projects/${projectId}`, { method: "PUT", body: JSON.stringify(payload) });
+			if (!res.ok) { await showProjectProposalResponseError(res, "Failed to apply project proposal", "Project update failed"); return false; }
 		}
+	} catch (err) {
+		showProjectProposalCaughtError("Failed to apply project proposal", err);
+		return false;
 	}
-	if (!await writeProjectProposalConfig(projectId, fields as Record<string, unknown>, propSessionId)) return false;
+	if (!await writeProjectProposalConfig(projectId, fields as Record<string, unknown>, propSessionId, undefined, true)) return false;
 
 	await refreshProjectProposalProjects();
 	void invalidateProjectProposalConfig(projectId);

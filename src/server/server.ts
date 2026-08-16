@@ -794,7 +794,7 @@ import { ProposalSeedService, proposalDraftOwnerId } from "./proposals/proposal-
 import {
 	CanonicalMutationError,
 	applyCanonicalGoalProposal,
-	mutateCanonicalProject,
+	applyCanonicalProjectProposal,
 	applyCanonicalToolProposal,
 	createCanonicalRole,
 	createCanonicalStaff,
@@ -7522,21 +7522,26 @@ async function handleApiRoute(
 			const acceptCanonical = body.acceptCanonical === true;
 			let project;
 			try {
-				({ project } = await mutateCanonicalProject({
-					mode: "register",
-					name: body.name,
-					rootPath: body.rootPath,
+				({ project } = await applyCanonicalProjectProposal({
+					mode: "register", name: body.name, rootPath: body.rootPath,
+					color, palette, colorLight, colorDark, acceptCanonical,
+					components: (body as Record<string, unknown>).components,
+					workflows: (body as Record<string, unknown>).workflows,
+					config: (body as Record<string, unknown>).config,
+					configDirectories: (body as Record<string, unknown>).configDirectories ?? (body as Record<string, unknown>).config_directories,
+					sandboxTokens: (body as Record<string, unknown>).sandboxTokens ?? (body as Record<string, unknown>).sandbox_tokens,
 				}, {
 					findByApplicationKey: (key) => projectRegistry.list().find(candidate => candidate.canonicalMutationKey === key),
-					register: (applicationKey) => {
-						const created = projectRegistry.register(body.name, body.rootPath, { color, palette, colorLight, colorDark, acceptCanonical });
-						if (applicationKey) projectRegistry.setCanonicalMutationKey(created.id, applicationKey);
+					register: (input) => {
+						const created = projectRegistry.register(input.name, input.rootPath, { color: input.color, palette: input.palette, colorLight: input.colorLight, colorDark: input.colorDark, acceptCanonical: input.acceptCanonical });
+						if (input.applicationKey) projectRegistry.setCanonicalMutationKey(created.id, input.applicationKey);
 						return projectRegistry.get(created.id)!;
 					},
 					get: (id) => projectRegistry.get(id),
 					update: (id, updates) => projectRegistry.update(id, updates as Parameters<typeof projectRegistry.update>[1]),
 					promote: (id, updates) => projectRegistry.promote(id, updates),
-					applyConfiguration: async (project) => {
+					markReady: (id, importId) => projectRegistry.markImportDecisionRunReady(id, importId),
+					afterConfigured: async (project) => {
 			// Initialize project context for the new project
 			const newCtx = projectContextManager.getOrCreate(project.id);
 			if (newCtx) {
@@ -7545,37 +7550,8 @@ async function handleApiRoute(
 				};
 			}
 
-			// Multi-repo: accept optional components / workflows in the create body.
-			// Single-repo without components → fill default `[{name: <project name>, repo: "."}]`.
-			if (newCtx) {
-				if (configuredComponents) {
-					if (createWorkflows) {
-						const { validateAllWorkflows } = await import("./agent/workflow-validator.js");
-						const errors = validateAllWorkflows(
-							createWorkflows as Parameters<typeof validateAllWorkflows>[0],
-							configuredComponents,
-						);
-						if (errors.length > 0) {
-							throw new CanonicalMutationError(400, "Workflow validation failed", "WORKFLOW_VALIDATION_FAILED", errors);
-						}
-					}
-					newCtx.projectConfigStore.setComponents(configuredComponents);
-					if (createWorkflows) newCtx.projectConfigStore.setWorkflows(createWorkflows);
-				} else {
-					// Default single-repo component named after the project.
-					if (newCtx.projectConfigStore.getComponents().length === 0) {
-						newCtx.projectConfigStore.setComponents([{ name: project.name, repo: "." }]);
-					}
-				}
-				// No default-workflow seeding. Workflows must be designed by the
-				// project assistant; a project may legitimately have zero workflows.
-			}
-			// Components are now durably configured. Publish exactly the marker made
-			// by register() before any hook can read the project context.
-			if (project.importDecisionRun?.state === "configuring") {
-				projectRegistry.markImportDecisionRunReady(project.id, project.importDecisionRun.id);
-				project = projectRegistry.get(project.id) ?? project;
-			}
+			// Components, workflows and the durable import marker were committed by
+			// applyCanonicalProjectProposal before this runtime-only phase runs.
 			// Pin base_ref from the live remote so new projects never have a blank,
 			// silently-resolved base. Best-effort: failures leave it blank (today's
 			// behaviour). See docs/design/base-ref.md (add-time pinning).
@@ -7645,10 +7621,12 @@ async function handleApiRoute(
 			const importMarker = project.importDecisionRun;
 			if (importMarker?.state === "ready") await dispatchImportDecisionSafely(project.id, importMarker.id);
 					},
-					rollbackRegistration: (created) => projectContextManager.remove(created.id),
 					removeRegistered: (created) => projectRegistry.remove(created.id),
 					removeContext: (id) => projectContextManager.remove(id),
-					openContext: (id) => Promise.resolve(!!projectContextManager.getOrCreate(id)),
+					openContext: async (id) => {
+						const context = projectContextManager.getOrCreate(id);
+						return context ? { projectConfigStore: context.projectConfigStore, secretsStore: context.secretsStore } : undefined;
+					},
 					suspendServices: (id) => worktreeServices.suspendProject(id),
 					stopServices: (id) => worktreeServices.stopProject(id),
 					reconcileServices: (id) => worktreeServices.reconcileProject(id),
@@ -7754,23 +7732,27 @@ async function handleApiRoute(
 		}
 		const projectId = projectGetMatch[1];
 		try {
-			const { project: updated } = await mutateCanonicalProject({
-				mode: "update",
-				updates: { id: projectId, ...updates },
-				sameRootPath: samePath,
+			const { project: updated } = await applyCanonicalProjectProposal({
+				mode: "update", projectId, name: updates.name, rootPath: updates.rootPath,
+				color: updates.color, palette: updates.palette, colorLight: updates.colorLight, colorDark: updates.colorDark,
+				config: body.config, components: body.components, workflows: body.workflows,
+				configDirectories: body.configDirectories, sandboxTokens: body.sandboxTokens,
 			}, {
 				findByApplicationKey: (key) => projectRegistry.list().find(project => project.canonicalMutationKey === key),
 				register: () => { throw new Error("Register is not available for a project update"); },
 				get: (id) => projectRegistry.get(id),
 				update: (id, next) => projectRegistry.update(id, next as Parameters<typeof projectRegistry.update>[1]),
 				promote: (id, next) => projectRegistry.promote(id, next),
-				applyConfiguration: () => undefined,
 				removeRegistered: (project) => projectRegistry.remove(project.id),
 				removeContext: (id) => projectContextManager.remove(id),
-				openContext: (id) => Promise.resolve(!!projectContextManager.getOrCreate(id)),
+				openContext: async (id) => {
+					const context = projectContextManager.getOrCreate(id);
+					return context ? { projectConfigStore: context.projectConfigStore, secretsStore: context.secretsStore } : undefined;
+				},
 				suspendServices: (id) => worktreeServices.suspendProject(id),
 				stopServices: (id) => worktreeServices.stopProject(id),
 				reconcileServices: (id) => worktreeServices.reconcileProject(id),
+				sameRootPath: samePath,
 			});
 			json(updated);
 		} catch (err: any) {
@@ -7857,17 +7839,18 @@ async function handleApiRoute(
 		try {
 			const body = await readBody(req);
 			const name = typeof body?.name === "string" ? body.name : undefined;
-			let { project: promoted } = await mutateCanonicalProject({
-				mode: "promote",
-				name,
-				updates: { id: projectId },
+			let { project: promoted } = await applyCanonicalProjectProposal({
+				mode: "promote", projectId, name,
+				config: body?.config, components: body?.components, workflows: body?.workflows,
+				configDirectories: body?.configDirectories, sandboxTokens: body?.sandboxTokens,
 			}, {
 				findByApplicationKey: (key) => projectRegistry.list().find(project => project.canonicalMutationKey === key),
 				register: () => { throw new Error("Register is not available for project promotion"); },
 				get: (id) => projectRegistry.get(id),
 				update: (id, updates) => projectRegistry.update(id, updates as Parameters<typeof projectRegistry.update>[1]),
 				promote: (id, updates) => projectRegistry.promote(id, updates),
-				applyConfiguration: async (promoted) => {
+				markReady: (id, importId) => projectRegistry.markImportDecisionRunReady(id, importId),
+				afterConfigured: async (promoted) => {
 			// A provisional project deliberately has no run until its proposal
 			// configuration is complete. The acceptance client writes that config
 			// before this request; retain a defensive default for direct API users
@@ -7916,7 +7899,10 @@ async function handleApiRoute(
 				},
 				removeRegistered: (project) => projectRegistry.remove(project.id),
 				removeContext: (id) => projectContextManager.remove(id),
-				openContext: (id) => Promise.resolve(!!projectContextManager.getOrCreate(id)),
+				openContext: async (id) => {
+					const context = projectContextManager.getOrCreate(id);
+					return context ? { projectConfigStore: context.projectConfigStore, secretsStore: context.secretsStore } : undefined;
+				},
 				suspendServices: (id) => worktreeServices.suspendProject(id),
 				stopServices: (id) => worktreeServices.stopProject(id),
 				reconcileServices: (id) => worktreeServices.reconcileProject(id),

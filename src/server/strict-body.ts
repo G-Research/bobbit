@@ -1,5 +1,5 @@
 export const STRICT_UPDATE_BODY_KEYS = {
-	projects: ["name", "color", "rootPath", "palette", "colorLight", "colorDark"],
+	projects: ["name", "color", "rootPath", "palette", "colorLight", "colorDark", "config", "components", "workflows", "configDirectories", "sandboxTokens"],
 	goals: ["title", "cwd", "state", "spec", "branch", "reattemptOf", "team"],
 	tools: ["projectId", "description", "group", "docs", "detail_docs", "grantPolicy"],
 	roles: ["projectId", "label", "promptTemplate", "accessory", "toolPolicies", "model", "thinkingLevel"],
