@@ -6,6 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { PromptSource, SessionManager, SessionInfo } from "./session-manager.js";
+import type { PersistedSession } from "./session-store.js";
 import { isNonRetryableAgentError, isProviderBackoffError, isRetryableGenericAgentError, isTransientReviewError } from "./verification-logic.js";
 import { GoalManager } from "./goal-manager.js";
 import { GoalStore, type PersistedGoal } from "./goal-store.js";
@@ -345,6 +346,48 @@ interface StartTeamLock {
 	promise: Promise<SessionInfo>;
 }
 
+function sameStringRecord(left: Record<string, string> | undefined, right: Record<string, string> | undefined): boolean {
+	if (left === undefined || right === undefined) return left === right;
+	const leftKeys = Object.keys(left).sort();
+	const rightKeys = Object.keys(right).sort();
+	return leftKeys.length === rightKeys.length
+		&& leftKeys.every((key, index) => key === rightKeys[index] && left[key] === right[key]);
+}
+
+function matchesAdoptedGoalWorkspace(goal: PersistedGoal, session: PersistedSession, projectId: string): boolean {
+	return goal.projectId === projectId
+		&& session.projectId === projectId
+		&& session.cwd === goal.cwd
+		&& session.worktreePath === goal.worktreePath
+		&& session.branch === goal.branch
+		&& session.repoPath === goal.repoPath
+		&& session.sandboxed === goal.sandboxed
+		&& sameStringRecord(session.repoWorktrees, goal.repoWorktrees);
+}
+
+function hasConflictingPromotionRelation(session: PersistedSession, goalId: string): boolean {
+	return (session.goalId !== undefined && session.goalId !== goalId)
+		|| (session.teamGoalId !== undefined && session.teamGoalId !== goalId)
+		|| (session.role !== undefined && session.role !== "team-lead")
+		|| session.teamLeadSessionId !== undefined
+		|| session.delegateOf !== undefined
+		|| session.parentSessionId !== undefined
+		|| session.childKind !== undefined
+		|| session.staffId !== undefined
+		|| session.assistantType !== undefined
+		|| session.goalAssistant === true
+		|| session.roleAssistant === true
+		|| session.toolAssistant === true
+		|| session.readOnly === true
+		|| session.nonInteractive === true
+		|| session.borrowsWorktree === true
+		|| session.archived === true;
+}
+
+function hasPromotionAttachment(session: PersistedSession | undefined): boolean {
+	return !!session && (session.goalId !== undefined || session.teamGoalId !== undefined || session.role !== undefined);
+}
+
 /** Internal tracking for a team associated with a goal. */
 interface TeamEntry {
 	goalId: string;
@@ -680,10 +723,85 @@ export class TeamManager {
 	}
 
 	/**
+	 * Reconcile promotion provenance before ordinary orphan recovery. A valid
+	 * adopted goal deterministically identifies one same-project source session,
+	 * so missing gates, the empty lead reservation, and exact attachment metadata
+	 * can be repaired without starting a team or creating any runtime/worktree.
+	 */
+	private async reconcileAdoptedGoalReservations(): Promise<void> {
+		const pcm = this.config.projectContextManager;
+		if (!pcm) return;
+		const contexts = [...pcm.all()];
+		for (const ctx of contexts) {
+			for (const goal of ctx.goalStore.getAll()) {
+				const ownerSessionId = goal.worktreeOwnerSessionId;
+				if (!ownerSessionId || goal.archived) continue;
+
+				const sourceLocations = contexts.filter(candidate => candidate.sessionStore.get(ownerSessionId) !== undefined);
+				const source = ctx.sessionStore.get(ownerSessionId);
+				const targetEntry = ctx.teamStore.get(goal.id);
+				const leadClaims = contexts.flatMap(candidate => candidate.teamStore.getAll())
+					.filter(entry => entry.teamLeadSessionId === ownerSessionId);
+				const conflictingClaim = leadClaims.some(entry => entry.goalId !== goal.id);
+				const validSource = sourceLocations.length === 1
+					&& sourceLocations[0] === ctx
+					&& !!source
+					&& matchesAdoptedGoalWorkspace(goal, source, ctx.project.id)
+					&& !hasConflictingPromotionRelation(source, goal.id);
+				const validReservation = !targetEntry || targetEntry.teamLeadSessionId === ownerSessionId;
+
+				if (!validSource || !validReservation || conflictingClaim) {
+					// Compensation is intentionally narrow. Once the source carries any
+					// attachment or the reservation gained workers/changed identity, boot
+					// refuses to guess and leaves the records for an explicit repair.
+					const unchangedReservation = !targetEntry
+						|| (targetEntry.teamLeadSessionId === ownerSessionId && (targetEntry.agents?.length ?? 0) === 0);
+					if (!hasPromotionAttachment(source) && unchangedReservation && !conflictingClaim) {
+						const deleted = await ctx.goalManager.deleteAdoptedGoalAttempt(goal.id, ownerSessionId);
+						if (deleted) {
+							if (targetEntry) ctx.teamStore.remove(goal.id);
+							ctx.gateStore.removeGoalGates(goal.id);
+							await Promise.all([ctx.gateStore.flush(), ctx.sessionStore.flush()]);
+							console.warn(`[team-manager] Boot compensation removed uncommitted adopted goal ${goal.id}`);
+						} else {
+							console.error(`[team-manager] Boot reconciliation refused non-todo adopted goal ${goal.id}`);
+						}
+					} else {
+						console.error(`[team-manager] Boot reconciliation refused ambiguous adopted goal ${goal.id}`);
+					}
+					continue;
+				}
+
+				if (!targetEntry) {
+					ctx.teamStore.put({
+						goalId: goal.id,
+						teamLeadSessionId: ownerSessionId,
+						agents: [],
+						maxConcurrent: 12,
+					});
+				}
+				if (source.goalId !== goal.id || source.teamGoalId !== goal.id || source.role !== "team-lead") {
+					ctx.sessionStore.update(ownerSessionId, {
+						goalId: goal.id,
+						teamGoalId: goal.id,
+						role: "team-lead",
+					});
+				}
+				if (goal.workflow) {
+					ctx.gateStore.initGatesForGoal(goal.id, goal.workflow.gates.map(gate => gate.id));
+				}
+				await Promise.all([ctx.gateStore.flush(), ctx.sessionStore.flush()]);
+			}
+		}
+	}
+
+	/**
 	 * Restore teams from disk. Called from the constructor (before sessions
 	 * are restored). Event subscriptions deferred to resubscribeTeamEvents().
 	 */
 	private async restoreTeams(): Promise<void> {
+		await this.reconcileAdoptedGoalReservations();
+
 		// orphan team-store cleanup — Boot-time orphan cleanup. Walk every persisted team
 		// entry FIRST and drop entries whose `goalId` is not present in the
 		// owning project's goal store. This prevents the zombie-reviewer sweep
@@ -1882,6 +2000,91 @@ export class TeamManager {
 	}
 
 	/**
+	 * Reserve an existing regular session as the sole lead for an adopted goal.
+	 * The reservation changes team metadata only; it never starts, replaces, or
+	 * terminates the source runtime. Exact retries return the established state.
+	 */
+	async adoptExistingLead(goalId: string, sessionId: string): Promise<TeamState> {
+		if (!this.restoreCompleted) await this.restorePromise;
+		// An adopted goal is never allowed to fall through to ordinary lead
+		// creation. If a start raced ahead, it will reject at the provenance guard
+		// in _startTeamImpl; join it before installing the reservation.
+		const starting = this.startTeamLocks.get(goalId);
+		if (starting) {
+			try { await starting.promise; } catch { /* expected for an unreserved adopted goal */ }
+		}
+		const goal = this.resolveGoal(goalId);
+		if (!goal) throw new TeamStartError("GOAL_NOT_FOUND", "Goal not found", 404);
+		if (goal.archived) throw new TeamStartError("GOAL_ARCHIVED", "Goal is archived and cannot adopt a lead");
+		if (goal.worktreeOwnerSessionId !== sessionId) {
+			throw new TeamStartError("ADOPTED_LEAD_PROVENANCE_MISMATCH", "Session does not own this adopted goal workspace");
+		}
+		const source = this.sessionManager.getSession(sessionId);
+		if (!source || source.status === "terminated") {
+			throw new TeamStartError("ADOPTED_LEAD_UNAVAILABLE", "The source session is unavailable for promotion");
+		}
+
+		const existing = this.teams.get(goalId);
+		if (existing) {
+			if (existing.teamLeadSessionId !== sessionId) {
+				throw new TeamStartError("TEAM_ALREADY_ACTIVE", `Team already active for goal: ${goalId}`);
+			}
+			return this.getTeamState(goalId)!;
+		}
+		const mappedGoal = this.sessionToGoal.get(sessionId);
+		if (mappedGoal && mappedGoal !== goalId) {
+			throw new TeamStartError("SESSION_ALREADY_TEAM_MEMBER", "Session already belongs to another team");
+		}
+		for (const [otherGoalId, entry] of this.teams) {
+			if (otherGoalId !== goalId && (entry.teamLeadSessionId === sessionId || entry.agents.some(agent => agent.sessionId === sessionId))) {
+				throw new TeamStartError("SESSION_ALREADY_TEAM_MEMBER", "Session already belongs to another team");
+			}
+		}
+
+		const entry: TeamEntry = {
+			goalId,
+			teamLeadSessionId: sessionId,
+			agents: [],
+			maxConcurrent: 12,
+		};
+		this.teams.set(goalId, entry);
+		this.sessionToGoal.set(sessionId, goalId);
+		try {
+			this.persistEntry(goalId);
+		} catch (error) {
+			this.teams.delete(goalId);
+			if (this.sessionToGoal.get(sessionId) === goalId) this.sessionToGoal.delete(sessionId);
+			throw error;
+		}
+		return this.getTeamState(goalId)!;
+	}
+
+	/**
+	 * Release only an unchanged empty promotion reservation. This is the
+	 * pre-commit compensation path and deliberately leaves the source session,
+	 * runtime, transcript, sandbox, and checkout untouched.
+	 */
+	async releaseAdoptedLead(goalId: string, sessionId: string): Promise<boolean> {
+		if (!this.restoreCompleted) await this.restorePromise;
+		const entry = this.teams.get(goalId);
+		if (!entry) return this.sessionToGoal.get(sessionId) !== goalId;
+		if (entry.teamLeadSessionId !== sessionId || entry.agents.length !== 0) return false;
+		const goal = this.resolveGoal(goalId);
+		if (!goal || goal.worktreeOwnerSessionId !== sessionId) return false;
+
+		entry.unsubscribeTeamLeadEvents?.();
+		entry.unsubscribeTeamLeadEvents = undefined;
+		this.clearIdleNudgeTimer(goalId);
+		this.teams.delete(goalId);
+		if (this.sessionToGoal.get(sessionId) === goalId) this.sessionToGoal.delete(sessionId);
+		this.leadIdleSinceByGoal.delete(goalId);
+		this.lastNudgeAtPerGoal.delete(goalId);
+		this.rearmedCompletedTeams.delete(goalId);
+		this.resolveTeamStore(goalId).remove(goalId);
+		return true;
+	}
+
+	/**
 	 * Start a team for the given goal.
 	 * Creates a Team Lead session and returns it.
 	 */
@@ -1976,6 +2179,12 @@ export class TeamManager {
 		}
 		this.assertGoalCanStart(goal);
 		const existingTeam = this.teams.get(goalId);
+		if (goal.worktreeOwnerSessionId && !existingTeam) {
+			throw new TeamStartError(
+				"ADOPTED_LEAD_RESERVATION_REQUIRED",
+				"This goal adopts its source session and cannot create a second team lead",
+			);
+		}
 		// A paused, authorized start must run the canonical resume lifecycle even
 		// if an earlier attempt already left team tracking behind. Every other
 		// existing-team path is a pure idempotency/error decision: it must not
@@ -3211,6 +3420,13 @@ export class TeamManager {
 		const entry = this.teams.get(goalId);
 		if (!entry) {
 			throw new Error(`No active team for goal: ${goalId}`);
+		}
+		const teardownGoal = this.resolveGoal(goalId);
+		if (teardownGoal?.worktreeOwnerSessionId === entry.teamLeadSessionId && !teardownGoal.archived) {
+			throw new TeamStartError(
+				"PROMOTED_LEAD_TEARDOWN_CONFLICT",
+				"A promoted session cannot be torn down while its goal is live; archive the goal first",
+			);
 		}
 
 		// Cancel any in-flight verifications before teardown — prevents zombie reviewers
