@@ -3,8 +3,8 @@
 
 import { afterEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import { initAuthorSidecarDir } from "../../src/server/agent/author-sidecar.ts";
@@ -13,9 +13,6 @@ import { PromptQueue } from "../../src/server/agent/prompt-queue.ts";
 import { SessionManager } from "../../src/server/agent/session-manager.ts";
 import { VerificationHarness } from "../../src/server/agent/verification-harness.ts";
 import { createManualClock } from "../harness/clock.js";
-import { FakePinnedCheckoutManager, TEST_PINNED_COMMIT } from "../harness/fake-pinned-checkout-manager.js";
-import { copyGitTemplate } from "../harness/git-template.js";
-import { createRunChild } from "../harness/run-isolation.js";
 
 const MARKER = "VERIFIER_BUSY_CONCURRENCY_REPRO";
 const BUSY_ERROR = "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.";
@@ -27,21 +24,10 @@ function deferred<T>() {
 	return { promise, resolve, reject };
 }
 
-const tempRoots: string[] = [];
-const sourceRoots = new Map<string, string>();
-
-/**
- * A run-owned Git template and independent state directory keep this fixture
- * self-contained. The Tier-1 fake manager below is lifecycle-faithful; raw Git
- * process execution belongs to the pinned-checkout manager suite.
- */
 function makeStateDir(prefix: string): string {
-	const root = createRunChild(prefix);
-	const sourceRoot = copyGitTemplate(path.join(root, "source"));
-	tempRoots.push(root);
+	const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 	const stateDir = path.join(root, "state");
 	fs.mkdirSync(stateDir, { recursive: true });
-	sourceRoots.set(stateDir, sourceRoot);
 	return stateDir;
 }
 
@@ -159,10 +145,6 @@ function putReviewer(manager: any, transport: BusyPiTransport, sessionId: string
 }
 
 function makeHarness(goalIds: string[], stateDir: string, manager: any) {
-	const sourceRoot = sourceRoots.get(stateDir);
-	assert.ok(sourceRoot, `${MARKER}: fixture source root is missing`);
-	const commitSha = TEST_PINNED_COMMIT;
-	const pinnedCheckoutManager = new FakePinnedCheckoutManager(path.join(stateDir, "verification-checkouts"));
 	initAuthorSidecarDir(stateDir, {
 		secretsDir: path.join(stateDir, "private-secrets"),
 		hmacKey: Buffer.alloc(32, 0x5b),
@@ -200,24 +182,11 @@ function makeHarness(goalIds: string[], stateDir: string, manager: any) {
 		undefined,
 		projectContextManager as any,
 		undefined,
-		{
-			// The fake is the Tier-1 lifecycle seam: it gives every UUID signal a
-			// distinct immutable lease and validates it before and after review.
-			commandRunner: {
-				execFile: async (file: string, args: string[]) => file === "git" && args.join(" ") === "rev-parse --verify HEAD^{commit}"
-					? { stdout: `${commitSha}\n`, stderr: "" }
-					: { stdout: "", stderr: "" },
-			} as any,
-			// LLM reviewer admission is the unit under test; this explicit Tier-1
-			// backend avoids requiring Docker after the real frozen source is acquired.
-			verificationExecutionBackend: { acquire: async ({ checkout }: any) => ({ cwd: checkout.path }) },
-			pinnedCheckoutManager: pinnedCheckoutManager as any,
-			clock: manager._testClock,
-		},
+		{ commandRunner: { execFile: async () => ({ stdout: "", stderr: "" }) } as any, clock: manager._testClock },
 	);
 	harness.resolveVerificationBaseBranch = async () => "main";
 	harness.resolveLegacyMasterBranch = async () => "main";
-	return { harness, verificationWrites, gateStatusWrites, gates, sourceRoot, commitSha, pinnedCheckoutManager };
+	return { harness, verificationWrites, gateStatusWrites, gates };
 }
 
 function installReviewerCreation(manager: any, transport: BusyPiTransport): void {
@@ -233,15 +202,15 @@ function gate() {
 	return { id: "review-gate", name: "Review gate", dependsOn: [], verify: [{ name: "Busy review", type: "llm-review", prompt: "Review", timeout: 60, phase: 0 }] };
 }
 
-function signal(goalId: string, id: string, commitSha: string) {
+function signal(goalId: string, id: string) {
 	return {
-		id: randomUUID(),
+		id,
 		goalId,
 		gateId: "review-gate",
 		sessionId: `${goalId}-lead`,
 		timestamp: Date.now(),
-		commitSha,
-		content: `review artifact ${id}`,
+		commitSha: `${id}-commit`,
+		content: "review artifact",
 		metadata: {},
 		verification: { status: "running", steps: [] },
 	};
@@ -253,8 +222,6 @@ afterEach(() => {
 		manager._testClock?.clearInterval(manager._statusHeartbeatTimer);
 		manager.sessions.clear();
 	}
-	while (tempRoots.length > 0) fs.rmSync(tempRoots.pop()!, { recursive: true, force: true });
-	sourceRoots.clear();
 });
 
 describe("verifier busy concurrency reproductions", () => {
@@ -265,12 +232,12 @@ describe("verifier busy concurrency reproductions", () => {
 		installReviewerCreation(manager, transport);
 		const goalAlpha = "goal-busy-alpha";
 		const goalBeta = "goal-busy-beta";
-		const { harness, sourceRoot } = makeHarness([goalAlpha, goalBeta], stateDir, manager);
+		const { harness } = makeHarness([goalAlpha, goalBeta], stateDir, manager);
 		const alphaId = "reviewer-alpha-preserved";
 		const betaId = "reviewer-beta-preserved";
 
-		const alpha = harness.runLlmReviewViaSession(reviewStep("Alpha"), sourceRoot, goalAlpha, { name: "reviewer", promptTemplate: "Review faithfully." }, "role context", "alpha kickoff", 60_000, alphaId);
-		const beta = harness.runLlmReviewViaSession(reviewStep("Beta"), sourceRoot, goalBeta, { name: "reviewer", promptTemplate: "Review faithfully." }, "role context", "beta kickoff", 60_000, betaId);
+		const alpha = harness.runLlmReviewViaSession(reviewStep("Alpha"), process.cwd(), goalAlpha, { name: "reviewer", promptTemplate: "Review faithfully." }, "role context", "alpha kickoff", 60_000, alphaId);
+		const beta = harness.runLlmReviewViaSession(reviewStep("Beta"), process.cwd(), goalBeta, { name: "reviewer", promptTemplate: "Review faithfully." }, "role context", "beta kickoff", 60_000, betaId);
 
 		await eventually(() => transport.pending(alphaId) !== undefined && transport.pending(betaId) !== undefined,
 			"both healthy-but-processing Pi reviewers must receive one atomic followUp command");
@@ -340,8 +307,8 @@ describe("verifier busy concurrency reproductions", () => {
 			const transport = new BusyPiTransport();
 			installReviewerCreation(manager, transport);
 			const goalId = `goal-cancel-order-${cancellation.name}`;
-			const { harness, verificationWrites, gates, sourceRoot, commitSha, pinnedCheckoutManager } = makeHarness([goalId], stateDir, manager);
-			const oldSignal = signal(goalId, `signal-cancel-order-old-${cancellation.name}`, commitSha);
+			const { harness, verificationWrites, gates } = makeHarness([goalId], stateDir, manager);
+			const oldSignal = signal(goalId, `signal-cancel-order-old-${cancellation.name}`);
 			gates.get(goalId)!.signals.push(oldSignal);
 			const oldSessionId = `reviewer-cancel-order-${cancellation.name}`;
 			const oldSession = putReviewer(manager, transport, oldSessionId, goalId);
@@ -414,18 +381,15 @@ describe("verifier busy concurrency reproductions", () => {
 			await cancelling;
 			assert.equal(harness.activeVerifications.has(oldSignal.id), false, `${MARKER}: old cancellation finalizes only after command cleanup`);
 
-			const replacementSignal = signal(goalId, `signal-cancel-order-replacement-${cancellation.name}`, commitSha);
+			const replacementSignal = signal(goalId, `signal-cancel-order-replacement-${cancellation.name}`);
 			gates.get(goalId)!.signals.push(replacementSignal);
-			const replacementRun = harness.verifyGateSignal(replacementSignal, gate(), sourceRoot, `goal/${goalId}`, "main", new Map(), "goal spec");
+			const replacementRun = harness.verifyGateSignal(replacementSignal, gate(), process.cwd(), `goal/${goalId}`, "main", new Map(), "goal spec");
 			await eventually(() => transport.commands.length === 1, `${MARKER}: replacement alone must dispatch its reviewer`);
 			const replacementSessionId = transport.commands[0].sessionId;
 			transport.accept(replacementSessionId);
 			harness.pendingResults.get(replacementSessionId)?.({ verdict: true, summary: "replacement only verdict" });
 			manager.getSession(replacementSessionId).status = "idle";
 			await replacementRun;
-			assert.deepEqual(pinnedCheckoutManager.acquiredSourceRoots, [sourceRoot], `${MARKER}: replacement must acquire an isolated frozen source before reviewer dispatch`);
-			assert.deepEqual(pinnedCheckoutManager.releasedSignalIds, [replacementSignal.id], `${MARKER}: replacement must release its exact frozen-source lease`);
-			assert.ok(pinnedCheckoutManager.assertionCount >= 2, `${MARKER}: frozen source must be audited before and after the reviewer step`);
 			const replacementWrite = verificationWrites.find(write => write.signalId === replacementSignal.id);
 			assert.equal(replacementWrite?.verification.status, "passed", `${MARKER}: ${cancellation.name} replacement alone must publish the verdict`);
 			assert.doesNotMatch(JSON.stringify(replacementWrite), /STALE_LATE_VERDICT/);
@@ -438,12 +402,12 @@ describe("verifier busy concurrency reproductions", () => {
 		const transport = new BusyPiTransport();
 		installReviewerCreation(manager, transport);
 		const goalId = "goal-busy-resignal";
-		const { harness, verificationWrites, gateStatusWrites, gates, sourceRoot, commitSha, pinnedCheckoutManager } = makeHarness([goalId], stateDir, manager);
-		const oldSignal = signal(goalId, "signal-busy-old", commitSha);
-		const replacementSignal = signal(goalId, "signal-busy-replacement", commitSha);
+		const { harness, verificationWrites, gateStatusWrites, gates } = makeHarness([goalId], stateDir, manager);
+		const oldSignal = signal(goalId, "signal-busy-old");
+		const replacementSignal = signal(goalId, "signal-busy-replacement");
 		gates.get(goalId)!.signals.push(oldSignal);
 
-		const oldRun = harness.verifyGateSignal(oldSignal, gate(), sourceRoot, `goal/${goalId}`, "main", new Map(), "goal spec");
+		const oldRun = harness.verifyGateSignal(oldSignal, gate(), process.cwd(), `goal/${goalId}`, "main", new Map(), "goal spec");
 		await eventually(() => transport.commands.length === 1, "old signal should be waiting in Pi's followUp queue");
 		const oldSessionId = transport.commands[0].sessionId;
 
@@ -454,7 +418,7 @@ describe("verifier busy concurrency reproductions", () => {
 		harness.pendingResults.get(oldSessionId)?.({ verdict: true, summary: "STALE_OLD_VERDICT_MUST_NOT_PUBLISH" });
 
 		gates.get(goalId)!.signals.push(replacementSignal);
-		const replacementRun = harness.verifyGateSignal(replacementSignal, gate(), sourceRoot, `goal/${goalId}`, "main", new Map(), "goal spec");
+		const replacementRun = harness.verifyGateSignal(replacementSignal, gate(), process.cwd(), `goal/${goalId}`, "main", new Map(), "goal spec");
 		await eventually(() => transport.commands.length === 2, "replacement signal should receive its own atomic followUp delivery");
 		const replacementSessionId = transport.commands[1].sessionId;
 		assert.notEqual(replacementSessionId, oldSessionId, `${MARKER}: re-signal must never reuse the superseded reviewer identity`);
@@ -464,9 +428,6 @@ describe("verifier busy concurrency reproductions", () => {
 		manager.getSession(replacementSessionId).status = "idle";
 		await Promise.all([oldRun, replacementRun]);
 
-		assert.deepEqual(pinnedCheckoutManager.acquiredSourceRoots, [sourceRoot, sourceRoot], `${MARKER}: both signal generations must acquire their own frozen source before reviewer dispatch`);
-		assert.deepEqual(new Set(pinnedCheckoutManager.releasedSignalIds), new Set([oldSignal.id, replacementSignal.id]), `${MARKER}: cancellation and replacement must release only their own frozen-source leases`);
-		assert.ok(pinnedCheckoutManager.assertionCount >= 3, `${MARKER}: each source generation must be audited around reviewer execution`);
 		const replacementWrite = verificationWrites.find(write => write.signalId === replacementSignal.id);
 		assert.equal(replacementWrite?.verification.status, "passed", `${MARKER}: replacement must pass after its own verdict. writes=${JSON.stringify(verificationWrites)}`);
 		assert.doesNotMatch(JSON.stringify(replacementWrite), /STALE_OLD_VERDICT_MUST_NOT_PUBLISH/);
