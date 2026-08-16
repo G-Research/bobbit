@@ -188,6 +188,7 @@ const PROPOSAL_TOOL_MAP: Record<string, string> = {
 	tool: "onToolProposal",
 	staff: "onStaffProposal",
 	project: "onProjectProposal",
+	workflow: "onWorkflowProposal",
 };
 
 /** Maps legacy XML proposal tag → ProposalType (replaces the per-parser
@@ -198,6 +199,7 @@ const PROPOSAL_TAG_TO_TYPE: Record<string, ProposalType> = {
 	tool_proposal: "tool",
 	staff_proposal: "staff",
 	project_proposal: "project",
+	workflow_proposal: "workflow",
 };
 
 /** Maps ProposalType → legacy per-type callback name on RemoteAgent. */
@@ -207,6 +209,7 @@ const TYPE_TO_LEGACY_CALLBACK: Record<ProposalType, string> = {
 	tool: "onToolProposal",
 	staff: "onStaffProposal",
 	project: "onProjectProposal",
+	workflow: "onWorkflowProposal",
 };
 
 function parseToolPayload(value: unknown): Record<string, unknown> | null {
@@ -785,6 +788,8 @@ export class RemoteAgent {
 	onStaffProposal?: (proposal: { name: string; description: string; prompt: string; triggers: string; cwd: string }, streaming: boolean) => void;
 	/** Callback fired when a project proposal is detected in an assistant message. */
 	onProjectProposal?: (fields: Record<string, unknown>, streaming: boolean) => void;
+	/** Callback fired when a workflow proposal is detected in an assistant message. */
+	onWorkflowProposal?: (fields: Record<string, unknown>, streaming: boolean) => void;
 	/**
 	 * Slice D: unified proposal callback. Slice E will collapse all six
 	 * `onXProposal` callbacks above into this one. For now both fire — see

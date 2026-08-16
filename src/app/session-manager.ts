@@ -3256,7 +3256,7 @@ async function rehydrateProposalsForSession(sessionId: string): Promise<void> {
 		if (!onProposal) return;
 		for (const p of body.proposals) {
 			if (p.proposalType === "goal" || p.proposalType === "role" || p.proposalType === "staff"
-				|| p.proposalType === "project" || p.proposalType === "tool") {
+				|| p.proposalType === "project" || p.proposalType === "workflow" || p.proposalType === "tool") {
 				onProposal(p.proposalType, p.fields, false, p.rev, "rehydrate");
 			}
 		}

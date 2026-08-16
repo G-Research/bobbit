@@ -20,7 +20,7 @@ import { proposalPanelTabId } from "./panel-workspace.js";
 
 export type ProposalType = "goal" | "project" | "workflow" | "role" | "tool" | "staff";
 
-export const PROPOSAL_TYPES: readonly ProposalType[] = ["goal", "project", "role", "tool", "staff"];
+export const PROPOSAL_TYPES: readonly ProposalType[] = ["goal", "project", "workflow", "role", "tool", "staff"];
 
 function assistantProposalTypeFromState(stateLike: any): ProposalType | null {
 	const raw = typeof stateLike?.assistantType === "string" ? stateLike.assistantType : "";
@@ -151,6 +151,7 @@ function getState(): any {
 const PROPOSAL_TAB_LABELS: Record<ProposalType, string> = {
 	goal: "Goal Proposal",
 	project: "Project Proposal",
+	workflow: "Workflow Proposal",
 	role: "Role Proposal",
 	tool: "Tool Proposal",
 	staff: "Staff Proposal",
@@ -244,6 +245,12 @@ function projectValidate(fields: Record<string, unknown>): string[] {
 	return requireKeys(fields, ["name", "root_path"]);
 }
 
+function workflowValidate(fields: Record<string, unknown>): string[] {
+	const errors = requireKeys(fields, ["id", "name", "gates"]);
+	if (fields.gates !== undefined && !Array.isArray(fields.gates)) errors.push("gates must be an array");
+	return errors;
+}
+
 function roleValidate(fields: Record<string, unknown>): string[] {
 	return requireKeys(fields, ["name", "label", "prompt"]);
 }
@@ -284,6 +291,7 @@ function makePlugin(type: ProposalType, cfg: PluginConfig): ProposalTypePlugin {
 export const PROPOSAL_TYPE_REGISTRY: Record<ProposalType, ProposalTypePlugin> = {
 	goal: makePlugin("goal", { mergeFields: goalMerge, onFirstEmit: proposalFirstEmit("goal"), validate: goalValidate }),
 	project: makePlugin("project", { mergeFields: projectMerge, onFirstEmit: proposalFirstEmit("project"), validate: projectValidate }),
+	workflow: makePlugin("workflow", { mergeFields: defaultMerge, onFirstEmit: proposalFirstEmit("workflow"), validate: workflowValidate }),
 	role: makePlugin("role", { mergeFields: defaultMerge, onFirstEmit: proposalFirstEmit("role"), validate: roleValidate }),
 	tool: makePlugin("tool", { mergeFields: defaultMerge, onFirstEmit: proposalFirstEmit("tool"), validate: toolValidate }),
 	staff: makePlugin("staff", { mergeFields: defaultMerge, onFirstEmit: proposalFirstEmit("staff"), validate: staffValidate }),
