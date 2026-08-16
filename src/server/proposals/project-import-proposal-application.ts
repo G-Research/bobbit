@@ -13,8 +13,6 @@ export interface ProjectImportApplication {
 	toolBeforeSha256?: string | null;
 	/** Exact immutable revision bytes, never the mutable live draft. */
 	snapshot: string;
-	/** Captured actual local tool bytes before the claim (tool proposals only). */
-	toolBeforeSha256?: string | null;
 	proposal: TypedProposal;
 }
 
