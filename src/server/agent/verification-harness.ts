@@ -2437,6 +2437,7 @@ export class VerificationHarness {
 					status: (phase === minPhase ? "running" : "waiting") as "running" | "waiting",
 					phase,
 					startedAt: verificationStartedAt,
+					...(s.type === "command" ? { commandSpawnState: "queued" as const } : {}),
 				};
 			}),
 			overallStatus: "running",
@@ -4987,7 +4988,14 @@ export class VerificationHarness {
 				signalId: signal.id,
 				steps: steps.map(s => {
 					const phase = s.phase ?? 0;
-					return { name: s.name, type: s.type, status: (phase === minPhase ? "running" : "waiting") as "running" | "waiting", phase, startedAt: verificationStartedAt };
+					return {
+						name: s.name,
+						type: s.type,
+						status: (phase === minPhase ? "running" : "waiting") as "running" | "waiting",
+						phase,
+						startedAt: verificationStartedAt,
+						...(s.type === "command" ? { commandSpawnState: "queued" as const } : {}),
+					};
 				}),
 				overallStatus: "running",
 				startedAt: verificationStartedAt,
@@ -7297,6 +7305,22 @@ export class VerificationHarness {
 				this._persistActive();
 			};
 
+			// Persist the ambiguous spawn boundary immediately before each spawn call.
+			// A cancellation may safely finalize a queued row, but once this transition
+			// is durable recovery must assume a process might exist even if the gateway
+			// crashes before `spawned` and its exact identity are persisted.
+			const beginCommandSpawn = (): boolean => {
+				if (!streamCtx) return true;
+				if (!this._canAdmitCommandStep(streamCtx)) return false;
+				const active = this.activeVerifications.get(streamCtx.signalId);
+				const step = active?.steps[streamCtx.stepIndex];
+				if (!step || step.commandSpawnState !== "queued") return false;
+				step.commandSpawnState = "spawning";
+				if (this._persistActive()) return true;
+				step.commandSpawnState = "queued";
+				return false;
+			};
+
 			if (streamCtx) {
 				const durable = useDetached || useContainerDurable;
 				stampActiveCommandStep({
@@ -7516,6 +7540,11 @@ export class VerificationHarness {
 					// `-w` joins that exact child without polling, preserving the host
 					// transport ownership boundary until container cleanup is complete.
 					wrappedCmd = `exec setsid -w /bin/sh -c ${shellSingleQuote(wrappedCmd)}`;
+					if (!beginCommandSpawn()) {
+						await dockerExecWatcher?.stop();
+						resolve({ passed: false, output: "Command admission cancelled before spawn." });
+						return;
+					}
 					tracked = spawnTracked("docker", ["exec", "-i", "-w", normalizedCwd, containerId, "/bin/sh", "-c", wrappedCmd], {
 						stdio: ["pipe", "pipe", "pipe"],
 						// Durable-container timeout is armed only after its atomic witness.
@@ -7548,6 +7577,10 @@ export class VerificationHarness {
 				} else if (useDetached) {
 					// Host durable path routed through the command-step seam (default =
 					// realVerificationCommandRunner → the identical spawnTracked call).
+					if (!beginCommandSpawn()) {
+						resolve({ passed: false, output: "Command admission cancelled before spawn." });
+						return;
+					}
 					tracked = this.commandStepRunner.spawn({
 						shellBin, shellArgs, cmdToRun, command,
 						cwd: normalizedCwd,
@@ -7559,6 +7592,10 @@ export class VerificationHarness {
 					});
 				} else {
 					// Host attached path routed through the seam (default = real spawn).
+					if (!beginCommandSpawn()) {
+						resolve({ passed: false, output: "Command admission cancelled before spawn." });
+						return;
+					}
 					tracked = this.commandStepRunner.spawn({
 						shellBin, shellArgs, cmdToRun, command,
 						cwd: normalizedCwd,
