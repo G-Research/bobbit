@@ -11,6 +11,8 @@ import {
 	buildArchivedSessionActions,
 	buildSessionActions,
 } from "../../src/app/session-actions.js";
+import "../../src/app/session-manager.js";
+import { RemoteAgent, subscribeGoalStateChanges } from "../../src/app/remote-agent.js";
 import {
 	renderApp,
 	setRenderApp,
@@ -110,6 +112,7 @@ const original = {
 	gatewaySessions: state.gatewaySessions,
 	archivedSessions: state.archivedSessions,
 	projects: state.projects,
+	goals: state.goals,
 	appView: state.appView,
 	sessionsGeneration: state.sessionsGeneration,
 	goalsGeneration: state.goalsGeneration,
@@ -119,6 +122,7 @@ beforeEach(() => {
 	state.gatewaySessions = [];
 	state.archivedSessions = [];
 	state.projects = [];
+	state.goals = [];
 	state.appView = "authenticated";
 	state.sessionsGeneration = 1;
 	state.goalsGeneration = 1;
@@ -129,9 +133,11 @@ beforeEach(() => {
 
 afterEach(() => {
 	stopSessionListPushSync();
+	vi.useRealTimers();
 	state.gatewaySessions = original.gatewaySessions;
 	state.archivedSessions = original.archivedSessions;
 	state.projects = original.projects;
+	state.goals = original.goals;
 	state.appView = original.appView;
 	state.sessionsGeneration = original.sessionsGeneration;
 	state.goalsGeneration = original.goalsGeneration;
@@ -379,5 +385,50 @@ describe("session tag push invalidation", () => {
 		// Drain the render queued by the optimistic patch so this test does not
 		// leave shared state work behind under the DOM suite's isolate:false mode.
 		renderApp();
+	});
+});
+
+describe("goal state push invalidation", () => {
+	it("coalesces a burst into one authoritative session and goal snapshot", async () => {
+		vi.useFakeTimers();
+		state.sessionsGeneration = -1;
+		state.goalsGeneration = -1;
+		const latestSessions = [session("latest", { projectId: undefined, status: "idle" })];
+		const latestGoals = [{ id: "goal-latest", title: "Latest goal", state: "complete", workflow: { gates: [] } }];
+		const requestedPaths: string[] = [];
+		vi.stubGlobal("fetch", async (input: string | URL) => {
+			const url = new URL(String(input), window.location.origin);
+			requestedPaths.push(url.pathname);
+			if (url.pathname === "/api/sessions") {
+				return response({ sessions: latestSessions, archivedDelegates: [], generation: 2 });
+			}
+			if (url.pathname === "/api/goals") return response({ goals: latestGoals, generation: 2 });
+			if (url.pathname === "/api/projects") return response({ projects: [{ id: "project-latest", name: "Latest" }] });
+			return response({ changed: false });
+		});
+		const subscriberEvents: Array<{ goalId?: string; type?: string }> = [];
+		const unsubscribe = subscribeGoalStateChanges(event => subscriberEvents.push(event));
+		const agent: any = new RemoteAgent();
+		try {
+			await agent.handleServerMessage({ type: "goal_state_changed", goalId: "goal-first" });
+			await agent.handleServerMessage({ type: "goal_state_changed", goalId: "goal-middle" });
+			await agent.handleServerMessage({ type: "goal_state_changed", goalId: "goal-latest" });
+
+			expect(requestedPaths.filter(path => path === "/api/sessions")).toHaveLength(0);
+			expect(subscriberEvents).toEqual([
+				{ goalId: "goal-first", type: "goal_state_changed" },
+				{ goalId: "goal-middle", type: "goal_state_changed" },
+				{ goalId: "goal-latest", type: "goal_state_changed" },
+			]);
+
+			await vi.advanceTimersByTimeAsync(100);
+			expect(requestedPaths.filter(path => path === "/api/sessions")).toHaveLength(1);
+			expect(requestedPaths.filter(path => path === "/api/goals")).toHaveLength(1);
+			expect(requestedPaths.filter(path => path === "/api/projects")).toHaveLength(1);
+			expect(state.gatewaySessions).toEqual(latestSessions);
+			expect(state.goals).toEqual(latestGoals);
+		} finally {
+			unsubscribe();
+		}
 	});
 });
