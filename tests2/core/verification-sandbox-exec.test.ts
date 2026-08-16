@@ -201,9 +201,8 @@ function beginStreamingCommandFixture(harness: InstanceType<typeof VerificationH
 	return streamCtx;
 }
 
-function persistedCommandStep(signalId: string, stepIndex = 0) {
-	const persisted = JSON.parse(fs.readFileSync(path.join(TEST_DIR, "state", "active-verifications.json"), "utf8"));
-	return persisted.verifications.find((verification: any) => verification.signalId === signalId)?.steps[stepIndex];
+function persistedCommandStep(harness: InstanceType<typeof VerificationHarness>, signalId: string, stepIndex = 0) {
+	return (harness as any)._loadActive().find((verification: any) => verification.signalId === signalId)?.steps[stepIndex];
 }
 
 // ---------------------------------------------------------------------------
@@ -264,7 +263,7 @@ describe("runCommandStep spawn behavior", () => {
 				spawnCalls += 1;
 				const active = (harness as any).activeVerifications.get("sig-spawn-state");
 				assert.equal(active.steps[0].commandSpawnState, "spawning");
-				assert.equal(persistedCommandStep("sig-spawn-state").commandSpawnState, "spawning");
+				assert.equal(persistedCommandStep(harness, "sig-spawn-state").commandSpawnState, "spawning");
 				return fakeRunner.spawn(spec);
 			},
 		};
@@ -282,7 +281,7 @@ describe("runCommandStep spawn behavior", () => {
 		assert.equal(result.passed, true);
 		assert.equal(spawnCalls, 1);
 		const activeStep = (harness as any).activeVerifications.get(streamCtx.signalId).steps[streamCtx.stepIndex];
-		const durableStep = persistedCommandStep(streamCtx.signalId, streamCtx.stepIndex);
+		const durableStep = persistedCommandStep(harness, streamCtx.signalId, streamCtx.stepIndex);
 		assert.equal(activeStep.commandSpawnState, "spawned");
 		assert.equal(durableStep.commandSpawnState, "spawned");
 		assert.ok(Number.isFinite(activeStep.commandSpawnedAt), "active spawned timestamp must be numeric");
@@ -332,7 +331,7 @@ describe("runCommandStep spawn behavior", () => {
 			(harness as any).activeVerifications.get(streamCtx.signalId).steps[streamCtx.stepIndex].commandSpawnState,
 			"queued",
 		);
-		assert.equal(persistedCommandStep(streamCtx.signalId, streamCtx.stepIndex).commandSpawnState, "queued");
+		assert.equal(persistedCommandStep(harness, streamCtx.signalId, streamCtx.stepIndex).commandSpawnState, "queued");
 	});
 });
 
