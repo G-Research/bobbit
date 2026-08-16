@@ -87,17 +87,30 @@ function createPauseRouteFixture(options: { goals?: GoalWithPauseSource[] } = {}
 		requestChildStart: () => "started",
 		notifyChildTerminal: () => {},
 	};
+	type GoalUpdateArgs = Parameters<GoalManager["updateGoal"]>;
 	const originalUpdateGoal = goalManager.updateGoal.bind(goalManager);
+	// The production route uses updateGoalStrict for the lifecycle publication
+	// boundary. Keep the older method wrapped too so this fixture remains usable
+	// against pre-strict route revisions, but share all bookkeeping and stalling
+	// assertions across both persistence modes.
+	const originalUpdateGoalStrict = (goalManager as any).updateGoalStrict?.bind(goalManager) as
+		| ((...args: GoalUpdateArgs) => Promise<boolean>)
+		| undefined;
 	let stallWrite: { started: ReturnType<typeof deferred>; release: ReturnType<typeof deferred> } | undefined;
-	(goalManager as any).updateGoal = async (...args: Parameters<GoalManager["updateGoal"]>) => {
-		updateCalls++;
-		updateArguments.push({ goalId: args[0], updates: args[1] });
-		if (stallWrite) {
-			stallWrite.started.resolve();
-			await stallWrite.release.promise;
-		}
-		return originalUpdateGoal(...args);
-	};
+	const wrapGoalUpdate = (update: (...args: GoalUpdateArgs) => Promise<boolean>) =>
+		async (...args: GoalUpdateArgs): Promise<boolean> => {
+			updateCalls++;
+			updateArguments.push({ goalId: args[0], updates: args[1] });
+			if (stallWrite) {
+				stallWrite.started.resolve();
+				await stallWrite.release.promise;
+			}
+			return update(...args);
+		};
+	(goalManager as any).updateGoal = wrapGoalUpdate(originalUpdateGoal);
+	if (originalUpdateGoalStrict) {
+		(goalManager as any).updateGoalStrict = wrapGoalUpdate(originalUpdateGoalStrict);
+	}
 	const context = { goalStore, goalManager, gateStore: {}, project: { id: "project" } };
 	const deps = {
 		projectContextManager: { getContextForGoal: () => context, all: () => [context] },
