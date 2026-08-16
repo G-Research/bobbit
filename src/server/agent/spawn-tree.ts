@@ -35,9 +35,7 @@
 import { execFileSync, spawn, type ChildProcess, type StdioOptions } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, watch, type FSWatcher } from "node:fs";
 import { tmpdir } from "node:os";
-import { extname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { createRequire } from "node:module";
+import { join } from "node:path";
 import { connect } from "node:net";
 import { randomUUID } from "node:crypto";
 import type { Clock } from "../gateway-deps.js";
@@ -66,8 +64,6 @@ export interface SpawnTrackedOptions {
 	posixSentinelIdentity?: { file: string; nonce: string };
 	/** Test seam for validating a retained POSIX sentinel before its final signal. */
 	posixSentinelIdentityInspector?: (pid: number) => { pgid: number; startTokenKind: string; startToken: string; sentinelNonce?: string } | undefined;
-	/** Test-only inherited FD that acknowledges the sentinel handled SIGTERM. */
-	posixSentinelSignalWitnessFd?: number;
 	/**
 	 * Docker-exec transport only: retain the exact POSIX sentinel after its CLI
 	 * root exits so container payload cleanup can finish before host transport
@@ -374,26 +370,28 @@ exit [BobbitJobSupervisor]::Run([string]$payload.file, [string[]]$payload.args, 
 
 const WINDOWS_JOB_SUPERVISOR_COMMAND = Buffer.from(WINDOWS_JOB_SUPERVISOR, "utf16le").toString("base64");
 
-// The POSIX supervisor is a fixed Node program. It starts a same-group
-// sentinel, publishes its ownership handshake over FD 3, and directly spawns
-// the configured payload from argv. No configured bytes cross a shell parser.
-const POSIX_TREE_PAYLOAD_ENV = "BOBBIT_POSIX_TREE_PAYLOAD";
+// The background shell remains in the detached process group but ignores the
+// graceful signal. It makes root exit an ownership-safe place to send SIGKILL:
+// no empty-group/PGID-reuse window exists until that final signal kills it.
+// Run this in a separately invoked shell, rather than a background subshell.
+// POSIX `/bin/sh` preserves the outer shell's `$$` in `( ... ) &`; a new shell
+// gives the identity record the actual sentinel PID needed after root exit.
+// A persisted POSIX identity must be an exact process-incarnation authority.
+// Linux field 22 is kernel-stable for an incarnation. Node exposes no libproc
+// binding, so Darwin combines its process start time with a cryptographic nonce
+// held in the sentinel's argv. `lstart` alone is never accepted: a same-second
+// PID reuse lacks the 128-bit nonce and fails closed during recovery.
+const POSIX_TREE_SENTINEL_CHILD_SCRIPT = "trap '' HUP INT TERM; if [ -n \"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE\" ]; then case \"$(uname -s 2>/dev/null)\" in Linux) __bobbit_sentinel_start=$(awk '{print $22}' \"/proc/$$/stat\" 2>/dev/null || true); __bobbit_sentinel_kind=linux-proc-stat-22 ;; Darwin) __bobbit_sentinel_start=$(LC_ALL=C ps -o lstart= -p \"$$\" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'); __bobbit_sentinel_kind=darwin-lstart-argv-nonce ;; *) exit 125 ;; esac; [ -n \"$__bobbit_sentinel_start\" ] || exit 125; __bobbit_sentinel_tmp=\"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE.$$.tmp\"; printf '{\"pid\":%s,\"pgid\":%s,\"nonce\":\"%s\",\"startTokenKind\":\"%s\",\"startToken\":\"%s\"}\\n' \"$$\" \"$BOBBIT_POSIX_SENTINEL_PGID\" \"$BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE\" \"$__bobbit_sentinel_kind\" \"$__bobbit_sentinel_start\" > \"$__bobbit_sentinel_tmp\" && mv \"$__bobbit_sentinel_tmp\" \"$BOBBIT_POSIX_SENTINEL_IDENTITY_FILE\" || { rm -f \"$__bobbit_sentinel_tmp\"; exit 125; }; fi; printf . >&3; exec 3>&-; while :; do sleep 2147483647 & wait $!; done";
+// Capture the group leader before starting the sentinel. Its `$PPID` is not a
+// stable identity: a fast root exit can reparent the background shell first.
+// The sentinel's `$0` is a process-held nonce witness on Darwin. It is not
+// inherited by the payload, which starts only after these variables are unset.
+const POSIX_TREE_SENTINEL_SCRIPT = "__bobbit_sentinel_pgid=$$; export BOBBIT_POSIX_SENTINEL_PGID=\"$__bobbit_sentinel_pgid\"; /bin/sh -c \"$BOBBIT_POSIX_TREE_SENTINEL_CHILD_SCRIPT\" \"bobbit-posix-sentinel:$BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE\" & unset BOBBIT_POSIX_SENTINEL_PGID BOBBIT_POSIX_SENTINEL_IDENTITY_FILE BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE BOBBIT_POSIX_TREE_SENTINEL_CHILD_SCRIPT; exec 3>&-; exec \"$@\"";
 
-function posixSupervisorArgs(): string[] {
-	const extension = extname(fileURLToPath(import.meta.url));
-	const supervisor = fileURLToPath(new URL(`./posix-tree-supervisor${extension}`, import.meta.url));
-	// Source-mode tests may launch from an arbitrary command cwd. Resolve tsx
-	// relative to this module, never through that configured cwd or its PATH.
-	return extension === ".ts" ? ["--import", createRequire(import.meta.url).resolve("tsx"), supervisor] : [supervisor];
-}
-
-function withPosixSentinelReadyPipe(stdio: StdioOptions | undefined): { stdio: StdioOptions; payloadStdioCount: number } {
-	if (Array.isArray(stdio)) {
-		const supervisorStdio = [...stdio.slice(0, 3), "pipe", ...stdio.slice(3)] as StdioOptions;
-		return { stdio: supervisorStdio, payloadStdioCount: supervisorStdio.length };
-	}
+function withPosixSentinelReadyPipe(stdio: StdioOptions | undefined): StdioOptions {
+	if (Array.isArray(stdio)) return [...stdio.slice(0, 3), "pipe", ...stdio.slice(3)] as StdioOptions;
 	const standard = stdio ?? "pipe";
-	return { stdio: [standard, standard, standard, "pipe"] as StdioOptions, payloadStdioCount: 4 };
+	return [standard, standard, standard, "pipe"] as StdioOptions;
 }
 
 /** Spawn a process whose entire tree we can later kill. */
@@ -415,10 +413,6 @@ export function spawnTracked(
 	// require PowerShell merely to exercise state transitions.
 	const posixTreeSentinel = opts.posixTreeSentinel ?? (!isWin && opts.spawnImpl == null);
 	const retainPosixSentinelForContainerTransport = !!opts.retainPosixSentinelForContainerTransport;
-	const posixSentinelSignalWitnessFd = opts.posixSentinelSignalWitnessFd;
-	if (posixSentinelSignalWitnessFd != null && (!Number.isSafeInteger(posixSentinelSignalWitnessFd) || posixSentinelSignalWitnessFd < 4)) {
-		throw new Error("POSIX sentinel signal witness must be an inherited FD after the readiness pipe.");
-	}
 	if (retainPosixSentinelForContainerTransport && (!posixTreeSentinel || !opts.posixSentinelIdentity)) {
 		throw new Error("Container transport sentinel retention requires a POSIX sentinel identity.");
 	}
@@ -438,32 +432,27 @@ export function spawnTracked(
 			cwd: opts.cwd ?? process.cwd(),
 		}), "utf8").toString("base64")
 		: undefined;
-	const posixStdio = posixTreeSentinel ? withPosixSentinelReadyPipe(opts.stdio) : undefined;
 	const sentinelEnv = posixTreeSentinel
 		? {
 			...(opts.env ?? process.env),
-			[POSIX_TREE_PAYLOAD_ENV]: JSON.stringify({ file: cmd, args, stdioCount: posixStdio!.payloadStdioCount }),
+			BOBBIT_POSIX_TREE_SENTINEL_CHILD_SCRIPT: POSIX_TREE_SENTINEL_CHILD_SCRIPT,
 			...(opts.posixSentinelIdentity ? {
 				BOBBIT_POSIX_SENTINEL_IDENTITY_FILE: opts.posixSentinelIdentity.file,
 				BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE: opts.posixSentinelIdentity.nonce,
 			} : {}),
-			// Always overwrite this private test seam so an inherited user environment
-			// can never make production sentinels emit a signal acknowledgement.
-			BOBBIT_POSIX_SENTINEL_TEST_SIGNAL_WITNESS_FD: posixSentinelSignalWitnessFd == null ? "" : String(posixSentinelSignalWitnessFd),
 		}
 		: opts.env;
 	let child: ChildProcess;
 	try {
-		if (windowsJobSupervisor) {
-			// Keep the PowerShell supervisor separate from the POSIX shell launch:
-			// its encoded program is constant and the configured payload is JSON in
-			// an environment envelope consumed by that supervisor only.
-			child = spawnImpl(
-				"powershell.exe",
-				["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", WINDOWS_JOB_SUPERVISOR_COMMAND],
-				{
-					cwd: opts.cwd,
-					env: {
+		child = spawnImpl(
+			windowsJobSupervisor ? "powershell.exe" : (posixTreeSentinel ? "/bin/sh" : cmd),
+			(windowsJobSupervisor
+				? ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", WINDOWS_JOB_SUPERVISOR_COMMAND]
+				: posixTreeSentinel ? ["-c", POSIX_TREE_SENTINEL_SCRIPT, "bobbit-tree-sentinel", cmd, ...args] : args) as string[],
+			{
+				cwd: opts.cwd,
+				env: windowsJobSupervisor
+					? {
 						...(opts.env ?? process.env),
 						BOBBIT_WINDOWS_JOB_PAYLOAD: windowsPayload,
 						BOBBIT_WINDOWS_JOB_READY_FILE: windowsJobReadiness!.file,
@@ -472,38 +461,15 @@ export function spawnTracked(
 							BOBBIT_WINDOWS_JOB_COMPLETION_NONCE: opts.windowsJobCompletion.nonce,
 							...(windowsJobShutdownPipe ? { BOBBIT_WINDOWS_JOB_SHUTDOWN_PIPE: windowsJobShutdownPipe } : {}),
 						} : {}),
-					},
-					stdio: opts.stdio,
-					detached: !isWin,
-					windowsHide: opts.windowsHide ?? isWin,
-				},
-			);
-		} else if (posixTreeSentinel) {
-			// The fixed supervisor consumes a private JSON envelope and launches its
-			// payload with argv. The executable passed here is trusted runtime state,
-			// not the configured command, so the tracked launch has no shell sink.
-			child = spawnImpl(
-				process.execPath,
-				posixSupervisorArgs(),
-				{
-					cwd: opts.cwd,
-					env: sentinelEnv,
-					stdio: posixStdio!.stdio,
-					detached: !isWin,
-					windowsHide: opts.windowsHide ?? isWin,
-				},
-			);
-		} else {
-			// Direct launch has no shell boundary and must remain distinct from both
-			// supervisor paths so configured command bytes cannot flow into either.
-			child = spawnImpl(cmd, [...args], {
-				cwd: opts.cwd,
-				env: opts.env,
-				stdio: opts.stdio,
+					}
+					: sentinelEnv,
+				stdio: posixTreeSentinel ? withPosixSentinelReadyPipe(opts.stdio) : opts.stdio,
+				// POSIX: detached:true puts the child in its own process group so we
+				// can kill the whole tree via process.kill(-pgid, sig).
 				detached: !isWin,
 				windowsHide: opts.windowsHide ?? isWin,
-			});
-		}
+			},
+		);
 	} catch (error) {
 		windowsJobReadiness?.fail();
 		windowsJobReadiness?.cleanup();

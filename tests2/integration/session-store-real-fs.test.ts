@@ -205,7 +205,7 @@ describe("SessionStore real filesystem fidelity", () => {
 			console.warn = origWarn;
 		}
 		assert.ok(
-			warns.some(w => /Failed to parse/.test(w)) && warns.some(w => /Loaded live tier from backup/.test(w)),
+			warns.some(w => /Failed to parse/.test(w)) && warns.some(w => /Loaded from backup/.test(w)),
 			`expected corrupt-primary and backup-restore warnings, got: ${warns.join("\n")}`,
 		);
 	});
