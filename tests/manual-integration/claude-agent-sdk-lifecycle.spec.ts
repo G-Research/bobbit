@@ -740,6 +740,57 @@ async function waitForManualDockerInitialReadiness(
 	}
 }
 
+type ManualRestoredSdkSession = { status?: unknown; dormant?: unknown; restoreError?: unknown };
+type ManualRestoredSdkSessionFacts = {
+	sessionPresent: boolean;
+	sessionStatus: "starting" | "preparing" | "idle" | "streaming" | "aborting" | "terminated" | "other";
+	sessionLive: boolean;
+	sessionDormant: boolean;
+	restoreFailure: boolean;
+	restoreDiagnostic?: string;
+};
+
+/** Keep restart evidence live-only and expose a dormant SDK restore failure safely. */
+function manualRestoredSdkSessionFacts(
+	session: ManualRestoredSdkSession | undefined,
+	sessionLive: boolean,
+	routeDiagnostic: (error: unknown) => string,
+): ManualRestoredSdkSessionFacts {
+	const sessionStatus = ["starting", "preparing", "idle", "streaming", "aborting", "terminated"].includes(session?.status as string)
+		? session!.status as ManualRestoredSdkSessionFacts["sessionStatus"]
+		: "other";
+	const sessionDormant = session?.dormant === true;
+	const restoreError = session?.restoreError;
+	const restoreFailure = sessionDormant || sessionStatus === "terminated" || restoreError !== undefined;
+	return {
+		sessionPresent: session !== undefined,
+		sessionStatus,
+		sessionLive,
+		sessionDormant,
+		restoreFailure,
+		...(restoreFailure ? { restoreDiagnostic: routeDiagnostic(restoreError) } : {}),
+	};
+}
+
+/** Wait for an actual idle bridge; a dormant persistence capsule is never a restored session. */
+async function waitForManualSdkRestoredSession<T extends ManualRestoredSdkSession>(
+	manager: { getSession(sessionId: string): T | undefined; isSessionLive(sessionId: string): boolean },
+	sessionId: string,
+	label: string,
+	routeDiagnostic: (error: unknown) => string,
+	timeoutMs: number,
+): Promise<T> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		const session = manager.getSession(sessionId);
+		const facts = manualRestoredSdkSessionFacts(session, manager.isSessionLive(sessionId), routeDiagnostic);
+		if (facts.restoreFailure) throw new Error(JSON.stringify(facts));
+		if (session && facts.sessionLive && !facts.sessionDormant && facts.sessionStatus === "idle") return session;
+		await new Promise(resolve => setTimeout(resolve, 100));
+	}
+	throw new Error(`Timed out waiting for ${label}`);
+}
+
 test("Claude Agent SDK manual timeout event diagnostics retain only fixed event categories", () => {
 	const counts = createManualTurnEventCounts();
 	countManualTurnEvent(counts, { type: "agent_start", privatePayload: "must-not-appear" });
@@ -949,6 +1000,52 @@ test("Claude Agent SDK manual Docker terminal facts normalize unknown bridge dat
 	expect(facts.sdkTerminalDiagnostic).toBe("SDK_SESSION_UNAVAILABLE");
 	const serialized = JSON.stringify(facts);
 	for (const secret of ["private-state", "private provider failure"]) expect(serialized).not.toContain(secret);
+});
+
+test("Claude Agent SDK manual restart waiter accepts only a live idle session and sanitizes restore failure", async () => {
+	const { ClaudeAgentSdkUnavailableError, claudeAgentSdkUnavailableRouteDiagnostic } = await import("../../dist/server/agent/claude-agent-sdk-error.js");
+	const liveIdle = manualRestoredSdkSessionFacts({ status: "idle", dormant: false }, true, claudeAgentSdkUnavailableRouteDiagnostic);
+	expect(liveIdle).toEqual({
+		sessionPresent: true,
+		sessionStatus: "idle",
+		sessionLive: true,
+		sessionDormant: false,
+		restoreFailure: false,
+	});
+	expect(manualRestoredSdkSessionFacts({ status: "idle", dormant: true }, false, claudeAgentSdkUnavailableRouteDiagnostic)).toMatchObject({
+		sessionStatus: "idle",
+		sessionLive: false,
+		sessionDormant: true,
+		restoreFailure: true,
+	});
+	const secret = "manual-restore-secret-sentinel";
+	const dormant = {
+		status: "terminated",
+		dormant: true,
+		restoreError: new ClaudeAgentSdkUnavailableError(`provider detail=${secret} CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE`),
+	};
+	const dormantFacts = manualRestoredSdkSessionFacts(dormant, false, claudeAgentSdkUnavailableRouteDiagnostic);
+	expect(dormantFacts).toEqual({
+		sessionPresent: true,
+		sessionStatus: "terminated",
+		sessionLive: false,
+		sessionDormant: true,
+		restoreFailure: true,
+		restoreDiagnostic: "SDK_SESSION_UNAVAILABLE: CLAUDE_AGENT_SDK_SANDBOX_AUTH_UNAVAILABLE",
+	});
+	const manager = {
+		getSession: () => dormant,
+		isSessionLive: () => false,
+	};
+	let diagnostic = "";
+	try {
+		await waitForManualSdkRestoredSession(manager, "private-session-id", "SDK gateway restart", claudeAgentSdkUnavailableRouteDiagnostic, 120_000);
+	} catch (error) {
+		diagnostic = error instanceof Error ? error.message : "";
+	}
+	expect(JSON.parse(diagnostic)).toEqual(dormantFacts);
+	expect(diagnostic).not.toContain(secret);
+	expect(diagnostic).not.toContain("private-session-id");
 });
 
 test("Claude Agent SDK manual Docker readiness failure emits safe pre-turn terminal facts", async () => {
@@ -1575,7 +1672,13 @@ test.describe("Claude Agent SDK lifecycle (manual subscription smoke)", () => {
 			gateway = createGateway({ host: "127.0.0.1", port: 0, portExplicit: true, authToken: token, defaultCwd: root, forceAuth: true });
 			const restartedPort = await (gateway as any).start();
 			baseURL = `http://127.0.0.1:${restartedPort}`;
-			session = await waitFor(() => gateway!.sessionManager.getSession(created.id), "SDK gateway restart/resume", 120_000);
+			session = await waitForManualSdkRestoredSession(
+				gateway!.sessionManager,
+				created.id,
+				"SDK gateway restart/resume",
+				claudeAgentSdkUnavailableRouteDiagnostic,
+				120_000,
+			);
 			await session.rpcClient.waitForReady(90_000);
 			expect(gateway.sessionManager.getPersistedSession(created.id)?.claudeAgentSdkSessionId).toBe(persistedSdkSessionId);
 			const resumedModel = await session.rpcClient.getState();
@@ -1987,7 +2090,13 @@ test.describe("Claude Agent SDK Docker sandbox lifecycle (manual subscription sm
 			await gateway.shutdown();
 			gateway = createGateway({ host: "127.0.0.1", port: 0, portExplicit: true, authToken: token, defaultCwd: root, forceAuth: true });
 			port = await (gateway as any).start();
-			session = await waitFor(() => gateway!.sessionManager.getSession(created.id), "sandbox SDK gateway restart");
+			session = await waitForManualSdkRestoredSession(
+				gateway!.sessionManager,
+				created.id,
+				"sandbox SDK gateway restart",
+				claudeAgentSdkUnavailableRouteDiagnostic,
+				120_000,
+			);
 			await session.rpcClient.waitForReady(120_000);
 			expect(gateway.sessionManager.getPersistedSession(created.id)?.claudeAgentSdkSessionId).toBe(persistedSdkSessionId);
 			const resumedSandboxModel = await session.rpcClient.getState();
