@@ -68,13 +68,13 @@ export default { decide(ctx) {
 `);
 	fs.writeFileSync(path.join(packDir, "lib", "import-project-proposal.mjs"), `
 const deadline = () => new Date(Date.now() + 60_000).toISOString();
-export default { decide() {
+export default { decide(ctx) {
   return { kind: "request", request: {
     version: 1, key: "import-project-config-draft", title: "Draft project configuration", question: "Update imported config?",
     options: [{ value: "draft", label: "Create draft" }, { value: "skip", label: "Skip" }], other: { maxLength: 40 },
     requestedClass: "consent-required", scope: "project", deadlineAt: deadline(),
     effect: { kind: "proposal", proposals: {
-      draft: { proposalType: "project", args: { name: "Updated import project", config: { build_command: "echo imported" } } },
+      draft: { proposalType: "project", args: { projectId: ctx.projectId, name: "Updated import project", config: { build_command: "echo imported" } } },
     }, noEffectValues: ["skip", "other"] },
   } };
 } };

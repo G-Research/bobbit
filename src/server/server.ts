@@ -781,7 +781,7 @@ import {
 } from "./proposals/proposal-files.js";
 import { ProposalSeedService, proposalDraftOwnerId } from "./proposals/proposal-seed-service.js";
 import { ProjectImportProposalApplicationService, ProjectImportApplicationError, projectImportApplicationKey, projectImportSnapshotSha256 } from "./proposals/project-import-proposal-application.js";
-import { createGoalCreationLifecycle } from "./proposals/goal-creation-lifecycle.js";
+import { createGoalCreationLifecycle, type GoalCreationLifecycleDeps } from "./proposals/goal-creation-lifecycle.js";
 import {
 	CanonicalMutationError,
 	CanonicalProjectConfigPersistenceError,
@@ -817,6 +817,24 @@ const _goalWarnedClients = new WeakSet<WebSocket>();
 const execAsync = promisify(exec);
 let serverCommandRunner: CommandRunner = realCommandRunner;
 let serverRemoteGitPolicy: RemoteGitPolicy = {};
+
+type CanonicalGoalProposalDependencyFactoryInput = Omit<CanonicalGoalProposalDeps, "afterCreate" | "onAfterCreateError"> & GoalCreationLifecycleDeps;
+
+/** Compose public and import goal creation with one lifecycle owner. */
+function createCanonicalGoalProposalDependencies(input: CanonicalGoalProposalDependencyFactoryInput): CanonicalGoalProposalDeps {
+	return {
+		resolveProject: input.resolveProject,
+		validateCwd: input.validateCwd,
+		getContext: input.getContext,
+		ensureSandbox: input.ensureSandbox,
+		findGoalAcrossProjects: input.findGoalAcrossProjects,
+		getNestingPrefs: input.getNestingPrefs,
+		authorizeChild: input.authorizeChild,
+		findCascadeWorkflow: input.findCascadeWorkflow,
+		applicationKey: input.applicationKey,
+		...createGoalCreationLifecycle(input),
+	};
+}
 
 /** One public-equivalent base-ref validator shared by route and import apply paths. */
 function createCanonicalBaseRefValidator(commandRunner: CommandRunner) {
@@ -3654,51 +3672,37 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		thinkingConsumer: advisoryThinkingConsumer,
 	});
 	sessionManager.lifecycleHub?.setDecisionDispatcher(decisionHookDispatcher);
-	const createCanonicalGoalProposalDependencies = (input: {
-		resolveProject: CanonicalGoalProposalDeps["resolveProject"];
-		authorizeChild?: CanonicalGoalProposalDeps["authorizeChild"];
-		applicationKey?: string;
-	}): CanonicalGoalProposalDeps => {
-		const lifecycle = createGoalCreationLifecycle({
-			getContextForGoal: goalId => projectContextManager.getContextForGoal(goalId) ?? undefined,
-			getContext: projectId => projectContextManager.getOrCreate(projectId) ?? undefined,
-			requestChildStart: goalId => verificationHarness.requestChildStart(goalId),
-			startTeam: goalId => teamManager.startTeam(goalId),
-			broadcast: message => broadcastToAll(message),
-			logLifecycleSchedulingError: error => console.error("[goal] Post-create lifecycle scheduling failed:", error),
-		});
-		return {
-			resolveProject: input.resolveProject,
-			validateCwd: (projectId, cwd) => {
-				const validation = validateExecutionCwd(projectRegistry, projectContextManager, projectId, cwd, { kind: "user-input" });
-				if (!validation.ok) throw new CanonicalMutationError(validation.status, validation.error, validation.code);
-			},
-			getContext: projectId => projectContextManager.getOrCreate(projectId) ?? undefined,
-			ensureSandbox: sandboxManager ? projectId => sandboxManager.ensureForProject(projectId) : undefined,
-			findGoalAcrossProjects: goalId => {
-				for (const project of projectRegistry.list()) {
-					const goal = projectContextManager.getOrCreate(project.id)?.goalManager.getGoal(goalId);
-					if (goal) return goal;
-				}
-				return undefined;
-			},
-			getNestingPrefs: () => readSubgoalNestingPrefs(key => preferencesStore.get(key)),
-			authorizeChild: input.authorizeChild,
-			findCascadeWorkflow: (projectId, workflowId) => configCascade.resolveWorkflows(projectId).find(row => row.item.id === workflowId)?.item,
-			...lifecycle,
-			applicationKey: input.applicationKey,
-		};
-	};
 	// One gateway-owned composition is shared by HTTP acceptance and boot replay.
 	// It receives only project-owned stores and the public canonical mutations.
 	projectImportProposalApplicationService = new ProjectImportProposalApplicationService({
 		goal: async (fields, application) => {
 			const project = projectRegistry.get(application.projectId);
 			if (!project) throw new CanonicalMutationError(404, "Project not found");
+			const configuredSandboxManager = sandboxManager;
 			const result = await applyCanonicalGoalProposal(
 				{ ...fields, projectId: application.projectId },
 				createCanonicalGoalProposalDependencies({
 					resolveProject: () => ({ id: project.id, name: project.name, rootPath: project.rootPath }),
+					validateCwd: (projectId, cwd) => {
+						const validation = validateExecutionCwd(projectRegistry, projectContextManager, projectId, cwd, { kind: "user-input" });
+						if (!validation.ok) throw new CanonicalMutationError(validation.status, validation.error, validation.code);
+					},
+					getContext: projectId => projectContextManager.getOrCreate(projectId) ?? undefined,
+					getContextForGoal: goalId => projectContextManager.getContextForGoal(goalId) ?? undefined,
+					ensureSandbox: configuredSandboxManager ? projectId => configuredSandboxManager.ensureForProject(projectId) : undefined,
+					findGoalAcrossProjects: goalId => {
+						for (const candidate of projectRegistry.list()) {
+							const goal = projectContextManager.getOrCreate(candidate.id)?.goalManager.getGoal(goalId);
+							if (goal) return goal;
+						}
+						return undefined;
+					},
+					getNestingPrefs: () => readSubgoalNestingPrefs(key => preferencesStore.get(key)),
+					findCascadeWorkflow: (projectId, workflowId) => configCascade.resolveWorkflows(projectId).find(row => row.item.id === workflowId)?.item,
+					requestChildStart: goalId => verificationHarness.requestChildStart(goalId),
+					startTeam: goalId => teamManager.startTeam(goalId),
+					broadcast: message => broadcastToAll(message),
+					logLifecycleSchedulingError: error => console.error("[goal] Post-create lifecycle scheduling failed:", error),
 					applicationKey: application.applicationKey,
 				}),
 			);
@@ -10453,6 +10457,7 @@ async function handleApiRoute(
 	// POST /api/goals
 	if (url.pathname === "/api/goals" && req.method === "POST") {
 		const body = await readBody(req);
+		const activeSandboxManager = sandboxManager ?? undefined;
     try {
       const { goal, replayed } = await applyCanonicalGoalProposal(
         body ?? {},
@@ -10462,6 +10467,20 @@ async function handleApiRoute(
             if (!resolved.ok) throw new CanonicalMutationError(resolved.status, resolved.error, resolved.code);
             return { id: resolved.projectId, name: resolved.project.name, rootPath: resolved.project.rootPath };
           },
+          validateCwd: (projectId, cwd) => {
+            const validation = validateExecutionCwd(projectRegistry, projectContextManager, projectId, cwd, { kind: "user-input" });
+            if (!validation.ok) throw new CanonicalMutationError(validation.status, validation.error, validation.code);
+          },
+          getContext: projectId => projectContextManager.getOrCreate(projectId) ?? undefined,
+          getContextForGoal: goalId => projectContextManager.getContextForGoal(goalId) ?? undefined,
+          ensureSandbox: activeSandboxManager ? projectId => activeSandboxManager.ensureForProject(projectId) : undefined,
+          findGoalAcrossProjects: getGoalAcrossProjects,
+          getNestingPrefs: () => readSubgoalNestingPrefs(key => preferencesStore.get(key)),
+          findCascadeWorkflow: (projectId, workflowId) => configCascade.resolveWorkflows(projectId).find(row => row.item.id === workflowId)?.item,
+          requestChildStart: goalId => verificationHarness.requestChildStart(goalId),
+          startTeam: goalId => teamManager.startTeam(goalId),
+          broadcast: message => broadcastToAll(message),
+          logLifecycleSchedulingError: error => console.error("[goal] Post-create lifecycle scheduling failed:", error),
           authorizeChild: (parent) => {
             const rawSecret = (req.headers as Record<string, string | string[] | undefined>)["x-bobbit-session-secret"];
             const secret = Array.isArray(rawSecret) ? rawSecret[0] : rawSecret;
