@@ -238,14 +238,23 @@ export class MessageEditor extends LitElement {
 	}
 
 	private async _loadHistory() {
+		const sessionId = this.sessionId;
 		this._resetHistoryBrowsing();
-		if (!this.sessionId) return;
+		if (!sessionId) {
+			this._history = [];
+			return;
+		}
 		try {
 			const store = getAppStorage().commandHistory;
-			this._history = await store.getHistory(this.sessionId);
+			const history = await store.getHistory(sessionId);
+			if (this.sessionId !== sessionId) return;
+			this._history = history;
 		} catch {
 			// Storage not available — history won't work but that's fine
+			if (this.sessionId !== sessionId) return;
 			this._history = [];
+		} finally {
+			if (this.sessionId === sessionId) this._resetHistoryBrowsing();
 		}
 	}
 
@@ -1050,13 +1059,9 @@ export class MessageEditor extends LitElement {
 	};
 
 	private _applyHistoryEntry() {
-		if (this._historyEditBuffer.has(this._historyIndex)) {
-			this.value = this._historyEditBuffer.get(this._historyIndex)!;
-		} else if (this._historyIndex >= 0 && this._historyIndex < this._history.length) {
-			this.value = this._history[this._historyIndex];
-		} else {
-			return;
-		}
+		const index = this._historyIndex;
+		if (index < -1 || index >= this._history.length) return;
+		this.value = this._historyEditBuffer.get(index) ?? (index === -1 ? "" : this._history[index]);
 		this.onInput?.(this.value);
 	}
 
@@ -1514,7 +1519,7 @@ export class MessageEditor extends LitElement {
 	protected override updated(changed: Map<string, unknown>) {
 		super.updated(changed);
 		if (changed.has("sessionId")) {
-			this._loadHistory();
+			void this._loadHistory();
 		}
 		if (changed.has("blockedSendReason") && !this.blockedSendReason) {
 			this._blockedSendError = "";
