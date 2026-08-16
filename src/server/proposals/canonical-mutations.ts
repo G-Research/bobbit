@@ -9,14 +9,37 @@ import path from "node:path";
 import { parseDocument } from "yaml";
 import type { Role, RoleStore } from "../agent/role-store.js";
 import type { RoleManager } from "../agent/role-manager.js";
+import type { PersistedGoal } from "../agent/goal-store.js";
 import type { Workflow, WorkflowStore } from "../agent/workflow-store.js";
-import { validateWorkflowDefinition, type WorkflowComponentRef } from "../agent/workflow-validator.js";
+import {
+  freezeWorkflowDefinition,
+  validateWorkflowDefinition,
+  type WorkflowComponentRef,
+} from "../agent/workflow-validator.js";
+import {
+  buildDefaultWorkflows,
+  buildParentWorkflow,
+} from "../state-migration/seed-default-workflows.js";
+import {
+  checkCanSpawnChild,
+  clampMaxDepth,
+  inheritedChildOverrides,
+  type SubgoalNestingPrefs,
+} from "../agent/subgoal-nesting-limit.js";
+import {
+  GoalPausedError,
+  requireAncestorsNotPaused,
+} from "../agent/goal-paused-guard.js";
 import { ToolManager, __resetToolScanCache } from "../agent/tool-manager.js";
 
 /** Durable, server-owned idempotency marker. Callers must never take this from
  * proposal metadata or another user controlled field. */
 export const CANONICAL_MUTATION_KEY = "bobbit.canonicalMutationKey";
 const CANONICAL_APPLICATION_KEY = /^[A-Za-z0-9_.:-]{1,256}$/;
+
+// Serializes same-process duplicate applications until the durable marker is
+// flushed. A restart uses findByApplicationKey against the persisted record.
+const inFlightGoalApplications = new Map<string, Promise<void>>();
 
 function assertCanonicalApplicationKey(value: string | undefined): void {
 	if (value !== undefined && !CANONICAL_APPLICATION_KEY.test(value)) {
@@ -25,7 +48,7 @@ function assertCanonicalApplicationKey(value: string | undefined): void {
 }
 
 export class CanonicalMutationError extends Error {
-	constructor(public readonly status: 400 | 404 | 409 | 422, message: string, public readonly code?: string, public readonly details?: unknown) {
+	constructor(public readonly status: 400 | 403 | 404 | 409 | 422 | 500, message: string, public readonly code?: string, public readonly details?: unknown) {
 		super(message);
 	}
 }
@@ -283,79 +306,497 @@ function targetLoaderAccepts(toolManager: ToolManager, name: string): boolean {
  * are immutable through this operation.
  */
 /**
- * The persistence boundary for goal creation. Route and proposal callers do
- * their own authentication/transport validation, then pass the resolved
- * workflow and policy-clamped options here. This keeps a replay from creating
- * a second goal while deliberately retaining the public route's semantics.
+ * The typed shape shared by POST /api/goals and durable proposal application.
+ * This deliberately describes the proposal, not the HTTP request: the route
+ * only parses a body and supplies transport-only authorization.
  */
-export async function createCanonicalGoal<T extends { id: string; workflow?: { gates: Array<{ id: string }> }; metadata?: Record<string, unknown> }>(
-	input: {
-		title: string;
-		cwd: string;
-		options: Record<string, unknown>;
-		projectId?: string;
-		reattemptOf?: string;
-		autoStartTeam: boolean;
-		/** Assigned by a trusted application, never copied from proposal metadata. */
-		applicationKey?: string;
-	},
-	deps: {
-		findByApplicationKey(key: string): T | undefined;
-		create(title: string, cwd: string, options: Record<string, unknown>): Promise<T>;
-		update(id: string, updates: Record<string, unknown>): void;
-		initGates(goalId: string, gateIds: string[]): void;
-		flush(): Promise<void>;
-		afterCreate(goal: T): void | Promise<void>;
-		onAfterCreateError?(error: unknown, goal: T): void;
-	},
+export interface CanonicalGoalProposal {
+  title?: unknown;
+  cwd?: unknown;
+  spec?: unknown;
+  workflowId?: unknown;
+  workflow?: unknown;
+  projectId?: unknown;
+  sandboxed?: unknown;
+  autoStartTeam?: unknown;
+  enabledOptionalSteps?: unknown;
+  metadata?: unknown;
+  parentGoalId?: unknown;
+  inlineRoles?: unknown;
+  subgoalsAllowed?: unknown;
+  maxNestingDepth?: unknown;
+  divergencePolicy?: unknown;
+  maxConcurrentChildren?: unknown;
+  worktree?: unknown;
+  reattemptOf?: unknown;
+}
+
+type CanonicalGoalContext = {
+  goalManager: {
+    getGoal(id: string): PersistedGoal | undefined;
+    listGoals(): PersistedGoal[];
+    createGoal(
+      title: string,
+      cwd: string,
+      options: Record<string, unknown>,
+    ): Promise<PersistedGoal>;
+    updateGoal(id: string, updates: Record<string, unknown>): void;
+    getGoalStore(): { flush(): Promise<void> };
+  };
+  gateStore: {
+    initGatesForGoal(goalId: string, gateIds: string[]): void;
+    flush(): Promise<void>;
+  };
+  workflowStore: WorkflowStore;
+  projectConfigStore: {
+    getComponents(): Array<{ name: string; commands?: Record<string, string> }>;
+  };
+};
+
+export interface CanonicalGoalProposalDeps {
+  resolveProject(projectId: unknown): {
+    id: string;
+    name: string;
+    rootPath: string;
+  };
+  validateCwd(projectId: string, cwd: string): void;
+  getContext(projectId: string): CanonicalGoalContext | undefined;
+  ensureSandbox?(projectId: string): Promise<void>;
+  findGoalAcrossProjects(goalId: string): PersistedGoal | undefined;
+  getNestingPrefs(): SubgoalNestingPrefs;
+  /** Auth is transport-owned; proposal application leaves it unset. */
+  authorizeChild?(parent: PersistedGoal): void;
+  findCascadeWorkflow(
+    projectId: string,
+    workflowId: string,
+  ): Workflow | undefined;
+  afterCreate(goal: PersistedGoal, parentGoalId?: string): void | Promise<void>;
+  onAfterCreateError?(error: unknown, goal: PersistedGoal): void;
+  /** Trusted server application identity; never accepted from proposal metadata. */
+  applicationKey?: string;
+}
+
+/**
+ * Resolve and apply a goal proposal as one canonical operation. All validation
+ * precedes persistence, so a rejected cwd, parent, workflow, or option cannot
+ * leave a goal or gate behind. The persistence/lifecycle half remains in
+ * createCanonicalGoal for independently testable durable replay semantics.
+ */
+export async function applyCanonicalGoalProposal(
+  proposal: CanonicalGoalProposal,
+  deps: CanonicalGoalProposalDeps,
+): Promise<{ goal: PersistedGoal; replayed: boolean }> {
+  const title = proposal.title;
+  if (!title || typeof title !== "string")
+    throw new CanonicalMutationError(400, "Missing title");
+  const explicitCwd =
+    typeof proposal.cwd === "string" && proposal.cwd.trim().length > 0
+      ? proposal.cwd.trim()
+      : undefined;
+  const project = deps.resolveProject(proposal.projectId);
+  const cwd = explicitCwd || project.rootPath;
+  deps.validateCwd(project.id, cwd);
+  const context = deps.getContext(project.id);
+  if (!context) throw new CanonicalMutationError(400, "Invalid project");
+  const sandboxed = proposal.sandboxed === true;
+  if (sandboxed && deps.ensureSandbox) {
+    try {
+      await deps.ensureSandbox(project.id);
+    } catch (error) {
+      throw new CanonicalMutationError(
+        500,
+        `Sandbox init failed: ${(error as Error).message || error}`,
+      );
+    }
+  }
+  const parentGoalId =
+    typeof proposal.parentGoalId === "string" && proposal.parentGoalId.trim()
+      ? proposal.parentGoalId.trim()
+      : undefined;
+  let parent: PersistedGoal | undefined;
+  if (parentGoalId) {
+    parent = context.goalManager.getGoal(parentGoalId);
+    if (!parent) {
+      if (deps.findGoalAcrossProjects(parentGoalId))
+        throw new CanonicalMutationError(
+          422,
+          "Parent goal belongs to a different project. Select a parent in the same project.",
+          "PARENT_CROSS_PROJECT",
+        );
+      throw new CanonicalMutationError(
+        422,
+        "Parent goal not found",
+        "PARENT_NOT_FOUND",
+      );
+    }
+    deps.authorizeChild?.(parent);
+    try {
+      requireAncestorsNotPaused(
+        parentGoalId,
+        (id) =>
+          context.goalManager.getGoal(id) ?? deps.findGoalAcrossProjects(id),
+      );
+    } catch (error) {
+      if (error instanceof GoalPausedError)
+        throw new CanonicalMutationError(409, error.message, error.code, {
+          goalId: error.goalId,
+        });
+      throw error;
+    }
+    const spawn = checkCanSpawnChild(
+      parent,
+      deps.getNestingPrefs(),
+      (id) =>
+        context.goalManager.getGoal(id) ?? deps.findGoalAcrossProjects(id),
+    );
+    if (!spawn.ok) {
+      if (spawn.code === "SUBGOALS_DISABLED")
+        throw new CanonicalMutationError(
+          422,
+          "Subgoals are disabled",
+          spawn.code,
+        );
+      if (spawn.code === "PARENT_SUBGOALS_DISABLED")
+        throw new CanonicalMutationError(
+          422,
+          `Parent goal "${parent.title}" doesn't allow sub-goals`,
+          spawn.code,
+        );
+      throw new CanonicalMutationError(
+        422,
+        `Nesting depth cap reached: ${spawn.currentDepth} / ${spawn.maxDepth}`,
+        spawn.code,
+        { currentDepth: spawn.currentDepth, maxDepth: spawn.maxDepth },
+      );
+    }
+  }
+  const requestedWorkflowId =
+    typeof proposal.workflowId === "string" && proposal.workflowId
+      ? proposal.workflowId
+      : "general";
+  let workflowId = requestedWorkflowId;
+  let workflow: Workflow | undefined;
+  if (proposal.workflow && typeof proposal.workflow === "object") {
+    workflow = proposal.workflow as Workflow;
+    workflowId = workflow.id || requestedWorkflowId;
+  } else {
+    workflow = requestedWorkflowId
+      ? (deps.findCascadeWorkflow(project.id, requestedWorkflowId) ??
+        context.workflowStore.get(requestedWorkflowId))
+      : undefined;
+    if (!workflow && context.workflowStore.getAll().length === 0) {
+      const components = context.projectConfigStore.getComponents();
+      const component =
+        components.find(
+          (item) =>
+            item.name === project.name &&
+            Object.keys(item.commands ?? {}).length > 0,
+        ) ??
+        components.find(
+          (item) => Object.keys(item.commands ?? {}).length > 0,
+        ) ??
+        components.find((item) => item.name === project.name) ??
+        components.find((item) => item.name.length > 0);
+      const seeds = buildDefaultWorkflows(
+        component?.name || project.name || "project",
+        component ? Object.keys(component.commands ?? {}) : [],
+      );
+      seeds.parent = buildParentWorkflow();
+      for (const seeded of Object.values(seeds))
+        context.workflowStore.put(seeded as Workflow);
+      workflow = requestedWorkflowId
+        ? context.workflowStore.get(requestedWorkflowId)
+        : (context.workflowStore.get("general") ??
+          context.workflowStore.getAll()[0]);
+      workflowId = workflow?.id || "general";
+    }
+    if (
+      requestedWorkflowId &&
+      !workflow &&
+      context.workflowStore.getAll().length > 0
+    ) {
+      const available = context.workflowStore.getAll().map((item) => item.id);
+      throw new CanonicalMutationError(
+        400,
+        `Workflow "${requestedWorkflowId}" not found. Available: ${available.join(", ")}`,
+        "WORKFLOW_NOT_FOUND",
+        { workflowId: requestedWorkflowId, available },
+      );
+    }
+  }
+  if (workflow)
+    workflow = freezeWorkflowDefinition(
+      workflow,
+      context.projectConfigStore.getComponents() as WorkflowComponentRef[],
+      workflowId,
+      { validateComponentReferences: false },
+    );
+  const nesting = deps.getNestingPrefs();
+  const inherited = parent
+    ? inheritedChildOverrides(
+        parent,
+        nesting,
+        (id) =>
+          context.goalManager.getGoal(id) ?? deps.findGoalAcrossProjects(id),
+      )
+    : undefined;
+  const subgoalsAllowed =
+    typeof proposal.subgoalsAllowed === "boolean"
+      ? proposal.subgoalsAllowed &&
+        (inherited?.subgoalsAllowed ?? nesting.subgoalsEnabled)
+      : inherited?.subgoalsAllowed;
+  const maxNestingDepth =
+    typeof proposal.maxNestingDepth === "number" &&
+    Number.isFinite(proposal.maxNestingDepth)
+      ? Math.min(
+          clampMaxDepth(proposal.maxNestingDepth),
+          inherited?.maxNestingDepth ?? nesting.maxNestingDepth,
+        )
+      : inherited?.maxNestingDepth;
+  const root = !parentGoalId;
+  const divergencePolicy =
+    root &&
+    (proposal.divergencePolicy === "strict" ||
+      proposal.divergencePolicy === "balanced" ||
+      proposal.divergencePolicy === "autonomous")
+      ? proposal.divergencePolicy
+      : undefined;
+  const maxConcurrentChildren =
+    root &&
+    typeof proposal.maxConcurrentChildren === "number" &&
+    Number.isFinite(proposal.maxConcurrentChildren) &&
+    Math.floor(proposal.maxConcurrentChildren) >= 1 &&
+    Math.floor(proposal.maxConcurrentChildren) <= 8
+      ? Math.floor(proposal.maxConcurrentChildren)
+      : undefined;
+  const metadata =
+    proposal.metadata &&
+    typeof proposal.metadata === "object" &&
+    !Array.isArray(proposal.metadata) &&
+    Object.keys(proposal.metadata).length > 0
+      ? (proposal.metadata as Record<string, unknown>)
+      : undefined;
+  if (
+    proposal.enabledOptionalSteps !== undefined &&
+    (!Array.isArray(proposal.enabledOptionalSteps) ||
+      !proposal.enabledOptionalSteps.every((item) => typeof item === "string"))
+  ) {
+    throw new CanonicalMutationError(
+      400,
+      "enabledOptionalSteps must be an array of strings",
+    );
+  }
+  const enabledOptionalSteps = proposal.enabledOptionalSteps as
+    string[] | undefined;
+  if (enabledOptionalSteps && workflow) {
+    const optionalNames = new Set(
+      workflow.gates.flatMap((gate) =>
+        (gate.verify ?? [])
+          .filter((step) => step.optional)
+          .map((step) => step.name),
+      ),
+    );
+    const invalidOption = enabledOptionalSteps.find(
+      (name) => !optionalNames.has(name),
+    );
+    if (invalidOption)
+      throw new CanonicalMutationError(
+        400,
+        `Unknown optional workflow step: ${invalidOption}`,
+        "OPTION_NOT_FOUND",
+      );
+  }
+  const inlineRoles =
+    proposal.inlineRoles &&
+    typeof proposal.inlineRoles === "object" &&
+    !Array.isArray(proposal.inlineRoles)
+      ? (proposal.inlineRoles as Record<string, Role>)
+      : undefined;
+  return createCanonicalGoal(
+    {
+      title,
+      cwd,
+      projectId: project.id,
+      reattemptOf:
+        typeof proposal.reattemptOf === "string"
+          ? proposal.reattemptOf
+          : undefined,
+      autoStartTeam: proposal.autoStartTeam !== false,
+      applicationKey: deps.applicationKey,
+      options: {
+        spec: proposal.spec || "",
+        workflowId,
+        workflowStore: context.workflowStore,
+        resolvedWorkflow: workflow,
+        sandboxed,
+        enabledOptionalSteps,
+        projectId: project.id,
+        parentGoalId,
+        inlineRoles,
+        subgoalsAllowed,
+        maxNestingDepth,
+        divergencePolicy,
+        maxConcurrentChildren,
+        metadata,
+        worktree:
+          typeof proposal.worktree === "boolean"
+            ? proposal.worktree
+            : undefined,
+      },
+    },
+    {
+      findByApplicationKey: (key) =>
+        context.goalManager
+          .listGoals()
+          .find(
+            (candidate) => candidate.metadata?.[CANONICAL_MUTATION_KEY] === key,
+          ),
+      create: (goalTitle, goalCwd, options) =>
+        context.goalManager.createGoal(
+          goalTitle,
+          goalCwd,
+          options,
+        ) as Promise<PersistedGoal>,
+      update: (id, updates) => context.goalManager.updateGoal(id, updates),
+      initGates: (id, gateIds) =>
+        context.gateStore.initGatesForGoal(id, gateIds),
+      flush: () =>
+        Promise.all([
+          context.goalManager.getGoalStore().flush(),
+          context.gateStore.flush(),
+        ]).then(() => undefined),
+      afterCreate: (goal) => deps.afterCreate(goal, parentGoalId),
+      onAfterCreateError: deps.onAfterCreateError,
+    },
+  );
+}
+
+/**
+ * The persistence boundary for goal creation. It strips user-owned replay
+ * markers before spreading options so an empty sanitized metadata object cannot
+ * accidentally resurrect a forged marker from input.options.
+ */
+export async function createCanonicalGoal<
+  T extends {
+    id: string;
+    workflow?: { gates: Array<{ id: string }> };
+    metadata?: Record<string, unknown>;
+  },
+>(
+  input: {
+    title: string;
+    cwd: string;
+    options: Record<string, unknown>;
+    projectId?: string;
+    reattemptOf?: string;
+    autoStartTeam: boolean;
+    /** Assigned by a trusted application, never copied from proposal metadata. */
+    applicationKey?: string;
+  },
+  deps: {
+    findByApplicationKey(key: string): T | undefined;
+    create(
+      title: string,
+      cwd: string,
+      options: Record<string, unknown>,
+    ): Promise<T>;
+    update(id: string, updates: Record<string, unknown>): void;
+    initGates(goalId: string, gateIds: string[]): void;
+    flush(): Promise<void>;
+    afterCreate(goal: T): void | Promise<void>;
+    onAfterCreateError?(error: unknown, goal: T): void;
+  },
 ): Promise<{ goal: T; replayed: boolean }> {
-	if (typeof input.title !== "string" || !input.title.trim()) {
-		throw new CanonicalMutationError(400, "Goal title is required");
-	}
-	if (typeof input.cwd !== "string" || !(path.posix.isAbsolute(input.cwd) || path.win32.isAbsolute(input.cwd))) {
-		throw new CanonicalMutationError(400, "Goal cwd must be an absolute path");
-	}
-	if (!input.options || typeof input.options !== "object" || Array.isArray(input.options)) {
-		throw new CanonicalMutationError(400, "Goal options must be an object");
-	}
-	assertCanonicalApplicationKey(input.applicationKey);
-	if (input.applicationKey) {
-		const existing = deps.findByApplicationKey(input.applicationKey);
-		if (existing) return { goal: existing, replayed: true };
-	}
-	const metadata = input.options.metadata && typeof input.options.metadata === "object" && !Array.isArray(input.options.metadata)
-		? { ...(input.options.metadata as Record<string, unknown>) }
-		: {};
-	// Never copy a caller-supplied marker from arbitrary proposal metadata. Only
-	// a trusted application may attach the durable replay identity.
-	delete metadata[CANONICAL_MUTATION_KEY];
-	if (input.applicationKey) metadata[CANONICAL_MUTATION_KEY] = input.applicationKey;
-	const goal = await deps.create(input.title, input.cwd, {
-		...input.options,
-		...(Object.keys(metadata).length > 0 ? { metadata } : {}),
-	});
-	if (input.projectId) {
-		deps.update(goal.id, { projectId: input.projectId });
-		(goal as T & { projectId?: string }).projectId = input.projectId;
-	}
-	if (input.reattemptOf) {
-		deps.update(goal.id, { reattemptOf: input.reattemptOf });
-		(goal as T & { reattemptOf?: string }).reattemptOf = input.reattemptOf;
-	}
-	deps.update(goal.id, { autoStartTeam: input.autoStartTeam });
-	(goal as T & { autoStartTeam?: boolean }).autoStartTeam = input.autoStartTeam;
-	if (goal.workflow) deps.initGates(goal.id, goal.workflow.gates.map(gate => gate.id));
-	await deps.flush();
-	// The HTTP route publishes the creation response before its historical
-	// fire-and-forget setup/start work. Deferring retains that observable order
-	// while proposal callers still share the exact same lifecycle hook.
-	queueMicrotask(() => {
-		Promise.resolve().then(() => deps.afterCreate(goal)).catch(error => {
-			// Lifecycle scheduling must never surface as an unhandled microtask.
-			deps.onAfterCreateError?.(error, goal);
-		});
-	});
-	return { goal, replayed: false };
+  if (typeof input.title !== "string" || !input.title.trim()) {
+    throw new CanonicalMutationError(400, "Goal title is required");
+  }
+  if (
+    typeof input.cwd !== "string" ||
+    !(path.posix.isAbsolute(input.cwd) || path.win32.isAbsolute(input.cwd))
+  ) {
+    throw new CanonicalMutationError(400, "Goal cwd must be an absolute path");
+  }
+  if (
+    !input.options ||
+    typeof input.options !== "object" ||
+    Array.isArray(input.options)
+  ) {
+    throw new CanonicalMutationError(400, "Goal options must be an object");
+  }
+  assertCanonicalApplicationKey(input.applicationKey);
+  let finishApplication: (() => void) | undefined;
+  let applicationCompletion: Promise<void> | undefined;
+  if (input.applicationKey) {
+    const inFlight = inFlightGoalApplications.get(input.applicationKey);
+    if (inFlight) await inFlight;
+    const existing = deps.findByApplicationKey(input.applicationKey);
+    if (existing) return { goal: existing, replayed: true };
+    applicationCompletion = new Promise<void>((resolve) => {
+      finishApplication = resolve;
+    });
+    inFlightGoalApplications.set(input.applicationKey, applicationCompletion);
+  }
+  try {
+    const metadata =
+      input.options.metadata &&
+      typeof input.options.metadata === "object" &&
+      !Array.isArray(input.options.metadata)
+        ? { ...(input.options.metadata as Record<string, unknown>) }
+        : {};
+    // Never copy a caller-supplied marker from arbitrary proposal metadata. Only
+    // a trusted application may attach the durable replay identity.
+    delete metadata[CANONICAL_MUTATION_KEY];
+    if (input.applicationKey)
+      metadata[CANONICAL_MUTATION_KEY] = input.applicationKey;
+    // Omit the original metadata before spreading. Otherwise an empty sanitized
+    // object would skip the conditional below and revive a forged marker through
+    // `...input.options`.
+    const { metadata: _untrustedMetadata, ...optionsWithoutMetadata } =
+      input.options;
+    const goal = await deps.create(input.title, input.cwd, {
+      ...optionsWithoutMetadata,
+      ...(Object.keys(metadata).length > 0 ? { metadata } : {}),
+    });
+    if (input.projectId) {
+      deps.update(goal.id, { projectId: input.projectId });
+      (goal as T & { projectId?: string }).projectId = input.projectId;
+    }
+    if (input.reattemptOf) {
+      deps.update(goal.id, { reattemptOf: input.reattemptOf });
+      (goal as T & { reattemptOf?: string }).reattemptOf = input.reattemptOf;
+    }
+    deps.update(goal.id, { autoStartTeam: input.autoStartTeam });
+    (goal as T & { autoStartTeam?: boolean }).autoStartTeam =
+      input.autoStartTeam;
+    if (goal.workflow)
+      deps.initGates(
+        goal.id,
+        goal.workflow.gates.map((gate) => gate.id),
+      );
+    await deps.flush();
+    // The HTTP route publishes the creation response before its historical
+    // fire-and-forget setup/start work. Deferring retains that observable order
+    // while proposal callers still share the exact same lifecycle hook.
+    queueMicrotask(() => {
+      Promise.resolve()
+        .then(() => deps.afterCreate(goal))
+        .catch((error) => {
+          // Lifecycle scheduling must never surface as an unhandled microtask.
+          deps.onAfterCreateError?.(error, goal);
+        });
+    });
+    return { goal, replayed: false };
+  } finally {
+    finishApplication?.();
+    if (
+      input.applicationKey &&
+      applicationCompletion &&
+      inFlightGoalApplications.get(input.applicationKey) ===
+        applicationCompletion
+    ) {
+      inFlightGoalApplications.delete(input.applicationKey);
+    }
+  }
 }
 
 export type CanonicalProjectMode = "register" | "update" | "promote";

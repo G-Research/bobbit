@@ -5,6 +5,7 @@ import path from "node:path";
 import { ProjectRegistry } from "../../src/server/agent/project-registry.js";
 import {
 	CANONICAL_MUTATION_KEY,
+	applyCanonicalGoalProposal,
 	createCanonicalGoal,
 	mutateCanonicalProject,
 } from "../../src/server/proposals/canonical-mutations.js";
@@ -31,9 +32,11 @@ test("canonical goal stamps a server key, overrides caller metadata, and replays
 		applicationKey: "server-key-1",
 		options: { metadata: { [CANONICAL_MUTATION_KEY]: "caller-key", "example.keep": true } },
 	};
-	const first = await createCanonicalGoal(input, deps);
+	const [first, replay] = await Promise.all([
+		createCanonicalGoal(input, deps),
+		createCanonicalGoal(input, deps),
+	]);
 	await Promise.resolve();
-	const replay = await createCanonicalGoal(input, deps);
 	expect(first.replayed).toBe(false);
 	expect(replay.replayed).toBe(true);
 	expect(goals).toHaveLength(1);
@@ -47,6 +50,48 @@ test("canonical goal stamps a server key, overrides caller metadata, and replays
 		options: { metadata: { [CANONICAL_MUTATION_KEY]: "forged" } },
 	}, deps);
 	expect(unkeyed.goal.metadata).toBeUndefined();
+});
+
+test("canonical proposal resolves registered workflow, inline roles, and optional steps before persisting", async () => {
+	const goals: any[] = [];
+	const gates: string[][] = [];
+	let received: any;
+	const workflow = { id: "registered", name: "Registered", description: "", gates: [{ id: "design", name: "Design", dependsOn: [], verify: [{ name: "lint", type: "command" as const, run: "echo lint", optional: true, optionalLabel: "Lint" }] }], createdAt: 1, updatedAt: 1 };
+	const workflowStore = { get: (id: string) => id === workflow.id ? workflow : undefined, getAll: () => [workflow], put: () => undefined };
+	const context: any = {
+		goalManager: {
+			getGoal: () => undefined,
+			listGoals: () => goals,
+			createGoal: async (_title: string, _cwd: string, options: any) => {
+				received = options;
+				const goal = { id: "proposal-goal", workflow: options.resolvedWorkflow, metadata: options.metadata };
+				goals.push(goal);
+				return goal;
+			},
+			updateGoal: () => undefined,
+			getGoalStore: () => ({ flush: async () => undefined }),
+		},
+		gateStore: { initGatesForGoal: (_id: string, ids: string[]) => gates.push(ids), flush: async () => undefined },
+		workflowStore,
+		projectConfigStore: { getComponents: () => [] },
+	};
+	const result = await applyCanonicalGoalProposal({
+		title: "Proposal", projectId: "project", cwd: "/project", workflowId: "registered",
+		enabledOptionalSteps: ["lint"], inlineRoles: { reviewer: { name: "reviewer", label: "Reviewer", promptTemplate: "Review", accessory: "none", createdAt: 1, updatedAt: 1 } },
+	}, {
+		resolveProject: () => ({ id: "project", name: "Project", rootPath: "/project" }),
+		validateCwd: () => undefined,
+		getContext: () => context,
+		findGoalAcrossProjects: () => undefined,
+		getNestingPrefs: () => ({ subgoalsEnabled: false, maxNestingDepth: 3 }),
+		findCascadeWorkflow: () => workflow,
+		afterCreate: () => undefined,
+	});
+	await Promise.resolve();
+	expect(result.replayed).toBe(false);
+	expect(received).toMatchObject({ workflowId: "registered", enabledOptionalSteps: ["lint"] });
+	expect(received.inlineRoles.reviewer.name).toBe("reviewer");
+	expect(gates).toEqual([["design"]]);
 });
 
 test("canonical goal rejects invalid creation input before persistence", async () => {
