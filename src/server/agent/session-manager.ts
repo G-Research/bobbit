@@ -3763,6 +3763,9 @@ export class SessionManager {
 						], { timeout: 5_000 });
 						worktreeOk = true;
 					} catch {
+						// A live adopted goal owns the promoted source's exact workspace.
+						// Container recovery may inspect it, but cannot repair or replace it.
+						this.assertPromotedSessionRecoveryAllowed(session.id, "repair or recreate its sandbox worktree");
 						// Try git worktree repair first
 						try {
 							await this.commandRunner.execFile("docker", [
@@ -3966,6 +3969,35 @@ export class SessionManager {
 	): void {
 		const reason = this.promotedSessionLifecycleGuard?.(sessionId, action);
 		if (reason) throw new PromotedSessionLifecycleConflictError(sessionId, reason);
+	}
+
+	/**
+	 * Recovery may inspect a promoted source, but it must not mutate its workspace
+	 * or archive its durable record while the adopted goal remains live. The goal
+	 * archive flow publishes goal archival first, so the canonical guard permits
+	 * its later ordered source teardown without a separate bypass.
+	 */
+	private assertPromotedSessionRecoveryAllowed(sessionId: string, operation: string): void {
+		try {
+			this.assertPromotedSessionLifecycleAllowed(sessionId, "archive");
+		} catch (error) {
+			if (error instanceof PromotedSessionLifecycleConflictError) {
+				console.warn(`[session-manager] Preserving promoted source ${sessionId}; recovery cannot ${operation} while its adopted goal is live`);
+			}
+			throw error;
+		}
+	}
+
+	/** Keep an unrecoverable promoted source dormant instead of archiving it. */
+	private preservePromotedSessionAfterRecoveryFailure(ps: PersistedSession, operation: string): boolean {
+		try {
+			this.assertPromotedSessionRecoveryAllowed(ps.id, operation);
+			return false;
+		} catch (error) {
+			if (!(error instanceof PromotedSessionLifecycleConflictError)) throw error;
+			if (!this.sessions.has(ps.id)) this.addPromotedRecoveryDormant(ps, error.message);
+			return true;
+		}
 	}
 
 	setExtensionChannelServices(services: ExtensionChannelServices | undefined): void {
@@ -10232,6 +10264,7 @@ export class SessionManager {
 		const delegateSurvivors: PersistedSession[] = [];
 		for (const ps of delegates) {
 			if (!ps.agentSessionFile) {
+				if (this.preservePromotedSessionAfterRecoveryFailure(ps, "archive its missing-transcript record")) continue;
 				try { this.getSessionStore(ps.projectId).archive(ps.id); } catch { /* project gone */ }
 				continue;
 			}
@@ -10247,6 +10280,7 @@ export class SessionManager {
 			});
 			if (reap.reap) {
 				console.log(`[session-manager] Reaping orphaned delegate child ${ps.id} on boot — ${reap.reason}`);
+				if (this.preservePromotedSessionAfterRecoveryFailure(ps, "archive its orphaned delegate record")) continue;
 				try { this.getSessionStore(ps.projectId).archive(ps.id); } catch { /* project gone */ }
 				continue;
 			}
@@ -10305,6 +10339,7 @@ export class SessionManager {
 				const reason = !dirExists ? "directory missing" : ".git metadata missing";
 				console.log(`[session-manager] Recovering worktree for "${ps.title}" (${ps.id}): ${reason}, branch: ${ps.branch}`);
 				try {
+					this.assertPromotedSessionRecoveryAllowed(ps.id, "repair or recreate its host worktree");
 					const { recoverWorktree } = await import("../skills/git.js");
 					const recovered = await recoverWorktree(ps.repoPath, ps.branch, ps.worktreePath, this.commandRunner, this.remoteGitPolicy);
 					if (recovered) {
@@ -10447,6 +10482,7 @@ export class SessionManager {
 			});
 			if (decision.reap) {
 				console.log(`[session-manager] Reaping ${ps.childKind} child ${ps.id} on boot — ${decision.reason}`);
+				if (this.preservePromotedSessionAfterRecoveryFailure(ps, "archive its orphaned child record")) return;
 				sessionStore.archive(ps.id);
 				return;
 			}
@@ -10475,6 +10511,7 @@ export class SessionManager {
 				} else {
 					console.log(`[session-manager] Archiving ${ps.id} — no agent session file (metadata preserved)`);
 				}
+				if (this.preservePromotedSessionAfterRecoveryFailure(ps, "archive its missing-transcript record")) return;
 				sessionStore.archive(ps.id);
 				return;
 			}
@@ -10507,6 +10544,7 @@ export class SessionManager {
 				return;
 			} else {
 				console.log(`[session-manager] Archiving ${ps.id} — agent session file not found: ${ps.agentSessionFile} (metadata preserved)`);
+				if (this.preservePromotedSessionAfterRecoveryFailure(ps, "archive its missing-transcript record")) return;
 				sessionStore.archive(ps.id);
 				return;
 			}
@@ -10544,7 +10582,11 @@ export class SessionManager {
 		} catch (err) {
 			const msg = err instanceof Error ? (err.stack || err.message) : String(err);
 			console.error(`[session-manager] Failed to restore "${ps.title}" (${ps.id}), will retry next restart:`, err);
-			this.addDormantSession(ps, msg);
+			if (err instanceof PromotedSessionLifecycleConflictError) {
+				this.addPromotedRecoveryDormant(ps, msg);
+			} else {
+				this.addDormantSession(ps, msg);
+			}
 		}
 	}
 
@@ -10597,6 +10639,25 @@ export class SessionManager {
 				inFlightSteerTexts: reconciled.inFlightSteerTexts,
 			},
 		};
+	}
+
+	private addPromotedRecoveryDormant(ps: PersistedSession, restoreError: string): void {
+		this.addDormantSession(ps, restoreError);
+		const dormant = this.sessions.get(ps.id);
+		if (!dormant) return;
+		// Preserve the canonical adopted workspace projection while recovery is
+		// quarantined. The durable record remains untouched and owns these values.
+		dormant.repoPath = ps.repoPath;
+		dormant.branch = ps.branch;
+		dormant.worktreePath = ps.worktreePath;
+		dormant.repoWorktrees = ps.repoWorktrees && ps.repoPath
+			? Object.entries(ps.repoWorktrees).map(([repo, worktreePath]) => ({
+				repo,
+				repoPath: repo === "." ? ps.repoPath! : path.join(ps.repoPath!, repo),
+				worktreePath,
+			}))
+			: undefined;
+		dormant.sandboxed = ps.sandboxed;
 	}
 
 	private addDormantSession(
@@ -10782,6 +10843,9 @@ export class SessionManager {
 				if ((ps as any)._preserveSandboxRealm) {
 					throw new Error(`Cannot respawn sandboxed session ${ps.id}: sandbox realm is unavailable`);
 				}
+				// An adopted source's sandbox realm is part of its canonical workspace.
+				// A transient restore outage must not silently transfer it to the host.
+				this.assertPromotedSessionRecoveryAllowed(ps.id, "downgrade its unavailable sandbox realm");
 				ps.sandboxed = false;
 				this.resolveStoreForSession(ps.id).update(ps.id, { sandboxed: false });
 				this.applyScopedGatewayCredentials(bridgeOptions, ps.id, ps.projectId, ps.goalId ?? ps.teamGoalId);
@@ -10804,6 +10868,7 @@ export class SessionManager {
 					console.log(`[session-manager] Sandbox worktree verified for ${ps.id}: ${ps.cwd}`);
 				} catch {
 					console.warn(`[session-manager] Sandbox worktree MISSING for ${ps.id}: ${ps.cwd} — attempting recovery`);
+					this.assertPromotedSessionRecoveryAllowed(ps.id, "repair or recreate its sandbox worktree");
 					let recovered = false;
 
 					// Try git worktree repair first — handles broken .git link files after hard container kill
@@ -10850,6 +10915,7 @@ export class SessionManager {
 							return;
 						}
 						console.warn(`[session-manager] Archiving session ${ps.id} — sandbox worktree unrecoverable`);
+						if (this.preservePromotedSessionAfterRecoveryFailure(ps, "archive its unrecoverable sandbox record")) return;
 						try { this.getSessionStore(ps.projectId).archive(ps.id); } catch { /* best-effort */ }
 						return; // Skip restoring this session
 					}
@@ -14589,6 +14655,9 @@ export class SessionManager {
 	 * case.
 	 */
 	private async archiveWithCascade(id: string, store?: SessionStore): Promise<boolean> {
+		// Defense in depth for internal recovery and maintenance callers. Ordered
+		// goal archival has already made the canonical guard return undefined here.
+		this.assertPromotedSessionRecoveryAllowed(id, "archive its session record");
 		await this.cascadeReapOwner(id);
 		// Extension Platform G1.4: notify lifecycle providers the session is
 		// shutting down. Best-effort and bounded by the hub's per-provider
@@ -14621,8 +14690,10 @@ export class SessionManager {
 		try { return await target.archiveAsync(id); } catch { return false; }
 	}
 
-	async terminateSession(id: string, opts?: { allowPromotedGoalLifecycle?: boolean }): Promise<boolean> {
-		if (!opts?.allowPromotedGoalLifecycle) this.assertPromotedSessionLifecycleAllowed(id, "archive");
+	async terminateSession(id: string, _opts?: { allowPromotedGoalLifecycle?: boolean }): Promise<boolean> {
+		// Legacy callers may still pass the old option, but canonical goal state —
+		// never a caller boolean — is the only authority for promoted teardown.
+		this.assertPromotedSessionLifecycleAllowed(id, "archive");
 		const persisted = this.getPersistedSession(id);
 		const live = this.sessions.get(id);
 		const lifecycleOwnerId = (live?.sandboxed || persisted?.sandboxed)
@@ -14878,8 +14949,9 @@ export class SessionManager {
 	 * Routes through the runtime archive seam (§6) so a dormant parent's live
 	 * children are cascade-reaped before it is archived.
 	 */
-	async storeArchive(id: string, opts?: { allowPromotedGoalLifecycle?: boolean }): Promise<boolean> {
-		if (!opts?.allowPromotedGoalLifecycle) this.assertPromotedSessionLifecycleAllowed(id, "archive");
+	async storeArchive(id: string, _opts?: { allowPromotedGoalLifecycle?: boolean }): Promise<boolean> {
+		// Preserve the legacy call shape without preserving its authority bypass.
+		this.assertPromotedSessionLifecycleAllowed(id, "archive");
 		const persisted = this.getPersistedSession(id);
 		const lifecycleOwnerId = persisted?.sandboxed
 			? (persisted.borrowsWorktree

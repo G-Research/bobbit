@@ -161,6 +161,7 @@ function fixture(name: string, overrides: Record<string, unknown> = {}): {
 	const store = {
 		get: vi.fn(() => persisted),
 		getLive: vi.fn(() => [persisted]),
+		getAll: vi.fn(() => [persisted]),
 		update: vi.fn((_id: string, patch: Record<string, unknown>) => {
 			updates.push({ ...patch });
 			Object.assign(persisted, patch);
@@ -375,16 +376,258 @@ describe("SessionManager current-session runtime promotion", () => {
 		expect(replacement.stop).toHaveBeenCalledTimes(1);
 	});
 
-	it("blocks direct archive and purge through the ownership guard while allowing ordered goal teardown", async () => {
+	it("keeps a promoted source dormant and byte-stable when its transcript cannot be recovered", async () => {
+		const fx = fixture("promotion-missing-transcript", {
+			agentSessionFile: undefined,
+			goalId: "goal-promoted",
+			teamGoalId: "goal-promoted",
+			role: "team-lead",
+			accessory: "crown",
+			sandboxed: true,
+		});
+		fx.manager.sessions.clear();
+		fx.manager.recoverSessionFile = vi.fn(() => null);
+		fx.manager.setPromotedSessionLifecycleGuard((sessionId: string) =>
+			sessionId === fx.persisted.id ? "live adopted goal still owns source" : undefined);
+		const before = structuredClone(fx.persisted);
+
+		await fx.manager.restoreOneSession(fx.persisted);
+		await fx.manager.restoreOneSession(fx.persisted);
+
+		expect(fx.store.archive).not.toHaveBeenCalled();
+		expect(fx.store.archiveAsync).not.toHaveBeenCalled();
+		expect(fx.persisted).toEqual(before);
+		expect(fx.manager.getSession(fx.persisted.id)).toMatchObject({
+			id: fx.persisted.id,
+			dormant: true,
+			goalId: "goal-promoted",
+			teamGoalId: "goal-promoted",
+			role: "team-lead",
+			cwd: before.cwd,
+			worktreePath: before.worktreePath,
+			repoPath: before.repoPath,
+			branch: before.branch,
+			sandboxed: true,
+		});
+		expect(fx.manager.getSession(fx.persisted.id).repoWorktrees).toEqual(fx.live.repoWorktrees);
+	});
+
+	it("retains a promoted sandbox source when its recorded transcript file is missing", async () => {
+		const fx = fixture("promotion-missing-transcript-file", {
+			agentSessionFile: "/home/node/.bobbit/agent/sessions/promotion-missing.jsonl",
+			goalId: "goal-promoted",
+			teamGoalId: "goal-promoted",
+			role: "team-lead",
+			sandboxed: true,
+		});
+		fx.manager.sessions.clear();
+		fx.manager.setPromotedSessionLifecycleGuard((sessionId: string) =>
+			sessionId === fx.persisted.id ? "live adopted goal still owns source" : undefined);
+		const sandboxExec = vi.fn(async (args: string[]) => {
+			if (args[0] === "test") throw new Error("transcript missing");
+		});
+		fx.manager.sandboxManager = { get: vi.fn(() => ({ exec: sandboxExec })) };
+		const before = structuredClone(fx.persisted);
+
+		await fx.manager.restoreOneSession(fx.persisted);
+
+		expect(sandboxExec).toHaveBeenCalledTimes(2);
+		expect(fx.store.archive).not.toHaveBeenCalled();
+		expect(fx.persisted).toEqual(before);
+		expect(fx.manager.getSession(fx.persisted.id)).toMatchObject({
+			dormant: true,
+			goalId: "goal-promoted",
+			teamGoalId: "goal-promoted",
+			worktreePath: before.worktreePath,
+			repoPath: before.repoPath,
+			branch: before.branch,
+			sandboxed: true,
+		});
+	});
+
+	it("fails closed before promoted sandbox worktree repair or recreation on repeated restore", async () => {
+		const fx = fixture("promotion-missing-sandbox-worktree", {
+			goalId: "goal-promoted",
+			teamGoalId: "goal-promoted",
+			role: "team-lead",
+			accessory: "crown",
+			sandboxed: true,
+			cwd: "/workspace-wt/session/promotion-missing-sandbox-worktree",
+			worktreePath: "/workspace-wt/session/promotion-missing-sandbox-worktree",
+		});
+		fx.manager.sessions.clear();
+		fx.manager.setPromotedSessionLifecycleGuard((sessionId: string) =>
+			sessionId === fx.persisted.id ? "live adopted goal still owns source" : undefined);
+		fx.manager.applySandboxWiring = vi.fn(async (options: any) => {
+			options.containerId = "same-container";
+			options.cwd = fx.persisted.cwd;
+			return true;
+		});
+		const execFile = vi.fn(async (...args: any[]) => {
+			if (args[1]?.includes("test")) throw new Error("worktree missing");
+			throw new Error("repair must not run");
+		});
+		fx.manager.commandRunner = { execFile };
+		const createWorktree = vi.fn(async () => { throw new Error("recreation must not run"); });
+		fx.manager.sandboxManager = { get: vi.fn(() => ({ createWorktree })) };
+		const before = structuredClone(fx.persisted);
+
+		await expect(fx.manager.restoreSession(fx.persisted)).rejects.toBeInstanceOf(PromotedSessionLifecycleConflictError);
+		await expect(fx.manager.restoreSession(fx.persisted)).rejects.toBeInstanceOf(PromotedSessionLifecycleConflictError);
+
+		expect(execFile).toHaveBeenCalledTimes(2);
+		for (const call of execFile.mock.calls) expect(call[1]).not.toContain("repair");
+		expect(createWorktree).not.toHaveBeenCalled();
+		expect(fx.store.archive).not.toHaveBeenCalled();
+		expect(fx.store.archiveAsync).not.toHaveBeenCalled();
+		expect(fx.persisted).toEqual(before);
+	});
+
+	it("quarantines a promoted source instead of downgrading an unavailable sandbox realm", async () => {
+		const fx = fixture("promotion-sandbox-unavailable", {
+			goalId: "goal-promoted",
+			teamGoalId: "goal-promoted",
+			role: "team-lead",
+			sandboxed: true,
+			cwd: "/workspace-wt/session/promotion-sandbox-unavailable",
+			worktreePath: "/workspace-wt/session/promotion-sandbox-unavailable",
+		});
+		fx.manager.sessions.clear();
+		fx.manager.setPromotedSessionLifecycleGuard((sessionId: string) =>
+			sessionId === fx.persisted.id ? "live adopted goal still owns source" : undefined);
+		fx.manager.applySandboxWiring = vi.fn(async () => false);
+		const before = structuredClone(fx.persisted);
+
+		await fx.manager.restoreOneSession(fx.persisted);
+
+		expect(fx.store.updates).not.toContainEqual({ sandboxed: false });
+		expect(fx.persisted).toEqual(before);
+		expect(fx.manager.getSession(fx.persisted.id)).toMatchObject({
+			dormant: true,
+			sandboxed: true,
+			goalId: "goal-promoted",
+			teamGoalId: "goal-promoted",
+			cwd: before.cwd,
+			worktreePath: before.worktreePath,
+		});
+	});
+
+	it("does not repair, recreate, archive, or terminate a live promoted source during container recovery", async () => {
+		const fx = fixture("promotion-live-container-recovery", {
+			goalId: "goal-promoted",
+			teamGoalId: "goal-promoted",
+			role: "team-lead",
+			sandboxed: true,
+			cwd: "/workspace-wt/session/promotion-live-container-recovery",
+			worktreePath: "/workspace-wt/session/promotion-live-container-recovery",
+		});
+		fx.live.cwd = fx.persisted.cwd;
+		fx.live.worktreePath = fx.persisted.worktreePath;
+		fx.live.sandboxed = true;
+		fx.manager.setPromotedSessionLifecycleGuard((sessionId: string) =>
+			sessionId === fx.persisted.id ? "live adopted goal still owns source" : undefined);
+		const execFile = vi.fn(async (..._args: any[]) => { throw new Error("worktree missing"); });
+		fx.manager.commandRunner = { execFile };
+		const createWorktree = vi.fn();
+		fx.manager.sandboxManager = { get: vi.fn(() => ({ createWorktree })) };
+
+		await fx.manager.recoverSandboxSessions(fx.persisted.projectId, "replacement-container-id");
+
+		expect(execFile).toHaveBeenCalledTimes(1);
+		expect(execFile.mock.calls[0][1]).not.toContain("repair");
+		expect(createWorktree).not.toHaveBeenCalled();
+		expect(fx.store.archive).not.toHaveBeenCalled();
+		expect(fx.store.archiveAsync).not.toHaveBeenCalled();
+		expect(fx.manager.getSession(fx.persisted.id)).toBe(fx.live);
+		expect(fx.live.status).toBe("idle");
+	});
+
+	it("does not run boot host recovery against any promoted multi-repo workspace", async () => {
+		const fx = fixture("promotion-host-recovery", {
+			goalId: "goal-promoted",
+			teamGoalId: "goal-promoted",
+			role: "team-lead",
+			sandboxed: false,
+		});
+		fx.manager.sessions.clear();
+		fx.manager.restoreOneSession = vi.fn(async () => {});
+		fx.manager.setPromotedSessionLifecycleGuard((sessionId: string) =>
+			sessionId === fx.persisted.id ? "live adopted goal still owns source" : undefined);
+		const execFile = vi.fn(async () => { throw new Error("host git must not run"); });
+		fx.manager.commandRunner = { execFile };
+		const before = structuredClone(fx.persisted);
+
+		await fx.manager.restoreSessions();
+
+		expect(fx.manager.restoreOneSession).toHaveBeenCalledTimes(1);
+		expect(execFile).not.toHaveBeenCalled();
+		expect(fx.store.archive).not.toHaveBeenCalled();
+		expect(fx.persisted).toEqual(before);
+		expect(fx.persisted.repoWorktrees).toEqual(before.repoWorktrees);
+	});
+
+	it("preserves ordinary missing-transcript archival and sandbox worktree recovery behavior", async () => {
+		const missingTranscript = fixture("ordinary-missing-transcript", { agentSessionFile: undefined });
+		missingTranscript.manager.sessions.clear();
+		missingTranscript.manager.recoverSessionFile = vi.fn(() => null);
+		await missingTranscript.manager.restoreOneSession(missingTranscript.persisted);
+		expect(missingTranscript.store.archive).toHaveBeenCalledWith(missingTranscript.persisted.id);
+
+		const sandbox = fixture("ordinary-missing-sandbox-worktree", {
+			sandboxed: true,
+			cwd: "/workspace-wt/session/ordinary-missing-sandbox-worktree",
+			worktreePath: "/workspace-wt/session/ordinary-missing-sandbox-worktree",
+		});
+		sandbox.manager.sessions.clear();
+		sandbox.manager.applySandboxWiring = vi.fn(async (options: any) => {
+			options.containerId = "ordinary-container";
+			return true;
+		});
+		const execFile = vi.fn(async () => { throw new Error("missing or unrepaired"); });
+		sandbox.manager.commandRunner = { execFile };
+		const createWorktree = vi.fn(async () => { throw new Error("recreation failed"); });
+		sandbox.manager.sandboxManager = { get: vi.fn(() => ({ createWorktree })) };
+
+		await sandbox.manager.restoreSession(sandbox.persisted);
+
+		expect(execFile.mock.calls.some((call: any[]) => call[1]?.includes("repair"))).toBe(true);
+		expect(createWorktree).toHaveBeenCalledTimes(1);
+		expect(sandbox.store.archive).toHaveBeenCalledWith(sandbox.persisted.id);
+
+		const unavailable = fixture("ordinary-sandbox-unavailable", {
+			sandboxed: true,
+			cwd: "/workspace-wt/session/ordinary-sandbox-unavailable",
+			worktreePath: "/workspace-wt/session/ordinary-sandbox-unavailable",
+		});
+		unavailable.manager.sessions.clear();
+		unavailable.manager.applySandboxWiring = vi.fn(async () => false);
+		registerRpcBridgeFactory(() => bridge());
+		await unavailable.manager.restoreSession(unavailable.persisted);
+		expect(unavailable.persisted.sandboxed).toBe(false);
+		expect(unavailable.store.updates).toContainEqual({ sandboxed: false });
+	});
+
+	it("guards archiveWithCascade before child teardown and allows ordered goal archival", async () => {
 		const fx = fixture("promotion-lifecycle-guard");
+		let goalArchived = false;
 		fx.manager.setPromotedSessionLifecycleGuard((sessionId: string, action: string) =>
-			sessionId === fx.live.id ? `live promoted goal owns ${action}` : undefined);
+			sessionId === fx.live.id && !goalArchived ? `live promoted goal owns ${action}` : undefined);
+		fx.manager.cascadeReapOwner = vi.fn(async () => {});
 
 		await expect(fx.manager.storeArchive(fx.live.id)).rejects.toBeInstanceOf(PromotedSessionLifecycleConflictError);
+		await expect(fx.manager.storeArchive(fx.live.id, { allowPromotedGoalLifecycle: true }))
+			.rejects.toBeInstanceOf(PromotedSessionLifecycleConflictError);
+		await expect(fx.manager.terminateSession(fx.live.id, { allowPromotedGoalLifecycle: true }))
+			.rejects.toBeInstanceOf(PromotedSessionLifecycleConflictError);
+		await expect(fx.manager.archiveWithCascade(fx.live.id, fx.store)).rejects.toBeInstanceOf(PromotedSessionLifecycleConflictError);
+		expect(fx.manager.cascadeReapOwner).not.toHaveBeenCalled();
 		expect(fx.manager.getSession(fx.live.id)).toBe(fx.live);
 		expect(fx.persisted.archived).toBeUndefined();
 
-		await expect(fx.manager.storeArchive(fx.live.id, { allowPromotedGoalLifecycle: true })).resolves.toBe(true);
+		// The ordered goal endpoint durably archives the goal before team/source teardown.
+		goalArchived = true;
+		await expect(fx.manager.storeArchive(fx.live.id)).resolves.toBe(true);
+		expect(fx.manager.cascadeReapOwner).toHaveBeenCalledTimes(1);
 		expect(fx.persisted.archived).toBe(true);
 	});
 });
