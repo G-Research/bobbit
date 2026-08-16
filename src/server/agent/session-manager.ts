@@ -13841,7 +13841,7 @@ export class SessionManager {
 		}
 		if (!coordinator && session) broadcastStatus(session, "starting");
 		return this._coordinateSessionReplacement(id, "assign-role", (token) =>
-			this._assignRoleStaged(id, role, token), { drainOnRelease: true, cancelOnTerminal: () => false });
+			this._assignRoleStaged(id, role, undefined, token), { drainOnRelease: true, cancelOnTerminal: () => false });
 	}
 
 	/**
@@ -13878,7 +13878,7 @@ export class SessionManager {
 		};
 		if (!coordinator && session) broadcastStatus(session, "starting");
 		const promoted = await this._coordinateSessionReplacement(id, "promote-goal-lead", (token) =>
-			this._assignRoleStaged(id, role, token, projection), {
+			this._assignRoleStaged(id, role, projection, token), {
 				drainOnRelease: true,
 				cancelOnTerminal: () => { throw new Error(`Session ${id} promotion was cancelled by termination`); },
 			});
@@ -13924,8 +13924,8 @@ export class SessionManager {
 	private async _assignRoleStaged(
 		id: string,
 		role: { name: string; promptTemplate: string; accessory: string },
+		projection: SessionRoleReplacementProjection | undefined,
 		token: SessionReplacementToken,
-		projection?: SessionRoleReplacementProjection,
 	): Promise<boolean> {
 		const session = this.sessions.get(id);
 		if (!session) return false;
@@ -14280,8 +14280,11 @@ export class SessionManager {
 		}
 		session.goalId = replacementSession.goalId;
 		session.teamGoalId = replacementSession.teamGoalId;
-		session.role = replacementSession.role ?? role.name;
-		session.accessory = replacementSession.accessory ?? role.accessory;
+		// Ordinary assignment must replace the prior role rather than reading it
+		// back from replacementSession (which aliases the original session). Only
+		// promotion supplies graph metadata as an explicit prospective projection.
+		session.role = projection?.role ?? role.name;
+		session.accessory = projection?.accessory ?? role.accessory;
 		session.allowedTools = effectiveAllowedNames;
 		if (verifiedReplacementTuple) {
 			this.persistSessionModel(
