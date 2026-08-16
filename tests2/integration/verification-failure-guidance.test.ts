@@ -10,7 +10,6 @@ import { buildVerificationFailureMessage } from "../../src/server/agent/notify-t
 import { VerificationHarness } from "../../src/server/agent/verification-harness.js";
 import type { Workflow, WorkflowGate } from "../../src/server/agent/workflow-store.js";
 import { createFakeVerificationCommandRunner } from "../harness/fake-verification-command-runner.js";
-import { InjectedPinnedCheckoutManager } from "./helpers/injected-pinned-checkout.js";
 
 const GATE_ID = "implementation";
 const START_TIME = 1_700_000_000_000;
@@ -57,7 +56,6 @@ async function runFailureNotification(options: {
 	projectConfigStore?: unknown;
 }): Promise<{ message: string; persistedGuidance: string | undefined }> {
 	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "failure-guidance-integration-"));
-	const pinnedCheckoutManager = new InjectedPinnedCheckoutManager();
 	let initialGoalStore: GoalStore | undefined;
 	let goalStore: GoalStore | undefined;
 	let gateStore: GateStore | undefined;
@@ -112,7 +110,6 @@ async function runFailureNotification(options: {
 			{
 				commandRunner: fakeGitRunner,
 				commandStepRunner: createFakeVerificationCommandRunner(),
-				pinnedCheckoutManager: pinnedCheckoutManager as any,
 			},
 		);
 		const notifications: string[] = [];
@@ -136,7 +133,6 @@ async function runFailureNotification(options: {
 		expect(notifications).toHaveLength(1);
 		return { message: notifications[0], persistedGuidance };
 	} finally {
-		pinnedCheckoutManager.dispose();
 		await Promise.allSettled([initialGoalStore, goalStore, gateStore]
 			.filter((store): store is GoalStore | GateStore => store !== undefined)
 			.map(store => store.close()));
