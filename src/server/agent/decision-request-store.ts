@@ -293,6 +293,11 @@ export class DecisionRequestStore {
 		return this.list().filter(request => request.status === "pending" && request.delivery.kind === "project-import" && request.delivery.importId === importId);
 	}
 
+	/** Claimed imports are intentionally visible to boot recovery without any UI/list route. */
+	listApplyingImportProposals(importId: string): StoredDecisionRequest[] {
+		return this.list().filter(request => request.delivery.kind === "project-import" && request.delivery.importId === importId && request.proposal?.status === "applying");
+	}
+
 	getImportRun(id: string): StoredProjectImportRun | undefined {
 		const run = this.state.importRuns[id];
 		return run ? clone(run) : undefined;

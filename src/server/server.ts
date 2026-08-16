@@ -2770,6 +2770,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	let toolResultFilterDispatcher!: ToolResultFilterDispatcher;
 	let decisionRequestManager!: DecisionRequestManager;
 	let projectImportDecisionCoordinator!: ProjectImportDecisionCoordinator;
+	let projectImportProposalApplicationService!: ProjectImportProposalApplicationService;
 	let projectImportStartupReplay: Promise<void> | undefined;
 	let extensionChannelServices: ExtensionChannelServices | undefined;
 	let extensionChannelServicesInit: Promise<ExtensionChannelServices | undefined> | undefined;
@@ -3644,6 +3645,33 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		thinkingConsumer: advisoryThinkingConsumer,
 	});
 	sessionManager.lifecycleHub?.setDecisionDispatcher(decisionHookDispatcher);
+	// One gateway-owned composition is shared by HTTP acceptance and boot replay.
+	// It receives only project-owned stores and the public canonical mutations.
+	projectImportProposalApplicationService = new ProjectImportProposalApplicationService({
+		goal: async (fields, application) => {
+			const project = projectRegistry.get(application.projectId);
+			if (!project) throw new CanonicalMutationError(404, "Project not found");
+			const result = await applyCanonicalGoalProposal({ ...fields, projectId: application.projectId }, {
+				resolveProject: () => ({ id: project.id, name: project.name, rootPath: project.rootPath }),
+				validateCwd: (_id, cwd) => { const check = validateExecutionCwd(projectRegistry, projectContextManager, project.id, cwd, { kind: "user-input" }); if (!check.ok) throw new CanonicalMutationError(check.status, check.error, check.code); },
+				getContext: id => projectContextManager.getOrCreate(id) ?? undefined,
+				findGoalAcrossProjects: id => projectContextManager.getContextForGoal(id)?.goalManager.getGoal(id),
+				getNestingPrefs: () => readSubgoalNestingPrefs(key => preferencesStore.get(key)),
+				findCascadeWorkflow: (id, workflowId) => configCascade.resolveWorkflows(id).find(row => row.item.id === workflowId)?.item,
+				afterCreate: () => {}, applicationKey: application.applicationKey,
+			});
+			return { outcome: { goalId: result.goal.id } };
+		},
+		project: async (fields, application) => {
+			const result = await applyCanonicalProjectProposal({ mode: "update", projectId: application.projectId, name: fields.name, rootPath: fields.root_path ?? fields.rootPath, components: fields.components, workflows: fields.workflows, config: fields.config, configDirectories: fields.configDirectories ?? fields.config_directories, sandboxTokens: fields.sandboxTokens ?? fields.sandbox_tokens, applicationKey: application.applicationKey }, {
+				findByApplicationKey: key => projectRegistry.list().find(candidate => candidate.canonicalMutationKey === key), register: () => { throw new Error("Register unavailable"); }, get: id => projectRegistry.get(id), update: (id, updates) => projectRegistry.update(id, updates as Parameters<typeof projectRegistry.update>[1]), promote: (id, updates) => projectRegistry.promote(id, updates), removeRegistered: item => projectRegistry.remove(item.id), removeContext: id => projectContextManager.remove(id), openContext: async id => { const ctx = projectContextManager.getOrCreate(id); return ctx ? { projectConfigStore: ctx.projectConfigStore, secretsStore: ctx.secretsStore } : undefined; }, suspendServices: id => worktreeServices.suspendProject(id), stopServices: id => worktreeServices.stopProject(id), reconcileServices: id => worktreeServices.reconcileProject(id), captureRegistryRecord: id => projectRegistry.captureExactRecord(id), restoreRegistryRecord: (id, snapshot) => projectRegistry.restoreExactRecord(id, snapshot), sameRootPath: (left, right) => path.resolve(left) === path.resolve(right),
+			}); return { outcome: { projectId: result.project.id } };
+		},
+		workflow: async (fields, application) => { const ctx = projectContextManager.getOrCreate(application.projectId); if (!ctx) throw new CanonicalMutationError(404, "Project not found"); const workflow = createCanonicalWorkflow(fields, ctx.workflowStore, ctx.projectConfigStore.getComponents(), application.applicationKey); return { outcome: { workflowId: workflow.id } }; },
+		role: async (fields, application) => { const ctx = projectContextManager.getOrCreate(application.projectId); if (!ctx) throw new CanonicalMutationError(404, "Project not found"); const role = await createCanonicalRole({ ...fields, promptTemplate: fields.prompt }, { scope: "project", store: ctx.roleStore, projectId: application.projectId }, { normalizeThinking: normalizeRoleThinking, validateModel: async () => true, applicationKey: application.applicationKey }); return { outcome: { role: role.name } }; },
+		tool: async (fields, application) => { const ctx = projectContextManager.getOrCreate(application.projectId); if (!ctx) throw new CanonicalMutationError(404, "Project not found"); const result = applyCanonicalToolProposal({ action: fields.action as any, tool: fields.tool as any, content: fields.content as any }, { toolManager: ctx.toolManager }); __resetToolScanCache(); return { outcome: { tool: result.tool, action: result.action } }; },
+		staff: async (fields, application) => { const project = projectRegistry.get(application.projectId); if (!project) throw new CanonicalMutationError(404, "Project not found"); const staff = await createCanonicalStaff({ ...fields, systemPrompt: fields.prompt, roleId: fields.role ?? fields.roleId, projectId: application.projectId }, { applicationKey: application.applicationKey, resolveProject: () => ({ projectId: project.id, rootPath: project.rootPath }), validateCwd: (_id, cwd) => { const check = validateExecutionCwd(projectRegistry, projectContextManager, project.id, cwd, { kind: "user-input" }); if (!check.ok) throw new CanonicalMutationError(check.status, check.error, check.code); }, validateTriggers: value => staffManager.validateTriggers(value as any), validateRole: (roleId, id) => { if (!projectContextManager.getOrCreate(id)?.roleStore.get(roleId)) throw new CanonicalMutationError(404, "Role not found"); }, create: (name, description, prompt, cwd, options) => staffManager.createStaff(name, description, prompt, cwd, sessionManager, options as any), broadcast: () => {} }); return { outcome: { staffId: staff.id } }; },
+	});
 	projectImportDecisionCoordinator = new ProjectImportDecisionCoordinator({
 		registry: projectRegistry,
 		projectContextManager,
@@ -4469,7 +4497,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToProject, broadcastToUi, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, decisionRequestManager, projectImportDecisionCoordinator, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, worktreeServices, extensionSettingsCatalogue, requestMutationDispatcher, toolResultFilterDispatcher, contextTraceStore, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToProject, broadcastToUi, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, decisionRequestManager, projectImportDecisionCoordinator, projectImportProposalApplicationService, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, worktreeServices, extensionSettingsCatalogue, requestMutationDispatcher, toolResultFilterDispatcher, contextTraceStore, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -4987,7 +5015,35 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// decision owner exist. Configuring markers intentionally remain dormant.
 	// This promise is awaited before normal session restoration below; failures
 	// are still contained so a damaged project cannot stop gateway boot.
-	projectImportStartupReplay = projectImportDecisionCoordinator.reconcileAll().catch((err) => {
+	const reconcileApplyingImportProposals = async () => {
+		for (const context of projectContextManager.all()) {
+			const marker = projectRegistry.get(context.project.id)?.importDecisionRun;
+			if (marker?.state !== "ready") continue;
+			// Accepted effects may have finalized just before a crash; cleanup is
+			// idempotent and never re-emits an audit row.
+			for (const record of context.decisionRequestStore.list()) {
+				if (record.delivery.kind !== "project-import" || record.delivery.importId !== marker.id || record.proposal?.status !== "accepted") continue;
+				const draftId = proposalDraftOwnerId({ kind: "project-import", projectId: context.project.id, importId: marker.id, requestId: record.id });
+				await deleteProposalFile(bobbitStateDir(), draftId, record.proposal.type).catch(() => {});
+			}
+			for (const record of context.decisionRequestStore.listApplyingImportProposals(marker.id)) {
+				const application = record.proposal?.status === "applying" ? record.proposal.application : undefined;
+				if (!application || application.projectId !== context.project.id || application.importId !== marker.id || application.requestId !== record.id) continue;
+				try {
+					const result = await projectImportProposalApplicationService.reconcileApplying(bobbitStateDir(), record, application);
+					if (!result || !context.decisionRequestStore.finalizeImportProposal(application, new Date(gatewayDeps.clock.now()).toISOString(), result.outcome)) continue;
+					const draftId = proposalDraftOwnerId({ kind: "project-import", projectId: application.projectId, importId: application.importId, requestId: application.requestId });
+					await deleteProposalFile(bobbitStateDir(), draftId, application.type).catch(() => {});
+					// One durable accepted transition produces one redacted audit row.
+					try { contextTraceStore.appendProjectImportOutcome(application.projectId, application.importId, { kind: "decision", packId: record.asker.packId, hookId: record.asker.hookId, event: "decisionResolved", outcome: "applied", requestId: record.id, questionId: record.questionId, actor: "user" }); } catch {}
+				} catch (error) { console.warn(`[project-import-proposals] applying replay failed project=${context.project.id} request=${record.id}:`, error); }
+			}
+		}
+	};
+	projectImportStartupReplay = Promise.all([
+		projectImportDecisionCoordinator.reconcileAll(),
+		reconcileApplyingImportProposals(),
+	]).then(() => undefined).catch((err) => {
 		console.warn("[project-import-decisions] startup reconciliation failed (non-fatal):", err);
 	});
 	teamManager.setVerificationHarness(verificationHarness);
@@ -5907,6 +5963,7 @@ async function handleApiRoute(
 	inboxManager?: InboxManager,
 	decisionRequestManager?: DecisionRequestManager,
 	projectImportDecisionCoordinator?: ProjectImportDecisionCoordinator,
+	projectImportProposalApplicationService?: ProjectImportProposalApplicationService,
 	marketplaceSourceStore?: MarketplaceSourceStore,
 	marketplaceInstaller?: MarketplaceInstaller,
 	cookieStore?: CookieStore,
@@ -5932,6 +5989,7 @@ async function handleApiRoute(
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
 	const serverRoleStore = roleStore!;
+	const importApplicationService = projectImportProposalApplicationService!;
 	const dispatcher = actionDispatcher!;
 	const remoteState = remoteStateRoutes!;
 	// Slice B3: the route dispatcher + pack-level route registry (always wired by the
@@ -9039,28 +9097,7 @@ async function handleApiRoute(
 		// adopts an applying record after the prior process has exited.
 		if (!claim.claimed) { json({ ok: true, status: "applying" }, 202); return; }
 		try {
-			const service = new ProjectImportProposalApplicationService({
-				goal: async (fields, application) => {
-					const result = await applyCanonicalGoalProposal({ ...fields, projectId }, {
-						resolveProject: () => ({ id: projectId, name: project.name, rootPath: project.rootPath }),
-						validateCwd: (_id, cwd) => { const check = validateExecutionCwd(projectRegistry, projectContextManager, projectId, cwd, { kind: "user-input" }); if (!check.ok) throw new CanonicalMutationError(check.status, check.error, check.code); },
-						getContext: id => projectContextManager.getOrCreate(id) ?? undefined,
-						findGoalAcrossProjects: getGoalAcrossProjects, getNestingPrefs: () => readSubgoalNestingPrefs(key => preferencesStore.get(key)),
-						findCascadeWorkflow: (id, workflowId) => configCascade.resolveWorkflows(id).find(row => row.item.id === workflowId)?.item,
-						afterCreate: () => {}, applicationKey: application.applicationKey,
-					});
-					return { outcome: { goalId: result.goal.id } };
-				},
-				project: async (fields, application) => {
-					const result = await applyCanonicalProjectProposal({ mode: "update", projectId, name: fields.name, rootPath: fields.root_path ?? fields.rootPath, components: fields.components, workflows: fields.workflows, config: fields.config, configDirectories: fields.configDirectories ?? fields.config_directories, sandboxTokens: fields.sandboxTokens ?? fields.sandbox_tokens, applicationKey: application.applicationKey }, {
-						findByApplicationKey: key => projectRegistry.list().find(candidate => candidate.canonicalMutationKey === key), register: () => { throw new Error("Register unavailable"); }, get: id => projectRegistry.get(id), update: (id, updates) => projectRegistry.update(id, updates as Parameters<typeof projectRegistry.update>[1]), promote: (id, updates) => projectRegistry.promote(id, updates), removeRegistered: item => projectRegistry.remove(item.id), removeContext: id => projectContextManager.remove(id), openContext: async id => { const ctx = projectContextManager.getOrCreate(id); return ctx ? { projectConfigStore: ctx.projectConfigStore, secretsStore: ctx.secretsStore } : undefined; }, suspendServices: id => worktreeServices.suspendProject(id), stopServices: id => worktreeServices.stopProject(id), reconcileServices: id => worktreeServices.reconcileProject(id), validateBaseRef: validateCanonicalBaseRef, invalidateSandboxImageRequirements: id => sandboxImageRequirements.invalidateProject(id), captureRegistryRecord: id => projectRegistry.captureExactRecord(id), restoreRegistryRecord: (id, snapshot) => projectRegistry.restoreExactRecord(id, snapshot), sameRootPath: samePath,
-					}); return { outcome: { projectId: result.project.id } };
-				},
-				workflow: async (fields, application) => { const ctx = projectContextManager.getOrCreate(projectId); if (!ctx) throw new CanonicalMutationError(404, "Project not found"); const workflow = createCanonicalWorkflow(fields, ctx.workflowStore, ctx.projectConfigStore.getComponents(), application.applicationKey); return { outcome: { workflowId: workflow.id } }; },
-				role: async (fields, application) => { const target = resolveRoleMutationTarget(projectId); if (!target.ok || target.target.scope !== "project") throw new CanonicalMutationError(409, "Project import proposal target is unavailable", "PROJECT_ID_MISMATCH"); const role = await createCanonicalRole({ ...fields, promptTemplate: fields.prompt }, target.target, { normalizeThinking: normalizeRoleThinking, validateModel: async () => true, applicationKey: application.applicationKey }); return { outcome: { role: role.name } }; },
-				tool: async (fields) => { const context = projectContextManager.getOrCreate(projectId); if (!context) throw new CanonicalMutationError(404, "Project not found"); const result = applyCanonicalToolProposal({ action: fields.action as any, tool: fields.tool as any, content: fields.content as any }, { toolManager: context.toolManager }); __resetToolScanCache(); return { outcome: { tool: result.tool, action: result.action } }; },
-				staff: async (fields, application) => { const staff = await createCanonicalStaff({ ...fields, systemPrompt: fields.prompt, roleId: fields.role ?? fields.roleId, projectId }, { applicationKey: application.applicationKey, resolveProject: () => ({ projectId, rootPath: project.rootPath }), validateCwd: (_id, cwd) => { const check = validateExecutionCwd(projectRegistry, projectContextManager, projectId, cwd, { kind: "user-input" }); if (!check.ok) throw new CanonicalMutationError(check.status, check.error, check.code); }, validateTriggers: value => staffManager.validateTriggers(value as any), validateRole: (roleId, id) => { if (!resolveRoleForProject(roleId, id)) throw new CanonicalMutationError(404, "Role not found"); }, create: (name, description, prompt, cwd, options) => staffManager.createStaff(name, description, prompt, cwd, sessionManager, options as any), broadcast: (staff, staffProjectId) => broadcastStaffChanged({ type: "staff_changed", reason: "created", staffId: staff.id, projectId: staffProjectId, sessionId: staff.currentSessionId }) }); return { outcome: { staffId: staff.id } }; },
-			});
+			const service = importApplicationService;
 			const result = await service.apply({ projectId, importId: marker.id, requestId, type: draft.type, rev: draft.rev, snapshot: draft.snapshot, proposal: draft.parsed.value });
 			if (!store.finalizeImportProposal(identity, new Date().toISOString(), result.outcome)) {
 				const settled = store.get(requestId)?.proposal;

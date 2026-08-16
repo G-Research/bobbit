@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import type { TypedProposal, ProposalType } from "./proposal-files.js";
+import { getProposalTypePlugin, readSnapshot, type TypedProposal, type ProposalType } from "./proposal-files.js";
+import type { ProposalApplicationIdentity, StoredDecisionRequest } from "../agent/decision-request-store.js";
 
 /** Immutable server-owned identity for one reviewed import draft revision. */
 export interface ProjectImportApplication {
@@ -53,6 +54,17 @@ export class ProjectImportProposalApplicationService {
 		if (target !== input.projectId) {
 			throw new ProjectImportApplicationError(409, "PROJECT_ID_MISMATCH", "Project import proposal target does not match its owner");
 		}
+	}
+
+	/** Adopt a dead process's durable applying claim. This never claims or executes a created proposal. */
+	async reconcileApplying(stateDir: string, record: StoredDecisionRequest, identity: ProposalApplicationIdentity): Promise<ProjectImportApplicationResult | undefined> {
+		if (record.proposal?.status !== "applying" || record.proposal.application.key !== identity.key) return undefined;
+		const draftId = (await import("./proposal-seed-service.js")).proposalDraftOwnerId({ kind: "project-import", projectId: identity.projectId, importId: identity.importId, requestId: identity.requestId });
+		const snapshot = await readSnapshot(stateDir, draftId, identity.type, identity.rev);
+		if (snapshot === undefined || projectImportSnapshotSha256(snapshot) !== identity.snapshotSha256) throw new ProjectImportApplicationError(409, "SNAPSHOT_MISMATCH", "Applying proposal revision is unavailable");
+		const parsed = getProposalTypePlugin(identity.type).parse(snapshot);
+		if (!parsed.ok) throw new ProjectImportApplicationError(422, "INVALID_PROPOSAL", "Applying proposal revision is invalid");
+		return this.apply({ ...identity, snapshot, proposal: parsed.value });
 	}
 
 	async apply(input: ProjectImportApplication): Promise<ProjectImportApplicationResult> {
