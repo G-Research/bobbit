@@ -129,6 +129,7 @@ function createHarness(opts: {
 	containerId?: string;
 	projectId?: string;
 	branch?: string;
+	commandStepRunner?: any;
 } = {}) {
 	const broadcastCalls: Array<{ goalId: string; event: any }> = [];
 	const broadcastFn = (goalId: string, event: any) => {
@@ -158,7 +159,7 @@ function createHarness(opts: {
 			commandRunner: {
 				execFile: async () => ({ stdout: "refs/remotes/origin/master\n", stderr: "" }),
 			},
-			commandStepRunner: createFakeVerificationCommandRunner(),
+			commandStepRunner: opts.commandStepRunner ?? createFakeVerificationCommandRunner(),
 		},
 	);
 	return { harness, broadcastCalls, pcm };
@@ -166,6 +167,43 @@ function createHarness(opts: {
 
 async function runCommandStep(harness: InstanceType<typeof VerificationHarness>, ...args: any[]) {
 	return (harness as any).runCommandStep(...args);
+}
+
+function beginStreamingCommandFixture(harness: InstanceType<typeof VerificationHarness>, signalId: string) {
+	const streamCtx = {
+		goalId: "goal-1",
+		gateId: "gate-1",
+		signalId,
+		stepIndex: 0,
+	};
+	const signal: GateSignal = {
+		id: streamCtx.signalId,
+		goalId: streamCtx.goalId,
+		gateId: streamCtx.gateId,
+		sessionId: "streaming-fixture-session",
+		timestamp: Date.now(),
+		commitSha: "streaming-fixture-commit",
+		content: "streaming fixture",
+		metadata: {},
+		verification: { status: "running", steps: [] },
+	};
+	harness.beginVerification(signal, {
+		id: streamCtx.gateId,
+		name: "Streaming fixture",
+		dependsOn: [],
+		verify: [{ name: "stream command", type: "command", run: STREAM_MARKER_COMMAND }],
+	} as any);
+	assert.equal(
+		(harness as any).activeVerifications.get(streamCtx.signalId)?.steps[streamCtx.stepIndex]?.commandSpawnState,
+		"queued",
+		"fixture must enter the production queued command lifecycle before spawning",
+	);
+	return streamCtx;
+}
+
+function persistedCommandStep(signalId: string, stepIndex = 0) {
+	const persisted = JSON.parse(fs.readFileSync(path.join(TEST_DIR, "state", "active-verifications.json"), "utf8"));
+	return persisted.verifications.find((verification: any) => verification.signalId === signalId)?.steps[stepIndex];
 }
 
 // ---------------------------------------------------------------------------
@@ -193,37 +231,7 @@ describe("runCommandStep spawn behavior", () => {
 
 	it("streams output via broadcastFn for host path", async () => {
 		const { harness, broadcastCalls } = createHarness();
-		const streamCtx = {
-			goalId: "goal-1",
-			gateId: "gate-1",
-			signalId: "sig-1",
-			stepIndex: 0,
-		};
-		// A stream context is only valid after the production signal lifecycle has
-		// synchronously queued its command step. This also lets the spawn boundary
-		// reject reset/finalized verifications without weakening direct command tests.
-		const signal: GateSignal = {
-			id: streamCtx.signalId,
-			goalId: streamCtx.goalId,
-			gateId: streamCtx.gateId,
-			sessionId: "streaming-fixture-session",
-			timestamp: Date.now(),
-			commitSha: "streaming-fixture-commit",
-			content: "streaming fixture",
-			metadata: {},
-			verification: { status: "running", steps: [] },
-		};
-		harness.beginVerification(signal, {
-			id: streamCtx.gateId,
-			name: "Streaming fixture",
-			dependsOn: [],
-			verify: [{ name: "stream command", type: "command", run: STREAM_MARKER_COMMAND }],
-		} as any);
-		assert.equal(
-			(harness as any).activeVerifications.get(streamCtx.signalId)?.steps[streamCtx.stepIndex]?.commandSpawnState,
-			"queued",
-			"fixture must enter the production queued command lifecycle before spawning",
-		);
+		const streamCtx = beginStreamingCommandFixture(harness, "sig-1");
 		const result = await runCommandStep(harness,
 			STREAM_MARKER_COMMAND,
 			HOST_CWD,
@@ -244,6 +252,87 @@ describe("runCommandStep spawn behavior", () => {
 		assert.equal(result.diagnostics?.type, "retained-command-diagnostics");
 		assert.ok(result.diagnostics?.stdout?.path, "fake output should retain stdout diagnostics");
 		assert.match(fs.readFileSync(result.diagnostics.stdout.path, "utf8"), /streamed-marker/);
+	});
+
+	it("persists spawning before fake runner admission and stamps spawned ownership after completion", async () => {
+		let harness!: InstanceType<typeof VerificationHarness>;
+		let spawnCalls = 0;
+		const fakeRunner = createFakeVerificationCommandRunner();
+		const commandStepRunner = {
+			...fakeRunner,
+			spawn: (spec: any) => {
+				spawnCalls += 1;
+				const active = (harness as any).activeVerifications.get("sig-spawn-state");
+				assert.equal(active.steps[0].commandSpawnState, "spawning");
+				assert.equal(persistedCommandStep("sig-spawn-state").commandSpawnState, "spawning");
+				return fakeRunner.spawn(spec);
+			},
+		};
+		({ harness } = createHarness({ commandStepRunner }));
+		const streamCtx = beginStreamingCommandFixture(harness, "sig-spawn-state");
+
+		const result = await runCommandStep(harness,
+			STREAM_MARKER_COMMAND,
+			HOST_CWD,
+			10,
+			false,
+			streamCtx,
+		);
+
+		assert.equal(result.passed, true);
+		assert.equal(spawnCalls, 1);
+		const activeStep = (harness as any).activeVerifications.get(streamCtx.signalId).steps[streamCtx.stepIndex];
+		const durableStep = persistedCommandStep(streamCtx.signalId, streamCtx.stepIndex);
+		assert.equal(activeStep.commandSpawnState, "spawned");
+		assert.equal(durableStep.commandSpawnState, "spawned");
+		assert.ok(Number.isFinite(activeStep.commandSpawnedAt), "active spawned timestamp must be numeric");
+		assert.ok(Number.isFinite(durableStep.commandSpawnedAt), "durable spawned timestamp must be numeric");
+	});
+
+	it("does not admit a fake command when persisting the spawning boundary fails", async () => {
+		let spawnCalls = 0;
+		const fakeRunner = createFakeVerificationCommandRunner();
+		const { harness } = createHarness({
+			commandStepRunner: {
+				...fakeRunner,
+				spawn: (spec: any) => {
+					spawnCalls += 1;
+					return fakeRunner.spawn(spec);
+				},
+			},
+		});
+		const streamCtx = beginStreamingCommandFixture(harness, "sig-spawn-persist-failure");
+		const persist = (harness as any)._persistActive.bind(harness);
+		let rejectedPreSpawnPersistCalls = 0;
+		(harness as any)._persistActive = () => {
+			const step = (harness as any).activeVerifications.get(streamCtx.signalId)?.steps[streamCtx.stepIndex];
+			if (step?.commandSpawnState === "spawning") {
+				rejectedPreSpawnPersistCalls += 1;
+				return false;
+			}
+			return persist();
+		};
+		try {
+			const result = await runCommandStep(harness,
+				STREAM_MARKER_COMMAND,
+				HOST_CWD,
+				10,
+				false,
+				streamCtx,
+			);
+			assert.equal(result.passed, false);
+			assert.match(result.output, /admission cancelled before spawn/i);
+		} finally {
+			(harness as any)._persistActive = persist;
+		}
+
+		assert.equal(rejectedPreSpawnPersistCalls, 1, "must reject only the exact pre-spawn persistence call");
+		assert.equal(spawnCalls, 0, "runner.spawn must not run without a durable spawning boundary");
+		assert.equal(
+			(harness as any).activeVerifications.get(streamCtx.signalId).steps[streamCtx.stepIndex].commandSpawnState,
+			"queued",
+		);
+		assert.equal(persistedCommandStep(streamCtx.signalId, streamCtx.stepIndex).commandSpawnState, "queued");
 	});
 });
 
