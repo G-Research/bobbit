@@ -2979,6 +2979,22 @@ export type SessionTerminationListener = (sessionId: string, info: SessionTermin
 /** Purge-only entry into the gateway's per-session preview operation queue. */
 export type SessionPreviewPurgeOperation = <T>(sessionId: string, operation: () => Promise<T>) => Promise<T>;
 
+export type PromotedSessionLifecycleAction = "archive" | "purge";
+export type PromotedSessionLifecycleGuard = (
+	sessionId: string,
+	action: PromotedSessionLifecycleAction,
+) => string | undefined;
+
+export class PromotedSessionLifecycleConflictError extends Error {
+	readonly statusCode = 409;
+	readonly code = "PROMOTED_SESSION_LIFECYCLE_CONFLICT";
+
+	constructor(sessionId: string, reason: string) {
+		super(`Session ${sessionId} cannot be archived or purged directly: ${reason}`);
+		this.name = "PromotedSessionLifecycleConflictError";
+	}
+}
+
 export interface SessionManagerOptions {
 	/** Override the path to pi-coding-agent cli.js */
 	agentCliPath?: string;
@@ -3031,6 +3047,8 @@ export interface SessionManagerOptions {
 	 * cannot recreate a mount after deletion.
 	 */
 	previewPurgeOperation?: SessionPreviewPurgeOperation;
+	/** Late-bound graph guard supplied by goal/team ownership. A reason blocks direct destruction. */
+	promotedSessionLifecycleGuard?: PromotedSessionLifecycleGuard;
 }
 
 type SessionReplacementToken = {
@@ -3038,6 +3056,18 @@ type SessionReplacementToken = {
 	generation: number;
 	kind: string;
 };
+
+type SessionRoleReplacementProjection = {
+	goalId: string;
+	teamGoalId: string;
+	role: "team-lead";
+	accessory: string;
+	/** Promotion retains the source session's verified tuple instead of adopting role defaults. */
+	preserveModelTuple: true;
+};
+
+type PromotionAttachmentField = "goalId" | "teamGoalId" | "role" | "accessory";
+type PromotionAttachmentSnapshot = Record<PromotionAttachmentField, { present: boolean; value: unknown }>;
 
 type SessionReplacementCoordinator = {
 	tail: Promise<void>;
@@ -3194,6 +3224,7 @@ export class SessionManager {
 	private sessionPurgesInFlight = new Map<string, Promise<void>>();
 	private readonly archiveStat: (filePath: string) => Promise<{ size: number }>;
 	private readonly previewPurgeOperation: SessionPreviewPurgeOperation;
+	private promotedSessionLifecycleGuard?: PromotedSessionLifecycleGuard;
 	/** Heartbeat timer: re-broadcasts the current `session_status` for every
 	 *  active session every STATUS_HEARTBEAT_INTERVAL_MS, WITHOUT bumping
 	 *  `statusVersion`. Self-heals any client that missed a transition frame.
@@ -3874,6 +3905,7 @@ export class SessionManager {
 		this._bootRestoreLagSampler = options?.bootRestoreLagSampler;
 		this.archiveStat = options?.archiveStat ?? ((filePath) => fsp.stat(filePath));
 		this.previewPurgeOperation = options?.previewPurgeOperation ?? (async (_sessionId, operation) => operation());
+		this.promotedSessionLifecycleGuard = options?.promotedSessionLifecycleGuard;
 		sessionManagerModuleClock = this.clock;
 		this.agentCliPath = options?.agentCliPath;
 		this.systemPromptPath = options?.systemPromptPath;
@@ -3922,6 +3954,18 @@ export class SessionManager {
 			SessionManager.STATUS_HEARTBEAT_INTERVAL_MS,
 		);
 		(this._statusHeartbeatTimer as any).unref?.();
+	}
+
+	setPromotedSessionLifecycleGuard(guard: PromotedSessionLifecycleGuard | undefined): void {
+		this.promotedSessionLifecycleGuard = guard;
+	}
+
+	private assertPromotedSessionLifecycleAllowed(
+		sessionId: string,
+		action: PromotedSessionLifecycleAction,
+	): void {
+		const reason = this.promotedSessionLifecycleGuard?.(sessionId, action);
+		if (reason) throw new PromotedSessionLifecycleConflictError(sessionId, reason);
 	}
 
 	setExtensionChannelServices(services: ExtensionChannelServices | undefined): void {
@@ -13800,14 +13844,104 @@ export class SessionManager {
 			this._assignRoleStaged(id, role, token), { drainOnRelease: true, cancelOnTerminal: () => false });
 	}
 
+	/**
+	 * Attach a regular session to an accepted goal and rebuild its runtime as the
+	 * goal's lead without changing its identity, transcript, checkout, or sandbox.
+	 * Exact repeats are a no-op; conflicting attachments are rejected.
+	 */
+	async promoteToGoalLead(id: string, goalId: string): Promise<SessionInfo> {
+		const coordinator = this._sessionReplacementCoordinators.get(id);
+		const session = this.sessions.get(id);
+		if (!session && !coordinator) throw new Error(`Session ${id} not found`);
+		if (!coordinator && session?.status === "streaming") {
+			throw new Error("Cannot promote a session while its agent is streaming");
+		}
+		const goal = this.resolveGoal(goalId);
+		if (!goal) throw new Error(`Cannot promote session: goal ${goalId} was not found`);
+		if (session?.projectId && goal.projectId && session.projectId !== goal.projectId) {
+			throw new Error(`Cannot promote session ${id} across projects`);
+		}
+		if (session?.goalId === goalId && session.teamGoalId === goalId && session.role === "team-lead") {
+			return session;
+		}
+		if (session && (session.goalId || session.teamGoalId || session.role || session.assistantType || session.staffId || session.delegateOf || session.parentSessionId)) {
+			throw new Error(`Session ${id} already has goal, role, staff, assistant, delegate, or child metadata`);
+		}
+		const role = this.resolveSessionRole("team-lead", undefined, session?.projectId);
+		if (!role) throw new Error('Cannot promote session: role "team-lead" is unavailable');
+		const projection: SessionRoleReplacementProjection = {
+			goalId,
+			teamGoalId: goalId,
+			role: "team-lead",
+			accessory: role.accessory ?? "crown",
+			preserveModelTuple: true,
+		};
+		if (!coordinator && session) broadcastStatus(session, "starting");
+		const promoted = await this._coordinateSessionReplacement(id, "promote-goal-lead", (token) =>
+			this._assignRoleStaged(id, role, token, projection), {
+				drainOnRelease: true,
+				cancelOnTerminal: () => { throw new Error(`Session ${id} promotion was cancelled by termination`); },
+			});
+		if (!promoted) throw new Error(`Session ${id} disappeared during promotion`);
+		const canonical = this.sessions.get(id);
+		if (!canonical) throw new Error(`Session ${id} promotion committed without a canonical runtime`);
+		return canonical;
+	}
+
+	private snapshotPromotionAttachment(source: PersistedSession): PromotionAttachmentSnapshot {
+		const own = Object.prototype.hasOwnProperty;
+		return {
+			goalId: { present: own.call(source, "goalId"), value: source.goalId },
+			teamGoalId: { present: own.call(source, "teamGoalId"), value: source.teamGoalId },
+			role: { present: own.call(source, "role"), value: source.role },
+			accessory: { present: own.call(source, "accessory"), value: source.accessory },
+		};
+	}
+
+	private async restorePromotionAttachment(
+		store: SessionStore,
+		id: string,
+		snapshot: PromotionAttachmentSnapshot,
+	): Promise<void> {
+		const values = Object.fromEntries(
+			Object.entries(snapshot).map(([key, entry]) => [key, entry.value]),
+		) as Partial<PersistedSession>;
+		store.update(id, values as Parameters<SessionStore["update"]>[1]);
+		const restored = store.get(id) as Record<string, unknown> | undefined;
+		if (restored) {
+			for (const [key, entry] of Object.entries(snapshot)) {
+				if (!entry.present) delete restored[key];
+			}
+			// Bump the writer generation after deleting absent optional fields. The
+			// immediately scheduled structural write cannot serialize until this turn
+			// yields, so flushAsync publishes only the exact restored shape.
+			store.update(id, { lastActivity: restored.lastActivity as number });
+		}
+		await store.flushAsync();
+	}
+
 	/** Prepare and commit one role replacement while the shared lifecycle coordinator owns the session. */
 	private async _assignRoleStaged(
 		id: string,
 		role: { name: string; promptTemplate: string; accessory: string },
 		token: SessionReplacementToken,
+		projection?: SessionRoleReplacementProjection,
 	): Promise<boolean> {
 		const session = this.sessions.get(id);
 		if (!session) return false;
+		if (projection) {
+			const projectionGoal = this.resolveGoal(projection.goalId);
+			if (!projectionGoal) throw new Error(`Cannot promote session: goal ${projection.goalId} was not found`);
+			if (session.projectId && projectionGoal.projectId && session.projectId !== projectionGoal.projectId) {
+				throw new Error(`Cannot promote session ${id} across projects`);
+			}
+			if (session.goalId === projection.goalId && session.teamGoalId === projection.teamGoalId && session.role === projection.role) {
+				return true;
+			}
+			if (session.goalId || session.teamGoalId || session.role || session.assistantType || session.staffId || session.delegateOf || session.parentSessionId) {
+				throw new Error(`Session ${id} gained conflicting metadata before promotion staging`);
+			}
+		}
 		if (!this._replacementTokenIsCurrent(id, token) || token.coordinator.terminalRequest) {
 			throw new Error(`Session ${id} role replacement was superseded before staging`);
 		}
@@ -13816,8 +13950,13 @@ export class SessionManager {
 		// starts. Re-check the final canonical state here so role assignment never stops
 		// an active bridge merely because a coordinator existed at API-entry time.
 		if (session.status === "streaming") {
-			throw new Error("Cannot assign role while agent is streaming");
+			throw new Error(projection
+				? "Cannot promote a session while its agent is streaming"
+				: "Cannot assign role while agent is streaming");
 		}
+		const replacementSession: SessionInfo = projection
+			? { ...session, ...projection }
+			: session;
 		// Get the agent session file so we can restore conversation. A structured
 		// getState rejection is just as much a fallback case as a thrown RPC error;
 		// start from the durable value and replace it only with a non-empty live one.
@@ -13832,16 +13971,16 @@ export class SessionManager {
 		} catch { /* retain the durable transcript path */ }
 
 		// Reassemble system prompt with role instructions as separate fields
-		const goal = session.goalId ? this.resolveGoal(session.goalId) : undefined;
+		const goal = replacementSession.goalId ? this.resolveGoal(replacementSession.goalId) : undefined;
 		const goalSpec = goal?.spec;
 		// Look up the full role (with toolPolicies) cascade-first so pack-contributed
 		// roles keep their policies during role reassignment.
-		const fullRole = this.resolveSessionRole(role.name, undefined, session.projectId) ?? (role as Role);
+		const fullRole = this.resolveSessionRole(role.name, undefined, replacementSession.projectId) ?? (role as Role);
 		// Filter goal-metadata disabled tools (bobbit.disabledTools) for the
 		// session's effective goal so the reassembled prompt, the activation args,
 		// and the persisted allowedTools all agree after a role reassignment.
-		const respawnEffectiveGoalId = session.goalId ?? session.teamGoalId;
-		const respawnDisabled = this.disabledToolsForGoal(respawnEffectiveGoalId, session.projectId);
+		const respawnEffectiveGoalId = replacementSession.goalId ?? replacementSession.teamGoalId;
+		const respawnDisabled = this.disabledToolsForGoal(respawnEffectiveGoalId, replacementSession.projectId);
 		const effectiveAllowedRaw = this.resolveEffectiveAllowedTools(fullRole);
 		const effectiveAllowed = respawnDisabled
 			? effectiveAllowedRaw.filter(e => !respawnDisabled.has(e.name.toLowerCase()))
@@ -13861,13 +14000,13 @@ export class SessionManager {
 		// the other regular-session sites (previously passed raw — latent bug).
 		const rolePrompt = resolveRolePrompt(fullRole ?? role, {
 			branch: goal?.branch,
-			agentId: `${role.name}-${(session.goalId || session.id).slice(0, 8)}`,
+			agentId: `${role.name}-${(replacementSession.goalId || replacementSession.id).slice(0, 8)}`,
 			roleManager: this.roleManager,
 		});
 
 		const promptPath = this.assemblePrompt(id, {
 			baseSystemPromptPath: this.systemPromptPath,
-			cwd: session.cwd,
+			cwd: replacementSession.cwd,
 			goalTitle: goal?.title,
 			goalState: goal?.state,
 			goalSpec,
@@ -13878,7 +14017,7 @@ export class SessionManager {
 		});
 
 		// Respawn with new system prompt
-		const bridgeOptions: RpcBridgeOptions = { cwd: session.cwd };
+		const bridgeOptions: RpcBridgeOptions = { cwd: replacementSession.cwd };
 		if (this.agentCliPath) bridgeOptions.cliPath = this.agentCliPath;
 		if (promptPath) bridgeOptions.systemPromptPath = promptPath;
 		if (this.toolManager) bridgeOptions.toolManager = this.toolManager;
@@ -13886,10 +14025,10 @@ export class SessionManager {
 			BOBBIT_SESSION_ID: id,
 			BOBBIT_SESSION_SECRET: this.sessionSecretStore.getOrCreateSecret(id),
 		};
-		if (session.goalId) {
-			bridgeOptions.env.BOBBIT_GOAL_ID = session.goalId;
+		if (replacementSession.goalId) {
+			bridgeOptions.env.BOBBIT_GOAL_ID = replacementSession.goalId;
 			// Re-attach extensions: team leads need both team + goal tools, others just goal tools
-			const isTeamLead = session.role === "team-lead";
+			const isTeamLead = replacementSession.role === "team-lead";
 			if (isTeamLead) {
 				bridgeOptions.args = ["--extension", this.getTeamLeadExtensionPath(), "--extension", this.getGoalToolsExtensionPath()];
 			} else if (!bridgeOptions.args?.includes("--extension")) {
@@ -13909,8 +14048,8 @@ export class SessionManager {
 		// Apply tool activation args, including Bobbit extension tools and MCP policy filtering.
 		// `respawnAllowed` is `[]` (NO tools) when a role allowlist was fully removed by
 		// `bobbit.disabledTools`, and `undefined` only for a genuinely unrestricted session.
-		await this.ensureMcpManagerForContext(session.projectId, session.cwd);
-		const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, session.cwd, session.projectId, respawnEffectiveGoalId, session.sessionOnlyGrantedTools);
+		await this.ensureMcpManagerForContext(replacementSession.projectId, replacementSession.cwd);
+		const respawnActivation = this.buildToolActivationArgs(id, respawnAllowed, fullRole, replacementSession.cwd, replacementSession.projectId, respawnEffectiveGoalId, session.sessionOnlyGrantedTools);
 		bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
 		bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...respawnActivation.runtimeExtensions];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
@@ -13923,14 +14062,21 @@ export class SessionManager {
 			respawnPersisted?.modelProvider && respawnPersisted?.modelId
 				? normalizeAigwModelString(`${respawnPersisted.modelProvider}/${respawnPersisted.modelId}`)
 				: undefined;
-		const rawRoleModel = this.resolveRoleModelValue(role.name, session.projectId);
+		const rawRoleModel = projection?.preserveModelTuple
+			? undefined
+			: this.resolveRoleModelValue(role.name, replacementSession.projectId);
 		const roleModel = rawRoleModel
 			? normalizeAigwModelString(rawRoleModel)
 			: undefined;
-		const roleInitialModel = this.resolveInitialModel(role.name, session.projectId);
-		const roleDefaultModel = this.resolveInitialModel(undefined, session.projectId);
+		const roleInitialModel = this.resolveInitialModel(role.name, replacementSession.projectId);
+		const roleDefaultModel = this.resolveInitialModel(undefined, replacementSession.projectId);
 		const rawRoleDefaultModel = this.preferencesStore?.get("default.sessionModel") as string | undefined;
-		const exactRoleReplacementModel = roleModel ?? respawnPersistedModel ?? rawRoleDefaultModel;
+		const livePinnedModel = replacementSession.spawnPinnedModel
+			? normalizeAigwModelString(replacementSession.spawnPinnedModel)
+			: undefined;
+		const exactRoleReplacementModel = projection?.preserveModelTuple
+			? respawnPersistedModel ?? livePinnedModel ?? rawRoleDefaultModel
+			: roleModel ?? respawnPersistedModel ?? rawRoleDefaultModel;
 		bridgeOptions.initialModel = exactRoleReplacementModel
 			? await this.requireCurrentCatalogSpawnModel(exactRoleReplacementModel)
 			: await this.resolveCurrentCatalogSpawnModel([
@@ -13938,14 +14084,23 @@ export class SessionManager {
 				roleDefaultModel,
 			]);
 		const roleThinkingOverride = isKnownThinkingLevel(
-			this.resolveRoleThinkingLevelValue(role.name, session.projectId),
+			projection?.preserveModelTuple
+				? undefined
+				: this.resolveRoleThinkingLevelValue(role.name, replacementSession.projectId),
 		);
-		const initThinking = await this.resolveCurrentCatalogThinkingLevel(
-			bridgeOptions.initialModel,
-			role.name,
-			session.projectId,
-			roleThinkingOverride ?? respawnPersisted?.effectiveThinkingLevel,
-		);
+		const initThinking = projection?.preserveModelTuple
+			? await this.resolveCurrentCatalogPreferredThinkingLevel(
+				bridgeOptions.initialModel,
+				role.name,
+				replacementSession.projectId,
+				respawnPersisted?.effectiveThinkingLevel ?? replacementSession.spawnPinnedThinkingLevel,
+			)
+			: await this.resolveCurrentCatalogThinkingLevel(
+				bridgeOptions.initialModel,
+				role.name,
+				replacementSession.projectId,
+				roleThinkingOverride ?? respawnPersisted?.effectiveThinkingLevel,
+			);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 
 		// Role assignment is an in-place rehydration, so the replacement must stay
@@ -13955,24 +14110,26 @@ export class SessionManager {
 		// longer be wired; silently launching Pi on the host would strand the
 		// container transcript and make an apparently successful role change lose
 		// model-visible history.
-		if (session.sandboxed) {
+		if (replacementSession.sandboxed) {
 			const sandboxApplied = await this.applySandboxWiring(bridgeOptions, id, {
-				projectId: session.projectId,
-				goalId: session.goalId ?? session.teamGoalId,
+				projectId: replacementSession.projectId,
+				goalId: replacementSession.goalId ?? replacementSession.teamGoalId,
 			});
 			if (!sandboxApplied) {
 				throw new Error(`Cannot assign role for sandboxed session ${id}: sandbox realm is unavailable`);
 			}
 		} else {
-			this.applyScopedGatewayCredentials(bridgeOptions, id, session.projectId, session.goalId ?? session.teamGoalId);
+			this.applyScopedGatewayCredentials(bridgeOptions, id, replacementSession.projectId, replacementSession.goalId ?? replacementSession.teamGoalId);
 		}
 		const spawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
-		await this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, spawnProvider);
+		await this.applyDirectProviderEnv(bridgeOptions, !!replacementSession.sandboxed, spawnProvider);
 		await this.finalizeSpawnOptions(bridgeOptions, {
 			model: exactRoleReplacementModel ?? bridgeOptions.initialModel,
-			thinkingLevel: roleThinkingOverride ?? respawnPersisted?.effectiveThinkingLevel,
+			thinkingLevel: projection?.preserveModelTuple
+				? respawnPersisted?.effectiveThinkingLevel ?? replacementSession.spawnPinnedThinkingLevel
+				: roleThinkingOverride ?? respawnPersisted?.effectiveThinkingLevel,
 			role: role.name,
-			projectId: session.projectId,
+			projectId: replacementSession.projectId,
 		});
 
 		// Build and fully validate the replacement while the original bridge stays
@@ -13982,6 +14139,9 @@ export class SessionManager {
 		// fails closed without turning a healthy idle session into a dead one.
 		const oldRpcClient = session.rpcClient;
 		const oldUnsubscribe = session.unsubscribe;
+		const promotionAttachmentBefore = projection && persistedBeforeRole
+			? this.snapshotPromotionAttachment(persistedBeforeRole)
+			: undefined;
 		const rpcClient = new RpcBridge(bridgeOptions);
 		let replacementCommitted = false;
 		let oldBridgeStopped = false;
@@ -13999,10 +14159,10 @@ export class SessionManager {
 		});
 
 		bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension);
-		const rolePs = { ...respawnPersisted, ...session, agentSessionFile } as PersistedSession;
+		const rolePs = { ...respawnPersisted, ...replacementSession, agentSessionFile } as PersistedSession;
 		const roleFileCtx = sessionFsContextForAgentFile(rolePs, agentSessionFile);
 		const stagedSession = {
-			...session,
+			...replacementSession,
 			rpcClient,
 			unsubscribe: unsub,
 			spawnPinnedModel: bridgeOptions.initialModel,
@@ -14047,9 +14207,25 @@ export class SessionManager {
 				throw new Error(`Session ${id} role replacement was superseded before old bridge stop`);
 			}
 
-			// Persist the metadata before the irreversible old-process stop. If the
-			// stop rejects, restore the prior durable values and retain its listener.
-			roleStore.update(id, { role: role.name, accessory: role.accessory });
+			// Persist the metadata before the irreversible old-process stop. Promotion
+			// publishes its complete graph attachment in one structural mutation. If
+			// the stop rejects, restore the prior values and their exact optional-field
+			// presence while retaining the old bridge and listener.
+			try {
+				roleStore.update(id, projection
+					? {
+						goalId: projection.goalId,
+						teamGoalId: projection.teamGoalId,
+						role: projection.role,
+						accessory: projection.accessory,
+					}
+					: { role: role.name, accessory: role.accessory });
+			} catch (err) {
+				if (promotionAttachmentBefore) {
+					await this.restorePromotionAttachment(roleStore, id, promotionAttachmentBefore);
+				}
+				throw err;
+			}
 			// The old SessionInfo remains canonical through the stop await. Cancel its
 			// pending activity transactions first so stop-triggered late RPC success
 			// cannot write activity or open the replacement's restore quarantine.
@@ -14058,14 +14234,22 @@ export class SessionManager {
 				await oldRpcClient.stop();
 				oldBridgeStopped = true;
 			} catch (err) {
-				roleStore.update(id, { role: session.role, accessory: session.accessory });
+				if (promotionAttachmentBefore) {
+					await this.restorePromotionAttachment(roleStore, id, promotionAttachmentBefore);
+				} else {
+					roleStore.update(id, { role: session.role, accessory: session.accessory });
+				}
 				throw err;
 			}
 			// The old stop is the irreversible await in the two-phase swap. Revalidate
 			// both identity and ownership afterwards; a stale staged bridge is disposed
 			// by the catch path and can never overwrite a newer canonical process.
 			if (this.sessions.get(id) !== session || !this._replacementTokenIsCurrent(id, token) || token.coordinator.terminalRequest) {
-				roleStore.update(id, { role: session.role, accessory: session.accessory });
+				if (promotionAttachmentBefore) {
+					await this.restorePromotionAttachment(roleStore, id, promotionAttachmentBefore);
+				} else {
+					roleStore.update(id, { role: session.role, accessory: session.accessory });
+				}
 				throw new Error(`Session ${id} role replacement was superseded after old bridge stop`);
 			}
 		} catch (err) {
@@ -14094,8 +14278,10 @@ export class SessionManager {
 			session.spawnPinnedModel = `${verifiedReplacementTuple.provider}/${verifiedReplacementTuple.modelId}`;
 			session.spawnPinnedThinkingLevel = verifiedReplacementTuple.thinkingLevel;
 		}
-		session.role = role.name;
-		session.accessory = role.accessory;
+		session.goalId = replacementSession.goalId;
+		session.teamGoalId = replacementSession.teamGoalId;
+		session.role = replacementSession.role ?? role.name;
+		session.accessory = replacementSession.accessory ?? role.accessory;
 		session.allowedTools = effectiveAllowedNames;
 		if (verifiedReplacementTuple) {
 			this.persistSessionModel(
@@ -14432,7 +14618,8 @@ export class SessionManager {
 		try { return await target.archiveAsync(id); } catch { return false; }
 	}
 
-	async terminateSession(id: string): Promise<boolean> {
+	async terminateSession(id: string, opts?: { allowPromotedGoalLifecycle?: boolean }): Promise<boolean> {
+		if (!opts?.allowPromotedGoalLifecycle) this.assertPromotedSessionLifecycleAllowed(id, "archive");
 		const persisted = this.getPersistedSession(id);
 		const live = this.sessions.get(id);
 		const lifecycleOwnerId = (live?.sandboxed || persisted?.sandboxed)
@@ -14688,7 +14875,8 @@ export class SessionManager {
 	 * Routes through the runtime archive seam (§6) so a dormant parent's live
 	 * children are cascade-reaped before it is archived.
 	 */
-	async storeArchive(id: string): Promise<boolean> {
+	async storeArchive(id: string, opts?: { allowPromotedGoalLifecycle?: boolean }): Promise<boolean> {
+		if (!opts?.allowPromotedGoalLifecycle) this.assertPromotedSessionLifecycleAllowed(id, "archive");
 		const persisted = this.getPersistedSession(id);
 		const lifecycleOwnerId = persisted?.sandboxed
 			? (persisted.borrowsWorktree
@@ -15612,6 +15800,7 @@ export class SessionManager {
 
 	/** Internal purge body — entered only through the per-session owner above. */
 	private async purgeOneSession(ps: PersistedSession): Promise<void> {
+		this.assertPromotedSessionLifecycleAllowed(ps.id, "purge");
 		// SAFETY: refuse to destroy a team-lead session that the team-store
 		// still references for a non-archived goal. Symptom this prevents:
 		// the user's "Audit subgoals branch" team-lead vanished because some
