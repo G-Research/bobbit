@@ -100,6 +100,38 @@ export function deriveNestingFields(
 }
 
 
+type GoalUpdates = {
+	title?: string;
+	cwd?: string;
+	state?: GoalState;
+	spec?: string;
+	team?: boolean;
+	repoPath?: string;
+	branch?: string;
+	reattemptOf?: string;
+	projectId?: string;
+	autoStartTeam?: boolean;
+	// Nested-goals fields. spawnedFromPlanId MUST be settable immediately
+	// after createGoal (no awaits between) — see runSubgoalStep.
+	spawnedFromPlanId?: string;
+	paused?: boolean;
+	pauseSource?: "operator" | "legacy-deps";
+	replanCount?: number;
+	divergencePolicy?: "strict" | "balanced" | "autonomous";
+	maxConcurrentChildren?: number;
+	/** Per-goal sub-goal opt-in (editable post-creation via PATCH /policy). */
+	subgoalsAllowed?: boolean;
+	/** Per-goal nesting cap (clamped to system ceiling at the route layer). */
+	maxNestingDepth?: number;
+	acceptanceCriteria?: string[];
+	suggestedRole?: string;
+	spawnedBySessionId?: string;
+	/** Durable merge-conflict flag for child goals (Plan-tab data contract). */
+	mergeConflict?: boolean;
+	/** Visible scheduler terminal/circuit-breaker recovery state. */
+	schedulerRecovery?: PersistedGoal["schedulerRecovery"];
+};
+
 export class GoalManager {
 	private store: GoalStore;
 	private workflowStore?: WorkflowStore;
@@ -1074,41 +1106,29 @@ export class GoalManager {
 		return Math.max(1, Math.min(8, raw));
 	}
 
-	async updateGoal(id: string, updates: {
-		title?: string;
-		cwd?: string;
-		state?: GoalState;
-		spec?: string;
-		team?: boolean;
-		repoPath?: string;
-		branch?: string;
-		reattemptOf?: string;
-		projectId?: string;
-		autoStartTeam?: boolean;
-		// Nested-goals fields. spawnedFromPlanId MUST be settable immediately
-		// after createGoal (no awaits between) — see runSubgoalStep.
-		spawnedFromPlanId?: string;
-		paused?: boolean;
-		pauseSource?: "operator" | "legacy-deps";
-		replanCount?: number;
-		divergencePolicy?: "strict" | "balanced" | "autonomous";
-		maxConcurrentChildren?: number;
-		/** Per-goal sub-goal opt-in (editable post-creation via PATCH /policy). */
-		subgoalsAllowed?: boolean;
-		/** Per-goal nesting cap (clamped to system ceiling at the route layer). */
-		maxNestingDepth?: number;
-		acceptanceCriteria?: string[];
-		suggestedRole?: string;
-		spawnedBySessionId?: string;
-		/** Durable merge-conflict flag for child goals (Plan-tab data contract). */
-		mergeConflict?: boolean;
-		/** Visible scheduler terminal/circuit-breaker recovery state. */
-		schedulerRecovery?: PersistedGoal["schedulerRecovery"];
-	}): Promise<boolean> {
+	async updateGoal(id: string, updates: GoalUpdates): Promise<boolean> {
+		return this.updateGoalWithPersistence(id, updates, false);
+	}
+
+	/**
+	 * Strict variant for lifecycle writes that must be durably published before
+	 * their caller can emit a success event or release its lifecycle fence.
+	 */
+	async updateGoalStrict(id: string, updates: GoalUpdates): Promise<boolean> {
+		return this.updateGoalWithPersistence(id, updates, true);
+	}
+
+	private async updateGoalWithPersistence(
+		id: string,
+		updates: GoalUpdates,
+		strict: boolean,
+	): Promise<boolean> {
 		const existing = this.store.get(id);
 		if (!existing) return false;
 
-		// If toggling team mode ON for a non-team goal, auto-create worktree
+		// If toggling team mode ON for a non-team goal, auto-create worktree.
+		// Keep this shared by strict and ordinary updates so both preserve the
+		// established GoalManager update semantics.
 		if (updates.team === true && !existing.team && !existing.worktreePath && !isHeadquartersProject(existing.projectId)) {
 			const cwd = updates.cwd ?? existing.cwd;
 			if (await isGitRepo(cwd, this.commandRunner)) {
@@ -1128,7 +1148,9 @@ export class GoalManager {
 			}
 		}
 
-		return this.store.update(id, updates);
+		return strict
+			? this.store.updateStrict(id, updates)
+			: this.store.update(id, updates);
 	}
 
 	/** Narrow explicit deletion because GoalStore.update deliberately ignores undefined fields. */

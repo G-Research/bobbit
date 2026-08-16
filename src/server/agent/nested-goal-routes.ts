@@ -366,8 +366,19 @@ export async function tryHandleNestedGoalRoute(
 			if (!alreadyPaused) {
 				// Persist operator provenance in the same authoritative write as the
 				// pause flag. A restart must not mistake this operator decision for a
-				// legacy dependency pause and migrate it away.
-				await pauseGoalManager.updateGoal(goalId, { paused: true, pauseSource: "operator" });
+				// legacy dependency pause and migrate it away. This strict publication
+				// fence must settle before success is broadcast or the lifecycle fence
+				// opens; GoalStore rolls memory back if publication fails.
+				try {
+					const persisted = await pauseGoalManager.updateGoalStrict(goalId, {
+						paused: true,
+						pauseSource: "operator",
+					});
+					if (!persisted) throw new Error(`Goal ${goalId} not found during pause publication`);
+				} catch (err) {
+					console.error(`[api] pause: failed to durably publish paused state for ${goalId}:`, err);
+					throw new VerificationCancellationFenceError(goalId);
+				}
 				broadcastToAll({ type: "goal_state_changed", goalId });
 			}
 		} finally {
