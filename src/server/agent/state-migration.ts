@@ -37,6 +37,24 @@ const HEADQUARTERS_BACKUP_RETIRED_SUFFIX = ".pre-headquarters-id-migration-recov
 // keyed by goalId and remaps onto team-state.json; it is handled via
 // team-state.json and excluded here to avoid the target-remap ambiguity.)
 const HEADQUARTERS_RETIREABLE_STORE_FILES = ["sessions.json", "sessions.archived.json", "goals.json", "staff.json", "team-state.json"] as const;
+const SESSION_TIER_FILES = ["sessions.json", "sessions.archived.json"] as const;
+
+/**
+ * Sessions keep one deletion namespace across their split persistence tiers.
+ * A hard-delete is permanent regardless of whether the row was live or archived
+ * when it was purged, and legacy pre-split backups only know `sessions.json`.
+ */
+function tombstoneNamespaceForStoreFile(fileName: string): string {
+	return fileName === "sessions.archived.json" ? "sessions.json" : fileName;
+}
+
+function isSessionTierFile(fileName: string): fileName is (typeof SESSION_TIER_FILES)[number] {
+	return (SESSION_TIER_FILES as readonly string[]).includes(fileName);
+}
+
+function sessionTierFilesForStoreFile(fileName: string): readonly string[] {
+	return isSessionTierFile(fileName) ? SESSION_TIER_FILES : [fileName];
+}
 
 /** Normalize paths for equality checks, including Windows drive-letter casing. */
 function pathKey(p: string): string {
@@ -715,7 +733,32 @@ function routeLegacyProjectStoreFile(
 	}
 	const tombstonedKeys = new Set<string>();
 	for (const dir of tombstoneDirs) {
-		for (const key of readDeletionTombstones(dir, fileName)) tombstonedKeys.add(key);
+		for (const key of readDeletionTombstones(dir, tombstoneNamespaceForStoreFile(fileName))) tombstonedKeys.add(key);
+	}
+
+	// The two v3 session files are one logical store. A pre-split
+	// `sessions.json` backup can contain a row that has since moved into the
+	// archived tier (and the converse after unarchiving). Treat its presence in
+	// either current tier as recovered, rather than re-routing a duplicate into
+	// the backup file's old tier. Include every state dir the recovery can read
+	// or route into, matching the tombstone union above.
+	const currentTierKeys = new Set<string>();
+	if (isSessionTierFile(fileName)) {
+		const currentStateDirs = new Set([path.dirname(targetFile), path.dirname(legacyFile)]);
+		for (const project of projectEvidence.current) {
+			const id = String(project.id ?? "");
+			if (id && projectEvidence.sameRootIds.has(id) && typeof project.rootPath === "string") {
+				currentStateDirs.add(path.join(project.rootPath, ".bobbit", "state"));
+			}
+		}
+		for (const stateDir of currentStateDirs) {
+			for (const tierFile of SESSION_TIER_FILES) {
+				for (const record of readStoreRecordsWithShape(path.join(stateDir, tierFile), tierFile).records) {
+					const key = recordKeyForFile(tierFile, record);
+					if (key) currentTierKeys.add(key);
+				}
+			}
+		}
 	}
 
 	const routeNormal = (projectId: string, record: Record<string, unknown>, key: string): void => {
@@ -764,7 +807,7 @@ function routeLegacyProjectStoreFile(
 	}
 
 	for (const [key, backup] of backupByKey) {
-		if (seenLegacyKeys.has(key)) continue;
+		if (seenLegacyKeys.has(key) || currentTierKeys.has(key)) continue;
 		// Finding C's deletion counterpart: a backup-only key that carries a
 		// deletion tombstone was removed on purpose after the migration — do NOT
 		// recover it. Un-tombstoned backup-only keys keep their current recovery
@@ -868,8 +911,9 @@ function retireSpentHeadquartersBackups(
 		// Union of keys present in any live store the recovery could route into.
 		const liveKeys = new Set<string>();
 		const liveFiles = [
-			path.join(headquartersStateDir, fileName),
-			...sameRootStateDirs.map(dir => path.join(dir, fileName)),
+			...([headquartersStateDir, ...sameRootStateDirs].flatMap(stateDir =>
+				sessionTierFilesForStoreFile(fileName).map(tierFile => path.join(stateDir, tierFile)),
+			)),
 		];
 		for (const file of liveFiles) {
 			for (const record of readStoreRecordsWithShape(file, fileName).records) {
@@ -887,7 +931,7 @@ function retireSpentHeadquartersBackups(
 		const tombstoneDirs = new Set([headquartersStateDir, ...sameRootStateDirs]);
 		const tombstoned = new Set<string>();
 		for (const dir of tombstoneDirs) {
-			for (const key of readDeletionTombstones(dir, fileName)) tombstoned.add(key);
+			for (const key of readDeletionTombstones(dir, tombstoneNamespaceForStoreFile(fileName))) tombstoned.add(key);
 			// team-state.json has no tombstone namespace of its own: its records
 			// are keyed by goalId and are cleaned up when a goal is deleted, but
 			// only goals.json gets a goal tombstone. Gate team-state retirement on
