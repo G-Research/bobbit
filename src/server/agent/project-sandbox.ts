@@ -19,10 +19,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics } from "./cpu-diagnostics.js";
-import { buildDockerRunArgs, isVerificationSignalId, projectSandboxVolumeCreateArgs, projectSandboxVolumeNames, SANDBOX_STATE_MOUNTS, validatedE2ERunId } from "./docker-args.js";
+import { buildDockerRunArgs, projectSandboxVolumeCreateArgs, projectSandboxVolumeNames, SANDBOX_STATE_MOUNTS, validatedE2ERunId } from "./docker-args.js";
 import { activeAgentSessionsDir } from "./agent-session-path.js";
-import { bobbitStateDir, globalAgentDir } from "../bobbit-dir.js";
-import { verificationCheckoutProjectDir } from "./verification-checkout-scope.js";
+import { globalAgentDir } from "../bobbit-dir.js";
 import { toDockerPath } from "./rpc-bridge.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { ToolManager } from "./tool-manager.js";
@@ -39,21 +38,10 @@ const DOCKER_BIN = "docker";
 const DOCKER_ENV = { ...process.env, MSYS_NO_PATHCONV: "1", MSYS2_ARG_CONV_EXCL: "*" };
 const CONTAINER_AGENT_SESSIONS_DIR = "/home/node/.bobbit/agent/sessions";
 const CONTAINER_AGENT_MODELS_JSON = "/home/node/.bobbit/agent/models.json";
-const VERIFICATION_SIDECAR_LABEL = "bobbit-verification-sidecar";
-const VERIFICATION_SIGNAL_LABEL = "bobbit-verification-signal";
-const VERIFICATION_CHECKOUT_CONTAINER_ROOT = "/bobbit-state/verification-checkouts";
-const VERIFICATION_SOURCE_CONTAINER_ROOT = "/bobbit-state/verification-sources";
-const VERIFICATION_SIDECAR_VERSION = "3";
-const FULL_DOCKER_ID = /^[a-f0-9]{64}$/i;
-const SAFE_IGNORED_OUTPUT_DIR = /^(?:[A-Za-z0-9][A-Za-z0-9._-]*)(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/;
-const SAFE_WORKTREE_DEPENDENCY = /^\/workspace(?:-wt\/(?:[A-Za-z0-9][A-Za-z0-9._-]*)(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*)?\/node_modules$/;
-const SAFE_DEPENDENCY_PATH = /^(?:[A-Za-z0-9][A-Za-z0-9._-]*\/)*node_modules$/;
 
 interface DockerMountInfo {
 	Type?: string;
-	/** Docker uses Source for named-volume identity in inspect output. */
 	Source?: string;
-	Name?: string;
 	Destination?: string;
 	RW?: boolean;
 	Mode?: string;
@@ -64,13 +52,6 @@ type SandboxVolumeOwnershipEvidence = {
 	workspaceInitializedByBobbit: boolean;
 };
 
-interface DockerMountSpec {
-	Type?: string;
-	Source?: string;
-	Target?: string;
-	ReadOnly?: boolean;
-	VolumeOptions?: { Subpath?: string };
-}
 
 export interface AgentDirMountExpectation {
 	sessionsDir: string;
@@ -85,52 +66,6 @@ export interface AgentDirMountStalenessResult {
 
 export interface StateDirMountExpectation {
 	stateDir: string;
-}
-
-/** A restartable, signal-owned Docker container that sees one frozen source root. */
-export interface VerificationSidecar {
-	containerId: string;
-	projectId: string;
-	signalId: string;
-	checkoutPath: string;
-	cwd: string;
-}
-
-export interface VerificationSidecarDependencyLink {
-	/** Signal-root-relative dependency symlink, e.g. services/api/node_modules. */
-	path: string;
-	/** Exact normal-sandbox dependency directory for that same logical repository. */
-	target: string;
-}
-
-export interface VerificationSidecarRequest {
-	signalId: string;
-	/** Canonical completed checkout supplied by the pinned-checkout owner. */
-	checkoutPath: string;
-	/** Ignored output directories that commands may create in the execution view.
-	 * They are intentionally constrained to relative paths and cannot shadow
-	 * any materialized source entry. */
-	ignoredOutputDirs?: readonly string[];
-	/**
-	 * Ordered repository-local dependency links. An omitted map retains D-3's
-	 * root-only node_modules compatibility path; an explicit (including empty)
-	 * map never guesses a live worktree target.
-	 */
-	dependencyLinks?: readonly VerificationSidecarDependencyLink[];
-}
-
-/** Cleanup is bound to the durable full identity recorded for a sidecar. */
-export interface VerificationSidecarRemovalRequest extends Omit<VerificationSidecarRequest, "checkoutPath"> {
-	/** Persisted expected checkout path. It may no longer exist during terminal recovery. */
-	checkoutPath: string;
-	containerId: string;
-}
-
-interface DockerContainerInspection {
-	Id?: string;
-	Config?: { Image?: string; Labels?: Record<string, string> };
-	Mounts?: DockerMountInfo[];
-	HostConfig?: { Mounts?: DockerMountSpec[] };
 }
 
 export function getModelsJsonContentStaleness(hostContent: string, containerContent: string): AgentDirMountStalenessResult {
@@ -176,10 +111,6 @@ function comparableMountPath(value: string): string {
 	return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
-function samePath(left: string, right: string): boolean {
-	return comparableMountPath(left) === comparableMountPath(right);
-}
-
 function hostPathMountCandidates(hostPath: string): Set<string> {
 	const candidates = new Set<string>();
 	const add = (value: string | undefined): void => {
@@ -205,130 +136,6 @@ function mountSourceMatches(source: string | undefined, expectedHostPath: string
 function isMountReadOnly(mount: DockerMountInfo): boolean {
 	if (mount.RW === false) return true;
 	return typeof mount.Mode === "string" && mount.Mode.split(",").includes("ro");
-}
-
-function isStrictDescendant(root: string, candidate: string): boolean {
-	const relative = path.relative(root, candidate);
-	return !!relative && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
-}
-
-function isWithin(root: string, candidate: string): boolean {
-	return samePath(root, candidate) || isStrictDescendant(root, candidate);
-}
-
-function pathsOverlap(left: string, right: string): boolean {
-	const a = normalizeContainerMountDestination(left);
-	const b = normalizeContainerMountDestination(right);
-	return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
-}
-
-function sidecarPaths(signalId: string): { source: string; view: string } {
-	return {
-		source: `${VERIFICATION_SOURCE_CONTAINER_ROOT}/${signalId}`,
-		view: `${VERIFICATION_CHECKOUT_CONTAINER_ROOT}/${signalId}`,
-	};
-}
-
-/** Fixed support mounts are not project source authority. Everything else a
- * verifier sees must be the signal source, a declared output, or a declared
- * exact dependency-volume leaf. */
-function isAllowedVerificationSidecarSupportMount(destination: string): boolean {
-	return destination === "/tools"
-		|| destination === "/tools-builtin"
-		|| destination === "/market-packs-builtin"
-		|| destination === "/market-packs-server"
-		|| destination === "/market-packs-global-user"
-		|| destination === "/market-packs-project"
-		|| destination === "/bobbit/preview-root"
-		|| destination === "/home/node/.bobbit/agent/sessions"
-		|| destination === "/home/node/.bobbit/agent/models.json"
-		|| destination === "/home/node/.bobbit/agent/auth.json"
-		|| destination === "/tmp/session-prompts"
-		|| destination === "/mcp-extensions"
-		|| SANDBOX_STATE_MOUNTS.some(({ sub }) => destination === `/bobbit-state/${sub}`);
-}
-
-function validatedIgnoredOutputDirs(value: readonly string[] | undefined): string[] {
-	const outputDirs = [...(value ?? [])];
-	for (let index = 0; index < outputDirs.length; index++) {
-		if (index > 0 && outputDirs[index - 1]! >= outputDirs[index]!) {
-			throw new Error("[project-sandbox] verification output directories must be unique and sorted");
-		}
-		const output = outputDirs[index]!;
-		if (!SAFE_IGNORED_OUTPUT_DIR.test(output) || output.split("/").some(part => part === "." || part === "..")) {
-			throw new Error("[project-sandbox] verification output directory is not a safe relative path");
-		}
-		if (outputDirs.some(other => other !== output && (other.startsWith(`${output}/`) || output.startsWith(`${other}/`)))) {
-			throw new Error("[project-sandbox] verification output directories overlap");
-		}
-	}
-	return outputDirs;
-}
-
-interface OutputTrieNode {
-	children: Map<string, OutputTrieNode>;
-	outputDir?: string;
-	dependencyTarget?: string;
-}
-
-function outputTrie(outputDirs: readonly string[], dependencyLinks: readonly VerificationSidecarDependencyLink[] = []): OutputTrieNode {
-	const root: OutputTrieNode = { children: new Map() };
-	const resolveNode = (relativePath: string): OutputTrieNode => {
-		let node = root;
-		for (const segment of relativePath.split("/")) {
-			let child = node.children.get(segment);
-			if (!child) {
-				child = { children: new Map() };
-				node.children.set(segment, child);
-			}
-			node = child;
-		}
-		return node;
-	};
-	for (const outputDir of outputDirs) resolveNode(outputDir).outputDir = outputDir;
-	for (const dependency of dependencyLinks) {
-		if (outputDirs.some(outputDir => outputDir === dependency.path
-			|| outputDir.startsWith(`${dependency.path}/`) || dependency.path.startsWith(`${outputDir}/`))) {
-			throw new Error("[project-sandbox] verification output and dependency paths overlap");
-		}
-		resolveNode(dependency.path).dependencyTarget = dependency.target;
-	}
-	return root;
-}
-
-/**
- * Return the canonical, ordinary directory that Docker may bind for one
- * project's frozen checkouts. A pre-existing scope must never be followed:
- * otherwise a project-local symlink could turn its mount into another project's
- * checkout tree (or any host directory).
- */
-export function resolveScopedVerificationCheckoutMount(checkoutRoot: string, projectId: string): string {
-	fs.mkdirSync(checkoutRoot, { recursive: true });
-	const canonicalRoot = fs.realpathSync(checkoutRoot);
-	const rootInfo = fs.lstatSync(canonicalRoot);
-	if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) {
-		throw new Error("[project-sandbox] verification checkout root is not a safe directory");
-	}
-	const scoped = verificationCheckoutProjectDir(canonicalRoot, projectId);
-	if (!scoped) throw new Error("[project-sandbox] refusing sandbox mount without an authoritative project ID");
-	try {
-		const info = fs.lstatSync(scoped);
-		if (!info.isDirectory() || info.isSymbolicLink()) {
-			throw new Error("[project-sandbox] verification checkout scope is not a safe directory");
-		}
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-		fs.mkdirSync(scoped, { mode: 0o755 });
-	}
-	// This is the mount root, not an execution tree. Sandbox processes may write
-	// inside atomically published signal children but cannot replace this parent.
-	fs.chmodSync(scoped, 0o755);
-	const canonicalScope = fs.realpathSync(scoped);
-	const scopeInfo = fs.lstatSync(canonicalScope);
-	if (!scopeInfo.isDirectory() || scopeInfo.isSymbolicLink() || (process.platform !== "win32" && (scopeInfo.mode & 0o022) !== 0) || comparableMountPath(canonicalScope) !== comparableMountPath(scoped) || !isStrictDescendant(canonicalRoot, canonicalScope)) {
-		throw new Error("[project-sandbox] verification checkout scope escapes its server-owned root");
-	}
-	return canonicalScope;
 }
 
 export function getAgentDirMountStaleness(
@@ -360,13 +167,6 @@ export function getStateDirMountStaleness(
 	expected: StateDirMountExpectation,
 ): AgentDirMountStalenessResult {
 	if (!Array.isArray(mounts)) return { stale: true, reason: "container mount metadata is not an array" };
-	// A project container is shared by agents. It must never receive a parent
-	// checkout mount, otherwise any agent could inspect another signal's frozen
-	// source or replace the mount child before a verifier starts.
-	if (mounts.some((mount) => normalizeContainerMountDestination(mount?.Destination) === VERIFICATION_CHECKOUT_CONTAINER_ROOT
-		|| normalizeContainerMountDestination(mount?.Destination).startsWith(`${VERIFICATION_CHECKOUT_CONTAINER_ROOT}/`))) {
-		return { stale: true, reason: "long-lived project container exposes verification checkout source" };
-	}
 	for (const { sub, readOnly } of SANDBOX_STATE_MOUNTS) {
 		const destination = `/bobbit-state/${sub}`;
 		const hostPath = path.join(expected.stateDir, sub);
@@ -627,178 +427,6 @@ export class ProjectSandbox {
 			status: this._status,
 			projectId: this.options.projectId,
 		};
-	}
-
-	/**
-	 * Return the one durable sidecar allowed to execute a signal. The parent
-	 * project container never has any verification source mount; this separate
-	 * container binds the completed signal root read-only and constructs a
-	 * root-owned execution view so a same-UID process cannot rename or mutate
-	 * attested source bytes out from under its cwd.
-	 */
-	async getVerificationSidecar(request: VerificationSidecarRequest): Promise<VerificationSidecar> {
-		return this._withContainerLifecycle(async () => {
-			// A verifier owns its own isolated sidecar. It intentionally does not
-			// require the mutable project container, clone, or Git worktree lifecycle.
-			const checkoutPath = this._validateVerificationCheckout(request);
-			const matching = await this._findVerificationSidecars(request.signalId);
-			if (matching.length > 1) {
-				throw new Error(`[project-sandbox] refusing ambiguous verification sidecars for signal ${request.signalId}`);
-			}
-			const ignoredOutputDirs = this._validatedSidecarOutputDirs(request, checkoutPath);
-			const dependencyLinks = this._validatedSidecarDependencyLinks(request, checkoutPath);
-			if (matching.length === 1) {
-				const sidecar = await this._validateVerificationSidecar(matching[0], request.signalId, checkoutPath, undefined, ignoredOutputDirs, dependencyLinks);
-				if (!(await this._isContainerRunning(sidecar.containerId))) {
-					await this.execDocker(["start", sidecar.containerId], { timeout: 30_000, env: DOCKER_ENV });
-				}
-				return sidecar;
-			}
-			return this._createVerificationSidecar({ ...request, ignoredOutputDirs, dependencyLinks }, checkoutPath);
-		});
-	}
-
-	/** List only strictly validated sidecars owned by this ProjectSandbox. */
-	async listVerificationSidecars(): Promise<VerificationSidecar[]> {
-		return this._withContainerLifecycle(() => this._listVerificationSidecars());
-	}
-
-	/** Reconnect validation for persisted verifier state. Full IDs only: Docker's
-	 * convenient short-ID aliases are never an authority across a restart. */
-	async resolveVerificationSidecar(input: { signalId: string; containerId: string; ignoredOutputDirs: readonly string[]; dependencyLinks?: readonly VerificationSidecarDependencyLink[] }): Promise<VerificationSidecar> {
-		return this._withContainerLifecycle(async () => {
-			if (!isVerificationSignalId(input.signalId) || !FULL_DOCKER_ID.test(input.containerId)) {
-				throw new Error("[project-sandbox] verification sidecar identity is not canonical");
-			}
-			const checkoutPath = this._validateVerificationCheckout({
-				signalId: input.signalId,
-				checkoutPath: path.join(resolveScopedVerificationCheckoutMount(path.join(bobbitStateDir(), "verification-checkouts"), this.options.projectId), input.signalId),
-			});
-			const ignoredOutputDirs = this._validatedSidecarOutputDirs(input, checkoutPath);
-			const dependencyLinks = this._validatedSidecarDependencyLinks(input, checkoutPath);
-			const sidecar = await this._validateVerificationSidecar(input.containerId, input.signalId, checkoutPath, undefined, ignoredOutputDirs, dependencyLinks);
-			if (!(await this._isContainerRunning(sidecar.containerId))) {
-				await this.execDocker(["start", sidecar.containerId], { timeout: 30_000, env: DOCKER_ENV });
-			}
-			return sidecar;
-		});
-	}
-
-	/** Remove a verified sidecar after its command-tree terminal barrier. */
-	async removeVerificationSidecar(request: VerificationSidecarRemovalRequest): Promise<void> {
-		await this._withContainerLifecycle(async () => {
-			if (!isVerificationSignalId(request.signalId) || !FULL_DOCKER_ID.test(request.containerId)) {
-				throw new Error("[project-sandbox] verification sidecar cleanup requires canonical signal and full Docker identities");
-			}
-			let checkoutPath: string | undefined;
-			try {
-				checkoutPath = this._validateVerificationCheckout(request);
-			} catch (error) {
-				// Terminal recovery may run after the pinned-checkout owner removed the
-				// host root. It may still remove only the durable exact container after
-				// proving every independent ownership and mount identity below.
-				const expected = this._expectedVerificationCheckoutPath(request);
-				if (fs.existsSync(expected)) throw error;
-				const inspection = await this._inspectFullContainer(request.containerId);
-				if (inspection.Id.toLowerCase() !== request.containerId.toLowerCase()) {
-					throw new Error("[project-sandbox] Docker inspect did not resolve the recorded verification sidecar identity");
-				}
-				this._validateMissingCheckoutRemoval(inspection, request, expected);
-				await this._removeVerificationSidecarContainer(inspection.Id);
-				return;
-			}
-			const matching = await this._findVerificationSidecars(request.signalId);
-			if (matching.length > 1) throw new Error(`[project-sandbox] refusing ambiguous verification sidecars for signal ${request.signalId}`);
-			if (matching.length === 0) {
-				if (!(await this._isExactContainerAbsent(request.containerId))) {
-					throw new Error("[project-sandbox] verification sidecar cleanup found no matching label but the recorded sidecar still exists");
-				}
-				return;
-			}
-			if (matching[0].toLowerCase() !== request.containerId.toLowerCase()) {
-				throw new Error("[project-sandbox] verification sidecar cleanup identity does not match the recorded sidecar");
-			}
-			await this._validateVerificationSidecar(matching[0], request.signalId, checkoutPath);
-			// The caller's persisted canonical identity was compared above; remove
-			// that exact ID rather than widening authority through a rediscovery value.
-			await this._removeVerificationSidecarContainer(request.containerId);
-		});
-	}
-
-	private _expectedVerificationCheckoutPath(request: Pick<VerificationSidecarRequest, "signalId" | "checkoutPath">): string {
-		const scope = resolveScopedVerificationCheckoutMount(path.join(bobbitStateDir(), "verification-checkouts"), this.options.projectId);
-		const expected = path.join(scope, request.signalId);
-		if (!samePath(path.resolve(request.checkoutPath), expected)) {
-			throw new Error("[project-sandbox] verification checkout is not this project's exact completed signal root");
-		}
-		return expected;
-	}
-
-	private _validateMissingCheckoutRemoval(
-		inspection: DockerContainerInspection & { Id: string },
-		request: VerificationSidecarRemovalRequest,
-		expectedCheckoutPath: string,
-	): void {
-		const labels = inspection.Config?.Labels ?? {};
-		const outputDirs = validatedIgnoredOutputDirs(request.ignoredOutputDirs);
-		const dependencyLinks = request.dependencyLinks === undefined ? undefined : this._validatedDependencyLinkList(request.dependencyLinks);
-		const dependencyLabel = labels["bobbit-verification-dependencies"];
-		const declaredDependencyLinks = dependencyLabel === undefined
-			? undefined
-			: this._validatedDependencyLinkList(this._dependencyLinksFromLabel(dependencyLabel));
-		if (!this._isCurrentSidecarLabels(labels, request.signalId)
-			|| labels["bobbit-verification-outputs"] !== outputDirs.join(",")
-			|| !declaredDependencyLinks
-			|| (dependencyLinks !== undefined && dependencyLabel !== this._serializeDependencyLinks(dependencyLinks))
-			|| inspection.Config?.Image !== this.options.image) {
-			throw new Error("[project-sandbox] refusing missing-checkout cleanup for foreign, stale, or mismatched verification sidecar");
-		}
-		const { source, view } = sidecarPaths(request.signalId);
-		const mounts = inspection.Mounts ?? [];
-		const sourceMounts = mounts.filter(mount => normalizeContainerMountDestination(mount.Destination) === source);
-		if (sourceMounts.length !== 1 || sourceMounts[0].Type !== "bind" || !isMountReadOnly(sourceMounts[0])
-			|| !mountSourceMatches(sourceMounts[0].Source, expectedCheckoutPath)) {
-			throw new Error("[project-sandbox] refusing missing-checkout cleanup with invalid exact source mount");
-		}
-		const expectedOutputs = new Map(outputDirs.map(outputDir => [`${view}/${outputDir}`, path.join(expectedCheckoutPath, outputDir)]));
-		for (const [destination, hostPath] of expectedOutputs) {
-			const outputMounts = mounts.filter(mount => normalizeContainerMountDestination(mount.Destination) === destination);
-			if (outputMounts.length !== 1 || outputMounts[0].Type !== "bind" || isMountReadOnly(outputMounts[0]) || !mountSourceMatches(outputMounts[0].Source, hostPath)) {
-				throw new Error("[project-sandbox] refusing missing-checkout cleanup with invalid writable output mount");
-			}
-		}
-		this._validateDependencyVolumeMounts(inspection, declaredDependencyLinks);
-		this._validateNoForeignVerificationMounts(mounts, source, new Set(expectedOutputs.keys()), declaredDependencyLinks);
-		if (mounts.some(mount => {
-			const destination = normalizeContainerMountDestination(mount.Destination);
-			return destination !== source && !expectedOutputs.has(destination) && (pathsOverlap(destination, source) || pathsOverlap(destination, view));
-		})) {
-			throw new Error("[project-sandbox] refusing missing-checkout cleanup with shadowing mounts");
-		}
-	}
-
-	/** Remove validated orphan sidecars before the pinned-checkout owner removes host roots. */
-	async recoverVerificationSidecars(activeSignalIds: ReadonlySet<string>): Promise<string[]> {
-		return this._withContainerLifecycle(async () => {
-			const removed: string[] = [];
-			// Recovery deliberately classifies candidates independently. A malformed
-			// or stale owned orphan must not stop a later valid orphan from being
-			// collected, and host checkout roots may already have been removed.
-			for (const id of await this._findVerificationSidecarCandidates()) {
-				try {
-					const inspection = await this._inspectFullContainer(id);
-					if (!this._isOwnedSidecarCandidate(inspection) || inspection.Id === this.containerId) continue;
-					const signalId = inspection.Config?.Labels?.[VERIFICATION_SIGNAL_LABEL];
-					if (signalId && isVerificationSignalId(signalId) && activeSignalIds.has(signalId)
-						&& this._isCurrentSidecarLabels(inspection.Config?.Labels ?? {}, signalId)) continue;
-					await this._removeVerificationSidecarContainer(inspection.Id);
-					if (signalId && isVerificationSignalId(signalId)) removed.push(signalId);
-				} catch (error) {
-					console.warn(`[project-sandbox] unable to recover verification sidecar candidate ${id.substring(0, 12)}: ${(error as Error).message}`);
-				}
-			}
-			return removed;
-		});
 	}
 
 	/** Create a git worktree inside the container. Returns the container-internal path. */
@@ -1354,10 +982,6 @@ export class ProjectSandbox {
 	/** Full destroy: remove container AND volume. */
 	async destroy(): Promise<void> {
 		this.stopHealthMonitor();
-		// A project destroy is terminal: remove only strictly labelled and mounted
-		// sidecars before releasing named volumes. Invalid/foreign lookalikes are
-		// intentionally left for an operator rather than guessed at.
-		await this.recoverVerificationSidecars(new Set());
 		const volumes = projectSandboxVolumeNames(this.options.projectId, this.e2eRunId);
 		// Production retains its historic workspace-only destroy behavior. Legacy
 		// E2E owns both run-namespaced volumes and must remove both even when a
@@ -1505,7 +1129,9 @@ export class ProjectSandbox {
 		// Ensure the state directory and sandbox-visible subdirectories exist for bind mounts
 		const stateDir = path.join(this.options.projectDir, ".bobbit", "state");
 		fs.mkdirSync(stateDir, { recursive: true });
-		for (const { sub } of SANDBOX_STATE_MOUNTS) fs.mkdirSync(path.join(stateDir, sub), { recursive: true });
+		for (const sub of ["sessions", "tool-guard", "html-snapshots"]) {
+			fs.mkdirSync(path.join(stateDir, sub), { recursive: true });
+		}
 
 		// Dynamic resource limits: N-2 cores, M-2GB memory, no PID limit
 		// Query Docker daemon to avoid requesting more resources than the VM has
@@ -1562,9 +1188,12 @@ export class ProjectSandbox {
 			extraReadonlyMounts: extraReadonlyMounts.length ? extraReadonlyMounts : undefined,
 		}, this.commandRunner);
 
-		// Docker inherits credential values from this child environment; argv carries
-		// names only so a failed `docker run` cannot serialize secrets in an error.
-		if (githubToken) dockerArgs.splice(dockerArgs.length - 3, 0, "-e", "GITHUB_TOKEN");
+		// Inject GITHUB_TOKEN for git push/PR inside container. Only the name goes
+		// into argv; the value reaches Docker through the CLI child's environment.
+		if (githubToken) {
+			const insertIdx = dockerArgs.length - 3; // before image + sleep + infinity
+			dockerArgs.splice(insertIdx, 0, "-e", "GITHUB_TOKEN");
+		}
 
 		const { stdout } = await this.execDocker(dockerArgs, {
 			timeout: 60_000,
@@ -1816,498 +1445,6 @@ export class ProjectSandbox {
 
 	// ── Private: Docker helpers ────────────────────────────────────────
 
-	private _validateVerificationCheckout(request: VerificationSidecarRequest): string {
-		if (!isVerificationSignalId(request.signalId)) {
-			throw new Error("[project-sandbox] verification sidecar requires a canonical signal UUID");
-		}
-		const scope = resolveScopedVerificationCheckoutMount(path.join(bobbitStateDir(), "verification-checkouts"), this.options.projectId);
-		const expected = path.join(scope, request.signalId);
-		let actual: string;
-		try {
-			actual = fs.realpathSync(request.checkoutPath);
-		} catch {
-			throw new Error("[project-sandbox] verification checkout is unavailable");
-		}
-		const info = fs.lstatSync(actual);
-		if (!info.isDirectory() || info.isSymbolicLink() || !samePath(actual, expected)) {
-			throw new Error("[project-sandbox] verification checkout is not this project's exact completed signal root");
-		}
-		return actual;
-	}
-
-	private _serializeDependencyLinks(links: readonly VerificationSidecarDependencyLink[]): string {
-		return links.map(link => `${link.path}=${link.target}`).join(",");
-	}
-
-	/** The verifier may see only a declared node_modules leaf from its project's
-	 * named workspace volume, never a live workspace/worktree root. */
-	private _expectedDependencyVolumeMounts(links: readonly VerificationSidecarDependencyLink[]): Map<string, string> {
-		const volumes = projectSandboxVolumeNames(this.options.projectId, this.e2eRunId);
-		return new Map(links.map(link => [
-			link.target,
-			link.target.startsWith("/workspace-wt/") ? volumes.worktrees : volumes.workspace,
-		]));
-	}
-
-	private _validateDependencyVolumeMounts(inspection: DockerContainerInspection, links: readonly VerificationSidecarDependencyLink[]): void {
-		const expected = this._expectedDependencyVolumeMounts(links);
-		const mounts = inspection.Mounts ?? [];
-		const mountSpecs = inspection.HostConfig?.Mounts;
-		for (const [destination, volume] of expected) {
-			const matches = mounts.filter(mount => normalizeContainerMountDestination(mount.Destination) === destination);
-			const subpath = destination.startsWith("/workspace-wt/")
-				? destination.slice("/workspace-wt/".length)
-				: destination.slice("/workspace/".length);
-			const specs = mountSpecs?.filter(mount => normalizeContainerMountDestination(mount.Target) === destination) ?? [];
-			if (matches.length !== 1 || matches[0]!.Type !== "volume" || !isMountReadOnly(matches[0]!)
-				|| (matches[0]!.Source !== volume && matches[0]!.Name !== volume)
-				|| specs.length !== 1 || specs[0]!.Type !== "volume" || specs[0]!.Source !== volume
-				|| specs[0]!.ReadOnly !== true || specs[0]!.VolumeOptions?.Subpath !== subpath) {
-				throw new Error("[project-sandbox] refusing verification sidecar with an invalid read-only exact dependency volume mount");
-			}
-		}
-		// No broad live workspace/worktree mount (or a foreign subpath) can be
-		// adopted. Exact declared leaves above are the entire authority surface.
-		const destinations = [
-			...mounts.map(mount => normalizeContainerMountDestination(mount.Destination)),
-			...(mountSpecs ?? []).map(mount => normalizeContainerMountDestination(mount.Target)),
-		];
-		if (destinations.some(destination => (destination === "/workspace" || destination.startsWith("/workspace/")
-			|| destination === "/workspace-wt" || destination.startsWith("/workspace-wt/"))
-			&& !expected.has(destination))) {
-			throw new Error("[project-sandbox] refusing verification sidecar with a broad or foreign live workspace mount");
-		}
-	}
-
-	private _validateNoForeignVerificationMounts(
-		mounts: readonly DockerMountInfo[],
-		source: string,
-		outputDestinations: ReadonlySet<string>,
-		links: readonly VerificationSidecarDependencyLink[],
-	): void {
-		const dependencyDestinations = this._expectedDependencyVolumeMounts(links);
-		if (mounts.some(mount => {
-			const destination = normalizeContainerMountDestination(mount.Destination);
-			return destination !== source && !outputDestinations.has(destination)
-				&& !dependencyDestinations.has(destination)
-				&& !isAllowedVerificationSidecarSupportMount(destination);
-		})) {
-			throw new Error("[project-sandbox] refusing verification sidecar with a foreign mount");
-		}
-	}
-
-	private _dependencyLinksFromLabel(value: string | undefined): VerificationSidecarDependencyLink[] {
-		if (value === undefined || value === "") return [];
-		return value.split(",").map((entry) => {
-			const separator = entry.indexOf("=");
-			if (separator <= 0 || separator !== entry.lastIndexOf("=")) {
-				throw new Error("[project-sandbox] verification dependency label is malformed");
-			}
-			return { path: entry.slice(0, separator), target: entry.slice(separator + 1) };
-		});
-	}
-
-	private _validatedDependencyLinkList(links: readonly VerificationSidecarDependencyLink[]): VerificationSidecarDependencyLink[] {
-		const out = [...links];
-		for (let index = 0; index < out.length; index++) {
-			const link = out[index]!;
-			if (!link || typeof link.path !== "string" || typeof link.target !== "string"
-				|| !SAFE_DEPENDENCY_PATH.test(link.path) || !SAFE_WORKTREE_DEPENDENCY.test(link.target)
-				|| !link.target.endsWith(`/${link.path}`)
-				|| (index > 0 && out[index - 1]!.path >= link.path)) {
-				throw new Error("[project-sandbox] verification dependencies must be ordered repository-local node_modules links");
-			}
-		}
-		return out;
-	}
-
-	private _validatedSidecarDependencyLinks(
-		request: Pick<VerificationSidecarRequest, "dependencyLinks">,
-		checkoutPath: string,
-	): VerificationSidecarDependencyLink[] {
-		const explicit = request.dependencyLinks;
-		// An omitted map is the D-3 compatibility contract only. D-4 callers pass
-		// an explicit ordered map (possibly empty), so a multi-repository layout can
-		// never silently select a root or another repository's live dependency tree.
-		const links = explicit === undefined
-			? (this._isManagedDependencyLink(checkoutPath) ? [{ path: "node_modules", target: "/workspace/node_modules" }] : [])
-			: this._validatedDependencyLinkList(explicit);
-		for (const link of links) this._validateDependencyLinkPath(checkoutPath, link);
-		return links;
-	}
-
-	private _validateDependencyLinkPath(checkoutPath: string, link: VerificationSidecarDependencyLink): void {
-		const root = fs.realpathSync(checkoutPath);
-		let current = root;
-		const segments = link.path.split("/");
-		for (let index = 0; index < segments.length; index++) {
-			current = path.join(current, segments[index]!);
-			if (!isStrictDescendant(root, current)) throw new Error("[project-sandbox] verification dependency escapes its checkout");
-			const info = fs.lstatSync(current);
-			if (index === segments.length - 1) {
-				if (!info.isSymbolicLink()) throw new Error("[project-sandbox] verification dependency is not a manager-owned link");
-				const target = fs.realpathSync(current);
-				const targetInfo = fs.lstatSync(target);
-				if (!targetInfo.isDirectory() || targetInfo.isSymbolicLink() || isWithin(root, target)) {
-					throw new Error("[project-sandbox] verification dependency link target is unsafe");
-				}
-			} else if (!info.isDirectory() || info.isSymbolicLink()) {
-				throw new Error("[project-sandbox] verification dependency traverses an unsafe source path");
-			}
-		}
-	}
-
-	private _validatedSidecarOutputDirs(
-		request: Pick<VerificationSidecarRequest, "ignoredOutputDirs">,
-		checkoutPath: string,
-	): string[] {
-		const declared = validatedIgnoredOutputDirs(request.ignoredOutputDirs);
-		// This structural check is intentionally phase-independent. Outputs may
-		// already exist after a prior step or restart, while a nested output may
-		// share source ancestors (for example tests/results under tests/src).
-		for (const outputDir of declared) this._validateOutputPathStructure(checkoutPath, outputDir);
-		return declared;
-	}
-
-	private _validateOutputPathStructure(checkoutPath: string, outputDir: string): void {
-		const root = fs.realpathSync(checkoutPath);
-		const rootInfo = fs.lstatSync(root);
-		if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error("[project-sandbox] verification checkout root is unsafe");
-		let current = root;
-		for (const segment of outputDir.split("/")) {
-			current = path.join(current, segment);
-			if (!isStrictDescendant(root, current)) throw new Error("[project-sandbox] verification output escapes its checkout");
-			try {
-				const info = fs.lstatSync(current);
-				if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("[project-sandbox] verification output traverses a symlink or source file");
-			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-				throw error;
-			}
-		}
-	}
-
-	private async _listVerificationSidecars(): Promise<VerificationSidecar[]> {
-		const ids = await this._findVerificationSidecars();
-		const listed: VerificationSidecar[] = [];
-		for (const id of ids) {
-			const inspection = await this._inspectFullContainer(id);
-			const signalId = inspection.Config?.Labels?.[VERIFICATION_SIGNAL_LABEL];
-			if (!signalId || !isVerificationSignalId(signalId)) {
-				throw new Error(`[project-sandbox] verification sidecar ${id} has an invalid signal label`);
-			}
-			const scope = resolveScopedVerificationCheckoutMount(path.join(bobbitStateDir(), "verification-checkouts"), this.options.projectId);
-			const checkoutPath = this._validateVerificationCheckout({ signalId, checkoutPath: path.join(scope, signalId) });
-			listed.push(await this._validateVerificationSidecar(id, signalId, checkoutPath, inspection));
-		}
-		return listed;
-	}
-
-	private async _findVerificationSidecars(signalId?: string): Promise<string[]> {
-		const args = [
-			"ps", "-a",
-			"--filter", `label=${VERIFICATION_SIDECAR_LABEL}=1`,
-			"--filter", `label=bobbit-project=${this.options.projectId}`,
-		];
-		if (signalId) args.push("--filter", `label=${VERIFICATION_SIGNAL_LABEL}=${signalId}`);
-		if (this.e2eRunId) args.push("--filter", `label=bobbit-e2e-run=${this.e2eRunId}`);
-		args.push("--format", "{{.ID}}");
-		const { stdout } = await this.execDocker(args, { timeout: 10_000, env: DOCKER_ENV });
-		const refs = stdout.trim().split("\n").filter(Boolean);
-		const ids: string[] = [];
-		for (const ref of refs) ids.push((await this._inspectFullContainer(ref)).Id);
-		return ids;
-	}
-
-	/** Broad project-owned discovery used only for terminal orphan cleanup. */
-	private async _findVerificationSidecarCandidates(): Promise<string[]> {
-		const args = ["ps", "-a", "--filter", `label=${VERIFICATION_SIDECAR_LABEL}=1`, "--filter", `label=bobbit-project=${this.options.projectId}`];
-		if (this.e2eRunId) args.push("--filter", `label=bobbit-e2e-run=${this.e2eRunId}`);
-		args.push("--format", "{{.ID}}");
-		const { stdout } = await this.execDocker(args, { timeout: 10_000, env: DOCKER_ENV });
-		return stdout.trim().split("\n").filter(Boolean);
-	}
-
-	private _isOwnedSidecarCandidate(inspection: DockerContainerInspection & { Id: string }): boolean {
-		const labels = inspection.Config?.Labels ?? {};
-		return FULL_DOCKER_ID.test(inspection.Id)
-			&& labels[VERIFICATION_SIDECAR_LABEL] === "1"
-			&& labels["bobbit-project"] === this.options.projectId
-			&& (this.e2eRunId ? labels["bobbit-e2e-run"] === this.e2eRunId : !labels["bobbit-e2e-run"]);
-	}
-
-	private _isCurrentSidecarLabels(labels: Record<string, string>, signalId: string): boolean {
-		return labels[VERIFICATION_SIDECAR_LABEL] === "1"
-			&& labels["bobbit-project"] === this.options.projectId
-			&& labels[VERIFICATION_SIGNAL_LABEL] === signalId
-			&& labels["bobbit-verification-version"] === VERIFICATION_SIDECAR_VERSION
-			&& typeof labels["bobbit-verification-outputs"] === "string"
-			&& typeof labels["bobbit-verification-dependencies"] === "string"
-			&& (this.e2eRunId ? labels["bobbit-e2e-run"] === this.e2eRunId : !labels["bobbit-e2e-run"]);
-	}
-
-	private async _inspectFullContainer(containerRef: string): Promise<DockerContainerInspection & { Id: string }> {
-		const { stdout } = await this.execDocker(["inspect", "--format", "{{json .}}", containerRef], { timeout: 5_000, env: DOCKER_ENV });
-		let inspection: DockerContainerInspection;
-		try {
-			inspection = JSON.parse(stdout.trim()) as DockerContainerInspection;
-		} catch {
-			throw new Error("[project-sandbox] verification sidecar inspect returned malformed data");
-		}
-		if (!inspection.Id || !FULL_DOCKER_ID.test(inspection.Id)) {
-			throw new Error("[project-sandbox] verification sidecar did not return a canonical full Docker identity");
-		}
-		return inspection as DockerContainerInspection & { Id: string };
-	}
-
-	private async _validateVerificationSidecar(
-		containerRef: string,
-		signalId: string,
-		checkoutPath: string,
-		knownInspection?: DockerContainerInspection & { Id: string },
-		expectedIgnoredOutputDirs?: readonly string[],
-		expectedDependencyLinks?: readonly VerificationSidecarDependencyLink[],
-	): Promise<VerificationSidecar> {
-		const inspection = knownInspection ?? await this._inspectFullContainer(containerRef);
-		if (!FULL_DOCKER_ID.test(inspection.Id) || inspection.Id === this.containerId) {
-			throw new Error("[project-sandbox] verification sidecar identity is not a canonical isolated container");
-		}
-		const labels = inspection.Config?.Labels ?? {};
-		if (!this._isCurrentSidecarLabels(labels, signalId)
-			|| (expectedIgnoredOutputDirs && labels["bobbit-verification-outputs"] !== expectedIgnoredOutputDirs.join(","))
-			|| inspection.Config?.Image !== this.options.image) {
-			throw new Error("[project-sandbox] refusing foreign, stale, or mismatched verification sidecar");
-		}
-		const { source, view } = sidecarPaths(signalId);
-		const mounts = inspection.Mounts ?? [];
-		const declaredOutputDirs = validatedIgnoredOutputDirs(labels["bobbit-verification-outputs"] ? labels["bobbit-verification-outputs"].split(",").filter(Boolean) : []);
-		const outputDirs = this._validatedSidecarOutputDirs({ ignoredOutputDirs: declaredOutputDirs }, checkoutPath);
-		const declaredDependencyLinks = labels["bobbit-verification-dependencies"] === undefined
-			? this._validatedSidecarDependencyLinks({}, checkoutPath)
-			: this._validatedSidecarDependencyLinks({ dependencyLinks: this._dependencyLinksFromLabel(labels["bobbit-verification-dependencies"]) }, checkoutPath);
-		if (expectedDependencyLinks && this._serializeDependencyLinks(declaredDependencyLinks) !== this._serializeDependencyLinks(this._validatedDependencyLinkList(expectedDependencyLinks))) {
-			throw new Error("[project-sandbox] verification sidecar dependency links do not match the durable identity");
-		}
-		const matchingMounts = mounts.filter((mount) => normalizeContainerMountDestination(mount.Destination) === source);
-		if (matchingMounts.length !== 1 || matchingMounts[0].Type !== "bind"
-			|| !mountSourceMatches(matchingMounts[0].Source, checkoutPath) || !isMountReadOnly(matchingMounts[0])) {
-			throw new Error("[project-sandbox] refusing verification sidecar with an invalid read-only exact source mount");
-		}
-		const expectedOutputMounts = new Map(outputDirs.map(outputDir => [`${view}/${outputDir}`, this._validatedOutputMountPath(checkoutPath, outputDir, false)]));
-		for (const [destination, hostPath] of expectedOutputMounts) {
-			const outputMounts = mounts.filter(mount => normalizeContainerMountDestination(mount.Destination) === destination);
-			if (outputMounts.length !== 1 || outputMounts[0].Type !== "bind" || isMountReadOnly(outputMounts[0])
-				|| !mountSourceMatches(outputMounts[0].Source, hostPath)) {
-				throw new Error("[project-sandbox] refusing verification sidecar with an invalid writable output mount");
-			}
-		}
-		this._validateDependencyVolumeMounts(inspection, declaredDependencyLinks);
-		this._validateNoForeignVerificationMounts(mounts, source, new Set(expectedOutputMounts.keys()), declaredDependencyLinks);
-		if (mounts.some((mount) => {
-			const destination = normalizeContainerMountDestination(mount.Destination);
-			return destination !== source && !expectedOutputMounts.has(destination)
-				&& (pathsOverlap(destination, source) || pathsOverlap(destination, view));
-		})) {
-			throw new Error("[project-sandbox] refusing verification sidecar with a shadowing source or execution mount");
-		}
-		await this._validateVerificationExecutionView(inspection.Id, signalId, checkoutPath, outputDirs, declaredDependencyLinks);
-		return { containerId: inspection.Id, projectId: this.options.projectId, signalId, checkoutPath, cwd: view };
-	}
-
-	private async _validateVerificationExecutionView(
-		containerId: string,
-		signalId: string,
-		checkoutPath: string,
-		declaredOutputDirs: readonly string[],
-		dependencyLinks: readonly VerificationSidecarDependencyLink[],
-	): Promise<void> {
-		const { source, view } = sidecarPaths(signalId);
-		const trie = outputTrie(declaredOutputDirs, dependencyLinks);
-		const stat = (await this.execDocker(["exec", "-u", "root", containerId, "stat", "-c", "%u:%a", "--", view], { timeout: 10_000, env: DOCKER_ENV })).stdout.trim();
-		if (stat !== "0:555") throw new Error("[project-sandbox] verification execution root is not root-owned and non-writable");
-
-		const validateNode = async (node: OutputTrieNode, relative: string): Promise<void> => {
-			const hostDir = relative ? path.join(checkoutPath, relative) : checkoutPath;
-			const sourceDir = relative ? `${source}/${relative}` : source;
-			const viewDir = relative ? `${view}/${relative}` : view;
-			const hostInfo = fs.lstatSync(hostDir);
-			if (!hostInfo.isDirectory() || hostInfo.isSymbolicLink()) throw new Error("[project-sandbox] verification output ancestor is not a safe source directory");
-			if (relative) {
-				const ancestorStat = (await this.execDocker(["exec", "-u", "root", containerId, "stat", "-c", "%u:%a", "--", viewDir], { timeout: 10_000, env: DOCKER_ENV })).stdout.trim();
-				if (ancestorStat !== "0:555") throw new Error("[project-sandbox] verification execution output ancestor is not root-owned and non-writable");
-			}
-			const sourceEntries = new Set(fs.readdirSync(hostDir));
-			const expectedEntries = new Set([...sourceEntries, ...node.children.keys()]);
-			const viewEntries = (await this.execDocker(["exec", "-u", "root", containerId, "find", viewDir, "-mindepth", "1", "-maxdepth", "1", "-printf", "%f\\n"], { timeout: 10_000, env: DOCKER_ENV })).stdout.trim().split("\n").filter(Boolean);
-			if (viewEntries.length !== expectedEntries.size || viewEntries.some(entry => !expectedEntries.has(entry))) {
-				throw new Error("[project-sandbox] verification execution view contains missing or unallowlisted entries");
-			}
-			for (const entry of expectedEntries) {
-				const child = node.children.get(entry);
-				const childRelative = relative ? `${relative}/${entry}` : entry;
-				if (child) {
-					if (child.outputDir) continue; // exact output leaf is validated below
-					if (child.dependencyTarget) {
-						const dependency = (await this.execDocker(["exec", "-u", "root", containerId, "readlink", "--", `${viewDir}/${entry}`], { timeout: 10_000, env: DOCKER_ENV })).stdout.trim();
-						if (dependency !== child.dependencyTarget) throw new Error("[project-sandbox] verification dependency link is invalid");
-						await this.execDocker(["exec", "-u", "root", containerId, "test", "-d", dependency], { timeout: 10_000, env: DOCKER_ENV });
-						continue;
-					}
-					await validateNode(child, childRelative);
-					continue;
-				}
-				const target = (await this.execDocker(["exec", "-u", "root", containerId, "readlink", "--", `${viewDir}/${entry}`], { timeout: 10_000, env: DOCKER_ENV })).stdout.trim();
-				if (target !== `${sourceDir}/${entry}`) throw new Error("[project-sandbox] verification execution view source link is invalid");
-			}
-		};
-		await validateNode(trie, "");
-		for (const outputDir of declaredOutputDirs) {
-			const outputStat = (await this.execDocker(["exec", "-u", "root", containerId, "stat", "-c", "%F:%a", "--", `${view}/${outputDir}`], { timeout: 10_000, env: DOCKER_ENV })).stdout.trim();
-			if (!/^directory:[0-7]{2}[2367]$/u.test(outputStat)) throw new Error("[project-sandbox] verification output directory is not writable");
-		}
-	}
-
-	private _validatedOutputMountPath(checkoutPath: string, outputDir: string, create: boolean): string {
-		const root = fs.realpathSync(checkoutPath);
-		const rootInfo = fs.lstatSync(root);
-		if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error("[project-sandbox] verification checkout root is unsafe");
-		let current = root;
-		for (const segment of outputDir.split("/")) {
-			current = path.join(current, segment);
-			if (!isStrictDescendant(root, current)) throw new Error("[project-sandbox] verification output escapes its checkout");
-			try {
-				const info = fs.lstatSync(current);
-				if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("[project-sandbox] verification output traverses a symlink or non-directory");
-			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code !== "ENOENT" || !create) throw error;
-				fs.mkdirSync(current, { mode: 0o777 });
-				const created = fs.lstatSync(current);
-				if (!created.isDirectory() || created.isSymbolicLink()) throw new Error("[project-sandbox] verification output creation was replaced");
-			}
-		}
-		const canonical = fs.realpathSync(current);
-		if (!samePath(canonical, current) || !isStrictDescendant(root, canonical)) {
-			throw new Error("[project-sandbox] verification output path is not canonical");
-		}
-		if (create) fs.chmodSync(canonical, 0o777);
-		return canonical;
-	}
-
-	private _isManagedDependencyLink(checkoutPath: string): boolean {
-		const dependency = path.join(checkoutPath, "node_modules");
-		try {
-			const info = fs.lstatSync(dependency);
-			if (!info.isSymbolicLink()) return false;
-			const target = fs.realpathSync(dependency);
-			const targetInfo = fs.lstatSync(target);
-			return targetInfo.isDirectory() && !targetInfo.isSymbolicLink()
-				&& path.basename(target) === "node_modules" && !isWithin(checkoutPath, target);
-		} catch {
-			return false;
-		}
-	}
-
-	/** Supply Docker's inherited `-e KEY` values without ever placing values in argv. */
-	private _dockerRunEnvironment(): NodeJS.ProcessEnv {
-		const env: NodeJS.ProcessEnv = { ...DOCKER_ENV };
-		for (const [key, value] of Object.entries(this.options.sandboxCredentials ?? {})) {
-			if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) env[key] = value;
-		}
-		if (this.options.githubToken) env.GITHUB_TOKEN = this.options.githubToken;
-		return env;
-	}
-
-	private async _createVerificationSidecar(request: VerificationSidecarRequest, checkoutPath: string): Promise<VerificationSidecar> {
-		const { signalId } = request;
-		const ignoredOutputDirs = this._validatedSidecarOutputDirs(request, checkoutPath);
-		const dependencyLinks = this._validatedSidecarDependencyLinks(request, checkoutPath);
-		for (const outputDir of ignoredOutputDirs) this._validatedOutputMountPath(checkoutPath, outputDir, true);
-		const { projectId, image, sandboxNetwork, sandboxCredentials, sandboxAgentAuthAllowed, sandboxAgentAuthGoogleAllowed, sandboxAgentAuthPrefs, githubToken } = this.options;
-		const stateDir = path.join(this.options.projectDir, ".bobbit", "state");
-		fs.mkdirSync(stateDir, { recursive: true });
-		for (const { sub } of SANDBOX_STATE_MOUNTS) fs.mkdirSync(path.join(stateDir, sub), { recursive: true });
-		const dockerLimits = await getDockerResourceLimits(this.commandRunner);
-		const { cpus: totalCpus, memoryGB: totalMemGB } = computeResourceLimits(os.cpus().length, os.totalmem(), dockerLimits?.cpus, dockerLimits?.memBytes);
-		const dockerArgs = buildDockerRunArgs({
-			image, workspaceDir: "", projectMarketPacksRoot: path.join(this.options.projectDir, ".bobbit", "config", "market-packs"),
-			label: projectId, labelPrefix: "bobbit-project", additionalLabels: this.e2eRunId ? { "bobbit-e2e-run": this.e2eRunId } : undefined,
-			e2eRunId: this.e2eRunId, projectId, stateDir, verificationSidecar: { signalId, checkoutDir: checkoutPath, ignoredOutputDirs, dependencyLinks },
-			memoryLimit: `${totalMemGB}g`, cpuLimit: `${totalCpus}`, sandboxCredentials,
-			sandboxAgentAuthAllowed, sandboxAgentAuthGoogleAllowed, sandboxAgentAuthPrefs, sandboxNetwork, toolManager: this.options.toolManager,
-		}, this.commandRunner);
-		if (githubToken) dockerArgs.splice(dockerArgs.length - 3, 0, "-e", "GITHUB_TOKEN");
-		const { stdout } = await this.execDocker(dockerArgs, { timeout: 60_000, env: this._dockerRunEnvironment() });
-		const containerId = stdout.trim();
-		if (!FULL_DOCKER_ID.test(containerId)) {
-			throw new Error(`[project-sandbox] docker run returned a non-canonical verification sidecar ID for project ${projectId}`);
-		}
-		try {
-			await this._buildVerificationExecutionView(containerId, signalId, checkoutPath, ignoredOutputDirs, dependencyLinks);
-			return await this._validateVerificationSidecar(containerId, signalId, checkoutPath, undefined, ignoredOutputDirs, dependencyLinks);
-		} catch (error) {
-			// The ID was returned by this docker invocation, so it is safe to remove
-			// the failed candidate without broad label-based cleanup. A failed removal
-			// is not hidden: retaining an unverified sidecar is safer than claiming it
-			// disappeared and leaving an open frozen-root descriptor behind.
-			try {
-				await this._removeVerificationSidecarContainer(containerId);
-			} catch (cleanupError) {
-				throw new Error(`[project-sandbox] verification sidecar setup failed and cleanup could not be confirmed: ${(cleanupError as Error).message}`, { cause: error });
-			}
-			throw error;
-		}
-	}
-
-	private async _buildVerificationExecutionView(
-		containerId: string,
-		signalId: string,
-		checkoutPath: string,
-		ignoredOutputDirs: readonly string[],
-		dependencyLinks: readonly VerificationSidecarDependencyLink[],
-	): Promise<void> {
-		const { source, view } = sidecarPaths(signalId);
-		const trie = outputTrie(ignoredOutputDirs, dependencyLinks);
-		const execRoot = async (argv: string[]): Promise<void> => {
-			await this.execDocker(["exec", "-u", "root", containerId, ...argv], { timeout: 10_000, env: DOCKER_ENV });
-		};
-		// No shell is used here: every source name was read from the completed
-		// checkout and every caller-supplied output path was grammar-validated.
-		await execRoot(["mkdir", "-p", "--", view]);
-		await execRoot(["chmod", "0755", "--", view]);
-		const buildNode = async (node: OutputTrieNode, relative: string): Promise<void> => {
-			const hostDir = relative ? path.join(checkoutPath, relative) : checkoutPath;
-			const sourceDir = relative ? `${source}/${relative}` : source;
-			const viewDir = relative ? `${view}/${relative}` : view;
-			const sourceEntries = new Set(fs.readdirSync(hostDir));
-			for (const entry of sourceEntries) {
-				const child = node.children.get(entry);
-				if (child) continue;
-				await execRoot(["ln", "-s", "--", `${sourceDir}/${entry}`, `${viewDir}/${entry}`]);
-			}
-			for (const [entry, child] of node.children) {
-				const childRelative = relative ? `${relative}/${entry}` : entry;
-				if (child.outputDir) {
-					// Docker already mounted the server-owned persistent leaf. Never remove,
-					// recreate, chown, or chmod a mountpoint from the sidecar layer.
-					await execRoot(["test", "-d", `${viewDir}/${entry}`]);
-					continue;
-				}
-				if (child.dependencyTarget) {
-					await execRoot(["test", "-d", child.dependencyTarget]);
-					await execRoot(["ln", "-s", "--", child.dependencyTarget, `${viewDir}/${entry}`]);
-					continue;
-				}
-				// Shared source ancestors are root-owned and non-writable. Their source
-				// siblings are linked below, preserving e.g. tests/src beside tests/results.
-				await execRoot(["mkdir", "-p", "--", `${viewDir}/${entry}`]);
-				await execRoot(["chmod", "0555", "--", `${viewDir}/${entry}`]);
-				await buildNode(child, childRelative);
-			}
-		};
-		await buildNode(trie, "");
-		await execRoot(["chmod", "0555", "--", view]);
-	}
-
 	private async _hasStaleAgentDirMounts(containerId: string): Promise<boolean> {
 		const activeAgentDir = globalAgentDir();
 		const expected = {
@@ -2383,57 +1520,16 @@ export class ProjectSandbox {
 			const args = [
 				"ps", "-a",
 				"--filter", `label=${label}`,
-				// Verification sidecars share the project label for ownership, but are
-				// never interchangeable with the long-lived project container.
-				"--filter", `label!=${VERIFICATION_SIDECAR_LABEL}=1`,
 			];
 			if (e2eRunId) args.push("--filter", `label=bobbit-e2e-run=${e2eRunId}`);
 			args.push("--format", "{{.ID}}");
-			let stdout: string;
-			try {
-				({ stdout } = await this.execDocker(args, {
-					timeout: 10_000,
-					env: DOCKER_ENV,
-				}));
-			} catch (error) {
-				// Docker versions before label-negation support reject `label!=` at
-				// parse time. Fall back only for that capability gap; full inspect
-				// below remains the mandatory sidecar exclusion on every daemon.
-				if (!/invalid filter.*label!|label!.*invalid filter/i.test(String(error))) return null;
-				const fallbackArgs = ["ps", "-a", "--filter", `label=${label}`];
-				if (e2eRunId) fallbackArgs.push("--filter", `label=bobbit-e2e-run=${e2eRunId}`);
-				fallbackArgs.push("--format", "{{.ID}}");
-				try {
-					({ stdout } = await this.execDocker(fallbackArgs, {
-						timeout: 10_000,
-						env: DOCKER_ENV,
-					}));
-				} catch {
-					return null;
-				}
-			}
-			for (const ref of stdout.trim().split("\n").filter(Boolean)) {
-				// Docker filters are only a first pass: inspect each candidate before
-				// adopting it, so a malformed or sidecar-labelled response cannot be
-				// restarted, health-checked, or later removed as the project container.
-				try {
-					const inspection = await this._inspectFullContainer(ref);
-					const labels = inspection.Config?.Labels ?? {};
-					if (labels["bobbit-project"] !== this.options.projectId
-						|| Object.hasOwn(labels, VERIFICATION_SIDECAR_LABEL)
-						|| (e2eRunId ? labels["bobbit-e2e-run"] !== e2eRunId : !!labels["bobbit-e2e-run"])) {
-						continue;
-					}
-					return inspection.Id;
-				} catch {
-					// A candidate can disappear between `ps` and `inspect`, or be a
-					// malformed daemon response. Never let it poison later candidates.
-				}
-			}
-			return null;
+			const { stdout } = await this.execDocker(args, {
+				timeout: 10_000,
+				env: DOCKER_ENV,
+			});
+			const ids = stdout.trim().split("\n").filter(Boolean);
+			return ids[0] ?? null;
 		} catch {
-			// Preserve the historical missing-daemon behavior: callers create a
-			// replacement when discovery itself cannot reach Docker.
 			return null;
 		}
 	}
@@ -2477,55 +1573,17 @@ export class ProjectSandbox {
 	}
 
 	/**
-	 * Remove one verified sidecar and prove the exact full Docker ID no longer
-	 * resolves. Unlike generic project-container teardown this is fail-closed:
-	 * an unavailable daemon, a malformed reply, or a surviving container leaves
-	 * the checkout lease in place for recovery.
+	 * Environment for the `docker run` child. Credential and token VALUES are
+	 * handed to Docker here, never through argv, so `-e NAME` inherits them from
+	 * this process. Keeps secrets out of `ps`, execFile error messages, and logs.
 	 */
-	private async _removeVerificationSidecarContainer(containerId: string): Promise<void> {
-		if (!FULL_DOCKER_ID.test(containerId)) {
-			throw new Error("[project-sandbox] verification sidecar cleanup requires a canonical full Docker identity");
+	private _dockerRunEnvironment(): NodeJS.ProcessEnv {
+		const env: NodeJS.ProcessEnv = { ...DOCKER_ENV };
+		for (const [key, value] of Object.entries(this.options.sandboxCredentials ?? {})) {
+			if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) env[key] = value;
 		}
-		try {
-			await this.execDocker(["rm", "-f", containerId], {
-				timeout: 15_000,
-				env: DOCKER_ENV,
-			});
-		} catch (error) {
-			// Concurrent terminal cleanup is safe only when a follow-up exact-ID
-			// inspect proves it won. Do not treat arbitrary Docker errors as absence.
-			if (await this._isExactContainerAbsent(containerId)) return;
-			throw new Error(`[project-sandbox] verification sidecar removal failed: ${(error as Error).message}`);
-		}
-		if (!(await this._isExactContainerAbsent(containerId))) {
-			throw new Error("[project-sandbox] verification sidecar removal did not remove the recorded container");
-		}
-	}
-
-	/** Returns true only when Docker explicitly says this full ID no longer exists. */
-	private async _isExactContainerAbsent(containerId: string): Promise<boolean> {
-		if (!FULL_DOCKER_ID.test(containerId)) {
-			throw new Error("[project-sandbox] verification sidecar absence check requires a canonical full Docker identity");
-		}
-		try {
-			const inspection = await this._inspectFullContainer(containerId);
-			if (inspection.Id.toLowerCase() !== containerId.toLowerCase()) {
-				throw new Error("[project-sandbox] Docker inspect did not resolve the recorded verification sidecar identity");
-			}
-			return false;
-		} catch (error) {
-			if (this._isConfirmedExactContainerAbsence(error, containerId)) return true;
-			throw new Error(`[project-sandbox] unable to confirm verification sidecar removal: ${(error as Error).message}`);
-		}
-	}
-
-	private _isConfirmedExactContainerAbsence(error: unknown, containerId: string): boolean {
-		const detail = [
-			(error as { message?: unknown } | null)?.message,
-			(error as { stderr?: unknown } | null)?.stderr,
-		].filter((value): value is string => typeof value === "string").join("\n").toLowerCase();
-		const escapedId = containerId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").toLowerCase();
-		return new RegExp(`\\bno such (?:container|object):\\s*${escapedId}\\b`, "u").test(detail);
+		if (this.options.githubToken) env.GITHUB_TOKEN = this.options.githubToken;
+		return env;
 	}
 
 	private async _removeContainer(containerId: string): Promise<void> {

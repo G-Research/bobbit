@@ -6,10 +6,8 @@
  *   tests/e2e/gate-resign-cancel.spec.ts
  */
 import assert from "node:assert";
-import fs from "node:fs";
-import path from "node:path";
 import { test } from "./_e2e/in-process-harness.js";
-import { apiFetch, createGoal, deleteGoal, gitCwd } from "./_e2e/e2e-setup.js";
+import { apiFetch, createGoal, deleteGoal } from "./_e2e/e2e-setup.js";
 import { createFakeVerificationCommandRunner } from "../harness/fake-verification-command-runner.js";
 
 let originalCommandStepRunner: unknown;
@@ -37,19 +35,19 @@ async function getGate(goalId: string, gateId: string): Promise<any> {
 	return response.json();
 }
 
-async function waitForGateStatus(goalId: string, gateId: string, expected: string, signalId?: string): Promise<any> {
+async function waitForGateStatus(goalId: string, gateId: string, expected: string): Promise<any> {
 	const deadline = Date.now() + 5_000;
 	let gate: any;
 	do {
 		gate = await getGate(goalId, gateId);
-		if (gate.status === expected && (!signalId || gate.signals.at(-1)?.id === signalId)) return gate;
+		if (gate.status === expected) return gate;
 		await new Promise((resolve) => setTimeout(resolve, 10));
 	} while (Date.now() < deadline);
 	throw new Error(`Timed out waiting for ${goalId}/${gateId}=${expected}; last=${JSON.stringify(gate)}`);
 }
 
 test("cascade reset — re-signaling upstream resets downstream to pending", async () => {
-	const goal = await createGoal({ title: "Cascade Reset Test", cwd: gitCwd(), workflowId: "test-fast" });
+	const goal = await createGoal({ title: "Cascade Reset Test", workflowId: "test-fast" });
 	try {
 		assert.equal((await signalGate(goal.id, "design-doc", { content: "# Design v1" })).status, 201);
 		await waitForGateStatus(goal.id, "design-doc", "passed");
@@ -57,14 +55,8 @@ test("cascade reset — re-signaling upstream resets downstream to pending", asy
 		assert.equal((await signalGate(goal.id, "implementation")).status, 201);
 		await waitForGateStatus(goal.id, "implementation", "passed");
 
-		// Whole-gate reuse is intentionally keyed to source bytes. Change the
-		// real fixture workspace before the upstream re-signal so it exercises
-		// the cascade-reset lifecycle instead of a valid pinned cache reuse.
-		fs.writeFileSync(path.join(gitCwd(), "cascade-v2.txt"), "source revision two\n");
-		const reSignal = await signalGate(goal.id, "design-doc", { content: "# Design v2" });
-		assert.equal(reSignal.status, 201);
-		const reSignalId = (await reSignal.json()).signal.id;
-		await waitForGateStatus(goal.id, "design-doc", "passed", reSignalId);
+		assert.equal((await signalGate(goal.id, "design-doc", { content: "# Design v2" })).status, 201);
+		await waitForGateStatus(goal.id, "design-doc", "passed");
 
 		const implementation = await getGate(goal.id, "implementation");
 		assert.equal(implementation.status, "pending", "implementation gate should reset after upstream re-signal");
@@ -74,7 +66,7 @@ test("cascade reset — re-signaling upstream resets downstream to pending", asy
 });
 
 test("signaling a gate with unmet upstream dependency returns 409", async () => {
-	const goal = await createGoal({ title: "Dependency Test", cwd: gitCwd(), workflowId: "test-fast" });
+	const goal = await createGoal({ title: "Dependency Test", workflowId: "test-fast" });
 	try {
 		const response = await signalGate(goal.id, "implementation");
 		assert.equal(response.status, 409);
@@ -85,7 +77,7 @@ test("signaling a gate with unmet upstream dependency returns 409", async () => 
 });
 
 test("signaling an unknown gate returns 404", async () => {
-	const goal = await createGoal({ title: "Unknown Gate Test", cwd: gitCwd(), workflowId: "test-fast" });
+	const goal = await createGoal({ title: "Unknown Gate Test", workflowId: "test-fast" });
 	try {
 		assert.equal((await signalGate(goal.id, "nonexistent-gate")).status, 404);
 	} finally {
@@ -94,7 +86,7 @@ test("signaling an unknown gate returns 404", async () => {
 });
 
 test("metadata variable resolution in command step", async () => {
-	const goal = await createGoal({ title: "Metadata Resolution Test", cwd: gitCwd(), workflowId: "bug-fix" });
+	const goal = await createGoal({ title: "Metadata Resolution Test", workflowId: "bug-fix" });
 	try {
 		assert.equal((await signalGate(goal.id, "issue-analysis", {
 			content: "# Analysis\n\nSteps: run echo\nRoot cause: src/a.ts:1",

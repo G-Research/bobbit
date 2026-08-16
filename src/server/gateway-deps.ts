@@ -3,8 +3,6 @@ import fs from "node:fs";
 import { execFileSafe } from "./exec-file-safe.js";
 import type { RpcBridgeFactory } from "./agent/rpc-bridge.js";
 import { realVerificationCommandRunner, type VerificationCommandRunner } from "./agent/verification-command-runner.js";
-import type { PinnedCheckoutManager } from "./agent/verification-pinned-checkout.js";
-import type { VerificationExecutionBackend } from "./agent/verification-harness.js";
 
 export type { ExecFileOptions, ExecFileSyncOptions, SpawnOptions } from "node:child_process";
 
@@ -38,13 +36,6 @@ export interface GatewayDeps {
 	 * tier-1 injects a non-spawning fake. See agent/verification-command-runner.ts.
 	 */
 	commandStepRunner?: VerificationCommandRunner;
-	/**
-	 * Frozen-checkout lifecycle implementation. Omit in production so
-	 * VerificationHarness constructs the real fail-closed Git manager.
-	 */
-	pinnedCheckoutManager?: PinnedCheckoutManager;
-	/** Test-only safe execution backend for fake pinned-checkout fixtures. */
-	verificationExecutionBackend?: VerificationExecutionBackend;
 	fetchImpl?: typeof fetch;
 	agentBridgeFactory?: RpcBridgeFactory;
 	fsImpl?: FsLike;
@@ -54,9 +45,6 @@ export interface ResolvedGatewayDeps {
 	clock: Clock;
 	commandRunner: CommandRunner;
 	commandStepRunner: VerificationCommandRunner;
-	/** Optional by design: its absence selects VerificationHarness's real manager. */
-	pinnedCheckoutManager?: PinnedCheckoutManager;
-	verificationExecutionBackend?: VerificationExecutionBackend;
 	fetchImpl: typeof fetch;
 	agentBridgeFactory: RpcBridgeFactory;
 	fsImpl: FsLike;
@@ -117,8 +105,6 @@ export function resolveGatewayDeps(deps: GatewayDeps = {}): ResolvedGatewayDeps 
 		clock: deps.clock ?? realClock,
 		commandRunner: deps.commandRunner ?? realCommandRunner,
 		commandStepRunner: deps.commandStepRunner ?? realVerificationCommandRunner,
-		pinnedCheckoutManager: deps.pinnedCheckoutManager,
-		verificationExecutionBackend: deps.verificationExecutionBackend,
 		fetchImpl: deps.fetchImpl ?? realFetch,
 		agentBridgeFactory: deps.agentBridgeFactory ?? defaultRpcBridgeFactory,
 		fsImpl: deps.fsImpl ?? realFs,
