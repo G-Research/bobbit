@@ -955,6 +955,84 @@ describe("Headquarters directory migration", () => {
 		assert.equal(goalIds.includes("g-dropped"), true, "un-tombstoned backup-only goal must still be recovered");
 	});
 
+	// Split-session regression: a pre-v3 sessions.json backup can contain a row
+	// that has since been archived. The archived tier is a current copy of that
+	// logical session, so recovery must not reintroduce it into live storage and
+	// retirement must count the sibling tier as recovered.
+	it("does not reintroduce an archived session from a pre-split live backup and retires it", () => {
+		const root = tmpRoot();
+		const override = tmpRoot("bobbit-hq-override-");
+		useIsolatedSecretsDir();
+		const overrideState = path.join(override, "state");
+		fs.mkdirSync(overrideState, { recursive: true });
+		const oldId = "override-normal-project";
+		writeJson(path.join(overrideState, "projects.json"), [hqProject(override)]);
+		writeJson(path.join(overrideState, "projects.json.pre-headquarters-id-migration"), [normalProject(oldId, root, { name: "Override Normal" })]);
+		fs.writeFileSync(path.join(overrideState, ".headquarters-dir-migrated"), "done", "utf-8");
+		writeJson(path.join(overrideState, "sessions.json"), [
+			{ id: "s-survivor", title: "Live", cwd: root, agentSessionFile: "live.jsonl", projectId: HEADQUARTERS_PROJECT_ID, createdAt: 1, lastActivity: 1 },
+		]);
+		// This is a legacy pre-split backup: s-now-archived used to be live.
+		writeJson(path.join(overrideState, "sessions.json.pre-headquarters-id-migration"), [
+			{ id: "s-survivor", title: "Live", cwd: root, agentSessionFile: "live.jsonl", projectId: oldId, createdAt: 1, lastActivity: 1 },
+			{ id: "s-now-archived", title: "Archived", cwd: root, agentSessionFile: "archived.jsonl", projectId: oldId, createdAt: 1, lastActivity: 1, archived: true },
+		]);
+		writeJson(path.join(overrideState, "sessions.archived.json"), [
+			{ id: "s-now-archived", title: "Archived", cwd: root, agentSessionFile: "archived.jsonl", projectId: oldId, createdAt: 1, lastActivity: 1, archived: true },
+		]);
+
+		migrateLegacyHeadquartersDirectory(overrideDirs(root, override, overrideState));
+
+		const normalState = path.join(root, ".bobbit", "state");
+		const normalLive = readJson<Array<Record<string, unknown>>>(path.join(normalState, "sessions.json"));
+		const normalArchived = readJson<Array<Record<string, unknown>>>(path.join(normalState, "sessions.archived.json"));
+		assert.equal(normalLive.some(session => session.id === "s-now-archived"), false, "a row present in the archived tier must not be recovered into live storage");
+		assert.equal(normalArchived.some(session => session.id === "s-now-archived"), true, "the archived tier remains the recovered location");
+		assert.equal(fs.existsSync(path.join(overrideState, "sessions.json.pre-headquarters-id-migration")), false, "the pre-split backup is fully accounted for across both tiers");
+		assert.equal(fs.existsSync(path.join(overrideState, "sessions.json.pre-headquarters-id-migration-recovered")), true);
+	});
+
+	// Both tiers share the sessions.json deletion namespace. A purge while a row
+	// is archived must suppress backup-only recovery and make its archived backup
+	// eligible for retirement.
+	it("keeps a purged archived session deleted and retires its archived backup", () => {
+		const root = tmpRoot();
+		const override = tmpRoot("bobbit-hq-override-");
+		useIsolatedSecretsDir();
+		const overrideState = path.join(override, "state");
+		fs.mkdirSync(overrideState, { recursive: true });
+		const oldId = "override-normal-project";
+		writeJson(path.join(overrideState, "projects.json"), [hqProject(override)]);
+		writeJson(path.join(overrideState, "projects.json.pre-headquarters-id-migration"), [normalProject(oldId, root, { name: "Override Normal" })]);
+		fs.writeFileSync(path.join(overrideState, ".headquarters-dir-migrated"), "done", "utf-8");
+		writeJson(path.join(overrideState, "sessions.archived.json"), [
+			{ id: "s-archived-survivor", title: "Archived", cwd: root, agentSessionFile: "archived.jsonl", projectId: HEADQUARTERS_PROJECT_ID, createdAt: 1, lastActivity: 1, archived: true },
+		]);
+		writeJson(path.join(overrideState, "sessions.archived.json.pre-headquarters-id-migration"), [
+			{ id: "s-archived-survivor", title: "Archived", cwd: root, agentSessionFile: "archived.jsonl", projectId: oldId, createdAt: 1, lastActivity: 1, archived: true },
+			{ id: "s-archived-purged", title: "Purged", cwd: root, agentSessionFile: "purged.jsonl", projectId: oldId, createdAt: 1, lastActivity: 1, archived: true },
+		]);
+		// SessionStore records all hard-deletes here, independent of the tier.
+		writeJson(path.join(overrideState, ".deletion-tombstones.json"), { "sessions.json": ["s-archived-purged"] });
+
+		migrateLegacyHeadquartersDirectory(overrideDirs(root, override, overrideState));
+
+		const allSessionFiles = [
+			path.join(overrideState, "sessions.json"),
+			path.join(overrideState, "sessions.archived.json"),
+			path.join(root, ".bobbit", "state", "sessions.json"),
+			path.join(root, ".bobbit", "state", "sessions.archived.json"),
+		];
+		const allIds = allSessionFiles.flatMap(file => {
+			if (!fs.existsSync(file)) return [];
+			const raw = readJson<Array<Record<string, unknown>> | { sessions?: Array<Record<string, unknown>> }>(file);
+			return (Array.isArray(raw) ? raw : (raw.sessions ?? [])).map(session => String(session.id));
+		});
+		assert.equal(allIds.includes("s-archived-purged"), false, "the canonical sessions.json tombstone must suppress archived backup recovery");
+		assert.equal(fs.existsSync(path.join(overrideState, "sessions.archived.json.pre-headquarters-id-migration")), false, "the tombstoned archived backup is fully accounted for");
+		assert.equal(fs.existsSync(path.join(overrideState, "sessions.archived.json.pre-headquarters-id-migration-recovered")), true);
+	});
+
 	// Spent-backup retirement: after a completed migration (marker present), a
 	// fully-accounted (recovered or tombstoned) backup is retired to the
 	// `-recovered` suffix and can no longer resurrect anything; a backup still
