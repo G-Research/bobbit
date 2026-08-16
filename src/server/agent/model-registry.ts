@@ -27,6 +27,11 @@ import { getGoogleCodeAssistModels } from "./google-code-assist-models.js";
 import { GOOGLE_GEMINI_CLI_PROVIDER, hasGoogleCodeAssistSpawnCredential } from "./google-code-assist.js";
 import { isAnthropicApiKeyCredential, isUsableAnthropicOAuthCredential } from "../auth/credential-store.js";
 import { runtimeFromProvider, type SessionRuntime } from "./session-runtime.js";
+import {
+	CLAUDE_AGENT_SDK_PROVIDER,
+	getClaudeAgentSdkModels,
+	isReservedClaudeAgentSdkProvider,
+} from "./claude-agent-sdk-model-catalog.js";
 
 // These Pi providers require credential/runtime integration Bobbit does not yet
 // forward to host or sandbox agents. Keep the denylist provider-scoped so future
@@ -381,6 +386,19 @@ async function assembleModels(
 			console.error("[model-registry] Failed to load built-in providers:", err);
 		}
 
+		// 1a. Claude Agent SDK exposes its own stable aliases. These are separate
+		// from direct Pi Anthropic rows: only a complete, unrejected Anthropic OAuth
+		// credential authenticates the SDK, and its aliases retain Pi's canonical
+		// display/capability/cost fields without using canonical IDs for selection.
+		try {
+			const credential = readAuthJson()?.anthropic;
+			results.push(...getClaudeAgentSdkModels(
+				isUsableAnthropicOAuthCredential(globalAuthPath(), credential),
+			));
+		} catch (err) {
+			console.error("[model-registry] Failed to load Claude Agent SDK aliases:", err);
+		}
+
 		// 1b. Google account (Code Assist / OAuth) Gemini models. These reach
 		// cloudcode-pa.googleapis.com directly from the gateway host, so they share
 		// the same direct-egress visibility semantics as built-in providers and are
@@ -457,6 +475,10 @@ async function assembleModels(
 	// retain the complete prior exact rows for that unchanged source only.
 	const configs = (prefs.get("customProviders") as CustomProviderConfig[] | undefined) || [];
 	for (const config of configs) {
+		// The built-in Agent SDK aliases are the sole owner of this namespace.
+		// Never permit a custom config (including old persisted configs) to emit
+		// canonical Claude IDs as SDK selections.
+		if (isReservedClaudeAgentSdkProvider(config.id) || isReservedClaudeAgentSdkProvider(config.name)) continue;
 		const sourceKey = customSourceKey(config);
 		let sourceModels: ApiModel[] | undefined;
 		try {
@@ -606,8 +628,11 @@ function hasOAuthCredentials(provider?: string): boolean {
 
 /** Discover models from a single custom provider config (without persisting anything). */
 export async function discoverModelsForConfig(config: CustomProviderConfig): Promise<ApiModel[]> {
+	if (isReservedClaudeAgentSdkProvider(config.id) || isReservedClaudeAgentSdkProvider(config.name)) return [];
 	try {
-		return (await discoverFromSingleConfig(config)).map(withDerivedRuntime);
+		return (await discoverFromSingleConfig(config))
+			.filter((model) => model.provider !== CLAUDE_AGENT_SDK_PROVIDER)
+			.map(withDerivedRuntime);
 	} catch (err) {
 		// Preserve the standalone discovery API's established empty-on-failure
 		// contract. Registry assembly calls the throwing primitive below so it can
