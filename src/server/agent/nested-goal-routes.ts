@@ -349,7 +349,9 @@ export async function tryHandleNestedGoalRoute(
 	 * MUST go through `executePauseForGoals`, not call this directly.
 	 */
 	async function applyOperatorPause(pauseGoalManager: GoalManager, goalId: string): Promise<void> {
-		await pauseGoalManager.updateGoal(goalId, { paused: true });
+		// Provenance distinguishes an operator pause from pre-provenance legacy
+		// dependency pauses when GoalManager restores persisted goals on boot.
+		await pauseGoalManager.updateGoal(goalId, { paused: true, pauseSource: "operator" });
 		await cancelAllVerifications(goalId);
 		broadcastToUi({ type: "goal_state_changed", goalId });
 	}

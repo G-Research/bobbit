@@ -30,7 +30,6 @@ import { testWorkflows, TEST_DEFAULT_COMPONENT } from "../../tests/e2e/seed-work
 import { createManualClock, type ManualClock } from "./clock.js";
 import { createFencedCommandRunner } from "./fenced-command-runner.js";
 import { createFencedFetch } from "./fenced-fetch.js";
-import { FakePinnedCheckoutManager } from "./fake-pinned-checkout-manager.js";
 import { createFakeVerificationCommandRunner } from "./fake-verification-command-runner.js";
 import { loadServerTestRuntime, serverRuntimeMode } from "./server-runtime.js";
 import { createRunChild, getRunRoot } from "./run-isolation.js";
@@ -314,14 +313,6 @@ async function boot(): Promise<BootedGateway> {
 	const deps: GatewayDeps = {
 		clock,
 		commandRunner: createFencedCommandRunner(runtime.gatewayDeps.realCommandRunner),
-		// This ephemeral project is intentionally non-Git. Keep gate lifecycle
-		// coverage explicit while production retains the real fail-closed manager.
-		pinnedCheckoutManager: new FakePinnedCheckoutManager(join(stateDir, "verification-checkouts")),
-		// The fixture owns both the fake checkout and non-durable command runner.
-		// Its in-process cwd is a trusted test seam, never a production fallback.
-		verificationExecutionBackend: {
-			acquire: async ({ checkout }) => ({ cwd: checkout.path }),
-		},
 		fetchImpl: createFencedFetch(),
 		agentBridgeFactory,
 		...(useFakeCommandStep ? { commandStepRunner: createFakeVerificationCommandRunner() } : {}),
