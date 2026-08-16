@@ -6,7 +6,7 @@
 import { test, expect, apiFetch, createSession, deleteSession, openApp, navigateToHash, waitForSessionStatus } from "./_helpers/journey-fixture.js";
 
 const SDK_PROVIDER = "claude-agent-sdk";
-const SDK_MODEL = "subagent-card-browser";
+const SDK_MODEL = "sonnet";
 const SDK_SESSION_ID = "44444444-4444-4444-8444-444444444444";
 const PARENT_TOOL_USE_ID = "sdk-agent-parent-card";
 const CHILD_AGENT_ID = "sdk-child-card";
@@ -173,14 +173,6 @@ test.use({
 
 async function installSdkModel(): Promise<Record<string, unknown>> {
 	const originalPreferences = await (await apiFetch("/api/preferences")).json() as Record<string, unknown>;
-	const provider = await apiFetch("/api/custom-providers", {
-		method: "POST",
-		body: JSON.stringify({
-			id: SDK_PROVIDER, name: SDK_PROVIDER, type: "manual", baseUrl: "http://127.0.0.1:9",
-			models: [{ id: SDK_MODEL, name: "Subagent card browser" }],
-		}),
-	});
-	expect(provider.status, await provider.text()).toBe(200);
 	const preferences = await apiFetch("/api/preferences", {
 		method: "PUT",
 		body: JSON.stringify({ "default.sessionModel": `${SDK_PROVIDER}/${SDK_MODEL}`, "default.sessionThinkingLevel": "off" }),
@@ -283,7 +275,6 @@ test.describe("Claude SDK embedded subagent card", () => {
 			expect(await page.locator("[data-subagent-parent-tool-use-id]").count()).toBe(1);
 		} finally {
 			if (sessionId) await deleteSession(sessionId).catch(() => undefined);
-			await apiFetch(`/api/custom-providers/${SDK_PROVIDER}`, { method: "DELETE" }).catch(() => undefined);
 			await apiFetch("/api/preferences", {
 				method: "PUT",
 				body: JSON.stringify({

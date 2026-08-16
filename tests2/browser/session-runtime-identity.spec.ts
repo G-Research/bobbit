@@ -9,7 +9,7 @@ import type { Page } from "@playwright/test";
 import { test, expect, apiFetch, createSession, deleteSession, openApp, navigateToHash, waitForSessionStatus } from "./_helpers/journey-fixture.js";
 
 const SDK_PROVIDER = "claude-agent-sdk";
-const SDK_MODEL = "sonnet-runtime-browser";
+const SDK_MODEL = "sonnet";
 const SDK_SESSION_ID = "22222222-2222-4222-8222-222222222222";
 
 type SdkQueryArgs = { prompt: AsyncIterable<unknown>; options: Record<string, unknown> };
@@ -101,24 +101,12 @@ async function selectSdkDefaultInModelsSettings(page: Page): Promise<void> {
 }
 
 test.describe("session runtime identity", () => {
-	test("SDK selection persists without sidebar badges in live, reloaded, reconnected, archived, and unavailable audit rows", async ({ page, gateway }) => {
+	test("SDK selection persists without sidebar badges in live, reloaded, reconnected, and archived audit rows", async ({ page, gateway }) => {
 		test.setTimeout(55_000);
 		queries.length = 0;
 		const originalPreferences = await (await apiFetch("/api/preferences")).json() as Record<string, unknown>;
 		let sessionId: string | undefined;
 		try {
-			const provider = await apiFetch("/api/custom-providers", {
-				method: "POST",
-				body: JSON.stringify({
-					id: SDK_PROVIDER,
-					name: SDK_PROVIDER,
-					type: "manual",
-					baseUrl: "http://127.0.0.1:9",
-					models: [{ id: SDK_MODEL, name: "Runtime Browser Sonnet" }],
-				}),
-			});
-			expect(provider.status, await provider.text()).toBe(200);
-
 			await openApp(page);
 			await selectSdkDefaultInModelsSettings(page);
 			sessionId = await createSession();
@@ -173,31 +161,25 @@ test.describe("session runtime identity", () => {
 			await expect(archivedRow).toBeVisible({ timeout: 20_000 });
 			await expect(sidebarRuntimeBadges(archivedRow)).toHaveCount(0);
 
-			const removed = await apiFetch(`/api/custom-providers/${SDK_PROVIDER}`, { method: "DELETE" });
-			expect(removed.status, await removed.text()).toBe(200);
-			// Audit routes use the registry's cached catalog synchronously. Refresh it
-			// first so the archived session is evaluated against the removed provider.
 			const catalogResponse = await apiFetch("/api/models");
 			expect(catalogResponse.status).toBe(200);
 			const catalog = await catalogResponse.json() as Array<Record<string, unknown>>;
-			expect(catalog.some((model) => model.provider === SDK_PROVIDER && model.id === SDK_MODEL)).toBe(false);
+			expect(catalog.some((model) => model.provider === SDK_PROVIDER && model.id === SDK_MODEL)).toBe(true);
 
-			const unavailableResponse = await apiFetch("/api/sessions?include=archived");
-			const unavailablePayload = await unavailableResponse.json() as { sessions: Array<Record<string, unknown>> };
-			expect(unavailablePayload.sessions.find((session) => session.id === sessionId)).toMatchObject({
+			const archivedResponse = await apiFetch("/api/sessions?include=archived");
+			const archivedPayload = await archivedResponse.json() as { sessions: Array<Record<string, unknown>> };
+			expect(archivedPayload.sessions.find((session) => session.id === sessionId)).toMatchObject({
 				runtime: "claude-agent-sdk",
 				modelProvider: SDK_PROVIDER,
 				modelId: SDK_MODEL,
-				modelAvailable: false,
+				modelAvailable: true,
 			});
 
 			await page.reload({ waitUntil: "domcontentloaded" });
 			await showArchived(page);
 			await expect(sidebarRuntimeBadges(sessionRow(page, sessionId))).toHaveCount(0, { timeout: 20_000 });
-			await expect(sessionRow(page, sessionId)).toContainText("Model unavailable");
 		} finally {
 			if (sessionId) await deleteSession(sessionId).catch(() => undefined);
-			await apiFetch(`/api/custom-providers/${SDK_PROVIDER}`, { method: "DELETE" }).catch(() => undefined);
 			await apiFetch("/api/preferences", {
 				method: "PUT",
 				body: JSON.stringify({

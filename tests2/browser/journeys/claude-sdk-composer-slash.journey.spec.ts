@@ -12,7 +12,7 @@ import type { Page } from "@playwright/test";
 import { test, expect, apiFetch, createSession, deleteSession, openApp, navigateToHash, registerProject, waitForSessionStatus } from "../_helpers/journey-fixture.js";
 
 const SDK_PROVIDER = "claude-agent-sdk";
-const SDK_MODEL = "composer-slash-browser";
+const SDK_MODEL = "sonnet";
 const SDK_SESSION_ID = "33333333-3333-4333-8333-333333333333";
 const PACK = "pr-walkthrough";
 
@@ -92,17 +92,6 @@ test.use({
 const editor = (page: Page) => page.locator("message-editor textarea").first();
 
 async function chooseSdkDefault(): Promise<void> {
-	const provider = await apiFetch("/api/custom-providers", {
-		method: "POST",
-		body: JSON.stringify({
-			id: SDK_PROVIDER,
-			name: SDK_PROVIDER,
-			type: "manual",
-			baseUrl: "http://127.0.0.1:9",
-			models: [{ id: SDK_MODEL, name: "Composer slash SDK" }],
-		}),
-	});
-	expect(provider.status, await provider.text()).toBe(200);
 	const preferences = await apiFetch("/api/preferences", {
 		method: "PUT",
 		body: JSON.stringify({
@@ -251,7 +240,6 @@ test.describe("Journey: Claude SDK composer slash interception", () => {
 			if (skillProjectId) await apiFetch(`/api/projects/${skillProjectId}`, { method: "DELETE" }).catch(() => undefined);
 			if (emptyProjectId) await apiFetch(`/api/projects/${emptyProjectId}`, { method: "DELETE" }).catch(() => undefined);
 			await setPackEnabled(false).catch(() => undefined);
-			await apiFetch(`/api/custom-providers/${SDK_PROVIDER}`, { method: "DELETE" }).catch(() => undefined);
 			await apiFetch("/api/preferences", {
 				method: "PUT",
 				body: JSON.stringify({

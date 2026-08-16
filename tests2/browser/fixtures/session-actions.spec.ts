@@ -29,7 +29,7 @@ const CANONICAL_SESSION_ACTION_IDS = [
 ] as const;
 
 const SDK_PROVIDER = "claude-agent-sdk";
-const SDK_MODEL = "session-actions-sdk";
+const SDK_MODEL = "sonnet";
 
 /** Deterministic official SDK Query seam; the production bridge remains in use. */
 class FakeSdkQuery implements AsyncIterable<unknown> {
@@ -650,17 +650,6 @@ test.describe("unified session actions", () => {
 
 		let sdkSessionId: string | undefined;
 		try {
-			const provider = await apiFetch("/api/custom-providers", {
-				method: "POST",
-				body: JSON.stringify({
-					id: SDK_PROVIDER,
-					name: SDK_PROVIDER,
-					type: "manual",
-					baseUrl: "http://127.0.0.1:9",
-					models: [{ id: SDK_MODEL, name: "Session Actions SDK" }],
-				}),
-			});
-			expect(provider.status, await provider.text()).toBe(200);
 			const defaultModel = await apiFetch("/api/preferences", {
 				method: "PUT",
 				body: JSON.stringify({ "default.sessionModel": `${SDK_PROVIDER}/${SDK_MODEL}`, "default.sessionThinkingLevel": "off" }),
@@ -682,7 +671,6 @@ test.describe("unified session actions", () => {
 			expect(await popoverActionIds(page), "Pi sidebar actions must retain Fork").toContain("fork");
 			await closePopover(page);
 		} finally {
-			await apiFetch(`/api/custom-providers/${SDK_PROVIDER}`, { method: "DELETE" }).catch(() => undefined);
 			await apiFetch("/api/preferences", {
 				method: "PUT",
 				body: JSON.stringify({
