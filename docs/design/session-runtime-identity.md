@@ -3,10 +3,10 @@
 ## Purpose
 
 A Bobbit session has a runtime identity: either the existing Pi process runtime or
-Claude Agent SDK. The identity is durable and visible so users can tell which
-execution and recovery contract applies to a live, dormant, or archived session.
-It is deliberately derived from the selected model provider rather than becoming
-a second setting that could disagree with the model.
+Claude Agent SDK. The identity is durable and visible in model selection so users
+can choose the appropriate execution and recovery contract. It is deliberately
+derived from the selected model provider rather than becoming a second setting
+that could disagree with the model.
 
 ## Canonical derivation
 
@@ -69,15 +69,17 @@ authority; reconnect, heartbeat, and archived-session paths use the same server
 resolution. Clients may omit the additive field during a rolling upgrade.
 
 The model catalog also exposes a read-only derived runtime for every model.
-Model-picker rows and live, archived, goal, delegate, and audit/sidebar session
-rows show a consistent Pi or Claude Agent SDK badge. The badges explain the
-runtime contract without introducing a runtime control.
+Model-picker rows show a consistent Pi or Claude Agent SDK badge, explaining the
+runtime contract without introducing a runtime control. Sidebar session rows —
+live, archived, goal, delegate, and audit — do not render runtime badges; runtime
+remains durable in the server projection and is selected and inspected through
+model-selection surfaces.
 
 Model availability is separate from identity. If a saved provider/model is not
 in the current catalog, the session row keeps its persisted provider/model and
-runtime badge and adds **Model unavailable** with the tuple in its tooltip. A
-missing provider must not hide an archived session, substitute a default model,
-or relabel an SDK session as Pi.
+adds **Model unavailable** with the tuple in its tooltip. A missing provider must
+not hide an archived session, substitute a default model, or relabel an SDK
+session as Pi.
 
 ## Continue and fork boundaries
 

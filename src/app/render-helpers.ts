@@ -397,38 +397,8 @@ function renderActiveShimmer() {
 	return html`<span class="sidebar-active-dot" style="--dot-delay:${delay}s"></span>`;
 }
 
-/** Display-only runtime identity projected by the server. Legacy rows default to Pi. */
-type RuntimeIdentity = "pi" | "claude-agent-sdk";
-type RuntimeSession = GatewaySession & {
-	runtime?: RuntimeIdentity;
-	modelProvider?: string;
-	modelId?: string;
-	modelAvailable?: boolean;
-};
-
-export function runtimeLabel(runtime: RuntimeIdentity | undefined): "Pi" | "Claude Agent SDK" {
-	return runtime === "claude-agent-sdk" ? "Claude Agent SDK" : "Pi";
-}
-
-/** Compact, text-bearing runtime badge shared by live and archived session rows. */
-export function renderRuntimeBadge(session: RuntimeSession): TemplateResult {
-	const runtime = session.runtime === "claude-agent-sdk" ? "claude-agent-sdk" : "pi";
-	const label = runtimeLabel(runtime);
-	return html`<span
-		data-runtime-badge=${runtime}
-		class="runtime-badge shrink-0 inline-flex max-w-[110px] items-center gap-0.5 truncate rounded-full border border-border px-1.5 py-px text-[10px] font-semibold leading-4 text-muted-foreground ${runtime === "claude-agent-sdk" ? "border-primary/30 bg-primary/5 text-foreground" : ""}"
-		title=${`Session runtime: ${label}`}
-		aria-label=${`Session runtime: ${label}`}
-	>
-		${runtime === "claude-agent-sdk"
-			? html`<svg aria-hidden="true" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m8 9-4 3 4 3M16 9l4 3-4 3M14 5l-4 14"/></svg>`
-			: html`<svg aria-hidden="true" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7h10M9 7v10M15 7v10M6 17h4M14 17h4"/></svg>`}
-		<span class="truncate">${label}</span>
-	</span>`;
-}
-
-/** Persisted sessions retain their runtime even if the current registry lost their tuple. */
-export function renderModelUnavailableBadge(session: RuntimeSession): TemplateResult | string {
+/** Persisted sessions retain their model identity even if the current registry lost their tuple. */
+export function renderModelUnavailableBadge(session: GatewaySession): TemplateResult | string {
 	if (session.modelAvailable !== false) return "";
 	const tuple = [session.modelProvider, session.modelId].filter(Boolean).join("/");
 	const title = tuple ? `Model unavailable: ${tuple}` : "Model unavailable";
@@ -470,7 +440,7 @@ export function renderSessionTime(session: GatewaySession, selected = false) {
 /**
  * Reserve the timestamp's flex slot while desktop row actions are visible.
  * `invisible` hides paint but keeps the timestamp's in-flow width, preventing
- * the title and runtime badges from jumping on hover or keyboard focus.
+ * the title and model-availability indicator from jumping on hover or keyboard focus.
  */
 export function renderReservedSessionTimestamp(content: TemplateResult | string): TemplateResult {
 	return html`<span
@@ -1239,7 +1209,7 @@ export function renderSessionRow(session: GatewaySession, treeOptionsOrIndex?: R
 					<div class="flex items-center gap-1 min-w-0">${renderStatusGoalTitle(treeOptions.goalTitle, treeOptions.projectColor, mobile)}${mobile ? html`<span class="flex-1"></span>${renderSessionTime(session)}` : ""}</div>
 					<div class="sidebar-status-agent-title min-w-0 truncate ${preparing ? "text-muted-foreground/60 italic" : ""}" data-testid="sidebar-session-title-text" style=${`font-size:${mobile ? "1em" : "0.75em"};`}>${preparing ? "preparing…" : renderSessionTitle(displayTitle, isActive, state.searchQuery)}</div>
 				` : html`
-					<div class="flex items-center gap-1 min-w-0 font-normal">${flat ? renderStatusIdentityIcon(treeOptions?.statusIdentity, treeOptions?.projectColor, mobile) : nothing}<span class="flex-1 min-w-0 truncate ${preparing ? "text-muted-foreground/60 italic" : ""}" data-testid="sidebar-session-title-text" style="${mobile ? "font-size: 1.3333em;" : ""}">${preparing ? "preparing…" : renderSessionTitle(displayTitle, isActive, state.searchQuery)}</span>${renderRuntimeBadge(session)}${renderModelUnavailableBadge(session)}${mobile ? html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span>${renderSessionTime(session)}` : ""}</div>
+					<div class="flex items-center gap-1 min-w-0 font-normal">${flat ? renderStatusIdentityIcon(treeOptions?.statusIdentity, treeOptions?.projectColor, mobile) : nothing}<span class="flex-1 min-w-0 truncate ${preparing ? "text-muted-foreground/60 italic" : ""}" data-testid="sidebar-session-title-text" style="${mobile ? "font-size: 1.3333em;" : ""}">${preparing ? "preparing…" : renderSessionTitle(displayTitle, isActive, state.searchQuery)}</span>${renderModelUnavailableBadge(session)}${mobile ? html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span>${renderSessionTime(session)}` : ""}</div>
 				`}
 			</div>
 			${mobile
@@ -1391,7 +1361,7 @@ export function renderArchivedSessionRow(session: GatewaySession, extraChildren 
 				${treeOptions?.goalTitle ? html`
 					${renderStatusGoalTitle(treeOptions.goalTitle, treeOptions.projectColor, mobile)}
 					<div class="sidebar-status-agent-title truncate" style=${`font-size:${mobile ? "1em" : "0.75em"};`}>${renderHighlightedText(displayTitle, state.searchQuery)}</div>
-				` : html`<div class="flex items-center gap-1 min-w-0" style="${mobile ? "font-size: 1.3333em;" : ""}">${flat ? renderStatusIdentityIcon(treeOptions?.statusIdentity, treeOptions?.projectColor, mobile) : nothing}<span class="truncate">${renderHighlightedText(displayTitle, state.searchQuery)}</span>${renderRuntimeBadge(session)}${renderModelUnavailableBadge(session)}</div>`}
+				` : html`<div class="flex items-center gap-1 min-w-0" style="${mobile ? "font-size: 1.3333em;" : ""}">${flat ? renderStatusIdentityIcon(treeOptions?.statusIdentity, treeOptions?.projectColor, mobile) : nothing}<span class="truncate">${renderHighlightedText(displayTitle, state.searchQuery)}</span>${renderModelUnavailableBadge(session)}</div>`}
 			</div>
 			${mobile
 				? html`${archivedTime}${buttons}`
@@ -1480,7 +1450,7 @@ function renderTeamLeadRow(session: GatewaySession, childCount: number, expanded
 					: statusBobbit(session.status, session.isCompacting, session.id, active, session.isAborting, true, false, session.accessory, false, false, true)}
 			</div>
 			<div class="flex-1 min-w-0 flex flex-col justify-center">
-				<div class="flex items-center gap-1 min-w-0 font-normal"><span class="flex-1 min-w-0 truncate" data-testid="sidebar-session-title-text" style="${mobile ? "font-size: 1.3333em;" : ""}">${renderSessionTitle(displayTitle, isActive, state.searchQuery)}</span>${renderRuntimeBadge(session)}${renderModelUnavailableBadge(session)}${mobile ? html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span>${renderSessionTime(session)}` : ""}</div>
+				<div class="flex items-center gap-1 min-w-0 font-normal"><span class="flex-1 min-w-0 truncate" data-testid="sidebar-session-title-text" style="${mobile ? "font-size: 1.3333em;" : ""}">${renderSessionTitle(displayTitle, isActive, state.searchQuery)}</span>${renderModelUnavailableBadge(session)}${mobile ? html`<span class="shrink-0 text-muted-foreground/40" style="font-size: 0.9167em;">·</span>${renderSessionTime(session)}` : ""}</div>
 			</div>
 			${mobile
 				? buttons

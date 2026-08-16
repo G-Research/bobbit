@@ -11,7 +11,7 @@ __syncBeforeAll(() => __syncCE());
 // every assertion (SB-05..08, SB-15, SB-34, SB-36).
 import { html, render } from "lit";
 import { describe, expect, it } from "vitest";
-import { terseRelativeTime, formatSessionAge, renderModelUnavailableBadge, renderReservedSessionTimestamp, renderRuntimeBadge, runtimeLabel } from "../../src/app/render-helpers.js";
+import { terseRelativeTime, formatSessionAge, renderModelUnavailableBadge, renderReservedSessionTimestamp, renderSessionRow, renderArchivedSessionRow } from "../../src/app/render-helpers.js";
 
 function hasUnseenActivity(session: any, activeId: string, goals: any[], visitedMap: Record<string, number>): boolean {
 	if (session.status === "streaming" || session.status === "busy") return false;
@@ -140,29 +140,57 @@ describe("SB-34: Keyboard shortcut actions", () => {
 	it("random key returns null", () => expect(getKeyboardShortcutAction("x", false, false, false, "BODY")).toBeNull());
 });
 
-describe("Session runtime badges", () => {
-	it("keeps the persisted SDK identity when its model is unavailable", () => {
-		const runtimeRoot = document.createElement("div");
-		const unavailableRoot = document.createElement("div");
-		const session = {
-			runtime: "claude-agent-sdk",
-			modelProvider: "claude-agent-sdk",
-			modelId: "claude-opus-4-6",
-			modelAvailable: false,
-		} as any;
-		render(renderRuntimeBadge(session), runtimeRoot);
-		render(renderModelUnavailableBadge(session), unavailableRoot);
+const runtimeIdentitySession = (id: string, overrides: Record<string, unknown> = {}) => ({
+	id,
+	title: `Session ${id}`,
+	cwd: "/fixture",
+	status: "idle",
+	createdAt: 1,
+	lastActivity: 1,
+	clientCount: 0,
+	runtime: "claude-agent-sdk",
+	modelProvider: "claude-agent-sdk",
+	modelId: "claude-opus-4-6",
+	modelAvailable: false,
+	...overrides,
+}) as any;
 
-		const runtime = runtimeRoot.querySelector('[data-runtime-badge]') as HTMLElement;
-		const unavailable = unavailableRoot.querySelector('[data-model-unavailable]') as HTMLElement;
-		expect(runtime.dataset.runtimeBadge).toBe("claude-agent-sdk");
-		expect(runtime.getAttribute("aria-label")).toBe("Session runtime: Claude Agent SDK");
-		expect(unavailable.textContent).toBe("Model unavailable");
-		expect(unavailable.getAttribute("title")).toContain("claude-agent-sdk/claude-opus-4-6");
+describe("Sidebar session runtime presentation", () => {
+	it("does not render runtime badges on live, archived, goal, delegate, or audit rows", () => {
+		const rows = [
+			["live", renderSessionRow(runtimeIdentitySession("live"))],
+			["archived", renderArchivedSessionRow(runtimeIdentitySession("archived", { archived: true, status: "archived" }))],
+			["goal", renderSessionRow(runtimeIdentitySession("goal"), { goalTitle: "Fixture goal" })],
+			["delegate", renderSessionRow(runtimeIdentitySession("delegate", { delegateOf: "live" }))],
+			["audit", renderArchivedSessionRow(runtimeIdentitySession("audit", { archived: true, status: "archived" }), false, { goalTitle: "Archived goal" })],
+		] as const;
+
+		for (const [kind, row] of rows) {
+			const root = document.createElement("div");
+			render(row, root);
+			expect(root.querySelector("[data-runtime-badge]"), kind).toBeNull();
+		}
 	});
 
-	it("defaults legacy rows without a runtime to Pi", () => {
-		expect(runtimeLabel(undefined)).toBe("Pi");
+	it("retains Model unavailable indicators without a runtime badge", () => {
+		const liveRoot = document.createElement("div");
+		const archivedRoot = document.createElement("div");
+		const session = runtimeIdentitySession("unavailable");
+		render(renderSessionRow(session), liveRoot);
+		render(renderArchivedSessionRow({ ...session, archived: true, status: "archived" }), archivedRoot);
+
+		for (const root of [liveRoot, archivedRoot]) {
+			const unavailable = root.querySelector('[data-model-unavailable]') as HTMLElement;
+			expect(root.querySelector("[data-runtime-badge]")).toBeNull();
+			expect(unavailable.textContent).toBe("Model unavailable");
+			expect(unavailable.getAttribute("title")).toContain("claude-agent-sdk/claude-opus-4-6");
+		}
+	});
+
+	it("keeps the unavailable badge's persisted model tuple", () => {
+		const root = document.createElement("div");
+		render(renderModelUnavailableBadge(runtimeIdentitySession("tuple")), root);
+		expect(root.querySelector('[data-model-unavailable]')?.getAttribute("title")).toContain("claude-agent-sdk/claude-opus-4-6");
 	});
 });
 

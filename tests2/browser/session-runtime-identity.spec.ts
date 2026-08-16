@@ -70,8 +70,8 @@ function sessionRow(page: Page, sessionId: string) {
 	return page.locator(`[data-session-id="${sessionId}"]`).first();
 }
 
-function runtimeBadge(row: ReturnType<typeof sessionRow>) {
-	return row.locator('[data-runtime-badge="claude-agent-sdk"]').first();
+function sidebarRuntimeBadges(row: ReturnType<typeof sessionRow>) {
+	return row.locator("[data-runtime-badge]");
 }
 
 async function showArchived(page: Page): Promise<void> {
@@ -101,7 +101,7 @@ async function selectSdkDefaultInModelsSettings(page: Page): Promise<void> {
 }
 
 test.describe("session runtime identity", () => {
-	test("SDK selection stays visible in live, reloaded, reconnected, archived, and unavailable audit rows", async ({ page, gateway }) => {
+	test("SDK selection persists without sidebar badges in live, reloaded, reconnected, archived, and unavailable audit rows", async ({ page, gateway }) => {
 		test.setTimeout(55_000);
 		queries.length = 0;
 		const originalPreferences = await (await apiFetch("/api/preferences")).json() as Record<string, unknown>;
@@ -137,11 +137,11 @@ test.describe("session runtime identity", () => {
 			await navigateToHash(page, `#/session/${sessionId}`);
 			const liveRow = sessionRow(page, sessionId);
 			await expect(liveRow).toBeVisible({ timeout: 20_000 });
-			await expect(runtimeBadge(liveRow)).toBeVisible();
+			await expect(sidebarRuntimeBadges(liveRow)).toHaveCount(0);
 
 			await page.reload({ waitUntil: "domcontentloaded" });
 			await navigateToHash(page, `#/session/${sessionId}`);
-			await expect(runtimeBadge(sessionRow(page, sessionId))).toBeVisible({ timeout: 20_000 });
+			await expect(sidebarRuntimeBadges(sessionRow(page, sessionId))).toHaveCount(0, { timeout: 20_000 });
 
 			await gateway.crash();
 			await gateway.restart();
@@ -153,7 +153,7 @@ test.describe("session runtime identity", () => {
 			}, { timeout: 30_000 }).toBe("claude-agent-sdk");
 			await page.reload({ waitUntil: "domcontentloaded" });
 			await navigateToHash(page, `#/session/${sessionId}`);
-			await expect(runtimeBadge(sessionRow(page, sessionId))).toBeVisible({ timeout: 20_000 });
+			await expect(sidebarRuntimeBadges(sessionRow(page, sessionId))).toHaveCount(0, { timeout: 20_000 });
 			expect(queries, "restart reconnect resumes through the SDK bridge").toHaveLength(2);
 
 			const archive = await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
@@ -171,7 +171,7 @@ test.describe("session runtime identity", () => {
 			await showArchived(page);
 			const archivedRow = sessionRow(page, sessionId);
 			await expect(archivedRow).toBeVisible({ timeout: 20_000 });
-			await expect(runtimeBadge(archivedRow)).toBeVisible();
+			await expect(sidebarRuntimeBadges(archivedRow)).toHaveCount(0);
 
 			const removed = await apiFetch(`/api/custom-providers/${SDK_PROVIDER}`, { method: "DELETE" });
 			expect(removed.status, await removed.text()).toBe(200);
@@ -193,7 +193,7 @@ test.describe("session runtime identity", () => {
 
 			await page.reload({ waitUntil: "domcontentloaded" });
 			await showArchived(page);
-			await expect(runtimeBadge(sessionRow(page, sessionId))).toBeVisible({ timeout: 20_000 });
+			await expect(sidebarRuntimeBadges(sessionRow(page, sessionId))).toHaveCount(0, { timeout: 20_000 });
 			await expect(sessionRow(page, sessionId)).toContainText("Model unavailable");
 		} finally {
 			if (sessionId) await deleteSession(sessionId).catch(() => undefined);
