@@ -1673,13 +1673,26 @@ export class ProjectSandbox {
 		return env;
 	}
 
+	/** Docker's only idempotent removal result: the exact requested container is absent. */
+	private _isConfirmedContainerAbsence(error: unknown, containerId: string): boolean {
+		const stderr = (error as { stderr?: unknown } | null)?.stderr;
+		if (typeof stderr !== "string") return false;
+		const escapedId = containerId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		return new RegExp(`^\\s*Error response from daemon: No such container: ${escapedId}\\s*$`, "u").test(stderr);
+	}
+
 	private async _removeContainer(containerId: string): Promise<void> {
 		try {
 			await this.execDocker(["rm", "-f", containerId], {
 				timeout: 15_000,
 				env: DOCKER_ENV,
 			});
-		} catch { /* already gone */ }
+		} catch (error) {
+			// A daemon, permission, timeout, or ambiguous failure leaves the current
+			// applied container authoritative and must abort its replacement.
+			if (this._isConfirmedContainerAbsence(error, containerId)) return;
+			throw error;
+		}
 	}
 
 	private async _dockerExec(
