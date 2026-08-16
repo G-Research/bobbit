@@ -26,7 +26,146 @@ async function expectPromotionLifecycleConflict(response: Response): Promise<voi
 	expect((await jsonResponse(response)).code).toBe("PROMOTED_SESSION_LIFECYCLE_CONFLICT");
 }
 
+async function createPromotionCandidate(gateway: any, label: string): Promise<{
+	ownerId: string;
+	context: any;
+}> {
+	const projectRoot = path.join(gateway.bobbitDir, `promotion-${label}-${randomUUID()}`);
+	copyGitTemplate(projectRoot);
+	const project = await registerProject({
+		name: `promotion-${label}-${Date.now()}`,
+		rootPath: projectRoot,
+		components: [{ name: "app", repo: "." }],
+		workflows: {
+			general: {
+				name: "General",
+				description: "Promotion compensation fixture",
+				gates: [{ id: "implementation", name: "Implementation", depends_on: [] }],
+			},
+		},
+	});
+	const ownerId = await createSession({ projectId: project.id, cwd: projectRoot });
+	await waitForSessionStatus(ownerId, "idle", 30_000);
+	const seeded = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/seed`, {
+		method: "POST",
+		body: JSON.stringify({
+			args: {
+				title: `Promote ${label}`,
+				spec: "Exercise promotion compensation.",
+				workflow: "general",
+				projectId: project.id,
+			},
+		}),
+	});
+	expect(seeded.status, await seeded.clone().text()).toBe(200);
+	const selected = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/worktree-mode`, {
+		method: "PUT",
+		body: JSON.stringify({ mode: "current-session" }),
+	});
+	expect(selected.status, await selected.clone().text()).toBe(200);
+	return {
+		ownerId,
+		context: gateway.projectContextManager.getOrCreate(project.id),
+	};
+}
+
 test.describe("current-session goal promotion API", () => {
+	test("removes gates and goal after an exact reservation release, then permits a clean retry", async ({ gateway, scope }) => {
+		const { ownerId, context } = await createPromotionCandidate(gateway, "released-compensation");
+		const goalManager = context.goalManager as any;
+		const sessionManager = gateway.sessionManager as any;
+		const originalCreateGoal = goalManager.createGoal;
+		const originalPromote = sessionManager.promoteToGoalLead;
+		let attemptedGoalId: string | undefined;
+		goalManager.createGoal = async function (...args: any[]) {
+			const goal = await originalCreateGoal.apply(this, args);
+			attemptedGoalId = goal.id;
+			return goal;
+		};
+		sessionManager.promoteToGoalLead = async () => {
+			throw new Error("forced pre-commit promotion failure");
+		};
+
+		let failed: Response;
+		try {
+			failed = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
+				method: "POST",
+				body: JSON.stringify({ title: "Promote released compensation" }),
+			});
+		} finally {
+			goalManager.createGoal = originalCreateGoal;
+			sessionManager.promoteToGoalLead = originalPromote;
+		}
+		expect(failed!.status).toBe(400);
+		expect(attemptedGoalId).toBeTruthy();
+		expect(context.goalStore.get(attemptedGoalId!)).toBeUndefined();
+		expect(context.gateStore.getGatesForGoal(attemptedGoalId!)).toEqual([]);
+		expect(gateway.teamManager.getTeamState(attemptedGoalId!)).toBeUndefined();
+
+		const retry = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
+			method: "POST",
+			body: JSON.stringify({ title: "Promote released compensation" }),
+		});
+		expect(retry.status, await retry.clone().text()).toBe(201);
+		const retriedGoal = await jsonResponse(retry);
+		scope.trackGoal(retriedGoal.id);
+		expect(retriedGoal.id).not.toBe(attemptedGoalId);
+		expect((await sessionRecord(ownerId))).toMatchObject({
+			goalId: retriedGoal.id,
+			teamGoalId: retriedGoal.id,
+			role: "team-lead",
+		});
+	});
+
+	test("retains the recoverable goal, gates, and lead when reservation release is refused", async ({ gateway, scope }) => {
+		const { ownerId, context } = await createPromotionCandidate(gateway, "refused-compensation");
+		const teamManager = gateway.teamManager as any;
+		const sessionManager = gateway.sessionManager as any;
+		const originalRelease = teamManager.releaseAdoptedLead;
+		const originalPromote = sessionManager.promoteToGoalLead;
+		teamManager.releaseAdoptedLead = async () => false;
+		sessionManager.promoteToGoalLead = async () => {
+			throw new Error("forced pre-commit promotion failure");
+		};
+
+		let failed: Response;
+		try {
+			failed = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
+				method: "POST",
+				body: JSON.stringify({ title: "Promote refused compensation" }),
+			});
+		} finally {
+			teamManager.releaseAdoptedLead = originalRelease;
+			sessionManager.promoteToGoalLead = originalPromote;
+		}
+		expect(failed!.status).toBe(400);
+		const retainedGoals = context.goalStore.getAll()
+			.filter((goal: any) => goal.worktreeOwnerSessionId === ownerId && !goal.archived);
+		expect(retainedGoals).toHaveLength(1);
+		const retainedGoal = retainedGoals[0];
+		expect(context.gateStore.getGatesForGoal(retainedGoal.id)).toHaveLength(1);
+		expect(gateway.teamManager.getTeamState(retainedGoal.id)).toMatchObject({
+			teamLeadSessionId: ownerId,
+			agents: [],
+		});
+		expect(await sessionRecord(ownerId)).toMatchObject({ role: "general" });
+
+		const retry = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
+			method: "POST",
+			body: JSON.stringify({ title: "Promote refused compensation" }),
+		});
+		expect(retry.status, await retry.clone().text()).toBe(201);
+		const retriedGoal = await jsonResponse(retry);
+		scope.trackGoal(retriedGoal.id);
+		expect(retriedGoal.id).toBe(retainedGoal.id);
+		expect(context.gateStore.getGatesForGoal(retainedGoal.id)).toHaveLength(1);
+		expect(await sessionRecord(ownerId)).toMatchObject({
+			goalId: retainedGoal.id,
+			teamGoalId: retainedGoal.id,
+			role: "team-lead",
+		});
+	});
+
 	test("persists owner mode, rejects authority, and promotes exactly in place", async ({ gateway, scope }) => {
 		const projectRoot = path.join(gateway.bobbitDir, `promotion-api-${randomUUID()}`);
 		copyGitTemplate(projectRoot);

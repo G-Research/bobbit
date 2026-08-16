@@ -15842,7 +15842,6 @@ async function handleApiRoute(
 					? body.enabledOptionalSteps as string[]
 					: undefined;
 				let goal: PersistedGoal | undefined;
-				let reserved = false;
 				let committed = false;
 				let baselineGeneralRoleCleared = false;
 				try {
@@ -15874,7 +15873,6 @@ async function handleApiRoute(
 					if (goal.workflow) targetCtx.gateStore.initGatesForGoal(goal.id, goal.workflow.gates.map(gate => gate.id));
 					await Promise.all([targetCtx.goalStore.flush(), targetCtx.gateStore.flush()]);
 					await teamManager.adoptExistingLead(goal.id, ownerSessionId);
-					reserved = true;
 					// `general` is the baseline role attached to every ordinary session,
 					// not a workflow relationship. SessionManager's staged promotion guard
 					// intentionally rejects real assigned roles, so remove this one baseline
@@ -15905,10 +15903,16 @@ async function handleApiRoute(
 						await targetCtx.sessionStore.flushAsync().catch(() => undefined);
 					}
 					if (goal && !committed) {
-						if (reserved) await teamManager.releaseAdoptedLead(goal.id, ownerSessionId).catch(() => false);
-						targetCtx.gateStore.removeGoalGates(goal.id);
-						await targetCtx.gateStore.flush().catch(() => undefined);
-						await targetCtx.goalManager.deleteAdoptedGoalAttempt(goal.id, ownerSessionId).catch(() => false);
+						// Goal/gate compensation is safe only after TeamManager confirms the
+						// exact empty owner reservation was released (or was provably absent).
+						// A false/failed release means the graph changed under this attempt;
+						// retain it intact so retry/boot reconciliation can finish promotion.
+						const reservationReleased = await teamManager.releaseAdoptedLead(goal.id, ownerSessionId).catch(() => false);
+						if (reservationReleased) {
+							targetCtx.gateStore.removeGoalGates(goal.id);
+							await targetCtx.gateStore.flush().catch(() => undefined);
+							await targetCtx.goalManager.deleteAdoptedGoalAttempt(goal.id, ownerSessionId).catch(() => false);
+						}
 					}
 					throw error;
 				}
