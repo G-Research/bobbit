@@ -162,17 +162,21 @@ test.describe("project-import proposal route — canonical effects", () => {
 			expect(context.decisionRequestStore.claimImportProposal(identity, new Date().toISOString()).claimed).toBe(true);
 			await gateway.crash();
 			await gateway.restart();
-			// Recovery happens during boot: this is the first request/context access after restart.
-			expect((await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-proposals`, { headers: { Cookie: cookie } })).status).toBe(200);
-			const restarted = gateway.projectContextManager.getOrCreate(projectId)!;
-			const settled = restarted.decisionRequestStore.get(requestId!);
-			expect(settled.proposal).toMatchObject({ status: "accepted", application: { key: identity.key } });
-			expect(settled.proposal.auditedAt).toEqual(expect.any(String));
-			expect(restarted.roleStore.get("route-import-role")).toMatchObject({ label: "Route import role" });
-			expect(auditRows(path.join(gateway.bobbitDir, "state"), projectId, importId).filter(entry => entry.auditKey === identity.key)).toHaveLength(1);
+			// No route or getOrCreate call may warm this context: boot replay itself must
+			// open the durable owner. Reading the private map is deliberately non-creating.
+			await expect(async () => {
+				const restarted = (gateway.projectContextManager as any).contexts.get(projectId);
+				expect(restarted).toBeTruthy();
+				const settled = restarted.decisionRequestStore.get(requestId!);
+				expect(settled.proposal).toMatchObject({ status: "accepted", application: { key: identity.key } });
+				expect(settled.proposal.auditedAt).toEqual(expect.any(String));
+				expect(restarted.roleStore.get("route-import-role")).toMatchObject({ label: "Route import role" });
+				expect(auditRows(path.join(gateway.bobbitDir, "state"), projectId, importId).filter(entry => entry.auditKey === identity.key)).toHaveLength(1);
+			}).toPass();
 			await gateway.crash();
 			await gateway.restart();
-			const again = gateway.projectContextManager.getOrCreate(projectId)!;
+			const again = (gateway.projectContextManager as any).contexts.get(projectId);
+			expect(again).toBeTruthy();
 			expect(again.roleStore.get("route-import-role")).toMatchObject({ label: "Route import role" });
 			expect(auditRows(path.join(gateway.bobbitDir, "state"), projectId, importId).filter(entry => entry.auditKey === identity.key)).toHaveLength(1);
 		} finally {

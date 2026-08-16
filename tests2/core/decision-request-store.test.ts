@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { describe, it } from "vitest";
 import {
@@ -7,6 +9,13 @@ import {
 	type DecisionMemory,
 	type StoredDecisionRequest,
 } from "../../src/server/agent/decision-request-store.ts";
+import {
+	ProjectImportProposalApplicationService,
+	projectImportApplicationKey,
+	projectImportSnapshotSha256,
+} from "../../src/server/proposals/project-import-proposal-application.ts";
+import { writeSnapshot } from "../../src/server/proposals/proposal-files.ts";
+import { proposalDraftOwnerId } from "../../src/server/proposals/proposal-seed-service.ts";
 import { createMemFs, type MemFs } from "../harness/mem-fs.js";
 
 let memfs: MemFs = createMemFs();
@@ -187,6 +196,127 @@ describe("DecisionRequestStore", () => {
 		assert.ok(restartedProposal?.status === "accepted");
 		assert.equal(restartedProposal.auditedAt, "2026-01-01T00:03:01.000Z", "restart replay observes the durable audit fence");
 		assert.deepEqual(restarted.listApplyingImportProposals("import-1"), []);
+	});
+
+	it("recovers exactly one effect when a durable claim rename succeeds then throws", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "decision-request-claim-ambiguity-"));
+		const requestId = "request-claim-ambiguity";
+		const importId = "import-claim-ambiguity";
+		const snapshot = "name: claimed-role\nlabel: Claimed role\nprompt: Recovered from an exact durable claim.\n";
+		const identity = {
+			projectId: "project-1", importId, requestId, type: "role" as const, rev: 1,
+			snapshotSha256: projectImportSnapshotSha256(snapshot),
+			key: projectImportApplicationKey({ projectId: "project-1", importId, requestId, type: "role", rev: 1, snapshot }),
+		};
+		let armClaimThrow = false;
+		let throwAfterRename = true;
+		const fsThatThrowsAfterPublish = new Proxy(fs, {
+			get(target, property, receiver) {
+				if (property === "renameSync") return (from: fs.PathLike, to: fs.PathLike) => {
+					target.renameSync(from, to);
+					if (armClaimThrow && throwAfterRename && path.resolve(String(to)) === path.join(dir, "extension-decision-requests.json")) {
+						throwAfterRename = false;
+						throw new Error("injected claim rename succeeded then threw");
+					}
+				};
+				const value = Reflect.get(target, property, receiver);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+		try {
+			const store = new DecisionRequestStore(dir, fsThatThrowsAfterPublish as any);
+			const imported = request(requestId, {
+				sessionId: undefined, goalId: undefined, delivery: { kind: "project-import", importId },
+				asker: { packId: "pack-1", hookId: "hook-1", event: "projectImported" }, request: { ...request("seed").request, scope: "project" },
+			});
+			assert.equal(store.put(imported), true);
+			assert.equal(store.writeTerminalFirst(requestId, { status: "resolved", resolvedAt: "2026-01-01T00:01:00.000Z", resolution: { value: { kind: "option", value: "safe" }, actor: "user", reason: "answered" } }).written, true);
+			assert.equal(store.updateProposal(requestId, { status: "created", type: "role", rev: 1 }), true);
+			const owner = proposalDraftOwnerId({ kind: "project-import", projectId: identity.projectId, importId, requestId });
+			await writeSnapshot(dir, owner, "role", 1, snapshot);
+
+			armClaimThrow = true;
+			const ambiguousClaim = store.claimImportProposal(identity, "2026-01-01T00:02:00.000Z");
+			assert.equal(ambiguousClaim.claimed, false, "the caller must not execute after an unknown publish result");
+			assert.equal(throwAfterRename, false, "the target rename must happen before the injected throw");
+			const bytes = fs.readFileSync(path.join(dir, "extension-decision-requests.json"), "utf8");
+			assert.match(bytes, new RegExp(identity.key));
+			assert.equal(JSON.parse(bytes).requests[requestId].proposal.status, "applying", "the real durable bytes own recovery");
+
+			const restarted = new DecisionRequestStore(dir, fs as any);
+			const applying = restarted.get(requestId)!;
+			assert.equal(applying.proposal?.status, "applying");
+			let effectCalls = 0;
+			const application = new ProjectImportProposalApplicationService(Object.fromEntries(["goal", "project", "workflow", "role", "tool", "staff"].map(type => [type, async () => {
+				effectCalls++;
+				return { outcome: { role: "claimed-role" } };
+			}])) as any);
+			assert.deepEqual(await application.reconcileApplying(dir, applying, identity), { outcome: { role: "claimed-role" } });
+			assert.equal(effectCalls, 1, "only boot recovery executes the durably claimed effect");
+			assert.equal(restarted.finalizeImportProposal(identity, "2026-01-01T00:03:00.000Z", { role: "claimed-role" }), true);
+			assert.deepEqual(new DecisionRequestStore(dir, fs as any).listApplyingImportProposals(importId), [], "the finalized replay cannot execute again");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not replay an effect when a durable finalize rename succeeds then throws", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "decision-request-finalize-ambiguity-"));
+		const requestId = "request-finalize-ambiguity";
+		const importId = "import-finalize-ambiguity";
+		const snapshot = "name: finalized-role\nlabel: Finalized role\nprompt: Already applied before finalization ambiguity.\n";
+		const identity = {
+			projectId: "project-1", importId, requestId, type: "role" as const, rev: 1,
+			snapshotSha256: projectImportSnapshotSha256(snapshot),
+			key: projectImportApplicationKey({ projectId: "project-1", importId, requestId, type: "role", rev: 1, snapshot }),
+		};
+		let armFinalizeThrow = false;
+		let throwAfterRename = true;
+		const fsThatThrowsAfterFinalize = new Proxy(fs, {
+			get(target, property, receiver) {
+				if (property === "renameSync") return (from: fs.PathLike, to: fs.PathLike) => {
+					target.renameSync(from, to);
+					if (armFinalizeThrow && throwAfterRename && path.resolve(String(to)) === path.join(dir, "extension-decision-requests.json")) {
+						throwAfterRename = false;
+						throw new Error("injected finalize rename succeeded then threw");
+					}
+				};
+				const value = Reflect.get(target, property, receiver);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+		try {
+			const store = new DecisionRequestStore(dir, fsThatThrowsAfterFinalize as any);
+			const imported = request(requestId, {
+				sessionId: undefined, goalId: undefined, delivery: { kind: "project-import", importId },
+				asker: { packId: "pack-1", hookId: "hook-1", event: "projectImported" }, request: { ...request("seed").request, scope: "project" },
+			});
+			assert.equal(store.put(imported), true);
+			assert.equal(store.writeTerminalFirst(requestId, { status: "resolved", resolvedAt: "2026-01-01T00:01:00.000Z", resolution: { value: { kind: "option", value: "safe" }, actor: "user", reason: "answered" } }).written, true);
+			assert.equal(store.updateProposal(requestId, { status: "created", type: "role", rev: 1 }), true);
+			assert.equal(store.claimImportProposal(identity, "2026-01-01T00:02:00.000Z").claimed, true);
+			let effectCalls = 0;
+			const application = new ProjectImportProposalApplicationService(Object.fromEntries(["goal", "project", "workflow", "role", "tool", "staff"].map(type => [type, async () => {
+				effectCalls++;
+				return { outcome: { role: "finalized-role" } };
+			}])) as any);
+			assert.deepEqual(await application.apply({ ...identity, snapshot, proposal: { type: "role", fields: { name: "finalized-role", label: "Finalized role", prompt: "Already applied before finalization ambiguity." } } }), { outcome: { role: "finalized-role" } });
+			assert.equal(effectCalls, 1);
+
+			armFinalizeThrow = true;
+			assert.equal(store.finalizeImportProposal(identity, "2026-01-01T00:03:00.000Z", { role: "finalized-role" }), false, "the caller sees an ambiguous finalize result");
+			assert.equal(throwAfterRename, false, "the exact finalizing rename must happen before the injected throw");
+			const bytes = fs.readFileSync(path.join(dir, "extension-decision-requests.json"), "utf8");
+			assert.match(bytes, new RegExp(identity.key));
+			assert.equal(JSON.parse(bytes).requests[requestId].proposal.status, "accepted", "the real durable bytes fence a duplicate effect");
+
+			const restarted = new DecisionRequestStore(dir, fs as any);
+			assert.equal(restarted.get(requestId)?.proposal?.status, "accepted");
+			assert.deepEqual(restarted.listApplyingImportProposals(importId), []);
+			assert.equal(effectCalls, 1, "restart observes accepted bytes and does not replay the canonical effect");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("fails closed on malformed tagged proposal states", () => {
