@@ -143,6 +143,18 @@ export class ReliableTurnRuntime {
 		return this.push(this.steerAckHolds, text, new TurnBarrier(label));
 	}
 
+	/** Task notifications are trusted system prompts, so Pi receives their stable System prefix. */
+	holdTaskNotificationEcho(text: string, label = `task-notification:${text}`): TurnBarrier {
+		return this.holdEcho(`[System]: ${text}`, label);
+	}
+
+	/** Dispatch through the production task-notification source without supplying a browser-owned id. */
+	dispatchTaskNotifications(texts: readonly string[]): Promise<unknown[]> {
+		return Promise.all(texts.map((text) =>
+			this.sessionManager.deliverLiveSteer(this.sessionId, text, { source: "task-notification" }),
+		));
+	}
+
 	failSteer(text: string, message = "fixture definite pre-dispatch rejection"): void {
 		this.push(this.steerFailures, text, new Error(message));
 	}

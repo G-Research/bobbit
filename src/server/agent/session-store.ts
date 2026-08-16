@@ -89,10 +89,9 @@ function validLedgerInteger(value: unknown): value is number {
 
 /**
  * Normalize persisted dispatch evidence and migrate legacy string/structured
- * rows. Modern active attempts are unique by intent id; when corrupt state
- * contains two, the first durable occurrence wins and later rows are ignored.
- * Legacy rows retain their historical shape so the existing restore reconciler
- * can migrate them without pretending they carry modern attempt evidence.
+ * rows. Modern active attempts are unique by intent id. Every historical
+ * row is upgraded to a distinct deterministic uncertain carrier so recovery
+ * never correlates or replays work by its text body.
  */
 export function normalizePersistedInFlightSteers(
 	entries: readonly PersistedInFlightSteer[] | undefined,
@@ -104,9 +103,21 @@ export function normalizePersistedInFlightSteers(
 		const entry = entries[index];
 		if (typeof entry === "string") {
 			if (entry.length === 0) continue;
+			const intentId = `legacy-inflight-steer:${index}`;
+			if (activeIntentIds.has(intentId)) continue;
+			activeIntentIds.add(intentId);
 			records.push({
 				text: entry,
-				promptId: `legacy-inflight-steer:${index}`,
+				promptId: intentId,
+				intentId,
+				attemptId: `attempt:legacy-inflight:${intentId}`,
+				dispatchEpoch: index,
+				state: "uncertain",
+				targetTurn: "continuation",
+				sequence: index + 1,
+				kind: "steer",
+				createdAt: index,
+				retryable: false,
 				source: "user",
 				author: { ...LOCAL_USER_AUTHOR },
 			});
@@ -119,30 +130,52 @@ export function normalizePersistedInFlightSteers(
 		const promptId = validLedgerKey(entry.promptId)
 			? entry.promptId
 			: `legacy-inflight-steer:${index}`;
-		const modernAttempt = validLedgerKey(entry.intentId)
+		const completeModernAttempt = validLedgerKey(entry.intentId)
 			&& validLedgerKey(entry.attemptId)
 			&& validLedgerInteger(entry.dispatchEpoch);
-		if (modernAttempt && activeIntentIds.has(entry.intentId!)) continue;
-		if (modernAttempt) activeIntentIds.add(entry.intentId!);
-		const record: InFlightSteerRecord = modernAttempt
-			? {
-				text: entry.text,
-				promptId,
-				intentId: entry.intentId,
-				attemptId: entry.attemptId,
-				dispatchEpoch: entry.dispatchEpoch,
-				state: entry.state === "dispatching" || entry.state === "received" || entry.state === "uncertain"
-					? entry.state
-					: "uncertain",
-				targetTurn: entry.targetTurn === "next-turn" || entry.targetTurn === "continuation"
-					? entry.targetTurn
-					: "continuation",
-				sequence: validLedgerInteger(entry.sequence) ? entry.sequence : index + 1,
-				kind: entry.kind === "prompt" || entry.kind === "steer" ? entry.kind : "steer",
-				createdAt: validLedgerInteger(entry.createdAt) ? entry.createdAt : entry.dispatchEpoch,
-				retryable: typeof entry.retryable === "boolean" ? entry.retryable : false,
-			}
-			: { text: entry.text, promptId };
+		// Pre-reliable records were accepted by Pi without an occurrence tuple.
+		// Migrate each persisted position into a stable, fail-closed carrier rather
+		// than trying to correlate it by body text. A completed modern tuple keeps
+		// its identity; malformed/old tuples get a deterministic legacy identity.
+		// An existing reliable occurrence identity is authoritative. A second
+		// persisted active record claiming it cannot be safely replayed, settled, or
+		// reminted as distinct work, so retain the first occurrence and drop it.
+		if (validLedgerKey(entry.intentId) && activeIntentIds.has(entry.intentId)) continue;
+		const baseIntentId = completeModernAttempt
+			? entry.intentId!
+			: validLedgerKey(entry.intentId)
+				? entry.intentId
+				: `legacy-inflight-steer:${promptId}`;
+		let intentId = baseIntentId;
+		let duplicate = 1;
+		while (activeIntentIds.has(intentId)) intentId = `${baseIntentId}:${duplicate++}`;
+		activeIntentIds.add(intentId);
+		const modernAttempt = completeModernAttempt && intentId === entry.intentId;
+		const dispatchEpoch = modernAttempt
+			? entry.dispatchEpoch!
+			: validLedgerInteger(entry.dispatchEpoch)
+				? entry.dispatchEpoch
+				: validLedgerInteger(entry.createdAt)
+					? entry.createdAt
+					: index;
+		const record: InFlightSteerRecord = {
+			text: entry.text,
+			promptId,
+			intentId,
+			attemptId: modernAttempt ? entry.attemptId : `attempt:legacy-inflight:${intentId}`,
+			dispatchEpoch,
+			// Historical handoffs cannot be safely retried or treated as echoed.
+			state: modernAttempt && (entry.state === "dispatching" || entry.state === "received" || entry.state === "uncertain")
+				? entry.state
+				: "uncertain",
+			targetTurn: entry.targetTurn === "next-turn" || entry.targetTurn === "continuation"
+				? entry.targetTurn
+				: "continuation",
+			sequence: validLedgerInteger(entry.sequence) ? entry.sequence : index + 1,
+			kind: entry.kind === "prompt" || entry.kind === "steer" ? entry.kind : "steer",
+			createdAt: validLedgerInteger(entry.createdAt) ? entry.createdAt : dispatchEpoch,
+			retryable: modernAttempt && typeof entry.retryable === "boolean" ? entry.retryable : false,
+		};
 		if (isPromptSource(entry.source)) record.source = entry.source;
 		if (isMessageAuthor(entry.author)) {
 			record.author = entry.author;
@@ -392,6 +425,8 @@ export class SessionStore {
 	private persistenceFailureSequence = 0;
 	private lastPersistenceError: unknown = null;
 	private lastPersistenceMetrics: PersistenceMetrics | null = null;
+	/** Legacy delivery ledger rows were upgraded in-memory during load. */
+	private loadedDeliveryLedgerMigration = false;
 
 	/**
 	 * Serialize whole-file publication across store instances in this process.
@@ -406,6 +441,9 @@ export class SessionStore {
 		this.storeDir = stateDir;
 		this.storeFile = path.join(stateDir, "sessions.json");
 		this.load();
+		// Publish a structural delivery-ledger migration without waiting for a
+		// later queue mutation; otherwise a crash could reintroduce text-only rows.
+		if (this.loadedDeliveryLedgerMigration) this.saveNow();
 	}
 
 	/** Normalise PersistedSession-shaped rows read from disk (legacy field migration). */
@@ -433,9 +471,17 @@ export class SessionStore {
 				else if (s.toolAssistant) s.assistantType = "tool";
 			}
 			if (Array.isArray(s.inFlightSteerTexts)) {
-				s.inFlightSteerTexts = normalizePersistedInFlightSteers(s.inFlightSteerTexts);
+				const originalLedger = s.inFlightSteerTexts;
+				const normalizedLedger = normalizePersistedInFlightSteers(originalLedger);
+				// JSON comparison is intentional at this disk boundary: the normalized
+				// shape is JSON-only and a structural difference must be durably saved.
+				if (JSON.stringify(originalLedger) !== JSON.stringify(normalizedLedger)) {
+					this.loadedDeliveryLedgerMigration = true;
+				}
+				s.inFlightSteerTexts = normalizedLedger;
 			} else if (s.inFlightSteerTexts !== undefined) {
 				s.inFlightSteerTexts = undefined;
+				this.loadedDeliveryLedgerMigration = true;
 			}
 			this.sessions.set(s.id, s);
 		}
