@@ -77,7 +77,7 @@ test("canonical proposal resolves registered workflow, inline roles, and optiona
 	};
 	const result = await applyCanonicalGoalProposal({
 		title: "Proposal", projectId: "project", cwd: "/project", workflowId: "registered",
-		enabledOptionalSteps: ["lint"], inlineRoles: { reviewer: { name: "reviewer", label: "Reviewer", promptTemplate: "Review", accessory: "none", createdAt: 1, updatedAt: 1 } },
+		enabledOptionalSteps: ["lint", "stale hidden option"], inlineRoles: { reviewer: { name: "reviewer", label: "Reviewer", promptTemplate: "Review", accessory: "none", createdAt: 1, updatedAt: 1 } },
 	}, {
 		resolveProject: () => ({ id: "project", name: "Project", rootPath: "/project" }),
 		validateCwd: () => undefined,
@@ -92,6 +92,23 @@ test("canonical proposal resolves registered workflow, inline roles, and optiona
 	expect(received).toMatchObject({ workflowId: "registered", enabledOptionalSteps: ["lint"] });
 	expect(received.inlineRoles.reviewer.name).toBe("reviewer");
 	expect(gates).toEqual([["design"]]);
+});
+
+test("canonical proposal ignores malformed optional steps", async () => {
+	let received: any;
+	const workflow = { id: "registered", name: "Registered", description: "", gates: [{ id: "gate", name: "Gate", dependsOn: [], verify: [] }], createdAt: 1, updatedAt: 1 };
+	const context: any = {
+		goalManager: { getGoal: () => undefined, listGoals: () => [], createGoal: async (_title: string, _cwd: string, options: any) => { received = options; return { id: "goal", workflow: options.resolvedWorkflow }; }, updateGoal: () => undefined, getGoalStore: () => ({ flush: async () => undefined }) },
+		gateStore: { initGatesForGoal: () => undefined, flush: async () => undefined },
+		workflowStore: { get: () => workflow, getAll: () => [workflow], put: () => undefined },
+		projectConfigStore: { getComponents: () => [] },
+	};
+	await applyCanonicalGoalProposal({ title: "Proposal", cwd: "/project", workflowId: "registered", enabledOptionalSteps: ["valid", 1] }, {
+		resolveProject: () => ({ id: "project", name: "Project", rootPath: "/project" }), validateCwd: () => undefined, getContext: () => context,
+		findGoalAcrossProjects: () => undefined, getNestingPrefs: () => ({ subgoalsEnabled: false, maxNestingDepth: 3 }),
+		findCascadeWorkflow: () => workflow, afterCreate: () => undefined,
+	});
+	expect(received.enabledOptionalSteps).toBeUndefined();
 });
 
 test("canonical goal rejects invalid creation input before persistence", async () => {
@@ -124,6 +141,38 @@ test("canonical goal reports lifecycle scheduling failures instead of leaking an
 	expect(errors[0]).toBeInstanceOf(Error);
 });
 
+test("canonical goal single-flight shares failures and permits retry", async () => {
+	const failure = new Error("create failed");
+	let attempts = 0;
+	const deps = {
+		findByApplicationKey: () => undefined,
+		create: async () => { attempts++; if (attempts === 1) throw failure; return { id: "goal", workflow: { gates: [] } }; },
+		update: () => undefined, initGates: () => undefined, flush: async () => undefined, afterCreate: () => undefined,
+	};
+	const input = { title: "Goal", cwd: "/project", projectId: "project", autoStartTeam: false, applicationKey: "same-key", options: {} };
+	const first = createCanonicalGoal(input, deps);
+	const second = createCanonicalGoal(input, deps);
+	await expect(first).rejects.toBe(failure);
+	await expect(second).rejects.toBe(failure);
+	expect(attempts).toBe(1);
+	expect((await createCanonicalGoal(input, deps)).replayed).toBe(false);
+	expect(attempts).toBe(2);
+});
+
+test("durable canonical goal replay does not re-run gates or lifecycle setup", async () => {
+	const existing = { id: "goal", metadata: { [CANONICAL_MUTATION_KEY]: "key" }, workflow: { gates: [{ id: "gate" }] } };
+	let gates = 0;
+	let lifecycle = 0;
+	const replay = await createCanonicalGoal({ title: "Goal", cwd: "/project", autoStartTeam: true, applicationKey: "key", options: {} }, {
+		findByApplicationKey: () => existing, create: async () => { throw new Error("must not create"); }, update: () => undefined,
+		initGates: () => { gates++; }, flush: async () => undefined, afterCreate: () => { lifecycle++; },
+	});
+	await Promise.resolve();
+	expect(replay).toEqual({ goal: existing, replayed: true });
+	expect(gates).toBe(0);
+	expect(lifecycle).toBe(0);
+});
+
 test("canonical project registration replays by server key and rolls back rejected configuration", async () => {
 	const projects: Array<any> = [];
 	let removed = 0;
@@ -148,6 +197,35 @@ test("canonical project registration replays by server key and rolls back reject
 	await expect(mutateCanonicalProject({ mode: "register", name: "Project", rootPath: "/project" }, { ...deps, applyConfiguration: () => { throw new Error("invalid config"); } })).rejects.toThrow("invalid config");
 	expect(removed).toBe(1);
 	await expect(mutateCanonicalProject({ mode: "register", name: "Project", rootPath: "relative" }, deps)).rejects.toThrow("absolute");
+});
+
+test("canonical project registration single-flights success and failure", async () => {
+	let projects: Array<any> = [];
+	let registrations = 0;
+	let fail = false;
+	const deps = {
+		findByApplicationKey: (key: string) => projects.find(project => project.key === key),
+		register: (key?: string) => { registrations++; const project = { id: `project-${registrations}`, rootPath: "/project", key }; projects.push(project); return project; },
+		get: () => undefined, update: () => undefined, promote: () => { throw new Error("unused"); },
+		applyConfiguration: async () => { if (fail) throw new Error("configuration failed"); },
+		removeRegistered: (project: any) => { projects = projects.filter(candidate => candidate !== project); }, removeContext: async () => undefined,
+		openContext: async () => true, suspendServices: async () => undefined, stopServices: async () => undefined, reconcileServices: async () => undefined,
+	};
+	const input = { mode: "register" as const, name: "Project", rootPath: "/project", applicationKey: "key" };
+	const [first, second] = await Promise.all([mutateCanonicalProject(input, deps), mutateCanonicalProject(input, deps)]);
+	expect(registrations).toBe(1);
+	expect(first.replayed).toBe(false);
+	expect(second).toMatchObject({ project: first.project, replayed: true });
+	projects = [];
+	registrations = 0;
+	fail = true;
+	const failed = await Promise.allSettled([mutateCanonicalProject(input, deps), mutateCanonicalProject(input, deps)]);
+	expect(registrations).toBe(1);
+	expect(failed.map(result => result.status)).toEqual(["rejected", "rejected"]);
+	expect((failed[0] as PromiseRejectedResult).reason).toBe((failed[1] as PromiseRejectedResult).reason);
+	fail = false;
+	expect((await mutateCanonicalProject(input, deps)).replayed).toBe(false);
+	expect(registrations).toBe(2);
 });
 
 test("project registry persists and reloads only a valid server-owned canonical mutation key", () => {

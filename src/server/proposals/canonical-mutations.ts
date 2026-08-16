@@ -38,7 +38,33 @@ const CANONICAL_APPLICATION_KEY = /^[A-Za-z0-9_.:-]{1,256}$/;
 
 // Serializes same-process duplicate applications until the durable marker is
 // flushed. A restart uses findByApplicationKey against the persisted record.
-const inFlightGoalApplications = new Map<string, Promise<void>>();
+// Keys include mutation kind and project scope: a coincident client key must
+// never collapse unrelated projects or mutation types.
+const inFlightCanonicalApplications = new Map<string, Promise<unknown>>();
+
+async function applySingleFlight<T extends { replayed: boolean }>(
+  scopeKey: string,
+  apply: () => Promise<T>,
+): Promise<T> {
+  const inFlight = inFlightCanonicalApplications.get(scopeKey) as
+    | Promise<T>
+    | undefined;
+  if (inFlight) {
+    // Await the actual outcome, rather than a completion signal followed by a
+    // second lookup. This gives every concurrent caller the same failure too.
+    const outcome = await inFlight;
+    return { ...outcome, replayed: true };
+  }
+  const operation = Promise.resolve().then(apply);
+  inFlightCanonicalApplications.set(scopeKey, operation);
+  try {
+    return await operation;
+  } finally {
+    if (inFlightCanonicalApplications.get(scopeKey) === operation) {
+      inFlightCanonicalApplications.delete(scopeKey);
+    }
+  }
+}
 
 function assertCanonicalApplicationKey(value: string | undefined): void {
 	if (value !== undefined && !CANONICAL_APPLICATION_KEY.test(value)) {
@@ -393,7 +419,7 @@ type CanonicalGoalContext = {
   };
   workflowStore: WorkflowStore;
   projectConfigStore: {
-    getComponents(): Array<{ name: string; commands?: Record<string, string> }>;
+    getComponents(): WorkflowComponentRef[];
   };
 };
 
@@ -548,6 +574,9 @@ export async function applyCanonicalGoalProposal(
       seeds.parent = buildParentWorkflow();
       for (const seeded of Object.values(seeds))
         context.workflowStore.put(seeded as Workflow);
+      console.log(
+        `[api] Auto-seeded ${Object.keys(seeds).length} default workflows for project "${project.name}" on first goal creation`,
+      );
       workflow = requestedWorkflowId
         ? context.workflowStore.get(requestedWorkflowId)
         : (context.workflowStore.get("general") ??
@@ -571,7 +600,7 @@ export async function applyCanonicalGoalProposal(
   if (workflow)
     workflow = freezeWorkflowDefinition(
       workflow,
-      context.projectConfigStore.getComponents() as WorkflowComponentRef[],
+      context.projectConfigStore.getComponents(),
       workflowId,
       { validateComponentReferences: false },
     );
@@ -620,18 +649,14 @@ export async function applyCanonicalGoalProposal(
     Object.keys(proposal.metadata).length > 0
       ? (proposal.metadata as Record<string, unknown>)
       : undefined;
-  if (
-    proposal.enabledOptionalSteps !== undefined &&
-    (!Array.isArray(proposal.enabledOptionalSteps) ||
-      !proposal.enabledOptionalSteps.every((item) => typeof item === "string"))
-  ) {
-    throw new CanonicalMutationError(
-      400,
-      "enabledOptionalSteps must be an array of strings",
-    );
-  }
-  const enabledOptionalSteps = proposal.enabledOptionalSteps as
-    string[] | undefined;
+  // Preserve the public route's tolerant parsing: malformed values are
+  // ignored, while free-text proposal options are narrowed to the workflow
+  // actually selected. Stale hidden UI choices must not block acceptance.
+  let enabledOptionalSteps =
+    Array.isArray(proposal.enabledOptionalSteps) &&
+    proposal.enabledOptionalSteps.every((item) => typeof item === "string")
+      ? proposal.enabledOptionalSteps
+      : undefined;
   if (enabledOptionalSteps && workflow) {
     const optionalNames = new Set(
       workflow.gates.flatMap((gate) =>
@@ -640,15 +665,9 @@ export async function applyCanonicalGoalProposal(
           .map((step) => step.name),
       ),
     );
-    const invalidOption = enabledOptionalSteps.find(
-      (name) => !optionalNames.has(name),
+    enabledOptionalSteps = enabledOptionalSteps.filter((name) =>
+      optionalNames.has(name),
     );
-    if (invalidOption)
-      throw new CanonicalMutationError(
-        400,
-        `Unknown optional workflow step: ${invalidOption}`,
-        "OPTION_NOT_FOUND",
-      );
   }
   const inlineRoles =
     proposal.inlineRoles &&
@@ -768,19 +787,13 @@ export async function createCanonicalGoal<
     throw new CanonicalMutationError(400, "Goal options must be an object");
   }
   assertCanonicalApplicationKey(input.applicationKey);
-  let finishApplication: (() => void) | undefined;
-  let applicationCompletion: Promise<void> | undefined;
-  if (input.applicationKey) {
-    const inFlight = inFlightGoalApplications.get(input.applicationKey);
-    if (inFlight) await inFlight;
-    const existing = deps.findByApplicationKey(input.applicationKey);
-    if (existing) return { goal: existing, replayed: true };
-    applicationCompletion = new Promise<void>((resolve) => {
-      finishApplication = resolve;
-    });
-    inFlightGoalApplications.set(input.applicationKey, applicationCompletion);
-  }
-  try {
+  const apply = async (): Promise<{ goal: T; replayed: boolean }> => {
+    if (input.applicationKey) {
+      const existing = deps.findByApplicationKey(input.applicationKey);
+      // A durable replay owns no setup work. Boot recovery owns interrupted
+      // setup, preventing a retry from duplicating gates, teams, or worktrees.
+      if (existing) return { goal: existing, replayed: true };
+    }
     const metadata =
       input.options.metadata &&
       typeof input.options.metadata === "object" &&
@@ -830,17 +843,13 @@ export async function createCanonicalGoal<
         });
     });
     return { goal, replayed: false };
-  } finally {
-    finishApplication?.();
-    if (
-      input.applicationKey &&
-      applicationCompletion &&
-      inFlightGoalApplications.get(input.applicationKey) ===
-        applicationCompletion
-    ) {
-      inFlightGoalApplications.delete(input.applicationKey);
-    }
-  }
+  };
+  return input.applicationKey
+    ? applySingleFlight(
+        `goal:${input.projectId ?? input.cwd}:${input.applicationKey}`,
+        apply,
+      )
+    : apply();
 }
 
 export type CanonicalProjectMode = "register" | "update" | "promote";
@@ -892,20 +901,28 @@ export async function mutateCanonicalProject<T extends { id: string; rootPath: s
 	}
 	assertCanonicalApplicationKey(input.applicationKey);
 	if (input.mode === "register") {
-		if (input.applicationKey) {
-			const existing = deps.findByApplicationKey(input.applicationKey);
-			if (existing) return { project: existing, replayed: true };
-		}
-		const project = deps.register(input.applicationKey);
-		try {
-			await deps.applyConfiguration(project);
-			return { project, replayed: false };
-		} catch (error) {
-			// A rejected initial config must never leave a half-registered project.
-			try { await deps.rollbackRegistration?.(project); } catch { /* original validation error wins */ }
-			try { deps.removeRegistered(project); } catch { /* original validation error wins */ }
-			throw error;
-		}
+		const register = async (): Promise<{ project: T; replayed: boolean }> => {
+			if (input.applicationKey) {
+				const existing = deps.findByApplicationKey(input.applicationKey);
+				if (existing) return { project: existing, replayed: true };
+			}
+			const project = deps.register(input.applicationKey);
+			try {
+				await deps.applyConfiguration(project);
+				return { project, replayed: false };
+			} catch (error) {
+				// A rejected initial config must never leave a half-registered project.
+				try { await deps.rollbackRegistration?.(project); } catch { /* original validation error wins */ }
+				try { deps.removeRegistered(project); } catch { /* original validation error wins */ }
+				throw error;
+			}
+		};
+		return input.applicationKey
+			? applySingleFlight(
+				`project:register:${input.rootPath}:${input.applicationKey}`,
+				register,
+			)
+			: register();
 	}
 	if (!input.updates?.id || typeof input.updates.id !== "string") {
 		throw new CanonicalMutationError(400, "Project mutation target is required");

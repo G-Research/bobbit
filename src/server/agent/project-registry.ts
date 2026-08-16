@@ -1422,11 +1422,6 @@ export class ProjectRegistry {
     return project;
   }
 
-  /**
-   * Promote a provisional project to a full project.
-   * Clears `provisional` flag and optionally updates the name.
-   * If rootPath now exists but wasn't scaffolded, scaffold it.
-   */
   /** Persist a server-derived mutation key without exposing it as normal project configuration. */
   setCanonicalMutationKey(id: string, key: string | undefined): void {
     const project = this.projects.get(id);
@@ -1439,6 +1434,11 @@ export class ProjectRegistry {
     this.save();
   }
 
+  /**
+   * Promote a provisional project to a full project.
+   * Clears `provisional` flag and optionally updates the name.
+   * If rootPath now exists but wasn't scaffolded, scaffold it.
+   */
   promote(id: string, updates: { name?: string }): RegisteredProject {
     const project = this.projects.get(id);
     if (!project) throw new Error(`Project not found: ${id}`);

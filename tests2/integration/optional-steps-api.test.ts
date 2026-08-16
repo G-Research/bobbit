@@ -110,6 +110,45 @@ test.describe("Optional steps API", () => {
 		}
 	});
 
+	test("canonical goal route ignores unknown and malformed optional step selections", async () => {
+		const workflowId = uniqueWorkflowId();
+		await createTestWorkflow(workflowId);
+		try {
+			const goal = await createGoalWithOpts({ workflowId, enabledOptionalSteps: ["QA testing", "stale hidden option"] });
+			try {
+				expect(goal.enabledOptionalSteps).toEqual(["QA testing"]);
+			} finally {
+				await deleteGoal(goal.id);
+			}
+			const malformed = await createGoalWithOpts({ workflowId, enabledOptionalSteps: ["QA testing", 1] });
+			try {
+				expect(malformed.enabledOptionalSteps).toBeUndefined();
+			} finally {
+				await deleteGoal(malformed.id);
+			}
+		} finally {
+			await deleteTestWorkflow(workflowId);
+		}
+	});
+
+	test("canonical goal route preserves inline workflow, roles, and valid options", async () => {
+		const goal = await createGoalWithOpts({
+			workflow: {
+				id: uniqueWorkflowId(), name: "Inline optional workflow", description: "",
+				gates: [{ id: "impl", name: "Implementation", dependsOn: [], verify: [{ name: "Inline QA", type: "command", run: "echo ok", optional: true, optionalLabel: "Enable Inline QA" }] }],
+			},
+			inlineRoles: { reviewer: { name: "reviewer", label: "Reviewer", promptTemplate: "Review", accessory: "none", createdAt: 1, updatedAt: 1 } },
+			enabledOptionalSteps: ["Inline QA", "stale hidden option"],
+		});
+		try {
+			expect(goal.workflow?.id).toMatch(/^test-optional-/);
+			expect(goal.enabledOptionalSteps).toEqual(["Inline QA"]);
+			expect(goal.inlineRoles?.reviewer?.name).toBe("reviewer");
+		} finally {
+			await deleteGoal(goal.id);
+		}
+	});
+
 	test("optional step skipped when not enabled", async () => {
 		const workflowId = uniqueWorkflowId();
 		await createTestWorkflow(workflowId);

@@ -10448,10 +10448,17 @@ async function handleApiRoute(
           });
         },
         afterCreate: (createdGoal, parentGoalId) => {
-          const targetCtx = projectContextManager.getContextForGoal(
-            createdGoal.id,
-          );
-          if (!targetCtx) return;
+          const targetCtx =
+            projectContextManager.getContextForGoal(createdGoal.id) ??
+            (createdGoal.projectId
+              ? projectContextManager.getOrCreate(createdGoal.projectId)
+              : null);
+          // Never leave a durable goal preparing just because its just-created
+          // context has not been indexed by goal id yet.
+          if (!targetCtx)
+            throw new Error(
+              `Goal project context is unavailable for ${createdGoal.id}`,
+            );
           if (createdGoal.autoStartTeam && parentGoalId) {
             if (createdGoal.state !== "blocked") {
               const outcome = verificationHarness.requestChildStart(
