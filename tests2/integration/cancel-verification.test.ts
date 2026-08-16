@@ -363,7 +363,10 @@ async function disposeRestartCancellationFixture(fixture: RestartCancellationFix
 			fixture.clock.advance(1_000);
 			await (await finalization);
 		}
-		await Promise.all([...(fixture.harness as any)._terminalCleanupPromises.values()]);
+		await Promise.all([
+			...(fixture.harness as any)._cancelledCleanupPromises.values(),
+			...(fixture.harness as any)._cancelledFinalizationPromises.values(),
+		]);
 		await fixture.gateStore.close();
 	} finally {
 		fs.rmSync(fixture.stateDir, { recursive: true, force: true });
