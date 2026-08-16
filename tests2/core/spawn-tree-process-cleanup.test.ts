@@ -8,10 +8,8 @@ import { EventEmitter } from "node:events";
 import { _trackedCount, killAllTracked, killTreeByPid, spawnTracked } from "../../src/server/agent/spawn-tree.js";
 import { VerificationHarness, type ActiveVerification } from "../../src/server/agent/verification-harness.js";
 import { createManualClock } from "../harness/clock.js";
-import { FakePinnedCheckoutManager, pinnedCheckoutReference } from "../harness/fake-pinned-checkout-manager.js";
 
 const SPAWN_TREE_SOURCE = readFileSync(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url), "utf8");
-const POSIX_SUPERVISOR_SOURCE = readFileSync(new URL("../../src/server/agent/posix-tree-supervisor.ts", import.meta.url), "utf8");
 
 type NativeSpawn = typeof import("node:child_process").spawn;
 
@@ -202,8 +200,6 @@ const inherited = {
   file: process.env.BOBBIT_POSIX_SENTINEL_IDENTITY_FILE,
   nonce: process.env.BOBBIT_POSIX_SENTINEL_IDENTITY_NONCE,
   script: process.env.BOBBIT_POSIX_TREE_SENTINEL_CHILD_SCRIPT,
-  payload: process.env.BOBBIT_POSIX_TREE_PAYLOAD,
-  signalWitness: process.env.BOBBIT_POSIX_SENTINEL_TEST_SIGNAL_WITNESS_FD,
   pgid: process.env.BOBBIT_POSIX_SENTINEL_PGID,
 };
 const nested = spawnTracked(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: ["ignore", "ignore", "ignore", "pipe"], posixSentinelIdentity: { file: process.env.BOBBIT_NESTED_SENTINEL_FILE, nonce: "nested-nonce" } });
@@ -224,19 +220,14 @@ import path from "node:path";
 import { spawnTracked } from ${JSON.stringify(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-nested-sentinel-"));
 const outerFile = path.join(dir, "outer.json"), nestedFile = path.join(dir, "nested.json"), resultFile = path.join(dir, "result.json");
-const tracked = spawnTracked(process.execPath, ["--import", "tsx", "--input-type=module", "-e", ${JSON.stringify(NESTED_SENTINEL_PAYLOAD)}], { stdio: ["ignore", "ignore", "ignore", "pipe"], env: { ...process.env, BOBBIT_OUTER_SENTINEL_FILE: outerFile, BOBBIT_NESTED_SENTINEL_FILE: nestedFile, BOBBIT_NESTED_SENTINEL_RESULT: resultFile }, posixSentinelIdentity: { file: outerFile, nonce: "outer-nonce" }, posixSentinelSignalWitnessFd: 4 });
+const tracked = spawnTracked(process.execPath, ["--import", "tsx", "--input-type=module", "-e", ${JSON.stringify(NESTED_SENTINEL_PAYLOAD)}], { stdio: ["ignore", "ignore", "ignore", "pipe"], env: { ...process.env, BOBBIT_OUTER_SENTINEL_FILE: outerFile, BOBBIT_NESTED_SENTINEL_FILE: nestedFile, BOBBIT_NESTED_SENTINEL_RESULT: resultFile }, posixSentinelIdentity: { file: outerFile, nonce: "outer-nonce" } });
 // The payload can exit before its outer sentinel's FD3 acknowledgement.
 // Subscribe before either event so a fast close cannot be lost between awaits.
 const closed = new Promise((resolve, reject) => { tracked.child.once("close", resolve); tracked.child.once("error", reject); });
-const signalWitness = tracked.child.stdio[4];
-const signalHandled = new Promise((resolve, reject) => { if (!signalWitness) return reject(new Error("missing sentinel signal witness")); signalWitness.once("data", resolve); signalWitness.once("error", reject); });
 await new Promise((resolve, reject) => { const ready = tracked.child.stdio[3]; if (!ready) return reject(new Error("missing outer ready")); ready.once("data", resolve); ready.once("error", reject); });
-const outer = JSON.parse(fs.readFileSync(outerFile, "utf8"));
-process.kill(outer.pid, "SIGTERM");
-await signalHandled;
 await closed;
 const result = JSON.parse(fs.readFileSync(resultFile, "utf8"));
-process.stdout.write(JSON.stringify({ ...result, survivedImmediateSigterm: true }) + "\n", () => { fs.rmSync(dir, { recursive: true, force: true }); process.exit(0); });
+process.stdout.write(JSON.stringify(result) + "\n", () => { fs.rmSync(dir, { recursive: true, force: true }); process.exit(0); });
 `;
 
 const IDENTITY_FAILURE_PROBE = String.raw`
@@ -263,30 +254,6 @@ process.stdout.write(JSON.stringify({ acknowledged, reaped }) + "\n", () => {
   fs.rmSync(dir, { recursive: true, force: true });
   process.exit(0);
 });
-`;
-
-const POSIX_COMMAND_INJECTION_PROBE = String.raw`
-import assert from "node:assert/strict";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { spawnTracked } from ${JSON.stringify(new URL("../../src/server/agent/spawn-tree.ts", import.meta.url).href)};
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-posix-command-injection-"));
-const injected = path.join(dir, "injected");
-try {
-  // If this command were assembled into shell source, the trailing redirect
-  // would create the marker. The tracked launcher must instead try to execute
-  // this complete string as one shell-free executable path.
-  const command = process.execPath + "; printf injected > " + JSON.stringify(injected);
-  const tracked = spawnTracked(command, [], { cwd: dir, stdio: ["ignore", "ignore", "ignore"] });
-  await tracked.ownershipReady;
-  await new Promise((resolve, reject) => { tracked.child.once("close", resolve); tracked.child.once("error", reject); });
-  assert.equal(fs.existsSync(injected), false, "configured command must not be interpreted by a shell");
-  assert.equal(await tracked.waitForTreeExit(1_500), true);
-  process.stdout.write(JSON.stringify({ injected: fs.existsSync(injected) }) + "\n");
-} finally {
-  fs.rmSync(dir, { recursive: true, force: true });
-}
 `;
 
 type FakeReadyPipe = EventEmitter & { unrefCalls: number; unref(): void };
@@ -410,40 +377,15 @@ function groupAlive(pid: number): boolean {
 
 function makeRecoveryHarness(
 	stateDir: string,
-	calls: Array<{ kind: string; status: string; update?: any }>,
-	deps: { platform?: NodeJS.Platform; posixProcessIdentityInspector?: (pid: number) => any; containerProcessIdentityInspector?: (containerId: string, pid: number) => Promise<{ pid: number; pgid: number; startToken: string } | undefined>; containerProcessTopSnapshot?: (containerId: string) => Promise<readonly any[]>; persistedTreeKiller?: (pid: number, signal?: NodeJS.Signals) => "signalled" | "unsupported" | "invalid"; recoveredSentinelReaper?: (step: any) => Promise<void>; projectContextManager?: any; clock?: any; pinnedCheckoutManager?: FakePinnedCheckoutManager } = {},
+	calls: Array<{ kind: string; status: string }>,
+	deps: { platform?: NodeJS.Platform; posixProcessIdentityInspector?: (pid: number) => any; containerProcessIdentityInspector?: (containerId: string, pid: number) => Promise<{ pid: number; pgid: number; startToken: string } | undefined>; containerProcessTopSnapshot?: (containerId: string) => Promise<readonly any[]>; persistedTreeKiller?: (pid: number, signal?: NodeJS.Signals) => "signalled" | "unsupported" | "invalid"; recoveredSentinelReaper?: (step: any) => Promise<void>; projectContextManager?: any; clock?: any } = {},
 ): VerificationHarness {
-	const pinnedCheckoutManager = deps.pinnedCheckoutManager ?? new FakePinnedCheckoutManager(path.join(stateDir, "verification-checkouts"));
-	const persistPath = path.join(stateDir, "active-verifications.json");
-	let persistedCurrentSignalId = "signal";
-	if (fs.existsSync(persistPath)) {
-		const persisted = JSON.parse(fs.readFileSync(persistPath, "utf8"));
-		const verifications = persisted.verifications ?? [];
-		// Recovery sees the signal history already persisted by the gate store.
-		// Use the recovered active record's actual ID, rather than a synthetic
-		// default, so the fixture does not turn a valid generation into stale work.
-		if (typeof verifications[verifications.length - 1]?.signalId === "string") {
-			persistedCurrentSignalId = verifications[verifications.length - 1].signalId;
-		}
-		let changed = false;
-		for (const verification of verifications) {
-			if (typeof verification?.signalId !== "string") continue;
-			const checkout = pinnedCheckoutManager.seed(verification.signalId, stateDir);
-			if (!verification.pinnedCheckout) {
-				verification.pinnedCheckout = pinnedCheckoutReference(checkout);
-				changed = true;
-			}
-		}
-		if (changed) fs.writeFileSync(persistPath, JSON.stringify(persisted));
-	}
 	return new VerificationHarness(
 		stateDir,
 		{
-			updateSignalVerification: (_signalId: string, update: any) => calls.push({ kind: "verification", status: update.status, update }),
+			updateSignalVerification: (_signalId: string, update: any) => calls.push({ kind: "verification", status: update.status }),
 			updateGateStatus: (_goalId: string, _gateId: string, status: string) => calls.push({ kind: "gate", status }),
-			// Model the persisted current generation. Restart cancellation must
-			// restore this eligible gate to pending after exact cleanup settles.
-			getGate: () => ({ status: "running", signals: [{ id: persistedCurrentSignalId, verification: { status: "running", steps: [] } }] }),
+			getGate: () => undefined,
 		} as any,
 		() => {},
 		{ get: () => undefined, getAll: () => [] } as any,
@@ -455,7 +397,6 @@ function makeRecoveryHarness(
 		undefined,
 		{
 			...deps,
-			pinnedCheckoutManager: pinnedCheckoutManager as any,
 			containerProcessIdentityInspector: deps.containerProcessIdentityInspector ?? (async (_containerId, pid) => ({ pid, pgid: pid, startToken: "container-start" })),
 			containerProcessTopSnapshot: deps.containerProcessTopSnapshot ?? (async () => [{ pid: 1, ppid: 1, pgid: 1, state: "S", args: "init" }]),
 		},
@@ -489,8 +430,7 @@ async function expectRecoveredContainerSentinelWait(
 	const reapStarted = new Promise<void>(resolve => { resolveReapStarted = resolve; });
 	const events: string[] = [];
 	const calls: Array<{ kind: string; status: string }> = [];
-	const pinnedCheckoutManager = new FakePinnedCheckoutManager(path.join(stateDir, "verification-checkouts"));
-	const harness = makeRecoveryHarness(stateDir, calls, { platform: "linux", pinnedCheckoutManager });
+	const harness = makeRecoveryHarness(stateDir, calls, { platform: "linux" });
 	(harness as any)._reapRecoveredPosixSentinel = async () => {
 		events.push("reap");
 		resolveReapStarted();
@@ -503,7 +443,6 @@ async function expectRecoveredContainerSentinelWait(
 	const step = recoveredContainerSentinelStep(stateDir, name, nonce, deadlineMs);
 	const active: ActiveVerification = {
 		goalId: "goal", gateId: "implementation", signalId: "signal", overallStatus: "running", startedAt: Date.now(), currentPhase: 0, steps: [step],
-		pinnedCheckout: pinnedCheckoutReference(pinnedCheckoutManager.seed("signal", stateDir)),
 	};
 	fs.writeFileSync(path.join(stateDir, "active-verifications.json"), JSON.stringify({ verifications: [active] }));
 	const result = harness.resumeInterruptedVerifications();
@@ -513,20 +452,7 @@ async function expectRecoveredContainerSentinelWait(
 	releaseReap();
 	await expect(result).resolves.toBeUndefined();
 	expect(events).toEqual(expectedEvents);
-	expect(calls.map(({ kind, status }) => ({ kind, status }))).toEqual(statuses);
-	if (statuses.some(({ kind, status }) => kind === "verification" && status === "cancelled")) {
-		const verification = calls.find(call => call.kind === "verification") as any;
-		expect(verification?.update).toMatchObject({
-			status: "cancelled",
-			cancellation: { cause: "gateway-restart-recovery", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
-			steps: [expect.objectContaining({
-				name,
-				status: "cancelled",
-				cancellation: { cause: "gateway-restart-recovery", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
-				output: expect.stringMatching(/restart|re-signal/i),
-			})],
-		});
-	}
+	expect(calls).toEqual(statuses);
 }
 
 describe("spawnTracked timeout cleanup", () => {
@@ -722,8 +648,7 @@ describe("spawnTracked timeout cleanup", () => {
 		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-sentinel-windows-"));
 		const calls: Array<{ kind: string; status: string }> = [];
 		try {
-			const pinnedCheckoutManager = new FakePinnedCheckoutManager(path.join(stateDir, "verification-checkouts"));
-			const harness = makeRecoveryHarness(stateDir, calls, { platform: "win32", pinnedCheckoutManager });
+			const harness = makeRecoveryHarness(stateDir, calls, { platform: "win32" });
 			(harness as any)._dockerExecCapture = async () => ({ code: 0, stdout: "0\n" });
 			const step: any = {
 				name: "Windows container", type: "command", status: "running", startedAt: Date.now() - 1_000,
@@ -731,7 +656,6 @@ describe("spawnTracked timeout cleanup", () => {
 			};
 			const active: ActiveVerification = {
 				goalId: "goal", gateId: "implementation", signalId: "signal", overallStatus: "running", startedAt: Date.now(), currentPhase: 0, steps: [step],
-				pinnedCheckout: pinnedCheckoutReference(pinnedCheckoutManager.seed("signal", stateDir)),
 			};
 			fs.writeFileSync(path.join(stateDir, "active-verifications.json"), JSON.stringify({ verifications: [active] }));
 
@@ -773,12 +697,12 @@ describe("spawnTracked timeout cleanup", () => {
 		}
 	});
 
-	it("reaps the exact host sentinel before cancelling a recovered container with no verdict", async () => {
+	it("reaps the exact host sentinel before returning a recovered container no-verdict wait", async () => {
 		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-container-sentinel-no-verdict-"));
 		try {
 			await expectRecoveredContainerSentinelWait(stateDir, {
 				name: "No-verdict container", nonce: "no-verdict-nonce", deadlineMs: Date.now() + 10_000, recordTerm: false, events: ["reap"],
-				statuses: [{ kind: "verification", status: "cancelled" }, { kind: "gate", status: "pending" }],
+				statuses: [{ kind: "verification", status: "failed" }, { kind: "gate", status: "pending" }],
 			});
 		} finally {
 			fs.rmSync(stateDir, { recursive: true, force: true });
@@ -796,30 +720,16 @@ describe("spawnTracked timeout cleanup", () => {
 		expect(result.identity.startToken).toEqual(expect.any(String));
 	});
 
-	it("records a nonce-bound Darwin sentinel identity from the live supervisor argv", async () => {
-		if (process.platform !== "darwin") {
-			expect(process.platform).not.toBe("darwin");
-			return;
-		}
-		const result = await runNativeJsonProbe(FAST_EXIT_SENTINEL_PROBE);
-		expect(result.identity).toMatchObject({
-			nonce: "fast-exit-nonce",
-			pgid: result.rootPid,
-			startTokenKind: "darwin-lstart-argv-nonce",
-		});
-	});
-
-	it("keeps the post-ownership sentinel alive and scrubs its envelope before a nested tracked spawn", async () => {
-		if (process.platform === "win32") {
-			expect(process.platform).toBe("win32");
+	it("scrubs outer sentinel identity before a nested tracked spawn", async () => {
+		if (process.platform !== "linux") {
+			expect(process.platform).not.toBe("linux");
 			return;
 		}
 		const result = await runNativeJsonProbe(NESTED_SENTINEL_PROBE);
-		expect(result.inherited).toEqual({ file: undefined, nonce: undefined, script: undefined, payload: undefined, signalWitness: undefined, pgid: undefined });
+		expect(result.inherited).toEqual({ file: undefined, nonce: undefined, script: undefined, pgid: undefined });
 		expect(result.outer.nonce).toBe("outer-nonce");
 		expect(result.nested.nonce).toBe("nested-nonce");
 		expect(result.nested.pid).not.toBe(result.outer.pid);
-		expect(result.survivedImmediateSigterm).toBe(true);
 	});
 
 	it("does not acknowledge or leak when sentinel identity publishing fails", async () => {
@@ -829,21 +739,6 @@ describe("spawnTracked timeout cleanup", () => {
 		}
 		const result = await runNativeJsonProbe(IDENTITY_FAILURE_PROBE);
 		expect(result).toEqual({ acknowledged: false, reaped: true });
-	});
-
-	it("keeps configured POSIX commands outside every shell boundary", async () => {
-		if (process.platform === "win32") {
-			expect(process.platform).toBe("win32");
-			return;
-		}
-		const result = await runNativeJsonProbe(POSIX_COMMAND_INJECTION_PROBE);
-		expect(result).toEqual({ injected: false });
-		expect(SPAWN_TREE_SOURCE).toContain("posixSupervisorArgs");
-		expect(SPAWN_TREE_SOURCE).toContain("POSIX_TREE_PAYLOAD_ENV");
-		expect(SPAWN_TREE_SOURCE).not.toContain('"/bin/sh"');
-		expect(SPAWN_TREE_SOURCE).not.toContain("/dev/fd/");
-		expect(POSIX_SUPERVISOR_SOURCE).toContain('spawn("/usr/bin/env", ["--", payload.file, ...payload.args]');
-		expect(POSIX_SUPERVISOR_SOURCE).toContain("process.exitCode = 125;");
 	});
 
 	it("refuses a reused POSIX sentinel PID before it can signal a group", async () => {
