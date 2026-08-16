@@ -9,8 +9,12 @@ export interface ProjectImportApplication {
 	requestId: string;
 	type: ProposalType;
 	rev: number;
+	/** Tool bytes captured before the claim; used for deterministic replay. */
+	toolBeforeSha256?: string | null;
 	/** Exact immutable revision bytes, never the mutable live draft. */
 	snapshot: string;
+	/** Captured actual local tool bytes before the claim (tool proposals only). */
+	toolBeforeSha256?: string | null;
 	proposal: TypedProposal;
 }
 

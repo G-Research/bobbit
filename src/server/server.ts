@@ -795,6 +795,7 @@ import {
 	applyCanonicalProjectProposal,
 	validateProjectBaseRef,
 	applyCanonicalToolProposal,
+	canonicalToolProposalState,
 	createCanonicalRole,
 	createCanonicalStaff,
 	createCanonicalWorkflow,
@@ -3669,7 +3670,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		},
 		workflow: async (fields, application) => { const ctx = projectContextManager.getOrCreate(application.projectId); if (!ctx) throw new CanonicalMutationError(404, "Project not found"); const workflow = createCanonicalWorkflow(fields, ctx.workflowStore, ctx.projectConfigStore.getComponents(), application.applicationKey); return { outcome: { workflowId: workflow.id } }; },
 		role: async (fields, application) => { const ctx = projectContextManager.getOrCreate(application.projectId); if (!ctx) throw new CanonicalMutationError(404, "Project not found"); const role = await createCanonicalRole({ ...fields, promptTemplate: fields.prompt }, { scope: "project", store: ctx.roleStore, projectId: application.projectId }, { normalizeThinking: normalizeRoleThinking, validateModel: async () => true, applicationKey: application.applicationKey }); return { outcome: { role: role.name } }; },
-		tool: async (fields, application) => { const ctx = projectContextManager.getOrCreate(application.projectId); if (!ctx) throw new CanonicalMutationError(404, "Project not found"); const result = applyCanonicalToolProposal({ action: fields.action as any, tool: fields.tool as any, content: fields.content as any }, { toolManager: ctx.toolManager }); __resetToolScanCache(); return { outcome: { tool: result.tool, action: result.action } }; },
+		tool: async (fields, application) => { const ctx = projectContextManager.getOrCreate(application.projectId); if (!ctx) throw new CanonicalMutationError(404, "Project not found"); const result = applyCanonicalToolProposal({ action: fields.action as any, tool: fields.tool as any, content: fields.content as any, expectedBeforeSha256: application.toolBeforeSha256 }, { toolManager: ctx.toolManager }); __resetToolScanCache(); return { outcome: { tool: result.tool, action: result.action } }; },
 		staff: async (fields, application) => { const project = projectRegistry.get(application.projectId); if (!project) throw new CanonicalMutationError(404, "Project not found"); const staff = await createCanonicalStaff({ ...fields, systemPrompt: fields.prompt, roleId: fields.role ?? fields.roleId, projectId: application.projectId }, { applicationKey: application.applicationKey, resolveProject: () => ({ projectId: project.id, rootPath: project.rootPath }), validateCwd: (_id, cwd) => { const check = validateExecutionCwd(projectRegistry, projectContextManager, project.id, cwd, { kind: "user-input" }); if (!check.ok) throw new CanonicalMutationError(check.status, check.error, check.code); }, validateTriggers: value => staffManager.validateTriggers(value as any), validateRole: (roleId, id) => { if (!projectContextManager.getOrCreate(id)?.roleStore.get(roleId)) throw new CanonicalMutationError(404, "Role not found"); }, create: (name, description, prompt, cwd, options) => staffManager.createStaff(name, description, prompt, cwd, sessionManager, options as any), broadcast: () => {} }); return { outcome: { staffId: staff.id } }; },
 	});
 	projectImportDecisionCoordinator = new ProjectImportDecisionCoordinator({
@@ -9095,7 +9096,10 @@ async function handleApiRoute(
 			await deleteProposalFile(bobbitStateDir(), draft.draftId, draft.type); audit("dropped");
 			broadcastToProject(projectId, { type: "project_import_decision_requests_updated", projectId, ts: clock?.now() ?? Date.now() }); json({ ok: true, status: "rejected" }); return;
 		}
-		const identity = { projectId, importId: marker.id, requestId, type: draft.type, rev: draft.rev, snapshotSha256: projectImportSnapshotSha256(draft.snapshot), key: projectImportApplicationKey({ projectId, importId: marker.id, requestId, type: draft.type, rev: draft.rev, snapshot: draft.snapshot }) };
+		const toolBeforeSha256 = draft.type === "tool"
+			? canonicalToolProposalState(String(draft.parsed.value.fields.tool ?? ""), { toolManager: projectContextManager.getOrCreate(projectId)?.toolManager ?? toolManager }) ?? null
+			: undefined;
+		const identity = { projectId, importId: marker.id, requestId, type: draft.type, rev: draft.rev, snapshotSha256: projectImportSnapshotSha256(draft.snapshot), ...(draft.type === "tool" ? { toolBeforeSha256 } : {}), key: projectImportApplicationKey({ projectId, importId: marker.id, requestId, type: draft.type, rev: draft.rev, snapshot: draft.snapshot }) };
 		const claim = store.claimImportProposal(identity, new Date().toISOString());
 		if (!claim.claimed && claim.proposal?.status === "accepted") { json({ ok: true, status: "accepted" }, 200); return; }
 		if (!claim.claimed && claim.proposal?.status === "created") { json({ error: "Proposal claim could not be persisted", code: "PROPOSAL_CLAIM_FAILED" }, 503); return; }
@@ -9105,7 +9109,7 @@ async function handleApiRoute(
 		if (!claim.claimed) { json({ ok: true, status: "applying" }, 202); return; }
 		try {
 			const service = importApplicationService;
-			const result = await service.apply({ projectId, importId: marker.id, requestId, type: draft.type, rev: draft.rev, snapshot: draft.snapshot, proposal: draft.parsed.value });
+			const result = await service.apply({ projectId, importId: marker.id, requestId, type: draft.type, rev: draft.rev, snapshot: draft.snapshot, ...(draft.type === "tool" ? { toolBeforeSha256 } : {}), proposal: draft.parsed.value });
 			if (!store.finalizeImportProposal(identity, new Date().toISOString(), result.outcome)) {
 				const settled = store.get(requestId)?.proposal;
 				if (settled?.status !== "accepted" || settled.application?.key !== identity.key) throw new ProjectImportApplicationError(500, "FINALIZE_FAILED", "Proposal effect applied but finalization could not be persisted");

@@ -184,6 +184,8 @@ export type ProposalApplicationIdentity = {
 	type: ProposalType;
 	rev: number;
 	snapshotSha256: string;
+	/** Tool state captured immediately before the durable claim; absent for other types. */
+	toolBeforeSha256?: string | null;
 	key: string;
 };
 
@@ -825,12 +827,13 @@ function isProposalApplicationIdentity(value: unknown): value is ProposalApplica
 	return isRecord(value) && isBoundedString(value.projectId, 128) && isBoundedString(value.importId, 128)
 		&& isBoundedString(value.requestId, 128) && isProposalType(value.type) && isPositiveInteger(value.rev)
 		&& typeof value.snapshotSha256 === "string" && /^[a-f0-9]{64}$/.test(value.snapshotSha256)
+		&& (value.toolBeforeSha256 === undefined || value.toolBeforeSha256 === null || typeof value.toolBeforeSha256 === "string" && /^[a-f0-9]{64}$/.test(value.toolBeforeSha256))
 		&& typeof value.key === "string" && /^import-proposal-v1:[a-f0-9]{64}$/.test(value.key);
 }
 
 function sameApplication(left: ProposalApplicationIdentity, right: ProposalApplicationIdentity): boolean {
 	return left.projectId === right.projectId && left.importId === right.importId && left.requestId === right.requestId
-		&& left.type === right.type && left.rev === right.rev && left.snapshotSha256 === right.snapshotSha256 && left.key === right.key;
+		&& left.type === right.type && left.rev === right.rev && left.snapshotSha256 === right.snapshotSha256 && left.toolBeforeSha256 === right.toolBeforeSha256 && left.key === right.key;
 }
 
 function isDecisionValue(value: unknown): value is DecisionValue {

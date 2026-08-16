@@ -3,6 +3,7 @@
  * acceptance. Keep persistence here: proposal surfaces must never grow a
  * second, almost-the-same implementation.
  */
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -312,7 +313,7 @@ export async function deleteCanonicalStaff<T>(
 }
 
 export type ToolProposalAction = "create" | "update" | "delete";
-export type ToolProposal = { action: ToolProposalAction; tool: string; content?: string };
+export type ToolProposal = { action: ToolProposalAction; tool: string; content?: string; expectedBeforeSha256?: string | null };
 export type ToolProposalResult = { action: ToolProposalAction; tool: string; groupDir: string };
 
 type ParsedTool = { name: string; group: string; value: Record<string, unknown> };
@@ -1329,11 +1330,23 @@ export async function applyCanonicalProjectProposal<T extends CanonicalProjectRe
  * promotion and replay ownership live here so proposal application never has
  * to recreate route lifecycle semantics.
  */
+export function canonicalToolProposalState(tool: string, deps: { toolManager: ToolManager }): string | undefined {
+	if (!TOOL_NAME.test(tool)) return undefined;
+	const local = localToolPath(deps.toolManager.getToolsDir(), tool);
+	return local ? createHash("sha256").update(fs.readFileSync(local.file, "utf8"), "utf8").digest("hex") : undefined;
+}
+
 export function applyCanonicalToolProposal(proposal: ToolProposal, deps: { toolManager: ToolManager }): ToolProposalResult {
 	if (!proposal || !TOOL_NAME.test(proposal.tool || "")) throw new CanonicalMutationError(400, "Invalid tool name");
 	if (proposal.action !== "create" && proposal.action !== "update" && proposal.action !== "delete") throw new CanonicalMutationError(400, "Tool action must be create, update, or delete");
 	const toolsDir = deps.toolManager.getToolsDir();
 	const local = localToolPath(toolsDir, proposal.tool);
+	const before = local ? createHash("sha256").update(fs.readFileSync(local.file, "utf8"), "utf8").digest("hex") : null;
+	if (proposal.expectedBeforeSha256 !== undefined && before !== proposal.expectedBeforeSha256) {
+		const desired = proposal.action === "delete" ? null : createHash("sha256").update(proposal.content ?? "", "utf8").digest("hex");
+		if (before === desired) return { action: proposal.action, tool: proposal.tool, groupDir: local?.groupDir ?? "" };
+		throw new CanonicalMutationError(409, "Tool override changed while proposal was applying", "TOOL_STATE_CONFLICT");
+	}
 	if (proposal.action === "delete") {
 		if (!local) throw new CanonicalMutationError(404, "Tool override not found in project");
 		fs.rmSync(local.file, { force: true });
