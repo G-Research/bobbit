@@ -35,6 +35,7 @@ class MemoryStore<T extends { id: string }> {
 		this.records.set(id, { ...current, ...patch });
 		this.updates.push(id);
 	}
+	async flush(): Promise<void> {}
 }
 
 class MemoryTeamStore {
@@ -230,6 +231,137 @@ function makeFixture(options: { deferFirstScan?: boolean } = {}) {
 		agentTranscript,
 	};
 }
+
+function makeAdoptedGoalRestartFixture(options: { reservation: boolean; role: string }) {
+	const ownerSessionId = "regular-owner";
+	const projectId = "project-adopted";
+	const goal = {
+		id: "goal-adopted",
+		title: "Adopted goal",
+		projectId,
+		state: "todo",
+		team: true,
+		cwd: "/worktrees/session-owner",
+		worktreePath: "/worktrees/session-owner",
+		repoPath: "/repo",
+		branch: "session/owner",
+		repoWorktrees: { app: "/worktrees/session-owner/app" },
+		sandboxed: true,
+		archived: false,
+		worktreeOwnerSessionId: ownerSessionId,
+		workflow: { gates: [{ id: "design-doc" }] },
+	};
+	const source = {
+		id: ownerSessionId,
+		title: "Regular session",
+		projectId,
+		cwd: goal.cwd,
+		worktreePath: goal.worktreePath,
+		repoPath: goal.repoPath,
+		branch: goal.branch,
+		repoWorktrees: goal.repoWorktrees,
+		sandboxed: goal.sandboxed,
+		role: options.role,
+		accessory: "regular-cap",
+		createdAt: 1,
+		lastActivity: 1,
+	};
+	const goals = new MemoryStore<any>([goal]);
+	const sessions = new MemoryStore<any>([source]);
+	const teams = new MemoryTeamStore(options.reservation ? [{
+		goalId: goal.id,
+		teamLeadSessionId: ownerSessionId,
+		agents: [],
+		maxConcurrent: 12,
+	}] : []);
+	const initializedGates: string[] = [];
+	const gateStore = {
+		initGatesForGoal: (goalId: string) => { initializedGates.push(goalId); },
+		removeGoalGates: () => {},
+		flush: async () => {},
+	};
+	const deletedAttempts: string[] = [];
+	const context = {
+		project: { id: projectId },
+		goalStore: goals,
+		teamStore: teams,
+		sessionStore: sessions,
+		gateStore,
+		goalManager: {
+			deleteAdoptedGoalAttempt: async (goalId: string) => {
+				deletedAttempts.push(goalId);
+				return false;
+			},
+		},
+	};
+	const projectContextManager = {
+		all: () => [context],
+		getContextForGoal: (goalId: string) => goals.get(goalId) ? context : undefined,
+	};
+	const recoveryFs = new TeamRecoveryFsFake();
+	for (const root of trustedAgentSessionsRoots()) recoveryFs.dir(root, []);
+	const sessionManager = {
+		getSession: () => undefined,
+		getSessionInfo: () => undefined,
+	};
+	const role = {
+		name: "team-lead",
+		label: "Team Lead",
+		promptTemplate: "Lead the goal",
+		accessory: "lead-crown",
+		createdAt: 0,
+		updatedAt: 0,
+	};
+	const manager = new TeamManager(sessionManager as any, {
+		projectContextManager,
+		roleStore: { get: (name: string) => name === role.name ? role : undefined, getAll: () => [role] },
+		taskManager: { getTasksByGoal: () => [], getTasksForSession: () => [] },
+		colorStore: { get: () => undefined, set: () => {}, remove: () => {}, getAll: () => ({}) },
+		recoveryFs,
+		recoverySidecars: new MemoryRecoverySidecars(),
+	} as any, undefined, noTimerClock as any);
+
+	return { manager, goal, source, sessions, teams, initializedGates, deletedAttempts };
+}
+
+describe("TeamManager adopted-goal restart reconciliation", () => {
+	for (const reservation of [true, false]) {
+		it(`repairs a baseline general session with ${reservation ? "an empty" : "no"} lead reservation`, async () => {
+			const fixture = makeAdoptedGoalRestartFixture({ reservation, role: "general" });
+			await fixture.manager.waitForRestore();
+
+			assert.deepEqual(fixture.sessions.get(fixture.source.id), {
+				...fixture.source,
+				goalId: fixture.goal.id,
+				teamGoalId: fixture.goal.id,
+				role: "team-lead",
+				accessory: "lead-crown",
+			});
+			assert.deepEqual(fixture.manager.getTeamState(fixture.goal.id), {
+				goalId: fixture.goal.id,
+				teamLeadSessionId: fixture.source.id,
+				agents: [],
+				maxConcurrent: 12,
+			});
+			assert.deepEqual(fixture.initializedGates, [fixture.goal.id]);
+			assert.deepEqual(fixture.deletedAttempts, []);
+			assert.deepEqual(fixture.teams.mutations, reservation ? [] : [`put:${fixture.goal.id}`]);
+			fixture.manager.dispose();
+		});
+	}
+
+	it("leaves a non-general relation unchanged instead of attaching or compensating it", async () => {
+		const fixture = makeAdoptedGoalRestartFixture({ reservation: true, role: "coder" });
+		await fixture.manager.waitForRestore();
+
+		assert.deepEqual(fixture.sessions.get(fixture.source.id), fixture.source);
+		assert.deepEqual(fixture.sessions.updates, []);
+		assert.deepEqual(fixture.initializedGates, []);
+		assert.deepEqual(fixture.deletedAttempts, []);
+		assert.equal(fixture.manager.getTeamState(fixture.goal.id)?.teamLeadSessionId, fixture.source.id);
+		fixture.manager.dispose();
+	});
+});
 
 describe("TeamManager awaited async recovery", () => {
 	it("keeps restore pending and team indexes incomplete until deferred recovery I/O settles", async () => {

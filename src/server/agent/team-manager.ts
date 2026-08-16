@@ -365,10 +365,14 @@ function matchesAdoptedGoalWorkspace(goal: PersistedGoal, session: PersistedSess
 		&& sameStringRecord(session.repoWorktrees, goal.repoWorktrees);
 }
 
+function isBaselineRegularPromotionRole(role: string | undefined): boolean {
+	return role === undefined || role === "general";
+}
+
 function hasConflictingPromotionRelation(session: PersistedSession, goalId: string): boolean {
 	return (session.goalId !== undefined && session.goalId !== goalId)
 		|| (session.teamGoalId !== undefined && session.teamGoalId !== goalId)
-		|| (session.role !== undefined && session.role !== "team-lead")
+		|| (!isBaselineRegularPromotionRole(session.role) && session.role !== "team-lead")
 		|| session.teamLeadSessionId !== undefined
 		|| session.delegateOf !== undefined
 		|| session.parentSessionId !== undefined
@@ -385,7 +389,9 @@ function hasConflictingPromotionRelation(session: PersistedSession, goalId: stri
 }
 
 function hasPromotionAttachment(session: PersistedSession | undefined): boolean {
-	return !!session && (session.goalId !== undefined || session.teamGoalId !== undefined || session.role !== undefined);
+	return !!session && (session.goalId !== undefined
+		|| session.teamGoalId !== undefined
+		|| !isBaselineRegularPromotionRole(session.role));
 }
 
 /** Internal tracking for a team associated with a goal. */
@@ -780,11 +786,16 @@ export class TeamManager {
 						maxConcurrent: 12,
 					});
 				}
-				if (source.goalId !== goal.id || source.teamGoalId !== goal.id || source.role !== "team-lead") {
+				const teamLeadAccessory = resolveRole(goal, "team-lead", this.resolveRoleSource(goal))?.accessory ?? "crown";
+				if (source.goalId !== goal.id
+					|| source.teamGoalId !== goal.id
+					|| source.role !== "team-lead"
+					|| source.accessory !== teamLeadAccessory) {
 					ctx.sessionStore.update(ownerSessionId, {
 						goalId: goal.id,
 						teamGoalId: goal.id,
 						role: "team-lead",
+						accessory: teamLeadAccessory,
 					});
 				}
 				if (goal.workflow) {
