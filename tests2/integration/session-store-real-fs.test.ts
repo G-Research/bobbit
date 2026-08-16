@@ -138,7 +138,7 @@ describe("SessionStore real filesystem fidelity", () => {
 		assert.ok(fs.existsSync(storeFile), "sessions.json should exist after save");
 		assert.ok(!fs.existsSync(tmpFile), "successful real-fs save must not leave sessions.json.tmp");
 		const parsed = JSON.parse(fs.readFileSync(storeFile, "utf-8"));
-		assert.equal(parsed.version, 2);
+		assert.equal(parsed.version, 3);
 		assert.equal(parsed.epoch, 1);
 		assert.deepEqual(parsed.sessions.map((s: PersistedSession) => s.id), ["s1"]);
 	});
@@ -153,7 +153,7 @@ describe("SessionStore real filesystem fidelity", () => {
 		assert.equal(store.getWrittenEpoch(), 1);
 
 		const externalPayload = {
-			version: 2,
+			version: 3,
 			epoch: 41,
 			sessions: [makeSession("external", { title: "external rewrite with a distinct real-file size" })],
 		};
@@ -322,7 +322,7 @@ describe("SessionStore real filesystem fidelity", () => {
 		await seed.flushAsync();
 		const stale = new SessionStore(stateDir);
 		const external = {
-			version: 2,
+			version: 3,
 			epoch: 9,
 			sessions: [makeSession("external", { title: "newer external state with a different fingerprint size" })],
 		};
@@ -386,5 +386,42 @@ describe("SessionStore real filesystem fidelity", () => {
 		assert.equal(result!.count, 2);
 		assert.deepEqual(result!.paths.map(p => path.relative(transcriptsDir, p)).sort(), expected);
 		assert.ok(warns.every(w => !w.includes("tracked.jsonl") && !w.includes("old-orphan.jsonl")));
+	});
+
+	it("migrates a 1,234-row v2 snapshot exactly once and retains the recoverable source", async () => {
+		const root = freshRoot();
+		const stateDir = path.join(root, "state");
+		const storeFile = path.join(stateDir, "sessions.json");
+		const archivedFile = path.join(stateDir, "sessions.archived.json");
+		const rows = Array.from({ length: 1234 }, (_, i) => makeSession(`migration-${i}`, {
+			title: `payload-${i}`,
+			archived: i % 3 === 0,
+			archivedAt: i % 3 === 0 ? i + 1 : undefined,
+		}));
+		const source = JSON.stringify({ version: 2, epoch: 41, sessions: rows });
+		fs.mkdirSync(stateDir, { recursive: true });
+		fs.writeFileSync(storeFile, source, "utf-8");
+
+		const migrated = new SessionStore(stateDir);
+		await migrated.flushAsync();
+		assert.equal(migrated.getAll().length, 1234);
+		assert.equal(fs.readFileSync(`${storeFile}.pre-archived-split`, "utf-8"), source, "the original v2 bytes are forensic recovery evidence");
+		const live = JSON.parse(fs.readFileSync(storeFile, "utf-8"));
+		const archived = JSON.parse(fs.readFileSync(archivedFile, "utf-8"));
+		assert.equal(live.version, 3);
+		assert.equal(archived.version, 3);
+		assert.equal(live.sessions.length + archived.sessions.length, 1234);
+		assert.ok(live.sessions.every((row: PersistedSession) => row.archived !== true));
+		assert.ok(archived.sessions.every((row: PersistedSession) => row.archived === true));
+		assert.deepEqual(new Set([...live.sessions, ...archived.sessions].map((row: PersistedSession) => row.id)), new Set(rows.map(row => row.id)));
+
+		const liveBytes = fs.readFileSync(storeFile, "utf-8");
+		const archiveBytes = fs.readFileSync(archivedFile, "utf-8");
+		const reloaded = new SessionStore(stateDir);
+		await reloaded.flushAsync();
+		assert.equal(reloaded.getAll().length, 1234);
+		assert.equal(fs.readFileSync(storeFile, "utf-8"), liveBytes, "a completed migration must be idempotent");
+		assert.equal(fs.readFileSync(archivedFile, "utf-8"), archiveBytes, "a completed migration must not rewrite archive rows");
+		assert.equal(fs.existsSync(`${storeFile}.pre-archived-split.1`), false);
 	});
 });
