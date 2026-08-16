@@ -14,11 +14,10 @@ __syncBeforeAll(() => __syncCE());
 //   • PI-17 bar-colour thresholds / stale bar / no-bar, PI-18 cost popover open-close,
 //     PI-23 stats-bar composition + model button — NOT ported. Those behaviours live
 //     INLINE in <agent-interface> (AgentInterface.ts render, no extractable helper for
-//     the bar-colour/tooltip composition). AgentInterface cannot be fully mounted in
-//     isolation under happy-dom because it renders canvas bobbit avatars, wires a
-//     ResizeObserver, and drives scroll-based follow-tail. The focused cost tests below
-//     render its pure footer template without connecting the element.
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+//     the bar-colour/tooltip composition). The focused cost tests below exercise the
+//     component's public render path with a minimal session fixture; they deliberately
+//     do not depend on its private implementation details.
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { html, render } from "lit";
 import "../../src/ui/components/CostPopover.js";
 import { AgentInterface } from "../../src/ui/components/AgentInterface.js";
@@ -35,6 +34,19 @@ const COST_BASE = {
 
 let calls: string[];
 let response: any;
+
+beforeAll(() => {
+	// The public AgentInterface render path includes the streaming container,
+	// which initializes its Bobbit canvas avatar when committed to happy-dom.
+	(HTMLCanvasElement.prototype as any).getContext = () => ({
+		clearRect() {}, fillRect() {}, beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, fill() {}, arc() {},
+		createLinearGradient: () => ({ addColorStop() {} }),
+		getImageData: () => ({ data: new Uint8ClampedArray(4) }),
+		putImageData() {}, drawImage() {}, save() {}, restore() {}, translate() {}, rotate() {}, scale() {},
+	});
+	(HTMLElement.prototype as any).getAnimations ??= () => [];
+	(HTMLCanvasElement.prototype as any).getAnimations = () => [];
+});
 
 beforeEach(() => {
 	calls = [];
@@ -116,24 +128,34 @@ describe("CostPopover production component cache-hit display", () => {
 });
 
 function renderFooterCost(serverCost: unknown): HTMLElement {
-	const ui = document.createElement("agent-interface") as AgentInterface;
+	const ui = new AgentInterface();
 	ui.session = {
 		sessionId: "cost-session",
 		state: {
 			messages: [],
+			tools: [],
+			pendingToolCalls: new Set<string>(),
+			streamingMessage: null,
+			isStreaming: false,
+			status: "idle",
 			model: null,
+			thinkingLevel: "off",
 			serverCost,
 		},
 	} as any;
+	ui.gitRepoKnown = "no";
 	const container = document.createElement("div");
 	document.body.appendChild(container);
-	render((ui as any).renderStats(), container);
+	// Use the component's public render path, which composes the footer, rather
+	// than reaching into the private renderStats implementation.
+	render(ui.render(), container);
 	return container;
 }
 
 describe("billed and subscription cost semantics", () => {
 	it("renders a numeric billed snapshot without presenting an estimate", async () => {
 		const footer = renderFooterCost({ ...COST_BASE, totalCost: 0.2, costBasis: "api-billed", notionalCostUsd: null });
+		expect(footer.querySelector('[data-testid="session-stats-bar"]')).toBeTruthy();
 		const billedFooter = footer.querySelector('[data-testid="footer-billed-cost"]')!;
 		expect(billedFooter.textContent).toContain("$0.2");
 		expect(billedFooter.getAttribute("aria-label")).toBe("Billed API cost $0.2");
@@ -154,6 +176,7 @@ describe("billed and subscription cost semantics", () => {
 			costBasis: "subscription-notional",
 		};
 		const footer = renderFooterCost(subscription);
+		expect(footer.querySelector('[data-testid="session-stats-bar"]')).toBeTruthy();
 		const estimateFooter = footer.querySelector('[data-testid="footer-subscription-notional"]')!;
 		expect(estimateFooter.textContent).toContain("Est. API equivalent $0.0125");
 		expect(estimateFooter.getAttribute("aria-label")).toContain("not a billed API cost");
