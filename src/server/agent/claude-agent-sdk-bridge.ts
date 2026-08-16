@@ -475,7 +475,11 @@ export class ClaudeAgentSdkBridge implements IRpcBridge {
 			const surface = this.options.claudeSdkToolSurface ?? buildEmptyClaudeSdkToolSurface(this.options.claudeAgentSdkSessionId ?? "direct-bridge");
 			this.allocatedToolSurface = surface;
 			this.attachSubagentLifecycle(surface);
-			const sdkOptions: Options = buildClaudeAgentSdkQueryOptions(surface, sdkBase, preCompact);
+			const sdkOptions: Options = {
+				...buildClaudeAgentSdkQueryOptions(surface, sdkBase, preCompact),
+				// Pinned SDK 0.3.222 emits canonical stream_event frames only with this opt-in.
+				includePartialMessages: true,
+			};
 
 			const query = this.deps.query({ prompt: this.input, options: sdkOptions });
 			if (isPromise(query)) {

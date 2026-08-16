@@ -417,6 +417,55 @@ describe("ClaudeAgentSdkBridge", () => {
 		expect(observed.some(event => event.type === "process_exit")).toBe(false);
 	});
 
+	it("opts into pinned SDK partial frames and keeps accepted users before streamed and final assistant content", async () => {
+		const sessionId = "00000000-0000-4000-8000-000000000013";
+		const fixture = bridgeFixture();
+		const query = await startReady(fixture, sessionId);
+		const observed: any[] = [];
+		fixture.bridge.onEvent(event => observed.push(event));
+
+		expect(query.options.includePartialMessages).toBe(true);
+		const streamedTurn = fixture.bridge.prompt("stream this response");
+		await query.nextInput();
+		query.emit({
+			type: "stream_event", uuid: "sdk-assistant-stream",
+			event: { type: "message_start", message: { id: "sdk-assistant-message", role: "assistant", content: [] } },
+		});
+		query.emit({ type: "stream_event", uuid: "sdk-assistant-stream", event: {
+			type: "content_block_start", index: 0, content_block: { type: "text", text: "" },
+		} });
+		query.emit({ type: "stream_event", uuid: "sdk-assistant-stream", event: {
+			type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "streamed " },
+		} });
+		query.emit({ type: "stream_event", uuid: "sdk-assistant-stream", event: {
+			type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "response" },
+		} });
+		query.emit({ type: "stream_event", uuid: "sdk-assistant-stream", event: { type: "content_block_stop", index: 0 } });
+		query.emit({
+			type: "assistant", uuid: "sdk-assistant-stream", message: {
+				id: "sdk-assistant-message", content: [{ type: "text", text: "streamed response" }],
+			},
+		});
+		query.emit({ type: "result", subtype: "success", session_id: sessionId });
+		await streamedTurn;
+		await flushMicrotasks(12);
+
+		expect(observed[0]).toEqual({ type: "agent_start" });
+		expect(observed[1]).toEqual({
+			type: "message_end",
+			message: { role: "user", content: [{ type: "text", text: "stream this response" }] },
+		});
+		expect(observed.filter(event => event.type === "message_update").map(event => event.assistantMessageEvent.type)).toEqual([
+			"start", "text_start", "text_delta", "text_delta", "text_end",
+		]);
+		const finalized = observed.filter(event => event.type === "message_end" && event.message?.role === "assistant");
+		expect(finalized).toHaveLength(1);
+		expect(finalized[0].message.content).toEqual([{ type: "text", text: "streamed response" }]);
+		expect(observed.map(event => event.type)).toEqual([
+			"agent_start", "message_end", "message_update", "message_update", "message_update", "message_update", "message_update", "message_end", "agent_end",
+		]);
+	});
+
 	it("starts a fresh translator for a second SDK turn while consuming repeated init frames", async () => {
 		const sessionId = "00000000-0000-4000-8000-000000000012";
 		const fixture = bridgeFixture();
