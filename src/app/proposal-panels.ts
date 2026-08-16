@@ -94,6 +94,10 @@ import type {
 // runtime module is dynamic-imported below.
 import type { TriggerDef as _TriggerDef } from "./render-triggers.js";
 
+// One proposal apply may mutate configuration at a time. Set synchronously
+// before the request so repeated clicks cannot create competing writes.
+let toolProposalApplyInFlight = false;
+
 // ──────────────────────────────────────────────────────────────────────
 // isSessionArchived — used by submit handlers to skip DELETE on
 // already-archived sessions.
@@ -2357,12 +2361,15 @@ function toolPreviewPanel() {
 	};
 
 	const handleApplyToolProposal = async () => {
+		if (toolProposalApplyInFlight) return;
 		const slot = state.activeProposals.tool;
 		const toolName = state.toolPreviewName.trim();
 		const action = slot?.fields.action;
 		const content = slot?.fields.content;
 		const target = proposalProjectId("tool", slot?.sessionId ?? activeSessionId());
 		if (!toolName || !target || (action !== "create" && action !== "update" && action !== "delete")) return;
+		toolProposalApplyInFlight = true;
+		renderApp();
 		try {
 			const res = await gatewayFetch("/api/tools/proposal", {
 				method: "POST",
@@ -2375,6 +2382,9 @@ function toolPreviewPanel() {
 			await handleViewTool();
 		} catch (error) {
 			showProjectProposalCaughtError("Failed to apply tool proposal", error);
+		} finally {
+			toolProposalApplyInFlight = false;
+			renderApp();
 		}
 	};
 
@@ -2477,8 +2487,8 @@ function toolPreviewPanel() {
 				${state.toolPreviewName ? html`<span data-testid="proposal-primary-submit">${Button({
 					variant: "default",
 					onClick: canApplyToolProposal ? handleApplyToolProposal : handleViewTool,
-					disabled: streaming,
-					children: html`<span class="inline-flex items-center gap-1.5">${icon(Wrench, "sm")} ${canApplyToolProposal ? "Apply Tool" : "View Tool"}</span>`,
+					disabled: streaming || toolProposalApplyInFlight,
+					children: html`<span class="inline-flex items-center gap-1.5">${icon(Wrench, "sm")} ${toolProposalApplyInFlight ? "Applying…" : canApplyToolProposal ? "Apply Tool" : "View Tool"}</span>`,
 				})}</span>` : ""}
 			</div>
 		</div>

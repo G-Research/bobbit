@@ -59,3 +59,22 @@ test("public tool proposal application is loader-visible, updates, deletes, and 
 	listed = await (await apiFetch(`/api/tools?projectId=${encodeURIComponent(projectId)}`)).json();
 	expect(listed.tools.some((entry: any) => entry.name === tool)).toBe(false);
 });
+
+test("system is an explicit Headquarters alias for canonical tool proposals", async () => {
+	const tool = uniqueTool();
+	const create = await apiFetch("/api/tools/proposal", {
+		method: "POST",
+		body: JSON.stringify({ projectId: "system", action: "create", tool, content: content(tool, "server scope") }),
+	});
+	expect(create.status).toBe(201);
+	try {
+		const listed = await (await apiFetch("/api/tools?projectId=headquarters")).json();
+		expect(listed.tools.find((entry: any) => entry.name === tool)).toMatchObject({ description: "server scope" });
+	} finally {
+		const remove = await apiFetch("/api/tools/proposal", {
+			method: "POST",
+			body: JSON.stringify({ projectId: "system", action: "delete", tool }),
+		});
+		expect(remove.status).toBe(200);
+	}
+});

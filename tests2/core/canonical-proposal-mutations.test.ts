@@ -11,6 +11,8 @@ import {
 	createCanonicalRole,
 	createCanonicalStaff,
 	createCanonicalWorkflow,
+	deleteCanonicalStaff,
+	updateCanonicalStaff,
 	updateCanonicalWorkflow,
 } from "../../src/server/proposals/canonical-mutations.ts";
 
@@ -36,7 +38,7 @@ function yaml(name: string, description: string, group = "Fixture"): string {
 }
 
 function apply(manager: ToolManager, action: "create" | "update" | "delete", tool: string, content?: string) {
-	return applyCanonicalToolProposal({ action, tool, content }, { configDir: manager.getToolsDir(), toolManager: manager });
+	return applyCanonicalToolProposal({ action, tool, content }, { toolManager: manager });
 }
 
 describe("canonical proposal mutations", () => {
@@ -53,6 +55,8 @@ describe("canonical proposal mutations", () => {
 		let options: Record<string, unknown> | undefined;
 		let broadcast = false;
 		const staff = await createCanonicalStaff({ name: "Proposal Staff", description: "", systemPrompt: "Prompt", cwd: "/workspace", projectId: "project", sandboxed: true, worktree: false }, {
+			resolveProject: () => ({ projectId: "project", rootPath: "/workspace" }),
+			validateCwd: () => undefined,
 			create: async (_name, _description, _prompt, _cwd, value) => { options = value; return { id: "staff-1" }; },
 			broadcast: (value) => { broadcast = value.id === "staff-1"; },
 		});
@@ -60,6 +64,35 @@ describe("canonical proposal mutations", () => {
 		assert.equal(options?.sandboxed, true);
 		assert.equal(options?.worktree, false);
 		assert.equal(broadcast, true);
+	});
+
+	it("owns staff validation, accessory session metadata, and lifecycle broadcasts", async () => {
+		await assert.rejects(
+			() => createCanonicalStaff({}, {
+				resolveProject: () => ({ projectId: "project", rootPath: "/workspace" }),
+				validateCwd: () => undefined,
+				create: async () => ({ id: "never" }),
+				broadcast: () => undefined,
+			}),
+			(error: any) => error instanceof CanonicalMutationError && error.message === "Missing name",
+		);
+		let staff: any = { id: "staff-1", currentSessionId: "session-1", accessory: "crown" };
+		let accessory: unknown;
+		let broadcasts = 0;
+		const updated = updateCanonicalStaff("staff-1", { accessory: "crown" }, {
+			update: () => true,
+			read: () => staff,
+			syncAccessory: (_sessionId, value) => { accessory = value; },
+			broadcast: () => { broadcasts++; },
+		});
+		assert.equal(updated, staff);
+		assert.equal(accessory, "crown");
+		await deleteCanonicalStaff("staff-1", {
+			read: () => staff,
+			remove: async () => true,
+			broadcast: () => { broadcasts++; },
+		});
+		assert.equal(broadcasts, 2);
 	});
 
 	it("creates, updates, and deletes exactly the project override while revealing a bundled fallback", () => {
@@ -82,14 +115,42 @@ describe("canonical proposal mutations", () => {
 		assert.equal(fs.existsSync(path.join(configDir, "tools")), before);
 	});
 
-	it("preserves previous override bytes when an update candidate is rejected", () => {
+	it("accepts an extension-backed override only when the local group dependencies load", () => {
+		const { configDir, manager } = fixture();
+		fs.mkdirSync(path.join(configDir, "tools", "fixture"), { recursive: true });
+		fs.mkdirSync(path.join(configDir, "tools", "_shared"), { recursive: true });
+		fs.writeFileSync(path.join(configDir, "tools", "_shared", "helper.ts"), "export const helper = true;\n");
+		fs.writeFileSync(path.join(configDir, "tools", "fixture", "extension.ts"), "import { helper } from '../_shared/helper.ts'; export { helper };\n");
+		const content = "name: extension_tool\ndescription: extension backed\ngroup: Fixture\nprovider:\n  type: bobbit-extension\n  extension: extension.ts\n";
+		apply(manager, "create", "extension_tool", content);
+		assert.equal(manager.getToolByName("extension_tool")?.description, "extension backed");
+	});
+
+	it("restores exact bytes after the target loader rejects a post-write update", () => {
 		const { configDir, manager } = fixture();
 		const initial = yaml("safe_tool", "safe");
 		apply(manager, "create", "safe_tool", initial);
 		const file = path.join(configDir, "tools", "fixture", "safe_tool.yaml");
-		assert.throws(() => apply(manager, "update", "safe_tool", "name: safe_tool\ndescription: bad\ngroup: Fixture\nprovider: broken\n"), CanonicalMutationError);
+		const rejectingTarget = {
+			getToolsDir: () => manager.getToolsDir(),
+			getBuiltinToolsDir: () => manager.getBuiltinToolsDir(),
+			getLocalTools: () => [],
+			getToolDiagnostics: () => [],
+		} as unknown as ToolManager;
+		assert.throws(() => apply(rejectingTarget, "update", "safe_tool", yaml("safe_tool", "candidate")), CanonicalMutationError);
 		assert.equal(fs.readFileSync(file, "utf8"), initial);
-		assert.equal(manager.getToolByName("safe_tool")?.description, "safe");
+	});
+
+	it("removes an empty group after a failed create", () => {
+		const { configDir, manager } = fixture();
+		const rejectingTarget = {
+			getToolsDir: () => manager.getToolsDir(),
+			getBuiltinToolsDir: () => manager.getBuiltinToolsDir(),
+			getLocalTools: () => [],
+			getToolDiagnostics: () => [],
+		} as unknown as ToolManager;
+		assert.throws(() => apply(rejectingTarget, "create", "rejected_tool", yaml("rejected_tool", "candidate")), CanonicalMutationError);
+		assert.equal(fs.existsSync(path.join(configDir, "tools", "fixture")), false);
 	});
 
 	it("validates workflow gates before create or update writes", () => {

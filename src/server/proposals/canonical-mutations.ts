@@ -13,7 +13,6 @@ import type { PersistedGoal } from "../agent/goal-store.js";
 import type { Workflow, WorkflowStore } from "../agent/workflow-store.js";
 import {
   freezeWorkflowDefinition,
-  validateWorkflowDefinition,
   type WorkflowComponentRef,
 } from "../agent/workflow-validator.js";
 import {
@@ -30,7 +29,7 @@ import {
   GoalPausedError,
   requireAncestorsNotPaused,
 } from "../agent/goal-paused-guard.js";
-import { ToolManager, __resetToolScanCache } from "../agent/tool-manager.js";
+import { ToolManager, __resetToolScanCache, copyToolGroupWithSharedDependencies } from "../agent/tool-manager.js";
 
 /** Durable, server-owned idempotency marker. Callers must never take this from
  * proposal metadata or another user controlled field. */
@@ -66,7 +65,7 @@ export async function createCanonicalRole(
 ): Promise<Role> {
 	const model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : undefined;
 	if (model && /^[^/]+\/.+$/.test(model) && !(await deps.validateModel(model))) {
-		throw new CanonicalMutationError(422, "Role model is not available");
+		throw new CanonicalMutationError(422, "Role model is not available", "MODEL_UNAVAILABLE");
 	}
 	if (target.scope === "server") {
 		return target.manager.createRole({
@@ -116,7 +115,7 @@ export async function updateCanonicalRole(
 ): Promise<void> {
 	const requestedModel = body.model !== undefined && typeof body.model === "string" && body.model.trim() ? body.model.trim() : undefined;
 	if (requestedModel && /^[^/]+\/.+$/.test(requestedModel) && !(await deps.validateModel(requestedModel))) {
-		throw new CanonicalMutationError(422, "Role model is not available");
+		throw new CanonicalMutationError(422, "Role model is not available", "MODEL_UNAVAILABLE");
 	}
 	if (target.scope === "project") {
 		const existing = target.store.get(name);
@@ -147,15 +146,22 @@ export function deleteCanonicalRole(name: string, target: RoleTarget): void {
 	if (!target.manager.deleteRole(name)) throw new CanonicalMutationError(404, "Role not found");
 }
 
-function assertWorkflow(candidate: unknown, components: WorkflowComponentRef[]): void {
-	const errors = validateWorkflowDefinition(candidate, components);
-	if (errors.length) throw new CanonicalMutationError(400, errors[0].message);
+function freezeCanonicalWorkflow(candidate: Workflow, components: WorkflowComponentRef[], identity: string): Workflow {
+	try {
+		// Keep API-created definitions identical to WorkflowManager-created ones:
+		// validate, normalize legacy fields, and freeze the durable snapshot before
+		// the store sees it.
+		return freezeWorkflowDefinition(candidate, components, identity);
+	} catch (error) {
+		throw new CanonicalMutationError(400, error instanceof Error ? error.message : String(error));
+	}
 }
 
 export function createCanonicalWorkflow(body: Record<string, any>, workflowStore: WorkflowStore, components: WorkflowComponentRef[]): Workflow {
+	const id = body.id as string;
+	if ((workflowStore as any).getLocal?.(id)) throw new CanonicalMutationError(400, `Workflow "${id}" already exists`);
 	const now = Date.now();
-	const workflow: Workflow = { id: body.id as string, name: (body.name as string) ?? body.id, description: (body.description as string) ?? "", gates: body.gates || [], createdAt: now, updatedAt: now };
-	assertWorkflow(workflow, components);
+	const workflow: Workflow = freezeCanonicalWorkflow({ id, name: (body.name as string) ?? id, description: (body.description as string) ?? "", gates: body.gates || [], createdAt: now, updatedAt: now }, components, id);
 	workflowStore.put(workflow);
 	return workflow;
 }
@@ -163,51 +169,75 @@ export function createCanonicalWorkflow(body: Record<string, any>, workflowStore
 export function updateCanonicalWorkflow(id: string, body: Record<string, any>, workflowStore: WorkflowStore, components: WorkflowComponentRef[]): Workflow {
 	const existing = workflowStore.get(id);
 	if (!existing) throw new CanonicalMutationError(404, "Workflow not found in project");
-	const updated: Workflow = { ...existing, name: body.name ?? existing.name, description: body.description ?? existing.description,
-		gates: Array.isArray(body.gates) ? body.gates : existing.gates, id, updatedAt: Date.now() };
-	assertWorkflow(updated, components);
+	const updated: Workflow = freezeCanonicalWorkflow({ ...existing, name: body.name ?? existing.name, description: body.description ?? existing.description,
+		gates: Array.isArray(body.gates) ? body.gates : existing.gates, id, createdAt: existing.createdAt, updatedAt: Date.now() }, components, id);
 	workflowStore.put(updated);
 	return updated;
 }
 
-/** Staff persistence and its observable broadcast are one operation. Validation
- * stays injectable because request routes own their transport-specific errors. */
+/** Staff persistence and all of its observable side effects are one operation.
+ * Routes supply project/cwd policy, while proposal imports use the same contract. */
 export async function createCanonicalStaff<T>(
-	input: { name: string; description: string; systemPrompt: string; cwd: string; projectId: string; triggers?: unknown; roleId?: unknown; accessory?: unknown; sandboxed: boolean; worktree?: boolean },
+	input: { name?: unknown; description?: unknown; systemPrompt?: unknown; cwd?: unknown; projectId?: unknown; triggers?: unknown; roleId?: unknown; accessory?: unknown; sandboxed?: unknown; worktree?: unknown },
 	deps: {
+		resolveProject(projectId: unknown): { projectId: string; rootPath: string };
+		validateCwd(projectId: string, cwd: string): void;
+		validateTriggers?(triggers: unknown): void;
+		validateRole?(roleId: string, projectId: string): void;
 		create(name: string, description: string, prompt: string, cwd: string, options: Record<string, unknown>): Promise<T>;
 		broadcast(staff: T, projectId: string): void;
 	},
 ): Promise<T> {
-	const staff = await deps.create(input.name, input.description, input.systemPrompt, input.cwd, {
+	if (!input.name || typeof input.name !== "string") throw new CanonicalMutationError(400, "Missing name");
+	if (!input.systemPrompt || typeof input.systemPrompt !== "string") throw new CanonicalMutationError(400, "Missing systemPrompt");
+	if (input.roleId !== undefined && input.roleId !== null && typeof input.roleId !== "string") {
+		throw new CanonicalMutationError(400, "roleId must be a string or null");
+	}
+	try { deps.validateTriggers?.(input.triggers); }
+	catch (error) { throw new CanonicalMutationError(400, error instanceof Error ? error.message : String(error)); }
+	const scope = deps.resolveProject(input.projectId);
+	const cwd = typeof input.cwd === "string" && input.cwd.trim().length > 0 ? input.cwd.trim() : scope.rootPath;
+	deps.validateCwd(scope.projectId, cwd);
+	if (typeof input.roleId === "string" && input.roleId.length > 0) deps.validateRole?.(input.roleId, scope.projectId);
+	const staff = await deps.create(input.name, typeof input.description === "string" ? input.description : "", input.systemPrompt, cwd, {
 		triggers: input.triggers,
 		roleId: input.roleId,
 		accessory: input.accessory,
-		projectId: input.projectId,
-		sandboxed: input.sandboxed,
+		projectId: scope.projectId,
+		sandboxed: input.sandboxed === true,
 		...(typeof input.worktree === "boolean" ? { worktree: input.worktree } : {}),
 	});
-	deps.broadcast(staff, input.projectId);
+	deps.broadcast(staff, scope.projectId);
 	return staff;
 }
 
-export function updateCanonicalStaff<T>(
+export function updateCanonicalStaff<T extends { currentSessionId?: string; accessory?: unknown }>(
 	id: string,
 	updates: Record<string, unknown>,
-	deps: { update(id: string, updates: Record<string, unknown>): boolean; read(id: string): T | undefined },
+	deps: {
+		update(id: string, updates: Record<string, unknown>): boolean;
+		read(id: string): T | undefined;
+		syncAccessory?(sessionId: string, accessory: unknown): void;
+		broadcast?(staff: T): void;
+	},
 ): T {
 	if (!deps.update(id, updates)) throw new CanonicalMutationError(404, "Staff agent not found");
 	const staff = deps.read(id);
 	if (!staff) throw new CanonicalMutationError(404, "Staff agent not found");
+	if (Object.prototype.hasOwnProperty.call(updates, "accessory") && staff.currentSessionId) {
+		deps.syncAccessory?.(staff.currentSessionId, staff.accessory);
+	}
+	deps.broadcast?.(staff);
 	return staff;
 }
 
 export async function deleteCanonicalStaff<T>(
 	id: string,
-	deps: { read(id: string): T | undefined; remove(id: string): Promise<boolean> },
+	deps: { read(id: string): T | undefined; remove(id: string): Promise<boolean>; broadcast?(staff: T): void },
 ): Promise<T | undefined> {
 	const staff = deps.read(id);
 	if (!await deps.remove(id)) throw new CanonicalMutationError(404, "Staff agent not found");
+	if (staff) deps.broadcast?.(staff);
 	return staff;
 }
 
@@ -279,12 +309,26 @@ function atomicWrite(file: string, content: string): void {
 	finally { try { fs.rmSync(temporary, { force: true }); } catch { /* no-op */ } }
 }
 
-function loaderAcceptsCandidate(content: string, parsed: ParsedTool, toolManager: ToolManager): boolean {
+function loaderAcceptsCandidate(content: string, parsed: ParsedTool, toolManager: ToolManager, groupDir: string): boolean {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "bobbit-tool-proposal-"));
 	try {
 		const configDir = path.join(root, "config");
-		atomicWrite(path.join(configDir, "tools", canonicalToolGroupDir(parsed.group), `${parsed.name}.yaml`), content);
-		const candidateManager = new ToolManager(configDir, toolManager.getBuiltinToolsDir());
+		const targetToolsDir = path.join(configDir, "tools");
+		const localToolsDir = toolManager.getToolsDir();
+		const builtinToolsDir = toolManager.getBuiltinToolsDir();
+		// An extension-backed tool is only loadable alongside its group module and
+		// shared imports. Seed the isolated tree from the same local override (or
+		// builtin group) that supplies those dependencies before replacing the
+		// candidate declaration. `groupDir` was canonicalized above, so neither
+		// source nor destination can escape a tools root.
+		const sourceToolsDir = fs.existsSync(path.join(localToolsDir, groupDir))
+			? localToolsDir
+			: builtinToolsDir && fs.existsSync(path.join(builtinToolsDir, groupDir))
+				? builtinToolsDir
+				: undefined;
+		if (sourceToolsDir) copyToolGroupWithSharedDependencies(sourceToolsDir, targetToolsDir, groupDir);
+		atomicWrite(path.join(targetToolsDir, groupDir, `${parsed.name}.yaml`), content);
+		const candidateManager = new ToolManager(configDir, builtinToolsDir);
 		const visible = candidateManager.getLocalTools().some(tool => tool.name === parsed.name);
 		const diagnostics = candidateManager.getToolDiagnostics().some(diagnostic => diagnostic.toolName === parsed.name || diagnostic.tool === parsed.name);
 		return visible && !diagnostics;
@@ -910,7 +954,7 @@ export async function mutateCanonicalProject<T extends { id: string; rootPath: s
 	}
 }
 
-export function applyCanonicalToolProposal(proposal: ToolProposal, deps: { configDir: string; toolManager: ToolManager }): ToolProposalResult {
+export function applyCanonicalToolProposal(proposal: ToolProposal, deps: { toolManager: ToolManager }): ToolProposalResult {
 	if (!proposal || !TOOL_NAME.test(proposal.tool || "")) throw new CanonicalMutationError(400, "Invalid tool name");
 	if (proposal.action !== "create" && proposal.action !== "update" && proposal.action !== "delete") throw new CanonicalMutationError(400, "Tool action must be create, update, or delete");
 	const toolsDir = deps.toolManager.getToolsDir();
@@ -923,29 +967,34 @@ export function applyCanonicalToolProposal(proposal: ToolProposal, deps: { confi
 	}
 	const content = proposal.content ?? "";
 	const parsed = parseToolYaml(content, proposal.tool);
-	const groupDir = canonicalToolGroupDir(parsed.group);
+	const declaredGroupDir = canonicalToolGroupDir(parsed.group);
 	if (proposal.action === "create" && local) throw new CanonicalMutationError(409, "Tool override already exists in project");
 	if (proposal.action === "update" && !local) throw new CanonicalMutationError(404, "Tool override not found in project");
-	// Exercise the same parser, contribution preflight and diagnostics as the
-	// runtime loader in an isolated tree before publishing any candidate bytes.
-	if (!loaderAcceptsCandidate(content, parsed, deps.toolManager)) {
-		throw new CanonicalMutationError(422, "Tool YAML was rejected by the tool loader");
-	}
 	// Preserve an existing layout on update: the declaration controls display
 	// grouping while the override's existing on-disk group remains canonical.
+	const groupDir = local?.groupDir || declaredGroupDir;
+	// Exercise the same parser, contribution preflight and diagnostics as the
+	// runtime loader in an isolated tree before publishing any candidate bytes.
+	if (!loaderAcceptsCandidate(content, parsed, deps.toolManager, groupDir)) {
+		throw new CanonicalMutationError(422, "Tool YAML was rejected by the tool loader");
+	}
 	const file = local?.file ?? path.join(toolsDir, groupDir, `${parsed.name}.yaml`);
 	const previous = local ? fs.readFileSync(file, "utf8") : undefined;
+	const groupExisted = fs.existsSync(path.join(toolsDir, groupDir));
 	atomicWrite(file, content);
 	if (!targetLoaderAccepts(deps.toolManager, parsed.name)) {
 		// A target group can have an invalid shared extension even though a clean
 		// candidate was valid. Restore byte-for-byte rather than deleting a valid
-		// override on update.
+		// override on update, and do not leave an empty group after a failed create.
 		try {
 			if (previous !== undefined) atomicWrite(file, previous);
-			else fs.rmSync(file, { force: true });
+			else {
+				fs.rmSync(file, { force: true });
+				if (!groupExisted) fs.rmdirSync(path.join(toolsDir, groupDir));
+			}
 			__resetToolScanCache();
 		} catch { /* preservation failure is surfaced as a rejected mutation */ }
 		throw new CanonicalMutationError(422, "Tool YAML was rejected by the tool loader");
 	}
-	return { action: proposal.action, tool: parsed.name, groupDir: local?.groupDir ?? groupDir };
+	return { action: proposal.action, tool: parsed.name, groupDir };
 }

@@ -88,6 +88,16 @@ async function lastPutBody(page: Page): Promise<any> {
 }
 
 test.describe("Goal/workflow editor fixture", () => {
+	test("new workflow with no gates blocks save inline without issuing a request", async ({ page }) => {
+		await loadNewWorkflowEditor(page);
+		await page.locator("input[placeholder='e.g. bug-fix']").fill("empty-workflow");
+		await page.locator("input[placeholder='Workflow name']").fill("Empty workflow");
+		await saveButton(page).click();
+		await expect(page.getByTestId("wf-save-error-banner")).toHaveText("Add at least one gate before saving this workflow.");
+		await expect.poll(() => page.evaluate(() => (window as any).__goalWorkflowFetchLog()
+			.filter((entry: any) => entry.method === "POST" || entry.method === "PUT").length)).toBe(0);
+	});
+
 	test("agent-qa type shows prompt textarea and hides command-only controls", async ({ page }) => {
 		await loadWorkflow(page, workflowWithSteps([
 			{ name: "Test step", type: "command", run: "echo test", phase: 0 },
