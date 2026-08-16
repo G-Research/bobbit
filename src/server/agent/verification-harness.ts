@@ -4081,6 +4081,8 @@ export class VerificationHarness {
 	private _cancelledCleanupRetryTimers = new Map<string, NodeJS.Timeout>();
 	/** One cleanup owner per cancelled signal; callers may either await or detach it. */
 	private _cancelledCleanupPromises = new Map<string, Promise<void>>();
+	/** Concurrent completion paths join the same cancellation publication. */
+	private _cancelledFinalizationPromises = new Map<string, Promise<void>>();
 	/** Ephemeral fence while a stale-generation cancellation retry owns persistence. */
 	private _failedCancellationFences = new WeakSet<ActiveVerification>();
 	/** One bounded-backoff persistence retry owner for a stale-generation fence. */
@@ -4361,6 +4363,18 @@ export class VerificationHarness {
 
 	/** One terminal cancellation path, invoked only after every cleanup phase settles. */
 	private async _finalizeCancelledVerification(active: ActiveVerification): Promise<void> {
+		const existing = this._cancelledFinalizationPromises.get(active.signalId);
+		if (existing) return existing;
+		const finalization = this._finalizeCancelledVerificationOnce(active);
+		this._cancelledFinalizationPromises.set(active.signalId, finalization);
+		try {
+			await finalization;
+		} finally {
+			if (this._cancelledFinalizationPromises.get(active.signalId) === finalization) this._cancelledFinalizationPromises.delete(active.signalId);
+		}
+	}
+
+	private async _finalizeCancelledVerificationOnce(active: ActiveVerification): Promise<void> {
 		if (this._hasPendingCommandKillCleanup(active) || active.reviewerCleanupPending || active.cancellationFinalizing) return;
 		// A reset/re-signal may have replaced this active object while exact cleanup
 		// was settling. Historical generations can update only their own signal.
