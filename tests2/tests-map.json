@@ -3218,6 +3218,15 @@
       }
     },
     {
+      "path": "tests2/core/claude-agent-sdk-history-adapter.test.ts",
+      "reason": "Focused Claude Agent SDK history-adapter coverage for orphan and duplicate tool-result suppression, normal prompt and translated tool-result preservation, and conservative mixed-content fallback.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/claude-agent-sdk-bridge.test.ts",
       "reason": "Deterministic fake-Query lifecycle coverage for Agent SDK readiness, streamed prompt/steer acknowledgement, translator forwarding, interruption, terminal stop, model/thinking controls, unsupported controls, and per-session environment isolation.",
       "execution": {
