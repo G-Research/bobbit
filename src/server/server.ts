@@ -7806,6 +7806,7 @@ async function handleApiRoute(
 			json({ ...updated, ...(warnings?.length ? { warnings } : {}) });
 		} catch (err: any) {
 			if (writeSpecialProjectMutationError(err)) return;
+			if (writeProjectRegistrationError(err)) return;
 			if (writeCanonicalProjectMutationError(err)) return;
 			jsonError(500, err, { error: "Project mutation failed" });
 		}
@@ -7964,6 +7965,7 @@ async function handleApiRoute(
 			json({ ...promoted, ...(warnings?.length ? { warnings } : {}) });
 		} catch (err: any) {
 			if (writeSpecialProjectMutationError(err)) return;
+			if (writeProjectRegistrationError(err)) return;
 			if (writeCanonicalProjectMutationError(err)) return;
 			jsonError(500, err, { error: "Project mutation failed" });
 		}

@@ -198,7 +198,7 @@ test.describe("server-side preflight defense in depth (POST /api/projects)", () 
 
 		const res = await rawApiFetch("/api/projects", {
 			method: "POST",
-			body: JSON.stringify({ name: "Symlink", rootPath: link, __e2e_no_accept_canonical: true }),
+			body: JSON.stringify({ name: "Symlink", rootPath: link }),
 		});
 		expect(res.status).toBe(400);
 		const body = await res.json();
@@ -237,5 +237,39 @@ test.describe("server-side preflight defense in depth (POST /api/projects)", () 
 			error: "A project is already registered at this root",
 			code: "project_root_already_registered",
 		});
+	});
+
+	test("duplicate-root update returns a typed error without mutating either project", async () => {
+		const firstRoot = freshRoot("update-duplicate-first");
+		const secondRoot = freshRoot("update-duplicate-second");
+		const first = await apiFetch("/api/projects", {
+			method: "POST",
+			body: JSON.stringify({ name: "First", rootPath: firstRoot }),
+		});
+		expect(first.status).toBe(201);
+		const firstProject = await first.json();
+		const second = await apiFetch("/api/projects", {
+			method: "POST",
+			body: JSON.stringify({ name: "Second", rootPath: secondRoot }),
+		});
+		expect(second.status).toBe(201);
+		const secondProject = await second.json();
+
+		const update = await apiFetch(`/api/projects/${encodeURIComponent(secondProject.id)}`, {
+			method: "PUT",
+			body: JSON.stringify({ rootPath: firstRoot }),
+		});
+		expect(update.status).toBe(400);
+		expect(await update.json()).toEqual({
+			error: "A project is already registered at this root",
+			code: "project_root_already_registered",
+		});
+
+		const [firstAfter, secondAfter] = await Promise.all([
+			apiFetch(`/api/projects/${encodeURIComponent(firstProject.id)}`),
+			apiFetch(`/api/projects/${encodeURIComponent(secondProject.id)}`),
+		]);
+		expect(await firstAfter.json()).toMatchObject({ id: firstProject.id, name: "First", rootPath: firstRoot });
+		expect(await secondAfter.json()).toMatchObject({ id: secondProject.id, name: "Second", rootPath: secondRoot });
 	});
 });
