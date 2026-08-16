@@ -521,6 +521,24 @@ export class PreflightFailedError extends Error {
   }
 }
 
+/** Expected registration failures are typed so routes can safely distinguish
+ * client-correctable root issues from internal registry/store errors. */
+export class ProjectRootNotFoundError extends Error {
+  readonly code = "project_root_not_found";
+  constructor(public readonly rootPath: string) {
+    super("Project root path does not exist");
+    this.name = "ProjectRootNotFoundError";
+  }
+}
+
+export class ProjectRootAlreadyRegisteredError extends Error {
+  readonly code = "project_root_already_registered";
+  constructor(public readonly rootPath: string, public readonly existingProjectId: string) {
+    super("A project is already registered at this root");
+    this.name = "ProjectRootAlreadyRegisteredError";
+  }
+}
+
 export class SymlinkProjectRootError extends Error {
   readonly code = "symlink_root";
   constructor(public readonly rootPath: string, public readonly canonical: string) {
@@ -652,7 +670,7 @@ export class ProjectRegistry {
           `A server-managed workspace owns ${rootPath}; choose a different directory.`,
         );
       }
-      throw new Error(`A project is already registered at ${rootPath} (id=${existing.id})`);
+      throw new ProjectRootAlreadyRegisteredError(rootPath, existing.id);
     }
   }
 
@@ -960,7 +978,7 @@ export class ProjectRegistry {
     }
 
     if (!fs.existsSync(rootPath)) {
-      throw new Error("Project root path does not exist: " + rootPath);
+      throw new ProjectRootNotFoundError(rootPath);
     }
 
     // Symlink guard: if rootPath resolves through a symlink, require the

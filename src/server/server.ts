@@ -726,6 +726,8 @@ import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels } from "./agent/image-generation.js";
 import {
 	ProjectRegistry,
+	ProjectRootAlreadyRegisteredError,
+	ProjectRootNotFoundError,
 	SymlinkProjectRootError,
 	PreflightFailedError,
 	SYSTEM_PROJECT_ID,
@@ -6410,6 +6412,13 @@ async function handleApiRoute(
 			},
 			hasRef: async (repoPath, ref) => refExistsInRepo(repoPath, ref, serverCommandRunner).catch(() => false),
 		});
+	const writeProjectRegistrationError = (err: unknown): boolean => {
+		if (err instanceof ProjectRootNotFoundError || err instanceof ProjectRootAlreadyRegisteredError) {
+			json({ error: err.message, code: err.code }, 400);
+			return true;
+		}
+		return false;
+	};
 	const writeCanonicalProjectMutationError = (err: unknown): boolean => {
 		if (err instanceof CanonicalMutationError) {
 			// The Settings UI has a long-standing structured base_ref contract.
@@ -7671,13 +7680,23 @@ async function handleApiRoute(
 					return;
 				}
 				if (regErr instanceof SymlinkProjectRootError) {
-					json({ error: "Project root is a symlink", code: "symlink_root" }, 400);
+					json({
+						error: "Project root is a symlink",
+						code: "symlink_root",
+						rootPath: regErr.rootPath,
+						canonical: regErr.canonical,
+					}, 400);
 					return;
 				}
 				if (regErr instanceof PreflightFailedError) {
-					json({ error: "Project preflight failed", code: "preflight_failed", report: { hasFail: true } }, 400);
+					json({
+						error: regErr.message,
+						code: "preflight_failed",
+						report: regErr.report,
+					}, 400);
 					return;
 				}
+				if (writeProjectRegistrationError(regErr)) return;
 				throw regErr;
 			}
 			json({ ...project, ...(baseRefWarnings?.length ? { warnings: baseRefWarnings } : {}) }, 201);
