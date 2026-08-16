@@ -3070,7 +3070,6 @@ function renderSignalEntry(signal: GateSignal): TemplateResult {
 	const isExpanded = expandedSignalIds.has(signal.id);
 	const isFocused = focusedSignalId === signal.id;
 	const shortSha = signal.commitSha ? signal.commitSha.slice(0, 7) : "???????";
-	const sourceDigest = signal.pinnedCheckout?.contentDigest ?? signal.contentDigest;
 
 	// Check for live verification data
 	const liveKey = `${signal.gateId}:${signal.id}`;
@@ -3155,23 +3154,6 @@ function renderSignalEntry(signal: GateSignal): TemplateResult {
 						`;
 						})}
 					`}
-					${sourceDigest || signal.contentDigestError || signal.pinnedCheckoutError ? html`
-						<div class="signal-metadata" data-testid="goal-dashboard-source-witness">
-							<span class="signal-metadata-label">Verification source:</span>
-							${signal.pinnedCheckout ? html`
-								<span class="signal-metadata-item" data-testid="goal-dashboard-frozen-source">Frozen source verified</span>
-							` : nothing}
-							${sourceDigest ? html`
-								<code class="signal-metadata-item" data-testid="goal-dashboard-source-digest">sha256:${sourceDigest.digest.slice(0, 12)} · ${sourceDigest.fileCount} files</code>
-							` : nothing}
-							${signal.contentDigestError ? html`
-								<span class="signal-metadata-item" data-testid="goal-dashboard-source-digest-error">Source digest unavailable: ${signal.contentDigestError.message}</span>
-							` : nothing}
-							${signal.pinnedCheckoutError ? html`
-								<span class="signal-metadata-item" data-testid="goal-dashboard-frozen-source-error">Frozen source unavailable: ${signal.pinnedCheckoutError.message} (${signal.pinnedCheckoutError.code})</span>
-							` : nothing}
-						</div>
-					` : nothing}
 					${signal.metadata && Object.keys(signal.metadata).length > 0 ? html`
 						<div class="signal-metadata">
 							<span class="signal-metadata-label">Metadata:</span>

@@ -22,7 +22,6 @@ import path from "node:path";
 
 import { makeTmpDir } from "../../tests/helpers/tmp.ts";
 import { VerificationHarness, type ActiveVerification } from "../../src/server/agent/verification-harness.js";
-import { FakePinnedCheckoutManager, pinnedCheckoutReference } from "../harness/fake-pinned-checkout-manager.js";
 
 const MARKER = "RESTART_SAFE_GATE_COMMANDS_REPRO";
 const GOAL_ID = "goal-restart-safe-commands";
@@ -53,7 +52,6 @@ function makeHarness(_t: TestContext) {
 	} as any;
 	const roleStore = { get: () => undefined, getAll: () => [] } as any;
 
-	const pinnedCheckoutManager = new FakePinnedCheckoutManager(path.join(stateDir, "pinned-checkouts"));
 	const harness = new VerificationHarness(
 		stateDir,
 		gateStore,
@@ -65,18 +63,16 @@ function makeHarness(_t: TestContext) {
 		undefined,
 		undefined,
 		undefined,
-		{ pinnedCheckoutManager: pinnedCheckoutManager as any },
 	);
 	harness.setTeamLeadNotifier((goalId, message) => notifications.push({ goalId, message }));
 
-	return { stateDir, harness, gateStoreCalls, notifications, broadcasts, pinnedCheckoutManager };
+	return { stateDir, harness, gateStoreCalls, notifications, broadcasts };
 }
 
-function persistActive(stateDir: string, verification: ActiveVerification, pinnedCheckoutManager: FakePinnedCheckoutManager): void {
-	const checkout = pinnedCheckoutManager.seed(verification.signalId, stateDir);
+function persistActive(stateDir: string, verification: ActiveVerification): void {
 	fs.writeFileSync(
 		path.join(stateDir, "active-verifications.json"),
-		JSON.stringify({ verifications: [{ ...verification, pinnedCheckout: pinnedCheckoutReference(checkout) }] }, null, 2),
+		JSON.stringify({ verifications: [verification] }, null, 2),
 	);
 }
 
@@ -89,7 +85,7 @@ function latestGateStatus(calls: GateStoreCall[]): string | undefined {
 }
 
 test("restart recovery with no durable command verdict does not fabricate a failed command result", async (t) => {
-	const { stateDir, harness, gateStoreCalls, notifications, pinnedCheckoutManager } = makeHarness(t);
+	const { stateDir, harness, gateStoreCalls, notifications } = makeHarness(t);
 	const startedAt = Date.now() - 1_000;
 
 	persistActive(stateDir, {
@@ -111,7 +107,7 @@ test("restart recovery with no durable command verdict does not fabricate a fail
 				timeoutSec: 300,
 			},
 		],
-	}, pinnedCheckoutManager);
+	});
 
 	await harness.resumeInterruptedVerifications();
 
@@ -136,7 +132,7 @@ test("restart recovery with no durable command verdict does not fabricate a fail
 });
 
 test("real recovered command failure skips later phases and omits skipped rows from notifications", async (t) => {
-	const { stateDir, harness, gateStoreCalls, notifications, pinnedCheckoutManager } = makeHarness(t);
+	const { stateDir, harness, gateStoreCalls, notifications } = makeHarness(t);
 	const startedAt = Date.now() - 2_000;
 	const diagDir = path.join(stateDir, "verifications", "sig-real-command-failure");
 	fs.mkdirSync(diagDir, { recursive: true });
@@ -181,7 +177,7 @@ test("real recovered command failure skips later phases and omits skipped rows f
 				startedAt,
 			},
 		],
-	}, pinnedCheckoutManager);
+	});
 
 	await harness.resumeInterruptedVerifications();
 

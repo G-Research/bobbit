@@ -180,10 +180,7 @@ function dockerAvailable() {
 }
 
 /** Specs known to require a live Docker daemon (their Docker paths skip otherwise). */
-const DOCKER_GATED = [
-	"tests/e2e/pinned-verification-sidecar.spec.ts",
-	"tests/e2e/sandbox-recovery.spec.ts",
-];
+const DOCKER_GATED = ["tests/e2e/sandbox-recovery.spec.ts"];
 
 function npmCmd() {
 	return process.platform === "win32" ? "npm.cmd" : "npm";
