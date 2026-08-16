@@ -395,11 +395,28 @@ type DiskFingerprint = {
 export interface PersistenceMetrics {
 	bytes: number;
 	durationMs: number;
+	/** Bytes actually serialized for each independently persisted tier. */
+	liveBytes?: number;
+	archivedBytes?: number;
 }
+
+export type SessionTier = "live" | "archived";
+type TierPersistenceState = {
+	file: string;
+	loadedEpoch: number;
+	writtenEpoch: number;
+	diskFingerprint: DiskFingerprint | null;
+	staleGuardTripped: boolean;
+	dirtyGeneration: number;
+	publishedGeneration: number;
+};
+type TransitionEntry = { id: string; tier: SessionTier; session?: PersistedSession };
+type LegacySnapshot = { raw: string; rows: unknown[]; epoch: number; source: string };
 
 export class SessionStore {
 	private readonly storeDir: string;
 	private readonly storeFile: string;
+	private readonly transitionFile: string;
 	private readonly fs: SessionStoreFs;
 	private readonly clock: Clock;
 	private sessions: Map<string, PersistedSession> = new Map();
@@ -408,14 +425,11 @@ export class SessionStore {
 	private static BACKUP_COUNT = 5;
 	/** Monotonically increasing counter — bumped on every mutation. Resets to 0 on server restart. */
 	private generation = 0;
-	/** Epoch read from disk on construction (or 0 for legacy/missing). */
-	private loadedEpoch = 0;
-	/** Epoch we have successfully written to disk this process. */
-	private writtenEpoch = 0;
-	/** Last observed metadata for the primary; never authoritative before our first write. */
-	private diskFingerprint: DiskFingerprint | null = null;
-	/** One-shot latch: once tripped, no further saveNow() writes to disk. */
-	private staleGuardTripped = false;
+	private readonly tiers: Record<SessionTier, TierPersistenceState>;
+	private migrationNeeded = false;
+	private tierLayoutNeedsRepair = false;
+	private legacySnapshot: LegacySnapshot | null = null;
+	private pendingTransitions = new Map<string, TransitionEntry>();
 	/** Active promise-based purge writer; synchronous mutations fold into it. */
 	private asyncSaveInFlight: Promise<void> | null = null;
 	private asyncSaveRequested = false;
@@ -440,11 +454,57 @@ export class SessionStore {
 		this.clock = clock;
 		this.storeDir = stateDir;
 		this.storeFile = path.join(stateDir, "sessions.json");
+		this.transitionFile = `${this.storeFile}.split-transition`;
+		this.tiers = {
+			live: this.newTier(this.storeFile),
+			archived: this.newTier(path.join(stateDir, "sessions.archived.json")),
+		};
 		this.load();
-		// Publish a structural delivery-ledger migration without waiting for a
-		// later queue mutation; otherwise a crash could reintroduce text-only rows.
-		if (this.loadedDeliveryLedgerMigration) this.saveNow();
+		// Publish legacy/v2 and delivery-ledger normalization without waiting for a
+		// later queue mutation. A v2 source is retained before it is partitioned.
+		// Give these boot repairs a real barrier generation so flushAsync() waits.
+		if (this.migrationNeeded) this.generation++;
+		if (this.tierLayoutNeedsRepair) {
+			this.generation++;
+			this.tiers.live.dirtyGeneration = this.generation;
+			this.tiers.archived.dirtyGeneration = this.generation;
+		}
+		if (this.loadedDeliveryLedgerMigration && !this.migrationNeeded && !this.tierLayoutNeedsRepair) {
+			this.generation++;
+			for (const session of this.sessions.values()) this.markMutation(session, session);
+		}
+		if (this.migrationNeeded || this.tierLayoutNeedsRepair || this.loadedDeliveryLedgerMigration || this.pendingTransitions.size) this.saveNow();
 	}
+
+	private newTier(file: string): TierPersistenceState {
+		return { file, loadedEpoch: 0, writtenEpoch: 0, diskFingerprint: null, staleGuardTripped: false, dirtyGeneration: 0, publishedGeneration: 0 };
+	}
+
+	private tierForSession(session: PersistedSession | undefined): SessionTier {
+		return session?.archived === true ? "archived" : "live";
+	}
+
+	private tierFile(tier: SessionTier): string { return this.tiers[tier].file; }
+	private tierBakPath(tier: SessionTier, n: number): string { return `${this.tierFile(tier)}.bak.${n}`; }
+	private tierTmpPath(tier: SessionTier): string { return `${this.tierFile(tier)}.tmp`; }
+
+	/** Mark precisely the tier whose serialized membership changed. */
+	private markMutation(previous: PersistedSession | undefined, next: PersistedSession | undefined): void {
+		const before = previous ? this.tierForSession(previous) : undefined;
+		const after = next ? this.tierForSession(next) : undefined;
+		if (before) this.tiers[before].dirtyGeneration = this.generation;
+		if (after) this.tiers[after].dirtyGeneration = this.generation;
+		if (previous && next && before !== after) {
+			this.pendingTransitions.set(next.id, { id: next.id, tier: after!, session: { ...next } });
+		} else if (next && this.pendingTransitions.has(next.id)) {
+			// Keep an already-published intent's final row current while a batch
+			// coalesces additional updates before the tier pair is durable.
+			this.pendingTransitions.set(next.id, { id: next.id, tier: after!, session: { ...next } });
+		} else if (previous && !next && this.pendingTransitions.has(previous.id)) {
+			this.pendingTransitions.set(previous.id, { id: previous.id, tier: before!, session: undefined });
+		}
+	}
+
 
 	/** Normalise PersistedSession-shaped rows read from disk (legacy field migration). */
 	private seedFromArray(rows: unknown[]): void {
@@ -525,48 +585,82 @@ export class SessionStore {
 		}
 	}
 
-	/** Backup-file path for index 1..N. */
-	private bakPath(n: number): string {
-		return `${this.storeFile}.bak.${n}`;
-	}
-
-	private load(): void {
-		this.loadedEpoch = 0;
-		this.writtenEpoch = 0;
-
-		const candidates = [this.storeFile];
-		for (let i = 1; i <= SessionStore.BACKUP_COUNT; i++) candidates.push(this.bakPath(i));
-
+	private readTierCandidates(tier: SessionTier): { rows: unknown[]; legacy?: LegacySnapshot } {
+		const state = this.tiers[tier];
+		const candidates = [state.file];
+		for (let i = 1; i <= SessionStore.BACKUP_COUNT; i++) candidates.push(this.tierBakPath(tier, i));
 		for (const file of candidates) {
 			try {
 				if (!this.fs.existsSync(file)) continue;
 				const raw = this.fs.readFileSync(file, "utf-8");
 				const parsed = JSON.parse(raw);
-
-				if (Array.isArray(parsed)) {
-					// Legacy v1 shape
-					this.seedFromArray(parsed);
-					this.loadedEpoch = 0;
-					if (file !== this.storeFile) {
-						console.warn(`[session-store] Loaded from backup ${path.basename(file)} — primary missing/corrupt`);
-					}
-					return;
+				if (parsed && typeof parsed === "object" && (parsed as { version?: unknown }).version === 3 && Array.isArray((parsed as { sessions?: unknown[] }).sessions)) {
+					const obj = parsed as { epoch?: unknown; sessions: unknown[] };
+					state.loadedEpoch = typeof obj.epoch === "number" ? obj.epoch : 0;
+					if (file !== state.file) console.warn(`[session-store] Loaded ${tier} tier from backup ${path.basename(file)} (epoch ${state.loadedEpoch}) — primary missing/corrupt`);
+					return { rows: obj.sessions };
 				}
-				if (parsed && typeof parsed === "object" && (parsed as { version?: number }).version === 2 && Array.isArray((parsed as { sessions?: unknown[] }).sessions)) {
-					const obj = parsed as { version: number; epoch?: number; sessions: unknown[] };
-					this.seedFromArray(obj.sessions);
-					this.loadedEpoch = typeof obj.epoch === "number" ? obj.epoch : 0;
-					if (file !== this.storeFile) {
-						console.warn(`[session-store] Loaded from backup ${path.basename(file)} (epoch ${this.loadedEpoch}) — primary missing/corrupt`);
-					}
-					return;
+				if (tier === "live" && (Array.isArray(parsed) || (parsed && typeof parsed === "object" && (parsed as { version?: unknown }).version === 2 && Array.isArray((parsed as { sessions?: unknown[] }).sessions)))) {
+					const rows = Array.isArray(parsed) ? parsed : (parsed as { sessions: unknown[] }).sessions;
+					const epoch = Array.isArray(parsed) ? 0 : typeof (parsed as { epoch?: unknown }).epoch === "number" ? (parsed as { epoch: number }).epoch : 0;
+					return { rows, legacy: { raw, rows, epoch, source: file } };
 				}
 				console.warn(`[session-store] ${file}: unrecognised shape, skipping`);
-			} catch (err) {
-				console.warn(`[session-store] Failed to parse ${file}:`, err);
+			} catch (err) { console.warn(`[session-store] Failed to parse ${file}:`, err); }
+		}
+		return { rows: [] };
+	}
+
+	private load(): void {
+		const live = this.readTierCandidates("live");
+		if (live.legacy) {
+			this.legacySnapshot = live.legacy;
+			this.tiers.live.loadedEpoch = live.legacy.epoch;
+			// A prior migration can have published archive before a failed live
+			// rename. Load its epoch for the tier-local guard, but keep the v2
+			// snapshot authoritative for the rows being repartitioned.
+			this.readTierCandidates("archived");
+			this.migrationNeeded = true;
+			this.seedFromArray(live.rows);
+			this.tiers.live.dirtyGeneration = 0;
+			this.tiers.archived.dirtyGeneration = 0;
+		} else {
+			if (live.rows.some(row => !!row && typeof row === "object" && (row as PersistedSession).archived === true)) this.tierLayoutNeedsRepair = true;
+			this.seedFromArray(live.rows);
+			const archived = this.readTierCandidates("archived");
+			if (archived.rows.some(row => !!row && typeof row === "object" && (row as PersistedSession).archived !== true)) this.tierLayoutNeedsRepair = true;
+			for (const row of archived.rows) {
+				if (!row || typeof row !== "object" || !(row as PersistedSession).id) continue;
+				const id = (row as PersistedSession).id;
+				if (this.sessions.has(id)) {
+					console.warn(`[session-store] Duplicate session ${id} in live and archived tiers; keeping live row`);
+					this.tierLayoutNeedsRepair = true;
+					continue;
+				}
+				this.seedFromArray([row]);
 			}
 		}
-		// No file readable — start empty.
+		// A transition is authoritative for the membership-changing ids after a
+		// crash between the independent atomic renames.
+		try {
+			if (this.fs.existsSync(this.transitionFile)) {
+				const intent = JSON.parse(this.fs.readFileSync(this.transitionFile, "utf-8")) as { version?: unknown; entries?: TransitionEntry[] };
+				if (intent.version === 1 && Array.isArray(intent.entries)) {
+					for (const entry of intent.entries) {
+						if (!entry || typeof entry.id !== "string") continue;
+						if (entry.session) this.sessions.set(entry.id, entry.session);
+						else this.sessions.delete(entry.id);
+						this.pendingTransitions.set(entry.id, entry);
+					}
+					if (this.pendingTransitions.size) {
+						// Repair both complete tier snapshots before clearing the intent.
+						this.generation++;
+						this.tiers.live.dirtyGeneration = this.generation;
+						this.tiers.archived.dirtyGeneration = this.generation;
+					}
+				}
+			}
+		} catch (err) { console.warn(`[session-store] Failed to parse ${this.transitionFile}:`, err); }
 	}
 
 
@@ -577,177 +671,147 @@ export class SessionStore {
 			&& a.ctimeMs === b.ctimeMs;
 	}
 
-	/**
-	 * Atomically reserve this file's write slot before awaiting the prior writer.
-	 * The reservation, rather than a best-effort `.tmp` convention, prevents two
-	 * SessionStore instances from interleaving backup rotation and tmp+rename.
-	 */
-	private async withFileWriteFence<T>(write: () => Promise<T>): Promise<T> {
-		const key = path.resolve(this.storeFile);
-		const previous = SessionStore.fileWriteTails.get(key) ?? Promise.resolve();
-		let release!: () => void;
-		const completion = new Promise<void>((resolve) => { release = resolve; });
-		const tail = previous.catch(() => undefined).then(() => completion);
-		SessionStore.fileWriteTails.set(key, tail);
-		await previous.catch(() => undefined);
+	/** Acquire all file fences in a stable order; pair writes cannot deadlock. */
+	private async withTierWriteFences<T>(tiers: readonly SessionTier[], write: () => Promise<T>): Promise<T> {
+		const keys = [...new Set(tiers.map(t => path.resolve(this.tierFile(t))))].sort();
+		const releases: Array<() => void> = [];
+		const tails: Array<{ key: string; tail: Promise<void> }> = [];
 		try {
+			for (const key of keys) {
+				const previous = SessionStore.fileWriteTails.get(key) ?? Promise.resolve();
+				let release!: () => void;
+				const completion = new Promise<void>(resolve => { release = resolve; });
+				const tail = previous.catch(() => undefined).then(() => completion);
+				SessionStore.fileWriteTails.set(key, tail);
+				await previous.catch(() => undefined);
+				releases.push(release); tails.push({ key, tail });
+			}
 			return await write();
 		} finally {
-			release();
-			if (SessionStore.fileWriteTails.get(key) === tail) {
-				SessionStore.fileWriteTails.delete(key);
-			}
+			for (let i = releases.length - 1; i >= 0; i--) releases[i]();
+			for (const { key, tail } of tails) if (SessionStore.fileWriteTails.get(key) === tail) SessionStore.fileWriteTails.delete(key);
 		}
 	}
 
-
-	private async peekDiskEpochAsync(): Promise<number> {
+	private async peekDiskEpochAsync(tier: SessionTier): Promise<number> {
 		try {
-			const raw = await this.fs.promises.readFile(this.storeFile, "utf-8");
-			const parsed = JSON.parse(raw);
-			if (Array.isArray(parsed)) return 0;
-			if (parsed && typeof parsed === "object" && typeof (parsed as { epoch?: unknown }).epoch === "number") {
-				return (parsed as { epoch: number }).epoch;
-			}
-			return -1;
-		} catch {
-			return -1;
-		}
+			const parsed = JSON.parse(await this.fs.promises.readFile(this.tierFile(tier), "utf-8"));
+			if (tier === "live" && Array.isArray(parsed)) return 0;
+			return parsed && typeof parsed === "object" && typeof parsed.epoch === "number" ? parsed.epoch : -1;
+		} catch { return -1; }
 	}
 
-	private async currentDiskFingerprintAsync(): Promise<DiskFingerprint | null> {
+	private async currentDiskFingerprintAsync(tier: SessionTier): Promise<DiskFingerprint | null> {
 		try {
-			const stat = await this.fs.promises.stat(this.storeFile);
-			const size = Number(stat.size);
-			const mtimeMs = Number(stat.mtimeMs);
-			if (!Number.isFinite(size) || !Number.isFinite(mtimeMs)) return null;
-			const ctimeMs = Number(stat.ctimeMs);
-			// Size + mtime is not a sufficient identity on filesystems that expose
-			// coarse timestamp resolution. Re-read the epoch when ctime is absent
-			// instead of treating an external same-size rewrite as our own write.
-			if (!Number.isFinite(size) || !Number.isFinite(mtimeMs) || !Number.isFinite(ctimeMs)) return null;
-			return { size, mtimeMs, ctimeMs };
-		} catch {
-			return null;
+			const stat = await this.fs.promises.stat(this.tierFile(tier));
+			const size = Number(stat.size), mtimeMs = Number(stat.mtimeMs), ctimeMs = Number(stat.ctimeMs);
+			// ctime is load-bearing: size + mtime is unsafe on coarse filesystems.
+			return Number.isFinite(size) && Number.isFinite(mtimeMs) && Number.isFinite(ctimeMs) ? { size, mtimeMs, ctimeMs } : null;
+		} catch { return null; }
+	}
+
+	private async rotateBackupsAsync(tier: SessionTier): Promise<void> {
+		const file = this.tierFile(tier);
+		try { await this.fs.promises.access(file); } catch { return; }
+		try { await this.fs.promises.unlink(this.tierBakPath(tier, SessionStore.BACKUP_COUNT)); } catch { /* non-fatal */ }
+		for (let i = SessionStore.BACKUP_COUNT - 1; i >= 1; i--) {
+			try { await this.fs.promises.rename(this.tierBakPath(tier, i), this.tierBakPath(tier, i + 1)); } catch { /* non-fatal */ }
 		}
+		try { await this.fs.promises.copyFile(file, this.tierBakPath(tier, 1)); } catch { /* non-fatal */ }
 	}
 
-	/** Promise-based backup rotation with the same oldest-first policy as saveNow(). */
-	private async rotateBackupsAsync(): Promise<void> {
-		try {
-			// Whether a primary exists is a policy decision: without it there is no
-			// new backup snapshot, so do not shift the existing recovery chain.
-			await this.fs.promises.access(this.storeFile);
-		} catch {
-			return;
-		}
-		const N = SessionStore.BACKUP_COUNT;
-		try { await this.fs.promises.unlink(this.bakPath(N)); } catch { /* non-fatal */ }
-		for (let i = N - 1; i >= 1; i--) {
-			try { await this.fs.promises.rename(this.bakPath(i), this.bakPath(i + 1)); } catch { /* non-fatal */ }
-		}
-		try { await this.fs.promises.copyFile(this.storeFile, this.bakPath(1)); } catch { /* non-fatal */ }
-	}
+	/** Live-tier compatibility accessors retained for existing callers. */
+	isStaleGuardTripped(): boolean { return this.tiers.live.staleGuardTripped; }
+	getLoadedEpoch(): number { return this.tiers.live.loadedEpoch; }
+	getWrittenEpoch(): number { return this.tiers.live.writtenEpoch; }
+	getTierLoadedEpoch(tier: SessionTier): number { return this.tiers[tier].loadedEpoch; }
+	getTierWrittenEpoch(tier: SessionTier): number { return this.tiers[tier].writtenEpoch; }
+	isTierStaleGuardTripped(tier: SessionTier): boolean { return this.tiers[tier].staleGuardTripped; }
 
-	/** True if the most recent saveNow() refused to write due to the stale-snapshot guard. */
-	isStaleGuardTripped(): boolean {
-		return this.staleGuardTripped;
-	}
-
-	/** Epoch read from disk at construction. Test-visible. */
-	getLoadedEpoch(): number {
-		return this.loadedEpoch;
-	}
-
-	/** Epoch most recently written to disk this process. Test-visible. */
-	getWrittenEpoch(): number {
-		return this.writtenEpoch;
-	}
-
-
-	/**
-	 * Immediately join the serialized async writer for structural mutations.
-	 * Entering the writer performs no filesystem operation on this call stack;
-	 * the first write yields to `fs.promises` and subsequent mutations coalesce
-	 * into its trailing drain iteration.
-	 */
 	private saveNow(): void {
-		if (this.saveTimer) {
-			this.clock.clearTimeout(this.saveTimer);
-			this.saveTimer = null;
-		}
+		if (this.saveTimer) { this.clock.clearTimeout(this.saveTimer); this.saveTimer = null; }
 		void this.requestAsyncSave();
 	}
 
-	/** Promise-based save preserving epoch checks, backups, fsync, and atomic rename. */
-	private async saveNowAsync(): Promise<number> {
-		return this.withFileWriteFence(() => this.saveNowUnlockedAsync());
+	private retainLegacySnapshot(): void {
+		if (!this.legacySnapshot) return;
+		let retained = `${this.storeFile}.pre-archived-split`;
+		for (let n = 1; this.fs.existsSync(retained); n++) retained = `${this.storeFile}.pre-archived-split.${n}`;
+		this.fs.mkdirSync(this.storeDir, { recursive: true });
+		this.fs.writeFileSync(retained, this.legacySnapshot.raw, "utf-8");
 	}
 
-	/** Runs inside the per-file fence so check, backup rotation, and rename agree. */
-	private async saveNowUnlockedAsync(): Promise<number> {
-		if (this.staleGuardTripped) {
-			throw new Error("Session persistence refused: stale-snapshot guard is active");
+	private async writeTransitionIntent(entries: readonly TransitionEntry[]): Promise<void> {
+		if (!entries.length) return;
+		const tmp = `${this.transitionFile}.tmp`;
+		await this.fs.promises.writeFile(tmp, JSON.stringify({ version: 1, entries }), "utf-8");
+		await this.fs.promises.rename(tmp, this.transitionFile);
+	}
+
+	private async saveTierUnlockedAsync(tier: SessionTier, json: string): Promise<void> {
+		const state = this.tiers[tier];
+		if (state.staleGuardTripped) throw new Error(`Session persistence refused: stale-snapshot guard is active for ${tier} tier`);
+		const fingerprint = await this.currentDiskFingerprintAsync(tier);
+		const onDiskEpoch = state.writtenEpoch > 0 && SessionStore.fingerprintsEqual(fingerprint, state.diskFingerprint)
+			? Math.max(state.loadedEpoch, state.writtenEpoch) : await this.peekDiskEpochAsync(tier);
+		if (onDiskEpoch > state.loadedEpoch && state.writtenEpoch === 0) {
+			state.staleGuardTripped = true;
+			console.error(`[session-store] REFUSING to save ${tier} tier: on-disk epoch ${onDiskEpoch} is newer than loaded epoch ${state.loadedEpoch}. Manual intervention required: inspect ${state.file} and ${state.file}.bak.*`);
+			throw new Error(`Session persistence refused: on-disk epoch ${onDiskEpoch} is newer than loaded epoch ${state.loadedEpoch}`);
 		}
-		const startedAt = performance.now();
+		const epoch = Math.max(state.loadedEpoch, state.writtenEpoch, onDiskEpoch < 0 ? 0 : onDiskEpoch) + 1;
+		const payload = JSON.stringify({ version: 3, epoch, sessions: JSON.parse(json) });
+		const tmp = this.tierTmpPath(tier);
 		try {
-			await this.fs.promises.mkdir(this.storeDir, { recursive: true });
-
-			const currentFingerprint = await this.currentDiskFingerprintAsync();
-			const onDiskEpoch = this.writtenEpoch > 0
-				&& SessionStore.fingerprintsEqual(currentFingerprint, this.diskFingerprint)
-				? Math.max(this.loadedEpoch, this.writtenEpoch)
-				: await this.peekDiskEpochAsync();
-			if (onDiskEpoch > this.loadedEpoch && this.writtenEpoch === 0) {
-				console.error(
-					`[session-store] REFUSING to save: on-disk epoch ${onDiskEpoch} is ` +
-					`newer than loaded epoch ${this.loadedEpoch}. Possible stale-snapshot ` +
-					`recovery (cloud sync / antivirus / .pre-migration). ` +
-					`In-memory state has ${this.sessions.size} sessions; on-disk has more recent. ` +
-					`Manual intervention required: inspect ${this.storeFile} and ${this.storeFile}.bak.*`,
-				);
-				this.staleGuardTripped = true;
-				throw new Error(`Session persistence refused: on-disk epoch ${onDiskEpoch} is newer than loaded epoch ${this.loadedEpoch}`);
-			}
-
-			const nextEpoch = Math.max(this.loadedEpoch, this.writtenEpoch, onDiskEpoch < 0 ? 0 : onDiskEpoch) + 1;
-			const payload = {
-				version: 2 as const,
-				epoch: nextEpoch,
-				sessions: Array.from(this.sessions.values()),
-			};
-			const json = JSON.stringify(payload);
-			// Snapshot after serialization. A mutation which was already folded
-			// into this payload must not force an identical trailing rewrite.
-			const serializedGeneration = this.generation;
-
-			await this.rotateBackupsAsync();
-
-			const tmp = `${this.storeFile}.tmp`;
-			// FsLike intentionally has a small async surface so memfs and other
-			// injected filesystems need not implement FileHandle.open/sync/close.
-			// Use fsync when the richer real-fs API is available, otherwise retain
-			// the same atomic tmp+rename publish contract with writeFile.
+			await this.rotateBackupsAsync(tier);
 			if (this.fs.promises.open) {
 				const handle = await this.fs.promises.open(tmp, "w");
-				try {
-					await handle.writeFile(json, "utf-8");
-					try { await handle.sync(); } catch { /* non-fatal on network shares */ }
-				} finally {
-					await handle.close();
-				}
-			} else {
-				await this.fs.promises.writeFile(tmp, json, "utf-8");
+				try { await handle.writeFile(payload, "utf-8"); try { await handle.sync(); } catch { /* non-fatal */ } } finally { await handle.close(); }
+			} else await this.fs.promises.writeFile(tmp, payload, "utf-8");
+			await this.fs.promises.rename(tmp, state.file);
+			state.writtenEpoch = epoch;
+			state.diskFingerprint = await this.currentDiskFingerprintAsync(tier);
+		} catch (err) { try { await this.fs.promises.unlink(tmp); } catch { /* ignore */ } throw err; }
+	}
+
+	/** Serialize only dirty tiers; the archive tier is never touched by live activity. */
+	private async saveNowAsync(): Promise<number> {
+		// Yield before snapshotting so synchronous structural bursts coalesce into
+		// the same tier payload, as the original single-file drain did.
+		await this.fs.promises.mkdir(this.storeDir, { recursive: true });
+		const mustMigrate = this.migrationNeeded;
+		const selected = (Object.keys(this.tiers) as SessionTier[]).filter(t => mustMigrate || this.tiers[t].dirtyGeneration > this.tiers[t].publishedGeneration);
+		const transitionEntries = [...this.pendingTransitions.values()];
+		const transition = transitionEntries.length > 0;
+		// A legacy source is kept authoritative until archive publication succeeds;
+		// publish archive first so an archive move has its destination before live
+		// removal. The transition intent resolves either direction if interrupted.
+		if (mustMigrate || transition) selected.sort((a, b) => a === "archived" ? -1 : b === "archived" ? 1 : 0);
+		if (!selected.length) return this.generation;
+		const rows: Partial<Record<SessionTier, PersistedSession[]>> = {};
+		for (const tier of selected) rows[tier] = Array.from(this.sessions.values()).filter(s => this.tierForSession(s) === tier);
+		const json: Partial<Record<SessionTier, string>> = {};
+		for (const tier of selected) json[tier] = JSON.stringify(rows[tier]);
+		const serializedGeneration = this.generation;
+		const fenced = transition ? ["live", "archived"] as SessionTier[] : selected;
+		const startedAt = performance.now();
+		return this.withTierWriteFences(fenced, async () => {
+			if (mustMigrate) this.retainLegacySnapshot();
+			if (transition) await this.writeTransitionIntent(transitionEntries);
+			for (const tier of selected) await this.saveTierUnlockedAsync(tier, json[tier]!);
+			if (transition) {
+				try { await this.fs.promises.unlink(this.transitionFile); } catch { /* ignore */ }
+				for (const entry of transitionEntries) if (this.pendingTransitions.get(entry.id) === entry) this.pendingTransitions.delete(entry.id);
 			}
-			await this.fs.promises.rename(tmp, this.storeFile);
-			this.writtenEpoch = nextEpoch;
-			this.lastPersistenceMetrics = { bytes: Buffer.byteLength(json), durationMs: performance.now() - startedAt };
-			this.diskFingerprint = await this.currentDiskFingerprintAsync();
+			for (const tier of selected) this.tiers[tier].publishedGeneration = Math.max(this.tiers[tier].publishedGeneration, serializedGeneration);
+			this.migrationNeeded = false;
+			const persistedBytes = (tier: SessionTier) => json[tier]
+				? Buffer.byteLength(JSON.stringify({ version: 3, epoch: this.tiers[tier].writtenEpoch, sessions: JSON.parse(json[tier]!) })) : 0;
+			const liveBytes = persistedBytes("live");
+			const archivedBytes = persistedBytes("archived");
+			this.lastPersistenceMetrics = { bytes: liveBytes + archivedBytes, liveBytes, archivedBytes, durationMs: performance.now() - startedAt };
 			return serializedGeneration;
-		} catch (err) {
-			try { await this.fs.promises.unlink(`${this.storeFile}.tmp`); } catch { /* ignore */ }
-			throw err;
-		}
+		});
 	}
 
 	private async drainAsyncSaves(): Promise<void> {
@@ -769,7 +833,7 @@ export class SessionStore {
 					this.lastPersistenceError = err;
 					// The stale guard already emitted its actionable REFUSING diagnostic.
 					// Keep hot-path retries quiet while explicit barriers still reject.
-					if (!this.staleGuardTripped) console.error("[session-store] Failed to save sessions:", err);
+					if (!(Object.values(this.tiers) as TierPersistenceState[]).some(tier => tier.staleGuardTripped)) console.error("[session-store] Failed to save sessions:", err);
 					// Do not spin on a broken disk. A later mutation or explicit barrier
 					// may retry; barriers observe this failure instead of false success.
 					this.asyncSaveRequested = false;
@@ -816,8 +880,10 @@ export class SessionStore {
 	onIndexUpdate?: (session: PersistedSession) => void;
 
 	put(session: PersistedSession): void {
+		const previous = this.sessions.get(session.id);
 		this.generation++;
 		this.sessions.set(session.id, session);
+		this.markMutation(previous, session);
 		this.saveNow(); // immediate — structural change
 		this.onIndexUpdate?.(session);
 	}
@@ -827,12 +893,14 @@ export class SessionStore {
 	}
 
 	remove(id: string): void {
+		const existing = this.sessions.get(id);
+		if (!existing) return;
 		this.generation++;
 		this.sessions.delete(id);
+		this.markMutation(existing, undefined);
 		this.saveNow(); // immediate — structural change
 		// Durably tombstone this hard-delete so the boot-time headquarters
-		// migration does not resurrect the record from a stale
-		// `.pre-headquarters-id-migration` backup on the next restart.
+		// migration does not resurrect the record from a stale backup on restart.
 		recordDeletionTombstone(this.storeDir, "sessions.json", id);
 	}
 
@@ -867,8 +935,10 @@ export class SessionStore {
 	update(id: string, updates: Partial<UpdatableSessionFields>): void {
 		const existing = this.sessions.get(id);
 		if (!existing) return;
+		const previous = { ...existing };
 		this.generation++;
 		Object.assign(existing, updates);
+		this.markMutation(previous, existing);
 
 		// Recovery-critical fields bypass the high-frequency debounce.
 		const critical = SessionStore.RECOVERY_CRITICAL_FIELDS.some(f => f in updates);
@@ -894,12 +964,14 @@ export class SessionStore {
 	restoreUserTagsShape(id: string, present: boolean, value: unknown): boolean {
 		const existing = this.sessions.get(id);
 		if (!existing) return false;
+		const previous = { ...existing };
 		this.generation++;
 		if (present) {
 			(existing as unknown as { user_tags: unknown }).user_tags = value;
 		} else {
 			delete existing.user_tags;
 		}
+		this.markMutation(previous, existing);
 		if (this.saveTimer) { this.clock.clearTimeout(this.saveTimer); this.saveTimer = null; }
 		this.saveNow();
 		return true;
@@ -932,9 +1004,11 @@ export class SessionStore {
 				}
 			}
 		}
+		const previous = { ...session };
 		this.generation++;
 		if (!session.drafts) session.drafts = {};
 		session.drafts[type] = data;
+		this.markMutation(previous, session);
 		this.save();
 		return true;
 	}
@@ -943,12 +1017,14 @@ export class SessionStore {
 	deleteDraft(sessionId: string, type: string): boolean {
 		const session = this.sessions.get(sessionId);
 		if (!session?.drafts) return false;
+		const previous = { ...session };
 		this.generation++;
 		delete session.drafts[type];
 		// Clean up empty drafts object
 		if (Object.keys(session.drafts).length === 0) {
 			delete session.drafts;
 		}
+		this.markMutation(previous, session);
 		this.save();
 		return true;
 	}
@@ -957,9 +1033,11 @@ export class SessionStore {
 	archive(id: string): boolean {
 		const existing = this.sessions.get(id);
 		if (!existing) return false;
+		const previous = { ...existing };
 		this.generation++;
 		existing.archived = true;
 		existing.archivedAt = this.clock.now();
+		this.markMutation(previous, existing);
 		this.saveNow(); // immediate — structural change
 		this.onIndexUpdate?.(existing);
 		return true;
@@ -978,10 +1056,12 @@ export class SessionStore {
 			return false;
 		}
 		const failureSequence = this.persistenceFailureSequence;
+		const previous = { ...existing };
 		this.generation++;
 		const targetGeneration = this.generation;
 		existing.archived = true;
 		existing.archivedAt = this.clock.now();
+		this.markMutation(previous, existing);
 		if (this.saveTimer) {
 			this.clock.clearTimeout(this.saveTimer);
 			this.saveTimer = null;
@@ -1024,6 +1104,7 @@ export class SessionStore {
 		if (!existing) return false;
 		this.generation++;
 		this.sessions.delete(id);
+		this.markMutation(existing, undefined);
 		this.saveNow();
 		// purge() is a permanent hard-delete, exactly like remove() — durably
 		// tombstone it so the boot-time headquarters migration does not resurrect
@@ -1047,6 +1128,7 @@ export class SessionStore {
 		this.generation++;
 		const targetGeneration = this.generation;
 		this.sessions.delete(id);
+		this.markMutation(existing, undefined);
 		if (this.saveTimer) {
 			this.clock.clearTimeout(this.saveTimer);
 			this.saveTimer = null;
