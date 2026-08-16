@@ -2615,6 +2615,15 @@
       }
     },
     {
+      "path": "tests2/core/archived-team-restore-guard.test.ts",
+      "reason": "Failing-first native v2 core coverage proving cold restore suppresses live team-owned sessions whose teamGoalId resolves to an archived goal without relying on TeamStore, while preserving goalId-only standalone restoration.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/session-manager-boot-restore-lag.test.ts",
       "reason": "Native v2 core coverage for event-loop-lag-aware eager restore batching without skipped or deferred sessions.",
       "execution": {
