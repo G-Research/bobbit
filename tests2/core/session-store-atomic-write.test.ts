@@ -754,6 +754,57 @@ describe("SessionStore atomic write", () => {
 		}
 	});
 
+	it("drains an archived update made after a fresh transition intent is durable", async () => {
+		const store = new SessionStore(stateDir, memfs);
+		store.put(makeSession("move"));
+		await store.flushAsync();
+
+		const asyncFs = memfs as any;
+		const baseRename = asyncFs.promises.rename;
+		const intentDurable = deferred();
+		const releaseTierRenames = deferred();
+		let pauseFreshIntent = true;
+		asyncFs.promises.rename = async (from: PathLike, to: PathLike) => {
+			const isFreshIntent = pauseFreshIntent
+				&& path.resolve(String(from)) === path.resolve(`${STORE_FILE}.split-transition.tmp`)
+				&& path.resolve(String(to)) === path.resolve(`${STORE_FILE}.split-transition`);
+			const result = await baseRename(from, to);
+			if (isFreshIntent) {
+				pauseFreshIntent = false;
+				intentDurable.resolve();
+				await releaseTierRenames.promise;
+			}
+			return result;
+		};
+		try {
+			store.archive("move");
+			await settleWithin(intentDurable.promise, "fresh transition intent publication");
+
+			// This is not another membership move: it remains in the archive tier
+			// while the pair that placed it there is still between its renames.
+			store.update("move", { title: "updated while transition was active" });
+			releaseTierRenames.resolve();
+			await settleWithin(store.flushAsync(), "transition followed by archived update");
+
+			const live = readTier(STORE_FILE);
+			const archived = readTier(ARCHIVED_FILE);
+			assert.equal(live.version, 3, "live tier remains valid JSON after the interleaving");
+			assert.equal(archived.version, 3, "archived tier remains valid JSON after the interleaving");
+			assert.deepEqual(live.sessions, []);
+			assert.deepEqual(archived.sessions.map(session => ({ id: session.id, title: session.title, archived: session.archived })), [
+				{ id: "move", title: "updated while transition was active", archived: true },
+			]);
+			assert.equal(memfs.existsSync(`${STORE_FILE}.split-transition`), false, "the completed pair must clear its intent");
+
+			const secondReload = new SessionStore(stateDir, memfs);
+			await settleWithin(secondReload.flushAsync(), "second reload after archived update");
+			assert.deepEqual(secondReload.get("move"), archived.sessions[0], "the second reload matches the durable archived row");
+			assert.deepEqual(secondReload.getArchived(), archived.sessions);
+		} finally {
+			asyncFs.promises.rename = baseRename;
+		}
+	});
+
 	it("converges after a peer clears a target/target intent left by an unlink failure", async () => {
 		const original = new SessionStore(stateDir, memfs);
 		original.put(makeSession("move"));
