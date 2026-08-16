@@ -10,14 +10,11 @@ import path from "node:path";
 import { inspect } from "node:util";
 import type { CommandRunner } from "../../src/server/gateway-deps.ts";
 import { VerificationHarness } from "../../src/server/agent/verification-harness.ts";
-import { FakePinnedCheckoutManager, pinnedCheckoutReference } from "../harness/fake-pinned-checkout-manager.ts";
 import { installScopedMemoryFs } from "./helpers/scoped-memory-fs.ts";
 
 let restoreFs: (() => void) | undefined;
 beforeAll(() => { restoreFs = installScopedMemoryFs(); });
 afterAll(() => { restoreFs?.(); });
-
-const PROJECT_ID = "project-basebranch";
 
 function makeTempStateDir(): string {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "verif-basebranch-regression-"));
@@ -121,16 +118,14 @@ function makeHarnessFixture(
 	const projectConfigStore = makeProjectConfigStore(baseRef);
 	const projectContextManager = {
 		getContextForGoal: (goalId: string) => goalId === signal.goalId ? {
-			project: { id: PROJECT_ID },
+			project: { id: "project-basebranch" },
 			goalStore: { get: (id: string) => id === signal.goalId ? goal : undefined },
 			gateStore,
 			projectConfigStore,
 		} : null,
 	};
-	const stateDir = makeTempStateDir();
-	const pinnedCheckoutManager = new FakePinnedCheckoutManager(path.join(stateDir, "pinned-checkouts"));
 	const harness = new VerificationHarness(
-		stateDir,
+		makeTempStateDir(),
 		undefined,
 		() => {},
 		{ get: () => null, getAll: () => [] } as any,
@@ -140,9 +135,9 @@ function makeHarnessFixture(
 		projectConfigStore as any,
 		projectContextManager as any,
 		undefined,
-		{ commandRunner, pinnedCheckoutManager: pinnedCheckoutManager as any },
+		{ commandRunner },
 	);
-	return { harness, signal, gateStore, goal, pinnedCheckoutManager };
+	return { harness, signal, gateStore, goal };
 }
 
 test("local-only verification does not warn when origin remote is absent", async () => {
@@ -394,21 +389,7 @@ test("ready-to-merge keeps {{master}} on detected primary when configured base_r
 });
 
 test("rerun verification context includes {{baseBranch}} from configured base_ref", async () => {
-	const { harness, signal, gateStore, pinnedCheckoutManager } = makeHarnessFixture("origin/develop");
-	// Restart recovery may only resume the project-owned lease that the goal
-	// context authoritatively identifies; seed the lifecycle fixture accordingly.
-	const checkout = pinnedCheckoutManager.seed(signal.id, process.cwd(), PROJECT_ID);
-	(harness as any).activeVerifications.set(signal.id, {
-		goalId: signal.goalId,
-		projectId: PROJECT_ID,
-		gateId: signal.gateId,
-		signalId: signal.id,
-		overallStatus: "running",
-		startedAt: Date.now(),
-		currentPhase: 0,
-		pinnedCheckout: pinnedCheckoutReference(checkout),
-		steps: [],
-	});
+	const { harness, signal, gateStore } = makeHarnessFixture("origin/develop");
 	gateStore._gateState.signals[0] = {
 		...signal,
 		verification: {

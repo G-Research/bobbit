@@ -7,7 +7,7 @@
  */
 
 import { ProjectSandbox } from "./project-sandbox.js";
-import type { ProjectSandboxOptions, ContainerState, SandboxHealthEvent, VerificationSidecar, VerificationSidecarRequest, VerificationSidecarRemovalRequest } from "./project-sandbox.js";
+import type { ProjectSandboxOptions, ContainerState, SandboxHealthEvent } from "./project-sandbox.js";
 import { sandboxImageRequirements } from "./sandbox-image-requirements.js";
 import type { Clock, CommandRunner } from "../gateway-deps.js";
 import { HEADQUARTERS_PROJECT_ID, SYSTEM_PROJECT_ID } from "./project-registry.js";
@@ -43,21 +43,12 @@ export interface SandboxManagerStats {
  * sandbox network creation, GitHub-token resolution) — keeping SandboxManager
  * itself decoupled from ProjectRegistry, ProjectContextManager, SessionManager, etc.
  */
-/** A verification backend may be provisioned for a direct (unsandboxed) goal,
- * but ordinary agent sessions still require explicit `sandbox: docker`. */
-export type SandboxBootstrapPurpose = "session" | "verification";
-export type SandboxBootstrap = (projectId: string, purpose?: SandboxBootstrapPurpose) => Promise<ProjectSandboxOptions | null>;
+export type SandboxBootstrap = (projectId: string) => Promise<ProjectSandboxOptions | null>;
 
 /** Cheap, synchronous desired-image projection used only to skip a ready sandbox's heavyweight bootstrap. */
 export type SandboxPlanIdentity = { readonly image: string; readonly fingerprint?: string };
 export type SandboxPlanIdentityResolver = (projectId: string) => SandboxPlanIdentity | null;
 
-type VerificationBackend = {
-	sandbox: ProjectSandbox;
-	identity: { image: string; fingerprint?: string };
-	/** Signals whose successful acquire/resolve was performed by this exact backend. */
-	outstanding: Set<string>;
-};
 
 export interface SandboxManagerOptions {
 	/**
@@ -78,20 +69,6 @@ export interface SandboxManagerOptions {
 
 export class SandboxManager {
 	private sandboxes = new Map<string, ProjectSandbox>();
-	/**
-	 * A verification sidecar is deliberately independent from the live session
-	 * sandbox. Its options come only from the authoritative build-free bootstrap
-	 * for the exact ready image, so a requirements change cannot make a sidecar
-	 * inherit A's credentials or image after B was verified.
-	 */
-	private _verificationBackends = new Map<string, VerificationBackend>();
-	/**
-	 * Exact-image sidecars can outlive a requirements transition. Keep their
-	 * credential-free validator until terminal cleanup proves the recorded ID is
-	 * gone; routing an A-owned sidecar through B would correctly reject it, but
-	 * would leave the durable checkout pinned forever.
-	 */
-	private _supersededVerificationBackends = new Map<string, Map<string, VerificationBackend>>();
 	private _recoveryListeners: Array<(projectId: string, containerId: string) => void> = [];
 	private _healthUnsubscribes = new Map<string, () => void>();
 	/**
@@ -144,84 +121,27 @@ export class SandboxManager {
 	 * the bootstrap in case config has changed.
 	 */
 	async ensureForProject(projectId: string): Promise<void> {
-		await this._ensure(projectId, "session");
-	}
-
-	/**
-	 * Prepare the isolated Docker backend used by immutable verification. Direct
-	 * agents remain host-resident; only their fresh verification work uses this.
-	 */
-	async ensureVerificationBackend(projectId: string): Promise<void> {
-		await this._ensure(projectId, "verification");
-	}
-
-	private async _ensure(projectId: string, purpose: SandboxBootstrapPurpose): Promise<void> {
 		if (isSandboxExemptProject(projectId)) return;
 
 		const existing = this.sandboxes.get(projectId);
-		// Verification intentionally does not return early for a ready project
-		// sandbox. Its bootstrap is the authoritative no-build exact-image
-		// readiness fence; every sidecar request must pass it before Docker run.
-
-		// A ready session sandbox can skip all bootstrap work only when its exact
-		// server-owned plan remains unchanged. Missing identities deliberately
-		// fall through to the authoritative bootstrap comparison.
-		if (existing?.getStatus().status === "ready" && purpose === "session" && this._planIdentity) {
+		// A ready session sandbox can skip bootstrap only when the server-owned
+		// image plan is unchanged. Otherwise bootstrap recreates it transactionally.
+		if (existing?.getStatus().status === "ready" && this._planIdentity) {
 			let desired: SandboxPlanIdentity | null = null;
 			try { desired = this._planIdentity(projectId); } catch { /* bootstrap is authoritative */ }
 			const applied = this._appliedImagePlans.get(projectId);
 			if (desired && applied?.image === desired.image && applied.fingerprint === desired.fingerprint) return;
 		}
 
-		// Verification owns an independent, credential-free sidecar backend. It
-		// must not wait for (or reuse) a session sandbox: an in-flight A may be
-		// superseded by a ready B while the session bootstrap is still running.
-		// A session bootstrap can return null while a concurrent verification
-		// bootstrap must create a backend. Do not coalesce their negative results.
-		const key = `${projectId}:${purpose}`;
-		const inFlight = this._ensureInFlight.get(key);
+		const inFlight = this._ensureInFlight.get(projectId);
 		if (inFlight) return inFlight;
-
 		if (!this._bootstrap) {
-			throw new Error(`[sandbox-manager] ${purpose} backend requested for ${projectId} but no bootstrap was provided`);
+			throw new Error(`[sandbox-manager] ensureForProject(${projectId}) called but no bootstrap was provided`);
 		}
 		const bootstrap = this._bootstrap;
 		const p = (async () => {
-			const opts = await bootstrap(projectId, purpose);
+			const opts = await bootstrap(projectId);
 			if (!opts) return;
-			if (purpose === "verification") {
-				// Sidecars never use mutable-session credentials, OAuth state, or GitHub
-				// tokens. Keep this defensive sanitization next to the authority split so
-				// a future bootstrap change cannot accidentally reintroduce them.
-				const {
-					sandboxCredentials: _sandboxCredentials,
-					sandboxAgentAuthAllowed: _sandboxAgentAuthAllowed,
-					sandboxAgentAuthGoogleAllowed: _sandboxAgentAuthGoogleAllowed,
-					sandboxAgentAuthPrefs: _sandboxAgentAuthPrefs,
-					githubToken: _githubToken,
-					...sidecarOptions
-				} = opts;
-				const identity = { image: sidecarOptions.image, fingerprint: sidecarOptions.sandboxImageFingerprint };
-				const current = this._verificationBackends.get(projectId);
-				if (current?.identity.image === identity.image && current.identity.fingerprint === identity.fingerprint) return;
-				// Do not recreate or replace the live session sandbox. The new backend
-				// retains B's exact options for the subsequent Docker run; any failure
-				// leaves A untouched and verification fails closed at its caller. Retain A
-				// only when it owns known sidecars: carrying empty validators across every
-				// image transition both leaks state and overstates cleanup authority.
-				if (current) this._retainVerificationBackend(projectId, current);
-				const retained = this._supersededVerificationBackends.get(projectId);
-				const retainedKey = this._verificationBackendIdentityKey(identity);
-				const next = retained?.get(retainedKey) ?? {
-					sandbox: new ProjectSandbox(sidecarOptions, this.deps),
-					identity,
-					outstanding: new Set<string>(),
-				};
-				retained?.delete(retainedKey);
-				if (retained?.size === 0) this._supersededVerificationBackends.delete(projectId);
-				this._verificationBackends.set(projectId, next);
-				return;
-			}
 			const current = this.sandboxes.get(projectId);
 			if (current?.getStatus().status === "ready") {
 				const applied = this._appliedImagePlans.get(projectId);
@@ -229,26 +149,20 @@ export class SandboxManager {
 				try {
 					await current.recreate(opts);
 				} catch (error) {
-					// The ProjectSandbox either retained A or restored it before this
-					// boundary rejects. Keep A's applied identity and expose the failed
-					// desired B plan through the existing core-owned status projection.
-					if (opts.sandboxImageFingerprint) {
-						sandboxImageRequirements.recordBuildFailure(projectId, opts.sandboxImageFingerprint);
-					}
+					if (opts.sandboxImageFingerprint) sandboxImageRequirements.recordBuildFailure(projectId, opts.sandboxImageFingerprint);
 					throw error;
 				}
-				// Commit identity only after the desired container is healthy.
 				this._appliedImagePlans.set(projectId, { image: opts.image, fingerprint: opts.sandboxImageFingerprint });
 				return;
 			}
 			await this.initForProject(projectId, opts);
 		})();
 
-		this._ensureInFlight.set(key, p);
+		this._ensureInFlight.set(projectId, p);
 		try {
 			await p;
 		} finally {
-			if (this._ensureInFlight.get(key) === p) this._ensureInFlight.delete(key);
+			if (this._ensureInFlight.get(projectId) === p) this._ensureInFlight.delete(projectId);
 		}
 	}
 
@@ -273,8 +187,6 @@ export class SandboxManager {
 
 		try {
 			await sandbox.init();
-			// A session sandbox is the durable owner even if verification raced while
-			// init was pending. Reassert the exact instance before exposing it.
 			this.sandboxes.set(projectId, sandbox);
 			this._appliedImagePlans.set(projectId, { image: opts.image, fingerprint: opts.sandboxImageFingerprint });
 			console.log(`[sandbox-manager] Project ${projectId} sandbox ready (container: ${sandbox.getStatus().containerId.substring(0, 12)})`);
@@ -304,129 +216,6 @@ export class SandboxManager {
 		return this.sandboxes.get(projectId);
 	}
 
-	/** Acquire the isolated container for one pinned signal, never the shared project container. */
-	async getVerificationSidecar(projectId: string, request: VerificationSidecarRequest): Promise<VerificationSidecar> {
-		await this.ensureVerificationBackend(projectId);
-		const backend = this._verificationBackends.get(projectId);
-		if (!backend) throw new Error(`[sandbox-manager] immutable verification backend is unavailable for project ${projectId}`);
-		const sidecar = await backend.sandbox.getVerificationSidecar(request);
-		backend.outstanding.add(request.signalId);
-		return sidecar;
-	}
-
-	/** Validate a persisted sidecar identity after restart. Short Docker IDs and
-	 * project-container IDs are rejected by ProjectSandbox. */
-	async resolveVerificationSidecar(
-		projectId: string,
-		input: { signalId: string; containerId: string; ignoredOutputDirs: readonly string[]; dependencyLinks?: VerificationSidecarRequest["dependencyLinks"] },
-	): Promise<VerificationSidecar> {
-		await this.ensureVerificationBackend(projectId);
-		const backend = this._verificationBackends.get(projectId);
-		if (!backend) throw new Error(`[sandbox-manager] immutable verification backend is unavailable for project ${projectId}`);
-		const sidecar = await backend.sandbox.resolveVerificationSidecar(input);
-		backend.outstanding.add(input.signalId);
-		return sidecar;
-	}
-
-	async removeVerificationSidecar(projectId: string, request: VerificationSidecarRemovalRequest): Promise<void> {
-		// Terminal cleanup normally refreshes the current exact-image fence. If that
-		// bootstrap is unavailable, a prior backend that already owns this signal is
-		// still the only safe path to terminal convergence; do not abandon it.
-		let bootstrapFailure: unknown;
-		try {
-			await this.ensureVerificationBackend(projectId);
-		} catch (error) {
-			bootstrapFailure = error;
-		}
-		const failures: unknown[] = bootstrapFailure === undefined ? [] : [bootstrapFailure];
-		const bootstrapSummary = bootstrapFailure instanceof Error
-			? `: ${bootstrapFailure.message}`
-			: bootstrapFailure === undefined ? "" : `: ${String(bootstrapFailure)}`;
-		for (const backend of this._verificationBackendCandidates(projectId)) {
-			try {
-				// Each backend validates the exact ID, labels, image and mounts before it
-				// removes anything (or proves that exact ID absent). Do not widen this to
-				// project-level discovery when an identity transition races terminal work.
-				await backend.sandbox.removeVerificationSidecar(request);
-				backend.outstanding.delete(request.signalId);
-				this._pruneRetainedVerificationBackend(projectId, backend);
-				return;
-			} catch (error) {
-				failures.push(error);
-			}
-		}
-		throw new AggregateError(
-			failures,
-			`[sandbox-manager] immutable verification sidecar cleanup could not confirm the exact owner for project ${projectId}${failures.length ? "" : " (no backend)"}${bootstrapSummary}`,
-			bootstrapFailure === undefined ? undefined : { cause: bootstrapFailure },
-		);
-	}
-
-	async recoverVerificationSidecars(projectId: string, activeSignalIds: ReadonlySet<string>): Promise<string[]> {
-		// ProjectSandbox discovery is project/label/run scoped rather than image
-		// scoped. Sweep once with the current backend (or the sole fallback after a
-		// restart), never once per retained exact-image removal validator.
-		const backend = this._verificationBackends.get(projectId)
-			?? this._supersededVerificationBackends.get(projectId)?.values().next().value;
-		if (!backend) {
-			throw new Error(`[sandbox-manager] immutable verification sidecar recovery is unavailable for project ${projectId}`);
-		}
-		const removed = await backend.sandbox.recoverVerificationSidecars(activeSignalIds);
-		this._clearVerificationOutstanding(projectId, removed);
-		return removed;
-	}
-
-	private _verificationBackendIdentityKey(identity: VerificationBackend["identity"]): string {
-		return `${identity.image}\u0000${identity.fingerprint ?? ""}`;
-	}
-
-	private _retainVerificationBackend(projectId: string, backend: VerificationBackend): void {
-		if (backend.outstanding.size === 0) return;
-		let retained = this._supersededVerificationBackends.get(projectId);
-		if (!retained) this._supersededVerificationBackends.set(projectId, retained = new Map());
-		retained.set(this._verificationBackendIdentityKey(backend.identity), backend);
-	}
-
-	private _pruneRetainedVerificationBackend(projectId: string, backend: VerificationBackend): void {
-		if (backend.outstanding.size > 0) return;
-		const retained = this._supersededVerificationBackends.get(projectId);
-		if (!retained) return;
-		const key = this._verificationBackendIdentityKey(backend.identity);
-		if (retained.get(key) !== backend) return;
-		retained.delete(key);
-		if (retained.size === 0) this._supersededVerificationBackends.delete(projectId);
-	}
-
-	private _clearVerificationOutstanding(projectId: string, signalIds: readonly string[]): void {
-		if (signalIds.length === 0) return;
-		const current = this._verificationBackends.get(projectId);
-		if (current) for (const signalId of signalIds) current.outstanding.delete(signalId);
-		for (const backend of [...(this._supersededVerificationBackends.get(projectId)?.values() ?? [])]) {
-			for (const signalId of signalIds) backend.outstanding.delete(signalId);
-			this._pruneRetainedVerificationBackend(projectId, backend);
-		}
-	}
-
-	/** Current first, then only exact superseded validators. */
-	private _verificationBackendCandidates(projectId: string): VerificationBackend[] {
-		const current = this._verificationBackends.get(projectId);
-		const retained = this._supersededVerificationBackends.get(projectId);
-		return [...(current ? [current] : []), ...(retained?.values() ?? [])];
-	}
-
-	private async _reapVerificationBackends(projectId: string): Promise<void> {
-		const backend = this._verificationBackends.get(projectId)
-			?? this._supersededVerificationBackends.get(projectId)?.values().next().value;
-		try {
-			if (backend) await backend.sandbox.recoverVerificationSidecars(new Set());
-		} catch {
-			// Teardown is best effort; clear in-memory validators even if its one
-			// project-scoped discovery sweep is unavailable.
-		} finally {
-			this._verificationBackends.delete(projectId);
-			this._supersededVerificationBackends.delete(projectId);
-		}
-	}
 
 	/** Check if a project has a sandbox registered (regardless of state). */
 	has(projectId: string): boolean {
@@ -486,19 +275,13 @@ export class SandboxManager {
 	/** Destroy sandbox for a project (remove container AND volume). */
 	async destroy(projectId: string): Promise<void> {
 		const sandbox = this.sandboxes.get(projectId);
-		const verificationBackends = this._verificationBackendCandidates(projectId);
-		if (!sandbox && verificationBackends.length === 0) return;
+		if (!sandbox) return;
 
-		sandbox?.stopHealthMonitor();
+		sandbox.stopHealthMonitor();
 		const unsub = this._healthUnsubscribes.get(projectId);
 		if (unsub) { try { unsub(); } catch { /* ignore */ } this._healthUnsubscribes.delete(projectId); }
 
-		// Verification backends never own a live project container or its volumes.
-		// Reap their sidecars and discard every current/superseded validator without
-		// invoking ProjectSandbox.destroy() on one of them, which could mutate a
-		// live session's shared project volume during teardown.
-		await this._reapVerificationBackends(projectId);
-		if (sandbox) await sandbox.destroy();
+		await sandbox.destroy();
 		this.sandboxes.delete(projectId);
 		this._appliedImagePlans.delete(projectId);
 		console.log(`[sandbox-manager] Destroyed sandbox for project ${projectId}`);
@@ -506,14 +289,11 @@ export class SandboxManager {
 
 	/** Destroy all sandboxes. */
 	async destroyAll(): Promise<void> {
-		const projectIds = new Set([...this.sandboxes.keys(), ...this._verificationBackends.keys(), ...this._supersededVerificationBackends.keys()]);
-		const destroyPromises = [...projectIds].map(projectId => this.destroy(projectId).catch(err => {
+		const destroyPromises = [...this.sandboxes.keys()].map(projectId => this.destroy(projectId).catch(err => {
 			console.warn(`[sandbox-manager] Destroy error for project ${projectId}:`, err?.message || err);
 		}));
 		await Promise.allSettled(destroyPromises);
 		this.sandboxes.clear();
-		this._verificationBackends.clear();
-		this._supersededVerificationBackends.clear();
 		this._healthUnsubscribes.clear();
 		this._appliedImagePlans.clear();
 	}

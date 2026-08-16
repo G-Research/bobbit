@@ -25,7 +25,6 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { awaitableRm } from "./test-utils/cleanup.js";
 import { withDistServerImportLock } from "./test-utils/dist-import-lock.js";
-import { FakePinnedCheckoutManager } from "../../tests2/harness/fake-pinned-checkout-manager.js";
 import { createRunChild, getRunRoot, installRunIsolation } from "../../tests2/harness/run-isolation.js";
 
 installRunIsolation();
@@ -294,10 +293,6 @@ export const test = base.extend<{ restoreDefaultProject: void }, { enableWorktre
 			defaultCwd: bobbitDir,
 			forceAuth: true,
 			agentCliPath: MOCK_AGENT,
-		}, {
-			// This isolated fixture deliberately uses a non-Git project root.
-			// Inject only here; production continues to fail closed on checkout errors.
-			pinnedCheckoutManager: new FakePinnedCheckoutManager(join(bobbitDir, "state", "verification-checkouts")),
 		});
 
 		const port = await gw.start();

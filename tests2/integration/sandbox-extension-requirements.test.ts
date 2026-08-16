@@ -513,11 +513,6 @@ describe.sequential("sandbox extension requirements integration", () => {
 			expect(dockerBootstrapCalls).toBe(3);
 			expect(created).toEqual(["project-a", "project-b", "project-a"]);
 			expect(removed).toEqual(["fixture-project-a-1"]);
-			// Verification must re-enter the no-build bootstrap readiness fence even
-			// when a session container is already ready.
-			await manager.ensureVerificationBackend("project-a");
-			expect(bootstrapCalls).toBe(4);
-			expect(dockerBootstrapCalls).toBe(4);
 			expect(manager.get("project-a")?.getStatus().containerId).toBe("fixture-project-a-2");
 			expect(manager.get("project-b")?.getStatus().containerId).toBe("fixture-project-b-1");
 		} finally {

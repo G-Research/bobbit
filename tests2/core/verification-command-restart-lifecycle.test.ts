@@ -8,9 +8,7 @@ import path from "node:path";
 
 import { makeTmpDir } from "../../tests/helpers/tmp.ts";
 import { VerificationHarness, type ActiveVerification } from "../../src/server/agent/verification-harness.js";
-import { SandboxManager } from "../../src/server/agent/sandbox-manager.js";
 import { createFakeVerificationCommandRunner } from "../harness/fake-verification-command-runner.js";
-import { FakePinnedCheckoutManager, pinnedCheckoutReference } from "../harness/fake-pinned-checkout-manager.js";
 
 const GOAL_ID = "goal-restart-safe-command-lifecycle";
 const GATE_ID = "implementation";
@@ -25,7 +23,6 @@ type GateStoreCall =
 
 let lifecycleSequence = 0;
 const suiteRoot = makeTmpDir("verif-command-lifecycle-unit-");
-const pinnedCheckoutManagers = new Map<string, FakePinnedCheckoutManager>();
 
 afterAll(() => {
 	fs.rmSync(suiteRoot, { recursive: true, force: true });
@@ -47,8 +44,6 @@ function makeHarnessForStateDir(stateDir = makeLifecycleStateDir(), platform?: N
 		getGate: () => undefined,
 		getGatesForGoal: () => [],
 	} as any;
-	const pinnedCheckoutManager = new FakePinnedCheckoutManager(path.join(stateDir, "pinned-checkouts"));
-	pinnedCheckoutManagers.set(stateDir, pinnedCheckoutManager);
 	const harness = new VerificationHarness(
 		stateDir,
 		gateStore,
@@ -63,7 +58,6 @@ function makeHarnessForStateDir(stateDir = makeLifecycleStateDir(), platform?: N
 		{
 			commandRunner: { execFile: async () => ({ stdout: "", stderr: "" }) },
 			commandStepRunner: createFakeVerificationCommandRunner(),
-			pinnedCheckoutManager: pinnedCheckoutManager as any,
 			platform,
 			// Container lifecycle tests own no Engine fixture. Their exact signal
 			// mock represents a completed payload group; this structured snapshot
@@ -72,21 +66,11 @@ function makeHarnessForStateDir(stateDir = makeLifecycleStateDir(), platform?: N
 		},
 	);
 	harness.setTeamLeadNotifier((goalId, message) => notifications.push({ goalId, message }));
-	return { stateDir, harness, gateStoreCalls, broadcasts, notifications, pinnedCheckoutManager };
+	return { stateDir, harness, gateStoreCalls, broadcasts, notifications };
 }
 
 function persistActive(stateDir: string, verification: ActiveVerification | any): void {
-	const pinnedCheckoutManager = pinnedCheckoutManagers.get(stateDir);
-	assert.ok(pinnedCheckoutManager, `missing pinned-checkout fixture for ${stateDir}`);
-	const checkout = pinnedCheckoutManager.seed(verification.signalId, stateDir);
-	fs.writeFileSync(path.join(stateDir, "active-verifications.json"), JSON.stringify({
-		verifications: [{ ...verification, pinnedCheckout: pinnedCheckoutReference(checkout) }],
-	}, null, 2));
-}
-
-function seedActivePinnedCheckout(harness: any, verification: any, sourceRoot = process.cwd()): void {
-	const checkout = harness.pinnedCheckoutManager.seed(verification.signalId, sourceRoot);
-	verification.pinnedCheckout = pinnedCheckoutReference(checkout);
+	fs.writeFileSync(path.join(stateDir, "active-verifications.json"), JSON.stringify({ verifications: [verification] }, null, 2));
 }
 
 function latestSignalUpdate(calls: GateStoreCall[]): any {
@@ -164,94 +148,8 @@ function containerOwnership(containerId: string, nonce: string) {
 	return { containerOwnershipWitness: { containerId, nonce, ...CONTAINER_PROCESS }, containerOwnershipAttestation: { version: 1, containerId, nonce, execId: "exec", enginePid: 1, enginePgid: 2, tag: "tag", ...CONTAINER_PROCESS } };
 }
 function containerStep(args: any) { return commandStepFixture({ ...args, restartRecoveryMode: "container-exec", ...containerOwnership(args.containerId, args.nonce) }); }
-function trackVerification(harness: any, verification: any): void {
-	seedActivePinnedCheckout(harness, verification);
-	harness.activeVerifications.set(verification.signalId, verification);
-}
+function trackVerification(harness: any, verification: any): void { harness.activeVerifications.set(verification.signalId, verification); }
 function mockContainerIdentity(harness: any): void { harness.containerProcessIdentityInspector = async (_containerId: string, pid: number) => ({ pid, ...CONTAINER_PROCESS }); }
-
-test("terminal cleanup rows are private and cancellation retries resources without rewriting a published pass", async () => {
-	const { harness, gateStoreCalls, broadcasts, pinnedCheckoutManager } = makeHarnessForStateDir();
-	const signalId = "sig-terminal-cleanup";
-	const fullContainerId = "a".repeat(64);
-	let removals = 0;
-	(harness as any).sessionManager = {
-		getSandboxManager: () => ({
-			get: () => ({
-				removeVerificationSidecar: async ({ containerId }: { containerId: string }) => {
-					assert.equal(containerId, fullContainerId, `${MARKER}: cleanup must retain the persisted full container identity`);
-					if (++removals === 1) throw new Error("Docker endpoint at /private/path is unavailable");
-				},
-			}),
-		}),
-	};
-	const verification = activeVerification(signalId, [], Date.now());
-	seedActivePinnedCheckout(harness, verification);
-	verification.projectId = "test-project-id";
-	verification.overallStatus = "passed";
-	verification.terminalVerdictPublished = true;
-	verification.verificationContainer = {
-		projectId: "test-project-id", signalId, containerId: fullContainerId,
-		cwd: `/bobbit-state/verification-checkouts/${signalId}`, ignoredOutputDirs: [],
-	};
-	(harness as any).activeVerifications.set(signalId, verification);
-
-	await (harness as any)._releaseTerminalVerificationResources(verification);
-	assert.ok(verification.cleanupPending, `${MARKER}: failed strict cleanup must retain the terminal row`);
-	assert.deepEqual(harness.getActiveVerifications(), [], `${MARKER}: cleanup-only rows must not surface as active verification work`);
-	assert.equal(harness.getActiveVerification(signalId), undefined, `${MARKER}: a terminal cleanup row must not participate in active lookup`);
-	const publication = { gateStoreCalls: gateStoreCalls.length, broadcasts: broadcasts.length };
-
-	await harness.cancelAllVerifications(GOAL_ID);
-	assert.equal(removals, 2, `${MARKER}: goal cancellation should drive the retained cleanup obligation`);
-	assert.equal((harness as any).activeVerifications.has(signalId), false, `${MARKER}: successful retry must release the exact terminal row`);
-	assert.deepEqual({ gateStoreCalls: gateStoreCalls.length, broadcasts: broadcasts.length }, publication, `${MARKER}: cancellation must not overwrite or re-broadcast a published pass`);
-	assert.deepEqual(pinnedCheckoutManager.releasedSignalIds, [signalId]);
-});
-
-test("unavailable exact verification bootstrap retains the terminal sidecar reference and checkout pin", async () => {
-	const { harness, pinnedCheckoutManager } = makeHarnessForStateDir();
-	const signalId = "sig-bootstrap-unavailable";
-	const manager = new SandboxManager({
-		bootstrap: async () => { throw new Error("prepared verifier image unavailable"); },
-	});
-	(harness as any).sessionManager = { getSandboxManager: () => manager };
-	const verification = activeVerification(signalId, [], Date.now());
-	seedActivePinnedCheckout(harness, verification);
-	verification.projectId = "test-project-id";
-	verification.overallStatus = "passed";
-	verification.terminalVerdictPublished = true;
-	verification.verificationContainer = {
-		projectId: "test-project-id", signalId, containerId: "a".repeat(64),
-		cwd: `/bobbit-state/verification-checkouts/${signalId}`, ignoredOutputDirs: [],
-	};
-	(harness as any).activeVerifications.set(signalId, verification);
-
-	assert.equal(await (harness as any)._releaseTerminalVerificationResources(verification), false);
-	assert.ok(verification.verificationContainer, `${MARKER}: unavailable bootstrap must retain the exact sidecar reference`);
-	assert.ok(verification.cleanupPending, `${MARKER}: unavailable bootstrap must leave terminal cleanup pending`);
-	assert.equal((harness as any).activeVerifications.get(signalId), verification, `${MARKER}: retry authority must retain the active terminal row`);
-	assert.deepEqual(pinnedCheckoutManager.releasedSignalIds, [], `${MARKER}: checkout pin must not release before exact sidecar cleanup`);
-});
-
-test("branch dependency remap preserves the default link when its target is absent", async () => {
-	const { harness, pinnedCheckoutManager } = makeHarnessForStateDir();
-	const signalId = "sig-remap-target";
-	const checkout = pinnedCheckoutManager.seed(signalId, process.cwd());
-	fs.symlinkSync(path.join(process.cwd(), "node_modules"), path.join(checkout.path, "node_modules"));
-	const calls: string[][] = [];
-	(harness as any).commandRunner = {
-		execFile: async (_command: string, args: string[]) => {
-			calls.push(args);
-			if (args[args.length - 3] === "test") throw new Error("missing branch dependencies");
-			return { stdout: "", stderr: "" };
-		},
-	};
-
-	await (harness as any).remapSandboxIgnoredDependencies(checkout, `/bobbit-state/verification-checkouts/${signalId}`, "b".repeat(64), "goal/missing-deps");
-	assert.deepEqual(calls, [["exec", "-u", "root", "b".repeat(64), "test", "-d", "/workspace-wt/goal/missing-deps/node_modules"]]);
-	assert.equal(fs.readlinkSync(path.join(checkout.path, "node_modules")), path.join(process.cwd(), "node_modules"), `${MARKER}: absent branch dependencies must not replace the working default link`);
-});
 
 test("persisted identity accepts a matching nonce with a fresh heartbeat on a supported host", () => {
 	// Exercise the durable-host contract independent of the CI runner's OS.
@@ -520,7 +418,6 @@ test("recovered command success delegates remaining waiting phases", async () =>
 		{ name: "Recovered command", type: "command", status: "running", phase: 0, startedAt, exitFile: "authored" },
 		{ name: "Downstream review", type: "llm-review", status: "waiting", phase: 1, startedAt },
 	], startedAt);
-	seedActivePinnedCheckout(harness, verification);
 	(harness as any).activeVerifications.set(verification.signalId, verification);
 	(harness as any)._resumeCommandStep = async () => ({ name: "Recovered command", type: "command", passed: true, output: "recovered", duration_ms: 1 });
 	let continued = false;
@@ -540,7 +437,6 @@ test("cancelled or superseded resume cannot update gate state after cancellation
 	const { harness, gateStoreCalls, broadcasts, notifications } = makeHarnessForStateDir();
 	const startedAt = Date.now();
 	const verification = activeVerification("sig-stale", [commandStepFixture({ name: "Slow resumed command", startedAt })], startedAt);
-	seedActivePinnedCheckout(harness, verification);
 	(harness as any).activeVerifications.set(verification.signalId, verification);
 	const resumeStarted = deferred<void>();
 	const allowFinish = deferred<void>();
