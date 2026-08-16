@@ -424,6 +424,10 @@ export class SessionStore {
 	private readonly tiers: Record<SessionTier, TierPersistenceState>;
 	private migrationNeeded = false;
 	private tierLayoutNeedsRepair = false;
+	/** Ids whose disk tier membership must be normalized on the next save. */
+	private readonly tierLayoutRepairIds = new Set<string>();
+	/** Malformed rows without an intent-addressable id still need normalization. */
+	private tierLayoutHasUnidentifiedRepair = false;
 	private legacySnapshot: LegacySnapshot | null = null;
 	/** Membership moves waiting for their first, epoch-bound transition intent. */
 	private pendingTransitions = new Map<string, TransitionEntry>();
@@ -488,6 +492,24 @@ export class SessionStore {
 	private tierFile(tier: SessionTier): string { return this.tiers[tier].file; }
 	private tierBakPath(tier: SessionTier, n: number): string { return `${this.tierFile(tier)}.bak.${n}`; }
 	private tierTmpPath(tier: SessionTier): string { return `${this.tierFile(tier)}.tmp`; }
+
+	private refreshTierLayoutRepairNeeded(): void {
+		this.tierLayoutNeedsRepair = this.tierLayoutRepairIds.size > 0 || this.tierLayoutHasUnidentifiedRepair;
+	}
+
+	private trackTierLayoutRepair(row: unknown): void {
+		if (!row || typeof row !== "object") return;
+		const id = (row as PersistedSession).id;
+		if (typeof id === "string" && id) this.tierLayoutRepairIds.add(id);
+		else this.tierLayoutHasUnidentifiedRepair = true;
+		this.refreshTierLayoutRepairNeeded();
+	}
+
+	/** An authoritative intent supersedes only the layout conflicts it names. */
+	private resolveTierLayoutRepairs(entries: readonly TransitionEntry[]): void {
+		for (const entry of entries) this.tierLayoutRepairIds.delete(entry.id);
+		this.refreshTierLayoutRepairNeeded();
+	}
 
 	/** Mark precisely the tier whose serialized membership changed. */
 	private markMutation(previous: PersistedSession | undefined, next: PersistedSession | undefined): void {
@@ -627,16 +649,18 @@ export class SessionStore {
 			this.tiers.live.dirtyGeneration = 0;
 			this.tiers.archived.dirtyGeneration = 0;
 		} else {
-			if (live.rows.some(row => !!row && typeof row === "object" && (row as PersistedSession).archived === true)) this.tierLayoutNeedsRepair = true;
+			for (const row of live.rows) {
+				if (!!row && typeof row === "object" && (row as PersistedSession).archived === true) this.trackTierLayoutRepair(row);
+			}
 			this.seedFromArray(live.rows);
 			const archived = this.readTierCandidates("archived");
-			if (archived.rows.some(row => !!row && typeof row === "object" && (row as PersistedSession).archived !== true)) this.tierLayoutNeedsRepair = true;
 			for (const row of archived.rows) {
+				if (!!row && typeof row === "object" && (row as PersistedSession).archived !== true) this.trackTierLayoutRepair(row);
 				if (!row || typeof row !== "object" || !(row as PersistedSession).id) continue;
 				const id = (row as PersistedSession).id;
 				if (this.sessions.has(id)) {
 					console.warn(`[session-store] Duplicate session ${id} in live and archived tiers; keeping live row`);
-					this.tierLayoutNeedsRepair = true;
+					this.trackTierLayoutRepair(row);
 					continue;
 				}
 				this.seedFromArray([row]);
@@ -711,6 +735,7 @@ export class SessionStore {
 				return;
 			}
 			this.applyTransitionEntries(intent.entries);
+			this.resolveTierLayoutRepairs(intent.entries);
 			if (live === "target" && archived === "target") {
 				this.transitionIntentCleanup = intent;
 				return;
