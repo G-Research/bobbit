@@ -520,13 +520,17 @@ describe("focused tool contract refresh", () => {
 		const providerSchemas = JSON.parse(JSON.stringify({ bobbit_read: bobbitTool.parameters, read_session: readSession.parameters }));
 		assert.equal(JSON.stringify(providerSchemas).includes("verbose"), false);
 		assert.equal(providerSchemas.bobbit_read.additionalProperties, false);
-		assert.ok(providerSchemas.read_session.anyOf.every((branch: any) => branch.additionalProperties === false));
+		assert.equal(providerSchemas.read_session.type, "object");
+		assert.equal(providerSchemas.read_session.additionalProperties, false);
 		const validate = (tool: any, args: Record<string, unknown>) => validateToolArguments(tool, {
 			type: "toolCall", id: "validate", name: tool.name, arguments: args,
 		});
 		assert.deepEqual(validate(readSession, { operation: "list", session_id: ps.id }), { operation: "list", session_id: ps.id });
 		assert.deepEqual(validate(readSession, { operation: "inspect", session_id: ps.id, message_index: 1 }), { operation: "inspect", session_id: ps.id, message_index: 1 });
-		assert.throws(() => validate(readSession, { operation: "list", session_id: ps.id, message_index: 1 }));
+		await assert.rejects(
+			() => readSession.execute("invalid", { operation: "list", session_id: ps.id, message_index: 1 }),
+			/read_session list does not accept message_index\/result_index/,
+		);
 		assert.throws(() => validate(bobbitTool, { operation: "health", verbose: true }), /Unrecognized field: verbose/);
 
 		process.env.BOBBIT_GATEWAY_URL = "https://focused-runtime.invalid";

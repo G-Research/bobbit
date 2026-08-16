@@ -15,27 +15,6 @@ import type { ThinkingLevel } from "../../shared/thinking-levels.js";
 
 const VERIFIER_SESSION_ID_RE = /^(?:llm-review|agent-qa)-/;
 
-/**
- * Server-owned identity for a verification sidecar. It is deliberately absent
- * from public session APIs: only the verification harness may request it.
- * SessionManager re-resolves and validates the referenced sidecar on every
- * spawn/restore; a persisted ID alone is never an execution authority.
- */
-export interface VerificationContainerReference {
-	/** v1 is D-3 root-only; v2 persists D-4 repository-local dependency mappings. */
-	version: 1 | 2;
-	projectId: string;
-	signalId: string;
-	/** Full canonical Docker container ID, returned by ProjectSandbox. */
-	containerId: string;
-	/** Fixed container-internal checkout cwd supplied by the sidecar. */
-	cwd: string;
-	/** Exact sorted ignored-output allowlist committed in the sidecar label. */
-	ignoredOutputDirs: readonly string[];
-	/** v2 only: ordered signal-root-relative links to exact normal-sandbox dependencies. */
-	dependencyLinks?: readonly { path: string; target: string }[];
-}
-
 function isVerifierSessionId(id: string): boolean {
 	return VERIFIER_SESSION_ID_RE.test(id);
 }
@@ -303,12 +282,8 @@ export interface PersistedSession {
 	imageModelId?: string;
 	/** Whether this session runs inside a Docker sandbox container */
 	sandboxed?: boolean;
-	/**
-	 * Internal-only verification sidecar identity. Never accept this from REST/
-	 * WS input; SessionManager validates it against the owning project+signal
-	 * before every use and on restore.
-	 */
-	verificationContainer?: VerificationContainerReference;
+	/** Exact container identity retained only when the session owns an adopted sandbox workspace. */
+	containerId?: string;
 	/** Per-repo worktree paths (multi-repo only). Single-repo uses flat worktreePath. */
 	repoWorktrees?: Record<string, string>;
 	/** Server-authoritative right-hand side-panel workspace. */
@@ -366,7 +341,7 @@ export type UpdatableSessionFields = Pick<
 	| "imageModelProvider"
 	| "imageModelId"
 	| "sandboxed"
-	| "verificationContainer"
+	| "containerId"
 	| "projectId"
 	| "repoWorktrees"
 	| "sidePanelWorkspace"
@@ -854,7 +829,7 @@ export class SessionStore {
 	private static RECOVERY_CRITICAL_FIELDS: ReadonlyArray<keyof UpdatableSessionFields> = [
 		"agentSessionFile", "branch", "worktreePath", "cwd", "repoPath",
 		"repoWorktrees", "archived", "archivedAt",
-		"sandboxed", "projectId", "goalId", "delegateOf",
+		"sandboxed", "containerId", "projectId", "goalId", "delegateOf",
 		"parentSessionId", "childKind", "readOnly", "childTerminal", "terminalAt",
 		"role", "assistantType", "taskId", "staffId",
 		"teamGoalId", "teamLeadSessionId",

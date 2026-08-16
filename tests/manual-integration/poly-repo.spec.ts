@@ -270,9 +270,8 @@ test.describe("Poly Repo — integration", () => {
 		console.log(`  Gateway :${port}  rootPath=${rootPath}`);
 
 		// 5.  Register the multi-repo project.
-		// Default workflows reference one component name; pin them to repo1 (must
-		// match an entry in components[] or the project-config validator rejects).
-		const workflows = buildDefaultWorkflows("repo1");
+		// Pin workflows to repo1 and include only the commands that component supports.
+		const workflows = buildDefaultWorkflows("repo1", Object.keys(components[0].commands));
 		const body = {
 			name: "Poly Repo",
 			rootPath,

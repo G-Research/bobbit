@@ -5,11 +5,11 @@
 // is LAZY-imported by `pack-entrypoints.ts::runSpawnLauncher` ONLY when the pack
 // `run` route returns `HOST_NOT_TRUSTED`, so non-walkthrough packs never load it.
 //
-// The server-side, prefs-backed `assertTrustedBindingTarget` remains the REAL gate
-// (the confined worker cannot read prefs). This module is a UX affordance that
-// persists the user's decision to the same `githubTrustedHosts` preference the
-// Settings page manages (`PUT /api/preferences`), then lets the launch re-invoke
-// `run` with a `trustedHostAck` so the reviewer child is spawned.
+// The server-side effective-host resolver remains the REAL gate (the confined
+// worker cannot read gateway trust state). This module asks that same resolver
+// whether the host is already trusted. Only an unknown host reaches the prompt;
+// acceptance persists the decision to the `githubTrustedHosts` preference and
+// lets the launch re-invoke `run` with a `trustedHostAck`.
 //
 // Node-safe at import time: it imports the dependency-free `gatewayFetch` and the
 // type-only/lazy `dialogs-lazy` wrapper — neither touches the DOM until CALLED —
@@ -27,31 +27,33 @@ export interface EnsureGithubHostTrustedDeps {
 }
 
 /**
- * Returns `true` when `host` is trusted — already (the default baseline or in the
- * managed list) or after the user accepts the prompt AND the host is persisted;
- * `false` when the user declines or `host` is not a valid bare hostname.
- *
- * Persistence contract (design [medium] fix): a PUT failure/error aborts (returns
- * `false`); a readback failure AFTER a successful PUT does NOT abort — the host is
- * already persisted, so trust the PUT and return `true`.
+ * Returns `true` when `host` is trusted by the server's effective-host decision,
+ * or after the user accepts the prompt and the host is persisted. A false or
+ * unavailable server decision fails closed to the existing prompt flow.
  */
 export async function ensureGithubHostTrusted(host: string, deps?: EnsureGithubHostTrustedDeps): Promise<boolean> {
 	const request = deps?.fetch ?? gatewayFetch;
 	const confirm = deps?.confirm ?? confirmAction;
 	const normalized = normalizeTrustedHost(host);
 	if (!normalized) return false;
-	// Default baseline hosts (github.com / www.github.com) are always trusted — never
-	// prompt or touch the network for them.
+	// Baseline hosts are immutable server trust and need no round trip.
 	if (isTrustedExternalHost(normalized, [])) return true;
 
-	// Current managed list (authoritative server copy). A read failure falls through
-	// to the prompt — we never silently trust an unknown host on a transient error.
+	// This boolean endpoint is the client trust source of truth. It includes hosts
+	// discovered from token-free gh configuration as well as managed preferences.
+	// Malformed responses and lookup failures must never silently authorize a host.
+	try {
+		const res = await request(`/api/github/trusted-hosts/check?host=${encodeURIComponent(normalized)}`);
+		if (res.ok && (await res.json())?.trusted === true) return true;
+	} catch { /* fail closed to prompt */ }
+
+	// Read preferences only to preserve existing managed entries if the user accepts;
+	// do not use this client-side list as a second trust authority.
 	let managed: string[] = [];
 	try {
 		const res = await request("/api/preferences");
 		if (res.ok) managed = normalizeTrustedHosts((await res.json()).githubTrustedHosts);
-	} catch { /* fall through — prompt anyway */ }
-	if (isTrustedExternalHost(normalized, managed)) return true; // baseline or already trusted
+	} catch { /* prompt with an empty append base; the server normalizes the PUT */ }
 
 	const ok = await confirm(
 		"Trust this domain?",
@@ -61,18 +63,12 @@ export async function ensureGithubHostTrusted(host: string, deps?: EnsureGithubH
 	if (!ok) return false;
 
 	const next = normalizeTrustedHosts([...managed, normalized]);
-	// The PUT is the persist step — only a PUT failure/error aborts.
 	try {
 		const put = await request("/api/preferences", { method: "PUT", body: JSON.stringify({ githubTrustedHosts: next }) });
-		if (!put.ok) return false;
-	} catch { return false; }
-	// Best-effort readback to catch a server-side normalize drop; on a readback error
-	// the PUT already succeeded, so trust it.
-	try {
-		const res = await request("/api/preferences");
-		if (res.ok) return isTrustedExternalHost(normalized, normalizeTrustedHosts((await res.json()).githubTrustedHosts));
-	} catch { /* readback failed but PUT succeeded */ }
-	return true;
+		return put.ok;
+	} catch {
+		return false;
+	}
 }
 
 /** The subset of a spawn `run` route result the trust flow reads/returns. */

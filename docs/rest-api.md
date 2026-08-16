@@ -480,12 +480,89 @@ In-flight `propose_*` payloads are mirrored to `.bobbit/state/proposal-drafts/<s
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/sessions/:id/proposal/:type` | Read the raw proposal file body. `200` with `text/markdown` (goal) or `application/yaml` (others). `404 {ok:false, code:"FILE_NOT_FOUND", message}` if no draft. |
+| `GET` | `/api/sessions/:id/proposal/goal/worktree-mode` | Read the goal draft's durable worktree mode and freshly recomputed eligibility for promoting its owner. An absent mode projects as `new-worktree`; coordinates are display-only server state. See [Current-session goal promotion](#current-session-goal-promotion). |
+| `PUT` | `/api/sessions/:id/proposal/goal/worktree-mode` | Persist exactly `{ mode: "new-worktree" | "current-session" }`, create a proposal revision, and broadcast the normal stamped `proposal_update`. New worktree removes the optional field to preserve legacy serialization. |
+| `POST` | `/api/sessions/:id/proposal/goal/accept` | Accept a draft whose persisted mode is `current-session`, create the normal goal/gates, and promote the proposal-owning session as its existing lead. Source and workspace authority are derived only from the route owner and canonical server state. |
 | `GET` | `/api/sessions/:id/proposal/:type/snapshot?rev=N` | Read a historical revision without mutating the live draft. Parses `<type>.history/<rev>.<ext>` through the per-type plugin and returns `200 {ok:true, rev, fields}`. Does not broadcast `proposal_update` and does not update `state.activeProposals`. `400 {ok:false, code:"INVALID_BODY"}` for invalid rev; `404 {ok:false, code:"SNAPSHOT_NOT_FOUND", message}` if the snapshot file is missing; `400` with `ParseError` shape if the snapshot fails to parse. Used by read-only historical proposal tabs. |
 | `POST` | `/api/sessions/:id/proposal/:type/seed` | Called by `propose_*` tool `execute()`. Body `{ args: <propose-args object> }`. Serialises args via the per-type plugin, atomically writes the file, parses, attempts to open/focus `proposal:<type>` in the side-panel workspace, then broadcasts `proposal_update {source:"seed", rev}`. `200 {ok:true, rev}` on success; `400` with structured error on parse/validate failure. For `type=goal`, the named `workflow` and `options` are validated against the project's workflows **before** writing. When project workflows are resolvable and non-empty, omitted, empty, or whitespace-only `workflow` is rejected with `400 {ok:false, code:"MISSING_WORKFLOW", message, availableWorkflows: [{ id, name }]}` so agents can retry with a valid workflow. Unknown values are rejected with `400 {ok:false, code:"UNKNOWN_WORKFLOW", availableWorkflows}` or `400 {ok:false, code:"UNKNOWN_OPTIONAL_STEP", validOptionalSteps}`. A rejected goal workflow seed writes no draft, creates no rev, emits no `__proposal_rev_v1__` success marker, and broadcasts no `proposal_update`; the real `propose_goal` tool call must persist/broadcast an errored tool result (`isError: true`) so the UI can render/open the failed attempt from the transcript tool-call input plus the validation result. Workflow validation is skipped only when there are genuinely no resolvable workflows. See [goals-workflows-tasks.md — Validating a proposed workflow at proposal time](goals-workflows-tasks.md#validating-a-proposed-workflow-at-proposal-time). |
 | `POST` | `/api/sessions/:id/proposal/:type/edit` | Surgical content edit. Body `{ old_text: string, new_text: string }`. Exact-string replacement, first-and-only-occurrence rule, empty `new_text` deletes. On success: writes atomically, broadcasts `proposal_update {source:"edit", rev}`, returns `200 {ok:true, newContent, rev}`. Does not open or focus side-panel tabs; already-open proposal tabs refresh from the content slot. On failure: file unchanged, returns 4xx with structured error. |
 | `POST` | `/api/sessions/:id/proposal/:type/restore` | Mutating rollback endpoint for explicit API restore flows. Body `{ rev: number }` (positive integer). Copies `<type>.history/<rev>.<ext>` back to the live draft AND writes a NEW snapshot at `currentRev+1` so the rollback appears in the timeline. Attempts to open/focus `proposal:<type>` in the side-panel workspace, then broadcasts `proposal_update {source:"restore", rev: newRev}`. `200 {ok:true, newRev, fields}` on success; `400 {ok:false, code:"INVALID_BODY"}` if `rev` is not a positive integer; `404 {ok:false, code:"SNAPSHOT_NOT_FOUND", message}` if the requested snapshot file is missing; `400` with `ParseError` shape if the snapshot fails to parse. Historical chat-card tabs use `GET /snapshot` instead so browsing old revisions is non-mutating. |
 | `DELETE` | `/api/sessions/:id/proposal/:type` | Delete the draft. Broadcasts `proposal_cleared`. `204` on success (idempotent — `204` even if the file was absent). Called by accept handlers after a successful save. The per-session `<type>.history/` directory is cleaned with the rest of the per-session draft dir on the 7-day purge (deferred from archive so the [archived-proposal-reopen flows](archived-proposal-reopen.md) can read drafts after the source session is archived). |
 | `GET` | `/api/sessions/:id/proposals` | List every parsed proposal draft for the session in one call. Returns `200 { proposals: Array<{ proposalType, fields, rev }> }`; `proposals` is empty when the per-session directory is absent or empty. Mirrors the WS `proposal_update {source:"rehydrate"}` broadcast as a one-shot REST call — used by fast-path session switch-backs (no fresh WS auth, so the broadcast doesn't run) and by the archived-session footer to decide whether to surface a "Resubmit `<type>` proposal" button (see [docs/archived-proposal-reopen.md](archived-proposal-reopen.md)). This is content hydration only and does not open or focus side-panel tabs. `400` on invalid sessionId; `500` on unexpected enumeration failure. |
+
+#### Current-session goal promotion
+
+The goal proposal panel uses these owner-scoped routes only for the **Current session** mode. New worktree proposals continue through `POST /api/goals` unchanged. The separation is deliberate: the server can bind promotion authority to the proposal owner instead of accepting an arbitrary source session or checkout in general goal creation.
+
+##### Worktree mode projection
+
+`GET /api/sessions/:ownerId/proposal/goal/worktree-mode` parses the owner's current goal draft and returns:
+
+```json
+{
+  "mode": "current-session",
+  "eligibility": {
+    "eligible": true,
+    "coordinates": {
+      "sessionId": "session-id",
+      "projectId": "project-id",
+      "cwd": "/existing/worktree/packages/app",
+      "worktreePath": "/existing/worktree",
+      "repoPath": "/repository",
+      "branch": "session/existing",
+      "repoWorktrees": { "api": "/existing/worktree/api" },
+      "sandboxed": false,
+      "componentCount": 1
+    }
+  }
+}
+```
+
+`repoWorktrees` and `containerId` are omitted when not applicable. An ineligible response replaces `coordinates` with `{ "eligible": false, "code": "...", "reason": "..." }`. The stable codes are:
+
+| Code | Meaning |
+|---|---|
+| `SESSION_NOT_LIVE` | The owner has no matching live and durable non-archived session. |
+| `SESSION_NOT_IDLE` | The owner is busy, compacting, restoring prior streaming work, dormant, lifecycle-fenced, or has pending prompt/steer work. |
+| `SESSION_HAS_RELATION` | Goal, team, non-baseline role, assistant, staff, delegate, child, or task metadata already owns the session. |
+| `SESSION_UNSAFE` | The session is read-only, non-interactive, terminal-child state, or borrows another worktree. |
+| `PROJECT_UNAVAILABLE` | The draft has no usable registered target project, or its target does not resolve. |
+| `PROJECT_MISMATCH` | Live or durable session state belongs to a different project. |
+| `TRANSCRIPT_UNAVAILABLE` | The canonical transcript is missing or unreachable in its host/container realm. |
+| `WORKTREE_UNAVAILABLE` | A dedicated branch/worktree is missing, unreachable, not current, or aliases the repository checkout. |
+| `WORKSPACE_MISMATCH` | Live and durable workspace or sandbox metadata disagree. |
+| `MULTI_REPO_MISMATCH` | Configured Git components and canonical component worktrees are incomplete, duplicated, aliased, or divergent. |
+| `SANDBOX_UNAVAILABLE` | The exact recorded sandbox container is absent or not ready. |
+| `PROMOTION_CONFLICT` | Multiple live adopted goals claim this owner, or retry provenance belongs to another project. |
+| `WORKSPACE_CLAIMED` | Another live session, goal, team agent, or staff record claims an overlapping workspace. |
+
+The first failing reason is concise enough for direct UI display. Eligibility is recomputed on every read; the route never trusts coordinates cached by the browser.
+
+`PUT /api/sessions/:ownerId/proposal/goal/worktree-mode` accepts no keys besides `mode`. `current-session` writes the optional frontmatter field; `new-worktree` removes it. Both responses use the GET shape after the edit. The route can preserve a restored Current session selection even when it is now ineligible; the UI disables acceptance until the user chooses New worktree or eligibility becomes valid.
+
+##### Accept in place
+
+`POST /api/sessions/:ownerId/proposal/goal/accept` requires a non-empty `title`. It accepts only human-editable goal definition fields:
+
+```text
+title, spec, workflowId, workflow, inlineRoles, enabledOptionalSteps,
+subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren,
+parentGoalId, metadata
+```
+
+The body must not contain `sessionId`, `ownerSessionId`, `promoteSessionId`, `projectId`, `cwd`, `worktree`, `worktreePath`, `branch`, `repoPath`, `repoWorktrees`, `sandboxed`, `containerId`, or `autoStartTeam`. Supplying one returns `400 PROMOTION_AUTHORITY_REJECTED`; other unknown keys return `400 INVALID_BODY`. The route derives the source session from `ownerId`, the project and selected mode from the draft, and every workspace/sandbox coordinate from matching live and durable records. A non-empty `parentGoalId` returns `422 PROMOTION_PARENT_UNSUPPORTED` because this flow creates a top-level goal.
+
+Immediately before mutation, the server rechecks that the draft still selects `current-session` and that the owner is eligible. A mode change returns `409 WORKTREE_MODE_MISMATCH`; an eligibility failure returns `409` with the corresponding code above. Successful acceptance returns the goal with `201`. The goal has `setupStatus: "ready"`, the exact source coordinates, and `worktreeOwnerSessionId: ownerId`; its team has that same session as `teamLeadSessionId` with no second lead.
+
+Acceptance is single-flight per owner. Exact retries find the one existing live goal by `worktreeOwnerSessionId` and return it with `201`, even after successful acceptance cleared the draft. Multiple matching goals return `409 PROMOTION_CONFLICT`. While an attempt owns the session reservation, competing role or destructive session mutations return retryable `409 SESSION_GOAL_PROMOTION_IN_PROGRESS`.
+
+Pre-commit failure compensates only an unchanged empty lead reservation plus the attempt-created gates and goal. Post-commit finalization failure keeps the attached session and goal for an exact retry. These boundaries preserve the original transcript, runtime, sandbox, and checkout in either case.
+
+##### Lifecycle conflicts
+
+While the adopted goal is live, direct source archive or purge returns `409 PROMOTED_SESSION_LIFECYCLE_CONFLICT`, and independent team teardown returns `409 PROMOTED_LEAD_TEARDOWN_CONFLICT`. Goal archive is the required ordered path. An archive racing unfinished acceptance returns `409 PROMOTION_IN_PROGRESS` before any goal state, verification, or cascade mutation.
+
+After successful goal archive, the goal is durably marked archived before its team reservation is removed and the source session is archived. Archive does not delete the session-owned worktree. A later session purge may clean it only after the normal reference guards find no live owner or borrower. See [Promote the current session in place](goals-workflows-tasks.md#promote-the-current-session-in-place) for restart recovery, sandbox preservation, and multi-repository cleanup semantics.
 
 #### Error response shape
 

@@ -149,9 +149,8 @@ test.describe("source Vite inline HTML theme runtime", () => {
 	test("teardown escalates a SIGTERM-ignoring detached source process and awaits close", async () => {
 		test.setTimeout(10_000);
 		const child = spawn(process.execPath, ["--input-type=module", "--eval", [
-			'import { writeSync } from "node:fs";',
-			'process.on("SIGTERM", () => writeSync(1, "SIGTERM ignored\\n"));',
-			'writeSync(1, "ready\\n");',
+			'process.stdout.write("ready\\n");',
+			'process.on("SIGTERM", () => process.stdout.write("SIGTERM ignored\\n"));',
 			"setInterval(() => {}, 1_000);",
 		].join("")], {
 			detached: process.platform !== "win32",

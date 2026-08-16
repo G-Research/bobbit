@@ -209,13 +209,15 @@ The migration is idempotent and handles missing files gracefully (fresh installs
 
 Team state is restored from each project's `team-state.json` so live teams survive gateway restarts without losing their lead/worker wiring. The restart path is restorative only:
 
-- `TeamManager.restoreTeams()` loads persisted team entries, repairs recoverable dangling records, and drops unrecoverable team-store entries so a future manual "Start Team" is not blocked by stale state.
-- After `SessionManager.restoreSessions()`, `TeamManager.resubscribeTeamEvents()` re-attaches lead/worker event listeners for those restored entries and may nudge an already-restored idle lead that has concrete outstanding work.
+- `TeamManager.restoreTeams()` loads persisted team entries, repairs recoverable dangling records, and drops unrecoverable team-store entries so a future manual "Start Team" is not blocked by stale state. Historical fully-orphan/worker transcript discovery and legacy sidecar backfill run once per project recovery-policy version behind `.team-forensic-recovery.json`; concrete dangling team pointers invalidate completion and reopen recovery. Recovered session rows are flushed before completion, and a sibling completion-pending fence makes failed completion acknowledgement retryable. See [Checkpoint Team Forensic Recovery](design/checkpoint-team-forensic-recovery.md).
+- The current server then eagerly runs `SessionManager.restoreSessions()` before listen. `TeamManager.resubscribeTeamEvents()` follows restoration, re-attaches lead/worker event listeners, and may nudge an already-restored idle lead that has concrete outstanding work.
 - Restart does **not** scan team-mode goals and call `startTeam()` for goals that lack a restored team entry. A teamless existing goal stays teamless even if its persisted `autoStartTeam` flag is `true`.
 
 This distinction matters because `autoStartTeam` is a creation/setup affordance, not a supervisor. Goals created with `autoStartTeam: false` and goals explicitly stopped through `teardownTeam()` have no active team-store entry after setup/teardown, so they remain manual-start goals across restart. The UI should show "Start Team" rather than a silently recreated lead.
 
 Regression coverage pins that boot resubscribe does not call `startTeam()` for a sessionless ready team goal, and that start → teardown → restart leaves the goal teamless until manual start.
+
+PR #1216 (`Fix Archived Team Leaks`) overlaps the live-set boundary. If it lands before this startup work is rebased, preserve `restoreTeams → reconcileArchivedTeamOwnership → restoreSessions(suppression)`. Archived ownership reconciliation must precede dispatch so a completed forensic checkpoint cannot preserve leaked archived sessions as live. Resolve this integration semantically rather than retaining the current call shape during conflict resolution.
 
 #### Worker liveness, spawn capacity, and stale reap
 
@@ -856,7 +858,7 @@ Projects whose `rootPath` points at a subdirectory of a larger git repo (e.g. `r
 - **Agent session cwd** — the directory the agent process boots into, what tools like `bash`/`Read` see — is **`goal.cwd`**. This is the offset path; sessions want to land at the user's project root, not at the surrounding repo root.
 - **`componentRoot()` / `resolveStep()` `branchContainer` argument** — must be **`goal.worktreePath ?? goal.cwd`**. These helpers layer `repo + relativePath` themselves to derive a component's working directory. Passing an already-offset `goal.cwd` here doubles the `relativePath` segment (e.g. `…/sub/sub/…`) and the resulting command runs in a path that does not exist.
 
-**Use the exported helper.** `goalBranchContainer(goal)` in `src/server/agent/verification-harness.ts` returns the un-offset container with the correct legacy fallback. Any new call site that forwards a goal into step resolution — verification, sandbox exec, or any future caller — should route through this helper rather than picking a field directly. Pinned verification resolves this container for the executing goal once, then maps its logical component location only through the frozen layout; it does not remap a parent, sibling, or live component cwd. See [Pinned multi-repo verification](design/pinned-multi-repo-verification.md):
+**Use the exported helper.** `goalBranchContainer(goal)` in `src/server/agent/verification-harness.ts` returns the un-offset container with the correct legacy fallback. Any new call site that forwards a goal into step resolution — verification, sandbox exec, or any future caller — should route through this helper rather than picking a field directly:
 
 ```ts
 export function goalBranchContainer(goal: { worktreePath?: string; cwd: string }): string;
@@ -864,7 +866,7 @@ export function goalBranchContainer(goal: { worktreePath?: string; cwd: string }
 
 The `?? goal.cwd` fallback inside the helper handles legacy / non-worktree goals where `worktreePath` is undefined; in that case no offset was ever applied to `cwd`, so the fallback is safe.
 
-**Pinning test.** `tests2/core/verify-step-resolution.test.ts` pins the call-site contract: single-repo and multi-repo component locations, the legacy `worktreePath` fallback, and `FIX-PINNED-NESTED-STEP-CWD` exact-once mapping from a child goal into a frozen layout. An agent investigating verification step resolution should start there.
+**Pinning test.** `tests/verify-step-resolution.test.ts` pins the call-site contract with four cases: single-repo with `relativePath` (the original bug), single-repo with no `relativePath`, multi-repo with both `repo` and `relativePath`, and the legacy fallback when `worktreePath` is undefined. An agent investigating step-resolution paths in verification should start there.
 
 #### Remote branch cleanup
 

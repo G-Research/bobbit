@@ -13,6 +13,8 @@
  */
 import { test } from "vitest";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 const { routes } = await import("../../market-packs/pr-walkthrough/lib/routes.mjs");
 
@@ -117,4 +119,10 @@ test("a mismatched ack for the wrong host still refuses to spawn", async () => {
 	assert.equal(result.ok, false);
 	assert.equal(result.code, "HOST_NOT_TRUSTED");
 	assert.equal(m.spawnCalls.length, 0);
+});
+
+test("pack manifest declares the panel submitReview route", () => {
+	const manifestPath = fileURLToPath(new URL("../../market-packs/pr-walkthrough/pack.yaml", import.meta.url));
+	const manifest = readFileSync(manifestPath, "utf8");
+	assert.match(manifest, /names:\s*\[[^\]]*\bsubmitReview\b[^\]]*\]/);
 });

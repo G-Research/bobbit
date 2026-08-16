@@ -12,7 +12,7 @@
  * the harness process tree is killed and restarted.
  *
  * Usage:
- *   node dist/server/watchdog.js [-- ...args forwarded to harness/cli]
+ *   node scripts/harness-bootstrap.mjs watchdog [-- ...args forwarded to harness/cli]
  *   npm run dev:watchdog [-- -- ...args]
  *
  * The watchdog itself is a lightweight loop with no dependencies on the
@@ -155,7 +155,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
-const HARNESS_PATH = path.join(__dirname, "harness.js");
+/** Stable outside-dist launcher can recover an interrupted whole-dist promotion. */
+const HARNESS_BOOTSTRAP_PATH = path.join(PROJECT_ROOT, "scripts", "harness-bootstrap.mjs");
 
 /** Watchdog state file — records harness PID and last healthy timestamp */
 const STATE_FILE = path.join(bobbitStateDir(), "watchdog.json");
@@ -308,7 +309,7 @@ function launchHarness(): void {
 		dependencyRecheckTimer = null;
 	}
 
-	const child = spawn(process.execPath, [HARNESS_PATH, ...forwardedArgs], {
+	const child = spawn(process.execPath, [HARNESS_BOOTSTRAP_PATH, "harness", "--", ...forwardedArgs], {
 		cwd: PROJECT_ROOT,
 		stdio: "inherit",
 		env: { ...process.env },

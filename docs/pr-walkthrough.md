@@ -52,11 +52,12 @@ used by tests to stub it.
 
 Posting must satisfy two orthogonal checks that live in different places:
 
-- **Auth availability** — "is `gh` (or a token) authenticated for this host?" needs no
-  gateway prefs, so it can be computed anywhere `gh` is on `PATH` (the server route or
-  the confined pack worker).
-- **Host trust** — "is this host allowed to be contacted at all?" reads the
-  `githubTrustedHosts` preference, which **only the server** can access.
+- **Auth availability** — "is `gh` (or a token) authenticated for this host?" is a
+  credential decision, separate from whether Bobbit permits contacting the host.
+- **Host trust** — "is this host allowed to be contacted at all?" uses the server's
+  effective trusted-host set: built-in GitHub hosts, managed `githubTrustedHosts`, and
+  host keys explicitly configured in the local `gh` CLI. Only the server resolves this
+  set, so every GitHub consumer applies the same decision.
 
 The end-to-end path:
 
@@ -64,14 +65,15 @@ The end-to-end path:
 panel "Post to GitHub"
   → pack worker `submitReview` route (proxies with the gateway bearer token)
     → POST /api/pr-walkthrough/submit-review   (bearer-gated public route, routed by jobId)
-      → assertTrustedBindingTarget            (server-side, prefs-backed trust gate)
+      → assertTrustedBindingTarget            (server-side effective-host trust gate)
       → submitGithubReview → gh api …/pulls/<n>/reviews --method POST
 ```
 
 The `gh` invocation and the trust check stay **server-side** for two reasons: the
-confined pack worker cannot read `githubTrustedHosts`, and the pack route worker inherits
-the *gateway* process environment — not the reviewer session's — so it holds no session
-secret to authenticate the internal tool endpoints. The worker therefore proxies to a
+confined pack worker cannot resolve Bobbit's effective trusted-host set, and the pack
+route worker inherits the *gateway* process environment — not the reviewer session's —
+so it holds no session secret to authenticate the internal tool endpoints. The worker
+therefore proxies to a
 **bearer-authenticated public route** (`POST /api/pr-walkthrough/submit-review`, the same
 auth tier as the existing export/submit route) routed by the `jobId` it holds from its
 own binding. The server resolves the authoritative binding + target from that `jobId`,
@@ -93,26 +95,30 @@ Launching a walkthrough against a host that is **not** already trusted now **pro
 the user to add it, instead of silently failing later with a 403.
 
 - `github.com` / `www.github.com` are always trusted and never prompt.
-- The `run` route resolves the PR's host before spawning; for a non-default host with no
-  acknowledgement it returns `HOST_NOT_TRUSTED` (carrying the resolved host + `prUrl`)
-  **without spawning** anything.
-- The client checks the host against the managed trusted list. If already trusted it
-  re-invokes silently. Otherwise it prompts: on **accept** it persists the normalized
-  host to the `githubTrustedHosts` preference (via `PUT /api/preferences`, the same write
-  path Settings uses) and re-invokes the launch; on **decline** it aborts with a readable
-  cancel message and nothing is spawned or persisted.
+- The `run` route determines the target host before spawning; for a non-default host
+  with no acknowledgement it returns `HOST_NOT_TRUSTED` with the host and, when already
+  known, the PR URL, **without spawning** anything.
+- For current-branch launch, `run` parses the local `origin` first and rejects an
+  unknown host **before any `gh` request**. This prevents the trust prompt itself from
+  causing a pre-trust GitHub lookup.
+- The client asks `GET /api/github/trusted-hosts/check?host=…` for the server's effective
+  decision; it does not rebuild the trust set from preferences. A host configured only
+  in `gh` therefore re-invokes silently without prompting or changing preferences.
+- If the server says the host is unknown (or the check fails), the client prompts. On
+  **accept** it persists the normalized host to `githubTrustedHosts` via
+  `PUT /api/preferences` and re-invokes the launch; on **decline** it aborts with a
+  readable message and nothing is spawned or persisted.
 
-**Why prompt at launch rather than fail later:** the target host is only known after
-`run` resolves the current-branch PR, and only the server can read the trusted list — so
-the client cannot pre-check it. Returning `HOST_NOT_TRUSTED` from `run` hands the
-resolved host back to the client (which owns the trusted-hosts UI) to make the decision.
-The acknowledgement only governs whether the *harmless, read-only reviewer child* is
-spawned; the real security boundary stays the server-side, prefs-backed trust check
-applied when the diff is read and the review is posted, so a stale or forged ack cannot
-widen data access.
+**Why prompt at launch rather than fail later:** the pack must hand the locally resolved
+host to the browser that owns the trust UI, while the browser must defer the actual
+trust decision to the server. The acknowledgement only governs whether the harmless,
+read-only reviewer child is spawned; the real security boundary remains the same
+server-side effective-host check applied before diff reads and review posting. A stale
+or forged acknowledgement therefore cannot widen data access.
 
-Extra trusted hosts are managed in **System → General → Trusted GitHub hosts** (persisted
-under `githubTrustedHosts`). See
+Users can add explicit hosts in **System → General → Trusted GitHub hosts** (persisted
+under `githubTrustedHosts`), but a host already configured in `gh` needs no duplicate
+preference entry. See
 [Trusted GitHub hosts](pr-walkthrough-panel.md#trusted-github-hosts) for the allowlist
 model and [the design doc](design/pr-walkthrough-gh-posting.md) for the launch
 trust-prompt mechanism.

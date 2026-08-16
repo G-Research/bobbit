@@ -21,6 +21,69 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/github-trusted-host-resolver.test.ts",
+      "reason": "Core security and caching coverage for token-free gh-config GitHub host discovery, environment stripping, normalization, failure fallback, and single-flight refreshes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/session-goal-promotion-proposal.test.ts",
+      "reason": "Core coverage for legacy-default proposal compatibility, durable current-session selection, snapshots, archive continuation, validation, and server-owned coordinate authority.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/session-goal-promotion-eligibility.test.ts",
+      "reason": "Core policy coverage for current-session promotion eligibility, canonical coordinates, forbidden relationships, workspace conflicts, multi-repo fidelity, and sandbox reachability.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/session-goal-promotion-session-runtime.test.ts",
+      "reason": "Core runtime coverage for staged same-session role replacement, identity and sandbox continuity, exact rollback, and serialized idempotent promotion.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/session-goal-promotion-panel.test.ts",
+      "reason": "DOM coverage for the accessible New worktree and Current session selector, authoritative coordinate projection, unavailable reasons, and owner-scoped acceptance dispatch.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/integration/session-goal-promotion.test.ts",
+      "reason": "Integration coverage for owner-scoped worktree-mode routes, authority rejection, in-place acceptance, idempotency, coordinate continuity, and proposal cleanup.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/session-goal-promotion.journey.spec.ts",
+      "reason": "Browser journey for selecting Current session, accepting in place with the original session, reload continuity, unavailable reasons, safe archive, and unchanged new-worktree creation.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/integration/strict-update-body-routes.test.ts",
       "reason": "Regression contract for strict finite-shape update bodies: exact route allow-lists, accepted representative updates, unknown-key rejection, no mutation, goal policy guidance, and immutable staff sandboxing.",
       "execution": {
@@ -2381,7 +2444,16 @@
     },
     {
       "path": "tests2/core/team-manager-async-recovery.test.ts",
-      "reason": "Native v2 unit coverage for awaited TeamManager recovery lifecycle boundaries using deterministic in-memory asynchronous I/O.",
+      "reason": "Native v2 unit coverage for awaited TeamManager recovery lifecycle boundaries, durable forensic-scan suppression, and targeted damage invalidation using deterministic in-memory asynchronous I/O.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/team-recovery-checkpoint.test.ts",
+      "reason": "Tier-1 durability coverage for the versioned team forensic-recovery checkpoint, including crash-in-progress, corrupt, stale-version, and completed states.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -2975,78 +3047,6 @@
       }
     },
     {
-      "path": "tests2/core/gate-store-content-digest.test.ts",
-      "reason": "Pins append-only gate signal content-digest mutation, durable sanitized errors, and legacy-signal compatibility.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/verification-content-digest.test.ts",
-      "reason": "Pins raw worktree-byte verification content witnesses, ignored-file exclusion, mode and CRLF sensitivity, tracked deletion, and fail-closed inventory validation.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/core/verification-pinned-checkout.test.ts",
-      "reason": "Pins private detached raw-byte staging, atomic source-only public checkout publication/quarantine, immutable digest assertions, symlink-race containment, stale-commit rejection, targeted orphan-lease recovery, and ignored dependency sensitivity boundaries.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "core"
-      }
-    },
-    {
-      "path": "tests2/integration/verification-pinned-checkout-npm.test.ts",
-      "reason": "E2E Vitest npm-script smoke proving a frozen checkout exposes only ignored top-level node_modules dependencies while their mutable bytes remain outside the pinned digest.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "e2e",
-        "project": "e2e"
-      }
-    },
-    {
-      "path": "tests2/integration/verification-pinned-checkout-real-git.test.ts",
-      "reason": "Real-Git D-3 regression: a private detached no-checkout worktree publishes a Git-free public inventory, permits ignored output, rejects non-ignored additions, and resumes from the persisted lease.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "e2e",
-        "project": "e2e"
-      }
-    },
-    {
-      "path": "tests2/integration/verification-pinned-checkout-multi-repo-real-git.test.ts",
-      "reason": "Real-Git D-4 integration: distinct component repositories retain independent commits in one immutable logical layout, resume without consulting mutable live roots, reject escaping layout entries, and clean only recorded resources.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "e2e",
-        "project": "e2e"
-      }
-    },
-    {
-      "path": "tests2/integration/pinned-gate-verification-e2e.test.ts",
-      "reason": "Real-Git D-5 lifecycle E2E: production VerificationHarness executes frozen single- and multi-repository checkouts, audits source mutation, and keeps cache witnesses digest- and repository-identity-safe.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "e2e",
-        "project": "e2e"
-      }
-    },
-    {
-      "path": "tests2/integration/gate-content-digest-nested.test.ts",
-      "reason": "Integration seam for nested child branch-container content witnesses: parent, sibling, and child layouts remain isolated; same-SHA content changes and v2 repository identities report legible cache misses, while component cwd is composed once.",
-      "execution": {
-        "runner": "vitest",
-        "tier": "unit",
-        "project": "integration"
-      }
-    },
-    {
       "path": "tests2/core/vite-bundled-dev.test.ts",
       "reason": "Vite config regression coverage proving development uses bundled browser chunks to avoid the large native-ESM request waterfall, scopes Tailwind scanning away from non-UI edits, guards Tailwind's unreleased bundled-dev hot-update fix, and keeps production asset URL rewriting separate.",
       "execution": {
@@ -3434,6 +3434,10 @@
     },
     {
       "path": "tests2/browser/journeys/session-activity-restart.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/session-goal-promotion.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
@@ -18398,13 +18402,6 @@
       "method": "relocate",
       "replacement": [],
       "rationale": "Authenticated production-gateway coverage for live pin, archive retention, archived list projection, archived unpin, and durable tag state across two real gateway restarts."
-    },
-    {
-      "file": "tests/e2e/pinned-verification-sidecar.spec.ts",
-      "bucket": "daily",
-      "method": "relocate",
-      "replacement": [],
-      "rationale": "Production SessionManager → SandboxManager Docker sidecar verification lifecycle with live source mutation and exact cleanup."
     },
     {
       "file": "tests/manual-integration/reliable-agent-context-pressure.spec.ts",

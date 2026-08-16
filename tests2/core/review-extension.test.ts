@@ -212,22 +212,22 @@ describe("review_open durable receipt contract", () => {
 		assert.equal(uploads.length, 0);
 	});
 
-	it("publishes a closed schema with exactly one source mode and bounded file count", () => {
+	it("publishes a Bedrock-valid closed object schema with bounded file inputs", () => {
 		const schema = reviewOpen.parameters;
+		assert.equal(schema.type, "object");
 		const valid = [
+			{},
 			{ markdown: "" },
 			{ file: "architecture.md" },
+			{ markdown: "inline", file: "architecture.md" },
 			{ title: "Bundle", replace: false, files: [{ markdown: "one" }] },
 			{ files: [{ title: "Inline", markdown: "one" }, { file: "notes.md" }] },
 		];
 		for (const params of valid) assert.equal(Value.Check(schema, params), true, JSON.stringify(params));
 
 		const invalid = [
-			{},
-			{ markdown: "inline", file: "architecture.md" },
 			{ files: [] },
 			{ files: Array.from({ length: MAX_REVIEW_FILES + 1 }, () => ({ markdown: "x" })) },
-			{ markdown: "inline", files: [{ markdown: "nested" }] },
 			{ files: [{}] },
 			{ files: [{ markdown: "nested", file: "notes.md" }] },
 			{ files: [{ markdown: 42 }] },
@@ -240,6 +240,8 @@ describe("review_open durable receipt contract", () => {
 		const invalid = [
 			{},
 			{ markdown: "inline", file: "architecture.md" },
+			{ markdown: "inline", files: [{ markdown: "nested" }] },
+			{ file: "architecture.md", files: [{ file: "notes.md" }] },
 			{ files: [] },
 			{ files: Array.from({ length: MAX_REVIEW_FILES + 1 }, () => ({ markdown: "x" })) },
 			{ files: [{}] },

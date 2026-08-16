@@ -93,6 +93,57 @@ Durable regression coverage is kept near the affected contracts:
 
 > **Legacy note — per-goal setup command removed.** An earlier design (PR #816) added bespoke per-goal `worktreeSetupCommand` / `worktreeSetupTimeoutMs` fields on `PersistedGoal`, plus matching REST, `propose_goal`, and goal-dialog affordances. That surface is **superseded by goal metadata and the `goalProvisioned` hook** and has been removed: the goal-store load path **drops** those legacy fields, the REST / `propose_goal` / UI inputs no longer exist, and posting them has no effect. Only the **component / project** `worktree_setup_command` (and its `worktree_setup_timeout_ms`) remains supported. To run goal-specific setup, declare metadata that an extension's `goalProvisioned` provider acts on — that hook fires at **every** worktree provisioning in the subtree (including pool claims), so filesystem treatments land on every agent and sub-goal worktree symmetrically, which the single per-goal command could not guarantee.
 
+### Promote the current session in place
+
+A goal proposal can either provision a new goal workspace or adopt the proposal-owning session's existing workspace. The second mode is useful when planning turns into implementation after work has already started: the user keeps the same conversation, checkout, dirty files, and sandbox instead of moving that state into a newly spawned Team Lead.
+
+The proposal's **Worktree** row exposes two modes:
+
+- **New worktree** is the default and retains the ordinary `POST /api/goals` path. An absent mode and an explicitly selected New worktree serialize identically, so existing proposal files and callers remain compatible.
+- **Current session** promotes the proposal owner in place. The panel shows the server-derived branch, worktree path, sandbox state, and multi-repository worktree count. Sandbox and auto-start controls become read-only because the existing realm is retained and that session becomes the lead immediately.
+
+The choice is stored as the optional `worktreeMode: current-session` field in the goal proposal's frontmatter. Proposal edits, revision snapshots, reload rehydration, and archived-draft continuation therefore use the existing proposal-file lifecycle rather than a second preference store. Selecting New worktree removes the field. If an archived draft still selects Current session, the selection remains visible but its archived owner is ineligible; a copied continue-archived draft is evaluated against the new proposal owner.
+
+#### Eligibility and authority
+
+Eligibility is recomputed from live and durable server state both when the panel reads the proposal and immediately before acceptance. The panel's result is advisory; a session that becomes busy or otherwise unsafe before submit is rejected by the final check.
+
+The proposal owner must be:
+
+- a live, non-archived, idle regular interactive session in the proposal's registered project;
+- free of goal, team, staff, assistant, delegate, child, task, read-only, non-interactive, or borrowed-worktree relationships (the ordinary baseline role is allowed);
+- backed by an available durable transcript;
+- the owner of a dedicated branch and worktree whose live and persisted `cwd`, `worktreePath`, `repoPath`, and `branch` agree;
+- complete for every configured Git component in a multi-repository project; and
+- still attached to the same reachable sandbox container when sandboxed.
+
+Promotion also fails when another session, goal, team, or staff record claims an overlapping workspace, or when multiple live goals claim the same promotion provenance. The eligibility response uses stable reason codes such as `SESSION_NOT_IDLE`, `SESSION_HAS_RELATION`, `WORKTREE_UNAVAILABLE`, `MULTI_REPO_MISMATCH`, `SANDBOX_UNAVAILABLE`, and `WORKSPACE_CLAIMED`; see the [owner-scoped REST contract](rest-api.md#current-session-goal-promotion) for the complete response shape.
+
+The source is always the owner named by the proposal route and must remain in the same project. The accept body cannot choose a session, project, checkout, branch, repository, container, or sandbox mode. This prevents a valid proposal from being turned into authority over another checkout by editing a request or draft. Current-session promotion creates a top-level goal; a `parentGoalId` is rejected because adopting a regular session as a nested child would introduce a second lifecycle owner.
+
+#### Acceptance and continuity
+
+Acceptance composes the normal goal framework with an adopted workspace:
+
+1. Create the goal with its normal workflow snapshot, metadata, inline roles, policy, and gate records.
+2. Copy the canonical session coordinates onto the goal, stamp `worktreeOwnerSessionId` as provenance, and mark setup `ready` without provisioning, pool claims, setup commands, or a `goalProvisioned` hook.
+3. Reserve the existing session as the team's only lead. An adopted goal cannot fall through to ordinary `startTeam()` and spawn a second lead.
+4. Replace the agent bridge in place with canonical `team-lead` prompt, goal/team tools, and `BOBBIT_GOAL_ID`, then resume the same transcript. No duplicate kickoff prompt is sent.
+
+The Bobbit session ID, transcript file, title, connected clients, queued work, model/thinking tuple, `cwd`, branch, single- or multi-repository worktrees, sandbox container, and checkout contents stay attached to the same session. Promotion performs no Git checkout, reset, commit, copy, move, rename, or worktree creation, so staged, unstaged, and untracked work is unchanged. `worktreeOwnerSessionId` is an idempotency and recovery link only: the source session remains the checkout and sandbox lifecycle owner.
+
+#### Failure, restart, and cleanup
+
+Acceptance is single-flight per proposal owner. While the reservation is held, competing role or destructive session mutations return `409 SESSION_GOAL_PROMOTION_IN_PROGRESS`. A retry locates an existing live goal only through `worktreeOwnerSessionId`; matching paths or branch names are never enough.
+
+Before the replacement runtime becomes canonical, compensation may remove only the attempt-created empty lead reservation, gates, and adopted goal. It does not touch the source runtime, transcript, sandbox, or checkout. Once runtime replacement commits, later finalization failures retain the exact goal/session/team graph; retry finalizes and returns that same goal instead of creating another.
+
+On gateway restart, adopted-goal reconciliation runs before ordinary orphan-team recovery. It verifies same-project identity and exact coordinates, repairs an unambiguous missing lead reservation, attachment fields, or workflow gates, and then restores the original session runtime and team subscriptions. It never calls ordinary team start, creates a session, provisions a worktree, or transfers a sandbox. Ambiguous records fail closed. If the promoted transcript, worktree, or recorded sandbox realm cannot be restored safely, Bobbit preserves the source as dormant rather than archiving it, repairing the adopted checkout, replacing its container, or silently downgrading it to the host.
+
+A live promoted session cannot be archived or purged directly (`409 PROMOTED_SESSION_LIFECYCLE_CONFLICT`), and its team cannot be torn down independently. Archive the goal instead. The ordered goal path first publishes the goal's archived state, then removes workers and team subscriptions and archives the source session. Archive retention preserves the session-owned worktree; final session purge may remove it only after no live session, goal, team, staff, pool, or container reference remains. Multi-repository component worktrees follow the same ownership rule, and adopted branches are not treated as goal-created remote branches.
+
+For the implementation rationale and recovery boundaries, see [Promote Session to Goal — implementation design](design/session-goal-promotion.md).
+
 ### Headquarters no-worktree goals
 
 Headquarters can host explicit data-only goals without a git worktree. A goal created with `projectId: "headquarters"`, `worktree: false`, and a valid workflow snapshot can reach `setupStatus: "ready"` with no `branch`, `worktreePath`, or `repoPath`.
@@ -139,7 +190,7 @@ Goal creation never assumes a workflow named `"general"` exists. The default-wor
 
 These defaults are final goal-creation and user-side acceptance safety nets. Proposal seed validation follows the same precedence for bespoke workflows: a structurally valid `inlineWorkflow` satisfies the workflow requirement, and any omitted, stale, or unknown `workflow` field is non-authoritative. Without a valid `inlineWorkflow`, `propose_goal` must still name an explicit project workflow ID when project workflows are resolvable and non-empty (see [Validating a proposed workflow at proposal time](#validating-a-proposed-workflow-at-proposal-time)).
 
-No source file outside seed data, tests, and documentation may use the literal string `"general"` as a workflow default. This is enforced by the pinning test [`tests2/core/no-general-workflow-default.test.ts`](../tests2/core/no-general-workflow-default.test.ts), which scans `src/server/agent/` and `src/app/` for the string and rejects new occurrences (the role named `"general"` is explicitly allowlisted; it is unrelated to workflows). The pin exists because `"general"` was historically a magic default hardcoded in five places — UI dropdown initial state, accept handler fallback, `GoalManager` lookup, the goal-assistant prompt, and the re-attempt context builder — but workflows are now project-scoped with no system-level builtins, so there is no guarantee any given project has a workflow with that id. Hardcoding the string produced confusing `Workflow not found: general` errors on projects whose assistant had generated a bespoke workflow set with different names. The fix routes everything through "first workflow in store" instead, with the pinning test preventing reintroduction. See [Workflows](#workflows) for why workflows are project-scoped.
+No source file outside seed data, tests, and documentation may use the literal string `"general"` as a workflow default. This is enforced by the pinning test [`tests/no-general-workflow-default.test.ts`](../tests/no-general-workflow-default.test.ts), which scans `src/server/agent/` and `src/app/` for the string and rejects new occurrences (the role named `"general"` is explicitly allowlisted; it is unrelated to workflows). The pin exists because `"general"` was historically a magic default hardcoded in five places — UI dropdown initial state, accept handler fallback, `GoalManager` lookup, the goal-assistant prompt, and the re-attempt context builder — but workflows are now project-scoped with no system-level builtins, so there is no guarantee any given project has a workflow with that id. Hardcoding the string produced confusing `Workflow not found: general` errors on projects whose assistant had generated a bespoke workflow set with different names. The fix routes everything through "first workflow in store" instead, with the pinning test preventing reintroduction. See [Workflows](#workflows) for why workflows are project-scoped.
 
 #### Goal creation in a zero-workflow project
 
@@ -564,38 +615,6 @@ Gates can define automated verification that runs when signaled:
 - **Combined** — mechanical + qualitative steps across phases
 
 Verification is async. On signal, the verification status is `"running"`. On completion: the gate transitions to `"passed"` (all steps pass) or `"failed"` (any step fails, with details). A WebSocket event `gate_verification_complete` is emitted. If no verification is defined, the gate auto-passes.
-
-#### Pinned source verification
-
-A verification verdict attests to the source bytes that belonged to the signal, not to whichever bytes happen to be in the mutable goal worktree while a command or reviewer is running. This closes the gap where a digest can reject a stale cache hit but a concurrent agent, watcher, or verification command can still change the worktree after it was hashed.
-
-After the existing non-destructive origin synchronization of the verification cwd, a fresh verification signal resolves the executing goal's un-offset branch container and creates one signal-owned frozen layout. A single-repository layout preserves the D-3 v1 checkout and digest. A multi-repository layout is D-4 v2: it materializes each declared, non-overlapping goal-owned repository beneath the same copied branch-container layout. Each inventory includes tracked and non-ignored untracked paths and witnesses file bytes, executable mode, symlink targets, and tracked deletions. Ignored output and Git metadata are outside that source contract.
-
-Component steps resolve to a logical `{ repoKey, relativePath }` once, then map only through the persisted pinned-layout manifest. This is why a nested component and a component in a separate repository execute at the matching frozen path rather than at the copied root or in a live worktree. Free-form steps use the frozen container root. Invalid paths, absent repositories, symlinks, overlapping repository roots, or any mapping failure fail closed; they never select a fallback cwd.
-
-The persisted `pinnedCheckout` attestation is v1 for one repository and v2 for a multi-repository layout. Along with the signal's `contentDigest`, it identifies the checked bytes. A v2 attestation adds the aggregate digest and ordered per-repository commit/digest identities, so one component cannot be substituted for another during post-acquisition step reuse.
-
-Whole-gate route reuse is also fail-closed. For v2 evidence, the route must obtain an independent, path-free current component witness and it must exactly match the attestation's ordered repository keys and commits. An unavailable or mismatched witness, a changed digest, incomplete evidence, or a v1-to-v2 (or v2-to-v1) transition is a cache miss. A successful whole-gate cache materialization copies coherent prior attestation evidence and creates no checkout lease because no process executes.
-
-All command, LLM-review, agent-QA, and human-signoff steps for a signal use that same frozen source view. Bobbit audits it before each phase, after each phase, and before publishing the final verdict. A successful command cannot publish a pass if an audit finds public-checkout mutation. Failed acquisition, unreadable checkout, source mutation, or unsupported layout records a fixed `PINNED_CHECKOUT_*` code/message instead of host paths or Git output. Read-only permissions are a guard against accidental writes; the repeated raw-byte digest audit is the authority. See [Pinned multi-repo verification (D-4)](design/pinned-multi-repo-verification.md) for layout and containment, and the [D-5 end-to-end verification plan](design/pinned-gate-verification-e2e.md) for lifecycle coverage.
-
-#### Immutable verification sidecar
-
-Every fresh verification phase that executes source—whether the goal's ordinary agent sessions are sandboxed or direct—uses an exact, signal-labelled Docker sidecar. Docker must be available and the configured Bobbit sandbox image must already be built before signalling a gate that needs such execution. Gate signalling never builds an image, clones a project, or injects project credentials as a side effect; an unavailable sidecar fails with the sanitized `PINNED_CHECKOUT_UNREADABLE` diagnostic. A whole-gate cache materialization and a no-step gate run no verification process and therefore do not create a sidecar.
-
-The ordinary project container never receives a broad mount of verification source. The sidecar sees the signal's source-only checkout at its fixed verification path, not the mutable branch worktree and not the private Git worktree. It receives no broad live `/workspace`, `/workspace-wt`, or clone-source mount. Git metadata remains server-private. The sidecar-only backend does not provision a mutable project container, clone, or credentials.
-
-Ignored directories may be mounted as writable output overlays only when the frozen `.gitignore` rules prove they are ignored. In a v2 layout, the only live-worktree exposure permitted for dependencies is an exact, validated, read-only repository-local subpath from that project's worktree volume (for example, `services/api/node_modules`). It is not a mount of the containing workspace or worktree volume, cannot name a sibling repository, and must match the persisted dependency map. This lets checks write reports, coverage, or dependency setup output without making those bytes part of the source witness. The sidecar is removed before every host-side digest audit and before checkout release; a lingering sidecar cannot race an audit or keep a checkout alive unnoticed. See [Pinned multi-repo verification (D-4)](design/pinned-multi-repo-verification.md#sandbox-parity) for mount validation and recovery rules.
-
-#### Pinned checkout lifecycle and recovery
-
-For each fresh verification signal, the checkout manager owns a durable lease. Its operational states are preparation, ready, and releasing; the lease records the project owner, signal identity, and enough v1 or v2 inventory/commit/digest information to resume without rereading mutable source bytes. A whole-gate cache materialization executes no process and acquires no new checkout lease. On restart, active verifications can resume only after the recorded lease, project ownership, checkout identity, and every applicable repository identity/digest still agree. Orphaned or interrupted leases are reclaimed by the manager, never by sweeping arbitrary worktrees. Cleanup removes only the exact recorded public layout, private worktrees, and sidecar resources; a failed cleanup remains the lease owner's bounded-retry responsibility rather than granting a later signal authority over those paths.
-
-Cancellation and terminal publication keep their existing generation and process-cleanup rules. On cancellation or re-signal, Bobbit reaps the held command before releasing its lease. A terminal gate status may be visible while its sidecar/check-out cleanup is still pending, but the active record remains the sole cleanup owner until command cleanup, sidecar removal, and lease release have all converged. Restart resumes the recorded ready lease rather than rereading live source; cleanup retries converge only on the recorded resources. Failures remain durable diagnostic state rather than authorizing a broad delete or allowing a newer signal to be overwritten. See [Exact process ownership for command verification](verification-restart.md) for command-tree ownership and [Retained gate diagnostics](gate-diagnostics.md) for inspection.
-
-#### D-5 lifecycle coverage
-
-D-5 divides lifecycle proof by boundary. The production Docker-sidecar E2E pauses single- and multi-repository commands while live worktrees change, proving frozen execution, exact nested component cwd, sanitized API/history evidence, and exact cleanup. The real-Git harness E2E owns cancellation/reap ordering, restart/resume, cache witnesses, mutation auditing, and cleanup retry. The browser journey uses deterministic injected evidence only for rendered/reloaded history, not to attest real Git or Docker behavior. The [D-5 end-to-end verification plan](design/pinned-gate-verification-e2e.md) is the complete coverage boundary and scenario reference.
 
 `llm-review` and `agent-qa` prompts use a verifier-owned durable queue row and Pi's atomic follow-up delivery rather than treating a busy reviewer as a content failure. The row receipt, cancellation/re-signal fence, same-session recovery, and diagnostic contract are described in [Verifier Recovery](llm-review-recovery.md#verifier-prompt-dispatch-and-contention).
 

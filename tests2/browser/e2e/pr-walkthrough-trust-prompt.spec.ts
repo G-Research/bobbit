@@ -30,6 +30,7 @@ import { apiFetch, waitForSessionStatus } from "../e2e-setup.js";
 import { openApp, createSessionViaUI } from "./ui-helpers.js";
 
 const RUN_ROUTE_RE = /\/api\/ext\/route\/run\b/;
+const TRUST_CHECK_ROUTE_RE = /\/api\/github\/trusted-hosts\/check\b/;
 
 interface RunPost { ackHost?: unknown; prUrl?: unknown; body: Record<string, unknown> }
 
@@ -111,6 +112,50 @@ test.describe("PR walkthrough — launch trust prompt", () => {
 		await waitForSessionStatus(sid, "idle").catch(() => { /* best-effort */ });
 		return sid;
 	}
+
+	test("a gh-configured host silently retries from the server decision without prompting or writing preferences", async ({ page }) => {
+		const HOST = "ghe.gh-configured.example.com";
+		const PR_URL = `https://${HOST}/octo/repo/pull/2`;
+		await setTrustedHosts(savedHosts.filter((h) => h !== HOST));
+
+		const sid = await freshSession(page);
+		await page.route(TRUST_CHECK_ROUTE_RE, async (route: Route) => {
+			const checkedHost = new URL(route.request().url()).searchParams.get("host");
+			await route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify({ host: checkedHost, trusted: checkedHost === HOST }),
+			});
+		});
+		const preferenceWrites: string[] = [];
+		page.on("request", (request) => {
+			if (new URL(request.url()).pathname === "/api/preferences" && request.method() === "PUT") {
+				preferenceWrites.push(request.postData() || "");
+			}
+		});
+		const runPosts: RunPost[] = [];
+		await page.route(RUN_ROUTE_RE, async (route: Route) => {
+			const parsed = parseRunPost(route.request().postData());
+			runPosts.push(parsed);
+			await route.fulfill({
+				status: 200,
+				contentType: "application/json",
+				body: JSON.stringify(parsed.ackHost
+					? { ok: true, childSessionId: sid }
+					: { ok: false, code: "HOST_NOT_TRUSTED", retryable: true, host: HOST, prUrl: PR_URL }),
+			});
+		});
+
+		await clickPrWalkthroughLauncher(page);
+
+		await expect.poll(() => runPosts.length, { timeout: 10_000 }).toBe(2);
+		expect(runPosts[0].ackHost).toBeUndefined();
+		expect(runPosts[1].ackHost).toBe(HOST);
+		expect(runPosts[1].prUrl).toBe(PR_URL);
+		await expect(trustDialog(page)).toHaveCount(0);
+		expect(preferenceWrites, "effective server trust must not be copied into managed preferences").toEqual([]);
+		expect(await readTrustedHosts()).not.toContain(HOST);
+	});
 
 	test("accept → persists the host and re-invokes run with trustedHostAck + prUrl", async ({ page }) => {
 		const HOST = "ghe.accept-test.example.com";

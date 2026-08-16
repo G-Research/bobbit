@@ -10,7 +10,6 @@ import { inspect } from "node:util";
 
 import { VerificationHarness } from "../../src/server/agent/verification-harness.js";
 import type { CommandRunner } from "../../src/server/gateway-deps.ts";
-import { FakePinnedCheckoutManager } from "../harness/fake-pinned-checkout-manager.ts";
 
 const GOAL_BRANCH = "goal/nondestructive-sync";
 const SHA_A = "a".repeat(40);
@@ -18,14 +17,6 @@ const SHA_B = "b".repeat(40);
 const SHA_C = "c".repeat(40);
 
 type Topology = "equal" | "local-ahead" | "local-behind" | "diverged";
-
-/** Mirrors the manager's hard SHA equality contract while leaving materialization to its own suite. */
-class CommitFaithfulPinnedCheckoutManager extends FakePinnedCheckoutManager {
-	override async acquire(input: { signal: { id: string; commitSha?: string }; sourceRoot: string; projectId: string }) {
-		const checkout = await super.acquire(input);
-		return { ...checkout, commitSha: input.signal.commitSha ?? checkout.commitSha };
-	}
-}
 
 class GitTopologyRunner implements CommandRunner {
 	readonly calls: string[][] = [];
@@ -90,16 +81,9 @@ function makeHarness(topology: Topology) {
 		metadata: {},
 	};
 	const gateState: any = { goalId: signal.goalId, gateId: signal.gateId, status: "pending", signals: [signal] };
-	const repinnedCommits: string[] = [];
 	const gateStore = {
 		getGate: () => gateState,
 		getGatesForGoal: () => [gateState],
-		updateSignalCommitSha: async (signalId: string, commitSha: string) => {
-			const target = gateState.signals.find((entry: any) => entry.id === signalId);
-			assert.ok(target, `missing signal ${signalId}`);
-			target.commitSha = commitSha;
-			repinnedCommits.push(commitSha);
-		},
 		updateSignalVerification: (signalId: string, verification: any) => {
 			const target = gateState.signals.find((entry: any) => entry.id === signalId);
 			if (target) target.verification = verification;
@@ -116,7 +100,6 @@ function makeHarness(topology: Topology) {
 			projectConfigStore,
 		} : null,
 	};
-	const pinnedCheckoutManager = new CommitFaithfulPinnedCheckoutManager(path.join(stateDir, "pinned-checkouts"));
 	const harness = new VerificationHarness(
 		stateDir,
 		undefined,
@@ -128,10 +111,10 @@ function makeHarness(topology: Topology) {
 		projectConfigStore as any,
 		projectContextManager as any,
 		undefined,
-		{ commandRunner: runner, pinnedCheckoutManager: pinnedCheckoutManager as any },
+		{ commandRunner: runner },
 	);
 	(harness as any).runCommandStep = async (command: string) => ({ passed: true, output: `executed ${command}` });
-	return { root, harness, runner, signal, gateState, repinnedCommits, pinnedCheckoutManager };
+	return { root, harness, runner, signal, gateState };
 }
 
 const GATE_DEF = {
@@ -174,11 +157,6 @@ test("local-behind goal worktree fast-forwards HEAD to origin", async () => {
 	try {
 		assert.equal(result.runner.currentHead, SHA_C);
 		assert.equal(result.runner.calls.some(args => args[0] === "reset" && args[1] === "--hard"), true);
-		assert.deepEqual(result.repinnedCommits, [SHA_C], "the post-sync commit must be durably repinned before acquisition");
-		assert.equal(result.signal.commitSha, SHA_C);
-		assert.equal(result.gateState.signals[0].commitSha, SHA_C);
-		assert.equal(result.gateState.signals[0].pinnedCheckout.commitSha, SHA_C);
-		assert.equal(result.gateState.signals[0].verification.status, "passed");
 		assert.doesNotMatch(result.warnings, /diverged|Failed to sync worktree/i);
 	} finally { cleanup(result.root); }
 });

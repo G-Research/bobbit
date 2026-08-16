@@ -35,6 +35,11 @@ export interface PersistedGoal {
 	updatedAt: number;
 	/** Git worktree path (if goal has its own worktree) */
 	worktreePath?: string;
+	/**
+	 * Session that owned this checkout before it was adopted by the goal.
+	 * Provenance/idempotency only: the session remains the worktree lifecycle owner.
+	 */
+	worktreeOwnerSessionId?: string;
 	/** Git branch name for this goal's worktree */
 	branch?: string;
 	/** The original repo path (for worktree cleanup) */
@@ -238,7 +243,7 @@ const SETUP_STATUSES = new Set<SetupStatus>(["ready", "preparing", "retrying", "
 const MERGE_TARGETS = new Set(["master", "parent"]);
 const DIVERGENCE_POLICIES = new Set(["strict", "balanced", "autonomous"]);
 const STRING_FIELDS = [
-	"worktreePath", "branch", "repoPath", "projectId", "teamLeadSessionId", "setupError",
+	"worktreePath", "worktreeOwnerSessionId", "branch", "repoPath", "projectId", "teamLeadSessionId", "setupError",
 	"reattemptOf", "parentGoalId", "rootGoalId", "spawnedFromPlanId", "suggestedRole", "spawnedBySessionId",
 ] as const;
 const BOOLEAN_FIELDS = [
@@ -355,6 +360,7 @@ function validateGoal(
 		if (!Number.isFinite(value[field])) invalidGoal(label, `${field} must be finite`);
 	}
 	for (const field of STRING_FIELDS) if (value[field] !== undefined && typeof value[field] !== "string") invalidGoal(label, `${field} must be a string`);
+	if (value.worktreeOwnerSessionId === "") invalidGoal(label, "worktreeOwnerSessionId must be a non-empty string");
 	if (value.workflowId !== undefined && value.workflowId !== null && typeof value.workflowId !== "string") {
 		invalidGoal(label, "workflowId must be a string or null");
 	}

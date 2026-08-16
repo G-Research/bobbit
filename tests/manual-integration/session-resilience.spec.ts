@@ -39,21 +39,17 @@ const PROJECT_ROOT = resolve(import.meta.dirname, "..", "..");
  * This helper mimics what `propose_project` would supply.
  */
 function projectRegistrationBody(name: string, rootPath: string, opts: { upsert?: boolean } = {}) {
-	// Component must declare every command name referenced by the seeded
-	// workflows (build/check/unit/e2e), otherwise validateAllWorkflows rejects
-	// the registration. Stub them with `echo ok` — these tests never run them
-	// to completion, only check goal creation and team start.
-	const components = [{
-		name,
-		repo: ".",
-		commands: {
-			build: "echo build ok",
-			check: "echo check ok",
-			unit: "echo unit ok",
-			e2e: "echo e2e ok",
-		},
-	}];
-	const workflows = buildDefaultWorkflows(name);
+	// Derive persisted workflows from the component's command map so unavailable
+	// canonical steps are filtered before validation. These commands are stubs —
+	// the scenarios only check goal creation and team start.
+	const commands = {
+		build: "echo build ok",
+		check: "echo check ok",
+		unit: "echo unit ok",
+		e2e: "echo e2e ok",
+	};
+	const components = [{ name, repo: ".", commands }];
+	const workflows = buildDefaultWorkflows(name, Object.keys(commands));
 	return { name, rootPath, components, workflows, ...opts };
 }
 const SERVER_CLI = join(PROJECT_ROOT, "dist", "server", "cli.js");
