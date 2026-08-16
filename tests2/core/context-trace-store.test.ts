@@ -326,12 +326,12 @@ describe("ContextTraceStore", () => {
 		store.appendProjectImportTrace("project-1", "import-1", [{
 			kind: "decision", packId: "extension-pack", hookId: "import-hook", event: "projectImported", outcome: "applied",
 			requestId: "request-1", questionId: "a".repeat(64),
-			...({ projectRoot: secret, ownedRoots: [secret], components: [{ id: secret, languages: [secret] }], question: secret, otherText: secret, proposal: { args: secret }, error: secret } as any),
+			...({ projectRoot: secret, ownedRoots: [secret], components: [{ id: secret, languages: [secret] }], question: secret, otherText: secret, proposal: { args: secret, nested: [{ tokens: secret, credentials: [secret] }] }, error: secret } as any),
 		}]);
 		store.appendProjectImportOutcome("project-1", "import-1", {
 			kind: "decision", packId: "extension-pack", hookId: "import-hook", event: "projectImported", outcome: "applied",
 			requestId: "request-1", questionId: "a".repeat(64), answer: "other", actor: "user", defaultApplied: false,
-			...({ question: secret, otherText: secret, proposal: { args: secret }, error: secret } as any),
+			...({ question: secret, otherText: secret, proposal: { args: secret, nested: [{ secrets: [secret] }] }, error: secret } as any),
 		});
 
 		expect(store.readTrace("project-1")).toEqual([]);

@@ -235,6 +235,13 @@ test("project registry migrates legacy replay keys and keeps bounded append-only
 		const migrated = new ProjectRegistry(stateDir);
 		expect(migrated.hasCanonicalMutationReceipt(project.id, "legacy-key:1")).toBe(true);
 		expect(migrated.get(project.id)?.canonicalMutationKey).toBeUndefined();
+
+		// Legacy receipt migration is deliberately narrow: an old free-form field
+		// must never become replay authority after a restart.
+		fs.writeFileSync(path.join(stateDir, "projects.json"), JSON.stringify([{ ...project, canonicalMutationKey: "invalid legacy receipt with spaces" }]));
+		const invalidLegacy = new ProjectRegistry(stateDir);
+		expect(invalidLegacy.hasCanonicalMutationReceipt(project.id, "invalid legacy receipt with spaces")).toBe(false);
+		expect(invalidLegacy.get(project.id)?.canonicalMutationKey).toBeUndefined();
 	} finally {
 		fs.rmSync(stateDir, { recursive: true, force: true });
 	}

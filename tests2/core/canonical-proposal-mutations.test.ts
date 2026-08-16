@@ -8,6 +8,7 @@ import { ToolManager, __resetToolScanCache } from "../../src/server/agent/tool-m
 import {
 	CanonicalMutationError,
 	applyCanonicalToolProposal,
+	canonicalToolProposalState,
 	createCanonicalRole,
 	createCanonicalStaff,
 	createCanonicalWorkflow,
@@ -104,6 +105,31 @@ describe("canonical proposal mutations", () => {
 		apply(manager, "delete", "fallback_tool");
 		assert.equal(manager.getToolByName("fallback_tool")?.description, "bundled");
 		assert.equal(fs.existsSync(path.join(configDir, "tools", "fixture", "fallback_tool.yaml")), false);
+	});
+
+	it("replays tool create, update, and delete only for the exact observed bytes and rejects competing writes", () => {
+		const { manager } = fixture();
+		const created = yaml("replay_tool", "created");
+		const changed = yaml("replay_tool", "changed");
+
+		// A lost response may replay each CRUD operation, but only if the exact
+		// before-state proves the effect already happened.
+		assert.equal(applyCanonicalToolProposal({ action: "create", tool: "replay_tool", content: created, expectedBeforeSha256: null }, { toolManager: manager }).action, "create");
+		assert.equal(applyCanonicalToolProposal({ action: "create", tool: "replay_tool", content: created, expectedBeforeSha256: null }, { toolManager: manager }).action, "create");
+		const createdHash = canonicalToolProposalState("replay_tool", { toolManager: manager })!;
+		assert.equal(applyCanonicalToolProposal({ action: "update", tool: "replay_tool", content: changed, expectedBeforeSha256: createdHash }, { toolManager: manager }).action, "update");
+		assert.equal(applyCanonicalToolProposal({ action: "update", tool: "replay_tool", content: changed, expectedBeforeSha256: createdHash }, { toolManager: manager }).action, "update");
+		const changedHash = canonicalToolProposalState("replay_tool", { toolManager: manager })!;
+		assert.equal(applyCanonicalToolProposal({ action: "delete", tool: "replay_tool", expectedBeforeSha256: changedHash }, { toolManager: manager }).action, "delete");
+		assert.equal(applyCanonicalToolProposal({ action: "delete", tool: "replay_tool", expectedBeforeSha256: changedHash }, { toolManager: manager }).action, "delete");
+
+		apply(manager, "create", "conflict_tool", yaml("conflict_tool", "first"));
+		const staleHash = canonicalToolProposalState("conflict_tool", { toolManager: manager })!;
+		apply(manager, "update", "conflict_tool", yaml("conflict_tool", "newer"));
+		assert.throws(
+			() => applyCanonicalToolProposal({ action: "update", tool: "conflict_tool", content: yaml("conflict_tool", "stale"), expectedBeforeSha256: staleHash }, { toolManager: manager }),
+			(error: any) => error instanceof CanonicalMutationError && error.code === "TOOL_STATE_CONFLICT",
+		);
 	});
 
 	it("rejects malformed content and traversal before mutating the project tree", () => {
