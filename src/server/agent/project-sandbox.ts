@@ -1581,7 +1581,13 @@ export class ProjectSandbox {
 
 		this.containerId = containerId;
 
-		await this._repairSandboxVolumeOwnership(containerId, volumeEvidence);
+		try {
+			await this._repairSandboxVolumeOwnership(containerId, volumeEvidence);
+		} catch (err: any) {
+			// A replacement can retry this evidence-gated repair. Do not discard the
+			// new container solely because Docker interrupted the ownership exec.
+			console.warn(`[project-sandbox] Could not repair volume ownership for ${containerId.substring(0, 12)}: ${err?.message || err}`);
+		}
 
 		// Defense-in-depth: mask /proc/1/environ
 		try {
@@ -1646,9 +1652,14 @@ export class ProjectSandbox {
 	}
 
 	/** Preserve reconnect/restart ownership recovery without adopting a foreign
-	 * or non-empty named volume. */
-	private async _repairSandboxVolumeRootsOnExistingContainer(containerId: string, _lifecycle: "reconnect" | "restart"): Promise<void> {
-		await this._repairSandboxVolumeOwnership(containerId, await this._sandboxVolumeOwnershipEvidence(this.e2eRunId));
+	 * or non-empty named volume. A repair interruption is not a health failure
+	 * for an already usable container. */
+	private async _repairSandboxVolumeRootsOnExistingContainer(containerId: string, lifecycle: "reconnect" | "restart"): Promise<void> {
+		try {
+			await this._repairSandboxVolumeOwnership(containerId, await this._sandboxVolumeOwnershipEvidence(this.e2eRunId));
+		} catch (err: any) {
+			console.warn(`[project-sandbox] Failed to repair volume-root ownership during ${lifecycle} for healthy container ${containerId.substring(0, 12)}; continuing with worktree retry fallback: ${err?.message || err}`);
+		}
 	}
 
 	/**
@@ -1677,15 +1688,9 @@ export class ProjectSandbox {
 			"repair_empty_root_owned_dir /workspace-wt",
 			workspaceRepair,
 		].filter(Boolean).join("\n");
-		try {
-			await this.execDocker([
-				"exec", "-u", "root", containerId, "sh", "-c", command,
-			], { timeout: 10_000, env: DOCKER_ENV });
-		} catch (err: any) {
-			// The container remains usable if the repair itself is interrupted. A
-			// future replacement reruns this evidence-based, idempotent repair.
-			console.warn(`[project-sandbox] Could not repair volume ownership for ${containerId.substring(0, 12)}: ${err?.message || err}`);
-		}
+		await this.execDocker([
+			"exec", "-u", "root", containerId, "sh", "-c", command,
+		], { timeout: 10_000, env: DOCKER_ENV });
 	}
 
 	private async _runInitSequence(): Promise<void> {

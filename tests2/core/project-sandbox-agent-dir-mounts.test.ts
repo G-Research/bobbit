@@ -215,7 +215,10 @@ describe("ProjectSandbox agent-dir mount staleness", () => {
 					calls.push(`exec:${args[0]}`);
 					return "";
 				};
-				(sandbox as any)._initializeSandboxVolumeRoots = async () => {
+				const ownershipEvidence = { workspaceInitializedByBobbit: true };
+				(sandbox as any)._sandboxVolumeOwnershipEvidence = async () => ownershipEvidence;
+				(sandbox as any)._repairSandboxVolumeOwnership = async (_containerId: string, evidence: unknown) => {
+					assert.equal(evidence, ownershipEvidence, "reconnect/restart must pass durable volume ownership evidence to the repair");
 					calls.push("repair");
 					throw new Error("injected ownership exec failure");
 				};
