@@ -134,10 +134,22 @@ function createPreReadinessRunner() {
 	};
 }
 
-function setActiveCommandVerification(harness: any, goalId: string, gateId: string, signalId: string, names = ["step"]) {
+function setActiveCommandVerification(
+	harness: any,
+	goalId: string,
+	gateId: string,
+	signalId: string,
+	names = ["step"],
+	options: { commandSpawnState?: "queued" | "spawned" } = {},
+) {
+	const startedAt = Date.now();
+	const commandSpawnState = options.commandSpawnState ?? "queued";
 	(harness as any).activeVerifications.set(signalId, {
-		goalId, gateId, signalId, overallStatus: "running", startedAt: Date.now(), currentPhase: 0,
-		steps: names.map(name => ({ name, type: "command", status: "running", startedAt: Date.now() })),
+		goalId, gateId, signalId, overallStatus: "running", startedAt, currentPhase: 0,
+		steps: names.map(name => ({
+			name, type: "command", status: "running", startedAt, commandSpawnState,
+			...(commandSpawnState === "spawned" ? { commandSpawnedAt: startedAt } : {}),
+		})),
 	});
 }
 
@@ -512,7 +524,10 @@ describe("runCommandStep tree-kill", () => {
 			killTree: (signal: string) => { events.push(`transport:${signal}`); },
 			waitForTreeExit: async () => events.includes("transport:SIGKILL"),
 		};
-		setActiveCommandVerification(harness, "goal-container-transport-handoff", "gate-container-transport-handoff", signalId);
+		setActiveCommandVerification(
+			harness, "goal-container-transport-handoff", "gate-container-transport-handoff", signalId, ["step"],
+			{ commandSpawnState: "spawned" },
+		);
 		const step = (harness as any).activeVerifications.get(signalId).steps[0];
 		Object.assign(step, {
 			containerId: "container-handoff",
@@ -550,7 +565,10 @@ describe("runCommandStep tree-kill", () => {
 			killTree: () => { events.push("signal"); },
 			waitForTreeExit: async () => ++waits > 1,
 		};
-		setActiveCommandVerification(harness, "goal-durable-live-transport", "gate-durable-live-transport", signalId);
+		setActiveCommandVerification(
+			harness, "goal-durable-live-transport", "gate-durable-live-transport", signalId, ["step"],
+			{ commandSpawnState: "spawned" },
+		);
 		const active = (harness as any).activeVerifications.get(signalId);
 		active.cancelled = true;
 		active.overallStatus = "cancelled";
@@ -605,7 +623,10 @@ describe("runCommandStep tree-kill", () => {
 			killTree: () => { signals++; },
 			waitForTreeExit: async () => { waits++; return true; },
 		};
-		setActiveCommandVerification(harness, "goal-transport-persist-failure", "gate-transport-persist-failure", signalId);
+		setActiveCommandVerification(
+			harness, "goal-transport-persist-failure", "gate-transport-persist-failure", signalId, ["step"],
+			{ commandSpawnState: "spawned" },
+		);
 		const active = (harness as any).activeVerifications.get(signalId);
 		const step = active.steps[0];
 		Object.assign(step, {
@@ -662,7 +683,10 @@ describe("runCommandStep tree-kill", () => {
 			killTree: onKill,
 			waitForTreeExit: async () => true,
 		});
-		setActiveCommandVerification(harness, "goal-concurrent-pre-readiness-cancel", "gate-concurrent-pre-readiness-cancel", signalId, ["held", "ready"]);
+		setActiveCommandVerification(
+			harness, "goal-concurrent-pre-readiness-cancel", "gate-concurrent-pre-readiness-cancel", signalId, ["held", "ready"],
+			{ commandSpawnState: "spawned" },
+		);
 		(harness as any)._trackedCommandChildren.set(`${signalId}:0`, makeTracked(heldOwnershipReady, () => { heldKills++; }));
 		(harness as any)._trackedCommandChildren.set(`${signalId}:1`, makeTracked(Promise.resolve(), () => { readyKills++; }));
 
