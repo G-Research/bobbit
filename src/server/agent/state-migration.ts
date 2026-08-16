@@ -36,7 +36,7 @@ const HEADQUARTERS_BACKUP_RETIRED_SUFFIX = ".pre-headquarters-id-migration-recov
 // their keys are eligible for deletion tombstones. (gateway-swarms.json is
 // keyed by goalId and remaps onto team-state.json; it is handled via
 // team-state.json and excluded here to avoid the target-remap ambiguity.)
-const HEADQUARTERS_RETIREABLE_STORE_FILES = ["sessions.json", "goals.json", "staff.json", "team-state.json"] as const;
+const HEADQUARTERS_RETIREABLE_STORE_FILES = ["sessions.json", "sessions.archived.json", "goals.json", "staff.json", "team-state.json"] as const;
 
 /** Normalize paths for equality checks, including Windows drive-letter casing. */
 function pathKey(p: string): string {
@@ -209,6 +209,7 @@ const SERVER_SECRET_ENTRIES = ["token", "tls", "sandbox-agent-auth"] as const;
 const PROJECT_STORE_FILES = new Set([
 	"goals.json",
 	"sessions.json",
+	"sessions.archived.json",
 	"staff.json",
 	"tasks.json",
 	"team-state.json",
@@ -332,7 +333,7 @@ function recordKeyForFile(fileName: string, record: Record<string, unknown>): st
 	return String(record.id ?? record.goalId ?? record.staffId ?? "");
 }
 
-const HEADQUARTERS_EXECUTION_STORE_FILES = new Set(["sessions.json", "goals.json", "staff.json", "team-state.json", "gateway-swarms.json"]);
+const HEADQUARTERS_EXECUTION_STORE_FILES = new Set(["sessions.json", "sessions.archived.json", "goals.json", "staff.json", "team-state.json", "gateway-swarms.json"]);
 const HEADQUARTERS_GIT_WORKTREE_FIELDS = [
 	"worktreePath",
 	"repoPath",
@@ -460,7 +461,7 @@ function sanitizeExistingHeadquartersStores(
 	diagnostics: HeadquartersMigrationDiagnostics,
 	opts: { stampMissingProjectId?: boolean } = {},
 ): void {
-	for (const fileName of ["sessions.json", "goals.json", "staff.json", "team-state.json", "gateway-swarms.json"]) {
+	for (const fileName of ["sessions.json", "sessions.archived.json", "goals.json", "staff.json", "team-state.json", "gateway-swarms.json"]) {
 		sanitizeHeadquartersStoreFile(path.join(headquartersStateDir, fileName), fileName, headquartersDirPath, diagnostics, opts);
 	}
 }
@@ -468,17 +469,18 @@ function sanitizeExistingHeadquartersStores(
 /**
  * On-disk shape of a per-project store file. Most stores
  * (goals/staff/tasks/team-state/gates/inbox) are plain JSON arrays, but
- * `sessions.json` is a versioned envelope `{ version: 2, epoch, sessions: [...] }`
- * written by SessionStore. The migration MUST round-trip whichever shape it
- * finds: rewriting the envelope as a bare array (the previous bug) flattened its
- * top-level keys into `{ id: "version" | "epoch" | "sessions" }` pseudo-records,
- * which SessionStore cannot load — so Headquarters sessions silently vanished on
- * the next restart. Pinned by tests/headquarters-state-migration.test.ts.
+ * `sessions.json` and `sessions.archived.json` are versioned envelopes
+ * `{ version, epoch, sessions: [...] }` written by SessionStore. The migration
+ * MUST round-trip whichever shape it finds: rewriting an envelope as a bare array
+ * flattened its top-level keys into `{ id: "version" | "epoch" | "sessions" }`
+ * pseudo-records, which SessionStore cannot load — so sessions silently vanished
+ * on the next restart. Carry the envelope version rather than assuming v2: v3 has
+ * separate live and archived tiers and each tier's epoch is independent.
  */
-type StoreFileShape = { kind: "array" } | { kind: "sessions-v2"; epoch: number };
+type StoreFileShape = { kind: "array" } | { kind: "sessions-envelope"; version: number; epoch: number };
 
 function isSessionsEnvelopeFile(fileName: string): boolean {
-	return fileName === "sessions.json";
+	return fileName === "sessions.json" || fileName === "sessions.archived.json";
 }
 
 /**
@@ -493,11 +495,13 @@ function readStoreRecordsWithShape(filePath: string, fileName: string): { record
 	if (
 		sessionsEnvelope &&
 		isPlainRecord(value) &&
-		(value as { version?: unknown }).version === 2 &&
+		typeof (value as { version?: unknown }).version === "number" &&
+		(value as { version: number }).version >= 2 &&
 		Array.isArray((value as { sessions?: unknown }).sessions)
 	) {
+		const version = (value as { version: number }).version;
 		const epoch = typeof (value as { epoch?: unknown }).epoch === "number" ? (value as { epoch: number }).epoch : 0;
-		return { records: ((value as { sessions: unknown[] }).sessions).filter(isPlainRecord), shape: { kind: "sessions-v2", epoch } };
+		return { records: ((value as { sessions: unknown[] }).sessions).filter(isPlainRecord), shape: { kind: "sessions-envelope", version, epoch } };
 	}
 	if (isPlainRecord(value)) {
 		return {
@@ -506,16 +510,16 @@ function readStoreRecordsWithShape(filePath: string, fileName: string): { record
 		};
 	}
 	// Missing/unreadable: write a bare array. SessionStore accepts the legacy v1
-	// array shape and upgrades it to the v2 envelope on its next save. The envelope
-	// is only ever *preserved* here when the file already exists in that shape, so a
-	// sanitize/merge of an existing HQ store never downgrades it to the array form.
+	// array shape and upgrades it on its next save. An envelope is only ever
+	// *preserved* here when the file already exists in that shape, so sanitization
+	// never downgrades an existing v2/v3 tier.
 	return { records: [], shape: { kind: "array" } };
 }
 
 function writeStoreRecords(filePath: string, records: Record<string, unknown>[], shape: StoreFileShape): void {
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
-	const payload = shape.kind === "sessions-v2"
-		? { version: 2 as const, epoch: shape.epoch, sessions: records }
+	const payload = shape.kind === "sessions-envelope"
+		? { version: shape.version, epoch: shape.epoch, sessions: records }
 		: records;
 	fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), "utf-8");
 }
@@ -1478,18 +1482,17 @@ export function migrateToPerProjectState(
 	}
 
 	// Envelope-aware variants of writeBucket / clearCentralBucketIfDefaultMissing for
-	// sessions.json. Unlike goals/tasks/staff (true arrays), sessions.json is a
-	// versioned envelope `{ version: 2, epoch, sessions: [...] }` written by
-	// SessionStore. Reading it with readJsonArray returns [] (dropping every session)
-	// and writing it as a bare array (or clearing with `[]`) corrupts the store so
-	// SessionStore loads nothing after restart. These preserve the discovered shape.
+	// both SessionStore tiers. Unlike goals/tasks/staff (true arrays), sessions are
+	// versioned envelopes. Reading them with readJsonArray or clearing them with `[]`
+	// corrupts the tier. These preserve the discovered v2/v3 shape independently.
 	function writeSessionBucket(
 		centralFile: string,
+		fileName: "sessions.json" | "sessions.archived.json",
 		project: RegisteredProject,
 		sessions: Record<string, unknown>[],
 		sourceShape: StoreFileShape,
 	): void {
-		const targetFile = path.join(ensureProjectStateDir(project), "sessions.json");
+		const targetFile = path.join(ensureProjectStateDir(project), fileName);
 		if (samePath(targetFile, centralFile)) {
 			backupForHeadquartersMigration(targetFile);
 			writeStoreRecords(targetFile, sessions, sourceShape);
@@ -1498,7 +1501,7 @@ export function migrateToPerProjectState(
 		if (sessions.length === 0) return;
 		fs.mkdirSync(path.dirname(targetFile), { recursive: true });
 		const targetExists = fs.existsSync(targetFile);
-		const { records: existing, shape: existingShape } = readStoreRecordsWithShape(targetFile, "sessions.json");
+		const { records: existing, shape: existingShape } = readStoreRecordsWithShape(targetFile, fileName);
 		const existingIds = new Set(existing.map(item => String(item.id)));
 		let added = 0;
 		for (const session of sessions) {
@@ -1507,22 +1510,23 @@ export function migrateToPerProjectState(
 				added++;
 			}
 		}
-		// Preserve the target's own envelope when it already exists; otherwise adopt
-		// the source envelope shape so a brand-new per-project file stays v2.
+		// Preserve the target tier's envelope when it already exists; otherwise adopt
+		// the source tier's version and epoch for a brand-new per-project tier.
 		writeStoreRecords(targetFile, existing, targetExists ? existingShape : sourceShape);
 		if (added > 0) console.log(`[migration] Wrote ${added} new items to ${targetFile}`);
 	}
 
 	function clearCentralSessionsBucketIfDefaultMissing(
 		centralFile: string,
+		fileName: "sessions.json" | "sessions.archived.json",
 		groups: Map<string, Record<string, unknown>[]>,
 		shape: StoreFileShape,
 	): void {
-		const defaultTarget = path.join(ensureProjectStateDir(defaultProject), "sessions.json");
+		const defaultTarget = path.join(ensureProjectStateDir(defaultProject), fileName);
 		if (!samePath(defaultTarget, centralFile)) return;
 		if (groups.has(defaultProject.id)) return;
 		if (!fs.existsSync(centralFile)) return;
-		// Write an EMPTY v2 envelope, never a bare `[]`, so SessionStore can load it.
+		// Write an empty envelope, never a bare `[]`, so SessionStore can load it.
 		backupForHeadquartersMigration(centralFile);
 		writeStoreRecords(centralFile, [], shape);
 	}
@@ -1580,40 +1584,46 @@ export function migrateToPerProjectState(
 	console.log(`[migration] Distributed ${centralGoals.length} goals across ${goalsByProject.size} project(s)`);
 
 	// ── 3. Sessions ──
-	// sessions.json is a versioned envelope (see writeSessionBucket) — read and write
-	// it envelope-aware so distribution never flattens/clears it to a bare array.
-	const centralSessionsFile = path.join(centralStateDir, "sessions.json");
-	const { records: centralSessions, shape: sessionsShape } = readStoreRecordsWithShape(centralSessionsFile, "sessions.json");
-	const sessionsByProject = new Map<string, Record<string, unknown>[]>();
+	// Both SessionStore tiers are independently versioned envelopes. Keep their
+	// records and epoch/version metadata separate throughout project routing.
+	const distributeSessionTier = (fileName: "sessions.json" | "sessions.archived.json"): void => {
+		const centralFile = path.join(centralStateDir, fileName);
+		const { records: centralSessions, shape } = readStoreRecordsWithShape(centralFile, fileName);
+		const sessionsByProject = new Map<string, Record<string, unknown>[]>();
 
-	for (const session of centralSessions) {
-		const projectId = typeof session.projectId === "string" ? session.projectId : undefined;
-		const project = resolveProject(projectId);
-		if (!project) {
-			markAmbiguous("sessions.json", String(session.id ?? ""), projectId ? `unknown projectId ${projectId} while same-root normal project evidence exists` : "missing projectId while same-root normal project evidence exists");
-			let bucket = sessionsByProject.get(defaultProject.id);
+		for (const session of centralSessions) {
+			const projectId = typeof session.projectId === "string" ? session.projectId : undefined;
+			const project = resolveProject(projectId);
+			if (!project) {
+				markAmbiguous(fileName, String(session.id ?? ""), projectId ? `unknown projectId ${projectId} while same-root normal project evidence exists` : "missing projectId while same-root normal project evidence exists");
+				let bucket = sessionsByProject.get(defaultProject.id);
+				if (!bucket) {
+					bucket = [];
+					sessionsByProject.set(defaultProject.id, bucket);
+				}
+				bucket.push(session);
+				continue;
+			}
+			session.projectId = project.id;
+			let bucket = sessionsByProject.get(project.id);
 			if (!bucket) {
 				bucket = [];
-				sessionsByProject.set(defaultProject.id, bucket);
+				sessionsByProject.set(project.id, bucket);
 			}
 			bucket.push(session);
-			continue;
 		}
-		session.projectId = project.id;
-		let bucket = sessionsByProject.get(project.id);
-		if (!bucket) {
-			bucket = [];
-			sessionsByProject.set(project.id, bucket);
-		}
-		bucket.push(session);
-	}
 
-	for (const [projectId, sessions] of sessionsByProject) {
-		const project = projectRegistry.get(projectId)!;
-		writeSessionBucket(centralSessionsFile, project, sessions, sessionsShape);
-	}
-	clearCentralSessionsBucketIfDefaultMissing(centralSessionsFile, sessionsByProject, sessionsShape);
-	console.log(`[migration] Distributed ${centralSessions.length} sessions across ${sessionsByProject.size} project(s)`);
+		for (const [projectId, sessions] of sessionsByProject) {
+			const project = projectRegistry.get(projectId)!;
+			writeSessionBucket(centralFile, fileName, project, sessions, shape);
+		}
+		clearCentralSessionsBucketIfDefaultMissing(centralFile, fileName, sessionsByProject, shape);
+		console.log(`[migration] Distributed ${centralSessions.length} ${fileName} records across ${sessionsByProject.size} project(s)`);
+	};
+	const centralSessionsFile = path.join(centralStateDir, "sessions.json");
+	const centralArchivedSessionsFile = path.join(centralStateDir, "sessions.archived.json");
+	distributeSessionTier("sessions.json");
+	distributeSessionTier("sessions.archived.json");
 
 	// ── 4. Tasks — resolve project via goalId → goal's project ──
 	const centralTasksFile = path.join(centralStateDir, "tasks.json");
@@ -1782,6 +1792,7 @@ export function migrateToPerProjectState(
 	if (!samePath(centralResolved, defaultProjectStateDir)) {
 		renameForBackup(centralGoalsFile);
 		renameForBackup(centralSessionsFile);
+		renameForBackup(centralArchivedSessionsFile);
 		renameForBackup(centralTasksFile);
 		renameForBackup(centralStaffFile);
 		renameForBackup(centralGatesFile);
@@ -1822,14 +1833,43 @@ export function recoverPreMigrationData(stateDir: string): void {
 	const recoveryMarker = path.join(stateDir, RECOVERY_MARKER);
 	if (fs.existsSync(recoveryMarker)) return;
 
+	let totalRecovered = 0;
+
+	// SessionStore tiers are independently versioned envelopes. Recover each tier
+	// without merging archived rows into the live tier or flattening either envelope.
+	for (const name of ["sessions.json", "sessions.archived.json"] as const) {
+		const backupFile = path.join(stateDir, name + PRE_MIGRATION_SUFFIX);
+		const currentFile = path.join(stateDir, name);
+		if (!fs.existsSync(backupFile)) continue;
+		try {
+			const { records: backup, shape: backupShape } = readStoreRecordsWithShape(backupFile, name);
+			if (backup.length === 0) continue;
+			const currentExists = fs.existsSync(currentFile);
+			const { records: current, shape: currentShape } = readStoreRecordsWithShape(currentFile, name);
+			const existingIds = new Set(current.map(item => String(item.id)));
+			let added = 0;
+			for (const item of backup) {
+				const id = String(item.id ?? "");
+				if (id && !existingIds.has(id)) {
+					current.push(item);
+					existingIds.add(id);
+					added++;
+				}
+			}
+			if (added > 0) {
+				writeStoreRecords(currentFile, current, currentExists ? currentShape : backupShape);
+				console.log(`[migration-recovery] Recovered ${added} entries into ${name}`);
+				totalRecovered += added;
+			}
+		} catch (err) {
+			console.warn(`[migration-recovery] Failed to recover ${name}: ${err}`);
+		}
+	}
+
 	const filesToRecover = [
-		{ name: "sessions.json", idField: "id" },
 		{ name: "staff.json", idField: "id" },
 		{ name: "team-state.json", idField: "goalId" },
 	];
-
-	let totalRecovered = 0;
-
 	for (const { name, idField } of filesToRecover) {
 		const backupFile = path.join(stateDir, name + PRE_MIGRATION_SUFFIX);
 		const currentFile = path.join(stateDir, name);

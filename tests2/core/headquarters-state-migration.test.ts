@@ -12,6 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createFsFromVolume, Volume } from "memfs";
 import { migrateLegacyHeadquartersDirectory, migrateToPerProjectState } from "../../src/server/agent/state-migration.js";
+import { SessionStore } from "../../src/server/agent/session-store.js";
 import { serverSecretsDir } from "../../src/server/bobbit-dir.js";
 import {
 	HEADQUARTERS_PROJECT_ID,
@@ -314,6 +315,78 @@ describe("Headquarters directory migration", () => {
 		assert.equal(reread.version, 2);
 		assert.equal(reread.epoch, epoch);
 		assert.equal(reread.sessions.length, 1);
+	});
+
+	// v3 splits SessionStore persistence into independent live and archived envelopes.
+	// The always-run Headquarters sanitizer must preserve both envelope versions and
+	// epochs, sanitize their rows in place, and remain byte-stable on the next boot.
+	it("round-trips v3 live and archived session tiers through repeated Headquarters migration", () => {
+		const root = tmpRoot();
+		const dirs = migrateDirs(root);
+		const worktreePath = path.join(root, "..", "repo-wt", "goal-branch");
+		const liveFile = path.join(dirs.headquartersStateDir, "sessions.json");
+		const archivedFile = path.join(dirs.headquartersStateDir, "sessions.archived.json");
+		writeJson(liveFile, {
+			version: 3,
+			epoch: 17,
+			sessions: [{
+				id: "live-v3",
+				title: "Live v3",
+				cwd: worktreePath,
+				agentSessionFile: "live.jsonl",
+				projectId: HEADQUARTERS_PROJECT_ID,
+				createdAt: 1,
+				lastActivity: 2,
+				worktreePath,
+				customLiveField: { preserved: true },
+			}],
+		});
+		writeJson(archivedFile, {
+			version: 3,
+			epoch: 23,
+			sessions: [{
+				id: "archived-v3",
+				title: "Archived v3",
+				cwd: worktreePath,
+				agentSessionFile: "archived.jsonl",
+				projectId: HEADQUARTERS_PROJECT_ID,
+				createdAt: 3,
+				lastActivity: 4,
+				archived: true,
+				archivedAt: 5,
+				branch: "goal/legacy",
+				customArchivedField: { preserved: true },
+			}],
+		});
+
+		migrateLegacyHeadquartersDirectory(dirs);
+		const firstLiveBytes = fs.readFileSync(liveFile, "utf-8");
+		const firstArchivedBytes = fs.readFileSync(archivedFile, "utf-8");
+		migrateLegacyHeadquartersDirectory(dirs);
+		assert.equal(fs.readFileSync(liveFile, "utf-8"), firstLiveBytes, "live v3 tier must be byte-stable on the second migration");
+		assert.equal(fs.readFileSync(archivedFile, "utf-8"), firstArchivedBytes, "archived v3 tier must be byte-stable on the second migration");
+
+		const live = readJson<{ version: number; epoch: number; sessions: Array<Record<string, unknown>> }>(liveFile);
+		const archived = readJson<{ version: number; epoch: number; sessions: Array<Record<string, unknown>> }>(archivedFile);
+		assert.equal(live.version, 3);
+		assert.equal(live.epoch, 17);
+		assert.equal(archived.version, 3);
+		assert.equal(archived.epoch, 23);
+		assert.deepEqual(live.sessions.map(session => session.id), ["live-v3"]);
+		assert.deepEqual(archived.sessions.map(session => session.id), ["archived-v3"]);
+		assert.deepEqual(live.sessions[0].customLiveField, { preserved: true });
+		assert.deepEqual(archived.sessions[0].customArchivedField, { preserved: true });
+		assert.equal(Object.hasOwn(live.sessions[0], "worktreePath"), false);
+		assert.equal(Object.hasOwn(archived.sessions[0], "branch"), false);
+
+		const reloaded = new SessionStore(dirs.headquartersStateDir);
+		const reloadedLive = reloaded.getLive();
+		const reloadedArchived = reloaded.getArchived();
+		assert.equal(reloadedLive.length + reloadedArchived.length, 2, "all v3 records must survive");
+		assert.equal(reloadedLive.length, 1, "live count must survive");
+		assert.equal(reloadedArchived.length, 1, "archived count must survive");
+		assert.deepEqual(reloadedLive.map(session => session.id), ["live-v3"]);
+		assert.deepEqual(reloadedArchived.map(session => session.id), ["archived-v3"]);
 	});
 
 	// Security regression (S1): live server secrets must live OUTSIDE any project
