@@ -1101,7 +1101,12 @@ describe("ClaudeAgentSdkBridge", () => {
 
 		expect(query.interruptCalls).toBe(1);
 		expect(observed.filter(event => event.type === "agent_end")).toHaveLength(2);
-		expect(observed.filter(event => event.type === "message_end").map(event => event.message.content[0]?.text)).toEqual(["one", "two"]);
+		// Each fresh root boundary must retain its canonical accepted-user echo
+		// and independently translated assistant terminal after the abort reset.
+		expect(observed.filter(event => event.type === "message_end" && event.message?.role === "user")
+			.map(event => event.message.content[0]?.text)).toEqual(["one", "two"]);
+		expect(observed.filter(event => event.type === "message_end" && event.message?.role === "assistant")
+			.map(event => event.message.content[0]?.text)).toEqual(["one", "two"]);
 		expect(fixture.bridge.running).toBe(true);
 	});
 
