@@ -14,9 +14,12 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
 import { Check, Copy, Eye, FolderOpen, Goal as GoalIcon, Minus, Pencil, Plus, UserCheck, Users, Wrench } from "lucide";
 
-import { state, renderApp, setProjects, activeSessionId, isProposalStreaming } from "./state.js";
+import { state, renderApp, setProjects, activeSessionId, isProposalStreaming, type GoalWorktreeMode, type GoalWorktreeModeProjection } from "./state.js";
 import {
 	createGoal,
+	acceptGoalProposalInCurrentSession,
+	fetchGoalWorktreeMode,
+	updateGoalWorktreeMode,
 	createRole,
 	gatewayFetch,
 	refreshSessions,
@@ -652,6 +655,78 @@ const projectOuterScrollRef = createRef<HTMLDivElement>();
 // SHARED GOAL FORM
 // ============================================================================
 
+const _goalWorktreeModeFetching = new Set<string>();
+
+/** Proposal ownership is fixed by the slot (or historical tab source), never by
+ * whichever chat tab happens to be active. */
+function goalProposalOwnerSessionId(): string | undefined {
+	if (_proposalOverride?.type === "goal" && _proposalOverrideSessionId) return _proposalOverrideSessionId;
+	return state.activeProposals.goal?.sessionId;
+}
+
+function parsedGoalWorktreeMode(fields: Record<string, unknown> | undefined): GoalWorktreeMode {
+	return fields?.worktreeMode === "current-session" ? "current-session" : "new-worktree";
+}
+
+function goalProposalWorktreeMode(): GoalWorktreeMode {
+	return parsedGoalWorktreeMode(activeGoalProposalFormSnapshot() as Record<string, unknown> | undefined);
+}
+
+function ensureGoalWorktreeModeProjection(ownerSessionId: string | undefined): void {
+	if (!ownerSessionId || state.goalWorktreeModeBySession[ownerSessionId] || _goalWorktreeModeFetching.has(ownerSessionId)) return;
+	_goalWorktreeModeFetching.add(ownerSessionId);
+	state.goalWorktreeModeBySession[ownerSessionId] = {
+		mode: goalProposalWorktreeMode(),
+		eligible: false,
+		loading: true,
+	};
+	void fetchGoalWorktreeMode(ownerSessionId).then((projection) => {
+		state.goalWorktreeModeBySession[ownerSessionId] = projection;
+	}).catch(() => {
+		state.goalWorktreeModeBySession[ownerSessionId] = {
+			mode: goalProposalWorktreeMode(),
+			eligible: false,
+			reason: "Current session unavailable — eligibility could not be verified.",
+		};
+	}).finally(() => {
+		_goalWorktreeModeFetching.delete(ownerSessionId);
+		renderApp();
+	});
+}
+
+async function persistGoalWorktreeMode(ownerSessionId: string, mode: GoalWorktreeMode): Promise<void> {
+	const liveFields = state.activeProposals.goal?.sessionId === ownerSessionId
+		? state.activeProposals.goal.fields
+		: undefined;
+	const historicalFields = _proposalOverride?.type === "goal" && _proposalOverrideSessionId === ownerSessionId
+		? _proposalOverride.fields
+		: undefined;
+	const targetFields = historicalFields ?? liveFields;
+	if (!targetFields) return;
+	const hadMode = Object.prototype.hasOwnProperty.call(targetFields, "worktreeMode");
+	const previousMode = targetFields.worktreeMode;
+	if (mode === "new-worktree") delete targetFields.worktreeMode;
+	else targetFields.worktreeMode = mode;
+	const previousProjection = state.goalWorktreeModeBySession[ownerSessionId];
+	if (previousProjection) state.goalWorktreeModeBySession[ownerSessionId] = { ...previousProjection, mode };
+	_proposalInitializedFrom = null;
+	renderApp();
+	try {
+		await updateGoalWorktreeMode(ownerSessionId, mode);
+		// PUT rewrites the draft; GET gives the latest authoritative eligibility.
+		state.goalWorktreeModeBySession[ownerSessionId] = await fetchGoalWorktreeMode(ownerSessionId);
+	} catch (err) {
+		if (hadMode) targetFields.worktreeMode = previousMode;
+		else delete targetFields.worktreeMode;
+		state.goalWorktreeModeBySession[ownerSessionId] = previousProjection;
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to update worktree mode", message, { code, stack });
+	} finally {
+		_proposalInitializedFrom = null;
+		renderApp();
+	}
+}
+
 interface GoalFormConfig {
 	// Field values
 	title: string;
@@ -662,6 +737,11 @@ interface GoalFormConfig {
 	specEditMode: boolean;
 	enabledOptionalSteps: string[];
 	linkedProjectId?: string;
+	/** Durable selection from the proposal draft (absent defaults to new-worktree). */
+	worktreeMode?: GoalWorktreeMode;
+	/** Recomputed, display-only eligibility for the proposal owner. */
+	worktreeModeProjection?: GoalWorktreeModeProjection;
+	onWorktreeModeChange?: (mode: GoalWorktreeMode) => void;
 
 	/** Cross-project "Proposing into <Target>" banner (design §7). Rendered at the
 	 *  very top of the form when the goal targets a project other than the
@@ -1151,6 +1231,12 @@ function renderGoalForm(config: GoalFormConfig) {
 	if (wf && config.linkedProjectId) ensureQaConfigLoaded(config.linkedProjectId);
 	if (config.linkedProjectId) ensureProjectComponentsLoaded(config.linkedProjectId);
 	const componentSummary = config.linkedProjectId ? _projectComponentsCache.get(config.linkedProjectId) : undefined;
+	const worktreeMode = config.worktreeMode ?? "new-worktree";
+	const promotion = config.worktreeModeProjection;
+	const currentMode = worktreeMode === "current-session";
+	const currentUnavailable = currentMode && (!promotion || promotion.loading || !promotion.eligible);
+	const selectedBranch = currentMode ? (promotion?.branch || "Unavailable") : "Generated for this goal";
+	const selectedWorktreePath = currentMode ? (promotion?.worktreePath || "Unavailable") : worktreePath;
 	const optionalSteps: Array<{name: string; label: string; description?: string; type?: string}> = [];
 	if (wf) {
 		for (const gate of wf.gates) {
@@ -1173,7 +1259,7 @@ function renderGoalForm(config: GoalFormConfig) {
 	const lblCls = "text-xs text-muted-foreground font-medium shrink-0";
 
 	const createBusy = !!config.saving;
-	const createDisabled = (config.createDisabled ?? !config.title.trim()) || createBusy || !!config.streaming || noWorkflows || workflowProblem;
+	const createDisabled = (config.createDisabled ?? !config.title.trim()) || createBusy || !!config.streaming || noWorkflows || workflowProblem || currentUnavailable;
 
 	queueMicrotask(() => {
 		reconcileFollowTail(goalSpecPreviewRef.value);
@@ -1251,22 +1337,61 @@ function renderGoalForm(config: GoalFormConfig) {
 				` : ""}
 			</div>
 			${linkedProject ? html`
-				<div class="flex items-center gap-2 text-[11px] text-muted-foreground min-w-0">
-					<span class="${lblCls} w-20 md:w-16">Worktree</span>
-					<span class="truncate flex-1 min-w-0" title=${linkedProject.rootPath + ' → ' + worktreePath}>
-						<span class="font-medium text-foreground/80">${linkedProject.name}</span>
-						<code class="text-[10px] font-mono opacity-80 ml-1">${worktreePath}</code>
-					</span>
-				</div>
-				${componentSummary?.multiRepo ? html`
-					<div class="flex items-center gap-2 text-[11px] text-muted-foreground min-w-0" data-testid="multi-repo-indicator">
-						<span class="${lblCls} w-20 md:w-16"></span>
-						<span class="truncate flex-1 min-w-0 text-amber-600 dark:text-amber-400">
-							Will create ${componentSummary.componentCount} worktree${componentSummary.componentCount === 1 ? "" : "s"}
-							across ${componentSummary.repoCount} repo${componentSummary.repoCount === 1 ? "" : "s"}.
-						</span>
+				<div class="flex items-start gap-2 min-w-0">
+					<span class="${lblCls} w-20 md:w-16 mt-2" id="goal-worktree-label">Worktree</span>
+					<div class="flex-1 min-w-0 flex flex-col gap-1.5">
+						<div class="flex flex-wrap items-center gap-2 min-w-0">
+							<div
+								class="inline-flex rounded-md border border-border overflow-hidden bg-background"
+								role="radiogroup"
+								aria-labelledby="goal-worktree-label"
+								aria-describedby="goal-worktree-description goal-worktree-coordinates goal-worktree-reason"
+								data-testid="goal-form-worktree-mode"
+							>
+								<label class="relative inline-flex items-center justify-center min-w-[126px] h-9 px-3 text-xs font-medium cursor-pointer ${!currentMode ? "bg-primary text-primary-foreground" : "bg-background text-muted-foreground hover:bg-secondary hover:text-foreground"}">
+									<input class="absolute w-px h-px [clip-path:inset(50%)]" type="radio" name="goal-worktree-mode" value="new-worktree"
+										.checked=${!currentMode}
+										?disabled=${createBusy}
+										data-testid="goal-form-worktree-new"
+										@change=${() => config.onWorktreeModeChange?.("new-worktree")} />
+									<span>New worktree</span>
+								</label>
+								<label aria-disabled=${promotion?.eligible && !promotion.loading ? "false" : "true"}
+									class="relative inline-flex items-center justify-center min-w-[126px] h-9 px-3 border-l border-border text-xs font-medium ${currentMode ? "bg-primary text-primary-foreground" : promotion?.eligible && !promotion.loading ? "bg-background text-muted-foreground hover:bg-secondary hover:text-foreground cursor-pointer" : "bg-muted text-muted-foreground opacity-70 cursor-not-allowed"}">
+									<input class="absolute w-px h-px [clip-path:inset(50%)]" type="radio" name="goal-worktree-mode" value="current-session"
+										.checked=${currentMode}
+										?disabled=${createBusy || !promotion?.eligible || !!promotion?.loading}
+										data-testid="goal-form-worktree-current-session"
+										@change=${() => config.onWorktreeModeChange?.("current-session")} />
+									<span>Current session</span>
+								</label>
+							</div>
+							<span class="text-[11px] text-muted-foreground truncate"><strong class="font-medium text-foreground/80">${linkedProject.name}</strong></span>
+						</div>
+						<div class="rounded-md border border-border bg-muted/40 px-2.5 py-2 min-w-0" data-testid="goal-form-worktree-summary">
+							<p class="text-[11px] leading-snug text-foreground mb-1.5" id="goal-worktree-description">
+								${currentMode
+									? "This session becomes the goal lead in place. Its checkout, transcript, and sandbox stay unchanged."
+									: "Bobbit will create a dedicated branch and worktree for the goal."}
+							</p>
+							<dl class="grid grid-cols-[45px_minmax(0,1fr)] gap-x-2 gap-y-0.5 text-[10px] leading-snug" id="goal-worktree-coordinates">
+								<dt class="text-muted-foreground">Mode</dt><dd class="m-0 text-foreground">${currentMode ? "Current session" : "New worktree"}</dd>
+								<dt class="text-muted-foreground">Branch</dt><dd class="m-0 font-mono text-foreground break-all" data-testid="goal-form-worktree-branch">${selectedBranch}</dd>
+								<dt class="text-muted-foreground">Path</dt><dd class="m-0 font-mono text-foreground break-all" data-testid="goal-form-worktree-path">${selectedWorktreePath}</dd>
+								${currentMode && promotion?.componentCount ? html`<dt class="text-muted-foreground">Repos</dt><dd class="m-0 text-foreground">${promotion.componentCount} component worktree${promotion.componentCount === 1 ? "" : "s"}</dd>` : ""}
+							</dl>
+						</div>
+						<p id="goal-worktree-reason" class="text-[11px] leading-snug text-muted-foreground" aria-live="polite" data-testid="goal-form-worktree-current-unavailable">
+							${promotion?.loading ? "Checking whether this session can be reused…" : !promotion?.eligible ? (promotion?.reason || "Current session is unavailable for this proposal.") : ""}
+						</p>
+						${!currentMode && componentSummary?.multiRepo ? html`
+							<div class="text-[11px] text-muted-foreground text-amber-600 dark:text-amber-400" data-testid="multi-repo-indicator">
+								Will create ${componentSummary.componentCount} worktree${componentSummary.componentCount === 1 ? "" : "s"}
+								across ${componentSummary.repoCount} repo${componentSummary.repoCount === 1 ? "" : "s"}.
+							</div>
+						` : ""}
 					</div>
-				` : ""}
+				</div>
 			` : html`
 				<div class="flex items-start gap-2">
 					<label class="${lblCls} w-20 md:w-16 mt-2">Directory</label>
@@ -1285,22 +1410,23 @@ function renderGoalForm(config: GoalFormConfig) {
 				</div>
 			`}
 			<div class="flex flex-wrap items-center gap-x-4 gap-y-1.5 pt-0.5">
-				${sandboxConfigured ? html`
-					<label class="flex items-center gap-1.5 cursor-pointer ${!sandboxAvailable ? "opacity-40 pointer-events-none" : ""}">
-						<input type="checkbox" class="toggle-switch" .checked=${config.sandboxed}
-							?disabled=${!sandboxAvailable}
+				${sandboxConfigured || currentMode ? html`
+					<label class="flex items-center gap-1.5 ${currentMode || !sandboxAvailable ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}">
+						<input type="checkbox" class="toggle-switch" .checked=${currentMode ? (promotion?.sandboxed ?? config.sandboxed) : config.sandboxed}
+							?disabled=${currentMode || !sandboxAvailable}
 							@change=${config.onSandboxChange} />
-						<span class="text-xs text-muted-foreground font-medium">Sandbox</span>
+						<span class="text-xs text-muted-foreground font-medium">Sandbox${currentMode ? " (inherited)" : ""}</span>
 						<span title=${!sandboxAvailable
 							? "Docker sandbox is configured but unavailable — check Docker status and image in Settings"
 							: "Runs each team agent in an isolated Docker container with restricted filesystem and network access"}
 							class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
 					</label>
 				` : ""}
-				<label class="flex items-center gap-1.5 cursor-pointer">
+				<label class="flex items-center gap-1.5 ${currentMode ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}">
 					<input type="checkbox" class="toggle-switch" .checked=${config.autoStartTeam}
+						?disabled=${currentMode}
 						@change=${config.onAutoStartTeamChange} />
-					<span class="text-xs text-muted-foreground font-medium">Auto-start team</span>
+					<span class="text-xs text-muted-foreground font-medium">Auto-start team${currentMode ? " (already the lead)" : ""}</span>
 					<span title="Automatically start the team lead when the worktree is ready"
 						class="text-[9px] text-muted-foreground cursor-help">ⓘ</span>
 				</label>
@@ -1779,6 +1905,10 @@ function goalPreviewPanel() {
 	// re-attempt, and project-scoped goal creation stay behaviorally equivalent
 	// to the non-assistant proposal panel.
 	syncProposalFormState();
+	const worktreeOwnerSessionId = goalProposalOwnerSessionId();
+	ensureGoalWorktreeModeProjection(worktreeOwnerSessionId);
+	const worktreeMode = goalProposalWorktreeMode();
+	const worktreeModeProjection = worktreeOwnerSessionId ? state.goalWorktreeModeBySession[worktreeOwnerSessionId] : undefined;
 	ensureWorkflowsLoaded(state.previewProjectId || undefined);
 	ensureSandboxStatusLoaded();
 	ensureProposalRolesLoaded();
@@ -1825,7 +1955,7 @@ function goalPreviewPanel() {
 		// Snapshot form state up-front so a retry after createGoal() rejection
 		// reads the latest values (the user may have edited the workflow id /
 		// title between attempts).
-		const sessionId = activeSessionId();
+		const sessionId = worktreeOwnerSessionId;
 		const projectId = state.previewProjectId || undefined;
 		const inlineRolesField = Object.keys(_proposalInlineRoles).length > 0
 			? _proposalInlineRoles as Record<string, unknown>
@@ -1862,23 +1992,28 @@ function goalPreviewPanel() {
 		let goal;
 		try {
 			const submitCwd = isHeadquartersProject(projectId) && !state.previewCwdEdited ? "" : state.previewCwd.trim();
-			goal = await createGoal(trimmedTitle, submitCwd, {
+			const commonFields = {
 				spec: state.previewSpec,
 				workflowId,
 				workflow: inlineWorkflowField,
 				inlineRoles: inlineRolesField,
-				reattemptOf: reattemptGoalId || undefined,
-				sandboxed,
-				projectId,
 				enabledOptionalSteps,
-				autoStartTeam,
 				parentGoalId: parentGoalIdField,
 				subgoalsAllowed: subgoalSubmission.subgoalsAllowed,
 				maxNestingDepth: subgoalSubmission.maxNestingDepth,
 				divergencePolicy: divergencePolicyField,
 				maxConcurrentChildren: maxConcurrentChildrenField,
 				metadata: metadataRowsToObject(state.previewMetadataRows),
-			});
+			};
+			goal = worktreeMode === "current-session" && worktreeOwnerSessionId
+				? await acceptGoalProposalInCurrentSession(worktreeOwnerSessionId, trimmedTitle, commonFields)
+				: await createGoal(trimmedTitle, submitCwd, {
+					...commonFields,
+					reattemptOf: reattemptGoalId || undefined,
+					sandboxed,
+					projectId,
+					autoStartTeam,
+				});
 		} catch (err) {
 			const { message, code, stack } = errorDetails(err);
 			showConnectionError("Failed to create goal", message, { code, stack });
@@ -1972,6 +2107,9 @@ function goalPreviewPanel() {
 				enabledOptionalSteps: _assistantEnabledOptionalSteps,
 				crossProjectBanner: crossProjectBanner("goal", state.activeProposals.goal?.sessionId ?? activeSessionId()),
 				linkedProjectId: state.previewProjectId || undefined,
+				worktreeMode,
+				worktreeModeProjection,
+				onWorktreeModeChange: worktreeOwnerSessionId ? (mode) => { void persistGoalWorktreeMode(worktreeOwnerSessionId, mode); } : undefined,
 				workflowState: workflowStateFor(state.previewProjectId || undefined),
 				workflowErrorMessage,
 				workflowValidationFailed: !!workflowValidationError,
@@ -3950,6 +4088,7 @@ function projectLegacyToComponents(fields: Record<string, unknown>): Record<stri
 
 type GoalProposalFormSnapshot = {
 	title: string; spec: string; cwd?: string; workflow?: string; options?: string;
+	worktreeMode?: GoalWorktreeMode;
 	parentGoalId?: string; inlineWorkflow?: Workflow; inlineRoles?: Record<string, RoleData>;
 	subgoalsAllowed?: boolean; maxNestingDepth?: number;
 	divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number;
@@ -3964,7 +4103,7 @@ function activeGoalProposalFormSnapshot(): GoalProposalFormSnapshot | undefined 
 }
 
 function goalProposalFormIdentityKey(proposal: GoalProposalFormSnapshot, workflowValidationKey: string): string {
-	return `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}|${proposal.parentGoalId || ""}|${proposal.subgoalsAllowed ?? ""}|${proposal.maxNestingDepth ?? ""}|${proposal.divergencePolicy ?? ""}|${proposal.maxConcurrentChildren ?? ""}|${proposal.metadata ? JSON.stringify(proposal.metadata) : ""}|${workflowValidationKey}`;
+	return `${proposal.title}|${proposal.spec}|${proposal.cwd || ""}|${proposal.workflow || ""}|${proposal.options || ""}|${proposal.worktreeMode || ""}|${proposal.parentGoalId || ""}|${proposal.subgoalsAllowed ?? ""}|${proposal.maxNestingDepth ?? ""}|${proposal.divergencePolicy ?? ""}|${proposal.maxConcurrentChildren ?? ""}|${proposal.metadata ? JSON.stringify(proposal.metadata) : ""}|${workflowValidationKey}`;
 }
 
 function activeGoalProposalFormIdentityKey(): string | null {
@@ -4074,6 +4213,10 @@ function goalProposalPanel() {
 	}
 	useGoalProposalTabsContext(goalProposalTabsContextKey("proposal"));
 	syncProposalFormState();
+	const worktreeOwnerSessionId = goalProposalOwnerSessionId();
+	ensureGoalWorktreeModeProjection(worktreeOwnerSessionId);
+	const worktreeMode = goalProposalWorktreeMode();
+	const worktreeModeProjection = worktreeOwnerSessionId ? state.goalWorktreeModeBySession[worktreeOwnerSessionId] : undefined;
 	ensureWorkflowsLoaded(state.previewProjectId || undefined);
 	ensureSandboxStatusLoaded();
 	ensureProposalRolesLoaded();
@@ -4161,22 +4304,27 @@ function goalProposalPanel() {
 				const inlineRolesField = Object.keys(_proposalInlineRoles).length > 0
 					? _proposalInlineRoles as Record<string, unknown>
 					: undefined;
-				goal = await createGoal(trimmedTitle, _proposalCwd.trim(), {
+				const commonFields = {
 					spec: _proposalSpec,
 					workflowId: inlineWorkflowField ? undefined : workflowId,
 					workflow: inlineWorkflowField,
 					inlineRoles: inlineRolesField,
-					sandboxed,
-					projectId,
 					enabledOptionalSteps,
-					autoStartTeam,
 					parentGoalId: parentGoalIdField,
 					subgoalsAllowed: subgoalsAllowedField,
 					maxNestingDepth: maxNestingDepthField,
 					divergencePolicy: divergencePolicyField,
 					maxConcurrentChildren: maxConcurrentChildrenField,
 					metadata: metadataRowsToObject(_proposalMetadataRows),
-				});
+				};
+				goal = worktreeMode === "current-session" && worktreeOwnerSessionId
+					? await acceptGoalProposalInCurrentSession(worktreeOwnerSessionId, trimmedTitle, commonFields)
+					: await createGoal(trimmedTitle, _proposalCwd.trim(), {
+						...commonFields,
+						sandboxed,
+						projectId,
+						autoStartTeam,
+					});
 			} catch (err) {
 				const { message, code, stack } = errorDetails(err);
 				showConnectionError("Failed to create goal", message, { code, stack });
@@ -4184,7 +4332,7 @@ function goalProposalPanel() {
 			}
 			if (!goal) return;
 
-			const proposalSessionId = state.activeProposals.goal?.sessionId ?? activeSessionId();
+			const proposalSessionId = worktreeOwnerSessionId;
 
 			// --- Success: clear the proposal and navigate. ---
 			if (proposalSessionId) clearProposalAnnotations(proposalSessionId, "goal");
@@ -4203,7 +4351,9 @@ function goalProposalPanel() {
 			_proposalMetadataRows = [];
 			resetProposalTabsState();
 			await closeCurrentProposalPanel("goal", proposalSessionId);
-			if (proposalSessionId) void deleteProposalFile(proposalSessionId, "goal");
+			// Current-session acceptance owns its atomic draft clear on the server;
+			// the ordinary path keeps the existing client DELETE unchanged.
+			if (proposalSessionId && worktreeMode === "new-worktree") void deleteProposalFile(proposalSessionId, "goal");
 			setHashRoute("goal-dashboard", goal.id, true);
 		} finally {
 			_proposalSaving = false;
@@ -4270,6 +4420,9 @@ function goalProposalPanel() {
 		enabledOptionalSteps: _proposalEnabledOptionalSteps,
 		crossProjectBanner: crossProjectBanner("goal", state.activeProposals.goal?.sessionId ?? activeSessionId()),
 		linkedProjectId: state.previewProjectId || undefined,
+		worktreeMode,
+		worktreeModeProjection,
+		onWorktreeModeChange: worktreeOwnerSessionId ? (mode) => { void persistGoalWorktreeMode(worktreeOwnerSessionId, mode); } : undefined,
 		workflowState: workflowStateFor(state.previewProjectId || undefined),
 		workflowErrorMessage,
 		workflowValidationFailed: !!workflowValidationError,

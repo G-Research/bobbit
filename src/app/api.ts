@@ -4,6 +4,8 @@ import {
 	setProjectsIfChanged,
 	type GatewaySession,
 	type Goal,
+	type GoalWorktreeMode,
+	type GoalWorktreeModeProjection,
 	type Project,
 	type RemotePrStatus,
 	type RemoteStateError,
@@ -2008,6 +2010,117 @@ export async function fetchGoalGitStatus(
 // GOAL API
 // ============================================================================
 
+export interface CurrentSessionGoalAcceptOptions {
+	spec?: string;
+	workflowId?: string;
+	enabledOptionalSteps?: string[];
+	workflow?: unknown;
+	inlineRoles?: Record<string, unknown>;
+	subgoalsAllowed?: boolean;
+	maxNestingDepth?: number;
+	divergencePolicy?: "strict" | "balanced" | "autonomous";
+	maxConcurrentChildren?: number;
+	parentGoalId?: string;
+	metadata?: Record<string, unknown>;
+}
+
+async function finishGoalCreate(goal: Goal): Promise<Goal> {
+	await refreshSessions();
+	const goalsById = new Map(state.goals.map(g => [g.id, g]));
+	let cursor: Goal | undefined = goalsById.get(goal.id) ?? goal;
+	const seenGoalIds = new Set<string>();
+	while (cursor && !seenGoalIds.has(cursor.id)) {
+		seenGoalIds.add(cursor.id);
+		expandSidebarTreeNode({ kind: "goal", goalId: cursor.id }, { explicit: false });
+		cursor = cursor.parentGoalId ? goalsById.get(cursor.parentGoalId) : undefined;
+	}
+	return goal;
+}
+
+/** Read the durable mode plus freshly recomputed promotion eligibility for the
+ * proposal-owning session. Coordinate fields are display-only. */
+export async function fetchGoalWorktreeMode(sessionId: string): Promise<GoalWorktreeModeProjection> {
+	const res = await gatewayFetch(`/api/sessions/${encodeURIComponent(sessionId)}/proposal/goal/worktree-mode`);
+	if (!res.ok) throw await errorFromResponse(res, `Failed to load worktree mode: ${res.status}`);
+	const body = await res.json() as any;
+	const eligibility = body?.eligibility && typeof body.eligibility === "object" ? body.eligibility : body;
+	const coordinates = eligibility?.coordinates && typeof eligibility.coordinates === "object"
+		? eligibility.coordinates
+		: body?.coordinates && typeof body.coordinates === "object" ? body.coordinates
+			: eligibility?.workspace && typeof eligibility.workspace === "object" ? eligibility.workspace
+				: body?.workspace && typeof body.workspace === "object" ? body.workspace : eligibility;
+	const rawMode = body?.mode ?? eligibility?.mode;
+	const componentCount = Number.isFinite(coordinates?.componentCount)
+		? Number(coordinates.componentCount)
+		: Array.isArray(coordinates?.components) ? coordinates.components.length
+			: coordinates?.repoWorktrees && typeof coordinates.repoWorktrees === "object" ? Object.keys(coordinates.repoWorktrees).length : undefined;
+	return {
+		mode: rawMode === "current-session" ? "current-session" : "new-worktree",
+		eligible: eligibility?.eligible === true,
+		...(typeof eligibility?.reason === "string" && eligibility.reason ? { reason: eligibility.reason } : {}),
+		...(typeof coordinates?.branch === "string" && coordinates.branch ? { branch: coordinates.branch } : {}),
+		...(typeof coordinates?.worktreePath === "string" && coordinates.worktreePath ? { worktreePath: coordinates.worktreePath } : {}),
+		...(componentCount !== undefined ? { componentCount } : {}),
+		...(typeof coordinates?.sandboxed === "boolean" ? { sandboxed: coordinates.sandboxed } : {}),
+	};
+}
+
+/** Persist only the human-owned mode. The server derives all promotion
+ * authority from the proposal owner and broadcasts the rewritten draft. */
+export async function updateGoalWorktreeMode(sessionId: string, mode: GoalWorktreeMode): Promise<GoalWorktreeModeProjection> {
+	const res = await gatewayFetch(`/api/sessions/${encodeURIComponent(sessionId)}/proposal/goal/worktree-mode`, {
+		method: "PUT",
+		body: JSON.stringify({ mode }),
+	});
+	if (!res.ok) throw await errorFromResponse(res, `Failed to update worktree mode: ${res.status}`);
+	const body = await res.json().catch(() => ({})) as any;
+	const eligibility = body?.eligibility && typeof body.eligibility === "object" ? body.eligibility : body;
+	const coordinates = eligibility?.coordinates && typeof eligibility.coordinates === "object" ? eligibility.coordinates : eligibility;
+	return {
+		mode: body?.mode === "current-session" ? "current-session" : mode,
+		eligible: eligibility?.eligible === true,
+		...(typeof eligibility?.reason === "string" && eligibility.reason ? { reason: eligibility.reason } : {}),
+		...(typeof coordinates?.branch === "string" && coordinates.branch ? { branch: coordinates.branch } : {}),
+		...(typeof coordinates?.worktreePath === "string" && coordinates.worktreePath ? { worktreePath: coordinates.worktreePath } : {}),
+		...(Number.isFinite(coordinates?.componentCount) ? { componentCount: Number(coordinates.componentCount) } : {}),
+		...(typeof coordinates?.sandboxed === "boolean" ? { sandboxed: coordinates.sandboxed } : {}),
+	};
+}
+
+/** Accept a current-session proposal without sending any session, project,
+ * branch, worktree, repository, sandbox, or cwd authority. */
+export async function acceptGoalProposalInCurrentSession(
+	sessionId: string,
+	title: string,
+	opts: CurrentSessionGoalAcceptOptions = {},
+): Promise<Goal | null> {
+	try {
+		const body: Record<string, unknown> = { title, spec: opts.spec ?? "" };
+		if (opts.workflowId) body.workflowId = opts.workflowId;
+		if (opts.enabledOptionalSteps?.length) body.enabledOptionalSteps = opts.enabledOptionalSteps;
+		if (opts.workflow !== undefined) body.workflow = opts.workflow;
+		if (opts.inlineRoles && Object.keys(opts.inlineRoles).length > 0) body.inlineRoles = opts.inlineRoles;
+		if (opts.subgoalsAllowed !== undefined) body.subgoalsAllowed = opts.subgoalsAllowed;
+		if (opts.maxNestingDepth !== undefined) body.maxNestingDepth = opts.maxNestingDepth;
+		if (opts.divergencePolicy !== undefined) body.divergencePolicy = opts.divergencePolicy;
+		if (opts.maxConcurrentChildren !== undefined) body.maxConcurrentChildren = opts.maxConcurrentChildren;
+		if (opts.parentGoalId) body.parentGoalId = opts.parentGoalId;
+		if (opts.metadata && Object.keys(opts.metadata).length > 0) body.metadata = opts.metadata;
+		const res = await gatewayFetch(`/api/sessions/${encodeURIComponent(sessionId)}/proposal/goal/accept`, {
+			method: "POST",
+			body: JSON.stringify(body),
+		});
+		if (!res.ok) throw await errorFromResponse(res, `Failed to promote session: ${res.status}`);
+		const responseBody = await res.json() as Goal | { goal: Goal };
+		const goal = "goal" in responseBody ? responseBody.goal : responseBody;
+		return await finishGoalCreate(goal);
+	} catch (err) {
+		const { message, code, stack } = errorDetails(err);
+		showConnectionError("Failed to promote session", message, { code, stack });
+		return null;
+	}
+}
+
 export async function createGoal(title: string, cwd: string, opts?: { spec?: string; workflowId?: string; reattemptOf?: string; sandboxed?: boolean; projectId?: string; enabledOptionalSteps?: string[]; autoStartTeam?: boolean; workflow?: unknown; inlineRoles?: Record<string, unknown>; subgoalsAllowed?: boolean; maxNestingDepth?: number; divergencePolicy?: "strict" | "balanced" | "autonomous"; maxConcurrentChildren?: number; parentGoalId?: string; metadata?: Record<string, unknown> }): Promise<Goal | null> {
 	const { spec = "", workflowId, reattemptOf, sandboxed, projectId, enabledOptionalSteps, autoStartTeam, workflow, inlineRoles, subgoalsAllowed, maxNestingDepth, divergencePolicy, maxConcurrentChildren, parentGoalId, metadata } = opts ?? {};
 	try {
@@ -2041,16 +2154,7 @@ export async function createGoal(title: string, cwd: string, opts?: { spec?: str
 		});
 		if (!res.ok) throw await errorFromResponse(res, `Failed to create goal: ${res.status}`);
 		const goal = await res.json() as Goal;
-		await refreshSessions();
-		const goalsById = new Map(state.goals.map(g => [g.id, g]));
-		let cursor: Goal | undefined = goalsById.get(goal.id) ?? goal;
-		const seenGoalIds = new Set<string>();
-		while (cursor && !seenGoalIds.has(cursor.id)) {
-			seenGoalIds.add(cursor.id);
-			expandSidebarTreeNode({ kind: "goal", goalId: cursor.id }, { explicit: false });
-			cursor = cursor.parentGoalId ? goalsById.get(cursor.parentGoalId) : undefined;
-		}
-		return goal;
+		return await finishGoalCreate(goal);
 	} catch (err) {
 		const { message, code, stack } = errorDetails(err);
 		showConnectionError("Failed to create goal", message, { code, stack });

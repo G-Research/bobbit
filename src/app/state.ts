@@ -69,6 +69,22 @@ export interface Project {
   position?: number;
 }
 
+export type GoalWorktreeMode = "new-worktree" | "current-session";
+
+/** Server-authoritative eligibility and coordinates for promoting a proposal's
+ * owner session in place. This is a UI projection only; the proposal draft's
+ * `worktreeMode` field remains the durable selection. */
+export interface GoalWorktreeModeProjection {
+	mode: GoalWorktreeMode;
+	eligible: boolean;
+	reason?: string;
+	branch?: string;
+	worktreePath?: string;
+	componentCount?: number;
+	sandboxed?: boolean;
+	loading?: boolean;
+}
+
 export interface GatewaySession {
 	id: string;
 	title: string;
@@ -450,6 +466,9 @@ export const state = {
 			rev: number;
 		}
 	>>,
+	/** Recomputed promotion eligibility keyed by proposal owner session. Never
+	 * used as draft durability or as authority for submitted coordinates. */
+	goalWorktreeModeBySession: {} as Record<string, GoalWorktreeModeProjection | undefined>,
 	activeProjectId: null as string | null,
 	/** Per-session flag set when the user accepts a registered-mode project
 	 *  proposal. The proposal panel uses this to render a "Changes Saved" view
