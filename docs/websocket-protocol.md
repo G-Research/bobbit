@@ -50,7 +50,7 @@ Bobbit has separate limits for the socket transport, the chat composer, and Exte
 Routing rules:
 
 - The first unauthenticated frame is only expected to authenticate. Oversized unauthenticated frames are rejected before command routing to avoid parsing arbitrary large unauthenticated input.
-- After authentication, non-extension session commands such as `prompt`, `steer`, `follow_up`, queue edits, `ext_session_write_permit`, and `ext_session_post` are governed by the WebSocket transport limit plus their feature-specific validation. They are **not** rejected solely because the serialized frame is larger than the 1 MiB extension-channel envelope cap.
+- After authentication, non-extension session commands such as `prompt`, `steer`, queue edits, `ext_session_write_permit`, and `ext_session_post` are governed by the WebSocket transport limit plus their feature-specific validation. They are **not** rejected solely because the serialized frame is larger than the 1 MiB extension-channel envelope cap.
 - Prompt frames sent from the browser composer should stay below `MessageEditor.MAX_SERIALIZED_SEND_BYTES`, which is deliberately lower than `WS_MAX_PAYLOAD_BYTES`. This ordering makes the composer error the common failure mode for oversized attachment sends, not a socket close.
 - Extension-channel operations (`ext_channel_open_grant`, `ext_channel_open`, `ext_channel_attach`, `ext_channel_list`, `ext_channel_send`, `ext_channel_close`, `ext_channel_detach`) remain capped by `MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES`. If one is too large, the server returns a structured size error and leaves the socket usable. With a `requestId`, callers receive an `ext_channel_result` or `ext_channel_open_grant_result` failure; without one, the fallback is a normal `error` frame with code `FRAME_TOO_LARGE`.
 - The 1 MiB cap is only an envelope guard. It does not replace per-channel quotas such as declared frame and inbound-byte limits, pack identity checks, open grants, attachment checks, or session-write permits.
@@ -68,7 +68,7 @@ Overflow diagnostics include `outerType`, `innerType` for `{ type: "event" }` fr
 
 ## Cumulative assistant stream compaction
 
-Pi emits cumulative assistant `message_update` events: every text, thinking, or tool-argument fragment repeats the assistant message built so far. Sending and retaining each growing copy made WebSocket serialization, wire traffic, and replay memory grow with transcript length. Bobbit therefore compacts only the live projection for clients that explicitly negotiate it. The durable transcript and replay source remain cumulative and authoritative so an optimization failure cannot corrupt history.
+Pi `0.84.1` JSON/RPC emits delta-only assistant `message_update` frames. `RpcBridge` first reconstructs Bobbit's cumulative internal event from the preceding assistant start, while preserving `message_end.message` as terminal authority. Repeating those growing cumulative copies to every browser would make WebSocket serialization and wire traffic grow with transcript length, so Bobbit compacts only the live browser projection for clients that negotiate it. Replay and snapshots remain cumulative and authoritative.
 
 ### Negotiation and compatibility
 
@@ -82,7 +82,7 @@ An app client requests version 1 in its authentication frame:
 }
 ```
 
-The gateway echoes `capabilities.assistantStreamDelta: 1` in `auth_ok` only when it accepts that version. A negotiated session socket receives compact live updates for supported assistant text, thinking, and progressive tool-call JSON events. The compact event carries `assistantStreamDelta: 1` plus the semantic fragment and any baseline or block checkpoint required to reconstruct Pi's original cumulative shape exactly.
+The gateway echoes `capabilities.assistantStreamDelta: 1` in `auth_ok` only when it accepts that version. A negotiated session socket receives compact live updates for supported assistant text, thinking, and progressive tool-call JSON events. The compact event carries `assistantStreamDelta: 1` plus the semantic fragment and any baseline or block checkpoint required to reconstruct Bobbit's cumulative internal shape exactly.
 
 Compatibility is fail-safe:
 
@@ -113,7 +113,7 @@ A replaceable assistant update is not allowed to make a slow recipient degrade h
 
 This cutover is narrower than the general overflow guard documented above. The general guard still warns at 1 MiB and protects non-replaceable traffic with its 4 MiB overflow threshold; stream cutover avoids growing a replaceable cumulative-update queue to that point.
 
-After reconnect authentication, queued user-intent frames are flushed before resume or snapshot traffic. The outbox is FIFO and removes an entry only after the replacement socket accepts its send. If the socket closes or a send throws during the flush, the current entry and unsent suffix stay in order for the next reconnect, preventing a prompt or steer from disappearing during a race.
+After reconnect authentication, IndexedDB-backed local intent is resent before resume or snapshot traffic. The FIFO resend keeps the original `intentId`; socket acceptance records only the connection epoch and does not remove the occurrence. Server admission is idempotent, its authoritative projection replaces local ownership by ID, and correlated transcript surfacing or explicit cancellation is the settlement boundary.
 
 ### Diagnostics and lifecycle
 
@@ -231,11 +231,11 @@ lifecycle, validation, size, or replay rules.
 | `subscribe_goal` | `goalId` | `/ws/viewer` only: add a goal subscription for goal-scoped broadcasts. |
 | `unsubscribe_goal` | `goalId` | `/ws/viewer` only: remove one goal subscription. |
 | `clear_goal_subscriptions` | — | `/ws/viewer` only: remove all goal subscriptions. |
-| `prompt` | `text`, `images?`, `attachments?` | Send a user prompt |
-| `steer` | `text` | Interrupt the agent mid-turn with guidance |
-| `follow_up` | `text` | Send a follow-up message |
-| `steer_queued` | `messageId` | Promote a queued message to steered (priority) |
-| `remove_queued` | `messageId` | Remove a message from the queue |
+| `prompt` | `text`, `intentId?`, `images?`, `attachments?` | Admit one prompt occurrence; replay by ID is idempotent. |
+| `steer` | `text`, `intentId?` | Admit one steer occurrence; it may target the current or next turn. |
+| `retry_intent` | `intentId` | Retry one definitely failed occurrence without changing its stable ID. |
+| `steer_queued` | `messageId` | Promote an accepted queued prompt to steer intent. |
+| `remove_queued` | `messageId` | Durably dismiss one queued or uncertain occurrence. |
 | `reorder_queue` | `messageIds` | Reorder the prompt queue to match the given ID order |
 | `abort` | — | Abort the current agent turn |
 | `retry` | — | Retry the last failed turn |
@@ -289,14 +289,20 @@ the only picker frame is:
 The optional field preserves compatibility with older clients. For Pi, when it
 is absent the gateway reuses the previous durable effective level when available,
 otherwise the current authoritative level, and clamps it against the exact new
-catalog model. `max` is selectable only when that model's `thinkingLevelMap`
-explicitly contains a non-null `max` entry. Interactive Claude Agent SDK
-requests instead require a model and level advertised by the initialized active
-Query. An unavailable model rejects before SDK mutation. An unavailable level
-in a combined request makes no requested thinking mutation or durable requested
-tuple, although model application and read-back can already have occurred before
-recovery. See [Per-model thinking-level capabilities](thinking-levels.md) for Pi
-map semantics and [Live model and thinking controls](claude-agent-sdk-sessions.md#live-model-and-thinking-controls)
+catalog model. It does not infer `max`: that level is selectable only when the
+model's `thinkingLevelMap` explicitly contains a non-null `max` entry. Pi `0.84.1`'s
+direct Anthropic and supported Amazon Bedrock Opus 5 rows publish
+`{ xhigh: "xhigh", max: "max" }`, so both levels—and the ordinary `off` through
+`high` levels retained by the map rules—are available for those exact rows. Opus
+4.8 publishes `xhigh` only. `max` is unavailable without an explicit map entry;
+`xhigh` may additionally come from the narrow map-less family fallbacks documented
+in the thinking-level guide. Interactive Claude Agent SDK requests instead require a
+model and level advertised by the initialized active Query. An unavailable model
+rejects before SDK mutation. An unavailable level in a combined request makes no
+requested thinking mutation or durable requested tuple, although model application
+and read-back can already have occurred before recovery. See
+[Per-model thinking-level capabilities](thinking-levels.md) for Pi map semantics and
+[Live model and thinking controls](claude-agent-sdk-sessions.md#live-model-and-thinking-controls)
 for the SDK capability contract.
 
 On success, the gateway:
@@ -421,7 +427,7 @@ for the SDK contract.
 | `auth_failed` | — | Authentication failed |
 | `state` | `data` | Current agent state snapshot. `data.condition` may be `{ code: "MODEL_SELECTION_REQUIRED", provider: string, modelId: string }`; partial snapshots that omit it do not clear it, and the server sends explicit `condition: null` only after verified recovery. |
 | `messages` | `data` | Full message history array |
-| `event` | `data`, `seq?`, `ts?` | Streaming agent event (message_start, content_delta, tool calls, etc.). `seq` is a monotonic per-session counter starting at 1; `ts` is wall-clock ms at broadcast time. Both are optional for backward compatibility — old clients that ignore them still function correctly. |
+| `event` | `data`, `seq?`, `ts?` | Ordered agent event. Correlated user events carry delivery identity; `assistant_stream_invalidated` removes a provisional recoverable-length tail by `assistantStreamId`. `seq` is monotonic per session and `ts` is wall-clock ms; both remain optional for legacy interoperability. |
 | `resume_gap` | `lastSeq` | Server's reply when `resume` cannot safely replay the missed tail. This can mean the requested `fromSeq` is outside the retained EventBuffer window, the replay would exceed the resume byte budget, or the socket is already backed up. Client must fall back to `get_messages` for a fresh snapshot and reset its seq counter to `lastSeq`. |
 | `session_status` | `status`, `statusVersion`, `runtime?` | Session status change (`idle`, `streaming`, `aborting`, etc.). See [Runtime identity on status frames](#runtime-identity-on-status-frames). |
 | `session_title` | `sessionId`, `title` | Title changed |
@@ -431,10 +437,12 @@ for the SDK contract.
 | `staff_changed` | `reason`, `staffId`, `projectId`, `previousProjectId?`, `sessionId?` | A staff record was created, updated, reassigned, or deleted through REST/tool paths. Clients should reload staff and orphaned-staff state before refreshing sessions so permanent staff-agent sessions are classified under Staff instead of regular Sessions. |
 | `client_joined` | `clientId` | Another client connected |
 | `client_left` | `clientId` | A client disconnected |
-| `error` | `message`, `code` | Error message |
+| `error` | `message`, `code`, `intentId?`, `retryable?` | Error message. Correlated pre-admission errors may update only that local occurrence; uncorrelated errors settle none. |
 | `pong` | — | Keepalive response |
-| `cost_update` | `sessionId`, `goalId?`, `taskId?`, `cost` | Authoritative, cumulative persisted `SessionUsageSnapshot`, identical to `state.serverCost` (not a delta). Clients replace their snapshot and never sum visible transcript rows. Sent after Pi completed-assistant/completed-compaction accounting, after an SDK root result is durably accepted, and during hydration when usage exists. See [Session usage and cost — Snapshot contract](session-cost.md#snapshot-contract). |
-| `queue_update` | `sessionId`, `queue` | Prompt queue changed |
+| `cost_update` | `sessionId`, `goalId?`, `taskId?`, `cost` | Authoritative, cumulative persisted `SessionUsageSnapshot`, identical to `state.serverCost` (not a delta). Clients replace their snapshot and never sum visible transcript rows. Sent after Pi completed-assistant/completed-compaction accounting, after an SDK root result is durably accepted, and during hydration when usage exists. Current servers include `cost.cacheHitRate`; see [Session usage and cost — Snapshot contract](session-cost.md#snapshot-contract). |
+| `queue_update` | `sessionId`, `queue` | Full server delivery-outbox projection, including accepted and in-flight occurrences. |
+| `delivery_outbox` | `sessionId`, `outbox` | Attach-time server-authoritative delivery projection; current clients merge it by occurrence ID. |
+| `intent_update` | `sessionId`, `intent`, `settlement?` | One exact occurrence projection or `surfaced` / `failed` / `cancelled` disposition. |
 | `side_panel_workspace` | `sessionId`, `workspace` | The server-authoritative side-panel workspace for the session changed. Clients replace their local mirror only when `workspace.revision` is newer; see [side-panel-workspace.md](side-panel-workspace.md). |
 | `task_changed` | `task` | A task was created, updated, or deleted |
 | `tasks_list` | `tasks` | Full task list for a goal |

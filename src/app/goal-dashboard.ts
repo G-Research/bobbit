@@ -12,6 +12,7 @@ import { runGitStatusRefresh, abortableSleep } from "./git-status-refresh.js";
 import { dispatchVerificationEvent } from "./verification-event-bus.js";
 import { GATE_STATUS_CLIENT_EVENT, shouldRefreshActiveVerificationsForEvent, shouldRefreshGateDetailsForEvent, shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
 import { remoteStateRequestKey, remoteStateRequestOrder } from "./remote-state-request-order.js";
+import { beginSchedulerRecoverySnapshot, consumeSchedulerRecovery, fenceStaleSchedulerRecovery } from "./scheduler-recovery-fence.js";
 import { getRouteFromHash, setGoalDashboardRoute, setHashRoute, type DashboardTabId } from "./routing.js";
 import { createAndConnectSession, connectToSession, startReattempt } from "./session-manager.js";
 import { showGoalDialog } from "./dialogs.js";
@@ -21,7 +22,7 @@ import { shouldShowPlanTab, shouldShowChildrenTab } from "./goal-dashboard-tab-v
 import { nestingDepthOf, effectiveMaxNestingDepthOf } from "./subgoal-eligibility.js";
 import { isLegacyUnattributableTreeCostRow, LEGACY_TREE_COST_ROW_TOOLTIP } from "./tree-cost-legacy.js";
 import { isSubgoalsEnabled, getSystemMaxNestingDepth } from "./subgoals-flag.js";
-import { renderPlanTab, computePlanStepsForGoal } from "./goal-dashboard-plan-tab.js";
+import { renderPlanTab, computePlanStepsForGoal, clearSchedulerRecoveryForGoal, retryPlanNodeSchedulerStart } from "./goal-dashboard-plan-tab.js";
 import { renderChildrenTab } from "./goal-dashboard-children-tab.js";
 import { ensureGitStatusWidget } from "./lazy-widgets.js";
 import { ensureMarkdownBlock } from "../ui/lazy/markdown-block.js";
@@ -112,6 +113,7 @@ function syncCurrentGoalLifecycleFromState(): void {
 	const archivedAt = archived ? (stateGoal.archivedAt ?? currentGoal.archivedAt ?? Date.now()) : undefined;
 	const paused = stateGoal.paused === true ? true : undefined;
 	const setup = getGoalSetupUiState(stateGoal);
+	const schedulerRecovery = stateGoal.schedulerRecovery;
 	const updatedAt = stateGoal.updatedAt ?? currentGoal.updatedAt;
 
 	if (
@@ -120,6 +122,7 @@ function syncCurrentGoalLifecycleFromState(): void {
 		&& currentGoal.paused === paused
 		&& currentGoal.setupStatus === setup.status
 		&& currentGoal.setupError === setup.error
+		&& currentGoal.schedulerRecovery === schedulerRecovery
 		&& currentGoal.state === stateGoal.state
 		&& currentGoal.updatedAt === updatedAt
 	) return;
@@ -131,6 +134,7 @@ function syncCurrentGoalLifecycleFromState(): void {
 		paused,
 		setupStatus: setup.status,
 		setupError: setup.error,
+		schedulerRecovery,
 		state: stateGoal.state,
 		updatedAt,
 	};
@@ -460,12 +464,18 @@ async function fetchDashboardDescendants(goalId: string): Promise<void> {
 	if (dashboardDescendantsInFlight) return;
 	dashboardDescendantsInFlight = true;
 	dashboardDescendantsLastFetchAt = Date.now();
+	// Capture before awaiting: a retry that succeeds while this request is in
+	// flight consumes the older snapshot's recovery record only.
+	const recoverySnapshotGeneration = beginSchedulerRecoverySnapshot();
 	try {
 		const res = await gatewayFetch(`/api/goals/${goalId}/descendants`);
 		if (!res.ok) return;
 		const data = await res.json() as { goals?: Goal[] };
 		if (currentGoalId === goalId) {
-			dashboardDescendants = Array.isArray(data?.goals) ? data.goals : [];
+			dashboardDescendants = fenceStaleSchedulerRecovery(
+				Array.isArray(data?.goals) ? data.goals : [],
+				recoverySnapshotGeneration,
+			).goals;
 			renderApp();
 		}
 	} catch {
@@ -576,8 +586,8 @@ function dashboardGoalPool(): Goal[] {
 	for (const g of state.goals) {
 		seen.add(g.id);
 		const enriched = enrichedById.get(g.id);
-		if (enriched && (enriched.gateStatus !== undefined || enriched.mergeConflict !== undefined)) {
-			out.push({ ...g, gateStatus: enriched.gateStatus, mergeConflict: enriched.mergeConflict });
+		if (enriched && (enriched.gateStatus !== undefined || enriched.mergeConflict !== undefined || enriched.schedulerRecovery !== undefined)) {
+			out.push({ ...g, gateStatus: enriched.gateStatus, mergeConflict: enriched.mergeConflict, schedulerRecovery: enriched.schedulerRecovery });
 		} else {
 			out.push(g);
 		}
@@ -586,6 +596,22 @@ function dashboardGoalPool(): Goal[] {
 		if (!seen.has(g.id)) { seen.add(g.id); out.push(g); }
 	}
 	return out;
+}
+
+/**
+ * The Plan pool merges the live goal store with a descendants cache. Consume a
+ * successful retry from both sources so descendant enrichment cannot restore
+ * the already-cleared recovery pill before the next fetch.
+ */
+function reconcilePlanSchedulerRecoveryRetry(goalId: string, consumedRecovery: NonNullable<Goal["schedulerRecovery"]>): void {
+	// The root badge and Plan-node actions share this success callback.
+	consumeSchedulerRecovery(goalId, consumedRecovery);
+	state.goals = clearSchedulerRecoveryForGoal(state.goals, goalId, consumedRecovery);
+	dashboardDescendants = clearSchedulerRecoveryForGoal(dashboardDescendants, goalId, consumedRecovery);
+	if (currentGoal?.id === goalId) {
+		currentGoal = clearSchedulerRecoveryForGoal([currentGoal], goalId, consumedRecovery)[0];
+	}
+	renderApp();
 }
 
 async function fetchTreeCost(goalId: string): Promise<void> {
@@ -2091,6 +2117,19 @@ function renderNavBar(goal: Goal): TemplateResult {
 				</button>
 				<span class="nav-title">${goal.title}</span>
 				${goal.workflow ? html`<span class="nav-workflow-badge" title="Uses workflow: ${goal.workflow.name}">${goal.workflow.name}</span>` : nothing}
+				${goal.schedulerRecovery ? (() => {
+					const lifecycleBlocked = goal.paused || goal.state === "blocked" || goal.state === "complete" || goal.state === "shelved";
+					return html`<button
+						data-testid="goal-scheduler-recovery-retry"
+						?disabled=${!goal.schedulerRecovery!.retryable || lifecycleBlocked}
+						title=${lifecycleBlocked ? "Resolve the goal lifecycle (resume, unblock, or reopen) before retrying" : goal.schedulerRecovery!.reason}
+						style="margin-left:8px;font-size:0.75em;padding:2px 8px;border-radius:9999px;background:color-mix(in oklch, var(--warning) 16%, transparent);color:var(--warning);border:0;cursor:pointer;"
+						@click=${async () => {
+							if (!goal.schedulerRecovery?.retryable || lifecycleBlocked) return;
+							await retryPlanNodeSchedulerStart(goal.id, goal.schedulerRecovery, gatewayFetch, reconcilePlanSchedulerRecoveryRetry);
+						}}
+					>Scheduler recovery: ${lifecycleBlocked ? "resolve lifecycle" : "retry"}</button>`;
+				})() : nothing}
 				${(() => {
 					const editedTs = recentSpecEditTs(goal.id);
 					if (editedTs === undefined) return nothing;
@@ -3423,7 +3462,7 @@ export function renderGoalDashboard(): TemplateResult {
 				<div class="tab-panel ${activeTab === "tasks" ? "active" : ""}" data-testid="goal-dashboard-tab-panel" data-tab-id="tasks" data-active=${String(activeTab === "tasks")}>${activeTab === "tasks" ? renderTasksTab() : nothing}</div>
 				<div class="tab-panel ${activeTab === "agents" ? "active" : ""}" data-testid="goal-dashboard-tab-panel" data-tab-id="agents" data-active=${String(activeTab === "agents")}>${activeTab === "agents" ? renderAgentsTab() : nothing}</div>
 				<div class="tab-panel ${activeTab === "commits" ? "active" : ""}" data-testid="goal-dashboard-tab-panel" data-tab-id="commits" data-active=${String(activeTab === "commits")}>${activeTab === "commits" ? renderCommitsTab() : nothing}</div>
-				<div class="tab-panel ${activeTab === "plan" ? "active" : ""}" data-testid="goal-dashboard-tab-panel" data-tab-id="plan" data-active=${String(activeTab === "plan")}>${activeTab === "plan" ? renderPlanTab({ currentGoal: currentGoal!, allGoals: dashboardGoalPool() }) : nothing}</div>
+				<div class="tab-panel ${activeTab === "plan" ? "active" : ""}" data-testid="goal-dashboard-tab-panel" data-tab-id="plan" data-active=${String(activeTab === "plan")}>${activeTab === "plan" ? renderPlanTab({ currentGoal: currentGoal!, allGoals: dashboardGoalPool(), onSchedulerRecoveryRetrySucceeded: reconcilePlanSchedulerRecoveryRetry }) : nothing}</div>
 				<div class="tab-panel ${activeTab === "children" ? "active" : ""}" data-testid="goal-dashboard-tab-panel" data-tab-id="children" data-active=${String(activeTab === "children")}>${activeTab === "children" ? renderChildrenTab({ currentGoal: currentGoal!, allGoals: state.goals, treeCostBreakdown: treeCost?.breakdown ?? null }) : nothing}</div>
 			</div>
 		</div>

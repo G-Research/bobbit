@@ -78,6 +78,7 @@ function extensionContext(signal: AbortSignal, controller: AbortController): Ext
 		cwd: config.cwd,
 		sessionManager: unavailable as ExtensionContext["sessionManager"],
 		modelRegistry: unavailable as ExtensionContext["modelRegistry"],
+		scopedModels: [],
 		model: undefined,
 		isIdle: () => true,
 		isProjectTrusted: () => false,

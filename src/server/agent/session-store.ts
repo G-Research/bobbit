@@ -4,7 +4,12 @@ import path from "node:path";
 import { recordDeletionTombstone, recordDeletionTombstoneAsync } from "./deletion-tombstones.js";
 import { isMessageAuthor, LOCAL_USER_AUTHOR, type MessageAuthor } from "../../shared/message-author.js";
 import { isPromptSource, type PromptSource } from "../../shared/prompt-source.js";
-import type { QueuedMessage } from "../ws/protocol.js";
+import type {
+	DeliveryIntentKind,
+	DeliveryState,
+	DeliveryTargetTurn,
+	QueuedMessage,
+} from "../ws/protocol.js";
 import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
 import type { ThinkingLevel } from "../../shared/thinking-levels.js";
 import { resolveSessionRuntime, type SessionRuntime } from "./session-runtime.js";
@@ -22,36 +27,77 @@ function defaultVerifierAccessory(id: string): string {
 /** Legacy persisted value. Retained only so older session records remain readable. */
 export type WorktreePushPolicy = "local-only" | "publish";
 
-/** A steer accepted for dispatch but not yet echoed into the Pi transcript. */
+export type InFlightAttemptState = Extract<DeliveryState, "dispatching" | "received" | "uncertain">;
+
+/** A user intent handed to Pi and retained until its exact user-message end is durably settled. */
 export interface InFlightSteerRecord {
 	/** Unprefixed durable base model text. The author sidecar proves any per-RPC decoration. */
 	text: string;
-	/** Stable dispatch identity used to correlate the eventual user-role echo. */
+	/** Legacy-compatible sidecar correlation id. Modern dispatches keep it attempt-unique. */
 	promptId: string;
+	/** Stable accepted occurrence identity, shared with QueuedMessage.id and WS projections. */
+	intentId?: string;
+	/** One Pi delivery attempt. It must not be replaced while its outcome is ambiguous. */
+	attemptId?: string;
+	/** Monotonic dispatch evidence used to reject stale attempt events after restore. */
+	dispatchEpoch?: number;
+	state?: InFlightAttemptState;
+	targetTurn?: DeliveryTargetTurn;
+	sequence?: number;
+	/** Original accepted occurrence metadata; required for identity-preserving restore. */
+	kind?: DeliveryIntentKind;
+	createdAt?: number;
+	/** Ambiguous attempts are not retryable until a terminal no-start proof retires them. */
+	retryable?: boolean;
 	source?: PromptSource;
 	author?: MessageAuthor;
+	images?: Array<{ type: "image"; data: string; mimeType: string }>;
+	attachments?: unknown[];
+	suppressTitleGen?: boolean;
 }
 
 /** The persisted boundary accepts legacy string-only steer ledgers. */
 export type PersistedInFlightSteer = string | InFlightSteerRecord;
 
+function validLedgerKey(value: unknown): value is string {
+	return typeof value === "string" && value.length > 0;
+}
+
+function validLedgerInteger(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
 /**
- * Normalize the persisted steer ledger for runtime use. Legacy strings are
- * human-authored because they predate caller provenance and only the browser
- * could create them. Malformed optional metadata is discarded safely.
+ * Normalize persisted dispatch evidence and migrate legacy string/structured
+ * rows. Modern active attempts are unique by intent id. Every historical
+ * row is upgraded to a distinct deterministic uncertain carrier so recovery
+ * never correlates or replays work by its text body.
  */
 export function normalizePersistedInFlightSteers(
 	entries: readonly PersistedInFlightSteer[] | undefined,
 ): InFlightSteerRecord[] | undefined {
 	if (!entries || entries.length === 0) return undefined;
 	const records: InFlightSteerRecord[] = [];
+	const activeIntentIds = new Set<string>();
 	for (let index = 0; index < entries.length; index++) {
 		const entry = entries[index];
 		if (typeof entry === "string") {
 			if (entry.length === 0) continue;
+			const intentId = `legacy-inflight-steer:${index}`;
+			if (activeIntentIds.has(intentId)) continue;
+			activeIntentIds.add(intentId);
 			records.push({
 				text: entry,
-				promptId: `legacy-inflight-steer:${index}`,
+				promptId: intentId,
+				intentId,
+				attemptId: `attempt:legacy-inflight:${intentId}`,
+				dispatchEpoch: index,
+				state: "uncertain",
+				targetTurn: "continuation",
+				sequence: index + 1,
+				kind: "steer",
+				createdAt: index,
+				retryable: false,
 				source: "user",
 				author: { ...LOCAL_USER_AUTHOR },
 			});
@@ -60,17 +106,64 @@ export function normalizePersistedInFlightSteers(
 		if (!entry || typeof entry !== "object" || typeof entry.text !== "string" || entry.text.length === 0) {
 			continue;
 		}
+
+		const promptId = validLedgerKey(entry.promptId)
+			? entry.promptId
+			: `legacy-inflight-steer:${index}`;
+		const completeModernAttempt = validLedgerKey(entry.intentId)
+			&& validLedgerKey(entry.attemptId)
+			&& validLedgerInteger(entry.dispatchEpoch);
+		// Pre-reliable records were accepted by Pi without an occurrence tuple.
+		// Migrate each persisted position into a stable, fail-closed carrier rather
+		// than trying to correlate it by body text. A completed modern tuple keeps
+		// its identity; malformed/old tuples get a deterministic legacy identity.
+		// An existing reliable occurrence identity is authoritative. A second
+		// persisted active record claiming it cannot be safely replayed, settled, or
+		// reminted as distinct work, so retain the first occurrence and drop it.
+		if (validLedgerKey(entry.intentId) && activeIntentIds.has(entry.intentId)) continue;
+		const baseIntentId = completeModernAttempt
+			? entry.intentId!
+			: validLedgerKey(entry.intentId)
+				? entry.intentId
+				: `legacy-inflight-steer:${promptId}`;
+		let intentId = baseIntentId;
+		let duplicate = 1;
+		while (activeIntentIds.has(intentId)) intentId = `${baseIntentId}:${duplicate++}`;
+		activeIntentIds.add(intentId);
+		const modernAttempt = completeModernAttempt && intentId === entry.intentId;
+		const dispatchEpoch = modernAttempt
+			? entry.dispatchEpoch!
+			: validLedgerInteger(entry.dispatchEpoch)
+				? entry.dispatchEpoch
+				: validLedgerInteger(entry.createdAt)
+					? entry.createdAt
+					: index;
 		const record: InFlightSteerRecord = {
 			text: entry.text,
-			promptId: typeof entry.promptId === "string" && entry.promptId.length > 0
-				? entry.promptId
-				: `legacy-inflight-steer:${index}`,
+			promptId,
+			intentId,
+			attemptId: modernAttempt ? entry.attemptId : `attempt:legacy-inflight:${intentId}`,
+			dispatchEpoch,
+			// Historical handoffs cannot be safely retried or treated as echoed.
+			state: modernAttempt && (entry.state === "dispatching" || entry.state === "received" || entry.state === "uncertain")
+				? entry.state
+				: "uncertain",
+			targetTurn: entry.targetTurn === "next-turn" || entry.targetTurn === "continuation"
+				? entry.targetTurn
+				: "continuation",
+			sequence: validLedgerInteger(entry.sequence) ? entry.sequence : index + 1,
+			kind: entry.kind === "prompt" || entry.kind === "steer" ? entry.kind : "steer",
+			createdAt: validLedgerInteger(entry.createdAt) ? entry.createdAt : dispatchEpoch,
+			retryable: modernAttempt && typeof entry.retryable === "boolean" ? entry.retryable : false,
 		};
 		if (isPromptSource(entry.source)) record.source = entry.source;
 		if (isMessageAuthor(entry.author)) {
 			record.author = entry.author;
 			if (record.source === undefined) record.source = entry.author.kind;
 		}
+		if (Array.isArray(entry.images)) record.images = entry.images;
+		if (Array.isArray(entry.attachments)) record.attachments = entry.attachments;
+		if (entry.suppressTitleGen === true) record.suppressTitleGen = true;
 		records.push(record);
 	}
 	return records.length > 0 ? records : undefined;
@@ -311,6 +404,8 @@ export class SessionStore {
 	private persistenceFailureSequence = 0;
 	private lastPersistenceError: unknown = null;
 	private lastPersistenceMetrics: PersistenceMetrics | null = null;
+	/** Legacy delivery ledger rows were upgraded in-memory during load. */
+	private loadedDeliveryLedgerMigration = false;
 
 	/**
 	 * Serialize whole-file publication across store instances in this process.
@@ -325,6 +420,9 @@ export class SessionStore {
 		this.storeDir = stateDir;
 		this.storeFile = path.join(stateDir, "sessions.json");
 		this.load();
+		// Publish a structural delivery-ledger migration without waiting for a
+		// later queue mutation; otherwise a crash could reintroduce text-only rows.
+		if (this.loadedDeliveryLedgerMigration) this.saveNow();
 	}
 
 	/** Normalise PersistedSession-shaped rows read from disk (legacy field migration). */
@@ -352,9 +450,17 @@ export class SessionStore {
 				else if (s.toolAssistant) s.assistantType = "tool";
 			}
 			if (Array.isArray(s.inFlightSteerTexts)) {
-				s.inFlightSteerTexts = normalizePersistedInFlightSteers(s.inFlightSteerTexts);
+				const originalLedger = s.inFlightSteerTexts;
+				const normalizedLedger = normalizePersistedInFlightSteers(originalLedger);
+				// JSON comparison is intentional at this disk boundary: the normalized
+				// shape is JSON-only and a structural difference must be durably saved.
+				if (JSON.stringify(originalLedger) !== JSON.stringify(normalizedLedger)) {
+					this.loadedDeliveryLedgerMigration = true;
+				}
+				s.inFlightSteerTexts = normalizedLedger;
 			} else if (s.inFlightSteerTexts !== undefined) {
 				s.inFlightSteerTexts = undefined;
+				this.loadedDeliveryLedgerMigration = true;
 			}
 			this.normalizeRuntimeIdentity(s);
 			this.sessions.set(s.id, s);
@@ -761,7 +867,7 @@ export class SessionStore {
 		"role", "assistantType", "taskId", "staffId",
 		"teamGoalId", "teamLeadSessionId",
 		"runtime", "claudeAgentSdkSessionId", "modelProvider", "modelId", "effectiveThinkingLevel",
-		"manualRetryRequired", "inFlightSteerTexts", "user_tags",
+		"messageQueue", "manualRetryRequired", "inFlightSteerTexts", "user_tags",
 		"sidePanelWorkspace",
 	];
 

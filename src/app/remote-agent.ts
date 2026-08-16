@@ -73,6 +73,7 @@ import { computeStreamingMessageId } from "./streaming-message-id.js";
 import {
 	buildCompactionSummaryMessages,
 	buildInProgressCompactionPayload,
+	isContextOverflowError,
 	parseOverflowTokenCount,
 	type CompactionSummaryPayload,
 	type CompactionTrigger,
@@ -81,6 +82,8 @@ import type { AutoRetryPendingEvent, ManualRetryRequiredEvent, ProviderAuthRequi
 import { LOCAL_USER_AUTHOR, type BobbitMessage, type MessageAuthor } from "../shared/message-author.js";
 import type { PromptSource } from "../shared/prompt-source.js";
 import { reconstructAssistantStreamDelta } from "../shared/assistant-stream-delta.js";
+import { storage } from "./storage.js";
+import type { PersistedDeliveryIntent } from "../ui/storage/app-storage.js";
 
 const CLIENT_SYSTEM_AUTHOR: MessageAuthor = {
 	kind: "system",
@@ -390,21 +393,134 @@ class GatewayRetryError extends Error {
 export type ClientSessionStatus = "idle" | "streaming" | "aborting" | "preparing" | "archived" | "starting" | "terminated";
 
 /** A message waiting in the server-side prompt queue (mirrors server QueuedMessage) */
+export type DeliveryState = "local" | "queued" | "dispatching" | "received" | "uncertain" | "failed" | "cancelled";
+export type DeliveryTargetTurn = "continuation" | "next-turn";
+
+const DELIVERY_STATE_RANK: Record<DeliveryState, number> = {
+	local: 0,
+	queued: 1,
+	dispatching: 2,
+	uncertain: 3,
+	failed: 3,
+	received: 4,
+	cancelled: 5,
+};
+
 export interface QueuedMessage {
 	id: string;
 	text: string;
 	images?: Array<{ type: "image"; data: string; mimeType: string }>;
 	attachments?: unknown[];
 	isSteered: boolean;
+	kind?: "prompt" | "steer";
+	targetTurn?: DeliveryTargetTurn;
+	sequence?: number;
+	deliveryState?: DeliveryState;
+	deliveryReason?: string;
+	deliveryError?: string;
+	retryable?: boolean;
 	/** Legacy optional flag from the pre-ledger queue model; current server rows omit it. */
 	dispatched?: boolean;
 	source?: PromptSource;
 	author?: MessageAuthor;
-	/** True for a client-side outbox row not yet delivered to the server (S2):
-	 *  issued while the WS was reconnecting; flushed on auth_ok. Lets the pill
-	 *  strip render it distinctly ("waiting to send") and the client reconcile it. */
+	/** True only while this occurrence has no observable server projection. */
 	unsent?: boolean;
 	createdAt: number;
+}
+
+interface PendingOutboxEntry {
+	frame: any;
+	row?: QueuedMessage;
+	persisted?: boolean;
+	/** Exact durable revision from which this tab rendered the local row. */
+	localRevision?: number;
+	lastSentEpoch?: number;
+	/** A correlated pre-admission rejection requires an explicit user Retry.
+	 * It must not be flushed automatically on this or a later connection. */
+	retryRequired?: boolean;
+	mutationPending?: boolean;
+}
+
+function createIntentId(): string {
+	if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+	return `intent_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+}
+
+function deliveryIntentId(value: any): string | undefined {
+	const id = value?.deliveryIntentId ?? value?.intentId;
+	return typeof id === "string" && id.length > 0 ? id : undefined;
+}
+
+/**
+ * A user-shaped in-flight steer spliced into a server snapshot is continuity
+ * evidence, never Pi's correlated user-message echo. Both markers are
+ * explicit server-owned recovery metadata: modern rows carry an intent while
+ * older persisted rows may carry only a prompt id or synthetic snapshot id.
+ */
+function isDeliveryRecoveryProjection(value: any): boolean {
+	return value?._deliveryRecoveryProjection === true || value?._inFlightSteer === true;
+}
+
+/**
+ * Recovery rows must retain an occurrence key without correlating by text.
+ * Prefer the durable intent (so a real Pi echo settles the existing carrier),
+ * then the pre-intent prompt id. Snapshot/attempt ids are server-issued
+ * compatibility fallbacks for legacy records that have neither.
+ */
+function deliveryRecoveryOccurrenceId(value: any): string | undefined {
+	const candidates = [
+		deliveryIntentId(value),
+		value?.promptId,
+		value?.id,
+		value?.deliveryAttemptId ?? value?.attemptId,
+	];
+	return candidates.find((candidate): candidate is string =>
+		typeof candidate === "string" && candidate.length > 0,
+	);
+}
+
+function deliveryRecoveryOutboxRow(message: any): QueuedMessage | undefined {
+	const id = deliveryRecoveryOccurrenceId(message);
+	if (!id) return undefined;
+	const sequence = Number.isSafeInteger(message?.sequence) && message.sequence >= 0
+		? message.sequence
+		: undefined;
+	const rawState = message?.deliveryState ?? message?.state;
+	const deliveryState = rawState === "local" || rawState === "queued" || rawState === "dispatching"
+		|| rawState === "received" || rawState === "uncertain" || rawState === "failed" || rawState === "cancelled"
+		? rawState as DeliveryState
+		// A recovery-only record proves neither Pi admission nor settlement. Keep
+		// it visible as an uncertain delivery carrier rather than a transcript row.
+		: "uncertain" as const;
+	return {
+		...message,
+		id,
+		text: extractText(message),
+		isSteered: message?.isSteered === true || message?.kind === "steer",
+		createdAt: typeof message?.createdAt === "number" && Number.isFinite(message.createdAt)
+			? message.createdAt
+			: sequence ?? 0,
+		kind: message?.kind === "prompt" || message?.kind === "steer" ? message.kind : "steer",
+		deliveryState,
+		...(message?.targetTurn === "continuation" || message?.targetTurn === "next-turn"
+			? { targetTurn: message.targetTurn }
+			: {}),
+		...(sequence === undefined ? {} : { sequence }),
+		...(message?.deliveryReason ? { deliveryReason: message.deliveryReason } : {}),
+		...(message?.deliveryError ? { deliveryError: message.deliveryError } : {}),
+		...(typeof message?.retryable === "boolean" ? { retryable: message.retryable } : {}),
+		...(message?.source ? { source: message.source } : {}),
+		...(message?.author ? { author: message.author } : {}),
+	};
+}
+
+function persistedOutboxRow(row: QueuedMessage): Record<string, unknown> {
+	const copy: Record<string, unknown> = { ...row };
+	// The resend frame already owns payload bodies. Keeping a second copy in the
+	// display row would double/triple large attachment storage for no recovery gain.
+	delete copy.images;
+	delete copy.attachments;
+	return copy;
 }
 
 export class RemoteAgent {
@@ -437,14 +553,15 @@ export class RemoteAgent {
 	private _pendingReviewToolCalls = new Map<string, PendingReviewToolCall>();
 	// Server-authoritative prompt queue
 	private _serverQueue: QueuedMessage[] = [];
-	// Client-side outbox for user-intent frames issued while the WS is not OPEN
-	// (S2 — VPN flap / reconnect): instead of silently dropping the frame (and
-	// clearing the composer as if it sent), queue it, surface it in the existing
-	// prompt-queue pill strip as a "pending/unsent" row, and flush FIFO on the
-	// next auth_ok. Bounded so a long offline period can't grow unbounded.
-	private _pendingOutbox: Array<{ frame: any; row?: QueuedMessage }> = [];
+	// The IndexedDB-backed portion owns an occurrence only until a matching
+	// server projection is observed. `_deliveryProjection` then owns the visible
+	// carrier until the correlated real user message enters the reducer.
+	private _pendingOutbox: PendingOutboxEntry[] = [];
+	private _deliveryProjection = new Map<string, QueuedMessage>();
+	/** Bounded terminal occurrence fence; prevents late queue frames from resurrecting surfaced intent. */
+	private _settledDeliveryIntentIds = new Set<string>();
+	private _connectionEpoch = 0;
 	private static readonly OUTBOX_MAX = 50;
-	private static readonly OUTBOX_FRAME_TYPES = new Set(["prompt", "steer", "retry"]);
 	// Reducer-owned message state. The reducer is the single source of truth
 	// for transcript order; `_state.messages` is mirrored from `reducerState.messages`
 	// after every dispatch so existing UI bindings keep working.
@@ -462,13 +579,9 @@ export class RemoteAgent {
 	private _pendingAttachments: any[] | null = null;
 
 	// Skill expansions from the most recent prompt. The server is the
-	// authoritative resolver of `/<name>` invocations, but if a caller
-	// constructs a user-with-attachments message that already carries
-	// `skillExpansions`, we forward them through to the optimistic echo
-	// so the chip renders immediately (parity with attachments). When the
-	// server later echoes back the canonical user message, the dedup path
-	// in message_end replaces the optimistic record (server is
-	// authoritative for the final `skillExpansions` shape).
+	// authoritative resolver of `/<name>` invocations, but scripted callers may
+	// already carry expansions. Preserve them only as a fallback enrichment for
+	// the correlated real user echo; no optimistic transcript row is created.
 	private _pendingSkillExpansions: any[] | null = null;
 
 	// Compaction tracking — persists across message refreshes.
@@ -942,6 +1055,7 @@ export class RemoteAgent {
 		this._sessionId = sessionId;
 		this._intentionalDisconnect = false;
 		this._reconnectAttempt = 0;
+		await this._restoreDeliveryOutbox();
 
 		// On mobile, the OS suspends the tab when backgrounded. When the user
 		// returns, the WebSocket is often already dead but the reconnect timer
@@ -1055,6 +1169,7 @@ export class RemoteAgent {
 						// server-side snapshot wait that follows.
 						bootMark("auth-ok");
 						this._reconnectAttempt = 0;
+						this._connectionEpoch++;
 						this._setConnectionStatus("connected");
 						resolve();
 						// Initial hydration is owned by connectToSession after ChatPanel
@@ -1282,59 +1397,54 @@ export class RemoteAgent {
 				? (input as any).skillExpansions
 				: null;
 
-		// Add the user message optimistically so it renders immediately —
-		// but only when the agent is idle AND the socket is open. If streaming,
-		// the prompt is queued server-side and echoed in the correct position. If
-		// the socket is NOT open (S2), the frame goes to the outbox and surfaces as
-		// a pending pill — rendering a transcript bubble would falsely look "sent".
-		if (!this._state.isStreaming && this.ws?.readyState === WebSocket.OPEN) {
-			const optimisticId = `optimistic_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-			const optimisticMsg: any = {
-				role: attachments?.length || this._pendingSkillExpansions?.length
-					? "user-with-attachments"
-					: "user",
-				content: [{ type: "text", text }],
-				timestamp: Date.now(),
-				id: optimisticId,
-				author: LOCAL_USER_AUTHOR,
-				...(attachments?.length ? { attachments } : {}),
-				...(this._pendingSkillExpansions?.length
-					? { skillExpansions: this._pendingSkillExpansions }
-					: {}),
-			};
-			this.apply({ type: "optimistic-prompt", message: optimisticMsg });
-			this.emit({ type: "message_end", message: optimisticMsg });
-		}
-
-		this.send({
+		const intentId = createIntentId();
+		const createdAt = Date.now();
+		const frame = {
 			type: "prompt",
+			intentId,
 			text,
 			...(imageData?.length ? { images: imageData } : {}),
 			...(attachments?.length ? { attachments } : {}),
 			// Assistant auto-kickoff prompts must not seed the session title —
 			// naming fires on the first genuine user message instead.
 			...(promptOpts?.suppressTitleGen ? { suppressTitleGen: true } : {}),
-		});
+		};
+		const row: QueuedMessage = {
+			id: intentId,
+			text,
+			images: imageData,
+			attachments,
+			isSteered: false,
+			kind: "prompt",
+			targetTurn: "next-turn",
+			deliveryState: "local",
+			unsent: true,
+			source: "user",
+			author: LOCAL_USER_AUTHOR,
+			createdAt,
+		};
+		await this._admitDeliveryIntent(frame, row);
 	}
 
 	steer(message: any): void {
 		const text = typeof message === "string" ? message : extractText(message);
-		// Add optimistic user message so it renders immediately in chat — but only
-		// when the socket is open. Offline (S2), the steer goes to the outbox and
-		// shows as a pending pill instead of a falsely-"sent" bubble.
-		if (this.ws?.readyState === WebSocket.OPEN) {
-			const optimisticId = `optimistic_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-			const optimisticMsg: any = {
-				role: "user",
-				content: [{ type: "text", text }],
-				timestamp: Date.now(),
-				id: optimisticId,
-				author: LOCAL_USER_AUTHOR,
-			};
-			this.apply({ type: "optimistic-steer", message: optimisticMsg });
-			this.emit({ type: "message_end", message: optimisticMsg });
-		}
-		this.send({ type: "steer", text });
+		const intentId = createIntentId();
+		const row: QueuedMessage = {
+			id: intentId,
+			text,
+			isSteered: true,
+			kind: "steer",
+			targetTurn: this._state.isStreaming ? "continuation" : "next-turn",
+			deliveryState: "local",
+			unsent: true,
+			source: "user",
+			author: LOCAL_USER_AUTHOR,
+			createdAt: Date.now(),
+		};
+		// `steer` is a synchronous Agent API, but dispatch is deliberately held
+		// behind the durable write. The row is visible synchronously; failure
+		// becomes an actionable outbox state rather than a missing transcript row.
+		void this._admitDeliveryIntent({ type: "steer", intentId, text }, row);
 	}
 
 	get isAborting(): boolean { return this._isAborting; }
@@ -1349,6 +1459,79 @@ export class RemoteAgent {
 		this._clearProviderAuthRequired();
 		this.send({ type: "retry" });
 		this.emit({ type: "render" });
+	}
+
+	/** Retry one failed occurrence without changing its stable identity. */
+	retryIntent(intentId: string): void {
+		const projected = this._deliveryProjection.get(intentId)
+			?? this._serverQueue.find((row) => row.id === intentId);
+		// Abort-recovery cancellation is a durable fail-closed carrier, not a safe
+		// resend affordance. Ignore stale-tab Retry clicks unless the authoritative
+		// server projection explicitly marks this exact occurrence retryable.
+		if (projected && (projected.deliveryState === "cancelled" || projected.retryable === false)) return;
+		const local = this._pendingOutbox.find((entry) => entry.row?.id === intentId);
+		if (local?.row && !projected && (local.row.retryable === false || local.mutationPending)) return;
+		if (local?.row && !projected && (local.row.deliveryState === "failed" || !local.persisted)) {
+			const retriedRow: QueuedMessage = {
+				...local.row,
+				deliveryState: "local",
+				unsent: true,
+			};
+			delete retriedRow.deliveryReason;
+			delete retriedRow.deliveryError;
+			delete retriedRow.retryable;
+			local.mutationPending = true;
+
+			const persistRetry = local.persisted && this._sessionId && local.localRevision !== undefined
+				? storage.deliveryIntents.replaceIfRevision(
+					this._sessionId,
+					intentId,
+					local.localRevision,
+					local.frame,
+					persistedOutboxRow(retriedRow),
+				)
+				: storage.deliveryIntents.put(this._sessionId, intentId, local.frame, persistedOutboxRow(retriedRow))
+					.then((result) => ({
+						ok: result.ok,
+						applied: result.ok,
+						...(result.ok ? {
+							current: {
+								key: `${this._sessionId}:${intentId}`,
+								sessionId: this._sessionId,
+								intentId,
+								frame: local.frame,
+								row: persistedOutboxRow(retriedRow),
+								revision: result.revision ?? 0,
+								createdAt: retriedRow.createdAt,
+								updatedAt: Date.now(),
+							},
+						} : {}),
+					}));
+
+			void persistRetry.then((result) => {
+				local.mutationPending = false;
+				if (!this._pendingOutbox.includes(local)) return;
+				if (result.ok && result.applied && result.current) {
+					this._applyPersistedLocalRecord(local, result.current);
+					local.lastSentEpoch = undefined;
+					this._sendOutboxEntry(local);
+					this.onQueueUpdate?.(this.getQueue());
+					return;
+				}
+				if (result.ok && !result.applied) {
+					this._reconcileConditionalMutation(local, result.current);
+					return;
+				}
+				local.retryRequired = true;
+				local.row!.deliveryState = "failed";
+				local.row!.unsent = false;
+				local.row!.retryable = false;
+				local.row!.deliveryError = "This message could not be saved for reliable delivery.";
+				this.onQueueUpdate?.(this.getQueue());
+			});
+			return;
+		}
+		this.send({ type: "retry_intent", intentId });
 	}
 
 	compact(): void {
@@ -1686,16 +1869,26 @@ export class RemoteAgent {
 	clearFollowUpQueue(): void {}
 	clearAllQueues(): void {}
 	hasQueuedMessages(): boolean {
-		return this._serverQueue.length > 0 || this._pendingOutbox.some((e) => !!e.row);
+		return this.getQueue().length > 0;
 	}
 
-	/** Get the prompt queue for the pill strip: the server-authoritative queue
-	 *  plus any client-side pending-unsent rows (S2), which sort after the server
-	 *  rows since they have not been delivered yet. */
+	/** One ID-keyed projection across server queue/ledger state and the durable
+	 * pre-acceptance spool. Server rows win without changing occurrence order. */
 	getQueue(): QueuedMessage[] {
-		if (this._pendingOutbox.length === 0) return this._serverQueue;
-		const pendingRows = this._pendingOutbox.map((e) => e.row).filter((r): r is QueuedMessage => !!r);
-		return pendingRows.length ? [...this._serverQueue, ...pendingRows] : this._serverQueue;
+		const rows: QueuedMessage[] = [];
+		const seen = new Set<string>();
+		for (const row of [...this._serverQueue, ...this._deliveryProjection.values()]) {
+			if (!row?.id || seen.has(row.id)) continue;
+			seen.add(row.id);
+			rows.push(row);
+		}
+		for (const entry of this._pendingOutbox) {
+			const row = entry.row;
+			if (!row?.id || seen.has(row.id)) continue;
+			seen.add(row.id);
+			rows.push(row);
+		}
+		return rows;
 	}
 
 	/** Ask the server to promote a queued message to a steer. */
@@ -1703,11 +1896,32 @@ export class RemoteAgent {
 		this.send({ type: "steer_queued", messageId });
 	}
 
-	/** Ask the server to remove a message from the queue. A pending-unsent
-	 *  outbox row (S2) is dropped locally — the server never saw it. */
+	/** Remove a never-sent or definitively pre-admission-rejected local occurrence.
+	 * Once a frame may have reached server admission, retain its carrier until a
+	 * durable cancellation receipt. */
 	removeQueued(messageId: string): void {
 		const idx = this._pendingOutbox.findIndex((e) => e.row?.id === messageId);
-		if (idx !== -1) {
+		const hasServerProjection = this._deliveryProjection.has(messageId)
+			|| this._serverQueue.some((row) => row.id === messageId);
+		const local = idx === -1 ? undefined : this._pendingOutbox[idx];
+		if (local && !hasServerProjection && (local.lastSentEpoch === undefined || local.retryRequired === true)) {
+			if (local.mutationPending) return;
+			if (local.persisted && this._sessionId && local.localRevision !== undefined) {
+				const renderedRevision = local.localRevision;
+				local.mutationPending = true;
+				void storage.deliveryIntents.deleteIfRevision(this._sessionId, messageId, renderedRevision)
+					.then((result) => {
+						local.mutationPending = false;
+						if (!this._pendingOutbox.includes(local)) return;
+						if (result.ok && result.applied && local.localRevision === renderedRevision) {
+							this._pendingOutbox = this._pendingOutbox.filter((entry) => entry !== local);
+							this.onQueueUpdate?.(this.getQueue());
+							return;
+						}
+						if (result.ok && !result.applied) this._reconcileConditionalMutation(local, result.current);
+					});
+				return;
+			}
 			this._pendingOutbox.splice(idx, 1);
 			this.onQueueUpdate?.(this.getQueue());
 			return;
@@ -1863,56 +2077,274 @@ export class RemoteAgent {
 		for (const p of pendingSurfaceTokens) p.reject(new Error(`pack surface-token mint: ${reason}`));
 	}
 
+	private _applyPersistedLocalRecord(entry: PendingOutboxEntry, record: PersistedDeliveryIntent): boolean {
+		if (
+			!record?.frame
+			|| !record?.row
+			|| record.intentId !== (record.row as any).id
+			|| deliveryIntentId(record.frame) !== record.intentId
+		) return false;
+		const restoredState = (record.row as any).deliveryState;
+		const retryRequired = restoredState === "failed";
+		entry.frame = record.frame;
+		entry.row = {
+			...(record.row as any),
+			deliveryState: retryRequired ? "failed" : "local",
+			unsent: !retryRequired,
+		};
+		entry.persisted = true;
+		entry.localRevision = Number.isSafeInteger(record.revision) && record.revision >= 0 ? record.revision : 0;
+		entry.retryRequired = retryRequired;
+		return true;
+	}
+
+	/** A losing CAS adopts the newer shared carrier instead of deleting it. An
+	 * absent record is not proof of transcript surfacing: a different tab may
+	 * already have transferred ownership to the server, so this tab retains its
+	 * visible row until its own authoritative projection arrives. */
+	private _reconcileConditionalMutation(
+		entry: PendingOutboxEntry,
+		current?: PersistedDeliveryIntent,
+	): void {
+		const renderedRevision = entry.localRevision ?? -1;
+		if (current && this._applyPersistedLocalRecord(entry, current)) {
+			const adoptedNewerLocal = (entry.localRevision ?? 0) > renderedRevision && !entry.retryRequired;
+			if (adoptedNewerLocal) {
+				// The writer can close after committing this revision but before sending.
+				// Any connected tab that adopts the local carrier may take over immediately;
+				// duplicate frames are safe because server admission is occurrence-idempotent.
+				entry.lastSentEpoch = undefined;
+				this._sendOutboxEntry(entry);
+			}
+		}
+		this.onQueueUpdate?.(this.getQueue());
+	}
+
+	private async _restoreDeliveryOutbox(): Promise<void> {
+		const restored = await storage.deliveryIntents.list(this._sessionId);
+		for (const record of restored) {
+			if (
+				!record?.frame
+				|| !record?.row
+				|| record.intentId !== (record.row as any).id
+				|| deliveryIntentId(record.frame) !== record.intentId
+			) continue;
+			if (this._pendingOutbox.some((entry) => entry.row?.id === record.intentId)) continue;
+			const entry: PendingOutboxEntry = { frame: record.frame };
+			if (this._applyPersistedLocalRecord(entry, record)) this._pendingOutbox.push(entry);
+		}
+	}
+
+	private async _admitDeliveryIntent(frame: any, row: QueuedMessage): Promise<void> {
+		const entry: PendingOutboxEntry = { frame, row };
+		this._pendingOutbox.push(entry);
+		this.onQueueUpdate?.(this.getQueue());
+
+		const result = this._pendingOutbox.filter((candidate) => !!candidate.row).length > RemoteAgent.OUTBOX_MAX
+			? { ok: false as const, reason: "session-full" as const }
+			: !this._sessionId
+				// Unit harnesses may exercise an unbound agent; production agents are
+				// always session-bound before composer admission.
+				? { ok: true as const }
+				: await storage.deliveryIntents.put(this._sessionId, row.id, frame, persistedOutboxRow(row));
+		if (!this._pendingOutbox.includes(entry)) {
+			if (result.ok) void storage.deliveryIntents.delete(this._sessionId, row.id);
+			return;
+		}
+		if (!result.ok) {
+			row.deliveryState = "failed";
+			row.unsent = false;
+			row.retryable = false;
+			row.deliveryError = result.reason === "entry-too-large"
+				? "Message is too large to save for reliable delivery."
+				: result.reason === "session-full" || result.reason === "storage-full"
+					? "Reliable delivery storage is full. Remove another pending message and try again."
+					: "This message could not be saved for reliable delivery.";
+			this.onQueueUpdate?.(this.getQueue());
+			return;
+		}
+		entry.persisted = true;
+		entry.localRevision = result.revision ?? 0;
+		this._sendOutboxEntry(entry);
+	}
+
+	private _sendOutboxEntry(entry: PendingOutboxEntry): boolean {
+		if (!entry.persisted || entry.retryRequired || entry.lastSentEpoch === this._connectionEpoch) return false;
+		if (this._sessionId && this._connectionStatus !== "connected") return false;
+		if (this.ws?.readyState !== WebSocket.OPEN) return false;
+		try {
+			this.ws.send(JSON.stringify(entry.frame));
+			entry.lastSentEpoch = this._connectionEpoch;
+			if (entry.row) entry.row.unsent = false;
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	/** Move only an exclusively local occurrence into an actionable failed state.
+	 * A server projection means ownership has already transferred and a late error
+	 * from another socket generation must not regress it. */
+	private async _markLocalIntentRejected(msg: any): Promise<boolean> {
+		const intentId = deliveryIntentId(msg);
+		if (!intentId || this._deliveryProjection.has(intentId)
+			|| this._serverQueue.some((row) => row.id === intentId)) return false;
+		const entry = this._pendingOutbox.find((candidate) => candidate.row?.id === intentId);
+		if (!entry?.row) return false;
+
+		entry.row.deliveryState = "failed";
+		entry.row.unsent = false;
+		entry.row.retryable = msg.retryable !== false;
+		entry.row.deliveryReason = typeof msg.code === "string" ? msg.code.slice(0, 128) : "PRE_ADMISSION_REJECTED";
+		entry.row.deliveryError = typeof msg.message === "string" && msg.message
+			? msg.message.slice(0, 1_000)
+			: "This message was not accepted by the server.";
+		entry.lastSentEpoch = undefined;
+		entry.retryRequired = true;
+		this.onQueueUpdate?.(this.getQueue());
+
+		if (entry.persisted && this._sessionId && entry.localRevision !== undefined) {
+			const result = await storage.deliveryIntents.replaceIfRevision(
+				this._sessionId,
+				intentId,
+				entry.localRevision,
+				entry.frame,
+				persistedOutboxRow(entry.row),
+			);
+			if (result.ok && result.applied && result.current) {
+				this._applyPersistedLocalRecord(entry, result.current);
+			} else if (result.ok && !result.applied) {
+				this._reconcileConditionalMutation(entry, result.current);
+			} else {
+				entry.row.retryable = false;
+				entry.row.deliveryError = "The server rejected this message, but its failed state could not be saved. Dismiss it or copy the text before reloading.";
+				this.onQueueUpdate?.(this.getQueue());
+			}
+		}
+		return true;
+	}
+
+	private _rememberSettledIntent(intentId: string): void {
+		this._settledDeliveryIntentIds.add(intentId);
+		if (this._settledDeliveryIntentIds.size > 2_048) {
+			this._settledDeliveryIntentIds.delete(this._settledDeliveryIntentIds.values().next().value!);
+		}
+	}
+
+	private _mergeDeliveryProjection(row: QueuedMessage): void {
+		if (this._settledDeliveryIntentIds.has(row.id)) return;
+		const previous = this._deliveryProjection.get(row.id);
+		if (previous) {
+			const priorRank = DELIVERY_STATE_RANK[previous.deliveryState ?? "queued"];
+			const nextRank = DELIVERY_STATE_RANK[row.deliveryState ?? "queued"];
+			const provenRedrive = row.deliveryState === "queued"
+				&& (row.deliveryReason === "retry-requested"
+					|| row.deliveryReason === "continuation-aborted"
+					|| row.deliveryReason === "proven-no-start");
+			if (nextRank < priorRank && !provenRedrive) return;
+		}
+		this._deliveryProjection.set(row.id, row);
+	}
+
+	private _acceptProjectedRows(rows: any[]): QueuedMessage[] {
+		const acceptedIds = new Set<string>();
+		const normalized: QueuedMessage[] = [];
+		for (const raw of rows) {
+			const id = typeof raw?.id === "string" ? raw.id : deliveryIntentId(raw);
+			if (!id || this._settledDeliveryIntentIds.has(id)) continue;
+			acceptedIds.add(id);
+			const state = raw?.deliveryState ?? raw?.state;
+			const deliveryState = state === "local" || state === "queued" || state === "dispatching"
+				|| state === "received" || state === "uncertain" || state === "failed" || state === "cancelled"
+				? state as DeliveryState
+				: undefined;
+			normalized.push({
+				...raw,
+				id,
+				...(deliveryState ? { deliveryState } : {}),
+				unsent: false,
+			} as QueuedMessage);
+		}
+		if (acceptedIds.size > 0) {
+			this._pendingOutbox = this._pendingOutbox.filter((entry) => {
+				const id = entry.row?.id;
+				if (!id || !acceptedIds.has(id)) return true;
+				void storage.deliveryIntents.delete(this._sessionId, id);
+				return false;
+			});
+		}
+		return normalized;
+	}
+
+	private _replaceDeliveryProjection(rows: any[]): void {
+		const normalized = this._acceptProjectedRows(rows);
+		// Absence is not settlement: the server may publish the post-receipt empty
+		// projection immediately before the correlated user event on the same
+		// socket. Retain old carriers until `_settleSurfacedIntent` runs, avoiding
+		// a one-frame gap. Explicit failed/cancelled updates remain renderable too.
+		for (const row of normalized) this._mergeDeliveryProjection(row);
+		this.onQueueUpdate?.(this.getQueue());
+	}
+
+	private _updateDeliveryProjection(raw: any): void {
+		const id = typeof raw?.id === "string" ? raw.id : deliveryIntentId(raw);
+		if (!id) return;
+		const local = this._pendingOutbox.find((entry) => entry.row?.id === id)?.row;
+		const previous = this._deliveryProjection.get(id) ?? local;
+		if (!previous && typeof raw?.text !== "string") return;
+		const [normalized] = this._acceptProjectedRows([{ ...previous, ...raw, id }]);
+		if (normalized) this._mergeDeliveryProjection(normalized);
+		this.onQueueUpdate?.(this.getQueue());
+	}
+
+	private _settleSurfacedIntent(intentId: string): void {
+		this._rememberSettledIntent(intentId);
+		let changed = this._deliveryProjection.delete(intentId);
+		const beforeServer = this._serverQueue.length;
+		this._serverQueue = this._serverQueue.filter((row) => row.id !== intentId);
+		changed = changed || beforeServer !== this._serverQueue.length;
+		const beforeLocal = this._pendingOutbox.length;
+		this._pendingOutbox = this._pendingOutbox.filter((entry) => entry.row?.id !== intentId);
+		changed = changed || beforeLocal !== this._pendingOutbox.length;
+		void storage.deliveryIntents.delete(this._sessionId, intentId);
+		if (changed) this.onQueueUpdate?.(this.getQueue());
+	}
+
 	private send(msg: any): void {
 		if (this.ws?.readyState === WebSocket.OPEN) {
 			this.ws.send(JSON.stringify(msg));
 			return;
 		}
-		// S2: queue user-intent frames instead of dropping them. A prompt/steer
-		// also gets a pending pill row (built from the frame) so it appears in the
-		// existing queue strip; retry has no text → no pill, but still resends.
-		if (RemoteAgent.OUTBOX_FRAME_TYPES.has(msg?.type)) {
-			if (this._pendingOutbox.length >= RemoteAgent.OUTBOX_MAX) this._pendingOutbox.shift();
-			let row: QueuedMessage | undefined;
-			if (typeof msg.text === "string") {
-				row = {
-					id: `outbox_${Date.now()}_${Math.random().toString(36).slice(2)}`,
-					text: msg.text,
-					isSteered: msg.type === "steer",
-					unsent: true,
-					source: "user",
-					author: LOCAL_USER_AUTHOR,
-					createdAt: Date.now(),
-					...(Array.isArray(msg.images) && msg.images.length ? { images: msg.images } : {}),
-					...(Array.isArray(msg.attachments) && msg.attachments.length ? { attachments: msg.attachments } : {}),
-				};
-			}
-			this._pendingOutbox.push({ frame: msg, row });
-			if (row) this.onQueueUpdate?.(this.getQueue());
+		// Prompt and steer admission use `_admitDeliveryIntent`; retry remains a
+		// body-free transient control which can safely wait for reconnect.
+		if (msg?.type === "retry") {
+			const controls = this._pendingOutbox.filter((entry) => !entry.row);
+			if (controls.length < RemoteAgent.OUTBOX_MAX) this._pendingOutbox.push({ frame: msg, persisted: true });
 			return;
 		}
 		console.warn("[RemoteAgent] Message dropped (WS not open):", msg.type, "readyState:", this.ws?.readyState);
 	}
 
-	/** Flush queued user-intent frames after the socket reopens (auth_ok). FIFO;
-	 *  the server then echoes/enqueues them and the normal queue_update
-	 *  reconciliation replaces the pending pills. (S2) */
+	/** Resend every still-preacceptance occurrence once per authenticated socket.
+	 * Entries remain durable and visible after `WebSocket.send()`; only a matching
+	 * server projection may move ownership out of this spool. */
 	private _flushOutbox(): void {
 		if (this._pendingOutbox.length === 0) return;
-		let sent = 0;
-		while (this._pendingOutbox.length > 0 && this.ws?.readyState === WebSocket.OPEN) {
-			const entry = this._pendingOutbox[0];
+		for (const entry of [...this._pendingOutbox]) {
+			if (entry.row) {
+				this._sendOutboxEntry(entry);
+				continue;
+			}
+			if (this.ws?.readyState !== WebSocket.OPEN) break;
 			try {
 				this.ws.send(JSON.stringify(entry.frame));
+				const idx = this._pendingOutbox.indexOf(entry);
+				if (idx >= 0) this._pendingOutbox.splice(idx, 1);
 			} catch {
-				// Keep this entry and the unsent suffix in FIFO order. A later auth_ok
-				// retries them on the replacement socket instead of silently losing intent.
 				break;
 			}
-			this._pendingOutbox.shift();
-			sent++;
 		}
-		if (sent > 0) this.onQueueUpdate?.(this.getQueue());
+		this.onQueueUpdate?.(this.getQueue());
 	}
 
 	private async handleServerMessage(msg: any) {
@@ -2021,10 +2453,52 @@ export class RemoteAgent {
 					// that scales with transcript length. Opt-in; no-op when disarmed.
 					bootTimingMeta({ sessionId: this._sessionId, transcriptMessages: rootMessages.length });
 					bootMark(`snapshot-received(${rootMessages.length} msgs)`);
+
+					// In-flight rows are server recovery projections, never correlated Pi
+					// user-message surfacing. Keep child rows partitioned before the outbox
+					// projection, so they cannot be rendered or settled as root work.
+					const recoveryRows: QueuedMessage[] = [];
+					const transcriptRows: any[] = [];
+					for (const message of rootMessages) {
+						if (isDeliveryRecoveryProjection(message)) {
+							const row = deliveryRecoveryOutboxRow(message);
+							if (row) {
+								recoveryRows.push(row);
+								continue;
+							}
+						}
+						transcriptRows.push(message);
+					}
+					const recovered = this._acceptProjectedRows(recoveryRows.map((row) => {
+						const previous = this._deliveryProjection.get(row.id)
+							?? this._serverQueue.find((candidate) => candidate.id === row.id)
+							?? this._pendingOutbox.find((entry) => entry.row?.id === row.id)?.row;
+						if (!previous) return row;
+						return {
+							...row,
+							...previous,
+							...(row.targetTurn ? { targetTurn: row.targetTurn } : {}),
+							...(row.sequence === undefined ? {} : { sequence: row.sequence }),
+							...(row.deliveryState ? { deliveryState: row.deliveryState } : {}),
+							...(row.retryable === undefined ? {} : { retryable: row.retryable }),
+						};
+					}));
+					for (const row of recovered) this._mergeDeliveryProjection(row);
+
 					// Server snapshot is authoritative for any id it contains. The
 					// reducer merges in survivors (optimistic, synthetic, permission)
 					// and sorts the result by (_order, _insertionTick).
-					this.apply({ type: "snapshot", messages: [...rootMessages] });
+					this.apply({ type: "snapshot", messages: transcriptRows });
+					// Only a real snapshot transcript row may settle the outbox. The
+					// recovery rows above deliberately remain pending until a correlated
+					// Pi user start (or a later real transcript snapshot) is surfaced.
+					for (const message of transcriptRows) {
+						const intentId = deliveryIntentId(message);
+						if (intentId && (message?.role === "user" || message?.role === "user-with-attachments")) {
+							this._settleSurfacedIntent(intentId);
+						}
+					}
+					if (recovered.length > 0) this.onQueueUpdate?.(this.getQueue());
 					bootMark("snapshot-applied");
 					// The reducer triggers a re-render via rAF; mark + flush after it
 					// paints so the table captures the full reload incl. MessageList.
@@ -2244,12 +2718,53 @@ export class RemoteAgent {
 				this.onTitleChange?.(msg.title);
 				break;
 
-			case "queue_update":
-				this._serverQueue = Array.isArray(msg.queue) ? msg.queue : [];
-				// Merge any pending-unsent outbox rows so a server queue update
-				// doesn't visually drop them before they flush (S2).
+			case "queue_update": {
+				const rows = this._acceptProjectedRows(Array.isArray(msg.queue) ? msg.queue : []);
+				// Modern queue rows are also delivery projections. Keep them through
+				// dispatch even if a later legacy queue-only frame omits the row. Read
+				// back the monotonic projection so `_serverQueue` cannot shadow a newer
+				// uncertain/terminal state with a stale queued carrier.
+				for (const row of rows) this._mergeDeliveryProjection(row);
+				this._serverQueue = rows.map((row) => this._deliveryProjection.get(row.id) ?? row);
 				this.onQueueUpdate?.(this.getQueue());
 				break;
+			}
+
+			case "delivery_outbox":
+				this._replaceDeliveryProjection(
+					Array.isArray(msg.outbox) ? msg.outbox
+						: Array.isArray(msg.intents) ? msg.intents
+							: Array.isArray(msg.rows) ? msg.rows
+								: Array.isArray(msg.data) ? msg.data : [],
+				);
+				break;
+
+			case "intent_update": {
+				const intent = msg.intent ?? msg.row ?? msg.data ?? msg;
+				const intentId = typeof intent?.id === "string" ? intent.id : deliveryIntentId(intent);
+				if (intentId && (msg.settlement === "surfaced" || msg.settlement === "cancelled")) {
+					this._settleSurfacedIntent(intentId);
+					break;
+				}
+				this._updateDeliveryProjection(intent);
+				break;
+			}
+
+			case "intent_accepted": {
+				// Receipt alone is not ownership transfer. It intentionally does not
+				// clear IndexedDB; a receipt carrying its matching projection can.
+				if (msg.intent || msg.row || msg.data?.text) {
+					this._updateDeliveryProjection(msg.intent ?? msg.row ?? msg.data);
+					break;
+				}
+				const id = deliveryIntentId(msg);
+				const local = id ? this._pendingOutbox.find((entry) => entry.row?.id === id)?.row : undefined;
+				if (local) {
+					local.unsent = false;
+					this.onQueueUpdate?.(this.getQueue());
+				}
+				break;
+			}
 
 			case "side_panel_workspace":
 				if ((msg as any).workspace) applySidePanelWorkspaceFromServer((msg as any).workspace, { source: "ws" });
@@ -2536,6 +3051,7 @@ export class RemoteAgent {
 
 			case "error":
 				console.error(`[RemoteAgent] Server error: ${msg.message} (${msg.code})`);
+				await this._markLocalIntentRejected(msg);
 				if (this._state.modelSelectionPending) {
 					this._state.modelSelectionPending = null;
 					this._state.modelSelectionError = typeof msg.message === "string" && msg.message
@@ -2563,9 +3079,8 @@ export class RemoteAgent {
 				this._state.error = msg.message || "Unknown server error";
 				this._pendingAttachments = null;
 				this._pendingSkillExpansions = null;
-				// Turn died (e.g. immediate model 404) possibly BEFORE the server
-				// echoed the user prompt. Settle any unreconciled optimistic row out
-				// of the far-future tail sentinel so it doesn't strand at the bottom.
+				// Legacy compatibility: settle a pre-upgrade optimistic row if one
+				// survived into this session. Durable intents stay in the outbox.
 				this.apply({ type: "settle-optimistic" });
 				this.apply({
 					type: "error",
@@ -3019,6 +3534,13 @@ export class RemoteAgent {
 	private handleAgentEvent(event: any) {
 		event = this._normalizeAssistantStreamUpdate(event);
 		if (!event) return;
+		const correlatedIntentId = deliveryIntentId(event) ?? deliveryIntentId(event.message);
+		if (correlatedIntentId && event.message && !deliveryIntentId(event.message)) {
+			event = {
+				...event,
+				message: { ...event.message, deliveryIntentId: correlatedIntentId },
+			};
+		}
 		// Track current event seq so live-event reducer dispatches use it.
 		const eventSeq = this._highestSeq;
 		// Child frames are a nested projection, never root agent events. Handle the
@@ -3152,18 +3674,46 @@ export class RemoteAgent {
 
 				this._taskStartTime = null;
 				this._state.turnStartTime = null;
-				// Turn ended. If a prompt/steer was sent but never echoed back as a
-				// server user row, settle the optimistic row into chronological
-				// position instead of leaving it pinned at the tail sentinel.
+				// Legacy compatibility only. New submissions never create optimistic
+				// transcript rows; their durable outbox carrier survives turn end.
 				this.apply({ type: "settle-optimistic" });
 				break;
 			}
 
-			case "message_start":
-				// Don't add messages here — wait for message_end which
-				// carries the finalized message and allows proper ordering
-				// with any deferred assistant message.
+			case "assistant_stream_invalidated": {
+				const assistantStreamId = typeof event.assistantStreamId === "string"
+					? event.assistantStreamId
+					: undefined;
+				if (!assistantStreamId) break;
+				if (this._state.streamingMessage?.assistantStreamId === assistantStreamId) {
+					this._state.streamingMessage = null;
+					this.streamingMessageId = undefined;
+				}
+				this._previousRawAssistantStreamMessage = undefined;
+				this.apply({ type: "assistant-stream-invalidated", assistantStreamId });
 				break;
+			}
+
+			case "message_start": {
+				// A correlated Pi user start is the acknowledgement boundary: put the
+				// real row in the transcript reducer first, then synchronously remove
+				// its outbox carrier. Uncorrelated/assistant starts still wait for end.
+				const message = event.message;
+				const intentId = deliveryIntentId(message) ?? correlatedIntentId;
+				if (
+					intentId
+					&& message
+					&& (message.role === "user" || message.role === "user-with-attachments")
+				) {
+					const correlated = deliveryIntentId(message)
+						? message
+						: { ...message, deliveryIntentId: intentId };
+					this.apply({ type: "live-event", frame: { type: "message_start", message: correlated }, seq: eventSeq, ts: 0 });
+					this._settleSurfacedIntent(intentId);
+					event = { ...event, message: correlated };
+				}
+				break;
+			}
 
 			case "message_update":
 				if (event.message) {
@@ -3214,8 +3764,7 @@ export class RemoteAgent {
 							this._overflowRecoveryDeadline !== null
 							&& Date.now() <= this._overflowRecoveryDeadline
 							&& msg.stopReason === "error"
-							&& typeof msg.errorMessage === "string"
-							&& /prompt is too long|tokens?\s*>\s*\d/i.test(msg.errorMessage)
+							&& isContextOverflowError(msg.errorMessage)
 						) {
 							msg = { ...msg, _suppressedByOverflowRecovery: true };
 							suppressedOverflowRetry = true;
@@ -3312,6 +3861,11 @@ export class RemoteAgent {
 						}
 
 						this.apply({ type: "live-event", frame: { type: "message_end", message: msg }, seq: eventSeq, ts: 0 });
+						const surfacedIntentId = deliveryIntentId(msg) ?? correlatedIntentId;
+						if (
+							surfacedIntentId
+							&& (msg.role === "user" || msg.role === "user-with-attachments")
+						) this._settleSurfacedIntent(surfacedIntentId);
 						this._checkProposalToolResult(msg);
 
 						// Slice C2: bridge the live message onto the typed Host session
@@ -3423,6 +3977,7 @@ export class RemoteAgent {
 				// surfacing as a standalone red banner.
 				if (this._triggerFromEvent(event) === "overflow") {
 					this._overflowRecoveryDeadline = Date.now() + 60_000;
+					this.apply({ type: "suppress-latest-context-overflow-error" });
 				}
 				// Add a rich in-progress synthetic so compaction is visible in chat history
 				this._addCompactingPlaceholder(this._triggerFromEvent(event));

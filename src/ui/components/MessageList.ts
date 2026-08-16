@@ -6,7 +6,7 @@ import type {
 } from "@earendil-works/pi-ai";
 import { icon } from "@mariozechner/mini-lit";
 import { Copy, GitFork } from "lucide";
-import { html, LitElement, type PropertyValues, type TemplateResult } from "lit";
+import { html, LitElement, nothing, type PropertyValues, type TemplateResult } from "lit";
 import { property } from "lit/decorators.js";
 import { repeat } from "lit/directives/repeat.js";
 import { renderMessage } from "./message-renderer-registry.js";
@@ -75,6 +75,16 @@ function durableUserEntryId(message: BobbitMessage<AgentMessage>): string | unde
 		|| candidate.entryId.length > HISTORY_ENTRY_ID_MAX_LENGTH
 		|| candidate.entryId.trim() !== candidate.entryId) return undefined;
 	return candidate.entryId;
+}
+
+/** Reflect only an explicit correlated occurrence identity; legacy rows remain unkeyed. */
+function correlatedDeliveryIntentId(message: BobbitMessage<AgentMessage>): string | undefined {
+	const candidate = message as BobbitMessage<AgentMessage> & {
+		deliveryIntentId?: unknown;
+		intentId?: unknown;
+	};
+	const value = candidate.deliveryIntentId ?? candidate.intentId;
+	return typeof value === "string" && value.length > 0 && value.length <= 256 ? value : undefined;
 }
 
 interface PromptActionsOpenDetail {
@@ -475,6 +485,7 @@ export class MessageList extends LitElement {
 				items.push({
 					key: keyFor(msg),
 					template: html`<user-message
+						data-intent-id=${correlatedDeliveryIntentId(msg) ?? nothing}
 						.message=${msg}
 						.showAuthorLabel=${this.promptAuthorDisplayMode.showLabels && isAccountablePrompt}
 						.authorAppearance=${isAccountablePrompt
@@ -560,6 +571,7 @@ export class MessageList extends LitElement {
 					key: keyFor(msg),
 					template: html`<assistant-message
 						.message=${amsg}
+						.sessionId=${this.sessionId}
 						.tools=${this.tools}
 						.isStreaming=${false}
 						.pendingToolCalls=${this.pendingToolCalls}

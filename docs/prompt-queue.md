@@ -1,254 +1,136 @@
-# Prompt Queue & Message Dispatch
+# Reliable prompt and steer delivery
 
-How user messages flow from the browser to the agent subprocess, how they queue when the agent is busy, and how the UI keeps in sync.
+Bobbit separates **delivery state** from the **conversation transcript**. A prompt or steer may be accepted, queued, sent, or uncertain before Pi has durably written its user row. Keeping that work in the delivery outbox prevents it from being mistaken for a completed chat message and keeps a newly accepted human prompt visible through acknowledgement, reconnect, and hard reload.
 
-## Architecture overview
+This contract covers browser input and server-originated work. It extends the existing `PromptQueue`, dispatch ledger, prompt-author sidecar, snapshot handling, and queue-pill UI; it is not a second mailbox or transcript.
 
-```
-Browser (RemoteAgent)          Server (SessionManager)         Agent subprocess
-─────────────────────          ───────────────────────         ─────────────────
-  prompt() ──WS──►  enqueuePrompt()
-                     ├─ idle + empty queue ──► rpcClient.prompt() ──► process
-                     └─ busy or queue has items
-                        ├─ PromptQueue.enqueue()
-                        └─ broadcastQueue() ──WS──► queue_update
-                                                     │
-                     agent_end event ◄────────────────┘
-                     ├─ drainQueue()
-                     │  └─ dequeue next ──► rpcClient.prompt()
-                     └─ broadcastQueue() ──WS──► queue_update
+## Ownership boundary
 
-  steer()  ──WS──►  enqueue steered row ──► _dispatchSteer()
-                                      └─► rpcClient.steer() ──► injected mid-turn
-```
+The transcript is ordered exclusively by real, settled Pi transcript rows. Synthetic recovery rows, RPC acknowledgements, WebSocket writes, and lifecycle events do not create or settle transcript bubbles.
 
-## Three dispatch paths
+The delivery outbox owns every occurrence until exact Pi evidence transfers ownership:
 
-### 1. Direct dispatch (idle + empty queue)
+- The queue and in-flight ledger are server-owned durable delivery state.
+- Queue pills show pending, dispatched, failed, cancelled, or uncertain work without claiming it is chat history.
+- A real correlated Pi user row is the only route into the conversation. Its exact sidecar settlement makes the transfer durable.
+- A snapshot may contain a user-shaped recovery projection to preserve delivery information. The client removes every explicitly marked projection from the transcript reducer and places it in the outbox instead. It never settles an occurrence.
 
-The fast path. Agent is idle and nothing is queued — the prompt goes straight to the agent subprocess via `rpcClient.prompt()`. Title generation also fires here for the first message.
+This distinction is deliberate. A projection exists because Bobbit knows it handed work toward Pi, not because Pi recorded the work. Rendering it after the canonical transcript can make new user messages appear to disappear above System cards. Keeping it in the outbox preserves transcript order and makes reload reproduce the same truthful state.
 
-### 2. Enqueue (busy or queue non-empty)
+## Stable occurrence identity
 
-Agent is streaming or the queue already has items. The message is added to `PromptQueue`, and a `queue_update` is broadcast to all connected clients so the UI can show the pending messages. If the agent happens to be idle (queue was non-empty), `drainQueue()` is called immediately.
+Each accepted occurrence has a server-owned stable `intentId`. It identifies one submission, rather than its body: identical prompts are independent occurrences and must never be correlated, deduplicated, or settled by text.
 
-### 3. Drain (agent becomes idle)
+Browser submissions create and persist an ID before transport. The gateway supplies an ID when an older browser omits one. All newly created server-generated work also uses the reliable model, including:
 
-On `agent_end`, if the queue has items and the turn did not end with a genuine error, `drainQueue()` dispatches the next work. A recognized cancellation-shaped terminal is reconciled as cancellation rather than a provider error, then reaches this same drain boundary. If steered messages are at the front of the queue, they are all popped as a batch via `dequeueAllSteered()` and concatenated (`\n`-joined) into a single prompt — this ensures multiple steered messages arrive as one coherent block rather than triggering separate agent turns. Otherwise, the next undispatched message is popped and sent via `rpcClient.prompt()`. Status is set to `"streaming"` optimistically to prevent a race where another `enqueuePrompt()` call sees idle+empty and dispatches a second concurrent prompt.
+- task-complete notifications and other task notifications;
+- auto-nudges and inbox wake-ups;
+- verification messages and verifier follow-ups;
+- kickoff, continuation, recovery, and other system prompts, including batched system prompts; and
+- server/API/tool-originated local-user prompts and live steers.
 
-## Message types
+A direct server prompt reserves its occurrence before its Pi RPC. A queued or live steer reserves the same occurrence before leaving `PromptQueue`. Reliable steers are dispatched serially, rather than newline-batched, so equal-text steers retain separate identities. A source or author describes provenance; it is not an identity key.
 
-### `prompt` (client → server)
+An occurrence keeps its `intentId` while moving between browser storage, `PromptQueue`, the in-flight ledger, delivery projections, and the user row. Every dispatch creates a distinct `attemptId` and monotonic dispatch epoch. The prompt-author sidecar records the exact occurrence and attempt, model-text digest/prefix evidence, accountable author, and terminal disposition. These sidecar facts—not matching text, display text, or arrival order—are the evidence used to settle or retire an attempt.
 
-Standard user message. Always routed through `enqueuePrompt()` — never sent directly to the agent.
+## Lifecycle
 
-### `steer` (client → server)
+| State | Meaning | Visible surface |
+| --- | --- | --- |
+| `local` | Browser storage accepted the occurrence but the gateway has not durably admitted it. | **Waiting for connection**. Reload resends the same ID. |
+| `queued` | The gateway durably owns it in a lane. | Queue pill, including next-turn or continuation context. |
+| `dispatching` | A durable in-flight attempt exists and Pi RPC has been called. | **Sending…**; an RPC acknowledgement is not settlement. |
+| `received` | A correlated Pi user start was observed. | The real Pi row can be surfaced while the durable terminal sidecar is awaited. |
+| `uncertain` | Pi may have received the exact attempt but Bobbit cannot prove its terminal result. | **Awaiting delivery confirmation**; no automatic replay or Retry. |
+| `failed` | Pi definitively rejected before starting the attempt, with the required cancellation evidence. | **Not delivered**, with Retry only when that occurrence is eligible. |
+| `cancelled` | A cancellation disposition is durable. | **Cancelled** / dismissal state, never a transcript message. |
+| `surfaced` | The exact Pi user row and echoed sidecar settlement are durable. | The settled Pi transcript row becomes the carrier. |
 
-A mid-turn redirect. Behavior depends on agent state:
+The browser persists local work before sending. The server persists accepted queue work, or an in-flight reservation, before calling Pi. Admission and replay are idempotent by `(sessionId, intentId)`: a reconnect or another tab returns the same carrier, while equal text under another ID remains separate.
 
-- **Agent streaming**: Enqueued as a steered row, then dispatched **immediately** through `_dispatchSteer()` — injected between tool calls in real time. `_dispatchSteer()` records the text in the in-flight ledger, removes the row from the visible queue, persists both changes together, and forwards it via `rpcClient.steer()`. The UI textarea always queues via `prompt` — it never sends `steer` directly.
-- **Agent idle**: Enqueued as a steered message. Steered messages sort before normal messages in the queue.
+## Receipt, settlement, and snapshots
 
-### `follow_up` (client → server)
+Pi receipt has two distinct boundaries:
 
-Similar to `prompt` but dispatched via `rpcClient.followUp()` instead of `rpcClient.prompt()`. Used when continuing a conversation after the agent finished (different RPC semantics in the agent subprocess). Routed through `enqueuePrompt()` like normal prompts. The `isFollowUp` flag is preserved on the `QueuedMessage` so that queued follow-ups dispatch via the correct RPC method on drain.
+1. A correlated user `message_start` is receipt evidence. It lets the client surface the real Pi user row and transition the delivery carrier without a blank frame.
+2. A correlated user `message_end` settles only after the sidecar has durably recorded the matching `intentId` and `attemptId` as echoed. Only then may the dispatch reservation be pruned.
 
-### `steer_queued` (client → server)
+The sidecar matters across restarts and races. It binds the Pi row to the intended occurrence using exact occurrence/attempt evidence and dispatch metadata; it never infers a match from text. A late transcript row can still settle its original attempt after a reconnect or replacement. Conversely, a missing ledger/outbox row is not proof of settlement because the matching Pi event may be arriving on the same connection.
 
-Promotes an already-queued message to steered priority. If the agent is **streaming**, promotion dequeues all consecutive steered rows from the front of the queue via `dequeueAllSteered()` and immediately hands them to the single `_dispatchSteer()` site, matching a fresh live steer instead of waiting for a later tool boundary; the dispatched rows leave the visible queue. `_dispatchSteer()` removes the rows, joins them with `\n`, aborts any parked `bash_bg wait`, forwards to `rpcClient.steer()`, and owns RPC-failure recovery. If the agent is **idle**, promotion broadcasts and `drainQueue()` drains normally with steered rows first.
+A hard reload reconstructs the same division of ownership: settled Pi rows form the transcript, and queued, dispatching, received, uncertain, failed, or cancelled occurrences form the outbox. Recovery-only rows are excluded from `state.messages` even when their presentation resembles a user or System message. They cannot overtake the transcript tail or become settled merely by being rehydrated.
 
-### `remove_queued` (client → server)
+## Lanes, compaction, and settlement fences
 
-Removes a message from the queue. Broadcasts an updated queue.
+An occurrence has a `kind` (`prompt` or `steer`), a target lane, and FIFO sequence within that lane:
 
-### `reorder_queue` (client → server)
+- prompts use `next-turn`;
+- a steer uses `continuation` only while a streaming turn can accept it; otherwise it is next-turn work; and
+- reordering changes only queued rows in their lane. A dispatched attempt is never reordered.
 
-Reorders the queue to match a given array of message IDs. Unknown IDs are ignored; messages not listed are appended at the end. Broadcasts updated queue. Used by the drag-to-reorder UI on queue pills.
+Compaction is active turn work, not an idle gap. It accepts and shows new work but fences every prompt, steer, retry, queue-drain, and tool-end dispatch path. Continuation steers retain their affinity where Pi can continue the turn; other work waits for the appropriate release owner.
 
-### `queue_update` (server → client)
+Final `agent_end` finishes user-visible turn bookkeeping but is not a fresh-prompt admission boundary. Pi can still run compaction or continuation work. `agent_settled` is the boundary that proves Pi has cleared its active-run guard and may drain next-turn work. It is **not** a prompt echo: every in-flight attempt without a correlated Pi start remains non-retryable `uncertain` at settlement and is never automatically replayed.
 
-Sent whenever the queue changes — enqueue, dequeue, steer, remove, reorder. Contains the full queue array so clients can replace their local state.
+See [Context compaction](compaction.md#reliable-turn-fence-and-release) for release ownership, overflow handling, and Stop during compaction.
 
-## PromptQueue internals
+## Failure, Stop, and recovery
 
-`src/server/agent/prompt-queue.ts` — a per-session ordered queue with priority sorting.
+The central safety rule is that a post-write handoff is ambiguous until exact evidence says otherwise. A timeout, thrown RPC, bridge loss, restart, abort, or replacement after the write may mean Pi received the message. Bobbit retains that exact intent/attempt as non-retryable `uncertain`; it does not invent a new occurrence, replay it automatically, or turn it into a transcript row.
 
-**Ordering**: Steered messages always sort before non-steered. Within each group, insertion order is preserved (stable sort). The client can explicitly reorder via `reorder(messageIds)` — the queue adopts the given ID order, with unlisted items appended at the end.
+A `{ success: false }` response is authoritative no-start evidence only when the matching prompt-author dispatch can also be durably cancelled. This second condition prevents a racing Pi echo from being retired and replayed. Once both facts hold, Bobbit may retire that attempt and perform its bounded recovery for the same durable occurrence:
 
-**Lifetime is queued → dispatched (= removed).** A row is added by `enqueue()` and is removed exactly once: either by `_dispatchSteer()` as it records the in-flight ledger and starts `rpcClient.steer()` (steered batch dispatch), by `drainQueue()` when the agent goes idle (regular dispatch), or by an explicit `remove()` from the UI. The queue **does not** carry an in-flight `dispatched` flag — once Bobbit records the ledger and removes the row, the shadow ledger (and then the SDK's `_steeringMessages` mirror after RPC acceptance) owns that state. `enqueueAtFront()` is reserved for reconciliation paths that need to put a row back at index 0 after an RPC failure or post-abort drain.
+- ordinary user-owned work can become an actionable, retryable failed row; and
+- server-owned automatic or verifier work returns only to its existing bounded recovery policy, retaining the same occurrence and envelope.
 
-Why this matters: the previous design carried a `dispatched: true` flag on rows after dispatch and relied on `removeDispatched()` / `resetDispatched()` to maintain it across normal completion vs force-kill. Three independent caches of "what's pending" — Bobbit's flag, the SDK's `_steeringMessages`, and pi-agent-core's `Agent.steeringQueue` — drifted under abort/restart and produced duplicate-steer-on-Stop. Removing the flag and treating row-removal-on-dispatch as the single source of truth at the Bobbit layer eliminates the drift. See [docs/design/steer-subsystem-rewrite.md](design/steer-subsystem-rewrite.md) for the design rationale.
+A received attempt, a failed sidecar cancellation, or any ambiguous outcome cannot use this recovery path. Explicit Dismiss writes a cancellation tombstone before removing an actionable carrier; it does not assert that Pi never saw the message.
 
-**follow_up preservation**: `QueuedMessage` carries an optional `isFollowUp` flag. When set, `drainQueue()` dispatches via `rpcClient.followUp()` instead of `rpcClient.prompt()`, preserving the correct RPC semantics through the queue.
+Stop follows the same rule. Queued work remains visible and continuation rows retarget to next-turn. Graceful replacement waits through `agent_settled`; hard replacement synthesizes the missing lifecycle boundary, reconciles exact evidence, then releases eligible work once. Old callbacks are generation-fenced. No Stop/restart path may blindly replay a dispatched occurrence.
 
-**Persistence**: The queue is persisted to `.bobbit/state/sessions.json` (via `SessionStore.update`) on every mutation, and restored on server restart via `new PromptQueue(ps.messageQueue)`.
+### Restart and legacy records
 
-## Client-side rendering
+Queue rows, modern in-flight attempts, and prompt-author settlements survive restart. Restore folds terminal sidecar evidence before a queue becomes live, preventing an echoed or dismissed occurrence from returning as pending work. A modern unsettled handoff restores as uncertain.
 
-`src/app/remote-agent.ts` handles the UI side:
+Older persisted ledgers may contain bare text strings or structured rows without a complete occurrence tuple. On load and at the trusted restore boundary, Bobbit converts each position into a deterministic, non-retryable uncertain carrier with server-owned compatibility identity. It does not compare legacy text against the transcript—equal strings are especially unsafe. A pre-identity structured record can be retired only by its own durable sidecar evidence; a bare record without that proof fails closed as uncertain. This migration avoids silent loss, duplicate delivery, accidental settlement, and false transcript cards while allowing users/operators to dismiss unresolved historical work.
 
-### Optimistic user messages
+## Errored turns
 
-When the user sends a prompt and the agent is **idle** (`!isStreaming`), `RemoteAgent.prompt()` adds the message to `state.messages` immediately with an `optimistic_*` id prefix. This ensures the message appears in chat without waiting for the server echo.
+A genuine model/provider error parks accepted work while normal retry policy runs. A new prompt or steer below the consecutive-error cap can implicitly unstick an ordinary errored turn. Bobbit prepends a short recovery prefix to the **model-facing dispatch payload**, without changing the occurrence identity, original user text, lane, or FIFO position.
 
-When the agent is **streaming**, the message is queued — no optimistic message is added. The server will echo it in the correct interleaved position when the queue drains and the agent processes it. The message appears as a queue pill above the textarea so the user knows it's pending.
+At the error cap, incoming work stays visibly parked until a human uses Retry or resolves the upstream problem. This prevents a broken provider from consuming unlimited automatic redrives while ensuring accepted work is not lost. A prompt arriving between final `agent_end` and `agent_settled` is retained as its one deferred occurrence and dispatched once at settlement, ahead of later eligible work.
 
-### Deduplication
+## `bash_bg wait` interaction
 
-When the server echoes a user message via `message_end`, `RemoteAgent` checks if an optimistic message with matching text already exists. If so, it replaces the optimistic message in-place (preserving position) rather than appending a duplicate.
+Dispatching a reliable automatic continuation steer interrupts a registered active `bash_bg wait` request so Pi can observe the steer at a tool boundary. The background process is not killed; only the wait request is aborted. Work still fenced behind compaction, Stop, replacement, or the settlement boundary does not interrupt a wait until it actually dispatches.
 
-### Live event tracking
+Wait interruption is transport/liveness behavior, not delivery evidence. It neither proves Pi receipt nor settles the occurrence; the exact Pi row and sidecar are still required.
 
-Live user messages are tracked through the unified message reducer (`src/app/message-reducer.ts`). The legacy `_liveEventMessages` bucket has been removed: `live-event` actions stamp the server `seq` as `_order`, and the `snapshot` action is authoritative for any id it contains. Surviving optimistic and live-only rows that the snapshot doesn't supersede are merged in by id and kept in their original order via `(_order, _insertionTick)` sorting. See [internals.md — Reducer ordering invariant](internals.md#reducer-ordering-invariant).
+## UI actions and operational invariants
 
-### Queue display
+- Queue rows can be reordered, edited, promoted, retried, or dismissed only when their state permits it. Uncertain work is dismiss-only.
+- Browser drafts are separate from delivery. Once Send or Steer creates an occurrence, the outbox owns it.
+- Multi-tab and reconnect projection merges use occurrence IDs and revision-checked local mutations. A stale tab cannot replace a newer Retry or Dismiss.
+- Delivery state is body-free in diagnostics. Operators should use session, intent, attempt, epoch, state, reason, and outcome—not prompt bodies—to investigate recovery.
 
-The client receives `queue_update` events and stores them in `_serverQueue`. The UI renders each queued message as a "pill" above the textarea:
+The result is intentionally conservative: an acknowledged prompt remains discoverable immediately, and a recovery record remains visible without ever rewriting conversation history. Visible uncertainty is preferable to duplicate model side effects or a misleading transcript.
 
-- **Non-steered pills** show four controls: drag handle (for reordering), edit button (pencil — removes pill and populates textarea for editing), steer button, and remove button (X).
-- **Steered pills** that remain in the queue show a "Sent" badge and no interactive controls. Streaming `steer_queued` promotions normally do not linger as Sent pills: the server removes the promoted front group from the queue in the same dispatch path, so the next `queue_update` drops the row.
-- **Edit flow**: Clicking the pencil icon fires `onEditQueued`, which removes the pill from the queue and places its text back in the textarea. On re-send, the message is added to the end of the queue (or dispatched directly if the agent is idle).
-- **Drag reorder**: Dragging a pill's handle fires `onReorder`, which sends a `reorder_queue` WS message. The server reorders and broadcasts the updated queue to all clients.
-
-### Draft persistence
-
-The message editor saves drafts so unsent composer state (both text and attached files) survives page reloads, session switches, and WebSocket reconnects.
-
-- **Prompt Text**: Saved to the server session via debounced `_flushDraft()` calls on input events, and loaded via `loadDraftFromServer()` when switching sessions. A synchronous mirror in `sessionStorage` avoids cursor and text clobbering during Lit component re-renders.
-- **Attachments (Images/Files)**: Stored client-side in IndexedDB via `PromptDraftAttachmentsStore` to avoid bloating the server-side `sessions.json` with large base64 blobs. State is lifted into `AgentInterface` and bound into `<message-editor>`, surviving slow-path cache-evicted session switching and page reloads.
-- **Text Generation-Counter Staleness Guard**: The **prompt text** draft employs a persistent monotonic generation (`gen`) counter, stored on the server draft, to reject out-of-order writes (e.g., late debounced autosaves landing after a message send). The client synchronously seeds `_draftGen` from `sessionStorage` or the server draft on load to prevent post-round-trip edits from being rejected as stale.
-- **Attachment In-Flight Guard**: Attachment drafts carry **no persistent gen** — IndexedDB records have no generation field. A stale async load resurrecting cleared/sent attachments is prevented by an in-memory in-flight async-load generation token (`_attachmentDraftGen`) in `AgentInterface`, bumped on every load/set/clear so an in-flight read that is no longer current is discarded on resolve.
-
-For a comprehensive explanation of the persistence model, safety caps/evictions, state lifting, and synchronization guards, see [docs/design/composer-draft-persistence.md](design/composer-draft-persistence.md).
-
-**Race protection on session switch**: `_flushDraft()` returns a promise and stores it in `_pendingSave`. When switching sessions, `_setupPromptDraftHandlers()` awaits `_pendingSave` before loading the new session's draft. This prevents a stale save from the old session from clobbering the newly loaded draft. The teardown path (`_teardownDraftHandlers`) does not abort in-flight saves — it lets them complete so no data is lost.
-
-**Restore resilience against Lit re-renders**: After loading a draft from the server, the value is set on the editor element. However, Lit component re-renders (triggered by connection status changes, message loading, etc.) can reset the editor's value. To handle this, draft restore uses a `requestAnimationFrame` retry loop that re-applies the draft value for up to 5 frames, ensuring the draft survives any re-renders that occur during the initial render cycle.
-
-## Error handling
-
-### Turn errors suppress queue draining
-
-If a genuine error ends a turn (tracked via `lastTurnErrored`), `drainQueue()` is skipped on `agent_end`. Queued messages wait for recovery rather than being fed into a broken agent. An error-shaped terminal is provisional until the final boundary: the narrow cancellation reconciliation below clears its error state and drains instead.
-
-**Error-state queue gating (implicit unstick)**: When a genuine error survives the final boundary, `session.lastTurnErrored = true` and `session.consecutiveErrorTurns` is incremented. An incoming prompt or steer then takes one of two paths:
-
-- **Below the cap** (`consecutiveErrorTurns < MAX_CONSECUTIVE_ERROR_TURNS`, currently `3`): `enqueuePrompt()` / `deliverLiveSteer()` implicitly unstick the session. They clear `lastTurnErrored` / `lastTurnErrorMessage` / `turnHadToolCalls`, cancel any `pendingAutoRetryTimer`, reset `transientRetryAttempts`, prepend a short `[SYSTEM: previous turn failed with: …. Your previous turn was interrupted. Pick up where you left off — re-check state first and avoid redoing completed work.]` prefix to the new text, and dispatch it. The previous failed turn is **not** retried — the incoming message is treated as fresh intent. Any messages parked in the queue while the session was wedged then drain normally (without the prefix, since the error is already cleared).
-- **At or above the cap** (`consecutiveErrorTurns ≥ 3`): the incoming message is parked in `promptQueue` (the pre-change behaviour) and a warning is logged. This is the brake for persistently broken upstreams (quota exhausted, auth revoked, content filter) so we don't re-trigger the failing model on every nudge. Parked messages drain once a human clicks Retry and the underlying issue is fixed.
-
-The counter resets to `0` on cancellation reconciliation, any successful `message_end` (non-error, non-aborted), and a successful explicit `retryLastPrompt`. Steers must still route through `deliverLiveSteer()` so they persist to `promptQueue` first (`persisted: true`), preserving the Stop/retry invariant (PI-25b/PI-25c).
-
-**Explicit UI Retry bypasses the cap.** `retryLastPrompt()` always runs regardless of `consecutiveErrorTurns` — the cap only gates the implicit path.
-
-**TeamManager no longer second-guesses.** The previous suppression that dropped team-lead nudges when `teamLeadSession.lastTurnErrored` was true has been removed. SessionManager is the single source of truth: the nudge either unsticks the lead (≤ cap) or parks (≥ cap). If the lead is persistently broken, parked nudges drain automatically once a human fixes the upstream issue — strictly better than the old "drop on the floor" behaviour.
-
-See also [docs/debugging.md — Session wedged after errored turn](debugging.md#session-wedged-after-errored-turn) and the AGENTS.md debug-keyword entry of the same name.
-
-### Retry
-
-`retryLastPrompt()` handles two cases:
-- **Fresh error** (no tool calls executed): Re-sends `lastPromptText` via `rpcClient.prompt()`.
-- **Mid-work error** (tool calls already ran): Sends a system continuation message so the agent picks up where it left off rather than re-executing tools.
-
-On successful retry (turn completes without error), `lastTurnErrored` is cleared and `drainQueue()` resumes normal operation.
-
-### Parked work is never silently idle
-
-For a non-cancellation error, Bobbit must not drain queued prompts or steers into a possibly broken provider. `maybeAutoRetryTransient()` first applies the established provider-overload, transport, and generic-runtime retry policies. A scheduled retry leaves the rows queued and emits the visible retry countdown; deterministic provider/auth/validation failures remain parked.
-
-If no retry timer is armed and durable queued work remains, Bobbit retains the errored state and emits `manual_retry_required`: **"Queued work is parked because this turn failed. Manual Retry is required."** This idempotent backstop makes unclassified failures actionable instead of presenting healthy-looking idle. The condition is replayed to a newly authenticated live attachment together with the queue, so a reload or reconnect does not hide the required manual recovery. Starting a new turn or invoking Retry clears the notice.
-
-See [Auto-Retry](auto-retry.md) for classifier and scheduling policy.
-
-### Dispatch failure
-
-If `rpcClient.prompt()` fails during direct dispatch or `drainQueue()`, Bobbit treats the text as not accepted by the agent. The rows that were already removed from `PromptQueue` are re-enqueued at the front in their original order.
-
-For ordinary dispatch rejections, the optimistic `"streaming"` status is reverted to `"idle"`, the updated queue is broadcast, and a follow-up drain is scheduled on the next tick. For provider-auth failures such as `No API key found for openrouter`, Bobbit stops there instead of redraining: it persists `wasStreaming: false`, clears `streamingStartedAt`, broadcasts `session_status: "idle"`, and emits `provider_auth_required` so the UI shows fix/retry/switch-provider/abort-respawn actions. The failed prompt stays at the front of the queue and is consumed by Retry after credentials or model choice are fixed.
-
-For `drainQueue()` recovery, Bobbit suppresses re-enqueue only after an inbound agent event advances `agentObservedTurnVersion`, proving the turn was accepted. Local status-only changes such as Stop → `"aborting"` do not count; that distinction prevents duplicate recovered task notifications without dropping a prompt that was rejected during abort/restart reconciliation.
-
-The exception is a child-exit path where the session is already `terminated` or `aborting`. Bobbit does not re-enqueue into a dead bridge; sandbox recovery, force-abort recovery, or explicit Retry owns the next process.
-
-## Abort and force-kill recovery
-
-When the user clicks Stop (or presses Escape), the server attempts a graceful abort via `rpcClient.abort()`. If the agent doesn't become idle within 3 seconds (e.g. it's blocked in a synchronous tool like `bash sleep 60`), the process is force-killed and a fresh agent is spawned.
-
-**Aborting status**: On abort, the server immediately broadcasts `session_status: "aborting"` so the UI can show feedback (an "Aborting..." spinner in `AgentInterface`). This covers the up-to-3-second window where the graceful abort is pending and the user would otherwise see no response. The status transitions: `streaming` → `aborting` → `idle` (graceful) or `streaming` → `aborting` → force-kill → respawn → `idle`.
-
-### Cancellation-shaped terminal recovery
-
-A runtime cancellation can arrive while the session is still `streaming`, rather than through the user-Stop `"aborting"` state. At the final `agent_end` boundary, Bobbit treats either source as cancellation when the latest assistant terminal is one of these narrow Pi/runtime forms:
-
-- `stopReason: "aborted"`; or
-- `stopReason: "error"` with a normalized whole-message cancellation form such as `aborted`, `request aborted`, `operation aborted`, or `AbortError` / standard operation-aborted wording.
-
-This is intentionally not a substring match. Provider, authentication, validation, HTTP/server, timeout, connection, rate-limit, and content-policy diagnostics that merely mention "aborted" remain genuine errors and keep their existing park/retry policy.
-
-Cancellation reconciliation preserves durable intent before returning to idle:
-
-1. Requeue only steer ledger entries that have not reached a proven user-role echo. Echoed steers are already settled and must not be replayed.
-2. Broadcast the reconciled queue, clear cancellation-only error state and counters, then use the normal `drainQueue()` boundary. A replacement coordinator may defer that drain until it releases; reconciliation never dispatches work directly.
-3. Preserve queue priority and FIFO ordering: recovered steers return to the front in dispatch order, then the normal drain batches consecutive steers.
-
-The same boundary serves user Stop and external cancellation so force-abort behavior remains unchanged. It also retains dangling tool-call and dispatch-rejection recovery in their existing owners.
-
-### Terminal ownership and exactly-once delivery
-
-Only the latest distinct assistant terminal seen before the final boundary classifies the turn. After a final `agent_end` is handled, its terminal identities and cancellation classification are consumed; a late `message_end` or duplicate `agent_end` cannot reclassify a later turn, repeat reconciliation, enqueue a second steer, or drain another queue row. A new `agent_start`, Retry, or accepted redrive establishes the next turn's terminal scope.
-
-**Force-kill recovery flow** (exactly-once at the transcript level):
-
-1. User clicks Stop. `SessionManager.forceAbort()` enters abort handling. The shadow ledger (`session.inFlightSteerTexts`) holds every dispatched steer that has not reached a proven user-role `message_end` echo.
-2. If the graceful abort does not settle, the agent process is stopped and `_reconcileAfterAbort()` re-enqueues only the unresolved ledger entries at the front of `promptQueue` with `isSteered: true` (via `enqueueAtFront()`), then clears the ledger. Reverse traversal preserves their original dispatch order and keeps recovered steers ahead of ordinary queued work.
-3. A synthetic `agent_end` is emitted and a fresh subprocess is spawned.
-4. `drainQueue()` runs. The re-enqueued steered rows are popped via `dequeueAllSteered()`, joined into a single prompt, and dispatched once.
-
-The same reconciliation runs on the graceful path: when `handleAgentLifecycle` sees `agent_end` while `wasAborting`, it calls `_reconcileAfterAbort()` before transitioning to `idle`. Either way the result is the same — every steer the user typed appears as exactly one `<user-message>` in the rendered chat, even if the abort race tore down the agent between dispatch and echo.
-
-### The shadow ledger
-
-`SessionInfo.inFlightSteerTexts` is a per-session array of durable steer records. A record's lifecycle is bounded between **dispatch start** (recorded by `_dispatchSteer()` before the row-removal store update) and a proven user-role echo. The record carries a stable prompt ID as well as the original text so settlement can distinguish repeated identical steers.
-
-- **Record + persist**: `_dispatchSteer()` appends the batch record before removing queue rows, then persists `messageQueue` and `inFlightSteerTexts` in the same store update. A gateway restart after row removal but before transcript echo can therefore recover the text exactly once.
-- **Settle**: `_consumeSteerEcho()` accepts only a user or user-with-attachments `message_end`. When a prompt-author binding is available, it matches by prompt ID; only legacy/unbound echoes fall back to the first matching text. A replayed terminal frame that is already settled is ignored, so it cannot consume a later same-text steer.
-- **Drain**: `_reconcileAfterAbort()` and `restoreSession()` run after durable echoes have been replayed. They re-enqueue only records that remain unresolved, in dispatch order, with `isSteered: true`, then clear the ledger.
-
-The ledger exists because the SDK's in-process steering mirror is not a durable restart/abort recovery surface. The proven user-role echo is Bobbit's durable settlement boundary: it shows the steer reached Pi, so it must never be replayed after Stop or a restart. Entries without that proof are recovered exactly once from the ledger. Bounded growth is enforced by construction: every push has a paired settlement or recovery drain; neither path is silently dropped.
-
-Late RPC rejection is also guarded: `_dispatchSteer()` only rolls a failed steer back into the queue if its ledger entry is still present. If abort/restart reconciliation already drained that entry, the catch path persists the cleared ledger and does **not** enqueue a duplicate.
-
-**Why `steer_queued` dispatches through `_dispatchSteer()`**: while streaming, `steerQueued()` only does the queue promotion/dequeue work and then immediately calls the same `_dispatchSteer()` path used by fresh live steers. That keeps wait abort, row removal, batching, shadow-ledger handoff, and RPC-failure recovery in one place. When idle, promotion falls back to normal `drainQueue()` semantics with steered rows first.
-
-## WS protocol summary
+## Protocol summary
 
 | Direction | Type | Purpose |
-|-----------|------|---------|
-| Client → Server | `prompt` | Send a user message (queued if busy) |
-| Client → Server | `steer` | Mid-turn interrupt or queued-as-steered |
-| Client → Server | `follow_up` | Continue after agent idle (different RPC) |
-| Client → Server | `steer_queued` | Promote queued message to steered priority |
-| Client → Server | `remove_queued` | Remove a message from the queue |
-| Client → Server | `reorder_queue` | Reorder queue to match given ID array |
-| Client → Server | `abort` | Cancel current turn (force-kills if needed) |
-| Client → Server | `retry` | Retry after model/API error |
-| Server → Client | `queue_update` | Full queue state after any mutation |
-| Server → Client | `session_status` | `"streaming"`, `"aborting"`, or `"idle"` status changes |
-| Server → Client | `manual_retry_required` | Durable queued work is parked after a non-retryable or unclassified turn failure; use manual Retry after addressing the cause |
-| Server → Client | `provider_auth_required` | Provider credential failure; client renders Settings, Retry, Switch provider, and Abort/respawn recovery actions |
+| --- | --- | --- |
+| Client → server | `prompt`, `steer` | Submit one occurrence with an optional `intentId`. |
+| Client → server | `retry_intent` | Retry one definitely failed eligible occurrence by stable ID. |
+| Client → server | `steer_queued` | Promote an accepted queued occurrence to a steer. |
+| Client → server | `remove_queued` | Durably dismiss one queued or uncertain occurrence. |
+| Client → server | `reorder_queue` | Reorder queued IDs within their lanes. |
+| Client → server | `abort` | Stop the active turn without deleting accepted work. |
+| Server → client | `intent_update` | Exact occurrence projection or terminal disposition. |
+| Server → client | `queue_update`, `delivery_outbox` | Server-authoritative visible outbox projection. |
+| Server → client | correlated Pi user event | Receipt/transcript evidence carrying delivery identity. |
 
-## Key files
+## Related documentation
 
-| File | Role |
-|------|------|
-| `src/server/agent/prompt-queue.ts` | Queue data structure with priority sorting; `enqueue` / `dequeue` / `dequeueAllSteered` / `enqueueAtFront` / `remove` / `reorderByIds`. No `dispatched` flag, no `markDispatched`/`removeDispatched`/`resetDispatched`. |
-| `src/server/agent/session-manager.ts` | `enqueuePrompt()`, `drainQueue()`, `deliverLiveSteer()`, `steerQueued()`, single `_dispatchSteer()` site, `_consumeSteerEcho()`, `_reconcileAfterAbort()`, `forceAbort()`, lifecycle |
-| `src/server/ws/handler.ts` | WS command routing (`prompt`, `steer`, `follow_up`, etc.) |
-| `src/server/ws/protocol.ts` | `QueuedMessage`, `ManualRetryRequiredEvent`, `ProviderAuthRequiredEvent`, and client/server message unions |
-| `src/app/remote-agent.ts` | Client-side optimistic rendering, dedup, queue state |
-
-## Related
-
-- [Composer caret-row invariant](internals.md#composer-caret-row-invariant) — how the composer decides between caret movement and command-history browsing for ArrowUp/ArrowDown, and why the decision requires layout measurement.
-- [session-prompt-tools.md](session-prompt-tools.md) — agent-facing `session_prompt` / `team_prompt` delivery modes that route into `enqueuePrompt()` and `deliverLiveSteer()`.
-- [image-attachment-only-prompts.md](image-attachment-only-prompts.md) — `enqueuePrompt` synthesizes a non-blank text body for attachment-only prompts before they reach the queue, so queued/drained rows never carry a blank `ContentBlock`.
+- [Context compaction](compaction.md#reliable-turn-fence-and-release)
+- [Auto-retry](auto-retry.md)
+- [Background process persistence](bg-process-persistence.md#wait-interruption-versus-intent-delivery)
+- [Debugging reliable delivery](debugging.md#reliable-prompt-and-steer-delivery)
+- [WebSocket protocol](websocket-protocol.md)

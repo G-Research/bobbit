@@ -300,7 +300,15 @@ test("(c) a transient resume failure routes into the rerun-from-scratch fallback
 	assert.equal(promptAuthorBindingMatchesText(bindings[0], VERIFICATION_RESULT_REMINDER), false);
 	assert.equal(bindings[0].source, "verification");
 	assert.deepEqual(bindings[0].author, { kind: "system", id: "system:bobbit", label: "Bobbit" });
-	assert.equal(bindings[0].settlement?.outcome, "cancelled");
+	assert.equal(bindings[0].settlement, undefined, "A post-write transport failure is ambiguous, not proof that Pi never started the reminder.");
+	assert.ok(bindings[0].intentId, "The failed reminder must retain its server-owned occurrence identity.");
+	assert.ok(bindings[0].attemptId, "The failed reminder must retain its exact dispatch attempt identity.");
+	const inFlight = (fakeSession as any).inFlightSteerTexts ?? [];
+	assert.equal(inFlight.length, 1, "The ambiguous reminder must remain as exactly one recovery carrier, not be cancelled or duplicated.");
+	assert.equal(inFlight[0].state, "uncertain");
+	assert.equal(inFlight[0].retryable, false);
+	assert.equal(inFlight[0].intentId, bindings[0].intentId, "The retained carrier must be the original reminder occurrence.");
+	assert.equal(inFlight[0].attemptId, bindings[0].attemptId, "The retained carrier must be the original reminder attempt.");
 
 	const statuses = gateStatusCalls(calls);
 	assert.strictEqual(

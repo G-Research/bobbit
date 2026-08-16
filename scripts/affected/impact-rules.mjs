@@ -558,6 +558,12 @@ const allowedExecutableOperation = (kind, expression, allowReason, count = 1) =>
  */
 export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 	{
+		consumer: "tests2/core/pi-installed-contract.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("dynamic-import", "pathToFileURL(adapterPath).href", "installed Pi JSON event adapter selected by the pinned package contract"),
+		]),
+	},
+	{
 		consumer: "tests2/core/aigw-wellknown-dns-guard.test.ts",
 		operations: frozen([
 			allowedExecutableOperation("dynamic-import", "`${pathToFileURL(extension!).href}?test=${Date.now()}`", "test-owned generated AIGW guard extension"),
@@ -844,6 +850,14 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
  * second read through an existing expression an intentional review event too.
  */
 export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
+	{
+		consumer: "tests2/core/pi-installed-contract.test.ts",
+		allowReason: "installed pinned Pi dependency package metadata and adapter paths",
+		reads: frozen([
+			{ expression: "candidate", count: 1 },
+			{ expression: "path.join(installedPackageRoot(packageName), \"package.json\")", count: 1 },
+		]),
+	},
 	{
 		consumer: "tests2/core/borrowed-sandbox-worktree-ownership.test.ts",
 		allowReason: "test-owned persisted sandbox transcript used to prove byte preservation across reload and termination",

@@ -10,6 +10,7 @@ import {
 	type PromptAuthorBinding,
 } from "../../src/server/agent/author-sidecar.ts";
 import { spliceInFlightSteers } from "../../src/server/agent/splice-inflight-message.ts";
+import { normalizePersistedInFlightSteers } from "../../src/server/agent/session-store.ts";
 import { LOCAL_USER_AUTHOR, type MessageAuthor } from "../../src/shared/message-author.ts";
 
 const SYSTEM_AUTHOR: MessageAuthor = { kind: "system", id: "system:bobbit", label: "Bobbit" };
@@ -71,15 +72,30 @@ describe("spliceInFlightSteers occurrence correlation", () => {
 		const historical = userRow("old-user", "reroute");
 		const messages = [historical, { id: "assistant", role: "assistant", content: "working" }];
 
-		const result = spliceInFlightSteers(messages, [steer("reroute", "new-system-steer")]);
+		const result = spliceInFlightSteers(messages, [{
+			...steer("reroute", "attempt-new-system-steer"),
+			intentId: "intent-new-system-steer",
+			attemptId: "attempt-new-system-steer",
+			state: "dispatching",
+			targetTurn: "continuation",
+			sequence: 7,
+		}]);
 
 		expect(result).toHaveLength(3);
 		expect(result.slice(0, 2)).toEqual(messages);
 		expect(result[2]).toMatchObject({
-			id: "inflight-steer:new-system-steer",
+			id: "inflight-steer:intent-new-system-steer",
 			role: "user",
 			author: SYSTEM_AUTHOR,
+			deliveryIntentId: "intent-new-system-steer",
+			deliveryAttemptId: "attempt-new-system-steer",
+			deliveryState: "dispatching",
+			targetTurn: "continuation",
+			sequence: 7,
+			kind: "steer",
+			isSteered: true,
 			_inFlightSteer: true,
+			_deliveryRecoveryProjection: true,
 		});
 	});
 
@@ -162,16 +178,52 @@ describe("spliceInFlightSteers occurrence correlation", () => {
 		expect(result[1].author).toEqual(SYSTEM_AUTHOR);
 	});
 
-	it("retains occurrence-unaware multiset compatibility for legacy string records", () => {
-		const messages = [userRow("legacy-echo", "legacy")];
+	it("routes a migrated pre-intent structured carrier to non-retryable uncertain delivery ownership", () => {
+		const restored = normalizePersistedInFlightSteers([{
+			text: "pre-intent task notification",
+			promptId: "legacy-task-notification:42",
+			source: "task-notification",
+			author: SYSTEM_AUTHOR,
+		}])!;
+		const result = spliceInFlightSteers([], restored);
 
-		const result = spliceInFlightSteers(messages, ["legacy", "legacy"]);
+		expect(result).toEqual([expect.objectContaining({
+			id: "inflight-steer:legacy-inflight-steer:legacy-task-notification:42",
+			author: SYSTEM_AUTHOR,
+			deliveryIntentId: "legacy-inflight-steer:legacy-task-notification:42",
+			deliveryAttemptId: "attempt:legacy-inflight:legacy-inflight-steer:legacy-task-notification:42",
+			deliveryState: "uncertain",
+			retryable: false,
+			_deliveryRecoveryProjection: true,
+			_inFlightSteer: true,
+		})]);
+	});
+
+	it("routes duplicate bare-string recovery carriers to distinct non-retryable identities", () => {
+		const result = spliceInFlightSteers([], ["legacy", "legacy"]);
 
 		expect(result).toHaveLength(2);
-		expect(result[1]).toMatchObject({
-			id: "inflight-steer:1:legacy",
-			author: LOCAL_USER_AUTHOR,
-			_inFlightSteer: true,
-		});
+		expect(result).toEqual([
+			expect.objectContaining({
+				id: "inflight-steer:legacy-inflight-steer:0",
+				author: LOCAL_USER_AUTHOR,
+				deliveryIntentId: "legacy-inflight-steer:0",
+				deliveryAttemptId: "attempt:legacy-inflight:legacy-inflight-steer:0",
+				deliveryState: "uncertain",
+				retryable: false,
+				_deliveryRecoveryProjection: true,
+				_inFlightSteer: true,
+			}),
+			expect.objectContaining({
+				id: "inflight-steer:legacy-inflight-steer:1",
+				author: LOCAL_USER_AUTHOR,
+				deliveryIntentId: "legacy-inflight-steer:1",
+				deliveryAttemptId: "attempt:legacy-inflight:legacy-inflight-steer:1",
+				deliveryState: "uncertain",
+				retryable: false,
+				_deliveryRecoveryProjection: true,
+				_inFlightSteer: true,
+			}),
+		]);
 	});
 });

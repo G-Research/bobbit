@@ -16,7 +16,7 @@ For startup, restart, and broken override fallback behavior, see [Tool override 
 | `prompt` | Enqueues a normal prompt behind current work. | Starts a normal turn immediately when possible, otherwise queues normally. | New work or follow-up tasks that should run as a fresh turn. |
 | `steer` | Uses the live-steer path (`SessionManager.deliverLiveSteer`). | Queues a steered prompt with `isSteered: true`. | Current-turn corrections, urgent nudges, or preserving steered recovery semantics. |
 
-Steered delivery is not a silent downgrade to a normal prompt. If the target is not currently streaming, the queued row remains steered, so it keeps steered priority and the existing abort/restart recovery behavior described in [Prompt Queue & Message Dispatch](prompt-queue.md).
+Steered delivery is not a silent downgrade to a normal prompt. The shared delivery boundary assigns every documented tool-route prompt or steer a server-owned stable occurrence identity before it can enter the queue or Pi RPC path; callers do not supply an `intentId`. An idle target retains steered priority; a streaming target routes through live steer dispatch. The [reliable delivery](prompt-queue.md) lifecycle, including durable outbox, sidecar, restart, and ambiguity handling, applies to both modes.
 
 ## Unavailable-model admission fence
 
@@ -53,7 +53,7 @@ The chat transcript uses a dedicated `session_prompt` tool renderer instead of s
 - the delivery mode (`prompt` by default, or `steer`);
 - the prompt/steer message body, preserving line breaks while relying on Lit template escaping for safety.
 
-Prompt cards use the chat/message icon and a `Prompted` header. Steer cards use a lightning-style icon and a `Steered` header. Completed cards include the delivery outcome: `queued`, `dispatched`, or `live steer dispatched`. Failed and aborted cards follow the normal tool-renderer error conventions and surface the server error text.
+Prompt cards use the chat/message icon and a `Prompted` header. Steer cards use a lightning-style icon and a `Steered` header. Completed cards include the routing outcome: `queued`, `dispatched`, or `live steer dispatched`. The outcome reports routing, not Pi receipt, settlement, wait interruption, or transcript delivery; those require the reliable lifecycle's correlated Pi and sidecar evidence. Failed and aborted cards follow the normal tool-renderer error conventions and surface the server error text.
 
 Parameters:
 
@@ -163,10 +163,9 @@ See [REST API](rest-api.md) for the route table and [Orchestration](orchestratio
 
 Focused coverage lives in:
 
-- `tests/session-prompt-delivery.test.ts` — shared helper mode selection, streaming vs idle behavior, missing/terminated targets, result `target.sessionId`/optional `target.title` metadata, and non-interactive rules.
-- `tests2/integration/team-steer-prompt.test.ts` — goal-team `team_prompt` recovery for retryable `fetch failed`, blocked/action-required behavior for provider-auth failures, exactly-once queued-intent preservation, and workflow context injection.
-- `tests/session-prompt-policy.test.ts` — real `session_prompt` YAML `grantPolicy: never` and absence from default allowed tools until explicitly re-granted.
-- `tests/session-prompt-renderer.spec.ts` with `tests/fixtures/session-prompt-renderer.html` — browser fixture coverage for default prompt mode, steer mode with distinct icon/label, multiline escaped message text, missing-title fallback to shortened id, session link rendering, and server error display.
-- `tests/e2e/session-prompt.spec.ts` — caller authorization, arbitrary live target prompting, returned target metadata, and steer-mode interruption of `bash_bg wait` through the live-steer path.
-- `tests/e2e/team-steer-prompt.spec.ts` — `team_prompt` default steer behavior, `mode: "prompt"` normal queue semantics, and workflow context injection in both modes.
+- `tests2/core/session-prompt-delivery.test.ts` — shared helper mode selection, streaming vs idle behavior, missing/terminated targets, target metadata, and non-interactive rules.
+- `tests2/integration/team-steer-prompt.test.ts` — goal-team recovery, blocked/action-required behavior, queued-intent preservation, and workflow context injection.
+- `tests2/core/session-prompt-policy.test.ts` — `session_prompt` policy and default-tool exclusion.
+- `tests2/dom/session-prompt-renderer.test.ts` — prompt/steer card rendering and server errors.
+- `tests/e2e/session-prompt.spec.ts` — API/tool-route behavior, including reliable delivery routing.
 - `tests2/core/model-selection-required-prompt-boundary.test.ts` and `tests2/browser/journeys/model-selection-recovery.journey.spec.ts` — conditioned delivery is rejected before acceptance, and the browser retains its text and attachment draft through model recovery.

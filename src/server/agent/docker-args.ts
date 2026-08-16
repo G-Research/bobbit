@@ -68,19 +68,38 @@ export function projectSandboxVolumeNames(projectId: string, runId = process.env
 }
 
 /**
- * Explicitly create E2E volumes before the container so they carry ownership
- * labels. Docker's implicit named-volume creation cannot attach labels, which
- * would make teardown depend on a surviving container to discover a project.
+ * Explicitly create project sandbox volumes before the container. This gives
+ * every new volume an owner label; Docker's implicit named-volume creation
+ * cannot attach labels. `initializationId` is an unguessable per-attempt marker
+ * used by ProjectSandbox to prove it created the volume before changing its
+ * ownership. It must never be supplied for an existing volume.
+ */
+export function projectSandboxVolumeCreateArgs(
+	projectId: string,
+	runId = process.env.BOBBIT_E2E_RUN_ID,
+	initializationId?: string,
+): string[][] {
+	const validatedRunId = validatedE2ERunId(runId);
+	return Object.values(projectSandboxVolumeNames(projectId, validatedRunId)).map((name) => {
+		const args = [
+			"volume", "create",
+			"--label", `bobbit-project=${projectId}`,
+		];
+		if (validatedRunId) args.push("--label", `bobbit-e2e-run=${validatedRunId}`);
+		if (initializationId) args.push("--label", `bobbit-volume-initialization=${initializationId}`);
+		args.push(name);
+		return args;
+	});
+}
+
+/**
+ * Explicitly create E2E volumes before the container so teardown can discover
+ * their owner even after the container is gone. Production callers use
+ * projectSandboxVolumeCreateArgs directly for the same ownership labels.
  */
 export function e2eSandboxVolumeCreateArgs(projectId: string, runId = process.env.BOBBIT_E2E_RUN_ID): string[][] {
-	const validatedRunId = validatedE2ERunId(runId);
-	if (!validatedRunId) return [];
-	return Object.values(projectSandboxVolumeNames(projectId, validatedRunId)).map((name) => [
-		"volume", "create",
-		"--label", `bobbit-project=${projectId}`,
-		"--label", `bobbit-e2e-run=${validatedRunId}`,
-		name,
-	]);
+	if (!validatedE2ERunId(runId)) return [];
+	return projectSandboxVolumeCreateArgs(projectId, runId);
 }
 
 export interface DockerRunConfig {
@@ -380,14 +399,16 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 		args.push("-e", `PI_OFFLINE=${process.env.PI_OFFLINE}`);
 	}
 
-	// Sandbox credentials
+	// Sandbox credentials inherit from the Docker CLI child's environment. Values
+	// must never appear in argv: execFile errors and process inspection can expose
+	// argv to logs, gate history, and other local users.
 	if (sandboxCredentials) {
-		for (const [key, value] of Object.entries(sandboxCredentials)) {
+		for (const key of Object.keys(sandboxCredentials)) {
 			if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
 				console.warn(`[docker-args] Skipping invalid credential key: ${key}`);
 				continue;
 			}
-			args.push("-e", `${key}=${value}`);
+			args.push("-e", key);
 		}
 	}
 

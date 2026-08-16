@@ -261,7 +261,7 @@ describe("message author primitives", () => {
 		expect(invalid.peek()?.author).toBeUndefined();
 	});
 
-	it("normalizes legacy and structured in-flight steer ledgers without inventing tool authors", () => {
+	it("migrates legacy and pre-intent ledgers into stable, non-retryable uncertain carriers", () => {
 		const systemAuthor: MessageAuthor = { kind: "system", id: "system:bobbit", label: "Bobbit" };
 		const restored = normalizePersistedInFlightSteers([
 			"legacy human steer",
@@ -272,12 +272,61 @@ describe("message author primitives", () => {
 			{
 				text: "legacy human steer",
 				promptId: "legacy-inflight-steer:0",
+				intentId: "legacy-inflight-steer:0",
+				attemptId: "attempt:legacy-inflight:legacy-inflight-steer:0",
+				dispatchEpoch: 0,
+				state: "uncertain",
+				targetTurn: "continuation",
+				sequence: 1,
+				kind: "steer",
+				createdAt: 0,
+				retryable: false,
 				source: "user",
 				author: LOCAL_USER_AUTHOR,
 			},
-			{ text: "server steer", promptId: "prompt-system", source: "auto-nudge", author: systemAuthor },
-			{ text: "invalid author", promptId: "prompt-invalid", source: "system" },
+			{
+				text: "server steer",
+				promptId: "prompt-system",
+				intentId: "legacy-inflight-steer:prompt-system",
+				attemptId: "attempt:legacy-inflight:legacy-inflight-steer:prompt-system",
+				dispatchEpoch: 1,
+				state: "uncertain",
+				targetTurn: "continuation",
+				sequence: 2,
+				kind: "steer",
+				createdAt: 1,
+				retryable: false,
+				source: "auto-nudge",
+				author: systemAuthor,
+			},
+			{
+				text: "invalid author",
+				promptId: "prompt-invalid",
+				intentId: "legacy-inflight-steer:prompt-invalid",
+				attemptId: "attempt:legacy-inflight:legacy-inflight-steer:prompt-invalid",
+				dispatchEpoch: 2,
+				state: "uncertain",
+				targetTurn: "continuation",
+				sequence: 3,
+				kind: "steer",
+				createdAt: 2,
+				retryable: false,
+				source: "system",
+			},
 		]);
+	});
+
+	it("preserves distinct migration carriers for duplicate bare-string records across restart normalization", () => {
+		const persisted = ["same legacy steer", "same legacy steer"];
+		const restored = normalizePersistedInFlightSteers(persisted)!;
+		const restarted = normalizePersistedInFlightSteers(restored)!;
+
+		expect(restored.map((record) => record.promptId)).toEqual([
+			"legacy-inflight-steer:0",
+			"legacy-inflight-steer:1",
+		]);
+		expect(new Set(restored.map((record) => record.promptId)).size).toBe(2);
+		expect(restarted).toEqual(restored);
 	});
 
 	it("keeps authors on in-flight assistant and steer snapshot splices", () => {
@@ -309,7 +358,7 @@ describe("message author primitives", () => {
 		expect(snapshot[1].content).toEqual([{ type: "text", text: "automatic reminder" }]);
 	});
 
-	it("strips untrusted snapshot authors before preserving trusted Bobbit splices", () => {
+	it("strips untrusted snapshot authors and recovery markers before preserving trusted Bobbit splices", () => {
 		const snapshotAgent: MessageAuthor = { kind: "agent", id: "session:snapshot-trust", label: "Snapshot Agent" };
 		const liveAgent: MessageAuthor = { kind: "agent", id: "session:live-trust", label: "Live Agent" };
 		const trustedSystem: MessageAuthor = { kind: "system", id: "system:bobbit", label: "Bobbit" };
@@ -318,7 +367,14 @@ describe("message author primitives", () => {
 
 		const rawSnapshot = [
 			{ id: "raw-assistant", role: "assistant", content: "answer", author: untrustedSystem },
-			{ id: "raw-user", role: "user", content: "question", author: untrustedAgent },
+			{
+				id: "raw-user",
+				role: "user",
+				content: "question",
+				author: untrustedAgent,
+				_inFlightSteer: true,
+				_deliveryRecoveryProjection: true,
+			},
 		];
 		const visible = buildVisibleMessageSnapshot(rawSnapshot, {
 			sessionId: "snapshot-trust",
@@ -330,18 +386,27 @@ describe("message author primitives", () => {
 			},
 			inFlightSteerTexts: [{
 				text: "trusted reminder",
-				promptId: "trusted-steer",
+				promptId: "trusted-steer-attempt",
+				intentId: "trusted-steer-intent",
+				attemptId: "trusted-steer-attempt",
 				source: "system",
 				author: trustedSystem,
 			}],
 		});
 
 		expect(visible[0].author).toEqual(snapshotAgent);
-		expect(visible[1].author).toEqual(LOCAL_USER_AUTHOR);
+		expect(visible[1]).toMatchObject({ author: LOCAL_USER_AUTHOR });
+		expect(visible[1]._inFlightSteer).toBeUndefined();
+		expect(visible[1]._deliveryRecoveryProjection).toBeUndefined();
 		expect(visible[2].author).toEqual(liveAgent);
-		expect(visible[3].author).toEqual(trustedSystem);
+		expect(visible[3]).toMatchObject({
+			author: trustedSystem,
+			deliveryIntentId: "trusted-steer-intent",
+			_deliveryRecoveryProjection: true,
+		});
 		expect(rawSnapshot[0].author).toEqual(untrustedSystem);
 		expect(rawSnapshot[1].author).toEqual(untrustedAgent);
+		expect(rawSnapshot[1]._deliveryRecoveryProjection).toBe(true);
 	});
 
 	it("exposes the mixed-author batch identity as a system author", () => {

@@ -7,6 +7,7 @@ import "./LiveTimer.js";
 
 export class StreamingMessageContainer extends LitElement {
 	@property({ type: Array }) tools: AgentTool[] = [];
+	@property({ type: String }) sessionId = "";
 	@property({ type: Boolean }) isStreaming = false;
 	@property({ type: Boolean }) archived = false;
 
@@ -384,6 +385,7 @@ export class StreamingMessageContainer extends LitElement {
 		if (msg && msg.role === "assistant" && !this._isOnlyPermissionBlockedToolCalls(msg)) {
 			content = html`<assistant-message
 				.message=${msg}
+				.sessionId=${this.sessionId}
 				.tools=${this.tools}
 				.isStreaming=${this.isStreaming}
 				.pendingToolCalls=${this.pendingToolCalls}
