@@ -369,7 +369,26 @@ function isBaselineRegularPromotionRole(role: string | undefined): boolean {
 	return role === undefined || role === "general";
 }
 
-function hasConflictingPromotionRelation(session: PersistedSession, goalId: string): boolean {
+type PromotionRelation = Pick<PersistedSession,
+	| "goalId"
+	| "teamGoalId"
+	| "role"
+	| "teamLeadSessionId"
+	| "delegateOf"
+	| "parentSessionId"
+	| "childKind"
+	| "staffId"
+	| "assistantType"
+	| "goalAssistant"
+	| "roleAssistant"
+	| "toolAssistant"
+	| "readOnly"
+	| "nonInteractive"
+	| "borrowsWorktree"
+	| "archived"
+>;
+
+function hasConflictingPromotionRelation(session: PromotionRelation, goalId: string): boolean {
 	return (session.goalId !== undefined && session.goalId !== goalId)
 		|| (session.teamGoalId !== undefined && session.teamGoalId !== goalId)
 		|| (!isBaselineRegularPromotionRole(session.role) && session.role !== "team-lead")
@@ -388,10 +407,24 @@ function hasConflictingPromotionRelation(session: PersistedSession, goalId: stri
 		|| session.archived === true;
 }
 
-function hasPromotionAttachment(session: PersistedSession | undefined): boolean {
+function hasPromotionAttachment(session: Pick<PromotionRelation, "goalId" | "teamGoalId" | "role"> | undefined): boolean {
 	return !!session && (session.goalId !== undefined
 		|| session.teamGoalId !== undefined
 		|| !isBaselineRegularPromotionRole(session.role));
+}
+
+function hasExactAdoptedLeadAttachment(session: PromotionRelation | undefined, goalId: string): boolean {
+	return !!session
+		&& session.goalId === goalId
+		&& session.teamGoalId === goalId
+		&& session.role === "team-lead"
+		&& !hasConflictingPromotionRelation(session, goalId);
+}
+
+function isUnattachedPromotionSource(session: PromotionRelation | undefined, goalId: string): boolean {
+	return !!session
+		&& !hasPromotionAttachment(session)
+		&& !hasConflictingPromotionRelation(session, goalId);
 }
 
 /** Internal tracking for a team associated with a goal. */
@@ -2088,6 +2121,17 @@ export class TeamManager {
 		if (entry.teamLeadSessionId !== sessionId || entry.agents.length !== 0) return false;
 		const goal = this.resolveGoal(goalId);
 		if (!goal || goal.worktreeOwnerSessionId !== sessionId) return false;
+		const liveSource = this.sessionManager.getSession(sessionId);
+		const getPersistedSession = (this.sessionManager as Partial<SessionManager>).getPersistedSession;
+		const persistedSource = typeof getPersistedSession === "function"
+			? getPersistedSession.call(this.sessionManager, sessionId)
+			: undefined;
+		// Compensation owns only the still-unattached source capsule. Once either
+		// canonical view gained a partial or complete relation, fail closed so an
+		// identity-changing race cannot remove the reservation underneath it.
+		if (!isUnattachedPromotionSource(liveSource, goalId) || !isUnattachedPromotionSource(persistedSource, goalId)) {
+			return false;
+		}
 
 		entry.unsubscribeTeamLeadEvents?.();
 		entry.unsubscribeTeamLeadEvents = undefined;
@@ -2481,6 +2525,31 @@ export class TeamManager {
 		return undefined;
 	}
 
+	private assertAdoptedLeadWorkerAdmission(goal: PersistedGoal, entry: TeamEntry): void {
+		const ownerSessionId = goal.worktreeOwnerSessionId;
+		if (!ownerSessionId) return;
+		const liveSource = entry.teamLeadSessionId === ownerSessionId
+			? this.sessionManager.getSession(ownerSessionId)
+			: undefined;
+		const getPersistedSession = (this.sessionManager as Partial<SessionManager>).getPersistedSession;
+		const persistedSource = typeof getPersistedSession === "function"
+			? getPersistedSession.call(this.sessionManager, ownerSessionId)
+			: undefined;
+		// The durable projection is written before the old runtime stops, so it is
+		// not by itself a commit signal. Require both the durable row and canonical
+		// live runtime to carry the exact attachment before creating any worker.
+		if (
+			entry.teamLeadSessionId !== ownerSessionId
+			|| !hasExactAdoptedLeadAttachment(liveSource, goal.id)
+			|| !hasExactAdoptedLeadAttachment(persistedSource, goal.id)
+		) {
+			throw new TeamStartError(
+				"ADOPTED_LEAD_ATTACHMENT_PENDING",
+				"The adopted team lead is still attaching to this goal; wait for promotion to finish",
+			);
+		}
+	}
+
 	async spawnRole(
 		goalId: string,
 		role: string,
@@ -2506,6 +2575,11 @@ export class TeamManager {
 		if (!entry) {
 			throw new Error(`No active team for goal: ${goalId}`);
 		}
+		const goal = this.resolveGoal(goalId);
+		if (!goal) {
+			throw new Error(`Goal not found: ${goalId}`);
+		}
+		this.assertAdoptedLeadWorkerAdmission(goal, entry);
 
 		// Check concurrency limit using the same live-worker semantics as sidebar/listing.
 		this.reapStaleWorkers(goalId, entry);
@@ -2516,10 +2590,6 @@ export class TeamManager {
 			);
 		}
 
-		const goal = this.resolveGoal(goalId);
-		if (!goal) {
-			throw new Error(`Goal not found: ${goalId}`);
-		}
 		// A stale/preparing goal must not be able to create a worker through an
 		// in-process caller that bypasses the REST spawn route.
 		this.assertGoalSetupReady(goal);

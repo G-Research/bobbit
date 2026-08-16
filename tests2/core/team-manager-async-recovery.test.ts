@@ -232,6 +232,119 @@ function makeFixture(options: { deferFirstScan?: boolean } = {}) {
 	};
 }
 
+async function makeAdoptedAdmissionFixture() {
+	const ownerSessionId = "regular-owner";
+	const projectId = "project-admission";
+	const goal = {
+		id: "goal-admission",
+		title: "Adopted admission goal",
+		projectId,
+		state: "todo",
+		team: true,
+		cwd: "/worktrees/session-owner",
+		archived: false,
+		paused: false,
+		worktreeOwnerSessionId: ownerSessionId,
+	};
+	const source = {
+		id: ownerSessionId,
+		title: "Regular session",
+		projectId,
+		cwd: goal.cwd,
+		status: "idle",
+		role: "general",
+		createdAt: 1,
+		lastActivity: 1,
+	};
+	const goals = new MemoryStore<any>();
+	const sessions = new MemoryStore<any>();
+	const teams = new MemoryTeamStore([]);
+	const liveSessions = new Map<string, any>();
+	let workerSequence = 0;
+	const context = {
+		project: { id: projectId },
+		goalStore: goals,
+		teamStore: teams,
+		sessionStore: sessions,
+	};
+	const projectContextManager = {
+		all: () => [context],
+		getContextForGoal: (goalId: string) => goals.get(goalId) ? context : undefined,
+	};
+	const sessionManager = {
+		getSession: (id: string) => liveSessions.get(id),
+		getSessionInfo: (id: string) => liveSessions.get(id),
+		getPersistedSession: (id: string) => sessions.get(id),
+		createSession: async (cwd: string, _args?: string[], goalId?: string) => {
+			const id = `worker-${++workerSequence}`;
+			const worker = {
+				id,
+				title: "Worker",
+				cwd,
+				status: "idle",
+				goalId,
+				titleGenerated: false,
+				rpcClient: { onEvent: () => () => {}, prompt: async () => {} },
+				clients: new Set(),
+				createdAt: 2,
+				lastActivity: 2,
+			};
+			liveSessions.set(id, worker);
+			sessions.put(worker);
+			return worker;
+		},
+		setTitle: (id: string, title: string) => {
+			const live = liveSessions.get(id);
+			if (live) live.title = title;
+			return !!live;
+		},
+		updateSessionMeta: (id: string, patch: any) => {
+			const live = liveSessions.get(id);
+			if (live) Object.assign(live, patch);
+			if (sessions.get(id)) sessions.update(id, patch);
+			return !!live;
+		},
+		resolveSessionAgentAuthor: () => undefined,
+		enqueuePrompt: async () => ({ status: "dispatched" }),
+		isSandboxEnabled: false,
+		getSandboxManager: () => undefined,
+		dispatchGoalProvisionedForWorktree: async () => {},
+	};
+	const recoveryFs = new TeamRecoveryFsFake();
+	for (const root of trustedAgentSessionsRoots()) recoveryFs.dir(root, []);
+	const roles = [{
+		name: "team-lead",
+		label: "Team Lead",
+		promptTemplate: "Lead the goal",
+		accessory: "lead-crown",
+		createdAt: 0,
+		updatedAt: 0,
+	}, {
+		name: "coder",
+		label: "Coder",
+		promptTemplate: "Implement the task",
+		accessory: "headphones",
+		createdAt: 0,
+		updatedAt: 0,
+	}];
+	const manager = new TeamManager(sessionManager as any, {
+		projectContextManager,
+		roleStore: { get: (name: string) => roles.find(role => role.name === name), getAll: () => roles },
+		taskManager: { getTasksByGoal: () => [], getTasksForSession: () => [] },
+		colorStore: { get: () => undefined, set: () => {}, remove: () => {}, getAll: () => ({}) },
+		recoveryFs,
+		recoverySidecars: new MemoryRecoverySidecars(),
+	} as any, undefined, noTimerClock as any);
+	await manager.waitForRestore();
+
+	goals.put(goal);
+	sessions.put(source);
+	liveSessions.set(source.id, { ...source });
+	await manager.adoptExistingLead(goal.id, source.id);
+
+	return { manager, goal, source, goals, sessions, teams, liveSessions, get workerCount() { return workerSequence; } };
+}
+
 function makeAdoptedGoalRestartFixture(options: { reservation: boolean; role: string }) {
 	const ownerSessionId = "regular-owner";
 	const projectId = "project-adopted";
@@ -323,6 +436,91 @@ function makeAdoptedGoalRestartFixture(options: { reservation: boolean; role: st
 
 	return { manager, goal, source, sessions, teams, initializedGates, deletedAttempts };
 }
+
+describe("TeamManager adopted-lead worker admission", () => {
+	it("rejects a worker in the pending window after reservation and releases the untouched reservation", async () => {
+		const fixture = await makeAdoptedAdmissionFixture();
+		try {
+			await assert.rejects(
+				() => fixture.manager.spawnRole(fixture.goal.id, "coder", "must not start yet"),
+				(error: any) => error?.code === "ADOPTED_LEAD_ATTACHMENT_PENDING",
+			);
+			assert.equal(fixture.workerCount, 0);
+			assert.deepEqual(fixture.manager.getTeamState(fixture.goal.id)?.agents, []);
+			assert.equal(await fixture.manager.releaseAdoptedLead(fixture.goal.id, fixture.source.id), true);
+			assert.equal(fixture.manager.getTeamState(fixture.goal.id), undefined);
+		} finally {
+			fixture.manager.dispose();
+		}
+	});
+
+	it("allows workers only after both the live and durable source carry the exact committed attachment", async () => {
+		const fixture = await makeAdoptedAdmissionFixture();
+		try {
+			const attachment = { goalId: fixture.goal.id, teamGoalId: fixture.goal.id, role: "team-lead" };
+			Object.assign(fixture.liveSessions.get(fixture.source.id), attachment);
+			fixture.sessions.update(fixture.source.id, attachment);
+
+			const worker = await fixture.manager.spawnRole(fixture.goal.id, "coder", "start after commit");
+			assert.equal(worker.sessionId, "worker-1");
+			assert.equal(fixture.manager.getTeamState(fixture.goal.id)?.agents.length, 1);
+		} finally {
+			fixture.manager.dispose();
+		}
+	});
+
+	it("keeps ordinary team worker admission unchanged", async () => {
+		const fixture = await makeAdoptedAdmissionFixture();
+		try {
+			const ordinaryGoal = { ...fixture.goal, id: "goal-ordinary", title: "Ordinary goal", worktreeOwnerSessionId: undefined };
+			const ordinaryLead = {
+				...fixture.source,
+				id: "ordinary-lead",
+				goalId: ordinaryGoal.id,
+				teamGoalId: ordinaryGoal.id,
+				role: "team-lead",
+			};
+			fixture.goals.put(ordinaryGoal);
+			fixture.sessions.put(ordinaryLead);
+			fixture.liveSessions.set(ordinaryLead.id, ordinaryLead);
+			(fixture.manager as any).teams.set(ordinaryGoal.id, {
+				goalId: ordinaryGoal.id,
+				teamLeadSessionId: ordinaryLead.id,
+				agents: [],
+				maxConcurrent: 12,
+			});
+			(fixture.manager as any).sessionToGoal.set(ordinaryLead.id, ordinaryGoal.id);
+
+			const worker = await fixture.manager.spawnRole(ordinaryGoal.id, "coder", "ordinary spawn");
+			assert.equal(worker.sessionId, "worker-1");
+			assert.equal(fixture.manager.getTeamState(ordinaryGoal.id)?.agents.length, 1);
+		} finally {
+			fixture.manager.dispose();
+		}
+	});
+
+	it("fails closed on a partial identity change and refuses to release its reservation", async () => {
+		const fixture = await makeAdoptedAdmissionFixture();
+		try {
+			Object.assign(fixture.liveSessions.get(fixture.source.id), {
+				goalId: fixture.goal.id,
+				teamGoalId: "different-goal",
+				role: "team-lead",
+			});
+			fixture.sessions.update(fixture.source.id, { goalId: fixture.goal.id });
+
+			await assert.rejects(
+				() => fixture.manager.spawnRole(fixture.goal.id, "coder", "identity changed"),
+				(error: any) => error?.code === "ADOPTED_LEAD_ATTACHMENT_PENDING",
+			);
+			assert.equal(await fixture.manager.releaseAdoptedLead(fixture.goal.id, fixture.source.id), false);
+			assert.ok(fixture.manager.getTeamState(fixture.goal.id), "failed defense must retain the reservation");
+			assert.equal(fixture.teams.get(fixture.goal.id)?.teamLeadSessionId, fixture.source.id);
+		} finally {
+			fixture.manager.dispose();
+		}
+	});
+});
 
 describe("TeamManager adopted-goal restart reconciliation", () => {
 	for (const reservation of [true, false]) {
