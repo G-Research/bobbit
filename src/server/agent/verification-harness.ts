@@ -4382,13 +4382,16 @@ export class VerificationHarness {
 		// terminal and therefore unmodified.
 		for (const step of active.steps) {
 			const passed = step.passed ?? (step.status === "passed" || step.status === "skipped");
-			if (!isExplicitRestartInterruptedStep({
-				passed,
-				skipped: step.skipped,
-				status: step.status,
-				output: step.output ?? "",
-				type: step.type,
-			})) continue;
+			const output = step.output ?? "";
+			const status = step.status;
+			if (status !== "waiting" && status !== "running" && status !== "failed" && status !== "timeout") continue;
+			// Command rows use `waiting` as their explicit no-verdict recovery state.
+			// Once a resumed command/reviewer row has been written as failed/timeout,
+			// its restart marker is the authoritative interruption predicate instead.
+			const restartInterrupted = status === "failed" || status === "timeout"
+				? isRestartInterruptedStep({ passed, output, type: step.type })
+				: isExplicitRestartInterruptedStep({ passed, skipped: step.skipped, status, output, type: step.type });
+			if (!restartInterrupted) continue;
 			step.status = "running";
 		}
 		this._markVerificationCancelled(active, "gateway-restart-recovery");
