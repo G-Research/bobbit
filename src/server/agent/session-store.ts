@@ -518,11 +518,14 @@ export class SessionStore {
 		if (before) this.tiers[before].dirtyGeneration = this.generation;
 		if (after) this.tiers[after].dirtyGeneration = this.generation;
 		if (previous && next && before !== after) {
-			this.pendingTransitions.set(next.id, { id: next.id, tier: after!, session: { ...next } });
+			// Transition rows are recovery evidence. Detach nested persisted state so
+			// a later in-place mutation cannot alter the pending intent snapshot.
+			this.pendingTransitions.set(next.id, { id: next.id, tier: after!, session: structuredClone(next) });
 		} else if (next && this.pendingTransitions.has(next.id)) {
 			// Keep an already-published intent's final row current while a batch
-			// coalesces additional updates before the tier pair is durable.
-			this.pendingTransitions.set(next.id, { id: next.id, tier: after!, session: { ...next } });
+			// coalesces additional updates before the tier pair is durable. Detach it
+			// for the same reason as the initial transition snapshot.
+			this.pendingTransitions.set(next.id, { id: next.id, tier: after!, session: structuredClone(next) });
 		} else if (previous && !next && this.pendingTransitions.has(previous.id)) {
 			this.pendingTransitions.set(previous.id, { id: previous.id, tier: before!, session: undefined });
 		}
