@@ -279,52 +279,63 @@ test("restart recovery continues to a second persisted verification when the fir
 	expect(resumed, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: second durable verification must still be resumed after the first fence failure").toEqual([first.signalId, second.signalId]);
 });
 
-test.each(["llm-review", "agent-qa"] as const)("%s accepts a failed verification_result delivered synchronously during teardown", async (type) => {
+test.each(["llm-review", "agent-qa"] as const)("%s durably captures a failed verification_result before teardown yields", async (type) => {
 	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), `verification-late-${type}-verdict-`));
 	const signalId = `${SIGNAL_ID}-late-${type}`;
 	const sessionId = `${signalId}-session`;
 	let harness: any;
-	let resolverObserved = false;
+	let releaseTerminate!: () => void;
+	const terminateBlocked = new Promise<void>(resolve => { releaseTerminate = resolve; });
+	let acceptedResolver!: () => void;
+	const acceptedDuringTerminate = new Promise<void>(resolve => { acceptedResolver = resolve; });
 	const lateSummary = `Late ${type} rejection accepted during teardown.`;
+	const calls: any[] = [];
+	let terminateAttempts = 0;
 	const sessionManager = {
 		getSession: () => ({ id: sessionId, status: "idle", rpcClient: { onEvent: () => () => {} } }),
-		waitForIdle: async () => {},
-		waitForStreaming: async () => {},
+		waitForIdle: async () => {}, waitForStreaming: async () => {},
 		terminateSession: async (id: string) => {
+			// The first call is the `_tryResumeFromSession` teardown boundary. A
+			// later cancellation cleanup retry is deliberately idempotent and must
+			// not turn the pre-publication assertion into an unhandled rejection.
+			if (++terminateAttempts !== 1) return;
 			const resolver = harness.pendingResults.get(id);
-			resolverObserved = typeof resolver === "function";
+			expect(resolver, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: teardown must retain the exact pending verifier resolver").toBeTypeOf("function");
 			resolver?.({ verdict: false, summary: lateSummary });
-			await Promise.resolve(); // deterministic async teardown continuation
+			acceptedResolver();
+			await terminateBlocked;
 		},
 	};
 	const store = {
 		getGate: () => ({ signals: [{ id: signalId }] }),
-		updateSignalVerification: () => {}, updateGateStatus: () => {}, getGatesForGoal: () => [],
+		updateSignalVerification: (_id: string, update: any) => calls.push({ kind: "signal", update }),
+		updateGateStatus: (_goal: string, _gate: string, status: string) => calls.push({ kind: "gate", status }), getGatesForGoal: () => [],
 	} as any;
 	harness = new VerificationHarness(stateDir, store, () => {}, { get: () => undefined, getAll: () => [] } as any, undefined, sessionManager as any);
-	// Drive directly to teardown without timers, polling, prompt transport, or
-	// an unrelated reviewer result. The resolver may only be accepted there.
 	harness.waitForReviewerErroredTurnRecovery = async () => ({ type: "idle" });
 	harness.dispatchVerifierPrompt = async () => ({ type: "accepted" });
 	harness.waitForReviewTurn = async () => ({ type: "idle" });
 	const active = {
 		goalId: GOAL_ID, gateId: GATE_ID, signalId, overallStatus: "running" as const, startedAt: 1,
-		steps: [{ name: `Late ${type} verdict`, type, status: "running" as const, startedAt: 1, sessionId }],
+		steps: [{ name: `Late ${type} verdict`, type, status: "running" as const, startedAt: 1, sessionId, restartInterrupted: true }],
 	};
 	harness.activeVerifications.set(signalId, active);
-	const accepted = await harness._tryResumeFromSession(active, active.steps[0]);
-	expect(resolverObserved, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: terminateSession must observe the live pending verifier resolver").toBe(true);
-	expect(accepted, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: a failed verdict delivered during teardown must replace the synthetic restart outcome").toMatchObject({
-		passed: false, output: lateSummary, verdictObtained: true,
-	});
-	// Simulate a crash immediately after the accepted result reaches the active
-	// row. The harness persistence seam, rather than raw file reads, proves the
-	// real failed verdict is restart-durable before normal publication continues.
-	harness._updateActiveStepFromResumedResult(active, active.steps[0], accepted);
 	expect(harness._persistActive()).toBe(true);
-	const restarted = new VerificationHarness(stateDir, store, () => {}, { get: () => undefined, getAll: () => [] } as any);
-	const persisted = restarted._loadActive().find((entry: any) => entry.signalId === signalId);
-	expect(persisted?.steps[0]).toMatchObject({ status: "failed", passed: false, output: lateSummary });
+	const recovery = harness._resumeOneVerification(active);
+	try {
+		await acceptedDuringTerminate;
+		// A new harness models the crash/restart boundary without direct file IO.
+		const restarted = new VerificationHarness(stateDir, store, () => {}, { get: () => undefined, getAll: () => [] } as any);
+		const persisted = restarted._loadActive().find((entry: any) => entry.signalId === signalId);
+		expect(persisted?.steps[0]).toMatchObject({ status: "failed", passed: false, output: lateSummary, verdictObtained: true });
+		expect(persisted?.steps[0]?.restartInterrupted, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: accepted reviewer verdict clears stale restart provenance before teardown can finish").not.toBe(true);
+		expect(calls, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: exact teardown blocks all terminal publication").toEqual([]);
+	} finally {
+		releaseTerminate();
+	}
+	await recovery;
+	expect(calls.find(call => call.kind === "signal")?.update).toMatchObject({ status: "failed", cancellation: undefined });
+	expect(calls.filter(call => call.kind === "gate").map(call => call.status)).toEqual(["failed"]);
 });
 
 async function resumeGenuineRestartLikeVerdict(type: "llm-review" | "agent-qa", output: string) {
