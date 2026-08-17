@@ -19,6 +19,7 @@ import { afterEach, expect, test } from "vitest";
 import { GateStore, type GateSignal } from "../../src/server/agent/gate-store.js";
 import { VerificationHarness } from "../../src/server/agent/verification-harness.js";
 import type { WorkflowGate } from "../../src/server/agent/workflow-store.js";
+import { createManualClock } from "../harness/clock.js";
 
 const GOAL_ID = "verification-cancellation-outcome-goal";
 const GATE_ID = "verification-cancellation-outcome-gate";
@@ -246,10 +247,34 @@ test("restart recovery continues to a second persisted verification when the fir
 	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "verification-restart-fence-continue-"));
 	const first = { goalId: `${GOAL_ID}-first`, gateId: `${GATE_ID}-first`, signalId: `${SIGNAL_ID}-first`, overallStatus: "running" as const, startedAt: 1, steps: [] };
 	const second = { goalId: `${GOAL_ID}-second`, gateId: `${GATE_ID}-second`, signalId: `${SIGNAL_ID}-second`, overallStatus: "running" as const, startedAt: 1, steps: [] };
+	const stored = new Map([
+		[first.signalId, {
+			status: "running", signals: [{
+				id: first.signalId, goalId: first.goalId, gateId: first.gateId, sessionId: "owner", timestamp: 1,
+				commitSha: "0123456789abcdef0123456789abcdef01234567", content: "", contentVersion: 1,
+				verification: { status: "running", steps: [] },
+			}],
+		}],
+		[second.signalId, {
+			status: "running", signals: [{
+				id: second.signalId, goalId: second.goalId, gateId: second.gateId, sessionId: "owner", timestamp: 2,
+				commitSha: "0123456789abcdef0123456789abcdef01234567", content: "", contentVersion: 1,
+				verification: { status: "running", steps: [] },
+			}],
+		}],
+	]);
+	const publications: any[] = [];
 	const store = {
-		getGate: (goalId: string, gateId: string) => ({ signals: [{ id: goalId === first.goalId && gateId === first.gateId ? first.signalId : second.signalId }] }),
-		updateSignalVerification: () => { throw new Error("store must not publish while the first restart fence is undurable"); },
-		updateGateStatus: () => { throw new Error("store must not publish while the first restart fence is undurable"); },
+		getGate: (goalId: string, gateId: string) => [...stored.values()].find(gate => gate.signals[0]!.goalId === goalId && gate.signals[0]!.gateId === gateId),
+		updateSignalVerification: (signalId: string, verification: any) => {
+			stored.get(signalId)!.signals[0]!.verification = verification;
+			publications.push({ kind: "signal", signalId, verification });
+		},
+		updateGateStatus: (goalId: string, gateId: string, status: string) => {
+			const gate = [...stored.values()].find(candidate => candidate.signals[0]!.goalId === goalId && candidate.signals[0]!.gateId === gateId)!;
+			gate.status = status;
+			publications.push({ kind: "gate", goalId, status });
+		},
 		getGatesForGoal: () => [],
 	} as any;
 	const seed = new VerificationHarness(stateDir, store, () => {}, { get: () => undefined, getAll: () => [] } as any);
@@ -277,6 +302,19 @@ test("restart recovery continues to a second persisted verification when the fir
 
 	await expect(recovered.resumeInterruptedVerifications(), "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: one restart fence failure must not abort unrelated recovery").resolves.toBeUndefined();
 	expect(resumed, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: second durable verification must still be resumed after the first fence failure").toEqual([first.signalId, second.signalId]);
+	expect((recovered as any).activeVerifications.has(first.signalId), "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: a failed restart fence must keep its in-memory owner").toBe(true);
+	expect((recovered as any)._loadActive().some((entry: any) => entry.signalId === first.signalId), "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: a failed restart fence must keep its durable owner").toBe(true);
+	expect(publications.filter(call => call.signalId === first.signalId)).toEqual([]);
+
+	// Re-drive through the public restart seam after persistence recovers. The
+	// retained first record settles once; the already-processed sibling stays done.
+	await recovered.resumeInterruptedVerifications();
+	expect(resumed, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: durable structured recovery must re-enter cleanup without recursive resume").toEqual([first.signalId, second.signalId]);
+	expect((recovered as any).activeVerifications.has(first.signalId)).toBe(false);
+	expect((recovered as any)._loadActive().some((entry: any) => entry.signalId === first.signalId)).toBe(false);
+	expect(publications.filter(call => call.kind === "signal" && call.signalId === first.signalId)).toEqual([
+		expect.objectContaining({ verification: expect.objectContaining({ status: "cancelled", cancellation: expect.objectContaining({ cause: "gateway-restart-recovery" }) }) }),
+	]);
 });
 
 test.each(["llm-review", "agent-qa"] as const)("%s durably captures a failed verification_result before teardown yields", async (type) => {
@@ -306,10 +344,20 @@ test.each(["llm-review", "agent-qa"] as const)("%s durably captures a failed ver
 			await terminateBlocked;
 		},
 	};
+	const storedSignal = {
+		id: signalId, goalId: GOAL_ID, gateId: GATE_ID, sessionId: "owner", timestamp: 1,
+		commitSha: "0123456789abcdef0123456789abcdef01234567", content: "", contentVersion: 1,
+		verification: {
+			status: "running",
+			steps: [{ name: `Late ${type} verdict`, type, status: "running", passed: false, phase: 0, output: "", duration_ms: 0 }],
+		},
+	};
+	const storedGate = { status: "running", signals: [storedSignal] };
 	const store = {
-		getGate: () => ({ signals: [{ id: signalId }] }),
-		updateSignalVerification: (_id: string, update: any) => calls.push({ kind: "signal", update }),
-		updateGateStatus: (_goal: string, _gate: string, status: string) => calls.push({ kind: "gate", status }), getGatesForGoal: () => [],
+		getGate: () => storedGate,
+		updateSignalVerification: (_id: string, update: any) => { storedSignal.verification = update; calls.push({ kind: "signal", update }); },
+		updateGateStatus: (_goal: string, _gate: string, status: string) => { storedGate.status = status; calls.push({ kind: "gate", status }); },
+		getGatesForGoal: () => [],
 	} as any;
 	harness = new VerificationHarness(stateDir, store, () => {}, { get: () => undefined, getAll: () => [] } as any, undefined, sessionManager as any);
 	harness.waitForReviewerErroredTurnRecovery = async () => ({ type: "idle" });
@@ -317,7 +365,7 @@ test.each(["llm-review", "agent-qa"] as const)("%s durably captures a failed ver
 	harness.waitForReviewTurn = async () => ({ type: "idle" });
 	const active = {
 		goalId: GOAL_ID, gateId: GATE_ID, signalId, overallStatus: "running" as const, startedAt: 1,
-		steps: [{ name: `Late ${type} verdict`, type, status: "running" as const, startedAt: 1, sessionId, restartInterrupted: true }],
+		steps: [{ name: `Late ${type} verdict`, type, status: "running" as const, startedAt: 1, sessionId }],
 	};
 	harness.activeVerifications.set(signalId, active);
 	expect(harness._persistActive()).toBe(true);
@@ -334,8 +382,217 @@ test.each(["llm-review", "agent-qa"] as const)("%s durably captures a failed ver
 		releaseTerminate();
 	}
 	await recovery;
-	expect(calls.find(call => call.kind === "signal")?.update).toMatchObject({ status: "failed", cancellation: undefined });
+	const published = calls.find(call => call.kind === "signal")?.update;
+	expect(published).toMatchObject({ status: "failed" });
+	expect(published?.cancellation).toBeUndefined();
 	expect(calls.filter(call => call.kind === "gate").map(call => call.status)).toEqual(["failed"]);
+});
+
+
+function createStrictTerminalStore(signalId: string, initialSteps: any[]) {
+	const signalRecord: any = {
+		id: signalId, goalId: GOAL_ID, gateId: GATE_ID, sessionId: "owner", timestamp: 1,
+		commitSha: "0123456789abcdef0123456789abcdef01234567", content: "", contentVersion: 1,
+		verification: { status: "running", steps: initialSteps },
+	};
+	const gate: any = { status: "running", signals: [signalRecord] };
+	const calls: any[] = [];
+	return {
+		gate,
+		signalRecord,
+		calls,
+		store: {
+			getGate: () => gate,
+			getGatesForGoal: () => [],
+			updateSignalVerificationStrict: async (requestedSignalId: string, verification: any) => {
+				expect(requestedSignalId).toBe(signalId);
+				signalRecord.verification = verification;
+				calls.push({ kind: "signal", signalId: requestedSignalId, verification });
+			},
+			updateGateStatusStrict: async (_goalId: string, _gateId: string, status: string) => {
+				gate.status = status;
+				calls.push({ kind: "gate", status });
+			},
+			updateSignalVerification: () => { throw new Error("mixed terminal publication must use the strict signal seam"); },
+			updateGateStatus: () => { throw new Error("mixed terminal publication must use the strict gate seam"); },
+		},
+	};
+}
+
+function deferredVoid() {
+	let resolve!: () => void;
+	const promise = new Promise<void>(done => { resolve = done; });
+	return { promise, resolve };
+}
+
+test("mixed restart command intent is durable until exact tracked cleanup settles, then publishes once", async () => {
+	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "verification-mixed-command-intent-"));
+	const signalId = `${SIGNAL_ID}-mixed-command`;
+	const events: any[] = [];
+	const terminal = createStrictTerminalStore(signalId, [
+		{ name: "Genuine command failure", type: "command", passed: false, status: "failed", phase: 0, output: "real failure", duration_ms: 7 },
+		{ name: "Interrupted spawned command", type: "command", passed: false, status: "running", phase: 0, output: "partial output", duration_ms: 3 },
+	]);
+	const harness: any = new VerificationHarness(
+		stateDir, terminal.store as any, (_goalId, event) => events.push(event), { get: () => undefined, getAll: () => [] } as any,
+	);
+	const active: any = {
+		goalId: GOAL_ID, gateId: GATE_ID, signalId, overallStatus: "running", startedAt: 1,
+		steps: [
+			{ name: "Genuine command failure", type: "command", status: "failed", passed: false, output: "real failure", durationMs: 7, startedAt: 1 },
+			{
+				name: "Interrupted spawned command", type: "command", status: "running", passed: false,
+				output: "partial output", durationMs: 3, startedAt: 1, restartInterrupted: true,
+				commandSpawnState: "spawned", commandSpawnedAt: 2,
+			},
+		],
+	};
+	harness.activeVerifications.set(signalId, active);
+	expect(harness._persistActive()).toBe(true);
+
+	const cleanupStarted = deferredVoid();
+	const releaseCleanup = deferredVoid();
+	let killCalls = 0;
+	const tracked = {
+		ownershipReady: Promise.resolve(),
+		killTree: () => { killCalls++; cleanupStarted.resolve(); },
+		waitForTreeExit: () => releaseCleanup.promise.then(() => true),
+	};
+	harness._trackedCommandChildren.set(`${signalId}:1`, tracked);
+
+	const preparation = harness._prepareMixedRestartFailureFromActive(active);
+	await cleanupStarted.promise;
+	const durable = harness._loadActive().find((entry: any) => entry.signalId === signalId);
+	expect(durable).toMatchObject({
+		pendingTerminalIntent: {
+			kind: "mixed-restart-failed",
+			verification: {
+				status: "failed",
+				steps: [
+					{ name: "Genuine command failure", status: "failed", passed: false, output: "real failure" },
+					{ name: "Interrupted spawned command", status: "cancelled", passed: false, cancellation: { cause: "gateway-restart-recovery" } },
+				],
+			},
+		},
+		steps: [
+			{ name: "Genuine command failure", status: "failed" },
+			{ name: "Interrupted spawned command", status: "running", restartInterrupted: true, killRequestedAt: expect.any(Number), killReason: "cancelled", killSignal: "SIGKILL" },
+		],
+	});
+	expect(terminal.calls).toEqual([]);
+	expect(terminal.gate.status).toBe("running");
+	expect(events.filter(event => event.type === "gate_verification_complete")).toEqual([]);
+
+	releaseCleanup.resolve();
+	await preparation;
+	expect(killCalls).toBe(1);
+	expect(terminal.calls.filter(call => call.kind === "signal")).toEqual([
+		expect.objectContaining({ verification: expect.objectContaining({ status: "failed" }) }),
+	]);
+	expect(terminal.calls.filter(call => call.kind === "gate")).toEqual([{ kind: "gate", status: "failed" }]);
+	expect(terminal.signalRecord.verification.steps).toMatchObject([
+		{ name: "Genuine command failure", status: "failed", passed: false, output: "real failure" },
+		{ name: "Interrupted spawned command", status: "cancelled", passed: false, cancellation: { cause: "gateway-restart-recovery" } },
+	]);
+	expect(events.filter(event => event.type === "gate_verification_complete")).toEqual([
+		expect.objectContaining({ signalId, status: "failed" }),
+	]);
+	expect(harness._loadActive().some((entry: any) => entry.signalId === signalId)).toBe(false);
+});
+
+test("mixed reviewer cleanup failure retains its exact session and intent until deterministic retry", async () => {
+	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "verification-mixed-reviewer-intent-"));
+	const signalId = `${SIGNAL_ID}-mixed-reviewer`;
+	const sessionId = `${signalId}-session`;
+	const clock = createManualClock(10_000);
+	const events: any[] = [];
+	const terminal = createStrictTerminalStore(signalId, [
+		{ name: "Genuine sibling failure", type: "command", passed: false, status: "failed", phase: 0, output: "real failure", duration_ms: 4 },
+		{ name: "Interrupted reviewer", type: "llm-review", passed: false, status: "running", phase: 0, output: "", duration_ms: 0 },
+	]);
+	let failTerminate = true;
+	const terminated: string[] = [];
+	const sessionManager = {
+		terminateSession: async (requestedSessionId: string) => {
+			terminated.push(requestedSessionId);
+			if (failTerminate) throw new Error("injected reviewer teardown failure");
+		},
+	};
+	const harness: any = new VerificationHarness(
+		stateDir, terminal.store as any, (_goalId, event) => events.push(event), { get: () => undefined, getAll: () => [] } as any,
+		undefined, sessionManager as any, undefined, undefined, undefined, undefined, { clock },
+	);
+	const active: any = {
+		goalId: GOAL_ID, gateId: GATE_ID, signalId, overallStatus: "running", startedAt: 1, reviewerCleanupPending: true,
+		steps: [
+			{ name: "Genuine sibling failure", type: "command", status: "failed", passed: false, output: "real failure", durationMs: 4, startedAt: 1 },
+			{ name: "Interrupted reviewer", type: "llm-review", status: "running", passed: false, output: "", startedAt: 1, restartInterrupted: true, sessionId },
+		],
+	};
+	harness.activeVerifications.set(signalId, active);
+	expect(harness._persistActive()).toBe(true);
+
+	await harness._prepareMixedRestartFailureFromActive(active);
+	const durablePending = harness._loadActive().find((entry: any) => entry.signalId === signalId);
+	expect(durablePending).toMatchObject({
+		reviewerCleanupPending: true,
+		pendingTerminalIntent: { kind: "mixed-restart-failed", verification: { status: "failed" } },
+		steps: [expect.any(Object), { name: "Interrupted reviewer", sessionId, restartInterrupted: true }],
+	});
+	expect(terminated).toEqual([sessionId]);
+	expect(terminal.calls).toEqual([]);
+	expect(events.filter(event => event.type === "gate_verification_complete")).toEqual([]);
+	expect(clock.pending()).toBe(1);
+
+	failTerminate = false;
+	clock.advance(1_000);
+	const retry = harness._cancelledCleanupPromises.get(signalId);
+	expect(retry).toBeDefined();
+	await retry;
+	expect(terminated).toEqual([sessionId, sessionId]);
+	expect(terminal.calls.filter(call => call.kind === "signal")).toHaveLength(1);
+	expect(terminal.calls.filter(call => call.kind === "gate")).toEqual([{ kind: "gate", status: "failed" }]);
+	expect(terminal.signalRecord.verification.steps).toMatchObject([
+		{ name: "Genuine sibling failure", status: "failed", passed: false },
+		{ name: "Interrupted reviewer", status: "cancelled", passed: false, cancellation: { cause: "gateway-restart-recovery" } },
+	]);
+	expect(events.filter(event => event.type === "gate_verification_complete")).toEqual([
+		expect.objectContaining({ signalId, status: "failed" }),
+	]);
+	expect(harness._loadActive().some((entry: any) => entry.signalId === signalId)).toBe(false);
+	expect(clock.pending()).toBe(0);
+});
+
+test.each(["cancelled", "mixed"] as const)("missing goal/store retires a %s exact-cleanup owner without events or retries", async (kind) => {
+	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), `verification-missing-store-${kind}-`));
+	const signalId = `${SIGNAL_ID}-missing-store-${kind}`;
+	const clock = createManualClock(20_000);
+	const events: any[] = [];
+	const missingProjectContext = { getContextForGoal: () => undefined };
+	const harness: any = new VerificationHarness(
+		stateDir, undefined, (_goalId, event) => events.push(event), { get: () => undefined, getAll: () => [] } as any,
+		undefined, undefined, undefined, undefined, missingProjectContext as any, undefined, { clock },
+	);
+	const active: any = {
+		goalId: `${GOAL_ID}-removed`, gateId: GATE_ID, signalId, overallStatus: kind === "cancelled" ? "cancelled" : "running", startedAt: 1,
+		steps: [],
+		...(kind === "cancelled"
+			? { cancelled: true, cancellation: { cause: "archive", requestedAt: 19_000 } }
+			: {
+				pendingTerminalIntent: {
+					kind: "mixed-restart-failed", preparedAt: 19_000, gateStatus: "failed",
+					verification: { status: "failed", steps: [] },
+				},
+			}),
+	};
+	harness.activeVerifications.set(signalId, active);
+	expect(harness._persistActive()).toBe(true);
+
+	await harness._startCancelledVerificationCleanup(active);
+	expect(harness.activeVerifications.has(signalId), "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: missing goal/store cannot retain an unpublishable active owner").toBe(false);
+	expect(harness._loadActive().some((entry: any) => entry.signalId === signalId)).toBe(false);
+	expect(events).toEqual([]);
+	expect(clock.pending(), "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: retired missing-store ownership must not schedule an infinite cleanup retry").toBe(0);
 });
 
 async function resumeGenuineRestartLikeVerdict(type: "llm-review" | "agent-qa", output: string) {
