@@ -2535,9 +2535,14 @@ export class VerificationHarness {
 			// than writing an empty `{ verifications: [] }`. This unifies the "clear"
 			// semantics with resumeInterruptedVerifications() (which unlinks) so two
 			// concurrent harnesses sharing a stateDir cannot race between unlink and
-			// empty-file-write. Best-effort unlink so concurrent unlinks don't throw.
+			// empty-file-write. Only concurrent/missing-file ENOENT is success: a
+			// permission or I/O failure must keep terminal ownership fail-closed.
 			if (this.activeVerifications.size === 0) {
-				try { fs.unlinkSync(this._persistPath); } catch {}
+				try {
+					fs.unlinkSync(this._persistPath);
+				} catch (err: any) {
+					if (err?.code !== "ENOENT") throw err;
+				}
 				return true;
 			}
 			const data = { verifications: [...this.activeVerifications.values()] };
