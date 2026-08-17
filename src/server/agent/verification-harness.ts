@@ -1824,6 +1824,8 @@ type ResumedVerificationStep = {
 	duration_ms: number;
 	/** Set only by recovery code that conclusively obtained no verdict. */
 	restartInterrupted?: true;
+	/** A `verification_result` was received; its summary must never drive retry classification. */
+	verdictObtained?: true;
 	timeout?: VerificationTimeoutInfo;
 	diagnostics?: GateStepDiagnostics;
 };
@@ -3014,10 +3016,14 @@ export class VerificationHarness {
 			// timeout) is also re-runnable — deterministically re-run it from
 			// scratch instead of leaving it a terminal "could not be recovered"
 			// restart-interrupt (shouldRerunSessionStepOnResume).
-			const isTransient = step.type === "agent-qa"
-					? isTransientVerifierQaError(resumeResult?.output || "")
-					: isRetryableLlmReviewRecovery(resumeResult?.output || "");
-			const rerunnable = resumeResult?.status !== "timeout"
+			const canRetryRecovery = resumeResult?.verdictObtained !== true;
+			// Never inspect a real verification_result summary for transient/restart
+			// phrases: reviewer findings are verdict content, not harness provenance.
+			const isTransient = canRetryRecovery && (step.type === "agent-qa"
+				? isTransientVerifierQaError(resumeResult?.output || "")
+				: isRetryableLlmReviewRecovery(resumeResult?.output || ""));
+			const rerunnable = canRetryRecovery
+				&& resumeResult?.status !== "timeout"
 				&& (isTransient || shouldRerunSessionStepOnResume(resumeResult?.output || ""));
 			if (resumeResult && !resumeResult.passed && (step.type === "llm-review" || step.type === "agent-qa") && rerunnable) {
 				console.log(`[verification] Resume failed transiently for "${step.name}", re-running from scratch...`);
@@ -3253,6 +3259,7 @@ export class VerificationHarness {
 					passed: idleResult.verdict,
 					output: idleResult.summary,
 					duration_ms: Date.now() - step.startedAt,
+					verdictObtained: true,
 				};
 			}
 			if (idleResult.type === "timeout") return timeoutStep(idleResult.elapsedMs);
@@ -3265,6 +3272,7 @@ export class VerificationHarness {
 					passed: recoveryResult.verdict,
 					output: recoveryResult.summary,
 					duration_ms: Date.now() - step.startedAt,
+					verdictObtained: true,
 				};
 			}
 			if (recoveryResult.type === "timeout") return timeoutStep(recoveryResult.elapsedMs);
@@ -3316,7 +3324,7 @@ export class VerificationHarness {
 					resultPromise,
 				});
 				if (reminderDispatch.type === "result") {
-					return { name: step.name, type: step.type, passed: reminderDispatch.result.verdict, output: reminderDispatch.result.summary, duration_ms: Date.now() - step.startedAt };
+					return { name: step.name, type: step.type, passed: reminderDispatch.result.verdict, output: reminderDispatch.result.summary, duration_ms: Date.now() - step.startedAt, verdictObtained: true };
 				}
 				if (reminderDispatch.type === "cancelled") {
 					return { name: step.name, type: step.type, passed: false, output: reminderDispatch.reason, duration_ms: Date.now() - step.startedAt };
@@ -3345,6 +3353,7 @@ export class VerificationHarness {
 					passed: result2.verdict,
 					output: result2.summary,
 					duration_ms: Date.now() - step.startedAt,
+					verdictObtained: true,
 				};
 			}
 			if (result2.type === "timeout") return timeoutStep(result2.elapsedMs);
@@ -3356,6 +3365,7 @@ export class VerificationHarness {
 					passed: postReminderRecovery.verdict,
 					output: postReminderRecovery.summary,
 					duration_ms: Date.now() - step.startedAt,
+					verdictObtained: true,
 				};
 			}
 			if (postReminderRecovery.type === "timeout") return timeoutStep(postReminderRecovery.elapsedMs);
@@ -3391,7 +3401,7 @@ export class VerificationHarness {
 						resultPromise,
 					});
 					if (fallbackDispatch.type === "result") {
-						return { name: step.name, type: step.type, passed: fallbackDispatch.result.verdict, output: fallbackDispatch.result.summary, duration_ms: Date.now() - step.startedAt };
+						return { name: step.name, type: step.type, passed: fallbackDispatch.result.verdict, output: fallbackDispatch.result.summary, duration_ms: Date.now() - step.startedAt, verdictObtained: true };
 					}
 					if (fallbackDispatch.type === "cancelled") {
 						return { name: step.name, type: step.type, passed: false, output: fallbackDispatch.reason, duration_ms: Date.now() - step.startedAt };
@@ -3418,6 +3428,7 @@ export class VerificationHarness {
 						passed: fallbackResult.verdict,
 						output: fallbackResult.summary,
 						duration_ms: Date.now() - step.startedAt,
+						verdictObtained: true,
 					};
 				}
 				if (fallbackResult.type === "timeout") return timeoutStep(fallbackResult.elapsedMs);
@@ -3429,6 +3440,7 @@ export class VerificationHarness {
 						passed: postFallbackRecovery.verdict,
 						output: postFallbackRecovery.summary,
 						duration_ms: Date.now() - step.startedAt,
+						verdictObtained: true,
 					};
 				}
 				if (postFallbackRecovery.type === "timeout") return timeoutStep(postFallbackRecovery.elapsedMs);
