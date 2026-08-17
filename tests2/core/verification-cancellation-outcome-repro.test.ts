@@ -1530,3 +1530,206 @@ test.each(["llm-review", "agent-qa"] as const)("%s cancellation joins an in-flig
 		durableSignalCancelled: true,
 	});
 });
+
+function createReviewerSpawnLifecycleFixture(type: "llm-review" | "agent-qa", suffix: string) {
+	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), `verification-reviewer-spawn-${suffix}-`));
+	gateStore = new GateStore(stateDir, undefined, { persistence: "json" });
+	gateStore.initGatesForGoal(GOAL_ID, [GATE_ID]);
+	const createStarted = deferredVoid();
+	let resolveCreateOutcome!: (outcome: "created" | "rejected") => void;
+	const createOutcome = new Promise<"created" | "rejected">(resolve => { resolveCreateOutcome = resolve; });
+	const registrationStarted = deferredVoid();
+	const registrationRelease = deferredVoid();
+	const order: string[] = [];
+	const liveSessions = new Set<string>();
+	const registeredSessions = new Set<string>();
+	const terminated: string[] = [];
+	const unregistered: string[] = [];
+	const events: any[] = [];
+	const fakeSession = (sessionId: string) => ({
+		id: sessionId, cwd: stateDir!, status: "idle", lastTurnErrored: false,
+		rpcClient: { onEvent: () => () => {}, setThinkingLevel: async () => {} },
+	});
+	const sessionManager = {
+		isSandboxEnabled: false,
+		createSession: async (...args: any[]) => {
+			const opts = args[4] as { sessionId: string };
+			createStarted.resolve();
+			const outcome = await createOutcome;
+			if (outcome === "rejected") {
+				order.push("creator-rejected");
+				throw new Error("injected reviewer creator rejection");
+			}
+			liveSessions.add(opts.sessionId);
+			order.push("creator-created");
+			return fakeSession(opts.sessionId);
+		},
+		setTitle: () => {}, updateSessionMeta: () => {},
+		getSession: (sessionId: string) => liveSessions.has(sessionId) ? fakeSession(sessionId) : undefined,
+		terminateSession: async (sessionId: string) => {
+			terminated.push(sessionId);
+			liveSessions.delete(sessionId);
+			order.push("terminate");
+			return true;
+		},
+	};
+	const teamManager = {
+		getTeamState: () => undefined,
+		registerReviewerSession: async (_goalId: string, sessionId: string) => {
+			registrationStarted.resolve();
+			await registrationRelease.promise;
+			registeredSessions.add(sessionId);
+			order.push("registered");
+		},
+		unregisterReviewerSession: async (_goalId: string, sessionId: string) => {
+			unregistered.push(sessionId);
+			registeredSessions.delete(sessionId);
+			order.push("unregister");
+		},
+	};
+	const role = { name: type === "agent-qa" ? "qa-tester" : "reviewer", promptTemplate: "Review the supplied work." };
+	const goal = { id: GOAL_ID, branch: "goal/reviewer-spawn-lifecycle", sandboxed: false, paused: false };
+	const projectConfigStore = {
+		get: () => undefined, getWithDefaults: () => ({}), getQaMaxDurationMinutes: () => 10, getComponents: () => [],
+	};
+	const context = { project: { id: "reviewer-spawn-lifecycle-project", name: "Reviewer Spawn Lifecycle" }, goalStore: { get: () => goal }, gateStore, projectConfigStore };
+	const projectContextManager = { getContextForGoal: (goalId: string) => goalId === GOAL_ID ? context : null, all: () => [context] };
+	const originalSignalWrite = gateStore.updateSignalVerificationStrict.bind(gateStore);
+	const originalGateWrite = gateStore.updateGateStatusStrict.bind(gateStore);
+	(gateStore as any).updateSignalVerificationStrict = async (...args: any[]) => {
+		order.push("signal");
+		return (originalSignalWrite as any)(...args);
+	};
+	(gateStore as any).updateGateStatusStrict = async (...args: any[]) => {
+		order.push("gate");
+		return (originalGateWrite as any)(...args);
+	};
+	const harness: any = new VerificationHarness(
+		stateDir, gateStore, (_goalId, event) => { events.push(event); order.push("event"); },
+		{ get: () => role, getAll: () => [role] } as any,
+		undefined, sessionManager as any, teamManager as any, undefined, projectContextManager as any, undefined,
+		{ commandRunner: { execFile: async () => ({ stdout: Buffer.from("0123456789abcdef\n"), stderr: Buffer.alloc(0) }) } },
+	);
+	harness.resolveVerificationBaseBranch = async () => "main";
+	harness.resolveLegacyMasterBranch = async () => "main";
+	const gate: WorkflowGate = {
+		id: GATE_ID, name: "Reviewer spawn lifecycle", dependsOn: [],
+		verify: [{ name: "Held reviewer spawn", type, prompt: "Review this generation.", phase: 0 } as any],
+	};
+	const heldSignal: GateSignal = { ...signal(), id: `${SIGNAL_ID}-${suffix}-${type}`, verification: { status: "running", steps: [] } };
+	heldSignal.verification!.steps = harness.beginVerification(heldSignal, gate);
+	gateStore.recordSignal(heldSignal);
+	const verification = harness.verifyGateSignal(heldSignal, gate, stateDir, goal.branch, "main", new Map(), "goal spec");
+	return {
+		harness, heldSignal, verification, createStarted: createStarted.promise, registrationStarted: registrationStarted.promise,
+		resolveCreate: () => resolveCreateOutcome("created"),
+		rejectCreate: () => resolveCreateOutcome("rejected"),
+		releaseRegistration: registrationRelease.resolve,
+		liveSessions, registeredSessions, terminated, unregistered, events, order,
+	};
+}
+
+test.each(["llm-review", "agent-qa"] as const)("%s cancellation waits for a rejecting reviewer creator before publishing or retiring", async (type) => {
+	const fixture = createReviewerSpawnLifecycleFixture(type, `creator-rejection-${type}`);
+	await fixture.createStarted;
+	const cancellation = fixture.harness.cancelStaleVerifications(GOAL_ID, GATE_ID, "manual");
+	await Promise.resolve();
+	expect(fixture.order, "VERIFICATION_REVIEWER_SPAWN_CANCELLATION_RACE: a held creator blocks signal, gate, and event publication").toEqual([]);
+	fixture.rejectCreate();
+	await cancellation;
+	await fixture.verification;
+
+	const historical = gateStore!.getGate(GOAL_ID, GATE_ID)!.signals.find(candidate => candidate.id === fixture.heldSignal.id)!;
+	expect(fixture.order.indexOf("signal")).toBeGreaterThan(fixture.order.indexOf("creator-rejected"));
+	expect(fixture.order.slice(-3)).toEqual(["signal", "gate", "event"]);
+	expect(historical.verification).toMatchObject({ status: "cancelled", cancellation: { cause: "manual" } });
+	expect(gateStore!.getGate(GOAL_ID, GATE_ID)!.status).toBe("pending");
+	expect(fixture.events.filter(event => event.type === "gate_verification_complete")).toEqual([
+		expect.objectContaining({ signalId: fixture.heldSignal.id, status: "cancelled" }),
+	]);
+	expect(fixture.liveSessions).toEqual(new Set());
+	expect(fixture.registeredSessions).toEqual(new Set());
+	expect(fixture.harness.getActiveVerification(fixture.heldSignal.id)).toBeUndefined();
+	expect(fixture.harness._loadActive().some((active: any) => active.signalId === fixture.heldSignal.id)).toBe(false);
+});
+
+test.each(["llm-review", "agent-qa"] as const)("%s cancellation joins deferred reviewer registration and cleans the exact session before publishing", async (type) => {
+	const fixture = createReviewerSpawnLifecycleFixture(type, `registration-${type}`);
+	await fixture.createStarted;
+	fixture.resolveCreate();
+	await fixture.registrationStarted;
+	const cancellation = fixture.harness.cancelStaleVerifications(GOAL_ID, GATE_ID, "manual");
+	await Promise.resolve();
+	expect(fixture.order, "VERIFICATION_REVIEWER_SPAWN_CANCELLATION_RACE: deferred reviewer registration keeps the terminal record unpublished").toEqual(["creator-created"]);
+	fixture.releaseRegistration();
+	await cancellation;
+	await fixture.verification;
+
+	const reviewerSessionId = fixture.terminated[0]!;
+	expect(fixture.terminated, "VERIFICATION_REVIEWER_SPAWN_CANCELLATION_RACE: cancellation terminates the exact created reviewer").toEqual([reviewerSessionId]);
+	expect(fixture.unregistered, "VERIFICATION_REVIEWER_SPAWN_CANCELLATION_RACE: cancellation unregisters the exact created reviewer").toEqual([reviewerSessionId]);
+	expect(fixture.order.indexOf("terminate")).toBeGreaterThan(fixture.order.indexOf("registered"));
+	expect(fixture.order.indexOf("unregister")).toBeGreaterThan(fixture.order.indexOf("registered"));
+	expect(fixture.order.indexOf("signal")).toBeGreaterThan(fixture.order.indexOf("terminate"));
+	expect(fixture.order.indexOf("signal")).toBeGreaterThan(fixture.order.indexOf("unregister"));
+	expect(fixture.order.slice(-3)).toEqual(["signal", "gate", "event"]);
+	expect(fixture.liveSessions).toEqual(new Set());
+	expect(fixture.registeredSessions).toEqual(new Set());
+	expect(fixture.harness.getActiveVerification(fixture.heldSignal.id)).toBeUndefined();
+	expect(fixture.harness._loadActive().some((active: any) => active.signalId === fixture.heldSignal.id)).toBe(false);
+});
+
+test.each(["spawning", "spawned"] as const)("restart re-drives %s reviewer spawn ownership before cancelled publication", async (reviewerSpawnState) => {
+	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), `verification-reviewer-spawn-restart-${reviewerSpawnState}-`));
+	gateStore = new GateStore(stateDir, undefined, { persistence: "json" });
+	gateStore.initGatesForGoal(GOAL_ID, [GATE_ID]);
+	const signalId = `${SIGNAL_ID}-restart-reviewer-${reviewerSpawnState}`;
+	const reviewerSessionId = `${signalId}-session`;
+	const storedSignal: GateSignal = { ...signal(), id: signalId, verification: { status: "running", steps: [{ name: "Interrupted reviewer spawn", type: "llm-review", status: "running", passed: false, phase: 0, output: "", duration_ms: 0 }] } };
+	gateStore.recordSignal(storedSignal);
+	const order: string[] = [];
+	const terminated: string[] = [];
+	const unregistered: string[] = [];
+	const events: any[] = [];
+	const originalSignalWrite = gateStore.updateSignalVerificationStrict.bind(gateStore);
+	const originalGateWrite = gateStore.updateGateStatusStrict.bind(gateStore);
+	(gateStore as any).updateSignalVerificationStrict = async (...args: any[]) => { order.push("signal"); return (originalSignalWrite as any)(...args); };
+	(gateStore as any).updateGateStatusStrict = async (...args: any[]) => { order.push("gate"); return (originalGateWrite as any)(...args); };
+	let createAttempts = 0;
+	const sessionManager = {
+		createSession: async () => { createAttempts++; throw new Error("restart must not await a non-existent old creator"); },
+		terminateSession: async (sessionId: string) => { terminated.push(sessionId); order.push("terminate"); return false; },
+	};
+	const teamManager = {
+		unregisterReviewerSession: async (_goalId: string, sessionId: string) => { unregistered.push(sessionId); order.push("unregister"); },
+	};
+	const seed: any = new VerificationHarness(stateDir, gateStore, () => {}, { get: () => undefined, getAll: () => [] } as any);
+	const active: any = {
+		goalId: GOAL_ID, gateId: GATE_ID, signalId, overallStatus: "cancelled", cancelled: true, reviewerCleanupPending: true, startedAt: 1,
+		cancellation: { cause: "gateway-restart-recovery", requestedAt: 1 },
+		steps: [{ name: "Interrupted reviewer spawn", type: "llm-review", status: "running", startedAt: 1, sessionId: reviewerSessionId, reviewerSpawnState }],
+	};
+	seed.activeVerifications.set(signalId, active);
+	expect(seed._persistActive()).toBe(true);
+	const restarted: any = new VerificationHarness(
+		stateDir, gateStore, (_goalId, event) => { events.push(event); order.push("event"); }, { get: () => undefined, getAll: () => [] } as any,
+		undefined, sessionManager as any, teamManager as any,
+	);
+	await restarted.resumeInterruptedVerifications();
+
+	expect(createAttempts, "VERIFICATION_REVIEWER_SPAWN_CANCELLATION_RACE: restart has no old in-memory creator to await or recreate").toBe(0);
+	expect(terminated).toEqual([reviewerSessionId]);
+	expect(unregistered).toEqual([reviewerSessionId]);
+	expect(order.indexOf("signal")).toBeGreaterThan(order.indexOf("terminate"));
+	expect(order.indexOf("signal")).toBeGreaterThan(order.indexOf("unregister"));
+	expect(order.slice(-3)).toEqual(["signal", "gate", "event"]);
+	expect(gateStore.getGate(GOAL_ID, GATE_ID)!.signals.find(candidate => candidate.id === signalId)!.verification).toMatchObject({
+		status: "cancelled", cancellation: { cause: "gateway-restart-recovery" },
+	});
+	expect(gateStore.getGate(GOAL_ID, GATE_ID)!.status).toBe("pending");
+	expect(events.filter(event => event.type === "gate_verification_complete")).toEqual([
+		expect.objectContaining({ signalId, status: "cancelled" }),
+	]);
+	expect(restarted.getActiveVerification(signalId)).toBeUndefined();
+	expect(restarted._loadActive().some((entry: any) => entry.signalId === signalId)).toBe(false);
+});
