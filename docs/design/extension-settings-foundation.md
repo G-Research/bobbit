@@ -339,14 +339,14 @@ New tests belong in `tests2/` and are registered in `tests2/tests-map.json`.
 | Core | `tests2/core/extension-settings-schema.test.ts` | All five field kinds, descriptor/default/range/enum validation, required/optional clearing, invalid hook opaque config, no secret defaults, requires-config field validation. |
 | Core | `tests2/core/extension-settings-store.test.ts` | YAML round-trip and defensive copies, revision CAS, unknown future public keys preserved, malformed-row isolation, public publication failure, one owner-only coalesced secret save, secret-save compensation restoring the exact prior public state/revision and runtime values, legacy-pair upgrade, mismatch rejection before redacted or runtime reads, no stale-generation laundering after an ambiguous replacement, unavailable result when compensation fails, and no secret in YAML/error/log snapshots. |
 | Core | `tests2/core/pack-contributions.test.ts` (extend) | Project disabled provider/hook filtering, project config overlay before `requiresConfig`, unreadable settings fail closed, install-scope activation still wins. |
-| Integration | `tests2/integration/extension-settings-api.test.ts` | Authenticated read versus operator-only mutation, exact target identity, schema/type/enum/range/CAS failures, value redaction in GET/PATCH/WebSocket/console capture, invalidation of a previously built registry, and ordinary EP-6 grants remain unchanged. |
-| Integration | same | Two project contexts: configure Hindsight URL in both, disable `hindsight/memory` only in A, assert A has no active provider while B does; reload contexts and assert isolation persists. Test legacy PackStore fallback is read-only and first project write shadows it. |
+| Integration | `tests2/integration/extension-settings-api-contract.test.ts` and `tests2/integration/extension-settings-runtime.test.ts` | Contract coverage verifies authenticated read versus operator-only mutation and exact target identity/schema/type/enum/range/CAS failures. Runtime coverage verifies value redaction in GET/PATCH/WebSocket/console capture, invalidation of a previously built registry, and ordinary EP-6 grants remain unchanged. |
+| Integration | `tests2/integration/extension-settings-runtime.test.ts` | Two project contexts: configure Hindsight URL in both, disable `hindsight/memory` only in A, assert A has no active provider while B does; reload contexts and assert isolation persists. Test legacy PackStore fallback is read-only and first project write shadows it. |
 | Browser | `tests2/browser/e2e/extension-settings.spec.ts` | Market form labels and keyboard traversal, set Hindsight URL/key, assert the returned/UI DOM never contain the key, reload and see only **Set**, disable A while B remains active, reload again, clear secret, and clean up both project state directories/fixture packs. Use an accessibility scan or explicit names/roles for switch, input, select, status, save, and clear controls. |
 
 Focused commands after implementation:
 
 ```bash
-npx vitest run tests2/core/extension-settings-schema.test.ts tests2/core/extension-settings-store.test.ts tests2/integration/extension-settings-api.test.ts --config vitest.config.ts --retry=0
+npx vitest run tests2/core/extension-settings-schema.test.ts tests2/core/extension-settings-store.test.ts tests2/integration/extension-settings-api-contract.test.ts tests2/integration/extension-settings-runtime.test.ts --config vitest.config.ts --retry=0
 BOBBIT_V2_RETRY_FREE=1 npm run test:browser -- tests2/browser/e2e/extension-settings.spec.ts --retries=0
 ```
 

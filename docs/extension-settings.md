@@ -383,9 +383,10 @@ The selected-set contract is covered at boundaries where a shape or copy could o
 - `tests2/core/extension-settings-store.test.ts` covers native schema-2 YAML, schema-1 rejection
   and migration-on-save, malformed-row isolation, aggregate caps, clone safety, rollback, and
   generation mismatch behavior.
-- `tests2/integration/extension-settings-api.test.ts` covers unordered PATCH canonicalization,
-  validation failures, reload/runtime projection, scalar-only legacy fallback, native persistence,
-  and secret redaction.
+- `tests2/integration/extension-settings-api-contract.test.ts` covers unordered PATCH canonicalization,
+  validation failures, reload/runtime projection, and native persistence.
+- `tests2/integration/extension-settings-runtime.test.ts` covers scalar-only legacy fallback,
+  secret redaction, runtime isolation, and hook schema evolution.
 - `tests2/dom/marketplace-extension-settings-multi-enum.test.ts` covers the labelled native group,
   canonical draft PATCH behavior, empty versus default semantics, and projection replacement.
 - `tests2/browser/e2e/extension-settings.spec.ts` covers keyboard selection, save/reset/reload,
