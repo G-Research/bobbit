@@ -430,10 +430,9 @@ function isNonSandboxedPolyrepoTeamLead(ps: Pick<PersistedSession, "role" | "goa
 /**
  * Classify the current live closure owned by one team goal.
  *
- * Legacy delegates inherit their parent's effective goal in `teamGoalId` for
- * metadata policy. That stamp is not ownership when the live ancestry is rooted
- * at an ordinary goal-only session. Team references and genuine/store-only team
- * roots remain authoritative, and descendants use the canonical OR relation.
+ * Every exact non-empty `teamGoalId` match is a durable ownership root,
+ * regardless of ancestry. Current TeamStore references supplement those roots;
+ * `goalId` alone never does. Descendants use the canonical OR relation.
  */
 export function collectTeamOwnedSessionClosure(
 	goalId: string,
@@ -442,11 +441,14 @@ export function collectTeamOwnedSessionClosure(
 	errors?: string[],
 ): Set<string> {
 	const byId = new Map(live.map((session) => [session.id, session]));
-	const validReferences = new Set<string>();
+	const selected = new Set<string>();
 	const reportConflict = (session: PersistedSession) => {
 		const message = `ownership conflict: ${session.id} belongs to ${session.teamGoalId}`;
 		if (errors && !errors.includes(message)) errors.push(message);
 	};
+	for (const session of live) {
+		if (session.teamGoalId === goalId) selected.add(session.id);
+	}
 	for (const id of referencedIds) {
 		const session = byId.get(id);
 		if (!session) continue;
@@ -454,40 +456,7 @@ export function collectTeamOwnedSessionClosure(
 			reportConflict(session);
 			continue;
 		}
-		validReferences.add(id);
-	}
-
-	const parentIds = (session: PersistedSession): string[] => {
-		const ids: string[] = [];
-		if (session.delegateOf) ids.push(session.delegateOf);
-		if (session.childKind && session.parentSessionId && session.parentSessionId !== session.delegateOf) {
-			ids.push(session.parentSessionId);
-		}
-		return ids;
-	};
-	const memo = new Map<string, boolean>();
-	const visiting = new Set<string>();
-	const rootedInTeam = (session: PersistedSession): boolean => {
-		if (validReferences.has(session.id)) return true;
-		if (session.teamGoalId && session.teamGoalId !== goalId) return false;
-		const cached = memo.get(session.id);
-		if (cached !== undefined) return cached;
-		if (visiting.has(session.id)) return session.teamGoalId === goalId;
-		visiting.add(session.id);
-		const liveParents = parentIds(session).map((id) => byId.get(id)).filter((row): row is PersistedSession => !!row);
-		// A missing parent cannot prove a standalone root. Conservatively retain the
-		// durable ownership stamp so store-only leaked children remain repairable.
-		const owned = liveParents.length === 0
-			? session.teamGoalId === goalId
-			: liveParents.some(rootedInTeam);
-		visiting.delete(session.id);
-		memo.set(session.id, owned);
-		return owned;
-	};
-
-	const selected = new Set<string>(validReferences);
-	for (const session of live) {
-		if (session.teamGoalId === goalId && rootedInTeam(session)) selected.add(session.id);
+		selected.add(id);
 	}
 	let changed = true;
 	while (changed) {
@@ -3833,13 +3802,14 @@ export class SessionManager {
 	}
 
 	/**
-	 * Resolve team ownership from the same bounded live closure used by archive
-	 * reconciliation. `teamGoalId` remains effective-goal metadata on legacy
-	 * standalone delegates, so callers must not use that raw stamp as admission.
+	 * Resolve durable team ownership from the same bounded live closure used by
+	 * archive reconciliation. An exact `teamGoalId` stamp is authoritative;
+	 * current TeamStore references and their descendants supplement it.
 	 */
 	getTrustedTeamGoalIdForSession(sessionId: string): string | undefined {
 		const persisted = this.getPersistedSession(sessionId);
 		if (!persisted) return undefined;
+		if (persisted.teamGoalId) return persisted.teamGoalId;
 
 		let live: PersistedSession[];
 		let teamEntries: Array<{ goalId: string; teamLeadSessionId: string | null; agents: Array<{ sessionId: string }> }> = [];
@@ -3854,14 +3824,14 @@ export class SessionManager {
 			live = this._testStore?.getLive() ?? [];
 		}
 		// Admission can race just after reconciliation archived the requested
-		// owner. Include only that exact durable row so a genuine terminal owner
-		// remains fenced without traversing archived history.
+		// referenced owner. Include only that exact row so TeamStore-derived
+		// ownership remains fenced without traversing archived history.
 		if (!live.some((session) => session.id === sessionId)) live = [...live, persisted];
 
 		const candidateGoalIds = new Set<string>();
-		// Match reconciliation's bounded candidate source: current live ownership
-		// stamps plus current TeamStore entries (and only the exact admission target
-		// added above), never archived history or goalId.
+		// Exact stamps returned above are the primary authority. The remaining scan
+		// resolves their current live descendants plus TeamStore references and the
+		// references' descendants, without consulting goalId or archived history.
 		for (const session of live) {
 			if (session.teamGoalId) candidateGoalIds.add(session.teamGoalId);
 		}
@@ -10497,9 +10467,9 @@ export class SessionManager {
 		const livePersisted = this.projectContextManager
 			? [...this.projectContextManager.getAllLiveSessions()]
 			: (this._testStore?.getLive() ?? []);
-		// Defensive terminal-owner fence. Use the same ancestry-aware classifier as
-		// reconciliation so a metadata-only delegate of a live standalone session
-		// remains eagerly restorable while genuine archived-team closures never dispatch.
+		// Defensive terminal-owner fence. Use the same durable-ownership classifier
+		// as reconciliation: every exact archived-goal `teamGoalId` match and its
+		// canonical descendants are suppressed, while `goalId` alone stays eager.
 		const terminalSuppressed = new Set(suppressedSessionIds);
 		if (this.projectContextManager) {
 			for (const context of this.projectContextManager.all()) {

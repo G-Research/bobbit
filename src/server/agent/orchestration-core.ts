@@ -339,7 +339,7 @@ export interface OrchestrationSessionView {
 		assistantType: string | undefined,
 		opts?: Record<string, unknown>,
 	): Promise<{ id: string }>;
-	/** Resolve canonical live team ownership; raw teamGoalId may be metadata only. */
+	/** Resolve durable team ownership from teamGoalId or current team references. */
 	getTrustedTeamGoalIdForSession?(sessionId: string): string | undefined;
 	/** Team-owned child publication joins TeamManager's terminal admission queue. */
 	runWithTeamGoalAdmission?<T>(goalId: string, operation: () => Promise<T>): Promise<T>;
@@ -542,8 +542,8 @@ export class OrchestrationCore {
 	async spawn(opts: SpawnOpts): Promise<ChildHandle> {
 		this.assertCanSpawn(opts.ownerSessionId);
 		const ownerPs = this.deps.sessionManager.getPersistedSession(opts.ownerSessionId);
-		// Raw teamGoalId is also inherited effective-goal metadata on standalone
-		// delegate chains. Only the canonical live team closure joins terminal admission.
+		// Exact teamGoalId metadata is durable ownership regardless of ancestry;
+		// current TeamStore references and their closure are supplemental authority.
 		const trustedTeamGoalId = this.deps.sessionManager.getTrustedTeamGoalIdForSession
 			? this.deps.sessionManager.getTrustedTeamGoalIdForSession(opts.ownerSessionId)
 			// Structural unit-test views predating the classifier retain their legacy
@@ -653,8 +653,8 @@ export class OrchestrationCore {
 				// A team-owned sub-branch must finish process setup before releasing
 				// terminal admission. Otherwise createSession returns its preparing
 				// placeholder and detached setup can start a process after archival.
-				// Canonical ownership is required: raw inherited teamGoalId metadata on
-				// standalone delegate chains must retain detached setup behaviour.
+				// Team-owned setup must remain inside the admission turn until process
+				// creation finishes, including exact inherited teamGoalId ownership.
 				if (lifecycle === "full" && trustedTeamGoalId) {
 					createOpts.awaitWorktreeSetup = true;
 				}

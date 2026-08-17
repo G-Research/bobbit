@@ -201,24 +201,28 @@ describe("OrchestrationCore.spawn — local delegated helper worktrees", () => {
 		assert.equal("worktreePushPolicy" in persistedChild, false, "persisted child metadata must not imply publication policy");
 	});
 
-	it("does not force setup awaiting from standalone inherited team metadata", async () => {
+	it("keeps exact teamGoalId sub-branch setup inside team admission", async () => {
 		const view = new FakeView();
-		view.owner("metadata-owner", { teamGoalId: "goal-metadata", projectId: "proj-A" });
-		(view as any).getTrustedTeamGoalIdForSession = () => undefined;
-		(view as any).runWithTeamGoalAdmission = () => {
-			throw new Error("standalone metadata must not enter team admission");
+		view.owner("team-owner", { teamGoalId: "goal-team", projectId: "proj-A" });
+		(view as any).getTrustedTeamGoalIdForSession = () => "goal-team";
+		let admitted = false;
+		(view as any).runWithTeamGoalAdmission = async (goalId: string, operation: () => Promise<unknown>) => {
+			assert.equal(goalId, "goal-team");
+			admitted = true;
+			return operation();
 		};
 		const core = makeCore(view, "anthropic/claude-x");
 
 		await core.spawn({
-			ownerSessionId: "metadata-owner",
+			ownerSessionId: "team-owner",
 			instructions: "x",
 			lifecycle: "full",
 			worktree: { mode: "sub-branch", repoPath: "/repo", goalId: "goal-child", branch: "goal/child", cwd: "/repo" },
 		});
 
-		assert.equal(view.createSessionCalls[0].opts.teamGoalId, "goal-metadata", "raw ownership metadata is still inherited");
-		assert.equal(view.createSessionCalls[0].opts.awaitWorktreeSetup, undefined, "metadata-only ownership keeps detached setup");
+		assert.equal(admitted, true);
+		assert.equal(view.createSessionCalls[0].opts.teamGoalId, "goal-team", "durable ownership metadata is inherited");
+		assert.equal(view.createSessionCalls[0].opts.awaitWorktreeSetup, true, "team-owned setup must finish before admission releases");
 	});
 
 	it("bare and shared-cwd delegates omit worktree publication metadata", async () => {
