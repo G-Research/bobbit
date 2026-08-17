@@ -467,12 +467,17 @@ test.each([
 	let activeHarness: any;
 	const cleanupOperation = async (operation: "terminate" | "unregister", requestedSessionId: string) => {
 		cleanupCalls[operation].push(requestedSessionId);
-		if (operation !== trigger || cleanupCalls[operation].length !== 1) return;
-		const resolver = activeHarness.pendingResults.get(requestedSessionId);
-		expect(resolver, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: teardown retains the exact late-verdict resolver").toBeTypeOf("function");
-		resolver({ verdict, summary });
-		cleanupRejected.resolve();
-		throw new Error(`injected ${operation} cleanup rejection`);
+		const attempt = cleanupCalls[operation].length;
+		if (operation !== trigger || attempt > 2) return;
+		if (attempt === 1) {
+			const resolver = activeHarness.pendingResults.get(requestedSessionId);
+			expect(resolver, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: teardown retains the exact late-verdict resolver").toBeTypeOf("function");
+			resolver({ verdict, summary });
+			cleanupRejected.resolve();
+		}
+		// The resumed-review teardown and its immediate shared-owner re-drive both
+		// fail. Only the scheduled/restarted third attempt may publish the verdict.
+		throw new Error(`injected ${operation} cleanup rejection ${attempt}`);
 	};
 	const sessionManager = {
 		getSession: () => ({ id: sessionId, status: "idle", rpcClient: { onEvent: () => () => {} } }),
@@ -507,8 +512,17 @@ test.each([
 	await recovery;
 
 	const persisted = activeHarness._loadActive().find((entry: any) => entry.signalId === signalId);
+	const expectedStatus = verdict ? "passed" : "failed";
 	expect(persisted, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: cleanup failure retains durable terminal ownership").toMatchObject({
 		reviewerCleanupPending: true,
+		pendingTerminalIntent: {
+			kind: "terminal",
+			gateStatus: expectedStatus,
+			verification: {
+				status: expectedStatus,
+				steps: [{ name: "Recovered verdict", type, status: expectedStatus, passed: verdict, output: summary }],
+			},
+		},
 		steps: [{
 			name: "Recovered verdict", type, sessionId,
 			status: verdict ? "passed" : "failed", passed: verdict, output: summary, verdictObtained: true,
@@ -535,8 +549,7 @@ test.each([
 		if (retry) await retry;
 	}
 
-	expect(cleanupCalls[trigger], "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: the rejected exact cleanup operation is retried for the same session").toEqual([sessionId, sessionId]);
-	const expectedStatus = verdict ? "passed" : "failed";
+	expect(cleanupCalls[trigger], "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: both failed cleanup owners and the successful retry target the same session").toEqual([sessionId, sessionId, sessionId]);
 	expect(publications.filter(call => call.kind === "signal")).toEqual([
 		expect.objectContaining({ verification: expect.objectContaining({ status: expectedStatus, steps: [expect.objectContaining({ passed: verdict, status: expectedStatus, output: summary })] }) }),
 	]);
