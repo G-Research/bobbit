@@ -191,7 +191,7 @@ All three files register their stories in `tests/e2e/ui/story-registry.ts`, the 
 The worker-scoped `gateway` fixture in `tests/e2e/gateway-harness.ts` exposes two lifecycle hooks for tests that need to assert what survives a server bounce:
 
 - `gateway.crash()` — calls the in-process gateway's `shutdown()`. The browser page's WebSocket fires `close` and the client begins its reconnect loop.
-- `gateway.restart()` — re-invokes `createGateway` against the **same port** with `portExplicit: true`, anchored at the **same `bobbitDir`**. On-disk state (`SessionStore` v2 atomic writes + `.bak.N` rotation, projects, drafts, goals) carries over because the second boot reads what the first wrote. A small `EADDRINUSE` retry loop handles Windows TIME_WAIT races on the listener socket; the call throws if the OS assigns a different port.
+- `gateway.restart()` — re-invokes `createGateway` against the **same port** with `portExplicit: true`, anchored at the **same `bobbitDir`**. On-disk state (SessionStore v3 split-tier atomic writes with per-tier `.bak.N` rotation, projects, drafts, goals) carries over because the second boot reads what the first wrote. A small `EADDRINUSE` retry loop handles Windows TIME_WAIT races on the listener socket; the call throws if the OS assigns a different port.
 
 **Why same-port re-bind.** The browser page is bound to `http://127.0.0.1:<port>` for the lifetime of the test. The client's WebSocket reconnect logic resumes against the same origin without `page.reload()`, so the test asserts the production reconnect path rather than a navigation.
 
