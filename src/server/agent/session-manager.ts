@@ -10665,6 +10665,15 @@ export class SessionManager {
 			return true;
 		};
 		try {
+			const continuationIntentId = `boot-continuation:${session.id}`;
+			// A correlated user message_end is durable proof that Pi received this exact
+			// deterministic occurrence. Its in-flight carrier is correctly pruned at that
+			// boundary, but wasStreaming remains true until agent_end. On another hard
+			// restart, consume only the startup dispatch fence instead of mistaking the
+			// missing carrier for permission to represent the same work a second time.
+			if (this.intentSettlement(session.id, continuationIntentId) === "surfaced") {
+				return markAccepted();
+			}
 			const continuationPrompt =
 				"The infrastructure server restarted while you were mid-turn. " +
 				"Your previous work has been preserved. Please continue where you left off. " +
@@ -10674,7 +10683,7 @@ export class SessionManager {
 				whenReady: true,
 				streamingBehavior: "followUp",
 				// A boot retry must retain the first potentially-written occurrence.
-				intentId: `boot-continuation:${session.id}`,
+				intentId: continuationIntentId,
 				now: () => this.clock.now(),
 			});
 			if ((response as any)?.uncertain === true) {
