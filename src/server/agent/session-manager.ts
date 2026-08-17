@@ -10638,14 +10638,30 @@ export class SessionManager {
 
 	private async _dispatchBootContinuation(session: SessionInfo): Promise<boolean> {
 		this._bootRepromptedSessions.add(session.id);
+		// A replacement may reuse the SessionInfo object while installing a different
+		// bridge, so object identity alone is not a sufficient acknowledgement fence.
+		const dispatchBridge = session.rpcClient;
 		// The coordinator remains installed while this cold-start RPC is pending.
 		// Mark streaming as a second fence for the instant after coordinator release,
 		// including the case where agent_start arrived before the RPC acknowledgement.
 		this.markPromptDispatchStreaming(session);
 		const markAccepted = (): boolean => {
-			if (!this._sessionWriterIsCurrent(session)) return false;
+			// Terminal turn settlement leaves this exact bridge canonical, so its delayed
+			// correlated acknowledgement may still consume the startup-only fence. Once
+			// replacement fencing starts, including its transient map gap, every old-bridge
+			// acknowledgement is inert even if the SessionInfo object is later reused.
+			if (
+				session.lifecycleFenced
+				|| this.sessions.get(session.id) !== session
+				|| session.rpcClient !== dispatchBridge
+			) return false;
+			// Acceptance consumes the *restore-startup* dispatch intent, but the new
+			// continuation turn is still active. Keep the durable wasStreaming marker
+			// written by markPromptDispatchStreaming until agent_end settles the turn.
+			// The Windows dev harness force-kills the gateway, so shutdown() may never
+			// get a chance to reconstruct this bit from in-memory status. Clearing it
+			// at RPC acknowledgement made every second rapid restart lose continuation.
 			session.restoreStartupWasStreaming = false;
-			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: false });
 			return true;
 		};
 		try {
@@ -10672,9 +10688,10 @@ export class SessionManager {
 			// add a second continuation after restore returns. The pre-fence observer in
 			// handleAgentLifecycle clears it even when coordinator ownership suppresses
 			// the rest of agent_start bookkeeping.
-			// Clear the durable marker only after the final canonical bridge accepts
-			// the continuation. A gateway death during provisional restore therefore
-			// rehydrates wasStreaming=true and safely tries again on the next boot.
+			// Consume the startup-dispatch fence after the final canonical bridge
+			// accepts the continuation. The separate durable active-turn marker remains
+			// true until lifecycle settlement, so a hard gateway death mid-continuation
+			// safely re-drives again on the next boot.
 			return markAccepted();
 		} catch (err) {
 			// dispatchTrackedSystemPrompt already treats an exact correlated user echo

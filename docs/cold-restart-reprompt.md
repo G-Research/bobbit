@@ -94,6 +94,14 @@ before the prompt is sent and the prompt itself gets the generous timeout. A
 `MODEL_SELECTION_REQUIRED` capsule never reaches this restore path and is not
 re-prompted when a client attaches.
 
+RPC acceptance consumes only the restore-startup dispatch fence. The persisted
+`wasStreaming` bit remains true for the newly accepted continuation until its
+`agent_end` lifecycle settles the turn. This matters for hard-kill development
+restarts, where `SessionManager.shutdown()` never runs: clearing the bit at prompt
+acknowledgement made a second restart during the continuation lose automatic
+re-drive and wait for a user message. Normal successful settlement clears the bit
+through the ordinary lifecycle path.
+
 `nonInteractive` reviewer / QA sessions are **excluded** here — they are re-driven
 exclusively by the verification harness (`resumeInterruptedVerifications` →
 `_tryResumeFromSession`), and firing the mid-turn nudge too would race two prompts
