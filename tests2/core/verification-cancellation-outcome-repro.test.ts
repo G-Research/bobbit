@@ -269,12 +269,25 @@ async function resumeGenuineRestartLikeVerdict(type: "llm-review" | "agent-qa", 
 	const recovered = new VerificationHarness(
 		stateDir, store, () => {}, { get: () => undefined, getAll: () => [] } as any,
 	);
+	// This models an actual recovered `verification_result`, not a transport
+	// interruption. Even hostile historical text (or an intentionally empty
+	// summary) must not authorize a replacement reviewer/QA run.
 	(recovered as any)._tryResumeFromSession = async (_recoveredActive: any, step: any) => ({
 		name: step.name, type, passed: false, status: "failed", output, duration_ms: 4,
+		verdictObtained: true,
 	});
+	const rerunAttempts: string[] = [];
+	(recovered as any)._rerunLlmReviewStep = async () => {
+		rerunAttempts.push("llm-review");
+		return { name: `Genuine ${type} verdict`, type: "llm-review", passed: true, status: "passed", output: "Rerun must never replace the verdict.", duration_ms: 1 };
+	};
+	(recovered as any)._rerunAgentQaStep = async () => {
+		rerunAttempts.push("agent-qa");
+		return { name: `Genuine ${type} verdict`, type: "agent-qa", passed: true, status: "passed", output: "Rerun must never replace the verdict.", duration_ms: 1 };
+	};
 	recovered.setTeamLeadNotifier((_goalId, message) => notifications.push(message));
 	await recovered.resumeInterruptedVerifications();
-	return { calls, notifications };
+	return { calls, notifications, rerunAttempts };
 }
 
 test("a marked restart interruption cannot cancel its unmarked failed reviewer sibling — VERIFICATION_CANCELLATION_OUTCOME_AUDIT", async () => {
@@ -352,11 +365,12 @@ test.each([
 	["llm-review", ""],
 	["agent-qa", ""],
 ] as const)("unmarked genuine %s restart-like verdicts fail closed instead of becoming cancellation", async (type, output) => {
-	const { calls, notifications } = await resumeGenuineRestartLikeVerdict(type, output);
+	const { calls, notifications, rerunAttempts } = await resumeGenuineRestartLikeVerdict(type, output);
 	const verification = calls.find(call => call.kind === "verification")?.value;
 	expect(verification, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: genuine reviewer verdict must publish normally").toMatchObject({ status: "failed" });
 	expect(verification?.cancellation).toBeUndefined();
 	expect(verification?.steps).toMatchObject([{ status: "failed", passed: false, output }]);
 	expect(calls.filter(call => call.kind === "gate").map(call => call.value)).toEqual(["failed"]);
 	expect(notifications.join("\n"), "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: genuine failure notification must not be suppressed by restart-like content").toContain(`step="Genuine ${type} verdict"`);
+	expect(rerunAttempts, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: a recovered verification_result with verdictObtained=true must never be replaced by a rerun").toEqual([]);
 });
