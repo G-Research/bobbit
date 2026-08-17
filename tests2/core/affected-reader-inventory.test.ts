@@ -70,6 +70,7 @@ const INDIRECT_READ_PAIRS = [
 	{ consumer: "tests2/core/team-extension-dismiss-gateway.test.ts", input: "defaults/tools/agent/gateway.js" },
 	{ consumer: "tests2/core/run-isolation.test.ts", input: "playwright-e2e.config.ts" },
 	{ consumer: "tests2/core/run-isolation.test.ts", input: "playwright-v2.config.ts" },
+	{ consumer: "tests2/core/node-modules-ring-fence.test.ts", input: "src/server/harness.ts" },
 	{ consumer: "tests2/core/pi-published-shrinkwrap-security.test.ts", input: "package.json" },
 	{ consumer: "tests2/core/pi-published-shrinkwrap-security.test.ts", input: "package-lock.json" },
 	{ consumer: "tests2/core/pi-published-shrinkwrap-security.test.ts", input: "tests2/core/fixtures/pi-published-shrinkwrap-security/advisory-floor.json" },
@@ -215,7 +216,7 @@ describe("affected repository reader inventory", () => {
 			consumer: string;
 			inputs: readonly string[];
 		}) => rule.inputs.map((input) => ({ consumer: rule.consumer, input })));
-		expect(declared).toHaveLength(60);
+		expect(declared).toHaveLength(61);
 		expect(declared).toEqual(INDIRECT_READ_PAIRS);
 		expect(graph.meta.indirectRepositoryReadValidation.issues).toEqual([]);
 	});
