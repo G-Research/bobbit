@@ -1879,6 +1879,10 @@ export function recoverPreMigrationData(stateDir: string): void {
 
 	let totalRecovered = 0;
 
+	// SessionStore tiers share one hard-delete namespace. Read the canonical live
+	// namespace once so a purged row cannot be restored from either tier backup.
+	const tombstonedSessionIds = readDeletionTombstones(stateDir, "sessions.json");
+
 	// SessionStore tiers are independently versioned envelopes. Recover each tier
 	// without merging archived rows into the live tier or flattening either envelope.
 	for (const name of ["sessions.json", "sessions.archived.json"] as const) {
@@ -1894,7 +1898,7 @@ export function recoverPreMigrationData(stateDir: string): void {
 			let added = 0;
 			for (const item of backup) {
 				const id = String(item.id ?? "");
-				if (id && !existingIds.has(id)) {
+				if (id && !tombstonedSessionIds.has(id) && !existingIds.has(id)) {
 					current.push(item);
 					existingIds.add(id);
 					added++;
