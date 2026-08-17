@@ -3131,24 +3131,36 @@ export class VerificationHarness {
 
 		if (this._cancellationOwnsTerminalPublication(v)) return;
 
+		// A mixed aggregate stays failed for its real sibling verdict, while each
+		// durable no-verdict row remains auditable as cancelled. One timestamp
+		// makes the aggregate's interruption audit deterministic.
+		const aggregatePublishedAt = Date.now();
+		const restartInterruptionCancellation: VerificationCancellation = {
+			cause: "gateway-restart-recovery",
+			requestedAt: aggregatePublishedAt,
+			finalizedAt: aggregatePublishedAt,
+		};
+		const publishedSteps = resolvedSteps.map(r => {
+			const interrupted = r.restartInterrupted === true;
+			const status = interrupted ? "cancelled" as const : persistedStatusForStep(r);
+			const stepResult = {
+				name: r.name,
+				type: r.type as "command" | "llm-review" | "agent-qa" | "human-signoff",
+				passed: interrupted ? false : r.passed,
+				...(status === "skipped" ? { skipped: true } : {}),
+				status,
+				phase: r.phase ?? 0,
+				output: r.output,
+				duration_ms: r.duration_ms,
+				...(r.timeout ? { timeout: r.timeout } : {}),
+				...(interrupted ? { cancellation: { ...restartInterruptionCancellation } } : {}),
+			} as GateSignalStep;
+			if (r.diagnostics) stepResult.diagnostics = r.diagnostics;
+			return stepResult;
+		});
 		this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
 			status: persistedStatus,
-			steps: resolvedSteps.map(r => {
-				const status = persistedStatusForStep(r);
-				const stepResult = {
-					name: r.name,
-					type: r.type as "command" | "llm-review" | "agent-qa" | "human-signoff",
-					passed: r.passed,
-					...(status === "skipped" ? { skipped: true } : {}),
-					status,
-					phase: r.phase ?? 0,
-					output: r.output,
-					duration_ms: r.duration_ms,
-					...(r.timeout ? { timeout: r.timeout } : {}),
-				} as GateSignalStep;
-				if (r.diagnostics) stepResult.diagnostics = r.diagnostics;
-				return stepResult;
-			}),
+			steps: publishedSteps,
 		});
 		this.resolveGateStore(v.goalId).updateGateStatus(v.goalId, v.gateId, gateStatus);
 
@@ -3158,7 +3170,7 @@ export class VerificationHarness {
 		});
 		broadcastGateStatusChanged(this.broadcastFn, v.goalId, v.gateId, gateStatus);
 		const goalBranch = this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId)?.branch;
-		this.notifyTeamLead(v.goalId, v.gateId, persistedStatus, { steps: resolvedSteps, goalBranch });
+		this.notifyTeamLead(v.goalId, v.gateId, persistedStatus, { steps: publishedSteps, goalBranch });
 		if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resumed verification ${v.signalId}: ${persistedStatus}`);
 	}
 
@@ -4452,10 +4464,9 @@ export class VerificationHarness {
 		this._markVerificationCancelled(active, "gateway-restart-recovery");
 		if (!this._persistActive()) throw new Error(`Could not persist cancellation fence for ${active.signalId}`);
 		this._notifyCancellationFenceCommitted(active);
-		await this._terminateCancelledReviewersFor([active]);
-		const settled = await this._killPersistedCommandSteps(active, "SIGKILL", { markIntent: false });
-		if (settled) await this._finalizeCancelledVerification(active);
-		else this._scheduleCommandKillCleanupRetry(active.signalId);
+		// Use the sole full-cleanup owner so reviewer, host-tree, and Docker
+		// failures retain their exact retry path. It publishes only after cleanup.
+		await this._startCancelledVerificationCleanup(active);
 	}
 
 	/** One terminal cancellation path, invoked only after every cleanup phase settles. */
