@@ -41,8 +41,6 @@ export interface PromptAuthorDispatchRecord {
 	author: MessageAuthor;
 	/** Exact dispatch-time author prefix. Never contains message-body text. */
 	modelPrefix?: string;
-	/** This attempt participates in exact turn-terminal evidence. */
-	turnTerminalMarkerVersion?: 1;
 }
 
 export interface PromptAuthorSettlementRecord {
@@ -55,16 +53,6 @@ export interface PromptAuthorSettlementRecord {
 	outcome: "echoed" | "cancelled";
 	messageId?: string;
 	messageTimestamp?: number;
-}
-
-/** Exact companion evidence that one echoed attempt's Pi turn terminated. */
-export interface PromptAuthorTurnTerminalRecord {
-	schemaVersion: 2;
-	type: "prompt-author-turn-terminal";
-	promptId: string;
-	intentId: string;
-	attemptId: string;
-	terminalAt: number;
 }
 
 /**
@@ -90,7 +78,6 @@ export interface PromptAuthorDismissalTombstoneRecord {
 export type AuthorSidecarRecord =
 	| PromptAuthorDispatchRecord
 	| PromptAuthorSettlementRecord
-	| PromptAuthorTurnTerminalRecord
 	| PromptAuthorDismissalTombstoneRecord;
 
 /** Non-serialized append evidence used only to break equal lifecycle timestamps. */
@@ -115,8 +102,6 @@ export interface PromptAuthorDispatchInput {
 	author: MessageAuthor;
 	/** Exact formatter-derived prefix included at the start of `modelText`. */
 	modelPrefix?: string;
-	/** Opt in to exact turn-terminal evidence for this attempt. */
-	turnTerminalMarkerVersion?: 1;
 }
 
 export interface PromptAuthorSettlementInput {
@@ -129,15 +114,6 @@ export interface PromptAuthorSettlementInput {
 	outcome: "echoed" | "cancelled";
 	messageId?: string;
 	messageTimestamp?: number;
-}
-
-export interface PromptAuthorTurnTerminalInput {
-	schemaVersion?: 2;
-	type?: "prompt-author-turn-terminal";
-	promptId: string;
-	intentId: string;
-	attemptId: string;
-	terminalAt: number;
 }
 
 export interface PromptAuthorDismissalTombstoneInput {
@@ -173,7 +149,6 @@ export interface PromptAuthorBinding {
 	source: PromptSource;
 	author: MessageAuthor;
 	modelPrefix?: string;
-	turnTerminalMarkerVersion?: 1;
 	settlement?: {
 		schemaVersion: 1 | 2;
 		type: "prompt-author-settlement";
@@ -185,7 +160,6 @@ export interface PromptAuthorBinding {
 		messageId?: string;
 		messageTimestamp?: number;
 	};
-	turnTerminal?: PromptAuthorTurnTerminalRecord;
 }
 
 export interface InitAuthorSidecarOptions {
@@ -281,8 +255,7 @@ function isDispatchRecord(value: unknown): value is PromptAuthorDispatchRecord {
 		&& validDigest(record.modelTextDigest)
 		&& isPromptSource(record.source)
 		&& isMessageAuthor(record.author)
-		&& hasValidModelPrefix({ author: record.author, modelPrefix: record.modelPrefix })
-		&& (record.turnTerminalMarkerVersion === undefined || record.turnTerminalMarkerVersion === 1);
+		&& hasValidModelPrefix({ author: record.author, modelPrefix: record.modelPrefix });
 }
 
 function isSettlementRecord(value: unknown): value is PromptAuthorSettlementRecord {
@@ -297,17 +270,6 @@ function isSettlementRecord(value: unknown): value is PromptAuthorSettlementReco
 		&& (record.outcome === "echoed" || record.outcome === "cancelled")
 		&& (record.messageId === undefined || validKey(record.messageId))
 		&& (record.messageTimestamp === undefined || validTimestamp(record.messageTimestamp));
-}
-
-function isTurnTerminalRecord(value: unknown): value is PromptAuthorTurnTerminalRecord {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-	const record = value as Record<string, unknown>;
-	return record.schemaVersion === 2
-		&& record.type === "prompt-author-turn-terminal"
-		&& validKey(record.promptId)
-		&& validKey(record.intentId)
-		&& validKey(record.attemptId)
-		&& validTimestamp(record.terminalAt);
 }
 
 function isDismissalTombstoneRecord(value: unknown): value is PromptAuthorDismissalTombstoneRecord {
@@ -370,9 +332,6 @@ function canonicalDispatchRecord(record: PromptAuthorDispatchRecord): PromptAuth
 		source: record.source,
 		author: canonicalAuthor(record.author),
 		...(record.modelPrefix === undefined ? {} : { modelPrefix: record.modelPrefix }),
-		...(record.turnTerminalMarkerVersion === undefined ? {} : {
-			turnTerminalMarkerVersion: record.turnTerminalMarkerVersion,
-		}),
 	};
 }
 
@@ -387,17 +346,6 @@ function canonicalSettlementRecord(record: PromptAuthorSettlementRecord): Prompt
 		outcome: record.outcome,
 		...(record.messageId === undefined ? {} : { messageId: record.messageId }),
 		...(record.messageTimestamp === undefined ? {} : { messageTimestamp: record.messageTimestamp }),
-	};
-}
-
-function canonicalTurnTerminalRecord(record: PromptAuthorTurnTerminalRecord): PromptAuthorTurnTerminalRecord {
-	return {
-		schemaVersion: 2,
-		type: "prompt-author-turn-terminal",
-		promptId: record.promptId,
-		intentId: record.intentId,
-		attemptId: record.attemptId,
-		terminalAt: record.terminalAt,
 	};
 }
 
@@ -423,7 +371,6 @@ function canonicalDismissalTombstoneRecord(
 function canonicalRecord(record: AuthorSidecarRecord): AuthorSidecarRecord {
 	if (record.type === "prompt-author") return canonicalDispatchRecord(record);
 	if (record.type === "prompt-author-settlement") return canonicalSettlementRecord(record);
-	if (record.type === "prompt-author-turn-terminal") return canonicalTurnTerminalRecord(record);
 	return canonicalDismissalTombstoneRecord(record);
 }
 
@@ -439,8 +386,7 @@ function isPromptAuthorBinding(value: unknown): value is PromptAuthorBinding {
 		|| !validTimestamp(record.dispatchedAt)
 		|| !isPromptSource(record.source)
 		|| !isMessageAuthor(record.author)
-		|| !hasValidModelPrefix({ author: record.author, modelPrefix: record.modelPrefix })
-		|| (record.turnTerminalMarkerVersion !== undefined && record.turnTerminalMarkerVersion !== 1)) return false;
+		|| !hasValidModelPrefix({ author: record.author, modelPrefix: record.modelPrefix })) return false;
 	const hasLegacyText = typeof record.modelText === "string";
 	const hasDigest = validDigest(record.modelTextDigest);
 	return hasLegacyText || hasDigest;
@@ -651,8 +597,7 @@ function recordsFromText(text: string): AuthorSidecarRecord[] {
 		if (!trimmed) continue;
 		try {
 			const parsed: unknown = JSON.parse(trimmed);
-			if (isDispatchRecord(parsed) || isSettlementRecord(parsed)
-				|| isTurnTerminalRecord(parsed) || isDismissalTombstoneRecord(parsed)) {
+			if (isDispatchRecord(parsed) || isSettlementRecord(parsed) || isDismissalTombstoneRecord(parsed)) {
 				records.push(canonicalRecord(parsed));
 			}
 		} catch { /* a partial final line is expected after some crashes */ }
@@ -732,8 +677,7 @@ function migrateLegacyFile(legacyFile: string, sessionId: string, legacyDir: str
 					...(parsed.messageId === undefined ? {} : { messageId: parsed.messageId }),
 					...(parsed.messageTimestamp === undefined ? {} : { messageTimestamp: parsed.messageTimestamp }),
 				});
-			} else if (isDispatchRecord(parsed) || isSettlementRecord(parsed)
-				|| isTurnTerminalRecord(parsed) || isDismissalTombstoneRecord(parsed)) {
+			} else if (isDispatchRecord(parsed) || isSettlementRecord(parsed) || isDismissalTombstoneRecord(parsed)) {
 				migrated.push(canonicalRecord(parsed));
 			}
 		} catch { /* malformed/future rows safely degrade to inference */ }
@@ -872,9 +816,6 @@ export function appendPromptAuthorDispatch(
 		source: input.source,
 		author: isMessageAuthor(input.author) ? canonicalAuthor(input.author) : input.author,
 		...(input.modelPrefix === undefined ? {} : { modelPrefix: input.modelPrefix }),
-		...(input.turnTerminalMarkerVersion === undefined ? {} : {
-			turnTerminalMarkerVersion: input.turnTerminalMarkerVersion,
-		}),
 	};
 	if (!isDispatchRecord(record)) return false;
 	return appendRecord(sessionId, record);
@@ -896,23 +837,6 @@ export function appendPromptAuthorSettlement(
 		...(input.messageTimestamp === undefined ? {} : { messageTimestamp: input.messageTimestamp }),
 	};
 	if (!isSettlementRecord(record)) return false;
-	return appendRecord(sessionId, record);
-}
-
-/** Mark the exact echoed attempt whose canonical Pi turn reached a terminal boundary. */
-export function appendPromptAuthorTurnTerminal(
-	sessionId: string,
-	input: PromptAuthorTurnTerminalInput,
-): boolean {
-	const record: PromptAuthorTurnTerminalRecord = {
-		schemaVersion: 2,
-		type: "prompt-author-turn-terminal",
-		promptId: input.promptId,
-		intentId: input.intentId,
-		attemptId: input.attemptId,
-		terminalAt: input.terminalAt,
-	};
-	if (!isTurnTerminalRecord(record)) return false;
 	return appendRecord(sessionId, record);
 }
 
@@ -1035,14 +959,6 @@ export function foldAuthorSidecarRecords(records: AuthorSidecarRecord[]): Prompt
 			});
 			bindings.set(key, binding);
 			latestKeyByPromptId.set(record.promptId, key);
-			continue;
-		}
-		if (isTurnTerminalRecord(record)) {
-			const binding = bindings.get(`attempt:${record.attemptId}`) as OrderedPromptAuthorBinding | undefined;
-			if (!binding || binding.promptId !== record.promptId || binding.intentId !== record.intentId
-				|| binding.turnTerminalMarkerVersion !== 1) continue;
-			binding.turnTerminal = record;
-			binding[PROMPT_AUTHOR_LIFECYCLE_ORDER] = recordIndex;
 			continue;
 		}
 		if (!isSettlementRecord(record)) continue;
@@ -1682,9 +1598,6 @@ export function copyAuthorSidecar(
 				source: binding.source,
 				author: binding.author,
 				...(binding.modelPrefix === undefined ? {} : { modelPrefix: binding.modelPrefix }),
-				...(binding.turnTerminalMarkerVersion === undefined ? {} : {
-					turnTerminalMarkerVersion: binding.turnTerminalMarkerVersion,
-				}),
 			});
 			records.push({
 				schemaVersion: 2,
@@ -1697,7 +1610,6 @@ export function copyAuthorSidecar(
 				...(binding.settlement.messageId === undefined ? {} : { messageId: binding.settlement.messageId }),
 				...(binding.settlement.messageTimestamp === undefined ? {} : { messageTimestamp: binding.settlement.messageTimestamp }),
 			});
-			if (binding.turnTerminal) records.push(canonicalTurnTerminalRecord(binding.turnTerminal));
 		}
 		return replaceSessionRecords(toSessionId, records);
 	} catch (error) {
