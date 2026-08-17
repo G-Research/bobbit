@@ -47,7 +47,7 @@ class FakeView implements OrchestrationSessionView {
 
 	owner(id: string, opts?: Partial<FakeSession> & Partial<PersistedSessionLike>): void {
 		this.live.set(id, { id, status: "idle", cwd: `/cwd/${id}`, allowedTools: opts?.allowedTools, title: opts?.title });
-		this.persisted.set(id, { id, title: opts?.title, delegateOf: opts?.delegateOf, parentSessionId: opts?.parentSessionId, childKind: opts?.childKind, archived: opts?.archived, sandboxed: opts?.sandboxed, projectId: opts?.projectId, cwd: opts?.cwd ?? `/cwd/${id}` });
+		this.persisted.set(id, { id, title: opts?.title, delegateOf: opts?.delegateOf, parentSessionId: opts?.parentSessionId, childKind: opts?.childKind, archived: opts?.archived, sandboxed: opts?.sandboxed, projectId: opts?.projectId, teamGoalId: opts?.teamGoalId, cwd: opts?.cwd ?? `/cwd/${id}` });
 	}
 
 	async createDelegateSession(parentSessionId: string, opts: any): Promise<{ id: string }> {
@@ -193,11 +193,32 @@ describe("OrchestrationCore.spawn — local delegated helper worktrees", () => {
 		assert.equal(view.createSessionCalls.length, 1);
 		const { opts } = view.createSessionCalls[0];
 		assert.deepEqual(opts.worktreeOpts, { repoPath: "/repo" });
+		assert.equal(opts.awaitWorktreeSetup, undefined, "non-team full sub-branch setup remains detached");
 		assert.equal("worktreePushPolicy" in opts, false, "local creation must not carry removed publication policy metadata");
 		assert.equal(opts.sandboxBranch, "goal/abcd/helper");
 		const persistedChild = view.persisted.get("child-1");
 		assert.ok(persistedChild);
 		assert.equal("worktreePushPolicy" in persistedChild, false, "persisted child metadata must not imply publication policy");
+	});
+
+	it("does not force setup awaiting from standalone inherited team metadata", async () => {
+		const view = new FakeView();
+		view.owner("metadata-owner", { teamGoalId: "goal-metadata", projectId: "proj-A" });
+		(view as any).getTrustedTeamGoalIdForSession = () => undefined;
+		(view as any).runWithTeamGoalAdmission = () => {
+			throw new Error("standalone metadata must not enter team admission");
+		};
+		const core = makeCore(view, "anthropic/claude-x");
+
+		await core.spawn({
+			ownerSessionId: "metadata-owner",
+			instructions: "x",
+			lifecycle: "full",
+			worktree: { mode: "sub-branch", repoPath: "/repo", goalId: "goal-child", branch: "goal/child", cwd: "/repo" },
+		});
+
+		assert.equal(view.createSessionCalls[0].opts.teamGoalId, "goal-metadata", "raw ownership metadata is still inherited");
+		assert.equal(view.createSessionCalls[0].opts.awaitWorktreeSetup, undefined, "metadata-only ownership keeps detached setup");
 	});
 
 	it("bare and shared-cwd delegates omit worktree publication metadata", async () => {

@@ -542,7 +542,6 @@ export class OrchestrationCore {
 	async spawn(opts: SpawnOpts): Promise<ChildHandle> {
 		this.assertCanSpawn(opts.ownerSessionId);
 		const ownerPs = this.deps.sessionManager.getPersistedSession(opts.ownerSessionId);
-		const operation = () => this.spawnAdmitted(opts, ownerPs);
 		// Raw teamGoalId is also inherited effective-goal metadata on standalone
 		// delegate chains. Only the canonical live team closure joins terminal admission.
 		const trustedTeamGoalId = this.deps.sessionManager.getTrustedTeamGoalIdForSession
@@ -550,12 +549,17 @@ export class OrchestrationCore {
 			// Structural unit-test views predating the classifier retain their legacy
 			// raw-owner behaviour; production SessionManager always implements the query.
 			: ownerPs?.teamGoalId;
+		const operation = () => this.spawnAdmitted(opts, ownerPs, trustedTeamGoalId);
 		return trustedTeamGoalId && this.deps.sessionManager.runWithTeamGoalAdmission
 			? this.deps.sessionManager.runWithTeamGoalAdmission(trustedTeamGoalId, operation)
 			: operation();
 	}
 
-	private async spawnAdmitted(opts: SpawnOpts, ownerPs: PersistedSessionLike | undefined): Promise<ChildHandle> {
+	private async spawnAdmitted(
+		opts: SpawnOpts,
+		ownerPs: PersistedSessionLike | undefined,
+		trustedTeamGoalId: string | undefined,
+	): Promise<ChildHandle> {
 		const childKind: ChildKind = opts.childKind ?? "delegate";
 		const model = opts.model ?? this.deps.resolveSessionModel(opts.ownerSessionId);
 		const thinkingLevel = opts.thinkingLevel ?? this.deps.resolveSessionThinking?.(opts.ownerSessionId);
@@ -646,6 +650,14 @@ export class OrchestrationCore {
 			};
 			if (opts.worktree?.mode === "sub-branch") {
 				createOpts.sandboxBranch = opts.worktree.branch;
+				// A team-owned sub-branch must finish process setup before releasing
+				// terminal admission. Otherwise createSession returns its preparing
+				// placeholder and detached setup can start a process after archival.
+				// Canonical ownership is required: raw inherited teamGoalId metadata on
+				// standalone delegate chains must retain detached setup behaviour.
+				if (lifecycle === "full" && trustedTeamGoalId) {
+					createOpts.awaitWorktreeSetup = true;
+				}
 			}
 			const child = await this.deps.sessionManager.createSession(cwd, undefined, goalId, undefined, createOpts);
 			childId = child.id;
