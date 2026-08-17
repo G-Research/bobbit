@@ -10643,9 +10643,19 @@ export class SessionManager {
 		// including the case where agent_start arrived before the RPC acknowledgement.
 		this.markPromptDispatchStreaming(session);
 		const markAccepted = (): boolean => {
-			if (!this._sessionWriterIsCurrent(session)) return false;
+			// A terminal lifecycle can fence ordinary writes before a delayed RPC ack
+			// arrives. The exact tracked prompt echo still proves this canonical bridge
+			// accepted the continuation, so consume its startup-only fence as long as a
+			// replacement has not superseded the session.
+			const canonical = this.sessions.get(session.id);
+			if (canonical && canonical !== session) return false;
+			// Acceptance consumes the *restore-startup* dispatch intent, but the new
+			// continuation turn is still active. Keep the durable wasStreaming marker
+			// written by markPromptDispatchStreaming until agent_end settles the turn.
+			// The Windows dev harness force-kills the gateway, so shutdown() may never
+			// get a chance to reconstruct this bit from in-memory status. Clearing it
+			// at RPC acknowledgement made every second rapid restart lose continuation.
 			session.restoreStartupWasStreaming = false;
-			this.resolveStoreForSession(session.id).update(session.id, { wasStreaming: false });
 			return true;
 		};
 		try {
@@ -10672,9 +10682,10 @@ export class SessionManager {
 			// add a second continuation after restore returns. The pre-fence observer in
 			// handleAgentLifecycle clears it even when coordinator ownership suppresses
 			// the rest of agent_start bookkeeping.
-			// Clear the durable marker only after the final canonical bridge accepts
-			// the continuation. A gateway death during provisional restore therefore
-			// rehydrates wasStreaming=true and safely tries again on the next boot.
+			// Consume the startup-dispatch fence after the final canonical bridge
+			// accepts the continuation. The separate durable active-turn marker remains
+			// true until lifecycle settlement, so a hard gateway death mid-continuation
+			// safely re-drives again on the next boot.
 			return markAccepted();
 		} catch (err) {
 			// dispatchTrackedSystemPrompt already treats an exact correlated user echo

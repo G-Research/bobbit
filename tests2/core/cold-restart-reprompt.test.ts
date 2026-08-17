@@ -397,7 +397,20 @@ describe("cold-restart re-prompt (reproducing)", () => {
 
 		assert.equal(firstPrompts.length, 0);
 		assert.equal(secondPrompts.length, 1, "next boot must deliver the still-durable continuation once");
-		assert.equal(ps.wasStreaming, false, "only accepted canonical dispatch clears the marker");
+		assert.equal(ps.wasStreaming, true, "RPC acceptance must keep the active continuation durable until agent_end");
+
+		// Model the dev harness force-killing that accepted continuation before Pi
+		// emits agent_end. The next gateway must re-drive without a user nudge.
+		const thirdPrompts: string[] = [];
+		const thirdBridge = {
+			...baseBridge,
+			async promptWhenReady(text: string) { thirdPrompts.push(text); return { success: true }; },
+		};
+		const third = makeManager(thirdBridge);
+		third._testStore = first._testStore;
+		await third.restoreSession(ps);
+		await flush();
+		assert.equal(thirdPrompts.length, 1, "hard restart during an accepted continuation must automatically continue again");
 	});
 
 	it("dispatches boot continuation once after a queued final replacement fails", async () => {
@@ -440,7 +453,7 @@ describe("cold-restart re-prompt (reproducing)", () => {
 		await flush();
 
 		assert.equal(prompts.length, 1, "rollback canonical bridge receives one continuation, never a provisional duplicate");
-		assert.equal(ps.wasStreaming, false);
+		assert.equal(ps.wasStreaming, true, "accepted continuation remains restartable until lifecycle settlement");
 	});
 
 	it.each(["stop", "terminate"])("cancels deferred wasStreaming continuation when queued %s wins", async (terminal) => {
