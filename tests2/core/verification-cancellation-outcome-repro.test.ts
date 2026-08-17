@@ -277,6 +277,62 @@ async function resumeGenuineRestartLikeVerdict(type: "llm-review" | "agent-qa", 
 	return { calls, notifications };
 }
 
+test("a marked restart interruption cannot cancel its unmarked failed reviewer sibling — VERIFICATION_CANCELLATION_OUTCOME_AUDIT", async () => {
+	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "verification-restart-sibling-verdict-"));
+	const calls: Array<{ kind: string; value: any }> = [];
+	const events: any[] = [];
+	const signalId = `${SIGNAL_ID}-restart-sibling-verdict`;
+	const store = {
+		getGate: () => ({ status: "running", signals: [{ id: signalId, timestamp: 1 }] }),
+		updateSignalVerification: (_id: string, value: any) => calls.push({ kind: "verification", value }),
+		updateGateStatus: (_goalId: string, _gateId: string, value: string) => calls.push({ kind: "gate", value }),
+		getGatesForGoal: () => [],
+	} as any;
+	const seed = new VerificationHarness(
+		stateDir, store, (_goalId, event) => events.push(event), { get: () => undefined, getAll: () => [] } as any,
+	);
+	const active = {
+		goalId: GOAL_ID, gateId: GATE_ID, signalId, overallStatus: "running" as const, startedAt: 1,
+		steps: [
+			{
+				name: "Marked no-verdict review", type: "llm-review", status: "failed" as const, passed: false, startedAt: 1,
+				output: "", restartInterrupted: true,
+			},
+			{
+				name: "Genuine reviewer rejection", type: "llm-review", status: "failed" as const, passed: false, startedAt: 1,
+				output: `Actual reviewer rejection.\n${FORMER_RESTART_PHRASES.join("\n")}`,
+			},
+		],
+	};
+	(seed as any).activeVerifications.set(signalId, active);
+	expect((seed as any)._persistActive(), "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: sibling verdict fixture must cross the durable active-record recovery seam").toBe(true);
+
+	const recovered = new VerificationHarness(
+		stateDir, store, (_goalId, event) => events.push(event), { get: () => undefined, getAll: () => [] } as any,
+	);
+	const rerunAttempts: string[] = [];
+	(recovered as any)._tryResumeFromSession = async (_active: any, step: any) => {
+		rerunAttempts.push(step.name);
+		throw new Error(`unexpected rerun of persisted terminal step ${step.name}`);
+	};
+	await recovered.resumeInterruptedVerifications();
+
+	const verification = calls.find(call => call.kind === "verification")?.value;
+	expect(verification, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: an unmarked genuine failed sibling must publish a terminal verification").toMatchObject({
+		status: "failed",
+		steps: [
+			{},
+			{ name: "Genuine reviewer rejection", status: "failed", passed: false, output: expect.stringContaining("Actual reviewer rejection.") },
+		],
+	});
+	expect(verification?.cancellation, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: a genuine failure sibling forbids cancellation provenance on the signal").toBeUndefined();
+	expect(calls.filter(call => call.kind === "gate").map(call => call.value)).toEqual(["failed"]);
+	expect(events).toContainEqual(expect.objectContaining({ type: "gate_verification_complete", signalId, status: "failed" }));
+	expect(events.some(event => event.type === "gate_verification_complete" && event.status === "cancelled"),
+		"VERIFICATION_CANCELLATION_OUTCOME_AUDIT: sibling verdict failure must not emit a cancelled completion event").toBe(false);
+	expect(rerunAttempts, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: persisted terminal marked interruption is audit evidence, never rerunnable work").toEqual([]);
+});
+
 test.each([
 	["llm-review", FORMER_RESTART_PHRASES.join("\n")],
 	["agent-qa", FORMER_RESTART_PHRASES.join("\n")],
