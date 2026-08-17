@@ -1413,6 +1413,7 @@ test.each(["llm-review", "agent-qa"] as const)("%s cancellation joins an in-flig
 	const liveSessions = new Set<string>();
 	const terminateCalls: Array<{ sessionId: string; existed: boolean }> = [];
 	const events: any[] = [];
+	const terminalPublished = deferredVoid();
 	const fakeSession = (sessionId: string) => ({
 		id: sessionId,
 		cwd: stateDir!,
@@ -1466,7 +1467,10 @@ test.each(["llm-review", "agent-qa"] as const)("%s cancellation joins an in-flig
 	const harness: any = new VerificationHarness(
 		stateDir,
 		gateStore,
-		(_goalId, event) => events.push(event),
+		(_goalId, event) => {
+			events.push(event);
+			if (event.type === "gate_verification_complete" && event.signalId === heldSignal.id) terminalPublished.resolve();
+		},
 		roleStore as any,
 		undefined,
 		sessionManager as any,
@@ -1504,31 +1508,36 @@ test.each(["llm-review", "agent-qa"] as const)("%s cancellation joins an in-flig
 	// synchronously. Release createSession in the following microtask so the race
 	// order is exact: cleanup observes not-found, then the spawn becomes live.
 	queueMicrotask(releaseCreate.resolve);
-	await cancellation;
 	await createSettled.promise;
 
-	const cancelledEventPublished = events.some(event => event.type === "gate_verification_complete"
-		&& event.signalId === heldSignal.id && event.status === "cancelled");
-	const durableSignal = gateStore.getGate(GOAL_ID, GATE_ID)!.signals.find(candidate => candidate.id === heldSignal.id)!;
-	const reviewerSessionId = terminateCalls[0]?.sessionId;
-	const observations = {
-		terminationSettledBeforeCreate: terminateCalls.some(call => call.existed === false),
-		terminalPublishedWithLiveSpawn: cancelledEventPublished
-			&& !!reviewerSessionId && liveSessions.has(reviewerSessionId),
-		liveSessionAfterOwnerRetired: !!reviewerSessionId && liveSessions.has(reviewerSessionId)
-			&& !harness.activeVerifications.has(heldSignal.id),
-		durableSignalCancelled: durableSignal.verification?.status === "cancelled",
-	};
+	const preCleanupGate = gateStore.getGate(GOAL_ID, GATE_ID)!;
+	const preCleanupSignal = preCleanupGate.signals.find(candidate => candidate.id === heldSignal.id)!;
+	expect(preCleanupSignal.verification?.status,
+		"VERIFICATION_REVIEWER_SPAWN_CANCELLATION_RACE: a cancellation fence is not a terminal signal publication").toBe("running");
+	expect(preCleanupGate.status,
+		"VERIFICATION_REVIEWER_SPAWN_CANCELLATION_RACE: exact reviewer cleanup retains the non-terminal gate state").not.toMatch(/passed|failed|cancelled/);
+	expect(events.filter(event => event.type === "gate_verification_complete" && event.signalId === heldSignal.id),
+		"VERIFICATION_REVIEWER_SPAWN_CANCELLATION_RACE: no terminal event may precede deferred registration cleanup").toEqual([]);
+	expect(harness.activeVerifications.has(heldSignal.id),
+		"VERIFICATION_REVIEWER_SPAWN_CANCELLATION_RACE: cancellation return is only the fence; exact cleanup retains ownership").toBe(true);
+	expect(harness._loadActive().some((active: any) => active.signalId === heldSignal.id),
+		"VERIFICATION_REVIEWER_SPAWN_CANCELLATION_RACE: retained ownership survives the pre-cleanup checkpoint").toBe(true);
 
 	releaseRegistration.resolve();
+	await terminalPublished.promise;
+	await cancellation;
 	await verification;
 
-	expect(observations, "VERIFICATION_REVIEWER_SPAWN_CANCELLATION_RACE: cancellation must join or durably retain an in-flight reviewer spawn; terminateSession(not-found) cannot settle exact ownership or allow terminal publication").toEqual({
-		terminationSettledBeforeCreate: false,
-		terminalPublishedWithLiveSpawn: false,
-		liveSessionAfterOwnerRetired: false,
-		durableSignalCancelled: true,
-	});
+	const finalGate = gateStore.getGate(GOAL_ID, GATE_ID)!;
+	const finalSignal = finalGate.signals.find(candidate => candidate.id === heldSignal.id)!;
+	expect(finalSignal.verification).toMatchObject({ status: "cancelled", cancellation: { cause: "manual" } });
+	expect(finalGate.status).toBe("pending");
+	expect(events.filter(event => event.type === "gate_verification_complete" && event.signalId === heldSignal.id)).toEqual([
+		expect.objectContaining({ signalId: heldSignal.id, status: "cancelled" }),
+	]);
+	expect(liveSessions).toEqual(new Set());
+	expect(harness.getActiveVerification(heldSignal.id)).toBeUndefined();
+	expect(harness._loadActive().some((active: any) => active.signalId === heldSignal.id)).toBe(false);
 });
 
 function createReviewerSpawnLifecycleFixture(type: "llm-review" | "agent-qa", suffix: string) {
@@ -1546,6 +1555,7 @@ function createReviewerSpawnLifecycleFixture(type: "llm-review" | "agent-qa", su
 	const terminated: string[] = [];
 	const unregistered: string[] = [];
 	const events: any[] = [];
+	const terminalPublished = deferredVoid();
 	const fakeSession = (sessionId: string) => ({
 		id: sessionId, cwd: stateDir!, status: "idle", lastTurnErrored: false,
 		rpcClient: { onEvent: () => () => {}, setThinkingLevel: async () => {} },
@@ -1605,7 +1615,13 @@ function createReviewerSpawnLifecycleFixture(type: "llm-review" | "agent-qa", su
 		return (originalGateWrite as any)(...args);
 	};
 	const harness: any = new VerificationHarness(
-		stateDir, gateStore, (_goalId, event) => { events.push(event); order.push("event"); },
+		stateDir, gateStore, (_goalId, event) => {
+			events.push(event);
+			if (event.type === "gate_verification_complete") {
+				order.push("event");
+				terminalPublished.resolve();
+			}
+		},
 		{ get: () => role, getAll: () => [role] } as any,
 		undefined, sessionManager as any, teamManager as any, undefined, projectContextManager as any, undefined,
 		{ commandRunner: { execFile: async () => ({ stdout: Buffer.from("0123456789abcdef\n"), stderr: Buffer.alloc(0) }) } },
@@ -1622,6 +1638,7 @@ function createReviewerSpawnLifecycleFixture(type: "llm-review" | "agent-qa", su
 	const verification = harness.verifyGateSignal(heldSignal, gate, stateDir, goal.branch, "main", new Map(), "goal spec");
 	return {
 		harness, heldSignal, verification, createStarted: createStarted.promise, registrationStarted: registrationStarted.promise,
+		terminalPublished: terminalPublished.promise,
 		resolveCreate: () => resolveCreateOutcome("created"),
 		rejectCreate: () => resolveCreateOutcome("rejected"),
 		releaseRegistration: registrationRelease.resolve,
@@ -1636,6 +1653,7 @@ test.each(["llm-review", "agent-qa"] as const)("%s cancellation waits for a reje
 	await Promise.resolve();
 	expect(fixture.order, "VERIFICATION_REVIEWER_SPAWN_CANCELLATION_RACE: a held creator blocks signal, gate, and event publication").toEqual([]);
 	fixture.rejectCreate();
+	await fixture.terminalPublished;
 	await cancellation;
 	await fixture.verification;
 
@@ -1662,6 +1680,7 @@ test.each(["llm-review", "agent-qa"] as const)("%s cancellation joins deferred r
 	await Promise.resolve();
 	expect(fixture.order, "VERIFICATION_REVIEWER_SPAWN_CANCELLATION_RACE: deferred reviewer registration keeps the terminal record unpublished").toEqual(["creator-created"]);
 	fixture.releaseRegistration();
+	await fixture.terminalPublished;
 	await cancellation;
 	await fixture.verification;
 
@@ -1712,7 +1731,10 @@ test.each(["spawning", "spawned"] as const)("restart re-drives %s reviewer spawn
 	seed.activeVerifications.set(signalId, active);
 	expect(seed._persistActive()).toBe(true);
 	const restarted: any = new VerificationHarness(
-		stateDir, gateStore, (_goalId, event) => { events.push(event); order.push("event"); }, { get: () => undefined, getAll: () => [] } as any,
+		stateDir, gateStore, (_goalId, event) => {
+			events.push(event);
+			if (event.type === "gate_verification_complete") order.push("event");
+		}, { get: () => undefined, getAll: () => [] } as any,
 		undefined, sessionManager as any, teamManager as any,
 	);
 	await restarted.resumeInterruptedVerifications();
