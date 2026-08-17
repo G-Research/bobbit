@@ -281,6 +281,7 @@ test("a marked restart interruption cannot cancel its unmarked failed reviewer s
 	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "verification-restart-sibling-verdict-"));
 	const calls: Array<{ kind: string; value: any }> = [];
 	const events: any[] = [];
+	const notifications: string[] = [];
 	const signalId = `${SIGNAL_ID}-restart-sibling-verdict`;
 	const store = {
 		getGate: () => ({ status: "running", signals: [{ id: signalId, timestamp: 1 }] }),
@@ -315,13 +316,23 @@ test("a marked restart interruption cannot cancel its unmarked failed reviewer s
 		rerunAttempts.push(step.name);
 		throw new Error(`unexpected rerun of persisted terminal step ${step.name}`);
 	};
+	recovered.setTeamLeadNotifier((_goalId, message) => notifications.push(message));
 	await recovered.resumeInterruptedVerifications();
 
 	const verification = calls.find(call => call.kind === "verification")?.value;
 	expect(verification, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: an unmarked genuine failed sibling must publish a terminal verification").toMatchObject({
 		status: "failed",
 		steps: [
-			{},
+			{
+				name: "Marked no-verdict review",
+				status: "cancelled",
+				passed: false,
+				cancellation: {
+					cause: "gateway-restart-recovery",
+					requestedAt: expect.any(Number),
+					finalizedAt: expect.any(Number),
+				},
+			},
 			{ name: "Genuine reviewer rejection", status: "failed", passed: false, output: expect.stringContaining("Actual reviewer rejection.") },
 		],
 	});
@@ -330,6 +341,8 @@ test("a marked restart interruption cannot cancel its unmarked failed reviewer s
 	expect(events).toContainEqual(expect.objectContaining({ type: "gate_verification_complete", signalId, status: "failed" }));
 	expect(events.some(event => event.type === "gate_verification_complete" && event.status === "cancelled"),
 		"VERIFICATION_CANCELLATION_OUTCOME_AUDIT: sibling verdict failure must not emit a cancelled completion event").toBe(false);
+	expect(notifications.join("\n"), "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: only the genuine product failure belongs in the failure notification").toContain('step="Genuine reviewer rejection"');
+	expect(notifications.join("\n"), "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: an interrupted audit row must not appear as a failed notification step").not.toContain('step="Marked no-verdict review"');
 	expect(rerunAttempts, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: persisted terminal marked interruption is audit evidence, never rerunnable work").toEqual([]);
 });
 
