@@ -562,6 +562,19 @@ test.each([
 	expect(owner.activeVerifications.has(signalId)).toBe(false);
 	expect(owner._loadActive().some((entry: any) => entry.signalId === signalId)).toBe(false);
 	expect(ownerClock.pending()).toBe(0);
+
+	// A fresh boot after the timer/restart retry succeeded must not reconstruct
+	// or republish a terminal owner. This closes the duplicate-publication half
+	// of the orphan-reviewer cleanup recovery contract.
+	const freshClock = createManualClock(ownerClock.now());
+	const fresh = makeHarness(freshClock);
+	await fresh.resumeInterruptedVerifications();
+	expect(publications.filter(call => call.kind === "signal"), "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: terminal signal publication is exactly-once across a fresh restart").toHaveLength(1);
+	expect(publications.filter(call => call.kind === "gate"), "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: terminal gate publication is exactly-once across a fresh restart").toHaveLength(1);
+	expect(events.filter(event => event.type === "gate_verification_complete"), "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: terminal WS publication is exactly-once across a fresh restart").toHaveLength(1);
+	expect(notifications, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: terminal transcript publication is exactly-once across a fresh restart").toHaveLength(1);
+	expect(fresh._loadActive().some((entry: any) => entry.signalId === signalId), "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: a terminally published reviewer cleanup owner is not retained for the next boot").toBe(false);
+	expect(freshClock.pending()).toBe(0);
 });
 
 function installHeldResumeResolver(type: "llm-review" | "agent-qa", suffix: string) {
@@ -1233,6 +1246,9 @@ test("scheduled cleanup continuation retains a live generation when rerun contex
 	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "verification-cleanup-continuation-context-"));
 	const signalId = `${SIGNAL_ID}-cleanup-continuation`;
 	const clock = createManualClock(70_000);
+	const resumeEntered = deferredVoid();
+	const continuationFinished = deferredVoid();
+	let resumeReturned = false;
 	const harness: any = new VerificationHarness(
 		stateDir, {} as any, () => {}, { get: () => undefined, getAll: () => [] } as any,
 		undefined, undefined, undefined, undefined, undefined, undefined, { clock },
@@ -1256,12 +1272,127 @@ test("scheduled cleanup continuation retains a live generation when rerun contex
 		// This is the real no-context continuation outcome: no terminal verdict
 		// was published and this active owner still needs a deterministic retry.
 		expect(await harness._continueResumeWithRemainingPhases(candidate)).toBe(false);
+		resumeReturned = true;
+		resumeEntered.resolve();
+	};
+	const persistActive = harness._persistActive.bind(harness);
+	harness._persistActive = () => {
+		const persisted = persistActive();
+		// The command-cleanup timer invokes this only after _resumeOneVerification
+		// returns and it has made its final retain-or-retire decision. This seam is
+		// deliberately stronger than one microtask, which previously observed the
+		// row before the timer callback reached its deletion branch.
+		if (resumeReturned) continuationFinished.resolve();
+		return persisted;
 	};
 
 	harness._scheduleCommandKillCleanupRetry(signalId);
 	expect(clock.pending()).toBe(1);
 	clock.advance(1_000);
-	await Promise.resolve();
+	await resumeEntered.promise;
+	await continuationFinished.promise;
 
 	expect(harness.getActiveVerification(signalId), "CLEANUP_CONTINUATION_CONTEXT: missing rerun context must retain the live durable owner instead of deleting it").toBe(active);
+	expect(harness._loadActive().find((entry: any) => entry.signalId === signalId), "CLEANUP_CONTINUATION_CONTEXT: the retained live owner must survive the timer callback durably").toMatchObject({ signalId, overallStatus: "running" });
+});
+
+test("boot resume retains a live generation when rerun context is unavailable", async () => {
+	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "verification-boot-continuation-context-"));
+	const signalId = `${SIGNAL_ID}-boot-continuation`;
+	const clock = createManualClock(80_000);
+	const seed: any = new VerificationHarness(
+		stateDir, {} as any, () => {}, { get: () => undefined, getAll: () => [] } as any,
+		undefined, undefined, undefined, undefined, undefined, undefined, { clock },
+	);
+	const active: any = {
+		goalId: GOAL_ID, gateId: GATE_ID, signalId, overallStatus: "running", startedAt: 1,
+		steps: [{ name: "Awaiting unavailable rerun", type: "command", status: "waiting", startedAt: 1 }],
+	};
+	seed.activeVerifications.set(signalId, active);
+	expect(seed._persistActive()).toBe(true);
+
+	const resumed: any = new VerificationHarness(
+		stateDir, {} as any, () => {}, { get: () => undefined, getAll: () => [] } as any,
+		undefined, undefined, undefined, undefined, undefined, undefined, { clock },
+	);
+	resumed._gatherRerunContext = async () => null;
+	resumed._resumeOneVerification = async (candidate: any) => {
+		expect(await resumed._continueResumeWithRemainingPhases(candidate)).toBe(false);
+	};
+
+	await resumed.resumeInterruptedVerifications();
+
+	expect(resumed.getActiveVerification(signalId), "BOOT_CONTINUATION_CONTEXT: unavailable rerun context must remain active after the complete boot-resume pass").toMatchObject({ signalId, overallStatus: "running" });
+	expect(resumed._loadActive().find((entry: any) => entry.signalId === signalId), "BOOT_CONTINUATION_CONTEXT: a subsequent restart must recover the same unavailable-context owner rather than an empty state").toMatchObject({ signalId, overallStatus: "running" });
+});
+
+test("outer restart Resume Error retains and retries terminal intent when persistence rejects", async () => {
+	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "verification-resume-error-persist-"));
+	const signalId = `${SIGNAL_ID}-resume-error-persist`;
+	const clock = createManualClock(90_000);
+	const events: any[] = [];
+	const notifications: string[] = [];
+	const publications: any[] = [];
+	const storedSignal: any = { ...signal(), id: signalId };
+	const storedGate: any = { status: "pending", signals: [storedSignal] };
+	const store: any = {
+		getGate: () => storedGate,
+		getGatesForGoal: () => [],
+		updateSignalVerification: (_signalId: string, verification: any) => publications.push({ kind: "signal", verification }),
+		updateGateStatus: (_goalId: string, _gateId: string, status: string) => publications.push({ kind: "gate", status }),
+		updateSignalVerificationStrict: async (_signalId: string, verification: any) => publications.push({ kind: "signal", verification }),
+		updateGateStatusStrict: async (_goalId: string, _gateId: string, status: string) => publications.push({ kind: "gate", status }),
+	};
+	const seed: any = new VerificationHarness(
+		stateDir, store, () => {}, { get: () => undefined, getAll: () => [] } as any,
+		undefined, undefined, undefined, undefined, undefined, undefined, { clock },
+	);
+	const active: any = {
+		goalId: GOAL_ID, gateId: GATE_ID, signalId, overallStatus: "running", startedAt: 1,
+		steps: [{ name: "Resume Error candidate", type: "command", status: "running", startedAt: 1 }],
+	};
+	seed.activeVerifications.set(signalId, active);
+	expect(seed._persistActive()).toBe(true);
+
+	const resumed: any = new VerificationHarness(
+		stateDir, store, (_goalId, event) => events.push(event), { get: () => undefined, getAll: () => [] } as any,
+		undefined, undefined, undefined, undefined, undefined, undefined, { clock },
+	);
+	resumed.setTeamLeadNotifier((_goalId: string, message: string) => notifications.push(message));
+	let resumeFailed = false;
+	let rejectedTerminalWrite = false;
+	const persistActive = resumed._persistActive.bind(resumed);
+	resumed._persistActive = () => {
+		if (resumeFailed && !rejectedTerminalWrite) {
+			rejectedTerminalWrite = true;
+			return false;
+		}
+		return persistActive();
+	};
+	resumed._resumeOneVerification = async () => {
+		resumeFailed = true;
+		throw new Error("injected non-retryable resume failure");
+	};
+
+	await resumed.resumeInterruptedVerifications();
+
+	expect(rejectedTerminalWrite, "RESUME_ERROR_PERSISTENCE_FENCE: the fixture must reject the first terminal-intent persistence").toBe(true);
+	expect(publications, "RESUME_ERROR_PERSISTENCE_FENCE: an undurable Resume Error must not publish signal or gate state").toEqual([]);
+	expect(events.filter(event => event.type === "gate_verification_complete"), "RESUME_ERROR_PERSISTENCE_FENCE: an undurable Resume Error must not emit a terminal WS event").toEqual([]);
+	expect(notifications, "RESUME_ERROR_PERSISTENCE_FENCE: an undurable Resume Error must not emit a transcript notification").toEqual([]);
+	expect(resumed.getActiveVerification(signalId), "RESUME_ERROR_PERSISTENCE_FENCE: rejected terminal persistence retains the live owner").toMatchObject({ signalId, pendingTerminalIntent: expect.any(Object) });
+	expect(resumed._loadActive().find((entry: any) => entry.signalId === signalId), "RESUME_ERROR_PERSISTENCE_FENCE: finally must durably retain the retryable terminal owner").toMatchObject({ signalId, pendingTerminalIntent: expect.any(Object) });
+	expect(clock.pending(), "RESUME_ERROR_PERSISTENCE_FENCE: rejected terminal persistence schedules a manual-clock retry").toBe(1);
+
+	clock.advance(1_000);
+	const retry = resumed._cancelledCleanupPromises.get(signalId);
+	if (retry) await retry;
+	await Promise.resolve();
+
+	expect(publications.filter(call => call.kind === "signal"), "RESUME_ERROR_PERSISTENCE_FENCE: the retry publishes the staged signal once").toHaveLength(1);
+	expect(publications.filter(call => call.kind === "gate"), "RESUME_ERROR_PERSISTENCE_FENCE: the retry publishes the staged gate once").toHaveLength(1);
+	expect(events.filter(event => event.type === "gate_verification_complete"), "RESUME_ERROR_PERSISTENCE_FENCE: the retry publishes one terminal WS event").toHaveLength(1);
+	expect(notifications, "RESUME_ERROR_PERSISTENCE_FENCE: the retry emits one terminal transcript notification").toHaveLength(1);
+	expect(resumed.getActiveVerification(signalId)).toBeUndefined();
+	expect(resumed._loadActive().some((entry: any) => entry.signalId === signalId)).toBe(false);
 });
