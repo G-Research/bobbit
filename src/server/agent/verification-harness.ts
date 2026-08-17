@@ -1825,6 +1825,8 @@ type PendingMixedRestartFailureIntent = {
 	verification: GateSignal["verification"];
 	gateStatus: "passed" | "failed";
 	goalBranch?: string;
+	/** False when the terminal rows were synthesized outside workflow execution. */
+	workflowAligned?: boolean;
 };
 
 type ResumedVerificationStep = {
@@ -2641,14 +2643,20 @@ export class VerificationHarness {
 
 		for (const v of running) {
 			this.activeVerifications.set(v.signalId, v);
-			// A persisted marker is an unfinished teardown attempt, not proof that
-			// reviewer ownership is still being cleaned in this process.
-			delete v.reviewerCleanupPending;
-			if (!this._persistActive()) {
-				console.error(`[verification] Failed to persist recovered active ${v.signalId}; leaving it for a later restart`);
-				continue;
-			}
 			try {
+				// This is a normal running generation whose crash happened during
+				// reviewer ownership cleanup. The marker is durable authority over the
+				// exact retained session IDs, not stale process state. Settle that
+				// ownership before resuming and never touch command cleanup here.
+				if (v.reviewerCleanupPending) {
+					await this._recoverOrphanedReviewerCleanupAndResume(v);
+					continue;
+				}
+				if (!this._persistActive()) {
+					console.error(`[verification] Failed to persist recovered active ${v.signalId}; leaving it for a later restart`);
+					continue;
+				}
+
 				// Skip verifications for goals that completed/shelved while we were down
 				const goal = this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId);
 				if (goal && (goal.state === "complete" || goal.state === "shelved")) {
@@ -2961,6 +2969,7 @@ export class VerificationHarness {
 		verification: GateSignal["verification"],
 		gateStatus: "passed" | "failed",
 		goalBranch?: string,
+		workflowAligned?: boolean,
 	): Promise<boolean> {
 		if (!active.reviewerCleanupPending) return false;
 		active.pendingTerminalIntent = {
@@ -2969,6 +2978,7 @@ export class VerificationHarness {
 			verification,
 			gateStatus,
 			goalBranch,
+			workflowAligned,
 		};
 		if (!this._persistActive()) {
 			this._scheduleCancelledVerificationCleanupRetry(active.signalId);
@@ -4334,6 +4344,11 @@ export class VerificationHarness {
 	}
 
 	private _commandKillRetryTimers = new Map<string, NodeJS.Timeout>();
+	/** One recovery owner per running row whose persisted reviewer cleanup was interrupted. */
+	private _orphanReviewerCleanupRecoveryPromises = new Map<string, Promise<void>>();
+	/** Bounded deterministic retry for an orphan reviewer ownership cleanup. */
+	private _orphanReviewerCleanupRetryTimers = new Map<string, NodeJS.Timeout>();
+	private _orphanReviewerCleanupRetryAttempts = new Map<string, number>();
 	/** Retries cancellation cleanup errors without letting a detached terminal request reject. */
 	private _cancelledCleanupRetryTimers = new Map<string, NodeJS.Timeout>();
 	private _cancelledCleanupRetryAttempts = new Map<string, number>();
@@ -4731,7 +4746,11 @@ export class VerificationHarness {
 			if (current) {
 				this.broadcastFn(active.goalId, { type: "gate_verification_complete", goalId: active.goalId, gateId: active.gateId, signalId: active.signalId, status: intent.gateStatus });
 				broadcastGateStatusChanged(this.broadcastFn, active.goalId, active.gateId, intent.gateStatus);
-				this.notifyTeamLead(active.goalId, active.gateId, intent.gateStatus, { steps: intent.verification.steps, goalBranch: intent.goalBranch });
+				this.notifyTeamLead(active.goalId, active.gateId, intent.gateStatus, {
+					steps: intent.verification.steps,
+					goalBranch: intent.goalBranch,
+					workflowAligned: intent.workflowAligned,
+				});
 			}
 		} catch (error) {
 			if (this.activeVerifications.get(active.signalId) === active) this._persistActive();
@@ -4801,6 +4820,86 @@ export class VerificationHarness {
 			if (this.activeVerifications.get(active.signalId) === active) this._persistActive();
 			throw error;
 		}
+	}
+
+	/** A normal running row may retain only reviewer cleanup authority after a crash. */
+	private _isOrphanReviewerCleanupRecoveryActive(active: ActiveVerification): boolean {
+		return this._isResumeStillActive(active)
+			&& active.overallStatus === "running"
+			&& !active.pendingTerminalIntent
+			&& active.reviewerCleanupPending === true;
+	}
+
+	/**
+	 * Re-drive only the persisted reviewer session ownership and resume exactly
+	 * once after its durable cleanup marker clears. Command ownership is
+	 * deliberately outside this recovery path.
+	 */
+	private async _recoverOrphanedReviewerCleanupAndResume(active: ActiveVerification): Promise<void> {
+		const existing = this._orphanReviewerCleanupRecoveryPromises.get(active.signalId);
+		if (existing) return existing;
+		let recovery!: Promise<void>;
+		recovery = (async () => {
+			if (!this._isOrphanReviewerCleanupRecoveryActive(active)) return;
+			try {
+				// _terminateCancelledReviewersFor persists the existing marker before
+				// teardown, operates on every retained session ID, and clears it only
+				// after both terminate and unregister settle durably.
+				await this._terminateCancelledReviewersFor([active]);
+			} catch (err) {
+				// Never delete a rejected cleanup owner. The marker was persisted before
+				// external operations; retain/re-persist it and retry this exact row.
+				if (this._isOrphanReviewerCleanupRecoveryActive(active)) {
+					this._persistActive();
+					this._scheduleOrphanReviewerCleanupRetry(active.signalId);
+				}
+				console.warn(`[verification] Orphan reviewer cleanup for ${active.signalId} did not settle: ${(err as Error).message}`);
+				return;
+			}
+			if (!this._isResumeStillActive(active) || active.pendingTerminalIntent || active.reviewerCleanupPending) return;
+			this._orphanReviewerCleanupRetryAttempts.delete(active.signalId);
+			await this._resumeOneVerification(active);
+		})().finally(() => {
+			if (this._orphanReviewerCleanupRecoveryPromises.get(active.signalId) === recovery) {
+				this._orphanReviewerCleanupRecoveryPromises.delete(active.signalId);
+			}
+		});
+		this._orphanReviewerCleanupRecoveryPromises.set(active.signalId, recovery);
+		return recovery;
+	}
+
+	private _scheduleOrphanReviewerCleanupRetry(signalId: string): void {
+		if (this._orphanReviewerCleanupRetryTimers.has(signalId)) return;
+		const attempt = (this._orphanReviewerCleanupRetryAttempts.get(signalId) ?? 0) + 1;
+		this._orphanReviewerCleanupRetryAttempts.set(signalId, attempt);
+		const delayMs = Math.min(30_000, 1_000 * 2 ** Math.min(5, attempt - 1));
+		const timer = this.clock.setTimeout(async () => {
+			this._orphanReviewerCleanupRetryTimers.delete(signalId);
+			const active = this.activeVerifications.get(signalId);
+			if (!active || !this._isOrphanReviewerCleanupRecoveryActive(active)) {
+				this._orphanReviewerCleanupRetryAttempts.delete(signalId);
+				return;
+			}
+			try {
+				await this._recoverOrphanedReviewerCleanupAndResume(active);
+			} catch (err) {
+				// Resume failures use the normal restart classifier on a subsequent
+				// boot; only a still-pending reviewer cleanup is retried here.
+				console.warn(`[verification] Orphan reviewer recovery for ${signalId} failed: ${(err as Error).message}`);
+			}
+			if (this.activeVerifications.get(signalId) === active
+				&& !active.cancelled
+				&& !active.pendingTerminalIntent
+				&& !this._hasPendingCommandKillCleanup(active)
+				&& !active.reviewerCleanupPending) {
+				this.activeVerifications.delete(signalId);
+				this._persistActive();
+			} else if (this._isOrphanReviewerCleanupRecoveryActive(active)) {
+				this._scheduleOrphanReviewerCleanupRetry(signalId);
+			}
+		}, delayMs);
+		timer.unref?.();
+		this._orphanReviewerCleanupRetryTimers.set(signalId, timer);
 	}
 
 	private _scheduleCommandKillCleanupRetry(signalId: string): void {
@@ -6189,7 +6288,7 @@ export class VerificationHarness {
 				return;
 			}
 			const errorStep = { name: "Error", type: "command" as const, passed: false, status: "failed" as const, phase: 0, output: err.message, duration_ms: 0 };
-			if (await this._stageTerminalIntentIfCleanupPending(active, { status: "failed", steps: [errorStep] }, "failed", goalBranch)) return;
+			if (await this._stageTerminalIntentIfCleanupPending(active, { status: "failed", steps: [errorStep] }, "failed", goalBranch, false)) return;
 			this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, {
 				status: "failed",
 				steps: [errorStep],

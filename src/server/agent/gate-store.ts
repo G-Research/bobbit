@@ -936,6 +936,12 @@ export class GateStore {
 		const gate = this.gates.get(key);
 		if (!gate) return;
 		gate.signals.push(signal);
+		// A new running generation supersedes any strict terminal state from an
+		// older generation. Keep this in the same mutation and persistence schedule
+		// as the appended signal so readers cannot observe a replacement running
+		// signal alongside a stale passed/failed gate. A human bypass remains
+		// authoritative, and historical non-running signals leave the gate intact.
+		if (signal.verification.status === "running" && gate.status !== "bypassed") gate.status = "pending";
 		gate.updatedAt = Date.now();
 		this.save([key]);
 		this.onStatusChange?.(signal.goalId, signal.gateId);
