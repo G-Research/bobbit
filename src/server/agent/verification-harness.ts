@@ -2701,39 +2701,26 @@ export class VerificationHarness {
 				} else {
 					if (this._cancellationOwnsTerminalPublication(v)) continue;
 					console.error(`[verification] Failed to resume verification ${v.signalId}:`, err);
-					// Best-effort: mark as failed. Wrap each external store call in
-					// try/catch so a missing goal/gate doesn't stop us from cleaning
-					// up the in-memory entry below (HTTP 409 lock-after-restart bug).
+					// Unexpected recovery errors are terminal product failures, but they still
+					// must use the strict signal → gate → durable retirement → event owner.
+					// Never let an in-memory marker or caller finally block publish/retire them.
 					try {
-						this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
+						const goalBranch = this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId)?.branch;
+						await this._stageTerminalIntentIfCleanupPending(v, {
 							status: "failed",
 							steps: [{ name: "Resume Error", type: "command", passed: false, status: "failed", phase: 0, output: `Failed to resume after restart: ${errMsg}`, duration_ms: 0 }],
-						});
-						if (this._cancellationOwnsTerminalPublication(v)) continue;
-						this.resolveGateStore(v.goalId).updateGateStatus(v.goalId, v.gateId, "failed");
-						v.overallStatus = "failed";
-						v.terminalVerdictPublished = true;
-						if (!this._persistActive()) throw new Error(`Could not persist restart failure publication for ${v.signalId}`);
+						}, "failed", goalBranch, false, { alwaysStage: true });
 					} catch (storeErr) {
-						console.error(`[verification] Failed to update gate store for ${v.signalId} during resume cleanup:`, storeErr);
-					}
-					try {
-						this.broadcastFn(v.goalId, {
-							type: "gate_verification_complete",
-							goalId: v.goalId, gateId: v.gateId, signalId: v.signalId, status: "failed",
-						});
-						broadcastGateStatusChanged(this.broadcastFn, v.goalId, v.gateId, "failed");
-						this.notifyTeamLead(v.goalId, v.gateId, "failed");
-					} catch (bcastErr) {
-						console.error(`[verification] Failed to broadcast failure for ${v.signalId} during resume cleanup:`, bcastErr);
+						console.error(`[verification] Failed to stage resume failure for ${v.signalId}:`, storeErr);
 					}
 				}
 			} finally {
-				// Drop only the entry this resume owns. If a cancellation/re-signal
-				// already removed it (or a future path replaced it), do not clobber
-				// that newer active state. A timeout/cancel kill intent that has not
-				// been verified complete must remain durable for retry after restart.
+				// Resume callers never infer terminal ownership from _resumeOneVerification
+				// returning: cancellation and staged terminal-intent owners retire themselves.
+				// An already-durable marker is retained only for legacy fallback records
+				// whose signal and gate writes had published successfully.
 				if (this.activeVerifications.get(v.signalId) === v
+					&& v.terminalVerdictPublished === true
 					&& !v.cancelled
 					&& !v.pendingTerminalIntent
 					&& !this._hasPendingCommandKillCleanup(v)
@@ -2982,15 +2969,20 @@ export class VerificationHarness {
 		await this._startCancelledVerificationCleanup(v);
 	}
 
-	/** Stage a real terminal verdict behind already-durable exact reviewer cleanup. */
+	/**
+	 * Stage a real terminal verdict behind exact cleanup ownership. Resume recovery
+	 * forces this path so its timer-driven caller cannot retire the active row before
+	 * strict signal, gate, durable retirement, and event publication all settle.
+	 */
 	private async _stageTerminalIntentIfCleanupPending(
 		active: ActiveVerification,
 		verification: GateSignal["verification"],
 		gateStatus: "passed" | "failed",
 		goalBranch?: string,
 		workflowAligned?: boolean,
+		options: { alwaysStage?: boolean } = {},
 	): Promise<boolean> {
-		if (!active.reviewerCleanupPending) return false;
+		if (!options.alwaysStage && !active.reviewerCleanupPending) return false;
 		active.pendingTerminalIntent = {
 			kind: "terminal",
 			preparedAt: Date.now(),
@@ -3335,7 +3327,9 @@ export class VerificationHarness {
 			await this._startCancelledVerificationCleanup(v);
 			return;
 		}
-		if (await this._stageTerminalIntentIfCleanupPending(v, publishedVerification, gateStatus, goalBranch)) return;
+		// Recovered terminal aggregates always use the durable cleanup/finalization
+		// owner, even when no reviewer cleanup was pending at the crash boundary.
+		if (await this._stageTerminalIntentIfCleanupPending(v, publishedVerification, gateStatus, goalBranch, undefined, { alwaysStage: true })) return;
 		this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, publishedVerification);
 		this.resolveGateStore(v.goalId).updateGateStatus(v.goalId, v.gateId, gateStatus);
 
@@ -4982,9 +4976,9 @@ export class VerificationHarness {
 
 				if (this.activeVerifications.get(signalId) === active) {
 					await this._resumeOneVerification(active);
-					if (this.activeVerifications.get(signalId) === active && !this._hasPendingCommandKillCleanup(active)) {
-						this.activeVerifications.delete(signalId);
-					}
+					// A resume return is not terminal proof. A staged terminal intent,
+					// cancellation owner, or unavailable rerun context must retain this
+					// row until its authoritative owner retires it durably.
 					this._persistActive();
 				}
 			} catch (err) {
