@@ -2684,7 +2684,8 @@ export class VerificationHarness {
 					try {
 						console.warn(`[verification] Resume RPC recovery for ${v.signalId} was interrupted: ${errMsg}`);
 						this._markUnfinishedStepsRestartInterrupted(v);
-						if (!this._persistActive()) throw new Error(`Could not persist restart interruption fence for ${v.signalId}`);
+						// The selected terminal helper persists the complete intent/fence
+						// before it may notify or start exact cleanup.
 						if (this._hasUnmarkedTerminalResumeFailure(v)) {
 							await this._prepareMixedRestartFailureFromActive(v);
 						} else {
@@ -2973,7 +2974,6 @@ export class VerificationHarness {
 		if (v.steps.some(step => step.restartInterrupted === true)
 			&& !this._hasUnmarkedTerminalResumeFailure(v)) {
 			this._markUnfinishedStepsRestartInterrupted(v);
-			if (!this._persistActive()) throw new Error(`Could not persist restart interruption fence for ${v.signalId}`);
 			await this._finalizeRestartInterruptedVerification(v);
 			return;
 		}
@@ -3125,7 +3125,6 @@ export class VerificationHarness {
 					// the step look like an ordinary failed reviewer verdict on next boot.
 					this._updateActiveStepFromResumedResult(v, step, { ...resumedStep, status: "running" });
 					this._markUnfinishedStepsRestartInterrupted(v);
-					if (!this._persistActive()) throw new Error(`Could not persist restart interruption fence for ${v.signalId}`);
 					await this._finalizeRestartInterruptedVerification(v);
 					return;
 				}
@@ -3199,7 +3198,6 @@ export class VerificationHarness {
 			&& !this._hasUnmarkedTerminalResumeFailure(v);
 		if (suppressedByRestart) {
 			this._markUnfinishedStepsRestartInterrupted(v);
-			if (!this._persistActive()) throw new Error(`Could not persist restart interruption fence for ${v.signalId}`);
 			await this._finalizeRestartInterruptedVerification(v);
 			return;
 		}
@@ -4556,8 +4554,8 @@ export class VerificationHarness {
 		active.cancellation = cancellation;
 		const signal = this.tryResolveGateStore(active.goalId)
 			?.getGate(active.goalId, active.gateId)
-			?.signals.find(candidate => candidate.id === active.signalId);
-		const persistedSteps = signal?.verification.steps ?? [];
+			?.signals?.find(candidate => candidate.id === active.signalId);
+		const persistedSteps = signal?.verification?.steps ?? [];
 		const count = Math.max(persistedSteps.length, active.steps.length);
 		const steps: GateSignalStep[] = [];
 		for (let index = 0; index < count; index++) {
@@ -5155,6 +5153,9 @@ export class VerificationHarness {
 		try {
 			// Never issue asynchronous teardown/kill from a memory-only fence.
 			if (!this._persistActive()) return true;
+			// A persistence-first retry may be the first path after intent creation
+			// that reaches cleanup; release parked signoffs only after its fence is on disk.
+			if (active.pendingTerminalIntent) this._drainPendingSignoffsForSignal(active.signalId);
 			await this._terminateCancelledReviewersFor([active]);
 			const { signalId } = active;
 			// Partition siblings by ownership domain. A live docker-exec transport
