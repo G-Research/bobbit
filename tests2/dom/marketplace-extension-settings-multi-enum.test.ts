@@ -106,6 +106,24 @@ describe("Market multi-enum extension settings", () => {
 		expect(patches[0]).toMatchObject({ expectedRevision: 1, values: { languages: ["go", "javascript"] } });
 	});
 
+	it("keeps back-to-back changes before rerender without restoring a removed option", async () => {
+		await renderFixture([{
+			key: "languages", type: "multi-enum", label: "Languages", optional: true,
+			values: ["typescript", "javascript", "python"], default: ["typescript", "python"], value: ["typescript", "python"], source: "default",
+		}]);
+		const python = root.querySelector<HTMLInputElement>('[data-testid="market-settings-multi-enum-option"][data-option-value="python"]')!;
+		const javascript = root.querySelector<HTMLInputElement>('[data-testid="market-settings-multi-enum-option"][data-option-value="javascript"]')!;
+
+		// Do not await between events: both handlers use the same rendered closure.
+		python.click();
+		javascript.click();
+
+		await waitFor(() => root.querySelector('[data-testid="market-settings-multi-enum-summary"]')?.textContent === "2 selected", "combined rapid selection");
+		expect(root.querySelector<HTMLInputElement>('[data-option-value="typescript"]')?.checked).toBe(true);
+		expect(javascript.checked).toBe(true);
+		expect(root.querySelector<HTMLInputElement>('[data-option-value="python"]')?.checked).toBe(false);
+	});
+
 	it("keeps an explicit empty required set invalid, then stages Use default as PATCH null", async () => {
 		await renderFixture([{
 			key: "languages", type: "multi-enum", label: "Languages", optional: false,

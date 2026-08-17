@@ -2373,7 +2373,10 @@ function renderSettingsField(target: ExtensionSettingsTarget, field: ExtensionSe
 		const draft = settingsDrafts.get(owner);
 		const usingDefault = draft?.has(field.key) === true && draft.get(field.key) === undefined;
 		const toggle = (option: string, checked: boolean): void => {
-			change(checked ? [...selected, option] : selected.filter((value) => value !== option));
+			// DOM events can arrive before Lit re-renders this closure. Always build
+			// the next set from the live draft so one toggle cannot restore another.
+			const current = canonicalMultiEnum(draftFor(owner, field)) ?? [];
+			change(checked ? [...current, option] : current.filter((value) => value !== option));
 		};
 		control = html`<fieldset id=${fieldId} class="market-settings-multi-enum" data-testid="market-settings-multi-enum" data-field-key=${field.key} ?disabled=${busyOwner} aria-invalid=${error ? "true" : "false"} aria-describedby=${ariaDescribedBy}>
 			<legend>${fieldLabel(field)}${field.required ? html` <span aria-hidden="true">*</span>` : ""}</legend>
