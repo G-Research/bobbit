@@ -4768,8 +4768,8 @@ export class VerificationHarness {
 			}
 			// Supersession or replacement wins after the historical signal write.
 			if (this.activeVerifications.get(active.signalId) !== active || active.cancelled || active.pendingTerminalIntent !== intent) return;
-			const current = this._isCurrentGateSignal(active);
-			if (current) {
+			const currentBeforeGateWrite = this._isCurrentGateSignal(active);
+			if (currentBeforeGateWrite) {
 				if (typeof (store as Partial<GateStore>).updateGateStatusStrict === "function") {
 					await store.updateGateStatusStrict(active.goalId, active.gateId, intent.gateStatus);
 				} else {
@@ -4788,7 +4788,11 @@ export class VerificationHarness {
 				throw new Error(`Could not persist mixed restart terminal publication for ${active.signalId}`);
 			}
 			this._cancelledCleanupRetryAttempts.delete(active.signalId);
-			if (current) {
+			// The strict gate write can yield while a replacement signal is admitted.
+			// Historical terminal persistence may finish, but only the post-write
+			// current generation may emit current-gate status or transcript events.
+			const currentAfterGateWrite = this._isCurrentGateSignal(active);
+			if (currentAfterGateWrite) {
 				this.broadcastFn(active.goalId, { type: "gate_verification_complete", goalId: active.goalId, gateId: active.gateId, signalId: active.signalId, status: intent.gateStatus });
 				broadcastGateStatusChanged(this.broadcastFn, active.goalId, active.gateId, intent.gateStatus);
 				this.notifyTeamLead(active.goalId, active.gateId, intent.gateStatus, {
