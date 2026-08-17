@@ -351,6 +351,9 @@ const extension: ExtensionFactory = (pi) => {
 			if (p.operation === "inspect" && (p.pattern !== undefined || p.case_sensitive !== undefined || p.context !== undefined)) {
 				return fail("read_session inspect does not accept list filtering fields");
 			}
+			if (p.operation === "inspect" && p.result_index === undefined && (p.offset !== undefined || p.limit !== undefined)) {
+				return fail("read_session inspect offset/limit require result_index");
+			}
 			if (p.operation === "inspect" && typeof p.offset === "number" && p.offset < 0) {
 				return fail("read_session inspect offset must be >= 0");
 			}

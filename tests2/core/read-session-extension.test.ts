@@ -37,7 +37,9 @@ describe("read_session discriminated tool contract", () => {
 			{ operation: "list", session_id: "s", message_index: 1 },
 			{ operation: "inspect", session_id: "s", message_index: 1, pattern: "x" },
 			{ operation: "inspect", session_id: "s", message_index: 1, context: 1 },
-			{ operation: "inspect", session_id: "s", message_index: 1, offset: -1 },
+			{ operation: "inspect", session_id: "s", message_index: 1, offset: 1 },
+			{ operation: "inspect", session_id: "s", message_index: 1, limit: 40 },
+			{ operation: "inspect", session_id: "s", message_index: 1, result_index: 0, offset: -1 },
 			{ operation: "list", session_id: "s", limit: 201 },
 		]) {
 			const result = await tool.execute("invalid", value);
