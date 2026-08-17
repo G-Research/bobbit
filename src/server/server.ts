@@ -18948,11 +18948,17 @@ async function handleApiRoute(
 				}
 			}
 		}
-		resolver({
-			verdict: body.verdict === "pass",
-			summary: body.summary,
-			reportHtml,
-		});
+		try {
+			resolver({
+				verdict: body.verdict === "pass",
+				summary: body.summary,
+				reportHtml,
+			});
+		} catch (err) {
+			console.warn(`[verification] Could not durably record verification_result for ${body.sessionId}: ${(err as Error)?.message || err}`);
+			json({ error: "Verification result could not be durably recorded; retry", code: "VERDICT_NOT_PERSISTED" }, 503);
+			return;
+		}
 		json({ ok: true });
 		return;
 	}
