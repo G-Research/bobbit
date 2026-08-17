@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { createFsFromVolume, Volume } from "memfs";
-import { migrateLegacyHeadquartersDirectory, migrateToPerProjectState } from "../../src/server/agent/state-migration.js";
+import { migrateLegacyHeadquartersDirectory, migrateToPerProjectState, recoverPreMigrationData } from "../../src/server/agent/state-migration.js";
 import { SessionStore } from "../../src/server/agent/session-store.js";
 import { serverSecretsDir } from "../../src/server/bobbit-dir.js";
 import {
@@ -1031,6 +1031,49 @@ describe("Headquarters directory migration", () => {
 		assert.equal(allIds.includes("s-archived-purged"), false, "the canonical sessions.json tombstone must suppress archived backup recovery");
 		assert.equal(fs.existsSync(path.join(overrideState, "sessions.archived.json.pre-headquarters-id-migration")), false, "the tombstoned archived backup is fully accounted for");
 		assert.equal(fs.existsSync(path.join(overrideState, "sessions.archived.json.pre-headquarters-id-migration-recovered")), true);
+	});
+
+	// Session tier `.pre-migration` recovery happens outside the Headquarters
+	// re-attribution pass. It must still use one canonical `sessions.json`
+	// tombstone namespace, keep each v3 envelope's independent metadata, and
+	// never route an archived recovery into the live tier.
+	it("suppresses tombstoned rows from both split session recovery backups while preserving v3 tiers", () => {
+		const stateDir = tmpRoot("split-session-recovery-");
+		const liveFile = path.join(stateDir, "sessions.json");
+		const archivedFile = path.join(stateDir, "sessions.archived.json");
+		writeJson(liveFile, {
+			version: 3,
+			epoch: 41,
+			sessions: [{ id: "live-current", title: "Current live", cwd: stateDir, agentSessionFile: "live-current.jsonl", createdAt: 1, lastActivity: 1 }],
+		});
+		writeJson(archivedFile, {
+			version: 3,
+			epoch: 59,
+			sessions: [{ id: "archived-current", title: "Current archived", cwd: stateDir, agentSessionFile: "archived-current.jsonl", createdAt: 1, lastActivity: 1, archived: true }],
+		});
+		writeJson(liveFile + ".pre-migration", [
+			{ id: "live-deleted", title: "Deleted live", cwd: stateDir, agentSessionFile: "live-deleted.jsonl", createdAt: 1, lastActivity: 1 },
+			{ id: "live-recoverable", title: "Recovered live", cwd: stateDir, agentSessionFile: "live-recoverable.jsonl", createdAt: 1, lastActivity: 1 },
+		]);
+		writeJson(archivedFile + ".pre-migration", [
+			{ id: "archived-deleted", title: "Deleted archived", cwd: stateDir, agentSessionFile: "archived-deleted.jsonl", createdAt: 1, lastActivity: 1, archived: true },
+			{ id: "archived-recoverable", title: "Recovered archived", cwd: stateDir, agentSessionFile: "archived-recoverable.jsonl", createdAt: 1, lastActivity: 1, archived: true },
+		]);
+		writeJson(path.join(stateDir, ".deletion-tombstones.json"), {
+			// Both split tier backups must consult this canonical namespace.
+			"sessions.json": ["live-deleted", "archived-deleted"],
+		});
+
+		recoverPreMigrationData(stateDir);
+
+		const live = readJson<{ version: number; epoch: number; sessions: Array<Record<string, unknown>> }>(liveFile);
+		const archived = readJson<{ version: number; epoch: number; sessions: Array<Record<string, unknown>> }>(archivedFile);
+		assert.deepEqual({ version: live.version, epoch: live.epoch }, { version: 3, epoch: 41 }, "live recovery must preserve its v3 envelope metadata");
+		assert.deepEqual({ version: archived.version, epoch: archived.epoch }, { version: 3, epoch: 59 }, "archived recovery must preserve its v3 envelope metadata");
+		assert.deepEqual(live.sessions.map(session => session.id).sort(), ["live-current", "live-recoverable"]);
+		assert.deepEqual(archived.sessions.map(session => session.id).sort(), ["archived-current", "archived-recoverable"]);
+		assert.equal(live.sessions.some(session => session.id === "archived-recoverable"), false, "archived recovery must remain out of the live tier");
+		assert.equal(archived.sessions.find(session => session.id === "archived-recoverable")?.archived, true, "recovered archived session must remain archived");
 	});
 
 	// Spent-backup retirement: after a completed migration (marker present), a
