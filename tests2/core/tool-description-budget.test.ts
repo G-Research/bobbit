@@ -51,7 +51,10 @@ const EXTENSION_GROUPS = [
 
 // Vite resolves this eager glob into static module imports in one transform pass.
 // Unlike sequential import(url), extension discovery has no per-group async tax.
-const EXTENSION_MODULES = import.meta.glob<{ default: ExtensionFactory }>(
+const EXTENSION_MODULES = import.meta.glob<{
+	default: ExtensionFactory;
+	installBrowserTools?: (pi: any, backend: { ensurePage(): Promise<never>; cleanup(): Promise<void> }) => void;
+}>(
 	"../../defaults/tools/*/extension.ts",
 	{ eager: true },
 );
@@ -113,7 +116,26 @@ beforeAll(() => {
 
 	for (const [modulePath, module] of Object.entries(EXTENSION_MODULES)) {
 		assert.ok(typeof module.default === "function", `${modulePath} has no callable default export`);
-		captureTools(module.default, modulePath, bedrockCaptured);
+		if (modulePath.endsWith("/browser/extension.ts") && module.installBrowserTools) {
+			// Unit forks intentionally cannot require Playwright. Inject the browser
+			// extension's supported inert backend so its schemas still enter the inventory.
+			module.installBrowserTools({
+				registerTool(def: any) {
+					bedrockCaptured.push({
+						name: def?.name ?? "<unnamed>",
+						description: def?.description,
+						parameters: def?.parameters,
+						source: modulePath,
+					});
+				},
+				on() {},
+			}, {
+				ensurePage: async () => { throw new Error("schema inventory does not execute browser tools"); },
+				cleanup: async () => {},
+			});
+		} else {
+			captureTools(module.default, modulePath, bedrockCaptured);
+		}
 	}
 
 	assert.ok(captured.length >= 13, `expected at least 13 tools registered, got ${captured.length}`);
@@ -164,6 +186,12 @@ function collectAllDescriptions(
 }
 
 describe("default tool provider schema compatibility", () => {
+	it("captures tools from every discovered default extension", () => {
+		const coveredSources = new Set(bedrockCaptured.map((tool) => tool.source));
+		const missing = Object.keys(EXTENSION_MODULES).filter((modulePath) => !coveredSources.has(modulePath));
+		assert.deepEqual(missing, [], `default extension(s) registered no tools under the inventory fixture: ${missing.join(", ")}`);
+	});
+
 	it("every default tool has a Bedrock-compatible top-level object input schema", () => {
 		const violations = bedrockCaptured
 			.filter((tool) => !tool.parameters || typeof tool.parameters !== "object" || (tool.parameters as any).type !== "object")
