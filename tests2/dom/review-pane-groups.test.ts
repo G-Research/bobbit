@@ -614,6 +614,10 @@ describe("ReviewPane review groups", () => {
 		const trigger = overflowTrigger(pane);
 		expect(trigger).not.toBeNull();
 
+		pane.querySelector<HTMLButtonElement>(".review-reject-btn")!.click();
+		await settle(pane);
+		expect(pane.querySelector("[role=alert]"), `${REGRESSION}: reject validation must be visible before refresh`).not.toBeNull();
+
 		trigger!.click();
 		await settle(pane);
 		const menu = controlledMenu(trigger!);
@@ -631,6 +635,7 @@ describe("ReviewPane review groups", () => {
 		await settle(pane);
 		expect(trigger!.getAttribute("aria-expanded"), `${REGRESSION}: same-review refresh must preserve the open menu`).toBe("true");
 		expect(lastItem!.isConnected, `${REGRESSION}: same-review refresh must not detach the pending click target`).toBe(true);
+		expect(pane.querySelector("[role=alert]"), `${REGRESSION}: same-review refresh must still clear stale validation`).toBeNull();
 
 		let change: CustomEvent | undefined;
 		pane.addEventListener("review-file-change", (event) => { change = event as CustomEvent; });
