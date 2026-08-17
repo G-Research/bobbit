@@ -326,7 +326,7 @@ test.each(["llm-review", "agent-qa"] as const)("%s durably captures a failed ver
 		await acceptedDuringTerminate;
 		// A new harness models the crash/restart boundary without direct file IO.
 		const restarted = new VerificationHarness(stateDir, store, () => {}, { get: () => undefined, getAll: () => [] } as any);
-		const persisted = restarted._loadActive().find((entry: any) => entry.signalId === signalId);
+		const persisted = (restarted as any)._loadActive().find((entry: any) => entry.signalId === signalId);
 		expect(persisted?.steps[0]).toMatchObject({ status: "failed", passed: false, output: lateSummary, verdictObtained: true });
 		expect(persisted?.steps[0]?.restartInterrupted, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: accepted reviewer verdict clears stale restart provenance before teardown can finish").not.toBe(true);
 		expect(calls, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: exact teardown blocks all terminal publication").toEqual([]);
