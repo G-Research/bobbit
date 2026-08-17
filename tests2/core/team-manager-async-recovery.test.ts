@@ -246,6 +246,11 @@ async function makeAdoptedAdmissionFixture() {
 		paused: false,
 		worktreeOwnerSessionId: ownerSessionId,
 	};
+	let subscriptionCount = 0;
+	let unsubscribeCount = 0;
+	let activeSubscriptions = 0;
+	let promptCount = 0;
+	let failNextTransition = false;
 	const source = {
 		id: ownerSessionId,
 		title: "Regular session",
@@ -253,6 +258,19 @@ async function makeAdoptedAdmissionFixture() {
 		cwd: goal.cwd,
 		status: "idle",
 		role: "general",
+		rpcClient: {
+			onEvent: () => {
+				subscriptionCount += 1;
+				activeSubscriptions += 1;
+				let active = true;
+				return () => {
+					if (!active) return;
+					active = false;
+					unsubscribeCount += 1;
+					activeSubscriptions -= 1;
+				};
+			},
+		},
 		createdAt: 1,
 		lastActivity: 1,
 	};
@@ -261,9 +279,20 @@ async function makeAdoptedAdmissionFixture() {
 	const teams = new MemoryTeamStore([]);
 	const liveSessions = new Map<string, any>();
 	let workerSequence = 0;
+	const goalManager = {
+		updateGoal: async (goalId: string, patch: any) => {
+			if (failNextTransition) {
+				failNextTransition = false;
+				throw new Error("injected transition failure");
+			}
+			goals.update(goalId, patch);
+			return goals.get(goalId);
+		},
+	};
 	const context = {
 		project: { id: projectId },
 		goalStore: goals,
+		goalManager,
 		teamStore: teams,
 		sessionStore: sessions,
 	};
@@ -305,7 +334,10 @@ async function makeAdoptedAdmissionFixture() {
 			return !!live;
 		},
 		resolveSessionAgentAuthor: () => undefined,
-		enqueuePrompt: async () => ({ status: "dispatched" }),
+		enqueuePrompt: async () => {
+			promptCount += 1;
+			return { status: "dispatched" };
+		},
 		isSandboxEnabled: false,
 		getSandboxManager: () => undefined,
 		dispatchGoalProvisionedForWorktree: async () => {},
@@ -342,7 +374,21 @@ async function makeAdoptedAdmissionFixture() {
 	liveSessions.set(source.id, { ...source });
 	await manager.adoptExistingLead(goal.id, source.id);
 
-	return { manager, goal, source, goals, sessions, teams, liveSessions, get workerCount() { return workerSequence; } };
+	return {
+		manager,
+		goal,
+		source,
+		goals,
+		sessions,
+		teams,
+		liveSessions,
+		failNextTransition: () => { failNextTransition = true; },
+		get workerCount() { return workerSequence; },
+		get subscriptionCount() { return subscriptionCount; },
+		get unsubscribeCount() { return unsubscribeCount; },
+		get activeSubscriptions() { return activeSubscriptions; },
+		get promptCount() { return promptCount; },
+	};
 }
 
 function makeAdoptedGoalRestartFixture(options: { reservation: boolean; role: string }) {
@@ -405,6 +451,10 @@ function makeAdoptedGoalRestartFixture(options: { reservation: boolean; role: st
 				deletedAttempts.push(goalId);
 				return false;
 			},
+			updateGoal: async (goalId: string, patch: any) => {
+				goals.update(goalId, patch);
+				return goals.get(goalId);
+			},
 		},
 	};
 	const projectContextManager = {
@@ -434,7 +484,7 @@ function makeAdoptedGoalRestartFixture(options: { reservation: boolean; role: st
 		recoverySidecars: new MemoryRecoverySidecars(),
 	} as any, undefined, noTimerClock as any);
 
-	return { manager, goal, source, sessions, teams, initializedGates, deletedAttempts };
+	return { manager, goal, source, goals, sessions, teams, initializedGates, deletedAttempts };
 }
 
 describe("TeamManager adopted-lead worker admission", () => {
@@ -522,6 +572,116 @@ describe("TeamManager adopted-lead worker admission", () => {
 	});
 });
 
+describe("TeamManager adopted-lead finalization", () => {
+	it("activates the reserved lead without a kickoff and stays single-subscribed across retries", async () => {
+		const fixture = await makeAdoptedAdmissionFixture();
+		try {
+			const attachment = { goalId: fixture.goal.id, teamGoalId: fixture.goal.id, role: "team-lead" };
+			Object.assign(fixture.liveSessions.get(fixture.source.id), attachment);
+			fixture.sessions.update(fixture.source.id, attachment);
+
+			const first = await fixture.manager.finalizeAdoptedLead(fixture.goal.id);
+			assert.equal(first.teamLeadSessionId, fixture.source.id);
+			assert.equal(fixture.goals.get(fixture.goal.id)?.state, "in-progress");
+			assert.equal(fixture.subscriptionCount, 1);
+			assert.equal(fixture.activeSubscriptions, 1);
+			assert.equal(fixture.promptCount, 0);
+			assert.equal(fixture.workerCount, 0);
+
+			const retry = await fixture.manager.finalizeAdoptedLead(fixture.goal.id);
+			assert.equal(retry.teamLeadSessionId, fixture.source.id);
+			assert.equal(fixture.subscriptionCount, 2);
+			assert.equal(fixture.unsubscribeCount, 1);
+			assert.equal(fixture.activeSubscriptions, 1, "retry replaces rather than duplicates the lead listener");
+			assert.equal(fixture.goals.updates.length, 1, "in-progress transition is idempotent");
+			assert.equal(fixture.promptCount, 0, "finalization never sends the normal startTeam kickoff");
+		} finally {
+			fixture.manager.dispose();
+		}
+	});
+
+	it("retries cleanly after the todo transition fails", async () => {
+		const fixture = await makeAdoptedAdmissionFixture();
+		try {
+			const attachment = { goalId: fixture.goal.id, teamGoalId: fixture.goal.id, role: "team-lead" };
+			Object.assign(fixture.liveSessions.get(fixture.source.id), attachment);
+			fixture.sessions.update(fixture.source.id, attachment);
+			fixture.failNextTransition();
+
+			await assert.rejects(
+				() => fixture.manager.finalizeAdoptedLead(fixture.goal.id),
+				/injected transition failure/,
+			);
+			assert.equal(fixture.goals.get(fixture.goal.id)?.state, "todo");
+			assert.equal(fixture.activeSubscriptions, 1);
+
+			await fixture.manager.finalizeAdoptedLead(fixture.goal.id);
+			assert.equal(fixture.goals.get(fixture.goal.id)?.state, "in-progress");
+			assert.equal(fixture.subscriptionCount, 2);
+			assert.equal(fixture.unsubscribeCount, 1);
+			assert.equal(fixture.activeSubscriptions, 1);
+			assert.equal(fixture.promptCount, 0);
+			assert.equal(fixture.workerCount, 0);
+		} finally {
+			fixture.manager.dispose();
+		}
+	});
+});
+
+describe("TeamManager adopted-goal archive admission", () => {
+	for (const scenario of ["pending", "live-only", "durable-only", "partial", "identity-mismatch"] as const) {
+		it(`rejects ${scenario} promotion state before running archive`, async () => {
+			const fixture = await makeAdoptedAdmissionFixture();
+			try {
+				const exact = { goalId: fixture.goal.id, teamGoalId: fixture.goal.id, role: "team-lead" };
+				if (scenario === "live-only") Object.assign(fixture.liveSessions.get(fixture.source.id), exact);
+				if (scenario === "durable-only") fixture.sessions.update(fixture.source.id, exact);
+				if (scenario === "partial") {
+					Object.assign(fixture.liveSessions.get(fixture.source.id), { goalId: fixture.goal.id });
+					fixture.sessions.update(fixture.source.id, { goalId: fixture.goal.id });
+				}
+				if (scenario === "identity-mismatch") {
+					Object.assign(fixture.liveSessions.get(fixture.source.id), exact, { teamGoalId: "other-goal" });
+					fixture.sessions.update(fixture.source.id, exact);
+				}
+				let archiveCalls = 0;
+				await assert.rejects(
+					() => fixture.manager.withAdoptedGoalArchiveAdmission(fixture.goal.id, async () => { archiveCalls += 1; }),
+					(error: any) => error?.code === "PROMOTION_IN_PROGRESS" && error?.status === 409,
+				);
+				assert.equal(archiveCalls, 0);
+				assert.equal(fixture.goals.get(fixture.goal.id)?.archived, false);
+			} finally {
+				fixture.manager.dispose();
+			}
+		});
+	}
+
+	it("admits an exact committed attachment and leaves ordinary goals unchanged", async () => {
+		const fixture = await makeAdoptedAdmissionFixture();
+		try {
+			const exact = { goalId: fixture.goal.id, teamGoalId: fixture.goal.id, role: "team-lead" };
+			Object.assign(fixture.liveSessions.get(fixture.source.id), exact);
+			fixture.sessions.update(fixture.source.id, exact);
+			const adoptedResult = await fixture.manager.withAdoptedGoalArchiveAdmission(
+				fixture.goal.id,
+				async () => "adopted-archive",
+			);
+			assert.equal(adoptedResult, "adopted-archive");
+
+			const ordinaryGoal = { ...fixture.goal, id: "ordinary-goal", worktreeOwnerSessionId: undefined };
+			fixture.goals.put(ordinaryGoal);
+			const ordinaryResult = await fixture.manager.withAdoptedGoalArchiveAdmission(
+				ordinaryGoal.id,
+				async () => "ordinary-archive",
+			);
+			assert.equal(ordinaryResult, "ordinary-archive");
+		} finally {
+			fixture.manager.dispose();
+		}
+	});
+});
+
 describe("TeamManager adopted-goal restart reconciliation", () => {
 	for (const reservation of [true, false]) {
 		it(`repairs a baseline general session with ${reservation ? "an empty" : "no"} lead reservation`, async () => {
@@ -542,6 +702,8 @@ describe("TeamManager adopted-goal restart reconciliation", () => {
 				maxConcurrent: 12,
 			});
 			assert.deepEqual(fixture.initializedGates, [fixture.goal.id]);
+			assert.equal(fixture.sessions.records.size, 1);
+			assert.equal(fixture.goals.get(fixture.goal.id)?.state, "in-progress");
 			assert.deepEqual(fixture.deletedAttempts, []);
 			assert.deepEqual(fixture.teams.mutations, reservation ? [] : [`put:${fixture.goal.id}`]);
 			fixture.manager.dispose();

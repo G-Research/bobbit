@@ -566,6 +566,8 @@ export class TeamManager {
 
 	/** In-flight startTeam operations, including their immutable caller semantics. */
 	private startTeamLocks = new Map<string, StartTeamLock>();
+	/** Serializes adopted-lead finalization with the admitted archive operation. */
+	private adoptedGoalLifecycleLocks = new Map<string, Promise<void>>();
 	private readonly commandRunner: CommandRunner;
 	private readonly recoveryFs: RecoveryFs;
 	private readonly recoverySidecars: TeamRecoverySidecars;
@@ -833,6 +835,9 @@ export class TeamManager {
 				}
 				if (goal.workflow) {
 					ctx.gateStore.initGatesForGoal(goal.id, goal.workflow.gates.map(gate => gate.id));
+				}
+				if (goal.state === "todo") {
+					await ctx.goalManager.updateGoal(goal.id, { state: "in-progress" });
 				}
 				await Promise.all([ctx.gateStore.flush(), ctx.sessionStore.flush()]);
 			}
@@ -2109,6 +2114,104 @@ export class TeamManager {
 		return this.getTeamState(goalId)!;
 	}
 
+	private hasExactAdoptedLeadAttachment(goal: PersistedGoal, entry: TeamEntry | undefined): boolean {
+		const ownerSessionId = goal.worktreeOwnerSessionId;
+		if (!ownerSessionId || entry?.teamLeadSessionId !== ownerSessionId) return false;
+		if (this.sessionToGoal.get(ownerSessionId) !== goal.id) return false;
+		const liveSource = this.sessionManager.getSession(ownerSessionId);
+		const getPersistedSession = (this.sessionManager as Partial<SessionManager>).getPersistedSession;
+		const persistedSource = typeof getPersistedSession === "function"
+			? getPersistedSession.call(this.sessionManager, ownerSessionId)
+			: undefined;
+		return liveSource?.status !== "terminated"
+			&& liveSource?.projectId === goal.projectId
+			&& persistedSource?.projectId === goal.projectId
+			&& hasExactAdoptedLeadAttachment(liveSource, goal.id)
+			&& hasExactAdoptedLeadAttachment(persistedSource, goal.id);
+	}
+
+	private async runAdoptedGoalLifecycleLocked<T>(goalId: string, action: () => Promise<T>): Promise<T> {
+		for (;;) {
+			const previous = this.adoptedGoalLifecycleLocks.get(goalId);
+			if (!previous) break;
+			await previous.catch(() => undefined);
+		}
+		let release!: () => void;
+		const current = new Promise<void>((resolve) => { release = resolve; });
+		this.adoptedGoalLifecycleLocks.set(goalId, current);
+		try {
+			return await action();
+		} finally {
+			if (this.adoptedGoalLifecycleLocks.get(goalId) === current) {
+				this.adoptedGoalLifecycleLocks.delete(goalId);
+			}
+			release();
+		}
+	}
+
+	/**
+	 * Complete the normal active-team lifecycle after SessionManager has committed
+	 * an in-place lead promotion. This installs the ordinary lead subscription and
+	 * activates a todo goal, but deliberately creates no runtime and sends no kickoff.
+	 */
+	async finalizeAdoptedLead(goalId: string): Promise<TeamState> {
+		if (!this.restoreCompleted) await this.restorePromise;
+		return this.runAdoptedGoalLifecycleLocked(goalId, async () => {
+			const goal = this.resolveGoal(goalId);
+			if (!goal) throw new TeamStartError("GOAL_NOT_FOUND", "Goal not found", 404);
+			if (!goal.worktreeOwnerSessionId) {
+				throw new TeamStartError("GOAL_NOT_ADOPTED", "Goal does not adopt an existing session");
+			}
+			if (goal.archived) {
+				throw new TeamStartError("GOAL_ARCHIVED", "Goal is archived and cannot finalize its adopted lead");
+			}
+			const entry = this.teams.get(goalId);
+			if (!this.hasExactAdoptedLeadAttachment(goal, entry)) {
+				throw new TeamStartError(
+					"ADOPTED_LEAD_ATTACHMENT_PENDING",
+					"The adopted team lead is still attaching to this goal; wait for promotion to finish",
+				);
+			}
+			if (!this.subscribeTeamLeadEvents(goalId)) {
+				throw new TeamStartError(
+					"ADOPTED_LEAD_SUBSCRIPTION_FAILED",
+					"The adopted team lead lifecycle could not be activated; retry finalization",
+				);
+			}
+			const lead = this.sessionManager.getSession(goal.worktreeOwnerSessionId);
+			if (lead?.status === "idle") this.startIdleNudgeTimer(goalId);
+			if (goal.state === "todo") {
+				await this.resolveGoalManager(goalId).updateGoal(goalId, { state: "in-progress" });
+			}
+			return this.getTeamState(goalId)!;
+		});
+	}
+
+	/**
+	 * Admit and serialize an adopted-goal archive only after the source runtime and
+	 * durable row both carry the exact committed lead attachment. Ordinary goals
+	 * pass through unchanged. The callback keeps the admission and archive mutation
+	 * under the same per-goal lifecycle lock so the check cannot become stale.
+	 */
+	async withAdoptedGoalArchiveAdmission<T>(goalId: string, archive: () => Promise<T>): Promise<T> {
+		if (!this.restoreCompleted) await this.restorePromise;
+		return this.runAdoptedGoalLifecycleLocked(goalId, async () => {
+			const goal = this.resolveGoal(goalId);
+			if (!goal) throw new TeamStartError("GOAL_NOT_FOUND", "Goal not found", 404);
+			if (
+				goal.worktreeOwnerSessionId
+				&& !goal.archived
+				&& !this.hasExactAdoptedLeadAttachment(goal, this.teams.get(goalId))
+			) {
+				throw new TeamStartError(
+					"PROMOTION_IN_PROGRESS",
+					"Current-session promotion is still in progress; retry goal archive after it finishes",
+				);
+			}
+			return archive();
+		});
+	}
+
 	/**
 	 * Release only an unchanged empty promotion reservation. This is the
 	 * pre-commit compensation path and deliberately leaves the source session,
@@ -2526,23 +2629,11 @@ export class TeamManager {
 	}
 
 	private assertAdoptedLeadWorkerAdmission(goal: PersistedGoal, entry: TeamEntry): void {
-		const ownerSessionId = goal.worktreeOwnerSessionId;
-		if (!ownerSessionId) return;
-		const liveSource = entry.teamLeadSessionId === ownerSessionId
-			? this.sessionManager.getSession(ownerSessionId)
-			: undefined;
-		const getPersistedSession = (this.sessionManager as Partial<SessionManager>).getPersistedSession;
-		const persistedSource = typeof getPersistedSession === "function"
-			? getPersistedSession.call(this.sessionManager, ownerSessionId)
-			: undefined;
+		if (!goal.worktreeOwnerSessionId) return;
 		// The durable projection is written before the old runtime stops, so it is
 		// not by itself a commit signal. Require both the durable row and canonical
-		// live runtime to carry the exact attachment before creating any worker.
-		if (
-			entry.teamLeadSessionId !== ownerSessionId
-			|| !hasExactAdoptedLeadAttachment(liveSource, goal.id)
-			|| !hasExactAdoptedLeadAttachment(persistedSource, goal.id)
-		) {
+		// live runtime to carry the exact same-project attachment before creating a worker.
+		if (!this.hasExactAdoptedLeadAttachment(goal, entry)) {
 			throw new TeamStartError(
 				"ADOPTED_LEAD_ATTACHMENT_PENDING",
 				"The adopted team lead is still attaching to this goal; wait for promotion to finish",
