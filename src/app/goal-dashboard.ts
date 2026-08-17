@@ -3125,6 +3125,12 @@ function renderSignalEntry(signal: GateSignal): TemplateResult {
 	const vStatus = signal.verification.status;
 	const cancellation = vStatus === "cancelled" ? signal.verification.cancellation : undefined;
 	const causeLabel = cancellationCauseLabel(cancellation);
+	const cancelledPassedCount = vStatus === "cancelled"
+		? signal.verification.steps.filter(step => step.status === "passed").length
+		: 0;
+	const cancelledInterruptedCount = vStatus === "cancelled"
+		? signal.verification.steps.filter(step => step.status === "cancelled").length
+		: 0;
 	const gate = gates.find(candidate => candidate.gateId === signal.gateId);
 	const latestSignal = gate?.signals.at(-1);
 	const canResignal = vStatus === "cancelled"
@@ -3190,7 +3196,7 @@ function renderSignalEntry(signal: GateSignal): TemplateResult {
 						<div class="gate-historical-notice" data-testid="goal-dashboard-signal-cancellation">
 							Cancelled — ${causeLabel} · requested ${formatRelativeTime(cancellation?.requestedAt ?? signal.timestamp)}
 							${cancellation?.finalizedAt ? html` · cleanup finished ${formatRelativeTime(cancellation.finalizedAt)}` : nothing}
-							. Gate pending · eligible to run again.
+							 · ${cancelledPassedCount} passed, ${cancelledInterruptedCount} interrupted. Gate pending · eligible to run again.
 						</div>
 					` : nothing}
 					${isLive ? renderLiveVerificationSteps(liveEntry!) : vStatus === "running" && signal.verification.steps.length === 0
