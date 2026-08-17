@@ -10,6 +10,11 @@ import * as rpcBridgeModule from "../../src/server/agent/rpc-bridge.js";
 import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
 import * as harnessDepsModule from "../../src/server/harness-deps.js";
 import {
+	discardStagedDistBuild,
+	prepareStagedDistBuild,
+	promoteStagedDistBuild,
+} from "../../src/server/harness-build.js";
+import {
 	applyWatchdogRecoveryDecision,
 	WatchdogRecoveryPolicy,
 	type WatchdogRecoveryActions,
@@ -771,35 +776,115 @@ describe.skipIf(!desiredContractAvailable)("harness lifecycle validation policy"
 });
 
 describe("harness sentinel restart downtime policy", () => {
-	it("keeps failed preparation from exposing partial live output to a later crash relaunch", () => {
-		const buildBody = sourceFunctionBody(repositorySource("src/server/harness.ts"), "buildServer");
-		const stagesThenPromotes = /\b(?:stage|staging|candidate|next)\w*\b/i.test(buildBody)
-			&& /\b(?:promot|swap|rename)\w*\b/i.test(buildBody);
-		const snapshotsThenRollsBack = /\b(?:backup|snapshot)\w*\b/i.test(buildBody)
-			&& /\b(?:rollback|restore)\w*\b/i.test(buildBody);
+	it("keeps failed staged compilation from changing the live crash-relaunch artifact", async () => {
+		const root = makeTempDir("bobbit-staged-build-failure-");
+		const liveCli = path.join(root, "dist", "server", "cli.js");
+		const liveUi = path.join(root, "dist", "ui", "index.html");
+		fs.mkdirSync(path.dirname(liveCli), { recursive: true });
+		fs.mkdirSync(path.dirname(liveUi), { recursive: true });
+		fs.writeFileSync(liveCli, "live-crash-relaunch-artifact\n", "utf-8");
+		fs.writeFileSync(liveUi, "live-ui\n", "utf-8");
 
-		expect(
-			stagesThenPromotes || snapshotsThenRollsBack,
-			`${POLICY_PREFIX}_FAILED_BUILD_MUST_NOT_MUTATE_LIVE_DIST: build preparation must use staged atomic promotion or proven rollback so a later unexpected crash cannot launch partial output`,
-		).toBe(true);
+		await expect(prepareStagedDistBuild(root, stagingDir => {
+			const partialCli = path.join(stagingDir, "server", "cli.js");
+			fs.mkdirSync(path.dirname(partialCli), { recursive: true });
+			fs.writeFileSync(partialCli, "partial-candidate\n", "utf-8");
+			throw new Error("deterministic compiler failure");
+		})).rejects.toThrow(/compiler failure/i);
+
+		expect(fs.readFileSync(liveCli, "utf-8"), `${POLICY_PREFIX}_FAILED_BUILD_MUST_NOT_MUTATE_LIVE_DIST`).toBe("live-crash-relaunch-artifact\n");
+		expect(fs.readFileSync(liveUi, "utf-8")).toBe("live-ui\n");
+		expect(fs.readdirSync(root).filter(name => name.startsWith(".bobbit-dist-stage-"))).toEqual([]);
 	});
 
-	it("counts and delays a genuine child crash during asynchronous restart preparation", () => {
+	it("promotes a complete staged server as one dist tree while preserving UI output", async () => {
+		const root = makeTempDir("bobbit-staged-build-promotion-");
+		const liveCli = path.join(root, "dist", "server", "cli.js");
+		const liveUi = path.join(root, "dist", "ui", "index.html");
+		fs.mkdirSync(path.dirname(liveCli), { recursive: true });
+		fs.mkdirSync(path.dirname(liveUi), { recursive: true });
+		fs.writeFileSync(liveCli, "old-server\n", "utf-8");
+		fs.writeFileSync(liveUi, "preserved-ui\n", "utf-8");
+
+		const prepared = await prepareStagedDistBuild(root, stagingDir => {
+			const candidateCli = path.join(stagingDir, "server", "cli.js");
+			fs.mkdirSync(path.dirname(candidateCli), { recursive: true });
+			fs.writeFileSync(candidateCli, "new-server\n", "utf-8");
+		});
+		expect(fs.readFileSync(liveCli, "utf-8")).toBe("old-server\n");
+
+		promoteStagedDistBuild(prepared);
+		expect(fs.readFileSync(liveCli, "utf-8")).toBe("new-server\n");
+		expect(fs.readFileSync(liveUi, "utf-8")).toBe("preserved-ui\n");
+		expect(fs.existsSync(prepared.stagingDir)).toBe(false);
+	});
+
+	it("rolls the live dist back when candidate promotion fails", async () => {
+		const root = makeTempDir("bobbit-staged-build-rollback-");
+		const liveCli = path.join(root, "dist", "server", "cli.js");
+		fs.mkdirSync(path.dirname(liveCli), { recursive: true });
+		fs.writeFileSync(liveCli, "rollback-authority\n", "utf-8");
+		const prepared = await prepareStagedDistBuild(root, stagingDir => {
+			const candidateCli = path.join(stagingDir, "server", "cli.js");
+			fs.mkdirSync(path.dirname(candidateCli), { recursive: true });
+			fs.writeFileSync(candidateCli, "candidate\n", "utf-8");
+		});
+
+		const realRename = fs.renameSync.bind(fs);
+		let renameCalls = 0;
+		vi.spyOn(fs, "renameSync").mockImplementation((oldPath, newPath) => {
+			renameCalls++;
+			if (renameCalls === 2) throw new Error("deterministic promotion failure");
+			return realRename(oldPath, newPath);
+		});
+		expect(() => promoteStagedDistBuild(prepared)).toThrow(/promotion failure/i);
+		expect(fs.readFileSync(liveCli, "utf-8")).toBe("rollback-authority\n");
+		discardStagedDistBuild(prepared);
+	});
+
+	it("discards preparation when the gateway changes before intentional stop", async () => {
+		const events: string[] = [];
+		let finishBuild!: () => void;
+		const buildBlocked = new Promise<void>(resolve => { finishBuild = resolve; });
+		const run = sentinelRestartRunner()({
+			validate: () => { events.push("validate"); return healthy; },
+			build: async () => {
+				events.push("build-start");
+				await buildBlocked;
+				events.push("build-finished");
+				return "staged-candidate";
+			},
+			enterIntentionalStop: () => { events.push("enter-intentional-stop"); return false; },
+			stop: () => { events.push("stop"); },
+			waitUntilStopped: () => { events.push("wait-until-stopped"); },
+			promote: () => { events.push("promote"); },
+			discard: (prepared: string) => { events.push(`discard:${prepared}`); },
+			launch: () => { events.push("launch"); },
+			report: () => { events.push("report"); },
+		});
+		await vi.waitFor(() => expect(events).toEqual(["validate", "build-start"]));
+		events.push("gateway-crash-normal-delay-and-counting");
+		finishBuild();
+		await run;
+
+		expect(events).toEqual([
+			"validate",
+			"build-start",
+			"gateway-crash-normal-delay-and-counting",
+			"build-finished",
+			"enter-intentional-stop",
+			"discard:staged-candidate",
+			"report",
+		]);
+	});
+
+	it("keeps restart serialization separate from intentional crash suppression", () => {
 		const source = repositorySource("src/server/harness.ts");
 		const launchBody = sourceFunctionBody(source, "launchServer");
 		const restartBody = sourceFunctionBody(source, "restart");
-		const preparation = restartBody.indexOf("runHarnessSentinelRestart");
-		expect(preparation, `${POLICY_PREFIX}_RESTART_PREPARATION_SEAM_MISSING`).toBeGreaterThanOrEqual(0);
-
-		expect(
-			restartBody.slice(0, preparation),
-			`${POLICY_PREFIX}_PREPARATION_CRASH_MUST_RETAIN_CRASH_POLICY: restart serialization must not set the intentional-stop guard before validation/build completes`,
-		).not.toMatch(/\brestarting\s*=\s*true\b/);
-		expect(
-			launchBody,
-			`${POLICY_PREFIX}_PREPARATION_CRASH_MUST_RETAIN_CRASH_POLICY: child exits during validation/build must still increment quick-crash counters and schedule the normal delayed relaunch`,
-		).not.toMatch(/if\s*\(\s*!restarting\s*\)/);
-		expect(launchBody).toMatch(/consecutiveQuickCrashes\+\+[\s\S]*setTimeout\s*\(/);
+		expect(source).toMatch(/let restartInProgress = false;[\s\S]*let intentionalStop = false;/);
+		expect(launchBody).toMatch(/if\s*\(\s*!intentionalStop\s*\)[\s\S]*consecutiveQuickCrashes\+\+[\s\S]*setTimeout\s*\(/);
+		expect(restartBody).toMatch(/restartInProgress\s*=\s*true[\s\S]*enterIntentionalStop[\s\S]*intentionalStop\s*=\s*true/);
 	});
 
 	it("validates and builds before stopping the current gateway", async () => {

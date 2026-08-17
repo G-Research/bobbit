@@ -103,11 +103,15 @@ export interface HarnessLifecycleDeps {
 	exit: (code: number) => void;
 }
 
-export interface HarnessSentinelRestartDeps {
+export interface HarnessSentinelRestartDeps<TPrepared = void> {
 	validate: () => DependencyValidationResult | Promise<DependencyValidationResult>;
-	build: () => void | Promise<void>;
+	build: () => TPrepared | Promise<TPrepared>;
+	/** Enter the narrow intentional-stop window. False means the live child changed during preparation. */
+	enterIntentionalStop?: () => boolean | Promise<boolean>;
 	stop: () => void | Promise<void>;
 	waitUntilStopped: () => void | Promise<void>;
+	promote?: (prepared: TPrepared) => void | Promise<void>;
+	discard?: (prepared: TPrepared) => void | Promise<void>;
 	launch: () => void | Promise<void>;
 	report: (message: string) => void;
 }
@@ -188,7 +192,9 @@ export async function runHarnessLifecycle(
  * failure therefore leaves the current gateway serving, while a successful
  * build enters the short stop/port-release/launch critical section.
  */
-export async function runHarnessSentinelRestart(deps: HarnessSentinelRestartDeps): Promise<void> {
+export async function runHarnessSentinelRestart<TPrepared = void>(
+	deps: HarnessSentinelRestartDeps<TPrepared>,
+): Promise<void> {
 	let validation: DependencyValidationResult;
 	try {
 		validation = await deps.validate();
@@ -201,16 +207,30 @@ export async function runHarnessSentinelRestart(deps: HarnessSentinelRestartDeps
 		return;
 	}
 
+	let prepared: TPrepared;
 	try {
-		await deps.build();
+		prepared = await deps.build();
 	} catch (error) {
 		deps.report(`Harness build failure: ${errorMessage(error)}.`);
 		return;
 	}
 
-	await deps.stop();
-	await deps.waitUntilStopped();
-	await deps.launch();
+	if (deps.enterIntentionalStop && !await deps.enterIntentionalStop()) {
+		await deps.discard?.(prepared);
+		deps.report("Gateway changed during restart preparation; discarded the staged build and kept normal crash recovery in control.");
+		return;
+	}
+
+	let promoted = false;
+	try {
+		await deps.stop();
+		await deps.waitUntilStopped();
+		await deps.promote?.(prepared);
+		promoted = true;
+		await deps.launch();
+	} finally {
+		if (!promoted) await deps.discard?.(prepared);
+	}
 }
 
 const invokedPath = process.argv[1];
