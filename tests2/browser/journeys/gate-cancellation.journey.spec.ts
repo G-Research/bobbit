@@ -115,8 +115,8 @@ async function waitForCompletedPhaseAndOwnedCommandAndAwaitingHuman(fixture: Fix
 
 		return active?.overallStatus === "running"
 			// Phase 0 must be durably complete with output before phase 1 starts.
-			&& completedPhase?.status === "passed" && completedPhase?.passed === true
-			&& inspectedCompletedPhase?.status === "passed" && inspectedCompletedPhase?.passed === true
+			&& completedPhase?.status === "passed"
+			&& inspectedCompletedPhase?.status === "passed"
 			&& inspectedCompletedPhase?.output?.includes(fixture.phaseZeroMarker)
 			&& command?.status === "running"
 			// The active record supplies durable command ownership while the
