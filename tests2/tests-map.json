@@ -3569,8 +3569,17 @@
       }
     },
     {
-      "path": "tests2/integration/extension-settings-api.test.ts",
-      "reason": "Authenticated gateway settings API coverage for redaction, prompt-operator writes, target validation, cache/WS invalidation, legacy fallback, and two-project runtime isolation.",
+      "path": "tests2/integration/extension-settings-api-contract.test.ts",
+      "reason": "Authenticated gateway settings API contract coverage for prompt-operator writes, target validation, redacted values, schema states, multi-enum canonicalization, defaults, and revision CAS. Split from the runtime suite to retain the fixed tier-1 file-wall budget on Windows.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/extension-settings-runtime.test.ts",
+      "reason": "Authenticated gateway settings runtime coverage for secret-redacted cache/WS invalidation, legacy fallback, project isolation, and hook schema evolution. Split from the API contract suite to retain the fixed tier-1 file-wall budget on Windows.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
