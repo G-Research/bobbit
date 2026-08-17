@@ -4812,12 +4812,17 @@ export class VerificationHarness {
 	private _startCancelledVerificationCleanup(active: ActiveVerification): Promise<void> {
 		const existing = this._cancelledCleanupPromises.get(active.signalId);
 		if (existing) return existing;
-		const cleanup = this._runCancelledVerificationCleanup(active);
-		this._cancelledCleanupPromises.set(active.signalId, cleanup);
-		void cleanup.then(
-			() => {
+		// Retire this owner before scheduling another full pass. A retained live
+		// TrackedChild must be revisited by _runCancelledVerificationCleanup, not
+		// merely by the recovered-command retry, but a retry cannot join this run.
+		let cleanup!: Promise<void>;
+		cleanup = this._runCancelledVerificationCleanup(active).then(
+			shouldRetry => {
 				if (this._cancelledCleanupPromises.get(active.signalId) === cleanup) {
 					this._cancelledCleanupPromises.delete(active.signalId);
+					if (shouldRetry && this.activeVerifications.get(active.signalId) === active && active.cancelled) {
+						this._scheduleCancelledVerificationCleanupRetry(active.signalId);
+					}
 				}
 			},
 			err => {
@@ -4826,17 +4831,19 @@ export class VerificationHarness {
 				console.warn(`[verification] Unexpected detached cancellation cleanup failure for ${active.signalId}: ${(err as Error).message}`);
 				if (this._cancelledCleanupPromises.get(active.signalId) === cleanup) {
 					this._cancelledCleanupPromises.delete(active.signalId);
-				}
-				this._persistActive();
-				if (this.activeVerifications.get(active.signalId) === active && active.cancelled) {
-					this._scheduleCancelledVerificationCleanupRetry(active.signalId);
+					this._persistActive();
+					if (this.activeVerifications.get(active.signalId) === active && active.cancelled) {
+						this._scheduleCancelledVerificationCleanupRetry(active.signalId);
+					}
 				}
 			},
 		);
+		this._cancelledCleanupPromises.set(active.signalId, cleanup);
 		return cleanup;
 	}
 
-	private async _runCancelledVerificationCleanup(active: ActiveVerification): Promise<void> {
+	/** Returns true when exact cancellation cleanup must be re-driven. */
+	private async _runCancelledVerificationCleanup(active: ActiveVerification): Promise<boolean> {
 		try {
 			await this._terminateCancelledReviewersFor([active]);
 			const { signalId } = active;
@@ -4849,17 +4856,16 @@ export class VerificationHarness {
 				: !Array.from(this._trackedCommandChildren.keys()).some(key => key.startsWith(`${signalId}:`));
 			if (liveHostCleanupSettled && persistedCleanupSettled && liveTransportCleanupSettled) {
 				await this._finalizeCancelledVerification(active);
-			} else {
-				this._persistActive();
-				this._scheduleCommandKillCleanupRetry(signalId);
+				console.log(`[verification] Cancelled verification ${signalId} for goal ${active.goalId} (${active.cancellation?.cause ?? "unknown"})`);
+				return false;
 			}
+			this._persistActive();
 			console.log(`[verification] Cancelled verification ${signalId} for goal ${active.goalId} (${active.cancellation?.cause ?? "unknown"})`);
+			return true;
 		} catch (err) {
 			console.warn(`[verification] Cancellation cleanup for ${active.signalId} did not settle: ${(err as Error).message}`);
 			this._persistActive();
-			if (this.activeVerifications.get(active.signalId) === active && active.cancelled) {
-				this._scheduleCancelledVerificationCleanupRetry(active.signalId);
-			}
+			return this.activeVerifications.get(active.signalId) === active && active.cancelled;
 		}
 	}
 
@@ -5750,15 +5756,15 @@ export class VerificationHarness {
 						});
 						const av = this.activeVerifications.get(signal.id);
 						if (av && av.steps[index]) {
-							// Keep completed output/artifacts in the active record too. A later
-							// cancellation must retain work from earlier phases even though the
-							// signal's final aggregate has not yet been published.
-							av.steps[index] = {
-								...av.steps[index], status: resultStatus as NonNullable<GateSignalStep["status"]>, phase,
+							// Keep the active row's identity: cancellation cleanup may hold this
+							// exact object while the command result is being published. Replacing
+							// it would make the identity fence retain the live TrackedChild.
+							Object.assign(av.steps[index], {
+								status: resultStatus as NonNullable<GateSignalStep["status"]>, phase,
 								durationMs: duration_ms, output: result.output || "", sessionId: result.sessionId,
 								timeout: result.timeout, passed: result.passed, skipped: result.skipped,
 								expect: step.expect, artifact, diagnostics: result.diagnostics,
-							};
+							});
 							this._persistActive();
 						}
 						const stepResult = {
