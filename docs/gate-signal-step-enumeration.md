@@ -88,15 +88,26 @@ that event AFTER its own `gate_signal_received` broadcast — see
 
 ### REST handler shape
 
-The `gate_signal` handler in `server.ts` calls the harness inline before
-recording the signal:
+The `gate_signal` handler in `server.ts` fences a prior generation inline before cache reuse, step enumeration, or signal recording:
 
 ```ts
-// Its synchronous marking phase durably records old cancellation and kill intent.
-// Cleanup is owned asynchronously so it can overlap the fresh generation.
-void verificationHarness.cancelStaleVerifications(goalId, gateId).catch(error => {
-  console.error(`[api] Error cancelling stale verification for re-signal ${goalId}/${gateId}:`, error);
-});
+try {
+  verificationHarness.fenceStaleVerificationsForGates(
+    goalId,
+    [gateId],
+    staleCancellationStarted ? "zombie-recovery" : "superseded",
+  );
+} catch (error) {
+  json({
+    error: "Could not durably cancel active verification before re-signal",
+    code: "VERIFICATION_CANCELLATION_FENCE_FAILED",
+    retryable: true,
+  }, 503);
+  return;
+}
+
+const cachedResponse = reuseCachedGateSignal(/* … */);
+if (cachedResponse) { json(cachedResponse, 201); return; }
 
 const signal = { id: signalId, /* … */, verification: { status: "running", steps: [] } };
 const initialSteps = verificationHarness.beginVerification(signal, gateDef);
@@ -115,7 +126,7 @@ verificationHarness.verifyGateSignal(signal, gateDef, /* … */).catch(/* … */
 
 Two ordering details matter:
 
-1. **Stale cancellation is initiated before `beginVerification`, but its cleanup is not awaited.** Its synchronous marking phase durably records the old generation's cancellation and command kill intent before the new entry is seeded. The owned cleanup can then overlap the fresh generation; otherwise the sweep could observe the just-seeded entry and tear it down.
+1. **The stale fence precedes cache reuse, `beginVerification`, and `recordSignal`.** On durable success, `fenceStaleVerificationsForGates` starts its own detached exact cleanup, allowing old cleanup to overlap a replacement safely. A persistence failure returns retryable `503 VERIFICATION_CANCELLATION_FENCE_FAILED` and creates no replacement signal.
 2. **`recordSignal` happens after `beginVerification` returns.** This is
    the entire point of the fix — the persisted signal and the
    `activeVerifications` map land in the same scheduler tick with matching
@@ -216,9 +227,11 @@ when a historical chat card is rendered without live WebSocket events.
 
 ## Stale-verification cancellation ordering
 
-`cancelStaleVerifications(goalId, gateId)` marks matching old active entries cancelled, durably records command kill intent, and starts their owned cleanup. The signal handler initiates it **before** `beginVerification`, but does not await its cleanup: a new generation may begin while old reviewer/sign-off work is draining and command payload or host transport cleanup remains pending. The old finalizer is generation-safe: it can finalize only the old signal after exact cleanup, never a newer signal or its gate state.
+`fenceStaleVerificationsForGates(goalId, [gateId], cause)` synchronously marks matching old active entries cancelled, durably records command kill intent, and starts their detached exact cleanup. The signal handler calls it before cache reuse, `beginVerification`, or signal recording. A successful fence lets a new generation begin while old reviewer/sign-off work is draining and command payload or host transport cleanup remains pending; a failed fence returns retryable `503 VERIFICATION_CANCELLATION_FENCE_FAILED` without creating a replacement signal.
 
-Any future call site that signals a gate must follow the same pattern: initiate stale cancellation → begin → record → broadcast `gate_signal_received` → broadcast `gate_verification_started` → kick off async `verifyGateSignal`. The two WebSocket broadcasts remain ordered even while old cleanup overlaps the new generation.
+The normal re-signal cause is `superseded`. When duplicate detection finds that the old verifier sessions are no longer alive, the replacement is explicitly `zombie-recovery`; this preserves why the old generation was displaced. The old finalizer can persist only its own historical signal after exact cleanup, never a newer signal or its gate state.
+
+Any future call site that signals a gate must follow the same pattern: fence stale work → cache decision → begin → record → broadcast `gate_signal_received` → broadcast `gate_verification_started` → kick off async `verifyGateSignal`. The two WebSocket broadcasts remain ordered even while old cleanup overlaps the new generation.
 
 ## What is NOT changed
 

@@ -2082,6 +2082,18 @@ Verification step rows preserve the same durable fields used by gate inspection 
 
 Fresh responses return the initialized rows from the verification harness. Cached same-commit responses return the persisted terminal `verification.steps[]` from the prior signal rather than rebuilding from workflow definitions, so cached cards retain skipped and phase metadata.
 
+Before cache reuse or replacement-signal creation, the route synchronously fences any stale generation. If that durable fence cannot be written, it returns `503`:
+
+```json
+{
+  "error": "Could not durably cancel active verification before re-signal",
+  "code": "VERIFICATION_CANCELLATION_FENCE_FAILED",
+  "retryable": true
+}
+```
+
+No replacement signal is created for this retryable failure.
+
 ```json
 {
   "id": "sig-22",

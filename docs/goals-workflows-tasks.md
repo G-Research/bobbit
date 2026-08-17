@@ -893,14 +893,14 @@ Feature behavior: [Review Pane Sign-Off](review-pane-signoff.md). Full design: [
 
 ### Gate Re-Signal Cancellation
 
-A re-signal creates a new verification generation without waiting for the old command tree to finish cleaning up. The handler initiates `cancelStaleVerifications()` before it seeds the new signal. Its synchronous marking phase durably records the old generation's cancellation and command kill intent before the fresh generation is seeded; its owned asynchronous cleanup is intentionally handled with `.catch()` rather than awaited.
+A re-signal creates a new verification generation without waiting for the old command tree to finish cleaning up. Before cache reuse or seeding the new signal, the handler calls synchronous `fenceStaleVerificationsForGates(goalId, [gateId], cause)` in a `try`/`catch`. A successful durable fence starts its own detached exact cleanup; a fence failure returns retryable `503 VERIFICATION_CANCELLATION_FENCE_FAILED` and creates no replacement signal.
 
 - Old reviewer sessions are terminated and pending `human-signoff` resolvers are drained, so their late results are suppressed.
 - Command payload cleanup, and for Docker command steps the host `docker exec` transport cleanup, can remain pending while the fresh generation runs. The durable cleanup retry and restart-recovery paths continue to own that old work.
 - The old signal becomes terminal only after exact cleanup settles. Its finalizer updates that old signal's audit result and emits its completion; it cannot overwrite the newer signal or the gate's current state.
 - Only the current generation determines the gate's pass/fail state and team-lead notification.
 
-This prevents reviewer proliferation without treating an unverified or still-owned process tree as complete. **Zombie detection:** If the previous verification's reviewer sessions have all died (crashed, timed out), the server detects this via `areVerificationSessionsAlive()` and initiates the same cancellation path instead of returning a 409 duplicate error.
+This prevents reviewer proliferation without treating an unverified or still-owned process tree as complete. The ordinary replacement cause is `superseded`. **Zombie detection:** if the previous verification's reviewer sessions have all died (crashed or timed out), `areVerificationSessionsAlive()` identifies that case and uses `zombie-recovery` instead of returning a duplicate `409`; the durable audit therefore distinguishes it from an ordinary re-signal.
 
 **Manual cancellation:** `POST /api/goals/:goalId/gates/:gateId/cancel-verification` is idempotent; the dashboard exposes it for a running signal. Its `200` response is one of these exact shapes:
 
