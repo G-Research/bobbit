@@ -458,6 +458,16 @@ test("reviewer cleanup failure stays durable and blocks cancellation publication
 	expect(fixture.events.filter(event => event.type === "gate_verification_complete"),
 		"REVIEWER_CLEANUP_FAILURE_MUST_NOT_EMIT_TERMINAL_EVENT_EARLY").toHaveLength(0);
 
+	// A late reviewer result can make the live row terminal after cancellation
+	// was fenced. reviewerCleanupPending still owns the exact persisted session
+	// cleanup; retry must not lose that owner by filtering only running rows.
+	Object.assign(pending.steps[0], { status: "passed", passed: true, output: "Late reviewer callback." });
+	(fixture.harness as any)._persistActive();
+	expect(JSON.parse(fs.readFileSync(path.join(fixture.stateDir, "active-verifications.json"), "utf8")).verifications[0]).toMatchObject({
+		reviewerCleanupPending: true,
+		steps: [expect.objectContaining({ sessionId: fixture.reviewerSessionId, status: "passed" })],
+	});
+
 	// A test-owned direct re-drive replaces timer sleeps/polling and proves that
 	// retrying the same exact reviewer ownership can settle safely.
 	await (fixture.harness as any)._startCancelledVerificationCleanup(pending);
