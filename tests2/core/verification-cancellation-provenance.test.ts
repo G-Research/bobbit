@@ -55,6 +55,7 @@ function makeFixture(
 	signalId: string,
 	persistence: "json" | "sqlite" = "json",
 	goal?: { state: "todo" | "in-progress" | "complete" | "shelved" | "blocked"; archived?: boolean },
+	cleanupManagers: { sessionManager?: any; teamManager?: any; clock?: any } = {},
 ) {
 	const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "verification-cancellation-provenance-"));
 	roots.push(stateDir);
@@ -67,7 +68,8 @@ function makeFixture(
 	} : undefined;
 	const harness = new VerificationHarness(
 		stateDir, gateStore, (_goalId, event) => events.push(event), ROLE_STORE as any,
-		undefined, undefined, undefined, undefined, projectContextManager as any,
+		undefined, cleanupManagers.sessionManager, cleanupManagers.teamManager, undefined, projectContextManager as any,
+		undefined, cleanupManagers.clock ? { clock: cleanupManagers.clock } : undefined,
 	);
 	const signal: GateSignal = {
 		id: signalId,
@@ -99,6 +101,52 @@ async function cancelForProducer(cause: CancellationCause) {
 	// shelf/archive, zombie recovery, and restart recovery).
 	await (fixture.harness as any).cancelStaleVerifications(GOAL_ID, GATE_ID, cause);
 	return fixture;
+}
+
+/** A deterministic clock keeps cleanup-retry timers inert until this test drives the retry itself. */
+function makeManualClock() {
+	let nextId = 0;
+	const timers = new Map<number, () => void>();
+	return {
+		now: () => 1_700_000_000_000,
+		setTimeout: (handler: () => void) => {
+			const id = ++nextId;
+			timers.set(id, handler);
+			return id as any;
+		},
+		clearTimeout: (id: number) => timers.delete(id),
+		setInterval: () => 0 as any,
+		clearInterval: () => {},
+	};
+}
+
+function makeReviewerCleanupFixture(
+	signalId: string,
+	cleanupManagers: { sessionManager: any; teamManager: any; clock: any },
+) {
+	const fixture = makeFixture(signalId, "json", undefined, cleanupManagers);
+	const active = (fixture.harness as any).activeVerifications.get(signalId) as ActiveVerification;
+	const reviewerSessionId = `${signalId}-reviewer-session`;
+	Object.assign(active.steps[0], {
+		type: "llm-review",
+		status: "running",
+		sessionId: reviewerSessionId,
+		output: "Reviewer still owns an active session.",
+		startedAt: 1_700_000_000_000,
+	});
+	fixture.gateStore.updateSignalVerification(signalId, {
+		status: "running",
+		steps: [{
+			name: "Running sign-off",
+			type: "llm-review",
+			passed: false,
+			status: "running",
+			phase: 0,
+			output: "Reviewer still owns an active session.",
+			duration_ms: 0,
+		}],
+	} as any);
+	return { ...fixture, active, reviewerSessionId };
 }
 
 test.each(CAUSES)("%s is durable, typed, and never becomes a failed gate", async (cause) => {
@@ -367,4 +415,131 @@ test("only current-generation gateway restart recovery nudges the team lead once
 	});
 	await historical.harness.cancelStaleVerifications(GOAL_ID, GATE_ID, "gateway-restart-recovery");
 	expect(historicalNotifications, "historical recovery must not nudge after a newer signal exists").toHaveLength(0);
+});
+
+test("reviewer cleanup failure stays durable and blocks cancellation publication until its idempotent retry settles", async () => {
+	const clock = makeManualClock();
+	const terminated: string[] = [];
+	const unregistered: string[] = [];
+	let terminateAttempts = 0;
+	const sessionManager = {
+		terminateSession: async (sessionId: string) => {
+			terminated.push(sessionId);
+			if (++terminateAttempts === 1) throw new Error("REVIEWER_CLEANUP_TERMINATE_ONCE");
+		},
+	};
+	const teamManager = {
+		unregisterReviewerSession: async (goalId: string, sessionId: string) => {
+			expect(goalId).toBe(GOAL_ID);
+			unregistered.push(sessionId);
+		},
+	};
+	const fixture = makeReviewerCleanupFixture("reviewer-cleanup-retry", { sessionManager, teamManager, clock });
+
+	await (fixture.harness as any).cancelStaleVerifications(GOAL_ID, GATE_ID, "manual");
+
+	const pending = fixture.harness.getActiveVerification(fixture.signal.id) as ActiveVerification;
+	expect(pending, "REVIEWER_CLEANUP_FAILURE_MUST_KEEP_EXACT_OWNER: a swallowed terminate failure must not retire its active row").toMatchObject({
+		cancelled: true,
+		overallStatus: "cancelled",
+		reviewerCleanupPending: true,
+		cancellation: { cause: "manual", requestedAt: expect.any(Number) },
+		steps: [expect.objectContaining({ sessionId: fixture.reviewerSessionId, status: "running" })],
+	});
+	const durablePending = JSON.parse(fs.readFileSync(path.join(fixture.stateDir, "active-verifications.json"), "utf8"));
+	expect(durablePending.verifications).toEqual([expect.objectContaining({
+		signalId: fixture.signal.id,
+		reviewerCleanupPending: true,
+		cancellation: expect.objectContaining({ cause: "manual" }),
+		steps: [expect.objectContaining({ sessionId: fixture.reviewerSessionId })],
+	})]);
+	expect(fixture.gateStore.getGate(GOAL_ID, GATE_ID)!.signals.find(signal => signal.id === fixture.signal.id)!.verification?.status,
+		"REVIEWER_CLEANUP_FAILURE_MUST_NOT_PUBLISH_CANCELLED_EARLY").toBe("running");
+	expect(fixture.events.filter(event => event.type === "gate_verification_complete"),
+		"REVIEWER_CLEANUP_FAILURE_MUST_NOT_EMIT_TERMINAL_EVENT_EARLY").toHaveLength(0);
+
+	// A test-owned direct re-drive replaces timer sleeps/polling and proves that
+	// retrying the same exact reviewer ownership can settle safely.
+	await (fixture.harness as any)._startCancelledVerificationCleanup(pending);
+
+	const historical = fixture.gateStore.getGate(GOAL_ID, GATE_ID)!.signals.find(signal => signal.id === fixture.signal.id)!;
+	expect(terminated, "REVIEWER_CLEANUP_RETRY_MUST_TERMINATE_THE_SAME_SESSION").toEqual([fixture.reviewerSessionId, fixture.reviewerSessionId]);
+	expect(unregistered, "REVIEWER_CLEANUP_RETRY_MUST_UNREGISTER_THE_SAME_SESSION").toEqual([fixture.reviewerSessionId, fixture.reviewerSessionId]);
+	expect(historical.verification).toMatchObject({ status: "cancelled", cancellation: { cause: "manual" } });
+	expect(fixture.gateStore.getGate(GOAL_ID, GATE_ID)!.status).toBe("pending");
+	expect(fixture.harness.getActiveVerification(fixture.signal.id)).toBeUndefined();
+	expect(fixture.events.filter(event => event.type === "gate_verification_complete")).toEqual([
+		expect.objectContaining({ signalId: fixture.signal.id, status: "cancelled", cancellation: expect.objectContaining({ cause: "manual" }) }),
+	]);
+});
+
+test("restart re-drives persisted reviewer cleanup failure without losing the exact session owner or publishing early", async () => {
+	const clock = makeManualClock();
+	const reviewerSessionId = "restart-reviewer-owner";
+	const firstTerminations: string[] = [];
+	const firstUnregistrations: string[] = [];
+	const initial = makeReviewerCleanupFixture("restart-reviewer-cleanup", {
+		clock,
+		sessionManager: { terminateSession: async (sessionId: string) => { firstTerminations.push(sessionId); throw new Error("RESTART_REVIEWER_TERMINATE_ONCE"); } },
+		teamManager: { unregisterReviewerSession: async (_goalId: string, sessionId: string) => { firstUnregistrations.push(sessionId); } },
+	});
+	Object.assign(initial.active, {
+		cancelled: true,
+		overallStatus: "cancelled",
+		reviewerCleanupPending: true,
+		cancellation: { cause: "goal-pause", requestedAt: 1_700_000_000_000 },
+	});
+	Object.assign(initial.active.steps[0], { sessionId: reviewerSessionId, cancellation: { cause: "goal-pause", requestedAt: 1_700_000_000_000 } });
+	(initial.harness as any)._persistActive();
+
+	const failedEvents: any[] = [];
+	const failedRecovery = new VerificationHarness(
+		initial.stateDir, initial.gateStore, (_goalId, event) => failedEvents.push(event), ROLE_STORE as any,
+		undefined,
+		{ terminateSession: async (sessionId: string) => { firstTerminations.push(sessionId); throw new Error("RESTART_REVIEWER_TERMINATE_ONCE"); } } as any,
+		{ unregisterReviewerSession: async (_goalId: string, sessionId: string) => { firstUnregistrations.push(sessionId); } } as any,
+		undefined, undefined, undefined, { clock: makeManualClock() as any },
+	);
+	await failedRecovery.resumeInterruptedVerifications();
+
+	const retained = failedRecovery.getActiveVerification(initial.signal.id) as ActiveVerification;
+	expect(retained, "RESTART_REVIEWER_CLEANUP_FAILURE_MUST_RETAIN_ACTIVE_ROW").toMatchObject({
+		cancelled: true,
+		reviewerCleanupPending: true,
+		cancellation: { cause: "goal-pause" },
+		steps: [expect.objectContaining({ sessionId: reviewerSessionId })],
+	});
+	expect(JSON.parse(fs.readFileSync(path.join(initial.stateDir, "active-verifications.json"), "utf8")).verifications[0]).toMatchObject({
+		reviewerCleanupPending: true,
+		cancellation: { cause: "goal-pause" },
+		steps: [expect.objectContaining({ sessionId: reviewerSessionId })],
+	});
+	expect(initial.gateStore.getGate(GOAL_ID, GATE_ID)!.signals.find(signal => signal.id === initial.signal.id)!.verification?.status).toBe("running");
+	expect(failedEvents.filter(event => event.type === "gate_verification_complete")).toHaveLength(0);
+
+	const recoveredEvents: any[] = [];
+	const finalTerminations: string[] = [];
+	const finalUnregistrations: string[] = [];
+	const successfulRecovery = new VerificationHarness(
+		initial.stateDir, initial.gateStore, (_goalId, event) => recoveredEvents.push(event), ROLE_STORE as any,
+		undefined,
+		{ terminateSession: async (sessionId: string) => { finalTerminations.push(sessionId); } } as any,
+		{ unregisterReviewerSession: async (_goalId: string, sessionId: string) => { finalUnregistrations.push(sessionId); } } as any,
+		undefined, undefined, undefined, { clock: makeManualClock() as any },
+	);
+	await successfulRecovery.resumeInterruptedVerifications();
+
+	expect(firstTerminations).toEqual([reviewerSessionId]);
+	expect(firstUnregistrations).toEqual([reviewerSessionId]);
+	expect(finalTerminations, "RESTART_REVIEWER_CLEANUP_RETRY_MUST_TERMINATE_PERSISTED_SESSION").toEqual([reviewerSessionId]);
+	expect(finalUnregistrations, "RESTART_REVIEWER_CLEANUP_RETRY_MUST_UNREGISTER_PERSISTED_SESSION").toEqual([reviewerSessionId]);
+	expect(initial.gateStore.getGate(GOAL_ID, GATE_ID)!.signals.find(signal => signal.id === initial.signal.id)!.verification).toMatchObject({
+		status: "cancelled",
+		cancellation: { cause: "goal-pause" },
+	});
+	expect(initial.gateStore.getGate(GOAL_ID, GATE_ID)!.status).toBe("pending");
+	expect(successfulRecovery.getActiveVerification(initial.signal.id)).toBeUndefined();
+	expect(recoveredEvents.filter(event => event.type === "gate_verification_complete")).toEqual([
+		expect.objectContaining({ signalId: initial.signal.id, status: "cancelled", cancellation: expect.objectContaining({ cause: "goal-pause" }) }),
+	]);
 });
