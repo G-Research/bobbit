@@ -425,6 +425,132 @@ function deferredVoid() {
 	return { promise, resolve };
 }
 
+test.each([
+	{ type: "llm-review" as const, verdict: true, trigger: "terminate" as const, restartRetry: true },
+	{ type: "llm-review" as const, verdict: false, trigger: "unregister" as const, restartRetry: false },
+	{ type: "agent-qa" as const, verdict: true, trigger: "unregister" as const, restartRetry: false },
+	{ type: "agent-qa" as const, verdict: false, trigger: "terminate" as const, restartRetry: false },
+])("$type $verdict late verdict stays fenced when $trigger cleanup rejects", async ({ type, verdict, trigger, restartRetry }) => {
+	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), `verification-late-cleanup-${type}-${verdict ? "pass" : "fail"}-`));
+	const signalId = `${SIGNAL_ID}-late-cleanup-${type}-${verdict ? "pass" : "fail"}`;
+	const sessionId = `${signalId}-session`;
+	const summary = `${type} durable ${verdict ? "approval" : "rejection"}`;
+	const clock = createManualClock(40_000);
+	const events: any[] = [];
+	const notifications: string[] = [];
+	const publications: any[] = [];
+	const storedSignal: any = {
+		id: signalId, goalId: GOAL_ID, gateId: GATE_ID, sessionId: "owner", timestamp: 1,
+		commitSha: "0123456789abcdef0123456789abcdef01234567", content: "", contentVersion: 1,
+		verification: { status: "running", steps: [{ name: "Recovered verdict", type, status: "running", passed: false, output: "", duration_ms: 0 }] },
+	};
+	const storedGate: any = { status: "pending", signals: [storedSignal] };
+	const publishSignal = (requestedSignalId: string, verification: any) => {
+		expect(requestedSignalId).toBe(signalId);
+		storedSignal.verification = verification;
+		publications.push({ kind: "signal", verification });
+	};
+	const publishGate = (_goalId: string, _gateId: string, status: string) => {
+		storedGate.status = status;
+		publications.push({ kind: "gate", status });
+	};
+	const store: any = {
+		getGate: () => storedGate,
+		getGatesForGoal: () => [],
+		updateSignalVerification: publishSignal,
+		updateGateStatus: publishGate,
+		updateSignalVerificationStrict: async (requestedSignalId: string, verification: any) => publishSignal(requestedSignalId, verification),
+		updateGateStatusStrict: async (goalId: string, gateId: string, status: string) => publishGate(goalId, gateId, status),
+	};
+	const cleanupCalls = { terminate: [] as string[], unregister: [] as string[] };
+	const cleanupRejected = deferredVoid();
+	let activeHarness: any;
+	const cleanupOperation = async (operation: "terminate" | "unregister", requestedSessionId: string) => {
+		cleanupCalls[operation].push(requestedSessionId);
+		if (operation !== trigger || cleanupCalls[operation].length !== 1) return;
+		const resolver = activeHarness.pendingResults.get(requestedSessionId);
+		expect(resolver, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: teardown retains the exact late-verdict resolver").toBeTypeOf("function");
+		resolver({ verdict, summary });
+		cleanupRejected.resolve();
+		throw new Error(`injected ${operation} cleanup rejection`);
+	};
+	const sessionManager = {
+		getSession: () => ({ id: sessionId, status: "idle", rpcClient: { onEvent: () => () => {} } }),
+		waitForIdle: async () => {},
+		waitForStreaming: async () => {},
+		terminateSession: async (requestedSessionId: string) => cleanupOperation("terminate", requestedSessionId),
+	};
+	const teamManager = {
+		registerReviewerSession: () => {},
+		unregisterReviewerSession: async (_goalId: string, requestedSessionId: string) => cleanupOperation("unregister", requestedSessionId),
+	};
+	const makeHarness = (harnessClock = clock) => {
+		const harness: any = new VerificationHarness(
+			stateDir!, store, (_goalId, event) => events.push(event), { get: () => undefined, getAll: () => [] } as any,
+			undefined, sessionManager as any, teamManager as any, undefined, undefined, undefined, { clock: harnessClock },
+		);
+		harness.setTeamLeadNotifier((_goalId: string, message: string) => notifications.push(message));
+		harness.waitForReviewerErroredTurnRecovery = async () => ({ type: "idle" });
+		harness.dispatchVerifierPrompt = async () => ({ type: "accepted" });
+		harness.waitForReviewTurn = async () => ({ type: "idle" });
+		return harness;
+	};
+	activeHarness = makeHarness();
+	const active: any = {
+		goalId: GOAL_ID, gateId: GATE_ID, signalId, overallStatus: "running", startedAt: 1,
+		steps: [{ name: "Recovered verdict", type, status: "running", startedAt: 1, sessionId }],
+	};
+	activeHarness.activeVerifications.set(signalId, active);
+	expect(activeHarness._persistActive()).toBe(true);
+	const recovery = activeHarness._resumeOneVerification(active);
+	await cleanupRejected.promise;
+	await recovery;
+
+	const persisted = activeHarness._loadActive().find((entry: any) => entry.signalId === signalId);
+	expect(persisted, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: cleanup failure retains durable terminal ownership").toMatchObject({
+		reviewerCleanupPending: true,
+		steps: [{
+			name: "Recovered verdict", type, sessionId,
+			status: verdict ? "passed" : "failed", passed: verdict, output: summary, verdictObtained: true,
+		}],
+	});
+	expect(publications, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: reviewer cleanup gates signal and gate publication").toEqual([]);
+	expect(events.filter(event => event.type === "gate_verification_complete"), "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: reviewer cleanup gates WS terminal publication").toEqual([]);
+	expect(notifications, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: reviewer cleanup gates transcript notification").toEqual([]);
+
+	let owner = activeHarness;
+	let ownerClock = clock;
+	if (restartRetry) {
+		// A fresh gateway must consume the durable reviewer cleanup fence before it
+		// can publish the already-captured product verdict.
+		ownerClock = createManualClock(clock.now());
+		owner = makeHarness(ownerClock);
+		activeHarness = owner;
+		await owner.resumeInterruptedVerifications();
+	} else {
+		expect(clock.pending()).toBe(1);
+		clock.advance(1_000);
+		await Promise.resolve();
+		const retry = owner._cancelledCleanupPromises.get(signalId);
+		if (retry) await retry;
+	}
+
+	expect(cleanupCalls[trigger], "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: the rejected exact cleanup operation is retried for the same session").toEqual([sessionId, sessionId]);
+	const expectedStatus = verdict ? "passed" : "failed";
+	expect(publications.filter(call => call.kind === "signal")).toEqual([
+		expect.objectContaining({ verification: expect.objectContaining({ status: expectedStatus, steps: [expect.objectContaining({ passed: verdict, status: expectedStatus, output: summary })] }) }),
+	]);
+	expect(publications.filter(call => call.kind === "gate")).toEqual([{ kind: "gate", status: expectedStatus }]);
+	expect(events.filter(event => event.type === "gate_verification_complete")).toEqual([
+		expect.objectContaining({ signalId, status: expectedStatus }),
+	]);
+	expect(notifications).toHaveLength(1);
+	expect(notifications[0]).toMatch(verdict ? /PASSED/ : /FAILED/);
+	expect(owner.activeVerifications.has(signalId)).toBe(false);
+	expect(owner._loadActive().some((entry: any) => entry.signalId === signalId)).toBe(false);
+	expect(ownerClock.pending()).toBe(0);
+});
+
 function installHeldResumeResolver(type: "llm-review" | "agent-qa", suffix: string) {
 	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), `verification-resolver-${suffix}-`));
 	const signalId = `${SIGNAL_ID}-${suffix}`;
@@ -667,6 +793,20 @@ test("mixed reviewer cleanup failure retains its exact session and intent until 
 	]);
 	expect(harness._loadActive().some((entry: any) => entry.signalId === signalId)).toBe(false);
 	expect(clock.pending()).toBe(0);
+});
+
+test("empty active-state removal fails closed on non-ENOENT unlink errors", () => {
+	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "verification-empty-unlink-failure-"));
+	const persistedPath = path.join(stateDir, "active-verifications.json");
+	const harness: any = new VerificationHarness(
+		stateDir, {} as any, () => {}, { get: () => undefined, getAll: () => [] } as any,
+	);
+	expect(harness.activeVerifications.size).toBe(0);
+	// A directory at the owned file path deterministically makes unlink fail with
+	// EISDIR/EPERM without permissions, platform timing, or filesystem mocking.
+	fs.mkdirSync(persistedPath);
+	expect(harness._persistActive(), "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: non-ENOENT unlink failure cannot acknowledge durable owner retirement").toBe(false);
+	expect(fs.statSync(persistedPath).isDirectory()).toBe(true);
 });
 
 test.each(["cancelled", "mixed"] as const)("missing goal/store retires a %s exact-cleanup owner without events or retries", async (kind) => {

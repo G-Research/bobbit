@@ -1,7 +1,10 @@
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { expect, test } from "vitest";
 
 import { GateStore, type GateSignal } from "../../src/server/agent/gate-store.js";
+import { VerificationHarness } from "../../src/server/agent/verification-harness.js";
 import type { WorkflowGate } from "../../src/server/agent/workflow-store.js";
 import {
 	buildRunningGateSignalResponse,
@@ -35,6 +38,12 @@ function makeNotifier(notifications: Notification[]): CachedGateSignalNotifier {
 		verificationComplete: (goalId, gateId, signalId, status) => notifications.push({ type: "complete", goalId, gateId, signalId, status }),
 		statusChanged: (goalId, gateId, status) => notifications.push({ type: "status", goalId, gateId, status }),
 	};
+}
+
+function deferredVoid() {
+	let resolve!: () => void;
+	const promise = new Promise<void>(done => { resolve = done; });
+	return { promise, resolve };
 }
 
 function signal(overrides: Partial<GateSignal> = {}): GateSignal {
@@ -109,6 +118,64 @@ test.describe("POST /api/goals/:goalId/gates/:gateId/signal agent reminder", () 
 		expect(body.agentReminder).toMatch(/gate_status/);
 		expect(body.agentReminder).toMatch(/gate_inspect/);
 		expect(body.agentReminder).toMatch(/Go idle now/i);
+	});
+
+	test.each(["manual", "superseded"] as const)("cached verifier fast-path cannot publish after a %s fence lands during base resolution", async (cause) => {
+		const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), `verification-cached-${cause}-fence-`));
+		try {
+			const prior = signal({
+				id: `${cause}-prior`,
+				verification: {
+					status: "passed",
+					steps: [{ name: "Fast cached verification", type: "command", status: "passed", passed: true, output: "cached evidence", duration_ms: 2, phase: 0 }],
+				},
+			});
+			gateStore.recordSignal(prior);
+			const current = signal({ id: `${cause}-current` });
+			const events: any[] = [];
+			const notifications: string[] = [];
+			const harness: any = new VerificationHarness(
+				stateDir, gateStore, (_goalId, event) => events.push(event), { get: () => undefined, getAll: () => [] } as any,
+			);
+			harness.setTeamLeadNotifier((_goalId: string, message: string) => notifications.push(message));
+			current.verification.steps = harness.beginVerification(current, gate);
+			gateStore.recordSignal(current);
+
+			const baseStarted = deferredVoid();
+			const releaseBase = deferredVoid();
+			harness.resolveVerificationBaseBranch = async () => {
+				baseStarted.resolve();
+				await releaseBase.promise;
+				return "main";
+			};
+			harness.resolveLegacyMasterBranch = async () => "main";
+			const verification = harness.verifyGateSignal(current, gate, stateDir, "goal/cached-fence", "main");
+			await baseStarted.promise;
+
+			const cancellation = harness.cancelStaleVerifications(GOAL_ID, GATE_ID, cause);
+			if (cause === "superseded") {
+				gateStore.recordSignal(signal({
+					id: "superseded-replacement",
+					verification: { status: "running", steps: [] },
+				}));
+			}
+			await cancellation;
+			releaseBase.resolve();
+			await verification;
+
+			const gateAfter = gateStore.getGate(GOAL_ID, GATE_ID)!;
+			const cancelled = gateAfter.signals.find(entry => entry.id === current.id)?.verification as any;
+			expect(cancelled, "GATE_SIGNAL_AGENT_REMINDER: cached result cannot overwrite a cancellation fence").toMatchObject({
+				status: "cancelled",
+				cancellation: { cause },
+				steps: [{ name: "Fast cached verification", status: "cancelled", cancellation: { cause } }],
+			});
+			expect(gateAfter.status, "GATE_SIGNAL_AGENT_REMINDER: cached cancellation leaves the gate pending and eligible").toBe("pending");
+			expect(events.filter(event => event.type === "gate_verification_complete" && event.signalId === current.id && (event.status === "passed" || event.status === "failed"))).toEqual([]);
+			expect(notifications.some(message => /PASSED|FAILED/.test(message))).toBe(false);
+		} finally {
+			fs.rmSync(stateDir, { recursive: true, force: true });
+		}
 	});
 
 	test("cached pass response does not include the async wait reminder", () => {

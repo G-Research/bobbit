@@ -522,6 +522,34 @@ describe("runCommandStep tree-kill", () => {
 		assert.strictEqual((harness as any)._trackedCommandChildren.has(`${signalId}:0`), false, "tracked child should be unregistered after timeout settles");
 	});
 
+	it("preserves timeout kill mechanics when a later manual cancellation owns the run outcome", () => {
+		const goalId = "goal-timeout-then-manual";
+		const gateId = "gate-timeout-then-manual";
+		const signalId = "signal-timeout-then-manual";
+		const stateDir = fs.mkdtempSync(path.join(TEST_DIR, "timeout-then-manual-"));
+		const clock = createManualClock(50_000);
+		const fixture = createCancellationGateFixture(goalId, gateId, signalId);
+		const harness = makeHarness({ clock }, [], stateDir, fixture.gateStore);
+		setActiveCommandVerification(harness, goalId, gateId, signalId, ["timed out command"], { commandSpawnState: "spawned" });
+		const active = (harness as any).activeVerifications.get(signalId);
+		// Timeout owns the process tree while the row is still running; its
+		// terminal timeout result lands only after that kill intent is durable.
+		(harness as any)._markPersistedCommandKillIntent(active, "SIGKILL", "timeout");
+		Object.assign(active.steps[0], { status: "timeout", passed: false, output: "command timed out" });
+		expect((harness as any)._persistActive()).toBe(true);
+
+		// The orchestration cause describes the whole run. It must not rewrite the
+		// already-owned process-tree reason used by timeout recovery.
+		harness.fenceAndCancelAllVerifications(goalId, "manual");
+		const durable = (harness as any)._loadActive().find((entry: any) => entry.signalId === signalId);
+		expect(durable).toMatchObject({
+			cancelled: true,
+			cancellation: { cause: "manual" },
+			steps: [{ name: "timed out command", status: "timeout", killReason: "timeout", killSignal: "SIGKILL" }],
+		});
+		expect(fixture.verificationUpdates).toEqual([]);
+	});
+
 	it("fails rather than claiming a timeout tree cleanup succeeded when verification is unavailable", async () => {
 		const harness = makeHarness({ commandStepRunner: createUnverifiedTreeRunner({ pid: 910_003, killed: true, timedOut: true }) });
 		const tmp = fs.mkdtempSync(path.join(TEST_DIR, "rcs-unverified-cleanup-"));
