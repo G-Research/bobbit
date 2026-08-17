@@ -222,6 +222,7 @@ provider bodies, or callback, container, or correlation identifiers.
 | --- | --- |
 | Date and implementation commit | 2026-08-17; `47cf34c1e`. |
 | Runtime versions | Agent SDK `0.3.222`; Claude `2.1.222`; runtime schema `2`; host-current Pi `0.84`. |
+| OAuth, policy, and image category | Direct Bobbit OAuth available; sandbox OAuth policy present; matching image capability available. |
 | Model and controls | Started with alias `haiku`; supported live switch to `sonnet` and thinking control passed. |
 | Credential-free and direct coverage | Credential-free provider-unavailable recovery passed with no fallback; direct OAuth Playwright/API lifecycle and permission-card flow passed. |
 | Docker coverage | The actual Docker sandbox gate passed without a warm-up request. |
@@ -229,7 +230,27 @@ provider bodies, or callback, container, or correlation identifiers.
 | Bobbit-owned interactions | Read-only gate action, Bobbit slash ownership, and constrained helper rendering within its card passed. |
 | Usage and cost | Transcript, token totals, and current/high-water context fields were present. Cost basis was `subscription-notional`; billed total was `null`; the notional value was nullable. |
 | Compaction | Automatic compaction was not observed and remains observation-only. |
-| Sanitized repository artifacts | `tests/manual-integration/claude-agent-sdk-lifecycle.spec.ts`, `tests/e2e/claude-agent-sdk-session-restart.spec.ts`, and `tests/e2e/claude-agent-sdk-real-init-inventory.spec.ts`. |
+| Sanitized repository artifacts | `tests/manual-integration/claude-agent-sdk-lifecycle.spec.ts`, `tests2/browser/journeys/claude-live-controls.journey.spec.ts`, `tests/e2e/claude-agent-sdk-session-restart.spec.ts`, and `tests/e2e/claude-agent-sdk-real-init-inventory.spec.ts`. |
+
+### Normalized commands for completed evidence
+
+These normalized forms use the default unprefixed `haiku` alias. The placeholder
+is intentionally not an auth path.
+
+```bash
+npm run test:manual -- --grep "provider-unavailable failure"
+
+BOBBIT_RUN_CLAUDE_AGENT_SDK_SMOKE=1 \
+MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR="<isolated-auth-dir>" \
+npm run test:manual -- --grep "Claude Agent SDK lifecycle"
+
+BOBBIT_RUN_CLAUDE_AGENT_SDK_SANDBOX_SMOKE=1 \
+MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR="<isolated-auth-dir>" \
+npm run test:manual -- --grep "Docker sandbox lifecycle"
+
+npx playwright test --config playwright-v2.config.ts \
+  tests2/browser/journeys/claude-live-controls.journey.spec.ts
+```
 
 The required agent-run Playwright/API evidence is recorded. The parent release
 owner separately decides whether all parent requirements are satisfied.

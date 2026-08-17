@@ -34,6 +34,11 @@ requirement. All other providers, including `anthropic/*` and `aigw/*`, remain
 Pi-backed. This explicit split prevents an existing Anthropic session from
 changing runtime merely because an SDK is installed.
 
+The `claude-agent-sdk` provider namespace is reserved case-insensitively. A
+custom provider whose id **or name** claims it is ignored, including a legacy
+saved provider; it cannot add arbitrary SDK models or impersonate the runtime.
+Remove that obsolete custom-provider entry rather than attempting to repair it.
+
 An AI Gateway is separate from this runtime. With the default
 `aigw.exclusive` setting, a configured gateway hides all direct built-in rows,
 including SDK aliases; the gateway's own models remain selectable and Pi-backed.
