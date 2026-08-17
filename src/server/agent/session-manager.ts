@@ -414,16 +414,20 @@ interface ArchivedWorktreeGuardRef {
 	cwd?: string;
 	branch?: string;
 	repoWorktrees?: Record<string, string>;
+	archived?: boolean;
+	worktreeOwnerSessionId?: string;
 }
 
-/** Non-sandboxed polyrepo team leads borrow, but never own, the goal worktree set. */
-function hasGoalOwnedTeamLeadWorktrees(ps: Pick<PersistedSession, "role" | "goalId" | "teamGoalId" | "sandboxed" | "repoWorktrees">): boolean {
+/** Structural precondition shared by ordinary borrowed leads and adopted workspace owners. */
+function isNonSandboxedPolyrepoTeamLead(ps: Pick<PersistedSession, "role" | "goalId" | "teamGoalId" | "sandboxed" | "repoWorktrees">): boolean {
 	return ps.role === "team-lead"
 		&& !!(ps.teamGoalId ?? ps.goalId)
 		&& !ps.sandboxed
 		&& !!ps.repoWorktrees
 		&& Object.keys(ps.repoWorktrees).length > 0;
 }
+
+type StrictSandboxWiringOptions = SandboxWiringOptions & { expectedExistingContainerId?: string };
 
 interface ArchivedWorktreeScanContext {
 	candidateContexts: ProjectContext[];
@@ -3064,9 +3068,11 @@ type SessionRoleReplacementProjection = {
 	accessory: string;
 	/** Promotion retains the source session's verified tuple instead of adopting role defaults. */
 	preserveModelTuple: true;
+	/** Exact existing sandbox realm captured from the source before staging. */
+	expectedSandboxContainerId?: string;
 };
 
-type PromotionAttachmentField = "goalId" | "teamGoalId" | "role" | "accessory";
+type PromotionAttachmentField = "goalId" | "teamGoalId" | "role" | "accessory" | "containerId";
 type PromotionAttachmentSnapshot = Record<PromotionAttachmentField, { present: boolean; value: unknown }>;
 
 type SessionReplacementCoordinator = {
@@ -3751,6 +3757,14 @@ export class SessionManager {
 
 		for (const session of sessionsToRecover) {
 			try {
+				const persisted = this.getSessionStore(session.projectId).get(session.id);
+				if (persisted && this.isCanonicalAdoptedWorkspaceOwner(persisted)) {
+					const expected = persisted.containerId?.trim();
+					if (!expected || session.containerId !== expected || newContainerId !== expected) {
+						this.assertPromotedSessionRecoveryAllowed(session.id, "transfer to a recovered sandbox container");
+						throw new Error(`Cannot recover promoted session ${session.id}: sandbox container identity changed`);
+					}
+				}
 				// Verify/repair/recreate worktree if needed. Headquarters never owns
 				// sandbox worktrees, even for legacy sessions with /workspace-wt cwd.
 				if (projectId !== HEADQUARTERS_PROJECT_ID && !session.borrowsWorktree && session.cwd?.startsWith("/workspace-wt/")) {
@@ -4275,6 +4289,55 @@ export class SessionManager {
 		return this._testGoalManager?.getGoalStore().get(goalId);
 	}
 
+	/** Resolve adoption authority from the session's canonical project store, including archived goals. */
+	private resolveSessionGoal(ps: Pick<PersistedSession, "projectId" | "goalId" | "teamGoalId">): PersistedGoal | undefined {
+		const goalId = ps.teamGoalId ?? ps.goalId;
+		if (!goalId) return undefined;
+		if (this.projectContextManager && ps.projectId) {
+			return this.projectContextManager.getOrCreate(ps.projectId)?.goalStore.get(goalId);
+		}
+		return this.resolveGoal(goalId);
+	}
+
+	private goalWorkspaceCoordinatesMatchSession(goal: PersistedGoal, ps: PersistedSession): boolean {
+		if (goal.projectId !== ps.projectId || goal.branch !== ps.branch) return false;
+		if (normalizeWorktreeHostPath(goal.repoPath) !== normalizeWorktreeHostPath(ps.repoPath)) return false;
+		if (normalizeWorktreeHostPath(goal.worktreePath) !== normalizeWorktreeHostPath(ps.worktreePath)) return false;
+		const goalComponents = goal.repoWorktrees ?? {};
+		const sessionComponents = ps.repoWorktrees ?? {};
+		const goalRepos = Object.keys(goalComponents).sort();
+		const sessionRepos = Object.keys(sessionComponents).sort();
+		return goalRepos.length === sessionRepos.length
+			&& goalRepos.every((repo, index) => repo === sessionRepos[index]
+				&& normalizeWorktreeHostPath(goalComponents[repo]) === normalizeWorktreeHostPath(sessionComponents[repo]));
+	}
+
+	private goalExactlyAdoptsSession(goal: PersistedGoal, ps: PersistedSession): boolean {
+		if (!ps.goalId || ps.teamGoalId !== ps.goalId) return false;
+		return goal.id === ps.goalId
+			&& goal.worktreeOwnerSessionId === ps.id
+			&& this.goalWorkspaceCoordinatesMatchSession(goal, ps);
+	}
+
+	private isCanonicalAdoptedWorkspaceOwner(ps: PersistedSession): boolean {
+		const goal = this.resolveSessionGoal(ps);
+		return !!goal && this.goalExactlyAdoptsSession(goal, ps);
+	}
+
+	/** Ordinary polyrepo leads borrow goal worktrees; exact adopted sources remain their lifecycle owner. */
+	private hasGoalOwnedTeamLeadWorktrees(ps: PersistedSession): boolean {
+		return isNonSandboxedPolyrepoTeamLead(ps) && !this.isCanonicalAdoptedWorkspaceOwner(ps);
+	}
+
+	private adoptedWorkspaceHasLiveReference(ps: PersistedSession): boolean {
+		if (!this.isCanonicalAdoptedWorkspaceOwner(ps)) return false;
+		const records = this.getAllPersistedSessionsForWorktreeGuard();
+		const paths = ps.repoWorktrees && Object.keys(ps.repoWorktrees).length > 0
+			? Object.values(ps.repoWorktrees)
+			: [ps.worktreePath];
+		return paths.some(candidate => isWorktreePathReferencedByLiveSession(candidate, records, { ignoreSessionId: ps.id }));
+	}
+
 	/** Whether Docker sandbox mode is enabled in project config. */
 	get isSandboxEnabled(): boolean {
 		return (this.projectConfigStore?.get("sandbox") || "none") === "docker";
@@ -4553,7 +4616,7 @@ export class SessionManager {
 	private async applySandboxWiring(
 		bridgeOptions: RpcBridgeOptions,
 		sessionId: string,
-		opts?: SandboxWiringOptions,
+		opts?: StrictSandboxWiringOptions,
 	): Promise<boolean> {
 		// Resolve project ID before reading sandbox config. The selected project's
 		// config is authoritative; the server/HQ store is only a legacy fallback for
@@ -4578,16 +4641,31 @@ export class SessionManager {
 		if (!this.sandboxManager) {
 			throw new Error("Sandbox mode requires SandboxManager — not initialized");
 		}
-		// Lazy per-project init — idempotent. Handles restore paths and any call site
-		// that reached wiring without going through the explicit session-setup /
-		// goals / staff entry points.
-		await this.sandboxManager.ensureForProject(projectId);
+		const expectedExistingContainerId = opts?.expectedExistingContainerId?.trim();
+		if (opts?.expectedExistingContainerId !== undefined && !expectedExistingContainerId) {
+			throw new Error(`Cannot reuse sandbox for session ${sessionId}: expected container identity is missing`);
+		}
+		// Ordinary creation/restore lazily initializes as before. Promotion and
+		// promoted-source restore pass an exact identity and must only inspect the
+		// already-ready sandbox: never bootstrap, transfer, or repair its realm.
+		if (!expectedExistingContainerId) await this.sandboxManager.ensureForProject(projectId);
 		const sandbox = this.sandboxManager.get(projectId);
 		if (!sandbox) {
 			throw new Error(`No sandbox initialized for project ${projectId}`);
 		}
-
+		const assertExpectedContainer = () => {
+			if (!expectedExistingContainerId) return;
+			const status = sandbox.getStatus();
+			if (status.status !== "ready" || status.containerId !== expectedExistingContainerId) {
+				throw new Error(`Cannot reuse sandbox for session ${sessionId}: expected ready container ${expectedExistingContainerId}`);
+			}
+		};
+		assertExpectedContainer();
 		const containerId = await sandbox.getContainerId();
+		if (expectedExistingContainerId && containerId !== expectedExistingContainerId) {
+			throw new Error(`Cannot reuse sandbox for session ${sessionId}: container identity changed`);
+		}
+		assertExpectedContainer();
 
 		// Read gateway URL and generate scoped token for the container.
 		const gwUrl = this.readGatewayUrlForAgent();
@@ -4606,6 +4684,9 @@ export class SessionManager {
 			bridgeOptions.gatewayToken = adminToken;
 		}
 
+		// Re-check after credential wiring as well: a health transition during an
+		// await must reject before a candidate bridge can start.
+		assertExpectedContainer();
 		bridgeOptions.sandboxed = true;
 		bridgeOptions.containerId = containerId;
 		const projectRootPath = projectContext?.project.rootPath;
@@ -4715,6 +4796,7 @@ export class SessionManager {
 				scope: projectId,
 			});
 		});
+		assertExpectedContainer();
 
 		return true;
 	}
@@ -10658,6 +10740,7 @@ export class SessionManager {
 			}))
 			: undefined;
 		dormant.sandboxed = ps.sandboxed;
+		dormant.containerId = ps.containerId;
 	}
 
 	private addDormantSession(
@@ -10827,18 +10910,33 @@ export class SessionManager {
 		// ── Restore Docker sandbox wiring ──
 		let restoredSandboxed = ps.sandboxed === true && !(ps.projectId && isSandboxExemptProject(ps.projectId));
 		if (ps.sandboxed === true) {
-			// Keep applySandboxWiring as the single restore decision point. It uses
-			// the selected project's config internally, returns false for non-docker
-			// projects, and preserves Headquarters/system no-sandbox exemptions.
-			// On restore, the worktree already exists inside the container —
-			// pass the container-internal cwd directly (no branch = no worktree creation).
+			// Keep applySandboxWiring as the single restore decision point. Ordinary
+			// sessions retain lazy bootstrap. A canonical adopted source instead uses
+			// its durable promotion identity and fails closed if that exact container
+			// is no longer ready.
 			if (ps.cwd?.startsWith("/workspace")) {
 				bridgeOptions.cwd = ps.cwd;
 			}
-			restoredSandboxed = await this.applySandboxWiring(bridgeOptions, ps.id, {
-				projectId: ps.projectId,
-				goalId: ps.goalId ?? ps.teamGoalId,
-			});
+			const adoptedSource = this.isCanonicalAdoptedWorkspaceOwner(ps);
+			const expectedExistingContainerId = adoptedSource
+				? ps.containerId?.trim()
+				: undefined;
+			if (adoptedSource && !expectedExistingContainerId) {
+				this.assertPromotedSessionRecoveryAllowed(ps.id, "restore without its durable sandbox container identity");
+				throw new Error(`Cannot restore promoted session ${ps.id}: durable sandbox container identity is missing`);
+			}
+			try {
+				restoredSandboxed = await this.applySandboxWiring(bridgeOptions, ps.id, {
+					projectId: ps.projectId,
+					goalId: ps.goalId ?? ps.teamGoalId,
+					expectedExistingContainerId,
+				});
+			} catch (error) {
+				if (adoptedSource) {
+					this.assertPromotedSessionRecoveryAllowed(ps.id, "transfer to a replacement sandbox container");
+				}
+				throw error;
+			}
 			if (!restoredSandboxed) {
 				if ((ps as any)._preserveSandboxRealm) {
 					throw new Error(`Cannot respawn sandboxed session ${ps.id}: sandbox realm is unavailable`);
@@ -11327,20 +11425,9 @@ export class SessionManager {
 			}
 		}
 
-		// For sandbox sessions, resolve the container ID so git-status and other
-		// host-side operations can run commands inside the container via docker exec.
-		// The containerId is not persisted — it's resolved from SandboxManager which
-		// reconnects to the existing container by label on startup.
-		if (ps.sandboxed && this.sandboxManager && ps.projectId) {
-			try {
-				const sandbox = this.sandboxManager.get(ps.projectId);
-				if (sandbox) {
-					session.containerId = await sandbox.getContainerId();
-				}
-			} catch (err) {
-				console.warn(`[session-manager] Could not resolve container for sandbox session ${ps.id}: ${err}`);
-			}
-		}
+		// applySandboxWiring already established the bridge's exact realm. Reuse
+		// that verified identity rather than performing another fallible lookup.
+		if (ps.sandboxed && bridgeOptions.containerId) session.containerId = bridgeOptions.containerId;
 
 		// Install the replacement before enabling lifecycle side effects. A replayed
 		// agent_end must never dequeue durable intent against a provisional bridge.
@@ -13927,11 +14014,39 @@ export class SessionManager {
 		if (session?.projectId && goal.projectId && session.projectId !== goal.projectId) {
 			throw new Error(`Cannot promote session ${id} across projects`);
 		}
+		const sourcePersisted = this.resolveStoreForSession(id).get(id);
+		if (
+			goal.worktreeOwnerSessionId !== id
+			|| !sourcePersisted
+			|| !this.goalWorkspaceCoordinatesMatchSession(goal, sourcePersisted)
+		) {
+			throw new Error(`Cannot promote session ${id}: adopted workspace provenance or coordinates do not match`);
+		}
 		if (session?.goalId === goalId && session.teamGoalId === goalId && session.role === "team-lead") {
+			if (session.sandboxed) {
+				const persisted = this.resolveStoreForSession(id).get(id);
+				const expected = persisted?.containerId?.trim();
+				if (!expected || session.containerId !== expected) {
+					throw new Error(`Cannot reuse promoted session ${id}: sandbox container identity changed`);
+				}
+				const options: RpcBridgeOptions = { cwd: session.cwd };
+				const applied = await this.applySandboxWiring(options, id, {
+					projectId: session.projectId,
+					goalId,
+					expectedExistingContainerId: expected,
+				});
+				if (!applied || options.containerId !== expected) {
+					throw new Error(`Cannot reuse promoted session ${id}: sandbox realm is unavailable`);
+				}
+			}
 			return session;
 		}
 		if (session && (session.goalId || session.teamGoalId || session.role || session.assistantType || session.staffId || session.delegateOf || session.parentSessionId)) {
 			throw new Error(`Session ${id} already has goal, role, staff, assistant, delegate, or child metadata`);
+		}
+		const expectedSandboxContainerId = session?.sandboxed ? session.containerId?.trim() : undefined;
+		if (session?.sandboxed && !expectedSandboxContainerId) {
+			throw new Error(`Cannot promote sandboxed session ${id}: existing container identity is missing`);
 		}
 		const role = this.resolveSessionRole("team-lead", undefined, session?.projectId);
 		if (!role) throw new Error('Cannot promote session: role "team-lead" is unavailable');
@@ -13941,6 +14056,7 @@ export class SessionManager {
 			role: "team-lead",
 			accessory: role.accessory ?? "crown",
 			preserveModelTuple: true,
+			expectedSandboxContainerId,
 		};
 		if (!coordinator && session) broadcastStatus(session, "starting");
 		const promoted = await this._coordinateSessionReplacement(id, "promote-goal-lead", (token) =>
@@ -13961,6 +14077,10 @@ export class SessionManager {
 			teamGoalId: { present: own.call(source, "teamGoalId"), value: source.teamGoalId },
 			role: { present: own.call(source, "role"), value: source.role },
 			accessory: { present: own.call(source, "accessory"), value: source.accessory },
+			containerId: {
+				present: own.call(source, "containerId"),
+				value: source.containerId,
+			},
 		};
 	}
 
@@ -14177,12 +14297,23 @@ export class SessionManager {
 		// container transcript and make an apparently successful role change lose
 		// model-visible history.
 		if (replacementSession.sandboxed) {
+			const adoptedExpectedContainerId = this.isCanonicalAdoptedWorkspaceOwner(respawnPersisted ?? persistedBeforeRole!)
+				? respawnPersisted?.containerId?.trim()
+				: undefined;
+			const strictExpectedContainerId = projection?.expectedSandboxContainerId ?? adoptedExpectedContainerId;
+			if (!projection && this.isCanonicalAdoptedWorkspaceOwner(respawnPersisted ?? persistedBeforeRole!) && !strictExpectedContainerId) {
+				throw new Error(`Cannot replace promoted session ${id}: durable sandbox container identity is missing`);
+			}
 			const sandboxApplied = await this.applySandboxWiring(bridgeOptions, id, {
 				projectId: replacementSession.projectId,
 				goalId: replacementSession.goalId ?? replacementSession.teamGoalId,
+				expectedExistingContainerId: strictExpectedContainerId,
 			});
 			if (!sandboxApplied) {
 				throw new Error(`Cannot assign role for sandboxed session ${id}: sandbox realm is unavailable`);
+			}
+			if (strictExpectedContainerId && bridgeOptions.containerId !== strictExpectedContainerId) {
+				throw new Error(`Cannot replace sandboxed session ${id}: container identity changed during staging`);
 			}
 		} else {
 			this.applyScopedGatewayCredentials(bridgeOptions, id, replacementSession.projectId, replacementSession.goalId ?? replacementSession.teamGoalId);
@@ -14284,7 +14415,10 @@ export class SessionManager {
 						teamGoalId: projection.teamGoalId,
 						role: projection.role,
 						accessory: projection.accessory,
-					}
+						...(projection.expectedSandboxContainerId
+							? { containerId: projection.expectedSandboxContainerId }
+							: {}),
+					} as Parameters<SessionStore["update"]>[1]
 					: { role: role.name, accessory: role.accessory });
 			} catch (err) {
 				if (promotionAttachmentBefore) {
@@ -14340,6 +14474,7 @@ export class SessionManager {
 		session.messagesSnapshotCursorProjection = undefined;
 		session.spawnPinnedModel = bridgeOptions.initialModel;
 		session.spawnPinnedThinkingLevel = bridgeOptions.initialThinkingLevel;
+		if (projection?.expectedSandboxContainerId) session.containerId = projection.expectedSandboxContainerId;
 		if (verifiedReplacementTuple) {
 			session.spawnPinnedModel = `${verifiedReplacementTuple.provider}/${verifiedReplacementTuple.modelId}`;
 			session.spawnPinnedThinkingLevel = verifiedReplacementTuple.thinkingLevel;
@@ -15554,8 +15689,24 @@ export class SessionManager {
 		for (const projectCtx of allContexts) {
 			const goalsById = new Map(projectCtx.goalStore.getAll().map(goal => [goal.id, goal]));
 			for (const goal of projectCtx.goalStore.getAll()) {
-				goalRefs.push({ id: goal.id, repoPath: goal.repoPath, worktreePath: goal.worktreePath, cwd: goal.cwd, branch: goal.branch, repoWorktrees: goal.repoWorktrees });
-				addRepoBranches(goal.repoPath, goal.branch, goal.repoWorktrees);
+				goalRefs.push({
+					id: goal.id,
+					repoPath: goal.repoPath,
+					worktreePath: goal.worktreePath,
+					cwd: goal.cwd,
+					branch: goal.branch,
+					repoWorktrees: goal.repoWorktrees,
+					archived: goal.archived,
+					worktreeOwnerSessionId: goal.worktreeOwnerSessionId,
+				});
+				// An archived, exactly matched adopted goal is provenance, not a live
+				// branch owner. Malformed or divergent records fail closed and retain
+				// the branch guard.
+				const adoptedOwner = goal.worktreeOwnerSessionId
+					? projectCtx.sessionStore.get(goal.worktreeOwnerSessionId)
+					: undefined;
+				const exactArchivedAdoption = !!(goal.archived && adoptedOwner && this.goalExactlyAdoptsSession(goal, adoptedOwner));
+				if (!exactArchivedAdoption) addRepoBranches(goal.repoPath, goal.branch, goal.repoWorktrees);
 			}
 			for (const team of projectCtx.teamStore.getAll()) {
 				const ownerGoal = goalsById.get(team.goalId);
@@ -15591,8 +15742,8 @@ export class SessionManager {
 
 	private async archivedSessionWorktreeItems(ps: PersistedSession, ctx: ArchivedWorktreeScanContext, projectName?: string): Promise<ArchivedSessionWorktreeItem[]> {
 		// Borrowed goal worktrees remain goal-owned after the lead is archived;
-		// do not expose them as archived-session cleanup candidates.
-		if (hasGoalOwnedTeamLeadWorktrees(ps)) return [];
+		// exact adopted sources are instead exposed for their final cleanup.
+		if (this.hasGoalOwnedTeamLeadWorktrees(ps)) return [];
 		const specs: Array<{ repo: string; repoPath?: string; worktreePath?: string; branch?: string; source: "repoWorktrees" | "sessionWorktree" }> = [];
 		if (ps.repoWorktrees && Object.keys(ps.repoWorktrees).length > 0) {
 			for (const [repo, wt] of Object.entries(ps.repoWorktrees)) {
@@ -15681,7 +15832,10 @@ export class SessionManager {
 		if (sessionReferenced) {
 			return base({ pathExists, gitWorktreeMetadataExists, localBranchExists, status: "skipped", reason: "referenced-by-live-session", detail: "Another non-archived or runtime session still references this worktree." });
 		}
-		if (this.isWorktreeReferencedByRefs(spec.worktreePath, ctx.goalRefs)) {
+		if (this.isWorktreeReferencedByRefs(spec.worktreePath, ctx.goalRefs, {
+			ownerSessionId: ps.id,
+			goalId: ps.teamGoalId ?? ps.goalId,
+		})) {
 			return base({ pathExists, gitWorktreeMetadataExists, localBranchExists, status: "skipped", reason: "referenced-by-live-goal", detail: "A persisted goal still references this worktree." });
 		}
 		if (this.isWorktreeReferencedByRefs(spec.worktreePath, ctx.teamRefs)) {
@@ -15732,10 +15886,19 @@ export class SessionManager {
 		return normalized === "/workspace" || normalized.startsWith("/workspace/") || normalized === "/workspace-wt" || normalized.startsWith("/workspace-wt/");
 	}
 
-	private isWorktreeReferencedByRefs(candidatePath: string | undefined, refs: ArchivedWorktreeGuardRef[]): boolean {
+	private isWorktreeReferencedByRefs(
+		candidatePath: string | undefined,
+		refs: ArchivedWorktreeGuardRef[],
+		archivedAdoption?: { ownerSessionId: string; goalId?: string },
+	): boolean {
 		const candidate = normalizeWorktreeHostPath(candidatePath);
 		if (!candidate) return false;
 		for (const ref of refs) {
+			if (
+				ref.archived
+				&& archivedAdoption?.goalId === ref.id
+				&& ref.worktreeOwnerSessionId === archivedAdoption?.ownerSessionId
+			) continue;
 			if (normalizeWorktreeHostPath(ref.worktreePath) === candidate) return true;
 			const cwd = normalizeWorktreeHostPath(ref.cwd);
 			if (cwd && (cwd === candidate || cwd.startsWith(`${candidate}/`))) return true;
@@ -15916,6 +16079,14 @@ export class SessionManager {
 			}
 		}
 
+		// Adopted multi-repo cleanup is all-or-nothing. If any component is still
+		// referenced, retain the archived owner record so a later purge can clean
+		// every component and the shared container exactly once.
+		if (this.adoptedWorkspaceHasLiveReference(ps)) {
+			console.warn(`[session-manager] Refusing to purge adopted workspace owner ${ps.id}: another live session still references a component`);
+			return;
+		}
+
 		// Cascade-reap any child agents before destroying the parent's data (§6).
 		// A parent normally cascades at archive time, but purge is a terminal data
 		// destruction — reap here as a final safety net so a child never outlives
@@ -15981,8 +16152,9 @@ export class SessionManager {
 		// Clean up host worktree.  Sandboxed session worktrees also create a host-side
 		// worktree for server bookkeeping, so we clean those up too.  Skip paths that
 		// are container-internal (start with /workspace) — those have no host counterpart.
-		// Skip delegates and non-sandboxed polyrepo leads — both borrow worktrees owned elsewhere.
-		const goalOwnsTeamLeadWorktrees = hasGoalOwnedTeamLeadWorktrees(ps);
+		// Skip delegates and ordinary non-sandboxed polyrepo leads — both borrow
+		// worktrees owned elsewhere. Canonical adopted sources remain final owners.
+		const goalOwnsTeamLeadWorktrees = this.hasGoalOwnedTeamLeadWorktrees(ps);
 		if (ps.worktreePath && ps.repoPath && !ps.worktreePath.startsWith("/workspace") && !ps.delegateOf && !goalOwnsTeamLeadWorktrees) {
 			try {
 				const { cleanupWorktree, removeEmptyWorktreeSetContainer } = await import("../skills/git.js");
@@ -16621,6 +16793,12 @@ export class SessionManager {
 		// kill immediately; recovery must never wait on the bridge being replaced.
 		// Paths remain in the agent's coordinate system — no translation needed.
 		const persistedBeforeAbort = this.resolveStoreForSession(id).get(id);
+		const adoptedExpectedContainerId = persistedBeforeAbort && this.isCanonicalAdoptedWorkspaceOwner(persistedBeforeAbort)
+			? persistedBeforeAbort.containerId?.trim()
+			: undefined;
+		if (persistedBeforeAbort && this.isCanonicalAdoptedWorkspaceOwner(persistedBeforeAbort) && !adoptedExpectedContainerId) {
+			throw new Error(`Cannot force-abort promoted session ${id}: durable sandbox container identity is missing`);
+		}
 		let agentSessionFile = persistedBeforeAbort?.agentSessionFile;
 		if (stateBeforeKill?.success && stateBeforeKill.data?.sessionFile) {
 			agentSessionFile = stateBeforeKill.data.sessionFile;
@@ -16698,6 +16876,7 @@ export class SessionManager {
 				const sandboxApplied = await this.applySandboxWiring(bridgeOptions, id, {
 					projectId: session.projectId,
 					goalId: session.goalId ?? session.teamGoalId,
+					expectedExistingContainerId: adoptedExpectedContainerId,
 				});
 				if (!sandboxApplied) {
 					throw new Error(`Cannot recover sandboxed session ${id}: sandbox realm is unavailable`);

@@ -157,6 +157,9 @@ function fixture(name: string, overrides: Record<string, unknown> = {}): {
 		sandboxed: false,
 		...overrides,
 	};
+	if (persisted.sandboxed && persisted.goalId) {
+		persisted.containerId ??= "same-container";
+	}
 	const updates: Record<string, unknown>[] = [];
 	const store = {
 		get: vi.fn(() => persisted),
@@ -189,6 +192,10 @@ function fixture(name: string, overrides: Record<string, unknown> = {}): {
 		spec: "Keep all existing work and continue as lead.",
 		branch: persisted.branch,
 		projectId: persisted.projectId,
+		repoPath: persisted.repoPath,
+		worktreePath: persisted.worktreePath,
+		repoWorktrees: persisted.repoWorktrees,
+		worktreeOwnerSessionId: persisted.id,
 	}));
 	managers.push(manager);
 
@@ -231,6 +238,7 @@ function fixture(name: string, overrides: Record<string, unknown> = {}): {
 			worktreePath,
 		})),
 		sandboxed: persisted.sandboxed,
+		...(persisted.containerId ? { containerId: persisted.containerId } : {}),
 		spawnPinnedModel: `${provider}/${modelId}`,
 		spawnPinnedThinkingLevel: thinkingLevel,
 	};
@@ -318,6 +326,7 @@ describe("SessionManager current-session runtime promotion", () => {
 		const fx = fixture("promotion-sandbox", {
 			agentSessionFile: "",
 			sandboxed: true,
+			containerId: "existing-container",
 			cwd: "/workspace-wt/session/promotion-sandbox",
 			worktreePath: "/workspace-wt/session/promotion-sandbox",
 		});
@@ -332,7 +341,11 @@ describe("SessionManager current-session runtime promotion", () => {
 		});
 		fx.manager.applySandboxWiring = vi.fn(async (bridgeOptions: any, sessionId: string, opts: any) => {
 			expect(sessionId).toBe(fx.live.id);
-			expect(opts).toEqual({ projectId: fx.live.projectId, goalId: "goal-sandbox" });
+			expect(opts).toEqual({
+				projectId: fx.live.projectId,
+				goalId: "goal-sandbox",
+				expectedExistingContainerId: "existing-container",
+			});
 			bridgeOptions.sandboxed = true;
 			bridgeOptions.containerId = "existing-container";
 			bridgeOptions.cwd = fx.live.cwd;
@@ -350,6 +363,55 @@ describe("SessionManager current-session runtime promotion", () => {
 		expect(options).not.toHaveProperty("sandboxBranch");
 		expect(options).not.toHaveProperty("sandboxBaseBranch");
 		expect(fx.persisted.worktreePath).toBe("/workspace-wt/session/promotion-sandbox");
+		expect(fx.persisted.containerId).toBe("existing-container");
+		expect(fx.live.containerId).toBe("existing-container");
+
+		fx.manager.applySandboxWiring = vi.fn(async () => {
+			throw new Error("existing container was replaced");
+		});
+		await expect(fx.manager.promoteToGoalLead(fx.live.id, "goal-sandbox"))
+			.rejects.toThrow("existing container was replaced");
+		expect(replacement.start).toHaveBeenCalledTimes(1);
+	});
+
+	it.each([
+		["non-ready", { status: "starting", containerId: "existing-container" }],
+		["replacement", { status: "ready", containerId: "replacement-container" }],
+	])("fails closed on a %s sandbox without bootstrap or candidate start", async (_case, status) => {
+		const fx = fixture(`promotion-sandbox-${_case}`, {
+			agentSessionFile: "",
+			sandboxed: true,
+			containerId: "existing-container",
+			cwd: `/workspace-wt/session/promotion-sandbox-${_case}`,
+			worktreePath: `/workspace-wt/session/promotion-sandbox-${_case}`,
+		});
+		fx.live.cwd = fx.persisted.cwd;
+		fx.live.worktreePath = fx.persisted.worktreePath;
+		fx.live.sandboxed = true;
+		const replacement = bridge();
+		const factory = vi.fn(() => replacement);
+		registerRpcBridgeFactory(factory);
+		const ensureForProject = vi.fn(async () => { throw new Error("strict promotion must not bootstrap"); });
+		const getContainerId = vi.fn(async () => status.containerId);
+		fx.manager.projectConfigStore = {
+			get: (key: string) => key === "sandbox" ? "docker" : undefined,
+			getSandboxTokens: () => [],
+		};
+		fx.manager.sandboxManager = {
+			ensureForProject,
+			get: vi.fn(() => ({ getStatus: () => status, getContainerId })),
+		};
+		const before = structuredClone(fx.persisted);
+
+		await expect(fx.manager.promoteToGoalLead(fx.live.id, "goal-sandbox-race"))
+			.rejects.toThrow(/expected ready container|container identity changed/);
+
+		expect(ensureForProject).not.toHaveBeenCalled();
+		expect(factory).not.toHaveBeenCalled();
+		expect(replacement.start).not.toHaveBeenCalled();
+		expect(fx.oldBridge.stop).not.toHaveBeenCalled();
+		expect(fx.manager.getSession(fx.live.id)).toBe(fx.live);
+		expect(fx.persisted).toEqual(before);
 	});
 
 	it("restores exact optional metadata and the original runtime when old stop rejects", async () => {
@@ -357,7 +419,7 @@ describe("SessionManager current-session runtime promotion", () => {
 		const replacement = bridge();
 		registerRpcBridgeFactory(() => replacement);
 		fx.oldBridge.stop = vi.fn(async () => { throw new Error("old bridge refused stop"); });
-		for (const field of ["goalId", "teamGoalId", "role", "accessory"]) {
+		for (const field of ["goalId", "teamGoalId", "role", "accessory", "containerId"]) {
 			expect(Object.prototype.hasOwnProperty.call(fx.persisted, field)).toBe(false);
 			expect(Object.prototype.hasOwnProperty.call(fx.live, field)).toBe(false);
 		}
@@ -368,7 +430,7 @@ describe("SessionManager current-session runtime promotion", () => {
 		expect(fx.manager.getSession(fx.live.id)).toBe(fx.live);
 		expect(fx.live.rpcClient).toBe(fx.oldBridge);
 		expect(fx.live.unsubscribe).toBeInstanceOf(Function);
-		for (const field of ["goalId", "teamGoalId", "role", "accessory"]) {
+		for (const field of ["goalId", "teamGoalId", "role", "accessory", "containerId"]) {
 			expect(Object.prototype.hasOwnProperty.call(fx.persisted, field)).toBe(false);
 			expect(Object.prototype.hasOwnProperty.call(fx.live, field)).toBe(false);
 		}
@@ -483,6 +545,46 @@ describe("SessionManager current-session runtime promotion", () => {
 		expect(fx.persisted).toEqual(before);
 	});
 
+	it("quarantines a promoted source when restart sees a replacement container without bootstrapping", async () => {
+		const fx = fixture("promotion-sandbox-replaced-on-restart", {
+			goalId: "goal-promoted",
+			teamGoalId: "goal-promoted",
+			role: "team-lead",
+			sandboxed: true,
+			containerId: "original-container",
+			cwd: "/workspace-wt/session/promotion-sandbox-replaced-on-restart",
+			worktreePath: "/workspace-wt/session/promotion-sandbox-replaced-on-restart",
+		});
+		fx.manager.sessions.clear();
+		fx.manager.setPromotedSessionLifecycleGuard((sessionId: string) =>
+			sessionId === fx.persisted.id ? "live adopted goal still owns source" : undefined);
+		const ensureForProject = vi.fn(async () => { throw new Error("must not bootstrap"); });
+		fx.manager.projectConfigStore = {
+			get: (key: string) => key === "sandbox" ? "docker" : undefined,
+			getSandboxTokens: () => [],
+		};
+		fx.manager.sandboxManager = {
+			ensureForProject,
+			get: vi.fn(() => ({
+				getStatus: () => ({ status: "ready", containerId: "replacement-container" }),
+				getContainerId: vi.fn(async () => "replacement-container"),
+			})),
+		};
+		const before = structuredClone(fx.persisted);
+
+		await fx.manager.restoreOneSession(fx.persisted);
+
+		expect(ensureForProject).not.toHaveBeenCalled();
+		expect(fx.persisted).toEqual(before);
+		expect(fx.manager.getSession(fx.persisted.id)).toMatchObject({
+			dormant: true,
+			sandboxed: true,
+			containerId: "original-container",
+			goalId: "goal-promoted",
+			teamGoalId: "goal-promoted",
+		});
+	});
+
 	it("quarantines a promoted source instead of downgrading an unavailable sandbox realm", async () => {
 		const fx = fixture("promotion-sandbox-unavailable", {
 			goalId: "goal-promoted",
@@ -533,13 +635,43 @@ describe("SessionManager current-session runtime promotion", () => {
 
 		await fx.manager.recoverSandboxSessions(fx.persisted.projectId, "replacement-container-id");
 
-		expect(execFile).toHaveBeenCalledTimes(1);
-		expect(execFile.mock.calls[0][1]).not.toContain("repair");
+		expect(execFile).not.toHaveBeenCalled();
 		expect(createWorktree).not.toHaveBeenCalled();
 		expect(fx.store.archive).not.toHaveBeenCalled();
 		expect(fx.store.archiveAsync).not.toHaveBeenCalled();
 		expect(fx.manager.getSession(fx.persisted.id)).toBe(fx.live);
 		expect(fx.live.status).toBe("idle");
+	});
+
+	it("uses strict adopted container identity during force-abort replacement", async () => {
+		const fx = fixture("promotion-force-abort", {
+			goalId: "goal-promoted",
+			teamGoalId: "goal-promoted",
+			role: "team-lead",
+			sandboxed: true,
+			containerId: "force-abort-container",
+			cwd: "/workspace-wt/session/promotion-force-abort",
+			worktreePath: "/workspace-wt/session/promotion-force-abort",
+		});
+		Object.assign(fx.live, {
+			goalId: "goal-promoted",
+			teamGoalId: "goal-promoted",
+			role: "team-lead",
+			sandboxed: true,
+			containerId: "force-abort-container",
+			status: "streaming",
+		});
+		fx.live.clients.clear();
+		fx.manager.applySandboxWiring = vi.fn(async (_options: any, _id: string, opts: any) => {
+			expect(opts.expectedExistingContainerId).toBe("force-abort-container");
+			throw new Error("stop after strict wiring assertion");
+		});
+
+		await expect(fx.manager.forceAbort(fx.live.id, 0)).rejects.toThrow("stop after strict wiring assertion");
+
+		expect(fx.manager.applySandboxWiring).toHaveBeenCalledTimes(1);
+		expect(fx.oldBridge.stop).toHaveBeenCalledTimes(1);
+		expect(fx.persisted.containerId).toBe("force-abort-container");
 	});
 
 	it("does not run boot host recovery against any promoted multi-repo workspace", async () => {
@@ -564,6 +696,70 @@ describe("SessionManager current-session runtime promotion", () => {
 		expect(fx.store.archive).not.toHaveBeenCalled();
 		expect(fx.persisted).toEqual(before);
 		expect(fx.persisted.repoWorktrees).toEqual(before.repoWorktrees);
+	});
+
+	it("classifies only exact canonical adopted multi-repo coordinates as source-owned cleanup", async () => {
+		const fx = fixture("promotion-adopted-cleanup", {
+			goalId: "goal-promoted",
+			teamGoalId: "goal-promoted",
+			role: "team-lead",
+			archived: true,
+		});
+		const archivedGoal = {
+			...fx.manager.resolveGoal("goal-promoted"),
+			archived: true,
+		};
+		fx.manager.resolveGoal = vi.fn(() => archivedGoal);
+
+		expect(fx.manager.isCanonicalAdoptedWorkspaceOwner(fx.persisted)).toBe(true);
+		expect(fx.manager.hasGoalOwnedTeamLeadWorktrees(fx.persisted)).toBe(false);
+		const borrower = {
+			...fx.persisted,
+			id: "live-borrower",
+			archived: false,
+			goalId: undefined,
+			teamGoalId: undefined,
+			role: undefined,
+			cwd: path.join(fx.persisted.repoWorktrees.api, "packages", "api"),
+			worktreePath: fx.persisted.repoWorktrees.api,
+			repoWorktrees: undefined,
+		};
+		fx.store.getAll.mockReturnValue([fx.persisted, borrower]);
+		expect(fx.manager.adoptedWorkspaceHasLiveReference(fx.persisted)).toBe(true);
+		fx.store.getAll.mockReturnValue([fx.persisted]);
+		expect(fx.manager.adoptedWorkspaceHasLiveReference(fx.persisted)).toBe(false);
+
+		const ordinary = { ...fx.persisted, id: "ordinary-lead" };
+		fx.manager.resolveGoal = vi.fn(() => ({ ...archivedGoal, worktreeOwnerSessionId: undefined }));
+		expect(fx.manager.hasGoalOwnedTeamLeadWorktrees(ordinary)).toBe(true);
+
+		fx.manager.resolveGoal = vi.fn(() => archivedGoal);
+		const divergent = {
+			...fx.persisted,
+			repoWorktrees: { ...fx.persisted.repoWorktrees, api: `${fx.persisted.repoWorktrees.api}-other` },
+		};
+		expect(fx.manager.isCanonicalAdoptedWorkspaceOwner(divergent)).toBe(false);
+		expect(fx.manager.hasGoalOwnedTeamLeadWorktrees(divergent)).toBe(true);
+
+		fx.manager.readGitWorktreeRefs = vi.fn(async () => ({ entries: [] }));
+		fx.manager.localBranchExists = vi.fn(async () => false);
+		const scanContext = {
+			candidateContexts: [],
+			sessionPathRecords: [fx.persisted],
+			goalRefs: [{
+				...archivedGoal,
+				id: "goal-promoted",
+			}],
+			teamRefs: [],
+			staffRefs: [],
+			branchGuardsByRepo: new Map(),
+			archivedBranchGuardsByRepo: new Map(),
+			gitRefsCache: new Map(),
+			branchExistsCache: new Map(),
+		};
+		const items = await fx.manager.archivedSessionWorktreeItems(fx.persisted, scanContext, "Project");
+		expect(items).toHaveLength(2);
+		expect(items.map((item: any) => item.reason)).toEqual(["already-cleaned", "already-cleaned"]);
 	});
 
 	it("preserves ordinary missing-transcript archival and sandbox worktree recovery behavior", async () => {

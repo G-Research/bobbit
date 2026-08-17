@@ -282,6 +282,8 @@ export interface PersistedSession {
 	imageModelId?: string;
 	/** Whether this session runs inside a Docker sandbox container */
 	sandboxed?: boolean;
+	/** Exact container identity retained only when the session owns an adopted sandbox workspace. */
+	containerId?: string;
 	/** Per-repo worktree paths (multi-repo only). Single-repo uses flat worktreePath. */
 	repoWorktrees?: Record<string, string>;
 	/** Server-authoritative right-hand side-panel workspace. */
@@ -339,6 +341,7 @@ export type UpdatableSessionFields = Pick<
 	| "imageModelProvider"
 	| "imageModelId"
 	| "sandboxed"
+	| "containerId"
 	| "projectId"
 	| "repoWorktrees"
 	| "sidePanelWorkspace"
@@ -826,7 +829,7 @@ export class SessionStore {
 	private static RECOVERY_CRITICAL_FIELDS: ReadonlyArray<keyof UpdatableSessionFields> = [
 		"agentSessionFile", "branch", "worktreePath", "cwd", "repoPath",
 		"repoWorktrees", "archived", "archivedAt",
-		"sandboxed", "projectId", "goalId", "delegateOf",
+		"sandboxed", "containerId", "projectId", "goalId", "delegateOf",
 		"parentSessionId", "childKind", "readOnly", "childTerminal", "terminalAt",
 		"role", "assistantType", "taskId", "staffId",
 		"teamGoalId", "teamLeadSessionId",
