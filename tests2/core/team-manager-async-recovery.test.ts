@@ -74,12 +74,14 @@ class MemoryTeamStore {
 
 class MemoryRecoveryCheckpoints implements TeamRecoveryCheckpointStore {
 	readonly statuses = new Map<string, "running" | "complete">();
+	readonly completionPending = new Set<string>();
 	readonly calls: string[] = [];
 	failBegin = false;
+	failCompleteAfterPublication = false;
 
 	async isComplete(stateDir: string): Promise<boolean> {
 		this.calls.push(`isComplete:${stateDir}`);
-		return this.statuses.get(stateDir) === "complete";
+		return this.statuses.get(stateDir) === "complete" && !this.completionPending.has(stateDir);
 	}
 	async begin(stateDir: string): Promise<void> {
 		this.calls.push(`begin:${stateDir}`);
@@ -88,7 +90,10 @@ class MemoryRecoveryCheckpoints implements TeamRecoveryCheckpointStore {
 	}
 	async complete(stateDir: string): Promise<void> {
 		this.calls.push(`complete:${stateDir}`);
+		this.completionPending.add(stateDir);
 		this.statuses.set(stateDir, "complete");
+		if (this.failCompleteAfterPublication) throw new Error("INJECTED_POST_RENAME_DIRECTORY_FSYNC_EIO");
+		this.completionPending.delete(stateDir);
 	}
 }
 
@@ -366,6 +371,26 @@ describe("TeamManager awaited async recovery", () => {
 		);
 		assert.deepEqual(fixture.checkpoints.calls.slice(-1), [`isComplete:${fixture.stateDir}`]);
 		second.dispose();
+	});
+
+	it("retries forensic recovery after visible completion fails its durability acknowledgement", async () => {
+		const fixture = makeFixture();
+		fixture.checkpoints.failCompleteAfterPublication = true;
+		await fixture.manager.waitForRestore();
+
+		assert.equal(fixture.checkpoints.statuses.get(fixture.stateDir), "complete", "precondition: completion became visible before acknowledgement failed");
+		assert.equal(fixture.checkpoints.completionPending.has(fixture.stateDir), true, "RECOVERY_COMPLETION_FENCE: the failed publication must retain retry authority");
+		fixture.manager.dispose();
+
+		fixture.checkpoints.failCompleteAfterPublication = false;
+		fixture.fs.calls.length = 0;
+		const retry = new TeamManager(fixture.sessionManager as any, fixture.managerConfig as any, undefined, noTimerClock as any);
+		await retry.waitForRestore();
+
+		assert.ok(fixture.fs.calls.some((call) => call.operation === "readdir"), "RECOVERY_COMPLETION_FENCE: the second boot must rerun forensic traversal");
+		assert.equal(fixture.checkpoints.statuses.get(fixture.stateDir), "complete");
+		assert.equal(fixture.checkpoints.completionPending.has(fixture.stateDir), false, "RECOVERY_COMPLETION_FENCE: successful retry must clear the fence");
+		retry.dispose();
 	});
 
 	it("invalidates a completed checkpoint and recovers when a persisted team points at a missing lead", async () => {

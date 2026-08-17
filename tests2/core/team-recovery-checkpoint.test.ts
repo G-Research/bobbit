@@ -6,6 +6,7 @@ import { afterEach, describe, it, vi } from "vitest";
 import {
 	FileTeamRecoveryCheckpointStore,
 	TEAM_FORENSIC_RECOVERY_CHECKPOINT_FILE,
+	TEAM_FORENSIC_RECOVERY_COMPLETION_FENCE_FILE,
 	TEAM_FORENSIC_RECOVERY_VERSION,
 } from "../../src/server/agent/team-recovery-checkpoint.ts";
 
@@ -46,6 +47,52 @@ describe("team forensic recovery checkpoint", () => {
 		assert.equal(await store.isComplete(stateDir), true);
 		const names = await fs.promises.readdir(stateDir);
 		assert.deepEqual(names, [TEAM_FORENSIC_RECOVERY_CHECKPOINT_FILE]);
+	});
+
+	it("retains retry authority when directory sync fails after the complete rename", async () => {
+		const stateDir = await tempStateDir();
+		const store = new FileTeamRecoveryCheckpointStore();
+		const marker = path.join(stateDir, TEAM_FORENSIC_RECOVERY_CHECKPOINT_FILE);
+		const fence = path.join(stateDir, TEAM_FORENSIC_RECOVERY_COMPLETION_FENCE_FILE);
+		await store.begin(stateDir);
+
+		const platformSpy = vi.spyOn(process, "platform", "get").mockReturnValue("linux");
+		const realOpen = fs.promises.open.bind(fs.promises);
+		let injected = false;
+		const openSpy = vi.spyOn(fs.promises, "open").mockImplementation(async (...args) => {
+			const handle = await realOpen(...args);
+			if (path.resolve(String(args[0])) !== path.resolve(stateDir)) return handle;
+			return new Proxy(handle, {
+				get(target, property) {
+					if (property === "sync") return async () => {
+						const checkpoint = JSON.parse(await fs.promises.readFile(marker, "utf-8")) as { status?: string };
+						if (!injected && checkpoint.status === "complete" && await fs.promises.access(fence).then(() => true, () => false)) {
+							injected = true;
+							const error = new Error("INJECTED_POST_RENAME_DIRECTORY_FSYNC_EIO") as NodeJS.ErrnoException;
+							error.code = "EIO";
+							throw error;
+						}
+						return target.sync();
+					};
+					const value = Reflect.get(target, property, target);
+					return typeof value === "function" ? value.bind(target) : value;
+				},
+			}) as fs.promises.FileHandle;
+		});
+		try {
+			await assert.rejects(store.complete(stateDir), /INJECTED_POST_RENAME_DIRECTORY_FSYNC_EIO/);
+			assert.equal(JSON.parse(await fs.promises.readFile(marker, "utf-8")).status, "complete", "precondition: rename made complete visible before directory fsync failed");
+			assert.equal(await store.isComplete(stateDir), false, "RECOVERY_COMPLETION_FENCE: a visible but unacknowledged complete marker must remain retryable");
+			assert.equal(await fs.promises.access(fence).then(() => true, () => false), true, "RECOVERY_COMPLETION_FENCE: failed publication must retain its sibling fence");
+		} finally {
+			openSpy.mockRestore();
+			platformSpy.mockRestore();
+		}
+
+		await store.begin(stateDir);
+		await store.complete(stateDir);
+		assert.equal(await store.isComplete(stateDir), true, "RECOVERY_COMPLETION_FENCE: a later successful pass may publish completion");
+		assert.deepEqual(await fs.promises.readdir(stateDir), [TEAM_FORENSIC_RECOVERY_CHECKPOINT_FILE]);
 	});
 
 	it("preserves the prior checkpoint when durable temporary-file publication is interrupted", async () => {

@@ -360,6 +360,48 @@ describe("Headquarters directory migration", () => {
 		assert.equal(readJson<{ status: string }>(marker).status, "complete");
 	});
 
+	it("retries when directory sync fails after the complete marker rename", () => {
+		const root = tmpRoot();
+		useIsolatedSecretsDir();
+		const legacyStateDir = path.join(root, ".bobbit", "state");
+		seedProject(legacyStateDir, hqProject(root));
+		const dirs = migrateDirs(root);
+		const marker = path.join(dirs.headquartersStateDir, ".headquarters-dir-migrated");
+		const fence = `${marker}.completion-pending`;
+		const originalFsyncSync = fs.fsyncSync;
+		let injected = false;
+		(fs as unknown as { fsyncSync: typeof fs.fsyncSync }).fsyncSync = ((fd: number) => {
+			if (!injected && fs.existsSync(marker) && fs.existsSync(fence)) {
+				const checkpoint = readJson<{ status?: string }>(marker);
+				if (checkpoint.status === "complete") {
+					injected = true;
+					const error = new Error("INJECTED_POST_RENAME_DIRECTORY_FSYNC_EIO") as NodeJS.ErrnoException;
+					error.code = "EIO";
+					throw error;
+				}
+			}
+			return originalFsyncSync(fd);
+		}) as typeof fs.fsyncSync;
+		let first: ReturnType<typeof migrateLegacyHeadquartersDirectory>;
+		try {
+			first = migrateLegacyHeadquartersDirectory(dirs);
+		} finally {
+			(fs as unknown as { fsyncSync: typeof fs.fsyncSync }).fsyncSync = originalFsyncSync;
+		}
+
+		assert.ok(first.failures.some(entry => entry.includes("INJECTED_POST_RENAME_DIRECTORY_FSYNC_EIO")), "the real EIO must be reported rather than treated as unsupported directory fsync");
+		assert.equal(readJson<{ status: string }>(marker).status, "complete", "precondition: complete was visible when its directory sync failed");
+		assert.equal(fs.existsSync(fence), true, "MIGRATION_COMPLETION_FENCE: unacknowledged completion must retain its sibling fence");
+
+		const second = migrateLegacyHeadquartersDirectory(dirs);
+		assert.equal(second.skipped.some(entry => entry.includes("skipped unchanged legacy tree")), false, "MIGRATION_COMPLETION_FENCE: the second boot must retry the full pass");
+		assert.equal(readJson<{ status: string }>(marker).status, "complete");
+		assert.equal(fs.existsSync(fence), false, "MIGRATION_COMPLETION_FENCE: successful retry must clear the fence");
+
+		const third = migrateLegacyHeadquartersDirectory(dirs);
+		assert.ok(third.skipped.some(entry => entry.includes("skipped unchanged legacy tree")), "the clean boot after acknowledgement must recover the steady-state fast path");
+	});
+
 	it("replaces stale completion authority before retryable migration work", () => {
 		const root = tmpRoot();
 		useIsolatedSecretsDir();

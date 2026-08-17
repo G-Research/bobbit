@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 
 export const TEAM_FORENSIC_RECOVERY_VERSION = 1;
 export const TEAM_FORENSIC_RECOVERY_CHECKPOINT_FILE = ".team-forensic-recovery.json";
+export const TEAM_FORENSIC_RECOVERY_COMPLETION_FENCE_FILE = `${TEAM_FORENSIC_RECOVERY_CHECKPOINT_FILE}.completion-pending`;
 
 type CheckpointStatus = "running" | "complete";
 
@@ -21,6 +22,10 @@ export interface TeamRecoveryCheckpointStore {
 
 function checkpointPath(stateDir: string): string {
 	return path.join(stateDir, TEAM_FORENSIC_RECOVERY_CHECKPOINT_FILE);
+}
+
+function completionFencePath(stateDir: string): string {
+	return path.join(stateDir, TEAM_FORENSIC_RECOVERY_COMPLETION_FENCE_FILE);
 }
 
 async function syncDirectory(directory: string): Promise<void> {
@@ -52,11 +57,18 @@ function isCheckpointRecord(value: unknown): value is TeamRecoveryCheckpointReco
 
 /**
  * Filesystem-backed versioned checkpoint. Writes are atomic, so a crash either
- * leaves the previous state or a valid `running`/`complete` record. A running,
- * corrupt, missing, or older-version record always causes recovery to run.
+ * leaves the previous state or a valid `running`/`complete` record. Completion
+ * remains fenced until its rename has passed the directory durability barrier.
+ * A running, fenced, corrupt, missing, or older-version record always retries.
  */
 export class FileTeamRecoveryCheckpointStore implements TeamRecoveryCheckpointStore {
 	async isComplete(stateDir: string): Promise<boolean> {
+		try {
+			await fs.promises.access(completionFencePath(stateDir));
+			return false;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") return false;
+		}
 		try {
 			const text = await fs.promises.readFile(checkpointPath(stateDir), "utf-8");
 			const value: unknown = JSON.parse(text);
@@ -67,24 +79,43 @@ export class FileTeamRecoveryCheckpointStore implements TeamRecoveryCheckpointSt
 	}
 
 	begin(stateDir: string): Promise<void> {
-		return this.write(stateDir, "running");
+		return this.writeRecord(stateDir, "running");
 	}
 
-	complete(stateDir: string): Promise<void> {
-		return this.write(stateDir, "complete");
-	}
-
-	private async write(stateDir: string, status: CheckpointStatus): Promise<void> {
+	async complete(stateDir: string): Promise<void> {
 		await fs.promises.mkdir(stateDir, { recursive: true });
-		const target = checkpointPath(stateDir);
+		const fence = completionFencePath(stateDir);
+		try {
+			await fs.promises.access(fence);
+			await syncDirectory(stateDir);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+			await this.publish(stateDir, fence, JSON.stringify({ version: TEAM_FORENSIC_RECOVERY_VERSION, status: "completion-pending" }));
+		}
+
+		// The fence is authoritative before the visible marker can become complete.
+		// If the marker's post-rename directory sync fails, the fence survives and
+		// the next boot retries instead of trusting that visible complete record.
+		await this.writeRecord(stateDir, "complete");
+		await fs.promises.unlink(fence);
+		await syncDirectory(stateDir);
+	}
+
+	private writeRecord(stateDir: string, status: CheckpointStatus): Promise<void> {
+		return this.publish(
+			stateDir,
+			checkpointPath(stateDir),
+			JSON.stringify({ version: TEAM_FORENSIC_RECOVERY_VERSION, status } satisfies TeamRecoveryCheckpointRecord),
+		);
+	}
+
+	private async publish(stateDir: string, target: string, contents: string): Promise<void> {
+		await fs.promises.mkdir(stateDir, { recursive: true });
 		const temporary = `${target}.tmp-${process.pid}-${randomUUID()}`;
 		let handle: fs.promises.FileHandle | undefined;
 		try {
 			handle = await fs.promises.open(temporary, "wx");
-			await handle.writeFile(
-				JSON.stringify({ version: TEAM_FORENSIC_RECOVERY_VERSION, status } satisfies TeamRecoveryCheckpointRecord),
-				"utf-8",
-			);
+			await handle.writeFile(contents, "utf-8");
 			await handle.sync();
 			await handle.close();
 			handle = undefined;

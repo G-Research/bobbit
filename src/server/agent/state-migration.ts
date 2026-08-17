@@ -21,6 +21,7 @@ const PRE_MIGRATION_SUFFIX = ".pre-migration";
 const RECOVERY_MARKER = ".pre-migration-recovered";
 const HEADQUARTERS_ID_MIGRATION_MARKER = ".headquarters-project-id-migrated";
 const HEADQUARTERS_DIR_MIGRATION_MARKER = ".headquarters-dir-migrated";
+const HEADQUARTERS_MIGRATION_COMPLETION_FENCE_SUFFIX = ".completion-pending";
 const HEADQUARTERS_MIGRATION_DIAGNOSTICS = "headquarters-migration-diagnostics.json";
 const PER_PROJECT_MIGRATION_DIAGNOSTICS = "per-project-state-migration-diagnostics.json";
 const HEADQUARTERS_BACKUP_SUFFIX = ".pre-headquarters-id-migration";
@@ -253,12 +254,16 @@ function migrationCheckpointEvidence(input: HeadquartersDirectoryMigrationInput)
 	}
 }
 
+function headquartersMigrationCompletionFencePath(markerPath: string): string {
+	return `${markerPath}${HEADQUARTERS_MIGRATION_COMPLETION_FENCE_SUFFIX}`;
+}
+
 function readHeadquartersMigrationCheckpoint(
 	markerPath: string,
 	paths: HeadquartersMigrationCheckpointPaths,
 	evidence: HeadquartersMigrationEvidenceEntry[] | null,
 ): boolean {
-	if (!evidence) return false;
+	if (!evidence || fs.existsSync(headquartersMigrationCompletionFencePath(markerPath))) return false;
 	try {
 		const value = JSON.parse(fs.readFileSync(markerPath, "utf-8")) as Partial<HeadquartersMigrationCheckpoint>;
 		return value.version === HEADQUARTERS_MIGRATION_CHECKPOINT_VERSION
@@ -273,7 +278,7 @@ function readHeadquartersMigrationCheckpoint(
 }
 
 function hadCompletedHeadquartersMigration(markerPath: string): boolean {
-	if (!fs.existsSync(markerPath)) return false;
+	if (!fs.existsSync(markerPath) || fs.existsSync(headquartersMigrationCompletionFencePath(markerPath))) return false;
 	try {
 		const raw = fs.readFileSync(markerPath, "utf-8");
 		try {
@@ -298,31 +303,32 @@ function syncCheckpointDirectory(dir: string): void {
 	try {
 		fd = fs.openSync(dir, "r");
 		fs.fsyncSync(fd);
-	} catch {
-		// Directory handles/fsync are unavailable on Windows and some filesystems.
-		// The checkpoint file itself was fsynced before the atomic rename.
+	} catch (error) {
+		// Match the repository's directory-durability policy: only errors proving
+		// that this filesystem cannot provide directory fsync are exempt. Real I/O
+		// failures such as EIO must keep checkpoint completion retryable.
+		if (!["EACCES", "EINVAL", "EISDIR", "ENOSYS", "ENOTSUP", "EPERM"].includes(
+			(error as NodeJS.ErrnoException)?.code ?? "",
+		)) throw error;
 	} finally {
 		if (fd !== undefined) fs.closeSync(fd);
 	}
 }
 
-function writeHeadquartersMigrationCheckpoint(
-	markerPath: string,
-	checkpoint: HeadquartersMigrationCheckpoint,
-): void {
-	const dir = path.dirname(markerPath);
+function publishHeadquartersMigrationCheckpointFile(targetPath: string, contents: string): void {
+	const dir = path.dirname(targetPath);
 	fs.mkdirSync(dir, { recursive: true });
-	const temporaryPath = `${markerPath}.${process.pid}.${randomUUID()}.tmp`;
+	const temporaryPath = `${targetPath}.${process.pid}.${randomUUID()}.tmp`;
 	let fd: number | undefined;
 	let temporaryCreated = false;
 	try {
-		fs.writeFileSync(temporaryPath, JSON.stringify(checkpoint), { encoding: "utf-8", flag: "wx", mode: 0o600 });
+		fs.writeFileSync(temporaryPath, contents, { encoding: "utf-8", flag: "wx", mode: 0o600 });
 		temporaryCreated = true;
 		fd = fs.openSync(temporaryPath, "r");
 		fs.fsyncSync(fd);
 		fs.closeSync(fd);
 		fd = undefined;
-		fs.renameSync(temporaryPath, markerPath);
+		fs.renameSync(temporaryPath, targetPath);
 		temporaryCreated = false;
 		syncCheckpointDirectory(dir);
 	} finally {
@@ -332,6 +338,29 @@ function writeHeadquartersMigrationCheckpoint(
 		if (temporaryCreated) {
 			try { fs.rmSync(temporaryPath, { force: true }); } catch { /* best-effort cleanup */ }
 		}
+	}
+}
+
+function writeHeadquartersMigrationCheckpoint(
+	markerPath: string,
+	checkpoint: HeadquartersMigrationCheckpoint,
+): void {
+	const dir = path.dirname(markerPath);
+	const fencePath = headquartersMigrationCompletionFencePath(markerPath);
+	if (checkpoint.status === "complete") {
+		if (fs.existsSync(fencePath)) syncCheckpointDirectory(dir);
+		else publishHeadquartersMigrationCheckpointFile(
+			fencePath,
+			JSON.stringify({ version: HEADQUARTERS_MIGRATION_CHECKPOINT_VERSION, status: "completion-pending" }),
+		);
+	}
+
+	// Completion is never authoritative while the sibling fence exists. It is
+	// removed only after the complete marker's rename and directory sync succeed.
+	publishHeadquartersMigrationCheckpointFile(markerPath, JSON.stringify(checkpoint));
+	if (checkpoint.status === "complete") {
+		fs.rmSync(fencePath);
+		syncCheckpointDirectory(dir);
 	}
 }
 
