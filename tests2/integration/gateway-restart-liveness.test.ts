@@ -15,8 +15,8 @@ test("gateway fixture recovers an interrupted crash and coalesces concurrent res
 	expect(recovered.token).toBe(token);
 	expect(recovered.bobbitDir).toBe(bobbitDir);
 	expect(recovered.clock).toBe(clock);
-	expect((await recovered.api("/health")).status).toBe(200);
+	expect((await recovered.api("/api/projects")).status).toBe(200);
 
 	await Promise.all([recovered.restart(), recovered.restart()]);
-	expect((await recovered.api("/health")).status).toBe(200);
+	expect((await recovered.api("/api/projects")).status).toBe(200);
 });
