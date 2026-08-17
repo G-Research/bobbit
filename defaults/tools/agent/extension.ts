@@ -325,32 +325,41 @@ const extension: ExtensionFactory = (pi) => {
 			"Use operation:'inspect' with one message_index for semantic message detail",
 			"Add one result_index only when you need that exact result excerpt; continue with offset and limit",
 		],
-		parameters: Type.Union([
-			Type.Object({
-				operation: Type.Literal("list"),
-				session_id: Type.String(),
-				offset: Type.Optional(Type.Integer({ description: "Default 0. Negative indexes from end." })),
-				limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200, description: "Default 20." })),
-				pattern: Type.Optional(Type.String({ description: "Regex filter on message text and tool diagnostics." })),
-				case_sensitive: Type.Optional(Type.Boolean()),
-				context: Type.Optional(Type.Integer({ minimum: 0, maximum: 5, description: "Expand each match by ±N neighbours." })),
-			}, { additionalProperties: false }),
-			Type.Object({
-				operation: Type.Literal("inspect"),
-				session_id: Type.String(),
-				message_index: Type.Integer({ minimum: 0 }),
-			}, { additionalProperties: false }),
-			Type.Object({
-				operation: Type.Literal("inspect"),
-				session_id: Type.String(),
-				message_index: Type.Integer({ minimum: 0 }),
-				result_index: Type.Integer({ minimum: 0 }),
-				offset: Type.Optional(Type.Integer({ minimum: 0, description: "Character offset. Default 0." })),
-				limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 8_000, description: "Excerpt characters. Default 2000." })),
-			}, { additionalProperties: false }),
-		]),
+		// Bedrock requires every tool's top-level input schema to be an object.
+		// Keep the list/inspect discriminator inside that object and enforce the
+		// operation-specific required fields in execute.
+		parameters: Type.Object({
+			operation: Type.Union([Type.Literal("list"), Type.Literal("inspect")]),
+			session_id: Type.String(),
+			offset: Type.Optional(Type.Integer({ description: "List: message offset (negative from end). Inspect result: character offset." })),
+			limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 8_000, description: "List: messages (max 200). Inspect: excerpt characters (max 8000)." })),
+			pattern: Type.Optional(Type.String({ description: "List only: regex filter on message text and tool diagnostics." })),
+			case_sensitive: Type.Optional(Type.Boolean({ description: "List only." })),
+			context: Type.Optional(Type.Integer({ minimum: 0, maximum: 5, description: "List only: expand matches by ±N neighbours." })),
+			message_index: Type.Optional(Type.Integer({ minimum: 0, description: "Required for inspect." })),
+			result_index: Type.Optional(Type.Integer({ minimum: 0, description: "Inspect only: select one tool result." })),
+		}, { additionalProperties: false }),
 
 		async execute(_toolCallId, params) {
+			const p = params as Record<string, unknown>;
+			if (p.operation === "inspect" && !Number.isInteger(p.message_index)) {
+				return fail("read_session inspect requires message_index");
+			}
+			if (p.operation === "list" && (p.message_index !== undefined || p.result_index !== undefined)) {
+				return fail("read_session list does not accept message_index/result_index");
+			}
+			if (p.operation === "inspect" && (p.pattern !== undefined || p.case_sensitive !== undefined || p.context !== undefined)) {
+				return fail("read_session inspect does not accept list filtering fields");
+			}
+			if (p.operation === "inspect" && p.result_index === undefined && (p.offset !== undefined || p.limit !== undefined)) {
+				return fail("read_session inspect offset/limit require result_index");
+			}
+			if (p.operation === "inspect" && typeof p.offset === "number" && p.offset < 0) {
+				return fail("read_session inspect offset must be >= 0");
+			}
+			if (p.operation === "list" && typeof p.limit === "number" && p.limit > 200) {
+				return fail("read_session list limit must be <= 200");
+			}
 			let result: { ok: boolean; status: number; body: any };
 			try {
 				result = await callReadSessionEndpoint(params as ReadSessionParams);
