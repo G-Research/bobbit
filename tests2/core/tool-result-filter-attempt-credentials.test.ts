@@ -88,6 +88,18 @@ describe("ToolResultFilterAttemptCredentials", () => {
 		expect(manager.toolResultFilterAttemptCredentials.hasRuntime("preparing")).toBe(true);
 	});
 
+	it("fails closed when policy activates after an ungated bridge starts", async () => {
+		const manager: any = new SessionManager();
+		manager.setToolResultFilterActivationResolver(() => ({ toolResult: true }));
+		for (const path of ["create", "restore", "respawn"]) {
+			const stop = vi.fn(async () => {});
+			await expect(manager.commitStartedToolResultFilterGate(path, "project", { stop }, undefined))
+				.rejects.toThrow(`Tool-result filter gate was not installed for session ${path}`);
+			expect(stop).toHaveBeenCalledOnce();
+			expect(manager.toolResultFilterAttemptCredentials.hasRuntime(path)).toBe(false);
+		}
+	});
+
 	it("allows concurrent distinct tool attempts but never cross-settles them", () => {
 		const credentials = new ToolResultFilterAttemptCredentials();
 		const runtime = credentials.beginRuntime(sessionId, 1);

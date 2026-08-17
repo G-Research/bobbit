@@ -485,8 +485,13 @@ export interface PipelineContext {
 	toolResultFilterGateCredential?: (sessionId: string) => { runtimeGeneration: number; runtimeKey: string };
 	/** Clears a predecessor gate credential when this replacement has no gate. */
 	invalidateToolResultFilterGate?: (sessionId: string) => void;
-	/** Commits a gate only after its exact staged bridge has started successfully. */
-	commitToolResultFilterGate?: (sessionId: string, credential: import("./tool-result-filter-attempt-credentials.js").ToolResultFilterGateCredential | undefined) => void;
+	/** Commits a started gate or stops an unprotected bridge if policy changed mid-spawn. */
+	commitToolResultFilterGate?: (
+		sessionId: string,
+		projectId: string | undefined,
+		rpcClient: RpcBridge,
+		credential: import("./tool-result-filter-attempt-credentials.js").ToolResultFilterGateCredential | undefined,
+	) => Promise<void>;
 	groupPolicyStore: ToolGroupPolicyStore | null;
 	configCascade: ConfigCascade | null;
 	lifecycleHub?: LifecycleHub;
@@ -1837,7 +1842,7 @@ export async function executeWorktreeAsync(
 			() => rpcClient.start(),
 			{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
 		);
-		if (toolResultFilterBootstrap) ctx.commitToolResultFilterGate?.(plan.id, toolResultFilterBootstrap);
+		await ctx.commitToolResultFilterGate?.(plan.id, plan.projectId, rpcClient, toolResultFilterBootstrap);
 	} catch (err) {
 		ctx.invalidateToolResultFilterGate?.(plan.id);
 		throw err;
@@ -2058,7 +2063,7 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 			() => rpcClient.start(),
 			{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
 		);
-		if (toolResultFilterBootstrap) ctx.commitToolResultFilterGate?.(plan.id, toolResultFilterBootstrap);
+		await ctx.commitToolResultFilterGate?.(plan.id, plan.projectId, rpcClient, toolResultFilterBootstrap);
 	} catch (err) {
 		ctx.invalidateToolResultFilterGate?.(plan.id);
 		throw err;

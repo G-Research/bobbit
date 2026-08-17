@@ -4052,6 +4052,31 @@ export class SessionManager {
 	 * keeps an installed gate: it passes through under the current policy and is
 	 * reusable if the grant returns, avoiding a needless raw-runtime flip.
 	 */
+	/**
+	 * The only post-start admission point for a Pi result gate. Activation may
+	 * change after setup resolved it but before `RpcBridge.start()` returns, while
+	 * this session is still invisible to grant reconciliation. Never publish that
+	 * bridge as runnable unless the current policy and exact staged credential agree.
+	 */
+	private async commitStartedToolResultFilterGate(
+		sessionId: string,
+		projectId: string | undefined,
+		rpcClient: RpcBridge,
+		credential: import("./tool-result-filter-attempt-credentials.js").ToolResultFilterGateCredential | undefined,
+	): Promise<void> {
+		try {
+			if (credential) this.toolResultFilterAttemptCredentials.commitRuntime(sessionId, credential);
+			const required = this.toolResultFilterActivationResolver?.(projectId).toolResult === true;
+			if (required && (!credential || !this.toolResultFilterAttemptCredentials.hasRuntime(sessionId))) {
+				throw new Error(`Tool-result filter gate was not installed for session ${sessionId}`);
+			}
+		} catch (err) {
+			this.toolResultFilterAttemptCredentials.invalidate(sessionId);
+			await rpcClient.stop().catch(() => {});
+			throw err;
+		}
+	}
+
 	async reconcileToolResultFilterGate(projectId: string): Promise<void> {
 		if (this.toolResultFilterActivationResolver?.(projectId).toolResult !== true) return;
 		for (const sessionId of [...this.sessions.keys()]) {
@@ -4456,7 +4481,8 @@ export class SessionManager {
 				sessionId, this._currentRespawnGeneration(sessionId),
 			),
 			invalidateToolResultFilterGate: (sessionId) => this.toolResultFilterAttemptCredentials.invalidate(sessionId),
-			commitToolResultFilterGate: (sessionId, credential) => this.toolResultFilterAttemptCredentials.commitRuntime(sessionId, credential),
+			commitToolResultFilterGate: (sessionId, runtimeProjectId, rpcClient, credential) =>
+				this.commitStartedToolResultFilterGate(sessionId, runtimeProjectId, rpcClient, credential),
 			groupPolicyStore: this.groupPolicyStore ?? null,
 			configCascade: this.configCascade,
 			lifecycleHub: this.lifecycleHub,
@@ -11540,7 +11566,7 @@ export class SessionManager {
 
 		try {
 			await rpcClient.start();
-			if (toolResultFilterBootstrap) this.toolResultFilterAttemptCredentials.commitRuntime(ps.id, toolResultFilterBootstrap);
+			await this.commitStartedToolResultFilterGate(ps.id, ps.projectId, rpcClient, toolResultFilterBootstrap);
 		} catch (err) {
 			// A partially started replacement must never survive a failed restore.
 			// The in-place caller will reinstall only its fenced dormant rollback.
@@ -14273,7 +14299,7 @@ export class SessionManager {
 
 		try {
 			await rpcClient.start();
-			if (toolResultFilterBootstrap) this.toolResultFilterAttemptCredentials.commitRuntime(id, toolResultFilterBootstrap);
+			await this.commitStartedToolResultFilterGate(id, session.projectId, rpcClient, toolResultFilterBootstrap);
 			if (agentSessionFile) {
 				if (!await sessionFileExists(roleFileCtx, agentSessionFile, this.sandboxManager)) {
 					throw new Error(`Cannot assign role for session ${id}: persisted conversation history is unavailable`);
@@ -16884,7 +16910,7 @@ export class SessionManager {
 			bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension);
 			try {
 				await rpcClient.start();
-				if (toolResultFilterBootstrap) this.toolResultFilterAttemptCredentials.commitRuntime(id, toolResultFilterBootstrap);
+				await this.commitStartedToolResultFilterGate(id, session.projectId, rpcClient, toolResultFilterBootstrap);
 			} catch (err) {
 				this.toolResultFilterAttemptCredentials.invalidate(id);
 				unsub();
