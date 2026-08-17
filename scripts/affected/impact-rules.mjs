@@ -1343,6 +1343,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/team-recovery-checkpoint.test.ts",
+		allowReason: "checkpoint marker inside the test-owned temporary state directory",
+		reads: frozen([
+			{ expression: "marker", count: 2 },
+		]),
+	},
+	{
 		consumer: "tests2/core/team-manager-ghost-workers.test.ts",
 		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
 		reads: frozen([
