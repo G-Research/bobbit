@@ -425,6 +425,112 @@ function deferredVoid() {
 	return { promise, resolve };
 }
 
+function installHeldResumeResolver(type: "llm-review" | "agent-qa", suffix: string) {
+	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), `verification-resolver-${suffix}-`));
+	const signalId = `${SIGNAL_ID}-${suffix}`;
+	const sessionId = `${signalId}-session`;
+	const clock = createManualClock(30_000);
+	let terminateCalls = 0;
+	const sessionManager = {
+		getSession: () => ({
+			id: sessionId,
+			status: "streaming",
+			rpcClient: { onEvent: () => () => {} },
+		}),
+		waitForIdle: async () => {},
+		terminateSession: async () => { terminateCalls++; },
+	};
+	const harness: any = new VerificationHarness(
+		stateDir, {} as any, () => {}, { get: () => undefined, getAll: () => [] } as any,
+		undefined, sessionManager as any, undefined, undefined, undefined, undefined, { clock },
+	);
+	const step: any = {
+		name: `${type} recovered verdict`, type, status: "running", startedAt: 29_000,
+		sessionId, restartInterrupted: true, output: "pre-result diagnostic", durationMs: 5,
+	};
+	const active: any = {
+		goalId: GOAL_ID, gateId: GATE_ID, signalId, overallStatus: "running", startedAt: 29_000,
+		steps: [step],
+	};
+	harness.activeVerifications.set(signalId, active);
+	expect(harness._persistActive()).toBe(true);
+	const resolverInstalled = deferredVoid();
+	harness.waitForReviewTurn = async (_requestedSessionId: string, resultPromise: Promise<any>) => {
+		resolverInstalled.resolve();
+		const result = await resultPromise;
+		return { type: "result", ...result };
+	};
+	const recovery = harness._tryResumeFromSession(active, step);
+	return {
+		harness, active, step, signalId, sessionId, clock, recovery,
+		resolverInstalled: resolverInstalled.promise,
+		terminateCalls: () => terminateCalls,
+	};
+}
+
+test.each(["llm-review", "agent-qa"] as const)("%s resolver rolls back an undurable verdict and accepts the same retry exactly once", async (type) => {
+	const fixture = installHeldResumeResolver(type, `persist-retry-${type}`);
+	await fixture.resolverInstalled;
+	const resolver = fixture.harness.pendingResults.get(fixture.sessionId);
+	expect(resolver).toBeTypeOf("function");
+	const before = structuredClone(fixture.step);
+	const persistActive = fixture.harness._persistActive.bind(fixture.harness);
+	let rejectPersistence = true;
+	let successfulResolverPersists = 0;
+	fixture.harness._persistActive = () => {
+		if (rejectPersistence) return false;
+		successfulResolverPersists++;
+		return persistActive();
+	};
+	let recoveryOutcome: "pending" | "resolved" | "rejected" = "pending";
+	let recoveryResolutions = 0;
+	void fixture.recovery.then(
+		() => { recoveryOutcome = "resolved"; recoveryResolutions++; },
+		() => { recoveryOutcome = "rejected"; },
+	);
+
+	expect(() => resolver({ verdict: false, summary: "Rejected after restart." })).toThrow(/Could not persist recovered verification result/);
+	expect(fixture.step, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: failed verdict persistence must restore every exact active-step field").toStrictEqual(before);
+	expect(fixture.step.restartInterrupted).toBe(true);
+	await Promise.resolve();
+	expect(recoveryOutcome, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: an undurable result must not resolve the captured reviewer promise").toBe("pending");
+	expect(fixture.clock.pending(), "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: resolver rejection must not depend on a retry timer").toBe(0);
+	expect(fixture.terminateCalls()).toBe(0);
+
+	rejectPersistence = false;
+	expect(() => resolver({ verdict: false, summary: "Rejected after restart." })).not.toThrow();
+	const result = await fixture.recovery;
+	expect(result).toMatchObject({ passed: false, output: "Rejected after restart.", verdictObtained: true });
+	await Promise.resolve();
+	expect(recoveryOutcome).toBe("resolved");
+	expect(recoveryResolutions).toBe(1);
+	expect(successfulResolverPersists).toBe(1);
+	expect(fixture.terminateCalls()).toBe(1);
+	expect(fixture.harness._loadActive().find((entry: any) => entry.signalId === fixture.signalId)?.steps[0]).toMatchObject({
+		status: "failed", passed: false, output: "Rejected after restart.", verdictObtained: true,
+	});
+	expect(fixture.harness._loadActive().find((entry: any) => entry.signalId === fixture.signalId)?.steps[0]?.restartInterrupted).toBeUndefined();
+});
+
+test("recovered verdict resolver rejects a missing active row without resolving its captured promise", async () => {
+	const fixture = installHeldResumeResolver("llm-review", "missing-active-row");
+	await fixture.resolverInstalled;
+	const resolver = fixture.harness.pendingResults.get(fixture.sessionId);
+	expect(resolver).toBeTypeOf("function");
+	fixture.harness.activeVerifications.delete(fixture.signalId);
+	let recoveryOutcome: "pending" | "resolved" | "rejected" = "pending";
+	void fixture.recovery.then(
+		() => { recoveryOutcome = "resolved"; },
+		() => { recoveryOutcome = "rejected"; },
+	);
+
+	expect(() => resolver({ verdict: true, summary: "Must not resolve." })).toThrow(/no active row/);
+	await Promise.resolve();
+	expect(recoveryOutcome).toBe("pending");
+	expect(fixture.terminateCalls()).toBe(0);
+	expect(fixture.clock.pending()).toBe(0);
+});
+
 test("mixed restart command intent is durable until exact tracked cleanup settles, then publishes once", async () => {
 	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "verification-mixed-command-intent-"));
 	const signalId = `${SIGNAL_ID}-mixed-command`;
