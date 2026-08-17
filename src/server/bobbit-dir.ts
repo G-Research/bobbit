@@ -113,7 +113,9 @@ export function serverSecretsDir(): string {
       const base = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
       dir = path.join(base, "bobbit", "secrets", hash);
     } else if (process.platform === "darwin") {
-      dir = path.join(os.homedir(), "Library", "Application Support", "bobbit", "secrets", hash);
+      // os.homedir() may retain the startup home; read env fresh for test/runtime isolation.
+      const home = process.env.HOME || process.env.USERPROFILE || os.homedir();
+      dir = path.join(home, "Library", "Application Support", "bobbit", "secrets", hash);
     } else {
       const base = process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state");
       dir = path.join(base, "bobbit", "secrets", hash);
