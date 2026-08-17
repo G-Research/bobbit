@@ -10674,18 +10674,22 @@ export class SessionManager {
 				(binding) => binding.intentId === continuationIntentId,
 			);
 			// A correlated user message_end is durable proof that Pi received this exact
-			// attempt only when its dispatch belongs to the interrupted turn being restored.
-			// The stable intent id is reused across turns, so an older echoed continuation
-			// must not consume a later ordinary turn's startup fence. Legacy or incomplete
-			// evidence is deliberately redriven rather than risking a lost continuation.
+			// attempt only when its echo settled during the interrupted turn being restored.
+			// agent_start may advance streamingStartedAt after dispatch but before that echo,
+			// so the exact settlement time — not the earlier dispatch epoch — scopes it to
+			// the active turn. The stable intent id is reused across turns; an older echo's
+			// settlement predates a later ordinary turn and cannot consume its startup fence.
+			// Legacy or incomplete evidence is deliberately redriven rather than risking a
+			// lost continuation.
 			if (
 				typeof interruptedTurnStartedAt === "number"
 				&& Number.isSafeInteger(interruptedTurnStartedAt)
 				&& interruptedTurnStartedAt >= 0
 				&& typeof surfacedAttempt?.attemptId === "string"
 				&& typeof surfacedAttempt.dispatchEpoch === "number"
-				&& surfacedAttempt.dispatchEpoch >= interruptedTurnStartedAt
 				&& surfacedAttempt.settlement?.outcome === "echoed"
+				&& Number.isSafeInteger(surfacedAttempt.settlement.settledAt)
+				&& surfacedAttempt.settlement.settledAt >= interruptedTurnStartedAt
 			) {
 				return markAccepted();
 			}
