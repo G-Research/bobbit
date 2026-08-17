@@ -95,7 +95,8 @@ Normal projects are self-contained units on disk. Their state (goals, sessions, 
   config/          # Normal project config
   state/
     goals.sqlite   # Goals for THIS project, one JSON-payload row per goal
-    sessions.json  # Sessions for THIS project
+    sessions.json  # Live SessionStore tier for THIS project; see design/split-archived-session-writes.md
+    sessions.archived.json # Archived SessionStore tier, eagerly merged at boot
     tasks.sqlite   # Tasks for THIS project's goals, one JSON-payload row per task
     team-state.json # Team state
     gates.sqlite   # Gate state and signals, one row per gate
@@ -112,7 +113,8 @@ Normal projects are self-contained units on disk. Their state (goals, sessions, 
   colors.json       # Session colors
   goals.sqlite      # Headquarters goals
   tasks.sqlite      # Headquarters tasks
-  sessions.json     # Headquarters sessions
+  sessions.json     # Headquarters live SessionStore tier
+  sessions.archived.json # Headquarters archived SessionStore tier, eagerly merged at boot
   staff.json        # Headquarters staff
   system-project/   # Hidden internal system-project anchor
 ```
@@ -3421,7 +3423,7 @@ Each registered project has its own state directory. All store data is scoped to
 | File / Directory | Owner | Purpose |
 |---|---|---|
 | `goals.sqlite` | `GoalStore` | One transactional SQLite row per goal containing the flexible JSON payload. Startup automatically imports validated `goals.json` and `.pre-migration` recovery. See [Goal and task store SQLite persistence](design/goal-task-store-sqlite-persistence.md). |
-| `sessions.json` | `SessionStore` | Session metadata |
+| `sessions.json` + `sessions.archived.json` | `SessionStore` | Independently versioned live and archived session tiers, eagerly merged into one store. See [Split archived SessionStore writes](design/split-archived-session-writes.md). |
 | `tasks.sqlite` | `TaskStore` | One transactional SQLite row per task containing the flexible JSON payload. Startup automatically imports validated `tasks.json` and `.pre-migration` recovery. See [Goal and task store SQLite persistence](design/goal-task-store-sqlite-persistence.md). |
 | `gates.sqlite` | `GateStore` | One transactional SQLite row per gate containing the flexible JSON payload. Startup automatically imports validated `gates.json` and `.pre-migration` recovery, then moves sources to collision-safe backups using atomic no-replace links before source unlink. See [Gate store SQLite persistence](design/gate-store-sqlite-persistence.md). |
 | `team-state.json` | `TeamStore` | Team agents/roles |

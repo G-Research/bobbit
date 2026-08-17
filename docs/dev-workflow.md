@@ -196,7 +196,7 @@ After editing files under `src/server/`:
 npm run restart-server
 ```
 
-This signals the harness to rebuild and restart the server. Your current session will survive — the harness persists session metadata to disk, and on relaunch the server restores all sessions from `.bobbit/state/sessions.json`.
+This signals the harness to rebuild and restart the server. Your current session will survive — the harness persists session metadata in eagerly loaded live and archived state tiers, then restores sessions on relaunch. See [Split archived SessionStore writes](design/split-archived-session-writes.md).
 
 **Do not skip this step.** The gateway runs from compiled JavaScript in `dist/server/`. Your TypeScript edits under `src/server/` have no effect until the server is rebuilt.
 

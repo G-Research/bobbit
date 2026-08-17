@@ -1,162 +1,144 @@
 # Split archived SessionStore writes
 
-## Decision
+## Purpose and boundaries
 
-`SessionStore` keeps its one eager, in-memory `Map<string, PersistedSession>` and its public read API unchanged. It will split **persistence only** into live and archived JSON tiers so routine live-session activity serializes only live records.
+`SessionStore` keeps one eagerly loaded `Map<string, PersistedSession>`. Splitting persistence prevents the archived majority of a project's session history from being synchronously serialized, copied, and fsynced for every live-session update.
 
-There is no UI, REST, WebSocket, search, pagination, startup, or loading-state change. `getArchived()`, `listArchivedSessionsPaginated()`, search integration, orphan cleanup, and all callers still read the same fully populated map immediately after construction. Lazy archived loading is explicitly rejected: it trades the measured recurring write stall for a first-access delay and a new loading state.
+This is a write-path change only. `getArchived()`, `listArchivedSessionsPaginated()`, search, orphan cleanup, worktree inventory, and REST/WebSocket responses all read the same complete in-memory map immediately after construction. There is no archive fetch, spinner, first-access delay, startup deferral, or API change.
 
-SQLite is also explicitly out of scope. The existing SQLite migration pattern is useful precedent, but replacing the safety-critical JSON writer would widen the blast radius and discard the proven epoch/fingerprint/fence path. Hard-link backup rotation and structural-vs-activity generation splitting are separate follow-up work; neither lands here.
+SQLite, lazy archive loading, hard-link backup rotation, and separate structural/activity API generations remain deliberately out of scope. SQLite may be appropriate later, but replacing this safety-critical JSON writer would discard its established epoch, fingerprint, backup, and write-fence protections for a much larger change.
 
-## Files and on-disk contract
+## Files and envelopes
 
-Only `src/server/agent/session-store.ts` changes in production. Tests extend the existing session-store suites; no new parallel persistence abstraction is introduced.
+Each project state directory contains two independently versioned tiers:
 
 ```text
-<stateDir>/
-  sessions.json                              live v3 primary
-  sessions.json.bak.1 ... sessions.json.bak.5
-  sessions.archived.json                     archived v3 primary
-  sessions.archived.json.bak.1 ... .bak.5
-  sessions.json.split-transition             short-lived pair-publication intent
-  sessions.json.pre-archived-split[.N]       retained exact v1/v2 migration source
+sessions.json                              live v3 tier
+sessions.json.bak.1 ... sessions.json.bak.5
+sessions.archived.json                     archived v3 tier
+sessions.archived.json.bak.1 ... sessions.archived.json.bak.5
+sessions.json.split-transition             short-lived pair-publication intent
+sessions.json.pre-archived-split[.N]       retained v1/v2 migration evidence
 ```
 
-The archive filename is deliberately `sessions.archived.json`, not a directory or a lazy index. Both primary files retain the compact envelope and five-generation backup chain:
+Normal v3 publication writes compact envelopes:
 
 ```ts
-// sessions.json
-{ version: 3, epoch: number, sessions: PersistedSession[] } // every row has archived !== true
-
-// sessions.archived.json
-{ version: 3, epoch: number, sessions: PersistedSession[] } // every row has archived === true
+{ version: 3, epoch: number, sessions: PersistedSession[] }
 ```
 
-`epoch` is a tier-local monotonic counter. The numbers in the two files are never compared and must not be derived from one shared counter. A v3 reader accepts the current legacy bare-array (v1) and v2 envelope only from the **live** candidate chain as a migration source. The archived candidate chain accepts v3 only. New writers always emit compact v3 JSON.
+The live tier normally contains rows whose `archived` is not `true`; the archived tier normally contains rows whose `archived` is `true`. Load accepts a misplaced row so it can recover and normalize it on the next publication. Membership is always determined by `archived === true`, not by a legacy `archivedAt` value.
 
-`split-transition` is not a third record tier and is normally absent. It is a small atomic intent needed because two independent `rename`s cannot be made cross-file atomic. Its payload contains a version, every membership-changing id in the batch, and the final complete row (or a hard-delete marker) plus final target tier. It is written before either tier is published and deleted only after every intended tier write succeeds. It gives restart a deterministic answer for a duplicate or missing row after a crash between the two renames; it does not supply an epoch or replace either tier as an authority.
+An epoch belongs to its tier. Live and archived epoch values are never compared or derived from a shared counter. A v1 bare array or v2 envelope is accepted only from the live candidate chain as a pre-split migration source. The archived candidate chain accepts v3 only. New writes always use v3.
 
-## Store state and helpers
+## Eager load and ordinary recovery
 
-`SessionStore` continues to own `sessions`, the debounce timer, global externally visible `generation`, index notifications, deletion tombstones, and the async drain. Replace the single-file persistence fields with a per-tier state object, for example:
+Construction reads each tier's primary followed by its backups from newest to oldest. The first parseable v3 envelope for that tier wins. Both results are merged before any caller can observe the store, then the established legacy-field, delivery-ledger, and verifier normalization runs over the complete map.
+
+A missing archived file means an empty archived tier for a new store or while migrating a legacy source. A corrupt primary still falls through to that tier's backups. Recovery does not compare epochs between independently recovered tiers: retaining parseable data from both is preferable to dropping a tier.
+
+Outside a valid transition intent:
+
+- A duplicate id in both tiers keeps the live row and reports a diagnostic. A later dirty publication canonicalizes membership from the row's `archived` flag.
+- A row stored in the wrong tier is loaded, reported, and repaired on the next write.
+- The retained `.pre-archived-split` file is migration evidence, not a normal v3 fallback.
+
+## Independent persistence safety
+
+Every tier keeps the protections that made the original writer safe:
+
+- **Epoch and stale latch.** Before a tier's first process write, or when its fingerprint is not an exact match, the writer reads that tier's on-disk epoch. An on-disk epoch newer than the tier's loaded epoch latches and refuses that tier only. A live stale latch cannot be caused, cleared, or bypassed by archive state, and vice versa.
+- **Fingerprint.** The fast path requires equal `size`, `mtimeMs`, and `ctimeMs`. Change time is required because size plus modification time is not a safe identity on coarse-resolution filesystems. A missing value, stat failure, changed file, or absent file forces an epoch read for that tier.
+- **Write fences.** The process-wide `SessionStore.fileWriteTails` fence is keyed by resolved file path. Live-only writes fence `sessions.json`; archive-only writes fence `sessions.archived.json`; pair work acquires both paths in sorted order and releases in reverse order to avoid deadlock between store instances.
+- **Atomic publication and backups.** Each tier independently rotates its own five backups, writes its own temporary file, fsyncs when the supplied filesystem supports it, and renames atomically. A live-only save neither serializes nor rotates/copies the archive tier.
+
+A stale live-only save leaves archive bytes untouched. A stale archive-only save leaves live bytes untouched. A stale membership move fails before it writes a transition intent or either tier, so it cannot overwrite a winner's ownership or worktree metadata.
+
+## Dirty routing and durability
+
+Each mutation still increments the public global generation once. That generation is not split for polling or API purposes.
+
+| Mutation | Tiers made dirty | Pair intent |
+|---|---|---:|
+| New or existing live `put` | live | no |
+| New or existing archived `put` | archived | no |
+| `put` that changes membership | live and archived | yes |
+| Update, draft, tag restore, or activity update without membership change | current tier | no |
+| `archive`, `archiveAsync`, or `update({ archived: true })` | live and archived | yes |
+| `update({ archived: false })` | live and archived | yes |
+| `remove` or `purge` | former tier | no |
+
+A live activity burst serializes only live rows; an archived-only update serializes only archived rows. A membership move serializes both snapshots. A generation is published only after every tier dirtied through that generation has completed its rename. Mutations captured in an already serialized snapshot stay coalesced; mutations that arrive afterward schedule a trailing drain. `flushAsync`, `archiveAsync`, and `purgeAsync` remain durability barriers and reject on their required write failure.
+
+`PersistenceMetrics` describes the completed drain rather than historical state: `liveBytes` and `archivedBytes` identify the actual tier payloads, and `bytes` is their sum. This makes the hot-path reduction observable without altering externally visible generation semantics.
+
+## Epoch-bound membership transitions
+
+Two file renames cannot be one filesystem transaction. A membership-changing batch therefore writes and fsyncs `sessions.json.split-transition` before publishing either tier. The v2 intent contains complete final rows (or a no-row hard-delete entry), the final tier for each id, and a binding for both tier epochs:
 
 ```ts
-type SessionTier = "live" | "archived";
-type TierPersistenceState = {
-  file: string;
-  loadedEpoch: number;
-  writtenEpoch: number;
-  diskFingerprint: DiskFingerprint | null;
-  staleGuardTripped: boolean;
-  dirtyGeneration: number;
-  publishedGeneration: number;
-};
+{
+  version: 2,
+  entries: [{ id, tier: "live" | "archived", session?: PersistedSession }],
+  epochs: {
+    live: { base, target: base + 1 },
+    archived: { base, target: base + 1 },
+  },
+}
 ```
 
-The store owns `liveTier`, `archivedTier`, `archivedDirty` (or equivalent tier dirty generations), pending pair-transition intent, and a global published-barrier watermark. Keep the existing public `getLoadedEpoch()`, `getWrittenEpoch()`, and `isStaleGuardTripped()` as live-tier compatibility accessors; add tier-specific test-visible accessors rather than silently changing their meaning. The existing aggregate `PersistenceMetrics` remains available; add optional live/archive byte fields if needed, while retaining `bytes` as the bytes serialized by the completed drain and `durationMs` as its elapsed wall time.
+Entries are detached from mutable nested session state. The intent is recovery evidence, not a third data tier and not a substitute for either tier's authority. It is cleared only when its exact bytes remain bound and the pair is conclusively spent.
 
-Implementation helpers should have narrow responsibilities:
+### Recovery truth table
 
-- `tierFile(tier)`, `tierBakPath(tier, n)`, `tierTmpPath(tier)`: derive every path from the tier rather than string-splicing at call sites.
-- `readTierCandidates(tier)`: read primary then `.bak.1` through `.bak.5`, parse v3, and return rows, loaded epoch, source path, and fingerprint. The live version also recognizes v1/v2 migration input.
-- `loadAndMergeTiers()`: eagerly read both files, apply pending transition intent, normalize legacy session fields once, and seed the one map.
-- `markTierMutation(previous, next, generation)`: decide which tier payload changed. It is called by every mutator after capturing the row's old membership.
-- `saveTierUnlockedAsync(tier, rows, serializedGeneration)`: preserve the existing fingerprint/stale guard, backup rotation, temp write, optional fsync, and rename for exactly that tier.
-- `withTierWriteFences(tiers, write)`: acquire `SessionStore.fileWriteTails` for all affected absolute file paths in sorted order, then release in reverse. This prevents deadlock while preserving an independent fence for each file.
-- `writeTransitionIntent`, `readTransitionIntent`, and `clearTransitionIntent`: atomically publish/recover/clear only the membership-pair intent.
-- `saveDirtyTiersUnlockedAsync()`: snapshot and serialize live rows only when live is dirty and archive rows only when archived is dirty; it coordinates intent only when a row changes tiers.
+On boot (and while retrying an interrupted recovery), the store classifies each observed tier epoch as `base`, `target`, or `outside` against the intent. A never-created tier is virtual epoch zero. An existing but unparsable tier is `outside`, never evidence that it is empty.
 
-Do not fork a second `Map`, do not cache archives outside the map, and do not change array iteration order within a tier.
+| Observed epochs | Meaning and action |
+|---|---|
+| `base` / `base` | Neither rename happened. Do **not** replay intent rows into the map. Clean up the exact spent intent under both fences. The original writer can retry its still-pending move with a fresh epoch-bound intent. |
+| `target` / `target` | Both renames happened. Apply the intended final rows to resolve any duplicate/misplaced row in memory, then clean up the exact spent intent. No tier is rewritten merely to remove the intent. |
+| One `base`, one `target` | Exactly one rename happened. The intent is authoritative for its ids: apply its final rows, repair only the missing tier to its target epoch, then remove the exact intent. |
+| Either tier `outside` | The intent is stale, superseded, malformed, or cannot be bound to these snapshots. Do not replay it, overwrite either tier, or remove it. Preserve it for investigation. |
 
-## Independent safety semantics
+A legacy v1 intent, malformed intent, or an intent lacking exact epoch bindings is never recovery authority and is retained rather than silently deleted.
 
-Each tier independently retains all current persistence protections:
+### Frozen recovery and coalesced writes
 
-1. **Epoch and stale latch.** Before that tier's first process write, or whenever its fingerprint differs/is unavailable, re-read that tier's on-disk epoch. If it is newer than that tier's `loadedEpoch` before this process has written the tier, latch and refuse only that tier. A rolled-back or newer archived file cannot trip, clear, or bypass the live latch, and vice versa.
-2. **Fingerprint.** Keep the current `(size, mtimeMs, ctimeMs)` equality rule per tier. Missing `ctimeMs`, a stat error, a changed file, or a missing file disables only that tier's fast path and forces an epoch read. Never treat `size + mtime` alone as identity.
-3. **Fence.** `SessionStore.fileWriteTails` remains static, but keys are resolved file paths. A live write fences `sessions.json`; an archive write fences `sessions.archived.json`; pair writes fence both. Temporary names are tier-specific.
-4. **Backup and atomic publication.** Each `saveTierUnlockedAsync` rotates only that tier's own backups oldest-first, writes `<tier>.tmp`, attempts fsync when the richer injected filesystem supports it, and atomically renames. The archive tier is never copied or rewritten during a live-only save.
+A partial pair freezes the complete post-intent live and archive row snapshots plus one recovery generation before asynchronous repair begins. Repair publishes only that frozen generation; a later in-memory update cannot leak into, or receive credit for, the old pair. Once the frozen repair completes, later dirty work drains separately, creating a fresh intent if it changes membership.
 
-A stale failure on a live-only update leaves the archived tier untouched. A stale failure on an archive/unarchive pair rejects that durability barrier and leaves the transition intent in place for deterministic restart recovery; it must not falsely mark either file's generation published.
+If a peer has removed the exact intent while a partial repair is pending, the repair restores the same v2 intent bytes before publishing the missing tier. It never replaces an existing different intent. This makes a second crash unambiguous. If both tiers are still at base, the active recovery is discarded without replay and pending entries are eligible for a new intent. If either epoch leaves the binding, the retry refuses rather than guessing. These rules let independently constructed stores converge while preserving the ordinary coalescing and trailing-drain guarantees.
 
-## Load, merge, and recovery
+## Legacy v1/v2 migration
 
-At boot the store loads both tiers synchronously before any caller can observe it:
+A live v1/v2 candidate is the authoritative complete source for migration. The store normalizes every row, partitions by `archived === true`, and retains all records.
 
-1. Read live candidates in `sessions.json`, `.bak.1` … `.bak.5` order. The first parseable v3 envelope wins; a v1/v2 candidate is retained as the legacy migration source instead.
-2. Read archive candidates in `sessions.archived.json`, `.bak.1` … `.bak.5` order. The first parseable v3 envelope wins. A missing archive file is empty only for a new empty store or legacy migration; a corrupt primary still tries its archive backups exactly like the live chain.
-3. Read a pending transition intent, if any. It wins for its listed ids: its final row is inserted in the indicated tier or its delete marker removes the id. The next successful drain repairs both tier files and clears the intent.
-4. Merge loaded rows into the existing single map, then perform the established legacy field/ledger/verifier normalization across that complete map.
+1. It retains the **exact original bytes** as `sessions.json.pre-archived-split`. Creation is exclusive; an identical retained source is reused, while a different collision gets the next `.N` suffix. Existing forensic evidence is never overwritten.
+2. It publishes the archived v3 partition first, using that tier's independent epoch and backup chain.
+3. It publishes the live v3 partition second. Its normal backup rotation retains the former legacy primary.
+4. Only after both publications succeeds is the migration considered complete. The retained source stays in place.
 
-Outside a pending transition, the duplicate-id policy is explicit: the live candidate wins, a diagnostic names the id and both source paths, and the next dirty publication canonicalizes the record into the tier selected by its `archived` flag. This conservative policy prevents an older archive backup from overriding the current live source. Rows placed in the wrong v3 file are accepted for recovery, normalized by their own `archived` boolean, logged, and repaired on the next write. A pending transition overrides this default because it records the intended final membership and is the only way to disambiguate a crash during archive vs unarchive.
+If archive publication fails, the v1/v2 live source remains authoritative. If archive succeeds but live publication fails, a restart still takes the legacy live source as authoritative and repopulates archive from it; a partially published archive does not contribute rows. A completed v3 split is idempotent: the next construction reads both v3 tiers, creates no new retained source, and does not rewrite unchanged tiers.
 
-The recovery order remains primary then newest-to-oldest backups **independently for each file**. Mixing two independently recovered tier snapshots is preferable to silently dropping a parseable tier; it does not compare epochs across tiers. The retained `.pre-archived-split` snapshot is migration evidence, not a normal v3 fallback after a completed split.
+## Tombstones, state migration, and operations
 
-## Mutations, dirtiness, and durability barriers
+Hard deletion has one canonical tombstone namespace: `sessions.json`. `remove()` and `purge()` record that namespace whether the deleted row was live or archived; `purgeAsync()` records it only after the matching tier deletion crosses its durability barrier. Even an unknown-id `remove()` records a tombstone to prevent stale migration evidence from reviving it.
 
-Every mutation still increments the existing global `generation` exactly once. This goal does not split API polling generations into structural and activity generations.
+State migration treats `sessions.json` and `sessions.archived.json` as independent versioned envelopes and preserves each tier's shape, version, and epoch while routing project records. It also treats the two files as one logical session identity set when assessing backup-only recovery, so a row that moved tiers is not duplicated or resurrected from an old tier. The canonical `sessions.json` tombstone suppresses recovery from either tier; a recovery backup is retired only after every record is live in either current tier or tombstoned.
 
-Before mutating a record, capture `previousArchived`; after mutation inspect `nextArchived`. Mark tiers as follows:
+The Add Project **start fresh** path normally archives the project state as a whole. When the selected directory is the running gateway's own directory, its gateway-owned allowlist preserves both tiers, the transition intent, and every `sessions.json.pre-archived-split*` retention artifact; moving only `sessions.json` would make the pair inconsistent. The same state migration and archive rules apply to Headquarters migration paths.
 
-| Operation | Live dirty | Archive dirty | Pair intent |
-|---|---:|---:|---:|
-| `put` new live / overwrite live | yes | no | no |
-| `put` new archived / overwrite archived | no | yes | no |
-| `put` changes existing membership | yes | yes | yes |
-| live `update`, draft, tag restore, or activity update | yes | no | no |
-| archived `update`, draft, or tag restore | no | yes | no |
-| `update({ archived: true })` / `archive` / `archiveAsync` | yes | yes | yes |
-| `update({ archived: false })` (unarchive) | yes | yes | yes |
-| `remove` / `purge` of live row | yes | no | delete only in live tier |
-| `remove` / `purge` of archived row | no | yes | delete only in archive tier |
+Operational code that inspects session state must account for both tiers. In particular, the worktree fallback reads `sessions.archived.json` if the live-tier resolver is unavailable, so a worktree referenced only there is not mistakenly removed. Archive lists, search, orphan checks, and worktree inventory remain correct because `SessionStore` eagerly merges both tiers before they run.
 
-`update({ archived: false })` is an unarchive even if legacy `archivedAt` remains present; membership is determined solely by `archived === true`, matching current reads. `put` must compare an existing row's membership rather than trusting only the incoming payload. Missing-id update/archive/purge remains a no-op and marks nothing dirty. `remove` and `purge` retain their existing `sessions.json` deletion-tombstone namespace; `purgeAsync` writes its tombstone only after the affected tier deletion has crossed its durability barrier.
+For manual recovery, stop the gateway before editing state. Preserve the two primaries, their backup chains, any `split-transition`, and retained migration evidence together. A stale-guard refusal is intentional: inspect the named tier and its `.bak.*` files rather than copying a snapshot across tiers or changing an epoch. Prefer restart-driven recovery when a valid bound transition exists; an unbound or outside-bound intent is evidence to retain and investigate, not a file to delete casually.
 
-A membership batch first atomically writes the transition intent, then publishes both affected tier snapshots under both fences, then clears the intent. The row's final archive state is present in the archive file before its live copy is removed, and the reverse movement is likewise protected by the intent; a crash cannot turn a two-file partial result into an ambiguous user-visible choice on restart.
+## Verification coverage
 
-The async drain may serialize one or both tiers. A live activity burst snapshots only `getLive()` rows and avoids both archived `JSON.stringify` and archive backup rotation. An archived mutation serializes only `getArchived()` rows unless it crosses membership. Snapshot generation accounting remains a barrier: a generation is considered published only when every tier dirtied by mutations through that generation has completed its atomic rename. A mutation folded into a snapshot already containing it advances the appropriate tier watermark without causing a duplicate write; a mutation arriving after serialization schedules a trailing drain. `flushAsync`, `archiveAsync`, and `purgeAsync` retain their current failure-sequence behavior and reject if their required tier generation did not publish.
-
-Metrics describe the actual drain, not full historical state: a live-only save reports live serialized bytes and zero archive bytes; an archive-only save reports the converse; a pair sums both. This makes the expected roughly 40x hot-path reduction observable without changing the public session response generation.
-
-## v2 migration and crash behavior
-
-A loaded v2 envelope is the authoritative complete snapshot for migration. The migration runs before normal writes and is idempotent:
-
-1. Parse and normalize every legacy row in memory, partitioning by `archived === true` without dropping records.
-2. Before replacing `sessions.json`, retain the exact original bytes at `sessions.json.pre-archived-split`. Create it without overwriting an existing retained source; an `EEXIST` collision uses `.1`, `.2`, and so on. This is evidence and recovery input, not a destructive rename.
-3. Atomically write an empty-or-populated v3 `sessions.archived.json` first, with its own epoch starting from zero/its loaded archive epoch and its own backup chain.
-4. Atomically write v3 `sessions.json` containing only live rows, with its own epoch derived from the v2 source's live-tier loaded epoch. Its regular backup rotation retains the former v2 primary before replacement.
-5. Only after both v3 primaries are durable is migration complete. Leave the retained `.pre-archived-split` snapshot in place; it is the explicitly recoverable original, never silently deleted.
-
-If the process dies or an archive write fails before step 4, the v2 live primary remains parseable and a restart repeats the partition safely. If archive succeeds but live fails, the v2 source still wins as the migration input; the archive output is overwritten idempotently from that same complete v2 source. If live succeeds, archive must already have succeeded, so a v3 live primary never represents a completed split without an archive-tier publication. If an existing retained snapshot collides, it is preserved; migration never overwrites forensic evidence.
-
-Legacy bare arrays follow the same retention-and-split path. A second construction after a completed v3 split reads the two v3 tiers, does not create another retained source, and does not duplicate rows.
-
-## Test plan
-
-Extend, do not replace, these suites:
-
-- `tests2/core/session-store.test.ts`
-- `tests2/core/session-store-atomic-write.test.ts`
-- `tests2/core/session-store-stale-load-guard.test.ts`
-- `tests2/core/session-store-orphan-cleanup.test.ts`
-- `tests2/integration/session-store-real-fs.test.ts`
-
-Add the following coverage, using injected memfs for deterministic writer/fingerprint instrumentation and real FS where atomic rename/mtime fidelity matters:
-
-1. **Live-size isolation.** Seed N live records plus M archived records, flush, and assert v3 `sessions.json` contains exactly N and its serialized byte size is unchanged when M grows. Assert `sessions.archived.json` contains M.
-2. **Live mutation isolation.** After both tiers are durable, mutate a live record and flush. Assert archive mtime/write counter and archive epoch are unchanged; assert only the live epoch advances.
-3. **Membership moves.** Archive a live record and assert both tier files publish the move; unarchive through `update({ archived: false })` and assert it returns to live after reload. Include `put` replacement across tiers, archived `put` overwrite, hard `remove`/`purge`, missing-id no-ops, and the existing tombstone guarantees.
-4. **Eager read parity.** Build equivalent pre-split/v2 data, split/reload it, and compare `getArchived()` plus every `listArchivedSessionsPaginated(limit, after)` result, totals, cursors, ordering, and live reads. This proves archive data remains eager and behaviorally identical.
-5. **Migration.** Write a 1,234-record v2 `sessions.json` with live and archived rows. Construct/flush, assert every id and payload survives, v3 tiers partition exactly, the exact v2 original is retained under `.pre-archived-split`, and a second construction is idempotent. Inject failures after retained-source creation and after archive publication to prove the original v2 path remains loadable and no records are lost.
-6. **Independent guard and recovery.** Independently externally roll back/advance/corrupt each tier and prove its own backup order, fingerprint revalidation, stale latch, and fence behavior. A newer or rolled-back archive file must not trip/bypass live protection, and the converse must hold. Add a crash-between-pair-renames case showing `split-transition` resolves duplicate/missing ids to the intended archive/unarchive state before repair.
-
-All existing regression suites remain green with their current behavioral coverage; legacy v1/v2 fixtures remain loadable, while the new split-specific assertions own v3 envelope inspection. Run `npm run check`, `npm run test:unit`, and `npm run test:e2e` after implementation.
+The session-store suites cover live-size isolation, live-write archive isolation, eager round-trip parity and pagination, membership moves, v1/v2 migration retention and idempotence, independent tier guards/recovery, and the epoch-bound transition truth table. Real-filesystem coverage owns backup rotation, atomic rename and retained-source behavior. State-migration, start-fresh allowlist, and archived-tier worktree-fallback tests protect adjacent operational paths.
 
 ## Explicit non-goals
 
-- No lazy archive load, archive spinner, first-access fetch, or changed UX.
-- No SQLite conversion or new database dependency.
-- No hard-link replacement for `copyFile` backup rotation.
-- No structural/activity generation split for `/api/sessions?since=`.
-- No archive search, pagination, orphan-cleanup, or API behavior rewrite.
+- Lazy archive loading or any archive-list UX/loading-state change.
+- SQLite conversion or a new database dependency.
+- Hard-link replacement for backup `copyFile`.
+- Structural/activity generation splitting for `/api/sessions?since=`.
+- Rewrites of search, archive pagination, orphan cleanup, or session APIs.
