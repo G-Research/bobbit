@@ -115,7 +115,10 @@ test.describe.serial("archived team ownership hard-restart reconciliation", () =
 		// Negative control: goalId alone is not team ownership. It deliberately
 		// points at the same archived goal and must still restore eagerly.
 		const controlId = await createSession({ projectId: project.id, goalId });
-		const leakedIds = [leadId, workerId];
+		// This row is structurally a child of that goal-only control, but its exact
+		// teamGoalId stamp is independently authoritative durable ownership.
+		const matchingChildId = await createSession({ projectId: project.id, goalId });
+		const leakedIds = [leadId, workerId, matchingChildId];
 		let serverOnline = true;
 
 		const bridgeModule = await import("../../../tests/e2e/in-process-mock-bridge.mjs");
@@ -135,6 +138,7 @@ test.describe.serial("archived team ownership hard-restart reconciliation", () =
 				waitForSessionStatus(leadId, "idle", 20_000),
 				waitForSessionStatus(workerId, "idle", 20_000),
 				waitForSessionStatus(controlId, "idle", 20_000),
+				waitForSessionStatus(matchingChildId, "idle", 20_000),
 			]);
 
 			const sessionManager = gateway.sessionManager;
@@ -153,6 +157,10 @@ test.describe.serial("archived team ownership hard-restart reconciliation", () =
 				role: "coder",
 				teamGoalId: goalId,
 				teamLeadSessionId: leadId,
+			})).toBe(true);
+			expect(sessionManager.updateSessionMeta(matchingChildId, {
+				delegateOf: controlId,
+				teamGoalId: goalId,
 			})).toBe(true);
 			context.teamStore.put({
 				goalId,
@@ -192,7 +200,7 @@ test.describe.serial("archived team ownership hard-restart reconciliation", () =
 				/\[team-manager\] Boot archived-team repair: goals=(\d+) sessionsArchived=(\d+) teamsRemoved=(\d+) blocked=(\d+) suppressed=(\d+) errors=(\d+)/,
 				"archived-team repair summary",
 			);
-			expect(repair.match.slice(1).map(Number)).toEqual([1, 2, 1, 0, 0, 0]);
+			expect(repair.match.slice(1).map(Number)).toEqual([1, 3, 1, 0, 0, 0]);
 			expect(firstMetrics.restoredRegular).toBe(1);
 			expect(firstMetrics.restoredDelegates).toBe(0);
 			expect(startedSessionIds).toContain(controlId);
@@ -258,6 +266,7 @@ test.describe.serial("archived team ownership hard-restart reconciliation", () =
 			if (!serverOnline) {
 				await gateway.restart().then(() => waitForHealth(20_000)).catch(() => undefined);
 			}
+			await deleteSession(matchingChildId).catch(() => undefined);
 			await deleteSession(controlId).catch(() => undefined);
 			await deleteSession(workerId).catch(() => undefined);
 			await deleteSession(leadId).catch(() => undefined);

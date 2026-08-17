@@ -338,7 +338,7 @@ describe("archived goal reconciliation", () => {
 		);
 	});
 
-	it("does not treat legacy effective-goal metadata on a standalone delegate chain as team ownership", async () => {
+	it("treats every matching teamGoalId as ownership regardless of standalone ancestry", async () => {
 		const archivedGoal = goal("goal-standalone-delegate");
 		const foreignGoal = goal("goal-foreign-descendant", false);
 		const standalone = session("standalone-root", { goalId: archivedGoal.id });
@@ -367,10 +367,10 @@ describe("archived goal reconciliation", () => {
 
 		const result = await fixture.manager.reconcileArchivedGoal(archivedGoal.id, { audit: false });
 
-		assert.equal(fixture.sessionStore.get(standalone.id).archived, false);
-		assert.equal(fixture.sessionStore.get(delegate.id).archived, false, "inherited teamGoalId is metadata, not standalone-chain ownership");
-		assert.equal(fixture.sessionStore.get(grandchild.id).archived, false, "standalone metadata ancestry remains live recursively");
-		assert.equal(fixture.sessionStore.get(worker.id).archived, true, "genuine non-child teamGoalId row remains authoritative");
+		assert.equal(fixture.sessionStore.get(standalone.id).archived, false, "goalId-only roots remain standalone");
+		assert.equal(fixture.sessionStore.get(delegate.id).archived, true, "matching teamGoalId is an ownership root despite its parent");
+		assert.equal(fixture.sessionStore.get(grandchild.id).archived, true, "every matching teamGoalId row is independently owned");
+		assert.equal(fixture.sessionStore.get(worker.id).archived, true, "store-only matching ownership remains authoritative");
 		assert.equal(fixture.sessionStore.get(mixedLinkChild.id).archived, true, "either canonical child link reaches a selected team parent");
 		assert.equal(fixture.sessionStore.get(foreignChild.id).archived, false, "foreign non-empty team ownership wins over descendant discovery");
 		assert.equal(fixture.sessionStore.get(foreignGrandchild.id).archived, false, "foreign-owned subtrees are not traversed");
@@ -381,7 +381,7 @@ describe("archived goal reconciliation", () => {
 		assert.match(result.errors.join("\n"), /ownership conflict/);
 	});
 
-	it("uses canonical ownership for orchestration admission while retaining effective-goal metadata", async () => {
+	it("uses matching teamGoalId as durable orchestration admission ownership", async () => {
 		const archivedGoal = goal("goal-standalone-orchestration", false);
 		const standalone = session("standalone-orchestration-root", { goalId: archivedGoal.id });
 		const genuineWorker = session("genuine-orchestration-worker", { teamGoalId: archivedGoal.id, role: "coder" });
@@ -392,16 +392,23 @@ describe("archived goal reconciliation", () => {
 			resolveSessionModel: () => undefined,
 		});
 
-		const child = await core.spawn({ ownerSessionId: standalone.id, instructions: "standalone metadata child" });
+		const child = await core.spawn({ ownerSessionId: standalone.id, instructions: "team-owned metadata child" });
 		assert.equal(fixture.sessionStore.get(child.sessionId).teamGoalId, archivedGoal.id, "effective-goal metadata is still copied");
-		assert.equal(fixture.sessionManager.getTrustedTeamGoalIdForSession(child.sessionId), undefined, "standalone ancestry keeps the raw stamp outside team ownership");
+		assert.equal(fixture.sessionManager.getTrustedTeamGoalIdForSession(child.sessionId), archivedGoal.id, "the exact durable stamp is ownership regardless of ancestry");
 
 		archivedGoal.archived = true;
+		const rowsBeforeRejectedCreate = fixture.sessionStore.getAll().length;
+		await assert.rejects(
+			() => core.spawn({ ownerSessionId: genuineWorker.id, instructions: "must be rejected" }),
+			(error: unknown) => error instanceof TeamStartError && error.code === "GOAL_ARCHIVED",
+		);
+		assert.equal(fixture.sessionStore.getAll().length, rowsBeforeRejectedCreate, "terminal admission creates no row");
+
 		const result = await fixture.manager.reconcileArchivedGoal(archivedGoal.id, { audit: false });
-		assert.equal(fixture.sessionStore.get(child.sessionId).archived, false, "metadata-only delegate remains outside reconciliation");
+		assert.equal(fixture.sessionStore.get(child.sessionId).archived, true, "matching child metadata is reconciled as ownership");
 		assert.equal(fixture.sessionStore.get(standalone.id).archived, false);
-		assert.equal(fixture.sessionStore.get(genuineWorker.id).archived, true, "genuine team ownership remains terminal");
-		assert.ok(!result.archivedSessionIds.includes(child.sessionId));
+		assert.equal(fixture.sessionStore.get(genuineWorker.id).archived, true, "matching team ownership remains terminal");
+		assert.ok(result.archivedSessionIds.includes(child.sessionId));
 	});
 
 	it("removes stale archived-goal team state while leaving a conflicting foreign owner live", async () => {
@@ -450,6 +457,41 @@ describe("archived goal reconciliation", () => {
 		);
 		assert.equal(fixture.sessionStore.get(standalone.id).archived, false);
 		assert.equal(fixture.sessionStore.get(delegate.id).modelId, "model", "soft archive preserves session metadata");
+	});
+
+	it("cold restore suppresses matching teamGoalId rows regardless of a goal-only parent", async () => {
+		const archivedGoal = goal("goal-cold-restore-ownership");
+		const standalone = session("cold-goal-only-root", { goalId: archivedGoal.id });
+		const matchingDelegate = session("cold-matching-delegate", {
+			delegateOf: standalone.id,
+			teamGoalId: archivedGoal.id,
+		});
+		const matchingGrandchild = session("cold-matching-grandchild", {
+			parentSessionId: matchingDelegate.id,
+			childKind: "review",
+			teamGoalId: archivedGoal.id,
+		});
+		const control = session("cold-live-control");
+		const fixture = makeFixture({
+			goals: [archivedGoal],
+			sessions: [standalone, matchingDelegate, matchingGrandchild, control],
+		});
+
+		const restoreManager: any = Object.create(SessionManager.prototype);
+		restoreManager.projectContextManager = fixture.projectContextManager;
+		restoreManager.sessions = new Map();
+		restoreManager.orchestrationCore = null;
+		restoreManager.clock = { now: () => Date.now() };
+		restoreManager._bootRestoreLagSampler = () => 0;
+		restoreManager.yieldBootRestore = async () => {};
+		const dispatched: string[] = [];
+		restoreManager.restoreOneSession = async (row: any) => { dispatched.push(row.id); };
+
+		await restoreManager.restoreSessions();
+
+		assert.deepEqual(dispatched, [standalone.id, control.id]);
+		assert.equal(fixture.sessionStore.get(standalone.id).archived, false, "goalId alone remains eagerly restorable");
+		assert.equal(fixture.sessionStore.get(control.id).archived, false, "unrelated live sessions remain eager");
 	});
 
 	it("returns exact boot suppression after archive publication failure and still eagerly dispatches an unrelated live session", async () => {

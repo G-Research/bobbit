@@ -7909,8 +7909,8 @@ async function handleApiRoute(
 					context: body.context,
 				});
 				// Direct REST delegates do not pass through OrchestrationCore. Join the
-				// shared terminal-admission turn only for canonically team-owned parents;
-				// raw teamGoalId may be effective-goal metadata on a standalone delegate.
+				// shared terminal-admission turn for every durably team-owned parent,
+				// including exact teamGoalId ownership regardless of ancestry.
 				const session = parentTrustedTeamGoalId
 					? await sessionManager.runWithTeamGoalAdmission(parentTrustedTeamGoalId, createDelegate)
 					: await createDelegate();

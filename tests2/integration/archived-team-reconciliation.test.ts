@@ -149,7 +149,7 @@ test.describe("archived team reconciliation", () => {
 		}
 	});
 
-	test("direct REST delegates admit standalone metadata ancestry but reject genuine archived-team ownership", async ({ gateway }) => {
+	test("direct REST delegates reject every matching teamGoalId owner after archive", async ({ gateway }) => {
 		const goal = await createGoal({ title: `trusted-delegate-admission-${Date.now()}`, team: true, autoStartTeam: false });
 		const standaloneRootId = await createSession({ goalId: goal.id });
 		const genuineTeamRootId = await createSession({ goalId: goal.id });
@@ -159,31 +159,28 @@ test.describe("archived team reconciliation", () => {
 
 		const firstDelegateResponse = await apiFetch("/api/sessions", {
 			method: "POST",
-			body: JSON.stringify({ delegateOf: standaloneRootId, instructions: "inherit archived goal metadata" }),
+			body: JSON.stringify({ delegateOf: standaloneRootId, instructions: "inherit durable team ownership" }),
 		});
 		expect(firstDelegateResponse.status).toBe(201);
 		const firstDelegateId = (await firstDelegateResponse.json()).id as string;
 		expect(sessionManager.getPersistedSession(firstDelegateId)?.teamGoalId).toBe(goal.id);
-		expect(sessionManager.getTrustedTeamGoalIdForSession(firstDelegateId)).toBeUndefined();
+		expect(sessionManager.getTrustedTeamGoalIdForSession(firstDelegateId)).toBe(goal.id);
 
 		await context.goalStore.archiveStrict(goal.id);
-		const standaloneResponse = await apiFetch("/api/sessions", {
-			method: "POST",
-			body: JSON.stringify({ delegateOf: firstDelegateId, instructions: "surviving standalone delegate child" }),
-		});
-		const standaloneBody = await standaloneResponse.json().catch(() => ({}));
-		expect(standaloneResponse.status, JSON.stringify(standaloneBody)).toBe(201);
-		expect(sessionManager.getPersistedSession(standaloneBody.id)).toMatchObject({
-			delegateOf: firstDelegateId,
-			teamGoalId: goal.id,
-		});
-		expect(sessionManager.getPersistedSession(standaloneBody.id)?.archived).not.toBe(true);
-		expect(sessionManager.getTrustedTeamGoalIdForSession(standaloneBody.id)).toBeUndefined();
-
 		const rowsBeforeRejectedCreate = context.sessionStore.getAll().length;
+		const inheritedResponse = await apiFetch("/api/sessions", {
+			method: "POST",
+			body: JSON.stringify({ delegateOf: firstDelegateId, instructions: "must be rejected" }),
+		});
+		const inheritedBody = await inheritedResponse.json().catch(() => ({}));
+		expect(inheritedResponse.status, JSON.stringify(inheritedBody)).toBe(409);
+		expect(inheritedBody).toMatchObject({ code: "GOAL_ARCHIVED", goalId: goal.id });
+		expect(context.sessionStore.getAll().length, "matching metadata admission creates no persisted row").toBe(rowsBeforeRejectedCreate);
+		expect(sessionManager.getPersistedSession(standaloneRootId)?.archived).not.toBe(true);
+
 		const teamResponse = await apiFetch("/api/sessions", {
 			method: "POST",
-			body: JSON.stringify({ delegateOf: genuineTeamRootId, instructions: "must be rejected" }),
+			body: JSON.stringify({ delegateOf: genuineTeamRootId, instructions: "must also be rejected" }),
 		});
 		const teamBody = await teamResponse.json().catch(() => ({}));
 		expect(teamResponse.status, JSON.stringify(teamBody)).toBe(409);
