@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { serverSecretsDir } from "../bobbit-dir.js";
 import {
 	HEADQUARTERS_PROJECT_ID,
@@ -30,6 +31,29 @@ const HEADQUARTERS_BACKUP_SUFFIX = ".pre-headquarters-id-migration";
 // `.pre-migration` → `.pre-migration-recovered` retirement precedent in
 // `recoverPreMigrationData`.
 const HEADQUARTERS_BACKUP_RETIRED_SUFFIX = ".pre-headquarters-id-migration-recovered";
+const HEADQUARTERS_MIGRATION_CHECKPOINT_VERSION = 2;
+const DELETION_TOMBSTONES_FILE = ".deletion-tombstones.json";
+
+interface HeadquartersMigrationEvidenceEntry {
+	path: string;
+	size: number;
+	mtimeMs?: number;
+	digest?: string;
+}
+
+interface HeadquartersMigrationCheckpoint {
+	version: number;
+	paths: {
+		serverRunDir: string;
+		headquartersDir: string;
+		headquartersStateDir: string;
+		headquartersConfigDir: string;
+		legacyServerBobbitDir: string;
+		legacyStateDir: string;
+		legacyConfigDir: string;
+	};
+	evidence: HeadquartersMigrationEvidenceEntry[];
+}
 // Array execution stores keyed by `id` that route through
 // `routeLegacyProjectStoreFile`'s backup-only recovery loop and can therefore
 // resurrect a deleted record. Their backups are eligible for retirement and
@@ -46,6 +70,96 @@ function pathKey(p: string): string {
 
 function samePath(a: string, b: string): boolean {
 	return pathKey(a) === pathKey(b);
+}
+
+function migrationCheckpointPaths(input: HeadquartersDirectoryMigrationInput): HeadquartersMigrationCheckpoint["paths"] {
+	const legacyStateDir = path.join(input.legacyServerBobbitDir, "state");
+	const legacyConfigDir = path.join(input.legacyServerBobbitDir, "config");
+	return {
+		serverRunDir: pathKey(input.serverRunDir),
+		headquartersDir: pathKey(input.headquartersDir),
+		headquartersStateDir: pathKey(input.headquartersStateDir),
+		headquartersConfigDir: pathKey(input.headquartersConfigDir),
+		legacyServerBobbitDir: pathKey(input.legacyServerBobbitDir),
+		legacyStateDir: pathKey(legacyStateDir),
+		legacyConfigDir: pathKey(legacyConfigDir),
+	};
+}
+
+/**
+ * Capture only evidence that can make completed migration work newly useful.
+ * Runtime-owned legacy project stores and config change continuously after the
+ * Headquarters split and deliberately do not invalidate the checkpoint.
+ */
+function migrationCheckpointEvidence(headquartersStateDir: string, legacyStateDir: string): HeadquartersMigrationEvidenceEntry[] | null {
+	const candidates = new Set<string>([
+		path.join(headquartersStateDir, "projects.json"),
+		path.join(legacyStateDir, "projects.json"),
+		path.join(headquartersStateDir, DELETION_TOMBSTONES_FILE),
+		path.join(legacyStateDir, DELETION_TOMBSTONES_FILE),
+	]);
+	try {
+		for (const dir of [headquartersStateDir, legacyStateDir]) {
+			if (!fs.existsSync(dir)) continue;
+			for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+				if (entry.name.endsWith(HEADQUARTERS_BACKUP_SUFFIX)) {
+					candidates.add(path.join(dir, entry.name));
+				}
+			}
+		}
+		const evidence: HeadquartersMigrationEvidenceEntry[] = [];
+		for (const file of [...candidates].sort((a, b) => pathKey(a).localeCompare(pathKey(b)))) {
+			if (!fs.existsSync(file)) continue;
+			const stat = fs.statSync(file);
+			if (path.basename(file) === "projects.json") {
+				// ProjectRegistry intentionally rewrites projects.json during every
+				// startup even when its bytes are unchanged. Hash this tiny registry so
+				// that harmless mtime churn does not defeat the migration fast path.
+				evidence.push({
+					path: pathKey(file),
+					size: stat.size,
+					digest: createHash("sha256").update(fs.readFileSync(file)).digest("hex"),
+				});
+			} else {
+				evidence.push({ path: pathKey(file), size: stat.size, mtimeMs: stat.mtimeMs });
+			}
+		}
+		return evidence;
+	} catch {
+		// An unreadable evidence boundary must fail closed into the full migration.
+		return null;
+	}
+}
+
+function readHeadquartersMigrationCheckpoint(
+	markerPath: string,
+	paths: HeadquartersMigrationCheckpoint["paths"],
+	evidence: HeadquartersMigrationEvidenceEntry[] | null,
+): boolean {
+	if (!evidence) return false;
+	try {
+		const value = JSON.parse(fs.readFileSync(markerPath, "utf-8")) as Partial<HeadquartersMigrationCheckpoint>;
+		return value.version === HEADQUARTERS_MIGRATION_CHECKPOINT_VERSION
+			&& JSON.stringify(value.paths) === JSON.stringify(paths)
+			&& JSON.stringify(value.evidence) === JSON.stringify(evidence);
+	} catch {
+		// Timestamp-only legacy markers and corrupt checkpoints get one full pass,
+		// then are upgraded to the versioned evidence record.
+		return false;
+	}
+}
+
+function writeHeadquartersMigrationCheckpoint(
+	markerPath: string,
+	paths: HeadquartersMigrationCheckpoint["paths"],
+	evidence: HeadquartersMigrationEvidenceEntry[] | null,
+): void {
+	if (!evidence) throw new Error("could not capture migration checkpoint evidence");
+	fs.writeFileSync(markerPath, JSON.stringify({
+		version: HEADQUARTERS_MIGRATION_CHECKPOINT_VERSION,
+		paths,
+		evidence,
+	} satisfies HeadquartersMigrationCheckpoint), "utf-8");
 }
 
 function canonicalPathKey(p: string): string {
@@ -1087,14 +1201,12 @@ export function migrateLegacyHeadquartersDirectory(input: HeadquartersDirectoryM
 	const legacyStateDir = path.join(legacyServerBobbitDir, "state");
 	const legacyConfigDir = path.join(legacyServerBobbitDir, "config");
 	const diagnostics = newHeadquartersDiagnostics({ serverRunDir, headquartersDir: headquartersDirPath, headquartersStateDir, headquartersConfigDir, legacyServerBobbitDir });
-	// Whether a prior migration already completed (marker present at boot start).
-	// Read BEFORE we (re-)write the marker at the end of this run. Used to make the
-	// B1 same-root per-store re-routing a no-op on subsequent boots and to gate
-	// spent-backup retirement so it only runs AFTER a completed migration. The
-	// deletion tombstones (layer above) are the primary correctness fix and work
-	// even when the marker is absent; this guard is defence-in-depth + the
-	// "no-op on second boot" invariant.
-	const alreadyMigrated = fs.existsSync(path.join(headquartersStateDir, HEADQUARTERS_DIR_MIGRATION_MARKER));
+	// Read the marker before this run changes any migration evidence. A legacy
+	// timestamp marker proves only that some pass ran; the versioned checkpoint
+	// additionally proves the path topology and recovery-relevant evidence are
+	// unchanged, which is what makes a steady-state skip safe.
+	const markerPath = path.join(headquartersStateDir, HEADQUARTERS_DIR_MIGRATION_MARKER);
+	const alreadyMigrated = fs.existsSync(markerPath);
 
 	try {
 		fs.mkdirSync(headquartersStateDir, { recursive: true });
@@ -1109,19 +1221,27 @@ export function migrateLegacyHeadquartersDirectory(input: HeadquartersDirectoryM
 	const usingOverride = !samePath(headquartersDirPath, defaultHeadquartersDir);
 	const sourceIsTarget = samePath(legacyStateDir, headquartersStateDir) && samePath(legacyConfigDir, headquartersConfigDir);
 	const useLegacyDefaultSource = !usingOverride || sourceIsTarget;
+	const checkpointPaths = migrationCheckpointPaths(input);
+	const checkpointEvidence = migrationCheckpointEvidence(headquartersStateDir, legacyStateDir);
+	const defaultSteadyState = !sourceIsTarget
+		&& !usingOverride
+		&& readHeadquartersMigrationCheckpoint(markerPath, checkpointPaths, checkpointEvidence);
 
 	if (!sourceIsTarget && !usingOverride && fs.existsSync(legacyStateDir)) {
-		for (const entry of fs.readdirSync(legacyStateDir, { withFileTypes: true })) {
-			const src = path.join(legacyStateDir, entry.name);
-			const dest = path.join(headquartersStateDir, entry.name);
-			if (PROJECT_STORE_FILES.has(entry.name)) continue;
-			if (SERVER_STATE_ENTRIES.has(entry.name) || entry.name.endsWith(HEADQUARTERS_BACKUP_SUFFIX)) {
-				copyTreePreserveFirst(src, dest, entry.name, diagnostics);
+		if (!defaultSteadyState) {
+			for (const entry of fs.readdirSync(legacyStateDir, { withFileTypes: true })) {
+				const src = path.join(legacyStateDir, entry.name);
+				const dest = path.join(headquartersStateDir, entry.name);
+				if (PROJECT_STORE_FILES.has(entry.name)) continue;
+				if (SERVER_STATE_ENTRIES.has(entry.name) || entry.name.endsWith(HEADQUARTERS_BACKUP_SUFFIX)) {
+					copyTreePreserveFirst(src, dest, entry.name, diagnostics);
+				}
 			}
+		} else {
+			diagnostics.skipped.push("default Headquarters migration: skipped unchanged legacy tree and project-store recovery");
 		}
-		// Relocate the legacy `<serverRunDir>/.bobbit/state` server secrets out to
-		// the OS-level serverSecretsDir(); leaving them at a normal-project-reachable
-		// path is a gateway-wide privilege escalation.
+		// Security relocation is intentionally outside the steady-state skip. A
+		// newly reintroduced reachable secret must still fail closed or be moved.
 		neutralizeLegacyServerSecrets(legacyStateDir, diagnostics);
 	} else if (usingOverride) {
 		diagnostics.skipped.push("legacy default .bobbit/state: BOBBIT_DIR/BOBBIT_PI_DIR-style Headquarters override is used in place");
@@ -1150,7 +1270,7 @@ export function migrateLegacyHeadquartersDirectory(input: HeadquartersDirectoryM
 	for (const id of sameRootIds) evidence.sameRootIds.add(id);
 	const sameRootEvidence = evidence.sameRootIds.size > 0;
 
-	if (!sourceIsTarget && !usingOverride && fs.existsSync(legacyStateDir)) {
+	if (!sourceIsTarget && !usingOverride && fs.existsSync(legacyStateDir) && !defaultSteadyState) {
 		for (const fileName of PROJECT_STORE_FILES) {
 			const legacyFile = path.join(legacyStateDir, fileName);
 			if (!fs.existsSync(legacyFile)) continue;
@@ -1207,7 +1327,7 @@ export function migrateLegacyHeadquartersDirectory(input: HeadquartersDirectoryM
 		}
 	}
 
-	if (!sourceIsTarget && !usingOverride && fs.existsSync(legacyConfigDir)) {
+	if (!sourceIsTarget && !usingOverride && fs.existsSync(legacyConfigDir) && !defaultSteadyState) {
 		if (sameRootEvidence) {
 			quarantineLegacyConfig(legacyConfigDir, headquartersStateDir, diagnostics);
 			diagnostics.skipped.push("legacy default .bobbit/config: same-root normal project evidence exists; config quarantined instead of activated in Headquarters");
@@ -1225,12 +1345,27 @@ export function migrateLegacyHeadquartersDirectory(input: HeadquartersDirectoryM
 	// tombstoned record on a later boot. Gated on `alreadyMigrated` so retirement
 	// only ever runs on a boot AFTER a completed migration (never on the first
 	// migration, before recovery has happened). Per-store safety gate inside.
-	if (alreadyMigrated) {
+	if (alreadyMigrated && !defaultSteadyState) {
 		retireSpentHeadquartersBackups(headquartersStateDir, evidence, diagnostics);
 	}
 
+	if (defaultSteadyState) {
+		// Preserve the last full diagnostics and checkpoint byte-for-byte. Besides
+		// avoiding a large synchronous rewrite, this keeps the forensic report from
+		// being replaced by an uninteresting steady-state pass.
+		return diagnostics;
+	}
+
 	try {
-		fs.writeFileSync(path.join(headquartersStateDir, HEADQUARTERS_DIR_MIGRATION_MARKER), new Date().toISOString(), "utf-8");
+		if (!sourceIsTarget && !usingOverride) {
+			writeHeadquartersMigrationCheckpoint(
+				markerPath,
+				checkpointPaths,
+				migrationCheckpointEvidence(headquartersStateDir, legacyStateDir),
+			);
+		} else {
+			fs.writeFileSync(markerPath, new Date().toISOString(), "utf-8");
+		}
 	} catch (err) {
 		diagnostics.failures.push(`write marker: ${(err as Error).message}`);
 	}

@@ -73,6 +73,10 @@ function lifecycleRunner(): AnyFunction {
 	return requireExport(harnessExports, lifecycleNames, "LIFECYCLE_CONTRACT");
 }
 
+function sentinelRestartRunner(): AnyFunction {
+	return requireExport(harnessExports, ["runHarnessSentinelRestart"], "SENTINEL_RESTART_CONTRACT");
+}
+
 function dependencyValidationCli(): AnyFunction {
 	return requireExport(harnessExports, ["runDependencyValidationCli"], "VALIDATION_CLI_CONTRACT");
 }
@@ -745,5 +749,65 @@ describe.skipIf(!desiredContractAvailable)("harness lifecycle validation policy"
 		failBuild = false;
 		await runLifecycle("sentinel-restart", fixture.deps);
 		expect(fixture.counters).toMatchObject({ validate: 2, repair: 0, build: 2, launch: 1, alive: true });
+	});
+});
+
+describe("harness sentinel restart downtime policy", () => {
+	it("validates and builds before stopping the current gateway", async () => {
+		const events: string[] = [];
+		await sentinelRestartRunner()({
+			validate: () => { events.push("validate"); return healthy; },
+			build: () => { events.push("build"); },
+			stop: () => { events.push("stop"); },
+			waitUntilStopped: () => { events.push("wait-until-stopped"); },
+			launch: () => { events.push("launch"); },
+			report: (message: string) => events.push(`report:${message}`),
+		});
+
+		expect(events).toEqual(["validate", "build", "stop", "wait-until-stopped", "launch"]);
+	});
+
+	it.each([
+		{
+			name: "dependency validation",
+			validate: () => unhealthy,
+			build: (): void => undefined,
+			diagnostic: /missing-pkg[\s\S]*npm install/i,
+		},
+		{
+			name: "TypeScript build",
+			validate: () => healthy,
+			build: (): never => { throw new Error("deterministic compiler failure"); },
+			diagnostic: /build failure[\s\S]*compiler failure/i,
+		},
+	])("keeps the current gateway running when $name preparation fails", async ({ validate, build: prepareBuild, diagnostic }) => {
+		const events: string[] = [];
+		await sentinelRestartRunner()({
+			validate: () => { events.push("validate"); return validate(); },
+			build: () => { events.push("build"); return prepareBuild(); },
+			stop: () => { events.push("stop"); },
+			waitUntilStopped: () => { events.push("wait-until-stopped"); },
+			launch: () => { events.push("launch"); },
+			report: (message: string) => events.push(`report:${message}`),
+		});
+
+		expect(events).not.toContain("stop");
+		expect(events).not.toContain("wait-until-stopped");
+		expect(events).not.toContain("launch");
+		expect(events.join("\n")).toMatch(diagnostic);
+	});
+
+	it("does not launch until both shutdown and port release complete", async () => {
+		const events: string[] = [];
+		await expect(sentinelRestartRunner()({
+			validate: () => healthy,
+			build: () => { events.push("build"); },
+			stop: () => { events.push("stop"); },
+			waitUntilStopped: () => { events.push("wait-until-stopped"); throw new Error("port still occupied"); },
+			launch: () => { events.push("launch"); },
+			report: () => undefined,
+		})).rejects.toThrow(/port still occupied/i);
+
+		expect(events).toEqual(["build", "stop", "wait-until-stopped"]);
 	});
 });

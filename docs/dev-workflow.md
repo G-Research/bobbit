@@ -53,17 +53,18 @@ The harness (`src/server/harness.ts`):
 - Checks the root manifest and the installed package-manifest presence for declared
   `dependencies` and `devDependencies`; `optionalDependencies` remain optional. The validator
   performs no writes, repairs, or package-manager subprocesses.
-- On a healthy sentinel restart: kills the gateway, waits for the port to free, validates,
-  rebuilds, and relaunches.
+- On a healthy sentinel restart: validates and rebuilds while the current gateway remains
+  available, then kills it, waits for the port to free, and launches the prepared replacement.
+  The full TypeScript build can be slow on Windows, but it is outside the gateway downtime window.
 - On a healthy unexpected gateway crash: validates and relaunches without rebuilding,
   preserving the existing crash-relaunch policy.
 - On initial validation failure: reports the missing dependencies or invalid root manifest,
   gives manual recovery instructions, and exits non-zero before build or launch.
-- On sentinel or crash-relaunch validation failure: reports the same diagnostics, performs no
-  build or launch, and leaves the harness and sentinel watcher alive. After repair, a later
-  `npm run restart-server` revalidates before rebuilding and launching.
-- On a sentinel build failure: does not launch stale output; the watcher remains available for
-  another restart after the build is fixed.
+- On sentinel or crash-relaunch validation failure: reports the same diagnostics and performs no
+  replacement launch. A sentinel preparation failure leaves the current gateway, harness, and
+  watcher alive. After repair, a later `npm run restart-server` revalidates before rebuilding.
+- On a sentinel build failure: keeps the current gateway available and does not launch partial or
+  stale output; the watcher remains available for another restart after the build is fixed.
 - Preserves sessions across restarts in `.bobbit/state/sessions.json`.
 
 To trigger a restart:
@@ -206,16 +207,17 @@ After `npm run restart-server`, watch for the harness output:
 
 ```
 [harness] ======== RESTART TRIGGERED ========
-[harness] Waiting for port 3001 to be free...
+[harness] Preparing replacement before stopping the current server...
 [harness] Building server...
 [harness] Build complete.
+[harness] Waiting for port 3001 to be free...
 [harness] Launching server (port 3001)...
 ```
 
-If validation or the build fails, the harness logs the error and does **not** launch the old
-build. For a validation failure, follow the stopped-stack manual repair procedure above and
-restart the development command. For a compilation failure, fix the code and run
-`npm run restart-server` again; the live watcher retries the build before launching.
+If validation or the build fails, the harness logs the error and keeps the current gateway
+running instead of entering the shutdown window or launching partial output. For a validation
+failure, follow the stopped-stack manual repair procedure above. For a compilation failure, fix
+the code and run `npm run restart-server` again; the live watcher retries preparation.
 
 ### Type-checking without restarting
 

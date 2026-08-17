@@ -8,10 +8,10 @@
  * which touches a sentinel file that this harness watches.
  *
  * Lifecycle on restart signal:
- *   1. Kill the running server child process
- *   2. Wait for the port to become free
- *   3. Validate installed dependencies
- *   4. Rebuild server TypeScript
+ *   1. Validate installed dependencies
+ *   2. Rebuild server TypeScript while the current gateway remains available
+ *   3. Kill the running server child process
+ *   4. Wait for the port to become free
  *   5. Re-launch the server
  *
  * Usage:
@@ -24,7 +24,7 @@ import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { restartSentinelPath } from "./harness-signal.js";
-import { runHarnessLifecycle, validateDependencies } from "./harness-deps.js";
+import { runHarnessLifecycle, runHarnessSentinelRestart, validateDependencies } from "./harness-deps.js";
 import { windowsGatewayKillArgs } from "./harness-kill.js";
 
 // ---------------------------------------------------------------------------
@@ -264,18 +264,22 @@ async function restart(): Promise<void> {
 
 	try {
 		console.log("\n[harness] ======== RESTART TRIGGERED ========");
+		console.log("[harness] Preparing replacement before stopping the current server...");
 
-		// 1. Kill running server
-		await killServer();
-
-		// 2. Wait for port to clear
-		console.log(`[harness] Waiting for port ${PORT} to be free...`);
-		await waitForPortFree(PORT);
-
-		// 3. Validate dependencies, then rebuild and relaunch when healthy.
-		// Invalid dependencies or a failed build leave this watcher alive for a
-		// later operator-triggered retry; stale output is never launched.
-		await applyLifecycle("sentinel-restart");
+		// Validation and the full TypeScript build are intentionally outside the
+		// gateway downtime window. A failed preparation leaves the current server
+		// available; only a successful build enters stop/wait/launch.
+		await runHarnessSentinelRestart({
+			validate: () => validateDependencies(PROJECT_ROOT),
+			build: buildServer,
+			stop: killServer,
+			waitUntilStopped: async () => {
+				console.log(`[harness] Waiting for port ${PORT} to be free...`);
+				await waitForPortFree(PORT);
+			},
+			launch: launchServer,
+			report: (message) => console.error(`[harness] ${message}`),
+		});
 	} catch (err) {
 		console.error("[harness] Restart failed:", err);
 	} finally {
