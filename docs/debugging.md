@@ -15,6 +15,21 @@ Scannable checklists for common issues. Each entry: symptom → where to look �
 - **Diagnostic**: enable Settings → Debug and inspect the latest `boot-timing.jsonl`. A long delay before `modules-evaluated` is Vite/browser loading; a delay after `ws-open` belongs to auth or snapshot recovery. Bundled dev requests `/assets/*.js`, not hundreds of `/src/**/*.ts` modules. Confirm `[boot]` / `[harness]` lifecycle logs before treating a proxy disconnect as a gateway restart.
 - **Pinning test**: `tests2/core/vite-bundled-dev.test.ts`.
 
+## Gateway restart preparation or promotion fails
+
+- **Compiler failure while the old gateway still answers:** this is expected fail-safe behavior. Sentinel preparation builds a sibling candidate without touching live `dist`; fix the source error and run `npm run restart-server` again. The serving gateway does not need to stop for source-only repair.
+- **Dependency-validation failure:** the gateway may remain available, but dependency repair is different. Stop Bobbit and the full development stack before running `npm install`, then restart. Never mutate `node_modules` beneath the serving stack.
+- **Gateway exits during preparation:** normal quick-crash accounting and relaunch remain authoritative. The harness discards the candidate if the prepared child changed; it must not promote output prepared against a different live-child generation.
+- **Promotion recovery message on startup:** every development launcher first runs `node scripts/harness-bootstrap.mjs recover`. The repository-root `.bobbit-dist-promotion.json` journal names only managed sibling staging and previous-live directories. The bootstrap validates required server entry points, restores the previous tree after interruption between renames, or retains a valid promoted candidate after the second rename.
+- **Corrupt journal or "no recovery authority":** stop the development stack and preserve `dist`, `.bobbit-dist-promotion.json`, `.bobbit-dist-stage-*`, and `.bobbit-dist-previous-*` for inspection. Do not delete or rename them manually; the bootstrap fails because selecting an authority without valid evidence could launch partial output. See [Development workflow](dev-workflow.md#dev-with-harness-recommended).
+
+## Team or Headquarters historical recovery repeats on every boot
+
+- **Team recovery:** inspect each project state directory's `.team-forensic-recovery.json` and sibling `.completion-pending` fence. Only a current-version, well-formed `complete` record with no fence qualifies. Missing, corrupt, `running`, stale-version, fenced, dangling-pointer-invalidated, or failed-flush state deliberately retries. A visible `complete` plus a fence means completion was not acknowledged.
+- **Headquarters migration:** inspect `.headquarters-dir-migrated` and its sibling fence. The current policy uses version 3 `running`/`complete` records. Changed path topology, project/tombstone/backup content, or backup keys no longer qualified by their live store invalidate the fast path. Missing, empty, or corrupt same-root live stores deliberately reopen backup recovery.
+- **Fence-clear I/O failure:** an `EIO` after fence removal should recreate the fence before the error is returned. If the fence is present on the next boot, retry is correct; a later successful pass removes it and restores the fast path. An aggregate error saying retry authority could not be republished means compensation also failed: stop the gateway, repair storage, remove the affected checkpoint and any fence, then restart to force recovery.
+- **Always-run work is not a regression:** secret relocation, `projects.json` repair, Headquarters execution-store sanitization, routine team consistency cleanup, and concrete dangling-pointer recovery run even when historical traversal is skipped. Use `<headquarters>/state/boot-timings.log` to distinguish these bounded checks from the slow migration/team phases. See [Gateway Startup Performance Audit](startup-performance-audit.md).
+
 ## Project Settings save returns `PROJECT_CONFIG_LOAD_FAILED` or `PROJECT_CONFIG_PERSIST_FAILED`
 
 - **Symptom**: `PUT /api/projects/:id/config` or `PUT /api/project-config` returns 409 `PROJECT_CONFIG_LOAD_FAILED`, or 500 `PROJECT_CONFIG_PERSIST_FAILED`, instead of `{ ok: true }`.

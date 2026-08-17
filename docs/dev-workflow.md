@@ -41,11 +41,7 @@ npm run dev:nord      # restart harness + Vite on NordLynx
 npm run dev:watchdog  # external watchdog + restart harness + Vite
 ```
 
-All three command wrappers run the same read-only dependency validator **before** their
-initial `build:server` step. A failure exits non-zero and stops the command chain before any
-build, harness/watchdog, Vite, NordLynx setup, or gateway launch. A healthy wrapper proceeds
-to the build and selected launcher; the harness then applies the same validation policy at
-its own lifecycle boundaries.
+All three command wrappers run the same read-only dependency validator, then invoke the stable outside-`dist` bootstrap to recover any interrupted promotion **before** their initial `build:server` step. A validation or bootstrap-recovery failure exits non-zero and stops the command chain before any build, harness/watchdog, Vite, NordLynx setup, or gateway launch. A healthy wrapper proceeds to the build and launches the harness or watchdog through `scripts/harness-bootstrap.mjs`; no lifecycle path imports a potentially missing compiled harness before promotion recovery has settled.
 
 The harness (`src/server/harness.ts`):
 
@@ -53,18 +49,16 @@ The harness (`src/server/harness.ts`):
 - Checks the root manifest and the installed package-manifest presence for declared
   `dependencies` and `devDependencies`; `optionalDependencies` remain optional. The validator
   performs no writes, repairs, or package-manager subprocesses.
-- On a healthy sentinel restart: validates and rebuilds while the current gateway remains
-  available, then kills it, waits for the port to free, and launches the prepared replacement.
-  The full TypeScript build can be slow on Windows, but it is outside the gateway downtime window.
-- On a healthy unexpected gateway crash: validates and relaunches without rebuilding,
-  preserving the existing crash-relaunch policy.
+- On a healthy sentinel restart: validates and builds a complete sibling candidate while the current gateway remains available. Server/shared output is rebuilt from scratch; unrelated live `dist` artifacts, including UI output, are copied into the candidate. Required server entry points must exist before the harness enters the stop window.
+- After stopping the gateway and observing its port release, promotes the whole candidate `dist` tree through directory renames and launches it. A durable repository-root `.bobbit-dist-promotion.json` journal records the managed staging and previous-live paths before either rename.
+- Every harness/watchdog launch first uses the outside-`dist` bootstrap to settle that journal. It restores the previous valid tree when interruption occurred after moving live `dist`, retains a valid candidate after candidate promotion, cleans stale managed artifacts, and refuses to guess when the journal is corrupt or no recovery authority exists.
+- On a healthy unexpected gateway crash: validates and relaunches the existing live `dist` without rebuilding. A genuine exit during sentinel preparation retains the normal quick-crash accounting and relaunch policy; it is not treated as an intentional stop.
 - On initial validation failure: reports the missing dependencies or invalid root manifest,
   gives manual recovery instructions, and exits non-zero before build or launch.
 - On sentinel or crash-relaunch validation failure: reports the same diagnostics and performs no
   replacement launch. A sentinel preparation failure leaves the current gateway, harness, and
   watcher alive. After repair, a later `npm run restart-server` revalidates before rebuilding.
-- On a sentinel build failure: keeps the current gateway available and does not launch partial or
-  stale output; the watcher remains available for another restart after the build is fixed.
+- On a sentinel staged-build failure: keeps the current gateway available, leaves live `dist` unchanged, removes the failed managed candidate, and does not launch partial output. The watcher remains available for another restart after the build is fixed.
 - Preserves sessions across restarts in `.bobbit/state/sessions.json`.
 
 To trigger a restart:
@@ -208,16 +202,21 @@ After `npm run restart-server`, watch for the harness output:
 ```
 [harness] ======== RESTART TRIGGERED ========
 [harness] Preparing replacement before stopping the current server...
-[harness] Building server...
-[harness] Build complete.
+[harness] Building staged server replacement...
+[harness] Staged build complete; live dist is unchanged.
 [harness] Waiting for port 3001 to be free...
 [harness] Launching server (port 3001)...
 ```
 
-If validation or the build fails, the harness logs the error and keeps the current gateway
-running instead of entering the shutdown window or launching partial output. For a validation
-failure, follow the stopped-stack manual repair procedure above. For a compilation failure, fix
-the code and run `npm run restart-server` again; the live watcher retries preparation.
+If validation or the staged build fails, the harness logs the error and keeps the current gateway running instead of entering the shutdown window or changing live `dist`. For a validation failure, follow the stopped-stack manual repair procedure above. For a compilation failure, fix the code and run `npm run restart-server` again; the live watcher retries preparation.
+
+If startup reports an interrupted promotion, do not delete or rename `dist`, `.bobbit-dist-stage-*`, `.bobbit-dist-previous-*`, or `.bobbit-dist-promotion.json` by hand. Stop the development stack and run:
+
+```bash
+node scripts/harness-bootstrap.mjs recover
+```
+
+The bootstrap validates journal paths and required server entry points before selecting an authority. A corrupt journal or a state with no valid authority fails deliberately so an operator can inspect it instead of silently launching uncertain output.
 
 ### Type-checking without restarting
 

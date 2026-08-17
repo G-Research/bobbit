@@ -1,100 +1,112 @@
 # Gateway Startup Performance Audit
 
-## Scope and measurement
+## Purpose
 
-The gateway now tees boot phase timings to `<headquarters>/state/boot-timings.log`. The audit uses ten completed starts from the same Windows development installation plus a controlled `npm run restart-server` run. Timings are wall-clock durations from process start to a ready listener; post-ready worktree sweeping, pool fill, and transcript cost backfill are reported separately.
+Gateway startup must restore durable state before it accepts traffic, but it should not repeat historical salvage work after that work has completed. This change separates one-time forensic recovery from every-boot consistency checks, and moves restart compilation outside the availability window without weakening eager session restoration or crash recovery.
 
-The measured installation has four project contexts and 39 live sessions. Its retained history is unusually large, which makes repeated recovery work easy to see.
+Boot phase lines are written to `<headquarters>/state/boot-timings.log`. They measure process and server phases; client reload samples use the separate `boot-timing.jsonl` instrumentation.
 
-## Baseline
+## Historical handoff evidence
 
-Across the ten retained starts:
+The following measurements came from the original candidate handoff. They are retained as context, not presented as a reproduction on the final implementation.
 
-| Phase | Median | Range | Startup role |
-|---|---:|---:|---|
-| Process prologue | 0.82 s | 0.76–1.16 s | binaries, token, TLS |
-| `createGateway` construction | 33.93 s | 10.25–53.21 s | migrations and synchronous store/context setup |
-| AI gateway check | 0.15 s | 0.12–0.23 s | network/provider discovery |
-| MCP initialization | 1.96 s | 1.85–2.50 s | MCP catalogue startup |
-| Team restoration | 74.48 s | 48.36–102.86 s | team consistency and historical transcript recovery |
-| Session restoration | 22.42 s | 21.12–35.34 s | live agent process revival |
-| Cost backfill | 0.67 s | 0.61–1.23 s | legacy metadata repair |
-| **Process start to ready** | **131.87 s** | **111.17–175.86 s** | user-visible gateway startup |
-| Post-ready background work | 32.43 s | 26.22–44.92 s | sweeper, pool fill, transcript backfill |
+A Windows development installation with four project contexts and a large retained history recorded ten starts:
 
-The controlled restart completed in 111.17 seconds after the new process began. Its critical path was:
+| Phase | Median | Range |
+|---|---:|---:|
+| Process prologue | 0.82 s | 0.76–1.16 s |
+| `createGateway` construction | 33.93 s | 10.25–53.21 s |
+| AI gateway check | 0.15 s | 0.12–0.23 s |
+| MCP initialization | 1.96 s | 1.85–2.50 s |
+| Team restoration | 74.48 s | 48.36–102.86 s |
+| Session restoration | 22.42 s | 21.12–35.34 s |
+| Cost backfill | 0.67 s | 0.61–1.23 s |
+| **Process start to ready** | **131.87 s** | **111.17–175.86 s** |
+| Post-ready background work | 32.43 s | 26.22–44.92 s |
 
-- team restoration: 73.90 s (66.5%);
-- session restoration: 23.53 s (21.2%);
-- gateway construction: 10.25 s (9.2%);
-- MCP initialization: 1.85 s (1.7%);
-- all other measured work: 1.64 s (1.5%).
+The handoff characterized that installation as having 39 live sessions. A later candidate observation reported a 30.83-second process-to-ready boot, 4.51-second gateway construction, a team-forensic phase below the logging threshold, and 35 restored sessions. The 39-to-35 difference was not independently accounted for. These figures therefore describe separate historical observations and must not be read as a verified before/after session-retention result.
 
-The old harness also stopped the live gateway before compiling server TypeScript. In the controlled run there were about 55 seconds between the shutdown marker and the next process boot marker. That build time was avoidable downtime in addition to gateway boot.
+The historical data still identifies the relevant costs: broad team transcript salvage ran repeatedly, Headquarters migration revisited unchanged trees and rewrote large diagnostics, and the restart harness compiled after stopping the live gateway.
 
-## Validated steady-state result
+## Final implementation
 
-The first fixed boot retained the one-time salvage behavior and completed in 109.35 seconds, including 57.38 seconds of team recovery, then atomically wrote the project checkpoints. The next boot showed no `restore-teams` phase above the 50 ms logging threshold.
+### Team forensic recovery checkpoint
 
-That checkpointed boot became ready in **78.57 seconds**: 30.78 seconds (28.1%) faster than the immediately preceding run and 53.30 seconds (40.4%) faster than the ten-run baseline median. The saved team phase was partly masked by unrelated run-to-run variance: session revival rose from 19.25 to 43.24 seconds and tool-doc generation rose from 1.20 to 15.76 seconds during the second run. The important controlled observation is that 57 seconds of repeated team traversal disappeared while all 35 live sessions restored and health remained clean.
+Each project state directory owns `.team-forensic-recovery.json`. The current team recovery policy writes version 1 records with `running` or `complete` status.
 
-After adding the Headquarters migration evidence checkpoint, its upgrade pass took 5.64 seconds and published the versioned marker. The next boot omitted both `restore-teams` and `migrateLegacyHeadquartersDirectory` from the ≥50 ms phase log. Gateway construction fell to **4.51 seconds**, and process start to ready fell to **30.83 seconds**—101.04 seconds (76.6%) faster than the original ten-run median. All 35 sessions restored and gateway health remained clean. The marker and 2.14 MB full diagnostics remained byte-for-byte untouched during the steady-state boot.
+A missing, malformed, stale-version, `running`, or completion-fenced record runs the expensive historical passes: fully orphaned team-lead discovery, non-team-lead discovery, and legacy identity-sidecar backfill. Routine team-store cleanup and concrete dangling `teamLeadSessionId` recovery still run on every boot. A dangling pointer revokes completion before recovery and reopens the broader project pass so related agents can be recovered in the same boot.
 
-## Root causes
+Completion is published only after recovered session rows have crossed the session store's acknowledged persistence boundary. Atomic temporary-file publication, file synchronization, rename, and supported directory synchronization protect both `running` and `complete` records.
 
-### 1. Historical team salvage ran on every boot
+A sibling `.team-forensic-recovery.json.completion-pending` file is the final fail-closed fence. It exists before `complete` is published and is removed only when completion has been acknowledged. If fence removal or its directory acknowledgement fails, including an `EIO` after the fence has disappeared, the publisher recreates the fence before returning the original error. Successful compensation makes the next boot retry. If compensation also fails, an aggregate error preserves both failures because checkpoint authority is then indeterminate and requires operator repair; it must not be described as safely complete.
 
-`TeamManager.restoreTeams()` combined routine consistency checks with forensic recovery introduced for old persistence defects. It repeatedly scanned every team-mode goal across the active, historical, and legacy agent-session roots to recover fully orphaned team leads and workers, then checked every session for a missing identity sidecar.
+See [Checkpoint Team Forensic Recovery](design/checkpoint-team-forensic-recovery.md) for the full recovery boundary.
 
-The recovery is valuable once, but successful results are durable and current session creation writes sidecars at the source. Repeating the same tree traversal accounted for roughly half to two-thirds of total startup time.
+### Headquarters migration checkpoint
 
-### 2. The restart harness put compilation inside downtime
+The default Headquarters layout uses policy version 3 of `.headquarters-dir-migrated`. Version 3 has explicit `running` and `complete` states and the same completion-pending fence protocol as team recovery. Missing, empty, malformed, older-version, `running`, fenced, or evidence-mismatched records perform a full migration pass. A failed pass retains or republishes retry authority unless both the original completion acknowledgement and its compensation fail; that aggregate failure requires storage repair before checkpoint authority can be trusted.
 
-A sentinel restart killed the current gateway, waited for its port, validated dependencies, compiled all server TypeScript, and only then launched the replacement. Compilation does not require the current process to be stopped, so users unnecessarily experienced the build as application downtime.
+The fast path requires both resolved path topology and bounded recovery evidence to match:
 
-### 3. Synchronous gateway construction is the next variable cost
+- top-level legacy state and config topology, including real-path targets;
+- content hashes for project registries, deletion tombstones, and migration backups;
+- recovery qualification for backup keys against same-root live stores and tombstones.
 
-Prior checkpoints grouped most constructor time into a broad pre-migration bucket. On slow starts this bucket reached roughly 42–44 seconds; project-context opening then took 3–7 seconds, and tool detail-document generation usually took 0.9–1.6 seconds. The constructor now records Headquarters migration, legacy model seeding, residual state/project-registry setup, per-project migration, context opening, and tool-doc generation separately.
+The recovery qualification detects a same-root live store becoming missing, empty, or corrupt even when the backup itself did not change. Backup content changes invalidate by digest rather than mtime or size, and a previously absent legacy source becoming present invalidates through topology evidence. Evidence read errors fail closed into a full pass.
 
-The two fixed boots attributed **22.56 seconds** and **10.27 seconds** directly to `migrateLegacyHeadquartersDirectory`. Its current always-run path revisits the legacy tree and retained migration backups even after the completion marker exists; one observed diagnostics payload contained more than 23,000 preserve/skip rows and 1,859 already-routed records. This is now the clearest follow-up target, but its fast path must preserve secret relocation, tombstones, and the ability to recover genuinely unaccounted backup keys.
+A clean match skips recursive legacy copying, project-store routing, config quarantine traversal, backup retirement, and diagnostics rewriting. It does **not** skip server-secret relocation, `projects.json` repair, or Headquarters execution-store sanitization. Secret handling remains fail-closed. Override and same-root B1 layouts retain their backup-retirement qualification because their source and target topology differs.
 
-### 4. Live session revival is material but UX-sensitive
+See [Headquarters migration and repair](headquarters.md#migration-and-repair-on-first-boot) for routing, tombstone, and backup semantics.
 
-Restoring live agent processes costs 21–35 seconds. The current contract eagerly revives the complete regular/delegate set before gateway readiness so restored teams, interrupted work, and session state are coherent on first use. Deferring or dropping this work could improve the headline number but would trade it for slow first-open sessions or broken restart recovery. It is not the first target.
+### Staged restart and crash recovery
 
-## Implemented improvements
+A sentinel restart now validates dependencies and builds a complete candidate `dist` tree while the live gateway serves. The candidate rebuilds server/shared output and carries forward unrelated artifacts, such as existing UI output. The harness verifies required server entry points before it enters the stop window.
 
-### Versioned forensic-recovery checkpoint
+After the gateway stops and releases its port, the harness promotes the whole candidate tree. A durable promotion journal outside `dist` records the candidate and prior-live locations before either rename. All harness, watchdog, and Nord launch paths enter through the stable `scripts/harness-bootstrap.mjs`, also outside `dist`, so a later launch can resolve an interrupted promotion without importing a possibly absent or partial compiled harness:
 
-Each project state directory now receives `.team-forensic-recovery.json`. Missing, corrupt, stale-version, or `running` checkpoints execute the historical sweep. A successful pass atomically publishes `complete`; subsequent clean boots keep routine team consistency checks but skip full orphan/worker discovery and legacy sidecar backfill.
+- restore the previous tree when interruption occurred after moving live `dist`;
+- retain a valid promoted candidate after the second rename;
+- promote the candidate for an initial build with no prior `dist`;
+- clean stale managed staging, backup, and journal artifacts;
+- refuse to guess when the journal is corrupt or no recovery authority remains.
 
-A concrete dangling team-lead pointer invalidates completion and reopens the project sweep, so current detectable damage is still recovered. A crash or failed recovery leaves the checkpoint incomplete and retries next boot. Operators can force salvage by removing the file, and future recovery-policy changes can bump its version.
+Validation or staged-build failure does not stop the current gateway or mutate live `dist`. If the gateway exits unexpectedly during preparation, normal crash accounting and relaunch policy remain in control and the staged candidate is discarded. Ordinary unexpected-crash relaunch still validates and launches the existing live `dist` without rebuilding; staged compilation is specific to an operator sentinel restart.
 
-This targets the 48–103 second dominant phase without changing team/session readiness ordering or application behavior. The first boot of a project on this policy may still perform the one-time migration.
+Operational details are in [Development workflow](dev-workflow.md#dev-with-harness-recommended).
 
-### Build-before-stop harness restart
+## Independent final-SHA verification
 
-Sentinel restarts now validate and compile while the current gateway keeps serving. Only a successful build enters the stop, port-release, and launch window. Validation or compilation failure leaves the current application available and avoids launching partial output.
+The final implementation was exercised at SHA `c5aaee4f7` on Windows 11 with Node 24.13.1 and npm 11.8.0. An isolated candidate harness used port 4311 and an isolated empty state directory. Raw ignored artifacts are retained under `.bobbit-qa/hard-restart/` in the verification worktree.
 
-This does not reduce compilation CPU time, but removes it from user-visible downtime and improves failure behavior.
+The initial one-time boot reached listen in 313 ms, with `createGateway` taking 138 ms. Two consecutive, exact `npm run restart-server` cycles then recorded:
 
-### Headquarters migration steady-state checkpoint
+| Cycle | Signal to ready | Replacement process to listen | `createGateway` | Health |
+|---|---:|---:|---:|---|
+| 1 | 22.223 s | 264 ms | 97 ms | HTTP 200 immediately after the signal and after ready |
+| 2 | 19.403 s | 267 ms | 94 ms | HTTP 200 immediately after the signal and after ready |
 
-The default-layout `.headquarters-dir-migrated` marker is now a versioned evidence checkpoint rather than a timestamp. When path topology plus project-registry, tombstone, and migration-backup signatures are unchanged, startup skips recursive legacy tree comparison, project-store rerouting, config quarantine traversal, backup retirement, marker rewriting, and the multi-megabyte diagnostics rewrite. Project registries use a content digest because `ProjectRegistry` intentionally rewrites identical bytes on every boot; using mtime would defeat the fast path. A legacy timestamp or older checkpoint receives one final full pass. New or changed migration evidence reopens recovery, while unchanged ambiguous backups remain preserved without forcing work forever. Secret relocation, project repair, and Headquarters execution-store sanitization always run.
+Signal-to-ready includes the staged build performed while the prior gateway remained available. After the second cycle, health reported `status: ok`, `sessions: 0`, and `orphanedTranscripts: 0`. Clean boots omitted the slow migration and team-forensic phases. The team checkpoint remained the same 33-byte `complete` record with unchanged mtime, and no completion-pending fence appeared.
 
-### Persistent phase instrumentation
+This isolated run does **not** reproduce the handoff's 35-session observation or provide a production-sized eager-restoration sample: its state was intentionally empty. Eager restore ordering, failure handling, and checkpoint invalidation are supported by the focused 95+ regression tests and the passing full build, type-check, unit, browser, E2E, and review gates. Failed-build availability was verified by executable regression coverage; the operational run did not inject corruption into a live installation.
 
-Boot and shutdown phase logs remain bounded and best-effort. Constructor checkpoints are now granular enough to distinguish Headquarters migration from store/context setup. The instrumentation is intentionally cheap and has no startup dependency of its own.
+## Session restoration and PR #1216 compatibility
 
-## Recommended next targets
+Full eager restoration remains a pre-listen requirement. Team recovery settles before the live restore set is dispatched, and team event subscription follows session restoration.
 
-1. **Instrument per-session restore before changing its lifecycle.** Record process spawn, model catalogue resolution, transcript switch, and background-process recovery separately. Optimize shared repeated work and bounded concurrency first; keep eager recovery semantics.
-2. **Cache tool detail-doc materialization if its new variability persists.** A source/effective-pack fingerprint could avoid rescanning unchanged definitions. The median was only 0.9–1.6 seconds, but one validation boot took 15.76 seconds, so more samples are warranted.
-3. **Keep post-ready work post-ready.** Worktree sweeping, pool fill, and transcript backfill already run after readiness. Their 26–45 seconds affect host load but not initial reachability; optimize them only after the critical path.
+PR #1216 (`Fix Archived Team Leaks`) overlaps this ordering. If it lands before the final rebase, preserve the semantic sequence:
 
-## Non-targets
+```text
+restoreTeams
+→ reconcileArchivedTeamOwnership
+→ restoreSessions(suppression)
+```
 
-- Do not remove eager live-session restoration merely to improve the headline number.
-- Do not make security migration, store repair, or recovery fire-and-forget without a durable boundary.
-- Do not move worktree pool preparation back before readiness.
-- Do not disable MCP or network/provider discovery globally for a small gain.
+Archived-goal ownership must be reconciled before session dispatch computes its live set. The forensic checkpoint must not turn an archived-session leak into durable live authority, and conflict resolution must preserve #1216's suppression input rather than mechanically retaining the current two-step call sequence.
+
+## Operational conclusions
+
+- The final isolated sample demonstrates short replacement-process startup and two successful staged hard restarts, not the historical production-sized session count.
+- Clean checkpointed boots avoid recurring historical transcript traversal, recursive legacy migration, and large diagnostics rewrites.
+- Completion fences make acknowledged durability—not a visible rename alone—the authority for skipping recovery.
+- Compilation remains part of signal-to-ready elapsed time but is outside gateway downtime.
+- Eager live-session restoration remains intentionally on the readiness path; optimize its internals rather than deferring it.

@@ -1,51 +1,93 @@
 # Checkpoint Team Forensic Recovery
 
-## Status
+## Status and context
 
-Implemented. This change is limited to `TeamManager.restoreTeams()` boot latency and does not change server listen ordering or session revival.
+Implemented. This design reduces `TeamManager.restoreTeams()` boot latency without changing readiness or live-session revival semantics. It distinguishes ongoing team consistency repair from historical transcript salvage that should run once per recovery-policy version.
 
 ## Problem
 
-Team restoration mixed two different responsibilities:
+Team restoration previously mixed two responsibilities:
 
 1. routine consistency repair for persisted team rows; and
-2. historical forensic migration across every team-mode goal and every trusted agent-session root.
+2. historical forensic migration across every team-mode goal and trusted agent-session root.
 
-The second category recovered valuable transcripts after old persistence bugs, but its fully-orphan lead scan, worker scan, and legacy sidecar backfill ran on every startup. On installations with several historical session roots, the six-pass restore phase took 48–103 seconds even when a prior boot had already repaired all recoverable data.
-
-## Design
-
-Each project state directory owns `.team-forensic-recovery.json`. The record contains a recovery-policy version and one of two states:
-
-- `running`: the historical sweep began but did not durably finish;
-- `complete`: the current recovery-policy version finished.
-
-Writes use a temporary file and atomic rename. Missing, malformed, `running`, and older-version records all run the forensic sweep. A clean `complete` record suppresses transcript-tree traversal for that project.
-
-The checkpoint gates only the expensive historical work:
-
-- fully-orphan team-lead discovery;
-- non-team-lead agent discovery; and
-- legacy session-sidecar backfill.
-
-Routine in-memory/store checks still run every boot. In particular, orphan team rows are removed, dangling `teamLeadSessionId` pointers still trigger targeted transcript recovery, and stale recovered titles are still upgraded. Finding a dangling lead invalidates an existing completion before repair and reopens the broader project sweep, so sibling agents can be recovered in the same boot. A process exit or reported recovery failure leaves `running`, causing the next boot to retry.
-
-The marker is per project rather than global. A newly registered or imported project therefore gets its own initial forensic recovery. Recovery-policy changes can deliberately increment the version to perform a new one-time sweep.
+The second category repairs old persistence failures, but its fully orphaned lead scan, worker scan, and legacy sidecar backfill do not need to traverse historical trees after their results are durable.
 
 ## Recovery boundary
 
-New sessions write exact sidecars in the normal session lifecycle, and team-lead purge cleans the team store at the source. The broad scan is therefore a migration/salvage path for historical damaged state, not a standing index rebuild. The persisted-team dangling-pointer path remains the ongoing safety net for concrete new damage.
+Each project state directory owns `.team-forensic-recovery.json`. The current policy version is 1, with two checkpoint states:
 
-Operators can force a project rescan by removing `.bobbit/state/.team-forensic-recovery.json`; the next boot writes `running`, performs all historical passes, and publishes `complete` only after they settle.
+- `running`: historical recovery has begun but has not durably completed;
+- `complete`: the current recovery-policy version has finished and been acknowledged.
+
+Missing, malformed, `running`, and older-version records run the forensic sweep. A clean, unfenced `complete` record suppresses only:
+
+- fully orphaned team-lead discovery;
+- non-team-lead agent discovery; and
+- legacy session-sidecar backfill.
+
+Routine checks remain every-boot behavior. Orphan team rows are removed, dangling `teamLeadSessionId` pointers trigger targeted transcript recovery, unrecoverable dangling entries are dropped, and stale recovered titles are upgraded. A concrete dangling pointer first replaces prior completion with `running`, then reopens the broader project sweep so sibling records can be recovered in the same boot.
+
+The marker is per project so a newly registered or imported project receives its own initial recovery. A future policy change can increment the version to request another fleet-wide pass.
+
+## Completion protocol
+
+Before historical traversal, `begin()` atomically publishes `running`. If this durable revocation fails, the project does not perform forensic mutations during that boot; routine consistency checks still run. This prevents recovery from modifying durable session state while an old `complete` marker remains authoritative.
+
+Recovery preserves existing identity rules: trusted roots remain ordered, the first trusted root wins during de-duplication, and an exact sidecar takes precedence over heuristic reconstruction. Sidecar writes are exclusive temporary-file publications followed by rename; a failed backfill fails the project pass rather than being reported as successful.
+
+After all historical passes settle, the session store is flushed before completion. This matters because reconstructed rows can be queued for asynchronous publication; the checkpoint cannot become authoritative while those rows exist only in memory.
+
+Checkpoint publication uses an exclusive temporary file, file synchronization, atomic rename, and supported directory synchronization. Completion has an additional sibling fence:
+
+```text
+.team-forensic-recovery.json.completion-pending
+```
+
+The sequence is:
+
+1. durably publish or acknowledge the completion-pending fence;
+2. durably publish `complete`;
+3. remove the fence and acknowledge that removal.
+
+`isComplete()` returns false whenever the fence exists, even if the visible checkpoint says `complete`. If fence removal or its final directory sync fails, including an `EIO` observed only after the fence is absent, the publisher recreates the fence before returning the original error. Successful compensation keeps the next boot retryable. If compensation also fails, an aggregate error retains both failures because checkpoint authority is indeterminate; stop the gateway, repair the state directory, remove the checkpoint and any fence, then restart to force recovery.
+
+Windows uses rename as the atomic publication boundary because Node does not support opening directories for synchronization there. POSIX filesystems additionally receive directory synchronization where supported; real I/O failures such as `EIO` are not classified as unsupported.
+
+## Ordering and integration
+
+The server's current pre-listen order is:
+
+```text
+restoreTeams → restoreSessions → resubscribeTeamEvents
+```
+
+Recovered persisted rows therefore exist before eager live-session revival, and event subscriptions attach only after live session objects exist.
+
+PR #1216 (`Fix Archived Team Leaks`) adds archived-goal reconciliation to the same boundary. If it lands before this work is rebased, preserve this semantic order:
+
+```text
+restoreTeams
+→ reconcileArchivedTeamOwnership
+→ restoreSessions(suppression)
+```
+
+Reconciliation must determine the suppressed archived-session set before dispatch. A checkpoint may skip historical tree traversal; it must never preserve leaked archived sessions as live or bypass #1216's ownership suppression.
+
+## Operations
+
+To force a project rescan, stop the gateway and remove the project's `.bobbit/state/.team-forensic-recovery.json` and any sibling completion-pending fence. The next boot publishes `running`, performs the historical passes, flushes recovered rows, and publishes acknowledged completion.
+
+Do not remove the checkpoint merely to diagnose ordinary team-store consistency: dangling-pointer and orphan-row checks already run every boot. Inspect gateway logs for checkpoint begin/complete warnings and confirm whether the sibling fence exists before treating a visible `complete` record as authoritative.
 
 ## Risks and mitigations
 
-- **Both the team row and session row disappear after completion:** there is no authoritative pointer proving new damage, so the broad scan does not automatically reopen. Current source-side persistence and sidecars prevent the known causes; deleting the checkpoint provides an explicit salvage path. A future newly identified cause should fix its mutation source and bump the recovery-policy version when a fleet-wide rescan is warranted.
-- **Checkpoint write fails:** restoration remains available; the project stays uncheckpointed and retries next boot. The failure is logged but does not prevent gateway startup.
-- **Crash during recovery:** `running` is written before historical traversal, so the next boot retries instead of trusting partial work.
-- **Corrupt or stale checkpoint:** it is treated as incomplete and safely replaced after recovery.
+- **Both the team row and session row disappear after completion:** no authoritative pointer proves new damage. Source-side persistence and sidecars prevent the known causes; an operator can remove the checkpoint for explicit salvage. A newly identified systemic cause should fix the mutation source and bump the policy version when a broad rescan is needed.
+- **Begin publication fails:** forensic mutations are skipped for that project, so stale completion cannot hide partially published repair. The next boot retries.
+- **Recovered-session flush or sidecar write fails:** completion is withheld and the project retries.
+- **Crash or completion acknowledgement failure:** `running` or a successfully retained/republished completion-pending fence remains retry authority. An aggregate compensation failure requires operator repair and explicit checkpoint removal before restart.
+- **Corrupt or stale checkpoint:** it is incomplete and safely replaced after recovery.
 
-## Tests
+## Verification
 
-- `tests2/core/team-manager-async-recovery.test.ts` verifies first-boot recovery, zero transcript-tree I/O on the next clean boot, and checkpoint invalidation for a dangling lead.
-- `tests2/core/team-recovery-checkpoint.test.ts` verifies missing, running, corrupt, stale-version, and completed checkpoint states plus temporary-file cleanup.
+Focused coverage exercises missing, running, corrupt, stale-version, and completed states; first-boot recovery and clean-boot zero tree I/O; dangling-pointer invalidation; recovered-session flush failure; atomic publication interruption; completion directory-sync failure; and compensation after fence-clear `EIO`. Broader session tests retain sidecar precedence, trusted-root ordering, and eager restoration behavior.
