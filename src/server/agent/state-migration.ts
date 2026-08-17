@@ -1882,10 +1882,20 @@ export function recoverPreMigrationData(stateDir: string): void {
 	// SessionStore tiers share one hard-delete namespace. Read the canonical live
 	// namespace once so a purged row cannot be restored from either tier backup.
 	const tombstonedSessionIds = readDeletionTombstones(stateDir, "sessions.json");
+	// SessionStore eagerly merges both tiers, so recovery must use the same logical
+	// identity set. Otherwise a row that moved tiers can be restored into its old
+	// tier from a stale backup, and duplicate backup rows can be restored twice.
+	const currentSessionIds = new Set<string>();
+	for (const name of SESSION_TIER_FILES) {
+		for (const item of readStoreRecordsWithShape(path.join(stateDir, name), name).records) {
+			const id = String(item.id ?? "");
+			if (id) currentSessionIds.add(id);
+		}
+	}
 
 	// SessionStore tiers are independently versioned envelopes. Recover each tier
 	// without merging archived rows into the live tier or flattening either envelope.
-	for (const name of ["sessions.json", "sessions.archived.json"] as const) {
+	for (const name of SESSION_TIER_FILES) {
 		const backupFile = path.join(stateDir, name + PRE_MIGRATION_SUFFIX);
 		const currentFile = path.join(stateDir, name);
 		if (!fs.existsSync(backupFile)) continue;
@@ -1894,13 +1904,14 @@ export function recoverPreMigrationData(stateDir: string): void {
 			if (backup.length === 0) continue;
 			const currentExists = fs.existsSync(currentFile);
 			const { records: current, shape: currentShape } = readStoreRecordsWithShape(currentFile, name);
-			const existingIds = new Set(current.map(item => String(item.id)));
 			let added = 0;
 			for (const item of backup) {
 				const id = String(item.id ?? "");
-				if (id && !tombstonedSessionIds.has(id) && !existingIds.has(id)) {
+				if (id && !tombstonedSessionIds.has(id) && !currentSessionIds.has(id)) {
 					current.push(item);
-					existingIds.add(id);
+					// Update the shared identity set before processing the next record
+					// or tier so stale backup sources cannot reintroduce it elsewhere.
+					currentSessionIds.add(id);
 					added++;
 				}
 			}
