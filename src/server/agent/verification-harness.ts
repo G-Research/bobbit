@@ -5191,11 +5191,16 @@ export class VerificationHarness {
 		const attempt = (this._cancelledCleanupRetryAttempts.get(signalId) ?? 0) + 1;
 		this._cancelledCleanupRetryAttempts.set(signalId, attempt);
 		const delayMs = Math.min(30_000, 1_000 * 2 ** Math.min(5, attempt - 1));
-		const timer = this.clock.setTimeout(() => {
+		const timer = this.clock.setTimeout(async () => {
 			this._cancelledCleanupRetryTimers.delete(signalId);
 			const active = this.activeVerifications.get(signalId);
-			if (active && (active.cancelled || active.pendingTerminalIntent)) void this._startCancelledVerificationCleanup(active);
-			else this._cancelledCleanupRetryAttempts.delete(signalId);
+			if (active && (active.cancelled || active.pendingTerminalIntent)) {
+				try {
+					await this._startCancelledVerificationCleanup(active);
+				} catch (err) {
+					console.warn(`[verification] Scheduled terminal cleanup retry for ${signalId} failed: ${(err as Error).message}`);
+				}
+			} else this._cancelledCleanupRetryAttempts.delete(signalId);
 		}, delayMs);
 		timer.unref?.();
 		this._cancelledCleanupRetryTimers.set(signalId, timer);
