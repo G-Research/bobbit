@@ -5177,7 +5177,8 @@
       "execution": {
         "runner": "vitest",
         "tier": "unit",
-        "project": "integration"
+        "project": "isolated",
+        "reason": "Mutates the shared verification harness command-step runner and notifier, so its exact cleanup ownership assertions require a dedicated isolated fork."
       }
     },
     {

@@ -183,6 +183,7 @@ async function expectNoSignalAdmission(gateway: any, goalId: string, expectedSig
  * pending even after `killTree()`, so no wall-clock race is involved.
  */
 interface PendingCleanupChild {
+	pid: number;
 	killed: boolean;
 	settled: boolean;
 	settle: () => void;
@@ -374,13 +375,18 @@ async function disposeRestartCancellationFixture(fixture: RestartCancellationFix
 }
 
 class PendingExactCleanupRunner implements VerificationCommandRunner {
-	readonly nonDurable = true;
+	readonly nonDurable: boolean;
 	readonly children: PendingCleanupChild[] = [];
 	private readonly spawnWaiters = new Map<number, Array<() => void>>();
 
+	constructor({ durable = false }: { durable?: boolean } = {}) {
+		this.nonDurable = !durable;
+	}
+
 	spawn(_spec: VerificationCommandSpawnSpec): TrackedChild {
+		const pid = 970_000 + this.children.length;
 		const child = Object.assign(new EventEmitter(), {
-			pid: 970_000 + this.children.length,
+			pid,
 			stdout: Object.assign(new EventEmitter(), { destroy() {} }),
 			stderr: Object.assign(new EventEmitter(), { destroy() {} }),
 			unref() {},
@@ -391,6 +397,7 @@ class PendingExactCleanupRunner implements VerificationCommandRunner {
 		const treeExit = new Promise<boolean>(resolve => { resolveTreeExit = resolve; });
 		const killed = new Promise<void>(resolve => { resolveKill = resolve; });
 		const record: PendingCleanupChild = {
+			pid,
 			killed: false,
 			settled: false,
 			settle: () => {
@@ -442,6 +449,45 @@ class PendingExactCleanupRunner implements VerificationCommandRunner {
 	settleAll(): void {
 		for (const child of this.children) child.settle();
 	}
+}
+
+/**
+ * Wait for the real ownership persistence edge after a fake command has been
+ * spawned. `spawn()` itself resolves before `_runCommandStep()` records its
+ * PID, so starting replacement at that earlier edge models a current-boot
+ * command rather than the intended known-dead zombie command.
+ */
+function awaitPersistedRunningCommandOwnership(
+	harness: VerificationHarness,
+	goalId: string,
+	signalId: string,
+	expectedPid: number,
+): { ready: Promise<void>; restore: () => void } {
+	const privateHarness = harness as any;
+	const hasPersistedOwnership = () => harness.getActiveVerifications(goalId).some(active =>
+		active.signalId === signalId && active.steps.some(step =>
+			step.status === "running" && step.pid === expectedPid,
+		),
+	);
+	let resolveReady!: () => void;
+	let resolved = false;
+	const ready = new Promise<void>(resolve => { resolveReady = resolve; });
+	const resolveIfPersisted = () => {
+		if (!resolved && hasPersistedOwnership()) {
+			resolved = true;
+			resolveReady();
+		}
+	};
+	const originalPersist = privateHarness._persistActive.bind(privateHarness);
+	const persistSpy = vi.spyOn(privateHarness, "_persistActive").mockImplementation(() => {
+		const persisted = originalPersist();
+		if (persisted) resolveIfPersisted();
+		return persisted;
+	});
+	// The record may have crossed the persistence edge just before the spy was
+	// installed, so handle that deterministic already-stamped case too.
+	resolveIfPersisted();
+	return { ready, restore: () => persistSpy.mockRestore() };
 }
 
 /** Observe cancellation state without adding wall-clock sleeps to tier 1. */
@@ -1097,8 +1143,13 @@ test.describe("Cancel Verification API", () => {
 		let sessionId: string | undefined;
 		let conn: WsConnection | undefined;
 		let resignalRequest: Promise<Response> | undefined;
-		const runner = new PendingExactCleanupRunner();
+		const runner = new PendingExactCleanupRunner({ durable: true });
 		const harness = gateway.teamManager.verificationHarness!;
+		const commandRunner = (gateway.sessionManager as any).commandRunner as {
+			execFile: (...args: any[]) => Promise<{ stdout: string; stderr: string }>;
+		};
+		let gitHeadSpy: ReturnType<typeof vi.spyOn> | undefined;
+		let ownershipBarrier: ReturnType<typeof awaitPersistedRunningCommandOwnership> | undefined;
 		const recoveryNudges: string[] = [];
 		const originalNotifier = (harness as any).notifyTeamLeadFn;
 		harness.setTeamLeadNotifier((_goalId: string, message: string) => { recoveryNudges.push(message); });
@@ -1108,10 +1159,28 @@ test.describe("Cancel Verification API", () => {
 			sessionId = await createSession({ goalId: setup.goalId });
 			conn = trackFakeCommandStepConnection(await connectWs(sessionId));
 
+			// Tier-1's spawn fence deliberately makes real Git unavailable. Give the
+			// route a stable local HEAD so it exercises duplicate zombie detection,
+			// rather than its deliberate unknown-commit fallback.
+			const originalExecFile = commandRunner.execFile.bind(commandRunner);
+			gitHeadSpy = vi.spyOn(commandRunner, "execFile").mockImplementation(async (...args: any[]) => {
+				const [file, gitArgs] = args;
+				if (file === "git" && gitArgs[0] === "rev-parse" && gitArgs[1] === "HEAD") {
+					return { stdout: "0123456789abcdef0123456789abcdef01234567", stderr: "" };
+				}
+				return originalExecFile(...args);
+			});
+
 			const firstRes = await signalSlowVerification(setup.goalId, "Old generation");
 			expect(firstRes.status).toBe(201);
 			const firstSignalId = (await firstRes.json() as SlowGateSignal).signal.id;
+			ownershipBarrier = awaitPersistedRunningCommandOwnership(harness, setup.goalId, firstSignalId, 970_000);
 			await runner.waitForSpawn(0);
+			await ownershipBarrier.ready;
+			expect(harness.areVerificationSessionsAlive(firstSignalId),
+				"PERSISTED_KNOWN_DEAD_FAKE_PID_MUST_BE_CLASSIFIED_AS_ZOMBIE").toBe(false);
+			const firstSignal = (await getGateState(setup.goalId) as any).signals.find((signal: any) => signal.id === firstSignalId);
+			expect(firstSignal?.commitSha, "ZOMBIE_REPLACEMENT_REQUIRES_A_KNOWN_COMMIT").not.toBe("unknown");
 			const eventCursor = conn.messageCount();
 
 			resignalRequest = signalSlowVerification(setup.goalId, "New generation");
@@ -1140,6 +1209,8 @@ test.describe("Cancel Verification API", () => {
 			expect(afterOldCleanup.status, "ZOMBIE_CLEANUP_MUST_NOT_OVERWRITE_NEW_GATE_STATE").toBe("pending");
 			expect(recoveryNudges, "ZOMBIE_RECOVERY_MUST_NOT_EMIT_A_RESIGNAL_NUDGE").toEqual([]);
 		} finally {
+			ownershipBarrier?.restore();
+			gitHeadSpy?.mockRestore();
 			(harness as any).notifyTeamLeadFn = originalNotifier;
 			runner.settleAll();
 			await resignalRequest?.catch(() => {});
