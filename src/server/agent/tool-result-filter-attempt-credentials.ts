@@ -20,29 +20,42 @@ export interface ToolResultFilterGateCredential {
  * in an environment variable, trace, transcript, log, or client response.
  */
 export class ToolResultFilterAttemptCredentials {
+	/** Credentials staged for a successor that has not started Pi yet. */
+	private readonly staged = new Map<string, ToolResultFilterGateCredential>();
+	/** Credentials committed only after the matching bridge has started. */
 	private readonly runtimes = new Map<string, ToolResultFilterGateCredential>();
 	/** Bounded by the short credential lifetime; values are expiry timestamps. */
 	private readonly consumed = new Map<string, number>();
 
 	beginRuntime(sessionId: string, runtimeGeneration: number): ToolResultFilterGateCredential {
 		const credential = Object.freeze({ runtimeGeneration, runtimeKey: randomBytes(32).toString("hex") });
-		this.runtimes.set(sessionId, credential);
+		// Staging a successor retires any predecessor credential immediately. The
+		// replacement coordinator fences its process; this owner must never let its
+		// old credential stand in for the successor's installed gate.
+		this.runtimes.delete(sessionId);
+		this.staged.set(sessionId, credential);
 		// A fresh runtime cannot replay a completed attempt from its predecessor.
 		for (const key of this.consumed.keys()) if (key.startsWith(`${sessionId}\u0000`)) this.consumed.delete(key);
 		return credential;
 	}
 
-	/**
-	 * Exact core-owned activation signal for the currently spawned Pi runtime.
-	 * It is set only by beginRuntime while the private bootstrap is assembled,
-	 * never by a callback/client claim.
-	 */
+	/** Commit exactly the credential staged for a successfully started bridge. */
+	commitRuntime(sessionId: string, credential: ToolResultFilterGateCredential | undefined): void {
+		if (!credential || this.staged.get(sessionId) !== credential) {
+			throw new Error(`Tool-result filter gate activation did not match staged runtime for session ${sessionId}`);
+		}
+		this.staged.delete(sessionId);
+		this.runtimes.set(sessionId, credential);
+	}
+
+	/** Exact core-owned installed-gate signal; staging alone is never active. */
 	hasRuntime(sessionId: string): boolean {
 		return this.runtimes.has(sessionId);
 	}
 
-	/** Invalidate a runtime before replacement, abort teardown, or termination. */
+	/** Invalidate staged/installed credentials before a failed or terminal runtime. */
 	invalidate(sessionId: string): void {
+		this.staged.delete(sessionId);
 		this.runtimes.delete(sessionId);
 		for (const key of this.consumed.keys()) if (key.startsWith(`${sessionId}\u0000`)) this.consumed.delete(key);
 	}

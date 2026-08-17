@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
 	createToolResultFilterAttemptToken,
 	ToolResultFilterAttemptCredentials,
@@ -12,6 +12,7 @@ const issuedAt = 1_700_000_000_000;
 function setup() {
 	const credentials = new ToolResultFilterAttemptCredentials();
 	const runtime = credentials.beginRuntime(sessionId, 7);
+	credentials.commitRuntime(sessionId, runtime);
 	const token = createToolResultFilterAttemptToken(runtime, sessionId, toolCallId, "7d1d98f4-bdcb-40ee-b0e1-7ac99f2df8db", issuedAt);
 	return { credentials, runtime, token };
 }
@@ -32,9 +33,21 @@ describe("ToolResultFilterAttemptCredentials", () => {
 		expect(credentials.consume(sessionId, toolCallId, token, issuedAt + 10_001)).toBe(false);
 	});
 
+	it("does not activate a staged credential before the bridge starts", () => {
+		const credentials = new ToolResultFilterAttemptCredentials();
+		const runtime = credentials.beginRuntime(sessionId, 0);
+		const token = createToolResultFilterAttemptToken(runtime, sessionId, toolCallId, "3f2d78f4-bdcb-40ee-b0e1-7ac99f2df8db", issuedAt);
+		expect(credentials.hasRuntime(sessionId)).toBe(false);
+		expect(credentials.consume(sessionId, toolCallId, token, issuedAt + 1)).toBe(false);
+		credentials.commitRuntime(sessionId, runtime);
+		expect(credentials.hasRuntime(sessionId)).toBe(true);
+		expect(credentials.consume(sessionId, toolCallId, token, issuedAt + 1)).toBe(true);
+	});
+
 	it("does not revoke a live gate for a coordinator-only generation advance", () => {
 		const manager: any = new SessionManager();
 		const runtime = manager.toolResultFilterAttemptCredentials.beginRuntime(sessionId, 0);
+		manager.toolResultFilterAttemptCredentials.commitRuntime(sessionId, runtime);
 		const token = createToolResultFilterAttemptToken(runtime, sessionId, toolCallId, "3f2d78f4-bdcb-40ee-b0e1-7ac99f2df8db", issuedAt);
 		// poison-redrive obtains a lifecycle coordinator token but does not replace
 		// the Pi process; its live private gate must stay usable.
@@ -46,14 +59,39 @@ describe("ToolResultFilterAttemptCredentials", () => {
 		const { credentials, token } = setup();
 		const next = credentials.beginRuntime(sessionId, 8);
 		expect(credentials.consume(sessionId, toolCallId, token, issuedAt + 1)).toBe(false);
+		credentials.commitRuntime(sessionId, next);
 		const current = createToolResultFilterAttemptToken(next, sessionId, toolCallId, "4c9189ab-003f-4b4a-a31a-8b64b3d71b11", issuedAt);
 		credentials.invalidate(sessionId);
 		expect(credentials.consume(sessionId, toolCallId, current, issuedAt + 1)).toBe(false);
 	});
 
+	it("waits for a preparing owner and ignores processless session capsules", async () => {
+		const manager: any = new SessionManager();
+		manager.setToolResultFilterActivationResolver(() => ({ toolResult: true }));
+		let finishSetup!: () => void;
+		const setup = new Promise<void>(resolve => { finishSetup = resolve; });
+		manager.sessions.set("preparing", { id: "preparing", projectId: "project", rpcClient: { running: true } });
+		manager.sessions.set("zombie", { id: "zombie", projectId: "project", rpcClient: { running: false } });
+		manager.pendingWorktreeSetups.set("preparing", setup);
+		manager.restartAgent = vi.fn(async (id: string) => {
+			const runtime = manager.toolResultFilterAttemptCredentials.beginRuntime(id, 1);
+			manager.toolResultFilterAttemptCredentials.commitRuntime(id, runtime);
+		});
+
+		const reconciliation = manager.reconcileToolResultFilterGate("project");
+		await Promise.resolve();
+		expect(manager.restartAgent).not.toHaveBeenCalled();
+		finishSetup();
+		await reconciliation;
+		expect(manager.restartAgent).toHaveBeenCalledTimes(1);
+		expect(manager.restartAgent).toHaveBeenCalledWith("preparing");
+		expect(manager.toolResultFilterAttemptCredentials.hasRuntime("preparing")).toBe(true);
+	});
+
 	it("allows concurrent distinct tool attempts but never cross-settles them", () => {
 		const credentials = new ToolResultFilterAttemptCredentials();
 		const runtime = credentials.beginRuntime(sessionId, 1);
+		credentials.commitRuntime(sessionId, runtime);
 		const first = createToolResultFilterAttemptToken(runtime, sessionId, "call-a", "11111111-1111-4111-8111-111111111111", issuedAt);
 		const second = createToolResultFilterAttemptToken(runtime, sessionId, "call-b", "22222222-2222-4222-8222-222222222222", issuedAt);
 		expect(credentials.consume(sessionId, "call-b", first, issuedAt + 1)).toBe(false);

@@ -485,6 +485,8 @@ export interface PipelineContext {
 	toolResultFilterGateCredential?: (sessionId: string) => { runtimeGeneration: number; runtimeKey: string };
 	/** Clears a predecessor gate credential when this replacement has no gate. */
 	invalidateToolResultFilterGate?: (sessionId: string) => void;
+	/** Commits a gate only after its exact staged bridge has started successfully. */
+	commitToolResultFilterGate?: (sessionId: string, credential: import("./tool-result-filter-attempt-credentials.js").ToolResultFilterGateCredential | undefined) => void;
 	groupPolicyStore: ToolGroupPolicyStore | null;
 	configCascade: ConfigCascade | null;
 	lifecycleHub?: LifecycleHub;
@@ -1511,7 +1513,13 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 	if (plan.dynamicCapabilities) await ctx.store.flushAsync();
 
 	// Step 8: spawn agent
-	const session = await profileAsync("executePlan.spawnAgent", () => spawnAgent(plan, ctx));
+	let session: SessionInfo;
+	try {
+		session = await profileAsync("executePlan.spawnAgent", () => spawnAgent(plan, ctx));
+	} catch (err) {
+		ctx.invalidateToolResultFilterGate?.(plan.id);
+		throw err;
+	}
 
 	// Step 9: update persistence with full session data (agentSessionFile, etc.)
 	persistOnce(session, plan, ctx.store);
@@ -1773,7 +1781,9 @@ export async function executeWorktreeAsync(
 		projectId: plan.projectId,
 	});
 
-	// Create real RpcBridge (replacing placeholder)
+	// Create real RpcBridge (replacing placeholder). Preserve the private
+	// bootstrap locally: RpcBridge deliberately removes it from options.
+	const toolResultFilterBootstrap = plan.bridgeOptions.toolResultFilterBootstrap;
 	const rpcClient = new RpcBridge(plan.bridgeOptions);
 	session.rpcClient = rpcClient;
 	session.allowedTools = plan.effectiveAllowedTools?.map(e => e.name);
@@ -1822,10 +1832,16 @@ export async function executeWorktreeAsync(
 	});
 
 	// Start agent with retry
-	await withRetry(
-		() => rpcClient.start(),
-		{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
-	);
+	try {
+		await withRetry(
+			() => rpcClient.start(),
+			{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
+		);
+		if (toolResultFilterBootstrap) ctx.commitToolResultFilterGate?.(plan.id, toolResultFilterBootstrap);
+	} catch (err) {
+		ctx.invalidateToolResultFilterGate?.(plan.id);
+		throw err;
+	}
 
 	// Continue-Archived: rehydrate from the cloned JSONL before persisting.
 	if (plan.preExistingAgentSessionFile) {
@@ -1935,6 +1951,8 @@ export async function executeWorktreeAsync(
  * Returns the fully wired SessionInfo.
  */
 async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise<SessionInfo> {
+	// RpcBridge consumes and deletes this private option in its constructor.
+	const toolResultFilterBootstrap = plan.bridgeOptions.toolResultFilterBootstrap;
 	const rpcClient = new RpcBridge(plan.bridgeOptions);
 	const spawnPinnedModel = plan.bridgeOptions.initialModel;
 	const spawnPinnedThinkingLevel = plan.bridgeOptions.initialThinkingLevel;
@@ -2035,10 +2053,16 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 
 	// Start agent with retry
 	const __t = performance.now();
-	await withRetry(
-		() => rpcClient.start(),
-		{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
-	);
+	try {
+		await withRetry(
+			() => rpcClient.start(),
+			{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
+		);
+		if (toolResultFilterBootstrap) ctx.commitToolResultFilterGate?.(plan.id, toolResultFilterBootstrap);
+	} catch (err) {
+		ctx.invalidateToolResultFilterGate?.(plan.id);
+		throw err;
+	}
 	recordElapsed("spawnAgent.rpcStart", performance.now() - __t);
 
 	// Continue-Archived: tell the agent CLI to rehydrate from the cloned JSONL

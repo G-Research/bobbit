@@ -211,6 +211,7 @@ test.describe("tool result filter route", () => {
 	test.beforeEach(async () => {
 		sessionId = await createSession({ projectId });
 		runtimeCredential = gatewayManager.toolResultFilterAttemptCredentials.beginRuntime(sessionId, 0);
+		gatewayManager.toolResultFilterAttemptCredentials.commitRuntime(sessionId, runtimeCredential);
 	});
 	test.afterEach(async () => {
 		if (projectId && cookie) {

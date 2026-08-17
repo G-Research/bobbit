@@ -3206,6 +3206,8 @@ export class SessionManager {
 	/** Core-owned pre-fan-out result-gate availability; recalculated for each spawn/restore. */
 	private toolResultFilterActivationResolver: ((projectId: string | undefined) => { toolResult?: boolean }) | null = null;
 	private piExtensionRuntimeDiagnostics = new Map<string, PiExtensionDiagnostic>();
+	/** Worktree setup owns a live placeholder before its bridge exists. */
+	private readonly pendingWorktreeSetups = new Map<string, Promise<void>>();
 	private worktreePools: Map<string, WorktreePool> = new Map();
 	private worktreePoolInitializations = new Map<string, Promise<void>>();
 	sandboxManager: SandboxManager | null = null;
@@ -4052,8 +4054,17 @@ export class SessionManager {
 	 */
 	async reconcileToolResultFilterGate(projectId: string): Promise<void> {
 		if (this.toolResultFilterActivationResolver?.(projectId).toolResult !== true) return;
-		for (const session of [...this.sessions.values()]) {
-			if (session.projectId !== projectId || session.status === "preparing" || session.status === "terminated") continue;
+		for (const sessionId of [...this.sessions.keys()]) {
+			// A worktree placeholder has no bridge yet. Its setup may have already
+			// resolved activation, so wait for the owner rather than guessing from
+			// `status` and accidentally returning a grant before its Pi starts.
+			const pendingSetup = this.pendingWorktreeSetups.get(sessionId);
+			if (pendingSetup) {
+				try { await pendingSetup; }
+				catch { continue; } // Setup failed: there is no runnable runtime to protect.
+			}
+			const session = this.sessions.get(sessionId);
+			if (!session || session.projectId !== projectId || !session.rpcClient.running) continue;
 			if (this.toolResultFilterAttemptCredentials.hasRuntime(session.id)) continue;
 			await this.restartAgent(session.id);
 			// The effective policy may have changed while this session waited behind
@@ -4445,6 +4456,7 @@ export class SessionManager {
 				sessionId, this._currentRespawnGeneration(sessionId),
 			),
 			invalidateToolResultFilterGate: (sessionId) => this.toolResultFilterAttemptCredentials.invalidate(sessionId),
+			commitToolResultFilterGate: (sessionId, credential) => this.toolResultFilterAttemptCredentials.commitRuntime(sessionId, credential),
 			groupPolicyStore: this.groupPolicyStore ?? null,
 			configCascade: this.configCascade,
 			lifecycleHub: this.lifecycleHub,
@@ -11402,6 +11414,7 @@ export class SessionManager {
 			projectId: ps.projectId,
 		});
 
+		const toolResultFilterBootstrap = bridgeOptions.toolResultFilterBootstrap;
 		const rpcClient = new RpcBridge(bridgeOptions);
 		const eventBuffer = new EventBuffer();
 		// In-place restart paths (`restartAgent`, `_restartSessionWithUpdatedRole`)
@@ -11527,9 +11540,11 @@ export class SessionManager {
 
 		try {
 			await rpcClient.start();
+			if (toolResultFilterBootstrap) this.toolResultFilterAttemptCredentials.commitRuntime(ps.id, toolResultFilterBootstrap);
 		} catch (err) {
 			// A partially started replacement must never survive a failed restore.
 			// The in-place caller will reinstall only its fenced dormant rollback.
+			this.toolResultFilterAttemptCredentials.invalidate(ps.id);
 			try { await rpcClient.stop(); } catch { /* best-effort cleanup */ }
 			throw err;
 		}
@@ -11561,6 +11576,7 @@ export class SessionManager {
 			// response. Detach its listener and fence the replacement before stopping
 			// it so replayed/late Pi events cannot mutate queues, status, or persisted
 			// intent after the rollback capsule becomes canonical again.
+			this.toolResultFilterAttemptCredentials.invalidate(ps.id);
 			restoring = false;
 			try { unsub(); } catch { /* best-effort listener cleanup */ }
 			this._fenceReplacedSession(session, this._currentRespawnGeneration(ps.id) + 1);
@@ -11571,6 +11587,7 @@ export class SessionManager {
 		try {
 			await this.tryAutoSelectModel(session);
 		} catch (err) {
+			this.toolResultFilterAttemptCredentials.invalidate(ps.id);
 			try { unsub(); } catch { /* best-effort listener cleanup */ }
 			await rpcClient.stop();
 			throw err;
@@ -12119,6 +12136,11 @@ export class SessionManager {
 					console.warn(`[session-manager] Early persist failed for worktree session ${session.id}:`, err);
 				}).finally(() => { session.pendingMetadataPersist = undefined; });
 			}).finally(releaseSetupThinkingAuthority);
+			this.pendingWorktreeSetups.set(id, setupPromise);
+			void setupPromise.then(
+				() => { if (this.pendingWorktreeSetups.get(id) === setupPromise) this.pendingWorktreeSetups.delete(id); },
+				() => { if (this.pendingWorktreeSetups.get(id) === setupPromise) this.pendingWorktreeSetups.delete(id); },
+			);
 
 			if (opts?.awaitWorktreeSetup) {
 				try {
@@ -14214,6 +14236,7 @@ export class SessionManager {
 		// fails closed without turning a healthy idle session into a dead one.
 		const oldRpcClient = session.rpcClient;
 		const oldUnsubscribe = session.unsubscribe;
+		const toolResultFilterBootstrap = bridgeOptions.toolResultFilterBootstrap;
 		const rpcClient = new RpcBridge(bridgeOptions);
 		let replacementCommitted = false;
 		let oldBridgeStopped = false;
@@ -14250,6 +14273,7 @@ export class SessionManager {
 
 		try {
 			await rpcClient.start();
+			if (toolResultFilterBootstrap) this.toolResultFilterAttemptCredentials.commitRuntime(id, toolResultFilterBootstrap);
 			if (agentSessionFile) {
 				if (!await sessionFileExists(roleFileCtx, agentSessionFile, this.sandboxManager)) {
 					throw new Error(`Cannot assign role for session ${id}: persisted conversation history is unavailable`);
@@ -14290,6 +14314,7 @@ export class SessionManager {
 				throw new Error(`Session ${id} role replacement was superseded after old bridge stop`);
 			}
 		} catch (err) {
+			this.toolResultFilterAttemptCredentials.invalidate(id);
 			unsub();
 			await rpcClient.stop().catch(() => {});
 			// If terminal cancellation landed during the irreversible old stop, both
@@ -16835,6 +16860,7 @@ export class SessionManager {
 				projectId: session.projectId,
 			});
 
+			const toolResultFilterBootstrap = bridgeOptions.toolResultFilterBootstrap;
 			const rpcClient = new RpcBridge(bridgeOptions);
 			let switchingSession = true;
 			let replayingSession = false;
@@ -16858,7 +16884,9 @@ export class SessionManager {
 			bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension);
 			try {
 				await rpcClient.start();
+				if (toolResultFilterBootstrap) this.toolResultFilterAttemptCredentials.commitRuntime(id, toolResultFilterBootstrap);
 			} catch (err) {
+				this.toolResultFilterAttemptCredentials.invalidate(id);
 				unsub();
 				await rpcClient.stop().catch(() => {});
 				throw err;
@@ -16889,6 +16917,7 @@ export class SessionManager {
 					}
 				}
 			} catch (err) {
+				this.toolResultFilterAttemptCredentials.invalidate(id);
 				switchingSession = false;
 				unsub();
 				await rpcClient.stop().catch(() => {});
@@ -16902,6 +16931,7 @@ export class SessionManager {
 			// Coordinator release owns their one exact redispatch.
 			this._reconcileAfterAbort(session, { outcome: "proven-no-start" });
 			if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session) {
+				this.toolResultFilterAttemptCredentials.invalidate(id);
 				unsub();
 				await rpcClient.stop().catch(() => {});
 				throw new Error(`Session ${id} force-abort replacement was superseded after rehydration`);
@@ -16916,11 +16946,13 @@ export class SessionManager {
 			try {
 				await this.tryAutoSelectModel(session);
 			} catch (err) {
+				this.toolResultFilterAttemptCredentials.invalidate(id);
 				unsub();
 				await rpcClient.stop().catch(() => {});
 				throw err;
 			}
 			if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session || session.rpcClient !== rpcClient) {
+				this.toolResultFilterAttemptCredentials.invalidate(id);
 				unsub();
 				await rpcClient.stop().catch(() => {});
 				throw new Error(`Session ${id} force-abort replacement was superseded during model verification`);
@@ -16934,6 +16966,7 @@ export class SessionManager {
 			// lifecycle replacement has settled, never against an intermediate bridge.
 			session.recoverDrainAttempts = 0;
 		} catch (err) {
+			this.toolResultFilterAttemptCredentials.invalidate(id);
 			// Without a complete closed-generation replay, neither delivery nor
 			// non-delivery is proven. Preserve the durable uncertain carrier and forbid
 			// automatic replay; explicit dismissal remains available through removeQueued.
