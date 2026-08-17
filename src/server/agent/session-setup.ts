@@ -1448,6 +1448,18 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
  * Run the full pipeline synchronously: resolve steps → spawn agent → persist → post-spawn.
  * Used by normal and delegate session creation.
  */
+const prePublicationGateFailures = new WeakSet<Error>();
+
+function markPrePublicationGateFailure(error: unknown): Error {
+	const failure = error instanceof Error ? error : new Error(String(error));
+	prePublicationGateFailures.add(failure);
+	return failure;
+}
+
+function takePrePublicationGateFailure(error: unknown): boolean {
+	return error instanceof Error && prePublicationGateFailures.delete(error);
+}
+
 export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext): Promise<SessionInfo> {
 	const __t0 = performance.now();
 	// Step 1-5: resolve all configuration
@@ -1525,6 +1537,15 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 		session = await profileAsync("executePlan.spawnAgent", () => spawnAgent(plan, ctx));
 	} catch (err) {
 		ctx.invalidateToolResultFilterGate?.(plan.id);
+		// Step 7 deliberately preserves evidence for ordinary spawn failures. A
+		// failed publication gate is different: its bridge was started but was
+		// refused before map publication, so archive only this exact pre-spawn row.
+		// Never let an overlapping newer live generation be archived instead.
+		if (takePrePublicationGateFailure(err)
+			&& !ctx.sessions.has(plan.id)
+			&& ctx.store.get(plan.id)?.createdAt === preSpawnSession.createdAt) {
+			ctx.store.archive(plan.id);
+		}
 		throw err;
 	}
 
@@ -2119,7 +2140,7 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 	} catch (err) {
 		ctx.invalidateToolResultFilterGate?.(plan.id);
 		await rpcClient.stop().catch(() => {});
-		throw err;
+		throw markPrePublicationGateFailure(err);
 	}
 	ctx.sessions.set(session.id, session);
 

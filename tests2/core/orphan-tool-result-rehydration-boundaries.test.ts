@@ -3697,6 +3697,18 @@ describe("executable SessionManager rehydration boundaries", () => {
 });
 
 function pipelineContext(sandboxManager: any = null): any {
+	const persisted = new Map<string, any>();
+	const store = {
+		put: vi.fn((row: any) => persisted.set(row.id, structuredClone(row))),
+		update: vi.fn(),
+		get: (id: string) => persisted.get(id),
+		archive: vi.fn((id: string) => {
+			const row = persisted.get(id);
+			if (!row) return false;
+			row.archived = true;
+			return true;
+		}),
+	};
 	return {
 		roleManager: null,
 		toolManager: null,
@@ -3710,7 +3722,7 @@ function pipelineContext(sandboxManager: any = null): any {
 		groupPolicyStore: null,
 		configCascade: null,
 		costTracker: {},
-		store: { put: vi.fn(), update: vi.fn() },
+		store,
 		searchIndex: {},
 		sessions: new Map(),
 		assemblePrompt: () => undefined,
@@ -3764,7 +3776,6 @@ describe("executable continue-archived/live-fork setup boundary", () => {
 		bridge.stop = vi.fn(async () => { bridge.running = false; });
 		registerRpcBridgeFactory(() => bridge);
 		const ctx = pipelineContext();
-		ctx.store.archive = vi.fn();
 		ctx.assertToolResultFilterGateAtPublication = vi.fn(() => {
 			if (filterRequired) throw new Error("Tool-result filter gate was not installed for session continue-publication-grant-race");
 		});
@@ -3774,8 +3785,18 @@ describe("executable continue-archived/live-fork setup boundary", () => {
 		expect(ctx.assertToolResultFilterGateAtPublication).toHaveBeenCalledWith("continue-publication-grant-race", "project-boundary");
 		expect(bridge.stop).toHaveBeenCalledOnce();
 		expect(ctx.sessions.get("continue-publication-grant-race")).toBeUndefined();
-		expect(ctx.store.put).not.toHaveBeenCalled();
-		expect(ctx.store.archive).not.toHaveBeenCalled();
+		expect(ctx.store.put).toHaveBeenCalledOnce();
+		expect(ctx.store.put).toHaveBeenCalledWith(expect.objectContaining({
+			id: "continue-publication-grant-race",
+			agentSessionFile: file,
+		}));
+		expect(ctx.store.archive).toHaveBeenCalledTimes(1);
+		expect(ctx.store.archive).toHaveBeenCalledWith("continue-publication-grant-race");
+		expect(ctx.store.get("continue-publication-grant-race")).toMatchObject({
+			id: "continue-publication-grant-race",
+			agentSessionFile: file,
+			archived: true,
+		});
 	});
 
 	it("fails closed for a plain create when policy binds after its initial map insertion", async () => {
