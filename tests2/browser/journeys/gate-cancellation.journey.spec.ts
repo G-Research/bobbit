@@ -171,8 +171,8 @@ async function expectCauseAcrossSurfaces(page: any, goalId: string, teamLeadId: 
 	const cancelledSignal = page.locator(`[data-testid="goal-dashboard-signal-entry"][data-signal-status="cancelled"]`).first();
 	await expect(cancelledSignal).toBeVisible({ timeout: 15_000 });
 	if (!await cancelledSignal.locator(".signal-entry__body").isVisible()) await cancelledSignal.locator(".signal-entry__header").click();
-	const cancellationSummary = cancelledSignal.locator(".verify-cards__header-status").first();
-	await expect(cancellationSummary, "dashboard cancellation summary preserves the completed phase and counts only unfinished rows as interrupted").toContainText(/1 passed,\s*2 interrupted/i);
+	const cancellationSummary = cancelledSignal.locator(".signal-entry__body [data-testid='goal-dashboard-signal-cancellation']").first();
+	await expect(cancellationSummary, "dashboard's durable cancellation notice preserves the completed phase and counts only unfinished rows as interrupted").toContainText(/1 passed,\s*2 interrupted/i);
 	await expect(cancellationSummary).toContainText(cancelledCause);
 	await expect(cancellationSummary).not.toContainText(failed);
 
