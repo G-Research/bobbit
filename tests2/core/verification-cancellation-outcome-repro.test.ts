@@ -1396,3 +1396,137 @@ test("outer restart Resume Error retains and retries terminal intent when persis
 	expect(resumed.getActiveVerification(signalId)).toBeUndefined();
 	expect(resumed._loadActive().some((entry: any) => entry.signalId === signalId)).toBe(false);
 });
+
+// Security/lifecycle reproducer for the pre-generated reviewer ID race.  The
+// session spawn is held inside createSession while cancellation targets the
+// persisted ID.  No polling or wall-clock sleeps are involved: the test's
+// microtask releases the spawn only after cancellation has queued its cleanup.
+test.each(["llm-review", "agent-qa"] as const)("%s cancellation joins an in-flight reviewer spawn before terminal publication — VERIFICATION_REVIEWER_SPAWN_CANCELLATION_RACE", async (type) => {
+	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), `verification-reviewer-spawn-race-${type}-`));
+	gateStore = new GateStore(stateDir, undefined, { persistence: "json" });
+	gateStore.initGatesForGoal(GOAL_ID, [GATE_ID]);
+
+	const createStarted = deferredVoid();
+	const releaseCreate = deferredVoid();
+	const createSettled = deferredVoid();
+	const releaseRegistration = deferredVoid();
+	const liveSessions = new Set<string>();
+	const terminateCalls: Array<{ sessionId: string; existed: boolean }> = [];
+	const events: any[] = [];
+	const fakeSession = (sessionId: string) => ({
+		id: sessionId,
+		cwd: stateDir!,
+		status: "idle",
+		lastTurnErrored: false,
+		rpcClient: {
+			onEvent: () => () => {},
+			setThinkingLevel: async () => {},
+		},
+	});
+	const sessionManager = {
+		isSandboxEnabled: false,
+		createSession: async (...args: any[]) => {
+			const opts = args[4] as { sessionId: string };
+			createStarted.resolve();
+			await releaseCreate.promise;
+			liveSessions.add(opts.sessionId);
+			createSettled.resolve();
+			return fakeSession(opts.sessionId);
+		},
+		setTitle: () => {},
+		updateSessionMeta: () => {},
+		getSession: (sessionId: string) => liveSessions.has(sessionId) ? fakeSession(sessionId) : undefined,
+		terminateSession: async (sessionId: string) => {
+			const existed = liveSessions.delete(sessionId);
+			terminateCalls.push({ sessionId, existed });
+			return existed;
+		},
+	};
+	const teamManager = {
+		getTeamState: () => undefined,
+		registerReviewerSession: async () => {
+			await releaseRegistration.promise;
+		},
+		unregisterReviewerSession: async () => {},
+	};
+	const role = { name: type === "agent-qa" ? "qa-tester" : "reviewer", promptTemplate: "Review the supplied work." };
+	const roleStore = { get: () => role, getAll: () => [role] };
+	const goal = { id: GOAL_ID, branch: "goal/reviewer-spawn-race", sandboxed: false, paused: false };
+	const projectConfigStore = {
+		get: () => undefined,
+		getWithDefaults: () => ({}),
+		getQaMaxDurationMinutes: () => 10,
+		getComponents: () => [],
+	};
+	const context = { project: { id: "reviewer-spawn-race-project", name: "Reviewer Spawn Race" }, goalStore: { get: () => goal }, gateStore, projectConfigStore };
+	const projectContextManager = {
+		getContextForGoal: (goalId: string) => goalId === GOAL_ID ? context : null,
+		all: () => [context],
+	};
+	const harness: any = new VerificationHarness(
+		stateDir,
+		gateStore,
+		(_goalId, event) => events.push(event),
+		roleStore as any,
+		undefined,
+		sessionManager as any,
+		teamManager as any,
+		undefined,
+		projectContextManager as any,
+		undefined,
+		{
+			commandRunner: {
+				execFile: async () => ({ stdout: Buffer.from("0123456789abcdef\n"), stderr: Buffer.alloc(0) }),
+			},
+		},
+	);
+	harness.resolveVerificationBaseBranch = async () => "main";
+	harness.resolveLegacyMasterBranch = async () => "main";
+
+	const gate: WorkflowGate = {
+		id: GATE_ID,
+		name: "Reviewer spawn cancellation race",
+		dependsOn: [],
+		verify: [{ name: "Held reviewer spawn", type, prompt: "Review this generation.", phase: 0 } as any],
+	};
+	const heldSignal: GateSignal = {
+		...signal(),
+		id: `${SIGNAL_ID}-spawn-race-${type}`,
+		verification: { status: "running", steps: [] },
+	};
+	heldSignal.verification!.steps = harness.beginVerification(heldSignal, gate);
+	gateStore.recordSignal(heldSignal);
+	const verification = harness.verifyGateSignal(heldSignal, gate, stateDir, goal.branch, "main", new Map(), "goal spec");
+	await createStarted.promise;
+
+	const cancellation = harness.cancelStaleVerifications(GOAL_ID, GATE_ID, "manual");
+	// `_terminateCancelledReviewersFor` queues its terminate/unregister microtasks
+	// synchronously. Release createSession in the following microtask so the race
+	// order is exact: cleanup observes not-found, then the spawn becomes live.
+	queueMicrotask(releaseCreate.resolve);
+	await cancellation;
+	await createSettled.promise;
+
+	const cancelledEventPublished = events.some(event => event.type === "gate_verification_complete"
+		&& event.signalId === heldSignal.id && event.status === "cancelled");
+	const durableSignal = gateStore.getGate(GOAL_ID, GATE_ID)!.signals.find(candidate => candidate.id === heldSignal.id)!;
+	const reviewerSessionId = terminateCalls[0]?.sessionId;
+	const observations = {
+		terminationSettledBeforeCreate: terminateCalls.some(call => call.existed === false),
+		terminalPublishedWithLiveSpawn: cancelledEventPublished
+			&& !!reviewerSessionId && liveSessions.has(reviewerSessionId),
+		liveSessionAfterOwnerRetired: !!reviewerSessionId && liveSessions.has(reviewerSessionId)
+			&& !harness.activeVerifications.has(heldSignal.id),
+		durableSignalCancelled: durableSignal.verification?.status === "cancelled",
+	};
+
+	releaseRegistration.resolve();
+	await verification;
+
+	expect(observations, "VERIFICATION_REVIEWER_SPAWN_CANCELLATION_RACE: cancellation must join or durably retain an in-flight reviewer spawn; terminateSession(not-found) cannot settle exact ownership or allow terminal publication").toEqual({
+		terminationSettledBeforeCreate: false,
+		terminalPublishedWithLiveSpawn: false,
+		liveSessionAfterOwnerRetired: false,
+		durableSignalCancelled: true,
+	});
+});
