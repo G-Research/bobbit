@@ -741,6 +741,58 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(canonical?.completedTurnCount).toBe(2);
 	});
 
+	it("does not redispatch a boot continuation whose correlated user echo survived a hard restart", async () => {
+		const file = hostTranscript("boot-continuation-echo-before-hard-restart");
+		const ps = persisted("boot-continuation-echo-before-hard-restart", file, { wasStreaming: true });
+		const store = mutableStore(ps);
+		let listener: ((event: any) => void) | undefined;
+		const acceptedBridge = recordingBridge(() => {});
+		acceptedBridge.onEvent = vi.fn((next: (event: any) => void) => {
+			listener = next;
+			return () => { listener = undefined; };
+		});
+		acceptedBridge.promptWhenReady = vi.fn(async (text: string) => {
+			listener?.({
+				type: "message_end",
+				message: { id: "delivered-boot-continuation", role: "user", content: text },
+			});
+			return { success: true };
+		});
+		const acceptedManager = makeManager(ps, acceptedBridge);
+		acceptedManager._testStore = store;
+
+		await acceptedManager._restoreSessionCoalesced(ps);
+
+		const intentId = `boot-continuation:${ps.id}`;
+		expect(acceptedBridge.promptWhenReady).toHaveBeenCalledTimes(1);
+		expect(ps.wasStreaming).toBe(true);
+		expect(ps.inFlightSteerTexts).toBeUndefined();
+		expect(readAuthorSidecar(ps.id)).toEqual([
+			expect.objectContaining({
+				intentId,
+				settlement: expect.objectContaining({ outcome: "echoed" }),
+			}),
+		]);
+
+		// Model a hard gateway kill after RPC acceptance and exact user echo, but
+		// before agent_end can settle the still-active turn.
+		const restoredBridge = recordingBridge(() => {});
+		restoredBridge.promptWhenReady = vi.fn(async () => ({ success: true }));
+		const restoredManager = makeManager(ps, restoredBridge);
+		restoredManager._testStore = store;
+
+		await restoredManager._restoreSessionCoalesced(ps);
+
+		expect(
+			restoredBridge.promptWhenReady,
+			"a durable exact echoed occurrence must not be represented twice",
+		).not.toHaveBeenCalled();
+		expect(ps.wasStreaming).toBe(true);
+		expect(ps.inFlightSteerTexts).toBeUndefined();
+		expect(restoredManager.sessions.get(ps.id)?.restoreStartupWasStreaming).toBe(false);
+		expect(readAuthorSidecar(ps.id)).toHaveLength(1);
+	});
+
 	it("treats a rejected boot-continuation acknowledgement as accepted after terminal lifecycle", async () => {
 		const file = hostTranscript("boot-continuation-terminal-before-rejection");
 		const bootEntered = deferred<void>();
