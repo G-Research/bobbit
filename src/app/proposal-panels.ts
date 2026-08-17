@@ -655,7 +655,8 @@ const projectOuterScrollRef = createRef<HTMLDivElement>();
 // SHARED GOAL FORM
 // ============================================================================
 
-const _goalWorktreeModeFetching = new Set<string>();
+const _goalWorktreeModeFetchIdBySession = new Map<string, number>();
+let _goalWorktreeModeNextFetchId = 0;
 
 /** Proposal ownership is fixed by the slot (or historical tab source), never by
  * whichever chat tab happens to be active. */
@@ -672,26 +673,70 @@ function goalProposalWorktreeMode(): GoalWorktreeMode {
 	return parsedGoalWorktreeMode(activeGoalProposalFormSnapshot() as Record<string, unknown> | undefined);
 }
 
-function ensureGoalWorktreeModeProjection(ownerSessionId: string | undefined): void {
-	if (!ownerSessionId || state.goalWorktreeModeBySession[ownerSessionId] || _goalWorktreeModeFetching.has(ownerSessionId)) return;
-	_goalWorktreeModeFetching.add(ownerSessionId);
+async function refreshGoalWorktreeModeProjection(
+	ownerSessionId: string,
+	options: { force?: boolean } = {},
+): Promise<GoalWorktreeModeProjection | undefined> {
+	if (!options.force && _goalWorktreeModeFetchIdBySession.has(ownerSessionId)) return undefined;
+	const fetchId = ++_goalWorktreeModeNextFetchId;
+	const invalidationRevision = state.goalWorktreeModeRevisionBySession[ownerSessionId] ?? 0;
+	_goalWorktreeModeFetchIdBySession.set(ownerSessionId, fetchId);
 	state.goalWorktreeModeBySession[ownerSessionId] = {
 		mode: goalProposalWorktreeMode(),
 		eligible: false,
 		loading: true,
 	};
-	void fetchGoalWorktreeMode(ownerSessionId).then((projection) => {
+	renderApp();
+	try {
+		const projection = await fetchGoalWorktreeMode(ownerSessionId);
+		// A newer forced read or a canonical session snapshot change supersedes
+		// this response. Never reinstall eligibility computed before that event.
+		if (_goalWorktreeModeFetchIdBySession.get(ownerSessionId) !== fetchId
+			|| (state.goalWorktreeModeRevisionBySession[ownerSessionId] ?? 0) !== invalidationRevision) {
+			return undefined;
+		}
 		state.goalWorktreeModeBySession[ownerSessionId] = projection;
-	}).catch(() => {
-		state.goalWorktreeModeBySession[ownerSessionId] = {
+		return projection;
+	} catch {
+		if (_goalWorktreeModeFetchIdBySession.get(ownerSessionId) !== fetchId
+			|| (state.goalWorktreeModeRevisionBySession[ownerSessionId] ?? 0) !== invalidationRevision) {
+			return undefined;
+		}
+		const unavailable: GoalWorktreeModeProjection = {
 			mode: goalProposalWorktreeMode(),
 			eligible: false,
 			reason: "Current session unavailable — eligibility could not be verified.",
 		};
-	}).finally(() => {
-		_goalWorktreeModeFetching.delete(ownerSessionId);
+		state.goalWorktreeModeBySession[ownerSessionId] = unavailable;
+		return unavailable;
+	} finally {
+		if (_goalWorktreeModeFetchIdBySession.get(ownerSessionId) === fetchId) {
+			_goalWorktreeModeFetchIdBySession.delete(ownerSessionId);
+		}
 		renderApp();
-	});
+	}
+}
+
+function ensureGoalWorktreeModeProjection(ownerSessionId: string | undefined): void {
+	if (!ownerSessionId || state.goalWorktreeModeBySession[ownerSessionId] || _goalWorktreeModeFetchIdBySession.has(ownerSessionId)) return;
+	void refreshGoalWorktreeModeProjection(ownerSessionId);
+}
+
+/** UI backstop immediately before current-session acceptance. The server still
+ * performs the authoritative locked recheck; this prevents dispatch when the
+ * latest owner-scoped projection already says the source became ineligible. */
+async function revalidateCurrentSessionGoalPromotion(ownerSessionId: string | undefined): Promise<boolean> {
+	if (!ownerSessionId) {
+		showConnectionError("Current session is unavailable", "The proposal owner could not be verified.");
+		return false;
+	}
+	const projection = await refreshGoalWorktreeModeProjection(ownerSessionId, { force: true });
+	if (projection?.eligible) return true;
+	showConnectionError(
+		"Current session is unavailable",
+		projection?.reason || "Eligibility changed while it was being checked. Try again.",
+	);
+	return false;
 }
 
 async function persistGoalWorktreeMode(ownerSessionId: string, mode: GoalWorktreeMode): Promise<void> {
@@ -713,8 +758,9 @@ async function persistGoalWorktreeMode(ownerSessionId: string, mode: GoalWorktre
 	renderApp();
 	try {
 		await updateGoalWorktreeMode(ownerSessionId, mode);
-		// PUT rewrites the draft; GET gives the latest authoritative eligibility.
-		state.goalWorktreeModeBySession[ownerSessionId] = await fetchGoalWorktreeMode(ownerSessionId);
+		// PUT rewrites the draft; a fenced GET gives the latest authoritative
+		// eligibility without allowing an older response to survive invalidation.
+		await refreshGoalWorktreeModeProjection(ownerSessionId, { force: true });
 	} catch (err) {
 		if (hadMode) targetFields.worktreeMode = previousMode;
 		else delete targetFields.worktreeMode;
@@ -1991,6 +2037,12 @@ function goalPreviewPanel() {
 		// (e.g. change workflow) and try again. See goal spec §1.
 		let goal;
 		try {
+			if (worktreeMode === "current-session"
+				&& !(await revalidateCurrentSessionGoalPromotion(worktreeOwnerSessionId))) {
+				_goalPreviewSaving = false;
+				renderApp();
+				return;
+			}
 			const submitCwd = isHeadquartersProject(projectId) && !state.previewCwdEdited ? "" : state.previewCwd.trim();
 			const commonFields = {
 				spec: state.previewSpec,
@@ -4264,6 +4316,8 @@ function goalProposalPanel() {
 		let goal;
 		try {
 			try {
+				if (worktreeMode === "current-session"
+					&& !(await revalidateCurrentSessionGoalPromotion(worktreeOwnerSessionId))) return;
 				// Parent goal is meaningful only while the system Subgoals feature is
 				// enabled. A stale/auto-filled parentGoalId from a team-lead proposal
 				// must not be submitted while the Sub-goals tab is hidden/off; accepting

@@ -2,6 +2,7 @@ import {
 	state,
 	renderApp,
 	setProjectsIfChanged,
+	invalidateGoalWorktreeModeProjection,
 	type GatewaySession,
 	type Goal,
 	type GoalWorktreeMode,
@@ -323,17 +324,67 @@ export function updateLocalSessionTitle(sessionId: string, title: string): void 
 	}
 }
 
+function watchesGoalPromotionProjection(sessionId: string): boolean {
+	return Object.prototype.hasOwnProperty.call(state.goalWorktreeModeBySession, sessionId)
+		|| Object.prototype.hasOwnProperty.call(state.goalWorktreeModeRevisionBySession, sessionId)
+		|| state.activeProposals.goal?.sessionId === sessionId;
+}
+
 export function updateLocalSessionStatus(sessionId: string, status: string): void {
 	const idx = state.gatewaySessions.findIndex((s) => s.id === sessionId);
 	if (idx >= 0) {
+		const previous = state.gatewaySessions[idx];
+		// A real owner status transition changes promotion eligibility. Drop only
+		// the display projection; the durable proposal mode stays untouched and the
+		// next render starts a fresh owner-scoped GET. Heartbeats with the same
+		// status deliberately do not create a refetch loop.
+		if (previous.status !== status && watchesGoalPromotionProjection(sessionId)) {
+			invalidateGoalWorktreeModeProjection(sessionId);
+		}
 		// NOTE: do NOT touch lastActivity here. The server is the sole writer of
 		// lastActivity (bumped on real activity in src/server/agent/session-setup.ts
 		// and friends, surfaced via /api/sessions polling every ~5s). Clobbering
 		// lastActivity to Date.now() on every session_status frame caused spurious
 		// "now ●" unread indicators in the sidebar on benign heartbeats and
 		// busy→idle transitions. See tests/spurious-idle-unread.spec.ts.
-		state.gatewaySessions[idx] = { ...state.gatewaySessions[idx], status };
+		state.gatewaySessions[idx] = { ...previous, status };
 		renderApp();
+	}
+}
+
+/** Public session fields that can change the server's promotion policy or its
+ * displayed canonical coordinates. Volatile activity/title/tag fields are
+ * intentionally excluded so polling does not refetch eligibility needlessly. */
+const GOAL_PROMOTION_SESSION_SNAPSHOT_KEYS = [
+	"status", "isCompacting", "isAborting", "restoreStartupWasStreaming", "dormant", "lifecycleFenced",
+	"goalId", "teamGoalId", "teamLeadSessionId", "role", "assistantType", "goalAssistant", "roleAssistant", "toolAssistant",
+	"delegateOf", "parentSessionId", "childKind", "childTerminal", "readOnly", "nonInteractive", "borrowsWorktree",
+	"borrowedWorktreeOwnerSessionId", "staffId", "taskId", "archived", "projectId", "cwd", "worktreePath", "repoPath",
+	"branch", "repoWorktrees", "sandboxed", "containerId",
+] as const;
+
+function goalPromotionSessionSnapshotFingerprint(session: GatewaySession | undefined): string {
+	if (!session) return "missing";
+	const record = session as GatewaySession & Record<string, unknown>;
+	return JSON.stringify(GOAL_PROMOTION_SESSION_SNAPSHOT_KEYS.map((key) => record[key]));
+}
+
+function invalidateChangedGoalPromotionSessionSnapshots(
+	previousSessions: readonly GatewaySession[],
+	nextSessions: readonly GatewaySession[],
+): void {
+	const previousById = new Map(previousSessions.map((session) => [session.id, session]));
+	const nextById = new Map(nextSessions.map((session) => [session.id, session]));
+	const watchedIds = new Set([
+		...Object.keys(state.goalWorktreeModeBySession),
+		...Object.keys(state.goalWorktreeModeRevisionBySession),
+		...(state.activeProposals.goal?.sessionId ? [state.activeProposals.goal.sessionId] : []),
+	]);
+	for (const sessionId of watchedIds) {
+		if (goalPromotionSessionSnapshotFingerprint(previousById.get(sessionId))
+			!== goalPromotionSessionSnapshotFingerprint(nextById.get(sessionId))) {
+			invalidateGoalWorktreeModeProjection(sessionId);
+		}
 	}
 }
 
@@ -791,6 +842,10 @@ export async function refreshSessions(): Promise<void> {
 				_prevSessionStatus.set(s.id, s.status);
 			}
 
+			// Session list snapshots can change eligibility without a live status
+			// frame (role/lifecycle/workspace updates, removal, restart recovery).
+			// Invalidate before replacement so the comparison uses the prior record.
+			invalidateChangedGoalPromotionSessionSnapshots(state.gatewaySessions, newSessions);
 			state.gatewaySessions = newSessions;
 
 			// Merge archived delegates of live sessions into state.archivedSessions

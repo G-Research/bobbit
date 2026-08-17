@@ -469,6 +469,10 @@ export const state = {
 	/** Recomputed promotion eligibility keyed by proposal owner session. Never
 	 * used as draft durability or as authority for submitted coordinates. */
 	goalWorktreeModeBySession: {} as Record<string, GoalWorktreeModeProjection | undefined>,
+	/** Monotonic invalidation fence for eligibility requests. A session snapshot
+	 * change deletes the display projection and increments this value so an older
+	 * in-flight GET cannot reinstall stale eligibility. */
+	goalWorktreeModeRevisionBySession: {} as Record<string, number | undefined>,
 	activeProjectId: null as string | null,
 	/** Per-session flag set when the user accepts a registered-mode project
 	 *  proposal. The proposal panel uses this to render a "Changes Saved" view
@@ -916,6 +920,18 @@ export function resetArchivedExpandState(): void {
 
 	// Free memory — archived sessions will be re-fetched on next toggle-on
 	state.archivedSessions = [];
+}
+
+// ============================================================================
+// GOAL PROMOTION PROJECTION INVALIDATION
+// ============================================================================
+
+/** Mark an owner's display-only promotion projection stale. The durable mode
+ * remains in the proposal draft; the proposal panel refetches eligibility on
+ * its next render. */
+export function invalidateGoalWorktreeModeProjection(sessionId: string): void {
+	delete state.goalWorktreeModeBySession[sessionId];
+	state.goalWorktreeModeRevisionBySession[sessionId] = (state.goalWorktreeModeRevisionBySession[sessionId] ?? 0) + 1;
 }
 
 // ============================================================================

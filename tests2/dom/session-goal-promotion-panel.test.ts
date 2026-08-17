@@ -32,9 +32,12 @@ const workflow: Workflow = {
 let state: typeof import("../../src/app/state.js").state;
 let setRenderApp: typeof import("../../src/app/state.js").setRenderApp;
 let proposalPanelContent: typeof import("../../src/app/proposal-panels.js").proposalPanelContent;
+let updateLocalSessionStatus: typeof import("../../src/app/api.js").updateLocalSessionStatus;
+let refreshSessions: typeof import("../../src/app/api.js").refreshSessions;
 let host: HTMLElement;
 let requests: Array<{ path: string; method: string; body?: Record<string, unknown> }>;
 let eligibility: Record<string, unknown>;
+let sessionSnapshot: Array<Record<string, unknown>> | undefined;
 
 function json(body: unknown, status = 200): Response {
 	return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -74,7 +77,7 @@ function installFetch(): void {
 		if (url.pathname === "/api/roles") return json({ roles: [] });
 		if (url.pathname === "/api/tools") return json({ tools: [], diagnostics: [] });
 		if (url.pathname === "/api/tool-group-policies") return json({});
-		if (url.pathname === "/api/sessions") return json({ sessions: state.gatewaySessions, generation: 2 });
+		if (url.pathname === "/api/sessions") return json({ sessions: sessionSnapshot ?? state.gatewaySessions, generation: state.sessionsGeneration + 1 });
 		if (url.pathname === "/api/goals") return json({ goals: state.goals, generation: 2 });
 		if (url.pathname === "/api/projects") return json({ projects: [project] });
 		if (url.pathname.includes("/archived")) return json({ sessions: [], goals: [] });
@@ -112,6 +115,7 @@ function resetState(worktreeMode?: "current-session"): void {
 	];
 	state.activeProposals = { goal: { sessionId: OWNER, fields, streaming: false, rev: 1 } };
 	state.goalWorktreeModeBySession = {};
+	state.goalWorktreeModeRevisionBySession = {};
 	state.previewProjectId = project.id;
 	state.selectedSessionId = OTHER;
 	state.connectingSessionId = null;
@@ -139,6 +143,7 @@ beforeEach(async () => {
 	document.body.innerHTML = '<div id="host"></div>';
 	host = document.getElementById("host")!;
 	requests = [];
+	sessionSnapshot = undefined;
 	eligibility = {
 		mode: "new-worktree",
 		eligible: true,
@@ -149,6 +154,7 @@ beforeEach(async () => {
 	};
 	installFetch();
 	({ state, setRenderApp } = await import("../../src/app/state.js"));
+	({ updateLocalSessionStatus, refreshSessions } = await import("../../src/app/api.js"));
 	({ proposalPanelContent } = await import("../../src/app/proposal-panels.js"));
 });
 
@@ -212,5 +218,84 @@ describe("current-session goal proposal panel", () => {
 		(host.querySelector("[data-testid='goal-form-worktree-new']") as HTMLInputElement).click();
 		await waitFor(() => expect(requests.some((r) => r.method === "PUT" && r.body?.mode === "new-worktree")).toBe(true));
 		await waitFor(() => expect((host.querySelector("[data-testid='proposal-primary-submit'] button") as HTMLButtonElement).disabled).toBe(false));
+	});
+
+	it("refreshes eligibility across owner idle → streaming → idle status transitions", async () => {
+		eligibility.mode = "current-session";
+		await mount("current-session");
+		await waitFor(() => expect((host.querySelector("[data-testid='goal-form-worktree-current-session']") as HTMLInputElement).disabled).toBe(false));
+		const initialGets = requests.filter((request) => request.method === "GET" && request.path.endsWith("/worktree-mode")).length;
+
+		eligibility = {
+			mode: "current-session",
+			eligible: false,
+			reason: "Current session must be idle.",
+		};
+		updateLocalSessionStatus(OWNER, "streaming");
+		await waitFor(() => expect((host.querySelector("[data-testid='goal-form-worktree-current-session']") as HTMLInputElement).disabled).toBe(true));
+		await waitFor(() => expect(host.querySelector("[data-testid='goal-form-worktree-current-unavailable']")?.textContent).toContain("must be idle"));
+		expect(requests.filter((request) => request.method === "GET" && request.path.endsWith("/worktree-mode")).length).toBeGreaterThan(initialGets);
+		expect((host.querySelector("[data-testid='proposal-primary-submit'] button") as HTMLButtonElement).disabled).toBe(true);
+
+		eligibility = {
+			mode: "current-session",
+			eligible: true,
+			branch: "session/proposal",
+			worktreePath: "/repo-wt/session-owner",
+			componentCount: 1,
+		};
+		updateLocalSessionStatus(OWNER, "idle");
+		await waitFor(() => expect((host.querySelector("[data-testid='goal-form-worktree-current-session']") as HTMLInputElement).disabled).toBe(false));
+		expect((host.querySelector("[data-testid='proposal-primary-submit'] button") as HTMLButtonElement).disabled).toBe(false);
+	});
+
+	it("refreshes eligibility when a session-list snapshot changes owner relation metadata", async () => {
+		eligibility.mode = "current-session";
+		await mount("current-session");
+		await waitFor(() => expect((host.querySelector("[data-testid='goal-form-worktree-current-session']") as HTMLInputElement).disabled).toBe(false));
+
+		eligibility = {
+			mode: "current-session",
+			eligible: false,
+			reason: "Current session already belongs to another Bobbit workflow.",
+		};
+		sessionSnapshot = state.gatewaySessions.map((session) => session.id === OWNER
+			? { ...session, role: "reviewer" }
+			: { ...session });
+		await refreshSessions();
+		await waitFor(() => expect(host.querySelector("[data-testid='goal-form-worktree-current-unavailable']")?.textContent).toContain("already belongs"));
+		expect((host.querySelector("[data-testid='goal-form-worktree-current-session']") as HTMLInputElement).disabled).toBe(true);
+		expect((host.querySelector("[data-testid='proposal-primary-submit'] button") as HTMLButtonElement).disabled).toBe(true);
+
+		eligibility = {
+			mode: "current-session",
+			eligible: true,
+			branch: "session/proposal",
+			worktreePath: "/repo-wt/session-owner",
+			componentCount: 1,
+		};
+		sessionSnapshot = state.gatewaySessions.map((session) => session.id === OWNER
+			? { ...session, role: undefined }
+			: { ...session });
+		await refreshSessions();
+		await waitFor(() => expect((host.querySelector("[data-testid='goal-form-worktree-current-session']") as HTMLInputElement).disabled).toBe(false));
+	});
+
+	it("revalidates immediately before acceptance and blocks a newly ineligible owner", async () => {
+		eligibility.mode = "current-session";
+		await mount("current-session");
+		await waitFor(() => expect((host.querySelector("[data-testid='proposal-primary-submit'] button") as HTMLButtonElement).disabled).toBe(false));
+		const getsBeforeCreate = requests.filter((request) => request.method === "GET" && request.path.endsWith("/worktree-mode")).length;
+		eligibility = {
+			mode: "current-session",
+			eligible: false,
+			reason: "Current session must be idle.",
+		};
+
+		(host.querySelector("[data-testid='proposal-primary-submit'] button") as HTMLButtonElement).click();
+		await waitFor(() => expect(host.querySelector("[data-testid='goal-form-worktree-current-unavailable']")?.textContent).toContain("must be idle"));
+		expect(requests.filter((request) => request.method === "GET" && request.path.endsWith("/worktree-mode")).length).toBeGreaterThan(getsBeforeCreate);
+		expect(requests.some((request) => request.method === "POST" && request.path.endsWith("/proposal/goal/accept"))).toBe(false);
+		expect((host.querySelector("[data-testid='proposal-primary-submit'] button") as HTMLButtonElement).disabled).toBe(true);
 	});
 });
