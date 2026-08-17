@@ -609,6 +609,22 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(switches).toEqual([file]);
 	});
 
+	it("fails closed when a grant lands during cold restore after start and before publication", async () => {
+		const file = hostTranscript("cold-restore-publication-grant-race");
+		let filterRequired = false;
+		const bridge = recordingBridge(() => { filterRequired = true; });
+		bridge.stop = vi.fn(async () => { bridge.running = false; });
+		const ps = persisted("cold-restore-publication-grant-race", file);
+		const manager = makeManager(ps, bridge);
+		manager.setToolResultFilterActivationResolver(() => ({ toolResult: filterRequired }));
+
+		await expect(manager.restoreSession(ps)).rejects.toThrow(
+			"Tool-result filter gate was not installed for session cold-restore-publication-grant-race",
+		);
+		expect(bridge.stop).toHaveBeenCalledOnce();
+		expect(manager.sessions.get(ps.id)).toBeUndefined();
+	});
+
 	it.each(["response", "exception"] as const)(
 		"does not drain a durable restore queue when replayed agent_end precedes a failed switch (%s)",
 		async (failure) => {
@@ -3690,7 +3706,7 @@ function pipelineContext(sandboxManager: any = null): any {
 		projectConfigStore: null,
 		sandboxManager,
 		sandboxTokenStore: null,
-		sessionSecretStore: { getOrCreateSecret: () => "fixture-secret" },
+		sessionSecretStore: { getOrCreateSecret: () => "fixture-secret", remove() {} },
 		groupPolicyStore: null,
 		configCascade: null,
 		costTracker: {},
@@ -3739,6 +3755,25 @@ describe("executable continue-archived/live-fork setup boundary", () => {
 		await executePlan(setupPlan("continue-host", file, false), pipelineContext());
 
 		expect(switches).toEqual([file]);
+	});
+
+	it("fails closed when a grant lands after a continue spawn starts but before publication", async () => {
+		const file = hostTranscript("continue-publication-grant-race");
+		let filterRequired = false;
+		const bridge = recordingBridge(() => { filterRequired = true; });
+		bridge.stop = vi.fn(async () => { bridge.running = false; });
+		registerRpcBridgeFactory(() => bridge);
+		const ctx = pipelineContext();
+		ctx.store.archive = vi.fn();
+		ctx.assertToolResultFilterGateAtPublication = vi.fn(() => {
+			if (filterRequired) throw new Error("Tool-result filter gate was not installed for session continue-publication-grant-race");
+		});
+
+		await expect(executePlan(setupPlan("continue-publication-grant-race", file, false), ctx))
+			.rejects.toThrow("Tool-result filter gate was not installed");
+		expect(ctx.assertToolResultFilterGateAtPublication).toHaveBeenCalledWith("continue-publication-grant-race", "project-boundary");
+		expect(bridge.stop).toHaveBeenCalledOnce();
+		expect(ctx.store.archive).toHaveBeenCalledWith("continue-publication-grant-race");
 	});
 
 	it("rewrites an orphan in a sandbox container-path clone before switching the sandbox process", async () => {

@@ -492,6 +492,8 @@ export interface PipelineContext {
 		rpcClient: RpcBridge,
 		credential: import("./tool-result-filter-attempt-credentials.js").ToolResultFilterGateCredential | undefined,
 	) => Promise<void>;
+	/** Synchronous final gate check; no await may separate it from publication. */
+	assertToolResultFilterGateAtPublication?: (sessionId: string, projectId: string | undefined) => void;
 	groupPolicyStore: ToolGroupPolicyStore | null;
 	configCascade: ConfigCascade | null;
 	lifecycleHub?: LifecycleHub;
@@ -1534,17 +1536,17 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 	// continue on provider/runtime defaults.
 	try {
 		await profileAsync("executePlan.postSpawn", () => postSpawn(session, plan, ctx));
+		// This is the ordinary-spawn publication boundary. It deliberately has no
+		// await between the policy read and the returned live session: a concurrent
+		// grant is therefore ordered entirely before this assertion or after publish.
+		ctx.assertToolResultFilterGateAtPublication?.(plan.id, plan.projectId);
+		if (session.status !== "terminated") session.status = "idle";
+		return session;
 	} catch (err) {
 		const setupError = err instanceof Error ? err : new Error(String(err));
 		handleSetupFailure(session, plan, setupError, ctx);
 		throw setupError;
 	}
-
-	// Normal/delegate sessions are not broadcast until createSession returns, but
-	// the returned object must be ready only after model enforcement succeeds.
-	if (session.status !== "terminated") session.status = "idle";
-
-	return session;
 }
 
 /**

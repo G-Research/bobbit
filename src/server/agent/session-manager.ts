@@ -4066,13 +4066,27 @@ export class SessionManager {
 	): Promise<void> {
 		try {
 			if (credential) this.toolResultFilterAttemptCredentials.commitRuntime(sessionId, credential);
-			const required = this.toolResultFilterActivationResolver?.(projectId).toolResult === true;
-			if (required && (!credential || !this.toolResultFilterAttemptCredentials.hasRuntime(sessionId))) {
+			this.assertToolResultFilterGateAtPublication(sessionId, projectId);
+		} catch (err) {
+			this.toolResultFilterAttemptCredentials.invalidate(sessionId);
+			await rpcClient.stop().catch(() => {});
+			throw err;
+		}
+	}
+
+	/**
+	 * Synchronous publication fence. Call immediately before returning or placing
+	 * a started session in `sessions`; an async gap would reintroduce the grant
+	 * ordering window this guard closes.
+	 */
+	private assertToolResultFilterGateAtPublication(sessionId: string, projectId: string | undefined): void {
+		try {
+			if (this.toolResultFilterActivationResolver?.(projectId).toolResult === true
+				&& !this.toolResultFilterAttemptCredentials.hasRuntime(sessionId)) {
 				throw new Error(`Tool-result filter gate was not installed for session ${sessionId}`);
 			}
 		} catch (err) {
 			this.toolResultFilterAttemptCredentials.invalidate(sessionId);
-			await rpcClient.stop().catch(() => {});
 			throw err;
 		}
 	}
@@ -4483,6 +4497,8 @@ export class SessionManager {
 			invalidateToolResultFilterGate: (sessionId) => this.toolResultFilterAttemptCredentials.invalidate(sessionId),
 			commitToolResultFilterGate: (sessionId, runtimeProjectId, rpcClient, credential) =>
 				this.commitStartedToolResultFilterGate(sessionId, runtimeProjectId, rpcClient, credential),
+			assertToolResultFilterGateAtPublication: (sessionId, runtimeProjectId) =>
+				this.assertToolResultFilterGateAtPublication(sessionId, runtimeProjectId),
 			groupPolicyStore: this.groupPolicyStore ?? null,
 			configCascade: this.configCascade,
 			lifecycleHub: this.lifecycleHub,
@@ -11636,6 +11652,16 @@ export class SessionManager {
 
 		// Install the replacement before enabling lifecycle side effects. A replayed
 		// agent_end must never dequeue durable intent against a provisional bridge.
+		// No await may separate this exact policy check from publication.
+		try {
+			this.assertToolResultFilterGateAtPublication(ps.id, ps.projectId);
+		} catch (err) {
+			restoring = false;
+			try { unsub(); } catch { /* best-effort listener cleanup */ }
+			this._fenceReplacedSession(session, this._currentRespawnGeneration(ps.id) + 1);
+			void rpcClient.stop().catch(() => {});
+			throw err;
+		}
 		this.sessions.set(ps.id, session);
 		if (settledSteersPruned > 0) this.persistInFlightSteerLedger(session);
 		// Replay-only keyless guards must not shadow a genuine future prompt once
@@ -12251,6 +12277,15 @@ export class SessionManager {
 			// exact read-back and one atomic durable tuple commit before create returns.
 			if (opts?.skipAutoModel && opts.skipAutoThinking && selectedSpawnModel) {
 				await this.tryAutoSelectModel(session);
+			}
+			// This is the manager-visible creation boundary. In the skipped-selector
+			// path an await above can let a grant land after executePlan's assertion.
+			// Keep this second check synchronous with publication.
+			try {
+				this.assertToolResultFilterGateAtPublication(session.id, projectId);
+			} catch (err) {
+				handleSetupFailure(session, plan, err instanceof Error ? err : new Error(String(err)), ctx);
+				throw err;
 			}
 			this.notifySessionCreated(session);
 
