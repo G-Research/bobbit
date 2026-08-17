@@ -768,7 +768,7 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 	{
 		consumer: "tests2/core/tool-description-budget.test.ts",
 		operations: frozen([
-			declaredExecutableOperation("import-meta-glob", "\"../../defaults/tools/{agent,ask,bobbit,browser,html,images,inbox,mcp,proposals,review,shell,skills,tasks,team,web}/extension.ts\"", ["impact:builtin-tools"]),
+			declaredExecutableOperation("import-meta-glob", "\"../../defaults/tools/*/extension.ts\"", ["impact:builtin-tools"]),
 		]),
 	},
 	{
