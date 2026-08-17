@@ -116,6 +116,16 @@ continuation but before lifecycle settlement, manager 3 still reads
 rule applies to further consecutive hard kills; no user prompt is needed to wake
 the session.
 
+Each restored interactive RPC bridge receives exactly one fresh tracked
+continuation attempt while that durable marker remains active. This includes a
+new bridge restored after the previous bridge emitted a correlated user echo but
+was killed before lifecycle settlement: `switch_session` rehydrates the durable
+history, but replaying that history does not execute the interrupted turn in the
+new agent process. Exact-occurrence deduplication therefore applies within a
+tracked attempt. It prevents ambiguous duplicate delivery of that occurrence,
+but must not suppress the fresh recovery attempt required by a new bridge.
+Canonical lifecycle settlement clears the durable marker and ends this re-drive.
+
 Acknowledgements are also fenced against session replacement. Dispatch captures
 the canonical session and its RPC bridge. A delayed acknowledgement may consume
 that dispatch's startup fence only while the captured session is still canonical,
@@ -136,8 +146,9 @@ The durability change does not create a second recovery protocol:
   continuation. The verification harness exclusively owns their re-drive and the
   compatibility `wasStreaming` bit is cleared when ownership is handed off.
 - Continuations retain their exact-occurrence identity, system author, and durable
-  queue/ledger handling, so an ambiguous write survives a restart without being
-  duplicated.
+  queue/ledger handling. An ambiguous write is not duplicated within its tracked
+  attempt, while each newly restored bridge still receives its required fresh
+  recovery attempt.
 - Definite-no-start rejection and poisoned-history rollback keep their existing
   ownership. RPC acceptance is not a rollback signal.
 - Session-replacement coordination, stop/terminate cancellation, model binding,
@@ -268,15 +279,17 @@ recovery outcomes rather than private implementation structure:
 2. An accepted manager-2 continuation keeps persisted `wasStreaming` true, and a
    manager 3 created after another hard kill automatically dispatches exactly one
    continuation.
-3. Canonical lifecycle settlement—not acknowledgement—owns the persisted clear.
+3. A correlated user echo on one bridge does not suppress the fresh tracked
+   continuation on each later hard-restored bridge before lifecycle settlement.
+4. Canonical lifecycle settlement—not acknowledgement—owns the persisted clear.
    A valid correlated late acknowledgement may consume only its startup fence.
-4. Delayed acknowledgements from a changed bridge, lifecycle-fenced session,
+5. Delayed acknowledgements from a changed bridge, lifecycle-fenced session,
    temporary canonical-map gap, or replacement session are inert.
-5. `nonInteractive` restores receive no generic continuation, and stop/terminate
+6. `nonInteractive` restores receive no generic continuation, and stop/terminate
    winners cancel deferred continuation.
-6. The boot-resume nudge owns asynchronous dispatch failures, and a lead targeted
+7. The boot-resume nudge owns asynchronous dispatch failures, and a lead targeted
    by both recovery mechanisms is prompted exactly once.
-7. Reset recovery nudges eligible restored teams while explicit dormant states and
+8. Reset recovery nudges eligible restored teams while explicit dormant states and
    teamless goals remain excluded.
 
 The orphan-result rehydration boundary coverage separately pins exact-occurrence
