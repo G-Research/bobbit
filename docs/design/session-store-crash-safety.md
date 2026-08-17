@@ -1,15 +1,13 @@
 # Session-store crash-safety
 
-Status: historical incident and the original v2 crash-safety work. Companion to
+Status: historical incident and original v2 crash-safety work. Companion to
 [`unify-session-status.md`](./unify-session-status.md) (single-writer
 status invariant) — both are about not silently losing session-shaped
 state across a crash.
 
-The current persistence topology is v3 split tiers; its file layout, transition
-recovery, and migration behavior are documented in
-[Split archived SessionStore writes](split-archived-session-writes.md). The v2
-format sections below explain the incident-era guard design, not the current
-on-disk layout.
+This is a **historical v2 record**, not the current on-disk contract. The current
+v3 split-tier layout, recovery, migration, and operations are documented in
+[Split archived SessionStore writes](split-archived-session-writes.md).
 
 ---
 
@@ -77,9 +75,10 @@ and a fresh `.jsonl` are sitting right there on disk.
 **Bug class prevented:** confusing "I can't reattach right now" with
 "this session is dead."
 
-## 3. The fix
+## 3. The fix (historical v2)
 
-Four parts. Each addresses one failure mode and is independently testable.
+The following four v2 controls addressed the incident and remain useful context
+for the v3 design. Each addresses one failure mode and is independently testable.
 
 ### 3.1 On-disk format v2 with epoch field
 
@@ -261,22 +260,25 @@ Tests:
 - `tests/session-store-*` — atomic-write crash simulation, stale-load
   guard, backup fallback, v1→v2 migration.
 
-## 7. Operator runbook
+## 7. Operator runbook (current v3 tiers)
 
-If you see `[session-store] REFUSING to save …` in the logs:
+See [split-persistence operations](split-archived-session-writes.md#tombstones-state-migration-and-operations)
+for the complete v3 contract. If logs say `[session-store] REFUSING to save
+<live|archived> tier`:
 
-1. **Stop the gateway.** Do not restart it — the latch is by design
-   process-lifetime, but a clean stop makes step 2 cleaner.
-2. **Inspect the on-disk state.** Compare `.bobbit/state/sessions.json`
-   against `.bak.1..5`. The `epoch` and `sessions.length` of each tells
-   you which is newest.
-3. **Find out who rewrote the file.** The most common culprits are
-   OneDrive / Dropbox / iCloud sync clients restoring a stale copy,
-   antivirus quarantine-and-restore, or a manual restore from a
-   `.pre-migration` backup while the gateway was up. Disable or
-   reconfigure that source.
-4. **Pick the canonical file** (usually the one with the highest
-   `epoch`), copy it to `sessions.json`, restart the gateway.
+1. **Stop the gateway.** Preserve the two primaries, both five-deep backup
+   chains, `sessions.json.split-transition`, and every
+   `sessions.json.pre-archived-split*` file together.
+2. **Diagnose only the tier and path named by `REFUSING`.** Its epochs are
+   tier-local: do not compare them to the other tier, copy a snapshot across
+   tiers, or change an epoch to make the guard pass. Any restore stays within
+   that tier's own primary and backup chain.
+3. **Keep transition evidence.** With a valid epoch-bound split-transition,
+   prefer restart-driven recovery. If the intent is unbound, malformed, or
+   either tier is outside its epoch binding, retain it for investigation; never
+   replay or casually delete it.
+4. **Find and stop the out-of-band writer**, then restart the gateway. Sync
+   clients, antivirus restore, and manual state replacement are common causes.
 
 If you see the orphaned-transcripts banner:
 
