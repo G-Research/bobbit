@@ -851,4 +851,90 @@ describe("SessionStore atomic write", () => {
 			asyncFs.promises.unlink = baseUnlink;
 		}
 	});
+
+	it("keeps a paused archive intent bound while setDraft replaces its nested draft data", async () => {
+		const store = new SessionStore(stateDir, memfs);
+		store.put(makeSession("move"));
+		store.setDraft("move", "proposal", { revision: 1, body: { text: "before archive" } });
+		await store.flushAsync();
+
+		const asyncFs = memfs as any;
+		const baseRename = asyncFs.promises.rename;
+		const intentDurable = deferred();
+		const releaseTierRenames = deferred();
+		let pauseFreshIntent = true;
+		asyncFs.promises.rename = async (from: PathLike, to: PathLike) => {
+			const isFreshIntent = pauseFreshIntent
+				&& path.resolve(String(from)) === path.resolve(`${STORE_FILE}.split-transition.tmp`)
+				&& path.resolve(String(to)) === path.resolve(`${STORE_FILE}.split-transition`);
+			const result = await baseRename(from, to);
+			if (isFreshIntent) {
+				pauseFreshIntent = false;
+				intentDurable.resolve();
+				await releaseTierRenames.promise;
+			}
+			return result;
+		};
+		try {
+			store.archive("move");
+			await settleWithin(intentDurable.promise, "archive intent rename");
+
+			// setDraft changes the existing `drafts` container in place. The durable
+			// intent must remain immutable evidence for its exact binding check.
+			assert.equal(store.setDraft("move", "proposal", { revision: 2, body: { text: "after intent" } }), true);
+			releaseTierRenames.resolve();
+			await settleWithin(store.flushAsync(), "archive followed by draft replacement");
+
+			assert.equal(memfs.existsSync(`${STORE_FILE}.split-transition`), false, "the still-bound intent must be cleaned up");
+			const archived = readTier(ARCHIVED_FILE).sessions.find(session => session.id === "move");
+			assert.deepEqual(archived?.drafts, { proposal: { revision: 2, body: { text: "after intent" } } });
+
+			const reloaded = new SessionStore(stateDir, memfs);
+			await settleWithin(reloaded.flushAsync(), "reload after draft replacement");
+			assert.deepEqual(reloaded.getDraft("move", "proposal"), { revision: 2, body: { text: "after intent" } });
+			assert.equal(reloaded.get("move")?.archived, true);
+		} finally {
+			asyncFs.promises.rename = baseRename;
+		}
+	});
+
+	it("retries an unlink-blocked archive intent after deleteDraft and converges durably", async () => {
+		const store = new SessionStore(stateDir, memfs);
+		store.put(makeSession("move"));
+		store.setDraft("move", "proposal", { revision: 1, body: { text: "remove on retry" } });
+		await store.flushAsync();
+
+		const asyncFs = memfs as any;
+		const baseUnlink = asyncFs.promises.unlink;
+		let failIntentUnlink = true;
+		asyncFs.promises.unlink = async (file: PathLike) => {
+			if (failIntentUnlink && path.resolve(String(file)) === path.resolve(`${STORE_FILE}.split-transition`)) {
+				throw Object.assign(new Error("EBUSY: injected transition intent unlink failure"), { code: "EBUSY" });
+			}
+			return baseUnlink(file);
+		};
+		try {
+			store.archive("move");
+			await assert.rejects(store.flushAsync(), /EBUSY: injected transition intent unlink failure/);
+			assert.equal(memfs.existsSync(`${STORE_FILE}.split-transition`), true, "the fully-published pair retains its busy intent");
+
+			// deleteDraft mutates the same nested drafts object captured by a shallow
+			// transition entry. Retrying must use the original durable intent bytes.
+			assert.equal(store.deleteDraft("move", "proposal"), true);
+			failIntentUnlink = false;
+			await settleWithin(store.flushAsync(), "unlink retry after draft deletion");
+			assert.equal(memfs.existsSync(`${STORE_FILE}.split-transition`), false, "retry removes the original spent intent");
+
+			store.update("move", { title: "after unlink retry" });
+			await settleWithin(store.flushAsync(), "later archived update");
+			const reloaded = new SessionStore(stateDir, memfs);
+			await settleWithin(reloaded.flushAsync(), "reload after unlink retry");
+			assert.equal(reloaded.get("move")?.title, "after unlink retry");
+			assert.equal(reloaded.get("move")?.archived, true);
+			assert.equal(reloaded.getDraft("move", "proposal"), undefined);
+			assert.deepEqual(reloaded.getArchived().map(session => session.id), ["move"]);
+		} finally {
+			asyncFs.promises.unlink = baseUnlink;
+		}
+	});
 });
