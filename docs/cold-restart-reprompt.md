@@ -94,19 +94,58 @@ before the prompt is sent and the prompt itself gets the generous timeout. A
 `MODEL_SELECTION_REQUIRED` capsule never reaches this restore path and is not
 re-prompted when a client attaches.
 
-RPC acceptance consumes only the restore-startup dispatch fence. The persisted
-`wasStreaming` bit remains true for the newly accepted continuation until its
-`agent_end` lifecycle settles the turn. This matters for hard-kill development
-restarts, where `SessionManager.shutdown()` never runs: clearing the bit at prompt
-acknowledgement made a second restart during the continuation lose automatic
-re-drive and wait for a user message. Normal successful settlement clears the bit
-through the ordinary lifecycle path.
+### Continuation durability and acknowledgement fencing
 
-`nonInteractive` reviewer / QA sessions are **excluded** here — they are re-driven
-exclusively by the verification harness (`resumeInterruptedVerifications` →
-`_tryResumeFromSession`), and firing the mid-turn nudge too would race two prompts
-at the same cold reviewer. The `wasStreaming` flag is still cleared so it does not
-leak across restarts.
+Restore gives the interrupted-turn state two distinct owners:
+
+- `restoreStartupWasStreaming` is an in-memory, one-shot fence for dispatching the
+  restored continuation.
+- Persisted `wasStreaming` records that the accepted continuation turn is still
+  active and must be re-driven after another gateway restart.
+
+RPC acknowledgement consumes only the startup dispatch fence. It proves that the
+agent accepted the continuation, not that the turn finished, so it must not clear
+persisted `wasStreaming`. Ordinary canonical lifecycle settlement remains the
+owner of that durable transition: a final `agent_end` (or terminal process exit)
+clears the active-turn marker through the existing lifecycle path.
+
+This ownership split matters when a hard development restart bypasses
+`SessionManager.shutdown()`. If manager 2 is killed after accepting the restored
+continuation but before lifecycle settlement, manager 3 still reads
+`wasStreaming: true` and dispatches another continuation automatically. The same
+rule applies to further consecutive hard kills; no user prompt is needed to wake
+the session.
+
+Acknowledgements are also fenced against session replacement. Dispatch captures
+the canonical session and its RPC bridge. A delayed acknowledgement may consume
+that dispatch's startup fence only while the captured session is still canonical,
+still owns the captured bridge, and has not entered replacement lifecycle
+fencing. This permits a correlated acknowledgement that arrives after terminal
+turn settlement when the same bridge remains canonical; it consumes only the
+startup fence and cannot rewrite the already-settled durable state. Once
+replacement begins, an acknowledgement from the old bridge is inert throughout
+the lifecycle-fenced interval, any temporary session-map gap, and after the
+replacement becomes canonical. It therefore cannot consume the replacement's
+startup fence or mutate its durable occurrence state.
+
+### Preserved recovery boundaries
+
+The durability change does not create a second recovery protocol:
+
+- `nonInteractive` reviewer and QA sessions remain excluded from generic boot
+  continuation. The verification harness exclusively owns their re-drive and the
+  compatibility `wasStreaming` bit is cleared when ownership is handed off.
+- Continuations retain their exact-occurrence identity, system author, and durable
+  queue/ledger handling, so an ambiguous write survives a restart without being
+  duplicated.
+- Definite-no-start rejection and poisoned-history rollback keep their existing
+  ownership. RPC acceptance is not a rollback signal.
+- Session-replacement coordination, stop/terminate cancellation, model binding,
+  and serialization remain unchanged; only the final canonical bridge dispatches
+  deferred continuation work.
+- Graceful shutdown still snapshots restart re-drive need through the existing
+  lifecycle rules. The durable marker specifically covers hard exits that bypass
+  that snapshot.
 
 ## Boot-resume nudge path
 
@@ -219,30 +258,38 @@ Net effect: a session that is both mid-turn and a lead-with-work is prompted
 These mirror the values the verification-harness reviewer-resume path already used
 for the same hazard — now unified behind the shared constants.
 
-## Pinning test
+## Pinning tests
 
-`tests/cold-restart-reprompt.test.ts` pins the behaviour through observable seams
-(call order, the prompt timeout argument, whether a rejection escaped, how many
-times the cold agent is prompted), not symbol names, so it stays robust against
-implementation detail:
+`tests2/core/cold-restart-reprompt.test.ts` pins the behaviour through observable
+recovery outcomes rather than private implementation structure:
 
-1. The mid-turn re-prompt calls `waitForReady` **before** `prompt` and passes a
-   generous (≥ 90 s) timeout, so the cold prompt lands instead of rejecting with
-   `Command timed out: prompt`.
-2. The boot-resume nudge never lets the async-drain cold-start rejection escape as
-   a process-level unhandled rejection (it must be awaited inside a `try/catch`).
-3. A session that is both mid-turn and a team-lead with outstanding work is
-   re-prompted/nudged **exactly once**.
-4. A reopened `in-progress` goal with a pending reset gate and restored team
-   receives one boot-resume nudge, while teamless, complete, paused, shelved, and
-   archived goals do not.
+1. The mid-turn re-prompt waits for readiness and uses the cold-start timeout
+   budget, so the prompt lands instead of failing at the generic RPC timeout.
+2. An accepted manager-2 continuation keeps persisted `wasStreaming` true, and a
+   manager 3 created after another hard kill automatically dispatches exactly one
+   continuation.
+3. Canonical lifecycle settlement—not acknowledgement—owns the persisted clear.
+   A valid correlated late acknowledgement may consume only its startup fence.
+4. Delayed acknowledgements from a changed bridge, lifecycle-fenced session,
+   temporary canonical-map gap, or replacement session are inert.
+5. `nonInteractive` restores receive no generic continuation, and stop/terminate
+   winners cancel deferred continuation.
+6. The boot-resume nudge owns asynchronous dispatch failures, and a lead targeted
+   by both recovery mechanisms is prompted exactly once.
+7. Reset recovery nudges eligible restored teams while explicit dormant states and
+   teamless goals remain excluded.
+
+The orphan-result rehydration boundary coverage separately pins exact-occurrence
+retention, durable queues, and poisoned-history rollback across the same restart
+path.
 
 ## Where the code lives
 
 | File | Symbol | Responsibility |
 |---|---|---|
 | `src/server/agent/rpc-bridge.ts` | `promptWhenReady`, `COLD_REPROMPT_READY_TIMEOUT_MS`, `COLD_REPROMPT_PROMPT_TIMEOUT_MS` | Shared wait-for-ready + generous-timeout prompt helper and its budget constants. |
-| `src/server/agent/session-manager.ts` | `restoreSession` (mid-turn branch) | Re-prompts a `wasStreaming` session via `promptWhenReady`; records `_bootRepromptedSessions`. |
+| `src/server/agent/session-manager.ts` | `restoreSession` (mid-turn branch) | Restores the interrupted-turn marker and schedules generic continuation for eligible interactive sessions. |
+| `src/server/agent/session-manager.ts` | `_dispatchBootContinuation` | Dispatches the tracked system continuation, fences its acknowledgement to the captured canonical bridge, and consumes only the restore-startup fence. |
 | `src/server/agent/session-manager.ts` | `wasBootReprompted`, `_bootRepromptedSessions` | Boot-coordination marker so the nudge skips an already-covered lead; cleared on `agent_start`. |
 | `src/server/agent/session-manager.ts` | `enqueuePrompt` (`coldStart` opt) → `dispatchDirectPrompt` | Threads `coldStart` so the direct dispatch uses `promptWhenReady`. |
 | `src/server/agent/team-manager.ts` | `_bootResumeIdleTeamLeads`, `_dispatchBootResumeNudge` | Boot-resume nudge for idle leads with work; owns the async-drain rejection. |
