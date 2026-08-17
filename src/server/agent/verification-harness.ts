@@ -2895,7 +2895,7 @@ export class VerificationHarness {
 	 */
 	private _canReconstructTerminalIntentBeforeReviewerCleanup(v: ActiveVerification): boolean {
 		if (v.steps.some(step => step.restartInterrupted === true)) return true;
-		const statuses = v.steps.map(step => persistedStatusForStep(step));
+		const statuses = v.steps.map(step => step.status);
 		if (statuses.every(status => status !== "waiting" && status !== "running")) return true;
 
 		let firstRealFailurePhase: number | undefined;
