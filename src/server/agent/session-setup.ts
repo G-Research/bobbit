@@ -1980,6 +1980,9 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 			? `⚡${plan.title}`
 			: plan.title),
 		cwd: effectiveCwd,
+		// Must exist before the first map publication: grant reconciliation and
+		// activation resolve against this exact project while setup is still live.
+		projectId: plan.projectId,
 		status: "starting",
 		statusVersion: 0,
 		createdAt: now,

@@ -65,14 +65,16 @@ describe("ToolResultFilterAttemptCredentials", () => {
 		expect(credentials.consume(sessionId, toolCallId, current, issuedAt + 1)).toBe(false);
 	});
 
-	it("waits for a plain-create owner and ignores processless session capsules", async () => {
+	it("waits for plain-create and delegate owners while ignoring processless capsules", async () => {
 		const manager: any = new SessionManager();
 		manager.setToolResultFilterActivationResolver(() => ({ toolResult: true }));
 		let finishSetup!: () => void;
 		const setup = new Promise<void>(resolve => { finishSetup = resolve; });
 		manager.sessions.set("plain-create", { id: "plain-create", projectId: "project", rpcClient: { running: true } });
+		manager.sessions.set("delegate", { id: "delegate", projectId: "project", rpcClient: { running: true } });
 		manager.sessions.set("zombie", { id: "zombie", projectId: "project", rpcClient: { running: false } });
 		manager.pendingSessionSetups.set("plain-create", setup);
+		manager.pendingSessionSetups.set("delegate", setup);
 		manager.restartAgent = vi.fn(async (id: string) => {
 			const runtime = manager.toolResultFilterAttemptCredentials.beginRuntime(id, 1);
 			manager.toolResultFilterAttemptCredentials.commitRuntime(id, runtime);
@@ -83,9 +85,11 @@ describe("ToolResultFilterAttemptCredentials", () => {
 		expect(manager.restartAgent).not.toHaveBeenCalled();
 		finishSetup();
 		await reconciliation;
-		expect(manager.restartAgent).toHaveBeenCalledTimes(1);
+		expect(manager.restartAgent).toHaveBeenCalledTimes(2);
 		expect(manager.restartAgent).toHaveBeenCalledWith("plain-create");
+		expect(manager.restartAgent).toHaveBeenCalledWith("delegate");
 		expect(manager.toolResultFilterAttemptCredentials.hasRuntime("plain-create")).toBe(true);
+		expect(manager.toolResultFilterAttemptCredentials.hasRuntime("delegate")).toBe(true);
 	});
 
 	it("fails closed when policy activates after an ungated bridge starts", async () => {

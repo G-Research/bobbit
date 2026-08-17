@@ -12529,43 +12529,62 @@ export class SessionManager {
 			plan.id,
 			delegateThinkingCandidate,
 		);
-		let session: SessionInfo;
+		// Delegates publish from executePlan and then await their direct bootstrap.
+		// Keep reconciliation behind one owner for that whole lifecycle.
+		let resolvePendingSetup!: () => void;
+		let rejectPendingSetup!: (error: unknown) => void;
+		const pendingSetup = new Promise<void>((resolve, reject) => {
+			resolvePendingSetup = resolve;
+			rejectPendingSetup = reject;
+		});
+		void pendingSetup.catch(() => {});
+		this.pendingSessionSetups.set(id, pendingSetup);
+		let completed = false;
 		try {
-			session = await executePlan(plan, ctx);
+			let session: SessionInfo;
+			try {
+				session = await executePlan(plan, ctx);
+			} finally {
+				releaseSetupThinkingAuthority();
+			}
+			// Persist the effective-goal stamp on BOTH the live session and the store
+			// record so it survives restart/respawn (the initial structural put happens
+			// inside executePlan; this guarantees the field regardless of plan
+			// propagation details). Belt-and-suspenders alongside plan.teamGoalId.
+			if (parentEffectiveGoalId) {
+				session.teamGoalId = parentEffectiveGoalId;
+				this.resolveStoreForSession(session.id).update(session.id, { teamGoalId: parentEffectiveGoalId });
+			}
+
+			// Persist with all structural fields (delegateOf is in the initial put, tracked for terminate)
+			session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
+				console.error(`[session-manager] Failed to persist delegate session ${id}:`, err);
+			}).finally(() => { session.pendingMetadataPersist = undefined; });
+
+			// Preserve an authenticated owner's identity for orchestration-created
+			// delegates. Direct/server-created delegates omit provenance and remain
+			// system-authored; sendDelegatePrompt validates the pair fail-closed.
+			try {
+				await sendDelegatePrompt(session, opts.instructions, DELEGATE_SPAWN_TIMEOUT_MS, {
+					source: opts.source,
+					author: opts.author,
+				});
+			} finally {
+				// Delegate bootstrap bypasses the queue; persist its direct occurrence
+				// before setup failure handling or a later restart can retry it.
+				this.broadcastQueue(session);
+			}
+
+			console.log(`[session-manager] Created delegate session ${id} (parent: ${parentSessionId}, status: ${session.status})`);
+			completed = true;
+			return session;
+		} catch (err) {
+			rejectPendingSetup(err);
+			throw err;
 		} finally {
-			releaseSetupThinkingAuthority();
+			if (completed) resolvePendingSetup();
+			if (this.pendingSessionSetups.get(id) === pendingSetup) this.pendingSessionSetups.delete(id);
 		}
-		if (parentProjectId) session.projectId = parentProjectId;
-		// Persist the effective-goal stamp on BOTH the live session and the store
-		// record so it survives restart/respawn (the initial structural put happens
-		// inside executePlan; this guarantees the field regardless of plan
-		// propagation details). Belt-and-suspenders alongside plan.teamGoalId.
-		if (parentEffectiveGoalId) {
-			session.teamGoalId = parentEffectiveGoalId;
-			this.resolveStoreForSession(session.id).update(session.id, { teamGoalId: parentEffectiveGoalId });
-		}
-
-		// Persist with all structural fields (delegateOf is in the initial put, tracked for terminate)
-		session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
-			console.error(`[session-manager] Failed to persist delegate session ${id}:`, err);
-		}).finally(() => { session.pendingMetadataPersist = undefined; });
-
-		// Preserve an authenticated owner's identity for orchestration-created
-		// delegates. Direct/server-created delegates omit provenance and remain
-		// system-authored; sendDelegatePrompt validates the pair fail-closed.
-		try {
-			await sendDelegatePrompt(session, opts.instructions, DELEGATE_SPAWN_TIMEOUT_MS, {
-				source: opts.source,
-				author: opts.author,
-			});
-		} finally {
-			// Delegate bootstrap bypasses the queue; persist its direct occurrence
-			// before setup failure handling or a later restart can retry it.
-			this.broadcastQueue(session);
-		}
-
-		console.log(`[session-manager] Created delegate session ${id} (parent: ${parentSessionId}, status: ${session.status})`);
-		return session;
 	}
 
 	private resolveIdleWaiters(sessionId: string): void {

@@ -3783,13 +3783,17 @@ describe("executable continue-archived/live-fork setup boundary", () => {
 		registerRpcBridgeFactory(() => bridge);
 		const ctx = pipelineContext();
 		ctx.store.archive = vi.fn();
-		ctx.tryAutoSelectModel = vi.fn(async () => { filterRequired = true; });
+		ctx.tryAutoSelectModel = vi.fn(async (session: any) => {
+			expect(ctx.sessions.get(session.id)?.projectId).toBe("project-boundary");
+			filterRequired = true;
+		});
 		ctx.assertToolResultFilterGateAtPublication = vi.fn(() => {
 			if (filterRequired) throw new Error("Tool-result filter gate was not installed for session plain-create-publication-race");
 		});
 		const plan = setupPlan("plain-create-publication-race", "", false);
 		delete plan.preExistingAgentSessionFile;
 		plan.skipAutoModel = false;
+		plan.mode = "delegate";
 
 		await expect(executePlan(plan, ctx)).rejects.toThrow("Tool-result filter gate was not installed");
 		expect(ctx.sessions.get(plan.id)).toBeUndefined();
