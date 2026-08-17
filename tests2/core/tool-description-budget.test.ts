@@ -14,14 +14,14 @@ guardProcessEnv();
  * regress.
  *
  * Limits:
+ *   - every default tool schema has a top-level `type: "object"` for Bedrock
  *   - tool.description.length            ≤ 150 chars
  *   - JSON Schema property description   ≤  80 chars (recursive)
  *   - buildMetaToolDescription output    ≤ 150 chars, no inlined op enumeration
  *
- * The first two are checked by importing each `defaults/tools/<group>/extension.ts`
- * with a fake `pi` that captures every `registerTool({...})` invocation. The
- * third hits `buildMetaToolDescription` directly with a synthetic 50-op list of
- * long names.
+ * The schema guard imports every `defaults/tools/<group>/extension.ts`. The
+ * description checks cover the budgeted group list below. The final checks hit
+ * `buildMetaToolDescription` directly with a synthetic 50-op list of long names.
  */
 
 import { describe, it, beforeAll } from "vitest";
@@ -52,7 +52,7 @@ const EXTENSION_GROUPS = [
 // Vite resolves this eager glob into static module imports in one transform pass.
 // Unlike sequential import(url), extension discovery has no per-group async tax.
 const EXTENSION_MODULES = import.meta.glob<{ default: ExtensionFactory }>(
-	"../../defaults/tools/{agent,ask,bobbit,browser,html,images,inbox,mcp,proposals,review,shell,skills,tasks,team,web}/extension.ts",
+	"../../defaults/tools/*/extension.ts",
 	{ eager: true },
 );
 
@@ -67,6 +67,23 @@ interface CapturedTool {
 }
 
 const captured: CapturedTool[] = [];
+const bedrockCaptured: CapturedTool[] = [];
+
+function captureTools(factory: ExtensionFactory, source: string, destination: CapturedTool[]): void {
+	factory({
+		registerTool(def: any) {
+			destination.push({
+				name: def?.name ?? "<unnamed>",
+				description: def?.description,
+				parameters: def?.parameters,
+				source,
+			});
+		},
+		on() {
+			// no-op — we don't drive the lifecycle in this test
+		},
+	});
+}
 
 beforeAll(() => {
 	// Ensure staff-gated tools (inbox) register so their descriptions are budget-checked.
@@ -77,6 +94,10 @@ beforeAll(() => {
 	if (!process.env.BOBBIT_SESSION_ID) {
 		process.env.BOBBIT_SESSION_ID = "00000000-0000-0000-0000-000000000000";
 	}
+	if (!process.env.BOBBIT_GOAL_ID) {
+		process.env.BOBBIT_GOAL_ID = "00000000-0000-0000-0000-000000000000";
+	}
+	process.env.BOBBIT_BUILTIN_TOOLS = "edit,find,grep,ls,read,write";
 	// The bobbit extension gates on gateway credentials (not on a goal/session).
 	// Provide non-empty env creds so its three tools register and get budget-checked.
 	if (!process.env.BOBBIT_TOKEN) process.env.BOBBIT_TOKEN = "test-token";
@@ -87,23 +108,16 @@ beforeAll(() => {
 		const factory = EXTENSION_MODULES[modulePath]?.default;
 		assert.ok(typeof factory === "function", `${group}/extension.ts has no callable default export`);
 
-		const pi = {
-			registerTool(def: any) {
-				captured.push({
-					name: def?.name ?? "<unnamed>",
-					description: def?.description,
-					parameters: def?.parameters,
-					source: `${group}/extension.ts`,
-				});
-			},
-			on() {
-				// no-op — we don't drive the lifecycle in this test
-			},
-		};
-		factory(pi);
+		captureTools(factory, `${group}/extension.ts`, captured);
+	}
+
+	for (const [modulePath, module] of Object.entries(EXTENSION_MODULES)) {
+		assert.ok(typeof module.default === "function", `${modulePath} has no callable default export`);
+		captureTools(module.default, modulePath, bedrockCaptured);
 	}
 
 	assert.ok(captured.length >= 13, `expected at least 13 tools registered, got ${captured.length}`);
+	assert.ok(bedrockCaptured.length >= captured.length, "Bedrock schema inventory must cover every budgeted tool");
 });
 
 /** Walk a TypeBox / JSON Schema tree and collect every `description` string with a path. */
@@ -148,6 +162,19 @@ function collectAllDescriptions(
 	}
 	return out;
 }
+
+describe("default tool provider schema compatibility", () => {
+	it("every default tool has a Bedrock-compatible top-level object input schema", () => {
+		const violations = bedrockCaptured
+			.filter((tool) => !tool.parameters || typeof tool.parameters !== "object" || (tool.parameters as any).type !== "object")
+			.map((tool) => `  ${tool.source} :: ${tool.name}`);
+		assert.equal(
+			violations.length,
+			0,
+			`${violations.length} tool schema(s) do not declare top-level type \"object\":\n${violations.join("\n")}`,
+		);
+	});
+});
 
 describe("tool description budget", () => {
 	it("every registered tool has description.length <= 150", () => {
