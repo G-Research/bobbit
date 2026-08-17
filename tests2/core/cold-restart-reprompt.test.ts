@@ -397,7 +397,29 @@ describe("cold-restart re-prompt (reproducing)", () => {
 
 		assert.equal(firstPrompts.length, 0);
 		assert.equal(secondPrompts.length, 1, "next boot must deliver the still-durable continuation once");
-		assert.equal(ps.wasStreaming, false, "only accepted canonical dispatch clears the marker");
+		assert.equal(
+			ps.wasStreaming,
+			true,
+			"hard restart during an accepted continuation must automatically continue again: manager-2 RPC acceptance must keep wasStreaming durable until lifecycle settlement",
+		);
+
+		// Model a second hard gateway kill after manager 2 accepted the restored
+		// continuation but before any agent_end/process_exit lifecycle settlement.
+		const thirdPrompts: string[] = [];
+		const thirdBridge = {
+			...baseBridge,
+			async promptWhenReady(text: string) { thirdPrompts.push(text); return { success: true }; },
+		};
+		const third = makeManager(thirdBridge);
+		third._testStore = first._testStore;
+		await third.restoreSession(ps);
+		await flush();
+
+		assert.equal(
+			thirdPrompts.length,
+			1,
+			"hard restart during an accepted continuation must automatically continue again",
+		);
 	});
 
 	it("dispatches boot continuation once after a queued final replacement fails", async () => {
