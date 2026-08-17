@@ -186,6 +186,38 @@ describe("buildVerificationFailureMessage", () => {
 		);
 	});
 
+	it("does not suppress genuine reviewer verdicts that quote every historic restart phrase or have empty output", () => {
+		const historicRestartText = [
+			"Step was running but had no session ID",
+			"Step was interrupted by server restart",
+			"Session lost during server restart",
+			"Agent process exited unexpectedly",
+			"Reviewer agent process died",
+			"Agent did not call verification_result after server restart",
+			"timed out while resuming after server restart",
+		].join("\n");
+		const message = buildVerificationFailureMessage("implementation", [
+			{ name: "Review quotes restart diagnostics", type: "llm-review", passed: false, status: "failed", output: historicRestartText },
+			{ name: "QA quotes restart diagnostics", type: "agent-qa", passed: false, status: "failed", output: historicRestartText },
+			{ name: "Review has intentionally empty verdict", type: "llm-review", passed: false, status: "failed", output: "" },
+			{ name: "QA has intentionally empty verdict", type: "agent-qa", passed: false, status: "failed", output: "" },
+		]);
+
+		for (const stepName of [
+			"Review quotes restart diagnostics",
+			"QA quotes restart diagnostics",
+			"Review has intentionally empty verdict",
+			"QA has intentionally empty verdict",
+		]) {
+			assert.match(
+				message,
+				new RegExp(`step="${stepName}"`),
+				`RESTART_PROVENANCE_FAIL_CLOSED_NOTIFICATION: ${stepName} is a genuine failed verdict unless the harness persisted structured restart provenance; content must never suppress the failure notification.`,
+			);
+		}
+		assert.match(message, /\*\*Gate verification FAILED\*\*\n\n\*\*Failed gate:\*\* `implementation` — `Review quotes restart diagnostics`/, `RESTART_PROVENANCE_FAIL_CLOSED_NOTIFICATION: the notification must retain failed-gate context.`);
+	});
+
 	it("omits long failed-step output entirely instead of truncating it", () => {
 		const output = `START\n${"x".repeat(610)}\nTAIL`;
 		const message = buildVerificationFailureMessage("execution", [

@@ -24,6 +24,17 @@ const GOAL_ID = "verification-cancellation-outcome-goal";
 const GATE_ID = "verification-cancellation-outcome-gate";
 const SIGNAL_ID = "verification-cancellation-outcome-signal";
 const COMPLETED_OUTPUT = "completed prerequisite output must survive cancellation";
+// Former restart-provenance text is deliberately retained only as hostile
+// reviewer content. It must never classify a product verdict as cancellation.
+const FORMER_RESTART_PHRASES = [
+	"Step was running but had no session ID",
+	"Step was interrupted by server restart",
+	"Session lost during server restart",
+	"Agent process exited unexpectedly",
+	"Reviewer agent process died",
+	"Agent did not call verification_result after server restart",
+	"timed out while resuming after server restart",
+] as const;
 let stateDir: string | undefined;
 let gateStore: GateStore | undefined;
 
@@ -127,12 +138,12 @@ const RESTART_GATE: WorkflowGate = {
 	dependsOn: [],
 	verify: [
 		{ name: "Completed before restart", type: "command", run: "echo completed", phase: 0 },
-		{ name: "Late failed restart result", type: "command", run: "exit 1", phase: 0 },
-		{ name: "Late timeout restart result", type: "command", run: "sleep 1", phase: 1 },
+		{ name: "Interrupted review result", type: "llm-review", prompt: "Review", phase: 0 },
+		{ name: "Interrupted QA result", type: "agent-qa", prompt: "QA", phase: 1 },
 	],
 };
 
-test("restart recovery keeps live passed evidence and neutralizes late failed or timeout rows — VERIFICATION_CANCELLATION_OUTCOME_AUDIT", async () => {
+function restartAggregateFixture() {
 	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "verification-cancellation-restart-"));
 	gateStore = new GateStore(stateDir, undefined, { persistence: "json" });
 	gateStore.initGatesForGoal(GOAL_ID, [GATE_ID]);
@@ -146,48 +157,137 @@ test("restart recovery keeps live passed evidence and neutralizes late failed or
 	const restartSignal = { ...signal(), id: `${SIGNAL_ID}-restart` };
 	restartSignal.verification.steps = harness.beginVerification(restartSignal, RESTART_GATE);
 	gateStore.recordSignal(restartSignal);
-
-	// These are live/restart-resumed terminal observations. The durable signal
-	// still contains only beginVerification's running/waiting seed rows.
 	const active = (harness as any).activeVerifications.get(restartSignal.id);
 	Object.assign(active.steps[0], {
 		status: "passed",
 		output: COMPLETED_OUTPUT,
 		durationMs: 23,
 	});
+	// This flag is harness-owned provenance, not reviewer output. Its diagnostic
+	// text deliberately has none of the historic restart phrases.
 	Object.assign(active.steps[1], {
 		status: "failed",
-		output: "Step was interrupted by server restart before a verdict was durable.",
+		passed: false,
+		output: "The recovered reviewer turn ended before a durable result.",
 		durationMs: 29,
+		restartInterrupted: true,
 	});
 	Object.assign(active.steps[2], {
 		status: "timeout",
-		output: "Verification timed out while resuming after server restart.",
+		passed: false,
+		output: "The recovered QA turn ended before a durable result.",
 		durationMs: 31,
+		restartInterrupted: true,
 	});
+	return { harness, restartSignal, active, events };
+}
+
+test("restart recovery uses structured interruption provenance and preserves completed evidence — VERIFICATION_CANCELLATION_OUTCOME_AUDIT", async () => {
+	const { harness, restartSignal, active, events } = restartAggregateFixture();
 
 	// The restart interruption seam is deterministic: no timer, polling, or
-	// temp-state inspection is needed to exercise the terminal publication.
+	// raw state-file reads are needed to exercise terminal publication.
 	await (harness as any)._finalizeRestartInterruptedVerification(active);
 
-	const verification = gateStore.getGate(GOAL_ID, GATE_ID)!.signals.find(entry => entry.id === restartSignal.id)!.verification as any;
+	const verification = gateStore!.getGate(GOAL_ID, GATE_ID)!.signals.find(entry => entry.id === restartSignal.id)!.verification as any;
 	expect(verification).toMatchObject({
 		status: "cancelled",
 		cancellation: { cause: "gateway-restart-recovery", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
 		steps: [
-			// A terminal status is authoritative even when an older active shape did
-			// not carry the redundant boolean result field.
 			{ name: "Completed before restart", status: "passed", passed: true, output: COMPLETED_OUTPUT, duration_ms: 23 },
-			{ name: "Late failed restart result", status: "cancelled", passed: false, cancellation: { cause: "gateway-restart-recovery" } },
-			{ name: "Late timeout restart result", status: "cancelled", passed: false, cancellation: { cause: "gateway-restart-recovery" } },
+			{ name: "Interrupted review result", status: "cancelled", passed: false, cancellation: { cause: "gateway-restart-recovery" } },
+			{ name: "Interrupted QA result", status: "cancelled", passed: false, cancellation: { cause: "gateway-restart-recovery" } },
 		],
 	});
 	expect(verification.steps.some((step: any) => step.status === "failed"),
-		"VERIFICATION_CANCELLATION_OUTCOME_AUDIT: a cancelled restart verification cannot retain a failed product row").toBe(false);
+		"VERIFICATION_CANCELLATION_OUTCOME_AUDIT: a structured restart interruption cannot retain a failed product row").toBe(false);
+	expect(gateStore!.getGate(GOAL_ID, GATE_ID)!.status).toBe("pending");
 	expect(events).toContainEqual(expect.objectContaining({
 		type: "gate_verification_complete",
 		signalId: restartSignal.id,
 		status: "cancelled",
 		cancellation: expect.objectContaining({ cause: "gateway-restart-recovery" }),
 	}));
+});
+
+test("structured restart provenance persists across recovery before cleanup finalizes — VERIFICATION_CANCELLATION_OUTCOME_AUDIT", async () => {
+	const { harness, active } = restartAggregateFixture();
+	let releaseCleanup!: () => void;
+	const cleanupBlocked = new Promise<void>(resolve => { releaseCleanup = resolve; });
+	let capturePersisted!: (value: any) => void;
+	const persistedDuringCleanup = new Promise<any>(resolve => { capturePersisted = resolve; });
+	(harness as any)._terminateCancelledReviewersFor = async () => {
+		// _loadActive is the harness persistence seam; it models a new gateway
+		// reading the record without polling or opening the state file in the test.
+		const restarted = new VerificationHarness(
+			stateDir!, gateStore!, () => {}, { get: () => undefined, getAll: () => [] } as any,
+		);
+		capturePersisted((restarted as any)._loadActive().find((entry: any) => entry.signalId === active.signalId));
+		await cleanupBlocked;
+	};
+
+	const finalization = (harness as any)._finalizeRestartInterruptedVerification(active);
+	const persisted = await persistedDuringCleanup;
+	expect(persisted, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: restart cancellation intent must reach durable active state before cleanup yields").toMatchObject({
+		cancelled: true,
+		overallStatus: "cancelled",
+		cancellation: { cause: "gateway-restart-recovery", requestedAt: expect.any(Number) },
+		steps: [
+			{ name: "Completed before restart", status: "passed" },
+			{ name: "Interrupted review result", status: "running", restartInterrupted: true, cancellation: { cause: "gateway-restart-recovery" } },
+			{ name: "Interrupted QA result", status: "running", restartInterrupted: true, cancellation: { cause: "gateway-restart-recovery" } },
+		],
+	});
+	releaseCleanup();
+	await finalization;
+});
+
+async function resumeGenuineRestartLikeVerdict(type: "llm-review" | "agent-qa", output: string) {
+	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "verification-genuine-restart-like-"));
+	const calls: Array<{ kind: string; value: any }> = [];
+	const notifications: string[] = [];
+	const signalId = `${SIGNAL_ID}-${type}-${output ? "phrases" : "empty"}`;
+	const store = {
+		getGate: () => ({ status: "running", signals: [{ id: signalId, timestamp: 1 }] }),
+		updateSignalVerification: (_id: string, value: any) => calls.push({ kind: "verification", value }),
+		updateGateStatus: (_goalId: string, _gateId: string, value: string) => calls.push({ kind: "gate", value }),
+		getGatesForGoal: () => [],
+	} as any;
+	const harness = new VerificationHarness(
+		stateDir, store, () => {}, { get: () => undefined, getAll: () => [] } as any,
+	);
+	const active = {
+		goalId: GOAL_ID, gateId: GATE_ID, signalId, overallStatus: "running" as const, startedAt: 1,
+		steps: [{ name: `Genuine ${type} verdict`, type, status: "running" as const, startedAt: 1, sessionId: "reviewer" }],
+	};
+	(harness as any).activeVerifications.set(signalId, active);
+	expect((harness as any)._persistActive(), "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: the legacy active record must cross the durable restart seam").toBe(true);
+
+	// Recover the old, unmarked record through the same persisted-active seam as
+	// gateway boot. The synthetic reviewer result is a genuine verdict whose
+	// text is adversarial; it has no harness-owned `restartInterrupted` marker.
+	const recovered = new VerificationHarness(
+		stateDir, store, () => {}, { get: () => undefined, getAll: () => [] } as any,
+	);
+	(recovered as any)._tryResumeFromSession = async (_recoveredActive: any, step: any) => ({
+		name: step.name, type, passed: false, status: "failed", output, duration_ms: 4,
+	});
+	recovered.setTeamLeadNotifier((_goalId, message) => notifications.push(message));
+	await recovered.resumeInterruptedVerifications();
+	return { calls, notifications };
+}
+
+test.each([
+	["llm-review", FORMER_RESTART_PHRASES.join("\n")],
+	["agent-qa", FORMER_RESTART_PHRASES.join("\n")],
+	["llm-review", ""],
+	["agent-qa", ""],
+] as const)("unmarked genuine %s restart-like verdicts fail closed instead of becoming cancellation", async (type, output) => {
+	const { calls, notifications } = await resumeGenuineRestartLikeVerdict(type, output);
+	const verification = calls.find(call => call.kind === "verification")?.value;
+	expect(verification, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: genuine reviewer verdict must publish normally").toMatchObject({ status: "failed" });
+	expect(verification?.cancellation).toBeUndefined();
+	expect(verification?.steps).toMatchObject([{ status: "failed", passed: false, output }]);
+	expect(calls.filter(call => call.kind === "gate").map(call => call.value)).toEqual(["failed"]);
+	expect(notifications.join("\n"), "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: genuine failure notification must not be suppressed by restart-like content").toContain(`step="Genuine ${type} verdict"`);
 });
