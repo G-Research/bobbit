@@ -2585,9 +2585,8 @@ export class VerificationHarness {
 				// durable terminal publication rather than retain a stale lock.
 				delete active.cancellationFinalizing;
 				// A crash may have happened between setting this marker and reviewer
-				// teardown. Re-drive the exact cleanup from the persisted running rows
-				// instead of retaining a permanent finalization block.
-				delete active.reviewerCleanupPending;
+				// teardown. Keep it: it authorizes re-driving the exact persisted
+				// reviewer session IDs even if a late verdict changed their row status.
 				this.activeVerifications.set(active.signalId, active);
 				// A pre-typed persisted cancellation has no recoverable provenance.
 				this._markVerificationCancelled(active, active.cancellation?.cause ?? "unknown");
@@ -4250,7 +4249,9 @@ export class VerificationHarness {
 		const reviewers = new Map<string, { goalId: string; sessionId: string }>();
 		for (const active of actives) {
 			for (const step of active.steps) {
-				if (step.status === "running" && step.sessionId) {
+				// A persisted cleanup marker retains authority over the exact reviewer
+				// identity even after a late verdict changes a cancelled row's status.
+				if (step.sessionId && (step.status === "running" || active.reviewerCleanupPending)) {
 					reviewers.set(step.sessionId, { goalId: active.goalId, sessionId: step.sessionId });
 				}
 			}
@@ -4265,27 +4266,41 @@ export class VerificationHarness {
 	private async _terminateCancelledReviewers(reviewers: readonly { goalId: string; sessionId: string }[]): Promise<void> {
 		const cleanup: Promise<unknown>[] = [];
 		for (const { goalId, sessionId } of reviewers) {
-			// Start both operations now. Do not let a slow stop RPC defer reviewer
-			// ownership removal until after another lifecycle event has redrained it.
-			cleanup.push(Promise.resolve(this.sessionManager?.terminateSession(sessionId)).catch(() => {}));
-			cleanup.push(Promise.resolve(this.teamManager?.unregisterReviewerSession(goalId, sessionId)).catch(() => {}));
+			// Start both operations before awaiting either one. Wrapping the invocation
+			// itself also converts a synchronous ownership-store failure into a settled
+			// result, so it cannot prevent the matching terminate request from starting.
+			// `terminateSession` returning false means the exact session is already gone,
+			// which is an idempotently settled cancellation cleanup.
+			cleanup.push(Promise.resolve().then(() => this.sessionManager?.terminateSession(sessionId)));
+			cleanup.push(Promise.resolve().then(() => this.teamManager?.unregisterReviewerSession(goalId, sessionId)));
 		}
-		await Promise.all(cleanup);
+		const results = await Promise.allSettled(cleanup);
+		const failures = results.flatMap(result => result.status === "rejected" ? [result.reason] : []);
+		if (failures.length > 0) {
+			throw new AggregateError(failures, `Failed to clean up ${failures.length} cancelled reviewer ownership operation(s)`);
+		}
 	}
 
 	/** Keep terminal publication behind reviewer cleanup, just as command cleanup is fenced. */
 	private async _terminateCancelledReviewersFor(actives: readonly ActiveVerification[]): Promise<void> {
 		const reviewers = this._snapshotRunningReviewers(actives);
-		if (reviewers.length === 0) return;
-		for (const active of actives) {
-			if (active.steps.some(step => step.status === "running" && !!step.sessionId)) active.reviewerCleanupPending = true;
+		const affected = actives.filter(active => active.reviewerCleanupPending
+			|| active.steps.some(step => step.status === "running" && !!step.sessionId));
+		if (affected.length === 0) return;
+		for (const active of affected) active.reviewerCleanupPending = true;
+		if (!this._persistActive()) {
+			// Leave the in-memory fence intact so the cancelled-cleanup retry owner
+			// writes it before it can re-drive these exact reviewer identities.
+			throw new Error(`Could not persist reviewer cleanup fence for ${affected.map(active => active.signalId).join(", ")}`);
 		}
-		this._persistActive();
-		try {
-			await this._terminateCancelledReviewers(reviewers);
-		} finally {
-			for (const active of actives) delete active.reviewerCleanupPending;
-			this._persistActive();
+		if (reviewers.length > 0) await this._terminateCancelledReviewers(reviewers);
+		for (const active of affected) delete active.reviewerCleanupPending;
+		if (!this._persistActive()) {
+			// A failed clear must remain fail-closed. The prior durable record still
+			// contains the marker (atomic persistence did not commit), and restoring it
+			// in memory ensures the retry owner cannot publish before re-driving cleanup.
+			for (const active of affected) active.reviewerCleanupPending = true;
+			throw new Error(`Could not persist reviewer cleanup completion for ${affected.map(active => active.signalId).join(", ")}`);
 		}
 	}
 
