@@ -12,7 +12,7 @@ vi.mock("../../src/server/agent/orphan-cleanup.ts", async (importOriginal) => {
 	};
 });
 
-import { SessionManager } from "../../src/server/agent/session-manager.ts";
+import { collectTeamOwnedSessionClosure, SessionManager } from "../../src/server/agent/session-manager.ts";
 import { OrchestrationCore } from "../../src/server/agent/orchestration-core.ts";
 import { TeamManager, TeamStartError } from "../../src/server/agent/team-manager.ts";
 
@@ -180,6 +180,25 @@ function makeFixture(options: {
 		getPersistedSession: (id: string) => sessionStore.get(id),
 		getSession: (id: string) => live.get(id),
 		getSessionInfo: (id: string) => live.get(id),
+		getTrustedTeamGoalIdForSession: (id: string) => {
+			const row = sessionStore.get(id);
+			if (!row) return undefined;
+			const currentLive = sessionStore.getLive();
+			const ownershipRows = currentLive.some((candidate) => candidate.id === id) ? currentLive : [...currentLive, row];
+			const candidates = new Set<string>();
+			for (const liveRow of ownershipRows) {
+				if (liveRow.teamGoalId) candidates.add(liveRow.teamGoalId);
+			}
+			for (const entry of teamStore.getAll()) candidates.add(entry.goalId);
+			for (const goalId of candidates) {
+				const entry = teamStore.get(goalId);
+				const references = new Set<string>();
+				if (entry?.teamLeadSessionId) references.add(entry.teamLeadSessionId);
+				for (const agent of entry?.agents ?? []) references.add(agent.sessionId);
+				if (collectTeamOwnedSessionClosure(goalId, ownershipRows, references).has(id)) return goalId;
+			}
+			return undefined;
+		},
 		setTeamGoalAdmissionFence: (fence: typeof admissionFence) => { admissionFence = fence; },
 		runWithTeamGoalAdmission: <T>(goalId: string, operation: () => Promise<T>) =>
 			admissionFence ? admissionFence(goalId, operation) : operation(),
@@ -197,6 +216,21 @@ function makeFixture(options: {
 			sessionStore.archive(id);
 			live.delete(id);
 			return true;
+		}),
+		createDelegateSession: vi.fn(async (parentId: string, delegateOpts: Record<string, unknown>) => {
+			const parent = sessionStore.get(parentId);
+			const id = `delegate-${createCalls.length + 1}`;
+			createCalls.push(id);
+			const row = session(id, {
+				...delegateOpts,
+				delegateOf: parentId,
+				projectId: parent?.projectId,
+				teamGoalId: parent?.goalId ?? parent?.teamGoalId,
+			});
+			sessionStore.put(row);
+			const active = { ...row, status: "idle", clients: new Set(), rpcClient: { onEvent: vi.fn(() => () => {}) } };
+			live.set(id, active);
+			return active;
 		}),
 		setTitle: (id: string, title: string) => {
 			const row = sessionStore.get(id);
@@ -345,6 +379,29 @@ describe("archived goal reconciliation", () => {
 		assert.equal(cascadeIds.has(mixedLinkChild.id), true, "canonical selected descendants remain in the termination cascade");
 		assert.equal(cascadeIds.has(foreignChild.id), false, "foreign conflicts are excluded from canonical cascade termination");
 		assert.match(result.errors.join("\n"), /ownership conflict/);
+	});
+
+	it("uses canonical ownership for orchestration admission while retaining effective-goal metadata", async () => {
+		const archivedGoal = goal("goal-standalone-orchestration", false);
+		const standalone = session("standalone-orchestration-root", { goalId: archivedGoal.id });
+		const genuineWorker = session("genuine-orchestration-worker", { teamGoalId: archivedGoal.id, role: "coder" });
+		const fixture = makeFixture({ goals: [archivedGoal], sessions: [standalone, genuineWorker] });
+		await fixture.manager.waitForRestore();
+		const core = new OrchestrationCore({
+			sessionManager: fixture.sessionManager,
+			resolveSessionModel: () => undefined,
+		});
+
+		const child = await core.spawn({ ownerSessionId: standalone.id, instructions: "standalone metadata child" });
+		assert.equal(fixture.sessionStore.get(child.sessionId).teamGoalId, archivedGoal.id, "effective-goal metadata is still copied");
+		assert.equal(fixture.sessionManager.getTrustedTeamGoalIdForSession(child.sessionId), undefined, "standalone ancestry keeps the raw stamp outside team ownership");
+
+		archivedGoal.archived = true;
+		const result = await fixture.manager.reconcileArchivedGoal(archivedGoal.id, { audit: false });
+		assert.equal(fixture.sessionStore.get(child.sessionId).archived, false, "metadata-only delegate remains outside reconciliation");
+		assert.equal(fixture.sessionStore.get(standalone.id).archived, false);
+		assert.equal(fixture.sessionStore.get(genuineWorker.id).archived, true, "genuine team ownership remains terminal");
+		assert.ok(!result.archivedSessionIds.includes(child.sessionId));
 	});
 
 	it("removes stale archived-goal team state while leaving a conflicting foreign owner live", async () => {

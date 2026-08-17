@@ -149,6 +149,48 @@ test.describe("archived team reconciliation", () => {
 		}
 	});
 
+	test("direct REST delegates admit standalone metadata ancestry but reject genuine archived-team ownership", async ({ gateway }) => {
+		const goal = await createGoal({ title: `trusted-delegate-admission-${Date.now()}`, team: true, autoStartTeam: false });
+		const standaloneRootId = await createSession({ goalId: goal.id });
+		const genuineTeamRootId = await createSession({ goalId: goal.id });
+		const sessionManager = gateway.sessionManager as any;
+		const context = gateway.projectContextManager.getContextForGoal(goal.id)!;
+		expect(sessionManager.updateSessionMeta(genuineTeamRootId, { role: "coder", teamGoalId: goal.id })).toBe(true);
+
+		const firstDelegateResponse = await apiFetch("/api/sessions", {
+			method: "POST",
+			body: JSON.stringify({ delegateOf: standaloneRootId, instructions: "inherit archived goal metadata" }),
+		});
+		expect(firstDelegateResponse.status).toBe(201);
+		const firstDelegateId = (await firstDelegateResponse.json()).id as string;
+		expect(sessionManager.getPersistedSession(firstDelegateId)?.teamGoalId).toBe(goal.id);
+		expect(sessionManager.getTrustedTeamGoalIdForSession(firstDelegateId)).toBeUndefined();
+
+		await context.goalStore.archiveStrict(goal.id);
+		const standaloneResponse = await apiFetch("/api/sessions", {
+			method: "POST",
+			body: JSON.stringify({ delegateOf: firstDelegateId, instructions: "surviving standalone delegate child" }),
+		});
+		const standaloneBody = await standaloneResponse.json().catch(() => ({}));
+		expect(standaloneResponse.status, JSON.stringify(standaloneBody)).toBe(201);
+		expect(sessionManager.getPersistedSession(standaloneBody.id)).toMatchObject({
+			delegateOf: firstDelegateId,
+			teamGoalId: goal.id,
+		});
+		expect(sessionManager.getPersistedSession(standaloneBody.id)?.archived).not.toBe(true);
+		expect(sessionManager.getTrustedTeamGoalIdForSession(standaloneBody.id)).toBeUndefined();
+
+		const rowsBeforeRejectedCreate = context.sessionStore.getAll().length;
+		const teamResponse = await apiFetch("/api/sessions", {
+			method: "POST",
+			body: JSON.stringify({ delegateOf: genuineTeamRootId, instructions: "must be rejected" }),
+		});
+		const teamBody = await teamResponse.json().catch(() => ({}));
+		expect(teamResponse.status, JSON.stringify(teamBody)).toBe(409);
+		expect(teamBody).toMatchObject({ code: "GOAL_ARCHIVED", goalId: goal.id });
+		expect(context.sessionStore.getAll().length, "terminal admission creates no persisted row").toBe(rowsBeforeRejectedCreate);
+	});
+
 	test("boot repair runs before event resubscription and restores only goal-only and genuinely live controls", async ({ gateway }) => {
 		const marker = `boot-repair-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 		const goal = await createGoal({ title: marker, team: true, autoStartTeam: false });

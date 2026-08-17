@@ -3832,6 +3832,50 @@ export class SessionManager {
 		this.teamGoalAdmissionFence = fence;
 	}
 
+	/**
+	 * Resolve team ownership from the same bounded live closure used by archive
+	 * reconciliation. `teamGoalId` remains effective-goal metadata on legacy
+	 * standalone delegates, so callers must not use that raw stamp as admission.
+	 */
+	getTrustedTeamGoalIdForSession(sessionId: string): string | undefined {
+		const persisted = this.getPersistedSession(sessionId);
+		if (!persisted) return undefined;
+
+		let live: PersistedSession[];
+		let teamEntries: Array<{ goalId: string; teamLeadSessionId: string | null; agents: Array<{ sessionId: string }> }> = [];
+		if (this.projectContextManager) {
+			const context = (persisted.projectId
+				? this.projectContextManager.getOrCreate(persisted.projectId)
+				: this.projectContextManager.getContextForSession(sessionId));
+			if (!context) return undefined;
+			live = context.sessionStore.getLive();
+			teamEntries = context.teamStore.getAll();
+		} else {
+			live = this._testStore?.getLive() ?? [];
+		}
+		// Admission can race just after reconciliation archived the requested
+		// owner. Include only that exact durable row so a genuine terminal owner
+		// remains fenced without traversing archived history.
+		if (!live.some((session) => session.id === sessionId)) live = [...live, persisted];
+
+		const candidateGoalIds = new Set<string>();
+		// Match reconciliation's bounded candidate source: current live ownership
+		// stamps plus current TeamStore entries (and only the exact admission target
+		// added above), never archived history or goalId.
+		for (const session of live) {
+			if (session.teamGoalId) candidateGoalIds.add(session.teamGoalId);
+		}
+		for (const entry of teamEntries) candidateGoalIds.add(entry.goalId);
+		for (const goalId of candidateGoalIds) {
+			const entry = teamEntries.find((candidate) => candidate.goalId === goalId);
+			const references = new Set<string>();
+			if (entry?.teamLeadSessionId) references.add(entry.teamLeadSessionId);
+			for (const agent of entry?.agents ?? []) references.add(agent.sessionId);
+			if (collectTeamOwnedSessionClosure(goalId, live, references).has(sessionId)) return goalId;
+		}
+		return undefined;
+	}
+
 	/** Run publication of a team-owned orchestration child under terminal admission. */
 	runWithTeamGoalAdmission<T>(goalId: string, operation: () => Promise<T>): Promise<T> {
 		return this.teamGoalAdmissionFence ? this.teamGoalAdmissionFence(goalId, operation) : operation();
@@ -12297,8 +12341,8 @@ export class SessionManager {
 		const parentSession = this.sessions.get(parentSessionId);
 		const parentMeta = parentStore?.get(parentSessionId);
 		const parentProjectId = parentSession?.projectId ?? parentMeta?.projectId;
-		const parentTeamGoalId = parentSession?.teamGoalId ?? parentMeta?.teamGoalId;
-		if (parentTeamGoalId && this.resolveGoal(parentTeamGoalId)?.archived) {
+		const initialTrustedTeamGoalId = this.getTrustedTeamGoalIdForSession(parentSessionId);
+		if (initialTrustedTeamGoalId && this.resolveGoal(initialTrustedTeamGoalId)?.archived) {
 			throw new Error("Cannot create a delegate for an archived team goal");
 		}
 
@@ -12442,7 +12486,8 @@ export class SessionManager {
 		);
 		let session: SessionInfo;
 		try {
-			if (parentTeamGoalId && this.resolveGoal(parentTeamGoalId)?.archived) {
+			const setupTrustedTeamGoalId = this.getTrustedTeamGoalIdForSession(parentSessionId);
+			if (setupTrustedTeamGoalId && this.resolveGoal(setupTrustedTeamGoalId)?.archived) {
 				throw new Error("Cannot create a delegate for an archived team goal");
 			}
 			session = await executePlan(plan, ctx);
@@ -12450,7 +12495,10 @@ export class SessionManager {
 			releaseSetupThinkingAuthority();
 		}
 		if (parentProjectId) session.projectId = parentProjectId;
-		if (parentTeamGoalId && this.resolveGoal(parentTeamGoalId)?.archived) {
+		// Re-evaluate the published child, not only its parent: reconciliation may
+		// have archived/removed the parent while setup was in flight.
+		const postSetupTrustedTeamGoalId = this.getTrustedTeamGoalIdForSession(session.id);
+		if (postSetupTrustedTeamGoalId && this.resolveGoal(postSetupTrustedTeamGoalId)?.archived) {
 			// The setup crossed terminal intent. Its initial row already carries
 			// teamGoalId, so boot can reconstruct cleanup even if this stop fails.
 			try {
