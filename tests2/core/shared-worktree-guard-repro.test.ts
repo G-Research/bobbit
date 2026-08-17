@@ -14,7 +14,7 @@ guardProcessEnv();
  * both halves of the contract: shared paths survive and unshared paths remain
  * cleanable without launching Git.
  */
-import { afterAll, afterEach, beforeEach, describe, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -302,6 +302,147 @@ describe("shared worktree guard reproductions", () => {
 				fakeGitState.commands.filter(call => call.args[0] === "worktree").map(call => call.args[2]),
 				[webWorktree],
 			);
+		} finally {
+			fs.rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("recovery ownership promotes a missing team marker before archive replay preserves every multi-repo artifact", async () => {
+		for (const initialTeam of [false, undefined] as const) {
+			fakeGitState.commands.length = 0;
+			const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `recovered-team-marker-${String(initialTeam)}-`));
+			try {
+				const root = path.join(tmp, "project");
+				const api = path.join(root, "api");
+				const web = path.join(root, "web");
+				fs.mkdirSync(path.join(api, ".git"), { recursive: true });
+				fs.mkdirSync(path.join(web, ".git"), { recursive: true });
+				const apiWorktree = path.join(tmp, "project-wt", "recovered-team", "api");
+				const webWorktree = path.join(tmp, "project-wt", "recovered-team", "web");
+				makeWorktree(apiWorktree);
+				makeWorktree(webWorktree);
+
+				const goalState = path.join(tmp, "goal-state");
+				const goalStore = new GoalStore(goalState, undefined, { persistence: "json" });
+				const goalManager = new GoalManager(goalStore, undefined, undefined, {
+					commandRunner: fakeGitRunner,
+					remotePolicy: { skipRemotePush: false },
+				});
+				let reconciliation = 0;
+				goalManager.setGoalArchiveReconciler(async (goalId) => {
+					reconciliation++;
+					if (goalStore.get(goalId)?.team !== true) {
+						assert.equal(await goalStore.updateStrict(goalId, { team: true }), true, "strict marker publication must acknowledge before cleanup");
+						const fresh = new GoalStore(goalState, undefined, { persistence: "json" });
+						assert.equal(fresh.get(goalId)?.team, true, "strict marker is durable before session archive acknowledgement");
+					}
+					return reconciliation === 1
+						? { archivedSessionIds: ["exact-teamGoalId-owner"], teamRemoved: true }
+						: { archivedSessionIds: [], suppressedSessionIds: [], teamRemoved: false, teamEntryRetained: false };
+				});
+				goalStore.put({
+					id: `recovered-team-${String(initialTeam)}`,
+					title: "recovered team",
+					cwd: path.join(tmp, "project-wt", "recovered-team"),
+					state: "complete",
+					...(initialTeam === undefined ? {} : { team: initialTeam }),
+					spec: "",
+					createdAt: Date.now(),
+					updatedAt: Date.now(),
+					repoPath: root,
+					branch: "goal/recovered-team",
+					worktreePath: path.join(tmp, "project-wt", "recovered-team"),
+					repoWorktrees: { api: apiWorktree, web: webWorktree },
+				});
+
+				const goalId = `recovered-team-${String(initialTeam)}`;
+				assert.equal(await goalManager.archiveGoal(goalId), true);
+				assert.equal(await goalManager.archiveGoal(goalId), true, "operator replay must invoke reconciliation again");
+				assert.equal(reconciliation, 2);
+				assert.equal(goalStore.get(goalId)?.team, true);
+				assert.ok(fs.existsSync(apiWorktree));
+				assert.ok(fs.existsSync(webWorktree));
+				assert.deepEqual(fakeGitState.commands, [], "marker promotion forbids worktree, local-branch, and remote push-delete cleanup");
+			} finally {
+				fs.rmSync(tmp, { recursive: true, force: true });
+			}
+		}
+	});
+
+	it("quiesce detaches runtime after bridge-stop failure without archiving or deleting evidence", async () => {
+		const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "archived-team-quiesce-"));
+		try {
+			const repo = makeRepo(tmp);
+			const worktree = path.join(tmp, "repo-wt", "quiesced-session");
+			makeWorktree(worktree);
+			const store = new SessionStore(stateRoot);
+			const persisted = makeSession("quiesced-session", {
+				archived: false,
+				projectId: "project-evidence",
+				teamGoalId: "archived-team-goal",
+				repoPath: repo,
+				branch: "session/quiesced-evidence",
+				worktreePath: worktree,
+				cwd: worktree,
+				messageQueue: [{ text: "durable queued evidence", createdAt: 1 }],
+			});
+			store.put(persisted);
+			await store.flushAsync();
+			const manager = makeManager(store);
+			const stop = vi.fn(async () => { throw new Error("injected bridge stop failure"); });
+			const unsubscribe = vi.fn();
+			const close = vi.fn();
+			const abortAllWaits = vi.fn();
+			const cleanupBg = vi.fn();
+			const removeToken = vi.fn();
+			const removeSecret = vi.fn();
+			const closeExtensions = vi.fn(async () => {});
+			const cleanupMcp = vi.fn(async () => {});
+			manager.cancelPendingAutoRetry = vi.fn();
+			manager.purgeVerifierPromptRows = vi.fn();
+			manager.closeExtensionChannelsForSession = closeExtensions;
+			manager.cleanupScopedMcpManagersForSessionScope = cleanupMcp;
+			manager._untrackConnectedSession = vi.fn();
+			manager.bgProcessManager = { abortAllWaits, cleanup: cleanupBg };
+			manager.sandboxTokenStore = { removeSession: removeToken };
+			manager.sessionSecretStore = { remove: removeSecret };
+			const live: any = {
+				...persisted,
+				status: "idle",
+				statusVersion: 0,
+				dormant: false,
+				lifecycleFenced: false,
+				clients: new Set([{ close }]),
+				rpcClient: { getState: vi.fn(async () => ({ success: true })), stop },
+				unsubscribe,
+			};
+			manager.sessions.set(persisted.id, live);
+			const generationBefore = store.getGeneration();
+
+			await assert.rejects(
+				() => manager.quiesceSessionRuntime(persisted.id),
+				/runtime was detached after its bridge stop failed: injected bridge stop failure/,
+			);
+			assert.equal(await manager.quiesceSessionRuntime(persisted.id), true, "second quiesce is an idempotent no-op after cleanup");
+
+			assert.equal(live.lifecycleFenced, true, "replacement dispatch is fenced before bridge stop");
+			assert.equal(live.dormant, true);
+			assert.equal(live.status, "terminated");
+			assert.equal(manager.getSession(persisted.id), undefined);
+			assert.equal(stop.mock.calls.length, 1);
+			assert.equal(unsubscribe.mock.calls.length, 1);
+			assert.equal(close.mock.calls.length, 1);
+			assert.equal(abortAllWaits.mock.calls.length, 1);
+			assert.equal(cleanupBg.mock.calls.length, 1);
+			assert.deepEqual(removeToken.mock.calls[0], [persisted.projectId, persisted.id]);
+			assert.deepEqual(removeSecret.mock.calls[0], [persisted.id]);
+			assert.equal(closeExtensions.mock.calls.length, 1);
+			assert.equal(cleanupMcp.mock.calls.length, 1);
+			assert.equal(store.getGeneration(), generationBefore, "quiesce performs no archive or metadata save");
+			assert.equal(store.get(persisted.id)?.archived, false);
+			assert.deepEqual(store.get(persisted.id)?.messageQueue, persisted.messageQueue);
+			assert.ok(fs.existsSync(worktree));
+			assert.deepEqual(fakeGitState.commands, [], "quiesce performs no worktree, local branch, or remote branch deletion");
 		} finally {
 			fs.rmSync(tmp, { recursive: true, force: true });
 		}

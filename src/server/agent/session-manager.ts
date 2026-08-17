@@ -15173,7 +15173,9 @@ export class SessionManager {
 		}
 		try { await session.rpcClient.getState(); } catch { /* process may already be stopped */ }
 		try { session.unsubscribe(); } catch { /* bridge stop remains mandatory */ }
-		await session.rpcClient.stop();
+		let bridgeStopError: unknown;
+		try { await session.rpcClient.stop(); }
+		catch (err) { bridgeStopError = err; }
 		if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session) {
 			throw new Error(`Session ${id} quiesce was superseded after bridge stop`);
 		}
@@ -15199,8 +15201,9 @@ export class SessionManager {
 			if (this.sandboxTokenStore && session.projectId) this.sandboxTokenStore.removeSession(session.projectId, id);
 		} catch { /* process is already stopped */ }
 		try { this.sessionSecretStore.remove(id); } catch { /* process is already stopped */ }
-		this.rejectAllVerifierPromptReceipts(id, new Error(`Session ${id} was quiesced by archived goal ownership`));
-		this.rejectIdleWaiters(id, new Error(`Session ${id} was quiesced by archived goal ownership`));
+		const quiesceReason = `Session ${id} was quiesced by archived goal ownership`;
+		this.rejectAllVerifierPromptReceipts(id, quiesceReason);
+		this.rejectIdleWaiters(id, new Error(quiesceReason));
 		for (const client of session.clients) {
 			try { client.close(1000, "Session quiesced"); } catch { /* best-effort */ }
 		}
@@ -15224,6 +15227,9 @@ export class SessionManager {
 			} catch (err) {
 				console.warn(`[session-manager] sessionShutdown dispatch failed for quiesced ${id}:`, err);
 			}
+		}
+		if (bridgeStopError) {
+			throw new Error(`Session ${id} runtime was detached after its bridge stop failed: ${bridgeStopError instanceof Error ? bridgeStopError.message : String(bridgeStopError)}`, { cause: bridgeStopError });
 		}
 		return true;
 	}
