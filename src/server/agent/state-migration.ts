@@ -355,12 +355,29 @@ function writeHeadquartersMigrationCheckpoint(
 		);
 	}
 
-	// Completion is never authoritative while the sibling fence exists. It is
-	// removed only after the complete marker's rename and directory sync succeed.
+	// Completion is never authoritative while the sibling fence exists. If the
+	// fence-clear acknowledgement fails, republish it before reporting failure so
+	// the next boot cannot trust the visible complete marker.
 	publishHeadquartersMigrationCheckpointFile(markerPath, JSON.stringify(checkpoint));
 	if (checkpoint.status === "complete") {
-		fs.rmSync(fencePath);
-		syncCheckpointDirectory(dir);
+		try {
+			fs.rmSync(fencePath);
+			syncCheckpointDirectory(dir);
+		} catch (error) {
+			try {
+				if (fs.existsSync(fencePath)) syncCheckpointDirectory(dir);
+				else publishHeadquartersMigrationCheckpointFile(
+					fencePath,
+					JSON.stringify({ version: HEADQUARTERS_MIGRATION_CHECKPOINT_VERSION, status: "completion-pending" }),
+				);
+			} catch (compensationError) {
+				throw new AggregateError(
+					[error, compensationError],
+					"Headquarters migration checkpoint completion failed and retry authority could not be republished",
+				);
+			}
+			throw error;
+		}
 	}
 }
 

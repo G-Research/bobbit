@@ -95,6 +95,54 @@ describe("team forensic recovery checkpoint", () => {
 		assert.deepEqual(await fs.promises.readdir(stateDir), [TEAM_FORENSIC_RECOVERY_CHECKPOINT_FILE]);
 	});
 
+	it("republishes retry authority when fence-clear acknowledgement fails", async () => {
+		const stateDir = await tempStateDir();
+		const store = new FileTeamRecoveryCheckpointStore();
+		const marker = path.join(stateDir, TEAM_FORENSIC_RECOVERY_CHECKPOINT_FILE);
+		const fence = path.join(stateDir, TEAM_FORENSIC_RECOVERY_COMPLETION_FENCE_FILE);
+		await store.begin(stateDir);
+
+		const platformSpy = vi.spyOn(process, "platform", "get").mockReturnValue("linux");
+		const realOpen = fs.promises.open.bind(fs.promises);
+		let injected = false;
+		const openSpy = vi.spyOn(fs.promises, "open").mockImplementation(async (...args) => {
+			const handle = await realOpen(...args);
+			if (path.resolve(String(args[0])) !== path.resolve(stateDir)) return handle;
+			return new Proxy(handle, {
+				get(target, property) {
+					if (property === "sync") return async () => {
+						const checkpoint = JSON.parse(await fs.promises.readFile(marker, "utf-8")) as { status?: string };
+						const fenceExists = await fs.promises.access(fence).then(() => true, () => false);
+						if (!injected && checkpoint.status === "complete" && !fenceExists) {
+							injected = true;
+							const error = new Error("INJECTED_FENCE_CLEAR_DIRECTORY_FSYNC_EIO") as NodeJS.ErrnoException;
+							error.code = "EIO";
+							throw error;
+						}
+						return target.sync();
+					};
+					const value = Reflect.get(target, property, target);
+					return typeof value === "function" ? value.bind(target) : value;
+				},
+			}) as fs.promises.FileHandle;
+		});
+		try {
+			await assert.rejects(store.complete(stateDir), /INJECTED_FENCE_CLEAR_DIRECTORY_FSYNC_EIO/);
+			assert.equal(injected, true, "precondition: failure occurs only after the fence is absent");
+			assert.equal(JSON.parse(await fs.promises.readFile(marker, "utf-8")).status, "complete");
+			assert.equal(await fs.promises.access(fence).then(() => true, () => false), true, "RECOVERY_COMPLETION_FENCE: failed fence-clear acknowledgement must republish retry authority");
+			assert.equal(await store.isComplete(stateDir), false, "RECOVERY_COMPLETION_FENCE: reported completion failure must remain retryable on the next boot");
+		} finally {
+			openSpy.mockRestore();
+			platformSpy.mockRestore();
+		}
+
+		await store.begin(stateDir);
+		await store.complete(stateDir);
+		assert.equal(await store.isComplete(stateDir), true, "RECOVERY_COMPLETION_FENCE: a later acknowledged completion restores the clean fast path");
+		assert.deepEqual(await fs.promises.readdir(stateDir), [TEAM_FORENSIC_RECOVERY_CHECKPOINT_FILE]);
+	});
+
 	it("preserves the prior checkpoint when durable temporary-file publication is interrupted", async () => {
 		const stateDir = await tempStateDir();
 		const store = new FileTeamRecoveryCheckpointStore();

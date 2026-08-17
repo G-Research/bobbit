@@ -78,6 +78,7 @@ class MemoryRecoveryCheckpoints implements TeamRecoveryCheckpointStore {
 	readonly calls: string[] = [];
 	failBegin = false;
 	failCompleteAfterPublication = false;
+	failFenceClearAcknowledgement = false;
 
 	async isComplete(stateDir: string): Promise<boolean> {
 		this.calls.push(`isComplete:${stateDir}`);
@@ -94,6 +95,10 @@ class MemoryRecoveryCheckpoints implements TeamRecoveryCheckpointStore {
 		this.statuses.set(stateDir, "complete");
 		if (this.failCompleteAfterPublication) throw new Error("INJECTED_POST_RENAME_DIRECTORY_FSYNC_EIO");
 		this.completionPending.delete(stateDir);
+		if (this.failFenceClearAcknowledgement) {
+			this.completionPending.add(stateDir);
+			throw new Error("INJECTED_FENCE_CLEAR_DIRECTORY_FSYNC_EIO");
+		}
 	}
 }
 
@@ -390,6 +395,26 @@ describe("TeamManager awaited async recovery", () => {
 		assert.ok(fixture.fs.calls.some((call) => call.operation === "readdir"), "RECOVERY_COMPLETION_FENCE: the second boot must rerun forensic traversal");
 		assert.equal(fixture.checkpoints.statuses.get(fixture.stateDir), "complete");
 		assert.equal(fixture.checkpoints.completionPending.has(fixture.stateDir), false, "RECOVERY_COMPLETION_FENCE: successful retry must clear the fence");
+		retry.dispose();
+	});
+
+	it("reruns forensic recovery after fence-clear acknowledgement fails", async () => {
+		const fixture = makeFixture();
+		fixture.checkpoints.failFenceClearAcknowledgement = true;
+		await fixture.manager.waitForRestore();
+
+		assert.equal(fixture.checkpoints.statuses.get(fixture.stateDir), "complete", "precondition: completion was visible after the fence was cleared");
+		assert.equal(fixture.checkpoints.completionPending.has(fixture.stateDir), true, "RECOVERY_COMPLETION_FENCE: compensation must republish retry authority");
+		fixture.manager.dispose();
+
+		fixture.checkpoints.failFenceClearAcknowledgement = false;
+		fixture.fs.calls.length = 0;
+		const retry = new TeamManager(fixture.sessionManager as any, fixture.managerConfig as any, undefined, noTimerClock as any);
+		await retry.waitForRestore();
+
+		assert.ok(fixture.fs.calls.some((call) => call.operation === "readdir"), "RECOVERY_COMPLETION_FENCE: the next boot must rerun historical recovery after the reported failure");
+		assert.equal(fixture.checkpoints.statuses.get(fixture.stateDir), "complete");
+		assert.equal(fixture.checkpoints.completionPending.has(fixture.stateDir), false);
 		retry.dispose();
 	});
 

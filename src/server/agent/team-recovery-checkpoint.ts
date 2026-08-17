@@ -85,6 +85,29 @@ export class FileTeamRecoveryCheckpointStore implements TeamRecoveryCheckpointSt
 	async complete(stateDir: string): Promise<void> {
 		await fs.promises.mkdir(stateDir, { recursive: true });
 		const fence = completionFencePath(stateDir);
+		await this.ensureCompletionFence(stateDir, fence);
+
+		// The fence is authoritative before the visible marker can become complete.
+		// If either completion acknowledgement fails, it is durably republished so
+		// the next boot retries instead of trusting the visible complete record.
+		await this.writeRecord(stateDir, "complete");
+		try {
+			await fs.promises.unlink(fence);
+			await syncDirectory(stateDir);
+		} catch (error) {
+			try {
+				await this.ensureCompletionFence(stateDir, fence);
+			} catch (compensationError) {
+				throw new AggregateError(
+					[error, compensationError],
+					"Forensic recovery checkpoint completion failed and retry authority could not be republished",
+				);
+			}
+			throw error;
+		}
+	}
+
+	private async ensureCompletionFence(stateDir: string, fence: string): Promise<void> {
 		try {
 			await fs.promises.access(fence);
 			await syncDirectory(stateDir);
@@ -92,13 +115,6 @@ export class FileTeamRecoveryCheckpointStore implements TeamRecoveryCheckpointSt
 			if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
 			await this.publish(stateDir, fence, JSON.stringify({ version: TEAM_FORENSIC_RECOVERY_VERSION, status: "completion-pending" }));
 		}
-
-		// The fence is authoritative before the visible marker can become complete.
-		// If the marker's post-rename directory sync fails, the fence survives and
-		// the next boot retries instead of trusting that visible complete record.
-		await this.writeRecord(stateDir, "complete");
-		await fs.promises.unlink(fence);
-		await syncDirectory(stateDir);
 	}
 
 	private writeRecord(stateDir: string, status: CheckpointStatus): Promise<void> {
