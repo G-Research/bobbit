@@ -43,7 +43,7 @@ contain the following durable sections.
 
 | Section | Exact source of truth / seam | Required operator content |
 | --- | --- | --- |
-| Runtime selection and persistence | `src/server/agent/session-runtime.ts::{runtimeFromProvider,resolveSessionRuntime,createSessionBridge}`, `session-store.ts` | Register the exact `claude-agent-sdk` Custom Provider and select `claude-agent-sdk/<model-id>` through normal default/role configuration. Explain that `anthropic/*` remains Pi, runtime is persisted/derived rather than a per-request switch, and crossing runtimes requires a new session. Explain opaque UUID resume and no Pi `switch_session`. |
+| Runtime selection and persistence | `src/server/agent/session-runtime.ts::{runtimeFromProvider,resolveSessionRuntime,createSessionBridge}`, `session-store.ts` | Select a built-in `claude-agent-sdk/<alias>` through normal default/role configuration. Explain that `anthropic/*` remains Pi, runtime is persisted/derived rather than a per-request switch, and crossing runtimes requires a new session. Explain opaque UUID resume and no Pi `switch_session`. |
 | Subscription authentication and settings isolation | `claude-agent-sdk-bridge.ts::buildClaudeAgentSdkEnv`, query-option builder | Direct SDK sessions use Bobbit's locked OAuth resolver and a durable Bobbit-owned config/history root without copying native CLI auth/config; `settingSources: []`, strict MCP, disabled auto-memory, only the Bobbit MCP server. State that API key/cloud/unmanaged settings/plugin/MCP fallback is not supported. |
 | Native tools, Bobbit tools, and permissions | `claude-agent-sdk-tool-surface.ts::{buildClaudeSdkToolSurface,normalizeClaudeSdkMcpToolName}`, `claude-sdk-tool-dispatcher.ts`, `SessionManager.requestToolGrant` | List Bobbit ownership and native suppression; distinguish canonical `read` from SDK raw `mcp__bobbit__read`. Explain allow/ask/never, visible permission cards, one-time/session/persistent grants, and that `PreToolUse` is final enforcement. Never advise bypass mode. |
 | Slash and skill ownership | Composer registry and `resolveSkillExpansions()` | Exact Bobbit skills win; bundled Claude commands are not autocomplete/launchers; unknown slashes pass through. SDK `/compact` is locally consumed, retains the draft, and is unsupported; only SDK-managed automatic compaction exists. |
@@ -65,24 +65,24 @@ work.
 ### Existing test extension points
 
 Extend only `tests/manual-integration/claude-agent-sdk-lifecycle.spec.ts` for
-real-model work. Keep its isolated temporary state, local gateway, custom provider
-setup, and environment capture/restore model. It already uses production
+real-model work. Keep its isolated temporary state, local gateway, built-in alias
+selection, and environment capture/restore model. It already uses production
 `SessionManager` and `IRpcBridge` seams rather than a second browser protocol.
 Add helper functions in that file only when they keep direct and sandbox cases
 readable; do not create test credentials, copy a Claude auth directory, or log
 model output.
 
-The manual suite must set a bounded timeout and skip unless its explicit flag,
-unprefixed `MANUAL_CLAUDE_AGENT_SDK_MODEL`, and
-`MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR` are present. The auth directory is an
-owner-only temporary `BOBBIT_AGENT_DIR` authenticated through a separate
-loopback Bobbit gateway. Playwright must receive it before agent-directory reset
-or auth-sensitive server imports, which can cache startup-derived state. The
-suite must never copy/paste tokens or auth files, co-locate this subscription
-OAuth with enterprise Anthropic OAuth in a normal instance, or remove the
-isolated directory before evidence review and final signoff. Its temporary Custom
-Provider/default model disappears with the isolated test state and does not alter
-a production gateway.
+The manual suite must set a bounded timeout and skip unless its explicit flag
+and `MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR` are present. It defaults to the unprefixed
+`haiku` alias; a supplied `MANUAL_CLAUDE_AGENT_SDK_MODEL` must be an unprefixed
+alias. The auth directory is an owner-only temporary `BOBBIT_AGENT_DIR`
+authenticated through a separate loopback Bobbit gateway. Playwright must receive
+it before agent-directory reset or auth-sensitive server imports, which can cache
+startup-derived state. The suite must never copy/paste tokens or auth files,
+co-locate this subscription OAuth with enterprise Anthropic OAuth in a normal
+instance, or remove the isolated directory before evidence review and final
+signoff. Its temporary default model disappears with the isolated test state and
+does not alter a production gateway.
 
 | Journey action | Production seam exercised | Manual assertion/evidence |
 | --- | --- | --- |
@@ -96,29 +96,26 @@ a production gateway.
 | Restart/resume and reload | persisted UUID → session restore → official history/snapshot → WS reload | Restart the isolated gateway and reload/reconnect its page/session transport; confirm same session wrapper and durable server snapshot, post-restart prompt ability, transcript row identity projection, cost/usage/basis snapshot and context high-water. |
 | Provider unavailable | isolated invalid/missing SDK subscription/provider fixture | Assert bounded `SDK_SESSION_UNAVAILABLE` category from start/restore/prompt, no hang/Pi fallback/new conversation, and retained wrapper/queue. This is credential-free and must run before the live smoke. |
 
-The direct test command remains:
+The direct test command defaults to `haiku`:
 
 ```bash
 BOBBIT_RUN_CLAUDE_AGENT_SDK_SMOKE=1 \
-MANUAL_CLAUDE_AGENT_SDK_MODEL=claude-sonnet-4-5 \
 MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR="$MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR" \
 npm run test:manual -- --grep "Claude Agent SDK lifecycle"
 ```
 
-The sandbox test command remains:
+The sandbox test command also defaults to `haiku`:
 
 ```bash
 BOBBIT_RUN_CLAUDE_AGENT_SDK_SANDBOX_SMOKE=1 \
-MANUAL_CLAUDE_AGENT_SDK_MODEL=claude-sonnet-4-5 \
 MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR="$MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR" \
 npm run test:manual -- --grep "Docker sandbox lifecycle"
 ```
 
 ### Credential-free parent checks before opt-in runs
 
-The parent/release owner must run and record these before asking a user to spend
-subscription quota. They are executable implementation evidence, not live
-subscription evidence:
+The parent/release owner must run and record these before a credentialed agent
+run. They are executable implementation evidence, not live subscription evidence:
 
 ```bash
 npm run build
@@ -163,10 +160,12 @@ selected model/capabilities settles within its bounded timeout, produces its
 expected server/UI observation, preserves runtime boundaries, and records no
 secret. An unsupported advertised control or an unobserved automatic compaction
 is **not** a product failure when the suite reports it accurately; fabricating a
-successful control/compaction is a failure. Any `SDK_SESSION_UNAVAILABLE`, image
-mismatch, permission/card mismatch, transcript/cost regression, raw child
-content leakage, or fallback to Pi is a failed scenario until remediated and
-rerun.
+successful control/compaction is a failure. An expected
+`SDK_SESSION_UNAVAILABLE` in the credential-free provider-unavailable fixture is
+a passing recovery observation. Any unexpected unavailable result in a
+credentialed scenario, image mismatch, permission/card mismatch, transcript/cost
+regression, raw child content leakage, or fallback to Pi is a failed scenario
+until remediated and rerun.
 
 No G11/G12 readiness statement may be made while any required entry is pending,
 failed, missing its sanitized record, or lacks the final agent-run Playwright/API
@@ -176,8 +175,9 @@ signoff record. Credential-free checks alone are insufficient.
 
 ### Direct host run
 
-- Explicit `BOBBIT_RUN_CLAUDE_AGENT_SDK_SMOKE=1`, a non-empty, unprefixed
-  `MANUAL_CLAUDE_AGENT_SDK_MODEL`, and `MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR`.
+- Explicit `BOBBIT_RUN_CLAUDE_AGENT_SDK_SMOKE=1` and
+  `MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR`. The default alias is `haiku`; any
+  `MANUAL_CLAUDE_AGENT_SDK_MODEL` override is an unprefixed alias.
 - The auth directory is a fresh owner-only temporary `BOBBIT_AGENT_DIR` whose
   OAuth was completed through a separate loopback Bobbit gateway. Export it to
   Playwright before directory reset or auth-sensitive imports; do not copy/paste
@@ -193,7 +193,7 @@ signoff record. Credential-free checks alone are insufficient.
 All direct prerequisites, plus:
 
 - Docker available and a rebuilt `bobbit-agent` image with Agent SDK `0.3.222`,
-  bundled Claude `2.1.222`, Pi `0.82.1`, runtime schema `2`, the image-owned SDK
+  bundled Claude `2.1.222`, Pi `0.84.1`, runtime schema `2`, the image-owned SDK
   dependency, and executable `/usr/local/bin/bobbit-claude-agent-sdk` wrapper
   under the `bobbit-sdk` identity. It must pass Bobbit's workspace-root ownership
   and container-reachable callback-translation checks; host binaries, dependency
@@ -211,28 +211,28 @@ Bobbit OAuth; `CLAUDE_AGENT_SDK_SANDBOX_UNAVAILABLE` means rebuild/repair the
 image, container CWD, or scoped authority. Do not weaken isolation to make a
 smoke pass.
 
-## Sanitized final-tip evidence snapshot
+## Completed sanitized agent-run record
 
-This snapshot records the completed final agent-run Playwright/API signoff at
-implementation tip `47cf34c1e`. It omits credentials, opaque identifiers,
-auth/workspace paths, prompts, tool arguments/results, provider/model output,
-and launch-log content. It is not a broader release-readiness declaration.
+This completed agent-run Playwright/API record is evidence for G11 only. It does
+not make or imply a parent release-readiness decision. It contains no credentials,
+opaque identifiers, private paths, prompts, tool inputs/results, model output,
+provider bodies, or callback, container, or correlation identifiers.
 
-| Area | Sanitized outcome |
+| Field | Sanitized completed record |
 | --- | --- |
-| Credential-free manual coverage | Passed. |
-| Authenticated direct OAuth Playwright/API lifecycle | Passed. |
-| Actual Docker sandbox gate | Passed without a warm-up request. |
-| Targeted SDK browser coverage | Passed. |
-| Provider-unavailable recovery | Passed with the expected bounded unavailable category and no fallback. |
-| Restart, resume, and reload | Passed. |
-| Transcript, usage, and subscription-notional cost projection | Passed. |
-| Bobbit-owned actions | Canonical `read`, slash ownership, and constrained helper/subagent rendering passed. |
-| Live controls | Supported model and thinking controls passed. |
+| Date and implementation commit | 2026-08-17; `47cf34c1e`. |
+| Runtime versions | Agent SDK `0.3.222`; Claude `2.1.222`; runtime schema `2`; host-current Pi `0.84`. |
+| Model and controls | Started with alias `haiku`; supported live switch to `sonnet` and thinking control passed. |
+| Credential-free and direct coverage | Credential-free provider-unavailable recovery passed with no fallback; direct OAuth Playwright/API lifecycle and permission-card flow passed. |
+| Docker coverage | The actual Docker sandbox gate passed without a warm-up request. |
+| Browser and lifecycle | Targeted browser coverage, restart, resume, reload, transcript projection, and canonical `read` passed. |
+| Bobbit-owned interactions | Read-only gate action, Bobbit slash ownership, and constrained helper rendering within its card passed. |
+| Usage and cost | Transcript, token totals, and current/high-water context fields were present. Cost basis was `subscription-notional`; billed total was `null`; the notional value was nullable. |
+| Compaction | Automatic compaction was not observed and remains observation-only. |
+| Sanitized repository artifacts | `tests/manual-integration/claude-agent-sdk-lifecycle.spec.ts`, `tests/e2e/claude-agent-sdk-session-restart.spec.ts`, and `tests/e2e/claude-agent-sdk-real-init-inventory.spec.ts`. |
 
-**The required final agent-run Playwright/API signoff has passed.** The parent
-release decision remains separate; it consumes this sanitized record rather than
-requiring a separate user-hands-on session.
+The required agent-run Playwright/API evidence is recorded. The parent release
+owner separately decides whether all parent requirements are satisfied.
 
 ## Recorded final signoff matrix template
 

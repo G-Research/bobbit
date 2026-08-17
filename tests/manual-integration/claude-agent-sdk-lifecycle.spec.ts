@@ -7,7 +7,7 @@
  * resets agent-directory state or imports auth-sensitive server modules. Never
  * copy/paste tokens or auth files, and do not co-locate this OAuth flow with
  * enterprise Anthropic OAuth in a normal Bobbit instance. Preserve the temporary
- * directory until sanitized evidence and user signoff are complete.
+ * directory until the sanitized final agent-run evidence record is reviewed.
  *
  * The smoke receives only a current access token from Bobbit's OAuth resolver;
  * it never copies credential values into the test gateway, SDK options,

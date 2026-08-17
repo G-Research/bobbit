@@ -34,11 +34,6 @@ requirement. All other providers, including `anthropic/*` and `aigw/*`, remain
 Pi-backed. This explicit split prevents an existing Anthropic session from
 changing runtime merely because an SDK is installed.
 
-The `claude-agent-sdk` provider namespace is reserved case-insensitively. A
-custom provider whose id **or name** claims it is ignored, including a legacy
-saved provider; it cannot add arbitrary SDK models or impersonate the runtime.
-Remove that obsolete custom-provider entry rather than attempting to repair it.
-
 An AI Gateway is separate from this runtime. With the default
 `aigw.exclusive` setting, a configured gateway hides all direct built-in rows,
 including SDK aliases; the gateway's own models remain selectable and Pi-backed.
@@ -52,10 +47,9 @@ alias (for example, `sonnet`). The auth-directory value identifies the
 owner-only, temporary `BOBBIT_AGENT_DIR` used by the isolated smoke gateway.
 The lifecycle spec maps it to `BOBBIT_AGENT_DIR` before resetting agent-directory
 state or importing auth-sensitive server modules, because those modules can cache
-startup-derived directory state. The smoke uses the built-in alias catalog and a
-temporary default session model; it never registers a custom provider. Neither
-variable changes a developer's production gateway; use the configuration above
-for production selection.
+startup-derived directory state. The smoke uses the built-in alias catalog and a temporary default session
+model. Neither variable changes a developer's production gateway; use the
+configuration above for production selection.
 
 ### Manual OAuth isolation
 
@@ -160,7 +154,7 @@ steers, interrupts, and stop retain their established owners. SDK arguments are
 opaque to Bobbit and do not use Pi command remapping.
 
 The sandbox image prerequisites are exact: Agent SDK `0.3.222`, bundled Claude
-`2.1.222`, Pi `0.82.1`, Bobbit runtime schema `2`, the architecture-appropriate
+`2.1.222`, Pi `0.84.1`, Bobbit runtime schema `2`, the architecture-appropriate
 SDK binary, and the fixed executable `/usr/local/bin/bobbit-claude-agent-sdk`
 wrapper running as the image-owned `bobbit-sdk` identity. The image, rather than
 the host, owns these dependencies. Bobbit verifies the SDK label, wrapper
@@ -970,25 +964,21 @@ npm run check
 
 ### Pending credentialed Docker dogfood
 
-The following is an opt-in manual scenario, not automated evidence and not a
-claim that it has been executed. Follow [Manual OAuth isolation](#manual-oauth-isolation)
-first: authenticate through the separate loopback gateway and export its
-owner-only temporary agent directory as `MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR` to
-Playwright before it can reset directory state or import auth-sensitive modules.
-Run only with Docker, a rebuilt `bobbit-agent` image satisfying the exact SDK,
-Claude, Pi, schema, wrapper, image-owned dependency, workspace-ownership, and
-callback-translation checks above; a local active Anthropic OAuth subscription;
-and an unprefixed built-in SDK alias. The scenario selects that alias as the
-temporary gateway's default session model, then creates a Docker-sandbox project
-with the required enabled empty `ANTHROPIC_OAUTH_TOKEN` policy. It does not
-configure a custom provider or a production gateway. It checks lazy idle creation
-and first-input startup, prompt, steer, soft interrupt, stop, force-abort
-replacement, gateway-restart resume, and same-UUID survival. It does not use or
-log API-key credentials.
+This preserved anchor names the credentialed Docker runbook and its completed
+sanitized record in the [G11 dogfood design](design/claude-agent-sdk-g11-dogfood.md#completed-sanitized-agent-run-record).
+For a repeat run, follow [Manual OAuth isolation](#manual-oauth-isolation) first:
+authenticate through the separate loopback gateway and export its owner-only
+temporary agent directory as `MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR` before Playwright
+can reset directory state or import auth-sensitive modules. Run only with Docker,
+a rebuilt `bobbit-agent` image satisfying the checks above, a local active
+Anthropic OAuth subscription, and a built-in unprefixed alias. The no-override
+path uses `haiku`; an explicit alias override remains available for a targeted
+run. The scenario creates an isolated Docker project with the required enabled
+empty `ANTHROPIC_OAUTH_TOKEN` policy, then verifies lifecycle and recovery without
+using or logging API-key credentials.
 
 ```bash
 BOBBIT_RUN_CLAUDE_AGENT_SDK_SANDBOX_SMOKE=1 \
-MANUAL_CLAUDE_AGENT_SDK_MODEL=sonnet \
 MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR="$MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR" \
 npm run test:manual -- --grep "Docker sandbox lifecycle"
 ```
@@ -997,15 +987,13 @@ The direct, non-Docker subscription smoke remains separately opt-in:
 
 ```bash
 BOBBIT_RUN_CLAUDE_AGENT_SDK_SMOKE=1 \
-MANUAL_CLAUDE_AGENT_SDK_MODEL=sonnet \
 MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR="$MANUAL_CLAUDE_AGENT_SDK_AUTH_DIR" \
 npm run test:manual -- --grep "Claude Agent SDK lifecycle"
 ```
 
-## Dogfood record and release boundary
+## Dogfood record and parent release boundary
 
-Run the credential-free unavailable-provider case before asking anyone to use
-subscription quota. It is intentionally included outside the opt-in blocks and
+Run the credential-free unavailable-provider case before a credentialed run. It
 must settle with `SDK_SESSION_UNAVAILABLE`, not hang, create a replacement
 conversation, or route the SDK session to Pi:
 
@@ -1013,47 +1001,16 @@ conversation, or route the SDK session to Pi:
 npm run test:manual -- --grep "provider-unavailable failure"
 ```
 
-Then record the focused deterministic checks already listed above, including the
-restart E2E and literal initialization-inventory test, before either opt-in
-command. They prove the implementation boundary, but they cannot prove a local
-OAuth login, a real model's advertised controls, Docker's credential handoff, or
-the user's browser workflow.
+Then record the deterministic checks, restart E2E, and literal
+initialization-inventory test before either opt-in command. They prove the
+implementation boundary, but do not prove a local OAuth login, live capability,
+or Docker credential handoff.
 
-| Evidence | Deterministic automated coverage | Direct subscription session | Docker subscription session |
-| --- | --- | --- | --- |
-| Runtime routing, official-history projection, root-only usage, unavailable-provider recovery, tool/permission ceilings, slash ownership, helpers, and tuple transaction | Required before a live run; credential-free | Pending a user-run session | Pending a user-run session |
-| Bobbit OAuth discovery and one real SDK conversation | Cannot prove | Required and pending until recorded | Does not replace direct evidence |
-| Docker image capability, private volume/UID boundary, explicit OAuth-policy handoff, and sandbox resume | Can prove isolated branches, not a host credential handoff | Not applicable | Required and pending until recorded |
-| User-visible tool card, nested helper card, controls, restart/resume, reload, transcript, cost, and usage observation | Can prove fixtures and projections | Required and pending until recorded | Required and pending until recorded |
-| Release readiness | Cannot establish | Requires user sign-off | Requires user sign-off |
-
-A manual command is not a readiness declaration. **Do not claim readiness until a
-user has run and signed off on both a real direct subscription session and a real
-Docker sandbox subscription session.** If sandbox operation is not supported in
-the intended environment, record that limitation and do not substitute a
-credential-free run or direct run for it.
-
-### What to record
-
-Use a short sanitized matrix in the workflow or release evidence. For each
-scenario, record only:
-
-| Field | Expected record |
-| --- | --- |
-| Run identity | Date, Bobbit commit, command, and unprefixed model ID. |
-| Versions | Installed SDK package and bundled Claude binary version; for Docker, matching image label/version. |
-| Auth and prerequisites | `Bobbit OAuth available` or a sanitized failure category; Docker policy present with an empty value, image capability, and Docker availability. A native Claude CLI login alone is insufficient. Never record tokens, account data, opaque IDs or UUIDs, config/session paths, environment dumps, provider bodies, prompts, or model output. |
-| Lifecycle outcomes | Start/readiness; canonical Bobbit tool and permission-card request/settlement; read-only gate action; Bobbit-owned slash; local SDK `/compact` rejection; one admitted helper beneath its root `Agent` card; advertised control's verified tuple or the accurate unsupported result; automatic compaction only if observed; restart/resume and reload. |
-| Durable observations | Stable official transcript projection; `costBasis`, nullable billed total, nullable notional value, usage totals, and current/high-water context. Record field presence and outcome, not raw transcript rows, opaque IDs, prompts, tool arguments, or model output. |
-| Failure and approval | Sanitized category, remediation and rerun result; provider-unavailable deterministic-check reference; user confirmation that the real session was run. UI artifacts may show only redacted labels and outcomes. |
-
-The required live matrix is complete only when every direct and sandbox row has
-a bounded observed outcome. An SDK control that is not advertised is an accurate
-unsupported result, not a pass by substitution. Likewise,
-automatic compaction is observation-only: do not invoke or fabricate a manual
-compaction event. `SDK_SESSION_UNAVAILABLE`, a sandbox auth/image failure,
-permission-card mismatch, transcript/cost regression, child content outside its
-root card, or Pi fallback is a failed row until it is fixed and rerun.
+An agent-run Playwright/API signoff requires bounded direct and supported Docker
+observations. It is evidence for G11, not a parent release decision. Use the
+completed sanitized record and the empty reusable matrix in the
+[G11 dogfood design](design/claude-agent-sdk-g11-dogfood.md#completed-sanitized-agent-run-record).
+Automatic compaction remains observation-only: do not invoke or fabricate it.
 
 For the original implementation rationale and acceptance plan, see
 [Claude Agent SDK session lifecycle design](design/claude-agent-sdk-session-lifecycle.md)
