@@ -17,12 +17,32 @@ describe("read_session discriminated tool contract", () => {
 		registerAgentExtension({ registerTool(config: any) { if (config.name === "read_session") tool = config; } } as any);
 	});
 	afterAll(() => { globalThis.fetch = realFetch; for (const [key, value] of Object.entries(previous)) value === undefined ? delete process.env[key] : process.env[key] = value; });
-	it("accepts only the closed list and exact inspect variants", () => {
-		const cases: [boolean, any[]][] = [
-			[true, [{ operation: "list", session_id: "s", offset: -20, limit: 20, pattern: "error", case_sensitive: true, context: 2 }, { operation: "inspect", session_id: "s", message_index: 7 }, { operation: "inspect", session_id: "s", message_index: 7, result_index: 1, offset: 5, limit: 40 }]],
-			[false, [{ session_id: "s" }, { operation: "inspect", session_id: "s" }, ...["verbose", "include_tool_results", "includeToolResults"].map((flag) => ({ operation: "list", session_id: "s", [flag]: true })), { operation: "list", session_id: "s", message_index: 1 }, { operation: "inspect", session_id: "s", message_index: 1, pattern: "x" }, { operation: "inspect", session_id: "s", message_index: 1, context: 1 }]],
-		];
-		for (const [expected, values] of cases) for (const value of values) assert.equal(Value.Check(tool.parameters, value), expected, JSON.stringify(value));
+	it("uses a Bedrock-valid top-level object schema", () => {
+		assert.equal(tool.parameters.type, "object");
+		for (const value of [
+			{ operation: "list", session_id: "s", offset: -20, limit: 20, pattern: "error", case_sensitive: true, context: 2 },
+			{ operation: "inspect", session_id: "s", message_index: 7 },
+			{ operation: "inspect", session_id: "s", message_index: 7, result_index: 1, offset: 5, limit: 40 },
+		]) assert.equal(Value.Check(tool.parameters, value), true, JSON.stringify(value));
+		for (const value of [
+			{ session_id: "s" },
+			{ operation: "other", session_id: "s" },
+			...["verbose", "include_tool_results", "includeToolResults"].map((flag) => ({ operation: "list", session_id: "s", [flag]: true })),
+		]) assert.equal(Value.Check(tool.parameters, value), false, JSON.stringify(value));
+	});
+
+	it("enforces operation-specific closed variants at runtime", async () => {
+		for (const value of [
+			{ operation: "inspect", session_id: "s" },
+			{ operation: "list", session_id: "s", message_index: 1 },
+			{ operation: "inspect", session_id: "s", message_index: 1, pattern: "x" },
+			{ operation: "inspect", session_id: "s", message_index: 1, context: 1 },
+			{ operation: "inspect", session_id: "s", message_index: 1, offset: -1 },
+			{ operation: "list", session_id: "s", limit: 201 },
+		]) {
+			const result = await tool.execute("invalid", value);
+			assert.equal(result.isError, true, JSON.stringify(value));
+		}
 	});
 
 	it("forwards list discovery and exact-result bounds without compatibility flags", async () => {
