@@ -246,14 +246,18 @@ test.describe("Gate Re-signal Cancellation", () => {
 		runner.settle();
 		await cancellation;
 		await oldVerification;
-		expect(signals().find(signal => signal.id === oldSignal.id)?.verification).toMatchObject({
+		const cancelledVerification = signals().find(signal => signal.id === oldSignal.id)?.verification;
+		expect(cancelledVerification).toMatchObject({
 			status: "cancelled",
 			cancellation: { cause: "superseded", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
 			steps: [
-				{ name: "Optional approval", status: "cancelled", cancellation: { cause: "superseded" } },
+				{ name: "Optional approval", status: "skipped", passed: true },
 				{ name: "Final signal check", status: "cancelled", cancellation: { cause: "superseded" } },
 			],
 		});
+		// The disabled optional phase completed as skipped before phase 1 spawned.
+		// Cancellation preserves completed audit rows and labels only unfinished work.
+		expect(cancelledVerification?.steps[0]?.cancellation).toBeUndefined();
 		expect(signals().find(signal => signal.id === newSignal.id)?.verification.status).toBe("running");
 		expect(gateStore.getGate(GOAL_ID, GATE_ID)?.status).toBe("pending");
 		expect(events.filter(event => event.type === "gate_verification_complete" && event.signalId === oldSignal.id && event.status === "cancelled")).toHaveLength(1);

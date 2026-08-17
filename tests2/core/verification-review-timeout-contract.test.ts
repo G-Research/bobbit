@@ -283,18 +283,29 @@ describe("recovery windows and provider exclusion", () => {
 				waitForStreaming: async (_id: string, ms: number) => { streamingTimeouts.push(ms); },
 				terminateSession: async () => {},
 			};
-			const { harness } = makeReviewHarness({ session, sessionManager });
-			await harness._tryResumeFromSession(
-				{ goalId: "missing-goal", gateId: "gate", signalId: "signal" },
-				{
-					name: "Review",
-					type: "llm-review",
-					status: "running",
-					startedAt: Date.now(),
-					sessionId,
-					...(timeoutSec === undefined ? {} : { timeoutSec }),
-				},
-			);
+			// Keep the legacy no-workflow timeout fallback while still providing a
+			// resolvable project context for the registered active generation.
+			const { harness } = makeReviewHarness({ goalId: "missing-goal", session, sessionManager });
+			const step = {
+				name: "Review",
+				type: "llm-review",
+				status: "running",
+				startedAt: Date.now(),
+				sessionId,
+				...(timeoutSec === undefined ? {} : { timeoutSec }),
+			};
+			const active = {
+				goalId: "missing-goal",
+				gateId: "gate",
+				signalId: "signal",
+				overallStatus: "running",
+				startedAt: step.startedAt,
+				steps: [step],
+			};
+			// The private resume seam requires the exact active step identity that
+			// production registered before session recovery began.
+			harness.activeVerifications.set(active.signalId, active);
+			await harness._tryResumeFromSession(active, step);
 			return { idleTimeouts, streamingTimeouts, promptTexts, bindings: readAuthorSidecar(sessionId) };
 		}
 

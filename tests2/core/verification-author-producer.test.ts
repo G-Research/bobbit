@@ -64,16 +64,26 @@ it("VerificationHarness prefixes its resumed-review reminder only at the provide
 			{ registerReviewerSession: () => {}, unregisterReviewerSession: () => {} } as any,
 		);
 
-		const result = await (harness as any)._tryResumeFromSession(
-			{ goalId: "goal-1", gateId: "gate-1", signalId: "signal-1" },
-			{
-				name: "Author reminder review",
-				type: "llm-review",
-				status: "running",
-				startedAt: 1_700_000_000_000,
-				sessionId,
-			},
-		);
+		const step = {
+			name: "Author reminder review",
+			type: "llm-review",
+			status: "running",
+			startedAt: 1_700_000_000_000,
+			sessionId,
+		};
+		const active = {
+			goalId: "goal-1",
+			gateId: "gate-1",
+			signalId: "signal-1",
+			overallStatus: "running",
+			startedAt: step.startedAt,
+			steps: [step],
+		};
+		// Production invokes the private resume helper only for a registered active
+		// verification. Keep the exact step identity so durable verdict capture can
+		// locate and update the row it owns.
+		(harness as any).activeVerifications.set(active.signalId, active);
+		const result = await (harness as any)._tryResumeFromSession(active, step);
 
 		assert.equal(result.passed, true);
 		const piText = `[System]: ${VERIFICATION_RESULT_REMINDER}`;

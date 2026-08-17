@@ -52,6 +52,21 @@ function initVerificationAuthorSidecar(stateDir: string): void {
 	});
 }
 
+function registerActiveResume(harness: VerificationHarness, step: any) {
+	const active = {
+		goalId: "goal-1",
+		gateId: "gate-1",
+		signalId: "signal-1",
+		overallStatus: "running",
+		startedAt: step.startedAt,
+		steps: [step],
+	};
+	// `_tryResumeFromSession` is a private lifecycle seam. Production reaches it
+	// only with this exact active row already registered and durably owned.
+	(harness as any).activeVerifications.set(active.signalId, active);
+	return active;
+}
+
 /**
  * `SessionManager` transitively pulls in flexsearch (via search-service),
  * which doesn't import cleanly under tsx in this test runner. Instead we
@@ -167,10 +182,9 @@ async function captureResumePromptForRestoredReviewer(opts: { restoreStartupWasS
 			{ registerReviewerSession: () => {}, unregisterReviewerSession: () => {} } as any,
 		) as any;
 
-		await (harness as any)._tryResumeFromSession(
-			{ goalId: "goal-1", gateId: "gate-1", signalId: "signal-1" },
-			{ name: "Restart resume review", type: "llm-review", status: "running", startedAt: Date.now() - 1_000, sessionId },
-		);
+		const step = { name: "Restart resume review", type: "llm-review", status: "running", startedAt: Date.now() - 1_000, sessionId };
+		const active = registerActiveResume(harness, step);
+		await (harness as any)._tryResumeFromSession(active, step);
 		return prompts;
 	} finally {
 		fs.rmSync(stateDir, { recursive: true, force: true });
@@ -255,10 +269,9 @@ async function runRestartContinuationFallback(opts: { jsonValidationErrorDuringC
 			{ registerReviewerSession: () => {}, unregisterReviewerSession: () => {} } as any,
 		) as any;
 
-		const result = await (harness as any)._tryResumeFromSession(
-			{ goalId: "goal-1", gateId: "gate-1", signalId: "signal-1" },
-			{ name: "Restart resume review", type: "llm-review", status: "running", startedAt: Date.now() - 1_000, sessionId },
-		);
+		const step = { name: "Restart resume review", type: "llm-review", status: "running", startedAt: Date.now() - 1_000, sessionId };
+		const active = registerActiveResume(harness, step);
+		const result = await (harness as any)._tryResumeFromSession(active, step);
 		return { prompts, calls, result };
 	} finally {
 		fs.rmSync(stateDir, { recursive: true, force: true });
@@ -332,10 +345,9 @@ async function runNetworkDisconnectRecovery() {
 			{ registerReviewerSession: () => {}, unregisterReviewerSession: () => {} } as any,
 		) as any;
 
-		const result = await (harness as any)._tryResumeFromSession(
-			{ goalId: "goal-1", gateId: "gate-1", signalId: "signal-1" },
-			{ name: "Sleep/Wi-Fi disconnect review", type: "llm-review", status: "running", startedAt: Date.now() - 1_000, sessionId },
-		);
+		const step = { name: "Sleep/Wi-Fi disconnect review", type: "llm-review", status: "running", startedAt: Date.now() - 1_000, sessionId };
+		const active = registerActiveResume(harness, step);
+		const result = await (harness as any)._tryResumeFromSession(active, step);
 		return { prompts, calls, result };
 	} finally {
 		fs.rmSync(stateDir, { recursive: true, force: true });
