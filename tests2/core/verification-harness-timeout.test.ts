@@ -852,16 +852,21 @@ describe("runCommandStep tree-kill", () => {
 		expect(cancellations).toHaveLength(1);
 		(harness as any)._persistActive = failOnceAfterFence;
 		await persistenceFailed.promise;
+		const initialCleanup = (harness as any)._cancelledCleanupPromises.get(signalId);
+		expect(initialCleanup).toBeDefined();
+		await initialCleanup;
 
+		expect((harness as any)._cancelledCleanupPromises.has(signalId)).toBe(false);
+		expect((harness as any)._cancelledCleanupRetryTimers.has(signalId)).toBe(true);
 		expect((harness as any)._trackedCommandChildren.get(`${signalId}:0`)).toBe(tree.tracked);
 		expect(tree.waits()).toBe(1);
 		expect(fixture.verificationUpdates).toEqual([]);
 		expect(broadcasts.filter(event => event.type === "gate_verification_complete")).toHaveLength(0);
 
 		clock.advance(1_000);
-		await Promise.resolve();
-		await Promise.resolve();
-		await Promise.resolve();
+		const retryCleanup = (harness as any)._cancelledCleanupPromises.get(signalId);
+		expect(retryCleanup).toBeDefined();
+		await retryCleanup;
 		expect(tree.waits()).toBeGreaterThanOrEqual(2);
 		expect((harness as any)._trackedCommandChildren.has(`${signalId}:0`)).toBe(false);
 		expect(fixture.gate.status).toBe("pending");
