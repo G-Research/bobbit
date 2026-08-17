@@ -168,7 +168,10 @@ test.describe("project-import proposal route — canonical effects", () => {
 			const restarted = Array.from(gateway.projectContextManager.all() as Iterable<ProjectContext>).find(candidate => candidate.project.id === projectId);
 			expect(restarted).toBeTruthy();
 			const settled = restarted!.decisionRequestStore.get(requestId!);
-			expect(settled.proposal).toMatchObject({ status: "accepted", application: { key: identity.key } });
+			if (!settled || settled.proposal?.status !== "accepted") {
+				throw new Error(`Expected startup replay to settle accepted proposal ${requestId}`);
+			}
+			expect(settled.proposal.application).toMatchObject({ key: identity.key });
 			expect(settled.proposal.auditedAt).toEqual(expect.any(String));
 			expect(restarted!.roleStore.get("route-import-role")).toMatchObject({ label: "Route import role" });
 			expect(auditRows(path.join(gateway.bobbitDir, "state"), projectId, importId).filter(entry => entry.auditKey === identity.key)).toHaveLength(1);
