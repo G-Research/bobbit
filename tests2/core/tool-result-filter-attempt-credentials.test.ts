@@ -92,6 +92,23 @@ describe("ToolResultFilterAttemptCredentials", () => {
 		expect(manager.toolResultFilterAttemptCredentials.hasRuntime("delegate")).toBe(true);
 	});
 
+	it("reconciles a live runtime left behind by a rejected setup owner", async () => {
+		const manager: any = new SessionManager();
+		manager.setToolResultFilterActivationResolver(() => ({ toolResult: true }));
+		const failure = Promise.reject(new Error("delegate bootstrap rejected"));
+		void failure.catch(() => {});
+		manager.sessions.set("delegate-live", { id: "delegate-live", projectId: "project", rpcClient: { running: true } });
+		manager.pendingSessionSetups.set("delegate-live", failure);
+		manager.restartAgent = vi.fn(async (id: string) => {
+			const runtime = manager.toolResultFilterAttemptCredentials.beginRuntime(id, 1);
+			manager.toolResultFilterAttemptCredentials.commitRuntime(id, runtime);
+		});
+
+		await manager.reconcileToolResultFilterGate("project");
+		expect(manager.restartAgent).toHaveBeenCalledWith("delegate-live");
+		expect(manager.toolResultFilterAttemptCredentials.hasRuntime("delegate-live")).toBe(true);
+	});
+
 	it("fails closed when policy activates after an ungated bridge starts", async () => {
 		const manager: any = new SessionManager();
 		manager.setToolResultFilterActivationResolver(() => ({ toolResult: true }));

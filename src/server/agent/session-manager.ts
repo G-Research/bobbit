@@ -4099,8 +4099,11 @@ export class SessionManager {
 			// `status` and accidentally replacing it or returning an early grant.
 			const pendingSetup = this.pendingSessionSetups.get(sessionId);
 			if (pendingSetup) {
+				// A rejected setup normally removes its session, but cleanup is
+				// generation-aware. Suppress the owner error and re-read canonical state:
+				// a live bridge left behind still needs gate reconciliation.
 				try { await pendingSetup; }
-				catch { continue; } // Setup failed: there is no runnable runtime to protect.
+				catch { /* inspect the current live owner below */ }
 			}
 			const session = this.sessions.get(sessionId);
 			if (!session || session.projectId !== projectId || !session.rpcClient.running) continue;
