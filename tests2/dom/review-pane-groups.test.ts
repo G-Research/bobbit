@@ -608,6 +608,40 @@ describe("ReviewPane review groups", () => {
 		expect(controlledMenu(trigger!), `${REGRESSION}: selected overflow menu must no longer be visible`).toBeNull();
 	});
 
+	it("keeps an open overflow menu clickable across same-review persistence refreshes", async () => {
+		const review = group("overflow-refresh", 7);
+		const pane = await mountReview(review);
+		const trigger = overflowTrigger(pane);
+		expect(trigger).not.toBeNull();
+
+		trigger!.click();
+		await settle(pane);
+		const menu = controlledMenu(trigger!);
+		const lastItem = Array.from(menu?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') || [])
+			.find((item) => item.textContent?.trim() === review.files[6]!.title);
+		expect(lastItem, `${REGRESSION}: the user-open overflow target must exist`).toBeDefined();
+
+		// The app replaces the group object after the active-file persistence
+		// response settles. That same-review refresh must not dismiss the menu
+		// between Playwright's actionability check and the user's click.
+		pane.review = {
+			...review,
+			files: review.files.map((file) => ({ ...file })),
+		};
+		await settle(pane);
+		expect(trigger!.getAttribute("aria-expanded"), `${REGRESSION}: same-review refresh must preserve the open menu`).toBe("true");
+		expect(lastItem!.isConnected, `${REGRESSION}: same-review refresh must not detach the pending click target`).toBe(true);
+
+		let change: CustomEvent | undefined;
+		pane.addEventListener("review-file-change", (event) => { change = event as CustomEvent; });
+		lastItem!.click();
+		await settle(pane);
+		expect(change?.detail).toEqual({
+			reviewId: review.reviewId,
+			fileId: review.files[6]!.fileId,
+		});
+	});
+
 	it("keeps eager mobile review panes pure and closes an inactive review with its exact draft", async () => {
 		const sessionId = "session-primary-close";
 		const reviewA = group("primary-close-a", 2, sessionId);

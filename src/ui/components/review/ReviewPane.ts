@@ -92,7 +92,10 @@ export class ReviewPane extends LitElement {
   }
 
   protected updated(changed: Map<string, unknown>): void {
-    if (changed.has("review") || changed.has("activeTab")) {
+    const previousReview = changed.get("review") as ReviewGroupModel | null | undefined;
+    const reviewIdentityChanged = changed.has("review")
+      && previousReview?.reviewId !== this.review?.reviewId;
+    if (reviewIdentityChanged || changed.has("activeTab")) {
       this._validationError = "";
       if (this._overflowOpen) this._closeOverflow(false);
     }
