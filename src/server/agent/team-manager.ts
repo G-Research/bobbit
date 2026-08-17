@@ -3715,23 +3715,79 @@ export class TeamManager {
 				for (const agent of entry?.agents ?? []) referencedIds.add(agent.sessionId);
 			}
 
-			this.deactivateArchivedTeamRuntime(goalId, runtimeEntry);
 			const errors: string[] = [];
+			const liveRows = (): PersistedSession[] => sessionStore?.getLive?.() ?? [];
+			// A failed SessionStore publication can leave its mutable in-memory row
+			// archived even though disk still says live. While TeamStore retains an
+			// explicit reference, include that exact row on every retry. This is bounded
+			// to current authority and deliberately does not enumerate archive history.
+			const candidateRows = (): PersistedSession[] => {
+				const byId = new Map(liveRows().map((session) => [session.id, session]));
+				for (const id of referencedIds) {
+					const referenced = sessionStore?.get?.(id);
+					if (referenced) byId.set(id, referenced);
+				}
+				return [...byId.values()];
+			};
+			const initialRows = candidateRows();
+			const initialClosure = collectTeamOwnedSessionClosure(goalId, initialRows, referencedIds, errors);
+			const hasAuthoritativeOwnership = initialRows.some((session) =>
+				session.teamGoalId === goalId
+				|| (referencedIds.has(session.id) && (!session.teamGoalId || session.teamGoalId === goalId)));
+
+			this.deactivateArchivedTeamRuntime(goalId, runtimeEntry);
+
+			// Recovery-shaped team ownership may predate the durable goal.team marker.
+			// Publish that sticky marker before archiving its only reconstructable row;
+			// archive replays then keep worktrees and remote branches as evidence.
+			if (goal.team !== true && hasAuthoritativeOwnership) {
+				let markerAcknowledged = false;
+				try {
+					const goalStore = context?.goalStore ?? this._localGoalManager?.getGoalStore();
+					if (goalStore) markerAcknowledged = await goalStore.updateStrict(goalId, { team: true });
+				} catch (err) {
+					errors.push(`team marker: ${err instanceof Error ? err.message : String(err)}`);
+				}
+				if (!markerAcknowledged) {
+					if (!errors.some((error) => error.startsWith("team marker:"))) {
+						errors.push("team marker: persistence was not acknowledged");
+					}
+					for (const id of initialClosure) {
+						try { await this.sessionManager.quiesceSessionRuntime(id); }
+						catch (err) { errors.push(`quiesce ${id}: ${err instanceof Error ? err.message : String(err)}`); }
+					}
+					try { await this.verificationHarness?.cancelAllVerifications(goalId); }
+					catch (err) { errors.push(`verification cancellation: ${err instanceof Error ? err.message : String(err)}`); }
+					const result: ArchivedGoalReconciliationResult = {
+						goalId,
+						status: "blocked",
+						archivedSessionIds: [],
+						suppressedSessionIds: [...initialClosure],
+						teamRemoved: false,
+						teamEntryRetained: !!teamStore?.get(goalId),
+						errors: errors.slice(0, 10),
+					};
+					if (options.audit !== false) {
+						console.log(`[team-manager] Archived-team reconciliation blocked: goal=${goalId} archived=0 suppressed=${result.suppressedSessionIds.length} teamRemoved=false retained=${result.teamEntryRetained} errors=${errors.length} elapsedMs=${this.clock.now() - startedAt}`);
+					}
+					return result;
+				}
+			}
+
 			try { await this.verificationHarness?.cancelAllVerifications(goalId); }
 			catch (err) { errors.push(`verification cancellation: ${err instanceof Error ? err.message : String(err)}`); }
 
-			// These are durable acknowledgements, not a projection of the mutable
-			// SessionStore row. archiveAsync marks a row archived before publishing its
-			// snapshot, so a rejected write can make getLive() hide a still-live disk row.
+			// These are durable acknowledgements from this call, not a projection of
+			// the mutable SessionStore row. archiveAsync marks a row archived before
+			// publishing its snapshot, so every retained explicit reference is retried.
 			const archivedSessionIds = new Set<string>();
 			const selectedIds = new Set<string>();
 			const attempted = new Set<string>();
-			const liveRows = (): PersistedSession[] => sessionStore?.getLive?.() ?? [];
 			// Admission is closed, so this bounded final scan reaches a fixed point;
 			// the extra pass catches descendants published by work admitted earlier.
-			const maxPasses = Math.max(1, liveRows().length + 1);
+			const maxPasses = Math.max(1, candidateRows().length + 1);
 			for (let pass = 0; pass < maxPasses; pass++) {
-				const closure = collectTeamOwnedSessionClosure(goalId, liveRows(), referencedIds, errors);
+				const closure = collectTeamOwnedSessionClosure(goalId, candidateRows(), referencedIds, errors);
 				for (const id of closure) selectedIds.add(id);
 				const pending = [...closure].filter((id) => !attempted.has(id));
 				if (pending.length === 0) break;
@@ -3756,7 +3812,7 @@ export class TeamManager {
 				}
 			}
 
-			const finalClosure = collectTeamOwnedSessionClosure(goalId, liveRows(), referencedIds, errors);
+			const finalClosure = collectTeamOwnedSessionClosure(goalId, candidateRows(), referencedIds, errors);
 			for (const id of finalClosure) selectedIds.add(id);
 			const suppressedSessionIds = [...selectedIds].filter((id) => !archivedSessionIds.has(id));
 			let teamRemoved = false;

@@ -15134,6 +15134,100 @@ export class SessionManager {
 		try { return await target.archiveAsync(id); } catch { return false; }
 	}
 
+	/**
+	 * Stop and detach a live runtime while deliberately leaving its persisted row
+	 * live. Archived-goal reconciliation uses this only when it cannot durably
+	 * publish the sticky team ownership marker: the row must remain available for
+	 * boot repair, but its process, dispatch authority, timers, and credentials
+	 * must not survive in the current process.
+	 */
+	async quiesceSessionRuntime(id: string): Promise<boolean> {
+		const coordinator = this._sessionReplacementCoordinators.get(id);
+		if (!this.sessions.has(id) && !coordinator) return true;
+		if (coordinator) coordinator.terminalRequest = "terminate";
+		const quiesced = this._coordinateSessionReplacement(id, "quiesce", (token) =>
+			this._quiesceSessionRuntimeOwned(id, token), { coalesceKey: "quiesce", drainOnRelease: false });
+		// _coordinateSessionReplacement installs a coordinator synchronously. Make
+		// terminal intent sticky for replacements admitted after this call as well.
+		const installed = this._sessionReplacementCoordinators.get(id);
+		if (installed) installed.terminalRequest = "terminate";
+		return quiesced;
+	}
+
+	private async _quiesceSessionRuntimeOwned(id: string, token: SessionReplacementToken): Promise<boolean> {
+		const session = this.sessions.get(id);
+		if (!session) return true;
+		if (!this._replacementTokenIsCurrent(id, token)) {
+			throw new Error(`Session ${id} quiesce was superseded before start`);
+		}
+
+		// Fence dispatch before the first await, then stop the bridge even when an
+		// auxiliary cleanup hook is unhealthy. The durable SessionStore row is never
+		// mutated by this seam.
+		session.lifecycleFenced = true;
+		session.dormant = true;
+		this.cancelPendingAutoRetry(session, "terminated");
+		try { this.purgeVerifierPromptRows(id, `Verifier session ${id} was quiesced before dispatch`); } catch { /* best-effort */ }
+		if (session.pendingMetadataPersist) {
+			try { await session.pendingMetadataPersist; } catch { /* already logged */ }
+		}
+		try { await session.rpcClient.getState(); } catch { /* process may already be stopped */ }
+		try { session.unsubscribe(); } catch { /* bridge stop remains mandatory */ }
+		await session.rpcClient.stop();
+		if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session) {
+			throw new Error(`Session ${id} quiesce was superseded after bridge stop`);
+		}
+		broadcastStatus(session, "terminated");
+
+		try { await this.closeExtensionChannelsForSession(id, "session-quiesced"); } catch { /* runtime is already stopped */ }
+		if (session.pendingGrantRequest) {
+			const pending = session.pendingGrantRequest;
+			const requests = pending.requests?.length
+				? pending.requests
+				: [{ resolve: pending.resolve, reject: pending.reject, timer: pending.timer, seq: pending.seq, ts: pending.ts }];
+			for (const req of requests) {
+				this.clock.clearTimeout(req.timer);
+				req.resolve({ granted: false });
+			}
+			session.pendingGrantRequest = undefined;
+		}
+		if ((this as any).bgProcessManager) {
+			try { (this as any).bgProcessManager.abortAllWaits(id); } catch { /* best-effort */ }
+			try { (this as any).bgProcessManager.cleanup(id); } catch { /* best-effort */ }
+		}
+		try {
+			if (this.sandboxTokenStore && session.projectId) this.sandboxTokenStore.removeSession(session.projectId, id);
+		} catch { /* process is already stopped */ }
+		try { this.sessionSecretStore.remove(id); } catch { /* process is already stopped */ }
+		this.rejectAllVerifierPromptReceipts(id, new Error(`Session ${id} was quiesced by archived goal ownership`));
+		this.rejectIdleWaiters(id, new Error(`Session ${id} was quiesced by archived goal ownership`));
+		for (const client of session.clients) {
+			try { client.close(1000, "Session quiesced"); } catch { /* best-effort */ }
+		}
+		session.clients.clear();
+		this._untrackConnectedSession(session);
+
+		const scope = { projectId: session.projectId, cwd: session.cwd };
+		this.sessions.delete(id);
+		this._taskIdCache.delete(id);
+		try { await this.cleanupScopedMcpManagersForSessionScope(scope); } catch { /* runtime authority is already removed */ }
+		if (this.lifecycleHub) {
+			try {
+				await this.lifecycleHub.dispatch("sessionShutdown", {
+					sessionId: id,
+					projectId: session.projectId,
+					scope: session.projectId ? "project" : "global",
+					cwd: session.cwd,
+					goalId: session.goalId ?? session.teamGoalId,
+					roleName: session.role,
+				}, lifecycleScopeInput(session));
+			} catch (err) {
+				console.warn(`[session-manager] sessionShutdown dispatch failed for quiesced ${id}:`, err);
+			}
+		}
+		return true;
+	}
+
 	async terminateSession(id: string, options: { preserveEvidence?: boolean; cascadeSessionIds?: ReadonlySet<string>; allowPromotedGoalLifecycle?: boolean } = {}): Promise<boolean> {
 		this.assertSessionGoalPromotionMutationAllowed(id);
 		// Legacy callers may still pass the old option, but canonical goal state —
