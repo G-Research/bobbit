@@ -4,6 +4,7 @@ import { describe, it } from "vitest";
 import { trustedAgentSessionsRoots } from "../../src/server/agent/agent-session-path.ts";
 import { sidecarPathFor, type SessionSidecar } from "../../src/server/agent/session-sidecar.ts";
 import { TeamManager, type TeamRecoverySidecars } from "../../src/server/agent/team-manager.ts";
+import type { TeamRecoveryCheckpointStore } from "../../src/server/agent/team-recovery-checkpoint.ts";
 import { slugDirNameForCwd } from "../../src/server/agent/team-store-consistency.ts";
 import { TeamRecoveryFsFake, microtaskTurns, sessionHeader } from "./team-recovery-test-fake.ts";
 
@@ -54,6 +55,24 @@ class MemoryTeamStore {
 	remove(goalId: string): void {
 		this.records.delete(goalId);
 		this.mutations.push(`remove:${goalId}`);
+	}
+}
+
+class MemoryRecoveryCheckpoints implements TeamRecoveryCheckpointStore {
+	readonly statuses = new Map<string, "running" | "complete">();
+	readonly calls: string[] = [];
+
+	async isComplete(stateDir: string): Promise<boolean> {
+		this.calls.push(`isComplete:${stateDir}`);
+		return this.statuses.get(stateDir) === "complete";
+	}
+	async begin(stateDir: string): Promise<void> {
+		this.calls.push(`begin:${stateDir}`);
+		this.statuses.set(stateDir, "running");
+	}
+	async complete(stateDir: string): Promise<void> {
+		this.calls.push(`complete:${stateDir}`);
+		this.statuses.set(stateDir, "complete");
 	}
 }
 
@@ -111,12 +130,15 @@ function seedTranscript(
 	return transcript;
 }
 
-function makeFixture(options: { deferFirstScan?: boolean } = {}) {
+function makeFixture(options: { deferFirstScan?: boolean; completedCheckpoint?: boolean } = {}) {
 	const roots = trustedAgentSessionsRoots();
 	assert.ok(roots.length > 0);
 	const firstRoot = roots[0]!;
 	const fs = new TeamRecoveryFsFake();
 	const sidecars = new MemoryRecoverySidecars();
+	const checkpoints = new MemoryRecoveryCheckpoints();
+	const stateDir = "/project-state";
+	if (options.completedCheckpoint) checkpoints.statuses.set(stateDir, "complete");
 
 	const goalPass2 = {
 		id: "goal-pass2",
@@ -194,6 +216,7 @@ function makeFixture(options: { deferFirstScan?: boolean } = {}) {
 	for (const transcript of [pass2Canonical, pass3Canonical, agentTranscript]) sidecars.existing.add(sidecarPathFor(transcript));
 
 	const context = {
+		stateDir,
 		goalStore: goals,
 		teamStore: teams,
 		sessionStore: sessions,
@@ -206,18 +229,24 @@ function makeFixture(options: { deferFirstScan?: boolean } = {}) {
 		getSession: () => undefined,
 		getSessionInfo: () => undefined,
 	};
-	const manager = new TeamManager(sessionManager as any, {
+	const managerConfig = {
 		projectContextManager,
 		taskManager: { getTasksByGoal: () => [], getTasksForSession: () => [] },
 		colorStore: { get: () => undefined, set: () => {}, remove: () => {}, getAll: () => ({}) },
 		recoveryFs: fs,
 		recoverySidecars: sidecars,
-	} as any, undefined, noTimerClock as any);
+		recoveryCheckpoints: checkpoints,
+	};
+	const manager = new TeamManager(sessionManager as any, managerConfig as any, undefined, noTimerClock as any);
 
 	return {
 		manager,
+		managerConfig,
+		sessionManager,
 		fs,
 		sidecars,
+		checkpoints,
+		stateDir,
 		sessions,
 		teams,
 		roots,
@@ -295,6 +324,42 @@ describe("TeamManager awaited async recovery", () => {
 			"trusted roots must be scanned sequentially in authoritative order",
 		);
 		assert.equal(fixture.fs.count("readFile"), 0, "manager recovery must use bounded transcript headers and injected sidecars");
+		fixture.manager.dispose();
+	});
+
+	it("checkpoints a completed forensic sweep and performs no transcript-tree I/O on the next clean boot", async () => {
+		const fixture = makeFixture();
+		await fixture.manager.waitForRestore();
+		assert.equal(fixture.checkpoints.statuses.get(fixture.stateDir), "complete");
+		assert.ok(fixture.fs.calls.some((call) => call.operation === "readdir"), "first boot must preserve historical recovery");
+		fixture.manager.dispose();
+
+		fixture.fs.calls.length = 0;
+		const second = new TeamManager(
+			fixture.sessionManager as any,
+			fixture.managerConfig as any,
+			undefined,
+			noTimerClock as any,
+		);
+		await second.waitForRestore();
+
+		assert.deepEqual(
+			fixture.fs.calls.filter((call) => ["readdir", "stat", "open", "read"].includes(call.operation)),
+			[],
+			"a completed project must not revisit historical agent-session roots",
+		);
+		assert.deepEqual(fixture.checkpoints.calls.slice(-1), [`isComplete:${fixture.stateDir}`]);
+		second.dispose();
+	});
+
+	it("invalidates a completed checkpoint and recovers when a persisted team points at a missing lead", async () => {
+		const fixture = makeFixture({ completedCheckpoint: true });
+		await fixture.manager.waitForRestore();
+
+		assert.ok(fixture.sessions.get("lead-pass2"), "targeted dangling-lead recovery must remain available");
+		assert.ok(fixture.fs.calls.some((call) => call.operation === "readdir"), "new concrete damage must reopen forensic recovery");
+		assert.ok(fixture.checkpoints.calls.includes(`begin:${fixture.stateDir}`));
+		assert.equal(fixture.checkpoints.statuses.get(fixture.stateDir), "complete");
 		fixture.manager.dispose();
 	});
 

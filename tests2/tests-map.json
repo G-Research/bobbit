@@ -2381,7 +2381,16 @@
     },
     {
       "path": "tests2/core/team-manager-async-recovery.test.ts",
-      "reason": "Native v2 unit coverage for awaited TeamManager recovery lifecycle boundaries using deterministic in-memory asynchronous I/O.",
+      "reason": "Native v2 unit coverage for awaited TeamManager recovery lifecycle boundaries, durable forensic-scan suppression, and targeted damage invalidation using deterministic in-memory asynchronous I/O.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/team-recovery-checkpoint.test.ts",
+      "reason": "Tier-1 durability coverage for the versioned team forensic-recovery checkpoint, including crash-in-progress, corrupt, stale-version, and completed states.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

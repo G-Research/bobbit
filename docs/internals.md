@@ -209,7 +209,7 @@ The migration is idempotent and handles missing files gracefully (fresh installs
 
 Team state is restored from each project's `team-state.json` so live teams survive gateway restarts without losing their lead/worker wiring. The restart path is restorative only:
 
-- `TeamManager.restoreTeams()` loads persisted team entries, repairs recoverable dangling records, and drops unrecoverable team-store entries so a future manual "Start Team" is not blocked by stale state.
+- `TeamManager.restoreTeams()` loads persisted team entries, repairs recoverable dangling records, and drops unrecoverable team-store entries so a future manual "Start Team" is not blocked by stale state. Historical fully-orphan/worker transcript discovery and legacy sidecar backfill run once per project recovery-policy version behind `.team-forensic-recovery.json`; concrete dangling team pointers invalidate completion and reopen recovery. See [Checkpoint Team Forensic Recovery](design/checkpoint-team-forensic-recovery.md).
 - After `SessionManager.restoreSessions()`, `TeamManager.resubscribeTeamEvents()` re-attaches lead/worker event listeners for those restored entries and may nudge an already-restored idle lead that has concrete outstanding work.
 - Restart does **not** scan team-mode goals and call `startTeam()` for goals that lack a restored team entry. A teamless existing goal stays teamless even if its persisted `autoStartTeam` flag is `true`.
 

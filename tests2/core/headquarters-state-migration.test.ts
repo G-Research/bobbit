@@ -139,7 +139,86 @@ describe("Headquarters directory migration", () => {
 		assert.equal(diagnostics.ambiguousRecords.length, 0);
 
 		const second = migrateLegacyHeadquartersDirectory(dirs);
-		assert.ok(second.skipped.some(entry => entry.includes("destination differs") || entry.includes("already present")), "migration should be idempotent and preserve existing HQ files");
+		assert.ok(second.skipped.some(entry => entry.includes("skipped unchanged legacy tree")), "the completed default migration should take the evidence-qualified fast path");
+	});
+
+	it("keeps the full diagnostics and recursively copied runtime trees byte-stable on the default fast path", () => {
+		const root = tmpRoot();
+		const legacyStateDir = path.join(root, ".bobbit", "state");
+		const previewFile = path.join(legacyStateDir, "preview", "session-1", "index.html");
+		seedProject(legacyStateDir, hqProject(root));
+		fs.mkdirSync(path.dirname(previewFile), { recursive: true });
+		fs.writeFileSync(previewFile, "first", "utf-8");
+		const dirs = migrateDirs(root);
+
+		migrateLegacyHeadquartersDirectory(dirs);
+		const marker = path.join(dirs.headquartersStateDir, ".headquarters-dir-migrated");
+		const diagnostics = path.join(dirs.headquartersStateDir, "headquarters-migration-diagnostics.json");
+		const markerBytes = fs.readFileSync(marker, "utf-8");
+		const diagnosticsBytes = fs.readFileSync(diagnostics, "utf-8");
+		const copiedPreview = path.join(dirs.headquartersStateDir, "preview", "session-1", "index.html");
+		assert.equal(fs.readFileSync(copiedPreview, "utf-8"), "first");
+
+		// This is now normal-project-owned runtime state. It must not trigger or be
+		// recopied by a completed Headquarters migration.
+		fs.writeFileSync(previewFile, "second", "utf-8");
+		const second = migrateLegacyHeadquartersDirectory(dirs);
+
+		assert.ok(second.skipped.some(entry => entry.includes("skipped unchanged legacy tree")));
+		assert.equal(fs.readFileSync(copiedPreview, "utf-8"), "first");
+		assert.equal(fs.readFileSync(marker, "utf-8"), markerBytes);
+		assert.equal(fs.readFileSync(diagnostics, "utf-8"), diagnosticsBytes);
+	});
+
+	it("permits the default fast path with an unchanged intentionally preserved ambiguous backup", () => {
+		const root = tmpRoot();
+		const legacyStateDir = path.join(root, ".bobbit", "state");
+		seedProject(legacyStateDir, hqProject(root), [normalProject("same-root", root)]);
+		writeJson(path.join(legacyStateDir, "goals.json"), [{
+			id: "live-goal", title: "Live", cwd: root, state: "todo", spec: "", projectId: "same-root", createdAt: 1, updatedAt: 1,
+		}]);
+		writeJson(path.join(legacyStateDir, "goals.json.pre-headquarters-id-migration"), [{
+			id: "ambiguous-goal", title: "Ambiguous", cwd: root, state: "todo", spec: "", projectId: "missing-project", createdAt: 1, updatedAt: 1,
+		}]);
+		const dirs = migrateDirs(root);
+		migrateLegacyHeadquartersDirectory(dirs);
+		const preserved = path.join(dirs.headquartersStateDir, "goals.json.pre-headquarters-id-migration");
+		assert.equal(fs.existsSync(preserved), true, "unaccounted backup evidence must remain recoverable");
+
+		const second = migrateLegacyHeadquartersDirectory(dirs);
+
+		assert.ok(second.skipped.some(entry => entry.includes("skipped unchanged legacy tree")));
+		assert.equal(fs.existsSync(preserved), true);
+	});
+
+	it("invalidates the default fast path when a migration backup artifact appears", () => {
+		const root = tmpRoot();
+		const legacyStateDir = path.join(root, ".bobbit", "state");
+		seedProject(legacyStateDir, hqProject(root));
+		const dirs = migrateDirs(root);
+		migrateLegacyHeadquartersDirectory(dirs);
+
+		writeJson(path.join(legacyStateDir, "goals.json.pre-headquarters-id-migration"), []);
+		const second = migrateLegacyHeadquartersDirectory(dirs);
+
+		assert.equal(second.skipped.some(entry => entry.includes("skipped unchanged legacy tree")), false);
+		assert.equal(fs.existsSync(path.join(dirs.headquartersStateDir, "goals.json.pre-headquarters-id-migration-recovered")), true);
+	});
+
+	it("still relocates a newly reintroduced legacy secret on the default fast path", () => {
+		const root = tmpRoot();
+		const secretsDir = useIsolatedSecretsDir();
+		const legacyStateDir = path.join(root, ".bobbit", "state");
+		seedProject(legacyStateDir, hqProject(root));
+		const dirs = migrateDirs(root);
+		migrateLegacyHeadquartersDirectory(dirs);
+
+		fs.writeFileSync(path.join(legacyStateDir, "token"), "late-secret", "utf-8");
+		const second = migrateLegacyHeadquartersDirectory(dirs);
+
+		assert.ok(second.skipped.some(entry => entry.includes("skipped unchanged legacy tree")));
+		assert.equal(fs.existsSync(path.join(legacyStateDir, "token")), false);
+		assert.equal(fs.readFileSync(path.join(secretsDir, "token"), "utf-8"), "late-secret");
 	});
 
 	it("sanitizes migrated Headquarters execution records and is idempotent", () => {
