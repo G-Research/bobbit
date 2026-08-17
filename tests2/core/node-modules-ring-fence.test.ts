@@ -113,6 +113,24 @@ function pathIsWithin(candidate: unknown, root: string): boolean {
 	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+function repositorySource(relativePath: string): string {
+	const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+	return fs.readFileSync(path.join(repositoryRoot, relativePath), "utf-8");
+}
+
+function sourceFunctionBody(source: string, functionName: string): string {
+	const signature = new RegExp(`(?:async\\s+)?function\\s+${functionName}\\s*\\(`);
+	const match = signature.exec(source);
+	if (!match) throw new Error(`${POLICY_PREFIX}_SOURCE_FUNCTION_MISSING:${functionName}`);
+	const open = source.indexOf("{", match.index + match[0].length);
+	let depth = 0;
+	for (let index = open; index < source.length; index++) {
+		if (source[index] === "{") depth++;
+		if (source[index] === "}" && --depth === 0) return source.slice(open + 1, index);
+	}
+	throw new Error(`${POLICY_PREFIX}_SOURCE_FUNCTION_UNTERMINATED:${functionName}`);
+}
+
 function observeLegacyRuntimeAccess(runtimeDir: string): { accesses: string[]; restore: () => void } {
 	const accesses: string[] = [];
 	const methods = [
@@ -753,6 +771,37 @@ describe.skipIf(!desiredContractAvailable)("harness lifecycle validation policy"
 });
 
 describe("harness sentinel restart downtime policy", () => {
+	it("keeps failed preparation from exposing partial live output to a later crash relaunch", () => {
+		const buildBody = sourceFunctionBody(repositorySource("src/server/harness.ts"), "buildServer");
+		const stagesThenPromotes = /\b(?:stage|staging|candidate|next)\w*\b/i.test(buildBody)
+			&& /\b(?:promot|swap|rename)\w*\b/i.test(buildBody);
+		const snapshotsThenRollsBack = /\b(?:backup|snapshot)\w*\b/i.test(buildBody)
+			&& /\b(?:rollback|restore)\w*\b/i.test(buildBody);
+
+		expect(
+			stagesThenPromotes || snapshotsThenRollsBack,
+			`${POLICY_PREFIX}_FAILED_BUILD_MUST_NOT_MUTATE_LIVE_DIST: build preparation must use staged atomic promotion or proven rollback so a later unexpected crash cannot launch partial output`,
+		).toBe(true);
+	});
+
+	it("counts and delays a genuine child crash during asynchronous restart preparation", () => {
+		const source = repositorySource("src/server/harness.ts");
+		const launchBody = sourceFunctionBody(source, "launchServer");
+		const restartBody = sourceFunctionBody(source, "restart");
+		const preparation = restartBody.indexOf("runHarnessSentinelRestart");
+		expect(preparation, `${POLICY_PREFIX}_RESTART_PREPARATION_SEAM_MISSING`).toBeGreaterThanOrEqual(0);
+
+		expect(
+			restartBody.slice(0, preparation),
+			`${POLICY_PREFIX}_PREPARATION_CRASH_MUST_RETAIN_CRASH_POLICY: restart serialization must not set the intentional-stop guard before validation/build completes`,
+		).not.toMatch(/\brestarting\s*=\s*true\b/);
+		expect(
+			launchBody,
+			`${POLICY_PREFIX}_PREPARATION_CRASH_MUST_RETAIN_CRASH_POLICY: child exits during validation/build must still increment quick-crash counters and schedule the normal delayed relaunch`,
+		).not.toMatch(/if\s*\(\s*!restarting\s*\)/);
+		expect(launchBody).toMatch(/consecutiveQuickCrashes\+\+[\s\S]*setTimeout\s*\(/);
+	});
+
 	it("validates and builds before stopping the current gateway", async () => {
 		const events: string[] = [];
 		await sentinelRestartRunner()({
