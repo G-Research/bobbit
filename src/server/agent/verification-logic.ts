@@ -70,6 +70,26 @@ export const PROVIDER_BACKOFF_REGEXES: RegExp[] = [
 ];
 
 /**
+ * Identify known RPC/reviewer-process exceptions while restarting a reviewer.
+ * This classifier accepts only harness-caught exception messages so recovery
+ * can persist structured no-verdict state. It must never be applied to a
+ * reviewer verdict, command output, or any terminal verification outcome.
+ */
+export function isRestartInterruptError(message: string): boolean {
+	if (!message) return false;
+	const patterns = [
+		"Command timed out",
+		"timed out",
+		"not ready",
+		"did not become ready",
+		"Agent process exited",
+		"Agent process not running",
+		"process exited",
+	];
+	return patterns.some(pattern => message.includes(pattern));
+}
+
+/**
  * How a command verification step can be recovered after a gateway restart.
  *
  * - `detached`   — host process spawned via the bash exit-file wrapper; the

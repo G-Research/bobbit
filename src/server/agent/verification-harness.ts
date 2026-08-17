@@ -1007,6 +1007,7 @@ import {
 	isVerifierPromptDispatchTimeoutError,
 	TRANSIENT_INFRA_ERROR_REGEXES,
 	shouldRetryVerificationStep,
+	isRestartInterruptError,
 	decideCommandRecoveryMode,
 	supportsHostDetachedCommandRecovery,
 	shouldRerunSessionStepOnResume,
@@ -2662,6 +2663,19 @@ export class VerificationHarness {
 				if (isPendingCommandCleanupError(err)) {
 					console.warn(`[verification] Resume of ${v.signalId} is waiting for command cleanup before finalizing: ${errMsg}`);
 					this._scheduleCommandKillCleanupRetry(v.signalId);
+				} else if (isRestartInterruptError(errMsg)) {
+					// This is a harness-caught RPC/process exception, not verifier output.
+					// Persist structured no-verdict provenance before any cleanup or retry.
+					console.warn(`[verification] Resume RPC recovery for ${v.signalId} was interrupted: ${errMsg}`);
+					this._markUnfinishedStepsRestartInterrupted(v);
+					if (!this._persistActive()) throw new Error(`Could not persist restart interruption fence for ${v.signalId}`);
+					if (this._hasUnmarkedTerminalResumeFailure(v)) {
+						// A genuine sibling failure remains authoritative. Re-enter normal
+						// aggregation; marker rows are retained but never re-run.
+						await this._resumeOneVerification(v);
+					} else {
+						await this._finalizeRestartInterruptedVerification(v);
+					}
 				} else {
 					if (this._cancellationOwnsTerminalPublication(v)) continue;
 					console.error(`[verification] Failed to resume verification ${v.signalId}:`, err);
