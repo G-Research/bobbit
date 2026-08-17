@@ -309,8 +309,10 @@ describe("GoalStore — onGoalCreated / onGoalArchived", () => {
 			if (failStrict) throw new Error("injected strict archive failure");
 			return originalSaveStrict(ids);
 		};
+		const beforeFailure = { ...store.get("strict-goal")! };
 
 		await assert.rejects(() => manager.archiveGoal("strict-goal"), /injected strict archive failure/);
+		assert.deepEqual(store.get("strict-goal"), beforeFailure, "an uncontended failure restores the full prior record");
 		assert.equal(store.get("strict-goal")?.archived, undefined, "failed strict publication rolls back memory");
 		assert.equal(archiveHooks, 0);
 		assert.equal(reconciliations, 0, "cleanup cannot run before durable terminal intent");

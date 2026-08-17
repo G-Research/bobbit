@@ -461,6 +461,121 @@ describe("GoalStore SQLite persistence", () => {
 		reader.close();
 	});
 
+	it("preserves a concurrent same-goal update when archive publication rejects", async () => {
+		const stateDir = tempRoot();
+		const store = openStore(stateDir);
+		store.put(goal("archive-race", { state: "in-progress" }));
+		await store.flush();
+		let archiveHooks = 0;
+		store.onGoalArchived = () => { archiveHooks++; };
+
+		const persistence = (store as any).persistence;
+		const originalPublishStrict = persistence.publishStrict.bind(persistence);
+		let rejectArchive!: (error: Error) => void;
+		let entered!: () => void;
+		const archiveEntered = new Promise<void>((resolve) => { entered = resolve; });
+		vi.spyOn(persistence, "publishStrict")
+			.mockImplementationOnce(() => new Promise<void>((_resolve, reject) => {
+				rejectArchive = reject;
+				entered();
+			}))
+			.mockImplementation((...args: unknown[]) => originalPublishStrict(args[0] as Iterable<string>));
+
+		const archiving = store.archiveStrict("archive-race");
+		await archiveEntered;
+		store.update("archive-race", { state: "complete", metadata: { merged: true } });
+		const concurrentUpdatedAt = store.get("archive-race")!.updatedAt;
+		rejectArchive(new Error("injected deferred archive failure"));
+		await expect(archiving).rejects.toThrow(/deferred archive failure/);
+
+		expect(store.get("archive-race")).toMatchObject({
+			state: "complete",
+			metadata: { merged: true },
+			updatedAt: concurrentUpdatedAt,
+		});
+		expect(store.get("archive-race")).not.toHaveProperty("archived");
+		expect(store.get("archive-race")).not.toHaveProperty("archivedAt");
+		expect(archiveHooks).toBe(0);
+		await store.flush();
+		await closeTracked(store);
+
+		const reloaded = openStore(stateDir);
+		expect(reloaded.get("archive-race")).toMatchObject({ state: "complete", metadata: { merged: true } });
+		expect(reloaded.get("archive-race")).not.toHaveProperty("archived");
+		expect(reloaded.get("archive-race")).not.toHaveProperty("archivedAt");
+	});
+
+	it("fully rolls back archive failure without erasing an unrelated goal generation", async () => {
+		const stateDir = tempRoot();
+		const store = openStore(stateDir);
+		store.put(goal("archive-target", { state: "in-progress" }));
+		store.put(goal("unrelated", { title: "Before" }));
+		await store.flush();
+		const beforeTarget = { ...store.get("archive-target")! };
+
+		const persistence = (store as any).persistence;
+		const originalPublishStrict = persistence.publishStrict.bind(persistence);
+		let rejectArchive!: (error: Error) => void;
+		let entered!: () => void;
+		const archiveEntered = new Promise<void>((resolve) => { entered = resolve; });
+		vi.spyOn(persistence, "publishStrict")
+			.mockImplementationOnce(() => new Promise<void>((_resolve, reject) => {
+				rejectArchive = reject;
+				entered();
+			}))
+			.mockImplementation((...args: unknown[]) => originalPublishStrict(args[0] as Iterable<string>));
+
+		const archiving = store.archiveStrict("archive-target");
+		await archiveEntered;
+		store.update("unrelated", { title: "Concurrent" });
+		const concurrentGeneration = store.getGeneration();
+		rejectArchive(new Error("injected unrelated archive failure"));
+		await expect(archiving).rejects.toThrow(/unrelated archive failure/);
+
+		expect(store.get("archive-target")).toEqual(beforeTarget);
+		expect(store.get("unrelated")?.title).toBe("Concurrent");
+		expect(store.getGeneration()).toBeGreaterThan(concurrentGeneration);
+	});
+
+	it("rolls back only strict-update fields when a later same-goal update wins", async () => {
+		const stateDir = tempRoot();
+		const store = openStore(stateDir);
+		store.put(goal("strict-race", { state: "in-progress" }));
+		await store.flush();
+
+		const persistence = (store as any).persistence;
+		const originalPublishStrict = persistence.publishStrict.bind(persistence);
+		let rejectStrict!: (error: Error) => void;
+		let entered!: () => void;
+		const strictEntered = new Promise<void>((resolve) => { entered = resolve; });
+		vi.spyOn(persistence, "publishStrict")
+			.mockImplementationOnce(() => new Promise<void>((_resolve, reject) => {
+				rejectStrict = reject;
+				entered();
+			}))
+			.mockImplementation((...args: unknown[]) => originalPublishStrict(args[0] as Iterable<string>));
+
+		const marking = store.updateStrict("strict-race", { team: true });
+		await strictEntered;
+		store.update("strict-race", { state: "complete", metadata: { merged: true } });
+		const concurrentUpdatedAt = store.get("strict-race")!.updatedAt;
+		rejectStrict(new Error("injected deferred marker failure"));
+		await expect(marking).rejects.toThrow(/deferred marker failure/);
+
+		expect(store.get("strict-race")).toMatchObject({
+			state: "complete",
+			metadata: { merged: true },
+			updatedAt: concurrentUpdatedAt,
+		});
+		expect(store.get("strict-race")).not.toHaveProperty("team");
+		await store.flush();
+		await closeTracked(store);
+
+		const reloaded = openStore(stateDir);
+		expect(reloaded.get("strict-race")).toMatchObject({ state: "complete", metadata: { merged: true } });
+		expect(reloaded.get("strict-race")).not.toHaveProperty("team");
+	});
+
 	it("compensates strict updates on publication failure without firing observers", async () => {
 		const stateDir = tempRoot();
 		const store = openStore(stateDir);
