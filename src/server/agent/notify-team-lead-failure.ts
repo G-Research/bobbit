@@ -12,7 +12,6 @@
  */
 
 import type { GateSignalStep } from "./gate-store.js";
-import { isRestartInterruptedStep } from "./verification-logic.js";
 
 export interface FailureStepLike {
 	name: string;
@@ -51,12 +50,6 @@ function describeFailedStep(step: FailureStepLike): string {
 	return `\`${step.name}\` (\`${step.type}\`)`;
 }
 
-function isRestartInterruptedFailureStep(step: FailureStepLike): boolean {
-	if (step.passed || step.skipped) return false;
-	if (step.type === "command") return step.status === "waiting";
-	return isRestartInterruptedStep({ passed: step.passed, output: step.output ?? "", type: step.type });
-}
-
 /**
  * Build the team-lead failure-notification message body for a failed gate.
  *
@@ -80,8 +73,7 @@ export function buildVerificationFailureMessage(
 		.filter(({ step }) =>
 			!step.passed
 			&& !step.skipped
-			&& step.status !== "cancelled"
-			&& !isRestartInterruptedFailureStep(step),
+			&& step.status !== "cancelled",
 		);
 
 	const lines: string[] = [];

@@ -1007,8 +1007,6 @@ import {
 	isVerifierPromptDispatchTimeoutError,
 	TRANSIENT_INFRA_ERROR_REGEXES,
 	shouldRetryVerificationStep,
-	isRestartInterruptError,
-	isRestartInterruptedStep,
 	decideCommandRecoveryMode,
 	supportsHostDetachedCommandRecovery,
 	shouldRerunSessionStepOnResume,
@@ -1699,6 +1697,8 @@ export interface ActiveVerification {
 		diagnostics?: GateSignalStep["diagnostics"];
 		/** Durable interruption fence captured before asynchronous cleanup starts. */
 		cancellation?: VerificationCancellation;
+		/** Recovery obtained no verifier/command verdict before gateway restart. */
+		restartInterrupted?: true;
 		startedAt: number;
 		sessionId?: string;
 		/** Subgoal-step cache — Tier-1.5 lookup reads `childGoalId` to short-circuit tier resolution. */
@@ -1821,6 +1821,8 @@ type ResumedVerificationStep = {
 	phase?: number;
 	output: string;
 	duration_ms: number;
+	/** Set only by recovery code that conclusively obtained no verdict. */
+	restartInterrupted?: true;
 	timeout?: VerificationTimeoutInfo;
 	diagnostics?: GateStepDiagnostics;
 };
@@ -1842,16 +1844,9 @@ function persistedStatusForStep(step: { passed: boolean; skipped?: boolean; stat
 	return step.passed ? "passed" : "failed";
 }
 
-function isExplicitRestartInterruptedStep(step: { passed: boolean; skipped?: boolean; status?: PersistedGateSignalStepStatus; output: string; type: string }): boolean {
-	if (step.passed || step.skipped) return false;
-	if (step.type === "command") return step.status === "waiting";
-	return isRestartInterruptedStep(step);
-}
-
-function shouldSuppressExplicitRestartInterrupt(steps: ReadonlyArray<{ passed: boolean; skipped?: boolean; status?: PersistedGateSignalStepStatus; output: string; type: string }>): boolean {
-	const failedSteps = steps.filter(s => !s.passed && !s.skipped);
-	if (failedSteps.length === 0) return false;
-	return failedSteps.every(isExplicitRestartInterruptedStep);
+function shouldSuppressExplicitRestartInterrupt(steps: ReadonlyArray<{ passed: boolean; skipped?: boolean; restartInterrupted?: true }>): boolean {
+	const nonPassedSteps = steps.filter(step => !step.passed && !step.skipped);
+	return nonPassedSteps.length > 0 && nonPassedSteps.every(step => step.restartInterrupted === true);
 }
 
 /**
@@ -2667,16 +2662,6 @@ export class VerificationHarness {
 				if (isPendingCommandCleanupError(err)) {
 					console.warn(`[verification] Resume of ${v.signalId} is waiting for command cleanup before finalizing: ${errMsg}`);
 					this._scheduleCommandKillCleanupRetry(v.signalId);
-				} else if (isRestartInterruptError(errMsg)) {
-					// Restart recovery is orchestration, not a reviewer/command verdict.
-					// Preserve every real row and leave the gate eligible for an explicit
-					// re-signal after exact cleanup settles.
-					console.warn(`[verification] Resume of ${v.signalId} was interrupted by restart recovery: ${errMsg}`);
-					try {
-						await this._finalizeRestartInterruptedVerification(v);
-					} catch (cleanupErr) {
-						console.error(`[verification] Restart cancellation cleanup is pending for ${v.signalId}:`, cleanupErr);
-					}
 				} else {
 					if (this._cancellationOwnsTerminalPublication(v)) continue;
 					console.error(`[verification] Failed to resume verification ${v.signalId}:`, err);
@@ -2838,6 +2823,10 @@ export class VerificationHarness {
 			timeout: result.timeout,
 			sessionId: step.sessionId,
 		});
+		// A real recovered or re-run result replaces any prior no-verdict marker.
+		// Only recovery code may set the marker, so old records fail closed.
+		if (result.restartInterrupted === true) v.steps[stepIndex].restartInterrupted = true;
+		else delete v.steps[stepIndex].restartInterrupted;
 		if (status === "skipped") v.steps[stepIndex].output = result.output || "Skipped — earlier phase failed";
 		this._persistActive();
 		if (status === "waiting" || status === "running") return;
@@ -2866,6 +2855,14 @@ export class VerificationHarness {
 
 	private async _resumeOneVerification(v: ActiveVerification): Promise<void> {
 		if (!this._isResumeStillActive(v)) return;
+		// A prior boot may have persisted a no-verdict recovery result then crashed
+		// before exact cleanup/finalization. This structured marker is authoritative:
+		// do not re-infer provenance from output or resume a generation already
+		// committed to cancellation.
+		if (v.steps.some(step => step.restartInterrupted === true)) {
+			await this._finalizeRestartInterruptedVerification(v);
+			return;
+		}
 		const resolvedSteps: ResumedVerificationStep[] = [];
 
 		for (const step of v.steps) {
@@ -2882,6 +2879,7 @@ export class VerificationHarness {
 					phase: step.phase ?? 0,
 					output: step.output || "",
 					duration_ms: step.durationMs || 0,
+					restartInterrupted: step.restartInterrupted,
 					timeout: step.timeout,
 				});
 				continue;
@@ -2996,8 +2994,8 @@ export class VerificationHarness {
 				resolvedSteps.push(resumedStep);
 				this._updateActiveStepFromResumedResult(v, step, resumedStep);
 			} else {
-				// No session and not an llm-review — cannot recover
-				resolvedSteps.push({
+				// No session-backed recovery path means no verdict was obtained.
+				const interruptedStep: ResumedVerificationStep = {
 					name: step.name,
 					type: step.type,
 					passed: false,
@@ -3005,25 +3003,23 @@ export class VerificationHarness {
 					phase: step.phase ?? 0,
 					output: "Step was running but had no session ID — cannot resume after restart.",
 					duration_ms: Date.now() - step.startedAt,
-				});
+					restartInterrupted: true,
+				};
+				resolvedSteps.push(interruptedStep);
+				this._updateActiveStepFromResumedResult(v, step, interruptedStep);
 			}
 		}
 
 		const firstRealFailedPhase = resolvedSteps.reduce<number | undefined>((earliest, step) => {
-			if (step.passed || step.skipped) return earliest;
+			if (step.passed || step.skipped || step.restartInterrupted === true) return earliest;
 			const status = persistedStatusForStep(step);
 			if (status !== "failed" && status !== "timeout") return earliest;
-			if (isExplicitRestartInterruptedStep(step)) return earliest;
 			const phase = step.phase ?? 0;
 			return earliest === undefined || phase < earliest ? phase : earliest;
 		}, undefined);
 		const firstRestartInterruptedPhase = firstRealFailedPhase === undefined
 			? resolvedSteps.reduce<number | undefined>((earliest, step) => {
-				// Empty waiting rows are never-run downstream placeholders. They are
-				// not themselves restart interruptions; after recovered success they
-				// must execute via normal phase semantics.
-				if (step.status === "waiting" && !step.output.trim()) return earliest;
-				if (step.passed || step.skipped || !isExplicitRestartInterruptedStep(step)) return earliest;
+				if (step.passed || step.skipped || step.restartInterrupted !== true) return earliest;
 				const phase = step.phase ?? 0;
 				return earliest === undefined || phase < earliest ? phase : earliest;
 			}, undefined)
@@ -3045,6 +3041,7 @@ export class VerificationHarness {
 				const phase = step.phase ?? 0;
 				if (step.status === "waiting" && phase > firstRestartInterruptedPhase && !step.output.trim()) {
 					step.output = "Step was interrupted by server restart before this phase could run.";
+					step.restartInterrupted = true;
 				}
 			}
 		} else if (resolvedSteps.some(step => step.status === "waiting")) {
@@ -3112,11 +3109,13 @@ export class VerificationHarness {
 
 		const session = this.sessionManager?.getSession(step.sessionId);
 		if (!session) {
-			// Session lost — return transient failure so caller can re-run
+			// The persisted reviewer session is absent, so recovery obtained no
+			// verdict. This is structured harness provenance, not reviewer output.
 			return {
 				name: step.name, type: step.type, passed: false,
 				output: "Session lost during server restart.",
 				duration_ms: Date.now() - step.startedAt,
+				restartInterrupted: true,
 			};
 		}
 
@@ -3255,6 +3254,7 @@ export class VerificationHarness {
 					name: step.name, type: step.type, passed: false,
 					output: `Reviewer agent was not ready / timed out while resuming after server restart: ${msg}`,
 					duration_ms: Date.now() - step.startedAt,
+					restartInterrupted: true,
 				};
 			}
 
@@ -3327,6 +3327,7 @@ export class VerificationHarness {
 						name: step.name, type: step.type, passed: false,
 						output: `Reviewer agent was not ready / timed out while sending post-continuation reminder after server restart: ${msg}`,
 						duration_ms: Date.now() - step.startedAt,
+						restartInterrupted: true,
 					};
 				}
 
@@ -3369,6 +3370,7 @@ export class VerificationHarness {
 				passed: false,
 				output: "Agent did not call verification_result after server restart and reminder.",
 				duration_ms: Date.now() - step.startedAt,
+				restartInterrupted: true,
 			};
 		} finally {
 			try { errListenerUnsub(); } catch { /* ignore */ }
@@ -4375,23 +4377,11 @@ export class VerificationHarness {
 	 * reviewer result as a failed step, so the durable audit retains its cause.
 	 */
 	private async _finalizeRestartInterruptedVerification(active: ActiveVerification): Promise<void> {
-		// Resume may have already persisted an interrupted reviewer result as
-		// failed/timeout. Restore only rows the established predicate identifies as
-		// restart diagnostics, so `_markVerificationCancelled` stamps them rather
-		// than preserving a synthetic product failure. Genuine verdicts remain
-		// terminal and therefore unmodified.
+		// Only a durable marker authorizes changing a recovered row. Do not infer
+		// restart provenance from a reviewer summary, command output, or its absence:
+		// old unmarked rows therefore fail closed as ordinary verdicts/unknown.
 		for (const step of active.steps) {
-			const passed = step.passed ?? (step.status === "passed" || step.status === "skipped");
-			const output = step.output ?? "";
-			const status = step.status;
-			if (status !== "waiting" && status !== "running" && status !== "failed" && status !== "timeout") continue;
-			// Command rows use `waiting` as their explicit no-verdict recovery state.
-			// Once a resumed command/reviewer row has been written as failed/timeout,
-			// its restart marker is the authoritative interruption predicate instead.
-			const restartInterrupted = status === "failed" || status === "timeout"
-				? isRestartInterruptedStep({ passed, output, type: step.type })
-				: isExplicitRestartInterruptedStep({ passed, skipped: step.skipped, status, output, type: step.type });
-			if (!restartInterrupted) continue;
+			if (step.restartInterrupted !== true) continue;
 			step.status = "running";
 		}
 		this._markVerificationCancelled(active, "gateway-restart-recovery");
@@ -8284,6 +8274,7 @@ export class VerificationHarness {
 				status: "waiting",
 				output: parts.join("\n\n"),
 				duration_ms: Date.now() - step.startedAt,
+				restartInterrupted: true,
 			});
 		};
 		const finalize = (code: number | null) => {
