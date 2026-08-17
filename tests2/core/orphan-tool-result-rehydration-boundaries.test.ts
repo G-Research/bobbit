@@ -7,6 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { createManualClock } from "../harness/clock.js";
 import { createMemFs } from "../harness/mem-fs.js";
 import { SandboxSessionFilesystem } from "../harness/sandbox-session-filesystem.js";
 
@@ -307,9 +308,9 @@ function persisted(id: string, agentSessionFile: string, overrides: Record<strin
 	};
 }
 
-function makeManager(ps: any, bridge: any): any {
+function makeManager(ps: any, bridge: any, options: any = {}): any {
 	registerRpcBridgeFactory(() => bridge);
-	const manager: any = new SessionManager();
+	const manager: any = new SessionManager(options);
 	manager._testStore = {
 		get: vi.fn(() => ps),
 		getLive: vi.fn(() => [ps]),
@@ -791,6 +792,76 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(ps.inFlightSteerTexts).toBeUndefined();
 		expect(restoredManager.sessions.get(ps.id)?.restoreStartupWasStreaming).toBe(false);
 		expect(readAuthorSidecar(ps.id)).toHaveLength(1);
+	});
+
+	it("redrives a later interrupted turn after an older echoed boot continuation settled", async () => {
+		const file = hostTranscript("boot-continuation-echo-from-older-turn");
+		const clock = createManualClock(10_000);
+		const ps = persisted("boot-continuation-echo-from-older-turn", file, {
+			wasStreaming: true,
+			streamingStartedAt: 9_000,
+		});
+		const store = mutableStore(ps);
+		let listener: ((event: any) => void) | undefined;
+		const acceptedBridge = recordingBridge(() => {});
+		acceptedBridge.onEvent = vi.fn((next: (event: any) => void) => {
+			listener = next;
+			return () => { listener = undefined; };
+		});
+		acceptedBridge.promptWhenReady = vi.fn(async (text: string) => {
+			listener?.({
+				type: "message_end",
+				message: { id: "delivered-older-boot-continuation", role: "user", content: text },
+			});
+			return { success: true };
+		});
+		const acceptedManager = makeManager(ps, acceptedBridge, { clock });
+		acceptedManager._testStore = store;
+
+		await acceptedManager._restoreSessionCoalesced(ps);
+		const intentId = `boot-continuation:${ps.id}`;
+		expect(readAuthorSidecar(ps.id)).toEqual([
+			expect.objectContaining({
+				intentId,
+				attemptId: expect.any(String),
+				dispatchEpoch: 10_000,
+				settlement: expect.objectContaining({ outcome: "echoed" }),
+			}),
+		]);
+		listener?.({ type: "agent_start" });
+		listener?.({ type: "agent_end", messages: [] });
+		expect(ps.wasStreaming).toBe(false);
+		expect(ps.streamingStartedAt).toBeUndefined();
+
+		// A distinct ordinary turn starts after the echoed continuation settled, then
+		// the gateway is hard-killed before this newer turn reaches agent_end.
+		clock.advance(100);
+		listener?.({ type: "agent_start" });
+		const laterTurnStartedAt = ps.streamingStartedAt;
+		expect(laterTurnStartedAt).toBe(10_100);
+		expect(ps.wasStreaming).toBe(true);
+
+		clock.advance(100);
+		const restoredBridge = recordingBridge(() => {});
+		restoredBridge.promptWhenReady = vi.fn(async () => ({ success: true }));
+		const restoredManager = makeManager(ps, restoredBridge, { clock });
+		restoredManager._testStore = store;
+
+		await restoredManager._restoreSessionCoalesced(ps);
+
+		expect(
+			restoredBridge.promptWhenReady,
+			"an older echoed continuation must not consume the newer turn's startup fence",
+		).toHaveBeenCalledTimes(1);
+		expect(ps.wasStreaming).toBe(true);
+		expect(ps.streamingStartedAt).toBe(laterTurnStartedAt);
+		expect(restoredManager.sessions.get(ps.id)?.restoreStartupWasStreaming).toBe(false);
+		const attempts = readAuthorSidecar(ps.id);
+		expect(attempts).toEqual([
+			expect.objectContaining({ intentId, dispatchEpoch: 10_000, settlement: expect.any(Object) }),
+			expect.objectContaining({ intentId, dispatchEpoch: 10_200 }),
+		]);
+		expect(attempts[1]?.settlement).toBeUndefined();
 	});
 
 	it("treats a rejected boot-continuation acknowledgement as accepted after terminal lifecycle", async () => {

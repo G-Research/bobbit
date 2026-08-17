@@ -10645,6 +10645,9 @@ export class SessionManager {
 		// Mark streaming as a second fence for the instant after coordinator release,
 		// including the case where agent_start arrived before the RPC acknowledgement.
 		this.markPromptDispatchStreaming(session);
+		// This persisted boundary distinguishes the interrupted turn being restored from
+		// older turns that used the same deterministic continuation intent id.
+		const interruptedTurnStartedAt = session.streamingStartedAt;
 		const markAccepted = (): boolean => {
 			// Terminal turn settlement leaves this exact bridge canonical, so its delayed
 			// correlated acknowledgement may still consume the startup-only fence. Once
@@ -10666,12 +10669,24 @@ export class SessionManager {
 		};
 		try {
 			const continuationIntentId = `boot-continuation:${session.id}`;
+			const surfacedAttempt = selectLatestPromptAuthorBinding(
+				readAuthorSidecar(session.id),
+				(binding) => binding.intentId === continuationIntentId,
+			);
 			// A correlated user message_end is durable proof that Pi received this exact
-			// deterministic occurrence. Its in-flight carrier is correctly pruned at that
-			// boundary, but wasStreaming remains true until agent_end. On another hard
-			// restart, consume only the startup dispatch fence instead of mistaking the
-			// missing carrier for permission to represent the same work a second time.
-			if (this.intentSettlement(session.id, continuationIntentId) === "surfaced") {
+			// attempt only when its dispatch belongs to the interrupted turn being restored.
+			// The stable intent id is reused across turns, so an older echoed continuation
+			// must not consume a later ordinary turn's startup fence. Legacy or incomplete
+			// evidence is deliberately redriven rather than risking a lost continuation.
+			if (
+				typeof interruptedTurnStartedAt === "number"
+				&& Number.isSafeInteger(interruptedTurnStartedAt)
+				&& interruptedTurnStartedAt >= 0
+				&& typeof surfacedAttempt?.attemptId === "string"
+				&& typeof surfacedAttempt.dispatchEpoch === "number"
+				&& surfacedAttempt.dispatchEpoch >= interruptedTurnStartedAt
+				&& surfacedAttempt.settlement?.outcome === "echoed"
+			) {
 				return markAccepted();
 			}
 			const continuationPrompt =
