@@ -3206,8 +3206,8 @@ export class SessionManager {
 	/** Core-owned pre-fan-out result-gate availability; recalculated for each spawn/restore. */
 	private toolResultFilterActivationResolver: ((projectId: string | undefined) => { toolResult?: boolean }) | null = null;
 	private piExtensionRuntimeDiagnostics = new Map<string, PiExtensionDiagnostic>();
-	/** Worktree setup owns a live placeholder before its bridge exists. */
-	private readonly pendingWorktreeSetups = new Map<string, Promise<void>>();
+	/** A setup owner serializes reconciliation until its exact session pipeline settles. */
+	private readonly pendingSessionSetups = new Map<string, Promise<unknown>>();
 	private worktreePools: Map<string, WorktreePool> = new Map();
 	private worktreePoolInitializations = new Map<string, Promise<void>>();
 	sandboxManager: SandboxManager | null = null;
@@ -4094,10 +4094,10 @@ export class SessionManager {
 	async reconcileToolResultFilterGate(projectId: string): Promise<void> {
 		if (this.toolResultFilterActivationResolver?.(projectId).toolResult !== true) return;
 		for (const sessionId of [...this.sessions.keys()]) {
-			// A worktree placeholder has no bridge yet. Its setup may have already
-			// resolved activation, so wait for the owner rather than guessing from
-			// `status` and accidentally returning a grant before its Pi starts.
-			const pendingSetup = this.pendingWorktreeSetups.get(sessionId);
+			// Setup may have already resolved activation while its bridge/session is
+			// only partially published. Wait for its owner rather than guessing from
+			// `status` and accidentally replacing it or returning an early grant.
+			const pendingSetup = this.pendingSessionSetups.get(sessionId);
 			if (pendingSetup) {
 				try { await pendingSetup; }
 				catch { continue; } // Setup failed: there is no runnable runtime to protect.
@@ -12188,10 +12188,10 @@ export class SessionManager {
 					console.warn(`[session-manager] Early persist failed for worktree session ${session.id}:`, err);
 				}).finally(() => { session.pendingMetadataPersist = undefined; });
 			}).finally(releaseSetupThinkingAuthority);
-			this.pendingWorktreeSetups.set(id, setupPromise);
+			this.pendingSessionSetups.set(id, setupPromise);
 			void setupPromise.then(
-				() => { if (this.pendingWorktreeSetups.get(id) === setupPromise) this.pendingWorktreeSetups.delete(id); },
-				() => { if (this.pendingWorktreeSetups.get(id) === setupPromise) this.pendingWorktreeSetups.delete(id); },
+				() => { if (this.pendingSessionSetups.get(id) === setupPromise) this.pendingSessionSetups.delete(id); },
+				() => { if (this.pendingSessionSetups.get(id) === setupPromise) this.pendingSessionSetups.delete(id); },
 			);
 
 			if (opts?.awaitWorktreeSetup) {
@@ -12269,38 +12269,57 @@ export class SessionManager {
 			id,
 			opts?.initialThinkingLevel,
 		);
-		try {
-			const session = await executePlan(plan, ctx);
-			if (projectId) session.projectId = projectId;
-			// Verification/reviewer sessions deliberately skip the ordinary post-spawn
-			// selectors because their tuple was pinned in argv. They still need the same
-			// exact read-back and one atomic durable tuple commit before create returns.
-			if (opts?.skipAutoModel && opts.skipAutoThinking && selectedSpawnModel) {
-				await this.tryAutoSelectModel(session);
-			}
-			// This is the manager-visible creation boundary. In the skipped-selector
-			// path an await above can let a grant land after executePlan's assertion.
-			// Keep this second check synchronous with publication.
+		// Register before executing the pipeline: spawnAgent may publish its session
+		// after an await, and grant reconciliation must join this exact owner rather
+		// than replacing that half-built object.
+		let resolvePendingSetup!: () => void;
+		let rejectPendingSetup!: (error: unknown) => void;
+		const pendingSetup = new Promise<void>((resolve, reject) => {
+			resolvePendingSetup = resolve;
+			rejectPendingSetup = reject;
+		});
+		void pendingSetup.catch(() => {});
+		this.pendingSessionSetups.set(id, pendingSetup);
+		const setupPromise = (async () => {
 			try {
-				this.assertToolResultFilterGateAtPublication(session.id, projectId);
-			} catch (err) {
-				handleSetupFailure(session, plan, err instanceof Error ? err : new Error(String(err)), ctx);
-				throw err;
-			}
-			this.notifySessionCreated(session);
+				const session = await executePlan(plan, ctx);
+				if (projectId) session.projectId = projectId;
+				// Verification/reviewer sessions deliberately skip the ordinary post-spawn
+				// selectors because their tuple was pinned in argv. They still need the same
+				// exact read-back and one atomic durable tuple commit before create returns.
+				if (opts?.skipAutoModel && opts.skipAutoThinking && selectedSpawnModel) {
+					await this.tryAutoSelectModel(session);
+				}
+				// This is the manager-visible creation boundary. In the skipped-selector
+				// path an await above can let a grant land after executePlan's assertion.
+				// Keep this second check synchronous with publication.
+				try {
+					this.assertToolResultFilterGateAtPublication(session.id, projectId);
+				} catch (err) {
+					handleSetupFailure(session, plan, err instanceof Error ? err : new Error(String(err)), ctx);
+					throw err;
+				}
+				this.notifySessionCreated(session);
 
-			// Persist session metadata (fire-and-forget, but tracked for terminate).
-			// Rehydrated sessions already have a cloned/adopted transcript path recorded;
-			// avoid a redundant get_state that can rewrite runtime-only metadata.
-			if (!plan.preExistingAgentSessionFile) {
-				session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
-					console.warn(`[session-manager] Early persist failed for ${session.id}:`, err);
-				}).finally(() => { session.pendingMetadataPersist = undefined; });
-			}
+				// Persist session metadata (fire-and-forget, but tracked for terminate).
+				// Rehydrated sessions already have a cloned/adopted transcript path recorded;
+				// avoid a redundant get_state that can rewrite runtime-only metadata.
+				if (!plan.preExistingAgentSessionFile) {
+					session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
+						console.warn(`[session-manager] Early persist failed for ${session.id}:`, err);
+					}).finally(() => { session.pendingMetadataPersist = undefined; });
+				}
 
-			return session;
+				return session;
+			} finally {
+				releaseSetupThinkingAuthority();
+			}
+		})();
+		void setupPromise.then(resolvePendingSetup, rejectPendingSetup);
+		try {
+			return await setupPromise;
 		} finally {
-			releaseSetupThinkingAuthority();
+			if (this.pendingSessionSetups.get(id) === pendingSetup) this.pendingSessionSetups.delete(id);
 		}
 	}
 

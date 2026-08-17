@@ -3776,6 +3776,27 @@ describe("executable continue-archived/live-fork setup boundary", () => {
 		expect(ctx.store.archive).toHaveBeenCalledWith("continue-publication-grant-race");
 	});
 
+	it("fails closed for a plain create when policy binds after its initial map insertion", async () => {
+		let filterRequired = false;
+		const bridge = recordingBridge(() => {});
+		bridge.stop = vi.fn(async () => { bridge.running = false; });
+		registerRpcBridgeFactory(() => bridge);
+		const ctx = pipelineContext();
+		ctx.store.archive = vi.fn();
+		ctx.tryAutoSelectModel = vi.fn(async () => { filterRequired = true; });
+		ctx.assertToolResultFilterGateAtPublication = vi.fn(() => {
+			if (filterRequired) throw new Error("Tool-result filter gate was not installed for session plain-create-publication-race");
+		});
+		const plan = setupPlan("plain-create-publication-race", "", false);
+		delete plan.preExistingAgentSessionFile;
+		plan.skipAutoModel = false;
+
+		await expect(executePlan(plan, ctx)).rejects.toThrow("Tool-result filter gate was not installed");
+		expect(ctx.sessions.get(plan.id)).toBeUndefined();
+		expect(bridge.stop).toHaveBeenCalledOnce();
+		expect(ctx.store.archive).toHaveBeenCalledWith(plan.id);
+	});
+
 	it("rewrites an orphan in a sandbox container-path clone before switching the sandbox process", async () => {
 		const containerFile = "/home/node/.bobbit/agent/sessions/--orphan-boundaries--/continue-sandbox.jsonl";
 		const sandbox = new SandboxSessionFilesystem({

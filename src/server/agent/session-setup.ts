@@ -2109,6 +2109,15 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 	}
 
 	// Add to live-sessions map so persistSessionMetadata can resolve via getState.
+	// There is deliberately no await between the final exact policy read and map
+	// publication: a grant is ordered before this check or sees this session.
+	try {
+		ctx.assertToolResultFilterGateAtPublication?.(plan.id, plan.projectId);
+	} catch (err) {
+		ctx.invalidateToolResultFilterGate?.(plan.id);
+		await rpcClient.stop().catch(() => {});
+		throw err;
+	}
 	ctx.sessions.set(session.id, session);
 
 	// Persist agentSessionFile BEFORE post-spawn model enforcement so the session
@@ -2230,11 +2239,13 @@ export function handleSetupFailure(
 		});
 	}
 
-	// 3. Remove from in-memory map
-	ctx.sessions.delete(session.id);
-
-	// 4. Archive in store (preserves evidence)
-	ctx.store.archive(session.id);
+	// 3-4. A replacement that became canonical while setup was unwinding must
+	// remain visible and durable. The failure owns archival only when it still
+	// owns this id (or it never reached live publication).
+	const current = ctx.sessions.get(session.id);
+	const superseded = !!current && current !== session;
+	if (current === session) ctx.sessions.delete(session.id);
+	if (!superseded) ctx.store.archive(session.id);
 
 	// 5. Notify connected clients (single writer + version bump).
 	broadcastStatus(session, "terminated");
