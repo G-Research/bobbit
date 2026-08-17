@@ -60,6 +60,14 @@ async function loadNewWorkflowEditor(page: Page): Promise<void> {
 	await expect(page.locator("input[placeholder='e.g. bug-fix']")).toBeVisible();
 }
 
+async function addMinimalValidGate(page: Page): Promise<void> {
+	await page.getByRole("button", { name: "Add Gate" }).click();
+	const gate = page.locator(".wf-gate-card").first();
+	await expect(gate).toBeVisible();
+	await gate.getByTestId("wf-gate-id").fill("create-gate");
+	await gate.getByTestId("wf-gate-name").fill("Create gate");
+}
+
 function saveButton(page: Page): Locator {
 	return page.locator(".wf-nav-right button").last();
 }
@@ -214,6 +222,7 @@ test.describe("Goal/workflow editor fixture", () => {
 		const workflowName = page.locator("input[placeholder='Workflow name']");
 		await workflowId.fill("submitted-workflow-id");
 		await workflowName.fill("Submitted workflow name");
+		await addMinimalValidGate(page);
 
 		const createRequest = page.evaluate(() =>
 			(window as any).__holdNextWorkflowCreate("server-created-workflow-id"),
@@ -223,7 +232,11 @@ test.describe("Goal/workflow editor fixture", () => {
 		expect(capturedCreate).toMatchObject({
 			url: "/api/workflows?projectId=fixture-project",
 			method: "POST",
-			body: { id: "submitted-workflow-id", name: "Submitted workflow name" },
+			body: {
+				id: "submitted-workflow-id",
+				name: "Submitted workflow name",
+				gates: [{ id: "create-gate", name: "Create gate", dependsOn: [] }],
+			},
 		});
 		await expect(saveButton(page)).toHaveText("Saving…");
 
