@@ -162,8 +162,12 @@ describe("reviewer archive metadata persistence", () => {
 	it("fences direct team delegates and preserves team branch evidence at operator archive", () => {
 		const server = fs.readFileSync(path.resolve(process.cwd(), "src", "server", "server.ts"), "utf-8");
 		const directDelegate = extractSourceSlice(server, "// ── Delegate session creation", "// ── Normal/assistant session creation");
-		assert.match(directDelegate, /parentTeamGoalId\s*=\s*parentSession\?\.teamGoalId\s*\?\?\s*parentPersisted\?\.teamGoalId/);
-		assert.match(directDelegate, /parentTeamGoalId\s*\?\s*await sessionManager\.runWithTeamGoalAdmission\(parentTeamGoalId, createDelegate\)\s*:\s*await createDelegate\(\)/);
+		assert.match(
+			directDelegate,
+			/parentTrustedTeamGoalId\s*=\s*sessionManager\.getTrustedTeamGoalIdForSession\(parentId\)/,
+			"direct delegates must derive admission ownership from SessionManager's canonical trusted classifier",
+		);
+		assert.match(directDelegate, /parentTrustedTeamGoalId\s*\?\s*await sessionManager\.runWithTeamGoalAdmission\(parentTrustedTeamGoalId, createDelegate\)\s*:\s*await createDelegate\(\)/);
 
 		const archiveEndpoint = extractSourceSlice(server, "const archiveGoalEndpoint = async", "// Routes with goal :id parameter");
 		const snapshot = archiveEndpoint.indexOf("const preserveRemoteBranchEvidence");
