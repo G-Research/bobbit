@@ -901,7 +901,7 @@ Branch names are never interpolated into a shell command; PR lookup and remote r
 
 ### Cancel verification endpoint
 
-`POST /api/goals/:goalId/gates/:gateId/cancel-verification` requests a manual cancellation of the gate's running verification. It is idempotent and always returns `200`.
+`POST /api/goals/:goalId/gates/:gateId/cancel-verification` requests a manual cancellation of the gate's running verification. For an existing eligible goal, successful cancellation and the idempotent no-running-verification response return `200`.
 
 ```json
 { "cancelled": false, "message": "No running verification to cancel" }
@@ -933,6 +933,12 @@ Exact cleanup settled. The historical signal has the terminal verification outco
 ```
 
 Cancellation intent and its typed cause are durable, but this response is **not** terminal. Exact command payload cleanup — and, for Docker command steps, host `docker exec` transport cleanup — must settle before the old signal receives its terminal cancellation result. The public `GET /api/goals/:goalId/verifications/active` endpoint intentionally hides cleanup-only ownership records; inspect the signal history or gate detail for the durable result after it settles. See [Verification cancellation lifecycle](verification-cancellation.md) for all causes, generation rules, and recovery semantics.
+
+Route guards return these responses before cancellation is considered:
+
+- `404` `{ "error": "Goal not found" }`
+- `409` `{ "error": "Goal is archived" }`
+- `400` `{ "error": "Goal is shelved" }`
 
 ### Goal Team
 
