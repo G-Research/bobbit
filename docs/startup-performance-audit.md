@@ -89,19 +89,18 @@ Signal-to-ready includes the staged build performed while the prior gateway rema
 
 This isolated run does **not** reproduce the handoff's 35-session observation or provide a production-sized eager-restoration sample: its state was intentionally empty. Eager restore ordering, failure handling, and checkpoint invalidation are supported by the focused 95+ regression tests and the passing full build, type-check, unit, browser, E2E, and review gates. Failed-build availability was verified by executable regression coverage; the operational run did not inject corruption into a live installation.
 
-## Session restoration and PR #1216 compatibility
+## Session restoration and archived ownership
 
-Full eager restoration remains a pre-listen requirement. Team recovery settles before the live restore set is dispatched, and team event subscription follows session restoration.
-
-PR #1216 (`Fix Archived Team Leaks`) overlaps this ordering. If it lands before the final rebase, preserve the semantic sequence:
+Full eager restoration remains a pre-listen requirement. Team recovery settles before bounded archived-team ownership reconciliation, the live restore set is dispatched with exact suppression, and team event subscription follows session restoration:
 
 ```text
 restoreTeams
 → reconcileArchivedTeamOwnership
 → restoreSessions(suppression)
+→ resubscribeTeamEvents
 ```
 
-Archived-goal ownership must be reconciled before session dispatch computes its live set. The forensic checkpoint must not turn an archived-session leak into durable live authority, and conflict resolution must preserve #1216's suppression input rather than mechanically retaining the current two-step call sequence.
+The forensic checkpoint only bounds historical recovery; it does not confer live authority. Archived-goal ownership reconciliation independently scans the current live session and team sets before dispatch, so checkpoint completion cannot preserve a leaked archived session.
 
 ## Operational conclusions
 
@@ -110,3 +109,57 @@ Archived-goal ownership must be reconciled before session dispatch computes its 
 - Completion fences make acknowledged durability—not a visible rename alone—the authority for skipping recovery.
 - Compilation remains part of signal-to-ready elapsed time but is outside gateway downtime.
 - Eager live-session restoration remains intentionally on the readiness path; optimize its internals rather than deferring it.
+
+## Archived-team reconciliation audit
+
+This audit records the startup impact and restart evidence for archived-team ownership reconciliation. The guard closes a crash window before agent restoration; it is not a general historical migration or a replacement for the existing eager session restore path.
+
+## Scope and method
+
+The restart E2E creates an archived team-goal crash fixture with:
+
+- a lead and worker carrying the archived goal's exact `teamGoalId`;
+- a third metadata child-shaped row whose ancestry points at a `goalId`-only standalone control but whose own exact `teamGoalId` still makes it authoritative team ownership;
+- a persisted TeamStore entry for the lead and worker; and
+- the standalone control, which carries the same archived `goalId` but no `teamGoalId`.
+
+It then durably writes the archived goal without calling the normal reconciliation callback, crashes the gateway, and performs two hard restarts. The mock bridge records every session process start. The test also captures session restore counts, repair/subscription log order, health, archived rows, and TeamStore file bytes and modification time.
+
+This is a deterministic lifecycle fixture, not a production-data migration. The motivating production snapshot identified 19 current live session rows owned by archived goals, but the test did not modify or claim to have repaired those historical records. A deployed gateway applies the same bounded boot repair to whatever matching current rows and team entries are present, archiving them rather than deleting them.
+
+## Measured restart results
+
+| Check | First repair boot | Second clean boot |
+|---|---|---|
+| Matching archived-team rows | 3 archived: lead, worker, and exact-`teamGoalId` metadata child shape | Remained archived with unchanged archive metadata |
+| Leaked session process starts | 0 across all 3 matching rows | 0 across all 3 matching rows |
+| `goalId`-only standalone control | Eagerly restored | Eagerly restored again |
+| TeamStore | Archived goal entry removed before event resubscription | Repaired file bytes and modification time unchanged |
+| Repair writes/logging | One candidate goal; 3 sessions archived; 1 team removed; 0 blocked, suppressed, or errors | No reconciliation summary and no reconciliation writes |
+| Health | `status: "ok"`; `orphanedTranscripts: 0` | `status: "ok"`; `orphanedTranscripts: 0` |
+
+The first restart also established the dispatch barrier order: the boot repair summary preceded session restoration, and restoration preceded event resubscription for zero archived-goal teams. The control was the only regular fixture session restored; no delegate fixture session was restored.
+
+The second restart compared both the repaired TeamStore contents and its filesystem modification time with the first-boot snapshot. Both were unchanged, while the control still spawned. This distinguishes write-idempotence from merely reaching the same logical JSON state through another rewrite.
+
+## Timing result and limitation
+
+The fixture measures run-local wall-clock restart time and pre-listen duration, and reads a reconciliation phase duration when that boot phase crosses the server's logging threshold. It asserts only that wall-clock restart includes the reported pre-listen work. The deterministic run did **not** retain a stable baseline sample or an exact before/after wall-clock delta suitable for this audit, so no latency number is claimed here.
+
+This omission is deliberate: process startup, filesystem cache state, and the test host dominate a single wall-clock sample. Future performance claims should record repeated baseline and candidate samples on the same environment rather than treating lifecycle assertions as a benchmark.
+
+## Startup work bound
+
+Candidate discovery makes one pass over each project's current live sessions and current team entries, with indexed goal lookups. It does not scan archived session history, transcript files, proposal drafts, costs, or forensic recovery history. Its discovery cost is therefore:
+
+```text
+O(current live sessions + current team entries)
+```
+
+Reconciliation work is limited to candidate archived goals and their current authoritative root/descendant closure. On a clean boot there are no candidates, no repair summary, and no reconciliation persistence write. Genuinely live sessions continue through the existing full eager restoration path; the guard does not add a top-N limit, dormant deferral, or lazy attach policy.
+
+## Operational interpretation
+
+A one-time repair boot can add session archive and TeamStore writes proportional to the current leaked set. Those writes preserve transcripts, drafts, costs, metadata, and branch/worktree recovery evidence. A failed session archive is returned as an exact dispatch-suppression id, while a failed TeamStore removal leaves passive retry evidence for the next boot. Neither failure allows an archived owner to spawn.
+
+Use the [archived-team reconciliation runbook](debugging.md#archived-team-reconciliation) for audit fields and restart checks. The ownership and boot-boundary design is documented under [Archived-team crash reconciliation](internals.md#archived-team-crash-reconciliation).
