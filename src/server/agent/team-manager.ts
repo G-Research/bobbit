@@ -3720,6 +3720,9 @@ export class TeamManager {
 			try { await this.verificationHarness?.cancelAllVerifications(goalId); }
 			catch (err) { errors.push(`verification cancellation: ${err instanceof Error ? err.message : String(err)}`); }
 
+			// These are durable acknowledgements, not a projection of the mutable
+			// SessionStore row. archiveAsync marks a row archived before publishing its
+			// snapshot, so a rejected write can make getLive() hide a still-live disk row.
 			const archivedSessionIds = new Set<string>();
 			const selectedIds = new Set<string>();
 			const attempted = new Set<string>();
@@ -3734,26 +3737,28 @@ export class TeamManager {
 				if (pending.length === 0) break;
 				for (const id of pending) {
 					attempted.add(id);
-					if (this.sessionManager.getPersistedSession(id)?.archived === true) {
-						archivedSessionIds.add(id);
-						continue;
-					}
 					const archiveOptions = { preserveEvidence: true, cascadeSessionIds: selectedIds };
+					let acknowledged = false;
 					try {
-						const terminated = await this.sessionManager.terminateSession(id, archiveOptions);
-						if (!terminated) await this.sessionManager.storeArchive(id, archiveOptions);
+						acknowledged = await this.sessionManager.terminateSession(id, archiveOptions);
 					} catch (err) {
 						errors.push(`stop ${id}: ${err instanceof Error ? err.message : String(err)}`);
-						try { await this.sessionManager.storeArchive(id, archiveOptions); }
-						catch (archiveErr) { errors.push(`archive ${id}: ${archiveErr instanceof Error ? archiveErr.message : String(archiveErr)}`); }
 					}
-					if (this.sessionManager.getPersistedSession(id)?.archived === true) archivedSessionIds.add(id);
+					if (!acknowledged) {
+						try {
+							acknowledged = await this.sessionManager.storeArchive(id, archiveOptions);
+							if (!acknowledged) errors.push(`archive ${id}: persistence was not acknowledged`);
+						} catch (archiveErr) {
+							errors.push(`archive ${id}: ${archiveErr instanceof Error ? archiveErr.message : String(archiveErr)}`);
+						}
+					}
+					if (acknowledged) archivedSessionIds.add(id);
 				}
 			}
 
 			const finalClosure = collectTeamOwnedSessionClosure(goalId, liveRows(), referencedIds, errors);
 			for (const id of finalClosure) selectedIds.add(id);
-			const suppressedSessionIds = [...selectedIds].filter((id) => this.sessionManager.getPersistedSession(id)?.archived !== true);
+			const suppressedSessionIds = [...selectedIds].filter((id) => !archivedSessionIds.has(id));
 			let teamRemoved = false;
 			let teamEntryRetained = !!teamStore?.get(goalId);
 			// Ownership conflicts protect the foreign session, not stale archived-goal

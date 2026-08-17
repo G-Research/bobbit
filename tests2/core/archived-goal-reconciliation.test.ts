@@ -13,8 +13,10 @@ vi.mock("../../src/server/agent/orphan-cleanup.ts", async (importOriginal) => {
 });
 
 import { collectTeamOwnedSessionClosure, SessionManager } from "../../src/server/agent/session-manager.ts";
+import { SessionStore } from "../../src/server/agent/session-store.ts";
 import { OrchestrationCore } from "../../src/server/agent/orchestration-core.ts";
 import { TeamManager, TeamStartError } from "../../src/server/agent/team-manager.ts";
+import { createMemFs } from "../harness/mem-fs.ts";
 
 interface GoalRow {
 	id: string;
@@ -82,6 +84,11 @@ class MemorySessionStore {
 		const row = this.rows.get(id);
 		if (row) { row.archived = true; this.archives.push(id); }
 	}
+	async archiveAsync(id: string): Promise<boolean> {
+		if (!this.rows.has(id)) return false;
+		this.archive(id);
+		return true;
+	}
 }
 
 class MemoryTeamStore {
@@ -124,15 +131,18 @@ function makeFixture(options: {
 	goals: GoalRow[];
 	sessions: any[];
 	teams?: TeamRow[];
+	sessionStore?: MemorySessionStore | SessionStore;
+	teamStore?: MemoryTeamStore;
+	restoreLive?: boolean;
 	terminate?: (id: string, fixture: ReturnType<typeof makeFixture>) => Promise<boolean>;
 	archive?: (id: string, fixture: ReturnType<typeof makeFixture>) => Promise<boolean>;
 }) {
 	const goals = new Map(options.goals.map((row) => [row.id, row]));
-	const sessionStore = new MemorySessionStore(options.sessions);
-	const teamStore = new MemoryTeamStore(options.teams ?? []);
+	const sessionStore = options.sessionStore ?? new MemorySessionStore(options.sessions);
+	const teamStore = options.teamStore ?? new MemoryTeamStore(options.teams ?? []);
 	const live = new Map<string, any>();
 	const subscriptions: string[] = [];
-	for (const row of options.sessions) {
+	if (options.restoreLive !== false) for (const row of options.sessions) {
 		live.set(row.id, {
 			...row,
 			status: "idle",
@@ -525,6 +535,96 @@ describe("archived goal reconciliation", () => {
 		await restoreManager.restoreSessions(suppressed);
 
 		assert.deepEqual(dispatched, [control.id], "suppression is narrow and does not defer genuinely live sessions");
+	});
+
+	it("retains TeamStore authority until a mutated archive row is durably acknowledged", async () => {
+		const archivedGoal = goal("goal-session-publication-fault");
+		const unstamped = session("teamstore-only-publication-fault", { goalId: archivedGoal.id });
+		const stateDir = path.resolve("/memfs/archived-goal-durable-ack/state");
+		const storeFile = path.join(stateDir, "sessions.json");
+		const memfs = createMemFs();
+		memfs.mkdirSync(stateDir, { recursive: true });
+		const initialStore = new SessionStore(stateDir, memfs);
+		initialStore.put(unstamped);
+		await initialStore.flushAsync();
+
+		const teamStore = new MemoryTeamStore([teamEntry(archivedGoal.id, unstamped.id)]);
+		const originalRename = memfs.promises.rename.bind(memfs.promises);
+		let failSessionPublication = true;
+		(memfs.promises as any).rename = async (from: string, to: string) => {
+			if (failSessionPublication && path.resolve(String(to)) === path.resolve(storeFile)) {
+				throw new Error("injected session archive publication failure");
+			}
+			return originalRename(from, to);
+		};
+		const persistenceError = vi.spyOn(console, "error").mockImplementation(() => {});
+		const fixture = makeFixture({
+			goals: [archivedGoal],
+			sessions: initialStore.getAll(),
+			sessionStore: initialStore,
+			teamStore,
+			terminate: async (id, current) => {
+				current.live.delete(id);
+				await current.sessionStore.archiveAsync(id);
+				return true;
+			},
+			archive: async (id, current) => {
+				try { return await current.sessionStore.archiveAsync(id); }
+				catch { return false; }
+			},
+		});
+		await fixture.manager.waitForRestore();
+
+		const failed = await fixture.manager.reconcileArchivedGoal(archivedGoal.id, { audit: false });
+
+		assert.equal(initialStore.get(unstamped.id)?.archived, true, "archiveAsync mutates the in-memory row before publication");
+		assert.equal(failed.status, "blocked");
+		assert.deepEqual(failed.archivedSessionIds, [], "an in-memory flag is not a durable acknowledgement");
+		assert.deepEqual(failed.suppressedSessionIds, [unstamped.id]);
+		assert.ok(teamStore.get(archivedGoal.id), "TeamStore remains durable retry authority");
+		assert.equal(fixture.live.has(unstamped.id), false, "the stopped process remains deactivated");
+		fixture.manager.resubscribeTeamEvents();
+		assert.deepEqual(fixture.subscriptions, [], "blocked archived ownership cannot resubscribe events");
+		assert.ok(persistenceError.mock.calls.length >= 1, "fixture exercised the real SessionStore publication failure");
+
+		failSessionPublication = false;
+		const restartedStore = new SessionStore(stateDir, memfs);
+		assert.equal(restartedStore.get(unstamped.id)?.archived, false, "restart reloads the still-live durable row");
+		const restarted = makeFixture({
+			goals: [archivedGoal],
+			sessions: restartedStore.getAll(),
+			sessionStore: restartedStore,
+			teamStore,
+			restoreLive: false,
+			terminate: async () => false,
+			archive: async (id, current) => current.sessionStore.archiveAsync(id),
+		});
+		await restarted.manager.waitForRestore();
+
+		const suppressedAfterRecovery = await restarted.manager.reconcileArchivedTeamOwnership();
+
+		assert.deepEqual([...suppressedAfterRecovery], []);
+		assert.equal(restartedStore.get(unstamped.id)?.archived, true, "boot repair publishes the recovered archive before restore");
+		assert.equal(teamStore.get(archivedGoal.id), undefined, "TeamStore is removed only after durable session acknowledgement");
+		assert.deepEqual(restarted.subscriptions, [], "pre-spawn repair creates no event subscription");
+
+		const cleanStore = new SessionStore(stateDir, memfs);
+		assert.equal(cleanStore.get(unstamped.id)?.archived, true, "the repaired archive survives another restart");
+		const clean = makeFixture({
+			goals: [archivedGoal],
+			sessions: cleanStore.getAll(),
+			sessionStore: cleanStore,
+			teamStore,
+			restoreLive: false,
+		});
+		await clean.manager.waitForRestore();
+		const cleanGeneration = cleanStore.getGeneration();
+		const removalsBeforeCleanBoot = teamStore.removals.length;
+
+		assert.deepEqual([...(await clean.manager.reconcileArchivedTeamOwnership())], []);
+		assert.equal(cleanStore.getGeneration(), cleanGeneration, "clean second boot performs no session write");
+		assert.equal(teamStore.removals.length, removalsBeforeCleanBoot, "clean second boot performs no team write");
+		assert.deepEqual(clean.archiveCalls, []);
 	});
 
 	it("retains failed TeamStore removal only as passive evidence and never resubscribes the archived team", async () => {
