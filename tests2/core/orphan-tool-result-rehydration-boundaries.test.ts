@@ -3773,7 +3773,9 @@ describe("executable continue-archived/live-fork setup boundary", () => {
 			.rejects.toThrow("Tool-result filter gate was not installed");
 		expect(ctx.assertToolResultFilterGateAtPublication).toHaveBeenCalledWith("continue-publication-grant-race", "project-boundary");
 		expect(bridge.stop).toHaveBeenCalledOnce();
-		expect(ctx.store.archive).toHaveBeenCalledWith("continue-publication-grant-race");
+		expect(ctx.sessions.get("continue-publication-grant-race")).toBeUndefined();
+		expect(ctx.store.put).not.toHaveBeenCalled();
+		expect(ctx.store.archive).not.toHaveBeenCalled();
 	});
 
 	it("fails closed for a plain create when policy binds after its initial map insertion", async () => {
