@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { serverSecretsDir } from "../bobbit-dir.js";
 import {
 	HEADQUARTERS_PROJECT_ID,
@@ -31,28 +31,37 @@ const HEADQUARTERS_BACKUP_SUFFIX = ".pre-headquarters-id-migration";
 // `.pre-migration` → `.pre-migration-recovered` retirement precedent in
 // `recoverPreMigrationData`.
 const HEADQUARTERS_BACKUP_RETIRED_SUFFIX = ".pre-headquarters-id-migration-recovered";
-const HEADQUARTERS_MIGRATION_CHECKPOINT_VERSION = 2;
+const HEADQUARTERS_MIGRATION_CHECKPOINT_VERSION = 3;
 const DELETION_TOMBSTONES_FILE = ".deletion-tombstones.json";
 
 interface HeadquartersMigrationEvidenceEntry {
 	path: string;
-	size: number;
-	mtimeMs?: number;
+	kind: "file" | "directory" | "symlink" | "other" | "missing";
+	size?: number;
+	realPath?: string;
 	digest?: string;
+	recoveryDigest?: string;
+}
+
+interface HeadquartersMigrationCheckpointPaths {
+	serverRunDir: string;
+	headquartersDir: string;
+	headquartersStateDir: string;
+	headquartersConfigDir: string;
+	legacyServerBobbitDir: string;
+	legacyStateDir: string;
+	legacyConfigDir: string;
 }
 
 interface HeadquartersMigrationCheckpoint {
 	version: number;
-	paths: {
-		serverRunDir: string;
-		headquartersDir: string;
-		headquartersStateDir: string;
-		headquartersConfigDir: string;
-		legacyServerBobbitDir: string;
-		legacyStateDir: string;
-		legacyConfigDir: string;
-	};
-	evidence: HeadquartersMigrationEvidenceEntry[];
+	status: "running" | "complete";
+	paths: HeadquartersMigrationCheckpointPaths;
+	startedAt?: string;
+	completedAt?: string;
+	/** A preceding complete pass may continue safety-gated backup retirement. */
+	priorCompletion?: boolean;
+	evidence?: HeadquartersMigrationEvidenceEntry[];
 }
 // Array execution stores keyed by `id` that route through
 // `routeLegacyProjectStoreFile`'s backup-only recovery loop and can therefore
@@ -72,7 +81,7 @@ function samePath(a: string, b: string): boolean {
 	return pathKey(a) === pathKey(b);
 }
 
-function migrationCheckpointPaths(input: HeadquartersDirectoryMigrationInput): HeadquartersMigrationCheckpoint["paths"] {
+function migrationCheckpointPaths(input: HeadquartersDirectoryMigrationInput): HeadquartersMigrationCheckpointPaths {
 	const legacyStateDir = path.join(input.legacyServerBobbitDir, "state");
 	const legacyConfigDir = path.join(input.legacyServerBobbitDir, "config");
 	return {
@@ -86,12 +95,101 @@ function migrationCheckpointPaths(input: HeadquartersDirectoryMigrationInput): H
 	};
 }
 
+function sha256(value: Buffer | string): string {
+	return createHash("sha256").update(value).digest("hex");
+}
+
+function evidenceKind(stat: fs.Stats): HeadquartersMigrationEvidenceEntry["kind"] {
+	if (stat.isSymbolicLink()) return "symlink";
+	if (stat.isFile()) return "file";
+	if (stat.isDirectory()) return "directory";
+	return "other";
+}
+
+/**
+ * A bounded, top-level topology digest catches an absent legacy source becoming
+ * present and a source junction/symlink being retargeted without walking runtime
+ * trees on every boot. Content beneath already-known runtime directories remains
+ * deliberately outside the steady-state checkpoint.
+ */
+function migrationTopologyEvidence(
+	dir: string,
+	include: (name: string) => boolean,
+): HeadquartersMigrationEvidenceEntry {
+	const evidencePath = `${pathKey(dir)}#topology`;
+	if (!fs.existsSync(dir)) return { path: evidencePath, kind: "missing", digest: sha256("missing") };
+	const rootLstat = fs.lstatSync(dir);
+	const rootKind = evidenceKind(rootLstat);
+	const realPath = pathKey(fs.realpathSync(dir));
+	const rootStat = fs.statSync(dir);
+	const entries = rootStat.isDirectory()
+		? fs.readdirSync(dir, { withFileTypes: true })
+			.filter(entry => include(entry.name))
+			.map(entry => {
+				const entryPath = path.join(dir, entry.name);
+				const stat = fs.lstatSync(entryPath);
+				let entryRealPath: string;
+				try { entryRealPath = pathKey(fs.realpathSync(entryPath)); }
+				catch { entryRealPath = "<unresolved>"; }
+				return { name: entry.name, kind: evidenceKind(stat), realPath: entryRealPath };
+			})
+			.sort((a, b) => a.name.localeCompare(b.name))
+		: [];
+	return {
+		path: evidencePath,
+		kind: rootKind,
+		realPath,
+		digest: sha256(JSON.stringify(entries)),
+	};
+}
+
+function backupRecoveryDigest(
+	backupFile: string,
+	fileName: string,
+	projects: Map<string, Record<string, unknown>>,
+	sameRootIds: Set<string>,
+	tombstoneDirs: Set<string>,
+): string {
+	const records = readStoreRecordsWithShape(backupFile, fileName).records;
+	const liveKeyCache = new Map<string, Set<string>>();
+	const tombstoned = new Set<string>();
+	for (const dir of tombstoneDirs) {
+		for (const key of readDeletionTombstones(dir, fileName)) tombstoned.add(key);
+		if (fileName === "team-state.json") {
+			for (const key of readDeletionTombstones(dir, "goals.json")) tombstoned.add(key);
+		}
+	}
+	const qualification: Array<[string, boolean]> = [];
+	for (const record of records) {
+		const key = recordKeyForFile(fileName, record);
+		const projectId = typeof record.projectId === "string" ? record.projectId : "";
+		if (!key || !sameRootIds.has(projectId)) continue;
+		const project = projects.get(projectId);
+		if (!project || typeof project.rootPath !== "string") continue;
+		const liveFile = path.join(project.rootPath, ".bobbit", "state", fileName);
+		let liveKeys = liveKeyCache.get(liveFile);
+		if (!liveKeys) {
+			liveKeys = new Set(readStoreRecordsWithShape(liveFile, fileName).records
+				.map(live => recordKeyForFile(fileName, live))
+				.filter(Boolean));
+			liveKeyCache.set(liveFile, liveKeys);
+		}
+		qualification.push([key, liveKeys.has(key) || tombstoned.has(key)]);
+	}
+	qualification.sort(([a], [b]) => a.localeCompare(b));
+	return sha256(JSON.stringify(qualification));
+}
+
 /**
  * Capture only evidence that can make completed migration work newly useful.
- * Runtime-owned legacy project stores and config change continuously after the
- * Headquarters split and deliberately do not invalidate the checkpoint.
+ * Recovery authorities are content-hashed, and their recoverable keys are
+ * cheaply qualified against their expected live stores. This catches missing,
+ * empty, or corrupt live stores without recursively walking historical trees.
  */
-function migrationCheckpointEvidence(headquartersStateDir: string, legacyStateDir: string): HeadquartersMigrationEvidenceEntry[] | null {
+function migrationCheckpointEvidence(input: HeadquartersDirectoryMigrationInput): HeadquartersMigrationEvidenceEntry[] | null {
+	const paths = migrationCheckpointPaths(input);
+	const headquartersStateDir = paths.headquartersStateDir;
+	const legacyStateDir = paths.legacyStateDir;
 	const candidates = new Set<string>([
 		path.join(headquartersStateDir, "projects.json"),
 		path.join(legacyStateDir, "projects.json"),
@@ -102,29 +200,53 @@ function migrationCheckpointEvidence(headquartersStateDir: string, legacyStateDi
 		for (const dir of [headquartersStateDir, legacyStateDir]) {
 			if (!fs.existsSync(dir)) continue;
 			for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-				if (entry.name.endsWith(HEADQUARTERS_BACKUP_SUFFIX)) {
-					candidates.add(path.join(dir, entry.name));
-				}
+				if (entry.name.endsWith(HEADQUARTERS_BACKUP_SUFFIX)) candidates.add(path.join(dir, entry.name));
 			}
 		}
-		const evidence: HeadquartersMigrationEvidenceEntry[] = [];
+
+		const projectFiles = [
+			path.join(headquartersStateDir, "projects.json"),
+			path.join(legacyStateDir, "projects.json"),
+		];
+		const projectRecords = [...projectFiles, ...projectFiles.map(file => file + HEADQUARTERS_BACKUP_SUFFIX)]
+			.flatMap(readProjectsFile);
+		const sameRootProjects = sameRootNormalProjectsFrom(projectRecords, paths.serverRunDir);
+		const sameRootIds = new Set(sameRootProjects.map(project => String(project.id ?? "")).filter(Boolean));
+		const projects = new Map(projectRecords.map(project => [String(project.id ?? ""), project] as const));
+		const tombstoneDirs = new Set([headquartersStateDir, legacyStateDir]);
+		for (const project of sameRootProjects) {
+			if (typeof project.rootPath === "string") tombstoneDirs.add(path.join(project.rootPath, ".bobbit", "state"));
+		}
+
+		const evidence: HeadquartersMigrationEvidenceEntry[] = [
+			migrationTopologyEvidence(paths.legacyStateDir, name => (
+				(SERVER_STATE_ENTRIES.has(name) && !(SERVER_SECRET_ENTRIES as readonly string[]).includes(name))
+				|| name.endsWith(HEADQUARTERS_BACKUP_SUFFIX)
+			)),
+			migrationTopologyEvidence(paths.legacyConfigDir, () => true),
+		];
 		for (const file of [...candidates].sort((a, b) => pathKey(a).localeCompare(pathKey(b)))) {
 			if (!fs.existsSync(file)) continue;
+			const lstat = fs.lstatSync(file);
+			const kind = evidenceKind(lstat);
 			const stat = fs.statSync(file);
-			if (path.basename(file) === "projects.json") {
-				// ProjectRegistry intentionally rewrites projects.json during every
-				// startup even when its bytes are unchanged. Hash this tiny registry so
-				// that harmless mtime churn does not defeat the migration fast path.
-				evidence.push({
-					path: pathKey(file),
-					size: stat.size,
-					digest: createHash("sha256").update(fs.readFileSync(file)).digest("hex"),
-				});
-			} else {
-				evidence.push({ path: pathKey(file), size: stat.size, mtimeMs: stat.mtimeMs });
+			const entry: HeadquartersMigrationEvidenceEntry = {
+				path: pathKey(file),
+				kind,
+				size: stat.size,
+				realPath: pathKey(fs.realpathSync(file)),
+			};
+			if (stat.isFile()) entry.digest = sha256(fs.readFileSync(file));
+			const base = path.basename(file);
+			if (base.endsWith(HEADQUARTERS_BACKUP_SUFFIX)) {
+				const fileName = base.slice(0, -HEADQUARTERS_BACKUP_SUFFIX.length);
+				if ((HEADQUARTERS_RETIREABLE_STORE_FILES as readonly string[]).includes(fileName)) {
+					entry.recoveryDigest = backupRecoveryDigest(file, fileName, projects, sameRootIds, tombstoneDirs);
+				}
 			}
+			evidence.push(entry);
 		}
-		return evidence;
+		return evidence.sort((a, b) => a.path.localeCompare(b.path));
 	} catch {
 		// An unreadable evidence boundary must fail closed into the full migration.
 		return null;
@@ -133,33 +255,84 @@ function migrationCheckpointEvidence(headquartersStateDir: string, legacyStateDi
 
 function readHeadquartersMigrationCheckpoint(
 	markerPath: string,
-	paths: HeadquartersMigrationCheckpoint["paths"],
+	paths: HeadquartersMigrationCheckpointPaths,
 	evidence: HeadquartersMigrationEvidenceEntry[] | null,
 ): boolean {
 	if (!evidence) return false;
 	try {
 		const value = JSON.parse(fs.readFileSync(markerPath, "utf-8")) as Partial<HeadquartersMigrationCheckpoint>;
 		return value.version === HEADQUARTERS_MIGRATION_CHECKPOINT_VERSION
+			&& value.status === "complete"
 			&& JSON.stringify(value.paths) === JSON.stringify(paths)
 			&& JSON.stringify(value.evidence) === JSON.stringify(evidence);
 	} catch {
-		// Timestamp-only legacy markers and corrupt checkpoints get one full pass,
-		// then are upgraded to the versioned evidence record.
+		// Timestamp-only legacy markers, running records, and corrupt checkpoints
+		// get a full pass before a fresh completion record is published.
 		return false;
+	}
+}
+
+function hadCompletedHeadquartersMigration(markerPath: string): boolean {
+	if (!fs.existsSync(markerPath)) return false;
+	try {
+		const raw = fs.readFileSync(markerPath, "utf-8");
+		try {
+			const value = JSON.parse(raw) as Partial<HeadquartersMigrationCheckpoint>;
+			if (value.version === HEADQUARTERS_MIGRATION_CHECKPOINT_VERSION) {
+				return value.status === "complete" || (value.status === "running" && value.priorCompletion === true);
+			}
+			// Version-2 evidence checkpoints were completion-only records.
+			return value.version === 2 && Array.isArray(value.evidence);
+		} catch {
+			// Preserve the historical timestamp / "done" marker authority used by
+			// override backup retirement. It never qualifies the default fast path.
+			return raw.trim().length > 0;
+		}
+	} catch {
+		return false;
+	}
+}
+
+function syncCheckpointDirectory(dir: string): void {
+	let fd: number | undefined;
+	try {
+		fd = fs.openSync(dir, "r");
+		fs.fsyncSync(fd);
+	} catch {
+		// Directory handles/fsync are unavailable on Windows and some filesystems.
+		// The checkpoint file itself was fsynced before the atomic rename.
+	} finally {
+		if (fd !== undefined) fs.closeSync(fd);
 	}
 }
 
 function writeHeadquartersMigrationCheckpoint(
 	markerPath: string,
-	paths: HeadquartersMigrationCheckpoint["paths"],
-	evidence: HeadquartersMigrationEvidenceEntry[] | null,
+	checkpoint: HeadquartersMigrationCheckpoint,
 ): void {
-	if (!evidence) throw new Error("could not capture migration checkpoint evidence");
-	fs.writeFileSync(markerPath, JSON.stringify({
-		version: HEADQUARTERS_MIGRATION_CHECKPOINT_VERSION,
-		paths,
-		evidence,
-	} satisfies HeadquartersMigrationCheckpoint), "utf-8");
+	const dir = path.dirname(markerPath);
+	fs.mkdirSync(dir, { recursive: true });
+	const temporaryPath = `${markerPath}.${process.pid}.${randomUUID()}.tmp`;
+	let fd: number | undefined;
+	let temporaryCreated = false;
+	try {
+		fs.writeFileSync(temporaryPath, JSON.stringify(checkpoint), { encoding: "utf-8", flag: "wx", mode: 0o600 });
+		temporaryCreated = true;
+		fd = fs.openSync(temporaryPath, "r");
+		fs.fsyncSync(fd);
+		fs.closeSync(fd);
+		fd = undefined;
+		fs.renameSync(temporaryPath, markerPath);
+		temporaryCreated = false;
+		syncCheckpointDirectory(dir);
+	} finally {
+		if (fd !== undefined) {
+			try { fs.closeSync(fd); } catch { /* best-effort cleanup */ }
+		}
+		if (temporaryCreated) {
+			try { fs.rmSync(temporaryPath, { force: true }); } catch { /* best-effort cleanup */ }
+		}
+	}
 }
 
 function canonicalPathKey(p: string): string {
@@ -790,8 +963,8 @@ function routeLegacyProjectStoreFile(
 	diagnostics: HeadquartersMigrationDiagnostics,
 ): void {
 	const legacyRecords = readStoreRecordsWithShape(legacyFile, fileName).records;
-	if (legacyRecords.length === 0) return;
 	const backupRecords = readStoreRecordsWithShape(legacyFile + HEADQUARTERS_BACKUP_SUFFIX, fileName).records;
+	if (legacyRecords.length === 0 && backupRecords.length === 0) return;
 	const backupByKey = new Map<string, Record<string, unknown>>();
 	for (const record of backupRecords) {
 		const key = recordKeyForFile(fileName, record);
@@ -1206,7 +1379,7 @@ export function migrateLegacyHeadquartersDirectory(input: HeadquartersDirectoryM
 	// additionally proves the path topology and recovery-relevant evidence are
 	// unchanged, which is what makes a steady-state skip safe.
 	const markerPath = path.join(headquartersStateDir, HEADQUARTERS_DIR_MIGRATION_MARKER);
-	const alreadyMigrated = fs.existsSync(markerPath);
+	const alreadyMigrated = hadCompletedHeadquartersMigration(markerPath);
 
 	try {
 		fs.mkdirSync(headquartersStateDir, { recursive: true });
@@ -1222,13 +1395,30 @@ export function migrateLegacyHeadquartersDirectory(input: HeadquartersDirectoryM
 	const sourceIsTarget = samePath(legacyStateDir, headquartersStateDir) && samePath(legacyConfigDir, headquartersConfigDir);
 	const useLegacyDefaultSource = !usingOverride || sourceIsTarget;
 	const checkpointPaths = migrationCheckpointPaths(input);
-	const checkpointEvidence = migrationCheckpointEvidence(headquartersStateDir, legacyStateDir);
+	const checkpointEvidence = migrationCheckpointEvidence(input);
 	const defaultSteadyState = !sourceIsTarget
 		&& !usingOverride
 		&& readHeadquartersMigrationCheckpoint(markerPath, checkpointPaths, checkpointEvidence);
+	let migrationPassStarted = false;
+	if (!defaultSteadyState) {
+		try {
+			// Replace any prior completion authority before migration changes begin.
+			// A crash or failed pass therefore leaves an explicit retryable record.
+			writeHeadquartersMigrationCheckpoint(markerPath, {
+				version: HEADQUARTERS_MIGRATION_CHECKPOINT_VERSION,
+				status: "running",
+				paths: checkpointPaths,
+				startedAt: new Date().toISOString(),
+				priorCompletion: alreadyMigrated,
+			});
+			migrationPassStarted = true;
+		} catch (err) {
+			diagnostics.failures.push(`write running marker: ${(err as Error).message}`);
+		}
+	}
 
 	if (!sourceIsTarget && !usingOverride && fs.existsSync(legacyStateDir)) {
-		if (!defaultSteadyState) {
+		if (!defaultSteadyState && migrationPassStarted) {
 			for (const entry of fs.readdirSync(legacyStateDir, { withFileTypes: true })) {
 				const src = path.join(legacyStateDir, entry.name);
 				const dest = path.join(headquartersStateDir, entry.name);
@@ -1270,22 +1460,27 @@ export function migrateLegacyHeadquartersDirectory(input: HeadquartersDirectoryM
 	for (const id of sameRootIds) evidence.sameRootIds.add(id);
 	const sameRootEvidence = evidence.sameRootIds.size > 0;
 
-	if (!sourceIsTarget && !usingOverride && fs.existsSync(legacyStateDir) && !defaultSteadyState) {
+	if (!sourceIsTarget && !usingOverride && fs.existsSync(legacyStateDir) && !defaultSteadyState && migrationPassStarted) {
 		for (const fileName of PROJECT_STORE_FILES) {
 			const legacyFile = path.join(legacyStateDir, fileName);
-			if (!fs.existsSync(legacyFile)) continue;
 			const targetFile = path.join(headquartersStateDir, fileName === "gateway-swarms.json" ? "team-state.json" : fileName);
+			const sourceFile = fs.existsSync(legacyFile) || fs.existsSync(legacyFile + HEADQUARTERS_BACKUP_SUFFIX)
+				? legacyFile
+				: targetFile;
+			const hasSource = fs.existsSync(sourceFile) || fs.existsSync(sourceFile + HEADQUARTERS_BACKUP_SUFFIX);
+			if (!hasSource) continue;
 			if (PROJECT_OBJECT_STORE_FILES.has(fileName)) {
+				if (!fs.existsSync(sourceFile)) continue;
 				if (sameRootEvidence) {
 					diagnostics.ambiguousRecords.push({ file: fileName, key: "*", reason: "object-shaped project store requires manual attribution when same-root normal project evidence exists" });
 				} else {
-					copyTreePreserveFirst(legacyFile, targetFile, fileName, diagnostics);
+					copyTreePreserveFirst(sourceFile, targetFile, fileName, diagnostics);
 				}
 				continue;
 			}
-			routeLegacyProjectStoreFile(fileName, legacyFile, targetFile, headquartersDirPath, evidence, diagnostics);
+			routeLegacyProjectStoreFile(fileName, sourceFile, targetFile, headquartersDirPath, evidence, diagnostics);
 		}
-	} else if (usingOverride && !sourceIsTarget && sameRootEvidence && alreadyMigrated && !hasUnretiredHeadquartersBackups(headquartersStateDir)) {
+	} else if (migrationPassStarted && usingOverride && !sourceIsTarget && sameRootEvidence && alreadyMigrated && !hasUnretiredHeadquartersBackups(headquartersStateDir)) {
 		// Marker guard (layer B / requirement 2): the B1 same-root re-routing loop
 		// is now tombstone-safe and idempotent. Skip it only when recovery is
 		// CONFIRMED COMPLETE — the completion marker is present AND every retireable
@@ -1300,7 +1495,7 @@ export function migrateLegacyHeadquartersDirectory(input: HeadquartersDirectoryM
 		// (The ALWAYS-RUN secret relocation / projects repair / store sanitisation
 		// below are NOT gated — they are idempotent and must keep running.)
 		diagnostics.skipped.push("B1 override same-root per-store re-routing: skipped (headquarters-dir migration complete; all spent backups retired)");
-	} else if (usingOverride && !sourceIsTarget && sameRootEvidence) {
+	} else if (migrationPassStarted && usingOverride && !sourceIsTarget && sameRootEvidence) {
 		// B1: BOBBIT_DIR/BOBBIT_PI_DIR-override installs promoted per-store records
 		// (sessions/goals/staff/…) under `headquarters` and left their
 		// `.pre-headquarters-id-migration` per-store backups in the SAME override
@@ -1327,7 +1522,7 @@ export function migrateLegacyHeadquartersDirectory(input: HeadquartersDirectoryM
 		}
 	}
 
-	if (!sourceIsTarget && !usingOverride && fs.existsSync(legacyConfigDir) && !defaultSteadyState) {
+	if (!sourceIsTarget && !usingOverride && fs.existsSync(legacyConfigDir) && !defaultSteadyState && migrationPassStarted) {
 		if (sameRootEvidence) {
 			quarantineLegacyConfig(legacyConfigDir, headquartersStateDir, diagnostics);
 			diagnostics.skipped.push("legacy default .bobbit/config: same-root normal project evidence exists; config quarantined instead of activated in Headquarters");
@@ -1345,7 +1540,7 @@ export function migrateLegacyHeadquartersDirectory(input: HeadquartersDirectoryM
 	// tombstoned record on a later boot. Gated on `alreadyMigrated` so retirement
 	// only ever runs on a boot AFTER a completed migration (never on the first
 	// migration, before recovery has happened). Per-store safety gate inside.
-	if (alreadyMigrated && !defaultSteadyState) {
+	if (migrationPassStarted && alreadyMigrated && !defaultSteadyState) {
 		retireSpentHeadquartersBackups(headquartersStateDir, evidence, diagnostics);
 	}
 
@@ -1356,19 +1551,23 @@ export function migrateLegacyHeadquartersDirectory(input: HeadquartersDirectoryM
 		return diagnostics;
 	}
 
-	try {
-		if (!sourceIsTarget && !usingOverride) {
-			writeHeadquartersMigrationCheckpoint(
-				markerPath,
-				checkpointPaths,
-				migrationCheckpointEvidence(headquartersStateDir, legacyStateDir),
-			);
-		} else {
-			fs.writeFileSync(markerPath, new Date().toISOString(), "utf-8");
+	if (migrationPassStarted && diagnostics.failures.length === 0) {
+		try {
+			const evidenceAfterMigration = migrationCheckpointEvidence(input);
+			if (!evidenceAfterMigration) throw new Error("could not capture migration checkpoint evidence");
+			writeHeadquartersMigrationCheckpoint(markerPath, {
+				version: HEADQUARTERS_MIGRATION_CHECKPOINT_VERSION,
+				status: "complete",
+				paths: checkpointPaths,
+				completedAt: new Date().toISOString(),
+				evidence: evidenceAfterMigration,
+			});
+		} catch (err) {
+			diagnostics.failures.push(`write complete marker: ${(err as Error).message}`);
 		}
-	} catch (err) {
-		diagnostics.failures.push(`write marker: ${(err as Error).message}`);
 	}
+	// Any failure deliberately leaves the durable `running` checkpoint in place,
+	// so the next boot retries instead of trusting stale completion evidence.
 	writeHeadquartersDiagnostics(headquartersStateDir, diagnostics);
 	return diagnostics;
 }

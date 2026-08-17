@@ -30,8 +30,8 @@ let tmpSequence = 0;
 
 beforeAll(() => {
 	for (const name of [
-		"chmodSync", "copyFileSync", "existsSync", "lstatSync", "mkdirSync",
-		"readFileSync", "readdirSync", "realpathSync", "renameSync", "rmSync",
+		"chmodSync", "closeSync", "copyFileSync", "existsSync", "fsyncSync", "lstatSync", "mkdirSync",
+		"openSync", "readFileSync", "readdirSync", "realpathSync", "renameSync", "rmSync",
 		"statSync", "utimesSync", "writeFileSync",
 	] as const) {
 		fsSpies.push(vi.spyOn(fs, name).mockImplementation(memoryFs[name].bind(memoryFs) as never));
@@ -132,7 +132,9 @@ describe("Headquarters directory migration", () => {
 		const dirs = migrateDirs(root);
 		const diagnostics = migrateLegacyHeadquartersDirectory(dirs);
 
-		assert.equal(fs.existsSync(path.join(dirs.headquartersStateDir, ".headquarters-dir-migrated")), true);
+		const marker = path.join(dirs.headquartersStateDir, ".headquarters-dir-migrated");
+		assert.equal(fs.existsSync(marker), true);
+		assert.equal(readJson<{ version: number; status: string }>(marker).status, "complete");
 		assert.equal(readJson(path.join(dirs.headquartersStateDir, "preferences.json")).theme, "dark");
 		assert.equal(readJson(path.join(dirs.headquartersStateDir, "sessions.json"))[0].projectId, HEADQUARTERS_PROJECT_ID);
 		assert.equal(fs.readFileSync(path.join(dirs.headquartersConfigDir, "project.yaml"), "utf-8"), "name: Server Config\n");
@@ -244,7 +246,7 @@ describe("Headquarters directory migration", () => {
 		assert.equal(second.skipped.some(entry => entry.includes("skipped unchanged legacy tree")), false, "a failed pass must not qualify the next boot for the steady-state fast path");
 	});
 
-	it.each(["missing", "empty"] as const)("recovers an untombstoned backup when the unchanged-evidence live store is %s", mode => {
+	it.each(["missing", "empty", "corrupt"] as const)("recovers an untombstoned backup when the unchanged-evidence live store is %s", mode => {
 		const root = tmpRoot();
 		useIsolatedSecretsDir();
 		const oldId = "recoverable-normal-project";
@@ -269,7 +271,8 @@ describe("Headquarters directory migration", () => {
 		assert.equal(readJson<Array<{ id: string }>>(liveGoals).some(goal => goal.id === recoverableGoal.id), true, "precondition: first pass recovers the goal");
 
 		if (mode === "missing") fs.rmSync(liveGoals);
-		else writeJson(liveGoals, []);
+		else if (mode === "empty") writeJson(liveGoals, []);
+		else fs.writeFileSync(liveGoals, "{not-json", "utf-8");
 		const second = migrateLegacyHeadquartersDirectory(dirs);
 
 		assert.equal(fs.existsSync(liveGoals), true, `checkpoint fast path must reopen unchanged backup recovery when the live goals store is ${mode}`);
@@ -309,6 +312,81 @@ describe("Headquarters directory migration", () => {
 			true,
 			"content-mutated backup authority must be reprocessed even when stat evidence is unchanged",
 		);
+	});
+
+	it("invalidates a completed checkpoint when a previously absent legacy source appears", () => {
+		const root = tmpRoot();
+		useIsolatedSecretsDir();
+		const legacyStateDir = path.join(root, ".bobbit", "state");
+		seedProject(legacyStateDir, hqProject(root));
+		const dirs = migrateDirs(root);
+		migrateLegacyHeadquartersDirectory(dirs);
+
+		fs.writeFileSync(path.join(legacyStateDir, "gateway-url"), "http://127.0.0.1:9191", "utf-8");
+		const second = migrateLegacyHeadquartersDirectory(dirs);
+
+		assert.equal(second.skipped.some(entry => entry.includes("skipped unchanged legacy tree")), false);
+		assert.equal(fs.readFileSync(path.join(dirs.headquartersStateDir, "gateway-url"), "utf-8"), "http://127.0.0.1:9191");
+	});
+
+	it("atomically leaves a running checkpoint when completion publication is interrupted", () => {
+		const root = tmpRoot();
+		useIsolatedSecretsDir();
+		const legacyStateDir = path.join(root, ".bobbit", "state");
+		seedProject(legacyStateDir, hqProject(root));
+		const dirs = migrateDirs(root);
+		const marker = path.join(dirs.headquartersStateDir, ".headquarters-dir-migrated");
+		const originalRenameSync = fs.renameSync;
+		(fs as unknown as { renameSync: typeof fs.renameSync }).renameSync = ((src: fs.PathLike, dest: fs.PathLike) => {
+			if (path.resolve(String(dest)) === path.resolve(marker)) {
+				const checkpoint = readJson<{ status?: string }>(String(src));
+				if (checkpoint.status === "complete") throw new Error("simulated completion publication interruption");
+			}
+			return originalRenameSync(src, dest);
+		}) as typeof fs.renameSync;
+		let first: ReturnType<typeof migrateLegacyHeadquartersDirectory>;
+		try {
+			first = migrateLegacyHeadquartersDirectory(dirs);
+		} finally {
+			(fs as unknown as { renameSync: typeof fs.renameSync }).renameSync = originalRenameSync;
+		}
+
+		assert.ok(first.failures.some(entry => entry.includes("simulated completion publication interruption")));
+		assert.equal(readJson<{ status: string }>(marker).status, "running", "interrupted completion must not expose partial or stale completion authority");
+		assert.equal(fs.readdirSync(dirs.headquartersStateDir).some(name => name.includes(".headquarters-dir-migrated.") && name.endsWith(".tmp")), false, "failed atomic publication must clean its temporary file");
+
+		const second = migrateLegacyHeadquartersDirectory(dirs);
+		assert.equal(second.skipped.some(entry => entry.includes("skipped unchanged legacy tree")), false, "a running checkpoint must force retry");
+		assert.equal(readJson<{ status: string }>(marker).status, "complete");
+	});
+
+	it("replaces stale completion authority before retryable migration work", () => {
+		const root = tmpRoot();
+		useIsolatedSecretsDir();
+		const legacyStateDir = path.join(root, ".bobbit", "state");
+		seedProject(legacyStateDir, hqProject(root));
+		const dirs = migrateDirs(root);
+		migrateLegacyHeadquartersDirectory(dirs);
+		const marker = path.join(dirs.headquartersStateDir, ".headquarters-dir-migrated");
+		const lateSource = path.join(legacyStateDir, "gateway-url");
+		fs.writeFileSync(lateSource, "retry-late-source", "utf-8");
+
+		const originalCopyFileSync = fs.copyFileSync;
+		(fs as unknown as { copyFileSync: typeof fs.copyFileSync }).copyFileSync = ((src: fs.PathLike, dest: fs.PathLike, mode?: number) => {
+			if (path.resolve(String(src)) === path.resolve(lateSource)) throw new Error("simulated late-source copy failure");
+			return originalCopyFileSync(src, dest, mode);
+		}) as typeof fs.copyFileSync;
+		try {
+			const failed = migrateLegacyHeadquartersDirectory(dirs);
+			assert.ok(failed.failures.some(entry => entry.includes("simulated late-source copy failure")));
+		} finally {
+			(fs as unknown as { copyFileSync: typeof fs.copyFileSync }).copyFileSync = originalCopyFileSync;
+		}
+
+		assert.equal(readJson<{ status: string }>(marker).status, "running", "failed retry must not retain the preceding complete checkpoint");
+		const retried = migrateLegacyHeadquartersDirectory(dirs);
+		assert.equal(retried.skipped.some(entry => entry.includes("skipped unchanged legacy tree")), false);
+		assert.equal(fs.readFileSync(path.join(dirs.headquartersStateDir, "gateway-url"), "utf-8"), "retry-late-source");
 	});
 
 	it("still relocates a newly reintroduced legacy secret on the default fast path", () => {
@@ -1088,10 +1166,11 @@ describe("Headquarters directory migration", () => {
 		writeJson(path.join(overrideState, "staff.json"), []);
 		writeJson(path.join(overrideState, "staff.json.pre-headquarters-id-migration"), [staffRecord("survivor", oldId), staffRecord("e2e-guardian", oldId)]);
 		writeJson(path.join(overrideState, ".deletion-tombstones.json"), { "staff.json": ["e2e-guardian"] });
-		// goals: g-unrecovered is neither in live nor tombstoned → backup preserved.
+		// goals: g-unrecovered has no reliable project authority, so it cannot be
+		// routed or retired and its backup remains available for manual recovery.
 		writeJson(path.join(root, ".bobbit", "state", "goals.json"), []);
 		writeJson(path.join(overrideState, "goals.json"), []);
-		writeJson(path.join(overrideState, "goals.json.pre-headquarters-id-migration"), [{ id: "g-unrecovered", title: "G", cwd: root, state: "todo", spec: "", projectId: oldId, createdAt: 1, updatedAt: 1 }]);
+		writeJson(path.join(overrideState, "goals.json.pre-headquarters-id-migration"), [{ id: "g-unrecovered", title: "G", cwd: root, state: "todo", spec: "", projectId: "missing-project", createdAt: 1, updatedAt: 1 }]);
 
 		migrateLegacyHeadquartersDirectory(overrideDirs(root, override, overrideState));
 
