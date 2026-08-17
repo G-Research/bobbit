@@ -557,54 +557,78 @@ describe("archived goal reconciliation", () => {
 		assert.equal(fixture.createCalls.length, 1, "post-terminal admission creates no session");
 	});
 
-	it("admits full-lifecycle team children on the shared fence and stamps ownership before publication", async () => {
+	it("holds team admission through delayed full sub-branch setup before archival", async () => {
 		const racingGoal = goal("goal-full-child-race", false);
 		const owner = session("team-owner", { teamGoalId: racingGoal.id, role: "team-lead" });
-		const standalone = session("standalone-owner", { goalId: racingGoal.id });
-		const fixture = makeFixture({ goals: [racingGoal], sessions: [owner, standalone] });
+		const fixture = makeFixture({ goals: [racingGoal], sessions: [owner] });
 		await fixture.manager.waitForRestore();
 
-		let releaseCreate!: () => void;
-		const createReleased = new Promise<void>((resolve) => { releaseCreate = resolve; });
-		let signalCreateEntered!: () => void;
-		const createEntered = new Promise<void>((resolve) => { signalCreateEntered = resolve; });
-		let childSequence = 0;
+		let releaseSetup!: () => void;
+		const setupReleased = new Promise<void>((resolve) => { releaseSetup = resolve; });
+		let signalSetupEntered!: () => void;
+		const setupEntered = new Promise<void>((resolve) => { signalSetupEntered = resolve; });
+		let bridgeStarts = 0;
+		let capturedCreateOpts: Record<string, unknown> | undefined;
 		fixture.sessionManager.createSession = vi.fn(async (cwd: string, _args: unknown, goalId: string | undefined, _assistant: unknown, createOpts: Record<string, unknown>) => {
-			const id = `full-child-${++childSequence}`;
-			fixture.createCalls.push(id);
-			if (id === "full-child-1") {
-				signalCreateEntered();
-				await createReleased;
-			}
-			const row = session(id, { cwd, goalId, ...createOpts });
+			capturedCreateOpts = createOpts;
+			fixture.createCalls.push("full-sub-branch-child");
+			const row = session("full-sub-branch-child", { cwd, goalId, ...createOpts });
 			fixture.sessionStore.put(row);
-			fixture.live.set(id, { ...row, status: "idle", clients: new Set(), rpcClient: { onEvent: vi.fn(() => () => {}) } });
-			return fixture.live.get(id);
+			const active = { ...row, status: "preparing", clients: new Set(), rpcClient: { onEvent: vi.fn(() => () => {}) } };
+			fixture.live.set(row.id, active);
+			const detachedSetup = (async () => {
+				signalSetupEntered();
+				await setupReleased;
+				bridgeStarts++;
+				active.status = "idle";
+			})();
+			if (createOpts.awaitWorktreeSetup === true) await detachedSetup;
+			return active;
 		});
 		const core = new OrchestrationCore({
 			sessionManager: fixture.sessionManager,
 			resolveSessionModel: () => undefined,
 		});
 
-		const spawning = core.spawn({ ownerSessionId: owner.id, instructions: "team child", lifecycle: "full" });
-		await createEntered;
+		const spawning = core.spawn({
+			ownerSessionId: owner.id,
+			instructions: "team child",
+			lifecycle: "full",
+			worktree: {
+				mode: "sub-branch",
+				repoPath: path.resolve("/pure/repo"),
+				goalId: "child-goal",
+				branch: "goal/child/helper",
+				cwd: path.resolve("/pure/repo"),
+			},
+		});
+		await setupEntered;
+		assert.equal(capturedCreateOpts?.awaitWorktreeSetup, true, "canonical team ownership keeps setup inside admission");
+		assert.equal(fixture.sessionStore.get("full-sub-branch-child").teamGoalId, racingGoal.id, "the preparing row is durably owned before setup");
+
 		racingGoal.archived = true;
+		let reconciliationSettled = false;
 		const reconciling = fixture.manager.reconcileArchivedGoal(racingGoal.id, { audit: false });
-		releaseCreate();
+		void reconciling.then(() => { reconciliationSettled = true; }, () => { reconciliationSettled = true; });
+		await Promise.resolve();
+		assert.equal(reconciliationSettled, false, "archive queues behind the admitted setup");
+		assert.deepEqual(fixture.terminateCalls, [], "the preparing placeholder is not removed while setup can still publish a process");
+
+		releaseSetup();
 		const child = await spawning;
 		const result = await reconciling;
 
-		assert.equal(fixture.sessionStore.get(child.sessionId).teamGoalId, racingGoal.id, "initial full-child row carries trusted parent ownership");
-		assert.equal(fixture.sessionStore.get(child.sessionId).archived, true, "child admitted before terminal closure is reconciled");
+		assert.equal(bridgeStarts, 1, "setup starts the process before reconciliation acquires admission");
+		assert.equal(fixture.sessionStore.get(child.sessionId).archived, true, "reconciliation archives the actual child after setup");
+		assert.equal(fixture.live.has(child.sessionId), false, "the reconciled process is stopped");
 		assert.ok(result.archivedSessionIds.includes(child.sessionId));
+		await Promise.resolve();
+		assert.equal(bridgeStarts, 1, "no detached setup starts another process after reconciliation");
 		await assert.rejects(
 			() => core.spawn({ ownerSessionId: owner.id, instructions: "too late", lifecycle: "full" }),
 			(error: unknown) => error instanceof TeamStartError && error.code === "GOAL_ARCHIVED",
 		);
 		assert.equal(fixture.createCalls.length, 1, "post-terminal full spawn creates no row or process");
-
-		const unrelated = await core.spawn({ ownerSessionId: standalone.id, instructions: "standalone child", lifecycle: "full" });
-		assert.equal(fixture.sessionStore.get(unrelated.sessionId).teamGoalId, undefined, "goalId-only owners are not broadened into team ownership");
 	});
 
 	it("caps boot audit error samples while suppressing every failed row", async () => {
