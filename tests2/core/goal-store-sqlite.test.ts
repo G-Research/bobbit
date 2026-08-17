@@ -461,6 +461,59 @@ describe("GoalStore SQLite persistence", () => {
 		reader.close();
 	});
 
+	it("coalesces concurrent same-goal archive publication and permits a fresh retry", async () => {
+		const stateDir = tempRoot();
+		const store = openStore(stateDir);
+		store.put(goal("coalesced-target", { state: "in-progress" }));
+		store.put(goal("independent-target", { state: "in-progress" }));
+		store.put(goal("unrelated-update", { title: "Before" }));
+		await store.flush();
+		const archivedHooks: string[] = [];
+		store.onGoalArchived = (row) => { archivedHooks.push(row.id); };
+
+		const persistence = (store as any).persistence;
+		const originalPublishStrict = persistence.publishStrict.bind(persistence);
+		let rejectArchive!: (error: Error) => void;
+		let entered!: () => void;
+		const archiveEntered = new Promise<void>((resolve) => { entered = resolve; });
+		vi.spyOn(persistence, "publishStrict")
+			.mockImplementationOnce(() => new Promise<void>((_resolve, reject) => {
+				rejectArchive = reject;
+				entered();
+			}))
+			.mockImplementation((...args: unknown[]) => originalPublishStrict(args[0] as Iterable<string>));
+
+		const first = store.archiveStrict("coalesced-target");
+		await archiveEntered;
+		const second = store.archiveStrict("coalesced-target");
+		expect(second).toBe(first);
+
+		store.update("unrelated-update", { title: "Concurrent" });
+		expect(store.get("unrelated-update")?.title).toBe("Concurrent");
+		await expect(store.archiveStrict("independent-target")).resolves.toBe(true);
+		expect(store.get("independent-target")?.archived).toBe(true);
+
+		const firstRejected = expect(first).rejects.toThrow(/coalesced archive failure/);
+		const secondRejected = expect(second).rejects.toThrow(/coalesced archive failure/);
+		rejectArchive(new Error("injected coalesced archive failure"));
+		await Promise.all([firstRejected, secondRejected]);
+
+		expect(store.get("coalesced-target")?.archived).toBeUndefined();
+		expect(store.get("coalesced-target")?.archivedAt).toBeUndefined();
+		expect(archivedHooks).toEqual(["independent-target"]);
+		await store.flush();
+		const failedReload = openStore(stateDir);
+		expect(failedReload.get("coalesced-target")?.archived).toBeUndefined();
+		await closeTracked(failedReload);
+
+		await expect(store.archiveStrict("coalesced-target")).resolves.toBe(true);
+		expect(archivedHooks).toEqual(["independent-target", "coalesced-target"]);
+		await closeTracked(store);
+		const successfulReload = openStore(stateDir);
+		expect(successfulReload.get("coalesced-target")?.archived).toBe(true);
+		await closeTracked(successfulReload);
+	});
+
 	it("preserves a concurrent same-goal update when archive publication rejects", async () => {
 		const stateDir = tempRoot();
 		const store = openStore(stateDir);

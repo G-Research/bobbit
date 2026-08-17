@@ -247,12 +247,22 @@ function makeFixture(options: {
 			const parent = sessionStore.get(parentId);
 			const id = `delegate-${createCalls.length + 1}`;
 			createCalls.push(id);
+			const trustedTeamGoalId = sessionManager.getTrustedTeamGoalIdForSession(parentId);
 			const row = session(id, {
 				...delegateOpts,
 				delegateOf: parentId,
 				projectId: parent?.projectId,
-				teamGoalId: parent?.goalId ?? parent?.teamGoalId,
+				teamGoalId: trustedTeamGoalId ?? parent?.goalId ?? parent?.teamGoalId,
 			});
+			sessionStore.put(row);
+			const active = { ...row, status: "idle", clients: new Set(), rpcClient: { onEvent: vi.fn(() => () => {}) } };
+			live.set(id, active);
+			return active;
+		}),
+		createSession: vi.fn(async (cwd: string, _args: unknown, goalId: string | undefined, _assistant: unknown, createOpts: Record<string, unknown>) => {
+			const id = `full-${createCalls.length + 1}`;
+			createCalls.push(id);
+			const row = session(id, { cwd, goalId, ...createOpts });
 			sessionStore.put(row);
 			const active = { ...row, status: "idle", clients: new Set(), rpcClient: { onEvent: vi.fn(() => () => {}) } };
 			live.set(id, active);
@@ -437,6 +447,70 @@ describe("archived goal reconciliation", () => {
 		assert.equal(fixture.sessionStore.get(standalone.id).archived, false);
 		assert.equal(fixture.sessionStore.get(genuineWorker.id).archived, true, "matching team ownership remains terminal");
 		assert.ok(result.archivedSessionIds.includes(child.sessionId));
+	});
+
+	it("durably propagates TeamStore-only ownership to bare and full children before cold repair", async () => {
+		const archivedGoal = goal("goal-teamstore-child-stamps", false);
+		const unstampedOwner = session("teamstore-only-owner", { role: "team-lead" });
+		const goalOnlyControl = session("goal-only-control", { goalId: archivedGoal.id });
+		const initial = makeFixture({
+			goals: [archivedGoal],
+			sessions: [unstampedOwner, goalOnlyControl],
+			teams: [teamEntry(archivedGoal.id, unstampedOwner.id)],
+		});
+		await initial.manager.waitForRestore();
+		const core = new OrchestrationCore({
+			sessionManager: initial.sessionManager,
+			resolveSessionModel: () => undefined,
+		});
+
+		const bare = await core.spawn({ ownerSessionId: unstampedOwner.id, instructions: "bare" });
+		const shared = await core.spawn({ ownerSessionId: unstampedOwner.id, instructions: "shared", lifecycle: "full" });
+		const branched = await core.spawn({
+			ownerSessionId: unstampedOwner.id,
+			instructions: "branched",
+			lifecycle: "full",
+			worktree: {
+				mode: "sub-branch",
+				repoPath: path.resolve("/pure/repo"),
+				goalId: "child-worktree-goal",
+				branch: "goal/child/helper",
+				cwd: path.resolve("/pure/repo"),
+			},
+		});
+		const children = [bare.sessionId, shared.sessionId, branched.sessionId];
+		for (const id of children) {
+			assert.equal(initial.sessionStore.get(id).teamGoalId, archivedGoal.id, `${id} carries exact initial ownership`);
+		}
+
+		initial.teamStore.remove(archivedGoal.id);
+		archivedGoal.archived = true;
+		const cold = makeFixture({
+			goals: [archivedGoal],
+			sessions: initial.sessionStore.getAll(),
+			sessionStore: initial.sessionStore,
+			teamStore: new MemoryTeamStore([]),
+			restoreLive: false,
+		});
+		await cold.manager.waitForRestore();
+		const suppressed = await cold.manager.reconcileArchivedTeamOwnership();
+		assert.deepEqual([...suppressed], []);
+		for (const id of children) assert.equal(cold.sessionStore.get(id).archived, true, `${id} is repaired without TeamStore`);
+		assert.equal(cold.sessionStore.get(goalOnlyControl.id).archived, false, "goalId-only control stays live");
+
+		const restoreManager: any = Object.create(SessionManager.prototype);
+		restoreManager.projectContextManager = cold.projectContextManager;
+		restoreManager.sessions = new Map();
+		restoreManager.orchestrationCore = null;
+		restoreManager.clock = { now: () => Date.now() };
+		restoreManager._bootRestoreLagSampler = () => 0;
+		restoreManager.yieldBootRestore = async () => {};
+		const dispatched: string[] = [];
+		restoreManager.restoreOneSession = async (row: any) => { dispatched.push(row.id); };
+		await restoreManager.restoreSessions(suppressed);
+
+		assert.equal(dispatched.includes(goalOnlyControl.id), true, "goalId-only control restores eagerly");
+		for (const id of children) assert.equal(dispatched.includes(id), false, `${id} never dispatches`);
 	});
 
 	it("removes stale archived-goal team state while leaving a conflicting foreign owner live", async () => {

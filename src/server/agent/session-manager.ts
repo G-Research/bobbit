@@ -12344,10 +12344,11 @@ export class SessionManager {
 		// could re-acquire a tool/provider the goal disabled — a treatment leak.
 		// Stamp the PARENT's effective goal as the delegate's `teamGoalId` (NOT
 		// `goalId`, so it is treated as a member, not a lead) so the resolver walks
-		// the same ancestry and the delegate inherits the same metadata. Prefer the
-		// live parent session, then its persisted record (restart/respawn).
-		const parentEffectiveGoalId =
-			parentSession?.goalId ?? parentSession?.teamGoalId
+		// the same ancestry and the delegate inherits the same metadata. Durable or
+		// current TeamStore-derived ownership wins; otherwise preserve the legacy
+		// live-then-persisted raw goal fallback used by standalone delegates.
+		const parentEffectiveGoalId = initialTrustedTeamGoalId
+			?? parentSession?.goalId ?? parentSession?.teamGoalId
 			?? parentMeta?.goalId ?? parentMeta?.teamGoalId;
 		const sourceAllowedTools = opts.allowedTools ?? parentSession?.allowedTools;
 		const parentAllowedTools: EffectiveTool[] | undefined = sourceAllowedTools
