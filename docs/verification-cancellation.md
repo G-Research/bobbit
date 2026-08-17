@@ -62,6 +62,14 @@ Cancelling a run first fences further work for that signal, drains pending human
 
 Terminal cancellation publication waits for all owned cleanup to settle. If exact cleanup is pending, the cancellation intent remains durable and cleanup is retried; it is not converted into a failed gate. This applies after a gateway restart as well as during normal operation.
 
+### Reviewer and QA spawn ownership
+
+Before a reviewer or agent-QA session can be created, the harness durably records its pre-generated session identity and `reviewerSpawnState`: `queued` → `spawning` → `spawned`. The state is ownership evidence, not display progress: `spawning` remains fail-closed because creation may already have allocated that exact identity.
+
+A current-boot barrier spans both `createSession` and team registration. Cancellation, re-signal, and lifecycle fences retain `reviewerCleanupPending` and the exact identity until that barrier and exact terminate/unregister cleanup settle. A rejected creation releases the barrier so cleanup can progress. If the initial ownership record cannot be persisted, no session is created and the in-memory identity is rolled back; a later creator cannot inherit it.
+
+Consequently, a not-found result from `terminateSession` does not prove cleanup while a current-boot creator is live. No terminal signal, gate update, status event, or transcript notification is published until the barrier and retained reviewer ownership settle.
+
 The same fence protects real recovered outcomes. A genuine recovered pass or failure, including a non-restart `Resume Error`, is first staged as a durable terminal intent when cleanup is still owned. Reviewer, host-tree, Docker payload and transport, and human-sign-off cleanup then settle before the signal and gate result are published. This prevents a late callback from changing either an interrupted run or a real verdict.
 
 The public active-verifications endpoint deliberately hides a run once it has entered cancellation cleanup. It is a view of work still running, not a process-ownership ledger. The durable signal history is the authoritative cancellation result after cleanup settles.
@@ -84,7 +92,7 @@ A request made during these transitions fails closed with a retryable conflict r
 
 ## Restart and recovery
 
-At gateway startup, Bobbit first reloads active cancellation intent and resumes its exact cleanup. A previously cancelled run retains its first cause and step history until it can be finalized. If reviewer cleanup was already in progress, the durable `reviewerCleanupPending` marker retains the exact reviewer session identity; retrying cleanup never substitutes a later session.
+At gateway startup, Bobbit first reloads active cancellation intent and resumes its exact cleanup. A previously cancelled run retains its first cause and step history until it can be finalized. If reviewer cleanup was already in progress, the durable `reviewerCleanupPending` marker retains the exact reviewer session identity; retrying cleanup never substitutes a later session. Persisted reviewer rows in `spawning` or `spawned` are cleanup-owned on restart: recovery re-drives exact terminate/unregister cleanup without recreating the old creator.
 
 Recovery distinguishes determined and unfinished work. A recoverable command result or an aggregate already determined by durable rows reconstructs a pass/fail terminal intent, then publishes it only after exact cleanup. Genuinely unfinished work first completes any retained ownership cleanup and then resumes. If the workflow, goal, gate, or signal context cannot be resolved, the active record is retained for later recovery rather than inventing an outcome.
 
@@ -101,8 +109,8 @@ The dashboard, sidebar/status widget, and transcript render cancellation separat
 ## Troubleshooting and audit
 
 1. Inspect the gate's latest signal and its `verification.cancellation` object. Treat `unknown` as unavailable legacy provenance, not a guessed cause.
-2. Inspect each step. Preserve passed output as evidence; investigate only `failed` or `timeout` statuses as product verification verdicts. A `cancelled` step was interrupted.
-3. If the manual cancel response has `pending: true`, wait for exact cleanup to settle. Do not kill recorded PIDs, process groups, Docker processes, or reviewer sessions manually.
+2. Inspect each step. Preserve passed output as evidence; investigate only `failed` or `timeout` statuses as product verification verdicts. A `cancelled` step was interrupted. For reviewer or QA steps, `reviewerSpawnState` identifies whether the durable reviewer identity was only queued, was being created, or was created.
+3. If the manual cancel response has `pending: true`, wait for exact cleanup to settle. Do not kill recorded PIDs, process groups, Docker processes, or reviewer sessions manually. A `spawning` reviewer remains cleanup-owned even if `terminateSession` first reports it missing.
 4. For a current run cancelled by pause or restart recovery, resume the goal if needed and explicitly re-signal once. For a superseded run, inspect the newer signal instead.
 5. If a lifecycle or gate mutation reports `VERIFICATION_CANCELLATION_FENCE_FAILED`, retry the operation. Do not assume the target mutation committed.
 

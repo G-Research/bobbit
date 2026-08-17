@@ -255,6 +255,16 @@ Worker `agent_end → notifyTeamLead` nudges are debounced 5s (`WORKER_IDLE_NUDG
 
 Key files: `src/server/agent/team-manager.ts`, `src/server/agent/team-store.ts`. Regression test: `tests/team-manager-reviewer-resume.test.ts`.
 
+#### Reviewer spawn ownership and cancellation fence
+
+The verifier pre-generates each reviewer or agent-QA session id and persists it before creation. Its durable `reviewerSpawnState` advances from `queued` to `spawning` to `spawned`. This makes the narrow interval around session creation auditable and restart-safe: `spawning` is already cleanup-owned because the exact session may have been allocated even though creation has not returned.
+
+A current-boot creation barrier begins before `createSession` can allocate the identity and ends only after team registration and spawn-state persistence settle. Cancellation, re-signal, and goal-lifecycle paths set and retain `reviewerCleanupPending` before they wait for that barrier, then own exact `terminateSession` and reviewer-unregister cleanup. They must not publish a terminal signal, change the current gate, or emit status/transcript completion until the barrier and cleanup settle. A rejected creator releases the barrier; failure to persist the initial ownership row prevents creation and restores the prior in-memory row, so an unpersisted identity cannot leak into a later creator.
+
+A not-found termination result is not cleanup proof while a current-boot creator remains live. On restart, persisted `spawning` and `spawned` rows are treated as retained cleanup ownership: recovery re-drives termination and unregistering for that exact identity but never recreates the old creator. This extends the existing generation fence, so historical cleanup cannot publish into a replacement signal.
+
+See [Verification cancellation lifecycle](verification-cancellation.md#reviewer-and-qa-spawn-ownership) for the externally visible outcome and troubleshooting contract.
+
 #### Reminder race after restart-resume
 
 When a server restart interrupts an in-flight reviewer turn, the harness tries to resume from the existing session rather than spawning a fresh one (`_tryResumeFromSession` in `verification-harness.ts`). Resume sends a reminder prompt asking the agent to call `verification_result`, then races the eventual tool call against an idle-detector so a stuck agent eventually fails rather than hanging the gate.
