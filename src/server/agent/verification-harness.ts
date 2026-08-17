@@ -1712,8 +1712,10 @@ export interface ActiveVerification {
 		humanPrompt?: string;
 		/** Human-readable label rendered on the sign-off card (human-signoff). */
 		humanLabel?: string;
-		/** Explicit admission state; only queued proves spawn was never attempted. */
+		/** Explicit admission state; only queued proves command spawn was never attempted. */
 		commandSpawnState?: "queued" | "spawning" | "spawned";
+		/** Durable exact reviewer-session ownership; `spawning` is fail-closed across restart. */
+		reviewerSpawnState?: "queued" | "spawning" | "spawned";
 		/** Set only after `spawnTracked` returns a live command child; phase-0 `running` alone is display state. */
 		commandSpawnedAt?: number;
 		/** OS process id of the spawned command (Layer 1). */
@@ -2254,6 +2256,8 @@ export class VerificationHarness {
 	private recoveryCancellationNotifiedSignals = new Set<string>();
 	/** Exact prompt admissions waiting to learn that their signal generation was cancelled. */
 	private verifierDispatchCancellationWaiters = new Map<string, Set<(reason: string) => void>>();
+	/** Current-boot reviewer creation promises, keyed by their durable exact session ID. */
+	private reviewerCreationBarriers = new Map<string, Promise<unknown>>();
 	/** Random UUID generated once per server process. Steps stamped with this bootEpoch were started by this process. */
 	private readonly bootEpoch: string = randomUUID();
 	private readonly _persistPath: string;
@@ -2452,6 +2456,7 @@ export class VerificationHarness {
 					phase,
 					startedAt: verificationStartedAt,
 					...(s.type === "command" ? { commandSpawnState: "queued" as const } : {}),
+					...((s.type === "llm-review" || s.type === "agent-qa") ? { reviewerSpawnState: "queued" as const } : {}),
 				};
 			}),
 			overallStatus: "running",
@@ -2644,6 +2649,16 @@ export class VerificationHarness {
 		for (const v of running) {
 			this.activeVerifications.set(v.signalId, v);
 			try {
+				// A creator from the old boot cannot resume. The durable exact session
+				// identity may nevertheless have been allocated just before the crash,
+				// so cancel fail-closed and re-drive its exact terminate/unregister.
+				if (v.steps.some(step => step.reviewerSpawnState === "spawning" || step.reviewerSpawnState === "spawned")) {
+					this._markVerificationCancelled(v, "gateway-restart-recovery");
+					if (!this._persistActive()) throw new Error(`Could not persist reviewer spawn recovery fence for ${v.signalId}`);
+					this._notifyCancellationFenceCommitted(v);
+					await this._startCancelledVerificationCleanup(v);
+					continue;
+				}
 				// This is a normal running generation whose crash happened during
 				// reviewer ownership cleanup. The marker is durable authority over the
 				// exact retained session IDs, not stale process state. Settle that
@@ -4359,6 +4374,120 @@ export class VerificationHarness {
 		}
 	}
 
+	/** Persist the exact reviewer identity before any createSession call may start. */
+	private _queueReviewerSpawn(
+		context: { goalId: string; gateId: string; signalId: string; stepIndex: number },
+		sessionId: string,
+		timeoutSec?: number,
+	): boolean {
+		const active = this.activeVerifications.get(context.signalId);
+		const step = active?.steps[context.stepIndex];
+		if (!active || !step || active.goalId !== context.goalId || active.gateId !== context.gateId
+			|| active.cancelled || !this._isCurrentGateSignal(active)
+			|| (step.type !== "llm-review" && step.type !== "agent-qa")) return false;
+		// Do not leave a memory-only reviewer identity behind if its durable
+		// ownership record cannot commit. A later creator must never inherit it.
+		const previous = {
+			hasSessionId: Object.hasOwn(step, "sessionId"), sessionId: step.sessionId,
+			hasTimeoutSec: Object.hasOwn(step, "timeoutSec"), timeoutSec: step.timeoutSec,
+			hasSpawnState: Object.hasOwn(step, "reviewerSpawnState"), reviewerSpawnState: step.reviewerSpawnState,
+		};
+		step.sessionId = sessionId;
+		step.timeoutSec = timeoutSec;
+		step.reviewerSpawnState = "queued";
+		if (this._persistActive()) return true;
+		if (previous.hasSessionId) step.sessionId = previous.sessionId;
+		else delete step.sessionId;
+		if (previous.hasTimeoutSec) step.timeoutSec = previous.timeoutSec;
+		else delete step.timeoutSec;
+		if (previous.hasSpawnState) step.reviewerSpawnState = previous.reviewerSpawnState;
+		else delete step.reviewerSpawnState;
+		return false;
+	}
+
+	/** Recheck cancellation/generation at the reviewer create-session boundary. */
+	private _canAdmitReviewerSpawn(
+		context: { goalId?: string; gateId?: string; signalId?: string; stepIndex?: number },
+		sessionId: string,
+	): boolean {
+		if (!context.goalId || !context.gateId || !context.signalId || context.stepIndex === undefined) return true;
+		const active = this.activeVerifications.get(context.signalId);
+		const step = active?.steps[context.stepIndex];
+		return !!active && active.goalId === context.goalId && active.gateId === context.gateId
+			&& !active.cancelled && active.overallStatus !== "cancelled"
+			&& !this.cancelledVerificationSignals.has(context.signalId)
+			&& this._isCurrentGateSignal(active)
+			&& step?.sessionId === sessionId
+			&& step.reviewerSpawnState === "queued";
+	}
+
+	/**
+	 * Register a current-boot creator before invoking createSession. Cancellation
+	 * joins this barrier before its exact terminate/unregister cleanup; persisted
+	 * spawning/spawned state remains the restart authority.
+	 */
+	private async _createReviewerSessionWithOwnership<T>(args: {
+		sessionId: string;
+		context?: { goalId?: string; gateId?: string; signalId?: string; stepIndex?: number };
+		create: () => Promise<T>;
+		/** Must include ownership-store registration, which can race cancellation. */
+		afterCreate?: (session: T) => Promise<void>;
+	}): Promise<T | undefined> {
+		const context = args.context;
+		if (!context?.signalId || context.stepIndex === undefined) {
+			const session = await args.create();
+			await args.afterCreate?.(session);
+			return session;
+		}
+		if (!this._canAdmitReviewerSpawn(context, args.sessionId)) return undefined;
+		const active = this.activeVerifications.get(context.signalId)!;
+		const step = active.steps[context.stepIndex]!;
+		step.reviewerSpawnState = "spawning";
+		if (!this._persistActive()) {
+			step.reviewerSpawnState = "queued";
+			return undefined;
+		}
+
+		let resolveBarrier!: (value: T | undefined) => void;
+		const barrier = new Promise<T | undefined>(resolve => {
+			resolveBarrier = resolve;
+		});
+		this.reviewerCreationBarriers.set(args.sessionId, barrier);
+		try {
+			// The map entry is visible before this final admission check and before
+			// createSession can synchronously allocate its exact durable session.
+			if (!this._canAdmitReviewerSpawn(context, args.sessionId)) {
+				resolveBarrier(undefined);
+				return await barrier;
+			}
+			let session: T;
+			try {
+				session = await args.create();
+			} catch (error) {
+				// A rejected create owns no live session, but cancellation waiting on
+				// this barrier must be released so it can settle the exact no-op cleanup.
+				resolveBarrier(undefined);
+				throw error;
+			}
+			await args.afterCreate?.(session);
+			const current = this.activeVerifications.get(context.signalId);
+			const currentStep = current?.steps[context.stepIndex];
+			if (currentStep?.sessionId === args.sessionId) {
+				currentStep.reviewerSpawnState = "spawned";
+				if (!this._persistActive()) throw new Error(`Could not persist spawned reviewer ownership for ${args.sessionId}`);
+			}
+			const stillAdmitted = !!current && !current.cancelled && current.overallStatus !== "cancelled"
+				&& this._isCurrentGateSignal(current) && currentStep?.sessionId === args.sessionId;
+			resolveBarrier(session);
+			return stillAdmitted ? await barrier : undefined;
+		} finally {
+			// Covers create, registration, and spawned-state persistence rejection so
+			// a cancellation that already captured this barrier can always progress.
+			resolveBarrier(undefined);
+			if (this.reviewerCreationBarriers.get(args.sessionId) === barrier) this.reviewerCreationBarriers.delete(args.sessionId);
+		}
+	}
+
 	/** Recheck cancellation/generation at command admission boundaries. */
 	private _canAdmitCommandStep(streamCtx?: { goalId: string; gateId: string; signalId: string; stepIndex: number }): boolean {
 		if (!streamCtx) return true;
@@ -4565,7 +4694,12 @@ export class VerificationHarness {
 			for (const step of active.steps) {
 				// A persisted cleanup marker retains authority over the exact reviewer
 				// identity even after a late verdict changes a cancelled row's status.
-				if (step.sessionId && (step.status === "running" || active.reviewerCleanupPending)) {
+				// `spawning` is also owned: createSession may have allocated this exact
+				// session while cancellation was waiting on the current-boot barrier.
+				const reviewerMayExist = step.reviewerSpawnState === "spawning"
+					|| step.reviewerSpawnState === "spawned"
+					|| (step.reviewerSpawnState === undefined && step.status === "running");
+				if (step.sessionId && (reviewerMayExist || active.reviewerCleanupPending)) {
 					reviewers.set(step.sessionId, { goalId: active.goalId, sessionId: step.sessionId });
 				}
 			}
@@ -4578,16 +4712,21 @@ export class VerificationHarness {
 	 * purges the exact verifier receipts, so a late agent_end cannot redrain them.
 	 */
 	private async _terminateCancelledReviewers(reviewers: readonly { goalId: string; sessionId: string }[]): Promise<void> {
-		const cleanup: Promise<unknown>[] = [];
-		for (const { goalId, sessionId } of reviewers) {
+		const cleanup = reviewers.map(async ({ goalId, sessionId }) => {
+			// A false/not-found termination is safe only after a creator from this
+			// boot has settled; otherwise it can race a just-created reviewer.
+			const creator = this.reviewerCreationBarriers.get(sessionId);
+			if (creator) await Promise.allSettled([creator]);
 			// Start both operations before awaiting either one. Wrapping the invocation
 			// itself also converts a synchronous ownership-store failure into a settled
 			// result, so it cannot prevent the matching terminate request from starting.
-			// `terminateSession` returning false means the exact session is already gone,
-			// which is an idempotently settled cancellation cleanup.
-			cleanup.push(Promise.resolve().then(() => this.sessionManager?.terminateSession(sessionId)));
-			cleanup.push(Promise.resolve().then(() => this.teamManager?.unregisterReviewerSession(goalId, sessionId)));
-		}
+			const results = await Promise.allSettled([
+				Promise.resolve().then(() => this.sessionManager?.terminateSession(sessionId)),
+				Promise.resolve().then(() => this.teamManager?.unregisterReviewerSession(goalId, sessionId)),
+			]);
+			const failures = results.flatMap(result => result.status === "rejected" ? [result.reason] : []);
+			if (failures.length) throw new AggregateError(failures, `Failed to clean up cancelled reviewer ${sessionId}`);
+		});
 		const results = await Promise.allSettled(cleanup);
 		const failures = results.flatMap(result => result.status === "rejected" ? [result.reason] : []);
 		if (failures.length > 0) {
@@ -4599,13 +4738,32 @@ export class VerificationHarness {
 	private async _terminateCancelledReviewersFor(actives: readonly ActiveVerification[]): Promise<void> {
 		const reviewers = this._snapshotRunningReviewers(actives);
 		const affected = actives.filter(active => active.reviewerCleanupPending
-			|| active.steps.some(step => step.status === "running" && !!step.sessionId));
+			|| active.steps.some(step => !!step.sessionId && (step.reviewerSpawnState === "spawning"
+				|| step.reviewerSpawnState === "spawned"
+				|| (step.reviewerSpawnState === undefined && step.status === "running"))));
 		if (affected.length === 0) return;
 		for (const active of affected) active.reviewerCleanupPending = true;
 		if (!this._persistActive()) {
 			// Leave the in-memory fence intact so the cancelled-cleanup retry owner
 			// writes it before it can re-drive these exact reviewer identities.
 			throw new Error(`Could not persist reviewer cleanup fence for ${affected.map(active => active.signalId).join(", ")}`);
+		}
+		const creators = reviewers
+			.map(reviewer => this.reviewerCreationBarriers.get(reviewer.sessionId))
+			.filter((creator): creator is Promise<unknown> => !!creator);
+		if (creators.length > 0) {
+			// Do not treat an early not-found terminate as cleanup while a current
+			// boot can still create/register this exact session. Keep the durable
+			// marker, return the caller as pending, and re-drive exact cleanup the
+			// instant the complete creator+registration barrier settles.
+			void Promise.allSettled(creators).then(() => {
+				for (const active of affected) {
+					if (this.activeVerifications.get(active.signalId) === active && active.reviewerCleanupPending) {
+						void this._startCancelledVerificationCleanup(active);
+					}
+				}
+			});
+			throw new Error(`Reviewer creation remains in flight for ${affected.map(active => active.signalId).join(", ")}`);
 		}
 		if (reviewers.length > 0) await this._terminateCancelledReviewers(reviewers);
 		for (const active of affected) delete active.reviewerCleanupPending;
@@ -5527,6 +5685,7 @@ export class VerificationHarness {
 						phase,
 						startedAt: verificationStartedAt,
 						...(s.type === "command" ? { commandSpawnState: "queued" as const } : {}),
+						...((s.type === "llm-review" || s.type === "agent-qa") ? { reviewerSpawnState: "queued" as const } : {}),
 					};
 				}),
 				overallStatus: "running",
@@ -5866,6 +6025,9 @@ export class VerificationHarness {
 							const prefix = step.type === "agent-qa" ? "agent-qa" : "llm-review";
 							stepSessionId = `${prefix}-${randomUUID().slice(0, 12)}`;
 							active.steps[index].startedAt = Date.now();
+							if (!this._queueReviewerSpawn({ goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id, stepIndex: index }, stepSessionId, reviewTimeoutSec)) {
+								throw new Error(`Could not persist queued reviewer ownership for ${stepSessionId}`);
+							}
 							this.broadcastFn(signal.goalId, {
 								type: "gate_verification_step_started",
 								goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
@@ -5873,12 +6035,6 @@ export class VerificationHarness {
 								startedAt: active.steps[index].startedAt,
 								sessionId: stepSessionId, timeoutSec: reviewTimeoutSec, phase,
 							});
-							const av = this.activeVerifications.get(signal.id);
-							if (av && av.steps[index]) {
-								av.steps[index].sessionId = stepSessionId;
-								av.steps[index].timeoutSec = reviewTimeoutSec;
-								this._persistActive();
-							}
 						}
 
 						if (step.type === "command") {
@@ -6040,6 +6196,9 @@ export class VerificationHarness {
 										attemptSessionId = `agent-qa-${randomUUID().slice(0, 12)}`;
 										console.log(`[verification][reviewer-lifecycle] agent-qa "${step.name}" from-scratch retry attempt ${attempt}/${maxBoundedAttempts}: retiring session ${retiredSessionId ?? "<none>"} → fresh session ${attemptSessionId} (goal=${signal.goalId}, timeout=${reviewTimeoutSec}s). Prior transcript preserved.`);
 										active.steps[index].startedAt = Date.now();
+										if (!this._queueReviewerSpawn({ goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id, stepIndex: index }, attemptSessionId, reviewTimeoutSec)) {
+											throw new Error(`Could not persist queued reviewer ownership for ${attemptSessionId}`);
+										}
 										if (!active.cancelled) this.broadcastFn(signal.goalId, {
 											type: "gate_verification_step_started",
 											goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
@@ -6047,12 +6206,6 @@ export class VerificationHarness {
 											startedAt: active.steps[index].startedAt,
 											sessionId: attemptSessionId, timeoutSec: reviewTimeoutSec, phase,
 										});
-										const avRetry = this.activeVerifications.get(signal.id);
-										if (avRetry && avRetry.steps[index]) {
-											avRetry.steps[index].sessionId = attemptSessionId;
-											avRetry.steps[index].timeoutSec = reviewTimeoutSec;
-											this._persistActive();
-										}
 									} else {
 										console.log(`[verification][reviewer-lifecycle] agent-qa "${step.name}" attempt 1/${maxBoundedAttempts}: session ${attemptSessionId ?? "<none>"} (goal=${signal.goalId}, timeout=${reviewTimeoutSec}s).`);
 									}
@@ -6061,7 +6214,7 @@ export class VerificationHarness {
 										cwd, signal.goalId, builtinVars,
 										signal.content, signal.metadata,
 										goalSpec, allGateStates, attemptSessionId,
-										{ gateId: signal.gateId, signalId: signal.id },
+										{ gateId: signal.gateId, signalId: signal.id, stepIndex: index },
 									);
 									result = qaResult;
 									if (qaResult.artifact) {
@@ -6179,6 +6332,9 @@ export class VerificationHarness {
 										attemptSessionId = `llm-review-${randomUUID().slice(0, 12)}`;
 										console.log(`[verification][reviewer-lifecycle] llm-review "${step.name}" from-scratch retry attempt ${attempt}/${maxBoundedAttempts}: retiring session ${retiredSessionId ?? "<none>"} → fresh session ${attemptSessionId} (goal=${signal.goalId}, timeout=${reviewTimeoutSec}s). Prior transcript preserved.`);
 										active.steps[index].startedAt = Date.now();
+										if (!this._queueReviewerSpawn({ goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id, stepIndex: index }, attemptSessionId, reviewTimeoutSec)) {
+											throw new Error(`Could not persist queued reviewer ownership for ${attemptSessionId}`);
+										}
 										if (!active.cancelled) this.broadcastFn(signal.goalId, {
 											type: "gate_verification_step_started",
 											goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
@@ -6186,12 +6342,6 @@ export class VerificationHarness {
 											startedAt: active.steps[index].startedAt,
 											sessionId: attemptSessionId, timeoutSec: reviewTimeoutSec, phase,
 										});
-										const avRetry = this.activeVerifications.get(signal.id);
-										if (avRetry && avRetry.steps[index]) {
-											avRetry.steps[index].sessionId = attemptSessionId;
-											avRetry.steps[index].timeoutSec = reviewTimeoutSec;
-											this._persistActive();
-										}
 									} else {
 										console.log(`[verification][reviewer-lifecycle] llm-review "${step.name}" attempt 1/${maxBoundedAttempts}: session ${attemptSessionId ?? "<none>"} (goal=${signal.goalId}, timeout=${reviewTimeoutSec}s).`);
 									}
@@ -6200,7 +6350,7 @@ export class VerificationHarness {
 										cwd, builtinVars,
 										signal.content, signal.metadata,
 										goalSpec, allGateStates, signal.goalId, attemptSessionId,
-										gate, { gateId: signal.gateId, signalId: signal.id },
+										gate, { gateId: signal.gateId, signalId: signal.id, stepIndex: index },
 									);
 									if (result.status === "timeout") break;
 									const decision = shouldRetryVerificationStep({
@@ -6369,7 +6519,7 @@ export class VerificationHarness {
 		goalId?: string,
 		sessionId?: string,
 		gate?: WorkflowGate,
-		verificationContext?: { gateId?: string; signalId?: string },
+		verificationContext?: { gateId?: string; signalId?: string; stepIndex?: number },
 	): Promise<ReviewStepExecutionResult> {
 		const roleName = step.role || "reviewer";
 		// Goal-scoped inline roles win over the role store. The default
@@ -6821,7 +6971,7 @@ export class VerificationHarness {
 		kickoff: string,
 		timeoutMs: number,
 		preGeneratedSessionId?: string,
-		verificationContext?: { gateId?: string; signalId?: string },
+		verificationContext?: { gateId?: string; signalId?: string; stepIndex?: number },
 	): Promise<ReviewStepExecutionResult> {
 		// Pause-cascade backstop: race-window guard. The mainline path is
 		// blocked at `/gates/:id/signal` (server.ts), but a deep descendant
@@ -6889,18 +7039,28 @@ export class VerificationHarness {
 			const goalProjectId = this.projectContextManager?.getContextForGoal(goalId)?.project.id;
 			if (!goalProjectId) throw new Error(`Cannot create verification review session: goal "${goalId}" has no projectId`);
 
-			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
-				rolePrompt: combinedPrompt,
-				roleName,
-				...reviewerMeta,
-				sandboxed: isSandboxed,
-				projectId: goalProjectId,
+			const session = await this._createReviewerSessionWithOwnership({
 				sessionId,
-				skipAutoModel: true,
-				skipAutoThinking: true,
-				initialModel: _preInitialModel,
-				initialThinkingLevel: _preInitialThinking,
+				context: verificationContext,
+				create: () => this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
+					rolePrompt: combinedPrompt,
+					roleName,
+					...reviewerMeta,
+					sandboxed: isSandboxed,
+					projectId: goalProjectId,
+					sessionId,
+					skipAutoModel: true,
+					skipAutoThinking: true,
+					initialModel: _preInitialModel,
+					initialThinkingLevel: _preInitialThinking,
+				}),
+				afterCreate: async () => {
+					if (!this.teamManager) return;
+					try { await this.teamManager.registerReviewerSession(goalId, sessionId, step.name); }
+					catch (err) { console.warn(`[verification] Failed to register reviewer session in team:`, err); }
+				},
 			});
+			if (!session) return { passed: false, output: "Reviewer session creation cancelled before spawn.", sessionId };
 
 			// Set title and metadata. `step.name` is optional — many inline
 			// workflows skip it. Fall back to step.role / "Review" so the
@@ -6917,15 +7077,6 @@ export class VerificationHarness {
 			// contract pinned by tests/verification-reviewer-meta.test.ts.
 			this.sessionManager!.updateSessionMeta(sessionId, reviewerMeta);
 
-			// Register in team store (if team manager available)
-			if (this.teamManager) {
-				try {
-					await this.teamManager.registerReviewerSession(goalId, sessionId, step.name);
-				} catch (err) {
-					// Non-fatal — session still works even if team registration fails
-					console.warn(`[verification] Failed to register reviewer session in team:`, err);
-				}
-			}
 
 			// Resolve role overrides so they win over default.reviewModel/Thinking.
 			const roleOverrides_r = this.resolveRoleForGoal(roleName, goalId);
@@ -7173,15 +7324,22 @@ export class VerificationHarness {
 			// across terminateSession, a late verdict is still captured
 			// (capturingResolver) and honored below.
 			if (sessionId) {
-				try {
-					await this.sessionManager!.terminateSession(sessionId);
-				} catch { /* ignore — session may already be terminated */ }
-				this.pendingResults.delete(sessionId);
-				if (this.teamManager) {
+				// Cancellation's durable cleanup owner joins the creator/registration
+				// barrier and must exclusively perform exact terminate/unregister.
+				const cleanupPending = this.activeVerifications.get(verificationContext?.signalId ?? "")?.reviewerCleanupPending === true;
+				const cleanupOwned = cleanupPending || (!!verificationContext?.signalId && this.cancelledVerificationSignals.has(verificationContext.signalId));
+				if (!cleanupOwned) {
 					try {
-						await this.teamManager.unregisterReviewerSession(goalId, sessionId);
-					} catch { /* ignore */ }
+						await this.sessionManager!.terminateSession(sessionId);
+					} catch { /* ignore — session may already be terminated */ }
+					if (this.teamManager) {
+						try {
+							await this.teamManager.unregisterReviewerSession(goalId, sessionId);
+						} catch { /* ignore */ }
+					}
 				}
+				this.pendingResults.delete(sessionId);
+				if (cleanupPending) await this._cancelledCleanupPromises.get(verificationContext?.signalId ?? "");
 				// If the reviewer's verdict landed during teardown and we were about
 				// to return the "did not call verification_result" hard failure,
 				// honor the late verdict instead of dropping it.
@@ -7246,7 +7404,7 @@ export class VerificationHarness {
 		goalSpec?: string,
 		allGateStates?: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>,
 		sessionId?: string,
-		verificationContext?: { gateId?: string; signalId?: string },
+		verificationContext?: { gateId?: string; signalId?: string; stepIndex?: number },
 	): Promise<ReviewStepExecutionResult & { artifact?: { content: string; contentType: string } }> {
 		const QA_MAX_ARTIFACT = 10 * 1024 * 1024; // 10 MB — same limit as llm-review artifacts
 		// Inline-roles-aware lookup. Same fallback chain as before: explicit
@@ -7309,7 +7467,7 @@ export class VerificationHarness {
 		// Pre-generate sessionId and register the verification_result resolver
 		// before session creation so same-session recovery can keep using the
 		// original identity even when startup/prompt delivery fails.
-		let qaSessionId: string | undefined = sessionId || `agent-qa-${randomUUID().slice(0, 12)}`;
+		const qaSessionId = sessionId || `agent-qa-${randomUUID().slice(0, 12)}`;
 		const { promise: resultPromise, resolve: resultResolver } = deferred<VerificationResult>();
 		let qaCapturedVerdict: VerificationResult | null = null;
 		let qaHardFailureNoResult = false;
@@ -7355,19 +7513,28 @@ export class VerificationHarness {
 			const qaGoalProjectId = this.projectContextManager?.getContextForGoal(goalId)?.project.id;
 			if (!qaGoalProjectId) throw new Error(`Cannot create verification QA session: goal "${goalId}" has no projectId`);
 
-			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
-				rolePrompt: combinedPrompt,
-				roleName: qaRoleName,
-				...qaReviewerMeta,
-				sandboxed: qaIsSandboxed,
-				projectId: qaGoalProjectId,
+			const session = await this._createReviewerSessionWithOwnership({
 				sessionId: qaSessionId,
-				skipAutoModel: true,
-				skipAutoThinking: true,
-				initialModel: _preQaInitialModel,
-				initialThinkingLevel: _preQaInitialThinking,
+				context: verificationContext,
+				create: () => this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
+					rolePrompt: combinedPrompt,
+					roleName: qaRoleName,
+					...qaReviewerMeta,
+					sandboxed: qaIsSandboxed,
+					projectId: qaGoalProjectId,
+					sessionId: qaSessionId,
+					skipAutoModel: true,
+					skipAutoThinking: true,
+					initialModel: _preQaInitialModel,
+					initialThinkingLevel: _preQaInitialThinking,
+				}),
+				afterCreate: async () => {
+					if (!this.teamManager) return;
+					try { await this.teamManager.registerReviewerSession(goalId, qaSessionId, step.name); }
+					catch (err) { console.warn(`[verification] Failed to register QA session in team:`, err); }
+				},
 			});
-			qaSessionId = session.id;
+			if (!session) return { passed: false, output: "QA session creation cancelled before spawn.", sessionId: qaSessionId };
 
 			// Set title and metadata — same fallback as llm-review above.
 			// Same teamLeadSessionId stamp so the sidebar can nest this QA
@@ -7380,14 +7547,6 @@ export class VerificationHarness {
 			this.sessionManager!.setTitle(qaSessionId, `${qaTitlePrefix}: ${qaFunName}`);
 			this.sessionManager!.updateSessionMeta(qaSessionId, qaReviewerMeta);
 
-			// Register in team store
-			if (this.teamManager) {
-				try {
-					await this.teamManager.registerReviewerSession(goalId, qaSessionId, step.name);
-				} catch (err) {
-					console.warn(`[verification] Failed to register QA session in team:`, err);
-				}
-			}
 
 			// Resolve role overrides for QA — role wins over default.reviewModel/Thinking.
 			const roleOverrides_q = this.resolveRoleForGoal(qaRoleName, goalId);
@@ -7628,14 +7787,18 @@ export class VerificationHarness {
 		} finally {
 			try { qaErrListenerUnsub?.(); } catch { /* ignore */ }
 			if (qaSessionId) {
-				// Terminate BEFORE deleting the pending resolver so a verdict POST
-				// racing teardown is still captured, not 404-dropped (see the
-				// delete-vs-late-POST fix in runLlmReviewViaSession).
-				try { await this.sessionManager!.terminateSession(qaSessionId); } catch { /* ignore */ }
-				this.pendingResults.delete(qaSessionId);
-				if (this.teamManager) {
-					try { await this.teamManager.unregisterReviewerSession(goalId, qaSessionId); } catch { /* ignore */ }
+				// Cancellation's durable cleanup owner joins the creator/registration
+				// barrier and must exclusively perform exact terminate/unregister.
+				const cleanupPending = this.activeVerifications.get(verificationContext?.signalId ?? "")?.reviewerCleanupPending === true;
+				const cleanupOwned = cleanupPending || (!!verificationContext?.signalId && this.cancelledVerificationSignals.has(verificationContext.signalId));
+				if (!cleanupOwned) {
+					try { await this.sessionManager!.terminateSession(qaSessionId); } catch { /* ignore */ }
+					if (this.teamManager) {
+						try { await this.teamManager.unregisterReviewerSession(goalId, qaSessionId); } catch { /* ignore */ }
+					}
 				}
+				this.pendingResults.delete(qaSessionId);
+				if (cleanupPending) await this._cancelledCleanupPromises.get(verificationContext?.signalId ?? "");
 				if (qaHardFailureNoResult && qaCapturedVerdict) {
 					const v: VerificationResult = qaCapturedVerdict;
 					const artifact = v.reportHtml
