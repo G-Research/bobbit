@@ -1,3 +1,4 @@
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	WorktreeServiceCoordinator,
@@ -9,7 +10,9 @@ import { ServiceToolAdapterRegistry, ServiceToolOperationScheduler } from "../..
 
 const projectId = "3f7a1c2e-0000-4000-8000-000000000000";
 const packId = "My_Pack.v2";
-const root = "/work/project-wt/feature";
+const root = path.resolve("work", "project-wt", "feature");
+const stateA = path.resolve("state", "project-a");
+const stateB = path.resolve("state", "project-b");
 const session = { id: "session-a", projectId, worktreePath: root, repoWorktrees: { ".": root } };
 const declaration = { packId, spec: { id: "service-a", dataDir: "cache" } };
 
@@ -20,7 +23,7 @@ function fixture(overrides: Partial<WorktreeServiceCoordinatorDeps> = {}) {
 	const stopped: ServiceInstanceRef[] = [];
 	const removed: string[] = [];
 	let activeCalls = 0;
-	let stateDir: string | undefined = "/state/project-a";
+	let stateDir: string | undefined = stateA;
 	let declarations: readonly typeof declaration[] = [declaration];
 	const operations = new ServiceToolAdapterRegistry();
 	const queryOperation = {
@@ -63,6 +66,10 @@ function request(overrides: Record<string, unknown> = {}) {
 	return { sessionId: session.id, packId, request: { component: ".", serviceId: "service-a", operation: "query", payload: { query: "ok" }, ...overrides } };
 }
 
+function expectManagedServicePath(target: string, stateRoot: string): void {
+	expect(target.startsWith(`${path.join(stateRoot, "managed-services", "v1")}${path.sep}`)).toBe(true);
+}
+
 describe("worktree service coordinator", () => {
 	it("accepts UUID project IDs and platform-valid pack identifiers throughout lifecycle operations", async () => {
 		const f = fixture();
@@ -100,7 +107,7 @@ describe("worktree service coordinator", () => {
 		const f = fixture();
 		await f.coordinator.reconcileProject(projectId);
 		const ref = f.reconciled[0];
-		expect(f.coordinator.resolveDataDir(ref, "cache")).toMatch(/^\/state\/project-a\/managed-services\/v1\//);
+		expectManagedServicePath(f.coordinator.resolveDataDir(ref, "cache"), stateA);
 		expect(() => f.coordinator.resolveDataDir(ref, "../escape")).toThrow("unavailable");
 	});
 
@@ -197,7 +204,7 @@ describe("worktree service coordinator", () => {
 		await f.coordinator.cleanupRemovedSessionWorktrees(projectId, session.id, [root]);
 		expect(f.stopped).toHaveLength(1);
 		expect(f.removed).toHaveLength(1);
-		expect(f.removed[0]).toContain("/managed-services/v1/");
+		expectManagedServicePath(f.removed[0]!, stateA);
 	});
 
 	it("retains a shared archived cleanup owner until its own worktree is confirmed removed", async () => {
@@ -233,31 +240,31 @@ describe("worktree service coordinator", () => {
 	it("removes a committed replacement's old state root, never the live new root", async () => {
 		const f = fixture();
 		await f.coordinator.reconcileProject(projectId);
-		f.setStateDir("/state/project-b");
+		f.setStateDir(stateB);
 
 		await f.coordinator.suspendProject(projectId);
 		await f.coordinator.stopProject(projectId);
 
 		expect(f.removed).toHaveLength(1);
-		expect(f.removed[0]).toMatch(/^\/state\/project-a\/managed-services\/v1\//);
-		expect(f.removed[0]).not.toContain("/state/project-b/");
+		expectManagedServicePath(f.removed[0]!, stateA);
+		expect(f.removed[0]!.startsWith(`${path.join(stateB, "managed-services", "v1")}${path.sep}`)).toBe(false);
 	});
 
 	it("does not delete an incoming A root during an A-to-B-to-A replacement", async () => {
 		const f = fixture();
 		await f.coordinator.reconcileProject(projectId);
-		f.setStateDir("/state/project-b");
+		f.setStateDir(stateB);
 		await f.coordinator.suspendProject(projectId);
 		await f.coordinator.stopProject(projectId);
 
 		await f.coordinator.reconcileProject(projectId);
-		f.setStateDir("/state/project-a");
+		f.setStateDir(stateA);
 		await f.coordinator.suspendProject(projectId);
 		await f.coordinator.stopProject(projectId);
 
 		expect(f.removed).toHaveLength(2);
-		expect(f.removed[0]).toMatch(/^\/state\/project-a\/managed-services\/v1\//);
-		expect(f.removed[1]).toMatch(/^\/state\/project-b\/managed-services\/v1\//);
+		expectManagedServicePath(f.removed[0]!, stateA);
+		expectManagedServicePath(f.removed[1]!, stateB);
 	});
 
 	it("fails closed when a new instance has no state authority", async () => {

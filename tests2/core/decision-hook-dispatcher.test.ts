@@ -1,8 +1,10 @@
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { ActionError } from "../../src/server/extension-host/action-dispatcher.ts";
 import { DecisionHookDispatcher } from "../../src/server/agent/decision-request-manager.ts";
 
 const base = { projectId: "project-a", sessionId: "session-a", cwd: "/work" };
+const projectRoot = path.resolve("project");
 
 function hook(id: string, packRoot: string): any {
 	return {
@@ -17,7 +19,7 @@ describe("decision hook dispatcher selections", () => {
 		imported.events = ["projectImported"];
 		const run: any = {
 			id: "import-1", projectId: "project-a", createdAt: "2026-01-01T00:00:00.000Z",
-			context: { event: "projectImported", projectId: "project-a", importId: "import-1", projectRoot: "/project", ownedRoots: ["/project"], components: [] },
+			context: { event: "projectImported", projectId: "project-a", importId: "import-1", projectRoot, ownedRoots: [projectRoot], components: [] },
 			hooks: {},
 		};
 		let imports = 0;
@@ -50,7 +52,7 @@ describe("decision hook dispatcher selections", () => {
 		imported.events = ["projectImported"];
 		const run: any = {
 			id: "import-1", projectId: "project-a", createdAt: "2026-01-01T00:00:00.000Z",
-			context: { event: "projectImported", projectId: "project-a", importId: "import-1", projectRoot: "/project", ownedRoots: ["/project"], components: [] },
+			context: { event: "projectImported", projectId: "project-a", importId: "import-1", projectRoot, ownedRoots: [projectRoot], components: [] },
 			hooks: {},
 		};
 		let granted = false;

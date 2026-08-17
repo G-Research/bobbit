@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { ProjectImportDecisionCoordinator } from "../../src/server/agent/project-import-decision-coordinator.ts";
+
+const projectRoot = path.resolve("project");
+const registeredProjectRoot = path.resolve("registered-project");
+const forgedProjectRoot = path.resolve("forged-project");
 
 describe("ProjectImportDecisionCoordinator", () => {
 	it("persists dispatch outcomes in the project/import trace once without a session", async () => {
@@ -11,7 +16,7 @@ describe("ProjectImportDecisionCoordinator", () => {
 		let dispatches = 0;
 		const coordinator = new ProjectImportDecisionCoordinator({
 			registry: {
-				get: (projectId: string) => projectId === "project-1" ? { id: "project-1", rootPath: "/project", importDecisionRun: run } : undefined,
+				get: (projectId: string) => projectId === "project-1" ? { id: "project-1", rootPath: projectRoot, importDecisionRun: run } : undefined,
 				list: () => [],
 			} as any,
 			projectContextManager: {
@@ -24,7 +29,7 @@ describe("ProjectImportDecisionCoordinator", () => {
 				}),
 			} as any,
 			buildContext: ({ project, importId }) => ({
-				event: "projectImported" as const, projectId: project.id, importId, projectRoot: "/project", ownedRoots: ["/project"], components: [],
+				event: "projectImported" as const, projectId: project.id, importId, projectRoot, ownedRoots: [projectRoot], components: [],
 			}),
 			canonicalProjectRoot: project => project.rootPath,
 			dispatcher: {
@@ -61,9 +66,9 @@ describe("ProjectImportDecisionCoordinator", () => {
 		const coordinator = new ProjectImportDecisionCoordinator({
 			registry: {
 				get: (projectId: string) => ["project-1", "project-2", "project-3"].includes(projectId)
-					? { id: projectId, rootPath: `/${projectId}`, importDecisionRun: ready(projectId) }
+					? { id: projectId, rootPath: path.resolve(projectId), importDecisionRun: ready(projectId) }
 					: undefined,
-				list: () => ["project-1", "project-2", "project-3"].map(id => ({ id, rootPath: `/${id}`, importDecisionRun: ready(id) })),
+				list: () => ["project-1", "project-2", "project-3"].map(id => ({ id, rootPath: path.resolve(id), importDecisionRun: ready(id) })),
 			} as any,
 			projectContextManager: {
 				getOrCreate: () => ({
@@ -120,7 +125,7 @@ describe("ProjectImportDecisionCoordinator", () => {
 		let dispatched = 0;
 		const coordinator = new ProjectImportDecisionCoordinator({
 			registry: {
-				get: () => ({ id: "project-1", rootPath: "/registered-project", importDecisionRun: run }),
+				get: () => ({ id: "project-1", rootPath: registeredProjectRoot, importDecisionRun: run }),
 				list: () => [],
 			} as any,
 			projectContextManager: {
@@ -128,7 +133,7 @@ describe("ProjectImportDecisionCoordinator", () => {
 					decisionRequestStore: {
 						getImportRun: () => ({
 							id: "import-1", projectId: "project-1", createdAt: new Date().toISOString(), hooks: {},
-							context: { event: "projectImported", projectId: "project-1", importId: "import-1", projectRoot: "/forged-project", ownedRoots: ["/forged-project"], components: [] },
+							context: { event: "projectImported", projectId: "project-1", importId: "import-1", projectRoot: forgedProjectRoot, ownedRoots: [forgedProjectRoot], components: [] },
 						}),
 						ensureImportRun: () => { throw new Error("must not replace a durable run"); },
 					},
