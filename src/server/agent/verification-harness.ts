@@ -4865,7 +4865,7 @@ export class VerificationHarness {
 		} catch (err) {
 			console.warn(`[verification] Cancellation cleanup for ${active.signalId} did not settle: ${(err as Error).message}`);
 			this._persistActive();
-			return this.activeVerifications.get(active.signalId) === active && active.cancelled;
+			return this.activeVerifications.get(active.signalId) === active && active.cancelled === true;
 		}
 	}
 
