@@ -446,13 +446,14 @@ test("reviewer cleanup failure stays durable and blocks cancellation publication
 		cancellation: { cause: "manual", requestedAt: expect.any(Number) },
 		steps: [expect.objectContaining({ sessionId: fixture.reviewerSessionId, status: "running" })],
 	});
-	const durablePending = JSON.parse(fs.readFileSync(path.join(fixture.stateDir, "active-verifications.json"), "utf8"));
-	expect(durablePending.verifications).toEqual([expect.objectContaining({
+	const durablePending = (fixture.harness as any)._loadActive()
+		.find((verification: ActiveVerification) => verification.signalId === fixture.signal.id)!;
+	expect(durablePending).toMatchObject({
 		signalId: fixture.signal.id,
 		reviewerCleanupPending: true,
 		cancellation: expect.objectContaining({ cause: "manual" }),
 		steps: [expect.objectContaining({ sessionId: fixture.reviewerSessionId })],
-	})]);
+	});
 	expect(fixture.gateStore.getGate(GOAL_ID, GATE_ID)!.signals.find(signal => signal.id === fixture.signal.id)!.verification?.status,
 		"REVIEWER_CLEANUP_FAILURE_MUST_NOT_PUBLISH_CANCELLED_EARLY").toBe("running");
 	expect(fixture.events.filter(event => event.type === "gate_verification_complete"),
@@ -463,7 +464,9 @@ test("reviewer cleanup failure stays durable and blocks cancellation publication
 	// cleanup; retry must not lose that owner by filtering only running rows.
 	Object.assign(pending.steps[0], { status: "passed", passed: true, output: "Late reviewer callback." });
 	(fixture.harness as any)._persistActive();
-	expect(JSON.parse(fs.readFileSync(path.join(fixture.stateDir, "active-verifications.json"), "utf8")).verifications[0]).toMatchObject({
+	const durableLateCallback = (fixture.harness as any)._loadActive()
+		.find((verification: ActiveVerification) => verification.signalId === fixture.signal.id)!;
+	expect(durableLateCallback).toMatchObject({
 		reviewerCleanupPending: true,
 		steps: [expect.objectContaining({ sessionId: fixture.reviewerSessionId, status: "passed" })],
 	});
@@ -519,7 +522,9 @@ test("restart re-drives persisted reviewer cleanup failure without losing the ex
 		cancellation: { cause: "goal-pause" },
 		steps: [expect.objectContaining({ sessionId: reviewerSessionId })],
 	});
-	expect(JSON.parse(fs.readFileSync(path.join(initial.stateDir, "active-verifications.json"), "utf8")).verifications[0]).toMatchObject({
+	const durableRetained = (failedRecovery as any)._loadActive()
+		.find((verification: ActiveVerification) => verification.signalId === initial.signal.id)!;
+	expect(durableRetained).toMatchObject({
 		reviewerCleanupPending: true,
 		cancellation: { cause: "goal-pause" },
 		steps: [expect.objectContaining({ sessionId: reviewerSessionId })],
