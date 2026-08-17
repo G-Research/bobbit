@@ -16,7 +16,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "vitest";
 
-import { GateStore, type GateSignal } from "../../src/server/agent/gate-store.js";
+import { GateStore, type GateSignal, type GateStatus } from "../../src/server/agent/gate-store.js";
 import { VerificationHarness } from "../../src/server/agent/verification-harness.js";
 import type { WorkflowGate } from "../../src/server/agent/workflow-store.js";
 import { createManualClock } from "../harness/clock.js";
@@ -1117,12 +1117,12 @@ test("a held stale strict gate write cannot overwrite a replacement generation o
 	const strictWriteStarted = deferredVoid();
 	const releaseStrictWrite = deferredVoid();
 	const updateGateStatusStrict = gateStore.updateGateStatusStrict.bind(gateStore);
-	(gateStore as any).updateGateStatusStrict = (...args: any[]) => {
+	(gateStore as any).updateGateStatusStrict = (goalId: string, gateId: string, status: GateStatus) => {
 		// GateStore updates its in-memory gate synchronously before returning the
 		// strict persistence promise. Hold only that promise's resolution so the
 		// replacement interleaves with a real durable-write await, not before the
 		// finalizer invokes the strict method.
-		const persisted = updateGateStatusStrict(...args);
+		const persisted = updateGateStatusStrict(goalId, gateId, status);
 		strictWriteStarted.resolve();
 		return Promise.all([persisted, releaseStrictWrite.promise]).then(() => undefined);
 	};
