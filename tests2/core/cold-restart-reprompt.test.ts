@@ -462,7 +462,7 @@ describe("cold-restart re-prompt (reproducing)", () => {
 		await flush();
 
 		assert.equal(prompts.length, 1, "rollback canonical bridge receives one continuation, never a provisional duplicate");
-		assert.equal(ps.wasStreaming, false);
+		assert.equal(ps.wasStreaming, true, "accepted continuation remains restartable until lifecycle settlement");
 	});
 
 	it.each(["stop", "terminate"])("cancels deferred wasStreaming continuation when queued %s wins", async (terminal) => {

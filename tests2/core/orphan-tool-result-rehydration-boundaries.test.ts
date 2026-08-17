@@ -796,7 +796,10 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(canonical?.status).toBe("idle");
 		expect(canonical?.completedTurnCount).toBe(1);
 		expect(canonical?.restoreStartupWasStreaming).toBe(false);
-		expect(manager._testStore.update).toHaveBeenCalledWith(ps.id, { wasStreaming: false });
+		expect(manager._testStore.update).toHaveBeenCalledWith(ps.id, expect.objectContaining({
+			wasStreaming: false,
+			streamingStartedAt: undefined,
+		}));
 		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(false);
 	});
 
@@ -977,7 +980,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 			{ streamingBehavior: "followUp" },
 		);
 		expect(manager.sessions.get(ps.id)?.restoreStartupWasStreaming).toBe(false);
-		expect(ps.wasStreaming).toBe(false);
+		expect(ps.wasStreaming, "accepted continuation stays durable until agent_end").toBe(true);
 		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(false);
 	});
 
