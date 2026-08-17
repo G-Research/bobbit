@@ -2657,21 +2657,7 @@ export class VerificationHarness {
 					continue;
 				}
 
-				// Skip verifications for goals that completed/shelved while we were down
-				const goal = this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId);
-				if (goal && (goal.state === "complete" || goal.state === "shelved")) {
-					if (process.env.BOBBIT_DEBUG) console.log(`[verification] Cleaning resumed verification ${v.signalId} for ${goal.state} goal ${v.goalId}`);
-					// A retry after the crash window must delete this record, not resume it.
-					this._markVerificationCancelled(v, goal.state === "shelved" ? "shelved" : "goal-complete");
-					if (!this._persistActive()) throw new Error(`Could not persist cancellation fence for ${v.signalId}`);
-					this._notifyCancellationFenceCommitted(v);
-					await this._startCancelledVerificationCleanup(v);
-					continue;
-				}
-				await this._resumeOneVerification(v);
-				// A restart-resume path can return after discovering a replacement.
-				// Apply the same durable supersession guard before any fallback path.
-				if (this._cancellationOwnsTerminalPublication(v)) continue;
+				await this._continueRecoveredRunningVerification(v);
 			} catch (err) {
 				const errMsg = (err as Error).message;
 				if (!this._isResumeStillActive(v)) {
@@ -2986,6 +2972,27 @@ export class VerificationHarness {
 		}
 		await this._startCancelledVerificationCleanup(active);
 		return true;
+	}
+
+	/**
+	 * Preserve lifecycle-terminal cancellation precedence whenever a recovered
+	 * running row is about to resume, including after orphan reviewer cleanup.
+	 */
+	private async _continueRecoveredRunningVerification(v: ActiveVerification): Promise<void> {
+		if (!this._isResumeStillActive(v) || v.pendingTerminalIntent || v.reviewerCleanupPending) return;
+		const goal = this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId);
+		if (goal && (goal.state === "complete" || goal.state === "shelved")) {
+			if (process.env.BOBBIT_DEBUG) console.log(`[verification] Cleaning resumed verification ${v.signalId} for ${goal.state} goal ${v.goalId}`);
+			this._markVerificationCancelled(v, goal.state === "shelved" ? "shelved" : "goal-complete");
+			if (!this._persistActive()) throw new Error(`Could not persist cancellation fence for ${v.signalId}`);
+			this._notifyCancellationFenceCommitted(v);
+			await this._startCancelledVerificationCleanup(v);
+			return;
+		}
+		await this._resumeOneVerification(v);
+		// A restart-resume path can return after discovering a replacement.
+		// Apply the same durable supersession guard before any fallback path.
+		this._cancellationOwnsTerminalPublication(v);
 	}
 
 	private async _continueResumeWithRemainingPhases(v: ActiveVerification): Promise<boolean> {
@@ -4858,7 +4865,7 @@ export class VerificationHarness {
 			}
 			if (!this._isResumeStillActive(active) || active.pendingTerminalIntent || active.reviewerCleanupPending) return;
 			this._orphanReviewerCleanupRetryAttempts.delete(active.signalId);
-			await this._resumeOneVerification(active);
+			await this._continueRecoveredRunningVerification(active);
 		})().finally(() => {
 			if (this._orphanReviewerCleanupRecoveryPromises.get(active.signalId) === recovery) {
 				this._orphanReviewerCleanupRecoveryPromises.delete(active.signalId);
@@ -4887,14 +4894,7 @@ export class VerificationHarness {
 				// boot; only a still-pending reviewer cleanup is retried here.
 				console.warn(`[verification] Orphan reviewer recovery for ${signalId} failed: ${(err as Error).message}`);
 			}
-			if (this.activeVerifications.get(signalId) === active
-				&& !active.cancelled
-				&& !active.pendingTerminalIntent
-				&& !this._hasPendingCommandKillCleanup(active)
-				&& !active.reviewerCleanupPending) {
-				this.activeVerifications.delete(signalId);
-				this._persistActive();
-			} else if (this._isOrphanReviewerCleanupRecoveryActive(active)) {
+			if (this._isOrphanReviewerCleanupRecoveryActive(active)) {
 				this._scheduleOrphanReviewerCleanupRetry(signalId);
 			}
 		}, delayMs);
