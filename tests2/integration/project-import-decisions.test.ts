@@ -121,11 +121,26 @@ function checkoutGrant(): string {
 	].join("\n") + "\n";
 }
 
+function enterInteractiveDecisionMode(): () => void {
+	const priorCi = process.env.CI;
+	const priorHeadless = process.env.BOBBIT_HEADLESS;
+	process.env.CI = "false";
+	process.env.BOBBIT_HEADLESS = "0";
+	return () => {
+		if (priorCi === undefined) delete process.env.CI;
+		else process.env.CI = priorCi;
+		if (priorHeadless === undefined) delete process.env.BOBBIT_HEADLESS;
+		else process.env.BOBBIT_HEADLESS = priorHeadless;
+	};
+}
+
 test.describe("project import decisions — real gateway lifecycle", () => {
 	let packDir = "";
 	let originalPackOrder: string[] = [];
+	let restoreDecisionMode = () => {};
 
 	test.beforeAll(async ({ gateway }) => {
+		restoreDecisionMode = enterInteractiveDecisionMode();
 		originalPackOrder = (await readJson<{ order: string[] }>(await apiFetch("/api/marketplace/pack-order?scope=server"))).order;
 		packDir = writeFixturePack(gateway.bobbitDir);
 		await notifyPackFilesystemMutation(originalPackOrder);
@@ -136,11 +151,15 @@ test.describe("project import decisions — real gateway lifecycle", () => {
 	});
 
 	test.afterAll(async () => {
-		await apiFetch("/api/marketplace/pack-activation", {
-			method: "PUT", body: JSON.stringify({ scope: "server", packName: PACK_ID, disabled: {} }),
-		}).catch(() => {});
-		if (packDir) fs.rmSync(packDir, { recursive: true, force: true });
-		await notifyPackFilesystemMutation(originalPackOrder).catch(() => {});
+		try {
+			await apiFetch("/api/marketplace/pack-activation", {
+				method: "PUT", body: JSON.stringify({ scope: "server", packName: PACK_ID, disabled: {} }),
+			}).catch(() => {});
+			if (packDir) fs.rmSync(packDir, { recursive: true, force: true });
+			await notifyPackFilesystemMutation(originalPackOrder).catch(() => {});
+		} finally {
+			restoreDecisionMode();
+		}
 	});
 
 	test("POST persists components, keeps checkout grants inert, and explicitly grants one durable replay", async ({ gateway }) => {

@@ -68,11 +68,26 @@ async function proposals(projectId: string, cookie: string): Promise<Array<{ req
 	return (await json<{ proposals: Array<{ requestId: string; proposalType: EffectType; rev: number }> }>(response)).proposals;
 }
 
+function enterInteractiveDecisionMode(): () => void {
+	const priorCi = process.env.CI;
+	const priorHeadless = process.env.BOBBIT_HEADLESS;
+	process.env.CI = "false";
+	process.env.BOBBIT_HEADLESS = "0";
+	return () => {
+		if (priorCi === undefined) delete process.env.CI;
+		else process.env.CI = priorCi;
+		if (priorHeadless === undefined) delete process.env.BOBBIT_HEADLESS;
+		else process.env.BOBBIT_HEADLESS = priorHeadless;
+	};
+}
+
 test.describe("project-import proposal route — canonical effects", () => {
 	let packDir = "";
 	let order: string[] = [];
+	let restoreDecisionMode = () => {};
 
 	test.beforeAll(async ({ gateway }) => {
+		restoreDecisionMode = enterInteractiveDecisionMode();
 		order = (await json<{ order: string[] }>(await apiFetch("/api/marketplace/pack-order?scope=server"))).order;
 		packDir = writePack(gateway.bobbitDir);
 		expect((await apiFetch("/api/marketplace/pack-order", { method: "PUT", body: JSON.stringify({ scope: "server", order }) })).status).toBe(200);
@@ -80,9 +95,13 @@ test.describe("project-import proposal route — canonical effects", () => {
 	});
 
 	test.afterAll(async () => {
-		await apiFetch("/api/marketplace/pack-activation", { method: "PUT", body: JSON.stringify({ scope: "server", packName: PACK_ID, disabled: {} }) }).catch(() => {});
-		if (packDir) fs.rmSync(packDir, { recursive: true, force: true });
-		await apiFetch("/api/marketplace/pack-order", { method: "PUT", body: JSON.stringify({ scope: "server", order }) }).catch(() => {});
+		try {
+			await apiFetch("/api/marketplace/pack-activation", { method: "PUT", body: JSON.stringify({ scope: "server", packName: PACK_ID, disabled: {} }) }).catch(() => {});
+			if (packDir) fs.rmSync(packDir, { recursive: true, force: true });
+			await apiFetch("/api/marketplace/pack-order", { method: "PUT", body: JSON.stringify({ scope: "server", order }) }).catch(() => {});
+		} finally {
+			restoreDecisionMode();
+		}
 	});
 
 	test("projects all six types then accepts them through the authenticated HTTP route exactly once", async ({ gateway }) => {
