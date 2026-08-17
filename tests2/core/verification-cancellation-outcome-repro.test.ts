@@ -74,12 +74,12 @@ test("re-signalling preserves a cause-labelled cancelled audit instead of fabric
 	gateStore.recordSignal(firstSignal);
 
 	// This mirrors a genuine completed phase before the re-signal interrupts the
-	// next phase. Both live state and durable progress have useful audit data.
+	// next phase. Deliberately do not mirror the live result into GateStore: the
+	// persisted signal must remain exactly as beginVerification() seeded it.
 	const active = (harness as any).activeVerifications.get(SIGNAL_ID);
 	active.steps[0] = {
 		...active.steps[0],
 		status: "passed",
-		passed: true,
 		output: COMPLETED_OUTPUT,
 		durationMs: 17,
 	};
@@ -89,14 +89,6 @@ test("re-signalling preserves a cause-labelled cancelled audit instead of fabric
 	const drainedSignoffs: any[] = [];
 	active.steps[1] = { ...active.steps[1], status: "running", awaitingHuman: true };
 	harness.pendingSignoffs.set(`${SIGNAL_ID}::Unfinished follow-up`, (outcome: any) => drainedSignoffs.push(outcome));
-	gateStore.updateSignalVerification(SIGNAL_ID, {
-		status: "running",
-		steps: [
-			{ name: "Completed prerequisite", type: "command", passed: true, status: "passed", phase: 0, output: COMPLETED_OUTPUT, duration_ms: 17 },
-			{ name: "Unfinished follow-up", type: "human-signoff", passed: false, status: "running", phase: 1, output: "", duration_ms: 0 },
-		],
-	});
-
 	await harness.cancelStaleVerifications(GOAL_ID, GATE_ID);
 	// The parked sign-off resolver is the cleanup acknowledgement for this
 	// process-free fixture; cancellation must drain it before final publication.
@@ -127,4 +119,75 @@ test("re-signalling preserves a cause-labelled cancelled audit instead of fabric
 	gateStore = new GateStore(stateDir, undefined, { persistence: "json" });
 	const reloaded = gateStore.getGate(GOAL_ID, GATE_ID)!.signals.find(entry => entry.id === SIGNAL_ID)!.verification as any;
 	expect(reloaded.cancellation, "VERIFICATION_CANCELLATION_OUTCOME_AUDIT: cancellation cause survives GateStore reload").toMatchObject({ cause: "superseded" });
+});
+
+const RESTART_GATE: WorkflowGate = {
+	id: GATE_ID,
+	name: "Restart cancellation aggregate fixture",
+	dependsOn: [],
+	verify: [
+		{ name: "Completed before restart", type: "command", run: "echo completed", phase: 0 },
+		{ name: "Late failed restart result", type: "command", run: "exit 1", phase: 0 },
+		{ name: "Late timeout restart result", type: "command", run: "sleep 1", phase: 1 },
+	],
+};
+
+test("restart recovery keeps live passed evidence and neutralizes late failed or timeout rows — VERIFICATION_CANCELLATION_OUTCOME_AUDIT", async () => {
+	stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "verification-cancellation-restart-"));
+	gateStore = new GateStore(stateDir, undefined, { persistence: "json" });
+	gateStore.initGatesForGoal(GOAL_ID, [GATE_ID]);
+	const events: any[] = [];
+	const harness = new VerificationHarness(
+		stateDir,
+		gateStore,
+		(_goalId, event) => events.push(event),
+		{ get: () => undefined, getAll: () => [] } as any,
+	);
+	const restartSignal = { ...signal(), id: `${SIGNAL_ID}-restart` };
+	restartSignal.verification.steps = harness.beginVerification(restartSignal, RESTART_GATE);
+	gateStore.recordSignal(restartSignal);
+
+	// These are live/restart-resumed terminal observations. The durable signal
+	// still contains only beginVerification's running/waiting seed rows.
+	const active = (harness as any).activeVerifications.get(restartSignal.id);
+	Object.assign(active.steps[0], {
+		status: "passed",
+		output: COMPLETED_OUTPUT,
+		durationMs: 23,
+	});
+	Object.assign(active.steps[1], {
+		status: "failed",
+		output: "Step was interrupted by server restart before a verdict was durable.",
+		durationMs: 29,
+	});
+	Object.assign(active.steps[2], {
+		status: "timeout",
+		output: "Verification timed out while resuming after server restart.",
+		durationMs: 31,
+	});
+
+	// The restart interruption seam is deterministic: no timer, polling, or
+	// temp-state inspection is needed to exercise the terminal publication.
+	await (harness as any)._finalizeRestartInterruptedVerification(active);
+
+	const verification = gateStore.getGate(GOAL_ID, GATE_ID)!.signals.find(entry => entry.id === restartSignal.id)!.verification as any;
+	expect(verification).toMatchObject({
+		status: "cancelled",
+		cancellation: { cause: "gateway-restart-recovery", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
+		steps: [
+			// A terminal status is authoritative even when an older active shape did
+			// not carry the redundant boolean result field.
+			{ name: "Completed before restart", status: "passed", passed: true, output: COMPLETED_OUTPUT, duration_ms: 23 },
+			{ name: "Late failed restart result", status: "cancelled", passed: false, cancellation: { cause: "gateway-restart-recovery" } },
+			{ name: "Late timeout restart result", status: "cancelled", passed: false, cancellation: { cause: "gateway-restart-recovery" } },
+		],
+	});
+	expect(verification.steps.some((step: any) => step.status === "failed"),
+		"VERIFICATION_CANCELLATION_OUTCOME_AUDIT: a cancelled restart verification cannot retain a failed product row").toBe(false);
+	expect(events).toContainEqual(expect.objectContaining({
+		type: "gate_verification_complete",
+		signalId: restartSignal.id,
+		status: "cancelled",
+		cancellation: expect.objectContaining({ cause: "gateway-restart-recovery" }),
+	}));
 });
