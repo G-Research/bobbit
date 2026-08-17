@@ -755,6 +755,8 @@ export class GoalStore {
 	private readonly persistence: GoalPersistence;
 	private goals: Map<string, PersistedGoal> = new Map();
 	private generation = 0;
+	/** Per-record mutation revisions let strict rollback preserve newer same-goal writes. */
+	private goalMutationRevisions = new Map<string, number>();
 	private acceptingMutations = true;
 	private closePromise: Promise<void> | null = null;
 
@@ -772,6 +774,27 @@ export class GoalStore {
 		if (!this.acceptingMutations) throw new Error("[goal-store] GoalStore is closing or closed");
 	}
 	private save(ids: Iterable<string>): void { this.persistence.schedule(ids); }
+	private recordMutation(id: string): number {
+		this.generation++;
+		const revision = (this.goalMutationRevisions.get(id) ?? 0) + 1;
+		this.goalMutationRevisions.set(id, revision);
+		return revision;
+	}
+	private restoreProperty(
+		record: Record<string, unknown>,
+		key: string,
+		previous: { present: boolean; value: unknown },
+	): void {
+		if (previous.present) record[key] = previous.value;
+		else delete record[key];
+	}
+	private restoreRecord(record: PersistedGoal, previous: PersistedGoal): void {
+		const target = record as unknown as Record<string, unknown>;
+		for (const key of Object.keys(target)) {
+			if (!(key in previous)) delete target[key];
+		}
+		Object.assign(record, previous);
+	}
 	flush(): Promise<void> { return this.persistence.flush(); }
 	close(): Promise<void> {
 		if (this.closePromise) return this.closePromise;
@@ -821,7 +844,7 @@ export class GoalStore {
 		// Detect "new id" BEFORE the set so the goal_created callback fires
 		// exactly once per id. Subsequent puts (updates) skip the callback.
 		const isNew = !this.goals.has(goal.id);
-		this.generation++;
+		this.recordMutation(goal.id);
 		this.goals.set(goal.id, goal);
 		this.save([goal.id]);
 		this.onIndexUpdate?.(goal);
@@ -834,7 +857,7 @@ export class GoalStore {
 
 	remove(id: string): void {
 		this.assertAcceptingMutations();
-		this.generation++;
+		this.recordMutation(id);
 		this.goals.delete(id);
 		this.save([id]);
 		// Durably tombstone this hard-delete so the boot-time headquarters
@@ -856,7 +879,7 @@ export class GoalStore {
 		// once. Idempotent: re-archiving an already-archived goal still returns
 		// true (back-compat with existing callers) but does NOT re-fire.
 		const wasAlreadyArchived = existing.archived === true;
-		this.generation++;
+		this.recordMutation(id);
 		existing.archived = true;
 		existing.archivedAt = Date.now();
 		this.save([id]);
@@ -879,17 +902,45 @@ export class GoalStore {
 		}
 
 		const previous = { ...existing };
-		this.generation++;
+		const previousArchived = {
+			present: Object.prototype.hasOwnProperty.call(existing, "archived"),
+			value: existing.archived,
+		};
+		const previousArchivedAt = {
+			present: Object.prototype.hasOwnProperty.call(existing, "archivedAt"),
+			value: existing.archivedAt,
+		};
+		const mutationRevision = this.recordMutation(id);
+		const mutationGeneration = this.generation;
 		existing.archived = true;
 		existing.archivedAt = Date.now();
+		const appliedArchivedAt = existing.archivedAt;
 		try {
 			await this.saveStrict([id]);
 		} catch (err) {
-			this.generation--;
-			for (const key of Object.keys(existing)) {
-				if (!(key in previous)) delete (existing as unknown as Record<string, unknown>)[key];
+			const current = this.goals.get(id);
+			const sameRecordRevision = this.goalMutationRevisions.get(id) === mutationRevision;
+			if (sameRecordRevision && current === existing) {
+				// Preserve the historical no-race compensation contract. If another
+				// goal mutated concurrently, however, rollback is a new visible mutation
+				// and must not erase that goal's generation increment.
+				this.restoreRecord(existing, previous);
+				if (this.generation === mutationGeneration) this.generation--;
+				else this.generation++;
+				this.goalMutationRevisions.set(id, mutationRevision + 1);
+			} else {
+				// A later same-goal mutation owns the rest of the current record. Revert
+				// only archiveStrict's still-current fields, then durably publish that
+				// merged compensation before the original operation rejects.
+				if (current) {
+					const record = current as unknown as Record<string, unknown>;
+					if (record.archived === true) this.restoreProperty(record, "archived", previousArchived);
+					if (record.archivedAt === appliedArchivedAt) this.restoreProperty(record, "archivedAt", previousArchivedAt);
+					this.recordMutation(id);
+				}
+				await this.saveStrict([id]);
+				if (current) this.onIndexUpdate?.(current);
 			}
-			Object.assign(existing, previous);
 			throw err;
 		}
 		this.onIndexUpdate?.(existing);
@@ -913,7 +964,7 @@ export class GoalStore {
 		this.assertAcceptingMutations();
 		const existing = this.goals.get(id);
 		if (!existing || existing.schedulerRecovery === undefined) return false;
-		this.generation++;
+		this.recordMutation(id);
 		delete existing.schedulerRecovery;
 		existing.updatedAt = Date.now();
 		this.save([id]);
@@ -956,7 +1007,7 @@ export class GoalStore {
 		if (!existing) return false;
 		const { cleaned, clearSetupError } = this.prepareUpdate(updates);
 		if (!this.hasUpdateChanged(existing, cleaned, clearSetupError)) return true;
-		this.generation++;
+		this.recordMutation(id);
 		this.applyUpdate(existing, cleaned, clearSetupError);
 		this.save([id]);
 		this.onIndexUpdate?.(existing);
@@ -1040,16 +1091,45 @@ export class GoalStore {
 		}
 
 		const previous = { ...existing };
-		this.generation++;
+		const ownedKeys = new Set(Object.keys(cleaned));
+		if (clearSetupError) ownedKeys.add("setupError");
+		const previousOwned = new Map([...ownedKeys].map((key) => [key, {
+			present: Object.prototype.hasOwnProperty.call(existing, key),
+			value: (existing as unknown as Record<string, unknown>)[key],
+		}]));
+		const mutationRevision = this.recordMutation(id);
+		const mutationGeneration = this.generation;
 		this.applyUpdate(existing, cleaned, clearSetupError);
+		const appliedOwned = new Map([...ownedKeys].map((key) => [key, {
+			present: Object.prototype.hasOwnProperty.call(existing, key),
+			value: (existing as unknown as Record<string, unknown>)[key],
+		}]));
 		try {
 			await this.saveStrict([id]);
 		} catch (err) {
-			this.generation--;
-			for (const key of Object.keys(existing)) {
-				if (!(key in previous)) delete (existing as unknown as Record<string, unknown>)[key];
+			const current = this.goals.get(id);
+			const sameRecordRevision = this.goalMutationRevisions.get(id) === mutationRevision;
+			if (sameRecordRevision && current === existing) {
+				this.restoreRecord(existing, previous);
+				if (this.generation === mutationGeneration) this.generation--;
+				else this.generation++;
+				this.goalMutationRevisions.set(id, mutationRevision + 1);
+			} else {
+				if (current) {
+					const record = current as unknown as Record<string, unknown>;
+					for (const key of ownedKeys) {
+						const applied = appliedOwned.get(key)!;
+						const stillApplied = Object.prototype.hasOwnProperty.call(record, key) === applied.present
+							&& (!applied.present || record[key] === applied.value);
+						if (stillApplied) this.restoreProperty(record, key, previousOwned.get(key)!);
+					}
+					// updatedAt is shared by every update. A later mutation owns its value,
+					// even when two updates happen within the same clock millisecond.
+					this.recordMutation(id);
+				}
+				await this.saveStrict([id]);
+				if (current) this.onIndexUpdate?.(current);
 			}
-			Object.assign(existing, previous);
 			throw err;
 		}
 		this.onIndexUpdate?.(existing);

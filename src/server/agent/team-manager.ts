@@ -587,6 +587,8 @@ export class TeamManager {
 	private goalAdmissionTails = new Map<string, Promise<void>>();
 	/** Serializes adopted-lead finalization with the admitted archive operation. */
 	private adoptedGoalLifecycleLocks = new Map<string, Promise<void>>();
+	/** Exact same-process retry evidence for rejected session archive publications. */
+	private archivedGoalSessionRetries = new Map<string, Set<string>>();
 	private readonly commandRunner: CommandRunner;
 	private readonly recoveryFs: RecoveryFs;
 	private readonly recoverySidecars: TeamRecoverySidecars;
@@ -3714,26 +3716,28 @@ export class TeamManager {
 				if (entry?.teamLeadSessionId) referencedIds.add(entry.teamLeadSessionId);
 				for (const agent of entry?.agents ?? []) referencedIds.add(agent.sessionId);
 			}
+			const retryIds = this.archivedGoalSessionRetries.get(goalId) ?? new Set<string>();
+			const authoritativeIds = new Set([...referencedIds, ...retryIds]);
 
 			const errors: string[] = [];
 			const liveRows = (): PersistedSession[] => sessionStore?.getLive?.() ?? [];
 			// A failed SessionStore publication can leave its mutable in-memory row
-			// archived even though disk still says live. While TeamStore retains an
-			// explicit reference, include that exact row on every retry. This is bounded
-			// to current authority and deliberately does not enumerate archive history.
+			// archived even though disk still says live. TeamStore references and exact
+			// failed IDs keep only those authoritative rows retryable without scanning
+			// archive history or broadening ownership to goalId-only sessions.
 			const candidateRows = (): PersistedSession[] => {
 				const byId = new Map(liveRows().map((session) => [session.id, session]));
-				for (const id of referencedIds) {
+				for (const id of authoritativeIds) {
 					const referenced = sessionStore?.get?.(id);
 					if (referenced) byId.set(id, referenced);
 				}
 				return [...byId.values()];
 			};
 			const initialRows = candidateRows();
-			const initialClosure = collectTeamOwnedSessionClosure(goalId, initialRows, referencedIds, errors);
+			const initialClosure = collectTeamOwnedSessionClosure(goalId, initialRows, authoritativeIds, errors);
 			const hasAuthoritativeOwnership = initialRows.some((session) =>
 				session.teamGoalId === goalId
-				|| (referencedIds.has(session.id) && (!session.teamGoalId || session.teamGoalId === goalId)));
+				|| (authoritativeIds.has(session.id) && (!session.teamGoalId || session.teamGoalId === goalId)));
 
 			this.deactivateArchivedTeamRuntime(goalId, runtimeEntry);
 
@@ -3787,7 +3791,7 @@ export class TeamManager {
 			// the extra pass catches descendants published by work admitted earlier.
 			const maxPasses = Math.max(1, candidateRows().length + 1);
 			for (let pass = 0; pass < maxPasses; pass++) {
-				const closure = collectTeamOwnedSessionClosure(goalId, candidateRows(), referencedIds, errors);
+				const closure = collectTeamOwnedSessionClosure(goalId, candidateRows(), authoritativeIds, errors);
 				for (const id of closure) selectedIds.add(id);
 				const pending = [...closure].filter((id) => !attempted.has(id));
 				if (pending.length === 0) break;
@@ -3808,11 +3812,21 @@ export class TeamManager {
 							errors.push(`archive ${id}: ${archiveErr instanceof Error ? archiveErr.message : String(archiveErr)}`);
 						}
 					}
-					if (acknowledged) archivedSessionIds.add(id);
+					if (acknowledged) {
+						archivedSessionIds.add(id);
+						const retries = this.archivedGoalSessionRetries.get(goalId);
+						retries?.delete(id);
+						if (retries?.size === 0) this.archivedGoalSessionRetries.delete(goalId);
+					} else {
+						let retries = this.archivedGoalSessionRetries.get(goalId);
+						if (!retries) this.archivedGoalSessionRetries.set(goalId, retries = new Set());
+						retries.add(id);
+						authoritativeIds.add(id);
+					}
 				}
 			}
 
-			const finalClosure = collectTeamOwnedSessionClosure(goalId, candidateRows(), referencedIds, errors);
+			const finalClosure = collectTeamOwnedSessionClosure(goalId, candidateRows(), authoritativeIds, errors);
 			for (const id of finalClosure) selectedIds.add(id);
 			const suppressedSessionIds = [...selectedIds].filter((id) => !archivedSessionIds.has(id));
 			let teamRemoved = false;
@@ -3858,6 +3872,9 @@ export class TeamManager {
 			for (const entry of context.teamStore.getAll()) {
 				if (context.goalStore.get(entry.goalId)?.archived) candidates.add(entry.goalId);
 			}
+		}
+		for (const [goalId, retries] of this.archivedGoalSessionRetries) {
+			if (retries.size > 0 && this.resolveGoal(goalId)?.archived) candidates.add(goalId);
 		}
 		let archived = 0;
 		let removed = 0;
