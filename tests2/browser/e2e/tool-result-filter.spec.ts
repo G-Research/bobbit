@@ -20,8 +20,7 @@ const ORDERED = "EP14_FIXTURE_ORDER_EP14_FIXTURE_REJECT__browser_canary_never_re
 
 type BrowserResponse = { status: number; text: string };
 type AttemptCredential = { runtimeGeneration: number; runtimeKey: string };
-type AttemptCredentialOwner = { beginRuntime(sessionId: string, runtimeGeneration: number): AttemptCredential };
-type FilterGateway = { sessionManager?: { toolResultFilterAttemptCredentials?: AttemptCredentialOwner } };
+type FilterGateway = { sessionManager?: { toolResultFilterAttemptCredentials?: unknown } };
 
 function fixturePackDir(bobbitDir: string): string {
 	return path.join(bobbitDir, "config", "market-packs", PACK_ID);
@@ -51,14 +50,15 @@ async function browserApi(page: Page, request: { path: string; method?: string; 
 }
 
 /**
- * The browser is intentionally not allowed to mint these. The real Pi gate is
- * their production owner; this in-process harness begins an equivalent test
- * runtime and mints one private, exact-attempt token per exercised callback.
+ * Read the credential installed by the real session replacement lifecycle.
+ * The test never mints one: grant-after-start must restart the live runtime and
+ * install this core-owned gate before the grant response succeeds.
  */
-function beginFilterRuntime(gateway: FilterGateway, sessionId: string): AttemptCredential {
-	const owner = gateway.sessionManager?.toolResultFilterAttemptCredentials;
-	expect(owner, "browser harness must expose the private filter credential owner").toBeTruthy();
-	return owner!.beginRuntime(sessionId, 0);
+function installedFilterRuntime(gateway: FilterGateway, sessionId: string): AttemptCredential {
+	const runtimes = (gateway.sessionManager?.toolResultFilterAttemptCredentials as any)?.runtimes as Map<string, AttemptCredential> | undefined;
+	const credential = runtimes?.get(sessionId);
+	expect(credential, "grant reconciliation must install the private gate runtime").toBeTruthy();
+	return credential!;
 }
 
 async function invokeFilter(
@@ -153,10 +153,11 @@ test.describe("tool result filter", () => {
 			const inert = parse(await browserApi(page, { path: route, method: "POST", body: { toolCallId: "inert", toolName: "fixture-tool", result: rawResult(REJECTED) } }));
 			expect(inert).toMatchObject({ isError: true, content: [{ type: "text", text: expect.stringMatching(/^Tool result withheld/) }] });
 
-			// Begin a private runtime only after the bearer-only probe above. Every
-			// subsequent route invocation gets a newly signed exact-attempt token.
-			const credential = beginFilterRuntime(gateway, sessionId);
+			// The session started before a grant, so the grant route must replace its
+			// live runtime with one that has the private result gate. No test helper
+			// may begin a runtime: that would hide the lifecycle bug this journey pins.
 			await grant(page, projectId, "result-filter");
+			const credential = installedFilterRuntime(gateway, sessionId);
 			await grant(page, projectId, "competing-result-filter");
 			const rejected = parse(await invokeFilter(page, route, credential, sessionId, "reject", rawResult(ORDERED)));
 			expect(rejected).toMatchObject({ isError: true, content: [{ type: "text", text: expect.stringMatching(/^Tool result withheld/) }] });

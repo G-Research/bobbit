@@ -11476,8 +11476,13 @@ async function handleApiRoute(
 		const grant: ExtensionGrant = isPackPrincipal
 			? { packId, principal: "pack", capability, grantedAt: extensionGrantNow(), grantedBy: extensionGrantActor }
 			: { packId, hookId: validHookId, capability, grantedAt: extensionGrantNow(), grantedBy: extensionGrantActor };
+		const previousGrants = store.getExtensionGrants();
+		const wasGranted = previousGrants.some(current => isPackPrincipal
+			? isPackExtensionGrant(current) && current.packId === packId && current.capability === capability
+			: !isPackExtensionGrant(current) && current.packId === packId && current.hookId === validHookId && current.capability === capability,
+		);
 		try {
-			const retained = store.getExtensionGrants().filter(current => isPackPrincipal
+			const retained = previousGrants.filter(current => isPackPrincipal
 				? !isPackExtensionGrant(current) || current.packId !== packId || current.capability !== capability
 				: isPackExtensionGrant(current) || current.packId !== packId || current.hookId !== validHookId || current.capability !== capability,
 			);
@@ -11485,8 +11490,25 @@ async function handleApiRoute(
 			// Config writes precede the independent registry binding. A crash/failure
 			// between them leaves the config row inert, never accidentally authorized.
 			projectRegistry.bindExtensionGrant(resolved.projectId, grant);
+			if (capability === "filter:tool-result") {
+				await sessionManager.reconcileToolResultFilterGate(resolved.projectId);
+			}
 		} catch (err) {
-			jsonError(503, err);
+			if (capability !== "filter:tool-result") {
+				jsonError(503, err);
+				return;
+			}
+			// A new grant is not authoritative until every affected live runtime has
+			// its private Pi gate. Roll it back rather than advertising protection we
+			// failed to install; an existing exact grant stays durable for a retry.
+			if (!wasGranted) {
+				try {
+					projectRegistry.revokeExtensionGrantBinding(resolved.projectId, grant);
+					store.setExtensionGrants(previousGrants);
+				} catch { /* The registry removal still leaves any stale config row inert. */ }
+			}
+			broadcastExtensionGrantInvalidation(resolved.projectId);
+			json({ error: "Tool-result filter gate reconciliation failed", code: "TOOL_RESULT_FILTER_RECONCILIATION_FAILED" }, 503);
 			return;
 		}
 		let auditAvailable = true;

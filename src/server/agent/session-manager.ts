@@ -4043,6 +4043,28 @@ export class SessionManager {
 		this.toolResultFilterActivationResolver = resolver;
 	}
 
+	/**
+	 * Reconcile a newly granted result gate with already-running project sessions.
+	 * The replacement coordinator fences prompt dispatch while preserving the
+	 * session identity, queue, clients, and transcript. Revocation deliberately
+	 * keeps an installed gate: it passes through under the current policy and is
+	 * reusable if the grant returns, avoiding a needless raw-runtime flip.
+	 */
+	async reconcileToolResultFilterGate(projectId: string): Promise<void> {
+		if (this.toolResultFilterActivationResolver?.(projectId).toolResult !== true) return;
+		for (const session of [...this.sessions.values()]) {
+			if (session.projectId !== projectId || session.status === "preparing" || session.status === "terminated") continue;
+			if (this.toolResultFilterAttemptCredentials.hasRuntime(session.id)) continue;
+			await this.restartAgent(session.id);
+			// The effective policy may have changed while this session waited behind
+			// another replacement. Never report a grant as active without its gate.
+			if (this.toolResultFilterActivationResolver?.(projectId).toolResult === true
+				&& !this.toolResultFilterAttemptCredentials.hasRuntime(session.id)) {
+				throw new Error(`Tool-result filter gate was not installed for session ${session.id}`);
+			}
+		}
+	}
+
 	private resolveStaticPromptSections(projectId: string | undefined): ResolvedSystemPromptSection[] {
 		if (!this.staticPromptSectionResolver) return [];
 		try { return this.staticPromptSectionResolver(projectId); }
@@ -4422,6 +4444,7 @@ export class SessionManager {
 			toolResultFilterGateCredential: (sessionId) => this.toolResultFilterAttemptCredentials.beginRuntime(
 				sessionId, this._currentRespawnGeneration(sessionId),
 			),
+			invalidateToolResultFilterGate: (sessionId) => this.toolResultFilterAttemptCredentials.invalidate(sessionId),
 			groupPolicyStore: this.groupPolicyStore ?? null,
 			configCascade: this.configCascade,
 			lifecycleHub: this.lifecycleHub,
@@ -5523,6 +5546,10 @@ export class SessionManager {
 			const gatePath = writeToolResultFilterExtension(sessionId);
 			if (!gatePath) throw new Error("Tool-result filter gate installation failed.");
 			toolResultGateEnv = toolResultFilterGateEnvironment(gatePath);
+		} else {
+			// A replacement built while the policy is revoked must not retain its
+			// predecessor's callback authority. Re-grant will reconcile this runtime.
+			this.toolResultFilterAttemptCredentials.invalidate(sessionId);
 		}
 
 		// Compute session-specific grants (tools in allowedTools but not in the role's base allowedTools)
@@ -10136,6 +10163,10 @@ export class SessionManager {
 				throw new Error(`Session ${id} respawn replacement was superseded during restore`);
 			}
 		} catch (err) {
+			// buildToolActivationArgs may have minted a bootstrap credential for the
+			// failed successor. It is not evidence of an installed gate and must not
+			// let a later grant skip this session's reconciliation.
+			this.toolResultFilterAttemptCredentials.invalidate(id);
 			this.sessions.set(id, session);
 			session.restoreError = err instanceof Error ? err.message : String(err);
 			for (const ws of savedClients) {
