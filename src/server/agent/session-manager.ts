@@ -2999,6 +2999,32 @@ export class PromotedSessionLifecycleConflictError extends Error {
 	}
 }
 
+/** Retryable admission failure while a regular session is being promoted in place. */
+export class SessionGoalPromotionInProgressError extends Error {
+	readonly statusCode = 409;
+	readonly code = "SESSION_GOAL_PROMOTION_IN_PROGRESS";
+	readonly retryable = true;
+
+	constructor(sessionId: string) {
+		super(`Session ${sessionId} is reserved for current-session goal promotion; retry after promotion finishes`);
+		this.name = "SessionGoalPromotionInProgressError";
+	}
+}
+
+/**
+ * Opaque process-local authority for one current-session promotion attempt.
+ * SessionManager validates object identity; callers cannot manufacture authority
+ * by copying the visible fields.
+ */
+export interface SessionGoalPromotionReservation {
+	readonly sessionId: string;
+	readonly attemptId: string;
+}
+
+interface OwnedSessionGoalPromotionReservation extends SessionGoalPromotionReservation {
+	goalId?: string;
+}
+
 export interface SessionManagerOptions {
 	/** Override the path to pi-coding-agent cli.js */
 	agentCliPath?: string;
@@ -3244,6 +3270,12 @@ export class SessionManager {
 	 * `promptOwner` until the final replacement commits or rolls back.
 	 */
 	private _sessionReplacementCoordinators = new Map<string, SessionReplacementCoordinator>();
+	/**
+	 * Short-lived owner reservation spanning goal/gate/team mutation and the
+	 * coordinated runtime replacement. This is deliberately distinct from the
+	 * replacement coordinator: it closes admission before any graph mutation.
+	 */
+	private _sessionGoalPromotionReservations = new Map<string, OwnedSessionGoalPromotionReservation>();
 	/** Per-owner FIFO shared by sandbox history-reuse registration and termination. */
 	private _sandboxBorrowerLifecycleQueues = new Map<string, SandboxBorrowerLifecycleQueue>();
 	/**
@@ -10074,6 +10106,7 @@ export class SessionManager {
 	 * Re-attaches existing WS clients so the user can keep working.
 	 */
 	async restartAgent(sessionId: string, expectedOwner?: SessionBridgeOwner): Promise<void> {
+		this.assertSessionGoalPromotionMutationAllowed(sessionId);
 		this._assertModelSelectionReady(sessionId);
 		const session = this.sessions.get(sessionId);
 		if (!session) throw new Error("Session not found");
@@ -13974,6 +14007,90 @@ export class SessionManager {
 	}
 
 	/**
+	 * Reserve a regular session before any current-session goal graph mutation.
+	 * An exact retained attempt may reclaim its same process-local reservation for
+	 * post-commit finalization or pre-commit repair; every competing mutation fails.
+	 */
+	reserveSessionGoalPromotion(id: string, goalId?: string): SessionGoalPromotionReservation {
+		const existing = this._sessionGoalPromotionReservations.get(id);
+		if (existing) {
+			if (goalId && existing.goalId === goalId) return existing;
+			throw new SessionGoalPromotionInProgressError(id);
+		}
+		const session = this.sessions.get(id);
+		if (!session) throw new Error(`Session ${id} not found`);
+		if (this._sessionReplacementCoordinators.has(id)) {
+			throw new SessionGoalPromotionInProgressError(id);
+		}
+		const persisted = this.resolveStoreForSession(id).get(id);
+		if (!persisted) throw new Error(`Session ${id} has no persisted record`);
+		const alreadyPromoted = !!goalId
+			&& session.goalId === goalId
+			&& session.teamGoalId === goalId
+			&& session.role === "team-lead"
+			&& persisted.goalId === goalId
+			&& persisted.teamGoalId === goalId
+			&& persisted.role === "team-lead";
+		if (goalId) {
+			const goal = this.resolveGoal(goalId);
+			if (!goal || goal.worktreeOwnerSessionId !== id || !this.goalWorkspaceCoordinatesMatchSession(goal, persisted)) {
+				throw new Error(`Session ${id} cannot resume promotion for unrelated goal ${goalId}`);
+			}
+		}
+		const baselineRole = (role: string | undefined) => role === undefined || role === "general";
+		if (!alreadyPromoted && (!baselineRole(session.role) || !baselineRole(persisted.role) || session.role !== persisted.role)) {
+			throw new Error(`Session ${id} no longer has its canonical baseline role`);
+		}
+		const reservation: OwnedSessionGoalPromotionReservation = {
+			sessionId: id,
+			attemptId: randomUUID(),
+			...(goalId ? { goalId } : {}),
+		};
+		this._sessionGoalPromotionReservations.set(id, reservation);
+		return reservation;
+	}
+
+	/** Bind the attempt to the exact adopted goal before lead/runtime attachment. */
+	bindSessionGoalPromotion(reservation: SessionGoalPromotionReservation, goalId: string): void {
+		const owned = this.requireSessionGoalPromotionReservation(reservation.sessionId, reservation);
+		if (owned.goalId && owned.goalId !== goalId) {
+			throw new Error(`Session ${reservation.sessionId} promotion is already bound to goal ${owned.goalId}`);
+		}
+		owned.goalId = goalId;
+	}
+
+	/** Release only the exact attempt authority currently owned by SessionManager. */
+	releaseSessionGoalPromotion(reservation: SessionGoalPromotionReservation): boolean {
+		if (this._sessionGoalPromotionReservations.get(reservation.sessionId) !== reservation) return false;
+		this._sessionGoalPromotionReservations.delete(reservation.sessionId);
+		return true;
+	}
+
+	/** Public read seam for goal-level destructive admission before any mutation. */
+	isSessionGoalPromotionReserved(id: string): boolean {
+		return this._sessionGoalPromotionReservations.has(id);
+	}
+
+	/** Public admission seam for server routes that directly mutate relation fields. */
+	assertSessionGoalPromotionMutationAllowed(id: string): void {
+		if (this.isSessionGoalPromotionReserved(id)) {
+			throw new SessionGoalPromotionInProgressError(id);
+		}
+	}
+
+	private requireSessionGoalPromotionReservation(
+		id: string,
+		reservation: SessionGoalPromotionReservation,
+		goalId?: string,
+	): OwnedSessionGoalPromotionReservation {
+		const owned = this._sessionGoalPromotionReservations.get(id);
+		if (owned !== reservation || reservation.sessionId !== id || (goalId !== undefined && owned.goalId !== goalId)) {
+			throw new Error(`Session ${id} promotion reservation is missing or does not match goal ${goalId ?? "<unbound>"}`);
+		}
+		return owned;
+	}
+
+	/**
 	 * Assign a role to an existing session. Requests for the same session are
 	 * serialized. The first request marks the canonical session as `starting`, so
 	 * prompts accepted while any replacement is staged are durably queued instead
@@ -13982,6 +14099,7 @@ export class SessionManager {
 	 * or against the original bridge after a clean rollback.
 	 */
 	async assignRole(id: string, role: { name: string; promptTemplate: string; accessory: string }): Promise<boolean> {
+		this.assertSessionGoalPromotionMutationAllowed(id);
 		const coordinator = this._sessionReplacementCoordinators.get(id);
 		const session = this.sessions.get(id);
 		// In-place restore/respawn deliberately removes SessionInfo while its
@@ -14002,7 +14120,12 @@ export class SessionManager {
 	 * goal's lead without changing its identity, transcript, checkout, or sandbox.
 	 * Exact repeats are a no-op; conflicting attachments are rejected.
 	 */
-	async promoteToGoalLead(id: string, goalId: string): Promise<SessionInfo> {
+	async promoteToGoalLead(
+		id: string,
+		goalId: string,
+		reservation: SessionGoalPromotionReservation,
+	): Promise<SessionInfo> {
+		this.requireSessionGoalPromotionReservation(id, reservation, goalId);
 		const coordinator = this._sessionReplacementCoordinators.get(id);
 		const session = this.sessions.get(id);
 		if (!session && !coordinator) throw new Error(`Session ${id} not found`);
@@ -14041,8 +14164,16 @@ export class SessionManager {
 			}
 			return session;
 		}
-		if (session && (session.goalId || session.teamGoalId || session.role || session.assistantType || session.staffId || session.delegateOf || session.parentSessionId)) {
-			throw new Error(`Session ${id} already has goal, role, staff, assistant, delegate, or child metadata`);
+		if (session && (
+			session.goalId
+			|| session.teamGoalId
+			|| (session.role && session.role !== "general")
+			|| session.assistantType
+			|| session.staffId
+			|| session.delegateOf
+			|| session.parentSessionId
+		)) {
+			throw new Error(`Session ${id} already has goal, assigned role, staff, assistant, delegate, or child metadata`);
 		}
 		const expectedSandboxContainerId = session?.sandboxed ? session.containerId?.trim() : undefined;
 		if (session?.sandboxed && !expectedSandboxContainerId) {
@@ -14124,7 +14255,15 @@ export class SessionManager {
 			if (session.goalId === projection.goalId && session.teamGoalId === projection.teamGoalId && session.role === projection.role) {
 				return true;
 			}
-			if (session.goalId || session.teamGoalId || session.role || session.assistantType || session.staffId || session.delegateOf || session.parentSessionId) {
+			if (
+				session.goalId
+				|| session.teamGoalId
+				|| (session.role && session.role !== "general")
+				|| session.assistantType
+				|| session.staffId
+				|| session.delegateOf
+				|| session.parentSessionId
+			) {
 				throw new Error(`Session ${id} gained conflicting metadata before promotion staging`);
 			}
 		}
@@ -14826,6 +14965,7 @@ export class SessionManager {
 	}
 
 	async terminateSession(id: string, _opts?: { allowPromotedGoalLifecycle?: boolean }): Promise<boolean> {
+		this.assertSessionGoalPromotionMutationAllowed(id);
 		// Legacy callers may still pass the old option, but canonical goal state —
 		// never a caller boolean — is the only authority for promoted teardown.
 		this.assertPromotedSessionLifecycleAllowed(id, "archive");
@@ -15085,6 +15225,7 @@ export class SessionManager {
 	 * children are cascade-reaped before it is archived.
 	 */
 	async storeArchive(id: string, _opts?: { allowPromotedGoalLifecycle?: boolean }): Promise<boolean> {
+		this.assertSessionGoalPromotionMutationAllowed(id);
 		// Preserve the legacy call shape without preserving its authority bypass.
 		this.assertPromotedSessionLifecycleAllowed(id, "archive");
 		const persisted = this.getPersistedSession(id);
@@ -16634,6 +16775,7 @@ export class SessionManager {
 	}
 
 	async forceAbort(id: string, gracePeriodMs = 3000): Promise<void> {
+		this.assertSessionGoalPromotionMutationAllowed(id);
 		const coordinator = this._sessionReplacementCoordinators.get(id);
 		const session = this.sessions.get(id);
 		if (!session && !coordinator) return;

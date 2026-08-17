@@ -238,12 +238,20 @@ function fixture(name: string, overrides: Record<string, unknown> = {}): {
 			worktreePath,
 		})),
 		sandboxed: persisted.sandboxed,
+		...(persisted.role ? { role: persisted.role } : {}),
+		...(persisted.accessory ? { accessory: persisted.accessory } : {}),
 		...(persisted.containerId ? { containerId: persisted.containerId } : {}),
 		spawnPinnedModel: `${provider}/${modelId}`,
 		spawnPinnedThinkingLevel: thinkingLevel,
 	};
 	manager.sessions.set(persisted.id, live);
 	return { manager, persisted, live, oldBridge, store };
+}
+
+function reservePromotion(fx: ReturnType<typeof fixture>, goalId: string): any {
+	const reservation = fx.manager.reserveSessionGoalPromotion(fx.live.id);
+	fx.manager.bindSessionGoalPromotion(reservation, goalId);
+	return reservation;
 }
 
 describe("SessionManager current-session runtime promotion", () => {
@@ -270,7 +278,8 @@ describe("SessionManager current-session runtime promotion", () => {
 		};
 		const beforeStatusVersion = fx.live.statusVersion;
 
-		const promoted = await fx.manager.promoteToGoalLead(fx.live.id, "goal-promoted");
+		const reservation = reservePromotion(fx, "goal-promoted");
+		const promoted = await fx.manager.promoteToGoalLead(fx.live.id, "goal-promoted", reservation);
 
 		expect(promoted).toBe(fx.live);
 		expect(fx.manager.getSession(fx.live.id)).toBe(fx.live);
@@ -318,8 +327,30 @@ describe("SessionManager current-session runtime promotion", () => {
 		expect(oldUnsubscribe).toHaveBeenCalledTimes(1);
 		expect(fx.live.unsubscribe).not.toBe(oldUnsubscribe);
 
-		await expect(fx.manager.promoteToGoalLead(fx.live.id, "goal-promoted")).resolves.toBe(fx.live);
+		await expect(fx.manager.promoteToGoalLead(fx.live.id, "goal-promoted", reservation)).resolves.toBe(fx.live);
 		expect(replacement.start).toHaveBeenCalledTimes(1);
+	});
+
+	it("rejects competing role and destructive lifecycle mutations while the promotion reservation is held", async () => {
+		const fx = fixture("promotion-reservation", { role: "general", accessory: "spark" });
+		const reservation = fx.manager.reserveSessionGoalPromotion(fx.live.id);
+		const competingRole = { name: "reviewer", promptTemplate: "Review", accessory: "search" };
+
+		await expect(fx.manager.assignRole(fx.live.id, competingRole)).rejects.toMatchObject({
+			statusCode: 409,
+			code: "SESSION_GOAL_PROMOTION_IN_PROGRESS",
+			retryable: true,
+		});
+		await expect(fx.manager.terminateSession(fx.live.id)).rejects.toMatchObject({
+			statusCode: 409,
+			code: "SESSION_GOAL_PROMOTION_IN_PROGRESS",
+		});
+		expect(fx.live).toMatchObject({ role: "general", accessory: "spark", status: "idle" });
+		expect(fx.persisted).toMatchObject({ role: "general", accessory: "spark" });
+		expect(fx.oldBridge.stop).not.toHaveBeenCalled();
+		expect(fx.manager.releaseSessionGoalPromotion({ ...reservation })).toBe(false);
+		expect(fx.manager.releaseSessionGoalPromotion(reservation)).toBe(true);
+		expect(() => fx.manager.assertSessionGoalPromotionMutationAllowed(fx.live.id)).not.toThrow();
 	});
 
 	it("reuses the existing sandbox realm and never requests worktree provisioning", async () => {
@@ -352,7 +383,8 @@ describe("SessionManager current-session runtime promotion", () => {
 			return true;
 		});
 
-		await fx.manager.promoteToGoalLead(fx.live.id, "goal-sandbox");
+		const reservation = reservePromotion(fx, "goal-sandbox");
+		await fx.manager.promoteToGoalLead(fx.live.id, "goal-sandbox", reservation);
 
 		expect(fx.manager.applySandboxWiring).toHaveBeenCalledTimes(1);
 		expect(options).toMatchObject({
@@ -369,7 +401,7 @@ describe("SessionManager current-session runtime promotion", () => {
 		fx.manager.applySandboxWiring = vi.fn(async () => {
 			throw new Error("existing container was replaced");
 		});
-		await expect(fx.manager.promoteToGoalLead(fx.live.id, "goal-sandbox"))
+		await expect(fx.manager.promoteToGoalLead(fx.live.id, "goal-sandbox", reservation))
 			.rejects.toThrow("existing container was replaced");
 		expect(replacement.start).toHaveBeenCalledTimes(1);
 	});
@@ -403,7 +435,8 @@ describe("SessionManager current-session runtime promotion", () => {
 		};
 		const before = structuredClone(fx.persisted);
 
-		await expect(fx.manager.promoteToGoalLead(fx.live.id, "goal-sandbox-race"))
+		const reservation = reservePromotion(fx, "goal-sandbox-race");
+		await expect(fx.manager.promoteToGoalLead(fx.live.id, "goal-sandbox-race", reservation))
 			.rejects.toThrow(/expected ready container|container identity changed/);
 
 		expect(ensureForProject).not.toHaveBeenCalled();
@@ -424,7 +457,8 @@ describe("SessionManager current-session runtime promotion", () => {
 			expect(Object.prototype.hasOwnProperty.call(fx.live, field)).toBe(false);
 		}
 
-		await expect(fx.manager.promoteToGoalLead(fx.live.id, "goal-rollback"))
+		const reservation = reservePromotion(fx, "goal-rollback");
+		await expect(fx.manager.promoteToGoalLead(fx.live.id, "goal-rollback", reservation))
 			.rejects.toThrow("old bridge refused stop");
 
 		expect(fx.manager.getSession(fx.live.id)).toBe(fx.live);
@@ -436,6 +470,21 @@ describe("SessionManager current-session runtime promotion", () => {
 		}
 		expect(fx.store.flushAsync).toHaveBeenCalledTimes(1);
 		expect(replacement.stop).toHaveBeenCalledTimes(1);
+	});
+
+	it("restores the exact canonical general baseline when promotion fails before commit", async () => {
+		const fx = fixture("promotion-general-rollback", { role: "general", accessory: "spark" });
+		const replacement = bridge();
+		registerRpcBridgeFactory(() => replacement);
+		fx.oldBridge.stop = vi.fn(async () => { throw new Error("old bridge refused stop"); });
+		const reservation = reservePromotion(fx, "goal-general-rollback");
+
+		await expect(fx.manager.promoteToGoalLead(fx.live.id, "goal-general-rollback", reservation))
+			.rejects.toThrow("old bridge refused stop");
+
+		expect(fx.live).toMatchObject({ role: "general", accessory: "spark", status: "idle" });
+		expect(fx.persisted).toMatchObject({ role: "general", accessory: "spark" });
+		expect(fx.store.flushAsync).toHaveBeenCalledTimes(1);
 	});
 
 	it("keeps a promoted source dormant and byte-stable when its transcript cannot be recovered", async () => {

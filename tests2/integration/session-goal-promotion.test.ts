@@ -117,6 +117,68 @@ test.describe("current-session goal promotion API", () => {
 		});
 	});
 
+	test("rejects a concurrent role PATCH and preserves the baseline after failed promotion compensation", async ({ gateway }) => {
+		const { ownerId, context } = await createPromotionCandidate(gateway, "role-race-compensation");
+		const sessionManager = gateway.sessionManager as any;
+		const originalPromote = sessionManager.promoteToGoalLead;
+		const sourceBefore = sessionManager.getSession(ownerId);
+		const baseline = {
+			role: sourceBefore.role,
+			accessory: sourceBefore.accessory,
+			allowedTools: sourceBefore.allowedTools ? [...sourceBefore.allowedTools] : undefined,
+		};
+		let releasePromotion!: () => void;
+		const blocked = new Promise<void>(resolve => { releasePromotion = resolve; });
+		let enteredPromotion!: () => void;
+		const entered = new Promise<void>(resolve => { enteredPromotion = resolve; });
+		sessionManager.promoteToGoalLead = async () => {
+			enteredPromotion();
+			await blocked;
+			throw new Error("forced promotion failure after reservation");
+		};
+
+		const acceptance = apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
+			method: "POST",
+			body: JSON.stringify({ title: "Promote role race compensation" }),
+		});
+		let failed: Response;
+		let pendingGoalId: string | undefined;
+		try {
+			await entered;
+			pendingGoalId = context.goalStore.getAll().find((goal: any) => goal.worktreeOwnerSessionId === ownerId)?.id;
+			expect(pendingGoalId).toBeTruthy();
+			const rolePatch = await apiFetch(`/api/sessions/${ownerId}`, {
+				method: "PATCH",
+				body: JSON.stringify({ roleId: "coder" }),
+			});
+			expect(rolePatch.status).toBe(409);
+			expect(await jsonResponse(rolePatch)).toMatchObject({
+				code: "SESSION_GOAL_PROMOTION_IN_PROGRESS",
+			});
+			releasePromotion();
+			failed = await acceptance;
+		} finally {
+			releasePromotion();
+			sessionManager.promoteToGoalLead = originalPromote;
+		}
+
+		expect(failed!.status).toBe(400);
+		const liveAfter = sessionManager.getSession(ownerId);
+		expect({
+			role: liveAfter.role,
+			accessory: liveAfter.accessory,
+			allowedTools: liveAfter.allowedTools,
+		}).toEqual(baseline);
+		expect(await sessionRecord(ownerId)).toMatchObject({
+			role: baseline.role,
+			accessory: baseline.accessory,
+		});
+		const attemptGoals = context.goalStore.getAll().filter((goal: any) => goal.worktreeOwnerSessionId === ownerId);
+		expect(attemptGoals).toEqual([]);
+		expect(context.gateStore.getGatesForGoal(pendingGoalId!)).toEqual([]);
+		expect(gateway.teamManager.getTeamState(pendingGoalId!)).toBeUndefined();
+	});
+
 	test("retains the recoverable goal, gates, and lead when reservation release is refused", async ({ gateway, scope }) => {
 		const { ownerId, context } = await createPromotionCandidate(gateway, "refused-compensation");
 		const teamManager = gateway.teamManager as any;

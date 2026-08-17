@@ -5397,9 +5397,19 @@ async function handleApiRoute(
 		json({ error: e.message, ...extra }, status);
 	};
 	const writeSessionLifecycleConflict = (err: unknown): boolean => {
-		if (!(err instanceof PromotedSessionLifecycleConflictError)) return false;
-		json({ error: err.message, code: err.code }, err.statusCode);
-		return true;
+		if (err instanceof PromotedSessionLifecycleConflictError) {
+			json({ error: err.message, code: err.code }, err.statusCode);
+			return true;
+		}
+		if (
+			err instanceof Error
+			&& (err as any).statusCode === 409
+			&& (err as any).code === "SESSION_GOAL_PROMOTION_IN_PROGRESS"
+		) {
+			json({ error: err.message, code: (err as any).code, retryable: true }, 409);
+			return true;
+		}
+		return false;
 	};
 	const parseStrictUpdateBody = <K extends readonly string[]>(raw: unknown, keys: K, options?: StrictBodyOptions): StrictBody<K> | null => {
 		try {
@@ -9128,7 +9138,10 @@ async function handleApiRoute(
 		// before merged-state updates, verification cancellation, or cascade mutation
 		// can touch any adopted goal in the requested subtree.
 		const pendingPromotion = [rootGoal, ...(cascade ? liveDescendants : [])]
-			.find(goal => goal.worktreeOwnerSessionId && _sessionGoalPromotionFlights.has(goal.worktreeOwnerSessionId));
+			.find(goal => goal.worktreeOwnerSessionId && (
+				_sessionGoalPromotionFlights.has(goal.worktreeOwnerSessionId)
+				|| sessionManager.isSessionGoalPromotionReserved(goal.worktreeOwnerSessionId)
+			));
 		if (pendingPromotion) {
 			json({
 				error: "Current-session promotion is still in progress; retry goal archive after it finishes",
@@ -15442,8 +15455,21 @@ async function handleApiRoute(
 		}
 		const body = parseStrictUpdateBody(rawBody, STRICT_UPDATE_BODY_KEYS.sessions);
 		if (!body) return;
-		// Fail before applying any sibling PATCH fields; SessionManager rechecks at
-		// the destructive boundary to close races with concurrent goal creation.
+		// Fail before applying any sibling PATCH fields. Relation/destructive fields
+		// cannot race the short SessionManager-owned promotion reservation.
+		const promotionSensitiveFields = [
+			"projectId", "roleId", "assistantType", "goalAssistant", "goalId", "accessory",
+			"delegateOf", "teamLeadSessionId", "archived",
+		];
+		if (promotionSensitiveFields.some(key => Object.prototype.hasOwnProperty.call(body, key))) {
+			try {
+				sessionManager.assertSessionGoalPromotionMutationAllowed(id);
+			} catch (err) {
+				const status = typeof (err as any)?.statusCode === "number" ? (err as any).statusCode : 409;
+				jsonError(status, err, { code: (err as any)?.code });
+				return;
+			}
+		}
 		if (body.archived === true) {
 			const reason = promotedSessionLifecycleConflictReason(projectContextManager, id);
 			if (reason) {
@@ -15495,7 +15521,8 @@ async function handleApiRoute(
 				const ok = await sessionManager.assignRole(id, role);
 				if (!ok) { json({ error: "Session not found" }, 404); return; }
 			} catch (err) {
-				jsonError(400, err);
+				const status = typeof (err as any)?.statusCode === "number" ? (err as any).statusCode : 400;
+				jsonError(status, err, (err as any)?.code ? { code: (err as any).code } : undefined);
 				return;
 			}
 		} else if (typeof body.roleId === "string" && body.roleId === "") {
@@ -15793,40 +15820,27 @@ async function handleApiRoute(
 			const runPromotion = async (): Promise<PersistedGoal> => {
 				const existing = lookupSessionGoalPromotion(projectContextManager.getAllGoals(), ownerSessionId);
 				if (existing.status === "conflict") throw Object.assign(new Error("Current session has conflicting goal promotion records."), { statusCode: 409, code: "PROMOTION_CONFLICT" });
-				if (existing.status === "found") {
-					await teamManager.adoptExistingLead(existing.goal.id, ownerSessionId);
-					const retryCtx = projectContextManager.getContextForGoal(existing.goal.id);
-					const retrySource = sessionManager.getSession(ownerSessionId);
-					let retryGeneralRoleCleared = false;
-					let retryCommitted = false;
-					if (retryCtx && retrySource?.role === "general") {
-						retrySource.role = undefined;
-						const persistedSource = retryCtx.sessionStore.get(ownerSessionId) as Record<string, unknown> | undefined;
-						if (persistedSource) {
-							delete persistedSource.role;
-							retryCtx.sessionStore.update(ownerSessionId, { lastActivity: persistedSource.lastActivity as number });
-						}
-						retryGeneralRoleCleared = true;
-					}
-					try {
-						await sessionManager.promoteToGoalLead(ownerSessionId, existing.goal.id);
-						retryCommitted = true;
+				const promotionReservation = sessionManager.reserveSessionGoalPromotion(
+					ownerSessionId,
+					existing.status === "found" ? existing.goal.id : undefined,
+				);
+				// Retain process-local exclusion whenever an attempt-owned graph survives.
+				// Exact retry reclaims the same reservation by its bound goal id.
+				let retainPromotionReservation = existing.status === "found";
+				try {
+					if (existing.status === "found") {
+						await teamManager.adoptExistingLead(existing.goal.id, ownerSessionId);
+						await sessionManager.promoteToGoalLead(ownerSessionId, existing.goal.id, promotionReservation);
 						await teamManager.finalizeAdoptedLead(existing.goal.id);
+						retainPromotionReservation = false;
 						try {
 							await deleteProposalFile(proposalStateDir, ownerSessionId, "goal");
 							_broadcastToSession?.(ownerSessionId, { type: "proposal_cleared", sessionId: ownerSessionId, proposalType: "goal" });
 						} catch (error) {
 							console.warn(`[promotion] Goal ${existing.goal.id} finalized on retry but its proposal draft could not be cleared:`, error);
 						}
-					} catch (error) {
-						if (retryGeneralRoleCleared && !retryCommitted && retryCtx) {
-							sessionManager.updateSessionMeta(ownerSessionId, { role: "general" });
-							await retryCtx.sessionStore.flushAsync().catch(() => undefined);
-						}
-						throw error;
+						return existing.goal as PersistedGoal;
 					}
-					return existing.goal as PersistedGoal;
-				}
 
 				const draft = await readPromotionDraft();
 				if (!draft.ok) throw Object.assign(new Error(draft.message), { statusCode: draft.code === "FILE_NOT_FOUND" ? 404 : 400, code: draft.code });
@@ -15882,7 +15896,6 @@ async function handleApiRoute(
 					: undefined;
 				let goal: PersistedGoal | undefined;
 				let committed = false;
-				let baselineGeneralRoleCleared = false;
 				try {
 					goal = await targetCtx.goalManager.createGoal(body.title.trim(), coordinates.cwd, {
 						spec: typeof body.spec === "string" ? body.spec : "",
@@ -15907,30 +15920,21 @@ async function handleApiRoute(
 							sandboxed: coordinates.sandboxed,
 						},
 					});
+					// From this point, retain the reservation unless finalization succeeds or
+					// exact pre-commit compensation removes the complete attempt graph.
+					sessionManager.bindSessionGoalPromotion(promotionReservation, goal.id);
+					retainPromotionReservation = true;
 					await targetCtx.goalManager.updateGoal(goal.id, { autoStartTeam: false });
 					goal.autoStartTeam = false;
 					if (goal.workflow) targetCtx.gateStore.initGatesForGoal(goal.id, goal.workflow.gates.map(gate => gate.id));
 					await Promise.all([targetCtx.goalStore.flush(), targetCtx.gateStore.flush()]);
 					await teamManager.adoptExistingLead(goal.id, ownerSessionId);
-					// `general` is the baseline role attached to every ordinary session,
-					// not a workflow relationship. SessionManager's staged promotion guard
-					// intentionally rejects real assigned roles, so remove this one baseline
-					// marker immediately before entering its coordinated replacement.
-					const sourceBeforePromotion = sessionManager.getSession(ownerSessionId);
-					if (sourceBeforePromotion?.role === "general") {
-						sourceBeforePromotion.role = undefined;
-						const persistedSource = targetCtx.sessionStore.get(ownerSessionId) as Record<string, unknown> | undefined;
-						if (persistedSource) {
-							delete persistedSource.role;
-							targetCtx.sessionStore.update(ownerSessionId, { lastActivity: persistedSource.lastActivity as number });
-						}
-						baselineGeneralRoleCleared = true;
-					}
-					await sessionManager.promoteToGoalLead(ownerSessionId, goal.id);
+					await sessionManager.promoteToGoalLead(ownerSessionId, goal.id, promotionReservation);
 					// Runtime replacement is the commit point. Finalization is idempotent
 					// post-commit repair: failures retain the exact graph/session for retry.
 					committed = true;
 					await teamManager.finalizeAdoptedLead(goal.id);
+					retainPromotionReservation = false;
 					try {
 						await deleteProposalFile(proposalStateDir, ownerSessionId, "goal");
 						_broadcastToSession?.(ownerSessionId, { type: "proposal_cleared", sessionId: ownerSessionId, proposalType: "goal" });
@@ -15940,10 +15944,6 @@ async function handleApiRoute(
 					broadcastToAll({ type: "goal_state_changed", goalId: goal.id });
 					return goal;
 				} catch (error) {
-					if (baselineGeneralRoleCleared && !committed) {
-						sessionManager.updateSessionMeta(ownerSessionId, { role: "general" });
-						await targetCtx.sessionStore.flushAsync().catch(() => undefined);
-					}
 					if (goal && !committed) {
 						// Goal/gate compensation is safe only after TeamManager confirms the
 						// exact empty owner reservation was released (or was provably absent).
@@ -15953,10 +15953,16 @@ async function handleApiRoute(
 						if (reservationReleased) {
 							targetCtx.gateStore.removeGoalGates(goal.id);
 							await targetCtx.gateStore.flush().catch(() => undefined);
-							await targetCtx.goalManager.deleteAdoptedGoalAttempt(goal.id, ownerSessionId).catch(() => false);
+							const goalDeleted = await targetCtx.goalManager.deleteAdoptedGoalAttempt(goal.id, ownerSessionId).catch(() => false);
+							if (goalDeleted) retainPromotionReservation = false;
 						}
 					}
 					throw error;
+				}
+				} finally {
+					if (!retainPromotionReservation) {
+						sessionManager.releaseSessionGoalPromotion(promotionReservation);
+					}
 				}
 			};
 
