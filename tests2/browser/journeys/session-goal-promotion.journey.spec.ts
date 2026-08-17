@@ -186,6 +186,7 @@ test.describe("Journey: Current-session goal promotion", () => {
 			expect(after.teamGoalId).toBe(goal.id);
 			expect(team.teamLeadSessionId).toBe(source.id);
 			expect(team.agents ?? []).toHaveLength(0);
+			expect(goal.state).toBe("in-progress");
 			expect(transcriptSnapshot(gateway, source.id)).toEqual(transcriptBefore);
 
 			await restartGateway(gateway);
@@ -204,6 +205,7 @@ test.describe("Journey: Current-session goal promotion", () => {
 			expect(restored.branch).toBe(before.branch);
 			expect(restored.worktreePath).toBe(before.worktreePath);
 			expect(restoredGoal.worktreeOwnerSessionId).toBe(source.id);
+			expect(restoredGoal.state).toBe("in-progress");
 			expect(restoredGoal.branch).toBe(before.branch);
 			expect(restoredGoal.worktreePath).toBe(before.worktreePath);
 			expect(restoredTeam.teamLeadSessionId).toBe(source.id);

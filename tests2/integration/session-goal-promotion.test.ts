@@ -166,6 +166,100 @@ test.describe("current-session goal promotion API", () => {
 		});
 	});
 
+	test("keeps a committed lead attached when finalization fails, then finalizes the exact goal on retry", async ({ gateway, scope }) => {
+		const { ownerId, context } = await createPromotionCandidate(gateway, "finalizer-retry");
+		const teamManager = gateway.teamManager as any;
+		const originalFinalize = teamManager.finalizeAdoptedLead;
+		let finalizeCalls = 0;
+		teamManager.finalizeAdoptedLead = async () => {
+			finalizeCalls += 1;
+			throw new Error("forced post-commit finalizer failure");
+		};
+
+		let failed: Response;
+		try {
+			failed = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
+				method: "POST",
+				body: JSON.stringify({ title: "Promote finalizer retry" }),
+			});
+		} finally {
+			teamManager.finalizeAdoptedLead = originalFinalize;
+		}
+		expect(failed!.status).toBe(400);
+		expect(finalizeCalls).toBe(1);
+		const retained = context.goalStore.getAll().filter((goal: any) => goal.worktreeOwnerSessionId === ownerId && !goal.archived);
+		expect(retained).toHaveLength(1);
+		const goal = retained[0];
+		scope.trackGoal(goal.id);
+		expect(goal.state).toBe("todo");
+		expect(await sessionRecord(ownerId)).toMatchObject({
+			goalId: goal.id,
+			teamGoalId: goal.id,
+			role: "team-lead",
+		});
+		expect(gateway.teamManager.getTeamState(goal.id)).toMatchObject({ teamLeadSessionId: ownerId, agents: [] });
+		expect((await apiFetch(`/api/sessions/${ownerId}/proposal/goal`)).status).toBe(200);
+
+		const retry = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
+			method: "POST",
+			body: JSON.stringify({ title: "Promote finalizer retry" }),
+		});
+		expect(retry.status, await retry.clone().text()).toBe(201);
+		expect((await jsonResponse(retry)).id).toBe(goal.id);
+		expect(context.goalStore.get(goal.id)?.state).toBe("in-progress");
+		expect(gateway.teamManager.getTeamState(goal.id)).toMatchObject({ teamLeadSessionId: ownerId, agents: [] });
+		expect(context.goalStore.getAll().filter((candidate: any) => candidate.worktreeOwnerSessionId === ownerId)).toHaveLength(1);
+		expect((await apiFetch(`/api/sessions/${ownerId}/proposal/goal`)).status).toBe(404);
+	});
+
+	test("rejects archive before mutation while promotion is in flight, then permits ordered archive", async ({ gateway }) => {
+		const { ownerId, context } = await createPromotionCandidate(gateway, "archive-flight");
+		const sessionManager = gateway.sessionManager as any;
+		const originalPromote = sessionManager.promoteToGoalLead;
+		let releasePromotion!: () => void;
+		const promotionBlocked = new Promise<void>(resolve => { releasePromotion = resolve; });
+		let enteredPromotion!: () => void;
+		const promotionEntered = new Promise<void>(resolve => { enteredPromotion = resolve; });
+		sessionManager.promoteToGoalLead = async (...args: any[]) => {
+			enteredPromotion();
+			await promotionBlocked;
+			return originalPromote.apply(sessionManager, args);
+		};
+
+		const acceptance = apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
+			method: "POST",
+			body: JSON.stringify({ title: "Promote archive flight" }),
+		});
+		let pendingGoal: any;
+		let accepted: Response;
+		let released = false;
+		try {
+			await promotionEntered;
+			pendingGoal = context.goalStore.getAll().find((goal: any) => goal.worktreeOwnerSessionId === ownerId && !goal.archived);
+			expect(pendingGoal).toBeTruthy();
+			const gatesBefore = context.gateStore.getGatesForGoal(pendingGoal.id).length;
+			const archive = await apiFetch(`/api/goals/${pendingGoal.id}?cascade=true&mergedManually=true`, { method: "DELETE" });
+			expect(archive.status).toBe(409);
+			expect((await jsonResponse(archive)).code).toBe("PROMOTION_IN_PROGRESS");
+			expect(context.goalStore.get(pendingGoal.id)).toMatchObject({ state: "todo" });
+			expect(context.goalStore.get(pendingGoal.id)?.archived).not.toBe(true);
+			expect(context.gateStore.getGatesForGoal(pendingGoal.id)).toHaveLength(gatesBefore);
+			expect(gateway.teamManager.getTeamState(pendingGoal.id)).toMatchObject({ teamLeadSessionId: ownerId, agents: [] });
+
+			releasePromotion();
+			released = true;
+			accepted = await acceptance;
+		} finally {
+			if (!released) releasePromotion();
+			sessionManager.promoteToGoalLead = originalPromote;
+		}
+		expect(accepted!.status, await accepted!.clone().text()).toBe(201);
+		expect(context.goalStore.get(pendingGoal.id)?.state).toBe("in-progress");
+		const archived = await apiFetch(`/api/goals/${pendingGoal.id}?cascade=true`, { method: "DELETE" });
+		expect(archived.status, await archived.clone().text()).toBe(200);
+		expect(context.goalStore.get(pendingGoal.id)?.archived).toBe(true);
+	});
+
 	test("persists owner mode, rejects authority, and promotes exactly in place", async ({ gateway, scope }) => {
 		const projectRoot = path.join(gateway.bobbitDir, `promotion-api-${randomUUID()}`);
 		copyGitTemplate(projectRoot);
@@ -261,6 +355,7 @@ test.describe("current-session goal promotion API", () => {
 		expect(goal.worktreePath).toBe(before.worktreePath);
 		expect(goal.branch).toBe(before.branch);
 		expect(goal.setupStatus).toBe("ready");
+		expect(goal.state).toBe("in-progress");
 
 		const after = await sessionRecord(ownerId);
 		expect(after.id).toBe(ownerId);
@@ -324,6 +419,75 @@ test.describe("current-session goal promotion API", () => {
 		expect(permittedPurge.status).toBe(200);
 		const sessionsAfterPurge = await jsonResponse(await apiFetch("/api/sessions?include=archived"));
 		expect(sessionsAfterPurge.sessions.some((session: any) => session.id === ownerId)).toBe(false);
+	});
+
+	test("preserves a real two-component worktree set through archive and removes it on final purge", async ({ gateway }) => {
+		const projectRoot = path.join(gateway.bobbitDir, `promotion-multi-${randomUUID()}`);
+		fs.mkdirSync(projectRoot, { recursive: true });
+		copyGitTemplate(path.join(projectRoot, "alpha"));
+		copyGitTemplate(path.join(projectRoot, "packages", "beta"));
+		const project = await registerProject({
+			name: `promotion-multi-${Date.now()}`,
+			rootPath: projectRoot,
+			components: [
+				{ name: "alpha", repo: "alpha" },
+				{ name: "beta", repo: "packages/beta" },
+			],
+			workflows: {
+				general: {
+					name: "General",
+					description: "Multi-repo promotion fixture",
+					gates: [{ id: "implementation", name: "Implementation", depends_on: [] }],
+				},
+			},
+		});
+		const ownerId = await createSession({ projectId: project.id, cwd: projectRoot });
+		await waitForSessionStatus(ownerId, "idle", 30_000);
+		const before = await sessionRecord(ownerId);
+		const repoWorktrees = before.repoWorktrees as Record<string, string>;
+		expect(Object.keys(repoWorktrees).sort()).toEqual(["alpha", "packages/beta"]);
+		const componentPaths = Object.values(repoWorktrees);
+		for (const componentPath of componentPaths) expect(fs.existsSync(componentPath)).toBe(true);
+		expect(fs.existsSync(path.join(before.worktreePath, ".git"))).toBe(false);
+
+		const seed = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/seed`, {
+			method: "POST",
+			body: JSON.stringify({ args: {
+				title: "Promote multi-repo owner",
+				spec: "Keep both component worktrees.",
+				workflow: "general",
+				projectId: project.id,
+			} }),
+		});
+		expect(seed.status, await seed.clone().text()).toBe(200);
+		const selected = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/worktree-mode`, {
+			method: "PUT",
+			body: JSON.stringify({ mode: "current-session" }),
+		});
+		expect(selected.status, await selected.clone().text()).toBe(200);
+		const accepted = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
+			method: "POST",
+			body: JSON.stringify({ title: "Promote multi-repo owner" }),
+		});
+		expect(accepted.status, await accepted.clone().text()).toBe(201);
+		const goal = await jsonResponse(accepted);
+		expect(goal.repoWorktrees).toEqual(repoWorktrees);
+		expect((await sessionRecord(ownerId)).repoWorktrees).toEqual(repoWorktrees);
+
+		const archived = await apiFetch(`/api/goals/${goal.id}?cascade=true`, { method: "DELETE" });
+		expect(archived.status, await archived.clone().text()).toBe(200);
+		for (const componentPath of componentPaths) expect(fs.existsSync(componentPath)).toBe(true);
+		expect(fs.existsSync(before.worktreePath)).toBe(true);
+		const inventory = await jsonResponse(await apiFetch("/api/maintenance/archived-session-worktrees?includeAlreadyCleaned=1"));
+		const archivedSource = inventory.sessions.find((session: any) => session.id === ownerId);
+		expect(archivedSource?.worktrees).toHaveLength(2);
+		expect(new Set(archivedSource.worktrees.map((item: any) => item.path))).toEqual(new Set(componentPaths));
+		expect(archivedSource.worktrees.every((item: any) => item.disposition !== "protected")).toBe(true);
+
+		const purged = await apiFetch(`/api/sessions/${ownerId}?purge=true`, { method: "DELETE" });
+		expect(purged.status, await purged.clone().text()).toBe(200);
+		for (const componentPath of componentPaths) expect(fs.existsSync(componentPath)).toBe(false);
+		expect(fs.existsSync(before.worktreePath)).toBe(false);
 	});
 
 	test("probes a sandbox owner's transcript in its container realm before promotion", async ({ gateway, scope }) => {

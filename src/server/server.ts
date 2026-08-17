@@ -9114,29 +9114,32 @@ async function handleApiRoute(
 		const rootGoal = getGoalAcrossProjects(id);
 		if (!rootGoal) { json({ error: "Goal not found" }, 404); return; }
 
-		if (!cascade) {
-			const liveDescendants = listDescendants(projectContextManager, id, { includeArchived: false });
-			if (liveDescendants.length > 0) {
-				json({
-					error: `Goal has ${liveDescendants.length} live descendant(s). Re-call with ?cascade=true to archive them all.`,
-					code: "HAS_DESCENDANTS",
-					count: liveDescendants.length,
-				}, 409);
-				return;
-			}
+		const liveDescendants = listDescendants(projectContextManager, id, { includeArchived: false });
+		if (!cascade && liveDescendants.length > 0) {
+			json({
+				error: `Goal has ${liveDescendants.length} live descendant(s). Re-call with ?cascade=true to archive them all.`,
+				code: "HAS_DESCENDANTS",
+				count: liveDescendants.length,
+			}, 409);
+			return;
+		}
+
+		// Promotion owns the source session flight. Reject the entire archive request
+		// before merged-state updates, verification cancellation, or cascade mutation
+		// can touch any adopted goal in the requested subtree.
+		const pendingPromotion = [rootGoal, ...(cascade ? liveDescendants : [])]
+			.find(goal => goal.worktreeOwnerSessionId && _sessionGoalPromotionFlights.has(goal.worktreeOwnerSessionId));
+		if (pendingPromotion) {
+			json({
+				error: "Current-session promotion is still in progress; retry goal archive after it finishes",
+				code: "PROMOTION_IN_PROGRESS",
+			}, 409);
+			return;
 		}
 
 		const mergedManually = url.searchParams.get("mergedManually") === "true";
 
-		const archiveOne = async (g: import("./agent/goal-store.js").PersistedGoal): Promise<boolean> => {
-			if (g.archived) {
-				try {
-					await cleanupGateDiagnosticsForGoal(g.id, projectContextManager.getContextForGoal(g.id)?.stateDir);
-				} catch (err) {
-					console.warn(`[api] archive: gate diagnostics cleanup failed for already-archived goal ${g.id}:`, err);
-				}
-				return false;
-			}
+		const performArchiveOne = async (g: import("./agent/goal-store.js").PersistedGoal): Promise<boolean> => {
 			if (mergedManually && g.id === id && g.state !== "complete") {
 				await getGoalManagerForGoal(g.id).updateGoal(g.id, { state: "complete" });
 			}
@@ -9160,10 +9163,8 @@ async function handleApiRoute(
 				if (tl?.branch) agentBranches.push(tl.branch);
 			}
 			const gm = getGoalManagerForGoal(g.id);
-			// A promoted source remains the checkout/sandbox lifecycle owner. Publish
-			// goal archival before TeamManager tears that source down; otherwise its
-			// live-goal guard correctly rejects direct teardown and restart recovery
-			// can misread the ordered shutdown as an incomplete promotion.
+			// A promoted source remains the checkout/sandbox lifecycle owner. Its
+			// durable archived bit must publish before TeamManager tears it down.
 			if (g.worktreeOwnerSessionId) await gm.archiveGoal(g.id);
 			if (teamManager.getTeamState(g.id)) {
 				await teamManager.teardownTeam(g.id);
@@ -9189,9 +9190,33 @@ async function handleApiRoute(
 			return true;
 		};
 
+		const archiveOne = async (g: import("./agent/goal-store.js").PersistedGoal): Promise<boolean> => {
+			if (g.archived) {
+				try {
+					await cleanupGateDiagnosticsForGoal(g.id, projectContextManager.getContextForGoal(g.id)?.stateDir);
+				} catch (err) {
+					console.warn(`[api] archive: gate diagnostics cleanup failed for already-archived goal ${g.id}:`, err);
+				}
+				return false;
+			}
+			// Admission precedes every archive-side mutation, including merged-state
+			// updates and verification cancellation, and holds through durable archive.
+			return g.worktreeOwnerSessionId
+				? teamManager.withAdoptedGoalArchiveAdmission(g.id, () => performArchiveOne(g))
+				: performArchiveOne(g);
+		};
+
 		if (!cascade) {
-			await archiveOne(rootGoal);
-			json({ ok: true, archived: 1 });
+			try {
+				await archiveOne(rootGoal);
+				json({ ok: true, archived: 1 });
+			} catch (error) {
+				if (error instanceof TeamStartError) {
+					json({ error: error.message, code: error.code }, error.status);
+					return;
+				}
+				throw error;
+			}
 			return;
 		}
 
@@ -9207,6 +9232,11 @@ async function handleApiRoute(
 		if (result.errors.length > 0) {
 			for (const e of result.errors) {
 				console.error(`[api] archive cascade: ${e.goalId} failed:`, e.error);
+			}
+			const admissionError = result.errors.find(entry => entry.error instanceof TeamStartError)?.error;
+			if (admissionError instanceof TeamStartError) {
+				json({ error: admissionError.message, code: admissionError.code }, admissionError.status);
+				return;
 			}
 		}
 		json({
@@ -15768,6 +15798,7 @@ async function handleApiRoute(
 					const retryCtx = projectContextManager.getContextForGoal(existing.goal.id);
 					const retrySource = sessionManager.getSession(ownerSessionId);
 					let retryGeneralRoleCleared = false;
+					let retryCommitted = false;
 					if (retryCtx && retrySource?.role === "general") {
 						retrySource.role = undefined;
 						const persistedSource = retryCtx.sessionStore.get(ownerSessionId) as Record<string, unknown> | undefined;
@@ -15779,8 +15810,16 @@ async function handleApiRoute(
 					}
 					try {
 						await sessionManager.promoteToGoalLead(ownerSessionId, existing.goal.id);
+						retryCommitted = true;
+						await teamManager.finalizeAdoptedLead(existing.goal.id);
+						try {
+							await deleteProposalFile(proposalStateDir, ownerSessionId, "goal");
+							_broadcastToSession?.(ownerSessionId, { type: "proposal_cleared", sessionId: ownerSessionId, proposalType: "goal" });
+						} catch (error) {
+							console.warn(`[promotion] Goal ${existing.goal.id} finalized on retry but its proposal draft could not be cleared:`, error);
+						}
 					} catch (error) {
-						if (retryGeneralRoleCleared && retryCtx) {
+						if (retryGeneralRoleCleared && !retryCommitted && retryCtx) {
 							sessionManager.updateSessionMeta(ownerSessionId, { role: "general" });
 							await retryCtx.sessionStore.flushAsync().catch(() => undefined);
 						}
@@ -15888,7 +15927,10 @@ async function handleApiRoute(
 						baselineGeneralRoleCleared = true;
 					}
 					await sessionManager.promoteToGoalLead(ownerSessionId, goal.id);
+					// Runtime replacement is the commit point. Finalization is idempotent
+					// post-commit repair: failures retain the exact graph/session for retry.
 					committed = true;
+					await teamManager.finalizeAdoptedLead(goal.id);
 					try {
 						await deleteProposalFile(proposalStateDir, ownerSessionId, "goal");
 						_broadcastToSession?.(ownerSessionId, { type: "proposal_cleared", sessionId: ownerSessionId, proposalType: "goal" });
