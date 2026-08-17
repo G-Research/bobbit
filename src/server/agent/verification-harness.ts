@@ -1700,6 +1700,8 @@ export interface ActiveVerification {
 		cancellation?: VerificationCancellation;
 		/** Recovery obtained no verifier/command verdict before gateway restart. */
 		restartInterrupted?: true;
+		/** A recovered reviewer verdict was durably captured for this exact row. */
+		verdictObtained?: true;
 		startedAt: number;
 		sessionId?: string;
 		/** Subgoal-step cache — Tier-1.5 lookup reads `childGoalId` to short-circuit tier resolution. */
@@ -2900,6 +2902,18 @@ export class VerificationHarness {
 		}
 	}
 
+	/** Record exact cleanup intent for recovered command rows without inventing queued ownership. */
+	private _markMixedRestartCommandKillIntent(v: ActiveVerification): void {
+		const now = Date.now();
+		for (const step of v.steps) {
+			if (step.type !== "command" || step.restartInterrupted !== true || step.commandSpawnState === "queued") continue;
+			if (step.commandSpawnState !== "spawning" && step.commandSpawnState !== "spawned") continue;
+			step.killRequestedAt ??= now;
+			step.killReason = "cancelled";
+			step.killSignal = "SIGKILL";
+		}
+	}
+
 	/** Prepare a mixed terminal failure directly from durable active rows after a recovery RPC exception. */
 	private async _prepareMixedRestartFailureFromActive(v: ActiveVerification): Promise<void> {
 		const preparedAt = Date.now();
@@ -2924,6 +2938,7 @@ export class VerificationHarness {
 				...(interrupted ? { cancellation: { ...cancellation } } : {}),
 			} as GateSignalStep;
 		});
+		this._markMixedRestartCommandKillIntent(v);
 		v.pendingTerminalIntent = {
 			kind: "mixed-restart-failed",
 			preparedAt,
@@ -2932,6 +2947,7 @@ export class VerificationHarness {
 			goalBranch: this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId)?.branch,
 		};
 		if (!this._persistActive()) throw new Error(`Could not persist mixed restart terminal intent for ${v.signalId}`);
+		this._drainPendingSignoffsForSignal(v.signalId);
 		await this._startCancelledVerificationCleanup(v);
 	}
 
@@ -3224,6 +3240,7 @@ export class VerificationHarness {
 		if (mixedRestartFailure) {
 			// Persist the complete terminal audit before any reviewer/process teardown.
 			// Exact cleanup owns subsequent publication and retries it after restart.
+			this._markMixedRestartCommandKillIntent(v);
 			v.pendingTerminalIntent = {
 				kind: "mixed-restart-failed",
 				preparedAt: aggregatePublishedAt,
@@ -3232,6 +3249,7 @@ export class VerificationHarness {
 				goalBranch,
 			};
 			if (!this._persistActive()) throw new Error(`Could not persist mixed restart terminal intent for ${v.signalId}`);
+			this._drainPendingSignoffsForSignal(v.signalId);
 			await this._startCancelledVerificationCleanup(v);
 			return;
 		}
@@ -3256,8 +3274,9 @@ export class VerificationHarness {
 		step: ActiveVerification["steps"][number],
 	): Promise<ResumedVerificationStep | null> {
 		if (!step.sessionId) return null;
+		const sessionId = step.sessionId;
 
-		const session = this.sessionManager?.getSession(step.sessionId);
+		const session = this.sessionManager?.getSession(sessionId);
 		if (!session) {
 			// The persisted reviewer session is absent, so recovery obtained no
 			// verdict. This is structured harness provenance, not reviewer output.
@@ -3307,19 +3326,26 @@ export class VerificationHarness {
 			verdictObtained: true,
 		});
 		const capturingResolver = (result: VerificationResult) => {
-			if (!capturedVerdict) {
-				capturedVerdict = result;
-				const active = this.activeVerifications.get(v.signalId);
-				const activeStep = active?.steps.find(candidate => candidate.sessionId === step.sessionId);
-				if (activeStep) {
-					activeStep.status = result.verdict ? "passed" : "failed";
-					activeStep.passed = result.verdict;
-					activeStep.output = result.summary;
-					activeStep.durationMs = Date.now() - activeStep.startedAt;
-					delete activeStep.restartInterrupted;
-					this._persistActive();
-				}
+			if (capturedVerdict) {
+				resultResolver(capturedVerdict);
+				return;
 			}
+			const active = this.activeVerifications.get(v.signalId);
+			const activeStep = active?.steps.find(candidate => candidate.sessionId === sessionId);
+			if (!active || !activeStep) throw new Error(`Recovered verification result has no active row for ${sessionId}`);
+			const before = structuredClone(activeStep);
+			activeStep.status = result.verdict ? "passed" : "failed";
+			activeStep.passed = result.verdict;
+			activeStep.output = result.summary;
+			activeStep.durationMs = Date.now() - activeStep.startedAt;
+			activeStep.verdictObtained = true;
+			delete activeStep.restartInterrupted;
+			if (!this._persistActive()) {
+				for (const key of Object.keys(activeStep)) if (!Object.prototype.hasOwnProperty.call(before, key)) delete (activeStep as any)[key];
+				Object.assign(activeStep, before);
+				throw new Error(`Could not persist recovered verification result for ${sessionId}`);
+			}
+			capturedVerdict = result;
 			resultResolver(result);
 		};
 		this.pendingResults.set(step.sessionId, capturingResolver);
@@ -3555,20 +3581,29 @@ export class VerificationHarness {
 				duration_ms: Date.now() - step.startedAt,
 				restartInterrupted: true,
 			};
-			// Keep the resolver registered through teardown and prefer a verdict that
-			// lands in that exact race window.
-			try { await this.sessionManager!.terminateSession(step.sessionId); } catch { /* cleanup repeats in finally */ }
-			try { await this.teamManager?.unregisterReviewerSession(v.goalId, step.sessionId); } catch { /* cleanup repeats in finally */ }
+			// Establish durable reviewer ownership before the first teardown request.
+			// The shared helper retains this exact session ID if either operation fails.
+			const cleanupActive = this.activeVerifications.get(v.signalId);
+			if (!cleanupActive) throw new Error(`No active verification for resumed reviewer ${sessionId}`);
+			cleanupActive.reviewerCleanupPending = true;
+			if (!this._persistActive()) throw new Error(`Could not persist reviewer cleanup fence for ${sessionId}`);
+			try {
+				await this._terminateCancelledReviewersFor([cleanupActive]);
+			} catch (cleanupErr) {
+				console.warn(`[verification] Resumed reviewer cleanup remains owned for ${sessionId}: ${(cleanupErr as Error).message}`);
+			}
 			return capturedVerdict ? captureVerdict(capturedVerdict) : noResult;
 		} finally {
 			try { errListenerUnsub(); } catch { /* ignore */ }
-			// Terminate BEFORE deleting the pending resolver so a verdict POST
-			// racing teardown is still captured, not 404-dropped (see the
-			// delete-vs-late-POST fix in runLlmReviewViaSession).
-			try { await this.sessionManager!.terminateSession(step.sessionId); } catch { /* ignore */ }
-			this.pendingResults.delete(step.sessionId);
-			if (this.teamManager) {
-				try { await this.teamManager.unregisterReviewerSession(v.goalId, step.sessionId); } catch { /* ignore */ }
+			// A failed exact cleanup retains resolver/session ownership for the shared
+			// terminal cleanup retry. Do not swallow it by deleting this authority.
+			const cleanupPending = this.activeVerifications.get(v.signalId)?.reviewerCleanupPending === true;
+			if (!cleanupPending) {
+				try { await this.sessionManager!.terminateSession(sessionId); } catch { /* ignore */ }
+				this.pendingResults.delete(sessionId);
+				if (this.teamManager) {
+					try { await this.teamManager.unregisterReviewerSession(v.goalId, sessionId); } catch { /* ignore */ }
+				}
 			}
 		}
 	}
