@@ -1117,10 +1117,14 @@ test("a held stale strict gate write cannot overwrite a replacement generation o
 	const strictWriteStarted = deferredVoid();
 	const releaseStrictWrite = deferredVoid();
 	const updateGateStatusStrict = gateStore.updateGateStatusStrict.bind(gateStore);
-	(gateStore as any).updateGateStatusStrict = async (...args: any[]) => {
+	(gateStore as any).updateGateStatusStrict = (...args: any[]) => {
+		// GateStore updates its in-memory gate synchronously before returning the
+		// strict persistence promise. Hold only that promise's resolution so the
+		// replacement interleaves with a real durable-write await, not before the
+		// finalizer invokes the strict method.
+		const persisted = updateGateStatusStrict(...args);
 		strictWriteStarted.resolve();
-		await releaseStrictWrite.promise;
-		return updateGateStatusStrict(...args);
+		return Promise.all([persisted, releaseStrictWrite.promise]).then(() => undefined);
 	};
 	const oldFinalization = harness._finalizePendingMixedRestartFailure(oldActive);
 	await strictWriteStarted.promise;
@@ -1128,6 +1132,9 @@ test("a held stale strict gate write cannot overwrite a replacement generation o
 	const replacement = { ...signal(), id: `${SIGNAL_ID}-held-replacement`, timestamp: oldSignal.timestamp + 1 };
 	replacement.verification.steps = harness.beginVerification(replacement, { ...GATE, verify: [] });
 	gateStore.recordSignal(replacement);
+	// Signal admission synchronously restores the replacement run's pending
+	// gate while the old generation's strict durability promise remains held.
+	gateStore.updateGateStatus(GOAL_ID, GATE_ID, "pending");
 	expect(gateStore.getGate(GOAL_ID, GATE_ID)!.signals.at(-1)?.id).toBe(replacement.id);
 	expect(gateStore.getGate(GOAL_ID, GATE_ID)!.status).toBe("pending");
 
