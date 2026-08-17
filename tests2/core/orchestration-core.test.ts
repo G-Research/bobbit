@@ -56,7 +56,16 @@ class FakeView implements OrchestrationSessionView {
 		this.live.set(id, { id, status: "idle", title: opts.title, output: "" });
 		// Persist childKind/readOnly exactly as the real createDelegateSession now
 		// does (findings #1/#2) so restart-rebuild + scoping tests are faithful.
-		this.persisted.set(id, { id, title: opts.title, delegateOf: parentSessionId, childKind: opts.childKind, instructions: opts.instructions });
+		const trustedTeamGoalId = this.getTrustedTeamGoalIdForSession?.(parentSessionId)
+			?? this.persisted.get(parentSessionId)?.teamGoalId;
+		this.persisted.set(id, {
+			id,
+			title: opts.title,
+			delegateOf: parentSessionId,
+			childKind: opts.childKind,
+			instructions: opts.instructions,
+			teamGoalId: trustedTeamGoalId,
+		});
 		return { id };
 	}
 	async createSession(cwd: string, _a: any, _g: any, _t: any, opts?: any): Promise<{ id: string }> {
@@ -69,6 +78,7 @@ class FakeView implements OrchestrationSessionView {
 			childKind: opts?.childKind,
 			sandboxed: opts?.sandboxed,
 			projectId: opts?.projectId,
+			teamGoalId: opts?.teamGoalId,
 			...(Object.prototype.hasOwnProperty.call(opts, "worktreePushPolicy")
 				? { worktreePushPolicy: opts.worktreePushPolicy }
 				: {}),
@@ -99,6 +109,9 @@ class FakeView implements OrchestrationSessionView {
 		return session ? { kind: "agent" as const, id: `session:${id}`, label: session.title ?? "Agent" } : undefined;
 	}
 	getPersistedSession(id: string): PersistedSessionLike | undefined { return this.persisted.get(id); }
+	getTrustedTeamGoalIdForSession(id: string): string | undefined {
+		return this.persisted.get(id)?.teamGoalId;
+	}
 	async terminateSession(id: string): Promise<boolean> { this.terminated.push(id); return true; }
 	async forceAbort(id: string): Promise<void> { this.aborted.push(id); }
 	markChildTerminal(id: string): void {
@@ -199,6 +212,38 @@ describe("OrchestrationCore.spawn — local delegated helper worktrees", () => {
 		const persistedChild = view.persisted.get("child-1");
 		assert.ok(persistedChild);
 		assert.equal("worktreePushPolicy" in persistedChild, false, "persisted child metadata must not imply publication policy");
+	});
+
+	it("stamps TeamStore-derived ownership on every child lifecycle before setup", async () => {
+		const view = new FakeView();
+		view.owner("teamstore-owner", { projectId: "proj-A" });
+		view.getTrustedTeamGoalIdForSession = () => "goal-from-team-store";
+		const admissions: string[] = [];
+		(view as any).runWithTeamGoalAdmission = async (goalId: string, operation: () => Promise<unknown>) => {
+			admissions.push(goalId);
+			return operation();
+		};
+		const core = makeCore(view, "anthropic/claude-x");
+
+		const bare = await core.spawn({ ownerSessionId: "teamstore-owner", instructions: "bare" });
+		const shared = await core.spawn({ ownerSessionId: "teamstore-owner", instructions: "shared", lifecycle: "full" });
+		const branched = await core.spawn({
+			ownerSessionId: "teamstore-owner",
+			instructions: "branched",
+			lifecycle: "full",
+			worktree: { mode: "sub-branch", repoPath: "/repo", goalId: "child-goal", branch: "goal/child", cwd: "/repo" },
+		});
+
+		for (const child of [bare, shared, branched]) {
+			assert.equal(
+				view.persisted.get(child.sessionId)?.teamGoalId,
+				"goal-from-team-store",
+				`${child.sessionId} must be owned in its initial persisted row`,
+			);
+		}
+		assert.deepEqual(admissions, ["goal-from-team-store", "goal-from-team-store", "goal-from-team-store"]);
+		assert.equal(view.createSessionCalls[0].opts.awaitWorktreeSetup, undefined, "shared full setup keeps its existing await policy");
+		assert.equal(view.createSessionCalls[1].opts.awaitWorktreeSetup, true, "team-owned branch setup stays inside admission");
 	});
 
 	it("keeps exact teamGoalId sub-branch setup inside team admission", async () => {

@@ -757,6 +757,8 @@ export class GoalStore {
 	private generation = 0;
 	/** Per-record mutation revisions let strict rollback preserve newer same-goal writes. */
 	private goalMutationRevisions = new Map<string, number>();
+	/** Same-goal strict archives share one publication and rollback outcome. */
+	private archiveStrictInFlight = new Map<string, Promise<boolean>>();
 	private acceptingMutations = true;
 	private closePromise: Promise<void> | null = null;
 
@@ -892,8 +894,29 @@ export class GoalStore {
 	 * Durably publish terminal archive intent before cross-store cleanup starts.
 	 * Replays fence an already-archived row without changing its archive time.
 	 */
-	async archiveStrict(id: string): Promise<boolean> {
+	archiveStrict(id: string): Promise<boolean> {
 		this.assertAcceptingMutations();
+		const inFlight = this.archiveStrictInFlight.get(id);
+		if (inFlight) return inFlight;
+
+		let resolveOperation!: (value: boolean) => void;
+		let rejectOperation!: (reason: unknown) => void;
+		const operation = new Promise<boolean>((resolve, reject) => {
+			resolveOperation = resolve;
+			rejectOperation = reject;
+		});
+		// Publish the shared promise before archiveStrictOnce can reach persistence.
+		// This keeps even synchronous/re-entrant callers on the same outcome.
+		this.archiveStrictInFlight.set(id, operation);
+		void this.archiveStrictOnce(id).then(resolveOperation, rejectOperation);
+		const clear = () => {
+			if (this.archiveStrictInFlight.get(id) === operation) this.archiveStrictInFlight.delete(id);
+		};
+		void operation.then(clear, clear);
+		return operation;
+	}
+
+	private async archiveStrictOnce(id: string): Promise<boolean> {
 		const existing = this.goals.get(id);
 		if (!existing) return false;
 		if (existing.archived === true) {

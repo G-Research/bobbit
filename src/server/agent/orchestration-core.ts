@@ -628,7 +628,9 @@ export class OrchestrationCore {
 				childKind,
 				// Structural ownership is part of the initial persisted row, before
 				// createSession can await worktree setup or start an agent process.
-				teamGoalId: ownerPs?.teamGoalId,
+				// A current TeamStore reference is trusted even when a legacy owner row
+				// has no stamp; an explicit foreign stamp still wins in the classifier.
+				teamGoalId: trustedTeamGoalId ?? ownerPs?.teamGoalId,
 				// Visible session title (Decision A.5 / launch-ux §5.3). createSession
 				// otherwise defaults to "New session"; thread it so a launcher-supplied
 				// title (e.g. "PR Walkthrough") names the sidebar entry.

@@ -333,6 +333,49 @@ describe("GoalStore — onGoalCreated / onGoalArchived", () => {
 		await store.close();
 	});
 
+	it("does not let a concurrent manager archive report success after shared publication failure", async () => {
+		const dir = fs.mkdtempSync(path.join(tmpRoot, "strict-manager-coalesced-"));
+		const store = new GoalStore(dir, undefined, { persistence: "json" });
+		const manager = new GoalManager(store, undefined, dir);
+		store.put(makeGoal("coalesced-manager-goal"));
+		await store.flush();
+		let archiveHooks = 0;
+		let reconciliations = 0;
+		store.onGoalArchived = () => { archiveHooks++; };
+		manager.setGoalArchiveReconciler(async () => { reconciliations++; });
+
+		const originalSaveStrict = (store as any).saveStrict.bind(store);
+		let rejectPublication!: (error: Error) => void;
+		let entered!: () => void;
+		const publicationEntered = new Promise<void>((resolve) => { entered = resolve; });
+		let firstPublication = true;
+		(store as any).saveStrict = (ids: Iterable<string>) => {
+			if (!firstPublication) return originalSaveStrict(ids);
+			firstPublication = false;
+			return new Promise<void>((_resolve, reject) => {
+				rejectPublication = reject;
+				entered();
+			});
+		};
+
+		const first = manager.archiveGoal("coalesced-manager-goal");
+		await publicationEntered;
+		const second = manager.archiveGoal("coalesced-manager-goal");
+		const firstRejected = assert.rejects(first, /shared publication failure/);
+		const secondRejected = assert.rejects(second, /shared publication failure/);
+		rejectPublication(new Error("injected shared publication failure"));
+		await Promise.all([firstRejected, secondRejected]);
+
+		assert.equal(store.get("coalesced-manager-goal")?.archived, undefined);
+		assert.equal(archiveHooks, 0);
+		assert.equal(reconciliations, 0, "no concurrent caller may continue into cleanup");
+
+		assert.equal(await manager.archiveGoal("coalesced-manager-goal"), true);
+		assert.equal(archiveHooks, 1);
+		assert.equal(reconciliations, 1, "a fresh retry performs the cleanup exactly once");
+		await store.close();
+	});
+
 	it("archive fires onGoalArchived exactly once on the false → true transition", () => {
 		const store = freshStore();
 		store.put(makeGoal("g-1"));
