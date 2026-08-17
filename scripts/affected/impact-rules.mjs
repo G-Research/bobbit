@@ -1154,9 +1154,10 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 	},
 	{
 		consumer: "tests2/integration/project-import-proposal-route.test.ts",
-		allowReason: "isolated integration gateway project context-trace output",
+		allowReason: "isolated integration gateway project context-trace and decision-request state",
 		reads: frozen([
 			{ expression: "file", count: 1 },
+			{ expression: "storePath", count: 1 },
 		]),
 	},
 	{
