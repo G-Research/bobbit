@@ -4860,7 +4860,7 @@ export class VerificationHarness {
 				return false;
 			}
 			this._persistActive();
-			console.log(`[verification] Cancelled verification ${signalId} for goal ${active.goalId} (${active.cancellation?.cause ?? "unknown"})`);
+			console.log(`[verification] Cancellation cleanup pending for ${signalId}; retrying exact ownership cleanup`);
 			return true;
 		} catch (err) {
 			console.warn(`[verification] Cancellation cleanup for ${active.signalId} did not settle: ${(err as Error).message}`);
