@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as rpcBridgeModule from "../../src/server/agent/rpc-bridge.js";
 import { resetAgentDirStateForTests } from "../../src/server/bobbit-dir.js";
 import * as harnessDepsModule from "../../src/server/harness-deps.js";
+import { recoverInterruptedDistPromotion } from "../../scripts/harness-bootstrap.mjs";
 import {
 	discardStagedDistBuild,
 	prepareStagedDistBuild,
@@ -57,6 +58,15 @@ function writePackage(modulesDir: string, packageName: string): void {
 		name: packageName,
 		version: "0.0.0-test",
 	});
+}
+
+function writeServerEntrypoints(distRoot: string, cliContent: string): string {
+	const serverDir = path.join(distRoot, "server");
+	fs.mkdirSync(serverDir, { recursive: true });
+	fs.writeFileSync(path.join(serverDir, "cli.js"), cliContent, "utf8");
+	fs.writeFileSync(path.join(serverDir, "harness.js"), "// harness fixture\n", "utf8");
+	fs.writeFileSync(path.join(serverDir, "watchdog.js"), "// watchdog fixture\n", "utf8");
+	return path.join(serverDir, "cli.js");
 }
 
 function requireExport(module: Record<string, unknown>, names: string[], label: string): AnyFunction {
@@ -121,6 +131,22 @@ function pathIsWithin(candidate: unknown, root: string): boolean {
 function repositorySource(relativePath: string): string {
 	const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 	return fs.readFileSync(path.join(repositoryRoot, relativePath), "utf-8");
+}
+
+function writePromotionJournalFixture(root: string, stagingDir: string, backupDir: string): string {
+	const journal = path.join(root, ".bobbit-dist-promotion.json");
+	fs.writeFileSync(journal, `${JSON.stringify({
+		version: 1,
+		phase: "live-moved",
+		hadLive: true,
+		stagingDir: path.basename(stagingDir),
+		backupDir: path.basename(backupDir),
+	})}\n`, "utf8");
+	return journal;
+}
+
+function runStableHarnessBootstrap(root: string): string {
+	return recoverInterruptedDistPromotion(root).action;
 }
 
 function sourceFunctionBody(source: string, functionName: string): string {
@@ -474,12 +500,23 @@ describe.skipIf(!desiredContractAvailable)("development harness pre-build valida
 			const steps = script.split(/\s*&&\s*/);
 
 			expect(steps[0], `${POLICY_PREFIX}_WRAPPER_VALIDATION_FIRST:${scriptName}`).toBe("node src/server/harness-deps.ts");
-			expect(steps[1], `${POLICY_PREFIX}_WRAPPER_BUILD_SECOND:${scriptName}`).toBe("npm run build:server");
+			expect(steps[1], `${POLICY_PREFIX}_WRAPPER_RECOVERY_BEFORE_BUILD:${scriptName}`).toBe("node scripts/harness-bootstrap.mjs recover");
+			expect(steps[2], `${POLICY_PREFIX}_WRAPPER_BUILD_AFTER_RECOVERY:${scriptName}`).toBe("npm run build:server");
 			expect(script, `${POLICY_PREFIX}_WRAPPER_NO_DEPENDENCY_REPAIR:${scriptName}`).not.toMatch(
 				/\b(?:npm\s+(?:install|i|ci|update|uninstall|remove|rm|prune|audit\s+fix)|pnpm\s+(?:install|i|add|update|up|remove)|yarn\s+(?:install|add|upgrade|remove)|bun\s+(?:install|add|update|remove))\b/i,
 			);
 		},
 	);
+
+	it("routes every dist harness/watchdog load through the stable outside-dist bootstrap", () => {
+		const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+		const manifest = JSON.parse(fs.readFileSync(path.join(repositoryRoot, "package.json"), "utf-8")) as {
+			scripts?: Record<string, string>;
+		};
+		expect(manifest.scripts?.["dev:harness"]).toMatch(/scripts\/harness-bootstrap\.mjs harness/);
+		expect(manifest.scripts?.["dev:watchdog"]).toMatch(/scripts\/harness-bootstrap\.mjs watchdog/);
+		expect(repositorySource("scripts/dev-nord.mjs")).toMatch(/scripts\/harness-bootstrap\.mjs harness/);
+	});
 
 	it("fails non-zero with actionable diagnostics without writes or package-manager subprocesses", () => {
 		const root = makeTempDir("bobbit-wrapper-validation-");
@@ -807,9 +844,7 @@ describe("harness sentinel restart downtime policy", () => {
 		fs.writeFileSync(liveUi, "preserved-ui\n", "utf-8");
 
 		const prepared = await prepareStagedDistBuild(root, stagingDir => {
-			const candidateCli = path.join(stagingDir, "server", "cli.js");
-			fs.mkdirSync(path.dirname(candidateCli), { recursive: true });
-			fs.writeFileSync(candidateCli, "new-server\n", "utf-8");
+			writeServerEntrypoints(stagingDir, "new-server\n");
 		});
 		expect(fs.readFileSync(liveCli, "utf-8")).toBe("old-server\n");
 
@@ -817,6 +852,48 @@ describe("harness sentinel restart downtime policy", () => {
 		expect(fs.readFileSync(liveCli, "utf-8")).toBe("new-server\n");
 		expect(fs.readFileSync(liveUi, "utf-8")).toBe("preserved-ui\n");
 		expect(fs.existsSync(prepared.stagingDir)).toBe(false);
+		expect(fs.existsSync(path.join(root, ".bobbit-dist-promotion.json"))).toBe(false);
+		expect(fs.readdirSync(root).filter(name => name.startsWith(".bobbit-dist-previous-"))).toEqual([]);
+	});
+
+	it("restores the old launchable dist after interruption immediately following the live rename", async () => {
+		const root = makeTempDir("bobbit-promotion-live-moved-");
+		const liveCli = writeServerEntrypoints(path.join(root, "dist"), "globalThis.__bobbitOldCliLaunched = 'old';\n");
+		const stagingDir = fs.mkdtempSync(path.join(root, ".bobbit-dist-stage-"));
+		writeServerEntrypoints(stagingDir, "candidate-must-not-launch\n");
+		const backupDir = path.join(root, ".bobbit-dist-previous-interrupted");
+		const journal = writePromotionJournalFixture(root, stagingDir, backupDir);
+
+		// Abrupt-exit fixture: persist the exact on-disk state after rename one and
+		// do not enter promoteStagedDistBuild's catch/rollback path.
+		fs.renameSync(path.join(root, "dist"), backupDir);
+		expect(fs.existsSync(path.join(root, "dist"))).toBe(false);
+		expect(runStableHarnessBootstrap(root)).toBe("restored-backup");
+
+		expect(fs.existsSync(journal)).toBe(false);
+		expect(fs.existsSync(backupDir)).toBe(false);
+		expect(fs.existsSync(stagingDir)).toBe(false);
+		await import(`${pathToFileURL(liveCli).href}?restored=${Date.now()}`);
+		expect((globalThis as Record<string, unknown>).__bobbitOldCliLaunched).toBe("old");
+	});
+
+	it("retains the valid candidate and cleans stale recovery state after interruption following candidate rename", async () => {
+		const root = makeTempDir("bobbit-promotion-candidate-moved-");
+		writeServerEntrypoints(path.join(root, "dist"), "old-server\n");
+		const stagingDir = fs.mkdtempSync(path.join(root, ".bobbit-dist-stage-"));
+		writeServerEntrypoints(stagingDir, "globalThis.__bobbitCandidateCliLaunched = 'candidate';\n");
+		const backupDir = path.join(root, ".bobbit-dist-previous-interrupted");
+		const journal = writePromotionJournalFixture(root, stagingDir, backupDir);
+
+		fs.renameSync(path.join(root, "dist"), backupDir);
+		fs.renameSync(stagingDir, path.join(root, "dist"));
+		expect(runStableHarnessBootstrap(root)).toBe("retained-candidate");
+
+		expect(fs.existsSync(journal)).toBe(false);
+		expect(fs.existsSync(backupDir)).toBe(false);
+		const liveCandidateCli = path.join(root, "dist", "server", "cli.js");
+		await import(`${pathToFileURL(liveCandidateCli).href}?candidate=${Date.now()}`);
+		expect((globalThis as Record<string, unknown>).__bobbitCandidateCliLaunched).toBe("candidate");
 	});
 
 	it("rolls the live dist back when candidate promotion fails", async () => {
@@ -825,16 +902,14 @@ describe("harness sentinel restart downtime policy", () => {
 		fs.mkdirSync(path.dirname(liveCli), { recursive: true });
 		fs.writeFileSync(liveCli, "rollback-authority\n", "utf-8");
 		const prepared = await prepareStagedDistBuild(root, stagingDir => {
-			const candidateCli = path.join(stagingDir, "server", "cli.js");
-			fs.mkdirSync(path.dirname(candidateCli), { recursive: true });
-			fs.writeFileSync(candidateCli, "candidate\n", "utf-8");
+			writeServerEntrypoints(stagingDir, "candidate\n");
 		});
 
 		const realRename = fs.renameSync.bind(fs);
-		let renameCalls = 0;
 		vi.spyOn(fs, "renameSync").mockImplementation((oldPath, newPath) => {
-			renameCalls++;
-			if (renameCalls === 2) throw new Error("deterministic promotion failure");
+			if (path.resolve(String(oldPath)) === path.resolve(prepared.stagingDir)) {
+				throw new Error("deterministic promotion failure");
+			}
 			return realRename(oldPath, newPath);
 		});
 		expect(() => promoteStagedDistBuild(prepared)).toThrow(/promotion failure/i);

@@ -505,7 +505,11 @@ export const INDIRECT_REPOSITORY_READ_RULES = Object.freeze([
 	{
 		id: "sentinel-restart-source-contract",
 		consumer: "tests2/core/node-modules-ring-fence.test.ts",
-		inputs: frozen(["src/server/harness.ts"]),
+		inputs: frozen([
+			"src/server/harness.ts",
+			"scripts/dev-nord.mjs",
+			"scripts/harness-bootstrap.mjs",
+		]),
 	},
 	{
 		id: "published-shrinkwrap-fixtures",
@@ -661,6 +665,13 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 		operations: frozen([
 			declaredExecutableOperation("embedded-dynamic-import", "process.env.BOBBIT_TEST_LEDGER_MODULE_URL", ["indirect:ledger-child-module"]),
 			allowedExecutableOperation("embedded-dynamic-import", "\"node:os\"", "inline child imports a Node builtin"),
+		]),
+	},
+	{
+		consumer: "tests2/core/node-modules-ring-fence.test.ts",
+		operations: frozen([
+			allowedExecutableOperation("dynamic-import", "`${pathToFileURL(liveCli).href}?restored=${Date.now()}`", "test-owned restored CLI interruption fixture"),
+			allowedExecutableOperation("dynamic-import", "`${pathToFileURL(liveCandidateCli).href}?candidate=${Date.now()}`", "test-owned promoted CLI interruption fixture"),
 		]),
 	},
 	{
@@ -1694,7 +1705,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 			{ expression: "sentinel", count: 2 },
 			{ expression: "file", count: 1 },
 			{ expression: "path.join(repositoryRoot, relativePath)", count: 1 },
-			{ expression: "path.join(repositoryRoot, \"package.json\")", count: 1 },
+			{ expression: "path.join(repositoryRoot, \"package.json\")", count: 2 },
 			{ expression: "liveCli", count: 4 },
 			{ expression: "liveUi", count: 2 },
 		]),

@@ -15,7 +15,7 @@
  *   5. Promote the staged dist and re-launch the server
  *
  * Usage:
- *   node dist/server/harness.js [-- ...args forwarded to cli.js]
+ *   node scripts/harness-bootstrap.mjs harness [-- ...args forwarded to cli.js]
  */
 
 import { spawn, execSync, type ChildProcess } from "node:child_process";
