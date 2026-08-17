@@ -4323,21 +4323,28 @@ export class VerificationHarness {
 			const persisted = persistedSteps[index];
 			const live = active.steps[index];
 			const interruption = live?.cancellation ?? persisted?.cancellation;
-			// The cancellation fence, not a post-kill step status, determines whether
-			// this row was interrupted. A process close can legitimately write a
-			// failed result after cancellation was requested; it is not a product
-			// verification failure and must remain neutral in the audit.
+			const liveStatus = live?.status;
+			// A live row is authoritative over the signal's seeded display row. In
+			// particular, a stale persisted `running`/`waiting` status must not erase
+			// a live completed command during cancellation finalization.
 			const interrupted = interruption !== undefined
-				// A cancelled terminal record must never retain a live row, even if a
-				// crash or late callback left the active/persisted status un-fenced.
-				|| live?.status === "waiting" || live?.status === "running"
-				|| persisted?.status === "waiting" || persisted?.status === "running";
+				// A cancelled terminal record must never retain an unfinished live row,
+				// even if a crash or late callback left it without a cancellation stamp.
+				|| liveStatus === "waiting" || liveStatus === "running"
+				// Persisted state is an interruption fallback only when no live row
+				// exists for this step.
+				|| (live === undefined && (persisted?.status === "waiting" || persisted?.status === "running"));
 			const stepCancellation = interrupted
 				? { ...(interruption ?? cancellation), finalizedAt: interruption?.finalizedAt ?? cancellation.finalizedAt }
 				: undefined;
-			const liveStatus = live?.status;
 			const status = interrupted ? "cancelled" as const : (liveStatus ?? persisted?.status ?? "cancelled");
-			const passed = interrupted ? false : (live?.passed ?? persisted?.passed ?? false);
+			const passed = interrupted
+				? false
+				: live?.passed !== undefined
+					? live.passed
+					: liveStatus !== undefined
+						? liveStatus === "passed" || liveStatus === "skipped"
+						: persisted?.passed ?? (persisted?.status === "passed" || persisted?.status === "skipped");
 			const skipped = !interrupted && (live?.skipped ?? persisted?.skipped);
 			const output = interrupted
 				? (live?.output ?? persisted?.output ?? `Verification cancelled (${cancellation.cause}).`)
@@ -4368,6 +4375,22 @@ export class VerificationHarness {
 	 * reviewer result as a failed step, so the durable audit retains its cause.
 	 */
 	private async _finalizeRestartInterruptedVerification(active: ActiveVerification): Promise<void> {
+		// Resume may have already persisted an interrupted reviewer result as
+		// failed/timeout. Restore only rows the established predicate identifies as
+		// restart diagnostics, so `_markVerificationCancelled` stamps them rather
+		// than preserving a synthetic product failure. Genuine verdicts remain
+		// terminal and therefore unmodified.
+		for (const step of active.steps) {
+			const passed = step.passed ?? (step.status === "passed" || step.status === "skipped");
+			if (!isExplicitRestartInterruptedStep({
+				passed,
+				skipped: step.skipped,
+				status: step.status,
+				output: step.output ?? "",
+				type: step.type,
+			})) continue;
+			step.status = "running";
+		}
 		this._markVerificationCancelled(active, "gateway-restart-recovery");
 		if (!this._persistActive()) throw new Error(`Could not persist cancellation fence for ${active.signalId}`);
 		this._notifyCancellationFenceCommitted(active);
