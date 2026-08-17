@@ -1,9 +1,15 @@
 # Session-store crash-safety
 
-Status: implemented on `goal/sessions-p-14dc3ec7`. Companion to
+Status: historical incident and the original v2 crash-safety work. Companion to
 [`unify-session-status.md`](./unify-session-status.md) (single-writer
 status invariant) — both are about not silently losing session-shaped
 state across a crash.
+
+The current persistence topology is v3 split tiers; its file layout, transition
+recovery, and migration behavior are documented in
+[Split archived SessionStore writes](split-archived-session-writes.md). The v2
+format sections below explain the incident-era guard design, not the current
+on-disk layout.
 
 ---
 

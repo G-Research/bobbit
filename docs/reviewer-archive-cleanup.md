@@ -24,7 +24,7 @@ After startup, the harness still sets the generated review title and rewrites th
 
 ## Legacy SessionStore backfill
 
-Older persisted rows may have only `goalId`, a generic title such as `New session`, and no `teamGoalId` / `teamLeadSessionId`. `SessionStore` normalizes these rows when it loads `sessions.json`:
+Older persisted rows may have only `goalId`, a generic title such as `New session`, and no `teamGoalId` / `teamLeadSessionId`. `SessionStore` normalizes these rows while eagerly loading its live and archived session tiers:
 
 1. Only recognized verifier IDs are considered. Ordinary archived sessions with `goalId` remain unchanged.
 2. If a verifier has `goalId` but no `teamGoalId`, the store sets `teamGoalId = goalId`.

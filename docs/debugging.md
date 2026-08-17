@@ -385,7 +385,7 @@ See [docs/archived-proposal-reopen.md](archived-proposal-reopen.md) for the full
 
 ## Session persistence
 
-- Check `<project-root>/.bobbit/state/sessions.json` (per-project, not centralized)
+- Check both `<project-root>/.bobbit/state/sessions.json` and `sessions.archived.json` (per-project, not centralized). They are v3 envelopes with separate tier epochs and are eagerly merged at boot; see [Split archived SessionStore writes](design/split-archived-session-writes.md) before manual recovery.
 - Initial persist happens via `persistOnce()` in `session-setup.ts` — a single `store.put()` with all structural fields at creation time
 - `persistSessionMetadata()` only calls `store.update()` (never `store.put()`) — updates `agentSessionFile` once the agent reports it
 - `persistSessionMetadata()` retries 3 times with backoff (500ms, 1s, 2s) on failure
