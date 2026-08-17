@@ -422,6 +422,95 @@ describe("cold-restart re-prompt (reproducing)", () => {
 		);
 	});
 
+	it.each([
+		"different bridge",
+		"lifecycle-fenced bridge",
+		"map gap",
+		"replacement session",
+	])("rejects a delayed boot acknowledgement from a superseded %s", async (supersession) => {
+		let releaseAck!: () => void;
+		let entered!: () => void;
+		const ack = new Promise<void>((resolve) => { releaseAck = resolve; });
+		const enteredGate = new Promise<void>((resolve) => { entered = resolve; });
+		const bridge: any = {
+			running: true,
+			async start() {}, async stop() {}, async waitForReady() {},
+			async promptWhenReady() { entered(); await ack; return { success: true }; },
+			async prompt() { return { success: true }; }, async steer() { return { success: true }; },
+			async abort() { return { success: true }; }, async getState() { return { success: true, data: {} }; },
+			async getMessages() { return { success: true, data: { messages: [] } }; },
+			async setModel() { return { success: true }; }, async setThinkingLevel() { return { success: true }; },
+			async compact() { return { success: true }; }, async sendCommand() { return { success: true }; },
+			onEvent() { return () => {}; },
+		};
+		const replacementBridge = { ...bridge, promptWhenReady: async () => ({ success: true }) };
+		const m = makeManager(bridge);
+		const ps = { ...makeMidTurnPersistedSession(`boot-stale-${supersession.replaceAll(" ", "-")}`), wasStreaming: false };
+		const update = vi.fn((_id: string, updates: Record<string, unknown>) => Object.assign(ps, updates));
+		m._testStore = { get: () => ps, update, archive: () => {} };
+		await m.restoreSession(ps);
+		const original = m.sessions.get(ps.id);
+		original.restoreStartupWasStreaming = true;
+		ps.wasStreaming = true;
+
+		const dispatch = m._dispatchBootContinuation(original);
+		await enteredGate;
+		const replacementLedger = structuredClone(original.inFlightSteerTexts);
+		const replacement = {
+			...original,
+			rpcClient: replacementBridge,
+			restoreStartupWasStreaming: true,
+			inFlightSteerTexts: structuredClone(replacementLedger),
+		};
+		if (supersession === "different bridge") {
+			original.rpcClient = replacementBridge;
+			original.inFlightSteerTexts = structuredClone(replacementLedger);
+		} else if (supersession === "lifecycle-fenced bridge") {
+			original.lifecycleFenced = true;
+			original.inFlightSteerTexts = structuredClone(replacementLedger);
+		} else if (supersession === "map gap") m.sessions.delete(ps.id);
+		else m.sessions.set(ps.id, replacement);
+
+		releaseAck();
+		assert.equal(await dispatch, false, "a superseded bridge acknowledgement must be inert");
+		if (supersession === "map gap") m.sessions.set(ps.id, replacement);
+
+		const canonical = m.sessions.get(ps.id);
+		assert.equal(canonical.restoreStartupWasStreaming, true, "the replacement startup fence is untouched");
+		assert.equal(ps.wasStreaming, true, "the stale acknowledgement cannot clear durable continuation state");
+		assert.equal(update.mock.calls.some(([, patch]) => patch.wasStreaming === false), false);
+		assert.deepEqual(canonical.inFlightSteerTexts, replacementLedger, "the replacement ledger is unchanged");
+	});
+
+	it("excludes non-interactive interrupted restores from generic boot continuation", async () => {
+		const prompts: string[] = [];
+		const bridge: any = {
+			running: true,
+			async start() {}, async stop() {}, async waitForReady() {},
+			async promptWhenReady(text: string) { prompts.push(text); return { success: true }; },
+			async prompt() { return { success: true }; }, async steer() { return { success: true }; },
+			async abort() { return { success: true }; }, async getState() { return { success: true, data: {} }; },
+			async getMessages() { return { success: true, data: { messages: [] } }; },
+			async setModel() { return { success: true }; }, async setThinkingLevel() { return { success: true }; },
+			async compact() { return { success: true }; }, async sendCommand() { return { success: true }; },
+			onEvent() { return () => {}; },
+		};
+		const m = makeManager(bridge);
+		const ps = { ...makeMidTurnPersistedSession("cold-non-interactive"), nonInteractive: true };
+		m._testStore = {
+			get: () => ps,
+			update: (_id: string, updates: Record<string, unknown>) => Object.assign(ps, updates),
+			archive: () => {},
+		};
+
+		await m.restoreSession(ps);
+		await flush();
+
+		assert.deepEqual(prompts, [], "VerificationHarness exclusively owns reviewer re-drive");
+		assert.equal(m.sessions.get(ps.id)?.restoreStartupWasStreaming, false);
+		assert.equal(ps.wasStreaming, false);
+	});
+
 	it("dispatches boot continuation once after a queued final replacement fails", async () => {
 		const prompts: string[] = [];
 		const bridge: any = {

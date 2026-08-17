@@ -796,7 +796,11 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(canonical?.status).toBe("idle");
 		expect(canonical?.completedTurnCount).toBe(1);
 		expect(canonical?.restoreStartupWasStreaming).toBe(false);
-		expect(manager._testStore.update).toHaveBeenCalledWith(ps.id, expect.objectContaining({
+		const falseWrites = manager._testStore.update.mock.calls.filter(
+			([id, patch]: [string, Record<string, unknown>]) => id === ps.id && patch.wasStreaming === false,
+		);
+		expect(falseWrites, "canonical agent_end exclusively owns the durable false write").toHaveLength(1);
+		expect(falseWrites[0]?.[1]).toEqual(expect.objectContaining({
 			wasStreaming: false,
 			streamingStartedAt: undefined,
 		}));
@@ -981,6 +985,9 @@ describe("executable SessionManager rehydration boundaries", () => {
 		);
 		expect(manager.sessions.get(ps.id)?.restoreStartupWasStreaming).toBe(false);
 		expect(ps.wasStreaming, "accepted continuation stays durable until agent_end").toBe(true);
+		expect(manager._testStore.update.mock.calls.filter(
+			([id, patch]: [string, Record<string, unknown>]) => id === ps.id && patch.wasStreaming === false,
+		), "acknowledgement must not impersonate lifecycle settlement").toHaveLength(0);
 		expect(manager._sessionReplacementCoordinators.has(ps.id)).toBe(false);
 	});
 

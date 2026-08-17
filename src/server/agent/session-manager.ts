@@ -10638,17 +10638,23 @@ export class SessionManager {
 
 	private async _dispatchBootContinuation(session: SessionInfo): Promise<boolean> {
 		this._bootRepromptedSessions.add(session.id);
+		// A replacement may reuse the SessionInfo object while installing a different
+		// bridge, so object identity alone is not a sufficient acknowledgement fence.
+		const dispatchBridge = session.rpcClient;
 		// The coordinator remains installed while this cold-start RPC is pending.
 		// Mark streaming as a second fence for the instant after coordinator release,
 		// including the case where agent_start arrived before the RPC acknowledgement.
 		this.markPromptDispatchStreaming(session);
 		const markAccepted = (): boolean => {
-			// A terminal lifecycle can fence ordinary writes before a delayed RPC ack
-			// arrives. The exact tracked prompt echo still proves this canonical bridge
-			// accepted the continuation, so consume its startup-only fence as long as a
-			// replacement has not superseded the session.
-			const canonical = this.sessions.get(session.id);
-			if (canonical && canonical !== session) return false;
+			// Terminal turn settlement leaves this exact bridge canonical, so its delayed
+			// correlated acknowledgement may still consume the startup-only fence. Once
+			// replacement fencing starts, including its transient map gap, every old-bridge
+			// acknowledgement is inert even if the SessionInfo object is later reused.
+			if (
+				session.lifecycleFenced
+				|| this.sessions.get(session.id) !== session
+				|| session.rpcClient !== dispatchBridge
+			) return false;
 			// Acceptance consumes the *restore-startup* dispatch intent, but the new
 			// continuation turn is still active. Keep the durable wasStreaming marker
 			// written by markPromptDispatchStreaming until agent_end settles the turn.
