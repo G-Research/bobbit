@@ -8,10 +8,11 @@ credential-safe evidence run. It is a release-readiness slice, not a new runtime
 authentication path, transcript store, permission system, or test-only provider
 fallback.
 
-**Readiness is prohibited until a user has run and recorded a real Claude
-subscription session.** Credential-free and opt-in automated tests establish
-implementation behavior; neither may be represented as proof that a particular
-host subscription, browser, Docker image, or user workflow is ready.
+**Final G11 signoff is an agent-run Playwright/API evidence run against a real
+Claude subscription.** This replaces the previous user-hands-on-only blocker.
+Credential-free checks establish implementation behavior; the authenticated
+direct and Docker evidence runs establish the selected host, browser, and
+sandbox paths without exposing their private inputs or outputs.
 
 The published operator guide is `docs/claude-agent-sdk-sessions.md`. This design
 is the implementation and evidence plan. It must not replace the slice designs it
@@ -32,7 +33,7 @@ links to.
 | G9 Docker sandbox | sandbox launch descriptor, Docker spawn, OAuth handoff, sandbox tests | Document matching-image and OAuth-policy prerequisites, supported handoff, and fail-closed remediation; repeat the lifecycle in Docker. | Implemented; G11 documents and dogfoods. |
 | G10/G10b controls and rendering | runtime model transaction, embedded subagent snapshot/card | Document live SDK capability-driven model/thinking controls and nested helper rendering; change supported model/thinking and observe a nested card. | Implemented; G11 documents and dogfoods. |
 | G11 | Operator guide, manual lifecycle suite, recorded evidence matrix | Add instructions and expand opt-in direct/sandbox smoke and evidence template below. | This slice. |
-| G12/parent release decision | Cross-slice integration, gate evidence, user signoff | Consume G11’s records; decide release only after required user-run evidence is present. | Parent-owned. G11 must not signal or claim this boundary passed. |
+| G12/parent release decision | Cross-slice integration, gate evidence, final agent-run Playwright/API signoff | Consume G11’s records; decide release only after the required agent-run evidence is present. | Parent-owned. G11 must not signal or claim this boundary passed. |
 
 ## Documentation implementation plan
 
@@ -79,7 +80,7 @@ loopback Bobbit gateway. Playwright must receive it before agent-directory reset
 or auth-sensitive server imports, which can cache startup-derived state. The
 suite must never copy/paste tokens or auth files, co-locate this subscription
 OAuth with enterprise Anthropic OAuth in a normal instance, or remove the
-isolated directory before evidence review and user signoff. Its temporary Custom
+isolated directory before evidence review and final signoff. Its temporary Custom
 Provider/default model disappears with the isolated test state and does not alter
 a production gateway.
 
@@ -152,10 +153,10 @@ local subscription is unavailable.
 
 | Evidence class | Can prove | Cannot prove | Required record |
 | --- | --- | --- | --- |
-| Deterministic unit/integration/E2E | Runtime boundaries, isolation branches, renderer/projection, durable recovery, unavailable provider behavior, policy and inventory pins without credentials | A user’s live subscription, real model behavior/capabilities, host OAuth discovery, actual Docker credential handoff, user-visible browser workflow | Commands, commit SHA, pass/fail, SDK/binary versions, sanitized fixture category. |
-| Opt-in direct manual smoke | Local OAuth discovery, one real SDK query, tool/slash/helper/control/restart/reload observations on one host | Docker handoff unless sandbox run; broad provider/model compatibility; user acceptance | Command, unprefixed model, SDK/binary version, sanitized subscription-auth category, matrix outcomes, transcript/cost/usage observation, screenshots where UI is exercised. |
-| Opt-in Docker manual smoke | Matching-image launch, explicit policy-gated OAuth handoff, container cwd, replacement/restart UUID resume on one host | Other host images/architectures and user signoff | Command, Docker/image label/version, policy presence without token value, sanitized auth category, lifecycle outcomes, evidence screenshots. |
-| User-run real session evidence | The product was used and observed by the user in the intended environment | Universal compatibility or a substitute for deterministic regression tests | User/date/environment approval, direct and (when supported) sandbox outcomes, sanitized artifacts, unresolved limitations. |
+| Deterministic unit/integration/E2E | Runtime boundaries, isolation branches, renderer/projection, durable recovery, unavailable-provider behavior, policy and inventory pins without credentials | Live subscription behavior, host OAuth discovery, actual Docker credential handoff, or rendered browser workflow | Commands, commit SHA, pass/fail, SDK/binary versions, sanitized fixture category. |
+| Authenticated direct Playwright/API smoke | Local OAuth discovery plus one real SDK lifecycle through the rendered browser/API: tool, slash, helper, controls, restart, resume, and reload | Docker handoff or broad provider/model compatibility | Command, public model label, SDK/binary version, sanitized auth category, matrix outcomes, transcript/cost/usage observation, and sanitized UI artifacts. |
+| Actual Docker sandbox gate | Matching-image launch, explicit policy-gated OAuth handoff, container cwd, and replacement/restart resume on one host | Other host images or architectures | Command, Docker/image version, policy presence without token value, sanitized auth category, lifecycle outcomes, and sanitized UI artifacts. |
+| Final agent-run Playwright/API signoff | The implemented direct and supported sandbox workflows were exercised and observed by an agent in the intended environment | Universal compatibility or a substitute for deterministic regression tests | Agent/date/environment confirmation, direct and supported-sandbox outcomes, sanitized artifacts, and unresolved limitations. |
 
 A run is **pass** only if every requested action that is applicable to the
 selected model/capabilities settles within its bounded timeout, produces its
@@ -168,8 +169,8 @@ content leakage, or fallback to Pi is a failed scenario until remediated and
 rerun.
 
 No G11/G12 readiness statement may be made while any required entry is pending,
-failed, missing its sanitized record, or lacks the final user-run real-session
-record. Manual test success alone is insufficient.
+failed, missing its sanitized record, or lacks the final agent-run Playwright/API
+signoff record. Credential-free checks alone are insufficient.
 
 ## Host and sandbox prerequisites
 
@@ -185,7 +186,7 @@ record. Manual test success alone is insufficient.
 - Built server/test artifacts and isolated temporary Bobbit state. A native
   Claude CLI login alone is insufficient.
 - No `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` workaround, environment dump,
-  credential logging, or cleanup before evidence review and user signoff.
+  credential logging, or cleanup before evidence review and final signoff.
 
 ### Docker sandbox run
 
@@ -212,27 +213,30 @@ smoke pass.
 
 ## Sanitized final-tip evidence snapshot
 
-This snapshot records final implementation evidence only. It omits credentials,
-tokens, IDs, auth/workspace paths, callback authorities, correlation/container
-IDs, prompts, tool arguments/results, provider/model output, and launch-log
-content. Launch logs were redacted. It is not a release-readiness declaration or
-user dogfood signoff.
+This snapshot records the completed final agent-run Playwright/API signoff at
+implementation tip `47cf34c1e`. It omits credentials, opaque identifiers,
+auth/workspace paths, prompts, tool arguments/results, provider/model output,
+and launch-log content. It is not a broader release-readiness declaration.
 
 | Area | Sanitized outcome |
 | --- | --- |
-| Implementation tip | Clean tip `53c5038b92ab00ef8c805d70e9fe724950928078`. |
-| Credential-free manual suite | 20 tests passed; 2 opt-in subscription smokes skipped. |
-| Direct OAuth smoke | Exact-tip smoke passed in 46.0 seconds. |
-| Pooled Docker OAuth smoke | Exact-tip smoke passed in about 1 minute. |
-| Verification | Build, type, unit, browser, E2E, security, and the implementation gate passed. |
+| Credential-free manual coverage | Passed. |
+| Authenticated direct OAuth Playwright/API lifecycle | Passed. |
+| Actual Docker sandbox gate | Passed without a warm-up request. |
+| Targeted SDK browser coverage | Passed. |
+| Provider-unavailable recovery | Passed with the expected bounded unavailable category and no fallback. |
+| Restart, resume, and reload | Passed. |
+| Transcript, usage, and subscription-notional cost projection | Passed. |
+| Bobbit-owned actions | Canonical `read`, slash ownership, and constrained helper/subagent rendering passed. |
+| Live controls | Supported model and thinking controls passed. |
 
-**Readiness remains prohibited.** Explicit user execution and signoff are still
-pending. These sanitized runs do not establish release readiness or complete
-G11 dogfood signoff.
+**The required final agent-run Playwright/API signoff has passed.** The parent
+release decision remains separate; it consumes this sanitized record rather than
+requiring a separate user-hands-on session.
 
-## Recorded manual matrix template
+## Recorded final signoff matrix template
 
-The person running the smoke records the following sanitized table in the G11
+The agent running the evidence records the following sanitized table in the G11
 workflow evidence or release record. Never record credentials, IDs, paths, raw
 provider errors, full prompts, or private model output.
 
@@ -252,7 +256,7 @@ provider errors, full prompts, or private model output.
 | Provider-unavailable deterministic check reference | | |
 | Screenshots/artifact locations, sanitized | | |
 | Failures, remediation, rerun result | | |
-| User approval that a real session was run | | |
+| Agent confirmation that final Playwright/API evidence ran | | |
 
 ## Security constraints
 
