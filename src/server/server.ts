@@ -7877,7 +7877,7 @@ async function handleApiRoute(
 				return;
 			}
 			const parentProjectId = parentSession?.projectId ?? parentPersisted?.projectId;
-			const parentTeamGoalId = parentSession?.teamGoalId ?? parentPersisted?.teamGoalId;
+			const parentTrustedTeamGoalId = sessionManager.getTrustedTeamGoalIdForSession(parentId);
 			if (!parentProjectId) {
 				json({ error: "Delegate parent session is missing projectId", code: "PROJECT_ID_REQUIRED" }, 422);
 				return;
@@ -7909,10 +7909,10 @@ async function handleApiRoute(
 					context: body.context,
 				});
 				// Direct REST delegates do not pass through OrchestrationCore. Join the
-				// shared terminal-admission turn only for trusted team-owned parents;
-				// OrchestrationCore keeps its existing outer fence without nesting.
-				const session = parentTeamGoalId
-					? await sessionManager.runWithTeamGoalAdmission(parentTeamGoalId, createDelegate)
+				// shared terminal-admission turn only for canonically team-owned parents;
+				// raw teamGoalId may be effective-goal metadata on a standalone delegate.
+				const session = parentTrustedTeamGoalId
+					? await sessionManager.runWithTeamGoalAdmission(parentTrustedTeamGoalId, createDelegate)
 					: await createDelegate();
 				// Register delegate as child in parent's sandbox scope
 				if (sandboxScope && sandboxTokenStore) {
@@ -7932,7 +7932,7 @@ async function handleApiRoute(
 				}, 201);
 			} catch (err) {
 				if (err instanceof TeamStartError) {
-					json({ error: err.message, code: err.code, goalId: parentTeamGoalId }, err.status);
+					json({ error: err.message, code: err.code, goalId: parentTrustedTeamGoalId }, err.status);
 				} else {
 					jsonError(500, err);
 				}

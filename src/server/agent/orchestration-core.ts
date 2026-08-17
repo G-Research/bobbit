@@ -339,6 +339,8 @@ export interface OrchestrationSessionView {
 		assistantType: string | undefined,
 		opts?: Record<string, unknown>,
 	): Promise<{ id: string }>;
+	/** Resolve canonical live team ownership; raw teamGoalId may be metadata only. */
+	getTrustedTeamGoalIdForSession?(sessionId: string): string | undefined;
 	/** Team-owned child publication joins TeamManager's terminal admission queue. */
 	runWithTeamGoalAdmission?<T>(goalId: string, operation: () => Promise<T>): Promise<T>;
 	enqueuePrompt(sessionId: string, text: string, opts?: Record<string, unknown>): Promise<{ status: string }>;
@@ -541,10 +543,15 @@ export class OrchestrationCore {
 		this.assertCanSpawn(opts.ownerSessionId);
 		const ownerPs = this.deps.sessionManager.getPersistedSession(opts.ownerSessionId);
 		const operation = () => this.spawnAdmitted(opts, ownerPs);
-		// teamGoalId is the trusted durable ownership predicate. goalId-only
-		// standalone owners remain outside team terminal admission.
-		return ownerPs?.teamGoalId && this.deps.sessionManager.runWithTeamGoalAdmission
-			? this.deps.sessionManager.runWithTeamGoalAdmission(ownerPs.teamGoalId, operation)
+		// Raw teamGoalId is also inherited effective-goal metadata on standalone
+		// delegate chains. Only the canonical live team closure joins terminal admission.
+		const trustedTeamGoalId = this.deps.sessionManager.getTrustedTeamGoalIdForSession
+			? this.deps.sessionManager.getTrustedTeamGoalIdForSession(opts.ownerSessionId)
+			// Structural unit-test views predating the classifier retain their legacy
+			// raw-owner behaviour; production SessionManager always implements the query.
+			: ownerPs?.teamGoalId;
+		return trustedTeamGoalId && this.deps.sessionManager.runWithTeamGoalAdmission
+			? this.deps.sessionManager.runWithTeamGoalAdmission(trustedTeamGoalId, operation)
 			: operation();
 	}
 
