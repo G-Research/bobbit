@@ -2845,6 +2845,31 @@ export class VerificationHarness {
 		});
 	}
 
+	/** A legacy/unmarked terminal row is always a genuine failure, never restart provenance. */
+	private _hasUnmarkedTerminalResumeFailure(v: ActiveVerification): boolean {
+		return v.steps.some(step => {
+			const passed = step.passed ?? (step.status === "passed" || step.status === "skipped");
+			const skipped = step.skipped ?? step.status === "skipped";
+			return !passed && !skipped
+				&& step.restartInterrupted !== true
+				&& (step.status === "failed" || step.status === "timeout");
+		});
+	}
+
+	/**
+	 * Once structured recovery commits a generation to cancellation, every
+	 * unfinished row must carry the same durable no-verdict provenance before
+	 * cleanup begins. A second crash can then resume cancellation without
+	 * examining output text or accidentally re-running a sibling.
+	 */
+	private _markUnfinishedStepsRestartInterrupted(v: ActiveVerification): void {
+		for (const step of v.steps) {
+			if (step.status === "waiting" || step.status === "running") {
+				step.restartInterrupted = true;
+			}
+		}
+	}
+
 	private async _continueResumeWithRemainingPhases(v: ActiveVerification): Promise<boolean> {
 		const ctx = await this._gatherRerunContext(v.goalId, v.gateId, v.signalId);
 		if (!ctx?.signal || !ctx.gate) return false;
@@ -2856,10 +2881,12 @@ export class VerificationHarness {
 	private async _resumeOneVerification(v: ActiveVerification): Promise<void> {
 		if (!this._isResumeStillActive(v)) return;
 		// A prior boot may have persisted a no-verdict recovery result then crashed
-		// before exact cleanup/finalization. This structured marker is authoritative:
-		// do not re-infer provenance from output or resume a generation already
-		// committed to cancellation.
-		if (v.steps.some(step => step.restartInterrupted === true)) {
+		// before exact cleanup/finalization. It prevents re-running that marked row,
+		// but never overrides an unmarked product failure from a sibling.
+		if (v.steps.some(step => step.restartInterrupted === true)
+			&& !this._hasUnmarkedTerminalResumeFailure(v)) {
+			this._markUnfinishedStepsRestartInterrupted(v);
+			if (!this._persistActive()) throw new Error(`Could not persist restart interruption fence for ${v.signalId}`);
 			await this._finalizeRestartInterruptedVerification(v);
 			return;
 		}
@@ -2867,6 +2894,23 @@ export class VerificationHarness {
 
 		for (const step of v.steps) {
 			if (!this._isResumeStillActive(v)) return;
+			if (step.restartInterrupted === true) {
+				// A persisted marker is an irreversible no-verdict recovery outcome.
+				// If an unmarked sibling genuinely failed, retain this row for the
+				// normal aggregate without re-running it or turning the run cancelled.
+				resolvedSteps.push({
+					name: step.name,
+					type: step.type,
+					passed: false,
+					status: step.status === "waiting" || step.status === "running" ? "failed" : step.status,
+					phase: step.phase ?? 0,
+					output: step.output || "Step was interrupted by server restart before a verdict was obtained.",
+					duration_ms: step.durationMs || 0,
+					restartInterrupted: true,
+					timeout: step.timeout,
+				});
+				continue;
+			}
 			if (step.status !== "running") {
 				// Already completed before restart — keep result
 				// Skipped steps (optional or phase-skipped) count as passed for overall verdict
@@ -2982,12 +3026,15 @@ export class VerificationHarness {
 				// before a transient result is persisted as a normal failed verdict.
 				// Do not cancel if an earlier or recovered row is a real failure: that
 				// remains the verification's product outcome.
-				if (shouldSuppressExplicitRestartInterrupt([...resolvedSteps, resumedStep])) {
+				if (shouldSuppressExplicitRestartInterrupt([...resolvedSteps, resumedStep])
+					&& !this._hasUnmarkedTerminalResumeFailure(v)) {
 					// Keep the interruption diagnostic for the cancelled audit, while
 					// retaining `running` until _markVerificationCancelled snapshots it.
 					// This prevents a crash between recovery and finalization from making
 					// the step look like an ordinary failed reviewer verdict on next boot.
 					this._updateActiveStepFromResumedResult(v, step, { ...resumedStep, status: "running" });
+					this._markUnfinishedStepsRestartInterrupted(v);
+					if (!this._persistActive()) throw new Error(`Could not persist restart interruption fence for ${v.signalId}`);
 					await this._finalizeRestartInterruptedVerification(v);
 					return;
 				}
@@ -3056,8 +3103,12 @@ export class VerificationHarness {
 		// A restart interruption is orchestration, not a failed reviewer/command
 		// verdict. Preserve the completed rows and cancel the remaining generation
 		// only after its exact cleanup ownership settles.
-		const suppressedByRestart = !allPassed && shouldSuppressExplicitRestartInterrupt(resolvedSteps);
+		const suppressedByRestart = !allPassed
+			&& shouldSuppressExplicitRestartInterrupt(resolvedSteps)
+			&& !this._hasUnmarkedTerminalResumeFailure(v);
 		if (suppressedByRestart) {
+			this._markUnfinishedStepsRestartInterrupted(v);
+			if (!this._persistActive()) throw new Error(`Could not persist restart interruption fence for ${v.signalId}`);
 			await this._finalizeRestartInterruptedVerification(v);
 			return;
 		}
