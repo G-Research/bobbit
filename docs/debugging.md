@@ -1010,6 +1010,14 @@ Lesson for extension authors: never read tool params from the first `execute()` 
 - **Terminal cancellation** has the same response fields with `pending: false`. With no running verification, the idempotent response is `{ "cancelled": false, "message": "No running verification to cancel" }`.
 - For cancellation causes, restart recovery, and generation safety, see [Verification cancellation lifecycle](verification-cancellation.md).
 
+## Reviewer or QA cancellation remains pending
+
+- **Symptom**: a cancelled review or QA signal remains pending, especially across a re-signal, lifecycle transition, or restart, even though `terminateSession` initially reports no session.
+- **Diagnostic**: inspect the active verification record and affected step for `reviewerCleanupPending`, the retained reviewer `sessionId`, and `reviewerSpawnState`. `queued` means creation was not admitted; `spawning` means the current boot may still be creating or registering the pre-generated identity; `spawned` means it was created and remains exact cleanup ownership.
+- **Expected behavior**: a current-boot creator covers both session creation and team registration. A not-found `terminateSession` result is insufficient while that creator is live. Cancellation keeps its durable cleanup owner until the creator barrier and exact terminate/unregister operations settle, then publishes the terminal cancelled signal and any gate/event updates.
+- **After restart**: persisted `spawning` and `spawned` rows are cleanup-owned. Recovery re-drives cleanup of their retained identity without recreating the old reviewer.
+- **Reference**: [Verification cancellation lifecycle](verification-cancellation.md#reviewer-and-qa-spawn-ownership) and [Verification architecture](internals.md#verification-architecture).
+
 ## Reviewer busy contention during `llm-review` or `agent-qa`
 
 - **Symptom**: a review or QA step reports the exact bridge message `Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.` This is infrastructure contention, not a reviewer finding and not an instruction to manually re-run the gate.
