@@ -41,7 +41,6 @@ import {
 	appendPromptAuthorDismissalTombstone,
 	appendPromptAuthorDispatch,
 	appendPromptAuthorSettlement,
-	appendPromptAuthorTurnTerminal,
 	digestPromptModelText,
 	extractPromptModelText,
 	mergeAuthorSidecarIntoMessages,
@@ -709,8 +708,6 @@ export interface PendingPromptAuthorRecord {
 	modelTextDigest?: string;
 	/** Exact author prefix injected into `modelText`; absent for unprefixed/degraded dispatches. */
 	modelPrefix?: string;
-	/** Exact terminal-marker support for the boot attempt owning this turn. */
-	turnTerminalMarkerVersion?: 1;
 	source: PromptSource;
 	author: MessageAuthor;
 }
@@ -977,12 +974,6 @@ export interface SessionInfo {
 	 * — polling for `status==idle` alone races with the pre-prompt idle
 	 * state, so observability of “a turn finished” needs its own counter. */
 	completedTurnCount?: number;
-	/** Exact echoed boot attempt awaiting this turn's canonical terminal boundary. */
-	echoedBootContinuationAttempt?: {
-		promptId: string;
-		intentId: string;
-		attemptId: string;
-	};
 	/** Monotonic diagnostic count of inbound events that advance a canonical Pi
 	 * turn. Dispatch acceptance uses exact prompt activity boundaries instead. */
 	agentObservedTurnVersion?: number;
@@ -1228,8 +1219,6 @@ export interface PreparedPromptAuthorDispatch {
 	promptId: string;
 	/** Monotonic evidence persisted with this exact attempt. */
 	dispatchEpoch?: number;
-	/** Exact terminal-marker support persisted with this attempt. */
-	turnTerminalMarkerVersion?: 1;
 	/** Exact text for this one Pi RPC. Durable queues and recovery state keep the base text. */
 	piText: string;
 	modelPrefix?: string;
@@ -1249,12 +1238,7 @@ export function preparePromptAuthorDispatch(
 	source: PromptSource,
 	author: MessageAuthor,
 	now: number,
-	evidence?: {
-		intentId: string;
-		attemptId?: string;
-		dispatchEpoch?: number;
-		trackTurnTerminal?: true;
-	},
+	evidence?: { intentId: string; attemptId?: string; dispatchEpoch?: number },
 ): PreparedPromptAuthorDispatch {
 	const desiredPrefix = modelPrefixForPromptAuthor(author);
 	const desiredPiText = desiredPrefix ? `${desiredPrefix}${baseModelText}` : baseModelText;
@@ -1273,7 +1257,6 @@ export function preparePromptAuthorDispatch(
 		source,
 		author,
 		...(desiredPrefix === undefined ? {} : { modelPrefix: desiredPrefix }),
-		...(evidence?.trackTurnTerminal === true ? { turnTerminalMarkerVersion: 1 as const } : {}),
 	});
 	const piText = sidecarPersisted ? desiredPiText : baseModelText;
 	const modelPrefix = sidecarPersisted ? desiredPrefix : undefined;
@@ -1285,9 +1268,6 @@ export function preparePromptAuthorDispatch(
 		modelText: piText,
 		...(modelTextDigest === undefined ? {} : { modelTextDigest }),
 		...(modelPrefix === undefined ? {} : { modelPrefix }),
-		...(sidecarPersisted && evidence?.trackTurnTerminal === true
-			? { turnTerminalMarkerVersion: 1 as const }
-			: {}),
 		source,
 		author,
 	};
@@ -1302,9 +1282,6 @@ export function preparePromptAuthorDispatch(
 	session.lastKeylessPromptAuthorEnd = undefined;
 	return {
 		...(evidence ? { intentId: evidence.intentId, dispatchEpoch } : {}),
-		...(sidecarPersisted && evidence?.trackTurnTerminal === true
-			? { turnTerminalMarkerVersion: 1 as const }
-			: {}),
 		attemptId,
 		promptId,
 		piText,
@@ -1550,8 +1527,6 @@ export async function dispatchTrackedPrompt(
 		streamingBehavior?: PromptStreamingBehavior;
 		/** Caller-owned durable occurrence identity for automatic retries. */
 		intentId?: string;
-		/** Persist exact evidence when this attempt's Pi turn reaches a terminal boundary. */
-		trackTurnTerminal?: true;
 		now?: () => number;
 	} = {},
 ): Promise<unknown> {
@@ -1570,10 +1545,7 @@ export async function dispatchTrackedPrompt(
 	const promptId = intentId;
 	const author = resolveAcceptedPromptAuthor(source, opts.author);
 	session.lastPromptSource = source;
-	const prepared = preparePromptAuthorDispatch(session, promptId, text, source, author, now(), {
-		intentId,
-		...(opts.trackTurnTerminal === true ? { trackTurnTerminal: true as const } : {}),
-	});
+	const prepared = preparePromptAuthorDispatch(session, promptId, text, source, author, now(), { intentId });
 	const ledgerRecord: ReliableInFlightRecord = {
 		text,
 		promptId,
@@ -1648,7 +1620,6 @@ export function dispatchTrackedSystemPrompt(
 		whenReady?: boolean;
 		streamingBehavior?: PromptStreamingBehavior;
 		intentId?: string;
-		trackTurnTerminal?: true;
 		now?: () => number;
 	} = {},
 ): Promise<unknown> {
@@ -1942,7 +1913,6 @@ function stripVisiblePromptEntryIdProvenance<T>(event: T): T {
 const PROMPT_AUTHOR_EVENT_BINDING = Symbol("prompt-author-event-binding");
 const PROMPT_ACTIVITY_BOUNDARY = Symbol("prompt-activity-boundary");
 const PROMPT_AMBIGUOUS_ECHO = Symbol("prompt-ambiguous-echo");
-const PROMPT_TURN_TERMINAL_RECORDED = Symbol("prompt-turn-terminal-recorded");
 type PromptAuthorEventBinding = { promptId: string; attemptId?: string; alreadySettled: boolean };
 type BufferedPromptEcho = {
 	messageKey?: string;
@@ -1953,50 +1923,7 @@ type BufferedPromptEcho = {
 type ActivityBoundPromptAuthorRecord = PendingPromptAuthorRecord & {
 	[PROMPT_ACTIVITY_BOUNDARY]?: SessionPromptActivityBoundary;
 	[PROMPT_AMBIGUOUS_ECHO]?: BufferedPromptEcho;
-	[PROMPT_TURN_TERMINAL_RECORDED]?: true;
 };
-
-function isTrackedBootContinuation(
-	session: SessionInfo,
-	pending: Pick<PendingPromptAuthorRecord, "promptId" | "intentId" | "attemptId" | "turnTerminalMarkerVersion">,
-): pending is typeof pending & { intentId: string; attemptId: string; turnTerminalMarkerVersion: 1 } {
-	return pending.turnTerminalMarkerVersion === 1
-		&& pending.intentId === `boot-continuation:${session.id}`
-		&& typeof pending.attemptId === "string";
-}
-
-function markEchoedBootContinuationAttempt(
-	session: SessionInfo,
-	pending: ActivityBoundPromptAuthorRecord,
-): void {
-	if (!isTrackedBootContinuation(session, pending) || pending[PROMPT_TURN_TERMINAL_RECORDED]) return;
-	session.echoedBootContinuationAttempt = {
-		promptId: pending.promptId,
-		intentId: pending.intentId,
-		attemptId: pending.attemptId,
-	};
-}
-
-function recordEchoedBootContinuationTurnTerminal(session: SessionInfo, terminalAt: number): void {
-	const candidates = new Map<string, { promptId: string; intentId: string; attemptId: string }>();
-	const active = session.echoedBootContinuationAttempt;
-	if (active) candidates.set(active.attemptId, active);
-	for (const rawPending of session.pendingPromptAuthors ?? []) {
-		const pending = rawPending as ActivityBoundPromptAuthorRecord;
-		if (!pending[PROMPT_AMBIGUOUS_ECHO] || pending[PROMPT_TURN_TERMINAL_RECORDED]
-			|| !isTrackedBootContinuation(session, pending)) continue;
-		candidates.set(pending.attemptId, {
-			promptId: pending.promptId,
-			intentId: pending.intentId,
-			attemptId: pending.attemptId,
-		});
-		pending[PROMPT_TURN_TERMINAL_RECORDED] = true;
-	}
-	for (const candidate of candidates.values()) {
-		void appendPromptAuthorTurnTerminal(session.id, { ...candidate, terminalAt });
-	}
-	session.echoedBootContinuationAttempt = undefined;
-}
 
 function beginPreparedPromptActivity(
 	session: SessionInfo,
@@ -2050,7 +1977,6 @@ function acceptPreparedPromptDispatch(
 		...(buffered.messageId ? { messageId: buffered.messageId } : {}),
 		...(buffered.messageTimestamp === undefined ? {} : { messageTimestamp: buffered.messageTimestamp }),
 	});
-	markEchoedBootContinuationAttempt(session, pending);
 	return true;
 }
 
@@ -2068,7 +1994,7 @@ function commitCorrelatedPromptActivity(
 export function restorePromptAuthorBindings(session: SessionInfo, entries: PromptAuthorBinding[]): number {
 	session.pendingPromptAuthors = entries
 		.filter((entry) => entry.settlement === undefined)
-		.map(({ promptId, intentId, attemptId, dispatchEpoch, dispatchedAt, modelText, modelTextDigest, modelPrefix, turnTerminalMarkerVersion, source, author }) => ({
+		.map(({ promptId, intentId, attemptId, dispatchEpoch, dispatchedAt, modelText, modelTextDigest, modelPrefix, source, author }) => ({
 			promptId,
 			...(intentId === undefined ? {} : { intentId }),
 			attemptId: attemptId ?? promptId,
@@ -2077,7 +2003,6 @@ export function restorePromptAuthorBindings(session: SessionInfo, entries: Promp
 			...(modelText === undefined ? {} : { modelText }),
 			...(modelTextDigest === undefined ? {} : { modelTextDigest }),
 			...(modelPrefix === undefined ? {} : { modelPrefix }),
-			...(turnTerminalMarkerVersion === undefined ? {} : { turnTerminalMarkerVersion }),
 			source,
 			author,
 		}));
@@ -2574,7 +2499,6 @@ export function prepareVisibleAgentEvent(
 			...(messageId ? { messageId } : {}),
 			...(typeof message.timestamp === "number" ? { messageTimestamp: message.timestamp } : {}),
 		});
-		markEchoedBootContinuationAttempt(session, pending as ActivityBoundPromptAuthorRecord);
 	}
 	const eventBinding = (prepared as any)[PROMPT_AUTHOR_EVENT_BINDING] as PromptAuthorEventBinding | undefined;
 	if (raw.type === "message_end" && eventBinding && !eventBinding.alreadySettled) {
@@ -8502,7 +8426,6 @@ export class SessionManager {
 			}
 			if (session.turnTerminalHandled) return;
 			session.turnTerminalHandled = true;
-			recordEchoedBootContinuationTurnTerminal(session, this.clock.now());
 
 			// Revoke one-time granted tools after the turn completes
 			if (session.oneTimeGrantedTools && session.oneTimeGrantedTools.length > 0) {
@@ -8784,7 +8707,6 @@ export class SessionManager {
 			});
 		} else if (event.type === "process_exit") {
 			session._piAgentRunSettled = true;
-			recordEchoedBootContinuationTurnTerminal(session, this.clock.now());
 			session.streamingStartedAt = undefined;
 			this.resolveStoreForSession(session.id).update(session.id, {
 				wasStreaming: false,
@@ -10723,9 +10645,6 @@ export class SessionManager {
 		// Mark streaming as a second fence for the instant after coordinator release,
 		// including the case where agent_start arrived before the RPC acknowledgement.
 		this.markPromptDispatchStreaming(session);
-		// This persisted boundary distinguishes the interrupted turn being restored from
-		// older turns that used the same deterministic continuation intent id.
-		const interruptedTurnStartedAt = session.streamingStartedAt;
 		const markAccepted = (): boolean => {
 			// Terminal turn settlement leaves this exact bridge canonical, so its delayed
 			// correlated acknowledgement may still consume the startup-only fence. Once
@@ -10746,34 +10665,6 @@ export class SessionManager {
 			return true;
 		};
 		try {
-			const continuationIntentId = `boot-continuation:${session.id}`;
-			const surfacedAttempt = selectLatestPromptAuthorBinding(
-				readAuthorSidecar(session.id),
-				(binding) => binding.intentId === continuationIntentId,
-			);
-			// A correlated user message_end is durable proof that Pi received this exact
-			// attempt. Marker-capable attempts remain active only until canonical agent_end
-			// or process_exit appends their exact terminal companion. This ordering evidence
-			// avoids millisecond-clock ties between a historical echo and a later ordinary
-			// agent_start. Older rows predate terminal markers, so they retain the settlement
-			// timestamp compatibility check rather than risking duplicate continuations.
-			if (
-				typeof interruptedTurnStartedAt === "number"
-				&& Number.isSafeInteger(interruptedTurnStartedAt)
-				&& interruptedTurnStartedAt >= 0
-				&& typeof surfacedAttempt?.attemptId === "string"
-				&& typeof surfacedAttempt.dispatchEpoch === "number"
-				&& surfacedAttempt.settlement?.outcome === "echoed"
-				&& (
-					(surfacedAttempt.turnTerminalMarkerVersion === 1
-						&& surfacedAttempt.turnTerminal === undefined)
-					|| (surfacedAttempt.turnTerminalMarkerVersion === undefined
-						&& Number.isSafeInteger(surfacedAttempt.settlement.settledAt)
-						&& surfacedAttempt.settlement.settledAt >= interruptedTurnStartedAt)
-				)
-			) {
-				return markAccepted();
-			}
 			const continuationPrompt =
 				"The infrastructure server restarted while you were mid-turn. " +
 				"Your previous work has been preserved. Please continue where you left off. " +
@@ -10783,8 +10674,7 @@ export class SessionManager {
 				whenReady: true,
 				streamingBehavior: "followUp",
 				// A boot retry must retain the first potentially-written occurrence.
-				intentId: continuationIntentId,
-				trackTurnTerminal: true,
+				intentId: `boot-continuation:${session.id}`,
 				now: () => this.clock.now(),
 			});
 			if ((response as any)?.uncertain === true) {

@@ -422,6 +422,66 @@ describe("cold-restart re-prompt (reproducing)", () => {
 		);
 	});
 
+	it("redrives an echoed accepted continuation on every hard-restored bridge until lifecycle settlement", async () => {
+		const ps = makeMidTurnPersistedSession("boot-restart-after-correlated-echo");
+		const update = vi.fn((_id: string, updates: Record<string, unknown>) => Object.assign(ps, updates));
+		const store = { get: () => ps, update, archive: () => {} };
+		const promptCounts: number[] = [];
+		const listeners: Array<((event: any) => void) | undefined> = [];
+		const makeEchoingBridge = (managerIndex: number): any => ({
+			running: true,
+			async start() {}, async stop() {}, async waitForReady() {},
+			async promptWhenReady(text: string) {
+				promptCounts[managerIndex] = (promptCounts[managerIndex] ?? 0) + 1;
+				listeners[managerIndex]?.({
+					type: "message_end",
+					message: { id: `boot-echo-${managerIndex}`, role: "user", content: text },
+				});
+				return { success: true };
+			},
+			async prompt() { return { success: true }; }, async steer() { return { success: true }; },
+			async abort() { return { success: true }; }, async getState() { return { success: true, data: {} }; },
+			async getMessages() { return { success: true, data: { messages: [] } }; },
+			async setModel() { return { success: true }; }, async setThinkingLevel() { return { success: true }; },
+			async compact() { return { success: true }; }, async sendCommand() { return { success: true }; },
+			onEvent(listener: (event: any) => void) {
+				listeners[managerIndex] = listener;
+				return () => { listeners[managerIndex] = undefined; };
+			},
+		});
+
+		for (let managerIndex = 0; managerIndex < 3; managerIndex++) {
+			const manager = makeManager(makeEchoingBridge(managerIndex));
+			manager._testStore = store;
+			await manager.restoreSession(ps);
+			await flush();
+
+			assert.equal(
+				promptCounts[managerIndex],
+				1,
+				`hard-restored manager ${managerIndex + 1} must receive exactly one tracked continuation`,
+			);
+			assert.equal(ps.wasStreaming, true, "a correlated user echo proves delivery, not turn settlement");
+			assert.equal(
+				update.mock.calls.some(([, patch]) => patch.wasStreaming === false),
+				false,
+				"no acknowledgement or echo may own the durable false write",
+			);
+		}
+
+		listeners[2]?.({ type: "agent_start" });
+		listeners[2]?.({
+			type: "message_end",
+			message: { role: "assistant", content: [{ type: "text", text: "continued" }], stopReason: "stop" },
+		});
+		listeners[2]?.({ type: "agent_end", messages: [] });
+
+		const falseWrites = update.mock.calls.filter(([, patch]) => patch.wasStreaming === false);
+		assert.equal(falseWrites.length, 1, "final canonical agent_end owns the first durable false write");
+		assert.equal(ps.wasStreaming, false);
+		assert.equal(ps.streamingStartedAt, undefined);
+	});
+
 	it.each([
 		"different bridge",
 		"lifecycle-fenced bridge",

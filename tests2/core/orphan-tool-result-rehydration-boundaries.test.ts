@@ -7,7 +7,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
-import { createManualClock } from "../harness/clock.js";
 import { createMemFs } from "../harness/mem-fs.js";
 import { SandboxSessionFilesystem } from "../harness/sandbox-session-filesystem.js";
 
@@ -308,9 +307,9 @@ function persisted(id: string, agentSessionFile: string, overrides: Record<strin
 	};
 }
 
-function makeManager(ps: any, bridge: any, options: any = {}): any {
+function makeManager(ps: any, bridge: any): any {
 	registerRpcBridgeFactory(() => bridge);
-	const manager: any = new SessionManager(options);
+	const manager: any = new SessionManager();
 	manager._testStore = {
 		get: vi.fn(() => ps),
 		getLive: vi.fn(() => [ps]),
@@ -740,205 +739,6 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(canonical?.status).toBe("idle");
 		expect(canonical?.promptQueue.isEmpty).toBe(true);
 		expect(canonical?.completedTurnCount).toBe(2);
-	});
-
-	it("does not redispatch a boot continuation whose correlated user echo survived a hard restart", async () => {
-		const file = hostTranscript("boot-continuation-echo-before-hard-restart");
-		const ps = persisted("boot-continuation-echo-before-hard-restart", file, { wasStreaming: true });
-		const store = mutableStore(ps);
-		let listener: ((event: any) => void) | undefined;
-		const acceptedBridge = recordingBridge(() => {});
-		acceptedBridge.onEvent = vi.fn((next: (event: any) => void) => {
-			listener = next;
-			return () => { listener = undefined; };
-		});
-		acceptedBridge.promptWhenReady = vi.fn(async (text: string) => {
-			listener?.({
-				type: "message_end",
-				message: { id: "delivered-boot-continuation", role: "user", content: text },
-			});
-			return { success: true };
-		});
-		const acceptedManager = makeManager(ps, acceptedBridge);
-		acceptedManager._testStore = store;
-
-		await acceptedManager._restoreSessionCoalesced(ps);
-
-		const intentId = `boot-continuation:${ps.id}`;
-		expect(acceptedBridge.promptWhenReady).toHaveBeenCalledTimes(1);
-		expect(ps.wasStreaming).toBe(true);
-		expect(ps.inFlightSteerTexts).toBeUndefined();
-		expect(readAuthorSidecar(ps.id)).toEqual([
-			expect.objectContaining({
-				intentId,
-				settlement: expect.objectContaining({ outcome: "echoed" }),
-			}),
-		]);
-
-		// Model a hard gateway kill after RPC acceptance and exact user echo, but
-		// before agent_end can settle the still-active turn.
-		const restoredBridge = recordingBridge(() => {});
-		restoredBridge.promptWhenReady = vi.fn(async () => ({ success: true }));
-		const restoredManager = makeManager(ps, restoredBridge);
-		restoredManager._testStore = store;
-
-		await restoredManager._restoreSessionCoalesced(ps);
-
-		expect(
-			restoredBridge.promptWhenReady,
-			"a durable exact echoed occurrence must not be represented twice",
-		).not.toHaveBeenCalled();
-		expect(ps.wasStreaming).toBe(true);
-		expect(ps.inFlightSteerTexts).toBeUndefined();
-		expect(restoredManager.sessions.get(ps.id)?.restoreStartupWasStreaming).toBe(false);
-		expect(readAuthorSidecar(ps.id)).toHaveLength(1);
-	});
-
-	it("does not redispatch when agent_start advances the turn boundary before the continuation echo", async () => {
-		const file = hostTranscript("boot-continuation-agent-start-before-echo");
-		const clock = createManualClock(10_000);
-		const ps = persisted("boot-continuation-agent-start-before-echo", file, {
-			wasStreaming: true,
-			streamingStartedAt: 9_000,
-		});
-		const store = mutableStore(ps);
-		let listener: ((event: any) => void) | undefined;
-		const acceptedBridge = recordingBridge(() => {});
-		acceptedBridge.onEvent = vi.fn((next: (event: any) => void) => {
-			listener = next;
-			return () => { listener = undefined; };
-		});
-		acceptedBridge.promptWhenReady = vi.fn(async (text: string) => {
-			clock.advance(100);
-			listener?.({ type: "agent_start" });
-			listener?.({
-				type: "message_end",
-				message: { id: "delivered-after-agent-start", role: "user", content: text },
-			});
-			return { success: true };
-		});
-		const acceptedManager = makeManager(ps, acceptedBridge, { clock });
-		acceptedManager._testStore = store;
-
-		await acceptedManager._restoreSessionCoalesced(ps);
-
-		const intentId = `boot-continuation:${ps.id}`;
-		expect(acceptedBridge.promptWhenReady).toHaveBeenCalledTimes(1);
-		expect(ps.wasStreaming).toBe(true);
-		expect(ps.streamingStartedAt).toBe(10_100);
-		expect(readAuthorSidecar(ps.id)).toEqual([
-			expect.objectContaining({
-				intentId,
-				dispatchEpoch: 10_000,
-				turnTerminalMarkerVersion: 1,
-				settlement: expect.objectContaining({ outcome: "echoed", settledAt: 10_100 }),
-			}),
-		]);
-		expect(readAuthorSidecar(ps.id)[0]?.turnTerminal).toBeUndefined();
-
-		// Model a hard kill after the correlated echo but before agent_end. The
-		// dispatch predates agent_start, while the exact settlement belongs to this turn.
-		clock.advance(100);
-		const restoredBridge = recordingBridge(() => {});
-		restoredBridge.promptWhenReady = vi.fn(async () => ({ success: true }));
-		const restoredManager = makeManager(ps, restoredBridge, { clock });
-		restoredManager._testStore = store;
-
-		await restoredManager._restoreSessionCoalesced(ps);
-
-		expect(
-			restoredBridge.promptWhenReady,
-			"a same-turn echo after agent_start must suppress duplicate continuation",
-		).not.toHaveBeenCalled();
-		expect(ps.wasStreaming).toBe(true);
-		expect(ps.streamingStartedAt).toBe(10_100);
-		expect(ps.inFlightSteerTexts).toBeUndefined();
-		expect(restoredManager.sessions.get(ps.id)?.restoreStartupWasStreaming).toBe(false);
-		expect(readAuthorSidecar(ps.id)).toHaveLength(1);
-	});
-
-	it.each(["agent_end", "process_exit"] as const)(
-		"redrives a later interrupted turn after an older echoed boot continuation settled by %s",
-		async (terminalEvent) => {
-		const fixtureId = `boot-continuation-echo-from-older-turn-${terminalEvent}`;
-		const file = hostTranscript(fixtureId);
-		const clock = createManualClock(10_000);
-		const ps = persisted(fixtureId, file, {
-			wasStreaming: true,
-			streamingStartedAt: 9_000,
-		});
-		const store = mutableStore(ps);
-		let listener: ((event: any) => void) | undefined;
-		const acceptedBridge = recordingBridge(() => {});
-		acceptedBridge.onEvent = vi.fn((next: (event: any) => void) => {
-			listener = next;
-			return () => { listener = undefined; };
-		});
-		acceptedBridge.promptWhenReady = vi.fn(async (text: string) => {
-			listener?.({
-				type: "message_end",
-				message: { id: "delivered-older-boot-continuation", role: "user", content: text },
-			});
-			return { success: true };
-		});
-		const acceptedManager = makeManager(ps, acceptedBridge, { clock });
-		acceptedManager._testStore = store;
-
-		await acceptedManager._restoreSessionCoalesced(ps);
-		const intentId = `boot-continuation:${ps.id}`;
-		expect(readAuthorSidecar(ps.id)).toEqual([
-			expect.objectContaining({
-				intentId,
-				attemptId: expect.any(String),
-				dispatchEpoch: 10_000,
-				settlement: expect.objectContaining({ outcome: "echoed" }),
-			}),
-		]);
-		listener?.({ type: "agent_start" });
-		listener?.(terminalEvent === "agent_end"
-			? { type: "agent_end", messages: [] }
-			: { type: "process_exit", code: 0 });
-		expect(ps.wasStreaming).toBe(false);
-		expect(ps.streamingStartedAt).toBeUndefined();
-
-		const [historicalAttempt] = readAuthorSidecar(ps.id);
-		expect(historicalAttempt).toEqual(expect.objectContaining({
-			turnTerminalMarkerVersion: 1,
-			turnTerminal: expect.objectContaining({ terminalAt: 10_000 }),
-		}));
-
-		// A distinct ordinary turn starts in the same clock tick after the echoed
-		// continuation settled, then the gateway is hard-killed before agent_end.
-		listener?.({ type: "agent_start" });
-		const laterTurnStartedAt = ps.streamingStartedAt;
-		expect(laterTurnStartedAt).toBe(10_000);
-		expect(ps.wasStreaming).toBe(true);
-
-		const restoredBridge = recordingBridge(() => {});
-		restoredBridge.promptWhenReady = vi.fn(async () => ({ success: true }));
-		const restoredManager = makeManager(ps, restoredBridge, { clock });
-		restoredManager._testStore = store;
-
-		await restoredManager._restoreSessionCoalesced(ps);
-
-		expect(
-			restoredBridge.promptWhenReady,
-			"an older echoed continuation must not consume the newer turn's startup fence",
-		).toHaveBeenCalledTimes(1);
-		expect(ps.wasStreaming).toBe(true);
-		expect(ps.streamingStartedAt).toBe(laterTurnStartedAt);
-		expect(restoredManager.sessions.get(ps.id)?.restoreStartupWasStreaming).toBe(false);
-		const attempts = readAuthorSidecar(ps.id);
-		expect(attempts).toEqual([
-			expect.objectContaining({
-				intentId,
-				dispatchEpoch: 10_000,
-				settlement: expect.any(Object),
-				turnTerminal: expect.any(Object),
-			}),
-			expect.objectContaining({ intentId, dispatchEpoch: 10_000 }),
-		]);
-		expect(attempts[1]?.settlement).toBeUndefined();
 	});
 
 	it("treats a rejected boot-continuation acknowledgement as accepted after terminal lifecycle", async () => {
