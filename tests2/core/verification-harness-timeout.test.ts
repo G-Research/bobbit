@@ -61,13 +61,18 @@ async function withTimeout<T>(promise: Promise<T>, budgetMs: number, label: stri
 }
 
 /** Minimal stubs for a bare-bones VerificationHarness. */
-function makeHarness(deps: Record<string, unknown> = {}, broadcasts: any[] = [], stateDir = fs.mkdtempSync(path.join(TEST_DIR, "harness-"))) {
-	fs.mkdirSync(stateDir, { recursive: true });
-	const stubGateStore = {
+function makeHarness(
+	deps: Record<string, unknown> = {},
+	broadcasts: any[] = [],
+	stateDir = fs.mkdtempSync(path.join(TEST_DIR, "harness-")),
+	gateStore: any = {
 		updateSignalVerification: () => {},
 		updateGateStatus: () => {},
 		getGate: () => undefined,
-	} as any;
+	},
+) {
+	fs.mkdirSync(stateDir, { recursive: true });
+	const stubGateStore = gateStore as any;
 	const roleStore = { get: () => undefined, getAll: () => [] } as any;
 	return new VerificationHarness(
 		stateDir,
@@ -86,6 +91,77 @@ function fakeTreeCommand(): string {
 function createFakeChild(pid: number, pipes = true) {
 	const stream = () => Object.assign(new EventEmitter(), { destroy() {} });
 	return Object.assign(new EventEmitter(), { pid, stdout: pipes ? stream() : undefined, stderr: pipes ? stream() : undefined });
+}
+
+function createDeferred<T>() {
+	let resolve!: (value: T | PromiseLike<T>) => void;
+	const promise = new Promise<T>(done => { resolve = done; });
+	return { promise, resolve };
+}
+
+/** A live host child with a controllable exact-tree barrier. */
+function createDeferredTreeExitRunner(options: { deferFirstTreeExit?: boolean } = {}) {
+	const spawned = createDeferred<void>();
+	const killStarted = createDeferred<void>();
+	const treeExit = createDeferred<boolean>();
+	let child: ReturnType<typeof createFakeChild> | undefined;
+	let waits = 0;
+	let kills = 0;
+	const tracked = {
+		get child() { return child!; },
+		ownershipReady: Promise.resolve(),
+		killed: () => kills > 0,
+		timedOut: () => false,
+		markSurvival: () => {},
+		killTree: () => { kills++; killStarted.resolve(); },
+		// Cleanup gets the first wait; the command-result close handler gets an
+		// independently settled exact-barrier observation while cleanup is paused.
+		waitForTreeExit: async () => ++waits === 1 && options.deferFirstTreeExit !== false ? treeExit.promise : true,
+	};
+	return {
+		runner: { nonDurable: true, spawn: () => {
+			child = createFakeChild(910_111);
+			spawned.resolve();
+			return tracked as any;
+		} },
+		spawned: spawned.promise,
+		killStarted: killStarted.promise,
+		releaseTreeExit: () => treeExit.resolve(true),
+		closeNormally: () => {
+			child!.emit("exit", 0, null);
+			child!.emit("close", 0, null);
+		},
+		tracked,
+		waits: () => waits,
+		kills: () => kills,
+	};
+}
+
+function createCancellationGateFixture(goalId: string, gateId: string, signalId: string) {
+	const signal: any = {
+		id: signalId, goalId, gateId, sessionId: "test-session", timestamp: 1,
+		commitSha: "test-commit", content: "", metadata: {},
+		verification: { status: "running", steps: [] },
+	};
+	const gate: any = {
+		id: gateId, name: "Tracked cleanup", status: "running", dependsOn: [],
+		verify: [{ name: "tracked command", type: "command", run: "true" }], signals: [signal],
+	};
+	const verificationUpdates: any[] = [];
+	const gateStore = {
+		getGate: (requestedGoalId: string, requestedGateId: string) =>
+			requestedGoalId === goalId && requestedGateId === gateId ? gate : undefined,
+		updateSignalVerification: (requestedSignalId: string, verification: any) => {
+			if (requestedSignalId !== signalId) throw new Error("unexpected signal update");
+			signal.verification = verification;
+			verificationUpdates.push(verification);
+		},
+		updateGateStatus: (requestedGoalId: string, requestedGateId: string, status: string) => {
+			if (requestedGoalId !== goalId || requestedGateId !== gateId) throw new Error("unexpected gate update");
+			gate.status = status;
+		},
+	};
+	return { signal, gate, gateStore, verificationUpdates };
 }
 
 /** Deterministic cleanup-failure seams: no OS process or wall-clock race. */
@@ -697,6 +773,102 @@ describe("runCommandStep tree-kill", () => {
 		acknowledgeHeld();
 		expect(await cleanup).toBe(true);
 		expect(heldKills).toBe(1);
+	});
+
+	it("keeps the exact tracked step when the normal command-result callback lands during cancellation cleanup", async () => {
+		const goalId = "goal-tracked-step-identity";
+		const gateId = "gate-tracked-step-identity";
+		const signalId = "sig-tracked-step-identity";
+		const clock = createManualClock(5_000);
+		const tree = createDeferredTreeExitRunner();
+		const fixture = createCancellationGateFixture(goalId, gateId, signalId);
+		const broadcasts: any[] = [];
+		const harness = makeHarness({ commandStepRunner: tree.runner, clock }, broadcasts, undefined, fixture.gateStore);
+
+		// This drives the production phase callback that records a completed command
+		// result. It must update the active step in place, because cancellation has
+		// already captured that object's exact tracked-child ownership.
+		const verification = harness.verifyGateSignal(
+			fixture.signal, fixture.gate, TEST_DIR, "goal/tracked-step-identity", "main", new Map(), "test goal",
+		);
+		await tree.spawned;
+		const active = (harness as any).activeVerifications.get(signalId);
+		const ownedStep = active.steps[0];
+		const cancellation = harness.cancelStaleVerifications(goalId, gateId, "manual");
+		await tree.killStarted;
+
+		// The command exits normally after cancellation starts. Its result callback
+		// runs while the cancellation owner's first exact tree wait remains blocked.
+		tree.closeNormally();
+		await verification;
+		expect(active.steps[0]).toBe(ownedStep);
+		expect((harness as any)._trackedCommandChildren.get(`${signalId}:0`)).toBe(tree.tracked);
+		expect(broadcasts.filter(event => event.type === "gate_verification_complete")).toHaveLength(0);
+
+		tree.releaseTreeExit();
+		expect(await cancellation).toBe(true);
+		expect(tree.kills()).toBe(1);
+		expect(tree.waits()).toBeGreaterThanOrEqual(2);
+		expect((harness as any)._trackedCommandChildren.has(`${signalId}:0`)).toBe(false);
+		expect((harness as any).activeVerifications.has(signalId)).toBe(false);
+		expect(fixture.gate.status).toBe("pending");
+		expect(fixture.signal.verification).toMatchObject({
+			status: "cancelled",
+			cancellation: { cause: "manual" },
+			steps: [{ status: "cancelled", cancellation: { cause: "manual" } }],
+		});
+		expect(broadcasts.filter(event => event.type === "gate_verification_complete")).toEqual([
+			expect.objectContaining({ goalId, gateId, signalId, status: "cancelled", cancellation: { cause: "manual", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) } }),
+		]);
+	});
+
+	it("retries a failed tracked-cleanup persistence with the same live child before publishing cancellation", async () => {
+		const goalId = "goal-tracked-cleanup-retry";
+		const gateId = "gate-tracked-cleanup-retry";
+		const signalId = "sig-tracked-cleanup-retry";
+		const clock = createManualClock(10_000);
+		const tree = createDeferredTreeExitRunner({ deferFirstTreeExit: false });
+		const fixture = createCancellationGateFixture(goalId, gateId, signalId);
+		const broadcasts: any[] = [];
+		const harness = makeHarness({ clock }, broadcasts, undefined, fixture.gateStore);
+		setActiveCommandVerification(harness, goalId, gateId, signalId, ["tracked command"], { commandSpawnState: "spawned" });
+		(harness as any)._trackedCommandChildren.set(`${signalId}:0`, tree.tracked);
+
+		const persistActive = (harness as any)._persistActive.bind(harness);
+		let failTrackedCleanupPersistence = true;
+		const persistenceFailed = createDeferred<void>();
+		const failOnceAfterFence = () => {
+			if (failTrackedCleanupPersistence) {
+				failTrackedCleanupPersistence = false;
+				persistenceFailed.resolve();
+				return false;
+			}
+			return persistActive();
+		};
+
+		// Fencing persists before the detached cleanup gets its first microtask, so
+		// turn on the one-shot failure only after that durable fence is established.
+		const cancellations = harness.fenceStaleVerificationsForGates(goalId, [gateId], "manual");
+		expect(cancellations).toHaveLength(1);
+		(harness as any)._persistActive = failOnceAfterFence;
+		await persistenceFailed.promise;
+
+		expect((harness as any)._trackedCommandChildren.get(`${signalId}:0`)).toBe(tree.tracked);
+		expect(tree.waits()).toBe(1);
+		expect(fixture.verificationUpdates).toEqual([]);
+		expect(broadcasts.filter(event => event.type === "gate_verification_complete")).toHaveLength(0);
+
+		clock.advance(1_000);
+		await Promise.resolve();
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(tree.waits()).toBeGreaterThanOrEqual(2);
+		expect((harness as any)._trackedCommandChildren.has(`${signalId}:0`)).toBe(false);
+		expect(fixture.gate.status).toBe("pending");
+		expect(fixture.signal.verification).toMatchObject({ status: "cancelled", cancellation: { cause: "manual" } });
+		expect(broadcasts.filter(event => event.type === "gate_verification_complete")).toEqual([
+			expect.objectContaining({ signalId, status: "cancelled", cancellation: { cause: "manual" } }),
+		]);
 	});
 
 	it("cancellation kills the tracked command and emits output plus cancelled marker", async () => {
