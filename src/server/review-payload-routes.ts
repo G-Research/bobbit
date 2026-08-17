@@ -293,7 +293,7 @@ export async function handleReviewPayloadRoute(
 		const payloadId = decodePart(open[2]);
 		if (!sessionId || !payloadId) { writeError(res, new ReviewPayloadError(400, "REVIEW_PAYLOAD_INVALID", "Invalid review content reference")); return true; }
 		try {
-			if (!hasLiveSession(deps, sessionId)) throw new ReviewPayloadError(404, "REVIEW_PAYLOAD_SESSION_UNAVAILABLE", "Review session is unavailable");
+			if (!hasPersistedSession(deps, sessionId)) throw new ReviewPayloadError(404, "REVIEW_PAYLOAD_SESSION_UNAVAILABLE", "Review session is unavailable");
 			const body = await deps.readBody(req);
 			if (!body || typeof body !== "object" || Array.isArray(body)) throw new ReviewPayloadError(400, "REVIEW_PAYLOAD_INVALID", "Invalid review open request");
 			const reference = body as Record<string, unknown>;
@@ -309,7 +309,7 @@ export async function handleReviewPayloadRoute(
 				throw new ReviewPayloadError(400, "REVIEW_PAYLOAD_INVALID", "Complete review reference is required");
 			}
 			const opened = await deps.operations.run(sessionId, async () => {
-				if (!hasLiveSession(deps, sessionId)) throw new ReviewPayloadError(404, "REVIEW_PAYLOAD_SESSION_UNAVAILABLE", "Review session is unavailable");
+				if (!hasPersistedSession(deps, sessionId)) throw new ReviewPayloadError(404, "REVIEW_PAYLOAD_SESSION_UNAVAILABLE", "Review session is unavailable");
 				const payload = await readReviewPayload(sessionId, payloadId);
 				assertReviewPayloadReference(payload, { toolCallId: reference.toolCallId, reviewId: reference.reviewId, hash: reference.hash });
 				const workspace = await deps.openReview(payload);

@@ -355,6 +355,18 @@ test.describe("review payload API hardening", () => {
 		);
 		expect(fetched.status).toBe(200);
 		expect((await fetched.json()).files).toMatchObject([{ markdown: "durable terminal review" }]);
+
+		const reopened = await apiFetch(`/api/sessions/${sessionId}/review-payloads/${receipt.payloadId}/open`, {
+			method: "POST",
+			body: JSON.stringify({
+				payloadId: receipt.payloadId,
+				toolCallId: receipt.toolCallId,
+				reviewId: receipt.reviewId,
+				hash: receipt.hash,
+			}),
+		});
+		expect(reopened.status).toBe(200);
+		expect(await reopened.json()).toMatchObject({ ok: true, status: "opened", payloadId: receipt.payloadId });
 	});
 
 	test("returns a prompt structured 413 and closes a chunked cap+1 upload before end", async ({ gateway }) => {
