@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { describe, it } from "vitest";
+import { describe, it, vi } from "vitest";
 import { trustedAgentSessionsRoots } from "../../src/server/agent/agent-session-path.ts";
 import { sidecarPathFor, type SessionSidecar } from "../../src/server/agent/session-sidecar.ts";
 import { TeamManager, type TeamRecoverySidecars } from "../../src/server/agent/team-manager.ts";
@@ -38,6 +40,18 @@ class MemoryStore<T extends { id: string }> {
 	}
 }
 
+class MemorySessionStore extends MemoryStore<any> {
+	flushCalls = 0;
+	flushError: Error | undefined;
+
+	async flushAsync(): Promise<void> {
+		this.flushCalls++;
+		if (this.flushError) throw this.flushError;
+	}
+
+	flush(): Promise<void> { return this.flushAsync(); }
+}
+
 class MemoryTeamStore {
 	readonly records = new Map<string, MemoryTeamEntry>();
 	readonly mutations: string[] = [];
@@ -61,6 +75,7 @@ class MemoryTeamStore {
 class MemoryRecoveryCheckpoints implements TeamRecoveryCheckpointStore {
 	readonly statuses = new Map<string, "running" | "complete">();
 	readonly calls: string[] = [];
+	failBegin = false;
 
 	async isComplete(stateDir: string): Promise<boolean> {
 		this.calls.push(`isComplete:${stateDir}`);
@@ -68,6 +83,7 @@ class MemoryRecoveryCheckpoints implements TeamRecoveryCheckpointStore {
 	}
 	async begin(stateDir: string): Promise<void> {
 		this.calls.push(`begin:${stateDir}`);
+		if (this.failBegin) throw new Error("INJECTED_CHECKPOINT_BEGIN_FAILURE");
 		this.statuses.set(stateDir, "running");
 	}
 	async complete(stateDir: string): Promise<void> {
@@ -181,7 +197,7 @@ function makeFixture(options: { deferFirstScan?: boolean; completedCheckpoint?: 
 		{ goalId: goalPass2.id, teamLeadSessionId: "lead-pass2", agents: [], maxConcurrent: 4 },
 		{ goalId: goalPass2Failure.id, teamLeadSessionId: "lead-failure", agents: [], maxConcurrent: 2 },
 	]);
-	const sessions = new MemoryStore<any>([{
+	const sessions = new MemorySessionStore([{
 		id: "existing-untracked-lead",
 		title: "Team Lead: Existing",
 		cwd: goalUntracked.worktreePath,
@@ -361,6 +377,114 @@ describe("TeamManager awaited async recovery", () => {
 		assert.ok(fixture.checkpoints.calls.includes(`begin:${fixture.stateDir}`));
 		assert.equal(fixture.checkpoints.statuses.get(fixture.stateDir), "complete");
 		fixture.manager.dispose();
+	});
+
+	it("does not complete recovery until reconstructed session rows are durably published", async () => {
+		const fixture = makeFixture();
+		fixture.sessions.flushError = new Error("INJECTED_SESSION_PUBLICATION_FAILURE");
+		await fixture.manager.waitForRestore();
+
+		assert.equal(
+			fixture.checkpoints.statuses.get(fixture.stateDir),
+			"running",
+			"RECOVERY_DURABILITY_BARRIER: a failed session-store publication must leave the forensic checkpoint retryable",
+		);
+		assert.ok(fixture.sessions.flushCalls > 0, "RECOVERY_DURABILITY_BARRIER: recovery must await a session-store persistence barrier");
+		fixture.manager.dispose();
+
+		fixture.sessions.flushError = undefined;
+		fixture.fs.calls.length = 0;
+		const retry = new TeamManager(fixture.sessionManager as any, fixture.managerConfig as any, undefined, noTimerClock as any);
+		await retry.waitForRestore();
+
+		assert.ok(fixture.fs.calls.some((call) => call.operation === "readdir"), "RECOVERY_DURABILITY_BARRIER: the next boot must retry forensic traversal");
+		assert.equal(fixture.checkpoints.statuses.get(fixture.stateDir), "complete");
+		retry.dispose();
+	});
+
+	it("does not repair under stale complete authority when checkpoint invalidation fails", async () => {
+		const fixture = makeFixture({ completedCheckpoint: true });
+		fixture.checkpoints.failBegin = true;
+		await fixture.manager.waitForRestore();
+
+		assert.equal(
+			fixture.sessions.get("lead-pass2"),
+			undefined,
+			"RECOVERY_INVALIDATION_FENCE: recovery must not continue while an old complete checkpoint cannot be durably invalidated",
+		);
+		assert.equal(fixture.checkpoints.statuses.get(fixture.stateDir), "complete");
+		fixture.manager.dispose();
+
+		fixture.checkpoints.failBegin = false;
+		fixture.fs.calls.length = 0;
+		const retry = new TeamManager(fixture.sessionManager as any, fixture.managerConfig as any, undefined, noTimerClock as any);
+		await retry.waitForRestore();
+
+		assert.ok(fixture.sessions.get("lead-pass2"), "RECOVERY_INVALIDATION_FENCE: a later boot must recover after checkpoint invalidation succeeds");
+		assert.ok(fixture.fs.calls.some((call) => call.operation === "readdir"), "RECOVERY_INVALIDATION_FENCE: retry must reopen forensic traversal");
+		assert.equal(fixture.checkpoints.statuses.get(fixture.stateDir), "complete");
+		retry.dispose();
+	});
+
+	it("retries a real sidecar backfill after publication fails", async () => {
+		const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "bobbit-team-sidecar-retry-"));
+		const transcript = path.join(root, "legacy.jsonl");
+		const stateDir = path.join(root, "state");
+		await fs.promises.writeFile(transcript, "{}\n", "utf-8");
+		const checkpoints = new MemoryRecoveryCheckpoints();
+		const sessions = new MemorySessionStore([{
+			id: "legacy-session",
+			title: "Coder: Legacy",
+			cwd: root,
+			createdAt: 1,
+			lastActivity: 1,
+			role: "coder",
+			agentSessionFile: transcript,
+			archived: true,
+		}]);
+		const goals = new MemoryStore<any>();
+		const teams = new MemoryTeamStore([]);
+		const context = { stateDir, goalStore: goals, teamStore: teams, sessionStore: sessions };
+		const managerConfig = {
+			projectContextManager: { all: () => [context], getContextForGoal: () => undefined },
+			taskManager: { getTasksByGoal: () => [], getTasksForSession: () => [] },
+			colorStore: { get: () => undefined, set: () => {}, remove: () => {}, getAll: () => ({}) },
+			recoveryCheckpoints: checkpoints,
+		};
+		const sessionManager = { getSession: () => undefined, getSessionInfo: () => undefined };
+		const targetSidecar = sidecarPathFor(transcript);
+		const realRename = fs.promises.rename.bind(fs.promises);
+		let injectFailure = true;
+		const renameSpy = vi.spyOn(fs.promises, "rename").mockImplementation(async (from, to) => {
+			if (injectFailure && path.resolve(String(to)) === path.resolve(targetSidecar)) {
+				injectFailure = false;
+				throw new Error("INJECTED_SIDECAR_PUBLICATION_FAILURE");
+			}
+			return realRename(from, to);
+		});
+		let manager: TeamManager | undefined;
+		let retry: TeamManager | undefined;
+		try {
+			manager = new TeamManager(sessionManager as any, managerConfig as any, undefined, noTimerClock as any);
+			await manager.waitForRestore();
+			assert.equal(
+				checkpoints.statuses.get(stateDir),
+				"running",
+				"RECOVERY_SIDECAR_RETRY: a failed sidecar publication must leave the forensic checkpoint retryable",
+			);
+			manager.dispose();
+			manager = undefined;
+
+			retry = new TeamManager(sessionManager as any, managerConfig as any, undefined, noTimerClock as any);
+			await retry.waitForRestore();
+			assert.equal(await fs.promises.readFile(targetSidecar, "utf-8").then(() => true, () => false), true, "RECOVERY_SIDECAR_RETRY: the next boot must retry the sidecar write");
+			assert.equal(checkpoints.statuses.get(stateDir), "complete");
+		} finally {
+			manager?.dispose();
+			retry?.dispose();
+			renameSpy.mockRestore();
+			await fs.promises.rm(root, { recursive: true, force: true });
+		}
 	});
 
 	it("supports an explicit boot boundary: team restore completes before session restore and event resubscription", async () => {

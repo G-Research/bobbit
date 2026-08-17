@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, it } from "vitest";
+import { afterEach, describe, it, vi } from "vitest";
 import {
 	FileTeamRecoveryCheckpointStore,
 	TEAM_FORENSIC_RECOVERY_CHECKPOINT_FILE,
@@ -46,5 +46,33 @@ describe("team forensic recovery checkpoint", () => {
 		assert.equal(await store.isComplete(stateDir), true);
 		const names = await fs.promises.readdir(stateDir);
 		assert.deepEqual(names, [TEAM_FORENSIC_RECOVERY_CHECKPOINT_FILE]);
+	});
+
+	it("preserves the prior checkpoint when durable temporary-file publication is interrupted", async () => {
+		const stateDir = await tempStateDir();
+		const store = new FileTeamRecoveryCheckpointStore();
+		await store.complete(stateDir);
+		const realOpen = fs.promises.open.bind(fs.promises);
+		const openSpy = vi.spyOn(fs.promises, "open").mockImplementation(async (...args) => {
+			const handle = await realOpen(...args);
+			return new Proxy(handle, {
+				get(target, property) {
+					if (property === "sync") return async () => { throw new Error("INJECTED_CHECKPOINT_FSYNC_INTERRUPTION"); };
+					const value = Reflect.get(target, property, target);
+					return typeof value === "function" ? value.bind(target) : value;
+				},
+			}) as fs.promises.FileHandle;
+		});
+		try {
+			await assert.rejects(
+				store.begin(stateDir),
+				/INJECTED_CHECKPOINT_FSYNC_INTERRUPTION/,
+				"RECOVERY_CHECKPOINT_ATOMICITY: checkpoint publication must flush its temporary file before rename",
+			);
+			assert.equal(await store.isComplete(stateDir), true, "RECOVERY_CHECKPOINT_ATOMICITY: an interrupted replacement must preserve the prior valid checkpoint");
+			assert.deepEqual(await fs.promises.readdir(stateDir), [TEAM_FORENSIC_RECOVERY_CHECKPOINT_FILE], "RECOVERY_CHECKPOINT_ATOMICITY: interrupted temporary files must be cleaned up");
+		} finally {
+			openSpy.mockRestore();
+		}
 	});
 });
