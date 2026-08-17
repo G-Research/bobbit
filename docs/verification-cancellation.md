@@ -40,6 +40,8 @@ The supported causes are:
 
 Cancellation provenance is recorded before any asynchronous reviewer, process, Docker, or sign-off cleanup begins. It is first-writer-wins: a later pause, reset, recovery pass, or retry cannot replace the cause chosen by the first cancelling producer. The intent and timestamps remain in the active durable record until finalization, so a gateway restart or delayed cleanup retry preserves them.
 
+Output text never determines provenance. A reviewer summary, command log, timeout wording, or missing output is evidence about a step only after the harness has a durable lifecycle record for it; otherwise it can be stale, user-authored, or produced after cancellation. Restart interruption is therefore recorded only by the durable `restartInterrupted` marker, and the compatibility `unknown` cause remains unknown rather than being guessed from text.
+
 ## Outcome and audit semantics
 
 `failed` means a command, reviewer, QA check, or human sign-off delivered a real failed verdict. An orchestration cancellation instead gives the signal verification `status: "cancelled"`; it does not make the gate failed.
@@ -60,11 +62,15 @@ Cancelling a run first fences further work for that signal, drains pending human
 
 Terminal cancellation publication waits for all owned cleanup to settle. If exact cleanup is pending, the cancellation intent remains durable and cleanup is retried; it is not converted into a failed gate. This applies after a gateway restart as well as during normal operation.
 
+The same fence protects real recovered outcomes. A genuine recovered pass or failure, including a non-restart `Resume Error`, is first staged as a durable terminal intent when cleanup is still owned. Reviewer, host-tree, Docker payload and transport, and human-sign-off cleanup then settle before the signal and gate result are published. This prevents a late callback from changing either an interrupted run or a real verdict.
+
 The public active-verifications endpoint deliberately hides a run once it has entered cancellation cleanup. It is a view of work still running, not a process-ownership ledger. The durable signal history is the authoritative cancellation result after cleanup settles.
 
 ## Generation safety and re-signalling
 
-Each signal is one generation. On re-signal, Bobbit fences the old generation as `superseded` before admitting the replacement. Old cleanup may continue, but its finalizer can update only its own historical signal; it cannot publish a result into the replacement generation or change the current gate status.
+Each signal is one generation. On re-signal, Bobbit fences the old generation as `superseded` before admitting the replacement. The replacement running generation resets the gate to `pending`. Old cleanup may continue and may persist its own historical signal, but it cannot publish a result into the replacement generation or change the current gate status.
+
+Publication is ordered: persist the historical signal result, update the gate only if that signal is still current, durably retire the active owner, then emit status and transcript events only if the generation is still current after the writes. This post-write check prevents an event emitted by old cleanup from making a replacement look completed.
 
 A paused goal rejects new signals while paused. Resuming does not automatically replay a cancelled verification: automatic replay could run a changed commit, workflow, goal lineage, or a superseded signal. Instead, after the goal is eligible again, use the explicit **Re-signal gate** action once. That creates a new generation under current admission checks.
 
@@ -78,13 +84,15 @@ A request made during these transitions fails closed with a retryable conflict r
 
 ## Restart and recovery
 
-At gateway startup, Bobbit first reloads active cancellation intent and resumes its exact cleanup. A previously cancelled run retains its first cause and step history until it can be finalized.
+At gateway startup, Bobbit first reloads active cancellation intent and resumes its exact cleanup. A previously cancelled run retains its first cause and step history until it can be finalized. If reviewer cleanup was already in progress, the durable `reviewerCleanupPending` marker retains the exact reviewer session identity; retrying cleanup never substitutes a later session.
 
-A still-running verification may be resumed when its evidence supports safe recovery. If restart recovery instead interrupts the run, it is recorded as `gateway-restart-recovery`, not as a failed verification. Bobbit sends one neutral re-signal notice only when that cancelled signal is still the gate's current generation. Zombie replacement and historical/superseded cleanup do not send that notice, avoiding misleading or duplicate instructions.
+Recovery distinguishes determined and unfinished work. A recoverable command result or an aggregate already determined by durable rows reconstructs a pass/fail terminal intent, then publishes it only after exact cleanup. Genuinely unfinished work first completes any retained ownership cleanup and then resumes. If the workflow, goal, gate, or signal context cannot be resolved, the active record is retained for later recovery rather than inventing an outcome.
+
+If restart recovery conclusively finds no verdict for a marked step, it records `gateway-restart-recovery`, not a failed verification. A real failed sibling remains a failed aggregate, with the interrupted step still marked cancelled for audit. Bobbit sends one neutral re-signal notice only when that cancelled signal is still the gate's current generation. Zombie replacement and historical/superseded cleanup do not send that notice, avoiding misleading or duplicate instructions.
 
 ## API, events, and UI
 
-REST signal history, gate detail/status, and inspection expose the durable verification status, cancellation object, and per-step cancellation data. The manual cancel endpoint returns `outcome: "cancelled"`, `cause: "manual"`, and the affected signal id; `pending: true` means exact cleanup has not settled yet.
+REST signal history, gate detail/status, and inspection expose the durable verification status, cancellation object, and per-step cancellation data. The manual cancel endpoint returns `outcome: "cancelled"`, `cause: "manual"`, and the affected signal id; `pending: true` means exact cleanup has not settled yet. A reviewer that submits a verdict after teardown has begun is either accepted through the retained cleanup owner or receives retryable `503 VERDICT_NOT_PERSISTED`; the client must retry rather than treating the transport error as a verdict.
 
 WebSocket cancellation completion uses `status: "cancelled"` with the same cancellation object. Clients should refresh authoritative gate data after gate events rather than infer a failure from a stopped spinner.
 
