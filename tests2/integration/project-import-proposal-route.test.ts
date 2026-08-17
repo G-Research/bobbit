@@ -5,6 +5,7 @@ import { apiFetch } from "./_e2e/e2e-setup.js";
 import { projectImportApplicationKey, projectImportSnapshotSha256 } from "../../src/server/proposals/project-import-proposal-application.ts";
 import { proposalDraftOwnerId } from "../../src/server/proposals/proposal-seed-service.ts";
 import { readSnapshot } from "../../src/server/proposals/proposal-files.ts";
+import type { ProjectContext } from "../../src/server/agent/project-context.ts";
 function auditRows(stateDir: string, projectId: string, importId: string): Array<{ auditKey?: string }> {
 	const file = path.join(stateDir, "session-context-trace", "project-import", projectId, `${importId}.jsonl`);
 	return fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line) as { auditKey?: string }) : [];
@@ -164,7 +165,7 @@ test.describe("project-import proposal route — canonical effects", () => {
 			await gateway.restart();
 			// No route or getOrCreate call may warm this context: boot replay itself must
 			// open the durable owner. all() is the public non-creating observation.
-			const restarted = Array.from(gateway.projectContextManager.all()).find((candidate: any) => candidate.project.id === projectId);
+			const restarted = Array.from(gateway.projectContextManager.all() as Iterable<ProjectContext>).find(candidate => candidate.project.id === projectId);
 			expect(restarted).toBeTruthy();
 			const settled = restarted!.decisionRequestStore.get(requestId!);
 			expect(settled.proposal).toMatchObject({ status: "accepted", application: { key: identity.key } });
@@ -173,7 +174,7 @@ test.describe("project-import proposal route — canonical effects", () => {
 			expect(auditRows(path.join(gateway.bobbitDir, "state"), projectId, importId).filter(entry => entry.auditKey === identity.key)).toHaveLength(1);
 			await gateway.crash();
 			await gateway.restart();
-			const again = Array.from(gateway.projectContextManager.all()).find((candidate: any) => candidate.project.id === projectId);
+			const again = Array.from(gateway.projectContextManager.all() as Iterable<ProjectContext>).find(candidate => candidate.project.id === projectId);
 			expect(again).toBeTruthy();
 			expect(again!.roleStore.get("route-import-role")).toMatchObject({ label: "Route import role" });
 			expect(auditRows(path.join(gateway.bobbitDir, "state"), projectId, importId).filter(entry => entry.auditKey === identity.key)).toHaveLength(1);
