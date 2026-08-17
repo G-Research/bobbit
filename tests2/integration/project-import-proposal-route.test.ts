@@ -186,4 +186,61 @@ test.describe("project-import proposal route — canonical effects", () => {
 			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});
+
+	test("startup replay fences audited proposals but reconciles an accepted unaudited record once", async ({ gateway }) => {
+		const root = path.join(gateway.bobbitDir, `route-audit-fence-${Date.now()}`);
+		fs.mkdirSync(root, { recursive: true });
+		let projectId = "";
+		try {
+			const created = await apiFetch("/api/projects", { method: "POST", body: JSON.stringify({ name: "route-audit-fence", rootPath: root, components: [{ name: "app", repo: "." }], __e2e_seed_skip__: true }) });
+			expect(created.status, await created.clone().text()).toBe(201);
+			projectId = (await json<{ id: string }>(created)).id;
+			expect((await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/extension-grants`, { method: "PUT", body: JSON.stringify({ packId: PACK_ID, hookId: "route-role", capability: "decide" }) })).status).toBe(200);
+			const requests = await json<{ requests: Array<{ id: string }> }>(await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-decision-requests?state=pending`));
+			const requestId = requests.requests[0]?.id;
+			expect(requestId).toBeTruthy();
+			expect((await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-decision-requests/${encodeURIComponent(requestId!)}/answer`, { method: "POST", body: JSON.stringify({ value: { kind: "option", value: "apply" } }) })).status).toBe(200);
+			const cookie = await operatorCookie();
+			const [draft] = await proposals(projectId, cookie);
+			expect(draft).toMatchObject({ requestId, proposalType: "role" });
+			expect((await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/import-proposals/${encodeURIComponent(requestId!)}/role/accept`, { method: "POST", headers: { Cookie: cookie }, body: JSON.stringify({ rev: draft!.rev }) })).status).toBe(201);
+
+			const context = gateway.projectContextManager.getOrCreate(projectId)!;
+			const accepted = context.decisionRequestStore.get(requestId!);
+			if (!accepted || accepted.delivery.kind !== "project-import" || accepted.proposal?.status !== "accepted" || !accepted.proposal.application || !accepted.proposal.auditedAt) throw new Error("Expected an accepted, audited import proposal");
+			const { importId } = accepted.delivery;
+			const auditKey = accepted.proposal.application.key;
+			const tracePath = path.join(gateway.bobbitDir, "state", "session-context-trace", "project-import", projectId, `${importId}.jsonl`);
+
+			// Simulate bounded trace rotation: the decision-store marker, not the
+			// surviving trace keys, is authoritative for an already audited proposal.
+			fs.writeFileSync(tracePath, "{}\n");
+			await gateway.crash();
+			await gateway.restart();
+			const fenced = Array.from(gateway.projectContextManager.all() as Iterable<ProjectContext>).find(candidate => candidate.project.id === projectId)?.decisionRequestStore.get(requestId!);
+			if (!fenced || fenced.proposal?.status !== "accepted") throw new Error("Expected startup replay to retain the accepted proposal");
+			expect(fenced.proposal.auditedAt).toEqual(accepted.proposal.auditedAt);
+			expect(auditRows(path.join(gateway.bobbitDir, "state"), projectId, importId).filter(entry => entry.auditKey === auditKey)).toHaveLength(0);
+
+			// Historical crash recovery keeps accepted-but-unmarked records eligible.
+			// Remove only the durable fence while the gateway is down; boot must append
+			// the keyed activity and restore the marker exactly once.
+			await gateway.crash();
+			const storePath = path.join(root, ".bobbit", "state", "extension-decision-requests.json");
+			const state = JSON.parse(fs.readFileSync(storePath, "utf8")) as { requests: Record<string, { proposal?: { auditedAt?: string } }> };
+			delete state.requests[requestId!]?.proposal?.auditedAt;
+			fs.writeFileSync(storePath, JSON.stringify(state, null, 2));
+			await gateway.restart();
+			const reconciled = Array.from(gateway.projectContextManager.all() as Iterable<ProjectContext>).find(candidate => candidate.project.id === projectId)?.decisionRequestStore.get(requestId!);
+			if (!reconciled || reconciled.proposal?.status !== "accepted") throw new Error("Expected startup replay to retain the accepted proposal");
+			expect(reconciled.proposal.auditedAt).toEqual(expect.any(String));
+			expect(auditRows(path.join(gateway.bobbitDir, "state"), projectId, importId).filter(entry => entry.auditKey === auditKey)).toHaveLength(1);
+			await gateway.crash();
+			await gateway.restart();
+			expect(auditRows(path.join(gateway.bobbitDir, "state"), projectId, importId).filter(entry => entry.auditKey === auditKey)).toHaveLength(1);
+		} finally {
+			if (projectId) await apiFetch(`/api/projects/${encodeURIComponent(projectId)}`, { method: "DELETE" }).catch(() => {});
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
 });

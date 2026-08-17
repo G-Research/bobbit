@@ -5072,10 +5072,13 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			if (marker?.state !== "ready") continue;
 			const context = projectContextManager.getOrCreate(project.id);
 			if (!context) continue;
-			// Accepted effects may have finalized just before a crash; cleanup is
-			// idempotent and never re-emits an audit row.
+			// Accepted effects may have finalized just before a crash. Complete only
+			// the missing audit hand-off; audited records are a durable replay fence.
 			for (const record of context.decisionRequestStore.list()) {
-				if (record.delivery.kind !== "project-import" || record.delivery.importId !== marker.id || record.proposal?.status !== "accepted") continue;
+				// `auditedAt` is the durable replay fence. The bounded JSONL trace can
+				// rotate away its opaque audit key, so trace deduplication alone cannot
+				// prevent an already-settled proposal from being audited again at boot.
+				if (record.delivery.kind !== "project-import" || record.delivery.importId !== marker.id || record.proposal?.status !== "accepted" || record.proposal.auditedAt) continue;
 				const draftId = proposalDraftOwnerId({ kind: "project-import", projectId: context.project.id, importId: marker.id, requestId: record.id });
 				await deleteProposalFile(bobbitStateDir(), draftId, record.proposal.type).catch(() => {});
 				if (record.proposal.application) {
