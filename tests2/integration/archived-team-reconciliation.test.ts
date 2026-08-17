@@ -118,6 +118,49 @@ test.describe("archived team reconciliation", () => {
 		expect(context.teamStore.get(goal.id)).toBeUndefined();
 	});
 
+	test("operator archive durably promotes recovered team ownership before archiving its exact owner", async ({ gateway }) => {
+		const goal = await createGoal({ title: `recovered-team-marker-${Date.now()}`, team: false, autoStartTeam: false });
+		const ownedId = await createSession({ goalId: goal.id });
+		const standaloneId = await createSession({ goalId: goal.id });
+		const sessionManager = gateway.sessionManager as any;
+		const context = gateway.projectContextManager.getContextForGoal(goal.id)!;
+		expect(sessionManager.updateSessionMeta(ownedId, { role: "coder", teamGoalId: goal.id })).toBe(true);
+		expect(context.goalStore.get(goal.id)?.team).not.toBe(true);
+		expect(context.teamStore.get(goal.id)).toBeUndefined();
+
+		const publicationOrder: string[] = [];
+		const originalMarker = context.goalStore.updateStrict.bind(context.goalStore);
+		const originalArchive = context.sessionStore.archiveAsync.bind(context.sessionStore);
+		const markerSpy = vi.spyOn(context.goalStore, "updateStrict").mockImplementation(async (...args: unknown[]) => {
+			publicationOrder.push("team-marker");
+			return originalMarker(args[0] as string, args[1] as any);
+		});
+		const archiveSpy = vi.spyOn(context.sessionStore, "archiveAsync").mockImplementation(async (...args: unknown[]) => {
+			const id = args[0] as string;
+			publicationOrder.push(`session-archive:${id}`);
+			return originalArchive(id);
+		});
+		try {
+			await archiveGoal(goal.id);
+
+			expect(publicationOrder[0]).toBe("team-marker");
+			expect(publicationOrder).toContain(`session-archive:${ownedId}`);
+			expect(context.goalStore.get(goal.id)).toMatchObject({ archived: true, team: true });
+			expect(sessionManager.getPersistedSession(ownedId)).toMatchObject({ teamGoalId: goal.id, archived: true });
+			expect(sessionManager.getPersistedSession(standaloneId)?.archived).not.toBe(true);
+			expect(context.teamStore.get(goal.id)).toBeUndefined();
+
+			publicationOrder.length = 0;
+			await archiveGoal(goal.id);
+			expect(markerSpy).toHaveBeenCalledTimes(1);
+			expect(publicationOrder).toEqual([]);
+			expect(sessionManager.getPersistedSession(standaloneId)?.archived).not.toBe(true);
+		} finally {
+			markerSpy.mockRestore();
+			archiveSpy.mockRestore();
+		}
+	});
+
 	test("a termination failure falls back to durable archival and cannot dispatch the team session on restore", async ({ gateway }) => {
 		const goal = await createGoal({ title: `termination-fallback-${Date.now()}`, team: true, autoStartTeam: false });
 		const leadId = await startTeam(goal.id);
