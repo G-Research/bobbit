@@ -143,10 +143,13 @@ export const GATEWAY_OWNED_FILES: readonly string[] = [
   "state/setup-complete",       // src/server/setup-status.ts
   "state/gateway-restart",      // src/server/harness.ts SENTINEL
   "state/token",                // src/server/auth/token.ts (admin token)
-  "state/sessions.json",        // global session registry (spans projects)
+  "state/sessions.json",        // live global session registry (spans projects)
+  "state/sessions.archived.json", // eagerly loaded archived session registry
+  "state/sessions.json.split-transition", // in-flight live/archive membership publication
+  "state/sessions.json.pre-archived-split*", // retained v1/v2 split-migration evidence
   "state/projects.json",        // global project registry (spans projects)
 
-  // TLS / OAuth
+  // TLS / OAuth / DNS challenge
   "state/tls/",                 // src/server/auth/tls.ts (ca.crt, server.crt, server.key)
   "state/desec.json",           // src/server/auth/desec.ts (DNS challenge state)
 
@@ -154,12 +157,26 @@ export const GATEWAY_OWNED_FILES: readonly string[] = [
   "state/tool-docs/",           // server.ts (tool-docs generation)
   "state/mcp-tool-docs/",       // src/server/mcp/mcp-manager.ts
 
-  // Per-session scratch — only relevant while server is running
+  // Per-session scratch — relevant while the server is running
   "state/preview/",             // src/server/preview/mount.ts
+  "state/preview-artifacts/",   // src/server/preview/artifacts.ts
+  "state/review-payloads/",     // src/server/review-payload-store.ts
   "state/tool-guard/",          // src/server/agent/tool-activation.ts
-  "state/mcp-extensions/",      // src/server/agent/tool-activation.ts
+  "state/tool-result-error-bridge/", // src/server/agent/tool-result-error-bridge-extension.ts
+  "state/provider-bridge/",     // src/server/agent/provider-bridge-extension.ts
+  "state/google-code-assist/",  // src/server/agent/google-code-assist-provider-extension.ts
+  "state/aigw-dns-guard/",      // src/server/agent/aigw-manager.ts
+  "state/mcp-extensions/",      // src/server/agent/tool-activation.ts, rpc-bridge.ts
   "state/html-snapshots/",      // server.ts
+  "state/gate-diagnostics/",    // src/server/agent/gate-diagnostics-cleanup.ts
+  "state/boot-timings.log",     // src/server/boot-profile.ts
   "state/proposal-drafts/",     // server.ts / session-manager.ts
+  "state/pr-walkthrough/",      // src/server/pr-walkthrough/routes.ts
+  "state/model-name-*",         // src/server/agent/session-manager.ts
+  "state/sessions/",            // per-session JSONL transcripts (rpc-bridge.ts container mount)
+  "state/session-prompts/",     // per-session prompt scratch (rpc-bridge.ts)
+  "state/system-project/",      // synthetic system-project anchor (server.ts)
+  "state/marketplace-cache/",   // server.ts (marketplace source git-clone cache; server-global)
 ];
 ```
 

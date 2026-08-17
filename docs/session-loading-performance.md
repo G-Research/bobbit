@@ -13,7 +13,7 @@ The optimizations remove repeated work; they do not reduce the work required for
 - Boot still eagerly restores the same ordered set: regular sessions followed by surviving delegates. Every candidate is attempted before boot completes.
 - There is no top-N or recency-based restore limit, dormant-session deferral, lazy boot revival, or attach-time revival.
 - Default and archived session-list filters, offset/cursor pagination, totals, generations, and response envelopes are unchanged.
-- Existing persistence formats and stale-state protections remain authoritative. The changes do not introduce a general store migration or a concurrent-writer merge protocol.
+- Legacy v1/v2 session sources remain recoverable, while v3 keeps stale-state protections independently for live and archived tiers. This is a narrow split migration, not a general store migration or concurrent-writer merge protocol.
 - No optimization adds implicit Git publication or changes worktree lifecycle.
 
 The common design rule is conservative reuse: skip work only when a monotonic sequence, mutation generation, or verified disk fingerprint proves that the relevant input is unchanged. Otherwise, run the existing path.
@@ -104,18 +104,17 @@ See [Session cost display](session-cost.md) for the cost data model.
 
 ### Session metadata store
 
-`SessionStore` writes the existing version-2 payload as compact JSON. This changes whitespace only: old pretty-printed files still load, and session field shape, array order, epochs, backups, critical synchronous flushes, temp-file fsync/rename, and corrupt-primary recovery are unchanged.
+`SessionStore` persists v3 session metadata as two independently versioned envelopes: live rows in `sessions.json` and archived rows in `sessions.archived.json`. Construction eagerly reads each tier and its backup chain, then merges both into the same in-memory map before archive lists, pagination, search, orphan cleanup, or restoration can observe it. This changes the write cadence, not archive UX: there is no lazy archive load, first-access delay, or new loading state.
 
-A disk fingerprint reduces redundant reads after a successful write by this process:
+Each tier owns its own epoch, `size` + `mtimeMs` + `ctimeMs` disk fingerprint, backup rotation, stale-snapshot latch, and process-wide path-keyed write fence. The fingerprint is only an optimization hint: a missing or changed fingerprint re-reads that tier's epoch, and a newer first-write epoch latches refusal for that tier alone. A live-tier stale latch cannot block, clear, or bypass an archive-tier latch, and vice versa. Each tier writes through its own temporary file, fsync, and atomic rename; a live-only mutation does not serialize, rotate, or rewrite archived data, and an archived-only mutation leaves live data untouched.
 
-1. the first write after load always reads and parses the on-disk epoch;
-2. after this process successfully renames a new primary file, it records size, modification time, and creation/change time when available;
-3. if those values are unchanged on a later save, the store reuses its known epoch rather than reading the same primary again; and
-4. a missing, changed, invalid, or unreadable fingerprint falls back to the full epoch read and existing stale-snapshot logic.
+A membership change is the exception. Because it moves a row between files, the store validates both tiers under both fences and durably writes an epoch-bound `sessions.json.split-transition` intent before publishing either snapshot. Recovery uses the intent only when both tier epochs prove which part of the pair published; otherwise it preserves the evidence rather than guessing. This makes the two files a durable membership pair without treating the intent as a third data tier.
 
-The fingerprint is refreshed only after a successful atomic replacement. It is an optimization hint, not a durability authority. In particular, the first-write newer-epoch guard still latches and refuses to overwrite a snapshot newer than the one loaded by this store.
+The split does **not** add locking or record merging between gateways. Operate one gateway per tier in a state directory. The per-tier atomic replacement, stale latch, and fence prevent torn files and unsafe writes by independently constructed stores in one process; they do not make simultaneous multi-gateway writers supported. See [Split archived SessionStore writes](design/split-archived-session-writes.md) for the envelope, transition recovery, migration, and manual-recovery contract.
 
-This does **not** add locking or record merging between gateways. Operate one gateway against a given state directory. Atomic replacement protects a single writer from torn primary files; it does not make simultaneous gateways a supported multi-writer topology. Before this process's first write, a newer external epoch triggers the latched stale-snapshot refusal. After this process has already written, a detected external rewrite forces epoch revalidation and advances from the observed epoch, but the existing contract does not merge the external records; the current in-memory session array can replace them.
+#### Historical v2 compact writer
+
+Before the v3 split, `SessionStore` wrote one compact version-2 payload. The v2 writer compacted whitespace while retaining array order, epochs, backups, critical synchronous flushes, temp-file fsync/rename, and corrupt-primary recovery. V1 bare arrays and v2 envelopes remain accepted only as live-tier migration sources; new writes are v3, and migration retains the exact original source as `sessions.json.pre-archived-split[.N]` evidence.
 
 ## Boot-time discovery and eager restoration
 
