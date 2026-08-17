@@ -1,5 +1,7 @@
 # Promote Session to Goal — implementation design
 
+Status: implemented. For the durable operator/developer contract, see [Goals, Workflows, Tasks & Gates — Promote the current session in place](../goals-workflows-tasks.md#promote-the-current-session-in-place) and [REST API — Current-session goal promotion](../rest-api.md#current-session-goal-promotion). The comparative design and implementation inventory below preserve the rationale for the selected architecture.
+
 ## Scope and invariants
 
 A goal proposal may choose one of two worktree modes:
@@ -60,15 +62,9 @@ When mode is absent or `new-worktree`, the panel continues to call the existing 
 A new pure `evaluateSessionGoalPromotion(...)` in `src/server/agent/session-goal-promotion.ts` returns:
 
 ```ts
-type SessionGoalPromotionEligibility = {
-  eligible: boolean;
-  code: string;
-  reason?: string;
-  branch?: string;
-  worktreePath?: string;
-  repoWorktreeCount?: number;
-  sandboxed?: boolean;
-};
+type SessionGoalPromotionEligibility =
+  | { eligible: true; coordinates: SessionGoalPromotionCoordinates }
+  | { eligible: false; code: SessionGoalPromotionReasonCode; reason: string };
 ```
 
 Both the GET projection and the final locked accept recheck call this same helper. Eligibility requires all of the following:
@@ -81,7 +77,7 @@ Both the GET projection and the final locked accept recheck call this same helpe
 6. For sandboxed sessions, the existing project container/realm and owned sandbox worktree coordinate are reachable. Eligibility never creates either one.
 7. No existing live goal provenance, team reservation, or conflicting lead/session attachment claims this owner, except the exact idempotent promotion relation returned on retry.
 
-Reasons are stable, concise UI text (for example, `Current session is unavailable while the session is working`, `Current session does not own a dedicated worktree`, or `Current session targets a different project`). The UI is advisory; acceptance always performs the locked recheck.
+Reasons are stable, concise UI text (for example, `Current session must be idle.`, `Current session has no dedicated worktree and branch.`, or `Current session belongs to a different project.`). The UI is advisory; acceptance always performs the locked recheck.
 
 ## Selected control flow
 
@@ -104,7 +100,7 @@ Until the verified candidate becomes canonical after successful old-bridge stop,
 1. dispose only the staged replacement;
 2. call `TeamManager.releaseAdoptedLead(goalId, ownerId)` only if the reservation still has that exact empty lead relation;
 3. call `GateStore.removeGoalGates(goalId)` only for the attempt-created goal;
-4. call `GoalManager.deleteGoal(goalId)` only if `worktreeOwnerSessionId` still equals `ownerId` and the source was not committed;
+4. call the narrow `GoalManager.deleteAdoptedGoalAttempt(goalId, ownerId)` only if provenance still matches, the goal remains unarchived and `todo`, and the source was not committed;
 5. flush affected stores.
 
 Compensation never calls Git, sandbox removal, worktree cleanup, session archive, or transcript cleanup. It does not remove a team entry that gained agents or changed lead, and does not remove an unrelated/reconciled goal. Fault injection must cover failure after goal creation, gate initialization, lead reservation, candidate start, transcript switch, tuple verification, durable session update, and old-bridge stop.
@@ -127,7 +123,7 @@ This pass runs inside the existing `restore-teams` boot phase. Then `SessionMana
 
 ### Archive, teardown, purge, and cleanup
 
-- Direct archive/termination/purge of a live promoted source conflicts while its non-archived goal or team reservation references it.
+- Direct archive/termination/purge of a live promoted source conflicts while its non-archived adopted goal exists.
 - Direct `team/teardown` of a live promoted goal conflicts because keeping the session alive would require out-of-scope demotion.
 - Goal archive is the allowed ordered path: publish goal archival intent, remove worker agents, remove the promoted reservation/subscriptions, then archive the source session through its existing lifecycle owner. The goal is never treated as having provisioned the source checkout.
 - Sandbox cleanup remains session-owned. Promotion does not set `borrowsWorktree`, change the owner ID, call `SandboxManager.createWorktree`, or transfer the project container.
@@ -146,7 +142,7 @@ The key distinction tested at every cleanup seam is:
 - **New worktree** — selected by default for absent/old proposals; shows the existing predicted goal path/component summary.
 - **Current session** — shows the server-projected exact branch, worktree path, and component count. It is disabled with the server reason when ineligible.
 
-The proposal owner comes from `state.activeProposals.goal.sessionId` (or the historical override owner), never `activeSessionId()` after a tab switch. `GoalProposalFormSnapshot`, its identity key, and `GoalFormConfig` carry the parsed mode/projection so edit, rehydrate, reload, snapshot restore, and continued-draft flows redraw consistently. Selecting a radio persists through `setGoalProposalWorktreeMode`; the returned stamped `proposal_update` remains the UI source of truth.
+The proposal owner comes from `state.activeProposals.goal.sessionId` (or the historical override owner), never `activeSessionId()` after a tab switch. `GoalProposalFormSnapshot`, its identity key, and `GoalFormConfig` carry the parsed mode/projection so edit, rehydrate, reload, snapshot restore, and continued-draft flows redraw consistently. Selecting a radio persists through `persistGoalWorktreeMode`; the returned stamped `proposal_update` remains the UI source of truth.
 
 If a restored `current-session` selection becomes ineligible, it stays visibly selected, shows the reason, and disables Create until the user selects New worktree. In current-session mode the sandbox display is read-only from the source and the Auto-start control is disabled with copy explaining that the current session becomes lead immediately.
 
@@ -154,23 +150,23 @@ Acceptance branches only at the API call: new mode uses existing `createGoal`; c
 
 ## Implementation map and test seams
 
-### Expected changed and new files
+### Planned change inventory (historical)
 
 | File | Existing/new symbol | Exact responsibility |
 |---|---|---|
 | `src/server/proposals/proposal-types.ts` | `GOAL_FRONTMATTER_KEYS`, `validateGoalInlineFields` | Preserve/validate optional `worktreeMode`; skip absent mode so old serialized bytes do not change. |
-| `src/server/agent/session-goal-promotion.ts` **(new)** | `GoalWorktreeMode`, `evaluateSessionGoalPromotion`, `findExistingSessionPromotion` | Pure eligibility/reason projection and exact provenance lookup shared by GET and final recheck. No paths from a request are inputs. |
+| `src/server/agent/session-goal-promotion.ts` **(new)** | `SessionGoalWorktreeMode`, `evaluateSessionGoalPromotion`, `lookupSessionGoalPromotion` | Pure eligibility/reason projection and exact provenance lookup shared by GET and final recheck. No paths from a request are inputs. |
 | `src/server/server.ts` | `handleApiRoute()` editable-proposal route block and goal archive/team teardown blocks | Add owner-scoped GET/PUT/accept operations, per-owner single flight, normal goal+gate composition, conditional compensation, and promoted lifecycle conflicts/order. Keep general `POST /api/goals` unchanged. |
 | `src/server/agent/goal-store.ts` | `PersistedGoal`, canonical validation (`STRING_FIELDS`) | Persist/validate optional `worktreeOwnerSessionId`; absence remains the legacy shape. |
-| `src/server/agent/goal-manager.ts` | `GoalManager.createGoal`, `GoalManager.archiveGoal`, internal `AdoptedGoalWorkspace` | Add internal adoption branch that copies exact canonical coordinates and starts ready without provisioning/setup/hook; guard archive cleanup by live source ownership; expose conditional attempt deletion through existing `deleteGoal`. |
+| `src/server/agent/goal-manager.ts` | `GoalManager.createGoal`, `GoalManager.archiveGoal`, `deleteAdoptedGoalAttempt`, internal `AdoptedGoalWorkspace` | Add internal adoption branch that copies exact canonical coordinates and starts ready without provisioning/setup/hook; guard archive cleanup by live source ownership; expose narrow conditional attempt deletion. |
 | `src/server/agent/team-manager.ts` | `TeamManager.adoptExistingLead` **(new)**, `releaseAdoptedLead` **(new)**, `restoreTeams`, `startTeam`, `teardownTeam` | Persist one existing-lead reservation, maintain `sessionToGoal`, make repeat/conflict behavior explicit, reconcile before orphan cleanup, prevent second lead and direct teardown. |
 | `src/server/agent/session-manager.ts` | `SessionManager.promoteToGoalLead` **(new)**, `_coordinateSessionReplacement`, generalized `_assignRoleStaged`, `terminateSession`, `storeArchive`, `purgeOneSession`, `buildArchivedWorktreeScanContext` | Stage/verify/rollback prospective goal-lead context on the same runtime identity and realm; block source destruction while live references remain; keep all component paths protected. |
 | `src/app/state.ts` | `GatewaySession`, `Goal` | Carry the existing authoritative eligibility inputs and new goal provenance projection needed by UI/reload diagnostics. No independent durable client state. |
-| `src/app/api.ts` | `getGoalProposalWorktreeMode` **(new)**, `setGoalProposalWorktreeMode` **(new)**, `acceptGoalProposalInCurrentSession` **(new)**, existing `createGoal` | Add owner-scoped calls; reject/omit coordinate authority client-side; leave existing new-worktree request construction byte-compatible. |
+| `src/app/api.ts` | `fetchGoalWorktreeMode` **(new)**, `updateGoalWorktreeMode` **(new)**, `acceptGoalProposalInCurrentSession` **(new)**, existing `createGoal` | Add owner-scoped calls; reject/omit coordinate authority client-side; leave existing new-worktree request construction byte-compatible. |
 | `src/app/proposal-panels.ts` | `GoalFormConfig`, `renderGoalForm`, `GoalProposalFormSnapshot`, `goalProposalFormIdentityKey`, `syncProposalFormState`, goal accept handler | Render/persist the radio choice and exact projection, bind to proposal owner, block invalid restored mode, and choose only the acceptance API path. |
 | `tests2/core/session-goal-promotion-proposal.test.ts` **(new)** | Cases below | Proposal default/bytes, enum, edit/snapshot/reopen persistence, and owner-scoped route authority. |
 | `tests2/core/session-goal-promotion-eligibility.test.ts` **(new)** | Cases below | Pure single/multi-repo/sandbox eligibility matrix and stable reasons. |
-| `tests2/core/session-goal-promotion-managers.test.ts` **(new)** | Cases below | Adopted goal creation, reservation/idempotency, staged continuity/rollback, restore, and cleanup ownership guards. |
+| `tests2/core/session-goal-promotion-session-runtime.test.ts` **(new)** | Cases below | Staged same-session continuity/rollback, sandbox identity, restart preservation, and cleanup ownership guards. |
 | `tests2/integration/session-goal-promotion.test.ts` **(new)** | Cases below | Real API/Git/runtime retry, dirty checkout, multi-repo, sandbox preservation, restart, and cleanup behavior. |
 | `tests2/browser/journeys/session-goal-promotion.journey.spec.ts` **(new)** | `Journey: Current-session goal promotion` | Registered visible selection/acceptance/continuity/reload/archive journey plus disabled and new-worktree controls. |
 | `tests2/tests-map.json` | browser/unit registration rows | Register every new v2 test, including the browser file as `smoke-journey`. |
@@ -200,7 +196,7 @@ Every reused contract below has an existing exact `tests2` anchor. These tests r
 | Sandbox worktree lifecycle ownership | `tests2/core/borrowed-sandbox-worktree-ownership.test.ts` — `describe("borrowed sandbox worktree ownership")`, tests `"round-trips borrowed ownership across persistence and never verifies or removes the source worktree"`, `"keeps owned sandbox cleanup as the control and removes its registered worktree coordinate exactly once"`, and `"persists flattened ownership and rejects owner termination before mutation until its nested-cwd borrower is archived"`. |
 | Inventory and sweeper reference safety | `tests2/core/worktree-inventory.test.ts` — `describe("worktree inventory classifier")`, tests `"protects an exact live worktree but not a branch-only match"`, `"protects durable multi-repo team-agent component worktrees"`, and `"revalidates session and pool claims arriving during a deferred cleanup scan"`; `tests2/core/worktree-sweeper-multi.test.ts` — `describe("worktree-sweeper — bounded asynchronous sweep")`, tests `"preserves a worktree claimed after the initial diagnostic snapshot"` and `"preserves every ownership, pool, container, detached, archive, and branch-drift guard"`. |
 
-## Exact new tests
+## Planned verification inventory (historical)
 
 ### `tests2/core/session-goal-promotion-proposal.test.ts`
 
@@ -223,7 +219,7 @@ Every reused contract below has an existing exact `tests2` anchor. These tests r
 - `it.each(...)` named `"rejects unsafe coordinates: $label"` covering missing/stale live-vs-durable `cwd`, `worktreePath`, `branch`, `repoPath`, incomplete/duplicate multi-repo entries, unavailable sandbox owner/container, and project mismatch
 - `it("returns stable concise reason codes and never reads a caller-supplied coordinate")`
 
-### `tests2/core/session-goal-promotion-managers.test.ts`
+### Manager and runtime coverage
 
 `describe("GoalManager adopted workspace")`
 
