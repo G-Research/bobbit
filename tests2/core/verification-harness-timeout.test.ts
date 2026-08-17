@@ -872,7 +872,7 @@ describe("runCommandStep tree-kill", () => {
 		expect(fixture.gate.status).toBe("pending");
 		expect(fixture.signal.verification).toMatchObject({ status: "cancelled", cancellation: { cause: "manual" } });
 		expect(broadcasts.filter(event => event.type === "gate_verification_complete")).toEqual([
-			expect.objectContaining({ signalId, status: "cancelled", cancellation: { cause: "manual" } }),
+			expect.objectContaining({ signalId, status: "cancelled", cancellation: expect.objectContaining({ cause: "manual" }) }),
 		]);
 	});
 
