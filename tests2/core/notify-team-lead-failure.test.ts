@@ -157,7 +157,12 @@ describe("buildVerificationFailureMessage", () => {
 				name: "Restart interrupted command",
 				type: "command",
 				passed: false,
-				status: "waiting",
+				status: "cancelled",
+				cancellation: {
+					cause: "gateway-restart-recovery",
+					requestedAt: 1_700_000_000_000,
+					finalizedAt: 1_700_000_000_123,
+				},
 				output: "Step was interrupted by server restart before a durable command exit status was recorded. No command verdict was obtained.",
 			},
 		];

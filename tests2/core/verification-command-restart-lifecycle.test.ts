@@ -257,8 +257,18 @@ test("mixed durable failure and interruption notifies only the failed step", asy
 
 	await harness.resumeInterruptedVerifications();
 	const update = latestSignalUpdate(gateStoreCalls);
-	assert.equal(stepByName(update, "Real failed command")?.status, "failed");
-	assert.equal(stepByName(update, "No verdict sibling")?.status, "waiting");
+	const realFailure = stepByName(update, "Real failed command");
+	const interruptedSibling = stepByName(update, "No verdict sibling");
+	assert.equal(update?.status, "failed", "The genuine durable command verdict owns the aggregate signal outcome.");
+	assert.equal(latestGateStatus(gateStoreCalls), "failed", "The genuine durable command verdict owns the gate outcome.");
+	assert.equal(realFailure?.status, "failed");
+	assert.equal(interruptedSibling?.status, "cancelled");
+	assert.equal(interruptedSibling?.passed, false);
+	assert.deepEqual(interruptedSibling?.cancellation && {
+		cause: interruptedSibling.cancellation.cause,
+		requestedAt: typeof interruptedSibling.cancellation.requestedAt,
+		finalizedAt: typeof interruptedSibling.cancellation.finalizedAt,
+	}, { cause: "gateway-restart-recovery", requestedAt: "number", finalizedAt: "number" });
 	const notices = notificationText(notifications);
 	assert.match(notices, /step="Real failed command"/);
 	assert.doesNotMatch(notices, /step="No verdict sibling"/);
