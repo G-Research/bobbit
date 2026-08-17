@@ -4385,10 +4385,24 @@ export class VerificationHarness {
 		if (!active || !step || active.goalId !== context.goalId || active.gateId !== context.gateId
 			|| active.cancelled || !this._isCurrentGateSignal(active)
 			|| (step.type !== "llm-review" && step.type !== "agent-qa")) return false;
+		// Do not leave a memory-only reviewer identity behind if its durable
+		// ownership record cannot commit. A later creator must never inherit it.
+		const previous = {
+			hasSessionId: Object.hasOwn(step, "sessionId"), sessionId: step.sessionId,
+			hasTimeoutSec: Object.hasOwn(step, "timeoutSec"), timeoutSec: step.timeoutSec,
+			hasSpawnState: Object.hasOwn(step, "reviewerSpawnState"), reviewerSpawnState: step.reviewerSpawnState,
+		};
 		step.sessionId = sessionId;
 		step.timeoutSec = timeoutSec;
 		step.reviewerSpawnState = "queued";
-		return this._persistActive();
+		if (this._persistActive()) return true;
+		if (previous.hasSessionId) step.sessionId = previous.sessionId;
+		else delete step.sessionId;
+		if (previous.hasTimeoutSec) step.timeoutSec = previous.timeoutSec;
+		else delete step.timeoutSec;
+		if (previous.hasSpawnState) step.reviewerSpawnState = previous.reviewerSpawnState;
+		else delete step.reviewerSpawnState;
+		return false;
 	}
 
 	/** Recheck cancellation/generation at the reviewer create-session boundary. */
@@ -4738,17 +4752,6 @@ export class VerificationHarness {
 			.map(reviewer => this.reviewerCreationBarriers.get(reviewer.sessionId))
 			.filter((creator): creator is Promise<unknown> => !!creator);
 		if (creators.length > 0) {
-			// Record the cancelled signal audit now, but do not mutate the current
-			// gate or emit a completion until exact ownership settles. This makes a
-			// deferred creator durable without allowing it to publish a terminal gate.
-			try {
-				this.tryResolveGateStore(affected[0].goalId)?.updateSignalVerification(
-					affected[0].signalId,
-					this._cancelledVerificationResult(affected[0]),
-				);
-			} catch (error) {
-				console.warn(`[verification] Could not persist pending reviewer cancellation audit: ${(error as Error).message}`);
-			}
 			// Do not treat an early not-found terminate as cleanup while a current
 			// boot can still create/register this exact session. Keep the durable
 			// marker, return the caller as pending, and re-drive exact cleanup the
