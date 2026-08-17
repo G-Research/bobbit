@@ -64,7 +64,7 @@ The harness (`src/server/harness.ts`):
   `npm run restart-server` revalidates before rebuilding and launching.
 - On a sentinel build failure: does not launch stale output; the watcher remains available for
   another restart after the build is fixed.
-- Preserves sessions across restarts in `.bobbit/state/sessions.json`.
+- Preserves sessions across restarts in the eagerly loaded `.bobbit/state/sessions.json` live tier and `.bobbit/state/sessions.archived.json` archived tier.
 
 To trigger a restart:
 
