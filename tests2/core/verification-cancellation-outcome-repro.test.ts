@@ -1131,10 +1131,9 @@ test("a held stale strict gate write cannot overwrite a replacement generation o
 
 	const replacement = { ...signal(), id: `${SIGNAL_ID}-held-replacement`, timestamp: oldSignal.timestamp + 1 };
 	replacement.verification.steps = harness.beginVerification(replacement, { ...GATE, verify: [] });
+	// recordSignal synchronously restores the replacement run's pending gate
+	// while the old generation's strict durability promise remains held.
 	gateStore.recordSignal(replacement);
-	// Signal admission synchronously restores the replacement run's pending
-	// gate while the old generation's strict durability promise remains held.
-	gateStore.updateGateStatus(GOAL_ID, GATE_ID, "pending");
 	expect(gateStore.getGate(GOAL_ID, GATE_ID)!.signals.at(-1)?.id).toBe(replacement.id);
 	expect(gateStore.getGate(GOAL_ID, GATE_ID)!.status).toBe("pending");
 
