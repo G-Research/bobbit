@@ -438,7 +438,7 @@ test("reviewer cleanup failure stays durable and blocks cancellation publication
 
 	await (fixture.harness as any).cancelStaleVerifications(GOAL_ID, GATE_ID, "manual");
 
-	const pending = fixture.harness.getActiveVerification(fixture.signal.id) as ActiveVerification;
+	const pending = (fixture.harness as any).activeVerifications.get(fixture.signal.id) as ActiveVerification;
 	expect(pending, "REVIEWER_CLEANUP_FAILURE_MUST_KEEP_EXACT_OWNER: a swallowed terminate failure must not retire its active row").toMatchObject({
 		cancelled: true,
 		overallStatus: "cancelled",
@@ -512,7 +512,7 @@ test("restart re-drives persisted reviewer cleanup failure without losing the ex
 	);
 	await failedRecovery.resumeInterruptedVerifications();
 
-	const retained = failedRecovery.getActiveVerification(initial.signal.id) as ActiveVerification;
+	const retained = (failedRecovery as any).activeVerifications.get(initial.signal.id) as ActiveVerification;
 	expect(retained, "RESTART_REVIEWER_CLEANUP_FAILURE_MUST_RETAIN_ACTIVE_ROW").toMatchObject({
 		cancelled: true,
 		reviewerCleanupPending: true,
