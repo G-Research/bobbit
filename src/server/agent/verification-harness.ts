@@ -5505,9 +5505,12 @@ export class VerificationHarness {
 				});
 				const allPassed = computeAllPassed(results);
 				const status = allPassed ? "passed" as const : "failed" as const;
-				const cachedActive = this.activeVerifications.get(signal.id);
-				if (cachedActive?.cancelled || (cachedActive && this._cancellationOwnsTerminalPublication(cachedActive))) return;
-				if (cachedActive && await this._stageTerminalIntentIfCleanupPending(cachedActive, { status, steps: results }, status, goalBranch)) return;
+				if (active.cancelled) {
+					await this._finalizeCancelledVerification(active);
+					return;
+				}
+				if (this._cancellationOwnsTerminalPublication(active)) return;
+				if (await this._stageTerminalIntentIfCleanupPending(active, { status, steps: results }, status, goalBranch)) return;
 				this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, { status, steps: results });
 				this.resolveGateStore(signal.goalId).updateGateStatus(signal.goalId, signal.gateId, status);
 				this.activeVerifications.delete(signal.id);
