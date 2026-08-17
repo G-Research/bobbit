@@ -5,6 +5,7 @@ import path from "node:path";
 import {
 	appendPromptAuthorDispatch,
 	appendPromptAuthorSettlement,
+	appendPromptAuthorTurnTerminal,
 	copyAuthorSidecar,
 	createPromptAuthorStreamCorrelation,
 	digestPromptModelText,
@@ -150,6 +151,42 @@ describe("author sidecar lifecycle evidence", () => {
 });
 
 describe("author sidecar v2 persistence", () => {
+	it("attaches exact turn-terminal evidence without changing echoed author settlement", () => {
+		const sessionId = "turn-terminal-companion";
+		const promptId = `boot-continuation:${sessionId}`;
+		const attemptId = "attempt:turn-terminal";
+		expect(appendPromptAuthorDispatch(sessionId, {
+			...dispatch(promptId, "continue", systemAuthor, 1_000),
+			intentId: promptId,
+			attemptId,
+			dispatchEpoch: 1_000,
+			turnTerminalMarkerVersion: 1,
+		})).toBe(true);
+		expect(appendPromptAuthorSettlement(sessionId, {
+			promptId,
+			intentId: promptId,
+			attemptId,
+			settledAt: 1_100,
+			outcome: "echoed",
+			messageId: "exact-echo",
+		})).toBe(true);
+		expect(appendPromptAuthorTurnTerminal(sessionId, {
+			promptId,
+			intentId: promptId,
+			attemptId,
+			terminalAt: 1_100,
+		})).toBe(true);
+
+		expect(readAuthorSidecar(sessionId)).toEqual([
+			expect.objectContaining({
+				author: systemAuthor,
+				turnTerminalMarkerVersion: 1,
+				settlement: expect.objectContaining({ outcome: "echoed", messageId: "exact-echo" }),
+				turnTerminal: expect.objectContaining({ attemptId, terminalAt: 1_100 }),
+			}),
+		]);
+	});
+
 	it("stores v2 digest rows in private secrets without prompt plaintext", () => {
 		const sessionId = "roundtrip";
 		const promptText = "TOP_SECRET_PROMPT_TEXT_must_never_reach_disk";

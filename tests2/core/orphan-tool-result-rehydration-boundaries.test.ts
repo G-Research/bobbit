@@ -811,7 +811,6 @@ describe("executable SessionManager rehydration boundaries", () => {
 		acceptedBridge.promptWhenReady = vi.fn(async (text: string) => {
 			clock.advance(100);
 			listener?.({ type: "agent_start" });
-			clock.advance(100);
 			listener?.({
 				type: "message_end",
 				message: { id: "delivered-after-agent-start", role: "user", content: text },
@@ -831,9 +830,11 @@ describe("executable SessionManager rehydration boundaries", () => {
 			expect.objectContaining({
 				intentId,
 				dispatchEpoch: 10_000,
-				settlement: expect.objectContaining({ outcome: "echoed", settledAt: 10_200 }),
+				turnTerminalMarkerVersion: 1,
+				settlement: expect.objectContaining({ outcome: "echoed", settledAt: 10_100 }),
 			}),
 		]);
+		expect(readAuthorSidecar(ps.id)[0]?.turnTerminal).toBeUndefined();
 
 		// Model a hard kill after the correlated echo but before agent_end. The
 		// dispatch predates agent_start, while the exact settlement belongs to this turn.
@@ -856,10 +857,13 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(readAuthorSidecar(ps.id)).toHaveLength(1);
 	});
 
-	it("redrives a later interrupted turn after an older echoed boot continuation settled", async () => {
-		const file = hostTranscript("boot-continuation-echo-from-older-turn");
+	it.each(["agent_end", "process_exit"] as const)(
+		"redrives a later interrupted turn after an older echoed boot continuation settled by %s",
+		async (terminalEvent) => {
+		const fixtureId = `boot-continuation-echo-from-older-turn-${terminalEvent}`;
+		const file = hostTranscript(fixtureId);
 		const clock = createManualClock(10_000);
-		const ps = persisted("boot-continuation-echo-from-older-turn", file, {
+		const ps = persisted(fixtureId, file, {
 			wasStreaming: true,
 			streamingStartedAt: 9_000,
 		});
@@ -891,19 +895,25 @@ describe("executable SessionManager rehydration boundaries", () => {
 			}),
 		]);
 		listener?.({ type: "agent_start" });
-		listener?.({ type: "agent_end", messages: [] });
+		listener?.(terminalEvent === "agent_end"
+			? { type: "agent_end", messages: [] }
+			: { type: "process_exit", code: 0 });
 		expect(ps.wasStreaming).toBe(false);
 		expect(ps.streamingStartedAt).toBeUndefined();
 
-		// A distinct ordinary turn starts after the echoed continuation settled, then
-		// the gateway is hard-killed before this newer turn reaches agent_end.
-		clock.advance(100);
+		const [historicalAttempt] = readAuthorSidecar(ps.id);
+		expect(historicalAttempt).toEqual(expect.objectContaining({
+			turnTerminalMarkerVersion: 1,
+			turnTerminal: expect.objectContaining({ terminalAt: 10_000 }),
+		}));
+
+		// A distinct ordinary turn starts in the same clock tick after the echoed
+		// continuation settled, then the gateway is hard-killed before agent_end.
 		listener?.({ type: "agent_start" });
 		const laterTurnStartedAt = ps.streamingStartedAt;
-		expect(laterTurnStartedAt).toBe(10_100);
+		expect(laterTurnStartedAt).toBe(10_000);
 		expect(ps.wasStreaming).toBe(true);
 
-		clock.advance(100);
 		const restoredBridge = recordingBridge(() => {});
 		restoredBridge.promptWhenReady = vi.fn(async () => ({ success: true }));
 		const restoredManager = makeManager(ps, restoredBridge, { clock });
@@ -920,8 +930,13 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(restoredManager.sessions.get(ps.id)?.restoreStartupWasStreaming).toBe(false);
 		const attempts = readAuthorSidecar(ps.id);
 		expect(attempts).toEqual([
-			expect.objectContaining({ intentId, dispatchEpoch: 10_000, settlement: expect.any(Object) }),
-			expect.objectContaining({ intentId, dispatchEpoch: 10_200 }),
+			expect.objectContaining({
+				intentId,
+				dispatchEpoch: 10_000,
+				settlement: expect.any(Object),
+				turnTerminal: expect.any(Object),
+			}),
+			expect.objectContaining({ intentId, dispatchEpoch: 10_000 }),
 		]);
 		expect(attempts[1]?.settlement).toBeUndefined();
 	});
