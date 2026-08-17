@@ -139,6 +139,8 @@ export interface GatewayFixture {
 }
 
 interface BootedGateway extends GatewayFixture {
+	/** Ensure the fork singleton is serving after an interrupted crash/restart test. */
+	ensureLive(): Promise<void>;
 	shutdown(): Promise<void>;
 }
 
@@ -331,19 +333,61 @@ async function boot(): Promise<BootedGateway> {
 		skipRemotePush: true, skipNonLocalRemoteGit: true,
 		builtinsDir: BUILTINS_DIR, builtinPacksDir: prepareBuiltinPacksDir(bobbitDir),
 	};
-	const startGateway = async (): Promise<any> => {
+	const startGateway = async (): Promise<ReturnType<typeof createGateway>> => {
 		// Suppress startup discovery without test-only environment flags.
 		configureAigwRuntimeFlags({ skipAigwDiscovery: true, testNoExternal: true, e2e: true });
 		const next = createGateway(gatewayOptions, deps);
-		const port = await next.start();
-		baseURL = `http://127.0.0.1:${port}`;
-		wsBase = `ws://127.0.0.1:${port}`;
-		writeFileSync(join(stateDir, "gateway-url"), baseURL, "utf-8");
-		return next;
+		try {
+			const port = await next.start();
+			baseURL = `http://127.0.0.1:${port}`;
+			wsBase = `ws://127.0.0.1:${port}`;
+			writeFileSync(join(stateDir, "gateway-url"), baseURL, "utf-8");
+			return next;
+		} catch (error) {
+			await next.shutdown().catch(() => {});
+			throw error;
+		}
 	};
 	let baseURL = "";
 	let wsBase = "";
-	let gw = await startGateway();
+	let gw: ReturnType<typeof createGateway> = await startGateway();
+	let live = true;
+	let disposed = false;
+	let lifecycleTail: Promise<void> = Promise.resolve();
+	let recoveryPromise: Promise<void> | undefined;
+	const enqueueLifecycle = (operation: () => Promise<void>): Promise<void> => {
+		const queued = lifecycleTail.then(operation, operation);
+		lifecycleTail = queued.then(() => undefined, () => undefined);
+		return queued;
+	};
+	const crashGateway = (): Promise<void> => enqueueLifecycle(async () => {
+		if (!live || disposed) return;
+		live = false;
+		await gw.shutdown();
+	});
+	const restartGateway = (): Promise<void> => {
+		if (disposed) return Promise.reject(new Error("[tests2/gateway] cannot restart a disposed fixture"));
+		if (recoveryPromise) return recoveryPromise;
+		const queued = enqueueLifecycle(async () => {
+			if (disposed) throw new Error("[tests2/gateway] cannot restart a disposed fixture");
+			if (live) {
+				live = false;
+				await gw.shutdown();
+			}
+			restoreAgentDirRuntime();
+			gw = await startGateway();
+			live = true;
+		});
+		const tracked = queued.finally(() => {
+			if (recoveryPromise === tracked) recoveryPromise = undefined;
+		});
+		recoveryPromise = tracked;
+		return tracked;
+	};
+	const ensureLive = async (): Promise<void> => {
+		if (disposed) throw new Error("[tests2/gateway] fixture was already disposed");
+		if (!live) await restartGateway();
+	};
 
 	const defaultProjectId = await registerDefaultProject(baseURL, token, defaultProjectRoot);
 	await seedDefaultWorkflows(baseURL, token, defaultProjectId);
@@ -474,13 +518,9 @@ async function boot(): Promise<BootedGateway> {
 			// component-linked verification steps of seeded workflows.
 			if (!componentOk) { try { cfg.setComponents([TEST_DEFAULT_COMPONENT]); } catch { /* best-effort */ } }
 		},
-		async crash() {
-			await gw.shutdown();
-		},
-		async restart() {
-			restoreAgentDirRuntime();
-			gw = await startGateway();
-		},
+		crash: crashGateway,
+		restart: restartGateway,
+		ensureLive,
 		async restoreDefaultProject() {
 			// If the default still exists (test only mutated it), keep its id — do NOT
 			// re-register (that would create a duplicate). Otherwise re-register and
@@ -500,8 +540,17 @@ async function boot(): Promise<BootedGateway> {
 			await seedDefaultWorkflows(baseURL, token, id);
 		},
 		async shutdown() {
-			await gw.shutdown();
-			try { rmSync(bobbitDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+			disposed = true;
+			await enqueueLifecycle(async () => {
+				try {
+					if (live) {
+						live = false;
+						await gw.shutdown();
+					}
+				} finally {
+					try { rmSync(bobbitDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+				}
+			});
 		},
 	};
 
@@ -521,6 +570,7 @@ async function boot(): Promise<BootedGateway> {
 export async function getGateway(): Promise<GatewayFixture> {
 	if (!bootPromise) bootPromise = boot();
 	const gw = await bootPromise;
+	await gw.ensureLive();
 	gw.restoreAgentDirRuntime();
 	return gw;
 }

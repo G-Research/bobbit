@@ -2047,6 +2047,15 @@
       }
     },
     {
+      "path": "tests2/integration/gateway-restart-liveness.test.ts",
+      "reason": "Harness liveness contract: an interrupted crash self-heals on getGateway(), repeated crash is idempotent, and concurrent restart calls coalesce without double-booting.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
       "path": "tests2/integration/session-lifecycle-api.test.ts",
       "reason": "v2-native gateway-per-worker session lifecycle API coverage.",
       "execution": {
