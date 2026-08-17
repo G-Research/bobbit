@@ -6186,6 +6186,7 @@ export class VerificationHarness {
 				return;
 			}
 			const errorStep = { name: "Error", type: "command" as const, passed: false, status: "failed" as const, phase: 0, output: err.message, duration_ms: 0 };
+			if (await this._stageTerminalIntentIfCleanupPending(active, { status: "failed", steps: [errorStep] }, "failed", goalBranch)) return;
 			this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, {
 				status: "failed",
 				steps: [errorStep],
