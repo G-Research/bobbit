@@ -221,7 +221,7 @@ provider bodies, or callback, container, or correlation identifiers.
 | Field | Sanitized completed record |
 | --- | --- |
 | Date and implementation commit | 2026-08-17; `47cf34c1e`. |
-| Runtime versions | Agent SDK `0.3.222`; Claude `2.1.222`; runtime schema `2`; host-current Pi `0.84`. |
+| Runtime versions | Agent SDK `0.3.222`; Claude `2.1.222`; runtime schema `2`; host-current Pi `0.84.1`. |
 | OAuth, policy, and image category | Direct Bobbit OAuth available; sandbox OAuth policy present; matching image capability available. |
 | Model and controls | Started with alias `haiku`; supported live switch to `sonnet` and thinking control passed. |
 | Credential-free and direct coverage | Credential-free provider-unavailable recovery passed with no fallback; direct OAuth Playwright/API lifecycle and permission-card flow passed. |
