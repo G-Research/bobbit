@@ -23,6 +23,26 @@ function checkpointPath(stateDir: string): string {
 	return path.join(stateDir, TEAM_FORENSIC_RECOVERY_CHECKPOINT_FILE);
 }
 
+async function syncDirectory(directory: string): Promise<void> {
+	// Windows does not support opening directories through Node's FileHandle API.
+	// Its rename is still the atomic publication boundary; POSIX additionally
+	// flushes the directory entry where the filesystem supports directory fsync.
+	if (process.platform === "win32") return;
+	let handle: fs.promises.FileHandle | undefined;
+	try {
+		handle = await fs.promises.open(directory, "r");
+		await handle.sync();
+	} catch (error) {
+		// Match the repository's established directory-durability policy: these
+		// errors mean the platform/filesystem cannot provide this extra barrier.
+		if (!["EACCES", "EINVAL", "EISDIR", "ENOSYS", "ENOTSUP", "EPERM"].includes(
+			(error as NodeJS.ErrnoException)?.code ?? "",
+		)) throw error;
+	} finally {
+		await handle?.close();
+	}
+}
+
 function isCheckpointRecord(value: unknown): value is TeamRecoveryCheckpointRecord {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
 	const record = value as Record<string, unknown>;
@@ -58,14 +78,20 @@ export class FileTeamRecoveryCheckpointStore implements TeamRecoveryCheckpointSt
 		await fs.promises.mkdir(stateDir, { recursive: true });
 		const target = checkpointPath(stateDir);
 		const temporary = `${target}.tmp-${process.pid}-${randomUUID()}`;
+		let handle: fs.promises.FileHandle | undefined;
 		try {
-			await fs.promises.writeFile(
-				temporary,
+			handle = await fs.promises.open(temporary, "wx");
+			await handle.writeFile(
 				JSON.stringify({ version: TEAM_FORENSIC_RECOVERY_VERSION, status } satisfies TeamRecoveryCheckpointRecord),
-				{ encoding: "utf-8", flag: "wx" },
+				"utf-8",
 			);
+			await handle.sync();
+			await handle.close();
+			handle = undefined;
 			await fs.promises.rename(temporary, target);
+			await syncDirectory(stateDir);
 		} catch (error) {
+			try { await handle?.close(); } catch { /* preserve the publication error */ }
 			try { await fs.promises.unlink(temporary); } catch { /* best-effort temporary cleanup */ }
 			throw error;
 		}

@@ -122,13 +122,14 @@ function createRealTeamRecoverySidecars(recoveryFs: RecoveryFs): TeamRecoverySid
 		read: (jsonlPath) => readSessionSidecarAsync(jsonlPath, recoveryFs),
 		async write(jsonlPath, sidecar) {
 			const target = sidecarPathFor(jsonlPath);
+			await fs.promises.mkdir(path.dirname(target), { recursive: true });
+			const tmp = `${target}.tmp-${process.pid}-${randomUUID()}`;
 			try {
-				await fs.promises.mkdir(path.dirname(target), { recursive: true });
-				const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
-				await fs.promises.writeFile(tmp, JSON.stringify(sidecar, null, 2), { encoding: "utf-8" });
+				await fs.promises.writeFile(tmp, JSON.stringify(sidecar, null, 2), { encoding: "utf-8", flag: "wx" });
 				await fs.promises.rename(tmp, target);
-			} catch (err) {
-				console.warn(`[session-sidecar] Failed to write sidecar for ${jsonlPath}: ${err}`);
+			} catch (error) {
+				try { await fs.promises.unlink(tmp); } catch { /* best-effort temporary cleanup */ }
+				throw error;
 			}
 		},
 	};
@@ -705,6 +706,18 @@ export class TeamManager {
 				forensicContexts.add(ctx);
 			}
 		}
+		// Durably revoke any prior completion before a recovery pass is allowed to
+		// inspect or repair historical transcript state. If publication fails, defer
+		// that project's forensic repair while routine every-boot checks still run.
+		for (const ctx of forensicContexts) {
+			if (typeof ctx.stateDir !== "string") continue;
+			try {
+				await this.recoveryCheckpoints.begin(ctx.stateDir);
+			} catch (err) {
+				failedForensicContexts.add(ctx);
+				console.warn(`[team-manager] Failed to begin forensic recovery checkpoint for ${ctx.stateDir}:`, err);
+			}
+		}
 
 		// orphan team-store cleanup — Boot-time orphan cleanup. Walk every persisted team
 		// entry FIRST and drop entries whose `goalId` is not present in the
@@ -785,18 +798,21 @@ export class TeamManager {
 				// archaeology. Recover it every boot and re-open the broader project
 				// sweep so sibling worker records can be repaired in the same pass.
 				if (orphans.length > 0 && !forensicContexts.has(ctx)) {
-					forensicContexts.add(ctx);
 					if (typeof ctx.stateDir === "string") {
 						try {
 							// Invalidate a prior completion before the targeted repair. If
 							// the process exits mid-pass, the next boot retries the sweep.
 							await this.recoveryCheckpoints.begin(ctx.stateDir);
+							forensicContexts.add(ctx);
 						} catch (err) {
 							failedForensicContexts.add(ctx);
 							console.warn(`[team-manager] Failed to begin forensic recovery checkpoint for ${ctx.stateDir}:`, err);
 						}
+					} else {
+						forensicContexts.add(ctx);
 					}
 				}
+				if (failedForensicContexts.has(ctx)) continue;
 				for (const goalId of orphans) {
 					const entry = ctx.teamStore.get(goalId);
 					const tlid = entry?.teamLeadSessionId ?? "<none>";
@@ -890,20 +906,9 @@ export class TeamManager {
 			// sidebar's archived branch then surfaces the team-lead under
 			// the goal again, with the full .jsonl history available via
 			// continue-archived if the user wants to read it.
-			// Stamp `running` before touching historical transcript trees. A crash
-			// or failed pass therefore cannot leave a completed checkpoint behind.
-			for (const ctx of forensicContexts) {
-				if (typeof ctx.stateDir !== "string") continue;
-				try {
-					await this.recoveryCheckpoints.begin(ctx.stateDir);
-				} catch (err) {
-					failedForensicContexts.add(ctx);
-					console.warn(`[team-manager] Failed to begin forensic recovery checkpoint for ${ctx.stateDir}:`, err);
-				}
-			}
-
 			let fullyOrphanRecovered = 0;
 			for (const ctx of forensicContexts) {
+				if (failedForensicContexts.has(ctx)) continue;
 				for (const goal of ctx.goalStore.getAll()) {
 					if (!goal.team) continue;
 					if (!goal.worktreePath) continue;
@@ -1020,6 +1025,7 @@ export class TeamManager {
 			// skip any agent whose worktreePath already has a session record.
 			let agentsRecovered = 0;
 			for (const ctx of forensicContexts) {
+				if (failedForensicContexts.has(ctx)) continue;
 				for (const goal of ctx.goalStore.getAll()) {
 					if (!goal.team || !goal.worktreePath) continue;
 					// Find the team-lead session for this goal (recovered or
@@ -1091,6 +1097,7 @@ export class TeamManager {
 			// before any other race could disturb the record again.
 			let sidecarsBackfilled = 0;
 			for (const ctx of forensicContexts) {
+				if (failedForensicContexts.has(ctx)) continue;
 				const allSessions = ctx.sessionStore.getAll();
 				const ordered = [
 					...allSessions.filter(s => typeof s.title === "string" && s.title.includes("(recovered)")),
@@ -1118,6 +1125,18 @@ export class TeamManager {
 				console.log(`[team-manager] Boot backfill: wrote ${sidecarsBackfilled} session sidecar(s) for legacy sessions.`);
 			}
 
+			// SessionStore.put() publishes asynchronously. The forensic checkpoint may
+			// become authoritative only after every reconstructed row for the project
+			// has crossed the store's acknowledged atomic persistence barrier.
+			for (const ctx of forensicContexts) {
+				if (typeof ctx.stateDir !== "string" || failedForensicContexts.has(ctx)) continue;
+				try {
+					await ctx.sessionStore.flushAsync();
+				} catch (err) {
+					failedForensicContexts.add(ctx);
+					console.warn(`[team-manager] Failed to publish recovered sessions for ${ctx.stateDir}:`, err);
+				}
+			}
 			for (const ctx of forensicContexts) {
 				if (typeof ctx.stateDir !== "string" || failedForensicContexts.has(ctx)) continue;
 				try {
