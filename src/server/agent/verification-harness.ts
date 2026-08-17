@@ -1820,10 +1820,10 @@ type TerminalGateSignalStepStatus = "passed" | "failed" | "timeout" | "skipped" 
 type PersistedGateSignalStepStatus = GateSignalStep["status"] | "timeout";
 
 type PendingMixedRestartFailureIntent = {
-	kind: "mixed-restart-failed";
+	kind: "mixed-restart-failed" | "terminal";
 	preparedAt: number;
 	verification: GateSignal["verification"];
-	gateStatus: "failed";
+	gateStatus: "passed" | "failed";
 	goalBranch?: string;
 };
 
@@ -2633,11 +2633,7 @@ export class VerificationHarness {
 		const running = persisted.filter(v => v.overallStatus === "running" && !v.cancelled && !v.pendingTerminalIntent);
 		if (running.length === 0) {
 			// Clean up stale file only after cancelled kill intents are settled.
-			if (this.activeVerifications.size === 0) {
-				try { fs.unlinkSync(this._persistPath); } catch {}
-			} else {
-				this._persistActive();
-			}
+			if (!this._persistActive()) console.error("[verification] Failed to retire resumed verification state");
 			return;
 		}
 
@@ -2745,11 +2741,7 @@ export class VerificationHarness {
 			}
 		}
 
-		if (this.activeVerifications.size === 0) {
-			try { fs.unlinkSync(this._persistPath); } catch {}
-		} else {
-			this._persistActive();
-		}
+		if (!this._persistActive()) console.error("[verification] Failed to persist resumed verification state");
 		await this._surfaceOrphanedNonInteractiveReviewers();
 		if (process.env.BOBBIT_DEBUG) console.log("[verification] Finished resuming interrupted verifications.");
 	}
@@ -2961,6 +2953,29 @@ export class VerificationHarness {
 		}
 		this._drainPendingSignoffsForSignal(v.signalId);
 		await this._startCancelledVerificationCleanup(v);
+	}
+
+	/** Stage a real terminal verdict behind already-durable exact reviewer cleanup. */
+	private async _stageTerminalIntentIfCleanupPending(
+		active: ActiveVerification,
+		verification: GateSignal["verification"],
+		gateStatus: "passed" | "failed",
+		goalBranch?: string,
+	): Promise<boolean> {
+		if (!active.reviewerCleanupPending) return false;
+		active.pendingTerminalIntent = {
+			kind: "terminal",
+			preparedAt: Date.now(),
+			verification,
+			gateStatus,
+			goalBranch,
+		};
+		if (!this._persistActive()) {
+			this._scheduleCancelledVerificationCleanupRetry(active.signalId);
+			return true;
+		}
+		await this._startCancelledVerificationCleanup(active);
+		return true;
 	}
 
 	private async _continueResumeWithRemainingPhases(v: ActiveVerification): Promise<boolean> {
@@ -3265,6 +3280,7 @@ export class VerificationHarness {
 			await this._startCancelledVerificationCleanup(v);
 			return;
 		}
+		if (await this._stageTerminalIntentIfCleanupPending(v, publishedVerification, gateStatus, goalBranch)) return;
 		this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, publishedVerification);
 		this.resolveGateStore(v.goalId).updateGateStatus(v.goalId, v.gateId, gateStatus);
 
@@ -4289,7 +4305,7 @@ export class VerificationHarness {
 			// when it records a crossed spawn boundary before identity persistence.
 			if (!step.killRequestedAt && !this._commandStepHasSpawnOwnership(step)) continue;
 			step.killRequestedAt ??= now;
-			step.killReason = reason;
+			step.killReason ??= reason;
 			step.killSignal = signal;
 		}
 	}
@@ -4695,9 +4711,9 @@ export class VerificationHarness {
 			const current = this._isCurrentGateSignal(active);
 			if (current) {
 				if (typeof (store as Partial<GateStore>).updateGateStatusStrict === "function") {
-					await store.updateGateStatusStrict(active.goalId, active.gateId, "failed");
+					await store.updateGateStatusStrict(active.goalId, active.gateId, intent.gateStatus);
 				} else {
-					store.updateGateStatus(active.goalId, active.gateId, "failed");
+					store.updateGateStatus(active.goalId, active.gateId, intent.gateStatus);
 				}
 			}
 			if (this.activeVerifications.get(active.signalId) !== active || active.cancelled || active.pendingTerminalIntent !== intent) return;
@@ -4713,9 +4729,9 @@ export class VerificationHarness {
 			}
 			this._cancelledCleanupRetryAttempts.delete(active.signalId);
 			if (current) {
-				this.broadcastFn(active.goalId, { type: "gate_verification_complete", goalId: active.goalId, gateId: active.gateId, signalId: active.signalId, status: "failed" });
-				broadcastGateStatusChanged(this.broadcastFn, active.goalId, active.gateId, "failed");
-				this.notifyTeamLead(active.goalId, active.gateId, "failed", { steps: intent.verification.steps, goalBranch: intent.goalBranch });
+				this.broadcastFn(active.goalId, { type: "gate_verification_complete", goalId: active.goalId, gateId: active.gateId, signalId: active.signalId, status: intent.gateStatus });
+				broadcastGateStatusChanged(this.broadcastFn, active.goalId, active.gateId, intent.gateStatus);
+				this.notifyTeamLead(active.goalId, active.gateId, intent.gateStatus, { steps: intent.verification.steps, goalBranch: intent.goalBranch });
 			}
 		} catch (error) {
 			if (this.activeVerifications.get(active.signalId) === active) this._persistActive();
@@ -5489,6 +5505,9 @@ export class VerificationHarness {
 				});
 				const allPassed = computeAllPassed(results);
 				const status = allPassed ? "passed" as const : "failed" as const;
+				const cachedActive = this.activeVerifications.get(signal.id);
+				if (cachedActive?.cancelled || (cachedActive && this._cancellationOwnsTerminalPublication(cachedActive))) return;
+				if (cachedActive && await this._stageTerminalIntentIfCleanupPending(cachedActive, { status, steps: results }, status, goalBranch)) return;
 				this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, { status, steps: results });
 				this.resolveGateStore(signal.goalId).updateGateStatus(signal.goalId, signal.gateId, status);
 				this.activeVerifications.delete(signal.id);
@@ -6143,7 +6162,8 @@ export class VerificationHarness {
 
 			if (this._cancellationOwnsTerminalPublication(active)) return;
 			const allPassed = computeAllPassed(results);
-			const status = allPassed ? "passed" : "failed";
+			const status = allPassed ? "passed" as const : "failed" as const;
+			if (await this._stageTerminalIntentIfCleanupPending(active, { status, steps: results }, status, goalBranch)) return;
 
 			this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, { status, steps: results });
 			this.resolveGateStore(signal.goalId).updateGateStatus(signal.goalId, signal.gateId, status);
