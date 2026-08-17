@@ -2649,6 +2649,15 @@ export class VerificationHarness {
 				// exact retained session IDs, not stale process state. Settle that
 				// ownership before resuming and never touch command cleanup here.
 				if (v.reviewerCleanupPending) {
+					// Lifecycle-terminal goals always cancel before reconstructing a
+					// product outcome. Otherwise, rows which already determine an
+					// aggregate must stage their strict terminal intent while this exact
+					// reviewer-cleanup marker is still durable.
+					if (await this._cancelRecoveredLifecycleTerminal(v)) continue;
+					if (this._canReconstructTerminalIntentBeforeReviewerCleanup(v)) {
+						await this._resumeOneVerification(v);
+						continue;
+					}
 					await this._recoverOrphanedReviewerCleanupAndResume(v);
 					continue;
 				}
@@ -2881,6 +2890,30 @@ export class VerificationHarness {
 	}
 
 	/**
+	 * Decide from durable status/provenance alone whether resumed rows already
+	 * determine their terminal aggregate. This deliberately never inspects output.
+	 */
+	private _canReconstructTerminalIntentBeforeReviewerCleanup(v: ActiveVerification): boolean {
+		if (v.steps.some(step => step.restartInterrupted === true)) return true;
+		const statuses = v.steps.map(step => persistedStatusForStep(step));
+		if (statuses.every(status => status !== "waiting" && status !== "running")) return true;
+
+		let firstRealFailurePhase: number | undefined;
+		for (const [index, step] of v.steps.entries()) {
+			const status = statuses[index]!;
+			if (step.restartInterrupted === true || (status !== "failed" && status !== "timeout")) continue;
+			const phase = step.phase ?? 0;
+			if (firstRealFailurePhase === undefined || phase < firstRealFailurePhase) firstRealFailurePhase = phase;
+		}
+		if (firstRealFailurePhase === undefined) return false;
+		return v.steps.every((step, index) => {
+			const status = statuses[index]!;
+			return status !== "waiting" && status !== "running"
+				|| (status === "waiting" && (step.phase ?? 0) > firstRealFailurePhase!);
+		});
+	}
+
+	/**
 	 * Once structured recovery commits a generation to cancellation, every
 	 * unfinished row must carry the same durable no-verdict provenance before
 	 * cleanup begins. A second crash can then resume cancellation without
@@ -2974,21 +3007,26 @@ export class VerificationHarness {
 		return true;
 	}
 
+	/** Cancel a recovered row before any product-outcome reconstruction for a terminal goal. */
+	private async _cancelRecoveredLifecycleTerminal(v: ActiveVerification): Promise<boolean> {
+		if (!this._isResumeStillActive(v) || v.pendingTerminalIntent) return true;
+		const goal = this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId);
+		if (!goal || (goal.state !== "complete" && goal.state !== "shelved")) return false;
+		if (process.env.BOBBIT_DEBUG) console.log(`[verification] Cleaning resumed verification ${v.signalId} for ${goal.state} goal ${v.goalId}`);
+		this._markVerificationCancelled(v, goal.state === "shelved" ? "shelved" : "goal-complete");
+		if (!this._persistActive()) throw new Error(`Could not persist cancellation fence for ${v.signalId}`);
+		this._notifyCancellationFenceCommitted(v);
+		await this._startCancelledVerificationCleanup(v);
+		return true;
+	}
+
 	/**
 	 * Preserve lifecycle-terminal cancellation precedence whenever a recovered
 	 * running row is about to resume, including after orphan reviewer cleanup.
 	 */
 	private async _continueRecoveredRunningVerification(v: ActiveVerification): Promise<void> {
 		if (!this._isResumeStillActive(v) || v.pendingTerminalIntent || v.reviewerCleanupPending) return;
-		const goal = this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId);
-		if (goal && (goal.state === "complete" || goal.state === "shelved")) {
-			if (process.env.BOBBIT_DEBUG) console.log(`[verification] Cleaning resumed verification ${v.signalId} for ${goal.state} goal ${v.goalId}`);
-			this._markVerificationCancelled(v, goal.state === "shelved" ? "shelved" : "goal-complete");
-			if (!this._persistActive()) throw new Error(`Could not persist cancellation fence for ${v.signalId}`);
-			this._notifyCancellationFenceCommitted(v);
-			await this._startCancelledVerificationCleanup(v);
-			return;
-		}
+		if (await this._cancelRecoveredLifecycleTerminal(v)) return;
 		await this._resumeOneVerification(v);
 		// A restart-resume path can return after discovering a replacement.
 		// Apply the same durable supersession guard before any fallback path.
@@ -4848,6 +4886,11 @@ export class VerificationHarness {
 		let recovery!: Promise<void>;
 		recovery = (async () => {
 			if (!this._isOrphanReviewerCleanupRecoveryActive(active)) return;
+			if (await this._cancelRecoveredLifecycleTerminal(active)) return;
+			if (this._canReconstructTerminalIntentBeforeReviewerCleanup(active)) {
+				await this._resumeOneVerification(active);
+				return;
+			}
 			try {
 				// _terminateCancelledReviewersFor persists the existing marker before
 				// teardown, operates on every retained session ID, and clears it only
