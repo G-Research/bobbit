@@ -32,6 +32,15 @@ export class ToolResultFilterAttemptCredentials {
 		return credential;
 	}
 
+	/**
+	 * Exact core-owned activation signal for the currently spawned Pi runtime.
+	 * It is set only by beginRuntime while the private bootstrap is assembled,
+	 * never by a callback/client claim.
+	 */
+	hasRuntime(sessionId: string): boolean {
+		return this.runtimes.has(sessionId);
+	}
+
 	/** Invalidate a runtime before replacement, abort teardown, or termination. */
 	invalidate(sessionId: string): void {
 		this.runtimes.delete(sessionId);

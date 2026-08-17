@@ -245,6 +245,32 @@ test.describe("tool result filter route", () => {
 		expect(response).toEqual(envelope.result);
 	});
 
+	test("reconciles a pre-grant live runtime before returning enabled authority", async () => {
+		const liveSessionId = await createSession({ projectId });
+		try {
+			const before = gatewayManager.getSession(liveSessionId);
+			expect(before).toBeTruthy();
+			expect((gatewayManager.toolResultFilterAttemptCredentials as any).runtimes.get(liveSessionId)).toBeUndefined();
+
+			await grant(projectId, cookie, "result-filter");
+
+			const after = gatewayManager.getSession(liveSessionId);
+			expect(after).toBeTruthy();
+			expect(after).not.toBe(before);
+			// This credential came from the real replacement's setup path, not
+			// beginRuntime in the test. A raw canary cannot reach this callback.
+			runtimeCredential = (gatewayManager.toolResultFilterAttemptCredentials as any).runtimes.get(liveSessionId);
+			expect(runtimeCredential).toBeTruthy();
+			const output = await postFilter(liveSessionId, {
+				toolCallId: "reconciled-live-call", toolName: "fixture-tool", result: result(REJECTED),
+			});
+			expect(output).toMatchObject({ isError: true, content: [{ type: "text", text: expect.stringMatching(/^Tool result withheld/) }] });
+			expect(JSON.stringify(output)).not.toContain(REJECTED);
+		} finally {
+			await deleteSession(liveSessionId);
+		}
+	});
+
 	test("round-trips generated gate wire bodies through the live route with ordinary Pi-safe output", async () => {
 		await grant(projectId, cookie, "result-filter");
 		const live = await installLiveGeneratedGate(sessionId, runtimeCredential!);

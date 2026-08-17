@@ -483,6 +483,8 @@ export interface PipelineContext {
 	sessionSecretStore: import("../auth/session-secret.js").SessionSecretStore;
 	/** Server-owned private Pi gate input; never added to bridge env or public APIs. */
 	toolResultFilterGateCredential?: (sessionId: string) => { runtimeGeneration: number; runtimeKey: string };
+	/** Clears a predecessor gate credential when this replacement has no gate. */
+	invalidateToolResultFilterGate?: (sessionId: string) => void;
 	groupPolicyStore: ToolGroupPolicyStore | null;
 	configCascade: ConfigCascade | null;
 	lifecycleHub?: LifecycleHub;
@@ -1299,6 +1301,8 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 		// It is never included in bridgeOptions.env or the mounted gate source.
 		plan.bridgeOptions.toolResultFilterBootstrap = credential;
 		toolResultGateEnv = toolResultFilterGateEnvironment(gatePath);
+	} else {
+		ctx.invalidateToolResultFilterGate?.(plan.id);
 	}
 	plan.bridgeOptions.piExtensions = [...(plan.bridgeOptions.piExtensions ?? []), ...piExtensionActivation.runtimeExtensions];
 	plan.bridgeOptions.env = { ...(plan.bridgeOptions.env || {}), ...activation.env, ...toolResultGateEnv };
