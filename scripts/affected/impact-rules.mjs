@@ -1036,7 +1036,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		consumer: "tests2/integration/pr-walkthrough-api.test.ts",
 		allowReason: "test-owned temporary fake-gh invocation log",
 		reads: frozen([
-			{ expression: "fakeGh.logPath", count: 2 },
+			{ expression: "fakeGh.logPath", count: 3 },
 		]),
 	},
 	{
