@@ -1668,10 +1668,11 @@ function hasExplicitTarget(body) {
 }
 
 // Resolve the current branch's open GitHub PR from the SERVER-DERIVED worker cwd
-// (never caller-supplied — same confinement as bundle's git cwd). The origin remote
-// is inspected locally BEFORE `gh` runs. A non-default origin without an exact ack
-// returns HOST_NOT_TRUSTED, ensuring an unknown host receives no GitHub request.
-// Once preflight passes, `gh` supplies PR metadata and `git` supplies fallback SHAs.
+// (never caller-supplied — same confinement as bundle's git cwd). Remote selection
+// is entirely local and follows Git's push/upstream precedence before `gh` runs.
+// A non-default host without an exact ack returns HOST_NOT_TRUSTED for the client
+// prompt flow. An ack is only a request to ask the gateway's authoritative trust
+// endpoint; it never authorizes `gh` by itself.
 async function resolveCurrentBranchTarget(cwd, io = { gh, git }, trustedHostAck) {
 	const noPr = {
 		ok: false,
@@ -1679,52 +1680,59 @@ async function resolveCurrentBranchTarget(cwd, io = { gh, git }, trustedHostAck)
 		error: "No open GitHub PR for the current branch. Open a PR, then run the walkthrough.",
 		code: "NO_PR",
 	};
+	const unresolvedRemote = {
+		ok: false,
+		retryable: false,
+		error: "Could not safely determine the GitHub repository for the current branch.",
+		code: "REMOTE_UNRESOLVED",
+	};
 
-	let origin;
-	try {
-		const remoteUrl = await io.git(cwd, ["remote", "get-url", "origin"]);
-		origin = parseGithubRemoteUrl(String(remoteUrl).trim());
-	} catch { /* handled by the fail-closed result below */ }
-	const rawOriginHost = origin && strOf(origin.host);
-	if (!origin || !rawOriginHost) {
-		return {
-			ok: false,
-			retryable: false,
-			error: "Could not safely determine the GitHub host from the origin remote.",
-			code: "REMOTE_UNRESOLVED",
-		};
-	}
-	const originHost = normalizeGithubHost(rawOriginHost);
-	if (!DEFAULT_TRUSTED_PR_HOSTS.has(originHost) && trustedHostAck !== originHost) {
-		return {
-			ok: false,
-			code: "HOST_NOT_TRUSTED",
-			retryable: true,
-			host: originHost,
-			error: `The remote host "${originHost}" is not in your trusted list.`,
-		};
+	const selected = await selectCurrentBranchRemote(cwd, io.git).catch(() => undefined);
+	if (!selected) return unresolvedRemote;
+	const remote = parseGithubRemoteUrl(selected.url);
+	if (!remote || !strOf(remote.host)) return unresolvedRemote;
+
+	const remoteHost = normalizeGithubHost(remote.host);
+	if (!DEFAULT_TRUSTED_PR_HOSTS.has(remoteHost)) {
+		if (trustedHostAck !== remoteHost) {
+			return {
+				ok: false,
+				code: "HOST_NOT_TRUSTED",
+				retryable: true,
+				host: remoteHost,
+				error: `The remote host "${remoteHost}" is not in your trusted list.`,
+			};
+		}
+		const checkTrustedHost = typeof io.isTrustedHost === "function" ? io.isTrustedHost : isGithubHostTrustedByGateway;
+		const trusted = await checkTrustedHost(remoteHost).catch(() => false);
+		if (trusted !== true) {
+			return {
+				ok: false,
+				code: "HOST_NOT_TRUSTED",
+				retryable: true,
+				host: remoteHost,
+				error: `The remote host "${remoteHost}" is not in your trusted list.`,
+			};
+		}
 	}
 
+	// Bind gh to the locally selected repository. This prevents gh's own remote
+	// heuristics from silently choosing a different host or repository.
+	const repoBinding = `${remoteHost}/${remote.owner}/${remote.repo}`;
 	let pr;
 	try {
-		const out = await io.gh(cwd, ["pr", "view", "--json", "number,title,body,url,headRefOid,baseRefOid,baseRefName,headRefName"]);
+		const out = await io.gh(cwd, ["pr", "view", "--repo", repoBinding, "--json", "number,title,body,url,headRefOid,baseRefOid,baseRefName,headRefName"]);
 		pr = JSON.parse(String(out).trim());
 	} catch {
 		return noPr; // gh non-zero / no PR for branch / gh unavailable
 	}
-	if (!pr || typeof pr !== "object" || !Number.isInteger(pr.number)) return noPr;
-
-	// owner/repo from `gh repo view`, falling back to the already-inspected origin.
-	let owner;
-	let repo;
-	try {
-		const repoOut = await io.gh(cwd, ["repo", "view", "--json", "owner,name"]);
-		const repoJson = JSON.parse(String(repoOut).trim());
-		owner = repoJson && repoJson.owner ? strOf(repoJson.owner.login) : undefined;
-		repo = repoJson ? strOf(repoJson.name) : undefined;
-	} catch { /* fall back to origin remote below */ }
-	owner = owner || origin.owner;
-	repo = repo || origin.repo;
+	if (!pr || typeof pr !== "object" || !Number.isInteger(pr.number) || pr.number <= 0) return noPr;
+	const prIdentity = parseExactGithubPrUrl(strOf(pr.url));
+	if (!prIdentity
+		|| normalizeGithubHost(prIdentity.host) !== remoteHost
+		|| prIdentity.owner.toLowerCase() !== remote.owner.toLowerCase()
+		|| prIdentity.repo.toLowerCase() !== remote.repo.toLowerCase()
+		|| prIdentity.number !== pr.number) return noPr;
 
 	// headSha: the PR head commit (headRefOid), else the worktree HEAD.
 	let headSha = strOf(pr.headRefOid);
@@ -1734,22 +1742,24 @@ async function resolveCurrentBranchTarget(cwd, io = { gh, git }, trustedHostAck)
 	// baseSha: the PR comparison base GitHub reports for the PR. This is the
 	// pre-merge base OID for merged PRs, so the launch-time bundle matches the
 	// Files changed diff GitHub shows instead of diffing against the current
-	// origin/<base> tip (which may already contain the PR and produce an empty diff).
+	// selected remote's base tip (which may already contain the PR).
 	let baseSha = strOf(pr.baseRefOid);
 	const baseRef = strOf(pr.baseRefName);
 	if (!baseSha && baseRef) {
-		baseSha = await io.git(cwd, ["rev-parse", `origin/${baseRef}`]).then((s) => s.trim()).catch(() => undefined);
+		const remoteBaseRef = `${selected.name}/${baseRef}`;
+		baseSha = await io.git(cwd, ["rev-parse", remoteBaseRef]).then((s) => s.trim()).catch(() => undefined);
 		if (!baseSha) baseSha = await io.git(cwd, ["rev-parse", baseRef]).then((s) => s.trim()).catch(() => undefined);
 		if (!baseSha && headSha) {
-			baseSha = await io.git(cwd, ["merge-base", `origin/${baseRef}`, "HEAD"]).then((s) => s.trim()).catch(() => undefined);
+			baseSha = await io.git(cwd, ["merge-base", remoteBaseRef, "HEAD"]).then((s) => s.trim()).catch(() => undefined);
 		}
 	}
 
 	return {
 		ok: true,
 		target: {
-			owner,
-			repo,
+			host: remoteHost,
+			owner: remote.owner,
+			repo: remote.repo,
 			prNumber: pr.number,
 			prTitle: strOf(pr.title),
 			prBody: typeof pr.body === "string" ? pr.body : undefined,
@@ -1760,6 +1770,58 @@ async function resolveCurrentBranchTarget(cwd, io = { gh, git }, trustedHostAck)
 			headSha,
 		},
 	};
+}
+
+async function selectCurrentBranchRemote(cwd, gitIo) {
+	const remoteOutput = await gitIo(cwd, ["remote"]);
+	const remotes = [...new Set(String(remoteOutput).split(/\r?\n/).map((name) => name.trim()).filter(Boolean))];
+	if (remotes.length === 0 || remotes.some((name) => /[\0\r\n]/.test(name))) return undefined;
+
+	const branch = await gitIo(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"])
+		.then(singleGitOutputLine)
+		.catch(() => undefined);
+	const configKeys = [
+		branch ? `branch.${branch}.pushRemote` : undefined,
+		"remote.pushDefault",
+		branch ? `branch.${branch}.remote` : undefined,
+	].filter(Boolean);
+	for (const key of configKeys) {
+		const rawConfigured = await gitIo(cwd, ["config", "--get", key]).catch(() => undefined);
+		if (rawConfigured === undefined) continue;
+		const configured = singleGitOutputLine(rawConfigured);
+		if (!configured || configured === "." || !remotes.includes(configured)) return undefined;
+		return readSelectedRemote(cwd, gitIo, configured);
+	}
+	if (remotes.includes("origin")) return readSelectedRemote(cwd, gitIo, "origin");
+	if (remotes.length === 1) return readSelectedRemote(cwd, gitIo, remotes[0]);
+	return undefined;
+}
+
+async function readSelectedRemote(cwd, gitIo, name) {
+	const rawUrl = await gitIo(cwd, ["remote", "get-url", name]);
+	const url = singleGitOutputLine(rawUrl);
+	return url ? { name, url } : undefined;
+}
+
+function singleGitOutputLine(value) {
+	const line = String(value).replace(/\r?\n$/, "");
+	if (!line || line !== line.trim() || /[\0\r\n]/.test(line)) return undefined;
+	return line;
+}
+
+async function isGithubHostTrustedByGateway(host) {
+	const creds = readGatewayCredsFromDisk();
+	if (creds.error) return false;
+	try {
+		const res = await fetch(`${creds.baseUrl}/api/github/trusted-hosts/check?host=${encodeURIComponent(host)}`, {
+			headers: { Authorization: `Bearer ${creds.token}` },
+		});
+		if (!res.ok) return false;
+		const json = await res.json();
+		return json && typeof json === "object" && json.trusted === true;
+	} catch {
+		return false;
+	}
 }
 
 // Ported PURE target canonicalization (canonicalizeTarget from
@@ -1832,6 +1894,22 @@ function parseGithubPrUrl(input) {
 	return undefined;
 }
 
+// gh's bound `pr view` response must identify exactly one HTTPS PR, not a URL
+// carrying credentials, query/fragment state, or a suffix for some other resource.
+// Explicit user-entered targets retain parseGithubPrUrl's existing deep-link support.
+function parseExactGithubPrUrl(input) {
+	try {
+		const url = new URL(input);
+		if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) return undefined;
+		const parts = url.pathname.split("/").filter(Boolean);
+		if (parts.length !== 4 || parts[2] !== "pull") return undefined;
+		const number = Number(parts[3]);
+		if (!Number.isInteger(number) || number <= 0) return undefined;
+		return { owner: parts[0], repo: parts[1], number, host: url.hostname.replace(/\.$/, "").toLowerCase() };
+	} catch { /* not a URL */ }
+	return undefined;
+}
+
 function normalizeGithubHost(host) {
 	const normalized = (host || "github.com").replace(/\.$/, "").toLowerCase();
 	return normalized === "www.github.com" ? "github.com" : normalized;
@@ -1857,16 +1935,46 @@ async function inferGithubRepository(cwd) {
 export const __test = { resolveCurrentBranchTarget, assembleSubmission, summarizeChunks, validateChunkId };
 
 function parseGithubRemoteUrl(url) {
-	if (!url) return undefined;
-	// scp-like: git@host:owner/repo(.git)
-	const scp = url.match(/^[^@]+@([^:]+):([^/]+)\/(.+?)(?:\.git)?$/);
-	if (scp) return { host: scp[1].toLowerCase(), owner: scp[2], repo: scp[3] };
+	if (typeof url !== "string" || !url || url !== url.trim() || /[\0\r\n]/.test(url)) return undefined;
+	const validPart = (value) => /^[A-Za-z0-9_.-]+$/.test(value) && value !== "." && value !== "..";
+	const parsePath = (owner, rawRepo) => {
+		const repo = rawRepo.endsWith(".git") ? rawRepo.slice(0, -4) : rawRepo;
+		return validPart(owner) && validPart(repo) ? { owner, repo } : undefined;
+	};
+
+	// Strict scp-like SSH form: user@host:owner/repo(.git).
+	const scp = url.match(/^([^@\s/:]+)@([A-Za-z0-9.-]+):([^/\s]+)\/([^/\s]+)$/);
+	if (scp) {
+		const path = parsePath(scp[3], scp[4]);
+		if (!path) return undefined;
+		const host = normalizeGithubRemoteHost(scp[2], true);
+		return host ? { host, ...path } : undefined;
+	}
+
 	try {
 		const u = new URL(url);
+		if (!["https:", "http:", "ssh:", "git:"].includes(u.protocol) || u.search || u.hash || !u.hostname) return undefined;
+		if ((u.protocol === "https:" || u.protocol === "http:" || u.protocol === "git:") && (u.username || u.password)) return undefined;
+		if (u.password || u.pathname.includes("%")) return undefined;
 		const parts = u.pathname.split("/").filter(Boolean);
-		if (parts.length >= 2) {
-			return { host: u.hostname.replace(/\.$/, "").toLowerCase(), owner: parts[0], repo: parts[1].replace(/\.git$/, "") };
-		}
+		if (parts.length !== 2) return undefined;
+		const path = parsePath(parts[0], parts[1]);
+		if (!path) return undefined;
+		const host = normalizeGithubRemoteHost(u.hostname, u.protocol === "ssh:");
+		return host ? { host, ...path } : undefined;
 	} catch { /* not a URL */ }
 	return undefined;
+}
+
+function normalizeGithubRemoteHost(host, sshTransport) {
+	const normalized = normalizeGithubHost(host);
+	if (!normalized || normalized.length > 253 || !normalized.split(".").every((label) => (
+		label.length > 0
+		&& label.length <= 63
+		&& /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)
+	))) return undefined;
+	// ssh.github.com is GitHub's alternate SSH endpoint (commonly port 443).
+	// It is not a general web alias: https://ssh.github.com remains a distinct,
+	// non-default host and therefore still requires the normal trust flow.
+	return sshTransport && normalized === "ssh.github.com" ? "github.com" : normalized;
 }
