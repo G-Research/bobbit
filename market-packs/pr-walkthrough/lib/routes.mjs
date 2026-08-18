@@ -283,7 +283,7 @@ export const routes = {
 		let targetInput = body;
 		const cwd = routeCwd(ctx);
 		if (!hasExplicitTarget(body)) {
-			const resolved = await resolveCurrentBranchTarget(cwd);
+			const resolved = await resolveCurrentBranchTarget(cwd, { gh, git }, strOf(body.trustedHostAck));
 			if (!resolved.ok) return resolved;
 			targetInput = resolved.target;
 		}
@@ -1668,19 +1668,42 @@ function hasExplicitTarget(body) {
 }
 
 // Resolve the current branch's open GitHub PR from the SERVER-DERIVED worker cwd
-// (never caller-supplied — same confinement as bundle's git cwd). Uses `gh` for the
-// PR metadata + `git` for the SHAs, then hands the assembled fields to
-// canonicalizeTarget (the caller) to build the github canonical target/changeset.
-// Returns { ok:false, code:"NO_PR" } when the branch has no open GitHub PR so the
-// panel can surface a clear "open a PR first" message. The walkthrough is
-// GitHub-PR-only; local base/head targets are not resolved here.
-async function resolveCurrentBranchTarget(cwd, io = { gh, git }) {
+// (never caller-supplied — same confinement as bundle's git cwd). The origin remote
+// is inspected locally BEFORE `gh` runs. A non-default origin without an exact ack
+// returns HOST_NOT_TRUSTED, ensuring an unknown host receives no GitHub request.
+// Once preflight passes, `gh` supplies PR metadata and `git` supplies fallback SHAs.
+async function resolveCurrentBranchTarget(cwd, io = { gh, git }, trustedHostAck) {
 	const noPr = {
 		ok: false,
 		retryable: false,
 		error: "No open GitHub PR for the current branch. Open a PR, then run the walkthrough.",
 		code: "NO_PR",
 	};
+
+	let origin;
+	try {
+		const remoteUrl = await io.git(cwd, ["remote", "get-url", "origin"]);
+		origin = parseGithubRemoteUrl(String(remoteUrl).trim());
+	} catch { /* handled by the fail-closed result below */ }
+	const rawOriginHost = origin && strOf(origin.host);
+	if (!origin || !rawOriginHost) {
+		return {
+			ok: false,
+			retryable: false,
+			error: "Could not safely determine the GitHub host from the origin remote.",
+			code: "REMOTE_UNRESOLVED",
+		};
+	}
+	const originHost = normalizeGithubHost(rawOriginHost);
+	if (!DEFAULT_TRUSTED_PR_HOSTS.has(originHost) && trustedHostAck !== originHost) {
+		return {
+			ok: false,
+			code: "HOST_NOT_TRUSTED",
+			retryable: true,
+			host: originHost,
+			error: `The remote host "${originHost}" is not in your trusted list.`,
+		};
+	}
 
 	let pr;
 	try {
@@ -1691,7 +1714,7 @@ async function resolveCurrentBranchTarget(cwd, io = { gh, git }) {
 	}
 	if (!pr || typeof pr !== "object" || !Number.isInteger(pr.number)) return noPr;
 
-	// owner/repo from `gh repo view`, falling back to the origin remote.
+	// owner/repo from `gh repo view`, falling back to the already-inspected origin.
 	let owner;
 	let repo;
 	try {
@@ -1700,13 +1723,8 @@ async function resolveCurrentBranchTarget(cwd, io = { gh, git }) {
 		owner = repoJson && repoJson.owner ? strOf(repoJson.owner.login) : undefined;
 		repo = repoJson ? strOf(repoJson.name) : undefined;
 	} catch { /* fall back to origin remote below */ }
-	if (!owner || !repo) {
-		const inferred = await inferGithubRepository(cwd);
-		if (inferred) {
-			owner = owner || inferred.owner;
-			repo = repo || inferred.repo;
-		}
-	}
+	owner = owner || origin.owner;
+	repo = repo || origin.repo;
 
 	// headSha: the PR head commit (headRefOid), else the worktree HEAD.
 	let headSha = strOf(pr.headRefOid);
