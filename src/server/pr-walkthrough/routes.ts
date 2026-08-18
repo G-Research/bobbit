@@ -14,7 +14,7 @@ import { deriveNavLabel } from "../../shared/pr-walkthrough/nav-label.js";
 import type { PrWalkthroughCardSection } from "../../shared/pr-walkthrough/types.js";
 import type { WalkthroughSessionManagerLike } from "./walkthrough-agent-manager.js";
 import { WalkthroughAnalysisBundleStore, analysisBundleToParsedDiff, createAnalysisBundleFromParsedDiff, type PrWalkthroughAnalysisBundle, type ReadPrWalkthroughBundleRequest } from "./walkthrough-analysis-bundle.js";
-import { parseGithubPrReference, resolveGithubPr, resolveGithubExportAuth } from "./github-adapter.js";
+import { GithubPrAdapterError, parseGithubPrReference, resolveGithubPr, resolveGithubExportAuth } from "./github-adapter.js";
 import { resolveLocalChangeset } from "./git-changeset.js";
 import { validatePrWalkthroughYaml, type WalkthroughParsedDiffForYamlMapping } from "./walkthrough-yaml-schema.js";
 import type { PrWalkthroughJobRecord, PrWalkthroughTarget } from "./walkthrough-agent-store.js";
@@ -419,7 +419,17 @@ export async function handlePrWalkthroughApiRoute(
 				fail(400, "Explicit confirmation is required before submitting a GitHub review", { code: "CONFIRMATION_REQUIRED" });
 				return true;
 			}
-			const result = await submitExport(changesetId, stored.payload, body, deps);
+			// Preserve the legacy unavailable response without doing trust discovery, but
+			// gate every export-capable GitHub payload against one current effective-host
+			// snapshot before loading the export adapter or starting any GitHub work.
+			if (stored.payload.export?.provider !== "github" || stored.payload.export.available !== true) {
+				const result = await submitExport(changesetId, stored.payload, body);
+				json(result, result.ok ? 200 : typeof result.status === "number" ? result.status : 400);
+				return true;
+			}
+			const trustedHosts = await resolveGithubTrustedHostsSnapshot(deps);
+			const validatedHost = validateStoredGithubExportTarget(stored.payload.changeset, trustedHosts);
+			const result = await submitExport(changesetId, stored.payload, body, validatedHost, deps);
 			json(result, result.ok ? 200 : typeof result.status === "number" ? result.status : 400);
 			return true;
 		}
@@ -899,7 +909,13 @@ function mapComment(comment: any, cards: WalkthroughCard[]): Record<string, unkn
 	};
 }
 
-async function submitExport(changesetId: string, payload: WalkthroughResolveResult, body: any, deps: PrWalkthroughRouteDeps = { defaultCwd: process.cwd(), readBody: async () => ({}) }): Promise<Record<string, unknown>> {
+async function submitExport(
+	changesetId: string,
+	payload: WalkthroughResolveResult,
+	body: any,
+	validatedHost = "github.com",
+	deps: PrWalkthroughRouteDeps = { defaultCwd: process.cwd(), readBody: async () => ({}) },
+): Promise<Record<string, unknown>> {
 	void changesetId;
 	if (payload.export?.provider !== "github" || payload.export.available !== true) {
 		return { ok: false, error: "GitHub review submission is unavailable for this walkthrough", code: "EXPORT_UNAVAILABLE" };
@@ -909,10 +925,7 @@ async function submitExport(changesetId: string, payload: WalkthroughResolveResu
 	const submitGithubReview = module?.submitGithubReview;
 	if (typeof buildGithubReviewPreview === "function" && typeof submitGithubReview === "function") {
 		const preview = buildGithubReviewPreview(body.draft, payload.cards, payload.changeset);
-		// Derive the host from the stored changeset so the gh path (used when no env
-		// token is present) targets the right host (`--hostname` for enterprise).
-		const host = hostFromUrl(stringValue(payload.changeset.prUrl) ?? stringValue(payload.changeset.externalUrl));
-		return submitGithubReview(preview, { confirm: true, event: body.event }, { ghHost: host, cwd: stringValue(body.cwd), noExternal: deps.noExternal });
+		return submitGithubReview(preview, { confirm: true, event: body.event }, { ghHost: validatedHost, cwd: stringValue(body.cwd), noExternal: deps.noExternal });
 	}
 	return { ok: false, error: "GitHub review submission adapter is unavailable", code: "EXPORT_ADAPTER_UNAVAILABLE" };
 }
@@ -1337,6 +1350,50 @@ function verifyCallerSession(
 	return sessionId;
 }
 
+/** Strictly validate the stored legacy export identity against the same host
+ * snapshot used by current walkthrough routes. The export mapper accepts loose
+ * changeset fields, so reject any explicit identity that disagrees with the
+ * canonical PR URL before the adapter can choose a target. */
+function validateStoredGithubExportTarget(changeset: WalkthroughChangeset, trustedHosts: readonly string[]): string {
+	const prUrl = stringValue(changeset.prUrl) ?? stringValue(changeset.externalUrl);
+	if (!prUrl) {
+		throw new GithubPrAdapterError("Stored walkthrough is missing a valid GitHub pull request URL", {
+			status: 400,
+			code: "invalid_github_pr_target",
+		});
+	}
+	const parsed = parseGithubPrReference({ prUrl, prNumber: changeset.prNumber }, [...trustedHosts]);
+	if (!parsed.host || !parsed.owner || !parsed.repo || !parsed.number || !parsed.url) {
+		throw new GithubPrAdapterError("Stored walkthrough has an invalid GitHub pull request target", {
+			status: 400,
+			code: "invalid_github_pr_target",
+		});
+	}
+
+	const storedNumber = changeset.prNumber;
+	if (storedNumber !== undefined) {
+		const normalized = typeof storedNumber === "number"
+			? (Number.isInteger(storedNumber) && storedNumber > 0 ? storedNumber : undefined)
+			: /^#?\d+$/.test(storedNumber.trim()) ? Number(storedNumber.trim().replace(/^#/, "")) : undefined;
+		if (normalized !== parsed.number) throwInvalidStoredGithubIdentity();
+	}
+	const identity = changeset as WalkthroughChangeset & { owner?: unknown; repo?: unknown };
+	const owner = stringValue(identity.owner);
+	const repo = stringValue(identity.repo)?.replace(/\.git$/i, "");
+	if ((owner && owner.toLowerCase() !== parsed.owner.toLowerCase())
+		|| (repo && repo.toLowerCase() !== parsed.repo.toLowerCase())) {
+		throwInvalidStoredGithubIdentity();
+	}
+	return parsed.host;
+}
+
+function throwInvalidStoredGithubIdentity(): never {
+	throw new GithubPrAdapterError("Stored walkthrough GitHub identity does not match its pull request URL", {
+		status: 400,
+		code: "invalid_github_pr_target",
+	});
+}
+
 /** Resolve and normalize one server-authoritative host snapshot. A missing
  * production callback fails closed to the built-in hosts recognized by
  * `isTrustedExternalHost`; it never falls back to reading preferences here. */
@@ -1390,14 +1447,6 @@ function hostFromTarget(target: { host?: unknown; prUrl?: unknown }): string | u
 		} catch { return undefined; }
 	}
 	return undefined;
-}
-
-/** Derive a host from a bare URL string (undefined when absent/unparseable). */
-function hostFromUrl(value: string | undefined): string | undefined {
-	if (!value || !value.trim()) return undefined;
-	try {
-		return new URL(value.trim()).hostname.replace(/\.$/, "").toLowerCase();
-	} catch { return undefined; }
 }
 
 /**

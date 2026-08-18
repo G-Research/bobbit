@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -15,6 +15,7 @@ import {
 	resolveWalkthroughForTesting,
 	type PrWalkthroughRouteDeps,
 } from "../../src/server/pr-walkthrough/routes.js";
+import { WalkthroughStore } from "../../src/server/pr-walkthrough/walkthrough-store.js";
 
 const BASE_SHA = "a".repeat(40);
 const HEAD_SHA = "b".repeat(40);
@@ -114,6 +115,7 @@ class PrWalkthroughRouteFixture {
 	private readonly sessions = new Map<string, InMemorySession>();
 	private readonly walkthroughs = new Map<string, StoredResolve>();
 	private readonly trustedHosts = new Set<string>();
+	private githubAuthToken?: string;
 	private nextId = 1;
 
 	constructor(
@@ -125,11 +127,24 @@ class PrWalkthroughRouteFixture {
 		this.trustedHosts.add(host);
 	}
 
+	untrustGithubHost(host: string): void {
+		this.trustedHosts.delete(host);
+	}
+
+	authenticateGithub(token = "configured-host-token"): void {
+		this.githubAuthToken = token;
+	}
+
+	storeLegacyWalkthrough(payload: StoredResolve): void {
+		if (!this.stateDir) throw new Error("legacy walkthrough storage requires a fixture stateDir");
+		new WalkthroughStore(this.stateDir).save(payload as any);
+	}
 
 	readonly commandRunner: CommandRunner = {
 		execFile: async (command, args, options) => {
-			if (command === "gh") {
+			if (command === "gh" || (this.githubAuthToken && args[0] === "auth" && args[1] === "token")) {
 				this.ghCalls.push(args.join(" "));
+				if (this.githubAuthToken) return { stdout: `${this.githubAuthToken}\n`, stderr: "" };
 				throw new Error("[pr-walkthrough-api] gh unavailable in tier-1");
 			}
 			if (command !== "git") throw new Error(`unexpected command: ${command}`);
@@ -195,6 +210,7 @@ class PrWalkthroughRouteFixture {
 
 		const submitMatch = url.pathname.match(/^\/api\/pr-walkthrough\/(.+)\/export\/submit$/);
 		if (submitMatch && method === "POST") {
+			if (this.stateDir) return this.callProductionRoute(url, body);
 			const walkthrough = this.walkthroughs.get(decodeURIComponent(submitMatch[1]));
 			if (!walkthrough) return json({ error: `Walkthrough not found: ${submitMatch[1]}` }, 404);
 			if (body?.confirm !== true) {
@@ -561,6 +577,103 @@ test.describe("PR walkthrough REST API", () => {
 		} finally {
 			await githubApi.close();
 			rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	test("configured-only enterprise legacy submit uses the validated host and PR identity", async () => {
+		const root = mkdtempSync(join(tmpdir(), "bobbit-prw-legacy-configured-"));
+		const headquartersDir = join(root, "headquarters");
+		const stateDir = join(headquartersDir, "state");
+		const fakeGh = createFakeGh(root);
+		const enterpriseHost = "github.configured.example";
+		try {
+			await withEnvironment({
+				BOBBIT_DIR: headquartersDir,
+				BOBBIT_GH_COMMAND: fakeGh.command,
+				BOBBIT_TEST_GH_LOG: fakeGh.logPath,
+				GITHUB_TOKEN: undefined,
+				GH_TOKEN: undefined,
+			}, async () => {
+				const api = new PrWalkthroughRouteFixture(stateDir, root);
+				api.trustGithubHost(enterpriseHost);
+				api.authenticateGithub();
+				const fixture = api.createLocalFixture();
+				const result = await resolveLocal(api, fixture, {
+					prUrl: `https://${enterpriseHost}/acme/widgets/pull/42`,
+				});
+				expect(result.export.available).toBe(true);
+				api.storeLegacyWalkthrough(result);
+
+				const submitted = await api.fetch(`/api/pr-walkthrough/${encodeURIComponent(result.changesetId)}/export/submit`, {
+					method: "POST",
+					body: JSON.stringify({
+						confirm: true,
+						event: "APPROVE",
+						cwd: root,
+						draft: { changeset: result.changeset, decisions: {}, completedCardIds: [], updatedAt: new Date().toISOString(), comments: [] },
+					}),
+				});
+				const submittedBody = await submitted.json();
+				expect(submitted.status, JSON.stringify(submittedBody)).toBe(200);
+				expect(submittedBody).toMatchObject({ ok: true, submitted: true });
+				const calls = readFileSync(fakeGh.logPath, "utf8").trim().split("\n").map(line => JSON.parse(line));
+				expect(calls).toHaveLength(1);
+				expect(calls[0].args).toEqual([
+					"api",
+					"repos/acme/widgets/pulls/42/reviews",
+					"--method", "POST",
+					"--input", expect.any(String),
+					"--hostname", enterpriseHost,
+				]);
+				expect(api.trustedHostResolutionCalls).toEqual([[enterpriseHost], [enterpriseHost]]);
+			});
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("legacy submit rejects a removed enterprise host before any additional GitHub call", async () => {
+		const root = mkdtempSync(join(tmpdir(), "bobbit-prw-legacy-removed-"));
+		const headquartersDir = join(root, "headquarters");
+		const stateDir = join(headquartersDir, "state");
+		const fakeGh = createFakeGh(root);
+		const enterpriseHost = "github.configured.example";
+		try {
+			await withEnvironment({
+				BOBBIT_DIR: headquartersDir,
+				BOBBIT_GH_COMMAND: fakeGh.command,
+				BOBBIT_TEST_GH_LOG: fakeGh.logPath,
+				GITHUB_TOKEN: undefined,
+				GH_TOKEN: undefined,
+			}, async () => {
+				const api = new PrWalkthroughRouteFixture(stateDir, root);
+				api.trustGithubHost(enterpriseHost);
+				api.authenticateGithub();
+				const fixture = api.createLocalFixture();
+				const result = await resolveLocal(api, fixture, {
+					prUrl: `https://${enterpriseHost}/acme/widgets/pull/42`,
+				});
+				expect(result.export.available).toBe(true);
+				api.storeLegacyWalkthrough(result);
+				api.untrustGithubHost(enterpriseHost);
+				const ghAuthCallsBeforeSubmit = [...api.ghCalls];
+
+				const rejected = await api.fetch(`/api/pr-walkthrough/${encodeURIComponent(result.changesetId)}/export/submit`, {
+					method: "POST",
+					body: JSON.stringify({
+						confirm: true,
+						cwd: root,
+						draft: { changeset: result.changeset, decisions: {}, completedCardIds: [], updatedAt: new Date().toISOString(), comments: [] },
+					}),
+				});
+				expect(rejected.status).toBe(400);
+				expect(await rejected.json()).toMatchObject({ code: "untrusted_github_host", host: enterpriseHost });
+				expect(api.ghCalls).toEqual(ghAuthCallsBeforeSubmit);
+				expect(existsSync(fakeGh.logPath)).toBe(false);
+				expect(api.trustedHostResolutionCalls).toEqual([[enterpriseHost], []]);
+			});
+		} finally {
+			rmSync(root, { recursive: true, force: true });
 		}
 	});
 
