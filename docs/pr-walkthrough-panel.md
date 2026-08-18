@@ -1035,20 +1035,19 @@ The effective set is the union of:
   host-specific auth configuration are trusted automatically. A user who already ran
   `gh auth login --hostname <host>` therefore does not have to configure Bobbit again.
 
-`GithubTrustedHostResolver` discovers only host keys with `gh auth status --json hosts`
-and normalizes them through the same hostname validator used for managed preferences.
-It never asks `gh` for a token, and never exposes, persists, or logs command output or
-errors. Token and generic host/repository environment overrides are stripped from the
-discovery subprocess, so environment-only authorization cannot make an arbitrary host
-trusted. The former `BOBBIT_GITHUB_TRUSTED_HOSTS` environment variable is not a trust
-source.
+`GithubTrustedHostResolver` reads only host keys from the local `gh` configuration and
+normalizes them through the same hostname validator used for managed preferences. It
+does not run an authentication-status or API probe, request tokens, or contact any
+configured host. Token data is never exposed, persisted, or logged, and environment-only
+authorization cannot make an arbitrary host trusted. The former
+`BOBBIT_GITHUB_TRUSTED_HOSTS` environment variable is not a trust source.
 
 Discovery is briefly cached and concurrent refreshes share one in-flight lookup. Managed
-preferences remain live on every resolution. If `gh` is missing, times out, returns
-invalid data, or otherwise cannot be read, discovery contributes no hosts; Bobbit fails
-closed to the built-in plus managed set. This short cache avoids spawning `gh` for every
-status poll or walkthrough boundary while allowing new `gh` configuration to take
-effect promptly.
+preferences remain live on every resolution. If the local `gh` configuration is absent,
+unreadable, or invalid, discovery contributes no hosts; Bobbit fails closed to the
+built-in plus managed set. This short cache avoids repeatedly reading configuration at
+every status poll or walkthrough boundary while allowing new host entries to take effect
+promptly.
 
 `PUT /api/preferences` runs `normalizeTrustedHosts` over managed entries. Each entry is
 lowercased, has any trailing dot stripped, and — if a full URL is pasted — reduced to its

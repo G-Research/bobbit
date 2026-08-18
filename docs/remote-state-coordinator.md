@@ -42,12 +42,12 @@ CLI. This lets an existing host-specific `gh` login enable an enterprise host wi
 duplicate Bobbit preference, while preventing individual consumers from drifting onto
 different allowlists.
 
-Discovery requests only the keys of `gh`'s host map; it never requests, returns,
-persists, or logs tokens. Generic token and host environment variables are removed from
-the discovery subprocess, so an environment-only token cannot authorize an arbitrary
-remote. Results are briefly cached and concurrent callers share the lookup. If `gh`
-configuration cannot be read, discovery contributes nothing and trust falls back to the
-built-in plus managed set.
+Discovery reads only host keys from the local `gh` configuration; it does not run an
+authentication-status or API probe, request tokens, or contact the configured hosts.
+Token data is never returned, persisted, or logged, and environment-only authorization
+cannot authorize an arbitrary remote. Results are briefly cached and concurrent callers
+share the lookup. If `gh` configuration cannot be read, discovery contributes nothing
+and trust falls back to the built-in plus managed set.
 
 The browser queries the server for a normalized boolean decision rather than receiving
 or rebuilding the effective list. Unknown hosts therefore remain rejected, while a
