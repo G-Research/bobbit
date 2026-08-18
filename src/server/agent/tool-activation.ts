@@ -603,6 +603,13 @@ function resolveExtensionPath(provider: ToolProvider & { groupDir: string; baseD
 export function jsonSchemaToTypeBox(schema: Record<string, unknown>): string {
 	if (!schema || typeof schema !== 'object') return 'Type.Any()';
 
+	// Handle unions before `type`: MCP meta-tool args explicitly accepts either a
+	// JSON object (GPT/Bedrock) or a JSON-encoded object string (some Completions models).
+	const anyOf = schema.anyOf as Record<string, unknown>[] | undefined;
+	if (Array.isArray(anyOf) && anyOf.length > 0) {
+		return `Type.Union([${anyOf.map(jsonSchemaToTypeBox).join(', ')}])`;
+	}
+
 	// Handle enum
 	const enumVals = schema.enum as unknown[] | undefined;
 	if (enumVals && Array.isArray(enumVals)) {
@@ -622,7 +629,11 @@ export function jsonSchemaToTypeBox(schema: Record<string, unknown>): string {
 		}
 		case 'object': {
 			const properties = schema.properties as Record<string, Record<string, unknown>> | undefined;
-			if (!properties) return 'Type.Any()';
+			if (!properties) {
+				return schema.additionalProperties === true
+					? 'Type.Object({}, { additionalProperties: true })'
+					: 'Type.Any()';
+			}
 			const required = (schema.required as string[]) || [];
 			const entries = Object.entries(properties).map(([key, propSchema]) => {
 				const tb = jsonSchemaToTypeBox(propSchema);
@@ -709,6 +720,60 @@ ${toolRegistrations}
 }
 
 /**
+ * Result of normalizing the MCP meta-tool `args` parameter.
+ */
+export type NormalizedMcpMetaArgs =
+	| { ok: true; args: Record<string, unknown> }
+	| { ok: false; reason: "args_not_json" | "args_must_be_object" };
+
+/**
+ * Normalize the `args` value a model supplied to an MCP meta-tool.
+ *
+ * Some OpenAI-Completions models (e.g. GLM) serialize the nested `args` object
+ * as a JSON *string*. The meta-tool schema declares `args` as a property-less
+ * object, which maps to `Type.Any()`, so the string passes pi's parameter
+ * validation and would otherwise be forwarded verbatim to the MCP server,
+ * which then errors. This helper accepts that shape safely.
+ *
+ * HERMETIC: this function is serialized verbatim into generated MCP meta-tool
+ * extensions via `Function.prototype.toString()`. It must never reference
+ * imports, module-scope constants, other module-scope helpers, or private
+ * fields. Inner declarations are fine — they are serialized with the body.
+ *
+ * Exactly one `JSON.parse` on a top-level string; the result is never
+ * re-parsed. No `eval`, no `new Function`, no coercion, no recursion.
+ * Accepted objects are returned by identity.
+ *
+ * The plain-object check is inlined on a single `candidate` value rather than
+ * factored into an inner helper: esbuild's `keepNames` (used by tsx and by the
+ * test prebundler) rewrites *any* nested function declaration or name-inferred
+ * arrow into `__name(fn, "name")`, which references a module-scope helper that
+ * does not exist inside a generated extension. Zero nested declarations means
+ * zero injection surface, and it also collapses the native-object and
+ * parsed-string branches onto one shared plain-object boundary. Pinned by the
+ * serialization guard tests.
+ */
+export function normalizeMcpMetaArgs(raw: unknown): NormalizedMcpMetaArgs {
+	if (raw === undefined || raw === null) return { ok: true, args: {} };
+	let candidate: unknown = raw;
+	if (typeof raw === "string") {
+		try {
+			candidate = JSON.parse(raw);
+		} catch {
+			return { ok: false, reason: "args_not_json" };
+		}
+	}
+	if (candidate === null || typeof candidate !== "object" || Array.isArray(candidate)) {
+		return { ok: false, reason: "args_must_be_object" };
+	}
+	const proto = Object.getPrototypeOf(candidate);
+	if (proto !== Object.prototype && proto !== null) {
+		return { ok: false, reason: "args_must_be_object" };
+	}
+	return { ok: true, args: candidate as Record<string, unknown> };
+}
+
+/**
  * Generate a pi-coding-agent extension that registers ONE meta-tool
  * `mcp_<serverName>` covering all of `ops`. Replaces the per-op registrations
  * produced by `generateMcpProxyExtension`.
@@ -718,6 +783,11 @@ ${toolRegistrations}
  * `args` object. The generated execute body POSTs the canonical per-op
  * tool name `mcp__<server>__<operation>` to `/api/internal/mcp-call` —
  * the dispatcher and on-disk routing identifier are completely unchanged.
+ *
+ * Model-supplied `args` is normalized by the serialized `normalizeMcpMetaArgs`
+ * helper before dispatch, so a JSON-string `args` from an OpenAI-Completions
+ * model is accepted and anything that is not a plain object is rejected
+ * locally as `invalid_args` without contacting the MCP dispatcher.
  *
  * When `unavailableReason` is provided OR `ops` is empty, emits a stub
  * meta-tool whose execute returns a structured unavailable message. The
@@ -790,6 +860,7 @@ export default function(pi) {
   const gwUrl = process.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitDir, "state", "gateway-url"), "utf-8").trim();
   const token = process.env.BOBBIT_TOKEN || fs.readFileSync(path.join(bobbitDir, "state", "token"), "utf-8").trim();
   const validOps = new Set(${JSON.stringify(opNames)});
+  const __bobbitNormalizeArgs = (${normalizeMcpMetaArgs.toString()});
   pi.registerTool({
     name: ${JSON.stringify(metaName)},
     description: ${JSON.stringify(description)},
@@ -797,10 +868,14 @@ export default function(pi) {
     execute: async (toolCallId, params) => {
       void toolCallId;
       const operation = params && params.operation;
-      const args = (params && params.args) || {};
       if (typeof operation !== "string" || !validOps.has(operation)) {
         return { content: [{ type: "text", text: JSON.stringify({ error: "invalid_operation", server: ${JSON.stringify(serverName)}, operation: operation }) }] };
       }
+      const __n = __bobbitNormalizeArgs(params && params.args);
+      if (!__n.ok) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: "invalid_args", server: ${JSON.stringify(serverName)}, operation: operation, reason: __n.reason, hint: "args must be a JSON object of the operation's parameters" }) }] };
+      }
+      const args = __n.args;
       const fullName = ${sub
 			? `"mcp__" + ${JSON.stringify(serverName)} + "__" + ${JSON.stringify(sub)} + "__" + operation`
 			: `"mcp__" + ${JSON.stringify(serverName)} + "__" + operation`};
