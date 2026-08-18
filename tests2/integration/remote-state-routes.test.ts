@@ -174,9 +174,12 @@ test.describe("remote-state coordinator routes", () => {
 		test.setTimeout(30_000);
 		const host = "ghe.config-only.test";
 		const unknownHost = "unknown.config-only.test";
+		const ghConfigDir = realpathSync(mkdtempSync(join(nonGitCwd(), "gh-config-")));
+		writeFileSync(join(ghConfigDir, "hosts.yml"), `${host}:\n    user: route-fixture\n`, "utf8");
+		const previousGhConfigDir = process.env.GH_CONFIG_DIR;
+		process.env.GH_CONFIG_DIR = ghConfigDir;
 		const branch = `fixture/gh-config-host-${Date.now()}`;
-		const sessionId = await createRemoteStateSession(gateway, gitCwd());
-		gateway.sessionManager.updateSessionMeta(sessionId, { branch });
+		let sessionId: string | undefined;
 		const runner = (gateway.sessionManager as any).commandRunner;
 		const originalExecFile = runner.execFile;
 		let remoteHost = host;
@@ -184,54 +187,55 @@ test.describe("remote-state coordinator routes", () => {
 		const remoteGhCalls: string[][] = [];
 		let originalTrustedHosts: unknown = [];
 
-		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
-			const command = commandName(file);
-			if (command === "git" && args.join(" ") === "remote get-url origin") {
-				return { stdout: `https://${remoteHost}/acme/widget.git\n`, stderr: "" };
-			}
-			if (command === "gh" && args[0] === "auth" && args[1] === "status") {
-				discoveryCalls += 1;
-				expect(args).toEqual(["auth", "status", "--json", "hosts", "--jq", ".hosts | keys[]"]);
-				return { stdout: `${host}\n`, stderr: "" };
-			}
-			if (command === "gh") {
-				remoteGhCalls.push([...args]);
-				if (args[0] === "pr" && args[1] === "list") {
-					return {
-						stdout: JSON.stringify([{
-							number: 74,
-							url: `https://${host}/acme/widget/pull/74`,
-							title: "Configured enterprise host",
-							state: "OPEN",
-							mergeable: "MERGEABLE",
-							headRefName: branch,
-							baseRefName: "main",
-							...ownedHeadEvidence("acme", "widget"),
-						}]),
-						stderr: "",
-					};
-				}
-				if (args[0] === "api") {
-					return {
-						stdout: JSON.stringify({ data: { repository: { viewerPermission: "ADMIN", pullRequest: { viewerCanMergeAsAdmin: true } } } }),
-						stderr: "",
-					};
-				}
-				if (args[0] === "pr" && args[1] === "merge") return { stdout: "merged", stderr: "" };
-			}
-			const probe = standardSingleRepositoryProbe(file, args, gitCwd());
-			if (probe) return probe;
-			return unexpectedRunnerCommand(file, args, options);
-		};
-
 		try {
+			sessionId = await createRemoteStateSession(gateway, gitCwd());
+			gateway.sessionManager.updateSessionMeta(sessionId, { branch });
+			runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+				const command = commandName(file);
+				if (command === "git" && args.join(" ") === "remote get-url origin") {
+					return { stdout: `https://${remoteHost}/acme/widget.git\n`, stderr: "" };
+				}
+				if (command === "gh" && args[0] === "auth" && args[1] === "status") {
+					discoveryCalls += 1;
+					return unexpectedRunnerCommand(file, args, options);
+				}
+				if (command === "gh") {
+					remoteGhCalls.push([...args]);
+					if (args[0] === "pr" && args[1] === "list") {
+						return {
+							stdout: JSON.stringify([{
+								number: 74,
+								url: `https://${host}/acme/widget/pull/74`,
+								title: "Configured enterprise host",
+								state: "OPEN",
+								mergeable: "MERGEABLE",
+								headRefName: branch,
+								baseRefName: "main",
+								...ownedHeadEvidence("acme", "widget"),
+							}]),
+							stderr: "",
+						};
+					}
+					if (args[0] === "api") {
+						return {
+							stdout: JSON.stringify({ data: { repository: { viewerPermission: "ADMIN", pullRequest: { viewerCanMergeAsAdmin: true } } } }),
+							stderr: "",
+						};
+					}
+					if (args[0] === "pr" && args[1] === "merge") return { stdout: "merged", stderr: "" };
+				}
+				const probe = standardSingleRepositoryProbe(file, args, gitCwd());
+				if (probe) return probe;
+				return unexpectedRunnerCommand(file, args, options);
+			};
+
 			const originalPreferences = await apiFetch("/api/preferences");
 			if (originalPreferences.ok) originalTrustedHosts = (await originalPreferences.json()).githubTrustedHosts ?? [];
 			expect((await apiFetch("/api/preferences", {
 				method: "PUT",
 				body: JSON.stringify({ githubTrustedHosts: [] }),
 			})).status).toBe(200);
-			// The fork-scoped gateway may have cached a failed discovery in an earlier
+			// The fork-scoped gateway may have cached discovery from an earlier
 			// integration file. Cross the short resolver TTL deterministically.
 			gateway.clock.advance(60_000);
 
@@ -251,7 +255,7 @@ test.describe("remote-state coordinator routes", () => {
 				body: JSON.stringify({ method: "squash", branch }),
 			});
 			expect(merge.status).toBe(200);
-			expect(discoveryCalls).toBe(1);
+			expect(discoveryCalls).toBe(0);
 			expect(remoteGhCalls.find(args => args[0] === "pr" && args[1] === "list")?.slice(0, 4)).toEqual([
 				"pr", "list", "--repo", `${host}/acme/widget`,
 			]);
@@ -272,11 +276,20 @@ test.describe("remote-state coordinator routes", () => {
 			expect(remoteGhCalls).toHaveLength(callsBeforeUnknown);
 		} finally {
 			runner.execFile = originalExecFile;
-			await deleteSession(sessionId);
-			await apiFetch("/api/preferences", {
-				method: "PUT",
-				body: JSON.stringify({ githubTrustedHosts: originalTrustedHosts }),
-			}).catch(() => {});
+			if (previousGhConfigDir === undefined) delete process.env.GH_CONFIG_DIR;
+			else process.env.GH_CONFIG_DIR = previousGhConfigDir;
+			// Expire the fixture discovery so its host cannot bleed into the next test.
+			gateway.clock.advance(60_000);
+			try {
+				if (sessionId) await deleteSession(sessionId);
+			} finally {
+				await apiFetch("/api/preferences", {
+					method: "PUT",
+					body: JSON.stringify({ githubTrustedHosts: originalTrustedHosts }),
+				}).catch(() => {});
+				const cleanup = await awaitableRm(ghConfigDir, { maxAttempts: 5, backoffMs: 50 });
+				expect(cleanup.removed, `GH_CONFIG_DIR fixture cleanup failed: ${String(cleanup.lastError ?? "unknown error")}`).toBe(true);
+			}
 		}
 	});
 
