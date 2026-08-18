@@ -170,6 +170,129 @@ test.describe("remote-state coordinator routes", () => {
 		serverModule.__clearRemoteStateForceNowFake();
 	});
 
+	test("trusts a gh-config-only enterprise host for status, permissions, merge, and trust checks", async ({ gateway }) => {
+		test.setTimeout(30_000);
+		const host = "ghe.config-only.test";
+		const unknownHost = "unknown.config-only.test";
+		const ghConfigDir = realpathSync(mkdtempSync(join(nonGitCwd(), "gh-config-")));
+		writeFileSync(join(ghConfigDir, "hosts.yml"), `${host}:\n    user: route-fixture\n`, "utf8");
+		const previousGhConfigDir = process.env.GH_CONFIG_DIR;
+		process.env.GH_CONFIG_DIR = ghConfigDir;
+		const branch = `fixture/gh-config-host-${Date.now()}`;
+		let sessionId: string | undefined;
+		const runner = (gateway.sessionManager as any).commandRunner;
+		const originalExecFile = runner.execFile;
+		let remoteHost = host;
+		let discoveryCalls = 0;
+		const remoteGhCalls: string[][] = [];
+		let originalTrustedHosts: unknown = [];
+
+		try {
+			sessionId = await createRemoteStateSession(gateway, gitCwd());
+			gateway.sessionManager.updateSessionMeta(sessionId, { branch });
+			runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+				const command = commandName(file);
+				if (command === "git" && args.join(" ") === "remote get-url origin") {
+					return { stdout: `https://${remoteHost}/acme/widget.git\n`, stderr: "" };
+				}
+				if (command === "gh" && args[0] === "auth" && args[1] === "status") {
+					discoveryCalls += 1;
+					return unexpectedRunnerCommand(file, args, options);
+				}
+				if (command === "gh") {
+					remoteGhCalls.push([...args]);
+					if (args[0] === "pr" && args[1] === "list") {
+						return {
+							stdout: JSON.stringify([{
+								number: 74,
+								url: `https://${host}/acme/widget/pull/74`,
+								title: "Configured enterprise host",
+								state: "OPEN",
+								mergeable: "MERGEABLE",
+								headRefName: branch,
+								baseRefName: "main",
+								...ownedHeadEvidence("acme", "widget"),
+							}]),
+							stderr: "",
+						};
+					}
+					if (args[0] === "api") {
+						return {
+							stdout: JSON.stringify({ data: { repository: { viewerPermission: "ADMIN", pullRequest: { viewerCanMergeAsAdmin: true } } } }),
+							stderr: "",
+						};
+					}
+					if (args[0] === "pr" && args[1] === "merge") return { stdout: "merged", stderr: "" };
+				}
+				const probe = standardSingleRepositoryProbe(file, args, gitCwd());
+				if (probe) return probe;
+				return unexpectedRunnerCommand(file, args, options);
+			};
+
+			const originalPreferences = await apiFetch("/api/preferences");
+			if (originalPreferences.ok) originalTrustedHosts = (await originalPreferences.json()).githubTrustedHosts ?? [];
+			expect((await apiFetch("/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ githubTrustedHosts: [] }),
+			})).status).toBe(200);
+			// The fork-scoped gateway may have cached discovery from an earlier
+			// integration file. Cross the short resolver TTL deterministically.
+			gateway.clock.advance(60_000);
+
+			const trustedCheck = await apiFetch(`/api/github/trusted-hosts/check?host=${host.toUpperCase()}.`);
+			expect(trustedCheck.status).toBe(200);
+			expect(await trustedCheck.json()).toEqual({ host, trusted: true });
+			const unknownCheck = await apiFetch(`/api/github/trusted-hosts/check?host=${unknownHost}`);
+			expect(await unknownCheck.json()).toEqual({ host: unknownHost, trusted: false });
+			expect((await apiFetch("/api/github/trusted-hosts/check?host=https%3A%2F%2Fevil.test%2Fpath")).status).toBe(400);
+
+			const status = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit`);
+			expect(status.status).toBe(200);
+			expect(await status.json()).toMatchObject({ data: { number: 74, title: "Configured enterprise host", viewerIsAdmin: true, viewerCanMergeAsAdmin: true } });
+
+			const merge = await apiFetch(`/api/sessions/${sessionId}/pr-merge`, {
+				method: "POST",
+				body: JSON.stringify({ method: "squash", branch }),
+			});
+			expect(merge.status).toBe(200);
+			expect(discoveryCalls).toBe(0);
+			expect(remoteGhCalls.find(args => args[0] === "pr" && args[1] === "list")?.slice(0, 4)).toEqual([
+				"pr", "list", "--repo", `${host}/acme/widget`,
+			]);
+			const permissionCalls = remoteGhCalls.filter(args => args[0] === "api");
+			expect(permissionCalls.length).toBeGreaterThan(0);
+			expect(permissionCalls.every(args => args[1] === "--hostname" && args[2] === host)).toBe(true);
+			expect(remoteGhCalls.find(args => args[0] === "pr" && args[1] === "merge")?.slice(0, 5)).toEqual([
+				"pr", "merge", "74", "--repo", `${host}/acme/widget`,
+			]);
+
+			remoteHost = unknownHost;
+			const callsBeforeUnknown = remoteGhCalls.length;
+			expect((await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit&optional=1`)).status).toBe(204);
+			expect((await apiFetch(`/api/sessions/${sessionId}/pr-merge`, {
+				method: "POST",
+				body: JSON.stringify({ method: "squash", branch }),
+			})).status).toBe(409);
+			expect(remoteGhCalls).toHaveLength(callsBeforeUnknown);
+		} finally {
+			runner.execFile = originalExecFile;
+			if (previousGhConfigDir === undefined) delete process.env.GH_CONFIG_DIR;
+			else process.env.GH_CONFIG_DIR = previousGhConfigDir;
+			// Expire the fixture discovery so its host cannot bleed into the next test.
+			gateway.clock.advance(60_000);
+			try {
+				if (sessionId) await deleteSession(sessionId);
+			} finally {
+				await apiFetch("/api/preferences", {
+					method: "PUT",
+					body: JSON.stringify({ githubTrustedHosts: originalTrustedHosts }),
+				}).catch(() => {});
+				const cleanup = await awaitableRm(ghConfigDir, { maxAttempts: 5, backoffMs: 50 });
+				expect(cleanup.removed, `GH_CONFIG_DIR fixture cleanup failed: ${String(cleanup.lastError ?? "unknown error")}`).toBe(true);
+			}
+		}
+	});
+
 	test("coalesces session Git and PR reads and only broadcasts redacted snapshot envelopes", async ({ gateway }) => {
 		test.setTimeout(30_000);
 		const sessionId = await createRemoteStateSession(gateway, gitCwd());

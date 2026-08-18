@@ -21,6 +21,15 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/github-trusted-host-resolver.test.ts",
+      "reason": "Core security and caching coverage for token-free gh-config GitHub host discovery, environment stripping, normalization, failure fallback, and single-flight refreshes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/integration/strict-update-body-routes.test.ts",
       "reason": "Regression contract for strict finite-shape update bodies: exact route allow-lists, accepted representative updates, unknown-key rejection, no mutation, goal policy guidance, and immutable staff sandboxing.",
       "execution": {

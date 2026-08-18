@@ -14,7 +14,7 @@ import { deriveNavLabel } from "../../shared/pr-walkthrough/nav-label.js";
 import type { PrWalkthroughCardSection } from "../../shared/pr-walkthrough/types.js";
 import type { WalkthroughSessionManagerLike } from "./walkthrough-agent-manager.js";
 import { WalkthroughAnalysisBundleStore, analysisBundleToParsedDiff, createAnalysisBundleFromParsedDiff, type PrWalkthroughAnalysisBundle, type ReadPrWalkthroughBundleRequest } from "./walkthrough-analysis-bundle.js";
-import { resolveGithubPr, resolveGithubExportAuth } from "./github-adapter.js";
+import { GithubPrAdapterError, parseGithubPrReference, resolveGithubPr, resolveGithubExportAuth } from "./github-adapter.js";
 import { resolveLocalChangeset } from "./git-changeset.js";
 import { validatePrWalkthroughYaml, type WalkthroughParsedDiffForYamlMapping } from "./walkthrough-yaml-schema.js";
 import type { PrWalkthroughJobRecord, PrWalkthroughTarget } from "./walkthrough-agent-store.js";
@@ -124,6 +124,11 @@ export type PrWalkthroughRouteDeps = {
 	resolveSessionCwd?: (sessionId: string) => string | undefined | Promise<string | undefined>;
 	resolveSessionModel?: (sessionId: string) => string | { provider?: string; id?: string; modelId?: string } | undefined | Promise<string | { provider?: string; id?: string; modelId?: string } | undefined>;
 	preferencesStore?: { get(key: string): unknown };
+	/** Resolve the server-authoritative effective GitHub host set (built-ins,
+	 *  managed preferences, and token-free host keys discovered from gh config).
+	 *  Production wiring must provide this callback; the optional shape preserves
+	 *  direct local-only helper callers while failing closed to built-ins. */
+	resolveGithubTrustedHosts?: () => readonly string[] | Promise<readonly string[]>;
 	getAvailableModels?: (preferencesStore: { get(key: string): unknown }) => Promise<ApiModel[]>;
 	completeModelText?: typeof defaultCompleteModelText;
 	createSynthesisAdapter?: (context: WalkthroughSynthesisContext) => WalkthroughLlmAdapter | undefined | Promise<WalkthroughLlmAdapter | undefined>;
@@ -194,9 +199,13 @@ export async function handlePrWalkthroughApiRoute(
 				fail(403, "Caller is not a bound PR-walkthrough reviewer", { code: "WALKTHROUGH_NOT_BOUND", retryable: false });
 				return true;
 			}
-			// FINDING 1 — trusted-host gate (restores assertTrustedGithubTarget) BEFORE
-			// any diff resolution, incl. the with-SHA local-recompute path.
-			if (!assertTrustedBindingTarget(binding, deps, fail)) return true;
+			// Resolve one effective-host snapshot and enforce it BEFORE any diff,
+			// credential, fetch, or persistence work. The same snapshot is threaded
+			// into the adapter so the gate and fetch path cannot disagree mid-request.
+			const trustedHosts = binding.target?.provider === "github"
+				? await resolveGithubTrustedHostsSnapshot(deps)
+				: [];
+			if (!await assertTrustedBindingTarget(binding, trustedHosts, fail)) return true;
 			const readRequest = {
 				mode: input.mode,
 				format: input.format,
@@ -207,7 +216,7 @@ export async function handlePrWalkthroughApiRoute(
 				hunkOffset: input.hunkOffset,
 				hunkLimit: input.hunkLimit,
 			};
-			const bundleRead = await resolveAndReadBindingBundle(deps, binding, authSessionId, readRequest);
+			const bundleRead = await resolveAndReadBindingBundle(deps, binding, authSessionId, readRequest, trustedHosts);
 			json(await attachPrwReadReceipt(store, binding.jobId, authSessionId, readRequest, bundleRead));
 			return true;
 		}
@@ -237,10 +246,13 @@ export async function handlePrWalkthroughApiRoute(
 				fail(403, "Caller is not a bound PR-walkthrough reviewer", { code: "WALKTHROUGH_NOT_BOUND", retryable: false });
 				return true;
 			}
-			// FINDING 1 — trusted-host gate (restores assertTrustedGithubTarget): an
-			// untrusted-host PR can never have a walkthrough published. Applied BEFORE
-			// validation/persistence so nothing is published for an untrusted host.
-			if (!assertTrustedBindingTarget(binding, deps, fail)) return true;
+			// An untrusted-host PR can never have a walkthrough published. Resolve and
+			// await trust BEFORE validation or persistence so unknown hosts have no side
+			// effects beyond the token-free effective-host lookup.
+			const trustedHosts = binding.target?.provider === "github"
+				? await resolveGithubTrustedHostsSnapshot(deps)
+				: [];
+			if (!await assertTrustedBindingTarget(binding, trustedHosts, fail)) return true;
 			const already = await store.get(PRW_PACK_ID, prwSubmittedKey(binding.jobId));
 			const finalized = await store.get(PRW_PACK_ID, prwFinalPayloadKey(binding.jobId));
 			if (already || finalized || PRW_TERMINAL_STATUSES.has(binding.status ?? "")) {
@@ -295,8 +307,8 @@ export async function handlePrWalkthroughApiRoute(
 				fail(400, "Invalid resolve request");
 				return true;
 			}
-			const extraHosts = normalizeTrustedHosts(deps.preferencesStore?.get("githubTrustedHosts"));
-			const result = sanitizeResolveResult(await resolveWalkthrough(body, deps, extraHosts), extraHosts);
+			const trustedHosts = await resolveGithubTrustedHostsSnapshot(deps);
+			const result = sanitizeResolveResult(await resolveWalkthrough(body, deps, trustedHosts), trustedHosts);
 			await storeWalkthrough(result);
 			json(result);
 			return true;
@@ -326,8 +338,12 @@ export async function handlePrWalkthroughApiRoute(
 				return true;
 			}
 			const { binding } = resolved;
-			// Trust chokepoint — the only place host trust is enforced for the pack post.
-			if (!assertTrustedBindingTarget(binding, deps, fail)) return true;
+			// Trust chokepoint — resolve and await it before auth probing, diff
+			// recomputation, adapter loading, or gh posting.
+			const trustedHosts = binding.target?.provider === "github"
+				? await resolveGithubTrustedHostsSnapshot(deps)
+				: [];
+			if (!await assertTrustedBindingTarget(binding, trustedHosts, fail)) return true;
 			if (binding.target?.provider !== "github") {
 				fail(400, "Local changesets can be previewed but not submitted to GitHub.", { code: "EXPORT_UNAVAILABLE" });
 				return true;
@@ -352,7 +368,7 @@ export async function handlePrWalkthroughApiRoute(
 				cards = (finalized as any).cards as WalkthroughCard[];
 				changeset = (finalized as any).changeset as WalkthroughChangeset;
 			} else {
-				const parsed = await resolveDiffForBindingTarget(binding.target, cwd, deps);
+				const parsed = await resolveDiffForBindingTarget(binding.target, cwd, deps, trustedHosts);
 				changeset = parsed.changeset as unknown as WalkthroughChangeset;
 				cards = synthesizeFallbackCards(changeset, flattenDiffBlocks(parsed.files as unknown as any[]), parsed.warnings as WalkthroughWarning[]);
 			}
@@ -403,7 +419,17 @@ export async function handlePrWalkthroughApiRoute(
 				fail(400, "Explicit confirmation is required before submitting a GitHub review", { code: "CONFIRMATION_REQUIRED" });
 				return true;
 			}
-			const result = await submitExport(changesetId, stored.payload, body, deps);
+			// Preserve the legacy unavailable response without doing trust discovery, but
+			// gate every export-capable GitHub payload against one current effective-host
+			// snapshot before loading the export adapter or starting any GitHub work.
+			if (stored.payload.export?.provider !== "github" || stored.payload.export.available !== true) {
+				const result = await submitExport(changesetId, stored.payload, body);
+				json(result, result.ok ? 200 : typeof result.status === "number" ? result.status : 400);
+				return true;
+			}
+			const trustedHosts = await resolveGithubTrustedHostsSnapshot(deps);
+			const validatedHost = validateStoredGithubExportTarget(stored.payload.changeset, trustedHosts);
+			const result = await submitExport(changesetId, stored.payload, body, validatedHost, deps);
 			json(result, result.ok ? 200 : typeof result.status === "number" ? result.status : 400);
 			return true;
 		}
@@ -431,6 +457,11 @@ async function resolveWalkthrough(body: Record<string, unknown>, deps: PrWalkthr
 	const prNumber = typeof body.prNumber === "number" || typeof body.prNumber === "string" ? body.prNumber : undefined;
 	const prTitle = stringValue(body.prTitle) || stringValue(body.title);
 	const wantsGithub = Boolean(prUrl || prNumber || body.provider === "github");
+
+	// Validate and trust-gate an explicit URL before local git resolution or any
+	// credential/auth probe. This keeps the with-SHA path as strict as the remote
+	// adapter path and prevents an unknown host from causing a pre-trust gh call.
+	if (wantsGithub && prUrl) parseGithubPrReference({ prUrl, prNumber }, extraHosts);
 
 	if (wantsGithub && (!baseSha || !headSha)) {
 		const delegated = await tryResolveGithubWithDelegation({ cwd, prUrl, prNumber, trustedHosts: extraHosts }, deps, context);
@@ -878,7 +909,13 @@ function mapComment(comment: any, cards: WalkthroughCard[]): Record<string, unkn
 	};
 }
 
-async function submitExport(changesetId: string, payload: WalkthroughResolveResult, body: any, deps: PrWalkthroughRouteDeps = { defaultCwd: process.cwd(), readBody: async () => ({}) }): Promise<Record<string, unknown>> {
+async function submitExport(
+	changesetId: string,
+	payload: WalkthroughResolveResult,
+	body: any,
+	validatedHost = "github.com",
+	deps: PrWalkthroughRouteDeps = { defaultCwd: process.cwd(), readBody: async () => ({}) },
+): Promise<Record<string, unknown>> {
 	void changesetId;
 	if (payload.export?.provider !== "github" || payload.export.available !== true) {
 		return { ok: false, error: "GitHub review submission is unavailable for this walkthrough", code: "EXPORT_UNAVAILABLE" };
@@ -888,10 +925,7 @@ async function submitExport(changesetId: string, payload: WalkthroughResolveResu
 	const submitGithubReview = module?.submitGithubReview;
 	if (typeof buildGithubReviewPreview === "function" && typeof submitGithubReview === "function") {
 		const preview = buildGithubReviewPreview(body.draft, payload.cards, payload.changeset);
-		// Derive the host from the stored changeset so the gh path (used when no env
-		// token is present) targets the right host (`--hostname` for enterprise).
-		const host = hostFromUrl(stringValue(payload.changeset.prUrl) ?? stringValue(payload.changeset.externalUrl));
-		return submitGithubReview(preview, { confirm: true, event: body.event }, { ghHost: host, cwd: stringValue(body.cwd), noExternal: deps.noExternal });
+		return submitGithubReview(preview, { confirm: true, event: body.event }, { ghHost: validatedHost, cwd: stringValue(body.cwd), noExternal: deps.noExternal });
 	}
 	return { ok: false, error: "GitHub review submission adapter is unavailable", code: "EXPORT_ADAPTER_UNAVAILABLE" };
 }
@@ -979,7 +1013,7 @@ function storePath(changesetId: string): string {
 
 function typedRouteError(err: unknown): { status: number; extra: Record<string, unknown> } | undefined {
 	if (!err || typeof err !== "object") return undefined;
-	const candidate = err as { status?: unknown; code?: unknown; warnings?: unknown; extra?: unknown };
+	const candidate = err as { status?: unknown; code?: unknown; host?: unknown; warnings?: unknown; extra?: unknown };
 	const status = typeof candidate.status === "number" && candidate.status >= 400 && candidate.status < 600 ? candidate.status : undefined;
 	const extra = candidate.extra && typeof candidate.extra === "object" && !Array.isArray(candidate.extra) ? candidate.extra as Record<string, unknown> : undefined;
 	if (!status && typeof candidate.code !== "string" && !Array.isArray(candidate.warnings) && !extra) return undefined;
@@ -988,6 +1022,7 @@ function typedRouteError(err: unknown): { status: number; extra: Record<string, 
 		extra: {
 			...(extra ?? {}),
 			...(typeof candidate.code === "string" ? { code: candidate.code } : {}),
+			...(typeof candidate.host === "string" ? { host: candidate.host } : {}),
 			...(Array.isArray(candidate.warnings) ? { warnings: candidate.warnings } : {}),
 		},
 	};
@@ -1315,34 +1350,74 @@ function verifyCallerSession(
 	return sessionId;
 }
 
+/** Strictly validate the stored legacy export identity against the same host
+ * snapshot used by current walkthrough routes. The export mapper accepts loose
+ * changeset fields, so reject any explicit identity that disagrees with the
+ * canonical PR URL before the adapter can choose a target. */
+function validateStoredGithubExportTarget(changeset: WalkthroughChangeset, trustedHosts: readonly string[]): string {
+	const prUrl = stringValue(changeset.prUrl) ?? stringValue(changeset.externalUrl);
+	if (!prUrl) {
+		throw new GithubPrAdapterError("Stored walkthrough is missing a valid GitHub pull request URL", {
+			status: 400,
+			code: "invalid_github_pr_target",
+		});
+	}
+	const parsed = parseGithubPrReference({ prUrl, prNumber: changeset.prNumber }, [...trustedHosts]);
+	if (!parsed.host || !parsed.owner || !parsed.repo || !parsed.number || !parsed.url) {
+		throw new GithubPrAdapterError("Stored walkthrough has an invalid GitHub pull request target", {
+			status: 400,
+			code: "invalid_github_pr_target",
+		});
+	}
+
+	const storedNumber = changeset.prNumber;
+	if (storedNumber !== undefined) {
+		const normalized = typeof storedNumber === "number"
+			? (Number.isInteger(storedNumber) && storedNumber > 0 ? storedNumber : undefined)
+			: /^#?\d+$/.test(storedNumber.trim()) ? Number(storedNumber.trim().replace(/^#/, "")) : undefined;
+		if (normalized !== parsed.number) throwInvalidStoredGithubIdentity();
+	}
+	const identity = changeset as WalkthroughChangeset & { owner?: unknown; repo?: unknown };
+	const owner = stringValue(identity.owner);
+	const repo = stringValue(identity.repo)?.replace(/\.git$/i, "");
+	if ((owner && owner.toLowerCase() !== parsed.owner.toLowerCase())
+		|| (repo && repo.toLowerCase() !== parsed.repo.toLowerCase())) {
+		throwInvalidStoredGithubIdentity();
+	}
+	return parsed.host;
+}
+
+function throwInvalidStoredGithubIdentity(): never {
+	throw new GithubPrAdapterError("Stored walkthrough GitHub identity does not match its pull request URL", {
+		status: 400,
+		code: "invalid_github_pr_target",
+	});
+}
+
+/** Resolve and normalize one server-authoritative host snapshot. A missing
+ * production callback fails closed to the built-in hosts recognized by
+ * `isTrustedExternalHost`; it never falls back to reading preferences here. */
+async function resolveGithubTrustedHostsSnapshot(deps: PrWalkthroughRouteDeps): Promise<string[]> {
+	if (typeof deps.resolveGithubTrustedHosts !== "function") return [];
+	return normalizeTrustedHosts(await deps.resolveGithubTrustedHosts());
+}
+
 /**
- * FINDING 1 — trusted-host gate for a binding-routed reviewer. Restores the
- * legacy launcher's `assertTrustedGithubTarget` chokepoint (which rejected
- * untrusted GitHub enterprise hosts BEFORE any diff was resolved). The pack
- * `run` route runs in the CONFINED extension-host worker and CANNOT read gateway
- * preferences (`githubTrustedHosts`), so this enforcement must live SERVER-SIDE,
- * at the two binding-routed routes that DO have `deps.preferencesStore`. It is
- * applied to ALL github targets — INCLUDING the with-SHA local-recompute path in
- * `resolveDiffForBindingTarget`, which otherwise bypasses the github-adapter's
- * own trust check (the gap this finding closes). A reviewer child may already
- * have been spawned for an untrusted host (the worker can't pre-check prefs);
- * that is HARMLESS — bundle + submit both 403 here, resolving/publishing NOTHING,
- * and the child is reaped on cleanup. Returns false (and writes the 403) when the
- * target's host is not trusted. `github.com`/`www.github.com` are the
- * default-trusted baseline (via `isTrustedExternalHost`); enterprise hosts come
- * only from the `githubTrustedHosts` preference.
+ * Trusted-host gate for a binding-routed reviewer. The effective snapshot is
+ * resolved by the route and threaded through every later adapter call, so a
+ * request cannot pass one trust decision and fetch/post under another. This
+ * async boundary must be awaited before any auth, network, or persistence work.
  */
-function assertTrustedBindingTarget(
+async function assertTrustedBindingTarget(
 	binding: PrWalkthroughBinding,
-	deps: PrWalkthroughRouteDeps,
+	trustedHosts: readonly string[],
 	fail: (status: number, message: string, extra?: Record<string, unknown>) => void,
-): boolean {
+): Promise<boolean> {
 	// Only github targets reach an external host; local targets recompute from the
 	// session worktree and have no host to trust.
 	if (binding.target?.provider !== "github") return true;
 	const host = bindingTargetHost(binding.target);
-	const trustedHosts = normalizeTrustedHosts(deps.preferencesStore?.get("githubTrustedHosts"));
-	if (host && isTrustedExternalHost(host, trustedHosts)) return true;
+	if (host && isTrustedExternalHost(host, [...trustedHosts])) return true;
 	fail(403, `Untrusted GitHub PR host: ${host ?? "unknown"}`, { code: "untrusted_github_host", host, retryable: false });
 	return false;
 }
@@ -1374,14 +1449,6 @@ function hostFromTarget(target: { host?: unknown; prUrl?: unknown }): string | u
 	return undefined;
 }
 
-/** Derive a host from a bare URL string (undefined when absent/unparseable). */
-function hostFromUrl(value: string | undefined): string | undefined {
-	if (!value || !value.trim()) return undefined;
-	try {
-		return new URL(value.trim()).hostname.replace(/\.$/, "").toLowerCase();
-	} catch { return undefined; }
-}
-
 /**
  * In-flight promise map used by resolveAndReadBindingBundle to deduplicate concurrent
  * lazy bundle resolutions for the same jobId. Without this guard, three concurrent
@@ -1406,6 +1473,7 @@ async function resolveAndReadBindingBundle(
 	binding: PrWalkthroughBinding,
 	sessionId: string,
 	readReq: Omit<ReadPrWalkthroughBundleRequest, "sessionId" | "jobId">,
+	trustedHosts?: readonly string[],
 ): Promise<Record<string, unknown>> {
 	const stateDir = deps.stateDir ?? bobbitStateDir();
 	const bundleStore = new WalkthroughAnalysisBundleStore(stateDir);
@@ -1426,7 +1494,7 @@ async function resolveAndReadBindingBundle(
 				if (bundleStore.load(binding.jobId)) return; // double-check after acquiring
 				const cwd = await resolveBindingCwd(deps, sessionId);
 				jobLike.cwd = cwd;
-				const parsedDiff = await resolveDiffForBindingTarget(binding.target, cwd, deps);
+				const parsedDiff = await resolveDiffForBindingTarget(binding.target, cwd, deps, trustedHosts);
 				const bundle = createAnalysisBundleFromParsedDiff(jobLike, parsedDiff);
 				bundleStore.save(binding.jobId, bundle);
 			})().finally(() => resolvingBundlePromises.delete(binding.jobId));
@@ -1477,8 +1545,11 @@ async function resolveDiffForBindingTarget(
 	target: PrWalkthroughTarget,
 	cwd: string,
 	deps: PrWalkthroughRouteDeps,
+	trustedHostSnapshot?: readonly string[],
 ): Promise<WalkthroughParsedDiffForYamlMapping> {
-	const trustedHosts = normalizeTrustedHosts(deps.preferencesStore?.get("githubTrustedHosts"));
+	const trustedHosts = trustedHostSnapshot === undefined
+		? await resolveGithubTrustedHostsSnapshot(deps)
+		: normalizeTrustedHosts(trustedHostSnapshot);
 	if (target.provider === "local") {
 		if (!target.baseSha || !target.headSha) throw new Error("Local PR walkthrough bundle requires baseSha and headSha.");
 		const resolved = await resolveLocalChangeset({ cwd, baseSha: target.baseSha, headSha: target.headSha });

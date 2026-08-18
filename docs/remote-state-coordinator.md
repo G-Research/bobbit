@@ -28,9 +28,33 @@ A repository without `origin` remains valid local state. Its refresh path does n
 
 A pull-request identity combines normalized host, owner, repository, and either a resolved head identity or PR number. Once a head lookup returns a PR number, both selectors alias the same record.
 
-Only complete remotes hosted on GitHub or a configured trusted GitHub Enterprise host are eligible for PR lookup. The Git transport identity remains port-sensitive, but PR/API authority is derived separately: SSH transport ports are dropped, while explicit HTTP(S) web/API ports remain part of the PR identity and every host-scoped `gh` call. Untrusted hosts, malformed paths, encoded separators, query strings, fragments, and trusted-looking substrings embedded in another URL are rejected rather than falling back to an independent lookup.
+Only complete remotes whose host is in Bobbit's effective GitHub trust set are eligible for PR lookup. The Git transport identity remains port-sensitive, but PR/API authority is derived separately: SSH transport ports are dropped, while explicit HTTP(S) web/API ports remain part of the PR identity and every host-scoped `gh` call. Untrusted hosts, malformed paths, encoded separators, query strings, fragments, and trusted-looking substrings embedded in another URL are rejected rather than falling back to an independent lookup.
 
 A repository-scoped head lookup validates every candidate against the exact server-owned head and head repository. It selects the unique open PR when present; otherwise it selects the uniquely newest terminal PR, allowing safe branch reuse without a second external read. Ambiguous, malformed, or cross-repository results fail closed and retain any last-good snapshot. Candidate refs, repository ownership, and ordering fields are validation inputs only and are never published.
+
+### Effective GitHub host trust
+
+One server-side resolver supplies the same effective trust decision to PR status polling,
+merge and permission checks, PR Walkthrough, and the browser's trust-prompt preflight.
+The effective set combines Bobbit's built-in GitHub hosts, managed
+`githubTrustedHosts`, and normalized host keys explicitly configured in the local `gh`
+CLI. This lets an existing host-specific `gh` login enable an enterprise host without a
+duplicate Bobbit preference, while preventing individual consumers from drifting onto
+different allowlists.
+
+Discovery reads only host keys from the local `gh` configuration; it does not run an
+authentication-status or API probe, request tokens, or contact the configured hosts.
+Token data is never returned, persisted, or logged, and environment-only authorization
+cannot authorize an arbitrary remote. Results are briefly cached and concurrent callers
+share the lookup. If `gh` configuration cannot be read, discovery contributes nothing
+and trust falls back to the built-in plus managed set.
+
+The browser queries the server for a normalized boolean decision rather than receiving
+or rebuilding the effective list. Unknown hosts therefore remain rejected, while a
+host configured only in `gh` is accepted consistently by status and action routes and
+by the PR Walkthrough launch flow. See
+[Trusted GitHub hosts](pr-walkthrough-panel.md#trusted-github-hosts) for discovery and
+prompt details.
 
 Published PR URLs are reconstructed from the validated server-derived HTTPS authority, owner, repository, and positive PR number. Upstream URLs containing credentials, query strings, fragments, mismatched authorities, non-HTTPS schemes, or non-canonical paths are rejected. Clients apply the same safe-link shape defensively before assigning a URL to a navigation sink.
 
@@ -182,7 +206,7 @@ This focused coordinator does not change:
 - publication, archive, session cleanup, or explicit Git/PR action semantics;
 - permission and ruleset caches;
 - marketplace caching;
-- PR Walkthrough integration; or
+- PR Walkthrough data-fetch and review lifecycle (it shares the effective-host resolver, but not coordinator records); or
 - other broad lifecycle and secondary GitHub surfaces.
 
 Those paths may still perform their established remote calls and are not evidence that the automatic status budget was violated. Do not route them through this coordinator without a separate lifecycle and security design.
