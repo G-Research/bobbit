@@ -1,37 +1,41 @@
-import { describe, expect, it, vi } from "vitest";
-import type { ExecFileOptions } from "node:child_process";
-import type { CommandRunner, ExecFileResult } from "../../src/server/gateway-deps.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { CommandRunner } from "../../src/server/gateway-deps.js";
 import { GithubTrustedHostResolver } from "../../src/server/github-trusted-hosts.js";
 import { isTrustedExternalHost } from "../../src/shared/pr-walkthrough/url-safety.js";
 
-interface CommandCall {
-	file: string;
-	args: readonly string[];
-	options?: ExecFileOptions;
+const tempRoots: string[] = [];
+
+async function tempRoot(): Promise<string> {
+	const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "bobbit-gh-hosts-"));
+	tempRoots.push(root);
+	return root;
+}
+
+afterEach(async () => {
+	await Promise.all(tempRoots.splice(0).map(root => fs.promises.rm(root, { recursive: true, force: true })));
+});
+
+function noCommandRunner(): CommandRunner {
+	return {
+		execFile: vi.fn(async () => {
+			throw new Error("host discovery must not execute a command");
+		}),
+	};
 }
 
 function makeResolver(input: {
-	outputs?: Array<ExecFileResult | Error>;
-	run?: CommandRunner["execFile"];
+	runner?: CommandRunner;
 	managed?: () => unknown;
 	now?: () => number;
 	cacheTtlMs?: number;
 	env?: Readonly<Record<string, string | undefined>>;
-} = {}): { resolver: GithubTrustedHostResolver; calls: CommandCall[] } {
-	const calls: CommandCall[] = [];
-	const outputs = [...(input.outputs ?? [{ stdout: "", stderr: "" }])];
-	const execFile: CommandRunner["execFile"] = input.run ?? (async (file, args, options) => {
-		calls.push({ file, args, options });
-		const output = outputs.shift() ?? { stdout: "", stderr: "" };
-		if (output instanceof Error) throw output;
-		return output;
-	});
-	const runner: CommandRunner = {
-		execFile: async (file, args, options) => {
-			if (input.run) calls.push({ file, args, options });
-			return execFile(file, args, options);
-		},
-	};
+	fileSystem?: Pick<typeof fs.promises, "open">;
+	platform?: NodeJS.Platform;
+} = {}): { resolver: GithubTrustedHostResolver; runner: CommandRunner } {
+	const runner = input.runner ?? noCommandRunner();
 	return {
 		resolver: new GithubTrustedHostResolver({
 			commandRunner: runner,
@@ -39,174 +43,207 @@ function makeResolver(input: {
 			getManagedHosts: input.managed ?? (() => []),
 			cacheTtlMs: input.cacheTtlMs,
 			env: input.env ?? {},
+			fileSystem: input.fileSystem,
+			platform: input.platform,
 		}),
-		calls,
+		runner,
 	};
 }
 
+async function writeHosts(configDir: string, contents: string | Buffer): Promise<void> {
+	await fs.promises.mkdir(configDir, { recursive: true });
+	await fs.promises.writeFile(path.join(configDir, "hosts.yml"), contents);
+}
+
 describe("GithubTrustedHostResolver", () => {
-	it("uses the token-free gh host-key query and returns normalized extra hosts", async () => {
-		const { resolver, calls } = makeResolver({
-			outputs: [{
-				stdout: [
-					"GHE.Example.COM.",
-					"second.example.com\r",
-					"ghe.example.com",
-					"github.com",
-					"host.example.com:443",
-					"https://not-a-host-key.example.com/path",
-					"github_pat_secret_value",
-					"ghp_secret_value",
-					"bad host.example.com",
-				].join("\n"),
-				stderr: "ignored diagnostics",
-			}],
-			managed: () => ["Managed.Example.com", "ghe.example.com", "api.github.com"],
+	it("reads only normalized top-level host keys from GH_CONFIG_DIR without invoking gh", async () => {
+		const configDir = await tempRoot();
+		const tokenSentinel = "github_pat_token_must_not_escape";
+		await writeHosts(configDir, [
+			"# oauth_token: ghp_comment_is_not_a_host",
+			"GHE.Example.COM.:",
+			"    user: octocat",
+			`    oauth_token: ${tokenSentinel}`,
+			"    git_protocol: https",
+			"second.example.com: # configured host",
+			"\tuser: nested",
+			"github.com:",
+			"    oauth_token: ghp_builtin",
+			"ghe.example.com:",
+		].join("\n"));
+		const managed = ["Managed.Example.com", "ghe.example.com", "api.github.com"];
+		const { resolver, runner } = makeResolver({ env: { GH_CONFIG_DIR: configDir }, managed: () => managed });
+
+		const result = await resolver.resolve();
+
+		expect(result).toEqual(["managed.example.com", "ghe.example.com", "second.example.com"]);
+		expect(JSON.stringify(result)).not.toContain(tokenSentinel);
+		expect(runner.execFile).not.toHaveBeenCalled();
+	});
+
+	it("does not trust token-looking indented values, comments, or environment-only authorization", async () => {
+		const configDir = await tempRoot();
+		await writeHosts(configDir, [
+			"# env-only.example.com:",
+			"configured.example.com:",
+			"    oauth_token: env-only.example.com:",
+			"    github_pat_secret.example.com: token",
+		].join("\n"));
+		const { resolver, runner } = makeResolver({
 			env: {
-				PATH: "bin",
-				GH_CONFIG_DIR: "/safe/gh-config",
-				GH_TOKEN: "secret-1",
-				github_token: "secret-2",
-				Gh_Enterprise_Token: "secret-3",
-				GITHUB_ENTERPRISE_TOKEN: "secret-4",
-				gh_HOST: "env-only.example.com",
-				Gh_RePo: "owner/repo",
+				GH_CONFIG_DIR: configDir,
+				GH_HOST: "env-only.example.com",
+				GH_ENTERPRISE_TOKEN: "environment-token",
+				GITHUB_TOKEN: "generic-token",
 			},
 		});
 
-		await expect(resolver.resolve()).resolves.toEqual([
-			"managed.example.com",
-			"ghe.example.com",
-			"second.example.com",
-		]);
-		expect(calls).toHaveLength(1);
-		expect(calls[0]!.file).toBe("gh");
-		expect(calls[0]!.args).toEqual(["auth", "status", "--json", "hosts", "--jq", ".hosts | keys[]"]);
-		expect(calls[0]!.options).toMatchObject({
-			encoding: "utf8",
-			maxBuffer: 64 * 1024,
-			timeout: 5_000,
-			windowsHide: true,
-		});
-		const childEnv = calls[0]!.options!.env!;
-		expect(childEnv.PATH).toBe("bin");
-		expect(childEnv.GH_CONFIG_DIR).toBe("/safe/gh-config");
-		expect(Object.keys(childEnv).map(key => key.toUpperCase())).not.toEqual(expect.arrayContaining([
-			"GH_TOKEN",
-			"GITHUB_TOKEN",
-			"GH_ENTERPRISE_TOKEN",
-			"GITHUB_ENTERPRISE_TOKEN",
-			"GH_HOST",
-			"GH_REPO",
-		]));
+		await expect(resolver.resolve()).resolves.toEqual(["configured.example.com"]);
+		expect(runner.execFile).not.toHaveBeenCalled();
 	});
 
-	it("cannot discover a host authorized only by generic enterprise environment variables", async () => {
-		const { resolver, calls } = makeResolver({
-			env: { GH_ENTERPRISE_TOKEN: "environment-token", GH_HOST: "env-only.example.com", GH_CONFIG_DIR: "/config" },
-			managed: () => ["managed.example.com"],
-			run: async (_file, _args, options) => ({
-				stdout: options?.env?.GH_ENTERPRISE_TOKEN || options?.env?.GH_HOST ? "env-only.example.com\n" : "",
-				stderr: "",
-			}),
-		});
+	it.each([
+		["malformed top-level YAML", "good.example.com:\nnot a mapping\n"],
+		["an invalid top-level hostname", "good.example.com:\nbad..example.com:\n"],
+		["a top-level scalar value", "good.example.com: token-looking-value\n"],
+	])("fails closed for %s", async (_label, contents) => {
+		const configDir = await tempRoot();
+		await writeHosts(configDir, contents);
+		const { resolver, runner } = makeResolver({ env: { GH_CONFIG_DIR: configDir } });
 
-		await expect(resolver.resolve()).resolves.toEqual(["managed.example.com"]);
-		expect(calls[0]!.options?.env?.GH_CONFIG_DIR).toBe("/config");
+		await expect(resolver.resolve()).resolves.toEqual([]);
+		expect(runner.execFile).not.toHaveBeenCalled();
+	});
+
+	it("fails closed for oversized, missing, and unreadable config", async () => {
+		const oversizedDir = await tempRoot();
+		await writeHosts(oversizedDir, Buffer.alloc(64 * 1024 + 1, 0x61));
+		await expect(makeResolver({ env: { GH_CONFIG_DIR: oversizedDir } }).resolver.resolve()).resolves.toEqual([]);
+
+		const missingDir = await tempRoot();
+		await expect(makeResolver({ env: { GH_CONFIG_DIR: missingDir } }).resolver.resolve()).resolves.toEqual([]);
+
+		const unreadable = makeResolver({
+			env: { GH_CONFIG_DIR: missingDir },
+			fileSystem: { open: async () => { throw new Error("unreadable: token-sentinel"); } } as unknown as Pick<typeof fs.promises, "open">,
+		});
+		await expect(unreadable.resolver.resolve()).resolves.toEqual([]);
+		expect(unreadable.runner.execFile).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		{
+			name: "Windows APPDATA",
+			platform: "win32" as NodeJS.Platform,
+			envFor: (root: string) => ({ APPDATA: root }),
+			configFor: (root: string) => path.join(root, "GitHub CLI"),
+		},
+		{
+			name: "XDG config before platform defaults",
+			platform: "win32" as NodeJS.Platform,
+			envFor: (root: string) => ({ XDG_CONFIG_HOME: root, APPDATA: path.join(root, "unused-appdata") }),
+			configFor: (root: string) => path.join(root, "gh"),
+		},
+		{
+			name: "macOS home fallback",
+			platform: "darwin" as NodeJS.Platform,
+			envFor: (root: string) => ({ HOME: root }),
+			configFor: (root: string) => path.join(root, ".config", "gh"),
+		},
+		{
+			name: "Linux home fallback",
+			platform: "linux" as NodeJS.Platform,
+			envFor: (root: string) => ({ HOME: root }),
+			configFor: (root: string) => path.join(root, ".config", "gh"),
+		},
+	])("uses the documented $name path", async ({ platform, envFor, configFor }) => {
+		const root = await tempRoot();
+		await writeHosts(configFor(root), "configured.example.com:\n    oauth_token: sentinel\n");
+		const { resolver, runner } = makeResolver({ platform, env: envFor(root) });
+
+		await expect(resolver.resolve()).resolves.toEqual(["configured.example.com"]);
+		expect(runner.execFile).not.toHaveBeenCalled();
 	});
 
 	it("caches only discovery while reading managed hosts live", async () => {
+		const configDir = await tempRoot();
+		await writeHosts(configDir, "configured.example.com:\n");
 		let managed: unknown = ["first-managed.example.com"];
-		const { resolver, calls } = makeResolver({
-			outputs: [{ stdout: "configured.example.com\n", stderr: "" }],
-			managed: () => managed,
-		});
+		let opens = 0;
+		const fileSystem: Pick<typeof fs.promises, "open"> = {
+			open: async (...args: Parameters<typeof fs.promises.open>) => {
+				opens += 1;
+				return fs.promises.open(...args);
+			},
+		};
+		const { resolver } = makeResolver({ env: { GH_CONFIG_DIR: configDir }, managed: () => managed, fileSystem });
 
 		await expect(resolver.resolve()).resolves.toEqual(["first-managed.example.com", "configured.example.com"]);
 		managed = ["second-managed.example.com"];
 		await expect(resolver.resolve()).resolves.toEqual(["second-managed.example.com", "configured.example.com"]);
-		expect(calls).toHaveLength(1);
+		expect(opens).toBe(1);
 	});
 
-	it("refreshes discovery at expiry", async () => {
-		let now = 10;
-		const { resolver, calls } = makeResolver({
-			outputs: [
-				{ stdout: "old.example.com\n", stderr: "" },
-				{ stdout: "new.example.com\n", stderr: "" },
-			],
-			now: () => now,
-			cacheTtlMs: 30,
-		});
-
-		await expect(resolver.resolve()).resolves.toEqual(["old.example.com"]);
-		now = 39;
-		await expect(resolver.resolve()).resolves.toEqual(["old.example.com"]);
-		now = 40;
-		await expect(resolver.resolve()).resolves.toEqual(["new.example.com"]);
-		expect(calls).toHaveLength(2);
-	});
-
-	it("coalesces concurrent discovery into one in-flight command", async () => {
-		let release!: (result: ExecFileResult) => void;
-		const pending = new Promise<ExecFileResult>(resolve => { release = resolve; });
-		const { resolver, calls } = makeResolver({ run: async () => pending });
-
-		const first = resolver.resolve();
-		const second = resolver.resolve();
-		expect(calls).toHaveLength(1);
-		release({ stdout: "configured.example.com\n", stderr: "" });
-		await expect(Promise.all([first, second])).resolves.toEqual([
-			["configured.example.com"],
-			["configured.example.com"],
-		]);
-		expect(calls).toHaveLength(1);
-	});
-
-	it("fails closed to built-in plus live managed trust and caches the failure briefly", async () => {
-		let managed: unknown = ["managed.example.com"];
-		const { resolver, calls } = makeResolver({
-			outputs: [new Error("gh is unavailable: secret-token")],
-			managed: () => managed,
-		});
-
-		const first = await resolver.resolve();
-		expect(first).toEqual(["managed.example.com"]);
-		expect(isTrustedExternalHost("github.com", first)).toBe(true);
-		expect(isTrustedExternalHost("unknown.example.com", first)).toBe(false);
-		managed = ["changed.example.com"];
-		await expect(resolver.resolve()).resolves.toEqual(["changed.example.com"]);
-		expect(calls).toHaveLength(1);
-	});
-
-	it("drops stale discovered hosts when a refresh fails", async () => {
+	it("refreshes at expiry and drops stale discovered hosts when the refresh fails", async () => {
+		const configDir = await tempRoot();
+		await writeHosts(configDir, "stale.example.com:\n");
 		let now = 0;
-		const { resolver, calls } = makeResolver({
-			outputs: [
-				{ stdout: "stale.example.com\n", stderr: "" },
-				new Error("refresh failed"),
-			],
-			now: () => now,
-			cacheTtlMs: 10,
-		});
+		const { resolver } = makeResolver({ env: { GH_CONFIG_DIR: configDir }, now: () => now, cacheTtlMs: 10 });
 
 		await expect(resolver.resolve()).resolves.toEqual(["stale.example.com"]);
+		now = 9;
+		await expect(resolver.resolve()).resolves.toEqual(["stale.example.com"]);
+		await fs.promises.rm(path.join(configDir, "hosts.yml"));
 		now = 10;
 		await expect(resolver.resolve()).resolves.toEqual([]);
 		now = 19;
 		await expect(resolver.resolve()).resolves.toEqual([]);
-		expect(calls).toHaveLength(2);
 	});
 
-	it("never logs discovery output, diagnostics, or errors", async () => {
+	it("coalesces concurrent config reads", async () => {
+		const configDir = await tempRoot();
+		await writeHosts(configDir, "configured.example.com:\n");
+		let release!: () => void;
+		const pending = new Promise<void>(resolve => { release = resolve; });
+		let opens = 0;
+		const fileSystem: Pick<typeof fs.promises, "open"> = {
+			open: async (...args: Parameters<typeof fs.promises.open>) => {
+				opens += 1;
+				await pending;
+				return fs.promises.open(...args);
+			},
+		};
+		const { resolver } = makeResolver({ env: { GH_CONFIG_DIR: configDir }, fileSystem });
+
+		const first = resolver.resolve();
+		const second = resolver.resolve();
+		expect(opens).toBe(1);
+		release();
+		await expect(Promise.all([first, second])).resolves.toEqual([
+			["configured.example.com"],
+			["configured.example.com"],
+		]);
+		expect(opens).toBe(1);
+	});
+
+	it("fails closed to built-in plus live managed trust and never logs read failures", async () => {
 		const spies = ["log", "error", "warn", "info", "debug"].map(method =>
 			vi.spyOn(console, method as "log").mockImplementation(() => undefined),
 		);
+		let managed: unknown = ["managed.example.com"];
 		try {
-			const failed = makeResolver({ outputs: [new Error("token-in-error")] }).resolver;
-			await failed.resolve();
-			const succeeded = makeResolver({ outputs: [{ stdout: "configured.example.com\n", stderr: "token-in-stderr" }] }).resolver;
-			await succeeded.resolve();
+			const { resolver, runner } = makeResolver({
+				env: { GH_CONFIG_DIR: "missing-token-sentinel" },
+				managed: () => managed,
+				fileSystem: { open: async () => { throw new Error("token-in-error"); } } as unknown as Pick<typeof fs.promises, "open">,
+			});
+			const first = await resolver.resolve();
+			expect(first).toEqual(["managed.example.com"]);
+			expect(isTrustedExternalHost("github.com", first)).toBe(true);
+			expect(isTrustedExternalHost("unknown.example.com", first)).toBe(false);
+			managed = ["changed.example.com"];
+			await expect(resolver.resolve()).resolves.toEqual(["changed.example.com"]);
+			expect(runner.execFile).not.toHaveBeenCalled();
 			for (const spy of spies) expect(spy).not.toHaveBeenCalled();
 		} finally {
 			for (const spy of spies) spy.mockRestore();
