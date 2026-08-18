@@ -3,6 +3,7 @@ import { isDeepStrictEqual, promisify } from "node:util";
 import { getRegisteredRpcBridgeFactory, registerRpcBridgeFactory, tryHostPathToContainer } from "./agent/rpc-bridge.js";
 import { resolveGatewayDeps, realCommandRunner, type Clock, type CommandRunner, type FsLike, type GatewayDeps } from "./gateway-deps.js";
 import { parseTrustedGithubRemote, RemoteStateCoordinator, type PullRequestIdentity, type RemoteStateAddress, type RemoteStateIntent, type RemoteStateTelemetryEvent, type RepositorySnapshotBinding, type TrustedGithubRemote } from "./remote-state-coordinator.js";
+import { GithubTrustedHostResolver } from "./github-trusted-hosts.js";
 import { resolveLegacyTestRuntimeFlags } from "./legacy-test-runtime-flags.js";
 import { parseStrictBody, STRICT_UPDATE_BODY_KEYS, type StrictBody, type StrictBodyOptions } from "./strict-body.js";
 export type { Clock, CommandRunner, ExecFileResult, FsLike, GatewayDeps, ResolvedGatewayDeps, TimerHandle } from "./gateway-deps.js";
@@ -626,7 +627,7 @@ import { authorizeChildrenMutation } from "./auth/children-mutation-authz.js";
 import { handlePreviewRequest, pickEntry } from "./preview/content-route.js";
 import { isLoopbackHost, loopbackForBind } from "./cli-loopback.js";
 import { handlePrWalkthroughApiRoute } from "./pr-walkthrough/routes.js";
-import { normalizeTrustedHosts } from "../shared/pr-walkthrough/url-safety.js";
+import { isTrustedExternalHost, normalizeTrustedHost, normalizeTrustedHosts } from "../shared/pr-walkthrough/url-safety.js";
 import { progressBus as searchProgressBus } from "./search/progress-bus.js";
 import { isSandboxAllowed } from "./auth/sandbox-guard.js";
 import { getGoogleAccessToken, ensureCodeAssistProject, hasGoogleCodeAssistCredential } from "./agent/google-code-assist.js";
@@ -2548,6 +2549,12 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const colorStore = new ColorStore(stateDir);
 	const prStatusStore = new PrStatusStore(stateDir, gatewayDeps.fsImpl);
 	const preferencesStore = new PreferencesStore(stateDir, gatewayDeps.fsImpl);
+	const githubTrustedHostResolver = new GithubTrustedHostResolver({
+		commandRunner: gatewayDeps.commandRunner,
+		clock: gatewayDeps.clock,
+		getManagedHosts: () => normalizeTrustedHosts(preferencesStore.get("githubTrustedHosts")),
+		env: process.env,
+	});
 	const reviewAnnotationStore = new ReviewAnnotationStore(stateDir, gatewayDeps.fsImpl);
 	const savedCwd = preferencesStore.get("defaultCwd");
 	if (savedCwd && typeof savedCwd === "string") {
@@ -3222,8 +3229,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const parsePrRemote = async (cwd: string): Promise<{ host: string; owner: string; repository: string } | undefined> => {
 		try {
 			const origin = stripTokenFromGitUrl(await execGit("git remote get-url origin", cwd, 5_000, undefined, gatewayDeps.commandRunner));
-			const configuredEnterpriseHosts = normalizeTrustedHosts(preferencesStore.get("githubTrustedHosts"));
-			return parseTrustedGithubRemote(origin, configuredEnterpriseHosts);
+			return parseTrustedGithubRemote(origin, await githubTrustedHostResolver.resolve());
 		} catch {
 			return undefined;
 		}
@@ -3553,6 +3559,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		if (target) remoteStateCoordinator.invalidate(target.identity.key, { allowImmediateRefresh: true });
 	};
 	const remoteStateRoutes = {
+		resolveGithubTrustedHosts: () => githubTrustedHostResolver.resolve(),
 		publicSnapshot: publicRemoteSnapshot,
 		publicGitSnapshot,
 		gitSnapshotFor,
@@ -5532,6 +5539,7 @@ async function handleApiRoute(
 			return persisted?.modelProvider && persisted.modelId ? `${persisted.modelProvider}/${persisted.modelId}` : undefined;
 		},
 		preferencesStore,
+		resolveGithubTrustedHosts: remoteState.resolveGithubTrustedHosts,
 		sandboxScope,
 		// host.agents reviewer migration (design Decisions C/D/E): the binding-routed
 		// submit-yaml/bundle paths resolve the jobId from the pack-store binding keyed
@@ -5542,6 +5550,8 @@ async function handleApiRoute(
 		sessionSecretStore: sessionManager.sessionSecretStore,
 		commandRunner: serverCommandRunner,
 		noExternal: serverRuntimeFlags.testNoExternal || serverRuntimeFlags.e2e,
+	} as Parameters<typeof handlePrWalkthroughApiRoute>[3] & {
+		resolveGithubTrustedHosts: () => Promise<string[]>;
 	})) return;
 
 	// ── Cross-project helper functions ─────────────────────────────
@@ -10424,6 +10434,19 @@ async function handleApiRoute(
 		preferencesStore.set("agentDirHistory", state.history);
 		broadcastToAll({ type: "agent_dir_changed", agentDir: getAgentDirApiState() });
 		json({ ...report, guidance: buildAgentDirRestartGuidance() });
+		return;
+	}
+
+	// GET /api/github/trusted-hosts/check — return only the effective trust decision.
+	if (url.pathname === "/api/github/trusted-hosts/check" && req.method === "GET") {
+		const hostInput = url.searchParams.get("host");
+		const host = hostInput?.includes("://") ? undefined : normalizeTrustedHost(hostInput);
+		if (!host) {
+			json({ error: "host must be a bare hostname" }, 400);
+			return;
+		}
+		const trustedHosts = await remoteState.resolveGithubTrustedHosts();
+		json({ host, trusted: isTrustedExternalHost(host, trustedHosts) });
 		return;
 	}
 

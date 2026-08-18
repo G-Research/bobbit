@@ -170,6 +170,116 @@ test.describe("remote-state coordinator routes", () => {
 		serverModule.__clearRemoteStateForceNowFake();
 	});
 
+	test("trusts a gh-config-only enterprise host for status, permissions, merge, and trust checks", async ({ gateway }) => {
+		test.setTimeout(30_000);
+		const host = "ghe.config-only.test";
+		const unknownHost = "unknown.config-only.test";
+		const branch = `fixture/gh-config-host-${Date.now()}`;
+		const sessionId = await createRemoteStateSession(gateway, gitCwd());
+		gateway.sessionManager.updateSessionMeta(sessionId, { branch });
+		const runner = (gateway.sessionManager as any).commandRunner;
+		const originalExecFile = runner.execFile;
+		let remoteHost = host;
+		let discoveryCalls = 0;
+		const remoteGhCalls: string[][] = [];
+		let originalTrustedHosts: unknown = [];
+
+		runner.execFile = async (file: string, args: readonly string[], options?: any) => {
+			const command = commandName(file);
+			if (command === "git" && args.join(" ") === "remote get-url origin") {
+				return { stdout: `https://${remoteHost}/acme/widget.git\n`, stderr: "" };
+			}
+			if (command === "gh" && args[0] === "auth" && args[1] === "status") {
+				discoveryCalls += 1;
+				expect(args).toEqual(["auth", "status", "--json", "hosts", "--jq", ".hosts | keys[]"]);
+				return { stdout: `${host}\n`, stderr: "" };
+			}
+			if (command === "gh") {
+				remoteGhCalls.push([...args]);
+				if (args[0] === "pr" && args[1] === "list") {
+					return {
+						stdout: JSON.stringify([{
+							number: 74,
+							url: `https://${host}/acme/widget/pull/74`,
+							title: "Configured enterprise host",
+							state: "OPEN",
+							mergeable: "MERGEABLE",
+							headRefName: branch,
+							baseRefName: "main",
+							...ownedHeadEvidence("acme", "widget"),
+						}]),
+						stderr: "",
+					};
+				}
+				if (args[0] === "api") {
+					return {
+						stdout: JSON.stringify({ data: { repository: { viewerPermission: "ADMIN", pullRequest: { viewerCanMergeAsAdmin: true } } } }),
+						stderr: "",
+					};
+				}
+				if (args[0] === "pr" && args[1] === "merge") return { stdout: "merged", stderr: "" };
+			}
+			const probe = standardSingleRepositoryProbe(file, args, gitCwd());
+			if (probe) return probe;
+			return unexpectedRunnerCommand(file, args, options);
+		};
+
+		try {
+			const originalPreferences = await apiFetch("/api/preferences");
+			if (originalPreferences.ok) originalTrustedHosts = (await originalPreferences.json()).githubTrustedHosts ?? [];
+			expect((await apiFetch("/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ githubTrustedHosts: [] }),
+			})).status).toBe(200);
+			// The fork-scoped gateway may have cached a failed discovery in an earlier
+			// integration file. Cross the short resolver TTL deterministically.
+			gateway.clock.advance(60_000);
+
+			const trustedCheck = await apiFetch(`/api/github/trusted-hosts/check?host=${host.toUpperCase()}.`);
+			expect(trustedCheck.status).toBe(200);
+			expect(await trustedCheck.json()).toEqual({ host, trusted: true });
+			const unknownCheck = await apiFetch(`/api/github/trusted-hosts/check?host=${unknownHost}`);
+			expect(await unknownCheck.json()).toEqual({ host: unknownHost, trusted: false });
+			expect((await apiFetch("/api/github/trusted-hosts/check?host=https%3A%2F%2Fevil.test%2Fpath")).status).toBe(400);
+
+			const status = await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit`);
+			expect(status.status).toBe(200);
+			expect(await status.json()).toMatchObject({ data: { number: 74, title: "Configured enterprise host", viewerIsAdmin: true, viewerCanMergeAsAdmin: true } });
+
+			const merge = await apiFetch(`/api/sessions/${sessionId}/pr-merge`, {
+				method: "POST",
+				body: JSON.stringify({ method: "squash", branch }),
+			});
+			expect(merge.status).toBe(200);
+			expect(discoveryCalls).toBe(1);
+			expect(remoteGhCalls.find(args => args[0] === "pr" && args[1] === "list")?.slice(0, 4)).toEqual([
+				"pr", "list", "--repo", `${host}/acme/widget`,
+			]);
+			const permissionCalls = remoteGhCalls.filter(args => args[0] === "api");
+			expect(permissionCalls.length).toBeGreaterThan(0);
+			expect(permissionCalls.every(args => args[1] === "--hostname" && args[2] === host)).toBe(true);
+			expect(remoteGhCalls.find(args => args[0] === "pr" && args[1] === "merge")?.slice(0, 5)).toEqual([
+				"pr", "merge", "74", "--repo", `${host}/acme/widget`,
+			]);
+
+			remoteHost = unknownHost;
+			const callsBeforeUnknown = remoteGhCalls.length;
+			expect((await apiFetch(`/api/sessions/${sessionId}/pr-status?intent=explicit&optional=1`)).status).toBe(204);
+			expect((await apiFetch(`/api/sessions/${sessionId}/pr-merge`, {
+				method: "POST",
+				body: JSON.stringify({ method: "squash", branch }),
+			})).status).toBe(409);
+			expect(remoteGhCalls).toHaveLength(callsBeforeUnknown);
+		} finally {
+			runner.execFile = originalExecFile;
+			await deleteSession(sessionId);
+			await apiFetch("/api/preferences", {
+				method: "PUT",
+				body: JSON.stringify({ githubTrustedHosts: originalTrustedHosts }),
+			}).catch(() => {});
+		}
+	});
+
 	test("coalesces session Git and PR reads and only broadcasts redacted snapshot envelopes", async ({ gateway }) => {
 		test.setTimeout(30_000);
 		const sessionId = await createRemoteStateSession(gateway, gitCwd());
