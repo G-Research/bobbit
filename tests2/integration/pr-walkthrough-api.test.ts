@@ -1,11 +1,19 @@
 import { EventEmitter } from "node:events";
+import { mkdtempSync, rmSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 
 import { describe, expect, it } from "vitest";
 import type { PackStore } from "../../src/server/extension-host/pack-store.js";
 import type { CommandRunner } from "../../src/server/gateway-deps.js";
 import { buildGithubReviewPreview } from "../../src/server/pr-walkthrough/export-mapper.js";
+import {
+	PR_WALKTHROUGH_ANALYSIS_BUNDLE_KIND,
+	PR_WALKTHROUGH_ANALYSIS_BUNDLE_SCHEMA_VERSION,
+	WalkthroughAnalysisBundleStore,
+} from "../../src/server/pr-walkthrough/walkthrough-analysis-bundle.js";
 import {
 	handlePrWalkthroughApiRoute,
 	resolveWalkthroughForTesting,
@@ -105,10 +113,19 @@ class PrWalkthroughRouteFixture {
 	readonly packStore = new InMemoryPackStore();
 	readonly gitCalls: string[] = [];
 	readonly ghCalls: string[] = [];
+	readonly trustedHostResolutionCalls: string[][] = [];
 	private readonly projects = new Map<string, InMemoryProject>();
 	private readonly sessions = new Map<string, InMemorySession>();
 	private readonly walkthroughs = new Map<string, StoredResolve>();
+	private readonly trustedHosts = new Set<string>();
 	private nextId = 1;
+
+	constructor(private readonly stateDir?: string) {}
+
+	trustGithubHost(host: string): void {
+		this.trustedHosts.add(host);
+	}
+
 
 	readonly commandRunner: CommandRunner = {
 		execFile: async (command, args, options) => {
@@ -156,12 +173,17 @@ class PrWalkthroughRouteFixture {
 
 		if (url.pathname === "/api/pr-walkthrough/resolve" && method === "POST") {
 			try {
-				const resolved = await resolveWalkthroughForTesting(body ?? {}, this.routeDeps(body));
+				const deps = this.routeDeps(body);
+				const trustedHosts = await deps.resolveGithubTrustedHosts?.() ?? [];
+				const resolved = await resolveWalkthroughForTesting(body ?? {}, deps, [...trustedHosts]);
 				this.walkthroughs.set(resolved.changesetId, resolved);
 				return json(resolved);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
-				return json({ error: message, message }, /not found|unknown|invalid|missing|required/i.test(message) ? 400 : 500);
+				const status = typeof (error as any)?.status === "number"
+					? (error as any).status
+					: /not found|unknown|invalid|missing|required/i.test(message) ? 400 : 500;
+				return json({ error: message, message, code: (error as any)?.code, host: (error as any)?.host }, status);
 			}
 		}
 
@@ -190,7 +212,11 @@ class PrWalkthroughRouteFixture {
 		}
 
 		if (url.pathname === "/api/pr-walkthrough/submit-review" && method === "POST") {
-			return this.callProductionPublicRoute(url, body);
+			return this.callProductionRoute(url, body);
+		}
+
+		if ((url.pathname === "/api/internal/pr-walkthrough/bundle" || url.pathname === "/api/internal/pr-walkthrough/analysis-bundle") && method === "POST") {
+			return this.callProductionRoute(url, body, { "x-bobbit-session-secret": "secret-read" });
 		}
 
 		return json({ error: "Route not found" }, 404);
@@ -199,16 +225,25 @@ class PrWalkthroughRouteFixture {
 	private routeDeps(body?: JsonBody): PrWalkthroughRouteDeps {
 		return {
 			defaultCwd: "C:/memory/default",
+			stateDir: this.stateDir,
 			readBody: async () => body,
 			resolveSessionCwd: sessionId => this.sessions.get(sessionId)?.cwd,
+			// Deliberately empty: configured-only enterprise trust must come from the
+			// effective resolver, never a direct preference read.
 			preferencesStore: { get: () => undefined },
+			resolveGithubTrustedHosts: async () => {
+				const snapshot = [...this.trustedHosts];
+				this.trustedHostResolutionCalls.push(snapshot);
+				return snapshot;
+			},
 			packStore: this.packStore as unknown as PackStore,
+			sessionSecretStore: { resolveSessionIdBySecret: (secret: string | undefined) => secret === "secret-read" ? "child-session" : undefined } as any,
 			commandRunner: this.commandRunner,
 			noExternal: true,
 		};
 	}
 
-	private async callProductionPublicRoute(url: URL, body?: JsonBody): Promise<Response> {
+	private async callProductionRoute(url: URL, body?: JsonBody, headers: Record<string, string> = {}): Promise<Response> {
 		let status = 500;
 		let payload: unknown = { error: "route did not respond" };
 		const response = {
@@ -221,7 +256,7 @@ class PrWalkthroughRouteFixture {
 				return response;
 			},
 		} as unknown as ServerResponse;
-		const request = { method: "POST", headers: {} } as IncomingMessage;
+		const request = { method: "POST", headers } as unknown as IncomingMessage;
 		const handled = await handlePrWalkthroughApiRoute(url, request, response, this.routeDeps(body));
 		expect(handled).toBe(true);
 		return json(payload, status);
@@ -343,43 +378,138 @@ test.describe("PR walkthrough REST API", () => {
 		expect((await submitResp.json()).code).toBe("EXPORT_UNAVAILABLE");
 	});
 
-	test("bearer-gated public submit-review enforces jobId + trust + confirm before any gh call", async () => {
+	test("configured-only enterprise host resolves while unknown host fails before git or gh", async () => {
+		const enterpriseHost = "github.configured.example";
+		const configured = new PrWalkthroughRouteFixture();
+		configured.trustGithubHost(enterpriseHost);
+		const configuredFixture = configured.createLocalFixture();
+		const configuredResult = await resolveLocal(configured, configuredFixture, {
+			prUrl: `https://${enterpriseHost}/acme/widgets/pull/42`,
+		});
+		expect(configuredResult.changesetId).toBe(`github:${enterpriseHost}/acme/widgets#42:${configuredFixture.headSha.slice(0, 7)}`);
+		expect(configuredResult.changeset.prUrl).toBe(`https://${enterpriseHost}/acme/widgets/pull/42`);
+		expect(configured.trustedHostResolutionCalls).toEqual([[enterpriseHost]]);
+		expect(configured.ghCalls).toEqual([`auth token --hostname ${enterpriseHost}`]);
+
+		const unknown = new PrWalkthroughRouteFixture();
+		const unknownFixture = unknown.createLocalFixture();
+		const response = await unknown.fetch("/api/pr-walkthrough/resolve", {
+			method: "POST",
+			body: JSON.stringify({
+				sessionId: unknownFixture.sessionId,
+				baseSha: unknownFixture.baseSha,
+				headSha: unknownFixture.headSha,
+				prUrl: "https://github.unknown.example/acme/widgets/pull/42",
+			}),
+		});
+		expect(response.status).toBe(400);
+		expect(await response.json()).toMatchObject({ code: "untrusted_github_host", host: "github.unknown.example" });
+		expect(unknown.gitCalls).toEqual([]);
+		expect(unknown.ghCalls).toEqual([]);
+	});
+
+	test("binding bundle uses one effective-host snapshot and rejects unknown before credentials", async () => {
+		const stateDir = mkdtempSync(join(tmpdir(), "bobbit-prw-effective-host-"));
+		try {
+			const api = new PrWalkthroughRouteFixture(stateDir);
+			api.trustGithubHost("github.configured.example");
+			await api.packStore.put("pr-walkthrough", "binding/child-session", {
+				jobId: "configured-bundle",
+				parentSessionId: "owner-bundle",
+				target: {
+					provider: "github", host: "github.configured.example",
+					prUrl: "https://github.configured.example/acme/widgets/pull/42",
+					owner: "acme", repo: "widgets", number: 42,
+					canonicalKey: "github:github.configured.example/acme/widgets#42",
+				},
+			});
+			new WalkthroughAnalysisBundleStore(stateDir).save("configured-bundle", {
+				schema_version: PR_WALKTHROUGH_ANALYSIS_BUNDLE_SCHEMA_VERSION,
+				kind: PR_WALKTHROUGH_ANALYSIS_BUNDLE_KIND,
+				generated_at: new Date().toISOString(),
+				job_id: "configured-bundle",
+				target: { provider: "github", owner: "acme", repo: "widgets", number: 42, url: "https://github.configured.example/acme/widgets/pull/42" },
+				changeset: { base_sha: BASE_SHA, head_sha: HEAD_SHA, files_changed: 0, additions: 0, deletions: 0 },
+				warnings: [],
+				files: [],
+			});
+
+			const configured = await api.fetch("/api/internal/pr-walkthrough/bundle", {
+				method: "POST",
+				body: JSON.stringify({ jobId: "configured-bundle", mode: "manifest" }),
+			});
+			expect(configured.status, JSON.stringify(await configured.clone().json())).toBe(200);
+			expect(api.trustedHostResolutionCalls).toEqual([["github.configured.example"]]);
+			expect(api.gitCalls).toEqual([]);
+			expect(api.ghCalls).toEqual([]);
+
+			const gitCallsAfterConfigured = [...api.gitCalls];
+			const ghCallsAfterConfigured = [...api.ghCalls];
+			await api.packStore.put("pr-walkthrough", "binding/child-session", {
+				jobId: "unknown-bundle",
+				parentSessionId: "owner-unknown",
+				target: {
+					provider: "github", host: "github.unknown.example",
+					prUrl: "https://github.unknown.example/acme/widgets/pull/42",
+					owner: "acme", repo: "widgets", number: 42,
+					canonicalKey: "github:github.unknown.example/acme/widgets#42",
+				},
+			});
+			const rejected = await api.fetch("/api/internal/pr-walkthrough/bundle", {
+				method: "POST",
+				body: JSON.stringify({ jobId: "unknown-bundle", mode: "manifest" }),
+			});
+			expect(rejected.status).toBe(403);
+			expect(await rejected.json()).toMatchObject({ code: "untrusted_github_host", host: "github.unknown.example" });
+			expect(api.gitCalls).toEqual(gitCallsAfterConfigured);
+			expect(api.ghCalls).toEqual(ghCallsAfterConfigured);
+		} finally {
+			rmSync(stateDir, { recursive: true, force: true });
+		}
+	});
+
+	test("submit-review accepts configured-only enterprise trust and rejects unknown before gh", async () => {
 		const api = new PrWalkthroughRouteFixture();
+		api.trustGithubHost("github.configured.example");
 		const store = api.packStore;
 		const PACK_ID = "pr-walkthrough";
-		const prUrl = "https://github.com/acme/widgets/pull/42";
 		const trustedJob = "prw-submit-review-trusted";
+		const configuredJob = "prw-submit-review-configured";
 		const untrustedJob = "prw-submit-review-untrusted";
-		const changeset = {
-			baseSha: "aaaaaaa", headSha: "bbbbbbb", provider: "github", prUrl, externalUrl: prUrl,
-			prNumber: 42, prTitle: "Post via gh", title: "PR #42: Post via gh",
-		};
-		const cards = [{ id: "card-1", phaseId: "significant", title: "Card", summary: "s", diffBlocks: [] }];
 		await store.put(PACK_ID, `reviews/${trustedJob}/binding/prw-session-sr-1`, {
 			jobId: trustedJob, parentSessionId: "owner-sr-1",
-			target: { provider: "github", prUrl, owner: "acme", repo: "widgets", number: 42, host: "github.com", canonicalKey: "github:acme/widgets#42" },
+			target: { provider: "github", prUrl: "https://github.com/acme/widgets/pull/42", owner: "acme", repo: "widgets", number: 42, host: "github.com", canonicalKey: "github:acme/widgets#42" },
 		});
-		await store.put(PACK_ID, `reviews/${trustedJob}/final/payload`, { changeset, cards });
-		await store.put(PACK_ID, `reviews/${untrustedJob}/binding/prw-session-sr-2`, {
-			jobId: untrustedJob, parentSessionId: "owner-sr-2",
-			target: { provider: "github", prUrl: "https://github.example.com/acme/widgets/pull/42", owner: "acme", repo: "widgets", number: 42, host: "github.example.com", canonicalKey: "github:github.example.com/acme/widgets#42" },
+		await store.put(PACK_ID, `reviews/${configuredJob}/binding/prw-session-sr-2`, {
+			jobId: configuredJob, parentSessionId: "owner-sr-2",
+			target: { provider: "github", prUrl: "https://github.configured.example/acme/widgets/pull/42", owner: "acme", repo: "widgets", number: 42, host: "github.configured.example", canonicalKey: "github:github.configured.example/acme/widgets#42" },
+		});
+		await store.put(PACK_ID, `reviews/${untrustedJob}/binding/prw-session-sr-3`, {
+			jobId: untrustedJob, parentSessionId: "owner-sr-3",
+			target: { provider: "github", prUrl: "https://github.unknown.example/acme/widgets/pull/42", owner: "acme", repo: "widgets", number: 42, host: "github.unknown.example", canonicalKey: "github:github.unknown.example/acme/widgets#42" },
 		});
 
 		const missing = await api.fetch("/api/pr-walkthrough/submit-review", { method: "POST", body: JSON.stringify({ confirm: true }) });
 		expect(missing.status).toBe(400);
 		expect((await missing.json()).code).toBe("INVALID_SUBMIT_REVIEW_REQUEST");
 
-		const unknown = await api.fetch("/api/pr-walkthrough/submit-review", { method: "POST", body: JSON.stringify({ jobId: "prw-nope", confirm: true }) });
-		expect(unknown.status).toBe(404);
-		expect((await unknown.json()).code).toBe("WALKTHROUGH_NOT_BOUND");
+		const unknownJob = await api.fetch("/api/pr-walkthrough/submit-review", { method: "POST", body: JSON.stringify({ jobId: "prw-nope", confirm: true }) });
+		expect(unknownJob.status).toBe(404);
+		expect((await unknownJob.json()).code).toBe("WALKTHROUGH_NOT_BOUND");
 
-		const untrusted = await api.fetch("/api/pr-walkthrough/submit-review", { method: "POST", body: JSON.stringify({ jobId: untrustedJob, confirm: true, draft: { comments: [] } }) });
+		const untrusted = await api.fetch("/api/pr-walkthrough/submit-review", { method: "POST", body: JSON.stringify({ jobId: untrustedJob, probe: true }) });
 		expect(untrusted.status).toBe(403);
 		expect((await untrusted.json()).code).toBe("untrusted_github_host");
+		expect(api.ghCalls).toEqual([]);
 
 		const noConfirm = await api.fetch("/api/pr-walkthrough/submit-review", { method: "POST", body: JSON.stringify({ jobId: trustedJob, draft: { comments: [] } }) });
 		expect(noConfirm.status).toBe(400);
 		expect((await noConfirm.json()).code).toBe("CONFIRMATION_REQUIRED");
 		expect(api.ghCalls).toEqual([]);
+
+		const configuredProbe = await api.fetch("/api/pr-walkthrough/submit-review", { method: "POST", body: JSON.stringify({ jobId: configuredJob, probe: true }) });
+		expect(configuredProbe.status).toBe(200);
+		expect(await configuredProbe.json()).toMatchObject({ available: false });
+		expect(api.ghCalls).toEqual(["auth token --hostname github.configured.example"]);
 	});
 });

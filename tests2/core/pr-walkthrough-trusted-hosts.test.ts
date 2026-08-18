@@ -24,7 +24,7 @@ import assert from "node:assert/strict";
 
 const { canonicalizeTarget, classifyDiffResolutionError, changesetIdForTargetForTesting, numberOnlyTargetFromInferred } = await import("../../src/server/pr-walkthrough/walkthrough-agent-manager.ts");
 const { GithubPrAdapterError, parseGithubPrReference, resolveGithubPr, changesetIdForGithubForTesting } = await import("../../src/server/pr-walkthrough/github-adapter.ts");
-const { parseGithubRefForTesting } = await import("../../src/server/pr-walkthrough/routes.ts");
+const { parseGithubRefForTesting, resolveWalkthroughForTesting } = await import("../../src/server/pr-walkthrough/routes.ts");
 
 describe("canonicalizeTarget host-qualified identity", () => {
 	it("keeps the historical key shape for github.com", () => {
@@ -199,6 +199,32 @@ function makeCapturingFetch(host: string): { fetch: any; urls: string[]; auth: A
 }
 
 describe("parseGithubRef enterprise resolve path", () => {
+	it("rejects an unknown with-SHA URL before git or gh even when the legacy preference contains it", async () => {
+		const calls: string[] = [];
+		await assert.rejects(
+			() => resolveWalkthroughForTesting({
+				prUrl: "https://unknown.example/acme/widgets/pull/42",
+				baseSha: "a".repeat(40),
+				headSha: "b".repeat(40),
+			}, {
+				defaultCwd: "/synthetic/repo",
+				readBody: async () => ({}),
+				// A direct preference read must not widen the authoritative snapshot.
+				preferencesStore: { get: () => ["unknown.example"] },
+				commandRunner: {
+					execFile: async (command, args) => {
+						calls.push(`${command} ${args.join(" ")}`);
+						throw new Error("no command may run before trust");
+					},
+				},
+			}, []),
+			(error: unknown) => error instanceof GithubPrAdapterError
+				&& error.code === "untrusted_github_host"
+				&& error.host === "unknown.example",
+		);
+		assert.deepEqual(calls, []);
+	});
+
 	it("returns full owner/repo/number/url for a trusted enterprise host", () => {
 		const ref = parseGithubRefForTesting("https://github.example.com/acme/widgets/pull/42", undefined, "/tmp", ["github.example.com"]);
 		assert.ok(ref);
