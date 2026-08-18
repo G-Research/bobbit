@@ -464,9 +464,10 @@ server endpoints with an `X-Bobbit-Session-Secret` header. The server resolves t
 routes the request via the pack-store reviewer index and review binding. This is
 **right-job routing**, not a security boundary: chunks and finalization land on
 exactly the job bound to the caller, and a cross-job request cannot resolve another
-session's binding. Trusted-host enforcement (`githubTrustedHosts`) is applied
-server-side for GitHub targets, because the confined pack worker cannot read
-gateway preferences. **Why no submit proof is needed:** in Bobbit's single-user
+session's binding. Effective trusted-host enforcement is applied server-side for
+GitHub targets, because the confined pack worker cannot resolve the built-in,
+managed-preference, and local-`gh` trust sources. **Why no submit proof is needed:** in
+Bobbit's single-user
 trust domain the result only ever surfaces in the user's own panel, so "fake review
 content" would be the user's own trusted agent writing wrong text into the user's
 own UI — a bug, not an attack. The old `BOBBIT_WALKTHROUGH_SUBMIT_PROOF` secret
@@ -1016,25 +1017,60 @@ validated YAML submission.
 
 ### Trusted GitHub hosts
 
-A walkthrough fetches PR metadata and diffs over the network, so Bobbit only talks to
-an allowlist of trusted hosts. The allowlist is the **only** source for extra hosts;
-the former `BOBBIT_GITHUB_TRUSTED_HOSTS` env var is no longer read anywhere.
+A walkthrough fetches PR metadata and diffs over the network, so Bobbit only contacts
+hosts in one server-authoritative effective set. Centralizing the decision keeps PR
+Walkthrough launch, fetch, and posting aligned with Git status PR polling, permission
+checks, and merge actions.
 
-- **Always-trusted baseline.** `DEFAULT_TRUSTED_HOSTS` in `src/shared/pr-walkthrough/url-safety.ts` (`github.com`, `www.github.com`, `api.github.com`, `raw.githubusercontent.com`, `gist.githubusercontent.com`) is trusted regardless of settings and cannot be removed. The managed list only adds **extra** hosts on top — typically GitHub Enterprise hosts.
-- **Where it lives.** The extra hosts are managed in **System → General → Trusted GitHub hosts** and persisted in the server-side global preferences store under the key `githubTrustedHosts: string[]` — the same store behind `GET`/`PUT /api/preferences`. Storing it server-side (rather than per-browser) means the allowlist is shared across clients and is readable by the server code that performs the fetches.
-- **Live per request.** The server reads `githubTrustedHosts` from the preferences store on each launch/resolve, not at boot, so adding a host takes effect immediately **without a server restart**.
-- **Normalization and validation on save.** `PUT /api/preferences` runs `normalizeTrustedHosts` over the submitted value. Each entry is lowercased, has any trailing dot stripped, and — if a full URL is pasted — reduced to its host. Entries with a path, whitespace, credentials, a port, or an invalid DNS label are rejected, the list is deduped (first-seen order preserved), and any baseline host is dropped so the managed list shows only true extras. Saving is lossy and never returns a 4xx: the server stores the accepted subset and the UI re-fetches because the `GET` readback is authoritative. An empty or all-invalid list removes the key entirely.
+The effective set is the union of:
 
-The host trust check is enforced server-side on `/launch` and `/resolve`: a target on a
-host that is neither in the baseline nor the managed allowlist is rejected **before**
-any job is created, returning HTTP `400` with body `{ code: "untrusted_github_host", host }`.
+- **Always-trusted built-ins.** `DEFAULT_TRUSTED_HOSTS` in the shared URL-safety module
+  includes `github.com` and its known web, API, raw, and gist hosts. These cannot be
+  removed.
+- **Managed preferences.** Users can add GitHub Enterprise hosts in **System → General →
+  Trusted GitHub hosts**. They are persisted server-side as
+  `githubTrustedHosts: string[]`, shared by every browser, and read on each trust
+  resolution so preference changes take effect without a restart.
+- **Local `gh` configuration.** Host keys explicitly present in the GitHub CLI's
+  host-specific auth configuration are trusted automatically. A user who already ran
+  `gh auth login --hostname <host>` therefore does not have to configure Bobbit again.
 
-**Launch-time trust prompt.** When a walkthrough is launched against a host that is
-neither in the baseline nor the managed list, the launcher **prompts** the user to add
-it rather than silently failing: the `run` route returns `HOST_NOT_TRUSTED` (host +
-resolved `prUrl`) **without spawning**, and the client offers to persist the host to
-`githubTrustedHosts` and continue (accept) or abort cleanly (decline). `github.com` /
-`www.github.com` never prompt. See
+`GithubTrustedHostResolver` discovers only host keys with `gh auth status --json hosts`
+and normalizes them through the same hostname validator used for managed preferences.
+It never asks `gh` for a token, and never exposes, persists, or logs command output or
+errors. Token and generic host/repository environment overrides are stripped from the
+discovery subprocess, so environment-only authorization cannot make an arbitrary host
+trusted. The former `BOBBIT_GITHUB_TRUSTED_HOSTS` environment variable is not a trust
+source.
+
+Discovery is briefly cached and concurrent refreshes share one in-flight lookup. Managed
+preferences remain live on every resolution. If `gh` is missing, times out, returns
+invalid data, or otherwise cannot be read, discovery contributes no hosts; Bobbit fails
+closed to the built-in plus managed set. This short cache avoids spawning `gh` for every
+status poll or walkthrough boundary while allowing new `gh` configuration to take
+effect promptly.
+
+`PUT /api/preferences` runs `normalizeTrustedHosts` over managed entries. Each entry is
+lowercased, has any trailing dot stripped, and — if a full URL is pasted — reduced to its
+host. Entries with a path, whitespace, credentials, a port, or an invalid DNS label are
+rejected; accepted entries are deduplicated, and built-ins are omitted from the managed
+list. Saving is lossy: the server stores the accepted subset and the UI re-fetches the
+authoritative value. An empty or all-invalid list removes the key.
+
+The server resolves one effective snapshot before a walkthrough performs credential
+probing, diff or metadata reads, persistence, or review posting, and threads that
+snapshot through the operation so its checks cannot disagree. A target outside that set
+is rejected before the external GitHub action.
+
+**Launch-time trust prompt.** For current-branch launch, the pack reads the local
+`origin` and returns `HOST_NOT_TRUSTED` before invoking `gh` when the host is not a
+built-in and has no acknowledgement. The browser then asks
+`GET /api/github/trusted-hosts/check?host=<hostname>` for only the server's normalized
+boolean decision; it does not reconstruct trust from the preference list. A host
+configured only in `gh` therefore retries silently without a prompt or preference
+write. An unknown host prompts the user to add it to `githubTrustedHosts`; accepting
+persists it and retries once, while declining spawns nothing. A failed server check also
+fails closed to the prompt. See
 [Trusting an unknown remote host at launch](pr-walkthrough.md#trusting-an-unknown-remote-host-at-launch).
 
 ### Enterprise host identity and token scoping
@@ -1072,7 +1108,7 @@ differently from github.com:
 - **Export button only shows copy/preview** — the walkthrough is local, missing a GitHub target, or export capability was disabled by the resolver. When it is unauthenticated (no `gh` auth and no env token), the dialog's **Post to GitHub** action explains it: run `gh auth login` (or set `GITHUB_TOKEN` / `GH_TOKEN`).
 - **Some comments are unmappable** — check whether the comment is card-level, attached to a binary/truncated file, or anchored to a line GitHub cannot review.
 - **Reload loses comments after a PR update** — the card checksum changed, so Bobbit intentionally avoids restoring comments onto a different diff. Re-run the walkthrough and review the updated cards.
-- **GitHub Enterprise URL is rejected** — launching against an untrusted host now prompts to add it; accept to persist it to Trusted GitHub hosts and continue. You can also pre-add the host (and the matching API base URL) under System → General → Trusted GitHub hosts.
+- **GitHub Enterprise URL is rejected** — run `gh auth login --hostname <host>` to configure the host in the local GitHub CLI, or accept the launch prompt to persist it under System → General → Trusted GitHub hosts. If a configured host remains untrusted, verify that the gateway process can read the same `gh` configuration; environment-only tokens do not count as host configuration.
 - **The PR-walkthrough viewer is missing entirely** — the built-in first-party pack may be disabled. Re-enable it from the Market built-in section (see [docs/marketplace.md](marketplace.md#built-in-first-party-packs)); a disabled pack removes the launcher, deep-link, and panel by design.
 
 ## Testing notes
@@ -1182,14 +1218,14 @@ user launched against a host that was not in the trusted allowlist. Instead of t
 the raw `untrusted_github_host` error, it named the host, warned that adding it lets
 Bobbit fetch repository and PR content from that host, and offered **Add & continue**
 (which persisted the host via `PUT /api/preferences` and retried the launch once) or
-**Cancel**. The server-side host trust check on `/launch` and `/resolve` is
-[retained](#trusted-github-hosts); only this client dialog and its one-shot retry were
-removed with the rest of the client launch flow.
+**Cancel**. The old `/launch` route disappeared with that flow; server-side effective
+host enforcement remains at the current walkthrough fetch and posting boundaries.
 
-**Reintroduced for the pack launch flow.** A launch-time trust prompt was later restored
-for the pack's spawn-on-click launch: the `run` route returns `HOST_NOT_TRUSTED` (host +
-resolved `prUrl`, no spawn) and the client prompts, persists to `githubTrustedHosts`, and
-retries once. See
+**Reintroduced for the pack launch flow.** A launch-time trust flow was later restored
+for the pack's spawn-on-click launcher: the `run` route returns `HOST_NOT_TRUSTED`
+without spawning, and the client asks the server for its effective decision. A
+`gh`-configured host retries silently; only an unknown host prompts, persists to
+`githubTrustedHosts` on acceptance, and retries once. See
 [Trusting an unknown remote host at launch](pr-walkthrough.md#trusting-an-unknown-remote-host-at-launch).
 
 ### Deleted standalone-tab resize behavior
