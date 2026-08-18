@@ -66,6 +66,7 @@ const TOGGLED_TOOL = "readonly_bash";
 
 const SYNC_FILE = "src/sync/worker.ts";
 const PR_TITLE = "Add retry/backoff to the sync worker";
+const LAUNCH_TEST_ORIGIN = "https://github.com/bobbit-fixtures/pr-walkthrough-no-pr.git";
 
 let repoDir: string | undefined;
 let baseSha = "";
@@ -85,6 +86,20 @@ function gitConfig(dir: string): void {
 	gitIn(dir, ["config", "user.email", "bobbit-ai@bobbit.ai"]);
 	gitIn(dir, ["config", "user.name", "bobbit-ai"]);
 	gitIn(dir, ["config", "commit.gpgsign", "false"]);
+}
+
+function setupLaunchTestGitRepo(gateway: { sessionManager?: any }, sessionId: string): void {
+	const persisted = gateway.sessionManager?.getPersistedSession(sessionId) as { cwd?: string } | undefined;
+	const cwd = persisted?.cwd;
+	expect(cwd, "the launch-test session must have a persisted cwd").toBeTruthy();
+	const gitPath = path.join(cwd!, ".git");
+	expect(fs.existsSync(gitPath), "the launch-test session cwd must start as an isolated non-git directory").toBe(false);
+
+	// The production preflight now fails closed unless it can select a local GitHub
+	// remote. Configure only local Git metadata: `remote add` performs no network I/O.
+	repoDir = cwd;
+	gitIn(cwd!, ["init", "-q"]);
+	gitIn(cwd!, ["remote", "add", "origin", LAUNCH_TEST_ORIGIN]);
 }
 
 function setupSessionGitRepo(dir: string): void {
@@ -364,7 +379,7 @@ test.afterEach(async () => {
 	// Best-effort: re-enable the pack + all toggles so a failed run never leaves the
 	// feature disabled/partially disabled for the next test.
 	await resetPrWalkthroughActivation().catch(() => {});
-	// UN-POISON shared state. setupSessionGitRepo git-inits the session's working
+	// UN-POISON shared state. The launch and bundle fixtures git-init the session's working
 	// dir. For a UI default-project session with no dedicated worktree that dir IS
 	// the SHARED harness default project root. Leaving it a git repo makes EVERY
 	// later session on this worker gateway get an unexpected worktree whose
@@ -621,9 +636,10 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 	// ── T-1: the composer slash command is `/pr-walkthrough` (not the internal
 	//    launcher filename/id suffix). Autocomplete completes the token only; the
 	//    completed slash command invokes the same run route on send. ──
-	test("T-1 — slash launcher is /pr-walkthrough and invokes run", async ({ page }) => {
+	test("T-1 — slash launcher is /pr-walkthrough and invokes run", async ({ page, gateway }) => {
 		await openApp(page);
-		await createSessionViaUI(page);
+		const sid = await createSessionViaUI(page);
+		setupLaunchTestGitRepo(gateway, sid);
 		await page.evaluate(() => (window as any).__bobbitReconcilePackRenderers());
 
 		const textarea = page.locator("textarea").first();
@@ -660,6 +676,7 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 		}, { timeout: 15_000 }).toBeTruthy();
 		expect(sid).toBeTruthy();
 		await waitForSessionStatus(sid!, "idle");
+		setupLaunchTestGitRepo(gateway, sid!);
 
 		const runPosts: string[] = [];
 		page.on("request", (r) => {
@@ -695,13 +712,14 @@ test.describe("PR walkthrough — launch UX (NO_PR error + child-session pane)",
 		expect(sidAfter, "a NO_PR launch must not switch the view").toBe(sid);
 	});
 
-	test("T-2b — inactive sidebar session-menu launch binds to that row without switching view", async ({ page }) => {
+	test("T-2b — inactive sidebar session-menu launch binds to that row without switching view", async ({ page, gateway }) => {
 		await openApp(page);
 		const ownerSid = await createSessionViaUI(page);
 		await waitForSessionStatus(ownerSid, "idle");
 		const activeSid = await createSessionViaUI(page);
 		await waitForSessionStatus(activeSid, "idle");
 		expect(activeSid).not.toBe(ownerSid);
+		setupLaunchTestGitRepo(gateway, ownerSid);
 
 		const ownerRow = page.locator(`[data-session-id="${ownerSid}"][data-sidebar-actions-row-root]`).first();
 		await expect(ownerRow, "inactive owner row must be present in the sidebar").toBeVisible({ timeout: 10_000 });
