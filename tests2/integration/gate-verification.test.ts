@@ -84,25 +84,3 @@ test("signaling an unknown gate returns 404", async () => {
 		await deleteGoal(goal.id);
 	}
 });
-
-test("metadata variable resolution in command step", async () => {
-	const goal = await createGoal({ title: "Metadata Resolution Test", workflowId: "bug-fix" });
-	try {
-		assert.equal((await signalGate(goal.id, "issue-analysis", {
-			content: "# Analysis\n\nSteps: run echo\nRoot cause: src/a.ts:1",
-		})).status, 201);
-		await waitForGateStatus(goal.id, "issue-analysis", "passed");
-
-		assert.equal((await signalGate(goal.id, "reproducing-test", {
-			metadata: {
-				test_command: "echo metadata-works",
-				error_pattern: "some error",
-			},
-		})).status, 201);
-		const gate = await waitForGateStatus(goal.id, "reproducing-test", "failed");
-		const lastSignal = gate.signals[gate.signals.length - 1];
-		assert.match(lastSignal.verification.steps[0].output, /metadata-works/);
-	} finally {
-		await deleteGoal(goal.id);
-	}
-});

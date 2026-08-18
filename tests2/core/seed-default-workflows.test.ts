@@ -16,6 +16,7 @@ type VerifyStep = {
 	role?: string;
 	phase?: number;
 	command?: string;
+	component?: string;
 	run?: string;
 	expect?: string;
 	optional?: boolean;
@@ -239,6 +240,7 @@ function assertImplementationReviewPolicy(
 	workflows: Record<string, Workflow>,
 	source: string,
 	phases = DEFAULT_IMPLEMENTATION_PHASES,
+	component = "myproj",
 ) {
 	for (const workflowId of IMPLEMENTATION_WORKFLOW_IDS) {
 		const implementation = findGate(workflows[workflowId], "implementation");
@@ -275,10 +277,22 @@ function assertImplementationReviewPolicy(
 		}
 	}
 
+	const reproducingGate = findGate(workflows["bug-fix"], "reproducing-test");
+	const reproducingFailure = reproducingGate.verify?.find((step) => step.type === "command" && step.expect === "failure");
+	assert.deepEqual(
+		{ component: reproducingFailure?.component, command: reproducingFailure?.command },
+		{ component, command: "unit" },
+		`${source}.bug-fix reproducing test must use the project-authored unit command`,
+	);
 	const bugFixSteps = findGate(workflows["bug-fix"], "implementation").verify ?? [];
-	const reproducingSuccess = bugFixSteps.find((step) => step.type === "command" && step.expect === "success" && step.run?.includes("test_command"));
-	assert.ok(reproducingSuccess, `${source}.bug-fix.implementation must run the reproducing test after the fix`);
-	assert.equal(reproducingSuccess.phase, 1, `${source}.bug-fix reproducing-test success command must run in phase 1`);
+	assert.ok(
+		bugFixSteps.some((step) => step.type === "command" && step.command === "unit" && step.phase === 1),
+		`${source}.bug-fix.implementation must prove the fix with the project-authored unit command`,
+	);
+	assert.ok(
+		![...(reproducingGate.verify ?? []), ...bugFixSteps].some((step) => step.run?.includes("test_command")),
+		`${source}.bug-fix must not interpolate metadata into shell commands`,
+	);
 }
 
 describe("consolidated implementation review defaults", () => {
@@ -339,7 +353,7 @@ describe("consolidated implementation review defaults", () => {
 			workflows?: Record<string, Workflow>;
 		};
 		assert.ok(project.workflows, "project.yaml must define workflows");
-		assertImplementationReviewPolicy(project.workflows, ".bobbit/config/project.yaml", PROJECT_IMPLEMENTATION_PHASES);
+		assertImplementationReviewPolicy(project.workflows, ".bobbit/config/project.yaml", PROJECT_IMPLEMENTATION_PHASES, "bobbit");
 		assertProjectReadyToMergeChecks(project.workflows, ".bobbit/config/project.yaml");
 
 		const prReview = project.workflows["pr-review"];

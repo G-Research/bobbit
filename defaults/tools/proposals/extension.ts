@@ -293,6 +293,7 @@ export default function (pi: ExtensionAPI) {
 				relative_path: Type.Optional(Type.String({ description: "Sub-path inside the repo." })),
 				worktree_setup_command: Type.Optional(Type.String()),
 				commands: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "name → shell. Absent ⇒ data-only." })),
+				env: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Literal, non-secret env for command steps selecting this component." })),
 				config: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Opaque key→string config, max 100 entries." })),
 			}), { description: "Single-repo: one component with repo='.'." })),
 			workflows: Type.Optional(Type.Record(Type.String(), Type.Any(), { description: "Inline workflows keyed by id." })),

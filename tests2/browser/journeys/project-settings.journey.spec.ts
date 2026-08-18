@@ -248,6 +248,96 @@ test.describe("Journey: Project Settings", () => {
 		}
 	});
 
+	test("Components command environment is discoverable, accessible, isolated, and persists literal blank values", async ({ page }) => {
+		const projectId = (await registerProject({
+			name: `v2-command-environment-${Date.now()}`,
+			rootPath: uniqueProjectDir(),
+			seedWorkflows: false,
+			components: [
+				{ name: "api", repo: ".", commands: { test: "npm test" }, config: { preserved: "yes" } },
+				{ name: "web", repo: "web", commands: { test: "npm run test" }, env: { WEB_ONLY: "1" } },
+			],
+		})).id;
+		try {
+			await openApp(page);
+			await navigateToHash(page, `#/settings/${projectId}/components`);
+			const components = page.getByTestId("components-tab");
+			await expect(components).toBeVisible({ timeout: 15_000 });
+			const api = components.locator('[data-testid="component-card"][data-component-name="api"]');
+			await api.locator(".wf-gate-header").click();
+			const environment = api.getByTestId("component-command-environment");
+			await expect(environment).toContainText("Command Environment (0)");
+			await expect(environment).toContainText("No command environment variables.");
+			await expect(environment).toContainText("Saved changes affect the next command without restarting Bobbit.");
+			await expect(environment).toContainText("Stored as plaintext. Do not enter API keys, tokens, passwords, or other secrets.");
+			await expect(environment).toContainText("Sandbox Tokens");
+			await expect(environment).toContainText("Provider API Keys");
+			await expect(api.locator("[data-testid='commands-list']")).toHaveCount(1);
+			await expect(api.locator("[data-testid='component-command-environment']")).toHaveCount(1);
+			await expect(api.locator("[data-testid='component-config-api']")).toHaveCount(1);
+
+			await environment.getByTestId("add-command-environment").click();
+			await expect(environment.getByTestId("command-environment-key")).toBeFocused();
+			await page.getByTestId("save-components").click();
+			const emptyName = environment.getByTestId("command-environment-key");
+			await expect(emptyName).toHaveAttribute("aria-invalid", "true");
+			await expect(environment.getByText("Variable name is required.")).toBeVisible();
+
+			await emptyName.fill("EMPTY");
+			await expect(environment.getByTestId("command-environment-value")).toHaveValue("");
+			await environment.getByTestId("add-command-environment").click();
+			const rows = environment.getByTestId("command-environment-row");
+			await rows.nth(1).getByTestId("command-environment-key").fill("LITERAL");
+			await rows.nth(1).getByTestId("command-environment-value").fill("$(not-expanded); %PATH%; $VAR");
+			await expect(rows.nth(1).getByRole("button", { name: "Remove LITERAL variable" })).toBeVisible();
+
+			await page.setViewportSize({ width: 600, height: 800 });
+			const metrics = await environment.locator(".command-environment-row").evaluateAll(elements => elements.map((element) => ({
+				clientWidth: element.clientWidth,
+				scrollWidth: element.scrollWidth,
+				columns: getComputedStyle(element).gridTemplateColumns,
+			})));
+			for (const row of metrics) {
+				expect(row.scrollWidth).toBeLessThanOrEqual(row.clientWidth);
+				expect(row.columns.split(" ")).toHaveLength(1);
+			}
+
+			await page.setViewportSize({ width: 1280, height: 900 });
+			const save = page.waitForResponse(response => response.request().method() === "PUT"
+				&& response.url().includes(`/api/projects/${projectId}/config`));
+			await page.getByTestId("save-components").click();
+			expect((await save).ok()).toBe(true);
+			await expect(page.getByTestId("save-status")).toHaveText("Saved.");
+
+			await page.reload();
+			await navigateToHash(page, `#/settings/${projectId}/components`);
+			const reloadedApi = page.locator('[data-testid="component-card"][data-component-name="api"]');
+			await reloadedApi.locator(".wf-gate-header").click();
+			const reloadedEnvironment = reloadedApi.getByTestId("component-command-environment");
+			await expect(reloadedEnvironment.getByTestId("command-environment-key").nth(0)).toHaveValue("EMPTY");
+			await expect(reloadedEnvironment.getByTestId("command-environment-value").nth(0)).toHaveValue("");
+			await expect(reloadedEnvironment.getByTestId("command-environment-value").nth(1)).toHaveValue("$(not-expanded); %PATH%; $VAR");
+			const web = page.locator('[data-testid="component-card"][data-component-name="web"]');
+			await web.locator(".wf-gate-header").click();
+			await expect(web.getByTestId("command-environment-key")).toHaveValue("WEB_ONLY");
+			await expect(web.getByTestId("command-environment-value")).toHaveValue("1");
+
+			await reloadedEnvironment.getByRole("button", { name: "Remove LITERAL variable" }).click();
+			await reloadedEnvironment.getByRole("button", { name: "Remove EMPTY variable" }).click();
+			const removeSave = page.waitForResponse(response => response.request().method() === "PUT"
+				&& response.url().includes(`/api/projects/${projectId}/config`));
+			await page.getByTestId("save-components").click();
+			expect((await removeSave).ok()).toBe(true);
+			await page.reload();
+			await navigateToHash(page, `#/settings/${projectId}/components`);
+			const emptiedApi = page.locator('[data-testid="component-card"][data-component-name="api"]');
+			await emptiedApi.locator(".wf-gate-header").click();
+			await expect(emptiedApi.getByTestId("component-command-environment")).toContainText("No command environment variables.");
+		} finally {
+			await deleteProject(projectId);
+		}
+	});
+
 	test("project sound override controls source-session audio while the Bell stays global", async ({ page }) => {
 		test.setTimeout(120_000);
 		const rootPath = uniqueProjectDir();

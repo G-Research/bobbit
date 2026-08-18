@@ -114,6 +114,7 @@ function projectMerge(
 				...prevC,
 				...c,
 				commands: c.commands ?? prevC.commands,
+				env: c.env ?? prevC.env,
 				config: c.config ?? prevC.config,
 			};
 		});

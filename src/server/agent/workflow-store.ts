@@ -14,6 +14,7 @@
  */
 
 import type { ProjectConfigStore, InlineWorkflowDef, InlineWorkflowGate, InlineVerifyStep } from "./project-config-store.js";
+import { normalizeCommandEnvironment, type CommandEnvironment } from "./command-environment.js";
 
 // ── Public types (kept compatible with the old WorkflowStore shape) ──
 
@@ -71,6 +72,8 @@ export interface VerifyStep {
 	component?: string;
 	/** Structural reference: which command on that component to invoke. */
 	command?: string;
+	/** Literal environment overrides, valid only when `type === "command"`. */
+	env?: CommandEnvironment;
 	/** Subgoal step descriptor (only when type === "subgoal"). */
 	subgoal?: VerifyStepSubgoal;
 }
@@ -159,6 +162,12 @@ function normalizeStep(raw: unknown): VerifyStep {
 	if (typeof r.failureGuidance === "string") step.failureGuidance = r.failureGuidance;
 	if (typeof r.component === "string") step.component = r.component;
 	if (typeof r.command === "string") step.command = r.command;
+	if (type === "command") {
+		const env = normalizeCommandEnvironment(r.env);
+		if (env && Object.keys(env).length > 0) step.env = env;
+	} else if (r.env !== undefined) {
+		console.warn("[workflow-store] Ignoring command environment on non-command step");
+	}
 	// Subgoal payload — only round-tripped when the field is a structured
 	// object. Older stored data without the `subgoal` field is silently
 	// tolerated; non-subgoal step types may legitimately leave this unset.
@@ -365,6 +374,7 @@ function serializeStep(s: VerifyStep): Record<string, unknown> {
 	if (s.component !== undefined) out.component = s.component;
 	if (s.command !== undefined) out.command = s.command;
 	if (s.run !== undefined) out.run = s.run;
+	if (s.type === "command" && s.env && Object.keys(s.env).length > 0) out.env = { ...s.env };
 	if (s.prompt !== undefined) out.prompt = s.prompt;
 	if (s.expect !== undefined) out.expect = s.expect;
 	if (s.timeout !== undefined) out.timeout = s.timeout;

@@ -70,6 +70,9 @@ interface EditorInstance {
 	vstepDragStepIdx: number | null;
 	vstepDropTarget: { phase: number; position: number } | null;
 	emptyPhases: Map<number, Set<number>>;
+	// Ordered row drafts preserve incomplete and duplicate environment names
+	// without collapsing them into the persisted Record shape.
+	environmentDrafts: Map<string, CommandEnvironmentDraftRow[]>;
 	// Touch drag transients
 	touchLongPressTimer: ReturnType<typeof setTimeout> | null;
 	touchStartY: number;
@@ -99,6 +102,7 @@ function makeInstance(id: string): EditorInstance {
 		vstepDragStepIdx: null,
 		vstepDropTarget: null,
 		emptyPhases: new Map(),
+		environmentDrafts: new Map(),
 		touchLongPressTimer: null,
 		touchStartY: 0,
 		touchDragging: false,
@@ -143,8 +147,20 @@ let currentView: View = "list";
 let workflows: Workflow[] = [];
 let loading = true;
 
-// Project components cache (for the `component` step-field dropdown).
+// Project components cache (for the `component` step-field dropdown and
+// command-environment inheritance labels). This contains only declared
+// component configuration, never host process environment values.
+type ProjectComponentMetadata = { name: string; env?: Record<string, string> };
+let projectComponents: ProjectComponentMetadata[] = [];
 let projectComponentNames: string[] = [];
+
+const COMMAND_ENV_KEY_MAX_LENGTH = 128;
+const COMMAND_ENV_VALUE_MAX_LENGTH = 16_384;
+const COMMAND_ENV_MAX_ENTRIES = 100;
+const COMMAND_ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+type CommandEnvironmentDraftRow = { id: number; key: string; value: string };
+let nextCommandEnvironmentDraftRowId = 0;
 
 // Draft metadata rows per gate (ordered list of [key, value] pairs). Mirrors
 // `gate.metadata` for editing but keeps blank rows visible. Synced into
@@ -160,6 +176,60 @@ function seedMetadataDrafts(gates: WorkflowGate[]): void {
 			metadataDrafts.set(i, Object.entries(g.metadata).map(([k, v]) => [k, v]));
 		}
 	});
+}
+
+function environmentDraftKey(gateIdx: number, stepIdx: number): string {
+	return `${gateIdx}:${stepIdx}`;
+}
+
+function makeEnvironmentDraftRows(env: Record<string, string> | undefined): CommandEnvironmentDraftRow[] {
+	return Object.entries(env || {}).map(([key, value]) => ({ id: ++nextCommandEnvironmentDraftRowId, key, value }));
+}
+
+function seedEnvironmentDrafts(inst: EditorInstance): void {
+	inst.environmentDrafts = new Map();
+	inst.editGates.forEach((gate, gateIdx) => (gate.verify || []).forEach((step, stepIdx) => {
+		if (step.type === "command" && step.env) {
+			inst.environmentDrafts.set(environmentDraftKey(gateIdx, stepIdx), makeEnvironmentDraftRows(step.env));
+		}
+	}));
+}
+
+function getEnvironmentDraftRows(inst: EditorInstance, gateIdx: number, stepIdx: number, step: VerifyStep): CommandEnvironmentDraftRow[] {
+	const key = environmentDraftKey(gateIdx, stepIdx);
+	let rows = inst.environmentDrafts.get(key);
+	if (!rows) {
+		rows = makeEnvironmentDraftRows(step.env);
+		inst.environmentDrafts.set(key, rows);
+	}
+	return rows;
+}
+
+function remapEnvironmentDraftGates(inst: EditorInstance, oldGates: WorkflowGate[], newGates: WorkflowGate[]): void {
+	const next = new Map<string, CommandEnvironmentDraftRow[]>();
+	newGates.forEach((gate, newGateIdx) => {
+		const oldGateIdx = oldGates.indexOf(gate);
+		if (oldGateIdx < 0) return;
+		for (const [key, rows] of inst.environmentDrafts) {
+			const [draftGateIdx, draftStepIdx] = key.split(":").map(Number);
+			if (draftGateIdx === oldGateIdx) next.set(environmentDraftKey(newGateIdx, draftStepIdx), rows);
+		}
+	});
+	inst.environmentDrafts = next;
+}
+
+function remapEnvironmentDraftSteps(inst: EditorInstance, gateIdx: number, oldSteps: VerifyStep[], newSteps: VerifyStep[]): void {
+	const next = new Map(inst.environmentDrafts);
+	for (const key of [...next.keys()]) {
+		if (Number(key.split(":")[0]) === gateIdx) next.delete(key);
+	}
+	newSteps.forEach((step, newStepIdx) => {
+		const oldStepIdx = oldSteps.indexOf(step);
+		if (oldStepIdx < 0) return;
+		const rows = inst.environmentDrafts.get(environmentDraftKey(gateIdx, oldStepIdx));
+		if (rows) next.set(environmentDraftKey(gateIdx, newStepIdx), rows);
+	});
+	inst.environmentDrafts = next;
 }
 
 // Top-level save-attempted state — used to surface inline validation errors.
@@ -188,23 +258,66 @@ export function validateStep(step: VerifyStep): Record<string, string> {
 		if (!hasRun && !hasCmd) errs.run = "Either a free-form `run` or a named `command` is required.";
 		if (hasRun && hasCmd) errs.command = "Specify exactly one of `run` or `command`, not both.";
 		if (hasCmd && !(step.component && step.component.trim())) errs.component = "Component is required for named commands.";
+		Object.assign(errs, validateCommandEnvironment(step.env));
 	}
 	return errs;
 }
 
 /** Collect every validation error across all steps in editGates. */
-function collectValidationErrors(gates: WorkflowGate[]): { gateIdx: number; stepIdx: number; errors: Record<string, string> }[] {
+function collectValidationErrors(inst: EditorInstance): { gateIdx: number; stepIdx: number; errors: Record<string, string> }[] {
 	const out: { gateIdx: number; stepIdx: number; errors: Record<string, string> }[] = [];
-	gates.forEach((g, gi) => {
+	inst.editGates.forEach((g, gi) => {
 		(g.verify || []).forEach((s, si) => {
 			const e = validateStep(s);
+			if (s.type === "command") Object.assign(e, validateCommandEnvironmentRows(getEnvironmentDraftRows(inst, gi, si, s)));
 			if (Object.keys(e).length > 0) out.push({ gateIdx: gi, stepIdx: si, errors: e });
 		});
 	});
 	return out;
 }
 
+function validateCommandEnvironment(env: Record<string, string> | undefined): Record<string, string> {
+	return validateCommandEnvironmentRows(Object.entries(env || {}).map(([key, value]) => ({ key, value })));
+}
+
+function validateCommandEnvironmentRows(rows: readonly Pick<CommandEnvironmentDraftRow, "key" | "value">[]): Record<string, string> {
+	const errors: Record<string, string> = {};
+	if (rows.length > COMMAND_ENV_MAX_ENTRIES) {
+		errors.env = `Maximum ${COMMAND_ENV_MAX_ENTRIES} variables per environment.`;
+		return errors;
+	}
+	const firstIndexByLowerKey = new Map<string, number>();
+	rows.forEach(({ key, value }, index) => {
+		const row = `env.${index}`;
+		if (!key) errors[`${row}.key`] = "Variable name is required.";
+		else if (!COMMAND_ENV_KEY_PATTERN.test(key)) errors[`${row}.key`] = "Use letters, numbers, and underscores; start with a letter or underscore.";
+		else if (key.length > COMMAND_ENV_KEY_MAX_LENGTH) errors[`${row}.key`] = `Variable names can be at most ${COMMAND_ENV_KEY_MAX_LENGTH} characters.`;
+		if (value.length > COMMAND_ENV_VALUE_MAX_LENGTH) errors[`${row}.value`] = `Values can be at most ${COMMAND_ENV_VALUE_MAX_LENGTH} characters.`;
+
+		const normalized = key.toLowerCase();
+		const firstIndex = firstIndexByLowerKey.get(normalized);
+		if (key && firstIndex !== undefined) {
+			const otherKey = rows[firstIndex].key;
+			errors[`${row}.key`] = `“${key}” duplicates “${otherKey}”. Variable names must be unique ignoring case.`;
+			errors[`env.${firstIndex}.key`] = `“${otherKey}” duplicates “${key}”. Variable names must be unique ignoring case.`;
+		} else if (key) {
+			firstIndexByLowerKey.set(normalized, index);
+		}
+	});
+	return errors;
+}
+
+function serializeCommandEnvironmentRows(rows: readonly CommandEnvironmentDraftRow[]): Record<string, string> | undefined {
+	const errors = validateCommandEnvironmentRows(rows);
+	const env: Record<string, string> = {};
+	rows.forEach(({ key, value }, index) => {
+		if (key && !errors[`env.${index}.key`] && !errors[`env.${index}.value`]) env[key] = value;
+	});
+	return Object.keys(env).length > 0 ? env : undefined;
+}
+
 async function loadProjectComponentsForEditor(): Promise<void> {
+	projectComponents = [];
 	projectComponentNames = [];
 	const projectId = getConfigProjectId({ preserveHeadquarters: true });
 	if (!projectId) return;
@@ -213,9 +326,13 @@ async function loadProjectComponentsForEditor(): Promise<void> {
 		if (!res.ok) return;
 		const data = await res.json().catch(() => null);
 		const comps = data && Array.isArray(data.components) ? data.components : [];
-		projectComponentNames = comps
-			.map((c: any) => (c && typeof c.name === "string") ? c.name : "")
-			.filter((n: string) => n.length > 0);
+		projectComponents = comps
+			.filter((c: any) => c && typeof c.name === "string" && c.name.length > 0)
+			.map((c: any) => ({
+				name: c.name,
+				env: c.env && typeof c.env === "object" && !Array.isArray(c.env) ? { ...c.env } : undefined,
+			}));
+		projectComponentNames = projectComponents.map(c => c.name);
 	} catch {
 		/* swallow — select degrades to a free-text option list */
 	} finally {
@@ -259,6 +376,7 @@ function resetPageInstance(): void {
 	pageInstance.vstepDragStepIdx = null;
 	pageInstance.vstepDropTarget = null;
 	pageInstance.emptyPhases = new Map();
+	pageInstance.environmentDrafts = new Map();
 }
 
 export async function loadWorkflowPageData(): Promise<void> {
@@ -304,13 +422,14 @@ function showEdit(workflow: Workflow): void {
 	pageInstance.editId = workflow.id;
 	pageInstance.editName = workflow.name;
 	pageInstance.editDescription = workflow.description;
-	pageInstance.editGates = workflow.gates.map((g) => ({ ...g, dependsOn: [...g.dependsOn], verify: g.verify ? g.verify.map(v => ({ ...v })) : undefined, metadata: g.metadata ? { ...g.metadata } : undefined }));
+	pageInstance.editGates = workflow.gates.map((g) => ({ ...g, dependsOn: [...g.dependsOn], verify: g.verify ? g.verify.map(v => ({ ...v, env: v.env ? { ...v.env } : undefined })) : undefined, metadata: g.metadata ? { ...g.metadata } : undefined }));
 	pageInstance.saving = false;
 	pageInstance.expandedGateIndices = new Set();
 	pageInstance.expandedVStepKeys = new Set();
 	saveAttempted = false;
 	saveBlockedReason = null;
 	seedMetadataDrafts(pageInstance.editGates);
+	seedEnvironmentDrafts(pageInstance);
 	void loadProjectComponentsForEditor();
 	setHashRoute("workflow-edit", workflow.id);
 }
@@ -332,6 +451,7 @@ function showNewEdit(): void {
 	saveAttempted = false;
 	saveBlockedReason = null;
 	metadataDrafts = new Map();
+	pageInstance.environmentDrafts = new Map();
 	void loadProjectComponentsForEditor();
 	renderApp();
 }
@@ -367,7 +487,7 @@ function compactPhases(gates: WorkflowGate[]): WorkflowGate[] {
 		const remap = new Map(phases.map((p, i) => [p, i]));
 		return {
 			...g,
-			verify: g.verify.map(s => ({ ...s, phase: remap.get(s.phase ?? 0) ?? 0 })),
+			verify: g.verify.map(s => ({ ...s, env: s.env ? { ...s.env } : undefined, phase: remap.get(s.phase ?? 0) ?? 0 })),
 		};
 	});
 }
@@ -399,7 +519,8 @@ function removeEmptyPhase(inst: EditorInstance, gateIdx: number, phase: number):
 // ============================================================================
 
 function moveVerifyStep(inst: EditorInstance, gateIdx: number, fromStepIdx: number, toPhase: number, toPosition: number): void {
-	const steps = [...(inst.editGates[gateIdx].verify || [])];
+	const oldSteps = inst.editGates[gateIdx].verify || [];
+	const steps = [...oldSteps];
 	const [moved] = steps.splice(fromStepIdx, 1);
 	moved.phase = toPhase;
 	const targetPhaseSteps = steps.filter(s => (s.phase ?? 0) === toPhase);
@@ -414,6 +535,7 @@ function moveVerifyStep(inst: EditorInstance, gateIdx: number, fromStepIdx: numb
 		}
 	}
 	steps.splice(insertAt, 0, moved);
+	remapEnvironmentDraftSteps(inst, gateIdx, oldSteps, steps);
 	updateGateField(inst, gateIdx, "verify", steps);
 }
 
@@ -551,7 +673,7 @@ async function handleSave(): Promise<void> {
 
 	// Run validation before persisting. Block save on any error and surface
 	// inline messages in the editor + a top-level banner.
-	const issues = collectValidationErrors(pageInstance.editGates);
+	const issues = collectValidationErrors(pageInstance);
 	if (issues.length > 0) {
 		// Expand any gates that contain an invalid step so the user can see the
 		// inline error without hunting for it.
@@ -676,7 +798,9 @@ function addGate(inst: EditorInstance): void {
 }
 
 function removeGate(inst: EditorInstance, index: number): void {
+	const oldGates = inst.editGates;
 	inst.editGates = inst.editGates.filter((_, i) => i !== index);
+	remapEnvironmentDraftGates(inst, oldGates, inst.editGates);
 	const newExpanded = new Set<number>();
 	for (const idx of inst.expandedGateIndices) {
 		if (idx < index) newExpanded.add(idx);
@@ -711,7 +835,7 @@ function notifyControlledChange(inst: EditorInstance): void {
 		gates: inst.editGates.map((g) => ({
 			...g,
 			dependsOn: [...g.dependsOn],
-			verify: g.verify ? g.verify.map((v) => ({ ...v })) : undefined,
+			verify: g.verify ? g.verify.map((v) => ({ ...v, env: v.env ? { ...v.env } : undefined })) : undefined,
 			metadata: g.metadata ? { ...g.metadata } : undefined,
 		})),
 	} as Workflow;
@@ -743,10 +867,12 @@ function toggleVStepExpand(inst: EditorInstance, gateIdx: number, stepIdx: numbe
 
 function moveGate(inst: EditorInstance, fromIdx: number, toIdx: number): void {
 	if (fromIdx === toIdx) return;
-	const newGates = [...inst.editGates];
+	const oldGates = inst.editGates;
+	const newGates = [...oldGates];
 	const [moved] = newGates.splice(fromIdx, 1);
 	newGates.splice(toIdx, 0, moved);
 	inst.editGates = newGates;
+	remapEnvironmentDraftGates(inst, oldGates, newGates);
 	notifyControlledChange(inst);
 
 	const remap = (oldIdx: number): number => {
@@ -929,6 +1055,7 @@ function mutateStepForTypeChange(prev: VerifyStep, newType: VerifyStep["type"]):
 		delete next.run;
 		delete next.expect;
 		delete next.command;
+		delete next.env;
 	} else {
 		delete next.prompt;
 		delete next.label;
@@ -950,12 +1077,129 @@ function mutateStepForTypeChange(prev: VerifyStep, newType: VerifyStep["type"]):
 	return next;
 }
 
+function commandEnvironmentContext(step: VerifyStep): { component?: ProjectComponentMetadata; precedence: string; empty: string } {
+	const component = step.component ? projectComponents.find(candidate => candidate.name === step.component) : undefined;
+	if (component) {
+		return {
+			component,
+			precedence: `Precedence: Step override → ${component.name} Command Environment → Bobbit process environment.`,
+			empty: `No environment overrides. This step inherits ${component.name} Command Environment.`,
+		};
+	}
+	if (step.run && !step.component) {
+		return {
+			precedence: "Precedence: Step override → Bobbit process environment.",
+			empty: "No environment overrides. This step uses the Bobbit process environment.",
+		};
+	}
+	return {
+		precedence: "Select a component to show inherited command environment.",
+		empty: "No environment overrides.",
+	};
+}
+
+function renderCommandEnvironmentEditor(
+	inst: EditorInstance,
+	gateIdx: number,
+	stepIdx: number,
+	step: VerifyStep,
+	errs: Record<string, string>,
+	readOnly: boolean,
+	updateStep: (patch: Partial<VerifyStep>, rerender?: boolean) => void,
+): TemplateResult {
+	const rows = getEnvironmentDraftRows(inst, gateIdx, stepIdx, step);
+	const context = commandEnvironmentContext(step);
+	const inheritedKeys = new Set(Object.keys(context.component?.env || {}).map(key => key.toLowerCase()));
+	const commitRows = (nextRows: CommandEnvironmentDraftRow[], rerender = false) => {
+		inst.environmentDrafts.set(environmentDraftKey(gateIdx, stepIdx), nextRows);
+		updateStep({ env: serializeCommandEnvironmentRows(nextRows) }, rerender);
+	};
+	const addRow = () => {
+		const row = { id: ++nextCommandEnvironmentDraftRowId, key: "", value: "" };
+		commitRows([...getEnvironmentDraftRows(inst, gateIdx, stepIdx, step), row], true);
+		queueMicrotask(() => document.querySelector<HTMLInputElement>(`[data-env-row-id="${row.id}"]`)?.focus());
+	};
+	return html`
+		<div class="wf-field wf-command-environment" data-testid="wf-step-environment">
+			<div class="wf-environment-heading">
+				<span class="wf-field-label">Environment overrides (${rows.length})</span>
+				${!readOnly && rows.length > 0 ? html`<button class="wf-criteria-add-btn" data-testid="wf-step-env-add" ?disabled=${rows.length >= COMMAND_ENV_MAX_ENTRIES} @click=${(e: Event) => {
+					e.stopPropagation();
+					addRow();
+				}}>Add variable</button>` : nothing}
+			</div>
+			<div class="wf-field-hint" data-testid="wf-step-env-intro">Overrides apply to this command step only.</div>
+			<div class="wf-field-hint" data-testid="wf-step-env-precedence">${context.precedence}</div>
+			<div class="wf-environment-warning" role="note">Stored as plaintext. Do not enter API keys, tokens, passwords, or other secrets. Use Sandbox Tokens or Provider API Keys for sensitive values.</div>
+			<div class="wf-field-hint">Values are passed literally; Bobbit does not expand $VAR or \${VAR}.</div>
+			${rows.length === 0 ? html`
+				<div class="wf-field-hint" data-testid="wf-step-env-empty">${context.empty}</div>
+				${readOnly ? nothing : html`<button class="wf-criteria-add-btn" data-testid="wf-step-env-add" @click=${(e: Event) => {
+					e.stopPropagation();
+					addRow();
+				}}>Add variable</button>`}
+			` : html`
+				<div class="wf-environment-list">
+					${rows.map((row, index) => {
+						const keyId = `wf-step-env-key-${row.id}`;
+						const valueId = `wf-step-env-value-${row.id}`;
+						const keyError = errs[`env.${index}.key`];
+						const valueError = errs[`env.${index}.value`];
+						const origin = context.component ? inheritedKeys.has(row.key.toLowerCase()) ? "Overrides component" : "Step only" : "";
+						return html`
+							<div class="wf-env-row" data-testid="wf-step-env-row">
+								<div class="wf-env-input-wrap">
+									<label class="wf-field-label" for=${keyId}>Name</label>
+									<input id=${keyId} class="wf-input ${keyError ? "wf-input-error" : ""}" data-testid="wf-step-env-key" data-env-row-id=${row.id} placeholder="VARIABLE_NAME" .value=${row.key}
+										?disabled=${readOnly} aria-invalid=${keyError ? "true" : "false"} aria-describedby=${keyError ? `${keyId}-error` : nothing}
+										@click=${(e: Event) => e.stopPropagation()}
+										@input=${(e: Event) => {
+											const current = getEnvironmentDraftRows(inst, gateIdx, stepIdx, step);
+											commitRows(current.map(candidate => candidate.id === row.id ? { ...candidate, key: (e.target as HTMLInputElement).value } : candidate));
+										}} />
+									${keyError ? html`<div id=${`${keyId}-error`} class="wf-field-error">${keyError}</div>` : nothing}
+								</div>
+								<div class="wf-env-input-wrap">
+									<label class="wf-field-label" for=${valueId}>Value</label>
+									<input id=${valueId} class="wf-input ${valueError ? "wf-input-error" : ""}" data-testid="wf-step-env-value" placeholder="Value (blank is allowed)" .value=${row.value}
+										?disabled=${readOnly} aria-invalid=${valueError ? "true" : "false"} aria-describedby=${valueError ? `${valueId}-error` : nothing}
+										@click=${(e: Event) => e.stopPropagation()}
+										@input=${(e: Event) => {
+											const current = getEnvironmentDraftRows(inst, gateIdx, stepIdx, step);
+											commitRows(current.map(candidate => candidate.id === row.id ? { ...candidate, value: (e.target as HTMLInputElement).value } : candidate));
+										}} />
+									${valueError ? html`<div id=${`${valueId}-error`} class="wf-field-error">${valueError}</div>` : nothing}
+								</div>
+								${origin ? html`<span class="wf-environment-origin" data-testid="wf-step-env-origin" aria-label=${origin}>${origin}</span>` : nothing}
+								${readOnly ? nothing : html`<button class="wf-criteria-remove" data-testid="wf-step-env-remove" title="Remove variable" aria-label=${row.key ? `Remove ${row.key} variable` : `Remove variable ${index + 1}`} @click=${(e: Event) => {
+									e.stopPropagation();
+									const current = getEnvironmentDraftRows(inst, gateIdx, stepIdx, step);
+									const removedIndex = current.findIndex(candidate => candidate.id === row.id);
+									const next = current.filter(candidate => candidate.id !== row.id);
+									const focusId = next[removedIndex]?.id ?? next[removedIndex - 1]?.id;
+									commitRows(next, true);
+									queueMicrotask(() => focusId
+										? document.querySelector<HTMLInputElement>(`[data-env-row-id="${focusId}"]`)?.focus()
+										: document.querySelector<HTMLButtonElement>("[data-testid='wf-step-env-add']")?.focus());
+								}}>${icon(Trash2, "sm")}</button>`}
+							</div>
+						`;
+					})}
+				</div>
+				${errs.env ? html`<div class="wf-field-error">${errs.env}</div>` : nothing}
+			`}
+		</div>
+	`;
+}
+
 function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateIdx: number, step: VerifyStep, stepIdx: number): TemplateResult {
 	const readOnly = isReadOnly(inst);
 	const typeIcon = stepTypeIcon(step.type);
 	const isVStepExpanded = inst.expandedVStepKeys.has(`${gateIdx}-${stepIdx}`);
 	const isDragging = inst.vstepDragGateIdx === gateIdx && inst.vstepDragStepIdx === stepIdx;
-	const errs = saveAttempted ? validateStep(step) : {};
+	const errs = saveAttempted
+		? { ...validateStep(step), ...(step.type === "command" ? validateCommandEnvironmentRows(getEnvironmentDraftRows(inst, gateIdx, stepIdx, step)) : {}) }
+		: {};
 
 	const currentSteps = (): VerifyStep[] => [...(((inst.editGates[gateIdx] || gate).verify) || [])];
 	const updateStep = (patch: Partial<VerifyStep>, rerender = false) => {
@@ -998,6 +1242,10 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 		const steps = currentSteps();
 		const newType = (e.target as HTMLSelectElement).value as VerifyStep["type"];
 		steps[stepIdx] = mutateStepForTypeChange(steps[stepIdx], newType);
+		if (newType !== "command") inst.environmentDrafts.delete(environmentDraftKey(gateIdx, stepIdx));
+		else if (!inst.environmentDrafts.has(environmentDraftKey(gateIdx, stepIdx))) {
+			inst.environmentDrafts.set(environmentDraftKey(gateIdx, stepIdx), makeEnvironmentDraftRows(steps[stepIdx].env));
+		}
 		updateGateField(inst, gateIdx, "verify", steps);
 	};
 	const setCommandMode = (mode: "run" | "command") => {
@@ -1053,7 +1301,9 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 				<span class="wf-vstep-spacer"></span>
 				${readOnly ? nothing : html`<button class="wf-criteria-remove" title="Remove verification step" @click=${(e: Event) => {
 					e.stopPropagation();
-					const steps = (gate.verify || []).filter((_: any, i: number) => i !== stepIdx);
+					const oldSteps = gate.verify || [];
+					const steps = oldSteps.filter((_: any, i: number) => i !== stepIdx);
+					remapEnvironmentDraftSteps(inst, gateIdx, oldSteps, steps);
 					updateGateField(inst, gateIdx, "verify", steps);
 				}}>${icon(Trash2, "sm")}</button>`}
 			</div>
@@ -1161,7 +1411,7 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 							</div>
 						`}
 
-					<details class="wf-vstep-advanced" ?open=${!!(step.timeout || step.role || step.description || step.component || (step.phase != null && step.phase !== 0) || (saveAttempted && Object.keys(errs).length > 0))}>
+					<details class="wf-vstep-advanced" ?open=${!!(step.timeout || step.role || step.description || step.component || step.env || (step.phase != null && step.phase !== 0) || (saveAttempted && Object.keys(errs).length > 0))}>
 						<summary class="wf-vstep-advanced-summary">Advanced</summary>
 						<div class="wf-vstep-advanced-fields">
 							<div class="wf-field">
@@ -1209,7 +1459,7 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 										<select class="wf-select ${errs.component ? "wf-input-error" : ""}" data-testid="wf-step-component" .value=${step.component || ""}
 											?disabled=${readOnly}
 											@click=${(e: Event) => e.stopPropagation()}
-											@change=${(e: Event) => updateStep({ component: (e.target as HTMLSelectElement).value || undefined })}>
+											@change=${(e: Event) => updateStep({ component: (e.target as HTMLSelectElement).value || undefined }, true)}>
 											<option value="" ?selected=${!step.component}>(first component)</option>
 											${componentOptions.map(n => html`<option value="${n}" ?selected=${step.component === n}>${n}</option>`)}
 										</select>
@@ -1217,12 +1467,13 @@ function renderVerifyStepEditor(inst: EditorInstance, gate: WorkflowGate, gateId
 										<input class="wf-input ${errs.component ? "wf-input-error" : ""}" data-testid="wf-step-component" .value=${step.component || ""} placeholder="Component name"
 											?disabled=${readOnly}
 											@click=${(e: Event) => e.stopPropagation()}
-											@input=${(e: Event) => updateStep({ component: (e.target as HTMLInputElement).value || undefined })} />
+											@input=${(e: Event) => updateStep({ component: (e.target as HTMLInputElement).value || undefined }, true)} />
 									`}
 									<div class="wf-field-hint">Required when using a named <code>command</code>; empty is valid only for free-form <code>run</code>.</div>
 									${errs.component ? html`<div class="wf-field-error" data-testid="wf-step-component-error">${errs.component}</div>` : nothing}
 								</div>
 							` : nothing}
+							${stepType === "command" ? renderCommandEnvironmentEditor(inst, gateIdx, stepIdx, step, errs, readOnly, updateStep) : nothing}
 							<div class="wf-field">
 								<label class="wf-field-label">Description</label>
 								<textarea class="wf-textarea" data-testid="wf-step-description" rows="2" .value=${step.description || ""} placeholder="Free-form description (shown in tooltips and the opt-in card)"
@@ -1454,7 +1705,7 @@ function seedEmbedInstance(
 	inst.editGates = (wf.gates || []).map((g) => ({
 		...g,
 		dependsOn: [...(g.dependsOn || [])],
-		verify: g.verify ? g.verify.map((v) => ({ ...v })) : undefined,
+		verify: g.verify ? g.verify.map((v) => ({ ...v, env: v.env ? { ...v.env } : undefined })) : undefined,
 		metadata: g.metadata ? { ...g.metadata } : undefined,
 	}));
 	inst.expandedGateIndices = expandAll
@@ -1472,6 +1723,7 @@ function seedEmbedInstance(
 	inst.vstepDragStepIdx = null;
 	inst.vstepDropTarget = null;
 	inst.emptyPhases = new Map();
+	seedEnvironmentDrafts(inst);
 }
 
 /**

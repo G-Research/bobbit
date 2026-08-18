@@ -252,6 +252,7 @@ interface VerifyStep {
   component?: string; // Component name to resolve against components[]
   command?: string;   // Named command on that component (component.commands[command])
   run?: string;       // Free-form shell. May coexist with component (uses component cwd) or stand alone.
+  env?: Record<string, string>; // Literal plaintext override; valid only for type: "command".
   // For type: "llm-review" / "agent-qa":
   prompt?: string;    // Review/QA prompt body (runtime tokens substituted by gate runner)
   role?: string;      // Reviewer role to spawn
@@ -297,12 +298,15 @@ Workflows live inside `project.yaml` under the top-level `workflows:` block (one
 | `{ component, run }` | same as above | literal `run` string |
 | `{ run }` | `<branch-container>` (per-branch worktree set root) | literal `run` string |
 
+A command step may also declare `env: { KEY: "value" }`. Its values override the selected component's `env`; a pure `{ run }` step has no component environment. These are plaintext literal values, not shell prefixes or secrets. For validation, exact precedence, host/container transport, and no-restart behavior, see [Project command environments](project-command-environments.md).
+
 ```yaml
 # project.yaml excerpt
 components:
   - name: myapp
     repo: "."
     commands: { build: npm run build, check: npm run check, test: npm test }
+    env: { NODE_OPTIONS: "--max-old-space-size=4096" }
 
 workflows:
   general:
@@ -322,6 +326,8 @@ workflows:
         verify:
           # Component-linked, named command — resolves to components.myapp.commands.build:
           - { name: "Build myapp", type: command, component: "myapp", command: "build" }
+          # Per-step values override the selected component declaration:
+          - { name: "CI test", type: command, component: "myapp", command: "test", env: { CI: "1" } }
           # Component-linked, free-form shell (cwd derived from component):
           - { name: "Custom thing", type: command, component: "myapp", run: "./scripts/special.sh" }
           - { name: "Code review", type: llm-review, phase: 1, prompt: "Review the changes on {{branch}} vs origin/{{baseBranch}}." }
@@ -347,7 +353,7 @@ The validator does **not** reject template tokens in free-form `run:` or `prompt
 
 #### Workflow editor authoring
 
-Settings → Workflows exposes the same schema as inline workflow YAML. Authors can edit gate `id`, `name`, `dependsOn`, `content`, `injectDownstream`, `optional`, `manual`, and `metadata`; verification step `type`, command/run source, prompt, role, component, timeout, phase, description, optional toggle, `optionalLabel`, and multiline **Failure guidance**; and `human-signoff`-specific `label` and `prompt` fields. Failure guidance is type-independent, so changing a verification step between command, LLM review, agent QA, and human sign-off preserves it. Read-only workflow and proposal inspectors keep guidance out of the collapsed step summary and show configured Markdown in a default-closed **Failure guidance** disclosure.
+Settings → Workflows exposes the same schema as inline workflow YAML. Authors can edit gate `id`, `name`, `dependsOn`, `content`, `injectDownstream`, `optional`, `manual`, and `metadata`; verification step `type`, command/run source, command-only `env` overrides, prompt, role, component, timeout, phase, description, optional toggle, `optionalLabel`, and multiline **Failure guidance**; and `human-signoff`-specific `label` and `prompt` fields. Command steps show environment overrides in Advanced fields; changing to a non-command type removes them. See [Project command environments](project-command-environments.md) for its inheritance display, validation, and plaintext warning. Failure guidance is type-independent, so changing a verification step between command, LLM review, agent QA, and human sign-off preserves it. Read-only workflow and proposal inspectors keep guidance out of the collapsed step summary and show configured Markdown in a default-closed **Failure guidance** disclosure.
 
 Timeout authoring is type-aware and leaving the field empty does not serialize a default. Command steps show the generic 300-second default and the 1200-second component `command: unit` exception. `llm-review` shows the 1200-second per-active-turn default. `agent-qa` explains that its omitted value is the greater of 1200 seconds and component `qa_max_duration_minutes + 5m`. Review-agent help also states that a positive explicit value may be shorter and that provider backoff is excluded.
 

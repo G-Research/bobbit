@@ -23,6 +23,8 @@ export interface ProposalComponent {
 	relative_path?: string;
 	worktree_setup_command?: string;
 	commands?: Record<string, string>;
+	/** Plaintext environment injected into this component's named commands. */
+	env?: Record<string, string>;
 	/** Opaque per-component key→string map (consumed by skills like /qa-test). Read-only in this view. */
 	config?: Record<string, string>;
 }
@@ -44,6 +46,8 @@ export interface ProposalVerifyStep {
 	/** Opt-in toggle label shown at goal creation for `optional: true` steps. */
 	optionalLabel?: string;
 	description?: string;
+	/** Plaintext command-only environment overrides. */
+	env?: Record<string, string>;
 	/** Static workflow-authored Markdown shown as advisory remediation guidance after a verification failure. */
 	failureGuidance?: string;
 	[key: string]: unknown;
@@ -133,6 +137,7 @@ export function componentsView(components: ProposalComponent[]): TemplateResult 
 function componentRow(c: ProposalComponent): TemplateResult {
 	const cmds = c.commands ? Object.entries(c.commands) : [];
 	const cfgEntries = c.config ? Object.entries(c.config) : [];
+	const envEntries = c.env ? Object.entries(c.env) : [];
 	const dataOnly = cmds.length === 0;
 	const componentId = `comp-${c.name}`;
 	// Path summary in the collapsed row: omit `.` (uninformative for single-repo).
@@ -182,6 +187,19 @@ function componentRow(c: ProposalComponent): TemplateResult {
 									<div class="flex items-baseline gap-2" id=${`comp-cmd-${c.name}-${name}`}>
 										<span class="text-[11px] px-1.5 py-0.5 rounded bg-primary/10 text-primary font-medium font-mono" style="min-width:60px;text-align:center;flex-shrink:0;">${name}</span>
 										<code class="text-[12px] font-mono break-all">${cmd}</code>
+									</div>
+								`)}
+							</div>
+						</div>
+					` : ""}
+					${envEntries.length > 0 ? html`
+						<div data-testid="component-environment-${c.name}">
+							<div class="text-[11px] text-muted-foreground mb-1.5">Command Environment (${envEntries.length})</div>
+							<div class="flex flex-col gap-1.5">
+								${envEntries.map(([k, v]) => html`
+									<div class="flex items-baseline gap-2" data-testid="component-environment-row-${c.name}-${k}">
+										<code class="text-[11px] px-1.5 py-0.5 rounded bg-primary/10 text-primary font-medium font-mono">${k}</code>
+										<span class="text-[12px] font-mono break-all">${v}</span>
 									</div>
 								`)}
 							</div>
@@ -380,6 +398,12 @@ function failureGuidanceDetails(step: ProposalVerifyStep): TemplateResult {
 
 function stepDetails(step: ProposalVerifyStep, type: string, componentNames: Set<string>): TemplateResult {
 	if (type === "command") {
+		const envEntries = Object.entries(step.env || {});
+		const envSummary = envEntries.length ? html`
+			<div data-testid="workflow-step-environment">
+				<div class="text-[11px] text-muted-foreground mb-1">Environment overrides (${envEntries.length})</div>
+				${envEntries.map(([key, value]) => html`<div class="text-[12px] font-mono"><code>${key}</code><span class="text-muted-foreground"> = </span><span>${value}</span></div>`)}
+			</div>` : "";
 		if (step.component && step.command) {
 			const known = componentNames.has(step.component);
 			return html`
@@ -390,15 +414,17 @@ function stepDetails(step: ProposalVerifyStep, type: string, componentNames: Set
 					<span class="text-foreground">${step.command}</span>
 				</div>
 				${!known ? html`<div class="text-[11px] text-amber-600">unknown component</div>` : ""}
+				${envSummary}
 			`;
 		}
 		if (step.run) {
 			return html`
 				<div class="text-[11px] text-muted-foreground">Inline command</div>
 				<pre class="text-[11px] p-2 rounded bg-secondary/40 overflow-x-auto m-0"><code>${step.run}</code></pre>
+				${envSummary}
 			`;
 		}
-		return html`<div class="text-[11px] text-muted-foreground italic">No command configured.</div>`;
+		return html`${envSummary || html`<div class="text-[11px] text-muted-foreground italic">No command configured.</div>`}`;
 	}
 	if (type === "llm-review") {
 		return html`

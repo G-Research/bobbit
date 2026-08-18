@@ -21,6 +21,51 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/command-environment.test.ts",
+      "reason": "Native core coverage for command-environment validation limits, case-insensitive precedence, literal snapshots, YAML persistence, workflow command-only validation, and cloning.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/project-command-environment-api.test.ts",
+      "reason": "Gateway API and live-verification coverage for declared command environments: persistence, validation, proposal/workflow paths, and next-invocation versus already-running snapshots.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/workflow-command-environment.spec.ts",
+      "reason": "Focused Chromium editor coverage for command-step environment overrides, literal blank values, validation, reload, and non-command cleanup.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/project-settings.journey.spec.ts",
+      "reason": "Project Settings Chromium journey includes the Components command-environment discoverability, accessibility, isolation, persistence, validation, and narrow-layout flow.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/integration/verification-command-template-security.test.ts",
+      "reason": "Integration coverage that malicious gate metadata in a legacy command template fails before spawn and cannot create a marker file.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
       "path": "tests2/integration/strict-update-body-routes.test.ts",
       "reason": "Regression contract for strict finite-shape update bodies: exact route allow-lists, accepted representative updates, unknown-key rejection, no mutation, goal policy guidance, and immutable staff sandboxing.",
       "execution": {

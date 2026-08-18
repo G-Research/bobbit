@@ -58,27 +58,4 @@ test.describe("Gates API (verification)", () => {
 		}
 	});
 
-	test("metadata variable resolution", async () => {
-		const goalId = await createGoalWithWorkflow("bug-fix");
-		const sessionId = await createSession({ goalId });
-		const ws = trackGateApiConnection(await connectWs(sessionId));
-		try {
-			await signalAndWaitForAuthoredGate(ws, goalId, "issue-analysis",
-				{ content: "# Analysis\n\nSteps: run echo\nRoot cause: src/a.ts:1" }, "passed");
-
-			// expect:failure gate — "echo metadata-works" exits 0 so gate fails
-			await signalAndWaitForAuthoredGate(ws, goalId, "reproducing-test",
-				{ metadata: { test_command: "echo metadata-works", error_pattern: "some error" } },
-				"failed");
-
-			const signalsResp = await apiFetch(`/api/goals/${goalId}/gates/reproducing-test/signals`);
-			const { signals } = await signalsResp.json();
-			const lastSignal = signals[signals.length - 1];
-			const step = lastSignal.verification.steps[0];
-			expect(step.output).toContain("metadata-works");
-		} finally {
-			ws.close();
-			await deleteGoal(goalId);
-		}
-	});
 });

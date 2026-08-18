@@ -779,6 +779,203 @@
 }
 .wf-criteria-add-btn:hover { background: var(--accent); }
 
+/* Component/workflow plaintext command-environment editors. The same primitive
+ * is shared by the workflow editor so rows retain their narrow-screen and
+ * accessibility behaviour on both Settings surfaces. */
+.command-environment {
+	min-width: 0;
+}
+.command-environment-heading {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	min-width: 0;
+}
+.command-environment-heading .wf-verify-label {
+	margin: 0;
+}
+.command-environment-description,
+.command-environment-literal {
+	margin: 4px 0 0;
+	font-size: 11px;
+	line-height: 1.4;
+	color: var(--muted-foreground);
+}
+.command-environment-warning {
+	display: flex;
+	align-items: flex-start;
+	gap: 6px;
+	margin-top: 6px;
+	padding: 6px 8px;
+	border: 1px solid color-mix(in oklch, var(--warning) 55%, var(--border));
+	border-radius: 6px;
+	background: color-mix(in oklch, var(--warning) 10%, transparent);
+	color: var(--foreground);
+	font-size: 11px;
+	line-height: 1.4;
+	min-width: 0;
+}
+.command-environment-warning svg {
+	color: var(--warning);
+	flex: 0 0 auto;
+	margin-top: 1px;
+}
+.command-environment-warning a {
+	color: inherit;
+	font-weight: 600;
+	text-decoration: underline;
+	text-underline-offset: 2px;
+}
+.command-environment-empty {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	margin-top: 8px;
+	font-size: 12px;
+	color: var(--muted-foreground);
+}
+.command-environment-rows {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	margin-top: 8px;
+	min-width: 0;
+}
+.command-environment-row {
+	display: grid;
+	grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.5fr) auto;
+	align-items: start;
+	gap: 8px;
+	min-width: 0;
+}
+.command-environment-input {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	min-width: 0;
+}
+.command-environment-input label {
+	font-size: 11px;
+	font-weight: 500;
+	color: var(--muted-foreground);
+}
+.command-environment-input .wf-input {
+	width: 100%;
+	min-width: 0;
+}
+.command-environment-key {
+	font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+.command-environment-row .wf-gate-delete {
+	margin-top: 20px;
+}
+
+/* Workflow command-step overrides use the same environment language as
+ * components, with workflow-specific class names retained for existing DOM
+ * consumers. Keep every grid parent shrinkable to avoid horizontal overflow. */
+.wf-command-environment,
+.wf-environment-list,
+.wf-env-input-wrap {
+	min-width: 0;
+}
+.wf-environment-heading {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	min-width: 0;
+}
+.wf-environment-warning {
+	margin-top: 6px;
+	padding: 6px 8px;
+	border: 1px solid color-mix(in oklch, var(--warning) 55%, var(--border));
+	border-radius: 6px;
+	background: color-mix(in oklch, var(--warning) 10%, transparent);
+	color: var(--foreground);
+	font-size: 11px;
+	line-height: 1.4;
+	min-width: 0;
+}
+.wf-environment-list {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	margin-top: 8px;
+}
+.wf-env-row {
+	display: grid;
+	grid-template-columns: minmax(9rem, .45fr) minmax(0, 1fr) auto auto;
+	align-items: start;
+	gap: 8px;
+	min-width: 0;
+}
+.wf-env-input-wrap {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+}
+.wf-env-input-wrap .wf-input {
+	width: 100%;
+	min-width: 0;
+}
+.wf-env-row > .wf-criteria-remove {
+	margin-top: 20px;
+}
+.wf-environment-origin {
+	align-self: center;
+	padding: 2px 6px;
+	border-radius: 4px;
+	background: color-mix(in oklch, var(--primary) 12%, transparent);
+	color: var(--muted-foreground);
+	font-size: 10px;
+	line-height: 1.3;
+	white-space: nowrap;
+}
+.wf-criteria-add-btn:focus-visible,
+.wf-criteria-remove:focus-visible {
+	outline: 2px solid var(--ring);
+	outline-offset: 2px;
+}
+
+@media (max-width: 600px) {
+	.command-environment-heading,
+	.command-environment-empty {
+		align-items: flex-start;
+		flex-direction: column;
+	}
+	.command-environment-row {
+		grid-template-columns: minmax(0, 1fr);
+		gap: 6px;
+	}
+	.command-environment-row .wf-gate-delete {
+		margin-top: 0;
+		justify-self: end;
+	}
+	.wf-environment-heading {
+		align-items: flex-start;
+		flex-direction: column;
+	}
+	.wf-env-row {
+		grid-template-columns: minmax(0, 1fr);
+		gap: 6px;
+	}
+	.wf-environment-origin {
+		justify-self: start;
+	}
+	.wf-env-row > .wf-criteria-remove {
+		width: 40px;
+		height: 40px;
+		margin-top: 0;
+		justify-self: end;
+	}
+	.wf-command-environment .wf-criteria-add-btn {
+		min-width: 40px;
+		min-height: 40px;
+	}
+}
+
 /* Collapsible verification step cards */
 .wf-vstep-card {
 	border: 1px solid var(--border);

@@ -7,7 +7,7 @@ import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Select, type SelectOption } from "@mariozechner/mini-lit/dist/Select.js";
 import { html } from "lit";
 import { live } from "lit/directives/live.js";
-import { ArrowLeft, Brain, Bug, Check, FlaskConical, Image as ImageIcon, Loader2, Plus, RotateCcw, Sparkles, Trash2, X } from "lucide";
+import { AlertTriangle, ArrowLeft, Brain, Bug, Check, FlaskConical, Image as ImageIcon, Loader2, Plus, RotateCcw, Sparkles, Trash2, X } from "lucide";
 import { showHeaderToast } from "./header-toast.js";
 import {
 	getShortcuts,
@@ -71,7 +71,13 @@ import "./components/search-status-dot.js";
 import { openOAuthDialog, confirmAction } from "./dialogs.js";
 import { ACCOUNT_OAUTH_PROVIDERS, clearDismissedAccountOAuthExpiryRemindersForProvider, type AccountOAuthProviderId } from "./account-oauth-providers.js";
 import "../ui/components/ProviderKeyInput.js";
-import { componentToEditState, buildSavePayload, type ComponentEditState } from "./components-editor.js";
+import {
+	COMMAND_ENV_MAX_ENTRIES,
+	componentToEditState,
+	buildSavePayload,
+	validateCommandEnvironmentEntries,
+	type ComponentEditState,
+} from "./components-editor.js";
 import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
 import { getSupportedThinkingLevels, clampThinkingLevel, type ThinkingLevel } from "../shared/thinking-levels.js";
 import { ImageModelSelector, type ImageGenerationModel } from "../ui/dialogs/ImageModelSelector.js";
@@ -3847,6 +3853,8 @@ interface ComponentsTabState {
 	dirty: boolean;
 	saving: "" | "saving" | "saved" | "error";
 	errorMessage: string;
+	/** Show inline environment validation after a blur or Save attempt. */
+	envValidationVisible: boolean;
 	workflowsExpanded: boolean;
 	/** Indices of components currently expanded in the list view. */
 	expanded: Set<number>;
@@ -3863,6 +3871,7 @@ function emptyComponentsTabState(): ComponentsTabState {
 		dirty: false,
 		saving: "",
 		errorMessage: "",
+		envValidationVisible: false,
 		workflowsExpanded: false,
 		expanded: new Set<number>(),
 	};
@@ -3907,6 +3916,11 @@ function markComponentsDirty(projectId: string): void {
 async function saveComponentsTab(projectId: string): Promise<void> {
 	const s = _componentsTabState.get(projectId);
 	if (!s) return;
+	s.envValidationVisible = true;
+	if (s.components.some(component => validateCommandEnvironmentEntries(component.env ?? []).size > 0)) {
+		renderApp();
+		return;
+	}
 	s.saving = "saving";
 	s.errorMessage = "";
 	renderApp();
@@ -3947,9 +3961,18 @@ function renderProjectComponentsTab(projectId: string) {
 		else s.expanded.add(index);
 		renderApp();
 	};
+	const focusEnvironmentRow = (componentIndex: number, rowIndex?: number) => {
+		requestAnimationFrame(() => {
+			const selector = rowIndex === undefined
+				? `[data-testid="add-command-environment"][data-component-index="${componentIndex}"]`
+				: `[data-testid="command-environment-key"][data-component-index="${componentIndex}"][data-env-index="${rowIndex}"]`;
+			(document.querySelector(selector) as HTMLElement | null)?.focus();
+		});
+	};
 
 	const renderComponentCard = (c: ComponentEditState, index: number) => {
 		const isExpanded = s.expanded.has(index);
+		const envErrors = s.envValidationVisible ? validateCommandEnvironmentEntries(c.env ?? []) : new Map();
 		const pathSummary = [c.repo && c.repo !== "." ? c.repo : null, c.relative_path].filter(Boolean).join(" / ") || ". (project root)";
 		const dataOnly = c.commands.length === 0;
 		const cmdCountLabel = dataOnly ? "data-only" : `${c.commands.length} cmd${c.commands.length === 1 ? "" : "s"}`;
@@ -4029,6 +4052,77 @@ function renderProjectComponentsTab(projectId: string) {
 							</div>
 							${dataOnly ? html`<div class="text-[11px] text-muted-foreground italic pl-1 mt-1">No commands defined — this is a data-only component (e.g. docs, fixtures, schemas).</div>` : ""}
 						</div>
+						<div class="wf-field command-environment" data-testid="component-command-environment">
+							<div class="command-environment-heading">
+								<span class="wf-verify-label">Command Environment (${c.env.length})</span>
+								${c.env.length > 0 ? html`<button
+									class="wf-criteria-add-btn"
+									data-testid="add-command-environment"
+									data-component-index=${index}
+									?disabled=${c.env.length >= COMMAND_ENV_MAX_ENTRIES}
+									aria-describedby=${c.env.length >= COMMAND_ENV_MAX_ENTRIES ? `component-env-limit-${index}` : ""}
+									@click=${(e: Event) => {
+										e.stopPropagation();
+										if (c.env.length >= COMMAND_ENV_MAX_ENTRIES) return;
+										c.env.push({ key: "", value: "" });
+										markComponentsDirty(projectId);
+										renderApp();
+										focusEnvironmentRow(index, c.env.length - 1);
+									}}
+								>Add variable</button>` : ""}
+							</div>
+							<p class="command-environment-description">Values are injected into this component’s named commands at execution time. Saved changes affect the next command without restarting Bobbit.</p>
+							<div class="command-environment-warning" role="note">
+								${icon(AlertTriangle, "sm")}
+								<span>Stored as plaintext. Do not enter API keys, tokens, passwords, or other secrets. Use <a href=${`#/settings/${projectId}/project`}>Sandbox Tokens</a> or <a href="#/settings/system/models">Provider API Keys</a> for sensitive values.</span>
+							</div>
+							<p class="command-environment-literal">Values are passed literally; Bobbit does not expand $VAR or \${VAR}.</p>
+							${c.env.length >= COMMAND_ENV_MAX_ENTRIES ? html`<span id=${`component-env-limit-${index}`} class="wf-field-hint">Maximum 100 variables per environment.</span>` : ""}
+							${c.env.length === 0 ? html`
+								<div class="command-environment-empty">
+									<span>No command environment variables.</span>
+									<button class="wf-criteria-add-btn" data-testid="add-command-environment" data-component-index=${index}
+										@click=${(e: Event) => {
+											e.stopPropagation();
+											c.env.push({ key: "", value: "" });
+											markComponentsDirty(projectId);
+											renderApp();
+											focusEnvironmentRow(index, 0);
+										}}>Add variable</button>
+								</div>` : html`
+								<div class="command-environment-rows">
+									${c.env.map((entry, envIndex) => {
+										const rowError = envErrors.get(envIndex);
+										const keyId = `component-env-name-${index}-${envIndex}`;
+										const valueId = `component-env-value-${index}-${envIndex}`;
+										const keyErrorId = `${keyId}-error`;
+										const valueErrorId = `${valueId}-error`;
+										const removeName = entry.key ? `Remove ${entry.key} variable` : `Remove variable ${envIndex + 1}`;
+										return html`<div class="command-environment-row" data-testid="command-environment-row" @click=${(e: Event) => e.stopPropagation()}>
+											<div class="command-environment-input">
+												<label for=${keyId}>Name</label>
+												<input id=${keyId} type="text" class="wf-input command-environment-key ${rowError?.key ? "wf-input-error" : ""}"
+													.value=${entry.key} placeholder="VARIABLE_NAME" data-testid="command-environment-key" data-component-index=${index} data-env-index=${envIndex}
+													aria-invalid=${rowError?.key ? "true" : "false"} aria-describedby=${rowError?.key ? keyErrorId : ""}
+													@input=${(e: Event) => { entry.key = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}
+													@blur=${() => { s.envValidationVisible = true; renderApp(); }}/>
+												${rowError?.key ? html`<span id=${keyErrorId} class="wf-field-error">${rowError.key}</span>` : ""}
+											</div>
+											<div class="command-environment-input">
+												<label for=${valueId}>Value</label>
+												<input id=${valueId} type="text" class="wf-input ${rowError?.value ? "wf-input-error" : ""}"
+													.value=${entry.value} placeholder="Value (blank is allowed)" data-testid="command-environment-value" data-component-index=${index} data-env-index=${envIndex}
+													aria-invalid=${rowError?.value ? "true" : "false"} aria-describedby=${rowError?.value ? valueErrorId : ""}
+													@input=${(e: Event) => { entry.value = (e.target as HTMLInputElement).value; markComponentsDirty(projectId); renderApp(); }}
+													@blur=${() => { s.envValidationVisible = true; renderApp(); }}/>
+												${rowError?.value ? html`<span id=${valueErrorId} class="wf-field-error">${rowError.value}</span>` : ""}
+											</div>
+											<button class="wf-gate-delete" title="Remove variable" aria-label=${removeName} data-testid="delete-command-environment"
+												@click=${() => { c.env.splice(envIndex, 1); markComponentsDirty(projectId); renderApp(); focusEnvironmentRow(index, c.env.length ? Math.min(envIndex, c.env.length - 1) : undefined); }}>${icon(X, "sm")}</button>
+										</div>`;
+									})}
+								</div>`}
+						</div>
 						<div class="wf-field" data-testid=${`component-config-${c.name}`}>
 							<span class="wf-verify-label">Config (${c.config.length})</span>
 							<div class="text-[11px] text-muted-foreground italic pl-1 mb-1">Opaque key→string map consumed by skills (e.g. <code>qa_start_command</code>, <code>qa_health_check</code>, <code>qa_max_duration_minutes</code>).</div>
@@ -4096,6 +4190,7 @@ function renderProjectComponentsTab(projectId: string) {
 							relative_path: "",
 							worktree_setup_command: "",
 							commands: [],
+							env: [],
 							config: [],
 						});
 						s.expanded.add(s.components.length - 1);

@@ -22,12 +22,19 @@ docs: >-
   documented in defaults/workflow-authoring-guide.md. Workflows are project-
   scoped only — there is no system-scope cascade.
 
-  COMPONENTS: each component accepts a `config: Record<string, string>` map of
-  opaque key→string entries (max 100 per component); QA-testing keys live there
-  now (qa_start_command, qa_health_check, qa_browser_entry,
-  qa_max_duration_minutes, qa_max_scenarios — all stringified). Inline env vars
-  directly into qa_start_command (e.g. "PORT=$PORT NODE_ENV=test npm start");
-  there is no separate qa_env field.
+  COMPONENTS: each component accepts an optional `env: Record<string, string>`
+  map of literal plaintext values injected into any command step that selects
+  it: `{component, command}` and `{component, run}`. A pure `{run}` step has
+  no component layer. Step-level `env` overrides the component map. Values are
+  not shell-expanded and saved changes affect the next command without restart.
+  This is non-secret configuration: never put API keys, tokens, passwords, or
+  other secrets here; use Sandbox Tokens/provider credential storage instead.
+  Each component also accepts a `config: Record<string, string>` map of opaque
+  key→string entries (max 100 per component); QA-testing keys live there now
+  (qa_start_command, qa_health_check, qa_browser_entry,
+  qa_max_duration_minutes, qa_max_scenarios — all stringified). Command
+  environment does not apply to QA skills, and there is no separate qa_env
+  field. See [Project command environments](../../../docs/project-command-environments.md).
 
   GOTCHAS: Native-YAML fields (config_directories, sandbox_tokens) MUST be sent
   as structured types — the server rejects JSON-encoded strings for these fields

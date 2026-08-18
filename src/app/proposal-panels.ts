@@ -3771,7 +3771,7 @@ function cloneWorkflow(wf: Workflow): Workflow {
 		gates: (wf.gates || []).map((g) => ({
 			...g,
 			dependsOn: [...(g.dependsOn || [])],
-			verify: g.verify ? g.verify.map((v) => ({ ...v })) : undefined,
+			verify: g.verify ? g.verify.map((v) => ({ ...v, env: v.env ? { ...v.env } : undefined })) : undefined,
 			metadata: g.metadata ? { ...g.metadata } : undefined,
 		})),
 	};

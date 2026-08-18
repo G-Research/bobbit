@@ -1,4 +1,6 @@
 import { normalizeWorkflow, type Workflow } from "./workflow-store.js";
+import { validateCommandEnvironment } from "./command-environment.js";
+import { unsafeCommandTemplateFailure } from "./verification-logic.js";
 
 /**
  * Workflow validation shared by project workflow mutations, goal creation, and
@@ -24,6 +26,7 @@ export interface ValidatorVerifyStep {
 	type?: string;
 	component?: string;
 	command?: string;
+	env?: unknown;
 	run?: string;
 	prompt?: string;
 	role?: string;
@@ -198,6 +201,10 @@ function validateWorkflowSteps(
 			}
 
 			if (stepType === "command") {
+				if (typeof step.run === "string") {
+					const templateFailure = unsafeCommandTemplateFailure(step.run);
+					if (templateFailure) fail(templateFailure.replace(/^Failed — /, ""));
+				}
 				const hasCommand = isNonEmptyString(step.command);
 				const hasRun = isNonEmptyString(step.run);
 				if (hasCommand && hasRun) {
@@ -322,6 +329,14 @@ export function validateWorkflowDefinition(
 			}
 			if (stepValue.phase !== undefined && (typeof stepValue.phase !== "number" || !Number.isFinite(stepValue.phase) || !Number.isInteger(stepValue.phase) || stepValue.phase < 0)) {
 				fail(`${prefix}: phase must be a finite non-negative integer`);
+			}
+			if (stepValue.env !== undefined) {
+				if (type !== "command") {
+					fail(`${prefix}: env is only valid on type: command steps`);
+				} else {
+					const environmentError = validateCommandEnvironment(stepValue.env, `${prefix}: env`);
+					if (environmentError) fail(environmentError);
+				}
 			}
 			if (type === "subgoal") {
 				if (!isPlainObject(stepValue.subgoal)) {

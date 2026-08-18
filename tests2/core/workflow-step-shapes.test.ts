@@ -8,7 +8,7 @@
  * Verifies:
  *   - All three command shapes resolve correctly via resolveStep().
  *   - {{project.X}} tokens are rejected by the validator (Phase 2 break).
- *   - Free-form `run:` substitutes {{branch}} and {{agent.X}} tokens.
+ *   - Free-form `run:` accepts only fixed execution identifiers; prompts retain metadata tokens.
  *   - `expect: failure` is honored on all command shapes (validator passes them).
  */
 import { describe, it } from "vitest";
@@ -83,28 +83,32 @@ describe("Validator — {{project.X}} rejection", () => {
 		assert.match(errs[0].message, /removed token/i);
 	});
 
-	it("rejects {{project.X}} embedded inside a llm-review prompt", () => {
+	it("continues to accept all template tokens in prompts", () => {
 		const wf: ValidatorWorkflow = {
 			id: "x", name: "X",
 			gates: [{ id: "g", name: "G", verify: [
-				{ name: "Review", type: "llm-review", prompt: "Use {{project.test_command}}." },
+				{ name: "Review", type: "llm-review", prompt: "Use {{agent.test_command}}, {{reproducing-test.meta.test_command}}, and {{goal_spec}}." },
 			] }],
 		};
-		const errs = validateWorkflow(wf, refs);
-		assert.ok(errs.length > 0);
+		assert.deepEqual(validateWorkflow(wf, refs), []);
 	});
 
-	it("accepts {{branch}}, {{master}}, {{agent.x}}, {{<gate>.meta.x}}", () => {
-		const wf: ValidatorWorkflow = {
-			id: "x", name: "X",
+	it("accepts fixed execution identifiers but rejects metadata and free-form command templates", () => {
+		const valid: ValidatorWorkflow = {
+			id: "valid", name: "Valid",
 			gates: [{ id: "g", name: "G", verify: [
-				{ name: "Push", type: "command", run: "git push origin {{branch}}" },
-				{ name: "Run", type: "command", run: "{{agent.test_command}}" },
-				{ name: "Meta", type: "command", run: "{{reproducing-test.meta.test_command}}" },
+				{ name: "Push", type: "command", run: "git push origin {{branch}} && git show {{commit}}" },
 			] }],
 		};
-		const errs = validateWorkflow(wf, refs);
-		assert.deepEqual(errs, []);
+		assert.deepEqual(validateWorkflow(valid, refs), []);
+
+		for (const token of ["{{agent.test_command}}", "{{reproducing-test.meta.test_command}}", "{{goal_spec}}", "{{cwd}}"] as const) {
+			const invalid: ValidatorWorkflow = {
+				id: "invalid", name: "Invalid",
+				gates: [{ id: "g", name: "G", verify: [{ name: "Unsafe", type: "command", run: `echo ${token}` }] }],
+			};
+			assert.match(validateWorkflow(invalid, refs)[0].message, /unsafe command template variable/i);
+		}
 	});
 });
 

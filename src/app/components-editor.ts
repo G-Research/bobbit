@@ -8,6 +8,55 @@
  * See docs/design/multi-repo-components.md §8.2.
  */
 
+export const COMMAND_ENV_MAX_ENTRIES = 100;
+export const COMMAND_ENV_MAX_KEY_LENGTH = 128;
+export const COMMAND_ENV_MAX_VALUE_LENGTH = 16_384;
+const COMMAND_ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+export interface CommandEnvironmentEntry {
+	key: string;
+	value: string;
+}
+
+export interface CommandEnvironmentEntryError {
+	key?: string;
+	value?: string;
+}
+
+/**
+ * UI-side mirror of command-environment validation. It keeps incomplete rows
+ * visible for correction and intentionally never trims values: they are
+ * literal configuration, including an explicitly blank value.
+ */
+export function validateCommandEnvironmentEntries(entries: CommandEnvironmentEntry[]): Map<number, CommandEnvironmentEntryError> {
+	const errors = new Map<number, CommandEnvironmentEntryError>();
+	const addError = (index: number, field: keyof CommandEnvironmentEntryError, message: string) => {
+		const error = errors.get(index) ?? {};
+		error[field] = message;
+		errors.set(index, error);
+	};
+	const names = new Map<string, number>();
+
+	entries.forEach((entry, index) => {
+		if (!entry.key) addError(index, "key", "Variable name is required.");
+		else if (!COMMAND_ENV_KEY_PATTERN.test(entry.key)) addError(index, "key", "Use letters, numbers, and underscores; start with a letter or underscore.");
+		else if (entry.key.length > COMMAND_ENV_MAX_KEY_LENGTH) addError(index, "key", `Variable names can be at most ${COMMAND_ENV_MAX_KEY_LENGTH} characters.`);
+		if (entry.value.length > COMMAND_ENV_MAX_VALUE_LENGTH) addError(index, "value", `Values can be at most ${COMMAND_ENV_MAX_VALUE_LENGTH} characters.`);
+
+		// Valid names contain ASCII only, so toLowerCase is locale-independent here.
+		const normalized = entry.key.toLowerCase();
+		const existing = names.get(normalized);
+		if (entry.key && existing !== undefined) {
+			const otherName = entries[existing].key;
+			addError(index, "key", `“${entry.key}” duplicates “${otherName}”. Variable names must be unique ignoring case.`);
+			addError(existing, "key", `“${otherName}” duplicates “${entry.key}”. Variable names must be unique ignoring case.`);
+		} else if (entry.key) {
+			names.set(normalized, index);
+		}
+	});
+	return errors;
+}
+
 export interface ComponentEditState {
 	name: string;
 	repo: string;
@@ -15,6 +64,8 @@ export interface ComponentEditState {
 	worktree_setup_command?: string;
 	/** Flat name → shell map. Empty array ⇒ data-only component. */
 	commands: Array<{ key: string; value: string }>;
+	/** Plaintext environment injected only into this component's named commands. */
+	env: CommandEnvironmentEntry[];
 	/** Opaque key→string config map (e.g. qa_start_command). Empty array allowed. */
 	config: Array<{ key: string; value: string }>;
 }
@@ -25,11 +76,13 @@ export interface ServerComponent {
 	relativePath?: string;
 	worktreeSetupCommand?: string;
 	commands?: Record<string, string>;
+	env?: Record<string, string>;
 	config?: Record<string, string>;
 }
 
 export function componentToEditState(c: ServerComponent): ComponentEditState {
 	const cmds = c.commands ? Object.entries(c.commands).map(([key, value]) => ({ key, value })) : [];
+	const env = c.env ? Object.entries(c.env).map(([key, value]) => ({ key, value })) : [];
 	const cfg = c.config ? Object.entries(c.config).map(([key, value]) => ({ key, value })) : [];
 	return {
 		name: c.name,
@@ -37,6 +90,7 @@ export function componentToEditState(c: ServerComponent): ComponentEditState {
 		relative_path: c.relativePath ?? "",
 		worktree_setup_command: c.worktreeSetupCommand ?? "",
 		commands: cmds,
+		env,
 		config: cfg,
 	};
 }
@@ -53,6 +107,16 @@ export function editStateToComponent(e: ComponentEditState): Record<string, unkn
 			if (key.trim() && value.trim()) cmds[key.trim()] = value;
 		}
 		if (Object.keys(cmds).length > 0) out.commands = cmds;
+	}
+	// Environment values are literal and blank values are meaningful. The editor
+	// blocks incomplete/invalid rows before save, so this conversion only omits
+	// a genuinely absent map.
+	if (e.env && e.env.length > 0) {
+		const env: Record<string, string> = {};
+		for (const { key, value } of e.env) {
+			if (key) env[key] = value;
+		}
+		if (Object.keys(env).length > 0) out.env = env;
 	}
 	// Per-component opaque config map (e.g. qa_start_command, qa_health_check).
 	// Drop entries with empty key; preserve empty values is meaningless so

@@ -27,7 +27,13 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
 
-import { goalBranchContainer, resolveStep } from "../../src/server/agent/verification-harness.ts";
+import {
+	buildDockerEnvironmentArgs,
+	goalBranchContainer,
+	mapSandboxCommandCwd,
+	resolveStep,
+} from "../../src/server/agent/verification-harness.ts";
+import { resolveCommandEnvironment } from "../../src/server/agent/command-environment.ts";
 import type { Component } from "../../src/server/agent/project-config-store.ts";
 
 describe("verify step resolution — goalBranchContainer composed with resolveStep", () => {
@@ -99,5 +105,52 @@ describe("verify step resolution — goalBranchContainer composed with resolveSt
 
 		const resolved = resolveStep(step, components, goalBranchContainer(goal));
 		assert.equal(resolved.cwd, "/legacy/repo");
+	});
+
+	it("returns the exact selected component for execution-scoped configuration", () => {
+		const api = { name: "api", repo: "api", commands: { test: "npm test" } } as Component;
+		const web = { name: "web", repo: "web", commands: { test: "npm run test" } } as Component;
+		const resolved = resolveStep({ name: "test", type: "command", component: "api", command: "test" } as any, [api, web], "/wt/branch");
+		assert.strictEqual(resolved.component, api, "runtime must overlay only the component selected while resolving the step");
+	});
+});
+
+describe("verification command environment snapshots", () => {
+	it("isolates selected components and applies literal step overrides without mutating inputs", async () => {
+		const base = { PATH: "host", HOST_ONLY: "yes" };
+		const api = { COMPONENT: "api", Path: "api-path", LITERAL: "$() ; &" };
+		const web = { COMPONENT: "web", WEB_ONLY: "1" };
+		const step = { PATH: "step-path", STEP_ONLY: "" };
+		const [apiEnv, webEnv, freeformEnv] = await Promise.all([
+			Promise.resolve(resolveCommandEnvironment(base, api, step)),
+			Promise.resolve(resolveCommandEnvironment(base, web)),
+			Promise.resolve(resolveCommandEnvironment(base, undefined, step)),
+		]);
+		assert.deepEqual(apiEnv, { HOST_ONLY: "yes", COMPONENT: "api", LITERAL: "$() ; &", PATH: "step-path", STEP_ONLY: "" });
+		assert.deepEqual(webEnv, { PATH: "host", HOST_ONLY: "yes", COMPONENT: "web", WEB_ONLY: "1" });
+		assert.deepEqual(freeformEnv, { HOST_ONLY: "yes", PATH: "step-path", STEP_ONLY: "" });
+		step.PATH = "changed-after-spawn";
+		assert.equal(apiEnv.PATH, "step-path", "each invocation owns an immutable environment snapshot");
+	});
+});
+
+describe("sandbox command environment transport", () => {
+	it("maps a component cwd beneath the matching sandbox worktree and rejects escapes", () => {
+		assert.equal(
+			mapSandboxCommandCwd("/host/wt/branch", "/host/wt/branch/api/packages/core", "/workspace-wt/goal/x"),
+			"/workspace-wt/goal/x/api/packages/core",
+		);
+		assert.throws(
+			() => mapSandboxCommandCwd("/host/wt/branch", "/host/wt/outside", "/workspace-wt/goal/x"),
+			/escapes the goal worktree/i,
+		);
+	});
+
+	it("builds argv-safe Docker environment entries without shell interpolation", () => {
+		const literal = `quotes ' \\" $() ; & |\nnext`;
+		assert.deepEqual(
+			buildDockerEnvironmentArgs({ BOBBIT_LITERAL: literal, EMPTY: "", OMIT: undefined }),
+			["-e", `BOBBIT_LITERAL=${literal}`, "-e", "EMPTY="],
+		);
 	});
 });

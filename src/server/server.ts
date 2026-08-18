@@ -611,6 +611,7 @@ import { InboxNudger } from "./agent/inbox-nudger.js";
 import type { InboxStore } from "./agent/inbox-store.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
 import { ProjectConfigLoadError, ProjectConfigStore, type PackOrderScope } from "./agent/project-config-store.js";
+import { validateCommandEnvironment } from "./agent/command-environment.js";
 import { SecretsStorePersistenceError } from "./agent/secrets-store.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
@@ -1944,34 +1945,36 @@ const LEGACY_QA_TOP_LEVEL_KEYS = [
 ] as const;
 
 /**
- * Validate the per-component `config:` map (post-migration, opaque
- * key→string). Rules mirror the propose_project tool's runtime validator:
- *   - keys must be non-empty strings
- *   - values must be strings
- *   - max 100 entries per component
- *
- * Returns null on success, or a string error message suitable for HTTP 400.
+ * Validate declared per-component fields before a project write. `config` stays
+ * opaque skill configuration; `env` is the separately validated command-only
+ * plaintext map. This deliberately validates declarations only—never a merged
+ * process environment.
  */
-function validateComponentsConfig(components: unknown): string | null {
+function validateComponents(components: unknown): string | null {
 	if (!Array.isArray(components)) return null;
 	for (const c of components) {
 		if (!c || typeof c !== "object") continue;
-		const cfg = (c as { config?: unknown }).config;
-		if (cfg === undefined || cfg === null) continue;
-		if (typeof cfg !== "object" || Array.isArray(cfg)) {
-			return `components[${(c as { name?: unknown }).name ?? "?"}].config: must be an object`;
-		}
-		const entries = Object.entries(cfg as Record<string, unknown>);
-		if (entries.length > 100) {
-			return `components[${(c as { name?: unknown }).name ?? "?"}].config: too many entries (max 100, got ${entries.length})`;
-		}
-		for (const [k, v] of entries) {
-			if (typeof k !== "string" || k.length === 0) {
-				return `components[${(c as { name?: unknown }).name ?? "?"}].config: empty key`;
+		const component = c as { name?: unknown; config?: unknown; env?: unknown };
+		const name = typeof component.name === "string" && component.name ? component.name : "?";
+		const cfg = component.config;
+		if (cfg !== undefined && cfg !== null) {
+			if (typeof cfg !== "object" || Array.isArray(cfg)) {
+				return `components[${name}].config: must be an object`;
 			}
-			if (typeof v !== "string") {
-				return `components[${(c as { name?: unknown }).name ?? "?"}].config.${k}: must be string, got ${typeof v}`;
+			const entries = Object.entries(cfg as Record<string, unknown>);
+			if (entries.length > 100) {
+				return `components[${name}].config: too many entries (max 100, got ${entries.length})`;
 			}
+			for (const [key, value] of entries) {
+				if (!key) return `components[${name}].config: empty key`;
+				if (typeof value !== "string") {
+					return `components[${name}].config.${key}: must be string, got ${typeof value}`;
+				}
+			}
+		}
+		if (component.env !== undefined) {
+			const environmentError = validateCommandEnvironment(component.env, `components[${name}].env`);
+			if (environmentError) return environmentError;
 		}
 	}
 	return null;
@@ -6422,9 +6425,9 @@ async function handleApiRoute(
 			json({ error: "Missing name or rootPath" }, 400);
 			return;
 		}
-		// Validate components[].config eagerly (mirrors propose_project tool).
+		// Validate component declarations before registration.
 		{
-			const err = validateComponentsConfig((body as Record<string, unknown>).components);
+			const err = validateComponents((body as Record<string, unknown>).components);
 			if (err) { json({ error: err }, 400); return; }
 		}
 		try {
@@ -6530,6 +6533,7 @@ async function handleApiRoute(
 						relativePath: typeof c.relative_path === "string" ? c.relative_path : (typeof c.relativePath === "string" ? c.relativePath as string : undefined),
 						worktreeSetupCommand: typeof c.worktree_setup_command === "string" ? c.worktree_setup_command : (typeof c.worktreeSetupCommand === "string" ? c.worktreeSetupCommand as string : undefined),
 						commands: c.commands && typeof c.commands === "object" && !Array.isArray(c.commands) ? c.commands as Record<string, string> : undefined,
+						env: c.env && typeof c.env === "object" && !Array.isArray(c.env) ? c.env as Record<string, string> : undefined,
 						config: c.config && typeof c.config === "object" && !Array.isArray(c.config) ? c.config as Record<string, string> : undefined,
 					}));
 					newCtx.projectConfigStore.setComponents(normalized);
@@ -6939,9 +6943,9 @@ async function handleApiRoute(
 				}
 			}
 
-			// Validate components[].config eagerly (mirrors propose_project tool).
+			// Validate component declarations before any write so the update is atomic.
 			{
-				const err = validateComponentsConfig((body as Record<string, unknown>).components);
+				const err = validateComponents((body as Record<string, unknown>).components);
 				if (err) { json({ error: err }, 400); return; }
 			}
 
@@ -7052,8 +7056,11 @@ async function handleApiRoute(
 						? legacyHook.trim()
 						: existing[0]?.worktreeSetupCommand;
 					if (hookValue) defaultComponent.worktree_setup_command = hookValue;
-					// Preserve existing per-component config (qa_* keys etc.) — the legacy
-					// flat-key write path must not silently wipe it.
+					// Preserve existing component-only fields. A legacy command write must
+					// never erase either opaque config or declared command environment.
+					if (existing[0]?.env && Object.keys(existing[0].env).length > 0) {
+						defaultComponent.env = { ...existing[0].env };
+					}
 					if (existing[0]?.config && Object.keys(existing[0].config).length > 0) {
 						defaultComponent.config = { ...existing[0].config };
 					}
@@ -7063,6 +7070,7 @@ async function handleApiRoute(
 						if (c.relativePath) entry.relative_path = c.relativePath;
 						if (c.worktreeSetupCommand) entry.worktree_setup_command = c.worktreeSetupCommand;
 						if (c.commands) entry.commands = c.commands;
+						if (c.env && Object.keys(c.env).length > 0) entry.env = { ...c.env };
 						if (c.config && Object.keys(c.config).length > 0) entry.config = { ...c.config };
 						return entry;
 					});
@@ -7177,6 +7185,7 @@ async function handleApiRoute(
 							relativePath: typeof c.relative_path === "string" ? c.relative_path : (typeof c.relativePath === "string" ? c.relativePath as string : undefined),
 							worktreeSetupCommand: typeof c.worktree_setup_command === "string" ? c.worktree_setup_command : (typeof c.worktreeSetupCommand === "string" ? c.worktreeSetupCommand as string : undefined),
 							commands: c.commands && typeof c.commands === "object" && !Array.isArray(c.commands) ? c.commands as Record<string, string> : undefined,
+							env: c.env && typeof c.env === "object" && !Array.isArray(c.env) ? c.env as Record<string, string> : undefined,
 							config: c.config && typeof c.config === "object" && !Array.isArray(c.config) ? c.config as Record<string, string> : undefined,
 						}));
 						draft.setComponents(normalized);
@@ -17010,7 +17019,7 @@ async function handleApiRoute(
 			const ctx = projectContextManager.getOrCreate(targetProjectId);
 			if (!ctx) { json({ error: "Project not found" }, 404); return; }
 			const now = Date.now();
-			const workflow = {
+			const candidate = {
 				id: body.id as string,
 				name: (body.name as string) ?? body.id,
 				description: (body.description as string) ?? "",
@@ -17018,7 +17027,10 @@ async function handleApiRoute(
 				createdAt: now,
 				updatedAt: now,
 			};
-			if (!workflow.id || typeof workflow.id !== "string") throw new Error("Missing id");
+			if (!candidate.id || typeof candidate.id !== "string") throw new Error("Missing id");
+			// Validate before normalization/write so command-only env declarations
+			// cannot be silently dropped from malformed workflow input.
+			const workflow = freezeWorkflowDefinition(candidate, ctx.projectConfigStore.getComponents());
 			ctx.workflowStore.put(workflow);
 			json(workflow, 201);
 		} catch (err: any) {
@@ -17089,16 +17101,20 @@ async function handleApiRoute(
 		if (!ctx) { json({ error: "Project not found" }, 404); return; }
 		const existing = ctx.workflowStore.get(id);
 		if (!existing) { json({ error: "Workflow not found in project" }, 404); return; }
-		const updated = {
-			...existing,
-			name: body.name ?? existing.name,
-			description: body.description ?? existing.description,
-			gates: Array.isArray(body.gates) ? body.gates : existing.gates,
-			id,
-			updatedAt: Date.now(),
-		};
-		ctx.workflowStore.put(updated);
-		json(updated);
+		try {
+			const updated = freezeWorkflowDefinition({
+				...existing,
+				name: body.name ?? existing.name,
+				description: body.description ?? existing.description,
+				gates: Array.isArray(body.gates) ? body.gates : existing.gates,
+				id,
+				updatedAt: Date.now(),
+			}, ctx.projectConfigStore.getComponents());
+			ctx.workflowStore.put(updated);
+			json(updated);
+		} catch (error) {
+			jsonError(400, error);
+		}
 		return;
 	}
 

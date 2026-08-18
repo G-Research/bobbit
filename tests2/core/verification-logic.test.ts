@@ -12,6 +12,8 @@ import assert from "node:assert/strict";
 
 import {
 	substituteVars,
+	substituteCommandVars,
+	unsafeCommandTemplateFailure,
 	isTransientReviewError,
 	isTransientQaError,
 	matchExpectFailure,
@@ -156,6 +158,24 @@ describe("substituteVars", () => {
 
 	it("handles whitespace in namespaced var {{ project.test_command }} (still left literal)", () => {
 		assert.equal(substituteVars("{{ project.test_command }}", {}, project, {}), "{{ project.test_command }}");
+	});
+});
+
+describe("substituteCommandVars", () => {
+	const builtins = { branch: "feat/x", baseBranch: "master", master: "master", cwd: "/work", commit: "abc123", goal_spec: "Fix the bug" };
+
+	it("resolves only fixed execution identifiers", () => {
+		assert.equal(
+			substituteCommandVars("git fetch origin {{baseBranch}} && git show {{commit}}", builtins),
+			"git fetch origin master && git show abc123",
+		);
+	});
+
+	it("never substitutes signal or upstream metadata into shell text", () => {
+		const marker = "COMMAND_TEMPLATE_METADATA_MUST_NOT_REACH_SHELL";
+		const command = "echo {{agent.test_command}} {{reproducing-test.meta.test_command}} {{goal_spec}}";
+		assert.equal(substituteCommandVars(command, { ...builtins, goal_spec: `touch ${marker}` }), command);
+		assert.match(unsafeCommandTemplateFailure(command) ?? "", /unsafe command template variable \{\{agent\.test_command\}\}/);
 	});
 });
 
@@ -1159,17 +1179,9 @@ describe("isCommandStepSkippable", () => {
 		assert.ok(reason && reason.includes("empty"));
 	});
 
-	it("returns a skip reason when a {{project.*}} template is unresolved", () => {
-		const reason = isCommandStepSkippable("{{project.build_command}}");
-		assert.ok(reason);
-		assert.ok(reason.includes("project.build_command"));
-		assert.ok(reason.includes("not configured"));
-	});
-
-	it("returns a skip reason when an unresolved template is embedded mid-command", () => {
-		const reason = isCommandStepSkippable("echo {{project.custom_thing}} && true");
-		assert.ok(reason);
-		assert.ok(reason.includes("project.custom_thing"));
+	it("does not auto-skip unresolved templates", () => {
+		assert.equal(isCommandStepSkippable("{{project.build_command}}"), null);
+		assert.equal(isCommandStepSkippable("echo {{project.custom_thing}} && true"), null);
 	});
 
 	it("does not skip a fully-resolved command that happens to contain braces", () => {

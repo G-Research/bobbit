@@ -20,6 +20,8 @@ components:                         # the only collection
   - name: web
     repo: "."
     commands: { build: npm run build, test: npm test }
+    env:                            # optional literal key→string map for selected command steps
+      NODE_OPTIONS: "--max-old-space-size=4096"
     config:                         # opaque key→string map; consumed by skills like /qa-test
       qa_start_command:        "PORT=$PORT NODE_ENV=test npm start"
       qa_health_check:         "http://127.0.0.1:$PORT/api/health"
@@ -65,6 +67,7 @@ components:
 - **`relative_path`** is an optional sub-path inside the repo's worktree. Useful for monorepos: `repo: "."` and `relative_path: packages/api` means commands run at `<branch-container>/packages/api`.
 - **`worktree_setup_command`** is a per-component runtime hook. Runs at the component's root path on worktree provision. 2-minute timeout, non-fatal, no deduplication.
 - **`commands`** is a free-form map. There is no fixed schema for command names — workflows reference commands structurally by `(component, command)` pair. Common conventions: `build`, `check`, `test`, `unit`, `e2e`, `lint`, `format`, `migrate`. Use whatever your project actually has.
+- **`env`** is an optional native, plaintext key→string map. It is injected into a command step that selects this component (a named command or component-linked `run`), not into `config`, worktree setup, or agent processes. Use it for literal non-secret execution settings only; command-step `env` can override it. See [Project command environments](../docs/project-command-environments.md).
 
 ### Data-only components
 
@@ -236,6 +239,9 @@ Bobbit appends this Markdown under **Workflow remediation guidance** after the m
 
 # Shape C: pure free-form, working dir = per-branch container root
 - { name: "Push branch", type: command, run: "git push origin {{branch}}:refs/heads/{{branch}} && git ls-remote --heads origin {{branch}} | grep -q ." }
+
+# Optional step override. Valid only on type: command.
+- { name: "CI test", type: command, component: "api", command: "test", env: { CI: "1" } }
 ```
 
 Use an explicit destination refspec for branch publication. Do **not** use a
@@ -259,6 +265,9 @@ Common optional fields (apply to all three shapes):
 | `expect: success \| failure` | flips pass/fail (use `failure` for TDD reproducing-tests) |
 | `timeout: <seconds>` | Type-specific timeout. Commands default to 300s; component `command: unit` defaults to 1200s. Review-agent rules are described below. |
 | `optional: true` + `optionalLabel:` + `description:` | renders as a user-toggleable "Enable X" affordance |
+| `env: { KEY: "value" }` | Literal non-secret override for this command step; it wins over the selected component's `env`. |
+
+`env` uses keys matching `/^[A-Za-z_][A-Za-z0-9_]*$/`; case-insensitive duplicates, non-string values, maps over 100 entries, keys over 128 characters, and values over 16,384 characters are rejected. Blank values explicitly set an empty variable; removing the key restores inheritance. Values are never shell-expanded. A pure `{ run }` step has no component layer and receives its overrides over the Bobbit process environment. Do not put secrets here—use Sandbox Tokens or Provider API Keys. For precedence, Docker behavior, and UI/API details, see [Project command environments](../docs/project-command-environments.md).
 
 > **Field split.** `optionalLabel:` is the goal-creation opt-in toggle
 > label for any `optional: true` step. `label:` is reserved exclusively

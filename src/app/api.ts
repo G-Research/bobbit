@@ -2518,6 +2518,8 @@ export interface VerifyStep {
 	component?: string;
 	/** Structural reference: which command on that component to invoke (Phase 2). */
 	command?: string;
+	/** Plaintext command-environment overrides; valid only for command steps. */
+	env?: Record<string, string>;
 }
 
 export interface WorkflowGate {

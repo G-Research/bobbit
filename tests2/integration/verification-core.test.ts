@@ -724,8 +724,7 @@ test.describe("Expect failure pipeline", () => {
 				"reproducing-test",
 				{
 					metadata: {
-						test_command: `node -e "console.error('Expected 5 but got 3');process.exit(1)"`,
-						error_pattern: "Expected 5 but got 3",
+						error_pattern: "expected reproduction failure",
 					},
 				},
 				"passed",
@@ -750,7 +749,6 @@ test.describe("Expect failure pipeline", () => {
 				"reproducing-test",
 				{
 					metadata: {
-						test_command: `node -e "console.error('Module not found');process.exit(1)"`,
 						error_pattern: "Expected 5 but got 3",
 					},
 				},

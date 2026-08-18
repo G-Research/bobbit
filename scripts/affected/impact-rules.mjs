@@ -853,6 +853,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/command-environment.test.ts",
+		allowReason: "test-owned temporary ProjectConfigStore YAML used to verify native component persistence",
+		reads: frozen([
+			{ expression: "path.join(dir, \"project.yaml\")", count: 1 },
+		]),
+	},
+	{
 		consumer: "tests2/core/focused-tool-contract-refresh.test.ts",
 		allowReason: "test-owned generated system prompt and the tool detail document path it points to",
 		reads: frozen([
