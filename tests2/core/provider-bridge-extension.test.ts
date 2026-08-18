@@ -148,6 +148,65 @@ describe("generateProviderBridgeExtension", () => {
 		assert.ok(!source.includes("resp.tail"), "before_agent_start must not consume a system-prompt tail");
 	});
 
+	it("returns only a transient prompt replacement from the gated core route", async () => {
+		const originalFetch = globalThis.fetch;
+		const originalGw = process.env.BOBBIT_GATEWAY_URL;
+		const originalToken = process.env.BOBBIT_TOKEN;
+		const posted: Array<{ url: string; body: unknown }> = [];
+		try {
+			process.env.BOBBIT_GATEWAY_URL = "http://127.0.0.1:65535";
+			process.env.BOBBIT_TOKEN = "unit-token";
+			globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+				posted.push({ url: String(url), body: JSON.parse(String(init?.body ?? "{}")) });
+				return new Response(JSON.stringify(posted.length === 1 ? {} : {
+					action: "replace",
+					text: "core-shaped request",
+				}), { status: 200, headers: { "Content-Type": "application/json" } });
+			}) as typeof fetch;
+			const beforeAgentStart = await registerBeforeAgentStart(generateProviderBridgeExtension("sess-mutate", { prompt: true }));
+			const event: any = { prompt: "original request", systemPrompt: "IMMUTABLE SYSTEM" };
+			assert.deepEqual(await beforeAgentStart(event), { prompt: "core-shaped request" });
+			assert.equal(event.prompt, "original request", "the input event is never mutated");
+			assert.equal(event.systemPrompt, "IMMUTABLE SYSTEM");
+			assert.deepEqual(posted, [
+				{ url: "http://127.0.0.1:65535/api/sessions/sess-mutate/provider-hooks/before-prompt", body: { prompt: "original request" } },
+				{ url: "http://127.0.0.1:65535/api/sessions/sess-mutate/request-mutations/prompt", body: { prompt: "original request" } },
+			]);
+		} finally {
+			globalThis.fetch = originalFetch;
+			if (originalGw === undefined) delete process.env.BOBBIT_GATEWAY_URL;
+			else process.env.BOBBIT_GATEWAY_URL = originalGw;
+			if (originalToken === undefined) delete process.env.BOBBIT_TOKEN;
+			else process.env.BOBBIT_TOKEN = originalToken;
+		}
+	});
+
+	it("fails open on malformed or unavailable prompt-mutation responses", async () => {
+		const originalFetch = globalThis.fetch;
+		const originalGw = process.env.BOBBIT_GATEWAY_URL;
+		const originalToken = process.env.BOBBIT_TOKEN;
+		try {
+			process.env.BOBBIT_GATEWAY_URL = "http://127.0.0.1:65535";
+			process.env.BOBBIT_TOKEN = "unit-token";
+			let calls = 0;
+			globalThis.fetch = (async () => {
+				calls++;
+				return new Response(JSON.stringify(calls === 1 ? {} : { action: "replace", text: 12 }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}) as typeof fetch;
+			const beforeAgentStart = await registerBeforeAgentStart(generateProviderBridgeExtension("sess-fail-open", { prompt: true }));
+			assert.equal(await beforeAgentStart({ prompt: "original" }), undefined);
+		} finally {
+			globalThis.fetch = originalFetch;
+			if (originalGw === undefined) delete process.env.BOBBIT_GATEWAY_URL;
+			else process.env.BOBBIT_GATEWAY_URL = originalGw;
+			if (originalToken === undefined) delete process.env.BOBBIT_TOKEN;
+			else process.env.BOBBIT_TOKEN = originalToken;
+		}
+	});
+
 	it("forwards event.prompt read-only and returns a hidden custom dynamic-context message", async () => {
 		const originalFetch = globalThis.fetch;
 		const originalGw = process.env.BOBBIT_GATEWAY_URL;
@@ -350,6 +409,19 @@ describe("stripDelimitedTail", () => {
 	it("preserves content after the region", () => {
 		const sp = `HEAD${tail}\nTAIL-AFTER`;
 		assert.equal(stripDelimitedTail(sp), "HEAD\nTAIL-AFTER");
+	});
+
+	it("removes only a genuine final dynamic region without touching extension wrappers or volatile bytes", () => {
+		const preserved = [
+			"<!-- bobbit:extension-prompt-region:start -->",
+			"<!-- bobbit:extension-prompt-section:start pack=\"fixture\" section=\"policy\" -->",
+			"STATIC EXTENSION",
+			"<!-- bobbit:extension-prompt-section:end pack=\"fixture\" section=\"policy\" -->",
+			"<!-- bobbit:extension-prompt-region:end -->",
+			"VOLATILE GOAL AFTER EXTENSION",
+		].join("\n");
+		const prompt = `${preserved}\n${DYNAMIC_CONTEXT_START}\nGENUINE FINAL DYNAMIC CONTEXT\n${DYNAMIC_CONTEXT_END}`;
+		assert.equal(stripDelimitedTail(prompt), preserved);
 	});
 });
 

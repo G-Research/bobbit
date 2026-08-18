@@ -8,6 +8,7 @@
 
 import { ProjectSandbox } from "./project-sandbox.js";
 import type { ProjectSandboxOptions, ContainerState, SandboxHealthEvent } from "./project-sandbox.js";
+import { sandboxImageRequirements } from "./sandbox-image-requirements.js";
 import type { Clock, CommandRunner } from "../gateway-deps.js";
 import { HEADQUARTERS_PROJECT_ID, SYSTEM_PROJECT_ID } from "./project-registry.js";
 
@@ -44,6 +45,11 @@ export interface SandboxManagerStats {
  */
 export type SandboxBootstrap = (projectId: string) => Promise<ProjectSandboxOptions | null>;
 
+/** Cheap, synchronous desired-image projection used only to skip a ready sandbox's heavyweight bootstrap. */
+export type SandboxPlanIdentity = { readonly image: string; readonly fingerprint?: string };
+export type SandboxPlanIdentityResolver = (projectId: string) => SandboxPlanIdentity | null;
+
+
 export interface SandboxManagerOptions {
 	/**
 	 * Called by `ensureForProject(projectId)` the first time a project's sandbox
@@ -52,6 +58,8 @@ export interface SandboxManagerOptions {
 	 * just coordinates lifecycle.
 	 */
 	bootstrap?: SandboxBootstrap;
+	/** Must avoid Docker, filesystem setup, and other bootstrap work. Null falls back to bootstrap. */
+	planIdentity?: SandboxPlanIdentityResolver;
 	commandRunner?: CommandRunner;
 	clock?: Clock;
 	worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string };
@@ -70,17 +78,26 @@ export class SandboxManager {
 	 * so later calls resolve immediately (idempotent).
 	 */
 	private _ensureInFlight = new Map<string, Promise<void>>();
+	/** Applied server-owned image identity for each live project sandbox. */
+	private _appliedImagePlans = new Map<string, { image: string; fingerprint?: string }>();
 	private _bootstrap: SandboxBootstrap | null;
+	private _planIdentity: SandboxPlanIdentityResolver | null;
 	private readonly deps: { commandRunner?: CommandRunner; clock?: Clock; worktreeSetupRuntime?: { skipNpmCi?: boolean; recordSetupPath?: string } };
 
 	constructor(opts: SandboxManagerOptions = {}) {
 		this._bootstrap = opts.bootstrap ?? null;
+		this._planIdentity = opts.planIdentity ?? null;
 		this.deps = { commandRunner: opts.commandRunner, clock: opts.clock, worktreeSetupRuntime: opts.worktreeSetupRuntime };
 	}
 
 	/** Set or replace the bootstrap function post-construction. */
 	setBootstrap(bootstrap: SandboxBootstrap | null): void {
 		this._bootstrap = bootstrap;
+	}
+
+	/** Set or replace the cheap desired-image projection post-construction. */
+	setPlanIdentityResolver(resolver: SandboxPlanIdentityResolver | null): void {
+		this._planIdentity = resolver;
 	}
 
 	/** Subscribe to container recovery events across all projects. Returns unsubscribe function. */
@@ -104,29 +121,38 @@ export class SandboxManager {
 	 * the bootstrap in case config has changed.
 	 */
 	async ensureForProject(projectId: string): Promise<void> {
-		// Headquarters / hidden `system` scopes are never sandboxed. Skip entirely
-		// so HQ sessions/goals run un-sandboxed with cwd = the Headquarters
-		// directory, never cloning the server-run-dir git checkout or creating a
-		// one-off `<hqDir>/.bobbit/{state,config}` layout.
 		if (isSandboxExemptProject(projectId)) return;
 
-		// Already fully initialized — fast path.
 		const existing = this.sandboxes.get(projectId);
-		if (existing && existing.getStatus().status === "ready") return;
+		// A ready session sandbox can skip bootstrap only when the server-owned
+		// image plan is unchanged. Otherwise bootstrap recreates it transactionally.
+		if (existing?.getStatus().status === "ready" && this._planIdentity) {
+			let desired: SandboxPlanIdentity | null = null;
+			try { desired = this._planIdentity(projectId); } catch { /* bootstrap is authoritative */ }
+			const applied = this._appliedImagePlans.get(projectId);
+			if (desired && applied?.image === desired.image && applied.fingerprint === desired.fingerprint) return;
+		}
 
-		// Join an in-flight init for the same project.
 		const inFlight = this._ensureInFlight.get(projectId);
 		if (inFlight) return inFlight;
-
 		if (!this._bootstrap) {
 			throw new Error(`[sandbox-manager] ensureForProject(${projectId}) called but no bootstrap was provided`);
 		}
 		const bootstrap = this._bootstrap;
-
 		const p = (async () => {
 			const opts = await bootstrap(projectId);
-			if (!opts) {
-				// Sandbox not applicable (disabled, not a git repo). Not an error.
+			if (!opts) return;
+			const current = this.sandboxes.get(projectId);
+			if (current?.getStatus().status === "ready") {
+				const applied = this._appliedImagePlans.get(projectId);
+				if (applied?.image === opts.image && applied.fingerprint === opts.sandboxImageFingerprint) return;
+				try {
+					await current.recreate(opts);
+				} catch (error) {
+					if (opts.sandboxImageFingerprint) sandboxImageRequirements.recordBuildFailure(projectId, opts.sandboxImageFingerprint);
+					throw error;
+				}
+				this._appliedImagePlans.set(projectId, { image: opts.image, fingerprint: opts.sandboxImageFingerprint });
 				return;
 			}
 			await this.initForProject(projectId, opts);
@@ -136,13 +162,7 @@ export class SandboxManager {
 		try {
 			await p;
 		} finally {
-			// Clear so a subsequent failing call can retry. Ready sandboxes are
-			// detected via `sandboxes.get(...).getStatus().status === "ready"`
-			// on the fast path above, so we don't need to keep the resolved
-			// promise around.
-			if (this._ensureInFlight.get(projectId) === p) {
-				this._ensureInFlight.delete(projectId);
-			}
+			if (this._ensureInFlight.get(projectId) === p) this._ensureInFlight.delete(projectId);
 		}
 	}
 
@@ -158,20 +178,17 @@ export class SandboxManager {
 		}
 
 		// If already tracked, just return — init was already done
-		if (this.sandboxes.has(projectId)) {
-			const existing = this.sandboxes.get(projectId)!;
-			if (existing.getStatus().status === "ready") {
-				return;
-			}
-			// Previous init failed — remove and retry
-			this.sandboxes.delete(projectId);
+		let sandbox = this.sandboxes.get(projectId);
+		if (sandbox?.getStatus().status === "ready") return;
+		if (!sandbox || sandbox.getStatus().status === "error") {
+			sandbox = new ProjectSandbox(opts, this.deps);
+			this.sandboxes.set(projectId, sandbox);
 		}
-
-		const sandbox = new ProjectSandbox(opts, this.deps);
-		this.sandboxes.set(projectId, sandbox);
 
 		try {
 			await sandbox.init();
+			this.sandboxes.set(projectId, sandbox);
+			this._appliedImagePlans.set(projectId, { image: opts.image, fingerprint: opts.sandboxImageFingerprint });
 			console.log(`[sandbox-manager] Project ${projectId} sandbox ready (container: ${sandbox.getStatus().containerId.substring(0, 12)})`);
 
 			// Start health monitoring and subscribe to events
@@ -198,6 +215,7 @@ export class SandboxManager {
 	get(projectId: string): ProjectSandbox | undefined {
 		return this.sandboxes.get(projectId);
 	}
+
 
 	/** Check if a project has a sandbox registered (regardless of state). */
 	has(projectId: string): boolean {
@@ -265,24 +283,19 @@ export class SandboxManager {
 
 		await sandbox.destroy();
 		this.sandboxes.delete(projectId);
+		this._appliedImagePlans.delete(projectId);
 		console.log(`[sandbox-manager] Destroyed sandbox for project ${projectId}`);
 	}
 
 	/** Destroy all sandboxes. */
 	async destroyAll(): Promise<void> {
-		// Clean up health subscriptions
-		for (const [, unsub] of this._healthUnsubscribes) {
-			unsub();
-		}
-		this._healthUnsubscribes.clear();
-
-		const destroyPromises = [...this.sandboxes.entries()].map(([projectId, sandbox]) =>
-			sandbox.destroy().catch(err => {
-				console.warn(`[sandbox-manager] Destroy error for project ${projectId}:`, err?.message || err);
-			}),
-		);
+		const destroyPromises = [...this.sandboxes.keys()].map(projectId => this.destroy(projectId).catch(err => {
+			console.warn(`[sandbox-manager] Destroy error for project ${projectId}:`, err?.message || err);
+		}));
 		await Promise.allSettled(destroyPromises);
 		this.sandboxes.clear();
+		this._healthUnsubscribes.clear();
+		this._appliedImagePlans.clear();
 	}
 
 	/** Number of tracked sandboxes. */

@@ -687,5 +687,22 @@ describe("BgProcessManager endTime snapshots", () => {
 	});
 });
 
+describe("BgProcessManager.grepLogs", () => {
+	it("preserves case-insensitive RE2 regex matching and bounded literal fallback", () => {
+		const h = makeManager();
+		const session = freshSession();
+		const info = h.mgr.create(session, "noop", h.stateDir);
+		try {
+			h.tailerSpecs[0].onChunk("stdout", "ordinary\nWARNING: check this\n", 29);
+			assert.equal(h.mgr.grepLogs(session, info.id, "error|fail|warning")?.total, 1);
+			// RE2 rejects look-ahead; legacy grep behavior falls back to literal text.
+			assert.equal(h.mgr.grepLogs(session, info.id, "(?=WARNING)")?.total, 0);
+			assert.equal(h.mgr.grepLogs(session, info.id, "x".repeat(1_025))?.total, 0);
+		} finally {
+			h.mgr.cleanup(session);
+		}
+	});
+});
+
 // Make sure no global mock timer state leaks between describe blocks.
 vi.useRealTimers();

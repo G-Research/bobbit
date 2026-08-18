@@ -7,11 +7,11 @@
 // Uses the fork-scoped gateway fixture (gateway.bobbitDir is the Headquarters
 // dir) instead of the Playwright in-process harness.
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch } from "./_e2e/e2e-setup.js";
+import { apiFetch, registerProject } from "./_e2e/e2e-setup.js";
 import fs from "node:fs";
 import path from "node:path";
 
-function writeMeta(packDir: string, packName: string): void {
+function writeMeta(packDir: string, packName: string, scope: "server" | "project" = "server"): void {
 	fs.writeFileSync(path.join(packDir, ".pack-meta.yaml"), [
 		"sourceUrl: e2e",
 		"sourceRef: local",
@@ -20,7 +20,7 @@ function writeMeta(packDir: string, packName: string): void {
 		"version: 1.0.0",
 		"installedAt: '2026-01-01T00:00:00.000Z'",
 		"updatedAt: '2026-01-01T00:00:00.000Z'",
-		"scope: server",
+		`scope: ${scope}`,
 	].join("\n") + "\n", "utf-8");
 }
 
@@ -28,8 +28,12 @@ function serverMarketPackDir(headquartersDir: string, packName: string): string 
 	return path.join(headquartersDir, "config", "market-packs", packName);
 }
 
-function writePack(headquartersDir: string, packName: string): string {
-	const packDir = serverMarketPackDir(headquartersDir, packName);
+function projectMarketPackDir(projectRoot: string, packName: string): string {
+	return path.join(projectRoot, ".bobbit", "config", "market-packs", packName);
+}
+
+function writePack(baseDir: string, packName: string, scope: "server" | "project" = "server"): string {
+	const packDir = scope === "server" ? serverMarketPackDir(baseDir, packName) : projectMarketPackDir(baseDir, packName);
 	fs.mkdirSync(path.join(packDir, "providers"), { recursive: true });
 	fs.mkdirSync(path.join(packDir, "lib"), { recursive: true });
 	fs.writeFileSync(path.join(packDir, "pack.yaml"), [
@@ -49,7 +53,7 @@ function writePack(headquartersDir: string, packName: string): string {
 		"  runtimes: [node]",
 		"  workflows: [review-flow]",
 	].join("\n") + "\n", "utf-8");
-	writeMeta(packDir, packName);
+	writeMeta(packDir, packName, scope);
 	fs.writeFileSync(path.join(packDir, "providers", "memory.yaml"), "id: memory\nmodule: ../lib/provider.js\nhooks: [beforePrompt]\n", "utf-8");
 	fs.writeFileSync(path.join(packDir, "lib", "provider.js"), "export default {};\n", "utf-8");
 	return packDir;
@@ -105,6 +109,33 @@ function writeSchema1Pack(headquartersDir: string, packName: string): string {
 }
 
 test.describe("marketplace pack activation — providers", () => {
+	test("activation refreshes a cached empty project scope after a direct pack create", async ({ gateway }) => {
+		const packName = `activation-cache-direct-${Date.now()}`;
+		const projectRoot = path.join(gateway.bobbitDir, `activation-cache-project-${packName}`);
+		fs.mkdirSync(projectRoot, { recursive: true });
+		const project = await registerProject({ name: `activation-cache-${packName}`, rootPath: projectRoot, seedWorkflows: false });
+		let packDir = "";
+		const activationUrl = `/api/marketplace/pack-activation?scope=project&projectId=${encodeURIComponent(project.id)}&packName=${encodeURIComponent(packName)}`;
+		try {
+			// This caches the missing market-packs/ root before an external installer
+			// writes a valid pack directly to disk.
+			const absent = await apiFetch(activationUrl);
+			expect(absent.status).toBe(404);
+
+			packDir = writePack(project.rootPath, packName, "project");
+			const activated = await apiFetch("/api/marketplace/pack-activation", {
+				method: "PUT",
+				body: JSON.stringify({ scope: "project", projectId: project.id, packName, disabled: { providers: [] } }),
+			});
+			expect(activated.status, `ACTIVATION_CACHE_DIRECT_CREATE_REGRESSION: ${await activated.clone().text()}`).toBe(200);
+			expect((await activated.json()).catalogue.providers).toEqual(["memory"]);
+		} finally {
+			if (packDir) fs.rmSync(packDir, { recursive: true, force: true });
+			// Keep the process-global cache clean for later direct-write fixtures.
+			await apiFetch(activationUrl).catch(() => {});
+		}
+	});
+
 	test("schema-1 catalogue omits schema-v2 arrays", async ({ gateway }) => {
 		const packName = `provider-activation-v1-${Date.now()}`;
 		const originalOrder = await readServerPackOrder();

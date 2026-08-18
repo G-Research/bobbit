@@ -19,9 +19,19 @@ export interface MessageConsumer {
  */
 interface SandboxContext {
 	sandboxId: string;
+	/** Capability minted by the parent for this exact iframe lifetime. */
+	channelToken: string;
 	iframe: HTMLIFrameElement | null; // null until setSandboxIframe() or null for user scripts
 	providers: SandboxRuntimeProvider[];
 	consumers: Set<MessageConsumer>;
+}
+
+const OPAQUE_SANDBOX_ORIGIN = "null";
+
+function createChannelToken(): string {
+	const bytes = new Uint8Array(16);
+	globalThis.crypto.getRandomValues(bytes);
+	return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 /**
@@ -52,6 +62,7 @@ export class RuntimeMessageRouter {
 	registerSandbox(sandboxId: string, providers: SandboxRuntimeProvider[], consumers: MessageConsumer[]): void {
 		this.sandboxes.set(sandboxId, {
 			sandboxId,
+			channelToken: createChannelToken(),
 			iframe: null, // Will be set via setSandboxIframe() for sandbox contexts
 			providers,
 			consumers: new Set(consumers),
@@ -59,6 +70,13 @@ export class RuntimeMessageRouter {
 
 		// Setup global listener if not already done
 		this.setupListener();
+	}
+
+	/** Return the parent-minted capability that is embedded only in this sandbox's
+	 * runtime bridge. The sandbox is intentionally an opaque (`null`) origin, so
+	 * this complements the source-window check rather than replacing it. */
+	getSandboxChannelToken(sandboxId: string): string | undefined {
+		return this.sandboxes.get(sandboxId)?.channelToken;
 	}
 
 	/**
@@ -118,27 +136,51 @@ export class RuntimeMessageRouter {
 	}
 
 	/**
+	 * Deliver a lifecycle message that has already been authenticated by the
+	 * sandbox owner. This deliberately bypasses window.postMessage: synthetic
+	 * local errors do not carry an iframe channel token and must not weaken the
+	 * public message boundary.
+	 */
+	async dispatchTrustedConsumerMessage(sandboxId: string, message: unknown): Promise<void> {
+		const context = this.sandboxes.get(sandboxId);
+		if (!context) return;
+		for (const consumer of context.consumers) {
+			await consumer.handleMessage(message);
+		}
+	}
+
+	/**
 	 * Setup the global message listeners (called automatically)
 	 */
 	private setupListener(): void {
 		// Setup sandbox iframe listener
 		if (!this.messageListener) {
 			this.messageListener = async (e: MessageEvent) => {
-				const { sandboxId, messageId } = e.data;
-				if (!sandboxId) return;
+				if (!e.data || typeof e.data !== "object") return;
+				const { sandboxId, messageId, channelToken } = e.data;
+				if (typeof sandboxId !== "string" || !sandboxId) return;
 
 				const context = this.sandboxes.get(sandboxId);
-				if (!context) {
-					return;
-				}
+				// `srcdoc` and extension sandboxes deliberately have opaque origins.
+				// Do not weaken this to a same-origin check: authenticate their exact
+				// source window and parent-minted per-iframe channel instead.
+				if (
+					!context?.iframe
+					|| e.source !== context.iframe.contentWindow
+					|| e.origin !== OPAQUE_SANDBOX_ORIGIN
+					|| channelToken !== context.channelToken
+				) return;
+				const authenticatedContext = context;
 
-				// Create respond() function for bidirectional communication
+				// Opaque-origin frames require `*` as the target origin. The exact
+				// source-window and channel token above authenticate the response path.
 				const respond = (response: any) => {
-					context.iframe?.contentWindow?.postMessage(
+					authenticatedContext.iframe!.contentWindow?.postMessage(
 						{
 							type: "runtime-response",
 							messageId,
 							sandboxId,
+							channelToken: authenticatedContext.channelToken,
 							...response,
 						},
 						"*",

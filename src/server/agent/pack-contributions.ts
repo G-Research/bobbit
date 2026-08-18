@@ -13,6 +13,8 @@
 //                                  manifest.contents.channels[])
 //   - `hooks/<name>.yaml`       → HookContribution[] (filtered by
 //                                  manifest.contents.hooks[]; metadata only)
+//   - `system-prompts/<name>.yaml` → SystemPromptSectionContribution[] (filtered
+//                                  by manifest.contents.systemPrompts[])
 //   - `pack.yaml.routes`        → RouteContribution
 //
 // Mirrors the tolerance of `tool-contributions.ts`: a malformed file is warned +
@@ -36,9 +38,19 @@ import { parse } from "yaml";
 import type { PackManifest } from "./pack-types.js";
 import { isSafeRelativePath, parseEntrypoints } from "./tool-contributions.js";
 import type { EntrypointIconId } from "../../shared/entrypoint-icons.js";
-import { isSafeBasename, isValidPackName } from "./pack-manifest.js";
+import {
+	isSafeBasename,
+	isValidPackName,
+	isValidSandboxRequirementId,
+	isValidSandboxRequirementListName,
+	MAX_SANDBOX_REQUIREMENT_CATALOGUE_ROWS_PER_PACK,
+	MAX_SANDBOX_REQUIREMENT_DECLARATION_FILE_BYTES,
+} from "./pack-manifest.js";
 import { isPackPathWithinRoot } from "../extension-host/path-guard.js";
+import { validateServiceExtensionSpec, type ServiceExtensionSpec } from "../extension-host/service-extension-contract.js";
 import type { McpServerConfig } from "../mcp/mcp-types.js";
+import { containsReservedCorePromptDelimiter, CORE_PROMPT_RESERVED_DELIMITER_TOKENS } from "./prompt-delimiters.js";
+import { normalizeExtensionSettingsSchema, type ExtensionSettingsSchema } from "./extension-settings-schema.js";
 
 // Panel ids may use dotted namespaces (e.g. `artifacts.viewer`).
 const PANEL_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
@@ -60,9 +72,18 @@ const PROVIDER_HOOKS = new Set([
 	"goalProvisioned",
 ]);
 const HOOK_ID_RE = /^[a-z0-9][a-z0-9_.-]*$/i;
-const HOOK_EVENTS = new Set(["sessionSetup", "beforePrompt", "afterTurn", "beforeCompact", "sessionShutdown", "goalProvisioned"] as const);
-const HOOK_CAPABILITIES = new Set(["store", "session", "agents"] as const);
-const HOOK_TOP_LEVEL_KEYS = new Set(["id", "module", "events", "mode", "capabilities", "budget", "config", "activation"]);
+const HOOK_EVENTS = new Set(["sessionSetup", "beforePrompt", "beforeToolCall", "afterToolResult", "afterTurn", "beforeCompact", "sessionShutdown", "goalProvisioned", "projectImported"] as const);
+const HOOK_CAPABILITIES = new Set(["store", "session", "agents", "mutate", "filter:tool-result", "prompt:system-static", "prompt:system-author"] as const);
+const HOOK_TOP_LEVEL_KEYS = new Set(["id", "module", "events", "mode", "capabilities", "budget", "config", "activation", "schedule", "selectors"]);
+
+/** Static prompt-section identifiers are pack-local, durable attribution keys. */
+export const SYSTEM_PROMPT_SECTION_ID_RE = /^[a-z0-9][a-z0-9_.-]{0,127}$/i;
+/** Keep display metadata bounded without imposing a project prompt budget here. */
+export const MAX_SYSTEM_PROMPT_SECTION_TITLE_BYTES = 256;
+/** Loader safety ceiling; project policy applies the lower effective prompt budget. */
+export const MAX_SYSTEM_PROMPT_SECTION_CONTENT_BYTES = 64 * 1024;
+/** Contributions may not forge any core-owned prompt delimiter. */
+export const SYSTEM_PROMPT_RESERVED_DELIMITER_PREFIXES = CORE_PROMPT_RESERVED_DELIMITER_TOKENS;
 
 /** A hard pack-contribution conflict (§5.4). Throwing aborts the pack's load so
  *  the registry can surface a loud error instead of silently registering an
@@ -203,6 +224,31 @@ export interface ChannelContribution {
 	packRoot: string;
 }
 
+/** A schema-2 declarative managed-service contribution. The pack supplies only
+ * this metadata; the core runtime owns commands, processes, ports, and secrets. */
+export interface ServiceExtensionContribution {
+	id: string;
+	spec: ServiceExtensionSpec;
+	settingsSchema?: ExtensionSettingsSchema;
+	settingsSchemaDiagnostic?: string;
+	activation?: { requiresConfig: string[] };
+	listName: string;
+	sourceFile: string;
+	packRoot: string;
+}
+
+/** Schema-3 inert request for a core-owned sandbox toolchain. This declaration
+ * contains only approved profile IDs; it has no Docker/build execution surface. */
+export interface SandboxRequirementContribution {
+	id: string;
+	profiles: readonly ("python")[];
+	settingsSchema?: ExtensionSettingsSchema;
+	activation?: { requiresConfig: string[] };
+	listName: string;
+	sourceFile: string;
+	packRoot: string;
+}
+
 export interface ProviderContribution {
 	id: string;
 	kind: "memory" | "selector" | "generic";
@@ -220,21 +266,36 @@ export interface ProviderContribution {
 	/** The RAW config schema descriptors (the verbatim `config` mapping) preserved
 	 *  for route-side validation; never handed to the provider as `ctx.config`. */
 	configSchema?: Record<string, unknown>;
+	/** Strict settings declaration derived from `configSchema`, when editable. */
+	settingsSchema?: ExtensionSettingsSchema;
+	/** Safe declaration diagnostic. A present value makes the target fail closed. */
+	settingsSchemaDiagnostic?: string;
 	/** Config-gated activation: the provider is omitted from the active provider
 	 *  listing until the EFFECTIVE flat config has a non-empty value for every
 	 *  key in `requiresConfig` (DisabledRefs/pack activation still wins). Enables a
 	 *  truly dormant install — no provider bridge, no per-turn hook routes, no
 	 *  network — until configured. */
 	activation?: { requiresConfig: string[] };
+	schedule?: HookSchedule;
 	listName: string;
 	sourceFile: string;
 	packRoot: string;
 }
 
 /** Supported inert hook declaration events. Declaring one does not register or execute it. */
-export type HookEvent = "sessionSetup" | "beforePrompt" | "afterTurn" | "beforeCompact" | "sessionShutdown" | "goalProvisioned";
+export type HookEvent = "sessionSetup" | "beforePrompt" | "beforeToolCall" | "afterToolResult" | "afterTurn" | "beforeCompact" | "sessionShutdown" | "goalProvisioned" | "projectImported";
 export type HookMode = "observe" | "decide";
-export type HookCapability = "store" | "session" | "agents";
+/** Optional dynamic capability selector stages; declarations remain inert metadata. */
+export type HookSelector = "skills" | "mcp";
+/** Optional cadence metadata. Wall-clock cadence remains inert. */
+export type ScheduledHookKind = "advisor" | "decision";
+export interface HookSchedule {
+	everyNTurns?: number;
+	wallClockMs?: number;
+	/** Omitted retains the compatible scheduled-advisor behavior. */
+	kind?: ScheduledHookKind;
+}
+export type HookCapability = "store" | "session" | "agents" | "mutate" | "filter:tool-result" | "prompt:system-static" | "prompt:system-author";
 
 /** A manifest-listed, inert hook metadata declaration. This is never imported,
  * authorized, config-gated, or registered for dispatch by the contribution loader. */
@@ -245,8 +306,31 @@ export interface HookContribution {
 	mode: HookMode;
 	capabilities: HookCapability[];
 	budget: { maxTokens: number; timeoutMs: number };
+	/** Opaque static config remains inert unless it validates as a settings schema. */
 	config?: Record<string, unknown>;
+	settingsSchema?: ExtensionSettingsSchema;
+	/** Only descriptor-shaped malformed hook config is surfaced as invalid. */
+	settingsSchemaDiagnostic?: string;
 	activation?: { requiresConfig: string[] };
+	schedule?: HookSchedule;
+	/** Only decide hooks on sessionSetup may declare these bounded selector stages. */
+	selectors?: HookSelector[];
+	listName: string;
+	sourceFile: string;
+	packRoot: string;
+}
+
+/** A literal, static system-prompt section declared by a schema-2 pack. */
+export interface SystemPromptSectionContribution {
+	/** Pack-local stable identifier, used for deterministic ordering and attribution. */
+	id: string;
+	/** Bounded display metadata only; never used as a prompt instruction or sort key. */
+	title: string;
+	/** Literal static markdown. The loader never interpolates this string. */
+	content: string;
+	/** Optional declaration cap; final project policy applies the lower cap. */
+	maxBytes?: number;
+	/** The manifest `contents.systemPrompts` basename that activates this declaration. */
 	listName: string;
 	sourceFile: string;
 	packRoot: string;
@@ -262,19 +346,18 @@ export function providerConfigStoreKey(providerId: string): string {
 	return `${PROVIDER_CONFIG_KEY_PREFIX}${providerId}`;
 }
 
-/** Collapse a provider `config` SCHEMA mapping to FLAT default values: a
- *  descriptor object contributes its `.default` (omitted when it has none — an
- *  optional field with no default stays `undefined`); a bare scalar is treated as
- *  the literal default. Never recurses — provider config is a flat key→descriptor
- *  surface. */
+/** Collapse a provider `config` mapping to flat runtime values. A
+ * descriptor-shaped object contributes its `.default` (omitted when it has none
+ * — an optional field with no default stays `undefined`); scalar and opaque
+ * object values are historic literal defaults. Never recurses. */
 export function resolveProviderConfigDefaults(schema: Record<string, unknown>): Record<string, unknown> {
 	const out: Record<string, unknown> = {};
 	for (const [key, descriptor] of Object.entries(schema)) {
-		if (isPlainObject(descriptor)) {
+		if (isPlainObject(descriptor) && "type" in descriptor) {
 			if ("default" in descriptor) out[key] = descriptor.default;
 			// optional with no default → omitted (effective value is `undefined`).
 		} else {
-			out[key] = descriptor; // bare-scalar shorthand = the literal default
+			out[key] = descriptor; // scalar or opaque static config = literal default
 		}
 	}
 	return out;
@@ -292,6 +375,29 @@ function parseProviderActivation(raw: unknown): { requiresConfig: string[] } | u
 	return { requiresConfig: keys };
 }
 
+/** An explicit config gate opts into strict validation even if the tolerant
+ * runtime parser cannot interpret it. Other legacy activation metadata remains
+ * inert and does not become a settings declaration. */
+function hasOwnRequiresConfig(raw: unknown): raw is Record<string, unknown> {
+	return isPlainObject(raw) && Object.prototype.hasOwnProperty.call(raw, "requiresConfig");
+}
+
+/** A config-free target cannot declare a satisfiable config gate. Normalize it
+ * to preserve the canonical diagnostic; an empty array otherwise normalizes as
+ * an empty schema, so explicitly retain the invalid declaration state. */
+function configlessActivationDiagnostic(rawActivation: unknown): string {
+	const settings = normalizeExtensionSettingsSchema({}, rawActivation);
+	return settings.diagnostic ?? "activation.requiresConfig must reference declared fields";
+}
+
+/** A config map opts into strict project settings only when at least one field
+ * is descriptor-shaped. Historic providers and inert hooks also use `config:`
+ * for arbitrary static maps, so scalar and opaque values remain runtime config,
+ * not a malformed settings declaration. */
+function hasSettingsDescriptor(config: Record<string, unknown>): boolean {
+	return Object.values(config).some(value => isPlainObject(value) && "type" in value);
+}
+
 /** All pack-scoped contributions for ONE installed pack. */
 export interface PackContributions {
 	packId: string; // structural, from the pack root dir name
@@ -300,10 +406,16 @@ export interface PackContributions {
 	panels: PanelContribution[];
 	entrypoints: EntrypointContribution[];
 	providers: ProviderContribution[];
+	/** Declarative runtime files listed by contents.runtimes[]. */
+	runtimes: ServiceExtensionContribution[];
+	/** Schema-3 inert toolchain requests listed by contents.sandboxRequirements[]. */
+	sandboxRequirements: SandboxRequirementContribution[];
 	/** Channel handler files listed by contents.channels[]. */
 	channels: ChannelContribution[];
 	/** Schema-2 hook metadata files listed by contents.hooks[]. Never executable. */
 	hooks: HookContribution[];
+	/** Schema-2 literal static prompt sections listed by contents.systemPrompts[]. */
+	systemPrompts?: SystemPromptSectionContribution[];
 	/** Schema-2 MCP contribution files listed by contents.mcp[]. */
 	mcp?: McpPackContribution[];
 	routes?: RouteContribution;
@@ -337,8 +449,11 @@ export function loadPackContributions(packRoot: string, manifest: PackManifest):
 		panels: loadPanels(packRoot),
 		entrypoints: loadEntrypoints(packRoot, manifest),
 		providers: loadProviders(packRoot, manifest),
+		runtimes: loadServiceExtensions(packRoot, manifest),
+		sandboxRequirements: loadSandboxRequirements(packRoot, manifest),
 		channels: loadChannels(packRoot, manifest),
 		hooks: loadHooks(packRoot, manifest),
+		systemPrompts: loadSystemPromptSections(packRoot, manifest),
 		mcp: loadMcpContributions(packRoot, manifest),
 	};
 	const routes = loadRoutes(packRoot, manifest);
@@ -608,6 +723,34 @@ interface ParsedHookActivation {
 	error?: string;
 }
 
+interface ParsedHookSchedule { schedule?: HookSchedule; error?: string; }
+interface ParsedHookSelectors { selectors?: HookSelector[]; error?: string; }
+function parseHookSchedule(raw: unknown): ParsedHookSchedule {
+	if (raw === undefined) return {};
+	if (!isPlainObject(raw)) return { error: "schedule must be a mapping" };
+	for (const key of Object.keys(raw)) if (key !== "everyNTurns" && key !== "wallClockMs" && key !== "kind") return { error: `schedule has unknown key ${JSON.stringify(key)}` };
+	const schedule: HookSchedule = {};
+	for (const key of ["everyNTurns", "wallClockMs"] as const) { const value = raw[key]; if (value === undefined) continue; if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 10_000) return { error: `schedule.${key} must be a safe integer in 1..10000` }; schedule[key] = value; }
+	if (raw.kind !== undefined) {
+		if (raw.kind !== "advisor" && raw.kind !== "decision") return { error: "schedule.kind must be advisor or decision" };
+		schedule.kind = raw.kind;
+	}
+	return { schedule };
+}
+
+function parseHookSelectors(raw: unknown): ParsedHookSelectors {
+	if (raw === undefined) return {};
+	if (!Array.isArray(raw) || raw.length === 0) return { error: "selectors must be a non-empty array" };
+	const selectors: HookSelector[] = [];
+	const seen = new Set<string>();
+	for (const selector of raw) {
+		if ((selector !== "skills" && selector !== "mcp") || seen.has(selector)) return { error: "selectors must contain unique supported stages" };
+		seen.add(selector);
+		selectors.push(selector);
+	}
+	return { selectors };
+}
+
 /** Hook activation is declaration metadata only. Its syntax is intentionally
  * strict here, but the loader never evaluates it or reads persisted config. */
 function parseHookActivation(raw: unknown): ParsedHookActivation {
@@ -752,7 +895,19 @@ export function loadHooks(packRoot: string, manifest: PackManifest): HookContrib
 			config = data.config;
 		}
 		const parsedActivation = parseHookActivation(data.activation);
-		if (parsedActivation.error) {
+		const configlessConfigGate = config === undefined && hasOwnRequiresConfig(data.activation);
+		const parsedSchedule = parseHookSchedule(data.schedule);
+		const parsedSelectors = parseHookSelectors(data.selectors);
+		if (parsedSchedule.error) { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) ${parsedSchedule.error}; dropping`); continue; }
+		if (parsedSelectors.error) { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) ${parsedSelectors.error}; dropping`); continue; }
+		const isProjectImportHook = normalizedEvents.includes("projectImported");
+		if (isProjectImportHook && mode !== "decide") { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) event 'projectImported' requires mode 'decide'; dropping`); continue; }
+		if (isProjectImportHook && parsedSelectors.selectors) { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) event 'projectImported' cannot declare selectors; dropping`); continue; }
+		if (isProjectImportHook && parsedSchedule.schedule) { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) event 'projectImported' cannot declare a schedule; dropping`); continue; }
+		if (parsedSelectors.selectors && (mode !== "decide" || !normalizedEvents.includes("sessionSetup"))) { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) selectors require mode 'decide' and event 'sessionSetup'; dropping`); continue; }
+		if (parsedSchedule.schedule?.everyNTurns !== undefined && (mode !== "decide" || normalizedEvents.length !== 1 || normalizedEvents[0] !== "afterTurn")) { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) schedule.everyNTurns requires mode 'decide' and exactly events: [afterTurn]; dropping`); continue; }
+		if (parsedSchedule.schedule?.kind === "decision" && (mode !== "decide" || normalizedEvents.length !== 1 || normalizedEvents[0] !== "afterTurn" || parsedSchedule.schedule.everyNTurns === undefined)) { console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) schedule.kind 'decision' requires mode 'decide', exactly events: [afterTurn], and everyNTurns; dropping`); continue; }
+		if (parsedActivation.error && !configlessConfigGate) {
 			console.warn(`[pack-contributions] hook '${id}' (${sourceFile}) ${parsedActivation.error}; dropping`);
 			continue;
 		}
@@ -777,9 +932,121 @@ export function loadHooks(packRoot: string, manifest: PackManifest): HookContrib
 			sourceFile,
 			packRoot,
 		};
-		if (config !== undefined) hook.config = config;
+		if (config !== undefined) {
+			hook.config = config;
+			if (hasSettingsDescriptor(config)) {
+				const settings = normalizeExtensionSettingsSchema(config, data.activation);
+				if (settings.schema) hook.settingsSchema = settings.schema;
+				else hook.settingsSchemaDiagnostic = settings.diagnostic;
+			}
+		} else if (configlessConfigGate) {
+			// Keep every explicit, config-free gate visible for repair, including
+			// malformed scalar/empty/mixed requiresConfig forms that the tolerant
+			// parser cannot retain as runtime activation metadata.
+			hook.settingsSchemaDiagnostic = configlessActivationDiagnostic(data.activation);
+		}
 		if (parsedActivation.activation) hook.activation = parsedActivation.activation;
+		if (parsedSchedule.schedule) hook.schedule = parsedSchedule.schedule;
+		if (parsedSelectors.selectors) hook.selectors = parsedSelectors.selectors;
 		out.push(hook);
+	}
+	return out;
+}
+
+/** True only for strings that round-trip through UTF-8 without replacement.
+ * YAML produces JavaScript strings, so reject lone UTF-16 surrogates before
+ * Buffer.byteLength would silently encode them as U+FFFD. */
+function isWellFormedText(value: string): boolean {
+	for (let i = 0; i < value.length; i++) {
+		const unit = value.charCodeAt(i);
+		if (unit >= 0xd800 && unit <= 0xdbff) {
+			const next = value.charCodeAt(i + 1);
+			if (next < 0xdc00 || next > 0xdfff) return false;
+			i++;
+		} else if (unit >= 0xdc00 && unit <= 0xdfff) {
+			return false;
+		}
+	}
+	return true;
+}
+
+function containsReservedSystemPromptDelimiter(content: string): boolean {
+	return containsReservedCorePromptDelimiter(content);
+}
+
+/** Load schema-2 `system-prompts/<name>.yaml` declarations listed by the
+ * manifest. These are inert literal text declarations: malformed files are
+ * warned and omitted, while duplicate activation/section identities reject the
+ * ambiguous pack exactly like other hard contribution conflicts. */
+export function loadSystemPromptSections(packRoot: string, manifest: PackManifest): SystemPromptSectionContribution[] {
+	if ((manifest.schema ?? 1) < 2) return [];
+	const listNames = manifest.contents.systemPrompts ?? [];
+	const dir = path.join(packRoot, "system-prompts");
+	const out: SystemPromptSectionContribution[] = [];
+	const seenListName = new Set<string>();
+	const seenId = new Set<string>();
+	for (const listName of listNames) {
+		if (typeof listName !== "string" || listName.length === 0) continue;
+		if (!isSafeBasename(listName)) {
+			console.warn(`[pack-contributions] system-prompt listName ${JSON.stringify(listName)} is not a safe basename; skipping`);
+			continue;
+		}
+		if (seenListName.has(listName)) {
+			throw new PackContributionError(
+				`pack "${packIdFromRoot(packRoot)}" declares system-prompt listName "${listName}" more than once; system-prompt listNames must be unique within a pack`,
+			);
+		}
+		seenListName.add(listName);
+		const sourceFile = resolveContributionFile(dir, listName);
+		if (!isPackPathWithinRoot(dir, sourceFile)) {
+			console.warn(`[pack-contributions] system-prompt '${listName}' resolves outside system-prompts/ (${sourceFile}); skipping`);
+			continue;
+		}
+		let data: unknown;
+		try {
+			data = readYaml(sourceFile);
+		} catch (err) {
+			console.warn(`[pack-contributions] skipping missing/malformed system-prompt '${listName}' (${sourceFile}): ${String(err)}`);
+			continue;
+		}
+		if (!isPlainObject(data)) {
+			console.warn(`[pack-contributions] system-prompt '${listName}' (${sourceFile}) is not a mapping; dropping`);
+			continue;
+		}
+		const id = data.id;
+		const title = data.title;
+		const content = data.content;
+		if (typeof id !== "string" || !SYSTEM_PROMPT_SECTION_ID_RE.test(id)) {
+			console.warn(`[pack-contributions] system-prompt '${listName}' (${sourceFile}) has invalid id; dropping`);
+			continue;
+		}
+		if (typeof title !== "string" || title.trim().length === 0 || !isWellFormedText(title)
+			|| Buffer.byteLength(title, "utf8") > MAX_SYSTEM_PROMPT_SECTION_TITLE_BYTES
+			|| /[\0\r\n]/.test(title)) {
+			console.warn(`[pack-contributions] system-prompt '${id}' (${sourceFile}) has invalid title; dropping`);
+			continue;
+		}
+		if (typeof content !== "string" || content.length === 0 || !isWellFormedText(content)
+			|| Buffer.byteLength(content, "utf8") > MAX_SYSTEM_PROMPT_SECTION_CONTENT_BYTES
+			|| containsReservedSystemPromptDelimiter(content)) {
+			console.warn(`[pack-contributions] system-prompt '${id}' (${sourceFile}) has invalid content; dropping`);
+			continue;
+		}
+		let maxBytes: number | undefined;
+		if (data.maxBytes !== undefined) {
+			if (typeof data.maxBytes !== "number" || !Number.isSafeInteger(data.maxBytes) || data.maxBytes <= 0) {
+				console.warn(`[pack-contributions] system-prompt '${id}' (${sourceFile}) has invalid maxBytes; dropping`);
+				continue;
+			}
+			maxBytes = data.maxBytes;
+		}
+		if (seenId.has(id)) {
+			throw new PackContributionError(
+				`pack "${packIdFromRoot(packRoot)}" declares system-prompt id "${id}" more than once; system-prompt ids must be unique within a pack`,
+			);
+		}
+		seenId.add(id);
+		out.push({ id, title, content, ...(maxBytes !== undefined ? { maxBytes } : {}), listName, sourceFile, packRoot });
 	}
 	return out;
 }
@@ -870,13 +1137,194 @@ export function loadProviders(packRoot: string, manifest: PackManifest): Provide
 			packRoot,
 		};
 		if (typeof data.runtime === "string" && data.runtime.length > 0) provider.runtime = data.runtime;
+		const activation = parseProviderActivation(data.activation);
+		const configlessConfigGate = data.config === undefined && hasOwnRequiresConfig(data.activation);
 		if (isPlainObject(data.config)) {
 			provider.configSchema = data.config;
 			provider.config = resolveProviderConfigDefaults(data.config);
+			if (hasSettingsDescriptor(data.config)) {
+				const settings = normalizeExtensionSettingsSchema(data.config, data.activation);
+				if (settings.schema) provider.settingsSchema = settings.schema;
+				else provider.settingsSchemaDiagnostic = settings.diagnostic;
+			}
+		} else if (configlessConfigGate) {
+			// Preserve opaque/bare-scalar config compatibility and tolerate unrelated
+			// legacy activation metadata, but an explicit gate with no declaration is
+			// invalid and must fail closed while remaining repairable in Market.
+			provider.settingsSchemaDiagnostic = configlessActivationDiagnostic(data.activation);
 		}
-		const activation = parseProviderActivation(data.activation);
 		if (activation) provider.activation = activation;
 		out.push(provider);
+	}
+	return out;
+}
+
+const SERVICE_EXTENSION_TOP_LEVEL_KEYS = new Set(["id", "service", "config", "activation"]);
+
+/** Load schema-2 `runtimes/<name>.yaml` service declarations only when their
+ * basename is listed by the manifest. Invalid declarations are inert; no pack
+ * document can smuggle a process command or an unbounded timing knob through
+ * this projection. */
+export function loadServiceExtensions(packRoot: string, manifest: PackManifest): ServiceExtensionContribution[] {
+	if ((manifest.schema ?? 1) < 2) return [];
+	const dir = path.join(packRoot, "runtimes");
+	const out: ServiceExtensionContribution[] = [];
+	const seenListNames = new Set<string>();
+	const seenIds = new Set<string>();
+	for (const listName of manifest.contents.runtimes ?? []) {
+		if (!isSafeBasename(listName)) {
+			console.warn(`[pack-contributions] runtime listName ${JSON.stringify(listName)} is not a safe basename; skipping`);
+			continue;
+		}
+		if (seenListNames.has(listName)) {
+			throw new PackContributionError(`pack "${packIdFromRoot(packRoot)}" declares runtime listName "${listName}" more than once; runtime listNames must be unique within a pack`);
+		}
+		seenListNames.add(listName);
+		const sourceFile = resolveContributionFile(dir, listName);
+		if (!isPackPathWithinRoot(dir, sourceFile)) {
+			console.warn(`[pack-contributions] runtime '${listName}' resolves outside runtimes/ (${sourceFile}); skipping`);
+			continue;
+		}
+		let data: unknown;
+		try { data = readYaml(sourceFile); } catch (err) {
+			console.warn(`[pack-contributions] skipping missing/malformed runtime '${listName}' (${sourceFile}): ${String(err)}`);
+			continue;
+		}
+		if (!isPlainObject(data) || Object.keys(data).some(key => !SERVICE_EXTENSION_TOP_LEVEL_KEYS.has(key))) {
+			console.warn(`[pack-contributions] runtime '${listName}' (${sourceFile}) has invalid top-level shape; dropping`);
+			continue;
+		}
+		const id = data.id;
+		if (typeof id !== "string" || !HOOK_ID_RE.test(id) || seenIds.has(id)) {
+			if (seenIds.has(id as string)) throw new PackContributionError(`pack "${packIdFromRoot(packRoot)}" declares runtime id "${String(id)}" more than once; runtime ids must be unique within a pack`);
+			console.warn(`[pack-contributions] runtime '${listName}' (${sourceFile}) has invalid id; dropping`);
+			continue;
+		}
+		if (!isPlainObject(data.service)) {
+			console.warn(`[pack-contributions] runtime '${id}' (${sourceFile}) has no service mapping; dropping`);
+			continue;
+		}
+		const validated = validateServiceExtensionSpec({ ...data.service, id });
+		if (!validated.ok) {
+			console.warn(`[pack-contributions] runtime '${id}' (${sourceFile}) has invalid service declaration; dropping`);
+			continue;
+		}
+		let settingsSchema: ExtensionSettingsSchema | undefined;
+		let settingsSchemaDiagnostic: string | undefined;
+		if (data.config !== undefined) {
+			if (!isPlainObject(data.config) || !hasSettingsDescriptor(data.config)) {
+				console.warn(`[pack-contributions] runtime '${id}' (${sourceFile}) config must be a settings descriptor mapping; dropping`);
+				continue;
+			}
+			const normalized = normalizeExtensionSettingsSchema(data.config, data.activation);
+			settingsSchema = normalized.schema;
+			settingsSchemaDiagnostic = normalized.diagnostic;
+		} else if (hasOwnRequiresConfig(data.activation)) {
+			settingsSchemaDiagnostic = configlessActivationDiagnostic(data.activation);
+		}
+		const activation = parseProviderActivation(data.activation);
+		if (settingsSchemaDiagnostic !== undefined || (data.activation !== undefined && !activation && !hasOwnRequiresConfig(data.activation))) {
+			console.warn(`[pack-contributions] runtime '${id}' (${sourceFile}) has invalid settings/activation declaration; dropping`);
+			continue;
+		}
+		seenIds.add(id);
+		out.push({ id, spec: validated.value, ...(settingsSchema ? { settingsSchema } : {}), ...(activation ? { activation } : {}), listName, sourceFile, packRoot });
+	}
+	return out;
+}
+
+const SANDBOX_REQUIREMENT_TOP_LEVEL_KEYS = new Set(["id", "profiles", "config", "activation"]);
+const SANDBOX_TOOLCHAIN_IDS = new Set(["python"] as const);
+const MAX_SANDBOX_REQUIREMENT_PROFILES = 8;
+
+/** Read a bounded declaration before YAML can allocate for attacker-controlled bytes. */
+function readSandboxRequirementYaml(file: string): unknown {
+	const stat = fs.statSync(file);
+	if (!stat.isFile()) throw new Error("declaration is not a regular file");
+	if (stat.size > MAX_SANDBOX_REQUIREMENT_DECLARATION_FILE_BYTES) {
+		throw new Error(`declaration exceeds ${MAX_SANDBOX_REQUIREMENT_DECLARATION_FILE_BYTES} bytes`);
+	}
+	return readYaml(file);
+}
+
+/** Load schema-3 inert sandbox requirements from manifest-listed files only.
+ * Reject rather than partially interpret every malformed declaration: only the
+ * core-owned profile vocabulary can reach later authorization and planning. */
+export function loadSandboxRequirements(packRoot: string, manifest: PackManifest): SandboxRequirementContribution[] {
+	if ((manifest.schema ?? 1) < 3) return [];
+	const listNames = manifest.contents.sandboxRequirements ?? [];
+	if (listNames.length > MAX_SANDBOX_REQUIREMENT_CATALOGUE_ROWS_PER_PACK) {
+		console.warn(`[pack-contributions] pack "${packIdFromRoot(packRoot)}" declares more than ${MAX_SANDBOX_REQUIREMENT_CATALOGUE_ROWS_PER_PACK} sandbox requirements; dropping catalogue`);
+		return [];
+	}
+	const dir = path.join(packRoot, "sandbox-requirements");
+	const out: SandboxRequirementContribution[] = [];
+	const seenListNames = new Set<string>();
+	const seenIds = new Set<string>();
+	for (const listName of listNames) {
+		if (!isValidSandboxRequirementListName(listName)) {
+			console.warn(`[pack-contributions] sandbox requirement listName ${JSON.stringify(listName)} is not a valid bounded basename; skipping`);
+			continue;
+		}
+		if (seenListNames.has(listName)) {
+			throw new PackContributionError(`pack "${packIdFromRoot(packRoot)}" declares sandbox requirement listName "${listName}" more than once; listNames must be unique within a pack`);
+		}
+		seenListNames.add(listName);
+		const sourceFile = resolveContributionFile(dir, listName);
+		if (!isPackPathWithinRoot(dir, sourceFile)) {
+			console.warn(`[pack-contributions] sandbox requirement '${listName}' resolves outside sandbox-requirements/ (${sourceFile}); skipping`);
+			continue;
+		}
+		let data: unknown;
+		try { data = readSandboxRequirementYaml(sourceFile); } catch (err) {
+			console.warn(`[pack-contributions] skipping missing/malformed/oversized sandbox requirement '${listName}' (${sourceFile}): ${String(err)}`);
+			continue;
+		}
+		if (!isPlainObject(data) || Object.keys(data).some(key => !SANDBOX_REQUIREMENT_TOP_LEVEL_KEYS.has(key))) {
+			console.warn(`[pack-contributions] sandbox requirement '${listName}' (${sourceFile}) has invalid top-level shape; dropping`);
+			continue;
+		}
+		const id = data.id;
+		if (!isValidSandboxRequirementId(id) || seenIds.has(id)) {
+			if (seenIds.has(id as string)) throw new PackContributionError(`pack "${packIdFromRoot(packRoot)}" declares sandbox requirement id "${String(id)}" more than once; ids must be unique within a pack`);
+			console.warn(`[pack-contributions] sandbox requirement '${listName}' (${sourceFile}) has invalid id; dropping`);
+			continue;
+		}
+		if (!Array.isArray(data.profiles) || data.profiles.length === 0 || data.profiles.length > MAX_SANDBOX_REQUIREMENT_PROFILES) {
+			console.warn(`[pack-contributions] sandbox requirement '${id}' (${sourceFile}) has invalid profiles; dropping`);
+			continue;
+		}
+		const profiles: ("python")[] = [];
+		const seenProfiles = new Set<string>();
+		let validProfiles = true;
+		for (const profile of data.profiles) {
+			if (typeof profile !== "string" || !SANDBOX_TOOLCHAIN_IDS.has(profile as "python") || seenProfiles.has(profile)) {
+				validProfiles = false;
+				break;
+			}
+			seenProfiles.add(profile);
+			profiles.push(profile as "python");
+		}
+		if (!validProfiles) {
+			console.warn(`[pack-contributions] sandbox requirement '${id}' (${sourceFile}) has unsupported or duplicate profiles; dropping`);
+			continue;
+		}
+		if (data.config === undefined && data.activation !== undefined) {
+			console.warn(`[pack-contributions] sandbox requirement '${id}' (${sourceFile}) has activation without config; dropping`);
+			continue;
+		}
+		let settingsSchema: ExtensionSettingsSchema | undefined;
+		if (data.config !== undefined) {
+			const normalized = normalizeExtensionSettingsSchema(data.config, data.activation);
+			if (!normalized.schema || normalized.schema.fields.some(field => field.type === "secret")) {
+				console.warn(`[pack-contributions] sandbox requirement '${id}' (${sourceFile}) has invalid public settings/activation declaration; dropping`);
+				continue;
+			}
+			settingsSchema = normalized.schema;
+		}
+		seenIds.add(id);
+		const activation = settingsSchema?.requiresConfig;
+		out.push({ id, profiles, ...(settingsSchema ? { settingsSchema } : {}), ...(activation && activation.length > 0 ? { activation: { requiresConfig: [...activation] } } : {}), listName, sourceFile, packRoot });
 	}
 	return out;
 }

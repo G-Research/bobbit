@@ -5,10 +5,10 @@ import path from "node:path";
 
 import { createManualClock } from "../harness/clock.js";
 
-const VIRTUAL_STATE_DIR = path.resolve("/.bobbit-test/session-direct-prompt");
-const VIRTUAL_SIDECAR_DIR = path.join(VIRTUAL_STATE_DIR, "author-sidecar");
-const VIRTUAL_SKILL_SIDECAR_DIR = path.join(VIRTUAL_STATE_DIR, "skill-sidecar");
+const VIRTUAL_ROOT_DIR = path.resolve("/.bobbit-test");
+const VIRTUAL_STATE_DIR = path.join(VIRTUAL_ROOT_DIR, "session-direct-prompt");
 const VIRTUAL_HMAC_KEY = Buffer.alloc(32, 0x36);
+const virtualDirectories = new Set([VIRTUAL_ROOT_DIR, VIRTUAL_STATE_DIR]);
 const virtualSidecarFiles = new Map<string, string>();
 const virtualFds = new Map<number, { path: string; flags: number }>();
 let nextVirtualFd = 10_000;
@@ -19,10 +19,7 @@ function virtualPath(value: fs.PathLike): string {
 
 function isVirtualSidecarPath(value: fs.PathLike): boolean {
 	const target = virtualPath(value);
-	return target === VIRTUAL_SIDECAR_DIR
-		|| target.startsWith(`${VIRTUAL_SIDECAR_DIR}${path.sep}`)
-		|| target === VIRTUAL_SKILL_SIDECAR_DIR
-		|| target.startsWith(`${VIRTUAL_SKILL_SIDECAR_DIR}${path.sep}`);
+	return target === VIRTUAL_STATE_DIR || target.startsWith(`${VIRTUAL_STATE_DIR}${path.sep}`);
 }
 
 const {
@@ -54,13 +51,16 @@ const {
 } = await import("../../src/server/skills/skill-sidecar.ts");
 
 // Author persistence is exercised through the real secure sidecar API, backed
-// by a descriptor-aware in-memory filesystem. Unexpected paths fail closed.
+// by a descriptor-aware in-memory filesystem. The configured root is virtual
+// too: canonicalization must not probe or create a real `/.bobbit-test` path.
+// Unexpected paths fail closed.
 const fsSpies: Array<{ mockRestore(): void }> = [];
-const virtualStats = (isDirectory: boolean) => ({
+const virtualStats = (isDirectory: boolean, size = 0) => ({
 	isDirectory: () => isDirectory,
 	isFile: () => !isDirectory,
 	isSymbolicLink: () => false,
 	mode: (isDirectory ? 0o040000 | 0o700 : 0o100000 | 0o600),
+	size,
 }) as fs.Stats;
 const enoent = (target: string) => Object.assign(new Error(`ENOENT: ${target}`), { code: "ENOENT" });
 
@@ -68,19 +68,26 @@ fsSpies.push(
 	vi.spyOn(fs, "existsSync").mockImplementation((target) => {
 		if (!isVirtualSidecarPath(target)) throw new Error(`unexpected filesystem read: ${String(target)}`);
 		const key = virtualPath(target);
-		return key === VIRTUAL_SIDECAR_DIR || key === VIRTUAL_SKILL_SIDECAR_DIR || virtualSidecarFiles.has(key);
+		return virtualDirectories.has(key) || virtualSidecarFiles.has(key);
 	}),
 	vi.spyOn(fs, "mkdirSync").mockImplementation(((target: fs.PathLike) => {
 		if (!isVirtualSidecarPath(target)) throw new Error(`unexpected filesystem write: ${String(target)}`);
+		virtualDirectories.add(virtualPath(target));
 		return undefined;
 	}) as typeof fs.mkdirSync),
 	vi.spyOn(fs, "lstatSync").mockImplementation(((target: fs.PathLike) => {
 		if (!isVirtualSidecarPath(target)) throw new Error(`unexpected filesystem read: ${String(target)}`);
 		const key = virtualPath(target);
-		if (key === VIRTUAL_SIDECAR_DIR || key === VIRTUAL_SKILL_SIDECAR_DIR) return virtualStats(true);
+		if (virtualDirectories.has(key)) return virtualStats(true);
 		if (virtualSidecarFiles.has(key)) return virtualStats(false);
 		throw enoent(key);
 	}) as typeof fs.lstatSync),
+	vi.spyOn(fs, "realpathSync").mockImplementation(((target: fs.PathLike) => {
+		if (!isVirtualSidecarPath(target)) throw new Error(`unexpected filesystem canonicalization: ${String(target)}`);
+		const key = virtualPath(target);
+		if (!virtualDirectories.has(key)) throw enoent(key);
+		return key;
+	}) as typeof fs.realpathSync),
 	vi.spyOn(fs, "chmodSync").mockImplementation(((target: fs.PathLike) => {
 		if (!isVirtualSidecarPath(target)) throw new Error(`unexpected filesystem write: ${String(target)}`);
 	}) as typeof fs.chmodSync),
@@ -96,8 +103,9 @@ fsSpies.push(
 		return fd;
 	}) as typeof fs.openSync),
 	vi.spyOn(fs, "fstatSync").mockImplementation(((fd: number) => {
-		if (!virtualFds.has(fd)) throw new Error(`unexpected descriptor stat: ${fd}`);
-		return virtualStats(false);
+		const descriptor = virtualFds.get(fd);
+		if (!descriptor) throw new Error(`unexpected descriptor stat: ${fd}`);
+		return virtualStats(false, Buffer.byteLength(virtualSidecarFiles.get(descriptor.path) ?? "", "utf8"));
 	}) as typeof fs.fstatSync),
 	vi.spyOn(fs, "fchmodSync").mockImplementation(((fd: number) => {
 		if (!virtualFds.has(fd)) throw new Error(`unexpected descriptor chmod: ${fd}`);
@@ -110,6 +118,13 @@ fsSpies.push(
 		virtualSidecarFiles.set(descriptor.path, (descriptor.flags & fs.constants.O_APPEND) !== 0 ? current + chunk : chunk);
 		return length;
 	}) as typeof fs.writeSync),
+	vi.spyOn(fs, "readSync").mockImplementation(((fd: number, data: Uint8Array, offset: number, length: number, position: number | null) => {
+		const descriptor = virtualFds.get(fd);
+		if (!descriptor) throw new Error(`unexpected descriptor read: ${fd}`);
+		const source = Buffer.from(virtualSidecarFiles.get(descriptor.path) ?? "", "utf8");
+		const destination = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+		return source.copy(destination, offset, position ?? 0, (position ?? 0) + length);
+	}) as typeof fs.readSync),
 	vi.spyOn(fs, "fsyncSync").mockImplementation(((fd: number) => {
 		if (!virtualFds.has(fd)) throw new Error(`unexpected descriptor fsync: ${fd}`);
 	}) as typeof fs.fsyncSync),

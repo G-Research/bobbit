@@ -410,7 +410,7 @@ test("status preserves a valid stored empty queue", async () => {
 	}
 });
 
-test("unreadable config is visible, sanitized, and cannot be overwritten", async () => {
+test("legacy config diagnostics sanitize unreadable state and redirect all mutations to project settings", async () => {
 	const store = makeStore();
 	const durableRead = store.read;
 	const durablePut = store.put;
@@ -429,12 +429,28 @@ test("unreadable config is visible, sanitized, and cannot be overwritten", async
 		return makeClient().client;
 	});
 	try {
-		const get = await routes.config({ host: { store } } as never, { method: "GET" } as never) as Record<string, unknown>;
-		const set = await routes.config({ host: { store } } as never, { method: "POST", body: { bank: "new-bank" } } as never) as Record<string, unknown>;
-		const recall = await routes.recall({ host: { store } } as never, { body: { query: "do not call remote" } } as never) as Record<string, unknown>;
-		assert.equal(get.error, "HINDSIGHT_CONFIG_UNAVAILABLE");
-		assert.equal(set.error, "HINDSIGHT_CONFIG_UNAVAILABLE");
-		assert.equal(recall.error, "HINDSIGHT_CONFIG_UNAVAILABLE");
+		const routeCtx = { host: { store }, projectId: "project-a" } as never;
+		const get = await routes.config(routeCtx, { method: "GET" } as never) as Record<string, unknown>;
+		const set = await routes.config(routeCtx, { method: "POST", body: { bank: "new-bank" } } as never) as Record<string, unknown>;
+		const recall = await routes.recall(routeCtx, { body: { query: "do not call remote" } } as never) as Record<string, unknown>;
+		assert.deepEqual(get, {
+			ok: true,
+			deprecated: true,
+			settings: { scope: "project", projectId: "project-a", message: "Configure Hindsight in Market project settings." },
+			legacyFallback: { state: "unavailable", diagnostic: { code: "STORE_READ_IO", retryable: true } },
+		});
+		assert.deepEqual(set, {
+			ok: false,
+			configured: false,
+			error: "HINDSIGHT_PROJECT_SETTINGS_REQUIRED",
+			settings: { scope: "project", projectId: "project-a", message: "Configure Hindsight in Market project settings." },
+		});
+		assert.deepEqual(recall, {
+			configured: false,
+			error: "HINDSIGHT_PROJECT_SETTINGS_REQUIRED",
+			settings: set.settings,
+			memories: [],
+		});
 		assert.equal(configWrites, 0);
 		assert.equal(clientCalls, 0);
 		assert.doesNotMatch(JSON.stringify([get, set, recall]), new RegExp(canary));
@@ -535,11 +551,12 @@ test("retry queue: failure enqueues, cap drops oldest, drain head, status sharin
 		assert.equal(q.length, 100, "queue capped at 100");
 		assert.equal(q[0].content, "User: turn 6", "oldest entries FIFO-evicted");
 
-		// status route reads the SAME pack-store queue + reports healthy.
-		const st = (await routes.status({ host: { store } } as never)) as { configured: boolean; healthy: boolean; queueDepth: number };
-		assert.equal(st.configured, true);
+		// Status preserves queue diagnostics and only exposes a redacted legacy
+		// fallback indicator while reporting legacy connectivity.
+		const st = (await routes.status({ host: { store } } as never)) as { healthy: boolean; queueDepth: number; legacyFallback: unknown };
 		assert.equal(st.healthy, true);
 		assert.equal(st.queueDepth, 100);
+		assert.deepEqual(st.legacyFallback, { state: "available", configured: true });
 
 		// Recover: a later afterTurn drains the queue HEAD (one entry) before its own
 		// (now-succeeding) retain.
@@ -561,75 +578,88 @@ test("retry queue: failure enqueues, cap drops oldest, drain head, status sharin
 	}
 });
 
-test("routes: dormant store ⇒ clean configured:false signals, no client constructed", async () => {
+test("routes expose only redacted legacy diagnostics and never construct a client while dormant", async () => {
 	let factoryCalls = 0;
 	__setClientFactory(() => {
 		factoryCalls++;
 		return makeClient().client;
 	});
 	try {
-		const store = makeStore(); // no config persisted
-		const cfg = (await routes.config({ host: { store } } as never, { method: "GET" } as never)) as { configured: boolean; config: Record<string, unknown> };
-		assert.equal(cfg.configured, false);
-		assert.equal(cfg.config.apiKeySet, false, "secret redacted to a boolean");
-		assert.equal(cfg.config.bank, "bobbit");
-
-		assert.deepEqual(await routes.recall({ host: { store } } as never, { body: { query: "x" } } as never), { configured: false, memories: [] });
-		assert.deepEqual(await routes.banks({ host: { store } } as never), { configured: false, banks: [] });
-		assert.equal(factoryCalls, 0, "no client constructed while unconfigured");
+		const store = makeStore();
+		const routeCtx = { host: { store }, projectId: "project-a" } as never;
+		const cfg = await routes.config(routeCtx, { method: "GET" } as never) as Record<string, unknown>;
+		assert.deepEqual(cfg, {
+			ok: true,
+			deprecated: true,
+			settings: { scope: "project", projectId: "project-a", message: "Configure Hindsight in Market project settings." },
+			legacyFallback: { state: "available", configured: false },
+		});
+		assert.equal("apiKey" in cfg, false);
+		assert.equal("config" in cfg, false, "legacy values are never returned");
+		assert.deepEqual(
+			await routes.recall(routeCtx, { body: { query: "x" } } as never),
+			{ configured: false, error: "HINDSIGHT_PROJECT_SETTINGS_REQUIRED", settings: cfg.settings, memories: [] },
+		);
+		assert.deepEqual(
+			await routes.banks(routeCtx, {} as never),
+			{ configured: false, error: "HINDSIGHT_PROJECT_SETTINGS_REQUIRED", settings: cfg.settings, banks: [] },
+		);
+		assert.equal(factoryCalls, 0, "no client constructed while project settings are unavailable to routes");
 	} finally {
 		__setClientFactory(null);
 	}
 });
 
-test("routes recall: project scope uses the REAL ctx.projectId; absent ⇒ no project filter", async () => {
-	// Regression: the recall route used to send a fabricated { project: "current" }
-	// tag. It must use the actual project id from the route ctx, and apply NO
-	// project filter when the ctx carries none.
+test("provider uses resolver-supplied project ctx.config rather than legacy PackStore config", async () => {
+	const legacyApiKey = "legacy-api-key-must-not-leak";
+	const projectApiKey = "project-api-key-runtime-only";
+	const store = makeStore();
+	await store.put(CONFIG_KEY, {
+		externalUrl: "https://legacy.example.test",
+		apiKey: legacyApiKey,
+		recallScope: "all",
+	});
 	const { client, calls, state } = makeClient();
-	__setClientFactory(() => client);
+	const clientConfigs: unknown[] = [];
+	__setClientFactory((config) => {
+		clientConfigs.push(config);
+		return client;
+	});
 	try {
-		state.memories = [{ text: "m" }];
-		const store = makeStore();
-		await store.put(CONFIG_KEY, { externalUrl: "http://localhost:8888", recallScope: "project" });
+		state.memories = [{ text: "project memory" }];
+		const result = await provider.beforePrompt({
+			config: { ...ACTIVE, externalUrl: "https://project.example.test/", apiKey: projectApiKey, recallScope: "project" },
+			host: { store },
+			projectId: "project-a",
+			prompt: "use project settings",
+		});
+		assert.equal(result.blocks[0]?.content, "- project memory");
+		assert.deepEqual(clientConfigs, [{ baseUrl: "https://project.example.test", apiKey: projectApiKey, namespace: "default", timeoutMs: 1500 }]);
+		assert.deepEqual(calls.recall[0]?.opts, { maxTokens: 1200, tags: { project: "project-a" }, tagsMatch: "any" });
 
-		// With a real project id in the route ctx, the filter uses it (NOT "current").
-		await routes.recall({ host: { store }, projectId: "proj-7" } as never, { body: { query: "q" } } as never);
-		const o1 = calls.recall[0].opts as { tags?: Record<string, string>; tagsMatch?: string };
-		assert.deepEqual(o1.tags, { project: "proj-7" });
-		assert.equal(o1.tagsMatch, "any");
-
-		// No project id in ctx ⇒ no project filter (no fabricated placeholder tag).
-		await routes.recall({ host: { store } } as never, { body: { query: "q2" } } as never);
-		const o2 = calls.recall[1].opts as { tags?: unknown };
-		assert.equal(o2.tags, undefined);
+		// A missing project URL remains dormant even when a legacy URL exists.
+		await provider.beforePrompt({ config: { bank: "bobbit" }, host: { store }, prompt: "must stay dormant" });
+		assert.equal(clientConfigs.length, 1);
+		assert.equal(JSON.stringify(result).includes(projectApiKey), false, "runtime secret is never returned by a provider hook");
+		assert.equal(JSON.stringify(await routes.config({ host: { store } } as never, { method: "GET" } as never)).includes(legacyApiKey), false);
 	} finally {
 		__setClientFactory(null);
 	}
 });
 
-test("routes config SET validates, persists, and redacts the secret", async () => {
-	__setClientFactory(() => makeClient().client);
-	try {
-		const store = makeStore();
-		const bad = (await routes.config({ host: { store } } as never, { method: "POST", body: { recallScope: "nope" } } as never)) as { ok: boolean; error?: string };
-		assert.equal(bad.ok, false);
-		assert.equal(bad.error, "CONFIG_INVALID");
-
-		const ok = (await routes.config(
-			{ host: { store } } as never,
-			{ method: "POST", body: { externalUrl: "http://localhost:8888", apiKey: "secret", recallScope: "project" } } as never,
-		)) as { ok: boolean; configured: boolean; config: Record<string, unknown> };
-		assert.equal(ok.ok, true);
-		assert.equal(ok.configured, true);
-		assert.equal(ok.config.recallScope, "project");
-		assert.equal(ok.config.apiKeySet, true);
-		assert.equal("apiKey" in ok.config, false, "raw secret never echoed");
-		// Persisted under CONFIG_KEY (the key the loader overlays).
-		const stored = (await store.get(CONFIG_KEY)) as Record<string, unknown>;
-		assert.equal(stored.externalUrl, "http://localhost:8888");
-		assert.equal(stored.apiKey, "secret");
-	} finally {
-		__setClientFactory(null);
-	}
+test("legacy config mutation is rejected without echoing or persisting apiKey", async () => {
+	const apiKey = "new-api-key-must-not-leak";
+	const store = makeStore();
+	const response = await routes.config(
+		{ host: { store }, projectId: "project-a" } as never,
+		{ method: "POST", body: { externalUrl: "http://localhost:8888", apiKey, recallScope: "project" } } as never,
+	) as Record<string, unknown>;
+	assert.deepEqual(response, {
+		ok: false,
+		configured: false,
+		error: "HINDSIGHT_PROJECT_SETTINGS_REQUIRED",
+		settings: { scope: "project", projectId: "project-a", message: "Configure Hindsight in Market project settings." },
+	});
+	assert.equal(await store.get(CONFIG_KEY), null, "legacy configuration writes are disabled");
+	assert.doesNotMatch(JSON.stringify(response), new RegExp(apiKey));
 });

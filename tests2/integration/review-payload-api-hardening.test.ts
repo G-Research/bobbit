@@ -322,6 +322,53 @@ test.describe("review payload API hardening", () => {
 		expect(await rejected.json()).toMatchObject({ code: "REVIEW_PAYLOAD_TOO_LARGE" });
 	});
 
+	test("returns the exact unavailable response for terminal uploads before secret auth while retaining persisted reads", async ({ gateway }) => {
+		const sessionId = await createSession();
+		cleanup.push(sessionId);
+		const secret = gateway.sessionManager.sessionSecretStore.getOrCreateSecret(sessionId);
+		const uploaded = await apiFetch(`/api/sessions/${sessionId}/review-payloads`, {
+			method: "POST",
+			headers: { "X-Bobbit-Session-Secret": secret },
+			body: JSON.stringify(reviewBody(["durable terminal review"])),
+		});
+		expect(uploaded.status).toBe(201);
+		const receipt = await uploaded.json();
+		const session = gateway.sessionManager.getSession(sessionId);
+		if (!session) throw new Error("expected a live session before terminal transition");
+		session.status = "terminated";
+
+		const terminalUpload = await apiFetch(`/api/sessions/${sessionId}/review-payloads`, {
+			method: "POST",
+			body: JSON.stringify(reviewBody(["must not authenticate"])),
+		});
+		expect(terminalUpload.status).toBe(404);
+		expect(await terminalUpload.json()).toEqual({
+			ok: false,
+			status: "failed",
+			code: "REVIEW_PAYLOAD_SESSION_UNAVAILABLE",
+			retryable: false,
+			message: "Review session is unavailable",
+		});
+
+		const fetched = await apiFetch(
+			`/api/sessions/${sessionId}/review-payloads/${receipt.payloadId}?toolCallId=${encodeURIComponent(receipt.toolCallId)}&reviewId=${encodeURIComponent(receipt.reviewId)}&hash=${receipt.hash}`,
+		);
+		expect(fetched.status).toBe(200);
+		expect((await fetched.json()).files).toMatchObject([{ markdown: "durable terminal review" }]);
+
+		const reopened = await apiFetch(`/api/sessions/${sessionId}/review-payloads/${receipt.payloadId}/open`, {
+			method: "POST",
+			body: JSON.stringify({
+				payloadId: receipt.payloadId,
+				toolCallId: receipt.toolCallId,
+				reviewId: receipt.reviewId,
+				hash: receipt.hash,
+			}),
+		});
+		expect(reopened.status).toBe(200);
+		expect(await reopened.json()).toMatchObject({ ok: true, status: "opened", payloadId: receipt.payloadId });
+	});
+
 	test("returns a prompt structured 413 and closes a chunked cap+1 upload before end", async ({ gateway }) => {
 		const sessionId = await createSession();
 		cleanup.push(sessionId);

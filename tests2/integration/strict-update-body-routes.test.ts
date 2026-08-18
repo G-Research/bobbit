@@ -18,7 +18,7 @@ import { seedTeamLeadHeader } from "./_e2e/e2e-setup.js";
  * an intentional API decision, rather than an incidental accepted property.
  */
 const EXPECTED_STRICT_UPDATE_BODY_KEYS = {
-	projects: ["name", "color", "rootPath", "palette", "colorLight", "colorDark"],
+	projects: ["name", "color", "rootPath", "palette", "colorLight", "colorDark", "config", "components", "workflows", "configDirectories", "sandboxTokens"],
 	goals: ["title", "cwd", "state", "spec", "branch", "reattemptOf", "team"],
 	tools: ["projectId", "description", "group", "docs", "detail_docs", "grantPolicy"],
 	roles: ["projectId", "label", "promptTemplate", "accessory", "toolPolicies", "model", "thinkingLevel"],
@@ -109,9 +109,22 @@ describe("finite-shape update routes reject unknown request fields", () => {
 	it("PUT /api/projects/:id persists valid fields and rejects an unknown field without mutation", async () => {
 		const project = await createProject("project");
 		const validName = unique("renamed-project");
-		const valid = await gw.api(`/api/projects/${project.id}`, jsonInit("PUT", { name: validName }));
-		expect(valid.status).toBe(200);
+		const valid = await gw.api(`/api/projects/${project.id}`, jsonInit("PUT", {
+			name: validName,
+			config: { strict_route_setting: "saved" },
+			components: [{ name: "app", repo: ".", commands: { check: "npm run check" } }],
+			workflows: {
+				strict: { name: "Strict", gates: [{ id: "check", name: "Check", dependsOn: [], verify: [{ name: "Check", type: "command", run: "npm run check" }] }] },
+			},
+			configDirectories: [{ path: ".claude", types: ["skills"] }],
+			sandboxTokens: [{ key: "STRICT_ROUTE_TOKEN", enabled: true, value: "secret" }],
+		}));
+		expect(valid.status, `project update: ${await valid.clone().text()}`).toBe(200);
 		expect((await readJson(`/api/projects/${project.id}`)).name).toBe(validName);
+		const config = await readJson(`/api/projects/${project.id}/config`);
+		expect(config.strict_route_setting).toBe("saved");
+		expect(config.config_directories).toEqual([{ path: ".claude", types: ["skills"] }]);
+		expect(config.sandbox_tokens).toEqual([{ key: "STRICT_ROUTE_TOKEN", enabled: true, value: "__REDACTED__" }]);
 
 		await expectUnknownRejected(`/api/projects/${project.id}`, "PUT", { ignoredProjectField: true }, "ignoredProjectField");
 		expect((await readJson(`/api/projects/${project.id}`)).name).toBe(validName);
@@ -191,7 +204,7 @@ describe("finite-shape update routes reject unknown request fields", () => {
 			id,
 			name: "Original strict workflow",
 			description: "Strict workflow fixture.",
-			gates: [],
+			gates: [{ id: "validate", name: "Validate", dependsOn: [], verify: [{ name: "Validate", type: "command", run: "echo ok" }] }],
 		}));
 		expect(create.status, `workflow creation: ${await create.clone().text()}`).toBe(201);
 		const path = `/api/workflows/${id}?projectId=${encodeURIComponent(project.id)}`;

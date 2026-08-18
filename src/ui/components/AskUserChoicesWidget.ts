@@ -59,6 +59,13 @@ export interface AskAnswer {
 	other_text: string | null;
 }
 
+/**
+ * Optional transport seam for non-tool question surfaces. Returning answers lets
+ * a server-owned surface render its authoritative terminal value; `void` keeps
+ * the existing optimistic tool-card behaviour available to callers.
+ */
+export type SubmitAnswers = (answers: AskAnswer[]) => Promise<AskAnswer[] | void>;
+
 interface DraftEntry {
 	/** null (none), a single option (single-select), or an array (multi-select). */
 	selected: string | string[] | null;
@@ -97,6 +104,10 @@ export class AskUserChoicesWidget extends LitElement {
 	@property({ attribute: false }) answers: AskAnswer[] | null = null;
 	@property({ type: String }) sessionId = "";
 	@property({ type: String }) toolUseId = "";
+	/** Opaque durable draft identity for a non-tool question surface. */
+	@property({ type: String }) draftKey = "";
+	/** Optional server-owned answer transport. Absence preserves ask-tool POSTing. */
+	@property({ attribute: false }) submitAnswers?: SubmitAnswers;
 	@property({ type: Boolean }) errored = false;
 	@property({ type: String }) errorText = "";
 
@@ -126,8 +137,15 @@ export class AskUserChoicesWidget extends LitElement {
 		if (changed.has("questions")) {
 			this._ensureDraft();
 		}
-		// sessionId / toolUseId may arrive after questions; (re)try the one-shot seed.
-		if (changed.has("sessionId") || changed.has("toolUseId")) {
+		// A new opaque identity must never inherit an in-memory selection from the
+		// prior card, even when its question shape happens to match.
+		if (changed.has("sessionId") || changed.has("toolUseId") || changed.has("draftKey")) {
+			this._seeded = false;
+			if (!this._isReadOnly() && Array.isArray(this.questions)) {
+				this._draft = this.questions.map((q) => ({ selected: q.multi ? [] : null, other_text: "" }));
+				this._activeTab = 0;
+				this._focusedOption = 0;
+			}
 			this._maybeSeedFromStore();
 		}
 		// Becoming read-only because a final answer arrived means the draft is
@@ -153,9 +171,14 @@ export class AskUserChoicesWidget extends LitElement {
 	}
 
 	/** Opaque scope key, or null when we lack the ids needed to key a draft. */
+	private _instanceKey(): string {
+		return this.draftKey || this.toolUseId;
+	}
+
 	private _scopeKey(): string | null {
-		if (!this.sessionId || !this.toolUseId) return null;
-		return this.sessionId + "::" + this.toolUseId;
+		const identity = this._instanceKey();
+		if (!this.sessionId || !identity) return null;
+		return this.sessionId + "::" + identity;
 	}
 
 	/**
@@ -432,17 +455,28 @@ export class AskUserChoicesWidget extends LitElement {
 			};
 		});
 		try {
-			const resp = await gatewayFetch(gatewayRoute("/api/internal/user-question/submit"), {
-				method: "POST",
-				body: JSON.stringify({ sessionId: this.sessionId, toolUseId: this.toolUseId, answers }),
-			});
-			if (!resp.ok) {
-				let msg = `HTTP ${resp.status}`;
-				try { const e = await resp.json(); if (e?.error) msg = e.error; } catch { /* ignore */ }
-				throw new Error(msg);
+			let resolvedAnswers: AskAnswer[] | void = undefined;
+			if (this.submitAnswers) {
+				// Decision/adaptor callers own their route and return only after the
+				// server has accepted a terminal value. They never create an ask
+				// envelope or enqueue an agent prompt.
+				resolvedAnswers = await this.submitAnswers(answers);
+			} else {
+				// Keep the established ask-user-choices path byte-for-byte when no
+				// alternate transport is injected.
+				const resp = await gatewayFetch(gatewayRoute("/api/internal/user-question/submit"), {
+					method: "POST",
+					body: JSON.stringify({ sessionId: this.sessionId, toolUseId: this.toolUseId, answers }),
+				});
+				if (!resp.ok) {
+					let msg = `HTTP ${resp.status}`;
+					try { const e = await resp.json(); if (e?.error) msg = e.error; } catch { /* ignore */ }
+					throw new Error(msg);
+				}
 			}
-			// Flip to read-only optimistically. The tool result will also arrive via the stream.
-			this.answers = answers;
+			// The normal ask flow remains optimistic after its POST. Injected
+			// transports may return the server-derived terminal rendering.
+			this.answers = resolvedAnswers ?? answers;
 			// Pending draft is now committed — clear it so it can't resurrect.
 			this._clearDraftStore();
 		} catch (e: any) {
@@ -662,8 +696,8 @@ export class AskUserChoicesWidget extends LitElement {
 				type="button"
 				role="tab"
 				aria-selected=${isActive ? "true" : "false"}
-				aria-controls=${`ask-panel-${this.toolUseId}-${idx}`}
-				id=${`ask-tab-${this.toolUseId}-${idx}`}
+				aria-controls=${`ask-panel-${this._instanceKey()}-${idx}`}
+				id=${`ask-tab-${this._instanceKey()}-${idx}`}
 				data-tab-index=${idx}
 				tabindex=${isActive ? "0" : "-1"}
 				class=${cls}
@@ -712,8 +746,8 @@ export class AskUserChoicesWidget extends LitElement {
 		// reused across panels, which on mobile leaves stale radio state (the
 		// browser treats the "same" radio as already-interacted-with and the
 		// next tap may not fire a `change` event).
-		const panelId = `ask-panel-${this.toolUseId}-${idx}`;
-		const tabId = `ask-tab-${this.toolUseId}-${idx}`;
+		const panelId = `ask-panel-${this._instanceKey()}-${idx}`;
+		const tabId = `ask-tab-${this._instanceKey()}-${idx}`;
 		return html`
 			<div
 				role="tabpanel"
@@ -770,7 +804,7 @@ export class AskUserChoicesWidget extends LitElement {
 			: html`<input
 					type="radio"
 					class="sr-only"
-					name=${`ask-q-${qIdx}-${this.toolUseId}`}
+					name=${`ask-q-${qIdx}-${this._instanceKey()}`}
 					value=${option}
 					.checked=${checked}
 					?disabled=${readOnly}
@@ -822,7 +856,7 @@ export class AskUserChoicesWidget extends LitElement {
 			: html`<input
 					type="radio"
 					class="sr-only"
-					name=${`ask-q-${qIdx}-${this.toolUseId}`}
+					name=${`ask-q-${qIdx}-${this._instanceKey()}`}
 					value=${OTHER_SENTINEL}
 					.checked=${checked}
 					?disabled=${readOnly}

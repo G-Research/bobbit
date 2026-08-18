@@ -10,6 +10,25 @@ import { CoalescedJsonWriter } from "./coalesced-json-writer.js";
 
 export type GoalState = "todo" | "in-progress" | "complete" | "shelved" | "blocked";
 
+/** Core-owned reason attached only to a consent pause. */
+export interface AwaitingExtensionConsentPauseReason {
+	kind: "awaiting-extension-consent";
+	requestId: string;
+	createdAt: string;
+}
+
+/** Reject malformed persisted/external consent reasons before they affect resume. */
+export function isAwaitingExtensionConsentPauseReason(value: unknown): value is AwaitingExtensionConsentPauseReason {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const reason = value as Record<string, unknown>;
+	if (reason.kind !== "awaiting-extension-consent") return false;
+	if (typeof reason.requestId !== "string" || reason.requestId.length < 1 || reason.requestId.length > 200) return false;
+	if (/[\u0000-\u001f\u007f]/.test(reason.requestId)) return false;
+	if (typeof reason.createdAt !== "string") return false;
+	const time = Date.parse(reason.createdAt);
+	return Number.isFinite(time) && new Date(time).toISOString() === reason.createdAt;
+}
+
 /** Durable visible scheduler terminal/circuit-breaker recovery state. */
 export interface PersistedSchedulerRecovery {
 	kind: "child" | "root";
@@ -113,6 +132,8 @@ export interface PersistedGoal {
 	 * suppression — paused != failed; the parent (or user) must act before the child can resume.
 	 */
 	paused?: boolean;
+	/** Core-owned provenance for a consent-owned pause. */
+	pauseReason?: AwaitingExtensionConsentPauseReason;
 	/**
 	 * Why a goal is paused. Operator provenance preserves an explicit pause across
 	 * boot-time legacy dependency-pause migration; absent values are legacy records.
@@ -212,6 +233,10 @@ function canonicalizeGoal(value: Record<string, unknown>): Record<string, unknow
 	if (value.setupStatus !== "error") delete value.setupError;
 	delete value.worktreeSetupCommand;
 	delete value.worktreeSetupTimeoutMs;
+	if (value.pauseReason !== undefined && !isAwaitingExtensionConsentPauseReason(value.pauseReason)) {
+		console.warn(`[goal-store] Dropping malformed pauseReason on goal ${String(value.id)}`);
+		delete value.pauseReason;
+	}
 	if (value.metadata !== undefined && !isRecord(value.metadata)) {
 		console.warn(`[goal-store] Dropping malformed metadata on goal ${String(value.id)}`);
 		delete value.metadata;
@@ -365,6 +390,9 @@ function validateGoal(
 	if (value.mergeTarget !== undefined && (typeof value.mergeTarget !== "string" || !MERGE_TARGETS.has(value.mergeTarget))) invalidGoal(label, "mergeTarget is unsupported");
 	if (value.divergencePolicy !== undefined && (typeof value.divergencePolicy !== "string" || !DIVERGENCE_POLICIES.has(value.divergencePolicy))) invalidGoal(label, "divergencePolicy is unsupported");
 	if (value.metadata !== undefined && !isRecord(value.metadata)) invalidGoal(label, "metadata must be an object");
+	if (value.pauseReason !== undefined && !isAwaitingExtensionConsentPauseReason(value.pauseReason)) {
+		invalidGoal(label, "pauseReason is invalid");
+	}
 	if (value.repoWorktrees !== undefined) validateStringRecord(value.repoWorktrees, `${label} repoWorktrees`);
 	if (value.inlineRoles !== undefined) validateInlineRoles(value.inlineRoles, `${label} inlineRoles`);
 	if (value.workflow !== undefined && value.workflow !== null) validateWorkflow(value.workflow, `${label} workflow`);
@@ -883,12 +911,17 @@ export class GoalStore {
 		return true;
 	}
 
-	/** Normalize updates and enforce the canonical setup state invariant. */
-	private prepareUpdate(updates: Partial<Omit<PersistedGoal, "id" | "createdAt">>): {
+	/** Normalize updates and enforce the canonical setup state invariant and pauseReason validity. */
+	private prepareUpdate(caller: string, updates: Partial<Omit<PersistedGoal, "id" | "createdAt">>): {
 		cleaned: Record<string, unknown>;
 		clearSetupError: boolean;
+		clearPauseReason: boolean;
 	} {
+		if (updates.pauseReason !== undefined && !isAwaitingExtensionConsentPauseReason(updates.pauseReason)) {
+			throw new Error(`GoalStore.${caller}: invalid awaiting-extension-consent pauseReason`);
+		}
 		const cleaned: Record<string, unknown> = {};
+		const clearPauseReason = Object.hasOwn(updates, "pauseReason") && updates.pauseReason === undefined;
 		for (const [key, value] of Object.entries(updates)) {
 			if (value !== undefined) cleaned[key] = value;
 		}
@@ -898,16 +931,18 @@ export class GoalStore {
 		}
 		const clearSetupError = status !== undefined && status !== "error";
 		if (clearSetupError) delete cleaned.setupError;
-		return { cleaned, clearSetupError };
+		return { cleaned, clearSetupError, clearPauseReason };
 	}
 
-	private hasUpdateChanged(existing: PersistedGoal, cleaned: Record<string, unknown>, clearSetupError: boolean): boolean {
+	private hasUpdateChanged(existing: PersistedGoal, cleaned: Record<string, unknown>, clearSetupError: boolean, clearPauseReason: boolean): boolean {
 		const record = existing as unknown as Record<string, unknown>;
 		return (clearSetupError && existing.setupError !== undefined)
+			|| (clearPauseReason && existing.pauseReason !== undefined)
 			|| Object.keys(cleaned).some(key => record[key] !== cleaned[key]);
 	}
 
-	private applyUpdate(existing: PersistedGoal, cleaned: Record<string, unknown>, clearSetupError: boolean): void {
+	private applyUpdate(existing: PersistedGoal, cleaned: Record<string, unknown>, clearSetupError: boolean, clearPauseReason: boolean): void {
+		if (clearPauseReason) delete existing.pauseReason;
 		Object.assign(existing, cleaned, { updatedAt: Date.now() });
 		if (clearSetupError) delete existing.setupError;
 	}
@@ -916,10 +951,10 @@ export class GoalStore {
 		this.assertAcceptingMutations();
 		const existing = this.goals.get(id);
 		if (!existing) return false;
-		const { cleaned, clearSetupError } = this.prepareUpdate(updates);
-		if (!this.hasUpdateChanged(existing, cleaned, clearSetupError)) return true;
+		const { cleaned, clearSetupError, clearPauseReason } = this.prepareUpdate("update", updates);
+		if (!this.hasUpdateChanged(existing, cleaned, clearSetupError, clearPauseReason)) return true;
 		this.generation++;
-		this.applyUpdate(existing, cleaned, clearSetupError);
+		this.applyUpdate(existing, cleaned, clearSetupError, clearPauseReason);
 		this.save([id]);
 		this.onIndexUpdate?.(existing);
 		return true;
@@ -993,17 +1028,23 @@ export class GoalStore {
 		this.assertAcceptingMutations();
 		const existing = this.goals.get(id);
 		if (!existing) return false;
-		const { cleaned, clearSetupError } = this.prepareUpdate(updates);
+		// R-007: skip the write entirely when no field actually changes.
+		// `updateGoal({})` after the cleaned-undefined sweep used to bump
+		// generation, rewrite goals.json, and emit a goal_state_changed
+		// cascade for nothing. Return value still indicates "goal exists"
+		// (true) rather than "a write happened" — callers historically
+		// only used it as a found/not-found signal.
+		const { cleaned, clearSetupError, clearPauseReason } = this.prepareUpdate("updateStrict", updates);
 		// A lifecycle caller may be replaying an already-applied state. It still
 		// needs a publication fence before the cross-store WAL can be cleared.
-		if (!this.hasUpdateChanged(existing, cleaned, clearSetupError)) {
+		if (!this.hasUpdateChanged(existing, cleaned, clearSetupError, clearPauseReason)) {
 			await this.saveStrict([id]);
 			return true;
 		}
 
 		const previous = { ...existing };
 		this.generation++;
-		this.applyUpdate(existing, cleaned, clearSetupError);
+		this.applyUpdate(existing, cleaned, clearSetupError, clearPauseReason);
 		try {
 			await this.saveStrict([id]);
 		} catch (err) {

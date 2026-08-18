@@ -478,6 +478,12 @@ export async function registerProject(opts: {
 	return project;
 }
 
+/** Remove a test project and wait for its scoped runtime resources to close. */
+export async function unregisterProject(id: string): Promise<void> {
+	const resp = await apiFetch(`/api/projects/${encodeURIComponent(id)}`, { method: "DELETE" });
+	if (resp.status !== 200) throw new Error(`unregisterProject(${id}) failed: ${resp.status} ${await responseText(resp)}`);
+}
+
 // ---------------------------------------------------------------------------
 // WebSocket helpers (identical semantics to tests/e2e/e2e-setup.ts).
 // ---------------------------------------------------------------------------

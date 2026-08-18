@@ -4437,15 +4437,20 @@ export class VerificationHarness {
 		// transparently rewrite the verify[] for child semantics (merges into
 		// parent's branch locally; no PR). See child-ready-to-merge.ts.
 		let effectiveGate = gate;
-		if (gate.id === "ready-to-merge" && Array.isArray(gate.verify) && gate.verify.length > 0) {
-			const rtmGoal = this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId);
-			if (rtmGoal?.mergeTarget === "parent" && rtmGoal.parentGoalId) {
-				const rtmParent = this.projectContextManager?.getContextForGoal(rtmGoal.parentGoalId)?.goalStore.get(rtmGoal.parentGoalId);
-				if (rtmParent?.branch) {
-					const adaptedVerify = adaptReadyToMergeVerify(gate.verify, { parentBranch: rtmParent.branch });
-					effectiveGate = { ...gate, verify: adaptedVerify };
-				}
-			}
+		const rtmGoal = gate.id === "ready-to-merge"
+			? this.projectContextManager?.getContextForGoal(signal.goalId)?.goalStore.get(signal.goalId)
+			: undefined;
+		// mergeTarget is the authoritative publication policy. A malformed or
+		// partially recovered child may be missing its parent record, but must
+		// still never publish or inspect a remote base as a root goal would.
+		const isParentTargetChild = rtmGoal?.mergeTarget === "parent";
+		if (isParentTargetChild && Array.isArray(gate.verify) && gate.verify.length > 0) {
+			const rtmParent = rtmGoal.parentGoalId
+				? this.projectContextManager?.getContextForGoal(rtmGoal.parentGoalId)?.goalStore.get(rtmGoal.parentGoalId)
+				: undefined;
+			const parentBranch = rtmParent?.branch ?? "its parent branch";
+			const adaptedVerify = adaptReadyToMergeVerify(gate.verify, { parentBranch });
+			effectiveGate = { ...gate, verify: adaptedVerify };
 		}
 		const steps = effectiveGate.verify;
 		if (!steps || steps.length === 0) {
@@ -4640,9 +4645,10 @@ export class VerificationHarness {
 			const phaseGroups = groupStepsByPhase(remainingActiveSteps, steps);
 			const sortedPhases = getSortedPhases(phaseGroups);
 
-			// Sync the goal worktree with the latest commits before running verification.
-			// Agents (sandbox or not) push to origin — fetch and reset to pick up their changes.
-			if (goalBranch) {
+			// Sync root goal worktrees with remote commits before verification. Children
+			// merge locally into their parent and must never probe or publish a remote
+			// goal branch as part of their ready-to-merge gate.
+			if (goalBranch && !isParentTargetChild) {
 				let hasOriginRemote = false;
 				try {
 					await this.commandRunner.execFile("git", ["remote", "get-url", "origin"], { cwd, timeout: 5_000 });

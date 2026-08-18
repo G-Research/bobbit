@@ -2,7 +2,7 @@ import { icon } from "@mariozechner/mini-lit";
 import { Button } from "@mariozechner/mini-lit/dist/Button.js";
 import { Dialog, DialogContent, DialogFooter, DialogHeader } from "@mariozechner/mini-lit/dist/Dialog.js";
 import { Input } from "@mariozechner/mini-lit/dist/Input.js";
-import { html, render } from "lit";
+import { html, nothing, render } from "lit";
 import { WandSparkles } from "lucide";
 import { cwdCombobox } from "./cwd-combobox.js";
 import {
@@ -52,6 +52,18 @@ import { accountOAuthProviderLabel, dismissAccountOAuthExpiryReminders, type Exp
 import { defaultCwdForProjectSession, HEADQUARTERS_PROJECT_ID } from "./headquarters.js";
 import { activeGatewayConnection, gatewayBaseUrl, gatewayUrl, InvalidGatewayBaseUrlError, LOCALHOST_TOKEN } from "./gateway-fetch.js";
 import { gatewayRoute } from "../shared/base-path.js";
+import {
+	activateProjectImportDecisionRequests,
+	deactivateProjectImportDecisionRequests,
+	projectImportDecisionProjectionError,
+	projectImportDecisionActivityForProject,
+	projectImportDecisionRequestsForProject,
+	projectImportDecisionRequestsLoaded,
+	projectImportProposalsForProject,
+	refreshProjectImportDecisionRequests,
+} from "./project-import-decisions.js";
+import { ProjectImportDecisionRenderer } from "../ui/tools/renderers/ProjectImportDecisionRenderer.js";
+import { ProjectImportProposalRenderer } from "../ui/tools/renderers/ProjectImportProposalRenderer.js";
 // NOTE: session-manager imports from dialogs, so we use dynamic imports to break the cycle
 
 // ============================================================================
@@ -2144,8 +2156,17 @@ export function showProjectDialog(): void {
 	const container = document.createElement("div");
 	document.body.appendChild(container);
 
-	type Step = "path" | "scan";
+	type Step = "path" | "scan" | "import-decisions";
+	type ImportContinuation = () => void | Promise<void>;
 	let step: Step = "path";
+	let importProject: import("./state.js").Project | null = null;
+	let importDecisionUnsubscribe: (() => void) | null = null;
+	let importContinuation: ImportContinuation | null = null;
+	let importHandoffStarted = false;
+	const importDecisionRenderer = new ProjectImportDecisionRenderer();
+	// The renderer owns bounded per-request feedback; this callback makes its
+	// synchronous pending/error transitions visible before the REST refresh.
+	const importProposalRenderer = new ProjectImportProposalRenderer(() => renderDialog());
 	let pathValue = "";
 
 	let detectionResult: { exists: boolean; hasBobbit: boolean; isEmpty: boolean; name: string } | null = null;
@@ -2186,12 +2207,45 @@ export function showProjectDialog(): void {
 	};
 
 	const cleanup = () => {
+		importDecisionUnsubscribe?.();
+		importDecisionUnsubscribe = null;
+		if (importProject) deactivateProjectImportDecisionRequests(importProject.id);
+		importProposalRenderer.clear();
 		if (detectDebounceTimer) {
 			clearTimeout(detectDebounceTimer);
 			detectDebounceTimer = null;
 		}
 		render(html``, container);
 		container.remove();
+	};
+
+	const completeImportDecisionStep = async () => {
+		const project = importProject;
+		if (!project || step !== "import-decisions" || importHandoffStarted) return;
+		if (!projectImportDecisionRequestsLoaded(project.id)
+			|| projectImportDecisionRequestsForProject(project.id).length > 0
+			|| projectImportProposalsForProject(project.id).length > 0) return;
+		importHandoffStarted = true;
+		await importContinuation?.();
+	};
+
+	/**
+	 * Preserve the terminal action of the caller that registered the project.
+	 * Import decisions may precede an existing assistant handoff, but must never
+	 * manufacture one for callers that previously just closed this dialog.
+	 */
+	const enterImportDecisionStep = (project: import("./state.js").Project, onComplete: ImportContinuation) => {
+		importDecisionUnsubscribe?.();
+		importProject = project;
+		importContinuation = onComplete;
+		importHandoffStarted = false;
+		step = "import-decisions";
+		busy = false;
+		importDecisionUnsubscribe = activateProjectImportDecisionRequests(project.id, () => {
+			renderDialog();
+			void completeImportDecisionStep();
+		});
+		renderDialog();
 	};
 
 	const runDetection = async (dirPath: string) => {
@@ -2451,7 +2505,7 @@ export function showProjectDialog(): void {
 					if (project) {
 						setProjects(await fetchProjects());
 						renderApp();
-						cleanup();
+						enterImportDecisionStep(project, cleanup);
 					} else {
 						busy = false;
 						renderDialog();
@@ -2474,7 +2528,7 @@ export function showProjectDialog(): void {
 									if (p2) {
 										setProjects(await fetchProjects());
 										renderApp();
-										cleanup();
+										enterImportDecisionStep(p2, cleanup);
 									} else {
 										busy = false;
 										renderDialog();
@@ -2737,8 +2791,58 @@ export function showProjectDialog(): void {
 		`;
 	};
 
+	const renderImportDecisionBody = () => {
+		const project = importProject;
+		if (!project) {
+			return html`<div class="flex items-center justify-center h-full text-sm text-muted-foreground" data-testid="project-import-decisions-loading">Checking project import decisions…</div>`;
+		}
+		const projectionError = projectImportDecisionProjectionError(project.id);
+		if (projectionError) {
+			return html`
+				<div class="flex flex-col items-center justify-center gap-3 h-full text-center" data-testid="project-import-decisions-error">
+					<p class="text-sm text-destructive">${projectionError.message}</p>
+					${Button({
+						variant: "default",
+						onClick: () => void refreshProjectImportDecisionRequests(project.id),
+						children: html`<span data-testid="project-import-decisions-retry">Retry</span>`,
+					})}
+				</div>
+			`;
+		}
+		if (!projectImportDecisionRequestsLoaded(project.id)) {
+			return html`<div class="flex items-center justify-center h-full text-sm text-muted-foreground" data-testid="project-import-decisions-loading">Checking project import decisions…</div>`;
+		}
+		const requests = projectImportDecisionRequestsForProject(project.id);
+		const proposals = projectImportProposalsForProject(project.id);
+		importProposalRenderer.reconcile(proposals);
+		const activity = projectImportDecisionActivityForProject(project.id);
+		const activityPanel = activity.length ? html`
+			<details class="text-xs text-muted-foreground" data-testid="project-import-decision-activity">
+				<summary>Extension activity (${activity.length})</summary>
+				<ul class="mt-2 space-y-1">${activity.map(row => html`<li>${row.packId ? `${row.packId}/` : ""}${row.hookId}: ${row.outcome}${row.reason ? ` — ${row.reason}` : ""}</li>`)}</ul>
+			</details>` : nothing;
+		if (requests.length === 0 && proposals.length === 0) {
+			return html`<div class="flex flex-col items-center justify-center gap-3 h-full text-sm text-muted-foreground" data-testid="project-import-decisions-complete"><div>Completing project import…</div>${activityPanel}</div>`;
+		}
+		return html`
+			<div class="flex flex-col gap-4 h-full min-h-0 overflow-y-auto" data-testid="project-import-decisions">
+				<p class="text-sm text-muted-foreground">Review these project import decisions before continuing.</p>
+				${requests.map((request) => importDecisionRenderer.render(request))}
+				${proposals.map((proposal) => importProposalRenderer.render(proposal))}
+				${activityPanel}
+			</div>
+		`;
+	};
+
 	// --- footer (sticky, position-invariant across all states) --------------
 	const renderFooter = () => {
+		if (step === "import-decisions") {
+			return html`
+				<div class="flex gap-2 justify-end">
+					${Button({ variant: "ghost", onClick: cleanup, children: "Cancel" })}
+				</div>
+			`;
+		}
 		if (step === "scan") {
 			return html`
 				<div class="flex gap-2 justify-end">
@@ -2795,14 +2899,16 @@ export function showProjectDialog(): void {
 							${DialogHeader({
 								title: step === "scan"
 									? "Confirm repos/subdirectories"
-									: detectionResult?.hasBobbit
-										? "Register Project"
-										: "Add Project",
+									: step === "import-decisions"
+										? "Project import decisions"
+										: detectionResult?.hasBobbit
+											? "Register Project"
+											: "Add Project",
 							})}
 							<span class="hidden" data-testid="add-project-step">${step}</span>
 						</div>
 						<div class="flex-1 min-h-0 px-6 pb-2 overflow-hidden">
-							${step === "scan" ? renderScanBody() : renderPathBody()}
+							${step === "scan" ? renderScanBody() : step === "import-decisions" ? renderImportDecisionBody() : renderPathBody()}
 						</div>
 						<div
 							class="shrink-0 px-6 py-4 border-t border-border"

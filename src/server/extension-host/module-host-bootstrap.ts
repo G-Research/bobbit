@@ -4,15 +4,19 @@
 //
 // This module is the `Worker` entry spawned by `ModuleHost.invoke`
 // (module-host-worker.ts). It runs in a worker thread whose memory is capped by
-// `resourceLimits` and that inherits a full copy of the gateway env.
+// `resourceLimits`. Actions/routes/providers and ordinary hooks inherit the gateway
+// environment; scheduled advisors and protected result filters receive only a
+// portable runtime environment.
 //
 // **Trust model (Model A).** Pack SERVER code is TRUSTED — same tier as a tool or
-// MCP server the user chose to install — so it runs with FULL ambient parity:
-// normal `node:` built-ins (`fs`/`child_process`/`net`/`http`…), normal network
-// globals (`fetch`/`WebSocket`), and the normal `process` (full env). There is NO
-// capability sandbox; a per-capability sandbox over trusted in-process code is false
-// security (a native `.node` addon or the shared process trivially defeats it). The
-// worker is purely a RESOURCE + CRASH isolation boundary (terminate-on-timeout,
+// MCP server the user chose to install — so it has ambient Node built-ins
+// (`fs`/`child_process`/`net`/`http`…) and network globals (`fetch`/`WebSocket`).
+// Actions/routes/providers also retain the normal full environment. Advisors and
+// protected result filters receive only portable runtime variables, avoiding
+// inherited gateway environment secrets;
+// this is not a capability sandbox because trusted advisor code still has ambient
+// filesystem/network access and can defeat in-process restrictions. The worker is
+// otherwise purely a RESOURCE + CRASH isolation boundary (terminate-on-timeout,
 // mem/cpu caps, spawned-child kill) plus module-import containment to the pack root
 // (loader/stability hygiene, NOT a security boundary).
 //
@@ -101,9 +105,11 @@ interface InvokeMessage {
 	kind: "invoke";
 	/** The epoch-cache-busted file URL the dispatcher resolved + validated. */
 	url: string;
-	exportKind: "actions" | "routes" | "providers";
+	exportKind: "actions" | "routes" | "providers" | "advisors" | "hooks" | "result-filters";
 	member: string;
-	/** Serializable handler context (identity + capability flags; NO live host). */
+	/** Serializable handler context (identity + capability flags; NO live host).
+	 * Advisor contexts are server-derived data only and intentionally have no
+	 * host/capability surface. */
 	ctx: SerializableCtx;
 	arg: unknown;
 }
@@ -148,14 +154,16 @@ type ParentMessage = InvokeMessage | HostReplyMessage | ChannelOpenMessage | Cha
 
 /** The serializable shape of `ActionHandlerCtx` sent across the MessagePort. */
 interface SerializableCtx {
-	sessionId: string;
+	/** Advisor contexts retain their narrow server-derived fields unchanged. */
+	[key: string]: unknown;
+	sessionId?: string;
 	toolUseId?: string;
-	tool: string;
+	tool?: string;
 	workingDir?: string;
 	sessionArchived?: boolean;
 	hostVersion?: number;
 	hostContractVersion?: number;
-	capabilities: { callRoute: boolean; session: boolean; store: boolean; agents: boolean };
+	capabilities?: { callRoute: boolean; session: boolean; store: boolean; agents: boolean; services: boolean };
 }
 
 interface ChannelSerializableCtx {
@@ -215,8 +223,10 @@ const confinementReady: Promise<void> = (async () => {
  * Override ONLY `process.cwd()` so it returns the session working dir (tool parity:
  * a tool/MCP server runs rooted at the session worktree, and worker threads cannot
  * `process.chdir()`). Nothing else about `process` is touched — the worker keeps the
- * real `process` global with the full env, real `argv`/`execPath`/`exit`/`kill`/
- * `binding`/… all present (trusted pack code is the tool/MCP tier). A no-op when
+ * real `process` global with its configured env, real `argv`/`execPath`/`exit`/
+ * `kill`/`binding`/… all present. Actions/routes/providers retain their full
+ * inherited env; advisors and protected result filters receive only portable runtime
+ * variables. A no-op when
  * `workingDir` is absent/empty (the worker keeps its real cwd).
  */
 function setSessionCwd(workingDir?: string): void {
@@ -459,7 +469,7 @@ function callHost(path: [string, string], args: unknown[]): Promise<unknown> {
  *  marshalled to the parent (authorized there — these cross-pack/cross-session
  *  boundaries ARE enforced); identity + flags are local. */
 function buildHostProxy(ctx: SerializableCtx): unknown {
-	const flags = ctx.capabilities;
+	const flags = ctx.capabilities ?? { callRoute: false, session: false, store: false, agents: false, services: false };
 	return {
 		version: ctx.hostVersion,
 		contractVersion: ctx.hostContractVersion,
@@ -468,6 +478,7 @@ function buildHostProxy(ctx: SerializableCtx): unknown {
 			session: flags.session,
 			store: flags.store,
 			agents: flags.agents,
+			services: flags.services,
 			has: (name: string) => (flags as Record<string, boolean>)[name] === true,
 		},
 		store: {
@@ -496,6 +507,9 @@ function buildHostProxy(ctx: SerializableCtx): unknown {
 			list: () => callHost(["agents", "list"], []),
 			read: (childSessionId: string, opts?: unknown) => callHost(["agents", "read"], [childSessionId, opts]),
 			status: (childSessionId: string) => callHost(["agents", "status"], [childSessionId]),
+		},
+		services: {
+			call: (request: unknown) => callHost(["services", "call"], [request]),
 		},
 	};
 }
@@ -666,7 +680,7 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 	try {
 		// ── (4) Dynamic-import the pack module through the module-import containment hook. ──
 		const mod = (await import(msg.url)) as Record<string, Record<string, unknown>>;
-		const group = msg.exportKind === "providers"
+		const group = msg.exportKind === "providers" || msg.exportKind === "hooks" || msg.exportKind === "result-filters"
 			? ((mod.default as Record<string, unknown> | undefined) ?? mod)
 			: (mod[msg.exportKind] ?? (mod.default as Record<string, Record<string, unknown>> | undefined)?.[msg.exportKind]);
 		// Export-map validation now lives HERE (moved off the parent so the parent never
@@ -679,21 +693,32 @@ async function handleInvoke(msg: InvokeMessage): Promise<void> {
 		// Own-property + function check (mirrors the former dispatcher parent-side guard):
 		// never invoke an INHERITED member (`constructor`, `toString`, …) — defense-in-depth
 		// against a prototype-walk. An unknown/own-non-function member is a 404.
-		const fn = Object.prototype.hasOwnProperty.call(group, msg.member) ? group[msg.member] : undefined;
+		const allowedHookMember = msg.exportKind === "result-filters"
+			? msg.member === "decide"
+			: msg.exportKind !== "hooks"
+				|| msg.member === "decide"
+				|| msg.member === "onDecision"
+				|| msg.member === "selectSkills"
+				|| msg.member === "selectMcp";
+		const fn = allowedHookMember && Object.prototype.hasOwnProperty.call(group, msg.member) ? group[msg.member] : undefined;
 		if (typeof fn !== "function") {
 			port!.postMessage({ kind: "result", ok: false, status: 404, error: `unknown ${msg.exportKind} member "${msg.member}"` });
 			return;
 		}
-		const ctx = msg.exportKind === "providers"
-			? { ...msg.ctx, host: buildHostProxy(msg.ctx), workingDir: msg.ctx.workingDir }
-			: {
-				host: buildHostProxy(msg.ctx),
-				sessionId: msg.ctx.sessionId,
-				toolUseId: msg.ctx.toolUseId,
-				tool: msg.ctx.tool,
-				workingDir: msg.ctx.workingDir,
-				sessionArchived: msg.ctx.sessionArchived,
-			};
+		const ctx = msg.exportKind === "hooks" || msg.exportKind === "result-filters"
+			? { ...msg.ctx, capabilities: { callRoute: false, session: false, store: false, agents: false, services: false } }
+			: msg.exportKind === "providers"
+				? { ...msg.ctx, host: buildHostProxy(msg.ctx), workingDir: msg.ctx.workingDir }
+				: msg.exportKind === "advisors"
+					? msg.ctx
+					: {
+					host: buildHostProxy(msg.ctx),
+					sessionId: msg.ctx.sessionId,
+					toolUseId: msg.ctx.toolUseId,
+					tool: msg.ctx.tool,
+					workingDir: msg.ctx.workingDir,
+					sessionArchived: msg.ctx.sessionArchived,
+				};
 		const result = await (fn as (c: unknown, a: unknown) => unknown)(ctx, msg.arg);
 		port!.postMessage({ kind: "result", ok: true, value: result });
 	} catch (err) {

@@ -23,7 +23,7 @@ The affected command includes committed, staged, unstaged, and untracked changes
 vitest run --config vitest.config.ts --silent=passed-only
 ```
 
-The suite has a fixed cap of three workers. `VITEST_MAX_WORKERS=1` or `2` may lower that cap for diagnosis; it cannot raise it. The normal developer configuration retains `retry: 3` as developer/workflow protection, but it is not qualification evidence. Qualification uses the repository wrapper with the exact retry-free control:
+The suite has a fixed cap of three fork workers shared by every unit project. `VITEST_MAX_WORKERS=1` or `2` may lower that cap for diagnosis; it cannot raise it. The normal developer configuration retains `retry: 3` as developer/workflow protection, but it is not qualification evidence. Qualification uses the repository wrapper with the exact retry-free control:
 
 ```bash
 BOBBIT_V2_RETRY_FREE=1 npm run test:unit
@@ -42,7 +42,7 @@ Normal collection contains these explicit projects from `tests2/tests-map.json`:
 | Project | Runtime | Isolation | Purpose |
 |---|---|---|---|
 | `v2-core` | Node, forks | shared worker modules | Pure and server decision coverage |
-| `v2-dom` | happy-dom, threads | Per file | DOM/component coverage |
+| `v2-dom` | happy-dom, forks | Per file | DOM/component coverage |
 | `v2-integration` | Node, forks | shared worker modules | In-process gateway and API coverage |
 | `v2-isolated` | Node, forks, one worker | Per file | Documented module/environment bleeders only |
 

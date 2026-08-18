@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import os from "node:os";
 import type { IncomingMessage } from "node:http";
 import type { WebSocket } from "ws";
 import type { SessionManager } from "../agent/session-manager.js";
@@ -25,6 +26,8 @@ import {
 import type { TaskState } from "../agent/task-store.js";
 import { TaskManager } from "../agent/task-manager.js";
 import { resolveSkillExpansions } from "../skills/resolve-skill-expansions.js";
+import { adoptedSkillEntries, type AdoptedSkillLedgerReader } from "../skills/adopted-skill-entries.js";
+import type { SkillMarketContext } from "../skills/slash-skills.js";
 import {
 	FileMentionBudgetError,
 	preflightFileMentionAdmission,
@@ -39,7 +42,7 @@ import {
 } from "../agent/compaction-sidecar.js";
 import { EventBuffer } from "../agent/event-buffer.js";
 import { latestRev, listProposalFiles, parseProposalFile } from "../proposals/proposal-files.js";
-import { bobbitStateDir } from "../bobbit-dir.js";
+import { bobbitStateDir, headquartersDir } from "../bobbit-dir.js";
 import type { ToolManager } from "../agent/tool-manager.js";
 import { resolveActionToolManager } from "../extension-host/action-dispatcher.js";
 import { resolvePackIdentityForTool } from "../extension-host/pack-identity.js";
@@ -53,8 +56,9 @@ import type { ActionGuardSession } from "../extension-host/action-guard.js";
 import { decideResumeReplay, paceAndSend, RESUME_REPLAY_DRAIN_TIMEOUT_MS, PACE_TIMEOUT_MS, waitForReplayDrain } from "../replay-pacing.js";
 import {
 	SESSION_COMMAND_QUEUE_FULL,
+	SESSION_COMMAND_SERIALISER,
 	SessionCommandQueueFullError,
-	SessionCommandSerialiser,
+	sessionCommandSerialisationKey,
 } from "./session-command-serialiser.js";
 import { isSocketSendable } from "./socket-sendability.js";
 
@@ -567,7 +571,6 @@ const MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES = 1024 * 1024;
 const MAX_UNAUTHENTICATED_WS_ENVELOPE_BYTES = 1024 * 1024;
 /** Generic authenticated text ceiling for prompts, steers, and pack posts. */
 export const MAX_AUTHENTICATED_PROMPT_TEXT_BYTES = 8 * 1024 * 1024;
-const SESSION_COMMAND_SERIALISER = new SessionCommandSerialiser();
 const EXTENSION_CHANNEL_WS_ENVELOPE_TOO_LARGE_MESSAGE = `Extension channel frame exceeds maximum envelope size (${MAX_EXTENSION_CHANNEL_WS_ENVELOPE_BYTES} bytes)`;
 
 // Restricted-session work includes agent work, metadata writes, and durable task
@@ -774,7 +777,7 @@ export function handleWebSocketConnection(
 	const clientId = randomUUID();
 	const commandSerialisationKey = sessionId === "__viewer__"
 		? `viewer:${clientId}`
-		: `session:${sessionId}`;
+		: sessionCommandSerialisationKey(sessionId);
 	let surfaceTokenAuthorityKey: string | undefined;
 	const attachedExtChannels = new Map<string, { sessionId: string; packId: string }>();
 
@@ -1323,15 +1326,35 @@ export function handleWebSocketConnection(
 					// rootPath for sandboxed sessions.
 					let resolvedConfigStore = projectConfigStore;
 					let skillCwd = session.cwd;
-					if (session.projectId && projectContextManager) {
-						const ctx = projectContextManager.getOrCreate(session.projectId);
-						if (ctx) {
-							resolvedConfigStore = ctx.projectConfigStore;
-							if (session.sandboxed) {
-								skillCwd = ctx.project.rootPath;
-							}
-						}
+					const projectContext = session.projectId && projectContextManager
+						? projectContextManager.getOrCreate(session.projectId)
+						: undefined;
+					if (projectContext) {
+						resolvedConfigStore = projectContext.projectConfigStore;
+						if (session.sandboxed) skillCwd = projectContext.project.rootPath;
 					}
+					const adoptedProjectStore = projectContext?.projectConfigStore as AdoptedSkillLedgerReader | undefined;
+					const adoptedServerStore = projectConfigStore as AdoptedSkillLedgerReader | undefined;
+					const skillMarketContext: SkillMarketContext = {
+						serverBase: headquartersDir(),
+						globalUserBase: os.homedir(),
+						projectBase: projectContext?.project.rootPath ?? skillCwd,
+						serverConfigStore: projectConfigStore as SkillMarketContext["serverConfigStore"],
+						projectConfigStore: resolvedConfigStore as SkillMarketContext["projectConfigStore"],
+						// Match API/session skill resolution: server and global-user activation
+						// always comes from the server store; only project uses its own store.
+						packActivation: (scope, packName) => {
+							const store = (scope === "project" ? projectContext?.projectConfigStore : projectConfigStore) as {
+								getPackActivation?: (scope: "server" | "global-user" | "project", packName: string) => { skills?: string[] };
+							} | undefined;
+							return store?.getPackActivation?.(scope, packName) ?? {};
+						},
+						adoptedEntries: (scope) => adoptedSkillEntries(scope, {
+							serverConfigStore: adoptedServerStore,
+							projectConfigStore: adoptedProjectStore,
+							projectId: session.projectId,
+						}),
+					};
 
 					const sandboxPathRewrite = session.sandboxed
 						? (hostPath: string): string | null => {
@@ -1354,6 +1377,12 @@ export function handleWebSocketConnection(
 						skillCwd,
 						resolvedConfigStore,
 						sandboxPathRewrite,
+						skillMarketContext,
+						// Only the skills stage can narrow slash-skill expansion. An MCP-only
+						// selection retains the legacy skills surface.
+						session.dynamicCapabilities?.skillsAuthoritative
+							? session.dynamicCapabilities.skills
+							: undefined,
 					);
 					for (const name of unknown) {
 						console.warn(`[ws-handler] Slash skill "${name}" not found for session ${sessionId} (cwd=${session.cwd})`);
@@ -1604,7 +1633,7 @@ export function handleWebSocketConnection(
 					}
 
 					try {
-						await applyRuntimeSessionModelSelection(
+						const verified = await applyRuntimeSessionModelSelection(
 							sessionManager,
 							session,
 							msg.provider,
@@ -1612,6 +1641,12 @@ export function handleWebSocketConnection(
 							combined.thinkingLevel,
 							preferencesStore,
 							broadcast,
+						);
+						sessionManager.persistHumanModelSelection(
+							session.id,
+							verified.provider,
+							verified.id,
+							verified.thinkingLevel,
 						);
 					} catch (err: any) {
 						// The runtime helper has already corrected both optimistic tuple fields
@@ -1650,7 +1685,8 @@ export function handleWebSocketConnection(
 						break;
 					}
 					try {
-						await applyRuntimeSessionThinkingSelection(sessionManager, session, msg.level, broadcast, preferencesStore);
+						const verified = await applyRuntimeSessionThinkingSelection(sessionManager, session, msg.level, broadcast, preferencesStore);
+						sessionManager.persistHumanThinkingSelection(session.id, verified.thinkingLevel);
 					} catch (err: any) {
 						const safeError = redactSensitive(String(err?.message || err));
 						console.error(`[ws-handler] set_thinking_level failed for session ${session.id} (${msg.level}):`, safeError);

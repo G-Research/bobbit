@@ -90,6 +90,9 @@ function readDisabledDirs(store?: ProjectConfigReader): Set<string> {
 // (marketPacksRoot, scope, orderHint) and drop the whole cache on any pack
 // mutation via `invalidateMarketPackScanCache()`, which the host already fans
 // out from `invalidateResolverCaches()` on install/update/uninstall/pack-order.
+// The activation catalogue has one narrow fallback for packs created directly
+// on disk by an external installer: a missing pack lookup refreshes only that
+// scope root. Runtime resolution must never use that fallback.
 //
 // Pinned by tests2/core/pack-list-scan-cache.test.ts (N resolutions ⇒ 1 scan;
 // invalidation forces a re-scan). Never widen the key without updating that test.
@@ -100,6 +103,17 @@ const __scanCache = new Map<string, PackEntry[]>();
  *  Wired into the host's `invalidateResolverCaches()`. */
 export function invalidateMarketPackScanCache(): void {
 	__scanCache.clear();
+}
+
+/** Drop cached order variants for exactly one scope root. This is intentionally
+ * private to the exceptional activation-catalogue refresh path; marketplace
+ * mutations use {@link invalidateMarketPackScanCache} through the host-wide
+ * resolver invalidation lifecycle. */
+function invalidateMarketPackScopeScanCache(scope: PackScope, marketPacksRoot: string): void {
+	const prefix = `${scope}\0${marketPacksRoot}\0`;
+	for (const key of __scanCache.keys()) {
+		if (key.startsWith(prefix)) __scanCache.delete(key);
+	}
 }
 
 /**
@@ -170,6 +184,18 @@ function scanMarketPacks(
  */
 export function scopeMarketPackEntries(scope: PackScope, base: string, packOrder: string[]): PackEntry[] {
 	const { marketPacksRoot } = scopePaths(scope, base);
+	return scanMarketPacks(marketPacksRoot, scope, packOrder);
+}
+
+/**
+ * Re-scan one scope root for the activation catalogue after its normal cached
+ * lookup missed. Direct filesystem installers do not cross the marketplace
+ * mutation lifecycle, so this is the sole boundary that discovers their newly
+ * present packs. Do not use for runtime resolution or marketplace mutations.
+ */
+export function refreshScopeMarketPackEntries(scope: PackScope, base: string, packOrder: string[]): PackEntry[] {
+	const { marketPacksRoot } = scopePaths(scope, base);
+	invalidateMarketPackScopeScanCache(scope, marketPacksRoot);
 	return scanMarketPacks(marketPacksRoot, scope, packOrder);
 }
 

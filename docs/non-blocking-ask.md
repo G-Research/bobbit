@@ -201,3 +201,4 @@ Both are legitimate patterns. Pick based on whether the counterparty is actively
 - [docs/blocking-tools.md](blocking-tools.md) — the other pattern (for `verification_result`).
 - [docs/rest-api.md](rest-api.md) — REST surface, including `/api/internal/*`.
 - [`src/shared/ask-envelope.ts`](../src/shared/ask-envelope.ts) — canonical envelope code.
+- [Extension decision requests](extension-decision-requests.md) — server-owned decision cards reuse this widget but use a distinct typed REST answer route; they do not append an ask envelope or wake an agent.

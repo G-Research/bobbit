@@ -2,7 +2,7 @@
 // Source: tests/context-trace-store.test.ts
 // Bucket: v2-core | Method: codemod | Classification: clean
 
-import { describe, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { ContextTraceStore, type TraceEntry } from "../../src/server/agent/context-trace-store.ts";
@@ -31,11 +31,44 @@ describe("ContextTraceStore", () => {
 		assert.deepEqual(store.readTrace("sess-1", 1).map((e) => e.ts), [2]);
 	});
 
+	it("persists only bounded safe provider metadata and re-sanitizes historical rows", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs);
+		const secret = "RAW_PROVIDER_SECRET /private/provider-stack";
+		store.appendTrace("sess-1", {
+			...entry(1),
+			providers: [
+				{ id: "safe-provider", ms: Infinity, blocks: -1, omitted: 1_000_000_001, error: secret },
+				{ id: "timeout", ms: 2, blocks: 1, omitted: 0, error: "timeout" },
+				{ id: "malformed", ms: 3, blocks: 1, omitted: 0, error: "malformed block(s) dropped" },
+				{ id: "../../unsafe", ms: 4, blocks: 1, omitted: 0, error: "unexpected provider failure" },
+			],
+		});
+
+		const traceFile = path.join(STATE_DIR, "session-context-trace", "sess-1.jsonl");
+		const persisted = memfs.readFileSync(traceFile, "utf-8");
+		assert.ok(!persisted.includes(secret));
+		assert.deepEqual(store.readTrace("sess-1")[0]?.providers, [
+			{ id: "safe-provider", ms: 0, blocks: 0, omitted: 1_000_000_000, error: "Provider error" },
+			{ id: "timeout", ms: 2, blocks: 1, omitted: 0, error: "Timed out" },
+			{ id: "malformed", ms: 3, blocks: 1, omitted: 0, error: "Malformed blocks omitted" },
+			{ id: "Unknown provider", ms: 4, blocks: 1, omitted: 0, error: "Provider error" },
+		]);
+
+		memfs.writeFileSync(traceFile, JSON.stringify({ ...entry(2), providers: [{ id: secret, ms: 1, blocks: 1, omitted: 0, error: secret }] }) + "\n");
+		const historical = store.readTrace("sess-1")[0]?.providers[0];
+		assert.deepEqual(historical, { id: "Unknown provider", ms: 1, blocks: 1, omitted: 0, error: "Provider error" });
+		assert.ok(!JSON.stringify(historical).includes(secret));
+
+		store.appendTrace("sess-many", { ...entry(3), providers: Array.from({ length: 101 }, (_, index) => ({ id: `provider-${index}`, ms: 1, blocks: 1, omitted: 0 })) });
+		assert.equal(store.readTrace("sess-many")[0]?.providers.length, 100);
+	});
+
 	it("caps trace files at 2 MB by dropping oldest lines", () => {
 		const memfs = createMemFs();
 		const store = new ContextTraceStore(STATE_DIR, memfs);
-		const large = "x".repeat(12 * 1024);
-		for (let i = 0; i < 260; i++) store.appendTrace("sess-cap", entry(i, large));
+		const providerRows = Array.from({ length: 100 }, (_, index) => ({ id: `provider-${index}`.padEnd(128, "x"), ms: 1, blocks: 1, omitted: 0 }));
+		for (let i = 0; i < 260; i++) store.appendTrace("sess-cap", { ...entry(i), providers: providerRows });
 
 		const traceFile = path.join(STATE_DIR, "session-context-trace", "sess-cap.jsonl");
 		assert.ok(memfs.statSync(traceFile).size <= 2 * 1024 * 1024);
@@ -43,5 +76,360 @@ describe("ContextTraceStore", () => {
 		assert.ok(rows.length > 0);
 		assert.ok(rows[0].ts > 0, "oldest entries should be dropped");
 		assert.equal(rows.at(-1)?.ts, 259, "newest entry should be retained");
+	});
+
+	it("persists only bounded public extension activity nested with its event", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs);
+		store.appendTrace("sess-1", {
+			...entry(1),
+			outcomes: [
+				{ kind: "decision", hookId: "grant-check", event: "beforePrompt", outcome: "denied", reason: "Grant required", value: "must-not-persist", ms: 4 },
+				{ kind: "advisory", hookId: "choose-model", event: "beforePrompt", outcome: "applied", reason: "User pin", value: "safe-model.2", ms: Infinity },
+				{ kind: "audit", hookId: "../../secret", event: "beforePrompt", outcome: "dropped", reason: "RAW_EXTENSION_REASON" } as any,
+				{ kind: "audit", hookId: "timeout", event: "beforePrompt", outcome: "dropped", reason: "Timed out", value: "raw-token-secret", ms: 9 },
+			],
+		});
+
+		const row = store.readTrace("sess-1")[0]!;
+		assert.deepEqual(row.outcomes, [
+			{ kind: "decision", hookId: "grant-check", event: "beforePrompt", outcome: "denied", reason: "Grant required", ms: 4 },
+			{ kind: "advisory", hookId: "choose-model", event: "beforePrompt", outcome: "applied", reason: "User pin", value: "safe-model.2" },
+			{ kind: "audit", hookId: "timeout", event: "beforePrompt", outcome: "dropped", reason: "Timed out", ms: 9 },
+		]);
+		const persisted = memfs.readFileSync(path.join(STATE_DIR, "session-context-trace", "sess-1.jsonl"), "utf-8");
+		assert.ok(!persisted.includes("must-not-persist"));
+		assert.ok(!persisted.includes("raw-token-secret"));
+		assert.ok(!persisted.includes("RAW_EXTENSION_REASON"));
+	});
+
+	it("allows only fixed request-mutation outcome metadata, including tool safety", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs);
+		const secret = "raw prompt tool arguments extension reason and error";
+		store.appendTrace("sess-1", {
+			...entry(1),
+			outcomes: [
+				{ kind: "audit", hookId: "prompt-hook", event: "beforePrompt", outcome: "superseded", reason: "Lower-priority proposal", ms: 3, before: secret, after: secret },
+				{ kind: "audit", hookId: "prompt-shaper", event: "beforePrompt", outcome: "advised", reason: "Prompt shaped", ms: 4, before: secret, after: secret },
+				{ kind: "audit", hookId: "tool-hook", event: "beforeToolCall", outcome: "advised", reason: "Tool warning", ms: 4, toolName: "unsafe-tool", args: secret },
+				{ kind: "audit", hookId: "tool-hook", event: "beforeToolCall", outcome: "denied", reason: "Tool denied", ms: 5, toolName: "unsafe-tool", error: secret },
+				{ kind: "audit", hookId: "disabled", event: "beforePrompt", outcome: "dropped", reason: "Prompt mutation disabled" },
+				{ kind: "audit", hookId: "bad", event: "beforeToolCall", outcome: "error", reason: secret } as any,
+			],
+		});
+
+		expect(store.readTrace("sess-1")[0]?.outcomes).toEqual([
+			{ kind: "audit", hookId: "prompt-hook", event: "beforePrompt", outcome: "superseded", reason: "Lower-priority proposal", ms: 3 },
+			{ kind: "audit", hookId: "prompt-shaper", event: "beforePrompt", outcome: "advised", reason: "Prompt shaped", ms: 4 },
+			{ kind: "audit", hookId: "tool-hook", event: "beforeToolCall", outcome: "advised", reason: "Tool warning", ms: 4 },
+			{ kind: "audit", hookId: "tool-hook", event: "beforeToolCall", outcome: "denied", reason: "Tool denied", ms: 5 },
+			{ kind: "audit", hookId: "disabled", event: "beforePrompt", outcome: "dropped", reason: "Prompt mutation disabled" },
+			{ kind: "audit", hookId: "bad", event: "beforeToolCall", outcome: "error" },
+		]);
+		const persisted = memfs.readFileSync(path.join(STATE_DIR, "session-context-trace", "sess-1.jsonl"), "utf-8");
+		expect(persisted).not.toContain(secret);
+	});
+
+	it("retains only fixed metadata for result-filter audit activity", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs);
+		const canary = "EP14_REJECTED_RESULT_CANARY_must_never_trace";
+		store.appendTrace("sess-1", {
+			...entry(1),
+			outcomes: [
+				{ kind: "audit", packId: "fixture-pack", hookId: "result-filter", event: "afterToolResult", outcome: "applied", reason: "Tool result withheld", value: "fixture-rule", ms: 6, content: canary, error: canary } as any,
+				{ kind: "audit", packId: "../../unsafe", hookId: "bad", event: "afterToolResult", outcome: "error", reason: canary, result: canary } as any,
+			],
+		});
+		expect(store.readTrace("sess-1")[0]?.outcomes).toEqual([
+			{ kind: "audit", packId: "fixture-pack", hookId: "result-filter", event: "afterToolResult", outcome: "applied", reason: "Tool result withheld", value: "fixture-rule", ms: 6 },
+			{ kind: "audit", hookId: "bad", event: "afterToolResult", outcome: "error" },
+		]);
+		const persisted = memfs.readFileSync(path.join(STATE_DIR, "session-context-trace", "sess-1.jsonl"), "utf-8");
+		expect(persisted).not.toContain(canary);
+	});
+
+	it("keeps the fixed budget-enforcement reason while redacting raw enforcement details", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs);
+		const secret = "CAP=100 TOKEN=never-persist";
+		store.appendTrace("sess-1", {
+			...entry(1),
+			outcomes: [
+				{ kind: "decision", hookId: "budget-hook", event: "beforePrompt", outcome: "denied", reason: "Budget enforcement", value: secret },
+				{ kind: "decision", hookId: "budget-hook", event: "beforePrompt", outcome: "denied", reason: secret } as any,
+			],
+		});
+
+		expect(store.readTrace("sess-1")[0]?.outcomes).toEqual([
+			{ kind: "decision", hookId: "budget-hook", event: "beforePrompt", outcome: "denied", reason: "Budget enforcement" },
+			{ kind: "decision", hookId: "budget-hook", event: "beforePrompt", outcome: "denied" },
+		]);
+		const persisted = memfs.readFileSync(path.join(STATE_DIR, "session-context-trace", "sess-1.jsonl"), "utf-8");
+		expect(persisted).not.toContain(secret);
+	});
+
+	it("persists only safe selection metadata and the fixed lower-priority reason", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs);
+		const secret = "raw proposal usage pin snapshot and extension error";
+		store.appendTrace("sess-1", {
+			...entry(1),
+			outcomes: [
+				{ kind: "advisory", packId: "extension-pack", hookId: "choose-model", event: "afterTurn", outcome: "advised", selectionKind: "model", selectionValue: "provider/model-id" },
+				{ kind: "advisory", packId: "extension-pack", hookId: "choose-thinking", event: "afterTurn", outcome: "applied", selectionKind: "thinking", selectionValue: "high" },
+				{ kind: "advisory", packId: "extension-pack", hookId: "lower-priority", event: "afterTurn", outcome: "superseded", reason: "Lower-priority selection", selectionKind: "thinking", selectionValue: "private-low" },
+				{ kind: "decision", hookId: "pinned-role", event: "beforePrompt", outcome: "denied", reason: "User pin", selectionKind: "role", selectionValue: "private-role" },
+				{ kind: "advisory", packId: "extension-pack", hookId: "bad-model", event: "afterTurn", outcome: "advised", selectionKind: "model", selectionValue: "not-a-model-tuple" },
+				{ kind: "decision", hookId: "unknown-kind", event: "beforePrompt", outcome: "error", selectionKind: secret, selectionValue: "workflow-id" } as any,
+				{ kind: "audit", hookId: "audit-row", event: "beforePrompt", outcome: "applied", selectionKind: "workflow", selectionValue: "workflow-id" } as any,
+				{ kind: "advisory", packId: "extension-pack", hookId: "raw-payload", event: "afterTurn", outcome: "error", selectionKind: "workflow", selectionValue: "private-workflow", proposal: secret, usage: { cost: secret }, error: secret, pin: secret, snapshot: { value: secret } } as any,
+			],
+		});
+
+		expect(store.readTrace("sess-1")[0]?.outcomes).toEqual([
+			{ kind: "advisory", packId: "extension-pack", hookId: "choose-model", event: "afterTurn", outcome: "advised", selectionKind: "model", selectionValue: "provider/model-id" },
+			{ kind: "advisory", packId: "extension-pack", hookId: "choose-thinking", event: "afterTurn", outcome: "applied", selectionKind: "thinking", selectionValue: "high" },
+			{ kind: "advisory", packId: "extension-pack", hookId: "lower-priority", event: "afterTurn", outcome: "superseded", reason: "Lower-priority selection", selectionKind: "thinking" },
+			{ kind: "decision", hookId: "pinned-role", event: "beforePrompt", outcome: "denied", reason: "User pin", selectionKind: "role" },
+			{ kind: "advisory", packId: "extension-pack", hookId: "bad-model", event: "afterTurn", outcome: "advised", selectionKind: "model" },
+			{ kind: "decision", hookId: "unknown-kind", event: "beforePrompt", outcome: "error" },
+			{ kind: "audit", hookId: "audit-row", event: "beforePrompt", outcome: "applied" },
+			{ kind: "advisory", packId: "extension-pack", hookId: "raw-payload", event: "afterTurn", outcome: "error", selectionKind: "workflow" },
+		]);
+		const persisted = memfs.readFileSync(path.join(STATE_DIR, "session-context-trace", "sess-1.jsonl"), "utf-8");
+		expect(persisted).not.toContain(secret);
+	});
+
+	it("persists only aggregate dynamic capability telemetry at the session-setup decision boundary", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs);
+		const secret = "query proposal reason candidate-id denied-id /private/config token";
+		store.appendTrace("sess-1", {
+			...entry(1),
+			outcomes: [
+				{
+					kind: "decision", packId: "extension-pack", hookId: "select-skills", event: "sessionSetup", outcome: "applied",
+					capabilityStage: "skills", selectionFingerprint: "a".repeat(64),
+					candidateCount: 8, selectedCount: 2, selectorCount: 3, contextBytesSaved: 512,
+					query: secret, proposal: { reason: secret, add: [secret] }, deniedIds: [secret], config: { secret },
+				} as any,
+				{
+					kind: "advisory", packId: "extension-pack", hookId: "not-a-selector", event: "sessionSetup", outcome: "applied",
+					capabilityStage: "mcp", selectionFingerprint: secret, candidateCount: 1, selectedCount: 1, selectorCount: 1, contextBytesSaved: 1,
+				} as any,
+				{
+					kind: "decision", hookId: "too-late", event: "beforePrompt", outcome: "applied",
+					capabilityStage: "mcp", selectionFingerprint: secret, candidateCount: 1, selectedCount: 1, selectorCount: 1, contextBytesSaved: 1,
+				} as any,
+				{
+					kind: "decision", hookId: "invalid-selector", event: "sessionSetup", outcome: "error",
+					capabilityStage: "tools", selectionFingerprint: secret, candidateCount: -1, selectedCount: Infinity, selectorCount: -1, contextBytesSaved: -1,
+				} as any,
+			],
+		});
+
+		expect(store.readTrace("sess-1")[0]?.outcomes).toEqual([
+			{
+				kind: "decision", packId: "extension-pack", hookId: "select-skills", event: "sessionSetup", outcome: "applied",
+				capabilityStage: "skills", selectionFingerprint: "a".repeat(64),
+				candidateCount: 8, selectedCount: 2, selectorCount: 3, contextBytesSaved: 512,
+			},
+			{ kind: "advisory", packId: "extension-pack", hookId: "not-a-selector", event: "sessionSetup", outcome: "applied" },
+			{ kind: "decision", hookId: "too-late", event: "beforePrompt", outcome: "applied" },
+			{ kind: "decision", hookId: "invalid-selector", event: "sessionSetup", outcome: "error" },
+		]);
+		const persisted = memfs.readFileSync(path.join(STATE_DIR, "session-context-trace", "sess-1.jsonl"), "utf-8");
+		expect(persisted).not.toContain(secret);
+	});
+
+	it("requires safe scheduled-advisor pack attribution and fixed lifecycle labels", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs);
+		const secret = "RAW_ADVISOR_PROSE /private/pack-token";
+		store.appendTrace("sess-1", {
+			...entry(1),
+			outcomes: [
+				{ kind: "advisory", packId: "trusted-pack.1", hookId: "after-every-turn", event: "afterTurn", outcome: "advised", value: "safe-advice-id", ms: 1_000_000_001 },
+				{ kind: "advisory", packId: "trusted-pack.1", hookId: "after-every-turn", event: "afterTurn", outcome: "dropped", reason: "Overlapping invocation", ms: 0 },
+				{ kind: "advisory", packId: "trusted-pack.1", hookId: "after-every-turn", event: "afterTurn", outcome: "dropped", reason: "Cancelled", ms: 4 },
+				{ kind: "advisory", packId: "trusted-pack.1", hookId: "after-every-turn", event: "afterTurn", outcome: "dropped", reason: "Disabled or revoked", ms: 5 },
+				{ kind: "advisory", hookId: "missing-pack", event: "afterTurn", outcome: "advised", value: secret, ms: 6 },
+				{ kind: "advisory", packId: "../../unsafe", hookId: "unsafe-pack", event: "afterTurn", outcome: "advised", value: secret, ms: 7 },
+			],
+		});
+
+		const row = store.readTrace("sess-1")[0]!;
+		assert.deepEqual(row.outcomes, [
+			{ kind: "advisory", packId: "trusted-pack.1", hookId: "after-every-turn", event: "afterTurn", outcome: "advised", value: "safe-advice-id", ms: 1_000_000_000 },
+			{ kind: "advisory", packId: "trusted-pack.1", hookId: "after-every-turn", event: "afterTurn", outcome: "dropped", reason: "Overlapping invocation", ms: 0 },
+			{ kind: "advisory", packId: "trusted-pack.1", hookId: "after-every-turn", event: "afterTurn", outcome: "dropped", reason: "Cancelled", ms: 4 },
+			{ kind: "advisory", packId: "trusted-pack.1", hookId: "after-every-turn", event: "afterTurn", outcome: "dropped", reason: "Disabled or revoked", ms: 5 },
+		]);
+		const persisted = memfs.readFileSync(path.join(STATE_DIR, "session-context-trace", "sess-1.jsonl"), "utf-8");
+		assert.ok(!persisted.includes(secret));
+		assert.ok(!persisted.includes("../../unsafe"));
+	});
+
+	it("appends delayed decision resolutions as redacted standalone trace entries", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs);
+		const secret = "question prose / Other answer / config args / prompt / token / credentials / raw error";
+		const before = Date.now();
+		store.appendOutcome("sess-1", {
+			kind: "decision",
+			packId: "extension-pack",
+			hookId: "model-choice",
+			event: "beforePrompt",
+			outcome: "applied",
+			requestId: "request-1",
+			questionId: "a".repeat(64),
+			answer: "other",
+			defaultApplied: true,
+			actor: "deadline",
+			reason: "Deadline elapsed",
+			ms: 7,
+			...({ question: secret, otherText: secret, proposal: { args: secret }, prompt: secret, token: secret, credentials: secret, error: secret } as any),
+		});
+
+		const [resolution] = store.readTrace("sess-1");
+		assert.ok(resolution.ts >= before);
+		assert.deepEqual(resolution, {
+			ts: resolution.ts,
+			hook: "decisionResolved",
+			sessionId: "sess-1",
+			providers: [],
+			outcomes: [{
+				kind: "decision",
+				hookId: "model-choice",
+				event: "decisionResolved",
+				outcome: "applied",
+				packId: "extension-pack",
+				requestId: "request-1",
+				questionId: "a".repeat(64),
+				answer: "other",
+				defaultApplied: true,
+				actor: "deadline",
+				reason: "Deadline elapsed",
+				ms: 7,
+			}],
+		});
+		const persisted = memfs.readFileSync(path.join(STATE_DIR, "session-context-trace", "sess-1.jsonl"), "utf-8");
+		assert.ok(!persisted.includes(secret));
+	});
+
+	it("writes project-import dispatch and resolution rows to a redacted non-session stream", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs);
+		const secret = "/private/root component-id typescript question Other proposal args raw error";
+		store.appendProjectImportTrace("project-1", "import-1", [{
+			kind: "decision", packId: "extension-pack", hookId: "import-hook", event: "projectImported", outcome: "applied",
+			requestId: "request-1", questionId: "a".repeat(64),
+			...({ projectRoot: secret, ownedRoots: [secret], components: [{ id: secret, languages: [secret] }], question: secret, otherText: secret, proposal: { args: secret, nested: [{ tokens: secret, credentials: [secret] }] }, error: secret } as any),
+		}]);
+		store.appendProjectImportOutcome("project-1", "import-1", {
+			kind: "decision", packId: "extension-pack", hookId: "import-hook", event: "projectImported", outcome: "applied",
+			requestId: "request-1", questionId: "a".repeat(64), answer: "other", actor: "user", defaultApplied: false,
+			...({ question: secret, otherText: secret, proposal: { args: secret, nested: [{ secrets: [secret] }] }, error: secret } as any),
+		});
+
+		expect(store.readTrace("project-1")).toEqual([]);
+		expect(store.readProjectImportTrace("project-1", "import-1")).toEqual([
+			{
+				ts: expect.any(Number), hook: "projectImported", projectId: "project-1", importId: "import-1", providers: [],
+				outcomes: [{ kind: "decision", packId: "extension-pack", hookId: "import-hook", event: "projectImported", outcome: "applied", requestId: "request-1", questionId: "a".repeat(64) }],
+			},
+			{
+				ts: expect.any(Number), hook: "decisionResolved", projectId: "project-1", importId: "import-1", providers: [],
+				outcomes: [{ kind: "decision", packId: "extension-pack", hookId: "import-hook", event: "decisionResolved", outcome: "applied", requestId: "request-1", questionId: "a".repeat(64), answer: "other", actor: "user", defaultApplied: false }],
+			},
+		]);
+		const persisted = memfs.readFileSync(path.join(STATE_DIR, "session-context-trace", "project-import", "project-1", "import-1.jsonl"), "utf-8");
+		expect(persisted).not.toContain(secret);
+	});
+
+	it("deduplicates keyed import-proposal audit appends without exposing the receipt", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs);
+		const key = `import-proposal-v1:${"a".repeat(64)}`;
+		const row = { kind: "decision" as const, packId: "extension-pack", hookId: "import-hook", event: "decisionResolved" as const, outcome: "applied" as const, requestId: "request-1", questionId: "a".repeat(64), actor: "user" as const };
+		expect(store.appendProjectImportOutcomeOnce("project-1", "import-1", key, row)).toBe(true);
+		expect(store.appendProjectImportOutcomeOnce("project-1", "import-1", key, row)).toBe(false);
+		expect(store.readProjectImportTrace("project-1", "import-1")).toHaveLength(1);
+		expect(JSON.stringify(store.readProjectImportTrace("project-1", "import-1"))).not.toContain(key);
+	});
+
+	it("persists only fixed consent audit metadata and rejects raw protected payloads", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs);
+		const secret = "raw question answer operation tool capability configuration payload";
+		store.appendTrace("sess-1", {
+			...entry(1),
+			...({ question: secret, answer: secret, operation: { id: secret }, tool: { input: secret }, capability: secret, configuration: { value: secret } } as any),
+			outcomes: [{
+				kind: "decision", packId: "extension-pack", hookId: "protected-change", event: "decisionResolved", outcome: "denied",
+				decisionClass: "consent-required", decisionStatus: "paused-awaiting-consent", classificationReason: "core-configuration-change",
+				timeoutAction: "pause-goal", resumeStatus: "claimed",
+				...({ question: secret, answer: secret, otherText: secret, operation: { id: secret, kind: secret }, tool: { args: secret }, capability: secret, config: { value: secret } } as any),
+			}, {
+				kind: "decision", hookId: "invalid-consent", event: "decisionResolved", outcome: "denied",
+				...({ decisionClass: secret, decisionStatus: secret, classificationReason: secret, timeoutAction: secret, resumeStatus: secret } as any),
+			}],
+		});
+
+		expect(store.readTrace("sess-1")[0]?.outcomes).toEqual([
+			{ kind: "decision", packId: "extension-pack", hookId: "protected-change", event: "decisionResolved", outcome: "denied", decisionClass: "consent-required", decisionStatus: "paused-awaiting-consent", classificationReason: "core-configuration-change", timeoutAction: "pause-goal", resumeStatus: "claimed" },
+			{ kind: "decision", hookId: "invalid-consent", event: "decisionResolved", outcome: "denied" },
+		]);
+		const persisted = memfs.readFileSync(path.join(STATE_DIR, "session-context-trace", "sess-1.jsonl"), "utf-8");
+		expect(persisted).not.toContain(secret);
+	});
+
+	it("keeps legacy outcome JSONL readable while rejecting unsafe decision metadata", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs);
+		const traceFile = path.join(STATE_DIR, "session-context-trace", "sess-1.jsonl");
+		const secret = "Question text and Other answer must not survive";
+		memfs.mkdirSync(path.dirname(traceFile), { recursive: true });
+		memfs.writeFileSync(traceFile, JSON.stringify({
+			...entry(1),
+			outcomes: [
+				{ kind: "audit", hookId: "legacy", event: "beforePrompt", outcome: "applied", value: "safe-value" },
+				{ kind: "decision", hookId: "choice", event: "decisionResolved", outcome: "applied", packId: "extension-pack", requestId: secret, questionId: secret, answer: secret, defaultApplied: "yes", actor: secret, reason: secret },
+			],
+		}) + "\n");
+
+		assert.deepEqual(store.readTrace("sess-1")[0]?.outcomes, [
+			{ kind: "audit", hookId: "legacy", event: "beforePrompt", outcome: "applied", value: "safe-value" },
+			{ kind: "decision", hookId: "choice", event: "decisionResolved", outcome: "applied", packId: "extension-pack" },
+		]);
+		assert.ok(!JSON.stringify(store.readTrace("sess-1")).includes(secret));
+	});
+
+	it("notifies an observer only after the trace is durable", () => {
+		const memfs = createMemFs();
+		const observed: TraceEntry[] = [];
+		const store = new ContextTraceStore(STATE_DIR, memfs, (sessionId, appended) => {
+			assert.deepEqual(store.readTrace(sessionId), [appended]);
+			observed.push(appended);
+		});
+		const appended = entry(1);
+
+		store.appendTrace("sess-1", appended);
+
+		assert.deepEqual(observed, [appended]);
+	});
+
+	it("isolates observer failures from durable trace writes", () => {
+		const memfs = createMemFs();
+		const store = new ContextTraceStore(STATE_DIR, memfs, () => {
+			throw new Error("invalidation transport unavailable");
+		});
+
+		store.appendTrace("sess-1", entry(1));
+		store.appendTrace("sess-1", entry(2));
+
+		assert.deepEqual(store.readTrace("sess-1").map((row) => row.ts), [1, 2]);
 	});
 });

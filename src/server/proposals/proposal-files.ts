@@ -14,12 +14,22 @@
 import { promises as fsp } from "node:fs";
 import path from "node:path";
 import { getProposalTypePlugin, type ProposalTypePlugin } from "./proposal-types.js";
+import { validatePromptExtensionProposalSections, type PromptExtensionProposalSection } from "../agent/prompt-extension-overrides.js";
 
-export type ProposalType = "goal" | "project" | "role" | "tool" | "staff";
+export type ProposalType = "goal" | "project" | "workflow" | "role" | "tool" | "staff";
 
 export interface TypedProposal {
 	type: ProposalType;
 	fields: Record<string, unknown>;
+}
+
+/** Called after the candidate parses but before it can replace the live draft. */
+export type ProposalCandidateValidator = (candidate: TypedProposal) => void | Promise<void>;
+
+/** Typed extraction seam for project-proposal acceptance; writes remain proposal-only. */
+export function extensionPromptSectionsFromProposal(proposal: TypedProposal): PromptExtensionProposalSection[] | undefined {
+	if (proposal.type !== "project" || proposal.fields.extensionPromptSections === undefined) return undefined;
+	return validatePromptExtensionProposalSections(proposal.fields.extensionPromptSections);
 }
 
 export type ParseErrorCode =
@@ -75,6 +85,7 @@ export type EditResult = EditSuccess | ParseError | EditError;
 export const PROPOSAL_TYPES: readonly ProposalType[] = [
 	"goal",
 	"project",
+	"workflow",
 	"role",
 	"tool",
 	"staff",
@@ -198,6 +209,7 @@ export async function restoreSnapshot(
 	sessionId: string,
 	type: ProposalType,
 	rev: number,
+	validateCandidate?: ProposalCandidateValidator,
 ): Promise<RestoreResult> {
 	assertSafeSessionId(sessionId);
 	assertSafeType(type);
@@ -212,6 +224,7 @@ export async function restoreSnapshot(
 	}
 	const parsed = plugin.parse(content);
 	if (!parsed.ok) return parsed;
+	await validateCandidate?.(parsed.value);
 
 	// Write to live draft atomically.
 	const dir = dirFor(stateDir, sessionId);
@@ -303,6 +316,7 @@ export async function editProposalFile(
 	type: ProposalType,
 	oldText: string,
 	newText: string,
+	validateCandidate?: ProposalCandidateValidator,
 ): Promise<EditResult> {
 	assertSafeSessionId(sessionId);
 	assertSafeType(type);
@@ -344,6 +358,12 @@ export async function editProposalFile(
 	if (!parsed.ok) {
 		await fsp.unlink(tmpPath).catch(() => {});
 		return parsed;
+	}
+	try {
+		await validateCandidate?.(parsed.value);
+	} catch (error) {
+		await fsp.unlink(tmpPath).catch(() => {});
+		throw error;
 	}
 	await fsp.rename(tmpPath, filePath);
 	// Snapshot the new content — non-fatal on failure.

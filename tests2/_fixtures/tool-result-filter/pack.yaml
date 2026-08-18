@@ -1,0 +1,15 @@
+schema: 2
+name: tool-result-filter-fixture
+version: 1.0.0
+description: Deterministic EP-14 result-filter canary fixture.
+contents:
+  roles: []
+  tools: []
+  skills: []
+  entrypoints: []
+  providers: []
+  hooks: [result-filter, competing-result-filter]
+  mcp: []
+  pi-extensions: []
+  runtimes: []
+  workflows: []

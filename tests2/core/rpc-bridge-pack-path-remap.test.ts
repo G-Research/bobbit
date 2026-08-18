@@ -101,6 +101,13 @@ describe("RpcBridge Docker path remapping for market pack extensions", () => {
 		assert.equal(containerPathToHost(containerPath), hostPath);
 	});
 
+	it("translates the private core tool-result gate path in the bind-mount table", () => {
+		const hostPath = path.join(serverRoot, ".bobbit", "state", "tool-result-filter", "abc123", "gate.ts");
+		const containerPath = "/bobbit-state/tool-result-filter/abc123/gate.ts";
+		assert.equal(hostPathToContainer(hostPath), containerPath);
+		assert.equal(containerPathToHost(containerPath), hostPath);
+	});
+
 	it("remaps installed server/global/project market pack pi-extension paths", () => {
 		const serverPiExtension = path.join(serverMarketPacksRoot, "server-pack", "pi-extensions", "demo", "extension.ts");
 		const serverToolExtension = path.join(serverMarketPacksRoot, "server-pack", "tools", "demo", "extension.ts");

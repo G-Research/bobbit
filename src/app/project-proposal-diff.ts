@@ -61,7 +61,7 @@ const REJECTED_LEGACY_QA_TOP_LEVEL: ReadonlySet<string> = new Set([
 export function buildProjectConfigDiff(fields: Record<string, unknown>): Record<string, unknown> {
 	const diff: Record<string, unknown> = {};
 	for (const [k, v] of Object.entries(fields)) {
-		if (k === "name" || k === "root_path" || k === "projectId") continue;
+		if (k === "name" || k === "root_path" || k === "projectId" || k === "extensionPromptSections") continue;
 		if (REJECTED_LEGACY_QA_TOP_LEVEL.has(k)) continue;
 		if (v === undefined || v === null || v === "") continue;
 		if (PROJECT_NATIVE_FIELDS.has(k)) {

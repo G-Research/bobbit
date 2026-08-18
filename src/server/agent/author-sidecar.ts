@@ -200,6 +200,7 @@ interface LegacyPromptAuthorSettlementRecord {
 
 const CORRELATION_TOLERANCE_MS = 2_000;
 const MAX_KEY_LENGTH = 256;
+const MAX_SIDECAR_BYTES = 4 * 1024 * 1024;
 const MAX_DIAGNOSTIC_VALUE_LENGTH = 512;
 const DIGEST_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const SIDECAR_KEY_DOMAIN = "bobbit/author-sidecar/v2/key\0";
@@ -459,11 +460,19 @@ function getSidecarDir(): string | undefined {
 	}
 }
 
-function filePath(sessionId: string): string | undefined {
+type SidecarPath = string & { readonly __sidecarPath: unique symbol };
+
+/** Construct one known filename and prove it remains directly below the private root. */
+function filePath(sessionId: string): SidecarPath | undefined {
 	const dir = getSidecarDir();
 	if (!dir) return undefined;
 	const safe = sessionId.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 160) || "unknown";
-	return path.join(dir, `${safe}.jsonl`);
+	const root = path.resolve(dir);
+	const target = path.resolve(root, `${safe}.jsonl`);
+	// `safe` is deliberately restrictive, but retain this containment guard as
+	// the authority for all filesystem calls should the naming convention change.
+	if (path.dirname(target) !== root) return undefined;
+	return target as SidecarPath;
 }
 
 function secureOpenFlags(baseFlags: number): number {
@@ -483,25 +492,32 @@ function secureFileDescriptor(fd: number): void {
 function writeAll(fd: number, value: Buffer): void {
 	let offset = 0;
 	while (offset < value.length) {
-		// Only canonical v2 ledger JSON reaches this private, non-executable file;
-		// paths are server-rooted and prompt bodies have already become keyed HMACs.
-		// codeql[js/http-to-file-access] Intentional bounded metadata ledger write, not an arbitrary upload.
 		const written = fs.writeSync(fd, value, offset, value.length - offset, null);
 		if (!Number.isSafeInteger(written) || written <= 0) throw new Error("Author-sidecar write was incomplete");
 		offset += written;
 	}
 }
 
-function appendLineSecure(target: string, line: string): void {
+function boundedText(value: string): Buffer {
+	const bytes = Buffer.from(value, "utf8");
+	if (bytes.length > MAX_SIDECAR_BYTES) throw new Error("Author-sidecar record exceeds the storage limit");
+	return bytes;
+}
+
+function appendLineSecure(target: SidecarPath, line: string): void {
 	let fd: number | undefined;
 	try {
+		const bytes = boundedText(line);
 		fd = fs.openSync(
 			target,
 			secureOpenFlags(fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_WRONLY),
 			0o600,
 		);
 		secureFileDescriptor(fd);
-		writeAll(fd, Buffer.from(line, "utf8"));
+		if (fs.fstatSync(fd).size + bytes.length > MAX_SIDECAR_BYTES) {
+			throw new Error("Author-sidecar storage limit exceeded");
+		}
+		writeAll(fd, bytes);
 		fs.fsyncSync(fd);
 	} finally {
 		if (fd !== undefined) fs.closeSync(fd);
@@ -526,12 +542,23 @@ function fsyncDirectory(target: string): void {
 	}
 }
 
-function readSecureText(target: string): string | undefined {
+function readSecureText(target: SidecarPath): string | undefined {
 	let fd: number | undefined;
 	try {
 		fd = fs.openSync(target, secureOpenFlags(fs.constants.O_RDONLY));
 		secureFileDescriptor(fd);
-		return fs.readFileSync(fd, "utf8");
+		const size = fs.fstatSync(fd).size;
+		if (!Number.isSafeInteger(size) || size < 0 || size > MAX_SIDECAR_BYTES) {
+			throw new Error("Author-sidecar ledger exceeds the storage limit");
+		}
+		const bytes = Buffer.alloc(size);
+		let offset = 0;
+		while (offset < bytes.length) {
+			const read = fs.readSync(fd, bytes, offset, bytes.length - offset, offset);
+			if (!Number.isSafeInteger(read) || read <= 0) break;
+			offset += read;
+		}
+		return bytes.subarray(0, offset).toString("utf8");
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return undefined;
 		throw error;
@@ -540,7 +567,8 @@ function readSecureText(target: string): string | undefined {
 	}
 }
 
-function writeSecureReplacement(target: string, text: string): void {
+function writeSecureReplacement(target: SidecarPath, text: string): void {
+	const replacement = boundedText(text);
 	const suffix = crypto.randomBytes(9).toString("base64url");
 	const temp = `${target}.${process.pid}.${suffix}.tmp`;
 	let fd: number | undefined;
@@ -549,7 +577,7 @@ function writeSecureReplacement(target: string, text: string): void {
 		fd = fs.openSync(temp, secureOpenFlags(fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY), 0o600);
 		tempCreated = true;
 		secureFileDescriptor(fd);
-		writeAll(fd, Buffer.from(text, "utf8"));
+		writeAll(fd, replacement);
 		fs.fsyncSync(fd);
 		fs.closeSync(fd);
 		fd = undefined;
@@ -788,7 +816,11 @@ export function initAuthorSidecarDir(
 	sidecarPlatform = options.platform ?? process.platform;
 	try {
 		ensurePrivateDirectory(nextDir);
-		sidecarDir = nextDir;
+		// Resolve the private root once after its no-symlink directory check. Every
+		// ledger path is subsequently derived and containment-checked beneath this
+		// canonical root, rather than reopening a caller-controlled path string.
+		sidecarDir = fs.realpathSync(nextDir);
+		enforceDirectoryMode(sidecarDir);
 		promptDigestKey = derivePromptDigestKey(keyMaterial);
 		migrateLegacyAuthorSidecars(legacyStateDir);
 	} catch (error) {

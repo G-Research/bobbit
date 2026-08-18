@@ -4,11 +4,25 @@
 
 import { afterEach, beforeEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import { EventBuffer } from "../../src/server/agent/event-buffer.ts";
 import { SessionManager } from "../../src/server/agent/session-manager.ts";
-import { resolveMarketplacePiExtensionActivation, type ResolvedPiExtensionContribution } from "../../src/server/agent/session-setup.ts";
+import { computeToolActivationArgs, type EffectiveTool } from "../../src/server/agent/tool-activation.ts";
+import {
+	assertToolResultFilterExtensionCompatibility,
+	assertToolResultFilterMarketplacePiExtensionCompatibility,
+	resolveMarketplacePiExtensionActivation,
+	resolveToolActivation,
+	TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_CODE,
+	TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_MESSAGE,
+	TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_CODE,
+	TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_MESSAGE,
+	type ResolvedPiExtensionContribution,
+	type SessionSetupPlan,
+} from "../../src/server/agent/session-setup.ts";
 import type { ScopedToolContext } from "../../src/server/agent/tool-manager.ts";
 import { pinAgentDirForTest, resetAgentDirForTest } from "../../tests/helpers/agent-dir.js";
 import { installMemoryFs } from "./helpers/memory-fs-spies.js";
@@ -49,6 +63,34 @@ function extensionPaths(args: string[]): string[] {
 	}
 	return out;
 }
+
+function assertProtectedMarketplacePiExtensionConflict(run: () => unknown): void {
+	assert.throws(run, (error: unknown) => {
+		assert.ok(error instanceof Error);
+		assert.equal((error as Error & { code?: string }).code, TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_CODE);
+		assert.equal(error.message, TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_MESSAGE);
+		// Legacy names remain aliases while callers migrate to the general fence.
+		assert.equal(TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_CODE, TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_CODE);
+		assert.equal(TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_MESSAGE, TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_MESSAGE);
+		return true;
+	});
+}
+
+function bobbitExtensionToolManager(provenance: "builtin" | "marketplace" | "config") {
+	const provider = {
+		type: "bobbit-extension" as const,
+		extension: "extension.ts",
+		groupDir: "fixture",
+		baseDir: `/fixture/${provenance}`,
+		extensionProvenance: provenance,
+	};
+	return {
+		getToolProviders: () => new Map([["fixture_tool", provider]]),
+		getExtensionPath: (groupDir: string, filename: string) => path.join("/fixture/builtin", groupDir, filename),
+	};
+}
+
+const fixtureTool: EffectiveTool[] = [{ kind: "yaml", name: "fixture_tool" }];
 
 function scopedPiToolManager() {
 	const providers = new Map<string, any>([
@@ -105,6 +147,117 @@ describe("marketplace pi extension activation args", () => {
 		assert.ok(noExtensionsIndex >= 0, "Bobbit activation args should still be first");
 		assert.ok(piIndex > noExtensionsIndex, "pi extension should be appended after Bobbit activation args");
 		assert.ok(codeAssistIndex === -1 || piIndex < codeAssistIndex, "pi extension should be before generated guard/provider extensions");
+	});
+
+	it("rejects a protected initial setup before Marketplace Pi extension args can reach Pi", () => {
+		const tmp = fixtureRoot("initial-conflict");
+		const extPath = path.join(tmp, "market-packs", "pi-pack", "pi-extensions", "demo", "extension.ts");
+		const plan = {
+			id: "protected-initial",
+			mode: "normal",
+			cwd: tmp,
+			projectId: "project-1",
+			bridgeOptions: {},
+		} as SessionSetupPlan;
+		const ctx: any = {
+			roleManager: null,
+			toolManager: null,
+			mcpManager: null,
+			groupPolicyStore: null,
+			configCascade: null,
+			requestMutationActivation: undefined,
+			toolResultFilterActivation: () => ({ toolResult: true }),
+			marketplacePiExtensionResolver: () => [contribution("demo", extPath)],
+			resolveGoalMetadata: () => ({}),
+		};
+
+		assertProtectedMarketplacePiExtensionConflict(() => resolveToolActivation(plan, ctx));
+		assert.deepEqual(plan.bridgeOptions.args, undefined, "protected setup must fail before Pi args are assembled");
+	});
+
+	for (const lifecycle of ["restore", "respawn", "force-abort"] as const) {
+		it(`rejects protected Marketplace Pi extensions through the shared ${lifecycle} activation path`, () => {
+			const tmp = fixtureRoot(`${lifecycle}-conflict`);
+			const extPath = path.join(tmp, "market-packs", "pi-pack", "pi-extensions", "demo", "extension.ts");
+			const manager: any = new SessionManager();
+			manager.setToolResultFilterActivationResolver(() => ({ toolResult: true }));
+			manager.setMarketplacePiExtensionResolver(() => [contribution("demo", extPath)]);
+
+			assertProtectedMarketplacePiExtensionConflict(() =>
+				manager.buildToolActivationArgs(`protected-${lifecycle}`, undefined, undefined, tmp, "project-1"),
+			);
+		});
+	}
+
+	it("allows an active filter with no enabled Marketplace Pi runtime extensions", () => {
+		assert.doesNotThrow(() =>
+			assertToolResultFilterMarketplacePiExtensionCompatibility(
+				{ toolResult: true },
+				{ runtimeExtensions: [] },
+			),
+		);
+	});
+
+	for (const provenance of ["marketplace", "config"] as const) {
+		it(`rejects an active ${provenance} bobbit-extension provider before initial setup`, () => {
+			const tmp = fixtureRoot(`${provenance}-tool-initial`);
+			const plan = {
+				id: `protected-${provenance}-initial`,
+				mode: "normal",
+				cwd: tmp,
+				projectId: "project-1",
+				effectiveAllowedTools: fixtureTool,
+				bridgeOptions: {},
+			} as SessionSetupPlan;
+			const ctx: any = {
+				roleManager: null,
+				toolManager: bobbitExtensionToolManager(provenance),
+				mcpManager: null,
+				groupPolicyStore: null,
+				configCascade: null,
+				requestMutationActivation: undefined,
+				toolResultFilterActivation: () => ({ toolResult: true }),
+				marketplacePiExtensionResolver: undefined,
+				resolveGoalMetadata: () => ({}),
+			};
+
+			assertProtectedMarketplacePiExtensionConflict(() => resolveToolActivation(plan, ctx));
+			assert.deepEqual(plan.bridgeOptions.args, undefined, "protected setup must fail before Pi args are assembled");
+		});
+
+		for (const lifecycle of ["restore", "respawn", "role-replacement", "force-abort"] as const) {
+			it(`rejects an active ${provenance} bobbit-extension provider through ${lifecycle}`, () => {
+				const manager: any = new SessionManager({ toolManager: bobbitExtensionToolManager(provenance) as any });
+				manager.setToolResultFilterActivationResolver(() => ({ toolResult: true }));
+				assertProtectedMarketplacePiExtensionConflict(() =>
+					manager.buildToolActivationArgs(`protected-${provenance}-${lifecycle}`, fixtureTool, undefined, fixtureRoot(lifecycle), "project-1"),
+				);
+			});
+		}
+	}
+
+	it("records trusted shipped provider provenance and permits it beside the filter", () => {
+		const activation = computeToolActivationArgs(fixtureTool, bobbitExtensionToolManager("builtin") as any);
+		assert.deepEqual(activation.activeBobbitExtensionProviders.map(provider => provider.provenance), ["builtin"]);
+		assert.doesNotThrow(() =>
+			assertToolResultFilterExtensionCompatibility(
+				{ toolResult: true },
+				activation,
+				{ runtimeExtensions: [] },
+			),
+		);
+	});
+
+	it("keeps untrusted provider extensions available when result filtering is inactive", () => {
+		const activation = computeToolActivationArgs(fixtureTool, bobbitExtensionToolManager("config") as any);
+		assert.equal(activation.activeBobbitExtensionProviders[0]?.provenance, "config");
+		assert.doesNotThrow(() =>
+			assertToolResultFilterExtensionCompatibility(
+				undefined,
+				activation,
+				{ runtimeExtensions: [] },
+			),
+		);
 	});
 
 	it("overlays cached runtime load diagnostics on resolved marketplace contributions", () => {
@@ -197,18 +350,31 @@ describe("marketplace pi extension activation args", () => {
 
 	it("uses project-scoped pi-extension tool policies when rebuilding guard args after restore or respawn", () => {
 		const tmp = fixtureRoot("session-scope");
-		const manager: any = new SessionManager();
-		manager.toolManager = scopedPiToolManager();
-		const { args } = manager.buildToolActivationArgs(
-			"session-scoped-guard",
-			undefined,
-			{ toolPolicies: { pi_demo: "ask" } },
-			tmp,
-			"project-1",
-		);
-		const guardPath = extensionPaths(args).find((p) => p.includes(`${path.sep}tool-guard${path.sep}`) || p.includes("/tool-guard/"));
-		assert.ok(guardPath, "expected scoped ask policy to emit a guard extension");
-		const code = memoryFs.readFileSync(guardPath!, "utf-8");
-		assert.match(code, /pi_demo/, "guard must include the project-scoped pi-extension tool policy");
+		const previousBobbitDir = process.env.BOBBIT_DIR;
+		// Tool-guard publication intentionally needs real lstat/chmod/open/fsync
+		// semantics to prove immutable artifact integrity; the fixture's MemFs only
+		// models the activation inputs, not those host filesystem guarantees.
+		restoreFs();
+		const guardRoot = fs.mkdtempSync(path.join(os.tmpdir(), "session-scoped-guard-"));
+		process.env.BOBBIT_DIR = guardRoot;
+		try {
+			const manager: any = new SessionManager();
+			manager.toolManager = scopedPiToolManager();
+			const { args } = manager.buildToolActivationArgs(
+				"session-scoped-guard",
+				undefined,
+				{ toolPolicies: { pi_demo: "ask" } },
+				tmp,
+				"project-1",
+			);
+			const guardPath = extensionPaths(args).find((p) => p.includes(`${path.sep}tool-guard${path.sep}`) || p.includes("/tool-guard/"));
+			assert.ok(guardPath, "expected scoped ask policy to emit a guard extension");
+			const code = fs.readFileSync(guardPath!, "utf-8");
+			assert.match(code, /pi_demo/, "guard must include the project-scoped pi-extension tool policy");
+		} finally {
+			if (previousBobbitDir === undefined) delete process.env.BOBBIT_DIR;
+			else process.env.BOBBIT_DIR = previousBobbitDir;
+			fs.rmSync(guardRoot, { recursive: true, force: true });
+		}
 	});
 });

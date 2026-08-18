@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import type { Clock } from "../gateway-deps.js";
 import { realClock } from "../gateway-deps.js";
 import fs from "node:fs";
@@ -15,10 +15,20 @@ import { THINKING_LEVELS, type ThinkingLevel } from "../../shared/thinking-level
 import { resolveBuiltinPacksDir } from "./builtin-packs.js";
 import { scopePaths } from "./pack-types.js";
 import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
+import { assertTrustedToolResultFilterExtensionArgs } from "./tool-result-filter-extension-trust.js";
+import type { ToolResultFilterGateCredential } from "./tool-result-filter-attempt-credentials.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** Builtin tools directory — dist/server/defaults/tools/ (read-only, shipped with Bobbit). */
-const BUILTIN_TOOLS_DIR = path.join(__dirname, "..", "defaults", "tools");
+function runtimeBuiltinToolsDir(): string {
+	const moduleDefaults = path.join(__dirname, "..", "defaults", "tools");
+	// Source-mode tests run from src/server/agent while production uses the
+	// copied dist/server/defaults tree. This mirrors ToolManager's resolver.
+	return fs.existsSync(moduleDefaults)
+		? moduleDefaults
+		: path.resolve(__dirname, "..", "..", "..", "defaults", "tools");
+}
+const BUILTIN_TOOLS_DIR = runtimeBuiltinToolsDir();
 /** Container mount for shipped first-party market packs. */
 export const BUILTIN_PACKS_CONTAINER_DIR = "/market-packs-builtin";
 /** Container mounts for installed marketplace packs by activation/install scope. */
@@ -98,6 +108,8 @@ export interface RpcBridgeOptions {
 	systemPromptPath?: string;
 	/** Extra environment variables */
 	env?: Record<string, string>;
+	/** Private one-shot stdin bootstrap for the core result gate. Never an env value. */
+	toolResultFilterBootstrap?: ToolResultFilterGateCredential;
 	/** Whether this session runs in a Docker sandbox (affects timeouts). */
 	sandboxed?: boolean;
 	/** Env vars to inject into the container (API keys, etc.) */
@@ -146,6 +158,31 @@ export interface RpcBridgeStartDeps {
 }
 
 export type RpcEventListener = (event: any) => void;
+
+type DockerPreflightExec = (file: string, args: string[], options: { encoding: "utf-8"; stdio: "pipe"; timeout: number }) => string | Buffer;
+
+/**
+ * A sandbox image can lag the host's patched Pi dependency. A protected
+ * session must verify both its read-only gate mount and private Pi seam before
+ * launching; an unpatched image would otherwise ignore the env input and emit
+ * raw results.
+ */
+export function assertDockerToolResultGateCompatibility(
+	containerId: string,
+	exec: DockerPreflightExec = execFileSync as unknown as DockerPreflightExec,
+): void {
+	const options = { encoding: "utf-8" as const, stdio: "pipe" as const, timeout: 5_000 };
+	try {
+		const mounts = String(exec("docker", ["inspect", "--format", "{{range .Mounts}}{{println .Destination .RW}}{{end}}", containerId], options));
+		if (!mounts.split(/\r?\n/).some(line => line.trim() === "/bobbit-state/tool-result-filter false")) {
+			throw new Error("missing read-only gate mount");
+		}
+		const probe = "const f=require('fs');const l=f.readFileSync('/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js','utf8');const s=f.readFileSync('/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js','utf8');const a=f.readFileSync('/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js','utf8');if(!l.includes('BOBBIT_TOOL_RESULT_FILTER_GATE')||!l.includes('consumeCoreToolResultGateBootstrap')||!l.includes('factory(bootstrap)')||!l.includes('__bobbitCoreToolResultGate')||!s.includes('__bobbitCoreToolResultGateActive')||!a.includes('gatedAfterResult.replaceResult === true'))process.exit(1);";
+		exec("docker", ["exec", containerId, "node", "-e", probe], options);
+	} catch {
+		throw new Error("Tool-result filter requires a patched Docker Pi runtime and read-only gate mount.");
+	}
+}
 
 /**
  * Lightweight bridge to a pi-coding-agent running in RPC mode.
@@ -509,6 +546,8 @@ export class RpcBridge {
 	private stderrDecoder = new StringDecoder("utf8");
 	/** Ring buffer of last stderr lines — included in exit error messages for diagnostics. */
 	private stderrTail: string[] = [];
+	/** Cleared immediately after the single private stdin write. */
+	private toolResultFilterBootstrap: ToolResultFilterGateCredential | undefined;
 	/** Rebuilds Pi 0.84 delta-only RPC updates for Bobbit's cumulative pipeline. */
 	private readonly assistantStreamNormalizer = new PiAssistantStreamNormalizer();
 	private readonly clock: Clock = realClock;
@@ -517,6 +556,11 @@ export class RpcBridge {
 		private options: RpcBridgeOptions = {},
 		private readonly startDeps: RpcBridgeStartDeps = {},
 	) {
+		// Keep the reusable key out of options before a factory, diagnostics, or
+		// spawn environment can inspect it. Only this bridge retains it until Pi's
+		// loader consumes the first stdin line.
+		this.toolResultFilterBootstrap = options.toolResultFilterBootstrap;
+		delete options.toolResultFilterBootstrap;
 		// If a test-registered factory claims this options object, return that
 		// instance instead of the default child-process bridge. This lets the
 		// E2E harness swap in an in-process mock without modifying any callers.
@@ -542,7 +586,10 @@ export class RpcBridge {
 				cliPath: this.options.cliPath,
 				resolve: this.startDeps.resolvePackage,
 			}).cliPath;
-		const args = buildAgentArgs(this.options);
+		let args = buildAgentArgs(this.options);
+		if (this.options.containerId && this.options.env?.BOBBIT_TOOL_RESULT_FILTER_GATE) {
+			assertDockerToolResultGateCompatibility(this.options.containerId);
+		}
 
 		// Disable pi's internal builtin tools and re-register the file-tool subset
 		// via _builtins/extension.ts. After pi 0.70, `--tools <list>` became a
@@ -575,6 +622,16 @@ export class RpcBridge {
 			}
 		}
 
+		// This is the authoritative final extension boundary. It runs after every
+		// setup/fallback addition and before either direct spawn or Docker remap.
+		// Earlier activation provenance checks are diagnostics only; all lifecycle
+		// paths converge here through RpcBridge.start().
+		if (this.options.env?.BOBBIT_TOOL_RESULT_FILTER_GATE) {
+			args = assertTrustedToolResultFilterExtensionArgs(args, {
+				builtinToolsDir: BUILTIN_TOOLS_DIR,
+			});
+		}
+
 		// Retry spawn on transient socket errors (ENOTCONN on Windows under fd pressure).
 		// The ENOTCONN can throw either synchronously from spawn() or asynchronously from
 		// socket initialization — we catch both by wrapping spawn + a brief stabilization delay.
@@ -582,7 +639,11 @@ export class RpcBridge {
 		for (let attempt = 0; attempt <= MAX_SPAWN_RETRIES; attempt++) {
 			try {
 				this._spawnProcess(cliPath, args);
+				// A spawn may report ENOENT on the next tick and stdin can report EPIPE
+				// while the private bootstrap write is in flight. Install every handler
+				// synchronously before the first await or write so neither error escapes.
 				this._attachProcessHandlers();
+				await this._writeToolResultFilterBootstrap();
 				// Brief pause to let async socket initialization errors surface.
 				// If ENOTCONN occurs during socket read setup, the process 'error'
 				// event fires within the next microtask. We wait for that.
@@ -618,10 +679,14 @@ export class RpcBridge {
 				// Spawn succeeded and stabilized
 				return;
 			} catch (err: any) {
-				// Clean up the failed process
+				const protectedGate = !!this.options.env?.BOBBIT_TOOL_RESULT_FILTER_GATE;
+				// Clean up the failed process before failing a protected bootstrap.
 				this.process?.kill().toString(); // best-effort kill
 				this.process = null;
 				this.pending.clear();
+				// A protected process consumes a one-shot loader bootstrap. Retrying
+				// would either replay it or launch an unprotected process, so fail closed.
+				if (protectedGate) throw err;
 
 				const isTransient = err?.code === "ENOTCONN" || err?.code === "EMFILE" ||
 					err?.code === "ENFILE" || err?.code === "EAGAIN" ||
@@ -639,6 +704,24 @@ export class RpcBridge {
 				}
 				throw err;
 			}
+		}
+	}
+
+	/** Write the exact one-use loader bootstrap before Pi can read RPC input. */
+	private async _writeToolResultFilterBootstrap(): Promise<void> {
+		if (!this.options.env?.BOBBIT_TOOL_RESULT_FILTER_GATE) return;
+		const bootstrap = this.toolResultFilterBootstrap;
+		if (!bootstrap || !this.process?.stdin) throw new Error("Tool-result filter bootstrap is unavailable.");
+		if (!Number.isSafeInteger(bootstrap.runtimeGeneration) || bootstrap.runtimeGeneration < 0 || !/^[0-9a-f]{64}$/.test(bootstrap.runtimeKey)) {
+			throw new Error("Tool-result filter bootstrap is invalid.");
+		}
+		const line = JSON.stringify({ runtimeGeneration: bootstrap.runtimeGeneration, runtimeKey: bootstrap.runtimeKey }) + "\n";
+		try {
+			await new Promise<void>((resolve, reject) => this.process!.stdin!.write(line, (error) => error ? reject(error) : resolve()));
+		} finally {
+			// Do not retain the reusable key past handoff; the loader consumes and
+			// closes its bootstrap reader before Pi reports readiness.
+			this.toolResultFilterBootstrap = undefined;
 		}
 	}
 
@@ -981,6 +1064,18 @@ export class RpcBridge {
 		if (this.options.env?.BOBBIT_GOAL_ID) {
 			execArgs.push("-e", `BOBBIT_GOAL_ID=${this.options.env.BOBBIT_GOAL_ID}`);
 		}
+		// The gate is a private Pi-loader input, not an ordinary --extension.
+		// Refuse an unmapped path before launching: a sandboxed protected session
+		// must never silently degrade into a raw-result session.
+		if (this.options.env?.BOBBIT_TOOL_RESULT_FILTER_GATE) {
+			const gatePath = tryHostPathToContainer(this.options.env.BOBBIT_TOOL_RESULT_FILTER_GATE, {
+				builtinToolsDir: this.options.toolManager?.getBuiltinToolsDir(),
+				projectBase: this.options.cwd,
+				projectMarketPacksRoot: this.options.projectMarketPacksRoot,
+			});
+			if (!gatePath) throw new Error("Tool-result filter gate is unavailable in the Docker sandbox.");
+			execArgs.push("-e", `BOBBIT_TOOL_RESULT_FILTER_GATE=${gatePath}`);
+		}
 		if (this.options.gatewayToken) {
 			execArgs.push("-e", `BOBBIT_TOKEN=${this.options.gatewayToken}`);
 		}
@@ -1310,8 +1405,10 @@ function buildMountTable(opts: MountTableOptions = {}): MountMapping[] {
 		{ containerPrefix: "/bobbit-state/html-snapshots", hostPath: path.join(stateDir, "html-snapshots") },
 		// Generated pi-coding-agent extensions — bind-mounted by docker-args.ts so
 		// sandboxed agents can load remapped --extension paths.
+		{ containerPrefix: "/bobbit-state/provider-bridge", hostPath: path.join(stateDir, "provider-bridge") },
 		{ containerPrefix: "/bobbit-state/google-code-assist", hostPath: path.join(stateDir, "google-code-assist") },
 		{ containerPrefix: "/bobbit-state/tool-result-error-bridge", hostPath: path.join(stateDir, "tool-result-error-bridge") },
+		{ containerPrefix: "/bobbit-state/tool-result-filter", hostPath: path.join(stateDir, "tool-result-filter") },
 		{ containerPrefix: "/bobbit-state/aigw-dns-guard", hostPath: path.join(stateDir, "aigw-dns-guard") },
 		{ containerPrefix: "/tools", hostPath: TOOLS_DIR },
 	];

@@ -39,6 +39,17 @@ function previewTab(entry = "index.html", version?: number): SidePanelWorkspaceT
 	};
 }
 
+function contextTab(): SidePanelWorkspaceTab {
+	return {
+		id: "context",
+		kind: "context",
+		title: "Context",
+		label: "Context",
+		source: { type: "context", sessionId },
+		updatedAt: 1,
+	};
+}
+
 function reviewTab(reviewId = "review-1", title = "Review"): SidePanelWorkspaceTab {
 	return {
 		id: `review:${encodeURIComponent(reviewId)}`,
@@ -70,6 +81,17 @@ describe("side-panel workspace canonicalization", () => {
 	it("rejects mismatched source sessions and malformed historical previews", () => {
 		assert.equal(canonicalizeTab({ ...proposalTab(), source: { type: "proposal", sessionId: "other", proposalType: "goal" } }, sessionId), null);
 		assert.equal(canonicalizeTab({ ...previewTab("index.html"), id: "preview:entry:index.html:v:0", source: { type: "preview", sessionId, entry: "index.html", historical: true, version: 0 } }, sessionId), null);
+	});
+
+	it("canonicalizes the singleton Context tab only for its workspace session", () => {
+		const canonical = canonicalizeTab({ ...contextTab(), title: "", label: "" }, sessionId);
+		assert.ok(canonical);
+		assert.equal(canonical.id, "context");
+		assert.equal(canonical.kind, "context");
+		assert.deepEqual(canonical.source, { type: "context", sessionId });
+		assert.equal(canonical.title, "Context");
+		assert.equal(canonicalizeTab({ ...contextTab(), id: "context:other" }, sessionId), null);
+		assert.equal(canonicalizeTab({ ...contextTab(), source: { type: "context", sessionId: "other" } }, sessionId), null);
 	});
 
 	it("migrates legacy review document/title tabs to canonical review ids", () => {

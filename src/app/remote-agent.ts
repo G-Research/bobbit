@@ -5,6 +5,7 @@ import { bootMark, bootTimingMeta, bootTimingReport } from "./boot-timing.js";
 import { loadSavedBindings } from "./shortcut-registry.js";
 import { gatewayWsUrl } from "./gateway-fetch.js";
 import { gatewayRoute } from "../shared/base-path.js";
+import { getRouteFromHash } from "./routing.js";
 
 /**
  * Placeholder model used as the initial value of `_state.model` before the
@@ -52,6 +53,9 @@ import { isEffectivePlayFinishSoundEnabled, type FinishSoundSource } from "./pla
 import { needsHumanAttentionOnIdleTransition, needsImmediateHumanAttention } from "./notification-policy.js";
 import { scheduleGateStatusRefreshForGoal, refreshSessions, scheduleSessionListRefreshFromPush, scheduleStaffListRefreshFromPush } from "./remote-agent-refresh.js";
 import { applySidePanelWorkspaceFromServer, hydrateSidePanelWorkspace } from "./side-panel-workspace.js";
+import { notifyContextTraceUpdated, refreshContextTrace, syncContextTraceInspector } from "./context-trace.js";
+import { notifyDecisionRequestsUpdated } from "./extension-decisions.js";
+import { notifyProjectImportDecisionRequestsUpdated } from "./project-import-decisions.js";
 import { shouldRefreshGateStatusForEvent } from "./gate-status-events.js";
 import { publishClientMessage, publishClientStatus } from "./session-event-bus.js";
 import { registerSessionPoster, unregisterSessionPoster, type SessionPostRequest } from "./session-write-bridge.js";
@@ -184,6 +188,7 @@ const PROPOSAL_TOOL_MAP: Record<string, string> = {
 	tool: "onToolProposal",
 	staff: "onStaffProposal",
 	project: "onProjectProposal",
+	workflow: "onWorkflowProposal",
 };
 
 /** Maps legacy XML proposal tag → ProposalType (replaces the per-parser
@@ -194,6 +199,7 @@ const PROPOSAL_TAG_TO_TYPE: Record<string, ProposalType> = {
 	tool_proposal: "tool",
 	staff_proposal: "staff",
 	project_proposal: "project",
+	workflow_proposal: "workflow",
 };
 
 /** Maps ProposalType → legacy per-type callback name on RemoteAgent. */
@@ -203,6 +209,7 @@ const TYPE_TO_LEGACY_CALLBACK: Record<ProposalType, string> = {
 	tool: "onToolProposal",
 	staff: "onStaffProposal",
 	project: "onProjectProposal",
+	workflow: "onWorkflowProposal",
 };
 
 function parseToolPayload(value: unknown): Record<string, unknown> | null {
@@ -781,6 +788,8 @@ export class RemoteAgent {
 	onStaffProposal?: (proposal: { name: string; description: string; prompt: string; triggers: string; cwd: string }, streaming: boolean) => void;
 	/** Callback fired when a project proposal is detected in an assistant message. */
 	onProjectProposal?: (fields: Record<string, unknown>, streaming: boolean) => void;
+	/** Callback fired when a workflow proposal is detected in an assistant message. */
+	onWorkflowProposal?: (fields: Record<string, unknown>, streaming: boolean) => void;
 	/**
 	 * Slice D: unified proposal callback. Slice E will collapse all six
 	 * `onXProposal` callbacks above into this one. For now both fire — see
@@ -1133,7 +1142,11 @@ export class RemoteAgent {
 						// then hydrate review content against authoritative tabs.
 						if (!initial) {
 							void hydrateSidePanelWorkspace(this._sessionId)
-								.then(() => this.reconcileSubmittedReviewWorkspace());
+								.then(() => this.reconcileSubmittedReviewWorkspace())
+								.then(() => {
+									syncContextTraceInspector(this._sessionId);
+									return refreshContextTrace(this._sessionId);
+								});
 						}
 						// S2: deliver any prompts/steers/retries the user issued while
 						// the socket was reconnecting, before resume/snapshot traffic.
@@ -2304,6 +2317,37 @@ export class RemoteAgent {
 			scheduleGateStatusRefreshForGoal((msg as any).goalId);
 		}
 		switch (msg.type) {
+			case "context_trace_updated":
+				// This is metadata-only invalidation. Do not accept a trace payload over
+				// WS; the controller refetches the active session's bounded REST view.
+				if (typeof msg.sessionId === "string" && msg.sessionId === this._sessionId) {
+					notifyContextTraceUpdated(msg.sessionId);
+				}
+				break;
+			case "decision_requests_updated":
+				// REST owns the request/answer projection. The frame deliberately
+				// carries only a session identity and timestamp.
+				if (typeof msg.sessionId === "string" && msg.sessionId === this._sessionId) {
+					notifyDecisionRequestsUpdated(msg.sessionId);
+				}
+				break;
+			case "project_import_decision_requests_updated":
+				// REST owns the import projection; this carries only the project identity.
+				if (typeof msg.projectId === "string") notifyProjectImportDecisionRequestsUpdated(msg.projectId);
+				break;
+			case "extension_settings_updated": {
+				// The WS frame is intentionally metadata-only. Fetch a fresh redacted
+				// projection only while the canonical Market route is displaying this
+				// exact project; another project's settings must never flash or reload.
+				const projectId = typeof msg.projectId === "string" ? msg.projectId : undefined;
+				if (!projectId) break;
+				const route = getRouteFromHash();
+				if (route.view === "market" && route.marketProjectId === projectId) {
+					const { refreshMarketplaceExtensionSettings } = await import("./marketplace-page.js");
+					refreshMarketplaceExtensionSettings(projectId);
+				}
+				break;
+			}
 			case "ext_surface_token_result": {
 				const pending = this._pendingExtSurfaceTokens.get(msg.requestId);
 				if (pending) {
@@ -2625,9 +2669,10 @@ export class RemoteAgent {
 				// Sole writer of _state.status.
 				this._state.status = msg.status as ClientSessionStatus;
 
-				if (msg.status === "streaming") {
-					this._clearProviderAuthRequired();
-				}
+				// A status frame is a projection, not proof that a new turn began.
+				// Keep credential recovery visible until the explicit `agent_start`
+				// lifecycle event; otherwise a forged/stale "streaming" status could
+				// dismiss the operator action required to recover provider access.
 
 				if (msg.status === "archived" && (msg as any).archivedAt) {
 					this._state.archivedAt = (msg as any).archivedAt;
@@ -2705,7 +2750,10 @@ export class RemoteAgent {
 			}
 
 			case "side_panel_workspace":
-				if ((msg as any).workspace) applySidePanelWorkspaceFromServer((msg as any).workspace, { source: "ws" });
+				if ((msg as any).workspace) {
+					applySidePanelWorkspaceFromServer((msg as any).workspace, { source: "ws" });
+					syncContextTraceInspector(this._sessionId);
+				}
 				break;
 
 			case "goal_setup_started":

@@ -1,5 +1,12 @@
 FROM node:22-slim
 
+# These values are generated only by sandbox-image-requirements.ts. The case
+# branch that consumes the toolchain selector remains closed so an extension
+# can select `python`, but never contribute packages, shell, registries, paths,
+# or arbitrary Docker arguments.
+ARG BOBBIT_SANDBOX_TOOLCHAINS=""
+ARG BOBBIT_SANDBOX_REQUIREMENTS_FINGERPRINT=""
+
 # Install build tools, git, curl, gh CLI, ripgrep.
 #
 # NOTE: we deliberately do NOT install Debian's `fd-find` apt package — at the
@@ -55,7 +62,6 @@ RUN npx -y playwright@1.52.0 install-deps chromium 2>/dev/null \
 ARG PI_AGENT_VERSION=0.74.0
 RUN npm install -g @earendil-works/pi-coding-agent@${PI_AGENT_VERSION} --no-audit --no-fund 2>/dev/null \
     && ln -sf $(npm root -g) /node_modules
-LABEL bobbit.pi-agent-version=${PI_AGENT_VERSION}
 
 # TypeScript compiler — needed for `npm run check` in worktrees.
 # Must run as root (before USER node) to write to /usr/local/lib/node_modules/.
@@ -90,6 +96,20 @@ RUN mkdir -p /home/node/.node_modules_cache
 ARG PLAYWRIGHT_VERSION=1.58.2
 RUN npx -y playwright@${PLAYWRIGHT_VERSION} install chromium
 
+# Apply the selected toolchain only after the shared toolchain and browser
+# layers. A requirements change therefore rebuilds only this closed recipe and
+# the image metadata rather than the expensive common layers above.
+USER root
+RUN set -eu; \
+    case "$BOBBIT_SANDBOX_TOOLCHAINS" in \
+      "") ;; \
+      python) apt-get update && apt-get install -y --no-install-recommends python3-venv python3-pip && apt-get clean && rm -rf /var/lib/apt/lists/* ;; \
+      *) echo "unsupported Bobbit sandbox toolchain" >&2; exit 1 ;; \
+    esac
+LABEL bobbit.pi-agent-version=${PI_AGENT_VERSION} \
+      bobbit.sandbox-requirements-fingerprint=${BOBBIT_SANDBOX_REQUIREMENTS_FINGERPRINT}
+
+USER node
 WORKDIR /workspace
 
 CMD ["sleep", "infinity"]

@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import {
 	computePiExtensionDiscoveryCacheKeyWithDiagnostics,
 	makePiExtensionDiagnostic,
+	PI_EXTENSION_PROBE_HARNESS_VERSION,
 	type PiExtensionDiagnostic,
 	type PiExtensionDiscoveryResult,
 	type PiExtensionToolInfo,
@@ -56,6 +57,7 @@ function skipped(cacheKey?: string): PiExtensionDiscoveryResult {
 	return {
 		status: "skipped",
 		tools: [],
+		harnessVersion: PI_EXTENSION_PROBE_HARNESS_VERSION,
 		...(cacheKey ? { cacheKey } : {}),
 		diagnostic: diagnostic("ok", "trust_required", "Executable discovery is skipped until the marketplace source is trusted."),
 	};
@@ -65,6 +67,7 @@ function failed(code: string, message: string, cacheKey?: string): PiExtensionDi
 	return {
 		status: "failed",
 		tools: [],
+		harnessVersion: PI_EXTENSION_PROBE_HARNESS_VERSION,
 		...(cacheKey ? { cacheKey } : {}),
 		diagnostic: diagnostic("discovery-failed", code, message),
 	};
@@ -74,6 +77,7 @@ function ok(tools: PiExtensionToolInfo[], cacheKey?: string): PiExtensionDiscove
 	return {
 		status: "ok",
 		tools,
+		harnessVersion: PI_EXTENSION_PROBE_HARNESS_VERSION,
 		...(cacheKey ? { cacheKey } : {}),
 	};
 }

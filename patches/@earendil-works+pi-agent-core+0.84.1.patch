@@ -1,0 +1,263 @@
+diff --git a/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js b/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js
+--- a/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js
++++ b/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js
+@@ -4,6 +4,37 @@
+  */
+ import { EventStream, validateToolArguments, } from "@earendil-works/pi-ai";
+ import { getDefaultStreamFn } from "./stream-fn.js";
++// This marker is supplied only by Pi's core session integration. It is an
++// identity token, not an extension-visible boolean, so only protected flows
++// suppress raw streaming updates before the event fan-out begins.
++export const __bobbitCoreToolResultGateMarker = Symbol("bobbit-core-tool-result-gate");
++const $protectedUpdateByteLength = Buffer.byteLength.bind(Buffer);
++const $protectedOwnDescriptor = Object.getOwnPropertyDescriptor;
++const $protectedOwnNames = Object.getOwnPropertyNames;
++const MAX_PROTECTED_TOOL_UPDATE_BYTES = 256 * 1024;
++function protectedSnapshotBytes(value, seen = new Set()) {
++    if (typeof value === "string")
++        return $protectedUpdateByteLength(value, "utf8");
++    if (value === null || typeof value === "boolean")
++        return 4;
++    if (typeof value === "number")
++        return 24;
++    if (typeof value !== "object")
++        return MAX_PROTECTED_TOOL_UPDATE_BYTES + 1;
++    if (seen.has(value))
++        return MAX_PROTECTED_TOOL_UPDATE_BYTES + 1;
++    seen.add(value);
++    let bytes = 2;
++    for (const name of $protectedOwnNames(value)) {
++        const descriptor = $protectedOwnDescriptor(value, name);
++        if (!descriptor || !("value" in descriptor))
++            return MAX_PROTECTED_TOOL_UPDATE_BYTES + 1;
++        bytes += $protectedUpdateByteLength(name, "utf8") + protectedSnapshotBytes(descriptor.value, seen);
++        if (bytes > MAX_PROTECTED_TOOL_UPDATE_BYTES)
++            return bytes;
++    }
++    return bytes;
++}
+ /**
+  * Start an agent loop with a new prompt message.
+  * The prompt is added to the context and events are emitted for it.
+@@ -312,7 +343,7 @@
+             };
+         }
+         else {
+-            const executed = await executePreparedToolCall(preparation, signal, emit);
++            const executed = await executePreparedToolCall(preparation, config, signal, emit);
+             finalized = await finalizeExecutedToolCall(currentContext, assistantMessage, preparation, executed, config, signal);
+         }
+         await emitToolExecutionEnd(finalized, emit);
+@@ -353,7 +384,7 @@
+             continue;
+         }
+         finalizedCalls.push(async () => {
+-            const executed = await executePreparedToolCall(preparation, signal, emit);
++            const executed = await executePreparedToolCall(preparation, config, signal, emit);
+             const finalized = await finalizeExecutedToolCall(currentContext, assistantMessage, preparation, executed, config, signal);
+             await emitToolExecutionEnd(finalized, emit);
+             return finalized;
+@@ -450,13 +481,41 @@
+         };
+     }
+ }
+-async function executePreparedToolCall(prepared, signal, emit) {
++async function executePreparedToolCall(prepared, config, signal, emit) {
++    const protectedFlow = config.__bobbitCoreToolResultGateMarker === __bobbitCoreToolResultGateMarker;
++    // Protected chunks are never passed to Pi's ordinary event fan-out. The
++    // unprotected path remains byte-for-byte compatible with upstream.
+     const updateEvents = [];
+     let acceptingUpdates = true;
++    let protectedPeakUpdateBytes = 0;
++    let protectedOverflow = false;
++    const acceptProtectedUpdate = (partialResult) => {
++        if (!acceptingUpdates || protectedOverflow)
++            return;
++        let bytes = MAX_PROTECTED_TOOL_UPDATE_BYTES + 1;
++        try {
++            bytes = protectedSnapshotBytes(partialResult);
++        }
++        catch {
++            // Descriptor traversal failures are admission failures, never a
++            // fallback route to an extension/session listener.
++        }
++        // Pi updates are cumulative snapshots (for example bash output.snapshot),
++        // so admission is based on the largest snapshot, never a misleading sum.
++        protectedPeakUpdateBytes = Math.max(protectedPeakUpdateBytes, bytes);
++        if (protectedPeakUpdateBytes > MAX_PROTECTED_TOOL_UPDATE_BYTES) {
++            protectedOverflow = true;
++            acceptingUpdates = false;
++        }
++    };
+     try {
+         const result = await prepared.tool.execute(prepared.toolCall.id, prepared.args, signal, (partialResult) => {
+             if (!acceptingUpdates)
+                 return;
++            if (protectedFlow) {
++                acceptProtectedUpdate(partialResult);
++                return;
++            }
+             updateEvents.push(Promise.resolve(emit({
+                 type: "tool_execution_update",
+                 toolCallId: prepared.toolCall.id,
+@@ -467,7 +526,7 @@
+         });
+         acceptingUpdates = false;
+         await Promise.all(updateEvents);
+-        return { result, isError: false };
++        return { result, isError: false, __bobbitCoreToolResultGateMarker: protectedOverflow ? __bobbitCoreToolResultGateMarker : undefined };
+     }
+     catch (error) {
+         acceptingUpdates = false;
+@@ -475,6 +534,7 @@
+         return {
+             result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
+             isError: true,
++            __bobbitCoreToolResultGateMarker: protectedOverflow ? __bobbitCoreToolResultGateMarker : undefined,
+         };
+     }
+     finally {
+@@ -484,6 +544,15 @@
+ async function finalizeExecutedToolCall(currentContext, assistantMessage, prepared, executed, config, signal) {
+     let result = executed.result;
+     let isError = executed.isError;
++    // Overflow is decided before any event/update listener and must never send
++    // the terminal raw result to the gateway or normal after-tool hooks.
++    if (executed.__bobbitCoreToolResultGateMarker === __bobbitCoreToolResultGateMarker) {
++        return {
++            toolCall: prepared.toolCall,
++            result: createErrorToolResult("Tool result withheld by project result policy [ref: protected-overflow]."),
++            isError: true,
++        };
++    }
+     if (config.afterToolCall) {
+         try {
+             const afterResult = await config.afterToolCall({
+@@ -494,15 +563,38 @@
+                 isError,
+                 context: currentContext,
+             }, signal);
+-            if (afterResult) {
+-                result = {
+-                    ...result,
+-                    content: afterResult.content ?? result.content,
+-                    details: afterResult.details ?? result.details,
+-                    usage: afterResult.usage ?? result.usage,
+-                    terminate: afterResult.terminate ?? result.terminate,
+-                };
+-                isError = afterResult.isError ?? isError;
++            // A cancelled result must never resume a pre-abort terminal value.
++            // The session gate receives this same signal and owns the opaque ref.
++            const gatedAfterResult = signal?.aborted && config.__bobbitCoreToolResultGateMarker === __bobbitCoreToolResultGateMarker
++                ? {
++                    content: [{ type: "text", text: "Tool result withheld by project result policy [ref: aborted]." }],
++                    details: undefined,
++                    usage: undefined,
++                    isError: true,
++                    replaceResult: true,
++                }
++                : afterResult;
++            if (gatedAfterResult) {
++                // A core-installed result gate is authoritative: unlike ordinary
++                // afterToolCall patches it must be able to remove details/usage.
++                if (gatedAfterResult.replaceResult === true) {
++                    result = {
++                        content: gatedAfterResult.content ?? [],
++                        details: gatedAfterResult.details,
++                        usage: gatedAfterResult.usage,
++                        terminate: gatedAfterResult.terminate,
++                    };
++                }
++                else {
++                    result = {
++                        ...result,
++                        content: gatedAfterResult.content ?? result.content,
++                        details: gatedAfterResult.details ?? result.details,
++                        usage: gatedAfterResult.usage ?? result.usage,
++                        terminate: gatedAfterResult.terminate ?? result.terminate,
++                    };
++                }
++                isError = gatedAfterResult.isError ?? isError;
+             }
+         }
+         catch (error) {
+diff --git a/node_modules/@earendil-works/pi-agent-core/dist/types.d.ts b/node_modules/@earendil-works/pi-agent-core/dist/types.d.ts
+--- a/node_modules/@earendil-works/pi-agent-core/dist/types.d.ts
++++ b/node_modules/@earendil-works/pi-agent-core/dist/types.d.ts
+@@ -60,6 +60,8 @@
+  * There is no deep merge for `content`, `details`, or `usage`.
+  */
+ export interface AfterToolCallResult {
++    /** Replace the complete result, including clearing details and usage. Reserved for core result gates. */
++    replaceResult?: boolean;
+     content?: (TextContent | ImageContent)[];
+     details?: unknown;
+     isError?: boolean;
+@@ -120,6 +122,8 @@
+ export interface PrepareNextTurnContext extends ShouldStopAfterTurnContext {
+ }
+ export interface AgentLoopConfig extends SimpleStreamOptions {
++    /** @internal Unforgeable marker for core-owned protected tool-result flow. */
++    __bobbitCoreToolResultGateMarker?: symbol;
+     model: Model<any>;
+     /**
+      * Converts AgentMessage[] to LLM-compatible Message[] before each LLM call.
+diff --git a/node_modules/@earendil-works/pi-agent-core/dist/agent.js b/node_modules/@earendil-works/pi-agent-core/dist/agent.js
+--- a/node_modules/@earendil-works/pi-agent-core/dist/agent.js
++++ b/node_modules/@earendil-works/pi-agent-core/dist/agent.js
+@@ -1,4 +1,4 @@
+-import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.js";
++import { __bobbitCoreToolResultGateMarker, runAgentLoop, runAgentLoopContinue } from "./agent-loop.js";
+ import { getDefaultStreamFn } from "./stream-fn.js";
+ function defaultConvertToLlm(messages) {
+     return messages.filter((message) => message.role === "user" || message.role === "assistant" || message.role === "toolResult");
+@@ -96,6 +96,8 @@
+     onResponse;
+     beforeToolCall;
+     afterToolCall;
++    // @internal Identity marker copied into the loop config by core session code.
++    __bobbitCoreToolResultGateActive;
+     shouldStopAfterTurn;
+     prepareNextTurn;
+     prepareNextTurnWithContext;
+@@ -299,6 +301,7 @@
+             toolExecution: this.toolExecution,
+             beforeToolCall: this.beforeToolCall,
+             afterToolCall: this.afterToolCall,
++            __bobbitCoreToolResultGateMarker: this.__bobbitCoreToolResultGateActive ? __bobbitCoreToolResultGateMarker : undefined,
+             shouldStopAfterTurn: shouldStopAfterTurn
+                 ? async (context) => await shouldStopAfterTurn(context, this.signal)
+                 : undefined,
+diff --git a/node_modules/@earendil-works/pi-agent-core/dist/agent.d.ts b/node_modules/@earendil-works/pi-agent-core/dist/agent.d.ts
+--- a/node_modules/@earendil-works/pi-agent-core/dist/agent.d.ts
++++ b/node_modules/@earendil-works/pi-agent-core/dist/agent.d.ts
+@@ -12,6 +12,8 @@
+     onResponse?: SimpleStreamOptions["onResponse"];
+     beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined>;
+     afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
++    /** @internal Identity marker only Pi core session code can install. */
++    __bobbitCoreToolResultGateActive?: boolean;
+     shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext, signal?: AbortSignal) => boolean | Promise<boolean>;
+     prepareNextTurn?: (signal?: AbortSignal) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
+     prepareNextTurnWithContext?: (context: PrepareNextTurnContext, signal?: AbortSignal) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
+@@ -42,6 +44,8 @@
+     onResponse?: SimpleStreamOptions["onResponse"];
+     beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined>;
+     afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
++    /** @internal Identity marker only Pi core session code can install. */
++    __bobbitCoreToolResultGateActive?: boolean;
+     shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext, signal?: AbortSignal) => boolean | Promise<boolean>;
+     prepareNextTurn?: (signal?: AbortSignal) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
+     prepareNextTurnWithContext?: (context: PrepareNextTurnContext, signal?: AbortSignal) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
+diff --git a/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.d.ts b/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.d.ts
+--- a/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.d.ts
++++ b/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.d.ts
+@@ -5,6 +5,8 @@
+ import { EventStream } from "@earendil-works/pi-ai";
+ import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, StreamFn } from "./types.ts";
+ export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
++/** @internal Identity marker for the core-owned protected result flow. */
++export declare const __bobbitCoreToolResultGateMarker: unique symbol;
+ /**
+  * Start an agent loop with a new prompt message.
+  * The prompt is added to the context and events are emitted for it.

@@ -1,6 +1,6 @@
 # Side-panel workspace
 
-Bobbit's side-panel workspace is the durable, per-session model for everything that opens to the right of chat. It replaces the old preview-specific/localStorage side-pane state with a server-authoritative tab set shared by previews, pack panels, proposals, review groups, and the staff inbox.
+Bobbit's side-panel workspace is the durable, per-session model for everything that opens to the right of chat. It replaces the old preview-specific/localStorage side-pane state with a server-authoritative tab set shared by previews, pack panels, proposals, review groups and their documents, the staff inbox, and the Context trace inspector.
 
 The workspace owns only side panels. Chat is not a side-panel tab.
 
@@ -14,9 +14,9 @@ For each session, the server is the source of truth for:
 - tab source metadata needed to rehydrate content;
 - the absence of closed tabs.
 
-A closed tab is authoritative absence. Reload, reconnect, restart, WebSocket replay, render, localStorage, and content caches must not recreate it. A closed proposal tab stays closed even if the proposal draft still exists; a closed review tab stays closed even if its group, files, or annotations are cached; a closed preview tab stays closed even if a mount or artifact still exists.
+A closed tab is authoritative absence. Reload, reconnect, restart, WebSocket replay, render, localStorage, and content caches must not recreate it. A closed proposal tab stays closed even if the proposal draft still exists; a closed review tab stays closed even if its group, files, documents, or annotations are cached; a closed preview tab stays closed even if a mount or artifact still exists; and a closed Context tab stays closed even if the trace endpoint has rows.
 
-Tabs can be created or focused only through explicit workspace open/reopen events. The real app render path renders the server workspace it has hydrated; it does not derive tabs from `activeProposals`, review-group caches, inbox booleans, preview mount state, or localStorage. File-based browser fixtures keep a local fallback so unit fixtures can run without a gateway, but that fallback is not the product authority.
+Tabs can be created or focused only through explicit workspace open/reopen events. The real app render path renders the server workspace it has hydrated; it does not derive tabs from `activeProposals`, review-group/document caches, inbox booleans, preview mount state, trace endpoint results, or localStorage. File-based browser fixtures keep a local fallback so unit fixtures can run without a gateway, but that fallback is not the product authority.
 
 ## Data model and persistence
 
@@ -24,7 +24,7 @@ The shared model lives in `src/shared/side-panel-workspace.ts` and is stored on 
 
 ```ts
 export type SidePanelSizeMode = "collapsed" | "split" | "fullscreen";
-export type SidePanelKind = "preview" | "proposal" | "review" | "inbox" | "pack";
+export type SidePanelKind = "preview" | "proposal" | "review" | "inbox" | "context" | "pack";
 ```
 
 A workspace contains:
@@ -49,6 +49,7 @@ Every committed mutation increments `revision`, persists the whole workspace thr
 | Proposal | `proposal:<type>` or `proposal:<type>:rev:<N>` | `proposalType`, `rev?`, `historical?` | Types are `goal`, `project`, `role`, `tool`, and `staff`. Current revisions update the current tab; historical revs open only by explicit reopen. |
 | Review | `review:<encoded-reviewId>` | stable `reviewId`, display `title`; artifact-backed reviews also carry exact `toolCallId`, `payloadId`, and `contentHash`; state carries `activeFileId` | One closable primary tab represents the whole review. Its ordered files are review-pane navigation, never workspace tabs. |
 | Inbox | `inbox` | session id and optional `staffId` | Staff inbox opens/focuses through the same workspace APIs as other panels. |
+| Context | `context` (singleton) | `{ type: "context", sessionId }` | **Session actions → View context trace** explicitly opens or focuses the read-only inspector. The tab is persisted in that session's workspace; after close it remains absent until that explicit action reopens it, even when durable trace rows exist. See [Context Trace Inspector](lifecycle-hub.md#context-trace-inspector) for its data-safety, loading, and update boundary. |
 
 ### Legacy chat artifacts exclusion
 

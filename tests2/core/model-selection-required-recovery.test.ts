@@ -447,6 +447,24 @@ describe("retired persisted model cold recovery", () => {
 		fs.rmSync(rollbackFailureFile, { force: true });
 		fs.writeFileSync(transcriptFile, poisonedTranscriptBytes, "utf-8");
 
+		// A recovery request with no valid caller selection must not fabricate a
+		// thinking level when the durable tuple also lacks one. It must fail before
+		// spawning a replacement and preserve the recoverable capsule.
+		store.update(SESSION_ID, { effectiveThinkingLevel: undefined });
+		const noAuthorityBridgeFactory = vi.fn(() => replacementBridge({
+			initialModel: `${replacement.provider}/${replacement.id}`,
+		}));
+		registerRpcBridgeFactory(noAuthorityBridgeFactory);
+		await assert.rejects(
+			manager.recoverModelSelectionRequired(SESSION_ID, replacement.provider, replacement.id),
+			(error: any) => error?.code === "MODEL_RECOVERY_FAILED",
+			"recovery without explicit or durable thinking authority must fail closed",
+		);
+		assert.equal(noAuthorityBridgeFactory.mock.calls.length, 0, "fail-closed recovery must not spawn a replacement");
+		assert.equal(manager.getSession(SESSION_ID), recovered, "failed authority resolution must retain the recoverable capsule");
+		assert.deepEqual(recovered.condition, EXPECTED_CONDITION, "failed authority resolution must retain recovery state");
+		store.update(SESSION_ID, { effectiveThinkingLevel: "high" });
+
 		let successfulOptions: Record<string, any> | undefined;
 		let successfulBridge: any;
 		let durableTupleAtConditionClear: Record<string, unknown> | undefined;
@@ -476,7 +494,6 @@ describe("retired persisted model cold recovery", () => {
 			SESSION_ID,
 			replacement.provider,
 			replacement.id,
-			"high",
 		);
 
 		await vi.waitFor(() => {
@@ -505,6 +522,7 @@ describe("retired persisted model cold recovery", () => {
 		releaseBgRestore();
 		const activated = await activation;
 		assert.equal(successfulOptions?.initialModel, `${replacement.provider}/${replacement.id}`, "recovery must spawn pinned to the selected exact tuple");
+		assert.equal(successfulOptions?.initialThinkingLevel, "high", "recovery without a caller override must retain the durable thinking tuple");
 		assert.equal(activated.provider, replacement.provider);
 		assert.equal(activated.modelId, replacement.id);
 		assert.equal(manager.getSession(SESSION_ID)?.condition, undefined, "verified activation clears the condition");

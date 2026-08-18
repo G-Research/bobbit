@@ -3,6 +3,7 @@ import type { RemoteAgent, ConnectionStatus } from "./remote-agent.js";
 import type { InboxEntry } from "../server/agent/inbox-store.js";
 import type { PanelWorkspaceTab } from "./panel-workspace.js";
 import type { SidePanelWorkspace } from "./side-panel-workspace.js";
+import type { SandboxStatusResponse } from "./api.js";
 import { isConfigPageRoute } from "./routing.js";
 import { type ProjectKind } from "./headquarters.js";
 import { safeSetItem, safeGetItem, safeGetJSON } from "./safe-storage.js";
@@ -189,6 +190,8 @@ export interface Goal {
 	 *  collapsing the team-lead also hides the sub-goals it owns. */
 	spawnedBySessionId?: string;
 	paused?: boolean;
+	/** Core-owned reason for an exact consent pause; absent for manual pauses. */
+	pauseReason?: { kind: "awaiting-extension-consent"; requestId: string; createdAt: string };
 	replanCount?: number;
 	/** Plan-tab enrichment (Phase 5c). Sourced ONLY from `GET /descendants`
 	 *  (`enrichDescendantsForPlan`), never from the live goal feed. Carried
@@ -437,7 +440,7 @@ export const state = {
 	 * tool). See `src/app/proposal-registry.ts` for `ProposalSlot`.
 	 */
 	activeProposals: {} as Partial<Record<
-		"goal" | "project" | "role" | "tool" | "staff",
+		"goal" | "project" | "workflow" | "role" | "tool" | "staff",
 		{
 			sessionId: string;
 			fields: Record<string, unknown>;
@@ -702,7 +705,7 @@ export const state = {
 	showHeadquartersInProjectLists: true,
 
 	/** Docker sandbox status (fetched on demand) */
-	sandboxStatus: null as { available: boolean; error?: string; dockerVersion?: string; imageExists?: boolean; configured: boolean; dockerfileExists?: boolean; buildCommand?: string } | null,
+	sandboxStatus: null as SandboxStatusResponse | null,
 
 	/** Per-proposal-tag streaming flag. True between the first message_update
 	 *  delta carrying a propose_<tag> block and the matching block-finish event.

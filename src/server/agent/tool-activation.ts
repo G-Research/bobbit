@@ -16,13 +16,13 @@
  */
 
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import type { ScopedToolContext, ToolManager, ToolProvider } from "./tool-manager.js";
+import type { BobbitExtensionProvenance, ResolvedToolProvider, ScopedToolContext, ToolManager } from "./tool-manager.js";
 import type { McpManager } from "../mcp/mcp-manager.js";
 import type { GrantPolicy } from "./role-store.js";
-import { generateToolGuardExtension, type ToolPolicyEntry } from "./tool-guard-extension.js";
+import { generateToolGuardExtension, type RequestMutationToolActivation, type ToolPolicyEntry } from "./tool-guard-extension.js";
 import {
 	makeMetaToolName,
 	buildMetaToolInputSchema,
@@ -122,10 +122,13 @@ function debugInactiveProviderSkipOnce(name: string, inactive: InactiveToolContr
 const policiesCache = new Map<string, Record<string, ToolPolicyEntry>>();
 /** Cached result of `writeMcpProxyExtensions` — value must be validated via fs.existsSync before return. */
 const mcpProxyCache = new Map<string, string[]>();
-/** Cached generated guard-extension source (skips the template-gen step). Keyed by (sessionId, policies, grantedTools). */
+/** Cached generated guard-extension source (skips the template-gen step). Keyed only by generated-source inputs; runtime identity is captured per activation. */
 const guardCodeCache = new Map<string, string>();
-/** Cached guard-extension file path (skips fs read-compare-write when the same code was already persisted). Must be validated via fs.existsSync before return. */
+/** Cached guard-extension file path. Every hit is integrity-checked before reuse. */
 const guardFileCache = new Map<string, string>();
+
+/** Fixed fail-closed error; never include attacker-controlled paths or bytes. */
+export const TOOL_GUARD_ARTIFACT_INTEGRITY_ERROR = "Tool guard artifact integrity check failed.";
 
 /**
  * Renamed/removed tool keys → their replacement. A user/project tool-policy or
@@ -574,6 +577,14 @@ export function computeEffectiveAllowedTools(
 	return result;
 }
 
+export interface ActiveBobbitExtensionProvider {
+	/** Server-derived provider identity; never sourced from extension YAML. */
+	toolName: string;
+	extensionPath: string;
+	/** `builtin` is the only same-realm provider allowed beside the result gate. */
+	provenance: BobbitExtensionProvenance;
+}
+
 export interface ToolActivationResult {
 	/** CLI args to add (e.g. ["--no-builtin-tools", "--no-extensions", "--extension", "/path/to/ext"]) */
 	args: string[];
@@ -586,6 +597,8 @@ export interface ToolActivationResult {
 	 * value is `""` so the extension registers nothing.
 	 */
 	env: Record<string, string>;
+	/** Every active YAML `bobbit-extension` provider and its cascade provenance. */
+	activeBobbitExtensionProviders: readonly ActiveBobbitExtensionProvider[];
 }
 
 /** Pi file-tool builtins re-registered via defaults/tools/_builtins/extension.ts. */
@@ -595,7 +608,7 @@ const FILE_TOOL_BUILTIN_NAMES = new Set(["read", "edit", "write", "grep", "find"
  * Resolve the absolute path for a bobbit-extension provider.
  * Uses the provider's baseDir (resolved from the cascade) instead of a hardcoded TOOLS_DIR.
  */
-function resolveExtensionPath(provider: ToolProvider & { groupDir: string; baseDir: string }): string {
+function resolveExtensionPath(provider: ResolvedToolProvider): string {
 	return path.join(provider.baseDir, provider.groupDir, provider.extension!);
 }
 
@@ -1018,6 +1031,63 @@ export function computeToolPolicies(
 	return result;
 }
 
+function failToolGuardArtifactIntegrity(): never {
+	throw new Error(TOOL_GUARD_ARTIFACT_INTEGRITY_ERROR);
+}
+
+/** Only ENOENT means a new content-addressed artifact may be created. */
+function lstatToolGuardPath(filePath: string): fs.Stats | undefined {
+	try {
+		return fs.lstatSync(filePath);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	}
+}
+
+/** Windows does not implement POSIX owner/group/other permission semantics. */
+function requiresPosixToolGuardModes(): boolean {
+	return process.platform !== "win32";
+}
+
+/** Guard roots are host-owned and must never traverse a link into untrusted state. */
+function ensureTrustedToolGuardDirectory(dir: string): void {
+	const stat = lstatToolGuardPath(dir);
+	if (!stat?.isDirectory() || stat.isSymbolicLink()) failToolGuardArtifactIntegrity();
+	if (requiresPosixToolGuardModes()) fs.chmodSync(dir, 0o755);
+	const verified = lstatToolGuardPath(dir);
+	if (!verified?.isDirectory() || verified.isSymbolicLink()) failToolGuardArtifactIntegrity();
+	if (requiresPosixToolGuardModes() && (verified.mode & 0o777) !== 0o755) failToolGuardArtifactIntegrity();
+}
+
+function hasExpectedRegularToolGuardFile(filePath: string, expected: string): boolean {
+	try {
+		const stat = fs.lstatSync(filePath);
+		return stat.isFile() && !stat.isSymbolicLink() && fs.readFileSync(filePath, "utf-8") === expected;
+	} catch {
+		return false;
+	}
+}
+
+function hasTrustedToolGuardArtifact(baseDir: string, extDir: string, filePath: string, expected: string): boolean {
+	try {
+		const root = fs.lstatSync(baseDir);
+		const directory = fs.lstatSync(extDir);
+		const file = fs.lstatSync(filePath);
+		const expectedModes = !requiresPosixToolGuardModes()
+			|| ((root.mode & 0o111) === 0o111
+				&& (directory.mode & 0o111) === 0o111
+				&& (file.mode & 0o777) === 0o444);
+		return root.isDirectory() && !root.isSymbolicLink()
+			&& directory.isDirectory() && !directory.isSymbolicLink()
+			&& file.isFile() && !file.isSymbolicLink()
+			&& expectedModes
+			&& fs.readFileSync(filePath, "utf-8") === expected;
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Write the tool_call guard extension if any tools have 'ask' policy.
  * Returns the file path of the written extension, or undefined if no guard is needed.
@@ -1031,6 +1101,7 @@ export function writeToolGuardExtension(
 	grantedTools?: string[],
 	disabledTools?: ReadonlySet<string>,
 	scopedContext?: ScopedToolContext,
+	requestMutation?: RequestMutationToolActivation,
 ): string | undefined {
 	const computed = computeToolPolicies(toolManager, mcpManager, role, groupPolicyStore, scopedContext);
 	const hasDisabled = !!disabledTools && disabledTools.size > 0;
@@ -1047,10 +1118,11 @@ export function writeToolGuardExtension(
 		}
 	}
 
-	// Generate the guard if any tool needs interception — 'ask' (long-poll for
-	// user grant) or 'never' (hard-block). 'allow' tools don't need the guard.
+	// Generate the guard if existing role policy needs interception or a live
+	// core dispatcher has tool-safety hooks. The generated source contains no
+	// grant or hook identity; the route rechecks authority on every call.
 	const hasGuardedTools = Object.values(policies).some(p => p.policy === 'ask' || p.policy === 'never');
-	if (!hasGuardedTools) return undefined;
+	if (!hasGuardedTools && !requestMutation?.toolSafety) return undefined;
 
 	// Fingerprint of all inputs that affect the generated code. Used to cache
 	// both the generated source (skip template gen) and the written file path
@@ -1061,38 +1133,66 @@ export function writeToolGuardExtension(
 		policies,
 		grantedTools: (grantedTools ?? []).slice().sort(),
 		...(hasDisabled ? { disabledTools: [...disabledTools!].map(t => t.toLowerCase()).sort() } : {}),
+		...(requestMutation?.toolSafety ? { requestMutation: "tool-safety" } : {}),
 	});
 
-	// Fast path: same code was already written to disk — reuse path if it still exists.
-	const cachedPath = guardFileCache.get(genKey);
-	if (cachedPath && fs.existsSync(cachedPath)) return cachedPath;
-
-	// Generate (or fetch cached) source code
+	// Generate (or fetch cached) source code before checking the file cache: a
+	// pathname is never authority to reuse a guard. The exact expected bytes are.
 	let code = guardCodeCache.get(genKey);
 	if (!code) {
-		code = generateToolGuardExtension(sessionId, policies, grantedTools ?? []);
+		code = generateToolGuardExtension(sessionId, policies, grantedTools ?? [], requestMutation);
 		guardCodeCache.set(genKey, code);
 	}
 
-	// Write to .bobbit/state/tool-guard/ with content hash for dedup
 	const baseDir = path.join(bobbitStateDir(), "tool-guard");
 	const hash = createHash("sha256").update(code).digest("hex").slice(0, 12);
 	const extDir = path.join(baseDir, hash);
-	fs.mkdirSync(extDir, { recursive: true });
-
 	const filePath = path.join(extDir, "guard.ts");
-	// Only write if content changed (avoid unnecessary fs writes)
+
 	try {
-		const existing = fs.readFileSync(filePath, "utf-8");
-		if (existing === code) {
+		// Cached paths must pass the same root, directory, type, content, and mode
+		// checks as a fresh write. `existsSync` follows symlinks and is not safe here.
+		if (guardFileCache.get(genKey) === filePath && hasTrustedToolGuardArtifact(baseDir, extDir, filePath, code)) {
+			return filePath;
+		}
+		guardFileCache.delete(genKey);
+
+		fs.mkdirSync(baseDir, { recursive: true, mode: 0o755 });
+		ensureTrustedToolGuardDirectory(baseDir);
+		fs.mkdirSync(extDir, { recursive: true, mode: 0o755 });
+		ensureTrustedToolGuardDirectory(extDir);
+
+		const existing = lstatToolGuardPath(filePath);
+		if (existing) {
+			if (!hasExpectedRegularToolGuardFile(filePath, code)) failToolGuardArtifactIntegrity();
+			// Repair a permissive inherited mode only after content/type validation.
+			if (requiresPosixToolGuardModes()) fs.chmodSync(filePath, 0o444);
+			if (!hasTrustedToolGuardArtifact(baseDir, extDir, filePath, code)) failToolGuardArtifactIntegrity();
 			guardFileCache.set(genKey, filePath);
 			return filePath;
 		}
-	} catch { /* file doesn't exist yet */ }
-	fs.writeFileSync(filePath, code, "utf-8");
-	guardFileCache.set(genKey, filePath);
 
-	return filePath;
+		// Publish only complete, durable source. The exclusive temporary file
+		// prevents partial readers, while rename makes publication atomic. POSIX
+		// files become read-only before publication; Windows must not rename a
+		// read-only temporary file because that can race/fail on NTFS.
+		const tempPath = path.join(extDir, `.guard-${process.pid}-${randomUUID()}.tmp`);
+		const fd = fs.openSync(tempPath, "wx", 0o600);
+		try {
+			fs.writeFileSync(fd, code, "utf-8");
+			fs.fsyncSync(fd);
+		} finally {
+			fs.closeSync(fd);
+		}
+		if (requiresPosixToolGuardModes()) fs.chmodSync(tempPath, 0o444);
+		fs.renameSync(tempPath, filePath);
+		if (!hasTrustedToolGuardArtifact(baseDir, extDir, filePath, code)) failToolGuardArtifactIntegrity();
+		guardFileCache.set(genKey, filePath);
+		return filePath;
+	} catch {
+		guardFileCache.delete(genKey);
+		failToolGuardArtifactIntegrity();
+	}
 }
 
 /**
@@ -1111,6 +1211,8 @@ export function writeMcpProxyExtensions(
 	groupPolicyStore?: GroupPolicyProvider,
 	disabledTools?: ReadonlySet<string>,
 	scopedContext?: ScopedToolContext,
+	/** Opaque pinned dynamic-capability snapshot identity. Keeps proxy artifacts isolated across selections. */
+	selectionFingerprint?: string,
 ): string[] {
 	const infos = mcpManager.getToolInfos();
 	const hasDisabled = !!disabledTools && disabledTools.size > 0;
@@ -1137,6 +1239,11 @@ export function writeMcpProxyExtensions(
 		toolPolicies: role?.toolPolicies ?? null,
 		groupPolicies: readGroupPolicies(groupPolicyStore),
 		toolScopeKey: scopedContext?.scopeKey ?? "default",
+		// The final allowed names normally distinguish proxy artifacts, but retain
+		// the immutable selection identity as a defense-in-depth cache boundary:
+		// no artifact built while one selector snapshot was pinned may satisfy a
+		// later snapshot through an incidental equal name list.
+		...(selectionFingerprint ? { selectionFingerprint } : {}),
 		...(hasDisabled ? { disabledTools: [...disabledTools!].map(t => t.toLowerCase()).sort() } : {}),
 	});
 	const cachedPaths = mcpProxyCache.get(cacheKey);
@@ -1327,6 +1434,7 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 
 	const builtinsToRegister = new Set<string>();
 	const extensionPaths = new Set<string>();
+	const activeBobbitExtensionProviders = new Map<string, ActiveBobbitExtensionProvider>();
 
 	if (!toolManager) {
 		// Fallback: no tool manager available, can't resolve providers.
@@ -1350,7 +1458,7 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 		if (mcpExtensionPaths) {
 			for (const extPath of mcpExtensionPaths) args.push("--extension", extPath);
 		}
-		return { args, env };
+		return { args, env, activeBobbitExtensionProviders: [] };
 	}
 
 	// Always load the _builtins extension; it reads BOBBIT_BUILTIN_TOOLS to
@@ -1397,7 +1505,17 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 					console.warn(`[tool-activation] Tool "${entry.name}" has provider.type: builtin with tool: "${provider.tool}" but no handler — extension not loaded; this is likely a misconfigured YAML`);
 				}
 			} else if (provider.type === "bobbit-extension" && provider.extension) {
-				extensionPaths.add(resolveExtensionPath(provider));
+				const extensionPath = resolveExtensionPath(provider);
+				extensionPaths.add(extensionPath);
+				// Provenance is resolved by ToolManager from the winning cascade
+				// layer, not inferred from a CLI path or mutable provider YAML.
+				if (!activeBobbitExtensionProviders.has(extensionPath)) {
+					activeBobbitExtensionProviders.set(extensionPath, {
+						toolName: entry.name,
+						extensionPath,
+						provenance: provider.extensionProvenance ?? "unknown",
+					});
+				}
 			}
 		}
 	};
@@ -1418,5 +1536,5 @@ export function computeToolActivationArgs(allowedTools?: EffectiveTool[], toolMa
 	if (mcpExtensionPaths) {
 		for (const extPath of mcpExtensionPaths) args.push("--extension", extPath);
 	}
-	return { args, env };
+	return { args, env, activeBobbitExtensionProviders: [...activeBobbitExtensionProviders.values()] };
 }

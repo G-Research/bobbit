@@ -50,7 +50,7 @@ import { HEADQUARTERS_HELPER_TEXT, HEADQUARTERS_PROJECT_ID, HEADQUARTERS_PROJECT
 import { getRouteFromHash, setHashRoute, toggleConfigPage, type SettingsTabId } from "./routing.js";
 import { renderWorkflowPage, loadWorkflowPageData } from "./workflow-page.js";
 import { setConfigScope, getConfigScope, getConfigApiProjectId } from "./config-scope.js";
-import { gatewayFetch, fetchSandboxStatus, fetchHarnessStatus, requestHarnessRestart, removeProject, fetchProjects, searchStats, searchRebuild, orphanedIndexRows, cleanupOrphanedIndexRows, type SearchStats, type OrphanedIndexRows } from "./api.js";
+import { gatewayFetch, fetchSandboxStatus, fetchHarnessStatus, requestHarnessRestart, removeProject, fetchProjects, searchStats, searchRebuild, orphanedIndexRows, cleanupOrphanedIndexRows, type SandboxRequirementsStatus, type SandboxRequirementState, type SandboxStatusResponse, type SearchStats, type OrphanedIndexRows } from "./api.js";
 import {
 	PLAY_FINISH_SOUND_CHANGED,
 	PROJECT_PLAY_FINISH_SOUND_KEY,
@@ -491,7 +491,7 @@ async function resetProjectScopeField(projectId: string, key: string): Promise<v
 }
 
 // ── Sandbox section state ──
-let sandboxStatusLocal: { available: boolean; error?: string; dockerVersion?: string; imageExists?: boolean; dockerfileExists?: boolean; buildCommand?: string; configured: boolean } | null = null;
+let sandboxStatusLocal: SandboxStatusResponse | null = null;
 let sandboxStatusLoaded = false;
 let sandboxStatusProjectId = "";
 let sandboxBuildInProgress = false;
@@ -505,6 +505,43 @@ let hostTokensLoaded = false;
 // Per-project mutable state for dynamic list editors (tokens, mounts)
 const _sandboxTokenEntries = new Map<string, { key: string; value: string; enabled: boolean; isHost: boolean; redacted: boolean }[]>();
 const _sandboxMountEntries = new Map<string, string[]>();
+
+const MAX_VISIBLE_SANDBOX_REQUIREMENTS = 8;
+
+function sandboxRequirementStateClass(state: SandboxRequirementState): string {
+	return state === "available"
+		? "text-green-600"
+		: state === "failed"
+			? "text-red-500"
+			: state === "unsupported"
+				? "text-orange-500"
+				: "text-muted-foreground";
+}
+
+/** Bounded, screen-reader-visible status projection for server-resolved requirements. */
+export function renderSandboxRequirementStates(requirements?: SandboxRequirementsStatus) {
+	if (!requirements?.entries.length) return "";
+	const visibleEntries = requirements.entries.slice(0, MAX_VISIBLE_SANDBOX_REQUIREMENTS);
+	const remaining = requirements.entries.length - visibleEntries.length;
+	return html`
+		<div class="basis-full flex flex-col gap-1 text-xs" data-testid="sandbox-requirement-statuses" role="list" aria-label="Sandbox requirement statuses">
+			${visibleEntries.map((requirement) => html`
+				<div
+					class="flex items-center gap-2"
+					role="listitem"
+					data-testid="sandbox-requirement-status"
+					data-state=${requirement.state}
+					aria-label=${`Sandbox requirement ${requirement.packId}/${requirement.requirementId}: ${requirement.state}${requirement.code ? ` (${requirement.code})` : ""}`}
+				>
+					<span class="font-mono text-muted-foreground">${requirement.packId}/${requirement.requirementId}</span>
+					<span class=${sandboxRequirementStateClass(requirement.state)}>${requirement.state}</span>
+					${requirement.code ? html`<span class="text-muted-foreground">(${requirement.code})</span>` : ""}
+				</div>
+			`)}
+			${remaining > 0 ? html`<span class="text-muted-foreground" data-testid="sandbox-requirement-status-overflow">${remaining} additional requirement${remaining === 1 ? "" : "s"}</span>` : ""}
+		</div>
+	`;
+}
 
 function loadSandboxStatus(projectId = getConfigApiProjectId(getActiveScope())): void {
 	if (sandboxStatusLoaded && sandboxStatusProjectId === projectId) return;
@@ -689,6 +726,8 @@ function renderSandboxSection(
 
 	const sandboxMode = pendingChanges.sandbox ?? resolved.sandbox?.value ?? "none";
 	const imageName = pendingChanges.sandbox_image ?? resolved.sandbox_image?.value ?? "bobbit-agent";
+	// Status is server-resolved; a requirement plan can point Docker at a derived image.
+	const checkedImageName = sandboxStatusLocal?.imageName ?? imageName;
 	const tokenEntries = _sandboxTokenEntries.get(projectId) || [];
 	const mountEntries = _sandboxMountEntries.get(projectId) || [];
 
@@ -718,7 +757,7 @@ function renderSandboxSection(
 			<!-- Docker Status -->
 			<div class="flex items-center gap-3">
 				<span class="${labelClass}">Docker Status</span>
-				<div class="flex items-center gap-2 text-sm">
+				<div class="flex flex-wrap items-center gap-2 text-sm">
 					${sandboxStatusLocal === null
 						? html`<span class="text-muted-foreground">Checking...</span>`
 						: sandboxStatusLocal.available
@@ -727,8 +766,10 @@ function renderSandboxSection(
 								<span class="text-foreground">Available${sandboxStatusLocal.dockerVersion ? ` (v${sandboxStatusLocal.dockerVersion})` : ""}</span>
 								${sandboxStatusLocal.imageExists !== undefined
 									? sandboxStatusLocal.imageExists
-										? html`<span class="text-xs text-muted-foreground ml-2">Image "${imageName}": found</span>`
-										: html`<span class="text-xs text-orange-500 ml-2">Image "${imageName}": not found</span>
+										? sandboxStatusLocal.imageReady === false
+										? html`<span class="text-xs text-orange-500 ml-2">Image "${checkedImageName}": stale</span>`
+										: html`<span class="text-xs text-muted-foreground ml-2">Image "${checkedImageName}": found</span>`
+										: html`<span class="text-xs text-orange-500 ml-2">Image "${checkedImageName}": not found</span>
 											${sandboxStatusLocal!.buildCommand ? html`
 												<div class="flex flex-col gap-1 ml-2">
 													<div class="flex items-center gap-2">
@@ -771,6 +812,8 @@ function renderSandboxSection(
 								<span class="w-2 h-2 rounded-full bg-red-500"></span>
 								<span class="text-muted-foreground">Not available${sandboxStatusLocal.error ? ` — ${sandboxStatusLocal.error}` : ""}</span>
 							`}
+					${sandboxStatusLocal?.imageName ? html`<span class="text-xs text-muted-foreground basis-full" data-testid="sandbox-resolved-image">Resolved image "${sandboxStatusLocal.imageName}"</span>` : ""}
+					${renderSandboxRequirementStates(sandboxStatusLocal?.requirements)}
 					<button
 						class="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors ml-1"
 						title="Refresh Docker status"

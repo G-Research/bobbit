@@ -21,11 +21,20 @@ const ARCHIVED_SAFE_ACTION_IDS = [
 	"view-system-prompt",
 	"open-new-window",
 ] as const;
-const ARCHIVED_ACTION_LABELS: Record<typeof ARCHIVED_SAFE_ACTION_IDS[number], string> = {
+const ACTIVE_ARCHIVED_SAFE_ACTION_IDS = [
+	"continue-archived",
+	"copy-link",
+	"pin",
+	"view-system-prompt",
+	"view-context-trace",
+	"open-new-window",
+] as const;
+const ARCHIVED_ACTION_LABELS: Record<typeof ACTIVE_ARCHIVED_SAFE_ACTION_IDS[number], string> = {
 	"continue-archived": "Continue in new session",
 	"copy-link": "Copy link",
 	"pin": "Pin session",
 	"view-system-prompt": "View system prompt",
+	"view-context-trace": "View context trace",
 	"open-new-window": "Open in new window",
 };
 const ARCHIVED_READ_ONLY_ACTION_IDS = ARCHIVED_SAFE_ACTION_IDS.filter((id) => id !== "continue-archived");
@@ -168,7 +177,7 @@ async function popoverLabels(page: Page): Promise<string[]> {
 async function expectArchivedSafeMenu(page: Page, expectedIds: readonly string[] = ARCHIVED_SAFE_ACTION_IDS): Promise<void> {
 	expect(await popoverActionIds(page)).toEqual([...expectedIds]);
 	const labels = await popoverLabels(page);
-	const expectedLabels = expectedIds.map((id) => ARCHIVED_ACTION_LABELS[id as typeof ARCHIVED_SAFE_ACTION_IDS[number]]);
+	const expectedLabels = expectedIds.map((id) => ARCHIVED_ACTION_LABELS[id as typeof ACTIVE_ARCHIVED_SAFE_ACTION_IDS[number]]);
 	expect(labels).toEqual(expectedLabels);
 	for (const forbidden of FORBIDDEN_LABELS) {
 		expect(labels.join("\n"), `${forbidden} must not appear in archived session menus`).not.toContain(forbidden);
@@ -261,7 +270,7 @@ test.describe("archived session actions", () => {
 		const headerPin = page.locator('[data-session-action-surface="header"][data-session-action-id="pin"]');
 		await expect(headerPin, "Pin must not leak into the archived desktop header").toHaveCount(0);
 		await openHeaderMenu(page);
-		await expectArchivedSafeMenu(page);
+		await expectArchivedSafeMenu(page, ACTIVE_ARCHIVED_SAFE_ACTION_IDS);
 		await menuItem(page, "pin").click();
 		await expect.poll(() => page.evaluate((id) => {
 			const session = (window as any).bobbitState?.archivedSessions?.find((candidate: { id?: string }) => candidate.id === id);
@@ -269,7 +278,7 @@ test.describe("archived session actions", () => {
 		}, archivedId), { message: "archived Pin action should update the loaded session" }).toBe(true);
 		await expect(headerPin, "Unpin must also remain absent from the archived desktop header").toHaveCount(0);
 		await openHeaderMenu(page);
-		expect(await popoverActionIds(page), "archived menu order should remain unchanged after pinning").toEqual([...ARCHIVED_SAFE_ACTION_IDS]);
+		expect(await popoverActionIds(page), "archived menu order should remain unchanged after pinning").toEqual([...ACTIVE_ARCHIVED_SAFE_ACTION_IDS]);
 		await expect(menuItem(page, "pin"), "archived Pin item should become Unpin in-place").toContainText("Unpin session");
 		await closePopover(page);
 	});
@@ -282,7 +291,7 @@ test.describe("archived session actions", () => {
 		await openApp(page);
 		await openArchivedSession(page, archivedId);
 		await openHeaderMenu(page);
-		await expectArchivedSafeMenu(page);
+		await expectArchivedSafeMenu(page, ACTIVE_ARCHIVED_SAFE_ACTION_IDS);
 		const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
 		expect(overflow, "mobile archived header menu must not create horizontal overflow").toBeLessThanOrEqual(1);
 	});

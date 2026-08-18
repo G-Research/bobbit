@@ -66,6 +66,13 @@ import type { UserMessageWithAttachments } from "./Messages.js";
 import type { StreamingMessageContainer } from "./StreamingMessageContainer.js";
 import type { GitRepoKnown } from "../../app/git-status-refresh.js";
 import { selectPromptAuthorDisplayMode } from "../message-author-presentation.js";
+import {
+	activateDecisionRequests,
+	deactivateDecisionRequests,
+	decisionRequestsForSession,
+	type DecisionRequestProjection,
+} from "../../app/extension-decisions.js";
+import { DecisionRequestRenderer } from "../tools/renderers/DecisionRequestRenderer.js";
 
 interface PromptHistoryForkDetail {
 	entryId: string;
@@ -593,6 +600,10 @@ export class AgentInterface extends LitElement {
 	private _attachmentDraftGen = 0;
 	private _cachedToolResults?: Map<string, ToolResultMessage>;
 	private _cachedMessagesRef?: AgentMessage[];
+	@state() private _decisionRequests: readonly DecisionRequestProjection[] = [];
+	private _unsubscribeDecisionRequests?: () => void;
+	private _decisionRequestsSessionId?: string;
+	private readonly _decisionRequestRenderer = new DecisionRequestRenderer();
 
 	public setInput(text: string, attachments?: Attachment[]) {
 		// Keep the lifted per-session draft in sync so the editor binding and the
@@ -925,6 +936,7 @@ export class AgentInterface extends LitElement {
 		// Re-subscribe when session property changes
 		if (changedProperties.has("session")) {
 			this.setupSessionSubscription();
+			if (this.isConnected) this.setupDecisionRequestProjection();
 			this._preCompactionPromptAuthorSlices = new Map();
 			const newSid = this.session?.sessionId;
 			// Restore the per-session composer attachment draft (lifted out of the
@@ -1074,6 +1086,7 @@ export class AgentInterface extends LitElement {
 
 		// Subscribe to external session if provided
 		this.setupSessionSubscription();
+		this.setupDecisionRequestProjection();
 
 		// Track host container width so the prompt-bar row compacts when the chat
 		// column is narrowed (mobile viewport OR desktop side-panel-open).
@@ -1141,6 +1154,25 @@ export class AgentInterface extends LitElement {
 			this._unsubscribeSession();
 			this._unsubscribeSession = undefined;
 		}
+		this._unsubscribeDecisionRequests?.();
+		this._unsubscribeDecisionRequests = undefined;
+		deactivateDecisionRequests(this._decisionRequestsSessionId);
+		this._decisionRequestsSessionId = undefined;
+	}
+
+	private setupDecisionRequestProjection(): void {
+		this._unsubscribeDecisionRequests?.();
+		this._unsubscribeDecisionRequests = undefined;
+		deactivateDecisionRequests(this._decisionRequestsSessionId);
+		this._decisionRequestsSessionId = undefined;
+		this._decisionRequests = [];
+		const sessionId = this.session?.sessionId;
+		if (!sessionId) return;
+		this._decisionRequestsSessionId = sessionId;
+		this._unsubscribeDecisionRequests = activateDecisionRequests(sessionId, () => {
+			if (this.session?.sessionId !== sessionId) return;
+			this._decisionRequests = [...decisionRequestsForSession(sessionId)];
+		});
 	}
 
 	private setupSessionSubscription() {
@@ -2084,6 +2116,14 @@ export class AgentInterface extends LitElement {
 		`;
 	}
 
+	private renderDecisionRequests() {
+		const sessionId = this.session?.sessionId;
+		if (!sessionId || this._decisionRequests.length === 0) return nothing;
+		return html`<div class="decision-request-list flex flex-col gap-3" aria-label="Decision requests">
+			${this._decisionRequests.map((request) => this._decisionRequestRenderer.render(request, sessionId))}
+		</div>`;
+	}
+
 	private renderMessages() {
 		if (!this.session)
 			return html`<div class="p-4 text-center text-muted-foreground">${i18n("No session available")}</div>`;
@@ -2165,6 +2205,8 @@ export class AgentInterface extends LitElement {
 						(this.session as any).denyToolPermission?.(id, toolName);
 					}}
 				></message-list>
+
+				${this.renderDecisionRequests()}
 
 				<!-- Streaming message container - manages its own updates -->
 				<streaming-message-container

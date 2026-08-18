@@ -97,9 +97,31 @@ export class InboxPanel extends LitElement {
 		this.dispatchEvent(new CustomEvent("inbox-add-close", { bubbles: true, composed: true }));
 	}
 
-	private _onEntryAction(eventName: "inbox-cancel" | "inbox-delete", entryId: string): void {
+	private _reviewConsent(entryId: string): void {
+		const entry = this.entries.find((candidate) => candidate.id === entryId);
+		const requestId = entry?.source?.type === "consent_pause" ? entry.source.requestId : undefined;
+		if (!requestId || !this.sessionId || typeof document === "undefined") return;
+
+		// This is a reference to the existing decision card, never a second answer surface.
+		if (typeof window !== "undefined") window.location.hash = `#/session/${encodeURIComponent(this.sessionId)}`;
+		let attempts = 0;
+		const focusCard = () => {
+			const card = [...document.querySelectorAll<HTMLElement>("[data-decision-request-id]")]
+				.find((candidate) => candidate.dataset.decisionRequestId === requestId);
+			if (card) {
+				card.scrollIntoView({ block: "center" });
+				card.focus({ preventScroll: true });
+				return;
+			}
+			if (++attempts < 30) setTimeout(focusCard, 100);
+		};
+		focusCard();
+	}
+
+	private _onEntryAction(eventName: "inbox-cancel" | "inbox-delete" | "inbox-review-consent", entryId: string): void {
 		if (eventName === "inbox-cancel") void this._cancel(entryId);
-		else void this._delete(entryId);
+		else if (eventName === "inbox-delete") void this._delete(entryId);
+		else this._reviewConsent(entryId);
 	}
 
 	render() {
@@ -143,6 +165,7 @@ export class InboxPanel extends LitElement {
 													.busy=${this._busyEntryIds.has(e.id)}
 													@inbox-cancel=${() => this._onEntryAction("inbox-cancel", e.id)}
 													@inbox-delete=${() => this._onEntryAction("inbox-delete", e.id)}
+													@inbox-review-consent=${() => this._onEntryAction("inbox-review-consent", e.id)}
 												></inbox-entry-row>
 											`)}
 										</div>
@@ -166,6 +189,7 @@ export class InboxPanel extends LitElement {
 														.busy=${this._busyEntryIds.has(e.id)}
 														@inbox-cancel=${() => this._onEntryAction("inbox-cancel", e.id)}
 														@inbox-delete=${() => this._onEntryAction("inbox-delete", e.id)}
+														@inbox-review-consent=${() => this._onEntryAction("inbox-review-consent", e.id)}
 													></inbox-entry-row>
 												`)}
 											</div>

@@ -145,7 +145,9 @@ A squishy pixel-art blob that lives in the UI — animated, expressive, and draw
 | [Development & Testing](docs/dev-workflow.md) | Dev environment, hot reload, testing |
 | [Goals & Workflows](docs/goals-workflows-tasks.md) | Task tracking, gates, and verification |
 | [Nested Sub-Goals](docs/nested-goals.md) | Goals that spawn child goals — teams, depth caps, roll-up, governance |
-| [Marketplace](docs/marketplace.md) | Pack-based install of roles, tools, and skills |
+| [Extension Platform](docs/extension-platform.md) | Install, configure, grant, inspect, revoke, and remove optional pack capabilities |
+| [Marketplace](docs/marketplace.md) | Pack-based install of roles, tools, skills, MCP, and extension contributions |
+| [Project Extension Settings](docs/extension-settings.md) | Typed per-project pack settings, secret handling, API, and Market behavior |
 | [Agent Memory (Hindsight)](docs/hindsight-memory.md) | Built-in, dormant-by-default memory provider backed by Hindsight |
 | [Bobbit Sprites](docs/bobbit-sprites.md) | Pixel-art mascot, animations, and accessories |
 

@@ -105,19 +105,17 @@ test.afterEach(async () => {
 });
 
 test.describe("AI Gateway Configure Flow", () => {
-	test("test connection discovers models without saving", async () => {
+	test("test connection rejects an unpersisted private HTTP gateway without saving", async () => {
 		resetRecordedRequests();
 		const res = await apiFetch("/api/aigw/test", {
 			method: "POST",
 			body: JSON.stringify({ url: `http://127.0.0.1:${mockPort}` }),
 		});
-		expect(res.status).toBe(200);
-		const data = await res.json();
-		expect(data.ok).toBe(true);
-		expect(data.models).toHaveLength(3);
-		expectSingleBobbitUserAgent(lastRecordedRequest("/v1/models"));
+		expect(res.status).toBe(502);
+		expect(await res.json()).toMatchObject({ error: expect.stringMatching(/public HTTPS endpoint/) });
+		expect(recordedRequests).toHaveLength(0);
 
-		// Should NOT be configured after test
+		// A rejected one-off probe must not create a trusted configuration.
 		const status = await apiFetch("/api/aigw/status");
 		const statusData = await status.json();
 		expect(statusData.configured).toBe(false);
@@ -270,6 +268,20 @@ test.describe("AI Gateway Configure Flow", () => {
 		const data = await res.json();
 		expect(data.data).toHaveLength(3);
 		expectSingleBobbitUserAgent(lastRecordedRequest("/v1/models"));
+	});
+
+	test("proxy preserves a configured gateway path prefix", async () => {
+		const prefix = "/gateway-mount";
+		await apiFetch("/api/aigw/configure", {
+			method: "POST",
+			body: JSON.stringify({ url: `http://127.0.0.1:${mockPort}${prefix}/v1` }),
+		});
+		resetRecordedRequests();
+
+		const res = await apiFetch("/api/aigw/v1/models?source=browser");
+		expect(res.status).toBe(200);
+		expect((await res.json()).data).toHaveLength(3);
+		expectSingleBobbitUserAgent(lastRecordedRequest(`${prefix}/v1/models?source=browser`));
 	});
 
 	test("preferences reflect aigw config", async () => {

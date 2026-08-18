@@ -738,6 +738,16 @@ describe("matchExpectFailure", () => {
 		assert.equal(r.passed, true);
 	});
 
+	it("preserves case-insensitive RE2 regex semantics", () => {
+		const r = matchExpectFailure(1, "Build FAILED: warning emitted", "error|fail|warning");
+		assert.equal(r.passed, true);
+	});
+
+	it("rejects RE2-unsupported and oversized patterns as invalid", () => {
+		assert.ok(matchExpectFailure(1, "aa", "(a)\\1").output.includes("Invalid error_pattern regex"));
+		assert.ok(matchExpectFailure(1, "x", "x".repeat(1_025)).output.includes("Invalid error_pattern regex"));
+	});
+
 	it("fails when command fails but error_pattern does not match", () => {
 		const r = matchExpectFailure(1, "Timeout waiting for page", "Expected element");
 		assert.equal(r.passed, false);

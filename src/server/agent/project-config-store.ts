@@ -3,6 +3,31 @@ import { realFs } from "../gateway-deps.js";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import yaml from "yaml";
+import {
+	cloneAdoptedExtension,
+	normalizeAdoptedExtension,
+	redactAdoptedExtension,
+	type AdoptedExtension,
+	type AdoptedExtensionsMap,
+	type AdoptionConformance,
+	type AdoptionScope,
+	type AdoptionStoreWarning,
+} from "./adopted-extensions.js";
+import {
+	DEFAULT_PROMPT_EXTENSION_BUDGET,
+	normalizePromptExtensionBudget,
+	normalizePromptExtensionOverrides,
+	type PromptExtensionBudget,
+	type PromptExtensionOverride,
+} from "./prompt-extension-overrides.js";
+import {
+	isExtensionSettingValue,
+	isWellFormedExtensionSettingsText,
+	normalizeDurableMultiEnumValue,
+	MAX_EXTENSION_SETTINGS_MULTI_ENUM_SELECTED_BYTES_PER_TARGET,
+	MAX_EXTENSION_SETTINGS_MULTI_ENUM_SELECTED_VALUES_PER_TARGET,
+	type ExtensionSettingValue,
+} from "./extension-settings-schema.js";
 
 // ── Component yaml normalization ────────────────────────────
 // SECURITY: `component.repo` and `component.relativePath` are joined onto
@@ -100,6 +125,11 @@ export interface ProjectConfigDraft {
 	setSandboxTokens(tokens: SandboxTokenEntry[]): void;
 	setPackOrder(scope: PackOrderScope, order: string[]): void;
 	setPackActivation(scope: PackOrderScope, packName: string, disabled: DisabledRefs): void;
+	setExtensionGrants(grants: ExtensionGrantMap): void;
+	setExtensionSettings(state: ExtensionSettingsState): void;
+	setAdoptedExtensions(scope: AdoptionScope, entries: Record<string, AdoptedExtension>): void;
+	setPromptExtensionBudget(budget: PromptExtensionBudget): void;
+	setPromptExtensionOverrides(overrides: PromptExtensionOverride[]): void;
 	setComponents(components: Component[]): void;
 	setWorkflows(workflows: Record<string, InlineWorkflowDef> | undefined): void;
 }
@@ -208,7 +238,7 @@ export interface InlineWorkflowDef {
 
 // ── Native-YAML migrated fields (typed side-tables) ──────────────────
 //
-// These five fields used to be JSON-encoded strings (or numeric strings)
+// These native fields used to be JSON-encoded strings (or numeric strings)
 // in project.yaml. They are now first-class structured fields. The store
 // keeps a back-compat surface: `get(key)` for these keys returns the
 // JSON-stringified form computed on demand, so existing call sites that
@@ -227,11 +257,218 @@ export interface SandboxTokenEntry {
 	value?: string;
 }
 
+/** Closed vocabulary for explicit extension capability grants. */
+export type ExtensionCapability =
+	| "decide" | "mutate" | "filter:tool-result" | "store" | "session" | "agents"
+	| "prompt:system-static" | "prompt:system-author"
+	| "service.manage" | "memory.read" | "memory.write" | "memory.reflect"
+	| "memory.invalidate" | "memory.read.all" | "sandbox:build";
+export const EXTENSION_CAPABILITIES: ReadonlySet<ExtensionCapability> = new Set([
+	"decide", "mutate", "filter:tool-result", "store", "session", "agents",
+	"prompt:system-static", "prompt:system-author",
+	"service.manage", "memory.read", "memory.write", "memory.reflect",
+	"memory.invalidate", "memory.read.all", "sandbox:build",
+]);
+
+/** The platform-owned capabilities available only to a non-hook pack principal. */
+export const EXTENSION_PACK_CAPABILITIES: ReadonlySet<ExtensionCapability> = new Set([
+	"service.manage", "memory.read", "memory.write", "memory.reflect",
+	"memory.invalidate", "memory.read.all", "sandbox:build",
+]);
+
+/** Server-derived hook identity. Wildcards are deliberately unsupported. */
+export interface ExtensionHookRef {
+	packId: string;
+	hookId: string;
+}
+
+/** Legacy persisted shape. An absent discriminator permanently means hook. */
+export interface ExtensionHookGrant extends ExtensionHookRef {
+	/** Deliberately absent from persisted hook rows; `principal: "hook"` is invalid. */
+	principal?: never;
+	capability: ExtensionCapability;
+	grantedAt: string;
+	grantedBy: string;
+}
+
+/** Durable exact grant for a non-hook pack principal. */
+export interface ExtensionPackGrant {
+	packId: string;
+	principal: "pack";
+	/** Pack rows must not name a hook. */
+	hookId?: never;
+	capability: ExtensionCapability;
+	grantedAt: string;
+	grantedBy: string;
+}
+
+/** A durable, exact per-project capability grant. */
+export type ExtensionGrant = ExtensionHookGrant | ExtensionPackGrant;
+
+export type ExtensionGrantMap = ExtensionGrant[];
+
+/** A grant's full persisted identity; all fields are operator-bound provenance. */
+export function isExtensionGrant(value: unknown): value is ExtensionGrant {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const candidate = value as Record<string, unknown>;
+	if (!isSafeExtensionGrantIdentifier(candidate.packId)
+		|| !isExtensionCapability(candidate.capability)
+		|| !isCanonicalExtensionGrantTimestamp(candidate.grantedAt)
+		|| !isSafeExtensionGrantIdentifier(candidate.grantedBy)) return false;
+	if (candidate.principal === "pack") return candidate.hookId === undefined;
+	return candidate.principal === undefined && isSafeExtensionGrantIdentifier(candidate.hookId);
+}
+
+/** Exact tuple + metadata equality used to bind config rows to operator state. */
+export function sameExtensionGrant(left: ExtensionGrant, right: ExtensionGrant): boolean {
+	return left.packId === right.packId
+		&& left.capability === right.capability
+		&& left.grantedAt === right.grantedAt
+		&& left.grantedBy === right.grantedBy
+		&& ("principal" in left) === ("principal" in right)
+		&& (("principal" in left) || left.hookId === (right as ExtensionHookGrant).hookId);
+}
+
+/** Public, project-owned settings overlay. Secret fields are never represented here. */
+export interface ExtensionSettingsRecord {
+	enabled?: boolean;
+	values: Record<string, ExtensionSettingValue>;
+}
+
+export type ExtensionSettingsMap = Record<string, ExtensionSettingsRecord>;
+
+/** Storage schema (not contribution schema); revision supports CAS at the API boundary. */
+export interface ExtensionSettingsState {
+	schema: 1 | 2;
+	revision: number;
+	/** Opaque identity paired with the owner-only extension-secret envelope. */
+	commitId?: string;
+	targets: ExtensionSettingsMap;
+}
+
+export const EMPTY_EXTENSION_SETTINGS_STATE: Readonly<ExtensionSettingsState> = Object.freeze({
+	schema: 2,
+	revision: 0,
+	targets: Object.freeze({}) as ExtensionSettingsMap,
+});
+
+const MAX_EXTENSION_SETTINGS_TARGETS = 256;
+const MAX_EXTENSION_SETTINGS_VALUES_PER_TARGET = 64;
+const MAX_EXTENSION_SETTINGS_TARGET_KEY_LENGTH = 512;
+const EXTENSION_SETTINGS_COMMIT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+
+function cloneExtensionSettingValue(value: ExtensionSettingValue): ExtensionSettingValue {
+	return Array.isArray(value) ? [...value] as ExtensionSettingValue : value;
+}
+
+function cloneExtensionSettings(state: ExtensionSettingsState): ExtensionSettingsState {
+	const targets: ExtensionSettingsMap = {};
+	for (const [target, record] of Object.entries(state.targets)) {
+		const values: Record<string, ExtensionSettingValue> = {};
+		for (const [key, value] of Object.entries(record.values)) values[key] = cloneExtensionSettingValue(value);
+		targets[target] = { ...(record.enabled === undefined ? {} : { enabled: record.enabled }), values };
+	}
+	return { schema: state.schema, revision: state.revision, ...(state.commitId === undefined ? {} : { commitId: state.commitId }), targets };
+}
+
+function isPrimitiveExtensionSettingValue(value: unknown): value is Exclude<ExtensionSettingValue, string[]> {
+	return !Array.isArray(value) && isExtensionSettingValue(value);
+}
+
+/**
+ * Defensive storage normalization. Malformed rows are isolated and dropped so
+ * one stale target cannot hide valid project settings; an invalid root returns
+ * a safe empty state. Schema 1 is deliberately primitive-only; schema 2 adds
+ * bounded, canonical native string arrays for declared multi-enum fields.
+ */
+export function normalizeExtensionSettings(raw: unknown): { value: ExtensionSettingsState; ok: boolean } {
+	const empty = (): ExtensionSettingsState => ({ schema: 2, revision: 0, targets: {} });
+	if (!isPlainObject(raw)) return { value: empty(), ok: false };
+	const schema = raw.schema;
+	const revision = raw.revision;
+	const commitId = raw.commitId;
+	const rawTargets = raw.targets;
+	if ((schema !== 1 && schema !== 2) || typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0
+		|| (commitId !== undefined && (typeof commitId !== "string" || !EXTENSION_SETTINGS_COMMIT_ID_RE.test(commitId)))
+		|| !isPlainObject(rawTargets)) {
+		return { value: empty(), ok: false };
+	}
+	const targets: ExtensionSettingsMap = {};
+	const entries = Object.entries(rawTargets);
+	if (entries.length > MAX_EXTENSION_SETTINGS_TARGETS) return { value: empty(), ok: false };
+	for (const [targetKey, candidate] of entries) {
+		// Server-created identity has exactly packId, kind and contribution id.
+		const parts = targetKey.split("\u0000");
+		if (targetKey.length === 0 || targetKey.length > MAX_EXTENSION_SETTINGS_TARGET_KEY_LENGTH
+			|| parts.length !== 3 || parts.some(part => part.length === 0)
+			|| (parts[1] !== "provider" && parts[1] !== "hook" && parts[1] !== "runtime" && parts[1] !== "sandboxRequirement") || !isPlainObject(candidate)) continue;
+		const enabled = candidate.enabled;
+		if (enabled !== undefined && typeof enabled !== "boolean") continue;
+		const rawValues = candidate.values === undefined ? {} : candidate.values;
+		if (!isPlainObject(rawValues)) continue;
+		const valueEntries = Object.entries(rawValues);
+		if (valueEntries.length > MAX_EXTENSION_SETTINGS_VALUES_PER_TARGET) continue;
+		const values: Record<string, ExtensionSettingValue> = {};
+		let selectedCount = 0;
+		let selectedBytes = 0;
+		let valid = true;
+		for (const [key, value] of valueEntries) {
+			if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(key)) { valid = false; break; }
+			if (Array.isArray(value)) {
+				// Never give an old malformed array a meaning after upgrading the reader.
+				if (schema === 1) { valid = false; break; }
+				const selected = normalizeDurableMultiEnumValue(value);
+				if (!selected) { valid = false; break; }
+				selectedCount += selected.length;
+				selectedBytes += selected.reduce((total, member) => total + Buffer.byteLength(member, "utf8"), 0);
+				if (selectedCount > MAX_EXTENSION_SETTINGS_MULTI_ENUM_SELECTED_VALUES_PER_TARGET
+					|| selectedBytes > MAX_EXTENSION_SETTINGS_MULTI_ENUM_SELECTED_BYTES_PER_TARGET) { valid = false; break; }
+				values[key] = selected as ExtensionSettingValue;
+			} else if (!isPrimitiveExtensionSettingValue(value)
+				|| (typeof value === "string" && (!isWellFormedExtensionSettingsText(value) || Buffer.byteLength(value, "utf8") > 4 * 1024))) {
+				valid = false;
+				break;
+			} else values[key] = value;
+		}
+		if (!valid) continue;
+		targets[targetKey] = { ...(enabled === undefined ? {} : { enabled }), values };
+	}
+	return { value: { schema, revision, ...(commitId === undefined ? {} : { commitId }), targets }, ok: true };
+}
+
+/** Shared strict bound for stored hook refs and server-derived principal labels. */
+export const EXTENSION_GRANT_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+export function isExtensionCapability(value: unknown): value is ExtensionCapability {
+	return typeof value === "string" && EXTENSION_CAPABILITIES.has(value as ExtensionCapability);
+}
+
+/** Pack-only capability matrix; hook capability support remains declaration-owned. */
+export function isExtensionPackCapability(value: unknown): value is ExtensionCapability {
+	return typeof value === "string" && EXTENSION_PACK_CAPABILITIES.has(value as ExtensionCapability);
+}
+
+export function isSafeExtensionGrantIdentifier(value: unknown): value is string {
+	return typeof value === "string" && EXTENSION_GRANT_IDENTIFIER.test(value);
+}
+
+/** ISO instants are canonicalized by the server before being persisted. */
+export function isCanonicalExtensionGrantTimestamp(value: unknown): value is string {
+	if (typeof value !== "string") return false;
+	const parsed = new Date(value);
+	return !Number.isNaN(parsed.valueOf()) && parsed.toISOString() === value;
+}
+
 const MIGRATED_KEYS = new Set([
 	"config_directories",
 	"sandbox_tokens",
 	"pack_order",
 	"pack_activation",
+	"extension_grants",
+	"extension_settings",
+	"adopted_extensions",
+	"prompt_extension_budget",
+	"extension_prompt_sections",
 ]);
 
 /**
@@ -267,13 +504,17 @@ export interface DisabledRefs {
 	mcpOperations?: Record<string, string[]>;
 	piExtensions?: string[];
 	runtimes?: string[];
+	/** Schema-3 inert sandbox requirement list names. */
+	sandboxRequirements?: string[];
 	workflows?: string[];
+	/** Schema-2 static system-prompt contribution list names. */
+	systemPrompts?: string[];
 }
 
 /** scope → packName → disabled entity refs by kind. Default (absent) = all enabled. */
 export type PackActivationMap = Partial<Record<PackOrderScope, Record<string, DisabledRefs>>>;
 
-const ACTIVATION_KINDS = ["roles", "tools", "skills", "entrypoints", "providers", "hooks", "mcp", "piExtensions", "runtimes", "workflows"] as const;
+const ACTIVATION_KINDS = ["roles", "tools", "skills", "entrypoints", "providers", "hooks", "mcp", "piExtensions", "runtimes", "sandboxRequirements", "workflows", "systemPrompts"] as const;
 
 function normalizeMcpOperations(raw: unknown): Record<string, string[]> | undefined {
 	if (!isPlainObject(raw)) return undefined;
@@ -364,14 +605,85 @@ function normalizeSandboxTokens(raw: unknown): { value: SandboxTokenEntry[]; ok:
 	return { value: out, ok: true };
 }
 
+function hasOnlyExtensionGrantFields(candidate: Record<string, unknown>, fields: readonly string[]): boolean {
+	return Object.keys(candidate).every(key => fields.includes(key));
+}
+
+/** Normalize, validate, and de-duplicate grants by their exact authority tuple. */
+export function normalizeExtensionGrants(raw: unknown): { value: ExtensionGrantMap; ok: boolean } {
+	if (!Array.isArray(raw)) return { value: [], ok: false };
+	const byTuple = new Map<string, ExtensionGrant>();
+	for (const candidate of raw) {
+		if (!isPlainObject(candidate)) continue;
+		const { packId, capability, grantedAt, grantedBy } = candidate;
+		if (!isSafeExtensionGrantIdentifier(packId)
+			|| !isExtensionCapability(capability)
+			|| !isCanonicalExtensionGrantTimestamp(grantedAt)
+			|| !isSafeExtensionGrantIdentifier(grantedBy)) continue;
+
+		// Legacy hook rows keep their exact discriminator-free persisted shape.
+		if (candidate.principal === undefined) {
+			const { hookId } = candidate;
+			// Legacy hook rows historically tolerated unknown keys. Retain that
+			// compatibility while canonicalizing them to the durable hook shape.
+			if (!isSafeExtensionGrantIdentifier(hookId)
+				|| isExtensionPackCapability(capability)) continue;
+			const grant: ExtensionHookGrant = { packId, hookId, capability, grantedAt, grantedBy };
+			byTuple.set(`${packId}\u0000hook\u0000${hookId}\u0000${capability}`, grant);
+			continue;
+		}
+
+		if (candidate.principal !== "pack"
+			|| !hasOnlyExtensionGrantFields(candidate, ["packId", "principal", "capability", "grantedAt", "grantedBy"])
+			|| !isExtensionPackCapability(capability)) continue;
+		const grant: ExtensionPackGrant = { packId, principal: "pack", capability, grantedAt, grantedBy };
+		byTuple.set(`${packId}\u0000pack\u0000${capability}`, grant);
+	}
+	return { value: [...byTuple.values()], ok: true };
+}
+
+function cloneExtensionGrants(grants: readonly ExtensionGrant[]): ExtensionGrantMap {
+	return grants.map(grant => ({ ...grant }));
+}
+
+/** Each corrupt entry is dropped independently so it cannot hide healthy adoptions. */
+function normalizeAdoptedExtensions(raw: unknown, warnings: AdoptionStoreWarning[]): { value: AdoptedExtensionsMap; ok: boolean } {
+	if (!isPlainObject(raw)) return { value: {}, ok: false };
+	const value: AdoptedExtensionsMap = {};
+	for (const scope of ["server", "global-user", "project"] as const) {
+		const entries = raw[scope];
+		if (entries === undefined) continue;
+		if (!isPlainObject(entries)) {
+			warnings.push({ code: "invalid_adoption_record", scope });
+			continue;
+		}
+		const accepted: Record<string, AdoptedExtension> = {};
+		for (const [id, candidate] of Object.entries(entries)) {
+			const record = normalizeAdoptedExtension(candidate);
+			if (!record || record.id !== id || record.scope !== scope) {
+				warnings.push({ code: "invalid_adoption_record", scope, ...(typeof id === "string" ? { id: id.slice(0, 48) } : {}) });
+				continue;
+			}
+			accepted[id] = record;
+		}
+		if (Object.keys(accepted).length > 0) value[scope] = accepted;
+	}
+	return { value, ok: true };
+}
+
 type PresentFields = {
 	config_directories: boolean;
 	sandbox_tokens: boolean;
 	pack_order: boolean;
 	pack_activation: boolean;
+	extension_grants: boolean;
+	extension_settings: boolean;
+	adopted_extensions: boolean;
+	prompt_extension_budget: boolean;
+	extension_prompt_sections: boolean;
 };
 
-type ConfigStoreState = {
+export type ProjectConfigRollbackSnapshot = {
 	data: ProjectConfig;
 	components: Component[];
 	workflows: Record<string, InlineWorkflowDef> | undefined;
@@ -379,12 +691,20 @@ type ConfigStoreState = {
 	sandboxTokens: SandboxTokenEntry[];
 	packOrder: PackOrderMap;
 	packActivation: PackActivationMap;
+	extensionGrants: ExtensionGrantMap;
+	extensionSettings: ExtensionSettingsState;
+	adoptedExtensions: AdoptedExtensionsMap;
+	promptExtensionBudget: PromptExtensionBudget;
+	promptExtensionOverrides: PromptExtensionOverride[];
 	present: PresentFields;
 	dirty: boolean;
 };
 
 function emptyPresent(): PresentFields {
-	return { config_directories: false, sandbox_tokens: false, pack_order: false, pack_activation: false };
+	return {
+		config_directories: false, sandbox_tokens: false, pack_order: false, pack_activation: false,
+		extension_grants: false, extension_settings: false, adopted_extensions: false, prompt_extension_budget: false, extension_prompt_sections: false,
+	};
 }
 
 function cloneComponents(components: Component[]): Component[] {
@@ -416,6 +736,26 @@ function clonePackActivation(packActivation: PackActivationMap): PackActivationM
 	return out;
 }
 
+function cloneAdoptedExtensions(entries: AdoptedExtensionsMap): AdoptedExtensionsMap {
+	const out: AdoptedExtensionsMap = {};
+	for (const scope of ["server", "global-user", "project"] as const) {
+		const scopeEntries = entries[scope];
+		if (!scopeEntries) continue;
+		out[scope] = Object.fromEntries(Object.entries(scopeEntries).map(([id, record]) => [id, cloneAdoptedExtension(record)]));
+	}
+	return out;
+}
+
+/** The legacy string API is sometimes sent over API responses; never leak command arguments through it. */
+function redactAdoptedExtensions(entries: AdoptedExtensionsMap): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	for (const scope of ["server", "global-user", "project"] as const) {
+		const scopeEntries = entries[scope];
+		if (scopeEntries) out[scope] = Object.fromEntries(Object.entries(scopeEntries).map(([id, record]) => [id, redactAdoptedExtension(record)]));
+	}
+	return out;
+}
+
 const DEFAULTS: Record<string, string> = {
 	build_command: "npm run build",
 	test_command: "npm test",
@@ -442,8 +782,8 @@ const DEFAULTS: Record<string, string> = {
  * Two coexisting shapes:
  *   1. Legacy flat string map (`build_command`, `test_command`, …) — preserved
  *      for back-compat. Reads continue to work after migration.
- *   2. Structured fields (`components: []`, `workflows: {}`, plus the five
- *      Native-YAML fields above) — emitted as native YAML on save.
+ *   2. Structured fields (`components: []`, `workflows: {}`, plus the
+ *      native-YAML fields above) — emitted as native YAML on save.
  *
  * The store keeps a back-compat read surface for the migrated fields:
  * `get("config_directories")` etc. return the JSON-stringified form
@@ -460,6 +800,12 @@ export class ProjectConfigStore {
 	private sandboxTokens: SandboxTokenEntry[] = [];
 	private packOrder: PackOrderMap = {};
 	private packActivation: PackActivationMap = {};
+	private extensionGrants: ExtensionGrantMap = [];
+	private extensionSettings: ExtensionSettingsState = cloneExtensionSettings(EMPTY_EXTENSION_SETTINGS_STATE);
+	private adoptedExtensions: AdoptedExtensionsMap = {};
+	private adoptionWarnings: AdoptionStoreWarning[] = [];
+	private promptExtensionBudget: PromptExtensionBudget = { ...DEFAULT_PROMPT_EXTENSION_BUDGET };
+	private promptExtensionOverrides: PromptExtensionOverride[] = [];
 	private present: PresentFields = emptyPresent();
 	/** Set when a legacy string representation needs a native-YAML rewrite. */
 	private dirty = false;
@@ -491,6 +837,12 @@ export class ProjectConfigStore {
 		this.sandboxTokens = [];
 		this.packOrder = {};
 		this.packActivation = {};
+		this.extensionGrants = [];
+		this.extensionSettings = cloneExtensionSettings(EMPTY_EXTENSION_SETTINGS_STATE);
+		this.adoptedExtensions = {};
+		this.adoptionWarnings = [];
+		this.promptExtensionBudget = { ...DEFAULT_PROMPT_EXTENSION_BUDGET };
+		this.promptExtensionOverrides = [];
 		this.present = emptyPresent();
 		this.dirty = false;
 		this.loadFailed = false;
@@ -568,9 +920,42 @@ export class ProjectConfigStore {
 		loadLegacy("sandbox_tokens", normalizeSandboxTokens, value => { this.sandboxTokens = value; });
 		loadLegacy("pack_order", normalizePackOrder, value => { this.packOrder = value; });
 		loadLegacy("pack_activation", normalizePackActivation, value => { this.packActivation = value; });
+		// Grants are native YAML only. Unlike the older migrated fields, no
+		// JSON-string compatibility representation is accepted or emitted.
+		const grants = raw.extension_grants;
+		if (grants !== undefined && grants !== null) {
+			const normalized = normalizeExtensionGrants(grants);
+			if (normalized.ok) {
+				this.extensionGrants = normalized.value;
+				this.present.extension_grants = true;
+			} else {
+				console.warn("[project-config-store] Failed to parse extension_grants, treating as default");
+			}
+		}
+		const extensionSettings = raw.extension_settings;
+		if (extensionSettings !== undefined && extensionSettings !== null) {
+			const normalized = normalizeExtensionSettings(extensionSettings);
+			if (normalized.ok) {
+				this.extensionSettings = normalized.value;
+				this.present.extension_settings = true;
+			} else console.warn("[project-config-store] Failed to parse extension_settings, treating as unavailable");
+		}
+		loadLegacy("adopted_extensions", value => normalizeAdoptedExtensions(value, this.adoptionWarnings), value => { this.adoptedExtensions = value; });
+		const budget = raw.prompt_extension_budget;
+		if (budget !== undefined && budget !== null) {
+			const normalized = normalizePromptExtensionBudget(budget);
+			if (normalized.ok) { this.promptExtensionBudget = normalized.value; this.present.prompt_extension_budget = true; }
+			else console.warn("[project-config-store] Failed to parse prompt_extension_budget, treating as default");
+		}
+		const overrides = raw.extension_prompt_sections;
+		if (overrides !== undefined && overrides !== null) {
+			const normalized = normalizePromptExtensionOverrides(overrides);
+			if (normalized.ok) { this.promptExtensionOverrides = normalized.value; this.present.extension_prompt_sections = true; }
+			else console.warn("[project-config-store] Failed to parse extension_prompt_sections, treating as default");
+		}
 	}
 
-	private snapshot(): ConfigStoreState {
+	private snapshot(): ProjectConfigRollbackSnapshot {
 		return {
 			data: { ...this.data },
 			components: cloneComponents(this.components),
@@ -579,12 +964,17 @@ export class ProjectConfigStore {
 			sandboxTokens: this.sandboxTokens.map(e => ({ ...e })),
 			packOrder: clonePackOrder(this.packOrder),
 			packActivation: clonePackActivation(this.packActivation),
+			extensionGrants: cloneExtensionGrants(this.extensionGrants),
+			extensionSettings: cloneExtensionSettings(this.extensionSettings),
+			adoptedExtensions: cloneAdoptedExtensions(this.adoptedExtensions),
+			promptExtensionBudget: { ...this.promptExtensionBudget },
+			promptExtensionOverrides: this.promptExtensionOverrides.map(override => ({ ...override })),
 			present: { ...this.present },
 			dirty: this.dirty,
 		};
 	}
 
-	private apply(state: ConfigStoreState): void {
+	private apply(state: ProjectConfigRollbackSnapshot): void {
 		this.data = state.data;
 		this.components = state.components;
 		this.workflows = state.workflows;
@@ -592,6 +982,11 @@ export class ProjectConfigStore {
 		this.sandboxTokens = state.sandboxTokens;
 		this.packOrder = state.packOrder;
 		this.packActivation = state.packActivation;
+		this.extensionGrants = state.extensionGrants;
+		this.extensionSettings = state.extensionSettings;
+		this.adoptedExtensions = state.adoptedExtensions;
+		this.promptExtensionBudget = state.promptExtensionBudget;
+		this.promptExtensionOverrides = state.promptExtensionOverrides;
 		this.present = state.present;
 		this.dirty = state.dirty;
 	}
@@ -600,7 +995,7 @@ export class ProjectConfigStore {
 		if (this.loadFailed) throw new ProjectConfigLoadError(this.configFile);
 	}
 
-	private serialize(state: ConfigStoreState): string {
+	private serialize(state: ProjectConfigRollbackSnapshot): string {
 		const out: Record<string, unknown> = {};
 		for (const [k, v] of Object.entries(state.data)) {
 			if (!MIGRATED_KEYS.has(k)) out[k] = v;
@@ -616,6 +1011,11 @@ export class ProjectConfigStore {
 		}
 		if (state.present.pack_order || this.packOrderNonEmpty(state.packOrder)) out.pack_order = this.serializePackOrder(state.packOrder);
 		if (state.present.pack_activation || this.packActivationNonEmpty(state.packActivation)) out.pack_activation = this.serializePackActivation(state.packActivation);
+		if (state.present.extension_grants || state.extensionGrants.length > 0) out.extension_grants = cloneExtensionGrants(state.extensionGrants);
+		if (state.present.extension_settings) out.extension_settings = cloneExtensionSettings(state.extensionSettings);
+		if (state.present.adopted_extensions || this.adoptedExtensionsNonEmpty(state.adoptedExtensions)) out.adopted_extensions = this.serializeAdoptedExtensions(state.adoptedExtensions);
+		if (state.present.prompt_extension_budget) out.prompt_extension_budget = { ...state.promptExtensionBudget };
+		if (state.present.extension_prompt_sections || state.promptExtensionOverrides.length > 0) out.extension_prompt_sections = state.promptExtensionOverrides.map(override => ({ ...override }));
 		return yaml.stringify(out);
 	}
 
@@ -631,7 +1031,7 @@ export class ProjectConfigStore {
 		}
 	}
 
-	private publish(state: ConfigStoreState): void {
+	private publish(state: ProjectConfigRollbackSnapshot): void {
 		const dir = path.dirname(this.configFile);
 		const temp = `${this.configFile}.${process.pid}.${randomUUID()}.tmp`;
 		try {
@@ -651,11 +1051,22 @@ export class ProjectConfigStore {
 		}
 	}
 
-	private commit(candidate: ConfigStoreState): void {
+	private commit(candidate: ProjectConfigRollbackSnapshot): void {
 		this.assertCanSave();
 		this.publish(candidate);
 		candidate.dirty = false;
 		this.apply(candidate);
+	}
+
+	/** Capture an opaque, deep-cloned durable state for a higher-level transaction. */
+	captureRollbackSnapshot(): ProjectConfigRollbackSnapshot {
+		return structuredClone(this.snapshot());
+	}
+
+	/** Restore a prior durable state. Used only to compensate a later transaction step. */
+	restoreRollbackSnapshot(snapshot: ProjectConfigRollbackSnapshot): void {
+		const candidate = structuredClone(snapshot);
+		this.commit(candidate);
 	}
 
 	/** Apply several changes as one durable, all-or-nothing publication. */
@@ -678,6 +1089,39 @@ export class ProjectConfigStore {
 				candidate.present.pack_order = this.packOrderNonEmpty(candidate.packOrder);
 			},
 			setPackActivation: (scope, packName, disabled) => this.setStatePackActivation(candidate, scope, packName, disabled),
+			setExtensionGrants: grants => {
+				candidate.extensionGrants = normalizeExtensionGrants(grants).value;
+				candidate.present.extension_grants = candidate.extensionGrants.length > 0;
+			},
+			setExtensionSettings: state => {
+				const normalized = normalizeExtensionSettings(state);
+				if (!normalized.ok) throw new Error("Invalid extension settings state");
+				candidate.extensionSettings = normalized.value;
+				candidate.present.extension_settings = true;
+			},
+			setAdoptedExtensions: (scope, entries) => {
+				const normalizedEntries: Record<string, AdoptedExtension> = {};
+				for (const [id, record] of Object.entries(entries)) {
+					const normalized = normalizeAdoptedExtension(record);
+					if (!normalized || normalized.id !== id || normalized.scope !== scope) throw new Error("Invalid adopted extension record");
+					normalizedEntries[id] = cloneAdoptedExtension(normalized);
+				}
+				candidate.adoptedExtensions = { ...candidate.adoptedExtensions, [scope]: normalizedEntries };
+				if (Object.keys(normalizedEntries).length === 0) delete candidate.adoptedExtensions[scope];
+				candidate.present.adopted_extensions = this.adoptedExtensionsNonEmpty(candidate.adoptedExtensions);
+			},
+			setPromptExtensionBudget: budget => {
+				const normalized = normalizePromptExtensionBudget(budget);
+				if (!normalized.ok) throw new Error("Invalid prompt extension budget");
+				candidate.promptExtensionBudget = normalized.value;
+				candidate.present.prompt_extension_budget = true;
+			},
+			setPromptExtensionOverrides: overrides => {
+				const normalized = normalizePromptExtensionOverrides(overrides);
+				if (!normalized.ok) throw new Error("Invalid prompt extension overrides");
+				candidate.promptExtensionOverrides = normalized.value;
+				candidate.present.extension_prompt_sections = candidate.promptExtensionOverrides.length > 0;
+			},
 			setComponents: components => { candidate.components = cloneComponents(components); },
 			setWorkflows: workflows => { candidate.workflows = workflows ? structuredClone(workflows) : undefined; },
 		};
@@ -685,7 +1129,7 @@ export class ProjectConfigStore {
 		this.commit(candidate);
 	}
 
-	private setStateValue(state: ConfigStoreState, key: string, value: string): void {
+	private setStateValue(state: ProjectConfigRollbackSnapshot, key: string, value: string): void {
 		if (key.includes(".")) {
 			throw new Error(`Project config key "${key}" must not contain dots — dots are reserved for namespace separators in {{project.key}} template variables`);
 		}
@@ -696,7 +1140,7 @@ export class ProjectConfigStore {
 		state.data[key] = value;
 	}
 
-	private setMigratedStateFromString(state: ConfigStoreState, key: string, value: string): void {
+	private setMigratedStateFromString(state: ProjectConfigRollbackSnapshot, key: string, value: string): void {
 		if (value === "") { this.removeStateValue(state, key); return; }
 		try {
 			const parsed = JSON.parse(value);
@@ -721,23 +1165,38 @@ export class ProjectConfigStore {
 					if (!norm.ok) throw new Error("Invalid pack_activation shape");
 					state.packActivation = norm.value; state.present.pack_activation = true; return;
 				}
+				case "extension_grants":
+				case "extension_settings":
+				case "prompt_extension_budget":
+				case "extension_prompt_sections":
+					throw new Error(`${key} must use its typed setter()`);
+				case "adopted_extensions": {
+					const norm = normalizeAdoptedExtensions(parsed, this.adoptionWarnings);
+					if (!norm.ok) throw new Error("Invalid adopted_extensions shape");
+					state.adoptedExtensions = norm.value; state.present.adopted_extensions = true; return;
+				}
 			}
 		} catch (error) {
 			throw new Error(`Failed to parse ${key} as JSON: ${(error as Error).message}`);
 		}
 	}
 
-	private removeStateValue(state: ConfigStoreState, key: string): void {
+	private removeStateValue(state: ProjectConfigRollbackSnapshot, key: string): void {
 		if (!MIGRATED_KEYS.has(key)) { delete state.data[key]; return; }
 		switch (key) {
 			case "config_directories": state.configDirectories = []; state.present.config_directories = false; return;
 			case "sandbox_tokens": state.sandboxTokens = []; state.present.sandbox_tokens = false; return;
 			case "pack_order": state.packOrder = {}; state.present.pack_order = false; return;
 			case "pack_activation": state.packActivation = {}; state.present.pack_activation = false; return;
+			case "extension_grants": state.extensionGrants = []; state.present.extension_grants = false; return;
+			case "extension_settings": state.extensionSettings = cloneExtensionSettings(EMPTY_EXTENSION_SETTINGS_STATE); state.present.extension_settings = false; return;
+			case "adopted_extensions": state.adoptedExtensions = {}; state.present.adopted_extensions = false; return;
+			case "prompt_extension_budget": state.promptExtensionBudget = { ...DEFAULT_PROMPT_EXTENSION_BUDGET }; state.present.prompt_extension_budget = false; return;
+			case "extension_prompt_sections": state.promptExtensionOverrides = []; state.present.extension_prompt_sections = false; return;
 		}
 	}
 
-	private setStatePackActivation(state: ConfigStoreState, scope: PackOrderScope, packName: string, disabled: DisabledRefs): void {
+	private setStatePackActivation(state: ProjectConfigRollbackSnapshot, scope: PackOrderScope, packName: string, disabled: DisabledRefs): void {
 		const norm = normalizeDisabledRefs(disabled);
 		const scopeMap = { ...(state.packActivation[scope] ?? {}) };
 		if (Object.keys(norm).length === 0) delete scopeMap[packName];
@@ -760,6 +1219,9 @@ export class ProjectConfigStore {
 		}
 		if (this.present.pack_order || this.packOrderNonEmpty()) out.pack_order = JSON.stringify(this.serializePackOrder());
 		if (this.present.pack_activation || this.packActivationNonEmpty()) out.pack_activation = JSON.stringify(this.serializePackActivation());
+		if (this.present.adopted_extensions || this.adoptedExtensionsNonEmpty()) out.adopted_extensions = JSON.stringify(redactAdoptedExtensions(this.adoptedExtensions));
+		if (this.present.prompt_extension_budget) out.prompt_extension_budget = JSON.stringify(this.promptExtensionBudget);
+		if (this.present.extension_prompt_sections || this.promptExtensionOverrides.length > 0) out.extension_prompt_sections = JSON.stringify(this.promptExtensionOverrides);
 		return out;
 	}
 
@@ -797,6 +1259,15 @@ export class ProjectConfigStore {
 		}
 		return out;
 	}
+
+	private adoptedExtensionsNonEmpty(entries: AdoptedExtensionsMap = this.adoptedExtensions): boolean {
+		return Object.values(entries).some(scopeEntries => scopeEntries && Object.keys(scopeEntries).length > 0);
+	}
+
+	private serializeAdoptedExtensions(entries: AdoptedExtensionsMap = this.adoptedExtensions): AdoptedExtensionsMap {
+		return cloneAdoptedExtensions(entries);
+	}
+
 	get(key: string): string | undefined {
 		if (MIGRATED_KEYS.has(key)) {
 			return this.flatLegacyView()[key];
@@ -881,7 +1352,6 @@ export class ProjectConfigStore {
 			const arr = refs[kind];
 			if (Array.isArray(arr) && arr.length > 0) out[kind] = [...arr];
 		}
-		if (refs.enabled === true) out.enabled = true;
 		const mcpOperations = normalizeMcpOperations(refs.mcpOperations);
 		if (mcpOperations) out.mcpOperations = mcpOperations;
 		return out;
@@ -893,7 +1363,71 @@ export class ProjectConfigStore {
 		this.mutate(draft => draft.setPackActivation(scope, packName, disabled));
 	}
 
-	/** Full scoped activation map (defensive copy). */
+	/** Native adopted-extension ledger accessors. Records are cloned at the boundary. */
+	getAdoptedExtensions(scope: AdoptionScope): Record<string, AdoptedExtension>;
+	getAdoptedExtensions(): AdoptedExtensionsMap;
+	getAdoptedExtensions(scope?: AdoptionScope): AdoptedExtensionsMap | Record<string, AdoptedExtension> {
+		if (scope) return Object.fromEntries(Object.entries(this.adoptedExtensions[scope] ?? {}).map(([id, record]) => [id, cloneAdoptedExtension(record)]));
+		return cloneAdoptedExtensions(this.adoptedExtensions);
+	}
+
+	getAdoptionWarnings(): AdoptionStoreWarning[] {
+		return this.adoptionWarnings.map(warning => ({ ...warning }));
+	}
+
+	upsertAdoptedExtension(scope: AdoptionScope, record: AdoptedExtension): void {
+		const normalized = normalizeAdoptedExtension(record);
+		if (!normalized || normalized.scope !== scope) throw new Error("Invalid adopted extension record");
+		this.mutate(draft => {
+			const current = this.getAdoptedExtensions(scope);
+			current[normalized.id] = normalized;
+			draft.setAdoptedExtensions(scope, current);
+		});
+	}
+
+	removeAdoptedExtension(scope: AdoptionScope, id: string): boolean {
+		const current = this.getAdoptedExtensions(scope);
+		if (!current[id]) return false;
+		delete current[id];
+		this.mutate(draft => draft.setAdoptedExtensions(scope, current));
+		return true;
+	}
+
+	/**
+	 * Atomically replace a ledger row only when the caller's observed revision is
+	 * current. Refreshes use this after awaiting network I/O so they cannot
+	 * resurrect a deletion or overwrite a concurrent disable/selection change.
+	 */
+	compareAndSwapAdoptedExtension(scope: AdoptionScope, id: string, expectedRevision: number, replacement: AdoptedExtension): "updated" | "missing" | "conflict" {
+		const current = this.getAdoptedExtensions(scope);
+		const existing = current[id];
+		if (!existing) return "missing";
+		if (existing.revision !== expectedRevision) return "conflict";
+		const normalized = normalizeAdoptedExtension(replacement);
+		if (!normalized || normalized.scope !== scope || normalized.id !== id || normalized.revision !== expectedRevision + 1) {
+			throw new Error("Invalid adopted extension compare-and-swap replacement");
+		}
+		current[id] = normalized;
+		this.mutate(draft => draft.setAdoptedExtensions(scope, current));
+		return "updated";
+	}
+
+	updateAdoptionConformance(scope: AdoptionScope, id: string, conformance: AdoptionConformance): boolean {
+		const current = this.getAdoptedExtensions(scope);
+		const record = current[id];
+		if (!record) return false;
+		const normalized = normalizeAdoptedExtension({
+			...record,
+			revision: record.revision + 1,
+			conformance,
+			provenance: { ...record.provenance, updatedAt: new Date().toISOString() },
+		});
+		if (!normalized) throw new Error("Invalid adoption conformance");
+		current[id] = normalized;
+		this.mutate(draft => draft.setAdoptedExtensions(scope, current));
+		return true;
+	}
+
 	getPackActivationMap(): PackActivationMap {
 		const out: PackActivationMap = {};
 		for (const [scope, byPack] of Object.entries(this.packActivation)) {
@@ -906,6 +1440,38 @@ export class ProjectConfigStore {
 		}
 		return out;
 	}
+
+	/** Exact active grants, copied so callers cannot mutate the stored snapshot. */
+	getExtensionGrants(): ExtensionGrantMap {
+		return cloneExtensionGrants(this.extensionGrants);
+	}
+
+	/** Replace grants atomically. Invalid rows are dropped and duplicate tuples replace metadata. */
+	setExtensionGrants(grants: ExtensionGrantMap): void {
+		this.mutate(draft => draft.setExtensionGrants(grants));
+	}
+
+	/** Safe public settings only; getters and setters are defensive and revision-preserving. */
+	getExtensionSettings(): ExtensionSettingsState {
+		return cloneExtensionSettings(this.extensionSettings);
+	}
+
+	setExtensionSettings(state: ExtensionSettingsState): void {
+		this.mutate(draft => draft.setExtensionSettings(state));
+	}
+
+
+	/** Project hard caps for static prompt extensions (defensive copy). */
+	getPromptExtensionBudget(): PromptExtensionBudget { return { ...this.promptExtensionBudget }; }
+
+	/** Replace project caps atomically; caps may only lower platform defaults. */
+	setPromptExtensionBudget(budget: PromptExtensionBudget): void { this.mutate(draft => draft.setPromptExtensionBudget(budget)); }
+
+	/** Revisioned, project-effective static section replacements (defensive copy). */
+	getPromptExtensionOverrides(): PromptExtensionOverride[] { return this.promptExtensionOverrides.map(override => ({ ...override })); }
+
+	/** Internal acceptance seam. Extensions never receive direct access to this setter. */
+	setPromptExtensionOverrides(overrides: PromptExtensionOverride[]): void { this.mutate(draft => draft.setPromptExtensionOverrides(overrides)); }
 
 	/** Returns a defensive clone of the named component's `config` map (or {} if missing/unknown). */
 	getComponentConfig(name: string): Record<string, string> {

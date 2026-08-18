@@ -494,14 +494,16 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			scaffoldBobbitDir,
 			loadOrCreateToken,
 			createGateway,
+			resolveSystemPromptPath,
 			registerRpcBridgeFactory,
 		} = await withDistServerImportLock(async () => {
 			const { setProjectRoot } = await import("../../dist/server/bobbit-dir.js");
 			const { scaffoldBobbitDir } = await import("../../dist/server/scaffold.js");
 			const { loadOrCreateToken } = await import("../../dist/server/auth/token.js");
 			const { createGateway } = await import("../../dist/server/server.js");
+			const { resolveSystemPromptPath } = await import("../../dist/server/agent/system-prompt.js");
 			const { registerRpcBridgeFactory } = await import("../../dist/server/agent/rpc-bridge.js");
-			return { setProjectRoot, scaffoldBobbitDir, loadOrCreateToken, createGateway, registerRpcBridgeFactory };
+			return { setProjectRoot, scaffoldBobbitDir, loadOrCreateToken, createGateway, resolveSystemPromptPath, registerRpcBridgeFactory };
 		});
 		// Register the in-process mock bridge factory before any sessions are
 		// created. See in-process-harness.ts for rationale — same story here.
@@ -548,6 +550,9 @@ export const test = base.extend<{ failureContext: void; restoreDefaultProject: v
 			authToken: token,
 			defaultCwd: serverRoot,
 			forceAuth: true,
+			// Match the CLI: resolve this after the harness establishes its isolated
+			// BOBBIT_DIR, then keep it stable across gateway restarts.
+			systemPromptPath: resolveSystemPromptPath(),
 			agentCliPath: MOCK_AGENT,
 			staticDir: STATIC_DIR,
 			basePath,

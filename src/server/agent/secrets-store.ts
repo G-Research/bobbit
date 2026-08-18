@@ -61,6 +61,17 @@ export class SecretsStore {
         return { ...this.data };
     }
 
+    /** Restore a previous complete value set as one durable publication. */
+    restoreAll(snapshot: Record<string, string>): void {
+        const candidate: Record<string, string> = {};
+        for (const [key, value] of Object.entries(snapshot)) {
+            // Empty strings are meaningful: they are exact prior persisted
+            // state and must survive a cross-store rollback.
+            if (typeof value === "string") candidate[key] = value;
+        }
+        this.commit(candidate);
+    }
+
     /** Bulk update: set multiple keys at once, remove keys with empty values. */
     update(entries: Record<string, string>): void {
         const candidate = { ...this.data };

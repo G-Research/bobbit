@@ -1,5 +1,8 @@
 import { icon } from "@mariozechner/mini-lit";
-import { ExternalLink, FileText, GitFork, Link, Pencil, Pin, PinOff, RotateCcw, Trash2 } from "lucide";
+import { Activity, ExternalLink, FileText, GitFork, Link, Pencil, Pin, PinOff, RotateCcw, Trash2 } from "lucide";
+import { openContextTraceInspector, stopContextTraceInspector } from "./context-trace.js";
+import { CONTEXT_PANEL_TAB_ID } from "./panel-workspace.js";
+import { openSidePanelTab } from "./side-panel-workspace.js";
 import type { TemplateResult } from "lit";
 import { copySidebarLink, gatewayFetch, refreshAgentSession, refreshSessions, sessionDeepLink, sessionPathDeepLink, setSessionPinned, type SidebarCopyLinkTitle } from "./api.js";
 import { listLauncherEntrypoints, runResolvedLauncherEntrypoint, type LauncherDispatchResult, type SpawnLaunchTarget } from "./pack-entrypoints.js";
@@ -7,7 +10,7 @@ import { confirmAction, showConnectionError, showRenameDialog } from "./dialogs-
 import { setHashRoute } from "./routing.js";
 import { shortcutHint } from "./shortcut-registry.js";
 import { connectToSession, forkSession, terminateSession } from "./session-manager.js";
-import { state, type GatewaySession } from "./state.js";
+import { activeSessionId, state, type GatewaySession } from "./state.js";
 import { ensureContinueSessionChooser } from "./lazy-widgets.js";
 import { errorDetails } from "./error-helpers.js";
 import { entrypointIconNode } from "./entrypoint-icon-registry.js";
@@ -21,6 +24,7 @@ export type SessionActionId =
 	| "fork"
 	| "copy-link"
 	| "view-system-prompt"
+	| "view-context-trace"
 	| "open-new-window";
 
 export type ArchivedSessionActionId =
@@ -28,6 +32,7 @@ export type ArchivedSessionActionId =
 	| "copy-link"
 	| "pin"
 	| "view-system-prompt"
+	| "view-context-trace"
 	| "open-new-window";
 
 export interface SessionActionTrailingToggle {
@@ -47,7 +52,7 @@ export interface SessionActionDescriptor {
 	tone?: "default" | "danger";
 	quick?: boolean;
 	visible?: boolean;
-	run: (event: Event) => void | Promise<void>;
+	run: (event: Event, opener?: HTMLElement) => void | Promise<void>;
 	trailingToggle?: SessionActionTrailingToggle;
 }
 
@@ -80,6 +85,7 @@ const BUILTIN_PRIORITIES: Record<SessionActionId, number> = {
 	"fork": 50,
 	"copy-link": 60,
 	"view-system-prompt": 70,
+	"view-context-trace": 75,
 	"open-new-window": 80,
 };
 
@@ -88,6 +94,7 @@ const ARCHIVED_BUILTIN_PRIORITIES: Record<ArchivedSessionActionId, number> = {
 	"copy-link": 20,
 	"pin": 30,
 	"view-system-prompt": 40,
+	"view-context-trace": 45,
 	"open-new-window": 50,
 };
 
@@ -222,6 +229,18 @@ export function buildArchivedSessionActions(input: BuildArchivedSessionActionsIn
 				event.stopPropagation();
 				void import("../ui/dialogs/SystemPromptDialog.js").then(({ SystemPromptDialog }) => SystemPromptDialog.show(session.id));
 			},
+		},
+		{
+			id: "view-context-trace",
+			label: "View context trace",
+			title: "Inspect read-only context provider activity",
+			icon: icon(Activity, "xs"),
+			priority: ARCHIVED_BUILTIN_PRIORITIES["view-context-trace"],
+			quick: false,
+			// Context tabs belong to the mounted session workspace. Do not expose an
+			// action for an archived sidebar row while another session is active.
+			visible: activeSessionId() === session.id,
+			run: (event: Event, opener?: HTMLElement) => openContextTracePanel(session.id, event, opener),
 		},
 		{
 			id: "open-new-window",
@@ -372,6 +391,18 @@ export function buildSessionActions(input: BuildSessionActionsInput): SessionAct
 			},
 		},
 		{
+			id: "view-context-trace",
+			label: "View context trace",
+			title: "Inspect read-only context provider activity",
+			icon: icon(Activity, "xs"),
+			priority: BUILTIN_PRIORITIES["view-context-trace"],
+			quick: false,
+			// The inspector is session-workspace scoped, so only the active
+			// descriptor can open it.
+			visible: activeSessionId() === session.id,
+			run: (event: Event, opener?: HTMLElement) => openContextTracePanel(session.id, event, opener),
+		},
+		{
 			id: "open-new-window",
 			label: "Open in new window",
 			title: isTeamLead ? "Open this team lead session in a new browser window" : "Open this session in a new browser window",
@@ -388,6 +419,30 @@ export function buildSessionActions(input: BuildSessionActionsInput): SessionAct
 	return actions
 		.filter((action) => action.visible !== false)
 		.sort((a, b) => a.priority - b.priority);
+}
+
+function openContextTracePanel(sessionId: string, event: Event, opener?: HTMLElement): void {
+	event.preventDefault();
+	event.stopPropagation();
+	// The menu can outlive a session switch for one render turn. Refuse the
+	// stale invocation rather than writing a Context tab into another workspace.
+	if (activeSessionId() !== sessionId) return;
+	const focusOpener = opener ?? (event.currentTarget instanceof HTMLElement ? event.currentTarget : undefined);
+	// The inspector is a persisted side-panel tab. `openSidePanelTab` applies its
+	// optimistic workspace before returning, so the controller can fetch while the
+	// non-modal panel mounts and moves focus to its heading.
+	void openSidePanelTab({
+		id: CONTEXT_PANEL_TAB_ID,
+		kind: "context",
+		title: "Context",
+		label: "Context",
+		source: { type: "context", sessionId },
+		updatedAt: Date.now(),
+	}, { focus: true }).catch((error) => {
+		console.warn("[context-trace] failed to open side-panel tab", error);
+		stopContextTraceInspector();
+	});
+	openContextTraceInspector(sessionId, focusOpener);
 }
 
 function buildPinSessionAction(session: GatewaySession, priority: number): SessionActionDescriptor {

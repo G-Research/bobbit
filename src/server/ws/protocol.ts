@@ -349,6 +349,16 @@ export type ServerMessage =
 	/** Sent to ALL authenticated clients when staff records change so staff and session sidebars can invalidate together. */
 	| { type: "staff_changed"; reason: StaffChangedReason; staffId: string; projectId: string; previousProjectId?: string; sessionId?: string }
 	| { type: "session_title"; sessionId: string; title: string }
+	/** Metadata-only invalidation after a session's durable context trace changes. */
+	| { type: "context_trace_updated"; sessionId: string; ts: number }
+	/** Metadata-only invalidation after a session's durable decision requests change. */
+	| { type: "decision_requests_updated"; sessionId: string; ts: number }
+	/** Metadata-only invalidation after a project's durable import decisions change. */
+	| { type: "project_import_decision_requests_updated"; projectId: string; ts: number }
+	/** Metadata-only invalidation after a project's extension grants change. */
+	| { type: "extension_grants_updated"; projectId: string; ts: number }
+	/** Metadata-only invalidation after a project's extension settings change. */
+	| { type: "extension_settings_updated"; projectId: string; revision: number; ts: number }
 	| { type: "pong" }
 	| { type: "cost_update"; sessionId: string; goalId?: string; taskId?: string; cost: SessionCostSnapshot }
 	| { type: "queue_update"; sessionId: string; queue: QueuedMessage[] }
@@ -386,8 +396,8 @@ export type ServerMessage =
 	| { type: "index:complete"; projectId: string; phase: "rebuild" | "incremental"; durationMs: number; rowsWritten: number }
 	| { type: "index:error"; projectId: string; message: string; recoverable: boolean }
 	| { type: "goal_spec_changed"; goalId: string; prevSpecHash: string; newSpecHash: string; prevLen: number; newLen: number; ts: number }
-	| { type: "proposal_update"; sessionId: string; proposalType: "goal" | "project" | "role" | "tool" | "staff"; fields: Record<string, unknown>; rev: number; streaming: false; source: "edit" | "seed" | "rehydrate" | "restore" }
-	| { type: "proposal_cleared"; sessionId: string; proposalType: "goal" | "project" | "role" | "tool" | "staff" }
+	| { type: "proposal_update"; sessionId: string; proposalType: "goal" | "project" | "workflow" | "role" | "tool" | "staff"; fields: Record<string, unknown>; rev: number; streaming: false; source: "edit" | "seed" | "rehydrate" | "restore" }
+	| { type: "proposal_cleared"; sessionId: string; proposalType: "goal" | "project" | "workflow" | "role" | "tool" | "staff" }
 	| {
 		type: "skill_expansions";
 		data: {

@@ -94,6 +94,10 @@ import type {
 // runtime module is dynamic-imported below.
 import type { TriggerDef as _TriggerDef } from "./render-triggers.js";
 
+// One proposal apply may mutate configuration at a time. Set synchronously
+// before the request so repeated clicks cannot create competing writes.
+let toolProposalApplyInFlight = false;
+
 // ──────────────────────────────────────────────────────────────────────
 // isSessionArchived — used by submit handlers to skip DELETE on
 // already-archived sessions.
@@ -2356,6 +2360,34 @@ function toolPreviewPanel() {
 		dismissTypedProposal("tool");
 	};
 
+	const handleApplyToolProposal = async () => {
+		if (toolProposalApplyInFlight) return;
+		const slot = state.activeProposals.tool;
+		const toolName = state.toolPreviewName.trim();
+		const action = slot?.fields.action;
+		const content = slot?.fields.content;
+		const target = proposalProjectId("tool", slot?.sessionId ?? activeSessionId());
+		if (!toolName || !target || (action !== "create" && action !== "update" && action !== "delete")) return;
+		toolProposalApplyInFlight = true;
+		renderApp();
+		try {
+			const res = await gatewayFetch("/api/tools/proposal", {
+				method: "POST",
+				body: JSON.stringify({ projectId: target, tool: toolName, action, ...(action === "delete" ? {} : { content }) }),
+			});
+			if (!res.ok) {
+				await showProjectProposalResponseError(res, "Failed to apply tool proposal", "Tool proposal was rejected");
+				return;
+			}
+			await handleViewTool();
+		} catch (error) {
+			showProjectProposalCaughtError("Failed to apply tool proposal", error);
+		} finally {
+			toolProposalApplyInFlight = false;
+			renderApp();
+		}
+	};
+
 	const handleViewTool = async () => {
 		const toolName = state.toolPreviewName.trim();
 		if (!toolName) return;
@@ -2375,6 +2407,8 @@ function toolPreviewPanel() {
 		renderApp();
 	};
 
+	const proposalAction = state.activeProposals.tool?.fields.action;
+	const canApplyToolProposal = proposalAction === "create" || proposalAction === "update" || proposalAction === "delete";
 	const checklist = state.toolPreviewChecklist;
 	const checklistItems = [
 		{ key: "docs" as const, label: "Documentation", desc: "Usage examples, parameter descriptions" },
@@ -2452,9 +2486,9 @@ function toolPreviewPanel() {
 				${Button({ variant: "ghost", onClick: handleDone, children: state.assistantType === "tool" ? "Close" : "Dismiss" })}
 				${state.toolPreviewName ? html`<span data-testid="proposal-primary-submit">${Button({
 					variant: "default",
-					onClick: handleViewTool,
-					disabled: streaming,
-					children: html`<span class="inline-flex items-center gap-1.5">${icon(Wrench, "sm")} View Tool</span>`,
+					onClick: canApplyToolProposal ? handleApplyToolProposal : handleViewTool,
+					disabled: streaming || toolProposalApplyInFlight,
+					children: html`<span class="inline-flex items-center gap-1.5">${icon(Wrench, "sm")} ${toolProposalApplyInFlight ? "Applying…" : canApplyToolProposal ? "Apply Tool" : "View Tool"}</span>`,
 				})}</span>` : ""}
 			</div>
 		</div>
@@ -3001,10 +3035,19 @@ async function invalidateProjectProposalConfig(projectId: string): Promise<void>
 	m.invalidateProjectScopeConfig(projectId);
 }
 
-async function promoteProjectProposal(projectId: string, name: string): Promise<boolean> {
+async function promoteProjectProposal(projectId: string, name: string, fields?: Record<string, unknown>): Promise<boolean> {
 	try {
 		const body: Record<string, unknown> = {};
 		if (name) body.name = name;
+		if (fields) {
+			const diff = buildProjectConfigDiff(fields);
+			if (Array.isArray(diff.components)) body.components = diff.components;
+			if (diff.workflows && typeof diff.workflows === "object") body.workflows = diff.workflows;
+			if (Array.isArray(diff.config_directories)) body.configDirectories = diff.config_directories;
+			if (Array.isArray(diff.sandbox_tokens)) body.sandboxTokens = diff.sandbox_tokens;
+			const flatConfig = Object.fromEntries(Object.entries(diff).filter(([key]) => !["components", "workflows", "config_directories", "sandbox_tokens"].includes(key)));
+			if (Object.keys(flatConfig).length > 0) body.config = flatConfig;
+		}
 		const res = await gatewayFetch(`/api/projects/${projectId}/promote`, {
 			method: "POST",
 			body: JSON.stringify(body),
@@ -3023,24 +3066,34 @@ async function promoteProjectProposal(projectId: string, name: string): Promise<
 async function writeProjectProposalConfig(
 	projectId: string,
 	fields: Record<string, unknown>,
+	proposalSessionId: string,
 	errorContext?: { title: string; messagePrefix: string },
+	skipGenericConfig = false,
 ): Promise<boolean> {
 	const diff = buildProjectConfigDiff(fields);
-	if (Object.keys(diff).length === 0) return true;
 	const title = errorContext?.title ?? "Failed to save project config";
 	try {
-		const res = await gatewayFetch(`/api/projects/${projectId}/config`, {
-			method: "PUT",
-			body: JSON.stringify(diff),
-		});
-		if (!res.ok) {
-			await showProjectProposalResponseError(
-				res,
-				title,
-				"Config write failed",
-				errorContext?.messagePrefix,
-			);
-			return false;
+		if (!skipGenericConfig && Object.keys(diff).length > 0) {
+			const res = await gatewayFetch(`/api/projects/${projectId}/config`, {
+				method: "PUT",
+				body: JSON.stringify(diff),
+			});
+			if (!res.ok) {
+				await showProjectProposalResponseError(res, title, "Config write failed", errorContext?.messagePrefix);
+				return false;
+			}
+		}
+		// Static prompt text never rides the generic config payload. The server
+		// re-reads the persisted proposal at this explicit human approval boundary.
+		if (fields.extensionPromptSections !== undefined) {
+			const res = await gatewayFetch(`/api/sessions/${encodeURIComponent(proposalSessionId)}/proposal/project/accept-extension-sections`, {
+				method: "POST",
+				body: JSON.stringify({ projectId }),
+			});
+			if (!res.ok) {
+				await showProjectProposalResponseError(res, title, "Prompt extension approval failed", errorContext?.messagePrefix);
+				return false;
+			}
 		}
 		return true;
 	} catch (err) {
@@ -3179,9 +3232,21 @@ async function acceptNewProjectProposalFromPanel(proposal: ActiveProjectProposal
 	if (!projectId) {
 		let res: Response;
 		try {
+			// Components are part of the server-derived import snapshot. Carry the
+			// finalized structured proposal into initial registration so import hooks
+			// never observe the temporary default component before this panel writes
+			// the remaining project config.
+			const registration: Record<string, unknown> = { name, rootPath };
+			const configDiff = buildProjectConfigDiff(fields as Record<string, unknown>);
+			if (Array.isArray(configDiff.components)) registration.components = configDiff.components;
+			if (configDiff.workflows && typeof configDiff.workflows === "object") registration.workflows = configDiff.workflows;
+			if (Array.isArray(configDiff.config_directories)) registration.configDirectories = configDiff.config_directories;
+			if (Array.isArray(configDiff.sandbox_tokens)) registration.sandboxTokens = configDiff.sandbox_tokens;
+			const flatConfig = Object.fromEntries(Object.entries(configDiff).filter(([key]) => !["components", "workflows", "config_directories", "sandbox_tokens"].includes(key)));
+			if (Object.keys(flatConfig).length > 0) registration.config = flatConfig;
 			res = await gatewayFetch("/api/projects", {
 				method: "POST",
-				body: JSON.stringify({ name, rootPath }),
+				body: JSON.stringify(registration),
 			});
 		} catch (err) {
 			showProjectProposalCaughtError(PROJECT_ACCEPT_FAILED, err);
@@ -3208,10 +3273,10 @@ async function acceptNewProjectProposalFromPanel(proposal: ActiveProjectProposal
 	}
 
 	const partialMessage = `Project "${name}" was registered, but its configuration is incomplete. Retry Accept to finish configuration; registration will not be repeated.`;
-	if (!await writeProjectProposalConfig(projectId, fields as Record<string, unknown>, {
+	if (!await writeProjectProposalConfig(projectId, fields as Record<string, unknown>, propSessionId, {
 		title: "Project registered; configuration incomplete",
 		messagePrefix: partialMessage,
-	})) return false;
+	}, true)) return false;
 
 	await refreshProjectProposalProjects();
 	void invalidateProjectProposalConfig(projectId);
@@ -3231,8 +3296,10 @@ async function acceptProvisionalProjectProposalFromPanel(
 ): Promise<boolean> {
 	const { fields, sessionId: propSessionId } = proposal;
 	const fieldNameStr = typeof fields.name === "string" ? fields.name : "";
-	if (!await promoteProjectProposal(projectId, fieldNameStr)) return false;
-	if (!await writeProjectProposalConfig(projectId, fields as Record<string, unknown>)) return false;
+	// Promotion receives the complete proposal and is the one durable import
+	// boundary: config is validated and committed before the marker is published.
+	if (!await promoteProjectProposal(projectId, fieldNameStr, fields as Record<string, unknown>)) return false;
+	if (!await writeProjectProposalConfig(projectId, fields as Record<string, unknown>, propSessionId, undefined, true)) return false;
 
 	await refreshProjectProposalProjects();
 	void invalidateProjectProposalConfig(projectId);
@@ -3257,22 +3324,25 @@ async function acceptRegisteredProjectProposalFromPanel(
 ): Promise<boolean> {
 	const { fields, sessionId: propSessionId } = proposal;
 	const fieldNameStr = typeof fields.name === "string" ? fields.name : "";
-	if (fieldNameStr) {
-		try {
-			const res = await gatewayFetch(`/api/projects/${projectId}`, {
-				method: "PUT",
-				body: JSON.stringify({ name: fieldNameStr }),
-			});
-			if (!res.ok) {
-				await showProjectProposalResponseError(res, "Failed to rename project", "Project rename failed");
-				return false;
-			}
-		} catch (err) {
-			showProjectProposalCaughtError("Failed to rename project", err);
-			return false;
+	try {
+		const diff = buildProjectConfigDiff(fields as Record<string, unknown>);
+		const payload: Record<string, unknown> = {};
+		if (fieldNameStr) payload.name = fieldNameStr;
+		if (Array.isArray(diff.components)) payload.components = diff.components;
+		if (diff.workflows && typeof diff.workflows === "object") payload.workflows = diff.workflows;
+		if (Array.isArray(diff.config_directories)) payload.configDirectories = diff.config_directories;
+		if (Array.isArray(diff.sandbox_tokens)) payload.sandboxTokens = diff.sandbox_tokens;
+		const flatConfig = Object.fromEntries(Object.entries(diff).filter(([key]) => !["components", "workflows", "config_directories", "sandbox_tokens"].includes(key)));
+		if (Object.keys(flatConfig).length > 0) payload.config = flatConfig;
+		if (Object.keys(payload).length > 0) {
+			const res = await gatewayFetch(`/api/projects/${projectId}`, { method: "PUT", body: JSON.stringify(payload) });
+			if (!res.ok) { await showProjectProposalResponseError(res, "Failed to apply project proposal", "Project update failed"); return false; }
 		}
+	} catch (err) {
+		showProjectProposalCaughtError("Failed to apply project proposal", err);
+		return false;
 	}
-	if (!await writeProjectProposalConfig(projectId, fields as Record<string, unknown>)) return false;
+	if (!await writeProjectProposalConfig(projectId, fields as Record<string, unknown>, propSessionId, undefined, true)) return false;
 
 	await refreshProjectProposalProjects();
 	void invalidateProjectProposalConfig(projectId);

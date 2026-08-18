@@ -102,6 +102,8 @@ export interface PersistedStaff {
 	 * docs/design/staff-inbox.md §10.
 	 */
 	contextPolicy?: "preserve" | "compact";
+	/** Server-owned replay marker for an atomic proposal application. */
+	canonicalMutationKey?: string;
 }
 
 /**
@@ -137,22 +139,22 @@ export class StaffStore {
 	}
 
 	private save(): void {
+		if (!fs.existsSync(this.storeDir)) fs.mkdirSync(this.storeDir, { recursive: true });
+		const temporary = `${this.storeFile}.${process.pid}.${Date.now()}.tmp`;
 		try {
-			if (!fs.existsSync(this.storeDir)) {
-				fs.mkdirSync(this.storeDir, { recursive: true });
-			}
-			const data = Array.from(this.staff.values());
-			fs.writeFileSync(this.storeFile, JSON.stringify(data, null, 2), "utf-8");
-		} catch (err) {
-			console.error("[staff-store] Failed to save staff:", err);
+			fs.writeFileSync(temporary, JSON.stringify(Array.from(this.staff.values()), null, 2), "utf-8");
+			fs.renameSync(temporary, this.storeFile);
+		} finally {
+			try { fs.rmSync(temporary, { force: true }); } catch { /* best effort */ }
 		}
 	}
 
 	put(staff: PersistedStaff): void {
 		// Normalise on every write so the in-memory record always carries
 		// real values. Mirrors the load-side normalisation.
+		const previous = this.staff.get(staff.id);
 		this.staff.set(staff.id, normalizeStaffRecord(staff));
-		this.save();
+		try { this.save(); } catch (error) { previous ? this.staff.set(staff.id, previous) : this.staff.delete(staff.id); throw error; }
 	}
 
 	get(id: string): PersistedStaff | undefined {
@@ -160,8 +162,9 @@ export class StaffStore {
 	}
 
 	remove(id: string): void {
+		const previous = this.staff.get(id);
 		this.staff.delete(id);
-		this.save();
+		try { this.save(); } catch (error) { if (previous) this.staff.set(id, previous); throw error; }
 		// Durably tombstone this hard-delete so the boot-time headquarters
 		// migration does not resurrect the record from a stale
 		// `.pre-headquarters-id-migration` backup on the next restart.
@@ -175,9 +178,15 @@ export class StaffStore {
 	update(id: string, updates: Partial<Omit<PersistedStaff, "id" | "createdAt">>): boolean {
 		const existing = this.staff.get(id);
 		if (!existing) return false;
+
+		// Build and persist a replacement record. Mutating the live record before
+		// capturing its rollback state made a failed write retain the requested
+		// update (including its new updatedAt) in memory.
+		const previous = structuredClone(existing);
+		const next = structuredClone(existing) as PersistedStaff;
 		// Strip undefined values to avoid overwriting existing fields.
 		// null is treated as "clear this field" (delete the key).
-		const rec = existing as unknown as Record<string, unknown>;
+		const rec = next as unknown as Record<string, unknown>;
 		for (const [k, v] of Object.entries(updates)) {
 			if (v === undefined) continue;
 			if (v === null) {
@@ -186,9 +195,15 @@ export class StaffStore {
 				rec[k] = v;
 			}
 		}
-		existing.updatedAt = Date.now();
-		normalizeStaffRecord(existing);
-		this.save();
+		next.updatedAt = Date.now();
+		normalizeStaffRecord(next);
+		this.staff.set(id, next);
+		try {
+			this.save();
+		} catch (error) {
+			this.staff.set(id, previous);
+			throw error;
+		}
 		return true;
 	}
 }

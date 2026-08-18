@@ -89,7 +89,11 @@ function makeGateStore(signal: any) {
 	};
 }
 
-function makeHarnessFixture(baseRef = "origin/master", commandRunner: CommandRunner = fakeGitRunner({ hasOrigin: false, hasRemoteGoalBranch: false })) {
+function makeHarnessFixture(
+	baseRef = "origin/master",
+	commandRunner: CommandRunner = fakeGitRunner({ hasOrigin: false, hasRemoteGoalBranch: false }),
+	goalOverrides: Record<string, unknown> = {},
+) {
 	const signal = {
 		id: "signal-basebranch",
 		goalId: "goal-basebranch",
@@ -109,6 +113,7 @@ function makeHarnessFixture(baseRef = "origin/master", commandRunner: CommandRun
 		spec: "Reproduce baseBranch verification regression",
 		state: "in-progress",
 		workflowId: "feature",
+		...goalOverrides,
 	};
 	const projectConfigStore = makeProjectConfigStore(baseRef);
 	const projectContextManager = {
@@ -221,6 +226,89 @@ test("local-only goal branch with origin does not warn when remote goal ref is m
 		/Failed to sync worktree from origin\/|couldn't find remote ref|fatal: couldn't find remote ref|remote ref .* not found/i,
 		`LOCAL_ONLY_GOAL_BRANCH_ORIGIN_REPRO: verification of unpublished goal branch with origin emitted noisy remote-ref sync warnings:\n${warningOutput}`,
 	);
+});
+
+test("parent-target child ready-to-merge never attempts remote publication or remote-base checks", async () => {
+	const gitCalls: string[][] = [];
+	const commandRunner: CommandRunner = {
+		execFile: async (_file, args) => {
+			gitCalls.push(args as string[]);
+			if (args[0] === "symbolic-ref") return { stdout: "refs/remotes/origin/main\n", stderr: "" };
+			throw new Error(`unexpected remote command: git ${args.join(" ")}`);
+		},
+	};
+	const { harness, signal, gateStore } = makeHarnessFixture(
+		"origin/main",
+		commandRunner,
+		{ mergeTarget: "parent" },
+	);
+	const executed: string[] = [];
+	(harness as any).runCommandStep = async (command: string) => {
+		executed.push(command);
+		return { passed: true, output: `executed ${command}` };
+	};
+
+	await harness.verifyGateSignal(
+		signal as any,
+		{
+			id: "ready-to-merge",
+			name: "Ready to Merge",
+			dependsOn: [],
+			verify: [
+				{ name: "Branch pushed to remote", type: "command", run: "git push origin {{branch}}:refs/heads/{{branch}}" },
+				{ name: "Base ref merged into branch", type: "command", run: "git fetch origin {{baseBranch}} && git merge-base --is-ancestor origin/{{baseBranch}} {{branch}}" },
+				{ name: "PR raised", type: "command", run: "gh pr list --head {{branch}} --base {{baseBranch}}" },
+			],
+		} as any,
+		process.cwd(),
+		"goal/child",
+		"main",
+		new Map(),
+		"Metadata, not goal text, marks this as a local child.",
+	);
+
+	assert.equal(gateStore._gateState.signals[0].verification?.status, "passed");
+	assert.equal(executed.length, 3);
+	for (const command of executed) {
+		assert.match(command, /^echo 'child goal —/);
+		assert.doesNotMatch(command, /\bgit\s+(?:push|fetch|ls-remote|merge-base)\b|\bgh\s+pr\b|origin\//);
+	}
+	assert.deepEqual(
+		gitCalls.map(args => args[0]),
+		["symbolic-ref"],
+		"child ready-to-merge must not inspect or mutate the remote publication/base state",
+	);
+});
+
+test("root ready-to-merge preserves publication, remote-base, and PR verification", async () => {
+	const { harness, signal, gateStore } = makeHarnessFixture("origin/main", undefined, { mergeTarget: "master" });
+	const executed: string[] = [];
+	(harness as any).runCommandStep = async (command: string) => {
+		executed.push(command);
+		return { passed: true, output: `executed ${command}` };
+	};
+	const verify = [
+		{ name: "Branch pushed to remote", type: "command", run: "git push origin {{branch}}:refs/heads/{{branch}}" },
+		{ name: "Base ref merged into branch", type: "command", run: "git fetch origin {{baseBranch}} && git merge-base --is-ancestor origin/{{baseBranch}} {{branch}}" },
+		{ name: "PR raised", type: "command", run: "gh pr list --head {{branch}} --base {{baseBranch}}" },
+	];
+
+	await harness.verifyGateSignal(
+		signal as any,
+		{ id: "ready-to-merge", name: "Ready to Merge", dependsOn: [], verify } as any,
+		process.cwd(),
+		"goal/root",
+		"main",
+		new Map(),
+		"Root publication behavior must not change.",
+	);
+
+	assert.equal(gateStore._gateState.signals[0].verification?.status, "passed");
+	assert.deepEqual(executed, [
+		"git push origin goal/root:refs/heads/goal/root",
+		"git fetch origin main && git merge-base --is-ancestor origin/main goal/root",
+		"gh pr list --head goal/root --base main",
+	]);
 });
 
 test("ready-to-merge command templates resolve {{baseBranch}} from configured origin/master and execute", async () => {

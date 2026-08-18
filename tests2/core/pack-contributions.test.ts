@@ -26,8 +26,15 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { createMemFs } from "../harness/mem-fs.js";
-import { validateManifest } from "../../src/server/agent/pack-manifest.ts";
-import { loadHooks, loadPackContributions, packIdFromRoot, PackContributionError } from "../../src/server/agent/pack-contributions.ts";
+import {
+	MAX_SANDBOX_REQUIREMENT_CATALOGUE_ROWS_PER_PACK,
+	MAX_SANDBOX_REQUIREMENT_DECLARATION_FILE_BYTES,
+	MAX_SANDBOX_REQUIREMENT_ID_LENGTH,
+	MAX_SANDBOX_REQUIREMENT_LIST_NAME_LENGTH,
+	validateManifest,
+} from "../../src/server/agent/pack-manifest.ts";
+import { loadHooks, loadPackContributions, loadSandboxRequirements, loadSystemPromptSections, packIdFromRoot, PackContributionError } from "../../src/server/agent/pack-contributions.ts";
+import { DYNAMIC_CONTEXT_END, DYNAMIC_CONTEXT_START } from "../../src/server/agent/prompt-delimiters.ts";
 import { HOST_API_VERSION, HOST_CONTRACT_VERSION, type HostChannelFrame, type HostChannelsApi, type HostApi } from "../../src/shared/extension-host/host-api.ts";
 import { PackContributionRegistry } from "../../src/server/extension-host/pack-contribution-registry.ts";
 import { isPackPathWithinRoot } from "../../src/server/extension-host/path-guard.ts";
@@ -43,7 +50,7 @@ const fsSpies: Array<{ mockRestore(): void }> = [];
 
 beforeAll(() => {
 	memoryFs.mkdirSync(tmp, { recursive: true });
-	for (const name of ["existsSync", "mkdirSync", "readFileSync", "readdirSync", "rmSync", "writeFileSync"] as const) {
+	for (const name of ["existsSync", "mkdirSync", "readFileSync", "readdirSync", "rmSync", "statSync", "writeFileSync"] as const) {
 		fsSpies.push(vi.spyOn(fs, name).mockImplementation(memoryFs[name].bind(memoryFs) as never));
 	}
 	fsSpies.push(vi.spyOn(fs, "realpathSync").mockImplementation(((file: fs.PathLike) => {
@@ -200,18 +207,61 @@ describe("validateManifest (§1.2)", () => {
 		}
 	});
 
-	it("rejects bad capability names and warns on newer schemas without failing", () => {
+	it("accepts the schema-3 sandbox-requirements authored key and camelCase alias only with safe basenames", () => {
+		for (const schema of [1, 2]) {
+			for (const key of ["sandbox-requirements", "sandboxRequirements"] as const) {
+				const problems: string[] = [];
+				assert.equal(validateManifest({ ...ok, schema, contents: { ...ok.contents, [key]: ["python"] } }, problems), null);
+				assert.match(problems.join("\n"), /contents\.sandbox-requirements requires schema 3/);
+			}
+		}
+		const problems: string[] = [];
+		const m = validateManifest({ ...ok, schema: 3, contents: { ...ok.contents, "sandbox-requirements": ["python-analysis"] } }, problems);
+		assert.ok(m);
+		assert.deepEqual(m.contents.sandboxRequirements, ["python-analysis"]);
+		assert.deepEqual(problems, []);
+		const alias = validateManifest({ ...ok, schema: 3, contents: { ...ok.contents, sandboxRequirements: ["python-alias"] } });
+		assert.deepEqual(alias?.contents.sandboxRequirements, ["python-alias"]);
+		assert.equal(validateManifest({ ...ok, schema: 3, contents: { ...ok.contents, "sandbox-requirements": ["../escape"] } }), null);
+	});
+
+	it("rejects bad capability names and warns on schemas newer than schema 3", () => {
 		const badProblems: string[] = [];
 		assert.equal(validateManifest({ ...ok, schema: 2, provides: ["Bad_Name"] }, badProblems), null);
 		assert.equal(badProblems[0], 'pack.yaml: provides entry "Bad_Name" must match /^[a-z0-9][a-z0-9-]*$/');
 
 		const problems: string[] = [];
-		const m = validateManifest({ ...ok, schema: 3, contents: { ...ok.contents, providers: ["memory"], channels: ["terminal"] } }, problems);
+		const m = validateManifest({ ...ok, schema: 4, contents: { ...ok.contents, providers: ["memory"], channels: ["terminal"] } }, problems);
 		assert.ok(m);
-		assert.equal(m.schema, 3);
-		assert.deepEqual(m.contents.providers, ["memory"]);
-		assert.deepEqual(m.contents.channels, ["terminal"]);
-		assert.deepEqual(problems, ["pack.yaml: schema 3 is newer than supported (2)"]);
+		assert.equal(m.schema, 4);
+		assert.deepEqual(problems, ["pack.yaml: schema 4 is newer than supported (3)"]);
+	});
+});
+
+describe("schema-2 static system prompt declarations", () => {
+	it("drops every Dynamic Context delimiter variant, including a start-only marker", () => {
+		const root = packRoot("system-prompt-dynamic-delimiters", "prompt-pack");
+		w(path.join(root, "pack.yaml"), "name: prompt-pack\n");
+		const entries = [
+			["good", "safe prompt bytes"],
+			["start-only", `unsafe ${DYNAMIC_CONTEXT_START} injected`],
+			["end-only", `unsafe ${DYNAMIC_CONTEXT_END} injected`],
+			["paired", `unsafe ${DYNAMIC_CONTEXT_START} injected ${DYNAMIC_CONTEXT_END}`],
+		] as const;
+		for (const [listName, content] of entries) {
+			w(path.join(root, "system-prompts", `${listName}.yaml`), `id: ${listName}\ntitle: ${listName}\ncontent: ${JSON.stringify(content)}\n`);
+		}
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const sections = loadSystemPromptSections(root, {
+				...manifest("prompt-pack", { systemPrompts: entries.map(([listName]) => listName) }), schema: 2,
+			});
+			assert.deepEqual(sections.map(section => section.id), ["good"]);
+			const output = warning.mock.calls.map(args => args.join(" ")).join("\n");
+			for (const [listName] of entries.slice(1)) assert.match(output, new RegExp(`${listName}.*invalid content`, "i"));
+		} finally {
+			warning.mockRestore();
+		}
 	});
 });
 
@@ -231,11 +281,90 @@ function manifest(name: string, opts: Partial<PackManifest["contents"]> & { rout
 			mcp: opts.mcp ?? [],
 			piExtensions: opts.piExtensions ?? [],
 			runtimes: opts.runtimes ?? [],
+			sandboxRequirements: opts.sandboxRequirements ?? [],
 			workflows: opts.workflows ?? [],
+			systemPrompts: opts.systemPrompts ?? [],
 		},
 		...(opts.routes ? { routes: opts.routes } : {}),
 	};
 }
+
+describe("schema-3 sandbox requirement declarations", () => {
+	it("loads only the closed, approved public-profile declaration shape", () => {
+		const root = packRoot("sandbox-requirements", "safe-tools");
+		w(path.join(root, "sandbox-requirements", "python.yaml"), "id: python-analysis\nprofiles: [python]\nconfig:\n  enabled: { type: boolean, default: true }\nactivation:\n  requiresConfig: [enabled]\n");
+		w(path.join(root, "sandbox-requirements", "injected.yaml"), "id: injected\nprofiles: [python, python]\ncommand: apt install anything\n");
+		const m = { ...manifest("safe-tools", { sandboxRequirements: ["python", "injected"] }), schema: 3 };
+		const requirements = loadSandboxRequirements(root, m);
+		assert.deepEqual(requirements.map(requirement => ({
+			id: requirement.id,
+			profiles: requirement.profiles,
+			settingsSchema: requirement.settingsSchema,
+			activation: requirement.activation,
+		})), [
+			{
+				id: "python-analysis",
+				profiles: ["python"],
+				settingsSchema: {
+					fields: [{ key: "enabled", type: "boolean", default: true }],
+					requiresConfig: ["enabled"],
+				},
+				activation: { requiresConfig: ["enabled"] },
+			},
+		]);
+	});
+
+	it("fails closed unless activation, settings, and exact pack authorization all permit the request", () => {
+		const root = packRoot("sandbox-requirements-registry", "safe-tools");
+		w(path.join(root, "sandbox-requirements", "python.yaml"), "id: python-analysis\nprofiles: [python]\nconfig:\n  enabled: { type: boolean, default: true }\nactivation:\n  requiresConfig: [enabled]\n");
+		const m = { ...manifest("safe-tools", { sandboxRequirements: ["python"] }), schema: 3 };
+		const registry = new PackContributionRegistry(
+			() => [entry(root, "server", m)],
+			undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+			(_projectId, packId) => packId === "safe-tools",
+		);
+		assert.deepEqual(registry.listSandboxRequirements(undefined), [{ packId: "safe-tools", requirementId: "python-analysis", profiles: ["python"] }]);
+
+		const denied = new PackContributionRegistry(() => [entry(root, "server", m)]);
+		assert.deepEqual(denied.listSandboxRequirements(undefined), []);
+	});
+
+	it("rejects sandbox catalogues and list basenames beyond their closed bounds", () => {
+		const base = { ...manifest("safe-tools"), schema: 3 };
+		const tooMany = Array.from({ length: MAX_SANDBOX_REQUIREMENT_CATALOGUE_ROWS_PER_PACK + 1 }, (_, index) => `entry-${index}`);
+		const countProblems: string[] = [];
+		assert.equal(validateManifest({ ...base, contents: { ...base.contents, sandboxRequirements: tooMany } }, countProblems), null);
+		assert.match(countProblems.join("\n"), /at most/);
+
+		for (const value of ["Uppercase", "a".repeat(MAX_SANDBOX_REQUIREMENT_LIST_NAME_LENGTH + 1)]) {
+			const problems: string[] = [];
+			assert.equal(validateManifest({ ...base, contents: { ...base.contents, sandboxRequirements: [value] } }, problems), null);
+			assert.match(problems.join("\n"), /lowercase, bounded basename/);
+		}
+		assert.equal(
+			validateManifest({ ...base, contents: { ...base.contents, sandboxRequirements: [`a${"é".repeat(MAX_SANDBOX_REQUIREMENT_LIST_NAME_LENGTH)}`] } }),
+			null,
+		);
+	});
+
+	it("drops direct-loader catalogues, oversized declarations, and invalid bounded IDs before activation or authorization", () => {
+		const root = packRoot("sandbox-requirements-limits", "safe-tools");
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const overCatalogue = { ...manifest("safe-tools", { sandboxRequirements: Array.from({ length: MAX_SANDBOX_REQUIREMENT_CATALOGUE_ROWS_PER_PACK + 1 }, (_, index) => `entry-${index}`) }), schema: 3 };
+			assert.deepEqual(loadSandboxRequirements(root, overCatalogue), []);
+
+			w(path.join(root, "sandbox-requirements", "oversized.yaml"), `id: oversized\nprofiles: [python]\n#${"x".repeat(MAX_SANDBOX_REQUIREMENT_DECLARATION_FILE_BYTES)}\n`);
+			w(path.join(root, "sandbox-requirements", "long-id.yaml"), `id: ${"a".repeat(MAX_SANDBOX_REQUIREMENT_ID_LENGTH + 1)}\nprofiles: [python]\n`);
+			w(path.join(root, "sandbox-requirements", "unknown.yaml"), "id: unknown\nprofiles: [unknown]\n");
+			w(path.join(root, "sandbox-requirements", "duplicate.yaml"), "id: duplicate\nprofiles: [python, python]\n");
+			const m = { ...manifest("safe-tools", { sandboxRequirements: ["oversized", "long-id", "unknown", "duplicate"] }), schema: 3 };
+			assert.deepEqual(loadSandboxRequirements(root, m), []);
+		} finally {
+			warning.mockRestore();
+		}
+	});
+});
 
 describe("loadPackContributions (§5.1) + pack-root containment (§2)", () => {
 	it("parses panels + entrypoints (filtered by contents.entrypoints, listName carried) + routes", () => {
@@ -454,6 +583,74 @@ describe("schema-2 hook contribution declarations (EP-1)", () => {
 		assert.equal(contributions.hooks[0].packRoot, root);
 	});
 
+	it("admits projectImported only for unscheduled decide hooks", () => {
+		const root = packRoot("hooks-project-import", "import-pack");
+		w(path.join(root, "pack.yaml"), "name: import-pack\n");
+		w(path.join(root, "hooks", "valid.yaml"), hookYaml(["id: import.valid", "events: [projectImported]", "mode: decide"]));
+		w(path.join(root, "hooks", "observe.yaml"), hookYaml(["id: import.observe", "events: [projectImported]"]));
+		w(path.join(root, "hooks", "selectors.yaml"), hookYaml(["id: import.selectors", "events: [projectImported, sessionSetup]", "mode: decide", "selectors: [skills]"]));
+		w(path.join(root, "hooks", "scheduled.yaml"), hookYaml(["id: import.scheduled", "events: [projectImported]", "mode: decide", "schedule: { everyNTurns: 1 }"]));
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const hooks = loadHooks(root, { ...manifest("import-pack", { hooks: ["valid", "observe", "selectors", "scheduled"] }), schema: 2 });
+			assert.deepEqual(hooks.map(hook => hook.id), ["import.valid"]);
+			assert.deepEqual(hooks[0]!.events, ["projectImported"]);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it("keeps opaque and bare-scalar hook config inert instead of treating it as settings", () => {
+		const root = packRoot("hooks-legacy-opaque", "legacy-hook-pack");
+		w(path.join(root, "pack.yaml"), "name: legacy-hook-pack\n");
+		w(path.join(root, "hooks", "legacy.yaml"), hookYaml([
+			"id: legacy.config",
+			"config:",
+			"  endpoint: https://legacy.example.test",
+			"  retries: 3",
+			"  metadata: { source: historic }",
+		]));
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+
+		const [hook] = loadPackContributions(root, { ...manifest("legacy-hook-pack", { hooks: ["legacy"] }), schema: 2 }).hooks;
+		assert.deepEqual(hook.config, {
+			endpoint: "https://legacy.example.test",
+			retries: 3,
+			metadata: { source: "historic" },
+		});
+		assert.equal(hook.settingsSchema, undefined);
+		assert.equal(hook.settingsSchemaDiagnostic, undefined);
+	});
+
+	it("retains config-free malformed requiresConfig hooks as invalid and fails closed at runtime", () => {
+		const root = packRoot("hooks-config-free-gates", "gate-pack");
+		w(path.join(root, "pack.yaml"), "name: gate-pack\n");
+		for (const [listName, activation] of [
+			["scalar", "activation: { requiresConfig: apiToken }"],
+			["empty", "activation: { requiresConfig: [] }"],
+			["mixed", "activation: { requiresConfig: [apiToken, 7] }"],
+		] as const) {
+			w(path.join(root, "hooks", `${listName}.yaml`), hookYaml([`id: gate.${listName}`, activation]));
+		}
+		w(path.join(root, "providers", "scalar.yaml"), [
+			"id: gate-provider", "module: ../lib/provider.js", "hooks: [beforePrompt]", "activation: { requiresConfig: apiToken }", "",
+		].join("\n"));
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+		w(path.join(root, "lib", "provider.js"), "export default {};\n");
+		const manifestWithGates = { ...manifest("gate-pack", { providers: ["scalar"], hooks: ["scalar", "empty", "mixed"] }), schema: 2 };
+		const contributions = loadPackContributions(root, manifestWithGates);
+		assert.deepEqual(contributions.hooks.map(hook => hook.id), ["gate.scalar", "gate.empty", "gate.mixed"]);
+		for (const hook of contributions.hooks) {
+			assert.equal(hook.settingsSchema, undefined);
+			assert.equal(typeof hook.settingsSchemaDiagnostic, "string");
+		}
+		assert.equal(typeof contributions.providers[0].settingsSchemaDiagnostic, "string");
+		const registry = new PackContributionRegistry(() => [entry(root, "server", manifestWithGates)]);
+		assert.deepEqual(registry.listProviders(undefined), [], "invalid provider config gates must not reach runtime metadata");
+		assert.deepEqual(registry.listHooks(undefined), [], "invalid hook config gates must not reach runtime metadata");
+	});
+
 	it("keeps hooks canonical and empty for schema 1, absent declarations, and an empty schema-2 list", () => {
 		const root = packRoot("hooks-noop", "noop-pack");
 		w(path.join(root, "pack.yaml"), "name: noop-pack\n");
@@ -482,10 +679,11 @@ describe("schema-2 hook contribution declarations (EP-1)", () => {
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 		try {
 			const c = loadPackContributions(root, { ...manifest("mixed-pack", { hooks: ["good", "bad-events", "bad-capabilities", "bad-mode", "bad-config", "bad-activation"] }), schema: 2 });
-			assert.deepEqual(c.hooks.map((hook) => hook.id), ["mixed.good"]);
+			assert.deepEqual(c.hooks.map((hook) => hook.id), ["mixed.good", "mixed.activation"]);
+			assert.equal(typeof c.hooks[1].settingsSchemaDiagnostic, "string");
 			const output = warn.mock.calls.map((args) => args.join(" ")).join("\n");
 			assert.match(output, /\[pack-contributions\]/);
-			for (const file of ["bad-events", "bad-capabilities", "bad-mode", "bad-config", "bad-activation"]) assert.match(output, new RegExp(file));
+			for (const file of ["bad-events", "bad-capabilities", "bad-mode", "bad-config"]) assert.match(output, new RegExp(file));
 		} finally {
 			warn.mockRestore();
 		}
@@ -560,6 +758,50 @@ describe("schema-2 hook contribution declarations (EP-1)", () => {
 		assert.doesNotThrow(() => loadPackContributions(root, m));
 		const registry = new PackContributionRegistry(() => [entry(root, "server", m)]);
 		assert.deepEqual(registry.listHooks(undefined).map((hook) => hook.id), ["inert.throwing"]);
+	});
+
+	it("accepts bounded every-N and inert wall-clock schedule metadata", () => {
+		const root = packRoot("hooks-schedules-valid", "scheduled-pack");
+		w(path.join(root, "pack.yaml"), "name: scheduled-pack\n");
+		w(path.join(root, "hooks", "every.yaml"), hookYaml([
+			"id: scheduled.every", "mode: decide", "events: [afterTurn]", "schedule:", "  everyNTurns: 3", "  wallClockMs: 10000",
+		]));
+		w(path.join(root, "hooks", "clock.yaml"), hookYaml([
+			"id: scheduled.clock", "schedule:", "  wallClockMs: 1",
+		]));
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+		const hooks = loadPackContributions(root, { ...manifest("scheduled-pack", { hooks: ["every", "clock"] }), schema: 2 }).hooks;
+		assert.deepEqual(hooks.map((hook) => ({ id: hook.id, schedule: hook.schedule })), [
+			{ id: "scheduled.every", schedule: { everyNTurns: 3, wallClockMs: 10000 } },
+			{ id: "scheduled.clock", schedule: { wallClockMs: 1 } },
+		]);
+	});
+
+	it("drops malformed schedules and every-N declarations with an unsafe lifecycle combination", () => {
+		const root = packRoot("hooks-schedules-invalid", "scheduled-pack");
+		w(path.join(root, "pack.yaml"), "name: scheduled-pack\n");
+		w(path.join(root, "hooks", "good.yaml"), hookYaml(["id: scheduled.good", "mode: decide", "events: [afterTurn]", "schedule: { everyNTurns: 1 }"]));
+		w(path.join(root, "hooks", "array.yaml"), hookYaml(["id: scheduled.array", "schedule: []"]));
+		w(path.join(root, "hooks", "unknown.yaml"), hookYaml(["id: scheduled.unknown", "schedule: { everyNTurns: 1, future: 2 }"]));
+		w(path.join(root, "hooks", "fraction.yaml"), hookYaml(["id: scheduled.fraction", "schedule: { everyNTurns: 1.5 }"]));
+		w(path.join(root, "hooks", "large.yaml"), hookYaml(["id: scheduled.large", "schedule: { wallClockMs: 10001 }"]));
+		w(path.join(root, "hooks", "observe.yaml"), hookYaml(["id: scheduled.observe", "mode: observe", "schedule: { everyNTurns: 2 }"]));
+		w(path.join(root, "hooks", "many-events.yaml"), hookYaml(["id: scheduled.many-events", "mode: decide", "events: [afterTurn, beforePrompt]", "schedule: { everyNTurns: 2 }"]));
+		// Wall-clock-only metadata remains a valid inert declaration even with a
+		// normal observe lifecycle.
+		w(path.join(root, "hooks", "wall-only.yaml"), hookYaml(["id: scheduled.wall-only", "schedule: { wallClockMs: 10000 }"]));
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const hooks = loadPackContributions(root, {
+				...manifest("scheduled-pack", { hooks: ["good", "array", "unknown", "fraction", "large", "observe", "many-events", "wall-only"] }), schema: 2,
+			}).hooks;
+			assert.deepEqual(hooks.map((hook) => hook.id), ["scheduled.good", "scheduled.wall-only"]);
+			const output = warn.mock.calls.map((args) => args.join(" ")).join("\n");
+			for (const file of ["array", "unknown", "fraction", "large", "observe", "many-events"]) assert.match(output, new RegExp(file));
+		} finally {
+			warn.mockRestore();
+		}
 	});
 });
 
@@ -663,6 +905,28 @@ describe("PackContributionRegistry (§5.2.1, §7)", () => {
 			`${otherRoot}:same.id`,
 		]);
 		assert.deepEqual(registry.getPack(undefined, "shared")!.hooks.map((hook) => hook.id), ["same.id", "shared.second"]);
+	});
+
+	it("lists only active runnable scheduled advisors", () => {
+		const root = packRoot("hooks-scheduled-registry", "scheduled-pack");
+		w(path.join(root, "pack.yaml"), "name: scheduled-pack\n");
+		w(path.join(root, "hooks", "due.yaml"), hookYaml(["id: scheduled.due", "mode: decide", "events: [afterTurn]", "schedule: { everyNTurns: 4 }"]));
+		w(path.join(root, "hooks", "wall.yaml"), hookYaml(["id: scheduled.wall", "schedule: { wallClockMs: 4 }"]));
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+		let disabled: string[] = [];
+		const m = { ...manifest("scheduled-pack", { hooks: ["due", "wall"] }), schema: 2 };
+		const registry = new PackContributionRegistry(
+			() => [entry(root, "server", m)],
+			undefined,
+			undefined,
+			undefined,
+			(_scope, _projectId, packName) => packName === "scheduled-pack" ? disabled : [],
+		);
+		assert.deepEqual(registry.listScheduledAdvisorHooks(undefined).map((hook) => hook.id), ["scheduled.due"]);
+		assert.equal(registry.listScheduledAdvisorHooks(undefined)[0].schedule?.everyNTurns, 4);
+		disabled = ["due"];
+		registry.invalidate();
+		assert.deepEqual(registry.listScheduledAdvisorHooks(undefined), []);
 	});
 
 	it("activation filtering removes disabled hook list names after invalidation and restores them", () => {
@@ -790,6 +1054,81 @@ describe("PackContributionRegistry (§5.2.1, §7)", () => {
 		assert.equal(restored.getPack(undefined, "memory-pack")!.entrypoints.length, 0, "entrypoint filtering remains unchanged");
 	});
 
+	it("fails closed invalid provider settings before defaults, legacy overlays, or runtime exposure", () => {
+		const root = packRoot("invalid-provider-settings", "mixed-provider-pack");
+		w(path.join(root, "pack.yaml"), "name: mixed-provider-pack\n");
+		w(path.join(root, "panels", "status.yaml"), "id: mixed.status\nentry: ../lib/status.js\n");
+		w(path.join(root, "providers", "invalid.yaml"), [
+			"id: invalid", "module: ../lib/provider.js", "hooks: [beforePrompt]", "config:",
+			"  externalUrl: { type: diagnostic-secret, default: https://default.invalid }",
+			"activation:", "  requiresConfig: [externalUrl]", "",
+		].join("\n"));
+		w(path.join(root, "providers", "valid.yaml"), [
+			"id: valid", "module: ../lib/provider.js", "hooks: [beforePrompt]", "config:",
+			"  externalUrl: { type: string, default: https://default.valid }",
+			"activation:", "  requiresConfig: [externalUrl]", "",
+		].join("\n"));
+		w(path.join(root, "lib", "provider.js"), "export default {};\n");
+		const m = { ...manifest("mixed-provider-pack", { providers: ["invalid", "valid"] }), schema: 2 };
+		const settingsReads: string[] = [];
+		const legacyReads: string[] = [];
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const registry = new PackContributionRegistry(
+				() => [entry(root, "server", m)], undefined, undefined,
+				(_scope, _projectId, _packId, providerId) => {
+					legacyReads.push(providerId);
+					return { externalUrl: `https://legacy.${providerId}` };
+				},
+				undefined, undefined, undefined,
+				(_projectId, _packId, kind, id) => {
+					settingsReads.push(`${kind}:${id ?? ""}`);
+					return { state: "absent" };
+				},
+			);
+			assert.deepEqual(registry.listProviders(undefined).map((provider) => provider.id), ["valid"]);
+			assert.deepEqual(registry.listProviders(undefined)[0].config, { externalUrl: "https://legacy.valid" });
+			assert.equal(registry.getPack(undefined, "mixed-provider-pack")?.panels[0]?.id, "mixed.status");
+			assert.deepEqual(legacyReads, ["valid"], "invalid declarations must not reach legacy settings");
+			assert.equal(settingsReads.includes("provider:invalid"), false, "invalid declarations must not read project settings");
+			assert.doesNotMatch(warning.mock.calls.flat().join("\n"), /diagnostic-secret/);
+		} finally {
+			warning.mockRestore();
+		}
+	});
+
+	it("fails closed invalid hook settings without dropping the pack or valid hook siblings", () => {
+		const root = packRoot("invalid-hook-settings", "mixed-hook-pack");
+		w(path.join(root, "pack.yaml"), "name: mixed-hook-pack\n");
+		w(path.join(root, "panels", "status.yaml"), "id: mixed.status\nentry: ../lib/status.js\n");
+		w(path.join(root, "hooks", "invalid.yaml"), hookYaml([
+			"id: invalid", "config:", "  apiKey: { type: diagnostic-secret }",
+		]));
+		w(path.join(root, "hooks", "valid.yaml"), hookYaml([
+			"id: valid", "config:", "  enabled: { type: boolean, default: true }",
+		]));
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+		const m = { ...manifest("mixed-hook-pack", { hooks: ["invalid", "valid"] }), schema: 2 };
+		const settingsReads: string[] = [];
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const registry = new PackContributionRegistry(
+				() => [entry(root, "server", m)], undefined, undefined, undefined, undefined, undefined, undefined,
+				(_projectId, _packId, kind, id) => {
+					settingsReads.push(`${kind}:${id ?? ""}`);
+					return { state: "present", enabled: true, values: {} };
+				},
+			);
+			assert.deepEqual(registry.listHooks(undefined).map((hook) => hook.id), ["valid"]);
+			assert.equal(registry.getPack(undefined, "mixed-hook-pack")?.panels[0]?.id, "mixed.status");
+			assert.equal(settingsReads.includes("hook:invalid"), false, "invalid declarations must not read project settings");
+			assert.equal(settingsReads.includes("hook:valid"), true);
+			assert.doesNotMatch(warning.mock.calls.flat().join("\n"), /diagnostic-secret/);
+		} finally {
+			warning.mockRestore();
+		}
+	});
+
 	it("config-gated activation: a provider with requiresConfig is omitted until the override supplies the key", () => {
 		const root = packRoot("act-config", "memory-pack");
 		w(path.join(root, "pack.yaml"), "name: memory-pack\n");
@@ -827,6 +1166,140 @@ describe("PackContributionRegistry (§5.2.1, §7)", () => {
 		const active = configured.listProviders(undefined);
 		assert.deepEqual(active.map((p) => p.id), ["memory"]);
 		assert.deepEqual(active[0].config, { externalUrl: "http://localhost:8888", bank: "bobbit" });
+	});
+
+	it("keeps config-gated selector and mutation hooks dormant until their effective project settings are valid", () => {
+		const root = packRoot("hook-config-gate", "selector-pack");
+		w(path.join(root, "pack.yaml"), "name: selector-pack\n");
+		w(path.join(root, "hooks", "select.yaml"), hookYaml([
+			"id: selector.mutate",
+			"events: [sessionSetup]",
+			"mode: decide",
+			"capabilities: [mutate]",
+			"selectors: [skills, mcp]",
+			"config:",
+			"  endpoint: { type: string, optional: true }",
+			"  executionMode: { type: enum, values: [safe, fast], default: safe }",
+			"activation:",
+			"  requiresConfig: [endpoint, executionMode]",
+		]));
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+		const m = { ...manifest("selector-pack", { hooks: ["select"] }), schema: 2 };
+		const hookIds = (result: any) => new PackContributionRegistry(
+			() => [entry(root, "server", m)], undefined, undefined, undefined, undefined, undefined, undefined,
+			() => result,
+		).listHooks("project-settings");
+
+		// An absent target has only declaration defaults, so the required endpoint
+		// keeps the hook dormant. A whitespace endpoint is absent for activation.
+		assert.deepEqual(hookIds({ state: "absent" }).map(hook => hook.id), []);
+		assert.deepEqual(hookIds({ state: "present", enabled: true, values: { endpoint: "   " } }).map(hook => hook.id), []);
+
+		// Runtime lookup supplies effective project values, including declared
+		// defaults. The static config descriptor remains metadata, never a runtime
+		// config replacement.
+		const [active] = hookIds({ state: "present", enabled: true, values: { endpoint: "https://selector.example", executionMode: "safe" } });
+		assert.equal(active.id, "selector.mutate");
+		assert.deepEqual(active.selectors, ["skills", "mcp"]);
+		assert.deepEqual(active.capabilities, ["mutate"]);
+		assert.deepEqual(active.config, {
+			endpoint: { type: "string", optional: true },
+			executionMode: { type: "enum", values: ["safe", "fast"], default: "safe" },
+		});
+
+		assert.deepEqual(hookIds({ state: "present", enabled: false, values: { endpoint: "https://selector.example" } }), []);
+		assert.deepEqual(hookIds({ state: "error", diagnostic: { code: "SETTINGS_READ_IO", retryable: true } }), []);
+	});
+
+	it("uses opaque hook config for activation without converting it into settings", () => {
+		const root = packRoot("hook-opaque-config-gate", "opaque-hook-pack");
+		w(path.join(root, "pack.yaml"), "name: opaque-hook-pack\n");
+		w(path.join(root, "hooks", "configured.yaml"), hookYaml([
+			"id: opaque.configured",
+			"config:",
+			"  endpoint: https://static.example",
+			"activation: { requiresConfig: [endpoint] }",
+		]));
+		w(path.join(root, "hooks", "blank.yaml"), hookYaml([
+			"id: opaque.blank",
+			"config:",
+			"  endpoint: '   '",
+			"activation: { requiresConfig: [endpoint] }",
+		]));
+		w(path.join(root, "hooks", "missing.yaml"), hookYaml([
+			"id: opaque.missing",
+			"config:",
+			"  region: local",
+			"activation: { requiresConfig: [endpoint] }",
+		]));
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+		const m = { ...manifest("opaque-hook-pack", { hooks: ["configured", "blank", "missing"] }), schema: 2 };
+		const hookIds = (result: any) => new PackContributionRegistry(
+			() => [entry(root, "server", m)], undefined, undefined, undefined, undefined, undefined, undefined,
+			(_projectId, _packId, kind) => kind === "hook" ? result : { state: "absent" },
+		).listHooks("project-settings").map(hook => hook.id);
+
+		assert.deepEqual(hookIds({ state: "absent" }), ["opaque.configured"]);
+		assert.deepEqual(hookIds({ state: "present", enabled: true, values: {} }), ["opaque.configured"], "an empty settings row does not erase static hook values");
+		assert.deepEqual(hookIds({ state: "present", enabled: false, values: {} }), [], "the hook target switch remains a kill switch");
+	});
+
+	it("requires own settings keys named constructor and toString", () => {
+		const root = packRoot("hook-prototype-config-keys", "prototype-hook-pack");
+		w(path.join(root, "pack.yaml"), "name: prototype-hook-pack\n");
+		w(path.join(root, "hooks", "guarded.yaml"), hookYaml([
+			"id: prototype.guarded",
+			"config:",
+			"  constructor: { type: string, optional: true }",
+			"  toString: { type: string, optional: true }",
+			"activation: { requiresConfig: [constructor, toString] }",
+		]));
+		w(path.join(root, "hooks", "defaulted.yaml"), hookYaml([
+			"id: prototype.defaulted",
+			"config:",
+			"  constructor: { type: string, default: constructor-default }",
+			"  toString: { type: string, default: tostring-default }",
+			"activation: { requiresConfig: [constructor, toString] }",
+		]));
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+		const m = { ...manifest("prototype-hook-pack", { hooks: ["guarded", "defaulted"] }), schema: 2 };
+		const hookIds = (result: any) => new PackContributionRegistry(
+			() => [entry(root, "server", m)], undefined, undefined, undefined, undefined, undefined, undefined,
+			(_projectId, _packId, kind) => kind === "hook" ? result : { state: "absent" },
+		).listHooks("project-settings").map(hook => hook.id);
+
+		assert.deepEqual(hookIds({ state: "absent" }), ["prototype.defaulted"], "Object.prototype values must not satisfy activation, while declared defaults do");
+		assert.deepEqual(hookIds({ state: "present", enabled: true, values: { constructor: "configured", toString: "configured" } }), ["prototype.guarded", "prototype.defaulted"]);
+	});
+
+	it("caches permanent hook settings failures but retries transient failures", () => {
+		const root = packRoot("hook-settings-read-cache", "cache-hook-pack");
+		w(path.join(root, "pack.yaml"), "name: cache-hook-pack\n");
+		w(path.join(root, "hooks", "plain.yaml"), hookYaml(["id: cache.plain"]));
+		w(path.join(root, "lib", "hook.mjs"), "export default {};\n");
+		const m = { ...manifest("cache-hook-pack", { hooks: ["plain"] }), schema: 2 };
+		const countHookReads = (retryable: boolean) => {
+			let reads = 0;
+			const registry = new PackContributionRegistry(
+				() => [entry(root, "server", m)], undefined, undefined, undefined, undefined, undefined, undefined,
+				(_projectId, _packId, kind) => {
+					if (kind !== "hook") return { state: "absent" };
+					reads++;
+					return { state: "error" as const, diagnostic: { code: "SETTINGS_INVALID_VALUES", retryable } };
+				},
+			);
+			assert.deepEqual(registry.listHooks("project-settings"), []);
+			assert.deepEqual(registry.listHooks("project-settings"), []);
+			return reads;
+		};
+
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			assert.equal(countHookReads(false), 1, "permanent failures cache their fail-closed index");
+			assert.equal(countHookReads(true), 2, "transient failures rebuild and retry");
+		} finally {
+			warning.mockRestore();
+		}
 	});
 
 	it("does not activate or cache a provider when durable config is unreadable, then retries", () => {

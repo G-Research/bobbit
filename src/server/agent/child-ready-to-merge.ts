@@ -8,8 +8,9 @@
  * both are wrong — children merge LOCALLY into the parent's branch and only
  * the root goal raises a PR (system-prompt Stanza B).
  *
- * This module rewrites the two offending verify steps with `echo` no-ops so
- * the same workflow can be inherited by a child without false failures.
+ * This module rewrites the three canonical publication verify steps with
+ * `echo` no-ops so the same workflow can be inherited by a child without
+ * false failures or remote mutation.
  * Replacement (rather than removal) keeps the step count stable so the
  * harness's cached step indexing continues to line up.
  *
@@ -47,11 +48,21 @@ export function adaptReadyToMergeVerify(
 		if (typeof step.run === "string" && step.run.startsWith(ECHO_PREFIX)) {
 			return step;
 		}
-		if (step.name === "Master merged into branch") {
+		if (step.name === "Branch pushed to remote") {
 			return {
-				name: "Master merged into branch",
+				name: "Branch pushed to remote",
 				type: "command" as const,
-				run: `echo 'child goal — merges locally into parent branch ${parentBranch}; no master merge required'`,
+				run: "echo 'child goal — branch remains local until parent merge; no remote publication required'",
+				...(step.failureGuidance !== undefined ? { failureGuidance: step.failureGuidance } : {}),
+			};
+		}
+		// "Master merged into branch" is retained for snapshots created before
+		// the canonical step was renamed to "Base ref merged into branch".
+		if (step.name === "Base ref merged into branch" || step.name === "Master merged into branch") {
+			return {
+				name: step.name,
+				type: "command" as const,
+				run: `echo 'child goal — merges locally into parent branch ${parentBranch}; no remote base ancestry required'`,
 				...(step.failureGuidance !== undefined ? { failureGuidance: step.failureGuidance } : {}),
 			};
 		}

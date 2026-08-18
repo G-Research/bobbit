@@ -96,6 +96,8 @@ export interface Workflow {
 	updatedAt: number;
 	/** If true, workflow is hidden from the UI (e.g. test-only workflows) */
 	hidden?: boolean;
+	/** Server-owned replay marker for an atomic proposal application. */
+	canonicalMutationKey?: string;
 }
 
 // ── Normalization between the inline yaml shape and the runtime shape ──
@@ -357,6 +359,7 @@ export function normalizeWorkflow(raw: unknown, idHint: string): Workflow | null
 		updatedAt: typeof r.updatedAt === "number" ? r.updatedAt : 0,
 	};
 	if (r.hidden === true) wf.hidden = true;
+	if (typeof r.canonicalMutationKey === "string") wf.canonicalMutationKey = r.canonicalMutationKey;
 	return wf;
 }
 
@@ -408,6 +411,7 @@ function serializeWorkflow(wf: Workflow): InlineWorkflowDef {
 		name: wf.name,
 		description: wf.description,
 		...(wf.hidden ? { hidden: true } : {}),
+		...(wf.canonicalMutationKey ? { canonicalMutationKey: wf.canonicalMutationKey } : {}),
 		gates: wf.gates.map(serializeGate) as unknown as InlineWorkflowGate[],
 	} as unknown as InlineWorkflowDef & { gates: InlineWorkflowGate[] };
 }

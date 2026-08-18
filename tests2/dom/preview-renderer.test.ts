@@ -14,6 +14,7 @@ import {
 	__resetGatewayConnectionForTests,
 	commitGatewayConnection,
 } from "../../src/app/gateway-fetch.js";
+import { authenticatedPreviewIframeForMessage } from "../../src/app/render.js";
 
 let PreviewOpenRenderer: typeof import("../../src/ui/tools/renderers/PreviewRenderer.js").PreviewOpenRenderer;
 let render: typeof import("lit").render;
@@ -69,6 +70,16 @@ function makePreviewResultFromPayload(snapshot: Record<string, unknown>) {
 	], timestamp: Date.now() };
 }
 const makePreviewResultWithSnapshot = (entry = "inline.html", contentHash = HASH, artifactId = ARTIFACT_ID) => makePreviewResult(entry, contentHash, artifactId);
+
+function mountPreviewIframe(src: string): HTMLIFrameElement {
+	const panel = document.createElement("div");
+	panel.className = "goal-preview-panel";
+	const iframe = document.createElement("iframe");
+	iframe.src = src;
+	panel.appendChild(iframe);
+	document.body.appendChild(panel);
+	return iframe;
+}
 const makePreviewResultWithoutArtifact = (entry = "inline.html", contentHash = HASH) => makePreviewResult(entry, contentHash, undefined);
 function makeFileResultWithSnapshot(filePath: string) {
 	return { role: "toolResult", toolCallId: TOOL_USE_ID, toolName: "preview_open", isError: false, content: [
@@ -222,6 +233,33 @@ afterEach(() => {
 	localStorage.clear();
 	vi.unstubAllGlobals();
 	document.body.innerHTML = "";
+});
+
+describe("Preview swipe authentication", () => {
+	afterEach(() => {
+		document.querySelectorAll(".goal-preview-panel").forEach(panel => panel.remove());
+	});
+
+	it("matches each mounted preview frame against its own canonical origin", () => {
+		const first = mountPreviewIframe("https://first-preview.test/preview/a.html");
+		const second = mountPreviewIframe("https://second-preview.test/preview/b.html");
+
+		const accepted = new MessageEvent("message", {
+			source: second.contentWindow,
+			origin: "https://second-preview.test",
+		});
+		const forgedOrigin = new MessageEvent("message", {
+			source: second.contentWindow,
+			origin: "https://first-preview.test",
+		});
+
+		expect(authenticatedPreviewIframeForMessage(accepted)).toBe(second);
+		expect(authenticatedPreviewIframeForMessage(forgedOrigin)).toBeNull();
+		expect(authenticatedPreviewIframeForMessage(new MessageEvent("message", {
+			source: first.contentWindow,
+			origin: "https://first-preview.test",
+		}))).toBe(first);
+	});
 });
 
 describe("PreviewOpenRenderer", () => {

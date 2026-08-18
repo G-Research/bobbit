@@ -1,0 +1,16 @@
+schema: 2
+name: thinking-selector
+description: Optional first-party fallback thinking-level selector.
+version: 1.0.0
+defaultDisabled: true
+contents:
+  roles: []
+  tools: []
+  skills: []
+  entrypoints: []
+  hooks: [default-thinking]
+  providers: []
+  mcp: []
+  pi-extensions: []
+  runtimes: []
+  workflows: []

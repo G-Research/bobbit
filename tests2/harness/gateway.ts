@@ -121,6 +121,10 @@ export interface GatewayFixture {
 	connectWs(suffix: string, opts?: { goalId?: string; clientKind?: string }): Promise<WebSocket>;
 	/** Snapshot live entity counts (used by the leak detector). */
 	countEntities(): EntityCounts;
+	/** Stop the live process while preserving its durable state for recovery tests. */
+	crash(): Promise<void>;
+	/** Start a fresh gateway process over the preserved durable state. */
+	restart(): Promise<void>;
 	/** Re-create/reseed the default project after a test deletes or mutates it. */
 	restoreDefaultProject(): Promise<void>;
 	/** Restore process-global runtime singletons after fork-mate tests reset them. */
@@ -135,6 +139,8 @@ export interface GatewayFixture {
 }
 
 interface BootedGateway extends GatewayFixture {
+	/** Ensure the fork singleton is serving after an interrupted crash/restart test. */
+	ensureLive(): Promise<void>;
 	shutdown(): Promise<void>;
 }
 
@@ -319,34 +325,69 @@ async function boot(): Promise<BootedGateway> {
 	};
 	if (useFakeCommandStep) console.log(`[tests2/gateway] fork ${process.pid}: injecting FAKE verification command-step runner (no shell spawns)`);
 
-	const gw = createGateway({
-		host: "127.0.0.1",
-		port: 0,
-		portExplicit: true,
-		authToken: token,
-		defaultCwd: bobbitDir,
-		forceAuth: true,
-		agentCliPath: MOCK_AGENT,
-		// Explicit config replaces the legacy env flags. Remote/network fencing
-		// is enforced structurally by the fenced CommandRunner/fetch above; these
-		// keep the in-process git helpers on the no-remote fast path too.
-		skipMcp: true,
-		skipWorktreePool: true,
-		skipTitleGeneration: true,
-		skipRemotePush: true,
-		skipNonLocalRemoteGit: true,
-		builtinsDir: BUILTINS_DIR,
-		builtinPacksDir: prepareBuiltinPacksDir(bobbitDir),
-	}, deps);
-
-	// Suppress the startup internet probe / aigw auto-discovery without env flags.
-	// createGateway seeds these from env (all false here); override before start().
-	configureAigwRuntimeFlags({ skipAigwDiscovery: true, testNoExternal: true, e2e: true });
-
-	const port = await gw.start();
-	const baseURL = `http://127.0.0.1:${port}`;
-	const wsBase = `ws://127.0.0.1:${port}`;
-	writeFileSync(join(stateDir, "gateway-url"), baseURL, "utf-8");
+	const gatewayOptions = {
+		host: "127.0.0.1", port: 0, portExplicit: true, authToken: token,
+		defaultCwd: bobbitDir, forceAuth: true, agentCliPath: MOCK_AGENT,
+		// Explicit config replaces legacy env flags; the injected deps fence IO.
+		skipMcp: true, skipWorktreePool: true, skipTitleGeneration: true,
+		skipRemotePush: true, skipNonLocalRemoteGit: true,
+		builtinsDir: BUILTINS_DIR, builtinPacksDir: prepareBuiltinPacksDir(bobbitDir),
+	};
+	const startGateway = async (): Promise<ReturnType<typeof createGateway>> => {
+		// Suppress startup discovery without test-only environment flags.
+		configureAigwRuntimeFlags({ skipAigwDiscovery: true, testNoExternal: true, e2e: true });
+		const next = createGateway(gatewayOptions, deps);
+		try {
+			const port = await next.start();
+			baseURL = `http://127.0.0.1:${port}`;
+			wsBase = `ws://127.0.0.1:${port}`;
+			writeFileSync(join(stateDir, "gateway-url"), baseURL, "utf-8");
+			return next;
+		} catch (error) {
+			await next.shutdown().catch(() => {});
+			throw error;
+		}
+	};
+	let baseURL = "";
+	let wsBase = "";
+	let gw: ReturnType<typeof createGateway> = await startGateway();
+	let live = true;
+	let disposed = false;
+	let lifecycleTail: Promise<void> = Promise.resolve();
+	let recoveryPromise: Promise<void> | undefined;
+	const enqueueLifecycle = (operation: () => Promise<void>): Promise<void> => {
+		const queued = lifecycleTail.then(operation, operation);
+		lifecycleTail = queued.then(() => undefined, () => undefined);
+		return queued;
+	};
+	const crashGateway = (): Promise<void> => enqueueLifecycle(async () => {
+		if (!live || disposed) return;
+		live = false;
+		await gw.shutdown();
+	});
+	const restartGateway = (): Promise<void> => {
+		if (disposed) return Promise.reject(new Error("[tests2/gateway] cannot restart a disposed fixture"));
+		if (recoveryPromise) return recoveryPromise;
+		const queued = enqueueLifecycle(async () => {
+			if (disposed) throw new Error("[tests2/gateway] cannot restart a disposed fixture");
+			if (live) {
+				live = false;
+				await gw.shutdown();
+			}
+			restoreAgentDirRuntime();
+			gw = await startGateway();
+			live = true;
+		});
+		const tracked = queued.finally(() => {
+			if (recoveryPromise === tracked) recoveryPromise = undefined;
+		});
+		recoveryPromise = tracked;
+		return tracked;
+	};
+	const ensureLive = async (): Promise<void> => {
+		if (disposed) throw new Error("[tests2/gateway] fixture was already disposed");
+		if (!live) await restartGateway();
+	};
 
 	const defaultProjectId = await registerDefaultProject(baseURL, token, defaultProjectRoot);
 	await seedDefaultWorkflows(baseURL, token, defaultProjectId);
@@ -379,17 +420,17 @@ async function boot(): Promise<BootedGateway> {
 	const authHeaders = (extra?: HeadersInit): HeadersInit => ({ Authorization: `Bearer ${token}`, ...(extra ?? {}) });
 
 	const fixture: BootedGateway = {
-		baseURL,
-		wsBase,
+		get baseURL() { return baseURL; },
+		get wsBase() { return wsBase; },
 		token,
 		bobbitDir,
 		get defaultProjectId() { return currentDefaultProjectId; },
 		clock,
-		sessionManager: gw.sessionManager,
-		teamManager: (gw as any).teamManager,
-		orchestrationCore: (gw as any).orchestrationCore,
-		bgProcessManager: gw.bgProcessManager,
-		projectContextManager: gw.projectContextManager,
+		get sessionManager() { return gw.sessionManager; },
+		get teamManager() { return (gw as any).teamManager; },
+		get orchestrationCore() { return (gw as any).orchestrationCore; },
+		get bgProcessManager() { return gw.bgProcessManager; },
+		get projectContextManager() { return gw.projectContextManager; },
 		restoreAgentDirRuntime,
 		async api(path, init) {
 			restoreAgentDirRuntime();
@@ -477,6 +518,9 @@ async function boot(): Promise<BootedGateway> {
 			// component-linked verification steps of seeded workflows.
 			if (!componentOk) { try { cfg.setComponents([TEST_DEFAULT_COMPONENT]); } catch { /* best-effort */ } }
 		},
+		crash: crashGateway,
+		restart: restartGateway,
+		ensureLive,
 		async restoreDefaultProject() {
 			// If the default still exists (test only mutated it), keep its id — do NOT
 			// re-register (that would create a duplicate). Otherwise re-register and
@@ -496,8 +540,17 @@ async function boot(): Promise<BootedGateway> {
 			await seedDefaultWorkflows(baseURL, token, id);
 		},
 		async shutdown() {
-			await gw.shutdown();
-			try { rmSync(bobbitDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+			disposed = true;
+			await enqueueLifecycle(async () => {
+				try {
+					if (live) {
+						live = false;
+						await gw.shutdown();
+					}
+				} finally {
+					try { rmSync(bobbitDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+				}
+			});
 		},
 	};
 
@@ -517,6 +570,7 @@ async function boot(): Promise<BootedGateway> {
 export async function getGateway(): Promise<GatewayFixture> {
 	if (!bootPromise) bootPromise = boot();
 	const gw = await bootPromise;
+	await gw.ensureLive();
 	gw.restoreAgentDirRuntime();
 	return gw;
 }

@@ -9,9 +9,11 @@
  * Served via GET /api/models with a 5-second TTL cache.
  */
 
+import dns from "node:dns/promises";
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
+import net from "node:net";
 import path from "node:path";
 // Pi also exposes provider-scoped `Models` with async catalog refresh/auth.
 // Bobbit intentionally stays on these synchronous static-catalog reads: its own
@@ -96,8 +98,130 @@ export interface CustomProviderConfig {
 	name: string;
 	type: "ollama" | "lmstudio" | "llama.cpp" | "vllm" | "manual" | "openai-images" | "gemini-images" | "google-imagen";
 	baseUrl: string;
+	/** Set only by the server's persisted custom-provider configuration route. */
+	trusted?: boolean;
 	apiKey?: string;
 	models?: Array<{ id: string; name: string }>;
+}
+
+function providerHostnameForIpCheck(hostname: string): string {
+	return hostname.replace(/^\[|\]$/g, "").toLowerCase();
+}
+
+function isLoopbackProviderHost(hostname: string): boolean {
+	const host = providerHostnameForIpCheck(hostname);
+	return host === "localhost" || host.endsWith(".localhost") || host === "::1" || host.startsWith("127.");
+}
+
+/**
+ * Canonicalize an endpoint before it becomes a model transport target. Plain HTTP
+ * and private literals are useful for local model servers, but only a provider
+ * record written by the server may opt into them.
+ */
+export function normalizeCustomProviderBaseUrl(raw: string, trusted = false): string {
+	let url: URL;
+	try { url = new URL(raw); }
+	catch { throw new Error("Custom provider URL must be absolute"); }
+	if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Custom provider URL must use HTTP or HTTPS");
+	if (url.username || url.password || url.hash || url.search) throw new Error("Custom provider URL must not contain credentials, a query, or a fragment");
+	const hostname = providerHostnameForIpCheck(url.hostname);
+	const isLocal = isLoopbackProviderHost(hostname) || (net.isIP(hostname) !== 0 && !isPublicProviderIp(hostname));
+	if (!trusted && (url.protocol !== "https:" || isLocal)) {
+		throw new Error("Untrusted custom provider URL must use public HTTPS");
+	}
+	return url.href.replace(/\/$/, "");
+}
+
+function isPublicProviderIp(address: string): boolean {
+	address = providerHostnameForIpCheck(address);
+	const family = net.isIP(address);
+	if (family === 4) {
+		const octets = address.split(".").map(Number);
+		if (octets.length !== 4 || octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false;
+		const [a, b, c] = octets;
+		if (a === 0 || a === 10 || a === 127 || a >= 224) return false;
+		if (a === 100 && b >= 64 && b <= 127) return false;
+		if (a === 169 && b === 254) return false;
+		if (a === 172 && b >= 16 && b <= 31) return false;
+		if (a === 192 && b === 168) return false;
+		if (a === 192 && b === 0 && (c === 0 || c === 2)) return false;
+		if (a === 192 && b === 88 && c === 99) return false;
+		if (a === 198 && (b === 18 || b === 19 || b === 51)) return false;
+		if (a === 203 && b === 0 && c === 113) return false;
+		return true;
+	}
+	if (family !== 6) return false;
+	const lower = address.toLowerCase().split("%")[0];
+	if (lower === "::" || lower === "::1") return false;
+	if (/^f[cd]/.test(lower) || /^fe[89ab]/.test(lower) || /^ff/.test(lower)) return false;
+	if (/^2001:db8(?:[:]|$)/.test(lower)) return false;
+	return /^[23]/.test(lower);
+}
+
+interface PinnedProviderTarget {
+	url: URL;
+	lookup?: (...args: any[]) => void;
+}
+
+type ProviderDnsLookup = (hostname: string, options: { all: true; verbatim: true }) => Promise<Array<{ address: string; family: number }>>;
+const CUSTOM_PROVIDER_DNS_TIMEOUT_MS = 5_000;
+
+function lookupProviderBeforeDeadline(
+	hostname: string,
+	lookup: ProviderDnsLookup,
+	deadline: number,
+): Promise<Array<{ address: string; family: number }>> {
+	const remaining = deadline - Date.now();
+	if (remaining <= 0) return Promise.reject(new Error("Custom provider DNS deadline exceeded"));
+	return new Promise((resolve, reject) => {
+		let settled = false;
+		const timer = setTimeout(() => {
+			if (settled) return;
+			settled = true;
+			reject(new Error("Custom provider DNS deadline exceeded"));
+		}, remaining);
+		void lookup(hostname, { all: true, verbatim: true }).then(
+			(addresses) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				resolve(addresses);
+			},
+			(error) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				reject(error);
+			},
+		);
+	});
+}
+
+/** Pin a custom-provider probe before its transport connects. Exported for focused DNS-admission tests. */
+export async function pinCustomProviderTarget(
+	raw: string,
+	trusted: boolean,
+	lookup: ProviderDnsLookup = dns.lookup,
+	dnsTimeoutMs = CUSTOM_PROVIDER_DNS_TIMEOUT_MS,
+): Promise<PinnedProviderTarget> {
+	const url = new URL(normalizeCustomProviderBaseUrl(raw, trusted));
+	const hostname = providerHostnameForIpCheck(url.hostname);
+	if (net.isIP(hostname)) return { url };
+	const deadline = Date.now() + Math.max(1, Math.min(dnsTimeoutMs, CUSTOM_PROVIDER_DNS_TIMEOUT_MS));
+	const addresses = await lookupProviderBeforeDeadline(hostname, lookup, deadline);
+	if (addresses.length === 0 || (!trusted && addresses.some(({ address }) => !isPublicProviderIp(address)))) {
+		throw new Error("Custom provider DNS resolved to a private or invalid address");
+	}
+	return {
+		url,
+		// Connect to precisely the addresses just checked, not a later DNS answer.
+		lookup: (_hostname: string, options: any, callback: any) => {
+			const eligible = options?.family ? addresses.filter((entry) => entry.family === options.family) : addresses;
+			if (eligible.length === 0) return callback(new Error("No validated provider address for requested family"));
+			if (options?.all) return callback(null, eligible);
+			return callback(null, eligible[0].address, eligible[0].family);
+		},
+	};
 }
 
 // ── Cache ──────────────────────────────────────────────────────────
@@ -445,7 +569,10 @@ async function assembleModels(
 		const sourceKey = customSourceKey(config);
 		let sourceModels: ApiModel[] | undefined;
 		try {
-			sourceModels = await discoverFromSingleConfig(config);
+			// Values read from PreferencesStore were persisted through the server's
+			// custom-provider route. Treat pre-trust-marker records as migrated trusted
+			// configuration, while preserving an explicit untrusted marker.
+			sourceModels = await discoverFromSingleConfig({ ...config, trusted: config.trusted !== false });
 		} catch (err) {
 			console.error(`[model-registry] Failed to discover from ${config.name}:`, err);
 			sourceModels = previousDynamicModels.get(sourceKey);
@@ -599,21 +726,23 @@ export async function discoverModelsForConfig(config: CustomProviderConfig): Pro
 }
 
 async function discoverFromSingleConfig(config: CustomProviderConfig): Promise<ApiModel[]> {
-	switch (config.type) {
+	const baseUrl = normalizeCustomProviderBaseUrl(config.baseUrl, config.trusted === true);
+	const trustedConfig = { ...config, baseUrl };
+	switch (trustedConfig.type) {
 		case "ollama":
-			return discoverOllamaModelsServer(config);
+			return discoverOllamaModelsServer(trustedConfig);
 		case "lmstudio":
-			return discoverLMStudioModelsServer(config);
+			return discoverLMStudioModelsServer(trustedConfig);
 		case "llama.cpp":
 		case "vllm":
-			return discoverOpenAICompatModelsServer(config);
+			return discoverOpenAICompatModelsServer(trustedConfig);
 		case "manual":
-			return (config.models || []).map(m => ({
+			return (trustedConfig.models || []).map(m => ({
 				id: m.id,
 				name: m.name || m.id,
-				provider: config.name || config.id,
+				provider: trustedConfig.name || trustedConfig.id,
 				api: "openai-completions" as const,
-				baseUrl: `${config.baseUrl}/v1`,
+				baseUrl: `${trustedConfig.baseUrl}/v1`,
 				contextWindow: 8192,
 				maxTokens: 4096,
 				reasoning: false,
@@ -627,6 +756,9 @@ async function discoverFromSingleConfig(config: CustomProviderConfig): Promise<A
 }
 
 async function discoverOllamaModelsServer(config: CustomProviderConfig): Promise<ApiModel[]> {
+	// The SDK has no lookup hook. Admit DNS before construction so an untrusted
+	// probe cannot turn a public HTTPS hostname into a private-network request.
+	await pinCustomProviderTarget(config.baseUrl, config.trusted === true);
 	const { Ollama } = await import("ollama");
 	const ollama = new Ollama({ host: config.baseUrl });
 	const { models } = await ollama.list();
@@ -669,6 +801,9 @@ async function discoverOllamaModelsServer(config: CustomProviderConfig): Promise
 }
 
 async function discoverLMStudioModelsServer(config: CustomProviderConfig): Promise<ApiModel[]> {
+	// LM Studio's WebSocket SDK similarly owns its transport, so perform the
+	// private-DNS admission check before it receives the endpoint.
+	await pinCustomProviderTarget(config.baseUrl, config.trusted === true);
 	const { LMStudioClient } = await import("@lmstudio/sdk");
 	const url = new URL(config.baseUrl);
 	const port = url.port ? parseInt(url.port, 10) : 1234;
@@ -693,7 +828,8 @@ async function discoverLMStudioModelsServer(config: CustomProviderConfig): Promi
 }
 
 async function discoverOpenAICompatModelsServer(config: CustomProviderConfig): Promise<ApiModel[]> {
-	const data = await httpGetJson(`${config.baseUrl}/v1/models`, config.apiKey, 5000);
+	const target = await pinCustomProviderTarget(`${config.baseUrl}/v1/models`, config.trusted === true);
+	const data = await httpGetJson(target, config.apiKey, 5000);
 	if (!data?.data || !Array.isArray(data.data)) return [];
 
 	return data.data.map((m: any) => {
@@ -717,28 +853,27 @@ async function discoverOpenAICompatModelsServer(config: CustomProviderConfig): P
 
 // ── HTTP helper ────────────────────────────────────────────────────
 
-function httpGetJson(url: string, apiKey?: string, timeoutMs = 10_000): Promise<any> {
+function httpGetJson(target: PinnedProviderTarget, apiKey?: string, timeoutMs = 10_000): Promise<any> {
 	return new Promise((resolve, reject) => {
-		const parsedUrl = new URL(url);
-		const transport = parsedUrl.protocol === "https:" ? https : http;
+		const transport = target.url.protocol === "https:" ? https : http;
 
 		const headers: Record<string, string> = { "Content-Type": "application/json" };
 		if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
 
-		const req = transport.request(parsedUrl, { method: "GET", headers, timeout: timeoutMs }, (res) => {
+		const req = transport.request(target.url, { method: "GET", headers, timeout: timeoutMs, ...(target.lookup ? { lookup: target.lookup } : {}) }, (res) => {
 			const chunks: Buffer[] = [];
 			res.on("data", (c: Buffer) => chunks.push(c));
 			res.on("end", () => {
 				const body = Buffer.concat(chunks).toString("utf-8");
 				if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
 					try { resolve(JSON.parse(body)); }
-					catch { reject(new Error(`Invalid JSON from ${url}`)); }
+					catch { reject(new Error("Invalid JSON from custom provider")); }
 				} else {
-					reject(new Error(`HTTP ${res.statusCode} from ${url}`));
+					reject(new Error(`HTTP ${res.statusCode} from custom provider`));
 				}
 			});
 		});
-		req.on("timeout", () => { req.destroy(); reject(new Error(`Timeout fetching ${url}`)); });
+		req.on("timeout", () => { req.destroy(); reject(new Error("Timeout fetching custom provider")); });
 		req.on("error", reject);
 		req.end();
 	});

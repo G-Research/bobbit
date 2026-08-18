@@ -55,16 +55,17 @@ See [websocket-protocol.md](websocket-protocol.md) for the wire contract.
 Every chat session owns a server-backed side-panel workspace for the right side
 of the chat view. The workspace is shared by regular sessions and assistant
 sessions, so HTML previews, pack panels such as PR walkthrough and artifact
-viewers, proposals, review documents, and the staff inbox all use the same tab
-strip and window controls. Chat stays outside the strip; when a non-staff
-session has no side-panel tabs, the side pane hides and chat fills the layout.
+viewers, proposals, review documents, the staff inbox, and the singleton
+Context trace inspector all use the same tab strip and window controls. Chat
+stays outside the strip; when a non-staff session has no side-panel tabs, the
+side pane hides and chat fills the layout.
 
 The server is authoritative for open tabs, active tab, tab order, and size mode
 (`split`, `fullscreen`, or `collapsed`). Closed tabs are durable absence: render,
 refresh, reconnect, content caches, and localStorage must not recreate a tab just
 because the underlying preview artifact, proposal draft, review document, inbox,
-or pack panel still exists. Tabs open only through explicit workspace open or
-reopen events.
+pack panel, or Context trace endpoint/store data still exists. Tabs open only
+through explicit workspace open or reopen events.
 
 Desktop renders the workspace beside chat in `split` mode; in `fullscreen` the
 panel fills the whole area down to the bottom edge and the composer is hidden (to

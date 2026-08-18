@@ -82,6 +82,8 @@ describe("verified model/thinking tuple persistence", () => {
 		const applied: string[] = [];
 		const session = {
 			id: "sess-1",
+			clients: new Set(),
+			spawnPinnedModel: "anthropic/claude-opus-4-5",
 			spawnPinnedThinkingLevel: "xhigh",
 			rpcClient: {
 				getState: async () => ({
@@ -99,7 +101,7 @@ describe("verified model/thinking tuple persistence", () => {
 			},
 		};
 
-		await (manager as any).tryApplyDefaultThinkingLevel(session);
+		await (manager as any).tryAutoSelectModel(session);
 
 		assert.deepEqual(applied, ["high"], "xhigh must clamp against the exact older Opus model");
 		assert.deepEqual(store.get("sess-1"), {
@@ -134,14 +136,15 @@ describe("restoreSession source guard", () => {
 		assert.ok(fallbackIdx > initialModelIdx, "restoreSession must fall back to role/default model resolution only after the persisted model branch");
 		assert.match(
 			window,
-			/resolveCurrentCatalogThinkingLevel\(\s*bridgeOptions\.initialModel,[\s\S]*?ps\.effectiveThinkingLevel[\s\S]*?bridgeOptions\.initialThinkingLevel/,
+			/clampCurrentCatalogThinkingCandidate\(\s*bridgeOptions\.initialModel,[\s\S]*?ps\.effectiveThinkingLevel[\s\S]*?bridgeOptions\.initialThinkingLevel/,
 			"restore must clamp durable effective thinking against the exact current catalog row",
 		);
-		const verifyModelIdx = window.indexOf("await this.tryAutoSelectModel(session)");
-		const verifyThinkingIdx = window.indexOf("await this.tryApplyDefaultThinkingLevel(session)", verifyModelIdx);
-		const idleIdx = window.indexOf('broadcastStatus(session, "idle")', verifyThinkingIdx);
-		assert.ok(verifyThinkingIdx > verifyModelIdx, "restore must verify effective thinking after exact model verification");
-		assert.ok(idleIdx > verifyThinkingIdx, "restore must verify and persist the tuple before broadcasting idle");
+		const verifyTupleIdx = window.indexOf("await this.tryAutoSelectModel(session)");
+		const idleIdx = window.indexOf('broadcastStatus(session, "idle")', verifyTupleIdx);
+		assert.ok(verifyTupleIdx >= 0, "restore must verify the exact model/thinking tuple in one transaction");
+		assert.ok(idleIdx > verifyTupleIdx, "restore must verify and persist the tuple before broadcasting idle");
+		assert.doesNotMatch(window, /tryApplyDefaultThinkingLevel|\?\?\s*["']medium["']/,
+			"restore must not resurrect a separate default-thinking pass or hidden fallback");
 	});
 
 	it("respawn, force-abort, and delegate paths carry durable effective thinking", () => {
@@ -149,16 +152,16 @@ describe("restoreSession source guard", () => {
 		const roleStart = src.indexOf("const respawnPersisted = this.resolveStoreForSession(id).get(id);");
 		const roleWindow = src.slice(roleStart, roleStart + 8_000);
 		assert.match(roleWindow, /respawnPersisted\?\.effectiveThinkingLevel/);
-		assert.match(roleWindow, /await this\.tryApplyDefaultThinkingLevel\(stagedSession\)/);
+		assert.match(roleWindow, /await this\.tryAutoSelectModel\(stagedSession\)/);
 
 		const forceStart = src.indexOf("const forceRespawnPersisted = this.resolveStoreForSession(id).get(id);");
 		const forceWindow = src.slice(forceStart, forceStart + 8_000);
 		assert.match(forceWindow, /forceRespawnPersisted\?\.effectiveThinkingLevel/);
-		assert.match(forceWindow, /await this\.tryApplyDefaultThinkingLevel\(session\)/);
+		assert.match(forceWindow, /await this\.tryAutoSelectModel\(session\)/);
 
 		const delegateStart = src.indexOf("async createDelegateSession(parentSessionId: string");
 		const delegateWindow = src.slice(delegateStart, delegateStart + 12_000);
 		assert.match(delegateWindow, /parentMeta\?\.effectiveThinkingLevel/);
-		assert.match(delegateWindow, /resolveCurrentCatalogThinkingLevel\(/);
+		assert.match(delegateWindow, /clampCurrentCatalogThinkingCandidate\(/);
 	});
 });

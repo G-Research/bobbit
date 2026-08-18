@@ -3,7 +3,7 @@
  * See docs/design/robust-add-project.md.
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch } from "./_e2e/e2e-setup.js";
+import { apiFetch, rawApiFetch } from "./_e2e/e2e-setup.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -179,6 +179,97 @@ test.describe("server-side preflight defense in depth (POST /api/projects)", () 
 		expect(res.status).toBe(400);
 		const body = await res.json();
 		expect(body.code).toBe("preflight_failed");
-		expect(body.report?.hasFail).toBe(true);
+		expect(body.report).toMatchObject({ rootPath: child, hasFail: true });
+		expect(body.report?.checks).toEqual(expect.arrayContaining([
+			expect.objectContaining({ id: "path.nested-in-project", level: "fail" }),
+		]));
+		expect(body.error).toContain("path.nested-in-project");
+	});
+
+	test("symlink registration preserves the canonical-path confirmation payload", async () => {
+		const target = freshRoot("symlink-target");
+		const link = path.join(fixtureRoot, `${++fixtureSequence}-symlink-link`);
+		try {
+			fs.symlinkSync(target, link, process.platform === "win32" ? "junction" : "dir");
+		} catch {
+			// Windows can deny junction creation in constrained CI environments.
+			return;
+		}
+
+		const res = await rawApiFetch("/api/projects", {
+			method: "POST",
+			body: JSON.stringify({ name: "Symlink", rootPath: link }),
+		});
+		expect(res.status).toBe(400);
+		const body = await res.json();
+		expect(body).toEqual({
+			error: "Project root is a symlink",
+			code: "symlink_root",
+			rootPath: link,
+			canonical: fs.realpathSync(target),
+		});
+	});
+
+	test("missing and duplicate roots return typed registration errors", async () => {
+		const missing = path.join(fixtureRoot, `${++fixtureSequence}-missing`);
+		let res = await apiFetch("/api/projects", {
+			method: "POST",
+			body: JSON.stringify({ name: "Missing", rootPath: missing }),
+		});
+		expect(res.status).toBe(400);
+		expect(await res.json()).toEqual({
+			error: "Project root path does not exist",
+			code: "project_root_not_found",
+		});
+
+		const root = freshRoot("duplicate-root");
+		res = await apiFetch("/api/projects", {
+			method: "POST",
+			body: JSON.stringify({ name: "Original", rootPath: root }),
+		});
+		expect(res.status).toBe(201);
+		res = await apiFetch("/api/projects", {
+			method: "POST",
+			body: JSON.stringify({ name: "Duplicate", rootPath: root }),
+		});
+		expect(res.status).toBe(400);
+		expect(await res.json()).toEqual({
+			error: "A project is already registered at this root",
+			code: "project_root_already_registered",
+		});
+	});
+
+	test("duplicate-root update returns a typed error without mutating either project", async () => {
+		const firstRoot = freshRoot("update-duplicate-first");
+		const secondRoot = freshRoot("update-duplicate-second");
+		const first = await apiFetch("/api/projects", {
+			method: "POST",
+			body: JSON.stringify({ name: "First", rootPath: firstRoot }),
+		});
+		expect(first.status).toBe(201);
+		const firstProject = await first.json();
+		const second = await apiFetch("/api/projects", {
+			method: "POST",
+			body: JSON.stringify({ name: "Second", rootPath: secondRoot }),
+		});
+		expect(second.status).toBe(201);
+		const secondProject = await second.json();
+
+		const update = await apiFetch(`/api/projects/${encodeURIComponent(secondProject.id)}`, {
+			method: "PUT",
+			body: JSON.stringify({ rootPath: firstRoot }),
+		});
+		expect(update.status).toBe(400);
+		expect(await update.json()).toEqual({
+			error: "A project is already registered at this root",
+			code: "project_root_already_registered",
+		});
+
+		const [firstAfter, secondAfter] = await Promise.all([
+			apiFetch(`/api/projects/${encodeURIComponent(firstProject.id)}`),
+			apiFetch(`/api/projects/${encodeURIComponent(secondProject.id)}`),
+		]);
+		expect(await firstAfter.json()).toMatchObject({ id: firstProject.id, name: "First", rootPath: firstRoot });
+		expect(await secondAfter.json()).toMatchObject({ id: secondProject.id, name: "Second", rootPath: secondRoot });
 	});
 });

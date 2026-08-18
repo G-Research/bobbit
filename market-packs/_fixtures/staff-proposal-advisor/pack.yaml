@@ -1,0 +1,9 @@
+schema: 2
+name: staff-proposal-advisor
+version: 1.0.0
+description: Test-only scheduled staff improvement consent fixture.
+contents:
+  roles: []
+  tools: []
+  skills: []
+  hooks: [staff-improvement]

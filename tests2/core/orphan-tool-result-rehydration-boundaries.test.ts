@@ -609,6 +609,22 @@ describe("executable SessionManager rehydration boundaries", () => {
 		expect(switches).toEqual([file]);
 	});
 
+	it("fails closed when a grant lands during cold restore after start and before publication", async () => {
+		const file = hostTranscript("cold-restore-publication-grant-race");
+		let filterRequired = false;
+		const bridge = recordingBridge(() => { filterRequired = true; });
+		bridge.stop = vi.fn(async () => { bridge.running = false; });
+		const ps = persisted("cold-restore-publication-grant-race", file);
+		const manager = makeManager(ps, bridge);
+		manager.setToolResultFilterActivationResolver(() => ({ toolResult: filterRequired }));
+
+		await expect(manager.restoreSession(ps)).rejects.toThrow(
+			"Tool-result filter gate was not installed for session cold-restore-publication-grant-race",
+		);
+		expect(bridge.stop).toHaveBeenCalledOnce();
+		expect(manager.sessions.get(ps.id)).toBeUndefined();
+	});
+
 	it.each(["response", "exception"] as const)(
 		"does not drain a durable restore queue when replayed agent_end precedes a failed switch (%s)",
 		async (failure) => {
@@ -1145,7 +1161,7 @@ describe("executable SessionManager rehydration boundaries", () => {
 		});
 		manager._testStore = store;
 		managers.push(manager);
-		const applyThinking = vi.spyOn(manager, "tryApplyDefaultThinkingLevel");
+		const verifyTuple = vi.spyOn(manager, "tryAutoSelectModel");
 		const oldBridge = recordingBridge(() => { throw new Error("old process must not switch"); });
 		oldBridge.stop = vi.fn(async () => {});
 		const original = liveSession(ps.id, oldBridge, { unsubscribe: vi.fn() });
@@ -1153,7 +1169,8 @@ describe("executable SessionManager rehydration boundaries", () => {
 
 		await expect(manager.assignRole(ps.id, role)).resolves.toBe(true);
 
-		expect(applyThinking, "LEGACY_STAGED_COMPLETE_TUPLE_RAN_REDUNDANT_THINKING_READ").not.toHaveBeenCalled();
+		expect(verifyTuple, "LEGACY_STAGED_COMPLETE_TUPLE_MUST_USE_ONE_EXACT_VERIFICATION_TRANSACTION")
+			.toHaveBeenCalledTimes(1);
 		expect(tupleUpdates(store), "LEGACY_STAGED_COMPLETE_TUPLE_WAS_DISCARDED").toEqual([{
 			modelProvider: FIXTURE_MODEL_PROVIDER,
 			modelId: FIXTURE_MODEL_ID,
@@ -3180,7 +3197,6 @@ describe("executable SessionManager rehydration boundaries", () => {
 			put: vi.fn(() => {}),
 			archive: vi.fn(() => {}),
 		};
-		manager.resolveInitialThinkingLevel = vi.fn(() => "high");
 		if (sandboxed) {
 			manager.applySandboxWiring = vi.fn(async (options: any) => {
 				options.containerId = "container-poison-rollback";
@@ -3356,7 +3372,6 @@ describe("executable SessionManager rehydration boundaries", () => {
 			options.sandboxed = true;
 			return true;
 		});
-		manager.resolveInitialThinkingLevel = vi.fn(() => "high");
 		managers.push(manager);
 
 		const oldPrompts: string[] = [];
@@ -3682,6 +3697,18 @@ describe("executable SessionManager rehydration boundaries", () => {
 });
 
 function pipelineContext(sandboxManager: any = null): any {
+	const persisted = new Map<string, any>();
+	const store = {
+		put: vi.fn((row: any) => persisted.set(row.id, structuredClone(row))),
+		update: vi.fn(),
+		get: (id: string) => persisted.get(id),
+		archive: vi.fn((id: string) => {
+			const row = persisted.get(id);
+			if (!row) return false;
+			row.archived = true;
+			return true;
+		}),
+	};
 	return {
 		roleManager: null,
 		toolManager: null,
@@ -3691,11 +3718,11 @@ function pipelineContext(sandboxManager: any = null): any {
 		projectConfigStore: null,
 		sandboxManager,
 		sandboxTokenStore: null,
-		sessionSecretStore: { getOrCreateSecret: () => "fixture-secret" },
+		sessionSecretStore: { getOrCreateSecret: () => "fixture-secret", remove() {} },
 		groupPolicyStore: null,
 		configCascade: null,
 		costTracker: {},
-		store: { put: vi.fn(), update: vi.fn() },
+		store,
 		searchIndex: {},
 		sessions: new Map(),
 		assemblePrompt: () => undefined,
@@ -3707,10 +3734,8 @@ function pipelineContext(sandboxManager: any = null): any {
 		trackCostFromEvent() {},
 		broadcast() {},
 		tryAutoSelectModel: async () => {},
-		tryApplyDefaultThinkingLevel: async () => {},
 		buildWorkflowList: () => "",
 		resolveInitialModel: () => undefined,
-		resolveInitialThinkingLevel: () => undefined,
 		prStatusStore: {},
 	};
 }
@@ -3742,6 +3767,61 @@ describe("executable continue-archived/live-fork setup boundary", () => {
 		await executePlan(setupPlan("continue-host", file, false), pipelineContext());
 
 		expect(switches).toEqual([file]);
+	});
+
+	it("fails closed when a grant lands after a continue spawn starts but before publication", async () => {
+		const file = hostTranscript("continue-publication-grant-race");
+		let filterRequired = false;
+		const bridge = recordingBridge(() => { filterRequired = true; });
+		bridge.stop = vi.fn(async () => { bridge.running = false; });
+		registerRpcBridgeFactory(() => bridge);
+		const ctx = pipelineContext();
+		ctx.assertToolResultFilterGateAtPublication = vi.fn(() => {
+			if (filterRequired) throw new Error("Tool-result filter gate was not installed for session continue-publication-grant-race");
+		});
+
+		await expect(executePlan(setupPlan("continue-publication-grant-race", file, false), ctx))
+			.rejects.toThrow("Tool-result filter gate was not installed");
+		expect(ctx.assertToolResultFilterGateAtPublication).toHaveBeenCalledWith("continue-publication-grant-race", "project-boundary");
+		expect(bridge.stop).toHaveBeenCalledOnce();
+		expect(ctx.sessions.get("continue-publication-grant-race")).toBeUndefined();
+		expect(ctx.store.put).toHaveBeenCalledOnce();
+		expect(ctx.store.put).toHaveBeenCalledWith(expect.objectContaining({
+			id: "continue-publication-grant-race",
+			agentSessionFile: file,
+		}));
+		expect(ctx.store.archive).toHaveBeenCalledTimes(1);
+		expect(ctx.store.archive).toHaveBeenCalledWith("continue-publication-grant-race");
+		expect(ctx.store.get("continue-publication-grant-race")).toMatchObject({
+			id: "continue-publication-grant-race",
+			agentSessionFile: file,
+			archived: true,
+		});
+	});
+
+	it("fails closed for a plain create when policy binds after its initial map insertion", async () => {
+		let filterRequired = false;
+		const bridge = recordingBridge(() => {});
+		bridge.stop = vi.fn(async () => { bridge.running = false; });
+		registerRpcBridgeFactory(() => bridge);
+		const ctx = pipelineContext();
+		ctx.store.archive = vi.fn();
+		ctx.tryAutoSelectModel = vi.fn(async (session: any) => {
+			expect(ctx.sessions.get(session.id)?.projectId).toBe("project-boundary");
+			filterRequired = true;
+		});
+		ctx.assertToolResultFilterGateAtPublication = vi.fn(() => {
+			if (filterRequired) throw new Error("Tool-result filter gate was not installed for session plain-create-publication-race");
+		});
+		const plan = setupPlan("plain-create-publication-race", "", false);
+		delete plan.preExistingAgentSessionFile;
+		plan.skipAutoModel = false;
+		plan.mode = "delegate";
+
+		await expect(executePlan(plan, ctx)).rejects.toThrow("Tool-result filter gate was not installed");
+		expect(ctx.sessions.get(plan.id)).toBeUndefined();
+		expect(bridge.stop).toHaveBeenCalledOnce();
+		expect(ctx.store.archive).toHaveBeenCalledWith(plan.id);
 	});
 
 	it("rewrites an orphan in a sandbox container-path clone before switching the sandbox process", async () => {

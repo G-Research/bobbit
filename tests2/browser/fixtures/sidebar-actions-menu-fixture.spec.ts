@@ -15,7 +15,18 @@ import {
 	trigger,
 } from "./sidebar-actions-menu-fixture-support.js";
 
-const { loadFixture } = installSidebarActionsFixture("sidebar-actions-menu-contracts-fixture-bundle.js");
+const { loadFixture: loadBaseFixture } = installSidebarActionsFixture("sidebar-actions-menu-contracts-fixture-bundle.js");
+
+async function loadFixture(page: Parameters<typeof loadBaseFixture>[0], viewport?: Parameters<typeof loadBaseFixture>[1]) {
+	const ids = await loadBaseFixture(page, viewport);
+	await page.evaluate((sessionId) => {
+		Object.assign((window as any).__bobbitState, {
+			selectedSessionId: sessionId,
+			connectingSessionId: sessionId,
+		});
+	}, ids.session);
+	return ids;
+}
 
 test("render-time session updates use the mounted active gateway connection", async ({ page }) => {
 	const ids = await loadFixture(page);
@@ -45,7 +56,7 @@ test("session and goal menus preserve popover ordering and title contracts", asy
 	const ids = await loadFixture(page);
 
 	await openMenu(page, "session", ids.session);
-	await expect.poll(() => menuLabels(page)).toEqual(["Modify", "Terminate", "Pin session", "Refresh agent", "Fork", "Copy link", "View system prompt", "Open in new window"]);
+	await expect.poll(() => menuLabels(page)).toEqual(["Modify", "Terminate", "Pin session", "Refresh agent", "Fork", "Copy link", "View system prompt", "View context trace", "Open in new window"]);
 	await expect.poll(() => menuTitleMap(page)).toMatchObject({
 		modify: "Modify session. Edit the name, colour, and Role",
 		pin: "Keep this session in Pinned",
@@ -53,6 +64,7 @@ test("session and goal menus preserve popover ordering and title contracts", asy
 		fork: "Create a new session from this session's history",
 		"copy-link": "Copy a link to this session",
 		"view-system-prompt": "View system prompt",
+		"view-context-trace": "Inspect read-only context provider activity",
 		"open-new-window": "Open this session in a new browser window",
 	});
 	expect((await menuTitleMap(page)).terminate).toContain("Terminate this session");

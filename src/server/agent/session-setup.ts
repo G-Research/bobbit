@@ -52,18 +52,32 @@ import type { ScopedToolContext, ToolManager } from "./tool-manager.js";
 import type { ToolGroupPolicyStore } from "./tool-group-policy-store.js";
 import type { McpManager } from "../mcp/mcp-manager.js";
 import type { SandboxManager } from "./sandbox-manager.js";
-import type { PromptParts, NestingContext } from "./system-prompt.js";
+import type { PromptParts, NestingContext, ResolvedSystemPromptSection } from "./system-prompt.js";
 import type { PrStatusStore } from "./pr-status-store.js";
-import type { LifecycleHub } from "./lifecycle-hub.js";
+import type { LifecycleHub, CapabilityStageResult } from "./lifecycle-hub.js";
 import type { ContextBlock } from "./context-blocks.js";
+import {
+	canonicalizeCapabilityQuery,
+	createDynamicCapabilitySelection,
+	type DynamicCapabilitySelection,
+} from "./dynamic-capability-contract.js";
 
 import type { ConfigCascade } from "./config-cascade.js";
 import { getAssistantDef, assistantRoleForType } from "./assistant-registry.js";
 import { resolveBundledDocsDir, resolveBundledSrcDir } from "./bundled-paths.js";
 import { buildReattemptContext } from "./goal-assistant.js";
-import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, type EffectiveTool } from "./tool-activation.js";
+import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, type EffectiveTool, type ToolActivationResult } from "./tool-activation.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
+import { assertToolResultGatePiCompatibility, toolResultFilterGateEnvironment, writeToolResultFilterExtension } from "./tool-result-filter-extension.js";
+import {
+	TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_CODE,
+	TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_MESSAGE,
+} from "./tool-result-filter-extension-trust.js";
+export {
+	TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_CODE,
+	TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_MESSAGE,
+} from "./tool-result-filter-extension-trust.js";
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
 import { writeAigwDnsGuardExtension } from "./aigw-manager.js";
 import { createWorktree, cleanupWorktree, isUnresolvedHeadWorktreeError, type RemoteGitPolicy } from "../skills/git.js";
@@ -172,6 +186,41 @@ export interface MarketplacePiExtensionActivation {
 	tools: PiExtensionToolInfo[];
 	diagnostics: PiExtensionDiagnostic[];
 	runtimeExtensions: RuntimePiExtensionInfo[];
+}
+
+/**
+ * Marketplace Pi extensions execute arbitrary code in Pi's realm. They cannot
+ * share a protected result-gate session, even though core snapshots intrinsics,
+ * because they could replace private AgentSession internals before execution.
+ */
+/**
+ * Result-gate sessions share Pi's private realm with every `--extension`.
+ * This early activation check gives setup diagnostics; RpcBridge owns the
+ * authoritative final path boundary immediately before spawn.
+ */
+export function assertToolResultFilterExtensionCompatibility(
+	filter: { toolResult?: boolean } | null | undefined,
+	toolActivation: Pick<ToolActivationResult, "activeBobbitExtensionProviders">,
+	piActivation: Pick<MarketplacePiExtensionActivation, "runtimeExtensions">,
+): void {
+	if (!filter?.toolResult) return;
+	const hasUntrustedToolProvider = toolActivation.activeBobbitExtensionProviders.some(provider => provider.provenance !== "builtin");
+	if (!hasUntrustedToolProvider && piActivation.runtimeExtensions.length === 0) return;
+	const error = new Error(TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_MESSAGE) as Error & { code: string };
+	error.code = TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_CODE;
+	throw error;
+}
+
+/** @deprecated Use assertToolResultFilterExtensionCompatibility. */
+export const TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_CODE = TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_CODE;
+/** @deprecated Use TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_MESSAGE. */
+export const TOOL_RESULT_FILTER_MARKETPLACE_PI_EXTENSION_CONFLICT_MESSAGE = TOOL_RESULT_FILTER_UNTRUSTED_EXTENSION_CONFLICT_MESSAGE;
+/** @deprecated Compatibility wrapper for Marketplace Pi extensions. */
+export function assertToolResultFilterMarketplacePiExtensionCompatibility(
+	filter: { toolResult?: boolean } | null | undefined,
+	activation: Pick<MarketplacePiExtensionActivation, "runtimeExtensions">,
+): void {
+	assertToolResultFilterExtensionCompatibility(filter, { activeBobbitExtensionProviders: [] }, activation);
 }
 
 const RUNTIME_OMIT_PI_EXTENSION_STATUSES = new Set<PiExtensionDiagnostic["status"]>(["disabled", "unresolved"]);
@@ -362,6 +411,8 @@ export interface SessionSetupPlan {
 	// Computed during planning
 	bridgeOptions: RpcBridgeOptions;
 	effectiveAllowedTools?: EffectiveTool[];
+	/** Immutable startup selector snapshot. Undefined preserves the legacy unrestricted optional surface. */
+	dynamicCapabilities?: DynamicCapabilitySelection;
 	promptPath?: string;
 	dynamicContextBlocks?: ContextBlock[];
 
@@ -430,9 +481,47 @@ export interface PipelineContext {
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null;
 	/** S1 — per-session capability secret store (see session-secret.ts). */
 	sessionSecretStore: import("../auth/session-secret.js").SessionSecretStore;
+	/** Server-owned private Pi gate input; never added to bridge env or public APIs. */
+	toolResultFilterGateCredential?: (sessionId: string) => { runtimeGeneration: number; runtimeKey: string };
+	/** Clears a predecessor gate credential when this replacement has no gate. */
+	invalidateToolResultFilterGate?: (sessionId: string) => void;
+	/** Commits a started gate or stops an unprotected bridge if policy changed mid-spawn. */
+	commitToolResultFilterGate?: (
+		sessionId: string,
+		projectId: string | undefined,
+		rpcClient: RpcBridge,
+		credential: import("./tool-result-filter-attempt-credentials.js").ToolResultFilterGateCredential | undefined,
+	) => Promise<void>;
+	/** Synchronous final gate check; no await may separate it from publication. */
+	assertToolResultFilterGateAtPublication?: (sessionId: string, projectId: string | undefined) => void;
 	groupPolicyStore: ToolGroupPolicyStore | null;
 	configCascade: ConfigCascade | null;
 	lifecycleHub?: LifecycleHub;
+/** Recomputed from the live request-mutation dispatcher at every spawn. */
+	requestMutationActivation?: (projectId: string | undefined) => { prompt?: boolean; toolSafety?: boolean };
+	/** Recomputed from the live result-filter dispatcher at every spawn. */
+	toolResultFilterActivation?: (projectId: string | undefined) => { toolResult?: boolean };
+	/** Returns active, user/model-invocable skill names after normal discovery and policy composition. */
+	resolveDynamicSkillCandidates?: (scope: { cwd: string; projectId?: string }) => readonly string[];
+	/** Builds a post-discovery, session-local skills catalogue for the prompt. */
+	resolveDynamicSkillsCatalog?: (scope: {
+		cwd: string;
+		projectId?: string;
+		allowedTools?: readonly string[];
+		selectedNames: readonly string[];
+	}) => import("../skills/slash-skills.js").SlashSkill[] | undefined;
+	/** Durable telemetry is best-effort and must never affect setup. */
+	recordDynamicCapabilitySelection?: (input: {
+		sessionId: string;
+		/** Undefined when eligible selectors all failed and legacy surfaces remain. */
+		selection?: DynamicCapabilitySelection;
+		skills: CapabilityStageResult;
+		mcp: CapabilityStageResult;
+		skillCandidateCount: number;
+		mcpCandidateCount: number;
+		skillsContextBytesSaved: number;
+		mcpContextBytesSaved: number;
+	}) => void;
 	/**
 	 * Resolve the EFFECTIVE (ancestry-merged) per-goal metadata for a goal id.
 	 * Wired by SessionManager to `goalManager.getEffectiveGoalMetadata`. Optional
@@ -449,6 +538,10 @@ export interface PipelineContext {
 	/** Injected command boundary used by setup-failure worktree cleanup. */
 	commandRunner?: CommandRunner;
 	assemblePrompt: (id: string, parts: PromptParts) => string | undefined;
+	/** Resolves the current project-effective static extension region. */
+	resolveStaticPromptSections?: (projectId: string | undefined) => ResolvedSystemPromptSection[];
+	/** Called after a worktree-backed session's durable coordinates are valid. */
+	onWorktreeReady?: (session: SessionInfo) => void | Promise<void>;
 
 	applySandboxWiring: (opts: RpcBridgeOptions, id: string, sandboxOpts?: SandboxWiringOptions) => Promise<boolean>;
 	/** Validate and canonicalize the fully assembled Pi tuple before bridge creation. */
@@ -463,9 +556,11 @@ export interface PipelineContext {
 	recordPiExtensionDiagnostic?: (session: SessionInfo, diagnostic: import("./rpc-bridge.js").RuntimePiExtensionDiagnostic, extension: RuntimePiExtensionInfo) => void;
 	broadcast: (clients: Set<WebSocket>, msg: ServerMessage) => void;
 	tryAutoSelectModel: (session: SessionInfo) => Promise<void>;
-	tryApplyDefaultThinkingLevel: (session: SessionInfo) => Promise<void>;
+	/** Clamp a dispatcher-provenanced setup candidate against the exact selected model. */
+	clampSetupThinkingLevel?: (model: string | undefined, candidate: string) => Promise<string | undefined>;
 	buildWorkflowList: (projectId?: string) => string;
 	resolveInitialModel: (role: string | undefined, projectId: string | undefined) => string | undefined;
+	/** Resolve only configured role/default thinking authority; never manufacture a fallback. */
 	resolveInitialThinkingLevel: (role: string | undefined, projectId: string | undefined) => string | undefined;
 	/**
 	 * Persist agentSessionFile + other live-state-derived fields. Optional —
@@ -613,6 +708,111 @@ function applyDisabledToolsFilter(plan: SessionSetupPlan, disabledTools: Readonl
 	}
 }
 
+/**
+ * A selector snapshot narrows only optional MCP meta-tools. It cannot alter
+ * YAML tools, policies, or the distinction between an unrestricted and explicit
+ * empty role allowlist. A missing snapshot is the byte-compatible legacy path.
+ */
+function applyDynamicMcpFilter(plan: SessionSetupPlan): void {
+	const selection = plan.dynamicCapabilities;
+	if (!selection?.mcpAuthoritative || !plan.effectiveAllowedTools) return;
+	const selected = new Set(selection.mcp);
+	plan.effectiveAllowedTools = plan.effectiveAllowedTools.filter(tool => tool.kind !== "mcp" || selected.has(tool.name));
+}
+
+function selectorEffectiveAllowedTools(plan: SessionSetupPlan, ctx: PipelineContext): readonly EffectiveTool[] | undefined {
+	let allowed = plan.effectiveAllowedTools;
+	if (allowed === undefined && ctx.toolManager) {
+		const roleName = plan.assistantType ? assistantRoleForType(plan.assistantType) : plan.roleName;
+		// A role-less session must keep the group-policy baseline; synthesizing the
+		// general role here could override a ceiling before normal setup runs.
+		const role = roleName ? lookupRole(roleName, plan, ctx) : undefined;
+		allowed = computeEffectiveAllowedTools(
+			ctx.toolManager, role, ctx.groupPolicyStore ?? undefined, ctx.mcpManager ?? undefined, scopedToolContext(plan.projectId, plan.cwd),
+		);
+	}
+	return allowed;
+}
+
+function selectionContextBytes(ids: readonly string[]): number {
+	return Buffer.byteLength(ids.join("\n"), "utf8");
+}
+
+function dynamicSkillsCatalog(plan: SessionSetupPlan, ctx: PipelineContext): import("../skills/slash-skills.js").SlashSkill[] | undefined {
+	const selection = plan.dynamicCapabilities;
+	const selectedNames = selection?.skillsAuthoritative ? selection.skills : undefined;
+	return selectedNames === undefined
+		? undefined
+		: ctx.resolveDynamicSkillsCatalog?.({
+			cwd: plan.cwd,
+			projectId: plan.projectId,
+			allowedTools: plan.effectiveAllowedTools?.map(tool => tool.name),
+			selectedNames,
+		});
+}
+
+/**
+ * Runs the two bounded startup selectors before the normal tool/prompt pipeline.
+ * The lifecycle dispatcher owns eligibility, grants, worker execution, and
+ * reduction; this layer only supplies existing candidate ceilings and persists
+ * the resulting immutable snapshot on the plan.
+ */
+export async function resolveDynamicCapabilities(plan: SessionSetupPlan, ctx: PipelineContext): Promise<void> {
+	if (plan.dynamicCapabilities || !ctx.lifecycleHub) return;
+	const candidateTools = selectorEffectiveAllowedTools(plan, ctx);
+	// No resolved allowlist preserves legacy unrestricted semantics; an explicit
+	// resolved list must contain activate_skill before a skill can be selected.
+	const skillsMayActivate = candidateTools === undefined || candidateTools.some(tool => tool.name.toLowerCase() === "activate_skill");
+	const skillCandidates = skillsMayActivate
+		? (ctx.resolveDynamicSkillCandidates?.({ cwd: plan.cwd, projectId: plan.projectId }) ?? []).slice().sort()
+		: [];
+	const mcpCandidates = (candidateTools ?? []).filter(tool => tool.kind === "mcp").map(tool => tool.name).sort();
+	const query = canonicalizeCapabilityQuery(plan.instructions ?? "");
+	let skills: CapabilityStageResult;
+	let mcp: CapabilityStageResult;
+	try {
+		skills = await ctx.lifecycleHub.selectCapabilities("skills", {
+			event: "sessionSetup", sessionId: plan.id, projectId: plan.projectId,
+			goalId: effectiveGoalId(plan), roleName: plan.roleName, cwd: plan.cwd,
+			query, available: skillCandidates,
+		});
+	} catch {
+		skills = { selected: [], authoritative: false, outcomes: [] };
+	}
+	try {
+		mcp = await ctx.lifecycleHub.selectCapabilities("mcp", {
+			event: "sessionSetup", sessionId: plan.id, projectId: plan.projectId,
+			goalId: effectiveGoalId(plan), roleName: plan.roleName, cwd: plan.cwd,
+			query, available: mcpCandidates, selectedSkills: skills.selected,
+		});
+	} catch {
+		mcp = { selected: [], authoritative: false, outcomes: [] };
+	}
+
+	// A stage becomes a ceiling only after a valid selector proposal wins. Failed,
+	// denied, or unavailable stages retain their existing optional surface.
+	const hasAuthority = skills.authoritative || mcp.authoritative;
+	const selection = hasAuthority
+		? createDynamicCapabilitySelection(query, skills.selected, mcp.selected, { skills: skills.authoritative, mcp: mcp.authoritative })
+		: undefined;
+	if (selection) plan.dynamicCapabilities = selection;
+
+	// Eligible selector failures are still observable, but no-authority stages
+	// report zero savings because their legacy surface remains available.
+	if (skills.outcomes.length > 0 || mcp.outcomes.length > 0) {
+		try {
+			ctx.recordDynamicCapabilitySelection?.({
+				sessionId: plan.id, selection, skills, mcp,
+				skillCandidateCount: skillCandidates.length, mcpCandidateCount: mcpCandidates.length,
+				skillsContextBytesSaved: skills.authoritative
+					? Math.max(0, selectionContextBytes(skillCandidates) - selectionContextBytes(skills.selected)) : 0,
+				mcpContextBytesSaved: mcp.authoritative
+					? Math.max(0, selectionContextBytes(mcpCandidates) - selectionContextBytes(mcp.selected)) : 0,
+			});
+		} catch { /* observability is never a setup dependency */ }
+	}
+}
+
 /** Prompt section order from `bobbit.promptSectionOrder`; undefined when none. */
 function promptSectionOrderFromMetadata(meta: Record<string, unknown>): string[] | undefined {
 	const raw = meta["bobbit.promptSectionOrder"];
@@ -718,8 +918,8 @@ function _resolveBridgeOptions(plan: SessionSetupPlan, ctx: PipelineContext): vo
 	if (plan.initialThinkingLevel) {
 		plan.bridgeOptions.initialThinkingLevel = plan.initialThinkingLevel;
 	} else if (!plan.skipAutoThinking) {
-		const pinnedT = ctx.resolveInitialThinkingLevel(plan.role ?? plan.roleName, plan.projectId);
-		if (pinnedT) plan.bridgeOptions.initialThinkingLevel = pinnedT;
+		const pinned = ctx.resolveInitialThinkingLevel(plan.role ?? plan.roleName, plan.projectId);
+		if (pinned) plan.bridgeOptions.initialThinkingLevel = pinned;
 	}
 }
 
@@ -773,6 +973,7 @@ function _resolveTools(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	}
 
 	plan.effectiveAllowedTools = effectiveAllowedTools;
+	applyDynamicMcpFilter(plan);
 
 	// Generic role-accessory application. When a session is created with a
 	// role (roleName/role) that resolves to a Role carrying an `accessory`, and
@@ -805,7 +1006,8 @@ function lookupRole(name: string, plan: SessionSetupPlan, ctx: PipelineContext):
 export async function resolveDynamicContext(plan: SessionSetupPlan, ctx: PipelineContext): Promise<void> {
 	if (!ctx.lifecycleHub) return;
 	try {
-		const { blocks } = await ctx.lifecycleHub.dispatch("sessionSetup", {
+		const explicitThinking = !!plan.bridgeOptions.initialThinkingLevel || plan.skipAutoThinking === true;
+		const { blocks, thinkingLevel } = await ctx.lifecycleHub.dispatch("sessionSetup", {
 			sessionId: plan.id,
 			projectId: plan.projectId,
 			scope: plan.projectId ? "project" : "global",
@@ -825,6 +1027,10 @@ export async function resolveDynamicContext(plan: SessionSetupPlan, ctx: Pipelin
 			repoWorktrees: plan.repoWorktrees,
 		});
 		plan.dynamicContextBlocks = blocks;
+		if (!explicitThinking && thinkingLevel && ctx.clampSetupThinkingLevel) {
+			const effective = await ctx.clampSetupThinkingLevel(plan.bridgeOptions.initialModel, thinkingLevel);
+			if (effective) plan.bridgeOptions.initialThinkingLevel = effective;
+		}
 	} catch (err) {
 		console.error(`[session-setup] sessionSetup dynamic context failed for ${plan.id}:`, err);
 	}
@@ -835,6 +1041,18 @@ export function resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): voi
 	return profile("resolvePrompt", () => _resolvePrompt(plan, ctx));
 }
 
+function resolveStaticPromptSections(plan: SessionSetupPlan, ctx: PipelineContext): ResolvedSystemPromptSection[] {
+	if (!ctx.resolveStaticPromptSections) return [];
+	try {
+		return ctx.resolveStaticPromptSections(plan.projectId);
+	} catch (error) {
+		// A malformed/over-budget installed extension must never prevent an agent
+		// turn. The resolver logs the concrete rejection; preserve a safe core prompt.
+		console.error(`[session-setup] static prompt extensions rejected for ${plan.id}:`, error);
+		return [];
+	}
+}
+
 function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	const assistantDef = plan.assistantType ? getAssistantDef(plan.assistantType) : undefined;
 
@@ -842,6 +1060,9 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 	// Per-goal prompt section ordering (bobbit.promptSectionOrder). Undefined ⇒
 	// today's fixed order, byte-identical. Applies to every prompt variant.
 	const sectionOrder = promptSectionOrderFromMetadata(goalMeta);
+	// Resolve once per setup so every prompt variant has exactly the same
+	// project-effective extension region and its persisted snapshot matches bytes.
+	const extensionPromptSections = resolveStaticPromptSections(plan, ctx);
 	// Per-goal disabled tools (bobbit.disabledTools). Filter the resolved
 	// allowlist HERE — BEFORE the prompt / tool-docs / skills catalog are
 	// assembled and cached — so a disabled tool can never be advertised in the
@@ -905,9 +1126,11 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			// strip disabled tools again before the prompt/tool-docs are assembled.
 			applyDisabledToolsFilter(plan, disabledTools);
 		}
+		applyDynamicMcpFilter(plan);
 
 		const promptPath = ctx.assemblePrompt(plan.id, {
 			dynamicContext: plan.dynamicContextBlocks,
+			skillsCatalog: dynamicSkillsCatalog(plan, ctx),
 			// Include the base system prompt so assistant sessions
 			// (goal/project/tool assistants) get it by default.
 			baseSystemPromptPath: ctx.systemPromptPath,
@@ -922,6 +1145,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			roleName: resolvedRoleName,
 			allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
+			extensionPromptSections,
 			sectionOrder,
 		});
 		if (promptPath) plan.bridgeOptions.systemPromptPath = promptPath;
@@ -939,6 +1163,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 
 		const promptPath = ctx.assemblePrompt(plan.id, {
 			dynamicContext: plan.dynamicContextBlocks,
+			skillsCatalog: dynamicSkillsCatalog(plan, ctx),
 			baseSystemPromptPath: ctx.systemPromptPath,
 			cwd: plan.cwd,
 			projectRoot: plan.repoPath,
@@ -951,6 +1176,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			roleName: plan.roleName,
 			allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
+			extensionPromptSections,
 			sectionOrder,
 		});
 		if (promptPath) plan.bridgeOptions.systemPromptPath = promptPath;
@@ -992,6 +1218,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 
 		const promptPath = ctx.assemblePrompt(plan.id, {
 			dynamicContext: plan.dynamicContextBlocks,
+			skillsCatalog: dynamicSkillsCatalog(plan, ctx),
 			baseSystemPromptPath: ctx.systemPromptPath,
 			cwd: plan.cwd,
 			projectRoot: plan.repoPath,
@@ -1007,6 +1234,7 @@ function _resolvePrompt(plan: SessionSetupPlan, ctx: PipelineContext): void {
 			allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
 			workflowContext: plan.workflowContext,
 			projectConfigStore: ctx.projectConfigStore ?? undefined,
+			extensionPromptSections,
 			nestingContext,
 			sectionOrder,
 		});
@@ -1054,19 +1282,39 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 	// Idempotent with the filtering already applied in resolvePrompt; this guard
 	// keeps activation correct even if invoked without a preceding resolvePrompt.
 	applyDisabledToolsFilter(plan, disabledTools);
+	applyDynamicMcpFilter(plan);
 
 	const flatNames = plan.effectiveAllowedTools?.map(e => e.name);
 	const toolScope = scopedToolContext(plan.projectId, plan.cwd);
+	const requestMutation = ctx.requestMutationActivation?.(plan.projectId);
+	const toolResultFilter = ctx.toolResultFilterActivation?.(plan.projectId);
 	const mcpExtPaths = ctx.mcpManager
-		? writeMcpProxyExtensions(ctx.mcpManager, flatNames, effectiveRole ?? undefined, ctx.toolManager ?? undefined, ctx.groupPolicyStore ?? undefined, disabledTools, toolScope)
+		? writeMcpProxyExtensions(ctx.mcpManager, flatNames, effectiveRole ?? undefined, ctx.toolManager ?? undefined, ctx.groupPolicyStore ?? undefined, disabledTools, toolScope, plan.dynamicCapabilities?.selectionFingerprint)
 		: undefined;
 
 	const activation = computeToolActivationArgs(plan.effectiveAllowedTools, ctx.toolManager ?? undefined, plan.cwd, mcpExtPaths, disabledTools, toolScope);
 	const piExtensionActivation = resolveMarketplacePiExtensionActivation(ctx.marketplacePiExtensionResolver, plan.projectId, plan.cwd);
+	assertToolResultFilterExtensionCompatibility(toolResultFilter, activation, piExtensionActivation);
 
 	plan.bridgeOptions.args = prependToolResultErrorBridge([...activation.args, ...piExtensionActivation.args, ...(plan.bridgeOptions.args || [])]);
+	let toolResultGateEnv: Record<string, string> | undefined;
+	if (toolResultFilter?.toolResult) {
+		// This is intentionally a setup-time hard failure. The private Pi loader
+		// must install the gate before every ordinary extension or no session starts.
+		assertToolResultGatePiCompatibility();
+		const credential = ctx.toolResultFilterGateCredential?.(plan.id);
+		if (!credential) throw new Error("Tool-result filter gate credential installation failed.");
+		const gatePath = writeToolResultFilterExtension(plan.id);
+		if (!gatePath) throw new Error("Tool-result filter gate installation failed.");
+		// RpcBridge writes this directly to Pi stdin before its RPC protocol starts.
+		// It is never included in bridgeOptions.env or the mounted gate source.
+		plan.bridgeOptions.toolResultFilterBootstrap = credential;
+		toolResultGateEnv = toolResultFilterGateEnvironment(gatePath);
+	} else {
+		ctx.invalidateToolResultFilterGate?.(plan.id);
+	}
 	plan.bridgeOptions.piExtensions = [...(plan.bridgeOptions.piExtensions ?? []), ...piExtensionActivation.runtimeExtensions];
-	plan.bridgeOptions.env = { ...(plan.bridgeOptions.env || {}), ...activation.env };
+	plan.bridgeOptions.env = { ...(plan.bridgeOptions.env || {}), ...activation.env, ...toolResultGateEnv };
 
 	// Generate and add the tool_call guard extension if any tools have 'ask' or 'never' policy.
 	const guardPath = ctx.toolManager ? writeToolGuardExtension(
@@ -1078,6 +1326,7 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 		[],
 		disabledTools,
 		toolScope,
+		requestMutation,
 	) : undefined;
 	if (guardPath) {
 		plan.bridgeOptions.args.push("--extension", guardPath);
@@ -1088,8 +1337,8 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 	// session's project declares those hooks. When no provider is interested the
 	// bridge is never written or passed to pi — preserving zero overhead and
 	// keeping spawn args byte-identical to the no-provider baseline.
-	if (ctx.lifecycleHub && hasProviderBridgeHooks(ctx.lifecycleHub, plan.projectId, effectiveGoalId(plan))) {
-		const bridgePath = writeProviderBridgeExtension(plan.id);
+	if ((ctx.lifecycleHub && hasProviderBridgeHooks(ctx.lifecycleHub, plan.projectId, effectiveGoalId(plan))) || requestMutation?.prompt) {
+		const bridgePath = writeProviderBridgeExtension(plan.id, requestMutation);
 		if (bridgePath) {
 			plan.bridgeOptions.args.push("--extension", bridgePath);
 		}
@@ -1189,6 +1438,7 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
 		allowedTools: plan.sessionScopedAllowedTools,
 		reattemptGoalId: plan.reattemptGoalId,
 		projectId: plan.projectId,
+		dynamicCapabilities: plan.dynamicCapabilities,
 	});
 }
 
@@ -1198,6 +1448,18 @@ export function persistOnce(session: SessionInfo, plan: SessionSetupPlan, store:
  * Run the full pipeline synchronously: resolve steps → spawn agent → persist → post-spawn.
  * Used by normal and delegate session creation.
  */
+const prePublicationGateFailures = new WeakSet<Error>();
+
+function markPrePublicationGateFailure(error: unknown): Error {
+	const failure = error instanceof Error ? error : new Error(String(error));
+	prePublicationGateFailures.add(failure);
+	return failure;
+}
+
+function takePrePublicationGateFailure(error: unknown): boolean {
+	return error instanceof Error && prePublicationGateFailures.delete(error);
+}
+
 export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext): Promise<SessionInfo> {
 	const __t0 = performance.now();
 	// Step 1-5: resolve all configuration
@@ -1207,6 +1469,7 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 		providerFromModel(plan.bridgeOptions.initialModel) === "anthropic",
 	);
 	resolveGoalExtensions(plan, ctx);
+	await resolveDynamicCapabilities(plan, ctx);
 	resolveTools(plan, ctx);
 	await resolveDynamicContext(plan, ctx);
 	resolvePrompt(plan, ctx);
@@ -1263,9 +1526,28 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 		sandboxed: plan.sandboxed, projectId: plan.projectId,
 	} as any;
 	persistOnce(preSpawnSession, plan, ctx.store);
+	// A dynamic snapshot is an execution boundary: do not spawn until the
+	// structural record (including its immutable selection) is durable. Keep
+	// legacy sessions on their established non-blocking persistence path.
+	if (plan.dynamicCapabilities) await ctx.store.flushAsync();
 
 	// Step 8: spawn agent
-	const session = await profileAsync("executePlan.spawnAgent", () => spawnAgent(plan, ctx));
+	let session: SessionInfo;
+	try {
+		session = await profileAsync("executePlan.spawnAgent", () => spawnAgent(plan, ctx));
+	} catch (err) {
+		ctx.invalidateToolResultFilterGate?.(plan.id);
+		// Step 7 deliberately preserves evidence for ordinary spawn failures. A
+		// failed publication gate is different: its bridge was started but was
+		// refused before map publication, so archive only this exact pre-spawn row.
+		// Never let an overlapping newer live generation be archived instead.
+		if (takePrePublicationGateFailure(err)
+			&& !ctx.sessions.has(plan.id)
+			&& ctx.store.get(plan.id)?.createdAt === preSpawnSession.createdAt) {
+			ctx.store.archive(plan.id);
+		}
+		throw err;
+	}
 
 	// Step 9: update persistence with full session data (agentSessionFile, etc.)
 	persistOnce(session, plan, ctx.store);
@@ -1275,17 +1557,17 @@ export async function executePlan(plan: SessionSetupPlan, ctx: PipelineContext):
 	// continue on provider/runtime defaults.
 	try {
 		await profileAsync("executePlan.postSpawn", () => postSpawn(session, plan, ctx));
+		// This is the ordinary-spawn publication boundary. It deliberately has no
+		// await between the policy read and the returned live session: a concurrent
+		// grant is therefore ordered entirely before this assertion or after publish.
+		ctx.assertToolResultFilterGateAtPublication?.(plan.id, plan.projectId);
+		if (session.status !== "terminated") session.status = "idle";
+		return session;
 	} catch (err) {
 		const setupError = err instanceof Error ? err : new Error(String(err));
 		handleSetupFailure(session, plan, setupError, ctx);
 		throw setupError;
 	}
-
-	// Normal/delegate sessions are not broadcast until createSession returns, but
-	// the returned object must be ready only after model enforcement succeeds.
-	if (session.status !== "terminated") session.status = "idle";
-
-	return session;
 }
 
 /**
@@ -1449,6 +1731,11 @@ export async function executeWorktreeAsync(
 			);
 		}
 		ctx.store.update(session.id, persistFields);
+		// Managed-service reconciliation begins only after these coordinates have
+		// been persisted. Listener failures are isolated from session setup.
+		try { await ctx.onWorktreeReady?.(session); } catch (err) {
+			console.warn(`[session-setup] worktree-ready listener failed for ${session.id}:`, err);
+		}
 		console.log(`[session-setup] Worktree ready for session ${session.id}: ${worktreeCwd} (branch: ${plan.branch})`);
 	}
 
@@ -1459,10 +1746,15 @@ export async function executeWorktreeAsync(
 		providerFromModel(plan.bridgeOptions.initialModel) === "anthropic",
 	);
 	resolveGoalExtensions(plan, ctx);
+	await resolveDynamicCapabilities(plan, ctx);
 	resolveTools(plan, ctx);
 	await resolveDynamicContext(plan, ctx);
 	resolvePrompt(plan, ctx);
 	resolveToolActivation(plan, ctx);
+	if (plan.dynamicCapabilities) {
+		ctx.store.update(session.id, { dynamicCapabilities: plan.dynamicCapabilities });
+		await ctx.store.flushAsync();
+	}
 
 	// Sandbox wiring (now with final CWD from worktree)
 	if (plan.sandboxed) {
@@ -1517,10 +1809,13 @@ export async function executeWorktreeAsync(
 		projectId: plan.projectId,
 	});
 
-	// Create real RpcBridge (replacing placeholder)
+	// Create real RpcBridge (replacing placeholder). Preserve the private
+	// bootstrap locally: RpcBridge deliberately removes it from options.
+	const toolResultFilterBootstrap = plan.bridgeOptions.toolResultFilterBootstrap;
 	const rpcClient = new RpcBridge(plan.bridgeOptions);
 	session.rpcClient = rpcClient;
 	session.allowedTools = plan.effectiveAllowedTools?.map(e => e.name);
+	session.dynamicCapabilities = plan.dynamicCapabilities;
 	// resolveTools may have applied the role's accessory (generic role-accessory
 	// application); mirror it onto the live worktree session so the sidebar
 	// renders it (the early placeholder persist predates accessory resolution).
@@ -1565,10 +1860,16 @@ export async function executeWorktreeAsync(
 	});
 
 	// Start agent with retry
-	await withRetry(
-		() => rpcClient.start(),
-		{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
-	);
+	try {
+		await withRetry(
+			() => rpcClient.start(),
+			{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
+		);
+		await ctx.commitToolResultFilterGate?.(plan.id, plan.projectId, rpcClient, toolResultFilterBootstrap);
+	} catch (err) {
+		ctx.invalidateToolResultFilterGate?.(plan.id);
+		throw err;
+	}
 
 	// Continue-Archived: rehydrate from the cloned JSONL before persisting.
 	if (plan.preExistingAgentSessionFile) {
@@ -1678,6 +1979,8 @@ export async function executeWorktreeAsync(
  * Returns the fully wired SessionInfo.
  */
 async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise<SessionInfo> {
+	// RpcBridge consumes and deletes this private option in its constructor.
+	const toolResultFilterBootstrap = plan.bridgeOptions.toolResultFilterBootstrap;
 	const rpcClient = new RpcBridge(plan.bridgeOptions);
 	const spawnPinnedModel = plan.bridgeOptions.initialModel;
 	const spawnPinnedThinkingLevel = plan.bridgeOptions.initialThinkingLevel;
@@ -1698,6 +2001,9 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 			? `⚡${plan.title}`
 			: plan.title),
 		cwd: effectiveCwd,
+		// Must exist before the first map publication: grant reconciliation and
+		// activation resolve against this exact project while setup is still live.
+		projectId: plan.projectId,
 		status: "starting",
 		statusVersion: 0,
 		createdAt: now,
@@ -1727,6 +2033,7 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		borrowsWorktree: plan.borrowsWorktree,
 		borrowedWorktreeOwnerSessionId: plan.borrowedWorktreeOwnerSessionId,
 		allowedTools: plan.effectiveAllowedTools?.map(e => e.name),
+		dynamicCapabilities: plan.dynamicCapabilities,
 		// Mirror the spawn-time resolver fallback: when callers pass only
 		// `roleName`, surface it as `session.role` so the post-spawn
 		// `tryAutoSelectModel` safety net keys off the right role id.
@@ -1777,10 +2084,16 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 
 	// Start agent with retry
 	const __t = performance.now();
-	await withRetry(
-		() => rpcClient.start(),
-		{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
-	);
+	try {
+		await withRetry(
+			() => rpcClient.start(),
+			{ retries: 2, delays: [500, 1000], label: "rpcClient.start", sessionId: plan.id },
+		);
+		await ctx.commitToolResultFilterGate?.(plan.id, plan.projectId, rpcClient, toolResultFilterBootstrap);
+	} catch (err) {
+		ctx.invalidateToolResultFilterGate?.(plan.id);
+		throw err;
+	}
 	recordElapsed("spawnAgent.rpcStart", performance.now() - __t);
 
 	// Continue-Archived: tell the agent CLI to rehydrate from the cloned JSONL
@@ -1820,6 +2133,15 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 	}
 
 	// Add to live-sessions map so persistSessionMetadata can resolve via getState.
+	// There is deliberately no await between the final exact policy read and map
+	// publication: a grant is ordered before this check or sees this session.
+	try {
+		ctx.assertToolResultFilterGateAtPublication?.(plan.id, plan.projectId);
+	} catch (err) {
+		ctx.invalidateToolResultFilterGate?.(plan.id);
+		await rpcClient.stop().catch(() => {});
+		throw markPrePublicationGateFailure(err);
+	}
 	ctx.sessions.set(session.id, session);
 
 	// Persist agentSessionFile BEFORE post-spawn model enforcement so the session
@@ -1838,22 +2160,11 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
  * Post-spawn setup for synchronous paths (normal, worktree, delegate).
  *
  * Model selection is awaited and fatal for every session type so explicit
- * selected-model failures cannot be hidden after spawn. Thinking-level setup is
- * a best-effort preference and remains a visible non-fatal warning.
+ * selected-model failures cannot be hidden after spawn. Thinking choices were
+ * resolved before bridge construction; no post-spawn fallback is permitted.
  */
 async function postSpawn(session: SessionInfo, plan: SessionSetupPlan, ctx: PipelineContext): Promise<void> {
-	if (!plan.skipAutoModel) {
-		await ctx.tryAutoSelectModel(session);
-	}
-	if (!plan.skipAutoThinking) {
-		const thinkingPromise = ctx.tryApplyDefaultThinkingLevel(session).catch((err) => {
-			console.warn(`[session-setup] Early thinking level failed for ${session.id}:`, err);
-		});
-		// Delegates send their first prompt immediately after setup; preserve the
-		// previous ordering by applying a valid thinking-level preference first,
-		// while still treating failures as non-fatal warnings.
-		if (plan.mode === "delegate") await thinkingPromise;
-	}
+	if (!plan.skipAutoModel) await ctx.tryAutoSelectModel(session);
 }
 
 // ── Delegate prompt ────────────────────────────────────────────────────────
@@ -1952,11 +2263,13 @@ export function handleSetupFailure(
 		});
 	}
 
-	// 3. Remove from in-memory map
-	ctx.sessions.delete(session.id);
-
-	// 4. Archive in store (preserves evidence)
-	ctx.store.archive(session.id);
+	// 3-4. A replacement that became canonical while setup was unwinding must
+	// remain visible and durable. The failure owns archival only when it still
+	// owns this id (or it never reached live publication).
+	const current = ctx.sessions.get(session.id);
+	const superseded = !!current && current !== session;
+	if (current === session) ctx.sessions.delete(session.id);
+	if (!superseded) ctx.store.archive(session.id);
 
 	// 5. Notify connected clients (single writer + version bump).
 	broadcastStatus(session, "terminated");

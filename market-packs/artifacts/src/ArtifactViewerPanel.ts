@@ -64,6 +64,9 @@ export default function createPanel({ html, nothing, renderHeader }: any) {
 	const bodyCache = new Map<string, any>();
 	// artifactId → captured console entries (from the iframe shim).
 	const consoleLogs = new Map<string, ConsoleEntry[]>();
+	// Each HTML artifact runs in an intentionally opaque-origin iframe. Bind its
+	// console bridge to both that exact WindowProxy and a parent-minted channel.
+	const consoleChannels = new Map<string, { iframe: HTMLIFrameElement; token: string }>();
 	// artifactId → console panel expanded?
 	const consoleExpanded = new Map<string, boolean>();
 
@@ -79,6 +82,17 @@ export default function createPanel({ html, nothing, renderHeader }: any) {
 			const d: any = e?.data;
 			if (!d || typeof d !== "object" || d[CONSOLE_MESSAGE_MARKER] !== true) return;
 			const id = typeof d.id === "string" ? d.id : "";
+			const channel = consoleChannels.get(id);
+			// Artifact iframes deliberately do not have `allow-same-origin`, so their
+			// canonical origin is `null`. Authenticate that expected opaque origin,
+			// the concrete source window, and the per-frame channel rather than adding
+			// a broken same-origin check.
+			if (
+				!channel
+				|| e.origin !== "null"
+				|| e.source !== channel.iframe.contentWindow
+				|| d.channelToken !== channel.token
+			) return;
 			const arr = consoleLogs.get(id) || [];
 			arr.push({ type: d.method === "error" ? "error" : "log", text: String(d.text || "") });
 			consoleLogs.set(id, arr);
@@ -132,8 +146,12 @@ export default function createPanel({ html, nothing, renderHeader }: any) {
 			if (!body) {
 				// A fresh html preview re-runs its scripts; reset its captured logs so
 				// the console reflects the current iframe instance (avoid duplicates).
-				if (type === "html" && viewMode === "preview") consoleLogs.delete(artifactId);
-				body = buildArtifactBody(type, filename, content, document, viewMode, artifactId);
+				const consoleToken = type === "html" && viewMode === "preview"
+					? crypto.randomUUID()
+					: undefined;
+				if (consoleToken) consoleLogs.delete(artifactId);
+				body = buildArtifactBody(type, filename, content, document, viewMode, artifactId, consoleToken);
+				if (consoleToken) consoleChannels.set(artifactId, { iframe: body as HTMLIFrameElement, token: consoleToken });
 				bodyCache.set(cacheKey, body);
 				// Fill the pdf/docx render-roots with the REAL vendored renderers
 				// (async; repaints are unaffected — the node is cached/stable).

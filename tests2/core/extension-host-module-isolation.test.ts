@@ -18,9 +18,10 @@ enableTsWorkerResolver();
  * resource/crash isolation + module-import containment (loader hygiene).
  *
  * Pinned invariants:
- *   - Ambient parity: a pack module may `import("node:child_process")` /
+ *   - Ambient parity: actions/routes/providers may `import("node:child_process")` /
  *     `import("node:fs")`, `fetch` is a function, `process.env` is readable with no
- *     declaration, and `process.cwd()` returns the supplied `workingDir`.
+ *     declaration, and `process.cwd()` returns the supplied `workingDir`. Advisors
+ *     receive only their portable runtime environment and no gateway secrets.
  *   - CPU control: a `while(1)` runaway is TERMINATED on timeout (504) — wall-time
  *     termination IS the CPU-cap control (worker_threads has no per-core throttle).
  *   - Memory cap: the exact-registered companion
@@ -38,12 +39,12 @@ enableTsWorkerResolver();
  * Fixtures are `.mjs` ESM modules under a temp dir (the worker dynamic-imports
  * them by file:// URL, exactly as the dispatcher builds it).
  */
-import { describe, it, beforeAll, afterAll } from "vitest";
+import { describe, it, beforeAll, afterAll, vi } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { ModuleHost, type InvokeRequest } from "../../src/server/extension-host/module-host-worker.ts";
+import { ModuleHost, ModuleHostAbortError, parseNodeOptions, type InvokeRequest } from "../../src/server/extension-host/module-host-worker.ts";
 import { ActionError, type ActionHandlerCtx } from "../../src/server/extension-host/action-dispatcher.ts";
 import { makeTmpDir } from "../../tests/helpers/tmp.ts";
 
@@ -67,6 +68,20 @@ const bareCtx = (): ActionHandlerCtx => ({
 
 function req(url: string, member: string, ctx: ActionHandlerCtx, arg: unknown = {}, packRoot: string = tmp, workingDir?: string): InvokeRequest {
 	return { url, packRoot, epoch: 0, exportKind: "actions", member, ctx, arg, workingDir };
+}
+
+function advisorReq(url: string, member: string, ctx: Record<string, unknown>, arg: unknown = undefined, packRoot: string = tmp): InvokeRequest {
+	return { url, packRoot, epoch: 0, exportKind: "advisors", member, ctx, arg, workingDir: typeof ctx.cwd === "string" ? ctx.cwd : undefined };
+}
+
+function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (reason?: unknown) => void } {
+	let resolve!: (value: T) => void;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+		resolve = resolvePromise;
+		reject = rejectPromise;
+	});
+	return { promise, resolve, reject };
 }
 
 /** Write `body` to `dir/name` (creating `dir`), returning its file:// URL — for
@@ -100,6 +115,21 @@ afterAll(() => {
 	try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
 });
 
+describe("ModuleHost — import-order compatibility", () => {
+	// Pins the ActionError temporal-dead-zone crash when ModuleHostAbortError loaded first.
+	it("loads action and advisor worker dependencies in either order", async () => {
+		vi.resetModules();
+		await import("../../src/server/extension-host/action-dispatcher.ts");
+		await import("../../src/server/extension-host/module-host-worker.ts");
+		await import("../../src/server/agent/lifecycle-hub.ts");
+
+		vi.resetModules();
+		await import("../../src/server/agent/lifecycle-hub.ts");
+		await import("../../src/server/extension-host/module-host-worker.ts");
+		await import("../../src/server/extension-host/action-dispatcher.ts");
+	});
+});
+
 // Worker bootstrap dominates this file's wall time. Run independent cases concurrently
 // so the same worker-boundary assertions stay comfortably inside the tier-1 15s budget.
 describe.concurrent("ModuleHost — confined execution (happy path + identity)", () => {
@@ -123,6 +153,128 @@ describe.concurrent("ModuleHost — confined execution (happy path + identity)",
 				(e) => e instanceof ActionError && e.status === 404,
 			);
 		} finally {
+			mh.dispose();
+		}
+	});
+});
+
+describe.concurrent("ModuleHost — scheduled advisor dispatch and cancellation", () => {
+	it("dispatches an advisor export with its data-only context and no host or gateway", async () => {
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			const url = writeModule(`export const advisors = { observe: async (ctx, arg) => ({ sessionId: ctx.sessionId, turn: ctx.turn.index, config: ctx.config.name, arg, hasHost: Object.hasOwn(ctx, "host"), gateway: typeof ctx.gateway }) };`);
+			const result = await mh.invoke(advisorReq(url, "observe", {
+				sessionId: "advisor-session",
+				projectId: "project-1",
+				goalId: "goal-1",
+				roleName: "coder",
+				cwd: tmp,
+				turn: { index: 2 },
+				config: { name: "safe-config" },
+				budget: { maxTokens: 100 },
+				// Defense in depth: the host strips data that is not advisor-safe even
+				// if a future caller accidentally includes it.
+				host: { secret: "must-not-cross" },
+				gateway: { secret: "must-not-cross" },
+			}, { event: "afterTurn" })) as Record<string, unknown>;
+			assert.deepEqual(result, {
+				sessionId: "advisor-session",
+				turn: 2,
+				config: "safe-config",
+				arg: { event: "afterTurn" },
+				hasHost: false,
+				gateway: "undefined",
+			});
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("keeps gateway secrets out of advisors while preserving portable runtime variables", async () => {
+		const sentinelName = `BOBBIT_ADVISOR_ENV_SENTINEL_${Math.random().toString(36).slice(2)}`;
+		const sentinelValue = `sentinel-${Math.random().toString(36).slice(2)}`;
+		process.env[sentinelName] = sentinelValue;
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			// A successful advisor result also proves safe loader flags still boot the
+			// TypeScript source path under Vitest with a restricted environment.
+			const url = writeModule(
+				`export const actions = { probe: async () => ({ value: process.env[${JSON.stringify(sentinelName)}] ?? null, path: process.env.PATH ?? process.env.Path ?? null }) };` +
+				`export const advisors = { probe: async () => ({ value: process.env[${JSON.stringify(sentinelName)}] ?? null, path: process.env.PATH ?? process.env.Path ?? null, temp: process.env.TMPDIR ?? process.env.TEMP ?? process.env.TMP ?? null, hasNodeOptions: Object.hasOwn(process.env, "NODE_OPTIONS") }) };`,
+			);
+			const action = (await mh.invoke(req(url, "probe", bareCtx()))) as Record<string, unknown>;
+			const advisor = (await mh.invoke(advisorReq(url, "probe", { sessionId: "advisor-session", cwd: tmp }))) as Record<string, unknown>;
+			assert.equal(action.value, sentinelValue, "actions retain the inherited gateway environment");
+			assert.equal(action.path, process.env.PATH ?? process.env.Path ?? null);
+			assert.equal(advisor.value, null, "advisors must not inherit a parent environment sentinel");
+			assert.equal(advisor.path, process.env.PATH ?? process.env.Path ?? null, "advisors retain executable discovery on every platform");
+			assert.equal(advisor.temp, process.env.TMPDIR ?? process.env.TEMP ?? process.env.TMP ?? null, "advisors retain a platform temporary directory");
+			assert.equal(advisor.hasNodeOptions, false, "loader options are not advisor-observable environment data");
+		} finally {
+			mh.dispose();
+			delete process.env[sentinelName];
+		}
+	});
+
+	it("preserves unquoted Windows loader paths while parsing NODE_OPTIONS", () => {
+		assert.deepEqual(
+			parseNodeOptions(`--require=C:\\repo\\preload.cjs --import "file:///path with spaces/register.mjs" --max-old-space-size=64`),
+			["--require=C:\\repo\\preload.cjs", "--import", "file:///path with spaces/register.mjs", "--max-old-space-size=64"],
+		);
+	});
+
+	it("a pre-aborted advisor signal rejects without creating a worker", async () => {
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		const controller = new AbortController();
+		controller.abort();
+		try {
+			const url = writeModule(`export const advisors = { observe: async () => "must not run" };`);
+			const invocation = mh.invoke(advisorReq(url, "observe", { sessionId: "advisor-session", cwd: tmp }), undefined, controller.signal);
+			assert.equal((mh as unknown as { live: Map<unknown, unknown> }).live.size, 0, "pre-abort must fence Worker construction");
+			await assert.rejects(
+				() => invocation,
+				(e) => e instanceof ModuleHostAbortError && e.status === 499 && e.code === "MODULE_HOST_ABORTED",
+			);
+		} finally {
+			mh.dispose();
+		}
+	});
+
+	it("an in-flight abort terminates the worker, cleans up, and is classified", async () => {
+		const entered = deferred<void>();
+		const releaseHostCall = deferred<unknown>();
+		const host = {
+			capabilities: { callRoute: false, session: false, store: true, agents: false },
+			store: {
+				get: async () => {
+					entered.resolve();
+					return await releaseHostCall.promise;
+				},
+				put: async () => {}, list: async () => [],
+			},
+			session: { readTranscript: async () => ({}), readToolCall: async () => null },
+		} as unknown as ActionHandlerCtx["host"];
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		const controller = new AbortController();
+		try {
+			const url = writeModule(`export const actions = { wait: async (ctx) => { await ctx.host.store.get("entered"); return "late"; } };`);
+			const invocation = mh.invoke(req(url, "wait", { ...bareCtx(), host }), undefined, controller.signal);
+			await entered.promise;
+			assert.equal((mh as unknown as { live: Map<unknown, unknown> }).live.size, 1, "the observed host call proves the worker is in flight");
+			controller.abort();
+			await assert.rejects(
+				() => invocation,
+				(e) => e instanceof ModuleHostAbortError && e.status === 499 && e.cancelled === true,
+			);
+			assert.equal((mh as unknown as { live: Map<unknown, unknown> }).live.size, 0, "abort releases the live-worker entry synchronously");
+			releaseHostCall.resolve(undefined);
+
+			// A completed cancellation leaves no stale listener/worker state that can
+			// poison the next caller.
+			const next = writeModule(`export const actions = { run: async () => "after-abort" };`);
+			assert.equal(await mh.invoke(req(next, "run", bareCtx())), "after-abort");
+		} finally {
+			releaseHostCall.resolve(undefined);
 			mh.dispose();
 		}
 	});
@@ -615,6 +767,32 @@ describe.concurrent("ModuleHost — host.agents proxy (Sub-goal C)", () => {
 			);
 			const result = await mh.invoke(req(url, "trySpawn", ctx));
 			assert.equal(result, "caught:host.agents.spawn is not permitted for a child session");
+		} finally {
+			mh.dispose();
+		}
+	});
+});
+
+describe.concurrent("ModuleHost — host.services proxy", () => {
+	it("marshals only the closed services.call request to the parent-bound host", async () => {
+		const calls: unknown[] = [];
+		const host = {
+			version: 1,
+			contractVersion: 1,
+			capabilities: { callRoute: false, session: false, store: false, agents: false, services: true, has: (name: string) => name === "services" },
+			store: { get: async () => null, put: async () => {}, list: async () => [] },
+			session: { readTranscript: async () => ({}), readToolCall: async () => null },
+			agents: { spawn: async () => ({ childSessionId: "unused" }), prompt: async () => ({ status: "dispatched" }), dismiss: async () => ({ ok: true }), list: async () => [], read: async () => ({}), status: async () => ({ status: "idle" }) },
+			services: { call: async (request: unknown) => { calls.push(request); return { count: 1 }; } },
+		} as unknown as ActionHandlerCtx["host"];
+		const ctx: ActionHandlerCtx = { host, sessionId: "owner-1", toolUseId: "tu", tool: "demo_tool" };
+		const mh = new ModuleHost({ timeoutMs: 10_000 });
+		try {
+			const url = writeModule(
+				`export const actions = { search: async (ctx) => ({ hasServices: ctx.host.capabilities.has("services"), result: await ctx.host.services.call({ component: ".", serviceId: "language", operation: "search", payload: { query: "x" } }), hasProcess: typeof ctx.host.services.process }) };`,
+			);
+			assert.deepEqual(await mh.invoke(req(url, "search", ctx)), { hasServices: true, result: { count: 1 }, hasProcess: "undefined" });
+			assert.deepEqual(calls, [{ component: ".", serviceId: "language", operation: "search", payload: { query: "x" } }]);
 		} finally {
 			mh.dispose();
 		}

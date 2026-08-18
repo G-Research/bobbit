@@ -51,6 +51,9 @@ async function callGateway(
 		method,
 		headers: {
 			"Authorization": `Bearer ${token}`,
+			// Lets the gateway distinguish a tool-authored draft mutation from a
+			// browser edit without trusting a forgeable public session id.
+			...(process.env.BOBBIT_SESSION_SECRET ? { "X-Bobbit-Session-Secret": process.env.BOBBIT_SESSION_SECRET } : {}),
 			...(body !== undefined ? { "Content-Type": "application/json" } : {}),
 		},
 		...(body !== undefined ? { body: JSON.stringify(body) } : {}),

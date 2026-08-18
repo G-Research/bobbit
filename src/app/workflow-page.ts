@@ -549,6 +549,15 @@ async function handleSave(): Promise<void> {
 	saveAttempted = true;
 	saveBlockedReason = null;
 
+	// A new workflow with no gates is rejected by the canonical API. Keep that
+	// expected validation local so Save never degrades into a connection toast.
+	if (pageInstance.isNew && pageInstance.editGates.length === 0) {
+		saveBlockedReason = "Add at least one gate before saving this workflow.";
+		pageInstance.saving = false;
+		renderApp();
+		return;
+	}
+
 	// Run validation before persisting. Block save on any error and surface
 	// inline messages in the editor + a top-level banner.
 	const issues = collectValidationErrors(pageInstance.editGates);

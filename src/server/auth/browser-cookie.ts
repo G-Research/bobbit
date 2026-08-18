@@ -4,7 +4,8 @@
  * This module does not authenticate requests. Callers must resolve credentials,
  * verify signed cookies, and enforce route authorization before using this
  * classification to decide whether an authenticated response may set a cookie.
- * Fetch Metadata and Origin are routing/performance signals only.
+ * Fetch Metadata and Origin can additionally provide strict same-origin evidence
+ * for cookie-authenticated state-changing routes; they never authenticate alone.
  */
 
 export type BrowserCookieHeaderValue = string | readonly string[] | undefined;
@@ -62,6 +63,35 @@ export interface BrowserCookieEligibility {
 	mayBootstrap: boolean;
 	mayRenew: boolean;
 	reason: BrowserCookieEligibilityReason;
+}
+
+/**
+ * Requires browser evidence for a cookie-authenticated mutation. Unlike cookie
+ * issuance, Origin is mandatory even for GET-shaped callers: mutation routes
+ * must never treat absent Fetch Metadata as same-origin.
+ *
+ * The existing Vite loopback/configured-host exception remains the sole dev
+ * proxy exception. Direct deployments require an exact serialized origin.
+ */
+export function hasSameOriginBrowserMutationEvidence(
+	request: BrowserCookieRequestMetadata,
+	context: Pick<BrowserCookieEligibilityContext, "deployment" | "configuredHost">,
+): boolean {
+	const fetchSite = readSingleHeader(request.headers, "sec-fetch-site");
+	if (fetchSite.kind !== "value" || normalizeToken(fetchSite.value) !== "same-origin") return false;
+
+	const fetchMode = readSingleHeader(request.headers, "sec-fetch-mode");
+	const normalizedMode = fetchMode.kind === "value" ? normalizeToken(fetchMode.value) : undefined;
+	if (normalizedMode !== "cors" && normalizedMode !== "same-origin") return false;
+
+	const requestOrigin = parseRequestOrigin(request.headers, request.isTls);
+	if (!requestOrigin || (requestOrigin.protocol === "http:" && !isLoopbackHostname(requestOrigin.hostname))) return false;
+
+	const originHeader = readSingleHeader(request.headers, "origin");
+	if (originHeader.kind !== "value") return false;
+	const browserOrigin = parseOriginHeader(originHeader.value!);
+	if (!browserOrigin || (browserOrigin.protocol === "http:" && !isLoopbackHostname(browserOrigin.hostname))) return false;
+	return isAcceptedOrigin(browserOrigin, requestOrigin, context);
 }
 
 const INELIGIBLE_SESSION_HEADERS = [
@@ -231,7 +261,7 @@ function parseOrigin(raw: string): ParsedOrigin | undefined {
 function isAcceptedOrigin(
 	browserOrigin: ParsedOrigin,
 	requestOrigin: ParsedOrigin,
-	context: BrowserCookieEligibilityContext,
+	context: Pick<BrowserCookieEligibilityContext, "deployment" | "configuredHost">,
 ): boolean {
 	if (browserOrigin.origin === requestOrigin.origin) return true;
 	if (context.deployment !== "vite") return false;

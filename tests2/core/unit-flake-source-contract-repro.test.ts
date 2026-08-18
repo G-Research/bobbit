@@ -54,8 +54,8 @@ describe("tier-1 flake source contracts", () => {
 	it("passes its request-scoped command runner to the sandbox-status Docker check", () => {
 		assert.match(
 			sandboxStatusRoute,
-			/checkDockerAvailability\(\s*configured\s*\?\s*imageName\s*:\s*undefined\s*,\s*dockerContextRoot\s*\?\?\s*undefined\s*,\s*commandRunner\s*\)/,
-			"SANDBOX_STATUS_RUNNER_CONTRACT: /api/sandbox-status must pass its request-scoped commandRunner to checkDockerAvailability.",
+			/checkDockerAvailability\(\s*configured\s*\?\s*plan\s*:\s*undefined\s*,\s*dockerContextRoot\s*\?\?\s*undefined\s*,\s*commandRunner\s*\)/,
+			"SANDBOX_STATUS_RUNNER_CONTRACT: /api/sandbox-status must pass its request-scoped commandRunner and its server-resolved plan to checkDockerAvailability.",
 		);
 		assert.doesNotMatch(
 			sandboxStatusRoute,

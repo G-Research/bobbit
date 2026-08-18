@@ -1,0 +1,8 @@
+id: competing-result-filter
+module: ../lib/competing-result-filter.mjs
+events: [afterToolResult]
+mode: decide
+capabilities: [filter:tool-result]
+budget:
+  timeoutMs: 1000
+  maxTokens: 64

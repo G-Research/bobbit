@@ -24,7 +24,10 @@ import path from "node:path";
 import { isPackPathWithinRoot } from "./path-guard.js";
 import { pathToFileURL } from "node:url";
 import type { ServerHostApi } from "./server-host-api.js";
+import { ActionError } from "./action-error.js";
 import { ModuleHost } from "./module-host-worker.js";
+
+export { ActionError } from "./action-error.js";
 
 /** The verified context handed to an action handler (design §4b). */
 export interface ActionHandlerCtx {
@@ -55,16 +58,6 @@ export type ActionHandler = (ctx: ActionHandlerCtx, args: unknown) => Promise<un
 /** The export shape a pack actions module declares. Resolved + validated INSIDE
  *  the worker (module-host-bootstrap) — the parent never constructs/imports it. */
 export type ActionsModule = { actions: Record<string, ActionHandler> };
-
-/** An error carrying the HTTP status the endpoint should surface. */
-export class ActionError extends Error {
-	readonly status: number;
-	constructor(status: number, message: string) {
-		super(message);
-		this.name = "ActionError";
-		this.status = status;
-	}
-}
 
 /** Minimal structural view of `ToolManager` the dispatcher depends on. Resolves
  *  the winning tool's on-disk location + its `actions.module` independent of

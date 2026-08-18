@@ -1,0 +1,211 @@
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
+@@ -123,6 +123,7 @@
+     _extensionCommandContextActions;
+     _extensionAbortHandler;
+     _extensionShutdownHandler;
++    _toolResultGate;
+     _extensionErrorListener;
+     _extensionErrorUnsubscriber;
+     _modelRuntime;
+@@ -221,6 +222,9 @@
+      * happens here instead of in wrappers.
+      */
+     _installAgentToolHooks() {
++        // Keep reloads and direct session construction synchronized with the
++        // core identity marker before a run can build its loop config.
++        this.agent.__bobbitCoreToolResultGateActive = !!this._toolResultGate;
+         this.agent.beforeToolCall = async ({ toolCall, args }) => {
+             const runner = this._extensionRunner;
+             if (!runner.hasHandlers("tool_call")) {
+@@ -241,33 +245,55 @@
+                 throw new Error(`Extension failed, blocking execution: ${String(err)}`);
+             }
+         };
+-        this.agent.afterToolCall = async ({ toolCall, args, result, isError }) => {
++        this.agent.afterToolCall = async ({ toolCall, args, result, isError }, signal) => {
+             const runner = this._extensionRunner;
++            const gate = this._toolResultGate;
++            let gatedResult = result;
++            let gatedIsError = isError;
++            if (gate) {
++                try {
++                    if (signal?.aborted)
++                        throw new Error("Core tool-result gate aborted");
++                    const gated = await gate({ toolCallId: toolCall.id, toolName: toolCall.name, input: args, result, isError, signal });
++                    if (signal?.aborted)
++                        throw new Error("Core tool-result gate aborted");
++                    if (!gated || !Array.isArray(gated.content) || typeof gated.isError !== "boolean")
++                        throw new Error("Invalid result gate response");
++                    gatedResult = { content: gated.content, details: gated.details, usage: gated.usage };
++                    gatedIsError = gated.isError;
++                }
++                catch {
++                    return { content: [{ type: "text", text: "Tool result withheld by project result policy [ref: core-gate]." }], details: undefined, usage: undefined, isError: true, replaceResult: true };
++                }
++            }
+             const hookResult = runner.hasHandlers("tool_result")
+                 ? await runner.emitToolResult({
+                     type: "tool_result",
+                     toolName: toolCall.name,
+                     toolCallId: toolCall.id,
+                     input: args,
+-                    content: result.content,
+-                    details: result.details,
+-                    isError,
+-                    usage: result.usage,
++                    content: gatedResult.content,
++                    details: gatedResult.details,
++                    isError: gatedIsError,
++                    usage: gatedResult.usage,
+                 })
+                 : undefined;
+-            const content = hookResult?.content ?? result.content ?? [];
+-            // Runs after the extension hook so images injected or replaced by extensions are normalized too.
++            const content = hookResult?.content ?? gatedResult.content ?? [];
++            // The gate has already made this content safe; normalize the final
++            // replacement before Pi can fan it out to transcript or model.
+             const normalizedContent = await normalizeToolResultImages(content, {
+                 autoResizeImages: this.settingsManager.getImageAutoResize(),
+             });
+-            if (!hookResult && normalizedContent === content) {
++            if (!gate && !hookResult && normalizedContent === content) {
+                 return undefined;
+             }
+             return {
+                 content: normalizedContent,
+-                details: hookResult?.details,
+-                isError: hookResult?.isError ?? isError,
+-                usage: hookResult?.usage,
++                details: hookResult?.details ?? gatedResult.details,
++                isError: hookResult?.isError ?? gatedIsError,
++                usage: hookResult?.usage ?? gatedResult.usage,
++                terminate: hookResult?.terminate,
++                replaceResult: !!gate,
+             };
+         };
+     }
+@@ -2029,6 +2055,9 @@
+             });
+         this._baseToolDefinitions = new Map(Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool]));
+         const extensionsResult = this._resourceLoader.getExtensions();
++        const coreToolResultGate = extensionsResult.runtime.__bobbitCoreToolResultGate;
++        this._toolResultGate = coreToolResultGate;
++        this.agent.__bobbitCoreToolResultGateActive = !!coreToolResultGate;
+         if (options.flagValues) {
+             for (const [name, value] of options.flagValues) {
+                 extensionsResult.runtime.flagValues.set(name, value);
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js
+@@ -55,6 +55,93 @@
+     "@mariozechner/pi-coding-agent": _bundledPiCodingAgent,
+ };
+ const require = createRequire(import.meta.url);
++// This capability is deliberately loader-private. Bobbit configures its path
++// before Pi starts; the first extension load snapshots it and invokes the
++// factory before any ordinary extension has an opportunity to alter globals.
++// The reusable callback key arrives only as this first stdin record. It is not
++// an env var or a mounted file, and this reader is removed before RPC readiness.
++const defineCoreProperty = Object.defineProperty;
++const CORE_GATE_BOOTSTRAP_MAX_BYTES = 256;
++let coreToolResultGateInitialized = false;
++let sealedCoreToolResultGate;
++let sealedCoreToolResultGateFailure;
++async function consumeCoreToolResultGateBootstrap() {
++    const input = process.stdin;
++    if (!input)
++        throw new Error("Core tool-result gate bootstrap is unavailable");
++    return await new Promise((resolve, reject) => {
++        let buffered = "";
++        let settled = false;
++        const finish = (error, value) => {
++            if (settled)
++                return;
++            settled = true;
++            clearTimeout(timer);
++            input.off("data", onData);
++            input.off("error", onError);
++            input.pause();
++            if (error)
++                reject(error);
++            else
++                resolve(value);
++        };
++        const onError = () => finish(new Error("Core tool-result gate bootstrap failed"));
++        const onData = (chunk) => {
++            buffered += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
++            if (Buffer.byteLength(buffered, "utf8") > CORE_GATE_BOOTSTRAP_MAX_BYTES)
++                return finish(new Error("Core tool-result gate bootstrap is invalid"));
++            const newline = buffered.indexOf("\n");
++            if (newline < 0)
++                return;
++            const line = buffered.slice(0, newline);
++            const remaining = buffered.slice(newline + 1);
++            try {
++                const value = JSON.parse(line);
++                if (!value || typeof value !== "object" || !Number.isSafeInteger(value.runtimeGeneration) || value.runtimeGeneration < 0 || typeof value.runtimeKey !== "string" || !/^[0-9a-f]{64}$/.test(value.runtimeKey))
++                    throw new Error("invalid");
++                // Pause and detach first: unshifting while still flowing would
++                // deliver the first RPC record to this bootstrap listener.
++                finish(undefined, Object.freeze({ runtimeGeneration: value.runtimeGeneration, runtimeKey: value.runtimeKey }));
++                if (remaining)
++                    input.unshift(Buffer.from(remaining, "utf8"));
++            }
++            catch {
++                finish(new Error("Core tool-result gate bootstrap is invalid"));
++            }
++        };
++        const timer = setTimeout(() => finish(new Error("Core tool-result gate bootstrap timed out")), 5_000);
++        input.on("data", onData);
++        input.on("error", onError);
++        input.resume();
++    });
++}
++async function loadSealedCoreToolResultGate(cwd) {
++    if (coreToolResultGateInitialized) {
++        if (sealedCoreToolResultGateFailure)
++            throw sealedCoreToolResultGateFailure;
++        return sealedCoreToolResultGate;
++    }
++    coreToolResultGateInitialized = true;
++    try {
++        const configuredPath = process.env.BOBBIT_TOOL_RESULT_FILTER_GATE?.trim();
++        if (!configuredPath)
++            return undefined;
++        const resolvedPath = resolvePath(configuredPath, cwd, { normalizeUnicodeSpaces: true });
++        const factory = await loadExtensionModule(resolvedPath, undefined);
++        if (!factory)
++            throw new Error("Core tool-result gate does not export a factory");
++        const bootstrap = await consumeCoreToolResultGateBootstrap();
++        const gate = await factory(bootstrap);
++        if (typeof gate !== "function")
++            throw new Error("Core tool-result gate factory returned an invalid gate");
++        sealedCoreToolResultGate = Object.freeze(async (event) => await gate(event));
++        return sealedCoreToolResultGate;
++    }
++    catch (error) {
++        sealedCoreToolResultGateFailure = error instanceof Error ? error : new Error(String(error));
++        throw sealedCoreToolResultGateFailure;
++    }
++}
+ const isTypeScriptSourceRuntime = !isBunBinary && path.extname(fileURLToPath(import.meta.url)) === ".ts";
+ /**
+  * Get aliases for jiti (used in built Node.js mode).
+@@ -436,6 +523,15 @@
+     const resolvedCwd = cacheToken?.cwd ?? resolvePath(cwd);
+     const resolvedEventBus = eventBus ?? createEventBus();
+     const resolvedRuntime = runtime ?? createExtensionRuntime();
++    const coreToolResultGate = await loadSealedCoreToolResultGate(resolvedCwd);
++    if (coreToolResultGate) {
++        defineCoreProperty(resolvedRuntime, "__bobbitCoreToolResultGate", {
++            value: coreToolResultGate,
++            enumerable: false,
++            configurable: false,
++            writable: false,
++        });
++    }
+     for (const extPath of paths) {
+         const { extension, error } = await loadExtension(extPath, resolvedCwd, resolvedEventBus, resolvedRuntime, cacheToken);
+         if (error) {

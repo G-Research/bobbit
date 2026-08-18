@@ -26,8 +26,11 @@ This guide is the practical how-to.
 **Read first:**
 
 - [docs/marketplace.md](marketplace.md) — packs, sources, scopes/precedence, install/uninstall, activation controls, and the full threat model. This guide assumes you can already author and install a pack.
+- [docs/extension-capability-grants.md](extension-capability-grants.md) — project operator grants. Exact active `decide` grants enable bounded decision/advisor paths; a hook that declares `mutate` needs a separate exact `mutate` grant for [gated request mutation](request-mutation.md). The active pack principal can separately receive closed non-hook platform capabilities, including `service.manage`, memory access, and `sandbox:build`; grants never change the Extension Host API. [Extension sandbox requirements](extension-sandbox-requirements.md) documents the schema-3, core-built image declaration that consumes the latter.
 - [docs/design/extension-host.md](design/extension-host.md) — the contribution-point model, two-host architecture, the frozen Host API, the security guard sequence, the adapter layer, and the isolation model. The *why* and the contract. (Its per-tool schema examples predate V1 — read them through [pack-schema-v1-rationalisation.md](design/pack-schema-v1-rationalisation.md).)
 - [docs/design/extension-channels-host-channels.md](design/extension-channels-host-channels.md) and [docs/design/extension-channels-terminal-ux.md](design/extension-channels-terminal-ux.md) — the design record for generic channels and the first-party terminal pack.
+- [Managed service-extension contract](service-extension-runtime.md) — schema-2 declarative services. The gateway runtime, worktree coordinator, and closure-bound `host.services.call()` are wired, but no built-in consumer has registered a closed adapter and compatible launcher. Declarations therefore fail closed; this does not change the existing Hindsight external provider.
+- [Staff-improvement proposal fixture](staff-improvement-proposals.md) — the test-only scheduled decision/consented draft example; it is not a production transcript classifier.
 
 **Status:** renderers, actions, panels, channels, routes, entrypoints, implicit stores, session access, and worker isolation are all **implemented**. `HOST_API_VERSION` is `1`; `HOST_CONTRACT_VERSION` is `4`; `host.capabilities` reports all flags `true` on a current host.
 
@@ -45,7 +48,9 @@ The renderer+action working example lives at `tests/fixtures/market-sources/retr
 | **Entrypoints** | `entrypoints/<ep>.yaml` (listed in `contents`) | Browser (launchers + deep-link routes) | `host.ui.navigate` / `openPanel` |
 | **Pack store** | *implicit* — no declaration | Gateway | `host.store.{get,read,put,list,delete,deletePrefix,stats}` (pack-namespaced; `read` returns a tri-state durable-read outcome, while `get` is legacy and lossy) |
 | **Providers** *(schema 2; all hooks wired via the Lifecycle Hub)* | `providers/<id>.yaml` (listed in `contents.providers`) | Server (Lifecycle Hub, worker tier) | default-export hook object — see [docs/lifecycle-hub.md](lifecycle-hub.md) |
-| **Hook metadata** *(schema 2; inert)* | `hooks/<name>.yaml` (listed in `contents.hooks`) | Registry metadata only | Does not load the module or create a runtime surface |
+| **Managed service extension** *(schema 2; declarative and gateway-wired)* | `runtimes/<name>.yaml` (listed in `contents.runtimes`) | Gateway-owned lifecycle manager and worktree coordinator for an authorized worktree scope | Closed declaration plus server-host `ctx.host.services.call()`; packs receive no service path, process, socket, or transport. No built-in consumer has registered the required closed adapter and compatible launcher, so declarations fail closed — see [Managed service-extension contract](service-extension-runtime.md) |
+| **Static system-prompt section** *(schema 2)* | `system-prompts/<name>.yaml` (listed in `contents.system-prompts`) | Gateway prompt layout | Literal text only; active and explicitly granted sections are placed in the protected static extension region. See [Static system-prompt sections](#static-system-prompt-sections-system-promptsnameyaml--schema-2). |
+| **Hooks** *(schema 2; metadata-first)* | `hooks/<name>.yaml` (listed in `contents.hooks`) | Registry metadata; bounded consumers are eligible scheduled advisors, the exact-granted decision dispatcher, [gated request mutation](request-mutation.md), and the core-owned [post-tool-result filter](design/ep-14-tool-result-filter.md) | Inactive or ungranted hooks do not load a module or create a general runtime surface; see [Extension decision requests](extension-decision-requests.md) |
 | **Standalone pi extensions** *(schema 2; not Extension Host surfaces)* | `pi-extensions/<id>/` or `pi-extensions/<id>.ts/.js/.mjs/.cjs` (listed in `contents.pi-extensions`) | Agent runtime via pi `--extension` | Plain pi extension API — see [Marketplace pi extensions](marketplace.md#marketplace-pi-extensions) |
 
 Plus the cross-cutting `host.session.*` (transcript reads, agent-driving posts, live events)
@@ -98,7 +103,9 @@ A pack is a directory with a `pack.yaml` plus an entity payload. The full V1 lay
   channels/<name>.yaml            # pack-scoped long-lived channel handlers (listed in contents.channels)
   entrypoints/<ep>.yaml           # pack-scoped launcher/deep-link definitions, one file each
   providers/<id>.yaml             # schema-2 provider contributions (listed in contents.providers; dispatched via the Lifecycle Hub)
-  hooks/<name>.yaml               # schema-2 inert hook metadata (listed in contents.hooks)
+  runtimes/<name>.yaml            # schema-2 declarative managed-service contract (gateway-wired; fails closed without a core adapter + launcher)
+  system-prompts/<id>.yaml        # schema-2 static prompt sections (listed in contents.system-prompts)
+  hooks/<name>.yaml               # schema-2 metadata-first hooks; may declare advisors, decision hooks, or gated request mutation hooks
   pi-extensions/<id>/             # schema-2 standalone pi extensions (listed in contents.pi-extensions)
   pi-extensions/<id>.ts           # or a single .ts/.js/.mjs/.cjs entry module
   lib/                            # shared implementation modules, NOT entities
@@ -128,7 +135,9 @@ contents:
   tools:       [artifact_demo]          # tools/<group> dir names
   skills:      []
   channels:    []                       # channels/<name>.yaml basenames; schema 2
-  hooks:       [turn-audit]             # hooks/<name>.yaml basenames; schema 2, metadata only
+  hooks:       [turn-audit]             # hooks/<name>.yaml basenames; schema 2
+  runtimes:    [memory-service]         # runtimes/<name>.yaml declarative service basenames; schema 2
+  system-prompts: [review-rules]         # system-prompts/<name>.yaml; schema 2 static sections
   entrypoints: [artifacts-deeplink]     # entrypoints/<name>.yaml basenames; toggleable
 routes:                                 # optional top-level block
   module: lib/routes.mjs                # relative to pack.yaml; contained in pack root
@@ -145,8 +154,18 @@ Rules:
   channel names within a pack are rejected.
 - **`contents.hooks: string[]`** — schema-2 hook metadata basenames under
   `hooks/<name>.yaml` (with `.yml` accepted as a fallback). An unlisted file is never
-  read. See [Hook metadata](#hook-metadata-hooksnameyaml--schema-2-inert) for the strict
-  declaration contract and its intentionally non-runtime boundary.
+  read. See [Hook metadata](#hook-metadata-hooksnameyaml--schema-2-metadata-first) for the strict
+  declaration contract, scheduled-advisor exception, and metadata-first boundary.
+- **`contents.system-prompts: string[]`** — schema-2 static-section basenames under
+  `system-prompts/<name>.yaml`. An unlisted file is never read. It is an activation catalogue;
+  authoring text still requires explicit project grants and approval. See [Static system-prompt
+  sections](#static-system-prompt-sections-system-promptsnameyaml--schema-2).
+- **`contents.runtimes: string[]`** — schema-2 managed-service declaration basenames under
+  `runtimes/<name>.yaml`. The gateway's lifecycle manager and worktree coordinator reconcile
+  eligible declarations using fresh settings and deny-wins `service.manage` checks. Listing,
+  activation, settings, and grants do not launch a service; the built-in adapter/launcher registry
+  is empty, so a future core consumer must register a closed adapter and compatible launcher. See
+  [Managed service-extension contract](service-extension-runtime.md).
 - **`contents.panels` does not exist** — panels are auto-discovered from `panels/*.yaml`. They
   are support surfaces, not activation points, so there is nothing to list or toggle.
 - **`routes: { module?, names? }`** (optional, top-level) — when present, the pack contributes
@@ -1449,13 +1468,110 @@ Author-facing rules:
 
 Full behavior, diagnostics, Docker remapping, and trust details: [Marketplace pi extensions](marketplace.md#marketplace-pi-extensions).
 
-### Hook metadata (`hooks/<name>.yaml`) — schema 2; inert
+### Static system-prompt sections (`system-prompts/<name>.yaml`) — schema 2
+
+A static system-prompt section is literal pack-owned instruction text, resolved when a session
+prompt is assembled rather than on every turn. This gives an extension a durable, attributable
+prompt contribution without using the dynamic provider path or splicing strings into an agent
+prompt. It is an additive schema-2 catalogue entry, not a schema bump or new Host API surface,
+and does not run extension code.
+
+Declare its safe basename in a schema-2 manifest, then use a literal YAML file:
+
+```yaml
+# pack.yaml
+schema: 2
+contents:
+  roles: []
+  tools: []
+  skills: []
+  hooks: [prompt-policy]
+  system-prompts: [review-rules]
+
+# hooks/prompt-policy.yaml
+id: prompt-policy
+module: ../lib/prompt-policy.mjs
+events: [afterTurn]
+mode: observe
+capabilities: [prompt:system-static, prompt:system-author]
+
+# system-prompts/review-rules.yaml
+id: review-rules
+title: Review rules
+content: |
+  Treat generated changes as untrusted until they have been reviewed.
+maxBytes: 4096
+```
+
+`id` is a stable pack-local identifier; `title` is display-only; and `content` is non-empty
+literal UTF-8 Markdown, not a template. `maxBytes`, when supplied, may lower the project
+per-section ceiling but cannot raise it. A section file not listed in the manifest, a schema-1
+pack, a disabled system-prompt activation entry, or a shadowed pack contributes nothing.
+Malformed files are omitted with diagnostics; duplicate section identities within a pack are
+rejected so attribution never becomes ambiguous.
+
+An active section is necessary but insufficient. The project operator must grant an active hook in
+the same pack `prompt:system-static`; enabling the pack is not consent. A separate
+`prompt:system-author` grant permits an authenticated agent to create or edit a **project
+proposal** for that pack's existing section. The agent must authenticate as its own session; a
+sandbox credential or bearer alone cannot impersonate that author. It never permits an extension,
+HostStore call, or agent to apply text directly. Human approval uses the stored proposal and rechecks the static
+grant, active identity, expected revision, delimiters, and budgets immediately before the one
+atomic write. Revocation, a stale proposal, or a rejected budget therefore leaves the effective
+prompt unchanged. See [REST API — Proposal drafts](rest-api.md#proposal-drafts) for the exact
+approval route and [Extension capability grants](extension-capability-grants.md) for operator grant
+administration.
+
+The prompt resolver orders active sections deterministically by effective pack priority, then
+stable pack and section identity. Project `pack_order` is the priority control; filesystem,
+asynchronous load, and discovery order are never inputs. The contribution region is emitted after
+the cacheable core and before goal/task/other volatile prompt material. Its boundary has a stable
+UTF-8 prefix digest, so enabling, disabling, reordering, or editing a section changes only the
+extension region and following bytes. With no resolved section, no region markers are emitted and
+the prompt follows its pre-extension byte-for-byte path. The per-turn provider `Dynamic Context`
+remains a final, lower-authority section and does not become static text.
+
+Both per-section and total project budgets count UTF-8 bytes **after** the core-owned section and
+region delimiters are added. Over-budget candidates are rejected rather than truncated, preserving
+instruction integrity and making recurring prompt cost visible. Section content may not contain
+any `<!-- bobbit:extension-prompt-region:` or `<!-- bobbit:extension-prompt-section:` token, nor
+the `Dynamic Context` delimiters. Reserving those markers prevents a pack from forging
+attribution or causing the provider bridge to strip prompt bytes.
+
+**Inspection and audit.** The system-prompt inspector exposes each accepted extension section
+with pack/name, section id/title, authored and rendered bytes, total-prompt bytes, and effective
+text. Authoring activity is recorded separately from the bounded Context trace: authorized audit
+detail includes the exact redacted diff, contributor, trigger/actor, proposal outcome, model and
+thinking level, terminal token/cost delta, duration, and byte share. The trace contains only safe
+status/identifier metadata, never prompt text, diffs, usage payloads, or secrets.
+
+### Hook metadata (`hooks/<name>.yaml`) — schema 2; metadata-first
 
 **Status:** a `schema: 2` pack can declare hook **metadata** in the same pack-contribution
-registry used by panels, entrypoints, providers, and channels. This is an indexing seam for a
-future runtime contract, not a hook runtime: it lets tooling inspect a stable declaration without
-making the declaration operational. Schema-1 packs, and schema-2 packs with no `contents.hooks`,
-produce an empty hook list and otherwise keep their existing behavior.
+registry used by panels, entrypoints, providers, and channels. Inactive or ungranted declarations
+remain metadata-only, so tooling can inspect a stable declaration without making it operational.
+Schema-1 packs, and schema-2 packs with no `contents.hooks`, produce an empty hook list and
+otherwise keep their existing behavior.
+
+The project separately records an exact [extension capability grant](extension-capability-grants.md)
+for an active hook. That administrative decision is not part of the pack manifest or Host API: a
+declaration cannot grant itself authority, and enabling a pack does not grant `decide` or any other
+capability. An active `decide` grant permits only the bounded runtimes documented here: the
+scheduled-advisor path below, the [decision-request dispatcher](extension-decision-requests.md)
+for a supported lifecycle event, the [gated request-mutation](request-mutation.md) consumer for a
+`mode: decide` hook with an exact `mutate` grant, an explicitly declared startup
+capability-selector stage, or the project-registration import dispatcher. Each
+runtime rechecks the active declaration and exact grant at its application
+fence, and creates neither a working Host API nor a general hook runtime.
+
+A `decide()` hook may also return the strict advisory-selection envelope
+`{ kind: "selection", selection: { ... } }`. It can recommend one bounded
+model, thinking, role, or workflow identifier from the host-provided
+`ctx.availableSelections`; it cannot supply a priority or directly apply a
+choice. `ctx.usage` is available only during `afterTurn`. See [Advisory selection
+proposals](extension-decision-requests.md#advisory-selection-proposals) for the
+exact shapes, availability contract, precedence, live-revocation fence, and the
+current thinking-only application boundary.
 
 Declare each file by basename in `pack.yaml`; only listed files are considered:
 
@@ -1488,6 +1604,216 @@ activation:
   requiresConfig: [auditEndpoint]
 ```
 
+#### Project import decision hook
+
+A `projectImported` hook can make a bounded decision while a **new normal
+project** is registered, before the Add Project flow creates its ordinary
+assistant session. This is a project-owned delivery lifecycle, not a session
+hook: it does not provide a session id, working directory, transcript, prompt,
+Host API, or a path to start an agent.
+
+The declaration needs `mode: decide`, an active exact `decide` grant, and no
+`selectors` or `schedule`. It may return only a decision request, a non-waking
+advisory, or no result; selection and request-mutation envelopes are unavailable.
+Requests must use `scope: project`. The detailed context, settlement, replay,
+and proposal-only effect boundary are in [Project import decision hooks](extension-decision-requests.md#project-import-decision-hooks).
+
+```yaml
+# hooks/project-import.yaml
+id: project-import
+module: ../lib/project-import.mjs
+events: [projectImported]
+mode: decide
+capabilities: []
+budget:
+  maxTokens: 64
+  timeoutMs: 1000
+```
+
+Treat `decide()` as declaration-only. The gateway atomically stores an import
+run and invokes an unfinished hook again after a crash, so external work in
+`decide()` could be duplicated. `onDecision()` receives the durable winning
+resolution and the same stored context; it is not a callback for a fresh
+filesystem scan.
+
+#### Startup capability selectors
+
+A hook may narrow the optional skill or MCP surface for a newly created session. This is a
+session-start capability-selection contract, not a loader, installer, policy API, or generic tool
+selector. It exists to reduce context while keeping the existing installation, adoption, role, and
+group-policy owners as hard ceilings. See [Dynamic capability selection](design/dynamic-capability-selection.md)
+for the full lifecycle and persistence contract.
+
+Declare one or both supported stages on a decision hook whose `events` include `sessionSetup`.
+The declaration is valid only with `mode: decide`; any other event or mode drops the declaration.
+Selectors run only for project-associated sessions and still need that project's exact `decide` grant
+before they can run.
+
+```yaml
+# hooks/capability-selector.yaml
+id: choose.capabilities
+module: ../lib/capability-selector.mjs
+events: [sessionSetup]
+mode: decide
+capabilities: []
+selectors: [skills, mcp]
+budget:
+  maxTokens: 1200
+  timeoutMs: 1000
+```
+
+Export the selected members from the module's `hooks` object. `selectSkills` runs first;
+`selectMcp` runs only after it settles and receives the fixed selected skill ids. Only stages listed
+by `selectors` are invoked.
+
+```js
+export const hooks = {
+  async selectSkills(ctx) {
+    // `available` is the server-built, sorted list of selectable slash names.
+    return {
+      add: ctx.available.filter((name) => name.startsWith("review")),
+      reason: "Review request",
+      confidence: 0.8,
+    };
+  },
+
+  async selectMcp(ctx) {
+    // `selectedSkills` is present only in this stage.
+    return {
+      add: ctx.selectedSkills?.includes("review") ? ["mcp_github"] : [],
+      reason: "Repository inspection",
+      confidence: 0.8,
+    };
+  },
+};
+```
+
+Each function receives frozen server-derived data: `event: "sessionSetup"`, session/project/goal
+and role identifiers where available, `cwd`, a UTF-8-bounded setup query, sorted identifier-only
+`available`, and (for MCP) sorted `selectedSkills`. It receives no policy details, plan or session
+object, skill content or paths, MCP configuration/operations, credentials, or Host API.
+
+Return exactly `{ add, omit?, reason, confidence }`. `add` and optional `omit` are arrays of 0–128
+safe identifiers; they are de-duplicated and lexicalized, and overlap resolves to `omit`. An empty
+`add` is valid and is authoritative when its valid, still-authorized proposal wins. `confidence` is
+finite in `[0, 1]`; `reason` is bounded diagnostic text and is never persisted. Core intersects
+`add` with `available`, so an unknown, disabled, shadowed, ungranted, or policy-denied id is never
+admitted. The winning valid proposal is ordered by confidence, active pack precedence, then pack
+and hook ids; completion timing does not matter.
+
+A valid winner makes only that stage authoritative. Its admitted `add` ids form the optional set;
+an empty list explicitly disables the stage's optional capabilities. When no stage has a valid,
+still-authorized winner, Bobbit retains the legacy optional skill/MCP surface. A snapshot is
+persisted only when at least one stage is authoritative, and is reused for restore, respawn, prompt
+rebuild, slash-skill expansion, and skill activation without rerunning selectors.
+
+#### Every-N-turn schedules
+
+`schedule` admits only `everyNTurns`, inert `wallClockMs`, and optional `kind: advisor | decision`.
+`everyNTurns` is a safe integer from 1 through 10,000 and is valid only on an exact
+`mode: decide`, `events: [afterTurn]` declaration. The durable completed-turn index starts at zero,
+so `everyNTurns: 5` is due on turns 5, 10, 15, and so on. It survives compaction, restore, and
+respawn; an interrupted due invocation is not replayed. `wallClockMs` has the same bounded integer
+syntax but is inert metadata: it creates no timer, deadline, catch-up work, retry, or wall-clock
+invocation.
+
+With omitted `kind`, or `kind: advisor`, an every-N declaration is a trace-only advisor. It exports
+an `advisors` object keyed by the declared hook id:
+
+```yaml
+# hooks/turn-audit.yaml
+id: audit.turn
+module: ../lib/audit-turn.mjs
+events: [afterTurn]
+mode: decide
+capabilities: []
+schedule: { everyNTurns: 5, kind: advisor }
+```
+
+```js
+export const advisors = {
+  "audit.turn": async (ctx) => {
+    // Record only a safe identifier, if anything.
+    return { advisory: { value: "turn-audit-complete" } };
+  },
+};
+```
+
+The advisor context is frozen server-derived data: `sessionId`, optional `projectId`/`goalId` and
+`roleName`, `cwd`, `workingDir`, `turn.index`, hook `config`, `budget.maxTokens`, and an optional
+read-only `scopeContext`. It deliberately contains no `host`, gateway credential, prompt,
+transcript, session object, or mutation surface. The only accepted return values are `undefined`
+or `{ advisory?: { value?: string } }`; `value` must be a safe identifier. Advice is trace
+metadata, not prompt text, a model message, a decision, or an instruction to the gateway.
+
+With `kind: decision`, the same every-N declaration instead enters the normal decision dispatcher:
+it calls the module's ordinary `hooks.decide` export only on due persisted cadence turns. The hook
+still requires its exact active `decide` grant; no timer, catch-up, or advisor invocation is
+created. The [staff-improvement proposal fixture](staff-improvement-proposals.md) is the focused,
+test-only example of this constrained scheduled-decision route.
+
+The Session Manager launches due advisors after the main turn on a fire-and-forget path. They
+never delay idle status, queue draining, or a later turn. There is at most one live invocation per
+`(sessionId, packId, hookId)`; a due overlap is recorded as dropped and is neither queued nor
+retried. Disable, removal, or exact-grant revocation aborts matching work and fences its late
+result. The trace attributes parent-measured execution duration to the server-derived `packId` and
+hook id; advisors cannot supply token or dollar estimates. Worker timeout, throw, malformed output,
+and trace failure remain isolated from the main turn and other advisors.
+
+Advisor code is installed-pack server code, so it remains trusted code with ambient Node,
+filesystem, and network access; this is not an OS sandbox. Its worker receives a small portable
+environment rather than the gateway's inherited environment, and has no Host API or gateway
+secret. Authors must still treat advisor code as privileged pack code.
+
+#### Post-tool-result filter
+
+A result-filter hook declares exactly one event and one special capability:
+
+```yaml
+# hooks/result-filter.yaml
+id: result-filter
+module: ../lib/result-filter.mjs
+events: [afterToolResult]
+mode: decide
+capabilities: [filter:tool-result]
+budget: { timeoutMs: 1000, maxTokens: 64 }
+```
+
+An operator must separately grant the exact `(packId, hookId, "filter:tool-result")` tuple.
+`decide`, `mutate`, activation, and pack provenance do not imply it. The dispatcher gives the
+module a frozen inspection containing only the completed canonical result, session/project IDs,
+and tool-call/name IDs. It never supplies tool arguments, credentials, a session object, policy
+map, Host API, apply callback, or raw persistence/transport handle.
+
+The default export is an object whose `decide(ctx)` returns one complete closed proposal:
+
+```js
+export default {
+  decide(ctx) {
+    if (!ctx.result.content.some(block => block.type === "text" && block.text.includes("fixture-canary"))) {
+      return { kind: "tool-result-filter", version: 1, action: "pass", ruleId: "result-filter", reasonCode: "not-matched" };
+    }
+    return {
+      kind: "tool-result-filter", version: 1, action: "redact", ruleId: "result-filter", reasonCode: "fixture-match",
+      replacement: { content: [{ type: "text", text: "Result withheld." }], isError: true },
+    };
+  },
+};
+```
+
+`action` is `pass`, `replace`, `redact`, or `reject`. `pass`/`reject` carry no replacement;
+`replace`/`redact` carry a complete bounded text/image replacement, not a patch, redaction range,
+URL, callback, free-form explanation, `details`, or `usage`. `ruleId` must equal the declaring
+hook ID; core owns outcome reason codes and attribution. Unknown fields and malformed values are
+rejected. Across eligible hooks, core reduces deterministically: `reject` wins, then `redact`,
+then `replace`, then `pass`; pack precedence and stable identity only choose attribution within a
+severity. A reject or any active-filter failure returns the core-owned synthetic error, not the
+original result. See [EP-14](design/ep-14-tool-result-filter.md) for exact limits and lifecycle.
+
+This is a fixture-only platform seam. It is not a credential detector, secret-scanning API, or
+user-configurable policy language. Do not use example patterns as production containment policy;
+that product is explicitly deferred.
+
 The declaration fields are strict:
 
 - **`id`** is a stable pack-local identifier matching
@@ -1497,11 +1823,18 @@ The declaration fields are strict:
   pack root after realpath-aware containment checks; absolute, syntactically unsafe, and
   pack-escaping paths reject the pack.
 - **`events`** is required, non-empty, and duplicate-free. Supported values are
-  `sessionSetup`, `beforePrompt`, `afterTurn`, `beforeCompact`, `sessionShutdown`, and
-  `goalProvisioned`.
+  `sessionSetup`, `beforePrompt`, `beforeToolCall`, `afterToolResult`, `afterTurn`,
+  `beforeCompact`, `sessionShutdown`, `goalProvisioned`, and `projectImported`.
+  `afterToolResult` is reserved for the result-filter consumer. `projectImported`
+  requires `mode: decide` and cannot declare `selectors` or `schedule`; it is
+  dispatched only after new-project component persistence. A declaration is
+  eligible for its `filter:tool-result` grant only when `afterToolResult` is the
+  sole event; other metadata remains inert.
 - **`mode`** is required and is exactly `observe` or `decide`.
 - **`capabilities`** is required and duplicate-free. Its only values are `store`, `session`,
-  and `agents`; `[]` is valid. These are descriptive metadata only and do not confer access.
+  `agents`, `mutate`, `filter:tool-result`, `prompt:system-static`, and
+  `prompt:system-author`; `[]` is valid. `filter:tool-result` requires `mode: decide` and
+  exactly `events: [afterToolResult]`. These are declarations only and do not confer access.
 - **`budget`** is optional. An omitted or non-mapping `budget`, and each missing, non-numeric,
   or non-finite field, falls back independently to `maxTokens: 1600` and `timeoutMs: 1500`.
   Finite numeric values are then clamped: `maxTokens` to `64..8192` and `timeoutMs` to
@@ -1509,6 +1842,16 @@ The declaration fields are strict:
 - **`config`**, when present, must be a mapping and is retained verbatim. **`activation`**,
   when present, must be a mapping containing no keys other than optional `requiresConfig`.
   That value, when present, is a non-empty, duplicate-free array of non-empty strings.
+- **`schedule`**, when present, is a mapping with optional `everyNTurns`, `wallClockMs`, and
+  `kind`. The numeric fields are safe integers from 1 through 10,000; `kind` is `advisor` or
+  `decision`. `everyNTurns` is valid only with `mode: decide` and exactly `events: [afterTurn]`;
+  any other pairing drops the declaration. `wallClockMs` alone is inert metadata. `kind: decision`
+  requires `everyNTurns` and that same exact mode/event pairing; without an every-N schedule,
+  omitted `kind` or `kind: advisor` has no scheduling effect.
+- **`selectors`**, when present, is a non-empty duplicate-free array containing only `skills`
+  and/or `mcp`. It is valid only with `mode: decide` and an `events` list containing
+  `sessionSetup`; any other pairing drops the declaration. It does not grant authority or make
+  the hook runnable by itself.
 
 Basenames must be safe pack-local names. The loader resolves `hooks/<basename>.yaml`, then
 `hooks/<basename>.yml`, and never scans the directory. A malformed YAML file or invalid field
@@ -1524,12 +1867,52 @@ copies are shadowed before their hook files are read.
 The existing `pack_activation.hooks` disabled-reference array uses the manifest basename
 (`listName`). After registry invalidation, a disabled reference removes that declaration from both
 the pack contribution and `listHooks`; clearing the reference restores it. This filtering does not
-inspect `config` or `activation`.
+inspect `config` or `activation`. Activation remains a ceiling for extension capability grants: an
+inactive, removed, or shadowed hook cannot be granted through the administrative API.
 
-**Non-runtime boundary.** Loading or listing hook metadata does not import the `module`, execute
-code, dispatch an event, establish authorization, evaluate `config` or `activation`, start timers,
-mutate state, or register a UI surface. It creates no executable hook registration. Authors must
-not rely on a hook file for any runtime behavior in this release.
+### Project grants do not create a Host API capability
+
+For an active hook, an operator may grant the exact `(packId, hookId, capability)` tuple through
+the authenticated project API. `mode: decide` makes `decide` an eligible requested capability;
+the manifest's `store`, `session`, and `agents` values are eligible only by the same exact name.
+`mutate` is eligible only when that active hook is also `mode: decide` and declares `mutate`.
+Its current use is the typed, core-applied [gated request-mutation](request-mutation.md) path;
+the grant does not directly let pack code apply a mutation. `filter:tool-result` is eligible only
+for `mode: decide`, exactly `events: [afterToolResult]`, and that declared capability; it permits
+only the core [pre-fan-out result-filter dispatcher](design/ep-14-tool-result-filter.md). Missing,
+revoked, malformed, or inactive grants deny.
+
+This is deliberately distinct from `host.capabilities`, `ctx.host`, and the existing scoped Host
+API. A grant does not add methods, bypass action/session policy, supply a token, or change what a
+trusted pack server module can access. It also does not turn a hook into a provider, route,
+action, channel, or standalone pi extension.
+
+Separately, an active pack—not a hook—may receive one of the closed non-hook capabilities:
+`service.manage`, `memory.read`, `memory.write`, `memory.reflect`, `memory.invalidate`, or
+`memory.read.all`. These are platform authority consumed through the server's shared resolver;
+they are not manifest declarations and cannot be granted to a hook. A pack author cannot create a
+new capability string or self-grant one. See [Extension capability grants](extension-capability-grants.md)
+for the operator API, audit, and live-revocation contract.
+
+**Indexing boundary.** Loading or listing hook metadata does not itself import the `module`,
+execute code, dispatch an event, establish authorization, evaluate `config` or `activation`, start
+timers, mutate state, or register a UI surface. The bounded runtime consumers are a due scheduled
+advisor with omitted/`advisor` kind meeting the exact contract above; an active exact-granted
+`mode: decide` hook invoked by the decision-request dispatcher (including only-due `kind: decision`
+every-N hooks); an active exact-granted `mode: decide`/`mutate` hook invoked by [gated request
+mutation](request-mutation.md); an active exact-granted declared selector during session setup;
+an active exact-granted `afterToolResult` filter; and an active exact-granted
+`projectImported` decision hook after new-project component persistence. The
+decision dispatcher rechecks the grant before `decide()` and optional
+`onDecision()`; request mutation rechecks every extension candidate
+after all workers settle and immediately before core applies a result; result filtering checks
+before invocation and after all workers settle; selectors recheck at their application fence. A
+scheduled `kind: decision`
+proposal is additionally forced through the constrained consent/draft route described in the
+[staff-improvement proposal fixture](staff-improvement-proposals.md). Inactive and ungranted hooks
+remain metadata-only. See [Extension decision requests](extension-decision-requests.md), [gated request
+mutation](request-mutation.md), and [Dynamic capability selection](design/dynamic-capability-selection.md)
+for their strict contracts and failure behavior.
 
 ### Providers (`providers/<id>.yaml`) — schema 2; `sessionSetup` wired into sessions
 

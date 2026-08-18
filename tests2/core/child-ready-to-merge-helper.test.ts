@@ -55,13 +55,19 @@ function rootWorkflow(verify: VerifyStep[] = ROOT_RTM_VERIFY): Workflow {
 }
 
 describe("adaptReadyToMergeVerify", () => {
-	it("replaces 'Master merged into branch' with parent-branch echo", () => {
-		const out = adaptReadyToMergeVerify(ROOT_RTM_VERIFY, { parentBranch: PARENT_BRANCH });
-		const step = out.find(s => s.name === "Master merged into branch");
-		assert.ok(step);
-		assert.equal(step.type, "command");
-		assert.match(step.run ?? "", /^echo 'child goal —/);
-		assert.match(step.run ?? "", new RegExp(PARENT_BRANCH));
+	it("replaces legacy and canonical base-ancestry steps with parent-branch echos", () => {
+		const legacy = adaptReadyToMergeVerify(ROOT_RTM_VERIFY, { parentBranch: PARENT_BRANCH });
+		const legacyStep = legacy.find(s => s.name === "Master merged into branch");
+		assert.ok(legacyStep);
+		assert.equal(legacyStep.type, "command");
+		assert.match(legacyStep.run ?? "", /^echo 'child goal —/);
+		assert.match(legacyStep.run ?? "", new RegExp(PARENT_BRANCH));
+
+		const canonical = adaptReadyToMergeVerify([
+			{ name: "Base ref merged into branch", type: "command", run: "git fetch origin main && git merge-base --is-ancestor origin/main HEAD" },
+		], { parentBranch: PARENT_BRANCH });
+		assert.match(canonical[0].run ?? "", /^echo 'child goal —/);
+		assert.doesNotMatch(canonical[0].run ?? "", /git fetch|merge-base|origin\//);
 	});
 
 	it("replaces 'PR raised' with the no-PR echo", () => {
@@ -75,11 +81,16 @@ describe("adaptReadyToMergeVerify", () => {
 		);
 	});
 
-	it("leaves 'Branch pushed to remote' intact (deep equal)", () => {
-		const out = adaptReadyToMergeVerify(ROOT_RTM_VERIFY, { parentBranch: PARENT_BRANCH });
-		const before = ROOT_RTM_VERIFY.find(s => s.name === "Branch pushed to remote")!;
-		const after = out.find(s => s.name === "Branch pushed to remote")!;
-		assert.deepEqual(after, before);
+	it("removes all canonical remote publication commands from children", () => {
+		const out = adaptReadyToMergeVerify([
+			{ name: "Branch pushed to remote", type: "command", run: "git push origin child:refs/heads/child && git ls-remote origin child" },
+			{ name: "Base ref merged into branch", type: "command", run: "git fetch origin main && git merge-base --is-ancestor origin/main child" },
+			{ name: "PR raised", type: "command", run: "gh pr list --head child --base main" },
+		], { parentBranch: PARENT_BRANCH });
+		for (const step of out) {
+			assert.match(step.run ?? "", /^echo 'child goal —/);
+			assert.doesNotMatch(step.run ?? "", /\bgit\s+(?:push|fetch|ls-remote|merge-base)\b|\bgh\s+pr\b|origin\//);
+		}
 	});
 
 	it("leaves unrelated custom steps intact", () => {

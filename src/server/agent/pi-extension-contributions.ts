@@ -44,6 +44,8 @@ export interface PiExtensionDiagnostic {
 export interface PiExtensionDiscoveryResult {
 	status: "ok" | "failed" | "skipped";
 	tools: PiExtensionToolInfo[];
+	/** Version of the confined discovery harness that produced this result. */
+	harnessVersion?: string;
 	diagnostic?: PiExtensionDiagnostic;
 	cacheKey?: string;
 }
@@ -104,6 +106,7 @@ function skippedDiscovery(cacheKey?: string): PiExtensionDiscoveryResult {
 	return {
 		status: "skipped",
 		tools: [],
+		harnessVersion: PI_EXTENSION_PROBE_HARNESS_VERSION,
 		...(cacheKey ? { cacheKey } : {}),
 		diagnostic: makePiExtensionDiagnostic("ok", "discovery_skipped", "Executable pi-extension discovery has not run."),
 	};

@@ -8,6 +8,8 @@ export type MessageType = "request-response" | "fire-and-forget";
 export interface RuntimeMessageBridgeOptions {
 	context: "sandbox-iframe" | "user-script";
 	sandboxId: string;
+	/** Parent-minted per-iframe capability; required for sandbox postMessage. */
+	channelToken?: string;
 }
 
 // biome-ignore lint/complexity/noStaticOnlyClass: fine
@@ -18,13 +20,14 @@ export class RuntimeMessageBridge {
 	 */
 	static generateBridgeCode(options: RuntimeMessageBridgeOptions): string {
 		if (options.context === "sandbox-iframe") {
-			return RuntimeMessageBridge.generateSandboxBridge(options.sandboxId);
+			if (!options.channelToken) throw new Error("Sandbox runtime bridge requires a channel token");
+			return RuntimeMessageBridge.generateSandboxBridge(options.sandboxId, options.channelToken);
 		} else {
 			return RuntimeMessageBridge.generateUserScriptBridge(options.sandboxId);
 		}
 	}
 
-	private static generateSandboxBridge(sandboxId: string): string {
+	private static generateSandboxBridge(sandboxId: string, channelToken: string): string {
 		// Returns stringified function that uses window.parent.postMessage
 		return `
 window.__completionCallbacks = [];
@@ -33,7 +36,7 @@ window.sendRuntimeMessage = async (message) => {
 
     return new Promise((resolve, reject) => {
         const handler = (e) => {
-            if (e.data.type === 'runtime-response' && e.data.messageId === messageId) {
+            if (e.source === window.parent && e.data.type === 'runtime-response' && e.data.messageId === messageId && e.data.channelToken === ${JSON.stringify(channelToken)}) {
                 window.removeEventListener('message', handler);
                 if (e.data.success) {
                     resolve(e.data);
@@ -48,6 +51,7 @@ window.sendRuntimeMessage = async (message) => {
         window.parent.postMessage({
             ...message,
             sandboxId: ${JSON.stringify(sandboxId)},
+            channelToken: ${JSON.stringify(channelToken)},
             messageId: messageId
         }, '*');
 

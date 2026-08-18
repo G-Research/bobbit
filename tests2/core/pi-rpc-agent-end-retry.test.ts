@@ -191,6 +191,8 @@ describe("Pi RPC agent_end retry contract", () => {
 
 	it("completes overflow compaction before retrying and settles only on the final agent_end", async () => {
 		const manager = makeManager();
+		const afterTurnDispatch = vi.fn(async () => ({ blocks: [], diagnostics: [] }));
+		manager.lifecycleHub = { dispatch: afterTurnDispatch };
 		const listeners = new Set<(event: any) => void>();
 		const prompt = vi.fn(async () => ({ success: true }));
 		const recordUsage = vi.fn(() => ({ inputTokens: 11, outputTokens: 13, cacheReadTokens: 17, cacheWriteTokens: 19, totalCost: 1 }));
@@ -346,6 +348,8 @@ describe("Pi RPC agent_end retry contract", () => {
 		// queued prompt, whose optimistic dispatch makes the session streaming.
 		expect(session.status).toBe("streaming");
 		expect(session.completedTurnCount).toBe(1);
+		expect(afterTurnDispatch).toHaveBeenCalledTimes(1);
+		expect((afterTurnDispatch.mock.calls[0] as unknown as any[])[1].usage).toEqual({ telemetry: "unknown" });
 		expect(session.allowedTools).toEqual(["write"]);
 		expect(session.oneTimeGrantedTools).toEqual([]);
 		expect(prompt).toHaveBeenCalledTimes(1);

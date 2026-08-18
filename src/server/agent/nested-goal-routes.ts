@@ -16,8 +16,8 @@ import type http from "node:http";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
-import type { GoalManager } from "./goal-manager.js";
 import type { PersistedGoal } from "./goal-store.js";
+import type { GoalManager } from "./goal-manager.js";
 import type { ProjectContextManager } from "./project-context-manager.js";
 import type { SessionManager } from "./session-manager.js";
 import type { TeamManager } from "./team-manager.js";
@@ -39,6 +39,7 @@ import {
 import { validateSpawnChildSpec } from "./spawn-child-spec-validation.js";
 import { walkGoalSubtree, cascadeSubtree } from "./goal-subtree.js";
 import { resumeOperatorPausedGoal } from "./goal-resume.js";
+import { executePauseForGoals } from "./goal-pause-service.js";
 import { GoalPausedError, requireAncestorsNotPaused } from "./goal-paused-guard.js";
 import { resolveChildWorkflow } from "./spawn-child-workflow.js";
 import { authorizeChildrenMutation, type ChildrenMutationClass } from "../auth/children-mutation-authz.js";
@@ -327,63 +328,14 @@ export async function tryHandleNestedGoalRoute(
 		return true;
 	}
 
-	/** Cancel any in-flight verifications for a goal (best-effort). */
-	async function cancelAllVerifications(goalId: string): Promise<void> {
-		for (const active of verificationHarness.getActiveVerifications(goalId)) {
-			try {
-				await verificationHarness.cancelStaleVerifications(goalId, active.gateId);
-			} catch (err) {
-				console.error(`[api] cancelAllVerifications: error cancelling verification for ${goalId}/${active.gateId}:`, err);
-			}
-		}
-	}
-
-	/**
-	 * Apply operator-pause semantics to a single goal: set paused=true,
-	 * cancel in-flight verifications, broadcast state change.
-	 *
-	 * THE ONLY CALLER of this function is `executePauseForGoals` below.
-	 * All code that needs to pause a goal (REST handler, replan-overflow)
-	 * MUST go through `executePauseForGoals`, not call this directly.
-	 */
-	async function applyOperatorPause(pauseGoalManager: GoalManager, goalId: string): Promise<void> {
-		// Provenance distinguishes an operator pause from pre-provenance legacy
-		// dependency pauses when GoalManager restores persisted goals on boot.
-		await pauseGoalManager.updateGoal(goalId, { paused: true, pauseSource: "operator" });
-		await cancelAllVerifications(goalId);
-		broadcastToAll({ type: "goal_state_changed", goalId });
-	}
-
-	/**
-	 * Execute a pause operation: pause all listed goals and abort their
-	 * streaming sessions (excluding the caller's own session).
-	 *
-	 * This is the SINGLE ENTRY POINT for goal-pause operations. Both the
-	 * REST POST /pause handler and the replan-overflow safety circuit
-	 * route through here. `applyOperatorPause` is only called from this
-	 * function — no other code touches goal.paused = true.
-	 */
-	async function executePauseForGoals(
-		targets: PersistedGoal[],
-		callerSessionId: string | undefined,
-	): Promise<number> {
-		const pausedIds = new Set<string>(targets.map(g => g.id));
-		let count = 0;
-		for (const g of targets) {
-			if (g.paused) continue;
-			await applyOperatorPause(getGoalManagerForGoal(g.id), g.id);
-			count++;
-		}
-		for (const s of sessionManager.getAllSessionsRaw()) {
-			if (!s.goalId || !pausedIds.has(s.goalId)) continue;
-			if (s.status !== "streaming") continue;
-			if (s.id === callerSessionId) continue;
-			sessionManager.abortSessionTurn(s.id).catch((err) => {
-				console.warn(`[pause] abortSessionTurn failed for session=${s.id} goal=${s.goalId}:`, err);
-			});
-		}
-		return count;
-	}
+	// Keep all pause entry points on the consent-aware shared lifecycle. This
+	// preserves operator provenance and clears stale consent reasons correctly.
+	const goalPauseDeps = {
+		getGoalManagerForGoal,
+		verificationHarness,
+		sessionManager,
+		broadcastGoalStateChanged: (goalId: string) => broadcastToAll({ type: "goal_state_changed", goalId }),
+	};
 
 	/**
 	 * Gov-1: increment a goal's replanCount and trip the replan-overflow
@@ -407,7 +359,7 @@ export async function tryHandleNestedGoalRoute(
 		const autoPaused = newReplanCount > 5 && !goal.paused;
 		if (autoPaused) {
 			const goalRecord = getGoalAcrossProjects(goal.id);
-			if (goalRecord) await executePauseForGoals([goalRecord], callerSessionId);
+			if (goalRecord) await executePauseForGoals(goalPauseDeps, [goalRecord], callerSessionId);
 		}
 		return { newReplanCount, autoPaused };
 	}
@@ -1257,7 +1209,7 @@ export async function tryHandleNestedGoalRoute(
 		const pauseTargets: PersistedGoal[] = cascade
 			? walkGoalSubtree(targetRoot.id, pauseAllGoals, { includeRoot: true, includeArchived: false })
 			: [targetRoot];
-		const count = await executePauseForGoals(pauseTargets, callerSessionId);
+		const count = await executePauseForGoals(goalPauseDeps, pauseTargets, callerSessionId);
 		json({ paused: count });
 		return true;
 	}

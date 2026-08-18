@@ -55,6 +55,7 @@ export const GATEWAY_OWNED_FILES: readonly string[] = [
 	"state/preview-artifacts/",   // src/server/preview/artifacts.ts
 	"state/review-payloads/",     // src/server/review-payload-store.ts
 	"state/tool-guard/",          // src/server/agent/tool-activation.ts
+	"state/tool-result-filter/", // src/server/agent/tool-result-filter-extension.ts
 	"state/tool-result-error-bridge/", // src/server/agent/tool-result-error-bridge-extension.ts
 	"state/provider-bridge/",     // src/server/agent/provider-bridge-extension.ts
 	"state/google-code-assist/",  // src/server/agent/google-code-assist-provider-extension.ts

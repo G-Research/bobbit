@@ -401,7 +401,7 @@ describe("buildDockerRunArgs", () => {
 				stateDir,
 			}, NOOP_COMMAND_RUNNER);
 			const mounts = args.filter((_a, i) => args[i - 1] === "-v");
-			for (const sub of ["google-code-assist", "tool-result-error-bridge", "aigw-dns-guard"]) {
+			for (const sub of ["tool-guard", "google-code-assist", "tool-result-error-bridge", "tool-result-filter", "aigw-dns-guard"]) {
 				const mount = mounts.find((m) => m.includes(`:/bobbit-state/${sub}`));
 				assert.ok(mount, `expected a ${sub} mount, got: ${JSON.stringify(mounts)}`);
 				assert.ok(
@@ -411,7 +411,7 @@ describe("buildDockerRunArgs", () => {
 				assert.ok(fs.existsSync(path.join(stateDir, sub)), `${sub} subdir should be created before mounting`);
 			}
 			// The writable state subdirs must NOT have picked up :ro.
-			for (const sub of ["sessions", "tool-guard", "html-snapshots"]) {
+			for (const sub of ["sessions", "html-snapshots"]) {
 				const m = mounts.find((x) => x.includes(`:/bobbit-state/${sub}`));
 				assert.ok(m, `expected a /bobbit-state/${sub} mount`);
 				assert.ok(

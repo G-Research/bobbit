@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +9,20 @@ import { getAllConfigDirectories, type ProjectConfigReader } from "./config-dire
 import type { SlashSkill } from "../skills/slash-skills.js";
 import { profile, bumpCount } from "./profiling.js";
 import { type ContextBlock, fenceBlock } from "./context-blocks.js";
+import {
+	containsReservedCorePromptDelimiter,
+	EXTENSION_PROMPT_REGION_END,
+	EXTENSION_PROMPT_REGION_START,
+	extensionPromptSectionEnd,
+	extensionPromptSectionStart,
+} from "./prompt-delimiters.js";
+
+export {
+	EXTENSION_PROMPT_REGION_END,
+	EXTENSION_PROMPT_REGION_START,
+	extensionPromptSectionEnd,
+	extensionPromptSectionStart,
+} from "./prompt-delimiters.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -371,13 +386,16 @@ export interface PromptParts {
 	skillsCatalogBudget?: number;
 	/** Fresh provider-supplied context blocks appended as the final, lowest-authority prompt section. */
 	dynamicContext?: ContextBlock[];
+	/** Resolved, granted static extension sections. Callers must validate grants and budgets before setting these. */
+	extensionPromptSections?: ResolvedSystemPromptSection[];
 	/**
 	 * Optional per-goal prompt section ordering (the `bobbit.promptSectionOrder`
 	 * metadata convention). Labels listed here are emitted first, in the given
 	 * order; any unlisted section keeps its original relative position after
 	 * them. Unknown labels are ignored. Absent ⇒ today's fixed order, byte-
-	 * identical. NOTE: reordering the stable/volatile split can change the
-	 * provider prompt-cache hit rate — a legitimate A/B experiment variable.
+	 * identical. With active static extensions the protected core/extension/
+	 * volatile partition is retained; labels may still reorder inside their
+	 * partition. Without extensions, legacy ordering remains byte-identical.
 	 */
 	sectionOrder?: string[];
 }
@@ -465,279 +483,373 @@ export function buildSkillsCatalogSection(skills: SlashSkill[], budgetOverride?:
 	return header + lines.join("\n");
 }
 
+/**
+ * A project-effective static prompt section, already resolved by the pack
+ * registry. This module deliberately does not resolve packs, grants, or
+ * budgets: it only gives the already-authorized result one canonical layout.
+ */
+export interface ResolvedSystemPromptSection {
+	packId: string;
+	packName: string;
+	sectionId: string;
+	title: string;
+	content: string;
+	/** Optional resolver-provided values; layout always computes authoritative bytes. */
+	contentBytes?: number;
+	renderedBytes?: number;
+	source?: "manifest" | "project-override";
+}
+
 export interface PromptSection {
 	label: string;
 	source: string;
 	content: string;
 	/** Estimated token count (~4 chars/token for Claude models) */
 	tokens: number;
+	/** Additive attribution for a static extension contribution. */
+	kind?: "extension";
+	packId?: string;
+	packName?: string;
+	sectionId?: string;
+	sectionTitle?: string;
+	/** UTF-8 bytes of extension-authored content (not the delimiter wrappers). */
+	contentBytes?: number;
+	/** UTF-8 bytes of this contribution with its section delimiters. */
+	renderedBytes?: number;
+	/** UTF-8 bytes in the full effective prompt containing this section. */
+	totalPromptBytes?: number;
 }
 
-/**
- * Assemble the full system prompt from its parts and write to a temp file.
- *
- * Order (stable prefix first, volatile sections last, for provider prompt-cache reuse):
- *   1. Global system prompt (config/system-prompt.md)
- *   2. AGENTS.md from the session's working directory (with @refs resolved inline)
- *   2.5. Working directory instructions
- *   3. Tool documentation
- *   4. Available Skills catalog
- *   5. Goal spec + role (if session belongs to a goal)
- *   6. Current Task
- *   7. Workflow upstream-gate context
- *
- * Returns the path to the assembled prompt file, or undefined if all parts
- * are empty (in which case no --system-prompt should be passed to the agent).
- */
-export function assembleSystemPrompt(sessionId: string, parts: PromptParts, stateDir?: string): string | undefined {
-	return profile("assembleSystemPrompt", () => _assembleSystemPrompt(sessionId, parts, stateDir));
+/** The cache-boundary identity and inspector projection for one effective prompt. */
+export interface SystemPromptLayout {
+	/** Full bytes written by assembleSystemPrompt, including the historical trailing newline. */
+	content: string | undefined;
+	/** Alias for consumers that describe the layout as a prompt rather than file content. */
+	prompt: string | undefined;
+	sections: PromptSection[];
+	totalPromptBytes: number;
+	/** UTF-8 offset immediately after the stable core and before extension-specific bytes. */
+	extensionRegionStartByteOffset: number;
+	/** SHA-256 of the exact UTF-8 prefix ending at extensionRegionStartByteOffset. */
+	stablePrefixSha256: string;
+	/** UTF-8 bytes in the core-owned outer extension-region markers, if present. */
+	extensionRegionBytes: number;
 }
 
-function _assembleSystemPrompt(sessionId: string, parts: PromptParts, stateDir?: string): string | undefined {
-	const sections: { label: string; content: string }[] = [];
-
-	// 1. Global system prompt (resolve @refs relative to its directory)
-	if (parts.baseSystemPromptPath && fs.existsSync(parts.baseSystemPromptPath)) {
-		const raw = fs.readFileSync(parts.baseSystemPromptPath, "utf-8").trim();
-		const base = raw ? resolveMarkdownRefs(raw, path.dirname(parts.baseSystemPromptPath)) : "";
-		if (base) sections.push({ label: "System Prompt", content: base });
-	}
-
-	// 2. Agent files — use projectRoot (host-accessible) when available; for sandboxed
-	// agents cwd is a container-internal path the host can't read.
-	const filesRoot = parts.projectRoot || parts.cwd;
-	const agentsMd = readAllAgentFiles(filesRoot, parts.projectConfigStore);
-	if (agentsMd.trim()) {
-		sections.push({ label: "Project AGENTS.md", content: "# Project AGENTS.md\n\n" + agentsMd.trim() });
-	}
-
-	// 2.5. Working directory instructions
-	if (parts.cwd) {
-		sections.push({ label: "Working Directory", content:
-			`# Working Directory\n\n` +
-			`Your working directory is: \`${parts.cwd}\`\n\n` +
-			`Stay in this directory for all file operations and git commands. ` +
-			`Do not \`cd\` into other directories unless explicitly required by the task.\n\n` +
-			`**Why this is a hard constraint:** Other agents, the dev server, and the user may all be working in the primary worktree simultaneously. ` +
-			`If you \`cd\` there and make changes, you risk merge conflicts during rebase, corrupting other agents' in-progress work, or breaking the running dev server. ` +
-			`Even for infrastructure files (Dockerfiles, configs), the correct flow is: edit here → commit → push to origin → pull from primary. ` +
-			`One \`cd\` violation cascades — all subsequent commands (edit, git add, commit) will operate on shared state.`
-		});
-	}
-
-	// 3. Tool documentation (stable across turns — kept in the prefix for prompt caching)
-	if (parts.toolDocs?.trim()) {
-		sections.push({ label: "Tools", content: parts.toolDocs.trim() });
-	}
-
-	// 4. Available Skills (autonomous activation catalog — stable across turns)
-	if (parts.skillsCatalog && parts.skillsCatalog.length > 0) {
-		const skillsSection = buildSkillsCatalogSection(parts.skillsCatalog, parts.skillsCatalogBudget);
-		if (skillsSection) sections.push({ label: "Available Skills", content: skillsSection });
-	}
-
-	// 5. Goal spec + role as SEPARATE labeled sections so each can be reordered
-	// independently via `bobbit.promptSectionOrder` and the assembled prompt
-	// mirrors the inspector (getPromptSections) which already exposes Goal and
-	// Role distinctly. Joined by the section separator below, the default order
-	// (Goal then Role) is byte-identical to the previous merged `Goal` section.
-	// Volatile sections (goal/role/task/workflow context) follow the stable prefix
-	// above so provider prompt caches reuse the tool docs + skills catalog.
-	if (parts.goalSpec?.trim()) {
-		const header = parts.goalTitle
-			? `# Goal\n\n**${parts.goalTitle}** (Status: ${parts.goalState || "unknown"})`
-			: "# Goal";
-		sections.push({ label: "Goal", content: header + "\n\n" + parts.goalSpec.trim() });
-	}
-	if (parts.rolePrompt?.trim()) {
-		// Backward compatibility: historically the role prompt rendered INSIDE the
-		// `# Goal` section. When there is no goal spec AND no explicit
-		// `bobbit.promptSectionOrder`, a role-only session must keep that exact
-		// shape (a `# Goal` header preceding the role prompt) so absent-metadata
-		// output is byte-identical to before. When metadata supplies a section
-		// order, `Role` stays a standalone, independently-reorderable section.
-		const hasOrder = !!parts.sectionOrder && parts.sectionOrder.length > 0;
-		const needsGoalHeader = !parts.goalSpec?.trim() && !hasOrder;
-		const roleHeader = parts.goalTitle
-			? `# Goal\n\n**${parts.goalTitle}** (Status: ${parts.goalState || "unknown"})`
-			: "# Goal";
-		const roleContent = needsGoalHeader
-			? roleHeader + "\n\n" + parts.rolePrompt.trim()
-			: parts.rolePrompt.trim();
-		sections.push({ label: "Role", content: roleContent });
-	}
-
-	// 5.5. Goal nesting context — three stanzas for team-lead sessions
-	// describing root/child role + the subgoal/team_spawn/task_create decision rule.
-	if (parts.nestingContext) {
-		const nesting = buildNestingContextSection(parts.nestingContext);
-		if (nesting) sections.push({ label: "Goal Nesting", content: nesting });
-	}
-
-	// 6. Task context
-	if (parts.taskTitle || parts.taskType) {
-		const taskLines: string[] = ["# Current Task"];
-		if (parts.taskType) taskLines.push(`\n**Type**: ${parts.taskType}`);
-		if (parts.taskTitle) taskLines.push(`**Title**: ${parts.taskTitle}`);
-
-		if (parts.taskSpec?.trim()) {
-			taskLines.push(`\n## Task Specification\n${parts.taskSpec.trim()}`);
-		}
-
-		if (parts.taskDependsOn && parts.taskDependsOn.length > 0) {
-			taskLines.push("\n## Dependencies\nThis task depends on the following completed tasks:");
-			for (const dep of parts.taskDependsOn) {
-				taskLines.push(`- ${dep}`);
-			}
-		}
-
-		sections.push({ label: "Task", content: taskLines.join("\n") });
-	}
-
-	// 7. Workflow dependency context (accepted upstream gate content)
-	if (parts.workflowContext?.trim()) {
-		sections.push({ label: "Workflow Context", content: parts.workflowContext.trim() });
-	}
-
-	// 8. Dynamic Context (provider-supplied, freshest/lowest-authority tail)
-	if (parts.dynamicContext?.length) {
-		sections.push({ label: "Dynamic Context", content: "## Dynamic Context\n\n" + parts.dynamicContext.map(fenceBlock).join("\n\n") });
-	}
-
-	if (sections.length === 0) return undefined;
-
-	// Apply the optional per-goal section ordering (absent ⇒ byte-identical default).
-	const combined = reorderLabeledSections(sections, parts.sectionOrder).map((s) => s.content).join("\n\n---\n\n") + "\n";
-	bumpCount("assembleSystemPrompt.bytes", combined.length);
-
-	const promptPath = path.join(resolvePromptsDir(stateDir), `${sessionId}.md`);
-	fs.writeFileSync(promptPath, combined, "utf-8");
-	return promptPath;
+interface LayoutSection {
+	label: string;
+	promptContent: string;
+	inspectorSections: PromptSection[];
 }
 
-/**
- * Return the system prompt broken into labeled sections for the inspector UI.
- * Takes the same PromptParts as assembleSystemPrompt but returns structured
- * sections instead of writing to disk.
- */
-/** Estimate token count from text (~4 chars per token for Claude models) */
+const STABLE_CORE_LABELS = new Set([
+	"System Prompt",
+	"Project AGENTS.md",
+	"Working Directory",
+	"Tools",
+	"Available Skills",
+]);
+const SECTION_SEPARATOR = "\n\n---\n\n";
+
+/** Estimate token count from text (~4 chars per token for Claude models). */
 function estimateTokens(text: string): number {
 	return Math.ceil(text.length / 4);
 }
 
-export function getPromptSections(parts: PromptParts): PromptSection[] {
-	const sections: PromptSection[] = [];
+function promptSection(label: string, source: string, content: string): PromptSection {
+	return { label, source, content, tokens: estimateTokens(content) };
+}
 
-	// 1. Global system prompt (resolve @refs relative to its directory)
+/** Build the one source of truth used by both file assembly and inspection. */
+function buildBaseLayoutSections(parts: PromptParts): LayoutSection[] {
+	const sections: LayoutSection[] = [];
+
 	if (parts.baseSystemPromptPath && fs.existsSync(parts.baseSystemPromptPath)) {
 		const raw = fs.readFileSync(parts.baseSystemPromptPath, "utf-8").trim();
-		const base = raw ? resolveMarkdownRefs(raw, path.dirname(parts.baseSystemPromptPath)) : "";
-		if (base) sections.push({ label: "System Prompt", source: parts.baseSystemPromptPath!, content: base, tokens: estimateTokens(base) });
+		const content = raw ? resolveMarkdownRefs(raw, path.dirname(parts.baseSystemPromptPath)) : "";
+		if (content) {
+			sections.push({
+				label: "System Prompt",
+				promptContent: content,
+				inspectorSections: [promptSection("System Prompt", parts.baseSystemPromptPath, content)],
+			});
+		}
 	}
 
-	// 2. Agent files (individual sections per file for provenance)
-	const viewerRoot = parts.projectRoot || parts.cwd;
+	// Resolve agent files once. The prompt intentionally combines them into the
+	// historical single section while the inspector retains per-file provenance.
+	const filesRoot = parts.projectRoot || parts.cwd;
+	const agentFiles: { source: string; content: string }[] = [];
 	if (parts.projectConfigStore) {
-		const dirs = getAllConfigDirectories(viewerRoot, parts.projectConfigStore);
-		const agentEntries = dirs.filter(d => d.types.includes("agents") && d.exists);
-		for (const entry of agentEntries) {
+		for (const entry of getAllConfigDirectories(filesRoot, parts.projectConfigStore)) {
+			if (!entry.types.includes("agents") || !entry.exists) continue;
 			try {
-				const content = fs.readFileSync(entry.path, "utf-8");
-				const resolved = resolveMarkdownRefs(content, path.dirname(entry.path));
-				if (resolved.trim()) {
-					sections.push({ label: "Project AGENTS.md", source: entry.path, content: resolved.trim(), tokens: estimateTokens(resolved.trim()) });
-				}
-			} catch {
-				// skip unreadable files
+				const content = resolveMarkdownRefs(fs.readFileSync(entry.path, "utf-8"), path.dirname(entry.path)).trim();
+				if (content) agentFiles.push({ source: entry.path, content });
+			} catch (err) {
+				console.warn(`[system-prompt] Failed to read agent file ${entry.path}, skipping:`, err);
 			}
 		}
 	} else {
-		// Legacy fallback: single AGENTS.md with absolute path
-		const agentsPath = path.join(viewerRoot, "AGENTS.md");
-		if (fs.existsSync(agentsPath)) {
-			const content = readAgentsMd(viewerRoot);
-			if (content.trim()) {
-				sections.push({ label: "Project AGENTS.md", source: agentsPath, content: content.trim(), tokens: estimateTokens(content.trim()) });
-			}
-		}
+		const agentsPath = path.join(filesRoot, "AGENTS.md");
+		const content = readAgentsMd(filesRoot).trim();
+		if (content) agentFiles.push({ source: agentsPath, content });
+	}
+	if (agentFiles.length) {
+		const content = agentFiles.map((file) => file.content).join("\n\n");
+		sections.push({
+			label: "Project AGENTS.md",
+			promptContent: "# Project AGENTS.md\n\n" + content,
+			inspectorSections: agentFiles.map((file) => promptSection("Project AGENTS.md", file.source, file.content)),
+		});
 	}
 
-	// 2.5. Working directory (also included in the prompt file via assembleSystemPrompt;
-	// the agent CLI may additionally inject its own "Current working directory" based on --cwd)
 	if (parts.cwd) {
-		const cwdContent = `Your working directory is: \`${parts.cwd}\`\n\n` +
+		const content = `Your working directory is: \`${parts.cwd}\`\n\n` +
 			`Stay in this directory for all file operations and git commands. ` +
 			`Do not \`cd\` into other directories unless explicitly required by the task.\n\n` +
 			`**Why this is a hard constraint:** Other agents, the dev server, and the user may all be working in the primary worktree simultaneously. ` +
 			`If you \`cd\` there and make changes, you risk merge conflicts during rebase, corrupting other agents' in-progress work, or breaking the running dev server. ` +
 			`Even for infrastructure files (Dockerfiles, configs), the correct flow is: edit here → commit → push to origin → pull from primary. ` +
 			`One \`cd\` violation cascades — all subsequent commands (edit, git add, commit) will operate on shared state.`;
-		sections.push({ label: "Working Directory", source: parts.cwd, content: cwdContent, tokens: estimateTokens(cwdContent) });
+		sections.push({
+			label: "Working Directory",
+			promptContent: "# Working Directory\n\n" + content,
+			inspectorSections: [promptSection("Working Directory", parts.cwd, content)],
+		});
 	}
 
-	// 3. Tool docs (stable prefix — kept ahead of volatile goal/role/task for cache reuse)
 	if (parts.toolDocs?.trim()) {
-		sections.push({ label: "Tools", source: "Tool documentation", content: parts.toolDocs.trim(), tokens: estimateTokens(parts.toolDocs.trim()) });
+		const content = parts.toolDocs.trim();
+		sections.push({ label: "Tools", promptContent: content, inspectorSections: [promptSection("Tools", "Tool documentation", content)] });
 	}
 
-	// 4. Available Skills (stable prefix)
-	if (parts.skillsCatalog && parts.skillsCatalog.length > 0) {
-		const skillsSection = buildSkillsCatalogSection(parts.skillsCatalog, parts.skillsCatalogBudget);
-		if (skillsSection) {
-			sections.push({ label: "Available Skills", source: "Slash skills catalog", content: skillsSection, tokens: estimateTokens(skillsSection) });
-		}
+	if (parts.skillsCatalog?.length) {
+		const content = buildSkillsCatalogSection(parts.skillsCatalog, parts.skillsCatalogBudget);
+		if (content) sections.push({ label: "Available Skills", promptContent: content, inspectorSections: [promptSection("Available Skills", "Slash skills catalog", content)] });
 	}
 
-	// 5. Goal spec (separate from role — volatile section follows the stable prefix)
 	if (parts.goalSpec?.trim()) {
-		const header = parts.goalTitle
-			? `**${parts.goalTitle}** (Status: ${parts.goalState || "unknown"})`
-			: "";
-		const goalContent = (header ? header + "\n\n" : "") + parts.goalSpec.trim();
-		sections.push({ label: "Goal", source: `Goal: ${parts.goalTitle || "Untitled"}`, content: goalContent, tokens: estimateTokens(goalContent) });
+		const promptHeader = parts.goalTitle
+			? `# Goal\n\n**${parts.goalTitle}** (Status: ${parts.goalState || "unknown"})`
+			: "# Goal";
+		const inspectorHeader = parts.goalTitle ? `**${parts.goalTitle}** (Status: ${parts.goalState || "unknown"})` : "";
+		const content = parts.goalSpec.trim();
+		sections.push({
+			label: "Goal",
+			promptContent: promptHeader + "\n\n" + content,
+			inspectorSections: [promptSection("Goal", `Goal: ${parts.goalTitle || "Untitled"}`, (inspectorHeader ? inspectorHeader + "\n\n" : "") + content)],
+		});
 	}
 
-	// 6. Role prompt
 	if (parts.rolePrompt?.trim()) {
-		sections.push({ label: "Role", source: `Role: ${parts.roleName || "unknown"}`, content: parts.rolePrompt.trim(), tokens: estimateTokens(parts.rolePrompt.trim()) });
+		const hasOrder = !!parts.sectionOrder?.length;
+		const needsGoalHeader = !parts.goalSpec?.trim() && !hasOrder;
+		const roleHeader = parts.goalTitle
+			? `# Goal\n\n**${parts.goalTitle}** (Status: ${parts.goalState || "unknown"})`
+			: "# Goal";
+		const content = parts.rolePrompt.trim();
+		sections.push({
+			label: "Role",
+			promptContent: needsGoalHeader ? roleHeader + "\n\n" + content : content,
+			inspectorSections: [promptSection("Role", `Role: ${parts.roleName || "unknown"}`, content)],
+		});
 	}
 
-	// 6.5. Goal nesting context — see _assembleSystemPrompt for shape.
 	if (parts.nestingContext) {
-		const nesting = buildNestingContextSection(parts.nestingContext);
-		if (nesting) {
-			sections.push({ label: "Goal Nesting", source: parts.nestingContext.parent ? "Child team-lead" : "Top-level team-lead", content: nesting, tokens: estimateTokens(nesting) });
-		}
+		const content = buildNestingContextSection(parts.nestingContext);
+		if (content) sections.push({
+			label: "Goal Nesting",
+			promptContent: content,
+			inspectorSections: [promptSection("Goal Nesting", parts.nestingContext.parent ? "Child team-lead" : "Top-level team-lead", content)],
+		});
 	}
 
-	// 7. Task context
 	if (parts.taskTitle || parts.taskType) {
-		const taskLines: string[] = [];
-		if (parts.taskType) taskLines.push(`**Type**: ${parts.taskType}`);
-		if (parts.taskTitle) taskLines.push(`**Title**: ${parts.taskTitle}`);
-		if (parts.taskSpec?.trim()) taskLines.push(`\n## Task Specification\n${parts.taskSpec.trim()}`);
-		if (parts.taskDependsOn?.length) {
-			taskLines.push("\n## Dependencies");
-			for (const dep of parts.taskDependsOn) taskLines.push(`- ${dep}`);
+		// Keep the prompt form byte-identical to the pre-layout assembler; the
+		// inspector intentionally omits the heading, as it always has.
+		const promptLines: string[] = ["# Current Task"];
+		const inspectorLines: string[] = [];
+		if (parts.taskType) {
+			promptLines.push(`\n**Type**: ${parts.taskType}`);
+			inspectorLines.push(`**Type**: ${parts.taskType}`);
 		}
-		const taskContent = taskLines.join("\n");
-		sections.push({ label: "Task", source: `Task: ${parts.taskTitle || "Untitled"}`, content: taskContent, tokens: estimateTokens(taskContent) });
+		if (parts.taskTitle) {
+			promptLines.push(`**Title**: ${parts.taskTitle}`);
+			inspectorLines.push(`**Title**: ${parts.taskTitle}`);
+		}
+		if (parts.taskSpec?.trim()) {
+			const spec = `\n## Task Specification\n${parts.taskSpec.trim()}`;
+			promptLines.push(spec);
+			inspectorLines.push(spec);
+		}
+		if (parts.taskDependsOn?.length) {
+			promptLines.push("\n## Dependencies\nThis task depends on the following completed tasks:");
+			inspectorLines.push("\n## Dependencies");
+			for (const dep of parts.taskDependsOn) {
+				promptLines.push(`- ${dep}`);
+				inspectorLines.push(`- ${dep}`);
+			}
+		}
+		const inspectorContent = inspectorLines.join("\n");
+		sections.push({
+			label: "Task",
+			promptContent: promptLines.join("\n"),
+			inspectorSections: [promptSection("Task", `Task: ${parts.taskTitle || "Untitled"}`, inspectorContent)],
+		});
 	}
 
-	// 8. Workflow context
 	if (parts.workflowContext?.trim()) {
-		sections.push({ label: "Workflow Context", source: "Upstream gates", content: parts.workflowContext.trim(), tokens: estimateTokens(parts.workflowContext.trim()) });
+		const content = parts.workflowContext.trim();
+		sections.push({ label: "Workflow Context", promptContent: content, inspectorSections: [promptSection("Workflow Context", "Upstream gates", content)] });
 	}
 
-	// 9. Dynamic Context (provider-supplied, freshest/lowest-authority tail)
 	if (parts.dynamicContext?.length) {
 		const content = parts.dynamicContext.map(fenceBlock).join("\n\n");
-		sections.push({ label: "Dynamic Context", source: "providers", content, tokens: estimateTokens(content) });
+		sections.push({
+			label: "Dynamic Context",
+			promptContent: "## Dynamic Context\n\n" + content,
+			inspectorSections: [promptSection("Dynamic Context", "providers", content)],
+		});
 	}
 
-	// Apply the optional per-goal section ordering so the inspector mirrors the
-	// assembled prompt (absent ⇒ byte-identical default).
-	return reorderLabeledSections(sections, parts.sectionOrder);
+	return sections;
+}
+
+function extensionLayoutSection(section: ResolvedSystemPromptSection): LayoutSection {
+	// The registry rejects these before a section reaches PromptParts. Keep this
+	// defensive guard at the final rendering boundary so raw prose can never
+	// forge core-owned attribution markers through a stale or direct caller.
+	if (containsReservedCorePromptDelimiter(section.content)) {
+		throw new Error(`Extension prompt section ${section.packId}/${section.sectionId} contains a reserved delimiter`);
+	}
+	const start = extensionPromptSectionStart(section.packId, section.sectionId);
+	const end = extensionPromptSectionEnd(section.packId, section.sectionId);
+	const rendered = `${start}\n${section.content}\n${end}`;
+	const contentBytes = Buffer.byteLength(section.content, "utf-8");
+	const renderedBytes = Buffer.byteLength(rendered, "utf-8");
+	return {
+		label: `Extension: ${section.packId}/${section.sectionId}`,
+		promptContent: rendered,
+		inspectorSections: [{
+			label: section.title,
+			source: `Extension: ${section.packName || section.packId}`,
+			content: rendered,
+			tokens: estimateTokens(section.content),
+			kind: "extension",
+			packId: section.packId,
+			packName: section.packName,
+			sectionId: section.sectionId,
+			sectionTitle: section.title,
+			contentBytes,
+			renderedBytes,
+		}],
+	};
+}
+
+function flattenInspectorSections(sections: LayoutSection[], totalPromptBytes: number): PromptSection[] {
+	return sections.flatMap((section) => section.inspectorSections.map((inspector) =>
+		inspector.kind === "extension" ? { ...inspector, totalPromptBytes } : inspector,
+	));
+}
+
+function joinPromptSections(sections: LayoutSection[]): string | undefined {
+	if (sections.length === 0) return undefined;
+	return sections.map((section) => section.promptContent).join(SECTION_SEPARATOR) + "\n";
+}
+
+/**
+ * Return the canonical layout used for both the on-disk prompt and the prompt
+ * inspector. When extensions are present their protected region is always
+ * between the stable core and volatile suffix; section-order metadata may still
+ * reorder inside either partition, but cannot move an extension across it.
+ */
+export function getSystemPromptLayout(parts: PromptParts): SystemPromptLayout {
+	const baseSections = buildBaseLayoutSections(parts);
+	const resolvedExtensions = parts.extensionPromptSections ?? [];
+	// Section-order metadata is applied exactly once, before either layout path
+	// derives its splice point. This makes the cacheable prefix independent of
+	// whether extensions are presently resolved.
+	const reorderedSections = reorderLabeledSections(baseSections, parts.sectionOrder);
+	// Dynamic Context is provider-supplied and protected-last. Normalize it
+	// after custom ordering for every layout, so metadata cannot move it into
+	// the stable prefix or ahead of the extension region.
+	const orderedSections = [
+		...reorderedSections.filter((section) => section.label !== "Dynamic Context"),
+		...reorderedSections.filter((section) => section.label === "Dynamic Context"),
+	];
+	const extensionBoundary = orderedSections.reduce((last, section, index) =>
+		STABLE_CORE_LABELS.has(section.label) ? index : last, -1) + 1;
+	const extensionRegionStartByteOffset = extensionBoundary > 0
+		? Buffer.byteLength(
+			orderedSections.slice(0, extensionBoundary).map((section) => section.promptContent).join(SECTION_SEPARATOR),
+			"utf-8",
+		)
+		: 0;
+	let promptSections: LayoutSection[];
+	let inspectorLayout: LayoutSection[];
+	let extensionRegionBytes = 0;
+
+	if (resolvedExtensions.length === 0) {
+		// Exact legacy path: no marker and no byte changes when EP-13 is inactive.
+		promptSections = orderedSections;
+		inspectorLayout = orderedSections;
+	} else {
+		const extensionSections = resolvedExtensions.map(extensionLayoutSection);
+		const regionContent = [
+			EXTENSION_PROMPT_REGION_START,
+			...extensionSections.map((section) => section.promptContent),
+			EXTENSION_PROMPT_REGION_END,
+		].join("\n");
+		extensionRegionBytes = Buffer.byteLength(regionContent, "utf-8");
+		const region: LayoutSection = { label: "Extension Prompt Region", promptContent: regionContent, inspectorSections: [] };
+		promptSections = [
+			...orderedSections.slice(0, extensionBoundary),
+			region,
+			...orderedSections.slice(extensionBoundary),
+		];
+		inspectorLayout = [
+			...orderedSections.slice(0, extensionBoundary),
+			...extensionSections,
+			...orderedSections.slice(extensionBoundary),
+		];
+	}
+
+	const content = joinPromptSections(promptSections);
+	const totalPromptBytes = content ? Buffer.byteLength(content, "utf-8") : 0;
+	const prefix = content ? Buffer.from(content, "utf-8").subarray(0, extensionRegionStartByteOffset) : Buffer.alloc(0);
+	return {
+		content,
+		prompt: content,
+		sections: flattenInspectorSections(inspectorLayout, totalPromptBytes),
+		totalPromptBytes,
+		extensionRegionStartByteOffset,
+		stablePrefixSha256: createHash("sha256").update(prefix).digest("hex"),
+		extensionRegionBytes,
+	};
+}
+
+/** Backwards-friendly alias for consumers that model this as a builder. */
+export const buildSystemPromptLayout = getSystemPromptLayout;
+
+/**
+ * Assemble the full system prompt from its parts and write to a temp file.
+ * Returns undefined when no content is available.
+ */
+export function assembleSystemPrompt(sessionId: string, parts: PromptParts, stateDir?: string): string | undefined {
+	return profile("assembleSystemPrompt", () => {
+		const layout = getSystemPromptLayout(parts);
+		if (!layout.content) return undefined;
+		bumpCount("assembleSystemPrompt.bytes", layout.totalPromptBytes);
+		const promptPath = path.join(resolvePromptsDir(stateDir), `${sessionId}.md`);
+		fs.writeFileSync(promptPath, layout.content, "utf-8");
+		return promptPath;
+	});
+}
+
+/** Return the inspector projection from the exact same layout used for assembly. */
+export function getPromptSections(parts: PromptParts): PromptSection[] {
+	return getSystemPromptLayout(parts).sections;
 }
 
 /**
@@ -746,9 +858,17 @@ export function getPromptSections(parts: PromptParts): PromptSection[] {
  */
 export function persistPromptSections(sessionId: string, parts: PromptParts, stateDir?: string): void {
 	try {
-		const sections = getPromptSections(parts);
-		const totalTokens = sections.reduce((sum, s) => sum + s.tokens, 0);
-		const data = { sections, totalTokens, createdAt: new Date().toISOString() };
+		const layout = getSystemPromptLayout(parts);
+		const totalTokens = layout.sections.reduce((sum, s) => sum + s.tokens, 0);
+		const data = {
+			sections: layout.sections,
+			totalTokens,
+			totalPromptBytes: layout.totalPromptBytes,
+			extensionRegionStartByteOffset: layout.extensionRegionStartByteOffset,
+			stablePrefixSha256: layout.stablePrefixSha256,
+			extensionRegionBytes: layout.extensionRegionBytes,
+			createdAt: new Date().toISOString(),
+		};
 		const jsonPath = path.join(resolvePromptsDir(stateDir), `${sessionId}-prompt.json`);
 		fs.writeFileSync(jsonPath, JSON.stringify(data), "utf-8");
 	} catch (err) {
@@ -760,7 +880,15 @@ export function persistPromptSections(sessionId: string, parts: PromptParts, sta
  * Load persisted prompt sections snapshot for a session.
  * Returns null if the file doesn't exist or can't be parsed.
  */
-export function loadPersistedPromptSections(sessionId: string, stateDir?: string): { sections: PromptSection[]; totalTokens: number; createdAt: string } | null {
+export function loadPersistedPromptSections(sessionId: string, stateDir?: string): {
+	sections: PromptSection[];
+	totalTokens: number;
+	totalPromptBytes?: number;
+	extensionRegionStartByteOffset?: number;
+	stablePrefixSha256?: string;
+	extensionRegionBytes?: number;
+	createdAt: string;
+} | null {
 	try {
 		const jsonPath = path.join(resolvePromptsDir(stateDir), `${sessionId}-prompt.json`);
 		if (!fs.existsSync(jsonPath)) return null;

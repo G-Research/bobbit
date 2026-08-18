@@ -21,7 +21,10 @@ import { SearchService } from "../search/search-service.js";
 import { CostTracker } from "./cost-tracker.js";
 import { GoalManager } from "./goal-manager.js";
 import { SecretsStore } from "./secrets-store.js";
+import { ExtensionSettingsSecretStore } from "./extension-settings-secret-store.js";
+import { ExtensionSettingsStore, type ProjectExtensionSettingsConfigStore } from "./extension-settings-store.js";
 import { PlanMutationStore } from "./plan-mutation-store.js";
+import { DecisionRequestStore } from "./decision-request-store.js";
 import { realFs, type Clock, type CommandRunner, type FsLike } from "../gateway-deps.js";
 import type { RemoteGitPolicy } from "../skills/git.js";
 
@@ -58,7 +61,13 @@ export class ProjectContext {
   readonly costTracker: CostTracker;
   readonly goalManager: GoalManager;
   readonly secretsStore: SecretsStore;
+  /** Owner-only extension secret bytes, isolated to this project's state directory. */
+  readonly extensionSettingsSecretStore: ExtensionSettingsSecretStore;
+  /** Project-scoped safe settings overlays plus runtime-only secret composition. */
+  readonly extensionSettingsStore: ExtensionSettingsStore;
   readonly planMutationStore: PlanMutationStore;
+  /** Durable, project-owned extension decision state. */
+  readonly decisionRequestStore: DecisionRequestStore;
 
   /**
    * Optional dispatcher for `goal_created` / `goal_archived` staff triggers.
@@ -104,6 +113,7 @@ export class ProjectContext {
     this.costTracker = new CostTracker(this.stateDir, fsImpl);
     this.secretsStore = new SecretsStore(this.stateDir, fsImpl);
     this.planMutationStore = new PlanMutationStore(this.stateDir, undefined, fsImpl, clock);
+    this.decisionRequestStore = new DecisionRequestStore(this.stateDir, fsImpl);
 
     // ProjectConfigStore must precede WorkflowStore because inline workflows
     // are loaded from project.yaml.
@@ -111,6 +121,14 @@ export class ProjectContext {
     this.projectConfigStore = isHeadquarters && opts.headquartersProjectConfigStore
       ? opts.headquartersProjectConfigStore
       : new ProjectConfigStore(this.configDir, fsImpl);
+    this.extensionSettingsSecretStore = new ExtensionSettingsSecretStore(this.stateDir, fsImpl);
+    // ProjectConfigStore gains this narrow native-settings surface with the
+    // EP-7 public-storage slice. Keep this owner scoped to the ProjectContext,
+    // never to a process-global pack resolver or config store.
+    this.extensionSettingsStore = new ExtensionSettingsStore(
+      this.projectConfigStore as unknown as ProjectExtensionSettingsConfigStore,
+      this.extensionSettingsSecretStore,
+    );
     this.workflowStore = new WorkflowStore(this.projectConfigStore);
     this.toolManager = new ToolManager(this.configDir);
     this.toolGroupPolicyStore = new ToolGroupPolicyStore(this.configDir);

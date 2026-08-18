@@ -38,10 +38,12 @@ import { realCommandRunner, type CommandRunner } from "../gateway-deps.js";
 
 export const SANDBOX_STATE_MOUNTS: Array<{ sub: string; readOnly?: boolean }> = [
 	{ sub: "sessions" },
-	{ sub: "tool-guard" },
+	{ sub: "tool-guard", readOnly: true },
 	{ sub: "html-snapshots" },
+	{ sub: "provider-bridge", readOnly: true },
 	{ sub: "google-code-assist", readOnly: true },
 	{ sub: "tool-result-error-bridge", readOnly: true },
+	{ sub: "tool-result-filter", readOnly: true },
 	{ sub: "aigw-dns-guard", readOnly: true },
 ];
 
@@ -303,10 +305,11 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 	// Bind mount ONLY specific state subdirectories — never the full state dir,
 	// which contains the host gateway token, TLS keys, sessions.json, etc.
 	//
-	// Generated extension state dirs (`google-code-assist`,
-	// `tool-result-error-bridge`, and `aigw-dns-guard`) hold content-addressed pi-coding-agent
-	// extensions loaded via `--extension`. remapArgsForContainer rewrites their
-	// host paths to `/bobbit-state/<subdir>/...`; those container paths only
+	// Generated extension state dirs (`tool-guard`, `provider-bridge`,
+	// `google-code-assist`, `tool-result-error-bridge`, `tool-result-filter`,
+	// and `aigw-dns-guard`) hold content-addressed Pi inputs.
+	// Most are loaded via `--extension`; the result gate is a private loader input.
+	// rpc-bridge rewrites their host paths to `/bobbit-state/<subdir>/...`; those container paths only
 	// resolve if the subdirs are bind-mounted here. They contain only generated
 	// extension source (no secrets), so mounting them is safe.
 	//
@@ -315,8 +318,9 @@ export function buildDockerRunArgs(config: DockerRunConfig, commandRunner: Comma
 	// mount would let a compromised sandbox tamper with content-addressed source
 	// reused by later sessions. The `:ro` flag closes that hole at the kernel
 	// mount level; the gateway also revalidates cached contents before reuse as
-	// defense-in-depth (see google-code-assist-provider-extension.ts,
-	// tool-result-error-bridge-extension.ts, and aigw-manager.ts).
+	// defense-in-depth (see tool-activation.ts,
+	// google-code-assist-provider-extension.ts, tool-result-error-bridge-extension.ts,
+	// and aigw-manager.ts).
 	if (stateDir) {
 		for (const { sub, readOnly } of SANDBOX_STATE_MOUNTS) {
 			const hostPath = path.join(stateDir, sub);

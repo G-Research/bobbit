@@ -1,8 +1,8 @@
 import type { ProposalType } from "./proposal-registry.js";
 
-export type PanelWorkspaceKind = "preview" | "proposal" | "review" | "inbox" | "pack";
+export type PanelWorkspaceKind = "preview" | "proposal" | "review" | "inbox" | "context" | "pack";
 export type LegacyPanelWorkspaceKind = PanelWorkspaceKind | "chat";
-export type LegacyPanelTab = "chat" | "preview" | "review" | "inbox" | "pack" | ProposalType;
+export type LegacyPanelTab = "chat" | "preview" | "review" | "inbox" | "context" | "pack" | ProposalType;
 
 export interface PanelWorkspaceTab {
 	id: string;
@@ -32,6 +32,7 @@ export interface PanelWorkspaceTab {
 		| { type: "proposal"; proposalType: ProposalType; sessionId?: string; rev?: number; historical?: boolean; [key: string]: unknown }
 		| { type: "review"; reviewId?: string; documentId?: string; title?: string; reviewTitle?: string; sessionId?: string; toolCallId?: string; payloadId?: string; contentHash?: string }
 		| { type: "inbox"; sessionId?: string }
+		| { type: "context"; sessionId?: string }
 		| {
 			/** A pack-contributed side panel (pack schema V1 §8.1). `{packId, panelId,
 			 *  instanceKey}` is the COMPOUND key into the client pack-panel registry
@@ -53,6 +54,7 @@ export const CHAT_PANEL_TAB_ID = "chat";
 export const LIVE_PREVIEW_PANEL_TAB_ID = "preview:live";
 export const LEGACY_LIVE_PREVIEW_PANEL_TAB_ID = "preview";
 export const INBOX_PANEL_TAB_ID = "inbox";
+export const CONTEXT_PANEL_TAB_ID = "context";
 export const DEFAULT_PACK_PANEL_INSTANCE_KEY = "default";
 export const PANEL_WORKSPACE_NO_SESSION_KEY = "__no-session__";
 const PANEL_TABS_STORAGE_KEY = "bobbit-panel-tabs-by-session";
@@ -108,6 +110,7 @@ function persistPanelWorkspace(stateLike: any): void {
 const PROPOSAL_LABELS: Record<ProposalType, string> = {
 	goal: "Goal",
 	project: "Project",
+	workflow: "Workflow",
 	role: "Role",
 	tool: "Tool",
 	staff: "Staff",
@@ -234,7 +237,7 @@ function isPackPanelTabId(id: string): boolean {
 
 export function isSidePanelTabId(id: unknown): id is string {
 	if (typeof id !== "string" || !id) return false;
-	if (id === INBOX_PANEL_TAB_ID) return true;
+	if (id === INBOX_PANEL_TAB_ID || id === CONTEXT_PANEL_TAB_ID) return true;
 	if (isPreviewPanelTabId(id)) return true;
 	if (proposalTypeFromId(id)) return true;
 	if (isReviewPanelTabId(id)) return true;
@@ -243,6 +246,7 @@ export function isSidePanelTabId(id: unknown): id is string {
 
 function panelTabKindFromId(id: string): PanelWorkspaceKind | undefined {
 	if (id === INBOX_PANEL_TAB_ID) return "inbox";
+	if (id === CONTEXT_PANEL_TAB_ID) return "context";
 	if (isPreviewPanelTabId(id)) return "preview";
 	if (proposalTypeFromId(id)) return "proposal";
 	if (isReviewPanelTabId(id)) return "review";
@@ -842,6 +846,17 @@ function canonicalPanelTab(rawTab: PanelWorkspaceTab, id: string): PanelWorkspac
 			},
 		};
 	}
+	if (kind === "context") {
+		return {
+			...rawTab,
+			id: CONTEXT_PANEL_TAB_ID,
+			kind: "context",
+			title: rawTab.title || "Context",
+			label: rawTab.label || "Context",
+			legacyTab: "context",
+			source: { ...(rawTab.source as Record<string, unknown>), type: "context" } as PanelWorkspaceTab["source"],
+		};
+	}
 	if (kind === "pack") {
 		const source = (rawTab.source || {}) as Record<string, unknown>;
 		const tabState = (rawTab.state || {}) as Record<string, unknown>;
@@ -997,8 +1012,9 @@ export function panelTabIdFromLegacy(tab: LegacyPanelTab | string | null | undef
 	if (tab === "chat") return null;
 	if (tab === "preview") return LIVE_PREVIEW_PANEL_TAB_ID;
 	if (tab === "inbox") return INBOX_PANEL_TAB_ID;
+	if (tab === "context") return CONTEXT_PANEL_TAB_ID;
 	if (tab === "review") return reviewActiveTitle ? reviewPanelTabId(reviewActiveTitle) : null;
-	if (tab === "goal" || tab === "project" || tab === "role" || tab === "tool" || tab === "staff") {
+	if (tab === "goal" || tab === "project" || tab === "workflow" || tab === "role" || tab === "tool" || tab === "staff") {
 		return proposalPanelTabId(tab);
 	}
 	return null;

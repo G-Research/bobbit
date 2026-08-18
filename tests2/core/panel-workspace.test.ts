@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 
 import {
 	CHAT_PANEL_TAB_ID,
+	CONTEXT_PANEL_TAB_ID,
 	DEFAULT_PACK_PANEL_INSTANCE_KEY,
 	INBOX_PANEL_TAB_ID,
 	LIVE_PREVIEW_PANEL_TAB_ID,
@@ -116,6 +117,17 @@ function inboxTab(): PanelWorkspaceTab {
 	};
 }
 
+function contextTab(): PanelWorkspaceTab {
+	return {
+		id: CONTEXT_PANEL_TAB_ID,
+		kind: "context",
+		title: "Context",
+		label: "Context",
+		legacyTab: "context",
+		source: { type: "context" },
+	};
+}
+
 function chatTab(): PanelWorkspaceTab {
 	return {
 		id: CHAT_PANEL_TAB_ID,
@@ -156,6 +168,13 @@ describe("panel workspace side-pane tab contract", () => {
 		assert.equal(tabs[0].kind, "inbox");
 		assert.equal(isPinnedPanelTab(tabs[0]), false);
 		assert.equal(firstContentPanelTab(tabs)?.id, INBOX_PANEL_TAB_ID);
+	});
+
+	it("keeps the Context singleton compatible with legacy tab helpers", () => {
+		const state = { selectedSessionId: "s1", panelWorkspaceActiveBySession: { s1: CONTEXT_PANEL_TAB_ID }, panelTabsBySession: { s1: [contextTab()] } };
+		assert.equal(findPanelTab([contextTab()], CONTEXT_PANEL_TAB_ID)?.kind, "context");
+		assert.equal(activePanelTabIdForSession(state, "s1"), CONTEXT_PANEL_TAB_ID);
+		assert.deepEqual(normalizeSidePanelTabs({ panelTabsBySession: { s1: [contextTab()] } }, "s1", []).map((tab) => tab.id), [CONTEXT_PANEL_TAB_ID]);
 	});
 
 	it("creates one reviewId-keyed primary tab for a multi-file review", () => {

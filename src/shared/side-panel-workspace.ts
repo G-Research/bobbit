@@ -1,6 +1,6 @@
 export type SidePanelSizeMode = "collapsed" | "split" | "fullscreen";
-export type SidePanelKind = "preview" | "proposal" | "review" | "inbox" | "pack";
-export type SidePanelProposalType = "goal" | "project" | "role" | "tool" | "staff";
+export type SidePanelKind = "preview" | "proposal" | "review" | "inbox" | "context" | "pack";
+export type SidePanelProposalType = "goal" | "project" | "workflow" | "role" | "tool" | "staff";
 
 export type SidePanelWorkspaceSource =
 	| {
@@ -29,6 +29,10 @@ export type SidePanelWorkspaceSource =
 		type: "inbox";
 		sessionId: string;
 		staffId?: string;
+	}
+	| {
+		type: "context";
+		sessionId: string;
 	}
 	| {
 		type: "pack";
@@ -117,8 +121,8 @@ export interface SidePanelWorkspace {
 }
 
 export const SIDE_PANEL_SIZE_MODES: readonly SidePanelSizeMode[] = ["collapsed", "split", "fullscreen"] as const;
-export const SIDE_PANEL_KINDS: readonly SidePanelKind[] = ["preview", "proposal", "review", "inbox", "pack"] as const;
-export const SIDE_PANEL_PROPOSAL_TYPES: readonly SidePanelProposalType[] = ["goal", "project", "role", "tool", "staff"] as const;
+export const SIDE_PANEL_KINDS: readonly SidePanelKind[] = ["preview", "proposal", "review", "inbox", "context", "pack"] as const;
+export const SIDE_PANEL_PROPOSAL_TYPES: readonly SidePanelProposalType[] = ["goal", "project", "workflow", "role", "tool", "staff"] as const;
 
 export function isSidePanelSizeMode(value: unknown): value is SidePanelSizeMode {
 	return typeof value === "string" && (SIDE_PANEL_SIZE_MODES as readonly string[]).includes(value);

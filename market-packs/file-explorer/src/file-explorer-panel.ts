@@ -226,6 +226,10 @@ export default function createFileExplorerPanel() {
 			}
 			state.host = host;
 			queueMicrotask(() => {
+				// A caller can synchronously remove a newly rendered panel before its
+				// deferred lifecycle setup runs. Do not create subscriptions or observers
+				// for a root that has already left the document.
+				if (!state!.root.isConnected) return;
 				activate(state!);
 				subscribeToStatus(state!);
 				requestInitialize(state!);
@@ -424,6 +428,10 @@ function activate(state: ExplorerState): void {
 
 function deactivate(state: ExplorerState): void {
 	state.active = false;
+	// A cached root can be rendered again after a real detach. Its directory
+	// snapshot may no longer describe the session, so route initialization must
+	// run again while preserving the durable UI preference already restored.
+	state.initialized = false;
 	state.lifecycleGeneration += 1;
 	state.initializationQueued = false;
 	state.refreshGeneration += 1;

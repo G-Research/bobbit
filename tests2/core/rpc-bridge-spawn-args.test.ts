@@ -19,7 +19,25 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
-import { buildAgentArgs, resolveEffectivePiSelection } from "../../src/server/agent/rpc-bridge.ts";
+import { assertDockerToolResultGateCompatibility, buildAgentArgs, resolveEffectivePiSelection } from "../../src/server/agent/rpc-bridge.ts";
+
+describe("Docker result-gate preflight", () => {
+	it("requires both a read-only gate mount and patched Pi markers before protected launch", () => {
+		const calls: string[][] = [];
+		const exec = (_file: string, args: string[]) => {
+			calls.push(args);
+			return args[0] === "inspect"
+				? "/bobbit-state/tool-result-filter false\n"
+				: "";
+		};
+		assert.doesNotThrow(() => assertDockerToolResultGateCompatibility("sandbox-1", exec));
+		assert.deepEqual(calls.map(args => args[0]), ["inspect", "exec"]);
+		assert.throws(
+			() => assertDockerToolResultGateCompatibility("sandbox-1", () => "/bobbit-state/tool-result-filter true\n"),
+			/patched Docker Pi runtime and read-only gate mount/,
+		);
+	});
+});
 
 describe("resolveEffectivePiSelection", () => {
 	it("resolves repeated raw flags with Pi last-wins semantics and strips selection args", () => {

@@ -32,7 +32,7 @@ import {
 	expandedGoals,
 } from "./state.js";
 import { fetchProjects, gatewayFetch, refreshSessions, resetPrPollThrottle } from "./api.js";
-import { getRouteFromHash, setHashRoute } from "./routing.js";
+import { getRouteFromHash, setHashRoute, setMarketRoute, type AppRoute } from "./routing.js";
 import { revealSidebarTargetForRoute } from "./sidebar-reveal.js";
 import { authenticateGateway, backToSessions, connectToSession, createAndConnectSession, terminateSession, applyProjectPalette, flushAndTeardownDraft, flushPendingDraft } from "./session-manager.js";
 import { selectProposalWorkspaceTab } from "./preview-panel.js";
@@ -299,6 +299,42 @@ async function restoreExtRoute(routeId: string | undefined, params: Record<strin
 
 let handlingHashChange = false;
 let pendingHashChange = false;
+
+function visibleMarketProject(projectId?: string): boolean {
+	return typeof projectId === "string" && state.projects.some(project =>
+		project.id === projectId && project.id !== HEADQUARTERS_PROJECT_ID && !project.hidden,
+	);
+}
+
+/**
+ * Resolve the Market alias only after the project catalogue is hydrated. This
+ * avoids issuing a project-scoped request against an implicit active/first
+ * project and makes copied canonical URLs authoritative.
+ */
+async function prepareMarketRoute(route: AppRoute): Promise<boolean> {
+	await refreshSessions();
+	if (!route.marketProjectId) {
+		const projectId = state.projects.find(project =>
+			project.id !== HEADQUARTERS_PROJECT_ID && !project.hidden,
+		)?.id;
+		// Keep the compatibility alias usable before a project exists: Market's
+		// server-scoped Browse and Sources tabs remain useful for onboarding.
+		// There is deliberately no implicit project context in this state.
+		if (!projectId) return true;
+		setMarketRoute(projectId, "installed", true);
+		return false;
+	}
+	if (!visibleMarketProject(route.marketProjectId)) {
+		// Never let an unknown canonical project silently fall back to another
+		// project's Market data. The dedicated unknown-project Market empty state
+		// is owned by the Market surface; until it mounts, remain on a safe route.
+		showHeaderToast("Market project was not found. Choose a project to continue.");
+		setHashRoute("landing", undefined, true);
+		return false;
+	}
+	state.activeProjectId = route.marketProjectId;
+	return true;
+}
 
 async function handleHashChange(): Promise<void> {
 	if (handlingHashChange) {
@@ -567,10 +603,10 @@ async function handleHashChange(): Promise<void> {
 			state.selectedSessionId = null;
 			state.goalDashboardId = null;
 			state.appView = "authenticated";
+			if (!(await prepareMarketRoute(route))) return;
 			const { loadMarketplaceData } = await import("./marketplace-page.js");
 			loadMarketplaceData();
 			renderApp();
-			await refreshSessions();
 		} else if (route.view === "staff") {
 			clearDashboardState();
 			if (state.remoteAgent) {
@@ -820,8 +856,11 @@ async function initApp() {
 				const { loadSkillsPageData } = await import("./skills-page.js");
 				loadSkillsPageData();
 			} else if (route.view === "market") {
-				const { loadMarketplaceData } = await import("./marketplace-page.js");
-				loadMarketplaceData();
+				state.appView = "authenticated";
+				if (await prepareMarketRoute(route)) {
+					const { loadMarketplaceData } = await import("./marketplace-page.js");
+					loadMarketplaceData();
+				}
 			} else if (route.view === "staff") {
 				const { loadStaffPageData } = await import("./staff-page.js");
 				loadStaffPageData();

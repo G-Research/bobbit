@@ -27,6 +27,12 @@ const BUILTINS_DIR = path.join(__dirname, "..", "defaults");
 /** The first-party pack band root (dist/server/builtin-packs/market-packs). */
 const BUILTIN_PACKS_DIR = resolveBuiltinPacksDir();
 
+/**
+ * A session-local post-discovery ceiling. `undefined` preserves the ordinary
+ * discovery surface; an explicit empty list admits no optional skills.
+ */
+export type SlashSkillNameCeiling = readonly string[] | undefined;
+
 export interface SlashSkill {
 	/** Slash command name (without leading /) */
 	name: string;
@@ -54,6 +60,10 @@ export interface SlashSkill {
 	originPackName?: string | null;
 	/** Market {@link PackEntry.id} when this skill resolved from a market pack; null otherwise (design §5.2). Mirrors roles/tools. */
 	originPackId?: string | null;
+	/** Explicit source class for a skill composed from an adopted directory. */
+	originKind?: "adopted";
+	/** Immutable adoption ledger id when {@link originKind} is `adopted`. */
+	adoptionId?: string;
 }
 
 /**
@@ -85,6 +95,12 @@ export interface SkillMarketContext {
 	 * Omitted ⇒ no activation filtering (back-compat).
 	 */
 	packActivation?: SkillActivationLookup;
+	/**
+	 * Synthetic skill-only entries created from durable adopted-extension records.
+	 * The callback owns ledger lookup and calls the shared scanner; this module
+	 * only inserts the returned entries into the established resolver order.
+	 */
+	adoptedEntries?: (scope: "server" | "global-user" | "project") => PackEntry[];
 }
 
 /**
@@ -111,6 +127,26 @@ interface FrontMatter {
 	agent?: string;
 }
 
+export type SkillScanDiagnosticReason =
+	| "missing_directory"
+	| "unreadable_directory"
+	| "missing_skill_file"
+	| "unreadable_file"
+	| "malformed_frontmatter"
+	| "duplicate_name";
+
+/** A controlled scanner rejection suitable for adoption conformance reporting. */
+export interface SkillScanDiagnostic {
+	path: string;
+	reason: SkillScanDiagnosticReason;
+}
+
+/** Shared scanner result: valid siblings plus controlled rejection diagnostics. */
+export interface SkillScanResult {
+	skills: SlashSkill[];
+	diagnostics: SkillScanDiagnostic[];
+}
+
 /** Normalize the allowed-tools / allowed_tools field into a string[] (or undefined). */
 function normalizeAllowedTools(fm: FrontMatter): string[] | undefined {
 	const raw = fm["allowed-tools"] ?? fm.allowed_tools;
@@ -120,24 +156,30 @@ function normalizeAllowedTools(fm: FrontMatter): string[] | undefined {
 	return undefined;
 }
 
-/** Parse YAML frontmatter from a SKILL.md or command .md file. */
-export function parseFrontmatter(raw: string): { frontmatter: FrontMatter; content: string } {
+/** Parse YAML frontmatter once, retaining a controlled diagnostic for scanner callers. */
+function parseFrontmatterDetailed(raw: string): {
+	frontmatter: FrontMatter;
+	content: string;
+	diagnostic?: "malformed_frontmatter";
+} {
 	const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/);
 	if (!match) return { frontmatter: {}, content: raw };
 
 	const yamlBlock = match[1];
 	const content = match[2];
-
 	try {
 		const parsed = YAML.parse(yamlBlock);
 		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
 			return { frontmatter: parsed as FrontMatter, content };
 		}
-		return { frontmatter: {}, content };
-	} catch (err) {
-		console.warn(`[slash-skills] Failed to parse YAML frontmatter:`, err);
-		return { frontmatter: {}, content: raw };
-	}
+	} catch { /* scanner callers receive a controlled diagnostic below */ }
+	return { frontmatter: {}, content: raw, diagnostic: "malformed_frontmatter" };
+}
+
+/** Parse YAML frontmatter from a SKILL.md or command .md file. */
+export function parseFrontmatter(raw: string): { frontmatter: FrontMatter; content: string } {
+	const { frontmatter, content } = parseFrontmatterDetailed(raw);
+	return { frontmatter, content };
 }
 
 /** Apply $ARGUMENTS, $ARGUMENTS[N], and $N substitutions. */
@@ -155,36 +197,37 @@ export function applySubstitutions(content: string, args: string): string {
 	return result;
 }
 
-/** Parse a single SKILL.md into a {@link SlashSkill}, or null on read/parse failure. */
-function parseSkillFile(skillFile: string, fallbackName: string, source: SlashSkill["source"]): SlashSkill | null {
+interface SkillParseResult {
+	skill?: SlashSkill;
+	reason?: "unreadable_file" | "malformed_frontmatter";
+}
+
+/** Parse one SKILL.md through the shared frontmatter parser. */
+function parseSkillFile(skillFile: string, fallbackName: string, source: SlashSkill["source"]): SkillParseResult {
 	try {
 		const raw = fs.readFileSync(skillFile, "utf-8");
-		const { frontmatter, content: rawContent } = parseFrontmatter(raw);
-		// Do NOT auto-inline @path/foo.md references. Claude Code uses Level-3
-		// progressive disclosure — the agent reads referenced files on demand,
-		// and the activation-header manifest tells it what's available.
-		const content = rawContent;
-
+		const { frontmatter, content, diagnostic } = parseFrontmatterDetailed(raw);
+		if (diagnostic) return { reason: diagnostic };
 		const name = frontmatter.name || fallbackName;
 		const description = frontmatter.description ||
 			content.split("\n").find((l) => l.trim().length > 0)?.trim() || "";
-
 		return {
-			name,
-			description,
-			argumentHint: frontmatter["argument-hint"],
-			disableModelInvocation: frontmatter["disable-model-invocation"],
-			userInvocable: frontmatter["user-invocable"],
-			content,
-			source,
-			filePath: skillFile,
-			allowedTools: normalizeAllowedTools(frontmatter),
-			context: frontmatter.context,
-			agent: frontmatter.agent,
+			skill: {
+				name,
+				description,
+				argumentHint: frontmatter["argument-hint"],
+				disableModelInvocation: frontmatter["disable-model-invocation"],
+				userInvocable: frontmatter["user-invocable"],
+				content,
+				source,
+				filePath: skillFile,
+				allowedTools: normalizeAllowedTools(frontmatter),
+				context: frontmatter.context,
+				agent: frontmatter.agent,
+			},
 		};
-	} catch (err) {
-		console.warn(`[slash-skills] Failed to parse ${skillFile}:`, err);
-		return null;
+	} catch {
+		return { reason: "unreadable_file" };
 	}
 }
 
@@ -202,37 +245,51 @@ function parseSkillFile(skillFile: string, fallbackName: string, source: SlashSk
  * plugin container. Exported so the pack resolver's SkillLoader reuses identical
  * parse logic.
  */
-export function scanSkillDir(dir: string, source: SlashSkill["source"]): SlashSkill[] {
+export function scanSkillDirResolved(dir: string, source: SlashSkill["source"]): SkillScanResult {
 	const skills: SlashSkill[] = [];
-	if (!fs.existsSync(dir)) return skills;
+	const diagnostics: SkillScanDiagnostic[] = [];
+	if (!fs.existsSync(dir)) return { skills, diagnostics: [{ path: dir, reason: "missing_directory" }] };
 
-	const seen = new Set<string>();
-	const readDir = (d: string): fs.Dirent[] => {
+	const seenFiles = new Set<string>();
+	const seenNames = new Set<string>();
+	const readDir = (d: string): fs.Dirent[] | null => {
 		try {
-			return fs.readdirSync(d, { withFileTypes: true });
+			return fs.readdirSync(d, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
 		} catch {
-			return [];
+			diagnostics.push({ path: d, reason: "unreadable_directory" });
+			return null;
 		}
 	};
-	const push = (skillFile: string, fallbackName: string): void => {
+	const push = (skillFile: string, fallbackName: string, reportMissing = true): void => {
 		const abs = path.resolve(skillFile);
-		if (seen.has(abs)) return;
-		if (!fs.existsSync(skillFile)) return;
-		const skill = parseSkillFile(skillFile, fallbackName, source);
-		if (skill) {
-			seen.add(abs);
-			skills.push(skill);
+		if (seenFiles.has(abs)) return;
+		if (!fs.existsSync(skillFile)) {
+			if (reportMissing) diagnostics.push({ path: skillFile, reason: "missing_skill_file" });
+			return;
 		}
+		seenFiles.add(abs);
+		const parsed = parseSkillFile(skillFile, fallbackName, source);
+		if (!parsed.skill) {
+			diagnostics.push({ path: skillFile, reason: parsed.reason ?? "unreadable_file" });
+			return;
+		}
+		if (seenNames.has(parsed.skill.name)) {
+			diagnostics.push({ path: skillFile, reason: "duplicate_name" });
+			return;
+		}
+		seenNames.add(parsed.skill.name);
+		skills.push(parsed.skill);
 	};
 
-	for (const entry of readDir(dir)) {
+	for (const entry of readDir(dir) ?? []) {
 		if (!entry.isDirectory()) continue;
-		// (1) One-level normal layout: <dir>/<name>/SKILL.md
-		push(path.join(dir, entry.name, "SKILL.md"), entry.name);
-		// (2) Plugins-parent root: <dir>/<plugin>/skills/<name>/SKILL.md
 		const nestedSkillsDir = path.join(dir, entry.name, "skills");
-		if (fs.existsSync(nestedSkillsDir)) {
-			for (const sub of readDir(nestedSkillsDir)) {
+		const hasNestedSkills = fs.existsSync(nestedSkillsDir);
+		// (1) One-level normal layout: <dir>/<name>/SKILL.md
+		push(path.join(dir, entry.name, "SKILL.md"), entry.name, !hasNestedSkills && entry.name !== "skills");
+		// (2) Plugins-parent root: <dir>/<plugin>/skills/<name>/SKILL.md
+		if (hasNestedSkills) {
+			for (const sub of readDir(nestedSkillsDir) ?? []) {
 				if (!sub.isDirectory()) continue;
 				push(path.join(nestedSkillsDir, sub.name, "SKILL.md"), sub.name);
 			}
@@ -243,13 +300,18 @@ export function scanSkillDir(dir: string, source: SlashSkill["source"]): SlashSk
 	// plugin skills container, not itself a normal one-level skill dir.
 	const directSkillsDir = path.join(dir, "skills");
 	if (fs.existsSync(directSkillsDir) && !fs.existsSync(path.join(directSkillsDir, "SKILL.md"))) {
-		for (const sub of readDir(directSkillsDir)) {
+		for (const sub of readDir(directSkillsDir) ?? []) {
 			if (!sub.isDirectory()) continue;
 			push(path.join(directSkillsDir, sub.name, "SKILL.md"), sub.name);
 		}
 	}
 
-	return skills;
+	return { skills, diagnostics };
+}
+
+/** Back-compatible valid-skill-only scanner used by legacy and pack loaders. */
+export function scanSkillDir(dir: string, source: SlashSkill["source"]): SlashSkill[] {
+	return scanSkillDirResolved(dir, source).skills;
 }
 
 /**
@@ -395,7 +457,23 @@ function buildSkillPackList(
 		serverConfigStore: marketContext?.serverConfigStore ?? projectConfigStore,
 		projectConfigStore: marketContext?.projectConfigStore ?? projectConfigStore,
 	});
-	return [staticEntry, ...list];
+	// Adopted directories are synthetic skill-only entries. They sit immediately
+	// before the legacy implicit band so user/custom/Claude project skills retain
+	// their established higher precedence. Sort each scope by immutable id rather
+	// than trusting store insertion order.
+	const adopted = (["server", "global-user", "project"] as const).flatMap((scope) => {
+		try {
+			return (marketContext?.adoptedEntries?.(scope) ?? [])
+				.filter((entry) => entry.kind === "adopted" && entry.scope === scope)
+				.sort((a, b) => a.id.localeCompare(b.id));
+		} catch {
+			// A corrupt adoption must not prevent unrelated skill discovery.
+			return [];
+		}
+	});
+	const legacyStart = list.findIndex((entry) => entry.kind === "legacy-implicit");
+	const insertion = legacyStart === -1 ? list.length : legacyStart;
+	return [staticEntry, ...list.slice(0, insertion), ...adopted, ...list.slice(insertion)];
 }
 
 /**
@@ -411,6 +489,7 @@ export function discoverSlashSkills(
 	cwd: string,
 	projectConfigStore?: { get(key: string): string | undefined },
 	marketContext?: SkillMarketContext,
+	selectedNames?: SlashSkillNameCeiling,
 ): SlashSkill[] {
 	const store = projectConfigStore as ProjectConfigReader | undefined;
 	const configVal =
@@ -428,7 +507,7 @@ export function discoverSlashSkills(
 		// differing in project pack_order can't reuse a stale cached list (finding C).
 		(marketContext?.projectConfigStore?.get("pack_order") ?? "");
 	if (_cache && _cache.cwd === cwd && _cache.configVal === configVal && Date.now() - _cache.ts < CACHE_TTL_MS) {
-		return _cache.skills;
+		return filterSlashSkillsBySelectedNames(_cache.skills, selectedNames);
 	}
 
 	const resolved = discoverSlashSkillsResolved(cwd, store, marketContext);
@@ -437,11 +516,14 @@ export function discoverSlashSkills(
 	// show the pack chip; filter to user-invocable skills only (default true).
 	const skills = resolved
 		.map((r) => {
-			const item = r.item;
 			const isMarket = r.origin.kind === "market";
-			item.originPackName = isMarket ? (r.origin.manifest?.name ?? null) : null;
-			item.originPackId = isMarket ? r.origin.id : null;
-			return item;
+			const isAdopted = r.origin.kind === "adopted";
+			return {
+				...r.item,
+				originPackName: isMarket ? (r.origin.manifest?.name ?? null) : null,
+				originPackId: isMarket ? r.origin.id : null,
+				...(isAdopted ? { originKind: "adopted" as const, adoptionId: r.origin.adoptionId } : {}),
+			};
 		})
 		.filter((s) => s.userInvocable !== false);
 
@@ -449,7 +531,22 @@ export function discoverSlashSkills(
 	skills.sort((a, b) => a.name.localeCompare(b.name));
 
 	_cache = { skills, cwd, configVal, ts: Date.now() };
-	return skills;
+	return filterSlashSkillsBySelectedNames(skills, selectedNames);
+}
+
+/**
+ * Applies a session-local ceiling only after ordinary discovery has resolved
+ * activation, adoption, and precedence. This deliberately never participates
+ * in the global discovery cache: a selected name without a composed winner is
+ * absent rather than falling through to a shadowed entry.
+ */
+export function filterSlashSkillsBySelectedNames(
+	skills: readonly SlashSkill[],
+	selectedNames?: SlashSkillNameCeiling,
+): SlashSkill[] {
+	if (selectedNames === undefined) return skills as SlashSkill[];
+	const selected = new Set(selectedNames);
+	return skills.filter((skill) => selected.has(skill.name));
 }
 
 /**
@@ -489,8 +586,9 @@ export function getSlashSkill(
 	name: string,
 	projectConfigStore?: { get(key: string): string | undefined },
 	marketContext?: SkillMarketContext,
+	selectedNames?: SlashSkillNameCeiling,
 ): SlashSkill | undefined {
-	return discoverSlashSkills(cwd, projectConfigStore, marketContext).find((s) => s.name === name);
+	return discoverSlashSkills(cwd, projectConfigStore, marketContext, selectedNames).find((s) => s.name === name);
 }
 
 /**

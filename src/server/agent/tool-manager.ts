@@ -19,6 +19,16 @@ export interface ToolProvider {
 	providerKey?: string; // for pi-extension
 }
 
+/** Immutable shipped tools are safe to load beside the private result gate. */
+export type BobbitExtensionProvenance = "builtin" | "marketplace" | "config" | "unknown";
+
+export type ResolvedToolProvider = ToolProvider & {
+	groupDir: string;
+	baseDir: string;
+	/** Server-derived source identity; YAML cannot declare or override this. */
+	extensionProvenance: BobbitExtensionProvenance;
+};
+
 export interface ScopedToolContext {
 	projectId?: string;
 	cwd?: string;
@@ -1130,20 +1140,36 @@ export class ToolManager {
 		};
 	}
 
-	/** Returns all tool providers with groupDir and baseDir in a single YAML scan. */
-	getToolProviders(scopedContext?: ScopedToolContext): Map<string, ToolProvider & { groupDir: string; baseDir: string }> {
+	/** Classify a resolved provider from its cascade layer, never its extension path string. */
+	private extensionProvenanceForBaseDir(baseDir: string): BobbitExtensionProvenance {
+		const resolved = path.resolve(baseDir);
+		if (this.builtinToolsDir && resolved === path.resolve(this.builtinToolsDir)) return "builtin";
+		if (resolved === path.resolve(this.toolsDir)) return "config";
+		if (this.marketRoots().some(root => resolved === path.resolve(root.dir))) return "marketplace";
+		return "unknown";
+	}
+
+	/** Returns all tool providers with server-derived same-realm provenance in one YAML scan. */
+	getToolProviders(scopedContext?: ScopedToolContext): Map<string, ResolvedToolProvider> {
 		const tools = loadToolDefinitions(this.toolsDir, this.builtinToolsDir, this.marketRoots());
-		const map = new Map<string, ToolProvider & { groupDir: string; baseDir: string }>();
+		const map = new Map<string, ResolvedToolProvider>();
 		for (const tool of tools) {
-			if (tool.provider) map.set(tool.name, { ...tool.provider, groupDir: tool.groupDir, baseDir: tool.baseDir });
+			if (tool.provider) {
+				map.set(tool.name, {
+					...tool.provider,
+					groupDir: tool.groupDir,
+					baseDir: tool.baseDir,
+					extensionProvenance: this.extensionProvenanceForBaseDir(tool.baseDir),
+				});
+			}
 		}
 		for (const [name, ext] of this.externalTools) {
-			map.set(name, { ...ext.provider, groupDir: '', baseDir: '' });
+			map.set(name, { ...ext.provider, groupDir: '', baseDir: '', extensionProvenance: "unknown" });
 		}
 		for (const entry of this.scopedPiToolGroups(scopedContext).values()) {
 			if (map.has(entry.runtimeName)) continue;
 			const provider = entry.providers[0];
-			map.set(entry.runtimeName, { type: "pi-extension", providerKey: provider.providerKey, groupDir: '', baseDir: '' });
+			map.set(entry.runtimeName, { type: "pi-extension", providerKey: provider.providerKey, groupDir: '', baseDir: '', extensionProvenance: "unknown" });
 		}
 		return map;
 	}

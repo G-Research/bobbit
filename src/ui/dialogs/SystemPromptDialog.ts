@@ -11,6 +11,16 @@ interface PromptSection {
 	source: string;
 	content: string;
 	tokens: number;
+	/** Additive extension attribution; absent in legacy persisted snapshots. */
+	kind?: "extension";
+	packId?: string;
+	packName?: string;
+	sectionId?: string;
+	sectionTitle?: string;
+	/** Authoritative UTF-8 byte counts supplied by the prompt layout. */
+	contentBytes?: number;
+	renderedBytes?: number;
+	totalPromptBytes?: number;
 }
 
 @customElement("system-prompt-dialog")
@@ -104,13 +114,62 @@ export class SystemPromptDialog extends DialogBase {
 		}
 	}
 
+	private formatBytes(bytes: number): string {
+		return `${bytes.toLocaleString()} UTF-8 byte${bytes === 1 ? "" : "s"}`;
+	}
+
+	private renderExtensionAttribution(section: PromptSection) {
+		if (section.kind !== "extension") return nothing;
+
+		const validBytes = (bytes: number | undefined): bytes is number =>
+			typeof bytes === "number" && Number.isFinite(bytes) && bytes >= 0;
+		const contentBytes = validBytes(section.contentBytes) ? section.contentBytes : undefined;
+		const renderedBytes = validBytes(section.renderedBytes) ? section.renderedBytes : undefined;
+		const totalPromptBytes = validBytes(section.totalPromptBytes) ? section.totalPromptBytes : undefined;
+		const hasContentBytes = contentBytes !== undefined;
+		const hasRenderedBytes = renderedBytes !== undefined;
+		const hasTotalBytes = totalPromptBytes !== undefined;
+		const share = hasRenderedBytes && hasTotalBytes && totalPromptBytes > 0
+			? (renderedBytes / totalPromptBytes) * 100
+			: undefined;
+		const contributor = section.packName ?? section.packId ?? "Unknown pack";
+		const contribution = section.sectionTitle ?? section.sectionId ?? section.label;
+
+		return html`
+			<div class="mt-2 text-xs text-muted-foreground space-y-1" aria-label="Extension contribution details">
+				<div class="flex flex-wrap gap-x-1.5 gap-y-0.5">
+					<span class="font-medium text-foreground">Extension</span>
+					<span>Pack: ${contributor}</span>
+					${section.packName && section.packId ? html`<span class="font-mono">(${section.packId})</span>` : nothing}
+					<span aria-hidden="true">·</span>
+					<span>Section: ${contribution}</span>
+					${section.sectionTitle && section.sectionId ? html`<span class="font-mono">(${section.sectionId})</span>` : nothing}
+				</div>
+				${hasContentBytes || hasRenderedBytes || hasTotalBytes ? html`
+					<div class="flex flex-wrap gap-x-1.5 gap-y-0.5" aria-label="Authoritative UTF-8 byte usage">
+						${hasContentBytes ? html`<span>${this.formatBytes(contentBytes)} content</span>` : nothing}
+						${hasContentBytes && (hasRenderedBytes || hasTotalBytes) ? html`<span aria-hidden="true">·</span>` : nothing}
+						${hasRenderedBytes ? html`<span>${this.formatBytes(renderedBytes)} rendered</span>` : nothing}
+						${hasRenderedBytes && hasTotalBytes ? html`<span aria-hidden="true">·</span>` : nothing}
+						${hasTotalBytes ? html`<span>${this.formatBytes(totalPromptBytes)} total prompt</span>` : nothing}
+						${share !== undefined ? html`<span aria-label="${share.toFixed(1)} percent of total prompt">· ${share.toFixed(1)}%</span>` : nothing}
+					</div>
+				` : nothing}
+			</div>
+		`;
+	}
+
 	private renderSection(section: PromptSection, index: number) {
 		const expanded = this.expandedSections.has(index);
+		const contentId = `system-prompt-section-${index}`;
+		const path = this.truncatePath(section.source);
 		return html`
 			<div class="border border-border rounded-lg overflow-hidden">
 				<button
-					class="w-full flex items-center gap-2 p-3 text-left hover:bg-secondary/50 transition-colors"
+					class="w-full flex items-start gap-2 p-3 text-left hover:bg-secondary/50 transition-colors"
 					@click=${() => this.toggleSection(index)}
+					aria-expanded="${expanded}"
+					aria-controls="${contentId}"
 				>
 					<svg
 						width="16"
@@ -119,25 +178,26 @@ export class SystemPromptDialog extends DialogBase {
 						fill="none"
 						stroke="currentColor"
 						stroke-width="2"
-						class="shrink-0 transition-transform ${expanded ? "rotate-90" : ""}"
+						class="shrink-0 mt-0.5 transition-transform ${expanded ? "rotate-90" : ""}"
 					>
 						<path d="m9 18 6-6-6-6"></path>
 					</svg>
-					<div class="flex-1 min-w-0 flex items-center gap-2">
-						${(() => { const p = this.truncatePath(section.source); return html`
-						<span
-							class="text-sm text-foreground truncate ${p.isPath ? 'font-mono' : 'font-medium'}"
-							title="${p.full}"
-							style="max-width: 70%"
-						>${p.display}</span>
-						<span class="text-[11px] px-1.5 py-0.5 rounded bg-secondary text-muted-foreground shrink-0">${section.label}</span>
-						`; })()}
+					<div class="flex-1 min-w-0">
+						<div class="flex items-center gap-2">
+							<span
+								class="text-sm text-foreground truncate ${path.isPath ? "font-mono" : "font-medium"}"
+								title="${path.full}"
+								style="max-width: 70%"
+							>${path.display}</span>
+							<span class="text-[11px] px-1.5 py-0.5 rounded bg-secondary text-muted-foreground shrink-0">${section.label}</span>
+						</div>
+						${this.renderExtensionAttribution(section)}
 					</div>
-					<span class="text-xs text-muted-foreground shrink-0">${this.formatTokens(section.tokens)}</span>
+					<span class="text-xs text-muted-foreground shrink-0 mt-0.5">${this.formatTokens(section.tokens)}</span>
 				</button>
 				${expanded
 					? html`
-							<div class="border-t border-border">
+							<div id="${contentId}" class="border-t border-border">
 								<pre
 									class="text-xs text-foreground p-3 m-0 overflow-y-auto"
 									style="white-space: pre-wrap; word-wrap: break-word; max-height: 400px; background: var(--muted);"

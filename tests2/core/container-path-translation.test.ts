@@ -65,6 +65,16 @@ describe("containerPathToHost (bind-mount fallback)", () => {
 		assert.equal(hostPath, expected);
 	});
 
+	it("translates the private core tool-result gate path", () => {
+		const containerPath = "/bobbit-state/tool-result-filter/abc123/gate.ts";
+		const hostPath = containerPathToHost(containerPath);
+		const expected = process.platform === "win32"
+			? "C:\\Users\\test\\project\\.bobbit\\state\\tool-result-filter\\abc123\\gate.ts"
+			: "/home/test/project/.bobbit/state/tool-result-filter/abc123/gate.ts";
+		assert.equal(hostPath, expected);
+		assert.equal(hostPathToContainer(hostPath), containerPath);
+	});
+
 	it("translates the AIGW DNS guard extension path", () => {
 		const containerPath = "/bobbit-state/aigw-dns-guard/abc123/guard.ts";
 		const hostPath = containerPathToHost(containerPath);

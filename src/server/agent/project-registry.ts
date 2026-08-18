@@ -8,8 +8,22 @@ import {
 } from "../../shared/palette-colors.js";
 import { getProjectRoot, headquartersDir } from "../bobbit-dir.js";
 import { runPreflight, type PreflightReport } from "./project-preflight.js";
+import {
+  isExtensionGrant,
+  sameExtensionGrant,
+  type ExtensionGrant,
+  type ExtensionGrantMap,
+} from "./project-config-store.js";
 
 export type ProjectKind = "normal" | "headquarters" | "system";
+
+export interface ImportDecisionRunMarker {
+  version: 1;
+  id: string;
+  createdAt: number;
+  /** Configuration is persisted by POST /api/projects before dispatch. */
+  state: "configuring" | "ready";
+}
 
 export interface RegisteredProject {
   id: string;           // UUID or stable built-in project id
@@ -23,6 +37,18 @@ export interface RegisteredProject {
   colorDark: string;    // Accent color for dark mode (always present)
   position?: number;    // User-controlled normal-project ordering; hidden/system/HQ projects do not participate
   provisional?: boolean; // True while a project assistant is setting up this project
+  /** Durable one-shot import decision lifecycle marker for newly registered normal projects. */
+  importDecisionRun?: ImportDecisionRunMarker;
+  /** @deprecated Legacy single replay receipt, migrated to canonicalMutationReceipts on load. */
+  canonicalMutationKey?: string;
+  /** Bounded append-only server-owned replay receipts for canonical mutations. */
+  canonicalMutationReceipts?: string[];
+  /**
+   * Gateway-owned exact grant rows. Project config is untrusted input; a config
+   * row authorizes only while this independently persisted operator binding
+   * matches every authority field.
+   */
+  extensionGrantBindings?: ExtensionGrantMap;
   /**
    * True for synthetic projects that should be filtered out of UI listings
    * but still resolvable by id (e.g. the "system" project used as the
@@ -497,6 +523,24 @@ export class PreflightFailedError extends Error {
   }
 }
 
+/** Expected registration failures are typed so routes can safely distinguish
+ * client-correctable root issues from internal registry/store errors. */
+export class ProjectRootNotFoundError extends Error {
+  readonly code = "project_root_not_found";
+  constructor(public readonly rootPath: string) {
+    super("Project root path does not exist");
+    this.name = "ProjectRootNotFoundError";
+  }
+}
+
+export class ProjectRootAlreadyRegisteredError extends Error {
+  readonly code = "project_root_already_registered";
+  constructor(public readonly rootPath: string, public readonly existingProjectId: string) {
+    super("A project is already registered at this root");
+    this.name = "ProjectRootAlreadyRegisteredError";
+  }
+}
+
 export class SymlinkProjectRootError extends Error {
   readonly code = "symlink_root";
   constructor(public readonly rootPath: string, public readonly canonical: string) {
@@ -628,7 +672,7 @@ export class ProjectRegistry {
           `A server-managed workspace owns ${rootPath}; choose a different directory.`,
         );
       }
-      throw new Error(`A project is already registered at ${rootPath} (id=${existing.id})`);
+      throw new ProjectRootAlreadyRegisteredError(rootPath, existing.id);
     }
   }
 
@@ -674,6 +718,33 @@ export class ProjectRegistry {
     let changed = false;
     this.projects.clear();
     for (const p of arr) {
+      // Replay receipts are gateway-owned durable identity, never free-form
+      // project metadata. Migrate the old one-slot key into the bounded
+      // collection so a newer application cannot erase an older replay fence.
+      const hadLegacyReceipt = p?.canonicalMutationKey !== undefined;
+      const legacyReceipt = typeof p?.canonicalMutationKey === "string" && /^[A-Za-z0-9_.:-]{1,256}$/.test(p.canonicalMutationKey)
+        ? p.canonicalMutationKey : undefined;
+      const hadReceiptProperty = p?.canonicalMutationReceipts !== undefined;
+      const hadReceiptCollection = Array.isArray(p?.canonicalMutationReceipts);
+      const rawReceipts = hadReceiptCollection ? p.canonicalMutationReceipts : [];
+      const receipts = rawReceipts.filter((key: unknown): key is string => typeof key === "string" && /^[A-Za-z0-9_.:-]{1,256}$/.test(key));
+      if (legacyReceipt) receipts.unshift(legacyReceipt);
+      const normalizedReceipts = [...new Set(receipts)].slice(-128);
+      if (normalizedReceipts.length > 0) p.canonicalMutationReceipts = normalizedReceipts;
+      else delete p.canonicalMutationReceipts;
+      if (p?.canonicalMutationKey !== undefined) delete p.canonicalMutationKey;
+      if (hadLegacyReceipt || hadReceiptProperty && !hadReceiptCollection || rawReceipts.length !== normalizedReceipts.length || rawReceipts.some((key: unknown, index: number) => key !== normalizedReceipts[index])) changed = true;
+      // A registry is gateway-owned, but malformed/migrated binding rows still
+      // fail closed rather than becoming a source of authority.
+      if (Array.isArray(p?.extensionGrantBindings)) {
+        const bindings = p.extensionGrantBindings.filter(isExtensionGrant).map((grant: ExtensionGrant) => ({ ...grant }));
+        if (bindings.length !== p.extensionGrantBindings.length) changed = true;
+        if (bindings.length > 0) p.extensionGrantBindings = bindings;
+        else { delete p.extensionGrantBindings; changed = true; }
+      } else if (p?.extensionGrantBindings !== undefined) {
+        delete p.extensionGrantBindings;
+        changed = true;
+      }
       // Migration: ensure colorLight/colorDark always present
       if (!p.colorLight || !p.colorDark) {
         if (p.color) {
@@ -833,6 +904,31 @@ export class ProjectRegistry {
     return this.projects.get(id);
   }
 
+  /**
+   * Capture one registry row exactly for a higher-level transaction. This is
+   * intentionally gateway-owned rather than exposing the backing map: fields
+   * such as import runs and canonical mutation keys are durable authority.
+   */
+  captureExactRecord(id: string): RegisteredProject | undefined {
+    const project = this.projects.get(id);
+    return project ? structuredClone(project) : undefined;
+  }
+
+  /**
+   * Restore a captured row (or its absence) in one durable registry write.
+   * Do not route this through update()/promote(): those APIs intentionally
+   * derive fields and would lose provisional/import authority on rollback.
+   */
+  restoreExactRecord(id: string, snapshot: RegisteredProject | undefined): void {
+    if (snapshot) {
+      if (snapshot.id !== id) throw new Error("Registry snapshot id mismatch");
+      this.projects.set(id, structuredClone(snapshot));
+    } else {
+      this.projects.delete(id);
+    }
+    this.save();
+  }
+
   /** Find a project whose rootPath matches its canonical identity. Excludes
    * hidden synthetic projects (e.g. "system") so that real-project lookups don't
    * accidentally match the install-dir anchor of the hidden system project. */
@@ -888,14 +984,14 @@ export class ProjectRegistry {
   register(
     name: string,
     rootPath: string,
-    opts?: { color?: string; palette?: string; colorLight?: string; colorDark?: string; acceptCanonical?: boolean },
+    opts?: { color?: string; palette?: string; colorLight?: string; colorDark?: string; acceptCanonical?: boolean; applicationKey?: string },
   ): RegisteredProject {
     if (!path.isAbsolute(rootPath)) {
       throw new Error(`rootPath must be absolute, got: ${rootPath}`);
     }
 
     if (!fs.existsSync(rootPath)) {
-      throw new Error("Project root path does not exist: " + rootPath);
+      throw new ProjectRootNotFoundError(rootPath);
     }
 
     // Symlink guard: if rootPath resolves through a symlink, require the
@@ -963,19 +1059,88 @@ export class ProjectRegistry {
     colorLight = colorLight || DEFAULT_PROJECT_COLOR_LIGHT;
     colorDark = colorDark || DEFAULT_PROJECT_COLOR_DARK;
 
+    const createdAt = Date.now();
     const project: RegisteredProject = {
       id: randomUUID(),
       name,
       rootPath,
-      createdAt: Date.now(),
+      createdAt,
       position: this.nextVisiblePosition(),
+      // This closes the registration/configuration crash gap. The route must
+      // persist components before flipping this marker and dispatching hooks.
+      importDecisionRun: { version: 1, id: randomUUID(), createdAt, state: "configuring" },
       color: colorLight, // backward compat
       colorLight,
       colorDark,
       ...(palette ? { palette } : {}),
+      ...(opts?.applicationKey ? { canonicalMutationReceipts: [this.assertCanonicalMutationReceipt(opts.applicationKey)] } : {}),
     };
 
     this.projects.set(project.id, project);
+    this.save();
+    return project;
+  }
+
+  /**
+   * Atomically publish a fully configured import run. The marker is immutable
+   * apart from its state: mismatched ids and legacy projects never gain a run.
+   */
+  markImportDecisionRunReady(projectId: string, importId: string): RegisteredProject {
+    const project = this.projects.get(projectId);
+    if (!project?.importDecisionRun || project.importDecisionRun.id !== importId) {
+      throw new Error(`Import decision run not found for project ${projectId}`);
+    }
+    if (project.importDecisionRun.state === "ready") return project;
+    project.importDecisionRun = { ...project.importDecisionRun, state: "ready" };
+    this.projects.set(projectId, project);
+    this.save();
+    return project;
+  }
+
+  /**
+   * Return only config grants that exactly match a gateway-owned operator
+   * binding for this project. This is intentionally a pure read fence: stale,
+   * revoked, or checkout-supplied rows never reach capability policy.
+   */
+  authorizedExtensionGrants(projectId: string, grants: readonly ExtensionGrant[]): ExtensionGrantMap {
+    const bindings = this.projects.get(projectId)?.extensionGrantBindings;
+    if (!bindings?.length) return [];
+    return grants.filter(grant => bindings.some(binding => sameExtensionGrant(binding, grant))).map(grant => ({ ...grant }));
+  }
+
+  /** Persist one authenticated exact grant binding, replacing its prior tuple. */
+  bindExtensionGrant(projectId: string, grant: ExtensionGrant): RegisteredProject {
+    if (!isExtensionGrant(grant)) throw new Error("Invalid extension grant binding");
+    const project = this.projects.get(projectId);
+    if (!project) throw new Error(`Project not found: ${projectId}`);
+    const sameAuthorityTuple = (candidate: ExtensionGrant): boolean => candidate.packId === grant.packId
+      && candidate.capability === grant.capability
+      && (("principal" in candidate) === ("principal" in grant))
+      && (("principal" in candidate) || candidate.hookId === (grant as Exclude<ExtensionGrant, { principal: "pack" }>).hookId);
+    const bindings = (project.extensionGrantBindings ?? []).filter(candidate => !sameAuthorityTuple(candidate));
+    bindings.push({ ...grant });
+    project.extensionGrantBindings = bindings;
+    this.projects.set(projectId, project);
+    this.save();
+    return project;
+  }
+
+  /**
+   * Remove every provenance version for the exact authority tuple before
+   * revoking its config mirror. This prevents a stale checkout row from
+   * laundering an older matching binding back into effect after a revoke.
+   */
+  revokeExtensionGrantBinding(projectId: string, grant: ExtensionGrant): RegisteredProject {
+    const project = this.projects.get(projectId);
+    if (!project) throw new Error(`Project not found: ${projectId}`);
+    const sameAuthorityTuple = (candidate: ExtensionGrant): boolean => candidate.packId === grant.packId
+      && candidate.capability === grant.capability
+      && (("principal" in candidate) === ("principal" in grant))
+      && (("principal" in candidate) || candidate.hookId === (grant as Exclude<ExtensionGrant, { principal: "pack" }>).hookId);
+    const bindings = (project.extensionGrantBindings ?? []).filter(candidate => !sameAuthorityTuple(candidate));
+    if (bindings.length > 0) project.extensionGrantBindings = bindings;
+    else delete project.extensionGrantBindings;
+    this.projects.set(projectId, project);
     this.save();
     return project;
   }
@@ -1314,6 +1479,32 @@ export class ProjectRegistry {
     return project;
   }
 
+  /** Whether a durable canonical application receipt belongs to this project. */
+  hasCanonicalMutationReceipt(id: string, key: string): boolean {
+    return this.projects.get(id)?.canonicalMutationReceipts?.includes(key) === true;
+  }
+
+  /** Append an immutable canonical replay receipt without erasing prior work. */
+  recordCanonicalMutationReceipt(id: string, key: string): void {
+    const project = this.projects.get(id);
+    if (!project) throw new Error(`Project not found: ${id}`);
+    key = this.assertCanonicalMutationReceipt(key);
+    if (project.canonicalMutationReceipts?.includes(key)) return;
+    project.canonicalMutationReceipts = [...(project.canonicalMutationReceipts ?? []), key].slice(-128);
+    this.projects.set(id, project);
+    this.save();
+  }
+
+  /** @deprecated Use recordCanonicalMutationReceipt; retained for package compatibility. */
+  setCanonicalMutationKey(id: string, key: string | undefined): void {
+    if (key !== undefined) this.recordCanonicalMutationReceipt(id, key);
+  }
+
+  private assertCanonicalMutationReceipt(key: string): string {
+    if (!/^[A-Za-z0-9_.:-]{1,256}$/.test(key)) throw new Error("Invalid canonical mutation key");
+    return key;
+  }
+
   /**
    * Promote a provisional project to a full project.
    * Clears `provisional` flag and optionally updates the name.
@@ -1323,9 +1514,16 @@ export class ProjectRegistry {
     const project = this.projects.get(id);
     if (!project) throw new Error(`Project not found: ${id}`);
     assertNormalMutableProject(project, "promoted");
-    // Idempotent — if already promoted, just update the name and return
+    // Idempotent — if already promoted, just update the name and return.
+    // The import run is deliberately allocated here (rather than while the
+    // project is provisional): proposal acceptance persists final components
+    // before POST /promote, so the snapshot can never describe a scaffold.
+    const wasProvisional = project.provisional === true;
     delete project.provisional;
     if (updates.name !== undefined) project.name = updates.name;
+    if (wasProvisional && !project.importDecisionRun) {
+      project.importDecisionRun = { version: 1, id: randomUUID(), createdAt: Date.now(), state: "configuring" };
+    }
 
     // Scaffold .bobbit directories if they don't exist yet (e.g. scaffolding path)
     if (fs.existsSync(project.rootPath)) {

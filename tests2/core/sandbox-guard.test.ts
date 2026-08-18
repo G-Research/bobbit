@@ -95,6 +95,30 @@ describe("sandbox route guard", () => {
 		assert.equal(isSandboxAllowed("/api/image-generation/generate", "POST", scope()), true);
 	});
 
+	describe("tool result filter callback", () => {
+		it("allows only POST to the scoped session's exact callback path", () => {
+			assert.equal(
+				isSandboxAllowed("/api/sessions/session-1/tool-result-filter", "POST", scope()),
+				true,
+			);
+			assert.equal(
+				isSandboxAllowed("/api/sessions/other-session/tool-result-filter", "POST", scope()),
+				false,
+			);
+			for (const method of ["GET", "PATCH", "DELETE"]) {
+				assert.equal(
+					isSandboxAllowed("/api/sessions/session-1/tool-result-filter", method, scope()),
+					false,
+					`${method} must not invoke the result-filter callback`,
+				);
+			}
+			assert.equal(
+				isSandboxAllowed("/api/sessions/session-1/tool-result-filter/extra", "POST", scope()),
+				false,
+			);
+		});
+	});
+
 	describe("google-code-assist runtime token endpoint", () => {
 		it("allows a sandboxed session to GET its OWN token endpoint", () => {
 			assert.equal(

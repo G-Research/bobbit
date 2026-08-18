@@ -19,6 +19,8 @@ import {
 	resetInlineHtmlPreparationCacheForTests,
 } from "../../src/ui/tools/renderers/prepare-inline-html.js";
 import { WriteRenderer } from "../../src/ui/tools/renderers/WriteRenderer.js";
+import { SandboxIframe } from "../../src/ui/components/SandboxedIframe.js";
+import { RuntimeMessageRouter } from "../../src/ui/components/sandbox/RuntimeMessageRouter.js";
 
 const okResult = {
 	isError: false,
@@ -493,5 +495,65 @@ describe("HTML renderer delegation", () => {
 		expect(iframe).toBeTruthy();
 		expectPreparedInlineFrame(iframe!);
 		expect(originalSource(container)).toBe(AUTHORED_HTML);
+	});
+});
+
+describe("sandbox iframe extension failure handling", () => {
+	it("settles an extension sandbox error through its registered consumer", async () => {
+		const sandbox = new SandboxIframe();
+		sandbox.sandboxUrlProvider = () => "chrome-extension://test/sandbox.html";
+		document.body.appendChild(sandbox);
+
+		const resultPromise = sandbox.execute("extension-error", "return 1;");
+		const iframe = sandbox.querySelector("iframe");
+		expect(iframe).toBeTruthy();
+		window.dispatchEvent(new MessageEvent("message", {
+			data: {
+				type: "sandbox-error",
+				error: "sandbox boot failed",
+				stack: "extension-stack",
+			},
+			source: iframe!.contentWindow,
+			origin: "chrome-extension://test",
+		}));
+
+		await expect(resultPromise).resolves.toMatchObject({
+			success: false,
+			error: { message: "sandbox boot failed", stack: "extension-stack" },
+		});
+		expect(sandbox.querySelector("iframe")).toBeNull();
+	});
+});
+
+describe("SEC-332 sandbox runtime postMessage authentication", () => {
+	it("accepts only the registered opaque-origin frame with its minted channel", async () => {
+		const router = new RuntimeMessageRouter();
+		const sandboxId = "security-sandbox";
+		const provider = { handleMessage: vi.fn(async () => {}) };
+		const iframe = document.createElement("iframe");
+		document.body.appendChild(iframe);
+		router.registerSandbox(sandboxId, [provider as any], []);
+		router.setSandboxIframe(sandboxId, iframe);
+		const token = router.getSandboxChannelToken(sandboxId)!;
+		const listener = (router as any).messageListener as (event: MessageEvent) => Promise<void>;
+		const message = (source: MessageEventSource | null, origin: string, channelToken = token) =>
+			new MessageEvent("message", {
+				data: { sandboxId, messageId: "request-1", channelToken },
+				source,
+				origin,
+			});
+
+		try {
+			await listener(message(window, "null"));
+			await listener(message(iframe.contentWindow, window.location.origin));
+			await listener(message(iframe.contentWindow, "null", "forged-channel"));
+			expect(provider.handleMessage).not.toHaveBeenCalled();
+
+			await listener(message(iframe.contentWindow, "null"));
+			expect(provider.handleMessage).toHaveBeenCalledTimes(1);
+		} finally {
+			router.unregisterSandbox(sandboxId);
+			iframe.remove();
+		}
 	});
 });

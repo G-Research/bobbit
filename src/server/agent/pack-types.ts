@@ -21,7 +21,7 @@ import { headquartersDir } from "../bobbit-dir.js";
 export type PackScope = "builtin" | "global-user" | "server" | "project";
 
 /** What sort of pack an entry represents. */
-export type PackKind = "builtin" | "user" | "market" | "legacy-implicit";
+export type PackKind = "builtin" | "user" | "market" | "legacy-implicit" | "adopted";
 
 /** Entity types the resolver can load. `mcp`/`panels` are future seams. */
 export type EntityType = "roles" | "tools" | "skills"; // + "mcp" | "panels" later
@@ -87,6 +87,10 @@ export interface PackManifest {
 		piExtensions?: string[]; // YAML key `pi-extensions`; loader later
 		runtimes?: string[]; // runtime contribution basenames (accepted, loader later)
 		workflows?: string[]; // workflow contribution basenames (accepted, loader later)
+		/** YAML `system-prompts`: static prompt-section declaration basenames (schema 2). */
+		systemPrompts?: string[];
+		/** Schema-3 inert sandbox requirement declaration basenames. */
+		sandboxRequirements?: string[];
 	};
 	/** Optional top-level pack-level routes (module + allowlist). Support surface,
 	 *  not toggleable. Absent ⇒ the pack contributes no server routes. */
@@ -123,9 +127,11 @@ export interface LoadedEntity<T> {
 
 /** One entry in the single ordered pack list (low→high priority). */
 export interface PackEntry {
-	/** Stable id: builtin | user:<scope> | market:<scope>:<name> | legacy:<...>. */
+	/** Stable id: builtin | user:<scope> | market:<scope>:<name> | adopt:<scope>:<id> | legacy:<...>. */
 	id: string;
 	kind: PackKind;
+	/** Immutable ledger id for synthetic adopted entries. */
+	adoptionId?: string;
 	scope: PackScope;
 	/** Absolute dir whose roles/ tools/ skills/ subtree is loaded. */
 	path: string;

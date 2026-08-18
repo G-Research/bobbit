@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { McpClient } from "./mcp-client.js";
+import type { McpInitializeSnapshot } from "./mcp-types.js";
 import { isValidOperationSchema, parseMcpToolName } from "./mcp-meta.js";
 import type {
   McpServerConfig,
@@ -129,6 +130,8 @@ export interface McpServerStatus {
   origin?: ResolvedMcpOrigin;
   ownerContributions?: RedactedResolvedMcpContribution[];
   activeSubNamespaces?: string[];
+  /** Safe protocol and server identity captured from a successful initialize handshake. */
+  negotiation?: McpInitializeSnapshot;
 }
 
 /** Bobbit-compatible tool info produced from MCP tool defs */
@@ -246,6 +249,8 @@ function flatManualContribution(name: string, config: McpServerConfig): Resolved
 export class McpManager {
   private clients = new Map<string, McpClient>();
   private toolDefs = new Map<string, McpToolDef[]>();
+  /** Sanitized diagnostics for tools rejected by the shared schema guard. */
+  private rejectedToolDefs = new Map<string, Array<{ name?: string; reason: "invalid_operation_schema" }>>();
   private configs = new Map<string, McpServerConfig>();
   private errors = new Map<string, string>();
   /** Desired group from the latest discovery pass (marketplace + manual override). */
@@ -617,6 +622,7 @@ export class McpManager {
         // report `error` while .connected is true; downstream callTool will
         // simply find no tools to dispatch.
         this.toolDefs.set(name, []);
+        this.rejectedToolDefs.set(name, []);
         this._markRouteMapDirty();
         return;
       }
@@ -624,10 +630,13 @@ export class McpManager {
       // Filter out malformed-schema ops (design §5.2). Surviving ops are
       // still usable; the bad ones are dropped from the meta-tool's enum.
       const validTools: McpToolDef[] = [];
+      const rejectedTools: Array<{ name?: string; reason: "invalid_operation_schema" }> = [];
       for (const tool of rawTools) {
         if (isValidOperationSchema(tool)) {
           validTools.push(tool);
         } else {
+          const rawName = tool && typeof tool.name === "string" ? tool.name : undefined;
+          rejectedTools.push({ ...(rawName && rawName.length <= 256 && !/[\0\n\r]/.test(rawName) ? { name: rawName } : {}), reason: "invalid_operation_schema" });
           console.warn(
             `[mcp] dropping invalid op "${name}/${tool?.name ?? "<unnamed>"}": malformed schema`,
           );
@@ -635,6 +644,7 @@ export class McpManager {
       }
 
       this.toolDefs.set(name, validTools);
+      this.rejectedToolDefs.set(name, rejectedTools);
       this._markRouteMapDirty();
 
       // Generate/update doc cache and summaries
@@ -659,6 +669,7 @@ export class McpManager {
       }
       this.clients.delete(name);
       this.toolDefs.delete(name);
+      this.rejectedToolDefs.delete(name);
       this._markRouteMapDirty();
     }
   }
@@ -821,6 +832,7 @@ export class McpManager {
       this.clients.delete(name);
     }
     this.toolDefs.delete(name);
+    this.rejectedToolDefs.delete(name);
     this.errors.delete(name);
     this._markRouteMapDirty();
     if (opts?.forget) {
@@ -1126,6 +1138,11 @@ export class McpManager {
     return undefined;
   }
 
+  /** Sanitized rejected-tool diagnostics, keyed by runtime server name. */
+  getRejectedToolDefinitions(serverName: string): Array<{ name?: string; reason: "invalid_operation_schema" }> {
+    return (this.rejectedToolDefs.get(serverName) ?? []).map(tool => ({ ...tool }));
+  }
+
   /** Helper for callers that refresh external MCP tools without leaving stale rows. */
   getToolRegistrationRefresh(): McpToolRegistrationRefresh {
     return { removePrefixes: ["mcp__"], toolInfos: this.getToolInfos() };
@@ -1257,6 +1274,7 @@ export class McpManager {
 
     for (const [name, config] of this.configs) {
       const client = this.clients.get(name);
+      const negotiation = client?.initializeSnapshot;
       const error = this.errors.get(name);
       const tools = this.toolDefs.get(name);
 
@@ -1280,6 +1298,7 @@ export class McpManager {
         ...(group?.ownerContributions[0]?.origin ? { origin: group.ownerContributions[0].origin } : {}),
         ...(ownerContributions ? { ownerContributions } : {}),
         ...(group?.activeSubNamespaces ? { activeSubNamespaces: [...group.activeSubNamespaces].sort() } : {}),
+        ...(negotiation ? { negotiation } : {}),
       });
     }
 

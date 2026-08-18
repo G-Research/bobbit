@@ -13,7 +13,7 @@ __syncBeforeAll(() => __syncCE());
 // menu-label/icon/click assertions work without real geometry.
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { SessionActionDescriptor } from "../../src/app/session-actions.js";
-import type { GatewaySession } from "../../src/app/state.js";
+import { state as appState, type GatewaySession } from "../../src/app/state.js";
 
 let html: typeof import("lit").html;
 let render: typeof import("lit").render;
@@ -291,6 +291,9 @@ const onFeedback = (ev: Event) => {
 
 function reset(): void {
 	dismissMenuSync();
+	appState.selectedSessionId = null;
+	appState.connectingSessionId = null;
+	appState.remoteAgent = null;
 	document.querySelectorAll("git-status-widget, #git-status-dropdown").forEach((el) => el.remove());
 	feedbackText = "";
 	feedbackEvents.length = 0;
@@ -336,6 +339,19 @@ afterEach(async () => {
 });
 
 describe("pack launcher session-menu surfaces", () => {
+	it("shows Context trace only on the active session descriptor", () => {
+		appState.selectedSessionId = "active-session";
+		appState.connectingSessionId = "active-session";
+
+		const activeIds = buildSessionActions({ session: fakeSession("active-session"), displayTitle: "Active session" })
+			.map((action) => action.id);
+		const inactiveIds = buildSessionActions({ session: fakeSession("inactive-session"), displayTitle: "Inactive session" })
+			.map((action) => action.id);
+
+		expect(activeIds).toContain("view-context-trace");
+		expect(inactiveIds).not.toContain("view-context-trace");
+	});
+
 	it("renders session-menu launchers in the sidebar session menu", async () => {
 		registerSessionMenu();
 		await openSurface("sidebar");

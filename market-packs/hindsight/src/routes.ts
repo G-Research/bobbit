@@ -1,24 +1,18 @@
-// Hindsight pack SERVER routes. Durable reads use the host store's tri-state
-// contract so an unreadable queue/config is never presented as an empty/default
-// snapshot or overwritten by a route mutation.
+// Hindsight pack SERVER routes. Project-scoped generic extension settings own
+// configuration and secret writes. These routes retain only read-only legacy
+// fallback diagnostics plus the durable queue diagnostics; they never write or
+// return a legacy configuration value.
 
 import {
 	clientConfig,
 	isConfigured,
-	loadEffectiveConfig,
+	loadLegacyConfigForDiagnostics,
 	loadQueue,
 	makeClient,
-	redactConfig,
 	readStore,
-	resolveConfig,
-	validateConfigOverrides,
-	CONFIG_DEFAULTS,
-	CONFIG_KEY,
 	LAST_ERROR_KEY,
-	type EffectiveConfig,
 	type StoreLike,
 	type StoreReadDiagnostic,
-	type Tags,
 } from "./shared.js";
 
 export { __setClientFactory } from "./shared.js";
@@ -30,25 +24,31 @@ interface RouteCtx {
 }
 interface RouteReq {
 	method?: string;
-	query?: Record<string, string>;
-	body?: unknown;
-}
-
-function isObj(v: unknown): v is Record<string, unknown> {
-	return !!v && typeof v === "object" && !Array.isArray(v);
-}
-
-function strOf(v: unknown): string | undefined {
-	return typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined;
 }
 
 /** Keep externally visible durable-store diagnostics stable, useful, and free of
- * implementation details (including paths or original error messages). */
+ * implementation details (including paths, original error messages, and secrets). */
 function safeDiagnostic(diagnostic: StoreReadDiagnostic): StoreReadDiagnostic {
 	return {
 		code: diagnostic.code,
 		...(diagnostic.retryable === true ? { retryable: true } : {}),
 		...(diagnostic.recoverable === true ? { recoverable: true } : {}),
+	};
+}
+
+function projectSettings(ctx: RouteCtx) {
+	return {
+		scope: "project" as const,
+		...(ctx.projectId ? { projectId: ctx.projectId } : {}),
+		message: "Configure Hindsight in Market project settings.",
+	};
+}
+
+function settingsRequired(ctx: RouteCtx) {
+	return {
+		configured: false,
+		error: "HINDSIGHT_PROJECT_SETTINGS_REQUIRED",
+		settings: projectSettings(ctx),
 	};
 }
 
@@ -59,142 +59,93 @@ async function queueStatus(store: StoreLike): Promise<{ queueDepth: number | nul
 		: { queueDepth: null, queueState: "unavailable", queueError: safeDiagnostic(result.diagnostic) };
 }
 
-async function lastError(store: StoreLike): Promise<{ value?: unknown; unavailable?: StoreReadDiagnostic }> {
+/** Do not expose a stored error message. An upstream or transport error can carry
+ * untrusted text, while the boolean is sufficient for the legacy status signal. */
+async function lastErrorStatus(store: StoreLike): Promise<{ recorded?: true; unavailable?: StoreReadDiagnostic }> {
 	const result = await readStore<unknown>(store, LAST_ERROR_KEY);
-	if (result.state === "present") return { value: result.value };
+	if (result.state === "present") return { recorded: true };
 	if (result.state === "error") return { unavailable: safeDiagnostic(result.diagnostic) };
 	return {};
 }
 
-function configUnavailable(diagnostic: StoreReadDiagnostic): { ok: false; error: "HINDSIGHT_CONFIG_UNAVAILABLE"; diagnostic: StoreReadDiagnostic } {
-	return { ok: false, error: "HINDSIGHT_CONFIG_UNAVAILABLE", diagnostic: safeDiagnostic(diagnostic) };
-}
-
-function routeConfigUnavailable(diagnostic: StoreReadDiagnostic) {
-	return { configured: false, error: "HINDSIGHT_CONFIG_UNAVAILABLE", diagnostic: safeDiagnostic(diagnostic) };
-}
-
-function manualTags(extra: Tags | undefined): Tags {
-	return { kind: "manual", ...(extra ?? {}) };
-}
-
 export const routes = {
+	/**
+	 * Compatibility endpoint for old pack clients. It intentionally has no write
+	 * path: configuring a project, including any secret, is only possible through
+	 * the gateway-owned extension-settings API. The legacy PackStore is inspected
+	 * only to explain whether an old fallback exists, never to return its values.
+	 */
 	config: async (ctx: RouteCtx, req: RouteReq) => {
-		const store = ctx.host.store;
 		const method = (req?.method ?? "GET").toUpperCase();
-		const hasBody = isObj(req?.body) && Object.keys(req!.body as object).length > 0;
-		const loaded = await loadEffectiveConfig(store);
-		if (!loaded.available) return configUnavailable(loaded.diagnostic);
+		if (method !== "GET") return { ok: false, ...settingsRequired(ctx) };
 
-		if (method === "GET" || !hasBody) {
-			return { ok: true, configured: isConfigured(loaded.config), config: redactConfig(loaded.config) };
-		}
-
-		const validation = validateConfigOverrides(req!.body);
-		if (!validation.ok) return { ok: false, error: "CONFIG_INVALID", errors: validation.errors ?? [] };
-		const overrides = { ...loaded.overrides, ...(validation.value ?? {}) };
-		await store.put(CONFIG_KEY, overrides);
-		const config = resolveConfig({ ...CONFIG_DEFAULTS, ...overrides });
-		return { ok: true, configured: isConfigured(config), config: redactConfig(config) };
+		const legacy = await loadLegacyConfigForDiagnostics(ctx.host.store);
+		return legacy.available
+			? {
+				ok: true,
+				deprecated: true,
+				settings: projectSettings(ctx),
+				legacyFallback: { state: "available" as const, configured: isConfigured(legacy.config) },
+			}
+			: {
+				ok: true,
+				deprecated: true,
+				settings: projectSettings(ctx),
+				legacyFallback: { state: "unavailable" as const, diagnostic: safeDiagnostic(legacy.diagnostic) },
+			};
 	},
 
+	/** Read-only migration diagnostics. Current project configuration is purposely
+	 * not read here: runtime receives it from the resolver as `ctx.config`. */
 	status: async (ctx: RouteCtx) => {
 		const store = ctx.host.store;
-		const [configResult, queue, error] = await Promise.all([loadEffectiveConfig(store), queueStatus(store), lastError(store)]);
-		if (!configResult.available) {
-			return {
-				...routeConfigUnavailable(configResult.diagnostic),
-				healthy: false,
-				...queue,
-				...(error.unavailable ? { lastErrorUnavailable: error.unavailable } : {}),
-			};
-		}
-		const cfg = configResult.config;
+		const [legacy, queue, error] = await Promise.all([
+			loadLegacyConfigForDiagnostics(store),
+			queueStatus(store),
+			lastErrorStatus(store),
+		]);
 		const base = {
-			configured: isConfigured(cfg),
-			mode: cfg.mode,
-			bank: cfg.bank,
-			namespace: cfg.namespace,
-			recallScope: cfg.recallScope,
-			autoRecall: cfg.autoRecall,
-			autoRetain: cfg.autoRetain,
+			settings: projectSettings(ctx),
 			...queue,
-			...(error.value ? { lastError: error.value } : {}),
+			...(error.recorded ? { lastErrorRecorded: true } : {}),
 			...(error.unavailable ? { lastErrorUnavailable: error.unavailable } : {}),
 		};
-		if (!isConfigured(cfg)) return { ...base, healthy: false };
+		if (!legacy.available) {
+			return {
+				...base,
+				healthy: null,
+				legacyFallback: { state: "unavailable" as const, diagnostic: safeDiagnostic(legacy.diagnostic) },
+			};
+		}
+		const configured = isConfigured(legacy.config);
+		if (!configured) {
+			return {
+				...base,
+				healthy: null,
+				legacyFallback: { state: "available" as const, configured: false },
+			};
+		}
 		try {
-			const client = await makeClient(clientConfig(cfg));
-			return { ...base, healthy: (await client.health()).ok === true };
+			const client = await makeClient(clientConfig(legacy.config));
+			return {
+				...base,
+				healthy: (await client.health()).ok === true,
+				legacyFallback: { state: "available" as const, configured: true },
+			};
 		} catch {
-			return { ...base, healthy: false };
+			return {
+				...base,
+				healthy: false,
+				legacyFallback: { state: "available" as const, configured: true },
+			};
 		}
 	},
 
-	recall: async (ctx: RouteCtx, req: RouteReq) => {
-		const loaded = await loadEffectiveConfig(ctx.host.store);
-		if (!loaded.available) return { ...routeConfigUnavailable(loaded.diagnostic), memories: [] };
-		const cfg = loaded.config;
-		if (!isConfigured(cfg)) return { configured: false, memories: [] };
-		const body = isObj(req?.body) ? req!.body : {};
-		const query = strOf(body.query) ?? strOf(req?.query?.query);
-		if (!query) return { configured: true, memories: [] };
-		const scope = body.scope === "project" || body.scope === "all" ? body.scope : cfg.recallScope;
-		const projectId = strOf(ctx.projectId);
-		const tags: Tags | undefined = scope === "project" && projectId ? { project: projectId } : undefined;
-		try {
-			const client = await makeClient(clientConfig(cfg));
-			const res = await client.recall(cfg.bank, query, { maxTokens: cfg.recallBudget, ...(tags ? { tags, tagsMatch: "any" as const } : {}) });
-			return { configured: true, memories: res?.memories ?? [] };
-		} catch (e) {
-			return { configured: true, memories: [], error: String((e as { message?: unknown })?.message ?? e) };
-		}
-	},
-
-	retain: async (ctx: RouteCtx, req: RouteReq) => {
-		const loaded = await loadEffectiveConfig(ctx.host.store);
-		if (!loaded.available) return { ...configUnavailable(loaded.diagnostic), configured: false };
-		const cfg = loaded.config;
-		if (!isConfigured(cfg)) return { ok: false, configured: false };
-		const body = isObj(req?.body) ? req!.body : {};
-		const content = strOf(body.content);
-		if (!content) return { ok: false, configured: true, error: "content is required" };
-		try {
-			const client = await makeClient(clientConfig(cfg));
-			await client.ensureBank(cfg.bank);
-			await client.retain(cfg.bank, content, { tags: manualTags(isObj(body.tags) ? (body.tags as Tags) : undefined), sync: body.sync === true });
-			return { ok: true, configured: true };
-		} catch (e) {
-			return { ok: false, configured: true, error: String((e as { message?: unknown })?.message ?? e) };
-		}
-	},
-
-	reflect: async (ctx: RouteCtx, req: RouteReq) => {
-		const loaded = await loadEffectiveConfig(ctx.host.store);
-		if (!loaded.available) return { ...routeConfigUnavailable(loaded.diagnostic), text: "" };
-		const cfg = loaded.config;
-		if (!isConfigured(cfg)) return { configured: false, text: "" };
-		const body = isObj(req?.body) ? req!.body : {};
-		const prompt = strOf(body.prompt);
-		if (!prompt) return { configured: true, text: "" };
-		try {
-			const client = await makeClient(clientConfig(cfg));
-			return { configured: true, text: (await client.reflect(cfg.bank, prompt))?.text ?? "" };
-		} catch (e) {
-			return { configured: true, text: "", error: String((e as { message?: unknown })?.message ?? e) };
-		}
-	},
-
-	banks: async (ctx: RouteCtx) => {
-		const loaded = await loadEffectiveConfig(ctx.host.store);
-		if (!loaded.available) return { ...routeConfigUnavailable(loaded.diagnostic), banks: [] };
-		const cfg: EffectiveConfig = loaded.config;
-		if (!isConfigured(cfg)) return { configured: false, banks: [] };
-		try {
-			const client = await makeClient(clientConfig(cfg));
-			return { configured: true, banks: (await client.listBanks())?.banks ?? [] };
-		} catch (e) {
-			return { configured: true, banks: [], error: String((e as { message?: unknown })?.message ?? e) };
-		}
-	},
+	// Project settings are not available to pack routes. Do not silently fall back
+	// to global legacy credentials for manual operations: that would defeat project
+	// isolation and create a competing configuration runtime.
+	recall: async (ctx: RouteCtx, _req: RouteReq) => ({ ...settingsRequired(ctx), memories: [] }),
+	retain: async (ctx: RouteCtx, _req: RouteReq) => ({ ok: false, ...settingsRequired(ctx) }),
+	reflect: async (ctx: RouteCtx, _req: RouteReq) => ({ ...settingsRequired(ctx), text: "" }),
+	banks: async (ctx: RouteCtx, _req: RouteReq) => ({ ...settingsRequired(ctx), banks: [] }),
 };

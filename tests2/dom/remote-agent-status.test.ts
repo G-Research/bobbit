@@ -100,6 +100,26 @@ describe("RemoteAgent canonical-status / version / heartbeat / gap-resync", () =
 		expectInvariant(a);
 	});
 
+	it("SEC-103 retains provider credential recovery through a streaming status projection", async () => {
+		const { a } = makeAgent();
+		const recovery = {
+			provider: "anthropic",
+			source: "agent",
+			reason: "missing-api-key" as const,
+			message: "Add a key before continuing.",
+			actions: [],
+			receivedAt: Date.now(),
+		};
+		(a as any)._state.providerAuthRequired = recovery;
+
+		await sessionStatus(a, "streaming", 1);
+		expect((a as any)._state.providerAuthRequired).toBe(recovery);
+
+		// Only the distinct lifecycle event that begins a turn clears the recovery UI.
+		agentEvent(a, "agent_start");
+		expect((a as any)._state.providerAuthRequired).toBeNull();
+	});
+
 	it("statusVersion gap triggers status_resync request", async () => {
 		const { a, sent } = makeAgent();
 		await sessionStatus(a, "idle", 1);

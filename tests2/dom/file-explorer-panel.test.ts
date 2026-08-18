@@ -56,6 +56,20 @@ function deferred<T>() {
 	return { promise, resolve };
 }
 
+function whenTreeItemRenders(root: HTMLElement, path: string): Promise<HTMLElement> {
+	const current = root.querySelector<HTMLElement>(`[role="treeitem"][data-path="${path}"]`);
+	if (current) return Promise.resolve(current);
+	return new Promise((resolve) => {
+		const observer = new MutationObserver(() => {
+			const item = root.querySelector<HTMLElement>(`[role="treeitem"][data-path="${path}"]`);
+			if (!item) return;
+			observer.disconnect();
+			resolve(item);
+		});
+		observer.observe(root, { childList: true, subtree: true });
+	});
+}
+
 afterEach(async () => {
 	for (const root of mounted.splice(0)) root.remove();
 	await tick();
@@ -447,6 +461,46 @@ describe("built-in file explorer panel", () => {
 		await vi.waitFor(() => expect(statusDispose).toHaveBeenCalledTimes(1));
 		await tick();
 		expect(statusDispose).toHaveBeenCalledTimes(1);
+	});
+
+	it("reinitializes a completed panel remounted in the same DOM turn", async () => {
+		const initialList = deferred<unknown>();
+		const remountList = deferred<unknown>();
+		const initialStarted = deferred<void>();
+		const remountStarted = deferred<void>();
+		const statusDispose = vi.fn();
+		let listCalls = 0;
+		const fakeHost = host({
+			list: () => {
+				listCalls += 1;
+				if (listCalls === 1) {
+					initialStarted.resolve();
+					return initialList.promise;
+				}
+				remountStarted.resolve();
+				return remountList.promise;
+			},
+			read: () => ({ kind: "text", text: "value" }),
+			diff: () => ({ kind: "empty" }),
+		}, { statusDispose });
+		const sid = `completed-remount-${++mountAttempt}`;
+		const root = mount(sid, fakeHost);
+		const initialItem = whenTreeItemRenders(root, "old.txt");
+		await initialStarted.promise;
+		expect(listCalls).toBe(1);
+		initialList.resolve(list([{ path: "old.txt", name: "old.txt", kind: "file" }]));
+		await initialItem;
+
+		root.remove();
+		const remounted = mount(sid, fakeHost);
+		const replacementItem = whenTreeItemRenders(remounted, "current.txt");
+		await remountStarted.promise;
+		expect(remounted).toBe(root);
+		expect(statusDispose).toHaveBeenCalledTimes(1);
+		expect(listCalls).toBe(2);
+		remountList.resolve(list([{ path: "current.txt", name: "current.txt", kind: "file" }]));
+		await replacementItem;
+		expect(row(remounted, "old.txt")).toBeNull();
 	});
 
 	it("disposes status subscriptions through element disconnect without document mutation observation", async () => {

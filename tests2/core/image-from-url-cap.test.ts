@@ -21,7 +21,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { generateImage } from "../../src/server/agent/image-generation.js";
+import { generateImage, validateImageDownloadUrl, type ApiImageModel } from "../../src/server/agent/image-generation.js";
 import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
 import { createMemFs } from "../harness/mem-fs.js";
 
@@ -90,6 +90,39 @@ async function callGenerate(): Promise<Error | undefined> {
 }
 
 describe("imageFromUrl 25 MB cap", () => {
+	it("confines a custom provider response URL to its trusted configured origin", () => {
+		const model = {
+			id: "image-v1", name: "Image V1", provider: "custom", api: "openai-images" as const,
+			baseUrl: "https://images.example/api", authenticated: true,
+			customProviderId: "custom-images", trustedCustomProvider: true,
+		} satisfies ApiImageModel;
+		assert.equal(validateImageDownloadUrl("https://images.example/generated.png", model).href, "https://images.example/generated.png");
+		assert.throws(() => validateImageDownloadUrl("https://169.254.169.254/latest/meta-data", model), /configured origin/);
+	});
+
+	it("allows only the configured origin for an intentionally local trusted provider", () => {
+		const model = {
+			id: "image-v1", name: "Image V1", provider: "custom", api: "openai-images" as const,
+			baseUrl: "http://localhost:8080/api", authenticated: true,
+			customProviderId: "custom-images", trustedCustomProvider: true,
+		} satisfies ApiImageModel;
+		assert.equal(validateImageDownloadUrl("http://localhost:8080/generated.png", model).href, "http://localhost:8080/generated.png");
+		assert.throws(() => validateImageDownloadUrl("http://localhost:8081/generated.png", model), /configured origin/);
+		assert.throws(() => validateImageDownloadUrl("http://localhost:8080/generated.png", { ...model, trustedCustomProvider: undefined }), /configured origin/);
+	});
+
+	it("returns the configured-origin validation error for malformed trusted provider metadata", () => {
+		const model = {
+			id: "image-v1", name: "Image V1", provider: "custom", api: "openai-images" as const,
+			baseUrl: "not an absolute URL", authenticated: true,
+			customProviderId: "custom-images", trustedCustomProvider: true,
+		} satisfies ApiImageModel;
+		assert.throws(
+			() => validateImageDownloadUrl("https://images.example/generated.png", model),
+			/custom provider image URL must use its configured origin/,
+		);
+	});
+
 	it("rejects up-front when Content-Length advertises >25 MB", async () => {
 		mockTwoStage(() => new Response("ignored", {
 			status: 200,

@@ -183,6 +183,7 @@ function titleFor(kind: SidePanelKind, source: SidePanelWorkspaceSource, rawTitl
 	if (kind === "proposal") return source.type === "proposal" ? `${source.proposalType[0].toUpperCase()}${source.proposalType.slice(1)} Proposal` : "Proposal";
 	if (kind === "review") return source.type === "review" ? source.title : "Review";
 	if (kind === "inbox") return "Inbox";
+	if (kind === "context") return "Context";
 	if (kind === "pack" && source.type === "pack") return source.panelId;
 	return "Panel";
 }
@@ -309,6 +310,12 @@ function canonicalizeInbox(raw: Record<string, unknown>, id: string, sessionId: 
 	return { id: "inbox", kind: "inbox", source: { type: "inbox", sessionId, ...(typeof source.staffId === "string" ? { staffId: truncate(source.staffId, 160) } : {}) } };
 }
 
+function canonicalizeContext(raw: Record<string, unknown>, id: string, sessionId: string): { id: string; kind: "context"; source: SidePanelWorkspaceSource } | null {
+	const source = isObject(raw.source) ? raw.source : undefined;
+	if (id !== "context" || !source || source.type !== "context" || !sourceSessionMatches(source, sessionId)) return null;
+	return { id: "context", kind: "context", source: { type: "context", sessionId } };
+}
+
 function canonicalizePack(raw: Record<string, unknown>, id: string, sessionId: string, validators?: SidePanelWorkspaceValidators): { id: string; kind: "pack"; source: SidePanelWorkspaceSource } | null {
 	const source = isObject(raw.source) ? raw.source : undefined;
 	if (!source || source.type !== "pack" || !sourceSessionMatches(source, sessionId)) return null;
@@ -370,6 +377,7 @@ export function canonicalizeTab(raw: unknown, sessionId: string, validators?: Si
 	else if (kind === "proposal") canonical = canonicalizeProposal(raw, id, sessionId);
 	else if (kind === "review") canonical = canonicalizeReview(raw, id, sessionId);
 	else if (kind === "inbox") canonical = canonicalizeInbox(raw, id, sessionId);
+	else if (kind === "context") canonical = canonicalizeContext(raw, id, sessionId);
 	else if (kind === "pack") canonical = canonicalizePack(raw, id, sessionId, validators);
 	if (!canonical) return null;
 	const canonicalKind = canonical.kind ?? kind;

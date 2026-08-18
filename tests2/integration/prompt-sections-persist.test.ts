@@ -10,10 +10,13 @@ import {
 	createSession,
 	deleteSession,
 	apiFetch,
+	bobbitDir,
 	connectWs,
 	statusPredicate,
 } from "./_e2e/e2e-setup.js";
+import { ContextTraceStore } from "../../src/server/agent/context-trace-store.js";
 import { pollUntil } from "../../tests/e2e/test-utils/cleanup.js";
+import path from "node:path";
 
 test.setTimeout(30_000);
 
@@ -136,6 +139,51 @@ test.describe("Persisted prompt sections", () => {
 		expect(typeof afterData.createdAt).toBe("string");
 
 		// Prevent afterEach from trying to delete already-terminated session
+		sessionId = "";
+	});
+
+	test("context traces remain bounded and readable for archived sessions", async () => {
+		sessionId = await createSession();
+		const traceStore = new ContextTraceStore(path.join(bobbitDir(), "state"));
+		const providerSecret = "RAW_PROVIDER_SECRET /private/provider-stack";
+		for (let index = 1; index <= 1_001; index++) {
+			traceStore.appendTrace(sessionId, {
+				ts: index,
+				hook: "afterTurn",
+				sessionId,
+				providers: index === 1_001
+					? [
+						{ id: "provider-second", ms: 2, blocks: 2, omitted: 0, error: providerSecret },
+						{ id: "provider-first", ms: 1, blocks: 1, omitted: 1, error: "timeout" },
+					]
+					: [],
+			});
+		}
+
+		const liveResponse = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}/context-trace?limit=1001`);
+		expect(liveResponse.status).toBe(200);
+		const live = await liveResponse.json();
+		expect(live.entries).toHaveLength(1_000);
+		expect(live.entries.at(-1)).toMatchObject({ ts: 1_001, hook: "afterTurn" });
+		expect(live.entries.at(-1).providers.map((provider: { id: string }) => provider.id)).toEqual(["provider-second", "provider-first"]);
+		expect(live.entries.at(-1).providers.map((provider: { error?: string }) => provider.error)).toEqual(["Provider error", "Timed out"]);
+		expect(JSON.stringify(live)).not.toContain(providerSecret);
+
+		const deleteResponse = await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
+		expect(deleteResponse.status).toBe(200);
+		const archivedResponse = await apiFetch(`/api/sessions/${sessionId}/context-trace?limit=2`);
+		expect(archivedResponse.status).toBe(200);
+		expect((await archivedResponse.json()).entries).toMatchObject([
+			{ ts: 1_001, hook: "afterTurn" },
+			{ hook: "sessionShutdown" },
+		]);
+
+		for (const id of ["does-not-exist", "%E0%A4%A"]) {
+			const response = await apiFetch(`/api/sessions/${id}/context-trace`);
+			expect(response.status).toBe(404);
+			expect(await response.json()).toEqual({ error: "Session not found" });
+		}
+
 		sessionId = "";
 	});
 });

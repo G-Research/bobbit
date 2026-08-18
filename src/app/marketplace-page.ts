@@ -7,7 +7,7 @@
 // ============================================================================
 
 import { icon } from "@mariozechner/mini-lit";
-import { html, TemplateResult } from "lit";
+import { html, nothing, TemplateResult } from "lit";
 import {
 	AlertTriangle,
 	ArrowLeft,
@@ -25,9 +25,10 @@ import {
 import type { IconNode } from "lucide";
 import { HEADQUARTERS_PROJECT_ID } from "./headquarters.js";
 import { renderApp, state } from "./state.js";
-import { setHashRoute } from "./routing.js";
+import { getRouteFromHash, setHashRoute, setMarketRoute } from "./routing.js";
 import {
 	addMarketplaceSource,
+	adoptMarketplaceExtension,
 	browseMarketplace,
 	getPackActivation,
 	getPackConflicts,
@@ -42,8 +43,22 @@ import {
 	uninstallMarketplacePack,
 	updateInstalledPack,
 	fetchContributions,
+	getExtensionSettings,
+	patchExtensionSettingsPack,
+	patchExtensionSettingsTarget,
+	grantExtensionCapability,
+	revokeExtensionCapability,
+	getExtensionGrantAudit,
 	fetchTools,
 	fetchMcpServers,
+	listMarketplaceAdoptions,
+	refreshMarketplaceAdoption,
+	removeMarketplaceAdoption,
+	updateMarketplaceAdoption,
+	type AdoptedExtension,
+	type AdoptionConformanceState,
+	type CreateAdoptionRequest,
+	type AdoptionOperation,
 	type BrowsePackWire,
 	type ConflictWire,
 	type DisabledRefs,
@@ -60,6 +75,11 @@ import {
 	type PackEntityDescriptions,
 	type PackMcpContributionWire,
 	type PiExtensionDiagnostic,
+	type ExtensionCapabilityGrantTuple,
+	type ExtensionCapabilityWire,
+	type ExtensionGrantAuditEntryWire,
+	type ExtensionSettingsResponse,
+	type ExtensionSettingValue,
 } from "./api.js";
 
 // ============================================================================
@@ -86,6 +106,19 @@ let installed: InstalledPackWire[] = [];
 let installedError = "";
 let conflicts: ConflictWire[] = [];
 
+/** Stock assets adopted in-place through the standard MCP/skill loaders. */
+let adoptions: AdoptedExtension[] = [];
+type AdoptionMode = "mcp-command" | "mcp-endpoint" | "skills-directory";
+let adoptionMode: AdoptionMode = "mcp-command";
+let adoptionScope: MarketScope = "server";
+let adoptionProjectId: string | undefined;
+let adoptionCommand = "";
+let adoptionArgs = "";
+let adoptionEndpoint = "";
+let adoptionSkillsDirectory = "";
+let adoptionError = "";
+let adopting = false;
+
 /** Per-installed-pack activation catalogue + disabled overrides, keyed by
  *  `${scope}:${packName}` (pack schema V1 §6.7/§9). This is the UNFILTERED
  *  authoritative source for the activation toggles — server-expanded from pack
@@ -108,12 +141,8 @@ let addingSource = false;
 let installScope: MarketScope = "server";
 let installProjectId: string | undefined = undefined;
 
-/** The project the marketplace currently operates on for the *project* scope
- *  segment. Set whenever the user picks a "Project: X" install target (or
- *  installs into one) so the Installed-list query, update, uninstall and
- *  pack-order all address the SAME project the install targeted — never the
- *  active/first project (finding #2). Defaults (when unset) to the active
- *  project, then the first registered project. */
+/** The project selected by the canonical Market route. It is intentionally
+ *  private: project-owned requests must never fall back to the active project. */
 let focusProjectId: string | undefined = undefined;
 
 /** Per-pack busy flags keyed by `${scope}:${packName}` or `dirName`. */
@@ -121,6 +150,77 @@ const busy = new Set<string>();
 
 /** Expanded conflict details keyed by `${scope}:${packName}`. */
 const expandedConflicts = new Set<string>();
+
+// Project-scoped extension settings are intentionally separate from install-scope
+// activation. Secret drafts never enter this state: they only exist in their
+// password input until the save request is serialized.
+type ExtensionSettingPrimitive = string | number | boolean | null;
+type ExtensionSettingDraftValue = ExtensionSettingPrimitive | string[];
+type ExtensionSettingField = {
+	key: string;
+	type: "string" | "secret" | "enum" | "multi-enum" | "boolean" | "number" | string;
+	label?: string;
+	description?: string;
+	placeholder?: string;
+	required?: boolean;
+	default?: ExtensionSettingDraftValue;
+	value?: ExtensionSettingDraftValue;
+	secretSet?: boolean;
+	source?: "default" | "legacy" | "project";
+	options?: Array<{ value: string; label?: string }>;
+	min?: number;
+	max?: number;
+	step?: number;
+};
+type ExtensionSettingsTarget = {
+	packId: string;
+	kind: "pack" | "provider" | "hook" | "runtime" | "sandboxRequirement";
+	id: string;
+	label?: string;
+	enabled?: boolean;
+	status?: string;
+	statusMessage?: string;
+	fields?: ExtensionSettingField[];
+	grants?: Array<{ capability: string; state?: string }>;
+};
+type ExtensionSettingsProjection = { projectId?: string; revision: number; targets: ExtensionSettingsTarget[] };
+
+let extensionSettings: ExtensionSettingsProjection | null = null;
+let extensionSettingsLoading = false;
+let extensionSettingsError = "";
+let extensionSettingsProjectId: string | undefined;
+let expandedSettingsOwner = "";
+let settingsDrafts = new Map<string, Map<string, ExtensionSettingDraftValue | undefined>>();
+// Password contents remain solely in their native input. This records only that
+// a secret input is non-empty so its owner can be saved without retaining bytes.
+const secretDrafts = new Set<string>();
+let settingsErrors = new Map<string, Map<string, string>>();
+let settingsFormErrors = new Map<string, string>();
+let settingsBusy = new Set<string>();
+let settingsStatus = "";
+let grantAuditEntries: ExtensionGrantAuditEntryWire[] = [];
+let grantAuditLoading = false;
+let grantAuditError = "";
+let grantAuditProjectId: string | undefined;
+// Grant actions are independent from settings saves and keyed by their exact,
+// project-owned tuple so a repeated click cannot submit duplicate authority.
+const capabilityGrantBusy = new Set<string>();
+const capabilityGrantErrors = new Map<string, string>();
+const marketGrantCapabilities = new Set<ExtensionCapabilityWire>([
+	"decide", "mutate", "filter:tool-result", "store", "session", "agents", "prompt:system-static", "prompt:system-author",
+	"service.manage", "memory.read", "memory.write", "memory.reflect", "memory.invalidate", "memory.read.all", "sandbox:build",
+]);
+const packCapabilityCopy: Partial<Record<ExtensionCapabilityWire, { label: string; description: string }>> = {
+	"service.manage": { label: "Manage service", description: "Start, stop, and manage this pack's project service." },
+	"memory.read": { label: "Read memory", description: "Read memory available to this pack in the current project scope." },
+	"memory.write": { label: "Write memory", description: "Create and update memory in the current project scope." },
+	"memory.reflect": { label: "Reflect on memory", description: "Produce derived reflections from memory this pack is allowed to read." },
+	"memory.invalidate": { label: "Invalidate memory", description: "Mark existing memory as invalid so it is no longer used as current knowledge." },
+	"memory.read.all": { label: "Read all memory", description: "Read all project memory, including memory outside the pack's ordinary scoped context." },
+	"sandbox:build": { label: "Build sandbox image", description: "Allow this pack's approved toolchain requirements to affect the project's core sandbox image." },
+};
+const packCapabilityOrder = ["service.manage", "memory.read", "memory.write", "memory.reflect", "memory.invalidate", "memory.read.all", "sandbox:build"] as const;
+const packCapabilityRank = new Map<ExtensionCapabilityWire, number>(packCapabilityOrder.map((capability, index) => [capability, index]));
 
 // Drag-reorder state (market packs within one scope).
 let dragScope: MarketScope | null = null;
@@ -144,6 +244,16 @@ export function clearMarketplaceState(): void {
 	installed = [];
 	installedError = "";
 	conflicts = [];
+	adoptions = [];
+	adoptionMode = "mcp-command";
+	adoptionScope = "server";
+	adoptionProjectId = undefined;
+	adoptionCommand = "";
+	adoptionArgs = "";
+	adoptionEndpoint = "";
+	adoptionSkillsDirectory = "";
+	adoptionError = "";
+	adopting = false;
 	activationByPack.clear();
 	mcpRuntimeByScope.clear();
 	newSourceType = "pack";
@@ -155,6 +265,21 @@ export function clearMarketplaceState(): void {
 	focusProjectId = undefined;
 	busy.clear();
 	expandedConflicts.clear();
+	extensionSettings = null;
+	extensionSettingsLoading = false;
+	extensionSettingsError = "";
+	extensionSettingsProjectId = undefined;
+	expandedSettingsOwner = "";
+	settingsDrafts.clear();
+	secretDrafts.clear();
+	settingsErrors.clear();
+	settingsFormErrors.clear();
+	settingsBusy.clear();
+	settingsStatus = "";
+	grantAuditEntries = [];
+	grantAuditLoading = false;
+	grantAuditError = "";
+	grantAuditProjectId = undefined;
 }
 
 // ============================================================================
@@ -162,11 +287,245 @@ export function clearMarketplaceState(): void {
 // ============================================================================
 
 function currentProjectId(): string | undefined {
-	// The project the marketplace addresses for the *project* scope segment.
-	// Prefer the explicitly focused project (set by the install scope picker so
-	// install + Installed-list + update/uninstall never diverge — finding #2),
-	// else the active project, else the first registered project.
-	return focusProjectId || state.activeProjectId || state.projects[0]?.id || undefined;
+	// Canonical Market routes are the sole project context. Never use the active
+	// project (or a first-project fallback) for a project-owned request.
+	return focusProjectId;
+}
+
+/** Clear the only DOM-held secret drafts before replacing a project surface. */
+function clearSecretInputs(): void {
+	for (const input of document.querySelectorAll<HTMLInputElement>("input[data-secret-owner]")) input.value = "";
+}
+
+/** Remove all project-owned UI before the new route can paint. */
+function clearProjectScopedMarketplaceState(projectId?: string): void {
+	focusProjectId = projectId;
+	installed = [];
+	installedError = "";
+	conflicts = [];
+	adoptions = [];
+	activationByPack.clear();
+	mcpRuntimeByScope.clear();
+	extensionSettings = null;
+	extensionSettingsLoading = false;
+	extensionSettingsError = "";
+	extensionSettingsProjectId = projectId;
+	grantAuditEntries = [];
+	grantAuditLoading = false;
+	grantAuditError = "";
+	grantAuditProjectId = projectId;
+	clearSecretInputs();
+	clearExtensionSettingsUi();
+	adoptionError = "";
+}
+
+/**
+ * Hydrate private Market state from the canonical hash before starting requests.
+ * When no visible project exists, the #/market compatibility alias remains a
+ * projectless Market surface for server-scoped Browse and Sources onboarding.
+ */
+function hydrateMarketRoute(): string | undefined {
+	const route = getRouteFromHash();
+	if (route.view !== "market") return undefined;
+	if (!route.marketProjectId) {
+		// Do not leave the last canonical project's card visible when navigating
+		// back to the projectless compatibility alias.
+		activeTab = "installed";
+		if (focusProjectId) clearProjectScopedMarketplaceState();
+		return undefined;
+	}
+	const projectId = route.marketProjectId;
+	const isVisible = state.projects.some(project => project.id === projectId && project.id !== HEADQUARTERS_PROJECT_ID && !project.hidden);
+	if (!isVisible) {
+		if (focusProjectId) clearProjectScopedMarketplaceState();
+		return undefined;
+	}
+	activeTab = route.marketTab ?? "installed";
+	if (focusProjectId !== projectId) clearProjectScopedMarketplaceState(projectId);
+	if (installScope === "project") installProjectId = projectId;
+	if (adoptionScope === "project") adoptionProjectId = projectId;
+	return projectId;
+}
+
+function settingsOwnerKey(target: Pick<ExtensionSettingsTarget, "packId" | "kind" | "id">): string {
+	return `${target.packId}:${target.kind}:${target.id}`;
+}
+
+function capabilityGrantKey(projectId: string, tuple: ExtensionCapabilityGrantTuple): string {
+	return "principal" in tuple
+		? `${projectId}:${tuple.packId}:pack:${tuple.capability}`
+		: `${projectId}:${tuple.packId}:hook:${tuple.hookId}:${tuple.capability}`;
+}
+
+function discardExtensionSettingsDrafts(): void {
+	settingsDrafts.clear();
+	secretDrafts.clear();
+	settingsErrors.clear();
+	settingsFormErrors.clear();
+	clearSecretInputs();
+}
+
+function clearExtensionSettingsUi(clearCapabilityGrantState = true): void {
+	expandedSettingsOwner = "";
+	discardExtensionSettingsDrafts();
+	settingsBusy.clear();
+	settingsStatus = "";
+	if (clearCapabilityGrantState) {
+		capabilityGrantBusy.clear();
+		capabilityGrantErrors.clear();
+	}
+}
+
+function normalizeExtensionSettings(data: ExtensionSettingsResponse, projectId: string): ExtensionSettingsProjection {
+	const targets: ExtensionSettingsTarget[] = data.targets.map((target) => {
+		const configuration = target.configuration.state;
+		// EP-7 servers authorize by a hook's applicable exact capability (for
+		// example, request mutation's `mutate`). Older servers retain the generic
+		// status, so use it only when the additive projection is absent.
+		const runtimeAuthorized = target.hookGrant?.runtimeAuthorized;
+		const grantRequired = target.hookGrant !== undefined
+			&& (typeof runtimeAuthorized === "boolean" ? !runtimeAuthorized : target.hookGrant.status === "grant-required");
+		const inactive = !target.enabled.effective || configuration !== "ready";
+		const status = !target.enabled.effective ? "disabled"
+			: configuration === "requires-config" ? "requires-config"
+			: configuration === "invalid-schema" || configuration === "invalid-values" ? "review"
+			: configuration === "unavailable" ? "unavailable"
+			: grantRequired ? "grant-required"
+			: "active";
+		const grantProjection = target.ref.kind === "pack" ? target.packGrant : target.hookGrant;
+		return {
+			packId: target.ref.packId,
+			kind: target.ref.kind,
+			id: target.ref.id,
+			label: target.listName,
+			enabled: target.enabled.effective,
+			status,
+			statusMessage: configuration === "requires-config" && target.configuration.missing.length
+				? `Enabled, but inactive until ${target.configuration.missing.join(", ")} is saved.`
+				: undefined,
+			fields: target.fields.map((field) => {
+				// `default` is part of the public schema declaration. Keep the legacy
+				// fallback while preserving canonical copies for the array-capable wire.
+				const defaultValue = (field as unknown as { default?: unknown }).default;
+				const declaredDefault = cloneSettingValue(
+					typeof defaultValue === "string" || typeof defaultValue === "number" || typeof defaultValue === "boolean" || Array.isArray(defaultValue)
+						? defaultValue as ExtensionSettingDraftValue
+						// Older servers expose the same public default as an effective value
+						// with a `default` source, but not yet as its own descriptor field.
+						: field.source === "default" ? field.value : undefined,
+				);
+				return {
+					key: field.key, type: field.type, label: field.label, description: field.description,
+					required: !field.optional, default: declaredDefault, value: cloneSettingValue(field.value), secretSet: field.secretSet,
+					source: field.source, options: field.values?.map((value) => ({ value })), min: field.min, max: field.max,
+				};
+			}),
+			grants: grantProjection?.requestedCapabilities.map((capability) => ({
+				capability,
+				// A newer server may advertise a reserved capability unknown to this
+				// client. Keep it visible, but never offer authority we cannot name.
+				state: marketGrantCapabilities.has(capability)
+					? grantProjection.grants.includes(capability) ? (inactive ? "Granted · inactive" : "Granted") : "Not granted"
+					: "Unavailable",
+			})),
+
+		};
+	});
+	for (const packId of new Set(targets.map((target) => target.packId))) {
+		if (targets.some((target) => target.packId === packId && target.kind === "pack")) continue;
+		const owned = targets.filter((target) => target.packId === packId);
+		const source = data.targets.find((target) => target.ref.packId === packId);
+		const label = source?.packName || packId;
+		const packGrant = source?.packGrant;
+		const enabled = owned.some((target) => target.enabled !== false);
+		targets.unshift({
+			packId, kind: "pack", id: packId, label, enabled,
+			status: owned.some((target) => target.enabled === false) ? "partially-enabled" : "active",
+			fields: [],
+			grants: packGrant?.requestedCapabilities.map((capability) => ({
+				capability,
+				state: marketGrantCapabilities.has(capability)
+					? packGrant.grants.includes(capability) ? (enabled ? "Granted" : "Granted · inactive") : "Not granted"
+					: "Unavailable",
+			})),
+		});
+	}
+	// The server owns the targets, but pack rows are aggregate headers in the
+	// Market grid. Keep each header ahead of its contributions and retain the
+	// partial state when only some project contributions are disabled.
+	for (const target of targets.filter((target) => target.kind === "pack")) {
+		const owned = targets.filter((candidate) => candidate.packId === target.packId && candidate.kind !== "pack");
+		if (owned.length > 0 && owned.some((candidate) => candidate.enabled === false) && owned.some((candidate) => candidate.enabled !== false)) {
+			target.status = "partially-enabled";
+		}
+	}
+	targets.sort((left, right) => Number(right.kind === "pack") - Number(left.kind === "pack"));
+	return { projectId, revision: data.revision, targets };
+}
+
+async function loadGrantAudit(projectId = currentProjectId()): Promise<void> {
+	if (!projectId) {
+		grantAuditEntries = [];
+		grantAuditProjectId = undefined;
+		return;
+	}
+	const requestedProjectId = projectId;
+	grantAuditLoading = true;
+	grantAuditError = "";
+	grantAuditProjectId = requestedProjectId;
+	renderApp();
+	try {
+		const response = await getExtensionGrantAudit(requestedProjectId);
+		if (!response.ok) throw new Error("Extension grant history is unavailable.");
+		if (currentProjectId() !== requestedProjectId) return;
+		grantAuditEntries = [...response.data.entries].reverse();
+	} catch {
+		if (currentProjectId() !== requestedProjectId) return;
+		grantAuditEntries = [];
+		grantAuditError = "Could not load grant history.";
+	} finally {
+		if (currentProjectId() === requestedProjectId) {
+			grantAuditLoading = false;
+			renderApp();
+		}
+	}
+}
+
+async function loadExtensionSettings(projectId = currentProjectId(), discardDrafts = false): Promise<void> {
+	if (!projectId) {
+		extensionSettings = null;
+		extensionSettingsProjectId = undefined;
+		return;
+	}
+	const requestedProjectId = projectId;
+	extensionSettingsLoading = true;
+	extensionSettingsError = "";
+	extensionSettingsProjectId = requestedProjectId;
+	renderApp();
+	try {
+		const response = await getExtensionSettings(requestedProjectId);
+		if (!response.ok) throw new Error("Extension settings are unavailable.");
+		if (currentProjectId() !== requestedProjectId) return;
+		// Passive metadata, grant, and activation refreshes update only the server
+		// projection; do not erase an in-progress settings form. Explicit reloads,
+		// successful saves, and project replacement deliberately discard drafts.
+		if (discardDrafts) discardExtensionSettingsDrafts();
+		extensionSettings = normalizeExtensionSettings(response.data, requestedProjectId);
+	} catch {
+		if (currentProjectId() !== requestedProjectId) return;
+		extensionSettings = null;
+		extensionSettingsError = "Extension settings are unavailable.";
+	} finally {
+		if (currentProjectId() === requestedProjectId) {
+			extensionSettingsLoading = false;
+			renderApp();
+		}
+	}
+}
+
+/** Called by the viewer WS integration after a metadata-only settings update. */
+export function refreshMarketplaceExtensionSettings(projectId: string): void {
+	if (projectId === currentProjectId()) void loadExtensionSettings(projectId);
 }
 
 /** The ACTIVE CHAT SESSION's project — the project the GLOBAL tool-renderer
@@ -223,17 +582,50 @@ export async function reconcileRenderersForActiveSession(): Promise<void> {
 }
 
 export async function loadMarketplaceData(showLoading = true): Promise<void> {
+	// Read the hash first: copied URLs, reloads and history navigation must set
+	// both the private project focus and tab before any project request starts.
+	const projectId = hydrateMarketRoute();
 	if (showLoading) {
 		loading = true;
 		renderApp();
 	}
-	const projectId = currentProjectId();
+	if (!projectId) {
+		// #/market without a visible project intentionally has no project-owned
+		// requests. Server-scoped source discovery and browsing remain available
+		// so a new installation can add a source before creating a project.
+		const srcRes = await listMarketplaceSources();
+		if (currentProjectId()) return;
+		if (srcRes.ok) {
+			sources = srcRes.data.sources || [];
+			sourcesError = "";
+		} else {
+			sources = [];
+			sourcesError = srcRes.error;
+		}
+		loading = false;
+		renderApp();
+		await loadBrowse(undefined);
+		return;
+	}
+	// Never render a previous project's projection under a newly focused project.
+	if (extensionSettingsProjectId !== projectId) {
+		extensionSettings = null;
+		extensionSettingsError = "";
+		extensionSettingsProjectId = projectId;
+		clearSecretInputs();
+		clearExtensionSettingsUi();
+	}
 
-	const [srcRes, instRes, confRes] = await Promise.all([
+	const [srcRes, instRes, confRes, adoptionRes] = await Promise.all([
 		listMarketplaceSources(),
 		listInstalledPacks(projectId),
 		getPackConflicts(projectId),
+		listMarketplaceAdoptions(projectId),
 	]);
+
+	// A route change may have started a newer load while these requests were in
+	// flight. Its data owns the screen; never repaint it with this old project.
+	if (currentProjectId() !== projectId) return;
 
 	if (srcRes.ok) {
 		sources = srcRes.data.sources || [];
@@ -252,14 +644,19 @@ export async function loadMarketplaceData(showLoading = true): Promise<void> {
 	}
 
 	conflicts = confRes.ok ? confRes.data.conflicts || [] : [];
+	// A pre-EP-9 server may not have this endpoint yet. Keep the existing Market
+	// page usable rather than surfacing an unrelated 404 as an installed error.
+	adoptions = adoptionRes.ok ? adoptionRes.data.adoptions || [] : [];
 
 	loading = false;
 	renderApp();
 
 	// Activation catalogues/runtime statuses are fetched in the background so the
 	// page paints immediately; toggles/statuses appear once they resolve.
-	void loadActivationForInstalled();
-	void loadMcpRuntimeForInstalled();
+	void loadActivationForInstalled(projectId);
+	void loadMcpRuntimeForInstalled(projectId);
+	void loadExtensionSettings(projectId);
+	void loadGrantAudit(projectId);
 
 	await loadBrowse();
 }
@@ -269,13 +666,15 @@ export async function loadMarketplaceData(showLoading = true): Promise<void> {
  *  for the toggle UI — never the runtime-filtered /api/tools or
  *  /api/ext/contributions, which would hide a disabled entity and make it
  *  impossible to re-enable. Best-effort; repaints when done. */
-async function loadActivationForInstalled(): Promise<void> {
+async function loadActivationForInstalled(projectId = currentProjectId()): Promise<void> {
+	if (!projectId) return;
 	const snapshot = installed.slice();
 	const results = await Promise.all(snapshot.map(async (p) => {
-		const projectId = p.scope === "project" ? currentProjectId() : undefined;
-		const res = await getPackActivation(p.scope, p.packName, projectId);
+		const scopedProjectId = p.scope === "project" ? projectId : undefined;
+		const res = await getPackActivation(p.scope, p.packName, scopedProjectId);
 		return { key: `${p.scope}:${p.packName}`, res };
 	}));
+	if (currentProjectId() !== projectId) return;
 	let changed = false;
 	for (const { key, res } of results) {
 		if (res.ok) { activationByPack.set(key, res.data); changed = true; }
@@ -287,9 +686,9 @@ function mcpRuntimeScopeKeyForPack(pack: InstalledPackWire): string {
 	return pack.scope === "project" ? `project:${currentProjectId() || ""}` : "default";
 }
 
-async function loadMcpRuntimeForInstalled(): Promise<void> {
+async function loadMcpRuntimeForInstalled(projectId = currentProjectId()): Promise<void> {
+	if (!projectId) return;
 	const needsDefault = installed.some((p) => p.scope !== "project" && packHasMcp(p));
-	const projectId = currentProjectId();
 	const needsProject = !!projectId && installed.some((p) => p.scope === "project" && packHasMcp(p));
 	const jobs: Array<Promise<void>> = [];
 	if (needsDefault) {
@@ -304,6 +703,7 @@ async function loadMcpRuntimeForInstalled(): Promise<void> {
 	}
 	if (jobs.length === 0) return;
 	await Promise.all(jobs);
+	if (currentProjectId() !== projectId) return;
 	renderApp();
 }
 
@@ -416,13 +816,16 @@ async function handleToggleMcpOperation(pack: InstalledPackWire, entry: PackActi
 	}
 }
 
-async function loadBrowse(): Promise<void> {
+async function loadBrowse(projectId = currentProjectId()): Promise<void> {
 	browseLoading = true;
 	browseError = "";
 	renderApp();
 	const before = new Set(enabledBrowseSourceIds);
 	const knownBefore = new Set(browseSources.map((src) => src.sourceId));
-	const res = await browseMarketplace(currentProjectId());
+	const res = await browseMarketplace(projectId);
+	// A project route can supersede projectless browsing while the request is in
+	// flight. Its data owns the screen; never paint the old catalogue over it.
+	if (currentProjectId() !== projectId) return;
 	if (res.ok) {
 		browseSources = res.data.sources || [];
 		browsePacks = res.data.packs || [];
@@ -516,11 +919,6 @@ async function handleInstall(pack: BrowsePackWire): Promise<void> {
 		renderApp();
 		return;
 	}
-	// Bind the marketplace's project focus to the install target so the pack we
-	// install appears in the Installed list and update/uninstall address the
-	// same project we installed into (finding #2).
-	if (scope === "project" && projectId) focusProjectId = projectId;
-
 	const key = `install:${pack.browseKey || `${pack.source?.id || "unknown"}:${pack.dirName}`}`;
 	busy.add(key);
 	renderApp();
@@ -534,7 +932,8 @@ async function handleInstall(pack: BrowsePackWire): Promise<void> {
 	const res = await installMarketplacePack({ sourceId, dirName: pack.dirName, scope, projectId });
 	busy.delete(key);
 	if (res.ok) {
-		await loadMarketplaceData(false);
+		if (scope === "project" && projectId) await showProjectInstalledAfterMutation(projectId);
+		else await loadMarketplaceData(false);
 		await refreshConfigPages();
 	} else {
 		browseError = res.error;
@@ -576,6 +975,164 @@ async function handleUninstall(pack: InstalledPackWire): Promise<void> {
 		installedError = res.error;
 		renderApp();
 	}
+}
+
+// ============================================================================
+// ADOPTION ACTIONS
+// ============================================================================
+
+function adoptionProjectFor(scope = adoptionScope): string | undefined {
+	return scope === "project" ? adoptionProjectId : undefined;
+}
+
+/** A same-hash navigation emits no hashchange, so refresh it explicitly after a
+ * project mutation. Other projects always navigate through the canonical route. */
+async function showProjectInstalledAfterMutation(projectId: string): Promise<void> {
+	const route = getRouteFromHash();
+	if (route.view === "market" && route.marketProjectId === projectId && route.marketTab === "installed") {
+		await loadMarketplaceData(false);
+		return;
+	}
+	setMarketRoute(projectId, "installed");
+}
+
+function adoptionBusyKey(adoption: AdoptedExtension, action: string): string {
+	return `adoption:${adoption.scope}:${adoption.id}:${action}`;
+}
+
+function isSafeMcpEndpoint(value: string): boolean {
+	try {
+		const url = new URL(value);
+		return (url.protocol === "http:" || url.protocol === "https:") && !url.username && !url.password && !url.search && !url.hash;
+	} catch {
+		return false;
+	}
+}
+
+async function handleAdopt(): Promise<void> {
+	const projectId = adoptionProjectFor();
+	adoptionError = "";
+	if (adoptionScope === "project" && !projectId) {
+		adoptionError = "Select a project before adopting into project scope.";
+		renderApp();
+		return;
+	}
+
+	let request: CreateAdoptionRequest;
+	if (adoptionMode === "mcp-command") {
+		const command = adoptionCommand.trim();
+		if (!command) {
+			adoptionError = "Enter an MCP command.";
+			renderApp();
+			return;
+		}
+		request = { kind: "mcp" as const, scope: adoptionScope, projectId, source: { transport: "stdio" as const, command, args: adoptionArgs.split("\n").map((arg) => arg.trim()).filter(Boolean) } };
+	} else if (adoptionMode === "mcp-endpoint") {
+		const url = adoptionEndpoint.trim();
+		if (!isSafeMcpEndpoint(url)) {
+			// Do not retain a rejected URL, which may contain credentials or a token-like query.
+			adoptionEndpoint = "";
+			adoptionError = "Enter an http(s) endpoint without credentials, a query, or a fragment.";
+			renderApp();
+			return;
+		}
+		request = { kind: "mcp" as const, scope: adoptionScope, projectId, source: { transport: "http" as const, url } };
+	} else {
+		const directory = adoptionSkillsDirectory.trim();
+		if (!directory.startsWith("/")) {
+			adoptionError = "Enter an absolute skills directory path.";
+			renderApp();
+			return;
+		}
+		request = { kind: "skills" as const, scope: adoptionScope, projectId, source: { directory } };
+	}
+
+	adopting = true;
+	renderApp();
+	const res = await adoptMarketplaceExtension(request);
+	adopting = false;
+	if (res.ok) {
+		// Inputs can contain command arguments or a rejected URL. Never retain them
+		// after the request, and always render source details from server-sanitized provenance.
+		adoptionCommand = "";
+		adoptionArgs = "";
+		adoptionEndpoint = "";
+		adoptionSkillsDirectory = "";
+		if (adoptionScope === "project" && projectId) await showProjectInstalledAfterMutation(projectId);
+		else await loadMarketplaceData(false);
+		await refreshConfigPages();
+	} else {
+		adoptionError = res.error;
+		renderApp();
+	}
+}
+
+async function handleRefreshAdoption(adoption: AdoptedExtension): Promise<void> {
+	const key = adoptionBusyKey(adoption, "refresh");
+	busy.add(key);
+	renderApp();
+	const res = await refreshMarketplaceAdoption({ id: adoption.id, scope: adoption.scope, projectId: adoption.scope === "project" ? adoption.projectId : undefined });
+	busy.delete(key);
+	if (res.ok) {
+		await loadMarketplaceData(false);
+		await refreshConfigPages();
+	} else {
+		adoptionError = res.error;
+		renderApp();
+	}
+}
+
+async function handleRemoveAdoption(adoption: AdoptedExtension): Promise<void> {
+	const { confirmAction } = await import("./dialogs.js");
+	const ok = await confirmAction(
+		"Remove adopted extension",
+		`Remove ${adoption.provenance.sourceLocation}? The source asset and existing Tools policy settings are untouched.`,
+		"Remove",
+		true,
+	);
+	if (!ok) return;
+	const key = adoptionBusyKey(adoption, "remove");
+	busy.add(key);
+	renderApp();
+	const res = await removeMarketplaceAdoption({ id: adoption.id, scope: adoption.scope, projectId: adoption.scope === "project" ? adoption.projectId : undefined });
+	busy.delete(key);
+	if (res.ok) {
+		await loadMarketplaceData(false);
+		await refreshConfigPages();
+	} else {
+		adoptionError = res.error;
+		renderApp();
+	}
+}
+
+async function handleUpdateAdoption(adoption: AdoptedExtension, updates: { enabled?: boolean; operations?: AdoptionOperation[] }): Promise<void> {
+	const key = adoptionBusyKey(adoption, "update");
+	busy.add(key);
+	renderApp();
+	const res = await updateMarketplaceAdoption({ id: adoption.id, scope: adoption.scope, projectId: adoption.scope === "project" ? adoption.projectId : undefined, ...updates });
+	busy.delete(key);
+	if (res.ok) {
+		await loadMarketplaceData(false);
+		await refreshConfigPages();
+	} else {
+		adoptionError = res.error;
+		renderApp();
+	}
+}
+
+async function handleToggleAdoptionOperation(adoption: AdoptedExtension, operation: AdoptionOperation, selected: boolean): Promise<void> {
+	if (selected && operation.classification !== "read-only-hint") {
+		const { confirmAction } = await import("./dialogs.js");
+		const ok = await confirmAction(
+			"Enable operation",
+		"This operation is not positively declared read-only. Enabling it only exposes the operation; normal allow/ask/never policy in Tools still applies.",
+		"Enable operation",
+		true,
+		);
+		if (!ok) return;
+	}
+	const operations = (adoption.operations ?? []).map((item) => item.name === operation.name ? { ...item, selected } : item);
+	await handleUpdateAdoption(adoption, { operations });
 }
 
 // ============================================================================
@@ -826,6 +1383,7 @@ function renderNavBar(): TemplateResult {
 				class="p-1 rounded-md hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
 				@click=${() => setHashRoute("landing")}
 				title="Back"
+				aria-label="Back"
 			>${icon(ArrowLeft, "sm")}</button>
 			<h1 class="text-lg font-semibold flex items-center gap-2">
 				${icon(Store, "sm")}
@@ -864,10 +1422,20 @@ function renderTabBar(): TemplateResult {
 				type="button"
 				data-testid="market-tab-${mode}"
 				class=${cls}
+				role="tab"
+				aria-selected=${isActive ? "true" : "false"}
+				aria-controls="market-tabpanel"
 				@click=${() => {
-					activeTab = mode;
+					const projectId = currentProjectId();
 					if (mode !== "browse") closeBrowseSourceMenu(false);
-					renderApp();
+					if (projectId) {
+						setMarketRoute(projectId, mode);
+					} else {
+						// No canonical project route exists yet. Keep the #/market alias
+						// and switch locally so server-scoped onboarding stays usable.
+						activeTab = mode;
+						renderApp();
+					}
 				}}
 			>
 				${icon(tabIcon, "xs")}
@@ -1093,6 +1661,32 @@ function renderSourceRow(src: MarketplaceSource): TemplateResult {
 	`;
 }
 
+async function chooseMarketProject(projectId: string): Promise<void> {
+	if (projectId === currentProjectId()) return;
+	if ([...settingsDrafts.values()].some((draft) => draft.size > 0) || secretDrafts.size > 0) {
+		const { confirmAction } = await import("./dialogs.js");
+		const discard = await confirmAction("Discard settings changes", "Discard unsaved project settings changes? Secret input values will be cleared.", "Discard changes", true);
+		if (!discard) return;
+	}
+	// Clear this screen synchronously, including DOM-only password drafts, so the
+	// next project never receives an old card/value frame while its route loads.
+	clearProjectScopedMarketplaceState(projectId);
+	loading = true;
+	renderApp();
+	setMarketRoute(projectId, activeTab);
+}
+
+function renderMarketProjectScope(): TemplateResult {
+	const projects = state.projects.filter((project) => project.id !== HEADQUARTERS_PROJECT_ID && !project.hidden);
+	const selected = currentProjectId();
+	return html`<div class="market-project-scope-row" data-testid="market-project-scope-row" role="navigation" aria-label="Project context">
+		<span class="market-project-scope-label">Project context</span>
+		<div class="market-project-scopes">${projects.length
+			? projects.map((project) => html`<button type="button" class="market-project-scope ${selected === project.id ? "market-project-scope--active" : ""}" data-testid="market-project-scope" data-project-id=${project.id} aria-current=${selected === project.id ? "page" : undefined} @click=${() => chooseMarketProject(project.id)}><span class="market-project-scope-dot" style=${`background:${project.color || project.colorLight}`}></span>${project.name}</button>`)
+			: html`<span class="text-xs text-muted-foreground" data-testid="market-no-project-context">No visible projects</span>`}</div>
+	</div>`;
+}
+
 function renderScopePicker(): TemplateResult {
 	const projects = state.projects || [];
 	return html`
@@ -1107,13 +1701,6 @@ function renderScopePicker(): TemplateResult {
 					if (v.startsWith("project:")) {
 						installScope = "project";
 						installProjectId = v.slice("project:".length);
-						// Re-focus the marketplace on the chosen project and reload the
-						// Installed list/conflicts for it so they match the install target.
-						if (focusProjectId !== installProjectId) {
-							focusProjectId = installProjectId;
-							void loadMarketplaceData(false);
-							return;
-						}
 					} else {
 						installScope = v as MarketScope;
 						installProjectId = undefined;
@@ -1126,6 +1713,170 @@ function renderScopePicker(): TemplateResult {
 				${projects.map((p: any) => html`<option value="project:${p.id}">Project: ${p.name}</option>`)}
 			</select>
 		</label>
+	`;
+}
+
+function renderAdoptionScopePicker(): TemplateResult {
+	const projects = state.projects || [];
+	return html`
+		<label class="flex items-center gap-2 text-xs text-muted-foreground">
+			<span>Adopt to</span>
+			<select
+				class="market-input"
+				data-testid="market-adopt-scope"
+				.value=${adoptionScope === "project" && adoptionProjectId ? `project:${adoptionProjectId}` : adoptionScope}
+				@change=${(e: Event) => {
+					const value = (e.target as HTMLSelectElement).value;
+					if (value.startsWith("project:")) {
+						adoptionScope = "project";
+						adoptionProjectId = value.slice("project:".length);
+					} else {
+						adoptionScope = value as MarketScope;
+						adoptionProjectId = undefined;
+					}
+					renderApp();
+				}}
+			>
+				<option value="server">Server</option>
+				<option value="global-user">Global (user)</option>
+				${projects.map((project: any) => html`<option value="project:${project.id}">Project: ${project.name}</option>`)}
+			</select>
+		</label>
+	`;
+}
+
+function adoptionStatusClass(status: AdoptionConformanceState): string {
+	switch (status) {
+		case "loaded": return "market-lozenge--positive";
+		case "partial": return "market-lozenge--warning";
+		case "rejected":
+		case "unreachable": return "market-lozenge--error";
+		default: return "market-lozenge--muted";
+	}
+}
+
+function adoptionStatusLabel(status: AdoptionConformanceState): string {
+	return status === "loaded" ? "Loaded" : status[0].toUpperCase() + status.slice(1);
+}
+
+function renderAdoptionForm(): TemplateResult {
+	const modeButton = (mode: AdoptionMode, label: string, testId: string) => html`
+		<button type="button" class="market-adopt-mode ${adoptionMode === mode ? "market-adopt-mode--selected" : ""}" data-testid=${testId}
+			@click=${() => { adoptionMode = mode; adoptionError = ""; renderApp(); }}>${label}</button>`;
+	const sourceFields = adoptionMode === "mcp-command"
+		? html`
+			<label class="market-adopt-field">Command
+				<input class="market-input" data-testid="market-adopt-command" .value=${adoptionCommand} placeholder="npx" autocomplete="off"
+					@input=${(e: Event) => { adoptionCommand = (e.target as HTMLInputElement).value; }} />
+			</label>
+			<label class="market-adopt-field">Arguments <span>one per line</span>
+				<textarea class="market-input market-adopt-textarea" data-testid="market-adopt-args" .value=${adoptionArgs} placeholder="-y&#10;@example/mcp-server"
+					@input=${(e: Event) => { adoptionArgs = (e.target as HTMLTextAreaElement).value; }}></textarea>
+			</label>`
+		: adoptionMode === "mcp-endpoint"
+			? html`<label class="market-adopt-field">Endpoint
+				<input class="market-input" data-testid="market-adopt-endpoint" .value=${adoptionEndpoint} placeholder="https://mcp.example.com"
+					autocomplete="off" @input=${(e: Event) => { adoptionEndpoint = (e.target as HTMLInputElement).value; }} />
+				<span>HTTP(S) only. Credentials, query strings, fragments, and headers are not accepted.</span>
+			</label>`
+			: html`<label class="market-adopt-field">Directory
+				<input class="market-input" data-testid="market-adopt-skills-directory" .value=${adoptionSkillsDirectory} placeholder="/absolute/path/to/skills"
+					autocomplete="off" @input=${(e: Event) => { adoptionSkillsDirectory = (e.target as HTMLInputElement).value; }} />
+				<span>Read in place — this folder is never copied or modified.</span>
+			</label>`;
+	return html`
+		<div class="market-adopt-form" data-testid="market-adopt-panel">
+			<div class="flex items-center justify-between gap-2 flex-wrap">
+				<div>
+					<div class="market-panel-title">${icon(Plus, "sm")} Adopt extension</div>
+					<div class="market-adopt-subtitle">Use a stock MCP server or Claude-style skills directory without creating a pack.</div>
+				</div>
+				${renderAdoptionScopePicker()}
+			</div>
+			<div class="market-adopt-modes" role="group" aria-label="Extension type">
+				${modeButton("mcp-command", "MCP command", "market-adopt-kind-command")}
+				${modeButton("mcp-endpoint", "MCP endpoint", "market-adopt-kind-endpoint")}
+				${modeButton("skills-directory", "Skills directory", "market-adopt-kind-skills")}
+			</div>
+			${sourceFields}
+			<div class="market-adopt-safety" data-testid="market-adopt-least-privilege">
+				MCP inspection exposes only operations positively declared read-only. It never grants allow permission; existing policy remains in Tools.
+			</div>
+			${adoptionError ? html`<div class="market-error" data-testid="market-adopt-error">${adoptionError}</div>` : ""}
+			<div class="flex justify-end">
+				<button class="market-btn market-btn--primary" data-testid="market-adopt-inspect" ?disabled=${adopting} @click=${handleAdopt}>
+					${icon(RotateCw, "xs", adopting ? "animate-spin" : "")} ${adopting ? "Inspecting…" : "Inspect & adopt"}
+				</button>
+			</div>
+		</div>
+	`;
+}
+
+function renderAdoptionCard(adoption: AdoptedExtension): TemplateResult {
+	const { conformance, provenance } = adoption;
+	const mcp = conformance.mcp;
+	const skills = conformance.skills;
+	const loaded = mcp?.loadedTools ?? skills?.loadedSkills ?? [];
+	const rejected = mcp?.rejectedTools ?? skills?.rejectedSkills ?? [];
+	const refreshBusy = busy.has(adoptionBusyKey(adoption, "refresh"));
+	const removeBusy = busy.has(adoptionBusyKey(adoption, "remove"));
+	const updateBusy = busy.has(adoptionBusyKey(adoption, "update"));
+	return html`
+		<div class="market-adoption-card" data-testid="market-adoption-card" data-adoption-id=${adoption.id}>
+			<div class="flex items-start justify-between gap-3">
+				<div class="flex-1 min-w-0">
+					<div class="flex items-center gap-2 flex-wrap">
+						<span class="text-sm font-semibold">${adoption.kind === "mcp" ? "MCP server" : "Skills directory"}</span>
+						<span class="market-adopted-badge">Adopted</span>
+						<span class="market-lozenge ${adoptionStatusClass(conformance.state)}" data-testid="market-adopt-result">${adoptionStatusLabel(conformance.state)}</span>
+						${!adoption.enabled ? html`<span class="market-lozenge market-lozenge--muted">Disabled</span>` : ""}
+					</div>
+					<div class="market-adoption-provenance" data-testid="market-adoption-provenance">
+						<span>${scopeLabel(adoption.scope)}</span><span>${provenance.sourceType}</span><span title=${provenance.sourceLocation}>${provenance.sourceLocation}</span><code>${adoption.namespace}</code>
+					</div>
+					${mcp?.serverName || mcp?.serverVersion || mcp?.negotiatedProtocol ? html`<div class="market-adoption-version">${mcp.serverName || "MCP server"}${mcp.serverVersion ? ` v${mcp.serverVersion}` : ""}${mcp.negotiatedProtocol ? ` · protocol ${mcp.negotiatedProtocol}` : ""}</div>` : ""}
+					<div class="market-adoption-assets">
+						<span>${loaded.length} loaded</span>${rejected.length ? html`<span>${rejected.length} rejected</span>` : ""}
+						${loaded.length ? html`<span title=${loaded.join(", ")}>${loaded.join(", ")}</span>` : ""}
+					</div>
+					${conformance.failures.length ? html`<div class="market-adoption-failures">${conformance.failures.map((failure) => html`<span title=${failure.code}>${failure.message}</span>`)}</div>` : ""}
+					${adoption.kind === "mcp" ? renderAdoptionOperations(adoption, updateBusy) : ""}
+				</div>
+				<div class="flex flex-col items-end gap-1 shrink-0">
+					<label class="market-toggle-switch" title="Enable or disable this adopted extension"><input type="checkbox" data-testid="market-adoption-enabled" .checked=${adoption.enabled} ?disabled=${updateBusy}
+						@change=${(e: Event) => handleUpdateAdoption(adoption, { enabled: (e.target as HTMLInputElement).checked })}/><span class="market-toggle-slider"></span></label>
+					<button class="market-btn" data-testid="market-adoption-refresh" ?disabled=${refreshBusy} @click=${() => handleRefreshAdoption(adoption)}>${icon(RotateCw, "xs", refreshBusy ? "animate-spin" : "")} Refresh</button>
+					<button class="market-btn market-btn--danger" data-testid="market-adoption-remove" ?disabled=${removeBusy} @click=${() => handleRemoveAdoption(adoption)}>${icon(Trash2, "xs")} Remove</button>
+				</div>
+			</div>
+			<div class="market-adoption-removal-note" data-testid="market-adoption-remove-confirmation">Removal leaves the source asset and Tools policy settings untouched.</div>
+		</div>
+	`;
+}
+
+function renderAdoptionOperations(adoption: AdoptedExtension, busyUpdate: boolean): TemplateResult {
+	const operations = adoption.operations ?? [];
+	if (!operations.length) return html`<div class="market-adoption-operation-note">No operations are currently available for selection.</div>`;
+	return html`
+		<div class="market-adoption-operations" data-testid="market-adoption-operations">
+			<div class="market-adoption-operation-note">Exposure boundary only — policy remains in <button class="market-link-button" @click=${() => setHashRoute("tools")}>Tools</button>.</div>
+			${operations.map((operation) => html`
+				<label class="market-mcp-operation-row ${operation.selected ? "" : "market-mcp-operation-row--disabled"}" data-testid="market-adoption-operation-${operation.name}">
+					<span class="market-toggle-switch"><input type="checkbox" data-testid="market-adoption-toggle-operation-${operation.name}" .checked=${operation.selected} ?disabled=${busyUpdate}
+						@change=${(e: Event) => handleToggleAdoptionOperation(adoption, operation, (e.target as HTMLInputElement).checked)} /><span class="market-toggle-slider"></span></span>
+					<span class="market-mcp-operation-main"><span class="market-mcp-operation-name"><code>${operation.name}</code></span><span class="market-mcp-operation-desc">${operation.classification === "read-only-hint" ? "Read-only hint" : operation.classification === "unknown" ? "Unknown capability" : "Mutation or contradictory hint"}</span></span>
+					<span class="market-mcp-operation-policy">${operation.selected ? "Policy in Tools" : "Not exposed"}</span>
+				</label>`)}
+		</div>
+	`;
+}
+
+function renderAdoptionsPanel(): TemplateResult {
+	return html`
+		<section class="market-panel" data-testid="market-adoptions-section">
+			${renderAdoptionForm()}
+			${adoptions.length ? html`<div class="market-adoption-list">${adoptions.map(renderAdoptionCard)}</div>` : html`<p class="text-xs text-muted-foreground italic">No stock extensions adopted yet.</p>`}
+		</section>
 	`;
 }
 
@@ -1478,13 +2229,503 @@ function builtinRowShadowed(packName: string): boolean {
 	);
 }
 
+function targetStatus(target: ExtensionSettingsTarget): { state: string; label: string; className: string; message: string } {
+	const raw = target.status || (target.enabled === false ? "disabled" : "active");
+	if (raw === "partially-enabled") return { state: "active", label: "Partially enabled", className: "market-lozenge--info", message: "Some project contributions are disabled or blocked." };
+	if (raw === "disabled" || target.enabled === false) return { state: "disabled", label: "Disabled for project", className: "market-lozenge--muted", message: "Disabled for this project. Settings and grants are preserved." };
+	if (raw === "requires-config" || raw === "dormant") return { state: "requires-config", label: "Needs configuration", className: "market-lozenge--warning", message: target.statusMessage || "Enabled, but inactive until required settings are saved." };
+	if (raw === "grant-required") return { state: "grant-required", label: "Grant required", className: "market-lozenge--warning", message: target.statusMessage || "Enabled, but inactive until the requested capability is granted." };
+	if (raw === "granted-inactive") return { state: "granted-inactive", label: "Granted · inactive", className: "market-lozenge--info", message: target.statusMessage || "A grant exists, but this contribution is not active." };
+	if (raw === "review" || raw === "invalid-schema") return { state: "review", label: "Settings need review", className: "market-lozenge--error", message: target.statusMessage || "Stored settings cannot be used until reviewed." };
+	if (raw === "unavailable") return { state: "unavailable", label: "Unavailable", className: "market-lozenge--error", message: target.statusMessage || "Settings could not be read." };
+	return { state: "active", label: "Active", className: "market-lozenge--positive", message: target.statusMessage || "Enabled, configured, and eligible to run." };
+}
+
+function fieldLabel(field: ExtensionSettingField): string {
+	return field.label || field.key.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[-_]+/g, " ").replace(/^./, (letter) => letter.toUpperCase());
+}
+
+function canonicalMultiEnum(value: unknown): string[] | undefined {
+	if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) return undefined;
+	return [...new Set(value)].sort();
+}
+
+/** Clone retained setting values so wire, projection, draft, and request arrays never alias. */
+function cloneSettingValue(value: ExtensionSettingDraftValue | undefined): ExtensionSettingDraftValue | undefined {
+	return Array.isArray(value) ? canonicalMultiEnum(value) : value;
+}
+
+function sameSettingValue(left: ExtensionSettingDraftValue | undefined, right: ExtensionSettingDraftValue | undefined): boolean {
+	if (Array.isArray(left) || Array.isArray(right)) {
+		const canonicalLeft = canonicalMultiEnum(left);
+		const canonicalRight = canonicalMultiEnum(right);
+		return canonicalLeft !== undefined && canonicalRight !== undefined
+			&& canonicalLeft.length === canonicalRight.length
+			&& canonicalLeft.every((item, index) => item === canonicalRight[index]);
+	}
+	return left === right;
+}
+
+function draftFor(owner: string, field: ExtensionSettingField): ExtensionSettingDraftValue | undefined {
+	const draft = settingsDrafts.get(owner);
+	// Only multi-enum previews its inherited selections for an explicit
+	// "Use default" draft. Primitive controls retain their established cleared
+	// state until the PATCH null mutation is saved.
+	const staged = draft?.has(field.key) ? draft.get(field.key) : undefined;
+	const value = draft?.has(field.key)
+		? staged === undefined && field.type === "multi-enum" ? field.default : staged
+		: field.value;
+	return cloneSettingValue(value);
+}
+
+function setDraft(owner: string, key: string, value: ExtensionSettingDraftValue | undefined): void {
+	const draft = new Map(settingsDrafts.get(owner));
+	draft.set(key, cloneSettingValue(value));
+	settingsDrafts.set(owner, draft);
+}
+
+function settingsTargetIsDirty(target: ExtensionSettingsTarget, owner: string): boolean {
+	const draft = settingsDrafts.get(owner);
+	if (draft) {
+		for (const field of target.fields ?? []) {
+			if (field.type === "secret" && draft.get(`__clear__${field.key}`) === true) return true;
+			if (!draft.has(field.key)) continue;
+			const staged = draft.get(field.key);
+			if (staged === undefined) {
+				if (field.source === "project" || field.source === "legacy") return true;
+			} else if (!sameSettingValue(staged, field.value)) return true;
+		}
+	}
+	return (target.fields ?? []).some((field) => secretDrafts.has(secretDraftKey(owner, field.key)));
+}
+
+function secretDraftKey(owner: string, key: string): string {
+	return `${owner}:${key}`;
+}
+
+function setSecretDraft(owner: string, key: string, present: boolean): void {
+	const sentinel = secretDraftKey(owner, key);
+	if (present) secretDrafts.add(sentinel); else secretDrafts.delete(sentinel);
+}
+
+function clearSecretDraft(owner: string, key: string): void {
+	setSecretDraft(owner, key, false);
+	for (const input of document.querySelectorAll<HTMLInputElement>("input[data-secret-owner]")) {
+		if (input.dataset.secretOwner === owner && input.dataset.fieldKey === key) input.value = "";
+	}
+}
+
+function validateField(field: ExtensionSettingField, value: ExtensionSettingDraftValue | undefined): string | undefined {
+	if (field.type === "secret") return undefined;
+	if (field.type === "multi-enum") {
+		const selected = canonicalMultiEnum(value);
+		if (field.required && (!selected || selected.length === 0)) return "Select at least one option.";
+		return undefined;
+	}
+	// A cleared draft means "Use default". It remains valid when that declared
+	// default supplies the required effective value.
+	if (field.required && field.default === undefined && (value === undefined || value === null || value === "")) return "This setting is required.";
+	if (field.type === "number" && value !== undefined && value !== null && value !== "") {
+		const number = typeof value === "number" ? value : Number(value);
+		if (!Number.isFinite(number)) return "Enter a valid number.";
+		if (typeof field.min === "number" && number < field.min) return `Enter a number of at least ${field.min}.`;
+		if (typeof field.max === "number" && number > field.max) return `Enter a number no greater than ${field.max}.`;
+	}
+	return undefined;
+}
+
+function setFieldError(owner: string, key: string, error?: string): void {
+	const errors = new Map(settingsErrors.get(owner));
+	if (error) errors.set(key, error); else errors.delete(key);
+	settingsErrors.set(owner, errors);
+}
+
+function renderSettingsField(target: ExtensionSettingsTarget, field: ExtensionSettingField): TemplateResult {
+	const owner = settingsOwnerKey(target);
+	const value = draftFor(owner, field);
+	// Empty required sets are invalid even before a user interaction; surface the
+	// same error used to block save rather than hiding an unusable configuration.
+	const error = settingsErrors.get(owner)?.get(field.key)
+		?? (field.type === "multi-enum" ? validateField(field, value) : undefined);
+	const fieldId = `market-settings-${owner.replace(/[^a-zA-Z0-9_-]/g, "-")}-${field.key.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+	const errorId = `${fieldId}-error`;
+	const helpId = `${fieldId}-help`;
+	const busyOwner = settingsBusy.has(owner);
+	const change = (next: ExtensionSettingDraftValue | undefined): void => {
+		setDraft(owner, field.key, next);
+		setFieldError(owner, field.key, validateField(field, draftFor(owner, field)));
+		renderApp();
+	};
+	const ariaDescribedBy = [field.description ? helpId : "", error ? errorId : ""].filter(Boolean).join(" ") || undefined;
+	let control: TemplateResult;
+	if (field.type === "secret") {
+		control = html`<input id=${fieldId} class="market-input" type="password" data-testid="market-settings-input" data-field-key=${field.key} ?disabled=${busyOwner} aria-invalid=${error ? "true" : "false"} aria-describedby=${ariaDescribedBy} data-secret-owner=${owner} placeholder=${field.secretSet ? "Enter a replacement" : ""} autocomplete="new-password" autocapitalize="off" spellcheck="false" @input=${(event: Event) => { setSecretDraft(owner, field.key, (event.target as HTMLInputElement).value.length > 0); renderApp(); }} />`;
+	} else if (field.type === "enum") {
+		const selected = typeof value === "string" ? value : "";
+		const valid = (field.options ?? []).some((option) => option.value === selected);
+		control = html`<select id=${fieldId} class="market-input" data-testid="market-settings-input" data-field-key=${field.key} ?disabled=${busyOwner} aria-invalid=${error ? "true" : "false"} aria-describedby=${ariaDescribedBy} .value=${selected} @change=${(event: Event) => change((event.target as HTMLSelectElement).value)}>
+			${!field.required ? html`<option value="">Not set</option>` : ""}
+			${selected && !valid ? html`<option value=${selected} disabled>Unsupported: ${selected}</option>` : ""}
+			${(field.options ?? []).map((option) => html`<option value=${option.value}>${option.label || option.value}</option>`)}
+		</select>`;
+	} else if (field.type === "multi-enum") {
+		const selected = canonicalMultiEnum(value) ?? [];
+		const draft = settingsDrafts.get(owner);
+		const usingDefault = draft?.has(field.key) === true && draft.get(field.key) === undefined;
+		const toggle = (option: string, checked: boolean): void => {
+			// DOM events can arrive before Lit re-renders this closure. Always build
+			// the next set from the live draft so one toggle cannot restore another.
+			const current = canonicalMultiEnum(draftFor(owner, field)) ?? [];
+			change(checked ? [...current, option] : current.filter((selectedValue) => selectedValue !== option));
+		};
+		control = html`<fieldset id=${fieldId} class="market-settings-multi-enum" data-testid="market-settings-multi-enum" data-field-key=${field.key} ?disabled=${busyOwner} aria-invalid=${error ? "true" : "false"} aria-describedby=${ariaDescribedBy}>
+			<legend>${fieldLabel(field)}${field.required ? html` <span aria-hidden="true">*</span>` : ""}</legend>
+			<div class="market-settings-multi-enum-options">
+				${(field.options ?? []).map((option, index) => {
+					const optionId = `${fieldId}-option-${index}`;
+					return html`<label class="market-settings-multi-enum-option" for=${optionId}><input id=${optionId} type="checkbox" data-testid="market-settings-multi-enum-option" data-option-value=${option.value} ?disabled=${busyOwner} .checked=${selected.includes(option.value)} @change=${(event: Event) => toggle(option.value, (event.target as HTMLInputElement).checked)} /><span>${option.label || option.value}</span></label>`;
+				})}
+			</div>
+			<div class="market-settings-multi-enum-summary" data-testid="market-settings-multi-enum-summary">${usingDefault ? "Using default" : selected.length === 0 ? "None selected" : selected.length === 1 ? "1 selected" : `${selected.length} selected`}</div>
+		</fieldset>`;
+	} else if (field.type === "boolean") {
+		const checked = value === true;
+		control = html`<label class="market-settings-boolean"><span class="market-toggle-switch"><input id=${fieldId} type="checkbox" data-testid="market-settings-input" data-field-key=${field.key} ?disabled=${busyOwner} aria-invalid=${error ? "true" : "false"} aria-describedby=${ariaDescribedBy} .checked=${checked} @change=${(event: Event) => change((event.target as HTMLInputElement).checked)} /><span class="market-toggle-slider"></span></span><span>${checked ? "On" : "Off"}</span></label>`;
+	} else if (field.type === "number") {
+		control = html`<input id=${fieldId} class="market-input" type="number" inputmode="decimal" data-testid="market-settings-input" data-field-key=${field.key} ?disabled=${busyOwner} aria-invalid=${error ? "true" : "false"} aria-describedby=${ariaDescribedBy} .value=${value === undefined || value === null ? "" : String(value)} .min=${field.min === undefined ? "" : String(field.min)} .max=${field.max === undefined ? "" : String(field.max)} .step=${field.step === undefined ? "any" : String(field.step)} @input=${(event: Event) => { const text = (event.target as HTMLInputElement).value; change(text === "" ? null : text as unknown as number); }} @blur=${() => setFieldError(owner, field.key, validateField(field, draftFor(owner, field)))} />`;
+	} else if (field.type === "string") {
+		control = html`<input id=${fieldId} class="market-input" type="text" data-testid="market-settings-input" data-field-key=${field.key} ?disabled=${busyOwner} aria-invalid=${error ? "true" : "false"} aria-describedby=${ariaDescribedBy} .value=${typeof value === "string" ? value : ""} placeholder=${field.placeholder || ""} autocomplete="off" @input=${(event: Event) => change((event.target as HTMLInputElement).value)} @blur=${() => setFieldError(owner, field.key, validateField(field, draftFor(owner, field)))} />`;
+	} else {
+		control = html`<div class="market-error" role="alert">Unsupported setting type.</div>`;
+	}
+	const defaultLabel = Array.isArray(field.default) ? field.default.join(", ") : String(field.default);
+	return html`<div class="market-settings-field" data-testid="market-settings-field" data-field-key=${field.key} data-field-type=${field.type}>
+		${field.type !== "multi-enum" ? html`<label for=${fieldId}>${fieldLabel(field)}${field.required ? html` <span aria-hidden="true">*</span>` : ""}</label>` : ""}
+		${field.description ? html`<div id=${helpId} class="market-settings-help">${field.description}</div>` : ""}
+		${control}
+		${field.type === "secret" ? html`<div class="market-settings-secret-row"><span class="market-settings-secret-state" data-testid="market-settings-secret-state" data-state=${field.secretSet ? "set" : "unset"}>${field.secretSet ? "Stored for this project" : "Not set"}</span>${field.secretSet ? html`<button type="button" class="market-btn market-btn--danger" data-testid="market-settings-secret-remove" data-field-key=${field.key} ?disabled=${busyOwner} @click=${() => { setDraft(owner, `__clear__${field.key}`, true); clearSecretDraft(owner, field.key); renderApp(); }}>Remove secret</button>` : ""}</div>` : ""}
+		${field.type !== "secret" ? html`<div class="market-settings-source">${settingsDrafts.get(owner)?.has(field.key) || field.source === "project" ? html`<button type="button" class="market-link-button" data-testid="market-settings-use-default" data-field-key=${field.key} ?disabled=${busyOwner} @click=${() => { setDraft(owner, field.key, undefined); setFieldError(owner, field.key, validateField(field, draftFor(owner, field))); renderApp(); }}>Use default</button>` : field.default !== undefined ? `Default: ${defaultLabel}` : field.source === "legacy" ? "Legacy setting" : ""}</div>` : ""}
+		${error ? html`<div id=${errorId} class="market-settings-field-error" role="alert">${error}</div>` : ""}
+	</div>`;
+}
+
+function secretInputValue(owner: string, key: string): string {
+	const inputs = document.querySelectorAll<HTMLInputElement>("input[data-secret-owner]");
+	for (const input of inputs) if (input.dataset.secretOwner === owner && input.dataset.fieldKey === key) return input.value;
+	return "";
+}
+
+async function resetSettingsTarget(target: ExtensionSettingsTarget): Promise<void> {
+	const { confirmAction } = await import("./dialogs.js");
+	const projectName = state.projects.find((project) => project.id === currentProjectId())?.name || "this project";
+	const confirmed = await confirmAction("Reset project settings", `Reset all settings, including stored secrets, for ${target.label || target.id} in ${projectName}? Activation and grants will not change.`, "Reset settings", true);
+	if (!confirmed) return;
+	const owner = settingsOwnerKey(target);
+	for (const field of target.fields ?? []) {
+		if (field.type === "secret") {
+			setDraft(owner, `__clear__${field.key}`, true);
+			clearSecretDraft(owner, field.key);
+		} else {
+			setDraft(owner, field.key, undefined);
+			setFieldError(owner, field.key, validateField(field, draftFor(owner, field)));
+		}
+	}
+	renderApp();
+}
+
+async function saveSettingsTarget(target: ExtensionSettingsTarget): Promise<void> {
+	const projection = extensionSettings;
+	const projectId = currentProjectId();
+	if (!projection || !projectId) return;
+	const owner = settingsOwnerKey(target);
+	const errors = new Map<string, string>();
+	for (const field of target.fields ?? []) {
+		const error = validateField(field, draftFor(owner, field));
+		if (error) errors.set(field.key, error);
+	}
+	if (errors.size || (target.fields ?? []).some((field) => !["string", "secret", "enum", "multi-enum", "boolean", "number"].includes(field.type))) {
+		settingsErrors.set(owner, errors);
+		settingsFormErrors.set(owner, "Review the highlighted settings before saving.");
+		// A rejected save is still an outcome: discard DOM-only passwords and
+		// their sentinels rather than carrying credentials across attempts.
+		for (const field of target.fields ?? []) if (field.type === "secret") clearSecretDraft(owner, field.key);
+		renderApp();
+		return;
+	}
+	const draft = settingsDrafts.get(owner) ?? new Map();
+	const values: Record<string, ExtensionSettingValue | null> = {};
+	for (const field of target.fields ?? []) {
+		if (field.type === "secret") {
+			const replacement = secretInputValue(owner, field.key);
+			if (replacement) values[field.key] = replacement;
+			if (draft.get(`__clear__${field.key}`) === true) values[field.key] = null;
+		} else if (draft.has(field.key)) {
+			const value = draft.get(field.key);
+			values[field.key] = value === undefined ? null
+				: field.type === "number" && typeof value === "string" ? Number(value)
+				: cloneSettingValue(value) as ExtensionSettingValue;
+		}
+	}
+	settingsBusy.add(owner);
+	settingsFormErrors.delete(owner);
+	renderApp();
+	try {
+		const response = await patchExtensionSettingsTarget(projectId, { packId: target.packId, kind: target.kind as "provider" | "hook" | "runtime" | "sandboxRequirement", id: target.id }, { expectedRevision: projection.revision, values });
+		if (!response.ok) {
+			if (response.status === 409) {
+				settingsFormErrors.set(owner, "Settings changed elsewhere. Reload the latest settings, review your changes, then save again.");
+				return;
+			}
+			throw new Error();
+		}
+		clearExtensionSettingsUi(false);
+		settingsStatus = `Settings saved for ${state.projects.find((project) => project.id === projectId)?.name || "this project"}.`;
+		await loadExtensionSettings(projectId, true);
+	} catch {
+		settingsFormErrors.set(owner, "Settings were not saved. Secret values were cleared; re-enter them and retry.");
+	} finally {
+		settingsBusy.delete(owner);
+		// Do not preserve password input contents or dirty sentinels after any
+		// request outcome. The password bytes never left their DOM input until
+		// serialization for this request.
+		for (const field of target.fields ?? []) if (field.type === "secret") clearSecretDraft(owner, field.key);
+		renderApp();
+	}
+}
+
+async function toggleSettingsTarget(target: ExtensionSettingsTarget, enabled: boolean): Promise<void> {
+	const projectId = currentProjectId();
+	if (!extensionSettings || !projectId) return;
+	const owner = settingsOwnerKey(target);
+	settingsBusy.add(owner); renderApp();
+	try {
+		const response = target.kind === "pack"
+			? await patchExtensionSettingsPack(projectId, target.packId, { expectedRevision: extensionSettings.revision, enabled })
+			: await patchExtensionSettingsTarget(projectId, { packId: target.packId, kind: target.kind, id: target.id }, { expectedRevision: extensionSettings.revision, enabled });
+		if (!response.ok) throw new Error();
+		await loadExtensionSettings(projectId);
+	} catch {
+		settingsFormErrors.set(owner, "Could not update project activation. Retry.");
+	} finally { settingsBusy.delete(owner); renderApp(); }
+}
+
+function isGrantedCapability(state?: string): boolean {
+	return state === "Granted" || state === "Granted · inactive";
+}
+
+function isActionableCapability(capability: string, state?: string): capability is ExtensionCapabilityWire {
+	return state !== "Unavailable" && marketGrantCapabilities.has(capability as ExtensionCapabilityWire);
+}
+
+function capabilityTuple(target: ExtensionSettingsTarget, capability: ExtensionCapabilityWire): ExtensionCapabilityGrantTuple {
+	return target.kind === "pack"
+		? { packId: target.packId, principal: "pack", capability }
+		: { packId: target.packId, hookId: target.id, capability };
+}
+
+function canChangeCapability(target: ExtensionSettingsTarget, capability: string, state?: string): boolean {
+	if (!isActionableCapability(capability, state)) return false;
+	// A stale durable grant remains revocable. New authority is available only
+	// when the server's current project projection says the principal is active.
+	if (isGrantedCapability(state)) return true;
+	return target.enabled !== false
+		&& target.status !== "disabled"
+		&& target.status !== "review"
+		&& target.status !== "unavailable";
+}
+
+function capabilityError(responseStatus: number, granted: boolean): string {
+	if (responseStatus === 401 || responseStatus === 403) return "Sign in as a browser operator to change extension grants.";
+	if (responseStatus === 400) return "This capability request is no longer valid.";
+	if (responseStatus === 404) return "This pack is no longer active for this project.";
+	if (responseStatus === 422) return "This pack does not support this capability.";
+	return `Could not ${granted ? "revoke" : "grant"} this extension capability. Retry.`;
+}
+
+async function changeCapabilityGrant(target: ExtensionSettingsTarget, capability: string, grantState?: string): Promise<void> {
+	const projectId = currentProjectId();
+	if (!projectId || !isActionableCapability(capability, grantState)) return;
+	const tuple = capabilityTuple(target, capability);
+	const key = capabilityGrantKey(projectId, tuple);
+	if (capabilityGrantBusy.has(key)) return;
+	const granted = isGrantedCapability(grantState);
+	if (!granted && !canChangeCapability(target, capability, grantState)) return;
+	if (!granted) {
+		const { confirmAction } = await import("./dialogs.js");
+		const projectName = state.projects.find((project) => project.id === projectId)?.name || "this project";
+		const isPack = "principal" in tuple;
+		const broadMemoryCopy = capability === "memory.read.all"
+			? " This lets it read all project memory, including memory outside its ordinary scoped context."
+			: "";
+		const confirmed = await confirmAction(
+			"Grant extension capability",
+			isPack
+				? `Grant ${capability} to pack ${target.label || target.packId} (${target.packId}) for ${projectName}?${broadMemoryCopy}`
+				: `Grant ${capability} to hook ${target.label || target.id} (${target.id}) in pack ${target.packId} for ${projectName}?`,
+			"Grant capability",
+		);
+		if (!confirmed || currentProjectId() !== projectId || capabilityGrantBusy.has(key)) return;
+	}
+	capabilityGrantBusy.add(key);
+	capabilityGrantErrors.delete(key);
+	renderApp();
+	try {
+		const response = granted
+			? await revokeExtensionCapability(projectId, tuple)
+			: await grantExtensionCapability(projectId, tuple);
+		if (!response.ok) {
+			if (currentProjectId() === projectId) {
+				capabilityGrantErrors.set(key, capabilityError(response.status, granted));
+				// Invalid/inactive responses may have raced a projection update; never
+				// leave a locally actionable stale row behind.
+				if (response.status === 400 || response.status === 404 || response.status === 422) void loadExtensionSettings(projectId);
+			}
+			return;
+		}
+		if (currentProjectId() !== projectId) return;
+		settingsStatus = `${granted ? "Revoked" : "Granted"} ${capability} for ${target.label || target.id} in ${state.projects.find((project) => project.id === projectId)?.name || "this project"}.`;
+		// Grants affect only authority. Reload server-owned state rather than
+		// inferring authority locally; the separate audit read remains read-only.
+		await Promise.all([loadExtensionSettings(projectId), loadGrantAudit(projectId)]);
+	} finally {
+		if (currentProjectId() === projectId) {
+			capabilityGrantBusy.delete(key);
+			renderApp();
+		}
+	}
+}
+
+function renderExtensionGrants(target: ExtensionSettingsTarget): TemplateResult {
+	if (!target.grants?.length) return html``;
+	const projectId = currentProjectId() || "";
+	const grants = target.kind === "pack"
+		? [...target.grants].sort((left, right) => (packCapabilityRank.get(left.capability as ExtensionCapabilityWire) ?? Number.MAX_SAFE_INTEGER) - (packCapabilityRank.get(right.capability as ExtensionCapabilityWire) ?? Number.MAX_SAFE_INTEGER))
+		: target.grants;
+	const grantedCount = grants.filter((grant) => isGrantedCapability(grant.state)).length;
+	const principal = target.kind === "pack" ? "pack" : "hook";
+	return html`<details class="market-extension-grants ${target.kind === "hook" ? "market-hook-grants" : ""}" data-testid=${target.kind === "hook" ? "market-hook-grants" : "market-extension-grants"} data-principal=${principal}>
+		<summary>Review grants · ${grantedCount} of ${grants.length} granted</summary>
+		${grants.map((grant) => {
+			const capability = grant.capability as ExtensionCapabilityWire;
+			const tuple = capabilityTuple(target, capability);
+			const grantKey = capabilityGrantKey(projectId, tuple);
+			const granted = isGrantedCapability(grant.state);
+			const actionable = canChangeCapability(target, grant.capability, grant.state);
+			const grantBusy = capabilityGrantBusy.has(grantKey);
+			const grantError = capabilityGrantErrors.get(grantKey);
+			const copy = target.kind === "pack" ? packCapabilityCopy[capability] : undefined;
+			const rowId = `market-capability-${grantKey.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+			const descriptionId = `${rowId}-description`;
+			const inactiveReason = target.kind === "pack" && !granted && !actionable && grant.state !== "Unavailable"
+				? "Enable this pack before granting this capability."
+				: undefined;
+			const reasonId = `${rowId}-reason`;
+			const describedBy = [copy ? descriptionId : undefined, inactiveReason ? reasonId : undefined].filter(Boolean).join(" ");
+			return html`<div class="market-capability-grant" data-testid="market-capability-grant" data-capability=${grant.capability} data-state=${grant.state || "Unavailable"} aria-busy=${grantBusy ? "true" : "false"}>
+				${target.kind === "hook"
+					// Keep the legacy hook row as text, including its punctuation. Existing
+					// Market journeys and assistive output use this exact concise form.
+					? html`<span>${grant.capability}: ${grant.state || "Unavailable"}</span>`
+					: html`<div class="market-capability-copy">
+						${copy ? html`<strong>${copy.label}</strong>` : ""}
+						<code>${grant.capability}</code>
+						<span>${grant.state || "Unavailable"}</span>
+						${copy ? html`<span id=${descriptionId} class="market-capability-description">${copy.description}</span>` : ""}
+						${inactiveReason ? html`<span id=${reasonId} class="market-capability-description">${inactiveReason}</span>` : ""}
+					</div>`}
+				<button type="button" class="market-btn" data-testid="market-capability-action" data-capability=${grant.capability} data-state=${grant.state || "Unavailable"} aria-describedby=${describedBy || nothing} ?disabled=${!actionable || grantBusy} @click=${() => changeCapabilityGrant(target, grant.capability, grant.state)}>${grantBusy ? (granted ? "Revoking…" : "Granting…") : grant.state === "Unavailable" ? "Unavailable" : `${granted ? "Revoke" : "Grant"} ${grant.capability}`}</button>
+				${grantError ? html`<div class="market-error" data-testid="market-capability-error" role="alert">${grantError}</div>` : ""}
+			</div>`;
+		})}
+	</details>`;
+}
+
+function renderSettingsTarget(target: ExtensionSettingsTarget): TemplateResult {
+	const owner = settingsOwnerKey(target);
+	const open = expandedSettingsOwner === owner;
+	const busyOwner = settingsBusy.has(owner);
+	const status = targetStatus(target);
+	const panelId = `market-settings-panel-${owner.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+	const formError = settingsFormErrors.get(owner);
+	const dirty = settingsTargetIsDirty(target, owner);
+	const configurable = target.kind !== "pack";
+	const packControllable = target.kind !== "pack"
+		|| (extensionSettings?.targets.some((candidate) => candidate.packId === target.packId && candidate.kind !== "pack") ?? false);
+	return html`<div class="market-runtime-target market-runtime-target--${target.kind}" data-testid=${target.kind === "provider" ? "market-project-provider-row" : target.kind === "hook" ? "market-project-hook-row" : target.kind === "runtime" ? "market-project-runtime-row" : "market-project-pack-row"} data-contribution-id=${target.id}>
+		<div class="market-runtime-target-main"><span class="market-runtime-kind">${target.kind === "pack" ? "Pack" : target.kind === "provider" ? "Provider" : target.kind === "runtime" ? "Runtime" : "Hook"}</span><span>${target.label || target.id}</span></div>
+		<label class="market-activation-toggle"><span class="market-toggle-switch"><input type="checkbox" data-testid=${target.kind === "pack" ? "market-project-pack-enabled" : target.kind === "provider" ? "market-project-provider-enabled" : target.kind === "runtime" ? "market-project-runtime-enabled" : "market-project-hook-enabled"} .checked=${target.enabled !== false} ?disabled=${busyOwner || !packControllable} @change=${(event: Event) => toggleSettingsTarget(target, (event.target as HTMLInputElement).checked)} /><span class="market-toggle-slider"></span></span><span>${target.enabled === false ? "Off" : "On"}</span></label>
+		<span class="market-lozenge ${status.className}" data-testid="market-runtime-status" data-state=${status.state}>${status.label}</span>
+		${configurable ? html`<button type="button" class="market-btn" data-testid="market-settings-toggle" data-owner-kind=${target.kind} data-owner-id=${target.id} aria-expanded=${open ? "true" : "false"} aria-controls=${panelId} @click=${() => { expandedSettingsOwner = open ? "" : owner; renderApp(); }}>${open ? "Close settings" : "Configure"}</button>` : ""}
+		${renderExtensionGrants(target)}
+		${open && configurable ? html`<fieldset id=${panelId} class="market-settings-form" data-testid="market-settings-form" data-owner-kind=${target.kind} data-owner-id=${target.id} data-revision=${extensionSettings?.revision ?? 0} aria-busy=${busyOwner ? "true" : "false"}><legend>${target.label || target.id} ${target.kind} settings</legend><div class="market-settings-project">Project: ${state.projects.find((project) => project.id === currentProjectId())?.name || "Unknown"}</div><p class="market-settings-status-copy">${status.message}</p>${formError ? html`<div class="market-settings-error-summary" data-testid="market-settings-error-summary" role="alert">${formError}${formError.includes("changed elsewhere") ? html` <button type="button" class="market-btn" @click=${() => loadExtensionSettings(currentProjectId(), true)}>Reload latest</button>` : ""}</div>` : ""}<div class="market-settings-fields">${(target.fields ?? []).map((field) => renderSettingsField(target, field))}</div><div class="market-settings-actions"><button type="button" class="market-btn market-btn--danger" data-testid="market-settings-reset" ?disabled=${busyOwner} @click=${() => resetSettingsTarget(target)}>Reset project settings</button><button type="button" class="market-btn market-btn--primary" data-testid="market-settings-save" ?disabled=${!dirty || busyOwner} @click=${() => saveSettingsTarget(target)}>${busyOwner ? "Saving…" : "Save"}</button></div></fieldset>` : ""}
+	</div>`;
+}
+
+function renderProjectRuntime(pack: InstalledPackWire): TemplateResult {
+	const projectId = currentProjectId();
+	if (!projectId) return html``;
+	if (extensionSettingsLoading && extensionSettingsProjectId === projectId) return html`<div class="market-project-runtime market-project-runtime--loading" data-testid="market-project-runtime" data-project-id=${projectId} data-pack-id=${pack.packName}>Loading project runtime…</div>`;
+	if (extensionSettingsError) return html`<div class="market-project-runtime" data-testid="market-project-runtime" data-project-id=${projectId} data-pack-id=${pack.packName}><span class="market-lozenge market-lozenge--error" data-testid="market-runtime-status" data-state="unavailable">Unavailable</span><button class="market-btn" @click=${() => loadExtensionSettings(projectId, true)}>Retry</button></div>`;
+	const targets = extensionSettings?.targets.filter((target) => target.packId === pack.packName) ?? [];
+	if (!targets.length) return html``;
+	const project = state.projects.find((item) => item.id === projectId);
+	return html`<section class="market-project-runtime" data-testid="market-project-runtime" data-project-id=${projectId} data-pack-id=${pack.packName}><div class="market-project-runtime-heading">Project runtime <span>${project?.name || "Unknown project"}</span></div><div class="market-runtime-grid">${targets.map(renderSettingsTarget)}</div></section>`;
+}
+
+/** One live region per selected project, not one per installed pack card. */
+function renderProjectSettingsStatus(): TemplateResult {
+	const projectId = currentProjectId();
+	if (!projectId) return html``;
+	return html`<div class="market-settings-status" data-testid="market-settings-status" data-project-id=${projectId} role="status" aria-live="polite" aria-atomic="true">${settingsStatus}</div>`;
+}
+
+function renderNoProjectRuntimeEmptyState(): TemplateResult {
+	if (currentProjectId()) return html``;
+	return html`<section class="market-project-runtime" data-testid="market-project-runtime-empty" role="status">
+		<div class="market-project-runtime-heading">Project runtime <span>No project selected</span></div>
+		<p class="text-sm text-muted-foreground">Create or select a project to configure per-project providers, hooks, and settings. Server-scoped Market sources and packages remain available.</p>
+	</section>`;
+}
+
+function renderGrantHistory(): TemplateResult {
+	const projectId = currentProjectId();
+	if (!projectId) return html``;
+	const project = state.projects.find((item) => item.id === projectId);
+	return html`<details class="market-grant-history" data-testid="market-grant-history">
+		<summary>Grant history</summary>
+		${grantAuditLoading && grantAuditProjectId === projectId
+			? html`<p class="market-grant-history-empty">Loading grant history…</p>`
+			: grantAuditError
+				? html`<div class="market-error" data-testid="market-grant-history-error" role="alert">${grantAuditError} <button type="button" class="market-btn" @click=${() => loadGrantAudit(projectId)}>Retry</button></div>`
+				: grantAuditEntries.length === 0
+					? html`<p class="market-grant-history-empty">No extension grant changes have been recorded for this project.</p>`
+					: html`<ul class="market-grant-history-list" aria-label=${`Grant history for ${project?.name || "this project"}`}>
+						${grantAuditEntries.map((entry) => {
+							const timestamp = new Date(entry.at);
+							const principal = "principal" in entry
+								? `Pack · ${entry.packId}`
+								: `Hook · ${entry.packId} / ${entry.hookId}`;
+							return html`<li class="market-grant-history-row" data-testid="market-grant-history-entry" data-principal=${"principal" in entry ? "pack" : "hook"}>
+								<time datetime=${entry.at}>${Number.isNaN(timestamp.getTime()) ? entry.at : timestamp.toLocaleString()}</time>
+								<span>${entry.action === "granted" ? "Granted" : "Revoked"}</span>
+								<code>${entry.capability}</code>
+								<span>${principal}</span>
+								<span>${entry.actor}</span>
+							</li>`;
+						})}
+					</ul>`}
+	</details>`;
+}
+
 function renderInstalledPanel(): TemplateResult {
 	const builtinPacks = installed.filter((p) => p.builtin);
 	const scopesWithPacks = SCOPE_ORDER.filter((s) => packsForScope(s).length > 0);
 	const isEmpty = builtinPacks.length === 0 && scopesWithPacks.length === 0;
 	return html`
+		${renderAdoptionsPanel()}
 		<section class="market-panel" data-testid="market-installed-panel">
 			<h2 class="market-panel-title">${icon(Package, "sm")} Installed</h2>
+			${renderNoProjectRuntimeEmptyState()}
 			${installedError ? html`<div class="market-error" data-testid="market-installed-error">${installedError}</div>` : ""}
 			${isEmpty
 				? html`<p class="text-sm text-muted-foreground italic">No packs installed.</p>`
@@ -1492,6 +2733,8 @@ function renderInstalledPanel(): TemplateResult {
 					${builtinPacks.length > 0 ? renderBuiltinGroup(builtinPacks) : ""}
 					${scopesWithPacks.map(renderScopeGroup)}
 				`}
+			${renderProjectSettingsStatus()}
+			${renderGrantHistory()}
 		</section>
 	`;
 }
@@ -1541,7 +2784,7 @@ function renderBuiltinPackCard(pack: InstalledPackWire): TemplateResult {
 			</div>
 			${shadowed
 				? html`<div class="market-activation-help text-[11px] text-muted-foreground/70 italic mt-2" data-testid="market-builtin-shadowed">Shadowed by an installed pack — manage activation on the installed copy.</div>`
-				: html`${renderActivationControls(pack)}${renderActivationEntityDetails(pack)}`}
+				: html`${renderActivationControls(pack)}${renderProjectRuntime(pack)}${renderActivationEntityDetails(pack)}`}
 		</div>
 	`;
 }
@@ -1592,6 +2835,7 @@ function renderInstalledPackCard(pack: InstalledPackWire, scope: MarketScope, in
 					${renderProvenance(pack)}
 					${expanded && hasConflict ? renderConflictDetails(packConflicts) : ""}
 					${renderActivationControls(pack)}
+					${renderProjectRuntime(pack)}
 					${renderActivationEntityDetails(pack)}
 				</div>
 				<div class="flex flex-col items-end gap-1 shrink-0">
@@ -1984,8 +3228,9 @@ export function renderMarketplacePage(): TemplateResult {
 		<div class="flex-1 flex flex-col h-full" @click=${() => closeBrowseSourceMenu()}>
 			${renderNavBar()}
 			${renderResearchPreviewBanner()}
+			${renderMarketProjectScope()}
 			${renderTabBar()}
-			<div class="flex-1 overflow-y-auto">
+			<div id="market-tabpanel" class="flex-1 overflow-y-auto" role="tabpanel" aria-label=${`${activeTab[0].toUpperCase()}${activeTab.slice(1)} marketplace`}>
 				<div class="max-w-3xl mx-auto px-4 py-6 flex flex-col gap-6">
 					${panel}
 				</div>

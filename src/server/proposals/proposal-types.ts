@@ -12,6 +12,7 @@
  * Design doc: docs/design/editable-proposals.md §3, §4.
  */
 import { parse as yamlParse, stringify as yamlStringify } from "yaml";
+import { PromptExtensionValidationError, validatePromptExtensionProposalSections } from "../agent/prompt-extension-overrides.js";
 // Note: type-only import to avoid runtime cycle with proposal-files.ts.
 import type {
 	ParseError,
@@ -290,6 +291,8 @@ function makeYamlPlugin(opts: {
 	 * existing registered project (explicit `projectId`).
 	 */
 	resolveRequiredFields?: (fields: Record<string, unknown>) => readonly string[];
+	/** Type-specific structural validation after generic required-field checks. */
+	validateFields?: (fields: Record<string, unknown>) => ParseError | null;
 }): ProposalTypePlugin {
 	return {
 		type: opts.type,
@@ -348,6 +351,8 @@ function makeYamlPlugin(opts: {
 					};
 				}
 			}
+			const fieldError = opts.validateFields?.(parsed as Record<string, unknown>);
+			if (fieldError) return fieldError;
 			const value: TypedProposal = { type: opts.type, fields: parsed as Record<string, unknown> };
 			return { ok: true, value };
 		},
@@ -359,6 +364,20 @@ function projectIdPresent(fields: Record<string, unknown>): boolean {
 	return typeof v === "string" && v.trim() !== "";
 }
 
+/** Validate the EP-13 proposal-only static-prompt edit field before it reaches approval. */
+export function validateProjectExtensionPromptSections(fields: Record<string, unknown>): ParseError | null {
+	if (fields.extensionPromptSections === undefined || fields.extensionPromptSections === null) return null;
+	try {
+		validatePromptExtensionProposalSections(fields.extensionPromptSections);
+		return null;
+	} catch (error) {
+		const message = error instanceof PromptExtensionValidationError
+			? error.message
+			: "extensionPromptSections is invalid";
+		return { ok: false, code: "STRUCTURAL_VALIDATION_FAILED", message };
+	}
+}
+
 const projectPlugin = makeYamlPlugin({
 	type: "project",
 	// `name` is always required. `root_path` is required only for CREATE
@@ -367,6 +386,15 @@ const projectPlugin = makeYamlPlugin({
 	requiredFields: ["name", "root_path"],
 	resolveRequiredFields: (fields) =>
 		projectIdPresent(fields) ? ["name"] : ["name", "root_path"],
+	validateFields: validateProjectExtensionPromptSections,
+});
+
+const workflowPlugin = makeYamlPlugin({
+	type: "workflow",
+	requiredFields: ["id", "name", "gates"],
+	validateFields: (fields) => Array.isArray(fields.gates)
+		? null
+		: { ok: false, code: "STRUCTURAL_VALIDATION_FAILED", message: "workflow.gates must be an array" },
 });
 
 const rolePlugin = makeYamlPlugin({
@@ -387,6 +415,7 @@ const staffPlugin = makeYamlPlugin({
 const REGISTRY: Record<ProposalType, ProposalTypePlugin> = {
 	goal: goalPlugin,
 	project: projectPlugin,
+	workflow: workflowPlugin,
 	role: rolePlugin,
 	tool: toolPlugin,
 	staff: staffPlugin,

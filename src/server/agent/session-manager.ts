@@ -83,7 +83,10 @@ import {
 } from "./compaction-sidecar.js";
 import {
 	SessionStore,
+	normalizeHumanSelectionPins,
 	normalizePersistedInFlightSteers,
+	normalizeScheduledAdvisorTurnCount,
+	type HumanSelectionPins,
 	type InFlightSteerRecord,
 	type PersistedSession,
 } from "./session-store.js";
@@ -96,7 +99,9 @@ import { shouldKeepDespiteOrphan, scanOrphanedTranscriptsAsync } from "./orphan-
 import { getAssistantDef, assistantRoleForType, composeAssistantTitle } from "./assistant-registry.js";
 import { resolveBundledDocsDir, resolveBundledSrcDir } from "./bundled-paths.js";
 import { buildReattemptContext } from "./goal-assistant.js";
-import { assembleSystemPrompt, cleanupSessionPrompt, cleanupSessionPromptAsync, persistPromptSections, purgePromptSectionsJsonAsync, type PromptParts } from "./system-prompt.js";
+import { assembleSystemPrompt, cleanupSessionPrompt, cleanupSessionPromptAsync, persistPromptSections, purgePromptSectionsJsonAsync, type PromptParts, type ResolvedSystemPromptSection } from "./system-prompt.js";
+import { PromptExtensionAuthoringAuditStore, type PromptExtensionAuthoringUsage } from "./prompt-extension-audit-store.js";
+import { ContextTraceStore } from "./context-trace-store.js";
 import { profile } from "./profiling.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics, recordEventLoopOperation } from "./cpu-diagnostics.js";
 import { generateSessionTitle, generateGoalSummaryTitle } from "./title-generator.js";
@@ -107,9 +112,13 @@ import type { ToolManager } from "./tool-manager.js";
 import { computeToolActivationArgs, writeMcpProxyExtensions, writeToolGuardExtension, computeEffectiveAllowedTools, tagAllowedTools, type EffectiveTool } from "./tool-activation.js";
 import { hasProviderBridgeHooks, writeProviderBridgeExtension } from "./provider-bridge-extension.js";
 import { prependToolResultErrorBridge } from "./tool-result-error-bridge-extension.js";
+import { assertToolResultGatePiCompatibility, toolResultFilterGateEnvironment, writeToolResultFilterExtension } from "./tool-result-filter-extension.js";
+import { ToolResultFilterAttemptCredentials } from "./tool-result-filter-attempt-credentials.js";
 import { normalizeToolResultErrorEvent, normalizeToolResultErrorSnapshot } from "./tool-result-error-normalizer.js";
 import { writeGoogleCodeAssistProviderExtension } from "./google-code-assist-provider-extension.js";
 import { discoverSlashSkills, type SkillMarketContext } from "../skills/slash-skills.js";
+import type { DynamicCapabilitySelection } from "./dynamic-capability-contract.js";
+import { adoptedSkillEntries, type AdoptedSkillLedgerReader } from "../skills/adopted-skill-entries.js";
 import { headquartersDir } from "../bobbit-dir.js";
 import { HEADQUARTERS_PROJECT_ID } from "./project-registry.js";
 import { shouldSkipRemotePush, shouldSkipRemoteGitForTests, shouldSkipRemotePushForTests, detectPrimaryBranch, isGitRepo, getRepoRoot, isUnresolvedHeadWorktreeError, type RemoteGitPolicy } from "../skills/git.js";
@@ -160,7 +169,8 @@ import { activeAgentSessionsDir, migratedActiveAgentSessionFileForHostPath, trus
 import { shouldReapChildOnBoot, shouldSendRestartCollectionReminder, type OrchestrationCore } from "./orchestration-core.js";
 
 import { isSandboxExemptProject, type SandboxManager } from "./sandbox-manager.js";
-import type { LifecycleHub } from "./lifecycle-hub.js";
+import type { HookDispatchBase, LifecycleHub, TurnUsageSnapshot } from "./lifecycle-hub.js";
+import { readTerminalAssistantUsage } from "./turn-usage.js";
 import { WorktreePool } from "./worktree-pool.js";
 import { BACKGROUND_IO_CONCURRENCY, mapWithConcurrency, removeTree } from "./bounded-async-work.js";
 import { backfillStaffIds as backfillStaffIdsImpl } from "./staff-backfill.js";
@@ -171,6 +181,7 @@ import {
 	type MarketplacePiExtensionResolver,
 	type MarketplacePiExtensionActivation,
 	type PiExtensionDiagnostic,
+	assertToolResultFilterExtensionCompatibility,
 	resolveMarketplacePiExtensionActivation,
 	scopedToolContext,
 	executePlan,
@@ -405,6 +416,24 @@ interface GitWorktreeRef {
 
 interface GitWorktreeRefs {
 	entries: GitWorktreeRef[];
+	/** False when Git could not authoritatively enumerate worktree metadata. */
+	verified: boolean;
+}
+
+type PostCleanupPathState = "absent" | "present" | "unconfirmed";
+
+/**
+ * Confirm removal after a destructive operation without treating inaccessible
+ * paths as missing. Only lstat's definitive missing-path errors prove absence.
+ */
+async function postCleanupPathState(candidatePath: string): Promise<PostCleanupPathState> {
+	try {
+		await fsp.lstat(candidatePath);
+		return "present";
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException | undefined)?.code;
+		return code === "ENOENT" || code === "ENOTDIR" ? "absent" : "unconfirmed";
+	}
 }
 
 interface ArchivedWorktreeGuardRef {
@@ -730,6 +759,14 @@ interface LivePromptAuthorMessageBinding {
 
 type ReplayPromptAuthorBinding = LivePromptAuthorMessageBinding;
 
+interface PendingPromptExtensionAudit {
+	id: string;
+	projectId: string;
+	stateDir: string;
+	/** Session-owner mirror; this makes a cross-project audit directly queryable by its authoring session. */
+	sessionStateDir?: string;
+}
+
 export interface PromptAuthorTombstoneBudget {
 	maxCount: number;
 	maxBytes: number;
@@ -891,6 +928,8 @@ export interface SessionInfo {
 	projectId?: string;
 	/** Allowed tools for this session */
 	allowedTools?: string[];
+	/** Immutable startup selector snapshot; never rerun selectors on restore/respawn. */
+	dynamicCapabilities?: DynamicCapabilitySelection;
 	/** Server-side prompt queue */
 	promptQueue: PromptQueue;
 	/** Queue row IDs re-enqueued after prompt delivery failed before agent_start. */
@@ -932,6 +971,8 @@ export interface SessionInfo {
 	spawnPinnedModel?: string;
 	/** Thinking level passed via `--thinking` at spawn time, if any. */
 	spawnPinnedThinkingLevel?: string;
+	/** Explicit user selections, never inferred from automatic/runtime tuple writes. */
+	humanSelectionPins?: HumanSelectionPins;
 	/** Staged candidates verify without advancing shared durable/client authority. */
 	_deferVerifiedTupleCommit?: boolean;
 	/** Exact recovery candidates must never use the opt-in controlled fallback. */
@@ -974,6 +1015,9 @@ export interface SessionInfo {
 	 * — polling for `status==idle` alone races with the pre-prompt idle
 	 * state, so observability of “a turn finished” needs its own counter. */
 	completedTurnCount?: number;
+	/** Durable monotonic every-N cadence used by advisors and scheduled decisions.
+	 * Unlike completedTurnCount it survives restore, respawn, and compaction. */
+	scheduledAdvisorTurnCount?: number;
 	/** Monotonic diagnostic count of inbound events that advance a canonical Pi
 	 * turn. Dispatch acceptance uses exact prompt activity boundaries instead. */
 	agentObservedTurnVersion?: number;
@@ -1032,8 +1076,14 @@ export interface SessionInfo {
 	latestTurnUserText?: string;
 	/** Assistant final text from the current/just-finished turn; passed to afterTurn providers. */
 	latestTurnAssistantText?: string;
+	/** Direct terminal usage for the current live turn; never persisted or ledger-derived. */
+	terminalTurnUsage?: TurnUsageSnapshot;
 	/** Cached PromptParts for serving prompt-sections API */
 	promptParts?: PromptParts;
+	/** A static-prompt update arrived during this turn and must apply before queue drain. */
+	staticPromptRefreshPending?: boolean;
+	pendingPromptExtensionAudits?: PendingPromptExtensionAudit[];
+	latestTerminalPromptExtensionUsage?: PromptExtensionAuthoringUsage;
 	/**
 	 * FIFO queue of pending skill-expansion envelopes awaiting echo-back from
 	 * the agent. Each entry carries the modelText (what the agent will echo as
@@ -1188,7 +1238,7 @@ export type VerifiedSessionModelTuple = {
 	thinkingLevel: ThinkingLevel;
 };
 
-type SetupInitialThinkingAuthority = Readonly<{
+type SetupCallerThinkingAuthority = Readonly<{
 	initialThinkingLevel: ThinkingLevel;
 }>;
 
@@ -2975,6 +3025,10 @@ export interface SessionTerminationInfo {
 }
 
 export type SessionTerminationListener = (sessionId: string, info: SessionTerminationInfo) => void | Promise<void>;
+/** Fired only after host worktree removal has been confirmed, never for a skipped or failed cleanup. */
+export type SessionWorktreeRemovedListener = (sessionId: string, info: { projectId?: string; worktreePaths: readonly string[] }) => void | Promise<void>;
+/** Fired only after a worktree-backed session has persisted its final coordinates. */
+export type SessionWorktreeReadyListener = (session: SessionInfo) => void | Promise<void>;
 
 /** Purge-only entry into the gateway's per-session preview operation queue. */
 export type SessionPreviewPurgeOperation = <T>(sessionId: string, operation: () => Promise<T>) => Promise<T>;
@@ -3145,7 +3199,15 @@ export class SessionManager {
 	private scopedMcpManagers: Map<string, McpManager> = new Map();
 	private marketplaceMcpResolver: MarketplaceMcpResolver | null = null;
 	private marketplacePiExtensionResolver: MarketplacePiExtensionResolver | null = null;
+	/** Server-owned resolver: registry/grants/overrides/budgets stay outside sessions. */
+	private staticPromptSectionResolver: ((projectId: string | undefined) => ResolvedSystemPromptSection[]) | null = null;
+	/** Core-owned request-mutation availability; recalculated for each spawn/restore. */
+	private requestMutationActivationResolver: ((projectId: string | undefined) => { prompt?: boolean; toolSafety?: boolean }) | null = null;
+	/** Core-owned pre-fan-out result-gate availability; recalculated for each spawn/restore. */
+	private toolResultFilterActivationResolver: ((projectId: string | undefined) => { toolResult?: boolean }) | null = null;
 	private piExtensionRuntimeDiagnostics = new Map<string, PiExtensionDiagnostic>();
+	/** A setup owner serializes reconciliation until its exact session pipeline settles. */
+	private readonly pendingSessionSetups = new Map<string, Promise<unknown>>();
 	private worktreePools: Map<string, WorktreePool> = new Map();
 	private worktreePoolInitializations = new Map<string, Promise<void>>();
 	sandboxManager: SandboxManager | null = null;
@@ -3160,6 +3222,8 @@ export class SessionManager {
 	 * every spawn/restore/respawn path can inject without a null-check).
 	 */
 	readonly sessionSecretStore: SessionSecretStore = new SessionSecretStore();
+	/** Server-only owner of private Pi result-gate callback credentials. */
+	readonly toolResultFilterAttemptCredentials = new ToolResultFilterAttemptCredentials();
 	configCascade: import("./config-cascade.js").ConfigCascade | null = null;
 	/**
 	 * Optional inbox nudger. Wired late from `server.ts` boot via
@@ -3171,7 +3235,9 @@ export class SessionManager {
 	private _onPrCreationDetected?: (session: SessionInfo) => void;
 	private _verificationHarness?: import("./verification-harness.js").VerificationHarness;
 	private _terminationListeners: SessionTerminationListener[] = [];
+	private _worktreeRemovedListeners: SessionWorktreeRemovedListener[] = [];
 	private _creationListeners: Array<(session: SessionInfo) => void> = [];
+	private _worktreeReadyListeners: SessionWorktreeReadyListener[] = [];
 	private _extensionChannels?: ExtensionChannelServices;
 	/**
 	 * Count of agent-CLI `*.jsonl` transcripts on disk that don't match any
@@ -3214,7 +3280,7 @@ export class SessionManager {
 	 * verifying its spawn tuple. The provisional spawn pin may already have been
 	 * clamped for a model that controlled fallback later replaces.
 	 */
-	private _setupInitialThinkingAuthorities = new Map<string, SetupInitialThinkingAuthority>();
+	private _setupCallerThinkingAuthorities = new Map<string, SetupCallerThinkingAuthority>();
 	/** User-driven orphan-history recoveries include their redrive so duplicate Retry clicks join instead of dispatching twice. */
 	private _poisonedHistoryRecoveries = new Map<string, Promise<void>>();
 	/** Latest lifecycle generation for each session; stale SessionInfo writers must no-op when behind this value. */
@@ -3236,14 +3302,14 @@ export class SessionManager {
 		this._aigwModelCache = null;
 	}
 
-	private retainSetupInitialThinkingAuthority(sessionId: string, rawInitialThinkingLevel: string | undefined): () => void {
+	private retainSetupCallerThinkingAuthority(sessionId: string, rawInitialThinkingLevel: string | undefined): () => void {
 		const initialThinkingLevel = isKnownThinkingLevel(rawInitialThinkingLevel);
 		if (!initialThinkingLevel) return () => {};
-		const authority: SetupInitialThinkingAuthority = { initialThinkingLevel };
-		this._setupInitialThinkingAuthorities.set(sessionId, authority);
+		const authority: SetupCallerThinkingAuthority = { initialThinkingLevel };
+		this._setupCallerThinkingAuthorities.set(sessionId, authority);
 		return () => {
-			if (this._setupInitialThinkingAuthorities.get(sessionId) === authority) {
-				this._setupInitialThinkingAuthorities.delete(sessionId);
+			if (this._setupCallerThinkingAuthorities.get(sessionId) === authority) {
+				this._setupCallerThinkingAuthorities.delete(sessionId);
 			}
 		};
 	}
@@ -3407,6 +3473,10 @@ export class SessionManager {
 
 	private _nextRespawnGeneration(sessionId: string): number {
 		const next = this._currentRespawnGeneration(sessionId) + 1;
+		// This is a lifecycle sequencing counter, not a process fence: a
+		// poison-redrive can advance it without replacing the live Pi process.
+		// Tool-result credentials rotate only when a replacement gate is prepared
+		// (beginRuntime) or the session is actually removed.
 		this._sessionRespawnGenerations.set(sessionId, next);
 		return next;
 	}
@@ -3648,9 +3718,36 @@ export class SessionManager {
 		this._terminationListeners.push(fn);
 	}
 
+	/** Subscribe to authoritative host worktree-removal completions. */
+	addWorktreeRemovedListener(fn: SessionWorktreeRemovedListener): void {
+		this._worktreeRemovedListeners.push(fn);
+	}
+
+	private async notifyWorktreeRemoved(sessionId: string, projectId: string | undefined, worktreePaths: readonly string[]): Promise<void> {
+		if (worktreePaths.length === 0) return;
+		for (const listener of this._worktreeRemovedListeners) {
+			try { await listener(sessionId, { projectId, worktreePaths }); } catch (err) {
+				console.error(`[session ${sessionId}] worktree removal listener failed:`, err);
+			}
+		}
+	}
+
 	/** Subscribe to newly created visible sessions. Listeners are invoked after initial persistence. */
 	addCreationListener(fn: (session: SessionInfo) => void): void {
 		this._creationListeners.push(fn);
+	}
+
+	/** Subscribe to the durable worktree-ready boundary in the setup pipeline. */
+	addWorktreeReadyListener(fn: SessionWorktreeReadyListener): void {
+		this._worktreeReadyListeners.push(fn);
+	}
+
+	private async notifyWorktreeReady(session: SessionInfo): Promise<void> {
+		for (const fn of this._worktreeReadyListeners) {
+			try { await fn(session); } catch (err) {
+				console.error(`[session-manager] worktree-ready listener failed for ${session.id}:`, err);
+			}
+		}
 	}
 
 	private notifySessionCreated(session: SessionInfo): void {
@@ -3926,6 +4023,139 @@ export class SessionManager {
 
 	setExtensionChannelServices(services: ExtensionChannelServices | undefined): void {
 		this._extensionChannels = services;
+	}
+
+
+	/** Install the project-effective EP-13 resolver after the pack registry boots. */
+	setStaticPromptSectionResolver(resolver: ((projectId: string | undefined) => ResolvedSystemPromptSection[]) | null): void {
+		this.staticPromptSectionResolver = resolver;
+	}
+
+	/** Install the core dispatcher availability resolver after registry boot. */
+	setRequestMutationActivationResolver(
+		resolver: ((projectId: string | undefined) => { prompt?: boolean; toolSafety?: boolean }) | null,
+	): void {
+		this.requestMutationActivationResolver = resolver;
+	}
+
+	/** Install the result-filter availability resolver after the dispatcher boots. */
+	setToolResultFilterActivationResolver(
+		resolver: ((projectId: string | undefined) => { toolResult?: boolean }) | null,
+	): void {
+		this.toolResultFilterActivationResolver = resolver;
+	}
+
+	/**
+	 * Reconcile a newly granted result gate with already-running project sessions.
+	 * The replacement coordinator fences prompt dispatch while preserving the
+	 * session identity, queue, clients, and transcript. Revocation deliberately
+	 * keeps an installed gate: it passes through under the current policy and is
+	 * reusable if the grant returns, avoiding a needless raw-runtime flip.
+	 */
+	/**
+	 * The only post-start admission point for a Pi result gate. Activation may
+	 * change after setup resolved it but before `RpcBridge.start()` returns, while
+	 * this session is still invisible to grant reconciliation. Never publish that
+	 * bridge as runnable unless the current policy and exact staged credential agree.
+	 */
+	private async commitStartedToolResultFilterGate(
+		sessionId: string,
+		projectId: string | undefined,
+		rpcClient: RpcBridge,
+		credential: import("./tool-result-filter-attempt-credentials.js").ToolResultFilterGateCredential | undefined,
+	): Promise<void> {
+		try {
+			if (credential) this.toolResultFilterAttemptCredentials.commitRuntime(sessionId, credential);
+			this.assertToolResultFilterGateAtPublication(sessionId, projectId);
+		} catch (err) {
+			this.toolResultFilterAttemptCredentials.invalidate(sessionId);
+			await rpcClient.stop().catch(() => {});
+			throw err;
+		}
+	}
+
+	/**
+	 * Synchronous publication fence. Call immediately before returning or placing
+	 * a started session in `sessions`; an async gap would reintroduce the grant
+	 * ordering window this guard closes.
+	 */
+	private assertToolResultFilterGateAtPublication(sessionId: string, projectId: string | undefined): void {
+		try {
+			if (this.toolResultFilterActivationResolver?.(projectId).toolResult === true
+				&& !this.toolResultFilterAttemptCredentials.hasRuntime(sessionId)) {
+				throw new Error(`Tool-result filter gate was not installed for session ${sessionId}`);
+			}
+		} catch (err) {
+			this.toolResultFilterAttemptCredentials.invalidate(sessionId);
+			throw err;
+		}
+	}
+
+	async reconcileToolResultFilterGate(projectId: string): Promise<void> {
+		if (this.toolResultFilterActivationResolver?.(projectId).toolResult !== true) return;
+		for (const sessionId of [...this.sessions.keys()]) {
+			// Setup may have already resolved activation while its bridge/session is
+			// only partially published. Wait for its owner rather than guessing from
+			// `status` and accidentally replacing it or returning an early grant.
+			const pendingSetup = this.pendingSessionSetups.get(sessionId);
+			if (pendingSetup) {
+				// A rejected setup normally removes its session, but cleanup is
+				// generation-aware. Suppress the owner error and re-read canonical state:
+				// a live bridge left behind still needs gate reconciliation.
+				try { await pendingSetup; }
+				catch { /* inspect the current live owner below */ }
+			}
+			const session = this.sessions.get(sessionId);
+			if (!session || session.projectId !== projectId || !session.rpcClient.running) continue;
+			if (this.toolResultFilterAttemptCredentials.hasRuntime(session.id)) continue;
+			await this.restartAgent(session.id);
+			// The effective policy may have changed while this session waited behind
+			// another replacement. Never report a grant as active without its gate.
+			if (this.toolResultFilterActivationResolver?.(projectId).toolResult === true
+				&& !this.toolResultFilterAttemptCredentials.hasRuntime(session.id)) {
+				throw new Error(`Tool-result filter gate was not installed for session ${session.id}`);
+			}
+		}
+	}
+
+	private resolveStaticPromptSections(projectId: string | undefined): ResolvedSystemPromptSection[] {
+		if (!this.staticPromptSectionResolver) return [];
+		try { return this.staticPromptSectionResolver(projectId); }
+		catch { console.warn("[session-manager] static prompt extensions rejected; retaining core prompt"); return []; }
+	}
+
+	registerPromptExtensionAuthoringAudits(
+		sessionId: string,
+		auditIds: readonly string[],
+		target: { projectId: string; stateDir: string; sessionStateDir?: string },
+	): void {
+		const session = this.sessions.get(sessionId);
+		if (!session || auditIds.length === 0) return;
+		const pending = session.pendingPromptExtensionAudits ??= [];
+		for (const id of auditIds) {
+			if (!pending.some(entry => entry.id === id)) {
+				pending.push({ id, projectId: target.projectId, stateDir: target.stateDir, ...(target.sessionStateDir ? { sessionStateDir: target.sessionStateDir } : {}) });
+			}
+		}
+	}
+
+	private applyPendingStaticPromptRefresh(session: SessionInfo): void {
+		if (!session.staticPromptRefreshPending) return;
+		if (this.refreshStaticPromptSectionsForSession(session)) session.staticPromptRefreshPending = false;
+	}
+
+	private refreshStaticPromptSectionsForSession(session: SessionInfo): boolean {
+		try { const parts = this.getPromptParts(session.id); if (!parts) return false; parts.extensionPromptSections = this.resolveStaticPromptSections(session.projectId); this.assemblePrompt(session.id, parts); return true; }
+		catch { console.warn("[session-manager] static prompt refresh rejected; retaining prior prompt"); return false; }
+	}
+
+	/** Rebuild prompt files now for idle sessions, or fence busy sessions until their turn ends. */
+	refreshStaticPromptSections(projectId: string): void {
+		for (const session of this.sessions.values()) {
+			if (session.projectId !== projectId) continue;
+			if (session.status === "streaming") { session.staticPromptRefreshPending = true; continue; }
+			this.refreshStaticPromptSectionsForSession(session);
+		}
 	}
 
 	get extensionChannels(): ExtensionChannelServices | undefined {
@@ -4264,9 +4494,59 @@ export class SessionManager {
 			sandboxManager: this.sandboxManager,
 			sandboxTokenStore: this.sandboxTokenStore,
 			sessionSecretStore: this.sessionSecretStore,
+			toolResultFilterGateCredential: (sessionId) => this.toolResultFilterAttemptCredentials.beginRuntime(
+				sessionId, this._currentRespawnGeneration(sessionId),
+			),
+			invalidateToolResultFilterGate: (sessionId) => this.toolResultFilterAttemptCredentials.invalidate(sessionId),
+			commitToolResultFilterGate: (sessionId, runtimeProjectId, rpcClient, credential) =>
+				this.commitStartedToolResultFilterGate(sessionId, runtimeProjectId, rpcClient, credential),
+			assertToolResultFilterGateAtPublication: (sessionId, runtimeProjectId) =>
+				this.assertToolResultFilterGateAtPublication(sessionId, runtimeProjectId),
 			groupPolicyStore: this.groupPolicyStore ?? null,
 			configCascade: this.configCascade,
 			lifecycleHub: this.lifecycleHub,
+			requestMutationActivation: this.requestMutationActivationResolver ?? undefined,
+			toolResultFilterActivation: this.toolResultFilterActivationResolver ?? undefined,
+			resolveDynamicSkillCandidates: (scope) => this.computeSkillsCatalog(
+				undefined,
+				scope.cwd,
+				scope.projectId && this.projectContextManager
+					? this.projectContextManager.getOrCreate(scope.projectId)?.projectConfigStore
+					: resolvedProjectConfigStore ?? undefined,
+				scope.projectId,
+			)?.map(skill => skill.name) ?? [],
+			resolveDynamicSkillsCatalog: (scope) => this.computeSkillsCatalog(
+				scope.allowedTools ? [...scope.allowedTools] : undefined,
+				scope.cwd,
+				scope.projectId && this.projectContextManager
+					? this.projectContextManager.getOrCreate(scope.projectId)?.projectConfigStore
+					: resolvedProjectConfigStore ?? undefined,
+				scope.projectId,
+				scope.selectedNames,
+			),
+			recordDynamicCapabilitySelection: (input) => {
+				try {
+					const trace = new ContextTraceStore(this.stateDir);
+					const stageRows = (stage: "skills" | "mcp", result: { outcomes: readonly unknown[]; selected: readonly string[]; authoritative: boolean }, candidateCount: number, contextBytesSaved: number) => [
+						...result.outcomes.map(row => ({
+							...(row as Record<string, unknown>), capabilityStage: stage,
+							...(input.selection ? { selectionFingerprint: input.selection.selectionFingerprint } : {}),
+							candidateCount, selectedCount: result.selected.length,
+							selectorCount: result.outcomes.length, contextBytesSaved,
+						})),
+						{ kind: "decision", hookId: "core", event: "sessionSetup", outcome: result.authoritative ? "applied" : "dropped", capabilityStage: stage,
+							...(input.selection ? { selectionFingerprint: input.selection.selectionFingerprint } : {}), candidateCount, selectedCount: result.selected.length,
+							selectorCount: result.outcomes.length, contextBytesSaved },
+					];
+					trace.appendTrace(input.sessionId, {
+						ts: Date.now(), hook: "sessionSetup", sessionId: input.sessionId, providers: [],
+						outcomes: [
+							...stageRows("skills", input.skills, input.skillCandidateCount, input.skillsContextBytesSaved),
+							...stageRows("mcp", input.mcp, input.mcpCandidateCount, input.mcpContextBytesSaved),
+						] as any,
+					});
+				} catch { /* telemetry is deliberately isolated from setup */ }
+			},
 			costTracker: resolvedCostTracker,
 			store: resolvedStore,
 			searchIndex: resolvedSearchIndex,
@@ -4274,6 +4554,8 @@ export class SessionManager {
 			listPersistedSessionsForWorktreeGuard: () => this.getAllPersistedSessionsForWorktreeGuard(),
 			commandRunner: this.commandRunner,
 			assemblePrompt: (id, parts) => this.assemblePrompt(id, parts),
+			resolveStaticPromptSections: (targetProjectId) => this.resolveStaticPromptSections(targetProjectId ?? projectId),
+			onWorktreeReady: (session) => this.notifyWorktreeReady(session),
 
 			applySandboxWiring: (opts, id, sandboxOpts) => this.applySandboxWiring(opts, id, sandboxOpts),
 			finalizeSpawnOptions: (opts, requested) => this.finalizeSpawnOptions(opts, requested),
@@ -4283,7 +4565,7 @@ export class SessionManager {
 			recordPiExtensionDiagnostic: (session, diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension),
 			broadcast: (clients, msg) => broadcast(clients, msg),
 			tryAutoSelectModel: async (session) => { await this.tryAutoSelectModel(session); },
-			tryApplyDefaultThinkingLevel: async (session) => { await this.tryApplyDefaultThinkingLevel(session); },
+			clampSetupThinkingLevel: (model, candidate) => this.clampCurrentCatalogThinkingCandidate(model, candidate),
 			buildWorkflowList: (projectId?: string) => this._buildWorkflowList(projectId),
 			resolveInitialModel: (role, projectId) => this.resolveInitialModel(role, projectId),
 			resolveInitialThinkingLevel: (role, projectId) => this.resolveInitialThinkingLevel(role, projectId),
@@ -5278,30 +5560,54 @@ export class SessionManager {
 		projectId?: string,
 		effectiveGoalId?: string,
 		grantedTools?: string[],
-	): { args: string[]; env: Record<string, string>; runtimeExtensions: RuntimePiExtensionInfo[] } {
+	): { args: string[]; env: Record<string, string>; runtimeExtensions: RuntimePiExtensionInfo[]; toolResultFilterBootstrap?: import("./tool-result-filter-attempt-credentials.js").ToolResultFilterGateCredential } {
 		// Goal-metadata disabled tools (bobbit.disabledTools). Resolved from the
 		// session's EFFECTIVE goal (goalId ?? teamGoalId, threaded by the caller)
 		// so restart/respawn/force-abort keep the same disablement initial setup
 		// applied — without this a restored session re-acquires disabled tools.
 		const disabledTools = this.disabledToolsForGoal(effectiveGoalId, projectId);
-		const filteredAllowed = disabledTools && allowedTools
+		const filteredAllowedByMetadata = disabledTools && allowedTools
 			? allowedTools.filter(e => !disabledTools.has(e.name.toLowerCase()))
 			: allowedTools;
+		const selection = this.resolveStoreForSession(sessionId).get(sessionId)?.dynamicCapabilities;
+		// A pinned selector snapshot may narrow only MCP meta-tools. It never
+		// grants a YAML tool and an absent snapshot remains the legacy surface.
+		const filteredAllowed = selection?.mcpAuthoritative && filteredAllowedByMetadata
+			? filteredAllowedByMetadata.filter(tool => tool.kind !== "mcp" || selection.mcp.includes(tool.name))
+			: filteredAllowedByMetadata;
 		const flatNames = filteredAllowed?.map(e => e.name);
 		const toolScope = scopedToolContext(projectId, cwd);
+		const requestMutation = this.requestMutationActivationResolver?.(projectId);
+		const toolResultFilter = this.toolResultFilterActivationResolver?.(projectId);
 
 		const mcpManager = this.getMcpManagerForContext(projectId, cwd);
 
 		// MCP proxy extensions
 		const mcpExtPaths = mcpManager
-			? writeMcpProxyExtensions(mcpManager, flatNames, role, this.toolManager, this.groupPolicyStore, disabledTools, toolScope)
+			? writeMcpProxyExtensions(mcpManager, flatNames, role, this.toolManager, this.groupPolicyStore, disabledTools, toolScope, selection?.selectionFingerprint)
 			: undefined;
 
 		// Builtin + bobbit-extension activation
 		const activation = computeToolActivationArgs(filteredAllowed, this.toolManager, cwd, mcpExtPaths, disabledTools, toolScope);
 		const piExtensionActivation = this.resolveMarketplacePiExtensionArgs(projectId, cwd);
+		assertToolResultFilterExtensionCompatibility(toolResultFilter, activation, piExtensionActivation);
 
 		const args = prependToolResultErrorBridge([...activation.args, ...piExtensionActivation.args]);
+		let toolResultGateEnv: Record<string, string> | undefined;
+		let toolResultFilterBootstrap: import("./tool-result-filter-attempt-credentials.js").ToolResultFilterGateCredential | undefined;
+		if (toolResultFilter?.toolResult) {
+			assertToolResultGatePiCompatibility();
+			toolResultFilterBootstrap = this.toolResultFilterAttemptCredentials.beginRuntime(
+				sessionId, this._currentRespawnGeneration(sessionId),
+			);
+			const gatePath = writeToolResultFilterExtension(sessionId);
+			if (!gatePath) throw new Error("Tool-result filter gate installation failed.");
+			toolResultGateEnv = toolResultFilterGateEnvironment(gatePath);
+		} else {
+			// A replacement built while the policy is revoked must not retain its
+			// predecessor's callback authority. Re-grant will reconcile this runtime.
+			this.toolResultFilterAttemptCredentials.invalidate(sessionId);
+		}
 
 		// Compute session-specific grants (tools in allowedTools but not in the role's base allowedTools)
 		// and layer explicit grant records on top. Ask-gated tools are part of the
@@ -5318,7 +5624,7 @@ export class SessionManager {
 
 		// Tool guard extension for 'ask' policy tools
 		const guardPath = this.toolManager
-			? writeToolGuardExtension(sessionId, this.toolManager, mcpManager ?? undefined, role, this.groupPolicyStore, sessionGrants, disabledTools, toolScope)
+			? writeToolGuardExtension(sessionId, this.toolManager, mcpManager ?? undefined, role, this.groupPolicyStore, sessionGrants, disabledTools, toolScope, requestMutation)
 			: undefined;
 		if (guardPath) {
 			args.push("--extension", guardPath);
@@ -5333,8 +5639,8 @@ export class SessionManager {
 		// so a goal that disabled a provider stays bridge-free after respawn too.
 		// Zero overhead when no enabled provider declares those hooks — the bridge
 		// is neither written nor pushed onto the spawn args.
-		if (this.lifecycleHub && hasProviderBridgeHooks(this.lifecycleHub, projectId, effectiveGoalId)) {
-			const bridgePath = writeProviderBridgeExtension(sessionId);
+		if ((this.lifecycleHub && hasProviderBridgeHooks(this.lifecycleHub, projectId, effectiveGoalId)) || requestMutation?.prompt) {
+			const bridgePath = writeProviderBridgeExtension(sessionId, requestMutation);
 			if (bridgePath) {
 				args.push("--extension", bridgePath);
 			}
@@ -5355,7 +5661,7 @@ export class SessionManager {
 			args.push("--extension", aigwDnsGuardPath);
 		}
 
-		return { args, env: activation.env, runtimeExtensions: piExtensionActivation.runtimeExtensions };
+		return { args, env: { ...activation.env, ...toolResultGateEnv }, runtimeExtensions: piExtensionActivation.runtimeExtensions, toolResultFilterBootstrap };
 	}
 
 	private messageAuthorDependencies(
@@ -5417,6 +5723,7 @@ export class SessionManager {
 	}
 
 	private _assemblePrompt(sessionId: string, parts: PromptParts): string | undefined {
+		if (parts.extensionPromptSections === undefined) parts.extensionPromptSections = this.resolveStaticPromptSections(this.sessions.get(sessionId)?.projectId);
 		if (this.toolManager && !parts.toolDocs) {
 			parts.toolDocs = this.toolManager.getToolDocsForPrompt(parts.allowedTools, bobbitStateDir());
 		}
@@ -5424,8 +5731,12 @@ export class SessionManager {
 		// Skipped when the session lacks `activate_skill` (catalog is useless without
 		// the activator) or when explicitly already populated.
 		if (!parts.skillsCatalog) {
-			const catalogProjectId = this.sessions.get(sessionId)?.projectId;
-			parts.skillsCatalog = this.computeSkillsCatalog(parts.allowedTools, parts.projectRoot || parts.cwd, parts.projectConfigStore, catalogProjectId);
+			const catalogSession = this.sessions.get(sessionId);
+			const catalogProjectId = catalogSession?.projectId;
+			parts.skillsCatalog = this.computeSkillsCatalog(
+				parts.allowedTools, parts.projectRoot || parts.cwd, parts.projectConfigStore, catalogProjectId,
+				catalogSession?.dynamicCapabilities?.skillsAuthoritative ? catalogSession.dynamicCapabilities.skills : undefined,
+			);
 		}
 		// Stamp the user-configured skills-catalog byte budget onto the parts so it flows
 		// into both the assembled prompt and the persisted prompt-sections snapshot.
@@ -5453,6 +5764,7 @@ export class SessionManager {
 		discoveryRoot: string,
 		projectConfigStore?: { get(key: string): string | undefined },
 		projectId?: string,
+		selectedNames?: readonly string[],
 	): import("../skills/slash-skills.js").SlashSkill[] | undefined {
 		// allowedTools=undefined => unrestricted; include the catalog.
 		// allowedTools=[] (EXPLICIT no tools, e.g. a recursion-stripped delegate or
@@ -5469,25 +5781,31 @@ export class SessionManager {
 			// base + server config store so server/global-user market skill packs
 			// resolve for the active project even when its root != server cwd.
 			const headquartersScope = projectId === HEADQUARTERS_PROJECT_ID;
+			const owningProjectStore = !headquartersScope && projectId
+				? (this.projectContextManager?.getOrCreate(projectId)?.projectConfigStore ?? projectConfigStore)
+				: undefined;
 			const marketContext: SkillMarketContext = {
 				serverBase: headquartersDir(),
 				globalUserBase: os.homedir(),
 				projectBase: headquartersScope ? "" : discoveryRoot,
 				serverConfigStore: this.projectConfigStore,
-				projectConfigStore: headquartersScope ? undefined : projectConfigStore as SkillMarketContext["projectConfigStore"],
+				projectConfigStore: owningProjectStore as SkillMarketContext["projectConfigStore"],
 				// pack-schema-v1 §7: filter disabled market-pack skills out of the runtime
 				// activation catalog too, using the SAME pack_activation store (server/
 				// global-user → server config store; project → the project's config store).
 				packActivation: (scope, packName) => {
-					const store = scope === "project"
-						? (!headquartersScope && projectId && this.projectContextManager
-							? this.projectContextManager.getOrCreate(projectId)?.projectConfigStore
-							: undefined)
-						: this.projectConfigStore;
-					return store?.getPackActivation(scope, packName) ?? {};
+					const store = (scope === "project" ? owningProjectStore : this.projectConfigStore) as {
+						getPackActivation?: (scope: "server" | "global-user" | "project", packName: string) => { skills?: string[] };
+					} | undefined;
+					return store?.getPackActivation?.(scope, packName) ?? {};
 				},
+				adoptedEntries: (scope) => adoptedSkillEntries(scope, {
+					serverConfigStore: this.projectConfigStore as AdoptedSkillLedgerReader | undefined,
+					projectConfigStore: owningProjectStore as AdoptedSkillLedgerReader | undefined,
+					projectId: headquartersScope ? undefined : projectId,
+				}),
 			};
-			const all = discoverSlashSkills(discoveryRoot, projectConfigStore, marketContext);
+			const all = discoverSlashSkills(discoveryRoot, projectConfigStore, marketContext, selectedNames);
 			// Filter: omit disable-model-invocation and skills with empty descriptions.
 			// userInvocable=false skills are already filtered by discoverSlashSkills.
 			return all.filter(s => s.disableModelInvocation !== true && (s.description?.trim() || "").length > 0);
@@ -5567,6 +5885,8 @@ export class SessionManager {
 		catch { persisted = undefined; }
 		const effectiveGoalId = session.goalId ?? session.teamGoalId ?? persisted?.goalId ?? persisted?.teamGoalId;
 		const sectionOrder = this.promptSectionOrderForGoal(effectiveGoalId, session.projectId ?? persisted?.projectId);
+		const dynamicSelection = session.dynamicCapabilities ?? persisted?.dynamicCapabilities;
+		const selectedSkillNames = dynamicSelection?.skillsAuthoritative ? dynamicSelection.skills : undefined;
 
 		// Delegate task instructions are durable store data, not ordinary cached prompt
 		// state. A provider hook can run after an early incomplete cache was created;
@@ -5596,17 +5916,19 @@ export class SessionManager {
 					parts.projectRoot || parts.cwd,
 					parts.projectConfigStore,
 					session.projectId ?? persisted.projectId,
+					selectedSkillNames,
 				);
 			}
 			if (parts.skillsCatalogBudget === undefined && this.preferencesStore) {
 				const pref = this.preferencesStore.get("skillsCatalogBudget");
 				if (typeof pref === "number" && Number.isFinite(pref)) parts.skillsCatalogBudget = pref;
 			}
+			parts.extensionPromptSections = this.resolveStaticPromptSections(session.projectId ?? persisted?.projectId);
 			session.promptParts = parts;
 			return parts;
 		}
 
-		if (session.promptParts) return session.promptParts;
+		if (session.promptParts) { session.promptParts.extensionPromptSections = this.resolveStaticPromptSections(session.projectId ?? persisted?.projectId); return session.promptParts; }
 
 		// Rebuild on demand for dormant / restored sessions missing cached parts
 		const assistantDef = session.assistantType ? getAssistantDef(session.assistantType) : undefined;
@@ -5696,6 +6018,7 @@ export class SessionManager {
 				parts.projectRoot || parts.cwd,
 				parts.projectConfigStore,
 				session.projectId ?? persisted?.projectId,
+				selectedSkillNames,
 			);
 		}
 		if (parts.skillsCatalogBudget === undefined && this.preferencesStore) {
@@ -5704,6 +6027,7 @@ export class SessionManager {
 		}
 
 		// Cache for future calls
+		parts.extensionPromptSections = this.resolveStaticPromptSections(session.projectId ?? persisted?.projectId);
 		session.promptParts = parts;
 		return parts;
 	}
@@ -8335,6 +8659,10 @@ export class SessionManager {
 			if (session.turnTerminalHandled || terminalIdentities.has(terminalIdentity ?? "")) return;
 			terminalIdentities.add(terminalIdentity ?? "");
 			session.lastAssistantTerminalIdentity = terminalIdentity;
+			// The following cost-tracking step records this terminal event's normalized
+			// usage. Clear first so a later terminal with no usage cannot leak an
+			// earlier assistant message's telemetry into afterTurn.
+			if (this.lifecycleHub) session.terminalTurnUsage = undefined;
 			session.latestTurnAssistantText = extractUserMessageText(event.message);
 			session.abortShapedTerminal = isAbortShapedAssistantTerminal(event.message);
 			const errored = event.message.stopReason === "error";
@@ -8370,6 +8698,8 @@ export class SessionManager {
 			this._bootRepromptedSessions.delete(session.id);
 			session.latestTurnUserText = undefined;
 			session.latestTurnAssistantText = undefined;
+			// No hub means no consumer: retain the pre-existing no-hook lifecycle.
+			if (this.lifecycleHub) session.terminalTurnUsage = undefined;
 			session.lastTurnErrored = false;
 			session.lastTurnErrorMessage = undefined;
 			session.abortShapedTerminal = undefined;
@@ -8378,6 +8708,7 @@ export class SessionManager {
 			session.turnTerminalHandled = false;
 			session.manualRetryRequired = false;
 			session.turnHadToolCalls = false;
+			session.latestTerminalPromptExtensionUsage = undefined;
 			session.streamingStartedAt = this.clock.now();
 			this.resolveStoreForSession(session.id).update(session.id, {
 				wasStreaming: true,
@@ -8479,13 +8810,30 @@ export class SessionManager {
 			if (!session.lastTurnErrored) session.manualRetryRequired = false;
 			session.streamingStartedAt = undefined;
 			session.completedTurnCount = (session.completedTurnCount ?? 0) + 1;
+			// This is the sole cadence boundary: retryable and duplicate terminal
+			// frames returned above, while a final cancellation reaches here once.
+			// Persist before either lifecycle dispatch so a crash cannot replay a due
+			// turn after restore. Saturation is defensive for impossible lifetime scale.
+			session.scheduledAdvisorTurnCount = Math.min(
+				Number.MAX_SAFE_INTEGER,
+				normalizeScheduledAdvisorTurnCount(session.scheduledAdvisorTurnCount) + 1,
+			);
+			this.resolveStoreForSession(session.id).update(session.id, {
+				scheduledAdvisorTurnCount: session.scheduledAdvisorTurnCount,
+			});
 			// Extension Platform G1.4: notify lifecycle providers a turn completed.
 			// Fire-and-forget — NEVER await into the agent_end event path, and
 			// swallow/log all errors so a slow or throwing provider can't stall
 			// the lifecycle. Per-provider timeouts are enforced inside the hub.
 			if (this.lifecycleHub) {
 				const turnIndex = session.completedTurnCount;
-				void this.lifecycleHub.dispatch("afterTurn", {
+				// Copy at the exact terminal boundary so detached post-turn work cannot
+				// observe a subsequent turn's slot. No terminal usage container means
+				// explicitly unknown telemetry, never inferred zeroes.
+				const usage: TurnUsageSnapshot = Object.freeze({
+					...(session.terminalTurnUsage ?? { telemetry: "unknown" as const }),
+				});
+				const afterTurn: HookDispatchBase = {
 					sessionId: session.id,
 					projectId: session.projectId,
 					scope: session.projectId ? "project" : "global",
@@ -8497,9 +8845,24 @@ export class SessionManager {
 					prompt: session.latestTurnUserText,
 					userText: session.latestTurnUserText,
 					assistantText: session.latestTurnAssistantText,
+					// Keep ordinary lifecycle telemetry on completedTurnCount; only the
+					// decision scheduler consumes the persisted cadence below.
 					turn: { index: turnIndex },
-				}, lifecycleScopeInput(session)).catch((err) => {
+					cadenceTurnIndex: session.scheduledAdvisorTurnCount,
+					usage,
+				};
+				const scope = lifecycleScopeInput(session);
+				// Both routes are detached from terminal settlement. Start ordinary
+				// afterTurn first, then the advisor projection; neither may delay idle
+				// status, queue draining, or later turns.
+				void this.lifecycleHub.dispatch("afterTurn", afterTurn, scope).catch((err) => {
 					console.warn(`[session-manager] afterTurn dispatch failed for ${session.id}:`, err);
+				});
+				const scheduledDispatch = this.lifecycleHub.dispatchScheduledAdvisors;
+				const scheduledTurnIndex = session.scheduledAdvisorTurnCount ?? 0;
+				const scheduledAfterTurn = { ...afterTurn, turn: { index: scheduledTurnIndex } };
+				if (scheduledDispatch) void scheduledDispatch.call(this.lifecycleHub, scheduledAfterTurn, scope).catch((err) => {
+					console.warn(`[session-manager] scheduled advisor dispatch failed for ${session.id}:`, err);
 				});
 			}
 			this.resolveStoreForSession(session.id).update(session.id, {
@@ -8507,6 +8870,8 @@ export class SessionManager {
 				streamingStartedAt: undefined,
 				manualRetryRequired: session.manualRetryRequired === true,
 			});
+			this.completePromptExtensionAuthoringAudits(session);
+			this.applyPendingStaticPromptRefresh(session);
 			broadcastStatus(session, "idle");
 			this.resolveIdleWaiters(session.id);
 			this.schedulePromptCursorRefresh(session, { settleBindings: true });
@@ -9855,6 +10220,10 @@ export class SessionManager {
 				throw new Error(`Session ${id} respawn replacement was superseded during restore`);
 			}
 		} catch (err) {
+			// buildToolActivationArgs may have minted a bootstrap credential for the
+			// failed successor. It is not evidence of an installed gate and must not
+			// let a later grant skip this session's reconciliation.
+			this.toolResultFilterAttemptCredentials.invalidate(id);
 			this.sessions.set(id, session);
 			session.restoreError = err instanceof Error ? err.message : String(err);
 			for (const ws of savedClients) {
@@ -10100,25 +10469,39 @@ export class SessionManager {
 		const assistantMessageEnd = event.type === "message_end" && event.message?.role === "assistant";
 		const compactionEnd = event.type === "compaction_end" || event.type === "auto_compaction_end";
 		if (!assistantMessageEnd && !compactionEnd) return;
-		const usage = assistantMessageEnd
-			? (event.message?.usage ?? event.usage)
-			: (event.result?.usage ?? event.usage);
-		if (!usage) return;
 
-		// Usage cost can be either a number (usage.cost) or an object (usage.cost.total)
-		const costValue = typeof usage.cost === "number" ? usage.cost
-			: typeof usage.cost?.total === "number" ? usage.cost.total
-			: undefined;
-		if (costValue === undefined) return;
+		// Keep the one field/alias validation path shared by cost accounting and
+		// afterTurn. Compaction remains cost-only: it is normalized through the same
+		// wire-shape reader but never occupies a user turn's telemetry slot.
+		const terminalEvent = assistantMessageEnd
+			? event
+			: { type: "message_end", message: { role: "assistant", usage: event.result?.usage ?? event.usage } };
+		const usage = readTerminalAssistantUsage(
+			terminalEvent,
+			assistantMessageEnd && this.lifecycleHub ? this.terminalUsageAttribution(session, event) : undefined,
+		);
+		if (!usage || usage.telemetry !== "known") return;
+
+		if (assistantMessageEnd && this.lifecycleHub) {
+			session.terminalTurnUsage = usage;
+			session.latestTerminalPromptExtensionUsage = {
+				...(usage.inputTokens === undefined ? {} : { inputTokens: usage.inputTokens }),
+				...(usage.outputTokens === undefined ? {} : { outputTokens: usage.outputTokens }),
+				...(usage.cacheReadTokens === undefined ? {} : { cacheReadTokens: usage.cacheReadTokens }),
+				...(usage.cacheWriteTokens === undefined ? {} : { cacheWriteTokens: usage.cacheWriteTokens }),
+				...(usage.cost === undefined ? {} : { cost: usage.cost }),
+			};
+		}
+		if (usage.cost === undefined) return;
 
 		const sessionCostTracker = this.resolveCostTracker(session);
 		const stampGoalId = session.goalId ?? session.teamGoalId;
 		const cumulativeCost = sessionCostTracker.recordUsage(session.id, {
-			inputTokens: usage.inputTokens ?? usage.input,
-			outputTokens: usage.outputTokens ?? usage.output,
-			cacheReadTokens: usage.cacheReadTokens ?? usage.cacheRead,
-			cacheWriteTokens: usage.cacheWriteTokens ?? usage.cacheWrite,
-			cost: costValue,
+			inputTokens: usage.inputTokens,
+			outputTokens: usage.outputTokens,
+			cacheReadTokens: usage.cacheReadTokens,
+			cacheWriteTokens: usage.cacheWriteTokens,
+			cost: usage.cost,
 		}, stampGoalId);
 
 		broadcast(session.clients, {
@@ -10128,6 +10511,46 @@ export class SessionManager {
 			taskId: this.resolveTaskIdForSession(session.id),
 			cost: cumulativeCost,
 		});
+	}
+
+	private completePromptExtensionAuthoringAudits(session: SessionInfo): void {
+		const pending = session.pendingPromptExtensionAudits;
+		if (!pending?.length) return;
+		session.pendingPromptExtensionAudits = [];
+		try {
+			const persisted = this.resolveStoreForSession(session.id).get(session.id);
+			const model = persisted?.modelProvider && persisted.modelId ? `${persisted.modelProvider}/${persisted.modelId}` : undefined;
+			const trace = new ContextTraceStore(this.stateDir);
+			for (const target of pending) {
+				let completed: ReturnType<PromptExtensionAuthoringAuditStore["complete"]> | undefined;
+				for (const stateDir of new Set([target.stateDir, target.sessionStateDir].filter((value): value is string => !!value))) {
+					const store = new PromptExtensionAuthoringAuditStore(stateDir);
+					const prior = store.get(target.id); if (!prior) continue;
+					const result = store.complete(target.id, { status: prior.status === "accepted" ? "accepted" : "proposed", ...(model ? { model } : {}), ...(persisted?.modelProvider ? { provider: persisted.modelProvider } : {}), ...(persisted?.effectiveThinkingLevel ? { thinkingLevel: persisted.effectiveThinkingLevel } : {}), ...(session.latestTerminalPromptExtensionUsage && Object.keys(session.latestTerminalPromptExtensionUsage).length ? { usage: session.latestTerminalPromptExtensionUsage } : {}) });
+					completed ??= result;
+				}
+				if (completed) trace.appendTrace(session.id, { ts: Date.now(), hook: "afterTurn", sessionId: session.id, providers: [], outcomes: [{ kind: "audit", hookId: completed.id, event: "afterTurn", outcome: "applied", value: completed.id }] });
+			}
+		} catch { console.warn("[session-manager] prompt extension authoring audit finalization unavailable"); }
+	}
+
+	/** Resolve only a complete, runtime-observed or read-back-verified model pair. */
+	private terminalUsageAttribution(session: SessionInfo, event: any): { provider?: string; modelId?: string } | undefined {
+		const provider = event?.message?.provider;
+		const modelId = event?.message?.model ?? event?.message?.modelId;
+		if (typeof provider === "string" && provider.length > 0 && typeof modelId === "string" && modelId.length > 0) {
+			return { provider, modelId };
+		}
+
+		const persisted = this.resolveStoreForSession(session.id).get(session.id);
+		if (
+			typeof persisted?.modelProvider === "string" && persisted.modelProvider.length > 0
+			&& typeof persisted.modelId === "string" && persisted.modelId.length > 0
+			&& isKnownThinkingLevel(persisted.effectiveThinkingLevel)
+		) {
+			return { provider: persisted.modelProvider, modelId: persisted.modelId };
+		}
+		return undefined;
 	}
 
 	/**
@@ -10597,6 +11020,7 @@ export class SessionManager {
 			nonInteractive: ps.nonInteractive,
 			preview: ps.preview,
 			allowedTools: ps.allowedTools,
+			dynamicCapabilities: ps.dynamicCapabilities,
 			projectId: ps.projectId,
 			spawnPinnedModel: ps.modelProvider && ps.modelId
 				? `${ps.modelProvider}/${ps.modelId}`
@@ -10605,6 +11029,8 @@ export class SessionManager {
 			promptQueue: new PromptQueue(restoredQueue),
 			inFlightSteerTexts: normalizePersistedInFlightSteers(ps.inFlightSteerTexts),
 			manualRetryRequired: ps.manualRetryRequired === true,
+			scheduledAdvisorTurnCount: normalizeScheduledAdvisorTurnCount(ps.scheduledAdvisorTurnCount),
+			humanSelectionPins: normalizeHumanSelectionPins(ps.humanSelectionPins),
 		});
 	}
 
@@ -10860,9 +11286,13 @@ export class SessionManager {
 		// a restored session keeps its goal's custom order instead of reverting to
 		// the default after a gateway restart. Undefined ⇒ byte-identical default.
 		const restoreSectionOrder = this.promptSectionOrderForGoal(restoreEffectiveGoalId, ps.projectId);
-		const restoredFiltered = restoreDisabled
+		const restoredFilteredByMetadata = restoreDisabled
 			? effectiveAllowed.filter(e => !restoreDisabled.has(e.name.toLowerCase()))
 			: effectiveAllowed;
+		const restoredSelection = ps.dynamicCapabilities;
+		const restoredFiltered = restoredSelection?.mcpAuthoritative
+			? restoredFilteredByMetadata.filter(tool => tool.kind !== "mcp" || restoredSelection.mcp.includes(tool.name))
+			: restoredFilteredByMetadata;
 		// Preserve the unrestricted (`undefined`) vs explicit-empty (`[]`)
 		// distinction. A genuinely unrestricted session (role-less / no
 		// toolManager, NO persisted/override allowlist) resolves `effectiveAllowed`
@@ -10879,6 +11309,7 @@ export class SessionManager {
 		bridgeOptions.args = [...restoredActivation.args, ...(bridgeOptions.args || [])];
 		bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...restoredActivation.runtimeExtensions];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...restoredActivation.env };
+		bridgeOptions.toolResultFilterBootstrap = restoredActivation.toolResultFilterBootstrap;
 
 		// Re-assemble system prompt (global + AGENTS.md + goal spec)
 		const assistantDef = ps.assistantType ? getAssistantDef(ps.assistantType) : undefined;
@@ -11009,19 +11440,15 @@ export class SessionManager {
 			psPersistedModel
 			&& isKnownThinkingLevel(ps.effectiveThinkingLevel)
 		);
-		const initThinking = restoreHasDurableTuple
-			? await this.resolveCurrentCatalogPreferredThinkingLevel(
-				bridgeOptions.initialModel,
+		const initThinking = await this.clampCurrentCatalogThinkingCandidate(
+			bridgeOptions.initialModel,
+			this.resolveExplicitThinkingCandidate(
 				ps.role,
 				ps.projectId,
 				ps.effectiveThinkingLevel,
-			)
-			: await this.resolveCurrentCatalogThinkingLevel(
-				bridgeOptions.initialModel,
-				ps.role,
-				ps.projectId,
-				ps.effectiveThinkingLevel,
-			);
+				restoreHasDurableTuple,
+			),
+		);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 		const restoreSpawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
 		await this.applyDirectProviderEnv(bridgeOptions, !!ps.sandboxed, restoreSpawnProvider);
@@ -11032,6 +11459,7 @@ export class SessionManager {
 			projectId: ps.projectId,
 		});
 
+		const toolResultFilterBootstrap = bridgeOptions.toolResultFilterBootstrap;
 		const rpcClient = new RpcBridge(bridgeOptions);
 		const eventBuffer = new EventBuffer();
 		// In-place restart paths (`restartAgent`, `_restartSessionWithUpdatedRole`)
@@ -11088,12 +11516,15 @@ export class SessionManager {
 			accessory: ps.accessory,
 			preview: ps.preview,
 			allowedTools: restoredAllowedNames,
+			dynamicCapabilities: ps.dynamicCapabilities,
 			promptQueue: new PromptQueue(restoredQueue),
 			streamingStartedAt: ps.streamingStartedAt,
 			restoreStartupWasStreaming: ps.wasStreaming === true,
 			projectId: ps.projectId,
 			inFlightSteerTexts: normalizePersistedInFlightSteers(ps.inFlightSteerTexts),
 			manualRetryRequired: ps.manualRetryRequired === true,
+			scheduledAdvisorTurnCount: normalizeScheduledAdvisorTurnCount(ps.scheduledAdvisorTurnCount),
+			humanSelectionPins: normalizeHumanSelectionPins(ps.humanSelectionPins),
 			spawnPinnedModel: bridgeOptions.initialModel,
 			spawnPinnedThinkingLevel: bridgeOptions.initialThinkingLevel,
 			_deferVerifiedTupleCommit: (ps as any)._deferVerifiedTupleCommit === true,
@@ -11154,9 +11585,11 @@ export class SessionManager {
 
 		try {
 			await rpcClient.start();
+			await this.commitStartedToolResultFilterGate(ps.id, ps.projectId, rpcClient, toolResultFilterBootstrap);
 		} catch (err) {
 			// A partially started replacement must never survive a failed restore.
 			// The in-place caller will reinstall only its fenced dormant rollback.
+			this.toolResultFilterAttemptCredentials.invalidate(ps.id);
 			try { await rpcClient.stop(); } catch { /* best-effort cleanup */ }
 			throw err;
 		}
@@ -11188,6 +11621,7 @@ export class SessionManager {
 			// response. Detach its listener and fence the replacement before stopping
 			// it so replayed/late Pi events cannot mutate queues, status, or persisted
 			// intent after the rollback capsule becomes canonical again.
+			this.toolResultFilterAttemptCredentials.invalidate(ps.id);
 			restoring = false;
 			try { unsub(); } catch { /* best-effort listener cleanup */ }
 			this._fenceReplacedSession(session, this._currentRespawnGeneration(ps.id) + 1);
@@ -11198,23 +11632,10 @@ export class SessionManager {
 		try {
 			await this.tryAutoSelectModel(session);
 		} catch (err) {
+			this.toolResultFilterAttemptCredentials.invalidate(ps.id);
 			try { unsub(); } catch { /* best-effort listener cleanup */ }
 			await rpcClient.stop();
 			throw err;
-		}
-		try {
-			await this.tryApplyDefaultThinkingLevel(session);
-		} catch (err) {
-			// Rows created before effectiveThinkingLevel was persisted have no exact
-			// thinking contract to enforce. Keep them readable and let a later complete
-			// state frame migrate them; a verified durable tuple must fail closed.
-			if (ps.effectiveThinkingLevel === undefined) {
-				console.warn(`[session-manager] Legacy session ${ps.id} could not verify effective thinking during restore:`, err);
-			} else {
-				try { unsub(); } catch { /* best-effort listener cleanup */ }
-				await rpcClient.stop();
-				throw err;
-			}
 		}
 
 		// For sandbox sessions, resolve the container ID so git-status and other
@@ -11234,6 +11655,16 @@ export class SessionManager {
 
 		// Install the replacement before enabling lifecycle side effects. A replayed
 		// agent_end must never dequeue durable intent against a provisional bridge.
+		// No await may separate this exact policy check from publication.
+		try {
+			this.assertToolResultFilterGateAtPublication(ps.id, ps.projectId);
+		} catch (err) {
+			restoring = false;
+			try { unsub(); } catch { /* best-effort listener cleanup */ }
+			this._fenceReplacedSession(session, this._currentRespawnGeneration(ps.id) + 1);
+			void rpcClient.stop().catch(() => {});
+			throw err;
+		}
 		this.sessions.set(ps.id, session);
 		if (settledSteersPruned > 0) this.persistInFlightSteerLedger(session);
 		// Replay-only keyless guards must not shadow a genuine future prompt once
@@ -11318,17 +11749,15 @@ export class SessionManager {
 				const slash = selected.indexOf("/");
 				selectedProvider = selected.slice(0, slash);
 				selectedModelId = selected.slice(slash + 1);
+				// Recovery may only use the caller's explicit selection or the exact
+				// durable tuple. Do not manufacture a default: without either authority,
+				// activation must fail closed rather than silently changing behaviour.
 				const requestedThinking = isKnownThinkingLevel(preferredThinkingLevel)
-					?? isKnownThinkingLevel(persisted.effectiveThinkingLevel)
-					?? "medium";
-				const clamped = await this.resolveCurrentCatalogThinkingLevel(
+					?? isKnownThinkingLevel(persisted.effectiveThinkingLevel);
+				const clamped = await this.clampCurrentCatalogThinkingCandidate(
 					selected,
-					capsule.role,
-					capsule.projectId,
 					requestedThinking,
 					models,
-					false,
-					true,
 				);
 				if (!clamped) throw new Error("replacement thinking level could not be normalized");
 				selectedThinking = clamped;
@@ -11600,11 +12029,9 @@ export class SessionManager {
 		}
 		const exactInitialThinkingLevel = opts?.skipAutoThinking && !opts?.initialThinkingLevel
 			? undefined
-			: await this.resolveCurrentCatalogThinkingLevel(
+			: await this.clampCurrentCatalogThinkingCandidate(
 				selectedSpawnModel,
-				initialRole,
-				projectId,
-				opts?.initialThinkingLevel,
+				this.resolveExplicitThinkingCandidate(initialRole, projectId, opts?.initialThinkingLevel),
 				currentModels,
 			);
 
@@ -11748,7 +12175,7 @@ export class SessionManager {
 			// and let setup complete in the background. Continue-Archived opts in to
 			// awaiting setup so fresh worktree/base-ref failures are returned by the POST
 			// instead of surfacing later as an asynchronously archived session.
-			const releaseSetupThinkingAuthority = this.retainSetupInitialThinkingAuthority(
+			const releaseSetupThinkingAuthority = this.retainSetupCallerThinkingAuthority(
 				id,
 				opts?.initialThinkingLevel,
 			);
@@ -11764,6 +12191,11 @@ export class SessionManager {
 					console.warn(`[session-manager] Early persist failed for worktree session ${session.id}:`, err);
 				}).finally(() => { session.pendingMetadataPersist = undefined; });
 			}).finally(releaseSetupThinkingAuthority);
+			this.pendingSessionSetups.set(id, setupPromise);
+			void setupPromise.then(
+				() => { if (this.pendingSessionSetups.get(id) === setupPromise) this.pendingSessionSetups.delete(id); },
+				() => { if (this.pendingSessionSetups.get(id) === setupPromise) this.pendingSessionSetups.delete(id); },
+			);
 
 			if (opts?.awaitWorktreeSetup) {
 				try {
@@ -11836,33 +12268,61 @@ export class SessionManager {
 			bridgeOptions: { cwd },
 		};
 
-		const releaseSetupThinkingAuthority = this.retainSetupInitialThinkingAuthority(
+		const releaseSetupThinkingAuthority = this.retainSetupCallerThinkingAuthority(
 			id,
 			opts?.initialThinkingLevel,
 		);
+		// Register before executing the pipeline: spawnAgent may publish its session
+		// after an await, and grant reconciliation must join this exact owner rather
+		// than replacing that half-built object.
+		let resolvePendingSetup!: () => void;
+		let rejectPendingSetup!: (error: unknown) => void;
+		const pendingSetup = new Promise<void>((resolve, reject) => {
+			resolvePendingSetup = resolve;
+			rejectPendingSetup = reject;
+		});
+		void pendingSetup.catch(() => {});
+		this.pendingSessionSetups.set(id, pendingSetup);
+		const setupPromise = (async () => {
+			try {
+				const session = await executePlan(plan, ctx);
+				if (projectId) session.projectId = projectId;
+				// Verification/reviewer sessions deliberately skip the ordinary post-spawn
+				// selectors because their tuple was pinned in argv. They still need the same
+				// exact read-back and one atomic durable tuple commit before create returns.
+				if (opts?.skipAutoModel && opts.skipAutoThinking && selectedSpawnModel) {
+					await this.tryAutoSelectModel(session);
+				}
+				// This is the manager-visible creation boundary. In the skipped-selector
+				// path an await above can let a grant land after executePlan's assertion.
+				// Keep this second check synchronous with publication.
+				try {
+					this.assertToolResultFilterGateAtPublication(session.id, projectId);
+				} catch (err) {
+					handleSetupFailure(session, plan, err instanceof Error ? err : new Error(String(err)), ctx);
+					throw err;
+				}
+				this.notifySessionCreated(session);
+
+				// Persist session metadata (fire-and-forget, but tracked for terminate).
+				// Rehydrated sessions already have a cloned/adopted transcript path recorded;
+				// avoid a redundant get_state that can rewrite runtime-only metadata.
+				if (!plan.preExistingAgentSessionFile) {
+					session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
+						console.warn(`[session-manager] Early persist failed for ${session.id}:`, err);
+					}).finally(() => { session.pendingMetadataPersist = undefined; });
+				}
+
+				return session;
+			} finally {
+				releaseSetupThinkingAuthority();
+			}
+		})();
+		void setupPromise.then(resolvePendingSetup, rejectPendingSetup);
 		try {
-			const session = await executePlan(plan, ctx);
-			if (projectId) session.projectId = projectId;
-			// Verification/reviewer sessions deliberately skip the ordinary post-spawn
-			// selectors because their tuple was pinned in argv. They still need the same
-			// exact read-back and one atomic durable tuple commit before create returns.
-			if (opts?.skipAutoModel && opts.skipAutoThinking && selectedSpawnModel) {
-				await this.tryAutoSelectModel(session);
-			}
-			this.notifySessionCreated(session);
-
-			// Persist session metadata (fire-and-forget, but tracked for terminate).
-			// Rehydrated sessions already have a cloned/adopted transcript path recorded;
-			// avoid a redundant get_state that can rewrite runtime-only metadata.
-			if (!plan.preExistingAgentSessionFile) {
-				session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
-					console.warn(`[session-manager] Early persist failed for ${session.id}:`, err);
-				}).finally(() => { session.pendingMetadataPersist = undefined; });
-			}
-
-			return session;
+			return await setupPromise;
 		} finally {
-			releaseSetupThinkingAuthority();
+			if (this.pendingSessionSetups.get(id) === pendingSetup) this.pendingSessionSetups.delete(id);
 		}
 	}
 
@@ -12005,11 +12465,9 @@ export class SessionManager {
 			: await this.resolveCurrentCatalogSpawnModel([]);
 		const delegateThinkingCandidate = opts.initialThinkingLevel
 			?? parentMeta?.effectiveThinkingLevel;
-		const delegateInitialThinking = await this.resolveCurrentCatalogThinkingLevel(
+		const delegateInitialThinking = await this.clampCurrentCatalogThinkingCandidate(
 			delegateInitialModel,
-			opts.role,
-			parentProjectId,
-			delegateThinkingCandidate,
+			this.resolveExplicitThinkingCandidate(opts.role, parentProjectId, delegateThinkingCandidate),
 		);
 
 		// Role injection (§Gap 2): resolve the role prompt cascade-first, mirroring
@@ -12070,47 +12528,66 @@ export class SessionManager {
 			bridgeOptions: { cwd: opts.cwd },
 		};
 
-		const releaseSetupThinkingAuthority = this.retainSetupInitialThinkingAuthority(
+		const releaseSetupThinkingAuthority = this.retainSetupCallerThinkingAuthority(
 			plan.id,
 			delegateThinkingCandidate,
 		);
-		let session: SessionInfo;
+		// Delegates publish from executePlan and then await their direct bootstrap.
+		// Keep reconciliation behind one owner for that whole lifecycle.
+		let resolvePendingSetup!: () => void;
+		let rejectPendingSetup!: (error: unknown) => void;
+		const pendingSetup = new Promise<void>((resolve, reject) => {
+			resolvePendingSetup = resolve;
+			rejectPendingSetup = reject;
+		});
+		void pendingSetup.catch(() => {});
+		this.pendingSessionSetups.set(id, pendingSetup);
+		let completed = false;
 		try {
-			session = await executePlan(plan, ctx);
+			let session: SessionInfo;
+			try {
+				session = await executePlan(plan, ctx);
+			} finally {
+				releaseSetupThinkingAuthority();
+			}
+			// Persist the effective-goal stamp on BOTH the live session and the store
+			// record so it survives restart/respawn (the initial structural put happens
+			// inside executePlan; this guarantees the field regardless of plan
+			// propagation details). Belt-and-suspenders alongside plan.teamGoalId.
+			if (parentEffectiveGoalId) {
+				session.teamGoalId = parentEffectiveGoalId;
+				this.resolveStoreForSession(session.id).update(session.id, { teamGoalId: parentEffectiveGoalId });
+			}
+
+			// Persist with all structural fields (delegateOf is in the initial put, tracked for terminate)
+			session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
+				console.error(`[session-manager] Failed to persist delegate session ${id}:`, err);
+			}).finally(() => { session.pendingMetadataPersist = undefined; });
+
+			// Preserve an authenticated owner's identity for orchestration-created
+			// delegates. Direct/server-created delegates omit provenance and remain
+			// system-authored; sendDelegatePrompt validates the pair fail-closed.
+			try {
+				await sendDelegatePrompt(session, opts.instructions, DELEGATE_SPAWN_TIMEOUT_MS, {
+					source: opts.source,
+					author: opts.author,
+				});
+			} finally {
+				// Delegate bootstrap bypasses the queue; persist its direct occurrence
+				// before setup failure handling or a later restart can retry it.
+				this.broadcastQueue(session);
+			}
+
+			console.log(`[session-manager] Created delegate session ${id} (parent: ${parentSessionId}, status: ${session.status})`);
+			completed = true;
+			return session;
+		} catch (err) {
+			rejectPendingSetup(err);
+			throw err;
 		} finally {
-			releaseSetupThinkingAuthority();
+			if (completed) resolvePendingSetup();
+			if (this.pendingSessionSetups.get(id) === pendingSetup) this.pendingSessionSetups.delete(id);
 		}
-		if (parentProjectId) session.projectId = parentProjectId;
-		// Persist the effective-goal stamp on BOTH the live session and the store
-		// record so it survives restart/respawn (the initial structural put happens
-		// inside executePlan; this guarantees the field regardless of plan
-		// propagation details). Belt-and-suspenders alongside plan.teamGoalId.
-		if (parentEffectiveGoalId) {
-			session.teamGoalId = parentEffectiveGoalId;
-			this.resolveStoreForSession(session.id).update(session.id, { teamGoalId: parentEffectiveGoalId });
-		}
-
-		// Persist with all structural fields (delegateOf is in the initial put, tracked for terminate)
-		session.pendingMetadataPersist = this.persistSessionMetadata(session).catch((err) => {
-			console.error(`[session-manager] Failed to persist delegate session ${id}:`, err);
-		}).finally(() => { session.pendingMetadataPersist = undefined; });
-
-		// Preserve an authenticated owner's identity for orchestration-created
-		// delegates. Direct/server-created delegates omit provenance and remain
-		// system-authored; sendDelegatePrompt validates the pair fail-closed.
-		try {
-			await sendDelegatePrompt(session, opts.instructions, DELEGATE_SPAWN_TIMEOUT_MS, {
-				source: opts.source,
-				author: opts.author,
-			});
-		} finally {
-			// Delegate bootstrap bypasses the queue; persist its direct occurrence
-			// before setup failure handling or a later restart can retry it.
-			this.broadcastQueue(session);
-		}
-
-		console.log(`[session-manager] Created delegate session ${id} (parent: ${parentSessionId}, status: ${session.status})`);
-		return session;
 	}
 
 	private resolveIdleWaiters(sessionId: string): void {
@@ -12542,12 +13019,17 @@ export class SessionManager {
 		return undefined;
 	}
 
+	/** Resolve configured role/default thinking authority for the same model that setup will pin. */
+	resolveInitialThinkingLevel(role: string | undefined, projectId: string | undefined): ThinkingLevel | undefined {
+		return this.clampThinkingCandidateForModel(
+			this.resolveInitialModel(role, projectId),
+			this.resolveExplicitThinkingCandidate(role, projectId),
+		);
+	}
+
 	/**
 	 * Final authority for the tuple that Pi will actually receive. Raw argv is
 	 * last-wins, so this runs only after every extension/remap has assembled args.
-	 * It validates the effective model against the exact target catalog row,
-	 * clamps thinking from that row, then removes raw selection flags and leaves
-	 * one canonical initial tuple. Requested identity remains diagnostic-only.
 	 */
 	private async finalizeSpawnOptions(
 		options: RpcBridgeOptions,
@@ -12599,9 +13081,6 @@ export class SessionManager {
 		if (effectiveThinking) options.initialThinkingLevel = effectiveThinking;
 		else delete options.initialThinkingLevel;
 
-		// Raw argv may have crossed providers after earlier env assembly. Refresh
-		// direct-host credentials from the validated effective provider; sandbox
-		// credentials remain owned by its already-applied realm wiring.
 		await this.applyDirectProviderEnv(
 			options,
 			options.sandboxed === true || !!options.containerId,
@@ -12672,101 +13151,61 @@ export class SessionManager {
 		return `${catalogDefault.provider}/${catalogDefault.id}`;
 	}
 
-	/** Resolve and clamp a spawn thinking level against the exact chosen model. */
-	private resolveThinkingLevelForModel(
-		model: string | undefined,
+	/** Resolve only operator/caller/durable thinking authority; never manufacture a fallback. */
+	private resolveExplicitThinkingCandidate(
 		role: string | undefined,
 		projectId: string | undefined,
 		preferred?: string,
-		catalogModel?: Awaited<ReturnType<typeof getAvailableModels>>[number],
 		preferPreferred = false,
 	): ThinkingLevel | undefined {
 		const preferredCandidate = isKnownThinkingLevel(preferred);
 		const roleCandidate = role
 			? isKnownThinkingLevel(this.resolveRoleThinkingLevelValue(role, projectId))
 			: undefined;
-		let candidate = preferPreferred ? preferredCandidate : roleCandidate;
-		if (!candidate) candidate = preferPreferred ? roleCandidate : preferredCandidate;
-		if (!candidate) {
-			candidate = isKnownThinkingLevel(
-				this.preferencesStore?.get("default.sessionThinkingLevel") as string | undefined,
-			);
-		}
-		if (!candidate) candidate = "medium";
-		if (!model) return candidate;
-		if (catalogModel) return clampThinkingLevel(candidate, catalogModel);
-		const slash = model.indexOf("/");
-		if (slash <= 0 || slash === model.length - 1) return candidate;
-		return clampThinkingLevelForModel(
-			candidate,
-			model.slice(0, slash),
-			model.slice(slash + 1),
+		const defaultCandidate = isKnownThinkingLevel(
+			this.preferencesStore?.get("default.sessionThinkingLevel") as string | undefined,
 		);
+		return preferPreferred
+			? preferredCandidate ?? roleCandidate ?? defaultCandidate
+			: roleCandidate ?? preferredCandidate ?? defaultCandidate;
 	}
 
-	/** Final spawn/restore clamp using the exact current session-selectable row. */
-	private async resolveCurrentCatalogThinkingLevel(
+	/** Clamp one core- or dispatcher-provenanced candidate, without selecting one. */
+	private clampThinkingCandidateForModel(
 		model: string | undefined,
-		role: string | undefined,
-		projectId: string | undefined,
-		preferred?: string,
+		candidate: string | undefined,
+		catalogModel?: Awaited<ReturnType<typeof getAvailableModels>>[number],
+	): ThinkingLevel | undefined {
+		const known = isKnownThinkingLevel(candidate);
+		if (!known) return undefined;
+		if (!model) return known;
+		if (catalogModel) return clampThinkingLevel(known, catalogModel);
+		const slash = model.indexOf("/");
+		if (slash <= 0 || slash === model.length - 1) return known;
+		return clampThinkingLevelForModel(known, model.slice(0, slash), model.slice(slash + 1));
+	}
+
+	/** Final exact-catalog clamp for a candidate selected outside this helper. */
+	private async clampCurrentCatalogThinkingCandidate(
+		model: string | undefined,
+		candidate: string | undefined,
 		models?: Awaited<ReturnType<typeof getAvailableModels>>,
 		allowUnlistedRawModel = false,
-		preferPreferred = false,
 	): Promise<ThinkingLevel | undefined> {
-		if (!model || !this.preferencesStore) {
-			return this.resolveThinkingLevelForModel(model, role, projectId, preferred, undefined, preferPreferred);
-		}
+		if (!model || !this.preferencesStore) return this.clampThinkingCandidateForModel(model, candidate);
 		const normalized = normalizeAigwModelString(model);
 		const slash = normalized.indexOf("/");
-		if (slash <= 0 || slash === normalized.length - 1) {
-			return this.resolveThinkingLevelForModel(normalized, role, projectId, preferred, undefined, preferPreferred);
-		}
-		const currentModels = models ?? await getAvailableModels(this.preferencesStore);
+		if (slash <= 0 || slash === normalized.length - 1) return this.clampThinkingCandidateForModel(normalized, candidate);
 		const catalogModel = findSessionSelectableModel(
-			currentModels,
+			models ?? await getAvailableModels(this.preferencesStore),
 			normalized.slice(0, slash),
 			normalized.slice(slash + 1),
 		);
 		if (!catalogModel) {
-			if (allowUnlistedRawModel) {
-				return this.resolveThinkingLevelForModel(normalized, role, projectId, preferred, undefined, preferPreferred);
-			}
+			if (allowUnlistedRawModel) return this.clampThinkingCandidateForModel(normalized, candidate);
 			throw new Error(`Model "${normalized}" is not currently available for session selection`);
 		}
-		return this.resolveThinkingLevelForModel(normalized, role, projectId, preferred, catalogModel, preferPreferred);
-	}
-
-	/** Preserve an already-chosen explicit/durable candidate ahead of role defaults. */
-	private resolveCurrentCatalogPreferredThinkingLevel(
-		model: string | undefined,
-		role: string | undefined,
-		projectId: string | undefined,
-		preferred: string | undefined,
-	): Promise<ThinkingLevel | undefined> {
-		return this.resolveCurrentCatalogThinkingLevel(
-			model,
-			role,
-			projectId,
-			preferred,
-			undefined,
-			false,
-			true,
-		);
-	}
-
-	/**
-	 * Resolve the thinking level to pin at spawn time for a session.
-	 * Mirrors `tryApplyDefaultThinkingLevel`: role override →
-	 * `default.sessionThinkingLevel` pref → "medium", clamped against the
-	 * exact model selected by the same role/preferences resolution.
-	 */
-	resolveInitialThinkingLevel(role: string | undefined, projectId: string | undefined): string | undefined {
-		return this.resolveThinkingLevelForModel(
-			this.resolveInitialModel(role, projectId),
-			role,
-			projectId,
-		);
+		return this.clampThinkingCandidateForModel(normalized, candidate, catalogModel);
 	}
 
 	/**
@@ -12813,17 +13252,12 @@ export class SessionManager {
 			const persisted = this.resolveStoreForSession(session.id).get(session.id);
 			const requestedThinking = explicitPreferredThinking
 				?? isKnownThinkingLevel(session.spawnPinnedThinkingLevel)
-				?? isKnownThinkingLevel(this.resolveRoleThinkingLevel(session))
-				?? isKnownThinkingLevel(persisted?.effectiveThinkingLevel)
-				?? isKnownThinkingLevel(this.preferencesStore?.get("default.sessionThinkingLevel") as string | undefined)
-				?? "medium";
-			const effectiveThinking = await this.resolveCurrentCatalogPreferredThinkingLevel(
-				modelString,
-				session.role,
-				session.projectId,
-				requestedThinking,
-			);
-			if (!effectiveThinking) throw new Error(`thinking level "${requestedThinking}" could not be normalized`);
+				?? this.resolveExplicitThinkingCandidate(session.role, session.projectId,
+					persisted?.modelProvider === provider && persisted?.modelId === modelId
+						? persisted.effectiveThinkingLevel
+						: undefined,
+					true,
+				);
 
 			const beforeResp = await session.rpcClient.getState();
 			if (beforeResp?.success === false) throw new Error("get_state failed before thinking selection");
@@ -12831,7 +13265,17 @@ export class SessionManager {
 			if (before?.model?.provider !== provider || before?.model?.id !== modelId) {
 				throw new Error(`model read-back changed before thinking selection for ${modelString}`);
 			}
-			if (isKnownThinkingLevel(before?.thinkingLevel) !== effectiveThinking) {
+			const liveThinking = isKnownThinkingLevel(before?.thinkingLevel);
+			const effectiveThinking = requestedThinking
+				? await this.clampCurrentCatalogThinkingCandidate(modelString, requestedThinking)
+				: liveThinking;
+			if (!effectiveThinking) {
+				if (requestedThinking) throw new Error(`thinking level "${requestedThinking}" could not be normalized`);
+				// Pi did not report a canonical thinking level to adopt.
+				session.spawnPinnedModel = modelString;
+				return;
+			}
+			if (requestedThinking && liveThinking !== effectiveThinking) {
 				const setResp = await session.rpcClient.setThinkingLevel(effectiveThinking);
 				if (setResp?.success === false) throw new Error(`thinking level "${effectiveThinking}" was rejected`);
 			}
@@ -12848,8 +13292,6 @@ export class SessionManager {
 			}
 
 			const tuple = { provider, modelId, thinkingLevel: effectiveThinking };
-			// Staged role candidates verify against Pi through the ordinary helper but
-			// cannot advance shared authority until their lifecycle commit wins.
 			if (session._deferVerifiedTupleCommit !== true) {
 				this.persistSessionModel(session.id, provider, modelId, effectiveThinking);
 				this._writeModelNameFile(session.id, modelString);
@@ -12871,7 +13313,7 @@ export class SessionManager {
 			const durableThinking = persisted?.modelProvider && persisted?.modelId
 				? isKnownThinkingLevel(persisted.effectiveThinkingLevel)
 				: undefined;
-			const explicitInitialThinking = this._setupInitialThinkingAuthorities.get(
+			const explicitInitialThinking = this._setupCallerThinkingAuthorities.get(
 				session.id,
 			)?.initialThinkingLevel;
 			const defaultThinking = isKnownThinkingLevel(
@@ -12879,19 +13321,9 @@ export class SessionManager {
 			);
 			const provisionalThinking = isKnownThinkingLevel(session.spawnPinnedThinkingLevel);
 			if (session._deferVerifiedTupleCommit === true) {
-				return roleThinking
-					?? durableThinking
-					?? explicitInitialThinking
-					?? defaultThinking
-					?? provisionalThinking
-					?? "medium";
+				return roleThinking ?? durableThinking ?? explicitInitialThinking ?? defaultThinking ?? provisionalThinking;
 			}
-			return durableThinking
-				?? roleThinking
-				?? explicitInitialThinking
-				?? defaultThinking
-				?? provisionalThinking
-				?? "medium";
+			return durableThinking ?? roleThinking ?? explicitInitialThinking ?? defaultThinking ?? provisionalThinking;
 		};
 
 		// Spawn-pinned models are explicit selections too (restore/respawn persisted
@@ -13084,90 +13516,6 @@ export class SessionManager {
 		return verifiedSpawnTuple;
 	}
 
-	/** Apply, read back, and atomically persist thinking with the exact live model. */
-	private async tryApplyDefaultThinkingLevel(session: SessionInfo): Promise<VerifiedSessionModelTuple> {
-		const persisted = this.resolveStoreForSession(session.id).get(session.id);
-		const spawnPinnedThinking = isKnownThinkingLevel(session.spawnPinnedThinkingLevel);
-		const spawnPinnedModel = session.spawnPinnedModel
-			? normalizeAigwModelString(session.spawnPinnedModel)
-			: undefined;
-		const spawnModelSlash = spawnPinnedModel?.indexOf("/") ?? -1;
-		// tryAutoSelectModel has already read back and atomically persisted this exact
-		// spawn tuple. Return before the first await so the normal setup path cannot
-		// leave a detached redundant thinking read that races a newer live selection.
-		if (
-			spawnPinnedThinking
-			&& spawnPinnedModel
-			&& spawnModelSlash > 0
-			&& persisted?.modelProvider === spawnPinnedModel.slice(0, spawnModelSlash)
-			&& persisted?.modelId === spawnPinnedModel.slice(spawnModelSlash + 1)
-			&& persisted?.effectiveThinkingLevel === spawnPinnedThinking
-		) {
-			return {
-				provider: spawnPinnedModel.slice(0, spawnModelSlash),
-				modelId: spawnPinnedModel.slice(spawnModelSlash + 1),
-				thinkingLevel: spawnPinnedThinking,
-			};
-		}
-		const roleThinking = isKnownThinkingLevel(this.resolveRoleThinkingLevel(session));
-		const durableThinking = isKnownThinkingLevel(persisted?.effectiveThinkingLevel);
-		const preferenceThinking = isKnownThinkingLevel(
-			this.preferencesStore?.get("default.sessionThinkingLevel") as string | undefined,
-		);
-		const requested = spawnPinnedThinking ?? roleThinking ?? durableThinking ?? preferenceThinking ?? "medium";
-
-		const applyAndVerify = async (candidate: ThinkingLevel): Promise<VerifiedSessionModelTuple> => {
-			const beforeResp = await session.rpcClient.getState();
-			if (beforeResp?.success === false) throw new Error("get_state failed before thinking selection");
-			const before = beforeResp?.data ?? beforeResp;
-			const provider = typeof before?.model?.provider === "string" ? before.model.provider : undefined;
-			const modelId = typeof before?.model?.id === "string" ? before.model.id : undefined;
-			if (!provider || !modelId) throw new Error("get_state returned no exact model before thinking selection");
-			const effective = await this.resolveCurrentCatalogThinkingLevel(
-				`${provider}/${modelId}`,
-				session.role,
-				session.projectId,
-				candidate,
-				undefined,
-				!session.spawnPinnedModel,
-			);
-			if (!effective) throw new Error(`thinking level "${candidate}" could not be normalized`);
-			if (
-				persisted?.modelProvider === provider
-				&& persisted?.modelId === modelId
-				&& persisted?.effectiveThinkingLevel === effective
-				&& isKnownThinkingLevel(before?.thinkingLevel) === effective
-			) {
-				return { provider, modelId, thinkingLevel: effective };
-			}
-			if (before?.thinkingLevel !== effective) {
-				const setResp = await session.rpcClient.setThinkingLevel(effective);
-				if (setResp?.success === false) throw new Error(`thinking level "${effective}" was rejected`);
-			}
-
-			const verifiedResp = await session.rpcClient.getState();
-			if (verifiedResp?.success === false) throw new Error("get_state failed after thinking selection");
-			const verified = verifiedResp?.data ?? verifiedResp;
-			const verifiedProvider = verified?.model?.provider;
-			const verifiedModelId = verified?.model?.id;
-			const verifiedThinking = isKnownThinkingLevel(verified?.thinkingLevel);
-			if (verifiedProvider !== provider || verifiedModelId !== modelId || verifiedThinking !== effective) {
-				throw new Error(`thinking selection read-back mismatch for ${provider}/${modelId}`);
-			}
-			if (session._deferVerifiedTupleCommit !== true) {
-				this.persistSessionModel(session.id, provider, modelId, effective);
-			}
-			session.spawnPinnedModel = `${provider}/${modelId}`;
-			session.spawnPinnedThinkingLevel = effective;
-			return { provider, modelId, thinkingLevel: effective };
-		};
-
-		const verifiedTuple = await applyAndVerify(requested);
-		if (process.env.BOBBIT_DEBUG) {
-			console.log(`[session-manager] Verified effective thinking level "${verifiedTuple.thinkingLevel}" for session ${session.id}`);
-		}
-		return verifiedTuple;
-	}
 
 	async persistSessionMetadata(session: SessionInfo): Promise<void> {
 		const maxRetries = 3;
@@ -13843,9 +14191,13 @@ export class SessionManager {
 		const respawnEffectiveGoalId = session.goalId ?? session.teamGoalId;
 		const respawnDisabled = this.disabledToolsForGoal(respawnEffectiveGoalId, session.projectId);
 		const effectiveAllowedRaw = this.resolveEffectiveAllowedTools(fullRole);
-		const effectiveAllowed = respawnDisabled
+		const effectiveAllowedByMetadata = respawnDisabled
 			? effectiveAllowedRaw.filter(e => !respawnDisabled.has(e.name.toLowerCase()))
 			: effectiveAllowedRaw;
+		const roleSelection = persistedBeforeRole?.dynamicCapabilities ?? session.dynamicCapabilities;
+		const effectiveAllowed = roleSelection?.mcpAuthoritative
+			? effectiveAllowedByMetadata.filter(tool => tool.kind !== "mcp" || roleSelection.mcp.includes(tool.name))
+			: effectiveAllowedByMetadata;
 		// Preserve the unrestricted (`undefined`) vs explicit-empty (`[]`)
 		// distinction. `effectiveAllowedRaw` is `[]` ONLY for a role-less /
 		// no-toolManager session (genuinely unrestricted ⇒ `undefined`). When a
@@ -13914,6 +14266,7 @@ export class SessionManager {
 		bridgeOptions.args = [...respawnActivation.args, ...(bridgeOptions.args || [])];
 		bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...respawnActivation.runtimeExtensions];
 		bridgeOptions.env = { ...(bridgeOptions.env || {}), ...respawnActivation.env };
+		bridgeOptions.toolResultFilterBootstrap = respawnActivation.toolResultFilterBootstrap;
 
 		// Pin one exact model/thinking tuple for the replacement. Model selection
 		// prefers the assigned role, while thinking independently prefers an explicit
@@ -13940,11 +14293,14 @@ export class SessionManager {
 		const roleThinkingOverride = isKnownThinkingLevel(
 			this.resolveRoleThinkingLevelValue(role.name, session.projectId),
 		);
-		const initThinking = await this.resolveCurrentCatalogThinkingLevel(
+		const initThinking = await this.clampCurrentCatalogThinkingCandidate(
 			bridgeOptions.initialModel,
-			role.name,
-			session.projectId,
-			roleThinkingOverride ?? respawnPersisted?.effectiveThinkingLevel,
+			this.resolveExplicitThinkingCandidate(
+				role.name,
+				session.projectId,
+				roleThinkingOverride ?? respawnPersisted?.effectiveThinkingLevel,
+				true,
+			),
 		);
 		if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 
@@ -13982,6 +14338,7 @@ export class SessionManager {
 		// fails closed without turning a healthy idle session into a dead one.
 		const oldRpcClient = session.rpcClient;
 		const oldUnsubscribe = session.unsubscribe;
+		const toolResultFilterBootstrap = bridgeOptions.toolResultFilterBootstrap;
 		const rpcClient = new RpcBridge(bridgeOptions);
 		let replacementCommitted = false;
 		let oldBridgeStopped = false;
@@ -14018,6 +14375,7 @@ export class SessionManager {
 
 		try {
 			await rpcClient.start();
+			await this.commitStartedToolResultFilterGate(id, session.projectId, rpcClient, toolResultFilterBootstrap);
 			if (agentSessionFile) {
 				if (!await sessionFileExists(roleFileCtx, agentSessionFile, this.sandboxManager)) {
 					throw new Error(`Cannot assign role for session ${id}: persisted conversation history is unavailable`);
@@ -14025,17 +14383,6 @@ export class SessionManager {
 				await this.switchSessionForRehydration(rpcClient, rolePs, agentSessionFile);
 			}
 			verifiedReplacementTuple = await this.tryAutoSelectModel(stagedSession);
-			// tryAutoSelectModel verifies a complete tuple. Only use the standalone
-			// thinking helper when model selection produced no tuple; re-reading an
-			// already-complete legacy candidate can fail and must not discard it.
-			if (!verifiedReplacementTuple) {
-				try {
-					verifiedReplacementTuple = await this.tryApplyDefaultThinkingLevel(stagedSession);
-				} catch (err) {
-					if (respawnPersisted?.effectiveThinkingLevel !== undefined) throw err;
-					console.warn(`[session-manager] Legacy session ${id} could not verify effective thinking during role replacement:`, err);
-				}
-			}
 			if (respawnPersisted?.effectiveThinkingLevel !== undefined && !verifiedReplacementTuple) {
 				throw new Error(`Cannot assign role for session ${id}: replacement model tuple was not verified`);
 			}
@@ -14069,6 +14416,7 @@ export class SessionManager {
 				throw new Error(`Session ${id} role replacement was superseded after old bridge stop`);
 			}
 		} catch (err) {
+			this.toolResultFilterAttemptCredentials.invalidate(id);
 			unsub();
 			await rpcClient.stop().catch(() => {});
 			// If terminal cancellation landed during the irreversible old stop, both
@@ -14315,6 +14663,48 @@ export class SessionManager {
 		});
 	}
 
+	/**
+	 * The extension boundary's shared explicit-choice fence. It intentionally
+	 * remains in core because it distinguishes operator/user authority from an
+	 * advisory result and is re-read inside the command serialiser. Verified
+	 * durable tuples are recovery state, not live advisory provenance.
+	 */
+	hasExplicitThinkingChoice(sessionId: string): boolean {
+		const persisted = this.getPersistedSession(sessionId);
+		const session = this.sessions.get(sessionId);
+		if (!persisted) return false;
+		if (persisted.humanSelectionPins?.thinkingLevel) return true;
+		if (this._setupCallerThinkingAuthorities.has(sessionId)) return true;
+		const role = session?.role ?? persisted.role;
+		const projectId = session?.projectId ?? persisted.projectId;
+		return !!this.resolveExplicitThinkingCandidate(role, projectId);
+	}
+
+	/** Persist an authenticated user's verified model tuple as explicit provenance. */
+	persistHumanModelSelection(sessionId: string, provider: string, modelId: string, thinkingLevel: ThinkingLevel): void {
+		this.persistHumanSelectionPins(sessionId, {
+			model: { provider, modelId },
+			thinkingLevel,
+		});
+	}
+
+	/** Persist an authenticated user's verified thinking choice without changing its model pin. */
+	persistHumanThinkingSelection(sessionId: string, thinkingLevel: ThinkingLevel): void {
+		const existing = this.getPersistedSession(sessionId)?.humanSelectionPins;
+		this.persistHumanSelectionPins(sessionId, {
+			...(existing?.model ? { model: { ...existing.model } } : {}),
+			thinkingLevel,
+		});
+	}
+
+	private persistHumanSelectionPins(sessionId: string, pins: HumanSelectionPins): void {
+		const verified = normalizeHumanSelectionPins(pins);
+		if (!verified) return;
+		this.resolveStoreForSession(sessionId).update(sessionId, { humanSelectionPins: verified });
+		const live = this.sessions.get(sessionId);
+		if (live) live.humanSelectionPins = verified;
+	}
+
 	/** Persist per-session image generation model override. Validates against the
 	 * registered image-model registry first; mirrors the WS handler's defence-in-depth
 	 * check so any code path that lands here can't poison session state with an
@@ -14401,6 +14791,10 @@ export class SessionManager {
 	 */
 	private async archiveWithCascade(id: string, store?: SessionStore): Promise<boolean> {
 		await this.cascadeReapOwner(id);
+		// Compatibility: lifecycle test/integration seams may provide only dispatch.
+		// A real LifecycleHub always has this method, so active advisors still abort
+		// immediately before shutdown continues.
+		this.lifecycleHub?.cancelScheduledAdvisors?.({ sessionId: id });
 		// Extension Platform G1.4: notify lifecycle providers the session is
 		// shutting down. Best-effort and bounded by the hub's per-provider
 		// timeouts; wrapped in try/catch so archival always completes even if a
@@ -14479,6 +14873,8 @@ export class SessionManager {
 
 		// Cascade-reap this owner's child agents (extracted seam — §6).
 		await this.cascadeReapOwner(id);
+		// Partial lifecycle test/integration seams may not implement advisors.
+		this.lifecycleHub?.cancelScheduledAdvisors?.({ sessionId: id });
 
 		await this.closeExtensionChannelsForSession(id, "session-terminated");
 
@@ -14548,6 +14944,7 @@ export class SessionManager {
 		// S1: drop the per-session capability secret so a terminated session's
 		// secret can no longer resolve to an authentic caller.
 		this.sessionSecretStore.remove(id);
+		this.toolResultFilterAttemptCredentials.invalidate(id);
 
 		// Clean up sandbox worktree inside the container.
 		// Skip sessions that share another owner's worktree: delegates, read-only
@@ -15050,7 +15447,7 @@ export class SessionManager {
 
 			try {
 				const { cleanupWorktree } = await import("../skills/git.js");
-				await cleanupWorktree(item.repoPath, item.path, item.branch, false);
+				await cleanupWorktree(item.repoPath, item.path, item.branch, false, this.commandRunner, this.remoteGitPolicy);
 
 				const worktreeRemoved = await this.archivedWorktreeRemoved(item);
 				if (!worktreeRemoved) {
@@ -15059,6 +15456,7 @@ export class SessionManager {
 					continue;
 				}
 
+				await this.notifyWorktreeRemoved(item.sessionId, item.projectId, [item.path]);
 				const branchDeleted = await this.deleteArchivedWorktreeBranchIfAllowed(item);
 				recordResult({
 					...base,
@@ -15411,6 +15809,14 @@ export class SessionManager {
 		let pathExists = false;
 		try { pathExists = fs.existsSync(spec.worktreePath); } catch { pathExists = false; }
 		const gitRefs = await this.readGitWorktreeRefs(spec.repoPath, ctx);
+		if (!gitRefs.verified) {
+			return base({
+				pathExists,
+				status: "skipped",
+				reason: "scan-error",
+				detail: "Could not verify git worktree metadata; archived-session cleanup will preserve this path for retry.",
+			});
+		}
 		const normalizedCandidate = normalizeWorktreeHostPath(spec.worktreePath);
 		const gitWorktreeMetadataExists = this.gitWorktreeMetadataMatches(gitRefs, normalizedCandidate, spec.branch);
 		const localBranchExists = await this.localBranchExists(spec.repoPath, spec.branch, ctx);
@@ -15500,12 +15906,15 @@ export class SessionManager {
 	}
 
 	private async archivedWorktreeRemoved(item: ArchivedSessionWorktreeItem): Promise<boolean> {
-		let pathExists = false;
-		try { pathExists = fs.existsSync(item.path); } catch { pathExists = false; }
-		const gitRefs = await this.readGitWorktreeRefsUncached(item.repoPath);
+		// Both observations are authoritative removal fences: an inaccessible path
+		// or failed Git listing is not evidence that cleanup completed.
+		const [pathState, gitRefs] = await Promise.all([
+			postCleanupPathState(item.path),
+			this.readGitWorktreeRefsUncached(item.repoPath),
+		]);
+		if (pathState !== "absent" || !gitRefs.verified) return false;
 		const normalizedCandidate = normalizeWorktreeHostPath(item.path);
-		const gitWorktreeMetadataExists = this.gitWorktreeMetadataMatches(gitRefs, normalizedCandidate, item.branch);
-		return !pathExists && !gitWorktreeMetadataExists;
+		return !this.gitWorktreeMetadataMatches(gitRefs, normalizedCandidate, item.branch);
 	}
 
 	private async deleteArchivedWorktreeBranchIfAllowed(item: ArchivedSessionWorktreeItem): Promise<boolean> {
@@ -15555,9 +15964,9 @@ export class SessionManager {
 				if (!normalizedPath) continue;
 				entries.push({ path: normalizedPath, branch: branchMatch?.[1] });
 			}
-			return { entries };
+			return { entries, verified: true };
 		} catch {
-			return { entries: [] };
+			return { entries: [], verified: false };
 		}
 	}
 
@@ -15719,6 +16128,7 @@ export class SessionManager {
 		// are container-internal (start with /workspace) — those have no host counterpart.
 		// Skip delegates and non-sandboxed polyrepo leads — both borrow worktrees owned elsewhere.
 		const goalOwnsTeamLeadWorktrees = hasGoalOwnedTeamLeadWorktrees(ps);
+		const removedWorktreePaths: string[] = [];
 		if (ps.worktreePath && ps.repoPath && !ps.worktreePath.startsWith("/workspace") && !ps.delegateOf && !goalOwnsTeamLeadWorktrees) {
 			try {
 				const { cleanupWorktree, removeEmptyWorktreeSetContainer } = await import("../skills/git.js");
@@ -15734,10 +16144,11 @@ export class SessionManager {
 						const repoPath = repo === "." ? ps.repoPath! : path.join(ps.repoPath!, repo);
 						try {
 							await cleanupWorktree(repoPath, wt, ps.branch, true, this.commandRunner, this.remoteGitPolicy);
-							try {
-								await fsp.access(wt);
-								console.error(`[session-manager] Component "${repo}" cleanup left worktree for ${ps.id}: ${wt}`);
-							} catch { /* removed */ }
+							if (await postCleanupPathState(wt) === "absent") {
+								removedWorktreePaths.push(wt);
+							} else {
+								console.error(`[session-manager] Component "${repo}" cleanup did not confirm worktree removal for ${ps.id}: ${wt}`);
+							}
 						} catch (err) {
 							console.error(`[session-manager] Failed to clean up component "${repo}" worktree for ${ps.id}:`, err);
 						}
@@ -15749,6 +16160,11 @@ export class SessionManager {
 					}
 				} else if (!isWorktreePathReferencedByLiveSession(ps.worktreePath, allPersisted, { ignoreSessionId: ps.id })) {
 					await cleanupWorktree(ps.repoPath, ps.worktreePath, ps.branch, true, this.commandRunner, this.remoteGitPolicy);
+					if (await postCleanupPathState(ps.worktreePath) === "absent") {
+						removedWorktreePaths.push(ps.worktreePath);
+					} else {
+						console.error(`[session-manager] Cleanup did not confirm worktree removal for ${ps.id}: ${ps.worktreePath}`);
+					}
 				} else {
 					console.log(`[session-manager] Skipping shared worktree cleanup for purged session ${ps.id}: ${ps.worktreePath}`);
 				}
@@ -15758,6 +16174,7 @@ export class SessionManager {
 		} else if (goalOwnsTeamLeadWorktrees) {
 			console.log(`[session-manager] Skipping goal-owned component worktree cleanup for purged team lead ${ps.id}.`);
 		}
+		await this.notifyWorktreeRemoved(ps.id, ps.projectId, removedWorktreePaths);
 
 		// Remove color
 		try {
@@ -15794,10 +16211,17 @@ export class SessionManager {
 		await this.cleanupScopedMcpManagersForSessionScope({ projectId: ps.projectId, cwd: ps.cwd });
 
 		// Notify termination listeners (sidebar broadcast etc.) so cached UI lists
-		// drop the entry without waiting for a polling tick.
+		// drop the entry without waiting for a polling tick. Preserve worktree
+		// coordinates for lifecycle owners that must stop state before deletion.
 		for (const listener of this._terminationListeners) {
 			try {
-				await listener(ps.id, { projectId: ps.projectId, reason: "purged" });
+				await listener(ps.id, {
+					projectId: ps.projectId,
+					reason: "purged",
+					cwd: ps.cwd,
+					worktreePath: ps.worktreePath,
+					repoWorktrees: ps.repoWorktrees ? Object.values(ps.repoWorktrees).map(worktreePath => ({ worktreePath })) : undefined,
+				});
 			} catch (err) {
 				console.error(`[session ${ps.id}] purge listener failed:`, err);
 			}
@@ -16492,6 +16916,7 @@ export class SessionManager {
 			bridgeOptions.args = [...forceActivation.args, ...(bridgeOptions.args || [])];
 			bridgeOptions.piExtensions = [...(bridgeOptions.piExtensions ?? []), ...forceActivation.runtimeExtensions];
 			bridgeOptions.env = { ...(bridgeOptions.env || {}), ...forceActivation.env };
+			bridgeOptions.toolResultFilterBootstrap = forceActivation.toolResultFilterBootstrap;
 
 			// Pin model/thinking-level at spawn for the force-abort respawn.
 			const forceRespawnPersisted = this.resolveStoreForSession(id).get(id);
@@ -16518,19 +16943,15 @@ export class SessionManager {
 				forceRespawnPersistedModel
 				&& isKnownThinkingLevel(forceRespawnPersisted?.effectiveThinkingLevel)
 			);
-			const initThinking = forceRespawnHasDurableTuple
-				? await this.resolveCurrentCatalogPreferredThinkingLevel(
-					bridgeOptions.initialModel,
+			const initThinking = await this.clampCurrentCatalogThinkingCandidate(
+				bridgeOptions.initialModel,
+				this.resolveExplicitThinkingCandidate(
 					session.role,
 					session.projectId,
 					forceRespawnPersisted?.effectiveThinkingLevel,
-				)
-				: await this.resolveCurrentCatalogThinkingLevel(
-					bridgeOptions.initialModel,
-					session.role,
-					session.projectId,
-					forceRespawnPersisted?.effectiveThinkingLevel,
-				);
+					forceRespawnHasDurableTuple,
+				),
+			);
 			if (initThinking) bridgeOptions.initialThinkingLevel = initThinking;
 			const forceSpawnProvider = bridgeOptions.initialModel?.slice(0, bridgeOptions.initialModel.indexOf("/"));
 			await this.applyDirectProviderEnv(bridgeOptions, !!session.sandboxed, forceSpawnProvider);
@@ -16541,6 +16962,7 @@ export class SessionManager {
 				projectId: session.projectId,
 			});
 
+			const toolResultFilterBootstrap = bridgeOptions.toolResultFilterBootstrap;
 			const rpcClient = new RpcBridge(bridgeOptions);
 			let switchingSession = true;
 			let replayingSession = false;
@@ -16564,7 +16986,9 @@ export class SessionManager {
 			bridgeOptions.onPiExtensionDiagnostic = (diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension);
 			try {
 				await rpcClient.start();
+				await this.commitStartedToolResultFilterGate(id, session.projectId, rpcClient, toolResultFilterBootstrap);
 			} catch (err) {
+				this.toolResultFilterAttemptCredentials.invalidate(id);
 				unsub();
 				await rpcClient.stop().catch(() => {});
 				throw err;
@@ -16595,6 +17019,7 @@ export class SessionManager {
 					}
 				}
 			} catch (err) {
+				this.toolResultFilterAttemptCredentials.invalidate(id);
 				switchingSession = false;
 				unsub();
 				await rpcClient.stop().catch(() => {});
@@ -16608,6 +17033,7 @@ export class SessionManager {
 			// Coordinator release owns their one exact redispatch.
 			this._reconcileAfterAbort(session, { outcome: "proven-no-start" });
 			if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session) {
+				this.toolResultFilterAttemptCredentials.invalidate(id);
 				unsub();
 				await rpcClient.stop().catch(() => {});
 				throw new Error(`Session ${id} force-abort replacement was superseded after rehydration`);
@@ -16621,18 +17047,14 @@ export class SessionManager {
 
 			try {
 				await this.tryAutoSelectModel(session);
-				try {
-					await this.tryApplyDefaultThinkingLevel(session);
-				} catch (err) {
-					if (forceRespawnPersisted?.effectiveThinkingLevel !== undefined) throw err;
-					console.warn(`[session-manager] Legacy session ${id} could not verify effective thinking during force-abort recovery:`, err);
-				}
 			} catch (err) {
+				this.toolResultFilterAttemptCredentials.invalidate(id);
 				unsub();
 				await rpcClient.stop().catch(() => {});
 				throw err;
 			}
 			if (!this._replacementTokenIsCurrent(id, token) || this.sessions.get(id) !== session || session.rpcClient !== rpcClient) {
+				this.toolResultFilterAttemptCredentials.invalidate(id);
 				unsub();
 				await rpcClient.stop().catch(() => {});
 				throw new Error(`Session ${id} force-abort replacement was superseded during model verification`);
@@ -16646,6 +17068,7 @@ export class SessionManager {
 			// lifecycle replacement has settled, never against an intermediate bridge.
 			session.recoverDrainAttempts = 0;
 		} catch (err) {
+			this.toolResultFilterAttemptCredentials.invalidate(id);
 			// Without a complete closed-generation replay, neither delivery nor
 			// non-delivery is proven. Preserve the durable uncertain carrier and forbid
 			// automatic replay; explicit dismissal remains available through removeQueued.

@@ -55,7 +55,8 @@ import { isSocketSendable } from "./ws/socket-sendability.js";
 import type { GateResetReopenOutcome, ServerMessage } from "./ws/protocol.js";
 import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { DEFAULT_OVERFLOW_GUARD, describeWsPayload, guardWebSocketOverflow } from "./ws-overflow-guard.js";
-import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
+import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, scanSkillDirResolved, type SkillMarketContext } from "./skills/slash-skills.js";
+import { adoptedSkillEntries, type AdoptedSkillLedgerReader } from "./skills/adopted-skill-entries.js";
 import { enumerateFiles } from "./skills/file-enumeration.js";
 import { TeamManager, GateDependencyError, TeamStartError } from "./agent/team-manager.js";
 import { OrchestrationCore, OrchestrationCoreError, dismissHttpStatus, isSettledStatus, type WaitResult } from "./agent/orchestration-core.js";
@@ -63,10 +64,10 @@ import { tryHandleNestedGoalRoute, listDescendants } from "./agent/nested-goal-r
 import { walkGoalSubtree, cascadeSubtree as cascadeGoalSubtree } from "./agent/goal-subtree.js";
 import type { Workflow } from "./agent/workflow-store.js";
 import { freezeWorkflowDefinition } from "./agent/workflow-validator.js";
-import { buildDefaultWorkflows, buildParentWorkflow } from "./state-migration/seed-default-workflows.js";
-import { readSubgoalNestingPrefs, checkCanSpawnChild, inheritedChildOverrides, clampMaxDepth } from "./agent/subgoal-nesting-limit.js";
-import { GoalPausedError, requireAncestorsNotPaused } from "./agent/goal-paused-guard.js";
-import { resumeOperatorPausedGoal } from "./agent/goal-resume.js";
+import { readSubgoalNestingPrefs } from "./agent/subgoal-nesting-limit.js";
+import { GoalPausedError } from "./agent/goal-paused-guard.js";
+import { resumeOnlyAwaitingConsentGoal, resumeOperatorPausedGoal } from "./agent/goal-resume.js";
+import { pauseGoalAwaitingExtensionConsent } from "./agent/goal-pause-service.js";
 import { collectDescendants, enrichDescendantsForPlan } from "./agent/goal-descendants.js";
 import { computeTreeCost } from "./agent/cost-tracker.js";
 import { backfillLegacyCostGoalIds, backfillLegacyCostGoalIdsFromTranscripts } from "./agent/cost-backfill.js";
@@ -83,18 +84,41 @@ import { ModuleHost } from "./extension-host/module-host-worker.js";
 import { authorizeActionRequest, authorizeScopedRequest, transcriptHasToolUse, type ActionGuardSession } from "./extension-host/action-guard.js";
 import { getPackStore, withStoreTimeout, PackStoreTimeoutError, PackStoreQuotaError } from "./extension-host/pack-store.js";
 import { createServerHostApi } from "./extension-host/server-host-api.js";
+import { ServiceExtensionRuntimeManager } from "./extension-host/service-extension-runtime.js";
+import { ServiceExtensionRegistry } from "./extension-host/service-extension-registry.js";
+import { WorktreeServiceCoordinator, type ServiceInstanceRef } from "./extension-host/worktree-service-coordinator.js";
+import { ServiceToolAdapterRegistry, ServiceToolOperationScheduler } from "./extension-host/service-extension-tool-rpc.js";
 import { transcriptToHostMessages, transcriptToToolCall, buildTranscriptEnvelope } from "./extension-host/contract-adapter.js";
 import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
 import type { StorePutOptions } from "../shared/extension-host/host-api.js";
 import { PackContributionRegistry, type ProviderConfigOverrideReadResult } from "./extension-host/pack-contribution-registry.js";
-import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
+
+import { loadPackContributions, packIdFromRoot, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX, type PackContributions } from "./agent/pack-contributions.js";
+import { ExtensionSettingsUnavailableError, type ExtensionSettingsTargetRef } from "./agent/extension-settings-store.js";
+import { isValidExtensionSettingValue, normalizeMultiEnumValue, reconcileExtensionSettingsValues, type ExtensionSettingDefinition, type ExtensionSettingValue } from "./agent/extension-settings-schema.js";
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
+import { DecisionHookDispatcher, DecisionRequestManager } from "./agent/decision-request-manager.js";
+import { ProjectImportDecisionCoordinator } from "./agent/project-import-decision-coordinator.js";
+import { buildProjectImportDecisionContext } from "./agent/project-import-decision-context.js";
+import { AdvisoryThinkingConsumer } from "./agent/advisory-thinking-consumer.js";
+import { isCurrentTrustedExtensionDecisionOperation } from "./agent/trusted-decision-operation.js";
 import { resolveConfiguredComponent, resolveHookScopeContext } from "./agent/hook-scope-context.js";
-import { ContextTraceStore } from "./agent/context-trace-store.js";
+import { ContextTraceStore, type TraceOutcomeReason } from "./agent/context-trace-store.js";
+import { RequestMutationDispatcher, type RequestMutationOutcome } from "./agent/request-mutation-dispatcher.js";
+import { RequestMutationAuditStore, type RequestMutationAuditOutcome, type RequestMutationAuditReason } from "./agent/request-mutation-audit-store.js";
+import type { RequestMutationReason, RequestMutationSource } from "./agent/request-mutation-contract.js";
+import { ToolResultFilterDispatcher, type ToolResultFilterDispatchOutcome, type ToolResultFilterResolution } from "./agent/tool-result-filter-dispatcher.js";
+import { ToolResultFilterAuditStore } from "./agent/tool-result-filter-audit-store.js";
+import { createSyntheticRejectedToolResult, validateToolResultInspection, type ToolResultInspection } from "./agent/tool-result-filter-contract.js";
 import { fenceBlock } from "./agent/context-blocks.js";
 import { DYNAMIC_CONTEXT_START, DYNAMIC_CONTEXT_END } from "./agent/provider-bridge-extension.js";
+import { getSystemPromptLayout, initPromptDirs, loadPersistedPromptSections, persistPromptSections, resolveSystemPromptPath, type ResolvedSystemPromptSection } from "./agent/system-prompt.js";
+import { acceptPromptExtensionProposal, assertPromptExtensionBudget, PromptExtensionValidationError, promptExtensionKey, promptExtensionSectionBytes, validatePromptExtensionProposalSections, type PromptExtensionOverride, type PromptExtensionProposalSection } from "./agent/prompt-extension-overrides.js";
+import { PromptExtensionAuthoringAuditStore } from "./agent/prompt-extension-audit-store.js";
+import { createPromptExtensionUnifiedDiff, promptExtensionBaseline } from "./agent/prompt-extension-diff.js";
+import { redactSensitive } from "./auth/redact.js";
 import { isPackPathWithinRoot } from "./extension-host/path-guard.js";
 import { buildGateStatusSummary, projectGateForList } from "./gate-status-summary.js";
 import { broadcastGateStatusChanged, wireGateStatusGenerationInvalidation } from "./gate-status-broadcast.js";
@@ -126,7 +150,7 @@ import {
 	type TextSelectionOptions,
 } from "./utils/text-selection.js";
 
-import { getPromptSections, initPromptDirs, loadPersistedPromptSections, persistPromptSections } from "./agent/system-prompt.js";
+import { getPromptSections } from "./agent/system-prompt.js";
 import { configureProfilingRuntime, recordElapsed } from "./agent/profiling.js";
 import { cpuDiagnosticsEnabled, getCpuDiagnostics, shutdownEventLoopLagMonitor, type CpuDiagnostics } from "./agent/cpu-diagnostics.js";
 import { SearchUnavailableError } from "./search/search-service.js";
@@ -177,20 +201,27 @@ import {
 } from "./agent/history-fork.js";
 
 import { isGitRepo, getRepoRoot, resolveSandboxMountRoot, shouldSkipRemotePush, stripTokenFromGitUrl, detectPrimaryBranch, parseBaseRef, detectBaseRefFromRemote, resolveBaseRef, refExistsInRepo, type RemoteGitPolicy } from "./skills/git.js";
-import {
-	baseRefMissingInReposError,
-	baseRefSkippedRepoWarning,
-	baseRefTagError,
-	isValidBaseRefBranchGrammar,
-	normalizeBaseRefValue,
-	validateBaseRefShape,
-} from "./base-ref-validation.js";
+import { isValidBaseRefBranchGrammar } from "./base-ref-validation.js";
 
 /**
  * Render the `team_wait` result text (orchestration-core design §9). Returns on
  * the first SETTLED child (idle or terminal); enumerates every awaited child's
  * status and instructs the agent to call `team_wait` again for the remainder.
  */
+function cloneExtensionSettingValue(value: ExtensionSettingValue): ExtensionSettingValue {
+	return Array.isArray(value) ? [...value].sort() : value;
+}
+
+function cloneExtensionSettingsValues(values: Readonly<Record<string, ExtensionSettingValue>>): Record<string, ExtensionSettingValue> {
+	return Object.fromEntries(Object.entries(values).map(([key, value]) => [key, cloneExtensionSettingValue(value)])) as Record<string, ExtensionSettingValue>;
+}
+
+/** Validate and detach public values before they cross the CAS boundary. */
+function normalizeExtensionSettingsApiValue(definition: ExtensionSettingDefinition, value: unknown): ExtensionSettingValue | undefined {
+	if (definition.type === "multi-enum") return normalizeMultiEnumValue(definition, value);
+	return isValidExtensionSettingValue(definition, value) ? value : undefined;
+}
+
 function formatWaitText(result: WaitResult): string {
 	const lines: string[] = [];
 	const first = result.firstIdle;
@@ -220,6 +251,20 @@ function formatWaitText(result: WaitResult): string {
 		lines.push(`➜ Process this result now, then call team_wait again to await the remaining children — pass child_session_ids: [${remainingIds.join(", ")}].`);
 	}
 	return lines.join("\n");
+}
+
+/** Resolve the sole Docker image plan from server-owned project configuration and
+ * the registry's active, grant-aware sandbox requirement projection. */
+function resolveProjectSandboxImagePlan(
+	registry: PackContributionRegistry,
+	projectConfig: ProjectConfigStore,
+	projectId: string | undefined,
+): SandboxImagePlan {
+	return resolveSandboxImagePlan({
+		baseImageName: projectConfig.get("sandbox_image") || "bobbit-agent",
+		requirements: registry.listSandboxRequirements(projectId),
+		piAgentVersion: getHostAgentVersion(),
+	});
 }
 
 function isMissingOptionalExtensionChannelModule(err: unknown): boolean {
@@ -554,7 +599,7 @@ export type { GitStatusResult } from "./skills/git-status-envelope.js";
 import { VerificationHarness, goalBranchContainer } from "./agent/verification-harness.js";
 import { validateAnswers, crossValidate, type UserQuestion } from "./agent/ask-user-choices-validation.js";
 import { buildAskResponseEnvelope, findAskResponseAnswers } from "../shared/ask-envelope.js";
-import { isKnownThinkingLevel } from "../shared/thinking-levels.js";
+import { THINKING_LEVELS, isKnownThinkingLevel } from "../shared/thinking-levels.js";
 import { normalizeBasePath, stripBasePath } from "../shared/base-path.js";
 import { rewriteManifestForBasePath, rewriteSpaShell } from "./base-path-http.js";
 import { isSessionSelectableModelString } from "./agent/google-code-assist.js";
@@ -610,18 +655,50 @@ import { InboxManager, type InboxEntry } from "./agent/inbox-manager.js";
 import { InboxNudger } from "./agent/inbox-nudger.js";
 import type { InboxStore } from "./agent/inbox-store.js";
 import { PreferencesStore } from "./agent/preferences-store.js";
-import { ProjectConfigLoadError, ProjectConfigStore, type PackOrderScope } from "./agent/project-config-store.js";
+import {
+	ProjectConfigLoadError,
+	ProjectConfigStore,
+	isExtensionCapability,
+	type Component,
+	type InlineWorkflowDef,
+	isSafeExtensionGrantIdentifier,
+	type ExtensionCapability,
+	type ExtensionGrant,
+	type PackOrderScope,
+} from "./agent/project-config-store.js";
+import { ExtensionGrantAuditStore } from "./agent/extension-grant-audit-store.js";
+import {
+	createExtensionCapabilityGrantResolver,
+	resolveExtensionGrant,
+	type ExtensionCapabilityGrantResolver,
+	type ResolvedHook,
+} from "./agent/extension-grant-policy.js";
+import {
+	aggregateAdoptedExtensions,
+	adoptedMcpContributions,
+	adoptionNamespace,
+	AdoptionValidationError,
+	cloneAdoptedExtension,
+	findOrCreateAdoptedExtension,
+	nextAdoptedExtensionRevision,
+	reconcileAdoptionOperations,
+	redactAdoptedExtension,
+	type AdoptedExtension,
+	type AdoptionConformance,
+	type AdoptionScope,
+} from "./agent/adopted-extensions.js";
 import { SecretsStorePersistenceError } from "./agent/secrets-store.js";
 import { ToolGroupPolicyStore } from "./agent/tool-group-policy-store.js";
 import { getAllConfigDirectories, removeBuiltinDirectory, resetConfigDirectories } from "./agent/config-directories.js";
-import { checkDockerAvailability, buildSandboxImage, isBuildingImage, ensureImageAgentVersion, resolveSandboxDockerContext } from "./agent/sandbox-status.js";
-import { SandboxManager, type SandboxBootstrap } from "./agent/sandbox-manager.js";
+import { checkDockerAvailability, buildSandboxImage, isBuildingImage, getHostAgentVersion, resolveSandboxDockerContext } from "./agent/sandbox-status.js";
+import { parseSandboxBaseImageReference, resolveSandboxImagePlan, sandboxImageRequirements, sandboxRequirementsStatus, UnsupportedSandboxImagePlanError, type SandboxImagePlan } from "./agent/sandbox-image-requirements.js";
+import { SandboxManager, type SandboxBootstrap, type SandboxPlanIdentityResolver } from "./agent/sandbox-manager.js";
 import { prepareSanitizedSandboxCloneSource, resolveSandboxCloneSource, type SandboxCloneSource } from "./agent/sandbox-clone-source.js";
 import { validateSandboxMounts } from "./agent/sandbox-mounts.js";
 import { SandboxTokenStore, type SandboxScope } from "./auth/sandbox-token.js";
 import { CookieStore, extractCookieValue, issueCookie, tryAuth as cookieTryAuth } from "./auth/cookie.js";
 import { loadOrCreateCookieSigningKey } from "./auth/cookie-signing-key.js";
-import { classifyBrowserCookieEligibility, type BrowserCookieAuthentication } from "./auth/browser-cookie.js";
+import { classifyBrowserCookieEligibility, hasSameOriginBrowserMutationEvidence, type BrowserCookieAuthentication } from "./auth/browser-cookie.js";
 import { authorizeChildrenMutation } from "./auth/children-mutation-authz.js";
 import { handlePreviewRequest, pickEntry } from "./preview/content-route.js";
 import { isLoopbackHost, loopbackForBind } from "./cli-loopback.js";
@@ -636,13 +713,15 @@ import { broadcastPreviewChanged, subscribePreviewChanged } from "./preview/even
 import { configureAigw, removeAigw, getAigwUrl, discoverAigwModels, proxyRequest, startupAigwCheck, configureAigwRuntimeFlags, normalizeAigwModelString } from "./agent/aigw-manager.js";
 import { aigwUserAgentHeaders } from "./agent/aigw-user-agent.js";
 import { ReviewAnnotationStore, type ReviewAnnotation } from "./review-annotation-store.js";
-import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, findSessionSelectableModel } from "./agent/model-registry.js";
+import { getAvailableModels, discoverModelsForConfig, invalidateModelCache, getBuiltInProviderIds, findSessionSelectableModel, normalizeCustomProviderBaseUrl } from "./agent/model-registry.js";
 import { testModelPreference, testProviderApiKey } from "./agent/model-completion.js";
 import { modelProbeFailure, modelProbeFailureFromHttpStatus } from "./agent/model-probe-result.js";
 import type { CustomProviderConfig } from "./agent/model-registry.js";
 import { canonicalImageModelPref, defaultImageModelPref, generateImage, getAvailableImageModels } from "./agent/image-generation.js";
 import {
 	ProjectRegistry,
+	ProjectRootAlreadyRegisteredError,
+	ProjectRootNotFoundError,
 	SymlinkProjectRootError,
 	PreflightFailedError,
 	SYSTEM_PROJECT_ID,
@@ -679,7 +758,7 @@ import { BUILTIN_PACK_SCOPE, activeBuiltinFirstPartyPackEntries, builtinFirstPar
 import { MarketplaceInstaller, MarketplaceError, readPackEntityDescriptions, type InstallScope, type PackOrderStore, type PackEntityDescriptions, type BrowsePack } from "./agent/marketplace-install.js";
 import type { MarketplaceMcpResolver, McpReloadResult, McpToolRouteSnapshot, ResolvedMcpContribution } from "./mcp/mcp-manager.js";
 import type { MarketplacePiExtensionResolver, ResolvedPiExtensionContribution, PiExtensionDiagnostic } from "./agent/session-setup.js";
-import { scopeMarketPackEntries, invalidateMarketPackScanCache } from "./agent/pack-list.js";
+import { scopeMarketPackEntries, refreshScopeMarketPackEntries, invalidateMarketPackScanCache } from "./agent/pack-list.js";
 import { buildConflictsFor, type ConflictWire, type PackScope, type PackEntry } from "./agent/pack-types.js";
 import { isSafeBasename } from "./agent/pack-manifest.js";
 import { gatewayMcpActivationContributionId, gatewayMcpRuntimeKey } from "./agent/mcp-gateway-runtime-identity.js";
@@ -688,6 +767,7 @@ import { initAssistantRegistry, assistantRoleForType } from "./agent/assistant-r
 import {
 	deleteProposalFile,
 	editProposalFile,
+	extensionPromptSectionsFromProposal,
 	isProposalType,
 	latestRev,
 	listProposalFiles,
@@ -699,7 +779,28 @@ import {
 	getProposalTypePlugin,
 	type ProposalType,
 } from "./proposals/proposal-files.js";
-import { prepareGoalProposalSeed } from "./proposals/goal-proposal-seed.js";
+import { ProposalSeedService, proposalDraftOwnerId } from "./proposals/proposal-seed-service.js";
+import { ProjectImportProposalApplicationService, ProjectImportApplicationError, projectImportApplicationKey, projectImportSnapshotSha256 } from "./proposals/project-import-proposal-application.js";
+import { createGoalCreationLifecycle, type GoalCreationLifecycleDeps } from "./proposals/goal-creation-lifecycle.js";
+import {
+	CanonicalMutationError,
+	CanonicalProjectConfigPersistenceError,
+	CanonicalSandboxSecretPersistenceError,
+	type CanonicalGoalProposalDeps,
+	applyCanonicalGoalProposal,
+	applyCanonicalProjectProposal,
+	validateProjectBaseRef,
+	applyCanonicalToolProposal,
+	canonicalToolProposalState,
+	createCanonicalRole,
+	createCanonicalStaff,
+	createCanonicalWorkflow,
+	deleteCanonicalRole,
+	deleteCanonicalStaff,
+	updateCanonicalRole,
+	updateCanonicalStaff,
+	updateCanonicalWorkflow,
+} from "./proposals/canonical-mutations.js";
 
 const VALID_TASK_STATES = new Set<string>(["todo", "in-progress", "blocked", "complete", "skipped"]);
 
@@ -716,8 +817,86 @@ const _goalWarnedClients = new WeakSet<WebSocket>();
 const execAsync = promisify(exec);
 let serverCommandRunner: CommandRunner = realCommandRunner;
 let serverRemoteGitPolicy: RemoteGitPolicy = {};
+
+type CanonicalGoalProposalDependencyFactoryInput = Omit<CanonicalGoalProposalDeps, "afterCreate" | "onAfterCreateError"> & GoalCreationLifecycleDeps;
+
+/** Compose public and import goal creation with one lifecycle owner. */
+function createCanonicalGoalProposalDependencies(input: CanonicalGoalProposalDependencyFactoryInput): CanonicalGoalProposalDeps {
+	return {
+		resolveProject: input.resolveProject,
+		validateCwd: input.validateCwd,
+		getContext: input.getContext,
+		ensureSandbox: input.ensureSandbox,
+		findGoalAcrossProjects: input.findGoalAcrossProjects,
+		getNestingPrefs: input.getNestingPrefs,
+		authorizeChild: input.authorizeChild,
+		findCascadeWorkflow: input.findCascadeWorkflow,
+		applicationKey: input.applicationKey,
+		...createGoalCreationLifecycle(input),
+	};
+}
+
+/** One public-equivalent base-ref validator shared by route and import apply paths. */
+function createCanonicalBaseRefValidator(commandRunner: CommandRunner) {
+	return (input: Parameters<typeof validateProjectBaseRef>[0]) => validateProjectBaseRef(input, {
+		isGitRepo: async (repoPath) => isGitRepo(repoPath, commandRunner).catch(() => false),
+		isTag: async (repoPath, ref) => {
+			try { await commandRunner.execFile("git", ["rev-parse", "--verify", `refs/tags/${ref}`], { cwd: repoPath, timeout: 5_000 }); return true; }
+			catch { return false; }
+		},
+		hasRef: async (repoPath, ref) => refExistsInRepo(repoPath, ref, commandRunner).catch(() => false),
+	});
+}
+
+/**
+ * Resolve the project-effective EP-13 prompt projection at every server
+ * boundary that needs it. Registry order is already deterministic; overrides
+ * replace only content, so position and attribution cannot drift.
+ */
+function resolveStaticPromptSectionsForProject(
+	projectContextManager: ProjectContextManager,
+	packContributionRegistry: PackContributionRegistry,
+	projectId: string | undefined,
+	overrideRows?: readonly PromptExtensionOverride[],
+): ResolvedSystemPromptSection[] {
+	if (!projectId) return [];
+	const context = projectContextManager.getOrCreate(projectId);
+	if (!context) return [];
+	const overrides = new Map((overrideRows ?? context.projectConfigStore.getPromptExtensionOverrides())
+		.map(row => [promptExtensionKey(row.packId, row.sectionId), row]));
+	const declaredMaxBytes = new Map<string, number | undefined>();
+	const effective = packContributionRegistry.listSystemPromptSections?.(projectId).map(section => {
+		const key = promptExtensionKey(section.packId, section.sectionId);
+		const override = overrides.get(key);
+		declaredMaxBytes.set(key, section.maxBytes);
+		return {
+			packId: section.packId,
+			packName: section.packName,
+			sectionId: section.sectionId,
+			title: section.title,
+			content: override?.content ?? section.content,
+			source: override ? "project-override" : "manifest",
+		} satisfies ResolvedSystemPromptSection;
+	}) ?? [];
+	// Wrapper-inclusive budgets reject the complete candidate rather than
+	// truncating or publishing a partial prompt.
+	assertPromptExtensionBudget(effective, context.projectConfigStore.getPromptExtensionBudget(), declaredMaxBytes);
+	return effective;
+}
 export function __setServerRemoteGitPolicy(p: RemoteGitPolicy): RemoteGitPolicy { const prev = serverRemoteGitPolicy; serverRemoteGitPolicy = p; return prev; }
 let serverRuntimeFlags = { e2e: false, testNoExternal: false };
+// Audit rows are append-only events. Keep timestamps unique per injected clock
+// so deterministic clocks cannot collapse distinct administrative transitions.
+const extensionGrantAuditTimestampFloors = new WeakMap<Clock, number>();
+let extensionGrantAuditDefaultTimestampFloor = Number.NEGATIVE_INFINITY;
+function nextExtensionGrantAuditTimestamp(clock?: Clock): string {
+	const now = clock?.now() ?? Date.now();
+	const previous = clock ? extensionGrantAuditTimestampFloors.get(clock) : extensionGrantAuditDefaultTimestampFloor;
+	const timestamp = Math.max(now, (previous ?? Number.NEGATIVE_INFINITY) + 1);
+	if (clock) extensionGrantAuditTimestampFloors.set(clock, timestamp);
+	else extensionGrantAuditDefaultTimestampFloor = timestamp;
+	return new Date(timestamp).toISOString();
+}
 
 function oneLineDescription(value: unknown): string | undefined {
 	if (typeof value !== "string") return undefined;
@@ -1977,6 +2156,42 @@ function validateComponentsConfig(components: unknown): string | null {
 	return null;
 }
 
+/**
+ * POST retries must write the same complete component shape as initial project
+ * registration. A crash while the import marker is `configuring` must not
+ * turn a valid retry into a lossy rewrite.
+ */
+function normalizeProjectRegistrationComponents(raw: unknown): Component[] | undefined {
+	if (!Array.isArray(raw) || raw.length === 0) return undefined;
+	return raw.map(value => {
+		const component = value && typeof value === "object" && !Array.isArray(value)
+			? value as Record<string, unknown>
+			: {};
+		return {
+			name: String(component.name ?? ""),
+			repo: typeof component.repo === "string" && component.repo ? component.repo : ".",
+			relativePath: typeof component.relative_path === "string"
+				? component.relative_path
+				: typeof component.relativePath === "string" ? component.relativePath : undefined,
+			worktreeSetupCommand: typeof component.worktree_setup_command === "string"
+				? component.worktree_setup_command
+				: typeof component.worktreeSetupCommand === "string" ? component.worktreeSetupCommand : undefined,
+			commands: component.commands && typeof component.commands === "object" && !Array.isArray(component.commands)
+				? component.commands as Record<string, string>
+				: undefined,
+			config: component.config && typeof component.config === "object" && !Array.isArray(component.config)
+				? component.config as Record<string, string>
+				: undefined,
+		};
+	});
+}
+
+function projectRegistrationWorkflows(raw: unknown): Record<string, InlineWorkflowDef> | undefined {
+	return raw && typeof raw === "object" && !Array.isArray(raw)
+		? raw as Record<string, InlineWorkflowDef>
+		: undefined;
+}
+
 export async function getGitDiff(cwd: string, file?: string, containerId?: string, commit?: string, commandRunner?: CommandRunner): Promise<string> {
 	let hasHead = true;
 	try { await execGit("git rev-parse --verify HEAD", cwd, 5000, containerId, commandRunner); } catch { hasHead = false; }
@@ -2578,6 +2793,12 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	// wiring below (they enumerate via the same marketPackProvider).
 	let routeRegistry!: RouteRegistry;
 	let packContributionRegistry!: PackContributionRegistry;
+	let requestMutationDispatcher!: RequestMutationDispatcher;
+	let toolResultFilterDispatcher!: ToolResultFilterDispatcher;
+	let decisionRequestManager!: DecisionRequestManager;
+	let projectImportDecisionCoordinator!: ProjectImportDecisionCoordinator;
+	let projectImportProposalApplicationService!: ProjectImportProposalApplicationService;
+	let projectImportStartupReplay: Promise<void> | undefined;
 	let extensionChannelServices: ExtensionChannelServices | undefined;
 	let extensionChannelServicesInit: Promise<ExtensionChannelServices | undefined> | undefined;
 	// Slice B1: warm the process-singleton pack store (file-backed, pack-namespaced
@@ -2593,7 +2814,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	const sessionManager = new SessionManager({
 		stateDir,
 		agentCliPath: config.agentCliPath,
-		systemPromptPath: config.systemPromptPath,
+		systemPromptPath: config.systemPromptPath ?? resolveSystemPromptPath(),
 		colorStore,
 		roleManager,
 		toolManager,
@@ -2806,6 +3027,20 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		}
 		return out;
 	};
+	/** Assemble the durable ledger at the existing resolver boundary. Server and
+	 * global-user records belong to the HQ store; project records never escape
+	 * their owning project store. */
+	const adoptedExtensionsForProject = (projectId?: string): AdoptedExtension[] => {
+		const effectiveProjectId = normalizeConfigProjectId(projectId);
+		const records = {
+			server: projectConfigStore.getAdoptedExtensions("server"),
+			"global-user": projectConfigStore.getAdoptedExtensions("global-user"),
+			...(effectiveProjectId && projectContextManager.getOrCreate(effectiveProjectId)
+				? { project: projectContextManager.getOrCreate(effectiveProjectId)!.projectConfigStore.getAdoptedExtensions("project") }
+				: {}),
+		};
+		return aggregateAdoptedExtensions(records, effectiveProjectId);
+	};
 	const marketplaceMcpResolver: MarketplaceMcpResolver = (scope) => {
 		const contributions: ResolvedMcpContribution[] = [];
 		const projectId = normalizeConfigProjectId(scope.projectId);
@@ -2848,6 +3083,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				console.warn(`[mcp] failed to load Marketplace MCP contributions from ${entry.path}:`, (err as Error).message);
 			}
 		}
+		// Vanilla MCPs use the same normalizer/manager path as pack MCPs. They
+		// intentionally precede the manual overlay, preserving manual precedence.
+		contributions.push(...adoptedMcpContributions(adoptedExtensionsForProject(projectId)));
 		return contributions;
 	};
 	const marketplacePiExtensionDiscoveryTrusted = (entry: PackEntry): boolean => {
@@ -2920,8 +3158,108 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		toolManager.setScopedPiExtensionTools(scopedContext, piExtensionExternalTools(contributions));
 		return contributions;
 	};
+	/**
+	 * The editable settings catalogue intentionally bypasses the runtime registry:
+	 * a disabled or config-dormant declaration has to remain visible so an
+	 * operator can repair it. It still applies the registry's winning-pack rule.
+	 */
+	const extensionSettingsCatalogue = (projectId: string | undefined): PackContributions[] => {
+		const winning = new Map<string, PackEntry>();
+		for (const entry of marketPackEntriesForProject(projectId)) {
+			if (!entry.manifest || (entry.manifest.schema ?? 1) < 2) continue;
+			const packId = packIdFromRoot(entry.path);
+			if (packId) winning.set(packId, entry);
+		}
+		const packs: PackContributions[] = [];
+		for (const entry of winning.values()) {
+			try {
+				packs.push(loadPackContributions(entry.path, entry.manifest!));
+			} catch {
+				// Contribution errors are represented as unavailable by the public
+				// projection; never surface a parser/path diagnostic from this route.
+			}
+		}
+		return packs;
+	};
+	const extensionSettingsRuntimeLookup = (projectId: string | undefined, packId: string, kind: "pack" | "provider" | "hook" | "runtime" | "sandboxRequirement", id?: string, existingContextOnly = false) => {
+		const context = projectId
+			? existingContextOnly
+				? [...projectContextManager.all()].find(candidate => candidate.project.id === projectId)
+				: projectContextManager.getOrCreate(projectId)
+			: undefined;
+		if (!context) return { state: "absent" as const };
+		const pack = extensionSettingsCatalogue(projectId).find(candidate => candidate.packId === packId);
+		if (kind === "pack") {
+			const refs: ExtensionSettingsTargetRef[] = [
+				...(pack?.providers ?? []).map(provider => ({ packId, kind: "provider" as const, id: provider.id })),
+				...(pack?.hooks ?? []).map(hook => ({ packId, kind: "hook" as const, id: hook.id })),
+				...(pack?.runtimes ?? []).map(runtime => ({ packId, kind: "runtime" as const, id: runtime.id })),
+				...(pack?.sandboxRequirements ?? []).map(requirement => ({ packId, kind: "sandboxRequirement" as const, id: requirement.id })),
+			];
+			const overrides = refs.map(ref => context.extensionSettingsStore.getTarget(ref));
+			if (refs.length > 0 && overrides.every(override => override?.enabled === false)) return { state: "present" as const, enabled: false, values: {} };
+			if (refs.length > 0 && overrides.every(override => override?.enabled === true)) return { state: "present" as const, enabled: true, values: {} };
+			return { state: "absent" as const };
+		}
+		const contribution = kind === "provider"
+			? pack?.providers.find(candidate => candidate.id === id)
+			: kind === "hook"
+				? pack?.hooks.find(candidate => candidate.id === id)
+				: kind === "runtime"
+					? pack?.runtimes.find(candidate => candidate.id === id)
+					: pack?.sandboxRequirements.find(candidate => candidate.id === id);
+		if (!contribution) return { state: "absent" as const };
+		const ref: ExtensionSettingsTargetRef = { packId, kind, id: id! };
+		try {
+			const store = context.extensionSettingsStore;
+			const fields = contribution.settingsSchema?.fields ?? [];
+			const defaults = Object.fromEntries(fields
+				.filter(field => field.type !== "secret" && field.default !== undefined)
+				.map(field => [field.key, cloneExtensionSettingValue(field.default!)])) as Record<string, ExtensionSettingValue>;
+			const secretFields = fields.filter(field => field.type === "secret").map(field => field.key);
+			const hasTargetRecord = store.hasTargetRecord(ref);
+			let legacyValues: Record<string, ExtensionSettingValue> | undefined;
+			// The old provider store remains a read-only compatibility source until a
+			// project target exists. Current declared values must pass the current
+			// schema, while undeclared primitive values remain in the runtime overlay
+			// for legacy providers (for example Hindsight's mode: managed).
+			if (!hasTargetRecord && kind === "provider" && contribution.settingsSchema) {
+				const legacy = getPackStore().readSync<Record<string, unknown>>(packId, providerConfigStoreKey(id!));
+				if (legacy.state === "error") return { state: "error" as const, diagnostic: { code: "SETTINGS_READ_UNAVAILABLE", retryable: legacy.diagnostic.retryable } };
+				if (legacy.state === "present" && legacy.value && typeof legacy.value === "object" && !Array.isArray(legacy.value)) {
+					legacyValues = Object.fromEntries(Object.entries(legacy.value).filter(([, value]) => typeof value === "string" || typeof value === "boolean" || typeof value === "number" && Number.isFinite(value))) as Record<string, ExtensionSettingValue>;
+				}
+			}
+			if (!hasTargetRecord && !legacyValues) return { state: "absent" as const };
+			const values = store.getForRuntime(ref, defaults, { legacyValues, secretFields });
+			const reconciled = reconcileExtensionSettingsValues(fields, values, { includeSecrets: true });
+			if (reconciled.invalidKeys.length > 0) return { state: "error" as const, diagnostic: { code: "SETTINGS_VALUES_INVALID", retryable: false } };
+			const declaredKeys = new Set(fields.map(field => field.key));
+			const legacyOverlay = !hasTargetRecord
+				? Object.fromEntries(Object.entries(legacyValues ?? {}).filter(([key]) => !declaredKeys.has(key)))
+				: {};
+			return {
+				state: "present" as const,
+				enabled: store.getTarget(ref)?.enabled !== false,
+				values: cloneExtensionSettingsValues({ ...legacyOverlay, ...reconciled.values }),
+			};
+		} catch {
+			return { state: "error" as const, diagnostic: { code: "SETTINGS_READ_UNAVAILABLE", retryable: true } };
+		}
+	};
 	sessionManager.setMarketplaceMcpResolver(marketplaceMcpResolver);
 	sessionManager.setMarketplacePiExtensionResolver(marketplacePiExtensionResolver);
+	/**
+	 * project.yaml is checkout content, never authority. Every runtime consumer
+	 * receives only rows whose exact metadata is independently bound in the
+	 * gateway-owned project registry by the authenticated grant route.
+	 */
+	const effectiveExtensionGrants = (projectId: string | undefined, store?: ProjectConfigStore): ExtensionGrant[] => {
+		if (!projectId) return [];
+		const configStore = store ?? projectContextManager.getOrCreate(projectId)?.projectConfigStore;
+		if (!configStore) return [];
+		return projectRegistry.authorizedExtensionGrants(projectId, configStore.getExtensionGrants());
+	};
 	packContributionRegistry = new PackContributionRegistry(
 		marketPackEntriesForProject,
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).entrypoints ?? [],
@@ -2951,11 +3289,155 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			return result;
 		},
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).hooks ?? [],
+		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).systemPrompts ?? [],
+		(projectId, packId, activeHooks = []) => {
+			const store = projectId ? projectContextManager.getOrCreate(projectId)?.projectConfigStore : undefined;
+			return effectiveExtensionGrants(projectId, store).some(grant => grant.packId === packId
+				&& grant.capability === "prompt:system-static"
+				&& activeHooks.some(hook => hook.id === grant.hookId && hook.capabilities.includes("prompt:system-static")),
+			);
+		},
+		extensionSettingsRuntimeLookup,
+		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).runtimes ?? [],
+		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).sandboxRequirements ?? [],
+		(projectId, packId) => {
+			const store = projectId
+				? projectContextManager.getOrCreate(projectId)?.projectConfigStore
+				: projectConfigStore;
+			return effectiveExtensionGrants(projectId, store).some(grant => (grant as { principal?: unknown }).principal === "pack"
+				&& grant.packId === packId && grant.capability === "sandbox:build") === true;
+		},
 	);
+	// Managed-service ownership starts at the gateway boundary. The runtime gets
+	// only core-owned launch/probe seams; no pack declaration can choose a host
+	// executable, container, path, port owner, or transport. This slice has no
+	// registered consumer adapter yet, so every declared run mode fails closed.
+	const serviceExtensionRegistry = new ServiceExtensionRegistry(packContributionRegistry);
+	const managedServiceAuthorization = createExtensionCapabilityGrantResolver({
+		// A background reconcile must never recreate a context that project removal
+		// or root replacement just closed. Lifecycle work only authorizes against an
+		// already-owned context; its generation fence handles in-flight discovery.
+		contextForProject: (projectId) => {
+			const context = [...projectContextManager.all()].find(candidate => candidate.project.id === projectId);
+			return context ? { projectConfigStore: context.projectConfigStore } : undefined;
+		},
+		contributions: packContributionRegistry,
+		// project.yaml records a grant but the gateway registry owns its authority.
+		grantsForProject: (projectId, grants) => projectRegistry.authorizedExtensionGrants(projectId, grants),
+	});
+	const servicePortOwners = new Map<number, string>();
+	const listActiveManagedServices = (projectId: string) => {
+		// A service cannot have valid state/settings ownership without its existing
+		// project context. Avoid lazy creation while lifecycle work is fenced.
+		if (![...projectContextManager.all()].some(context => context.project.id === projectId)) return [];
+		return serviceExtensionRegistry.list(projectId);
+	};
+	const managedServiceSettings = (ref: ServiceInstanceRef) => {
+		// Service authorization is a liveness check. It must never open a project
+		// context merely to make missing settings appear readable.
+		if (![...projectContextManager.all()].some(context => context.project.id === ref.projectId)) return undefined;
+		return extensionSettingsRuntimeLookup(ref.projectId, ref.packId, "runtime", ref.serviceId, true);
+	};
+	let worktreeServices!: WorktreeServiceCoordinator;
+	const managedServiceRuntime = new ServiceExtensionRuntimeManager({
+		listActive: listActiveManagedServices,
+		authorize: managedServiceAuthorization,
+		launchers: {
+			local: async () => { throw new Error("Managed service launch adapter is unavailable"); },
+			docker: async () => { throw new Error("Managed service launch adapter is unavailable"); },
+			compose: async () => { throw new Error("Managed service launch adapter is unavailable"); },
+		},
+		probe: async () => false,
+		ports: {
+			lease: async (ref, port) => {
+				const key = [ref.projectId, ref.component, ref.canonicalWorktreeRoot, ref.packId, ref.serviceId, ref.discriminator].join("\0");
+				if (servicePortOwners.has(port)) return undefined;
+				servicePortOwners.set(port, key);
+				return { release: async () => { if (servicePortOwners.get(port) === key) servicePortOwners.delete(port); } };
+			},
+		},
+		filesystem: { ensureDirectory: async (target) => { await fs.promises.mkdir(target, { recursive: true }); } },
+		clock: {
+			now: () => new Date(gatewayDeps.clock.now()),
+			sleep: (ms) => new Promise<void>(resolve => gatewayDeps.clock.setTimeout(() => resolve(), ms)),
+		},
+		resolveDataDir: (ref, declaredPath) => worktreeServices.resolveDataDir(ref, declaredPath),
+		resolveSettings: (ref) => {
+			const settings = managedServiceSettings(ref);
+			if (!settings || settings.state === "error" || settings.state === "present" && !settings.enabled) throw new Error("Managed service settings are unavailable");
+			return settings.state === "present" ? settings.values : {};
+		},
+	});
+	const serviceToolOperations = new ServiceToolAdapterRegistry();
+	const serviceToolScheduler = new ServiceToolOperationScheduler();
+	worktreeServices = new WorktreeServiceCoordinator({
+		sessions: {
+			get: (sessionId) => sessionManager.getPersistedSession(sessionId) ?? sessionManager.getSession(sessionId),
+			list: (projectId) => {
+				const context = [...projectContextManager.all()].find(candidate => candidate.project.id === projectId);
+				const persisted = context?.sessionStore.getAll().filter(session => session.projectId === undefined || session.projectId === projectId) ?? [];
+				const known = new Set(persisted.map(session => session.id));
+				return [...persisted, ...sessionManager.getAllSessionsRaw().filter(session => session.projectId === projectId && !known.has(session.id))];
+			},
+		},
+		components: (projectId) => [...projectContextManager.all()].find(context => context.project.id === projectId)?.projectConfigStore.getComponents() ?? [],
+		stateDir: (projectId) => [...projectContextManager.all()].find(context => context.project.id === projectId)?.stateDir,
+		git: {
+			topLevel: async (cwd) => {
+				const result = await gatewayDeps.commandRunner.execFile("git", ["rev-parse", "--show-toplevel"], { cwd, timeout: 15_000 });
+				return String(result.stdout).trim();
+			},
+		},
+		filesystem: {
+			realpath: (target) => fs.promises.realpath(target),
+			isDirectory: async (target) => (await fs.promises.stat(target)).isDirectory(),
+			removeDirectory: async (target) => { await fs.promises.rm(target, { recursive: true, force: true }); },
+		},
+		listActive: listActiveManagedServices,
+		authorize: managedServiceAuthorization,
+		settingsReadable: (ref) => {
+			const settings = managedServiceSettings(ref);
+			return !!settings && settings.state !== "error" && !(settings.state === "present" && !settings.enabled);
+		},
+		runtime: managedServiceRuntime,
+		operations: serviceToolOperations,
+		scheduler: serviceToolScheduler,
+	});
+
+	const contextTraceStore = new ContextTraceStore(bobbitStateDir(), gatewayDeps.fsImpl, (sessionId, entry) => {
+		broadcastToSession(sessionId, { type: "context_trace_updated", sessionId, ts: entry.ts });
+	});
+	const resolveStaticPromptSections = (projectId: string | undefined): ResolvedSystemPromptSection[] =>
+		resolveStaticPromptSectionsForProject(projectContextManager, packContributionRegistry, projectId);
+	requestMutationDispatcher = new RequestMutationDispatcher({
+		registry: packContributionRegistry,
+		moduleHost,
+		grantsForProject: (projectId) => effectiveExtensionGrants(projectId),
+		coreShapers: [],
+		cwdForSession: (sessionId) => sessionManager.getSession(sessionId)?.cwd
+			?? sessionManager.getPersistedSession(sessionId)?.cwd
+			?? process.cwd(),
+	});
+	toolResultFilterDispatcher = new ToolResultFilterDispatcher({
+		registry: packContributionRegistry,
+		moduleHost,
+		grantsForProject: (projectId) => effectiveExtensionGrants(projectId),
+		cwdForSession: (sessionId) => sessionManager.getSession(sessionId)?.cwd
+			?? sessionManager.getPersistedSession(sessionId)?.cwd
+			?? process.cwd(),
+	});
+	sessionManager.setRequestMutationActivationResolver((projectId) => projectId ? {
+		prompt: requestMutationDispatcher.hasPromptHooks(projectId),
+		toolSafety: requestMutationDispatcher.hasToolSafetyHooks(projectId),
+	} : {});
+	sessionManager.setToolResultFilterActivationResolver((projectId) => projectId ? {
+		toolResult: toolResultFilterDispatcher.hasEligibleFilters(projectId),
+	} : {});
+	sessionManager.setStaticPromptSectionResolver(resolveStaticPromptSections);
 	sessionManager.lifecycleHub = new LifecycleHub({
 		registry: packContributionRegistry,
 		moduleHost,
-		trace: new ContextTraceStore(bobbitStateDir(), gatewayDeps.fsImpl),
+		trace: contextTraceStore,
 		// Hierarchical goal-metadata resolver. The hub is shared across projects
 		// while each GoalStore is per ProjectContext, so route STRICTLY by goalId
 		// (never the caller-supplied projectId, which may be stale/cross-project).
@@ -2984,6 +3466,22 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			packStore: getPackStore(),
 			capabilityMask: { store: true, session: false, agents: false },
 		}),
+		// Rebuild the active hook tuple and re-read grants at both LifecycleHub
+		// fences. Scheduled advisors never cache a capability or configuration.
+		scheduledAdvisorAuthorizer: ({ projectId, packId, hookId }) => {
+			const activeHooks: ResolvedHook[] = packContributionRegistry.list(projectId).flatMap((pack) =>
+				pack.hooks.map((hook) => ({
+					packId: pack.packId,
+					hookId: hook.id,
+					mode: hook.mode,
+					capabilities: hook.capabilities,
+				})),
+			);
+			const configStore = projectId
+				? projectContextManager.getOrCreate(projectId)?.projectConfigStore ?? projectConfigStore
+				: projectConfigStore;
+			return resolveExtensionGrant(activeHooks, effectiveExtensionGrants(projectId, configStore), { packId, hookId }, "decide").allowed;
+		},
 		gatewayInfo: () => {
 			try {
 				const baseUrl = publishedGatewayUrl || process.env.BOBBIT_GATEWAY_URL || fs.readFileSync(path.join(bobbitStateDir(), "gateway-url"), "utf-8").trim();
@@ -3060,6 +3558,180 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	inboxManager.setNudger(inboxNudger);
 	staffManager.setInboxManager(inboxManager);
 	sessionManager.setInboxNudger(inboxNudger);
+
+	// Decision mediation is project-owned and never creates a prompt/agent turn.
+	// It is deliberately wired after inbox/proposal dependencies exist, then
+	// attached to LifecycleHub as a detached post-provider branch.
+	const proposalSeedService = new ProposalSeedService({
+		stateDir,
+		sessionManager,
+		projectRegistry,
+		projectContextManager,
+		configCascade,
+		getGoal: (goalId) => projectContextManager.getContextForGoal(goalId)?.goalStore.get(goalId),
+		getPreference: (key) => preferencesStore.get(key),
+		systemProjectId: SYSTEM_PROJECT_ID,
+		headquartersProjectId: HEADQUARTERS_PROJECT_ID,
+		broadcastToSession,
+		packContributionRegistry,
+		readBody,
+		// Project imports have no agent session. Publish a project-owned workspace
+		// invalidation only after the draft has been persisted, so clients query the
+		// durable projection rather than trusting a transient hook payload.
+		openProjectImportProposalWorkspace: (workspace) => {
+			broadcastToProject(workspace.owner.projectId, {
+				type: "project_import_decision_requests_updated",
+				projectId: workspace.owner.projectId,
+				ts: gatewayDeps.clock.now(),
+			});
+		},
+	});
+	decisionRequestManager = new DecisionRequestManager({
+		storeForProject: (projectId) => projectContextManager.getOrCreate(projectId)?.decisionRequestStore,
+		projectIds: function* () { for (const ctx of projectContextManager.all()) yield ctx.project.id; },
+		clock: gatewayDeps.clock,
+		// CI and explicitly headless gateway processes cannot wait for a browser.
+		isHeadless: () => process.env.CI === "true" || process.env.BOBBIT_HEADLESS === "1",
+		inboxManager,
+		// A consent inbox can only target the persisted origin session's staff
+		// record in the same project. Never substitute a lead or another staffer.
+		consentInboxTarget: (projectId, sessionId) => {
+			const session = sessionManager.getPersistedSession(sessionId);
+			const context = projectContextManager.getOrCreate(projectId);
+			if (!session?.staffId || session.projectId !== projectId || !context?.staffStore.get(session.staffId)) return undefined;
+			return session.staffId;
+		},
+		consentPauseLifecycle: {
+			pause: (goalId, reason, callerSessionId) => {
+				const context = projectContextManager.getContextForGoal(goalId);
+				if (!context) return Promise.resolve("not-matching" as const);
+				return pauseGoalAwaitingExtensionConsent({
+					getGoalManagerForGoal: () => context.goalManager, verificationHarness, sessionManager,
+					broadcastGoalStateChanged: (changedGoalId) => broadcastToAll({ type: "goal_state_changed", goalId: changedGoalId }),
+				}, goalId, reason, callerSessionId);
+			},
+			resume: (goalId, reason) => {
+				const context = projectContextManager.getContextForGoal(goalId);
+				if (!context) return Promise.resolve("not-matching" as const);
+				return resumeOnlyAwaitingConsentGoal(context.goalStore, goalId, reason,
+					(changedGoalId) => broadcastToAll({ type: "goal_state_changed", goalId: changedGoalId }));
+			},
+		},
+		// Read hooks, grants, and the exact protected operation afresh at both
+		// settlement fences. A missing, inactive, revoked, or changed operation
+		// fails closed before a consent answer can seed a proposal or continue work.
+		recheckConsentOperation: (record) => {
+			const active: ResolvedHook[] = packContributionRegistry.list(record.projectId).flatMap(pack =>
+				pack.hooks.map(hook => ({ packId: pack.packId, hookId: hook.id, mode: hook.mode, capabilities: hook.capabilities })),
+			);
+			const grants = effectiveExtensionGrants(record.projectId);
+			if (!resolveExtensionGrant(active, grants, { packId: record.asker.packId, hookId: record.asker.hookId }, "decide").allowed) return false;
+			// Unprotected, explicitly consent-required hook requests still need the
+			// fresh grant fence. Protected extension proposal effects additionally
+			// prove their stable core-owned operation fingerprint.
+			return !record.protectedOperation || isCurrentTrustedExtensionDecisionOperation(record);
+		},
+		proposalSeedService,
+		trace: contextTraceStore,
+		invalidateSession: (sessionId) => broadcastToSession(sessionId, {
+			type: "decision_requests_updated", sessionId, ts: gatewayDeps.clock.now(),
+		}),
+		invalidateProjectImport: (projectId: string) => broadcastToProject(projectId, {
+			type: "project_import_decision_requests_updated", projectId, ts: gatewayDeps.clock.now(),
+		}),
+	});
+	const advisoryThinkingConsumer = new AdvisoryThinkingConsumer({
+		sessionManager,
+		// Preserve the canonical SessionInfo identity: verified runtime mutation
+		// fences the bridge against this exact manager-owned object.
+		getSession: sessionManager.getSession.bind(sessionManager),
+		getPersistedSession: (sessionId) => sessionManager.getPersistedSession(sessionId),
+		hasExplicitThinkingChoice: (sessionId) => sessionManager.hasExplicitThinkingChoice(sessionId),
+		isAuthorized: ({ projectId, source }) => {
+			const active: ResolvedHook[] = packContributionRegistry.list(projectId).flatMap(pack =>
+				pack.hooks.map(hook => ({ packId: pack.packId, hookId: hook.id, mode: hook.mode, capabilities: hook.capabilities })),
+			);
+			const grants = effectiveExtensionGrants(projectId);
+			return resolveExtensionGrant(active, grants, source, "decide").allowed;
+		},
+		broadcast: (sessionId, message) => broadcastToSession(sessionId, message),
+	});
+	const decisionHookDispatcher = new DecisionHookDispatcher({
+		manager: decisionRequestManager,
+		registry: packContributionRegistry,
+		moduleHost,
+		grantsForProject: (projectId) => effectiveExtensionGrants(projectId),
+		availabilityForProject: async (projectId) => ({
+			models: (await getAvailableModels(preferencesStore))
+				.filter(model => model.sessionSelectable !== false)
+				.map(model => ({ provider: model.provider, modelId: model.id })),
+			thinkingLevels: THINKING_LEVELS,
+			roles: configCascade.resolveRoles(projectId).map(role => role.item.name),
+			workflows: configCascade.resolveWorkflows(projectId).map(workflow => workflow.item.id),
+		}),
+		thinkingConsumer: advisoryThinkingConsumer,
+	});
+	sessionManager.lifecycleHub?.setDecisionDispatcher(decisionHookDispatcher);
+	// One gateway-owned composition is shared by HTTP acceptance and boot replay.
+	// It receives only project-owned stores and the public canonical mutations.
+	projectImportProposalApplicationService = new ProjectImportProposalApplicationService({
+		goal: async (fields, application) => {
+			const project = projectRegistry.get(application.projectId);
+			if (!project) throw new CanonicalMutationError(404, "Project not found");
+			const configuredSandboxManager = sandboxManager;
+			const result = await applyCanonicalGoalProposal(
+				{ ...fields, projectId: application.projectId },
+				createCanonicalGoalProposalDependencies({
+					resolveProject: () => ({ id: project.id, name: project.name, rootPath: project.rootPath }),
+					validateCwd: (projectId, cwd) => {
+						const validation = validateExecutionCwd(projectRegistry, projectContextManager, projectId, cwd, { kind: "user-input" });
+						if (!validation.ok) throw new CanonicalMutationError(validation.status, validation.error, validation.code);
+					},
+					getContext: projectId => projectContextManager.getOrCreate(projectId) ?? undefined,
+					getContextForGoal: goalId => projectContextManager.getContextForGoal(goalId) ?? undefined,
+					ensureSandbox: configuredSandboxManager ? projectId => configuredSandboxManager.ensureForProject(projectId) : undefined,
+					findGoalAcrossProjects: goalId => {
+						for (const candidate of projectRegistry.list()) {
+							const goal = projectContextManager.getOrCreate(candidate.id)?.goalManager.getGoal(goalId);
+							if (goal) return goal;
+						}
+						return undefined;
+					},
+					getNestingPrefs: () => readSubgoalNestingPrefs(key => preferencesStore.get(key)),
+					findCascadeWorkflow: (projectId, workflowId) => configCascade.resolveWorkflows(projectId).find(row => row.item.id === workflowId)?.item,
+					requestChildStart: goalId => verificationHarness.requestChildStart(goalId),
+					startTeam: goalId => teamManager.startTeam(goalId),
+					broadcast: message => broadcastToAll(message),
+					logLifecycleSchedulingError: error => console.error("[goal] Post-create lifecycle scheduling failed:", error),
+					applicationKey: application.applicationKey,
+				}),
+			);
+			return { outcome: { goalId: result.goal.id } };
+		},
+		project: async (fields, application) => {
+			const result = await applyCanonicalProjectProposal({ mode: "update", projectId: application.projectId, name: fields.name, rootPath: fields.root_path ?? fields.rootPath, components: fields.components, workflows: fields.workflows, config: fields.config, configDirectories: fields.configDirectories ?? fields.config_directories, sandboxTokens: fields.sandboxTokens ?? fields.sandbox_tokens, applicationKey: application.applicationKey }, {
+				findByApplicationKey: key => projectRegistry.list().find(candidate => projectRegistry.hasCanonicalMutationReceipt(candidate.id, key)),
+				recordApplicationReceipt: (id, key) => projectRegistry.recordCanonicalMutationReceipt(id, key),
+				register: () => { throw new Error("Register unavailable"); }, get: id => projectRegistry.get(id), update: (id, updates) => projectRegistry.update(id, updates as Parameters<typeof projectRegistry.update>[1]), promote: (id, updates) => projectRegistry.promote(id, updates), removeRegistered: item => projectRegistry.remove(item.id), removeContext: id => projectContextManager.remove(id), openContext: async id => { const ctx = projectContextManager.getOrCreate(id); return ctx ? { projectConfigStore: ctx.projectConfigStore, secretsStore: ctx.secretsStore } : undefined; }, suspendServices: id => worktreeServices.suspendProject(id), stopServices: id => worktreeServices.stopProject(id), reconcileServices: id => worktreeServices.reconcileProject(id), captureRegistryRecord: id => projectRegistry.captureExactRecord(id), restoreRegistryRecord: (id, snapshot) => projectRegistry.restoreExactRecord(id, snapshot), sameRootPath: (left, right) => path.resolve(left) === path.resolve(right),
+				validateBaseRef: createCanonicalBaseRefValidator(serverCommandRunner),
+				invalidateSandboxImageRequirements: id => sandboxImageRequirements.invalidateProject(id),
+			}); return { outcome: { projectId: result.project.id } };
+		},
+		workflow: async (fields, application) => { const ctx = projectContextManager.getOrCreate(application.projectId); if (!ctx) throw new CanonicalMutationError(404, "Project not found"); const workflow = createCanonicalWorkflow(fields, ctx.workflowStore, ctx.projectConfigStore.getComponents(), application.applicationKey); return { outcome: { workflowId: workflow.id } }; },
+		role: async (fields, application) => { const ctx = projectContextManager.getOrCreate(application.projectId); if (!ctx) throw new CanonicalMutationError(404, "Project not found"); const role = await createCanonicalRole({ ...fields, promptTemplate: fields.prompt }, { scope: "project", store: ctx.roleStore, projectId: application.projectId }, { normalizeThinking: normalizeRoleThinking, validateModel: async (model) => { const normalized = normalizeAigwModelString(model); const slash = normalized.indexOf("/"); if (slash <= 0 || slash === normalized.length - 1) return false; return !!findSessionSelectableModel(await getAvailableModels(preferencesStore), normalized.slice(0, slash), normalized.slice(slash + 1)); }, applicationKey: application.applicationKey }); return { outcome: { role: role.name } }; },
+
+		tool: async (fields, application) => { const ctx = projectContextManager.getOrCreate(application.projectId); if (!ctx) throw new CanonicalMutationError(404, "Project not found"); const result = applyCanonicalToolProposal({ action: fields.action as any, tool: fields.tool as any, content: fields.content as any, expectedBeforeSha256: application.toolBeforeSha256 }, { toolManager: ctx.toolManager }); __resetToolScanCache(); return { outcome: { tool: result.tool, action: result.action } }; },
+		staff: async (fields, application) => { const project = projectRegistry.get(application.projectId); if (!project) throw new CanonicalMutationError(404, "Project not found"); const staff = await createCanonicalStaff({ ...fields, systemPrompt: fields.prompt, roleId: fields.role ?? fields.roleId, projectId: application.projectId }, { applicationKey: application.applicationKey, resolveProject: () => ({ projectId: project.id, rootPath: project.rootPath }), validateCwd: (_id, cwd) => { const check = validateExecutionCwd(projectRegistry, projectContextManager, project.id, cwd, { kind: "user-input" }); if (!check.ok) throw new CanonicalMutationError(check.status, check.error, check.code); }, validateTriggers: value => staffManager.validateTriggers(value as any), validateRole: (roleId, id) => { if (!resolveRoleForProject(roleId, id)) throw new CanonicalMutationError(404, "Role not found"); }, create: (name, description, prompt, cwd, options) => staffManager.createStaff(name, description, prompt, cwd, sessionManager, options as any), broadcast: (created, projectId) => broadcastToAll({ type: "staff_changed", reason: "created", staffId: created.id, projectId, sessionId: created.currentSessionId }) }); return { outcome: { staffId: staff.id } }; },
+	});
+	projectImportDecisionCoordinator = new ProjectImportDecisionCoordinator({
+		registry: projectRegistry,
+		projectContextManager,
+		dispatcher: decisionHookDispatcher,
+		buildContext: ({ project, importId, components }) => buildProjectImportDecisionContext({ project, importId, components }),
+		trace: contextTraceStore,
+		now: gatewayDeps.clock.now,
+		onError: (projectId, error) => console.warn(`[project-import-decisions] reconciliation failed project=${projectId}:`, error),
+	});
 
 	// One-shot migration: heal sessions that lost their `staffId` association
 	// before the staffId-persistence fix landed. Idempotent — sessions that
@@ -3876,7 +4548,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// Enable via BOBBIT_TIMING_LOG=1 to print "[timing] METHOD path ms" for each API call.
 			const _timingEnabled = process.env.BOBBIT_TIMING_LOG === "1";
 			const _timingStart = _timingEnabled ? performance.now() : 0;
-			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToUi, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes);
+			await handleApiRoute(url, req, res, sessionManager, config, colorStore, prStatusStore, teamManager, orchestrationCore, roleManager, toolManager, projectContextManager, bgProcessManager, staffManager, verificationHarness, preferencesStore, projectConfigStore, groupPolicyStore, broadcastToGoal, broadcastToAll, broadcastToProject, broadcastToUi, sandboxManager, projectRegistry, configCascade, sandboxScope, sandboxTokenStore, reviewAnnotationStore, broadcastToSession, roleStore, inboxManager, decisionRequestManager, projectImportDecisionCoordinator, projectImportProposalApplicationService, marketplaceSourceStore, marketplaceInstaller, cookieStore, actionDispatcher, routeDispatcher, routeRegistry, packContributionRegistry, worktreeServices, extensionSettingsCatalogue, requestMutationDispatcher, toolResultFilterDispatcher, contextTraceStore, extensionChannelServices, gatewayDeps.fetchImpl, gatewayDeps.commandRunner, gatewayDeps.fsImpl, gatewayDeps.clock, withPreviewSessionOperation, reviewPayloadOperations, oauthCancellationRetryState, remoteStateRoutes);
 			if (_timingEnabled) {
 				const dur = performance.now() - _timingStart;
 				if (dur >= 100) console.log(`[timing] ${req.method} ${url.pathname}${url.search} ${dur.toFixed(1)}ms`);
@@ -4273,12 +4945,29 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		} catch (err) {
 			console.error(`[broadcast] session_created failed for ${session.id}:`, err);
 		}
+		void worktreeServices.reconcileSession(session.id).catch(() => undefined);
+	});
+	// Cold worktree setup persists its coordinates after the initial creation
+	// event. Reconcile again at that durable boundary rather than guessing a path.
+	sessionManager.addWorktreeReadyListener((session) => {
+		void worktreeServices.reconcileSession(session.id).catch(() => undefined);
+	});
+	const releaseManagedServicesForSession = async (sessionId: string, info: import("./agent/session-manager.js").SessionTerminationInfo): Promise<void> => {
+		if (!info.projectId) return;
+		// Archive fences the live owner without deleting state: a later confirmed
+		// worktree-removal event owns destructive cleanup.
+		await worktreeServices.releaseSession(info.projectId, sessionId);
+	};
+	sessionManager.addWorktreeRemovedListener(async (sessionId, info) => {
+		if (!info.projectId) return;
+		await worktreeServices.cleanupRemovedSessionWorktrees(info.projectId, sessionId, info.worktreePaths);
 	});
 	// Push a session_removed broadcast to ALL clients on terminate/archive/purge
 	// so sidebars and dashboards update instantly. Replaces a 5s polling tick
 	// for a documented class of races (e.g. clicking a stale sidebar entry just
 	// after another tab archived the session).
 	sessionManager.addTerminationListener(async (sessionId, info) => {
+		await releaseManagedServicesForSession(sessionId, info);
 		try {
 			broadcastToAll({ type: "session_removed", sessionId, projectId: info.projectId, reason: info.reason });
 		} catch (err) {
@@ -4359,8 +5048,70 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 	}
 
 	ck("pre-VerificationHarness");
-	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade, { commandRunner: gatewayDeps.commandRunner, commandStepRunner: gatewayDeps.commandStepRunner, clock: gatewayDeps.clock, skipLlmReview: gatewayRuntimeFlags.skipLlmReview });
+	verificationHarness = new VerificationHarness(stateDir, undefined, broadcastToGoal, roleStore, preferencesStore, sessionManager, teamManager, projectConfigStore, projectContextManager, configCascade, {
+		commandRunner: gatewayDeps.commandRunner,
+		commandStepRunner: gatewayDeps.commandStepRunner,
+		clock: gatewayDeps.clock,
+		skipLlmReview: gatewayRuntimeFlags.skipLlmReview,
+	});
 	ck("new VerificationHarness");
+	// Reconciliation may replay a durable consent pause, so wait until its
+	// canonical verification lifecycle dependency is initialized.
+	void decisionRequestManager.reconcile().catch((err) => {
+		console.warn("[decision-requests] startup reconciliation failed (non-fatal):", err);
+	});
+	// Replay only ready registrations after all project contexts and the shared
+	// decision owner exist. Configuring markers intentionally remain dormant.
+	// This promise is awaited before normal session restoration below; failures
+	// are still contained so a damaged project cannot stop gateway boot.
+	const reconcileApplyingImportProposals = async () => {
+		// Contexts are lazy. Enumerate the durable registry and open each ready
+		// import owner so replay never depends on a prior list route or session.
+		for (const project of projectRegistry.list()) {
+			const marker = project.importDecisionRun;
+			if (marker?.state !== "ready") continue;
+			const context = projectContextManager.getOrCreate(project.id);
+			if (!context) continue;
+			// Accepted effects may have finalized just before a crash. Complete only
+			// the missing audit hand-off; audited records are a durable replay fence.
+			for (const record of context.decisionRequestStore.list()) {
+				// `auditedAt` is the durable replay fence. The bounded JSONL trace can
+				// rotate away its opaque audit key, so trace deduplication alone cannot
+				// prevent an already-settled proposal from being audited again at boot.
+				if (record.delivery.kind !== "project-import" || record.delivery.importId !== marker.id || record.proposal?.status !== "accepted" || record.proposal.auditedAt) continue;
+				const draftId = proposalDraftOwnerId({ kind: "project-import", projectId: context.project.id, importId: marker.id, requestId: record.id });
+				await deleteProposalFile(bobbitStateDir(), draftId, record.proposal.type).catch(() => {});
+				if (record.proposal.application) {
+					try {
+						contextTraceStore.appendProjectImportOutcomeOnce(context.project.id, marker.id, record.proposal.application.key, { kind: "decision", packId: record.asker.packId, hookId: record.asker.hookId, event: "decisionResolved", outcome: "applied", requestId: record.id, questionId: record.questionId, actor: "user" });
+						context.decisionRequestStore.markImportProposalAudited(record.id, record.proposal.application, new Date(gatewayDeps.clock.now()).toISOString());
+					} catch { /* leave audit marker unset for retry */ }
+				}
+			}
+			for (const record of context.decisionRequestStore.listApplyingImportProposals(marker.id)) {
+				const application = record.proposal?.status === "applying" ? record.proposal.application : undefined;
+				if (!application || application.projectId !== context.project.id || application.importId !== marker.id || application.requestId !== record.id) continue;
+				try {
+					const result = await projectImportProposalApplicationService.reconcileApplying(bobbitStateDir(), record, application);
+					if (!result || !context.decisionRequestStore.finalizeImportProposal(application, new Date(gatewayDeps.clock.now()).toISOString(), result.outcome)) continue;
+					const draftId = proposalDraftOwnerId({ kind: "project-import", projectId: application.projectId, importId: application.importId, requestId: application.requestId });
+					await deleteProposalFile(bobbitStateDir(), draftId, application.type).catch(() => {});
+					// A keyed audit append precedes its decision-store marker; replay
+					// deduplicates a crash between them without marking a failed append.
+					try {
+						contextTraceStore.appendProjectImportOutcomeOnce(application.projectId, application.importId, application.key, { kind: "decision", packId: record.asker.packId, hookId: record.asker.hookId, event: "decisionResolved", outcome: "applied", requestId: record.id, questionId: record.questionId, actor: "user" });
+						context.decisionRequestStore.markImportProposalAudited(record.id, application, new Date(gatewayDeps.clock.now()).toISOString());
+					} catch { /* leave audit marker unset for retry */ }
+				} catch (error) { console.warn(`[project-import-proposals] applying replay failed project=${context.project.id} request=${record.id}:`, error); }
+			}
+		}
+	};
+	projectImportStartupReplay = Promise.all([
+		projectImportDecisionCoordinator.reconcileAll(),
+		reconcileApplyingImportProposals(),
+	]).then(() => undefined).catch((err) => {
+		console.warn("[project-import-decisions] startup reconciliation failed (non-fatal):", err);
+	});
 	teamManager.setVerificationHarness(verificationHarness);
 	verificationHarness.setTeamLeadNotifier((goalId, message) => {
 		const team = teamManager.getTeamState(goalId);
@@ -4499,6 +5250,20 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// runs the host-side plumbing (image build/version check, mounts,
 			// credentials, sandbox network, GitHub token) the first time each
 			// project's sandbox is requested by session/goal/staff creation.
+			const sandboxPlanIdentity: SandboxPlanIdentityResolver = (projectId) => {
+				// This must remain a synchronous config/projection-only check. It is used
+				// solely to avoid Docker, git, network, and mount setup for an unchanged
+				// ready sandbox; bootstrap remains authoritative when it cannot decide.
+				if (!projectRegistry.get(projectId)) return null;
+				const ctx = projectContextManager.getOrCreate(projectId);
+				if (!ctx || (ctx.projectConfigStore.get("sandbox") || "none") !== "docker") return null;
+				try {
+					const plan = resolveProjectSandboxImagePlan(packContributionRegistry, ctx.projectConfigStore, projectId);
+					return { image: plan.imageName, fingerprint: plan.fingerprint };
+				} catch {
+					return null;
+				}
+			};
 			const sandboxBootstrap: SandboxBootstrap = async (projectId) => {
 				const project = projectRegistry.get(projectId);
 				if (!project) {
@@ -4510,30 +5275,44 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				}
 				const cfg = ctx.projectConfigStore;
 				const sandboxCfg = cfg.get("sandbox") || "none";
+				const projectDir = project.rootPath;
+				let plan: SandboxImagePlan;
+				try {
+					plan = resolveProjectSandboxImagePlan(packContributionRegistry, cfg, projectId);
+				} catch (error) {
+					if (!(error instanceof UnsupportedSandboxImagePlanError)) throw error;
+					throw new Error(`[sandbox] bootstrap for project ${projectId} has an unsupported sandbox_image configuration`);
+				}
+				const dockerContextRoot = resolveSandboxDockerContext(config.defaultCwd);
+
+
 				if (sandboxCfg !== "docker") return null;
 
-				const projectDir = project.rootPath;
-				const imageName = cfg.get("sandbox_image") || "bobbit-agent";
-
-				// Auto-build or rebuild image if missing or stale. Images are
-				// shared across projects (Docker image tags) so the first project
-				// to request a sandbox pays the build cost.
-				const dockerContextRoot = resolveSandboxDockerContext(config.defaultCwd);
-				const imageStatus = await checkDockerAvailability(imageName, dockerContextRoot ?? undefined, gatewayDeps.commandRunner);
-				if (imageStatus.imageExists === false) {
+				// Session sandboxes may provision only a buildable exact plan. A digest
+				// baseline remains fail-closed: Docker cannot receive it as `-t`, so never invent a tag.
+				const imageStatus = await checkDockerAvailability(plan, dockerContextRoot ?? undefined, gatewayDeps.commandRunner);
+				if (!imageStatus.available) {
+					throw new Error(`[sandbox] Docker is unavailable for project ${projectId}`);
+				}
+				if (imageStatus.imageReady !== true) {
+					if (!plan.buildable) {
+						throw new Error(`[sandbox] Exact sandbox image "${plan.imageName}" is not ready and is build-not-applicable because it is digest-pinned`);
+					}
 					if (!dockerContextRoot) {
-						throw new Error(`[sandbox] Docker image "${imageName}" is missing and docker/Dockerfile could not be found`);
+						throw new Error(`[sandbox] Exact sandbox image "${plan.imageName}" is not ready and docker/Dockerfile could not be found`);
 					}
-					const buildResult = await buildSandboxImage(imageName, dockerContextRoot, gatewayDeps.commandRunner);
+					const buildResult = await buildSandboxImage(plan, dockerContextRoot, gatewayDeps.commandRunner);
 					if (!buildResult.success) {
-						throw new Error(`[sandbox] Auto-build failed for project ${projectId}: ${buildResult.error || "unknown error"}`);
+						sandboxImageRequirements.recordBuildFailure(projectId, plan.fingerprint);
+						throw new Error(`[sandbox] Auto-build failed for project ${projectId}`);
 					}
-				} else if (imageStatus.imageExists === true) {
-					const imageReady = await ensureImageAgentVersion(imageName, dockerContextRoot ?? undefined, gatewayDeps.commandRunner);
-					if (!imageReady) {
-						throw new Error(`[sandbox] Docker image "${imageName}" is stale and could not be rebuilt`);
+					const rebuiltStatus = await checkDockerAvailability(plan, dockerContextRoot, gatewayDeps.commandRunner);
+					if (rebuiltStatus.imageReady !== true) {
+						sandboxImageRequirements.recordBuildFailure(projectId, plan.fingerprint);
+						throw new Error(`[sandbox] Auto-build for "${plan.imageName}" did not produce the required exact-plan labels`);
 					}
 				}
+				sandboxImageRequirements.recordBuildSuccess(projectId, plan.fingerprint);
 
 				const isRepo = await isGitRepo(projectDir, serverCommandRunner);
 				if (!isRepo) {
@@ -4638,7 +5417,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					projectDir,
 					repoUrl,
 					cloneSource,
-					image: imageName,
+					image: plan.imageName,
+					sandboxImageFingerprint: plan.fingerprint,
 					sandboxNetwork,
 					sandboxMounts: poolMounts,
 					sandboxCredentials: poolCredentials,
@@ -4656,7 +5436,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					baseRefResolver: () => cfg.get("base_ref"),
 				};
 			};
-			sandboxManager = new SandboxManager({ bootstrap: sandboxBootstrap, commandRunner: gatewayDeps.commandRunner, clock: gatewayDeps.clock, worktreeSetupRuntime });
+			sandboxManager = new SandboxManager({ bootstrap: sandboxBootstrap, planIdentity: sandboxPlanIdentity, commandRunner: gatewayDeps.commandRunner, clock: gatewayDeps.clock, worktreeSetupRuntime });
 			sessionManager.setSandboxManager(sandboxManager);
 			sessionManager.subscribeSandboxRecovery();
 
@@ -4673,10 +5453,29 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				}
 				persistPublishedGatewayUrl(stateDir, publishedGatewayUrl, gatewayDeps.fsImpl);
 
+			// Import decisions are project-owned and must replay before an ordinary
+			// agent session can resume. The coordinator isolates projects concurrently
+			// while awaiting their bounded hook dispatches, preserving startup ordering.
+			await bootPhase("replay-project-import-decisions", async () => {
+				await projectImportStartupReplay;
+			});
+
 			// Restore persisted teams before sessions so reconstructed records are available
 			// to session revival. Both complete before accepting connections.
 			await bootPhase("restore-teams", () => teamManager.waitForRestore());
 			await bootPhase("restore-sessions", () => sessionManager.restoreSessions());
+			// Services are process-local. Reconcile only projects with a persisted
+			// live session after restore, one at a time, so boot cannot fan out an
+			// unbounded set of Git/realpath probes.
+			await bootPhase("reconcile-managed-services", async () => {
+				const relevantProjects = new Set<string>();
+				for (const context of projectContextManager.all()) {
+					for (const session of context.sessionStore.getLive()) {
+						if (session.projectId === context.project.id) relevantProjects.add(session.projectId);
+					}
+				}
+				await worktreeServices.reconcileRestoredProjects(relevantProjects);
+			});
 			await bootPhase("review-payload-recovery", async () => {
 				try {
 					const knownSessionIds = [...projectContextManager.all()]
@@ -4956,6 +5755,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				gatewayDeps.clock.clearInterval(cleanupInterval);
 				triggerEngine.stop();
 				inboxNudger.stop();
+				decisionRequestManager.stop();
 				wss.close();
 				// Pi's Anthropic callback and exchange outlive the HTTP server. Abort
 				// and await them before tearing down stores or allowing restart.
@@ -4967,6 +5767,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 				// worktrees have already left their pools, and stale disk entries are
 				// never discovered or adopted during shutdown.
 				await phase("worktree-pools", () => drainWorktreePoolsForShutdown(sessionManager.getAllWorktreePools()));
+				await phase("managed-services", () => worktreeServices.close());
 				await phase("extension-channels", () => disposeExtensionChannelServices(extensionChannelServices, "gateway-shutdown"));
 				await phase("cpu-diagnostics", () => shutdownCpuDiagnostics());
 				shutdownEventLoopLagMonitor();
@@ -5201,6 +6002,7 @@ async function handleApiRoute(
 	groupPolicyStore: ToolGroupPolicyStore,
 	broadcastToGoal: (goalId: string, event: any) => void,
 	broadcastToAll: (event: any) => void,
+	broadcastToProject: (projectId: string, event: ServerMessage) => void,
 	broadcastToUi: (event: any) => void,
 	sandboxManager: SandboxManager | null,
 	projectRegistry: ProjectRegistry,
@@ -5211,6 +6013,9 @@ async function handleApiRoute(
 	_broadcastToSession?: (sessionId: string, event: any) => void,
 	roleStore?: RoleStore,
 	inboxManager?: InboxManager,
+	decisionRequestManager?: DecisionRequestManager,
+	projectImportDecisionCoordinator?: ProjectImportDecisionCoordinator,
+	projectImportProposalApplicationService?: ProjectImportProposalApplicationService,
 	marketplaceSourceStore?: MarketplaceSourceStore,
 	marketplaceInstaller?: MarketplaceInstaller,
 	cookieStore?: CookieStore,
@@ -5218,6 +6023,11 @@ async function handleApiRoute(
 	routeDispatcherArg?: RouteDispatcher,
 	routeRegistryArg?: RouteRegistry,
 	packContributionRegistryArg?: PackContributionRegistry,
+	worktreeServicesArg?: WorktreeServiceCoordinator,
+	extensionSettingsCatalogue?: (projectId: string | undefined) => PackContributions[],
+	requestMutationDispatcher?: RequestMutationDispatcher,
+	toolResultFilterDispatcher?: ToolResultFilterDispatcher,
+	requestMutationTrace?: ContextTraceStore,
 	extensionChannelServices?: ExtensionChannelServices,
 	fetchImpl: typeof fetch = fetch,
 	commandRunner: CommandRunner = realCommandRunner,
@@ -5231,6 +6041,7 @@ async function handleApiRoute(
 	// These are always wired by the sole caller; the optional markers are only to avoid
 	// touching every existing signature site.
 	const serverRoleStore = roleStore!;
+	const importApplicationService = projectImportProposalApplicationService!;
 	const dispatcher = actionDispatcher!;
 	const remoteState = remoteStateRoutes!;
 	// Slice B3: the route dispatcher + pack-level route registry (always wired by the
@@ -5240,6 +6051,60 @@ async function handleApiRoute(
 	// pack-schema-v1 §5.2: the project-scoped pack-contribution registry (panels /
 	// entrypoints / routes), always wired by the sole caller.
 	const packContributionRegistry = packContributionRegistryArg!;
+	// Route projections and mutations use the same operator-provenance fence as
+	// runtime dispatch; project.yaml is never an authorization source by itself.
+	const effectiveExtensionGrants = (projectId: string | undefined, store?: ProjectConfigStore): ExtensionGrant[] => {
+		if (!projectId) return [];
+		const configStore = store ?? projectContextManager.getOrCreate(projectId)?.projectConfigStore;
+		if (!configStore) return [];
+		return projectRegistry.authorizedExtensionGrants(projectId, configStore.getExtensionGrants());
+	};
+	const worktreeServices = worktreeServicesArg!;
+	const settingsCatalogue = extensionSettingsCatalogue!;
+	type SettingsField = ExtensionSettingDefinition;
+	type SettingsTarget = { ref: ExtensionSettingsTargetRef; packName: string; listName: string; fields: SettingsField[]; requiresConfig: string[]; contribution: any };
+	const isSettingsIdentifier = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value);
+	// Declarations are normalized exactly once by the contribution loader. In
+	// particular, legacy opaque `config:` maps are runtime configuration rather
+	// than an attempted settings schema; re-normalizing raw config here would
+	// incorrectly make them invalid and split catalogue/runtime truth.
+	const settingsTargets = (projectId: string): SettingsTarget[] => {
+		const targets: SettingsTarget[] = [];
+		for (const pack of settingsCatalogue(projectId)) {
+			for (const provider of pack.providers) {
+				// Every valid contribution is project-switchable. Opaque and absent
+				// config declarations intentionally expose an empty editable schema.
+				if (provider.settingsSchemaDiagnostic !== undefined) continue;
+				const schema = provider.settingsSchema;
+				targets.push({ ref: { packId: pack.packId, kind: "provider", id: provider.id }, packName: pack.packName, listName: provider.listName, fields: schema?.fields ?? [], requiresConfig: schema?.requiresConfig ?? [], contribution: provider });
+			}
+			for (const hook of pack.hooks) {
+				if (hook.settingsSchemaDiagnostic !== undefined) continue;
+				const schema = hook.settingsSchema;
+				targets.push({ ref: { packId: pack.packId, kind: "hook", id: hook.id }, packName: pack.packName, listName: hook.listName, fields: schema?.fields ?? [], requiresConfig: schema?.requiresConfig ?? [], contribution: hook });
+			}
+			for (const runtime of pack.runtimes) {
+				if (runtime.settingsSchemaDiagnostic !== undefined) continue;
+				const schema = runtime.settingsSchema;
+				targets.push({ ref: { packId: pack.packId, kind: "runtime", id: runtime.id }, packName: pack.packName, listName: runtime.listName, fields: schema?.fields ?? [], requiresConfig: schema?.requiresConfig ?? [], contribution: runtime });
+			}
+			for (const requirement of pack.sandboxRequirements) {
+				// Sandbox requirement declarations are rejected by their closed loader
+				// rather than retained with a repair diagnostic.
+				const schema = requirement.settingsSchema;
+				targets.push({ ref: { packId: pack.packId, kind: "sandboxRequirement", id: requirement.id }, packName: pack.packName, listName: requirement.listName, fields: schema?.fields ?? [], requiresConfig: schema?.requiresConfig ?? [], contribution: requirement });
+			}
+		}
+		return targets;
+	};
+	const invalidSettingsTargetRefs = (projectId: string): ExtensionSettingsTargetRef[] => settingsCatalogue(projectId).flatMap(pack => [
+		...pack.providers.filter(provider => provider.settingsSchemaDiagnostic !== undefined).map(provider => ({ packId: pack.packId, kind: "provider" as const, id: provider.id })),
+		...pack.hooks.filter(hook => hook.settingsSchemaDiagnostic !== undefined).map(hook => ({ packId: pack.packId, kind: "hook" as const, id: hook.id })),
+		...pack.runtimes.filter(runtime => runtime.settingsSchemaDiagnostic !== undefined).map(runtime => ({ packId: pack.packId, kind: "runtime" as const, id: runtime.id })),
+	]);
+	const mutationDispatcher = requestMutationDispatcher!;
+	const resultFilterDispatcher = toolResultFilterDispatcher!;
+	const mutationTrace = requestMutationTrace!;
 	/** Serialize a cascade-resolved item with origin/overrides + market-pack tags (design §5.2). */
 	const withOrigin = (r: { item: Record<string, unknown>; origin: unknown; overrides?: unknown; originPackId?: string | null; originPackName?: string | null }): Record<string, unknown> => ({
 		...r.item,
@@ -5310,7 +6175,227 @@ async function handleApiRoute(
 			console.warn("[extension-channels] closeUnavailablePacks failed after resolver invalidation:", err);
 		});
 	};
-	const invalidateResolverCaches = (): void => { invalidateMarketPackScanCache(); invalidateBuiltinPackScanCache(); invalidateSlashSkillsCache(); __resetToolScanCache(); toolManager.clearScopedPiExtensionTools(); piExtensionDiscoveryCache.clear(); dispatcher.invalidate(); routeDispatcher.invalidate(); routeRegistry.invalidate(); packContributionRegistry.invalidate(); closeUnavailableExtensionChannels(); };
+	const invalidateResolverCaches = (): void => {
+		invalidateMarketPackScanCache();
+		invalidateBuiltinPackScanCache();
+		invalidateSlashSkillsCache();
+		__resetToolScanCache();
+		toolManager.clearScopedPiExtensionTools();
+		piExtensionDiscoveryCache.clear();
+		dispatcher.invalidate();
+		routeDispatcher.invalidate();
+		routeRegistry.invalidate();
+		packContributionRegistry.invalidate();
+		sessionManager.lifecycleHub?.cancelScheduledAdvisors?.();
+		closeUnavailableExtensionChannels();
+		// Coalesce one pass per currently owned project after any committed
+		// pack/settings/grant invalidation. The coordinator does not start a
+		// declaration unless it can derive a live worktree scope.
+		for (const context of projectContextManager.all()) {
+			void worktreeServices.reconcileProject(context.project.id).catch(() => undefined);
+		}
+		for (const projectId of new Set(sessionManager.listSessions().map(session => session.projectId).filter((id): id is string => !!id))) {
+			sessionManager.refreshStaticPromptSections(projectId);
+		}
+	};
+
+	const extensionGrantActor = !config.forceAuth && isLoopbackHost(config.host) ? "localhost" : "admin";
+	const extensionGrantNow = (): string => nextExtensionGrantAuditTimestamp(clock);
+	// This is the one application-time resolver for server-owned pack principals.
+	// It deliberately holds no grant snapshot: every decision reads the current
+	// project store, so a revoke wins over work that was already scheduled.
+	const extensionCapabilityGrantResolver: ExtensionCapabilityGrantResolver = createExtensionCapabilityGrantResolver({
+		contextForProject: (projectId) => {
+			const context = projectContextManager.getOrCreate(projectId);
+			return context ? { projectConfigStore: context.projectConfigStore } : undefined;
+		},
+		contributions: packContributionRegistry,
+		grantsForProject: (projectId, raw) => projectRegistry.authorizedExtensionGrants(projectId, raw),
+	});
+	const extensionPackGrantCapabilities: readonly ExtensionCapability[] = [
+		"service.manage", "memory.read", "memory.write", "memory.reflect", "memory.invalidate", "memory.read.all", "sandbox:build",
+	];
+	const isPackExtensionGrant = (grant: ExtensionGrant): grant is Extract<ExtensionGrant, { principal: "pack" }> =>
+		(grant as { principal?: unknown }).principal === "pack";
+	const extensionGrantStatus = (projectId: string | undefined, store: ProjectConfigStore) => {
+		const grants = effectiveExtensionGrants(projectId, store);
+		const packs = packContributionRegistry.list(projectId);
+		const activeHooks: ResolvedHook[] = packs.flatMap(pack => pack.hooks.map(hook => ({
+			packId: pack.packId,
+			hookId: hook.id,
+			mode: hook.mode,
+			capabilities: hook.capabilities,
+			events: hook.events,
+		})));
+		return packs.map((pack) => ({
+			packId: pack.packId,
+			packName: pack.packName,
+			hooks: pack.hooks.map((hook) => {
+				const requestedCapabilities: ExtensionCapability[] = hook.mode === "decide"
+					? ["decide", ...hook.capabilities]
+					: [...hook.capabilities];
+				const hookGrants = requestedCapabilities.filter(capability => resolveExtensionGrant(
+					activeHooks,
+					grants,
+					{ packId: pack.packId, hookId: hook.id },
+					capability,
+				).allowed);
+				const runnable = hook.mode === "decide" && hookGrants.includes("decide");
+				return {
+					id: hook.id,
+					listName: hook.listName,
+					mode: hook.mode,
+					events: hook.events,
+					requestedCapabilities,
+					grants: hookGrants,
+					runnable,
+					status: hook.mode === "observe" ? "observe" : runnable ? "granted" : "grant-required",
+				};
+			}),
+		}));
+	};
+	const extensionPackGrantStatus = (projectId: string | undefined) =>
+		packContributionRegistry.list(projectId).map(pack => ({
+			packId: pack.packId,
+			packName: pack.packName,
+			requestedCapabilities: [...extensionPackGrantCapabilities],
+			grants: projectId === undefined ? [] : extensionPackGrantCapabilities.filter(capability =>
+				extensionCapabilityGrantResolver(projectId, { kind: "pack", packId: pack.packId }, capability).allowed,
+			),
+		}));
+	const extensionGrantProjection = (projectId: string | undefined, store: ProjectConfigStore) => ({
+		hooks: extensionGrantStatus(projectId, store),
+		packs: extensionPackGrantStatus(projectId),
+	});
+	const extensionSettingsProjection = (projectId: string) => {
+		const context = projectContextManager.getOrCreate(projectId);
+		if (!context) throw new Error("PROJECT_NOT_FOUND");
+		const store = context.extensionSettingsStore;
+		const publicState = store.getPublicState();
+		const targets = settingsTargets(projectId).map(target => {
+			const secretFields = target.fields.filter(field => field.type === "secret").map(field => field.key);
+			const defaults = Object.fromEntries(target.fields
+				.filter(field => field.default !== undefined)
+				.map(field => [field.key, cloneExtensionSettingValue(field.default!)])) as Record<string, ExtensionSettingValue>;
+			let legacyValues: Record<string, ExtensionSettingValue> | undefined;
+			if (target.ref.kind === "provider" && !store.hasTargetRecord(target.ref)) {
+				const legacy = getPackStore().readSync<Record<string, unknown>>(target.ref.packId, providerConfigStoreKey(target.ref.id));
+				if (legacy.state === "present" && legacy.value && typeof legacy.value === "object" && !Array.isArray(legacy.value)) {
+					legacyValues = Object.fromEntries(Object.entries(legacy.value).filter(([, value]) => typeof value === "string" || typeof value === "boolean" || typeof value === "number" && Number.isFinite(value))) as Record<string, ExtensionSettingValue>;
+				}
+			}
+			const effective = store.getEffective(target.ref, defaults, { legacyValues, secretFields });
+			const reconciled = reconcileExtensionSettingsValues(target.fields, effective.values);
+			const missing = target.requiresConfig.filter(key => {
+				if (secretFields.includes(key)) return !effective.secretSet[key];
+				const value = reconciled.values[key];
+				return value === undefined || value === null
+					|| typeof value === "string" && value.trim().length === 0
+					|| Array.isArray(value) && value.length === 0;
+			});
+			const enabled = effective.enabled !== false;
+			const hookGrant = target.ref.kind === "hook" ? (() => {
+				const hook = target.contribution as { mode: "observe" | "decide"; capabilities: ExtensionCapability[]; events: string[] };
+				const requestedCapabilities: ExtensionCapability[] = hook.mode === "decide" ? ["decide", ...hook.capabilities] : [...hook.capabilities];
+				const grants = effectiveExtensionGrants(projectId, context.projectConfigStore);
+				const granted = requestedCapabilities.filter(capability => supportsExtensionGrantCapability(hook, capability)
+					&& grants.some(grant => grant.packId === target.ref.packId && grant.hookId === target.ref.id && grant.capability === capability));
+				const runnable = hook.mode === "decide" && granted.includes("decide");
+				// Request mutation dispatch is intentionally authorized by its exact
+				// `mutate` grant; it does not also require the generic `decide` tuple.
+				const mutationAuthorized = hook.mode === "decide"
+					&& hook.capabilities.includes("mutate")
+					&& hook.events.some(event => event === "beforePrompt" || event === "beforeToolCall")
+					&& granted.includes("mutate");
+				const runtimeAuthorized = hook.mode === "observe" || runnable || mutationAuthorized;
+				return { id: target.ref.id, listName: target.listName, mode: hook.mode, events: hook.events, requestedCapabilities, grants: granted, runnable, status: hook.mode === "observe" ? "observe" : runnable ? "granted" : "grant-required", runtimeAuthorized };
+			})() : undefined;
+			return {
+				ref: target.ref,
+				packName: target.packName,
+				listName: target.listName,
+				enabled: { effective: enabled, ...(effective.enabled !== undefined ? { projectOverride: effective.enabled } : {}) },
+				configuration: { state: reconciled.invalidKeys.length > 0 ? "invalid-values" : enabled ? missing.length > 0 ? "requires-config" : "ready" : "disabled", missing },
+				fields: target.fields.map(field => ({
+					key: field.key, type: field.type, ...(field.label ? { label: field.label } : {}), ...(field.description ? { description: field.description } : {}), ...(field.optional ? { optional: true } : {}), ...(field.values ? { values: [...field.values] } : {}), ...(field.min !== undefined ? { min: field.min } : {}), ...(field.max !== undefined ? { max: field.max } : {}),
+					// Defaults are declaration metadata for public controls only. Secrets
+					// cannot have a declaration default and never expose one on the wire.
+					...(field.type !== "secret" && field.default !== undefined ? { default: cloneExtensionSettingValue(field.default) } : {}),
+					...(field.type === "secret" ? { secretSet: effective.secretSet[field.key] === true } : reconciled.values[field.key] !== undefined ? { value: cloneExtensionSettingValue(reconciled.values[field.key]) } : {}),
+					source: effective.sources[field.key] ?? "default",
+				})),
+				...(hookGrant ? { hookGrant } : {}),
+			};
+		});
+		for (const ref of invalidSettingsTargetRefs(projectId)) {
+			const pack = settingsCatalogue(projectId).find(candidate => candidate.packId === ref.packId);
+			const contribution = ref.kind === "provider"
+				? pack?.providers.find(candidate => candidate.id === ref.id)
+				: ref.kind === "hook"
+					? pack?.hooks.find(candidate => candidate.id === ref.id)
+					: ref.kind === "runtime"
+						? pack?.runtimes.find(candidate => candidate.id === ref.id)
+						: pack?.sandboxRequirements.find(candidate => candidate.id === ref.id);
+			if (!pack || !contribution) continue;
+			targets.push({ ref, packName: pack.packName, listName: contribution.listName, enabled: { effective: false }, configuration: { state: "invalid-schema", missing: [] }, fields: [] });
+		}
+		// The Market's existing Pack target is an administrative owner rather than
+		// a durable settings record. Publish it from the same active resolver used
+		// by grant application, so a revoked, inactive, or shadowed pack grant is
+		// never displayed as actionable authority.
+		const packTargets = extensionPackGrantStatus(projectId).map(pack => {
+			const ownedTargets = targets.filter(target => target.ref.packId === pack.packId);
+			const allOwnedTargetsDisabled = ownedTargets.length > 0 && ownedTargets.every(target => target.enabled.effective === false);
+			return {
+				ref: { packId: pack.packId, kind: "pack" as const, id: pack.packId },
+				packName: pack.packName,
+				listName: pack.packName,
+				enabled: { effective: !allOwnedTargetsDisabled },
+				configuration: { state: allOwnedTargetsDisabled ? "disabled" as const : "ready" as const, missing: [] },
+				fields: [],
+				packGrant: {
+					requestedCapabilities: pack.requestedCapabilities,
+					grants: pack.grants,
+				},
+			};
+		});
+		return { schema: 2 as const, revision: publicState.revision, targets: [...targets, ...packTargets] };
+	};
+	const extensionSettingsMutationFailure = (error: unknown): { status: number; body: Record<string, unknown> } => {
+		const code = error && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
+		if (code === "EXTENSION_SETTINGS_REVISION_CONFLICT") return { status: 409, body: { error: "Extension settings changed elsewhere. Reload and review before saving.", code } };
+		if (code === "EXTENSION_SETTINGS_UNAVAILABLE" || code === "EXTENSION_SETTINGS_SECRET_READ_FAILED") return { status: 503, body: { error: "Extension settings are unavailable. Retry after repairing project state.", code } };
+		if (code === "EXTENSION_SETTINGS_INVALID" || code === "EXTENSION_SETTINGS_SECRET_INVALID") return { status: 422, body: { error: "Invalid extension settings mutation", code } };
+		return { status: 503, body: { error: "Extension settings could not be saved", code: "EXTENSION_SETTINGS_PERSIST_FAILED" } };
+	};
+	const broadcastExtensionSettingsInvalidation = (projectId: string, revision: number): void => {
+		invalidateResolverCaches();
+		broadcastToProject(projectId, { type: "extension_settings_updated", projectId, revision, ts: clock?.now() ?? Date.now() });
+	};
+	const broadcastCommittedExtensionSettingsInvalidation = (projectId: string, error: unknown): void => {
+		if (error instanceof ExtensionSettingsUnavailableError && error.committedRevision !== undefined) {
+			broadcastExtensionSettingsInvalidation(projectId, error.committedRevision);
+		}
+	};
+	const extensionGrantHook = (projectId: string | undefined, packId: string, hookId: string) => {
+		const pack = packContributionRegistry.list(projectId).find(candidate => candidate.packId === packId);
+		return pack?.hooks.find(hook => hook.id === hookId);
+	};
+	const supportsExtensionGrantCapability = (hook: { mode: "observe" | "decide"; capabilities: readonly string[]; events: readonly string[] }, capability: ExtensionCapability): boolean =>
+		// Generic capabilities are pack-principal-only. Keep this REST eligibility
+		// fence explicit even though hook manifest validation also keeps the two
+		// declaration vocabularies disjoint.
+		!extensionPackGrantCapabilities.includes(capability)
+		&& (capability === "filter:tool-result"
+			? hook.mode === "decide" && hook.capabilities.includes(capability) && hook.events.length === 1 && hook.events[0] === "afterToolResult"
+			: capability === "mutate"
+				? hook.mode === "decide" && hook.capabilities.includes("mutate")
+				: (capability === "decide" && hook.mode === "decide") || hook.capabilities.includes(capability));
+	const extensionGrantAudit = (stateDir: string) => new ExtensionGrantAuditStore(stateDir, fsImpl);
+	const broadcastExtensionGrantInvalidation = (projectId: string): void => {
+		invalidateResolverCaches();
+		broadcastToProject(projectId, { type: "extension_grants_updated", projectId, ts: clock?.now() ?? Date.now() });
+	};
 	const refreshMcpExternalTools = (): void => {
 		sessionManager.refreshExternalMcpToolRegistrations();
 	};
@@ -5351,6 +6436,12 @@ async function handleApiRoute(
 	const noContent = () => {
 		res.writeHead(204);
 		res.end();
+	};
+	const isVerifiedPromptOperator = (): boolean => !!cookieStore && cookieTryAuth(req, cookieStore);
+	const requireVerifiedPromptOperator = (): boolean => {
+		if (isVerifiedPromptOperator()) return true;
+		json({ error: "A verified signed operator cookie is required", code: "PROMPT_EXTENSION_OPERATOR_REQUIRED" }, 403);
+		return false;
 	};
 	const jsonError = (status: number, err: unknown, extra?: Record<string, unknown>) => {
 		const e = err instanceof Error ? err : new Error(String(err));
@@ -5422,6 +6513,38 @@ async function handleApiRoute(
 		if (!(err instanceof SpecialProjectMutationError)) return false;
 		json({ error: err.message, code: err.code }, err.status);
 		return true;
+	};
+	const validateCanonicalBaseRef = createCanonicalBaseRefValidator(serverCommandRunner);
+	const writeProjectRegistrationError = (err: unknown): boolean => {
+		if (err instanceof ProjectRootNotFoundError || err instanceof ProjectRootAlreadyRegisteredError) {
+			json({ error: err.message, code: err.code }, 400);
+			return true;
+		}
+		return false;
+	};
+	const writeCanonicalProjectMutationError = (err: unknown): boolean => {
+		if (err instanceof CanonicalMutationError) {
+			// The Settings UI has a long-standing structured base_ref contract.
+			// Preserve it byte-for-byte while routing every other canonical failure
+			// through the typed, sanitized envelope below.
+			if (err.details && typeof err.details === "object" && (err.details as { field?: unknown }).field === "base_ref") {
+				json(err.details, err.status);
+				return true;
+			}
+			json({ error: err.message, ...(err.code ? { code: err.code } : {}), ...(err.details !== undefined ? { details: err.details } : {}) }, err.status);
+			return true;
+		}
+		if (err instanceof CanonicalProjectConfigPersistenceError || err instanceof ProjectConfigLoadError) {
+			const failure = projectConfigPersistenceFailure(err instanceof CanonicalProjectConfigPersistenceError ? err.cause : err);
+			json(failure.body, failure.status);
+			return true;
+		}
+		if (err instanceof CanonicalSandboxSecretPersistenceError || err instanceof SecretsStorePersistenceError) {
+			const failure = sandboxSecretPersistenceFailure(err instanceof CanonicalSandboxSecretPersistenceError ? err.cause : err);
+			json(failure.body, failure.status);
+			return true;
+		}
+		return false;
 	};
 
 	/** Subgoals feature gate. Writes 403 SUBGOALS_DISABLED + returns false when off. */
@@ -5689,6 +6812,11 @@ async function handleApiRoute(
 				const store = scope === "project" ? ctx?.projectConfigStore : projectConfigStore;
 				return store?.getPackActivation(scope as PackOrderScope, packName) ?? {};
 			},
+			adoptedEntries: (scope) => adoptedSkillEntries(scope, {
+				serverConfigStore: projectConfigStore as AdoptedSkillLedgerReader,
+				projectConfigStore: ctx?.projectConfigStore as AdoptedSkillLedgerReader | undefined,
+				projectId: effectiveProjectId ?? undefined,
+			}),
 		};
 	}
 
@@ -6007,12 +7135,29 @@ async function handleApiRoute(
 		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
 		const scopedConfigStore = resolveProjectConfigStore(resolved.projectId);
 		const sandboxConfig = scopedConfigStore.get("sandbox") || "none";
-		const imageName = scopedConfigStore.get("sandbox_image") || "bobbit-agent";
 		const configured = sandboxConfig === "docker";
 		const dockerContextRoot = resolveSandboxDockerContext(resolved.project.rootPath);
+		let plan: SandboxImagePlan;
+		try {
+			plan = resolveProjectSandboxImagePlan(packContributionRegistry, scopedConfigStore, resolved.projectId);
+		} catch (error) {
+			if (!(error instanceof UnsupportedSandboxImagePlanError)) throw error;
+			const status = await checkDockerAvailability(undefined, dockerContextRoot ?? undefined, commandRunner);
+			json({ ...status, configured, error: "Unsupported sandbox image configuration" });
+			return;
+		}
 		// Docker must use this request's gateway-owned runner: test coordinators
 		// fence host commands through that seam rather than allowing direct spawns.
-		const status = await checkDockerAvailability(configured ? imageName : undefined, dockerContextRoot ?? undefined, commandRunner);
+		const status = await checkDockerAvailability(configured ? plan : undefined, dockerContextRoot ?? undefined, commandRunner);
+		const failure = sandboxImageRequirements.getBuildFailure(resolved.projectId, plan.fingerprint);
+		// A recorded failure describes a pending attempt, never a currently ready
+		// exact image. In particular, it must not hide a later successful build.
+		if (configured && status.available && status.imageReady === false && failure && status.requirements) {
+			status.requirements = sandboxRequirementsStatus(plan, "failed", failure.code);
+		}
+		if (!configured && plan.requirements.length > 0) {
+			status.requirements = sandboxRequirementsStatus(plan, "unsupported");
+		}
 		json({ ...status, configured });
 		return;
 	}
@@ -6026,7 +7171,22 @@ async function handleApiRoute(
 		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
 		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
 		const scopedConfigStore = resolveProjectConfigStore(resolved.projectId);
-		const imageName = scopedConfigStore.get("sandbox_image") || "bobbit-agent";
+		if ((scopedConfigStore.get("sandbox") || "none") !== "docker") {
+			json({ success: false, error: "Sandbox image builds require Docker sandbox mode", code: "SANDBOX_NOT_CONFIGURED" }, 409);
+			return;
+		}
+		let plan: SandboxImagePlan;
+		try {
+			plan = resolveProjectSandboxImagePlan(packContributionRegistry, scopedConfigStore, resolved.projectId);
+		} catch (error) {
+			if (!(error instanceof UnsupportedSandboxImagePlanError)) throw error;
+			json({ success: false, error: "Unsupported sandbox image configuration", code: "SANDBOX_IMAGE_UNSUPPORTED" }, 422);
+			return;
+		}
+		if (!plan.buildable) {
+			json({ success: false, error: "Configured digest sandbox image is build-not-applicable", code: "SANDBOX_IMAGE_BUILD_NOT_APPLICABLE" }, 422);
+			return;
+		}
 		const dockerContextRoot = resolveSandboxDockerContext(resolved.project.rootPath);
 		if (!dockerContextRoot) {
 			json({ error: "Dockerfile not found at docker/Dockerfile" }, 404);
@@ -6036,11 +7196,13 @@ async function handleApiRoute(
 			json({ error: "Build already in progress" }, 409);
 			return;
 		}
-		const result = await buildSandboxImage(imageName, dockerContextRoot, commandRunner!);
+		const result = await buildSandboxImage(plan, dockerContextRoot, commandRunner!);
 		if (result.success) {
+			sandboxImageRequirements.recordBuildSuccess(resolved.projectId, plan.fingerprint);
 			json({ success: true });
 		} else {
-			json({ success: false, error: result.error }, 500);
+			sandboxImageRequirements.recordBuildFailure(resolved.projectId, plan.fingerprint);
+			json({ success: false, error: "Sandbox image build failed", code: "SANDBOX_IMAGE_BUILD_FAILED" }, 500);
 		}
 		return;
 	}
@@ -6433,6 +7595,18 @@ async function handleApiRoute(
 			const palette = typeof body.palette === "string" ? body.palette : undefined;
 			const colorLight = typeof body.colorLight === "string" ? body.colorLight : undefined;
 			const colorDark = typeof body.colorDark === "string" ? body.colorDark : undefined;
+			const configuredComponents = normalizeProjectRegistrationComponents((body as Record<string, unknown>).components);
+			const createWorkflows = projectRegistrationWorkflows((body as Record<string, unknown>).workflows);
+			const dispatchImportDecisionSafely = async (projectId: string, importId: string): Promise<void> => {
+				try {
+					await projectImportDecisionCoordinator?.dispatch(projectId, importId);
+				} catch (error) {
+					// Registration/configuration has already committed. Dispatch is a
+					// replayable best-effort boundary, never a reason to lie that the
+					// durable project failed to register.
+					console.warn(`[project-import-decisions] dispatch failed project=${projectId}:`, error);
+				}
+			};
 
 			if (isHeadquartersOwnedPath(body.rootPath)) {
 				const hq = headquartersProject();
@@ -6459,43 +7633,60 @@ async function handleApiRoute(
 			if (upsert) {
 				const existing = projectRegistry.getByPath(body.rootPath);
 				if (existing) {
-					// Ensure context is initialized
+					// Ensure context is initialized.
 					const ctx = projectContextManager.getOrCreate(existing.id);
 					if (ctx) {
 						ctx.gateStore.onStatusChange = () => {
 							ctx.goalStore.bumpGeneration();
 						};
 						wireGoalManagerResolvers(ctx, { sessionManager, projectContextManager, projectRegistry });
+						// A retry is the sole safe recovery for a registration that crashed
+						// while configuring. Persist the supplied/default components before
+						// publishing the original marker; never allocate a second run.
+						if (existing.importDecisionRun?.state === "configuring") {
+							if (configuredComponents) {
+								ctx.projectConfigStore.setComponents(configuredComponents);
+							} else if (ctx.projectConfigStore.getComponents().length === 0) {
+								ctx.projectConfigStore.setComponents([{ name: existing.name, repo: "." }]);
+							}
+							if (createWorkflows) ctx.projectConfigStore.setWorkflows(createWorkflows);
+							projectRegistry.markImportDecisionRunReady(existing.id, existing.importDecisionRun.id);
+						}
 					}
-					json(existing, 200);
+					const marker = existing.importDecisionRun;
+					if (marker?.state === "ready") await dispatchImportDecisionSafely(existing.id, marker.id);
+					json(projectRegistry.get(existing.id) ?? existing, 200);
 					return;
 				}
 			}
 
 			const acceptCanonical = body.acceptCanonical === true;
 			let project;
+			let baseRefWarnings: string[] | undefined;
 			try {
-				project = projectRegistry.register(body.name, body.rootPath, { color, palette, colorLight, colorDark, acceptCanonical });
-			} catch (regErr: any) {
-				if (regErr instanceof SymlinkProjectRootError) {
-					json({
-						error: "Project root is a symlink",
-						code: "symlink_root",
-						rootPath: regErr.rootPath,
-						canonical: regErr.canonical,
-					}, 400);
-					return;
-				}
-				if (regErr instanceof PreflightFailedError) {
-					json({
-						error: regErr.message,
-						code: "preflight_failed",
-						report: regErr.report,
-					}, 400);
-					return;
-				}
-				throw regErr;
-			}
+				({ project, warnings: baseRefWarnings } = await applyCanonicalProjectProposal({
+					mode: "register", name: body.name, rootPath: body.rootPath,
+					color, palette, colorLight, colorDark, acceptCanonical,
+					components: (body as Record<string, unknown>).components,
+					workflows: (body as Record<string, unknown>).workflows,
+					config: (body as Record<string, unknown>).config,
+					configDirectories: (body as Record<string, unknown>).configDirectories ?? (body as Record<string, unknown>).config_directories,
+					sandboxTokens: (body as Record<string, unknown>).sandboxTokens ?? (body as Record<string, unknown>).sandbox_tokens,
+				}, {
+					findByApplicationKey: (key) => projectRegistry.list().find(candidate => projectRegistry.hasCanonicalMutationReceipt(candidate.id, key)),
+					recordApplicationReceipt: (id, key) => projectRegistry.recordCanonicalMutationReceipt(id, key),
+					register: (input) => {
+						const created = projectRegistry.register(input.name, input.rootPath, { color: input.color, palette: input.palette, colorLight: input.colorLight, colorDark: input.colorDark, acceptCanonical: input.acceptCanonical });
+						if (input.applicationKey) projectRegistry.recordCanonicalMutationReceipt(created.id, input.applicationKey);
+						return projectRegistry.get(created.id)!;
+					},
+					get: (id) => projectRegistry.get(id),
+					update: (id, updates) => projectRegistry.update(id, updates as Parameters<typeof projectRegistry.update>[1]),
+					promote: (id, updates) => projectRegistry.promote(id, updates),
+					markReady: (id, importId) => projectRegistry.markImportDecisionRunReady(id, importId),
+					captureRegistryRecord: (id) => projectRegistry.captureExactRecord(id),
+					restoreRegistryRecord: (id, snapshot) => projectRegistry.restoreExactRecord(id, snapshot),
+					afterConfigured: async (project) => {
 			// Initialize project context for the new project
 			const newCtx = projectContextManager.getOrCreate(project.id);
 			if (newCtx) {
@@ -6504,47 +7695,8 @@ async function handleApiRoute(
 				};
 			}
 
-			// Multi-repo: accept optional components / workflows in the create body.
-			// Single-repo without components → fill default `[{name: <project name>, repo: "."}]`.
-			const createComponents = (body as Record<string, unknown>).components;
-			const createWorkflows = (body as Record<string, unknown>).workflows;
-			if (newCtx) {
-				if (Array.isArray(createComponents) && createComponents.length > 0) {
-					if (createWorkflows && typeof createWorkflows === "object" && !Array.isArray(createWorkflows)) {
-						try {
-							const { validateAllWorkflows } = await import("./agent/workflow-validator.js");
-							const errors = validateAllWorkflows(
-								createWorkflows as Parameters<typeof validateAllWorkflows>[0],
-								createComponents as Parameters<typeof validateAllWorkflows>[1],
-							);
-							if (errors.length > 0) {
-								projectRegistry.remove(project.id);
-								json({ error: "Workflow validation failed", details: errors }, 400);
-								return;
-							}
-						} catch { /* best-effort */ }
-					}
-					const normalized = (createComponents as Array<Record<string, unknown>>).map(c => ({
-						name: String(c.name ?? ""),
-						repo: typeof c.repo === "string" && c.repo ? c.repo : ".",
-						relativePath: typeof c.relative_path === "string" ? c.relative_path : (typeof c.relativePath === "string" ? c.relativePath as string : undefined),
-						worktreeSetupCommand: typeof c.worktree_setup_command === "string" ? c.worktree_setup_command : (typeof c.worktreeSetupCommand === "string" ? c.worktreeSetupCommand as string : undefined),
-						commands: c.commands && typeof c.commands === "object" && !Array.isArray(c.commands) ? c.commands as Record<string, string> : undefined,
-						config: c.config && typeof c.config === "object" && !Array.isArray(c.config) ? c.config as Record<string, string> : undefined,
-					}));
-					newCtx.projectConfigStore.setComponents(normalized);
-					if (createWorkflows && typeof createWorkflows === "object" && !Array.isArray(createWorkflows)) {
-						newCtx.projectConfigStore.setWorkflows(createWorkflows as Record<string, import("./agent/project-config-store.js").InlineWorkflowDef>);
-					}
-				} else {
-					// Default single-repo component named after the project.
-					if (newCtx.projectConfigStore.getComponents().length === 0) {
-						newCtx.projectConfigStore.setComponents([{ name: project.name, repo: "." }]);
-					}
-				}
-				// No default-workflow seeding. Workflows must be designed by the
-				// project assistant; a project may legitimately have zero workflows.
-			}
+			// Components, workflows and the durable import marker were committed by
+			// applyCanonicalProjectProposal before this runtime-only phase runs.
 			// Pin base_ref from the live remote so new projects never have a blank,
 			// silently-resolved base. Best-effort: failures leave it blank (today's
 			// behaviour). See docs/design/base-ref.md (add-time pinning).
@@ -6611,9 +7763,50 @@ async function handleApiRoute(
 			if (newCtx) {
 				wireGoalManagerResolvers(newCtx, { sessionManager, projectContextManager, projectRegistry });
 			}
-			json(project, 201);
+			const importMarker = project.importDecisionRun;
+			if (importMarker?.state === "ready") await dispatchImportDecisionSafely(project.id, importMarker.id);
+					},
+					removeRegistered: (created) => projectRegistry.remove(created.id),
+					removeContext: (id) => projectContextManager.remove(id),
+					openContext: async (id) => {
+						const context = projectContextManager.getOrCreate(id);
+						return context ? { projectConfigStore: context.projectConfigStore, secretsStore: context.secretsStore } : undefined;
+					},
+					suspendServices: (id) => worktreeServices.suspendProject(id),
+					stopServices: (id) => worktreeServices.stopProject(id),
+					reconcileServices: (id) => worktreeServices.reconcileProject(id),
+					validateBaseRef: validateCanonicalBaseRef,
+					invalidateSandboxImageRequirements: (id) => sandboxImageRequirements.invalidateProject(id),
+				}));
+			} catch (regErr: any) {
+				if (regErr instanceof CanonicalMutationError && regErr.code === "WORKFLOW_VALIDATION_FAILED") {
+					json({ error: regErr.message, details: regErr.details }, regErr.status);
+					return;
+				}
+				if (regErr instanceof SymlinkProjectRootError) {
+					json({
+						error: "Project root is a symlink",
+						code: "symlink_root",
+						rootPath: regErr.rootPath,
+						canonical: regErr.canonical,
+					}, 400);
+					return;
+				}
+				if (regErr instanceof PreflightFailedError) {
+					json({
+						error: regErr.message,
+						code: "preflight_failed",
+						report: regErr.report,
+					}, 400);
+					return;
+				}
+				if (writeProjectRegistrationError(regErr)) return;
+				throw regErr;
+			}
+			json({ ...project, ...(baseRefWarnings?.length ? { warnings: baseRefWarnings } : {}) }, 201);
 		} catch (err: any) {
-			jsonError(400, err);
+			if (writeCanonicalProjectMutationError(err)) return;
+			jsonError(500, err, { error: "Project mutation failed" });
 		}
 		return;
 	}
@@ -6686,12 +7879,41 @@ async function handleApiRoute(
 			}, 409);
 			return;
 		}
+		const projectId = projectGetMatch[1];
 		try {
-			const updated = projectRegistry.update(projectGetMatch[1], updates);
-			json(updated);
+			const { project: updated, warnings } = await applyCanonicalProjectProposal({
+				mode: "update", projectId, name: updates.name, rootPath: updates.rootPath,
+				color: updates.color, palette: updates.palette, colorLight: updates.colorLight, colorDark: updates.colorDark,
+				config: body.config, components: body.components, workflows: body.workflows,
+				configDirectories: body.configDirectories, sandboxTokens: body.sandboxTokens,
+			}, {
+				findByApplicationKey: (key) => projectRegistry.list().find(project => projectRegistry.hasCanonicalMutationReceipt(project.id, key)),
+				recordApplicationReceipt: (id, key) => projectRegistry.recordCanonicalMutationReceipt(id, key),
+				register: () => { throw new Error("Register is not available for a project update"); },
+				get: (id) => projectRegistry.get(id),
+				update: (id, next) => projectRegistry.update(id, next as Parameters<typeof projectRegistry.update>[1]),
+				promote: (id, next) => projectRegistry.promote(id, next),
+				captureRegistryRecord: (id) => projectRegistry.captureExactRecord(id),
+				restoreRegistryRecord: (id, snapshot) => projectRegistry.restoreExactRecord(id, snapshot),
+				removeRegistered: (project) => projectRegistry.remove(project.id),
+				removeContext: (id) => projectContextManager.remove(id),
+				openContext: async (id) => {
+					const context = projectContextManager.getOrCreate(id);
+					return context ? { projectConfigStore: context.projectConfigStore, secretsStore: context.secretsStore } : undefined;
+				},
+				suspendServices: (id) => worktreeServices.suspendProject(id),
+				stopServices: (id) => worktreeServices.stopProject(id),
+				reconcileServices: (id) => worktreeServices.reconcileProject(id),
+				validateBaseRef: validateCanonicalBaseRef,
+				invalidateSandboxImageRequirements: (id) => sandboxImageRequirements.invalidateProject(id),
+				sameRootPath: samePath,
+			});
+			json({ ...updated, ...(warnings?.length ? { warnings } : {}) });
 		} catch (err: any) {
 			if (writeSpecialProjectMutationError(err)) return;
-			jsonError(400, err);
+			if (writeProjectRegistrationError(err)) return;
+			if (writeCanonicalProjectMutationError(err)) return;
+			jsonError(500, err, { error: "Project mutation failed" });
 		}
 		return;
 	}
@@ -6738,6 +7960,9 @@ async function handleApiRoute(
 				return;
 			}
 			await sessionManager.cleanupScopedMcpManagersForProject(projectId, project?.rootPath);
+			// The data directory and fresh settings owner belong to this context.
+			// Fence/stop services before the context is closed or removed.
+			await worktreeServices.stopProject(projectId);
 			await projectContextManager.remove(projectId);
 			if (project?.provisional) {
 				projectRegistry.removeProvisional(projectId);
@@ -6770,7 +7995,43 @@ async function handleApiRoute(
 		try {
 			const body = await readBody(req);
 			const name = typeof body?.name === "string" ? body.name : undefined;
-			const promoted = projectRegistry.promote(projectId, { name });
+			let { project: promoted, warnings } = await applyCanonicalProjectProposal({
+				mode: "promote", projectId, name,
+				config: body?.config, components: body?.components, workflows: body?.workflows,
+				configDirectories: body?.configDirectories, sandboxTokens: body?.sandboxTokens,
+			}, {
+				findByApplicationKey: (key) => projectRegistry.list().find(project => projectRegistry.hasCanonicalMutationReceipt(project.id, key)),
+				recordApplicationReceipt: (id, key) => projectRegistry.recordCanonicalMutationReceipt(id, key),
+				register: () => { throw new Error("Register is not available for project promotion"); },
+				get: (id) => projectRegistry.get(id),
+				update: (id, updates) => projectRegistry.update(id, updates as Parameters<typeof projectRegistry.update>[1]),
+				promote: (id, updates) => projectRegistry.promote(id, updates),
+				markReady: (id, importId) => projectRegistry.markImportDecisionRunReady(id, importId),
+				captureRegistryRecord: (id) => projectRegistry.captureExactRecord(id),
+				restoreRegistryRecord: (id, snapshot) => projectRegistry.restoreExactRecord(id, snapshot),
+				afterConfigured: async (promoted) => {
+			// A provisional project deliberately has no run until its proposal
+			// configuration is complete. The acceptance client writes that config
+			// before this request; retain a defensive default for direct API users
+			// so the server-derived snapshot is never component-less.
+			const promotionContext = projectContextManager.getOrCreate(projectId);
+			if (promotionContext && promotionContext.projectConfigStore.getComponents().length === 0) {
+				promotionContext.projectConfigStore.setComponents([{ name: promoted.name, repo: "." }]);
+			}
+			// Canonical promotion publishes the ready marker only after the complete
+			// configuration is durable. Dispatch that marker here; checking for
+			// `configuring` would strand the run because canonical mutation has
+			// already performed the state transition before this callback.
+			const importRun = promoted.importDecisionRun;
+			if (importRun?.state === "ready") {
+				try {
+					await projectImportDecisionCoordinator?.dispatch(projectId, importRun.id);
+				} catch (error) {
+					// The ready marker is the recovery boundary. A restart/retry reuses
+					// it and dispatches the exact durable snapshot without re-asking.
+					console.warn(`[project-import-decisions] promotion dispatch failed project=${projectId}:`, error);
+				}
+			}
 			// Pin base_ref from the live remote (best-effort) now that the
 			// promoted project's rootPath is a real git repo. Mirrors the
 			// add-time pin in POST /api/projects. See docs/design/base-ref.md.
@@ -6796,10 +8057,25 @@ async function handleApiRoute(
 					}
 				}
 			} catch { /* best-effort — leave base_ref blank */ }
-			json(promoted);
+				},
+				removeRegistered: (project) => projectRegistry.remove(project.id),
+				removeContext: (id) => projectContextManager.remove(id),
+				openContext: async (id) => {
+					const context = projectContextManager.getOrCreate(id);
+					return context ? { projectConfigStore: context.projectConfigStore, secretsStore: context.secretsStore } : undefined;
+				},
+				suspendServices: (id) => worktreeServices.suspendProject(id),
+				stopServices: (id) => worktreeServices.stopProject(id),
+				reconcileServices: (id) => worktreeServices.reconcileProject(id),
+				validateBaseRef: validateCanonicalBaseRef,
+				invalidateSandboxImageRequirements: (id) => sandboxImageRequirements.invalidateProject(id),
+			});
+			json({ ...promoted, ...(warnings?.length ? { warnings } : {}) });
 		} catch (err: any) {
 			if (writeSpecialProjectMutationError(err)) return;
-			jsonError(400, err);
+			if (writeProjectRegistrationError(err)) return;
+			if (writeCanonicalProjectMutationError(err)) return;
+			jsonError(500, err, { error: "Project mutation failed" });
 		}
 		return;
 	}
@@ -6852,7 +8128,8 @@ async function handleApiRoute(
 	// GET/PUT /api/projects/:id/config, GET /api/projects/:id/config/defaults, GET /api/projects/:id/config/resolved
 	const projectConfigMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/config(?:\/(defaults|resolved))?$/);
 	if (projectConfigMatch) {
-		const ctx = projectContextManager.getOrCreate(projectConfigMatch[1]);
+		const requestedProjectId = projectConfigMatch[1];
+		const ctx = projectContextManager.getOrCreate(requestedProjectId);
 		if (!ctx) {
 			// Endpoint defense in depth: `fields.projectId` drives create-versus-edit
 			// acceptance dispatch on the client. A config mutation that nevertheless
@@ -6863,6 +8140,14 @@ async function handleApiRoute(
 			} else {
 				json({ error: "Project not found" }, 404);
 			}
+			return;
+		}
+		// The context manager resolves the exact registered scope. Keep that
+		// authoritative identity for side effects rather than relying on an
+		// unrelated route-local variable or inferring from configuration.
+		const projectId = ctx.project.id;
+		if (projectId !== requestedProjectId || !projectRegistry.get(projectId)) {
+			json({ ok: false, code: "UNKNOWN_PROJECT", message: `Unknown project: ${requestedProjectId}` }, 422);
 			return;
 		}
 		const suffix = projectConfigMatch[2]; // undefined | "defaults" | "resolved"
@@ -6877,6 +8162,10 @@ async function handleApiRoute(
 			// the wire. Migration removes them on boot; strip again here in case
 			// a stale on-disk value slipped through.
 			for (const k of LEGACY_QA_TOP_LEVEL_KEYS) delete config[k];
+			// Generic config surfaces must never serialize extension settings: even
+			// their redacted metadata belongs exclusively to the dedicated API.
+			delete config.extension_settings;
+			delete config.extensionSettings;
 			mergeSecretsIntoTokens(config, ctx.secretsStore);
 			json(redactSandboxSecrets(config));
 			return;
@@ -6916,6 +8205,8 @@ async function handleApiRoute(
 			result.sandbox_tokens = { value: ctx.projectConfigStore.getSandboxTokens(), source: migratedSource("sandbox_tokens") };
 			// Defence in depth: strip legacy top-level qa_* keys.
 			for (const k of LEGACY_QA_TOP_LEVEL_KEYS) delete result[k];
+			delete result.extension_settings;
+			delete result.extensionSettings;
 			// Merge secrets into sandbox_tokens (structured) for the resolved response.
 			if (Array.isArray(result.sandbox_tokens.value)) {
 				const tempConfig: Record<string, unknown> = { sandbox_tokens: result.sandbox_tokens.value };
@@ -6928,6 +8219,13 @@ async function handleApiRoute(
 		if (req.method === "PUT" && !suffix) {
 			const body = await readBody(req);
 			if (!body || typeof body !== "object") { json({ error: "Missing body" }, 400); return; }
+			const privilegedPromptConfigKey = Object.keys(body as Record<string, unknown>).find(key => new Set([
+				"extension_prompt_sections", "extensionPromptSections", "extension_grants", "extensionGrants", "prompt_extension_budget", "promptExtensionBudget", "extension_settings", "extensionSettings",
+			]).has(key));
+			if (privilegedPromptConfigKey) {
+				json({ error: `${privilegedPromptConfigKey} is managed by the prompt extension policy endpoints`, code: privilegedPromptConfigKey === "extension_prompt_sections" || privilegedPromptConfigKey === "extensionPromptSections" ? "PROMPT_EXTENSION_PROPOSAL_REQUIRED" : "PROMPT_EXTENSION_CONFIG_FORBIDDEN" }, 422);
+				return;
+			}
 
 			// Reject legacy top-level qa_* keys — they have moved into
 			// `components[<name>].config`. Done before any other parsing so the
@@ -6939,73 +8237,43 @@ async function handleApiRoute(
 				}
 			}
 
+			// Validate this Docker argument boundary before persisting. The resolver
+			// repeats the check for legacy on-disk config, but writes get a precise
+			// field error rather than leaving a future sandbox bootstrap ambiguous.
+			if ("sandbox_image" in (body as Record<string, unknown>)) {
+				const sandboxImage = (body as Record<string, unknown>).sandbox_image;
+				if (sandboxImage !== null && sandboxImage !== "" && (typeof sandboxImage !== "string" || !parseSandboxBaseImageReference(sandboxImage))) {
+					json({ field: "sandbox_image", error: "sandbox_image must be a valid Docker image reference" }, 400);
+					return;
+				}
+			}
+
 			// Validate components[].config eagerly (mirrors propose_project tool).
 			{
 				const err = validateComponentsConfig((body as Record<string, unknown>).components);
 				if (err) { json({ error: err }, 400); return; }
 			}
 
-			// `base_ref` validation — runs only when the field is present in the PUT body.
-			// On any failure we return HTTP 400 with `{ field: "base_ref", error, details? }`
-			// so the Settings UI can render the error inline. Non-fatal warnings (component
-			// paths that aren't git repos) bubble up via `baseRefWarnings` and are attached
-			// to the success response below. See docs/design/base-ref.md.
+			// `base_ref` validation — shared with canonical project proposal
+			// application, before any mutable config effect. Non-git components keep
+			// the documented warning semantics rather than blocking a save.
 			const baseRefWarnings: string[] = [];
 			if ("base_ref" in (body as Record<string, unknown>)) {
-				const rawBaseRef = (body as Record<string, unknown>).base_ref;
-				const baseRefValue = normalizeBaseRefValue(rawBaseRef);
-				if (baseRefValue) {
-					const sandboxResolved = ctx.projectConfigStore.getWithDefaults().sandbox || "none";
-					const shapeError = validateBaseRefShape({ value: rawBaseRef, sandbox: sandboxResolved });
-					if (shapeError) {
-						json(shapeError, 400);
-						return;
-					}
-					// Multi-repo ref existence — `git rev-parse --verify` against every
-					//    component repo. Also detect tags up-front: a value that resolves
-					//    via `refs/tags/<value>` in ANY component is rejected as a tag.
-					const componentsForCheck = ctx.projectConfigStore.getComponents();
-					const componentsToCheck = componentsForCheck.length > 0
-						? componentsForCheck
-						: [{ name: ctx.project.name || "default", repo: "." }];
-					const failures: Array<{ component: string; message: string }> = [];
-					let checkedRepoCount = 0;
-					let tagDetected = false;
-					for (const c of componentsToCheck) {
-						const repoPath = path.join(ctx.project.rootPath, c.repo);
-						const gitRepoCheck = await isGitRepo(repoPath, serverCommandRunner).catch(() => false);
-						if (!gitRepoCheck) {
-							baseRefWarnings.push(baseRefSkippedRepoWarning(c.name, repoPath));
-							continue;
-						}
-						checkedRepoCount++;
-						// Tag check first — if the value resolves as a tag in any component
-						// repo, fail with the tag-specific message rather than the generic
-						// "not present" error.
-						try {
-							await serverCommandRunner.execFile("git", ["rev-parse", "--verify", `refs/tags/${baseRefValue}`], { cwd: repoPath, timeout: 5_000 });
-							tagDetected = true;
-							break;
-						} catch {
-							// Not a tag in this repo — continue with branch-ref check below.
-						}
-						try {
-							await serverCommandRunner.execFile("git", ["rev-parse", "--verify", baseRefValue], { cwd: repoPath, timeout: 5_000 });
-						} catch {
-							failures.push({
-								component: c.name,
-								message: `ref not found. Try: cd ${c.repo} && git fetch origin`,
-							});
-						}
-					}
-					if (tagDetected) {
-						json(baseRefTagError(baseRefValue), 400);
-						return;
-					}
-					if (failures.length > 0) {
-						json(baseRefMissingInReposError(baseRefValue, failures, checkedRepoCount), 400);
-						return;
-					}
+				const candidateSandbox = (body as Record<string, unknown>).sandbox === null
+					? "none"
+					: typeof (body as Record<string, unknown>).sandbox === "string"
+						? (body as Record<string, unknown>).sandbox as string
+						: ctx.projectConfigStore.getWithDefaults().sandbox || "none";
+				try {
+					baseRefWarnings.push(...await validateCanonicalBaseRef({
+						value: (body as Record<string, unknown>).base_ref,
+						sandbox: candidateSandbox,
+						rootPath: ctx.project.rootPath,
+						components: ctx.projectConfigStore.getComponents(),
+					}));
+				} catch (error) {
+					if (writeCanonicalProjectMutationError(error)) return;
+					throw error;
 				}
 			}
 
@@ -7189,6 +8457,11 @@ async function handleApiRoute(
 				const failure = projectConfigPersistenceFailure(error);
 				json(failure.body, failure.status);
 				return;
+			}
+			// A changed image authority must never inherit a bounded failed-build
+			// marker for a previous configured image. This is project-local.
+			if ("sandbox_image" in (body as Record<string, unknown>) || "sandbox" in (body as Record<string, unknown>)) {
+				sandboxImageRequirements.invalidateProject(projectId);
 			}
 			if (Object.keys(pendingTokenSecretUpdates).length > 0) {
 				try {
@@ -7432,7 +8705,13 @@ async function handleApiRoute(
 				if (session.sandboxed) skillCwd = ctx.project.rootPath;
 			}
 		}
-		const skill = getSlashSkill(skillCwd, skillName, resolvedConfigStore, skillMarketContext(session.projectId ?? null));
+		// The immutable startup snapshot is a ceiling, not a new discovery source:
+		// an unknown/stale selected id fails closed and the ordinary no-snapshot
+		// route remains byte-for-byte unchanged.
+		const skill = getSlashSkill(
+			skillCwd, skillName, resolvedConfigStore, skillMarketContext(session.projectId ?? null),
+			session.dynamicCapabilities?.skillsAuthoritative ? session.dynamicCapabilities.skills : undefined,
+		);
 		if (!skill) {
 			json({ error: `Skill "${skillName}" not found` }, 404);
 			return;
@@ -7544,6 +8823,487 @@ async function handleApiRoute(
 		};
 	};
 
+	/** Persist safe request-mutation outcomes without letting diagnostics affect a turn. */
+	const appendRequestMutationDiagnostics = (
+		context: { stateDir: string },
+		sessionId: string,
+		event: "beforePrompt" | "beforeToolCall",
+		result: {
+			action: "pass" | "replace" | "warn" | "deny";
+			reason: RequestMutationReason;
+			text?: string;
+			source?: RequestMutationSource;
+			outcomes: readonly RequestMutationOutcome[];
+		},
+		before?: string,
+		toolName?: string,
+	): void => {
+		const auditReason = (reason: RequestMutationReason): RequestMutationAuditReason => reason;
+		const auditOutcome = (outcome: RequestMutationOutcome["outcome"]): RequestMutationAuditOutcome =>
+			outcome === "advised" ? "warned" : outcome;
+		const traceReason = (reason: RequestMutationReason): TraceOutcomeReason =>
+			reason === "Over budget" ? "Budget exhausted" : reason;
+		try {
+			const audit = new RequestMutationAuditStore(context.stateDir, fsImpl);
+			for (const outcome of result.outcomes) {
+				const source = outcome.source;
+				const isWinner = result.source && (
+					(source.kind === "extension" && result.source.packId !== "core"
+						&& source.packId === result.source.packId && source.hookId === result.source.hookId)
+					|| (source.kind === "core" && result.source.packId === "core" && source.id === `core:${result.source.hookId}`)
+				);
+				audit.append({
+					sessionId,
+					event,
+					...(source.kind === "extension" ? { packId: source.packId, hookId: source.hookId } : {}),
+					outcome: auditOutcome(outcome.outcome),
+					reason: auditReason(outcome.reason),
+					...(event === "beforePrompt" && isWinner && result.action === "replace"
+						? { before, after: result.text } : {}),
+					...(event === "beforeToolCall" ? { toolName } : {}),
+				});
+			}
+		} catch { /* Audit is diagnostic only; it must never alter the route outcome. */ }
+		try {
+			mutationTrace.appendTrace(sessionId, {
+				ts: Date.now(), hook: event, sessionId, providers: [],
+				outcomes: result.outcomes.map((outcome) => {
+					const source = outcome.source;
+					const hookId = source.kind === "extension" && typeof source.hookId === "string"
+						? source.hookId : source.id.replace(/^core:/, "");
+					return {
+						kind: "audit" as const,
+						...(source.kind === "extension" ? { packId: source.packId } : {}),
+						hookId,
+						event,
+						outcome: outcome.outcome,
+						reason: traceReason(outcome.reason),
+						ms: outcome.ms,
+					};
+				}),
+			});
+		} catch { /* Context tracing is also non-fatal. */ }
+	};
+
+	const serializedResultBytes = (value: unknown): number => {
+		try { return Math.min(256 * 1024, Buffer.byteLength(JSON.stringify(value), "utf8")); } catch { return 0; }
+	};
+	const traceReasonForToolResultFilter = (
+		action: "pass" | "replace" | "redact" | "reject",
+		outcome: ToolResultFilterDispatchOutcome["outcome"],
+		reasonCode: string,
+	): TraceOutcomeReason => {
+		if (outcome === "applied") {
+			return action === "pass" ? "Tool result passed"
+				: action === "replace" ? "Tool result replaced"
+					: action === "redact" ? "Tool result redacted" : "Tool result withheld";
+		}
+		if (outcome === "superseded") return "Lower-priority filter";
+		switch (reasonCode) {
+			case "filter-grant-required": return "Filter grant required";
+			case "filter-disabled-or-revoked":
+			case "no-filter": return "Filter disabled or revoked";
+			case "filter-malformed": return "Filter malformed";
+			case "filter-timed-out": return "Filter timed out";
+			case "filter-aborted": return "Filter aborted";
+			case "filter-admission-rejected": return "Filter admission rejected";
+			case "filter-lower-priority": return "Lower-priority filter";
+			default: return "Filter unavailable";
+		}
+	};
+	/**
+	 * Filter results are data firewalled here: only dispatcher-owned identifiers,
+	 * fixed states, counts, and timing reach the project audit or EP-5 trace.
+	 */
+	const appendToolResultFilterDiagnostics = (
+		context: { stateDir: string },
+		inspection: ToolResultInspection,
+		resolution: ToolResultFilterResolution,
+		latencyMs: number,
+	): void => {
+		// A gate invocation with no selected worker is feature-off pass-through and
+		// intentionally has no filter observability record.
+		if (resolution.outcomes.length === 0 && !resolution.source && resolution.action === "pass") return;
+		const inputBytes = serializedResultBytes(inspection.result);
+		const outputBytes = serializedResultBytes(resolution.result);
+		const finalOutcome = resolution.action === "pass" && !resolution.source ? "denied" as const : "applied" as const;
+		try {
+			const audit = new ToolResultFilterAuditStore(context.stateDir, fsImpl);
+			for (const outcome of resolution.outcomes) {
+				audit.append({
+					sessionId: inspection.sessionId, toolCallId: inspection.toolCallId, toolName: inspection.toolName,
+					packId: outcome.source.packId, hookId: outcome.source.hookId,
+					action: outcome.action, outcome: outcome.outcome, reasonCode: outcome.reasonCode,
+					...(outcome.ruleId ? { ruleId: outcome.ruleId } : {}), inputBytes, outputBytes, latencyMs: outcome.latencyMs,
+				});
+			}
+			audit.append({
+				sessionId: inspection.sessionId, toolCallId: inspection.toolCallId, toolName: inspection.toolName,
+				...(resolution.source ? { packId: resolution.source.packId, hookId: resolution.source.hookId } : {}),
+				action: resolution.action, outcome: finalOutcome, reasonCode: resolution.reasonCode,
+				...(resolution.ruleId ? { ruleId: resolution.ruleId } : {}), inputBytes, outputBytes, latencyMs,
+			});
+		} catch { /* Storage is diagnostic only and never changes the gated result. */ }
+		try {
+			mutationTrace.appendTrace(inspection.sessionId, {
+				ts: Date.now(), hook: "afterToolResult", sessionId: inspection.sessionId, providers: [],
+				outcomes: [
+					...resolution.outcomes.map((outcome) => ({
+						kind: "audit" as const, packId: outcome.source.packId, hookId: outcome.source.hookId,
+						event: "afterToolResult" as const, outcome: outcome.outcome,
+						reason: traceReasonForToolResultFilter(outcome.action, outcome.outcome, outcome.reasonCode),
+						...(outcome.ruleId ? { value: outcome.ruleId } : {}), ms: outcome.latencyMs,
+					})),
+					{
+						kind: "audit" as const, ...(resolution.source ? { packId: resolution.source.packId } : {}),
+						hookId: resolution.source?.hookId ?? "tool-result-filter", event: "afterToolResult" as const,
+						outcome: finalOutcome, reason: traceReasonForToolResultFilter(resolution.action, finalOutcome, resolution.reasonCode),
+						...(resolution.ruleId ? { value: resolution.ruleId } : {}), ms: latencyMs,
+					},
+				],
+			});
+		} catch { /* Context trace storage is isolated from the result gate. */ }
+	};
+
+	// Decision requests are a REST projection of durable project-owned records.
+	// They deliberately bypass ask envelopes and SessionManager.enqueuePrompt.
+	const decisionRequestsMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/decision-requests$/);
+	if (decisionRequestsMatch && req.method === "GET") {
+		let sessionId: string;
+		try { sessionId = decodeURIComponent(decisionRequestsMatch[1]); } catch { json({ error: "Session not found" }, 404); return; }
+		const session = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
+		if (!session?.projectId || !decisionRequestManager) { json({ error: "Session not found" }, 404); return; }
+		const state = url.searchParams.get("state");
+		if (state !== null && state !== "pending") { json({ error: "state must be pending" }, 400); return; }
+		const projectId = session.projectId;
+		const project = (record: import("./agent/decision-request-store.js").StoredDecisionRequest) => ({
+			id: record.id,
+			sessionId: record.sessionId,
+			status: record.status,
+			decisionClass: record.decisionClass ?? "deferrable",
+			classificationReason: record.classificationReason ?? "requested",
+			...(record.timeoutAction ? { timeoutAction: record.timeoutAction } : {}),
+			...(record.consentPause ? { consentPause: {
+				goalId: record.consentPause.goalId,
+				reason: record.consentPause.reason,
+				pausedAt: record.consentPause.pausedAt,
+				...(record.consentPause.resume ? { resume: record.consentPause.resume } : {}),
+			} } : {}),
+			request: {
+				title: record.request.title,
+				question: record.request.question,
+				options: record.request.options.map((option) => ({ value: option.value, label: option.label })),
+			},
+			...(record.resolution ? { resolution: { value: record.resolution.value } } : {}),
+		});
+		json({ requests: decisionRequestManager.listActionable(projectId, sessionId).map(project) });
+		return;
+	}
+
+	const decisionAnswerMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/decision-requests\/([^/]+)\/answer$/);
+	if (decisionAnswerMatch && req.method === "POST") {
+		let sessionId: string;
+		let requestId: string;
+		try {
+			sessionId = decodeURIComponent(decisionAnswerMatch[1]);
+			requestId = decodeURIComponent(decisionAnswerMatch[2]);
+		} catch { json({ error: "Decision request not found" }, 404); return; }
+		const session = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
+		if (!session?.projectId || !decisionRequestManager) { json({ error: "Session not found" }, 404); return; }
+		const current = decisionRequestManager.get(session.projectId, requestId);
+		// A request id is never sufficient authority: it must be owned by the URL's
+		// session before an answer can reach the durable manager.
+		if (!current || current.sessionId !== sessionId) { json({ error: "Decision request not found" }, 404); return; }
+		const body = await readBody(req).catch(() => undefined);
+		if (!body || typeof body !== "object" || Array.isArray(body)
+			|| Object.keys(body).length !== 1 || !("value" in body)) {
+			json({ error: "value is required" }, 400);
+			return;
+		}
+		const result = await decisionRequestManager.answer(session.projectId, requestId, (body as { value: unknown }).value);
+		if (result.status === "invalid") { json({ error: "Invalid decision answer" }, 400); return; }
+		if (!result.request) { json({ error: "Decision request not found" }, 404); return; }
+		const record = result.request;
+		json({ request: {
+			id: record.id,
+			sessionId: record.sessionId,
+			status: record.status,
+			decisionClass: record.decisionClass ?? "deferrable",
+			classificationReason: record.classificationReason ?? "requested",
+			...(record.timeoutAction ? { timeoutAction: record.timeoutAction } : {}),
+			...(record.consentPause ? { consentPause: {
+				goalId: record.consentPause.goalId,
+				reason: record.consentPause.reason,
+				pausedAt: record.consentPause.pausedAt,
+				...(record.consentPause.resume ? { resume: record.consentPause.resume } : {}),
+			} } : {}),
+			request: {
+				title: record.request.title,
+				question: record.request.question,
+				options: record.request.options.map((option) => ({ value: option.value, label: option.label })),
+			},
+			...(record.resolution ? { resolution: { value: record.resolution.value } } : {}),
+		} });
+		return;
+	}
+
+	// GET /api/projects/:id/import-decision-trace?limit=N — bounded, redacted
+	// project-owned activity. Unlike session traces this has no ambient session
+	// authorization surface, so require a verified operator and bind the durable
+	// import id to the requested registered project before opening its file.
+	const projectImportTraceMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/import-decision-trace$/);
+	if (projectImportTraceMatch && req.method === "GET") {
+		if (!requireVerifiedPromptOperator()) return;
+		let projectId: string;
+		try { projectId = decodeURIComponent(projectImportTraceMatch[1]); }
+		catch { json({ error: "Project not found" }, 404); return; }
+		const marker = projectRegistry.get(projectId)?.importDecisionRun;
+		if (!marker || marker.version !== 1 || marker.state !== "ready") {
+			json({ error: "Project not found" }, 404);
+			return;
+		}
+		const rawLimit = url.searchParams.get("limit");
+		const parsed = rawLimit === null ? 100 : Number.parseInt(rawLimit, 10);
+		const limit = Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 200) : 100;
+		try {
+			const entries = new ContextTraceStore(bobbitStateDir(), fsImpl)
+				.readProjectImportTrace(projectId, marker.id, limit);
+			json({ entries });
+		} catch {
+			json({ error: "Project import trace is unavailable", code: "PROJECT_IMPORT_TRACE_UNAVAILABLE" }, 503);
+		}
+		return;
+	}
+
+	// Project-import proposals are project-owned records. A durable application
+	// claim is made before a canonical mutation can observe draft fields.
+	const projectImportProposalsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/import-proposals(?:\/([^/]+)\/([^/]+)(\/(accept|reject))?)?$/);
+	if (projectImportProposalsMatch) {
+		if (!requireVerifiedPromptOperator()) return;
+		let projectId: string;
+		let requestId: string | undefined;
+		try { projectId = decodeURIComponent(projectImportProposalsMatch[1]); requestId = projectImportProposalsMatch[2] ? decodeURIComponent(projectImportProposalsMatch[2]) : undefined; }
+		catch { json({ error: "Project import proposal not found" }, 404); return; }
+		const project = projectRegistry.get(projectId);
+		const marker = project?.importDecisionRun;
+		if (!project || marker?.state !== "ready" || !decisionRequestManager) { json({ error: "Project import proposal not found" }, 404); return; }
+		const sensitive = new Set(["token", "tokens", "secret", "secrets", "password", "credentials", "apiKey", "api_key"]);
+		const safeValue = (value: unknown, depth = 0): unknown => {
+			if (depth > 6) return "[truncated]";
+			if (typeof value === "string") return value.slice(0, 16_384);
+			if (value === null || typeof value !== "object") return value;
+			if (Array.isArray(value)) return value.slice(0, 100).map(item => safeValue(item, depth + 1));
+			return Object.fromEntries(Object.entries(value as Record<string, unknown>).slice(0, 100).map(([key, item]) => [
+				key, sensitive.has(key) ? "[redacted]" : safeValue(item, depth + 1),
+			]));
+		};
+		const safeFields = (value: unknown): Record<string, unknown> =>
+			value && typeof value === "object" && !Array.isArray(value) ? safeValue(value) as Record<string, unknown> : {};
+		const resolveDraft = async (id: string, type: string, allowApplying = false) => {
+			if (!isProposalType(type)) return undefined;
+			const record = decisionRequestManager!.getImportRequest(projectId, marker.id, id);
+			if (!record || !record.proposal || record.proposal.type !== type || (record.proposal.status !== "created" && (!allowApplying || record.proposal.status !== "applying"))) return undefined;
+			const owner = { kind: "project-import" as const, projectId, importId: marker.id, requestId: id };
+			const draftId = proposalDraftOwnerId(owner);
+			const rev = record.proposal.rev;
+			if (!Number.isInteger(rev) || rev < 1) return undefined;
+			const snapshot = await readSnapshot(bobbitStateDir(), draftId, type, rev).catch(() => undefined);
+			if (snapshot === undefined) return undefined;
+			const parsed = getProposalTypePlugin(type).parse(snapshot);
+			if (!parsed.ok) return undefined;
+			return { record, draftId, parsed, snapshot, rev, type };
+		};
+		if (!requestId && req.method === "GET") {
+			const proposals: Array<{ requestId: string; proposalType: ProposalType; rev: number; fields: Record<string, unknown>; status?: string }> = [];
+			for (const record of decisionRequestManager.listImportRequests(projectId, marker.id)) {
+				if (!record.proposal || (record.proposal.status !== "created" && record.proposal.status !== "applying")) continue;
+				const draft = await resolveDraft(record.id, record.proposal.type, true);
+				if (draft) proposals.push({ requestId: record.id, proposalType: draft.type, rev: draft.rev, fields: safeFields(draft.parsed.value.fields), status: record.proposal.status });
+			}
+			json({ proposals }); return;
+		}
+		const type = projectImportProposalsMatch[3];
+		const action = projectImportProposalsMatch[5];
+		if (!requestId || !type) { json({ error: "Method not allowed" }, 405); return; }
+		if (!action && req.method === "GET") {
+			const draft = await resolveDraft(requestId, type, true);
+			if (!draft) { json({ error: "Project import proposal not found" }, 404); return; }
+			json({ requestId, proposalType: draft.type, rev: draft.rev, fields: safeFields(draft.parsed.value.fields), status: draft.record.proposal?.status }); return;
+		}
+		if ((action !== "accept" && action !== "reject") || req.method !== "POST") { json({ error: "Method not allowed" }, 405); return; }
+		const body = await readBody(req).catch(() => undefined);
+		if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1 || !Number.isInteger((body as { rev?: unknown }).rev)) { json({ error: "rev is required" }, 400); return; }
+		const requestedRev = (body as { rev: number }).rev;
+		const store = projectContextManager.getOrCreate(projectId)?.decisionRequestStore;
+		if (!store) { json({ error: "Project import proposal not found" }, 404); return; }
+		const audit = (record: import("./agent/decision-request-store.js").StoredDecisionRequest, outcome: "applied" | "dropped", applicationKey?: string): boolean => {
+			try {
+				const trace = new ContextTraceStore(bobbitStateDir(), fsImpl);
+				const row = { kind: "decision" as const, packId: record.asker.packId, hookId: record.asker.hookId, event: "decisionResolved" as const, outcome, requestId, questionId: record.questionId, actor: "user" as const };
+				if (applicationKey) { trace.appendProjectImportOutcomeOnce(projectId, marker.id, applicationKey, row); return true; }
+				trace.appendProjectImportOutcome(projectId, marker.id, row);
+				return true;
+			} catch { return false; }
+		};
+		// Accepted proposals have already consumed their immutable draft snapshot.
+		// A lost success response retries against only the durable application tuple;
+		// it must neither recreate the draft nor rerun its canonical mutation.
+		const completed = action === "accept" ? decisionRequestManager.getImportRequest(projectId, marker.id, requestId) : undefined;
+		if (completed?.proposal?.status === "accepted") {
+			if (completed.proposal.type !== type) {
+				json({ error: "Proposal application identity is invalid", code: "PROPOSAL_IDENTITY_MISMATCH" }, 409); return;
+			}
+			if (requestedRev !== completed.proposal.rev) {
+				json({ error: "Proposal revision is stale", code: "STALE_PROPOSAL" }, 409); return;
+			}
+			const application = completed.proposal.application;
+			if (!application || application.projectId !== projectId || application.importId !== marker.id
+				|| application.requestId !== requestId || application.type !== type || application.rev !== requestedRev) {
+				json({ error: "Proposal application identity is invalid", code: "PROPOSAL_IDENTITY_MISMATCH" }, 409); return;
+			}
+			if (!completed.proposal.auditedAt) {
+				if (!audit(completed, "applied", application.key)) { json({ error: "Proposal audit is unavailable", code: "AUDIT_FAILED" }, 503); return; }
+				store.markImportProposalAudited(requestId, application, new Date().toISOString());
+			}
+			json({ ok: true, status: "accepted", ...(completed.proposal.outcome ? { outcome: completed.proposal.outcome } : {}) }, 200); return;
+		}
+		const draft = await resolveDraft(requestId, type, action === "accept");
+		if (!draft) { json({ error: "Project import proposal not found" }, 404); return; }
+		if (requestedRev !== draft.rev) { json({ error: "Proposal revision is stale", code: "STALE_PROPOSAL" }, 409); return; }
+		if (action === "reject") {
+			if (!store.updateProposal(requestId, { status: "rejected", type: draft.type, rev: draft.rev, decidedAt: new Date().toISOString() })) { json({ error: "Proposal is already applying", code: "PROPOSAL_LOCKED" }, 409); return; }
+			await deleteProposalFile(bobbitStateDir(), draft.draftId, draft.type); audit(draft.record, "dropped");
+			broadcastToProject(projectId, { type: "project_import_decision_requests_updated", projectId, ts: clock?.now() ?? Date.now() }); json({ ok: true, status: "rejected" }); return;
+		}
+		const toolBeforeSha256 = draft.type === "tool"
+			? canonicalToolProposalState(String(draft.parsed.value.fields.tool ?? ""), { toolManager: projectContextManager.getOrCreate(projectId)?.toolManager ?? toolManager }) ?? null
+			: undefined;
+		const identity = { projectId, importId: marker.id, requestId, type: draft.type, rev: draft.rev, snapshotSha256: projectImportSnapshotSha256(draft.snapshot), ...(draft.type === "tool" ? { toolBeforeSha256 } : {}), key: projectImportApplicationKey({ projectId, importId: marker.id, requestId, type: draft.type, rev: draft.rev, snapshot: draft.snapshot }) };
+		// All trusted identity checks happen before the durable created→applying
+		// claim. A malformed/cross-project draft must not strand an applying lock.
+		try { importApplicationService.validate({ projectId, importId: marker.id, requestId, type: draft.type, rev: draft.rev, snapshot: draft.snapshot, ...(draft.type === "tool" ? { toolBeforeSha256 } : {}), proposal: draft.parsed.value }); }
+		catch (error) {
+			if (error instanceof ProjectImportApplicationError) json({ error: error.message, code: error.code }, error.status);
+			else jsonError(500, error);
+			return;
+		}
+		const claim = store.claimImportProposal(identity, new Date().toISOString());
+		if (!claim.claimed && claim.proposal?.status === "accepted") {
+			// A previous process may have finalized just before crashing. Finish its
+			// keyed audit hand-off instead of reporting a clean acceptance forever.
+			if (!claim.proposal.auditedAt) {
+				if (!audit(draft.record, "applied", identity.key)) { json({ error: "Proposal audit is unavailable", code: "AUDIT_FAILED" }, 503); return; }
+				store.markImportProposalAudited(requestId, identity, new Date().toISOString());
+			}
+			json({ ok: true, status: "accepted" }, 200); return;
+		}
+		if (!claim.claimed && claim.proposal?.status === "created") { json({ error: "Proposal claim could not be persisted", code: "PROPOSAL_CLAIM_FAILED" }, 503); return; }
+		// Only the request that durably changed created→applying may execute.
+		// Another live submit observes the lock and must never adopt it; boot alone
+		// adopts an applying record after the prior process has exited.
+		if (!claim.claimed) { json({ ok: true, status: "applying" }, 202); return; }
+		try {
+			const service = importApplicationService;
+			const result = await service.apply({ projectId, importId: marker.id, requestId, type: draft.type, rev: draft.rev, snapshot: draft.snapshot, ...(draft.type === "tool" ? { toolBeforeSha256 } : {}), proposal: draft.parsed.value });
+			if (!store.finalizeImportProposal(identity, new Date().toISOString(), result.outcome)) {
+				const settled = store.get(requestId)?.proposal;
+				if (settled?.status !== "accepted" || settled.application?.key !== identity.key) throw new ProjectImportApplicationError(500, "FINALIZE_FAILED", "Proposal effect applied but finalization could not be persisted");
+			}
+			await deleteProposalFile(bobbitStateDir(), draft.draftId, draft.type);
+			// Append is keyed before the decision-store marker. A crash between them
+			// replays without a duplicate; an append fault leaves the marker unset.
+			if (!audit(draft.record, "applied", identity.key)) throw new ProjectImportApplicationError(500, "AUDIT_FAILED", "Proposal applied but audit persistence failed");
+			store.markImportProposalAudited(requestId, identity, new Date().toISOString());
+			broadcastToProject(projectId, { type: "project_import_decision_requests_updated", projectId, ts: clock?.now() ?? Date.now() }); json({ ok: true, status: "accepted", outcome: result.outcome }, 201);
+		} catch (error) {
+			// Typed canonical rejections are deterministic and occur before an
+			// observable effect (or compensate it); unlock this exact claim for a
+			// corrected retry. Unknown failures remain applying for boot recovery.
+			if (error instanceof CanonicalMutationError || error instanceof CanonicalProjectConfigPersistenceError || error instanceof CanonicalSandboxSecretPersistenceError) store.releaseImportProposal(identity);
+			if (writeCanonicalProjectMutationError(error)) return;
+			if (error instanceof ProjectImportApplicationError || error instanceof CanonicalMutationError) json({ error: error.message, code: error.code }, error.status);
+			else jsonError(500, error);
+		}
+		return;
+	}
+
+	// Project-import decisions have no session or transcript. This projection is
+	// strictly bound to the registered project's ready run and durable delivery.
+	const projectImportRequestsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/import-decision-requests$/);
+	if (projectImportRequestsMatch && req.method === "GET") {
+		let projectId: string;
+		try { projectId = decodeURIComponent(projectImportRequestsMatch[1]); } catch { json({ error: "Project not found" }, 404); return; }
+		const project = projectRegistry.get(projectId);
+		const marker = project?.importDecisionRun;
+		const state = url.searchParams.get("state");
+		if (!project || marker?.state !== "ready") { json({ error: "Project not found" }, 404); return; }
+		if (state !== null && state !== "pending") { json({ error: "state must be pending" }, 400); return; }
+		const records = state === "pending"
+			? decisionRequestManager?.listPendingImportRequests(projectId, marker.id) ?? []
+			: decisionRequestManager?.listImportRequests(projectId, marker.id) ?? [];
+		// Activity is diagnostic, but it belongs to this same durable projection:
+		// a separate browser fetch can race a mandatory settlement refresh. Trace
+		// read failure must never hide a pending decision or make it actionable.
+		let activity: unknown[] = [];
+		try {
+			activity = new ContextTraceStore(bobbitStateDir(), fsImpl)
+				.readProjectImportTrace(projectId, marker.id, 50);
+		} catch { /* the decision projection remains authoritative without activity */ }
+		json({
+			requests: records.map(record => ({
+				id: record.id,
+				status: record.status,
+				decisionClass: record.decisionClass ?? "deferrable",
+				classificationReason: record.classificationReason ?? "requested",
+				request: {
+					title: record.request.title,
+					question: record.request.question,
+					options: record.request.options.map(option => ({ value: option.value, label: option.label })),
+				},
+				...(record.resolution ? { resolution: { value: record.resolution.value } } : {}),
+			})),
+			activity,
+		});
+		return;
+	}
+
+	const projectImportAnswerMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/import-decision-requests\/([^/]+)\/answer$/);
+	if (projectImportAnswerMatch && req.method === "POST") {
+		let projectId: string;
+		let requestId: string;
+		try {
+			projectId = decodeURIComponent(projectImportAnswerMatch[1]);
+			requestId = decodeURIComponent(projectImportAnswerMatch[2]);
+		} catch { json({ error: "Decision request not found" }, 404); return; }
+		const project = projectRegistry.get(projectId);
+		const marker = project?.importDecisionRun;
+		if (!project || marker?.state !== "ready" || !decisionRequestManager) { json({ error: "Decision request not found" }, 404); return; }
+		const current = decisionRequestManager.getImportRequest(projectId, marker.id, requestId);
+		if (!current) { json({ error: "Decision request not found" }, 404); return; }
+		const body = await readBody(req).catch(() => undefined);
+		if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1 || !("value" in body)) {
+			json({ error: "value is required" }, 400);
+			return;
+		}
+		const result = await decisionRequestManager.answer(projectId, requestId, (body as { value: unknown }).value);
+		if (result.status === "invalid") { json({ error: "Invalid decision answer" }, 400); return; }
+		if (!result.request) { json({ error: "Decision request not found" }, 404); return; }
+		const record = result.request;
+		json({ request: {
+			id: record.id,
+			status: record.status,
+			decisionClass: record.decisionClass ?? "deferrable",
+			classificationReason: record.classificationReason ?? "requested",
+			request: {
+				title: record.request.title,
+				question: record.request.question,
+				options: record.request.options.map(option => ({ value: option.value, label: option.label })),
+			},
+			...(record.resolution ? { resolution: { value: record.resolution.value } } : {}),
+		} });
+		return;
+	}
+
 	// POST /api/sessions/:id/provider-hooks/before-prompt — per-turn dynamic context.
 	const beforePromptMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/provider-hooks\/before-prompt$/);
 	if (beforePromptMatch && req.method === "POST") {
@@ -7635,10 +9395,222 @@ async function handleApiRoute(
 		return;
 	}
 
+	// Core-owned per-turn request mutation routes. They accept only the small
+	// transient request/tool envelopes, never a system prompt, tool arguments or
+	// an extension-supplied effect. Failures deliberately collapse to pass-through
+	// so the generated Pi bridges can never fail a turn.
+	const requestMutationPromptMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/request-mutations\/prompt$/);
+	if (requestMutationPromptMatch && req.method === "POST") {
+		const sessionId = requestMutationPromptMatch[1];
+		const body = await readBody(req, 33 * 1024).catch(() => null);
+		if (!body || typeof body !== "object" || Array.isArray(body)
+			|| Object.keys(body).length !== 1 || typeof body.prompt !== "string" || body.prompt.length === 0
+			|| Buffer.byteLength(body.prompt, "utf8") > 32 * 1024) {
+			json({ error: "Invalid prompt mutation request" }, 400);
+			return;
+		}
+		const hookContext = resolveHookCtx(sessionId);
+		if (!hookContext) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
+		try {
+			const result = await mutationDispatcher.shapePrompt({
+				sessionId,
+				projectId: hookContext.base.projectId ?? "",
+				text: body.prompt,
+			});
+			appendRequestMutationDiagnostics(
+				projectContextManager.getOrCreate(hookContext.base.projectId ?? "") ?? { stateDir: sessionManager.stateDir },
+				sessionId,
+				"beforePrompt",
+				result,
+				body.prompt,
+			);
+			if (result.action === "replace" && typeof result.text === "string") {
+				json({ action: "replace", text: result.text });
+			} else {
+				json({ action: "pass" });
+			}
+		} catch {
+			json({ action: "pass" });
+		}
+		return;
+	}
+
+	const requestMutationToolMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/request-mutations\/tool-safety$/);
+	if (requestMutationToolMatch && req.method === "POST") {
+		const sessionId = requestMutationToolMatch[1];
+		const body = await readBody(req, 1024).catch(() => null);
+		if (!body || typeof body !== "object" || Array.isArray(body)
+			|| Object.keys(body).length !== 1 || typeof body.toolName !== "string"
+			|| !isSafeExtensionGrantIdentifier(body.toolName)) {
+			json({ error: "Invalid tool safety request" }, 400);
+			return;
+		}
+		const hookContext = resolveHookCtx(sessionId);
+		if (!hookContext) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
+		try {
+			const result = await mutationDispatcher.inspectTool({
+				sessionId,
+				projectId: hookContext.base.projectId ?? "",
+				toolName: body.toolName,
+			});
+			appendRequestMutationDiagnostics(
+				projectContextManager.getOrCreate(hookContext.base.projectId ?? "") ?? { stateDir: sessionManager.stateDir },
+				sessionId,
+				"beforeToolCall",
+				result,
+				undefined,
+				body.toolName,
+			);
+			// The bridge recognizes only this exact core response as a block. A
+			// warning remains visible through core diagnostics but preserves ask/allow.
+			json({ action: result.action === "deny" ? "deny" : "pass" });
+		} catch {
+			json({ action: "pass" });
+		}
+		return;
+	}
+
+	// The generated Pi result gate calls this route after it has privately buffered
+	// a complete tool result and before Pi emits an update/end/message event. Never
+	// log, echo, or retain the request: dispatcher outcomes are metadata-only and
+	// the response is the sole value Pi may fan out.
+	const toolResultFilterMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/tool-result-filter$/);
+	if (toolResultFilterMatch && req.method === "POST") {
+		const sessionId = toolResultFilterMatch[1];
+		const hookContext = resolveHookCtx(sessionId);
+		if (!hookContext?.base.projectId) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
+		const reject = () => json(createSyntheticRejectedToolResult());
+		// The gate transport is the last owner of this protected payload. A peer
+		// disconnect must terminate every worker before any late pass can return.
+		const disconnect = new AbortController();
+		const abortOnDisconnect = () => { if (!disconnect.signal.aborted) disconnect.abort(); };
+		req.once("aborted", abortOnDisconnect);
+		req.once("error", abortOnDisconnect);
+		res.once("close", abortOnDisconnect);
+		const body = await readBody(req, 288 * 1024).catch(() => undefined);
+		try {
+			if (!body || typeof body !== "object" || Array.isArray(body)
+				|| Object.keys(body as Record<string, unknown>).length !== 3
+				|| !Object.hasOwn(body as Record<string, unknown>, "toolCallId")
+				|| !Object.hasOwn(body as Record<string, unknown>, "toolName")
+				|| !Object.hasOwn(body as Record<string, unknown>, "result")) {
+				reject();
+				return;
+			}
+			// BOBBIT_TOKEN proves only transport/session scope. The opaque callback
+			// credential is minted by the private Pi gate, bound to this exact tool
+			// attempt, and consumed synchronously before worker admission or audit.
+			if (!sessionManager.toolResultFilterAttemptCredentials.consume(
+				sessionId,
+				(body as Record<string, unknown>).toolCallId,
+				req.headers["x-bobbit-tool-result-attempt"],
+			)) {
+				reject();
+				return;
+			}
+			const inspection = validateToolResultInspection({
+				event: "afterToolResult",
+				sessionId,
+				projectId: hookContext.base.projectId,
+				toolCallId: (body as Record<string, unknown>).toolCallId,
+				toolName: (body as Record<string, unknown>).toolName,
+				result: (body as Record<string, unknown>).result,
+			});
+			const started = Date.now();
+			const resolution = await resultFilterDispatcher.filter(inspection, disconnect.signal);
+			try {
+				const context = projectContextManager.getOrCreate(hookContext.base.projectId)
+					?? { stateDir: sessionManager.stateDir };
+				appendToolResultFilterDiagnostics(context, inspection, resolution, Math.max(0, Date.now() - started));
+			} catch { /* Observability setup must not change the selected safe result. */ }
+			json(resolution.result);
+		} catch {
+			// A recognized gate request fails closed. Do not interpolate a malformed
+			// body, worker exception, or original result into an error response.
+			if (!res.writableEnded && !res.destroyed) reject();
+		} finally {
+			req.removeListener("aborted", abortOnDisconnect);
+			req.removeListener("error", abortOnDisconnect);
+			res.removeListener("close", abortOnDisconnect);
+		}
+		return;
+	}
+
+	const toolResultFilterAuditMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/tool-result-filter-audit$/);
+	if (toolResultFilterAuditMatch && req.method === "GET") {
+		if (!requireVerifiedPromptOperator()) return;
+		const sessionId = toolResultFilterAuditMatch[1];
+		const session = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
+		if (!session?.projectId) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
+		const context = projectContextManager.getOrCreate(session.projectId);
+		if (!context) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
+		const requested = Number.parseInt(url.searchParams.get("limit") ?? "100", 10);
+		const limit = Number.isFinite(requested) ? Math.max(1, Math.min(200, requested)) : 100;
+		try {
+			const entries = new ToolResultFilterAuditStore(context.stateDir, fsImpl).listForSession(sessionId, limit);
+			json({ entries });
+		} catch {
+			json({ error: "Tool result filter audit is unavailable", code: "TOOL_RESULT_FILTER_AUDIT_UNAVAILABLE" }, 503);
+		}
+		return;
+	}
+
+	const requestMutationAuditMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/request-mutation-audit$/);
+	if (requestMutationAuditMatch && req.method === "GET") {
+		if (!requireVerifiedPromptOperator()) return;
+		const sessionId = requestMutationAuditMatch[1];
+		const session = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
+		if (!session?.projectId) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
+		const context = projectContextManager.getOrCreate(session.projectId);
+		if (!context) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
+		const requested = Number.parseInt(url.searchParams.get("limit") ?? "100", 10);
+		const limit = Number.isFinite(requested) ? Math.max(1, Math.min(200, requested)) : 100;
+		try {
+			const entries = new RequestMutationAuditStore(context.stateDir, fsImpl)
+				.listForSession(sessionId, limit);
+			json({ entries });
+		} catch {
+			json({ error: "Request mutation audit is unavailable", code: "REQUEST_MUTATION_AUDIT_UNAVAILABLE" }, 503);
+		}
+		return;
+	}
+
+
 	// GET /api/sessions/:id/context-trace?limit=N — per-turn provider dispatch trace.
 	const contextTraceMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/context-trace$/);
 	if (contextTraceMatch && req.method === "GET") {
-		const sessionId = contextTraceMatch[1];
+		let sessionId: string;
+		try {
+			sessionId = decodeURIComponent(contextTraceMatch[1]);
+		} catch {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
+		if (!sessionManager.getSession(sessionId) && !sessionManager.getPersistedSession(sessionId)) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
 		let limit: number | undefined;
 		const rawLimit = url.searchParams.get("limit");
 		if (rawLimit !== null) {
@@ -7651,6 +9623,31 @@ async function handleApiRoute(
 		} catch (err: any) {
 			jsonError(500, err);
 		}
+		return;
+	}
+
+	// GET /api/sessions/:id/prompt-extension-audit — authorized durable detail.
+	const promptExtensionAuditMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/prompt-extension-audit$/);
+	if (promptExtensionAuditMatch && req.method === "GET") {
+		if (!requireVerifiedPromptOperator()) return;
+		const sessionId = promptExtensionAuditMatch[1];
+		const session = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
+		if (!session?.projectId) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
+		const context = projectContextManager.getOrCreate(session.projectId);
+		if (!context) {
+			json({ error: "Session not found" }, 404);
+			return;
+		}
+		const requested = Number.parseInt(url.searchParams.get("limit") ?? "100", 10);
+		const limit = Number.isFinite(requested) ? Math.max(1, Math.min(200, requested)) : 100;
+		try {
+			const entries = new PromptExtensionAuthoringAuditStore(context.stateDir, fsImpl)
+				.listForSession(sessionId, limit);
+			json({ entries });
+		} catch { json({ error: "Prompt extension audit is unavailable", code: "PROMPT_EXTENSION_AUDIT_UNAVAILABLE" }, 503); }
 		return;
 	}
 
@@ -8490,382 +10487,61 @@ async function handleApiRoute(
 	// POST /api/goals
 	if (url.pathname === "/api/goals" && req.method === "POST") {
 		const body = await readBody(req);
-		const title = body?.title;
-		const explicitCwd = typeof body?.cwd === "string" && body.cwd.trim().length > 0
-			? body.cwd.trim()
-			: undefined;
-		let cwd = explicitCwd || config.defaultCwd;
-		const spec = body?.spec || "";
-		const workflowId = (body?.workflowId && typeof body.workflowId === "string") ? body.workflowId : "general";
-		if (!title || typeof title !== "string") {
-			json({ error: "Missing title" }, 400);
-			return;
-		}
-		try {
-			const sandboxed = body.sandboxed === true;
-			const autoStartTeam = body.autoStartTeam !== false; // default true
-			// Per-goal metadata (optional, arbitrary namespaced key/value bag, e.g.
-			// `bobbit.disabledTools`, `hindsight.memory.enabled`). Accepted only as a
-			// NON-EMPTY plain object; passed verbatim to createGoal where it is
-			// persisted and resolved hierarchically down the goal tree. Supersedes the
-			// removed per-goal worktree-setup hook (PR #816); legacy
-			// `worktreeSetupCommand`/`worktreeSetupTimeoutMs` body fields are now
-			// ignored (no parse, no persistence). Component-level
-			// `worktree_setup_command` is unaffected.
-			let metadata: Record<string, unknown> | undefined;
-			{
-				const raw = body.metadata;
-				if (raw && typeof raw === "object" && !Array.isArray(raw) && Object.keys(raw as object).length > 0) {
-					metadata = raw as Record<string, unknown>;
-				}
-			}
-			let enabledOptionalSteps: string[] | undefined;
-			if (Array.isArray(body.enabledOptionalSteps) && body.enabledOptionalSteps.every((s: unknown) => typeof s === "string")) {
-				enabledOptionalSteps = body.enabledOptionalSteps;
-			}
-			const resolved = resolveProjectForRequest(projectRegistry, { projectId: body.projectId });
-			if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
-			const targetProjectId = resolved.projectId;
-			if (!explicitCwd) cwd = resolved.project.rootPath;
-			const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, targetProjectId, cwd, { kind: "user-input" });
-			if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
-			const targetCtx = projectContextManager.getOrCreate(targetProjectId);
-			if (!targetCtx) {
-				json({ error: "Invalid project" }, 400);
-				return;
-			}
-			// Lazy per-project sandbox init — idempotent, deduped by SandboxManager.
-			if (sandboxed && sandboxManager) {
-				try {
-					await sandboxManager.ensureForProject(targetProjectId);
-				} catch (err) {
-					jsonError(500, err, { error: `Sandbox init failed: ${(err as Error).message || err}` });
-					return;
-				}
-			}
-			const targetGoalManager = targetCtx.goalManager;
-			// Handle parentGoalId — depth cap validation (same gate as goal_spawn_child).
-			const parentGoalId = (body?.parentGoalId && typeof body.parentGoalId === "string") ? body.parentGoalId.trim() : undefined;
-			let resolvedParentGoal: PersistedGoal | undefined;
-			if (parentGoalId) {
-				// Parent MUST be in the same project context — cross-project hierarchy
-				// would corrupt the parentGoalId chain because createGoal only walks
-				// its own store. Reject cross-project parents with a clear 422.
-				resolvedParentGoal = targetGoalManager.getGoal(parentGoalId);
-				if (!resolvedParentGoal) {
-					const crossProject = getGoalAcrossProjects(parentGoalId);
-					if (crossProject) {
-						json({ error: "Parent goal belongs to a different project. Select a parent in the same project.", code: "PARENT_CROSS_PROJECT" }, 422);
-					} else {
-						json({ error: "Parent goal not found", code: "PARENT_NOT_FOUND" }, 422);
-					}
-					return;
-				}
-				// S1 SECURITY: creating a child via `POST /api/goals` with a
-				// `parentGoalId` is a Children mutation — it spawns and can
-				// auto-start a child team under another goal. It MUST be
-				// authorized like the other Children verbs BEFORE anything is
-				// created/started; previously this path validated parent
-				// existence + nesting + pause then created the child with NO
-				// authz, letting any shared-bearer-token holder (incl. a
-				// non-team-lead agent) drive child creation under an arbitrary
-				// goal and bypass the Children tool policy + per-session secret
-				// binding. This is an OPERATOR-class verb: the proposal UI drives
-				// it (verified human cookie accepted), otherwise the AUTHENTIC
-				// caller (derived server-side from the unforgeable per-session
-				// secret, never the public spawning-session header) must match
-				// the team-lead of the parent's ROOT goal. See
-				// children-mutation-authz.ts.
-				{
-					const h = req.headers as Record<string, string | string[] | undefined>;
-					const readHeader = (n: string): string | undefined => {
-						const v = h[n.toLowerCase()];
-						const s = Array.isArray(v) ? v[0] : v;
-						return typeof s === "string" && s.trim() ? s.trim() : undefined;
-					};
-					const rootGoalId = resolvedParentGoal.rootGoalId ?? resolvedParentGoal.id;
-					const authz = authorizeChildrenMutation({
-						mutationClass: "operator",
-						isHumanOperator: cookieTryAuth(req, cookieStore!),
-						// Derive the AUTHENTIC caller from the per-session secret,
-						// never the forgeable public spawning-session header.
-						authenticCallerSessionId: sessionManager.sessionSecretStore.resolveSessionIdBySecret(
-							readHeader("x-bobbit-session-secret"),
-						),
-						teamLeadSessionId: teamManager.getTeamState(rootGoalId)?.teamLeadSessionId,
-					});
-					if (!authz.ok) {
-						json({
-							error: "Caller session is not the team-lead for this goal",
-							code: "NOT_TEAM_LEAD",
-							goalId: parentGoalId,
-						}, 403);
-						return;
-					}
-				}
-				// Pause-cascade (Finding 1): refuse to create/auto-start a child
-				// under a paused parent OR any paused ancestor. Mirrors the
-				// guarantee `/spawn-child` and the harness `runSubgoalStep` already
-				// enforce — `POST /api/goals` with `parentGoalId` previously
-				// bypassed it entirely (validated parent existence + nesting, then
-				// created + auto-started the child). The walk is cycle-guarded.
-				try {
-					requireAncestorsNotPaused(
-						parentGoalId,
-						(id) => targetGoalManager.getGoal(id) ?? getGoalAcrossProjects(id),
-					);
-				} catch (err) {
-					if (err instanceof GoalPausedError) {
-						json({ error: err.message, code: err.code, goalId: err.goalId }, 409);
-						return;
-					}
-					throw err;
-				}
-				const prefs = readSubgoalNestingPrefs((k) => preferencesStore.get(k));
-				const nestResult = checkCanSpawnChild(
-					resolvedParentGoal,
-					prefs,
-					(id) => targetGoalManager.getGoal(id) ?? getGoalAcrossProjects(id),
-				);
-				if (!nestResult.ok) {
-					if (nestResult.code === "SUBGOALS_DISABLED") {
-						json({ error: "Subgoals are disabled", code: "SUBGOALS_DISABLED" }, 422);
-						return;
-					}
-					if (nestResult.code === "PARENT_SUBGOALS_DISABLED") {
-						json({
-							error: `Parent goal "${resolvedParentGoal.title}" doesn't allow sub-goals`,
-							code: "PARENT_SUBGOALS_DISABLED",
-						}, 422);
-						return;
-					}
-					if (nestResult.code === "NESTING_DEPTH_EXCEEDED") {
-						json({
-							error: `Nesting depth cap reached: ${nestResult.currentDepth} / ${nestResult.maxDepth}`,
-							code: "NESTING_DEPTH_EXCEEDED",
-							currentDepth: nestResult.currentDepth,
-							maxDepth: nestResult.maxDepth,
-						}, 422);
-						return;
-					}
-				}
-			}
-			// Cascade: body.workflow (inline snapshot) → workflowId lookup → auto-seed → first match.
-			let resolvedWorkflow: Workflow | undefined;
-			let resolvedWorkflowId = workflowId;
-			const inlineWorkflow = body?.workflow;
-			if (inlineWorkflow && typeof inlineWorkflow === "object") {
-				resolvedWorkflow = inlineWorkflow as Workflow;
-				resolvedWorkflowId = (inlineWorkflow as { id?: string }).id || workflowId;
-			} else {
-				// Layer 1: cascade lookup (only when workflowId given).
-				if (workflowId) {
-					const cascadeWorkflows = configCascade.resolveWorkflows(targetProjectId);
-					resolvedWorkflow = cascadeWorkflows.find(r => r.item.id === workflowId)?.item;
-					// Layer 1b: cascade miss — fall through to project store directly.
-					if (!resolvedWorkflow) {
-						resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
-					}
-				}
-				// Layer 2: store is empty → auto-seed defaults.
-				if (!resolvedWorkflow && targetCtx.workflowStore.getAll().length === 0) {
-					const projName = resolved.project.name || "project";
-					// Structural command steps resolve through components[name].commands at
-					// verification time. Prefer an executable project-named component,
-					// then any executable component. Only if none exist, retain the prior
-					// project-name/first-valid fallbacks, which seed no command references.
-					const components = targetCtx.projectConfigStore.getComponents();
-					const targetComponent = components.find((component) =>
-						component.name === projName && Object.keys(component.commands ?? {}).length > 0,
-					) ?? components.find((component) => Object.keys(component.commands ?? {}).length > 0)
-						?? components.find((component) => component.name === projName)
-						?? components.find((component) => component.name.length > 0);
-					const componentName = targetComponent?.name || projName;
-					const seeds = buildDefaultWorkflows(
-						componentName,
-						targetComponent ? Object.keys(targetComponent.commands ?? {}) : [],
-					);
-					seeds.parent = buildParentWorkflow();
-					for (const wf of Object.values(seeds)) {
-						targetCtx.workflowStore.put(wf as unknown as Workflow);
-					}
-					console.log(`[api] Auto-seeded ${Object.keys(seeds).length} default workflows for project "${projName}" on first goal creation`);
-					if (workflowId) {
-						resolvedWorkflow = targetCtx.workflowStore.get(workflowId);
-					} else {
-						resolvedWorkflow = targetCtx.workflowStore.get("general") ?? targetCtx.workflowStore.getAll()[0];
-						resolvedWorkflowId = resolvedWorkflow?.id || "general";
-					}
-				}
-				// Layer 3: explicit id given, store non-empty, still unknown → friendly 400.
-				if (workflowId && !resolvedWorkflow && targetCtx.workflowStore.getAll().length > 0) {
-					const available = targetCtx.workflowStore.getAll().map(w => w.id);
-					jsonError(400, new Error(`Workflow "${workflowId}" not found`), {
-						error: `Workflow "${workflowId}" not found. Available: ${available.join(", ")}`,
-						code: "WORKFLOW_NOT_FOUND",
-						workflowId,
-						available,
-					});
-					return;
-				}
-			}
-			// Resolve per-goal subgoal-nesting overrides.
-			//
-			// Two inputs: the parent's effective inherited ceiling (if any) and the
-			// explicit body values from the proposal form. Rules:
-			//   - System pref is the global ceiling (subgoalsEnabled gate + maxDepth cap).
-			//   - For child goals the parent's effective values are also a ceiling.
-			//   - Explicit body values can only tighten/disable, never exceed the ceiling.
-			// Helpers from subgoal-nesting-limit.ts compute the ceiling so this stays
-			// the single source of truth.
-			const nestingPrefs = readSubgoalNestingPrefs((k) => preferencesStore.get(k));
-			const inheritedNesting = (parentGoalId && resolvedParentGoal)
-				? inheritedChildOverrides(
-					resolvedParentGoal,
-					nestingPrefs,
-					(id) => targetGoalManager.getGoal(id) ?? getGoalAcrossProjects(id),
-				)
-				: undefined;
-			const ceilSubgoalsAllowed = inheritedNesting
-				? inheritedNesting.subgoalsAllowed
-				: nestingPrefs.subgoalsEnabled;
-			const ceilMaxNestingDepth = inheritedNesting
-				? inheritedNesting.maxNestingDepth
-				: nestingPrefs.maxNestingDepth;
-			const bodySubgoalsAllowedRaw = body?.subgoalsAllowed;
-			const bodyMaxNestingDepthRaw = body?.maxNestingDepth;
-			let effSubgoalsAllowed: boolean | undefined = inheritedNesting?.subgoalsAllowed;
-			if (typeof bodySubgoalsAllowedRaw === "boolean") {
-				// body=false always wins (disable always allowed); body=true only if
-				// the ceiling permits it. System/parent OFF blocks the explicit true.
-				effSubgoalsAllowed = bodySubgoalsAllowedRaw && ceilSubgoalsAllowed;
-			}
-			let effMaxNestingDepth: number | undefined = inheritedNesting?.maxNestingDepth;
-			if (typeof bodyMaxNestingDepthRaw === "number" && Number.isFinite(bodyMaxNestingDepthRaw)) {
-				effMaxNestingDepth = Math.min(clampMaxDepth(bodyMaxNestingDepthRaw), ceilMaxNestingDepth);
-			}
-			const bodyInlineRoles = (body?.inlineRoles && typeof body.inlineRoles === "object" && !Array.isArray(body.inlineRoles))
-				? body.inlineRoles as Record<string, import("./agent/role-store.js").Role>
-				: undefined;
-			// Root-only orchestration policy. Only honoured for top-level goals
-			// (no parentGoalId); children inherit the root's values. Mirrors the
-			// validation in PATCH /api/goals/:id/policy.
-			const isRootGoalCreate = parentGoalId === undefined;
-			let effDivergencePolicy: "strict" | "balanced" | "autonomous" | undefined;
-			if (isRootGoalCreate && (body?.divergencePolicy === "strict" || body?.divergencePolicy === "balanced" || body?.divergencePolicy === "autonomous")) {
-				effDivergencePolicy = body.divergencePolicy;
-			}
-			let effMaxConcurrentChildren: number | undefined;
-			if (isRootGoalCreate && typeof body?.maxConcurrentChildren === "number" && Number.isFinite(body.maxConcurrentChildren)) {
-				const n = Math.floor(body.maxConcurrentChildren);
-				if (n >= 1 && n <= 8) effMaxConcurrentChildren = n;
-			}
-			const explicitWorktree = typeof body?.worktree === "boolean" ? body.worktree : undefined;
-			// Validate the raw definition before normalization can discard malformed
-			// aliases/metadata, then snapshot the same canonical deep clone used by
-			// goal-workflow replacement. Component/command references are deliberately
-			// not re-resolved here: the selected workflow may come from another cascade
-			// layer or predate the target project's current component commands. Project
-			// workflow mutations and the workflow PUT endpoint remain strict.
-			if (resolvedWorkflow) {
-				resolvedWorkflow = freezeWorkflowDefinition(
-					resolvedWorkflow,
-					targetCtx.projectConfigStore.getComponents(),
-					resolvedWorkflowId,
-					{ validateComponentReferences: false },
-				);
-			}
-			const goal = await targetGoalManager.createGoal(title, cwd, {
-				spec,
-				workflowId: resolvedWorkflowId,
-				workflowStore: targetCtx.workflowStore,
-				resolvedWorkflow,
-				sandboxed,
-				enabledOptionalSteps,
-				projectId: targetProjectId,
-				parentGoalId,
-				inlineRoles: bodyInlineRoles,
-				subgoalsAllowed: effSubgoalsAllowed,
-				maxNestingDepth: effMaxNestingDepth,
-				divergencePolicy: effDivergencePolicy,
-				maxConcurrentChildren: effMaxConcurrentChildren,
-				metadata,
-				worktree: explicitWorktree,
-			});
-			// Set projectId from the explicit request scope.
-			if (targetProjectId) {
-				targetGoalManager.updateGoal(goal.id, { projectId: targetProjectId });
-				goal.projectId = targetProjectId;
-			}
-			// Set reattemptOf if provided
-			if (body.reattemptOf && typeof body.reattemptOf === "string") {
-				targetGoalManager.updateGoal(goal.id, { reattemptOf: body.reattemptOf });
-				goal.reattemptOf = body.reattemptOf;
-			}
-			// Persist autoStartTeam flag
-			targetGoalManager.updateGoal(goal.id, { autoStartTeam });
-			goal.autoStartTeam = autoStartTeam;
-			// Initialize gate states for the workflow
-			if (goal.workflow) {
-				targetCtx.gateStore.initGatesForGoal(goal.id, goal.workflow.gates.map(g => g.id));
-			}
-			// A successful create response must never reference a goal or its
-			// initialized gates that vanish on an immediate process kill. Ordinary
-			// mutations still use each store's coalesced writer; this is the narrow
-			// external creation boundary that awaits its existing publication queue.
-			await Promise.all([
-				targetGoalManager.getGoalStore().flush(),
-				targetCtx.gateStore.flush(),
-			]);
-			json(goal, 201);
-
-			// Fire-and-forget async worktree setup (and optionally start team)
-			if (goal.autoStartTeam && parentGoalId) {
-				// Finding 2 — a child goal auto-start must go through the
-				// unified per-root scheduler so the concurrency cap applies to
-				// the `POST /api/goals` child path too (previously it started
-				// the team with NO permit). At cap the child is parked
-				// `state='blocked'` (capacity-blocked) and started later when a
-				// permit frees; the scheduler handles setup + broadcasts.
-				//
-				// Guard is `state !== "blocked"` (NOT `setupStatus ===
-				// "preparing"`): a data-only / non-git child is created with
-				// `setupStatus === "ready"` (no worktree), so gating on
-				// "preparing" silently skipped the start and its team never ran.
-				// `requestChildStart` → `_startScheduledChildTeam` handles both
-				// "preparing" (setup + start) and "ready" (start-only). A blocked
-				// child (deps unmet) is not started here — it starts on unblock.
-				if (goal.state !== "blocked") {
-					const outcome = verificationHarness.requestChildStart(goal.id);
-					if (outcome === "capacity-blocked") {
-						targetGoalManager.updateGoal(goal.id, { state: "blocked" });
-						broadcastToAll({ type: "goal_state_changed", goalId: goal.id });
-					}
-				}
-			} else if (goal.setupStatus === "preparing") {
-				if (goal.autoStartTeam) {
-					targetGoalManager.setupWorktreeAndStartTeam(goal.id, () => teamManager.startTeam(goal.id)).then(() => {
-						broadcastToAll({ type: "goal_setup_complete", goalId: goal.id });
-					}).catch((err) => {
-						const g = targetGoalManager.getGoal(goal.id);
-						if (g?.setupStatus === "ready") {
-							broadcastToAll({ type: "goal_setup_complete", goalId: goal.id });
-							console.error("[goal] Auto-start team failed (worktree ready):", err);
-						} else {
-							broadcastToAll({ type: "goal_setup_error", goalId: goal.id, error: String(err) });
-						}
-					});
-				} else {
-					targetGoalManager.setupWorktree(goal.id).then(() => {
-						broadcastToAll({ type: "goal_setup_complete", goalId: goal.id });
-					}).catch((err) => {
-						broadcastToAll({ type: "goal_setup_error", goalId: goal.id, error: String(err) });
-					});
-				}
-			}
-		} catch (err) {
-			jsonError(400, err);
-		}
+		const activeSandboxManager = sandboxManager ?? undefined;
+    try {
+      const { goal, replayed } = await applyCanonicalGoalProposal(
+        body ?? {},
+        createCanonicalGoalProposalDependencies({
+          resolveProject: (projectId) => {
+            const resolved = resolveProjectForRequest(projectRegistry, { projectId });
+            if (!resolved.ok) throw new CanonicalMutationError(resolved.status, resolved.error, resolved.code);
+            return { id: resolved.projectId, name: resolved.project.name, rootPath: resolved.project.rootPath };
+          },
+          validateCwd: (projectId, cwd) => {
+            const validation = validateExecutionCwd(projectRegistry, projectContextManager, projectId, cwd, { kind: "user-input" });
+            if (!validation.ok) throw new CanonicalMutationError(validation.status, validation.error, validation.code);
+          },
+          getContext: projectId => projectContextManager.getOrCreate(projectId) ?? undefined,
+          getContextForGoal: goalId => projectContextManager.getContextForGoal(goalId) ?? undefined,
+          ensureSandbox: activeSandboxManager ? projectId => activeSandboxManager.ensureForProject(projectId) : undefined,
+          findGoalAcrossProjects: getGoalAcrossProjects,
+          getNestingPrefs: () => readSubgoalNestingPrefs(key => preferencesStore.get(key)),
+          findCascadeWorkflow: (projectId, workflowId) => configCascade.resolveWorkflows(projectId).find(row => row.item.id === workflowId)?.item,
+          requestChildStart: goalId => verificationHarness.requestChildStart(goalId),
+          startTeam: goalId => teamManager.startTeam(goalId),
+          broadcast: message => broadcastToAll(message),
+          logLifecycleSchedulingError: error => console.error("[goal] Post-create lifecycle scheduling failed:", error),
+          authorizeChild: (parent) => {
+            const rawSecret = (req.headers as Record<string, string | string[] | undefined>)["x-bobbit-session-secret"];
+            const secret = Array.isArray(rawSecret) ? rawSecret[0] : rawSecret;
+            const authz = authorizeChildrenMutation({
+              mutationClass: "operator",
+              isHumanOperator: cookieTryAuth(req, cookieStore!),
+              authenticCallerSessionId: sessionManager.sessionSecretStore.resolveSessionIdBySecret(typeof secret === "string" && secret.trim() ? secret.trim() : undefined),
+              teamLeadSessionId: teamManager.getTeamState(parent.rootGoalId ?? parent.id)?.teamLeadSessionId,
+            });
+            if (!authz.ok) throw new CanonicalMutationError(403, "Caller session is not the team-lead for this goal", "NOT_TEAM_LEAD", { goalId: parent.id });
+          },
+        }),
+      );
+      json(goal, replayed ? 200 : 201);
+    } catch (err) {
+      if (err instanceof CanonicalMutationError) {
+        const status = err.status;
+        const details =
+          err.details && typeof err.details === "object"
+            ? { ...(err.details as Record<string, unknown>) }
+            : {};
+        json(
+          {
+            error: err.message,
+            ...(err.code ? { code: err.code } : {}),
+            ...details,
+          },
+          status,
+        );
+      } else jsonError(400, err);
+    }
 		return;
 	}
 
@@ -9388,6 +11064,33 @@ async function handleApiRoute(
 		return;
 	}
 
+	// POST /api/tools/proposal — canonical public application path for a
+	// project-scoped propose_tool draft. The stored draft is intentionally not
+	// trusted here; callers submit the same complete operation a proposal UI
+	// accepts, and the shared service owns parsing, containment and persistence.
+	if (url.pathname === "/api/tools/proposal" && req.method === "POST") {
+		const body = await readBody(req);
+		// `system` is a legacy server-scope alias. Resolve it through Headquarters
+		// so tool proposals can never write the hidden system project's config.
+		// This resolver is shared with the ordinary tool mutation surfaces and is
+		// the seam proposal-import application will use as well.
+		const projectScope = resolveRequiredConfigProjectScope(body?.projectId, { aliasSystem: true });
+		if (!projectScope.ok) { writeConfigProjectScopeError(projectScope); return; }
+		try {
+			const result = applyCanonicalToolProposal({
+				action: body?.action,
+				tool: body?.tool,
+				content: body?.content,
+			}, { toolManager: projectScope.context?.toolManager ?? toolManager });
+			__resetToolScanCache();
+			json({ ok: true, ...result }, result.action === "create" ? 201 : 200);
+		} catch (error) {
+			if (error instanceof CanonicalMutationError) json({ error: error.message, ...(error.code ? { code: error.code } : {}) }, error.status);
+			else jsonError(500, error);
+		}
+		return;
+	}
+
 	// Routes with tool :name parameter
 	const toolMatch = url.pathname.match(/^\/api\/tools\/([^/]+)$/);
 	if (toolMatch) {
@@ -9583,6 +11286,342 @@ async function handleApiRoute(
 		return;
 	}
 
+	// Extension settings are project-owned and always redacted. The outer gateway
+	// guard authenticates reads; browser prompt-operator proof is required before
+	// any request can deposit a secret or change a project's runtime enablement.
+	const extensionSettingsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/extension-settings(?:\/([^/]+)(?:\/(provider|hook|runtime|sandboxRequirement)\/([^/]+))?)?$/);
+	if (extensionSettingsMatch && (req.method === "GET" || req.method === "PATCH")) {
+		let projectId: string;
+		let packId: string | undefined;
+		let id: string | undefined;
+		try {
+			projectId = decodeURIComponent(extensionSettingsMatch[1]);
+			packId = extensionSettingsMatch[2] === undefined ? undefined : decodeURIComponent(extensionSettingsMatch[2]);
+			id = extensionSettingsMatch[4] === undefined ? undefined : decodeURIComponent(extensionSettingsMatch[4]);
+		} catch { json({ error: "Invalid extension settings identity", code: "EXTENSION_SETTINGS_INVALID_IDENTITY" }, 400); return; }
+		const kind = extensionSettingsMatch[3] as "provider" | "hook" | "runtime" | "sandboxRequirement" | undefined;
+		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
+		const context = projectContextManager.getOrCreate(resolved.projectId);
+		if (!context) { json({ error: "Project not found", code: "PROJECT_NOT_FOUND" }, 404); return; }
+		if (req.method === "GET") {
+			if (packId !== undefined) { json({ error: "Method not allowed" }, 405); return; }
+			try { json(extensionSettingsProjection(resolved.projectId)); }
+			catch (error) { const failure = extensionSettingsMutationFailure(error); json(failure.body, failure.status); }
+			return;
+		}
+		if (!requireVerifiedPromptOperator()) return;
+		if (!packId || !isSettingsIdentifier(packId) || id !== undefined && !isSettingsIdentifier(id)) {
+			json({ error: "Invalid extension settings identity", code: "EXTENSION_SETTINGS_INVALID_IDENTITY" }, 400); return;
+		}
+		const body = await readBody(req).catch(() => null);
+		if (!body || typeof body !== "object" || Array.isArray(body) || !Number.isSafeInteger((body as { expectedRevision?: unknown }).expectedRevision) || (body as { expectedRevision: number }).expectedRevision < 0) {
+			json({ error: "expectedRevision is required", code: "EXTENSION_SETTINGS_EXPECTED_REVISION_REQUIRED" }, 400); return;
+		}
+		const input = body as { expectedRevision: number; enabled?: unknown; values?: unknown };
+		if (Object.keys(input).some(key => key !== "expectedRevision" && key !== "enabled" && key !== "values") || input.enabled !== undefined && typeof input.enabled !== "boolean") {
+			json({ error: "Invalid extension settings request", code: "EXTENSION_SETTINGS_INVALID_REQUEST" }, 400); return;
+		}
+		const allTargets = settingsTargets(resolved.projectId);
+		const invalidRefs = invalidSettingsTargetRefs(resolved.projectId);
+		const emitMutation = (result: { outcome: "updated"; revision: number }, responseTargets: ExtensionSettingsTargetRef[]) => {
+			broadcastExtensionSettingsInvalidation(resolved.projectId, result.revision);
+			let projection: ReturnType<typeof extensionSettingsProjection>;
+			try { projection = extensionSettingsProjection(resolved.projectId); }
+			catch (error) { const failure = extensionSettingsMutationFailure(error); json(failure.body, failure.status); return; }
+			const targets = projection.targets.filter(target => responseTargets.some(ref => ref.packId === target.ref.packId && ref.kind === target.ref.kind && ref.id === target.ref.id));
+			json({ revision: result.revision, ...(targets.length === 1 ? { target: targets[0] } : { targets }) });
+		};
+		if (kind) {
+			if (!id) { json({ error: "Invalid extension settings identity", code: "EXTENSION_SETTINGS_INVALID_IDENTITY" }, 400); return; }
+			const ref: ExtensionSettingsTargetRef = { packId, kind, id };
+			const target = allTargets.find(candidate => candidate.ref.packId === ref.packId && candidate.ref.kind === ref.kind && candidate.ref.id === ref.id);
+			if (!target) {
+				if (invalidRefs.some(candidate => candidate.packId === ref.packId && candidate.kind === ref.kind && candidate.id === ref.id)) json({ error: "Settings declaration requires review", code: "EXTENSION_SETTINGS_INVALID_SCHEMA" }, 422);
+				else json({ error: "Extension settings target not found", code: "EXTENSION_SETTINGS_TARGET_NOT_FOUND" }, 404);
+				return;
+			}
+			if (input.values !== undefined && (!input.values || typeof input.values !== "object" || Array.isArray(input.values))) { json({ error: "values must be an object", code: "EXTENSION_SETTINGS_INVALID_VALUES" }, 400); return; }
+			if (input.enabled === undefined && input.values === undefined) { json({ error: "No extension settings changes supplied", code: "EXTENSION_SETTINGS_EMPTY_MUTATION" }, 400); return; }
+			const publicValues: Record<string, ExtensionSettingValue | undefined> = {};
+			const secrets: Record<string, string | undefined> = {};
+			for (const [key, value] of Object.entries((input.values ?? {}) as Record<string, unknown>)) {
+				const field = target.fields.find(candidate => candidate.key === key);
+				if (!field) { json({ error: "Unknown extension settings field", code: "EXTENSION_SETTINGS_UNKNOWN_FIELD" }, 422); return; }
+				if (value === null) {
+					// Clearing a required field is valid only when its declaration can
+					// supply the effective value again via a non-secret default.
+					if (field.type !== "secret" && !field.optional && field.default === undefined) { json({ error: "Required extension settings fields cannot be cleared", code: "EXTENSION_SETTINGS_REQUIRED_FIELD" }, 422); return; }
+					if (field.type === "secret") secrets[key] = undefined; else publicValues[key] = undefined;
+					continue;
+				}
+				const normalized = normalizeExtensionSettingsApiValue(field, value);
+				if (normalized === undefined) { json({ error: "Invalid extension settings field value", code: "EXTENSION_SETTINGS_INVALID_FIELD_VALUE" }, 422); return; }
+				if (field.type === "secret") secrets[key] = normalized as string; else publicValues[key] = normalized;
+			}
+			try {
+				const result = context.extensionSettingsStore.compareAndSwap(ref, input.expectedRevision, { ...(input.enabled !== undefined ? { enabled: input.enabled as boolean } : {}), ...(Object.keys(publicValues).length ? { values: publicValues } : {}), ...(Object.keys(secrets).length ? { secrets } : {}) });
+				// Settings can alter a granted requirement's effective authority. Clear
+				// only this project so a revoke/regrant or disable/enable epoch cannot
+				// resurrect an old exact-plan failure.
+				sandboxImageRequirements.invalidateProject(resolved.projectId);
+				emitMutation(result, [ref]);
+			} catch (error) {
+				broadcastCommittedExtensionSettingsInvalidation(resolved.projectId, error);
+				const failure = extensionSettingsMutationFailure(error);
+				json(failure.body, failure.status);
+			}
+			return;
+		}
+		if (input.values !== undefined || input.enabled === undefined) { json({ error: "Pack settings changes require enabled", code: "EXTENSION_SETTINGS_INVALID_PACK_MUTATION" }, 400); return; }
+		const packTargets = allTargets.filter(target => target.ref.packId === packId);
+		if (packTargets.length === 0) {
+			if (invalidRefs.some(ref => ref.packId === packId)) json({ error: "Settings declaration requires review", code: "EXTENSION_SETTINGS_INVALID_SCHEMA" }, 422);
+			else json({ error: "Extension settings pack not found", code: "EXTENSION_SETTINGS_PACK_NOT_FOUND" }, 404);
+			return;
+		}
+		try {
+			const refs = packTargets.map(target => target.ref);
+			const result = context.extensionSettingsStore.compareAndSwapMany(refs.map(ref => ({ ref, enabled: input.enabled as boolean })), input.expectedRevision);
+			sandboxImageRequirements.invalidateProject(resolved.projectId);
+			emitMutation(result, refs);
+		} catch (error) {
+			broadcastCommittedExtensionSettingsInvalidation(resolved.projectId, error);
+			const failure = extensionSettingsMutationFailure(error);
+			json(failure.body, failure.status);
+		}
+		return;
+	}
+
+	// Extension grants are project-owned administrative state. The only authority
+	// accepted here is the authenticated gateway principal; sandbox credentials are
+	// blocked by the outer sandbox route guard before this handler is reached.
+	const extensionGrantAuditMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/extension-grant-audit$/);
+	if (extensionGrantAuditMatch && req.method === "GET") {
+		let projectId: string;
+		try { projectId = decodeURIComponent(extensionGrantAuditMatch[1]); } catch { json({ error: "Invalid project id" }, 400); return; }
+		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
+		const context = projectContextManager.getOrCreate(resolved.projectId);
+		if (!context) { json({ error: `Project not found: ${resolved.projectId}`, code: "PROJECT_NOT_FOUND" }, 404); return; }
+		const requestedLimit = Number(url.searchParams.get("limit") ?? "100");
+		const limit = Number.isInteger(requestedLimit) ? Math.max(1, Math.min(200, requestedLimit)) : 100;
+		try {
+			json({ entries: extensionGrantAudit(context.stateDir).list(limit) });
+		} catch {
+			json({ error: "Extension grant audit is unavailable", code: "EXTENSION_GRANT_AUDIT_UNAVAILABLE" }, 503);
+		}
+		return;
+	}
+
+	const extensionGrantsMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/extension-grants$/);
+	if (extensionGrantsMatch && (req.method === "GET" || req.method === "PUT")) {
+		let projectId: string;
+		try { projectId = decodeURIComponent(extensionGrantsMatch[1]); } catch { json({ error: "Invalid project id" }, 400); return; }
+		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
+		const context = projectContextManager.getOrCreate(resolved.projectId);
+		if (!context) { json({ error: `Project not found: ${resolved.projectId}`, code: "PROJECT_NOT_FOUND" }, 404); return; }
+		const store = context.projectConfigStore;
+		if (req.method === "GET") {
+			json({ grants: effectiveExtensionGrants(resolved.projectId, store), ...extensionGrantProjection(resolved.projectId, store) });
+			return;
+		}
+
+		const body = await readBody(req);
+		if (!body || typeof body !== "object" || Array.isArray(body)) {
+			json({ error: "Expected an exact extension grant tuple" }, 400);
+			return;
+		}
+		const tuple = body as Record<string, unknown>;
+		const isPackPrincipal = tuple.principal === "pack";
+		const expectedKeys = isPackPrincipal
+			? new Set(["packId", "principal", "capability"])
+			: new Set(["packId", "hookId", "capability"]);
+		if (Object.keys(tuple).some(key => !expectedKeys.has(key))) {
+			json({ error: "Expected an exact extension grant tuple" }, 400);
+			return;
+		}
+		const { packId, capability } = tuple;
+		const hookId = tuple.hookId;
+		if (!isSafeExtensionGrantIdentifier(packId) || !isExtensionCapability(capability)
+			|| (isPackPrincipal ? hookId !== undefined : !isSafeExtensionGrantIdentifier(hookId))) {
+			json({ error: "Invalid extension grant tuple" }, 400);
+			return;
+		}
+		const validHookId = hookId as string;
+		const requiresOperator = isPackPrincipal
+			|| capability === "prompt:system-static" || capability === "prompt:system-author" || capability === "mutate";
+		if (requiresOperator && !requireVerifiedPromptOperator()) return;
+		if (isPackPrincipal) {
+			if (!packContributionRegistry.getPack(resolved.projectId, packId)) {
+				json({ error: "Active extension principal not found", code: "EXTENSION_GRANT_PRINCIPAL_NOT_FOUND" }, 404);
+				return;
+			}
+			if (!extensionPackGrantCapabilities.includes(capability)) {
+				json({ error: "Capability is not supported by this pack principal", code: "EXTENSION_CAPABILITY_UNSUPPORTED" }, 422);
+				return;
+			}
+		} else {
+			const hook = extensionGrantHook(resolved.projectId, packId, validHookId);
+			if (!hook) {
+				json({ error: "Active hook not found", code: "EXTENSION_HOOK_NOT_FOUND" }, 404);
+				return;
+			}
+			if (!supportsExtensionGrantCapability(hook, capability)) {
+				json({ error: "Capability is not supported by this hook", code: "EXTENSION_CAPABILITY_UNSUPPORTED" }, 422);
+				return;
+			}
+		}
+		const grant: ExtensionGrant = isPackPrincipal
+			? { packId, principal: "pack", capability, grantedAt: extensionGrantNow(), grantedBy: extensionGrantActor }
+			: { packId, hookId: validHookId, capability, grantedAt: extensionGrantNow(), grantedBy: extensionGrantActor };
+		const previousGrants = store.getExtensionGrants();
+		const wasGranted = previousGrants.some(current => isPackPrincipal
+			? isPackExtensionGrant(current) && current.packId === packId && current.capability === capability
+			: !isPackExtensionGrant(current) && current.packId === packId && current.hookId === validHookId && current.capability === capability,
+		);
+		try {
+			const retained = previousGrants.filter(current => isPackPrincipal
+				? !isPackExtensionGrant(current) || current.packId !== packId || current.capability !== capability
+				: isPackExtensionGrant(current) || current.packId !== packId || current.hookId !== validHookId || current.capability !== capability,
+			);
+			store.setExtensionGrants([...retained, grant]);
+			// Config writes precede the independent registry binding. A crash/failure
+			// between them leaves the config row inert, never accidentally authorized.
+			projectRegistry.bindExtensionGrant(resolved.projectId, grant);
+			if (capability === "filter:tool-result") {
+				await sessionManager.reconcileToolResultFilterGate(resolved.projectId);
+			}
+		} catch (err) {
+			if (capability !== "filter:tool-result") {
+				jsonError(503, err);
+				return;
+			}
+			// A new grant is not authoritative until every affected live runtime has
+			// its private Pi gate. Roll it back rather than advertising protection we
+			// failed to install; an existing exact grant stays durable for a retry.
+			if (!wasGranted) {
+				try {
+					projectRegistry.revokeExtensionGrantBinding(resolved.projectId, grant);
+					store.setExtensionGrants(previousGrants);
+				} catch { /* The registry removal still leaves any stale config row inert. */ }
+			}
+			broadcastExtensionGrantInvalidation(resolved.projectId);
+			json({ error: "Tool-result filter gate reconciliation failed", code: "TOOL_RESULT_FILTER_RECONCILIATION_FAILED" }, 503);
+			return;
+		}
+		let auditAvailable = true;
+		try {
+			extensionGrantAudit(context.stateDir).appendOrQueue(isPackPrincipal
+				? { at: grant.grantedAt, actor: grant.grantedBy, action: "granted", packId, principal: "pack", capability }
+				: { at: grant.grantedAt, actor: grant.grantedBy, action: "granted", packId, hookId: validHookId, capability });
+		} catch {
+			auditAvailable = false;
+			console.warn(`[extension-grants] audit unavailable action=granted project=${resolved.projectId} pack=${packId} principal=${isPackPrincipal ? "pack" : validHookId} capability=${capability}`);
+		}
+		sandboxImageRequirements.invalidateProject(resolved.projectId);
+		broadcastExtensionGrantInvalidation(resolved.projectId);
+		// An explicit operator grant may admit hooks that were deliberately kept
+		// pending during registration. Replay only the durable ready marker.
+		const importRun = projectRegistry.get(resolved.projectId)?.importDecisionRun;
+		if (importRun?.state === "ready") {
+			try { await projectImportDecisionCoordinator?.dispatch(resolved.projectId, importRun.id); }
+			catch (error) { console.warn(`[project-import-decisions] grant replay failed project=${resolved.projectId}:`, error); }
+		}
+		const projection = extensionGrantProjection(resolved.projectId, store);
+		if (!auditAvailable) {
+			json({ error: "Extension grant changed but audit is unavailable", code: "EXTENSION_GRANT_AUDIT_UNAVAILABLE", grant, ...projection }, 503);
+			return;
+		}
+		json({ grant, ...projection });
+		return;
+	}
+
+	const extensionPackGrantRevokeMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/extension-grants\/([^/]+)\/principals\/pack\/([^/]+)$/);
+	const extensionHookGrantRevokeMatch = url.pathname.match(/^\/api\/projects\/([^/]+)\/extension-grants\/([^/]+)\/([^/]+)\/([^/]+)$/);
+	if ((extensionPackGrantRevokeMatch || extensionHookGrantRevokeMatch) && req.method === "DELETE") {
+		const match = extensionPackGrantRevokeMatch ?? extensionHookGrantRevokeMatch!;
+		const isPackPrincipal = !!extensionPackGrantRevokeMatch;
+		let projectId: string;
+		let packId: string;
+		let hookId: string | undefined;
+		let capability: string;
+		try {
+			projectId = decodeURIComponent(match[1]);
+			packId = decodeURIComponent(match[2]);
+			hookId = isPackPrincipal ? undefined : decodeURIComponent(match[3]);
+			capability = decodeURIComponent(match[isPackPrincipal ? 3 : 4]);
+		} catch { json({ error: "Invalid extension grant tuple" }, 400); return; }
+		if (!isSafeExtensionGrantIdentifier(packId) || !isExtensionCapability(capability)
+			|| (!isPackPrincipal && !isSafeExtensionGrantIdentifier(hookId))) {
+			json({ error: "Invalid extension grant tuple" }, 400);
+			return;
+		}
+		const validHookId = hookId as string;
+		const requiresOperator = isPackPrincipal
+			|| capability === "prompt:system-static" || capability === "prompt:system-author" || capability === "mutate";
+		if (requiresOperator && !requireVerifiedPromptOperator()) return;
+		const resolved = resolveProjectForRequest(projectRegistry, { projectId });
+		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
+		const context = projectContextManager.getOrCreate(resolved.projectId);
+		if (!context) { json({ error: `Project not found: ${resolved.projectId}`, code: "PROJECT_NOT_FOUND" }, 404); return; }
+		const store = context.projectConfigStore;
+		const audit = extensionGrantAudit(context.stateDir);
+		const grants = store.getExtensionGrants();
+		const matchesGrant = (grant: ExtensionGrant): boolean => isPackPrincipal
+			? isPackExtensionGrant(grant) && grant.packId === packId && grant.capability === capability
+			: !isPackExtensionGrant(grant) && grant.packId === packId && grant.hookId === validHookId && grant.capability === capability;
+		const revoked = grants.some(matchesGrant);
+		const auditRef = isPackPrincipal
+			? { action: "revoked" as const, packId, principal: "pack" as const, capability }
+			: { action: "revoked" as const, packId, hookId: validHookId, capability };
+		if (revoked) {
+			try {
+				const revokedGrant = grants.find(matchesGrant)!;
+				// Remove the gateway binding first. If the config write then fails, the
+				// stale checkout row remains fail-closed until explicitly re-granted.
+				projectRegistry.revokeExtensionGrantBinding(resolved.projectId, revokedGrant);
+				store.setExtensionGrants(grants.filter(grant => !matchesGrant(grant)));
+			} catch (err) {
+				jsonError(503, err);
+				return;
+			}
+			const at = extensionGrantNow();
+			let auditAvailable = true;
+			try {
+				audit.appendOrQueue({ at, actor: extensionGrantActor, ...auditRef });
+			} catch {
+				auditAvailable = false;
+				console.warn(`[extension-grants] audit unavailable action=revoked project=${resolved.projectId} pack=${packId} principal=${isPackPrincipal ? "pack" : hookId} capability=${capability}`);
+			}
+			sandboxImageRequirements.invalidateProject(resolved.projectId);
+			broadcastExtensionGrantInvalidation(resolved.projectId);
+			const projection = extensionGrantProjection(resolved.projectId, store);
+			if (!auditAvailable) {
+				json({ error: "Extension grant changed but audit is unavailable", code: "EXTENSION_GRANT_AUDIT_UNAVAILABLE", revoked: true, ...projection }, 503);
+				return;
+			}
+			json({ revoked: true, ...projection });
+			return;
+		}
+		// A revoke whose config mutation succeeded but audit append failed is
+		// recovered only by an exact retry. Ordinary idempotent no-op DELETEs do
+		// not create audit records.
+		try {
+			if (audit.recoverPending(auditRef)) {
+				json({ revoked: true, ...extensionGrantProjection(resolved.projectId, store) });
+				return;
+			}
+		} catch {
+			console.warn(`[extension-grants] audit unavailable action=revoked project=${resolved.projectId} pack=${packId} principal=${isPackPrincipal ? "pack" : hookId} capability=${capability}`);
+			json({ error: "Extension grant changed but audit is unavailable", code: "EXTENSION_GRANT_AUDIT_UNAVAILABLE", revoked: true, ...extensionGrantProjection(resolved.projectId, store) }, 503);
+			return;
+		}
+		json({ revoked: false, ...extensionGrantProjection(resolved.projectId, store) });
+		return;
+	}
+
 	// GET /api/ext/contributions?projectId= — project-scoped pack-contribution
 	// metadata for the client registries (pack-schema-v1 §6.4). Activation filtering
 	// is already applied by the registry (disabled entrypoints omitted). EVERY
@@ -9591,9 +11630,14 @@ async function handleApiRoute(
 	if (url.pathname === "/api/ext/contributions" && req.method === "GET") {
 		const contribScope = resolveRequiredConfigProjectScope(url.searchParams.get("projectId"));
 		if (!contribScope.ok) { writeConfigProjectScopeError(contribScope); return; }
+		const hooksByPack = new Map(extensionGrantStatus(
+			contribScope.effectiveProjectId,
+			contribScope.context?.projectConfigStore ?? projectConfigStore,
+		).map(pack => [pack.packId, pack.hooks]));
 		const packs = packContributionRegistry.list(contribScope.effectiveProjectId).map((p) => ({
 			packId: p.packId,
 			packName: p.packName,
+			hooks: hooksByPack.get(p.packId) ?? [],
 			panels: p.panels.map((panel) => {
 				const out: Record<string, unknown> = { id: panel.id };
 				if (panel.title !== undefined) out.title = panel.title;
@@ -9719,6 +11763,7 @@ async function handleApiRoute(
 			readOwnTranscript,
 			// Sub-goal A seam — sub-goal C consumes this to back `host.agents`.
 			orchestrationCore,
+			serviceToolRpc: worktreeServices,
 			// Sub-goal C: live status reader for host.agents.status/list (the core has
 			// no public status accessor).
 			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,
@@ -10139,6 +12184,7 @@ async function handleApiRoute(
 			readOwnTranscript,
 			// Sub-goal A seam — sub-goal C consumes this to back `host.agents`.
 			orchestrationCore,
+			serviceToolRpc: worktreeServices,
 			// Sub-goal C: live status reader for host.agents.status/list (the core has
 			// no public status accessor).
 			readChildStatus: (id: string) => sessionManager.getSession(id)?.status,
@@ -10613,6 +12659,231 @@ async function handleApiRoute(
 			return ctxs;
 		};
 
+		// A plan fingerprint represents the selected toolchain profiles, not the
+		// pack identity or precedence that selected them. A successful pack mutation
+		// can therefore replace an already-failed requirement with an identical
+		// fingerprint. Clear the failure epoch for every project the mutated scope
+		// can resolve into, without disturbing unrelated project-scope failures.
+		const invalidateSandboxRequirementFailuresForMarketplaceMutation = (scope: InstallScope, projectId?: string): void => {
+			if (scope === "project") {
+				if (projectId) sandboxImageRequirements.invalidateProject(projectId);
+				return;
+			}
+			for (const project of projectRegistry.list()) sandboxImageRequirements.invalidateProject(project.id);
+		};
+
+		// ── Vanilla extension adoption (EP-9) ───────────────────────
+		type AdoptionTarget = { scope: AdoptionScope; store: ProjectConfigStore; projectId?: string };
+		const adoptionTarget = (scope: AdoptionScope, rawProjectId: unknown): { ok: true; target: AdoptionTarget } | { ok: false; status: number; error: string } => {
+			if (scope !== "project") return { ok: true, target: { scope, store: projectConfigStore } };
+			if (typeof rawProjectId !== "string" || !rawProjectId.trim()) return { ok: false, status: 400, error: "projectId required for project scope" };
+			const projectId = normalizeConfigProjectId(rawProjectId);
+			if (!projectId) return { ok: false, status: 400, error: "project scope requires a normal project" };
+			const ctx = projectContextManager.getOrCreate(projectId);
+			return ctx ? { ok: true, target: { scope, store: ctx.projectConfigStore, projectId } } : { ok: false, status: 404, error: "Project not found" };
+		};
+		const adoptedFor = (projectId?: string): AdoptedExtension[] => aggregateAdoptedExtensions({
+			server: projectConfigStore.getAdoptedExtensions("server"),
+			"global-user": projectConfigStore.getAdoptedExtensions("global-user"),
+			...(projectId && projectContextManager.getOrCreate(projectId)
+				? { project: projectContextManager.getOrCreate(projectId)!.projectConfigStore.getAdoptedExtensions("project") }
+				: {}),
+		}, projectId);
+		const adoptionFailure = (code: "connection_failed" | "initialize_failed" | "tools_list_failed"): AdoptionConformance["failures"][number] => ({
+			code,
+			message: code === "initialize_failed" ? "The extension did not complete initialization." : code === "tools_list_failed" ? "The extension did not provide a tool list." : "The extension could not be reached.",
+		});
+		const skillConformance = (record: AdoptedExtension): AdoptionConformance => {
+			const directory = "directory" in record.source ? record.source.directory : "";
+			const scan = scanSkillDirResolved(directory, "custom");
+			const rejectedSkills = scan.diagnostics.map((diagnostic) => ({
+				path: diagnostic.path,
+				reason: diagnostic.reason === "unreadable_file" ? "missing_skill_file" : diagnostic.reason,
+			}));
+			const failures: AdoptionConformance["failures"] = [];
+			if (scan.diagnostics.some((diagnostic) => diagnostic.reason === "missing_directory")) failures.push({ code: "missing_directory", message: "The skills directory is unavailable." });
+			if (scan.diagnostics.some((diagnostic) => diagnostic.reason === "malformed_frontmatter")) failures.push({ code: "malformed_frontmatter", message: "A skill has malformed frontmatter." });
+			return {
+				state: scan.skills.length === 0 && scan.diagnostics.length > 0 ? "rejected" : scan.diagnostics.length > 0 ? "partial" : "loaded",
+				checkedAt: new Date().toISOString(),
+				skills: { loadedSkills: scan.skills.map((skill) => `adopt-${record.id}--${skill.name}`), rejectedSkills },
+				failures,
+			};
+		};
+		const refreshMcpConformance = async (target: AdoptionTarget, record: AdoptedExtension): Promise<AdoptedExtension> => {
+			// Disabled records intentionally have no runtime contribution. Reloading one
+			// would probe its source only to manufacture an absent-server failure.
+			if (!record.enabled) return record;
+
+			let reload: McpReloadResult | undefined;
+			try { reload = await reloadMcpAfterMarketplaceMutation(target.scope as InstallScope, target.projectId); } catch { /* status below is deliberately sanitized */ }
+			const manager = target.scope === "project" ? sessionManager.getMcpManager({ projectId: target.projectId }) : sessionManager.getMcpManager();
+			const runtimeServerKey = adoptionNamespace(record.id);
+			const status = manager?.getServerStatuses().find((row) => row.name === runtimeServerKey);
+			const managerInternals = manager as unknown as {
+				toolDefs?: Map<string, Array<{ name?: unknown; annotations?: unknown }>>;
+				getRejectedToolDefinitions?: (serverName: string) => Array<{ name?: string; reason: "invalid_operation_schema" }>;
+			} | null;
+			// `connectServer` records an empty tool list for a failed tools/list too, so
+			// map presence alone is not authoritative. A connected server with a settled
+			// reload is the only source allowed to reconcile the durable operation list.
+			const hasLiveToolList = reload?.status !== "pending"
+				&& status?.status === "connected"
+				&& managerInternals?.toolDefs?.has(runtimeServerKey) === true;
+			const operations = hasLiveToolList
+				? reconcileAdoptionOperations(
+					record.operations ?? [],
+					managerInternals!.toolDefs!.get(runtimeServerKey) ?? [],
+					record.conformance.state === "pending" && (record.operations?.length ?? 0) === 0,
+				)
+				: record.operations ?? [];
+			const rejectedTools = hasLiveToolList
+				? managerInternals?.getRejectedToolDefinitions?.(runtimeServerKey) ?? []
+				: record.conformance.mcp?.rejectedTools ?? [];
+			const statusError = status?.status === "error" || !status;
+			const error = status?.error ?? "";
+			const failureCode = /initializ/i.test(error) ? "initialize_failed" : /tools.?list/i.test(error) ? "tools_list_failed" : "connection_failed";
+			const conformance: AdoptionConformance = {
+				state: statusError ? "unreachable" : rejectedTools.length > 0 ? "partial" : "loaded",
+				checkedAt: new Date().toISOString(),
+				mcp: {
+					...(status?.negotiation ? { requestedProtocol: status.negotiation.requestedProtocol, ...(status.negotiation.negotiatedProtocol ? { negotiatedProtocol: status.negotiation.negotiatedProtocol } : {}), ...(status.negotiation.serverName ? { serverName: status.negotiation.serverName } : {}), ...(status.negotiation.serverVersion ? { serverVersion: status.negotiation.serverVersion } : {}) } : {}),
+					loadedTools: operations.map((operation) => operation.name),
+					rejectedTools,
+				},
+				failures: statusError ? [adoptionFailure(failureCode)] : [],
+			};
+			const updated = cloneAdoptedExtension({ ...record, revision: nextAdoptedExtensionRevision(record), operations, conformance, provenance: { ...record.provenance, updatedAt: new Date().toISOString() } });
+			try {
+				if (target.store.compareAndSwapAdoptedExtension(target.scope, record.id, record.revision, updated) !== "updated") return record;
+			} catch { return record; }
+			const selectedNames = (entries: NonNullable<AdoptedExtension["operations"]> = []) => entries
+				.filter((operation) => operation.selected)
+				.map((operation) => operation.name)
+				.sort();
+			// The first reload used the pre-CAS selection. Rebuild only when the
+			// authoritative reconciliation genuinely changed the exposed selection.
+			if (reload && hasLiveToolList && JSON.stringify(selectedNames(record.operations)) !== JSON.stringify(selectedNames(operations))) {
+				try { await reloadMcpAfterMarketplaceMutation(target.scope as InstallScope, target.projectId); } catch { /* conformance remains visible */ }
+			}
+			return updated;
+		};
+		const refreshAdoption = async (target: AdoptionTarget, record: AdoptedExtension): Promise<AdoptedExtension> => {
+			if (record.kind === "mcp") return refreshMcpConformance(target, record);
+			const updated = cloneAdoptedExtension({ ...record, revision: nextAdoptedExtensionRevision(record), conformance: skillConformance(record), provenance: { ...record.provenance, updatedAt: new Date().toISOString() } });
+			try {
+				if (target.store.compareAndSwapAdoptedExtension(target.scope, record.id, record.revision, updated) !== "updated") return record;
+			} catch { return record; }
+			return updated;
+		};
+		/** Adoption starts host commands or outbound connections, so localhost trust
+		 * alone is insufficient. Sandbox credentials are never operator authority. */
+		const requireAdoptionOperator = (): boolean => {
+			const bearer = req.headers.authorization;
+			const hasAdminBearer = typeof bearer === "string" && bearer.startsWith("Bearer ") && validateToken(bearer.slice(7), config.authToken);
+			const presentedSandbox = Boolean(sandboxScope) || [
+				typeof bearer === "string" && bearer.startsWith("Bearer ") ? bearer.slice(7) : undefined,
+				...url.searchParams.getAll("token"),
+			].some(token => typeof token === "string" && Boolean(sandboxTokenStore?.lookup(token)));
+			if (presentedSandbox) { json({ error: "Forbidden: sandbox token cannot mutate adoptions" }, 403); return false; }
+			// Bearer credentials are explicit operator intent; a signed browser cookie
+			// additionally needs unspoofable same-origin mutation evidence.
+			if (hasAdminBearer) return true;
+			if (cookieStore && cookieTryAuth(req, cookieStore) && hasSameOriginBrowserMutationEvidence({
+				method: req.method,
+				pathname: url.pathname,
+				headers: req.headers,
+				isTls: Boolean((req.socket as { encrypted?: boolean }).encrypted),
+			}, {
+				deployment: config.staticDir ? "direct" : "vite",
+				configuredHost: config.host,
+			})) return true;
+			json({ error: "Operator authentication required" }, 401);
+			return false;
+		};
+
+		// GET/POST/PATCH/refresh/DELETE deliberately live alongside the Market API so
+		// adopted assets inherit its scope and reload lifecycle without becoming packs.
+		if (url.pathname === "/api/marketplace/adoptions" && req.method === "GET") {
+			const requestedProjectId = url.searchParams.get("projectId") || undefined;
+			const projectId = requestedProjectId ? normalizeConfigProjectId(requestedProjectId) : undefined;
+			if (requestedProjectId && !projectId) { json({ error: "invalid projectId" }, 400); return; }
+			json({ adoptions: adoptedFor(projectId).map(redactAdoptedExtension) });
+			return;
+		}
+		if (url.pathname === "/api/marketplace/adoptions" && req.method === "POST") {
+			if (!requireAdoptionOperator()) return;
+			const body = await readBody(req) as Record<string, unknown> | null;
+			const scope = parseScope(body?.scope);
+			if (!scope || (body?.kind !== "mcp" && body?.kind !== "skills")) { json({ error: "kind and scope are required" }, 400); return; }
+			const resolved = adoptionTarget(scope, body?.projectId);
+			if (!resolved.ok) { json({ error: resolved.error }, resolved.status); return; }
+			try {
+				const existing = Object.values(resolved.target.store.getAdoptedExtensions(scope) as Record<string, AdoptedExtension>);
+				const result = findOrCreateAdoptedExtension(existing, { kind: body.kind, scope, ...(resolved.target.projectId ? { projectId: resolved.target.projectId } : {}), source: body.source });
+				if (!result.created) { json({ adoption: redactAdoptedExtension(result.record) }); return; }
+				resolved.target.store.upsertAdoptedExtension(scope, result.record);
+				invalidateResolverCaches();
+				const adoption = await refreshAdoption(resolved.target, result.record);
+				json({ adoption: redactAdoptedExtension(adoption) }, 201);
+			} catch (err) {
+				if (err instanceof AdoptionValidationError) { json({ error: "invalid adoption request" }, 400); return; }
+				const persistence = projectConfigPersistenceFailure(err);
+				json(persistence.body, persistence.status);
+			}
+			return;
+		}
+		const adoptionMatch = url.pathname.match(/^\/api\/marketplace\/adoptions\/([^/]+)(\/refresh)?$/);
+		if (adoptionMatch) {
+			if ((req.method === "PATCH" || req.method === "DELETE" || (req.method === "POST" && adoptionMatch[2] === "/refresh")) && !requireAdoptionOperator()) return;
+			const id = decodeURIComponent(adoptionMatch[1]);
+			const body = req.method === "PATCH" ? await readBody(req) as Record<string, unknown> | null : undefined;
+			const scope = parseScope(req.method === "PATCH" ? body?.scope : url.searchParams.get("scope"));
+			if (!scope) { json({ error: "invalid scope" }, 400); return; }
+			const resolved = adoptionTarget(scope, req.method === "PATCH" ? body?.projectId : url.searchParams.get("projectId"));
+			if (!resolved.ok) { json({ error: resolved.error }, resolved.status); return; }
+			const record = (resolved.target.store.getAdoptedExtensions(scope) as Record<string, AdoptedExtension>)[id];
+			if (!record || (scope === "project" && record.projectId !== resolved.target.projectId)) { json({ error: "adoption not found" }, 404); return; }
+			if (adoptionMatch[2] === "/refresh" && req.method === "POST") {
+				invalidateResolverCaches();
+				json({ adoption: redactAdoptedExtension(await refreshAdoption(resolved.target, record)) });
+				return;
+			}
+			if (!adoptionMatch[2] && req.method === "PATCH") {
+				if (!body || (body.enabled !== undefined && typeof body.enabled !== "boolean") || (body.operations !== undefined && !Array.isArray(body.operations))) { json({ error: "invalid adoption update" }, 400); return; }
+				let operations = record.operations;
+				if (body.operations !== undefined) {
+					if (record.kind !== "mcp") { json({ error: "skills adoptions have no operations" }, 400); return; }
+					const known = new Map((record.operations ?? []).map((operation) => [operation.name, operation]));
+					const requested = body.operations as Array<Record<string, unknown>>;
+					if (!requested.every((operation) => typeof operation?.name === "string" && typeof operation.selected === "boolean" && known.has(operation.name))) { json({ error: "operations must be known selections" }, 400); return; }
+					const requestedByName = new Map(requested.map(operation => [operation.name as string, operation.selected as boolean]));
+					operations = (record.operations ?? []).map(operation => {
+						const selected = requestedByName.get(operation.name);
+						// A full operation list is a UI transport detail. Only an actual
+						// value change is an operator decision; no-op resubmissions retain
+						// auto provenance so authoritative refresh can still revoke it.
+						return selected === undefined || selected === operation.selected
+							? operation
+							: { ...operation, selected, selection: "explicit" as const };
+					});
+				}
+				const updated = cloneAdoptedExtension({ ...record, revision: nextAdoptedExtensionRevision(record), ...(body.enabled !== undefined ? { enabled: body.enabled as boolean } : {}), ...(operations ? { operations } : {}), provenance: { ...record.provenance, updatedAt: new Date().toISOString() } });
+				try { resolved.target.store.upsertAdoptedExtension(scope, updated); } catch (err) { const persistence = projectConfigPersistenceFailure(err); json(persistence.body, persistence.status); return; }
+				invalidateResolverCaches();
+				if (updated.kind === "mcp") { try { await reloadMcpAfterMarketplaceMutation(scope, resolved.target.projectId); } catch { /* retain visible record */ } }
+				json({ adoption: redactAdoptedExtension(updated) });
+				return;
+			}
+			if (!adoptionMatch[2] && req.method === "DELETE") {
+				try { resolved.target.store.removeAdoptedExtension(scope, id); } catch (err) { const persistence = projectConfigPersistenceFailure(err); json(persistence.body, persistence.status); return; }
+				invalidateResolverCaches();
+				if (record.kind === "mcp") { try { await reloadMcpAfterMarketplaceMutation(scope, resolved.target.projectId); } catch { /* deletion is durable */ } }
+				noContent();
+				return;
+			}
+		}
+
 		// ── All-source Browse ─────────────────────────────────────
 		// GET /api/marketplace/browse?projectId=<optional>
 		if (url.pathname === "/api/marketplace/browse" && req.method === "GET") {
@@ -10763,6 +13034,7 @@ async function handleApiRoute(
 				const targetProjectId = targetScope === "project" ? normalizeConfigProjectId(body?.projectId) : undefined;
 				const installed = await installer.installMarketplacePack({ sourceId: body.sourceId, dirName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
 				invalidateResolverCaches();
+				invalidateSandboxRequirementFailuresForMarketplaceMutation(targetScope, targetProjectId);
 				const mcpReload = installed.manifest.contents.mcp?.length ? await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId) : undefined;
 				json({ installed, ...(mcpReload ? { mcpReload } : {}) }, 201);
 			} catch (err) { handleMarketErr(err); }
@@ -10790,6 +13062,7 @@ async function handleApiRoute(
 				const hadMcp = (prior?.manifest.contents.mcp?.length ?? 0) > 0;
 				const installed = await installer.updateMarketplacePack({ packName: body.packName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
 				invalidateResolverCaches();
+				invalidateSandboxRequirementFailuresForMarketplaceMutation(targetScope, targetProjectId);
 				const hasMcp = (installed.manifest.contents.mcp?.length ?? 0) > 0;
 				const mcpReload = hadMcp || hasMcp ? await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId) : undefined;
 				json({ installed, ...(mcpReload ? { mcpReload } : {}) });
@@ -10817,6 +13090,7 @@ async function handleApiRoute(
 				const prior = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }]).find((p) => p.scope === targetScope && p.packName === body.packName);
 				installer.uninstallPack({ packName: body.packName, scope: targetScope, projectBase: st.target.projectBase, packOrderStore: st.target.store });
 				invalidateResolverCaches();
+				invalidateSandboxRequirementFailuresForMarketplaceMutation(targetScope, targetProjectId);
 				if (prior?.manifest.contents.mcp?.length) await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId);
 				res.writeHead(204); res.end();
 			} catch (err) { handleMarketErr(err, 404); }
@@ -10877,6 +13151,7 @@ async function handleApiRoute(
 			const normalized = [...missing, ...filtered];
 			st.target.store.setPackOrder(targetScope, normalized);
 			invalidateResolverCaches();
+			invalidateSandboxRequirementFailuresForMarketplaceMutation(targetScope, targetProjectId);
 			const hasMcp = installer.listInstalled([{ scope: targetScope, projectBase: st.target.projectBase }]).some((p) => p.scope === targetScope && (p.manifest.contents.mcp?.length ?? 0) > 0);
 			const mcpReload = hasMcp ? await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId) : undefined;
 			json({ scope: targetScope, order: normalized, ...(mcpReload ? { mcpReload } : {}) });
@@ -10947,11 +13222,20 @@ async function handleApiRoute(
 			store: PackOrderStore,
 			packName: string,
 			projectId?: string,
-		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "session-menu" | "route"; routeId?: string }>; providers?: string[]; hooks?: string[]; mcp?: Array<string | Record<string, unknown>>; piExtensions?: Array<string | Record<string, unknown>>; runtimes?: string[]; workflows?: string[]; descriptions: PackEntityDescriptions } | null => {
+		): { roles: string[]; tools: string[]; skills: string[]; entrypoints: Array<{ listName: string; label?: string; kind?: "composer-slash" | "session-menu" | "route"; routeId?: string }>; providers?: string[]; hooks?: string[]; mcp?: Array<string | Record<string, unknown>>; piExtensions?: Array<string | Record<string, unknown>>; runtimes?: string[]; sandboxRequirements?: string[]; workflows?: string[]; systemPrompts?: string[]; descriptions: PackEntityDescriptions } | null => {
 			const base = scope === "server" ? headquartersDir() : scope === "global-user" ? os.homedir() : projectBase;
 			if (base === undefined) return null;
-			const entries = scopeMarketPackEntries(scope as PackScope, base, store.getPackOrder(scope));
+			const packOrder = store.getPackOrder(scope);
+			let entries = scopeMarketPackEntries(scope as PackScope, base, packOrder);
 			let entry = entries.find((e) => e.manifest?.name === packName);
+			// Direct installers can create a pack after an empty scan without using
+			// marketplace mutation routes. The activation catalogue is the canonical
+			// lookup for that pack, so only a miss refreshes this one scope root.
+			// Normal marketplace mutations already use invalidateResolverCaches().
+			if (!entry) {
+				entries = refreshScopeMarketPackEntries(scope as PackScope, base, packOrder);
+				entry = entries.find((e) => e.manifest?.name === packName);
+			}
 			// Built-in first-party packs (§7.4) have NO install-ledger entry but ARE
 			// toggleable at server scope — resolve their catalogue from the built-in band.
 			if ((!entry || !entry.manifest) && scope === "server") {
@@ -11089,7 +13373,9 @@ async function handleApiRoute(
 				mcp: (c.mcp ?? []).map((listName) => mcpByListName.get(listName) ?? listName),
 				piExtensions: (c.piExtensions ?? []).map((listName) => piExtensionByListName.get(listName) ?? listName),
 				runtimes: [...(c.runtimes ?? [])],
+				sandboxRequirements: [...(c.sandboxRequirements ?? [])],
 				workflows: [...(c.workflows ?? [])],
+				systemPrompts: [...(c.systemPrompts ?? [])],
 				descriptions,
 			};
 		};
@@ -11149,7 +13435,7 @@ async function handleApiRoute(
 			const cfgStore = st.target.store as unknown as ProjectConfigStore;
 			const beforeActivation = cfgStore.getPackActivation(targetScope as PackOrderScope, packName);
 			const cataloguePiExtensionNames = normalisePiExtensionCatalogueRefs(catalogue.piExtensions);
-			const normaliseKind = (kind: "roles" | "tools" | "skills" | "entrypoints" | "providers" | "hooks" | "mcp" | "piExtensions" | "runtimes" | "workflows", valid: Set<string>): string[] => {
+			const normaliseKind = (kind: "roles" | "tools" | "skills" | "entrypoints" | "providers" | "hooks" | "mcp" | "piExtensions" | "runtimes" | "sandboxRequirements" | "workflows" | "systemPrompts", valid: Set<string>): string[] => {
 				const raw = reqDisabled[kind];
 				if (!Array.isArray(raw)) return [];
 				return raw.filter((x): x is string => typeof x === "string" && valid.has(x));
@@ -11187,12 +13473,35 @@ async function handleApiRoute(
 				mcpOperations: normalizeMcpOperationsForCatalogue(),
 				piExtensions: normaliseKind("piExtensions", cataloguePiExtensionNames),
 				runtimes: normaliseKind("runtimes", new Set(catalogue.runtimes ?? [])),
+				sandboxRequirements: normaliseKind("sandboxRequirements", new Set(catalogue.sandboxRequirements ?? [])),
 				workflows: normaliseKind("workflows", new Set(catalogue.workflows ?? [])),
+				systemPrompts: normaliseKind("systemPrompts", new Set(catalogue.systemPrompts ?? [])),
 			};
 			const before = beforeActivation.mcp ?? [];
 			const beforeOps = beforeActivation.mcpOperations ?? {};
+			// Activation is shared across scope, but a failed image marker belongs
+			// only to a project whose effective exact plan actually changes. Snapshot
+			// the projected fingerprints so unrelated projects retain their retries.
+			const sandboxPlanFingerprints = (): Map<string, string | undefined> => {
+				const fingerprints = new Map<string, string | undefined>();
+				for (const project of projectRegistry.list()) {
+					const projectContext = projectContextManager.getOrCreate(project.id);
+					if (!projectContext) continue;
+					try {
+						fingerprints.set(project.id, resolveProjectSandboxImagePlan(packContributionRegistry, projectContext.projectConfigStore, project.id).fingerprint);
+					} catch {
+						// Invalid legacy project config cannot establish a new authority epoch.
+					}
+				}
+				return fingerprints;
+			};
+			const sandboxPlansBeforeActivation = sandboxPlanFingerprints();
 			cfgStore.setPackActivation(targetScope as PackOrderScope, packName, normalized);
 			invalidateResolverCaches();
+			const sandboxPlansAfterActivation = sandboxPlanFingerprints();
+			for (const [projectId, beforeFingerprint] of sandboxPlansBeforeActivation) {
+				if (sandboxPlansAfterActivation.get(projectId) !== beforeFingerprint) sandboxImageRequirements.invalidateProject(projectId);
+			}
 			const mcpChanged = JSON.stringify([...before].sort()) !== JSON.stringify([...normalized.mcp].sort()) || JSON.stringify(beforeOps) !== JSON.stringify(normalized.mcpOperations ?? {});
 			const mcpReload = mcpChanged ? await reloadMcpAfterMarketplaceMutation(targetScope, targetProjectId) : undefined;
 			const refreshedCatalogue = mcpChanged ? buildActivationCatalogue(targetScope, st.target.projectBase, st.target.store, packName, targetProjectId) ?? catalogue : catalogue;
@@ -11451,16 +13760,26 @@ async function handleApiRoute(
 	// POST /api/custom-providers/test — discover models without persisting
 	if (url.pathname === "/api/custom-providers/test" && req.method === "POST") {
 		const body = await readBody(req);
-		if (!body || !body.type || !body.baseUrl) {
-			json({ error: "Missing required fields: type, baseUrl" }, 400);
+		const customProviderTypes = new Set(["ollama", "lmstudio", "llama.cpp", "vllm", "manual", "openai-images", "gemini-images", "google-imagen"]);
+		if (!body || typeof body.type !== "string" || !customProviderTypes.has(body.type) || typeof body.baseUrl !== "string") {
+			json({ error: "Missing or invalid required fields: type, baseUrl" }, 400);
+			return;
+		}
+		// A probe is deliberately untrusted: it cannot scan localhost/private
+		// services before an operator explicitly persists a provider record.
+		let baseUrl: string;
+		try {
+			baseUrl = normalizeCustomProviderBaseUrl(body.baseUrl, false);
+		} catch (error) {
+			json({ error: error instanceof Error ? error.message : "Invalid custom provider URL" }, 400);
 			return;
 		}
 		const config: CustomProviderConfig = {
-			id: body.id || "test-" + Date.now(),
-			name: body.name || body.type,
-			type: body.type,
-			baseUrl: body.baseUrl,
-			...(body.apiKey ? { apiKey: body.apiKey } : {}),
+			id: typeof body.id === "string" ? body.id : "test-" + Date.now(),
+			name: typeof body.name === "string" ? body.name : body.type,
+			type: body.type as CustomProviderConfig["type"],
+			baseUrl,
+			...(typeof body.apiKey === "string" ? { apiKey: body.apiKey } : {}),
 		};
 		try {
 			const models = await discoverModelsForConfig(config);
@@ -11474,19 +13793,32 @@ async function handleApiRoute(
 	// POST /api/custom-providers — add or update a custom provider config
 	if (url.pathname === "/api/custom-providers" && req.method === "POST") {
 		const body = await readBody(req);
-		if (!body || !body.id || !body.type || !body.baseUrl) {
-			json({ error: "Missing required fields: id, type, baseUrl" }, 400);
+		const customProviderTypes = new Set(["ollama", "lmstudio", "llama.cpp", "vllm", "manual", "openai-images", "gemini-images", "google-imagen"]);
+		if (!body || typeof body.id !== "string" || !body.id.trim() || typeof body.type !== "string" || !customProviderTypes.has(body.type) || typeof body.baseUrl !== "string") {
+			json({ error: "Missing or invalid required fields: id, type, baseUrl" }, 400);
+			return;
+		}
+		let baseUrl: string;
+		try {
+			// This route persists the operator-selected endpoint, so it is the only
+			// place allowed to enable local/private custom-provider transports.
+			baseUrl = normalizeCustomProviderBaseUrl(body.baseUrl, true);
+		} catch (error) {
+			json({ error: error instanceof Error ? error.message : "Invalid custom provider URL" }, 400);
 			return;
 		}
 		const configs = (preferencesStore.get("customProviders") as CustomProviderConfig[] | undefined) || [];
 		const existing = configs.findIndex((c: CustomProviderConfig) => c.id === body.id);
+		// `trusted` is server-derived at the authenticated configuration boundary;
+		// callers cannot smuggle it into a one-off discovery request.
 		const config: CustomProviderConfig = {
 			id: body.id,
-			name: body.name || body.id,
-			type: body.type,
-			baseUrl: body.baseUrl,
-			...(body.apiKey ? { apiKey: body.apiKey } : {}),
-			...(body.models ? { models: body.models } : {}),
+			name: typeof body.name === "string" ? body.name : body.id,
+			type: body.type as CustomProviderConfig["type"],
+			baseUrl,
+			trusted: true,
+			...(typeof body.apiKey === "string" ? { apiKey: body.apiKey } : {}),
+			...(Array.isArray(body.models) ? { models: body.models } : {}),
 		};
 		if (existing >= 0) {
 			configs[existing] = config;
@@ -11648,7 +13980,10 @@ async function handleApiRoute(
 			return;
 		}
 		try {
-			const models = await discoverAigwModels(body.url);
+			// A one-off probe has not been persisted as trusted gateway configuration.
+			// It may contact public HTTPS endpoints only; private/localhost gateways are
+			// available after the explicit configure action records them server-side.
+			const models = await discoverAigwModels(body.url, { allowPrivateGateway: false });
 			json({ ok: true, models });
 		} catch (err: any) {
 			jsonError(502, err);
@@ -11712,15 +14047,20 @@ async function handleApiRoute(
 				json({ ok: false, error: "No AI Gateway configured." });
 				return;
 			}
-			const baseUrl = aigwUrl.replace(/\/+$/, "");
-			const modelBaseUrl = (resolved.baseUrl || baseUrl).replace(/\/+$/, "");
-			if (resolved.api !== "openai-responses" && resolved.api !== "openai-completions") {
-				// Converse and future provider-native APIs must be exercised through
-				// pi-ai; never relabel them as a root chat-completions request.
+			const configuredGateway = new URL(aigwUrl);
+			const resolvedEndpoint = new URL(resolved.baseUrl || configuredGateway.href);
+			if (
+				(resolved.api !== "openai-responses" && resolved.api !== "openai-completions")
+				|| resolvedEndpoint.origin !== configuredGateway.origin
+			) {
+				// Provider-native and well-known cross-origin adapters are exercised by
+				// pi-ai, whose admitted provider configuration owns their transport. This
+				// REST probe only ever connects to the explicitly configured gateway.
 				const result = await testModelPreference(preferencesStore, normalizedPref);
 				json(result, result.status || (result.ok ? 200 : 502));
 				return;
 			}
+			const modelBaseUrl = `${configuredGateway.origin}${resolvedEndpoint.pathname}`.replace(/\/+$/, "");
 			const started = Date.now();
 			try {
 				let resp: Response;
@@ -11778,8 +14118,7 @@ async function handleApiRoute(
 	if (url.pathname.startsWith("/api/aigw/v1/") && getAigwUrl(preferencesStore)) {
 		const aigwUrl = getAigwUrl(preferencesStore)!;
 		const subPath = url.pathname.replace("/api/aigw/v1/", "/v1/");
-		const targetUrl = `${aigwUrl}${subPath}${url.search}`;
-		proxyRequest(targetUrl, req, res);
+		void proxyRequest(aigwUrl, `${subPath}${url.search}`, req, res);
 		return;
 	}
 
@@ -11837,41 +14176,17 @@ async function handleApiRoute(
 			const resolvedTarget = resolveRoleMutationTarget(body?.projectId ?? url.searchParams.get("projectId"));
 			if (!resolvedTarget.ok) { writeConfigProjectScopeError(resolvedTarget); return; }
 			const target = resolvedTarget.target;
-			const modelStr = typeof body?.model === "string" && body.model.trim() ? body.model.trim() : undefined;
-			// Preserve legacy malformed-value dropping, but reject every well-formed
-			// model that is absent from Bobbit's current session-selectable catalog.
-			if (modelStr && /^[^/]+\/.+$/.test(modelStr) && !(await requireCurrentSessionModel(modelStr, "Role model"))) return;
-			if (target.scope === "server") {
-				const role = target.manager.createRole({
-					name: body?.name,
-					label: body?.label,
-					promptTemplate: body?.promptTemplate || "",
-					accessory: body?.accessory,
-					toolPolicies: body?.toolPolicies,
-					model: modelStr,
-					thinkingLevel: normalizeRoleThinking(body?.thinkingLevel),
-				});
-				json(role, 201);
-			} else {
-				const now = Date.now();
-				const role = {
-					name: body?.name,
-					label: body?.label ?? body?.name,
-					promptTemplate: body?.promptTemplate || "",
-					accessory: body?.accessory ?? "none",
-					toolPolicies: body?.toolPolicies,
-					model: modelStr,
-					thinkingLevel: normalizeRoleThinking(body?.thinkingLevel),
-					createdAt: now,
-					updatedAt: now,
-				};
-				if (!role.name || typeof role.name !== "string") throw new Error("Missing name");
-				const NAME_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
-				if (!NAME_PATTERN.test(role.name)) throw new Error("Role name must be lowercase alphanumeric + hyphens");
-				target.store.put(role);
-				json(role, 201);
-			}
+			const role = await createCanonicalRole(body ?? {}, target, {
+				normalizeThinking: normalizeRoleThinking,
+				// The canonical operation owns model validation. Keep the public
+				// route's catalog response verbatim by injecting its real checker.
+				validateModel: (model) => requireCurrentSessionModel(model, "Role model"),
+			});
+			json(role, 201);
 		} catch (err: any) {
+			// requireCurrentSessionModel has already emitted the established 400
+			// MODEL_UNAVAILABLE response; do not append a second response.
+			if (err instanceof CanonicalMutationError && err.code === "MODEL_UNAVAILABLE") return;
 			jsonError(400, err);
 		}
 		return;
@@ -11958,84 +14273,17 @@ async function handleApiRoute(
 			const resolvedTarget = resolveRoleMutationTarget(body.projectId ?? url.searchParams.get("projectId"));
 			if (!resolvedTarget.ok) { writeConfigProjectScopeError(resolvedTarget); return; }
 			const target = resolvedTarget.target;
-			const requestedModel = body.model !== undefined && typeof body.model === "string" && body.model.trim()
-				? body.model.trim()
-				: undefined;
-			if (requestedModel && /^[^/]+\/.+$/.test(requestedModel) && !(await requireCurrentSessionModel(requestedModel, "Role model"))) return;
-			if (target.scope === "project") {
-				const existing = target.store.get(name);
-				if (!existing) { json({ error: "Role not found in project" }, 404); return; }
-				const validPolicies = new Set(['allow', 'ask', 'never', 'always-allow', 'ask-once', 'always-ask', 'never-ask']);
-				let toolPolicies = existing.toolPolicies;
-				if (body.toolPolicies !== undefined) {
-					const cleaned: Record<string, any> = {};
-					if (body.toolPolicies && typeof body.toolPolicies === 'object') {
-						for (const [k, v] of Object.entries(body.toolPolicies)) {
-							if (typeof v === 'string' && validPolicies.has(v)) cleaned[k] = v;
-						}
-					}
-					toolPolicies = cleaned;
-				}
-				// model / thinkingLevel: explicit empty string clears the field; absent leaves unchanged.
-				let model = existing.model;
-				if (body.model !== undefined) {
-					model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : undefined;
-				}
-				let thinkingLevel = existing.thinkingLevel;
-				if (body.thinkingLevel !== undefined) {
-					thinkingLevel = normalizeRoleThinking(body.thinkingLevel);
-				}
-				const updated = {
-					...existing,
-					label: body.label ?? existing.label,
-					promptTemplate: body.promptTemplate ?? existing.promptTemplate,
-					accessory: body.accessory ?? existing.accessory,
-					toolPolicies,
-					model,
-					thinkingLevel,
-					name,
-					updatedAt: Date.now(),
-				};
-				target.store.put(updated);
-				json({ ok: true });
-			} else {
-				// model / thinkingLevel: explicit empty string clears the field; absent leaves unchanged.
-				const modelUpdate = body.model !== undefined
-					? (typeof body.model === "string" && body.model.trim() ? body.model.trim() : "")
-					: undefined;
-				const thinkingUpdate = body.thinkingLevel !== undefined
-					? (normalizeRoleThinking(body.thinkingLevel) ?? "")
-					: undefined;
-				// Apply model/thinking via direct store update to support clearing (yaml-store update treats undefined as "don't change").
-				if (modelUpdate !== undefined || thinkingUpdate !== undefined) {
-					const existing = target.manager.getRole(name);
-					if (existing) {
-						const patched = {
-							...existing,
-							model: modelUpdate !== undefined ? (modelUpdate || undefined) : existing.model,
-							thinkingLevel: thinkingUpdate !== undefined ? (thinkingUpdate || undefined) : existing.thinkingLevel,
-							updatedAt: Date.now(),
-						};
-						target.store.put(patched);
-					}
-				}
-				const ok = target.manager.updateRole(name, {
-					label: body.label,
-					promptTemplate: body.promptTemplate,
-					accessory: body.accessory,
-					toolPolicies: body.toolPolicies !== undefined ? (() => {
-						const validPolicies = new Set(['allow', 'ask', 'never', 'always-allow', 'ask-once', 'always-ask', 'never-ask']);
-						const cleaned: Record<string, import("./agent/role-store.js").GrantPolicy> = {};
-						if (body.toolPolicies && typeof body.toolPolicies === 'object') {
-							for (const [k, v] of Object.entries(body.toolPolicies)) {
-								if (typeof v === 'string' && validPolicies.has(v)) cleaned[k] = v as import("./agent/role-store.js").GrantPolicy;
-							}
-						}
-						return cleaned;
-					})() : undefined,
+			try {
+				await updateCanonicalRole(name, body, target, {
+					normalizeThinking: normalizeRoleThinking,
+					validateModel: (model) => requireCurrentSessionModel(model, "Role model"),
 				});
-				if (!ok) { json({ error: "Role not found" }, 404); return; }
 				json({ ok: true });
+			} catch (error) {
+				// requireCurrentSessionModel already owns this legacy response body.
+				if (error instanceof CanonicalMutationError && error.code === "MODEL_UNAVAILABLE") return;
+				if (error instanceof CanonicalMutationError) json({ error: error.message }, error.status);
+				else jsonError(500, error);
 			}
 			return;
 		}
@@ -12044,13 +14292,12 @@ async function handleApiRoute(
 			const resolvedTarget = resolveRoleMutationTarget(url.searchParams.get("projectId"));
 			if (!resolvedTarget.ok) { writeConfigProjectScopeError(resolvedTarget); return; }
 			const target = resolvedTarget.target;
-			if (target.scope === "project") {
-				target.store.remove(name);
+			try {
+				deleteCanonicalRole(name, target);
 				json({ ok: true });
-			} else {
-				const ok = target.manager.deleteRole(name);
-				if (!ok) { json({ error: "Role not found" }, 404); return; }
-				json({ ok: true });
+			} catch (error) {
+				if (error instanceof CanonicalMutationError) json({ error: error.message }, error.status);
+				else jsonError(500, error);
 			}
 			return;
 		}
@@ -12870,10 +15117,13 @@ async function handleApiRoute(
 			goal.workflow = freezeResult.workflow;
 		}
 
+		// The un-offset branch container is the cache witness root and command root.
+		const branchContainer = goalBranchContainer(goal);
+
 		// Get commit SHA
 		let commitSha = "unknown";
 		try {
-			commitSha = await execGitSafe("git rev-parse HEAD", goal.cwd, "unknown");
+			commitSha = await execGitSafe("git rev-parse HEAD", branchContainer, "unknown");
 		} catch { /* ignore */ }
 
 		// Reject if verification is already running for this gate+commit
@@ -13028,7 +15278,6 @@ async function handleApiRoute(
 		// integration target; when unset, fall back to the repo's detected primary.
 		// `parseBaseRef` normalizes remote refs like `origin/master` to `master`
 		// for workflow variables such as `{{baseBranch}}` and legacy `{{master}}`.
-		const branchContainer = goalBranchContainer(goal);
 		const configuredBase = parseBaseRef(gateSignalCtx.projectConfigStore.get("base_ref") || "");
 		const primary = configuredBase.branch || (await detectPrimaryBranch(branchContainer, serverCommandRunner, serverRemoteGitPolicy).catch(() => "master"));
 		verificationHarness.verifyGateSignal(
@@ -15468,7 +17717,7 @@ async function handleApiRoute(
 
 	// ── Editable proposals (file-on-disk source of truth) ──────────────
 	// docs/design/editable-proposals.md §6.4
-	const proposalRouteMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/proposal\/([^/]+)(\/edit|\/seed|\/restore|\/snapshot)?$/);
+	const proposalRouteMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/proposal\/([^/]+)(\/edit|\/seed|\/restore|\/snapshot|\/accept-extension-sections)?$/);
 	if (proposalRouteMatch) {
 		const sessionId = proposalRouteMatch[1];
 		const typeStr = proposalRouteMatch[2];
@@ -15483,6 +17732,123 @@ async function handleApiRoute(
 		}
 		const proposalType = typeStr as ProposalType;
 		const proposalStateDir = bobbitStateDir();
+		const isPromptOperator = isVerifiedPromptOperator();
+		const proposalMutationAgentSessionId = resolveAuthenticCallerFromSessionSecret();
+		const samePromptProposalSection = (left: PromptExtensionProposalSection, right: PromptExtensionProposalSection): boolean =>
+			left.packId === right.packId && left.sectionId === right.sectionId
+			&& left.content === right.content && left.expectedRevision === right.expectedRevision;
+		const promptProposalSections = (fields: Record<string, unknown> | undefined): PromptExtensionProposalSection[] =>
+			fields?.extensionPromptSections === undefined
+				? [] : validatePromptExtensionProposalSections(fields.extensionPromptSections);
+		const authorizeAgentPromptProposalCandidate = (before: Record<string, unknown> | undefined, candidate: Record<string, unknown>) => {
+			if (proposalType !== "project") return undefined;
+			const next = promptProposalSections(candidate);
+			const previous = promptProposalSections(before);
+			const involvesPromptSections = before?.extensionPromptSections !== undefined
+				|| candidate.extensionPromptSections !== undefined;
+			if (!involvesPromptSections) return undefined;
+
+			// A session secret identifies its owning session, not merely an agent class.
+			// Never permit one agent's secret to seed, edit, or restore another
+			// session's prompt proposal (or to lend that session its model attribution).
+			if (!isPromptOperator && proposalMutationAgentSessionId !== sessionId) {
+				throw new PromptExtensionValidationError("GRANT_REQUIRED", "Prompt extension proposals require the authentic session secret for the route session");
+			}
+			const proposalSession = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
+			const persistedProposalSession = sessionManager.getPersistedSession(sessionId);
+			if (!proposalSession) {
+				throw new PromptExtensionValidationError("GRANT_REQUIRED", "Prompt extension proposals require an existing route session");
+			}
+			const targetProjectId = typeof candidate.projectId === "string" && candidate.projectId.trim()
+				? candidate.projectId.trim() : proposalSession.projectId;
+			const previousTargetProjectId = typeof before?.projectId === "string" && before.projectId.trim()
+				? before.projectId.trim() : proposalSession.projectId;
+			const targetChanged = before !== undefined && targetProjectId !== previousTargetProjectId;
+			const changes = next.filter(section => !previous.some(prior => samePromptProposalSection(prior, section)));
+			const removed = previous.filter(section => !next.some(candidateSection =>
+				candidateSection.packId === section.packId && candidateSection.sectionId === section.sectionId,
+			));
+			// Moving a draft to another project changes which installed pack and grant
+			// authorize every section, even where the section tuple is byte-identical.
+			const authorizationSections = (targetChanged ? [...previous, ...next] : [...changes, ...removed])
+				.filter((section, index, all) => index === all.findIndex(candidateSection =>
+					candidateSection.packId === section.packId && candidateSection.sectionId === section.sectionId,
+				));
+			if (authorizationSections.length === 0 || isPromptOperator) return undefined;
+			const context = targetProjectId && projectContextManager.getOrCreate(targetProjectId);
+			if (!context) throw new PromptExtensionValidationError("GRANT_REQUIRED", "Prompt extension proposals require an existing target project");
+			const packs = packContributionRegistry.list(targetProjectId);
+			const grants = effectiveExtensionGrants(targetProjectId, context.projectConfigStore);
+			for (const change of authorizationSections) {
+				const grant = grants.find(candidateGrant => candidateGrant.packId === change.packId
+					&& candidateGrant.capability === "prompt:system-author");
+				if (!grant) {
+					throw new PromptExtensionValidationError("GRANT_REQUIRED", "prompt:system-author grant is required for prompt extension proposals");
+				}
+			}
+			// A retarget leaves section bytes unchanged, but it still authorizes and
+			// publishes an authoring request in the new project. Preserve those next
+			// sections for the target-attributed audit rather than dropping the event.
+			return { changes: targetChanged ? next : changes, context, targetProjectId, proposalSession, persistedProposalSession, packs, grants };
+		};
+		const recordAgentPromptProposalAudit = (
+			authoring: NonNullable<ReturnType<typeof authorizeAgentPromptProposalCandidate>>,
+			rev: number, trigger: string,
+		): void => {
+			try {
+				const before = resolveStaticPromptSectionsForProject(projectContextManager, packContributionRegistry, authoring.targetProjectId);
+				const after = before.map(section => {
+					const change = authoring.changes.find(candidate => candidate.packId === section.packId && candidate.sectionId === section.sectionId);
+					return change ? { ...section, content: change.content } : section;
+				});
+				const sessionAuditContext = authoring.proposalSession?.projectId
+					? projectContextManager.getOrCreate(authoring.proposalSession.projectId)
+					: undefined;
+				// The target remains authoritative, while an identical, target-attributed
+				// record in the authoring session's project lets the session route read it
+				// directly. Never discover this by scanning other project state directories.
+				const auditStateDirs = [...new Set([
+					authoring.context.stateDir,
+					sessionAuditContext?.stateDir,
+				].filter((value): value is string => !!value))];
+				const promptParts = sessionManager.getPromptParts(sessionId);
+				const totalPromptBytes = promptParts
+					? getSystemPromptLayout({ ...promptParts, extensionPromptSections: after }).totalPromptBytes : 0;
+				const auditIds: string[] = [];
+				for (const change of authoring.changes) {
+					const baseline = before.find(section => section.packId === change.packId && section.sectionId === change.sectionId);
+					const grant = authoring.grants.find((candidateGrant): candidateGrant is Exclude<ExtensionGrant, { principal: "pack" }> =>
+						!isPackExtensionGrant(candidateGrant)
+						&& candidateGrant.packId === change.packId
+						&& candidateGrant.capability === "prompt:system-author"
+						&& !!authoring.packs.find(pack => pack.packId === change.packId)?.hooks.some(hook => hook.id === candidateGrant.hookId));
+					if (!baseline || !grant) continue;
+					let recordId: string | undefined;
+					for (const stateDir of auditStateDirs) {
+						const record = new PromptExtensionAuthoringAuditStore(stateDir, fsImpl).create({
+							...(recordId ? { id: recordId } : {}),
+							packId: change.packId, hookId: grant.hookId, event: "proposal", sectionId: change.sectionId,
+							actor: "agent", sessionId, projectId: authoring.context.project.id,
+							...(authoring.proposalSession?.goalId ? { goalId: authoring.proposalSession.goalId } : {}), trigger,
+							...promptExtensionBaseline(baseline.content), proposalId: `${sessionId}:${rev}`,
+							diff: createPromptExtensionUnifiedDiff(baseline.content, change.content, change),
+							...(authoring.persistedProposalSession?.modelProvider && authoring.persistedProposalSession.modelId ? { model: `${authoring.persistedProposalSession.modelProvider}/${authoring.persistedProposalSession.modelId}`, provider: authoring.persistedProposalSession.modelProvider } : {}),
+							...(authoring.persistedProposalSession?.effectiveThinkingLevel ? { thinkingLevel: authoring.persistedProposalSession.effectiveThinkingLevel } : {}),
+							sectionBytes: promptExtensionSectionBytes(change), totalPromptBytes,
+						});
+						recordId ??= record.id;
+					}
+					if (recordId) auditIds.push(recordId);
+				}
+				sessionManager.registerPromptExtensionAuthoringAudits(sessionId, auditIds, {
+					projectId: authoring.context.project.id,
+					stateDir: authoring.context.stateDir,
+					...(sessionAuditContext?.stateDir ? { sessionStateDir: sessionAuditContext.stateDir } : {}),
+				});
+			} catch (error) {
+				console.warn(`[prompt-extension] proposal audit unavailable for ${sessionId}:`, redactSensitive(String(error)));
+			}
+		};
 
 		// GET /api/sessions/:id/proposal/:type — read raw file
 		if (suffix === "" && req.method === "GET") {
@@ -15542,6 +17908,100 @@ async function handleApiRoute(
 			return;
 		}
 
+		// POST /api/sessions/:id/proposal/project/accept-extension-sections —
+		// the sole human approval path for static prompt edits. It reads the
+		// stored proposal itself, never trusting raw section text from the wire.
+		if (suffix === "/accept-extension-sections" && req.method === "POST") {
+			if (proposalType !== "project") { json({ error: "Method not allowed" }, 405); return; }
+			if (!requireVerifiedPromptOperator()) return;
+			const body = await readBody(req).catch(() => null);
+			const targetProjectId = typeof body?.projectId === "string" ? body.projectId.trim() : "";
+			if (!targetProjectId) { json({ error: "projectId is required", code: "PROJECT_ID_REQUIRED" }, 400); return; }
+			const context = projectContextManager.getOrCreate(targetProjectId);
+			if (!context) { json({ error: "Project not found", code: "UNKNOWN_PROJECT" }, 404); return; }
+			try {
+				const parsed = await parseProposalFile(proposalStateDir, sessionId, "project");
+				if (!parsed.ok) { json(parsed, 400); return; }
+				const changes = extensionPromptSectionsFromProposal(parsed.value);
+				if (!changes) { json({ error: "Project proposal has no extension prompt sections", code: "PROMPT_EXTENSION_PROPOSAL_REQUIRED" }, 422); return; }
+				const declaredTarget = typeof parsed.value.fields.projectId === "string" ? parsed.value.fields.projectId.trim() : "";
+				if (declaredTarget && declaredTarget !== targetProjectId) {
+					json({ error: "Project proposal target does not match approval target", code: "PROJECT_ID_MISMATCH" }, 409);
+					return;
+				}
+				const active = packContributionRegistry.list(targetProjectId);
+				const activeSections = packContributionRegistry.listSystemPromptSections?.(targetProjectId) ?? [];
+				const caps = new Map(activeSections.map(section => [promptExtensionKey(section.packId, section.sectionId), section.maxBytes]));
+				const before = resolveStaticPromptSectionsForProject(projectContextManager, packContributionRegistry, targetProjectId);
+				acceptPromptExtensionProposal(context.projectConfigStore, changes, {
+					actor: extensionGrantActor,
+					hasStaticGrant: (packId) => effectiveExtensionGrants(targetProjectId, context.projectConfigStore).some(grant => {
+						if (isPackExtensionGrant(grant) || grant.packId !== packId || grant.capability !== "prompt:system-static") return false;
+						const hook = active.find(pack => pack.packId === packId)?.hooks.find(candidate => candidate.id === grant.hookId);
+						return !!hook && hook.capabilities.includes("prompt:system-static" as any);
+					}),
+					hasSection: (packId, sectionId) => activeSections.some(section => section.packId === packId && section.sectionId === sectionId),
+					resolveEffectiveSections: (overrides) => resolveStaticPromptSectionsForProject(projectContextManager, packContributionRegistry, targetProjectId, overrides),
+					declaredMaxBytes: caps,
+				});
+				const proposalRev = await latestRev(proposalStateDir, sessionId, "project");
+				const proposalId = `${sessionId}:${proposalRev}`;
+				const acceptedAuditIds: string[] = [];
+				// Override publication above is authoritative. Audit/trace availability
+				// must not turn an already-accepted proposal into a false client failure.
+				try {
+					const authoringSession = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
+					const sessionAuditContext = authoringSession?.projectId
+						? projectContextManager.getOrCreate(authoringSession.projectId)
+						: undefined;
+					const auditStateDirs = [...new Set([context.stateDir, sessionAuditContext?.stateDir].filter((value): value is string => !!value))];
+					const targetAudit = new PromptExtensionAuthoringAuditStore(context.stateDir, fsImpl);
+					const sessionAudit = new PromptExtensionAuthoringAuditStore(sessionAuditContext?.stateDir ?? context.stateDir, fsImpl);
+					for (const change of changes) {
+						// Draft edits create a new proposal revision without changing the
+						// authoring request identity. Resolve that identity from the direct
+						// authoring-session mirror, then require the target store to own the
+						// same opaque record. An unrelated newer target row must not settle.
+						const mirror = sessionAudit.listForSession(sessionId, 200).filter(candidate =>
+							candidate.projectId === context.project.id
+							&& candidate.packId === change.packId
+							&& candidate.sectionId === change.sectionId
+							&& (candidate.status === "requested" || candidate.status === "proposed")
+						).at(-1);
+						const entry = mirror && targetAudit.get(mirror.id);
+						const baseline = before.find(section => section.packId === change.packId && section.sectionId === change.sectionId);
+						if (!entry || entry.projectId !== context.project.id || !baseline) continue;
+						const update = {
+							status: "accepted" as const, terminal: false, proposalId,
+							diff: createPromptExtensionUnifiedDiff(baseline.content, change.content, change),
+							sectionBytes: promptExtensionSectionBytes(change),
+						};
+						for (const stateDir of auditStateDirs) {
+							const audit = new PromptExtensionAuthoringAuditStore(stateDir, fsImpl);
+							if (audit.get(entry.id)) audit.complete(entry.id, update);
+						}
+						acceptedAuditIds.push(entry.id);
+					}
+					// Trace deliberately exposes only bounded ids/statuses; the authorized
+					// audit endpoint joins the exact diff/model/usage detail by these ids.
+					new ContextTraceStore(bobbitStateDir(), fsImpl).appendTrace(sessionId, {
+						ts: Date.now(), hook: "afterTurn", sessionId, providers: [],
+						outcomes: acceptedAuditIds.length > 0
+							? acceptedAuditIds.map(id => ({ kind: "audit" as const, hookId: id, event: "afterTurn" as const, outcome: "applied" as const, value: id }))
+							: [{ kind: "audit" as const, hookId: "prompt-extension-approval", event: "afterTurn" as const, outcome: "applied" as const }],
+					});
+				} catch {
+					console.warn("[prompt-extension] proposal acceptance audit unavailable");
+				}
+				invalidateResolverCaches();
+				json({ ok: true, proposalId });
+			} catch (error) {
+				const code = error instanceof PromptExtensionValidationError ? error.code : "PROMPT_EXTENSION_REJECTED";
+				json({ error: error instanceof Error ? error.message : "Prompt extension proposal rejected", code }, 422);
+			}
+			return;
+		}
+
 		// POST /api/sessions/:id/proposal/:type/edit — surgical edit
 		if (suffix === "/edit" && req.method === "POST") {
 			const body = await readBody(req);
@@ -15555,12 +18015,16 @@ async function handleApiRoute(
 				return;
 			}
 			try {
-				const result = await editProposalFile(proposalStateDir, sessionId, proposalType, old_text, new_text);
+				const existing = proposalType === "project" ? await parseProposalFile(proposalStateDir, sessionId, proposalType) : undefined;
+				const before = existing?.ok ? existing.value.fields : undefined;
+				let authoring: ReturnType<typeof authorizeAgentPromptProposalCandidate> = undefined;
+				const result = await editProposalFile(proposalStateDir, sessionId, proposalType, old_text, new_text, candidate => { authoring = authorizeAgentPromptProposalCandidate(before, candidate.fields); });
 				if (!result.ok) {
 					const status = result.code === "FILE_NOT_FOUND" ? 404 : 400;
 					json(result, status);
 					return;
 				}
+				if (authoring) recordAgentPromptProposalAudit(authoring, result.rev, "edit_proposal");
 				if (_broadcastToSession) {
 					_broadcastToSession(sessionId, {
 						type: "proposal_update",
@@ -15574,7 +18038,8 @@ async function handleApiRoute(
 				}
 				json({ ok: true, newContent: result.newContent, rev: result.rev });
 			} catch (err) {
-				json({ error: String((err as Error)?.message ?? err) }, 500);
+				if (err instanceof PromptExtensionValidationError) json({ ok: false, code: err.code, message: err.message }, err.code === "GRANT_REQUIRED" ? 403 : 422);
+				else json({ error: String((err as Error)?.message ?? err) }, 500);
 			}
 			return;
 		}
@@ -15591,113 +18056,44 @@ async function handleApiRoute(
 				json({ ok: false, code: "INVALID_BODY", message: "args must be an object" }, 400);
 				return;
 			}
-			// Auto-inject parentGoalId for team-lead sessions proposing a goal,
-			// but only when the current goal is actually allowed to spawn a child.
-			// If subgoals are disabled globally or for this parent, an omitted
-			// parentGoalId must remain omitted so accepting the proposal creates a
-			// top-level goal instead of a hidden invalid child proposal.
-			let enrichedArgs = args as Record<string, unknown>;
-			// §1 cross-project target resolver — goal / staff / role / tool
-			// (NOT project). Resolve the TARGET project uniformly so that the
-			// tool path and direct API callers behave identically:
-			//   explicit trimmed args.projectId wins;
-			//   otherwise the session's project (system → headquarters).
-			// The resolved target is validated against the registry and stamped
-			// onto the draft, making `proposal.fields.projectId` the single
-			// source of truth for acceptance routing. When projectId is omitted
-			// this reduces to the previous behaviour byte-for-byte. `project`
-			// proposals are excluded: their client acceptance mode and dispatch are
-			// determined solely by `proposal.fields.projectId`; mutation endpoints
-			// validate any dispatched explicit target as defense in depth.
-			if (proposalType === "goal" || proposalType === "staff" || proposalType === "role" || proposalType === "tool") {
-				const proposalSession = sessionManager.getSession(sessionId) ?? sessionManager.getPersistedSession(sessionId);
-				const sessionProjectId = proposalSession?.projectId;
-				const explicitProjectId = typeof enrichedArgs.projectId === "string" && enrichedArgs.projectId.trim().length > 0
-					? enrichedArgs.projectId.trim()
-					: undefined;
-				const defaultProjectId = sessionProjectId === SYSTEM_PROJECT_ID ? HEADQUARTERS_PROJECT_ID : sessionProjectId;
-				const targetProjectId = explicitProjectId ?? defaultProjectId;
-				if (!targetProjectId) {
-					json({ ok: false, code: "PROJECT_ID_REQUIRED", message: "projectId required for project-scoped proposals" }, 400);
-					return;
-				}
-				const targetRecord = projectRegistry.get(targetProjectId);
-				if (!targetRecord) {
-					json({ ok: false, code: "UNKNOWN_PROJECT", message: `Unknown project: ${targetProjectId}` }, 422);
-					return;
-				}
-				// A hidden/synthetic project (e.g. the `system` anchor) is never a
-				// valid user-facing cross-project target. The system→headquarters
-				// mapping above applies to the OMITTED default only; an EXPLICIT
-				// projectId naming a hidden project must be rejected. Guarded on
-				// `explicitProjectId` so a hidden target arriving via the session
-				// default is unaffected (byte-for-byte default path preserved).
-				if (explicitProjectId && targetRecord.hidden) {
-					json({ ok: false, code: "UNKNOWN_PROJECT", message: `Project "${explicitProjectId}" is not a valid cross-project target.` }, 422);
-					return;
-				}
-				enrichedArgs = { ...enrichedArgs, projectId: targetProjectId };
-			}
-			// Resolve workflow membership from the stamped TARGET project, then run
-			// parent injection and validation through the state-independent core.
-			if (proposalType === "goal") {
-				const liveSession = sessionManager.getSession(sessionId);
-				const projectId = (typeof enrichedArgs.projectId === "string" && enrichedArgs.projectId.trim().length > 0
-					? enrichedArgs.projectId.trim()
-					: undefined)
-					?? (liveSession ?? sessionManager.getPersistedSession(sessionId))?.projectId;
-				let workflows: import("./agent/workflow-store.js").Workflow[] = [];
-				if (projectId) {
-					workflows = configCascade.resolveWorkflows(projectId).map(r => r.item);
-					if (workflows.length === 0) {
-						const ctx = projectContextManager.getOrCreate(projectId);
-						if (ctx) workflows = ctx.workflowStore.getAll();
-					}
-				}
-				const prepared = prepareGoalProposalSeed(enrichedArgs, {
-					session: liveSession,
-					workflows,
-					getGoal: (id) => getGoalAcrossProjects(id),
-					getPreference: (key) => preferencesStore.get(key),
-				});
-				if (!prepared.ok) { json(prepared.body, prepared.status); return; }
-				enrichedArgs = prepared.args;
-			}
+			let authoring: ReturnType<typeof authorizeAgentPromptProposalCandidate> = undefined;
 			try {
-				const writeRes = await writeProposalFile(proposalStateDir, sessionId, proposalType, enrichedArgs);
-				const parsed = await parseProposalFile(proposalStateDir, sessionId, proposalType);
-				if (!parsed.ok) {
-					json(parsed, 400);
+				authoring = authorizeAgentPromptProposalCandidate(undefined, args as Record<string, unknown>);
+			} catch (err) {
+				if (err instanceof PromptExtensionValidationError) json({ ok: false, code: err.code, message: err.message }, err.code === "GRANT_REQUIRED" ? 403 : 422);
+				else jsonError(500, err);
+				return;
+			}
+			if (proposalType === "project" && authoring) {
+				try {
+					const writeRes = await writeProposalFile(proposalStateDir, sessionId, proposalType, args as Record<string, unknown>);
+					recordAgentPromptProposalAudit(authoring, writeRes.rev, "propose_project");
+					json({ ok: true, rev: writeRes.rev });
+				} catch (err) { jsonError(500, err); }
+				return;
+			}
+			const proposalSeedService = new ProposalSeedService({
+				stateDir: proposalStateDir,
+				sessionManager,
+				projectRegistry,
+				projectContextManager,
+				configCascade,
+				getGoal: getGoalAcrossProjects,
+				getPreference: (key) => preferencesStore.get(key),
+				systemProjectId: SYSTEM_PROJECT_ID,
+				headquartersProjectId: HEADQUARTERS_PROJECT_ID,
+				broadcastToSession: _broadcastToSession,
+				packContributionRegistry,
+				readBody,
+			});
+			try {
+				const seeded = await proposalSeedService.seed(sessionId, proposalType, args as Record<string, unknown>);
+				if (!seeded.ok) {
+					json(seeded.body, seeded.status);
 					return;
 				}
-				const proposalLabel = proposalType.charAt(0).toUpperCase() + proposalType.slice(1);
-				await openSidePanelWorkspaceTab({
-					sessionManager,
-					readBody,
-					broadcastToSession: _broadcastToSession,
-					packContributionRegistry,
-				}, sessionId, {
-					id: `proposal:${proposalType}`,
-					kind: "proposal",
-					title: `${proposalLabel} Proposal`,
-					label: proposalLabel,
-					source: { type: "proposal", sessionId, proposalType },
-					updatedAt: Date.now(),
-				}, { focus: true, placeAfterActive: true }).catch((err) => {
-					console.warn(`[proposal/seed] failed to open side-panel workspace tab for ${sessionId}/${proposalType}:`, err);
-				});
-				if (_broadcastToSession) {
-					_broadcastToSession(sessionId, {
-						type: "proposal_update",
-						sessionId,
-						proposalType,
-						fields: parsed.value.fields,
-						rev: writeRes.rev,
-						streaming: false,
-						source: "seed",
-					});
-				}
-				json({ ok: true, rev: writeRes.rev });
+				if (authoring) recordAgentPromptProposalAudit(authoring, seeded.rev, "propose_project");
+				json({ ok: true, rev: seeded.rev });
 			} catch (err) {
 				json({ error: String((err as Error)?.message ?? err) }, 500);
 			}
@@ -15717,7 +18113,10 @@ async function handleApiRoute(
 				return;
 			}
 			try {
-				const result = await restoreSnapshot(proposalStateDir, sessionId, proposalType, rev);
+				const existing = proposalType === "project" ? await parseProposalFile(proposalStateDir, sessionId, proposalType) : undefined;
+				const before = existing?.ok ? existing.value.fields : undefined;
+				let authoring: ReturnType<typeof authorizeAgentPromptProposalCandidate> = undefined;
+				const result = await restoreSnapshot(proposalStateDir, sessionId, proposalType, rev, candidate => { authoring = authorizeAgentPromptProposalCandidate(before, candidate.fields); });
 				if (!result.ok) {
 					const status = (result as any).code === "SNAPSHOT_NOT_FOUND" ? 404 : 400;
 					json(result, status);
@@ -15739,6 +18138,7 @@ async function handleApiRoute(
 				}, { focus: true, placeAfterActive: true }).catch((err) => {
 					console.warn(`[proposal/restore] failed to open side-panel workspace tab for ${sessionId}/${proposalType}:`, err);
 				});
+				if (authoring) recordAgentPromptProposalAudit(authoring, result.newRev, "restore_proposal");
 				if (_broadcastToSession) {
 					_broadcastToSession(sessionId, {
 						type: "proposal_update",
@@ -15752,7 +18152,8 @@ async function handleApiRoute(
 				}
 				json({ ok: true, newRev: result.newRev, fields: result.fields });
 			} catch (err) {
-				json({ error: String((err as Error)?.message ?? err) }, 500);
+				if (err instanceof PromptExtensionValidationError) json({ ok: false, code: err.code, message: err.message }, err.code === "GRANT_REQUIRED" ? 403 : 422);
+				else json({ error: String((err as Error)?.message ?? err) }, 500);
 			}
 			return;
 		}
@@ -17009,20 +19410,9 @@ async function handleApiRoute(
 		try {
 			const ctx = projectContextManager.getOrCreate(targetProjectId);
 			if (!ctx) { json({ error: "Project not found" }, 404); return; }
-			const now = Date.now();
-			const workflow = {
-				id: body.id as string,
-				name: (body.name as string) ?? body.id,
-				description: (body.description as string) ?? "",
-				gates: body.gates || [],
-				createdAt: now,
-				updatedAt: now,
-			};
-			if (!workflow.id || typeof workflow.id !== "string") throw new Error("Missing id");
-			ctx.workflowStore.put(workflow);
-			json(workflow, 201);
+			json(createCanonicalWorkflow(body, ctx.workflowStore, ctx.projectConfigStore.getComponents()), 201);
 		} catch (err: any) {
-			jsonError(400, err);
+			jsonError(err instanceof CanonicalMutationError ? err.status : 400, err);
 		}
 		return;
 	}
@@ -17087,18 +19477,12 @@ async function handleApiRoute(
 		if (!qProjectId) { json({ error: "projectId required" }, 400); return; }
 		const ctx = projectContextManager.getOrCreate(qProjectId);
 		if (!ctx) { json({ error: "Project not found" }, 404); return; }
-		const existing = ctx.workflowStore.get(id);
-		if (!existing) { json({ error: "Workflow not found in project" }, 404); return; }
-		const updated = {
-			...existing,
-			name: body.name ?? existing.name,
-			description: body.description ?? existing.description,
-			gates: Array.isArray(body.gates) ? body.gates : existing.gates,
-			id,
-			updatedAt: Date.now(),
-		};
-		ctx.workflowStore.put(updated);
-		json(updated);
+		try {
+			json(updateCanonicalWorkflow(id, body, ctx.workflowStore, ctx.projectConfigStore.getComponents()));
+		} catch (error) {
+			if (error instanceof CanonicalMutationError) json({ error: error.message }, error.status);
+			else jsonError(500, error);
+		}
 		return;
 	}
 
@@ -18097,72 +20481,30 @@ async function handleApiRoute(
 	// POST /api/staff
 	if (url.pathname === "/api/staff" && req.method === "POST") {
 		const body = await readBody(req);
-		if (!body?.name || typeof body.name !== "string") {
-			json({ error: "Missing name" }, 400);
-			return;
-		}
-		if (!body?.systemPrompt || typeof body.systemPrompt !== "string") {
-			json({ error: "Missing systemPrompt" }, 400);
-			return;
-		}
-		// Defense-in-depth: roleId, when present, must be a string or null.
-		if (body.roleId !== undefined && body.roleId !== null && typeof body.roleId !== "string") {
-			json({ error: "roleId must be a string or null" }, 400);
-			return;
-		}
-		// Validate goal-* triggers carry a non-empty prompt (push-based
-		// dispatcher has no fallback; the prompt is mandatory).
 		try {
-			staffManager.validateTriggers(body.triggers);
-		} catch (err: any) {
-			jsonError(400, err);
-			return;
-		}
-		const explicitCwd = typeof body.cwd === "string" && body.cwd.trim().length > 0
-			? body.cwd.trim()
-			: undefined;
-		const explicitProjectId = typeof body.projectId === "string" && body.projectId.trim().length > 0
-			? body.projectId.trim()
-			: undefined;
-		const resolved = resolveProjectForRequest(projectRegistry, { projectId: explicitProjectId });
-		if (!resolved.ok) { writeProjectResolutionError(resolved); return; }
-		const cwd = explicitCwd ?? resolved.project.rootPath;
-		const cwdValidation = validateExecutionCwd(projectRegistry, projectContextManager, resolved.projectId, cwd, { kind: "user-input" });
-		if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
-		const projectId = resolved.projectId;
-		// Validate the referenced role exists in the selected project's cascade.
-		// roleId omitted or null/empty is allowed — staff with no role behave as before.
-		if (typeof body.roleId === "string" && body.roleId.length > 0 && !resolveRoleForProject(body.roleId, projectId)) {
-			json({ error: "Role not found" }, 404);
-			return;
-		}
-		try {
-			const staff = await staffManager.createStaff(
-				body.name,
-				body.description || "",
-				body.systemPrompt,
-				cwd,
-				sessionManager,
-				{
-					triggers: body.triggers,
-					roleId: body.roleId,
-					accessory: body.accessory,
-					projectId,
-					sandboxed: body.sandboxed === true,
-					...(typeof body.worktree === "boolean" ? { worktree: body.worktree } : {}),
+			const staff = await createCanonicalStaff(body ?? {}, {
+				resolveProject: (projectId) => {
+					const resolved = resolveProjectForRequest(projectRegistry, { projectId });
+					if (!resolved.ok) throw new CanonicalMutationError(resolved.status, resolved.error, resolved.code);
+					return { projectId: resolved.projectId, rootPath: resolved.project.rootPath };
 				},
-			);
-			broadcastStaffChanged({
-				type: "staff_changed",
-				reason: "created",
-				staffId: staff.id,
-				projectId,
-				sessionId: staff.currentSessionId,
+				validateCwd: (projectId, cwd) => {
+					const result = validateExecutionCwd(projectRegistry, projectContextManager, projectId, cwd, { kind: "user-input" });
+					if (!result.ok) throw new CanonicalMutationError(result.status, result.error, result.code);
+				},
+				validateTriggers: (triggers) => staffManager.validateTriggers(triggers as any),
+				validateRole: (roleId, projectId) => {
+					if (!resolveRoleForProject(roleId, projectId)) throw new CanonicalMutationError(404, "Role not found");
+				},
+				create: (name, description, prompt, staffCwd, options) => staffManager.createStaff(name, description, prompt, staffCwd, sessionManager, options as any),
+				broadcast: (staff, staffProjectId) => broadcastStaffChanged({
+					type: "staff_changed", reason: "created", staffId: staff.id, projectId: staffProjectId, sessionId: staff.currentSessionId,
+				}),
 			});
 			json(staff, 201);
-		} catch (err: any) {
-			console.error("[server] Failed to create staff agent:", err);
-			jsonError(500, err);
+		} catch (error) {
+			if (error instanceof CanonicalMutationError) json({ error: error.message, ...(error.code ? { code: error.code } : {}) }, error.status);
+			else { console.error("[server] Failed to create staff agent:", error); jsonError(500, error); }
 		}
 		return;
 	}
@@ -18281,53 +20623,54 @@ async function handleApiRoute(
 			}
 
 			const hasAccessoryUpdate = Object.prototype.hasOwnProperty.call(body, "accessory");
-			const ok = staffManager.updateStaff(id, {
-				name: body.name,
-				description: body.description,
-				systemPrompt: body.systemPrompt,
-				cwd: cwdUpdate,
-				state: body.state,
-				triggers: body.triggers,
-				memory: body.memory,
-				roleId: body.roleId,
-				accessory: hasAccessoryUpdate ? body.accessory : undefined,
-				contextPolicy:
-					body.contextPolicy === "preserve" || body.contextPolicy === "compact"
-						? body.contextPolicy
-						: undefined,
-			});
-			if (!ok) { json({ error: "Staff agent not found" }, 404); return; }
-			const staff = staffManager.getStaff(id);
-			if (hasAccessoryUpdate && staff?.currentSessionId) {
-				sessionManager.updateSessionMeta(staff.currentSessionId, { accessory: staff.accessory });
-			}
-			if (staff) {
-				broadcastStaffChanged({
-					type: "staff_changed",
-					reason: "updated",
-					staffId: staff.id,
-					projectId: staff.projectId ?? existingStaff.projectId ?? SYSTEM_PROJECT_ID,
-					sessionId: staff.currentSessionId,
+			let staff;
+			try {
+				staff = updateCanonicalStaff(id, {
+					name: body.name,
+					description: body.description,
+					systemPrompt: body.systemPrompt,
+					cwd: cwdUpdate,
+					state: body.state,
+					triggers: body.triggers,
+					memory: body.memory,
+					roleId: body.roleId,
+					...(hasAccessoryUpdate ? { accessory: body.accessory } : {}),
+					contextPolicy: body.contextPolicy === "preserve" || body.contextPolicy === "compact" ? body.contextPolicy : undefined,
+				}, {
+					update: (staffId, updates) => staffManager.updateStaff(staffId, updates as any),
+					read: (staffId) => staffManager.getStaff(staffId),
+					syncAccessory: (sessionId, accessory) => sessionManager.updateSessionMeta(sessionId, { accessory: accessory as string | undefined }),
+					broadcast: (updatedStaff) => broadcastStaffChanged({
+						type: "staff_changed",
+						reason: "updated",
+						staffId: updatedStaff.id,
+						projectId: updatedStaff.projectId ?? existingStaff.projectId ?? SYSTEM_PROJECT_ID,
+						sessionId: updatedStaff.currentSessionId,
+					}),
 				});
+			} catch (error) {
+				if (error instanceof CanonicalMutationError) { json({ error: error.message }, error.status); return; }
+				throw error;
 			}
 			json(staff);
 			return;
 		}
 
 		if (req.method === "DELETE") {
-			const previousStaff = staffManager.getStaff(id);
-			const ok = await staffManager.deleteStaff(id, sessionManager);
-			if (!ok) { json({ error: "Staff agent not found" }, 404); return; }
-			if (previousStaff) {
-				broadcastStaffChanged({
-					type: "staff_changed",
-					reason: "deleted",
-					staffId: previousStaff.id,
-					projectId: previousStaff.projectId ?? SYSTEM_PROJECT_ID,
-					sessionId: previousStaff.currentSessionId,
+			try {
+				await deleteCanonicalStaff(id, {
+					read: (staffId) => staffManager.getStaff(staffId),
+					remove: (staffId) => staffManager.deleteStaff(staffId, sessionManager),
+					broadcast: (previousStaff) => broadcastStaffChanged({
+						type: "staff_changed", reason: "deleted", staffId: previousStaff.id,
+						projectId: previousStaff.projectId ?? SYSTEM_PROJECT_ID, sessionId: previousStaff.currentSessionId,
+					}),
 				});
+				json({ ok: true });
+			} catch (error) {
+				if (error instanceof CanonicalMutationError) json({ error: error.message }, error.status);
+				else jsonError(500, error);
 			}
-			json({ ok: true });
 			return;
 		}
 	}

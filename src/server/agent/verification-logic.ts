@@ -7,6 +7,7 @@
 
 import type { GateSignal, GateSignalStep } from "./gate-store.js";
 import type { VerifyStep } from "./workflow-store.js";
+import { compileSafeRegex, MAX_SAFE_REGEX_PATTERN_BYTES } from "./safe-regex.js";
 
 // ---------------------------------------------------------------------------
 // Transient error detection
@@ -717,10 +718,20 @@ export function readyToMergeUnresolvedBuiltinFailure(gateId: string, resolvedCmd
  * Rules:
  * - If exitCode === 0: the command was expected to fail but succeeded → fail
  * - If no errorPattern provided: fail (pattern is required for expect:failure gates)
- * - If errorPattern is an invalid regex: fail with regex error
+ * - If errorPattern is invalid or exceeds the 1,024-byte cap: fail with a regex error
  * - If output matches errorPattern (case-insensitive): pass
  * - If output does not match: fail
  */
+
+/**
+ * Match gate metadata with RE2 rather than JavaScript's backtracking engine.
+ * This preserves the public regex contract while bounding pattern size and
+ * rejecting unsupported/non-linear syntax before evaluating command output.
+ */
+export function matchesExpectedFailurePattern(output: string, errorPattern: string): boolean {
+	return compileSafeRegex(errorPattern, { maxPatternBytes: MAX_SAFE_REGEX_PATTERN_BYTES }).test(output);
+}
+
 export function matchExpectFailure(
 	exitCode: number | null,
 	output: string,
@@ -741,18 +752,18 @@ export function matchExpectFailure(
 	}
 
 	try {
-		const regex = new RegExp(errorPattern, 'i');
-		if (regex.test(output)) {
+		if (matchesExpectedFailurePattern(output, errorPattern)) {
 			return { passed: true, output: output || `exit code ${exitCode}` };
 		}
 		return {
 			passed: false,
 			output: `Command failed (exit code ${exitCode}) but output did not match expected error pattern.\n\nExpected pattern: /${errorPattern}/i\n\nActual output (first 500 chars):\n${(output || '').slice(0, 500)}`,
 		};
-	} catch (regexErr: any) {
+	} catch (regexErr) {
+		const message = regexErr instanceof Error ? regexErr.message : "Invalid regular expression";
 		return {
 			passed: false,
-			output: `Invalid error_pattern regex: ${regexErr.message}\n\nPattern was: ${errorPattern}`,
+			output: `Invalid error_pattern regex: ${message}\n\nPattern was: ${errorPattern}`,
 		};
 	}
 }

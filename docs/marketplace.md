@@ -154,21 +154,45 @@ The MVP ships exactly one configured resolution mechanism: **`pack_order`**, the
 Each installed pack exposes per-entity **activation toggles** on the Market installed-pack
 surface, so you can disable individual entities without uninstalling the pack. Schema-1 packs
 toggle user-facing roles, tools, skills, and entrypoints. Schema-2 packs also toggle pack-scoped
-contributions: providers, hook metadata, MCP, and pi extensions. Support surfaces — panels,
-routes, stores, renderers, actions, `lib/` — are **not** independently toggleable (panels may be
-shown read-only as "support surfaces").
+contributions: providers, hooks (including those eligible for bounded advisors, decisions, or
+request mutation), MCP, and pi extensions. Schema-3 packs can also toggle listed sandbox
+requirements; those remain inert until their project settings, exact `sandbox:build` grant, and
+Docker sandbox mode all permit them. See [Extension sandbox requirements](extension-sandbox-requirements.md).
+Support surfaces — panels, routes, stores, renderers, actions, `lib/` — are **not** independently
+toggleable (panels may be shown read-only as "support surfaces").
 
-> **Extension Platform (`schema: 2`).** The activation system covers `providers`, `hooks`,
-> `mcp`, `piExtensions`, and the reserved `runtimes` / `workflows` siblings. They are first-class
-> in `DisabledRefs` and `ACTIVATION_KINDS`, and the `pack-activation` catalogue includes their
-> arrays only for schema-2 packs, so toggles round-trip through the same REST without changing
-> schema-1 catalogue shapes. **Providers** and manifest-listed **hook metadata** load through
+> **Extension Platform (`schema: 2` and `schema: 3`).** The activation system covers `providers`, `hooks`,
+> `mcp`, `piExtensions`, declarative `runtimes`, static `systemPrompts`, schema-3
+> `sandboxRequirements`, and the reserved `workflows` sibling. They are first-class in `DisabledRefs` and `ACTIVATION_KINDS`, and the
+> `pack-activation` catalogue includes their arrays only for the applicable schema-2 or schema-3 packs, so toggles
+> round-trip through the same REST without changing schema-1 catalogue shapes. **Providers** and manifest-listed **hook metadata** load through
 > `PackContributionRegistry`; hook activation filters indexed declarations by manifest basename
 > (`listName`) only. **MCP** loads through `McpManager` discovery; **pi extensions** resolve to
-> standalone pi `--extension` entries. `runtimes` and `workflows` remain catalogue-only reserved
-> kinds. Hook metadata is inert: indexing imports or dispatches nothing and grants no authority.
-> See [pack.yaml schema 2](#packyaml-schema-2-extension-platform) and the
-> [hook metadata contract](extension-host-authoring.md#hook-metadata-hooksnameyaml--schema-2-inert).
+> standalone pi `--extension` entries. The gateway constructs the `runtimes` lifecycle manager and
+> worktree coordinator, which use fresh settings and deny-wins `service.manage` checks; packs receive
+> no service path, process, socket, or transport. No built-in consumer has registered a closed adapter
+> and compatible launcher, so declarations fail closed and activation never launches a service.
+> `workflows` remains catalogue-only reserved. Hook indexing imports or dispatches nothing and grants no authority. The only bounded
+> runtime consumers are a due exact-granted every-N-turn advisor, the exact-granted `mode: decide`
+> decision dispatcher, and [gated request mutation](request-mutation.md) for a `mode: decide` hook
+> that declares `mutate` and has its separate exact `mutate` grant; see [Extension decision requests](extension-decision-requests.md),
+> [pack.yaml schema 2](#packyaml-schema-2-extension-platform), and the
+> [hook metadata contract](extension-host-authoring.md#hook-metadata-hooksnameyaml--schema-2-metadata-first).
+
+### Exact grant controls
+
+Activation and authorization are deliberately separate. With a project selected, an installed
+schema-2 or schema-3 pack's existing **Project runtime** block has a Pack row with **Review grants**. It lists
+the platform-owned non-hook capabilities individually and shows the exact capability string,
+current server-projected state, and one confirmed Grant or Revoke action. `memory.read.all` is
+called out as broader project-memory access; `sandbox:build` permits only approved declarative
+requirements to affect the core image. No toggle, bulk grant, Hindsight-specific panel, or
+client-created capability is involved.
+
+The same Installed surface has **Grant history**, backed by the project grant audit. It shows both
+new pack-principal and legacy hook records, so an operator can inspect an authority change after a
+pack has become inactive. Market always reloads server-owned projection after a mutation; an
+active-looking card is never treated as authorization by itself.
 
 What disabling does:
 
@@ -181,7 +205,8 @@ What disabling does:
   entrypoint never disables a panel.
 - **Disable an MCP contribution or operation** — the contribution id/list name is added to `DisabledRefs.mcp`, or operation names are added under `DisabledRefs.mcpOperations[contributionId]`. Disabled contributions are omitted from Marketplace MCP discovery/connection; disabled operations are omitted from route maps and external `mcp_*` tools. Runtime status refreshes immediately, while disabled rows remain visible in the activation catalogue so they can be re-enabled.
 - **Disable a pi extension** — its `contents.pi-extensions` list name is added to `DisabledRefs.piExtensions`, so Bobbit does not add its `--extension <path>` flag to matching agent sessions. The disabled row remains visible in the activation catalogue, including any last known diagnostics, so it can be re-enabled.
-- **Disable hook metadata** — its `contents.hooks` basename is added to `DisabledRefs.hooks`, so the registry omits that indexed declaration after invalidation. This does not change runtime behavior: hook metadata has no import, dispatch, authority, config evaluation, or UI surface.
+- **Disable a hook** — its `contents.hooks` basename is added to `DisabledRefs.hooks`, so the registry omits that declaration after invalidation. Listing remains non-executing; it stops matching advisors and prevents the decision, request-mutation, and result-filter consumers from admitting the hook. Their live fences discard late extension results.
+- **Disable a static prompt section** — its `contents.system-prompts` basename is added to `DisabledRefs.systemPrompts`. It remains visible in the catalogue but is omitted from the next effective prompt; re-enabling still requires the separate exact static-prompt grant.
 
 **Tool toggles are concrete tool names.** `pack.yaml` keeps `contents.tools` as **tool group
 names** (`tools/<group>/`) for manifest compatibility, but the installed catalogue expands
@@ -224,6 +249,127 @@ become impossible to re-enable. Manifest-declared entity names are **path-valida
 basename + a realpath-aware pack-root containment check) before any file is read, because the
 manifest's `contents` names are publisher-authored and this helper also runs on Browse, before
 any install. A rejected name simply yields no description row.
+
+## Adopt stock extensions without a pack
+
+**Adoption** is for a stock MCP server or a plain Claude-style skills directory that you
+want to use unchanged. It is not a Marketplace source or an installed pack: Market packs
+are copied/materialized and carry pack provenance, whereas an adoption retains an explicit
+`provenance.class: "adopted"` record that points to its source. This distinction keeps an
+adopted asset from being presented as first-party or publisher-authored.
+
+### Why adoption uses a ledger
+
+Bobbit persists the scoped adoption choice in its native `adopted_extensions` configuration
+ledger, then synthesizes ordinary contributions at the existing resolver and MCP reload
+boundaries. It does not generate, copy, or symlink a pack.
+
+That split is intentional: the ledger makes an adoption idempotent, removable, and stable
+across restart, while in-memory contributions keep the existing scanner, `PackResolver`,
+`SkillLoader`, MCP normalization, `McpManager`, proxy/meta tools, and policy path as the
+single runtime owners. A generated pack would add a second materialization/reconciliation
+lifecycle and could drift from the stock source. See the [EP-9 design](design/adopt-vanilla-extensions.md)
+for the full comparison and data-flow contract.
+
+### What can be adopted
+
+Market's **Installed** panel starts with **Adopt extension**. Choose a scope and one of:
+
+- **MCP command** — a stdio command plus optional arguments.
+- **MCP endpoint** — an `http:` or `https:` endpoint.
+- **Skills directory** — an absolute directory containing normal Claude-style skill folders
+  and `SKILL.md` files.
+
+Skills are read in place; Bobbit never copies or edits the directory. The existing skill
+scanner and frontmatter handling apply, including `allowed-tools`; that field remains a
+restriction on skill metadata, not a tool grant.
+
+Adoption deliberately has a narrow source shape. A stdio adoption owns no environment,
+headers, or working directory. An HTTP adoption owns no headers and rejects credentials,
+queries, and fragments. Market responses and cards omit stdio arguments and display only a
+sanitized source location, so this flow is not a way to persist or expose secrets.
+
+Click **Inspect & adopt** to validate and persist the request, then scan/reload it through
+the normal runtime path. The adopted card identifies its scope, source type/location,
+namespace, conformance, loaded/rejected assets, and available MCP server/protocol version.
+Use **Refresh** to scan/reconnect again, or **Remove** to delete the ledger record. Removal
+does not modify the source directory, manual MCP configuration, or existing Tools policies.
+
+### Scope, identity, and precedence
+
+Adoptions use the normal `server`, `global-user`, and `project` scopes. Project records are
+visible only in their owning project; server and global-user records participate in the
+normal cross-scope order. The server creates an immutable safe id and namespace from **public, secret-free** source
+fields: scope, project owner when applicable, kind, and the normalized directory, HTTP endpoint,
+or stdio command. Stdio arguments are deliberately excluded from that public identity so neither
+their contents nor an argument-derived hash can appear in ids, namespaces, cards, or API results.
+A private full identity also includes stdio arguments: repeating that exact configuration returns the
+existing record, while distinct configurations with the same public command receive deterministic
+collision suffixes (`<base>`, `<base>-2`, and so on). This gives exact idempotence without leaking
+private invocation details or creating another connection or skill contribution.
+
+Each record also has a generated namespace:
+
+- MCP server/tool identities use `adopt_<id>` (for example, `mcp_adopt_<id>` and its
+  generated operations).
+- Skill commands use `adopt-<id>--<skill>`.
+
+The namespace prevents a stock asset from silently replacing a first-party, Market, manual,
+or project asset. Adopted skills are injected below the legacy/custom skill band, so existing
+custom and Claude/project skills retain their established higher precedence. Adopted MCP
+contributions are added after ordered pack contributions and before the existing manual MCP
+overlay; a deliberately matching manual MCP entry therefore still wins. Existing deterministic
+route conflict diagnostics remain authoritative if a collision nevertheless reaches runtime.
+
+On startup, Bobbit loads the ledger before constructing the resolver and MCP managers, so the
+same contributions are reconstructed. Removing a record first persists its deletion, then
+invalidates/reloads the affected runtime; a reload failure cannot bring the record back after
+a restart.
+
+### MCP exposure is least privilege
+
+Discovery is evidence, not authority. On an adoption's first successful MCP discovery, Bobbit
+selects only an operation whose annotations explicitly say `readOnlyHint: true` and do not
+also say it is destructive. It excludes missing, unknown, malformed, contradictory, or
+mutation-indicating annotations and never infers safety from an operation name or description.
+
+The selected-operation list is a durable **hard exposure boundary**, not an automatic
+`allow` decision. Existing Tools/role policy still determines `allow`, `ask`, or `never`; an
+existing `never` continues to win. New operations found on a later refresh start unselected,
+even if they report a read-only hint. Initial read-only selections are tracked as automatic
+rather than user-approved: an authoritative, connected live tool list revokes one whenever its
+operation loses positive read-only evidence, including missing, malformed, unknown,
+contradictory, or mutation hints.
+
+Users may make an explicit selection change on the adopted MCP card; that change reloads the
+standard manager but does not alter policy grants. The UI can send its complete operation list,
+but only an operation whose selected value changes becomes explicit. Unchanged automatic values
+remain revocable, which prevents an ordinary full-list update from silently making an automatic
+read-only exposure permanent.
+
+### Conformance and failure isolation
+
+Adoptions report `pending`, `loaded`, `partial`, `rejected`, or `unreachable` conformance.
+MCP reports include requested/negotiated protocol and server identity/version when the
+handshake supplies them, plus loaded and rejected operations. Skill reports include loaded
+namespaced commands and rejected candidates. Rejection reasons and failure messages are
+controlled/sanitized categories (such as malformed frontmatter, missing directory, invalid
+operation schema, or connection failure), rather than raw spawned-process or network output.
+
+A malformed skill, unavailable directory, invalid command, unreachable endpoint, partial tool
+list, or protocol/version problem affects that adoption's record only. Valid sibling skills and
+unrelated packs, skills, MCP servers, and startup continue to work. Only an authoritative,
+connected live tool list reconciles durable MCP operations; disabled, pending, or unavailable
+refreshes preserve the last operation list and its automatic/explicit selection provenance. The
+record stays visible so it can be refreshed or removed instead of disappearing as if it had never
+existed.
+
+### Pi boundary
+
+Pi extensions are **not** an adoption type. Continue to install a Pi extension through a
+schema-2 pack as described below. EP-9 only reports
+`PI_EXTENSION_PROBE_HARNESS_VERSION` in existing Pi discovery diagnostics when available; it
+does not change Pi runtime arguments, probing, trust, activation, or the RPC bridge.
 
 ## Marketplace pi extensions
 
@@ -648,49 +794,62 @@ A source repo's top level is a collection of pack directories. Each pack is one 
 Authored by the publisher; copied verbatim on install. Parsed and validated by `pack-manifest.ts`.
 
 ```yaml
+schema: 3                        # OPTIONAL. Schema 2 unlocks the extension keys below; schema 3 adds sandbox-requirements.
 name: research-pack              # REQUIRED. /^[a-z0-9][a-z0-9-]*$/ — used as the install dir name.
 description: >                   # REQUIRED. One-paragraph summary shown in the browse UI.
   Deep-research role, web tools, and a literature-review skill.
 version: 1.2.0                   # REQUIRED. Semver-ish string; shown in provenance.
 author: jane@example.com         # OPTIONAL.
 homepage: https://...            # OPTIONAL.
+provides: [research]             # OPTIONAL — schema 2+ capability metadata.
+requires: []                     # OPTIONAL — schema 2+ capability metadata.
 contents:                        # REQUIRED. roles/tools/skills required; each MAY be empty.
   roles:       [researcher]      #   Drives the browse-UI declared-entity chips.
   tools:       [research]        #   tools[] are tool GROUP dir names under tools/; activation expands them to concrete tool names.
   skills:      [lit-review]      #   (No per-pack gate keys off tools[]; trust is
-  entrypoints: [open-review]      #    decided once when adding a source.)
+  entrypoints: [open-review]     #    decided once when adding a source.)
                                  #   OPTIONAL — entrypoints/<name>.yaml basenames (toggleable).
-  # schema: 2 only:
-  mcp:         [github]          #   OPTIONAL — mcp/<name>.yaml|yml|json basenames (toggleable).
-  pi-extensions: [demo]          #   OPTIONAL — pi-extensions/<name>/ or <name>.ts/.js/.mjs/.cjs (toggleable).
+  # schema: 2+ only:
+  providers: [research]          #   OPTIONAL — providers/<name>.yaml basenames.
+  hooks: [turn-audit]            #   OPTIONAL — hooks/<name>.yaml|yml basenames.
+  mcp: [github]                  #   OPTIONAL — mcp/<name>.yaml|yml|json basenames.
+  pi-extensions: [demo]          #   OPTIONAL — pi-extensions/<name>/ or <name>.ts/.js/.mjs/.cjs.
+  runtimes: [indexer]            #   OPTIONAL — runtimes/<name>.yaml basenames.
+  system-prompts: [review-rules] #   OPTIONAL — system-prompts/<name>.yaml basenames.
+  workflows: [review]            #   OPTIONAL — reserved workflow basenames.
+  # schema: 3 only:
+  sandbox-requirements: [python] #   OPTIONAL — approved toolchain declarations; see extension-sandbox-requirements.md.
 routes:                          # OPTIONAL top-level block — Extension-Host pack routes.
   module: lib/routes.mjs         #   relative to pack.yaml, contained in the pack root.
-  names:  [bundle, publish]       #   exported route-name allowlist.
+  names:  [bundle, publish]      #   exported route-name allowlist.
 ```
 
-Validation rules: `name`, `description`, `version` must be non-empty; `name` must match the pattern (rejects path separators, `..`, leading dots); `contents` is required with the `roles`/`tools`/`skills` array keys present (each may be empty). `contents.tools` lists tool **group** directory names, while activation catalogues expand those groups to concrete tool names. `contents.entrypoints` is optional and lists the basenames of `entrypoints/<name>.yaml` files (the Extension-Host activation catalogue — see [authoring guide](extension-host-authoring.md#entrypoints--non-chat-launchers--deep-link-routes-hostuinavigate)). The optional top-level `routes:` block declares pack-level Extension-Host routes. Panels are **auto-discovered** from `panels/*.yaml` and are not listed here. `contents.mcp` and `contents.pi-extensions` are **rejected at schema 1** (the absent-or-`1` default) and **accepted at `schema: 2`**; schema-2 MCP basenames load pack-owned MCP contribution files from `mcp/<name>.yaml|yml|json` (see [Marketplace MCP](#marketplace-mcp)), and schema-2 pi-extension basenames resolve standalone pi entries from `pi-extensions/<name>/` or `pi-extensions/<name>.ts/.js/.mjs/.cjs` (see [Marketplace pi extensions](#marketplace-pi-extensions)). There is **no `stores` key** (Extension-Host stores are implicit, namespaced by the server-derived `packId`) and **no `permissions` key** (trusted pack code has ambient OS access — there is no permission system). Unknown top-level keys are ignored (forward-compat). A pack whose `pack.yaml` is missing or invalid is skipped with a warning, never fatal.
+Validation rules: `name`, `description`, `version` must be non-empty; `name` must match the pattern (rejects path separators, `..`, leading dots); `contents` is required with the `roles`/`tools`/`skills` array keys present (each may be empty). `contents.tools` lists tool **group** directory names, while activation catalogues expand those groups to concrete tool names. `contents.entrypoints` is optional and lists the basenames of `entrypoints/<name>.yaml` files (the Extension-Host activation catalogue — see [authoring guide](extension-host-authoring.md#entrypoints--non-chat-launchers--deep-link-routes-hostuinavigate)). The optional top-level `routes:` block declares pack-level Extension-Host routes. Panels are **auto-discovered** from `panels/*.yaml` and are not listed here. Schema 2 accepts its seven extension `contents` keys and the top-level `provides`/`requires` metadata; schema 3 retains those and additionally accepts `contents.sandboxRequirements`. There is **no `stores` key** (Extension-Host stores are implicit, namespaced by the server-derived `packId`) and **no `permissions` key** (trusted pack code has ambient OS access — there is no permission system). Unknown top-level keys are ignored (forward-compat). A pack whose `pack.yaml` is missing or invalid is skipped with a warning, never fatal.
 
 ### `pack.yaml` schema 2 (Extension Platform)
 
-Schema 2 is the **Extension Platform** workstream's manifest tier. It began as a deliberately
-**additive** change — schema 2 widens what a `pack.yaml` may declare and adds loaders for
-pack-scoped contributions such as **providers** and **MCP** — and remains **fully back-compatible**: existing
-schema-1 (v1) packs see zero behaviour change. A pack opts in with a top-level `schema:` field;
-absent (or `1`) keeps the exact v1 semantics.
-**Providers now dispatch through the Lifecycle Hub.** What began as a manifest-only step is
-live: G1.3 wires the `sessionSetup` hook and G1.4 wires the per-turn `beforePrompt` /
-`beforeCompact` (via a generated provider-bridge pi extension) plus the server-side `afterTurn`
-/ `sessionShutdown` hooks. An installed + active + enabled provider that declares a hook
-contributes ambient context at that moment — see [docs/lifecycle-hub.md](lifecycle-hub.md). The
-first built-in production provider is the [Hindsight memory pack](hindsight-memory.md) (G2); it
-ships in the built-in band but stays **dormant until a Hindsight URL is configured**, so an
-out-of-the-box install still contributes nothing until you opt in or add another provider pack.
-Why ship the schema ahead of the runtime? The Extension Platform landed as a sequence of
-independently-mergeable PRs. Defining the manifest surface and the per-entity activation
-plumbing first meant later PRs (the lifecycle hub that actually *runs* providers, plus loaders
-for the other reserved contribution types) only added dispatch — they never had to re-open the
-manifest format or the activation REST. Authors could start shipping provider files before the
-dispatch PRs landed and have them load, validate, and toggle in the meantime.
+Schema 2 is the **Extension Platform** manifest tier. It adds pack-scoped contributions while
+remaining fully back-compatible: a schema-1 pack has unchanged behavior. A pack opts in with a
+top-level `schema: 2`; absent (or `1`) retains schema-1 semantics.
+
+Most schema-2 contribution paths are live: providers run through the Lifecycle Hub; hooks support
+bounded advisors, decisions, request mutation, capability selection, static-prompt grants, and
+post-tool-result filtering; MCP and standalone Pi extensions load through their normal runtime
+owners. Market is the operator surface for activation, per-project settings, and exact grants.
+Its existing Pack row also exposes the closed non-hook grants—`service.manage`, `memory.read`,
+`memory.write`, `memory.reflect`, `memory.invalidate`, and `memory.read.all`—through the same
+**Review grants** control and exact audit history used by hooks. Schema-3 packs additionally use
+`sandbox:build` only for [approved sandbox requirements](extension-sandbox-requirements.md), never
+for Docker control. The [Extension Platform overview](extension-platform.md) describes the complete install-to-removal lifecycle. The first built-in production provider,
+[Hindsight](hindsight-memory.md), remains inactive until its required project configuration is
+supplied.
+
+Managed-service infrastructure is production-wired: the gateway constructs its lifecycle manager
+and worktree coordinator, derives an exact worktree instance, and provides closure-bound
+`host.services.call()` to server hosts. The only intentionally unregistered part is the built-in
+consumer adapter and compatible launcher. Until a future core consumer registers both, declarations
+fail closed; listing, activation, settings, and grants do not launch a service. See [Managed service
+extensions](service-extension-runtime.md).
 
 #### The `schema` field and back-compat
 
@@ -698,11 +857,15 @@ dispatch PRs landed and have them load, validate, and toggle in the meantime.
   keeps verbatim v1 validation, including the `contents.mcp` rejection below. Other stray
   schema-2 `contents` keys and top-level `provides`/`requires` are ignored, so v1 packs cannot
   load providers and their `pack-activation` catalogue remains the old shape.
-- **`schema: 2`** unlocks the six new `contents` keys and the `provides`/`requires` arrays.
-- **`schema: 3` or higher** is *not* fatal: the pack loads its **schema-2 subset** and one
-  forward-compat warning is recorded (`pack.yaml: schema N is newer than supported (2)`).
-  This keeps a newer pack installable on an older Bobbit rather than vanishing — the publisher
-  gets a warning, the supported keys still resolve, and unknown keys are ignored as always.
+- **`schema: 2`** unlocks the seven `contents` keys documented below and the
+  `provides`/`requires` arrays.
+- **`schema: 3`** retains every schema-2 key and adds canonical `contents.sandbox-requirements`
+  (`contents.sandboxRequirements` remains an input alias). It is supported and does not emit a
+  forward-compatibility warning.
+- **`schema > 3`** is *not* fatal: the pack loads the supported **schema-3 subset** and one
+  forward-compatibility warning is recorded (`pack.yaml: schema N is newer than supported (3)`).
+  This keeps a newer pack installable rather than vanishing — the supported keys still resolve,
+  while unknown keys are ignored.
 
 #### `provides` / `requires` capability names
 
@@ -715,22 +878,29 @@ They are **metadata only** today (recorded on the parsed manifest, surfaced nowh
 behaviourally yet) — the dependency/capability graph that consumes them belongs to a later
 goal. They are validated now so packs can declare them ahead of that work.
 
-#### Six new `contents` keys
+#### Seven schema-2 `contents` keys
 
-Schema 2 adds six optional `contents` keys. Each is a `string[]` of **safe basenames** (same
+Schema 2 adds seven optional `contents` keys. Each is a `string[]` of **safe basenames** (same
 guard as `contents.entrypoints` — no path separators, no `..`, no absolute/drive forms), and
 each defaults to `[]` when absent:
 
 | `contents` key | YAML key | Runtime loader? | Purpose |
 |---|---|---|---|
 | `providers` | `providers` | **Yes** | `providers/<id>.yaml` provider contributions (below). |
-| `hooks` | `hooks` | **Yes (metadata only)** | Manifest-listed `hooks/<name>.yaml|yml` declarations; validated and indexed without runtime execution. See the [hook metadata contract](extension-host-authoring.md#hook-metadata-hooksnameyaml--schema-2-inert). |
+| `hooks` | `hooks` | **Yes** | Manifest-listed `hooks/<name>.yaml|yml` declarations are validated and indexed without runtime execution. Bounded consumers are eligible every-N-turn advisors, active exact-granted `mode: decide` decision hooks, and [gated request mutation](request-mutation.md) for `mode: decide` hooks that declare and are separately granted `mutate`; see [Extension decision requests](extension-decision-requests.md). |
 | `mcp` | `mcp` | **Yes** | `mcp/<id>.yaml|yml|json` MCP server contributions. |
 | `piExtensions` | `pi-extensions` | **Yes** | Standalone pi runtime extension basenames under `pi-extensions/`. Note the YAML key is **`pi-extensions`** (kebab-case) but the parsed field is `piExtensions` (camelCase). |
-| `runtimes` | `runtimes` | No (reserved) | Runtime contribution basenames. |
+| `runtimes` | `runtimes` | **Yes** | Declarative managed-service basenames under `runtimes/`. The gateway lifecycle manager and worktree coordinator reconcile eligible worktree instances, but no built-in consumer has registered a closed adapter and compatible launcher; declarations therefore fail closed. See [Managed service-extension contract](service-extension-runtime.md). |
+| `system-prompts` (parsed as `systemPrompts`) | `system-prompts` | **Yes** | Literal static prompt-section basenames under `system-prompts/`. Activation plus an exact static-prompt grant is required before a section reaches the effective prompt. |
 | `workflows` | `workflows` | No (reserved) | Workflow contribution basenames. |
 
-**`providers`, `hooks`, `mcp`, and `pi-extensions` have loaders.** `providers` and `hooks` load through the Extension-Host contribution registry; hook loading only validates and indexes manifest-listed metadata. It never imports the declared module, dispatches events, grants authority, evaluates configuration or activation metadata, or creates UI. `mcp` loads through the Marketplace MCP path described above; `pi-extensions` resolve to standalone pi `--extension` entries described in [Marketplace pi extensions](#marketplace-pi-extensions). Only `runtimes` and `workflows` remain accepted, normalised, activation-catalogue-only reserved keys.
+**`providers`, `hooks`, `runtimes`, `system-prompts`, `mcp`, and `pi-extensions` have loaders.** Providers, hooks, declarative runtimes, and static prompt sections load through the Extension-Host contribution registry. Hook indexing alone never imports a module, dispatches an event, grants authority, evaluates configuration, or creates UI; bounded consumers separately require their exact live grants. The gateway's runtime manager and worktree coordinator reconcile eligible managed-service declarations with fresh settings and deny-wins `service.manage` checks. They fail closed because no built-in consumer has registered a closed operation adapter and compatible launcher: a declaration, listing, activation toggle, settings change, or grant does not launch a process. Static prompt sections are literal text and require activation plus an exact `prompt:system-static` grant; see [Static system-prompt sections](extension-host-authoring.md#static-system-prompt-sections-system-promptsnameyaml--schema-2). `mcp` loads through the Marketplace MCP path described above; `pi-extensions` resolve to standalone pi `--extension` entries described in [Marketplace pi extensions](#marketplace-pi-extensions). Only `workflows` remains an accepted, normalised, activation-catalogue-only reserved key. See [Managed service-extension contract](service-extension-runtime.md).
+
+#### Schema-3 sandbox requirements
+
+Schema 3 adds the canonical `contents.sandbox-requirements` key to the schema-2 contract.
+The legacy `contents.sandboxRequirements` spelling is accepted as an input alias. It names
+approved, manifest-listed toolchain declarations; see [Extension sandbox requirements](extension-sandbox-requirements.md).
 
 #### Minimal schema-2 example
 
@@ -747,10 +917,12 @@ contents:
   tools:    []
   skills:   []
   providers: [memory]         # loads providers/memory.yaml (see below)
-  hooks:     [turn-audit]     # validates/indexes hooks/turn-audit.yaml; inert metadata
+  hooks:     [turn-audit]     # validates/indexes hooks/turn-audit.yaml; bounded dispatch needs an exact grant
   mcp:       [github]         # loads mcp/github.yaml (see Marketplace MCP)
   pi-extensions: [demo]       # loads pi-extensions/demo/ or pi-extensions/demo.ts
-  # runtimes / workflows are accepted here at schema 2 but remain reserved.
+  runtimes:  [memory-service] # declarative service; gateway-wired but fails closed without a core adapter + launcher
+  system-prompts: [review-rules] # literal static section; needs activation + exact grant
+  # workflows remain reserved.
 ```
 
 #### Provider contributions (`providers/<id>.yaml`)
@@ -775,6 +947,12 @@ budget:                       # OPTIONAL; both fields clamped
 config:                       # OPTIONAL opaque mapping handed to the provider verbatim
   maxEntries: 50
 ```
+
+For an editable per-project configuration, replace the opaque mapping with the flat descriptor
+map documented in [Project extension settings](extension-settings.md#for-pack-authors). A
+provider with descriptor-shaped entries is validated as a typed settings declaration; an existing
+opaque mapping remains static runtime configuration for compatibility. `activation.requiresConfig`
+may reference only declared settings fields when using that typed form.
 
 Field rules and defaults:
 
@@ -825,13 +1003,13 @@ rule: load via the pack-contribution registry, never the name-merging resolver.
 
 #### Per-contribution activation
 
-Providers, hook metadata, MCP, pi extensions, and the reserved runtime/workflow siblings are
-**first-class in the activation system**, so they round-trip through the same
+Providers, hook metadata, MCP, pi extensions, declarative runtimes, static prompt sections, and
+the reserved workflow sibling are **first-class in the activation system**, so they round-trip through the same
 `GET/PUT /api/marketplace/pack-activation` REST as roles, tools, skills, and entrypoints — see
 [Activation controls](#activation-controls):
 
-- **`DisabledRefs`** includes `providers`, `hooks`, `mcp`, `piExtensions`, `runtimes`, and
-  `workflows` arrays, plus `mcpOperations` for gateway operation opt-outs. The array kinds are in `ACTIVATION_KINDS` so normalisation, hydration,
+- **`DisabledRefs`** includes `providers`, `hooks`, `mcp`, `piExtensions`, `runtimes`,
+  `systemPrompts`, and `workflows` arrays, plus `mcpOperations` for gateway operation opt-outs. The array kinds are in `ACTIVATION_KINDS` so normalisation, hydration,
   and `getPackActivation` cover them automatically (one constant drives all three). `DisabledRefs.mcp` uses the pack-local `contents.mcp` basename for authored packs and a source-qualified contribution id for gateway installs; `DisabledRefs.piExtensions` uses the pack-local `contents.pi-extensions` basename.
 - The **activation catalogue** in the `pack-activation` response includes the new arrays only
   for schema-2 packs (read straight from the installed pack's `contents`), so a disabled provider stays visible in
@@ -842,11 +1020,14 @@ Providers, hook metadata, MCP, pi extensions, and the reserved runtime/workflow 
   generalised analogue of the entrypoint filter), and
   **`listProviders(projectId)`** returns only providers from packs that are **installed +
   active + enabled** for that scope. Entrypoint filtering is byte-identical to before.
-- Hook metadata is toggled by its **`listName`** (its `contents.hooks` basename).
-  `PackContributionRegistry` filters that declaration from the pack contribution and
+- Hooks are toggled by their **`listName`** (their `contents.hooks` basename).
+  `PackContributionRegistry` filters a declaration from the pack contribution and
   `listHooks(projectId)` after invalidation; it does not inspect `config` or `activation`.
-  The toggle remains metadata-only and never imports a module, dispatches a hook, grants
-  capability/authority, or registers UI. See the [hook metadata contract](extension-host-authoring.md#hook-metadata-hooksnameyaml--schema-2-inert).
+  Listing never imports a module, grants authority, or registers UI. Disabling stops matching
+  scheduled advisors and prevents the decision, [gated request-mutation](request-mutation.md),
+  and post-tool-result filter consumers from admitting the hook; their live fences discard late extension results. See the
+  [hook and scheduled-advisor contract](extension-host-authoring.md#hook-metadata-and-scheduled-advisors-hooksnameyaml--schema-2).
+- A static prompt section is toggled by its **`listName`** (its `contents.system-prompts` basename). A disabled section is absent from the effective prompt, while a still-active section also needs its exact `prompt:system-static` grant.
 - An authored MCP contribution is toggled by its **`listName`** (its `contents.mcp` basename). A gateway MCP contribution is toggled by its stable installed contribution id, not by runtime key or fingerprint. `McpManager` filters disabled Marketplace MCP contributions before connecting servers or exposing model-facing MCP meta-tools.
 - A pi extension is toggled by its **`listName`** (its `contents.pi-extensions` basename). Session startup filters disabled/unresolved extensions before appending pi `--extension` args, while the activation catalogue keeps disabled/unresolved rows visible with diagnostics.
 

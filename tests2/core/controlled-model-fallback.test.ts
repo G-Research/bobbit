@@ -95,9 +95,9 @@ function extractMethodBody(src: string, marker: string): string {
 	throw new Error(`could not find closing brace for ${marker}`);
 }
 
-function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
+function loadTryAutoSelectModel(): (this: any, session: any) => Promise<unknown> {
 	const src = readFileSync(SESSION_MANAGER_SOURCE, "utf-8");
-	let body = extractMethodBody(src, "private async tryAutoSelectModel(session: SessionInfo)");
+	let body = extractMethodBody(src, "private async tryAutoSelectModel(session: SessionInfo):");
 	body = body
 		.replace(/\s+as\s+string\s*\|\s*undefined/g, "")
 		.replace(/async \(modelString: string\): Promise<void> =>/g, "async (modelString) =>")
@@ -195,11 +195,13 @@ async function exerciseAutoSelect(options: {
 	failThinkingLevels?: string[];
 	spawnPinnedModel?: string;
 	spawnPinnedThinkingLevel?: string;
+	setupCallerThinkingLevel?: string;
 	explicitRoleAssignment?: boolean;
 	initialBound?: { provider: string; id: string; thinkingLevel?: string };
 	initialDurable?: { provider: string; id: string; thinkingLevel: string } | null;
 }): Promise<{
 	error: unknown;
+	returnValue: unknown;
 	setModelCalls: ModelPair[];
 	setThinkingCalls: string[];
 	persisted: Array<Record<string, unknown>>;
@@ -245,11 +247,36 @@ async function exerciseAutoSelect(options: {
 		"openai/fallback-session",
 		"openai/dead-fallback",
 	]);
+	const knownThinkingLevel = (value: unknown): string | undefined => (
+		typeof value === "string" && ["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(value)
+			? value
+			: undefined
+	);
 	const manager = {
 		preferencesStore: { get: (key: string) => options.prefs[key] },
-		_setupInitialThinkingAuthorities: new Map(),
+		_setupCallerThinkingAuthorities: new Map(options.setupCallerThinkingLevel
+			? [["session-under-test", { initialThinkingLevel: options.setupCallerThinkingLevel }]]
+			: []),
 		resolveRoleModel: () => options.roleModel,
 		resolveRoleThinkingLevel: () => options.roleThinking,
+		resolveRoleThinkingLevelValue: () => options.roleThinking,
+		resolveExplicitThinkingCandidate(
+			role: string | undefined,
+			_projectId: string | undefined,
+			preferred?: string,
+			preferPreferred = false,
+		) {
+			const preferredCandidate = knownThinkingLevel(preferred);
+			const roleCandidate = role ? knownThinkingLevel(options.roleThinking) : undefined;
+			const defaultCandidate = knownThinkingLevel(options.prefs["default.sessionThinkingLevel"]);
+			return preferPreferred
+				? preferredCandidate ?? roleCandidate ?? defaultCandidate
+				: roleCandidate ?? preferredCandidate ?? defaultCandidate;
+		},
+		async clampCurrentCatalogThinkingCandidate(model: string, candidate: string | undefined) {
+			const known = knownThinkingLevel(candidate);
+			return known ? this.resolveCurrentCatalogThinkingLevel(model, undefined, undefined, known) : undefined;
+		},
 		async resolveCurrentCatalogThinkingLevel(model: string, _role: string | undefined, _projectId: string | undefined, preferred: string) {
 			return model.includes("opus-5") || !["xhigh", "max"].includes(preferred) ? preferred : "high";
 		},
@@ -302,14 +329,16 @@ async function exerciseAutoSelect(options: {
 	};
 
 	let error: unknown;
+	let returnValue: unknown;
 	try {
-		await tryAutoSelectModel.call(manager, session);
+		returnValue = await tryAutoSelectModel.call(manager, session);
 	} catch (err) {
 		error = err;
 	}
 
 	return {
 		error,
+		returnValue,
 		setModelCalls,
 		setThinkingCalls,
 		persisted,
@@ -1101,16 +1130,23 @@ describe("controlled model fallback policy — session auto-selection", () => {
 		assert.deepEqual(result.broadcastTuples, []);
 	});
 
-	it("normalizes a legacy provider-prefixed AIGW default before selecting and persisting it", async () => {
+	it("normalizes a legacy provider-prefixed AIGW default and durably adopts Pi's live thinking without mutating it", async () => {
 		const result = await exerciseAutoSelect({
+			// No role, default, caller, durable, or extension thinking authority exists.
+			// Pi has already bound the selected model with its known live `medium` value.
 			prefs: { "default.sessionModel": "aigw/openai/legacy-model" },
+			initialBound: { provider: "aigw", id: "legacy-model", thinkingLevel: "medium" },
+			initialDurable: { provider: "anthropic", id: "previous-model", thinkingLevel: "high" },
 		});
 
 		assert.equal(result.error, undefined);
+		assert.deepEqual(result.returnValue, { provider: "aigw", modelId: "legacy-model", thinkingLevel: "medium" });
 		assert.deepEqual(result.setModelCalls, [["aigw", "legacy-model"]]);
-		assert.deepEqual(result.persisted, [{ modelProvider: "aigw", modelId: "legacy-model", effectiveThinkingLevel: "high" }]);
+		assert.deepEqual(result.setThinkingCalls, [], "no-authority setup must adopt, not RPC-mutate, Pi's live thinking value");
+		assert.deepEqual(result.persisted, [{ modelProvider: "aigw", modelId: "legacy-model", effectiveThinkingLevel: "medium" }]);
+		assert.deepEqual(result.durable, { provider: "aigw", id: "legacy-model", thinkingLevel: "medium" });
 		assert.deepEqual(result.modelFiles, ["aigw/legacy-model"]);
-		assert.deepEqual(result.broadcastModels, [{ provider: "aigw", id: "legacy-model" }]);
+		assert.deepEqual(result.broadcastTuples, [{ provider: "aigw", id: "legacy-model", thinkingLevel: "medium" }]);
 	});
 
 	it("enabled setting: malformed explicit default.sessionModel fails loudly and never chooses AIGW/hardcoded fallback", async () => {
@@ -1398,10 +1434,36 @@ describe("controlled model fallback policy — exact runtime tuple", () => {
 });
 
 describe("controlled model fallback policy — session setup visibility", () => {
-	it("normal/worktree post-spawn model selection is awaited, not swallowed as a warning", () => {
+	it("awaits setup decisions before spawn and post-spawn model verification", () => {
 		const src = readFileSync(SESSION_SETUP_SOURCE, "utf-8");
+		const dynamicContextBody = extractMethodBody(src, "export async function resolveDynamicContext");
 		const postSpawnBody = extractMethodBody(src, "async function postSpawn(session: SessionInfo");
 
+		assert.match(
+			dynamicContextBody,
+			/await\s+ctx\.lifecycleHub\.dispatch\("sessionSetup"/,
+			"setup thinking selection must be awaited before bridge construction",
+		);
+		assert.doesNotMatch(
+			dynamicContextBody,
+			/setupDecision:/,
+			"sessionSetup must dispatch exactly once even when host authority is explicit",
+		);
+		assert.match(
+			dynamicContextBody,
+			/if \(!explicitThinking && thinkingLevel && ctx\.clampSetupThinkingLevel\)/,
+			"an unconditionally dispatched selector must not override host authority",
+		);
+		assert.match(
+			dynamicContextBody,
+			/await\s+ctx\.clampSetupThinkingLevel\(plan\.bridgeOptions\.initialModel, thinkingLevel\)/,
+			"a dispatcher candidate must be clamped against the selected model",
+		);
+		assert.match(
+			dynamicContextBody,
+			/plan\.bridgeOptions\.initialThinkingLevel = effective/,
+			"the clamped setup decision must be passed to the bridge at spawn",
+		);
 		assert.match(
 			postSpawnBody,
 			/await\s+ctx\.tryAutoSelectModel\(session\)/,
@@ -1409,13 +1471,8 @@ describe("controlled model fallback policy — session setup visibility", () => 
 		);
 		assert.doesNotMatch(
 			postSpawnBody,
-			/tryAutoSelectModel\(session\)\.catch[\s\S]*Early model selection failed/,
-			"controlled model fallback policy: model selection failures must not be swallowed as fire-and-forget warnings",
-		);
-		assert.match(
-			postSpawnBody,
-			/tryApplyDefaultThinkingLevel\(session\)\.catch[\s\S]*Early thinking level failed/,
-			"thinking-level failures may remain non-fatal warnings",
+			/tryAutoSelectModel\(session\)\.catch[\s\S]*Early model selection failed|tryApplyDefaultThinkingLevel/,
+			"post-spawn setup must neither swallow model failures nor run the deleted thinking heuristic",
 		);
 
 		const worktreeBody = extractMethodBody(src, "export async function executeWorktreeAsync");

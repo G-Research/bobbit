@@ -1,4 +1,5 @@
-import { Type } from "@sinclair/typebox";
+// Pi 0.84 validates tool parameters with TypeBox v1 schemas.
+import { Type } from "typebox";
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import { accessSync, constants as fsConstants, realpathSync } from "node:fs";

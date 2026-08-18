@@ -13,10 +13,49 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { inferLegacyAigwMeta } from "../../src/server/agent/aigw-manager.ts";
-import { modelRecencyRank as serverModelRecencyRank } from "../../src/server/agent/model-registry.ts";
+import { modelRecencyRank as serverModelRecencyRank, normalizeCustomProviderBaseUrl, pinCustomProviderTarget } from "../../src/server/agent/model-registry.ts";
 import { modelRecencyRank } from "../../src/shared/model-ranks.ts";
 
 // ── Legacy /v1/models inference tests ─────────────────────────────
+
+describe("custom provider network trust", () => {
+	it("requires explicit persisted trust for local endpoints", () => {
+		assert.throws(() => normalizeCustomProviderBaseUrl("http://localhost:11434", false), /public HTTPS/);
+		assert.equal(normalizeCustomProviderBaseUrl("http://localhost:11434/", true), "http://localhost:11434");
+		assert.throws(() => normalizeCustomProviderBaseUrl("https://user:secret@example.com", true), /must not contain credentials/);
+	});
+
+	it("rejects private DNS before an untrusted SDK probe can connect", async () => {
+		const privateLookup = async () => [{ address: "169.254.169.254", family: 4 }];
+		await assert.rejects(
+			pinCustomProviderTarget("https://models.example", false, privateLookup),
+			/private or invalid address/,
+		);
+	});
+
+	it("classifies bracketed IPv6 literals before trust admission or DNS", async () => {
+		assert.throws(
+			() => normalizeCustomProviderBaseUrl("https://[2001:db8::1]", false),
+			/public HTTPS/,
+		);
+		let lookups = 0;
+		const target = await pinCustomProviderTarget("http://[::1]:11434", true, async () => {
+			lookups++;
+			return [];
+		});
+		assert.equal(target.url.hostname, "[::1]");
+		assert.equal(lookups, 0, "trusted IPv6 literals must not be sent through DNS");
+	});
+
+	it("bounds custom provider DNS admission", async () => {
+		const started = Date.now();
+		await assert.rejects(
+			pinCustomProviderTarget("https://models.example", false, async () => new Promise(() => {}), 20),
+			/DNS deadline exceeded/,
+		);
+		assert.ok(Date.now() - started < 500);
+	});
+});
 
 describe("inferLegacyAigwMeta()", () => {
 	it("Claude Opus → 1M context, 32K max, reasoning=true", () => {
