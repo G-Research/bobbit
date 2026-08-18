@@ -11,14 +11,14 @@
  * import without dragging the whole verification-harness graph in.
  */
 
-import { isRestartInterruptedStep } from "./verification-logic.js";
+import type { GateSignalStep } from "./gate-store.js";
 
 export interface FailureStepLike {
 	name: string;
 	type: string;
 	passed: boolean;
 	skipped?: boolean;
-	status?: "waiting" | "running" | "passed" | "failed" | "timeout" | "skipped";
+	status?: GateSignalStep["status"];
 	output?: string;
 }
 
@@ -50,12 +50,6 @@ function describeFailedStep(step: FailureStepLike): string {
 	return `\`${step.name}\` (\`${step.type}\`)`;
 }
 
-function isRestartInterruptedFailureStep(step: FailureStepLike): boolean {
-	if (step.passed || step.skipped) return false;
-	if (step.type === "command") return step.status === "waiting";
-	return isRestartInterruptedStep({ passed: step.passed, output: step.output ?? "", type: step.type });
-}
-
 /**
  * Build the team-lead failure-notification message body for a failed gate.
  *
@@ -77,7 +71,9 @@ export function buildVerificationFailureMessage(
 	const failed = steps
 		.map((step, index) => ({ step, index }))
 		.filter(({ step }) =>
-			!step.passed && !step.skipped && !isRestartInterruptedFailureStep(step),
+			!step.passed
+			&& !step.skipped
+			&& step.status !== "cancelled",
 		);
 
 	const lines: string[] = [];

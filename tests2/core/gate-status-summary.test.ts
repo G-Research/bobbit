@@ -18,6 +18,26 @@ function gate(status: GateState["status"], gateId = "implementation"): GateState
 	};
 }
 
+function signal(
+	id: string,
+	status: "failed" | "cancelled",
+	steps: GateState["signals"][number]["verification"]["steps"],
+): GateState["signals"][number] {
+	return {
+		id,
+		goalId: "goal-1",
+		gateId: "implementation",
+		sessionId: "session-1",
+		timestamp: 1,
+		commitSha: "commit-1",
+		verification: {
+			status,
+			steps,
+			...(status === "cancelled" ? { cancellation: { cause: "manual" as const, requestedAt: 2, finalizedAt: 3 } } : {}),
+		},
+	};
+}
+
 describe("buildGateStatusSummary", () => {
 	it("overlays active verification on an already-passed gate", () => {
 		const active: ActiveVerification = {
@@ -74,5 +94,44 @@ describe("buildGateStatusSummary", () => {
 		});
 		assert.equal(summary.bypassed, 0);
 		assert.equal(summary.bypassedCount, 0);
+	});
+
+	it("retains a genuine failed verdict after a newer cancelled signal", () => {
+		const stored = gate("failed");
+		stored.signals = [
+			signal("failed-run", "failed", [{ name: "Product check", type: "command", passed: false, output: "failed", duration_ms: 1, status: "failed" }]),
+			signal("cancelled-run", "cancelled", [{ name: "Interrupted check", type: "command", passed: false, output: "cancelled", duration_ms: 1, status: "cancelled" }]),
+		];
+
+		const summary = buildGateStatusSummary({
+			workflow: { gates: [{ id: "implementation", name: "Implementation", dependsOn: [] }] },
+			gates: [stored],
+			activeVerifications: [],
+		});
+		const implementation = summary.gates[0]!;
+
+		assert.equal(implementation.status, "failed");
+		assert.deepEqual(implementation.failedSteps, ["Product check"]);
+		assert.equal(implementation.verificationStatus, "cancelled");
+		assert.deepEqual(implementation.cancellation, { cause: "manual", requestedAt: 2, finalizedAt: 3 });
+	});
+
+	it("projects a legacy cancellation-only failed gate as pending", () => {
+		const stored = gate("failed");
+		const legacyCancellation = signal("cancelled-run", "cancelled", [{ name: "Interrupted check", type: "command", passed: false, output: "cancelled", duration_ms: 1, status: "cancelled" }]);
+		delete legacyCancellation.verification.cancellation;
+		stored.signals = [legacyCancellation];
+
+		const summary = buildGateStatusSummary({
+			workflow: { gates: [{ id: "implementation", name: "Implementation", dependsOn: [] }] },
+			gates: [stored],
+			activeVerifications: [],
+		});
+		const implementation = summary.gates[0]!;
+
+		assert.equal(implementation.status, "pending");
+		assert.equal(implementation.failedSteps, undefined);
+		assert.equal(implementation.verificationStatus, "cancelled");
+		assert.deepEqual(implementation.cancellation, { cause: "unknown" });
 	});
 });

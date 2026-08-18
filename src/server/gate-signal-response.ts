@@ -20,7 +20,7 @@ export interface GateSignalPostResponse {
 		id: string;
 		gateId: string;
 		goalId: string;
-		status: "running" | "passed" | "failed";
+		status: GateSignal["verification"]["status"];
 		steps: GateSignalResponseStep[];
 		cached?: true;
 	};

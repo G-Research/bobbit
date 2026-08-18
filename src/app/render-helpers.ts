@@ -1412,9 +1412,37 @@ const teamLoading = new Set<string>();
  * Pinned by sidebar visual tests — the output here must stay byte-identical
  * to the previous inline implementation when invoked from `renderGoalBadge`.
  */
+const CANCELLATION_CAUSE_LABELS: Record<string, string> = {
+	manual: "Cancelled manually",
+	"goal-pause": "Goal paused",
+	superseded: "Superseded by a newer signal",
+	"gate-reset": "Gate reset",
+	bypass: "Gate bypassed",
+	"goal-complete": "Goal completed",
+	"team-teardown": "Team torn down",
+	shelved: "Goal shelved",
+	archive: "Goal archived",
+	"zombie-recovery": "Recovered orphaned verification",
+	"gateway-restart-recovery": "Gateway restarted",
+	unknown: "Cause unavailable (legacy)",
+};
+
+/** Human-readable durable cancellation cause, shared by compact gate surfaces. */
+export function verificationCancellationCauseLabel(cause: string | undefined): string {
+	return CANCELLATION_CAUSE_LABELS[cause ?? "unknown"] ?? CANCELLATION_CAUSE_LABELS.unknown;
+}
+
 export function renderGateProgressBadge(goalId: string): TemplateResult | string {
 	const gs = state.gateStatusCache.get(goalId);
 	if (!gs) return "";
+	const cancelledGate = gs.gates?.find(gate => gate.verificationStatus === "cancelled" && !gate.running);
+	const cancelledLabel = cancelledGate
+		? verificationCancellationCauseLabel(cancelledGate.cancellation?.cause)
+		: undefined;
+	const cancellationBadge = cancelledLabel
+		? html`<span style="color:var(--muted-foreground);font-weight:500"> · cancelled · ${cancelledLabel}</span>`
+		: nothing;
+	const cancellationTitle = cancelledLabel ? ` — cancelled · ${cancelledLabel}` : "";
 	const bypassed = gs.bypassed ?? 0;
 	// A human bypass means ≥1 gate was forced past verification. The numerator
 	// counts bypassed gates as resolved (so a fully-resolved goal reads N/N), the
@@ -1445,7 +1473,7 @@ export function renderGateProgressBadge(goalId: string): TemplateResult | string
 		const verifyTitle = isBypass
 			? `${numerator} of ${gs.total} gates resolved (${bypassed} bypassed) — verifying ${gs.verifyingCount}`
 			: `${gs.passed} of ${gs.total} gates passed — verifying ${gs.verifyingCount}`;
-		return html`<span class="shrink-0" style="${verifyStyle}" title="${verifyTitle}"><span style="opacity:0.7">(</span><span class="gate-blink" style="animation: gate-blink 1.2s ease-in-out infinite">${displayed}</span><span style="opacity:0.7">/${gs.total})${suffix}</span></span>`;
+		return html`<span class="shrink-0" style="${verifyStyle}" title="${verifyTitle}${cancellationTitle}"><span style="opacity:0.7">(</span><span class="gate-blink" style="animation: gate-blink 1.2s ease-in-out infinite">${displayed}</span><span style="opacity:0.7">/${gs.total})${suffix}</span>${cancellationBadge}</span>`;
 	}
 	if (!allPassed && hasTeam && anyAgentWorking) {
 		// Wave animation only when agents are actively working.
@@ -1453,11 +1481,11 @@ export function renderGateProgressBadge(goalId: string): TemplateResult | string
 		const chars = label.split("");
 		const totalDur = 1.2;
 		const stagger = totalDur / chars.length;
-		return html`<span class="shrink-0 gate-wave" style="${baseStyle}" title="${resolvedTitle}">${chars.map((ch, i) =>
+		return html`<span class="shrink-0 gate-wave" style="${baseStyle}" title="${resolvedTitle}${cancellationTitle}">${chars.map((ch, i) =>
 			html`<span style="animation-delay:${(i * stagger).toFixed(2)}s">${ch}</span>`
-		)}</span>`;
+		)}${cancellationBadge}</span>`;
 	}
-	return html`<span class="shrink-0" style="${baseStyle}" title="${resolvedTitle}">(${numerator}/${gs.total})${suffix}</span>`;
+	return html`<span class="shrink-0" style="${baseStyle}" title="${resolvedTitle}${cancellationTitle}">(${numerator}/${gs.total})${suffix}${cancellationBadge}</span>`;
 }
 
 /**

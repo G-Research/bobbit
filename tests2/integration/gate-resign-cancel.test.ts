@@ -1,9 +1,12 @@
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { expect, test } from "vitest";
 
 import type { CommandRunner } from "../../src/server/gateway-deps.js";
+import type { VerificationCommandRunner, VerificationCommandSpawnSpec } from "../../src/server/agent/verification-command-runner.js";
+import type { TrackedChild } from "../../src/server/agent/spawn-tree.js";
 import { GateStore, type GateSignal } from "../../src/server/agent/gate-store.js";
 import { GoalStore, type PersistedGoal } from "../../src/server/agent/goal-store.js";
 import { VerificationHarness } from "../../src/server/agent/verification-harness.js";
@@ -106,8 +109,64 @@ async function completeSignal(signal: GateSignal): Promise<void> {
 	await harness.verifyGateSignal(signal, GATE, stateDir);
 }
 
+/**
+ * Exact-cleanup barrier for the re-signal generation test. The test owns both
+ * edges: cancellation has issued the kill intent, then exact tree cleanup has
+ * settled. It never depends on the shared gateway command semaphore.
+ */
+class ExactCleanupBarrierRunner implements VerificationCommandRunner {
+	readonly nonDurable = true;
+	private spawnedResolve!: () => void;
+	private killedResolve!: () => void;
+	private readonly spawned = new Promise<void>(resolve => { this.spawnedResolve = resolve; });
+	private readonly killed = new Promise<void>(resolve => { this.killedResolve = resolve; });
+	private settleExit!: () => void;
+
+	spawn(_spec: VerificationCommandSpawnSpec): TrackedChild {
+		const child = Object.assign(new EventEmitter(), {
+			pid: 971_001,
+			stdout: Object.assign(new EventEmitter(), { destroy() {} }),
+			stderr: Object.assign(new EventEmitter(), { destroy() {} }),
+			unref() {},
+			kill() { return true; },
+		});
+		let resolveTreeExit!: (settled: boolean) => void;
+		const treeExit = new Promise<boolean>(resolve => { resolveTreeExit = resolve; });
+		let killed = false;
+		this.settleExit = () => {
+			child.emit("exit", null, "SIGTERM");
+			child.emit("close", null, "SIGTERM");
+			resolveTreeExit(true);
+		};
+		this.spawnedResolve();
+		return {
+			child: child as unknown as TrackedChild["child"],
+			ownershipReady: Promise.resolve(),
+			waitForTreeExit: async () => treeExit,
+			killed: () => killed,
+			timedOut: () => false,
+			markSurvival: () => {},
+			killTree: () => {
+				if (killed) return;
+				killed = true;
+				this.killedResolve();
+			},
+		};
+	}
+
+	waitForSpawn(): Promise<void> { return this.spawned; }
+	waitForKill(): Promise<void> { return this.killed; }
+	settle(): void { this.settleExit(); }
+}
+
+
 function activeVerifications() {
 	return harness.getActiveVerifications(GOAL_ID);
+}
+
+/** Includes cancelled records still owned by exact cleanup. */
+function allActiveVerifications() {
+	return Array.from((harness as any).activeVerifications.values());
 }
 
 function signals(): GateSignal[] {
@@ -162,6 +221,51 @@ test.afterEach(async () => {
 });
 
 test.describe("Gate Re-signal Cancellation", () => {
+
+	test("re-signaling durably marks the old generation before exact cleanup settles", async () => {
+		const runner = new ExactCleanupBarrierRunner();
+		(harness as any).commandStepRunner = runner;
+		const oldSignal = declareSignal("Old generation");
+		const oldVerification = completeSignal(oldSignal);
+		await runner.waitForSpawn();
+
+		// Do not await: this mirrors the REST re-signal handler. The harness must
+		// publish cancellation intent before it waits for exact tree cleanup.
+		const cancellation = harness.cancelStaleVerifications(GOAL_ID, GATE_ID);
+		await runner.waitForKill();
+		const newSignal = declareSignal("New generation");
+		expect(signals()).toEqual(expect.arrayContaining([
+			expect.objectContaining({ id: oldSignal.id, verification: expect.objectContaining({ status: "running" }) }),
+			expect.objectContaining({ id: newSignal.id, verification: expect.objectContaining({ status: "running" }) }),
+		]));
+		expect(allActiveVerifications()).toEqual(expect.arrayContaining([
+			expect.objectContaining({ signalId: oldSignal.id, overallStatus: "cancelled", cancelled: true }),
+			expect.objectContaining({ signalId: newSignal.id, overallStatus: "running" }),
+		]));
+
+		runner.settle();
+		await cancellation;
+		await oldVerification;
+		const cancelledVerification = signals().find(signal => signal.id === oldSignal.id)?.verification;
+		expect(cancelledVerification).toMatchObject({
+			status: "cancelled",
+			cancellation: { cause: "superseded", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
+			steps: [
+				{ name: "Optional approval", status: "skipped", passed: true },
+				{ name: "Final signal check", status: "cancelled", cancellation: { cause: "superseded" } },
+			],
+		});
+		// The disabled optional phase completed as skipped before phase 1 spawned.
+		// Cancellation preserves completed audit rows and labels only unfinished work.
+		expect(cancelledVerification?.steps[0]?.cancellation).toBeUndefined();
+		expect(signals().find(signal => signal.id === newSignal.id)?.verification.status).toBe("running");
+		expect(gateStore.getGate(GOAL_ID, GATE_ID)?.status).toBe("pending");
+		expect(events.filter(event => event.type === "gate_verification_complete" && event.signalId === oldSignal.id && event.status === "cancelled")).toHaveLength(1);
+
+		await harness.cancelStaleVerifications(GOAL_ID, GATE_ID);
+	});
+
+
 	test("re-signaling a gate cancels the previous verification", async () => {
 		const signal1 = declareSignal("Signal v1");
 
@@ -177,7 +281,10 @@ test.describe("Gate Re-signal Cancellation", () => {
 			gateId: GATE_ID,
 			signalId: signal1.id,
 			status: "cancelled",
+			cancellation: expect.objectContaining({ cause: "superseded" }),
 		}));
+		expect(gateStore.getGate(GOAL_ID, GATE_ID)?.status,
+		"a superseded historical generation must not publish a failed gate state").toBe("pending");
 		expect(activeVerifications()).toEqual([
 			expect.objectContaining({ signalId: signal2.id, overallStatus: "running" }),
 		]);
@@ -193,8 +300,12 @@ test.describe("Gate Re-signal Cancellation", () => {
 		const history = signals();
 		expect(history).toHaveLength(2);
 		expect(history[0].verification).toMatchObject({
-			status: "failed",
-			steps: [{ name: "Cancelled", status: "failed" }],
+			status: "cancelled",
+			cancellation: { cause: "superseded", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
+			steps: [
+				{ name: "Optional approval", status: "cancelled", cancellation: { cause: "superseded" } },
+				{ name: "Final signal check", status: "cancelled", cancellation: { cause: "superseded" } },
+			],
 		});
 		expect(history.at(-1)).toMatchObject({
 			id: signal2.id,
@@ -226,7 +337,18 @@ test.describe("Gate Re-signal Cancellation", () => {
 		await completeSignal(signal3);
 		expect(activeVerifications()).toHaveLength(0);
 		expect(gateStore.getGate(GOAL_ID, GATE_ID)?.status).toBe("passed");
-		expect(signals().map((signal) => signal.verification.status)).toEqual(["failed", "failed", "passed"]);
+		const history = signals();
+		expect(history.map((signal) => signal.verification.status)).toEqual(["cancelled", "cancelled", "passed"]);
+		for (const historical of history.slice(0, -1)) {
+			expect(historical.verification).toMatchObject({
+				status: "cancelled",
+				cancellation: { cause: "superseded", requestedAt: expect.any(Number), finalizedAt: expect.any(Number) },
+				steps: [
+					{ name: "Optional approval", status: "cancelled", cancellation: { cause: "superseded" } },
+					{ name: "Final signal check", status: "cancelled", cancellation: { cause: "superseded" } },
+				],
+			});
+		}
 		expect(events.filter((event) => event.type === "gate_verification_complete" && event.status === "passed"))
 			.toEqual([expect.objectContaining({ signalId: signal3.id })]);
 		expect(notifications).toEqual([

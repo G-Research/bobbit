@@ -69,50 +69,11 @@ export const PROVIDER_BACKOFF_REGEXES: RegExp[] = [
 	/rate_limit_error/i,
 ];
 
-// ---------------------------------------------------------------------------
-// Restart-interrupt suppression (restart-interrupted verifications mark gates pending, not failed)
-// ---------------------------------------------------------------------------
-
 /**
- * Output-prefix markers indicating that a verification step failed because
- * the gateway was restarted mid-flight (or its agent subprocess was killed)
- * — NOT because the work being verified was actually wrong.
- *
- * Single source of truth for the predicate used by
- * `VerificationHarness._resumeOneVerification` to decide whether the overall
- * gate should fall back to `pending` (with a benign team-lead notification)
- * instead of `failed` (which would cause the team-lead to spend a turn
- * re-investigating a phantom regression).
- *
- * Match semantics: a step's `output` matches if it `includes()` any of these
- * substrings. Empty-output `llm-review` / `agent-qa` steps are also treated
- * as restart-interrupts at the call site (the SIGTERM-during-review case).
- *
- * Extend this list rather than introducing a parallel list — every test that
- * codifies "this is a restart-interrupt" reads from this array.
- */
-export const RESTART_INTERRUPT_MARKERS: readonly string[] = [
-	"Step was running but had no session ID",
-	"Step was interrupted by server restart",
-	"Session lost during server restart",
-	"Agent process exited unexpectedly",
-	"Reviewer agent process died",
-	"Agent did not call verification_result after server restart",
-	// Resume path could not re-attach to the revived reviewer: the agent was
-	// still cold (model + MCP init) and the readiness wait / reminder prompt
-	// RPC timed out. This is a restart-interrupt, not a real review failure.
-	"timed out while resuming after server restart",
-];
-
-/**
- * Return true iff a resume *error message* (from a thrown RpcBridge call —
- * `waitForReady` / `prompt`) indicates the failure was caused by the server
- * restart killing+reviving the reviewer agent (cold-init RPC timeout, process
- * not yet up) rather than a genuine verification failure.
- *
- * Used by `resumeInterruptedVerifications`'s outer catch to route such errors
- * into the `pending`-with-benign-nudge path instead of marking the gate
- * `failed` with a `Resume Error` step.
+ * Identify known RPC/reviewer-process exceptions while restarting a reviewer.
+ * This classifier accepts only harness-caught exception messages so recovery
+ * can persist structured no-verdict state. It must never be applied to a
+ * reviewer verdict, command output, or any terminal verification outcome.
  */
 export function isRestartInterruptError(message: string): boolean {
 	if (!message) return false;
@@ -125,45 +86,7 @@ export function isRestartInterruptError(message: string): boolean {
 		"Agent process not running",
 		"process exited",
 	];
-	return patterns.some(p => message.includes(p));
-}
-
-/**
- * Return true iff every failed step in `steps` looks like a restart
- * interrupt (per RESTART_INTERRUPT_MARKERS, plus the empty-output review/QA
- * special case). The predicate is conjunctive — a single real failure poisons
- * the whole verification, which still marks the gate failed.
- *
- * `steps` shape mirrors what `_resumeOneVerification` produces locally before
- * persisting the GateSignalStep records: each entry carries `passed`,
- * `output`, and `type`. Skipped steps are out of scope (they don't reach
- * this predicate's caller; only failed steps do).
- */
-export function isRestartInterruptedStep(step: { passed: boolean; output: string; type: string }): boolean {
-	if (step.passed) return false;
-	const output = step.output ?? "";
-	if (RESTART_INTERRUPT_MARKERS.some(marker => output.includes(marker))) return true;
-	// Empty-output llm-review / agent-qa failures are also restart-interrupts
-	// (the SIGTERM-during-review case — the reviewer was killed before it
-	// could emit anything to its session log).
-	if ((step.type === "llm-review" || step.type === "agent-qa") && output.trim() === "") return true;
-	return false;
-}
-
-/**
- * Return true iff at least one step failed AND every failed step is a
- * restart interrupt. This is the suppression predicate: when it returns true,
- * the gate should be marked `pending` (not `failed`) and the team-lead should
- * receive a benign "interrupted by restart, please re-signal" notification.
- *
- * Returns false when:
- * - No steps failed (overall pass — caller takes the normal pass branch)
- * - Any failed step is a real failure (gate should still mark failed)
- */
-export function shouldSuppressRestartInterrupt(steps: ReadonlyArray<{ passed: boolean; output: string; type: string }>): boolean {
-	const failedSteps = steps.filter(s => !s.passed);
-	if (failedSteps.length === 0) return false;
-	return failedSteps.every(isRestartInterruptedStep);
+	return patterns.some(pattern => message.includes(pattern));
 }
 
 /**
@@ -222,8 +145,9 @@ export function decideCommandRecoveryMode(opts: {
  * not be re-attached after a restart because the reviewer agent was still cold
  * (model + MCP init) or its session was lost — i.e. RE-RUNNABLE from scratch,
  * not a genuine verification failure and not permanently unrecoverable. These
- * mirror (a subset of) RESTART_INTERRUPT_MARKERS plus readiness-timeout
- * phrasings.
+ * use their own exact infrastructure envelopes plus readiness-timeout
+ * phrasings. This supports retry only; it never determines a terminal
+ * verification outcome.
  */
 const SESSION_RESUME_RERUNNABLE_MARKERS: readonly string[] = [
 	"did not call verification_result after server restart",

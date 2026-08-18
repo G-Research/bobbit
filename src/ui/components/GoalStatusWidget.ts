@@ -17,7 +17,7 @@
  *   - Passed gate View / Reset controls and a top-right Goal Dashboard button.
  *
  * Data:
- *   - Initial: `GET /api/goals/:id/gates` and `GET /api/goals/:id/verifications/active`.
+ *   - Initial: `GET /api/goals/:id/gates`, `?view=summary`, and active-verification reads.
  *   - Live: viewer WebSocket subscription using the centralized gate event
  *     refresh contract in `app/gate-status-events.ts`.
  *
@@ -33,7 +33,7 @@ import { completeTeam, refreshSessions, scheduleGateStatusRefreshForGoal } from 
 import type { SignoffReviewTarget } from "../../app/signoff-review-launch.js";
 import "./SignoffReviewLauncher.js";
 import { GATE_STATUS_CACHE_UPDATED_EVENT_TYPE, GATE_STATUS_CLIENT_EVENT, HUMAN_SIGNOFF_RESOLVED_EVENT_TYPE, shouldRefreshActiveVerificationsForEvent, shouldRefreshGateDetailsForEvent, shouldRefreshGateStatusForEvent } from "../../app/gate-status-events.js";
-import { renderGateProgressBadge, renderGateStatusIcon } from "../../app/render-helpers.js";
+import { renderGateProgressBadge, renderGateStatusIcon, verificationCancellationCauseLabel } from "../../app/render-helpers.js";
 import { setHashRoute } from "../../app/routing.js";
 import { state as appState } from "../../app/state.js";
 import { activeGatewayConnection, gatewayFetch, gatewayWsUrl } from "../../app/gateway-fetch.js";
@@ -41,11 +41,20 @@ import { gatewayRoute } from "../../shared/base-path.js";
 
 type GateStatus = "pending" | "passed" | "failed" | "running" | "bypassed";
 
+interface GateCancellationSummary {
+	cause?: string;
+	requestedAt?: number;
+	finalizedAt?: number;
+}
+
 interface GateSummary {
 	id: string;
 	name: string;
 	status: GateStatus;
 	latestPassedSignalId?: string;
+	/** The authoritative latest signal was cancelled; gate status stays pending. */
+	verificationStatus?: "cancelled";
+	cancellation?: GateCancellationSummary;
 	/** Human justification recorded when a gate was bypassed (honesty system). */
 	whyBypassed?: string;
 	/** Free-text “who am I” label of whoever bypassed the gate. */
@@ -96,6 +105,8 @@ export class GoalStatusWidget extends LitElement {
 	private _wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	private _dropdownEl: HTMLElement | null = null;
 	private _closeToken = 0;
+	/** Fences overlapping full/summary reads so an older pair cannot overwrite a newer snapshot. */
+	private _gateRefreshGeneration = 0;
 	private _onHashChange = () => {
 		if (this._expanded) this._closeDropdown();
 	};
@@ -120,7 +131,10 @@ export class GoalStatusWidget extends LitElement {
 		if (!msg || typeof msg !== "object") return;
 		if (typeof msg.goalId === "string" && msg.goalId !== this.goalId) return;
 		if (msg.type === GATE_STATUS_CACHE_UPDATED_EVENT_TYPE) {
-			this.requestUpdate();
+			// The compact `/gates` response can omit the current signal projection.
+			// Reconcile existing rows against the authoritative summary so a newer
+			// non-cancelled signal also clears an earlier cancellation caption.
+			this._gates = this._normalizeGates(this._gates);
 			this._syncDropdown();
 			return;
 		}
@@ -155,6 +169,7 @@ export class GoalStatusWidget extends LitElement {
 		window.removeEventListener(GATE_STATUS_CLIENT_EVENT, this._onGateStatusClientEvent);
 		this._stopGoalStateWatch();
 		this._closeToken++;
+		this._gateRefreshGeneration++;
 		this._removeDropdown();
 		this._disconnectWs();
 		this._closing = false;
@@ -164,6 +179,9 @@ export class GoalStatusWidget extends LitElement {
 	override updated(changed: Map<string, unknown>) {
 		super.updated(changed);
 		if (changed.has("goalId")) {
+			// Invalidate outstanding snapshots for the previous goal before fetching
+			// the new one.
+			this._gateRefreshGeneration++;
 			// Goal switched (rare — the host AgentInterface re-mounts per session,
 			// but defensive).
 			this._gates = [];
@@ -198,38 +216,45 @@ export class GoalStatusWidget extends LitElement {
 	// ── Data fetch ───────────────────────────────────────────────────
 
 	private async _fetchInitial(): Promise<void> {
+		const goalId = this.goalId;
 		this._loading = true;
-		scheduleGateStatusRefreshForGoal(this.goalId, 0);
 		try {
-			const [gatesResp, vActiveResp] = await Promise.all([
-				this._fetch(`/api/goals/${this.goalId}/gates`),
-				this._fetch(`/api/goals/${this.goalId}/verifications/active`),
-			]);
-			if (gatesResp?.ok) {
-				const data = await gatesResp.json().catch(() => null);
-				if (data?.gates) this._gates = this._normalizeGates(data.gates);
-			}
-			if (vActiveResp?.ok) {
-				const data = await vActiveResp.json().catch(() => null);
-				if (data?.verifications) {
-					this._awaitingSignoffs = this._extractSignoffs(data.verifications);
-					this._activeGateIds = this._extractActiveGateIds(data.verifications);
-				}
-			}
-		} catch {
-			// non-fatal — WS events will rehydrate
+			await Promise.all([this._refreshGates(), this._refreshActive()]);
+		} finally {
+			// A prior goal's initial request must not hide the new goal's loading UI.
+			if (this.goalId === goalId) this._loading = false;
 		}
-		this._loading = false;
 	}
 
 	private async _refreshGates(): Promise<void> {
-		scheduleGateStatusRefreshForGoal(this.goalId, 0);
+		const goalId = this.goalId;
+		const generation = ++this._gateRefreshGeneration;
+		scheduleGateStatusRefreshForGoal(goalId, 0);
 		try {
-			const resp = await this._fetch(`/api/goals/${this.goalId}/gates`);
-			if (!resp?.ok) return;
-			const data = await resp.json().catch(() => null);
-			if (data?.gates) this._gates = this._normalizeGates(data.gates);
-		} catch { /* non-fatal */ }
+			// The full endpoint owns all row/action metadata; the compact summary owns
+			// the latest signal projection. Read them as one fenced snapshot so neither
+			// response can independently publish a partial or stale row list.
+			const [fullResp, summaryResp] = await Promise.all([
+				this._fetch(`/api/goals/${goalId}/gates`),
+				this._fetch(`/api/goals/${goalId}/gates?view=summary`),
+			]);
+			const [fullData, summaryData] = await Promise.all([
+				fullResp?.ok ? fullResp.json().catch(() => null) : Promise.resolve(null),
+				summaryResp?.ok ? summaryResp.json().catch(() => null) : Promise.resolve(null),
+			]);
+			if (generation !== this._gateRefreshGeneration || goalId !== this.goalId) return;
+
+			const fullGates = Array.isArray(fullData?.gates) ? fullData.gates : undefined;
+			const summaryGates = this._summaryGates(summaryData);
+			const summaryByGateId = summaryGates === undefined ? undefined : this._gateMap(summaryGates);
+			if (fullGates) {
+				this._gates = this._normalizeGates(this._mergeSummaryIntoGates(fullGates, summaryByGateId), summaryByGateId);
+			} else if (summaryByGateId) {
+				// Keep the last usable full rows if only the full read failed, while still
+				// applying the newer authoritative cancellation projection.
+				this._gates = this._normalizeGates(this._mergeSummaryIntoGates(this._gates, summaryByGateId), summaryByGateId);
+			}
+		} catch { /* non-fatal — retain existing rows */ }
 	}
 
 	private async _refreshActive(): Promise<void> {
@@ -287,7 +312,41 @@ export class GoalStatusWidget extends LitElement {
 		}
 	}
 
-	private _normalizeGates(rawGates: unknown[]): GateSummary[] {
+	private _summaryGates(data: unknown): unknown[] | undefined {
+		if (!data || typeof data !== "object") return undefined;
+		const response = data as Record<string, unknown>;
+		if (response.summary && typeof response.summary === "object") {
+			const summaryGates = (response.summary as Record<string, unknown>).gates;
+			if (Array.isArray(summaryGates)) return summaryGates;
+		}
+		return Array.isArray(response.gates) ? response.gates : undefined;
+	}
+
+	private _gateMap(rawGates: unknown[]): Map<string, Record<string, unknown>> {
+		const gates = new Map<string, Record<string, unknown>>();
+		for (const gate of rawGates) {
+			if (!gate || typeof gate !== "object") continue;
+			const row = gate as Record<string, unknown>;
+			const id = typeof row.gateId === "string" ? row.gateId : typeof row.id === "string" ? row.id : undefined;
+			if (id) gates.set(id, row);
+		}
+		return gates;
+	}
+
+	private _mergeSummaryIntoGates(rawGates: unknown[], summaryByGateId?: ReadonlyMap<string, Record<string, unknown>>): unknown[] {
+		if (!summaryByGateId) return rawGates;
+		return rawGates.map(gate => {
+			if (!gate || typeof gate !== "object") return gate;
+			const row = gate as Record<string, unknown>;
+			const id = typeof row.gateId === "string" ? row.gateId : typeof row.id === "string" ? row.id : undefined;
+			const summary = id ? summaryByGateId.get(id) : undefined;
+			// Preserve the full row's action metadata while allowing the current
+			// summary projection to win where the two read models overlap.
+			return summary ? { ...row, ...summary } : row;
+		});
+	}
+
+	private _normalizeGates(rawGates: unknown[], authoritativeSummary?: ReadonlyMap<string, Record<string, unknown>>): GateSummary[] {
 		const out: GateSummary[] = [];
 		for (const g of rawGates) {
 			if (!g || typeof g !== "object") continue;
@@ -316,7 +375,26 @@ export class GoalStatusWidget extends LitElement {
 					if (whoAmI === undefined) whoAmI = fallback?.whoAmI;
 				}
 			}
-			out.push({ id, name, status, latestPassedSignalId, whyBypassed, whoAmI });
+			const gateCancellation = this._latestCancellation(obj);
+			const summaryGate = authoritativeSummary?.get(id)
+				?? (authoritativeSummary === undefined ? appState.gateStatusCache.get(this.goalId)?.gates?.find(gate => gate.gateId === id) : undefined);
+			// A directly fetched summary is the current-signal authority. The shared
+			// cache remains a fallback only when that read was unavailable; this lets a
+			// newer non-cancelled summary clear an older full-row cancellation.
+			const latestCancellation = summaryGate
+				? summaryGate.verificationStatus === "cancelled"
+					? this._normalizeCancellation(summaryGate.cancellation) ?? {}
+					: undefined
+				: gateCancellation;
+			out.push({
+				id,
+				name,
+				status,
+				latestPassedSignalId,
+				whyBypassed,
+				whoAmI,
+				...(latestCancellation ? { verificationStatus: "cancelled" as const, cancellation: latestCancellation } : {}),
+			});
 		}
 		return out;
 	}
@@ -339,6 +417,30 @@ export class GoalStatusWidget extends LitElement {
 			};
 		}
 		return undefined;
+	}
+
+	/** Read only the current/latest signal so a historical cancellation never outlives a re-signal. */
+	private _latestCancellation(gate: Record<string, unknown>): GateCancellationSummary | undefined {
+		const topLevel = gate.cancellation;
+		if (gate.verificationStatus === "cancelled") {
+			return this._normalizeCancellation(topLevel) ?? {};
+		}
+		if (!Array.isArray(gate.signals) || gate.signals.length === 0) return undefined;
+		const latest = gate.signals[gate.signals.length - 1];
+		if (!latest || typeof latest !== "object") return undefined;
+		const verification = (latest as Record<string, unknown>).verification;
+		if (!verification || typeof verification !== "object" || (verification as Record<string, unknown>).status !== "cancelled") return undefined;
+		return this._normalizeCancellation((verification as Record<string, unknown>).cancellation) ?? {};
+	}
+
+	private _normalizeCancellation(value: unknown): GateCancellationSummary | undefined {
+		if (!value || typeof value !== "object") return undefined;
+		const cancellation = value as Record<string, unknown>;
+		return {
+			...(typeof cancellation.cause === "string" ? { cause: cancellation.cause } : {}),
+			...(typeof cancellation.requestedAt === "number" ? { requestedAt: cancellation.requestedAt } : {}),
+			...(typeof cancellation.finalizedAt === "number" ? { finalizedAt: cancellation.finalizedAt } : {}),
+		};
 	}
 
 	private _latestPassedSignalId(rawSignals: unknown): string | undefined {
@@ -828,9 +930,12 @@ export class GoalStatusWidget extends LitElement {
 		const effectiveStatus: GateStatus = this._activeGateIds.has(gate.id) ? "running" : gate.status;
 		const canBypass = effectiveStatus === "pending" || effectiveStatus === "failed";
 		const formOpen = this._bypassing === gate.id;
+		const cancelledLabel = gate.verificationStatus === "cancelled" && !this._activeGateIds.has(gate.id)
+			? verificationCancellationCauseLabel(gate.cancellation?.cause)
+			: undefined;
 		const rowTitle = effectiveStatus === "bypassed" && (gate.whoAmI || gate.whyBypassed)
 			? `Bypassed by ${gate.whoAmI || "unknown"}${gate.whyBypassed ? `: ${gate.whyBypassed}` : ""}`
-			: gate.name;
+			: cancelledLabel ? `${gate.name} — cancelled · ${cancelledLabel}` : gate.name;
 		return html`
 			<div class="goal-widget-gate-row flex items-center gap-2 rounded-md" data-testid="goal-widget-gate" data-gate-id=${gate.id} data-gate-status=${effectiveStatus}>
 				<div class="goal-widget-gate-main min-w-0 flex items-center gap-2">
@@ -884,6 +989,7 @@ export class GoalStatusWidget extends LitElement {
 					Bypassed${gate.whoAmI ? html` by <span class="goal-widget-bypass-who">${gate.whoAmI}</span>` : nothing}${gate.whyBypassed ? html`: ${gate.whyBypassed}` : nothing}
 				</div>
 			` : nothing}
+			${cancelledLabel ? html`<div class="text-muted-foreground" style="font-size:11px" data-testid="goal-widget-gate-cancellation">cancelled · ${cancelledLabel}</div>` : nothing}
 			${formOpen ? this._renderBypassForm(gate) : nothing}
 			${bypassError ? html`<div class="goal-widget-gate-error" data-testid="goal-widget-gate-bypass-error">${bypassError}</div>` : nothing}
 		`;

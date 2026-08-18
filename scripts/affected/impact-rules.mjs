@@ -881,7 +881,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		consumer: "tests2/integration/verification-restart-resignal.test.ts",
 		allowReason: "isolated integration gateway, project, or harness-owned output",
 		reads: frozen([
-			{ expression: "persistPath", count: 2 },
+			{ expression: "persistPath", count: 3 },
 		]),
 	},
 	{
@@ -1247,6 +1247,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "test-owned temporary, generated, cache, or in-memory fixture output",
 		reads: frozen([
 			{ expression: "persistPath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/verification-cancellation-provenance.test.ts",
+		allowReason: "isolated test-owned active-verification persistence state",
+		reads: frozen([
+			{ expression: "path.join(stateDir, \"active-verifications.json\")", count: 1 },
 		]),
 	},
 	{

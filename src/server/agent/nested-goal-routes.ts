@@ -78,6 +78,22 @@ export interface NestedGoalRouteDeps {
 const HEADQUARTERS_NO_WORKTREE_CHILD_MERGE_MESSAGE = "This Headquarters goal runs in the Headquarters directory without a git worktree. Git branch, merge, and PR actions are unavailable.";
 const GENERIC_NO_WORKTREE_CHILD_MERGE_MESSAGE = "This goal runs without a git worktree. Git branch, merge, and PR actions are unavailable.";
 
+/** A goal lifecycle write cannot proceed until its cancellation fence is durable. */
+class VerificationCancellationFenceError extends Error {
+	constructor(goalId: string) {
+		super(`Could not durably cancel active verifications before pausing goal ${goalId}`);
+		this.name = "VerificationCancellationFenceError";
+	}
+}
+
+function writeVerificationCancellationFenceFailure(json: NestedGoalRouteDeps["json"]): void {
+	json({
+		error: "Could not durably cancel active verifications",
+		code: "VERIFICATION_CANCELLATION_FENCE_FAILED",
+		retryable: true,
+	}, 503);
+}
+
 /** Parent-facing status for child creation tool responses. */
 function childSetupOutcome(goal: PersistedGoal): { setupStatus: string; setupMessage: string; retrySetup?: boolean } {
 	const status: string = goal.setupStatus ?? "ready"; // GoalStore migrates legacy rows on load.
@@ -327,31 +343,47 @@ export async function tryHandleNestedGoalRoute(
 		return true;
 	}
 
-	/** Cancel any in-flight verifications for a goal (best-effort). */
-	async function cancelAllVerifications(goalId: string): Promise<void> {
-		for (const active of verificationHarness.getActiveVerifications(goalId)) {
-			try {
-				await verificationHarness.cancelStaleVerifications(goalId, active.gateId);
-			} catch (err) {
-				console.error(`[api] cancelAllVerifications: error cancelling verification for ${goalId}/${active.gateId}:`, err);
-			}
-		}
-	}
-
 	/**
-	 * Apply operator-pause semantics to a single goal: set paused=true,
-	 * cancel in-flight verifications, broadcast state change.
-	 *
-	 * THE ONLY CALLER of this function is `executePauseForGoals` below.
-	 * All code that needs to pause a goal (REST handler, replan-overflow)
-	 * MUST go through `executePauseForGoals`, not call this directly.
+	 * Apply operator-pause semantics to a single goal. Admission closes before
+	 * selecting active verifications and remains closed through the authoritative
+	 * pause write and broadcast. Exact cleanup stays detached in the harness.
 	 */
-	async function applyOperatorPause(pauseGoalManager: GoalManager, goalId: string): Promise<void> {
-		// Provenance distinguishes an operator pause from pre-provenance legacy
-		// dependency pauses when GoalManager restores persisted goals on boot.
-		await pauseGoalManager.updateGoal(goalId, { paused: true, pauseSource: "operator" });
-		await cancelAllVerifications(goalId);
-		broadcastToAll({ type: "goal_state_changed", goalId });
+	async function applyOperatorPause(
+		pauseGoalManager: GoalManager,
+		goalId: string,
+		alreadyPaused: boolean,
+	): Promise<void> {
+		const releaseLifecycleFence = verificationHarness.acquireGoalLifecycleFence(goalId);
+		try {
+			try {
+				verificationHarness.fenceAndCancelAllVerifications(goalId, "goal-pause");
+			} catch (err) {
+				console.error(`[api] pause: failed to fence verifications for ${goalId}:`, err);
+				throw new VerificationCancellationFenceError(goalId);
+			}
+			// Repeated pause requests re-drive durable cancellation and detached exact
+			// cleanup, but remain idempotent for the goal-state write and broadcast.
+			if (!alreadyPaused) {
+				// Persist operator provenance in the same authoritative write as the
+				// pause flag. A restart must not mistake this operator decision for a
+				// legacy dependency pause and migrate it away. This strict publication
+				// fence must settle before success is broadcast or the lifecycle fence
+				// opens; GoalStore rolls memory back if publication fails.
+				try {
+					const persisted = await pauseGoalManager.updateGoalStrict(goalId, {
+						paused: true,
+						pauseSource: "operator",
+					});
+					if (!persisted) throw new Error(`Goal ${goalId} not found during pause publication`);
+				} catch (err) {
+					console.error(`[api] pause: failed to durably publish paused state for ${goalId}:`, err);
+					throw new VerificationCancellationFenceError(goalId);
+				}
+				broadcastToAll({ type: "goal_state_changed", goalId });
+			}
+		} finally {
+			releaseLifecycleFence();
+		}
 	}
 
 	/**
@@ -367,20 +399,31 @@ export async function tryHandleNestedGoalRoute(
 		targets: PersistedGoal[],
 		callerSessionId: string | undefined,
 	): Promise<number> {
-		const pausedIds = new Set<string>(targets.map(g => g.id));
+		const successfullyPausedIds = new Set<string>();
 		let count = 0;
-		for (const g of targets) {
-			if (g.paused) continue;
-			await applyOperatorPause(getGoalManagerForGoal(g.id), g.id);
-			count++;
-		}
-		for (const s of sessionManager.getAllSessionsRaw()) {
-			if (!s.goalId || !pausedIds.has(s.goalId)) continue;
-			if (s.status !== "streaming") continue;
-			if (s.id === callerSessionId) continue;
-			sessionManager.abortSessionTurn(s.id).catch((err) => {
-				console.warn(`[pause] abortSessionTurn failed for session=${s.id} goal=${s.goalId}:`, err);
-			});
+		try {
+			for (const g of targets) {
+				// GoalManager may mutate this persisted target in place, so snapshot the
+				// idempotency/count decision before its authoritative paused write.
+				const wasPaused = g.paused === true;
+				await applyOperatorPause(getGoalManagerForGoal(g.id), g.id, wasPaused);
+				// Include repeated pauses: their cancellation fence re-drove successfully
+				// and their already-durable paused state remains eligible for the abort sweep.
+				successfullyPausedIds.add(g.id);
+				if (!wasPaused) count++;
+			}
+		} finally {
+			// A later cascade member can fail its durable fence after earlier goals
+			// have committed paused. Abort only those completed members before the
+			// failure reaches the route; never abort the failed goal's live sessions.
+			for (const s of sessionManager.getAllSessionsRaw()) {
+				if (!s.goalId || !successfullyPausedIds.has(s.goalId)) continue;
+				if (s.status !== "streaming") continue;
+				if (s.id === callerSessionId) continue;
+				sessionManager.abortSessionTurn(s.id).catch((err) => {
+					console.warn(`[pause] abortSessionTurn failed for session=${s.id} goal=${s.goalId}:`, err);
+				});
+			}
 		}
 		return count;
 	}
@@ -404,10 +447,13 @@ export async function tryHandleNestedGoalRoute(
 	): Promise<{ newReplanCount: number; autoPaused: boolean }> {
 		const newReplanCount = (goal.replanCount ?? 0) + 1;
 		await goalManager.updateGoal(goal.id, { replanCount: newReplanCount });
-		const autoPaused = newReplanCount > 5 && !goal.paused;
-		if (autoPaused) {
+		let autoPaused = false;
+		if (newReplanCount > 5 && !goal.paused) {
 			const goalRecord = getGoalAcrossProjects(goal.id);
-			if (goalRecord) await executePauseForGoals([goalRecord], callerSessionId);
+			if (goalRecord) {
+				await executePauseForGoals([goalRecord], callerSessionId);
+				autoPaused = true;
+			}
 		}
 		return { newReplanCount, autoPaused };
 	}
@@ -958,7 +1004,8 @@ export async function tryHandleNestedGoalRoute(
 				);
 				json({ kind: verdict.kind, summary: verdict.summary, applied: true, replanCount: newReplanCount, autoPaused });
 			} catch (err) {
-				jsonError(500, err);
+				if (err instanceof VerificationCancellationFenceError) writeVerificationCancellationFenceFailure(json);
+				else jsonError(500, err);
 			}
 			return true;
 		}
@@ -1257,8 +1304,13 @@ export async function tryHandleNestedGoalRoute(
 		const pauseTargets: PersistedGoal[] = cascade
 			? walkGoalSubtree(targetRoot.id, pauseAllGoals, { includeRoot: true, includeArchived: false })
 			: [targetRoot];
-		const count = await executePauseForGoals(pauseTargets, callerSessionId);
-		json({ paused: count });
+		try {
+			const count = await executePauseForGoals(pauseTargets, callerSessionId);
+			json({ paused: count });
+		} catch (err) {
+			if (err instanceof VerificationCancellationFenceError) writeVerificationCancellationFenceFailure(json);
+			else throw err;
+		}
 		return true;
 	}
 
@@ -1504,7 +1556,8 @@ export async function tryHandleNestedGoalRoute(
 			}
 			json({ applied: true, replanCount: newReplanCount, autoPaused });
 		} catch (err) {
-			jsonError(500, err);
+			if (err instanceof VerificationCancellationFenceError) writeVerificationCancellationFenceFailure(json);
+			else jsonError(500, err);
 		}
 		return true;
 	}

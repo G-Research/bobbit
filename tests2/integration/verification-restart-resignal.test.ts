@@ -25,16 +25,16 @@
  *      `server.ts:4792` will actually fire on re-signal.
  *
  *   3. Call `harness.resumeInterruptedVerifications()` — the same call
- *      `server.ts` makes during boot. Assert the zombie is removed from
- *      both memory and disk (Layer 2 acceptance criteria 3 & 4).
+ *      `server.ts` makes during boot. The missing exact cleanup witness means
+ *      the zombie remains durably fenced as a `gateway-restart-recovery`
+ *      cancellation until cleanup can be proven; it is not purged or failed.
  *
  *   4. Re-signal the gate via POST /api/goals/:id/gates/:gateId/signal.
- *      Assert: response is 201 (NOT 409), a brand-new signal id is
- *      returned, and a fresh verification is in flight.
+ *      Assert: response is 201 (NOT 409), a brand-new signal id is returned,
+ *      and the fenced historical generation cannot mutate the new run.
  *
- * Pre-fix, this fails at step 3 (zombie still in map, persistence still
- * contains the signalId) and again at step 4 (HTTP 409
- * "Verification already in progress for this commit").
+ * Pre-fix, this fails at step 4 with HTTP 409 "Verification already in
+ * progress for this commit".
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { apiFetch, createGoal, deleteGoal, nonGitCwd } from "./_e2e/e2e-setup.js";
@@ -90,6 +90,15 @@ function deadPid(): number {
 	return 0x7ffffffe;
 }
 
+function removeSeededZombie(harness: any, persistPath: string, signalId: string): void {
+	harness.activeVerifications.delete(signalId);
+	if (!fs.existsSync(persistPath)) return;
+	const persisted = JSON.parse(fs.readFileSync(persistPath, "utf-8"));
+	const verifications = (persisted.verifications ?? []).filter((entry: any) => entry?.signalId !== signalId);
+	if (verifications.length === 0) fs.rmSync(persistPath, { force: true });
+	else fs.writeFileSync(persistPath, JSON.stringify({ ...persisted, verifications }, null, 2));
+}
+
 test.describe("Verification lock after restart — re-signal is accepted", () => {
 	test.beforeAll(async () => {
 		await createWorkflow();
@@ -137,7 +146,15 @@ test.describe("Verification lock after restart — re-signal is accepted", () =>
 				verification: {
 					status: "running",
 					startedAt,
-					steps: [{ name: "Slow check", type: "command", status: "running", startedAt }],
+					steps: [{
+						name: "Slow check",
+						type: "command",
+						passed: false,
+						output: "",
+						duration_ms: 0,
+						status: "running",
+						startedAt,
+					}],
 				},
 			});
 
@@ -196,23 +213,34 @@ test.describe("Verification lock after restart — re-signal is accepted", () =>
 				"areVerificationSessionsAlive must NOT report a previous-boot zombie command step as alive",
 			).toBe(false);
 
-			// 5. Run the boot resume path. Post-fix, this synchronously removes
-			//    the zombie from `activeVerifications` AND rewrites the
-			//    persistence file with it gone.
+			// 5. Run the boot resume path. This fixture deliberately lacks a
+			//    typed exact-cleanup witness, so restart recovery must retain the
+			//    cancellation fence for retry rather than falsely claiming cleanup.
 			await harness.resumeInterruptedVerifications();
 
+			const fencedZombie = harness.activeVerifications.get(zombieSignalId);
+			expect(fencedZombie, "restart recovery must retain an unsettled exact-cleanup record").toMatchObject({
+				overallStatus: "cancelled",
+				cancelled: true,
+				cancellation: { cause: "gateway-restart-recovery", requestedAt: expect.any(Number) },
+				steps: [expect.objectContaining({
+					name: "Slow check",
+					status: "running",
+					cancellation: { cause: "gateway-restart-recovery", requestedAt: expect.any(Number) },
+					killRequestedAt: expect.any(Number),
+				})],
+			});
 			expect(
-				harness.activeVerifications.has(zombieSignalId),
-				"resumeInterruptedVerifications must remove the zombie from the in-memory map",
-			).toBe(false);
+				gateStore.getGate(goalId, gateId)?.signals.find((signal: any) => signal.id === zombieSignalId)?.verification.status,
+				"cleanup-fenced cancellation must not publish a terminal state before exact cleanup settles",
+			).toBe("running");
 
-			if (fs.existsSync(persistPath)) {
-				const raw = fs.readFileSync(persistPath, "utf-8");
-				expect(
-					raw.includes(zombieSignalId),
-					`resumeInterruptedVerifications must purge the zombie from ${persistPath} — otherwise the next boot would reload it`,
-				).toBe(false);
-			}
+			const persistedFence = JSON.parse(fs.readFileSync(persistPath, "utf-8")).verifications
+				.find((entry: any) => entry?.signalId === zombieSignalId);
+			expect(persistedFence, "restart cancellation fence must survive persistence").toMatchObject({
+				overallStatus: "cancelled",
+				cancellation: { cause: "gateway-restart-recovery", requestedAt: expect.any(Number) },
+			});
 
 			// 6. Re-signal the same gate at the same SHA via the public HTTP API.
 			//    Pre-fix: HTTP 409 "Verification already in progress for this commit"
@@ -233,16 +261,17 @@ test.describe("Verification lock after restart — re-signal is accepted", () =>
 				"re-signal must produce a fresh signal id, not echo the zombie",
 			).not.toBe(zombieSignalId);
 
-			// The zombie must not be reachable via the active verifications list
-			// any more — either the fresh verification replaced it, or both have
-			// already settled (the slow command is short enough that on fast
-			// machines it can complete before this assertion runs). What matters
-			// is that the zombie signal id is gone.
+			// Cancelled generations are intentionally excluded from the live list,
+			// so the zombie cannot block or become the new generation.
 			const liveActives = harness.getActiveVerifications(goalId);
 			expect(
 				liveActives.some((v: any) => v.signalId === zombieSignalId),
-				"zombie signal must not reappear in active verifications after re-signal",
+				"fenced zombie must not be reported as a live verification after re-signal",
 			).toBe(false);
+			expect(
+				gateStore.getGate(goalId, gateId)?.signals.find((signal: any) => signal.id === newSignalId)?.verification?.cancellation,
+				"restart fence must not propagate its cancellation to the re-signalled generation",
+			).toBeUndefined();
 
 			// Clean up the slow verification we just kicked off so it doesn't
 			// keep running after the test.
@@ -250,6 +279,7 @@ test.describe("Verification lock after restart — re-signal is accepted", () =>
 				method: "POST",
 			}).catch(() => {});
 		} finally {
+			removeSeededZombie(harness, path.join(gateway.bobbitDir, "state", "active-verifications.json"), zombieSignalId);
 			try { await deleteGoal(goalId); } catch { /* ignore */ }
 		}
 	});

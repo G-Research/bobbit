@@ -1609,6 +1609,13 @@ export async function fetchArchivedSessionsPaginated(limit = 50, afterCursor?: n
 	}
 }
 
+export interface GateStatusSummaryCancellation {
+	cause: VerificationCancellationCause;
+	/** Missing only on legacy records that predate durable provenance. */
+	requestedAt?: number;
+	finalizedAt?: number;
+}
+
 export interface GateStatusSummaryGate {
 	gateId: string;
 	name?: string;
@@ -1620,6 +1627,9 @@ export interface GateStatusSummaryGate {
 	signalCount: number;
 	updatedAt?: number;
 	failedSteps?: string[];
+	/** The latest signal was cancelled; gate status remains eligible/pending. */
+	verificationStatus?: "cancelled";
+	cancellation?: GateStatusSummaryCancellation;
 }
 
 export interface GateStatusSummary {
@@ -2645,6 +2655,27 @@ export interface VerificationTimeoutInfo {
 	elapsedMs: number;
 }
 
+/** Why orchestration interrupted a verification. This is distinct from command kill mechanics. */
+export type VerificationCancellationCause =
+	| "manual"
+	| "goal-pause"
+	| "superseded"
+	| "gate-reset"
+	| "bypass"
+	| "goal-complete"
+	| "team-teardown"
+	| "shelved"
+	| "archive"
+	| "zombie-recovery"
+	| "gateway-restart-recovery"
+	| "unknown";
+
+export interface VerificationCancellation {
+	cause: VerificationCancellationCause;
+	requestedAt: number;
+	finalizedAt?: number;
+}
+
 export interface GateSignal {
 	id: string;
 	gateId: string;
@@ -2656,7 +2687,9 @@ export interface GateSignal {
 	content?: string;
 	contentVersion?: number;
 	verification: {
-		status: "running" | "passed" | "failed";
+		status: "running" | "passed" | "failed" | "cancelled";
+		/** Present for cancelled runs; legacy cancellation records use `unknown`. */
+		cancellation?: VerificationCancellation;
 		steps: Array<{
 			name: string;
 			type: string;
@@ -2670,7 +2703,9 @@ export interface GateSignal {
 				metadata?: Record<string, string>;
 			};
 			/** Lifecycle status for in-flight rows seeded by beginVerification. */
-			status?: "waiting" | "running" | "passed" | "failed" | "timeout" | "skipped";
+			status?: "waiting" | "running" | "passed" | "failed" | "timeout" | "skipped" | "cancelled";
+			/** Why an unfinished step was interrupted, with durable audit timestamps. */
+			cancellation?: VerificationCancellation;
 			/** Present only when a review turn exhausted its configured allowance. */
 			timeout?: VerificationTimeoutInfo;
 			/** Optional phase number, mirrored from the workflow VerifyStep. */

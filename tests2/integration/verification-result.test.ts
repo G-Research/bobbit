@@ -131,6 +131,39 @@ test.describe("POST /api/internal/verification-result", () => {
 		harness.pendingResults.delete("test-session-fail");
 	});
 
+
+	test("returns retryable 503 when the pending resolver cannot persist the verdict", async ({ gateway }) => {
+		const harness = (gateway.sessionManager as any)._verificationHarness;
+		const sessionId = "test-session-verdict-not-persisted";
+		let invocations = 0;
+		harness.pendingResults.set(sessionId, () => {
+			invocations++;
+			throw new Error("injected durable-write failure");
+		});
+
+		try {
+			const res = await apiFetch("/api/internal/verification-result", {
+				method: "POST",
+				body: JSON.stringify({
+					sessionId,
+					verdict: "fail",
+					summary: "Retry this verdict after persistence recovers",
+				}),
+			});
+
+			expect(res.status).toBe(503);
+			const body = await res.json();
+			expect(body).toMatchObject({
+				code: "VERDICT_NOT_PERSISTED",
+				error: expect.stringMatching(/durably recorded.*retry/i),
+			});
+			expect(body).not.toHaveProperty("ok");
+			expect(invocations).toBe(1);
+		} finally {
+			harness.pendingResults.delete(sessionId);
+		}
+	});
+
 	test("passes report_html through when provided", async ({ gateway }) => {
 		const harness = (gateway.sessionManager as any)._verificationHarness;
 

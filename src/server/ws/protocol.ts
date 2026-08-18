@@ -1,7 +1,7 @@
 import type { InboxEntry } from "../agent/inbox-store.js";
 import type { MessageAuthor } from "../../shared/message-author.js";
 import type { PromptSource } from "../../shared/prompt-source.js";
-import type { VerificationTimeoutInfo } from "../agent/gate-store.js";
+import type { GateStatus, VerificationCancellationCause, VerificationTimeoutInfo } from "../agent/gate-store.js";
 import type { GoalState } from "../agent/goal-store.js";
 import type { SidePanelWorkspace } from "../../shared/side-panel-workspace.js";
 
@@ -10,6 +10,15 @@ export interface GateResetReopenOutcome {
 	previousState: GoalState;
 	state: GoalState;
 }
+
+/** Durable orchestration decision, separate from a command's kill mechanics. */
+export interface VerificationCancellation {
+	cause: VerificationCancellationCause;
+	requestedAt: number;
+	finalizedAt?: number;
+}
+
+export type GateVerificationStatus = "passed" | "failed" | "cancelled";
 
 export const MODEL_SELECTION_REQUIRED = "MODEL_SELECTION_REQUIRED" as const;
 export const MODEL_SELECTION_RECOVERY_FAILED = "MODEL_SELECTION_RECOVERY_FAILED" as const;
@@ -366,9 +375,11 @@ export type ServerMessage =
 	| { type: "gate_verification_phase_started"; goalId: string; gateId: string; signalId: string; phase: number; stepIndices: number[]; seq?: number }
 	| { type: "gate_verification_step_started"; goalId: string; gateId: string; signalId: string; stepIndex: number; stepName: string; startedAt?: number; sessionId?: string; timeoutSec?: number; phase?: number; seq?: number }
 	| { type: "gate_verification_step_output"; goalId: string; gateId: string; signalId: string; stepIndex: number; stream: "stdout" | "stderr"; text: string; ts: number; seq?: number }
-	| { type: "gate_verification_step_complete"; goalId: string; gateId: string; signalId: string; stepIndex: number; stepName: string; status: "passed" | "failed" | "timeout" | "skipped"; durationMs: number; output: string; sessionId?: string; timeout?: VerificationTimeoutInfo; phase?: number; seq?: number }
-	| { type: "gate_verification_complete"; goalId: string; gateId: string; signalId: string; status: string; seq?: number }
-	| { type: "gate_status_changed"; goalId: string; gateId: string; status: string }
+	| { type: "gate_verification_step_complete"; goalId: string; gateId: string; signalId: string; stepIndex: number; stepName: string; status: "passed" | "failed" | "timeout" | "skipped" | "cancelled"; durationMs: number; output: string; sessionId?: string; timeout?: VerificationTimeoutInfo; cancellation?: VerificationCancellation; phase?: number; seq?: number }
+	| { type: "gate_verification_complete"; goalId: string; gateId: string; signalId: string; status: "passed" | "failed"; seq?: number }
+	| { type: "gate_verification_complete"; goalId: string; gateId: string; signalId: string; status: "cancelled"; cancellation: VerificationCancellation; seq?: number }
+	/** Gate eligibility is independent from a cancelled verification outcome. */
+	| { type: "gate_status_changed"; goalId: string; gateId: string; status: GateStatus; signalId?: string; verificationStatus?: GateVerificationStatus; cancellation?: VerificationCancellation }
 	| { type: "gate_reset"; goalId: string; gateId: string; affectedGateIds: string[]; changedGateIds: string[]; unchangedGateIds: string[]; reopen: GateResetReopenOutcome }
 	| { type: "goal_setup_complete"; goalId: string }
 	| { type: "goal_setup_error"; goalId: string; error: string }

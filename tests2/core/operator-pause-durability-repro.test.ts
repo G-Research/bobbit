@@ -10,7 +10,17 @@ import { tryHandleNestedGoalRoute, type NestedGoalRouteDeps } from "../../src/se
 import { createMemFs } from "../harness/mem-fs.js";
 
 type GoalWithPauseSource = PersistedGoal & { pauseSource?: "operator" | "legacy-deps" };
-type RouteResult = { handled: boolean; status: number; payload: unknown };
+type RouteResult = { handled: boolean; status: number; payload: any };
+
+function deferred() {
+	let resolve!: () => void;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<void>((res, rej) => {
+		resolve = () => res();
+		reject = rej;
+	});
+	return { promise, resolve, reject };
+}
 
 function goal(id: string, overrides: Partial<GoalWithPauseSource> = {}): GoalWithPauseSource {
 	return {
@@ -36,6 +46,152 @@ async function restartWith(goals: GoalWithPauseSource[]): Promise<GoalStore> {
 	const afterRestart = new GoalStore(stateDir, memfs);
 	new GoalManager(afterRestart);
 	return afterRestart;
+}
+
+function createPauseRouteFixture(options: { goals?: GoalWithPauseSource[] } = {}) {
+	const memfs = createMemFs();
+	const stateDir = path.resolve("/memfs/operator-pause-fence/state");
+	memfs.mkdirSync(stateDir);
+	const goalStore = new GoalStore(stateDir, memfs);
+	const goalManager = new GoalManager(goalStore);
+	const pauseGoals = options.goals ?? [goal("pause-target")];
+	const pausedGoal = pauseGoals[0];
+	for (const pauseGoal of pauseGoals) goalStore.put(pauseGoal);
+
+	let fenceDepth = 0;
+	let failFence: { error: Error; goalId?: string } | undefined;
+	let updateCalls = 0;
+	const updateArguments: Array<{ goalId: string; updates: Parameters<GoalManager["updateGoal"]>[1] }> = [];
+	const fenceCalls: Array<{ goalId: string; cause: string; depth: number }> = [];
+	const broadcasts: any[] = [];
+	const broadcastFenceDepths: number[] = [];
+	const abortCalls: string[] = [];
+	const verificationHarness: any = {
+		acquireGoalLifecycleFence: () => {
+			fenceDepth++;
+			let released = false;
+			return () => {
+				if (!released) {
+					released = true;
+					fenceDepth--;
+				}
+			};
+		},
+		fenceAndCancelAllVerifications: (goalId: string, cause: string) => {
+			fenceCalls.push({ goalId, cause, depth: fenceDepth });
+			if (failFence && (!failFence.goalId || failFence.goalId === goalId)) throw failFence.error;
+		},
+		getActiveVerifications: () => [],
+		cancelStaleVerifications: async () => {},
+		resolvePlanStepChild: () => ({ source: "none", child: undefined }),
+		requestChildStart: () => "started",
+		notifyChildTerminal: () => {},
+	};
+	type GoalUpdateArgs = Parameters<GoalManager["updateGoal"]>;
+	const originalUpdateGoal = goalManager.updateGoal.bind(goalManager);
+	// The production route uses updateGoalStrict for the lifecycle publication
+	// boundary. Keep the older method wrapped too so this fixture remains usable
+	// against pre-strict route revisions, but share all bookkeeping and stalling
+	// assertions across both persistence modes.
+	const originalUpdateGoalStrict = (goalManager as any).updateGoalStrict?.bind(goalManager) as
+		| ((...args: GoalUpdateArgs) => Promise<boolean>)
+		| undefined;
+	let stallWrite: { started: ReturnType<typeof deferred>; release: ReturnType<typeof deferred> } | undefined;
+	const wrapGoalUpdate = (update: (...args: GoalUpdateArgs) => Promise<boolean>) =>
+		async (...args: GoalUpdateArgs): Promise<boolean> => {
+			updateCalls++;
+			updateArguments.push({ goalId: args[0], updates: args[1] });
+			if (stallWrite) {
+				stallWrite.started.resolve();
+				await stallWrite.release.promise;
+			}
+			return update(...args);
+		};
+	(goalManager as any).updateGoal = wrapGoalUpdate(originalUpdateGoal);
+	if (originalUpdateGoalStrict) {
+		(goalManager as any).updateGoalStrict = wrapGoalUpdate(originalUpdateGoalStrict);
+	}
+	const context = { goalStore, goalManager, gateStore: {}, project: { id: "project" } };
+	const deps = {
+		projectContextManager: { getContextForGoal: () => context, all: () => [context] },
+		verificationHarness,
+		teamManager: { teardownTeam: async () => {}, getTeamState: () => undefined },
+		sessionManager: {
+			getAllSessionsRaw: () => pauseGoals.map(pauseGoal => ({
+				id: `streaming-session-${pauseGoal.id}`, goalId: pauseGoal.id, status: "streaming",
+			})),
+			abortSessionTurn: async (sessionId: string) => { abortCalls.push(sessionId); },
+			getSession: () => undefined, deliverLiveSteer: async () => {}, enqueuePrompt: async () => {},
+			sessionSecretStore: { resolveSessionIdBySecret: () => undefined },
+		},
+		cookieStore: { verify: (value: string) => value === "human" },
+		requireSubgoalsEnabled: () => true,
+		getGoalAcrossProjects: (goalId: string) => goalStore.get(goalId),
+		getGoalManagerForGoal: () => goalManager,
+		readBody: async (req: http.IncomingMessage) => (req as any)._body,
+		json: () => {},
+		jsonError: () => {},
+		broadcastToAll: (event: any) => { broadcasts.push(event); broadcastFenceDepths.push(fenceDepth); },
+		getSubgoalNestingPrefs: () => ({ subgoalsEnabled: true, maxNestingDepth: 5 }),
+	} as unknown as NestedGoalRouteDeps;
+
+	async function post({ goalId = pausedGoal.id, cascade = false }: { goalId?: string; cascade?: boolean } = {}): Promise<RouteResult> {
+		let status = 0;
+		let payload: any;
+		const handled = await tryHandleNestedGoalRoute(
+			{ method: "POST", headers: { cookie: "bobbit_session=human" }, _body: { cascade } } as any as http.IncomingMessage,
+			new URL(`http://test/api/goals/${goalId}/pause`),
+			{
+				...deps,
+				json: (responseBody, responseStatus) => { payload = responseBody; status = responseStatus ?? 200; },
+				jsonError: (responseStatus, error) => { payload = { error }; status = responseStatus; },
+			},
+		);
+		return { handled, status, payload };
+	}
+
+	return {
+		goal: pausedGoal,
+		goals: pauseGoals,
+		goalStore,
+		post,
+		fenceCalls,
+		broadcasts,
+		broadcastFenceDepths,
+		abortCalls,
+		get fenceDepth() { return fenceDepth; },
+		get updateCalls() { return updateCalls; },
+		get updateArguments() { return updateArguments; },
+		failCancellationFence(error = new Error("simulated durable fence failure"), goalId?: string) {
+			failFence = { error, goalId };
+		},
+		holdStrictGoalPublication() {
+			// Exercise GoalStore's real strict-publication seam. The held wrapper
+			// delegates to it after release, so a successful pause still crosses the
+			// production coalesced-writer barrier rather than a test-only fake.
+			const persistence = (goalStore as any).persistence;
+			const publishStrict = persistence.publishStrict.bind(persistence);
+			const started = deferred();
+			const release = deferred();
+			persistence.publishStrict = async (ids: Iterable<string>) => {
+				started.resolve();
+				await release.promise;
+				return publishStrict(ids);
+			};
+			return { started, release };
+		},
+		failStrictGoalPublication(error = new Error("injected strict goal publication failure")) {
+			// GoalStore.updateStrict owns the rollback around this exact seam.
+			// Replacing it makes the route's success/error handling observable without
+			// timing a debounced ordinary save.
+			const persistence = (goalStore as any).persistence;
+			persistence.publishStrict = async () => { throw error; };
+		},
+		stallPausedWrite() {
+			stallWrite = { started: deferred(), release: deferred() };
+			return stallWrite;
+		},
+	};
 }
 
 function createResumeRouteFixture() {
@@ -93,6 +249,8 @@ function createResumeRouteFixture() {
 	const deps = {
 		projectContextManager: { getContextForGoal: () => context, all: () => [context] },
 		verificationHarness: {
+			acquireGoalLifecycleFence: () => () => {},
+			fenceAndCancelAllVerifications: () => {},
 			getActiveVerifications: () => [],
 			cancelStaleVerifications: async () => {},
 			resolvePlanStepChild: () => ({ source: "none", child: undefined }),
@@ -190,6 +348,148 @@ describe("operator pause durability", () => {
 		const migrated = store.get("legacy-dependency-paused-child")!;
 		assert.equal(migrated.state, "blocked", "legacy dependency pause must migrate to scheduler-blocked state");
 		assert.equal(migrated.paused, false, "legacy dependency pause must clear paused so it can auto-start after deps resolve");
+	});
+});
+
+describe("canonical operator pause lifecycle", () => {
+	it("fails closed when durable cancellation fencing fails", async () => {
+		const fx = createPauseRouteFixture();
+		fx.failCancellationFence();
+
+		const result = await fx.post();
+
+		assert.equal(result.handled, true);
+		assert.equal(result.status, 503);
+		assert.deepEqual(result.payload, {
+			error: "Could not durably cancel active verifications",
+			code: "VERIFICATION_CANCELLATION_FENCE_FAILED",
+			retryable: true,
+		});
+		assert.notEqual(fx.goalStore.get(fx.goal.id)!.paused, true, "a failed fence must not persist pause state");
+		assert.notEqual(fx.goalStore.get(fx.goal.id)!.pauseSource, "operator", "a failed fence must not stamp operator provenance");
+		assert.deepEqual(fx.updateArguments, [], "a failed fence must not attempt a pause/provenance write");
+		assert.equal(fx.broadcasts.length, 0, "a failed fence must not publish a successful pause");
+		assert.deepEqual(fx.abortCalls, [], "a failed fence must not abort goal sessions");
+		assert.equal(fx.fenceDepth, 0, "the lifecycle admission fence must release after failure");
+	});
+
+	it("aborts only earlier committed goals when a later cascade fence fails", async () => {
+		const parent = goal("cascade-parent");
+		const child = goal("cascade-child", { parentGoalId: parent.id, rootGoalId: parent.id });
+		const fx = createPauseRouteFixture({ goals: [parent, child] });
+		fx.failCancellationFence(new Error("child fence persistence failed"), child.id);
+
+		const result = await fx.post({ cascade: true });
+
+		assert.equal(result.status, 503);
+		assert.equal(fx.goalStore.get(parent.id)!.paused, true, "the earlier parent remains durably paused");
+		assert.equal(fx.goalStore.get(parent.id)!.pauseSource, "operator", "the committed parent retains operator provenance");
+		assert.notEqual(fx.goalStore.get(child.id)!.paused, true, "the failed child remains unpaused");
+		assert.notEqual(fx.goalStore.get(child.id)!.pauseSource, "operator", "the failed child is never stamped as operator-paused");
+		assert.deepEqual(fx.broadcasts, [{ type: "goal_state_changed", goalId: parent.id }]);
+		assert.deepEqual(fx.abortCalls, ["streaming-session-cascade-parent"], "only the committed parent may be aborted");
+		assert.deepEqual(fx.fenceCalls.map(call => call.goalId), [parent.id, child.id]);
+	});
+
+	it("holds goal-wide admission through the paused write", async () => {
+		const fx = createPauseRouteFixture();
+		const write = fx.stallPausedWrite();
+		let signalGeneration = 0;
+		const admitSignal = () => {
+			if (fx.fenceDepth > 0) return { status: 409, code: "GOAL_LIFECYCLE_FENCED" };
+			signalGeneration++;
+			return { status: 201 };
+		};
+
+		const pause = fx.post();
+		await write.started.promise;
+		assert.deepEqual(admitSignal(), { status: 409, code: "GOAL_LIFECYCLE_FENCED" });
+		assert.equal(signalGeneration, 0, "no signal generation may escape while the pause decision is open");
+		assert.equal(fx.goalStore.get(fx.goal.id)!.paused, undefined, "pause write remains authoritative and incomplete");
+
+		write.release.resolve();
+		const result = await pause;
+		assert.equal(result.status, 200);
+		assert.deepEqual(result.payload, { paused: 1 });
+		assert.equal(fx.goalStore.get(fx.goal.id)!.paused, true);
+		assert.equal(fx.goalStore.get(fx.goal.id)!.pauseSource, "operator", "the first pause durably records operator provenance");
+		assert.deepEqual(
+			fx.updateArguments,
+			[{ goalId: fx.goal.id, updates: { paused: true, pauseSource: "operator" } }],
+			"pause state and provenance must share one authoritative write",
+		);
+		assert.equal(fx.fenceDepth, 0, "admission reopens only after the paused write and broadcast settle");
+		assert.deepEqual(fx.fenceCalls, [{ goalId: fx.goal.id, cause: "goal-pause", depth: 1 }]);
+		assert.deepEqual(fx.broadcastFenceDepths, [1], "the paused broadcast must remain inside the lifecycle fence");
+	});
+
+	it("does not report or broadcast an operator pause before GoalStore strict publication settles", async () => {
+		const fx = createPauseRouteFixture();
+		const publication = fx.holdStrictGoalPublication();
+		const pause = fx.post();
+		const firstBoundary = await Promise.race([
+			publication.started.promise.then(() => "strict-publication" as const),
+			pause.then(() => "route-response" as const),
+		]);
+
+		assert.equal(
+			firstBoundary,
+			"strict-publication",
+			"OPERATOR_PAUSE_STRICT_PUBLICATION: the route must enter GoalStore's strict publication barrier before it can return success",
+		);
+		let responseSettled = false;
+		void pause.then(() => { responseSettled = true; });
+		await Promise.resolve();
+		assert.equal(responseSettled, false, "the held strict publication barrier must keep the pause response pending");
+		assert.deepEqual(fx.broadcasts, [], "the paused state must not broadcast before strict publication completes");
+
+		publication.release.resolve();
+		assert.deepEqual(await pause, { handled: true, status: 200, payload: { paused: 1 } });
+		assert.deepEqual(fx.broadcasts, [{ type: "goal_state_changed", goalId: fx.goal.id }]);
+		assert.equal(fx.goalStore.get(fx.goal.id)!.paused, true, "the successful response follows one durable pause/provenance publication");
+		assert.equal(fx.goalStore.get(fx.goal.id)!.pauseSource, "operator", "the successful response follows one durable pause/provenance publication");
+	});
+
+	it("maps a strict GoalStore pause publication failure to the retryable lifecycle error and restores memory", async () => {
+		const fx = createPauseRouteFixture();
+		fx.failStrictGoalPublication();
+
+		const result = await fx.post();
+
+		assert.equal(result.handled, true);
+		assert.deepEqual(result, {
+			handled: true,
+			status: 503,
+			payload: {
+				error: "Could not durably cancel active verifications",
+				code: "VERIFICATION_CANCELLATION_FENCE_FAILED",
+				retryable: true,
+			},
+		});
+		assert.notEqual(fx.goalStore.get(fx.goal.id)!.paused, true, "GoalStore strict rollback must restore paused memory ownership");
+		assert.notEqual(fx.goalStore.get(fx.goal.id)!.pauseSource, "operator", "GoalStore strict rollback must restore provenance memory ownership");
+		assert.notEqual(fx.goal.paused, true, "the route's live goal object must observe the rollback, not retain a stale pause");
+		assert.notEqual(fx.goal.pauseSource, "operator", "the route's live goal object must observe the provenance rollback");
+		assert.deepEqual(fx.broadcasts, [], "a rejected strict publication must not announce a successful pause");
+		assert.deepEqual(fx.abortCalls, [], "a rejected strict publication must not abort sessions as if pause succeeded");
+		assert.equal(fx.fenceDepth, 0, "the lifecycle fence must release after the strict publication failure");
+	});
+
+	it("repeated pause re-drives durable cancellation without duplicating state work", async () => {
+		const fx = createPauseRouteFixture();
+		assert.deepEqual(await fx.post(), { handled: true, status: 200, payload: { paused: 1 } });
+		assert.deepEqual(await fx.post(), { handled: true, status: 200, payload: { paused: 0 } });
+
+		assert.equal(fx.updateCalls, 1, "repeated pause must not rewrite already-paused state");
+		assert.deepEqual(
+			fx.updateArguments,
+			[{ goalId: fx.goal.id, updates: { paused: true, pauseSource: "operator" } }],
+			"only the first pause may write operator provenance",
+		);
+		assert.equal(fx.goalStore.get(fx.goal.id)!.pauseSource, "operator", "the first pause's provenance remains durable");
+		assert.equal(fx.broadcasts.length, 1, "repeated pause must not publish another state transition");
+		assert.deepEqual(fx.fenceCalls.map(call => call.cause), ["goal-pause", "goal-pause"]);
+		assert.equal(fx.fenceDepth, 0);
 	});
 });
 

@@ -644,6 +644,157 @@ describe("GateStore SQLite persistence", () => {
 		await reloaded.close();
 	});
 
+	it("rolls back a rejected strict verification publication while preserving a concurrent same-gate mutation", async () => {
+		const memfs = createMemFs();
+		const stateDir = path.resolve("/memfs/gate-strict-verification-rollback");
+		memfs.mkdirSync(stateDir, { recursive: true });
+		const store = new GateStore(stateDir, memfs, { persistence: "json" });
+		store.initGatesForGoal("goal-1", ["design"]);
+		const signal: GateSignal = {
+			id: "running-signal",
+			goalId: "goal-1",
+			gateId: "design",
+			sessionId: "session-1",
+			timestamp: 1,
+			commitSha: "abc123",
+			verification: {
+				status: "running",
+				steps: [{ name: "Completed phase", type: "command", passed: true, status: "passed", output: "kept", duration_ms: 3 }],
+			},
+		};
+		store.recordSignal(signal);
+		await store.flush();
+		const runningVerification = structuredClone(signal.verification);
+		const runningUpdatedAt = store.getGate("goal-1", "design")!.updatedAt;
+
+		const terminal: GateSignal["verification"] = {
+			status: "cancelled",
+			cancellation: { cause: "goal-pause", requestedAt: 2, finalizedAt: 3 },
+			steps: [
+				{ name: "Completed phase", type: "command", passed: true, status: "passed", output: "kept", duration_ms: 3 },
+				{ name: "Interrupted phase", type: "command", passed: false, status: "cancelled", cancellation: { cause: "goal-pause", requestedAt: 2, finalizedAt: 3 }, output: "", duration_ms: 0 },
+			],
+		};
+		const originalRename = memfs.promises.rename.bind(memfs.promises);
+		let failNextRename = true;
+		let markRenameStarted!: () => void;
+		let releaseRename!: () => void;
+		const renameStarted = new Promise<void>(resolve => { markRenameStarted = resolve; });
+		const renameReleased = new Promise<void>(resolve => { releaseRename = resolve; });
+		(memfs.promises as any).rename = async (from: string, to: string) => {
+			if (failNextRename && String(to).endsWith("gates.json")) {
+				failNextRename = false;
+				markRenameStarted();
+				await renameReleased;
+				throw new Error("injected strict verification rename failure");
+			}
+			return originalRename(from, to);
+		};
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const clock = vi.spyOn(Date, "now")
+			.mockReturnValueOnce(runningUpdatedAt + 1)
+			.mockReturnValueOnce(runningUpdatedAt + 2);
+
+		const publication = store.updateSignalVerificationStrict(signal.id, terminal);
+		await renameStarted;
+		store.updateGateMetadata("goal-1", "design", { concurrent: "mutation" });
+		releaseRename();
+		await expect(publication).rejects.toThrow(/injected strict verification rename failure/);
+		await store.flush();
+
+		const afterFailure = store.getGate("goal-1", "design")!;
+		expect(afterFailure.signals[0]?.verification.status).toBe("running");
+		expect(afterFailure.signals[0]?.verification).toEqual(runningVerification);
+		expect(afterFailure.currentMetadata).toEqual({ concurrent: "mutation" });
+		expect(afterFailure.updatedAt).toBe(runningUpdatedAt + 2);
+		const failedWriteReader = new GateStore(stateDir, memfs, { persistence: "json" });
+		expect(failedWriteReader.getGate("goal-1", "design")?.signals[0]?.verification).toEqual(runningVerification);
+		expect(failedWriteReader.getGate("goal-1", "design")?.currentMetadata).toEqual({ concurrent: "mutation" });
+		failedWriteReader.dispose();
+
+		clock.mockRestore();
+		(memfs.promises as any).rename = originalRename;
+		await expect(store.updateSignalVerificationStrict(signal.id, terminal)).resolves.toBeUndefined();
+		const durableReader = new GateStore(stateDir, memfs, { persistence: "json" });
+		expect(durableReader.getGate("goal-1", "design")?.signals[0]?.verification).toEqual(terminal);
+		expect(durableReader.getGate("goal-1", "design")?.currentMetadata).toEqual({ concurrent: "mutation" });
+		durableReader.dispose();
+		errorSpy.mockRestore();
+		await store.close();
+	});
+
+	it("rolls back a rejected strict gate status publication and notifies only after retry", async () => {
+		const memfs = createMemFs();
+		const stateDir = path.resolve("/memfs/gate-strict-status-rollback");
+		memfs.mkdirSync(stateDir, { recursive: true });
+		const store = new GateStore(stateDir, memfs, { persistence: "json" });
+		store.initGatesForGoal("goal-status", ["design"]);
+		await store.flush();
+		const previous = store.getGate("goal-status", "design")!;
+		const previousUpdatedAt = previous.updatedAt;
+		const statusChanged = vi.fn();
+		store.onStatusChange = statusChanged;
+		const originalRename = memfs.promises.rename.bind(memfs.promises);
+		let failNextRename = true;
+		(memfs.promises as any).rename = async (from: string, to: string) => {
+			if (failNextRename && String(to).endsWith("gates.json")) {
+				failNextRename = false;
+				throw new Error("injected strict gate status rename failure");
+			}
+			return originalRename(from, to);
+		};
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await expect(store.updateGateStatusStrict("goal-status", "design", "passed"))
+			.rejects.toThrow(/injected strict gate status rename failure/);
+		expect(store.getGate("goal-status", "design")).toMatchObject({ status: "pending", updatedAt: previousUpdatedAt });
+		expect(statusChanged, "STRICT_GATE_STATUS_MUST_NOT_NOTIFY_ON_REJECTED_WRITE").not.toHaveBeenCalled();
+
+		await expect(store.updateGateStatusStrict("goal-status", "design", "passed")).resolves.toBeUndefined();
+		expect(store.getGate("goal-status", "design")?.status).toBe("passed");
+		expect(statusChanged, "STRICT_GATE_STATUS_MUST_NOTIFY_AFTER_DURABLE_RETRY").toHaveBeenCalledTimes(1);
+		const reader = new GateStore(stateDir, memfs, { persistence: "json" });
+		expect(reader.getGate("goal-status", "design")?.status).toBe("passed");
+		reader.dispose();
+		errorSpy.mockRestore();
+		(memfs.promises as any).rename = originalRename;
+		await store.close();
+	});
+
+	it("rolls back a rejected SQLite strict verification publication", async () => {
+		const stateDir = tempRoot();
+		const store = openStore(stateDir);
+		store.initGatesForGoal("goal-sqlite-strict", ["design"]);
+		const signal: GateSignal = {
+			id: "sqlite-running-signal",
+			goalId: "goal-sqlite-strict",
+			gateId: "design",
+			sessionId: "session-1",
+			timestamp: 1,
+			commitSha: "abc123",
+			verification: { status: "running", steps: [] },
+		};
+		store.recordSignal(signal);
+		await store.flush();
+		const runningVerification = structuredClone(signal.verification);
+		const terminal: GateSignal["verification"] & { injectedFailure?: { toJSON(): never } } = {
+			status: "cancelled",
+			cancellation: { cause: "manual", requestedAt: 2, finalizedAt: 3 },
+			steps: [],
+			injectedFailure: { toJSON: () => { throw new Error("injected SQLite strict serialization failure"); } },
+		};
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		await expect(store.updateSignalVerificationStrict(signal.id, terminal)).rejects.toThrow(/injected SQLite strict serialization failure/);
+		expect(store.getGate("goal-sqlite-strict", "design")?.signals[0]?.verification).toEqual(runningVerification);
+
+		delete terminal.injectedFailure;
+		await expect(store.updateSignalVerificationStrict(signal.id, terminal)).resolves.toBeUndefined();
+		const durableReader = openStore(stateDir);
+		expect(durableReader.getGate("goal-sqlite-strict", "design")?.signals[0]?.verification).toEqual(terminal);
+		errorSpy.mockRestore();
+	});
+
 	it("retries a transient final flush failure and restores the exact mutation after restart", async () => {
 		const stateDir = tempRoot();
 		const store = openStore(stateDir);

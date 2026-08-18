@@ -220,17 +220,29 @@ test("resume preserves a real durable non-zero command verdict", async () => {
 	assert.match(notificationText(notifications), /step="Real failed command"/);
 });
 
-test("no durable verdict remains restart-interrupted and pending", async () => {
+test("no durable verdict is cancelled as gateway restart recovery without failing the gate", async () => {
 	const { stateDir, harness, gateStoreCalls, notifications } = makeHarnessForStateDir();
 	const startedAt = Date.now() - 100;
 	const files = diagnosticFixture(stateDir, "sig-no-verdict", { out: "probe started\n", err: "" });
 	persistActive(stateDir, activeVerification("sig-no-verdict", [commandStepFixture({ name: "No verdict", startedAt, ...files })], startedAt));
 
 	await harness.resumeInterruptedVerifications();
-	const step = stepByName(latestSignalUpdate(gateStoreCalls), "No verdict");
+	const update = latestSignalUpdate(gateStoreCalls);
+	const step = stepByName(update, "No verdict");
 	assert.equal(latestGateStatus(gateStoreCalls), "pending");
-	assert.equal(step?.status, "waiting");
-	assert.match(step?.output ?? "", /no command verdict|re-signal|durable command exit status/i);
+	assert.equal(update?.status, "cancelled");
+	assert.deepEqual(update?.cancellation && {
+		cause: update.cancellation.cause,
+		requestedAt: typeof update.cancellation.requestedAt,
+		finalizedAt: typeof update.cancellation.finalizedAt,
+	}, { cause: "gateway-restart-recovery", requestedAt: "number", finalizedAt: "number" });
+	assert.equal(step?.status, "cancelled");
+	assert.deepEqual(step?.cancellation && {
+		cause: step.cancellation.cause,
+		requestedAt: typeof step.cancellation.requestedAt,
+		finalizedAt: typeof step.cancellation.finalizedAt,
+	}, { cause: "gateway-restart-recovery", requestedAt: "number", finalizedAt: "number" });
+	assert.match(step?.output ?? "", /probe started|no command verdict|re-signal|durable command exit status/i);
 	assert.doesNotMatch(notificationText(notifications), /step="No verdict"/);
 });
 
@@ -245,8 +257,18 @@ test("mixed durable failure and interruption notifies only the failed step", asy
 
 	await harness.resumeInterruptedVerifications();
 	const update = latestSignalUpdate(gateStoreCalls);
-	assert.equal(stepByName(update, "Real failed command")?.status, "failed");
-	assert.equal(stepByName(update, "No verdict sibling")?.status, "waiting");
+	const realFailure = stepByName(update, "Real failed command");
+	const interruptedSibling = stepByName(update, "No verdict sibling");
+	assert.equal(update?.status, "failed", "The genuine durable command verdict owns the aggregate signal outcome.");
+	assert.equal(latestGateStatus(gateStoreCalls), "failed", "The genuine durable command verdict owns the gate outcome.");
+	assert.equal(realFailure?.status, "failed");
+	assert.equal(interruptedSibling?.status, "cancelled");
+	assert.equal(interruptedSibling?.passed, false);
+	assert.deepEqual(interruptedSibling?.cancellation && {
+		cause: interruptedSibling.cancellation.cause,
+		requestedAt: typeof interruptedSibling.cancellation.requestedAt,
+		finalizedAt: typeof interruptedSibling.cancellation.finalizedAt,
+	}, { cause: "gateway-restart-recovery", requestedAt: "number", finalizedAt: "number" });
 	const notices = notificationText(notifications);
 	assert.match(notices, /step="Real failed command"/);
 	assert.doesNotMatch(notices, /step="No verdict sibling"/);
@@ -380,17 +402,125 @@ test("Windows recovered docker-exec transport requires nonce-bound Job-close evi
 	assert.equal(step.sentinelCleanupPending, undefined);
 });
 
-test("attached or container recovery stays retryable with clear diagnostics", async () => {
+test("unsupported attached container recovery is cancelled with a durable restart cause", async () => {
 	const { stateDir, harness, gateStoreCalls } = makeHarnessForStateDir();
 	const startedAt = Date.now() - 100;
 	persistActive(stateDir, activeVerification("sig-attached", [commandStepFixture({ name: "Container attached command", startedAt, containerId: "container-under-test" })], startedAt));
 
 	await harness.resumeInterruptedVerifications();
-	const step = stepByName(latestSignalUpdate(gateStoreCalls), "Container attached command");
+	const update = latestSignalUpdate(gateStoreCalls);
+	const step = stepByName(update, "Container attached command");
 	assert.equal(latestGateStatus(gateStoreCalls), "pending");
-	assert.notEqual(step?.status, "failed");
+	assert.equal(update?.status, "cancelled");
+	assert.equal(update?.cancellation?.cause, "gateway-restart-recovery");
+	assert.equal(step?.status, "cancelled");
+	assert.equal(step?.cancellation?.cause, "gateway-restart-recovery");
 	assert.match(step?.output ?? "", /container|attached|unsupported/i);
 	assert.match(step?.output ?? "", /re-signal|retry|pending|no command verdict/i);
+});
+
+test("restart retains an ambiguous spawning command as a durable cleanup owner", async () => {
+	const { stateDir, harness, gateStoreCalls, broadcasts } = makeHarnessForStateDir();
+	const signalId = "sig-spawning-restart";
+	const startedAt = Date.now() - 100;
+	persistActive(stateDir, activeVerification(signalId, [{
+		...commandStepFixture({ name: "Spawn window command", startedAt, restartRecoveryMode: "pending-retry" }),
+		commandSpawnState: "spawning",
+	}], startedAt));
+
+	await harness.resumeInterruptedVerifications();
+
+	const active = (harness as any).activeVerifications.get(signalId);
+	const persisted = (harness as any)._loadActive().find((verification: ActiveVerification) => verification.signalId === signalId);
+	assert.ok(active, `${MARKER}: a spawn-window command must retain its active cleanup owner`);
+	assert.equal(active.overallStatus, "cancelled");
+	assert.equal(active.steps[0].status, "running", `${MARKER}: cleanup must not invent command completion`);
+	assert.equal(active.steps[0].killReason, "cancelled");
+	assert.equal(active.steps[0].killSignal, "SIGKILL");
+	assert.ok(active.steps[0].killRequestedAt, `${MARKER}: restart must persist kill intent before cleanup retries`);
+	assert.match(active.steps[0].killUnsafeReason ?? "", /no restart-safe persisted process identity/i);
+	assert.equal((harness as any)._hasPendingCommandKillCleanup(active), true);
+	assert.equal(persisted.steps[0].killRequestedAt, active.steps[0].killRequestedAt, `${MARKER}: ambiguous cleanup intent must survive restart persistence`);
+	assert.equal(gateStoreCalls.length, 0, `${MARKER}: ambiguous cleanup must not terminalize the signal or gate`);
+	assert.equal(broadcasts.length, 0, `${MARKER}: ambiguous cleanup must not publish terminal WebSocket state`);
+});
+
+test("spawning and spawned commands fail closed while queued commands finalize immediately", async () => {
+	const { harness, gateStoreCalls, broadcasts } = makeHarnessForStateDir();
+	const startedAt = Date.now();
+	const spawning = activeVerification("sig-spawning-cancel", [{
+		...commandStepFixture({ name: "Spawning", startedAt, restartRecoveryMode: "pending-retry" }),
+		commandSpawnState: "spawning",
+	}], startedAt);
+	const spawned = activeVerification("sig-spawned-cancel", [{
+		...commandStepFixture({ name: "Spawned", startedAt, restartRecoveryMode: "pending-retry" }),
+		commandSpawnState: "spawned",
+	}], startedAt);
+	const queued = activeVerification("sig-queued-cancel", [{
+		...commandStepFixture({ name: "Queued", startedAt, restartRecoveryMode: "pending-retry" }),
+		commandSpawnState: "queued",
+	}], startedAt);
+	// First leave the old generation in its ambiguous spawn window. A later
+	// generation must not erase that durable cleanup owner while superseding it.
+	trackVerification(harness, spawning);
+	assert.equal(await harness.cancelAllVerifications(GOAL_ID, "manual"), false);
+	trackVerification(harness, spawned);
+	trackVerification(harness, queued);
+
+	const settled = await harness.cancelStaleVerificationsForGates(GOAL_ID, [GATE_ID]);
+
+	for (const verification of [spawning, spawned]) {
+		const step = verification.steps[0];
+		assert.equal((harness as any).activeVerifications.get(verification.signalId), verification, `${MARKER}: ${step.commandSpawnState} ownership must survive a later superseding generation`);
+		assert.ok(step.killRequestedAt, `${MARKER}: ${step.commandSpawnState} must receive durable kill intent`);
+		assert.equal(step.killReason, "cancelled");
+		assert.match(step.killUnsafeReason ?? "", /no restart-safe persisted process identity/i);
+		assert.equal(step.killCompletedAt, undefined, `${MARKER}: ${step.commandSpawnState} without exact identity must never invent cleanup completion`);
+	}
+	assert.equal(spawning.cancellation?.cause, "manual", `${MARKER}: later supersession must preserve the first cancellation fence`);
+	assert.equal(settled, false, `${MARKER}: ambiguous spawning ownership keeps cancellation retryable`);
+	assert.equal((harness as any).activeVerifications.has(queued.signalId), false, `${MARKER}: only explicit queued proves no command process exists`);
+	assert.ok(gateStoreCalls.some(call => call.kind === "updateSignalVerification" && call.signalId === queued.signalId), `${MARKER}: queued cancellation may finalize immediately`);
+	assert.ok(broadcasts.some(entry => entry.event?.signalId === queued.signalId && entry.event?.status === "cancelled"));
+	assert.equal(broadcasts.some(entry => (entry.event?.signalId === spawning.signalId || entry.event?.signalId === spawned.signalId) && entry.event?.type === "gate_verification_complete"), false, `${MARKER}: ambiguous old generations must not publish terminal completion`);
+
+	const persisted = (harness as any)._loadActive();
+	assert.deepEqual(persisted.map((verification: ActiveVerification) => verification.signalId).sort(), [spawning.signalId, spawned.signalId].sort(), `${MARKER}: later supersession must not discard ambiguous cleanup owners`);
+});
+
+test("completed spawned rows preserve history without acquiring cancellation cleanup", async () => {
+	const { harness, gateStoreCalls, broadcasts } = makeHarnessForStateDir();
+	const signalId = "sig-completed-spawned";
+	const startedAt = Date.now();
+	const verification = activeVerification(signalId, [
+		{
+			...commandStepFixture({ name: "Completed command", startedAt }),
+			status: "passed",
+			durationMs: 12,
+			output: "already passed",
+			commandSpawnState: "spawned",
+		},
+		{
+			...commandStepFixture({ name: "Queued command", startedAt }),
+			commandSpawnState: "queued",
+		},
+	], startedAt);
+	trackVerification(harness, verification);
+
+	assert.equal(await harness.cancelAllVerifications(GOAL_ID, "manual"), true);
+
+	const update = latestSignalUpdate(gateStoreCalls);
+	const completed = stepByName(update, "Completed command");
+	const queued = stepByName(update, "Queued command");
+	assert.equal(completed?.status, "passed", `${MARKER}: completed command history must remain authoritative`);
+	assert.equal(completed?.output, "already passed");
+	assert.equal(verification.steps[0].killRequestedAt, undefined, `${MARKER}: stale spawned state must not create a new kill intent for a completed row`);
+	assert.equal(verification.steps[0].killCompletedAt, undefined);
+	assert.equal(queued?.status, "cancelled");
+	assert.equal(latestGateStatus(gateStoreCalls), "pending");
+	assert.equal(update?.status, "cancelled");
+	assert.equal((harness as any).activeVerifications.has(signalId), false, `${MARKER}: completed row must not leak a cleanup owner`);
+	assert.equal(broadcasts.filter(entry => entry.event?.type === "gate_verification_complete" && entry.event?.signalId === signalId).length, 1, `${MARKER}: cancellation must publish exactly once`);
 });
 
 test("resume reads bounded tails instead of whole retained logs", async () => {

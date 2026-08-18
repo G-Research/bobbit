@@ -57,7 +57,7 @@ import { paceAndSend, PACE_TIMEOUT_MS } from "./replay-pacing.js";
 import { DEFAULT_OVERFLOW_GUARD, describeWsPayload, guardWebSocketOverflow } from "./ws-overflow-guard.js";
 import { discoverSlashSkills, discoverSlashSkillsResolved, getSkillDirectories, getSlashSkill, buildSlashSkillPrompt, invalidateSlashSkillsCache, type SkillMarketContext } from "./skills/slash-skills.js";
 import { enumerateFiles } from "./skills/file-enumeration.js";
-import { TeamManager, GateDependencyError, TeamStartError } from "./agent/team-manager.js";
+import { TeamManager, GateDependencyError, TeamStartError, VerificationCancellationFenceError } from "./agent/team-manager.js";
 import { OrchestrationCore, OrchestrationCoreError, dismissHttpStatus, isSettledStatus, type WaitResult } from "./agent/orchestration-core.js";
 import { tryHandleNestedGoalRoute, listDescendants } from "./agent/nested-goal-routes.js";
 import { walkGoalSubtree, cascadeSubtree as cascadeGoalSubtree } from "./agent/goal-subtree.js";
@@ -9092,53 +9092,70 @@ async function handleApiRoute(
 				}
 				return false;
 			}
-			if (mergedManually && g.id === id && g.state !== "complete") {
-				await getGoalManagerForGoal(g.id).updateGoal(g.id, { state: "complete" });
-			}
-			for (const active of verificationHarness.getActiveVerifications(g.id)) {
+			// Close every gate before taking the cancellation snapshot. If this
+			// durable fence fails, do not tear down the team/worktree or archive the
+			// goal; callers receive a retryable failure instead of partial archive.
+			const releaseLifecycleFence = verificationHarness.acquireGoalLifecycleFence(g.id);
+			try {
 				try {
-					await verificationHarness.cancelStaleVerifications(g.id, active.gateId);
+					verificationHarness.fenceAndCancelAllVerifications(g.id, "archive");
 				} catch (err) {
-					console.error(`[api] archive: error cancelling verification for ${g.id}/${active.gateId}:`, err);
+					console.error(`[api] archive: failed to fence verifications for ${g.id}:`, err);
+					throw Object.assign(new Error("Could not durably cancel active verifications before archive"), {
+						code: "VERIFICATION_CANCELLATION_FENCE_FAILED", retryable: true,
+					});
 				}
-			}
-			const goalProjectCtx = projectContextManager.getContextForGoal(g.id);
-			const teamEntry = goalProjectCtx?.teamStore.get(g.id);
-			const agentBranches: string[] = [];
-			if (teamEntry?.agents) {
-				for (const a of teamEntry.agents) {
-					if (a.branch) agentBranches.push(a.branch);
+				if (mergedManually && g.id === id && g.state !== "complete") {
+					await getGoalManagerForGoal(g.id).updateGoal(g.id, { state: "complete" });
 				}
-			}
-			if (teamEntry?.teamLeadSessionId) {
-				const tl = goalProjectCtx?.sessionStore.get(teamEntry.teamLeadSessionId);
-				if (tl?.branch) agentBranches.push(tl.branch);
-			}
-			if (teamManager.getTeamState(g.id)) {
-				await teamManager.teardownTeam(g.id);
-			}
-			// Finding 2 — terminal event: release any per-root scheduler permit
-			// this child held (or drop it from the capacity queue) so the next
-			// capacity-blocked sibling can start. Best-effort + idempotent.
-			if (g.parentGoalId) {
-				try { verificationHarness.notifyChildTerminal(g.id); } catch (err) {
-					console.warn(`[api] archive: notifyChildTerminal failed for ${g.id} (non-fatal):`, err);
+				const goalProjectCtx = projectContextManager.getContextForGoal(g.id);
+				const teamEntry = goalProjectCtx?.teamStore.get(g.id);
+				const agentBranches: string[] = [];
+				if (teamEntry?.agents) {
+					for (const a of teamEntry.agents) {
+						if (a.branch) agentBranches.push(a.branch);
+					}
 				}
+				if (teamEntry?.teamLeadSessionId) {
+					const tl = goalProjectCtx?.sessionStore.get(teamEntry.teamLeadSessionId);
+					if (tl?.branch) agentBranches.push(tl.branch);
+				}
+				if (teamManager.getTeamState(g.id)) {
+					await teamManager.teardownTeam(g.id);
+				}
+				// Finding 2 — terminal event: release any per-root scheduler permit
+				// this child held (or drop it from the capacity queue) so the next
+				// capacity-blocked sibling can start. Best-effort + idempotent.
+				if (g.parentGoalId) {
+					try { verificationHarness.notifyChildTerminal(g.id); } catch (err) {
+						console.warn(`[api] archive: notifyChildTerminal failed for ${g.id} (non-fatal):`, err);
+					}
+				}
+				const gm = getGoalManagerForGoal(g.id);
+				await gm.archiveGoal(g.id);
+				prStatusStore.remove(g.id);
+				const archivedGoal = gm.getGoal(g.id);
+				if (archivedGoal?.repoPath) {
+					deleteRemoteGoalBranches(archivedGoal, agentBranches, archivedGoal.repoPath, commandRunner!, serverRemoteGitPolicy).catch(err => {
+						console.warn(`[api] archive: remote branch cleanup failed for ${g.id}:`, err);
+					});
+				}
+				return true;
+			} finally {
+				releaseLifecycleFence();
 			}
-			const gm = getGoalManagerForGoal(g.id);
-			await gm.archiveGoal(g.id);
-			prStatusStore.remove(g.id);
-			const archivedGoal = gm.getGoal(g.id);
-			if (archivedGoal?.repoPath) {
-				deleteRemoteGoalBranches(archivedGoal, agentBranches, archivedGoal.repoPath, commandRunner!, serverRemoteGitPolicy).catch(err => {
-					console.warn(`[api] archive: remote branch cleanup failed for ${g.id}:`, err);
-				});
-			}
-			return true;
 		};
 
 		if (!cascade) {
-			await archiveOne(rootGoal);
+			try {
+				await archiveOne(rootGoal);
+			} catch (err: any) {
+				if (err?.code === "VERIFICATION_CANCELLATION_FENCE_FAILED") {
+					json({ error: err.message, code: err.code, retryable: true }, 503);
+					return;
+				}
+				throw err;
+			}
 			json({ ok: true, archived: 1 });
 			return;
 		}
@@ -9152,6 +9169,11 @@ async function handleApiRoute(
 			{ order: "bottom-up", apply: archiveOne },
 		);
 		const archivedCount = result.processed.filter(p => p.result === true).length;
+		const fenceFailure = result.errors.find(e => (e.error as any)?.code === "VERIFICATION_CANCELLATION_FENCE_FAILED");
+		if (fenceFailure) {
+			json({ error: fenceFailure.error.message, code: "VERIFICATION_CANCELLATION_FENCE_FAILED", retryable: true }, 503);
+			return;
+		}
 		if (result.errors.length > 0) {
 			for (const e of result.errors) {
 				console.error(`[api] archive cascade: ${e.goalId} failed:`, e.error);
@@ -9277,8 +9299,13 @@ async function handleApiRoute(
 					if (!cwdValidation.ok) { writeCwdValidationError(cwdValidation); return; }
 				}
 			}
+			const terminalCancellationCause = putGoal && body.state !== putGoal.state
+				? body.state === "complete" ? "goal-complete" as const
+					: body.state === "shelved" ? "shelved" as const
+						: undefined
+				: undefined;
 			const goalMgr = getGoalManagerForGoal(id);
-			const ok = await goalMgr.updateGoal(id, {
+			const updateGoal = () => goalMgr.updateGoal(id, {
 				title: body.title,
 				cwd: body.cwd,
 				state: body.state,
@@ -9290,6 +9317,27 @@ async function handleApiRoute(
 				branch: body.branch,
 				reattemptOf: body.reattemptOf,
 			});
+			let ok: boolean;
+			if (terminalCancellationCause) {
+				// Close admission before the cancellation snapshot and retain the
+				// fence through the authoritative lifecycle write. Exact cleanup stays
+				// detached and owns its own eventual publication.
+				const releaseLifecycleFence = verificationHarness.acquireGoalLifecycleFence(id);
+				try {
+					try {
+						verificationHarness.fenceAndCancelAllVerifications(id, terminalCancellationCause);
+					} catch (err) {
+						console.error(`[api] Failed to fence verification cancellation before ${body.state} for ${id}:`, err);
+						json({ error: "Could not durably cancel active verifications", code: "VERIFICATION_CANCELLATION_FENCE_FAILED", retryable: true }, 503);
+						return;
+					}
+					ok = await updateGoal();
+				} finally {
+					releaseLifecycleFence();
+				}
+			} else {
+				ok = await updateGoal();
+			}
 			if (!ok) { json({ error: "Goal not found" }, 404); return; }
 			// Spec-edit notification: emit goal_spec_changed WS event and nudge the team lead.
 			if (typeof body.spec === "string" && body.spec !== prevSpec) {
@@ -12228,6 +12276,10 @@ async function handleApiRoute(
 						stale: verificationSnapshot.stale,
 						steps: verificationSnapshot.steps,
 						selection: verificationSnapshot.selection,
+						cancellation: latestSignal.verification?.cancellation,
+						...(latestSignal.verification?.status === "cancelled" && !latestSignal.verification?.cancellation
+							? { cancellation: { cause: "unknown" } }
+							: {}),
 					} : undefined,
 				};
 			}
@@ -12509,11 +12561,15 @@ async function handleApiRoute(
 		}
 
 		const affectedGateIds = getGateAndTransitiveDependents(initialGoal.workflow, gateId);
+		const releaseGateMutationFence = verificationHarness.acquireGateMutationFence(goalId, affectedGateIds);
 		try {
-			await verificationHarness.cancelStaleVerificationsForGates(goalId, affectedGateIds);
-		} catch (err) {
-			console.error(`[api] Error cancelling verifications for reset gates ${affectedGateIds.join(", ")}:`, err);
-		}
+			try {
+				await verificationHarness.cancelStaleVerificationsForGates(goalId, affectedGateIds, "gate-reset");
+			} catch (err) {
+				console.error(`[api] Error cancelling verifications for reset gates ${affectedGateIds.join(", ")}:`, err);
+				json({ error: "Could not durably cancel active verifications for gate reset", code: "VERIFICATION_CANCELLATION_FENCE_FAILED", retryable: true }, 503);
+				return;
+			}
 
 		// Cancellation is awaited, so re-read the project-owned record and reapply
 		// dormant guards before mutating either persistence store.
@@ -12726,6 +12782,9 @@ async function handleApiRoute(
 			teamLeadNotified,
 		});
 		return;
+		} finally {
+			releaseGateMutationFence();
+		}
 	}
 
 	// POST /api/goals/:goalId/gates/:gateId/bypass — human-only gate bypass.
@@ -12762,11 +12821,15 @@ async function handleApiRoute(
 		if (typeof whyBypassed !== "string" || !whyBypassed.trim()) { json({ error: "whyBypassed is required" }, 400); return; }
 		if (typeof whoAmI !== "string" || !whoAmI.trim()) { json({ error: "whoAmI is required" }, 400); return; }
 
+		const releaseGateMutationFence = verificationHarness.acquireGateMutationFence(goalId, [gateId]);
 		try {
-			await verificationHarness.cancelStaleVerificationsForGates(goalId, [gateId]);
-		} catch (err) {
-			console.error(`[api] Error cancelling verifications for bypassed gate ${gateId}:`, err);
-		}
+			try {
+				await verificationHarness.cancelStaleVerificationsForGates(goalId, [gateId], "bypass");
+			} catch (err) {
+				console.error(`[api] Error cancelling verifications for bypassed gate ${gateId}:`, err);
+				json({ error: "Could not durably cancel active verifications for gate bypass", code: "VERIFICATION_CANCELLATION_FENCE_FAILED", retryable: true }, 503);
+				return;
+			}
 
 		const bypassSignal = gateStore.bypassGate(goalId, gateId, { whyBypassed, whoAmI });
 		const bypassedAt = bypassSignal.metadata?.bypassedAt ?? String(bypassSignal.timestamp);
@@ -12803,6 +12866,9 @@ async function handleApiRoute(
 
 		json({ ok: true, gateId, status: "bypassed", whyBypassed, whoAmI, bypassedAt, teamLeadNotified });
 		return;
+		} finally {
+			releaseGateMutationFence();
+		}
 	}
 
 	// POST /api/goals/:goalId/gates/:gateId/signal — signal a gate
@@ -12811,7 +12877,13 @@ async function handleApiRoute(
 		const [, goalId, gateId] = gateSignalMatch;
 		const goal = getGoalAcrossProjects(goalId);
 		if (!goal) { json({ error: "Goal not found" }, 404); return; }
+		if (verificationHarness.isGoalLifecycleFenced(goalId)) {
+			json({ error: "Goal lifecycle transition is in progress; retry after it completes", code: "GOAL_LIFECYCLE_IN_PROGRESS", retryable: true }, 409);
+			return;
+		}
 		if (goal.archived) { json({ error: "Goal is archived" }, 409); return; }
+		if (goal.state === "complete") { json({ error: "Goal is complete", code: "GOAL_COMPLETE" }, 409); return; }
+		if (goal.state === "shelved") { json({ error: "Goal is shelved", code: "GOAL_SHELVED" }, 409); return; }
 		// Pause-cascade: a paused goal must reject gate signals. This is the
 		// most upstream block for both llm-review-* verifier spawns and
 		// command/qa-step kickoffs in the same handler chain.
@@ -12822,6 +12894,10 @@ async function handleApiRoute(
 		const gateStore = gateSignalCtx.gateStore;
 		const gateDef = goal.workflow.gates.find(g => g.id === gateId);
 		if (!gateDef) { json({ error: `Unknown gate: ${gateId}` }, 404); return; }
+		if (verificationHarness.isGateMutationFenced(goalId, gateId)) {
+			json({ error: "Gate is being reset or bypassed; retry after that operation completes", code: "GATE_MUTATION_IN_PROGRESS", retryable: true }, 409);
+			return;
+		}
 
 		const body = await readBody(req);
 		const signalSessionId = body?.sessionId || "unknown";
@@ -12869,14 +12945,16 @@ async function handleApiRoute(
 			gateSignalCtx.goalManager.getGoalStore().update(goalId, { workflow: freezeResult.workflow });
 			goal.workflow = freezeResult.workflow;
 		}
-
-		// Get commit SHA
+	// Get commit SHA
 		let commitSha = "unknown";
 		try {
 			commitSha = await execGitSafe("git rev-parse HEAD", goal.cwd, "unknown");
 		} catch { /* ignore */ }
 
-		// Reject if verification is already running for this gate+commit
+		// Reject if verification is already running for this gate+commit. A
+		// replacement-generation cancellation starts synchronously before the new
+		// signal is admitted, but its exact cleanup continues in the background.
+		let staleCancellationStarted = false;
 		if (commitSha !== "unknown") {
 			const activeVers = verificationHarness.getActiveVerifications(goalId);
 			const runningDup = activeVers.find(v => {
@@ -12889,8 +12967,11 @@ async function handleApiRoute(
 				// Check if sessions are actually alive — auto-cancel zombies
 				const alive = verificationHarness.areVerificationSessionsAlive(runningDup.signalId);
 				if (!alive) {
-					console.log(`[api] Auto-cancelling zombie verification ${runningDup.signalId} for gate ${gateId}`);
-					await verificationHarness.cancelStaleVerifications(goalId, gateId);
+					console.log(`[api] Replacing inactive verification ${runningDup.signalId} for gate ${gateId}`);
+					// This request is an explicit replacement generation. Fence the old
+					// generation now, but never make the new signal wait for its exact
+					// process/Docker cleanup or let a later broad sweep cancel the new row.
+					staleCancellationStarted = true;
 					// Fall through to create new signal
 				} else {
 					// Surface the step states so a future 409 is diagnosable from
@@ -12909,11 +12990,32 @@ async function handleApiRoute(
 			}
 		}
 
+		// Re-read lifecycle admission immediately before replacement fencing. The
+		// old generation is cancelled durably before cache reuse or new-signal
+		// creation; its exact cleanup remains detached in the harness.
+		const admissionGoal = getGoalAcrossProjects(goalId);
+		if (!admissionGoal) { json({ error: "Goal not found" }, 404); return; }
+		if (verificationHarness.isGoalLifecycleFenced(goalId)) {
+			json({ error: "Goal lifecycle transition is in progress; retry after it completes", code: "GOAL_LIFECYCLE_IN_PROGRESS", retryable: true }, 409);
+			return;
+		}
+		if (admissionGoal.archived || admissionGoal.state === "complete" || admissionGoal.state === "shelved" || admissionGoal.paused) {
+			json({ error: `Goal ${goalId} is not eligible to signal`, code: "GOAL_NOT_ELIGIBLE" }, 409);
+			return;
+		}
+		try {
+			verificationHarness.fenceStaleVerificationsForGates(goalId, [gateId], staleCancellationStarted ? "zombie-recovery" : "superseded");
+		} catch (err) {
+			console.error(`[api] Could not durably fence replacement verification ${goalId}/${gateId}:`, err);
+			json({ error: "Could not durably cancel active verification before re-signal", code: "VERIFICATION_CANCELLATION_FENCE_FAILED", retryable: true }, 503);
+			return;
+		}
+
 		// Auto-pass if a prior signal for the same commit already fully passed.
 		// The extracted decision core owns cache-boundary and response semantics so
 		// this route cannot drift from its deterministic store-level coverage.
 		const cachedResponse = reuseCachedGateSignal({
-			gateStore,
+	gateStore,
 			goalId,
 			gate: gateDef,
 			commitSha,
@@ -12953,14 +13055,6 @@ async function handleApiRoute(
 			}
 		}
 
-		// Mark any old generation cancelled before seeding the new one, but do not
-		// await its exact cleanup: re-signal creates a fresh generation while the
-		// old one remains durably pending. The harness finalizer may update only
-		// that old signal and is forbidden from overwriting this gate's new state.
-		void verificationHarness.cancelStaleVerifications(goalId, gateId).catch(error => {
-			console.error(`[api] Error cancelling stale verification for re-signal ${goalId}/${gateId}:`, error);
-		});
-
 		// Create signal record. Step enumeration is performed synchronously
 		// via `beginVerification` BEFORE `recordSignal` so the gate-store and
 		// `activeVerifications` agree on the step list from the very first
@@ -12979,7 +13073,13 @@ async function handleApiRoute(
 			verification: { status: "running" as const, steps: [] as any[] },
 		};
 
-		const initialSteps = verificationHarness.beginVerification(signal as any, gateDef);
+		let initialSteps: any[];
+		try {
+			initialSteps = verificationHarness.beginVerification(signal as any, gateDef);
+		} catch (err) {
+			json({ error: (err as Error).message, code: "GATE_MUTATION_IN_PROGRESS", retryable: true }, 409);
+			return;
+		}
 		signal.verification = { status: "running", steps: initialSteps };
 
 		gateStore.recordSignal(signal);
@@ -13088,12 +13188,19 @@ async function handleApiRoute(
 		}
 
 		// Explicit cancellation is non-terminal until exact cleanup settles. The
-		// harness owns the generation-safe failed-gate publication; this route must
+		// harness owns the generation-safe cancelled publication; this route must
 		// never overwrite a newer re-signal while an old tree is still pending.
-		const settled = await verificationHarness.cancelStaleVerifications(goalId, gateId);
+		const settled = await verificationHarness.cancelStaleVerifications(goalId, gateId, "manual");
 		json(settled
-			? { cancelled: true, pending: false }
-			: { cancelled: true, pending: true, message: "Cancellation is waiting for exact process cleanup" },
+			? { cancelled: true, outcome: "cancelled", cause: "manual", signalId: running.signalId, pending: false }
+			: {
+				cancelled: true,
+				outcome: "cancelled",
+				cause: "manual",
+				signalId: running.signalId,
+				pending: true,
+				message: "Cancellation is waiting for exact process cleanup",
+			},
 		200);
 		return;
 	}
@@ -13132,7 +13239,7 @@ async function handleApiRoute(
 					json({
 						error: "step is no longer awaiting human input",
 						stepName: histStep.name,
-						status: histStep.passed ? "passed" : (histStep.skipped ? "skipped" : "failed"),
+						status: histStep.status === "cancelled" ? "cancelled" : (histStep.passed ? "passed" : (histStep.skipped ? "skipped" : "failed")),
 					}, 409);
 					return;
 				}
@@ -14149,7 +14256,11 @@ async function handleApiRoute(
 			await teamManager.completeTeam(goalId, { allowBypassedGates: confirmBypassedGates });
 			json({ ok: true });
 		} catch (err) {
-			jsonError(400, err);
+			if (err instanceof VerificationCancellationFenceError) {
+				json({ error: err.message, code: err.code, retryable: true }, 503);
+			} else {
+				jsonError(400, err);
+			}
 		}
 		return;
 	}
@@ -14202,6 +14313,18 @@ async function handleApiRoute(
 				},
 			},
 		);
+		const fenceFailure = result.errors.find(error =>
+			error.error instanceof VerificationCancellationFenceError
+			|| (error.error as { code?: string })?.code === "VERIFICATION_CANCELLATION_FENCE_FAILED",
+		);
+		if (fenceFailure) {
+			json({
+				error: fenceFailure.error.message,
+				code: "VERIFICATION_CANCELLATION_FENCE_FAILED",
+				retryable: true,
+			}, 503);
+			return;
+		}
 		const toreDown = result.processed.filter(p => p.result === true).length;
 		json({
 			ok: true,
@@ -18825,11 +18948,17 @@ async function handleApiRoute(
 				}
 			}
 		}
-		resolver({
-			verdict: body.verdict === "pass",
-			summary: body.summary,
-			reportHtml,
-		});
+		try {
+			resolver({
+				verdict: body.verdict === "pass",
+				summary: body.summary,
+				reportHtml,
+			});
+		} catch (err) {
+			console.warn(`[verification] Could not durably record verification_result for ${body.sessionId}: ${(err as Error)?.message || err}`);
+			json({ error: "Verification result could not be durably recorded; retry", code: "VERDICT_NOT_PERSISTED" }, 503);
+			return;
+		}
 		json({ ok: true });
 		return;
 	}

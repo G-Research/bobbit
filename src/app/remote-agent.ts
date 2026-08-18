@@ -88,6 +88,26 @@ function withClientSystemAuthor<T extends object>(message: T): BobbitMessage<T> 
 	return { ...message, author: CLIENT_SYSTEM_AUTHOR };
 }
 
+const VERIFICATION_CANCELLATION_LABELS: Record<string, string> = {
+	manual: "Cancelled manually",
+	"goal-pause": "Goal paused",
+	superseded: "Superseded by a newer signal",
+	"gate-reset": "Gate reset",
+	bypass: "Gate bypassed",
+	"goal-complete": "Goal completed",
+	"team-teardown": "Team torn down",
+	shelved: "Goal shelved",
+	archive: "Goal archived",
+	"zombie-recovery": "Recovered orphaned verification",
+	"gateway-restart-recovery": "Gateway restarted",
+	unknown: "Cause unavailable (legacy)",
+};
+
+function verificationCancellationLabel(cancellation: unknown): string {
+	const cause = cancellation && typeof cancellation === "object" ? (cancellation as { cause?: unknown }).cause : undefined;
+	return typeof cause === "string" ? (VERIFICATION_CANCELLATION_LABELS[cause] ?? VERIFICATION_CANCELLATION_LABELS.unknown) : VERIFICATION_CANCELLATION_LABELS.unknown;
+}
+
 function createSystemNotification(
 	message: string,
 	category: "system" | "task" | "team" | "error" = "system",
@@ -2792,8 +2812,13 @@ export class RemoteAgent {
 				break;
 
 			case "gate_verification_complete": {
-				const gateVerifCat = (msg as any).status === "failed" ? "error" as const : "task" as const;
-				this._appendNotification(`Gate "${(msg as any).gateId}" verification ${(msg as any).status}`, gateVerifCat);
+				const verification = msg as any;
+				const cancelled = verification.status === "cancelled";
+				const gateVerifCat = verification.status === "failed" ? "error" as const : cancelled ? "system" as const : "task" as const;
+				const text = cancelled
+					? `Gate "${verification.gateId}" verification cancelled — ${verificationCancellationLabel(verification.cancellation)}`
+					: `Gate "${verification.gateId}" verification ${verification.status}`;
+				this._appendNotification(text, gateVerifCat);
 				dispatchVerificationEvent(msg);
 				break;
 			}

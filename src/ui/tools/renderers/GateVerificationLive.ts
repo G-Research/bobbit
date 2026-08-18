@@ -25,7 +25,21 @@ import {
 	renderSessionLink,
 } from "./delegate-cards.js";
 
-type VerificationStepStatus = "running" | "passed" | "failed" | "timeout" | "waiting" | "skipped" | "blocked";
+type VerificationStepStatus = "running" | "passed" | "failed" | "timeout" | "waiting" | "skipped" | "blocked" | "cancelled";
+type VerificationCancellationCause = "manual" | "goal-pause" | "superseded" | "gate-reset" | "bypass" | "goal-complete" | "team-teardown" | "shelved" | "archive" | "zombie-recovery" | "gateway-restart-recovery" | "unknown";
+type VerificationCancellation = { cause: VerificationCancellationCause; requestedAt: number; finalizedAt?: number };
+
+const CANCELLATION_CAUSE_LABELS: Record<VerificationCancellationCause, string> = {
+	manual: "Cancelled manually", "goal-pause": "Goal paused", superseded: "Superseded by a newer signal", "gate-reset": "Gate reset", bypass: "Gate bypassed", "goal-complete": "Goal completed", "team-teardown": "Team torn down", shelved: "Goal shelved", archive: "Goal archived", "zombie-recovery": "Recovered orphaned verification", "gateway-restart-recovery": "Gateway restarted", unknown: "Cause unavailable (legacy)",
+};
+
+function cancellationCauseLabel(cancellation: VerificationCancellation | undefined): string {
+	return CANCELLATION_CAUSE_LABELS[cancellation?.cause ?? "unknown"];
+}
+
+function cancellationTimestamp(cancellation: VerificationCancellation | undefined): string {
+	return cancellation?.requestedAt ? new Date(cancellation.requestedAt).toLocaleString() : "timestamp unavailable";
+}
 
 type VerificationTimeoutInfo = {
 	configuredSeconds: number;
@@ -48,6 +62,7 @@ type InitialVerificationStep = {
 	awaitingHuman?: boolean;
 	humanLabel?: string;
 	humanPrompt?: string;
+	cancellation?: VerificationCancellation;
 };
 
 interface VerificationStep {
@@ -63,6 +78,7 @@ interface VerificationStep {
 	awaitingHuman?: true;
 	humanLabel?: string;
 	humanPrompt?: string;
+	cancellation?: VerificationCancellation;
 }
 
 function normalizeStepStatus(step: Partial<InitialVerificationStep>, fallback: VerificationStepStatus = "running"): VerificationStepStatus {
@@ -72,6 +88,7 @@ function normalizeStepStatus(step: Partial<InitialVerificationStep>, fallback: V
 		if (key === "timeout") return "timeout";
 		if (key === "failed" || key === "failure" || key === "error") return "failed";
 		if (key === "skipped") return "skipped";
+		if (key === "cancelled" || key === "interrupted") return "cancelled";
 		if (key === "waiting" || key === "pending" || key === "queued" || key === "yet-to-run") return "waiting";
 		if (key === "blocked" || key === "blocked-by-earlier-failure") return "blocked";
 		if (key === "running" || key === "in-progress" || key === "starting") return "running";
@@ -102,6 +119,7 @@ function mapVerificationStep(step: InitialVerificationStep, fallback: Verificati
 			humanLabel: step.humanLabel,
 			humanPrompt: step.humanPrompt,
 		} : {}),
+		...(step.cancellation ? { cancellation: step.cancellation } : {}),
 	};
 }
 
@@ -129,7 +147,7 @@ function toDelegateStatus(status: string): string {
 	if (status === "passed") return "completed";
 	if (status === "failed" || status === "timeout") return "error";
 	if (status === "waiting") return "waiting";
-	if (status === "skipped" || status === "blocked") return "skipped";
+	if (status === "skipped" || status === "blocked" || status === "cancelled") return "skipped";
 	return "running";
 }
 
@@ -152,6 +170,7 @@ function statusSummary(steps: VerificationStep[]): string {
 		["waiting", "waiting"],
 		["blocked", "blocked"],
 		["skipped", "skipped"],
+		["cancelled", "interrupted"],
 	];
 	return labels
 		.map(([status, label]) => {
@@ -208,7 +227,8 @@ export class GateVerificationLive extends LitElement {
 	@property({ type: Array }) initialSteps: InitialVerificationStep[] = [];
 
 	@state() private steps: VerificationStep[] = [];
-	@state() private overallStatus: "idle" | "running" | "passed" | "failed" | "stale" = "idle";
+	@state() private overallStatus: "idle" | "running" | "passed" | "failed" | "cancelled" | "stale" = "idle";
+	@state() private cancellation: VerificationCancellation | undefined;
 	@state() private currentPhase = 0;
 	@state() private expandedSteps = new Set<number>();
 	@state() private modalStep: { index: number; name: string; output: string; type: string } | null = null;
@@ -235,9 +255,9 @@ export class GateVerificationLive extends LitElement {
 		// Seed steps from initialSteps once, before the gate_verification_started WS event arrives.
 		// Prefer explicit snapshot status semantics over legacy passed:false seed rows.
 		if (this.overallStatus === "idle" && this.steps.length === 0 && this.initialSteps.length > 0) {
-			const fallback = this.finalStatus === "passed" ? "passed" : this.finalStatus === "failed" ? "failed" : "running";
+			const fallback = this.finalStatus === "passed" ? "passed" : this.finalStatus === "failed" ? "failed" : this.finalStatus === "cancelled" ? "cancelled" : "running";
 			this.steps = this.initialSteps.map(s => mapVerificationStep(s, fallback));
-			this.overallStatus = this.finalStatus === "passed" || this.finalStatus === "failed" ? this.finalStatus : "running";
+			this.overallStatus = this.finalStatus === "passed" || this.finalStatus === "failed" || this.finalStatus === "cancelled" ? this.finalStatus : "running";
 			for (let i = 0; i < this.steps.length; i++) {
 				if (this.steps[i].output && !this._stepOutputs.has(i)) this._stepOutputs.set(i, this.steps[i].output!);
 			}
@@ -330,12 +350,14 @@ export class GateVerificationLive extends LitElement {
 
 			const vStatus = signal.verification.status;
 
-			if (vStatus === "passed" || vStatus === "failed") {
-				// Terminal gate state is authoritative: preserve final passed/failed behavior.
-				const fallback = vStatus === "passed" ? "passed" : "failed";
+			if (vStatus === "passed" || vStatus === "failed" || vStatus === "cancelled") {
+				// Durable terminal state is authoritative; cancellation is neutral and retains real rows.
+				const fallback = vStatus === "passed" ? "passed" : vStatus === "failed" ? "failed" : "cancelled";
 				const steps: VerificationStep[] = (signal.verification.steps || []).map((s: InitialVerificationStep) => mapVerificationStep(s, fallback));
 				this.steps = steps;
 				this.overallStatus = vStatus;
+				this.cancellation = vStatus === "cancelled" ? signal.verification.cancellation : undefined;
+				this._stopReconcileLoop();
 				return;
 			}
 
@@ -443,6 +465,7 @@ export class GateVerificationLive extends LitElement {
 			case "gate_verification_started": {
 				this._stepOutputs = new Map();
 				this.modalStep = null;
+				this.cancellation = undefined;
 				const stepDefs: Array<{ name: string; type: string; phase?: number }> = detail.steps || [];
 				const now = detail.startedAt || Date.now();
 				const minPhase = stepDefs.length > 0 ? Math.min(...stepDefs.map(s => s.phase ?? 0)) : 0;
@@ -524,6 +547,7 @@ export class GateVerificationLive extends LitElement {
 						output: detail.output,
 						sessionId: detail.sessionId ?? updated[idx].sessionId,
 						timeout: detail.timeout,
+						cancellation: detail.cancellation,
 					};
 					this.steps = updated;
 				} else if (idx >= this.steps.length) {
@@ -539,6 +563,7 @@ export class GateVerificationLive extends LitElement {
 						durationMs: detail.durationMs,
 						output: detail.output,
 						timeout: detail.timeout,
+						cancellation: detail.cancellation,
 					};
 					this.steps = updated;
 				}
@@ -571,6 +596,7 @@ export class GateVerificationLive extends LitElement {
 			case "gate_verification_complete": {
 				this.steps = this.steps.map(clearAwaitingHuman);
 				this.overallStatus = detail.status || "passed";
+				this.cancellation = detail.status === "cancelled" ? detail.cancellation : undefined;
 				this._stopReconcileLoop();
 				this.requestUpdate();
 				break;
@@ -593,6 +619,9 @@ export class GateVerificationLive extends LitElement {
 			if (this.finalStatus === "failed") {
 				return html`<div class="mt-2 text-xs ${statusColor("error")}">${statusIcon("error")} Failed</div>`;
 			}
+			if (this.finalStatus === "cancelled") {
+				return html`<div class="mt-2 text-xs ${statusColor("skipped")}">⏸ Cancelled — ${cancellationCauseLabel(this.cancellation)}</div>`;
+			}
 			return html`<div class="mt-2 text-xs ${statusColor("running")}">Verification in progress…</div>`;
 		}
 
@@ -605,12 +634,16 @@ export class GateVerificationLive extends LitElement {
 
 		// Auto-pass: complete arrived with no steps
 		if (this.steps.length === 0 && this.overallStatus !== "running") {
-			const dStatus = toDelegateStatus(this.overallStatus as "passed" | "failed");
-			return html`<div class="mt-2 text-xs ${statusColor(dStatus)}">${statusIcon(dStatus)} ${this.overallStatus === "passed" ? "Passed (no verification)" : "Failed"}</div>`;
+			const dStatus = toDelegateStatus(this.overallStatus);
+			const label = this.overallStatus === "passed" ? "Passed (no verification)"
+				: this.overallStatus === "cancelled" ? `Cancelled — ${cancellationCauseLabel(this.cancellation)}`
+				: "Failed";
+			return html`<div class="mt-2 text-xs ${statusColor(dStatus)}">${this.overallStatus === "cancelled" ? "⏸" : statusIcon(dStatus)} ${label}</div>`;
 		}
 
 		const passedCount = this.steps.filter(s => s.status === "passed").length;
 		const failedCount = this.steps.filter(s => s.status === "failed" || s.status === "timeout").length;
+		const cancelledCount = this.steps.filter(s => s.status === "cancelled").length;
 		const total = this.steps.length;
 		const summary = statusSummary(this.steps);
 
@@ -627,14 +660,14 @@ export class GateVerificationLive extends LitElement {
 
 		// Running: show step count inline with parent title (negative margin pulls it up).
 		// Completed: show full header with result summary.
-		const completedCount = passedCount + failedCount;
+		const completedCount = passedCount + failedCount + cancelledCount;
 		const isRunning = this.overallStatus === "running";
 
 		return html`
 			<div class="mt-2 space-y-1">
 				${isRunning
 					? html`<div class="flex items-center justify-end text-[10px] text-muted-foreground tabular-nums -mt-[1.35rem]">${summary || `${completedCount}/${total}`}</div>`
-					: this._renderHeader(passedCount, failedCount, total, summary)
+					: this._renderHeader(passedCount, failedCount, cancelledCount, total, summary)
 				}
 				${sortedPhases.map(phase => {
 					const phaseSteps = stepsByPhase.get(phase)!;
@@ -686,7 +719,7 @@ export class GateVerificationLive extends LitElement {
 			</div>`;
 	}
 
-	private _renderHeader(passed: number, failed: number, total: number, summary: string): TemplateResult {
+	private _renderHeader(passed: number, failed: number, cancelled: number, total: number, summary: string): TemplateResult {
 		if (this.overallStatus === "stale") {
 			return html`<div class="text-xs font-medium ${statusColor("skipped")} mb-1 flex items-center gap-2 flex-wrap">${statusIcon("skipped")} Verification <code class="text-[10px]">${this.gateId}</code> interrupted — stopped without completing.<button class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-muted text-muted-foreground hover:bg-accent" @click=${() => this._requestResignal()} title="Re-signal this gate to run a fresh verification">Re-signal gate</button></div>`;
 		}
@@ -695,6 +728,9 @@ export class GateVerificationLive extends LitElement {
 		}
 		if (this.overallStatus === "failed") {
 			return html`<div class="text-xs font-medium ${statusColor("error")} mb-1">${statusIcon("error")} Verified <code class="text-[10px]">${this.gateId}</code> — <span class="text-green-500">${passed} passed</span>, <span class="text-red-500">${failed} failed</span>${summary ? html` <span class="text-muted-foreground">(${summary})</span>` : nothing}</div>`;
+		}
+		if (this.overallStatus === "cancelled") {
+			return html`<div class="text-xs font-medium ${statusColor("skipped")} mb-1">⏸ Cancelled <code class="text-[10px]">${this.gateId}</code> — ${cancellationCauseLabel(this.cancellation)} · ${passed} passed, ${cancelled} interrupted · ${cancellationTimestamp(this.cancellation)}${summary ? html` <span class="text-muted-foreground">(${summary})</span>` : nothing}</div>`;
 		}
 		// Running
 		const completedCount = passed + failed;
@@ -732,7 +768,8 @@ export class GateVerificationLive extends LitElement {
 			&& !!this.gateId
 			&& !!this.signalId
 			&& !!step.name;
-		const statusLabel = step.status === "timeout" ? "Timed out" : step.status;
+		const statusLabel = step.status === "timeout" ? "Timed out" : step.status === "cancelled" ? "Interrupted" : step.status;
+		const stepCause = step.status === "cancelled" ? cancellationCauseLabel(step.cancellation ?? this.cancellation) : undefined;
 
 		const typeBadgeCls = step.type === "command"
 			? "bg-muted text-muted-foreground"
@@ -741,7 +778,7 @@ export class GateVerificationLive extends LitElement {
 		const clickable = hasOutput || isRunningCommand;
 
 		return html`
-			<div class="border border-border rounded text-sm">
+			<div class="border border-border rounded text-sm" data-step-status=${step.status === "cancelled" ? "interrupted" : step.status}>
 				<div
 					class="p-2 flex items-center gap-2 ${clickable ? "cursor-pointer hover:bg-accent/50" : ""}"
 					@click=${clickable ? () => {
@@ -770,6 +807,7 @@ export class GateVerificationLive extends LitElement {
 						` : nothing}
 					</div>
 					<span class="px-1.5 py-0.5 rounded text-[10px] font-medium ${stepStatusBadgeClass(step.status)}">${statusLabel}</span>
+					${stepCause ? html`<span class="text-[10px] text-muted-foreground">${stepCause} · ${cancellationTimestamp(step.cancellation ?? this.cancellation)}</span>` : nothing}
 					<span class="px-1.5 py-0.5 rounded text-[10px] font-medium ${typeBadgeCls}">${step.type}</span>
 					${marker
 						? html`<span data-timeout-timing class="text-xs text-muted-foreground tabular-nums">${formatTimeoutTiming(marker)}</span>`

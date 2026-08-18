@@ -133,6 +133,8 @@ async function makeHarness(): Promise<Harness> {
 		sessionSecretStore,
 	};
 	const verificationHarness: any = {
+		acquireGoalLifecycleFence: () => () => {},
+		fenceAndCancelAllVerifications: () => {},
 		getActiveVerifications: () => [],
 		cancelStaleVerifications: async () => {},
 		resolvePlanStepChild: () => ({ source: "none", child: undefined }),

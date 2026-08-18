@@ -954,7 +954,13 @@ function retainedCommandOutputTail(outFile?: string, errFile?: string): string {
 }
 import fs from "node:fs";
 import path from "node:path";
-import type { GateStore, GateSignal, GateSignalStep } from "./gate-store.js";
+import type {
+	GateStore,
+	GateSignal,
+	GateSignalStep,
+	VerificationCancellation,
+	VerificationCancellationCause,
+} from "./gate-store.js";
 import type { PreferencesStore } from "./preferences-store.js";
 import type { RoleStore } from "./role-store.js";
 import { resolveRole as resolveRoleFromGoal, listAvailableRoles } from "./resolve-role.js";
@@ -1002,7 +1008,6 @@ import {
 	TRANSIENT_INFRA_ERROR_REGEXES,
 	shouldRetryVerificationStep,
 	isRestartInterruptError,
-	isRestartInterruptedStep,
 	decideCommandRecoveryMode,
 	supportsHostDetachedCommandRecovery,
 	shouldRerunSessionStepOnResume,
@@ -1677,6 +1682,8 @@ export interface ActiveVerification {
 	goalId: string;
 	gateId: string;
 	signalId: string;
+	/** Product terminal verdict was durably published; protects restart recovery. */
+	terminalVerdictPublished?: boolean;
 	steps: Array<{
 		name: string;
 		type: string;
@@ -1684,6 +1691,17 @@ export interface ActiveVerification {
 		phase?: number;
 		durationMs?: number;
 		output?: string;
+		passed?: boolean;
+		skipped?: boolean;
+		expect?: GateSignalStep["expect"];
+		artifact?: GateSignalStep["artifact"];
+		diagnostics?: GateSignalStep["diagnostics"];
+		/** Durable interruption fence captured before asynchronous cleanup starts. */
+		cancellation?: VerificationCancellation;
+		/** Recovery obtained no verifier/command verdict before gateway restart. */
+		restartInterrupted?: true;
+		/** A recovered reviewer verdict was durably captured for this exact row. */
+		verdictObtained?: true;
 		startedAt: number;
 		sessionId?: string;
 		/** Subgoal-step cache — Tier-1.5 lookup reads `childGoalId` to short-circuit tier resolution. */
@@ -1694,6 +1712,12 @@ export interface ActiveVerification {
 		humanPrompt?: string;
 		/** Human-readable label rendered on the sign-off card (human-signoff). */
 		humanLabel?: string;
+		/** Explicit admission state; only queued proves command spawn was never attempted. */
+		commandSpawnState?: "queued" | "spawning" | "spawned";
+		/** Durable exact reviewer-session ownership; `spawning` is fail-closed across restart. */
+		reviewerSpawnState?: "queued" | "spawning" | "spawned";
+		/** Set only after `spawnTracked` returns a live command child; phase-0 `running` alone is display state. */
+		commandSpawnedAt?: number;
 		/** OS process id of the spawned command (Layer 1). */
 		pid?: number;
 		/** Date.now() at spawn — tie-breaker against pid reuse. */
@@ -1778,12 +1802,34 @@ export interface ActiveVerification {
 	overallStatus: "running" | "passed" | "failed" | "cancelled";
 	startedAt: number;
 	cancelled?: boolean;
+	/** Reviewer teardown has been requested but its exact ownership cleanup has not settled. */
+	reviewerCleanupPending?: boolean;
+	/** In-memory duplicate-finalizer fence; never terminal until the durable gate write resolves. */
+	cancellationFinalizing?: boolean;
+	/** Durable mixed-restart failure publication prepared before exact cleanup. */
+	pendingTerminalIntent?: PendingMixedRestartFailureIntent;
+	/** In-memory owner fence for pendingTerminalIntent publication. */
+	terminalIntentFinalizing?: boolean;
+	/** Durable orchestration provenance. This is not the command kill reason. */
+	cancellation?: VerificationCancellation;
+	/** @deprecated Process-kill compatibility field; do not use for orchestration provenance. */
 	cancelRequestedAt?: number;
+	/** @deprecated Process-kill compatibility field; do not use for orchestration provenance. */
 	cancelReason?: string;
 }
 
-type TerminalGateSignalStepStatus = "passed" | "failed" | "timeout" | "skipped";
+type TerminalGateSignalStepStatus = "passed" | "failed" | "timeout" | "skipped" | "cancelled";
 type PersistedGateSignalStepStatus = GateSignalStep["status"] | "timeout";
+
+type PendingMixedRestartFailureIntent = {
+	kind: "mixed-restart-failed" | "terminal";
+	preparedAt: number;
+	verification: GateSignal["verification"];
+	gateStatus: "passed" | "failed";
+	goalBranch?: string;
+	/** False when the terminal rows were synthesized outside workflow execution. */
+	workflowAligned?: boolean;
+};
 
 type ResumedVerificationStep = {
 	name: string;
@@ -1794,6 +1840,10 @@ type ResumedVerificationStep = {
 	phase?: number;
 	output: string;
 	duration_ms: number;
+	/** Set only by recovery code that conclusively obtained no verdict. */
+	restartInterrupted?: true;
+	/** A `verification_result` was received; its summary must never drive retry classification. */
+	verdictObtained?: true;
 	timeout?: VerificationTimeoutInfo;
 	diagnostics?: GateStepDiagnostics;
 };
@@ -1801,6 +1851,7 @@ type ResumedVerificationStep = {
 function terminalStatusForStep(step: { passed: boolean; skipped?: boolean; status?: PersistedGateSignalStepStatus }): TerminalGateSignalStepStatus {
 	if (step.skipped || step.status === "skipped") return "skipped";
 	if (step.status === "timeout") return "timeout";
+	if (step.status === "cancelled") return "cancelled";
 	if (step.status === "passed" || step.status === "failed") return step.status;
 	return step.passed ? "passed" : "failed";
 }
@@ -1809,20 +1860,14 @@ function persistedStatusForStep(step: { passed: boolean; skipped?: boolean; stat
 	if (step.skipped || step.status === "skipped") return "skipped";
 	if (step.status === "waiting" || step.status === "running") return step.status;
 	if (step.status === "timeout") return "timeout";
+	if (step.status === "cancelled") return "cancelled";
 	if (step.status === "passed" || step.status === "failed") return step.status;
 	return step.passed ? "passed" : "failed";
 }
 
-function isExplicitRestartInterruptedStep(step: { passed: boolean; skipped?: boolean; status?: PersistedGateSignalStepStatus; output: string; type: string }): boolean {
-	if (step.passed || step.skipped) return false;
-	if (step.type === "command") return step.status === "waiting";
-	return isRestartInterruptedStep(step);
-}
-
-function shouldSuppressExplicitRestartInterrupt(steps: ReadonlyArray<{ passed: boolean; skipped?: boolean; status?: PersistedGateSignalStepStatus; output: string; type: string }>): boolean {
-	const failedSteps = steps.filter(s => !s.passed && !s.skipped);
-	if (failedSteps.length === 0) return false;
-	return failedSteps.every(isExplicitRestartInterruptedStep);
+function shouldSuppressExplicitRestartInterrupt(steps: ReadonlyArray<{ passed: boolean; skipped?: boolean; restartInterrupted?: true }>): boolean {
+	const nonPassedSteps = steps.filter(step => !step.passed && !step.skipped);
+	return nonPassedSteps.length > 0 && nonPassedSteps.every(step => step.restartInterrupted === true);
 }
 
 /**
@@ -2194,8 +2239,25 @@ export class VerificationHarness {
 	 * enqueue a follow-up after its cancelled row has been removed.
 	 */
 	private cancelledVerificationSignals = new Set<string>();
+	/**
+	 * Route-owned gate mutations (reset/bypass) temporarily close admission for
+	 * their exact gates. This prevents a new signal from slipping in after the
+	 * cancellation snapshot but before the durable gate mutation commits.
+	 */
+	private gateMutationFences = new Map<string, number>();
+	/**
+	 * Goal lifecycle transitions (complete, shelve, archive) fence every gate
+	 * before their cancellation snapshot is taken. Unlike a gate mutation fence,
+	 * this closes admission for the entire goal while its authoritative lifecycle
+	 * write is in progress.
+	 */
+	private goalLifecycleFences = new Map<string, number>();
+	/** Recovery advice is emitted at most once for a current signal generation. */
+	private recoveryCancellationNotifiedSignals = new Set<string>();
 	/** Exact prompt admissions waiting to learn that their signal generation was cancelled. */
 	private verifierDispatchCancellationWaiters = new Map<string, Set<(reason: string) => void>>();
+	/** Current-boot reviewer creation promises, keyed by their durable exact session ID. */
+	private reviewerCreationBarriers = new Map<string, Promise<unknown>>();
 	/** Random UUID generated once per server process. Steps stamped with this bootEpoch were started by this process. */
 	private readonly bootEpoch: string = randomUUID();
 	private readonly _persistPath: string;
@@ -2283,6 +2345,52 @@ export class VerificationHarness {
 		return active && !active.cancelled && active.overallStatus !== "cancelled" ? active : undefined;
 	}
 
+	private _gateMutationKey(goalId: string, gateId: string): string {
+		return `${goalId}::${gateId}`;
+	}
+
+	/** Block signal admission until a reset/bypass has committed or failed. */
+	acquireGateMutationFence(goalId: string, gateIds: readonly string[]): () => void {
+		const keys = [...new Set(gateIds.map(gateId => this._gateMutationKey(goalId, gateId)))];
+		for (const key of keys) this.gateMutationFences.set(key, (this.gateMutationFences.get(key) ?? 0) + 1);
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			for (const key of keys) {
+				const count = (this.gateMutationFences.get(key) ?? 1) - 1;
+				if (count > 0) this.gateMutationFences.set(key, count);
+				else this.gateMutationFences.delete(key);
+			}
+		};
+	}
+
+	isGateMutationFenced(goalId: string, gateId: string): boolean {
+		return (this.gateMutationFences.get(this._gateMutationKey(goalId, gateId)) ?? 0) > 0;
+	}
+
+	/** Block every gate's signal admission during a terminal goal lifecycle write. */
+	acquireGoalLifecycleFence(goalId: string): () => void {
+		this.goalLifecycleFences.set(goalId, (this.goalLifecycleFences.get(goalId) ?? 0) + 1);
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			const count = (this.goalLifecycleFences.get(goalId) ?? 1) - 1;
+			if (count > 0) this.goalLifecycleFences.set(goalId, count);
+			else this.goalLifecycleFences.delete(goalId);
+		};
+	}
+
+	isGoalLifecycleFenced(goalId: string): boolean {
+		return (this.goalLifecycleFences.get(goalId) ?? 0) > 0;
+	}
+
+	/** True when either exact-gate or goal-wide lifecycle mutation closes admission. */
+	isSignalAdmissionFenced(goalId: string, gateId: string): boolean {
+		return this.isGoalLifecycleFenced(goalId) || this.isGateMutationFenced(goalId, gateId);
+	}
+
 	/**
 	 * Synchronously enumerate verification steps and seed the activeVerifications
 	 * map for `signal.id`. Returns the `GateSignalStep[]` shaped exactly for the
@@ -2311,6 +2419,12 @@ export class VerificationHarness {
 	 * must precede verification_started".
 	 */
 	beginVerification(signal: GateSignal, gate: WorkflowGate): GateSignalStep[] {
+		if (this.isGoalLifecycleFenced(signal.goalId)) {
+			throw new Error(`Goal ${signal.goalId} is completing, shelving, or archiving; retry signalling after that operation completes`);
+		}
+		if (this.isGateMutationFenced(signal.goalId, signal.gateId)) {
+			throw new Error(`Gate ${signal.gateId} is being reset or bypassed; retry signalling after that operation completes`);
+		}
 		const steps = gate.verify;
 		if (!steps || steps.length === 0) return [];
 
@@ -2341,6 +2455,8 @@ export class VerificationHarness {
 					status: (phase === minPhase ? "running" : "waiting") as "running" | "waiting",
 					phase,
 					startedAt: verificationStartedAt,
+					...(s.type === "command" ? { commandSpawnState: "queued" as const } : {}),
+					...((s.type === "llm-review" || s.type === "agent-qa") ? { reviewerSpawnState: "queued" as const } : {}),
 				};
 			}),
 			overallStatus: "running",
@@ -2426,9 +2542,14 @@ export class VerificationHarness {
 			// than writing an empty `{ verifications: [] }`. This unifies the "clear"
 			// semantics with resumeInterruptedVerifications() (which unlinks) so two
 			// concurrent harnesses sharing a stateDir cannot race between unlink and
-			// empty-file-write. Best-effort unlink so concurrent unlinks don't throw.
+			// empty-file-write. Only concurrent/missing-file ENOENT is success: a
+			// permission or I/O failure must keep terminal ownership fail-closed.
 			if (this.activeVerifications.size === 0) {
-				try { fs.unlinkSync(this._persistPath); } catch {}
+				try {
+					fs.unlinkSync(this._persistPath);
+				} catch (err: any) {
+					if (err?.code !== "ENOENT") throw err;
+				}
 				return true;
 			}
 			const data = { verifications: [...this.activeVerifications.values()] };
@@ -2480,30 +2601,46 @@ export class VerificationHarness {
 			return;
 		}
 
+		const pendingMixedFailures = persisted.filter(v => !!v.pendingTerminalIntent && !v.cancelled);
+		for (const v of pendingMixedFailures) {
+			const active = this.activeVerifications.get(v.signalId) ?? v;
+			try {
+				delete active.terminalIntentFinalizing;
+				this.activeVerifications.set(active.signalId, active);
+				if (!this._persistActive()) throw new Error(`Could not persist mixed restart terminal recovery for ${active.signalId}`);
+				await this._startCancelledVerificationCleanup(active);
+			} catch (err) {
+				console.error(`[verification] Failed to recover mixed restart terminal intent ${active.signalId}:`, err);
+			}
+		}
+
 		const cancelled = persisted.filter(v => v.cancelled || v.overallStatus === "cancelled");
 		for (const v of cancelled) {
 			const active = this.activeVerifications.get(v.signalId) ?? v;
-			this.activeVerifications.set(active.signalId, active);
-			this._markVerificationCancelled(active);
-			this._persistActive();
-			await this._terminateCancelledReviewers(this._snapshotRunningReviewers([active]));
-			const settled = await this._killPersistedCommandSteps(active, "SIGKILL", { markIntent: false });
-			if (settled) {
-				await this._finalizeCancelledVerification(active);
-			} else {
-				this._scheduleCommandKillCleanupRetry(active.signalId);
+			try {
+				// This is an in-memory concurrency fence only; a restart must retry the
+				// durable terminal publication rather than retain a stale lock.
+				delete active.cancellationFinalizing;
+				// A crash may have happened between setting this marker and reviewer
+				// teardown. Keep it: it authorizes re-driving the exact persisted
+				// reviewer session IDs even if a late verdict changed their row status.
+				this.activeVerifications.set(active.signalId, active);
+				// A pre-typed persisted cancellation has no recoverable provenance.
+				this._markVerificationCancelled(active, active.cancellation?.cause ?? "unknown");
+				if (!this._persistActive()) throw new Error(`Could not persist cancellation fence for ${active.signalId}`);
+				this._notifyCancellationFenceCommitted(active);
+				await this._startCancelledVerificationCleanup(active);
+			} catch (err) {
+				// One corrupt or temporarily unwritable record must not prevent
+				// recovery of unrelated verification generations.
+				console.error(`[verification] Failed to recover cancelled ${active.signalId}:`, err);
 			}
-			this._persistActive();
 		}
 
-		const running = persisted.filter(v => v.overallStatus === "running" && !v.cancelled);
+		const running = persisted.filter(v => v.overallStatus === "running" && !v.cancelled && !v.pendingTerminalIntent);
 		if (running.length === 0) {
 			// Clean up stale file only after cancelled kill intents are settled.
-			if (this.activeVerifications.size === 0) {
-				try { fs.unlinkSync(this._persistPath); } catch {}
-			} else {
-				this._persistActive();
-			}
+			if (!this._persistActive()) console.error("[verification] Failed to retire resumed verification state");
 			return;
 		}
 
@@ -2511,103 +2648,105 @@ export class VerificationHarness {
 
 		for (const v of running) {
 			this.activeVerifications.set(v.signalId, v);
-			this._persistActive();
 			try {
-				// Skip verifications for goals that completed/shelved while we were down
-				const goal = this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId);
-				if (goal && (goal.state === "complete" || goal.state === "shelved")) {
-					if (process.env.BOBBIT_DEBUG) console.log(`[verification] Cleaning resumed verification ${v.signalId} for ${goal.state} goal ${v.goalId}`);
-					// A retry after the crash window must delete this record, not resume it.
-					this._markVerificationCancelled(v);
-					this._persistActive();
-					await this._terminateCancelledReviewers(this._snapshotRunningReviewers([v]));
-					const settled = await this._killPersistedCommandSteps(v, "SIGKILL", { markIntent: false });
-					if (settled) {
-						await this._finalizeCancelledVerification(v);
-					} else {
-						this._scheduleCommandKillCleanupRetry(v.signalId);
-					}
-					this._persistActive();
+				// A creator from the old boot cannot resume. The durable exact session
+				// identity may nevertheless have been allocated just before the crash,
+				// so cancel fail-closed and re-drive its exact terminate/unregister.
+				if (v.steps.some(step => step.reviewerSpawnState === "spawning" || step.reviewerSpawnState === "spawned")) {
+					this._markVerificationCancelled(v, "gateway-restart-recovery");
+					if (!this._persistActive()) throw new Error(`Could not persist reviewer spawn recovery fence for ${v.signalId}`);
+					this._notifyCancellationFenceCommitted(v);
+					await this._startCancelledVerificationCleanup(v);
 					continue;
 				}
-				await this._resumeOneVerification(v);
+				// This is a normal running generation whose crash happened during
+				// reviewer ownership cleanup. The marker is durable authority over the
+				// exact retained session IDs, not stale process state. Settle that
+				// ownership before resuming and never touch command cleanup here.
+				if (v.reviewerCleanupPending) {
+					// Lifecycle-terminal goals always cancel before reconstructing a
+					// product outcome. Otherwise, rows which already determine an
+					// aggregate must stage their strict terminal intent while this exact
+					// reviewer-cleanup marker is still durable.
+					if (await this._cancelRecoveredLifecycleTerminal(v)) continue;
+					if (this._canReconstructTerminalIntentBeforeReviewerCleanup(v)) {
+						await this._resumeOneVerification(v);
+						continue;
+					}
+					await this._recoverOrphanedReviewerCleanupAndResume(v);
+					continue;
+				}
+				if (!this._persistActive()) {
+					console.error(`[verification] Failed to persist recovered active ${v.signalId}; leaving it for a later restart`);
+					continue;
+				}
+
+				await this._continueRecoveredRunningVerification(v);
 			} catch (err) {
 				const errMsg = (err as Error).message;
 				if (!this._isResumeStillActive(v)) {
 					if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resume of ${v.signalId} stopped after cancellation/supersession: ${errMsg}`);
 					continue;
 				}
+				if (v.cancelled || v.overallStatus === "cancelled") {
+					// A cancellation fence failure is retryable lifecycle work, never a
+					// product verification failure. Keep the active record durable.
+					console.warn(`[verification] Resume cancellation for ${v.signalId} remains pending: ${errMsg}`);
+					continue;
+				}
 				if (isPendingCommandCleanupError(err)) {
 					console.warn(`[verification] Resume of ${v.signalId} is waiting for command cleanup before finalizing: ${errMsg}`);
 					this._scheduleCommandKillCleanupRetry(v.signalId);
 				} else if (isRestartInterruptError(errMsg)) {
-					// A restart-induced resume error (cold-agent RPC timeout, agent
-					// process not yet up) must NEVER surface as a hard gate failure.
-					// Leave the gate `pending` so the team-lead re-signals, and send
-					// the benign nudge (mirrors the suppression path in
-					// `_resumeOneVerification`). Persist an honest audit record but keep
-					// the GATE status `pending`.
-					console.warn(`[verification] Resume of ${v.signalId} hit a restart-interrupt error (gate left pending): ${errMsg}`);
+					// This is a harness-caught RPC/process exception, not verifier output.
+					// Persist structured no-verdict provenance before any cleanup or retry.
 					try {
-						this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
-							status: "failed",
-							steps: [{ name: "Resume Interrupted", type: "command", passed: false, status: "failed", phase: 0, output: `Reviewer agent was not ready / timed out while resuming after server restart: ${errMsg}`, duration_ms: 0 }],
-						});
-						this.resolveGateStore(v.goalId).updateGateStatus(v.goalId, v.gateId, "pending");
-					} catch (storeErr) {
-						console.error(`[verification] Failed to update gate store for ${v.signalId} during restart-interrupt cleanup:`, storeErr);
-					}
-					try {
-						broadcastGateStatusChanged(this.broadcastFn, v.goalId, v.gateId, "pending");
-						this.notifyTeamLeadFn?.(
-							v.goalId,
-							`Gate verification on "${v.gateId}" was interrupted by a server restart and could not be recovered. Please re-signal the gate to run a fresh verification — no real failure was observed.`,
-						);
-					} catch (bcastErr) {
-						console.error(`[verification] Failed to broadcast restart-interrupt for ${v.signalId}:`, bcastErr);
+						console.warn(`[verification] Resume RPC recovery for ${v.signalId} was interrupted: ${errMsg}`);
+						this._markUnfinishedStepsRestartInterrupted(v);
+						// The selected terminal helper persists the complete intent/fence
+						// before it may notify or start exact cleanup.
+						if (this._hasUnmarkedTerminalResumeFailure(v)) {
+							await this._prepareMixedRestartFailureFromActive(v);
+						} else {
+							await this._finalizeRestartInterruptedVerification(v);
+						}
+					} catch (recoveryErr) {
+						console.error(`[verification] Structured restart recovery remains pending for ${v.signalId}:`, recoveryErr);
 					}
 				} else {
+					if (this._cancellationOwnsTerminalPublication(v)) continue;
 					console.error(`[verification] Failed to resume verification ${v.signalId}:`, err);
-					// Best-effort: mark as failed. Wrap each external store call in
-					// try/catch so a missing goal/gate doesn't stop us from cleaning
-					// up the in-memory entry below (HTTP 409 lock-after-restart bug).
+					// Unexpected recovery errors are terminal product failures, but they still
+					// must use the strict signal → gate → durable retirement → event owner.
+					// Never let an in-memory marker or caller finally block publish/retire them.
 					try {
-						this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
+						const goalBranch = this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId)?.branch;
+						await this._stageTerminalIntentIfCleanupPending(v, {
 							status: "failed",
 							steps: [{ name: "Resume Error", type: "command", passed: false, status: "failed", phase: 0, output: `Failed to resume after restart: ${errMsg}`, duration_ms: 0 }],
-						});
-						this.resolveGateStore(v.goalId).updateGateStatus(v.goalId, v.gateId, "failed");
+						}, "failed", goalBranch, false, { alwaysStage: true });
 					} catch (storeErr) {
-						console.error(`[verification] Failed to update gate store for ${v.signalId} during resume cleanup:`, storeErr);
-					}
-					try {
-						this.broadcastFn(v.goalId, {
-							type: "gate_verification_complete",
-							goalId: v.goalId, gateId: v.gateId, signalId: v.signalId, status: "failed",
-						});
-						broadcastGateStatusChanged(this.broadcastFn, v.goalId, v.gateId, "failed");
-						this.notifyTeamLead(v.goalId, v.gateId, "failed");
-					} catch (bcastErr) {
-						console.error(`[verification] Failed to broadcast failure for ${v.signalId} during resume cleanup:`, bcastErr);
+						console.error(`[verification] Failed to stage resume failure for ${v.signalId}:`, storeErr);
 					}
 				}
 			} finally {
-				// Drop only the entry this resume owns. If a cancellation/re-signal
-				// already removed it (or a future path replaced it), do not clobber
-				// that newer active state. A timeout/cancel kill intent that has not
-				// been verified complete must remain durable for retry after restart.
-				if (this.activeVerifications.get(v.signalId) === v && !this._hasPendingCommandKillCleanup(v)) {
+				// Resume callers never infer terminal ownership from _resumeOneVerification
+				// returning: cancellation and staged terminal-intent owners retire themselves.
+				// An already-durable marker is retained only for legacy fallback records
+				// whose signal and gate writes had published successfully.
+				if (this.activeVerifications.get(v.signalId) === v
+					&& v.terminalVerdictPublished === true
+					&& !v.cancelled
+					&& !v.pendingTerminalIntent
+					&& !this._hasPendingCommandKillCleanup(v)
+					&& !v.reviewerCleanupPending) {
 					this.activeVerifications.delete(v.signalId);
 				}
 				this._persistActive();
 			}
 		}
 
-		if (this.activeVerifications.size === 0) {
-			try { fs.unlinkSync(this._persistPath); } catch {}
-		} else {
-			this._persistActive();
-		}
+		if (!this._persistActive()) console.error("[verification] Failed to persist resumed verification state");
 		await this._surfaceOrphanedNonInteractiveReviewers();
 		if (process.env.BOBBIT_DEBUG) console.log("[verification] Finished resuming interrupted verifications.");
 	}
@@ -2719,6 +2858,10 @@ export class VerificationHarness {
 			timeout: result.timeout,
 			sessionId: step.sessionId,
 		});
+		// A real recovered or re-run result replaces any prior no-verdict marker.
+		// Only recovery code may set the marker, so old records fail closed.
+		if (result.restartInterrupted === true) v.steps[stepIndex].restartInterrupted = true;
+		else delete v.steps[stepIndex].restartInterrupted;
 		if (status === "skipped") v.steps[stepIndex].output = result.output || "Skipped — earlier phase failed";
 		this._persistActive();
 		if (status === "waiting" || status === "running") return;
@@ -2737,6 +2880,166 @@ export class VerificationHarness {
 		});
 	}
 
+	/** A legacy/unmarked terminal row is always a genuine failure, never restart provenance. */
+	private _hasUnmarkedTerminalResumeFailure(v: ActiveVerification): boolean {
+		return v.steps.some(step => {
+			const passed = step.passed ?? (step.status === "passed" || step.status === "skipped");
+			const skipped = step.skipped ?? step.status === "skipped";
+			return !passed && !skipped
+				&& step.restartInterrupted !== true
+				&& (step.status === "failed" || step.status === "timeout");
+		});
+	}
+
+	/**
+	 * Decide from durable status/provenance alone whether resumed rows already
+	 * determine their terminal aggregate. This deliberately never inspects output.
+	 */
+	private _canReconstructTerminalIntentBeforeReviewerCleanup(v: ActiveVerification): boolean {
+		if (v.steps.some(step => step.restartInterrupted === true)) return true;
+		const statuses = v.steps.map(step => step.status);
+		if (statuses.every(status => status !== "waiting" && status !== "running")) return true;
+
+		let firstRealFailurePhase: number | undefined;
+		for (const [index, step] of v.steps.entries()) {
+			const status = statuses[index]!;
+			if (step.restartInterrupted === true || (status !== "failed" && status !== "timeout")) continue;
+			const phase = step.phase ?? 0;
+			if (firstRealFailurePhase === undefined || phase < firstRealFailurePhase) firstRealFailurePhase = phase;
+		}
+		if (firstRealFailurePhase === undefined) return false;
+		return v.steps.every((step, index) => {
+			const status = statuses[index]!;
+			return status !== "waiting" && status !== "running"
+				|| (status === "waiting" && (step.phase ?? 0) > firstRealFailurePhase!);
+		});
+	}
+
+	/**
+	 * Once structured recovery commits a generation to cancellation, every
+	 * unfinished row must carry the same durable no-verdict provenance before
+	 * cleanup begins. A second crash can then resume cancellation without
+	 * examining output text or accidentally re-running a sibling.
+	 */
+	private _markUnfinishedStepsRestartInterrupted(v: ActiveVerification): void {
+		for (const step of v.steps) {
+			if (step.status === "waiting" || step.status === "running") {
+				step.restartInterrupted = true;
+			}
+		}
+	}
+
+	/** Record exact cleanup intent for recovered command rows without inventing queued ownership. */
+	private _markMixedRestartCommandKillIntent(v: ActiveVerification): void {
+		const now = Date.now();
+		for (const step of v.steps) {
+			if (step.type !== "command" || step.restartInterrupted !== true || step.commandSpawnState === "queued") continue;
+			if (step.commandSpawnState !== "spawning" && step.commandSpawnState !== "spawned") continue;
+			step.killRequestedAt ??= now;
+			step.killReason = "cancelled";
+			step.killSignal = "SIGKILL";
+		}
+	}
+
+	/** Prepare a mixed terminal failure directly from durable active rows after a recovery RPC exception. */
+	private async _prepareMixedRestartFailureFromActive(v: ActiveVerification): Promise<void> {
+		const preparedAt = Date.now();
+		const cancellation: VerificationCancellation = {
+			cause: "gateway-restart-recovery",
+			requestedAt: preparedAt,
+			finalizedAt: preparedAt,
+		};
+		const steps = v.steps.map(step => {
+			const interrupted = step.restartInterrupted === true;
+			const status = interrupted ? "cancelled" as const : step.status;
+			return {
+				name: step.name,
+				type: step.type as GateSignalStep["type"],
+				passed: interrupted ? false : (step.passed ?? (status === "passed" || status === "skipped")),
+				...(step.skipped || status === "skipped" ? { skipped: true } : {}),
+				status,
+				phase: step.phase ?? 0,
+				output: step.output ?? "",
+				duration_ms: step.durationMs ?? 0,
+				...(step.expect ? { expect: step.expect } : {}),
+				...(step.artifact ? { artifact: step.artifact } : {}),
+				...(step.diagnostics ? { diagnostics: step.diagnostics } : {}),
+				...(step.timeout ? { timeout: step.timeout } : {}),
+				...(interrupted ? { cancellation: { ...cancellation } } : {}),
+			} as GateSignalStep;
+		});
+		this._markMixedRestartCommandKillIntent(v);
+		v.pendingTerminalIntent = {
+			kind: "mixed-restart-failed",
+			preparedAt,
+			verification: { status: "failed", steps },
+			gateStatus: "failed",
+			goalBranch: this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId)?.branch,
+		};
+		if (!this._persistActive()) {
+			this._scheduleCancelledVerificationCleanupRetry(v.signalId);
+			return;
+		}
+		this._drainPendingSignoffsForSignal(v.signalId);
+		await this._startCancelledVerificationCleanup(v);
+	}
+
+	/**
+	 * Stage a real terminal verdict behind exact cleanup ownership. Resume recovery
+	 * forces this path so its timer-driven caller cannot retire the active row before
+	 * strict signal, gate, durable retirement, and event publication all settle.
+	 */
+	private async _stageTerminalIntentIfCleanupPending(
+		active: ActiveVerification,
+		verification: GateSignal["verification"],
+		gateStatus: "passed" | "failed",
+		goalBranch?: string,
+		workflowAligned?: boolean,
+		options: { alwaysStage?: boolean } = {},
+	): Promise<boolean> {
+		if (!options.alwaysStage && !active.reviewerCleanupPending) return false;
+		active.pendingTerminalIntent = {
+			kind: "terminal",
+			preparedAt: Date.now(),
+			verification,
+			gateStatus,
+			goalBranch,
+			workflowAligned,
+		};
+		if (!this._persistActive()) {
+			this._scheduleCancelledVerificationCleanupRetry(active.signalId);
+			return true;
+		}
+		await this._startCancelledVerificationCleanup(active);
+		return true;
+	}
+
+	/** Cancel a recovered row before any product-outcome reconstruction for a terminal goal. */
+	private async _cancelRecoveredLifecycleTerminal(v: ActiveVerification): Promise<boolean> {
+		if (!this._isResumeStillActive(v) || v.pendingTerminalIntent) return true;
+		const goal = this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId);
+		if (!goal || (goal.state !== "complete" && goal.state !== "shelved")) return false;
+		if (process.env.BOBBIT_DEBUG) console.log(`[verification] Cleaning resumed verification ${v.signalId} for ${goal.state} goal ${v.goalId}`);
+		this._markVerificationCancelled(v, goal.state === "shelved" ? "shelved" : "goal-complete");
+		if (!this._persistActive()) throw new Error(`Could not persist cancellation fence for ${v.signalId}`);
+		this._notifyCancellationFenceCommitted(v);
+		await this._startCancelledVerificationCleanup(v);
+		return true;
+	}
+
+	/**
+	 * Preserve lifecycle-terminal cancellation precedence whenever a recovered
+	 * running row is about to resume, including after orphan reviewer cleanup.
+	 */
+	private async _continueRecoveredRunningVerification(v: ActiveVerification): Promise<void> {
+		if (!this._isResumeStillActive(v) || v.pendingTerminalIntent || v.reviewerCleanupPending) return;
+		if (await this._cancelRecoveredLifecycleTerminal(v)) return;
+		await this._resumeOneVerification(v);
+		// A restart-resume path can return after discovering a replacement.
+		// Apply the same durable supersession guard before any fallback path.
+		this._cancellationOwnsTerminalPublication(v);
+	}
+
 	private async _continueResumeWithRemainingPhases(v: ActiveVerification): Promise<boolean> {
 		const ctx = await this._gatherRerunContext(v.goalId, v.gateId, v.signalId);
 		if (!ctx?.signal || !ctx.gate) return false;
@@ -2747,10 +3050,36 @@ export class VerificationHarness {
 
 	private async _resumeOneVerification(v: ActiveVerification): Promise<void> {
 		if (!this._isResumeStillActive(v)) return;
+		// A prior boot may have persisted a no-verdict recovery result then crashed
+		// before exact cleanup/finalization. It prevents re-running that marked row,
+		// but never overrides an unmarked product failure from a sibling.
+		if (v.steps.some(step => step.restartInterrupted === true)
+			&& !this._hasUnmarkedTerminalResumeFailure(v)) {
+			this._markUnfinishedStepsRestartInterrupted(v);
+			await this._finalizeRestartInterruptedVerification(v);
+			return;
+		}
 		const resolvedSteps: ResumedVerificationStep[] = [];
 
 		for (const step of v.steps) {
 			if (!this._isResumeStillActive(v)) return;
+			if (step.restartInterrupted === true) {
+				// A persisted marker is an irreversible no-verdict recovery outcome.
+				// If an unmarked sibling genuinely failed, retain this row for the
+				// normal aggregate without re-running it or turning the run cancelled.
+				resolvedSteps.push({
+					name: step.name,
+					type: step.type,
+					passed: false,
+					status: step.status === "waiting" || step.status === "running" ? "failed" : step.status,
+					phase: step.phase ?? 0,
+					output: step.output || "Step was interrupted by server restart before a verdict was obtained.",
+					duration_ms: step.durationMs || 0,
+					restartInterrupted: true,
+					timeout: step.timeout,
+				});
+				continue;
+			}
 			if (step.status !== "running") {
 				// Already completed before restart — keep result
 				// Skipped steps (optional or phase-skipped) count as passed for overall verdict
@@ -2763,6 +3092,7 @@ export class VerificationHarness {
 					phase: step.phase ?? 0,
 					output: step.output || "",
 					duration_ms: step.durationMs || 0,
+					restartInterrupted: step.restartInterrupted,
 					timeout: step.timeout,
 				});
 				continue;
@@ -2786,6 +3116,13 @@ export class VerificationHarness {
 				const key = `${v.signalId}::${step.name}`;
 				const { promise, resolve: resolver } = deferred<SignoffOutcome>();
 				this.pendingSignoffs.set(key, resolver);
+				// Cancellation drains parked resolvers once. If it fenced this
+				// generation immediately before registration, drain ourselves so
+				// this restart-resumed signoff cannot park forever.
+				if (!this._isResumeStillActive(v) && this.pendingSignoffs.get(key) === resolver) {
+					this.pendingSignoffs.delete(key);
+					resolver({ cancelled: true });
+				}
 				const outcome = await promise;
 				this.pendingSignoffs.delete(key);
 				if (!this._isResumeStillActive(v)) return;
@@ -2832,10 +3169,14 @@ export class VerificationHarness {
 			// timeout) is also re-runnable — deterministically re-run it from
 			// scratch instead of leaving it a terminal "could not be recovered"
 			// restart-interrupt (shouldRerunSessionStepOnResume).
-			const isTransient = step.type === "agent-qa"
-					? isTransientVerifierQaError(resumeResult?.output || "")
-					: isRetryableLlmReviewRecovery(resumeResult?.output || "");
-			const rerunnable = resumeResult?.status !== "timeout"
+			const canRetryRecovery = resumeResult?.verdictObtained !== true;
+			// Never inspect a real verification_result summary for transient/restart
+			// phrases: reviewer findings are verdict content, not harness provenance.
+			const isTransient = canRetryRecovery && (step.type === "agent-qa"
+				? isTransientVerifierQaError(resumeResult?.output || "")
+				: isRetryableLlmReviewRecovery(resumeResult?.output || ""));
+			const rerunnable = canRetryRecovery
+				&& resumeResult?.status !== "timeout"
 				&& (isTransient || shouldRerunSessionStepOnResume(resumeResult?.output || ""));
 			if (resumeResult && !resumeResult.passed && (step.type === "llm-review" || step.type === "agent-qa") && rerunnable) {
 				console.log(`[verification] Resume failed transiently for "${step.name}", re-running from scratch...`);
@@ -2854,11 +3195,26 @@ export class VerificationHarness {
 
 			if (resumeResult) {
 				const resumedStep = { ...resumeResult, status: persistedStatusForStep(resumeResult), phase: step.phase ?? 0 };
+				// A reviewer/QA resume interruption must fence this still-running row
+				// before a transient result is persisted as a normal failed verdict.
+				// Do not cancel if an earlier or recovered row is a real failure: that
+				// remains the verification's product outcome.
+				if (shouldSuppressExplicitRestartInterrupt([...resolvedSteps, resumedStep])
+					&& !this._hasUnmarkedTerminalResumeFailure(v)) {
+					// Keep the interruption diagnostic for the cancelled audit, while
+					// retaining `running` until _markVerificationCancelled snapshots it.
+					// This prevents a crash between recovery and finalization from making
+					// the step look like an ordinary failed reviewer verdict on next boot.
+					this._updateActiveStepFromResumedResult(v, step, { ...resumedStep, status: "running" });
+					this._markUnfinishedStepsRestartInterrupted(v);
+					await this._finalizeRestartInterruptedVerification(v);
+					return;
+				}
 				resolvedSteps.push(resumedStep);
 				this._updateActiveStepFromResumedResult(v, step, resumedStep);
 			} else {
-				// No session and not an llm-review — cannot recover
-				resolvedSteps.push({
+				// No session-backed recovery path means no verdict was obtained.
+				const interruptedStep: ResumedVerificationStep = {
 					name: step.name,
 					type: step.type,
 					passed: false,
@@ -2866,25 +3222,23 @@ export class VerificationHarness {
 					phase: step.phase ?? 0,
 					output: "Step was running but had no session ID — cannot resume after restart.",
 					duration_ms: Date.now() - step.startedAt,
-				});
+					restartInterrupted: true,
+				};
+				resolvedSteps.push(interruptedStep);
+				this._updateActiveStepFromResumedResult(v, step, interruptedStep);
 			}
 		}
 
 		const firstRealFailedPhase = resolvedSteps.reduce<number | undefined>((earliest, step) => {
-			if (step.passed || step.skipped) return earliest;
+			if (step.passed || step.skipped || step.restartInterrupted === true) return earliest;
 			const status = persistedStatusForStep(step);
 			if (status !== "failed" && status !== "timeout") return earliest;
-			if (isExplicitRestartInterruptedStep(step)) return earliest;
 			const phase = step.phase ?? 0;
 			return earliest === undefined || phase < earliest ? phase : earliest;
 		}, undefined);
 		const firstRestartInterruptedPhase = firstRealFailedPhase === undefined
 			? resolvedSteps.reduce<number | undefined>((earliest, step) => {
-				// Empty waiting rows are never-run downstream placeholders. They are
-				// not themselves restart interruptions; after recovered success they
-				// must execute via normal phase semantics.
-				if (step.status === "waiting" && !step.output.trim()) return earliest;
-				if (step.passed || step.skipped || !isExplicitRestartInterruptedStep(step)) return earliest;
+				if (step.passed || step.skipped || step.restartInterrupted !== true) return earliest;
 				const phase = step.phase ?? 0;
 				return earliest === undefined || phase < earliest ? phase : earliest;
 			}, undefined)
@@ -2906,6 +3260,7 @@ export class VerificationHarness {
 				const phase = step.phase ?? 0;
 				if (step.status === "waiting" && phase > firstRestartInterruptedPhase && !step.output.trim()) {
 					step.output = "Step was interrupted by server restart before this phase could run.";
+					step.restartInterrupted = true;
 				}
 			}
 		} else if (resolvedSteps.some(step => step.status === "waiting")) {
@@ -2917,41 +3272,80 @@ export class VerificationHarness {
 		// Compute overall result
 		const allPassed = computeAllPassed(resolvedSteps as GateSignalStep[]);
 
-		// Restart-interrupt suppression. If every failed step is an explicit
-		// command no-verdict row or a reviewer/QA restart interruption, don't mark
-		// the gate failed — the work being verified hasn't actually been judged.
-		// Persist the verification record honestly
-		// (so `gate_status` reflects what really happened) but leave the gate
-		// `pending` so a re-signal will run a fresh verification.
-		//
-		// Predicate is conjunctive: a single real failure poisons the gate
-		// (real failures should still surface as failed even if some sibling
-		// steps got restart-interrupted).
-		const suppressedByRestart = !allPassed && shouldSuppressExplicitRestartInterrupt(resolvedSteps);
+		// A restart interruption is orchestration, not a failed reviewer/command
+		// verdict. Preserve the completed rows and cancel the remaining generation
+		// only after its exact cleanup ownership settles.
+		const suppressedByRestart = !allPassed
+			&& shouldSuppressExplicitRestartInterrupt(resolvedSteps)
+			&& !this._hasUnmarkedTerminalResumeFailure(v);
+		if (suppressedByRestart) {
+			this._markUnfinishedStepsRestartInterrupted(v);
+			await this._finalizeRestartInterruptedVerification(v);
+			return;
+		}
 		const persistedStatus = allPassed ? "passed" as const : "failed" as const;
-		const gateStatus = suppressedByRestart ? "pending" as const : persistedStatus;
+		const gateStatus = persistedStatus;
 
-		if (!this._isResumeStillActive(v)) return;
+		if (this._cancellationOwnsTerminalPublication(v)) return;
 
-		this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, {
-			status: persistedStatus,
-			steps: resolvedSteps.map(r => {
-				const status = persistedStatusForStep(r);
-				const stepResult = {
-					name: r.name,
-					type: r.type as "command" | "llm-review" | "agent-qa" | "human-signoff",
-					passed: r.passed,
-					...(status === "skipped" ? { skipped: true } : {}),
-					status,
-					phase: r.phase ?? 0,
-					output: r.output,
-					duration_ms: r.duration_ms,
-					...(r.timeout ? { timeout: r.timeout } : {}),
-				} as GateSignalStep;
-				if (r.diagnostics) stepResult.diagnostics = r.diagnostics;
-				return stepResult;
-			}),
+		// A mixed aggregate stays failed for its real sibling verdict, while each
+		// durable no-verdict row remains auditable as cancelled. One timestamp
+		// makes the aggregate's interruption audit deterministic.
+		const aggregatePublishedAt = Date.now();
+		const restartInterruptionCancellation: VerificationCancellation = {
+			cause: "gateway-restart-recovery",
+			requestedAt: aggregatePublishedAt,
+			finalizedAt: aggregatePublishedAt,
+		};
+		const publishedSteps = resolvedSteps.map(r => {
+			const interrupted = r.restartInterrupted === true;
+			const status = interrupted ? "cancelled" as const : persistedStatusForStep(r);
+			const stepResult = {
+				name: r.name,
+				type: r.type as "command" | "llm-review" | "agent-qa" | "human-signoff",
+				passed: interrupted ? false : r.passed,
+				...(status === "skipped" ? { skipped: true } : {}),
+				status,
+				phase: r.phase ?? 0,
+				output: r.output,
+				duration_ms: r.duration_ms,
+				...(r.timeout ? { timeout: r.timeout } : {}),
+				...(interrupted ? { cancellation: { ...restartInterruptionCancellation } } : {}),
+			} as GateSignalStep;
+			if (r.diagnostics) stepResult.diagnostics = r.diagnostics;
+			return stepResult;
 		});
+		const goalBranch = this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId)?.branch;
+		const publishedVerification: GateSignal["verification"] = {
+			status: persistedStatus,
+			steps: publishedSteps,
+		};
+		const mixedRestartFailure = persistedStatus === "failed"
+			&& resolvedSteps.some(step => step.restartInterrupted === true)
+			&& this._hasUnmarkedTerminalResumeFailure(v);
+		if (mixedRestartFailure) {
+			// Persist the complete terminal audit before any reviewer/process teardown.
+			// Exact cleanup owns subsequent publication and retries it after restart.
+			this._markMixedRestartCommandKillIntent(v);
+			v.pendingTerminalIntent = {
+				kind: "mixed-restart-failed",
+				preparedAt: aggregatePublishedAt,
+				verification: publishedVerification,
+				gateStatus: "failed",
+				goalBranch,
+			};
+			if (!this._persistActive()) {
+				this._scheduleCancelledVerificationCleanupRetry(v.signalId);
+				return;
+			}
+			this._drainPendingSignoffsForSignal(v.signalId);
+			await this._startCancelledVerificationCleanup(v);
+			return;
+		}
+		// Recovered terminal aggregates always use the durable cleanup/finalization
+		// owner, even when no reviewer cleanup was pending at the crash boundary.
+		if (await this._stageTerminalIntentIfCleanupPending(v, publishedVerification, gateStatus, goalBranch, undefined, { alwaysStage: true })) return;
+		this.resolveGateStore(v.goalId).updateSignalVerification(v.signalId, publishedVerification);
 		this.resolveGateStore(v.goalId).updateGateStatus(v.goalId, v.gateId, gateStatus);
 
 		this.broadcastFn(v.goalId, {
@@ -2959,22 +3353,8 @@ export class VerificationHarness {
 			goalId: v.goalId, gateId: v.gateId, signalId: v.signalId, status: persistedStatus,
 		});
 		broadcastGateStatusChanged(this.broadcastFn, v.goalId, v.gateId, gateStatus);
-		if (suppressedByRestart) {
-			// Benign nudge — the team-lead should re-signal, not investigate a
-			// phantom regression. notifyTeamLead is keyed off the gate status
-			// string so we send a custom message rather than the standard one.
-			if (this.notifyTeamLeadFn) {
-				this.notifyTeamLeadFn(
-					v.goalId,
-					`Gate verification on "${v.gateId}" was interrupted by a server restart and could not be recovered. Please re-signal the gate to run a fresh verification — no real failure was observed.`,
-				);
-			}
-			if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resumed verification ${v.signalId}: failed steps were all restart-interrupts; gate left pending.`);
-		} else {
-			const goalBranch = this.projectContextManager?.getContextForGoal(v.goalId)?.goalStore.get(v.goalId)?.branch;
-			this.notifyTeamLead(v.goalId, v.gateId, persistedStatus, { steps: resolvedSteps, goalBranch });
-			if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resumed verification ${v.signalId}: ${persistedStatus}`);
-		}
+		this.notifyTeamLead(v.goalId, v.gateId, persistedStatus, { steps: publishedSteps, goalBranch });
+		if (process.env.BOBBIT_DEBUG) console.log(`[verification] Resumed verification ${v.signalId}: ${persistedStatus}`);
 	}
 
 	/**
@@ -2986,14 +3366,17 @@ export class VerificationHarness {
 		step: ActiveVerification["steps"][number],
 	): Promise<ResumedVerificationStep | null> {
 		if (!step.sessionId) return null;
+		const sessionId = step.sessionId;
 
-		const session = this.sessionManager?.getSession(step.sessionId);
+		const session = this.sessionManager?.getSession(sessionId);
 		if (!session) {
-			// Session lost — return transient failure so caller can re-run
+			// The persisted reviewer session is absent, so recovery obtained no
+			// verdict. This is structured harness provenance, not reviewer output.
 			return {
 				name: step.name, type: step.type, passed: false,
 				output: "Session lost during server restart.",
 				duration_ms: Date.now() - step.startedAt,
+				restartInterrupted: true,
 			};
 		}
 
@@ -3021,9 +3404,43 @@ export class VerificationHarness {
 			try { this.teamManager.registerReviewerSession(v.goalId, step.sessionId, step.name); } catch { /* ignore */ }
 		}
 
-		// Set up verification_result promise for this resumed session
+		// Capture the first accepted verification_result synchronously. A result can
+		// arrive while teardown starts; stamp durable active state before the REST
+		// acknowledgement can complete so cleanup never erases that verdict.
 		const { promise: resultPromise, resolve: resultResolver } = deferred<VerificationResult>();
-		this.pendingResults.set(step.sessionId, resultResolver);
+		let capturedVerdict: VerificationResult | undefined;
+		const captureVerdict = (result: VerificationResult): ResumedVerificationStep => ({
+			name: step.name,
+			type: step.type,
+			passed: result.verdict,
+			output: result.summary,
+			duration_ms: Date.now() - step.startedAt,
+			verdictObtained: true,
+		});
+		const capturingResolver = (result: VerificationResult) => {
+			if (capturedVerdict) {
+				resultResolver(capturedVerdict);
+				return;
+			}
+			const active = this.activeVerifications.get(v.signalId);
+			const activeStep = active?.steps.find(candidate => candidate.sessionId === sessionId);
+			if (!active || !activeStep) throw new Error(`Recovered verification result has no active row for ${sessionId}`);
+			const before = structuredClone(activeStep);
+			activeStep.status = result.verdict ? "passed" : "failed";
+			activeStep.passed = result.verdict;
+			activeStep.output = result.summary;
+			activeStep.durationMs = Date.now() - activeStep.startedAt;
+			activeStep.verdictObtained = true;
+			delete activeStep.restartInterrupted;
+			if (!this._persistActive()) {
+				for (const key of Object.keys(activeStep)) if (!Object.prototype.hasOwnProperty.call(before, key)) delete (activeStep as any)[key];
+				Object.assign(activeStep, before);
+				throw new Error(`Could not persist recovered verification result for ${sessionId}`);
+			}
+			capturedVerdict = result;
+			resultResolver(result);
+		};
+		this.pendingResults.set(step.sessionId, capturingResolver);
 
 		// Watch for errored tool_results so we can send a targeted JSON-retry
 		// prompt if the agent gives up after a streaming/arg-validation glitch.
@@ -3054,6 +3471,7 @@ export class VerificationHarness {
 					passed: idleResult.verdict,
 					output: idleResult.summary,
 					duration_ms: Date.now() - step.startedAt,
+					verdictObtained: true,
 				};
 			}
 			if (idleResult.type === "timeout") return timeoutStep(idleResult.elapsedMs);
@@ -3066,6 +3484,7 @@ export class VerificationHarness {
 					passed: recoveryResult.verdict,
 					output: recoveryResult.summary,
 					duration_ms: Date.now() - step.startedAt,
+					verdictObtained: true,
 				};
 			}
 			if (recoveryResult.type === "timeout") return timeoutStep(recoveryResult.elapsedMs);
@@ -3117,7 +3536,7 @@ export class VerificationHarness {
 					resultPromise,
 				});
 				if (reminderDispatch.type === "result") {
-					return { name: step.name, type: step.type, passed: reminderDispatch.result.verdict, output: reminderDispatch.result.summary, duration_ms: Date.now() - step.startedAt };
+					return { name: step.name, type: step.type, passed: reminderDispatch.result.verdict, output: reminderDispatch.result.summary, duration_ms: Date.now() - step.startedAt, verdictObtained: true };
 				}
 				if (reminderDispatch.type === "cancelled") {
 					return { name: step.name, type: step.type, passed: false, output: reminderDispatch.reason, duration_ms: Date.now() - step.startedAt };
@@ -3132,6 +3551,7 @@ export class VerificationHarness {
 					name: step.name, type: step.type, passed: false,
 					output: `Reviewer agent was not ready / timed out while resuming after server restart: ${msg}`,
 					duration_ms: Date.now() - step.startedAt,
+					restartInterrupted: true,
 				};
 			}
 
@@ -3145,6 +3565,7 @@ export class VerificationHarness {
 					passed: result2.verdict,
 					output: result2.summary,
 					duration_ms: Date.now() - step.startedAt,
+					verdictObtained: true,
 				};
 			}
 			if (result2.type === "timeout") return timeoutStep(result2.elapsedMs);
@@ -3156,6 +3577,7 @@ export class VerificationHarness {
 					passed: postReminderRecovery.verdict,
 					output: postReminderRecovery.summary,
 					duration_ms: Date.now() - step.startedAt,
+					verdictObtained: true,
 				};
 			}
 			if (postReminderRecovery.type === "timeout") return timeoutStep(postReminderRecovery.elapsedMs);
@@ -3191,7 +3613,7 @@ export class VerificationHarness {
 						resultPromise,
 					});
 					if (fallbackDispatch.type === "result") {
-						return { name: step.name, type: step.type, passed: fallbackDispatch.result.verdict, output: fallbackDispatch.result.summary, duration_ms: Date.now() - step.startedAt };
+						return { name: step.name, type: step.type, passed: fallbackDispatch.result.verdict, output: fallbackDispatch.result.summary, duration_ms: Date.now() - step.startedAt, verdictObtained: true };
 					}
 					if (fallbackDispatch.type === "cancelled") {
 						return { name: step.name, type: step.type, passed: false, output: fallbackDispatch.reason, duration_ms: Date.now() - step.startedAt };
@@ -3204,6 +3626,7 @@ export class VerificationHarness {
 						name: step.name, type: step.type, passed: false,
 						output: `Reviewer agent was not ready / timed out while sending post-continuation reminder after server restart: ${msg}`,
 						duration_ms: Date.now() - step.startedAt,
+						restartInterrupted: true,
 					};
 				}
 
@@ -3217,6 +3640,7 @@ export class VerificationHarness {
 						passed: fallbackResult.verdict,
 						output: fallbackResult.summary,
 						duration_ms: Date.now() - step.startedAt,
+						verdictObtained: true,
 					};
 				}
 				if (fallbackResult.type === "timeout") return timeoutStep(fallbackResult.elapsedMs);
@@ -3228,6 +3652,7 @@ export class VerificationHarness {
 						passed: postFallbackRecovery.verdict,
 						output: postFallbackRecovery.summary,
 						duration_ms: Date.now() - step.startedAt,
+						verdictObtained: true,
 					};
 				}
 				if (postFallbackRecovery.type === "timeout") return timeoutStep(postFallbackRecovery.elapsedMs);
@@ -3241,21 +3666,36 @@ export class VerificationHarness {
 				}
 			}
 
-			return {
+			const noResult: ResumedVerificationStep = {
 				name: step.name, type: step.type,
 				passed: false,
 				output: "Agent did not call verification_result after server restart and reminder.",
 				duration_ms: Date.now() - step.startedAt,
+				restartInterrupted: true,
 			};
+			// Establish durable reviewer ownership before the first teardown request.
+			// The shared helper retains this exact session ID if either operation fails.
+			const cleanupActive = this.activeVerifications.get(v.signalId);
+			if (!cleanupActive) throw new Error(`No active verification for resumed reviewer ${sessionId}`);
+			cleanupActive.reviewerCleanupPending = true;
+			if (!this._persistActive()) throw new Error(`Could not persist reviewer cleanup fence for ${sessionId}`);
+			try {
+				await this._terminateCancelledReviewersFor([cleanupActive]);
+			} catch (cleanupErr) {
+				console.warn(`[verification] Resumed reviewer cleanup remains owned for ${sessionId}: ${(cleanupErr as Error).message}`);
+			}
+			return capturedVerdict ? captureVerdict(capturedVerdict) : noResult;
 		} finally {
 			try { errListenerUnsub(); } catch { /* ignore */ }
-			// Terminate BEFORE deleting the pending resolver so a verdict POST
-			// racing teardown is still captured, not 404-dropped (see the
-			// delete-vs-late-POST fix in runLlmReviewViaSession).
-			try { await this.sessionManager!.terminateSession(step.sessionId); } catch { /* ignore */ }
-			this.pendingResults.delete(step.sessionId);
-			if (this.teamManager) {
-				try { await this.teamManager.unregisterReviewerSession(v.goalId, step.sessionId); } catch { /* ignore */ }
+			// A failed exact cleanup retains resolver/session ownership for the shared
+			// terminal cleanup retry. Do not swallow it by deleting this authority.
+			const cleanupPending = this.activeVerifications.get(v.signalId)?.reviewerCleanupPending === true;
+			this.pendingResults.delete(sessionId);
+			if (!cleanupPending) {
+				try { await this.sessionManager!.terminateSession(sessionId); } catch { /* ignore */ }
+				if (this.teamManager) {
+					try { await this.teamManager.unregisterReviewerSession(v.goalId, sessionId); } catch { /* ignore */ }
+				}
 			}
 		}
 	}
@@ -3612,6 +4052,10 @@ export class VerificationHarness {
 		return comps[0]?.name;
 	}
 
+	private tryResolveGateStore(goalId: string): GateStore | undefined {
+		try { return this.resolveGateStore(goalId); } catch { return undefined; }
+	}
+
 	private resolveGateStore(goalId: string): GateStore {
 		if (this.projectContextManager) {
 			const ctx = this.projectContextManager.getContextForGoal(goalId);
@@ -3645,7 +4089,7 @@ export class VerificationHarness {
 	}
 
 	private _isResumeStillActive(v: ActiveVerification): boolean {
-		return this.activeVerifications.get(v.signalId) === v && !v.cancelled;
+		return this.activeVerifications.get(v.signalId) === v && !v.cancelled && this._isCurrentGateSignal(v);
 	}
 
 	private _commandIdentityNonce(step: ActiveVerification["steps"][number]): string | undefined {
@@ -3883,9 +4327,27 @@ export class VerificationHarness {
 		);
 	}
 
+	/**
+	 * Explicit spawn lifecycle state is authoritative: once a row says spawning
+	 * or spawned, a process may exist even if a crash occurred before its exact
+	 * identity was persisted. Only an explicit queued state proves no spawn was
+	 * attempted. Legacy rows retain their identity-evidence compatibility.
+	 */
+	private _commandStepHasSpawnOwnership(step: ActiveVerification["steps"][number]): boolean {
+		return step.commandSpawnState === "spawning"
+			|| step.commandSpawnState === "spawned"
+			|| step.commandSpawnedAt !== undefined
+			// Legacy/recovered rows predate `commandSpawnedAt`; their durable exact
+			// identity records still prove that a command was actually admitted.
+			|| step.pid !== undefined
+			|| step.pidFile !== undefined
+			|| step.sentinelFile !== undefined
+			|| step.containerOwnershipWitness !== undefined;
+	}
+
 	private _commandStepRequiresKillCleanup(step: ActiveVerification["steps"][number]): boolean {
-		return step.type === "command" && (
-			step.status === "running" ||
+		return step.commandSpawnState !== "queued" && step.type === "command" && (
+			(step.status === "running" && this._commandStepHasSpawnOwnership(step)) ||
 			(!!step.killRequestedAt && !step.killCompletedAt) ||
 			!!step.sentinelCleanupPending ||
 			!!step.containerPayloadCleanupPending ||
@@ -3900,10 +4362,144 @@ export class VerificationHarness {
 		for (const step of active.steps) {
 			if (step.type !== "command") continue;
 			if (step.status !== "running" && !step.killRequestedAt) continue;
+			// A phase starts as `running` before its command acquires a permit.
+			// Cancellation may land in that display-only window; never manufacture
+			// an exact-cleanup obligation for a completed command. Explicit
+			// spawning/spawned state is authoritative only while the row is running,
+			// when it records a crossed spawn boundary before identity persistence.
+			if (!step.killRequestedAt && !this._commandStepHasSpawnOwnership(step)) continue;
 			step.killRequestedAt ??= now;
-			step.killReason = reason;
+			step.killReason ??= reason;
 			step.killSignal = signal;
 		}
+	}
+
+	/** Persist the exact reviewer identity before any createSession call may start. */
+	private _queueReviewerSpawn(
+		context: { goalId: string; gateId: string; signalId: string; stepIndex: number },
+		sessionId: string,
+		timeoutSec?: number,
+	): boolean {
+		const active = this.activeVerifications.get(context.signalId);
+		const step = active?.steps[context.stepIndex];
+		if (!active || !step || active.goalId !== context.goalId || active.gateId !== context.gateId
+			|| active.cancelled || !this._isCurrentGateSignal(active)
+			|| (step.type !== "llm-review" && step.type !== "agent-qa")) return false;
+		// Do not leave a memory-only reviewer identity behind if its durable
+		// ownership record cannot commit. A later creator must never inherit it.
+		const previous = {
+			hasSessionId: Object.hasOwn(step, "sessionId"), sessionId: step.sessionId,
+			hasTimeoutSec: Object.hasOwn(step, "timeoutSec"), timeoutSec: step.timeoutSec,
+			hasSpawnState: Object.hasOwn(step, "reviewerSpawnState"), reviewerSpawnState: step.reviewerSpawnState,
+		};
+		step.sessionId = sessionId;
+		step.timeoutSec = timeoutSec;
+		step.reviewerSpawnState = "queued";
+		if (this._persistActive()) return true;
+		if (previous.hasSessionId) step.sessionId = previous.sessionId;
+		else delete step.sessionId;
+		if (previous.hasTimeoutSec) step.timeoutSec = previous.timeoutSec;
+		else delete step.timeoutSec;
+		if (previous.hasSpawnState) step.reviewerSpawnState = previous.reviewerSpawnState;
+		else delete step.reviewerSpawnState;
+		return false;
+	}
+
+	/** Recheck cancellation/generation at the reviewer create-session boundary. */
+	private _canAdmitReviewerSpawn(
+		context: { goalId?: string; gateId?: string; signalId?: string; stepIndex?: number },
+		sessionId: string,
+	): boolean {
+		if (!context.goalId || !context.gateId || !context.signalId || context.stepIndex === undefined) return true;
+		const active = this.activeVerifications.get(context.signalId);
+		const step = active?.steps[context.stepIndex];
+		return !!active && active.goalId === context.goalId && active.gateId === context.gateId
+			&& !active.cancelled && active.overallStatus !== "cancelled"
+			&& !this.cancelledVerificationSignals.has(context.signalId)
+			&& this._isCurrentGateSignal(active)
+			&& step?.sessionId === sessionId
+			&& step.reviewerSpawnState === "queued";
+	}
+
+	/**
+	 * Register a current-boot creator before invoking createSession. Cancellation
+	 * joins this barrier before its exact terminate/unregister cleanup; persisted
+	 * spawning/spawned state remains the restart authority.
+	 */
+	private async _createReviewerSessionWithOwnership<T>(args: {
+		sessionId: string;
+		context?: { goalId?: string; gateId?: string; signalId?: string; stepIndex?: number };
+		create: () => Promise<T>;
+		/** Must include ownership-store registration, which can race cancellation. */
+		afterCreate?: (session: T) => Promise<void>;
+	}): Promise<T | undefined> {
+		const context = args.context;
+		if (!context?.signalId || context.stepIndex === undefined) {
+			const session = await args.create();
+			await args.afterCreate?.(session);
+			return session;
+		}
+		if (!this._canAdmitReviewerSpawn(context, args.sessionId)) return undefined;
+		const active = this.activeVerifications.get(context.signalId)!;
+		const step = active.steps[context.stepIndex]!;
+		step.reviewerSpawnState = "spawning";
+		if (!this._persistActive()) {
+			step.reviewerSpawnState = "queued";
+			return undefined;
+		}
+
+		let resolveBarrier!: (value: T | undefined) => void;
+		const barrier = new Promise<T | undefined>(resolve => {
+			resolveBarrier = resolve;
+		});
+		this.reviewerCreationBarriers.set(args.sessionId, barrier);
+		try {
+			// The map entry is visible before this final admission check and before
+			// createSession can synchronously allocate its exact durable session.
+			if (!this._canAdmitReviewerSpawn(context, args.sessionId)) {
+				resolveBarrier(undefined);
+				return await barrier;
+			}
+			let session: T;
+			try {
+				session = await args.create();
+			} catch (error) {
+				// A rejected create owns no live session, but cancellation waiting on
+				// this barrier must be released so it can settle the exact no-op cleanup.
+				resolveBarrier(undefined);
+				throw error;
+			}
+			await args.afterCreate?.(session);
+			const current = this.activeVerifications.get(context.signalId);
+			const currentStep = current?.steps[context.stepIndex];
+			if (currentStep?.sessionId === args.sessionId) {
+				currentStep.reviewerSpawnState = "spawned";
+				if (!this._persistActive()) throw new Error(`Could not persist spawned reviewer ownership for ${args.sessionId}`);
+			}
+			const stillAdmitted = !!current && !current.cancelled && current.overallStatus !== "cancelled"
+				&& this._isCurrentGateSignal(current) && currentStep?.sessionId === args.sessionId;
+			resolveBarrier(session);
+			return stillAdmitted ? await barrier : undefined;
+		} finally {
+			// Covers create, registration, and spawned-state persistence rejection so
+			// a cancellation that already captured this barrier can always progress.
+			resolveBarrier(undefined);
+			if (this.reviewerCreationBarriers.get(args.sessionId) === barrier) this.reviewerCreationBarriers.delete(args.sessionId);
+		}
+	}
+
+	/** Recheck cancellation/generation at command admission boundaries. */
+	private _canAdmitCommandStep(streamCtx?: { goalId: string; gateId: string; signalId: string; stepIndex: number }): boolean {
+		if (!streamCtx) return true;
+		const active = this.activeVerifications.get(streamCtx.signalId);
+		return !!active
+			&& active.goalId === streamCtx.goalId
+			&& active.gateId === streamCtx.gateId
+			&& !active.cancelled
+			&& active.overallStatus !== "cancelled"
+			&& !this.cancelledVerificationSignals.has(streamCtx.signalId)
+			&& this._isCurrentGateSignal(active)
+			&& active.steps[streamCtx.stepIndex]?.type === "command";
 	}
 
 	private async _waitForPidToExit(pid: number, timeoutMs = 1_500): Promise<boolean> {
@@ -3916,24 +4512,179 @@ export class VerificationHarness {
 	}
 
 	private _commandKillRetryTimers = new Map<string, NodeJS.Timeout>();
+	/** One recovery owner per running row whose persisted reviewer cleanup was interrupted. */
+	private _orphanReviewerCleanupRecoveryPromises = new Map<string, Promise<void>>();
+	/** Bounded deterministic retry for an orphan reviewer ownership cleanup. */
+	private _orphanReviewerCleanupRetryTimers = new Map<string, NodeJS.Timeout>();
+	private _orphanReviewerCleanupRetryAttempts = new Map<string, number>();
+	/** Retries cancellation cleanup errors without letting a detached terminal request reject. */
+	private _cancelledCleanupRetryTimers = new Map<string, NodeJS.Timeout>();
+	private _cancelledCleanupRetryAttempts = new Map<string, number>();
+	/** One cleanup owner per cancelled signal; callers may either await or detach it. */
+	private _cancelledCleanupPromises = new Map<string, Promise<void>>();
+	/** Concurrent completion paths join the same cancellation publication. */
+	private _cancelledFinalizationPromises = new Map<string, Promise<void>>();
+	private _terminalIntentFinalizationPromises = new Map<string, Promise<void>>();
+	/** Ephemeral fence while a stale-generation cancellation retry owns persistence. */
+	private _failedCancellationFences = new WeakSet<ActiveVerification>();
+	/** One bounded-backoff persistence retry owner for a stale-generation fence. */
+	private _failedCancellationFenceRetryTimers = new Map<string, NodeJS.Timeout>();
+	private _failedCancellationFenceRetryAttempts = new Map<string, number>();
+
+	/** Whether this exact signal is still the gate's current generation. */
+	private _isCurrentSignal(goalId: string, gateId: string, signalId: string): boolean {
+		const gate = this.resolveGateStore(goalId)?.getGate?.(goalId, gateId);
+		const signals = gate?.signals;
+		// Lightweight unit seams do not expose signal history; production does.
+		return !Array.isArray(signals) || signals.length === 0 || signals[signals.length - 1]?.id === signalId;
+	}
 
 	/** Whether this exact signal is still the gate's current generation. */
 	private _isCurrentGateSignal(active: ActiveVerification): boolean {
-		const gate = this.resolveGateStore(active.goalId)?.getGate?.(active.goalId, active.gateId);
-		const signals = gate?.signals;
-		// Lightweight unit seams do not expose signal history; production does.
-		return !Array.isArray(signals) || signals.length === 0 || signals[signals.length - 1]?.id === active.signalId;
+		return this._isCurrentSignal(active.goalId, active.gateId, active.signalId);
 	}
 
-	private _markVerificationCancelled(active: ActiveVerification): void {
+	/** Restore a failed cancellation fence without replacing in-flight step objects. */
+	private _restoreActiveVerification(active: ActiveVerification, snapshot: ActiveVerification): void {
+		const steps = active.steps;
+		for (const key of Object.keys(active)) {
+			if (key !== "steps" && !Object.prototype.hasOwnProperty.call(snapshot, key)) delete (active as any)[key];
+		}
+		for (const [key, value] of Object.entries(snapshot)) {
+			if (key !== "steps") (active as any)[key] = value;
+		}
+		for (let index = 0; index < snapshot.steps.length; index++) {
+			const previous = steps[index];
+			const restored = snapshot.steps[index]!;
+			if (!previous) {
+				steps[index] = restored;
+				continue;
+			}
+			for (const key of Object.keys(previous)) {
+				if (!Object.prototype.hasOwnProperty.call(restored, key)) delete (previous as any)[key];
+			}
+			Object.assign(previous, restored);
+		}
+		steps.length = snapshot.steps.length;
+		active.steps = steps;
+	}
+
+	/** Retry a stale fence that lost only its synchronous persistence race. */
+	private _retryFailedCancellationFence(active: ActiveVerification): void {
+		if (this.activeVerifications.get(active.signalId) !== active || active.cancelled || this._isCurrentGateSignal(active)) {
+			this._failedCancellationFences.delete(active);
+			this._failedCancellationFenceRetryAttempts.delete(active.signalId);
+			return;
+		}
+		const snapshot = structuredClone(active);
+		const wasFenced = this.cancelledVerificationSignals.has(active.signalId);
+		this._markVerificationCancelled(active, "superseded");
+		if (!this._persistActive()) {
+			this._restoreActiveVerification(active, snapshot);
+			if (wasFenced) this.cancelledVerificationSignals.add(active.signalId);
+			else this.cancelledVerificationSignals.delete(active.signalId);
+			this._failedCancellationFences.add(active);
+			this._scheduleFailedCancellationFenceRetry(active);
+			return;
+		}
+		this._failedCancellationFences.delete(active);
+		this._failedCancellationFenceRetryAttempts.delete(active.signalId);
+		this._notifyCancellationFenceCommitted(active);
+		void this._startCancelledVerificationCleanup(active);
+	}
+
+	private _scheduleFailedCancellationFenceRetry(active: ActiveVerification): void {
+		if (this._failedCancellationFenceRetryTimers.has(active.signalId)) return;
+		const attempts = (this._failedCancellationFenceRetryAttempts.get(active.signalId) ?? 0) + 1;
+		this._failedCancellationFenceRetryAttempts.set(active.signalId, attempts);
+		const delayMs = Math.min(30_000, 1_000 * 2 ** Math.max(0, attempts - 1));
+		const timer = this.clock.setTimeout(() => {
+			this._failedCancellationFenceRetryTimers.delete(active.signalId);
+			try {
+				this._retryFailedCancellationFence(active);
+			} catch (err) {
+				console.warn(`[verification] Stale cancellation fence retry for ${active.signalId} did not settle: ${(err as Error).message}`);
+				if (this.activeVerifications.get(active.signalId) === active) this._scheduleFailedCancellationFenceRetry(active);
+			}
+		}, delayMs);
+		timer.unref?.();
+		this._failedCancellationFenceRetryTimers.set(active.signalId, timer as NodeJS.Timeout);
+	}
+
+	/**
+	 * Final product verdicts are allowed only for the exact live generation.
+	 * A final checkout audit yields, so cancellation or a replacement may own the
+	 * row by the time it returns. Start the existing cleanup owner instead of
+	 * letting stale pass/fail writes mutate the replacement gate generation.
+	 */
+	private _cancellationOwnsTerminalPublication(active: ActiveVerification): boolean {
+		if (this.activeVerifications.get(active.signalId) !== active
+			|| active.terminalVerdictPublished
+			|| !!active.pendingTerminalIntent
+			|| active.overallStatus === "passed"
+			|| active.overallStatus === "failed"
+			|| this._failedCancellationFences.has(active)) return true;
+		if (!active.cancelled && !this._isCurrentGateSignal(active)) {
+			// A stale generation may not publish a product verdict. Fence it first,
+			// but leave it completely live if the fence cannot become durable.
+			const snapshot = structuredClone(active);
+			const wasFenced = this.cancelledVerificationSignals.has(active.signalId);
+			this._markVerificationCancelled(active, "superseded");
+			if (!this._persistActive()) {
+				this._restoreActiveVerification(active, snapshot);
+				if (wasFenced) this.cancelledVerificationSignals.add(active.signalId);
+				else this.cancelledVerificationSignals.delete(active.signalId);
+				// A stale generation may not publish a product verdict while its fence is
+				// retrying, but a transient write failure must not strand live work forever.
+				this._failedCancellationFences.add(active);
+				this._scheduleFailedCancellationFenceRetry(active);
+				return true;
+			}
+			this._notifyCancellationFenceCommitted(active);
+		}
+		if (!active.cancelled) return false;
+		void this._startCancelledVerificationCleanup(active);
+		return true;
+	}
+
+	/**
+	 * Fence an active generation synchronously. The cause is written before any
+	 * reviewer/process cleanup can yield, and first writer wins across retries,
+	 * restart recovery, and supersession.
+	 */
+	private _markVerificationCancelled(
+		active: ActiveVerification,
+		cause: VerificationCancellationCause,
+	): void {
+		const requestedAt = active.cancellation?.requestedAt ?? Date.now();
+		active.cancellation ??= { cause, requestedAt };
+		// Capture the exact in-flight rows before reviewer/process cleanup can
+		// resolve a killed command as a normal failed result. This fence is durable
+		// with the active record and first-writer-wins with the run cancellation.
+		for (const step of active.steps) {
+			if (step.status !== "waiting" && step.status !== "running") continue;
+			step.cancellation ??= { ...active.cancellation };
+		}
 		active.cancelled = true;
 		active.overallStatus = "cancelled";
-		active.cancelRequestedAt ??= Date.now();
+		// Retained only for old process-cleanup records. It must never carry the
+		// orchestration reason because a timeout and an operator cancellation can
+		// share the same SIGKILL mechanics.
+		active.cancelRequestedAt ??= active.cancellation.requestedAt;
 		this.cancelledVerificationSignals.add(active.signalId);
+		this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
+	}
+
+	/**
+	 * Irreversible waiter/signoff effects happen only after the cancellation fence
+	 * is on disk. This is deliberately separate from _markVerificationCancelled:
+	 * promises cannot be "unresolved" if a re-signal fence returns 503.
+	 */
+	private _notifyCancellationFenceCommitted(active: ActiveVerification): void {
 		const waiters = this.verifierDispatchCancellationWaiters.get(active.signalId);
 		this.verifierDispatchCancellationWaiters.delete(active.signalId);
 		for (const notify of waiters ?? []) notify(`Verifier prompt signal ${active.signalId} was cancelled or superseded`);
-		this._markPersistedCommandKillIntent(active, "SIGKILL", "cancelled");
+		this._drainPendingSignoffsForSignal(active.signalId);
 	}
 
 	/** Snapshot every live reviewer before any asynchronous command cleanup can yield. */
@@ -3941,7 +4692,14 @@ export class VerificationHarness {
 		const reviewers = new Map<string, { goalId: string; sessionId: string }>();
 		for (const active of actives) {
 			for (const step of active.steps) {
-				if (step.status === "running" && step.sessionId) {
+				// A persisted cleanup marker retains authority over the exact reviewer
+				// identity even after a late verdict changes a cancelled row's status.
+				// `spawning` is also owned: createSession may have allocated this exact
+				// session while cancellation was waiting on the current-boot barrier.
+				const reviewerMayExist = step.reviewerSpawnState === "spawning"
+					|| step.reviewerSpawnState === "spawned"
+					|| (step.reviewerSpawnState === undefined && step.status === "running");
+				if (step.sessionId && (reviewerMayExist || active.reviewerCleanupPending)) {
 					reviewers.set(step.sessionId, { goalId: active.goalId, sessionId: step.sessionId });
 				}
 			}
@@ -3954,36 +4712,393 @@ export class VerificationHarness {
 	 * purges the exact verifier receipts, so a late agent_end cannot redrain them.
 	 */
 	private async _terminateCancelledReviewers(reviewers: readonly { goalId: string; sessionId: string }[]): Promise<void> {
-		const cleanup: Promise<unknown>[] = [];
-		for (const { goalId, sessionId } of reviewers) {
-			// Start both operations now. Do not let a slow stop RPC defer reviewer
-			// ownership removal until after another lifecycle event has redrained it.
-			cleanup.push(Promise.resolve(this.sessionManager?.terminateSession(sessionId)).catch(() => {}));
-			cleanup.push(Promise.resolve(this.teamManager?.unregisterReviewerSession(goalId, sessionId)).catch(() => {}));
+		const cleanup = reviewers.map(async ({ goalId, sessionId }) => {
+			// A false/not-found termination is safe only after a creator from this
+			// boot has settled; otherwise it can race a just-created reviewer.
+			const creator = this.reviewerCreationBarriers.get(sessionId);
+			if (creator) await Promise.allSettled([creator]);
+			// Start both operations before awaiting either one. Wrapping the invocation
+			// itself also converts a synchronous ownership-store failure into a settled
+			// result, so it cannot prevent the matching terminate request from starting.
+			const results = await Promise.allSettled([
+				Promise.resolve().then(() => this.sessionManager?.terminateSession(sessionId)),
+				Promise.resolve().then(() => this.teamManager?.unregisterReviewerSession(goalId, sessionId)),
+			]);
+			const failures = results.flatMap(result => result.status === "rejected" ? [result.reason] : []);
+			if (failures.length) throw new AggregateError(failures, `Failed to clean up cancelled reviewer ${sessionId}`);
+		});
+		const results = await Promise.allSettled(cleanup);
+		const failures = results.flatMap(result => result.status === "rejected" ? [result.reason] : []);
+		if (failures.length > 0) {
+			throw new AggregateError(failures, `Failed to clean up ${failures.length} cancelled reviewer ownership operation(s)`);
 		}
-		await Promise.all(cleanup);
+	}
+
+	/** Keep terminal publication behind reviewer cleanup, just as command cleanup is fenced. */
+	private async _terminateCancelledReviewersFor(actives: readonly ActiveVerification[]): Promise<void> {
+		const reviewers = this._snapshotRunningReviewers(actives);
+		const affected = actives.filter(active => active.reviewerCleanupPending
+			|| active.steps.some(step => !!step.sessionId && (step.reviewerSpawnState === "spawning"
+				|| step.reviewerSpawnState === "spawned"
+				|| (step.reviewerSpawnState === undefined && step.status === "running"))));
+		if (affected.length === 0) return;
+		for (const active of affected) active.reviewerCleanupPending = true;
+		if (!this._persistActive()) {
+			// Leave the in-memory fence intact so the cancelled-cleanup retry owner
+			// writes it before it can re-drive these exact reviewer identities.
+			throw new Error(`Could not persist reviewer cleanup fence for ${affected.map(active => active.signalId).join(", ")}`);
+		}
+		const creators = reviewers
+			.map(reviewer => this.reviewerCreationBarriers.get(reviewer.sessionId))
+			.filter((creator): creator is Promise<unknown> => !!creator);
+		if (creators.length > 0) {
+			// Do not treat an early not-found terminate as cleanup while a current
+			// boot can still create/register this exact session. Keep the durable
+			// marker, return the caller as pending, and re-drive exact cleanup the
+			// instant the complete creator+registration barrier settles.
+			void Promise.allSettled(creators).then(() => {
+				for (const active of affected) {
+					if (this.activeVerifications.get(active.signalId) === active && active.reviewerCleanupPending) {
+						void this._startCancelledVerificationCleanup(active);
+					}
+				}
+			});
+			throw new Error(`Reviewer creation remains in flight for ${affected.map(active => active.signalId).join(", ")}`);
+		}
+		if (reviewers.length > 0) await this._terminateCancelledReviewers(reviewers);
+		for (const active of affected) delete active.reviewerCleanupPending;
+		if (!this._persistActive()) {
+			// A failed clear must remain fail-closed. The prior durable record still
+			// contains the marker (atomic persistence did not commit), and restoring it
+			// in memory ensures the retry owner cannot publish before re-driving cleanup.
+			for (const active of affected) active.reviewerCleanupPending = true;
+			throw new Error(`Could not persist reviewer cleanup completion for ${affected.map(active => active.signalId).join(", ")}`);
+		}
+	}
+
+	/** Reconstruct a cancellation audit from persisted signal rows plus live completed work. */
+	private _cancelledVerificationResult(active: ActiveVerification): GateSignal["verification"] {
+		const cancellation: VerificationCancellation = active.cancellation ?? {
+			cause: "unknown",
+			requestedAt: active.cancelRequestedAt ?? Date.now(),
+		};
+		const finalizedAt = Date.now();
+		cancellation.finalizedAt ??= finalizedAt;
+		active.cancellation = cancellation;
+		const signal = this.tryResolveGateStore(active.goalId)
+			?.getGate(active.goalId, active.gateId)
+			?.signals?.find(candidate => candidate.id === active.signalId);
+		const persistedSteps = signal?.verification?.steps ?? [];
+		const count = Math.max(persistedSteps.length, active.steps.length);
+		const steps: GateSignalStep[] = [];
+		for (let index = 0; index < count; index++) {
+			const persisted = persistedSteps[index];
+			const live = active.steps[index];
+			const interruption = live?.cancellation ?? persisted?.cancellation;
+			const liveStatus = live?.status;
+			// A live row is authoritative over the signal's seeded display row. In
+			// particular, a stale persisted `running`/`waiting` status must not erase
+			// a live completed command during cancellation finalization.
+			const interrupted = interruption !== undefined
+				// A cancelled terminal record must never retain an unfinished live row,
+				// even if a crash or late callback left it without a cancellation stamp.
+				|| liveStatus === "waiting" || liveStatus === "running"
+				// Persisted state is an interruption fallback only when no live row
+				// exists for this step.
+				|| (live === undefined && (persisted?.status === "waiting" || persisted?.status === "running"));
+			const stepCancellation = interrupted
+				? { ...(interruption ?? cancellation), finalizedAt: interruption?.finalizedAt ?? cancellation.finalizedAt }
+				: undefined;
+			const status = interrupted ? "cancelled" as const : (liveStatus ?? persisted?.status ?? "cancelled");
+			const passed = interrupted
+				? false
+				: live?.passed !== undefined
+					? live.passed
+					: liveStatus !== undefined
+						? liveStatus === "passed" || liveStatus === "skipped"
+						: persisted?.passed ?? (persisted?.status === "passed" || persisted?.status === "skipped");
+			const skipped = !interrupted && (live?.skipped ?? persisted?.skipped);
+			const output = interrupted
+				? (live?.output ?? persisted?.output ?? `Verification cancelled (${cancellation.cause}).`)
+				: (live?.output ?? persisted?.output ?? "");
+			const result: GateSignalStep = {
+				name: live?.name ?? persisted?.name ?? `Step ${index + 1}`,
+				type: (live?.type ?? persisted?.type ?? "command") as GateSignalStep["type"],
+				passed,
+				...(skipped ? { skipped: true } : {}),
+				status,
+				phase: live?.phase ?? persisted?.phase,
+				output,
+				duration_ms: live?.durationMs ?? persisted?.duration_ms ?? 0,
+				...(live?.expect ?? persisted?.expect ? { expect: live?.expect ?? persisted?.expect } : {}),
+				...(live?.artifact ?? persisted?.artifact ? { artifact: live?.artifact ?? persisted?.artifact } : {}),
+				...(live?.diagnostics ?? persisted?.diagnostics ? { diagnostics: live?.diagnostics ?? persisted?.diagnostics } : {}),
+				...(stepCancellation ? { cancellation: stepCancellation } : {}),
+			};
+			if (live?.timeout ?? persisted?.timeout) result.timeout = live?.timeout ?? persisted?.timeout;
+			steps.push(result);
+		}
+		return { status: "cancelled", steps, cancellation };
+	}
+
+	/**
+	 * Cancel a restart-interrupted generation through the normal cancellation
+	 * lifecycle. Callers must invoke this before accepting an interrupted
+	 * reviewer result as a failed step, so the durable audit retains its cause.
+	 */
+	private async _finalizeRestartInterruptedVerification(active: ActiveVerification): Promise<void> {
+		// Only a durable marker authorizes changing a recovered row. Do not infer
+		// restart provenance from a reviewer summary, command output, or its absence:
+		// old unmarked rows therefore fail closed as ordinary verdicts/unknown.
+		for (const step of active.steps) {
+			if (step.restartInterrupted !== true) continue;
+			step.status = "running";
+		}
+		this._markVerificationCancelled(active, "gateway-restart-recovery");
+		if (!this._persistActive()) {
+			this._scheduleCancelledVerificationCleanupRetry(active.signalId);
+			return;
+		}
+		this._notifyCancellationFenceCommitted(active);
+		// Use the sole full-cleanup owner so reviewer, host-tree, and Docker
+		// failures retain their exact retry path. It publishes only after cleanup.
+		await this._startCancelledVerificationCleanup(active);
 	}
 
 	/** One terminal cancellation path, invoked only after every cleanup phase settles. */
 	private async _finalizeCancelledVerification(active: ActiveVerification): Promise<void> {
-		if (this._hasPendingCommandKillCleanup(active)) return;
-		// A reset/re-signal may have replaced this active object while delayed exact
-		// cleanup was settling. The obsolete generation must not publish anything.
+		const existing = this._cancelledFinalizationPromises.get(active.signalId);
+		if (existing) return existing;
+		// Do not let a pre-cleanup caller own a resolved no-op promise. The cleanup
+		// retry that settles later must be able to become the publication owner.
+		if (this._hasPendingCommandKillCleanup(active) || active.reviewerCleanupPending || active.cancellationFinalizing) return;
+		const finalization = this._finalizeCancelledVerificationOnce(active);
+		this._cancelledFinalizationPromises.set(active.signalId, finalization);
+		try {
+			await finalization;
+		} finally {
+			if (this._cancelledFinalizationPromises.get(active.signalId) === finalization) this._cancelledFinalizationPromises.delete(active.signalId);
+		}
+	}
+
+	private async _finalizePendingMixedRestartFailure(active: ActiveVerification): Promise<void> {
+		const existing = this._terminalIntentFinalizationPromises.get(active.signalId);
+		if (existing) return existing;
+		if (!active.pendingTerminalIntent || active.cancelled || active.terminalIntentFinalizing) return;
+		const finalization = this._finalizePendingMixedRestartFailureOnce(active);
+		this._terminalIntentFinalizationPromises.set(active.signalId, finalization);
+		try {
+			await finalization;
+		} finally {
+			if (this._terminalIntentFinalizationPromises.get(active.signalId) === finalization) this._terminalIntentFinalizationPromises.delete(active.signalId);
+		}
+	}
+
+	private async _finalizePendingMixedRestartFailureOnce(active: ActiveVerification): Promise<void> {
+		const intent = active.pendingTerminalIntent;
+		if (!intent || active.cancelled || this.activeVerifications.get(active.signalId) !== active
+			|| this._hasPendingCommandKillCleanup(active) || active.reviewerCleanupPending) return;
+		active.terminalIntentFinalizing = true;
+		try {
+			const store = this.tryResolveGateStore(active.goalId);
+			if (!store) {
+				delete active.terminalIntentFinalizing;
+				delete active.pendingTerminalIntent;
+				this.activeVerifications.delete(active.signalId);
+				if (!this._persistActive()) {
+					active.pendingTerminalIntent = intent;
+					this.activeVerifications.set(active.signalId, active);
+					throw new Error(`Could not retire storeless mixed restart intent ${active.signalId}`);
+				}
+				this._cancelledCleanupRetryAttempts.delete(active.signalId);
+				return;
+			}
+			if (typeof (store as Partial<GateStore>).updateSignalVerificationStrict === "function") {
+				await store.updateSignalVerificationStrict(active.signalId, intent.verification);
+			} else {
+				store.updateSignalVerification(active.signalId, intent.verification);
+			}
+			// Supersession or replacement wins after the historical signal write.
+			if (this.activeVerifications.get(active.signalId) !== active || active.cancelled || active.pendingTerminalIntent !== intent) return;
+			const currentBeforeGateWrite = this._isCurrentGateSignal(active);
+			if (currentBeforeGateWrite) {
+				if (typeof (store as Partial<GateStore>).updateGateStatusStrict === "function") {
+					await store.updateGateStatusStrict(active.goalId, active.gateId, intent.gateStatus);
+				} else {
+					store.updateGateStatus(active.goalId, active.gateId, intent.gateStatus);
+				}
+			}
+			if (this.activeVerifications.get(active.signalId) !== active || active.cancelled || active.pendingTerminalIntent !== intent) return;
+			delete active.terminalIntentFinalizing;
+			delete active.pendingTerminalIntent;
+			this.activeVerifications.delete(active.signalId);
+			if (!this._persistActive()) {
+				// Restore in-memory ownership too: the strict writes can be retried,
+				// but events must remain behind a durable active-row retirement.
+				active.pendingTerminalIntent = intent;
+				this.activeVerifications.set(active.signalId, active);
+				throw new Error(`Could not persist mixed restart terminal publication for ${active.signalId}`);
+			}
+			this._cancelledCleanupRetryAttempts.delete(active.signalId);
+			// The strict gate write can yield while a replacement signal is admitted.
+			// Historical terminal persistence may finish, but only the post-write
+			// current generation may emit current-gate status or transcript events.
+			const currentAfterGateWrite = this._isCurrentGateSignal(active);
+			if (currentAfterGateWrite) {
+				this.broadcastFn(active.goalId, { type: "gate_verification_complete", goalId: active.goalId, gateId: active.gateId, signalId: active.signalId, status: intent.gateStatus });
+				broadcastGateStatusChanged(this.broadcastFn, active.goalId, active.gateId, intent.gateStatus);
+				this.notifyTeamLead(active.goalId, active.gateId, intent.gateStatus, {
+					steps: intent.verification.steps,
+					goalBranch: intent.goalBranch,
+					workflowAligned: intent.workflowAligned,
+				});
+			}
+		} catch (error) {
+			if (this.activeVerifications.get(active.signalId) === active) this._persistActive();
+			throw error;
+		} finally {
+			if (this.activeVerifications.get(active.signalId) === active) delete active.terminalIntentFinalizing;
+		}
+	}
+
+	private async _finalizeCancelledVerificationOnce(active: ActiveVerification): Promise<void> {
+		if (this._hasPendingCommandKillCleanup(active) || active.reviewerCleanupPending || active.cancellationFinalizing) return;
+		// A reset/re-signal may have replaced this active object while exact cleanup
+		// was settling. Historical generations can update only their own signal.
 		if (this.activeVerifications.get(active.signalId) !== active) return;
-		this.activeVerifications.delete(active.signalId);
-		const stillCurrent = this._isCurrentGateSignal(active);
-		this.resolveGateStore(active.goalId)?.updateSignalVerification(active.signalId, {
-			status: "failed",
-			steps: [{ name: "Cancelled", type: "command", passed: false, status: "failed", phase: 0, output: "Verification cancelled.", duration_ms: 0 }],
+		active.cancellationFinalizing = true;
+		try {
+			const verification = this._cancelledVerificationResult(active);
+			if (!this._persistActive()) throw new Error(`Could not persist cancellation finalization for ${active.signalId}`);
+			const store = this.tryResolveGateStore(active.goalId);
+			// Some restart-only cleanup seams (and a goal already removed from its
+			// project context) no longer have a gate store to publish into. Exact
+			// cleanup still owns and must retire this persisted active row; production
+			// records always retain a store and take the strict path below.
+			if (!store) {
+				delete active.cancellationFinalizing;
+				this.activeVerifications.delete(active.signalId);
+				if (!this._persistActive()) {
+					this.activeVerifications.set(active.signalId, active);
+					throw new Error(`Could not retire storeless cancellation ${active.signalId}`);
+				}
+				this._cancelledCleanupRetryAttempts.delete(active.signalId);
+				return;
+			}
+			if (typeof (store as Partial<GateStore>).updateSignalVerificationStrict === "function") {
+				await store.updateSignalVerificationStrict(active.signalId, verification);
+			} else {
+				store.updateSignalVerification(active.signalId, verification);
+			}
+			if (this.activeVerifications.get(active.signalId) !== active) return;
+			const terminalCause = verification.cancellation?.cause === "bypass"
+				|| verification.cancellation?.cause === "goal-complete"
+				|| verification.cancellation?.cause === "team-teardown"
+				|| verification.cancellation?.cause === "shelved"
+				|| verification.cancellation?.cause === "archive";
+			const goal = this.projectContextManager?.getContextForGoal(active.goalId)?.goalStore.get(active.goalId);
+			const resetCurrentGate = this._isCurrentGateSignal(active)
+				&& !terminalCause
+				&& !(verification.cancellation?.cause === "unknown" && (goal?.state === "complete" || goal?.state === "shelved" || goal?.archived))
+				&& store.getGate(active.goalId, active.gateId)?.status !== "bypassed";
+			if (resetCurrentGate) {
+				if (typeof (store as Partial<GateStore>).updateGateStatusStrict === "function") await store.updateGateStatusStrict(active.goalId, active.gateId, "pending");
+				else store.updateGateStatus(active.goalId, active.gateId, "pending");
+			}
+			if (this.activeVerifications.get(active.signalId) !== active) return;
+			delete active.cancellationFinalizing;
+			this.activeVerifications.delete(active.signalId);
+			if (!this._persistActive()) throw new Error(`Could not persist cancellation publication for ${active.signalId}`);
+			this._cancelledCleanupRetryAttempts.delete(active.signalId);
+			if (resetCurrentGate) broadcastGateStatusChanged(this.broadcastFn, active.goalId, active.gateId, "pending");
+			this.broadcastFn(active.goalId, { type: "gate_verification_complete", goalId: active.goalId, gateId: active.gateId, signalId: active.signalId, status: "cancelled", cancellation: verification.cancellation });
+			if (verification.cancellation?.cause === "gateway-restart-recovery" && this._isCurrentGateSignal(active) && !this.recoveryCancellationNotifiedSignals.has(active.signalId)) {
+				this.recoveryCancellationNotifiedSignals.add(active.signalId);
+				try { this.notifyTeamLead(active.goalId, active.gateId, "cancelled"); } catch (err) { console.error(`[verification] Failed to notify recovery cancellation ${active.signalId}:`, err); }
+			}
+		} catch (error) {
+			delete active.cancellationFinalizing;
+			if (this.activeVerifications.get(active.signalId) === active) this._persistActive();
+			throw error;
+		}
+	}
+
+	/** A normal running row may retain only reviewer cleanup authority after a crash. */
+	private _isOrphanReviewerCleanupRecoveryActive(active: ActiveVerification): boolean {
+		return this._isResumeStillActive(active)
+			&& active.overallStatus === "running"
+			&& !active.pendingTerminalIntent
+			&& active.reviewerCleanupPending === true;
+	}
+
+	/**
+	 * Re-drive only the persisted reviewer session ownership and resume exactly
+	 * once after its durable cleanup marker clears. Command ownership is
+	 * deliberately outside this recovery path.
+	 */
+	private async _recoverOrphanedReviewerCleanupAndResume(active: ActiveVerification): Promise<void> {
+		const existing = this._orphanReviewerCleanupRecoveryPromises.get(active.signalId);
+		if (existing) return existing;
+		let recovery!: Promise<void>;
+		recovery = (async () => {
+			if (!this._isOrphanReviewerCleanupRecoveryActive(active)) return;
+			if (await this._cancelRecoveredLifecycleTerminal(active)) return;
+			if (this._canReconstructTerminalIntentBeforeReviewerCleanup(active)) {
+				await this._resumeOneVerification(active);
+				return;
+			}
+			try {
+				// _terminateCancelledReviewersFor persists the existing marker before
+				// teardown, operates on every retained session ID, and clears it only
+				// after both terminate and unregister settle durably.
+				await this._terminateCancelledReviewersFor([active]);
+			} catch (err) {
+				// Never delete a rejected cleanup owner. The marker was persisted before
+				// external operations; retain/re-persist it and retry this exact row.
+				if (this._isOrphanReviewerCleanupRecoveryActive(active)) {
+					this._persistActive();
+					this._scheduleOrphanReviewerCleanupRetry(active.signalId);
+				}
+				console.warn(`[verification] Orphan reviewer cleanup for ${active.signalId} did not settle: ${(err as Error).message}`);
+				return;
+			}
+			if (!this._isResumeStillActive(active) || active.pendingTerminalIntent || active.reviewerCleanupPending) return;
+			this._orphanReviewerCleanupRetryAttempts.delete(active.signalId);
+			await this._continueRecoveredRunningVerification(active);
+		})().finally(() => {
+			if (this._orphanReviewerCleanupRecoveryPromises.get(active.signalId) === recovery) {
+				this._orphanReviewerCleanupRecoveryPromises.delete(active.signalId);
+			}
 		});
-		if (stillCurrent) this.resolveGateStore(active.goalId)?.updateGateStatus(active.goalId, active.gateId, "failed");
-		this._persistActive();
-		// The old signal's terminal event is still useful to clients, but only the
-		// current generation above may mutate the shared gate status.
-		this.broadcastFn(active.goalId, {
-			type: "gate_verification_complete", goalId: active.goalId, gateId: active.gateId,
-			signalId: active.signalId, status: "cancelled",
-		});
+		this._orphanReviewerCleanupRecoveryPromises.set(active.signalId, recovery);
+		return recovery;
+	}
+
+	private _scheduleOrphanReviewerCleanupRetry(signalId: string): void {
+		if (this._orphanReviewerCleanupRetryTimers.has(signalId)) return;
+		const attempt = (this._orphanReviewerCleanupRetryAttempts.get(signalId) ?? 0) + 1;
+		this._orphanReviewerCleanupRetryAttempts.set(signalId, attempt);
+		const delayMs = Math.min(30_000, 1_000 * 2 ** Math.min(5, attempt - 1));
+		const timer = this.clock.setTimeout(async () => {
+			this._orphanReviewerCleanupRetryTimers.delete(signalId);
+			const active = this.activeVerifications.get(signalId);
+			if (!active || !this._isOrphanReviewerCleanupRecoveryActive(active)) {
+				this._orphanReviewerCleanupRetryAttempts.delete(signalId);
+				return;
+			}
+			try {
+				await this._recoverOrphanedReviewerCleanupAndResume(active);
+			} catch (err) {
+				// Resume failures use the normal restart classifier on a subsequent
+				// boot; only a still-pending reviewer cleanup is retried here.
+				console.warn(`[verification] Orphan reviewer recovery for ${signalId} failed: ${(err as Error).message}`);
+			}
+			if (this._isOrphanReviewerCleanupRecoveryActive(active)) {
+				this._scheduleOrphanReviewerCleanupRetry(signalId);
+			}
+		}, delayMs);
+		timer.unref?.();
+		this._orphanReviewerCleanupRetryTimers.set(signalId, timer);
 	}
 
 	private _scheduleCommandKillCleanupRetry(signalId: string): void {
@@ -4019,15 +5134,17 @@ export class VerificationHarness {
 
 				if (this.activeVerifications.get(signalId) === active) {
 					await this._resumeOneVerification(active);
-					if (this.activeVerifications.get(signalId) === active && !this._hasPendingCommandKillCleanup(active)) {
-						this.activeVerifications.delete(signalId);
-					}
+					// A resume return is not terminal proof. A staged terminal intent,
+					// cancellation owner, or unavailable rerun context must retain this
+					// row until its authoritative owner retires it durably.
 					this._persistActive();
 				}
 			} catch (err) {
 				console.warn(`[verification] Command cleanup retry for ${signalId} did not settle: ${(err as Error).message}`);
 				this._persistActive();
-				if (this.activeVerifications.has(signalId)) this._scheduleCommandKillCleanupRetry(signalId);
+				const active = this.activeVerifications.get(signalId);
+				if (active?.cancelled) this._scheduleCancelledVerificationCleanupRetry(signalId);
+				else if (active) this._scheduleCommandKillCleanupRetry(signalId);
 			}
 		}, 1_000);
 		timer.unref?.();
@@ -4294,20 +5411,71 @@ export class VerificationHarness {
 	}
 
 	/**
-	 * Cancel ALL in-flight verifications for a goal (all gates).
-	 * Called when a goal completes, a team is torn down, or the goal is shelved.
+	 * Durably fence every active verification for a terminal goal transition.
+	 *
+	 * This method intentionally performs no await: a terminal route may commit
+	 * the goal state after the fence is on disk, while exact cleanup remains
+	 * owned by the detached lifecycle below. Terminal cancellation publication
+	 * still cannot occur until that cleanup settles.
 	 */
-	async cancelAllVerifications(goalId: string): Promise<boolean> {
+	fenceAndCancelAllVerifications(
+		goalId: string,
+		cause: VerificationCancellationCause = "goal-complete",
+	): ActiveVerification[] {
 		this._mergePersistedActiveVerifications(v => v.goalId === goalId);
-		const cancellations = Array.from(this.activeVerifications.values()).filter(active => active.goalId === goalId);
-		for (const active of cancellations) this._markVerificationCancelled(active);
-		// Persist the cancellation fence before yielding, then snapshot and tear down
-		// all reviewer queues before any command-child ownership barrier can block.
-		if (cancellations.length > 0) this._persistActive();
-		const reviewers = this._snapshotRunningReviewers(cancellations);
-		await this._terminateCancelledReviewers(reviewers);
+		const cancellations = Array.from(this.activeVerifications.values()).filter(active => active.goalId === goalId && !active.cancelled);
+		const before = cancellations.map(active => ({ active, value: structuredClone(active), wasFenced: this.cancelledVerificationSignals.has(active.signalId) }));
+		for (const active of cancellations) this._markVerificationCancelled(active, cause);
+		if (cancellations.length && !this._persistActive()) {
+			for (const snapshot of before) { this._restoreActiveVerification(snapshot.active, snapshot.value); if (snapshot.wasFenced) this.cancelledVerificationSignals.add(snapshot.active.signalId); else this.cancelledVerificationSignals.delete(snapshot.active.signalId); }
+			throw new Error(`Could not persist cancellation fence for goal ${goalId}`);
+		}
+		for (const active of cancellations) { this._notifyCancellationFenceCommitted(active); void this._startCancelledVerificationCleanup(active); }
+		return cancellations;
+	}
 
-		for (const active of cancellations) {
+	private _startCancelledVerificationCleanup(active: ActiveVerification): Promise<void> {
+		const existing = this._cancelledCleanupPromises.get(active.signalId);
+		if (existing) return existing;
+		// Retire this owner before scheduling another full pass. A retained live
+		// TrackedChild must be revisited by _runCancelledVerificationCleanup, not
+		// merely by the recovered-command retry, but a retry cannot join this run.
+		let cleanup!: Promise<void>;
+		cleanup = this._runCancelledVerificationCleanup(active).then(
+			shouldRetry => {
+				if (this._cancelledCleanupPromises.get(active.signalId) === cleanup) {
+					this._cancelledCleanupPromises.delete(active.signalId);
+					if (shouldRetry && this.activeVerifications.get(active.signalId) === active && (active.cancelled || active.pendingTerminalIntent)) {
+						this._scheduleCancelledVerificationCleanupRetry(active.signalId);
+					}
+				}
+			},
+			err => {
+				// _runCancelledVerificationCleanup handles operational failures itself,
+				// but keep the detached terminal path closed if that guarantee regresses.
+				console.warn(`[verification] Unexpected detached cancellation cleanup failure for ${active.signalId}: ${(err as Error).message}`);
+				if (this._cancelledCleanupPromises.get(active.signalId) === cleanup) {
+					this._cancelledCleanupPromises.delete(active.signalId);
+					this._persistActive();
+					if (this.activeVerifications.get(active.signalId) === active && (active.cancelled || active.pendingTerminalIntent)) {
+						this._scheduleCancelledVerificationCleanupRetry(active.signalId);
+					}
+				}
+			},
+		);
+		this._cancelledCleanupPromises.set(active.signalId, cleanup);
+		return cleanup;
+	}
+
+	/** Returns true when exact cancellation cleanup must be re-driven. */
+	private async _runCancelledVerificationCleanup(active: ActiveVerification): Promise<boolean> {
+		try {
+			// Never issue asynchronous teardown/kill from a memory-only fence.
+			if (!this._persistActive()) return true;
+			// A persistence-first retry may be the first path after intent creation
+			// that reaches cleanup; release parked signoffs only after its fence is on disk.
+			if (active.pendingTerminalIntent) this._drainPendingSignoffsForSignal(active.signalId);
+			await this._terminateCancelledReviewersFor([active]);
 			const { signalId } = active;
 			// Partition siblings by ownership domain. A live docker-exec transport
 			// is never reaped through the recovered sentinel path.
@@ -4316,19 +5484,71 @@ export class VerificationHarness {
 			const liveTransportCleanupSettled = persistedCleanupSettled
 				? await this._killTrackedForSignal(signalId, step => !!step?.containerId)
 				: !Array.from(this._trackedCommandChildren.keys()).some(key => key.startsWith(`${signalId}:`));
-			const commandKillsSettled = liveHostCleanupSettled && persistedCleanupSettled && liveTransportCleanupSettled;
-			this._drainPendingSignoffsForSignal(signalId);
-
-			if (commandKillsSettled) {
-				await this._finalizeCancelledVerification(active);
-			} else {
-				this._persistActive();
-				this._scheduleCommandKillCleanupRetry(signalId);
+			if (liveHostCleanupSettled && persistedCleanupSettled && liveTransportCleanupSettled) {
+				if (active.cancelled) await this._finalizeCancelledVerification(active);
+				else if (active.pendingTerminalIntent) await this._finalizePendingMixedRestartFailure(active);
+				console.log(`[verification] Terminal cleanup settled for ${signalId} (${active.cancelled ? active.cancellation?.cause ?? "unknown" : active.pendingTerminalIntent?.kind ?? "ordinary"})`);
+				return this.activeVerifications.get(signalId) === active && (active.cancelled === true || !!active.pendingTerminalIntent);
 			}
-
-			console.log(`[verification] Cancelled verification ${signalId} for goal ${goalId} (goal completing)`);
+			this._persistActive();
+			console.log(`[verification] Cancellation cleanup pending for ${signalId}; retrying exact ownership cleanup`);
+			return true;
+		} catch (err) {
+			console.warn(`[verification] Cancellation cleanup for ${active.signalId} did not settle: ${(err as Error).message}`);
+			this._persistActive();
+			return this.activeVerifications.get(active.signalId) === active && (active.cancelled === true || !!active.pendingTerminalIntent);
 		}
-		return !Array.from(this.activeVerifications.values()).some(active => active.goalId === goalId && active.cancelled);
+	}
+
+	private _scheduleCancelledVerificationCleanupRetry(signalId: string): void {
+		if (this._cancelledCleanupRetryTimers.has(signalId)) return;
+		const attempt = (this._cancelledCleanupRetryAttempts.get(signalId) ?? 0) + 1;
+		this._cancelledCleanupRetryAttempts.set(signalId, attempt);
+		const delayMs = Math.min(30_000, 1_000 * 2 ** Math.min(5, attempt - 1));
+		const timer = this.clock.setTimeout(async () => {
+			this._cancelledCleanupRetryTimers.delete(signalId);
+			const active = this.activeVerifications.get(signalId);
+			if (active && (active.cancelled || active.pendingTerminalIntent)) {
+				try {
+					await this._startCancelledVerificationCleanup(active);
+				} catch (err) {
+					console.warn(`[verification] Scheduled terminal cleanup retry for ${signalId} failed: ${(err as Error).message}`);
+				}
+			} else this._cancelledCleanupRetryAttempts.delete(signalId);
+		}, delayMs);
+		timer.unref?.();
+		this._cancelledCleanupRetryTimers.set(signalId, timer);
+	}
+
+	/**
+	 * Cancel ALL in-flight verifications for a goal (all gates).
+	 * Callers that require exact cleanup completion retain this awaitable API.
+	 */
+	async cancelAllVerifications(goalId: string, cause: VerificationCancellationCause = "goal-complete"): Promise<boolean> {
+		const cancellations = this.fenceAndCancelAllVerifications(goalId, cause);
+		await Promise.all(cancellations.map(active => this._startCancelledVerificationCleanup(active)));
+		return !Array.from(this.activeVerifications.values()).some(active => active.goalId === goalId && (active.cancelled || active.pendingTerminalIntent));
+	}
+
+	/**
+	 * Durably fence matching active generations before a replacement signal is
+	 * recorded. This is synchronous by design: callers can make the replacement
+	 * admission atomic while exact cleanup remains detached behind its one owner.
+	 */
+	fenceStaleVerificationsForGates(goalId: string, gateIds: readonly string[], cause: VerificationCancellationCause = "superseded"): ActiveVerification[] {
+		const gateIdSet = new Set(gateIds);
+		this._mergePersistedActiveVerifications(v => v.goalId === goalId && gateIdSet.has(v.gateId));
+		const cancellations = Array.from(this.activeVerifications.values()).filter(active => active.goalId === goalId && gateIdSet.has(active.gateId) && !active.cancelled);
+		const before = cancellations.map(active => ({ active, value: structuredClone(active) }));
+		const signalsBefore = new Set(this.cancelledVerificationSignals);
+		for (const active of cancellations) this._markVerificationCancelled(active, cause);
+		if (cancellations.length && !this._persistActive()) {
+			for (const snapshot of before) this._restoreActiveVerification(snapshot.active, snapshot.value);
+			this.cancelledVerificationSignals.clear(); for (const signalId of signalsBefore) this.cancelledVerificationSignals.add(signalId);
+			throw new Error(`Could not persist cancellation fence for goal ${goalId}`);
+		}
+		for (const active of cancellations) { this._notifyCancellationFenceCommitted(active); void this._startCancelledVerificationCleanup(active); }
+		return cancellations;
 	}
 
 	/**
@@ -4338,8 +5558,9 @@ export class VerificationHarness {
 	async cancelStaleVerifications(
 		goalId: string,
 		gateId: string,
+		cause: VerificationCancellationCause = "superseded",
 	): Promise<boolean> {
-		return this.cancelStaleVerificationsForGates(goalId, [gateId]);
+		return this.cancelStaleVerificationsForGates(goalId, [gateId], cause);
 	}
 
 	/**
@@ -4348,47 +5569,11 @@ export class VerificationHarness {
 	 * invalidate several gates without a later verification completing between
 	 * per-gate awaits and re-marking a reset gate.
 	 */
-	async cancelStaleVerificationsForGates(
-		goalId: string,
-		gateIds: string[],
-	): Promise<boolean> {
+	async cancelStaleVerificationsForGates(goalId: string, gateIds: string[], cause: VerificationCancellationCause = "superseded"): Promise<boolean> {
+		const cancellations = this.fenceStaleVerificationsForGates(goalId, gateIds, cause);
+		await Promise.all(cancellations.map(active => this._startCancelledVerificationCleanup(active)));
 		const gateIdSet = new Set(gateIds);
-		this._mergePersistedActiveVerifications(v => v.goalId === goalId && gateIdSet.has(v.gateId));
-		const targets = Array.from(this.activeVerifications.values())
-			.filter(active => active.goalId === goalId && gateIdSet.has(active.gateId));
-		for (const active of targets) this._markVerificationCancelled(active);
-		// Cancellation must fence verifier admission and stop every reviewer before
-		// a held command cleanup yields to an old agent_end or late tool result.
-		if (targets.length > 0) this._persistActive();
-		const reviewers = this._snapshotRunningReviewers(targets);
-		await this._terminateCancelledReviewers(reviewers);
-
-		const cancellations: ActiveVerification[] = [];
-		for (const active of targets) {
-			const { signalId } = active;
-			const liveHostCleanupSettled = await this._killTrackedForSignal(signalId, step => !step?.containerId);
-			const persistedCleanupSettled = await this._killPersistedCommandSteps(active, "SIGKILL", { markIntent: false });
-			const liveTransportCleanupSettled = persistedCleanupSettled
-				? await this._killTrackedForSignal(signalId, step => !!step?.containerId)
-				: !Array.from(this._trackedCommandChildren.keys()).some(key => key.startsWith(`${signalId}:`));
-			const commandKillsSettled = liveHostCleanupSettled && persistedCleanupSettled && liveTransportCleanupSettled;
-			this._drainPendingSignoffsForSignal(signalId);
-			if (commandKillsSettled) {
-				cancellations.push(active);
-			} else {
-				this._scheduleCommandKillCleanupRetry(signalId);
-			}
-		}
-
-		if (cancellations.length > 0) this._persistActive();
-
-		for (const active of cancellations) {
-			await this._finalizeCancelledVerification(active);
-			console.log(`[verification] Cancelled stale verification ${active.signalId} for gate ${active.gateId}`);
-		}
-		return !Array.from(this.activeVerifications.values()).some(active =>
-			active.goalId === goalId && gateIdSet.has(active.gateId) && active.cancelled,
-		);
+		return !Array.from(this.activeVerifications.values()).some(active => active.goalId === goalId && gateIdSet.has(active.gateId) && active.cancelled);
 	}
 
 	private notifyTeamLead(
@@ -4406,6 +5591,8 @@ export class VerificationHarness {
 		// Notify the goal's OWN team-lead first (intra-team signal).
 		if (status === "passed") {
 			this.notifyTeamLeadFn(goalId, `Gate verification PASSED: "${gateId}". Downstream work for this gate can now proceed.`);
+		} else if (status === "cancelled") {
+			this.notifyTeamLeadFn(goalId, `Gate verification for "${gateId}" was interrupted by recovery. It did not fail. Re-signal this gate once when ready to run verification again.`);
 		} else {
 			const steps = failureContext?.steps ?? [];
 			const frozenGate = failureContext?.workflowAligned === false
@@ -4491,7 +5678,15 @@ export class VerificationHarness {
 				signalId: signal.id,
 				steps: steps.map(s => {
 					const phase = s.phase ?? 0;
-					return { name: s.name, type: s.type, status: (phase === minPhase ? "running" : "waiting") as "running" | "waiting", phase, startedAt: verificationStartedAt };
+					return {
+						name: s.name,
+						type: s.type,
+						status: (phase === minPhase ? "running" : "waiting") as "running" | "waiting",
+						phase,
+						startedAt: verificationStartedAt,
+						...(s.type === "command" ? { commandSpawnState: "queued" as const } : {}),
+						...((s.type === "llm-review" || s.type === "agent-qa") ? { reviewerSpawnState: "queued" as const } : {}),
+					};
 				}),
 				overallStatus: "running",
 				startedAt: verificationStartedAt,
@@ -4609,6 +5804,12 @@ export class VerificationHarness {
 				});
 				const allPassed = computeAllPassed(results);
 				const status = allPassed ? "passed" as const : "failed" as const;
+				if (active.cancelled) {
+					await this._finalizeCancelledVerification(active);
+					return;
+				}
+				if (this._cancellationOwnsTerminalPublication(active)) return;
+				if (await this._stageTerminalIntentIfCleanupPending(active, { status, steps: results }, status, goalBranch)) return;
 				this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, { status, steps: results });
 				this.resolveGateStore(signal.goalId).updateGateStatus(signal.goalId, signal.gateId, status);
 				this.activeVerifications.delete(signal.id);
@@ -4769,10 +5970,14 @@ export class VerificationHarness {
 
 				// Broadcast phase started — transition waiting steps in this phase to running
 				active.currentPhase = phase;
-				for (const { index } of phaseSteps) {
-					if (active.steps[index]?.status === "waiting") {
-						active.steps[index].status = "running";
-						active.steps[index].startedAt = Date.now();
+				for (const { step, index } of phaseSteps) {
+					const activeStep = active.steps[index];
+					if (activeStep?.status === "waiting") {
+						activeStep.status = "running";
+						activeStep.startedAt = Date.now();
+						// A persisted waiting row has not entered command execution. Upgrade
+						// legacy records here without overwriting durable spawn ownership.
+						if (step.type === "command") activeStep.commandSpawnState ??= "queued";
 					}
 				}
 				this._persistActive();
@@ -4820,6 +6025,9 @@ export class VerificationHarness {
 							const prefix = step.type === "agent-qa" ? "agent-qa" : "llm-review";
 							stepSessionId = `${prefix}-${randomUUID().slice(0, 12)}`;
 							active.steps[index].startedAt = Date.now();
+							if (!this._queueReviewerSpawn({ goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id, stepIndex: index }, stepSessionId, reviewTimeoutSec)) {
+								throw new Error(`Could not persist queued reviewer ownership for ${stepSessionId}`);
+							}
 							this.broadcastFn(signal.goalId, {
 								type: "gate_verification_step_started",
 								goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
@@ -4827,12 +6035,6 @@ export class VerificationHarness {
 								startedAt: active.steps[index].startedAt,
 								sessionId: stepSessionId, timeoutSec: reviewTimeoutSec, phase,
 							});
-							const av = this.activeVerifications.get(signal.id);
-							if (av && av.steps[index]) {
-								av.steps[index].sessionId = stepSessionId;
-								av.steps[index].timeoutSec = reviewTimeoutSec;
-								this._persistActive();
-							}
 						}
 
 						if (step.type === "command") {
@@ -4950,7 +6152,12 @@ export class VerificationHarness {
 									}
 									await this.commandSemaphore.acquire();
 									try {
-										result = await this.runCommandStep(cmd, commandCwd, resolveCommandStepTimeoutSec(step), expectFailure, streamCtx, errorPattern, commandContainerId);
+										// The phase-0 row is deliberately shown as running while it
+										// waits for capacity. Recheck the exact generation at the
+										// final spawn boundary so reset/re-signal cannot admit work.
+										result = this._canAdmitCommandStep(streamCtx)
+											? await this.runCommandStep(cmd, commandCwd, resolveCommandStepTimeoutSec(step), expectFailure, streamCtx, errorPattern, commandContainerId)
+											: { passed: false, output: "Command admission cancelled before spawn." };
 									} finally {
 										this.commandSemaphore.release();
 									}
@@ -4989,6 +6196,9 @@ export class VerificationHarness {
 										attemptSessionId = `agent-qa-${randomUUID().slice(0, 12)}`;
 										console.log(`[verification][reviewer-lifecycle] agent-qa "${step.name}" from-scratch retry attempt ${attempt}/${maxBoundedAttempts}: retiring session ${retiredSessionId ?? "<none>"} → fresh session ${attemptSessionId} (goal=${signal.goalId}, timeout=${reviewTimeoutSec}s). Prior transcript preserved.`);
 										active.steps[index].startedAt = Date.now();
+										if (!this._queueReviewerSpawn({ goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id, stepIndex: index }, attemptSessionId, reviewTimeoutSec)) {
+											throw new Error(`Could not persist queued reviewer ownership for ${attemptSessionId}`);
+										}
 										if (!active.cancelled) this.broadcastFn(signal.goalId, {
 											type: "gate_verification_step_started",
 											goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
@@ -4996,12 +6206,6 @@ export class VerificationHarness {
 											startedAt: active.steps[index].startedAt,
 											sessionId: attemptSessionId, timeoutSec: reviewTimeoutSec, phase,
 										});
-										const avRetry = this.activeVerifications.get(signal.id);
-										if (avRetry && avRetry.steps[index]) {
-											avRetry.steps[index].sessionId = attemptSessionId;
-											avRetry.steps[index].timeoutSec = reviewTimeoutSec;
-											this._persistActive();
-										}
 									} else {
 										console.log(`[verification][reviewer-lifecycle] agent-qa "${step.name}" attempt 1/${maxBoundedAttempts}: session ${attemptSessionId ?? "<none>"} (goal=${signal.goalId}, timeout=${reviewTimeoutSec}s).`);
 									}
@@ -5010,7 +6214,7 @@ export class VerificationHarness {
 										cwd, signal.goalId, builtinVars,
 										signal.content, signal.metadata,
 										goalSpec, allGateStates, attemptSessionId,
-										{ gateId: signal.gateId, signalId: signal.id },
+										{ gateId: signal.gateId, signalId: signal.id, stepIndex: index },
 									);
 									result = qaResult;
 									if (qaResult.artifact) {
@@ -5074,6 +6278,14 @@ export class VerificationHarness {
 								const key = `${signal.id}::${step.name}`;
 								const { promise, resolve: resolver } = deferred<SignoffOutcome>();
 								this.pendingSignoffs.set(key, resolver);
+								// Register first, then synchronously recheck: cancellation may
+								// already have completed its one-time drain before this phase
+								// reached the signoff branch.
+								if ((active.cancelled || this.activeVerifications.get(signal.id) !== active)
+									&& this.pendingSignoffs.get(key) === resolver) {
+									this.pendingSignoffs.delete(key);
+									resolver({ cancelled: true });
+								}
 								const outcome = await promise;
 								this.pendingSignoffs.delete(key);
 								if ("decision" in outcome) {
@@ -5120,6 +6332,9 @@ export class VerificationHarness {
 										attemptSessionId = `llm-review-${randomUUID().slice(0, 12)}`;
 										console.log(`[verification][reviewer-lifecycle] llm-review "${step.name}" from-scratch retry attempt ${attempt}/${maxBoundedAttempts}: retiring session ${retiredSessionId ?? "<none>"} → fresh session ${attemptSessionId} (goal=${signal.goalId}, timeout=${reviewTimeoutSec}s). Prior transcript preserved.`);
 										active.steps[index].startedAt = Date.now();
+										if (!this._queueReviewerSpawn({ goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id, stepIndex: index }, attemptSessionId, reviewTimeoutSec)) {
+											throw new Error(`Could not persist queued reviewer ownership for ${attemptSessionId}`);
+										}
 										if (!active.cancelled) this.broadcastFn(signal.goalId, {
 											type: "gate_verification_step_started",
 											goalId: signal.goalId, gateId: signal.gateId, signalId: signal.id,
@@ -5127,12 +6342,6 @@ export class VerificationHarness {
 											startedAt: active.steps[index].startedAt,
 											sessionId: attemptSessionId, timeoutSec: reviewTimeoutSec, phase,
 										});
-										const avRetry = this.activeVerifications.get(signal.id);
-										if (avRetry && avRetry.steps[index]) {
-											avRetry.steps[index].sessionId = attemptSessionId;
-											avRetry.steps[index].timeoutSec = reviewTimeoutSec;
-											this._persistActive();
-										}
 									} else {
 										console.log(`[verification][reviewer-lifecycle] llm-review "${step.name}" attempt 1/${maxBoundedAttempts}: session ${attemptSessionId ?? "<none>"} (goal=${signal.goalId}, timeout=${reviewTimeoutSec}s).`);
 									}
@@ -5141,7 +6350,7 @@ export class VerificationHarness {
 										cwd, builtinVars,
 										signal.content, signal.metadata,
 										goalSpec, allGateStates, signal.goalId, attemptSessionId,
-										gate, { gateId: signal.gateId, signalId: signal.id },
+										gate, { gateId: signal.gateId, signalId: signal.id, stepIndex: index },
 									);
 									if (result.status === "timeout") break;
 									const decision = shouldRetryVerificationStep({
@@ -5185,7 +6394,15 @@ export class VerificationHarness {
 						});
 						const av = this.activeVerifications.get(signal.id);
 						if (av && av.steps[index]) {
-							av.steps[index] = { ...av.steps[index], status: resultStatus as NonNullable<GateSignalStep["status"]>, phase, durationMs: duration_ms, output: result.output || "", sessionId: result.sessionId, timeout: result.timeout };
+							// Keep the active row's identity: cancellation cleanup may hold this
+							// exact object while the command result is being published. Replacing
+							// it would make the identity fence retain the live TrackedChild.
+							Object.assign(av.steps[index], {
+								status: resultStatus as NonNullable<GateSignalStep["status"]>, phase,
+								durationMs: duration_ms, output: result.output || "", sessionId: result.sessionId,
+								timeout: result.timeout, passed: result.passed, skipped: result.skipped,
+								expect: step.expect, artifact, diagnostics: result.diagnostics,
+							});
 							this._persistActive();
 						}
 						const stepResult = {
@@ -5236,8 +6453,10 @@ export class VerificationHarness {
 				expect: steps[i].expect,
 			});
 
+			if (this._cancellationOwnsTerminalPublication(active)) return;
 			const allPassed = computeAllPassed(results);
-			const status = allPassed ? "passed" : "failed";
+			const status = allPassed ? "passed" as const : "failed" as const;
+			if (await this._stageTerminalIntentIfCleanupPending(active, { status, steps: results }, status, goalBranch)) return;
 
 			this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, { status, steps: results });
 			this.resolveGateStore(signal.goalId).updateGateStatus(signal.goalId, signal.gateId, status);
@@ -5254,11 +6473,13 @@ export class VerificationHarness {
 			broadcastGateStatusChanged(this.broadcastFn, signal.goalId, signal.gateId, status);
 			this.notifyTeamLead(signal.goalId, signal.gateId, status, { steps: results, goalBranch });
 		} catch (err: any) {
+			if (this._cancellationOwnsTerminalPublication(active)) return;
 			if (active.cancelled) {
 				await this._finalizeCancelledVerification(active);
 				return;
 			}
 			const errorStep = { name: "Error", type: "command" as const, passed: false, status: "failed" as const, phase: 0, output: err.message, duration_ms: 0 };
+			if (await this._stageTerminalIntentIfCleanupPending(active, { status: "failed", steps: [errorStep] }, "failed", goalBranch, false)) return;
 			this.resolveGateStore(signal.goalId).updateSignalVerification(signal.id, {
 				status: "failed",
 				steps: [errorStep],
@@ -5298,7 +6519,7 @@ export class VerificationHarness {
 		goalId?: string,
 		sessionId?: string,
 		gate?: WorkflowGate,
-		verificationContext?: { gateId?: string; signalId?: string },
+		verificationContext?: { gateId?: string; signalId?: string; stepIndex?: number },
 	): Promise<ReviewStepExecutionResult> {
 		const roleName = step.role || "reviewer";
 		// Goal-scoped inline roles win over the role store. The default
@@ -5750,7 +6971,7 @@ export class VerificationHarness {
 		kickoff: string,
 		timeoutMs: number,
 		preGeneratedSessionId?: string,
-		verificationContext?: { gateId?: string; signalId?: string },
+		verificationContext?: { gateId?: string; signalId?: string; stepIndex?: number },
 	): Promise<ReviewStepExecutionResult> {
 		// Pause-cascade backstop: race-window guard. The mainline path is
 		// blocked at `/gates/:id/signal` (server.ts), but a deep descendant
@@ -5818,18 +7039,28 @@ export class VerificationHarness {
 			const goalProjectId = this.projectContextManager?.getContextForGoal(goalId)?.project.id;
 			if (!goalProjectId) throw new Error(`Cannot create verification review session: goal "${goalId}" has no projectId`);
 
-			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
-				rolePrompt: combinedPrompt,
-				roleName,
-				...reviewerMeta,
-				sandboxed: isSandboxed,
-				projectId: goalProjectId,
+			const session = await this._createReviewerSessionWithOwnership({
 				sessionId,
-				skipAutoModel: true,
-				skipAutoThinking: true,
-				initialModel: _preInitialModel,
-				initialThinkingLevel: _preInitialThinking,
+				context: verificationContext,
+				create: () => this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
+					rolePrompt: combinedPrompt,
+					roleName,
+					...reviewerMeta,
+					sandboxed: isSandboxed,
+					projectId: goalProjectId,
+					sessionId,
+					skipAutoModel: true,
+					skipAutoThinking: true,
+					initialModel: _preInitialModel,
+					initialThinkingLevel: _preInitialThinking,
+				}),
+				afterCreate: async () => {
+					if (!this.teamManager) return;
+					try { await this.teamManager.registerReviewerSession(goalId, sessionId, step.name); }
+					catch (err) { console.warn(`[verification] Failed to register reviewer session in team:`, err); }
+				},
 			});
+			if (!session) return { passed: false, output: "Reviewer session creation cancelled before spawn.", sessionId };
 
 			// Set title and metadata. `step.name` is optional — many inline
 			// workflows skip it. Fall back to step.role / "Review" so the
@@ -5846,15 +7077,6 @@ export class VerificationHarness {
 			// contract pinned by tests/verification-reviewer-meta.test.ts.
 			this.sessionManager!.updateSessionMeta(sessionId, reviewerMeta);
 
-			// Register in team store (if team manager available)
-			if (this.teamManager) {
-				try {
-					await this.teamManager.registerReviewerSession(goalId, sessionId, step.name);
-				} catch (err) {
-					// Non-fatal — session still works even if team registration fails
-					console.warn(`[verification] Failed to register reviewer session in team:`, err);
-				}
-			}
 
 			// Resolve role overrides so they win over default.reviewModel/Thinking.
 			const roleOverrides_r = this.resolveRoleForGoal(roleName, goalId);
@@ -6102,15 +7324,22 @@ export class VerificationHarness {
 			// across terminateSession, a late verdict is still captured
 			// (capturingResolver) and honored below.
 			if (sessionId) {
-				try {
-					await this.sessionManager!.terminateSession(sessionId);
-				} catch { /* ignore — session may already be terminated */ }
-				this.pendingResults.delete(sessionId);
-				if (this.teamManager) {
+				// Cancellation's durable cleanup owner joins the creator/registration
+				// barrier and must exclusively perform exact terminate/unregister.
+				const cleanupPending = this.activeVerifications.get(verificationContext?.signalId ?? "")?.reviewerCleanupPending === true;
+				const cleanupOwned = cleanupPending || (!!verificationContext?.signalId && this.cancelledVerificationSignals.has(verificationContext.signalId));
+				if (!cleanupOwned) {
 					try {
-						await this.teamManager.unregisterReviewerSession(goalId, sessionId);
-					} catch { /* ignore */ }
+						await this.sessionManager!.terminateSession(sessionId);
+					} catch { /* ignore — session may already be terminated */ }
+					if (this.teamManager) {
+						try {
+							await this.teamManager.unregisterReviewerSession(goalId, sessionId);
+						} catch { /* ignore */ }
+					}
 				}
+				this.pendingResults.delete(sessionId);
+				if (cleanupPending) await this._cancelledCleanupPromises.get(verificationContext?.signalId ?? "");
 				// If the reviewer's verdict landed during teardown and we were about
 				// to return the "did not call verification_result" hard failure,
 				// honor the late verdict instead of dropping it.
@@ -6175,7 +7404,7 @@ export class VerificationHarness {
 		goalSpec?: string,
 		allGateStates?: Map<string, { metadata?: Record<string, string>; content?: string; status?: string; injectDownstream?: boolean }>,
 		sessionId?: string,
-		verificationContext?: { gateId?: string; signalId?: string },
+		verificationContext?: { gateId?: string; signalId?: string; stepIndex?: number },
 	): Promise<ReviewStepExecutionResult & { artifact?: { content: string; contentType: string } }> {
 		const QA_MAX_ARTIFACT = 10 * 1024 * 1024; // 10 MB — same limit as llm-review artifacts
 		// Inline-roles-aware lookup. Same fallback chain as before: explicit
@@ -6238,7 +7467,7 @@ export class VerificationHarness {
 		// Pre-generate sessionId and register the verification_result resolver
 		// before session creation so same-session recovery can keep using the
 		// original identity even when startup/prompt delivery fails.
-		let qaSessionId: string | undefined = sessionId || `agent-qa-${randomUUID().slice(0, 12)}`;
+		const qaSessionId = sessionId || `agent-qa-${randomUUID().slice(0, 12)}`;
 		const { promise: resultPromise, resolve: resultResolver } = deferred<VerificationResult>();
 		let qaCapturedVerdict: VerificationResult | null = null;
 		let qaHardFailureNoResult = false;
@@ -6284,19 +7513,28 @@ export class VerificationHarness {
 			const qaGoalProjectId = this.projectContextManager?.getContextForGoal(goalId)?.project.id;
 			if (!qaGoalProjectId) throw new Error(`Cannot create verification QA session: goal "${goalId}" has no projectId`);
 
-			const session = await this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
-				rolePrompt: combinedPrompt,
-				roleName: qaRoleName,
-				...qaReviewerMeta,
-				sandboxed: qaIsSandboxed,
-				projectId: qaGoalProjectId,
+			const session = await this._createReviewerSessionWithOwnership({
 				sessionId: qaSessionId,
-				skipAutoModel: true,
-				skipAutoThinking: true,
-				initialModel: _preQaInitialModel,
-				initialThinkingLevel: _preQaInitialThinking,
+				context: verificationContext,
+				create: () => this.sessionManager!.createSession(cwd, undefined, goalId, undefined, {
+					rolePrompt: combinedPrompt,
+					roleName: qaRoleName,
+					...qaReviewerMeta,
+					sandboxed: qaIsSandboxed,
+					projectId: qaGoalProjectId,
+					sessionId: qaSessionId,
+					skipAutoModel: true,
+					skipAutoThinking: true,
+					initialModel: _preQaInitialModel,
+					initialThinkingLevel: _preQaInitialThinking,
+				}),
+				afterCreate: async () => {
+					if (!this.teamManager) return;
+					try { await this.teamManager.registerReviewerSession(goalId, qaSessionId, step.name); }
+					catch (err) { console.warn(`[verification] Failed to register QA session in team:`, err); }
+				},
 			});
-			qaSessionId = session.id;
+			if (!session) return { passed: false, output: "QA session creation cancelled before spawn.", sessionId: qaSessionId };
 
 			// Set title and metadata — same fallback as llm-review above.
 			// Same teamLeadSessionId stamp so the sidebar can nest this QA
@@ -6309,14 +7547,6 @@ export class VerificationHarness {
 			this.sessionManager!.setTitle(qaSessionId, `${qaTitlePrefix}: ${qaFunName}`);
 			this.sessionManager!.updateSessionMeta(qaSessionId, qaReviewerMeta);
 
-			// Register in team store
-			if (this.teamManager) {
-				try {
-					await this.teamManager.registerReviewerSession(goalId, qaSessionId, step.name);
-				} catch (err) {
-					console.warn(`[verification] Failed to register QA session in team:`, err);
-				}
-			}
 
 			// Resolve role overrides for QA — role wins over default.reviewModel/Thinking.
 			const roleOverrides_q = this.resolveRoleForGoal(qaRoleName, goalId);
@@ -6557,14 +7787,18 @@ export class VerificationHarness {
 		} finally {
 			try { qaErrListenerUnsub?.(); } catch { /* ignore */ }
 			if (qaSessionId) {
-				// Terminate BEFORE deleting the pending resolver so a verdict POST
-				// racing teardown is still captured, not 404-dropped (see the
-				// delete-vs-late-POST fix in runLlmReviewViaSession).
-				try { await this.sessionManager!.terminateSession(qaSessionId); } catch { /* ignore */ }
-				this.pendingResults.delete(qaSessionId);
-				if (this.teamManager) {
-					try { await this.teamManager.unregisterReviewerSession(goalId, qaSessionId); } catch { /* ignore */ }
+				// Cancellation's durable cleanup owner joins the creator/registration
+				// barrier and must exclusively perform exact terminate/unregister.
+				const cleanupPending = this.activeVerifications.get(verificationContext?.signalId ?? "")?.reviewerCleanupPending === true;
+				const cleanupOwned = cleanupPending || (!!verificationContext?.signalId && this.cancelledVerificationSignals.has(verificationContext.signalId));
+				if (!cleanupOwned) {
+					try { await this.sessionManager!.terminateSession(qaSessionId); } catch { /* ignore */ }
+					if (this.teamManager) {
+						try { await this.teamManager.unregisterReviewerSession(goalId, qaSessionId); } catch { /* ignore */ }
+					}
 				}
+				this.pendingResults.delete(qaSessionId);
+				if (cleanupPending) await this._cancelledCleanupPromises.get(verificationContext?.signalId ?? "");
 				if (qaHardFailureNoResult && qaCapturedVerdict) {
 					const v: VerificationResult = qaCapturedVerdict;
 					const artifact = v.reportHtml
@@ -6778,6 +8012,22 @@ export class VerificationHarness {
 				this._persistActive();
 			};
 
+			// Persist the ambiguous spawn boundary immediately before each spawn call.
+			// A cancellation may safely finalize a queued row, but once this transition
+			// is durable recovery must assume a process might exist even if the gateway
+			// crashes before `spawned` and its exact identity are persisted.
+			const beginCommandSpawn = (): boolean => {
+				if (!streamCtx) return true;
+				if (!this._canAdmitCommandStep(streamCtx)) return false;
+				const active = this.activeVerifications.get(streamCtx.signalId);
+				const step = active?.steps[streamCtx.stepIndex];
+				if (!step || step.commandSpawnState !== "queued") return false;
+				step.commandSpawnState = "spawning";
+				if (this._persistActive()) return true;
+				step.commandSpawnState = "queued";
+				return false;
+			};
+
 			if (streamCtx) {
 				const durable = useDetached || useContainerDurable;
 				stampActiveCommandStep({
@@ -6956,6 +8206,14 @@ export class VerificationHarness {
 					// spawning misses the first event on a cold client connection.
 					await dockerExecWatcher.start();
 				}
+				// The semaphore admission check above covers capacity wait; this second
+				// fence covers command setup (including the async Docker watcher) and
+				// must be immediately before the only command spawn path.
+				if (!this._canAdmitCommandStep(streamCtx)) {
+					await dockerExecWatcher?.stop();
+					resolve({ passed: false, output: "Command admission cancelled before spawn." });
+					return;
+				}
 				if (containerId) {
 					// Container execution uses a daemon-bound sentinel; container-visible
 					// PID, heartbeat, and exit artifacts are deliberately not created.
@@ -6989,6 +8247,11 @@ export class VerificationHarness {
 					// `-w` joins that exact child without polling, preserving the host
 					// transport ownership boundary until container cleanup is complete.
 					wrappedCmd = `exec setsid -w /bin/sh -c ${shellSingleQuote(wrappedCmd)}`;
+					if (!beginCommandSpawn()) {
+						await dockerExecWatcher?.stop();
+						resolve({ passed: false, output: "Command admission cancelled before spawn." });
+						return;
+					}
 					tracked = spawnTracked("docker", ["exec", "-i", "-w", normalizedCwd, containerId, "/bin/sh", "-c", wrappedCmd], {
 						stdio: ["pipe", "pipe", "pipe"],
 						// Durable-container timeout is armed only after its atomic witness.
@@ -7021,6 +8284,10 @@ export class VerificationHarness {
 				} else if (useDetached) {
 					// Host durable path routed through the command-step seam (default =
 					// realVerificationCommandRunner → the identical spawnTracked call).
+					if (!beginCommandSpawn()) {
+						resolve({ passed: false, output: "Command admission cancelled before spawn." });
+						return;
+					}
 					tracked = this.commandStepRunner.spawn({
 						shellBin, shellArgs, cmdToRun, command,
 						cwd: normalizedCwd,
@@ -7032,6 +8299,10 @@ export class VerificationHarness {
 					});
 				} else {
 					// Host attached path routed through the seam (default = real spawn).
+					if (!beginCommandSpawn()) {
+						resolve({ passed: false, output: "Command admission cancelled before spawn." });
+						return;
+					}
 					tracked = this.commandStepRunner.spawn({
 						shellBin, shellArgs, cmdToRun, command,
 						cwd: normalizedCwd,
@@ -7067,6 +8338,11 @@ export class VerificationHarness {
 				})();
 				return;
 			}
+
+			// Spawn ownership now exists. This durable marker distinguishes a real
+			// child from the phase's optimistic `running` display state, so later
+			// cancellation preserves exact cleanup only for commands that started.
+			stampActiveCommandStep({ commandSpawnState: "spawned", commandSpawnedAt: Date.now() });
 
 			// Register so cancellation / shutdown can tree-kill the live child.
 			const trackedKey = streamCtx ? `${streamCtx.signalId}:${streamCtx.stepIndex}` : `__no_ctx_${child.pid ?? Date.now()}`;
@@ -7661,6 +8937,7 @@ export class VerificationHarness {
 				status: "waiting",
 				output: parts.join("\n\n"),
 				duration_ms: Date.now() - step.startedAt,
+				restartInterrupted: true,
 			});
 		};
 		const finalize = (code: number | null) => {

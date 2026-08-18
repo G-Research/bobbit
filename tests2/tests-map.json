@@ -2,11 +2,11 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1141,
+  "censusTotal": 1143,
   "buckets": {
     "daily": 67,
-    "v2-browser": 216,
-    "v2-core": 512,
+    "v2-browser": 217,
+    "v2-core": 513,
     "v2-dom": 144,
     "v2-integration": 202
   },
@@ -20,6 +20,15 @@
     "vitest-e2e": 2
   },
   "v2Native": [
+    {
+      "path": "tests2/dom/goal-dashboard-resignal.test.ts",
+      "reason": "Real dashboard DOM regression coverage that restricts re-signal to the current cancelled generation and preserves the action for the latest pending cancellation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
     {
       "path": "tests2/integration/strict-update-body-routes.test.ts",
       "reason": "Regression contract for strict finite-shape update bodies: exact route allow-lists, accepted representative updates, unknown-key rejection, no mutation, goal policy guidance, and immutable staff sandboxing.",
@@ -3225,6 +3234,33 @@
         "tier": "browser",
         "project": "browser"
       }
+    },
+    {
+      "path": "tests2/core/verification-cancellation-outcome-repro.test.ts",
+      "reason": "Focused durable cancellation regression: a superseded verification keeps its typed orchestration cause distinct from command-kill mechanics, persists cancelled rather than failed, preserves completed output while cancelling unfinished steps, and leaves the gate pending and eligible to run again.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/verification-cancellation-provenance.test.ts",
+      "reason": "Core contract for every typed cancellation producer, first-writer-wins durable provenance before cleanup, legacy unknown compatibility, and restart preservation of real completed output and cancelled audit rows.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/gate-cancellation.journey.spec.ts",
+      "reason": "Browser journey proving pause cancels a live command and human review with a cause-labelled neutral outcome across dashboard, sidebar, widget, transcript, reload, resume, and one explicit re-signal.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
     }
   ],
   "journeys": [
@@ -3242,6 +3278,10 @@
     },
     {
       "path": "tests2/browser/journeys/cross-project-proposal-banner.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/gate-cancellation.journey.spec.ts",
       "type": "smoke-journey"
     },
     {
@@ -5137,7 +5177,8 @@
       "execution": {
         "runner": "vitest",
         "tier": "unit",
-        "project": "integration"
+        "project": "isolated",
+        "reason": "Mutates the shared verification harness command-step runner and notifier, so its exact cleanup ownership assertions require a dedicated isolated fork."
       }
     },
     {

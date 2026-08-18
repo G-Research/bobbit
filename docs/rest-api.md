@@ -901,7 +901,7 @@ Branch names are never interpolated into a shell command; PR lookup and remote r
 
 ### Cancel verification endpoint
 
-`POST /api/goals/:goalId/gates/:gateId/cancel-verification` requests cancellation of the gate's running verification. It is idempotent and always returns `200` in one of these shapes:
+`POST /api/goals/:goalId/gates/:gateId/cancel-verification` requests a manual cancellation of the gate's running verification. For an existing eligible goal, successful cancellation and the idempotent no-running-verification response return `200`.
 
 ```json
 { "cancelled": false, "message": "No running verification to cancel" }
@@ -910,16 +910,35 @@ Branch names are never interpolated into a shell command; PR lookup and remote r
 No running verification existed.
 
 ```json
-{ "cancelled": true, "pending": false }
+{
+  "cancelled": true,
+  "outcome": "cancelled",
+  "cause": "manual",
+  "signalId": "sig-22",
+  "pending": false
+}
 ```
 
-Cancellation is terminal: exact cleanup settled.
+Exact cleanup settled. The historical signal has the terminal verification outcome `"cancelled"`; the gate remains eligible/pending rather than failed.
 
 ```json
-{ "cancelled": true, "pending": true, "message": "Cancellation is waiting for exact process cleanup" }
+{
+  "cancelled": true,
+  "outcome": "cancelled",
+  "cause": "manual",
+  "signalId": "sig-22",
+  "pending": true,
+  "message": "Cancellation is waiting for exact process cleanup"
+}
 ```
 
-Cancellation intent is durable, but this is **not** terminal. Exact command payload cleanup — and, for Docker command steps, host `docker exec` transport cleanup — must settle before the old signal receives its terminal cancellation result. Clients can inspect `GET /api/goals/:goalId/verifications/active` while `pending` is `true`.
+Cancellation intent and its typed cause are durable, but this response is **not** terminal. Exact command payload cleanup — and, for Docker command steps, host `docker exec` transport cleanup — must settle before the old signal receives its terminal cancellation result. The public `GET /api/goals/:goalId/verifications/active` endpoint intentionally hides cleanup-only ownership records; inspect the signal history or gate detail for the durable result after it settles. See [Verification cancellation lifecycle](verification-cancellation.md) for all causes, generation rules, and recovery semantics.
+
+Route guards return these responses before cancellation is considered:
+
+- `404` `{ "error": "Goal not found" }`
+- `409` `{ "error": "Goal is archived" }`
+- `400` `{ "error": "Goal is shelved" }`
 
 ### Goal Team
 
@@ -1991,7 +2010,7 @@ Returns the server-authoritative gate progress summary for counters and status c
 }
 ```
 
-Goal-wide fields: `passed`, `bypassed` (count of gates a human forced past verification; `bypassedCount` is an emitted alias for the same value), `total`, `verifying`, `verifyingCount`, `awaitingSignoffCount`, `awaitingHumanSignoff`, `runningGateIds`, and `gates`. `bypassed` is reported separately from `passed` so the badge can count bypassed gates toward the numerator while still flagging the goal as not-clean (red `(N/N)!`) — see [Human gate bypass](goals-workflows-tasks.md#human-gate-bypass). Per-gate fields: `gateId`, `name`, stored `status` (now includes `bypassed`), `effectiveStatus` (`running` while an active verification overlays stored state), `running`, `awaitingSignoffCount`, `dependsOn`, and `signalCount`. Conditional fields: `updatedAt` (if signaled) and `failedSteps` (if failed — names of non-passed, non-skipped verification steps). The top-level fields preserve existing consumers; `summary` is the canonical grouped shape used by newer clients.
+Goal-wide fields: `passed`, `bypassed` (count of gates a human forced past verification; `bypassedCount` is an emitted alias for the same value), `total`, `verifying`, `verifyingCount`, `awaitingSignoffCount`, `awaitingHumanSignoff`, `runningGateIds`, and `gates`. `bypassed` is reported separately from `passed` so the badge can count bypassed gates toward the numerator while still flagging the goal as not-clean (red `(N/N)!`) — see [Human gate bypass](goals-workflows-tasks.md#human-gate-bypass). Per-gate fields: `gateId`, `name`, stored `status` (now includes `bypassed`), `effectiveStatus` (`running` while an active verification overlays stored state), `running`, `awaitingSignoffCount`, `dependsOn`, and `signalCount`. Conditional fields: `updatedAt` (if signaled), `failedSteps` (if failed — names of non-passed, non-skipped verification steps), and, when the latest signal was cancelled, `verificationStatus: "cancelled"` plus `cancellation: { cause, requestedAt?, finalizedAt? }`. A cancellation ordinarily leaves the stored gate status `pending`; a separate gate-state mutation or an earlier real failed verdict can own a different status. Legacy cancellation records project `cancellation.cause` as `unknown`, never an inferred cause. See [Verification cancellation lifecycle](verification-cancellation.md). The top-level fields preserve existing consumers; `summary` is the canonical grouped shape used by newer clients.
 
 **`GET /api/goals/:id/gates/:gateId?view=summary`**
 
@@ -2029,7 +2048,7 @@ Returns the latest signal only. Content body is replaced with `hasContent` + `co
 }
 ```
 
-Step `status` is explicit: `passed`, `failed`, `skipped`, `running`, `waiting`, or `blocked`. Non-final `running`, `waiting`, and `blocked` steps should not be interpreted as failed when `passed` is absent or null. Completed signals keep their persisted final results, including each step's explicit terminal `status`, `phase`, and `skipped` flag. Default verification output is the last 20 lines per step, including bounded live stdout/stderr tails for running command steps.
+Step `status` is explicit: `passed`, `failed`, `timeout`, `skipped`, `cancelled`, `running`, `waiting`, or `blocked`. A cancelled step was interrupted by orchestration, not given a failed verdict; its cancellation metadata carries the durable cause and timestamps. Non-final `running`, `waiting`, and `blocked` steps should not be interpreted as failed when `passed` is absent or null. Completed signals keep their persisted final results, including each step's explicit terminal `status`, `phase`, and `skipped` flag. Default verification output is the last 20 lines per step, including bounded live stdout/stderr tails for running command steps.
 
 **`GET /api/goals/:id/tasks?view=summary`**
 
@@ -2058,10 +2077,22 @@ Strips `spec`, `resultSummary`, `baseSha`, timestamps (`createdAt`, `updatedAt`,
 Verification step rows preserve the same durable fields used by gate inspection and history:
 
 - `phase` — copied from the workflow step so clients can group and order phases;
-- `status` — explicit lifecycle or terminal status (`waiting`, `running`, `passed`, `failed`, or `skipped`);
+- `status` — explicit lifecycle or terminal status (`waiting`, `running`, `passed`, `failed`, `timeout`, `skipped`, or `cancelled`);
 - `skipped` — `true` when a step was intentionally skipped, including disabled optional steps and downstream phase skips.
 
 Fresh responses return the initialized rows from the verification harness. Cached same-commit responses return the persisted terminal `verification.steps[]` from the prior signal rather than rebuilding from workflow definitions, so cached cards retain skipped and phase metadata.
+
+Before cache reuse or replacement-signal creation, the route synchronously fences any stale generation. If that durable fence cannot be written, it returns `503`:
+
+```json
+{
+  "error": "Could not durably cancel active verification before re-signal",
+  "code": "VERIFICATION_CANCELLATION_FENCE_FAILED",
+  "retryable": true
+}
+```
+
+No replacement signal is created for this retryable failure.
 
 ```json
 {
@@ -2125,7 +2156,7 @@ Responses:
 - **200** `{ "resolved": true }` — the resolver was invoked. The step result is built (`passed = decision === "pass"`) and the gate continues through the standard phase machinery.
 - **400** — missing or malformed body.
 - **404** — goal / signal / step does not exist or no active verification owns the signal/gate pair.
-- **409** — idempotent surface. The step exists but is no longer awaiting human input. Body: `{ "error": "step is no longer awaiting human input", "stepName", "status": "passed" | "failed" | "skipped" }`. Distinguishes "another client just resolved it" from "never parked here".
+- **409** — idempotent surface. The step exists but is no longer awaiting human input. Body: `{ "error": "step is no longer awaiting human input", "stepName", "status": "passed" | "failed" | "skipped" | "cancelled" }`. Distinguishes "another client just resolved it" from "never parked here".
 - **400** when the goal is shelved; **409** when archived.
 
 Authz (v1) trusts the gateway token — anyone with UI access can submit. Sandboxed sub-agents are blocked at the `sandbox-guard` layer so they cannot self-approve a sign-off step that gates their own work.
@@ -2363,7 +2394,7 @@ Retained artifact bodies are not inlined in verification snapshots. `steps[].dia
 }
 ```
 
-Step `status` is one of `passed`, `failed`, `skipped`, `running`, `waiting`, or `blocked`. `waiting` means the step is yet to run. `blocked` is an active-snapshot derived state for a step blocked by an earlier phase failure; terminal persisted rows use `status: "skipped"` with `skipped: true` and their original `phase`. For non-final `running`, `waiting`, and `blocked` rows, `passed` may be absent or null; clients must not infer failure from old placeholder `passed: false` seed values.
+Step `status` is one of `passed`, `failed`, `timeout`, `skipped`, `cancelled`, `running`, `waiting`, or `blocked`. `waiting` means the step is yet to run. `blocked` is an active-snapshot derived state for a step blocked by an earlier phase failure; terminal persisted rows use `status: "skipped"` with `skipped: true` and their original `phase`. A `cancelled` row was interrupted by orchestration rather than failed; its cancellation metadata records the durable cause and timestamps. For non-final `running`, `waiting`, and `blocked` rows, `passed` may be absent or null; clients must not infer failure from old placeholder `passed: false` seed values.
 
 Running command steps may include bounded live stdout/stderr reads via `liveLogs`. The server reads a capped portion of the live log file first, then applies the requested `tail`, `head`, `slice`, `grep`, or `full` selection and the aggregate output budget. Use those selection modes for deeper targeted logs instead of relying on the default 20-line tail.
 
