@@ -252,20 +252,21 @@ function api(gateway: Gateway, path: string, init: RequestInit = {}): Promise<Re
 
 function projectRegistrationBody(rootPath: string): Record<string, unknown> {
 	const name = "Reliable context pressure";
+	const commands = {
+		build: "echo build ok",
+		check: "echo check ok",
+		unit: "echo unit ok",
+		e2e: "echo e2e ok",
+	};
 	return {
 		name,
 		rootPath,
 		components: [{
 			name,
 			repo: ".",
-			commands: {
-				build: "echo build ok",
-				check: "echo check ok",
-				unit: "echo unit ok",
-				e2e: "echo e2e ok",
-			},
+			commands,
 		}],
-		workflows: buildDefaultWorkflows(name),
+		workflows: buildDefaultWorkflows(name, Object.keys(commands)),
 	};
 }
 
