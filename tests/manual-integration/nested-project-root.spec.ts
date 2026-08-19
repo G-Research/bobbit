@@ -224,20 +224,21 @@ test.describe("Nested project root — integration", () => {
 		console.log(`  Gateway :${port}  repo=${repoRoot}  projectDir=${projectDir}`);
 
 		// 5. Register the project at the NESTED rootPath.
+		const commands = {
+			build: "echo build ok",
+			check: "echo check ok",
+			unit: "echo unit ok",
+			e2e: "echo e2e ok",
+		};
 		const body = {
 			name: "Nested Project",
 			rootPath: projectDir,
 			components: [{
 				name: "Nested Project",
 				repo: ".",
-				commands: {
-					build: "echo build ok",
-					check: "echo check ok",
-					unit: "echo unit ok",
-					e2e: "echo e2e ok",
-				},
+				commands,
 			}],
-			workflows: buildDefaultWorkflows("Nested Project"),
+			workflows: buildDefaultWorkflows("Nested Project", Object.keys(commands)),
 		};
 		const res = await api(gw, "/api/projects", { method: "POST", body: JSON.stringify(body) });
 		const txt = await res.text();

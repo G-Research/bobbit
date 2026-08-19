@@ -63,17 +63,18 @@ const HAS_DOCKER = hasDocker();
 // Project registration body
 // ---------------------------------------------------------------------------
 function projectRegistrationBody(name: string, rootPath: string, opts: { upsert?: boolean } = {}) {
+	const commands = {
+		build: "echo build ok",
+		check: "echo check ok",
+		unit: "echo unit ok",
+		e2e: "echo e2e ok",
+	};
 	const components = [{
 		name,
 		repo: ".",
-		commands: {
-			build: "echo build ok",
-			check: "echo check ok",
-			unit: "echo unit ok",
-			e2e: "echo e2e ok",
-		},
+		commands,
 	}];
-	const workflows = buildDefaultWorkflows(name);
+	const workflows = buildDefaultWorkflows(name, Object.keys(commands));
 	return { name, rootPath, components, workflows, ...opts };
 }
 
