@@ -3,6 +3,50 @@
 Newest first. Each release appends a `## v<version>` section; the release
 workflow publishes that section as the GitHub release body.
 
+## v0.17.0
+
+Upgrading from v0.16.3. This release adds a built-in file explorer, conversation forks, richer sidebar views, durable reviews and state storage, and major improvements to agent-turn reliability.
+
+### ✨ New Features
+
+* 🗂️ **Built-in file explorer**: Browse files with read-only previews, Git decorations, working-tree diffs, editable breadcrumbs, filename search, changed-file filtering, path copying, and navigation to accessible directories.
+
+* 🧭 **Project and status sidebar views**: Switch between project and status groupings, pin sessions, filter unread and read work, collapse sections, and reveal the current session even when search, filters, or archived state hide it.
+
+* 🌿 **Fork conversations from history**: Copy historic prompts or fork a session immediately before a selected prompt, preserving the applicable transcript, model context, and working directory with an optional fresh worktree.
+
+* 📝 **Grouped and durable Markdown reviews**: Open multi-file reviews in one workspace with responsive file navigation. Reviews up to 10 MiB are stored as session-owned artifacts and reopen reliably after reloads and recovery.
+
+* 🔄 **Reliable agent turns**: The Pi runtime has been upgraded to 0.84.1 with durable prompt identities, FIFO delivery, restart and reconnect recovery, safer Stop handling, compact streaming, and clear delivery status for pending automation.
+
+* 🖼️ **Session-local Markdown images**: Assistant messages can render workspace images referenced by relative, absolute, or `file://` paths through authenticated, session-scoped asset requests with traversal and size protections.
+
+* 💾 **Durable SQLite state**: Gates, goals, and tasks now use per-project SQLite storage, with transactional migration and recovery for existing JSON state.
+
+* 🧰 **Focused agent read tools**: Bobbit read operations now return compact, bounded summaries by default, support exact transcript inspection, and paginate larger gate and maintenance collections.
+
+* 👥 **Improved staff controls**: Staff sessions gain standard sidebar actions, while the editor now provides a full avatar preview, role and accessory selectors, named colours, clearer runtime details, and separate prompt and trigger controls.
+
+* 🏢 **Configured Git host support**: Hosts configured in `gh` are trusted consistently across PR status, merges, permissions, browser prompts, and PR Walkthroughs, improving GitHub Enterprise support without reading credentials.
+
+### 🐛 Bug Fixes
+
+* ▶️ **Safer goal and child-team startup**: Paused goals remain paused across restarts, teams wait for verified worktree setup, and failed child starts use bounded retries instead of making the gateway unresponsive.
+
+* 🖼️ **Reliable previews and panel tabs**: Previews with spaces, Unicode, emoji, long names, and nested assets reopen correctly. Artifact-backed tabs avoid file races, overflow cleanly, and retain the selected tab after reload.
+
+* ✅ **Explicit update API errors**: Resource update endpoints now reject unsupported fields with actionable `400` responses instead of silently returning success without saving the requested change.
+
+* 📊 **Accurate activity and dashboard state**: Team-lead uptime, agent counts, session activity, and read state now remain accurate across lifecycle overlap, archival, replacement, and gateway restarts.
+
+* ⏹️ **Force abort completes reliably**: Escape and force-abort actions now fall back to persisted transcript state when the agent state RPC hangs, preventing sessions from remaining stuck in `aborting`.
+
+* 🔍 **Reliable workflow verification dispatch**: Verification phases run in a predictable order, reviewer prompts survive busy sessions and restarts, and duplicate or cancelled dispatches are handled exactly once.
+
+* ☁️ **Bedrock-compatible agent tools**: `read_session`, `review_open`, and MCP meta-tools now expose Bedrock-compatible schemas while retaining strict runtime validation and native argument support.
+
+* 🤖 **Exact model metadata**: Host, sandbox, restore, replacement, AI Gateway, and custom-model paths now use the authoritative effective model tuple instead of stale compatibility shims.
+
 ## v0.16.3
 
 Upgrading from v0.16.2. This release adds a command-line version flag and completes the automated release workflow fixes.
