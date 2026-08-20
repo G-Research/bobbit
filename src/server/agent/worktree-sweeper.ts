@@ -187,10 +187,11 @@ function buildOwnershipGuards(ownership: SweepOwnership, aliases: CanonicalPaths
 			// Only archived sessions are retained for review. Archived goals and
 			// other record types do not prove that a leftover is expected here.
 			if (!archivedSessionRecords.has(rec)) continue;
-			if (rec.repoWorktrees && rec.repoPath && rec.branch) {
-				for (const [repo, worktreePath] of Object.entries(rec.repoWorktrees)) {
+			const repoWorktrees = Object.entries(rec.repoWorktrees ?? {});
+			if (repoWorktrees.length > 0) {
+				for (const [repo, worktreePath] of repoWorktrees) {
 					const key = worktreeIdentityKey(
-						repo === "." ? rec.repoPath : path.join(rec.repoPath, repo),
+						rec.repoPath ? (repo === "." ? rec.repoPath : path.join(rec.repoPath, repo)) : undefined,
 						worktreePath,
 						rec.branch,
 						aliases,
