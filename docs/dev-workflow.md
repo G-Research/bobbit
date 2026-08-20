@@ -64,7 +64,7 @@ The harness (`src/server/harness.ts`):
   `npm run restart-server` revalidates before rebuilding and launching.
 - On a sentinel build failure: does not launch stale output; the watcher remains available for
   another restart after the build is fixed.
-- Preserves sessions across restarts in `.bobbit/state/sessions.json`.
+- Preserves sessions across restarts in the eagerly loaded `.bobbit/state/sessions.json` live tier and `.bobbit/state/sessions.archived.json` archived tier.
 
 To trigger a restart:
 
@@ -196,7 +196,7 @@ After editing files under `src/server/`:
 npm run restart-server
 ```
 
-This signals the harness to rebuild and restart the server. Your current session will survive — the harness persists session metadata to disk, and on relaunch the server restores all sessions from `.bobbit/state/sessions.json`.
+This signals the harness to rebuild and restart the server. Your current session will survive — the harness persists session metadata in eagerly loaded live and archived state tiers, then restores sessions on relaunch. See [Split archived SessionStore writes](design/split-archived-session-writes.md).
 
 **Do not skip this step.** The gateway runs from compiled JavaScript in `dist/server/`. Your TypeScript edits under `src/server/` have no effect until the server is rebuilt.
 

@@ -370,11 +370,52 @@ type DiskFingerprint = {
 export interface PersistenceMetrics {
 	bytes: number;
 	durationMs: number;
+	/** Bytes actually serialized for each independently persisted tier. */
+	liveBytes?: number;
+	archivedBytes?: number;
 }
+
+export type SessionTier = "live" | "archived";
+type TierPersistenceState = {
+	file: string;
+	loadedEpoch: number;
+	/** True only when this process recovered a parseable envelope for the tier. */
+	loadedSnapshot: boolean;
+	writtenEpoch: number;
+	diskFingerprint: DiskFingerprint | null;
+	staleGuardTripped: boolean;
+	dirtyGeneration: number;
+	publishedGeneration: number;
+};
+type TransitionEntry = { id: string; tier: SessionTier; session?: PersistedSession };
+type TransitionEpoch = { base: number; target: number };
+type TransitionIntent = {
+	version: 2;
+	entries: TransitionEntry[];
+	epochs: Record<SessionTier, TransitionEpoch>;
+};
+type ActiveTransitionRecovery = {
+	intent: TransitionIntent;
+	/** Exact post-intent rows, frozen before any later in-memory mutation. */
+	rowsJson: Record<SessionTier, string>;
+	/** The only generation this interrupted pair is allowed to publish. */
+	generation: number;
+};
+type TransitionIntentBinding = "exact" | "absent" | "mismatch";
+type TransitionIntentCleanup = "removed" | "absent" | "mismatch";
+type PreparedTierWrite = {
+	tier: SessionTier;
+	baseEpoch: number;
+	targetEpoch: number;
+	payload: string;
+	payloadBytes: number;
+};
+type LegacySnapshot = { raw: string; rows: unknown[]; epoch: number; source: string };
 
 export class SessionStore {
 	private readonly storeDir: string;
 	private readonly storeFile: string;
+	private readonly transitionFile: string;
 	private readonly fs: SessionStoreFs;
 	private readonly clock: Clock;
 	private sessions: Map<string, PersistedSession> = new Map();
@@ -383,14 +424,20 @@ export class SessionStore {
 	private static BACKUP_COUNT = 5;
 	/** Monotonically increasing counter — bumped on every mutation. Resets to 0 on server restart. */
 	private generation = 0;
-	/** Epoch read from disk on construction (or 0 for legacy/missing). */
-	private loadedEpoch = 0;
-	/** Epoch we have successfully written to disk this process. */
-	private writtenEpoch = 0;
-	/** Last observed metadata for the primary; never authoritative before our first write. */
-	private diskFingerprint: DiskFingerprint | null = null;
-	/** One-shot latch: once tripped, no further saveNow() writes to disk. */
-	private staleGuardTripped = false;
+	private readonly tiers: Record<SessionTier, TierPersistenceState>;
+	private migrationNeeded = false;
+	private tierLayoutNeedsRepair = false;
+	/** Ids whose disk tier membership must be normalized on the next save. */
+	private readonly tierLayoutRepairIds = new Set<string>();
+	/** Malformed rows without an intent-addressable id still need normalization. */
+	private tierLayoutHasUnidentifiedRepair = false;
+	private legacySnapshot: LegacySnapshot | null = null;
+	/** Membership moves waiting for their first, epoch-bound transition intent. */
+	private pendingTransitions = new Map<string, TransitionEntry>();
+	/** A durable v2 intent with its exact interrupted-pair snapshot. */
+	private activeTransitionIntent: ActiveTransitionRecovery | null = null;
+	/** A fully published v2 intent left behind by a failed unlink. */
+	private transitionIntentCleanup: TransitionIntent | null = null;
 	/** Active promise-based purge writer; synchronous mutations fold into it. */
 	private asyncSaveInFlight: Promise<void> | null = null;
 	private asyncSaveRequested = false;
@@ -415,11 +462,78 @@ export class SessionStore {
 		this.clock = clock;
 		this.storeDir = stateDir;
 		this.storeFile = path.join(stateDir, "sessions.json");
+		this.transitionFile = `${this.storeFile}.split-transition`;
+		this.tiers = {
+			live: this.newTier(this.storeFile),
+			archived: this.newTier(path.join(stateDir, "sessions.archived.json")),
+		};
 		this.load();
-		// Publish a structural delivery-ledger migration without waiting for a
-		// later queue mutation; otherwise a crash could reintroduce text-only rows.
-		if (this.loadedDeliveryLedgerMigration) this.saveNow();
+		// Publish legacy/v2 and delivery-ledger normalization without waiting for a
+		// later queue mutation. A v2 source is retained before it is partitioned.
+		// Give these boot repairs a real barrier generation so flushAsync() waits.
+		if (this.migrationNeeded) this.generation++;
+		if (this.tierLayoutNeedsRepair) {
+			this.generation++;
+			this.tiers.live.dirtyGeneration = this.generation;
+			this.tiers.archived.dirtyGeneration = this.generation;
+		}
+		if (this.loadedDeliveryLedgerMigration && !this.migrationNeeded && !this.tierLayoutNeedsRepair) {
+			this.generation++;
+			for (const session of this.sessions.values()) this.markMutation(session, session);
+		}
+		if (this.migrationNeeded || this.tierLayoutNeedsRepair || this.loadedDeliveryLedgerMigration || this.pendingTransitions.size || this.activeTransitionIntent || this.transitionIntentCleanup) this.saveNow();
 	}
+
+	private newTier(file: string): TierPersistenceState {
+		return { file, loadedEpoch: 0, loadedSnapshot: false, writtenEpoch: 0, diskFingerprint: null, staleGuardTripped: false, dirtyGeneration: 0, publishedGeneration: 0 };
+	}
+
+	private tierForSession(session: PersistedSession | undefined): SessionTier {
+		return session?.archived === true ? "archived" : "live";
+	}
+
+	private tierFile(tier: SessionTier): string { return this.tiers[tier].file; }
+	private tierBakPath(tier: SessionTier, n: number): string { return `${this.tierFile(tier)}.bak.${n}`; }
+	private tierTmpPath(tier: SessionTier): string { return `${this.tierFile(tier)}.tmp`; }
+
+	private refreshTierLayoutRepairNeeded(): void {
+		this.tierLayoutNeedsRepair = this.tierLayoutRepairIds.size > 0 || this.tierLayoutHasUnidentifiedRepair;
+	}
+
+	private trackTierLayoutRepair(row: unknown): void {
+		if (!row || typeof row !== "object") return;
+		const id = (row as PersistedSession).id;
+		if (typeof id === "string" && id) this.tierLayoutRepairIds.add(id);
+		else this.tierLayoutHasUnidentifiedRepair = true;
+		this.refreshTierLayoutRepairNeeded();
+	}
+
+	/** An authoritative intent supersedes only the layout conflicts it names. */
+	private resolveTierLayoutRepairs(entries: readonly TransitionEntry[]): void {
+		for (const entry of entries) this.tierLayoutRepairIds.delete(entry.id);
+		this.refreshTierLayoutRepairNeeded();
+	}
+
+	/** Mark precisely the tier whose serialized membership changed. */
+	private markMutation(previous: PersistedSession | undefined, next: PersistedSession | undefined): void {
+		const before = previous ? this.tierForSession(previous) : undefined;
+		const after = next ? this.tierForSession(next) : undefined;
+		if (before) this.tiers[before].dirtyGeneration = this.generation;
+		if (after) this.tiers[after].dirtyGeneration = this.generation;
+		if (previous && next && before !== after) {
+			// Transition rows are recovery evidence. Detach nested persisted state so
+			// a later in-place mutation cannot alter the pending intent snapshot.
+			this.pendingTransitions.set(next.id, { id: next.id, tier: after!, session: structuredClone(next) });
+		} else if (next && this.pendingTransitions.has(next.id)) {
+			// Keep an already-published intent's final row current while a batch
+			// coalesces additional updates before the tier pair is durable. Detach it
+			// for the same reason as the initial transition snapshot.
+			this.pendingTransitions.set(next.id, { id: next.id, tier: after!, session: structuredClone(next) });
+		} else if (previous && !next && this.pendingTransitions.has(previous.id)) {
+			this.pendingTransitions.set(previous.id, { id: previous.id, tier: before!, session: undefined });
+		}
+	}
+
 
 	/** Normalise PersistedSession-shaped rows read from disk (legacy field migration). */
 	private seedFromArray(rows: unknown[]): void {
@@ -500,48 +614,154 @@ export class SessionStore {
 		}
 	}
 
-	/** Backup-file path for index 1..N. */
-	private bakPath(n: number): string {
-		return `${this.storeFile}.bak.${n}`;
-	}
-
-	private load(): void {
-		this.loadedEpoch = 0;
-		this.writtenEpoch = 0;
-
-		const candidates = [this.storeFile];
-		for (let i = 1; i <= SessionStore.BACKUP_COUNT; i++) candidates.push(this.bakPath(i));
-
+	private readTierCandidates(tier: SessionTier): { rows: unknown[]; legacy?: LegacySnapshot } {
+		const state = this.tiers[tier];
+		const candidates = [state.file];
+		for (let i = 1; i <= SessionStore.BACKUP_COUNT; i++) candidates.push(this.tierBakPath(tier, i));
 		for (const file of candidates) {
 			try {
 				if (!this.fs.existsSync(file)) continue;
 				const raw = this.fs.readFileSync(file, "utf-8");
 				const parsed = JSON.parse(raw);
-
-				if (Array.isArray(parsed)) {
-					// Legacy v1 shape
-					this.seedFromArray(parsed);
-					this.loadedEpoch = 0;
-					if (file !== this.storeFile) {
-						console.warn(`[session-store] Loaded from backup ${path.basename(file)} — primary missing/corrupt`);
-					}
-					return;
+				if (parsed && typeof parsed === "object" && (parsed as { version?: unknown }).version === 3 && Array.isArray((parsed as { sessions?: unknown[] }).sessions)) {
+					const obj = parsed as { epoch?: unknown; sessions: unknown[] };
+					state.loadedEpoch = typeof obj.epoch === "number" ? obj.epoch : 0;
+					state.loadedSnapshot = true;
+					if (file !== state.file) console.warn(`[session-store] Loaded from backup ${path.basename(file)} (${tier} tier, epoch ${state.loadedEpoch}) — primary missing/corrupt`);
+					return { rows: obj.sessions };
 				}
-				if (parsed && typeof parsed === "object" && (parsed as { version?: number }).version === 2 && Array.isArray((parsed as { sessions?: unknown[] }).sessions)) {
-					const obj = parsed as { version: number; epoch?: number; sessions: unknown[] };
-					this.seedFromArray(obj.sessions);
-					this.loadedEpoch = typeof obj.epoch === "number" ? obj.epoch : 0;
-					if (file !== this.storeFile) {
-						console.warn(`[session-store] Loaded from backup ${path.basename(file)} (epoch ${this.loadedEpoch}) — primary missing/corrupt`);
-					}
-					return;
+				if (tier === "live" && (Array.isArray(parsed) || (parsed && typeof parsed === "object" && (parsed as { version?: unknown }).version === 2 && Array.isArray((parsed as { sessions?: unknown[] }).sessions)))) {
+					const rows = Array.isArray(parsed) ? parsed : (parsed as { sessions: unknown[] }).sessions;
+					const epoch = Array.isArray(parsed) ? 0 : typeof (parsed as { epoch?: unknown }).epoch === "number" ? (parsed as { epoch: number }).epoch : 0;
+					return { rows, legacy: { raw, rows, epoch, source: file } };
 				}
 				console.warn(`[session-store] ${file}: unrecognised shape, skipping`);
-			} catch (err) {
-				console.warn(`[session-store] Failed to parse ${file}:`, err);
+			} catch (err) { console.warn(`[session-store] Failed to parse ${file}:`, err); }
+		}
+		return { rows: [] };
+	}
+
+	private load(): void {
+		const live = this.readTierCandidates("live");
+		if (live.legacy) {
+			this.legacySnapshot = live.legacy;
+			this.tiers.live.loadedEpoch = live.legacy.epoch;
+			// A prior migration can have published archive before a failed live
+			// rename. Load its epoch for the tier-local guard, but keep the v2
+			// snapshot authoritative for the rows being repartitioned.
+			this.readTierCandidates("archived");
+			this.migrationNeeded = true;
+			this.seedFromArray(live.rows);
+			this.tiers.live.dirtyGeneration = 0;
+			this.tiers.archived.dirtyGeneration = 0;
+		} else {
+			for (const row of live.rows) {
+				if (!!row && typeof row === "object" && (row as PersistedSession).archived === true) this.trackTierLayoutRepair(row);
+			}
+			this.seedFromArray(live.rows);
+			const archived = this.readTierCandidates("archived");
+			for (const row of archived.rows) {
+				if (!!row && typeof row === "object" && (row as PersistedSession).archived !== true) this.trackTierLayoutRepair(row);
+				if (!row || typeof row !== "object" || !(row as PersistedSession).id) continue;
+				const id = (row as PersistedSession).id;
+				if (this.sessions.has(id)) {
+					console.warn(`[session-store] Duplicate session ${id} in live and archived tiers; keeping live row`);
+					this.trackTierLayoutRepair(row);
+					continue;
+				}
+				this.seedFromArray([row]);
 			}
 		}
-		// No file readable — start empty.
+		this.loadTransitionIntent();
+	}
+
+	private isValidTransitionIntent(value: unknown): value is TransitionIntent {
+		if (!value || typeof value !== "object") return false;
+		const intent = value as Partial<TransitionIntent>;
+		if (intent.version !== 2 || !Array.isArray(intent.entries) || !intent.epochs) return false;
+		for (const tier of ["live", "archived"] as const) {
+			const epoch = intent.epochs[tier];
+			if (!epoch || !Number.isInteger(epoch.base) || epoch.base < 0 || epoch.target !== epoch.base + 1) return false;
+		}
+		return intent.entries.every(entry => !!entry && typeof entry.id === "string"
+			&& (entry.tier === "live" || entry.tier === "archived")
+			&& (!entry.session || (entry.session.id === entry.id && this.tierForSession(entry.session) === entry.tier)));
+	}
+
+	private applyTransitionEntries(entries: readonly TransitionEntry[]): void {
+		for (const entry of entries) {
+			if (entry.session) {
+				// The retained intent is immutable recovery evidence. Its row can contain
+				// nested persisted state, so a shallow copy would still let later session
+				// mutations corrupt the intent needed to repair a second interrupted write.
+				this.sessions.set(entry.id, structuredClone(entry.session));
+			} else this.sessions.delete(entry.id);
+		}
+	}
+
+	/** Serialize both post-intent tiers before later mutations can alter recovery. */
+	private snapshotTierRowsJson(): Record<SessionTier, string> {
+		return {
+			live: JSON.stringify(Array.from(this.sessions.values()).filter(session => this.tierForSession(session) === "live")),
+			archived: JSON.stringify(Array.from(this.sessions.values()).filter(session => this.tierForSession(session) === "archived")),
+		};
+	}
+
+	/**
+	 * A v2 intent is evidence only when the two tier epochs bind it to a single
+	 * interrupted pair publication. In particular, a base/base intent never
+	 * reached either rename and must not overwrite the independently loaded rows.
+	 */
+	private loadTransitionIntent(): void {
+		try {
+			if (!this.fs.existsSync(this.transitionFile)) return;
+			const raw = JSON.parse(this.fs.readFileSync(this.transitionFile, "utf-8")) as unknown;
+			if (!this.isValidTransitionIntent(raw)) {
+				// v1 has no epoch binding. It may be stale or belong to a different
+				// pair, so it is deliberately never recovery authority.
+				console.warn(`[session-store] Ignoring unbound or malformed transition intent ${path.basename(this.transitionFile)}`);
+				return;
+			}
+			const intent = raw;
+			const state = (tier: SessionTier): "base" | "target" | null => {
+				const tierState = this.tiers[tier];
+				// A missing first-use archive is virtual epoch zero; a corrupt tier
+				// without a parseable primary or backup is not transition evidence.
+				if (!tierState.loadedSnapshot && this.fs.existsSync(tierState.file)) return null;
+				const observed = tierState.loadedEpoch;
+				const epochs = intent.epochs[tier];
+				return observed === epochs.base ? "base" : observed === epochs.target ? "target" : null;
+			};
+			const live = state("live");
+			const archived = state("archived");
+			if (!live || !archived) {
+				console.warn(`[session-store] Ignoring superseded transition intent ${path.basename(this.transitionFile)}`);
+				return;
+			}
+			if (live === "base" && archived === "base") {
+				// The intent was durable but neither tier was published. Clean it up
+				// later under both fences, but never replay its stale entries.
+				this.transitionIntentCleanup = intent;
+				return;
+			}
+			this.applyTransitionEntries(intent.entries);
+			this.resolveTierLayoutRepairs(intent.entries);
+			if (live === "target" && archived === "target") {
+				this.transitionIntentCleanup = intent;
+				return;
+			}
+			// Exactly one target proves a crash between renames. Freeze the complete
+			// post-intent pair now: a mutation arriving before the repair drain must
+			// never be credited by, or leak into, this old transition publication.
+			const recoveryGeneration = ++this.generation;
+			this.activeTransitionIntent = {
+				intent,
+				rowsJson: this.snapshotTierRowsJson(),
+				generation: recoveryGeneration,
+			};
+			if (live === "base") this.tiers.live.dirtyGeneration = recoveryGeneration;
+			if (archived === "base") this.tiers.archived.dirtyGeneration = recoveryGeneration;
+		} catch (err) { console.warn(`[session-store] Failed to parse ${this.transitionFile}:`, err); }
 	}
 
 
@@ -552,177 +772,341 @@ export class SessionStore {
 			&& a.ctimeMs === b.ctimeMs;
 	}
 
-	/**
-	 * Atomically reserve this file's write slot before awaiting the prior writer.
-	 * The reservation, rather than a best-effort `.tmp` convention, prevents two
-	 * SessionStore instances from interleaving backup rotation and tmp+rename.
-	 */
-	private async withFileWriteFence<T>(write: () => Promise<T>): Promise<T> {
-		const key = path.resolve(this.storeFile);
-		const previous = SessionStore.fileWriteTails.get(key) ?? Promise.resolve();
-		let release!: () => void;
-		const completion = new Promise<void>((resolve) => { release = resolve; });
-		const tail = previous.catch(() => undefined).then(() => completion);
-		SessionStore.fileWriteTails.set(key, tail);
-		await previous.catch(() => undefined);
+	/** Acquire all file fences in a stable order; pair writes cannot deadlock. */
+	private async withTierWriteFences<T>(tiers: readonly SessionTier[], write: () => Promise<T>): Promise<T> {
+		const keys = [...new Set(tiers.map(t => path.resolve(this.tierFile(t))))].sort();
+		const releases: Array<() => void> = [];
+		const tails: Array<{ key: string; tail: Promise<void> }> = [];
 		try {
+			for (const key of keys) {
+				const previous = SessionStore.fileWriteTails.get(key) ?? Promise.resolve();
+				let release!: () => void;
+				const completion = new Promise<void>(resolve => { release = resolve; });
+				const tail = previous.catch(() => undefined).then(() => completion);
+				SessionStore.fileWriteTails.set(key, tail);
+				await previous.catch(() => undefined);
+				releases.push(release); tails.push({ key, tail });
+			}
 			return await write();
 		} finally {
-			release();
-			if (SessionStore.fileWriteTails.get(key) === tail) {
-				SessionStore.fileWriteTails.delete(key);
-			}
+			for (let i = releases.length - 1; i >= 0; i--) releases[i]();
+			for (const { key, tail } of tails) if (SessionStore.fileWriteTails.get(key) === tail) SessionStore.fileWriteTails.delete(key);
 		}
 	}
 
-
-	private async peekDiskEpochAsync(): Promise<number> {
+	private async peekDiskEpochAsync(tier: SessionTier): Promise<number> {
 		try {
-			const raw = await this.fs.promises.readFile(this.storeFile, "utf-8");
-			const parsed = JSON.parse(raw);
-			if (Array.isArray(parsed)) return 0;
-			if (parsed && typeof parsed === "object" && typeof (parsed as { epoch?: unknown }).epoch === "number") {
-				return (parsed as { epoch: number }).epoch;
-			}
-			return -1;
-		} catch {
-			return -1;
-		}
+			const parsed = JSON.parse(await this.fs.promises.readFile(this.tierFile(tier), "utf-8"));
+			if (tier === "live" && Array.isArray(parsed)) return 0;
+			return parsed && typeof parsed === "object" && typeof parsed.epoch === "number" ? parsed.epoch : -1;
+		} catch { return -1; }
 	}
 
-	private async currentDiskFingerprintAsync(): Promise<DiskFingerprint | null> {
+	private async currentDiskFingerprintAsync(tier: SessionTier): Promise<DiskFingerprint | null> {
 		try {
-			const stat = await this.fs.promises.stat(this.storeFile);
-			const size = Number(stat.size);
-			const mtimeMs = Number(stat.mtimeMs);
-			if (!Number.isFinite(size) || !Number.isFinite(mtimeMs)) return null;
-			const ctimeMs = Number(stat.ctimeMs);
-			// Size + mtime is not a sufficient identity on filesystems that expose
-			// coarse timestamp resolution. Re-read the epoch when ctime is absent
-			// instead of treating an external same-size rewrite as our own write.
-			if (!Number.isFinite(size) || !Number.isFinite(mtimeMs) || !Number.isFinite(ctimeMs)) return null;
-			return { size, mtimeMs, ctimeMs };
-		} catch {
-			return null;
+			const stat = await this.fs.promises.stat(this.tierFile(tier));
+			const size = Number(stat.size), mtimeMs = Number(stat.mtimeMs), ctimeMs = Number(stat.ctimeMs);
+			// ctime is load-bearing: size + mtime is unsafe on coarse filesystems.
+			return Number.isFinite(size) && Number.isFinite(mtimeMs) && Number.isFinite(ctimeMs) ? { size, mtimeMs, ctimeMs } : null;
+		} catch { return null; }
+	}
+
+	private async rotateBackupsAsync(tier: SessionTier): Promise<void> {
+		const file = this.tierFile(tier);
+		try { await this.fs.promises.access(file); } catch { return; }
+		try { await this.fs.promises.unlink(this.tierBakPath(tier, SessionStore.BACKUP_COUNT)); } catch { /* non-fatal */ }
+		for (let i = SessionStore.BACKUP_COUNT - 1; i >= 1; i--) {
+			try { await this.fs.promises.rename(this.tierBakPath(tier, i), this.tierBakPath(tier, i + 1)); } catch { /* non-fatal */ }
 		}
+		try { await this.fs.promises.copyFile(file, this.tierBakPath(tier, 1)); } catch { /* non-fatal */ }
 	}
 
-	/** Promise-based backup rotation with the same oldest-first policy as saveNow(). */
-	private async rotateBackupsAsync(): Promise<void> {
-		try {
-			// Whether a primary exists is a policy decision: without it there is no
-			// new backup snapshot, so do not shift the existing recovery chain.
-			await this.fs.promises.access(this.storeFile);
-		} catch {
-			return;
-		}
-		const N = SessionStore.BACKUP_COUNT;
-		try { await this.fs.promises.unlink(this.bakPath(N)); } catch { /* non-fatal */ }
-		for (let i = N - 1; i >= 1; i--) {
-			try { await this.fs.promises.rename(this.bakPath(i), this.bakPath(i + 1)); } catch { /* non-fatal */ }
-		}
-		try { await this.fs.promises.copyFile(this.storeFile, this.bakPath(1)); } catch { /* non-fatal */ }
-	}
+	/** Live-tier compatibility accessors retained for existing callers. */
+	isStaleGuardTripped(): boolean { return this.tiers.live.staleGuardTripped; }
+	getLoadedEpoch(): number { return this.tiers.live.loadedEpoch; }
+	getWrittenEpoch(): number { return this.tiers.live.writtenEpoch; }
+	getTierLoadedEpoch(tier: SessionTier): number { return this.tiers[tier].loadedEpoch; }
+	getTierWrittenEpoch(tier: SessionTier): number { return this.tiers[tier].writtenEpoch; }
+	isTierStaleGuardTripped(tier: SessionTier): boolean { return this.tiers[tier].staleGuardTripped; }
 
-	/** True if the most recent saveNow() refused to write due to the stale-snapshot guard. */
-	isStaleGuardTripped(): boolean {
-		return this.staleGuardTripped;
-	}
-
-	/** Epoch read from disk at construction. Test-visible. */
-	getLoadedEpoch(): number {
-		return this.loadedEpoch;
-	}
-
-	/** Epoch most recently written to disk this process. Test-visible. */
-	getWrittenEpoch(): number {
-		return this.writtenEpoch;
-	}
-
-
-	/**
-	 * Immediately join the serialized async writer for structural mutations.
-	 * Entering the writer performs no filesystem operation on this call stack;
-	 * the first write yields to `fs.promises` and subsequent mutations coalesce
-	 * into its trailing drain iteration.
-	 */
 	private saveNow(): void {
-		if (this.saveTimer) {
-			this.clock.clearTimeout(this.saveTimer);
-			this.saveTimer = null;
-		}
+		if (this.saveTimer) { this.clock.clearTimeout(this.saveTimer); this.saveTimer = null; }
 		void this.requestAsyncSave();
 	}
 
-	/** Promise-based save preserving epoch checks, backups, fsync, and atomic rename. */
-	private async saveNowAsync(): Promise<number> {
-		return this.withFileWriteFence(() => this.saveNowUnlockedAsync());
+	/** Retain the exact legacy source without blocking an async persistence barrier. */
+	private async retainLegacySnapshotAsync(): Promise<void> {
+		const snapshot = this.legacySnapshot;
+		if (!snapshot) return;
+		await this.fs.promises.mkdir(this.storeDir, { recursive: true });
+		const base = `${this.storeFile}.pre-archived-split`;
+		for (let n = 0; ; n++) {
+			const retained = n === 0 ? base : `${base}.${n}`;
+			try {
+				// An identical retained source is already durable migration evidence.
+				// This makes retry/restart and racing stores idempotent without ever
+				// overwriting a distinct forensic snapshot.
+				if (await this.fs.promises.readFile(retained, "utf-8") === snapshot.raw) return;
+				continue;
+			} catch (err) {
+				if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+			}
+			try {
+				// Exclusive creation closes the read/write race with another store.
+				await this.fs.promises.writeFile(retained, snapshot.raw, { encoding: "utf-8", flag: "wx" });
+				return;
+			} catch (err) {
+				if ((err as NodeJS.ErrnoException).code === "EEXIST") continue;
+				throw err;
+			}
+		}
 	}
 
-	/** Runs inside the per-file fence so check, backup rotation, and rename agree. */
-	private async saveNowUnlockedAsync(): Promise<number> {
-		if (this.staleGuardTripped) {
-			throw new Error("Session persistence refused: stale-snapshot guard is active");
-		}
-		const startedAt = performance.now();
+	private async writeTransitionIntent(intent: TransitionIntent): Promise<void> {
+		const tmp = `${this.transitionFile}.tmp`;
+		const payload = JSON.stringify(intent);
 		try {
-			await this.fs.promises.mkdir(this.storeDir, { recursive: true });
-
-			const currentFingerprint = await this.currentDiskFingerprintAsync();
-			const onDiskEpoch = this.writtenEpoch > 0
-				&& SessionStore.fingerprintsEqual(currentFingerprint, this.diskFingerprint)
-				? Math.max(this.loadedEpoch, this.writtenEpoch)
-				: await this.peekDiskEpochAsync();
-			if (onDiskEpoch > this.loadedEpoch && this.writtenEpoch === 0) {
-				console.error(
-					`[session-store] REFUSING to save: on-disk epoch ${onDiskEpoch} is ` +
-					`newer than loaded epoch ${this.loadedEpoch}. Possible stale-snapshot ` +
-					`recovery (cloud sync / antivirus / .pre-migration). ` +
-					`In-memory state has ${this.sessions.size} sessions; on-disk has more recent. ` +
-					`Manual intervention required: inspect ${this.storeFile} and ${this.storeFile}.bak.*`,
-				);
-				this.staleGuardTripped = true;
-				throw new Error(`Session persistence refused: on-disk epoch ${onDiskEpoch} is newer than loaded epoch ${this.loadedEpoch}`);
-			}
-
-			const nextEpoch = Math.max(this.loadedEpoch, this.writtenEpoch, onDiskEpoch < 0 ? 0 : onDiskEpoch) + 1;
-			const payload = {
-				version: 2 as const,
-				epoch: nextEpoch,
-				sessions: Array.from(this.sessions.values()),
-			};
-			const json = JSON.stringify(payload);
-			// Snapshot after serialization. A mutation which was already folded
-			// into this payload must not force an identical trailing rewrite.
-			const serializedGeneration = this.generation;
-
-			await this.rotateBackupsAsync();
-
-			const tmp = `${this.storeFile}.tmp`;
-			// FsLike intentionally has a small async surface so memfs and other
-			// injected filesystems need not implement FileHandle.open/sync/close.
-			// Use fsync when the richer real-fs API is available, otherwise retain
-			// the same atomic tmp+rename publish contract with writeFile.
 			if (this.fs.promises.open) {
 				const handle = await this.fs.promises.open(tmp, "w");
 				try {
-					await handle.writeFile(json, "utf-8");
-					try { await handle.sync(); } catch { /* non-fatal on network shares */ }
-				} finally {
-					await handle.close();
-				}
+					await handle.writeFile(payload, "utf-8");
+					try { await handle.sync(); } catch { /* non-fatal */ }
+				} finally { await handle.close(); }
 			} else {
-				await this.fs.promises.writeFile(tmp, json, "utf-8");
+				await this.fs.promises.writeFile(tmp, payload, "utf-8");
 			}
-			await this.fs.promises.rename(tmp, this.storeFile);
-			this.writtenEpoch = nextEpoch;
-			this.lastPersistenceMetrics = { bytes: Buffer.byteLength(json), durationMs: performance.now() - startedAt };
-			this.diskFingerprint = await this.currentDiskFingerprintAsync();
-			return serializedGeneration;
+			await this.fs.promises.rename(tmp, this.transitionFile);
 		} catch (err) {
-			try { await this.fs.promises.unlink(`${this.storeFile}.tmp`); } catch { /* ignore */ }
+			try { await this.fs.promises.unlink(tmp); } catch { /* ignore cleanup failure */ }
 			throw err;
 		}
+	}
+
+	/** Validate one tier and build, but do not publish, its next compact snapshot. */
+	private async prepareTierWriteUnlockedAsync(tier: SessionTier, rowsJson: string): Promise<PreparedTierWrite> {
+		const state = this.tiers[tier];
+		if (state.staleGuardTripped) throw new Error(`Session persistence refused: stale-snapshot guard is active for ${tier} tier`);
+		const fingerprint = await this.currentDiskFingerprintAsync(tier);
+		const onDiskEpoch = state.writtenEpoch > 0 && SessionStore.fingerprintsEqual(fingerprint, state.diskFingerprint)
+			? Math.max(state.loadedEpoch, state.writtenEpoch) : await this.peekDiskEpochAsync(tier);
+		if (onDiskEpoch > state.loadedEpoch && state.writtenEpoch === 0) {
+			state.staleGuardTripped = true;
+			console.error(`[session-store] REFUSING to save ${tier} tier: on-disk epoch ${onDiskEpoch} is newer than loaded epoch ${state.loadedEpoch}. Manual intervention required: inspect ${state.file} and ${state.file}.bak.*`);
+			throw new Error(`Session persistence refused: on-disk epoch ${onDiskEpoch} is newer than loaded epoch ${state.loadedEpoch}`);
+		}
+		const baseEpoch = Math.max(state.loadedEpoch, state.writtenEpoch, onDiskEpoch < 0 ? 0 : onDiskEpoch);
+		const targetEpoch = baseEpoch + 1;
+		// rowsJson is the sole JSON.stringify traversal of this tier's rows.
+		const payload = `{"version":3,"epoch":${targetEpoch},"sessions":${rowsJson}}`;
+		return { tier, baseEpoch, targetEpoch, payload, payloadBytes: Buffer.byteLength(payload) };
+	}
+
+	/** Publish a snapshot already validated while all of its relevant fences are held. */
+	private async publishPreparedTierUnlockedAsync(prepared: PreparedTierWrite): Promise<number> {
+		const { tier, targetEpoch, payload, payloadBytes } = prepared;
+		const state = this.tiers[tier];
+		const tmp = this.tierTmpPath(tier);
+		try {
+			await this.rotateBackupsAsync(tier);
+			if (this.fs.promises.open) {
+				const handle = await this.fs.promises.open(tmp, "w");
+				try { await handle.writeFile(payload, "utf-8"); try { await handle.sync(); } catch { /* non-fatal */ } } finally { await handle.close(); }
+			} else await this.fs.promises.writeFile(tmp, payload, "utf-8");
+			await this.fs.promises.rename(tmp, state.file);
+			state.writtenEpoch = targetEpoch;
+			state.diskFingerprint = await this.currentDiskFingerprintAsync(tier);
+			return payloadBytes;
+		} catch (err) { try { await this.fs.promises.unlink(tmp); } catch { /* ignore */ } throw err; }
+	}
+
+	private async transitionEpochStatesUnlocked(intent: TransitionIntent): Promise<Record<SessionTier, "base" | "target" | null>> {
+		const result = {} as Record<SessionTier, "base" | "target" | null>;
+		for (const tier of ["live", "archived"] as const) {
+			if (this.tiers[tier].staleGuardTripped) throw new Error(`Session persistence refused: stale-snapshot guard is active for ${tier} tier`);
+			const diskEpoch = await this.peekDiskEpochAsync(tier);
+			let observed = diskEpoch;
+			if (diskEpoch < 0) {
+				try {
+					await this.fs.promises.access(this.tierFile(tier));
+					// An existing file that could not be parsed is not transition evidence.
+				} catch (err) {
+					// A never-created tier has the same virtual epoch zero used by the writer.
+					// Other access failures remain outside the binding rather than appearing empty.
+					if ((err as NodeJS.ErrnoException).code === "ENOENT") observed = 0;
+				}
+			}
+			const epochs = intent.epochs[tier];
+			result[tier] = observed === epochs.base ? "base" : observed === epochs.target ? "target" : null;
+		}
+		return result;
+	}
+
+	/** Check whether a peer retained, removed, or replaced this exact durable intent. */
+	private async transitionIntentBindingUnlocked(intent: TransitionIntent): Promise<TransitionIntentBinding> {
+		try {
+			const raw = JSON.parse(await this.fs.promises.readFile(this.transitionFile, "utf-8"));
+			return JSON.stringify(raw) === JSON.stringify(intent) ? "exact" : "mismatch";
+		} catch (err) {
+			return (err as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "mismatch";
+		}
+	}
+
+	/**
+	 * Remove an exact v2 intent only after its binding is conclusively spent.
+	 * The discriminated outcome lets independently fenced stores converge when
+	 * a peer already removed the same binding, without accepting replacement
+	 * content or an out-of-band epoch transition.
+	 */
+	private async clearTransitionIntentIfSpentUnlocked(intent: TransitionIntent): Promise<TransitionIntentCleanup> {
+		const binding = await this.transitionIntentBindingUnlocked(intent);
+		if (binding === "mismatch") return "mismatch";
+		const states = await this.transitionEpochStatesUnlocked(intent);
+		const bothBase = states.live === "base" && states.archived === "base";
+		const bothTarget = states.live === "target" && states.archived === "target";
+		if (!bothBase && !bothTarget) return "mismatch";
+		if (binding === "absent") return "absent";
+		try {
+			await this.fs.promises.unlink(this.transitionFile);
+			return "removed";
+		} catch (err) {
+			// A peer can unlink after our exact read only outside this process's
+			// fence. It is still safe only because the epochs above prove it spent.
+			if ((err as NodeJS.ErrnoException).code === "ENOENT") return "absent";
+			throw err;
+		}
+	}
+
+	/** Serialize only dirty tiers; the archive tier is never touched by live activity. */
+	private async saveNowAsync(): Promise<number> {
+		const startedAt = performance.now();
+		await this.fs.promises.mkdir(this.storeDir, { recursive: true });
+		const mustMigrate = this.migrationNeeded;
+		let selected = (Object.keys(this.tiers) as SessionTier[]).filter(t => mustMigrate || this.tiers[t].dirtyGeneration > this.tiers[t].publishedGeneration);
+		const freshEntries = [...this.pendingTransitions.values()];
+		const activeRecovery = this.activeTransitionIntent;
+		const activeIntent = activeRecovery?.intent ?? null;
+		const freshTransition = freshEntries.length > 0 && !activeIntent;
+		const cleanupIntent = this.transitionIntentCleanup;
+		// A fresh membership transition must prepare and publish a complete pair,
+		// even if a coalesced prior write advanced one tier's dirty watermark.
+		if (freshTransition) selected = [...new Set<SessionTier>([...selected, "live", "archived"])];
+		// A legacy source is kept authoritative until archive publication succeeds;
+		// pair transitions remain archive-first after both tiers have been prepared.
+		if (mustMigrate || freshTransition || activeIntent) selected.sort((a, b) => a === "archived" ? -1 : b === "archived" ? 1 : 0);
+		if (!selected.length && !cleanupIntent) return this.generation;
+
+		const json: Partial<Record<SessionTier, string>> = {};
+		// Recovery must repair the frozen post-intent pair, never a later mutable
+		// map snapshot. Later dirty generations are deliberately drained afterward.
+		if (!activeRecovery) {
+			for (const tier of selected) {
+				json[tier] = JSON.stringify(Array.from(this.sessions.values()).filter(s => this.tierForSession(s) === tier));
+			}
+		}
+		const serializedGeneration = this.generation;
+		const fenced = freshTransition || activeIntent || cleanupIntent ? ["live", "archived"] as SessionTier[] : selected;
+		return this.withTierWriteFences(fenced, async () => {
+			if (cleanupIntent && !activeIntent) {
+				const cleanup = await this.clearTransitionIntentIfSpentUnlocked(cleanupIntent);
+				if (cleanup === "mismatch") throw new Error("Session persistence refused: transition intent changed before cleanup");
+				this.transitionIntentCleanup = null;
+				if (!selected.length) return serializedGeneration;
+			}
+
+			const persistedBytes: Partial<Record<SessionTier, number>> = {};
+			let publishedTiers = selected;
+			const completedGeneration = activeRecovery?.generation ?? serializedGeneration;
+			if (activeRecovery && activeIntent) {
+				// Never replace a durable pair binding on retry. Its exact base/target
+				// epochs decide whether it can be repaired, discarded, or only cleaned.
+				const states = await this.transitionEpochStatesUnlocked(activeIntent);
+				if (!states.live || !states.archived) {
+					throw new Error("Session persistence refused: active transition intent no longer matches tier epochs");
+				}
+				const binding = await this.transitionIntentBindingUnlocked(activeIntent);
+				if (binding === "mismatch") {
+					throw new Error("Session persistence refused: active transition intent changed before recovery");
+				}
+				const bothBase = states.live === "base" && states.archived === "base";
+				const bothTarget = states.live === "target" && states.archived === "target";
+				if (bothBase) {
+					if (binding === "exact") {
+						const cleanup = await this.clearTransitionIntentIfSpentUnlocked(activeIntent);
+						if (cleanup === "mismatch") throw new Error("Session persistence refused: transition intent changed before cleanup");
+					}
+					// Neither rename occurred. Whether this store or a peer removed the
+					// binding, pending entries stay eligible for a fresh epoch-bound try.
+					this.activeTransitionIntent = null;
+					this.asyncSaveRequested = true;
+					return this.publishedGeneration;
+				}
+				if (!bothTarget) {
+					// A peer may have cleaned the intent while we were down. Restore the
+					// identical v2 bytes before repairing the missing tier so a second
+					// crash remains unambiguous.
+					if (binding === "absent") await this.writeTransitionIntent(activeIntent);
+					const missing = (["archived", "live"] as SessionTier[]).filter(tier => states[tier] === "base");
+					for (const tier of missing) {
+						const epoch = activeIntent.epochs[tier];
+						const rowsJson = activeRecovery.rowsJson[tier];
+						const payload = `{"version":3,"epoch":${epoch.target},"sessions":${rowsJson}}`;
+						persistedBytes[tier] = await this.publishPreparedTierUnlockedAsync({
+							tier, baseEpoch: epoch.base, targetEpoch: epoch.target, payload, payloadBytes: Buffer.byteLength(payload),
+						});
+					}
+				}
+				const cleanup = await this.clearTransitionIntentIfSpentUnlocked(activeIntent);
+				if (cleanup === "mismatch") throw new Error("Session persistence refused: transition intent changed before cleanup");
+				this.activeTransitionIntent = null;
+				publishedTiers = ["live", "archived"];
+				for (const entry of activeIntent.entries) if (this.pendingTransitions.get(entry.id) === entry) this.pendingTransitions.delete(entry.id);
+				// The pair only establishes its own frozen generation. Any mutation
+				// folded in after that snapshot retains its tier dirtiness and must get
+				// a trailing drain with a new transition intent if membership changed.
+				if (this.generation > activeRecovery.generation || this.pendingTransitions.size) this.asyncSaveRequested = true;
+			} else {
+				// Preparation has no side effects. For a fresh membership transition all
+				// tier guards run under both fences before its intent or either rename.
+				const prepared: Partial<Record<SessionTier, PreparedTierWrite>> = {};
+				for (const tier of selected) prepared[tier] = await this.prepareTierWriteUnlockedAsync(tier, json[tier]!);
+				if (mustMigrate) await this.retainLegacySnapshotAsync();
+				let intent: TransitionIntent | null = null;
+				if (freshTransition) {
+					const live = prepared.live;
+					const archived = prepared.archived;
+					if (!live || !archived) throw new Error("Session persistence refused: membership transition did not prepare both tiers");
+					intent = {
+						version: 2,
+						entries: freshEntries,
+						epochs: {
+							live: { base: live.baseEpoch, target: live.targetEpoch },
+							archived: { base: archived.baseEpoch, target: archived.targetEpoch },
+						},
+					};
+					await this.writeTransitionIntent(intent);
+					this.activeTransitionIntent = {
+						intent,
+						rowsJson: { live: json.live!, archived: json.archived! },
+						generation: serializedGeneration,
+					};
+				}
+				for (const tier of selected) persistedBytes[tier] = await this.publishPreparedTierUnlockedAsync(prepared[tier]!);
+				if (intent) {
+					const cleanup = await this.clearTransitionIntentIfSpentUnlocked(intent);
+					if (cleanup === "mismatch") {
+						throw new Error("Session persistence refused: transition intent changed before cleanup");
+					}
+					this.activeTransitionIntent = null;
+					for (const entry of freshEntries) if (this.pendingTransitions.get(entry.id) === entry) this.pendingTransitions.delete(entry.id);
+				}
+			}
+			for (const tier of publishedTiers) this.tiers[tier].publishedGeneration = Math.max(this.tiers[tier].publishedGeneration, completedGeneration);
+			this.migrationNeeded = false;
+			const liveBytes = persistedBytes.live ?? 0;
+			const archivedBytes = persistedBytes.archived ?? 0;
+			this.lastPersistenceMetrics = { bytes: liveBytes + archivedBytes, liveBytes, archivedBytes, durationMs: performance.now() - startedAt };
+			return completedGeneration;
+		});
 	}
 
 	private async drainAsyncSaves(): Promise<void> {
@@ -744,7 +1128,7 @@ export class SessionStore {
 					this.lastPersistenceError = err;
 					// The stale guard already emitted its actionable REFUSING diagnostic.
 					// Keep hot-path retries quiet while explicit barriers still reject.
-					if (!this.staleGuardTripped) console.error("[session-store] Failed to save sessions:", err);
+					if (!(Object.values(this.tiers) as TierPersistenceState[]).some(tier => tier.staleGuardTripped)) console.error("[session-store] Failed to save sessions:", err);
 					// Do not spin on a broken disk. A later mutation or explicit barrier
 					// may retry; barriers observe this failure instead of false success.
 					this.asyncSaveRequested = false;
@@ -791,8 +1175,10 @@ export class SessionStore {
 	onIndexUpdate?: (session: PersistedSession) => void;
 
 	put(session: PersistedSession): void {
+		const previous = this.sessions.get(session.id);
 		this.generation++;
 		this.sessions.set(session.id, session);
+		this.markMutation(previous, session);
 		this.saveNow(); // immediate — structural change
 		this.onIndexUpdate?.(session);
 	}
@@ -802,12 +1188,15 @@ export class SessionStore {
 	}
 
 	remove(id: string): void {
+		const existing = this.sessions.get(id);
+		// Preserve the legacy hard-delete contract: an unknown id still records a
+		// tombstone, preventing stale migration sources from resurrecting it.
 		this.generation++;
 		this.sessions.delete(id);
+		this.markMutation(existing, undefined);
 		this.saveNow(); // immediate — structural change
 		// Durably tombstone this hard-delete so the boot-time headquarters
-		// migration does not resurrect the record from a stale
-		// `.pre-headquarters-id-migration` backup on the next restart.
+		// migration does not resurrect the record from a stale backup on restart.
 		recordDeletionTombstone(this.storeDir, "sessions.json", id);
 	}
 
@@ -842,8 +1231,10 @@ export class SessionStore {
 	update(id: string, updates: Partial<UpdatableSessionFields>): void {
 		const existing = this.sessions.get(id);
 		if (!existing) return;
+		const previous = { ...existing };
 		this.generation++;
 		Object.assign(existing, updates);
+		this.markMutation(previous, existing);
 
 		// Recovery-critical fields bypass the high-frequency debounce.
 		const critical = SessionStore.RECOVERY_CRITICAL_FIELDS.some(f => f in updates);
@@ -869,12 +1260,14 @@ export class SessionStore {
 	restoreUserTagsShape(id: string, present: boolean, value: unknown): boolean {
 		const existing = this.sessions.get(id);
 		if (!existing) return false;
+		const previous = { ...existing };
 		this.generation++;
 		if (present) {
 			(existing as unknown as { user_tags: unknown }).user_tags = value;
 		} else {
 			delete existing.user_tags;
 		}
+		this.markMutation(previous, existing);
 		if (this.saveTimer) { this.clock.clearTimeout(this.saveTimer); this.saveTimer = null; }
 		this.saveNow();
 		return true;
@@ -907,9 +1300,11 @@ export class SessionStore {
 				}
 			}
 		}
+		const previous = { ...session };
 		this.generation++;
 		if (!session.drafts) session.drafts = {};
 		session.drafts[type] = data;
+		this.markMutation(previous, session);
 		this.save();
 		return true;
 	}
@@ -918,12 +1313,14 @@ export class SessionStore {
 	deleteDraft(sessionId: string, type: string): boolean {
 		const session = this.sessions.get(sessionId);
 		if (!session?.drafts) return false;
+		const previous = { ...session };
 		this.generation++;
 		delete session.drafts[type];
 		// Clean up empty drafts object
 		if (Object.keys(session.drafts).length === 0) {
 			delete session.drafts;
 		}
+		this.markMutation(previous, session);
 		this.save();
 		return true;
 	}
@@ -932,9 +1329,11 @@ export class SessionStore {
 	archive(id: string): boolean {
 		const existing = this.sessions.get(id);
 		if (!existing) return false;
+		const previous = { ...existing };
 		this.generation++;
 		existing.archived = true;
 		existing.archivedAt = this.clock.now();
+		this.markMutation(previous, existing);
 		this.saveNow(); // immediate — structural change
 		this.onIndexUpdate?.(existing);
 		return true;
@@ -953,10 +1352,12 @@ export class SessionStore {
 			return false;
 		}
 		const failureSequence = this.persistenceFailureSequence;
+		const previous = { ...existing };
 		this.generation++;
 		const targetGeneration = this.generation;
 		existing.archived = true;
 		existing.archivedAt = this.clock.now();
+		this.markMutation(previous, existing);
 		if (this.saveTimer) {
 			this.clock.clearTimeout(this.saveTimer);
 			this.saveTimer = null;
@@ -999,6 +1400,7 @@ export class SessionStore {
 		if (!existing) return false;
 		this.generation++;
 		this.sessions.delete(id);
+		this.markMutation(existing, undefined);
 		this.saveNow();
 		// purge() is a permanent hard-delete, exactly like remove() — durably
 		// tombstone it so the boot-time headquarters migration does not resurrect
@@ -1022,6 +1424,7 @@ export class SessionStore {
 		this.generation++;
 		const targetGeneration = this.generation;
 		this.sessions.delete(id);
+		this.markMutation(existing, undefined);
 		if (this.saveTimer) {
 			this.clock.clearTimeout(this.saveTimer);
 			this.saveTimer = null;

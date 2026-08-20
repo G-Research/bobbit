@@ -117,7 +117,11 @@ The allowlist covers (paths are relative to `<rootPath>/.bobbit/`):
 
 - Cross-project gateway state — `state/gateway-url`, `state/watchdog.json`,
   `state/setup-complete`, `state/gateway-restart`, `state/token`,
-  `state/sessions.json`, `state/projects.json`.
+  `state/sessions.json`, `state/sessions.archived.json`,
+  `state/sessions.json.split-transition`, every
+  `state/sessions.json.pre-archived-split*` retention artifact, and
+  `state/projects.json`. The session files must remain together so the running
+  gateway can recover a pending membership transition safely.
 - TLS / DNS challenge state — `state/tls/`, `state/desec.json`.
 - Restart caches — `state/tool-docs/`, `state/mcp-tool-docs/`.
 - Per-session scratch — `state/preview/`, `state/tool-guard/`,

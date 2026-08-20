@@ -80,7 +80,7 @@ A hidden, synthetic project with id `system` is registered at server startup by 
 
 **Hidden flag.** `hidden: true` causes `GET /api/projects` to filter the project out, so it never reaches the client's `state.projects`. UI surfaces (sidebar grouping, project pickers, settings scope rows) therefore behave as if it doesn't exist and show Headquarters as the server scope instead. Internal lookups by id still resolve normally; lookups by `rootPath` or `cwd` (`findByPath`, `findByCwd`) skip hidden projects so the install dir cannot accidentally match the system anchor.
 
-**StateDir anchoring rule.** The system project's `rootPath` **must not** be a path whose derived `stateDir` (`<rootPath>/.bobbit/state/`) collides with any user project's `stateDir`. The startup hook anchors it at `<bobbitStateDir>/system-project/` precisely to avoid this: the install dir itself, and any user project rooted at the install dir, would otherwise share `goals.sqlite` / `sessions.json` with the system context. The collision symptom is duplicate goals appearing in both contexts (this is the trap that was hit during qa-seed implementation — see [docs/debugging.md — Multi-project / per-project state](debugging.md#multi-project--per-project-state)).
+**StateDir anchoring rule.** The system project's `rootPath` **must not** be a path whose derived `stateDir` (`<rootPath>/.bobbit/state/`) collides with any user project's `stateDir`. The startup hook anchors it at `<bobbitStateDir>/system-project/` precisely to avoid this: the install dir itself, and any user project rooted at the install dir, would otherwise share `goals.sqlite` and the `sessions.json` / `sessions.archived.json` tiers with the system context. The collision symptom is duplicate goals appearing in both contexts (this is the trap that was hit during qa-seed implementation — see [docs/debugging.md — Multi-project / per-project state](debugging.md#multi-project--per-project-state)).
 
 **Iteration contract: `visible()` vs `all()`.** `ProjectContextManager` exposes two iterators. `all()` returns **every** context including the hidden system project — use this for callers that legitimately need it (`getContextForSession`, `findStoreForStaff`, MCP discovery, system-scope tool authoring resolution). `visible()` skips `hidden: true` contexts — use this for worktree sweepers, worktree-pool init, goal-manager pool-resolver wiring, unified worktree maintenance, and the `/api/sessions` + `/api/goals` listing aggregations that back the UI. The cross-project aggregation methods on the manager (`getAllLiveGoals`, `getAllLiveSessions`, `getAllGoals`, `getAllSessions`, `searchAll`) filter hidden internally for the same reason. Iterating hidden via `all()` for worktree/pool flows was the root cause of `pool/_pool-*` branches being allocated in unrelated host repos when the bobbit state dir was nested inside one (pinned by `tests/system-project-pool-leak.test.ts`).
 
@@ -95,7 +95,8 @@ Normal projects are self-contained units on disk. Their state (goals, sessions, 
   config/          # Normal project config
   state/
     goals.sqlite   # Goals for THIS project, one JSON-payload row per goal
-    sessions.json  # Sessions for THIS project
+    sessions.json  # Live SessionStore tier for THIS project; see design/split-archived-session-writes.md
+    sessions.archived.json # Archived SessionStore tier, eagerly merged at boot
     tasks.sqlite   # Tasks for THIS project's goals, one JSON-payload row per task
     team-state.json # Team state
     gates.sqlite   # Gate state and signals, one row per gate
@@ -112,7 +113,8 @@ Normal projects are self-contained units on disk. Their state (goals, sessions, 
   colors.json       # Session colors
   goals.sqlite      # Headquarters goals
   tasks.sqlite      # Headquarters tasks
-  sessions.json     # Headquarters sessions
+  sessions.json     # Headquarters live SessionStore tier
+  sessions.archived.json # Headquarters archived SessionStore tier, eagerly merged at boot
   staff.json        # Headquarters staff
   system-project/   # Hidden internal system-project anchor
 ```
@@ -192,8 +194,8 @@ This design prevents a class of data corruption bugs where missing `projectId` v
 
 On first startup after upgrading to per-project state, `migrateToPerProjectState()` (`state-migration.ts`) distributes centralized state to per-project directories:
 
-1. Reads central `goals.json`, `sessions.json`, `tasks.json`, `team-state.json`, `gates.json`, `staff.json`
-2. Groups records by `projectId` (tasks/teams/gates resolve via their goal's project)
+1. Reads central `goals.json`, `sessions.json`, `sessions.archived.json`, `tasks.json`, `team-state.json`, `gates.json`, `staff.json`. The two session files remain separate versioned envelopes during routing.
+2. Groups records by `projectId` (tasks/teams/gates resolve via their goal's project); session recovery treats both tiers as one logical identity set so a tier move cannot duplicate or resurrect a row.
 3. Merges legacy JSON buckets into each project's `<rootPath>/.bobbit/state/` (avoids duplicates by ID)
 4. Staff agents without a `projectId` are anchored to the migration target project (`projectRegistry.getByPath(serverCwd)` if registered, else `projects[0]`). This is **migration-only** behavior - it runs once, is guarded by `.migrated-to-per-project`, and does not imply a runtime default. The block comment on `migrateToPerProjectState()` explains why this anchor is safe and why it must not be reused elsewhere.
 5. Renames central files with `.pre-migration` suffix (not deleted). `GoalStore`, `TaskStore`, and `GateStore` then own their corresponding JSON and recovery sources: each validates and transactionally imports into its separate SQLite authority before collision-safe retirement. The generic recovery pass excludes those three stores so it cannot recreate JSON that SQLite would ignore.
@@ -1360,7 +1362,7 @@ The sidebar shows an "unseen activity" dot on sessions that have new activity si
 
 ### Why server-side
 
-Read state used to live in `localStorage` (key `bobbit-session-visited`). That broke down in three ways: a fresh browser showed every session as unread; a different device had no idea what the first device had already seen; and clearing site data wiped the entire history. Moving the timestamp into `sessions.json` makes it shared across browsers/devices and survives server restarts - the same durability guarantee as every other piece of session metadata.
+Read state used to live in `localStorage` (key `bobbit-session-visited`). That broke down in three ways: a fresh browser showed every session as unread; a different device had no idea what the first device had already seen; and clearing site data wiped the entire history. Moving the timestamp into the appropriate persisted `SessionStore` tier makes it shared across browsers/devices and survives server restarts - the same durability guarantee as every other piece of session metadata.
 
 The trade-off is that there is no real-time push of read-state changes between open tabs - a second tab learns about the read state on its next refresh of the session list. This is acceptable because read state is per-user, low-stakes, and Bobbit is single-user (one server = one read state).
 
@@ -2547,7 +2549,7 @@ Sandboxed agents use standard git worktrees inside the project container when th
 
 ### Session persistence across restarts
 
-Sandbox containers are long-lived and survive gateway restarts (via `--restart=unless-stopped`). Session state (conversation history, branch, goal association) persists in `sessions.json` on the host via the bind-mounted `.bobbit/state/` directory.
+Sandbox containers are long-lived and survive gateway restarts (via `--restart=unless-stopped`). Active session state (conversation history, branch, goal association) persists in the live `sessions.json` tier on the host via the bind-mounted `.bobbit/state/` directory; archived metadata remains in its eagerly loaded `sessions.archived.json` sibling.
 
 **Recovery flow on gateway startup:**
 
@@ -3421,7 +3423,7 @@ Each registered project has its own state directory. All store data is scoped to
 | File / Directory | Owner | Purpose |
 |---|---|---|
 | `goals.sqlite` | `GoalStore` | One transactional SQLite row per goal containing the flexible JSON payload. Startup automatically imports validated `goals.json` and `.pre-migration` recovery. See [Goal and task store SQLite persistence](design/goal-task-store-sqlite-persistence.md). |
-| `sessions.json` | `SessionStore` | Session metadata |
+| `sessions.json` + `sessions.archived.json` | `SessionStore` | Independently versioned live and archived session tiers, eagerly merged into one store. See [Split archived SessionStore writes](design/split-archived-session-writes.md). |
 | `tasks.sqlite` | `TaskStore` | One transactional SQLite row per task containing the flexible JSON payload. Startup automatically imports validated `tasks.json` and `.pre-migration` recovery. See [Goal and task store SQLite persistence](design/goal-task-store-sqlite-persistence.md). |
 | `gates.sqlite` | `GateStore` | One transactional SQLite row per gate containing the flexible JSON payload. Startup automatically imports validated `gates.json` and `.pre-migration` recovery, then moves sources to collision-safe backups using atomic no-replace links before source unlink. See [Gate store SQLite persistence](design/gate-store-sqlite-persistence.md). |
 | `team-state.json` | `TeamStore` | Team agents/roles |

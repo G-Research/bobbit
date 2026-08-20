@@ -13,7 +13,7 @@ npm run test:e2e       # E2E v2: git/worktree/Docker/MCP/restart
 npm run test:manual    # Real agents/LLM + Docker (~5 min); ONLY gate-exempt path
 ```
 
-UI changes (`src/ui/`, `src/app/`) hot-reload under `npm run dev:harness`. Server changes (`src/server/`) require `npm run restart-server`. Run `npm run check` first. Sessions survive restarts via `.bobbit/state/sessions.json`.
+UI changes (`src/ui/`, `src/app/`) hot-reload under `npm run dev:harness`. Server changes (`src/server/`) require `npm run restart-server`. Run `npm run check` first. Sessions survive restarts through the split live (`.bobbit/state/sessions.json`) and archived (`.bobbit/state/sessions.archived.json`) tiers.
 
 ## Architecture map
 

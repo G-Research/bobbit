@@ -952,10 +952,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		consumer: "tests2/integration/session-store-real-fs.test.ts",
 		allowReason: "isolated integration gateway, project, or harness-owned output",
 		reads: frozen([
-			{ expression: "storeFile", count: 5 },
+			{ expression: "storeFile", count: 8 },
 			{ expression: "bak1", count: 1 },
 			{ expression: "bak2", count: 1 },
 			{ expression: "`${storeFile}.bak.1`", count: 1 },
+			{ expression: "`${storeFile}.pre-archived-split`", count: 2 },
+			{ expression: "`${storeFile}.pre-archived-split.1`", count: 2 },
+			{ expression: "archivedFile", count: 3 },
 		]),
 	},
 	{
@@ -1846,6 +1849,8 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 			{ expression: "path.join(overrideConfig, \"project.yaml\")", count: 1 },
 			{ expression: "normalStaffFile", count: 2 },
 			{ expression: "hqStaffFile", count: 2 },
+			{ expression: "liveFile", count: 2 },
+			{ expression: "archivedFile", count: 2 },
 		]),
 	},
 	{

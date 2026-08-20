@@ -48,6 +48,7 @@ function createSessionStoreMemFs(): SessionStoreMemFs {
 
 const stateDir = path.join("/state", "session-store-stale");
 const STORE_FILE = path.join(stateDir, "sessions.json");
+const ARCHIVED_FILE = path.join(stateDir, "sessions.archived.json");
 let memfs: SessionStoreMemFs;
 
 function makeSession(id: string): PersistedSession {
@@ -73,7 +74,7 @@ describe("SessionStore stale-snapshot guard", () => {
 
 		// External writer puts a v2 file with epoch 50 after we constructed.
 		const externalPayload = {
-			version: 2,
+			version: 3,
 			epoch: 50,
 			sessions: [{
 				id: "external-1",
@@ -161,5 +162,104 @@ describe("SessionStore stale-snapshot guard", () => {
 		const after6 = JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8"));
 		assert.equal(after6.epoch, 2);
 		assert.equal(store.isStaleGuardTripped(), false);
+	});
+
+	it("isolates stale guards and epoch validation between live and archived tiers", async () => {
+		const seed = new SessionStore(stateDir, memfs);
+		seed.put(makeSession("live"));
+		seed.put({ ...makeSession("archived"), archived: true, archivedAt: 1 });
+		await seed.flushAsync();
+
+		const liveWriter = new SessionStore(stateDir, memfs);
+		const archiveWriter = new SessionStore(stateDir, memfs);
+		const archiveExternal = { version: 3, epoch: 99, sessions: [{ ...makeSession("archived"), archived: true, archivedAt: 1 }] };
+		memfs.writeFileSync(ARCHIVED_FILE, JSON.stringify(archiveExternal), "utf-8");
+
+		liveWriter.update("live", { title: "live must still publish" });
+		await liveWriter.flushAsync();
+		assert.equal(liveWriter.isStaleGuardTripped(), false, "an archive rewrite must not trip the live latch");
+		assert.equal(JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8")).sessions[0].title, "live must still publish");
+
+		archiveWriter.update("archived", { title: "stale archive writer" });
+		await assert.rejects(archiveWriter.flushAsync(), /stale-snapshot|newer than loaded epoch/i);
+		assert.deepEqual(JSON.parse(memfs.readFileSync(ARCHIVED_FILE, "utf-8")), archiveExternal);
+
+		const archiveOnlyWriter = new SessionStore(stateDir, memfs);
+		const liveExternal = { version: 3, epoch: 123, sessions: [makeSession("live")] };
+		memfs.writeFileSync(STORE_FILE, JSON.stringify(liveExternal), "utf-8");
+		archiveOnlyWriter.update("archived", { title: "archive must still publish" });
+		await archiveOnlyWriter.flushAsync();
+		assert.equal(JSON.parse(memfs.readFileSync(ARCHIVED_FILE, "utf-8")).sessions[0].title, "archive must still publish");
+		assert.deepEqual(JSON.parse(memfs.readFileSync(STORE_FILE, "utf-8")), liveExternal);
+	});
+
+	it("rejects a stale live-to-archive writer before it can publish an intent or erase winner ownership metadata", async () => {
+		const initial = { ...makeSession("shared"), title: "unprivileged original", projectId: "old-project", teamGoalId: "old-goal", role: "coder", sandboxed: false };
+		const seed = new SessionStore(stateDir, memfs);
+		seed.put(initial);
+		await seed.flushAsync();
+
+		const winner = new SessionStore(stateDir, memfs);
+		const stale = new SessionStore(stateDir, memfs);
+		const winnerFields = { title: "secured live winner", projectId: "secure-project", teamGoalId: "secure-goal", role: "team-lead", sandboxed: true, assistantType: "goal" };
+		winner.update("shared", winnerFields);
+		await winner.flushAsync();
+		const winningLiveBytes = memfs.readFileSync(STORE_FILE, "utf-8");
+		const winningLive = JSON.parse(winningLiveBytes);
+		assert.equal(winningLive.epoch, 2);
+		assert.equal(memfs.existsSync(ARCHIVED_FILE), false);
+
+		const originalError = console.error;
+		console.error = () => {};
+		try {
+			assert.equal(stale.archive("shared"), true);
+			await assert.rejects(stale.flushAsync(), /stale-snapshot|newer than loaded epoch/i);
+		} finally {
+			console.error = originalError;
+		}
+
+		assert.equal(stale.isTierStaleGuardTripped("live"), true);
+		assert.equal(stale.isTierStaleGuardTripped("archived"), false);
+		assert.equal(stale.getTierWrittenEpoch("live"), 0);
+		assert.equal(stale.getTierWrittenEpoch("archived"), 0);
+		assert.equal(memfs.readFileSync(STORE_FILE, "utf-8"), winningLiveBytes, "rejected stale store must not alter winner live bytes");
+		assert.equal(memfs.existsSync(ARCHIVED_FILE), false, "rejected pair must not create an archive tier");
+		assert.equal(memfs.existsSync(`${STORE_FILE}.split-transition`), false, "rejected pair must not publish stale transition authority");
+		assert.deepEqual(winningLive.sessions, [{ ...initial, ...winnerFields }], "winner security and ownership metadata survives");
+	});
+
+	it("rejects a stale archived-to-live writer before it can publish an intent or resurrect a live row", async () => {
+		const initial = { ...makeSession("shared"), title: "unprivileged archive", archived: true, archivedAt: 10, projectId: "old-project", teamGoalId: "old-goal", role: "coder", sandboxed: false };
+		const seed = new SessionStore(stateDir, memfs);
+		seed.put(initial);
+		await seed.flushAsync();
+
+		const winner = new SessionStore(stateDir, memfs);
+		const stale = new SessionStore(stateDir, memfs);
+		const winnerFields = { title: "secured archived winner", projectId: "secure-project", teamGoalId: "secure-goal", role: "reviewer", sandboxed: true, assistantType: "role" };
+		winner.update("shared", winnerFields);
+		await winner.flushAsync();
+		const winningArchiveBytes = memfs.readFileSync(ARCHIVED_FILE, "utf-8");
+		const winningArchive = JSON.parse(winningArchiveBytes);
+		assert.equal(winningArchive.epoch, 2);
+		assert.equal(memfs.existsSync(STORE_FILE), false);
+
+		const originalError = console.error;
+		console.error = () => {};
+		try {
+			stale.update("shared", { archived: false });
+			await assert.rejects(stale.flushAsync(), /stale-snapshot|newer than loaded epoch/i);
+		} finally {
+			console.error = originalError;
+		}
+
+		assert.equal(stale.isTierStaleGuardTripped("archived"), true);
+		assert.equal(stale.isTierStaleGuardTripped("live"), false);
+		assert.equal(stale.getTierWrittenEpoch("live"), 0);
+		assert.equal(stale.getTierWrittenEpoch("archived"), 0);
+		assert.equal(memfs.readFileSync(ARCHIVED_FILE, "utf-8"), winningArchiveBytes, "rejected stale store must not alter winner archive bytes");
+		assert.equal(memfs.existsSync(STORE_FILE), false, "rejected pair must not resurrect a live row");
+		assert.equal(memfs.existsSync(`${STORE_FILE}.split-transition`), false, "rejected pair must not publish stale transition authority");
+		assert.deepEqual(winningArchive.sessions, [{ ...initial, ...winnerFields }], "winner security and ownership metadata survives");
 	});
 });

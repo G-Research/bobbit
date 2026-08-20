@@ -11,7 +11,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { createFsFromVolume, Volume } from "memfs";
-import { migrateLegacyHeadquartersDirectory, migrateToPerProjectState } from "../../src/server/agent/state-migration.js";
+import { migrateLegacyHeadquartersDirectory, migrateToPerProjectState, recoverPreMigrationData } from "../../src/server/agent/state-migration.js";
+import { SessionStore } from "../../src/server/agent/session-store.js";
 import { serverSecretsDir } from "../../src/server/bobbit-dir.js";
 import {
 	HEADQUARTERS_PROJECT_ID,
@@ -314,6 +315,78 @@ describe("Headquarters directory migration", () => {
 		assert.equal(reread.version, 2);
 		assert.equal(reread.epoch, epoch);
 		assert.equal(reread.sessions.length, 1);
+	});
+
+	// v3 splits SessionStore persistence into independent live and archived envelopes.
+	// The always-run Headquarters sanitizer must preserve both envelope versions and
+	// epochs, sanitize their rows in place, and remain byte-stable on the next boot.
+	it("round-trips v3 live and archived session tiers through repeated Headquarters migration", () => {
+		const root = tmpRoot();
+		const dirs = migrateDirs(root);
+		const worktreePath = path.join(root, "..", "repo-wt", "goal-branch");
+		const liveFile = path.join(dirs.headquartersStateDir, "sessions.json");
+		const archivedFile = path.join(dirs.headquartersStateDir, "sessions.archived.json");
+		writeJson(liveFile, {
+			version: 3,
+			epoch: 17,
+			sessions: [{
+				id: "live-v3",
+				title: "Live v3",
+				cwd: worktreePath,
+				agentSessionFile: "live.jsonl",
+				projectId: HEADQUARTERS_PROJECT_ID,
+				createdAt: 1,
+				lastActivity: 2,
+				worktreePath,
+				customLiveField: { preserved: true },
+			}],
+		});
+		writeJson(archivedFile, {
+			version: 3,
+			epoch: 23,
+			sessions: [{
+				id: "archived-v3",
+				title: "Archived v3",
+				cwd: worktreePath,
+				agentSessionFile: "archived.jsonl",
+				projectId: HEADQUARTERS_PROJECT_ID,
+				createdAt: 3,
+				lastActivity: 4,
+				archived: true,
+				archivedAt: 5,
+				branch: "goal/legacy",
+				customArchivedField: { preserved: true },
+			}],
+		});
+
+		migrateLegacyHeadquartersDirectory(dirs);
+		const firstLiveBytes = fs.readFileSync(liveFile, "utf-8");
+		const firstArchivedBytes = fs.readFileSync(archivedFile, "utf-8");
+		migrateLegacyHeadquartersDirectory(dirs);
+		assert.equal(fs.readFileSync(liveFile, "utf-8"), firstLiveBytes, "live v3 tier must be byte-stable on the second migration");
+		assert.equal(fs.readFileSync(archivedFile, "utf-8"), firstArchivedBytes, "archived v3 tier must be byte-stable on the second migration");
+
+		const live = readJson<{ version: number; epoch: number; sessions: Array<Record<string, unknown>> }>(liveFile);
+		const archived = readJson<{ version: number; epoch: number; sessions: Array<Record<string, unknown>> }>(archivedFile);
+		assert.equal(live.version, 3);
+		assert.equal(live.epoch, 17);
+		assert.equal(archived.version, 3);
+		assert.equal(archived.epoch, 23);
+		assert.deepEqual(live.sessions.map(session => session.id), ["live-v3"]);
+		assert.deepEqual(archived.sessions.map(session => session.id), ["archived-v3"]);
+		assert.deepEqual(live.sessions[0].customLiveField, { preserved: true });
+		assert.deepEqual(archived.sessions[0].customArchivedField, { preserved: true });
+		assert.equal(Object.hasOwn(live.sessions[0], "worktreePath"), false);
+		assert.equal(Object.hasOwn(archived.sessions[0], "branch"), false);
+
+		const reloaded = new SessionStore(dirs.headquartersStateDir);
+		const reloadedLive = reloaded.getLive();
+		const reloadedArchived = reloaded.getArchived();
+		assert.equal(reloadedLive.length + reloadedArchived.length, 2, "all v3 records must survive");
+		assert.equal(reloadedLive.length, 1, "live count must survive");
+		assert.equal(reloadedArchived.length, 1, "archived count must survive");
+		assert.deepEqual(reloadedLive.map(session => session.id), ["live-v3"]);
+		assert.deepEqual(reloadedArchived.map(session => session.id), ["archived-v3"]);
 	});
 
 	// Security regression (S1): live server secrets must live OUTSIDE any project
@@ -880,6 +953,256 @@ describe("Headquarters directory migration", () => {
 		assert.equal(sessionIds.includes("s-dropped"), true, "un-tombstoned backup-only session must still be recovered");
 		assert.equal(goalIds.includes("g-deleted"), false, "tombstoned goal must not be resurrected");
 		assert.equal(goalIds.includes("g-dropped"), true, "un-tombstoned backup-only goal must still be recovered");
+	});
+
+	// Split-session regression: a pre-v3 sessions.json backup can contain a row
+	// that has since been archived. The archived tier is a current copy of that
+	// logical session, so recovery must not reintroduce it into live storage and
+	// retirement must count the sibling tier as recovered.
+	it("does not reintroduce an archived session from a pre-split live backup and retires it", () => {
+		const root = tmpRoot();
+		const override = tmpRoot("bobbit-hq-override-");
+		useIsolatedSecretsDir();
+		const overrideState = path.join(override, "state");
+		fs.mkdirSync(overrideState, { recursive: true });
+		const oldId = "override-normal-project";
+		writeJson(path.join(overrideState, "projects.json"), [hqProject(override)]);
+		writeJson(path.join(overrideState, "projects.json.pre-headquarters-id-migration"), [normalProject(oldId, root, { name: "Override Normal" })]);
+		fs.writeFileSync(path.join(overrideState, ".headquarters-dir-migrated"), "done", "utf-8");
+		writeJson(path.join(overrideState, "sessions.json"), [
+			{ id: "s-survivor", title: "Live", cwd: root, agentSessionFile: "live.jsonl", projectId: HEADQUARTERS_PROJECT_ID, createdAt: 1, lastActivity: 1 },
+		]);
+		// This is a legacy pre-split backup: s-now-archived used to be live.
+		writeJson(path.join(overrideState, "sessions.json.pre-headquarters-id-migration"), [
+			{ id: "s-survivor", title: "Live", cwd: root, agentSessionFile: "live.jsonl", projectId: oldId, createdAt: 1, lastActivity: 1 },
+			{ id: "s-now-archived", title: "Archived", cwd: root, agentSessionFile: "archived.jsonl", projectId: oldId, createdAt: 1, lastActivity: 1, archived: true },
+		]);
+		writeJson(path.join(overrideState, "sessions.archived.json"), [
+			{ id: "s-now-archived", title: "Archived", cwd: root, agentSessionFile: "archived.jsonl", projectId: oldId, createdAt: 1, lastActivity: 1, archived: true },
+		]);
+
+		migrateLegacyHeadquartersDirectory(overrideDirs(root, override, overrideState));
+
+		const normalState = path.join(root, ".bobbit", "state");
+		const normalLive = readJson<Array<Record<string, unknown>>>(path.join(normalState, "sessions.json"));
+		const normalArchived = readJson<Array<Record<string, unknown>>>(path.join(normalState, "sessions.archived.json"));
+		assert.equal(normalLive.some(session => session.id === "s-now-archived"), false, "a row present in the archived tier must not be recovered into live storage");
+		assert.equal(normalArchived.some(session => session.id === "s-now-archived"), true, "the archived tier remains the recovered location");
+		assert.equal(fs.existsSync(path.join(overrideState, "sessions.json.pre-headquarters-id-migration")), false, "the pre-split backup is fully accounted for across both tiers");
+		assert.equal(fs.existsSync(path.join(overrideState, "sessions.json.pre-headquarters-id-migration-recovered")), true);
+	});
+
+	// Both tiers share the sessions.json deletion namespace. A purge while a row
+	// is archived must suppress backup-only recovery and make its archived backup
+	// eligible for retirement.
+	it("keeps a purged archived session deleted and retires its archived backup", () => {
+		const root = tmpRoot();
+		const override = tmpRoot("bobbit-hq-override-");
+		useIsolatedSecretsDir();
+		const overrideState = path.join(override, "state");
+		fs.mkdirSync(overrideState, { recursive: true });
+		const oldId = "override-normal-project";
+		writeJson(path.join(overrideState, "projects.json"), [hqProject(override)]);
+		writeJson(path.join(overrideState, "projects.json.pre-headquarters-id-migration"), [normalProject(oldId, root, { name: "Override Normal" })]);
+		fs.writeFileSync(path.join(overrideState, ".headquarters-dir-migrated"), "done", "utf-8");
+		writeJson(path.join(overrideState, "sessions.archived.json"), [
+			{ id: "s-archived-survivor", title: "Archived", cwd: root, agentSessionFile: "archived.jsonl", projectId: HEADQUARTERS_PROJECT_ID, createdAt: 1, lastActivity: 1, archived: true },
+		]);
+		writeJson(path.join(overrideState, "sessions.archived.json.pre-headquarters-id-migration"), [
+			{ id: "s-archived-survivor", title: "Archived", cwd: root, agentSessionFile: "archived.jsonl", projectId: oldId, createdAt: 1, lastActivity: 1, archived: true },
+			{ id: "s-archived-purged", title: "Purged", cwd: root, agentSessionFile: "purged.jsonl", projectId: oldId, createdAt: 1, lastActivity: 1, archived: true },
+		]);
+		// SessionStore records all hard-deletes here, independent of the tier.
+		writeJson(path.join(overrideState, ".deletion-tombstones.json"), { "sessions.json": ["s-archived-purged"] });
+
+		migrateLegacyHeadquartersDirectory(overrideDirs(root, override, overrideState));
+
+		const allSessionFiles = [
+			path.join(overrideState, "sessions.json"),
+			path.join(overrideState, "sessions.archived.json"),
+			path.join(root, ".bobbit", "state", "sessions.json"),
+			path.join(root, ".bobbit", "state", "sessions.archived.json"),
+		];
+		const allIds = allSessionFiles.flatMap(file => {
+			if (!fs.existsSync(file)) return [];
+			const raw = readJson<Array<Record<string, unknown>> | { sessions?: Array<Record<string, unknown>> }>(file);
+			return (Array.isArray(raw) ? raw : (raw.sessions ?? [])).map(session => String(session.id));
+		});
+		assert.equal(allIds.includes("s-archived-purged"), false, "the canonical sessions.json tombstone must suppress archived backup recovery");
+		assert.equal(fs.existsSync(path.join(overrideState, "sessions.archived.json.pre-headquarters-id-migration")), false, "the tombstoned archived backup is fully accounted for");
+		assert.equal(fs.existsSync(path.join(overrideState, "sessions.archived.json.pre-headquarters-id-migration-recovered")), true);
+	});
+
+	// Session tier `.pre-migration` recovery happens outside the Headquarters
+	// re-attribution pass. It must still use one canonical `sessions.json`
+	// tombstone namespace, keep each v3 envelope's independent metadata, and
+	// never route an archived recovery into the live tier.
+	it("suppresses tombstoned rows from both split session recovery backups while preserving v3 tiers", () => {
+		const stateDir = tmpRoot("split-session-recovery-");
+		const liveFile = path.join(stateDir, "sessions.json");
+		const archivedFile = path.join(stateDir, "sessions.archived.json");
+		writeJson(liveFile, {
+			version: 3,
+			epoch: 41,
+			sessions: [{ id: "live-current", title: "Current live", cwd: stateDir, agentSessionFile: "live-current.jsonl", createdAt: 1, lastActivity: 1 }],
+		});
+		writeJson(archivedFile, {
+			version: 3,
+			epoch: 59,
+			sessions: [{ id: "archived-current", title: "Current archived", cwd: stateDir, agentSessionFile: "archived-current.jsonl", createdAt: 1, lastActivity: 1, archived: true }],
+		});
+		writeJson(liveFile + ".pre-migration", [
+			{ id: "live-deleted", title: "Deleted live", cwd: stateDir, agentSessionFile: "live-deleted.jsonl", createdAt: 1, lastActivity: 1 },
+			{ id: "live-recoverable", title: "Recovered live", cwd: stateDir, agentSessionFile: "live-recoverable.jsonl", createdAt: 1, lastActivity: 1 },
+		]);
+		writeJson(archivedFile + ".pre-migration", [
+			{ id: "archived-deleted", title: "Deleted archived", cwd: stateDir, agentSessionFile: "archived-deleted.jsonl", createdAt: 1, lastActivity: 1, archived: true },
+			{ id: "archived-recoverable", title: "Recovered archived", cwd: stateDir, agentSessionFile: "archived-recoverable.jsonl", createdAt: 1, lastActivity: 1, archived: true },
+		]);
+		writeJson(path.join(stateDir, ".deletion-tombstones.json"), {
+			// Both split tier backups must consult this canonical namespace.
+			"sessions.json": ["live-deleted", "archived-deleted"],
+		});
+
+		recoverPreMigrationData(stateDir);
+
+		const live = readJson<{ version: number; epoch: number; sessions: Array<Record<string, unknown>> }>(liveFile);
+		const archived = readJson<{ version: number; epoch: number; sessions: Array<Record<string, unknown>> }>(archivedFile);
+		assert.deepEqual({ version: live.version, epoch: live.epoch }, { version: 3, epoch: 41 }, "live recovery must preserve its v3 envelope metadata");
+		assert.deepEqual({ version: archived.version, epoch: archived.epoch }, { version: 3, epoch: 59 }, "archived recovery must preserve its v3 envelope metadata");
+		assert.deepEqual(live.sessions.map(session => session.id).sort(), ["live-current", "live-recoverable"]);
+		assert.deepEqual(archived.sessions.map(session => session.id).sort(), ["archived-current", "archived-recoverable"]);
+		assert.equal(live.sessions.some(session => session.id === "archived-recoverable"), false, "archived recovery must remain out of the live tier");
+		assert.equal(archived.sessions.find(session => session.id === "archived-recoverable")?.archived, true, "recovered archived session must remain archived");
+	});
+
+	// Cross-tier recovery is one logical identity namespace. A stale backup from
+	// the opposite tier must never overwrite or duplicate the newer authoritative
+	// row — especially not its ownership, worktree, and tool-permission metadata.
+	// A truly absent id shared by both backups belongs to the first source tier and
+	// must be inserted once even when the recovery marker is removed for a re-run.
+	it("keeps authoritative split-tier rows while recovering a shared absent id exactly once across marker re-runs", () => {
+		const stateDir = tmpRoot("split-session-cross-tier-recovery-");
+		const liveFile = path.join(stateDir, "sessions.json");
+		const archivedFile = path.join(stateDir, "sessions.archived.json");
+		const recoveryMarker = path.join(stateDir, ".pre-migration-recovered");
+		const currentLive = {
+			id: "moved-to-live",
+			title: "Current live authority",
+			cwd: path.join(stateDir, "current-live-cwd"),
+			agentSessionFile: "current-live.jsonl",
+			createdAt: 100,
+			lastActivity: 500,
+			projectId: "current-live-owner",
+			teamGoalId: "goal-current-live",
+			teamLeadSessionId: "lead-current-live",
+			worktreePath: path.join(stateDir, "current-live-worktree"),
+			repoPath: path.join(stateDir, "current-live-repo"),
+			branch: "goal/current-live",
+			allowedTools: ["team_prompt"],
+			readOnly: true,
+		};
+		const currentArchived = {
+			id: "moved-to-archived",
+			title: "Current archived authority",
+			cwd: path.join(stateDir, "current-archived-cwd"),
+			agentSessionFile: "current-archived.jsonl",
+			createdAt: 200,
+			lastActivity: 600,
+			projectId: "current-archived-owner",
+			teamGoalId: "goal-current-archived",
+			teamLeadSessionId: "lead-current-archived",
+			worktreePath: path.join(stateDir, "current-archived-worktree"),
+			repoPath: path.join(stateDir, "current-archived-repo"),
+			branch: "goal/current-archived",
+			allowedTools: ["read_session"],
+			readOnly: true,
+			archived: true,
+			archivedAt: 601,
+		};
+		writeJson(liveFile, { version: 3, epoch: 101, sessions: [currentLive] });
+		writeJson(archivedFile, { version: 3, epoch: 211, sessions: [currentArchived] });
+
+		// Both are stale opposite-tier snapshots. If either is appended it would
+		// revive older ownership, worktree provenance, and permission data.
+		writeJson(liveFile + ".pre-migration", [
+			{
+				id: currentArchived.id,
+				title: "Stale live snapshot",
+				cwd: path.join(stateDir, "stale-live-cwd"),
+				agentSessionFile: "stale-live.jsonl",
+				createdAt: 1,
+				lastActivity: 2,
+				projectId: "stale-live-owner",
+				worktreePath: path.join(stateDir, "stale-live-worktree"),
+				branch: "goal/stale-live",
+				allowedTools: ["*"],
+			},
+			{
+				id: "recover-once",
+				title: "Live recovery source",
+				cwd: path.join(stateDir, "recover-once-live-cwd"),
+				agentSessionFile: "recover-once-live.jsonl",
+				createdAt: 3,
+				lastActivity: 4,
+				projectId: "recovery-owner",
+			},
+		]);
+		writeJson(archivedFile + ".pre-migration", [
+			{
+				id: currentLive.id,
+				title: "Stale archived snapshot",
+				cwd: path.join(stateDir, "stale-archived-cwd"),
+				agentSessionFile: "stale-archived.jsonl",
+				createdAt: 5,
+				lastActivity: 6,
+				projectId: "stale-archived-owner",
+				worktreePath: path.join(stateDir, "stale-archived-worktree"),
+				branch: "goal/stale-archived",
+				allowedTools: ["*"],
+				archived: true,
+			},
+			{
+				id: "recover-once",
+				title: "Stale archived recovery duplicate",
+				cwd: path.join(stateDir, "recover-once-archived-cwd"),
+				agentSessionFile: "recover-once-archived.jsonl",
+				createdAt: 7,
+				lastActivity: 8,
+				projectId: "stale-recovery-owner",
+				archived: true,
+			},
+		]);
+
+		recoverPreMigrationData(stateDir);
+		assert.equal(fs.existsSync(recoveryMarker), true, "first recovery must write its completion marker");
+		// Simulate an interrupted/migrated-away marker: re-running must still be a
+		// true no-op for rows already present in either tier.
+		fs.rmSync(recoveryMarker);
+		recoverPreMigrationData(stateDir);
+		assert.equal(fs.existsSync(recoveryMarker), true, "marker-removal re-run must complete without restoring a duplicate");
+
+		const live = readJson<{ version: number; epoch: number; sessions: Array<Record<string, unknown>> }>(liveFile);
+		const archived = readJson<{ version: number; epoch: number; sessions: Array<Record<string, unknown>> }>(archivedFile);
+		assert.deepEqual({ version: live.version, epoch: live.epoch }, { version: 3, epoch: 101 }, "live envelope must retain its independent metadata");
+		assert.deepEqual({ version: archived.version, epoch: archived.epoch }, { version: 3, epoch: 211 }, "archived envelope must retain its independent metadata");
+		assert.deepEqual(live.sessions, [currentLive, {
+			id: "recover-once",
+			title: "Live recovery source",
+			cwd: path.join(stateDir, "recover-once-live-cwd"),
+			agentSessionFile: "recover-once-live.jsonl",
+			createdAt: 3,
+			lastActivity: 4,
+			projectId: "recovery-owner",
+		}], "only the genuine live-source absence may be appended to live storage");
+		assert.deepEqual(archived.sessions, [currentArchived], "no stale live row or duplicate recovery row may be appended to archived storage");
+		assert.equal([...live.sessions, ...archived.sessions].filter(session => session.id === "recover-once").length, 1, "the shared absent id must recover exactly once across both passes");
+
+		const reloaded = new SessionStore(stateDir);
+		assert.deepEqual(reloaded.getLive().map(session => session.id).sort(), ["moved-to-live", "recover-once"]);
+		assert.deepEqual(reloaded.getArchived().map(session => session.id), ["moved-to-archived"]);
+		assert.deepEqual(reloaded.getLive().find(session => session.id === currentLive.id), currentLive, "eager reload must expose only the authoritative live row");
+		assert.deepEqual(reloaded.getArchived().find(session => session.id === currentArchived.id), currentArchived, "eager reload must expose only the authoritative archived row");
 	});
 
 	// Spent-backup retirement: after a completed migration (marker present), a
