@@ -11800,9 +11800,9 @@ export class SessionManager {
 			borrowsWorktree: opts?.borrowsWorktree,
 			borrowedWorktreeOwnerSessionId: opts?.borrowedWorktreeOwnerSessionId,
 			sessionScopedAllowedTools,
-			// Prebuilt host multi-repo worktrees already have all ordinary-cleanup
-			// coordinates. Carry them into persistOnce instead of adding them only
-			// after createSession returns.
+			// Prebuilt host worktrees already have all ordinary-cleanup coordinates.
+			// Carry them into persistOnce instead of adding them only after
+			// createSession returns.
 			worktreePath: opts?.worktreePath,
 			repoPath: opts?.repoPath,
 			branch: opts?.branch,

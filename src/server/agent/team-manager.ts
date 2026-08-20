@@ -2510,14 +2510,14 @@ export class TeamManager {
 				undefined,
 				{
 					rolePrompt, roleName: role, workflowContext, sandboxed: memberSandboxed,
-					// A host multi-repo worker is already fully provisioned. Thread its
-					// ordinary-cleanup coordinates into createSession so the initial
-					// persisted session row owns them before createSession returns.
-					...(workerRepoWorktrees ? {
-						worktreePath: worktreeResult?.worktreePath,
+					// A host worker worktree is already fully provisioned. Thread every
+					// ownership coordinate into createSession so the initial persisted
+					// row proves its exact repo/path/branch identity before return.
+					...(worktreeResult && goal.repoPath ? {
+						worktreePath: worktreeResult.worktreePath,
 						repoPath: goal.repoPath,
 						branch: branchName,
-						repoWorktrees: workerRepoWorktrees,
+						...(workerRepoWorktrees ? { repoWorktrees: workerRepoWorktrees } : {}),
 					} : {}),
 					// Pass branch info so applySandboxWiring creates the worktree inside the container.
 					// The base branch is local-ref-first because sandbox goal branches may be unpublished.
@@ -2544,10 +2544,10 @@ export class TeamManager {
 				role,
 				teamGoalId: goalId,
 				worktreePath: actualWorktreePath,
-				...(workerRepoWorktrees ? {
+				...(worktreeResult && goal.repoPath ? {
 					repoPath: goal.repoPath,
 					branch: branchName,
-					repoWorktrees: workerRepoWorktrees,
+					...(workerRepoWorktrees ? { repoWorktrees: workerRepoWorktrees } : {}),
 				} : {}),
 				accessory: roleAccessory,
 				teamLeadSessionId: entry.teamLeadSessionId ?? undefined,
@@ -2883,11 +2883,9 @@ export class TeamManager {
 			this.sessionManager.updateSessionMeta(sessionId, {
 				worktreePath: agent.worktreePath,
 				teamGoalId: goalId,
-				...(agent.repoWorktrees ? {
-					repoPath: goal.repoPath,
-					branch: agent.branch,
-					repoWorktrees: agent.repoWorktrees,
-				} : {}),
+				repoPath: goal.repoPath,
+				branch: agent.branch,
+				...(agent.repoWorktrees ? { repoWorktrees: agent.repoWorktrees } : {}),
 			} as any);
 			// Store repo coordinates for later purge cleanup. Multi-repo workers
 			// retain their component map so purge never probes the branch container.
