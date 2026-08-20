@@ -93,6 +93,57 @@ Durable regression coverage is kept near the affected contracts:
 
 > **Legacy note — per-goal setup command removed.** An earlier design (PR #816) added bespoke per-goal `worktreeSetupCommand` / `worktreeSetupTimeoutMs` fields on `PersistedGoal`, plus matching REST, `propose_goal`, and goal-dialog affordances. That surface is **superseded by goal metadata and the `goalProvisioned` hook** and has been removed: the goal-store load path **drops** those legacy fields, the REST / `propose_goal` / UI inputs no longer exist, and posting them has no effect. Only the **component / project** `worktree_setup_command` (and its `worktree_setup_timeout_ms`) remains supported. To run goal-specific setup, declare metadata that an extension's `goalProvisioned` provider acts on — that hook fires at **every** worktree provisioning in the subtree (including pool claims), so filesystem treatments land on every agent and sub-goal worktree symmetrically, which the single per-goal command could not guarantee.
 
+### Promote the current session in place
+
+A goal proposal can either provision a new goal workspace or adopt the proposal-owning session's existing workspace. The second mode is useful when planning turns into implementation after work has already started: the user keeps the same conversation, checkout, dirty files, and sandbox instead of moving that state into a newly spawned Team Lead.
+
+The proposal's **Worktree** row exposes two modes:
+
+- **New worktree** is the default and retains the ordinary `POST /api/goals` path. An absent mode and an explicitly selected New worktree serialize identically, so existing proposal files and callers remain compatible.
+- **Current session** promotes the proposal owner in place. The panel shows the server-derived branch, worktree path, sandbox state, and multi-repository worktree count. Sandbox and auto-start controls become read-only because the existing realm is retained and that session becomes the lead immediately.
+
+The choice is stored as the optional `worktreeMode: current-session` field in the goal proposal's frontmatter. Proposal edits, revision snapshots, reload rehydration, and archived-draft continuation therefore use the existing proposal-file lifecycle rather than a second preference store. Selecting New worktree removes the field. If an archived draft still selects Current session, the selection remains visible but its archived owner is ineligible; a copied continue-archived draft is evaluated against the new proposal owner.
+
+#### Eligibility and authority
+
+Eligibility is recomputed from live and durable server state both when the panel reads the proposal and immediately before acceptance. The panel's result is advisory; a session that becomes busy or otherwise unsafe before submit is rejected by the final check.
+
+The proposal owner must be:
+
+- a live, non-archived, idle regular interactive session in the proposal's registered project;
+- free of goal, team, staff, assistant, delegate, child, task, read-only, non-interactive, or borrowed-worktree relationships (the ordinary baseline role is allowed);
+- backed by an available durable transcript;
+- the owner of a dedicated branch and worktree whose live and persisted `cwd`, `worktreePath`, `repoPath`, and `branch` agree;
+- complete for every configured Git component in a multi-repository project; and
+- still attached to the same reachable sandbox container when sandboxed.
+
+Promotion also fails when another session, goal, team, or staff record claims an overlapping workspace, or when multiple live goals claim the same promotion provenance. The eligibility response uses stable reason codes such as `SESSION_NOT_IDLE`, `SESSION_HAS_RELATION`, `WORKTREE_UNAVAILABLE`, `MULTI_REPO_MISMATCH`, `SANDBOX_UNAVAILABLE`, and `WORKSPACE_CLAIMED`; see the [owner-scoped REST contract](rest-api.md#current-session-goal-promotion) for the complete response shape.
+
+The source is always the owner named by the proposal route and must remain in the same project. The accept body cannot choose a session, project, checkout, branch, repository, container, or sandbox mode. This prevents a valid proposal from being turned into authority over another checkout by editing a request or draft. Current-session promotion creates a top-level goal; a `parentGoalId` is rejected because adopting a regular session as a nested child would introduce a second lifecycle owner.
+
+#### Acceptance and continuity
+
+Acceptance composes the normal goal framework with an adopted workspace:
+
+1. Create the goal with its normal workflow snapshot, metadata, inline roles, policy, and gate records.
+2. Copy the canonical session coordinates onto the goal, stamp `worktreeOwnerSessionId` as provenance, and mark setup `ready` without provisioning, pool claims, setup commands, or a `goalProvisioned` hook.
+3. Reserve the existing session as the team's only lead. An adopted goal cannot fall through to ordinary `startTeam()` and spawn a second lead.
+4. Replace the agent bridge in place with canonical `team-lead` prompt, goal/team tools, and `BOBBIT_GOAL_ID`, then resume the same transcript. No duplicate kickoff prompt is sent.
+
+The Bobbit session ID, transcript file, title, connected clients, queued work, model/thinking tuple, `cwd`, branch, single- or multi-repository worktrees, sandbox container, and checkout contents stay attached to the same session. Promotion performs no Git checkout, reset, commit, copy, move, rename, or worktree creation, so staged, unstaged, and untracked work is unchanged. `worktreeOwnerSessionId` is an idempotency and recovery link only: the source session remains the checkout and sandbox lifecycle owner.
+
+#### Failure, restart, and cleanup
+
+Acceptance is single-flight per proposal owner. While the reservation is held, competing role or destructive session mutations return `409 SESSION_GOAL_PROMOTION_IN_PROGRESS`. A retry locates an existing live goal only through `worktreeOwnerSessionId`; matching paths or branch names are never enough.
+
+Before the replacement runtime becomes canonical, compensation may remove only the attempt-created empty lead reservation, gates, and adopted goal. It does not touch the source runtime, transcript, sandbox, or checkout. Once runtime replacement commits, later finalization failures retain the exact goal/session/team graph; retry finalizes and returns that same goal instead of creating another.
+
+On gateway restart, adopted-goal reconciliation runs before ordinary orphan-team recovery. It verifies same-project identity and exact coordinates, repairs an unambiguous missing lead reservation, attachment fields, or workflow gates, and then restores the original session runtime and team subscriptions. It never calls ordinary team start, creates a session, provisions a worktree, or transfers a sandbox. Ambiguous records fail closed. If the promoted transcript, worktree, or recorded sandbox realm cannot be restored safely, Bobbit preserves the source as dormant rather than archiving it, repairing the adopted checkout, replacing its container, or silently downgrading it to the host.
+
+A live promoted session cannot be archived or purged directly (`409 PROMOTED_SESSION_LIFECYCLE_CONFLICT`), and its team cannot be torn down independently. Archive the goal instead. The ordered goal path first publishes the goal's archived state, then removes workers and team subscriptions and archives the source session. Archive retention preserves the session-owned worktree; final session purge may remove it only after no live session, goal, team, staff, pool, or container reference remains. Multi-repository component worktrees follow the same ownership rule, and adopted branches are not treated as goal-created remote branches.
+
+For the implementation rationale and recovery boundaries, see [Promote Session to Goal — implementation design](design/session-goal-promotion.md).
+
 ### Headquarters no-worktree goals
 
 Headquarters can host explicit data-only goals without a git worktree. A goal created with `projectId: "headquarters"`, `worktree: false`, and a valid workflow snapshot can reach `setupStatus: "ready"` with no `branch`, `worktreePath`, or `repoPath`.
