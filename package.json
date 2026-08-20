@@ -28,7 +28,7 @@
     "README.md"
   ],
   "scripts": {
-    "build:server": "tsc -p tsconfig.server.json && shx chmod +x dist/server/cli.js && shx rm -rf dist/server/defaults && node scripts/copy-defaults.mjs && shx rm -rf dist/server/builtin-packs && node scripts/copy-builtin-packs.mjs",
+    "build:server": "node scripts/build-server.mjs && shx chmod +x dist/server/cli.js && shx rm -rf dist/server/defaults && node scripts/copy-defaults.mjs && shx rm -rf dist/server/builtin-packs && node scripts/copy-builtin-packs.mjs",
     "build:ui": "vite build",
     "build:packs": "node scripts/build-market-packs.mjs",
     "build": "npm run build:packs && npm run build:server && npm run build:ui",
@@ -76,7 +76,7 @@
     "metrics:baseline": "node scripts/metrics/baseline.mjs",
     "metrics:check": "node scripts/metrics/check.mjs",
     "test": "npm run test:unit && npm run test:browser && npm run test:e2e",
-    "clean": "shx rm -rf dist",
+    "clean": "shx rm -rf dist .profiles/build-server.tsbuildinfo .profiles/build-server-state.json",
     "prepublishOnly": "npm run build",
     "build:binaries": "node scripts/build-binaries.mjs"
   },

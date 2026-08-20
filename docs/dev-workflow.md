@@ -244,44 +244,59 @@ npm exec shx -- rm -f .profiles/check-server.tsbuildinfo .profiles/check-web.tsb
 npm run check
 ```
 
-A truncated or corrupt cache is never source of truth: rerunning `npm run check`
-rebuilds it. If recovery is needed explicitly, use the same cold-reset command.
-`npm run build:server` does not read these caches or enable incremental compilation;
-it still emits the complete server output from `tsconfig.server.json`. A warm check
-therefore cannot leave a build stale, and deleting `dist/` still requires and permits
-a complete `npm run build:server` regeneration.
+A truncated or corrupt check cache is never source of truth: rerunning `npm run check`
+rebuilds it. The check command neither reads nor writes the separate server-emission
+profile, so it cannot leave a server build stale.
 
-For the focused compiler and build-isolation contract, run:
+### Incremental server emission
+
+`npm run build:server` uses an independent incremental profile:
+
+- `.profiles/build-server.tsbuildinfo`
+- `.profiles/build-server-state.json`
+
+The canonical `tsconfig.server.json` stays non-incremental; the build wrapper owns
+only emission-cache lifecycle. It validates the recorded emitted artifacts before
+reuse, so a warm build after `dist/` is deleted regenerates the full TypeScript
+output. It also retires the four emitted artifacts for a deleted or renamed source.
+Malformed profiles, a failed/interrupted emit, and input-fingerprint changes cold
+recover rather than trusting stale state. Before TypeScript emits, the wrapper
+validates every existing output-tree component. A linked `dist`, expected-output
+parent, or expected-output leaf hard-fails before TypeScript emission; the same
+validation runs immediately before destructive stale-output cleanup.
+
+When the sidecar is missing, malformed, or otherwise unrecoverable, its old-output
+manifest is not trusted. The manifest-free cold reset scans stable, canonical
+configured output/include roots without following symlinks, junctions, or other
+reparse points, including when an entire included source root has become empty. It
+preserves copied trees and current output modes while removing stale TypeScript
+artifacts. Deleted or renamed sources therefore cannot retain output merely because
+no prior manifest is available.
+
+The build profile and the three check profiles are strictly separate: builds never
+read or write check profiles, and checks never read or write build profiles. `npm clean`
+removes `dist/` and the two build profiles while preserving the check profiles. To
+force a server-build reset manually:
+
+```bash
+npm exec shx -- rm -rf dist .profiles/build-server.tsbuildinfo .profiles/build-server-state.json
+npm run build:server
+```
+
+Removing `.profiles/` wholesale is also safe. The next check and build recreate only
+their respective profiles.
+
+For the focused compiler and build-isolation contract, run this from a clean checkout:
 
 ```bash
 node scripts/testing-v2/check-cache-contract.mjs
 ```
 
-It checks clean and retained-cache runs; post-warm source, deletion, dependency,
-shared-type, and config errors; corrupt-cache recovery; sequential fail-fast behavior;
-and check/build interleaving, including rebuilding after `dist/` is removed. It uses
-an isolated fixture and repository copy rather than changing the checkout.
-
-#### Check-cache measurement record
-
-Timings measure the complete `npm run check` command with monotonic
-`process.hrtime.bigint()` timing after the `npm run build:server` prerequisite. For
-cold samples, only the three cache files above were removed before each run; warm
-samples retained them and ran consecutively. This distinguishes TypeScript cache
-reuse from ordinary filesystem warmness.
-
-| Revision and environment | Cold samples (s), median | Warm/repeated samples (s), median |
-|---|---|---|
-| Baseline `origin/aj-local` `2c0e464a` — Darwin 27.0.0 arm64, Node 26.0.0, npm 11.12.1, TypeScript 5.9.3 | 22.981, 26.852, 23.086 — **23.086** | 20.810, 19.946, 19.738 — **19.946** |
-| Cached candidate `9611b90d` — same environment | 44.044, 52.170, 45.272 — **45.272** | 8.757, 8.542, 8.170 — **8.542** |
-
-The baseline produced no buildinfo files, so its repeated group is ordinary machine
-and filesystem warmness, not a cache measurement. These revisions were not a
-controlled like-for-like performance comparison: the candidate's cold samples were
-slower under the observed machine conditions. The retained-cache candidate samples
-demonstrate the intended repeated-run behavior; rerun the same repeated-sample
-methodology on the revision and machine being evaluated rather than relying on a
-single historical timing.
+It verifies cache separation, output parity, deleted `dist` recovery, source graph
+changes and stale-output retirement, corruption/interruption recovery, input
+invalidation, diagnostics and copy-tail fail-fast behavior, and cross-platform
+physical containment. See [Independent `build:server` emit cache](design/incremental-build-server-emit-cache.md)
+for the full lifecycle and measurement record.
 
 ### Adding new files
 
