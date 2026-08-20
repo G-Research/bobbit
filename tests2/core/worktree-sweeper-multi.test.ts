@@ -396,6 +396,32 @@ describe("worktree-sweeper — bounded asynchronous sweep", () => {
 		assert.deepEqual(cleanupCalls, []);
 	});
 
+	it("does not report an exact archived-session worktree as ownership-unverified", async () => {
+		const repo = path.resolve("virtual-archived-owner", "repo");
+		const worktreePath = path.resolve("virtual-archived-owner-wt", "worker");
+		const branch = "goal/archived/coder-abcd";
+		const { runner } = cannedRunner(new Map([[
+			repo,
+			[porcelainWorktree(repo, "master"), porcelainWorktree(worktreePath, branch)].join("\n"),
+		]]));
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		try {
+			const result = await sweepOrphanedWorktrees({
+				projects: [{ id: "project", rootPath: repo }],
+				goals: [],
+				sessions: [{ id: "archived-worker", repoPath: repo, worktreePath, branch, archived: true }],
+				staff: [],
+				fs: { access: async () => {} },
+				commandRunner: runner,
+			});
+
+			assert.deepEqual(result, { reclaimed: 0, cleaned: 0, repaired: 0 });
+			assert.deepEqual(log.mock.calls, [], "an exact archived repo/path/branch triple is expected retention, not an ownership warning");
+		} finally {
+			log.mockRestore();
+		}
+	});
+
 	it("preserves manually registered unverified worktrees inside and outside configured roots", async () => {
 		const { result, cleanupCalls, repairCalls } = await observeManualSweep("virtual-manual-worktrees");
 		assert.deepEqual({
