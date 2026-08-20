@@ -396,7 +396,7 @@ describe("worktree-sweeper — bounded asynchronous sweep", () => {
 		assert.deepEqual(cleanupCalls, []);
 	});
 
-	it("does not report an exact archived-session worktree as ownership-unverified", async () => {
+	it("does not report an exact archived-session worktree with an empty component map as ownership-unverified", async () => {
 		const repo = path.resolve("virtual-archived-owner", "repo");
 		const worktreePath = path.resolve("virtual-archived-owner-wt", "worker");
 		const branch = "goal/archived/coder-abcd";
@@ -409,7 +409,7 @@ describe("worktree-sweeper — bounded asynchronous sweep", () => {
 			const result = await sweepOrphanedWorktrees({
 				projects: [{ id: "project", rootPath: repo }],
 				goals: [],
-				sessions: [{ id: "archived-worker", repoPath: repo, worktreePath, branch, archived: true }],
+				sessions: [{ id: "archived-worker", repoPath: repo, worktreePath, branch, archived: true, repoWorktrees: {} }],
 				staff: [],
 				fs: { access: async () => {} },
 				commandRunner: runner,
@@ -417,6 +417,42 @@ describe("worktree-sweeper — bounded asynchronous sweep", () => {
 
 			assert.deepEqual(result, { reclaimed: 0, cleaned: 0, repaired: 0 });
 			assert.deepEqual(log.mock.calls, [], "an exact archived repo/path/branch triple is expected retention, not an ownership warning");
+		} finally {
+			log.mockRestore();
+		}
+	});
+
+	it("reports an archived-session worktree when a non-empty component map mismatches its exact flat tuple", async () => {
+		const repo = path.resolve("virtual-archived-component-owner", "repo");
+		const worktreePath = path.resolve("virtual-archived-component-owner-wt", "worker");
+		const mismatchedWorktreePath = path.resolve("virtual-archived-component-owner-wt", "other-worker");
+		const branch = "goal/archived/coder-mismatch";
+		const { runner } = cannedRunner(new Map([[
+			repo,
+			[porcelainWorktree(repo, "master"), porcelainWorktree(worktreePath, branch)].join("\n"),
+		]]));
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		try {
+			const result = await sweepOrphanedWorktrees({
+				projects: [{ id: "project", rootPath: repo }],
+				goals: [],
+				sessions: [{
+					id: "archived-worker",
+					repoPath: repo,
+					worktreePath,
+					branch,
+					archived: true,
+					repoWorktrees: { ".": mismatchedWorktreePath },
+				}],
+				staff: [],
+				fs: { access: async () => {} },
+				commandRunner: runner,
+			});
+
+			assert.deepEqual(result, { reclaimed: 0, cleaned: 0, repaired: 0 });
+			assert.deepEqual(log.mock.calls, [[
+				`[sweeper] Preserved unverified worktree: ${worktreePath} (branch: ${branch}, repo: ${repo})`,
+			]], "a non-empty component map remains authoritative over an exact flat tuple");
 		} finally {
 			log.mockRestore();
 		}
