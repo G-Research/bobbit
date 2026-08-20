@@ -9,7 +9,7 @@
  *   - Discovered worktrees without an exact durable identity are reported and
  *     preserved; branch or path shape never authorizes repair or cleanup.
  *
- * The sweeper runs once after the listener starts and may overlap pool fill.
+ * The sweeper runs once after the listener starts, before pool initialization.
  * It never mutates discovered Git worktrees or branches.
  */
 
@@ -371,9 +371,9 @@ export async function sweepOrphanedWorktrees(opts: {
 			| { kind: "reclaimed" }
 			| { kind: "needs-attention"; worktree: SweptWorktree; branch: string };
 
-		// Reconcile different repos in parallel, but keep worktrees within one repo
-		// sequential. This avoids concurrent Git metadata mutations in the same repo
-		// and prevents nested concurrency multiplication.
+		// Classify different repos in parallel, but keep worktrees within one repo
+		// sequential so diagnostic ordering stays deterministic and nested
+		// concurrency does not multiply.
 		const outcomesByRepo = await mapWithConcurrency(scans, RECOVERY_IO_CONCURRENCY, async (worktrees): Promise<SweepOutcome[]> => {
 			const outcomes: SweepOutcome[] = [];
 			for (const wt of worktrees) {

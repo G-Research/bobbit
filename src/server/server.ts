@@ -4725,8 +4725,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// claim, which costs real CPU on tests that don't need git at all.
 			//
 			// Boot sweeper + pool fill run AFTER `server.listen()` as a background
-			// chain — the sweeper shells out to `git worktree list/repair` per repo
-			// with 10–15s timeouts, and the pool readiness check awaits `isGitRepo`
+			// chain — the sweeper shells out to `git worktree list` per repo with a
+			// 10s timeout, and the pool readiness check awaits `isGitRepo`
 			// per project. Doing them before listen used to leave the gateway
 			// unreachable for many seconds on installs with stale worktrees.
 			//
@@ -4774,8 +4774,8 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 							const sessions: SweepOwnerSnapshot[] = [];
 							const teams: SweepOwnerSnapshot[] = [];
 							const staff: SweepOwnerSnapshot[] = [];
-							// Read the currently visible stores synchronously so no request can
-							// interleave between this snapshot and the sweeper's mutation call.
+							// Read the currently visible stores synchronously so diagnostic
+							// classification uses one internally consistent ownership snapshot.
 							for (const ctx of projectContextManager.visible()) {
 								if (ctx.project.id === HEADQUARTERS_PROJECT_ID || ctx.project.kind === "headquarters") continue;
 								for (const goal of ctx.goalStore.getAll()) {
