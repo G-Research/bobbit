@@ -105,6 +105,11 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 			/async \(\s*modelString: string,\s*explicitPreferredThinking\?: ThinkingLevel,\s*\): Promise<void> =>/g,
 			"async (modelString, explicitPreferredThinking) =>",
 		)
+		// The multi-gateway selector has a local TypeScript-only candidate alias.
+		// Remove that declaration for the JavaScript eval harness while retaining the
+		// production candidate-selection branch and every behavioral assertion below.
+		.replace(/\n\t\ttype GatewayCandidate = \{ gateway: ModelGateway; bindId: string \};/g, "")
+		.replace(/const candidates: GatewayCandidate\[\] =/g, "const candidates =")
 		.replace(/SessionManager\.AIGW_CACHE_TTL_MS/g, "60_000");
 
 	// The extracted production method now normalizes legacy provider-prefixed AIGW
@@ -153,6 +158,13 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 	const buildModelStateData = (provider: string, id: string) => ({
 		model: { provider, id, reasoning: false },
 	});
+	// The multi-gateway tail is outside this fallback fixture's selection cases,
+	// but its collaborators must be deterministic so the whole current method can
+	// still be evaluated rather than slicing off that production branch.
+	const isExclusiveMode = (gateways: Array<{ enabled: boolean; type: string }>) =>
+		gateways.some((gateway) => gateway.enabled && gateway.type === "aigw");
+	const gatewayModelBinding = (gateway: { name: string; type: string }, model: { id: string; wireId?: string }) =>
+		`${gateway.name}/${gateway.type === "aigw" ? (model.wireId ?? model.id) : model.id}`;
 
 	// eslint-disable-next-line no-new-func
 	return new Function(
@@ -168,6 +180,8 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 		"sanitizeModelErrorForLog",
 		"broadcast",
 		"buildModelStateData",
+		"isExclusiveMode",
+		"gatewayModelBinding",
 		`return async function tryAutoSelectModel(session) {${body}\n};`,
 	)(
 		normalizeAigwModelString,
@@ -182,6 +196,8 @@ function loadTryAutoSelectModel(): (this: any, session: any) => Promise<void> {
 		sanitizeModelErrorForLog,
 		broadcast,
 		buildModelStateData,
+		isExclusiveMode,
+		gatewayModelBinding,
 	);
 }
 
@@ -272,7 +288,10 @@ async function exerciseAutoSelect(options: {
 			store.update(sessionId, { modelProvider: provider, modelId, effectiveThinkingLevel });
 		},
 		_writeModelNameFile: (_sessionId: string, model: string) => modelFiles.push(model),
-		_aigwModelCache: undefined,
+		// Keep the current multi-gateway branch inert and deterministic for these
+		// explicit-selection/fallback cases; gateway discovery has focused coverage.
+		getConfiguredGateways: () => [],
+		discoverGatewayModelsCached: async () => [],
 	};
 	const session = {
 		id: "session-under-test",

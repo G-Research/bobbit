@@ -75,7 +75,7 @@ import { componentToEditState, buildSavePayload, type ComponentEditState } from 
 import { ModelSelector } from "../ui/dialogs/ModelSelector.js";
 import { getSupportedThinkingLevels, clampThinkingLevel, type ThinkingLevel } from "../shared/thinking-levels.js";
 import { ImageModelSelector, type ImageGenerationModel } from "../ui/dialogs/ImageModelSelector.js";
-import { AigwModelsDialog } from "../ui/dialogs/AigwModelsDialog.js";
+import { AigwModelsDialog, type AigwGatewayType, type AigwModelEntry } from "../ui/dialogs/AigwModelsDialog.js";
 
 type SettingsTab = SettingsTabId;
 const DEFAULT_TAB: SettingsTab = "shortcuts";
@@ -1583,22 +1583,39 @@ function renderPaletteTab() {
 
 // ── Models tab ──
 
-let aigwUrl = "";
-let aigwStatus: "idle" | "testing" | "saving" | "removing" = "idle";
-let aigwError = "";
-let aigwConfigured = false;
-let aigwConfiguredUrl = "";
-let aigwModels: Array<{ id: string; name: string; contextWindow: number; maxTokens: number; reasoning: boolean; upstreamProvider?: string }> = [];
-let aigwExclusive = true; // hide built-in providers while gateway is configured
+// Gateway records are secret-free. API-key expressions are sent only from the password field on save and never retained here.
+type SettingsGatewayType = "aigw" | "openai-compatible";
+type GatewayConnectionState = "reachable" | "empty" | "unreachable" | "disabled" | "unknown";
+interface SettingsGateway {
+	id: string;
+	name: string;
+	url: string;
+	type: SettingsGatewayType;
+	enabled: boolean;
+	apiKeyConfigured?: boolean;
+}
+type GatewayStatus = {
+	state: GatewayConnectionState;
+	models: AigwModelEntry[];
+	error?: string;
+};
+let gateways: SettingsGateway[] = [];
+let gatewaysSaving = false;
+let gatewaysError = "";
+let gatewayRowStatus: Record<string, "idle" | "testing" | "refreshing"> = {};
+let gatewayRowError: Record<string, string> = {};
+let gatewayApiKeyChanges: Record<string, string | null | undefined> = {};
+let gatewayStatusById: Record<string, GatewayStatus> = {};
+let gatewayModelsByName: Record<string, AigwModelEntry[]> = {};
 // Preferences
-let prefSessionModel = "";   // "provider/modelId" e.g. "aigw/claude-sonnet-4-6" or "anthropic/claude-sonnet-4-6"
-let prefReviewModel = "";    // same format
-let prefNamingModel = "";    // same format
-let prefImageModel = "";     // same format, defaults to openai/gpt-image-2 when unset
-let prefSessionThinking = "";   // "off"|"minimal"|"low"|"medium"|"high"|"xhigh"|""
+let prefSessionModel = "";
+let prefReviewModel = "";
+let prefNamingModel = "";
+let prefImageModel = "";
+let prefSessionThinking = "";
 let prefReviewThinking = "";
 let prefNamingThinking = "";
-let allowSessionModelFallback = false; // Global controlled-fallback opt-in; absent preference defaults off.
+let allowSessionModelFallback = false;
 let allModels: Array<{ id: string; provider: string; reasoning: boolean; upstreamProvider?: string }> = [];
 let allImageModels: ImageGenerationModel[] = [];
 let _modelsLoaded = false;
@@ -1654,28 +1671,147 @@ function imageModelIsAvailable(pref: string): boolean {
 	return allImageModels.some((m) => `${m.provider}/${m.id}` === pref);
 }
 
-function openAigwModelsDialog(): void {
-	AigwModelsDialog.open(aigwModels);
+function combinedGatewayModels(): AigwModelEntry[] {
+	return Object.values(gatewayModelsByName).flat();
 }
+
+function openAigwModelsDialog(): void {
+	const type: AigwGatewayType = gateways.some((g) => g.enabled && g.type === "aigw") ? "aigw" : "openai-compatible";
+	AigwModelsDialog.open(combinedGatewayModels(), type);
+}
+
+function newGatewayRowId(): string {
+	if (typeof crypto === "undefined") {
+		throw new Error("Secure random gateway IDs are unavailable in this browser.");
+	}
+	if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+	if (typeof crypto.getRandomValues !== "function") {
+		throw new Error("Secure random gateway IDs are unavailable in this browser.");
+	}
+
+	// Support browsers without randomUUID while retaining cryptographic entropy.
+	const bytes = crypto.getRandomValues(new Uint8Array(16));
+	bytes[6] = (bytes[6] & 0x0f) | 0x40;
+	bytes[8] = (bytes[8] & 0x3f) | 0x80;
+	const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function normalizeGatewayRow(raw: any): SettingsGateway {
+	return {
+		id: typeof raw?.id === "string" && raw.id ? raw.id : newGatewayRowId(),
+		name: typeof raw?.name === "string" ? raw.name : "",
+		url: typeof raw?.url === "string" ? raw.url : "",
+		type: raw?.type === "aigw" ? "aigw" : "openai-compatible",
+		enabled: raw?.enabled !== false,
+		apiKeyConfigured: raw?.apiKeyConfigured === true,
+	};
+}
+
+function normalizeGatewayStatus(raw: any, enabled: boolean): GatewayStatus {
+	const value = raw?.state ?? raw?.status?.state ?? raw?.status;
+	const state: GatewayConnectionState = !enabled
+		? "disabled"
+		: value === "reachable" || value === "empty" || value === "unreachable" || value === "disabled"
+			? value
+			: "unknown";
+	return {
+		state,
+		models: Array.isArray(raw?.models) ? raw.models : Array.isArray(raw?.status?.models) ? raw.status.models : [],
+		error: typeof raw?.error === "string" ? raw.error : typeof raw?.status?.error === "string" ? raw.status.error : undefined,
+	};
+}
+
+function gatewaysExclusivePending(): boolean {
+	return gateways.some((g) => g.enabled && g.type === "aigw");
+}
+
+function addGatewayRow(): void {
+	gateways = [...gateways, { id: newGatewayRowId(), name: "", url: "", type: "openai-compatible", enabled: true }];
+	gatewaysError = "";
+	renderApp();
+}
+
+function removeGatewayRow(id: string): void {
+	gateways = gateways.filter((g) => g.id !== id);
+	delete gatewayRowStatus[id];
+	delete gatewayRowError[id];
+	delete gatewayApiKeyChanges[id];
+	delete gatewayStatusById[id];
+	gatewaysError = "";
+	renderApp();
+}
+
+function updateGatewayRow(id: string, patch: Partial<SettingsGateway>): void {
+	gateways = gateways.map((g) => g.id === id ? { ...g, ...patch } : g);
+	delete gatewayRowError[id];
+	gatewaysError = "";
+	renderApp();
+}
+
+// Do not render on every keystroke: the `live()` value retains the input caret.
+function setGatewayField(id: string, field: "name" | "url", value: string): void {
+	gateways = gateways.map((g) => g.id === id ? { ...g, [field]: value } : g);
+}
+
+function setGatewayApiKey(id: string, value: string): void {
+	// A blank field means preserve the existing key. Clearing is deliberately an
+	// explicit action, so an accidental backspace can never delete a stored key.
+	gatewayApiKeyChanges[id] = value || undefined;
+}
+
+function clearGatewayApiKey(id: string): void {
+	gatewayApiKeyChanges[id] = null;
+	renderApp();
+}
+
+function statusForGateway(gateway: SettingsGateway): GatewayStatus {
+	return gatewayStatusById[gateway.id] ?? normalizeGatewayStatus(undefined, gateway.enabled);
+}
+
+function setGatewayModels(gateway: SettingsGateway, models: AigwModelEntry[]): void {
+	gatewayModelsByName = { ...gatewayModelsByName, [gateway.name.trim()]: models };
+}
+
+async function loadGatewayStatuses(rows: SettingsGateway[]): Promise<void> {
+	await Promise.all(rows.filter((g) => g.name.trim()).map(async (gateway) => {
+		if (!gateway.enabled) {
+			gatewayStatusById[gateway.id] = normalizeGatewayStatus({ state: "disabled" }, false);
+			return;
+		}
+		try {
+			const response = await gatewayFetch(`/api/aigw/gateways/${encodeURIComponent(gateway.name.trim())}/status`);
+			const data = await response.json().catch(() => ({}));
+			if (!response.ok) {
+				gatewayStatusById[gateway.id] = { state: "unreachable", models: [], error: data?.error || `HTTP ${response.status}` };
+				return;
+			}
+			const status = normalizeGatewayStatus(data, gateway.enabled);
+			gatewayStatusById[gateway.id] = status;
+			setGatewayModels(gateway, status.models);
+		} catch (err: any) {
+			gatewayStatusById[gateway.id] = { state: "unreachable", models: [], error: err?.message || "Gateway unavailable" };
+		}
+	}));
+}
+
 
 function loadModelsState(): void {
 	if (_modelsLoaded) return;
 	_modelsLoaded = true;
 	(async () => {
 		try {
-			const [statusRes, prefsRes, modelsRes, imageModelsRes] = await Promise.all([
-				gatewayFetch("/api/aigw/status"),
+			const [gatewaysRes, prefsRes, modelsRes, imageModelsRes] = await Promise.all([
+				gatewayFetch("/api/aigw/gateways"),
 				gatewayFetch("/api/preferences"),
 				gatewayFetch("/api/models"),
 				gatewayFetch("/api/image-models"),
 			]);
-			if (statusRes.ok) {
-				const data = await statusRes.json();
-				aigwConfigured = data.configured;
-				if (data.configured) {
-					aigwConfiguredUrl = data.url;
-					aigwUrl = data.url;
-					aigwModels = data.models || [];
+			if (gatewaysRes.ok) {
+				const data = await gatewaysRes.json().catch(() => ({}));
+				if (Array.isArray(data?.gateways)) {
+					gateways = data.gateways.map(normalizeGatewayRow);
+					await loadGatewayStatuses(gateways);
 				}
 			}
 			if (prefsRes.ok) {
@@ -1687,20 +1823,17 @@ function loadModelsState(): void {
 				prefSessionThinking = prefs["default.sessionThinkingLevel"] || "";
 				prefReviewThinking = prefs["default.reviewThinkingLevel"] || "";
 				prefNamingThinking = prefs["default.namingThinkingLevel"] || "";
-				allowSessionModelFallback = prefs.allowSessionModelFallback === true; // default false
-				aigwExclusive = prefs["aigw.exclusive"] !== false; // default true
+				allowSessionModelFallback = prefs.allowSessionModelFallback === true;
 			}
 			if (modelsRes.ok) {
 				const models = await modelsRes.json();
-				if (Array.isArray(models)) {
-					allModels = models;
-				}
+				if (Array.isArray(models)) allModels = models;
 			}
 			if (imageModelsRes.ok) {
 				const imageModels = await imageModelsRes.json();
 				if (Array.isArray(imageModels)) allImageModels = imageModels;
 			}
-		} catch {}
+		} catch { /* Settings remains usable when a gateway is temporarily down. */ }
 		renderApp();
 	})();
 }
@@ -1769,112 +1902,103 @@ async function setAllowSessionModelFallback(value: boolean): Promise<void> {
 	await savePref("allowSessionModelFallback", value);
 }
 
-async function testAigwConnection(): Promise<void> {
-	if (!aigwUrl.trim()) return;
-	aigwStatus = "testing";
-	aigwError = "";
-	renderApp();
+async function refreshAllModels(): Promise<void> {
 	try {
-		const res = await gatewayFetch("/api/aigw/test", {
-			method: "POST",
-			body: JSON.stringify({ url: aigwUrl.trim() }),
-		});
-		const data = await res.json();
-		if (!res.ok) {
-			aigwError = data.error || `HTTP ${res.status}`;
-		} else {
-			aigwModels = data.models || [];
-			aigwError = "";
-		}
-	} catch (err: any) {
-		aigwError = err.message || "Connection failed";
-	}
-	aigwStatus = "idle";
-	renderApp();
-}
-
-async function saveAigwConfig(): Promise<void> {
-	if (!aigwUrl.trim()) return;
-	aigwStatus = "saving";
-	aigwError = "";
-	renderApp();
-	try {
-		const res = await gatewayFetch("/api/aigw/configure", {
-			method: "POST",
-			body: JSON.stringify({ url: aigwUrl.trim() }),
-		});
-		const data = await res.json();
-		if (!res.ok) {
-			aigwError = data.error || `HTTP ${res.status}`;
-		} else {
-			aigwConfigured = true;
-			aigwConfiguredUrl = aigwUrl.trim();
-			aigwModels = data.models || [];
-			aigwError = "";
-		}
-	} catch (err: any) {
-		aigwError = err.message || "Save failed";
-	}
-	aigwStatus = "idle";
-	renderApp();
-}
-
-async function setAigwExclusive(value: boolean): Promise<void> {
-	aigwExclusive = value;
-	// Default is true — persist only the explicit "false" override, clear otherwise.
-	try {
-		await gatewayFetch("/api/preferences", {
-			method: "PUT",
-			body: JSON.stringify({ "aigw.exclusive": value ? null : false }),
-		});
-	} catch {}
-	// Refresh the selector lists used on this page (registry cache is keyed on prefs version).
-	try {
-		const res = await gatewayFetch("/api/models");
-		if (res.ok) {
-			const models = await res.json();
+		const response = await gatewayFetch("/api/models");
+		if (response.ok) {
+			const models = await response.json();
 			if (Array.isArray(models)) allModels = models;
 		}
-	} catch {}
-	renderApp();
+	} catch { /* best effort */ }
 }
 
-async function refreshAigwModels(): Promise<void> {
-	aigwStatus = "testing";
-	aigwError = "";
+async function testGatewayRow(id: string): Promise<void> {
+	const gateway = gateways.find((g) => g.id === id);
+	if (!gateway || !gateway.url.trim()) return;
+	gatewayRowStatus[id] = "testing";
+	delete gatewayRowError[id];
 	renderApp();
 	try {
-		const res = await gatewayFetch("/api/aigw/refresh", { method: "POST" });
-		const data = await res.json();
-		if (!res.ok) {
-			aigwError = data.error || `HTTP ${res.status}`;
+		const apiKey = gatewayApiKeyChanges[id];
+		// The stable id lets the server use an already-saved private key without
+		// putting its expression back into UI state or the request body.
+		const body: Record<string, unknown> = { gatewayId: gateway.id, url: gateway.url.trim(), type: gateway.type };
+		if (apiKey !== undefined) body.apiKey = apiKey;
+		const response = await gatewayFetch("/api/aigw/test", { method: "POST", body: JSON.stringify(body) });
+		const data = await response.json().catch(() => ({}));
+		if (!response.ok || data?.ok === false) {
+			gatewayRowError[id] = data?.error || `HTTP ${response.status}`;
 		} else {
-			aigwModels = data.models || [];
-			aigwError = "";
+			const models = Array.isArray(data?.models) ? data.models : [];
+			setGatewayModels(gateway, models);
+			gatewayStatusById[id] = normalizeGatewayStatus(data?.status ?? { state: models.length ? "reachable" : "empty", models }, gateway.enabled);
 		}
 	} catch (err: any) {
-		aigwError = err.message || "Refresh failed";
+		gatewayRowError[id] = err?.message || "Connection failed";
+	} finally {
+		gatewayRowStatus[id] = "idle";
+		renderApp();
 	}
-	aigwStatus = "idle";
-	renderApp();
 }
 
-async function removeAigwConfig(): Promise<void> {
-	aigwStatus = "removing";
-	aigwError = "";
+async function refreshGatewayRow(id: string): Promise<void> {
+	const gateway = gateways.find((g) => g.id === id);
+	if (!gateway?.name.trim()) return;
+	gatewayRowStatus[id] = "refreshing";
+	delete gatewayRowError[id];
 	renderApp();
 	try {
-		await gatewayFetch("/api/aigw/configure", { method: "DELETE" });
-		aigwConfigured = false;
-		aigwConfiguredUrl = "";
-		aigwUrl = "";
-		aigwModels = [];
-		aigwError = "";
+		const response = await gatewayFetch(`/api/aigw/gateways/${encodeURIComponent(gateway.name.trim())}/refresh`, { method: "POST" });
+		const data = await response.json().catch(() => ({}));
+		if (!response.ok) gatewayRowError[id] = data?.error || `HTTP ${response.status}`;
+		else {
+			const status = normalizeGatewayStatus(data, gateway.enabled);
+			gatewayStatusById[id] = status;
+			setGatewayModels(gateway, status.models);
+			await refreshAllModels();
+		}
 	} catch (err: any) {
-		aigwError = err.message || "Remove failed";
+		gatewayRowError[id] = err?.message || "Refresh failed";
+	} finally {
+		gatewayRowStatus[id] = "idle";
+		renderApp();
 	}
-	aigwStatus = "idle";
+}
+
+async function saveGatewaysList(): Promise<void> {
+	gatewaysSaving = true;
+	gatewaysError = "";
 	renderApp();
+	try {
+		const payload = gateways.map((gateway) => {
+			const row: Record<string, unknown> = {
+				id: gateway.id, name: gateway.name.trim(), url: gateway.url.trim(), type: gateway.type, enabled: gateway.enabled,
+			};
+			// Omitted means preserve; null is the explicit clear affordance.
+			if (gatewayApiKeyChanges[gateway.id] !== undefined) row.apiKey = gatewayApiKeyChanges[gateway.id];
+			return row;
+		});
+		const response = await gatewayFetch("/api/aigw/gateways", { method: "PUT", body: JSON.stringify({ gateways: payload }) });
+		const data = await response.json().catch(() => ({}));
+		if (!response.ok) {
+			gatewaysError = data?.error || `HTTP ${response.status}`;
+		} else {
+			if (Array.isArray(data?.gateways)) gateways = data.gateways.map(normalizeGatewayRow);
+			gatewayApiKeyChanges = {};
+			gatewayRowError = {};
+			await loadGatewayStatuses(gateways);
+			await refreshAllModels();
+		}
+	} catch (err: any) {
+		gatewaysError = err?.message || "Save failed";
+	} finally {
+		gatewaysSaving = false;
+		renderApp();
+	}
+}
+
+function openGatewayModels(gateway: SettingsGateway): void {
+	AigwModelsDialog.open(gatewayModelsByName[gateway.name.trim()] || [], gateway.type);
 }
 
 /** Format a "provider/modelId" pref value for display. Shows just the model ID. */
@@ -2124,10 +2248,13 @@ function renderImageModelRow(
 }
 
 // Exported for fixture tests (tests/settings-models-tab-redesign.spec.ts).
+// Legacy single-gateway options remain accepted so existing fixtures continue to
+// exercise the same Models-tab defaults while the gateway editor is list-based.
 export function __testResetModelsTab(opts: {
+	gateways?: SettingsGateway[];
 	aigwConfigured?: boolean;
 	aigwUrl?: string;
-	aigwModels?: Array<{ id: string; name: string; contextWindow: number; maxTokens: number; reasoning: boolean; upstreamProvider?: string }>;
+	aigwModels?: AigwModelEntry[];
 	allModels?: Array<{ id: string; provider: string; reasoning: boolean; upstreamProvider?: string }>;
 	allImageModels?: ImageGenerationModel[];
 	prefSessionModel?: string;
@@ -2136,11 +2263,20 @@ export function __testResetModelsTab(opts: {
 	prefImageModel?: string;
 	allowSessionModelFallback?: boolean;
 } = {}): void {
-	_modelsLoaded = true; // skip the fetcher
-	aigwConfigured = opts.aigwConfigured ?? false;
-	aigwConfiguredUrl = opts.aigwUrl ?? "";
-	aigwUrl = opts.aigwUrl ?? "";
-	aigwModels = opts.aigwModels ?? [];
+	_modelsLoaded = true;
+	gatewaysSaving = false;
+	gatewaysError = "";
+	gatewayRowStatus = {};
+	gatewayRowError = {};
+	gatewayApiKeyChanges = {};
+	gatewayStatusById = {};
+	gatewayModelsByName = {};
+	gateways = opts.gateways
+		? opts.gateways.map(normalizeGatewayRow)
+		: opts.aigwUrl
+			? [normalizeGatewayRow({ name: "aigw", url: opts.aigwUrl, type: "aigw", enabled: opts.aigwConfigured !== false })]
+			: [];
+	if (opts.aigwModels) gatewayModelsByName.aigw = opts.aigwModels;
 	allModels = opts.allModels ?? [];
 	allImageModels = opts.allImageModels ?? [];
 	prefSessionModel = opts.prefSessionModel ?? "";
@@ -2155,111 +2291,88 @@ export function __testResetModelsTab(opts: {
 	modelTestInFlight = {};
 }
 
+function gatewayStatusLabel(status: GatewayStatus): string {
+	switch (status.state) {
+		case "reachable": return `Connected · ${status.models.length} model${status.models.length === 1 ? "" : "s"}`;
+		case "empty": return "Connected · no models reported";
+		case "unreachable": return `Unavailable${status.models.length ? ` · ${status.models.length} retained model${status.models.length === 1 ? "" : "s"}` : ""}`;
+		case "disabled": return "Disabled";
+		default: return "Checking connection…";
+	}
+}
+
+function renderGatewayRow(gateway: SettingsGateway, busy: boolean) {
+	const status = statusForGateway(gateway);
+	const rowBusy = busy || gatewayRowStatus[gateway.id] !== "idle" && gatewayRowStatus[gateway.id] !== undefined;
+	const pendingKey = gatewayApiKeyChanges[gateway.id];
+	const hasConfiguredKey = gateway.apiKeyConfigured && pendingKey !== null;
+	const models = gatewayModelsByName[gateway.name.trim()] || status.models;
+	return html`
+		<div class="flex flex-col gap-2 p-3 rounded-md border border-border bg-card" data-testid="gateway-row" data-gateway-id=${gateway.id}>
+			<div class="flex flex-wrap items-center gap-2">
+				<input type="checkbox" class="shrink-0" title="Enable gateway" data-testid="gateway-enabled-checkbox" .checked=${live(gateway.enabled)} ?disabled=${busy}
+					@change=${(e: Event) => updateGatewayRow(gateway.id, { enabled: (e.target as HTMLInputElement).checked })} />
+				<input type="text" class="w-28 px-2 py-1.5 rounded-md border border-input bg-background text-foreground text-sm" placeholder="name" data-testid="gateway-name-input"
+					.value=${live(gateway.name)} ?disabled=${busy} @input=${(e: Event) => setGatewayField(gateway.id, "name", (e.target as HTMLInputElement).value)} />
+				<input type="text" class="flex-1 min-w-[12rem] px-2 py-1.5 rounded-md border border-input bg-background text-foreground text-sm" placeholder="http://gateway-host:port" data-testid="gateway-url-input"
+					.value=${live(gateway.url)} ?disabled=${busy} @input=${(e: Event) => setGatewayField(gateway.id, "url", (e.target as HTMLInputElement).value)} />
+				<select class="px-2 py-1.5 rounded-md border border-input bg-background text-foreground text-sm" data-testid="gateway-type-select" ?disabled=${busy}
+					@change=${(e: Event) => updateGatewayRow(gateway.id, { type: (e.target as HTMLSelectElement).value as SettingsGatewayType })}>
+					<option value="openai-compatible" ?selected=${gateway.type === "openai-compatible"}>openai-compatible</option>
+					<option value="aigw" ?selected=${gateway.type === "aigw"}>aigw</option>
+				</select>
+				<button class="px-2.5 py-1.5 text-sm rounded-md border border-input hover:bg-secondary disabled:opacity-50" data-testid="gateway-test-btn" ?disabled=${rowBusy || !gateway.url.trim()}
+					@click=${() => testGatewayRow(gateway.id)}>${gatewayRowStatus[gateway.id] === "testing" ? "Testing…" : "Test"}</button>
+				<button class="px-2.5 py-1.5 text-sm rounded-md border border-input hover:bg-secondary disabled:opacity-50" data-testid="gateway-refresh-btn" ?disabled=${rowBusy || !gateway.name.trim()}
+					@click=${() => refreshGatewayRow(gateway.id)}>${gatewayRowStatus[gateway.id] === "refreshing" ? "Refreshing…" : "Refresh"}</button>
+				<button class="px-2.5 py-1.5 text-sm rounded-md border border-destructive text-destructive hover:bg-destructive/10 disabled:opacity-50" data-testid="gateway-remove-btn" ?disabled=${busy}
+					@click=${() => removeGatewayRow(gateway.id)}>Remove</button>
+			</div>
+			<div class="flex flex-wrap items-center gap-2 text-xs">
+				<span data-testid="gateway-status" data-gateway-status=${status.state} class=${status.state === "unreachable" ? "text-destructive" : "text-muted-foreground"}>${gatewayStatusLabel(status)}</span>
+				${status.error ? html`<span class="text-destructive" data-testid="gateway-status-error">${status.error}</span>` : ""}
+				${models.length ? html`<button class="underline underline-offset-2 text-muted-foreground hover:text-foreground" data-testid="gateway-view-models-btn" @click=${() => openGatewayModels(gateway)}>View models (${models.length})</button>` : ""}
+			</div>
+			<div class="flex flex-wrap items-center gap-2">
+				<input type="password" class="w-52 max-w-full px-2 py-1.5 rounded-md border border-input bg-background text-foreground text-sm" placeholder=${hasConfiguredKey ? "Key configured (leave blank to preserve)" : "Optional API key"}
+					data-testid="gateway-api-key-input" autocomplete="new-password" name=${`bobbit-gateway-api-key-${gateway.id}`} ?disabled=${busy} @input=${(e: Event) => setGatewayApiKey(gateway.id, (e.target as HTMLInputElement).value)} />
+				${hasConfiguredKey ? html`<span class="text-xs text-muted-foreground" data-testid="gateway-key-configured">Key configured</span>` : ""}
+				${pendingKey === null ? html`<span class="text-xs text-warning" data-testid="gateway-key-clearing">Key will be cleared on save</span>` : ""}
+				${gateway.apiKeyConfigured && pendingKey !== null ? html`<button class="text-xs underline underline-offset-2 text-muted-foreground hover:text-foreground" data-testid="gateway-clear-key-btn" ?disabled=${busy} @click=${() => clearGatewayApiKey(gateway.id)}>Clear key</button>` : ""}
+			</div>
+			${gatewayRowError[gateway.id] ? html`<div class="text-xs text-destructive" data-testid="gateway-row-error">${gatewayRowError[gateway.id]}</div>` : ""}
+		</div>
+	`;
+}
+
 export function renderModelsTab() {
 	loadModelsState();
 
-	const busy = aigwStatus !== "idle";
-	const hasModels = aigwModels.length > 0;
+	const busy = gatewaysSaving;
+	const exclusivePending = gatewaysExclusivePending();
+	const hasModels = combinedGatewayModels().length > 0;
 
 	return html`
 		<div class="flex flex-col gap-6" data-testid="models-tab">
 
-			<!-- AI Gateway section -->
-			<div class="flex flex-col gap-4" data-testid="aigw-section">
-				<h3 class="text-sm font-semibold text-foreground">AI Gateway</h3>
-				<p class="text-sm text-muted-foreground">
-					Connect to an AI Gateway for on-prem LLM access through a single
-					OpenAI-compatible endpoint. When configured, only gateway models are shown.
-				</p>
-
-				<!-- URL input -->
-				<div class="flex flex-col gap-2">
-					<label class="text-sm font-medium text-foreground">Gateway URL</label>
-					<div class="flex gap-2">
-						<input
-							type="text"
-							class="flex-1 px-3 py-2 rounded-md border border-input bg-background text-foreground text-sm
-								focus:outline-none focus:ring-2 focus:ring-ring"
-							data-testid="aigw-url-input"
-							name="bobbit-aigw-url"
-							autocomplete="off"
-							autocapitalize="off"
-							spellcheck="false"
-							placeholder="http://gateway-host/v1"
-							.value=${aigwUrl}
-							?disabled=${busy}
-							@input=${(e: Event) => { aigwUrl = (e.target as HTMLInputElement).value; }}
-						/>
-						<button
-							class="px-3 py-2 text-sm rounded-md border border-input bg-background text-foreground
-								hover:bg-secondary transition-colors disabled:opacity-50"
-							title="Test gateway connection"
-							?disabled=${busy || !aigwUrl.trim()}
-							@click=${testAigwConnection}
-						>${aigwStatus === "testing" ? "Testing..." : "Test"}</button>
-					</div>
-				</div>
-
-				<!-- Error -->
-				${aigwError ? html`
-					<div class="text-sm text-destructive bg-destructive/10 px-3 py-2 rounded-md">
-						${aigwError}
-					</div>
-				` : ""}
-
-				<!-- Status badge -->
-				${aigwConfigured ? html`
-					<div class="flex items-center gap-2 px-3 py-2 rounded-md bg-green-500/10 border border-green-500/20">
-						<span class="w-2 h-2 rounded-full bg-green-500"></span>
-						<span class="text-sm text-foreground">Connected to <code class="text-xs">${aigwConfiguredUrl}</code></span>
-					</div>
-					<label class="flex items-start gap-2 text-sm text-foreground cursor-pointer">
-						<input
-							type="checkbox"
-							class="mt-0.5"
-							.checked=${aigwExclusive}
-							?disabled=${busy}
-							@change=${(e: Event) => setAigwExclusive((e.target as HTMLInputElement).checked)}
-						/>
-						<span class="flex flex-col">
-							<span>Hide built-in providers while the gateway is configured</span>
-							<span class="text-xs text-muted-foreground">
-								When enabled (default), the model picker only shows gateway models
-								and local custom providers. Turn this off for local dev when you
-								want direct API access alongside a dev gateway.
-							</span>
-						</span>
-					</label>
-				` : ""}
-
-				<!-- Action buttons -->
-				<div class="flex gap-2">
-					<button
-						class="px-4 py-2 text-sm rounded-md bg-primary text-primary-foreground
-							hover:bg-primary/90 transition-colors disabled:opacity-50"
-						title="Save gateway configuration"
-						?disabled=${busy || !aigwUrl.trim()}
-						@click=${saveAigwConfig}
-					>${aigwStatus === "saving" ? "Saving..." : aigwConfigured ? "Update" : "Enable Gateway"}</button>
-					${aigwConfigured ? html`
-						<button
-							class="px-4 py-2 text-sm rounded-md border border-destructive text-destructive
-								hover:bg-destructive/10 transition-colors disabled:opacity-50"
-							title="Disconnect gateway"
-							?disabled=${busy}
-							@click=${removeAigwConfig}
-						>${aigwStatus === "removing" ? "Removing..." : "Disconnect"}</button>
-						<button
-							class="px-4 py-2 text-sm rounded-md border border-input bg-background text-foreground
-								hover:bg-secondary transition-colors disabled:opacity-50"
-							title="Refresh available models"
-							?disabled=${busy}
-							@click=${refreshAigwModels}
-						>Refresh Models</button>
-					` : ""}
-				</div>
-
-			</div>
+      <!-- AI Gateways section -->
+      <div class="flex flex-col gap-4" data-testid="aigw-section">
+        <h3 class="text-sm font-semibold text-foreground">AI Gateways</h3>
+        <p class="text-sm text-muted-foreground">Connect enterprise AIGW or local OpenAI-compatible gateways. A gateway name becomes its provider in the model picker.</p>
+        ${exclusivePending ? html`
+          <div class="text-sm text-foreground bg-warning/10 border border-warning/30 px-3 py-2 rounded-md" data-testid="gateway-exclusivity-warning">
+            An enabled <code>aigw</code> gateway is exclusive: built-in providers and other OpenAI-compatible gateways are unavailable until it is disabled.
+          </div>
+        ` : ""}
+        <div class="flex flex-col gap-3" data-testid="gateways-editor">
+          ${gateways.length ? gateways.map((gateway) => renderGatewayRow(gateway, busy)) : html`<p class="text-xs text-muted-foreground italic">No gateways configured — built-in cloud providers are used.</p>`}
+        </div>
+        ${gatewaysError ? html`<div class="text-sm text-destructive bg-destructive/10 px-3 py-2 rounded-md" data-testid="gateways-error">${gatewaysError}</div>` : ""}
+        <div class="flex gap-2">
+          <button class="px-3 py-2 text-sm rounded-md border border-input bg-background text-foreground hover:bg-secondary disabled:opacity-50" data-testid="gateways-add-btn" ?disabled=${busy} @click=${addGatewayRow}>Add gateway</button>
+          <button class="px-4 py-2 text-sm rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50" data-testid="gateways-save-btn" ?disabled=${busy} @click=${saveGatewaysList}>${busy ? "Saving…" : "Save"}</button>
+        </div>
+      </div>
 
 			<!-- Default model preferences -->
 			<div class="flex flex-col gap-4 pt-4 border-t border-border" data-testid="defaults-section">
@@ -2317,7 +2430,7 @@ export function renderModelsTab() {
 							class="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2"
 							data-testid="view-aigw-models-btn"
 							@click=${openAigwModelsDialog}
-						>View available models… (${aigwModels.length})</button>
+						>View available models… (${combinedGatewayModels().length})</button>
 					</div>
 				` : ""}
 			</div>

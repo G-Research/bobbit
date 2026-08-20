@@ -127,7 +127,21 @@ import { McpManager, type MarketplaceMcpResolver, type McpReloadResult } from ".
 import { makeMetaToolName, parseMcpToolName } from "../mcp/mcp-meta.js";
 import { isReviewerBusyError, isTransientReviewError, isProviderBackoffError, isRetryableGenericAgentError, isNonRetryableAgentError } from "./verification-logic.js";
 import { truncateLargeToolContent } from "./truncate-large-content.js";
-import { getAigwUrl, discoverAigwModels, deriveName, normalizeAigwModelString, writeAigwDnsGuardExtension } from "./aigw-manager.js";
+import {
+	discoverGatewayModels,
+	listGateways,
+	getAigwUrl,
+	isExclusiveMode,
+	isClaudeId,
+	stripProviderPrefix,
+	bedrockRoutesForType,
+	deriveName,
+	normalizeAigwModelString,
+	getGatewayApiKeyExpression,
+	resolveGatewayCredential,
+	writeAigwDnsGuardExtension,
+	type ModelGateway,
+} from "./aigw-manager.js";
 import { defaultImageModelPref, getAvailableImageModels, parseImageModelPref } from "./image-generation.js";
 import { findSessionSelectableModel, getAvailableModels, modelRecencyRank, resolveModelStateMeta } from "./model-registry.js";
 import { isSessionSelectableModelString, isSpawnPinnableModelString } from "./google-code-assist.js";
@@ -442,6 +456,20 @@ interface ArchivedWorktreeScanContext {
 }
 
 export type SessionStatus = "starting" | "preparing" | "idle" | "streaming" | "aborting" | "terminated";
+
+/**
+ * Return the exact provider/model string written to Pi for a gateway result.
+ * Claude prefix stripping is deliberately AIGW-only: a raw OpenAI-compatible
+ * `claude-local` model must stay raw and never acquire Bedrock routing.
+ */
+export function gatewayModelBinding(
+	gateway: Pick<ModelGateway, "name" | "type">,
+	model: { id: string; wireId?: string },
+): string {
+	const bedrock = bedrockRoutesForType(gateway.type) && isClaudeId(model.id);
+	const id = bedrock ? stripProviderPrefix(model.id) : gateway.type === "aigw" ? (model.wireId ?? model.id) : model.id;
+	return `${gateway.name}/${id}`;
+}
 
 export type RestartRedriveSnapshot = {
 	status: SessionStatus;
@@ -3296,13 +3324,29 @@ export class SessionManager {
 	/** Injected boot lag sampler. When absent, restoreSessions owns a temporary
 	 * real event-loop delay histogram for the duration of eager restoration. */
 	private readonly _bootRestoreLagSampler?: () => number;
-	/** Cached aigw model discovery result (url → { models, timestamp }) */
-	private _aigwModelCache: { url: string; models: Awaited<ReturnType<typeof discoverAigwModels>>; ts: number } | null = null;
+	/** Per-gateway discovery cache. URL is part of each entry so editing a row
+	 * invalidates only that row; provider/model tuples never cross gateways. */
+	private _gatewayModelCache = new Map<string, { url: string; models: Awaited<ReturnType<typeof discoverGatewayModels>>; ts: number }>();
 	private static AIGW_CACHE_TTL_MS = 60_000; // 1 minute
 
-	/** Clear auto-selection discovery state after configure, refresh, or removal. */
+	/** Clear auto-selection discovery state after any gateway mutation. Kept under
+	 * its legacy name because the existing configure/refresh shims call it. */
 	invalidateAigwModelCache(): void {
-		this._aigwModelCache = null;
+		this._gatewayModelCache.clear();
+	}
+
+	invalidateGatewayModelCache(): void {
+		this.invalidateAigwModelCache();
+	}
+
+	/** Preserve direct pre-boot callers while `modelGateways` migration is owned
+	 * by server startup. An explicit empty array remains authoritative. */
+	private getConfiguredGateways(): ModelGateway[] {
+		if (!this.preferencesStore) return [];
+		const gateways = listGateways(this.preferencesStore);
+		if (Object.prototype.hasOwnProperty.call(this.preferencesStore.getAll(), "modelGateways")) return gateways;
+		const legacyUrl = getAigwUrl(this.preferencesStore);
+		return legacyUrl ? [{ id: "legacy-aigw", name: "aigw", url: legacyUrl, type: "aigw", enabled: true }] : gateways;
 	}
 
 	private retainSetupInitialThinkingAuthority(sessionId: string, rawInitialThinkingLevel: string | undefined): () => void {
@@ -13280,38 +13324,59 @@ export class SessionManager {
 			}
 		}
 
-		// Fall back to aigw best-ranked model only when no explicit role/default
-		// session model was selected.
-		const aigwUrl = getAigwUrl(this.preferencesStore);
-		if (!aigwUrl) return;
-
-		let aigwModels;
-		try {
-			// Use cached model list if fresh (avoids HTTP round-trip per session)
-			if (this._aigwModelCache && this._aigwModelCache.url === aigwUrl &&
-				this.clock.now() - this._aigwModelCache.ts < SessionManager.AIGW_CACHE_TTL_MS) {
-				aigwModels = this._aigwModelCache.models;
-			} else {
-				aigwModels = await discoverAigwModels(aigwUrl);
-				this._aigwModelCache = { url: aigwUrl, models: aigwModels, ts: this.clock.now() };
+		// Fall back to the best-ranked model across enabled gateway rows only when
+		// no explicit role/default model was selected. In exclusive mode this mirrors
+		// the registry: only AIGW contributes; otherwise local OpenAI-compatible
+		// gateways contribute alongside it. Bind the owning provider name so Pi's
+		// strict models.json lookup cannot silently select a different provider.
+		const gateways = this.getConfiguredGateways();
+		const enabledGateways = gateways.filter((gateway) => gateway.enabled);
+		if (enabledGateways.length === 0) return;
+		const exclusive = isExclusiveMode(gateways);
+		type GatewayCandidate = { gateway: ModelGateway; bindId: string };
+		const candidates: GatewayCandidate[] = [];
+		for (const gateway of enabledGateways) {
+			if (exclusive && gateway.type !== "aigw") continue;
+			try {
+				const models = await this.discoverGatewayModelsCached(gateway);
+				for (const model of models) {
+					const binding = gatewayModelBinding(gateway, model);
+					candidates.push({ gateway, bindId: binding.slice(gateway.name.length + 1) });
+				}
+			} catch (err) {
+				console.warn(`[session-manager] Failed to discover gateway "${gateway.name}" models for auto-selection:`, err);
 			}
-		} catch (err) {
-			console.warn(`[session-manager] Failed to discover aigw models for auto-selection:`, err);
-			return;
 		}
-		if (aigwModels.length === 0) return;
+		if (candidates.length === 0) return;
 
-		const modelToUse = [...aigwModels].sort((a, b) => modelRecencyRank(b.id) - modelRecencyRank(a.id))[0];
-		const aigwModel = `aigw/${modelToUse.id}`;
+		const best = [...candidates].sort((a, b) => modelRecencyRank(b.bindId) - modelRecencyRank(a.bindId))[0];
+		const modelString = `${best.gateway.name}/${best.bindId}`;
 		try {
-			await applyModelString(session.rpcClient, aigwModel, { contextLabel: "auto-selected aigw model" });
+			await applyModelString(session.rpcClient, modelString, { contextLabel: "auto-selected gateway model" });
 		} catch (err) {
 			console.warn(`[session-manager] Failed to auto-select model for ${session.id}:`, err);
 			return;
 		}
-		await commitExactSpawnTuple(aigwModel);
-		console.log(`[session-manager] Auto-selected aigw model "${modelToUse.id}" for session ${session.id}`);
+		await commitExactSpawnTuple(modelString);
+		console.log(`[session-manager] Auto-selected gateway model "${modelString}" for session ${session.id}`);
 		return verifiedSpawnTuple;
+	}
+
+	/** Discover one named gateway with a cache scoped to both its name and URL. */
+	private async discoverGatewayModelsCached(gateway: ModelGateway): Promise<Awaited<ReturnType<typeof discoverGatewayModels>>> {
+		const cached = this._gatewayModelCache.get(gateway.name);
+		if (cached && cached.url === gateway.url && this.clock.now() - cached.ts < SessionManager.AIGW_CACHE_TTL_MS) {
+			return cached.models;
+		}
+		// Resolve the expression only when issuing a fresh discovery request. A
+		// failed resolver rejects before fetch, so auto-selection never downgrades a
+		// credentialed gateway to an unauthenticated probe.
+		const credential = this.preferencesStore
+			? await resolveGatewayCredential(getGatewayApiKeyExpression(this.preferencesStore, gateway.id), gateway.name)
+			: undefined;
+		const models = await discoverGatewayModels(gateway, credential);
+		this._gatewayModelCache.set(gateway.name, { url: gateway.url, models, ts: this.clock.now() });
+		return models;
 	}
 
 	/** Apply, read back, and atomically persist thinking with the exact live model. */
@@ -14678,8 +14743,12 @@ export class SessionManager {
 	private getTitleGenOptions(): import("./title-generator.js").TitleGenOptions {
 		const namingModel = this.preferencesStore?.get("default.namingModel") as string | undefined;
 		const sessionModel = this.preferencesStore?.get("default.sessionModel") as string | undefined;
-		const aigwUrl = this.preferencesStore ? getAigwUrl(this.preferencesStore) : undefined;
-		return { namingModel: namingModel || undefined, fallbackModel: sessionModel || undefined, aigwUrl, thinkingLevel: "off", preferencesStore: this.preferencesStore, skipTitleGeneration: this.skipTitleGeneration };
+		const gateways = this.getConfiguredGateways().filter((gateway) => gateway.enabled);
+		// Automatic Claude fallback is intentionally AIGW-only. A local gateway
+		// named after Claude is not an enterprise AIGW and must not affect fallback.
+		const aigwGateway = gateways.find((gateway) => gateway.type === "aigw");
+		const aigwUrl = aigwGateway?.url;
+		return { namingModel: namingModel || undefined, fallbackModel: sessionModel || undefined, gateways, aigwUrl, aigwGateway, thinkingLevel: "off", preferencesStore: this.preferencesStore, skipTitleGeneration: this.skipTitleGeneration };
 	}
 
 	private async autoGenerateTitleFromText(session: SessionInfo, userText: string): Promise<void> {

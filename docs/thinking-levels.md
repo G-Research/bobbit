@@ -79,6 +79,10 @@ The UI clamps eagerly for immediate feedback, but the server repeats validation 
 
 Only a verified provider, model, and effective-thinking tuple becomes durable. An unrequested Pi fallback or a family-derived capability is not accepted as success.
 
+## Gateway provider boundary
+
+Thinking capability is keyed by the exact provider/model tuple. The singleton `aigw` provider may retain AIGW capability metadata, but a named OpenAI-compatible gateway with a `claude-*` ID must not inherit Anthropic or AIGW thinking tiers merely from its name. Unknown or mismatched providers fail closed.
+
 ## UI behavior
 
 Every thinking selector derives its options from `getSupportedThinkingLevels` and clamps through the shared helper.

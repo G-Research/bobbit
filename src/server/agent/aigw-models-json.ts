@@ -183,3 +183,63 @@ export function removeManagedAigwProvider(source: string): { text: string; remov
 		removed: true,
 	};
 }
+
+function inspectGatewayProvider(source: string, providerName: string): { root: JsoncNode; provider?: JsoncNode } {
+	const root = parseDocument(source);
+	const providerProperties = objectProperties(root, "providers");
+	if (providerProperties.length > 1) {
+		throw new AigwModelsJsonOwnershipError("models.json has duplicate providers keys; refusing ambiguous gateway publication");
+	}
+	const providers = providerProperties[0] ? propertyValue(providerProperties[0]) : undefined;
+	if (providers && providers.type !== "object") {
+		throw new AigwModelsJsonOwnershipError("models.json providers is not an object; refusing gateway publication");
+	}
+	const matches = objectProperties(providers, providerName);
+	if (matches.length > 1) {
+		throw new AigwModelsJsonOwnershipError(`models.json has duplicate providers.${providerName} keys; refusing ambiguous gateway publication`);
+	}
+	return { root, provider: matches[0] ? propertyValue(matches[0]) : undefined };
+}
+
+/**
+ * Insert or refresh a named non-AIGW gateway provider without reserializing the
+ * document. A pre-existing unmarked provider is always user-owned, even if a
+ * stale preference previously claimed its name.
+ */
+export function publishManagedGatewayProvider(source: string | undefined, providerName: string, generatedProvider: Record<string, unknown>): string {
+	let text = source ?? "{}\n";
+	const formatting = formattingFor(text);
+	const state = inspectGatewayProvider(text, providerName);
+	const generated = { ...generatedProvider, "x-bobbit-managed": AIGW_MANAGED_MARKER };
+
+	if (!state.provider) return setValue(text, ["providers", providerName], generated, formatting);
+	if (!isManagedAigw(state.provider)) {
+		throw new AigwModelsJsonOwnershipError(
+			`models.json already contains an unmarked providers.${providerName} block; it is user-owned and was not changed`,
+		);
+	}
+	assertAigwFieldsUnambiguous(state.provider);
+	for (const key of ["baseUrl", "apiKey", "api", "models"] as const) {
+		text = setValue(text, ["providers", providerName, key], generatedProvider[key], formatting);
+	}
+	const headers = generatedProvider.headers as Record<string, unknown> | undefined;
+	const reparsed = inspectGatewayProvider(text, providerName);
+	const headersNode = findNodeAtLocation(reparsed.root, ["providers", providerName, "headers"]);
+	if (headersNode && headersNode.type !== "object") text = setValue(text, ["providers", providerName, "headers"], {}, formatting);
+	for (const [name, value] of Object.entries(headers ?? {})) {
+		text = setValue(text, ["providers", providerName, "headers", name], value, formatting);
+	}
+	text = setValue(text, ["providers", providerName, "x-bobbit-managed", "kind"], AIGW_MANAGED_MARKER.kind, formatting);
+	return setValue(text, ["providers", providerName, "x-bobbit-managed", "version"], AIGW_MANAGED_MARKER.version, formatting);
+}
+
+/** Remove only a named provider carrying Bobbit's publication marker. */
+export function removeManagedGatewayProvider(source: string, providerName: string): { text: string; removed: boolean } {
+	const state = inspectGatewayProvider(source, providerName);
+	if (!state.provider || !isManagedAigw(state.provider)) return { text: source, removed: false };
+	assertAigwFieldsUnambiguous(state.provider);
+	return {
+		text: setValue(source, ["providers", providerName], undefined, formattingFor(source)),
+		removed: true,
+	};
+}

@@ -3,7 +3,7 @@
  *
  * Assembles a merged model list from:
  * 1. Built-in providers (from pi-ai getBuiltinProviders()/getBuiltinModels())
- * 2. AI Gateway models (if configured, live fetch via discoverAigwModels())
+ * 2. Named gateway models (live fetch via type-driven discoverGatewayModels())
  * 3. Custom local providers (Ollama, LM Studio, vLLM, llama.cpp)
  *
  * Served via GET /api/models with a 5-second TTL cache.
@@ -13,6 +13,7 @@ import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import path from "node:path";
+import { parse as parseJsonc } from "jsonc-parser";
 // Pi also exposes provider-scoped `Models` with async catalog refresh/auth.
 // Bobbit intentionally stays on these synchronous static-catalog reads: its own
 // registry composes that snapshot with AI Gateway and local-provider discovery,
@@ -21,7 +22,17 @@ import { getBuiltinProviders, getBuiltinModels, getBuiltinModel } from "@earendi
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { PreferencesStore } from "./preferences-store.js";
 import { globalAgentDir, globalAuthPath } from "../bobbit-dir.js";
-import { discoverAigwModels, getAigwUrl } from "./aigw-manager.js";
+import {
+	discoverAigwModels,
+	discoverGatewayModels,
+	gatewayHasConfiguredApiKey,
+	getAigwUrl,
+	getGatewayApiKeyExpression,
+	isExclusiveMode,
+	listGateways,
+	resolveGatewayCredential,
+	type ModelGateway,
+} from "./aigw-manager.js";
 import { inspectAigwTargetRealm, type AigwTargetRealm } from "./aigw-models-json.js";
 import { getGoogleCodeAssistModels } from "./google-code-assist-models.js";
 import { GOOGLE_GEMINI_CLI_PROVIDER, hasGoogleCodeAssistSpawnCredential } from "./google-code-assist.js";
@@ -211,12 +222,15 @@ export async function getAvailableModels(prefs: PreferencesStore): Promise<ApiMo
 
 /**
  * Simple version tracking — hash relevant preference keys.
- * We use a string hash of aigw.url + customProviders + providerKeys to detect changes.
+ * We use a string hash of modelGateways + customProviders + providerKeys to detect changes.
  */
 function getPrefsVersion(prefs: PreferencesStore): number {
 	const all = prefs.getAll();
 	let hash = 0;
 	const str = JSON.stringify([
+		all["modelGateways"],
+		// Keep the pre-migration lookup cache-correct for direct consumers that
+		// assemble before server boot has applied the idempotent migration.
 		all["aigw.url"],
 		all["aigw.exclusive"],
 		all["customProviders"],
@@ -238,6 +252,66 @@ function comparableAigwUrl(value: unknown): string | undefined {
 		return url.href.replace(/\/+$/, "");
 	} catch {
 		return undefined;
+	}
+}
+
+function comparableGatewayUrl(gateway: ModelGateway): string | undefined {
+	const normalized = comparableAigwUrl(gateway.url);
+	if (!normalized || gateway.type !== "openai-compatible") return normalized;
+	return normalized.endsWith("/v1") ? normalized : `${normalized}/v1`;
+}
+
+function registryGateways(prefs: PreferencesStore): ModelGateway[] {
+	const gateways = listGateways(prefs);
+	if (Object.prototype.hasOwnProperty.call(prefs.getAll(), "modelGateways")) return gateways;
+	const legacyUrl = getAigwUrl(prefs);
+	return legacyUrl ? [{ id: "legacy-aigw", name: "aigw", url: legacyUrl, type: "aigw", enabled: true }] : gateways;
+}
+
+/**
+ * Keep last-known models only for the same named provider and endpoint. A
+ * transient outage must not make the picker empty, but neither may a stale
+ * block be rebound to a renamed gateway or an unrelated URL.
+ */
+function readRetainedGatewayModels(gateway: ModelGateway, hasCredential: boolean): ApiModel[] {
+	try {
+		const data = parseJsonc(fs.readFileSync(path.join(globalAgentDir(), "models.json"), "utf-8"));
+		const provider = data?.providers?.[gateway.name];
+		const activeUrl = comparableGatewayUrl(gateway);
+		const retainedUrl = comparableAigwUrl(provider?.baseUrl);
+		if (!activeUrl || !retainedUrl || retainedUrl !== activeUrl || !Array.isArray(provider.models)) return [];
+		const gatewayOrigin = new URL(gateway.url).origin;
+		return provider.models.flatMap((model: any): ApiModel[] => {
+			if (!model || typeof model.id !== "string" || !model.id) return [];
+			const api = typeof model.api === "string" ? model.api : provider.api;
+			const baseUrl = typeof model.baseUrl === "string" ? model.baseUrl : provider.baseUrl;
+			if (typeof api !== "string" || typeof baseUrl !== "string") return [];
+			if (hasCredential && new URL(baseUrl).origin !== gatewayOrigin) return [];
+			const input = Array.isArray(model.input)
+				? model.input.filter((item: unknown): item is "text" | "image" => item === "text" || item === "image")
+				: [];
+			return [{
+				id: model.id,
+				name: typeof model.name === "string" && model.name ? model.name : model.id,
+				provider: gateway.name,
+				...(typeof model.upstreamProvider === "string" ? { upstreamProvider: model.upstreamProvider } : {}),
+				api,
+				baseUrl,
+				contextWindow: typeof model.contextWindow === "number" ? model.contextWindow : 0,
+				maxTokens: typeof model.maxTokens === "number" ? model.maxTokens : 0,
+				reasoning: model.reasoning === true,
+				...(model.thinkingLevelMap && typeof model.thinkingLevelMap === "object" ? { thinkingLevelMap: model.thinkingLevelMap } : {}),
+				input: input.length > 0 ? input : ["text"],
+				cost: model.cost && typeof model.cost === "object"
+					? model.cost
+					: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				...(model.headers && typeof model.headers === "object" ? { headers: model.headers } : {}),
+				...(model.compat && typeof model.compat === "object" ? { compat: model.compat } : {}),
+				authenticated: true,
+			}];
+		});
+	} catch {
+		return [];
 	}
 }
 
@@ -302,14 +376,29 @@ function readAigwTargetRealm(): AigwTargetRealm {
 	}
 }
 
+function restrictCredentialedAigwModels(models: ApiModel[], configuredUrl: string, hasCredential: boolean): ApiModel[] {
+	if (!hasCredential) return models;
+	let configuredOrigin: string;
+	try { configuredOrigin = new URL(configuredUrl).origin; }
+	catch { return []; }
+	return models.filter((model) => {
+		try { return typeof model.baseUrl === "string" && new URL(model.baseUrl).origin === configuredOrigin; }
+		catch { return false; }
+	});
+}
+
 async function readManagedRetainedAigwModels(
 	configuredUrl: string,
 	realm: Extract<AigwTargetRealm, { kind: "managed" }>,
+	hasCredential: boolean,
 ): Promise<ComposedAigwModels> {
 	const activeUrl = comparableAigwUrl(configuredUrl);
 	const retainedUrl = comparableAigwUrl(realm.provider.baseUrl);
 	if (!activeUrl || !retainedUrl || retainedUrl !== activeUrl) return { available: false, models: [] };
-	return composeAigwTargetModels(realm.provider, true);
+	const composed = await composeAigwTargetModels(realm.provider, true);
+	return composed.available
+		? { ...composed, models: restrictCredentialedAigwModels(composed.models, configuredUrl, hasCredential) }
+		: composed;
 }
 
 interface AssembledModelCatalog {
@@ -335,19 +424,17 @@ async function assembleModels(
 ): Promise<AssembledModelCatalog> {
 	const results: ApiModel[] = [];
 	const dynamicModels = new Map<string, ApiModel[]>();
-	const aigwUrl = getAigwUrl(prefs);
+	const gateways = registryGateways(prefs);
+	const enabledGateways = gateways.filter((gateway) => gateway.enabled);
+	const aigwGateway = enabledGateways.find((gateway) => gateway.type === "aigw");
+	const aigwUrl = aigwGateway?.url;
 
-	// When an AI Gateway is configured, it is treated as the single egress path
-	// by default — built-in upstream providers (anthropic, openai, bedrock, ...)
-	// are hidden because in a secure-zone deployment they can't be reached
-	// directly. Users who need to see built-ins alongside the gateway (e.g. for
-	// local development against a real API key AND a dev gateway) can opt out
-	// by setting `aigw.exclusive` to false in preferences.
-	// Custom local providers (Ollama, LM Studio) are always shown because they
-	// live on the user's own machine, not behind the gateway.
-	const aigwExclusive = aigwUrl ? (prefs.get("aigw.exclusive") as boolean | undefined) ?? true : false;
+	// Exclusivity is derived from enabled enterprise AIGWs. OpenAI-compatible
+	// gateways and built-ins share the picker unless an AIGW is the configured
+	// egress boundary; custom local providers remain visible in either mode.
+	const exclusive = isExclusiveMode(gateways);
 
-	if (!aigwExclusive) {
+	if (!exclusive) {
 		// 1. Built-in providers from pi-ai
 		try {
 			const providers = getBobbitBuiltInProviders();
@@ -388,13 +475,19 @@ async function assembleModels(
 		let sourceModels: ApiModel[] | undefined;
 		if (targetRealm.kind === "unmarked-user") {
 			const composed = await composeAigwTargetModels(targetRealm.provider);
-			sourceModels = composed.available ? composed.models : [];
+			sourceModels = composed.available
+				? restrictCredentialedAigwModels(composed.models, aigwUrl, gatewayHasConfiguredApiKey(prefs, aigwGateway!.id))
+				: [];
 		} else if (targetRealm.kind === "invalid") {
 			console.error(`[model-registry] AIGW target realm is unavailable: ${targetRealm.reason}`);
 			sourceModels = [];
 		} else {
 			try {
-				const aigwModels = await discoverAigwModels(aigwUrl);
+				const gateway = enabledGateways.find((candidate) => candidate.type === "aigw");
+				const credential = gateway
+					? await resolveGatewayCredential(getGatewayApiKeyExpression(prefs, gateway.id), gateway.name)
+					: undefined;
+				const aigwModels = await discoverAigwModels(aigwUrl, credential);
 				sourceModels = [];
 				for (const m of aigwModels) {
 					if (!m.baseUrl || !m.cost) {
@@ -424,7 +517,7 @@ async function assembleModels(
 				// An absent target keeps the prior exact discovery snapshot; user-owned
 				// targets were handled above and can never be bypassed by that cache.
 				const retained = targetRealm.kind === "managed"
-					? await readManagedRetainedAigwModels(aigwUrl, targetRealm)
+					? await readManagedRetainedAigwModels(aigwUrl, targetRealm, gatewayHasConfiguredApiKey(prefs, aigwGateway!.id))
 					: { available: false, models: [] };
 				sourceModels = retained.available ? retained.models : previousDynamicModels.get(sourceKey);
 			}
@@ -434,6 +527,42 @@ async function assembleModels(
 				dynamicModels.set(sourceKey, sourceModels);
 			}
 			results.push(...sourceModels);
+		}
+	}
+
+	// 2b. OpenAI-compatible gateways have no user-owned AIGW target realm. Their
+	// per-gateway publication is the retained catalog when discovery is unavailable.
+	for (const gateway of enabledGateways) {
+		if (gateway.type === "aigw" || exclusive) continue;
+		try {
+			const credential = await resolveGatewayCredential(
+				getGatewayApiKeyExpression(prefs, gateway.id),
+				gateway.name,
+			);
+			const discovered = await discoverGatewayModels(gateway, credential);
+			for (const model of discovered) {
+				// Discovery owns the conservative metadata fallback for generic
+				// gateways. Do not re-infer here: registry assembly must preserve
+				// the exact provider/type contract selected at discovery.
+				results.push({
+					id: model.id,
+					name: model.name,
+					provider: gateway.name,
+					api: "openai-completions",
+					baseUrl: model.baseUrl || comparableGatewayUrl(gateway) || gateway.url,
+					contextWindow: model.contextWindow,
+					maxTokens: model.maxTokens,
+					reasoning: model.reasoning,
+					...(model.thinkingLevelMap ? { thinkingLevelMap: model.thinkingLevelMap } : {}),
+					input: model.input,
+					cost: model.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					...(model.compat ? { compat: model.compat } : {}),
+					authenticated: true,
+				});
+			}
+		} catch (error) {
+			console.error(`[model-registry] Failed to discover gateway "${gateway.name}" models:`, error);
+			results.push(...readRetainedGatewayModels(gateway, gatewayHasConfiguredApiKey(prefs, gateway.id)));
 		}
 	}
 

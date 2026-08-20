@@ -3236,8 +3236,26 @@
       }
     },
     {
+      "path": "tests2/core/multi-gateway-auth.test.ts",
+      "reason": "Credential-free request-time gateway authentication coverage for absent, literal, environment, and command expressions plus sanitized failure/redaction behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/pi-installed-contract.test.ts",
       "reason": "Installed-runtime contract coverage for the aligned Pi trio version, active-run release before agent_settled observers, delta-only streaming with terminal authority, compaction event order and retry metadata, manual-compaction prompt rejection, recoverable-length overflow retry, queue release, and steer acknowledgement before user echo.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/multi-gateway-exclusivity.test.ts",
+      "reason": "Derived exclusivity regression coverage proving only an enabled AIGW gateway enables exclusive mode.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -3254,8 +3272,26 @@
       }
     },
     {
+      "path": "tests2/core/multi-gateway-migration.test.ts",
+      "reason": "Legacy singleton AIGW preference migration coverage for idempotence, cleanup, and preserved model preferences.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
       "path": "tests2/core/reliable-intent-attempt.test.ts",
       "reason": "Core reliable-turn attempt-ledger coverage for delayed acknowledgement and echo, exact-once identical steers, ambiguous failure, abort interleavings, stale attempts, and persisted restore, using the shared deterministic reliable-intent fixture.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/multi-gateway-retained-catalog.test.ts",
+      "reason": "Gateway discovery status coverage distinguishing authoritative empty results from unreachable matching retained catalogs.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",
@@ -3272,6 +3308,33 @@
       }
     },
     {
+      "path": "tests2/core/multi-gateway-validation.test.ts",
+      "reason": "Named gateway validation, persistence redaction, and provider routing regression coverage.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/multi-gateway-writer.test.ts",
+      "reason": "Type-specific models.json writer coverage, including raw OpenAI-compatible claude-local routing without Bedrock behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/multi-gateway-api.test.ts",
+      "reason": "In-process gateway API coverage for named gateway CRUD, authentication, status, refresh, and legacy shim behavior.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
       "path": "tests2/integration/reliable-intent-recovery.test.ts",
       "reason": "In-process gateway and mock-Pi integration coverage for agent_end-to-agent_settled admission fencing, barrier-driven compaction, durable ID-keyed admission, ordered identical steers, delayed acknowledgement and echo, reconnect, restart, abort, failure, and exactly-once transcript recovery, with helper-owned deterministic runtime barriers.",
       "execution": {
@@ -3281,12 +3344,39 @@
       }
     },
     {
+      "path": "tests2/browser/journeys/model-picker-hide-filter.journey.spec.ts",
+      "reason": "Chromium journey for visible empty versus unreachable gateway status and persisted display-only model-picker filtering.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/browser/journeys/reliable-agent-turns.journey.spec.ts",
       "reason": "Browser journey covering the reliable-turn visible-carrier invariant across idle and busy prompts, agent_end-to-agent_settled release, rapid identical steers, delayed acknowledgement and echo, manual, threshold, and overflow compaction, Stop races, reload, reconnect, second-tab convergence, and actionable delivery failure through its dedicated runtime fixture.",
       "execution": {
         "runner": "playwright",
         "tier": "browser",
         "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/multi-gateway-settings.journey.spec.ts",
+      "reason": "Chromium Models settings journey for adding, saving, testing, retaining, and removing named gateways without exposing configured keys.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
+      "path": "tests2/core/gateway-consumers.test.ts",
+      "reason": "Multi-gateway consumer regressions covering registry assembly, per-gateway session selection, retained discovery, and explicit title-provider routing.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
       }
     }
   ],

@@ -1742,6 +1742,18 @@ Key files and tests:
 
 ---
 
+## Model gateways
+
+Gateway records in `modelGateways` are secret-free and named: a row name is the provider key in `/api/models`, preferences, and generated `models.json`. Optional key expressions are stored separately under `providerKey.gateway.<id>`, so safe preference reads cannot expose them.
+
+### Type-specific composition
+
+`aigw` keeps its well-known routing, Bedrock environment, and DNS guard lifecycle. `openai-compatible` calls normalized `/v1/models`, keeps raw IDs, and emits only OpenAI-completions blocks; it never parses AIGW configuration or infers Bedrock routing from `claude`.
+
+### Migration, publication, and exclusivity
+
+Startup migrates a nonempty legacy `aigw.url` into an enabled `aigw` record. Existing `modelGateways`, including `[]`, is authoritative, while old `aigw/<model>` preferences remain valid. Publication updates only managed gateway blocks atomically and preserves unrelated providers and `modelOverrides`. Any enabled `aigw` derives exclusive mode; generic gateways merge with built-ins when no AIGW is enabled.
+
 ## AI Gateway request headers (`User-Agent`, `x-opencode-session`)
 
 Bobbit can route model traffic through a configured AI Gateway instead of directly to public providers. See [AI Gateway routing](ai-gateway-routing.md) for operator setup, discovery precedence, routing behavior, model migration, and refresh semantics; this section records the underlying implementation details.

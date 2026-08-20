@@ -2258,6 +2258,21 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/core/gateway-consumers.test.ts",
+		allowReason: "test-owned temporary credential command script and invocation marker",
+		reads: frozen([
+			{ expression: "commandScript", count: 1 },
+			{ expression: "commandMarker", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/multi-gateway-validation.test.ts",
+		allowReason: "test-owned temporary models.json fixtures in isolated agent directories",
+		reads: frozen([
+			{ expression: "file", count: 7 },
+		]),
+	},
+	{
 		consumer: "tests2/core/affected-test-classification.test.ts",
 		declarations: frozen(["indirect:affected-classification-source"]),
 		reads: frozen([

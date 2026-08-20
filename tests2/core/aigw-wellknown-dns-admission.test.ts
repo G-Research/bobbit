@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { PreferencesStore } from "../../src/server/agent/preferences-store.js";
 import {
 	GATEWAY, filterValidatedProviderUrls, getAigwProviderDnsGuardHosts, removeAigw,
 	replaceAigwProviderDnsGuardHosts, resetAgentDirStateForTests, translateWellKnown,
@@ -40,7 +41,7 @@ describe("AIGW DNS admission lifecycle", () => {
 			replaceAigwProviderDnsGuardHosts(["old.example"]);
 			replaceAigwProviderDnsGuardHosts(["new.example"]);
 			assert.deepEqual(getAigwProviderDnsGuardHosts(), ["new.example"]);
-			removeAigw({ remove() {} } as any);
+			removeAigw(new PreferencesStore(path.join(agentDir, "state")));
 			assert.deepEqual(getAigwProviderDnsGuardHosts(), []);
 		} finally {
 			if (previousAgentDir === undefined) delete process.env.BOBBIT_AGENT_DIR;

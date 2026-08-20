@@ -153,6 +153,47 @@ describe("startupAigwCheck — models.json refresh on startup", () => {
 		}
 	});
 
+	it("seeds well-known defaults and normalizes legacy AIGW preferences after startup publication", async () => {
+		let port = 0;
+		const mock = http.createServer((req, res) => {
+			res.setHeader("Content-Type", "application/json");
+			if (req.url === "/.well-known/opencode") {
+				res.end(JSON.stringify({
+					model: "openai:gpt-5.5",
+					provider: {
+						openai: {
+							npm: "@ai-sdk/openai",
+							options: { baseURL: `http://127.0.0.1:${port}/v1` },
+							models: { "gpt-5.5": {
+								name: "GPT 5.5", reasoning: false, modalities: { input: ["text"] },
+								limit: { context: 128000, output: 16384 },
+							} },
+						},
+					},
+				}));
+				return;
+			}
+			res.writeHead(404);
+			res.end();
+		});
+		await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", () => {
+			port = (mock.address() as any).port;
+			resolve();
+		}));
+		try {
+			const prefs = new PreferencesStore(stateDir);
+			prefs.set("aigw.url", `http://127.0.0.1:${port}`);
+			prefs.set("default.sessionModel", "aigw/openai/gpt-5.5");
+
+			assert.equal(await startupAigwCheck(prefs as any), true);
+			assert.equal(prefs.get("default.sessionModel"), "aigw/gpt-5.5");
+			assert.equal(prefs.get("default.reviewModel"), "aigw/gpt-5.5");
+			assert.equal(prefs.get("default.namingModel"), "aigw/gpt-5.5");
+		} finally {
+			await new Promise<void>((resolve) => mock.close(() => resolve()));
+		}
+	});
+
 	it("aigw configured + unreachable gateway → existing models.json left untouched, warning logged", async () => {
 		// Pre-write a sentinel models.json. We capture the bytes and verify
 		// they're unchanged after the failed startup refresh.
@@ -173,8 +214,15 @@ describe("startupAigwCheck — models.json refresh on startup", () => {
 		const before = readFileSync(path.join(tmp, "models.json"));
 
 		const prefs = new PreferencesStore(stateDir);
-		// Port 1 is reserved (TCPMUX) and reliably refuses connections.
-		prefs.set("aigw.url", "http://127.0.0.1:1");
+		// Exercise the persisted multi-gateway path directly. Port 1 is reserved
+		// (TCPMUX) and reliably refuses connections.
+		prefs.set("modelGateways", [{
+			id: "retained-aigw",
+			name: "aigw",
+			url: "http://127.0.0.1:1",
+			type: "aigw",
+			enabled: true,
+		}]);
 
 		const warnings: string[] = [];
 		const origWarn = console.warn;

@@ -15,6 +15,12 @@ import { Input } from "../components/Input.js";
 import { formatModelCost } from "../utils/format.js";
 import { i18n } from "../utils/i18n.js";
 
+/** Persisted, display-only picker filter. It is never sent to the server. */
+export const HIDE_UNCONFIGURED_MODELS_KEY = "bobbit.modelPicker.hideUnconfigured";
+
+function readHideUnconfiguredModels(): boolean { try { return localStorage.getItem(HIDE_UNCONFIGURED_MODELS_KEY) === "1"; } catch { return false; } }
+function writeHideUnconfiguredModels(value: boolean): void { try { localStorage.setItem(HIDE_UNCONFIGURED_MODELS_KEY, value ? "1" : "0"); } catch {} }
+
 function modelsAreEqual(a: Model<any> | null | undefined, b: Model<any> | null | undefined): boolean {
 	return !!a && !!b && a.provider === b.provider && a.id === b.id;
 }
@@ -25,6 +31,7 @@ export class ModelSelector extends DialogBase {
 	@state() searchQuery = "";
 	@state() filterThinking = false;
 	@state() filterVision = false;
+	@state() filterHideUnconfigured = false;
 	@state() selectedIndex = 0;
 	@state() private navigationMode: "mouse" | "keyboard" = "mouse";
 	@state() private serverModels: any[] = [];
@@ -41,6 +48,7 @@ export class ModelSelector extends DialogBase {
 		const selector = new ModelSelector();
 		selector.currentModel = currentModel;
 		selector.onSelectCallback = onSelect;
+		selector.filterHideUnconfigured = readHideUnconfiguredModels();
 		selector.open();
 		selector.loadModels();
 	}
@@ -169,6 +177,10 @@ export class ModelSelector extends DialogBase {
 			filteredModels = filteredModels.filter(({ model }) => model.input.includes("image"));
 		}
 
+		if (this.filterHideUnconfigured) {
+			filteredModels = filteredModels.filter(({ model }) => (model.authenticated ?? false) || modelsAreEqual(this.currentModel, model));
+		}
+
 		// Sort: current model first, then authenticated, then by recency rank
 		filteredModels.sort((a, b) => {
 			const aIsCurrent = modelsAreEqual(this.currentModel, a.model);
@@ -258,6 +270,7 @@ export class ModelSelector extends DialogBase {
 						className: "rounded-full",
 						children: html`<span class="inline-flex items-center gap-1">${icon(ImageIcon, "sm")} ${i18n("Vision")}</span>`,
 					})}
+					${Button({ variant: this.filterHideUnconfigured ? "default" : "secondary", size: "sm", onClick: () => { this.filterHideUnconfigured = !this.filterHideUnconfigured; writeHideUnconfiguredModels(this.filterHideUnconfigured); this.selectedIndex = 0; }, className: "rounded-full", children: html`<span class="inline-flex items-center gap-1" data-testid="model-filter-has-key">${icon(KeyRound, "sm")} Has key</span>` })}
 				</div>
 			</div>
 

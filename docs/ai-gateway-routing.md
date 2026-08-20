@@ -4,6 +4,12 @@ Bobbit can use one AI Gateway as the model source for agent sessions, reviews, a
 
 This avoids guessing capabilities from model names. In particular, OpenAI reasoning models can use the Responses API, where reasoning and function tools are supported together, while Bedrock models retain Converse semantics. Direct built-ins remain exact Pi rows, and user/custom models remain the exact configuration composed for their target realm; see the [metadata retirement decision](design/openai-model-additions-retirement.md).
 
+## Gateway types
+
+Bobbit supports named model gateways. The enterprise `aigw` type remains the singleton provider named `aigw` and uses well-known-first discovery. `openai-compatible` gateways use only normalized `/v1/models` discovery, preserve raw IDs, and always use OpenAI completions routing.
+
+A generic model ID such as `claude-local` is not a Bedrock routing signal: it never gets AIGW headers, `/aws`, or `bedrock-converse-stream`. See [Bring your own models](bring-your-own-models.md) and [Multi-gateway providers](multi-gateway-providers.md).
+
 ## Configure an AI Gateway
 
 Open **Settings → Models → AI Gateway** and enter an absolute HTTP(S) gateway URL, such as `https://gateway.example/v1`.
@@ -83,6 +89,12 @@ While the condition is active:
 For AIGW, a successful discovery that omits the old row can trigger this condition. A thrown discovery request alone is not evidence of retirement: an eligible matching marked publication or same-process exact snapshot may remain the session-selection authority during that outage. This distinction is why operators should compare `/api/models`, not only the fresh `/api/aigw/status` response, before concluding that a saved model was retired.
 
 See [Debugging — restored session requires a model](debugging.md#restored-session-requires-a-model) for diagnosis and recovery checks.
+
+## Credentials, retention, and status
+
+A gateway may have a private key expression. It is resolved immediately before discovery, proxying, probes, and title requests. Missing or `none` remains anonymous; literal, environment, and `!command` expressions send Bearer authentication only to the configured origin. Resolution failures are sanitized and fail closed, with no anonymous retry. Expressions and resolved tokens never appear in settings, status, logs, or safe preferences.
+
+Status is semantic: `reachable` has models, `empty` is a successful authoritative empty discovery, `unreachable` preserves only matching last-known provider rows, and `disabled` intentionally contributes nothing. Matching requires the provider name and normalized base URL; successful discovery always replaces retained availability.
 
 ## Remote config security
 

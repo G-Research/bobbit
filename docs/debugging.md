@@ -1176,6 +1176,20 @@ Checklist:
 
 See [Configurable agent directory](configurable-agent-directory.md).
 
+## Gateway is unreachable but the picker should keep last-known models
+
+Symptom: a saved gateway reports **Unreachable** after a restart, but its picker rows disappear or are confused with **No models**.
+
+`empty` is a successful zero-model discovery and is authoritative. `unreachable` is a transport, discovery, or credential-resolution failure. During an outage, `/api/models` retains only atomically published rows whose provider name and normalized URL match the saved gateway; a configured key also rejects retained cross-origin routes. Check `GET /api/aigw/gateways/<name>/status`, fix connectivity or the key expression, then refresh the named row.
+
+## Gateway command key fails instead of retrying anonymously
+
+Symptom: Test, Refresh, a probe, or title generation says it cannot resolve a gateway key. A `!command` key timed out, failed, exited nonzero, or printed no token. Bobbit fails closed: no anonymous fallback request is sent. Run it under the gateway process account and ensure standard output contains only the token.
+
+## Claude-shaped local model is routed incorrectly
+
+Symptom: an `openai-compatible` `claude-local` model uses Bedrock, `/aws`, or AIGW-only headers. This is a regression: generic gateways preserve raw IDs and use `openai-completions`. Confirm the row type and inspect `/api/models`; its `api` must be `openai-completions` with a normalized `/v1` base URL.
+
 ## AI Gateway publication leaves `models.json` unchanged
 
 Symptom: configure, refresh, or startup discovers models but does not update the AIGW block, or reports that publication was refused.

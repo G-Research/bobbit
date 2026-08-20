@@ -19,11 +19,18 @@ import net from "node:net";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { parse as parseJsonc } from "jsonc-parser";
 import { bobbitStateDir, globalAgentDir } from "../bobbit-dir.js";
 import { BOBBIT_AIGW_USER_AGENT, aigwUserAgentHeaders } from "./aigw-user-agent.js";
-import { publishManagedAigwProvider, removeManagedAigwProvider } from "./aigw-models-json.js";
+import { GatewayCredentialResolutionError, resolveGatewayCredential } from "./gateway-credential-resolver.js";
+import {
+	publishManagedAigwProvider,
+	publishManagedGatewayProvider,
+	removeManagedAigwProvider,
+	removeManagedGatewayProvider,
+} from "./aigw-models-json.js";
+export { GatewayCredentialResolutionError, resolveGatewayCredential };
 import type { PreferencesStore } from "./preferences-store.js";
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -73,6 +80,29 @@ export interface AigwConfig {
 	url: string;
 	models: AigwModel[];
 }
+
+
+/** The request/routing contract supported by a configured model gateway. */
+export type GatewayType = "aigw" | "openai-compatible";
+
+/**
+ * A public, persistable gateway record. Credentials are intentionally not part
+ * of this shape: their expression lives at `providerKey.gateway.<id>`.
+ */
+export interface ModelGateway {
+	id: string;
+	name: string;
+	url: string;
+	type: GatewayType;
+	enabled: boolean;
+	apiKeyConfigured?: boolean;
+}
+
+export type GatewayStatus =
+	| { state: "reachable"; models: AigwModel[] }
+	| { state: "empty"; models: [] }
+	| { state: "unreachable"; models: AigwModel[]; error: string }
+	| { state: "disabled"; models: [] };
 
 // ── Well-known model metadata ──────────────────────────────────────
 
@@ -376,6 +406,13 @@ export function normalizeAigwModelPreferences(prefs: PreferencesStore): void {
  * Set env vars so agent subprocesses route Bedrock calls through the gateway.
  * Called both on fresh configuration and on startup when aigw is already configured.
  */
+function clearBedrockEnvVars(): void {
+	delete process.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME;
+	delete process.env.AWS_BEDROCK_FORCE_HTTP1;
+	if (process.env.AWS_ACCESS_KEY_ID === "anything") delete process.env.AWS_ACCESS_KEY_ID;
+	if (process.env.AWS_SECRET_ACCESS_KEY === "anything") delete process.env.AWS_SECRET_ACCESS_KEY;
+}
+
 function setBedrockEnvVars(aigwUrl: string): void {
 	const bedrockBaseUrl = aigwUrl.replace(/\/+$/, "").replace(/\/v1$/, "") + "/aws";
 	process.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME = bedrockBaseUrl;
@@ -385,6 +422,379 @@ function setBedrockEnvVars(aigwUrl: string): void {
 	process.env.AWS_SECRET_ACCESS_KEY = "anything";
 	if (!process.env.AWS_REGION) process.env.AWS_REGION = "us-east-1";
 	console.log(`[aigw] Bedrock env configured: endpoint=${bedrockBaseUrl}`);
+}
+
+
+// ── Named model gateways ──────────────────────────────────────────
+
+const GATEWAYS_PREF_KEY = "modelGateways";
+const MANAGED_PROVIDERS_PREF_KEY = "_managedGatewayProviders";
+const GATEWAY_KEY_PREFIX = "providerKey.gateway.";
+const GATEWAY_NAME_PATTERN = /^[a-zA-Z0-9._-]+$/;
+const BUILTIN_PROVIDER_IDS = new Set([
+	"anthropic", "openai", "google", "google-gemini-cli", "google-vertex",
+	"xai", "amazon-bedrock", "groq", "mistral",
+]);
+
+function gatewayKeyPref(id: string): string {
+	return `${GATEWAY_KEY_PREFIX}${id}`;
+}
+
+function parseGatewayRow(row: unknown): ModelGateway | undefined {
+	if (!row || typeof row !== "object") return undefined;
+	const value = row as Record<string, unknown>;
+	if (typeof value.name !== "string" || typeof value.url !== "string") return undefined;
+	if (value.type !== "aigw" && value.type !== "openai-compatible") return undefined;
+	const id = typeof value.id === "string" && value.id.trim() ? value.id : randomUUID();
+	return {
+		id,
+		name: value.name.trim(),
+		url: value.url.trim(),
+		type: value.type,
+		enabled: value.enabled !== false,
+		...(typeof value.apiKeyConfigured === "boolean" ? { apiKeyConfigured: value.apiKeyConfigured } : {}),
+	};
+}
+
+function publicGateway(prefs: PreferencesStore, gateway: ModelGateway): ModelGateway {
+	const key = prefs.get(gatewayKeyPref(gateway.id));
+	return { ...gateway, ...(typeof key === "string" && key.trim() ? { apiKeyConfigured: true } : {}) };
+}
+
+/** List persisted gateways without leaking the stored credential expression. */
+export function listGateways(prefs: PreferencesStore): ModelGateway[] {
+	const raw = prefs.get(GATEWAYS_PREF_KEY);
+	if (!Array.isArray(raw)) return [];
+	return raw.flatMap((row) => {
+		const gateway = parseGatewayRow(row);
+		return gateway ? [publicGateway(prefs, gateway)] : [];
+	});
+}
+
+export function getEnabledGateways(prefs: PreferencesStore): ModelGateway[] {
+	return listGateways(prefs).filter((gateway) => gateway.enabled);
+}
+
+export function getGatewayByName(prefs: PreferencesStore, name: string): ModelGateway | undefined {
+	return listGateways(prefs).find((gateway) => gateway.name === name);
+}
+
+/** Any enabled AIGW row is exclusive; a generic OpenAI endpoint never is. */
+export function isExclusiveMode(gateways: readonly ModelGateway[]): boolean {
+	return gateways.some((gateway) => gateway.enabled && gateway.type === "aigw");
+}
+
+/** True only for the AIGW-specific Claude to Bedrock routing path. */
+export function isClaudeId(id: string): boolean {
+	return id.toLowerCase().includes("claude");
+}
+
+export function stripProviderPrefix(id: string): string {
+	const slash = id.indexOf("/");
+	return slash >= 0 ? id.slice(slash + 1) : id;
+}
+
+export function bedrockRoutesForType(type: GatewayType): boolean {
+	return type === "aigw";
+}
+
+function normalizeOpenAiBaseUrl(url: string): string {
+	const stripped = url.replace(/\/+$/, "");
+	return stripped.endsWith("/v1") ? stripped : `${stripped}/v1`;
+}
+
+const GATEWAY_URL_ERROR = "Gateway URL must be an absolute HTTP(S) URL without credentials, fragments, or credential query parameters";
+const CREDENTIAL_QUERY_PARAMETER = /(?:^|[-_.])(?:api[-_.]?key|access[-_.]?token|auth(?:orization)?|token|key|secret|password|credential|bearer)(?:$|[-_.])/i;
+
+/**
+ * Validate a URL before it can become durable gateway configuration. Keep the
+ * message independent of the submitted value so malformed credential-bearing
+ * URLs cannot be reflected into API responses or logs.
+ */
+export function validateGatewayUrl(value: unknown): string {
+	if (typeof value !== "string" || !value.trim()) throw new Error(GATEWAY_URL_ERROR);
+	const url = value.trim();
+	let parsed: URL;
+	try { parsed = new URL(url); }
+	catch { throw new Error(GATEWAY_URL_ERROR); }
+	if (
+		(parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+		!parsed.hostname ||
+		parsed.username ||
+		parsed.password ||
+		parsed.hash ||
+		[...parsed.searchParams.keys()].some((name) => CREDENTIAL_QUERY_PARAMETER.test(name))
+	) throw new Error(GATEWAY_URL_ERROR);
+	// Keep the established spelling/property bytes for ordinary saved URLs while
+	// trimming a terminal path slash before an optional query string.
+	return url.replace(/\/+(?=[?#]|$)/, "");
+}
+
+/**
+ * Validate and save records. `apiKey` is deliberately accepted separately by
+ * callers; this function never serializes secret expressions into modelGateways.
+ */
+export function saveGateways(prefs: PreferencesStore, gateways: readonly ModelGateway[]): ModelGateway[] {
+	const names = new Set<string>();
+	let aigwCount = 0;
+	const saved: ModelGateway[] = gateways.map((candidate) => {
+		const name = typeof candidate?.name === "string" ? candidate.name.trim() : "";
+		if (!name) throw new Error("Gateway name must not be empty");
+		if (!GATEWAY_NAME_PATTERN.test(name)) throw new Error(`Invalid gateway name "${name}"`);
+		if (BUILTIN_PROVIDER_IDS.has(name)) throw new Error(`Gateway name "${name}" collides with a built-in provider id`);
+		if (names.has(name)) throw new Error(`Duplicate gateway name "${name}"`);
+		const url = validateGatewayUrl(candidate?.url);
+		if (candidate.type !== "aigw" && candidate.type !== "openai-compatible") throw new Error(`Invalid gateway type for "${name}"`);
+		if (candidate.type === "aigw") {
+			aigwCount++;
+			if (name !== "aigw") throw new Error('An aigw-type gateway must be named "aigw"');
+			if (aigwCount > 1) throw new Error("At most one aigw-type gateway is allowed");
+		}
+		names.add(name);
+		return { id: typeof candidate.id === "string" && candidate.id.trim() ? candidate.id : randomUUID(), name, url, type: candidate.type, enabled: candidate.enabled !== false };
+	});
+	// Credentials are keyed by a stable gateway id, so rows removed from this
+	// replacement are the sole owner that can clean up their private expression.
+	// Do this only after validation has completed for every submitted row.
+	const savedIds = new Set(saved.map((gateway) => gateway.id));
+	prefs.set(GATEWAYS_PREF_KEY, saved);
+	for (const key of Object.keys(prefs.getAll())) {
+		if (key.startsWith(GATEWAY_KEY_PREFIX) && !savedIds.has(key.slice(GATEWAY_KEY_PREFIX.length))) {
+			prefs.remove(key);
+		}
+	}
+	return saved.map((gateway) => publicGateway(prefs, gateway));
+}
+
+/** Save/clear a key expression while retaining only a configured marker publicly. */
+export function setGatewayApiKey(prefs: PreferencesStore, gatewayId: string, apiKey: string | null | undefined): void {
+	if (apiKey === undefined) return; // omitted means preserve during stable-id edits
+	if (apiKey === null || !apiKey.trim()) prefs.remove(gatewayKeyPref(gatewayId));
+	else prefs.set(gatewayKeyPref(gatewayId), apiKey.trim());
+}
+
+export function getGatewayApiKeyExpression(prefs: PreferencesStore, gatewayId: string): string | undefined {
+	const value = prefs.get(gatewayKeyPref(gatewayId));
+	return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+/** Whether a saved expression resolves to a credential rather than the anonymous sentinel. */
+export function gatewayHasConfiguredApiKey(prefs: PreferencesStore, gatewayId: string): boolean {
+	const expression = getGatewayApiKeyExpression(prefs, gatewayId);
+	return expression !== undefined && expression !== "none";
+}
+
+/** Resolve a gateway key only for a request sent to its configured origin. */
+export async function resolveGatewayRequestHeaders(
+	prefs: PreferencesStore,
+	gateway: ModelGateway,
+	targetUrl: string = gateway.url,
+): Promise<Record<string, string>> {
+	// Resolve first so a broken command expression still fails closed instead of
+	// allowing an unauthenticated request to proceed on an external target.
+	const credential = await resolveGatewayCredential(getGatewayApiKeyExpression(prefs, gateway.id), gateway.name);
+	try {
+		if (new URL(targetUrl).origin !== new URL(gateway.url).origin) return {};
+	} catch {
+		return {};
+	}
+	return credential ? { Authorization: `Bearer ${credential}` } : {};
+}
+
+/** Idempotently moves the former singleton preference to the gateway list. */
+export function migrateGatewayPrefs(prefs: PreferencesStore): { migrated: boolean; gateways: ModelGateway[] } {
+	if (prefs.get(GATEWAYS_PREF_KEY) !== undefined) {
+		prefs.remove("aigw.url");
+		prefs.remove("aigw.exclusive");
+		return { migrated: false, gateways: listGateways(prefs) };
+	}
+	const legacyUrl = prefs.get("aigw.url");
+	if (typeof legacyUrl !== "string" || !legacyUrl.trim()) {
+		// Empty legacy settings are not configuration. Remove them so a future
+		// non-empty value cannot be mistaken for a partial migration.
+		prefs.remove("aigw.url");
+		prefs.remove("aigw.exclusive");
+		return { migrated: false, gateways: [] };
+	}
+	// A legacy value was already persisted under the old singleton shape. Only
+	// migrate it when it satisfies the current safe durable-record contract.
+	let url: string;
+	try { url = validateGatewayUrl(legacyUrl); }
+	catch {
+		prefs.remove("aigw.url");
+		prefs.remove("aigw.exclusive");
+		return { migrated: false, gateways: [] };
+	}
+	const gateways = saveGateways(prefs, [{ id: randomUUID(), name: "aigw", url, type: "aigw", enabled: true }]);
+	prefs.remove("aigw.url");
+	prefs.remove("aigw.exclusive");
+	return { migrated: true, gateways };
+}
+
+function providerApiKey(prefs: PreferencesStore, gateway: ModelGateway): string {
+	return getGatewayApiKeyExpression(prefs, gateway.id) ?? "none";
+}
+
+/** Preserves the current AIGW provider layout, including authoritative model routing. */
+export function buildAigwProviderBlock(gateway: ModelGateway, models: AigwModel[], apiKey = "none"): Record<string, unknown> {
+	const normalizedUrl = gateway.url.replace(/\/+$/, "");
+	const bedrockBaseUrl = normalizedUrl.replace(/\/v1$/, "") + "/aws";
+	const openaiCompat = { supportsDeveloperRole: false, supportsStore: false, supportsUsageInStreaming: false, supportsReasoningEffort: false, supportsStrictMode: false, maxTokensField: "max_tokens" };
+	return {
+		baseUrl: normalizedUrl, apiKey, api: "openai-completions",
+		headers: { "User-Agent": BOBBIT_AIGW_USER_AGENT, "x-opencode-session": `!node -e "process.stdout.write(process.env.BOBBIT_SESSION_ID || '')"` },
+		models: models.map((model) => {
+			const cost = model.cost ?? zeroAigwCost();
+			if (model.api && model.baseUrl) return {
+				id: model.wireId ?? model.id, ...(model.upstreamProvider ? { upstreamProvider: model.upstreamProvider } : {}), name: model.name,
+				contextWindow: model.contextWindow, maxTokens: model.maxTokens, reasoning: model.reasoning, input: model.input, cost,
+				api: model.api, baseUrl: model.baseUrl, ...(model.thinkingLevelMap ? { thinkingLevelMap: model.thinkingLevelMap } : {}), ...(model.compat ? { compat: model.compat } : {}),
+			};
+			if (isClaudeId(model.id)) return {
+				id: stripProviderPrefix(model.id), ...(model.upstreamProvider ? { upstreamProvider: model.upstreamProvider } : {}), name: model.name,
+				contextWindow: model.contextWindow, maxTokens: model.maxTokens, reasoning: model.reasoning, input: model.input, cost,
+				api: "bedrock-converse-stream", baseUrl: bedrockBaseUrl, ...(model.thinkingLevelMap ? { thinkingLevelMap: model.thinkingLevelMap } : {}), ...(model.compat ? { compat: model.compat } : {}),
+			};
+			return { id: model.id, ...(model.upstreamProvider ? { upstreamProvider: model.upstreamProvider } : {}), name: model.name,
+				contextWindow: model.contextWindow, maxTokens: model.maxTokens, reasoning: model.reasoning, input: model.input, cost,
+				...(model.thinkingLevelMap ? { thinkingLevelMap: model.thinkingLevelMap } : {}), compat: { ...openaiCompat, ...(model.compat ?? {}) } };
+		}),
+	};
+}
+
+/** Generic OpenAI routing deliberately contains no AIGW header or Bedrock branch. */
+export function buildOpenAiCompatibleProviderBlock(gateway: ModelGateway, models: AigwModel[], apiKey = "none"): Record<string, unknown> {
+	return {
+		baseUrl: normalizeOpenAiBaseUrl(gateway.url), apiKey, api: "openai-completions",
+		models: models.map((model) => ({ id: model.id, name: model.name, api: "openai-completions", contextWindow: model.contextWindow,
+			maxTokens: model.maxTokens, reasoning: model.reasoning, input: model.input, cost: model.cost ?? zeroAigwCost(),
+			...(model.thinkingLevelMap ? { thinkingLevelMap: model.thinkingLevelMap } : {}), compat: { ...GATEWAY_COMPAT, ...(model.compat ?? {}) } })),
+	};
+}
+
+function managedProviderNames(prefs: PreferencesStore): string[] {
+	const names = prefs.get(MANAGED_PROVIDERS_PREF_KEY);
+	return Array.isArray(names) ? names.filter((name): name is string => typeof name === "string") : [];
+}
+
+
+function hasMatchingRetainedProvider(provider: unknown, gateway: ModelGateway): provider is { baseUrl: string; models?: unknown[] } {
+	if (!provider || typeof provider !== "object" || typeof (provider as any).baseUrl !== "string") return false;
+	const actual = (provider as any).baseUrl.replace(/\/+$/, "");
+	const expected = (gateway.type === "openai-compatible" ? normalizeOpenAiBaseUrl(gateway.url) : gateway.url).replace(/\/+$/, "");
+	return actual === expected;
+}
+
+
+/** Read-only semantic status for one named gateway; it never publishes models.json. */
+export async function getGatewayStatus(prefs: PreferencesStore, gateway: ModelGateway): Promise<GatewayStatus> {
+	if (!gateway.enabled) return { state: "disabled", models: [] };
+	try {
+		const credential = await resolveGatewayCredential(getGatewayApiKeyExpression(prefs, gateway.id), gateway.name);
+		const models = await discoverGatewayModels(gateway, credential);
+		return models.length ? { state: "reachable", models } : { state: "empty", models: [] };
+	} catch (error) {
+		const retained = readModelsJson()?.providers?.[gateway.name];
+		const models = hasMatchingRetainedProvider(retained, gateway) && Array.isArray(retained.models)
+			? retained.models as AigwModel[] : [];
+		return { state: "unreachable", models, error: error instanceof GatewayCredentialResolutionError ? error.message : "Gateway is unreachable" };
+	}
+}
+
+/**
+ * Refresh every enabled provider. Success-empty is authoritative; a failed
+ * refresh retains its matching last-good block instead of turning into empty.
+ */
+export async function syncGatewaysModelsJson(prefs: PreferencesStore): Promise<Record<string, GatewayStatus>> {
+	const enabled = getEnabledGateways(prefs);
+	const enabledNames = new Set(enabled.map((gateway) => gateway.name));
+	const modelsPath = getModelsJsonPath();
+	const source = fs.existsSync(modelsPath) ? fs.readFileSync(modelsPath, "utf-8") : undefined;
+	const data = source === undefined ? { providers: {} } : parseJsonc(source) as Record<string, any>;
+	// An all-gateway outage has no publication work and must leave even an
+	// unreadable user file alone. Any attempted publication/removal below goes
+	// through the JSONC ownership helpers and fails closed on that same input.
+	const before = data && typeof data === "object" && data.providers && typeof data.providers === "object"
+		? data.providers as Record<string, unknown>
+		: {};
+	let published = source;
+	// A config change can require a stale managed block to be pruned even while
+	// every live gateway is down. Track that separately from discovery success:
+	// a pure outage leaves the file byte-identical, while an explicit removal,
+	// rename, disable, or URL mismatch is durably published.
+	let prunedProviders = false;
+	for (const name of new Set([...managedProviderNames(prefs), "aigw"])) {
+		if (!enabledNames.has(name)) {
+			const result = name === "aigw"
+				? removeManagedAigwProvider(published ?? "{}\n")
+				: removeManagedGatewayProvider(published ?? "{}\n", name);
+			published = result.text;
+			prunedProviders ||= result.removed;
+		}
+	}
+	const status: Record<string, GatewayStatus> = {};
+	const successfulAigwDiscoveries: Array<{ wellKnown: WellKnownConfig | null; models: AigwModel[] }> = [];
+	const successfulPublications: Array<{ gateway: ModelGateway; models: AigwModel[] }> = [];
+	let successfulDiscoveries = 0;
+	for (const gateway of enabled) {
+		try {
+			// Resolve at request time. A command failure throws before discovery,
+			// so a credentialed gateway never silently retries without its key.
+			const credential = await resolveGatewayCredential(getGatewayApiKeyExpression(prefs, gateway.id), gateway.name);
+			const aigwDiscovery = gateway.type === "aigw" ? await discoverAigwResult(gateway.url, credential) : undefined;
+			const models = aigwDiscovery?.models ?? await discoverGatewayModels(gateway, credential);
+			if (aigwDiscovery) successfulAigwDiscoveries.push(aigwDiscovery);
+			successfulPublications.push({ gateway, models });
+			successfulDiscoveries++;
+			status[gateway.name] = models.length ? { state: "reachable", models } : { state: "empty", models: [] };
+		} catch (error) {
+			const retained = before[gateway.name];
+			if (!hasMatchingRetainedProvider(retained, gateway)) {
+				const result = gateway.name === "aigw"
+					? removeManagedAigwProvider(published ?? "{}\n")
+					: removeManagedGatewayProvider(published ?? "{}\n", gateway.name);
+				published = result.text;
+				prunedProviders ||= result.removed;
+			}
+			const models = hasMatchingRetainedProvider(retained, gateway) && Array.isArray(retained.models) ? retained.models as AigwModel[] : [];
+			status[gateway.name] = {
+				state: "unreachable",
+				models,
+				error: error instanceof GatewayCredentialResolutionError ? error.message : "Gateway is unreachable",
+			};
+		}
+	}
+	// Construct every managed edit before the one atomic write. A user-owned
+	// provider collision therefore leaves both the file and preferences intact.
+	for (const { gateway, models } of successfulPublications) {
+		const provider = gateway.type === "aigw"
+			? buildAigwProviderBlock(gateway, models, providerApiKey(prefs, gateway))
+			: buildOpenAiCompatibleProviderBlock(gateway, models, providerApiKey(prefs, gateway));
+		published = gateway.name === "aigw"
+			? publishManagedAigwProvider(published, provider)
+			: publishManagedGatewayProvider(published, gateway.name, provider);
+	}
+	// A total outage must not rewrite a valid catalog (or accidentally publish an
+	// empty one). It must still publish configuration-driven pruning so removed
+	// or mismatched managed providers cannot remain selectable until recovery.
+	if (enabled.length > 0 && successfulDiscoveries === 0 && !prunedProviders) return status;
+	// Write before publishing managed names or changing DNS/env runtime authority.
+	writeModelsJsonText(published ?? "{}\n");
+	prefs.set(MANAGED_PROVIDERS_PREF_KEY, [...enabledNames]);
+	for (const discovery of successfulAigwDiscoveries) {
+		if (discovery.wellKnown?.model) seedDefaultModelsFromWellKnown(discovery.wellKnown, discovery.models, prefs);
+	}
+	if (successfulAigwDiscoveries.length > 0) normalizeAigwModelPreferences(prefs);
+	const aigw = enabled.find((gateway) => gateway.type === "aigw");
+	if (aigw) {
+		const providers = parseJsonc(published ?? "{}")?.providers;
+		replaceAigwProviderDnsGuardHosts(collectAigwProviderDnsHosts(providers?.[aigw.name]));
+		setBedrockEnvVars(aigw.url);
+	} else {
+		replaceAigwProviderDnsGuardHosts([]);
+		clearBedrockEnvVars();
+	}
+	return status;
 }
 
 export function writeAigwModelsJson(aigwUrl: string, models: AigwModel[]): void {
@@ -620,86 +1030,44 @@ export async function checkInternetAvailable(): Promise<boolean> {
  * Returns true if aigw is active after this call.
  */
 export async function startupAigwCheck(prefs: PreferencesStore): Promise<boolean> {
-	// Already configured — ensure env vars are set and models.json is up to date
-	const existingUrl = getAigwUrl(prefs);
-	if (existingUrl) {
-		console.log("[aigw] AI Gateway already configured:", existingUrl);
-		setBedrockEnvVars(existingUrl);
-		// A skip/unreachable startup keeps the last persisted routing active. Load
-		// its admitted host set before any spawned process or gateway-side request.
-		syncAigwProviderDnsGuardFromModelsJson();
-		// Users with a local aigw are typically offline; probe the public
-		// internet once and wire PI_OFFLINE accordingly. The probe is short
-		// (≤4s) and runs in parallel with no other startup work below.
+	migrateGatewayPrefs(prefs);
+	const configured = getEnabledGateways(prefs);
+	if (configured.length > 0) {
+		const aigw = configured.find((gateway) => gateway.type === "aigw");
+		if (aigw) {
+			setBedrockEnvVars(aigw.url);
+			syncAigwProviderDnsGuardFromModelsJson();
+		}
 		if (!runtimeFlags.skipAigwDiscovery) {
-			try {
-				const hasInternet = await checkInternetAvailable();
-				applyPiOfflineEnv(hasInternet);
-			} catch {
-				applyPiOfflineEnv(false);
-			}
+			try { applyPiOfflineEnv(await checkInternetAvailable()); }
+			catch { applyPiOfflineEnv(false); }
 		}
-		if (runtimeFlags.skipAigwDiscovery) {
-			console.log("[aigw] aigw configured, skipping startup re-discovery (BOBBIT_SKIP_AIGW_DISCOVERY)");
-			return true;
-		}
+		if (runtimeFlags.skipAigwDiscovery) return true;
 		try {
-			const models = await discoverAigwModels(existingUrl);
-			writeAigwModelsJson(existingUrl, models);
-			normalizeAigwModelPreferences(prefs);
-			console.log(`[aigw] re-discovered ${models.length} models on startup, refreshed models.json`);
-		} catch (err: any) {
-			const msg = err?.message || String(err);
-			console.warn(`[aigw] gateway unreachable on startup (${msg}), keeping existing models.json`);
-		}
+			const statuses = await syncGatewaysModelsJson(prefs);
+			if (Object.values(statuses).some((status) => status.state === "unreachable")) {
+				console.warn("[aigw] gateway unreachable on startup; keeping existing models.json");
+			}
+		} catch (error) { console.warn("[aigw] gateway refresh failed; keeping existing models.json", error instanceof Error ? error.message : ""); }
 		return true;
 	}
-
-	// Skip network probing + local-gateway auto-discovery when tests/CI opt out.
-	// Tests that exercise the /api/aigw/* endpoints configure the gateway
-	// explicitly and don't rely on the startup probe.
 	if (runtimeFlags.skipAigwDiscovery) return false;
-
-	// Check internet
 	const hasInternet = await checkInternetAvailable();
 	applyPiOfflineEnv(hasInternet);
-	if (hasInternet) {
-		console.log("[aigw] Internet available — using standard providers");
-		return false;
-	}
-
-	console.log("[aigw] No internet detected — probing for local AI Gateway...");
-
-	// Build candidate list from environment, then fall back to localhost
-	const candidates: string[] = [];
-	const anthropicBase = process.env.ANTHROPIC_BASE_URL;
-	if (anthropicBase) {
-		const base = anthropicBase.replace(/\/+$/, "");
-		candidates.push(base.endsWith("/v1") ? base : `${base}/v1`);
-	}
-	const openaiBase = process.env.OPENAI_BASE_URL;
-	if (openaiBase) {
-		candidates.push(openaiBase.replace(/\/+$/, ""));
-	}
-	candidates.push("http://localhost:1111/v1", "http://127.0.0.1:1111/v1");
-
+	if (hasInternet) return false;
+	const candidates = [
+		...(process.env.ANTHROPIC_BASE_URL ? [normalizeOpenAiBaseUrl(process.env.ANTHROPIC_BASE_URL)] : []),
+		...(process.env.OPENAI_BASE_URL ? [process.env.OPENAI_BASE_URL.replace(/\/+$/, "")] : []),
+		"http://localhost:1111/v1", "http://127.0.0.1:1111/v1",
+	];
 	for (const url of candidates) {
 		try {
 			const models = await discoverAigwModels(url);
-			if (models.length > 0) {
-				console.log(`[aigw] Found gateway at ${url} with ${models.length} models — auto-configuring`);
-				await configureAigw(url, prefs);
-				return true;
-			}
-		} catch {
-			// try next
-		}
+			if (models.length) { await configureAigw(url, prefs); return true; }
+		} catch { /* try the next local endpoint */ }
 	}
-
-	console.log("[aigw] No gateway found at well-known URLs");
 	return false;
 }
-
 // ── HTTP helpers ───────────────────────────────────────────────────
 
 /**
@@ -1011,6 +1379,8 @@ export function proxyRequest(
 	targetUrl: string,
 	incomingReq: http.IncomingMessage,
 	outgoingRes: http.ServerResponse,
+	gateway?: ModelGateway,
+	prefs?: PreferencesStore,
 ): void {
 	const parsed = new URL(targetUrl);
 	const transport = parsed.protocol === "https:" ? https : http;
@@ -1018,10 +1388,21 @@ export function proxyRequest(
 	const chunks: Buffer[] = [];
 	incomingReq.on("data", (c: Buffer) => chunks.push(c));
 	incomingReq.on("end", () => {
+		void (async () => {
 		const body = Buffer.concat(chunks);
+		let credentialHeaders: Record<string, string> = {};
+		try {
+			if (gateway && prefs) credentialHeaders = await resolveGatewayRequestHeaders(prefs, gateway, targetUrl);
+		} catch (error) {
+			// Do not issue an unauthenticated retry after a key command fails.
+			outgoingRes.writeHead(502, { "Content-Type": "application/json" });
+			outgoingRes.end(JSON.stringify({ error: error instanceof Error ? error.message : "Gateway credential resolution failed" }));
+			return;
+		}
 		const headers = aigwUserAgentHeaders({
 			"Content-Type": "application/json",
 			...(body.length > 0 ? { "Content-Length": String(body.length) } : {}),
+			...credentialHeaders,
 		});
 
 		const RESPONSE_TIMEOUT_MS = 120_000;
@@ -1069,6 +1450,7 @@ export function proxyRequest(
 		});
 		if (body.length > 0) proxyReq.write(body);
 		proxyReq.end();
+		})();
 	});
 }
 
@@ -1272,12 +1654,12 @@ export function readOpencodeWellKnownToken(gatewayUrl: string): string | undefin
  * - A top-level `config` wrapper is unwrapped; otherwise the object itself is
  *   treated as the config.
  */
-export async function fetchWellKnownConfig(baseUrl: string, timeoutMs = WELL_KNOWN_DEADLINE_MS): Promise<WellKnownConfig | null> {
+export async function fetchWellKnownConfig(baseUrl: string, timeoutMs = WELL_KNOWN_DEADLINE_MS, extraHeaders?: Record<string, string>): Promise<WellKnownConfig | null> {
 	const deadline = Date.now() + Math.min(Math.max(timeoutMs, 1), WELL_KNOWN_DEADLINE_MS);
-	return fetchWellKnownConfigBeforeDeadline(baseUrl, deadline);
+	return fetchWellKnownConfigBeforeDeadline(baseUrl, deadline, extraHeaders);
 }
 
-async function fetchWellKnownConfigBeforeDeadline(baseUrl: string, deadline: number): Promise<WellKnownConfig | null> {
+async function fetchWellKnownConfigBeforeDeadline(baseUrl: string, deadline: number, extraHeaders?: Record<string, string>): Promise<WellKnownConfig | null> {
 	let gateway: URL;
 	try { gateway = normalizeHttpUrl(baseUrl); }
 	catch { return null; }
@@ -1285,7 +1667,7 @@ async function fetchWellKnownConfigBeforeDeadline(baseUrl: string, deadline: num
 	if (runtimeFlags.skipAigwDiscovery) return null;
 	const wellKnownUrl = new URL("/.well-known/opencode", gateway.origin).href;
 	const token = readOpencodeWellKnownToken(gateway.href);
-	const authHeader: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+	const authHeader: Record<string, string> = { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(extraHeaders ?? {}) };
 	try {
 		const payload = await httpGetJson(wellKnownUrl, gateway.origin, deadline, authHeader);
 		return await resolveWellKnownPayload(payload, gateway.origin, authHeader, deadline, 0);
@@ -1338,12 +1720,16 @@ export async function filterValidatedProviderUrls(
 	configuredOrigin: string,
 	deadline: number,
 	lookupImpl: DnsLookup = originalGatewayDnsLookup,
+	allowCrossOrigin = true,
 ): Promise<WellKnownConfig> {
 	const disabled = new Set(Array.isArray(config.disabled_providers) ? config.disabled_providers : []);
 	const candidates = Object.entries(config.provider ?? {}).flatMap(([name, provider]) => {
 		if (!provider || disabled.has(name) || typeof provider.options?.baseURL !== "string") return [];
 		const target = validateProviderBaseTarget(provider.options.baseURL, configuredOrigin);
-		return target ? [{ name, provider, target }] : [];
+		// models.json has one provider-level apiKey. It cannot safely express a
+		// credential-less per-model external base URL, so omit those models when
+		// this gateway has a bearer credential instead of leaking it cross-origin.
+		return target && (allowCrossOrigin || target.origin === configuredOrigin) ? [{ name, provider, target }] : [];
 	});
 	// Resolve distinct DNS names concurrently. One slow or duplicated provider can
 	// consume only the remaining shared discovery budget, never N × DNS timeout.
@@ -1403,7 +1789,7 @@ interface AigwDiscoveryResult {
 	wellKnown: WellKnownConfig | null;
 }
 
-async function discoverAigwResult(baseUrl: string): Promise<AigwDiscoveryResult> {
+async function discoverAigwResult(baseUrl: string, authorization?: string): Promise<AigwDiscoveryResult> {
 	const gateway = normalizeHttpUrl(baseUrl);
 	const url = gateway.href.replace(/\/$/, "");
 	if (externalNetworkBlockedForTests() && !isLocalHttpUrl(url)) {
@@ -1411,14 +1797,21 @@ async function discoverAigwResult(baseUrl: string): Promise<AigwDiscoveryResult>
 	}
 
 	const discoveryDeadline = Date.now() + WELL_KNOWN_DEADLINE_MS;
-	const fetchedWellKnown = await fetchWellKnownConfigBeforeDeadline(url, discoveryDeadline);
+	const requestHeaders = authorization ? { Authorization: `Bearer ${authorization}` } : undefined;
+	const fetchedWellKnown = await fetchWellKnownConfigBeforeDeadline(url, discoveryDeadline, requestHeaders);
 	if (fetchedWellKnown && fetchedWellKnown.provider) {
-		const wellKnown = await filterValidatedProviderUrls(fetchedWellKnown, gateway.origin, discoveryDeadline);
+		const wellKnown = await filterValidatedProviderUrls(
+			fetchedWellKnown,
+			gateway.origin,
+			discoveryDeadline,
+			originalGatewayDnsLookup,
+			!authorization,
+		);
 		return { models: translateWellKnown(wellKnown, url), wellKnown };
 	}
 
 	const modelsUrl = url.endsWith("/v1") ? `${url}/models` : `${url}/v1/models`;
-	const data = await httpGetJson(modelsUrl, gateway.origin, Date.now() + 10_000);
+	const data = await httpGetJson(modelsUrl, gateway.origin, Date.now() + 10_000, requestHeaders);
 	if (!data?.data || !Array.isArray(data.data)) {
 		throw new Error("Unexpected response format from /v1/models — expected { data: [...] }");
 	}
@@ -1486,8 +1879,45 @@ async function discoverAigwResult(baseUrl: string): Promise<AigwDiscoveryResult>
 	return { models, wellKnown: null };
 }
 
-export async function discoverAigwModels(baseUrl: string): Promise<AigwModel[]> {
-	return (await discoverAigwResult(baseUrl)).models;
+export async function discoverAigwModels(baseUrl: string, authorization?: string): Promise<AigwModel[]> {
+	return (await discoverAigwResult(baseUrl, authorization)).models;
+}
+
+
+/**
+ * Discover a plain OpenAI-compatible endpoint. This intentionally bypasses
+ * AIGW well-known routing and preserves the upstream id verbatim: a local
+ * `claude-*` id is still an OpenAI-completions model, never Bedrock.
+ */
+export async function discoverOpenAiCompatibleModels(baseUrl: string, authorization?: string): Promise<AigwModel[]> {
+	const gateway = normalizeHttpUrl(baseUrl, "OpenAI-compatible gateway URL");
+	const normalized = gateway.href.replace(/\/$/, "");
+	if (externalNetworkBlockedForTests() && !isLocalHttpUrl(normalized)) throw new Error("External gateway discovery is disabled in tests");
+	const url = normalizeOpenAiBaseUrl(normalized);
+	const data = await httpGetJson(`${url}/models`, gateway.origin, Date.now() + 10_000, authorization ? { Authorization: `Bearer ${authorization}` } : undefined);
+	if (!data?.data || !Array.isArray(data.data)) throw new Error("Unexpected response format from /v1/models — expected { data: [...] }");
+	return data.data.map((item: any) => {
+		if (!item || typeof item.id !== "string" || !item.id) throw new Error("Unexpected response format from /v1/models — each model requires a string id");
+		// Plain OpenAI-compatible discovery shares the conservative legacy
+		// `/v1/models` metadata defaults, but never its AIGW routing decisions.
+		const meta = inferLegacyAigwMeta(item.id);
+		const context = item.context_length || item.context_window;
+		const maxTokens = item.max_tokens || item.max_completion_tokens;
+		return {
+			id: item.id, name: typeof item.name === "string" && item.name ? item.name : deriveName(item.id), api: "openai-completions",
+			reasoning: meta.reasoning, input: meta.input,
+			contextWindow: Math.max(Number.isFinite(context) ? context : 0, meta.contextWindow),
+			maxTokens: Math.max(Number.isFinite(maxTokens) ? maxTokens : 0, meta.maxTokens),
+			cost: normalizeAigwPricing(item.pricing), ...(meta.thinkingLevelMap ? { thinkingLevelMap: meta.thinkingLevelMap } : {}), ...(meta.compat ? { compat: meta.compat } : {}),
+		} satisfies AigwModel;
+	});
+}
+
+/** Type-driven discovery dispatch. */
+export function discoverGatewayModels(gateway: ModelGateway, authorization?: string): Promise<AigwModel[]> {
+	return gateway.type === "aigw"
+		? discoverAigwModels(gateway.url, authorization)
+		: discoverOpenAiCompatibleModels(gateway.url, authorization);
 }
 
 /**
@@ -1495,8 +1925,7 @@ export async function discoverAigwModels(baseUrl: string): Promise<AigwModel[]> 
  * Returns the discovered models.
  */
 export async function configureAigw(baseUrl: string, prefs: PreferencesStore): Promise<AigwModel[]> {
-	const gateway = normalizeHttpUrl(baseUrl);
-	const normalizedUrl = gateway.href.replace(/\/$/, "");
+	const normalizedUrl = validateGatewayUrl(baseUrl);
 	const result = await discoverAigwResult(normalizedUrl);
 	// Legacy fallback Claude entries are normalized during discovery. Do not
 	// remap authoritative well-known models merely because their ID contains
@@ -1508,7 +1937,11 @@ export async function configureAigw(baseUrl: string, prefs: PreferencesStore): P
 	// The writer atomically persists routing and only then replaces the active DNS
 	// host set. Status/test discovery never calls it and cannot mutate behavior.
 	writeAigwModelsJson(normalizedUrl, models);
-	prefs.set("aigw.url", normalizedUrl);
+	// Persist only the new, secret-free list after routing was atomically written.
+	const existing = listGateways(prefs).filter((gateway) => gateway.type !== "aigw");
+	saveGateways(prefs, [...existing, { id: getGatewayByName(prefs, "aigw")?.id ?? randomUUID(), name: "aigw", url: normalizedUrl, type: "aigw", enabled: true }]);
+	prefs.remove("aigw.url");
+	prefs.remove("aigw.exclusive");
 	if (result.wellKnown?.model) seedDefaultModelsFromWellKnown(result.wellKnown, models, prefs);
 	normalizeAigwModelPreferences(prefs);
 	return models;
@@ -1518,6 +1951,8 @@ export async function configureAigw(baseUrl: string, prefs: PreferencesStore): P
  * Remove aigw configuration.
  */
 export function removeAigw(prefs: PreferencesStore): void {
+	const remaining = listGateways(prefs).filter((gateway) => gateway.type !== "aigw");
+	saveGateways(prefs, remaining);
 	prefs.remove("aigw.url");
 	prefs.remove("aigw.models");
 	removeAigwModelsJson();
@@ -1527,6 +1962,9 @@ export function removeAigw(prefs: PreferencesStore): void {
  * Get the currently configured aigw URL (if any).
  */
 export function getAigwUrl(prefs: PreferencesStore): string | undefined {
+	// Existing modelGateways (including []) is authoritative. Legacy fallback is
+	// strictly for callers that run before boot-time migration.
+	if (prefs.get(GATEWAYS_PREF_KEY) !== undefined) return getEnabledGateways(prefs).find((gateway) => gateway.type === "aigw")?.url;
 	return prefs.get("aigw.url") as string | undefined;
 }
 

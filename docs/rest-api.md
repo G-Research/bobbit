@@ -1596,6 +1596,20 @@ For provider-native paths, classification accepts only a status prefix emitted b
 
 Used by the Settings → Models tab per-row Test button. See [AI Gateway routing — Model probes](ai-gateway-routing.md#model-probes) and [Debugging](debugging.md#reviewnaming-model-mismatch-under-ai-gateway).
 
+### AI Gateways (multi-gateway)
+
+Named gateway records expose only `id`, `name`, `url`, `type`, `enabled`, and `apiKeyConfigured`. Key expressions are private.
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/aigw/gateways` | List configured rows, including disabled rows. |
+| `PUT` | `/api/aigw/gateways` | Validate and replace rows, update private keys, and synchronize generated providers. |
+| `POST` | `/api/aigw/gateways/:name/refresh` | Refresh one named gateway. |
+| `GET` | `/api/aigw/gateways/:name/status` | Return semantic `reachable`, `empty`, `unreachable`, or `disabled` status. |
+| `*` | `/api/aigw/:name/v1/*` | Proxy through an enabled named gateway. |
+
+The legacy `/api/aigw/status`, `/configure`, `/refresh`, and `/api/aigw/v1/*` routes remain shims for the row named `aigw`.
+
 ### AI Gateway
 
 | Method | Path | Description |
