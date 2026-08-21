@@ -818,9 +818,10 @@ export async function resolveDynamicContext(plan: SessionSetupPlan, ctx: Pipelin
 			const controller = new AbortController();
 			const result = await ctx.hostInterceptors.dispatch("sessionSetup", {
 				sessionId: plan.id,
-				projectId: plan.projectId,
-				goalId: effectiveGoal,
-				roleName: plan.roleName,
+				...(plan.projectId ? { projectId: plan.projectId } : {}),
+				...(effectiveGoal ? { goalId: effectiveGoal } : {}),
+				scope: plan.projectId ? "project" : "global",
+				...(plan.roleName ? { roleName: plan.roleName } : {}),
 			}, {
 				projectId: plan.projectId,
 				sessionId: plan.id,

@@ -374,7 +374,9 @@ function legacyDispatchBase<N extends HostInterceptorName>(
 			? input.scope
 			: context.projectId ? "project" : "global",
 		...(typeof input.roleName === "string" ? { roleName: input.roleName } : {}),
-		...(typeof input.prompt === "string" ? { prompt: input.prompt } : {}),
+		...(typeof input.prompt === "string"
+			? { prompt: input.prompt }
+			: typeof input.userText === "string" ? { prompt: input.userText } : {}),
 		...(typeof input.userText === "string" ? { userText: input.userText } : {}),
 		...(typeof input.span === "string" ? { span: input.span } : {}),
 		...(typeof input.summary === "string" ? { summary: input.summary } : {}),
