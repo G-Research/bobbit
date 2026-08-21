@@ -455,10 +455,11 @@ test("sandbox mount is writable in both directions at the stable pack path", asy
 	await installAndEnable();
 	await waitForPiTool();
 
-	const docker = await import("node:child_process").then(({ spawnSync }) => ({
+	const { spawnSync } = await import("node:child_process");
+	const docker = {
 		info: spawnSync("docker", ["info"], { stdio: "ignore" }),
 		image: spawnSync("docker", ["image", "inspect", "bobbit-agent"], { stdio: "ignore" }),
-	}));
+	};
 	test.skip(docker.info.status !== 0 || docker.image.status !== 0, "Docker and the bobbit-agent image are required for the writable bind-mount round trip");
 
 	const setSandbox = await apiFetch(`/api/projects/${project.id}/config`, {
@@ -485,6 +486,28 @@ test("sandbox mount is writable in both directions at the stable pack path", asy
 	fs.writeFileSync(path.join(expectedHostDirectory, "host-marker.txt"), "written-on-host", "utf8");
 	const containerRead = await runPiTool(sessionId, { operation: "read", name: "host-marker.txt" });
 	expect(containerRead).toMatchObject({ directory: expectedContainerDirectory, content: "written-on-host" });
+	const markerBytes = fs.readFileSync(path.join(expectedHostDirectory, "container-marker.txt"));
+
+	await setFixtureActivation({});
+	await expect.poll(() => packIsContributed(), { timeout: 15_000 }).toBe(false);
+	await expect.poll(piToolIsListed, { timeout: 15_000 }).toBe(false);
+
+	const disabledSession = await createSession({ projectId: project.id });
+	sessionIds.push(disabledSession);
+	expect(runtimeEnvironment(gateway, disabledSession).BOBBIT_PACK_LOCAL_DATA_JSON).toBeUndefined();
+	expect(hasFixturePiExtension(gateway, disabledSession)).toBe(false);
+	expect(fs.readFileSync(path.join(expectedHostDirectory, "container-marker.txt"))).toEqual(markerBytes);
+
+	const poolResponse = await apiFetch("/api/sandbox-pool");
+	expect(poolResponse.status).toBe(200);
+	const containerId = ((await poolResponse.json()).containers ?? [])
+		.find((container: any) => container.projectId === project.id)?.containerId;
+	expect(containerId, "the refreshed project sandbox must remain tracked").toBeTruthy();
+	const inspect = spawnSync("docker", ["inspect", containerId], { encoding: "utf8" });
+	expect(inspect.status, inspect.stderr).toBe(0);
+	const mounts = JSON.parse(inspect.stdout)[0]?.Mounts ?? [];
+	expect(mounts.some((mount: any) => mount.Destination === expectedContainerDirectory),
+		"clearing the default-disabled override must remove the stale local-data bind").toBe(false);
 
 	const restoreConfig = await apiFetch(`/api/projects/${project.id}/config`, {
 		method: "PUT",
