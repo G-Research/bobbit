@@ -109,6 +109,7 @@ function makeFixture(): Fixture {
 			registry: registry as any,
 			projectContextManager: projectContextManager as any,
 			workflows: id => workflows.get(id) ?? [],
+			workflow: (projectId, workflowId) => workflows.get(projectId)?.find(workflow => workflow.id === workflowId),
 			components: () => [{ name: "app", repo: ".", commands: { test: "echo test" } }],
 			getGoal: id => goals.get(id),
 			nestingPrefs: () => ({ ...prefs }),
@@ -263,6 +264,35 @@ describe("canonical goal candidate — project, workflow, and structured fields"
 			expect(result.candidate.enabledOptionalSteps).toEqual(["QA testing"]);
 			expect(result.candidate.workflow).not.toBe(FEATURE_WORKFLOW);
 		}
+	});
+
+	it("uses exact creation-time workflow lookup for store-only runtime entries", () => {
+		fixture.deps.workflows = () => [];
+		const accepted = validate({ workflow: "feature", options: "QA testing" });
+		expect(accepted.ok).toBe(true);
+		if (accepted.ok) {
+			expect(accepted.candidate.workflowId).toBe("feature");
+			expect(accepted.candidate.enabledOptionalSteps).toEqual(["QA testing"]);
+		}
+		expectCode(validate({ workflow: "feature", options: "Not optional" }), "UNKNOWN_OPTIONAL_STEP");
+	});
+
+	it("accepts ordinary goal workflow snapshots above the child-inline cap", () => {
+		const largeWorkflow = structuredClone(FEATURE_WORKFLOW);
+		largeWorkflow.id = "large-workflow";
+		largeWorkflow.description = "x".repeat(300_000);
+		fixture.workflows.get(fixture.projectId)!.push(largeWorkflow);
+		const result = validate({ workflow: largeWorkflow.id });
+		expect(result.ok).toBe(true);
+		if (result.ok) expect(result.candidate.workflow?.description).toHaveLength(300_000);
+	});
+
+	it("retains the ordinary goal structured payload bound", () => {
+		const oversizedWorkflow = structuredClone(FEATURE_WORKFLOW);
+		oversizedWorkflow.id = "oversized-workflow";
+		oversizedWorkflow.description = "x".repeat(MAX_GOAL_STRUCTURED_BYTES);
+		fixture.workflows.get(fixture.projectId)!.push(oversizedWorkflow);
+		expectCode(validate({ workflow: oversizedWorkflow.id }), "WORKFLOW_TOO_LARGE");
 	});
 
 	it.each([

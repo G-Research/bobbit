@@ -5499,6 +5499,14 @@ async function handleApiRoute(
 		}
 		return undefined;
 	};
+	const resolveCurrentProjectWorkflow = (projectId: string, workflowId: string): Workflow | undefined => {
+		// Match ordinary creation: prefer the current visible cascade, then use
+		// exact live-store lookup so hidden/runtime-registered workflows remain
+		// creatable. Both branches are reads; validation never seeds or writes.
+		const cascade = configCascade.resolveWorkflows(projectId);
+		return cascade.find(entry => entry.item.id === workflowId)?.item
+			?? existingProjectContext(projectId)?.workflowStore.get(workflowId);
+	};
 	const goalCandidateDeps = {
 		registry: projectRegistry,
 		projectContextManager,
@@ -5506,6 +5514,7 @@ async function handleApiRoute(
 			const cascade = configCascade.resolveWorkflows(projectId).map(entry => entry.item);
 			return cascade.length > 0 ? cascade : existingProjectContext(projectId)?.workflowStore.getAll() ?? [];
 		},
+		workflow: resolveCurrentProjectWorkflow,
 		components: (projectId: string) => existingProjectContext(projectId)?.projectConfigStore.getComponents() ?? [],
 		getGoal: (id: string) => getGoalAcrossProjects(id),
 		nestingPrefs: () => readSubgoalNestingPrefs(key => preferencesStore.get(key)),

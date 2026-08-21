@@ -15,7 +15,9 @@ import { validateGoalProposalWorkflow } from "../proposals/goal-proposal-seed.js
 // persisted/API value to prevent unbounded payloads.
 export const MAX_GOAL_TITLE_LENGTH = 256;
 export const MAX_GOAL_SPEC_LENGTH = 20_000;
-export const MAX_GOAL_STRUCTURED_BYTES = 256 * 1024;
+// Ordinary root-goal payloads share the server/store's 1 MiB contract. The
+// tighter MAX_INLINE_JSON_BYTES limit belongs only to child-plan spawning.
+export const MAX_GOAL_STRUCTURED_BYTES = 1024 * 1024;
 
 export type GoalCandidateSource =
 	| { kind: "user-input" }
@@ -30,7 +32,10 @@ export interface GoalCandidateContext {
 export interface GoalCandidateDeps {
 	registry: ProjectRegistry;
 	projectContextManager: ProjectContextManager;
+	/** Workflows exposed by the project cascade (used for listings/errors). */
 	workflows(projectId: string): Workflow[];
+	/** Exact creation-time lookup, including store-only/hidden runtime entries. */
+	workflow(projectId: string, workflowId: string): Workflow | undefined;
 	components(projectId: string): Component[];
 	getGoal(id: string): PersistedGoal | undefined;
 	nestingPrefs(): SubgoalNestingPrefs;
@@ -122,15 +127,23 @@ export function validateGoalCandidate(raw: RawGoalCandidate, context: GoalCandid
 		}
 	}
 
-	const workflows = deps.workflows(resolved.projectId);
+	const cascadeWorkflows = deps.workflows(resolved.projectId);
 	const inlineWorkflow = raw.inlineWorkflow ?? (plainObject(raw.workflow) ? raw.workflow : undefined);
 	const workflowId = typeof raw.workflowId === "string" ? raw.workflowId.trim() : typeof raw.workflow === "string" ? raw.workflow.trim() : "";
 	const options = typeof raw.options === "string" ? raw.options : Array.isArray(raw.enabledOptionalSteps) ? raw.enabledOptionalSteps.join(",") : "";
 	if (raw.enabledOptionalSteps !== undefined && (!Array.isArray(raw.enabledOptionalSteps) || !raw.enabledOptionalSteps.every(v => typeof v === "string"))) return fail(400, "UNKNOWN_OPTIONAL_STEP", "enabledOptionalSteps must be an array of step names");
+	const registeredWorkflow = workflowId ? deps.workflow(resolved.projectId, workflowId) : undefined;
+	// Creation historically resolves an explicit id through the visible cascade,
+	// then falls back to the live project store. Add that exact match to the
+	// validation set so hidden/runtime workflows retain full option validation
+	// without exposing every hidden workflow in UNKNOWN_WORKFLOW guidance.
+	const workflows = registeredWorkflow && !cascadeWorkflows.some(workflow => workflow.id === registeredWorkflow.id)
+		? [...cascadeWorkflows, registeredWorkflow]
+		: cascadeWorkflows;
 	const workflowArgs = { inlineWorkflow, workflow: workflowId, options };
 	const workflowError = validateGoalProposalWorkflow(workflowArgs, workflows);
 	if (workflowError) return fail(400, workflowError.code, workflowError.message, { ...(workflowError.availableWorkflows ? { availableWorkflows: workflowError.availableWorkflows } : {}), ...(workflowError.validOptionalSteps ? { validOptionalSteps: workflowError.validOptionalSteps } : {}) });
-	const selected = inlineWorkflow ?? workflows.find(w => w.id === workflowId);
+	const selected = inlineWorkflow ?? registeredWorkflow ?? workflows.find(w => w.id === workflowId);
 	let frozenWorkflow: Workflow | undefined;
 	if (selected) {
 		const size = jsonSnapshot(selected, "inline workflow", "WORKFLOW_TOO_LARGE"); if (!size.ok) return size;
