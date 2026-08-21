@@ -2131,11 +2131,7 @@ export function createPreviewSessionOperationQueue(): PreviewSessionOperationQue
 	return { run, purge };
 }
 
-/**
- * Initialize post-listen project pools one at a time. Each pool owns the shared
- * candidate-level I/O ceiling during orphan reclaim, so project-level
- * parallelism here would multiply that bound across visible projects.
- */
+/** Initialize post-listen project pools in deterministic project order. */
 export async function initializeBootProjectPools<T>(
 	projects: readonly T[],
 	initialize: (project: T, index: number) => Promise<void>,
@@ -2228,16 +2224,15 @@ export async function drainWorktreePoolsForShutdown(
 }
 
 /**
- * Serialize the boot-time worktree ownership transition. The sweeper rechecks
- * live durable owners at every mutation boundary, while a pool entry must not
- * be exposed for claim (and renamed out of the pool namespace) until its scan
- * and deletion phase has settled. Both phases remain post-listen background work.
+ * Keep boot-time diagnostic discovery ahead of pool initialization so the
+ * sweeper observes one stable pre-fill inventory. Neither phase adopts or
+ * mutates worktrees discovered only from Git/path shape.
  */
 export async function coordinateBootWorktreeLifecycle(
-	runSweepDeletionPhase: () => Promise<void>,
+	runSweepDiscoveryPhase: () => Promise<void>,
 	initializePools: () => Promise<void>,
 ): Promise<void> {
-	await runSweepDeletionPhase();
+	await runSweepDiscoveryPhase();
 	await initializePools();
 }
 
@@ -4766,20 +4761,17 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 			// claim, which costs real CPU on tests that don't need git at all.
 			//
 			// Boot sweeper + pool fill run AFTER `server.listen()` as a background
-			// chain — the sweeper shells out to `git worktree list/repair` per repo
-			// with 10–15s timeouts, and the pool readiness check awaits `isGitRepo`
+			// chain — the sweeper shells out to `git worktree list` per repo with a
+			// 10s timeout, and the pool readiness check awaits `isGitRepo`
 			// per project. Doing them before listen used to leave the gateway
 			// unreachable for many seconds on installs with stale worktrees.
 			//
 			// Ownership ordering: the sweeper starts from a durable-owner snapshot
-			// for deterministic scan results, then refreshes visible project stores
-			// immediately before every repair or cleanup. Pool initialization still
-			// waits for the deletion phase so a claimed entry cannot be renamed out
-			// of the pool namespace while its old listing is being reconciled. Both
-			// phases run after listen(), so health and session requests remain
-			// available (sessions use the normal cold fallback until pools are ready).
-			// Project pools initialize sequentially afterwards so each reclaim scan
-			// exclusively owns the shared candidate-level I/O ceiling.
+			// for deterministic diagnostics. Pool initialization waits for discovery
+			// so the scan observes one stable pre-fill inventory; neither phase adopts
+			// worktrees based only on branch/path shape. Both phases run after listen(),
+			// so health and session requests remain available (sessions use the normal
+			// cold fallback until pools are ready).
 			const runBootBackgroundTasks = async (): Promise<void> => {
 				const t0 = Date.now();
 
@@ -4807,7 +4799,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 					const tStart = Date.now();
 					try {
 						const { sweepOrphanedWorktrees } = await import("./agent/worktree-sweeper.js");
-						type SweepOwnerSnapshot = { id: string; branch?: string; worktreePath?: string; cwd?: string; archived?: boolean; repoWorktrees?: Record<string, string> };
+						type SweepOwnerSnapshot = { id: string; branch?: string; worktreePath?: string; cwd?: string; repoPath?: string; archived?: boolean; repoWorktrees?: Record<string, string> };
 						const snapshotSweepOwnership = (): {
 							goals: SweepOwnerSnapshot[];
 							sessions: SweepOwnerSnapshot[];
@@ -4818,19 +4810,19 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 							const sessions: SweepOwnerSnapshot[] = [];
 							const teams: SweepOwnerSnapshot[] = [];
 							const staff: SweepOwnerSnapshot[] = [];
-							// Read the currently visible stores synchronously so no request can
-							// interleave between this snapshot and the sweeper's mutation call.
+							// Read the currently visible stores synchronously so diagnostic
+							// classification uses one internally consistent ownership snapshot.
 							for (const ctx of projectContextManager.visible()) {
 								if (ctx.project.id === HEADQUARTERS_PROJECT_ID || ctx.project.kind === "headquarters") continue;
 								for (const goal of ctx.goalStore.getAll()) {
 									goals.push({
-										id: goal.id, branch: goal.branch, worktreePath: goal.worktreePath, cwd: goal.cwd, archived: !!goal.archived,
+										id: goal.id, branch: goal.branch, worktreePath: goal.worktreePath, cwd: goal.cwd, repoPath: goal.repoPath, archived: !!goal.archived,
 										repoWorktrees: (goal as { repoWorktrees?: Record<string, string> }).repoWorktrees,
 									});
 								}
 								for (const session of ctx.sessionStore.getAll()) {
 									sessions.push({
-										id: session.id, branch: session.branch, worktreePath: session.worktreePath, cwd: session.cwd, archived: !!session.archived,
+										id: session.id, branch: session.branch, worktreePath: session.worktreePath, cwd: session.cwd, repoPath: session.repoPath, archived: !!session.archived,
 										repoWorktrees: session.repoWorktrees,
 									});
 								}
@@ -4848,7 +4840,7 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 								}
 								for (const member of ctx.staffStore.getAll()) {
 									staff.push({
-										id: member.id, branch: member.branch, worktreePath: member.worktreePath, cwd: member.cwd,
+										id: member.id, branch: member.branch, worktreePath: member.worktreePath, cwd: member.cwd, repoPath: member.repoPath,
 										repoWorktrees: member.repoWorktrees,
 									});
 								}

@@ -9,7 +9,7 @@
  *   - Discovered worktrees without an exact durable identity are reported and
  *     preserved; branch or path shape never authorizes repair or cleanup.
  *
- * The sweeper runs once after the listener starts and may overlap pool fill.
+ * The sweeper runs once after the listener starts, before pool initialization.
  * It never mutates discovered Git worktrees or branches.
  */
 
@@ -72,6 +72,7 @@ export interface SweepRecord {
 	branch?: string;
 	worktreePath?: string;
 	cwd?: string;
+	repoPath?: string;
 	archived?: boolean;
 	/** Per-repo worktree paths (multi-repo). Each is treated as separately owned. */
 	repoWorktrees?: Record<string, string>;
@@ -133,7 +134,7 @@ function ownershipPaths(ownership: SweepOwnership): Array<string | undefined> {
 		...ownership.sessions,
 		...(ownership.teams ?? []),
 		...ownership.staff,
-	].flatMap(record => [record.worktreePath, record.cwd, ...Object.values(record.repoWorktrees ?? {})]);
+	].flatMap(record => [record.repoPath, record.worktreePath, record.cwd, ...Object.values(record.repoWorktrees ?? {})]);
 }
 
 type SweepFs = Pick<RecoveryFs, "access"> & { realpath?: (value: string) => Promise<string> };
@@ -152,20 +153,27 @@ interface SweptWorktree extends ParsedWorktree {
 interface OwnershipGuards {
 	ownedBranches: Set<string>;
 	ownedPaths: Set<string>;
-	archivedBranches: Set<string>;
+	archivedIdentities: Set<string>;
 	teamContainerPaths: Set<string>;
 	branchToExpectedPath: Map<string, string>;
 	allRecords: SweepRecord[];
 }
 
+function worktreeIdentityKey(repoPath: string | undefined, worktreePath: string | undefined, branch: string | undefined, aliases: CanonicalPaths): string | undefined {
+	const repo = canonicalPath(repoPath, aliases);
+	const worktree = canonicalPath(worktreePath, aliases);
+	return repo && worktree && branch ? `${repo}\0${worktree}\0${branch}` : undefined;
+}
+
 function buildOwnershipGuards(ownership: SweepOwnership, aliases: CanonicalPaths = new Map()): OwnershipGuards {
 	const ownedBranches = new Set<string>();
 	const ownedPaths = new Set<string>();
-	const archivedBranches = new Set<string>();
+	const archivedIdentities = new Set<string>();
 	const teamContainerPaths = new Set<string>();
 	const branchToExpectedPath = new Map<string, string>();
 	const teamRecords = (ownership.teams ?? []).map(rec => ({ ...rec, archived: false }));
 	const teamIds = new Set(teamRecords.map(rec => rec.id));
+	const archivedSessionRecords = new Set(ownership.sessions.filter(rec => rec.archived));
 	const allRecords = [...ownership.goals, ...ownership.sessions, ...teamRecords, ...ownership.staff];
 	const addPathAliases = (paths: Set<string>, value: string | undefined): string | undefined => {
 		const lexical = normalize(value);
@@ -176,7 +184,24 @@ function buildOwnershipGuards(ownership: SweepOwnership, aliases: CanonicalPaths
 	};
 	for (const rec of allRecords) {
 		if (rec.archived) {
-			if (rec.branch) archivedBranches.add(rec.branch);
+			// Only archived sessions are retained for review. Archived goals and
+			// other record types do not prove that a leftover is expected here.
+			if (!archivedSessionRecords.has(rec)) continue;
+			const repoWorktrees = Object.entries(rec.repoWorktrees ?? {});
+			if (repoWorktrees.length > 0) {
+				for (const [repo, worktreePath] of repoWorktrees) {
+					const key = worktreeIdentityKey(
+						rec.repoPath ? (repo === "." ? rec.repoPath : path.join(rec.repoPath, repo)) : undefined,
+						worktreePath,
+						rec.branch,
+						aliases,
+					);
+					if (key) archivedIdentities.add(key);
+				}
+			} else {
+				const key = worktreeIdentityKey(rec.repoPath, rec.worktreePath, rec.branch, aliases);
+				if (key) archivedIdentities.add(key);
+			}
 			continue;
 		}
 		if (rec.branch) ownedBranches.add(rec.branch);
@@ -201,7 +226,7 @@ function buildOwnershipGuards(ownership: SweepOwnership, aliases: CanonicalPaths
 			Object.entries(record.repoWorktrees).map(([repo, worktreePath]) => [repo, canonicalPath(worktreePath, aliases) ?? worktreePath]),
 		),
 	}));
-	return { ownedBranches, ownedPaths, archivedBranches, teamContainerPaths, branchToExpectedPath, allRecords: [...allRecords, ...canonicalRecords] };
+	return { ownedBranches, ownedPaths, archivedIdentities, teamContainerPaths, branchToExpectedPath, allRecords: [...allRecords, ...canonicalRecords] };
 }
 
 function ownershipForWorktree(
@@ -347,9 +372,9 @@ export async function sweepOrphanedWorktrees(opts: {
 			| { kind: "reclaimed" }
 			| { kind: "needs-attention"; worktree: SweptWorktree; branch: string };
 
-		// Reconcile different repos in parallel, but keep worktrees within one repo
-		// sequential. This avoids concurrent Git metadata mutations in the same repo
-		// and prevents nested concurrency multiplication.
+		// Classify different repos in parallel, but keep worktrees within one repo
+		// sequential so diagnostic ordering stays deterministic and nested
+		// concurrency does not multiply.
 		const outcomesByRepo = await mapWithConcurrency(scans, RECOVERY_IO_CONCURRENCY, async (worktrees): Promise<SweepOutcome[]> => {
 			const outcomes: SweepOutcome[] = [];
 			for (const wt of worktrees) {
@@ -383,6 +408,15 @@ export async function sweepOrphanedWorktrees(opts: {
 				// Exact path ownership (including shared cwd, delegate, team-container,
 				// and multi-repo component guards) remains an ordinary protected row.
 				if (ownership.ownedByPath) {
+					outcomes.push({ kind: "none" });
+					continue;
+				}
+
+				// Archived-session retention is expected, not an ownership warning. An
+				// exact durable repo/path/branch triple proves where the worktree came
+				// from without granting this diagnostic-only sweeper mutation authority.
+				const archivedIdentity = worktreeIdentityKey(wt.repoPath, wt.path, branch, aliases);
+				if (archivedIdentity && initialGuards.archivedIdentities.has(archivedIdentity)) {
 					outcomes.push({ kind: "none" });
 					continue;
 				}

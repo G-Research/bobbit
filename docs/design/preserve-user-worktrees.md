@@ -10,15 +10,29 @@ Related lifecycle details remain in [Async background cleanup](async-background-
 
 Bobbit previously treated worktree branch and directory naming as ownership proof. Boot sweeping, Maintenance cleanup, and pool startup reclaim could therefore repair, remove, or adopt a manually created worktree merely because it looked Bobbit-related.
 
-The fail-closed correction removes shape-based mutation and adoption. That exposes a separate orderly-restart lifecycle issue: gateway shutdown intentionally left ready pool entries on disk because the next process reclaimed them. Once startup reclaim is disabled, each successful restart would otherwise leave the old ready pool unreachable and create another target-sized pool.
+The fail-closed correction removes shape-based mutation and adoption. It also distinguishes intentionally retained archived-session worktrees from unverified discoveries. Without that distinction, boot diagnostics warn about worktrees whose durable session records already prove why they remain.
+
+A separate orderly-restart issue arises because startup no longer reclaims ready pool entries. Graceful shutdown therefore drains entries still owned by the running pool so successful restarts do not leave an unreachable pool behind.
 
 ## Ownership boundary
 
 Bobbit may mutate a discovered worktree only when an existing durable record proves its exact repository, worktree path, and non-empty branch. Branch naming, root placement, and Git discovery are diagnostic hints only.
 
+Host team workers persist those coordinates in the initial session record, for both single- and multi-repository worktrees. Recording ownership during creation, rather than relying on a later metadata update, closes the crash window in which a provisioned worktree could outlive an incomplete session record. Later metadata updates and dismissal/archive preserve the same coordinates so ownership evidence survives the worker lifecycle.
+
 A live `WorktreePool` has one additional, narrow source of authority: entries still held in that instance's private `pool` array. Those entries were created and tracked by the current process. A successful `claim()` removes its entry from the array before it becomes a session or goal worktree, so claimed worktrees are outside shutdown-drain authority.
 
 No filesystem scan, Git worktree discovery, branch-prefix test, or prior-process pool entry may populate the shutdown drain set.
+
+## Boot diagnostics and archived retention
+
+The boot sweep is diagnostic-only. It may inspect Git worktrees and durable ownership records, but it does not adopt, repair, clean, or delete a discovered worktree.
+
+An exact archived-session repository, worktree path, and branch identity means the worktree is retained as expected and is omitted from the ownership-unverified warning. Multi-repository sessions apply the same contract to each recorded component. This classification explains why the worktree remains; it does not grant the boot sweep mutation authority.
+
+Incomplete coordinates or any identity mismatch fail closed: they do not prove expected retention or authorize mutation. Naming, location, or a branch-only match cannot fill missing evidence, so such worktrees remain preserved and diagnostically unverified where reported.
+
+Archived sessions continue to retain their worktrees for review. Explicit Maintenance cleanup remains the operator-controlled cleanup path and keeps its existing preview, eligibility, and immediate identity-revalidation rules.
 
 ## Current design: graceful current-instance drain
 
@@ -60,7 +74,7 @@ This is deliberately best effort:
 - A claim failure may schedule best-effort cleanup after the entry leaves the ready array. That cleanup remains tracked by the same live pool, is local-only, and participates in the stop barrier.
 - A stop failure or timeout skips that pool's drain. A drain failure or timeout may leak affected ready entries. Either way, shutdown continues with later pools and teardown phases.
 - A hard crash, `SIGKILL`, forced timeout, or interrupted drain may also leave pool-shaped worktrees.
-- A later process does not adopt, repair, or delete any such leftover by shape. It remains an ownership-unverified diagnostic.
+- A later process does not adopt, repair, or delete any such leftover by shape. Unless an exact archived-session identity proves expected retention, it remains ownership-unverified.
 
 Repeated orderly restarts therefore avoid accumulating another target-sized set when their bounded local cleanup succeeds. Crash and timeout cleanup are not guaranteed.
 
@@ -68,10 +82,11 @@ Repeated orderly restarts therefore avoid accumulating another target-sized set 
 
 The graceful drain composes with the original correction:
 
-- `src/server/agent/worktree-sweeper.ts` scans and reports discovered orphans without repair, cleanup, or branch deletion.
-- `src/server/agent/worktree-inventory.ts` classifies unproven Git worktrees as non-actionable `needs-attention` diagnostics.
-- Archived-session cleanup requires an exact repository/path/non-empty-branch record and immediately revalidates the originally selected triple.
-- `src/server/agent/worktree-pool.ts::initialize()` does not discover or adopt pool entries by branch/path/root shape.
+- Boot discovery reports unverified worktrees without repair, cleanup, adoption, or branch deletion.
+- Exact durable archived-session identities are recognized as expected retention rather than unverified ownership.
+- Unproven Git worktrees remain non-actionable `needs-attention` diagnostics.
+- Archived-session cleanup requires an exact repository/path/non-empty-branch record and immediately revalidates the originally selected identity.
+- Pool initialization does not discover or adopt entries by branch, path, or root shape.
 
 Primary worktrees, live session/goal/team/staff records, delegates and shared paths, container paths, multi-repository component paths, and current-instance fill/claim/freshen behavior retain their existing protections.
 
@@ -96,25 +111,22 @@ A manifest remains viable as a separate goal if warm restart reuse becomes a req
 
 ## Implementation surface
 
-Production changes remain limited to:
+The implementation is contained in the session and team lifecycle, worktree discovery and inventory, pool lifecycle, and gateway startup/shutdown modules.
 
-- `src/server/agent/worktree-sweeper.ts`
-- `src/server/agent/worktree-inventory.ts`
-- `src/server/agent/worktree-pool.ts`
-- `src/server/server.ts`, only for the shutdown pool phase and obsolete explanation
-
-No new API, UI, durable state, provenance marker, locking framework, or manual deletion flow is introduced.
+It reuses existing session ownership fields and Maintenance cleanup. No new API, UI, durable store, provenance marker, locking framework, or manual deletion flow is introduced.
 
 ## Focused verification
 
-Add registered v2 coverage proving:
+Registered v2 coverage proves:
 
-1. Startup does not adopt or mutate an exact pool-shaped worktree discovered from Git/filesystem shape alone.
-2. Same-instance fill and claim continue to work.
-3. `drain()` cleans only entries still held by that instance; a claimed entry is excluded.
-4. Single- and multi-repository drain cleanup, plus tracked claim-failure cleanup, always receives `skipRemotePush: true`.
-5. Every pool's stop starts before the first gateway-shutdown drain, and each stop/drain operation is bounded to 15 seconds.
-6. A stop failure or timeout skips that pool's drain; a drain failure or timeout does not prevent later drains or subsequent shutdown phases.
-7. Bounded cleanup and existing explicit project-removal drain behavior are preserved.
+1. Host single-repository workers persist the complete ownership identity in their initial session record.
+2. An exact archived-session identity is expected retention, while incomplete or mismatched records remain unverified.
+3. Startup does not adopt or mutate an exact pool-shaped worktree discovered from Git/filesystem shape alone.
+4. Same-instance fill and claim continue to work.
+5. `drain()` cleans only entries still held by that instance; a claimed entry is excluded.
+6. Single- and multi-repository drain cleanup, plus tracked claim-failure cleanup, always receives `skipRemotePush: true`.
+7. Every pool's stop starts before the first gateway-shutdown drain, and each stop/drain operation is bounded.
+8. A stop failure or timeout skips that pool's drain; a drain failure or timeout does not prevent later drains or subsequent shutdown phases.
+9. Bounded cleanup and existing explicit project-removal drain behavior are preserved.
 
 Run the focused worktree suite and `npm run check`; full workflow verification remains authoritative for broader regression coverage.
