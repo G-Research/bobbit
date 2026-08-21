@@ -980,7 +980,7 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		reads: frozen([
 			{ expression: "staged", count: 2 },
 			{ expression: "untracked", count: 2 },
-			{ expression: "draftPath", count: 2 },
+			{ expression: "draftPath", count: 4 },
 		]),
 	},
 	{
