@@ -120,6 +120,26 @@ describe("propose_goal — surfaces workflow validation rejection", () => {
 		assert.doesNotMatch(text, /__proposal_rev_v1__/);
 	});
 
+	it("returns isError with actionable CWD_OUTSIDE_PROJECT guidance and no revision on 422", async () => {
+		globalThis.fetch = (async () => fakeResponse(422, {
+			ok: false,
+			code: "CWD_OUTSIDE_PROJECT",
+			message: "cwd must be inside the selected project or an owned Bobbit worktree",
+		})) as any;
+
+		const result = await getExecute("propose_goal")("tu-cwd", {
+			title: "G",
+			spec: "s",
+			workflow: "feature",
+			cwd: "/outside/project",
+		});
+		assert.equal(result?.isError, true, "cwd validation rejection must surface as isError");
+		const text = textOf(result);
+		assert.match(text, /cwd must be inside the selected project/i);
+		assert.doesNotMatch(text, /Proposal submitted/);
+		assert.doesNotMatch(text, /__proposal_rev_v1__/);
+	});
+
 	it("returns the normal ack with rev contract on success (200)", async () => {
 		globalThis.fetch = (async () => fakeResponse(200, { ok: true, rev: 7 })) as any;
 
