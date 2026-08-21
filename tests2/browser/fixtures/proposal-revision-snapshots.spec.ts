@@ -16,6 +16,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Page } from "@playwright/test";
 import { test, expect } from "../gateway-harness.js";
+import { MockAgentCore } from "../../../tests/e2e/mock-agent-core.mjs";
 import { apiFetch, bobbitDir, nonGitCwd, defaultProjectId } from "../e2e-setup.js";
 import { openApp, createSessionViaUI, sendMessage, navigateToHash } from "./ui-helpers.js";
 
@@ -23,6 +24,43 @@ async function getDefaultProjectId(): Promise<string> {
 	const projectId = await defaultProjectId();
 	expect(projectId).toBeTruthy();
 	return projectId!;
+}
+
+function installAuthenticatedMockProposalCalls(): void {
+	// The in-process mock's canned proposal path bypasses the real extension,
+	// whose gateway client already sends BOBBIT_SESSION_SECRET. Keep these browser
+	// fixtures on the same owner-auth contract without weakening the tool-card and
+	// revision assertions.
+	const prototype = MockAgentCore.prototype as any;
+	const original = prototype._gatewayPost;
+	if (original.__proposalOwnerAuthInstalled) return;
+	const authenticatedPost = function(this: any, pathname: string, body: unknown, extraHeaders: Record<string, string> = {}) {
+		return original.call(this, pathname, body, {
+			"X-Bobbit-Session-Secret": this.env.BOBBIT_SESSION_SECRET || "",
+			...extraHeaders,
+		});
+	};
+	authenticatedPost.__proposalOwnerAuthInstalled = true;
+	prototype._gatewayPost = authenticatedPost;
+}
+installAuthenticatedMockProposalCalls();
+
+async function browserOperatorFetch(
+	page: Page,
+	pathname: string,
+	init: { method: string; body?: string },
+): Promise<{ status: number; text: string }> {
+	// Proposal mutations made by the test itself are operator actions. Execute
+	// them in the authenticated browser so the signed HttpOnly operator cookie is
+	// sent; a Node-side bearer token intentionally is not proposal-owner authority.
+	return page.evaluate(async ({ pathname, init }) => {
+		const response = await fetch(pathname, {
+			...init,
+			credentials: "include",
+			headers: { "Content-Type": "application/json" },
+		});
+		return { status: response.status, text: await response.text() };
+	}, { pathname, init });
 }
 
 async function createGoalAssistantSessionViaApi(page: Page): Promise<string> {
@@ -127,11 +165,11 @@ async function clickProposalOpenButtonForRev(page: Page, rev: number, errorPrefi
 }
 
 async function seedProjectProposalRevision(page: Page, sessionId: string, fields: Record<string, unknown>): Promise<number> {
-	const resp = await apiFetch(`/api/sessions/${sessionId}/proposal/project/seed`, {
+	const resp = await browserOperatorFetch(page, `/api/sessions/${sessionId}/proposal/project/seed`, {
 		method: "POST",
 		body: JSON.stringify({ args: fields }),
 	});
-	const text = await resp.text();
+	const text = resp.text;
 	expect(resp.status, `seed project proposal revision: ${text}`).toBe(200);
 	const body = JSON.parse(text) as { rev?: number };
 	expect(typeof body.rev, `seed response should include rev: ${text}`).toBe("number");
