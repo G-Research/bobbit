@@ -33,7 +33,7 @@ The JSON adapter preserves the public API and whole-array fixture format. Produc
 
 ## Layout and schema
 
-The MVP pins `better-sqlite3` 12.11.1 and opens:
+The MVP pins `better-sqlite3` 13.0.3 and opens:
 
 ```text
 <project-root>/.bobbit/state/gates.sqlite
