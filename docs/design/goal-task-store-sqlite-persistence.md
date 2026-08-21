@@ -285,7 +285,7 @@ The required sequence passed on baseline `de0fde14221bdb4ef0074aec89710258085fe5
 | `npm run test:browser` | Passed in 476 s; 718 passed, 8 skipped, 1 flaky retry; browser budget passed |
 | `npm run test:e2e` | Passed in 427 s; groups A, B, C, and D passed; browser phases passed 52 + 90 with 12 skipped; fidelity Vitest passed 181 with 1 skipped |
 | `npm run test:bundle` | Passed in 7 s; 2 files and 4 tests passed |
-| Packed-consumer bundled-prebuild native/store smoke | Passed: direct binding load, native write/read/close, `GoalStore`/`TaskStore` durable write/read/reopen, and handle cleanup |
+| Historical packed-consumer native smoke (pre-v13 rebuild-era baseline) | Passed during a 98 s packed-consumer run: native rebuild and binding load, `GoalStore`/`TaskStore` durable write/read, and handle cleanup |
 
 The check-through-bundle sequence took 1,253 seconds (20m53s). The gate-store qualification document records a historical single run of 1,027 seconds (17m07s: 40/18/202/381/379/7 seconds by phase). That older run is an uncontrolled historical observation, not a causal baseline: suite contents, machine load, caches, and other conditions were not controlled between runs.
 

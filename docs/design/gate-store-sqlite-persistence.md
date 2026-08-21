@@ -224,7 +224,7 @@ The final ordered qualification ran without source edits on the exact close-fenc
 | `npm run test:browser` | Passed (381 s; 717 passed, 9 skipped; browser budget passed) |
 | `npm run test:e2e` | Passed (379 s; groups A, B, C, and D passed) |
 | `npm run test:bundle` | Passed (7 s; 2 files, 4 tests) |
-| Packed-consumer bundled-prebuild native/store smoke | Passed before the separate registry audit: direct binding load, native write/read/close, installed-store round trip, and handle cleanup |
+| Historical packed-consumer native `better-sqlite3` rebuild and write/read smoke (pre-v13 rebuild-era baseline) | Passed before the separate registry audit |
 
 A read-only snapshot of representative production gate state was copied into an owned temporary directory, migrated, closed, reopened, queried directly, and removed. Source, post-migration, reopened, and SQLite counts were all 16. Sorted composite identities and every per-gate payload hash matched, and the retired JSON backup was byte-exact. The sorted-identity SHA-256 was `0f06c43d044c35b6d40d2fb5f8aeab2efd7c5540a77d7d907b6e1a65d745eb5e`; the identity-plus-payload-hash manifest SHA-256 was `d3a5b491925f4f7941756e226edf4fabff3a283facc670cf361b8dad9e27d3e1`. Before and after the exercise, the live source remained byte-for-byte unchanged at SHA-256 `c1a015d2f28cebe27ceff104f230f133a213fd6644e7b8607fe2638ab5504240`, 44,685 bytes, with modification time `2026-08-07T07:55:00.694Z`.
 
