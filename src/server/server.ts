@@ -90,7 +90,7 @@ import { resolvePackIdentityForTool } from "./extension-host/pack-identity.js";
 import { mintSurfaceToken, resolveSurfaceIdentity } from "./extension-host/surface-binding.js";
 import type { StorePutOptions } from "../shared/extension-host/host-api.js";
 import { PackContributionRegistry, type ProviderConfigOverrideReadResult } from "./extension-host/pack-contribution-registry.js";
-import { loadPackContributions, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
+import { loadPackContributions, packIdFromRoot, providerConfigStoreKey, PROVIDER_CONFIG_KEY_PREFIX } from "./agent/pack-contributions.js";
 import { loadPiExtensionContributions, loadPiExtensionContributionsWithDiscoverySync } from "./agent/pi-extension-contributions.js";
 import { LifecycleHub, type HookCtx } from "./agent/lifecycle-hub.js";
 import { resolveConfiguredComponent, resolveHookScopeContext } from "./agent/hook-scope-context.js";
@@ -2902,6 +2902,10 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		for (const entry of marketPackEntriesForProject(projectId)) {
 			if (!entry.manifest || (entry.manifest.schema ?? 1) < 2 || (entry.manifest.contents.piExtensions ?? []).length === 0) continue;
 			const manifest = entry.manifest;
+			const packId = packIdFromRoot(entry.path);
+			const winningPack = packContributionRegistry.getPack(projectId, packId);
+			if ((manifest.localData !== undefined || winningPack?.localData !== undefined)
+				&& (!winningPack || path.resolve(winningPack.packRoot) !== path.resolve(entry.path))) continue;
 			const store = packActivationStore(entry.scope, projectId);
 			const disabled = new Set(store?.getPackActivation(entry.scope as PackOrderScope, manifest.name).piExtensions ?? []);
 			const origin = {
@@ -2959,7 +2963,6 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		return contributions;
 	};
 	sessionManager.setMarketplaceMcpResolver(marketplaceMcpResolver);
-	sessionManager.setMarketplacePiExtensionResolver(marketplacePiExtensionResolver);
 	packContributionRegistry = new PackContributionRegistry(
 		marketPackEntriesForProject,
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).entrypoints ?? [],
@@ -2990,6 +2993,9 @@ export function createGateway(config: GatewayConfig, deps?: GatewayDeps) {
 		},
 		(scope, projectId, packName) => packActivationStore(scope as PackScope, projectId)?.getPackActivation(scope as PackOrderScope, packName).hooks ?? [],
 	);
+	// Pi winner filtering consults the contribution registry, so bind the resolver
+	// only after the registry is initialized.
+	sessionManager.setMarketplacePiExtensionResolver(marketplacePiExtensionResolver);
 	const packLocalDataResolver = new PackLocalDataResolver(
 		projectRegistry,
 		packContributionRegistry,
