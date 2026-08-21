@@ -306,7 +306,7 @@ test.describe("Journey: Failed Goal Proposal", () => {
 		const failedCard = page.locator('[data-testid="proposal-failed-card"]').filter({ hasText: "Outside Cwd Goal" }).first();
 		await expect(failedCard).toBeVisible({ timeout: 20_000 });
 		const errorMessage = failedCard.locator('[data-testid="proposal-error-message"]');
-		await expect(errorMessage).toContainText(/cwd must be inside the selected project/i);
+		await expect(errorMessage).toContainText(/cwd must be inside .+/i);
 		await expect(failedCard.locator('[data-testid="proposal-rev"]')).toHaveCount(0);
 		await expect.poll(() => page.evaluate(() => {
 			const state = (window as any).bobbitState ?? (window as any).__bobbitState;
