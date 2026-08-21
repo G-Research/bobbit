@@ -309,6 +309,14 @@ Scope follows marketplace install scope:
 - **Global-user** installs apply to sessions for the current OS user.
 - **Project** installs apply only to sessions in that project context. In multi-project setups, project pi extensions do not bleed into sibling projects.
 
+**Local-data precedence.** Two installed packs in different precedence bands can have the same
+structural pack id. A Pack Local Data binding has only one entry for that id, so Bobbit compares
+each same-id Pi contribution with the winner. If either one declares `localData`, the shadowed
+contribution is omitted; removing the winner exposes the next winner, whose Pi extension and
+directory bind on the next session activation. This prevents a shadowed extension from receiving
+the winner's directory. Same-id pairs where neither contribution declares `localData` keep the
+existing behavior and both enabled Pi extension entries may load.
+
 ### Discovery, metadata, and diagnostics
 
 Bobbit performs best-effort deterministic discovery to identify model-facing tools exposed by an extension. Discovery exists to improve UI provenance and map explicit Bobbit tool policies; it is not a gate for runtime loading.

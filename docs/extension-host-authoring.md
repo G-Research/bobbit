@@ -223,12 +223,17 @@ empty or whitespace-padded values; absolute, drive-relative, UNC, or device path
 colons/alternate data streams, control characters, and Windows-invalid punctuation; empty, `.`,
 or `..` components; Windows reserved device names; components ending in a dot or space; and paths
 equal to or below Bobbit-managed marketplace roots (`.bobbit/config/market-packs` and Headquarters
-`config/market-packs`, compared case-insensitively). At resolution time Bobbit also checks the fully
-resolved candidate against the live server, global-user, and every registered project's marketplace
-root. This protects ancestor-project layouts where the managed root is not a direct relative prefix
-of the declaring project. An invalid declaration rejects the pack instead of silently removing the
-capability. Schema-1 packs do not activate `localData`; packs with no declaration retain their
-previous manifest/runtime shape.
+`config/market-packs`, compared case-insensitively).
+
+Resolution also rejects the candidate against a live list of the server, global-user, and every
+registered project's managed marketplace root before creating any directory. Both lexical and
+canonical spellings are compared. When a root does not exist yet, Bobbit canonicalizes its nearest
+existing ancestor and appends the missing suffix, so an ancestor-project layout or a root reached
+through a POSIX symlink or Windows junction cannot evade the check merely because its final
+`config/market-packs` components are absent. The live list is read again for every resolution, so a
+project registered after startup is protected too. An invalid declaration rejects the pack instead
+of silently removing the capability. Schema-1 packs do not activate `localData`; packs with no
+declaration retain their previous manifest/runtime shape.
 
 #### Resolution and project identity
 
@@ -302,6 +307,13 @@ persistent staff sessions, goal/team/delegate worktrees, and restored or respawn
 Consequently, every host worktree for one project sees the same host directory; restoration does
 not persist or reconstruct a worktree-relative path. The environment variable is omitted entirely
 when no active pack declares local data.
+
+The map is also why local-data-aware Pi activation follows pack precedence. For each Pi
+contribution that shares a structural pack id with the winner, Bobbit omits the shadowed
+contribution when either one declares `localData`; uninstalling the winner lets the next winner
+activate with its own directory binding. Same-id pairs where neither contribution declares
+`localData` preserve the legacy behavior and both enabled Pi extension entries may load. See
+[Marketplace pi-extension activation](marketplace.md#install-activation-and-runtime-loading).
 
 #### Sandbox mapping and lifecycle
 
