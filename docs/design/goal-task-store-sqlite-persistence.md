@@ -244,7 +244,7 @@ The test split keeps native setup focused:
 - lifecycle tests cover constructor cleanup and `ProjectContext`/`ProjectContextManager` close behavior; and
 - the daily E2E upgrade journey boots a real gateway from legacy per-project JSON, verifies collision-safe retirement, mutates and deletes through supported APIs, gracefully restarts, and directly inspects authoritative rows after shutdown.
 
-Packed-consumer qualification retains the existing npm rebuild invocation, but with `better-sqlite3` 13.0.3 packaging (`gypfile: false`, no install lifecycle, and bundled prebuilds) that step is effectively a harmless no-op. The meaningful check loads the bundled native binding and performs an in-memory create/write/read/close smoke. That check belongs in bundle qualification rather than the general unit lane.
+Packed-consumer qualification deliberately does not run `npm rebuild`. Although `better-sqlite3` 13.0.3 declares `gypfile: false`, has no install lifecycle, and ships bundled prebuilds, npm omits `gypfile: false` from lockfile and hidden-lockfile package metadata. A targeted rebuild can therefore synthesize a `node-gyp rebuild` lifecycle and attempt an unintended local source build. Qualification instead loads the installed bundled prebuild directly, performs an in-memory native create/write/read/close smoke, and exercises the installed `GoalStore` and `TaskStore` through durable write/read/reopen/close round trips with handle cleanup. This tests the artifact consumers receive without replacing its native binding with a locally compiled binary. The check belongs in bundle qualification rather than the general unit lane.
 
 ## Benchmark and qualification evidence
 
@@ -285,7 +285,7 @@ The required sequence passed on baseline `de0fde14221bdb4ef0074aec89710258085fe5
 | `npm run test:browser` | Passed in 476 s; 718 passed, 8 skipped, 1 flaky retry; browser budget passed |
 | `npm run test:e2e` | Passed in 427 s; groups A, B, C, and D passed; browser phases passed 52 + 90 with 12 skipped; fidelity Vitest passed 181 with 1 skipped |
 | `npm run test:bundle` | Passed in 7 s; 2 files and 4 tests passed |
-| Packed-consumer native smoke | Passed during a 98 s packed-consumer run: native rebuild and binding load, GoalStore/TaskStore durable write/read, and handle cleanup |
+| Packed-consumer bundled-prebuild native/store smoke | Passed: direct binding load, native write/read/close, `GoalStore`/`TaskStore` durable write/read/reopen, and handle cleanup |
 
 The check-through-bundle sequence took 1,253 seconds (20m53s). The gate-store qualification document records a historical single run of 1,027 seconds (17m07s: 40/18/202/381/379/7 seconds by phase). That older run is an uncontrolled historical observation, not a causal baseline: suite contents, machine load, caches, and other conditions were not controlled between runs.
 
