@@ -103,10 +103,16 @@ interface GateWriteMetrics {
 	durationMs: number;
 }
 
+interface GatePublication {
+	/** Exact gate projections immediately before and after the successful durable write. */
+	previous: ReadonlyMap<string, GateState>;
+	current: ReadonlyMap<string, GateState>;
+}
+
 interface GatePersistence {
 	loadInto(gates: Map<string, GateState>): void;
 	schedule(keys: Iterable<string>): void;
-	publishStrict(keys: Iterable<string>): Promise<void>;
+	publishStrict(keys: Iterable<string>): Promise<GatePublication>;
 	flush(): Promise<void>;
 	close(): Promise<void>;
 	dispose(): void;
@@ -117,6 +123,9 @@ interface GatePersistence {
 class JsonGatePersistence implements GatePersistence {
 	private readonly writer: CoalescedJsonWriter;
 	private readonly storeFile: string;
+	private durable = new Map<string, GateState>();
+	private publishing: GatePublication | null = null;
+	private lastPublication: GatePublication = { previous: new Map(), current: new Map() };
 
 	constructor(
 		private readonly fs: FsLike,
@@ -128,8 +137,22 @@ class JsonGatePersistence implements GatePersistence {
 			fs,
 			stateDir,
 			this.storeFile,
-			() => JSON.stringify(Array.from(gates.values())),
+			() => {
+				const json = JSON.stringify(Array.from(gates.values()));
+				const current = new Map<string, GateState>();
+				for (const gate of JSON.parse(json) as GateState[]) current.set(compositeKey(gate.goalId, gate.gateId), gate);
+				this.publishing = { previous: this.durable, current };
+				return json;
+			},
 			"gate-store",
+			undefined,
+			undefined,
+			() => {
+				if (!this.publishing) return;
+				this.lastPublication = this.publishing;
+				this.durable = new Map(this.publishing.current);
+				this.publishing = null;
+			},
 		);
 	}
 
@@ -141,13 +164,16 @@ class JsonGatePersistence implements GatePersistence {
 			for (const gate of data) {
 				if (gate?.gateId && gate?.goalId) gates.set(compositeKey(gate.goalId, gate.gateId), gate);
 			}
+			this.durable = new Map(JSON.parse(JSON.stringify([...gates.values()])).map((gate: GateState) => [compositeKey(gate.goalId, gate.gateId), gate]));
 		} catch (error) {
 			console.error("[gate-store] Failed to load persisted gates:", error);
 		}
 	}
 
 	schedule(_keys: Iterable<string>): void { this.writer.schedule(); }
-	publishStrict(_keys: Iterable<string>): Promise<void> { return this.writer.publishStrict(); }
+	publishStrict(_keys: Iterable<string>): Promise<GatePublication> {
+		return this.writer.publishStrict().then(() => this.lastPublication);
+	}
 	flush(): Promise<void> { return this.writer.flush(); }
 	async close(): Promise<void> { await this.writer.flush(); }
 	dispose(): void { /* no persistent handle */ }
@@ -348,6 +374,8 @@ class SqliteGatePersistence implements GatePersistence {
 	private lastWriteMetrics: GateWriteMetrics | null = null;
 	private closePromise: Promise<void> | null = null;
 	private closed = false;
+	private durable = new Map<string, GateState>();
+	private lastPublication: GatePublication = { previous: new Map(), current: new Map() };
 
 	constructor(
 		private readonly fs: FsLike,
@@ -555,7 +583,11 @@ class SqliteGatePersistence implements GatePersistence {
 
 	loadInto(gates: Map<string, GateState>): void {
 		const rows = this.readValidatedRows();
-		for (const row of rows) gates.set(compositeKey(row.gate.goalId, row.gate.gateId), row.gate);
+		for (const row of rows) {
+			const key = compositeKey(row.gate.goalId, row.gate.gateId);
+			gates.set(key, row.gate);
+			this.durable.set(key, structuredClone(row.gate));
+		}
 	}
 
 	schedule(keys: Iterable<string>): void {
@@ -581,10 +613,10 @@ class SqliteGatePersistence implements GatePersistence {
 		return this.requestBarrier();
 	}
 
-	publishStrict(keys: Iterable<string>): Promise<void> {
+	publishStrict(keys: Iterable<string>): Promise<GatePublication> {
 		this.assertOpen();
 		for (const key of keys) this.dirty.add(key);
-		return this.requestBarrier();
+		return this.requestBarrier().then(() => this.lastPublication);
 	}
 
 	getLastWriteMetrics(): GateWriteMetrics | null { return this.lastWriteMetrics; }
@@ -661,6 +693,12 @@ class SqliteGatePersistence implements GatePersistence {
 			const snapshots = keys.map(key => ({ key, gate: this.gates.get(key) }));
 			const startedAt = performance.now();
 			let bytes = 0;
+			const previous = new Map<string, GateState>();
+			const current = new Map<string, GateState>();
+			for (const { key } of snapshots) {
+				const durable = this.durable.get(key);
+				if (durable) previous.set(key, durable);
+			}
 			try {
 				if (snapshots.length > 0) {
 					const upsert = this.db.prepare(`
@@ -678,11 +716,19 @@ class SqliteGatePersistence implements GatePersistence {
 							continue;
 						}
 						const payload = JSON.stringify(snapshot.gate);
+						const durableGate = JSON.parse(payload) as GateState;
+						current.set(snapshot.key, durableGate);
 						bytes += Buffer.byteLength(payload);
 						upsert.run(snapshot.gate.goalId, snapshot.gate.gateId, payload);
 					}
 					this.db.exec("COMMIT");
 				}
+				for (const { key } of snapshots) {
+					const durableGate = current.get(key);
+					if (durableGate) this.durable.set(key, durableGate);
+					else this.durable.delete(key);
+				}
+				this.lastPublication = { previous, current };
 				this.lastWriteMetrics = { bytes, durationMs: performance.now() - startedAt };
 				this.settlePublished(revision);
 			} catch (error) {
@@ -729,7 +775,6 @@ export class GateStore {
 	private closePromise: Promise<void> | null = null;
 	private readonly pendingInMemoryStatusCommits = new Map<string, GateStatusCommit[]>();
 	private readonly detachedStatusKeys = new Set<string>();
-	private detachedStatusCommits: GateStatusCommit[] = [];
 	private detachedStatusFlush: Promise<void> | null = null;
 	private detachedStatusFlushScheduled = false;
 
@@ -761,7 +806,7 @@ export class GateStore {
 
 	/** Await all pending persistence, primarily for orderly shutdown/tests. */
 	flush(): Promise<void> {
-		if (this.detachedStatusCommits.length > 0 || this.detachedStatusFlush) {
+		if (this.detachedStatusKeys.size > 0 || this.detachedStatusFlush) {
 			return this.flushDetachedStatusCommits();
 		}
 		return this.persistence.flush();
@@ -773,7 +818,27 @@ export class GateStore {
 		// This synchronous fence makes every mutation linearize either before the
 		// persistence close barrier or before touching the in-memory snapshot.
 		this.acceptingMutations = false;
-		this.closePromise = this.persistence.close();
+		if (this.detachedStatusKeys.size === 0 && !this.detachedStatusFlush) {
+			this.closePromise = this.persistence.close();
+			return this.closePromise;
+		}
+		this.closePromise = (async () => {
+			let lastError: unknown;
+			try {
+				for (let attempt = 0; attempt < GATE_SQLITE_CLOSE_ATTEMPTS; attempt++) {
+					try {
+						await this.flush();
+						await this.persistence.close();
+						return;
+					} catch (error) {
+						lastError = error;
+					}
+				}
+				throw lastError;
+			} finally {
+				if (lastError) this.persistence.dispose();
+			}
+		})();
 		return this.closePromise;
 	}
 
@@ -789,7 +854,7 @@ export class GateStore {
 	}
 
 	/** Strict lifecycle writes share the coalesced persistence queue. */
-	private saveStrict(keys: Iterable<string>): Promise<void> {
+	private saveStrict(keys: Iterable<string>): Promise<GatePublication> {
 		return this.persistence.publishStrict(keys);
 	}
 
@@ -802,10 +867,20 @@ export class GateStore {
 		return { goalId: gate.goalId, gateId: gate.gateId, previousStatus, status, revision: gate.statusRevision };
 	}
 
-	private reportStatusCommits(commits: readonly GateStatusCommit[]): void {
-		for (const commit of commits) {
+	private reportStatusCommits(keys: readonly string[], publication: GatePublication): void {
+		for (const key of keys) {
+			const previous = publication.previous.get(key);
+			const current = publication.current.get(key);
+			if (!previous || !current || previous.status === current.status) continue;
+			const commit: GateStatusCommit = {
+				goalId: current.goalId,
+				gateId: current.gateId,
+				previousStatus: previous.status,
+				status: current.status,
+				revision: current.statusRevision ?? 1,
+			};
 			try {
-				this.onStatusCommitted?.(Object.freeze({ ...commit }));
+				this.onStatusCommitted?.(Object.freeze(commit));
 			} catch (error) {
 				console.error(`[gate-store] Committed status observer failed for ${commit.goalId}/${commit.gateId}:`, error);
 			}
@@ -813,7 +888,8 @@ export class GateStore {
 	}
 
 	private publishStatusCommits(keys: Iterable<string>, commits: readonly GateStatusCommit[]): Promise<void> {
-		return this.saveStrict(keys).then(() => this.reportStatusCommits(commits));
+		const statusKeys = [...new Set(commits.map(commit => compositeKey(commit.goalId, commit.gateId)))];
+		return this.saveStrict(keys).then(publication => this.reportStatusCommits(statusKeys, publication));
 	}
 
 	private publishStatusCommitsDetached(keys: Iterable<string>, commits: readonly GateStatusCommit[]): void {
@@ -821,9 +897,10 @@ export class GateStore {
 			this.save(keys);
 			return;
 		}
+		// The detached strict batch owns scheduling while an observer is installed.
+		// Scheduling a second mutable-map write here could commit the final state
+		// ahead of this batch and consume the durable status delta without a fact.
 		for (const key of keys) this.detachedStatusKeys.add(key);
-		this.detachedStatusCommits.push(...commits);
-		this.save(this.detachedStatusKeys);
 		if (this.detachedStatusFlushScheduled || this.detachedStatusFlush) return;
 		this.detachedStatusFlushScheduled = true;
 		queueMicrotask(() => {
@@ -837,12 +914,16 @@ export class GateStore {
 	private flushDetachedStatusCommits(): Promise<void> {
 		if (this.detachedStatusFlush) return this.detachedStatusFlush;
 		this.detachedStatusFlush = (async () => {
-			while (this.detachedStatusCommits.length > 0) {
-				const commits = this.detachedStatusCommits;
-				this.detachedStatusCommits = [];
+			while (this.detachedStatusKeys.size > 0) {
+				const keys = [...this.detachedStatusKeys];
 				this.detachedStatusKeys.clear();
-				await this.persistence.flush();
-				this.reportStatusCommits(commits);
+				try {
+					const publication = await this.persistence.publishStrict(keys);
+					this.reportStatusCommits(keys, publication);
+				} catch (error) {
+					for (const key of keys) this.detachedStatusKeys.add(key);
+					throw error;
+				}
 			}
 		})().finally(() => {
 			this.detachedStatusFlush = null;

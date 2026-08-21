@@ -86,10 +86,16 @@ interface TaskFactBatch {
 	started: boolean;
 }
 
+interface TaskPublication {
+	/** Exact task projections immediately before and after the successful durable write. */
+	previous: ReadonlyMap<string, PersistedTask>;
+	current: ReadonlyMap<string, PersistedTask>;
+}
+
 interface TaskPersistence {
 	loadInto(tasks: Map<string, PersistedTask>): void;
 	schedule(ids: Iterable<string>): void;
-	publishStrict(ids: Iterable<string>): Promise<void>;
+	publishStrict(ids: Iterable<string>): Promise<TaskPublication>;
 	flush(): Promise<void>;
 	close(): Promise<void>;
 	dispose(): void;
@@ -100,6 +106,9 @@ interface TaskPersistence {
 class JsonTaskPersistence implements TaskPersistence {
 	private readonly writer: CoalescedJsonWriter;
 	private readonly storeFile: string;
+	private durable = new Map<string, PersistedTask>();
+	private publishing: TaskPublication | null = null;
+	private lastPublication: TaskPublication = { previous: new Map(), current: new Map() };
 
 	constructor(
 		private readonly fs: FsLike,
@@ -111,8 +120,24 @@ class JsonTaskPersistence implements TaskPersistence {
 			fs,
 			stateDir,
 			this.storeFile,
-			() => JSON.stringify(Array.from(tasks.values())),
+			() => {
+				const json = JSON.stringify(Array.from(tasks.values()));
+				const current = new Map<string, PersistedTask>();
+				for (const task of JSON.parse(json) as PersistedTask[]) current.set(task.id, task);
+				this.publishing = { previous: this.durable, current };
+				return json;
+			},
 			"task-store",
+			undefined,
+			undefined,
+			() => {
+				// The writer calls onWrite for the snapshot serialized immediately above.
+				// Keep this callback non-throwing: the atomic rename is already authoritative.
+				if (!this.publishing) return;
+				this.lastPublication = this.publishing;
+				this.durable = new Map(this.publishing.current);
+				this.publishing = null;
+			},
 		);
 	}
 
@@ -127,13 +152,16 @@ class JsonTaskPersistence implements TaskPersistence {
 				canonicalizeTask(value as Record<string, unknown>);
 				tasks.set(value.id, value as PersistedTask);
 			}
+			this.durable = new Map(JSON.parse(JSON.stringify([...tasks.values()])).map((task: PersistedTask) => [task.id, task]));
 		} catch (error) {
 			console.error("[task-store] Failed to load persisted tasks:", error);
 		}
 	}
 
 	schedule(_ids: Iterable<string>): void { this.writer.schedule(); }
-	publishStrict(_ids: Iterable<string>): Promise<void> { return this.writer.publishStrict(); }
+	publishStrict(_ids: Iterable<string>): Promise<TaskPublication> {
+		return this.writer.publishStrict().then(() => this.lastPublication);
+	}
 	flush(): Promise<void> { return this.writer.flush(); }
 	async close(): Promise<void> { await this.writer.flush(); }
 	dispose(): void { /* no persistent handle */ }
@@ -221,6 +249,13 @@ function validateTask(value: unknown, label: string, expectedId?: string, valida
 	return value as unknown as PersistedTask;
 }
 
+function taskFactValuesEqual(left: unknown, right: unknown): boolean {
+	if (Array.isArray(left) && Array.isArray(right)) {
+		return left.length === right.length && left.every((value, index) => value === right[index]);
+	}
+	return left === right;
+}
+
 function serializeTaskForPublication(task: PersistedTask, dirtyId: string): string {
 	const label = `runtime task ${dirtyId}`;
 	const payload = JSON.stringify(task);
@@ -268,6 +303,8 @@ class SqliteTaskPersistence implements TaskPersistence {
 	private lastWriteMetrics: TaskWriteMetrics | null = null;
 	private closePromise: Promise<void> | null = null;
 	private closed = false;
+	private durable = new Map<string, PersistedTask>();
+	private lastPublication: TaskPublication = { previous: new Map(), current: new Map() };
 
 	constructor(
 		private readonly fs: FsLike,
@@ -468,7 +505,10 @@ class SqliteTaskPersistence implements TaskPersistence {
 	}
 
 	loadInto(tasks: Map<string, PersistedTask>): void {
-		for (const row of this.readValidatedRows()) tasks.set(row.id, row.task);
+		for (const row of this.readValidatedRows()) {
+			tasks.set(row.id, row.task);
+			this.durable.set(row.id, structuredClone(row.task));
+		}
 	}
 
 	schedule(ids: Iterable<string>): void {
@@ -494,10 +534,10 @@ class SqliteTaskPersistence implements TaskPersistence {
 		return this.requestBarrier();
 	}
 
-	publishStrict(ids: Iterable<string>): Promise<void> {
+	publishStrict(ids: Iterable<string>): Promise<TaskPublication> {
 		this.assertOpen();
 		for (const id of ids) this.dirty.add(id);
-		return this.requestBarrier();
+		return this.requestBarrier().then(() => this.lastPublication);
 	}
 
 	getLastWriteMetrics(): TaskWriteMetrics | null { return this.lastWriteMetrics; }
@@ -573,6 +613,12 @@ class SqliteTaskPersistence implements TaskPersistence {
 			const snapshots = ids.map(id => ({ id, task: this.tasks.get(id) }));
 			const startedAt = performance.now();
 			let bytes = 0;
+			const previous = new Map<string, PersistedTask>();
+			const current = new Map<string, PersistedTask>();
+			for (const { id } of snapshots) {
+				const durable = this.durable.get(id);
+				if (durable) previous.set(id, durable);
+			}
 			try {
 				if (snapshots.length > 0) {
 					const upsert = this.db.prepare(`
@@ -587,11 +633,19 @@ class SqliteTaskPersistence implements TaskPersistence {
 							continue;
 						}
 						const payload = serializeTaskForPublication(snapshot.task, snapshot.id);
+						const durableTask = JSON.parse(payload) as PersistedTask;
+						current.set(snapshot.id, durableTask);
 						bytes += Buffer.byteLength(payload);
 						upsert.run(snapshot.id, payload);
 					}
 					this.db.exec("COMMIT");
 				}
+				for (const { id } of snapshots) {
+					const durableTask = current.get(id);
+					if (durableTask) this.durable.set(id, durableTask);
+					else this.durable.delete(id);
+				}
+				this.lastPublication = { previous, current };
 				this.lastWriteMetrics = { bytes, durationMs: performance.now() - startedAt };
 				this.settlePublished(revision);
 			} catch (error) {
@@ -639,6 +693,9 @@ export class TaskStore {
 	private acceptingMutations = true;
 	private closePromise: Promise<void> | null = null;
 	private committedFactBatch: TaskFactBatch | null = null;
+	private lastFactBatchPromise: Promise<void> | null = null;
+	private factPublishTail: Promise<void> = Promise.resolve();
+	private retryCommittedFacts: TaskCommittedFact[] = [];
 
 	/** Called only after a fact's task snapshot crosses a strict persistence fence. */
 	onCommittedFact?: (fact: TaskCommittedFact) => void;
@@ -668,19 +725,41 @@ export class TaskStore {
 
 	/** Await all pending persistence, primarily for orderly shutdown/tests. */
 	flush(): Promise<void> {
-		const batch = this.committedFactBatch;
-		if (batch) {
-			this.startCommittedFactBatch(batch);
-			return batch.promise;
+		let batch = this.committedFactBatch;
+		if (!batch && this.retryCommittedFacts.length > 0) {
+			batch = this.createCommittedFactBatch();
+			this.committedFactBatch = batch;
 		}
-		return this.persistence.flush();
+		if (batch) this.startCommittedFactBatch(batch);
+		const factBarrier = this.lastFactBatchPromise;
+		return factBarrier ? factBarrier.then(() => this.persistence.flush()) : this.persistence.flush();
 	}
 
 	/** Flush pending persistence and release the SQLite database handle. */
 	close(): Promise<void> {
 		if (this.closePromise) return this.closePromise;
 		this.acceptingMutations = false;
-		this.closePromise = this.persistence.close();
+		if (!this.committedFactBatch && !this.lastFactBatchPromise && this.retryCommittedFacts.length === 0) {
+			this.closePromise = this.persistence.close();
+			return this.closePromise;
+		}
+		this.closePromise = (async () => {
+			let lastError: unknown;
+			try {
+				for (let attempt = 0; attempt < TASK_SQLITE_CLOSE_ATTEMPTS; attempt++) {
+					try {
+						await this.flush();
+						await this.persistence.close();
+						return;
+					} catch (error) {
+						lastError = error;
+					}
+				}
+				throw lastError;
+			} finally {
+				if (lastError) this.persistence.dispose();
+			}
+		})();
 		return this.closePromise;
 	}
 
@@ -712,20 +791,18 @@ export class TaskStore {
 		this.assertAcceptingMutations();
 		this.tasks.set(task.id, task);
 		this.generation++;
-		this.save([task.id]);
 		// Preserve the historical coalesced hot path until a host observer is
-		// installed. There is no fact to fence in legacy-only contexts.
-		if (!this.onCommittedFact || facts.length === 0) return Promise.resolve();
+		// installed. With facts, the serialized strict batch below owns scheduling;
+		// a separate trailing write could otherwise commit its mutable task first
+		// and consume the durable delta before the fact batch observes it.
+		if (!this.onCommittedFact || facts.length === 0) {
+			this.save([task.id]);
+			return Promise.resolve();
+		}
 
 		let batch = this.committedFactBatch;
 		if (!batch) {
-			let resolve!: () => void;
-			let reject!: (error: unknown) => void;
-			const promise = new Promise<void>((batchResolve, batchReject) => {
-				resolve = batchResolve;
-				reject = batchReject;
-			});
-			batch = { facts: [], promise, resolve, reject, started: false };
+			batch = this.createCommittedFactBatch();
 			this.committedFactBatch = batch;
 			queueMicrotask(() => this.startCommittedFactBatch(batch!));
 		}
@@ -733,12 +810,76 @@ export class TaskStore {
 		return batch.promise;
 	}
 
+	private createCommittedFactBatch(): TaskFactBatch {
+		let resolve!: () => void;
+		let reject!: (error: unknown) => void;
+		const promise = new Promise<void>((batchResolve, batchReject) => {
+			resolve = batchResolve;
+			reject = batchReject;
+		});
+		return { facts: [], promise, resolve, reject, started: false };
+	}
+
 	private startCommittedFactBatch(batch: TaskFactBatch): void {
 		if (batch.started) return;
 		batch.started = true;
 		if (this.committedFactBatch === batch) this.committedFactBatch = null;
-		void this.persistence.flush().then(() => {
-			for (const fact of batch.facts) {
+
+		const publish = this.factPublishTail.then(async () => {
+			const intents = [...this.retryCommittedFacts, ...batch.facts];
+			this.retryCommittedFacts = [];
+			const ids = [...new Set(intents.map(fact => fact.taskId))];
+			try {
+				const publication = await this.persistence.publishStrict(ids);
+				this.reportCommittedTaskDeltas(intents, publication);
+			} catch (error) {
+				this.retryCommittedFacts = [...intents, ...this.retryCommittedFacts];
+				throw error;
+			}
+		});
+		this.factPublishTail = publish.catch(() => undefined);
+		this.lastFactBatchPromise = batch.promise;
+		void publish.then(batch.resolve, batch.reject).finally(() => {
+			if (this.lastFactBatchPromise === batch.promise) this.lastFactBatchPromise = null;
+		});
+	}
+
+	private reportCommittedTaskDeltas(intents: readonly TaskCommittedFact[], publication: TaskPublication): void {
+		const orderedIds = [...new Set(intents.map(fact => fact.taskId))];
+		for (const taskId of orderedIds) {
+			const taskIntents = intents.filter(fact => fact.taskId === taskId);
+			const previous = publication.previous.get(taskId);
+			const current = publication.current.get(taskId);
+			if (!current) continue;
+
+			const facts: TaskCommittedFact[] = [];
+			if (!previous) {
+				facts.push({
+					kind: "taskCreated", taskId, goalId: current.goalId, type: current.type,
+					state: current.state, parentTaskId: current.parentTaskId, revision: current.updatedAt,
+				});
+			} else {
+				const updateIntents = taskIntents.filter((fact): fact is Extract<TaskCommittedFact, { kind: "taskUpdated" }> => fact.kind === "taskUpdated");
+				if (updateIntents.length > 0) {
+					const candidates = [...new Set(updateIntents.flatMap(fact => fact.changedFields))];
+					const changedFields = candidates.filter(field => !taskFactValuesEqual(
+						(previous as unknown as Record<string, unknown>)[field],
+						(current as unknown as Record<string, unknown>)[field],
+					)).sort();
+					facts.push({
+						kind: "taskUpdated", taskId, goalId: current.goalId, state: current.state,
+						changedFields, revision: current.updatedAt,
+					});
+				}
+				if (taskIntents.some(fact => fact.kind === "taskStateChanged") && previous.state !== current.state) {
+					facts.push({
+						kind: "taskStateChanged", taskId, goalId: current.goalId,
+						previousState: previous.state, state: current.state, revision: current.updatedAt,
+					});
+				}
+			}
+
+			for (const fact of facts) {
 				try {
 					this.onCommittedFact?.(Object.freeze({
 						...fact,
@@ -748,8 +889,7 @@ export class TaskStore {
 					console.error(`[task-store] Committed fact observer failed for ${fact.taskId}:`, error);
 				}
 			}
-			batch.resolve();
-		}, batch.reject);
+		}
 	}
 
 	get(id: string): PersistedTask | undefined { return this.tasks.get(id); }
