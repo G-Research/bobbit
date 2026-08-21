@@ -219,19 +219,31 @@ export class PackLocalDataResolver {
 	}
 }
 
-/** Native lexical spelling plus its canonical spelling when the path exists. */
+/** Native lexical spelling plus the spelling obtained by canonicalizing the
+ * nearest existing ancestor. Appending the missing suffix is essential when a
+ * managed root sits below a symlinked Headquarters/project directory but its
+ * final `config/market-packs` components have not been created yet. */
 function absolutePathVariants(value: string): string[] {
 	const absolute = path.resolve(value);
 	const variants = [absolute];
-	try {
-		const real = fs.realpathSync(absolute);
-		if (!sameNativePath(absolute, real)) variants.push(real);
-	} catch (cause: any) {
-		if (cause?.code !== "ENOENT" && cause?.code !== "ENOTDIR") {
-			throw new PackLocalDataError("filesystem_error", "Could not canonicalize a managed Marketplace path", { cause });
+	const suffix: string[] = [];
+	let cursor = absolute;
+
+	while (true) {
+		try {
+			const real = path.resolve(fs.realpathSync(cursor), ...suffix);
+			if (!sameNativePath(absolute, real)) variants.push(real);
+			return variants;
+		} catch (cause: any) {
+			if (cause?.code !== "ENOENT" && cause?.code !== "ENOTDIR") {
+				throw new PackLocalDataError("filesystem_error", "Could not canonicalize a managed Marketplace path", { cause });
+			}
+			const parent = path.dirname(cursor);
+			if (parent === cursor) return variants;
+			suffix.unshift(path.basename(cursor));
+			cursor = parent;
 		}
 	}
-	return variants;
 }
 
 function isEqualOrDescendant(root: string, candidate: string): boolean {
