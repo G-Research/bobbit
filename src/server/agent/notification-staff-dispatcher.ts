@@ -249,13 +249,13 @@ export class NotificationStaffDispatcher {
 				this.aborters.delete(id);
 			}
 			const claimed = store.claimDue(this.clock.now(), LEASE_MS, BATCH_SIZE);
-			for (const row of claimed) this.deliver(store, row);
+			for (const row of claimed) this.deliverClaim(store, row);
 		} catch {
 			this.diagnostic({ code: "OUTBOX_RECONCILE_FAILED", projectId });
 		}
 	}
 
-	private deliver(store: NotificationDeliveryStore, row: NotificationDeliveryRow): void {
+	private deliverClaim(store: NotificationDeliveryStore, row: NotificationDeliveryRow): void {
 		const leaseId = row.leaseId!;
 		const aborter = new AbortController();
 		this.aborters.set(row.deliveryId, aborter);
