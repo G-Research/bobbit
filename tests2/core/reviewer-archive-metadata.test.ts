@@ -176,7 +176,7 @@ describe("reviewer archive metadata persistence", () => {
 		assert.match(archiveEndpoint, /preserveRemoteBranchEvidence = g\.team === true/,
 			"durable team mode must preserve remote branch evidence after reconciliation removes live/team rows");
 		assert.match(archiveEndpoint, /sessionStore\.getLive\(\)\.some\(\(session\) => session\.teamGoalId === g\.id\)/);
-		assert.match(archiveEndpoint, /archivedGoal\?\.repoPath && !preserveRemoteBranchEvidence/);
+		assert.match(archiveEndpoint, /archivedGoal\?\.repoPath && !archivedGoal\.worktreeOwnerSessionId && !preserveRemoteBranchEvidence/);
 	});
 
 	it("uses only SessionManager-backed LLM review execution", () => {
