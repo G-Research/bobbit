@@ -134,6 +134,163 @@ test.describe("editable proposals — REST API", () => {
 		}
 	});
 
+	test("invalid goal candidate fields are rejected before first persistence", async ({ gateway }) => {
+		const sid = await createSession();
+		const fp = proposalPath(gateway.bobbitDir, sid, "goal");
+		const cases: Array<{ name: string; overrides: Record<string, unknown>; code: string }> = [
+			{ name: "title bound", overrides: { title: "x".repeat(29) }, code: "TITLE_TOO_LONG" },
+			{ name: "spec bound", overrides: { spec: "x".repeat(20_001) }, code: "SPEC_TOO_LONG" },
+			{
+				name: "malformed inline workflow",
+				overrides: { workflow: undefined, inlineWorkflow: { id: "bad", name: "Bad", gates: [{ id: "one", name: "One", dependsOn: ["missing"], verify: [] }] } },
+				code: "WORKFLOW_INVALID",
+			},
+			{
+				name: "inline role contract",
+				overrides: { inlineRoles: { reviewer: { name: "other", label: "Reviewer", promptTemplate: "Review" } } },
+				code: "INLINE_ROLES_INVALID",
+			},
+			{ name: "missing parent", overrides: { parentGoalId: "missing-parent" }, code: "PARENT_NOT_FOUND" },
+			{ name: "metadata shape", overrides: { metadata: [] }, code: "METADATA_INVALID" },
+			{ name: "concurrency bound", overrides: { maxConcurrentChildren: 9 }, code: "MAX_CONCURRENT_CHILDREN_INVALID" },
+			{ name: "divergence policy", overrides: { divergencePolicy: "free" }, code: "DIVERGENCE_POLICY_INVALID" },
+		];
+		try {
+			for (const entry of cases) {
+				const response = await apiFetch(`/api/sessions/${sid}/proposal/goal/seed`, {
+					method: "POST",
+					body: JSON.stringify({ args: {
+						title: "Invalid candidate",
+						spec: "Invalid candidate must not persist.",
+						workflow: "feature",
+						...entry.overrides,
+					} }),
+				});
+				const text = await response.text();
+				expect(response.status, `${entry.name}: ${text}`).toBeGreaterThanOrEqual(400);
+				expect(JSON.parse(text), entry.name).toMatchObject({ ok: false, code: entry.code });
+				expect(fs.existsSync(fp), `${entry.name} must not create a live draft`).toBe(false);
+				expect(latestProposalRevision(gateway.bobbitDir, sid, "goal"), `${entry.name} must not advance revision`).toBe(0);
+			}
+		} finally {
+			await deleteSession(sid);
+		}
+	});
+
+	test("goal seed accepts omitted cwd and a valid project subdirectory", async ({ gateway }) => {
+		const sid = await createSession();
+		try {
+			const session = gateway.sessionManager.getSession(sid);
+			const registry = gateway.sessionManager.getProjectContextManager().getRegistry();
+			const projectRoot = registry.get(session.projectId)?.rootPath as string;
+			expect(projectRoot).toBeTruthy();
+
+			const omitted = await apiFetch(`/api/sessions/${sid}/proposal/goal/seed`, {
+				method: "POST",
+				body: JSON.stringify({ args: {
+					title: "Default cwd",
+					spec: "Omitted cwd resolves to the selected project.",
+					workflow: "feature",
+				} }),
+			});
+			expect(omitted.status, await omitted.clone().text()).toBe(200);
+
+			const subdirectory = path.join(projectRoot, "proposal-valid-subdirectory");
+			fs.mkdirSync(subdirectory, { recursive: true });
+			const nested = await apiFetch(`/api/sessions/${sid}/proposal/goal/seed`, {
+				method: "POST",
+				body: JSON.stringify({ args: {
+					title: "Nested cwd",
+					spec: "A project subdirectory remains a valid goal cwd.",
+					workflow: "feature",
+					cwd: subdirectory,
+				} }),
+			});
+			expect(nested.status, await nested.clone().text()).toBe(200);
+			expect(fs.readFileSync(proposalPath(gateway.bobbitDir, sid, "goal"), "utf8")).toContain("proposal-valid-subdirectory");
+		} finally {
+			await deleteSession(sid);
+		}
+	});
+
+	test("goal edit rejects an outside cwd before changing live bytes or revision", async ({ gateway }) => {
+		const sid = await createSession();
+		const fp = proposalPath(gateway.bobbitDir, sid, "goal");
+		try {
+			const session = gateway.sessionManager.getSession(sid);
+			const registry = gateway.sessionManager.getProjectContextManager().getRegistry();
+			const projectRoot = registry.get(session.projectId)?.rootPath as string;
+			const seeded = await apiFetch(`/api/sessions/${sid}/proposal/goal/seed`, {
+				method: "POST",
+				body: JSON.stringify({ args: {
+					title: "Edit cwd guard",
+					spec: "Editing validated frontmatter is transactional.",
+					workflow: "feature",
+					cwd: projectRoot,
+				} }),
+			});
+			expect(seeded.status, await seeded.clone().text()).toBe(200);
+			const before = fs.readFileSync(fp, "utf8");
+			const beforeRevision = latestProposalRevision(gateway.bobbitDir, sid, "goal");
+			const cwdLine = before.match(/^cwd:.*$/m)?.[0];
+			expect(cwdLine).toBeTruthy();
+			const outsideCwd = path.join(gateway.bobbitDir, "outside-edit-cwd", sid);
+
+			const edited = await apiFetch(`/api/sessions/${sid}/proposal/goal/edit`, {
+				method: "POST",
+				body: JSON.stringify({ old_text: cwdLine, new_text: `cwd: ${JSON.stringify(outsideCwd)}` }),
+			});
+			expect(edited.status, await edited.clone().text()).toBe(422);
+			expect(await edited.json()).toMatchObject({ ok: false, code: "CWD_OUTSIDE_PROJECT" });
+			expect(fs.readFileSync(fp, "utf8")).toBe(before);
+			expect(latestProposalRevision(gateway.bobbitDir, sid, "goal")).toBe(beforeRevision);
+			expect(fs.existsSync(fp + ".tmp")).toBe(false);
+		} finally {
+			await deleteSession(sid);
+		}
+	});
+
+	test("goal restore rejects a now-invalid snapshot before changing live bytes or revision", async ({ gateway }) => {
+		const sid = await createSession();
+		const fp = proposalPath(gateway.bobbitDir, sid, "goal");
+		try {
+			const session = gateway.sessionManager.getSession(sid);
+			const registry = gateway.sessionManager.getProjectContextManager().getRegistry();
+			const projectRoot = registry.get(session.projectId)?.rootPath as string;
+			for (const [title, cwd] of [
+				["Restore baseline", projectRoot],
+				["Restore live", path.join(projectRoot, "restore-live")],
+			]) {
+				const seeded = await apiFetch(`/api/sessions/${sid}/proposal/goal/seed`, {
+					method: "POST",
+					body: JSON.stringify({ args: { title, spec: "Restore validation fixture.", workflow: "feature", cwd } }),
+				});
+				expect(seeded.status, await seeded.clone().text()).toBe(200);
+			}
+			const liveBefore = fs.readFileSync(fp, "utf8");
+			const revisionBefore = latestProposalRevision(gateway.bobbitDir, sid, "goal");
+			expect(revisionBefore).toBeGreaterThanOrEqual(2);
+			const historyPath = path.join(path.dirname(fp), "goal.history", "1.md");
+			const snapshot = fs.readFileSync(historyPath, "utf8");
+			const cwdLine = snapshot.match(/^cwd:.*$/m)?.[0];
+			expect(cwdLine).toBeTruthy();
+			const outsideCwd = path.join(gateway.bobbitDir, "outside-restore-cwd", sid);
+			fs.writeFileSync(historyPath, snapshot.replace(cwdLine!, `cwd: ${JSON.stringify(outsideCwd)}`));
+
+			const restored = await apiFetch(`/api/sessions/${sid}/proposal/goal/restore`, {
+				method: "POST",
+				body: JSON.stringify({ rev: 1 }),
+			});
+			expect(restored.status, await restored.clone().text()).toBe(422);
+			expect(await restored.json()).toMatchObject({ ok: false, code: "CWD_OUTSIDE_PROJECT" });
+			expect(fs.readFileSync(fp, "utf8")).toBe(liveBefore);
+			expect(latestProposalRevision(gateway.bobbitDir, sid, "goal")).toBe(revisionBefore);
+			expect(fs.existsSync(fp + ".tmp")).toBe(false);
+		} finally {
+			await deleteSession(sid);
+		}
+	});
+
 	test("seed writes a goal draft on disk; GET returns markdown body", async ({ gateway }) => {
 		const seedResp = await apiFetch(`/api/sessions/${sessionId}/proposal/goal/seed`, {
 			method: "POST",

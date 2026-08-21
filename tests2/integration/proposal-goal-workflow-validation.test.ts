@@ -170,7 +170,7 @@ test.describe("goal proposal — workflow validation @smoke", () => {
 
 	test("valid inlineWorkflow plus stale workflow → 200 without UNKNOWN_WORKFLOW", async () => {
 		const response = await seedGoal(sessionId, {
-			title: "Inline Plus Stale Workflow Goal",
+			title: "Inline Plus Stale",
 			spec: "body\n",
 			workflow: "stale-workflow",
 			inlineWorkflow: INLINE_WORKFLOW,
@@ -200,7 +200,7 @@ test.describe("goal proposal — workflow validation @smoke", () => {
 
 	test("inlineWorkflow options reject names that are not optional in the inline snapshot", async () => {
 		const response = await seedGoal(sessionId, {
-			title: "Inline Invalid Optional Step Goal",
+			title: "Inline Invalid Option",
 			spec: "body\n",
 			inlineWorkflow: INLINE_WORKFLOW,
 			options: "QA testing",
