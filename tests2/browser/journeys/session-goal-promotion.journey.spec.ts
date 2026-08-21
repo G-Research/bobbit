@@ -162,10 +162,20 @@ test.describe("Journey: Current-session goal promotion", () => {
 
 			const newMode = page.locator("[data-testid='goal-form-worktree-new']");
 			const currentMode = page.locator("[data-testid='goal-form-worktree-current-session']");
+			const worktreeSelector = page.locator("[data-testid='goal-form-worktree-mode']");
 			await expect(newMode).toBeChecked();
 			await expect(currentMode).toBeEnabled({ timeout: 20_000 });
-			await currentMode.locator("xpath=..").click();
+			await worktreeSelector.locator("summary").click();
+			const newOption = page.locator("[data-testid='goal-form-worktree-option-new']");
+			const currentOption = page.locator("[data-testid='goal-form-worktree-option-current-session']");
+			await expect(newOption).toBeVisible();
+			await expect(newOption).toContainText("Create a dedicated branch and isolated checkout");
+			await expect(currentOption).toContainText(before.branch);
+			await expect(currentOption).toContainText(before.worktreePath);
+			await currentOption.click();
+			await expect(worktreeSelector).not.toHaveAttribute("open", "");
 			await expect(currentMode).toBeChecked();
+			await expect(page.locator("[data-testid='goal-form-worktree-summary']")).toContainText("Current session");
 			await expect(page.locator("[data-testid='goal-form-worktree-branch']")).toHaveText(before.branch);
 			await expect(page.locator("[data-testid='goal-form-worktree-path']")).toHaveText(before.worktreePath);
 
@@ -275,6 +285,9 @@ test.describe("Journey: Current-session goal promotion", () => {
 			await openSeededProposal(page, source.id);
 			const current = page.locator("[data-testid='goal-form-worktree-current-session']");
 			await expect(current).toBeDisabled({ timeout: 20_000 });
+			await page.locator("[data-testid='goal-form-worktree-summary']").click();
+			await expect(page.locator("[data-testid='goal-form-worktree-option-current-session']")).toBeVisible();
+			await expect(page.locator("[data-testid='goal-form-worktree-option-current-session']")).toBeDisabled();
 			await expect(page.locator("[data-testid='goal-form-worktree-current-unavailable']")).toContainText(/.+/);
 			await expect(page.locator("[data-testid='goal-form-worktree-new']")).toBeChecked();
 			await expect(page.locator("[data-testid='proposal-primary-submit'] button")).toBeEnabled();

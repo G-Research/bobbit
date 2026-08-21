@@ -1306,6 +1306,31 @@ function renderGoalForm(config: GoalFormConfig) {
 
 	const createBusy = !!config.saving;
 	const createDisabled = (config.createDisabled ?? !config.title.trim()) || createBusy || !!config.streaming || noWorkflows || workflowProblem || currentUnavailable;
+	const closeWorktreeModeMenu = (target: EventTarget | null, restoreFocus = false) => {
+		const details = target instanceof Element ? target.closest("details") : null;
+		details?.removeAttribute("open");
+		if (restoreFocus) (details?.querySelector("summary") as HTMLElement | null)?.focus();
+	};
+	const selectWorktreeMode = (event: Event, mode: GoalWorktreeMode) => {
+		closeWorktreeModeMenu(event.currentTarget);
+		if (mode !== worktreeMode) config.onWorktreeModeChange?.(mode);
+	};
+	const handleWorktreeModeMenuKeydown = (event: KeyboardEvent) => {
+		if (event.key === "Escape") {
+			event.preventDefault();
+			closeWorktreeModeMenu(event.currentTarget, true);
+			return;
+		}
+		if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+		const menu = event.currentTarget as HTMLElement;
+		const options = [...menu.querySelectorAll<HTMLButtonElement>("button[role='option']:not(:disabled)")];
+		if (options.length === 0) return;
+		const currentIndex = options.indexOf(document.activeElement as HTMLButtonElement);
+		const offset = event.key === "ArrowDown" ? 1 : -1;
+		const nextIndex = currentIndex < 0 ? (offset > 0 ? 0 : options.length - 1) : (currentIndex + offset + options.length) % options.length;
+		event.preventDefault();
+		options[nextIndex].focus();
+	};
 
 	queueMicrotask(() => {
 		reconcileFollowTail(goalSpecPreviewRef.value);
@@ -1383,60 +1408,87 @@ function renderGoalForm(config: GoalFormConfig) {
 				` : ""}
 			</div>
 			${linkedProject ? html`
-				<div class="flex items-start gap-2 min-w-0">
-					<span class="${lblCls} w-20 md:w-16 mt-2" id="goal-worktree-label">Worktree</span>
-					<div class="flex-1 min-w-0 flex flex-col gap-1.5">
-						<div class="flex flex-wrap items-center gap-2 min-w-0">
-							<div
-								class="inline-flex rounded-md border border-border overflow-hidden bg-background"
-								role="radiogroup"
-								aria-labelledby="goal-worktree-label"
-								aria-describedby="goal-worktree-description goal-worktree-coordinates goal-worktree-reason"
-								data-testid="goal-form-worktree-mode"
+				<div class="flex items-center gap-2 min-w-0">
+					<span class="${lblCls} w-20 md:w-16" id="goal-worktree-label">Worktree</span>
+					<details class="group relative flex-1 min-w-0" data-testid="goal-form-worktree-mode">
+						<input class="sr-only" type="radio" name="goal-worktree-mode" value="new-worktree"
+							.checked=${!currentMode}
+							?disabled=${createBusy}
+							data-testid="goal-form-worktree-new"
+							@change=${(event: Event) => selectWorktreeMode(event, "new-worktree")} />
+						<input class="sr-only" type="radio" name="goal-worktree-mode" value="current-session"
+							.checked=${currentMode}
+							?disabled=${createBusy || !promotion?.eligible || !!promotion?.loading}
+							data-testid="goal-form-worktree-current-session"
+							@change=${(event: Event) => selectWorktreeMode(event, "current-session")} />
+						<summary
+							class="list-none h-9 px-2.5 rounded-md border border-border bg-background hover:bg-secondary flex items-center gap-2 cursor-pointer select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [&::-webkit-details-marker]:hidden"
+							id="goal-worktree-summary"
+							aria-haspopup="listbox"
+							aria-controls="goal-worktree-options"
+							data-testid="goal-form-worktree-summary"
+							@click=${(event: Event) => { if (createBusy) event.preventDefault(); }}
+						>
+							<svg class="w-4 h-4 shrink-0 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 3v12M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm0-12c6 0 6 6 12 6v-3m0 3-3-3m3 3-3 3"/></svg>
+							<span class="min-w-0 flex items-baseline gap-1.5 truncate">
+								<strong class="text-xs font-medium shrink-0">${currentMode ? "Current session" : "New worktree"}</strong>
+								<span class="text-[10px] text-muted-foreground">—</span>
+								<span class="text-[10px] text-muted-foreground truncate">${currentMode ? (currentUnavailable ? "currently unavailable" : "keep this checkout and transcript") : "isolated branch and checkout"}</span>
+							</span>
+							<svg class="w-3.5 h-3.5 ml-auto shrink-0 text-muted-foreground transition-transform group-open:rotate-180" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+						</summary>
+						<div
+							class="absolute z-50 top-full left-0 right-0 mt-1 p-1 rounded-md border border-border bg-popover text-popover-foreground shadow-lg"
+							id="goal-worktree-options"
+							role="listbox"
+							aria-labelledby="goal-worktree-label"
+							@keydown=${handleWorktreeModeMenuKeydown}
+						>
+							<button
+								type="button"
+								class="w-full grid grid-cols-[14px_minmax(0,1fr)_14px] gap-2 items-start rounded px-2.5 py-2 text-left hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:bg-accent ${!currentMode ? "bg-accent/50" : ""}"
+								role="option"
+								aria-selected=${!currentMode ? "true" : "false"}
+								data-testid="goal-form-worktree-option-new"
+								?disabled=${createBusy}
+								@click=${(event: Event) => selectWorktreeMode(event, "new-worktree")}
 							>
-								<label class="relative inline-flex items-center justify-center min-w-[126px] h-9 px-3 text-xs font-medium cursor-pointer ${!currentMode ? "bg-primary text-primary-foreground" : "bg-background text-muted-foreground hover:bg-secondary hover:text-foreground"}">
-									<input class="absolute w-px h-px [clip-path:inset(50%)]" type="radio" name="goal-worktree-mode" value="new-worktree"
-										.checked=${!currentMode}
-										?disabled=${createBusy}
-										data-testid="goal-form-worktree-new"
-										@change=${() => config.onWorktreeModeChange?.("new-worktree")} />
-									<span>New worktree</span>
-								</label>
-								<label aria-disabled=${promotion?.eligible && !promotion.loading ? "false" : "true"}
-									class="relative inline-flex items-center justify-center min-w-[126px] h-9 px-3 border-l border-border text-xs font-medium ${currentMode ? "bg-primary text-primary-foreground" : promotion?.eligible && !promotion.loading ? "bg-background text-muted-foreground hover:bg-secondary hover:text-foreground cursor-pointer" : "bg-muted text-muted-foreground opacity-70 cursor-not-allowed"}">
-									<input class="absolute w-px h-px [clip-path:inset(50%)]" type="radio" name="goal-worktree-mode" value="current-session"
-										.checked=${currentMode}
-										?disabled=${createBusy || !promotion?.eligible || !!promotion?.loading}
-										data-testid="goal-form-worktree-current-session"
-										@change=${() => config.onWorktreeModeChange?.("current-session")} />
-									<span>Current session</span>
-								</label>
-							</div>
-							<span class="text-[11px] text-muted-foreground truncate"><strong class="font-medium text-foreground/80">${linkedProject.name}</strong></span>
+								<span class="w-3 h-3 mt-0.5 rounded-full border ${!currentMode ? "border-[3px] border-primary" : "border-muted-foreground"}" aria-hidden="true"></span>
+								<span class="min-w-0">
+									<strong class="block text-xs font-medium mb-0.5">New worktree</strong>
+									<span class="block text-[10px] leading-snug text-muted-foreground mb-1">Create a dedicated branch and isolated checkout for this goal.${componentSummary?.multiRepo ? ` This creates ${componentSummary.componentCount} worktrees across ${componentSummary.repoCount} repos.` : ""}</span>
+									<span class="grid grid-cols-[38px_minmax(0,1fr)] gap-x-2 gap-y-0.5 text-[9px] leading-snug">
+										<span class="text-muted-foreground">Branch</span><span class="font-mono truncate">${selectedBranch}</span>
+										<span class="text-muted-foreground">Path</span><span class="font-mono truncate">${selectedWorktreePath}</span>
+									</span>
+								</span>
+								${!currentMode ? html`<svg class="w-3.5 h-3.5 text-primary" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>` : html`<span></span>`}
+							</button>
+							<button
+								type="button"
+								class="w-full grid grid-cols-[14px_minmax(0,1fr)_14px] gap-2 items-start rounded px-2.5 py-2 text-left hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:bg-accent disabled:opacity-55 disabled:cursor-not-allowed disabled:hover:bg-transparent ${currentMode ? "bg-accent/50" : ""}"
+								role="option"
+								aria-selected=${currentMode ? "true" : "false"}
+								aria-describedby="goal-worktree-reason"
+								data-testid="goal-form-worktree-option-current-session"
+								?disabled=${createBusy || !promotion?.eligible || !!promotion?.loading}
+								@click=${(event: Event) => selectWorktreeMode(event, "current-session")}
+							>
+								<span class="w-3 h-3 mt-0.5 rounded-full border ${currentMode ? "border-[3px] border-primary" : "border-muted-foreground"}" aria-hidden="true"></span>
+								<span class="min-w-0">
+									<strong class="block text-xs font-medium mb-0.5">Current session</strong>
+									<span class="block text-[10px] leading-snug text-muted-foreground mb-1">Turn this session into the goal lead. Keep its checkout, transcript, and sandbox unchanged.</span>
+									<span class="grid grid-cols-[38px_minmax(0,1fr)] gap-x-2 gap-y-0.5 text-[9px] leading-snug">
+										<span class="text-muted-foreground">Branch</span><span class="font-mono truncate" data-testid="goal-form-worktree-branch">${promotion?.branch || "Unavailable"}</span>
+										<span class="text-muted-foreground">Path</span><span class="font-mono truncate" data-testid="goal-form-worktree-path">${promotion?.worktreePath || "Unavailable"}</span>
+										${promotion?.componentCount ? html`<span class="text-muted-foreground">Repos</span><span>${promotion.componentCount} component worktree${promotion.componentCount === 1 ? "" : "s"}</span>` : ""}
+									</span>
+									<span id="goal-worktree-reason" class="block mt-1 text-[10px] leading-snug text-muted-foreground" aria-live="polite" data-testid="goal-form-worktree-current-unavailable">${promotion?.loading ? "Checking whether this session can be reused…" : !promotion?.eligible ? (promotion?.reason || "Current session is unavailable for this proposal.") : ""}</span>
+								</span>
+								${currentMode ? html`<svg class="w-3.5 h-3.5 text-primary" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>` : html`<span></span>`}
+							</button>
 						</div>
-						<div class="rounded-md border border-border bg-muted/40 px-2.5 py-2 min-w-0" data-testid="goal-form-worktree-summary">
-							<p class="text-[11px] leading-snug text-foreground mb-1.5" id="goal-worktree-description">
-								${currentMode
-									? "This session becomes the goal lead in place. Its checkout, transcript, and sandbox stay unchanged."
-									: "Bobbit will create a dedicated branch and worktree for the goal."}
-							</p>
-							<dl class="grid grid-cols-[45px_minmax(0,1fr)] gap-x-2 gap-y-0.5 text-[10px] leading-snug" id="goal-worktree-coordinates">
-								<dt class="text-muted-foreground">Mode</dt><dd class="m-0 text-foreground">${currentMode ? "Current session" : "New worktree"}</dd>
-								<dt class="text-muted-foreground">Branch</dt><dd class="m-0 font-mono text-foreground break-all" data-testid="goal-form-worktree-branch">${selectedBranch}</dd>
-								<dt class="text-muted-foreground">Path</dt><dd class="m-0 font-mono text-foreground break-all" data-testid="goal-form-worktree-path">${selectedWorktreePath}</dd>
-								${currentMode && promotion?.componentCount ? html`<dt class="text-muted-foreground">Repos</dt><dd class="m-0 text-foreground">${promotion.componentCount} component worktree${promotion.componentCount === 1 ? "" : "s"}</dd>` : ""}
-							</dl>
-						</div>
-						<p id="goal-worktree-reason" class="text-[11px] leading-snug text-muted-foreground" aria-live="polite" data-testid="goal-form-worktree-current-unavailable">
-							${promotion?.loading ? "Checking whether this session can be reused…" : !promotion?.eligible ? (promotion?.reason || "Current session is unavailable for this proposal.") : ""}
-						</p>
-						${!currentMode && componentSummary?.multiRepo ? html`
-							<div class="text-[11px] text-muted-foreground text-amber-600 dark:text-amber-400" data-testid="multi-repo-indicator">
-								Will create ${componentSummary.componentCount} worktree${componentSummary.componentCount === 1 ? "" : "s"}
-								across ${componentSummary.repoCount} repo${componentSummary.repoCount === 1 ? "" : "s"}.
-							</div>
-						` : ""}
-					</div>
+					</details>
 				</div>
 			` : html`
 				<div class="flex items-start gap-2">

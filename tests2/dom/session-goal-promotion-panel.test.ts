@@ -172,7 +172,16 @@ describe("current-session goal proposal panel", () => {
 		await waitFor(() => expect(requests.some((r) => r.path === `/api/sessions/${OWNER}/proposal/goal/worktree-mode` && r.method === "GET")).toBe(true));
 		expect(requests.some((r) => r.path.includes(OTHER) && r.path.includes("worktree-mode"))).toBe(false);
 		expect((host.querySelector("[data-testid='goal-form-worktree-new']") as HTMLInputElement).checked).toBe(true);
-		expect(host.querySelector("[data-testid='goal-form-worktree-summary']")?.textContent).toContain("New worktree");
+		const summary = host.querySelector("[data-testid='goal-form-worktree-summary']");
+		expect(summary?.textContent).toContain("New worktree");
+		expect(summary?.textContent).toContain("isolated branch and checkout");
+		expect(summary?.textContent).not.toContain(project.name);
+		const newOption = host.querySelector("[data-testid='goal-form-worktree-option-new']");
+		expect(newOption?.textContent).toContain("Create a dedicated branch and isolated checkout");
+		expect(newOption?.textContent).toContain("Generated for this goal");
+		const currentOption = host.querySelector("[data-testid='goal-form-worktree-option-current-session']");
+		expect(currentOption?.textContent).toContain("Keep its checkout, transcript, and sandbox unchanged");
+		await waitFor(() => expect(currentOption?.textContent).toContain("/repo-wt/session-owner"));
 	});
 
 	it("persists Current session, renders authoritative coordinates, disables inherited controls, and accepts without coordinate authority", async () => {
@@ -182,7 +191,9 @@ describe("current-session goal proposal panel", () => {
 		current.click();
 		await waitFor(() => expect(requests.some((r) => r.method === "PUT" && r.path.endsWith("/proposal/goal/worktree-mode"))).toBe(true));
 		expect(requests.find((r) => r.method === "PUT")?.body).toEqual({ mode: "current-session" });
-		await waitFor(() => expect(host.querySelector("[data-testid='goal-form-worktree-branch']")?.textContent).toBe("session/proposal"));
+		await waitFor(() => expect(host.querySelector("[data-testid='goal-form-worktree-summary']")?.textContent).toContain("Current session"));
+		expect((host.querySelector("[data-testid='goal-form-worktree-current-session']") as HTMLInputElement).checked).toBe(true);
+		expect(host.querySelector("[data-testid='goal-form-worktree-branch']")?.textContent).toBe("session/proposal");
 		expect(host.querySelector("[data-testid='goal-form-worktree-path']")?.textContent).toBe("/repo-wt/session-owner");
 		const toggles = [...host.querySelectorAll<HTMLInputElement>("input.toggle-switch")];
 		expect(toggles.slice(0, 2).every((input) => input.disabled)).toBe(true);
