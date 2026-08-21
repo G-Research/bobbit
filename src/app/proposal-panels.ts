@@ -2061,7 +2061,7 @@ function goalPreviewPanel() {
 		const workflowId = inlineWorkflowField ? undefined : (assistantWorkflowId || undefined);
 		const sandboxed = _goalSandboxed;
 		const autoStartTeam = _goalAutoStartTeam;
-		const enabledOptionalSteps = _assistantEnabledOptionalSteps.length > 0 ? _assistantEnabledOptionalSteps : undefined;
+		const enabledOptionalSteps = _assistantEnabledOptionalSteps;
 		const currentSession = state.gatewaySessions.find(s => s.id === sessionId);
 		const reattemptGoalId = currentSession?.reattemptGoalId;
 		const parentGoalIdField = subgoalsEnabled ? (_proposalParentGoalId || undefined) : undefined;
@@ -4359,7 +4359,7 @@ function goalProposalPanel() {
 		const sandboxed = _proposalSandboxed;
 		const autoStartTeam = _proposalAutoStartTeam;
 		const workflowId = _proposalWorkflowId || undefined;
-		const enabledOptionalSteps = _proposalEnabledOptionalSteps.length > 0 ? _proposalEnabledOptionalSteps : undefined;
+		const enabledOptionalSteps = _proposalEnabledOptionalSteps;
 		const projectId = state.previewProjectId || undefined;
 
 		_proposalSaving = true;

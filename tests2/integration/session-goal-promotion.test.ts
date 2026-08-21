@@ -347,6 +347,63 @@ test.describe("current-session goal promotion API", () => {
 		expect(goal.workflow?.gates?.map((gate: any) => gate.id)).toEqual(["library-b-gate"]);
 	});
 
+	test("an explicit empty optional-step selection overrides the persisted draft options", async ({ gateway, scope }) => {
+		const projectRoot = path.join(gateway.bobbitDir, `promotion-options-override-${randomUUID()}`);
+		copyGitTemplate(projectRoot);
+		const project = await registerProject({
+			name: `promotion-options-override-${Date.now()}`,
+			rootPath: projectRoot,
+			components: [{ name: "app", repo: "." }],
+			workflows: {
+				"optional-flow": {
+					name: "Optional Flow",
+					description: "Acceptance-time optional-step selection.",
+					gates: [{
+						id: "implementation",
+						name: "Implementation",
+						depends_on: [],
+						verify: [{
+							name: "QA testing",
+							type: "command",
+							run: "echo qa",
+							optional: true,
+							optionalLabel: "Enable QA testing",
+						}],
+					}],
+				},
+			},
+		});
+		const ownerId = await createSession({ projectId: project.id, cwd: projectRoot });
+		await waitForSessionStatus(ownerId, "idle", 30_000);
+		const seeded = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/seed`, {
+			method: "POST",
+			body: JSON.stringify({ args: {
+				title: "Clear draft QA option",
+				spec: "Accept without the optional step selected in the persisted draft.",
+				workflow: "optional-flow",
+				options: "QA testing",
+				projectId: project.id,
+			} }),
+		});
+		expect(seeded.status, await seeded.clone().text()).toBe(200);
+		const selected = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/worktree-mode`, {
+			method: "PUT",
+			body: JSON.stringify({ mode: "current-session" }),
+		});
+		expect(selected.status, await selected.clone().text()).toBe(200);
+		expect(await (await apiFetch(`/api/sessions/${ownerId}/proposal/goal`)).text()).toContain("options: QA testing");
+
+		const accepted = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
+			method: "POST",
+			body: JSON.stringify({ enabledOptionalSteps: [] }),
+		});
+		expect(accepted.status, await accepted.clone().text()).toBe(201);
+		const goal = await jsonResponse(accepted);
+		scope.trackGoal(goal.id);
+		expect(goal.workflowId).toBe("optional-flow");
+		expect(goal.enabledOptionalSteps ?? []).toEqual([]);
+	});
+
 	test("removes gates and goal after an exact reservation release, then permits a clean retry", async ({ gateway, scope }) => {
 		const { ownerId, context } = await createPromotionCandidate(gateway, "released-compensation");
 		const goalManager = context.goalManager as any;

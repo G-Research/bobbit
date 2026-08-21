@@ -50,6 +50,7 @@ async function createGitSession(worktree: boolean): Promise<GitSessionFixture> {
 		projectId = (await registerProject({
 			name: `session-goal-promotion-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
 			rootPath: repo,
+			components: [{ name: "app", repo: ".", config: { qa_start_command: "echo ready" } }],
 		})).id;
 		const response = await apiFetch("/api/sessions", {
 			method: "POST",
@@ -85,10 +86,20 @@ function sessionCapabilityHeaders(gateway: GatewayInfo, sessionId: string): Reco
 	return { "X-Bobbit-Session-Secret": secret };
 }
 
-async function seedGoalProposal(gateway: GatewayInfo, sessionId: string, projectId: string, title: string): Promise<void> {
+async function seedGoalProposal(
+	gateway: GatewayInfo,
+	sessionId: string,
+	projectId: string,
+	title: string,
+	selection?: { workflowId?: string; options?: string },
+): Promise<void> {
 	const workflowsBody = await responseJson(await apiFetch(`/api/workflows?projectId=${encodeURIComponent(projectId)}`));
 	const workflows = Array.isArray(workflowsBody) ? workflowsBody : workflowsBody.workflows;
 	expect(workflows?.length, "journey project needs a workflow").toBeGreaterThan(0);
+	const workflow = selection?.workflowId
+		? workflows.find((candidate: any) => candidate.id === selection.workflowId)
+		: workflows[0];
+	expect(workflow, `journey project needs workflow ${selection?.workflowId}`).toBeTruthy();
 	await responseJson(await apiFetch(`/api/sessions/${sessionId}/proposal/goal/seed`, {
 		method: "POST",
 		headers: sessionCapabilityHeaders(gateway, sessionId),
@@ -96,7 +107,8 @@ async function seedGoalProposal(gateway: GatewayInfo, sessionId: string, project
 			args: {
 				title,
 				spec: "Promote the exact proposal owner without replacing its checkout or transcript.",
-				workflow: workflows[0].id,
+				workflow: workflow.id,
+				...(selection?.options ? { options: selection.options } : {}),
 				projectId,
 			},
 		}),
@@ -164,8 +176,19 @@ test.describe("Journey: Current-session goal promotion", () => {
 			expect(before.branch).toBeTruthy();
 			expect(before.worktreePath).toBeTruthy();
 			const transcriptBefore = transcriptSnapshot(gateway, source.id);
-			await seedGoalProposal(gateway, source.id, source.projectId, `Promote browser session ${Date.now()}`);
+			await seedGoalProposal(
+				gateway,
+				source.id,
+				source.projectId,
+				`Promote browser session ${Date.now()}`,
+				{ workflowId: "feature", options: "QA testing" },
+			);
 			await openSeededProposal(page, source.id);
+
+			const qaLabel = page.locator(".goal-preview-panel label", { hasText: "Enable QA Testing" }).first();
+			const qaCheckbox = qaLabel.locator("input[type='checkbox'].toggle-switch");
+			await expect(qaCheckbox).toBeChecked({ timeout: 20_000 });
+			await expect(qaCheckbox).toBeEnabled();
 
 			const newMode = page.locator("[data-testid='goal-form-worktree-new']");
 			const currentMode = page.locator("[data-testid='goal-form-worktree-current-session']");
@@ -196,6 +219,9 @@ test.describe("Journey: Current-session goal promotion", () => {
 			await expect(page.locator("body[data-shortcuts-ready='1']")).toBeVisible({ timeout: 20_000 });
 			await expect(page.locator("[data-testid='goal-form-worktree-current-session']")).toBeChecked({ timeout: 20_000 });
 			await expect(page.locator("[data-testid='goal-form-worktree-path']")).toHaveText(before.worktreePath);
+			await expect(qaCheckbox).toBeChecked({ timeout: 20_000 });
+			await qaCheckbox.click();
+			await expect(qaCheckbox).not.toBeChecked();
 
 			await page.locator("[data-testid='proposal-primary-submit'] button").click();
 			const goal = await waitForGoalOwnedBy(source.id);
@@ -210,6 +236,7 @@ test.describe("Journey: Current-session goal promotion", () => {
 			expect(team.teamLeadSessionId).toBe(source.id);
 			expect(team.agents ?? []).toHaveLength(0);
 			expect(goal.state).toBe("in-progress");
+			expect(goal.enabledOptionalSteps ?? []).toEqual([]);
 			expect(transcriptSnapshot(gateway, source.id)).toEqual(transcriptBefore);
 
 			await restartGateway(gateway);

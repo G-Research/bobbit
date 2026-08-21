@@ -2152,7 +2152,7 @@ export async function acceptGoalProposalInCurrentSession(
 	try {
 		const body: Record<string, unknown> = { title, spec: opts.spec ?? "" };
 		if (opts.workflowId) body.workflowId = opts.workflowId;
-		if (opts.enabledOptionalSteps?.length) body.enabledOptionalSteps = opts.enabledOptionalSteps;
+		if (opts.enabledOptionalSteps !== undefined) body.enabledOptionalSteps = opts.enabledOptionalSteps;
 		if (opts.workflow !== undefined) body.workflow = opts.workflow;
 		if (opts.inlineRoles && Object.keys(opts.inlineRoles).length > 0) body.inlineRoles = opts.inlineRoles;
 		if (opts.subgoalsAllowed !== undefined) body.subgoalsAllowed = opts.subgoalsAllowed;
