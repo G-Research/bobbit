@@ -120,6 +120,9 @@ function installSyntheticContext(
 		taskStore: {
 			get: (id: string) => taskRecords.get(id),
 			put: (task: PersistedTask) => taskRecords.set(task.id, task),
+			putCommitted: async (task: PersistedTask, _facts: unknown) => {
+				taskRecords.set(task.id, task);
+			},
 			getAll: () => [...taskRecords.values()],
 			getByGoalId: (goalId: string) => [...taskRecords.values()].filter(task => task.goalId === goalId),
 			getBySessionId: (ownerId: string) => [...taskRecords.values()].filter(task => task.assignedSessionId === ownerId),

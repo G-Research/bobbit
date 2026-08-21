@@ -56,17 +56,17 @@ describe("runSubgoalStep — merge + archive flow", () => {
 	it("R-028: archiveGoalAfterMerge sets state=complete BEFORE archiving (stale-pointer invalidation rescue path)", async () => {
 		// Order is load-bearing: the archived snapshot must have
 		// state=complete on disk so the rescue-path tier-2 short-circuit fires.
-		// Wrap goalStore.update to log the state stamp; wrap the strict durable
+		// Wrap goalStore.updateStrict to log the state stamp; wrap the strict durable
 		// archive boundary to log publication. Assert state-complete < archive.
 		const fx = await buildFixture();
 		afterAll(() => fx.cleanup());
 
 		const storeCalls: string[] = [];
-		const origUpdate = fx.goalStore.update.bind(fx.goalStore);
+		const origUpdateStrict = fx.goalStore.updateStrict.bind(fx.goalStore);
 		const origArchiveStrict = fx.goalStore.archiveStrict.bind(fx.goalStore);
-		(fx.goalStore as any).update = (id: string, updates: any) => {
+		(fx.goalStore as any).updateStrict = async (id: string, updates: any) => {
 			if (updates && updates.state === "complete") storeCalls.push(`state-complete:${id}`);
-			return origUpdate(id, updates);
+			return await origUpdateStrict(id, updates);
 		};
 		(fx.goalStore as any).archiveStrict = async (id: string) => {
 			storeCalls.push(`archive-strict:${id}`);
