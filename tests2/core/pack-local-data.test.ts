@@ -325,6 +325,28 @@ describe("PackLocalDataResolver", () => {
 			},
 		);
 
+		it("canonicalizes a POSIX symlink or Windows junction before an absent managed-root suffix", () => {
+			const root = fixtureRoot();
+			const canonicalHeadquarters = path.join(root, "canonical-headquarters");
+			const linkedHeadquarters = path.join(root, "linked-headquarters");
+			fs.mkdirSync(canonicalHeadquarters);
+			fs.symlinkSync(
+				canonicalHeadquarters,
+				linkedHeadquarters,
+				process.platform === "win32" ? "junction" : "dir",
+			);
+			const managedRoot = path.join(linkedHeadquarters, "config", "market-packs");
+			const candidate = path.join(canonicalHeadquarters, "config", "market-packs", "performance");
+			const resolver = resolverFor(root, [
+				contribution("performance", relativeDeclaration(root, candidate)),
+			], () => [managedRoot]);
+
+			expect(fs.existsSync(path.join(canonicalHeadquarters, "config"))).toBe(false);
+			expect(() => resolver.resolveHostDirectory("project-1", "performance"))
+				.toThrowError(expect.objectContaining({ code: "unsafe_path" }));
+			expect(fs.existsSync(path.join(canonicalHeadquarters, "config"))).toBe(false);
+		});
+
 		it("allows a nearby non-overlapping directory", () => {
 			const root = fixtureRoot();
 			const managedRoot = path.join(root, "simulated-headquarters", "config", "market-packs");
