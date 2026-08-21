@@ -16063,25 +16063,17 @@ async function handleApiRoute(
 					}
 
 					const { candidate, coordinates, targetCtx } = fresh!;
-					let resolvedWorkflow = candidate.workflow;
-					let resolvedWorkflowId = candidate.workflowId;
-					if (candidate.seedDefaultWorkflows && targetCtx.workflowStore.getAll().length === 0) {
-						const defaults = persistCurrentDefaultGoalWorkflows(coordinates.projectId, targetCtx);
-						const persistedWorkflowId = resolvedWorkflowId ?? defaults[0]?.id;
-						resolvedWorkflow = persistedWorkflowId ? targetCtx.workflowStore.get(persistedWorkflowId) : undefined;
-						resolvedWorkflowId = resolvedWorkflow?.id ?? resolvedWorkflowId;
-					}
-					if (resolvedWorkflowId && !resolvedWorkflow) {
-						throw Object.assign(new Error(`Workflow "${resolvedWorkflowId}" not found`), { statusCode: 400, code: "WORKFLOW_NOT_FOUND" });
+					if (candidate.workflowId && !candidate.workflow) {
+						throw Object.assign(new Error(`Workflow "${candidate.workflowId}" not found`), { statusCode: 400, code: "WORKFLOW_NOT_FOUND" });
 					}
 				let goal: PersistedGoal | undefined;
 				let committed = false;
 				try {
 					goal = await targetCtx.goalManager.createGoal(candidate.title, coordinates.cwd, {
 						spec: candidate.spec,
-						workflowId: resolvedWorkflowId,
+						workflowId: candidate.workflowId,
 						workflowStore: targetCtx.workflowStore,
-						resolvedWorkflow,
+						resolvedWorkflow: candidate.workflow,
 						enabledOptionalSteps: candidate.enabledOptionalSteps,
 						projectId: coordinates.projectId,
 						inlineRoles: candidate.inlineRoles,
@@ -16113,6 +16105,18 @@ async function handleApiRoute(
 					// Runtime replacement is the commit point. Finalization is idempotent
 					// post-commit repair: failures retain the exact graph/session for retry.
 					committed = true;
+					// Generated defaults are convenience configuration, not promotion input:
+					// the goal already owns the validator's frozen snapshot. Persist only
+					// after commit and only while the live store is still empty, so a failed
+					// promotion cannot leak config and concurrent workflow edits win.
+					if (candidate.seedDefaultWorkflows && targetCtx.workflowStore.getAllIncludingHidden().length === 0) {
+						try {
+							const defaults = persistCurrentDefaultGoalWorkflows(coordinates.projectId, targetCtx);
+							console.log(`[promotion] Auto-seeded ${defaults.length} default workflows for project "${candidate.project.name || "project"}" after goal ${goal.id} committed`);
+						} catch (error) {
+							console.warn(`[promotion] Goal ${goal.id} committed but generated workflow defaults could not be persisted for project ${coordinates.projectId}:`, error);
+						}
+					}
 					await teamManager.finalizeAdoptedLead(goal.id);
 					retainPromotionReservation = false;
 					try {

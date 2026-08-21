@@ -219,7 +219,7 @@ test.describe("current-session goal promotion API", () => {
 		expect(manager.getPersistedSession(victimId)).toMatchObject({ role: "team-lead", goalId: goal.id, teamGoalId: goal.id });
 	});
 
-	test("promotes an omitted workflow selection with the first generated default", async ({ gateway }) => {
+	test("defers generated workflow persistence until promotion commits", async ({ gateway, scope }) => {
 		const projectRoot = path.join(gateway.bobbitDir, `promotion-default-${randomUUID()}`);
 		copyGitTemplate(projectRoot);
 		const project = await registerProject({
@@ -250,16 +250,71 @@ test.describe("current-session goal promotion API", () => {
 		});
 		expect(selected.status, await selected.clone().text()).toBe(200);
 
+		const draftPath = path.join(gateway.bobbitDir, "state", "proposal-drafts", ownerId, "goal.md");
+		const historyDir = path.join(gateway.bobbitDir, "state", "proposal-drafts", ownerId, "goal.history");
+		const revision = () => fs.existsSync(historyDir)
+			? fs.readdirSync(historyDir).reduce((max, file) => Math.max(max, Number.parseInt(file.match(/^(\d+)\./)?.[1] ?? "0", 10)), 0)
+			: 0;
+		const draftBefore = fs.readFileSync(draftPath, "utf8");
+		const revisionBefore = revision();
+		expect(revisionBefore).toBeGreaterThan(0);
+		const workflowsBefore = structuredClone(context.workflowStore.getAll());
+		const workflowConfigBefore = structuredClone(context.projectConfigStore.getWorkflows());
+		const goalsBefore = structuredClone(context.goalStore.getAll());
+		const tasksBefore = structuredClone(context.taskStore.getAll());
+		const gatesBefore = (context.gateStore as any).gates?.size ?? 0;
+		const sessionBefore = structuredClone(gateway.sessionManager.getPersistedSession(ownerId));
+		const goalManager = context.goalManager as any;
+		const sessionManager = gateway.sessionManager as any;
+		const originalCreateGoal = goalManager.createGoal;
+		const originalPromote = sessionManager.promoteToGoalLead;
+		let attemptedGoalId: string | undefined;
+		goalManager.createGoal = async function (...args: any[]) {
+			const goal = await originalCreateGoal.apply(this, args);
+			attemptedGoalId = goal.id;
+			return goal;
+		};
+		sessionManager.promoteToGoalLead = async () => {
+			throw new Error("forced generated-default promotion failure");
+		};
+
+		let failed: Response;
+		try {
+			failed = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
+				method: "POST",
+				body: JSON.stringify({}),
+			});
+		} finally {
+			goalManager.createGoal = originalCreateGoal;
+			sessionManager.promoteToGoalLead = originalPromote;
+		}
+		expect(failed!.status).toBe(400);
+		expect(await jsonResponse(failed!)).toEqual({ error: "forced generated-default promotion failure" });
+		expect(attemptedGoalId).toBeTruthy();
+		expect(context.workflowStore.getAll()).toEqual(workflowsBefore);
+		expect(context.projectConfigStore.getWorkflows()).toEqual(workflowConfigBefore);
+		expect(context.goalStore.getAll()).toEqual(goalsBefore);
+		expect(context.taskStore.getAll()).toEqual(tasksBefore);
+		expect((context.gateStore as any).gates?.size ?? 0).toBe(gatesBefore);
+		expect(context.gateStore.getGatesForGoal(attemptedGoalId!)).toEqual([]);
+		expect(gateway.teamManager.getTeamState(attemptedGoalId!)).toBeUndefined();
+		expect(gateway.sessionManager.getPersistedSession(ownerId)).toEqual(sessionBefore);
+		expect(fs.readFileSync(draftPath, "utf8")).toBe(draftBefore);
+		expect(revision()).toBe(revisionBefore);
+
 		const accepted = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
 			method: "POST",
 			body: JSON.stringify({}),
 		});
 		expect(accepted.status, await accepted.clone().text()).toBe(201);
 		const goal = await jsonResponse(accepted);
+		scope.trackGoal(goal.id);
 		const persistedWorkflows = context.workflowStore.getAll();
 		expect(persistedWorkflows.length).toBeGreaterThan(0);
-		expect(goal.workflowId).toBe(persistedWorkflows[0].id);
-		expect(goal.workflow?.id).toBe(persistedWorkflows[0].id);
+		const selectedWorkflow = persistedWorkflows.find((workflow: any) => workflow.id === goal.workflowId);
+		expect(selectedWorkflow).toBeTruthy();
+		expect(goal.workflow).toEqual(selectedWorkflow);
+		expect(context.projectConfigStore.getWorkflows()).not.toEqual(workflowConfigBefore);
 	});
 
 	test("revalidates a stale workflow against defaults when the live store becomes empty", async ({ gateway }) => {
