@@ -10,7 +10,10 @@ import type { Workflow } from "./workflow-store.js";
 import type { Role } from "./role-store.js";
 import { validateGoalProposalWorkflow } from "../proposals/goal-proposal-seed.js";
 
-export const MAX_GOAL_TITLE_LENGTH = 28;
+// Goal creation historically accepted descriptive titles without the shorter
+// agent-facing naming guidance. Keep that guidance advisory while bounding the
+// persisted/API value to prevent unbounded payloads.
+export const MAX_GOAL_TITLE_LENGTH = 256;
 export const MAX_GOAL_SPEC_LENGTH = 20_000;
 export const MAX_GOAL_STRUCTURED_BYTES = 256 * 1024;
 
@@ -74,7 +77,7 @@ function jsonSnapshot(value: unknown, label: string, code: string): { ok: true; 
 export function validateGoalCandidate(raw: RawGoalCandidate, context: GoalCandidateContext, deps: GoalCandidateDeps): GoalCandidateResult {
 	const title = typeof raw.title === "string" ? raw.title.trim() : "";
 	if (!title) return fail(400, "TITLE_REQUIRED", "title must be a non-empty string");
-	if (title.length > MAX_GOAL_TITLE_LENGTH) return fail(400, "TITLE_TOO_LONG", `title must be fewer than 29 characters`, { limit: MAX_GOAL_TITLE_LENGTH, actual: title.length });
+	if (title.length > MAX_GOAL_TITLE_LENGTH) return fail(400, "TITLE_TOO_LONG", `title exceeds the maximum length of ${MAX_GOAL_TITLE_LENGTH} characters`, { limit: MAX_GOAL_TITLE_LENGTH, actual: title.length });
 	const spec = raw.spec === undefined || raw.spec === null ? "" : raw.spec;
 	if (typeof spec !== "string") return fail(400, "SPEC_INVALID", "spec must be a string");
 	if (spec.length > MAX_GOAL_SPEC_LENGTH) return fail(400, "SPEC_TOO_LONG", `spec exceeds the maximum length of ${MAX_GOAL_SPEC_LENGTH} characters`, { limit: MAX_GOAL_SPEC_LENGTH, actual: spec.length });

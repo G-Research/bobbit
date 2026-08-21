@@ -22,6 +22,7 @@ import { apiFetch, createSession, deleteSession } from "./_e2e/e2e-setup.js";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { MAX_GOAL_TITLE_LENGTH } from "../../src/server/agent/goal-candidate-validator.js";
 
 let sessionId: string;
 
@@ -138,7 +139,7 @@ test.describe("editable proposals — REST API", () => {
 		const sid = await createSession();
 		const fp = proposalPath(gateway.bobbitDir, sid, "goal");
 		const cases: Array<{ name: string; overrides: Record<string, unknown>; code: string }> = [
-			{ name: "title bound", overrides: { title: "x".repeat(29) }, code: "TITLE_TOO_LONG" },
+			{ name: "title bound", overrides: { title: "x".repeat(MAX_GOAL_TITLE_LENGTH + 1) }, code: "TITLE_TOO_LONG" },
 			{ name: "spec bound", overrides: { spec: "x".repeat(20_001) }, code: "SPEC_TOO_LONG" },
 			{
 				name: "malformed inline workflow",

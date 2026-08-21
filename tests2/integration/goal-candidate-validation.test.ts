@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	MAX_GOAL_SPEC_LENGTH,
 	MAX_GOAL_STRUCTURED_BYTES,
+	MAX_GOAL_TITLE_LENGTH,
 	validateGoalCandidate,
 	type GoalCandidateDeps,
 	type GoalCandidateSource,
@@ -292,9 +293,16 @@ describe("canonical goal candidate — project, workflow, and structured fields"
 		expectCode(validate(overrides), code);
 	});
 
+	it("accepts legacy descriptive titles through the canonical bound", () => {
+		const title = "x".repeat(MAX_GOAL_TITLE_LENGTH);
+		const result = validate({ title });
+		expect(result.ok).toBe(true);
+		if (result.ok) expect(result.candidate.title).toBe(title);
+	});
+
 	it.each([
 		[{ title: "" }, "TITLE_REQUIRED"],
-		[{ title: "x".repeat(29) }, "TITLE_TOO_LONG"],
+		[{ title: "x".repeat(MAX_GOAL_TITLE_LENGTH + 1) }, "TITLE_TOO_LONG"],
 		[{ spec: 42 }, "SPEC_INVALID"],
 		[{ spec: "x".repeat(MAX_GOAL_SPEC_LENGTH + 1) }, "SPEC_TOO_LONG"],
 		[{ subgoalsAllowed: "yes" }, "SUBGOALS_ALLOWED_INVALID"],
