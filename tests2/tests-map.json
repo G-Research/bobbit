@@ -2,11 +2,11 @@
   "$schema": "./tests-map.schema (informal): { generatedBy, censusTotal, buckets, methods, v2Native[{path,reason,execution}], journeys, entries[{file,bucket,method,replacement,rationale,migrated?,v2Path?,execution?}] }",
   "generatedBy": "scripts/testing-v2/gen-inventory.mjs, preserving reconciled v2Path/v2Native ownership",
   "note": "Re-run `node scripts/testing-v2/gen-inventory.mjs` after census changes. Classification overrides live in this generator; execution ownership is derived by test-map-execution.mjs.",
-  "censusTotal": 1142,
+  "censusTotal": 1143,
   "buckets": {
     "daily": 68,
     "v2-browser": 216,
-    "v2-core": 512,
+    "v2-core": 513,
     "v2-dom": 144,
     "v2-integration": 202
   },
@@ -16,10 +16,19 @@
     "legacy-pending": 153,
     "port": 2,
     "relocate": 53,
-    "rewrite": 145,
+    "rewrite": 146,
     "vitest-e2e": 2
   },
   "v2Native": [
+    {
+      "path": "tests2/core/goal-candidate-validator.test.ts",
+      "reason": "Core coverage for reusable canonical inline-role validation, normalization, and malformed contract rejection.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
     {
       "path": "tests2/core/github-trusted-host-resolver.test.ts",
       "reason": "Core security and caching coverage for token-free gh-config GitHub host discovery, environment stripping, normalization, failure fallback, and single-flight refreshes.",

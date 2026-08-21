@@ -85,7 +85,7 @@ export type CwdOwnershipSource =
 	| { kind: "verification"; goalId: string };
 
 export type CwdValidationResult =
-	| { ok: true }
+	| { ok: true; cwd?: string }
 	| { ok: false; status: 422; code: "CWD_OUTSIDE_PROJECT"; error: string };
 
 function realOrResolved(input: string): string {
@@ -192,13 +192,14 @@ export function validateExecutionCwd(
 	source: CwdOwnershipSource,
 ): CwdValidationResult {
 	if (!cwd) return { ok: true };
+	const canonicalCwd = realOrResolved(cwd);
 	const project = registry.get(projectId);
 	if (!project) {
 		return { ok: false, status: 422, code: "CWD_OUTSIDE_PROJECT", error: `cwd cannot be validated for unknown project: ${projectId}` };
 	}
 
 	if (isHeadquartersProject(project)) {
-		if (isSameOrDescendant(project.rootPath, cwd)) return { ok: true };
+		if (isSameOrDescendant(project.rootPath, canonicalCwd)) return { ok: true, cwd: canonicalCwd };
 		return {
 			ok: false,
 			status: 422,
@@ -208,7 +209,7 @@ export function validateExecutionCwd(
 	}
 
 	if (project.id === SYSTEM_PROJECT_ID) {
-		if (isSameOrDescendant(bobbitDir(), cwd) || isSameOrDescendant(project.rootPath, cwd)) return { ok: true };
+		if (isSameOrDescendant(bobbitDir(), canonicalCwd) || isSameOrDescendant(project.rootPath, canonicalCwd)) return { ok: true, cwd: canonicalCwd };
 		return {
 			ok: false,
 			status: 422,
@@ -218,7 +219,7 @@ export function validateExecutionCwd(
 	}
 
 	if (project.id === HEADQUARTERS_PROJECT_ID) {
-		if (isSameOrDescendant(project.rootPath, cwd)) return { ok: true };
+		if (isSameOrDescendant(project.rootPath, canonicalCwd)) return { ok: true, cwd: canonicalCwd };
 		return {
 			ok: false,
 			status: 422,
@@ -227,13 +228,15 @@ export function validateExecutionCwd(
 		};
 	}
 
-	if (isSameOrDescendant(project.rootPath, cwd)) return { ok: true };
-	if (sourceAllowsOwnedCwd(project, projectContextManager, cwd, source)) return { ok: true };
+	if (isSameOrDescendant(project.rootPath, canonicalCwd)) return { ok: true, cwd: canonicalCwd };
+	if (sourceAllowsOwnedCwd(project, projectContextManager, canonicalCwd, source)) return { ok: true, cwd: canonicalCwd };
 
 	return {
 		ok: false,
 		status: 422,
 		code: "CWD_OUTSIDE_PROJECT",
-		error: "cwd must be inside the selected project or an owned Bobbit worktree",
+		error: source.kind === "user-input"
+			? "cwd must be inside the selected project"
+			: "cwd must be inside the selected project or the server-owned Bobbit worktree",
 	};
 }

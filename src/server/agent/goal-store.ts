@@ -7,6 +7,7 @@ import type Database from "better-sqlite3";
 import { normalizeWorkflow, type Workflow } from "./workflow-store.js";
 import { readDeletionTombstones, recordDeletionTombstone } from "./deletion-tombstones.js";
 import { CoalescedJsonWriter } from "./coalesced-json-writer.js";
+import { validateInlineRoles as validateInlineRoleDefinitions } from "./inline-role-validator.js";
 
 export type GoalState = "todo" | "in-progress" | "complete" | "shelved" | "blocked";
 
@@ -325,20 +326,8 @@ function validateWorkflow(value: unknown, label: string): void {
 }
 
 function validateInlineRoles(value: unknown, label: string): void {
-	if (!isRecord(value)) invalidGoal(label, "must be an object");
-	for (const [name, role] of Object.entries(value)) {
-		if (!isRecord(role) || typeof role.name !== "string" || role.name !== name
-			|| typeof role.label !== "string" || typeof role.promptTemplate !== "string") {
-			invalidGoal(`${label} role ${name}`, "must have matching name, label, and promptTemplate");
-		}
-		for (const field of ["accessory", "model", "thinkingLevel"] as const) {
-			if (role[field] !== undefined && typeof role[field] !== "string") invalidGoal(`${label} role ${name}`, `${field} must be a string`);
-		}
-		for (const field of ["createdAt", "updatedAt"] as const) {
-			if (role[field] !== undefined && !Number.isFinite(role[field])) invalidGoal(`${label} role ${name}`, `${field} must be finite`);
-		}
-		if (role.toolPolicies !== undefined) validateStringRecord(role.toolPolicies, `${label} role ${name} toolPolicies`);
-	}
+	const result = validateInlineRoleDefinitions(value);
+	if (!result.ok) invalidGoal(label, result.message);
 }
 
 function validateGoal(
