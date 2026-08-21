@@ -1886,7 +1886,7 @@
     },
     {
       "path": "tests2/core/bobbit-tool-credentials.test.ts",
-      "reason": "bobbit gateway tool suite: credential/URL resolution — env creds, state-file fallback, absent-creds (logs + no registration, no throw), baseUrl trailing-slash trimming.",
+      "reason": "bobbit gateway tool suite: credential/URL resolution, host-issued session-secret propagation without caller causation controls, state-file fallback, absent credentials, and baseUrl trimming.",
       "execution": {
         "runner": "vitest",
         "tier": "unit",

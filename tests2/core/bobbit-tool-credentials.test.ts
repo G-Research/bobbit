@@ -16,6 +16,7 @@ function clearCreds() {
 	delete process.env.BOBBIT_TOKEN;
 	delete process.env.BOBBIT_GATEWAY_URL;
 	delete process.env.BOBBIT_DIR;
+	delete process.env.BOBBIT_SESSION_SECRET;
 }
 
 afterEach(() => {
@@ -65,5 +66,82 @@ describe("bobbit extension — credential resolution", () => {
 		const calls = stubFetch();
 		await tools.get("bobbit_read")!.execute("id", { operation: "health" });
 		expect(calls[0].url).toBe("https://gw.test/api/health");
+	});
+
+	it("binds goal, task, gate, and settings mutations to the host-issued session secret", async () => {
+		clearCreds();
+		process.env.BOBBIT_TOKEN = "tok";
+		process.env.BOBBIT_GATEWAY_URL = "https://gw.test";
+		process.env.BOBBIT_SESSION_SECRET = "host-issued-secret";
+		const tools = loadBobbitTools();
+		const calls = stubFetch();
+		for (const toolName of ["bobbit_orchestrate", "bobbit_admin"]) {
+			const properties = tools.get(toolName)!.parameters?.properties ?? {};
+			expect(properties).not.toHaveProperty("rootCorrelationId");
+			expect(properties).not.toHaveProperty("causationDepth");
+			expect(properties).not.toHaveProperty("correlationId");
+		}
+		const forgedControls = {
+			rootCorrelationId: "caller-root",
+			causationDepth: 999,
+			correlationId: "caller-correlation",
+		};
+
+		await tools.get("bobbit_orchestrate")!.execute("id", {
+			operation: "update_goal",
+			goalId: "goal-1",
+			body: { title: "Renamed" },
+			...forgedControls,
+		});
+		await tools.get("bobbit_orchestrate")!.execute("id", {
+			operation: "transition_task",
+			taskId: "task-1",
+			state: "complete",
+			...forgedControls,
+		});
+		await tools.get("bobbit_orchestrate")!.execute("id", {
+			operation: "signal_gate",
+			goalId: "goal-1",
+			gateId: "gate-1",
+			body: { content: "ready" },
+			...forgedControls,
+		});
+		await tools.get("bobbit_admin")!.execute("id", {
+			operation: "update_project_config",
+			projectId: "project-1",
+			config: { sandbox: "docker" },
+			...forgedControls,
+		});
+
+		expect(calls).toHaveLength(4);
+		expect(calls.map((call) => call.body)).toEqual([
+			{ title: "Renamed" },
+			{ state: "complete" },
+			{ content: "ready" },
+			{ sandbox: "docker" },
+		]);
+		for (const call of calls) {
+			expect(call.headers["X-Bobbit-Session-Secret"]).toBe("host-issued-secret");
+			expect(call.headers).not.toHaveProperty("X-Bobbit-Correlation-Id");
+			expect(call.headers).not.toHaveProperty("X-Bobbit-Causation-Depth");
+			expect(call.headers).not.toHaveProperty("X-Bobbit-Causation-Root");
+		}
+	});
+
+	it("preserves external no-secret requests without a session identity header", async () => {
+		clearCreds();
+		process.env.BOBBIT_TOKEN = "tok";
+		process.env.BOBBIT_GATEWAY_URL = "https://gw.test";
+		const tools = loadBobbitTools();
+		const calls = stubFetch();
+
+		await tools.get("bobbit_admin")!.execute("id", {
+			operation: "update_project_config",
+			projectId: "project-1",
+			config: { sandbox: "docker" },
+		});
+
+		expect(calls).toHaveLength(1);
+		expect(calls[0].headers).not.toHaveProperty("X-Bobbit-Session-Secret");
 	});
 });
