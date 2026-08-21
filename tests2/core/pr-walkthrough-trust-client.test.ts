@@ -9,9 +9,9 @@
  *
  * Pins the contract:
  *   - default host (github.com) → trusted with NO prompt / NO network.
- *   - already-managed enterprise host → trusted, NO prompt.
- *   - unknown host + accept → PUT persists, readback confirms → trusted.
- *   - unknown host + accept + PUT-ok + readback-FAILS → still trusted (trust the PUT).
+ *   - the server's effective decision trusts gh-configured hosts with NO prompt/PUT.
+ *   - unknown host + accept → PUT persists → trusted.
+ *   - false, malformed, or unavailable effective decisions fail closed to prompt.
  *   - unknown host + decline → NOT trusted, NO PUT.
  *   - PUT failure aborts (returns false).
  *   - callSpawnRouteWithTrust: HOST_NOT_TRUSTED → accept → second callRoute carries
@@ -67,21 +67,22 @@ describe("ensureGithubHostTrusted", () => {
 		assert.equal(calls.length, 0, "no /api/preferences call for a baseline host");
 	});
 
-	it("trusts an already-managed enterprise host without prompting", async () => {
-		const { fetch, calls } = scriptedFetch([jsonResponse({ githubTrustedHosts: ["ghe.example.com"] })]);
+	it("trusts a gh-configured enterprise host from the server decision without prompting or writing preferences", async () => {
+		const { fetch, calls } = scriptedFetch([jsonResponse({ host: "ghe.example.com", trusted: true })]);
 		let prompted = false;
-		const ok = await ensureGithubHostTrusted("ghe.example.com", { fetch, confirm: async () => { prompted = true; return true; } });
+		const ok = await ensureGithubHostTrusted("GHE.Example.com.", { fetch, confirm: async () => { prompted = true; return true; } });
 		assert.equal(ok, true);
 		assert.equal(prompted, false);
-		assert.equal(calls.length, 1, "only the GET readback, no PUT");
+		assert.equal(calls.length, 1);
+		assert.equal(calls[0].path, "/api/github/trusted-hosts/check?host=ghe.example.com");
 		assert.equal(calls[0].init?.method ?? "GET", "GET");
 	});
 
-	it("persists + trusts an unknown host on accept, then confirms via readback", async () => {
+	it("persists + trusts an unknown host on accept", async () => {
 		const { fetch, calls } = scriptedFetch([
-			jsonResponse({ githubTrustedHosts: [] }),               // initial GET
-			jsonResponse({ ok: true }),                             // PUT
-			jsonResponse({ githubTrustedHosts: ["ghe.corp.net"] }), // readback GET
+			jsonResponse({ host: "ghe.corp.net", trusted: false }),
+			jsonResponse({ githubTrustedHosts: [] }),
+			jsonResponse({ ok: true }),
 		]);
 		let promptedWith = "";
 		const ok = await ensureGithubHostTrusted("ghe.corp.net", {
@@ -90,60 +91,63 @@ describe("ensureGithubHostTrusted", () => {
 		});
 		assert.equal(ok, true);
 		assert.equal(promptedWith, "Trust domain");
-		assert.deepEqual(putBodyHosts(calls[1]), ["ghe.corp.net"]);
+		assert.deepEqual(putBodyHosts(calls[2]), ["ghe.corp.net"]);
 		assert.equal(calls.length, 3);
 	});
 
 	it("appends to the existing managed list on the PUT (no clobber)", async () => {
 		const { fetch, calls } = scriptedFetch([
+			jsonResponse({ trusted: false }),
 			jsonResponse({ githubTrustedHosts: ["a.example.com"] }),
 			jsonResponse({ ok: true }),
-			jsonResponse({ githubTrustedHosts: ["a.example.com", "b.example.com"] }),
 		]);
 		const ok = await ensureGithubHostTrusted("b.example.com", { fetch, confirm: async () => true });
 		assert.equal(ok, true);
-		assert.deepEqual(putBodyHosts(calls[1]), ["a.example.com", "b.example.com"]);
-	});
-
-	it("trusts the PUT when the readback GET fails (design [medium] fix)", async () => {
-		const { fetch, calls } = scriptedFetch([
-			jsonResponse({ githubTrustedHosts: [] }),  // initial GET
-			jsonResponse({ ok: true }),                // PUT succeeds
-			new Error("network down"),                 // readback throws
-		]);
-		const ok = await ensureGithubHostTrusted("ghe.corp.net", { fetch, confirm: async () => true });
-		assert.equal(ok, true, "a readback failure after a successful PUT must NOT abort");
-		assert.equal(calls.length, 3);
+		assert.deepEqual(putBodyHosts(calls[2]), ["a.example.com", "b.example.com"]);
 	});
 
 	it("does not persist and returns false on decline", async () => {
-		const { fetch, calls } = scriptedFetch([jsonResponse({ githubTrustedHosts: [] })]);
+		const { fetch, calls } = scriptedFetch([
+			jsonResponse({ trusted: false }),
+			jsonResponse({ githubTrustedHosts: [] }),
+		]);
 		const ok = await ensureGithubHostTrusted("ghe.corp.net", { fetch, confirm: async () => false });
 		assert.equal(ok, false);
-		assert.equal(calls.length, 1, "no PUT after a decline");
-		assert.equal(calls[0].init?.method ?? "GET", "GET");
+		assert.equal(calls.length, 2, "no PUT after a decline");
 	});
 
 	it("aborts (false) when the PUT itself fails", async () => {
 		const { fetch, calls } = scriptedFetch([
+			jsonResponse({ trusted: false }),
 			jsonResponse({ githubTrustedHosts: [] }),
-			failedResponse(),  // PUT !ok
+			failedResponse(),
 		]);
 		const ok = await ensureGithubHostTrusted("ghe.corp.net", { fetch, confirm: async () => true });
 		assert.equal(ok, false);
-		assert.equal(calls.length, 2, "no readback after a failed PUT");
+		assert.equal(calls.length, 3);
 	});
 
-	it("still prompts (does not silently trust) when the initial GET throws", async () => {
+	it("still prompts when the effective-host lookup throws", async () => {
 		const { fetch } = scriptedFetch([
-			new Error("offline"),        // initial GET throws
-			jsonResponse({ ok: true }),  // PUT
-			jsonResponse({ githubTrustedHosts: ["ghe.corp.net"] }),
+			new Error("offline"),
+			jsonResponse({ githubTrustedHosts: [] }),
+			jsonResponse({ ok: true }),
 		]);
 		let prompted = false;
 		const ok = await ensureGithubHostTrusted("ghe.corp.net", { fetch, confirm: async () => { prompted = true; return true; } });
 		assert.equal(prompted, true);
 		assert.equal(ok, true);
+	});
+
+	it("still prompts for a malformed successful server decision", async () => {
+		const { fetch } = scriptedFetch([
+			jsonResponse({ trusted: "yes" }),
+			jsonResponse({ githubTrustedHosts: [] }),
+		]);
+		let prompted = false;
+		const ok = await ensureGithubHostTrusted("ghe.corp.net", { fetch, confirm: async () => { prompted = true; return false; } });
+		assert.equal(prompted, true);
+		assert.equal(ok, false);
 	});
 
 	it("returns false for an invalid hostname without any network", async () => {

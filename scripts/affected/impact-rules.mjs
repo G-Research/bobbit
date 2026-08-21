@@ -784,7 +784,7 @@ export const DYNAMIC_EXECUTABLE_CONSUMER_AUDIT = Object.freeze([
 	{
 		consumer: "tests2/core/tool-description-budget.test.ts",
 		operations: frozen([
-			declaredExecutableOperation("import-meta-glob", "\"../../defaults/tools/{agent,ask,bobbit,browser,html,images,inbox,mcp,proposals,review,shell,skills,tasks,team,web}/extension.ts\"", ["impact:builtin-tools"]),
+			declaredExecutableOperation("import-meta-glob", "\"../../defaults/tools/*/extension.ts\"", ["impact:builtin-tools"]),
 		]),
 	},
 	{
@@ -975,6 +975,14 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		]),
 	},
 	{
+		consumer: "tests2/integration/session-goal-promotion.test.ts",
+		allowReason: "isolated integration session worktree files created to prove staged and untracked content survives promotion and restart",
+		reads: frozen([
+			{ expression: "staged", count: 2 },
+			{ expression: "untracked", count: 2 },
+		]),
+	},
+	{
 		consumer: "tests2/integration/server-prebundle-runtime.test.ts",
 		allowReason: "isolated integration gateway, project, or harness-owned output",
 		reads: frozen([
@@ -1046,6 +1054,13 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		allowReason: "isolated integration gateway, project, or harness-owned output",
 		reads: frozen([
 			{ expression: "sharedProjectYamlPath()", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/integration/pr-walkthrough-api.test.ts",
+		allowReason: "test-owned temporary fake-gh invocation log",
+		reads: frozen([
+			{ expression: "fakeGh.logPath", count: 3 },
 		]),
 	},
 	{
@@ -1412,6 +1427,14 @@ export const UNRESOLVED_REPOSITORY_READ_AUDIT = Object.freeze([
 		reads: frozen([
 			{ expression: "promptPath!", count: 1 },
 			{ expression: "promptPath", count: 1 },
+		]),
+	},
+	{
+		consumer: "tests2/core/session-goal-promotion-proposal.test.ts",
+		allowReason: "test-owned proposal drafts copied between isolated temporary session directories",
+		reads: frozen([
+			{ expression: "proposalFilePath(stateDir, continuedId, \"goal\")", count: 1 },
+			{ expression: "proposalFilePath(stateDir, sourceId, \"goal\")", count: 1 },
 		]),
 	},
 	{

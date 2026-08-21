@@ -147,9 +147,10 @@ export function isValidOperationSchema(tool: McpToolDef): boolean {
 
 /**
  * Build the meta-tool input_schema. `operation` is constrained to an enum of
- * valid op names (preserving input order). `args` is an opaque object —
- * detailed schemas live in the per-server tool-docs file (fetched on demand
- * via `mcp_describe`).
+ * valid op names (preserving input order). `args` accepts either an opaque
+ * object or a JSON-encoded object string (some Completions models emit the
+ * latter); execute normalizes both. Detailed per-operation schemas live in
+ * the tool-docs file fetched via `mcp_describe`.
  *
  * If no ops are valid, the enum becomes `["__unavailable__"]` so the model
  * can still see a stub but cannot fabricate a working call.
@@ -162,7 +163,15 @@ export function buildMetaToolInputSchema(ops: McpToolDef[]): Record<string, unkn
 		required: ["operation", "args"],
 		properties: {
 			operation: { type: "string", enum: opNames },
-			args: { type: "object" },
+			// Bedrock rejects unconstrained Type.Any schemas. The meta-tool contract
+			// truthfully accepts both native object args and a JSON-encoded object
+			// string (emitted by some OpenAI-Completions models); execute normalizes.
+			args: {
+				anyOf: [
+					{ type: "object", additionalProperties: true },
+					{ type: "string" },
+				],
+			},
 		},
 	};
 }

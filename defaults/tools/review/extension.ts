@@ -44,24 +44,18 @@ const reviewFileSchema = Type.Union([
 	}, { additionalProperties: false }),
 ]);
 
-const reviewOpenSchema = Type.Union([
-	Type.Object({
-		...commonOpenProperties,
-		markdown: Type.String({ description: "Inline Markdown content." }),
-	}, { additionalProperties: false }),
-	Type.Object({
-		...commonOpenProperties,
-		file: Type.String({ description: "Path to a Markdown file on disk." }),
-	}, { additionalProperties: false }),
-	Type.Object({
-		...commonOpenProperties,
-		files: Type.Array(reviewFileSchema, {
-			minItems: 1,
-			maxItems: MAX_REVIEW_FILES,
-			description: "Ordered Markdown files belonging to this review.",
-		}),
-	}, { additionalProperties: false }),
-]);
+// Bedrock requires every tool's top-level input schema to be an object.
+// The runtime validator below keeps the three source modes mutually exclusive.
+const reviewOpenSchema = Type.Object({
+	...commonOpenProperties,
+	markdown: Type.Optional(Type.String({ description: "Inline Markdown content." })),
+	file: Type.Optional(Type.String({ description: "Path to a Markdown file on disk." })),
+	files: Type.Optional(Type.Array(reviewFileSchema, {
+		minItems: 1,
+		maxItems: MAX_REVIEW_FILES,
+		description: "Ordered Markdown files belonging to this review.",
+	})),
+}, { additionalProperties: false });
 
 type ReviewFileInput = { title?: string; markdown: string } | { title?: string; file: string };
 type ReviewOpenInput =

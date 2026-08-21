@@ -60,6 +60,7 @@ const GOAL_FRONTMATTER_KEYS = [
 	"divergencePolicy",  // "strict"|"balanced"|"autonomous" — root-only plan-change autonomy
 	"maxConcurrentChildren", // number [1,8] — root-only concurrent child-team cap
 	"metadata",          // Record<string, unknown> — arbitrary namespaced per-goal metadata (inherited by sub-goals)
+	"worktreeMode",      // human-owned proposal choice; intentionally absent from propose_goal's tool schema
 ] as const;
 
 /**
@@ -201,6 +202,10 @@ function validateGoalInlineFields(fields: Record<string, unknown>): ParseError |
 	const md = fields.metadata;
 	if (md !== undefined && md !== null && !isPlainObject(md)) {
 		return { ok: false, code: "STRUCTURAL_VALIDATION_FAILED", message: "metadata must be a plain object of namespaced key/value pairs" };
+	}
+	const worktreeMode = fields.worktreeMode;
+	if (worktreeMode !== undefined && worktreeMode !== "new-worktree" && worktreeMode !== "current-session") {
+		return { ok: false, code: "STRUCTURAL_VALIDATION_FAILED", message: "worktreeMode must be one of: new-worktree, current-session" };
 	}
 	return null;
 }

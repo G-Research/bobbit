@@ -21,6 +21,69 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/github-trusted-host-resolver.test.ts",
+      "reason": "Core security and caching coverage for token-free gh-config GitHub host discovery, environment stripping, normalization, failure fallback, and single-flight refreshes.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/session-goal-promotion-proposal.test.ts",
+      "reason": "Core coverage for legacy-default proposal compatibility, durable current-session selection, snapshots, archive continuation, validation, and server-owned coordinate authority.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/session-goal-promotion-eligibility.test.ts",
+      "reason": "Core policy coverage for current-session promotion eligibility, canonical coordinates, forbidden relationships, workspace conflicts, multi-repo fidelity, and sandbox reachability.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/session-goal-promotion-session-runtime.test.ts",
+      "reason": "Core runtime coverage for staged same-session role replacement, identity and sandbox continuity, exact rollback, and serialized idempotent promotion.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/session-goal-promotion-panel.test.ts",
+      "reason": "DOM coverage for the accessible New worktree and Current session selector, authoritative coordinate projection, unavailable reasons, and owner-scoped acceptance dispatch.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/integration/session-goal-promotion.test.ts",
+      "reason": "Integration coverage for owner-scoped worktree-mode routes, authority rejection, in-place acceptance, idempotency, coordinate continuity, and proposal cleanup.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/session-goal-promotion.journey.spec.ts",
+      "reason": "Browser journey for selecting Current session, accepting in place with the original session, reload continuity, unavailable reasons, safe archive, and unchanged new-worktree creation.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/integration/strict-update-body-routes.test.ts",
       "reason": "Regression contract for strict finite-shape update bodies: exact route allow-lists, accepted representative updates, unknown-key rejection, no mutation, goal policy guidance, and immutable staff sandboxing.",
       "execution": {
@@ -3335,6 +3398,10 @@
     },
     {
       "path": "tests2/browser/journeys/session-activity-restart.journey.spec.ts",
+      "type": "smoke-journey"
+    },
+    {
+      "path": "tests2/browser/journeys/session-goal-promotion.journey.spec.ts",
       "type": "smoke-journey"
     },
     {

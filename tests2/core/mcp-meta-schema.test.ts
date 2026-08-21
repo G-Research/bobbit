@@ -87,9 +87,12 @@ describe("buildMetaToolInputSchema", () => {
 		const schema = buildMetaToolInputSchema(ops);
 		assert.equal(schema.type, "object");
 		assert.deepEqual(schema.required, ["operation", "args"]);
-		const props = schema.properties as Record<string, { type: string; enum?: string[] }>;
+		const props = schema.properties as Record<string, { type?: string; enum?: string[]; anyOf?: unknown[] }>;
 		assert.deepEqual(props.operation.enum, ["alpha", "beta", "gamma"]);
-		assert.equal(props.args.type, "object");
+		assert.deepEqual(props.args.anyOf, [
+			{ type: "object", additionalProperties: true },
+			{ type: "string" },
+		]);
 	});
 
 	it("filters out invalid ops; only valid ones land in enum", () => {
