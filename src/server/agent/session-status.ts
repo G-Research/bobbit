@@ -21,11 +21,19 @@ import type { ServerMessage } from "../ws/protocol.js";
 import { isSocketSendable } from "../ws/socket-sendability.js";
 
 /** Subset of `SessionInfo` the helper actually touches. */
+export interface SessionStatusChange {
+	previousStatus: string;
+	status: string;
+	statusVersion: number;
+}
+
 export interface BroadcastableSession {
 	status: string;
 	statusVersion: number;
 	clients: Set<WebSocket>;
 	streamingStartedAt?: number;
+	/** Post-broadcast observer owned by the session lifecycle host. */
+	onStatusChanged?: (change: SessionStatusChange) => void;
 }
 
 /** Internal: send a single `session_status` frame to every OPEN client. */
@@ -49,6 +57,7 @@ export function broadcastStatus<S extends BroadcastableSession>(
 	status: S["status"],
 	extras?: { streamingStartedAt?: number; archivedAt?: number },
 ): void {
+	const previousStatus = session.status;
 	session.status = status;
 	session.statusVersion = (session.statusVersion ?? 0) + 1;
 	broadcastFrame(session.clients, {
@@ -58,4 +67,14 @@ export function broadcastStatus<S extends BroadcastableSession>(
 		...(extras?.streamingStartedAt ? { streamingStartedAt: extras.streamingStartedAt } : {}),
 		...(extras?.archivedAt ? { archivedAt: extras.archivedAt } : {}),
 	});
+	// The authoritative legacy frame is queued before observers see the fact.
+	// Same-status writes retain their compatibility version bump/frame but are
+	// not lifecycle transitions and therefore do not publish notifications.
+	if (previousStatus !== status && session.onStatusChanged) {
+		try {
+			session.onStatusChanged({ previousStatus, status, statusVersion: session.statusVersion });
+		} catch {
+			// Observational fanout cannot roll back or fail the status transition.
+		}
+	}
 }

@@ -433,6 +433,11 @@ export interface PipelineContext {
 	groupPolicyStore: ToolGroupPolicyStore | null;
 	configCascade: ConfigCascade | null;
 	lifecycleHub?: LifecycleHub;
+	/** Additive typed interceptor port. Its implementation composes legacy providers. */
+	hostInterceptors?: {
+		dispatch: (name: string, input: Record<string, unknown>, context: Record<string, unknown>) => Promise<any>;
+		hasAny?: (names: readonly string[], projectId?: string, goalId?: string) => boolean;
+	};
 	/**
 	 * Resolve the EFFECTIVE (ancestry-merged) per-goal metadata for a goal id.
 	 * Wired by SessionManager to `goalManager.getEffectiveGoalMetadata`. Optional
@@ -458,6 +463,8 @@ export interface PipelineContext {
 	) => Promise<void>;
 	/** SessionManager-owned author normalization, including current staff/role lookup. */
 	prepareVisibleAgentEvent?: (session: SessionInfo, event: unknown) => unknown;
+	/** Installs narrow post-authority notification observers before live events. */
+	bindHostLifecycle?: (session: SessionInfo) => void;
 	handleAgentLifecycle: (session: SessionInfo, event: any) => void;
 	trackCostFromEvent: (session: SessionInfo, event: any) => void;
 	recordPiExtensionDiagnostic?: (session: SessionInfo, diagnostic: import("./rpc-bridge.js").RuntimePiExtensionDiagnostic, extension: RuntimePiExtensionInfo) => void;
@@ -803,21 +810,40 @@ function lookupRole(name: string, plan: SessionSetupPlan, ctx: PipelineContext):
 }
 
 export async function resolveDynamicContext(plan: SessionSetupPlan, ctx: PipelineContext): Promise<void> {
-	if (!ctx.lifecycleHub) return;
+	if (!ctx.hostInterceptors && !ctx.lifecycleHub) return;
 	try {
-		const { blocks } = await ctx.lifecycleHub.dispatch("sessionSetup", {
+		const effectiveGoal = effectiveGoalId(plan);
+		if (ctx.hostInterceptors) {
+			const controller = new AbortController();
+			const result = await ctx.hostInterceptors.dispatch("sessionSetup", {
+				sessionId: plan.id,
+				projectId: plan.projectId,
+				goalId: effectiveGoal,
+				roleName: plan.roleName,
+			}, {
+				projectId: plan.projectId,
+				sessionId: plan.id,
+				goalId: effectiveGoal,
+				cwd: plan.cwd,
+				signal: controller.signal,
+			});
+			const context = result?.value?.context ?? result?.context ?? result?.blocks;
+			plan.dynamicContextBlocks = Array.isArray(context) ? context : [];
+			return;
+		}
+		const { blocks } = await ctx.lifecycleHub!.dispatch("sessionSetup", {
 			sessionId: plan.id,
 			projectId: plan.projectId,
 			scope: plan.projectId ? "project" : "global",
 			cwd: plan.cwd,
 			// Effective goal so metadata-disabled providers are filtered for the
 			// whole subtree (members/sub-agents resolve the inherited metadata).
-			goalId: effectiveGoalId(plan),
+			goalId: effectiveGoal,
 			roleName: plan.roleName,
 			prompt: plan.instructions,
 		}, {
 			projectId: plan.projectId,
-			goalId: effectiveGoalId(plan),
+			goalId: effectiveGoal,
 			roleName: plan.roleName,
 			cwd: plan.cwd,
 			worktreePath: plan.worktreePath,
@@ -825,8 +851,8 @@ export async function resolveDynamicContext(plan: SessionSetupPlan, ctx: Pipelin
 			repoWorktrees: plan.repoWorktrees,
 		});
 		plan.dynamicContextBlocks = blocks;
-	} catch (err) {
-		console.error(`[session-setup] sessionSetup dynamic context failed for ${plan.id}:`, err);
+	} catch {
+		console.warn(`[session-setup] sessionSetup interceptor failed code=dispatch_error session=${plan.id}`);
 	}
 }
 
@@ -1066,7 +1092,14 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 
 	plan.bridgeOptions.args = prependToolResultErrorBridge([...activation.args, ...piExtensionActivation.args, ...(plan.bridgeOptions.args || [])]);
 	plan.bridgeOptions.piExtensions = [...(plan.bridgeOptions.piExtensions ?? []), ...piExtensionActivation.runtimeExtensions];
-	plan.bridgeOptions.env = { ...(plan.bridgeOptions.env || {}), ...activation.env };
+	const toolHooksNeeded = ctx.hostInterceptors?.hasAny?.(
+		["beforeToolCall", "afterToolResult"], plan.projectId, effectiveGoalId(plan),
+	) ?? !!ctx.hostInterceptors;
+	plan.bridgeOptions.env = {
+		...(plan.bridgeOptions.env || {}),
+		...activation.env,
+		...(toolHooksNeeded ? { BOBBIT_HOST_HOOKS_ENABLED: "1" } : {}),
+	};
 
 	// Generate and add the tool_call guard extension if any tools have 'ask' or 'never' policy.
 	const guardPath = ctx.toolManager ? writeToolGuardExtension(
@@ -1088,7 +1121,10 @@ function _resolveToolActivation(plan: SessionSetupPlan, ctx: PipelineContext): v
 	// session's project declares those hooks. When no provider is interested the
 	// bridge is never written or passed to pi — preserving zero overhead and
 	// keeping spawn args byte-identical to the no-provider baseline.
-	if (ctx.lifecycleHub && hasProviderBridgeHooks(ctx.lifecycleHub, plan.projectId, effectiveGoalId(plan))) {
+	const turnHooksNeeded = ctx.hostInterceptors?.hasAny?.(
+		["beforePrompt", "beforeCompact"], plan.projectId, effectiveGoalId(plan),
+	) ?? (!!ctx.lifecycleHub && hasProviderBridgeHooks(ctx.lifecycleHub, plan.projectId, effectiveGoalId(plan)));
+	if (turnHooksNeeded) {
 		const bridgePath = writeProviderBridgeExtension(plan.id);
 		if (bridgePath) {
 			plan.bridgeOptions.args.push("--extension", bridgePath);
@@ -1126,6 +1162,7 @@ export function subscribeToEvents(
 		now: ctx.now,
 		suppressUntilPrompt: opts.suppressUntilPrompt,
 	});
+	ctx.bindHostLifecycle?.(session);
 	return session.rpcClient.onEvent((event: any) => {
 		const preparedEvent = ctx.prepareVisibleAgentEvent
 			? ctx.prepareVisibleAgentEvent(session, event)
@@ -1733,6 +1770,7 @@ async function spawnAgent(plan: SessionSetupPlan, ctx: PipelineContext): Promise
 		role: plan.role ?? plan.roleName,
 		accessory: plan.accessory,
 		nonInteractive: plan.nonInteractive,
+		projectId: plan.projectId,
 		...(plan.repoWorktrees && plan.repoPath ? {
 			worktreePath: plan.worktreePath,
 			repoPath: plan.repoPath,

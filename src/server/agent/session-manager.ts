@@ -881,6 +881,42 @@ function sandboxWorktreeOwnerCoordinates(
 	return name ? { root, name } : undefined;
 }
 
+export type HostSessionNotificationName =
+	| "statusChanged"
+	| "turnStarted"
+	| "turnCompleted"
+	| "messageAppended"
+	| "toolCallStarted"
+	| "toolCallCompleted"
+	| "sessionStatusChanged";
+
+export interface HostSessionNotificationPublication {
+	projectId: string;
+	sessionId: string;
+	aggregateId: string;
+	aggregateRevision?: string | number;
+	payload: Readonly<Record<string, unknown>>;
+}
+
+/** Narrow post-authority port; the Extension Host dispatcher owns validation and fanout. */
+export interface HostSessionNotificationPublisher {
+	publish(name: HostSessionNotificationName, publication: HostSessionNotificationPublication): unknown;
+}
+
+export interface SessionHostInterceptorPort {
+	dispatch(name: string, input: Record<string, unknown>, context: Record<string, unknown>): Promise<any>;
+	hasAny?(names: readonly string[], projectId?: string, goalId?: string): boolean;
+}
+
+interface ToolCallLifecycleEntry {
+	toolCallId: string;
+	toolName: string;
+	turnIndex: number;
+	startedAt: number;
+	status?: "succeeded" | "failed";
+	errorStatus?: "tool_error";
+}
+
 export interface SessionInfo {
 	id: string;
 	title: string;
@@ -1002,6 +1038,14 @@ export interface SessionInfo {
 	lastAssistantTerminalIdentity?: string;
 	/** Deduplicates repeated/late final agent_end frames within one turn. */
 	turnTerminalHandled?: boolean;
+	/** Last turn index whose canonical agent_start notification was published. */
+	hostTurnStartedIndex?: number;
+	/** Bounded, metadata-only tool calls admitted by the host interceptor seam. */
+	hostToolCallLifecycle?: Map<string, ToolCallLifecycleEntry>;
+	/** Post-authority status observer installed by SessionManager. */
+	onStatusChanged?: import("./session-status.js").BroadcastableSession["onStatusChanged"];
+	/** Called only after a live event entered EventBuffer and its legacy frame was queued. */
+	onEventAccepted?: (event: unknown, cursor: number) => void;
 	/** A non-retryable terminal failure left durable work parked for manual Retry. */
 	manualRetryRequired?: boolean;
 	/** Number of consecutive auto-retries attempted for transient errors on this turn */
@@ -2818,7 +2862,7 @@ export function isRetryableAgentEnd(event: unknown): boolean {
  *  Retryable agent_end events (`isRetryableAgentEnd`) are suppressed by callers
  *  before reaching here so clients never see a non-terminal turn-end.
  *  See docs/design/streaming-dedup-reorder.md §4.2. */
-export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer: EventBuffer; pendingSkillExpansions?: PendingSkillSidecarEnvelope[]; previousAssistantStreamMessage?: any }, truncated: unknown): void {
+export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer: EventBuffer; pendingSkillExpansions?: PendingSkillSidecarEnvelope[]; previousAssistantStreamMessage?: any; onEventAccepted?: (event: unknown, cursor: number) => void }, truncated: unknown): import("./event-buffer.js").BufferedEvent {
 	const normalizeStartedAt = performance.now();
 	const normalized = normalizeToolResultErrorEvent(truncated);
 	const sanitized = sanitizeProviderAuthEventForEmit(normalized);
@@ -2830,6 +2874,11 @@ export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer
 	const retainStartedAt = performance.now();
 	const entry = session.eventBuffer.push(spliced);
 	const retainMs = performance.now() - retainStartedAt;
+	// EventBuffer acceptance is the authoritative live-message fence. Fanout is
+	// isolated here so a later socket failure cannot suppress the committed fact.
+	if (session.onEventAccepted) {
+		try { session.onEventAccepted(spliced, entry.seq); } catch { /* observational fanout is isolated */ }
+	}
 	const baseFrame = { type: "event" as const, data: spliced, seq: entry.seq, ts: entry.ts };
 	const assistantStreamUpdate = isAssistantStreamMessageUpdate(spliced);
 	let scanned = 0;
@@ -2959,6 +3008,7 @@ export function emitSessionEvent(session: { clients: Set<WebSocket>; eventBuffer
 			sendMs,
 		});
 	}
+	return entry;
 }
 
 /**
@@ -3129,6 +3179,8 @@ export interface SessionManagerOptions {
 	previewPurgeOperation?: SessionPreviewPurgeOperation;
 	/** Late-bound graph guard supplied by goal/team ownership. A reason blocks direct destruction. */
 	promotedSessionLifecycleGuard?: PromotedSessionLifecycleGuard;
+	/** Narrow canonical notification publication seam. */
+	hostNotificationPublisher?: HostSessionNotificationPublisher;
 }
 
 type SessionReplacementToken = {
@@ -3263,6 +3315,8 @@ export class SessionManager {
 	sandboxManager: SandboxManager | null = null;
 	sandboxTokenStore: import("../auth/sandbox-token.js").SandboxTokenStore | null = null;
 	lifecycleHub?: LifecycleHub;
+	private hostInterceptors?: SessionHostInterceptorPort;
+	private hostNotificationPublisher?: HostSessionNotificationPublisher;
 	/**
 	 * S1 — per-session capability secret store. Injected into the owning
 	 * session's env as `BOBBIT_SESSION_SECRET` and used by the orchestration
@@ -3567,6 +3621,7 @@ export class SessionManager {
 		this._taskIdCache.delete(session.id);
 		session.lifecycleFenced = true;
 		session.lifecycleGeneration = replacingGeneration - 1;
+		session.hostToolCallLifecycle?.clear();
 		session.dormant = true;
 		session.status = "terminated";
 		session.clients.clear();
@@ -3770,6 +3825,137 @@ export class SessionManager {
 	/** Subscribe to newly created visible sessions. Listeners are invoked after initial persistence. */
 	addCreationListener(fn: (session: SessionInfo) => void): void {
 		this._creationListeners.push(fn);
+	}
+
+	/** Late-bind the interceptor router while preserving LifecycleHub as fallback. */
+	setHostInterceptorPort(port: SessionHostInterceptorPort | undefined): void {
+		this.hostInterceptors = port;
+	}
+
+	/** Server route seam for prompt/compact/tool boundaries owned inside Pi. */
+	dispatchHostInterceptor(sessionId: string, name: string, input: Record<string, unknown>): Promise<any> | undefined {
+		const session = this.sessions.get(sessionId);
+		if (!session || !this.hostInterceptors) return undefined;
+		const controller = new AbortController();
+		return this.hostInterceptors.dispatch(name, input, {
+			projectId: session.projectId,
+			sessionId,
+			goalId: session.goalId ?? session.teamGoalId,
+			cwd: session.cwd,
+			signal: controller.signal,
+		});
+	}
+
+	/** Late-bind the canonical Extension Host dispatcher without giving sessions fanout ownership. */
+	setHostNotificationPublisher(publisher: HostSessionNotificationPublisher | undefined): void {
+		this.hostNotificationPublisher = publisher;
+		for (const session of this.sessions.values()) this.attachHostLifecycleObservers(session);
+	}
+
+	private publishSessionNotification(
+		session: SessionInfo,
+		name: HostSessionNotificationName,
+		aggregateId: string,
+		aggregateRevision: string | number | undefined,
+		payload: Readonly<Record<string, unknown>>,
+	): void {
+		if (!this.hostNotificationPublisher || !session.projectId) return;
+		try {
+			this.hostNotificationPublisher.publish(name, {
+				projectId: session.projectId,
+				sessionId: session.id,
+				aggregateId,
+				aggregateRevision,
+				payload,
+			});
+		} catch {
+			console.warn(`[session-manager] host notification publication failed code=publisher_error name=${name} session=${session.id}`);
+		}
+	}
+
+	private attachHostLifecycleObservers(session: SessionInfo): void {
+		session.onStatusChanged = (change) => {
+			if (change.status === "terminated" || change.status === "archived") {
+				session.hostToolCallLifecycle?.clear();
+			}
+			this.publishSessionNotification(session, "statusChanged", session.id, change.statusVersion, {
+				previousStatus: change.previousStatus,
+				status: change.status,
+				statusVersion: change.statusVersion,
+			});
+			this.publishSessionNotification(session, "sessionStatusChanged", session.id, change.statusVersion, {
+				sessionId: session.id,
+				previousStatus: change.previousStatus,
+				status: change.status,
+				statusVersion: change.statusVersion,
+			});
+		};
+		session.onEventAccepted = (event, cursor) => this.publishAcceptedSessionEvent(session, event, cursor);
+	}
+
+	/**
+	 * Admission seam called by the beforeToolCall route after permission and the
+	 * interceptor router have approved the final tool name/arguments.
+	 */
+	markToolCallAdmitted(sessionId: string, toolCallId: string, toolName: string): void {
+		const session = this.sessions.get(sessionId);
+		if (!session || !this._sessionWriterIsCurrent(session)) return;
+		if (!toolCallId || !toolName) return;
+		const tracker = session.hostToolCallLifecycle ??= new Map<string, ToolCallLifecycleEntry>();
+		if (tracker.has(toolCallId)) return;
+		while (tracker.size >= 128) tracker.delete(tracker.keys().next().value!);
+		const turnIndex = (session.completedTurnCount ?? 0) + 1;
+		tracker.set(toolCallId, { toolCallId, toolName, turnIndex, startedAt: performance.now() });
+		this.publishSessionNotification(session, "toolCallStarted", toolCallId, toolCallId, {
+			toolCallId,
+			toolName,
+			turnIndex,
+		});
+	}
+
+	private recordToolCallTerminal(session: SessionInfo, event: any): void {
+		const toolCallId = typeof event?.toolCallId === "string" ? event.toolCallId : undefined;
+		if (!toolCallId) return;
+		const tracked = session.hostToolCallLifecycle?.get(toolCallId);
+		if (!tracked) return;
+		tracked.status = event.isError === true ? "failed" : "succeeded";
+		tracked.errorStatus = event.isError === true ? "tool_error" : undefined;
+	}
+
+	private publishAcceptedSessionEvent(session: SessionInfo, accepted: unknown, cursor: number): void {
+		if (!accepted || typeof accepted !== "object") return;
+		const event = accepted as { type?: unknown; message?: any };
+		if (event.type !== "message_end" || !event.message || typeof event.message !== "object") return;
+		const message = event.message;
+		const role = typeof message.role === "string" ? message.role : "unknown";
+		const content = Array.isArray(message.content) ? message.content : [];
+		const blockKinds = [...new Set(content
+			.map((block: unknown) => block && typeof block === "object" && typeof (block as { type?: unknown }).type === "string"
+				? (block as { type: string }).type
+				: "unknown"))].slice(0, 16);
+		const explicitMessageId = typeof message.id === "string" && message.id.length > 0 ? message.id : undefined;
+		const messageId = explicitMessageId ?? `${session.id}:${cursor}`;
+		this.publishSessionNotification(session, "messageAppended", messageId, cursor, {
+			messageId,
+			cursor,
+			role,
+			blockKinds,
+		});
+
+		if (role !== "toolResult") return;
+		const toolCallId = typeof message.toolCallId === "string" ? message.toolCallId : undefined;
+		if (!toolCallId) return;
+		const tracked = session.hostToolCallLifecycle?.get(toolCallId);
+		if (!tracked) return;
+		session.hostToolCallLifecycle!.delete(toolCallId);
+		const failed = tracked.status === "failed" || message.isError === true;
+		this.publishSessionNotification(session, "toolCallCompleted", toolCallId, cursor, {
+			toolCallId,
+			toolName: tracked.toolName,
+			status: failed ? "failed" : "succeeded",
+			durationMs: Math.max(0, Math.round(performance.now() - tracked.startedAt)),
+			...(failed ? { errorStatus: tracked.errorStatus ?? "tool_error" } : {}),
+		});
 	}
 
 	private notifySessionCreated(session: SessionInfo): void {
@@ -4061,6 +4247,7 @@ export class SessionManager {
 		this.archiveStat = options?.archiveStat ?? ((filePath) => fsp.stat(filePath));
 		this.previewPurgeOperation = options?.previewPurgeOperation ?? (async (_sessionId, operation) => operation());
 		this.promotedSessionLifecycleGuard = options?.promotedSessionLifecycleGuard;
+		this.hostNotificationPublisher = options?.hostNotificationPublisher;
 		sessionManagerModuleClock = this.clock;
 		this.agentCliPath = options?.agentCliPath;
 		this.systemPromptPath = options?.systemPromptPath;
@@ -4544,6 +4731,7 @@ export class SessionManager {
 			groupPolicyStore: this.groupPolicyStore ?? null,
 			configCascade: this.configCascade,
 			lifecycleHub: this.lifecycleHub,
+			hostInterceptors: this.hostInterceptors,
 			costTracker: resolvedCostTracker,
 			store: resolvedStore,
 			searchIndex: resolvedSearchIndex,
@@ -4555,6 +4743,7 @@ export class SessionManager {
 			applySandboxWiring: (opts, id, sandboxOpts) => this.applySandboxWiring(opts, id, sandboxOpts),
 			finalizeSpawnOptions: (opts, requested) => this.finalizeSpawnOptions(opts, requested),
 			prepareVisibleAgentEvent: (session, event) => this.prepareVisibleAgentEvent(session, event),
+			bindHostLifecycle: (session) => this.attachHostLifecycleObservers(session),
 			handleAgentLifecycle: (session, event) => this.handleAgentLifecycle(session, event),
 			trackCostFromEvent: (session, event) => this.trackCostFromEvent(session, event),
 			recordPiExtensionDiagnostic: (session, diagnostic, extension) => this.recordPiExtensionDiagnostic(session, diagnostic, extension),
@@ -5629,7 +5818,10 @@ export class SessionManager {
 		// so a goal that disabled a provider stays bridge-free after respawn too.
 		// Zero overhead when no enabled provider declares those hooks — the bridge
 		// is neither written nor pushed onto the spawn args.
-		if (this.lifecycleHub && hasProviderBridgeHooks(this.lifecycleHub, projectId, effectiveGoalId)) {
+		const turnHooksNeeded = this.hostInterceptors?.hasAny?.(
+			["beforePrompt", "beforeCompact"], projectId, effectiveGoalId,
+		) ?? (!!this.lifecycleHub && hasProviderBridgeHooks(this.lifecycleHub, projectId, effectiveGoalId));
+		if (turnHooksNeeded) {
 			const bridgePath = writeProviderBridgeExtension(sessionId);
 			if (bridgePath) {
 				args.push("--extension", bridgePath);
@@ -5651,7 +5843,17 @@ export class SessionManager {
 			args.push("--extension", aigwDnsGuardPath);
 		}
 
-		return { args, env: activation.env, runtimeExtensions: piExtensionActivation.runtimeExtensions };
+		const toolHooksNeeded = this.hostInterceptors?.hasAny?.(
+			["beforeToolCall", "afterToolResult"], projectId, effectiveGoalId,
+		) ?? !!this.hostInterceptors;
+		return {
+			args,
+			env: {
+				...activation.env,
+				...(toolHooksNeeded ? { BOBBIT_HOST_HOOKS_ENABLED: "1" } : {}),
+			},
+			runtimeExtensions: piExtensionActivation.runtimeExtensions,
+		};
 	}
 
 	private messageAuthorDependencies(
@@ -8516,6 +8718,7 @@ export class SessionManager {
 			abortAttemptOutcome?: "ambiguous" | "proven-no-start";
 		},
 	): void {
+		if (!session.onStatusChanged || !session.onEventAccepted) this.attachHostLifecycleObservers(session);
 		// Inbound turn progress is also the acknowledgement fence for prompt RPCs.
 		// Record it for the current canonical generation even while a replacement
 		// coordinator suppresses ordinary lifecycle effects: poison redrive and boot
@@ -8589,6 +8792,7 @@ export class SessionManager {
 		// (for example, recovered/pre-existing rows). Fresh live steers and
 		// steer_queued promotions dispatch immediately through _dispatchSteer.
 		if (event.type === "tool_execution_end") {
+			this.recordToolCallTerminal(session, event);
 			// Compaction and Stop are active turns. Neither tool completion nor a
 			// stale boundary may bypass their sole release owner.
 			if (session.status === "aborting" || session.isCompacting) return;
@@ -8681,6 +8885,14 @@ export class SessionManager {
 				manualRetryRequired: false,
 			});
 			broadcastStatus(session, "streaming", { streamingStartedAt: session.streamingStartedAt });
+			const turnIndex = (session.completedTurnCount ?? 0) + 1;
+			if (session.hostTurnStartedIndex !== turnIndex) {
+				session.hostTurnStartedIndex = turnIndex;
+				this.publishSessionNotification(session, "turnStarted", `${session.id}:${turnIndex}`, turnIndex, {
+					turnIndex,
+					source: session.lastPromptSource ?? "user",
+				});
+			}
 			// Pi has durably appended the user prompt by agent_start. Refresh the
 			// authoritative cursor plane now so prompt actions appear during the turn.
 			this.schedulePromptCursorRefresh(session);
@@ -8734,6 +8946,13 @@ export class SessionManager {
 
 			const wasAborting = session.status === "aborting";
 			const abortShapedTerminal = session.abortShapedTerminal === true;
+			const terminalOutcome: "succeeded" | "errored" | "aborted" = wasAborting || abortShapedTerminal
+				? "aborted"
+				: session.lastTurnErrored || event.error === true || event.success === false
+					? "errored"
+					: "succeeded";
+			const terminalStartedAt = session.streamingStartedAt;
+			const terminalHadToolCalls = session.turnHadToolCalls === true;
 			// Consume this turn's classification at the sole final boundary. A late
 			// duplicate agent_end cannot reinterpret the next turn as cancelled.
 			session.abortShapedTerminal = undefined;
@@ -8804,6 +9023,14 @@ export class SessionManager {
 				manualRetryRequired: session.manualRetryRequired === true,
 			});
 			broadcastStatus(session, "idle");
+			const completedTurnIndex = session.completedTurnCount;
+			this.publishSessionNotification(session, "turnCompleted", `${session.id}:${completedTurnIndex}`, completedTurnIndex, {
+				turnIndex: completedTurnIndex,
+				outcome: terminalOutcome,
+				durationMs: terminalStartedAt === undefined ? 0 : Math.max(0, this.clock.now() - terminalStartedAt),
+				hadToolCalls: terminalHadToolCalls,
+			});
+			session.hostToolCallLifecycle?.clear();
 			this.resolveIdleWaiters(session.id);
 			this.schedulePromptCursorRefresh(session, { settleBindings: true });
 			// Don't drain the queue if the turn ended with a model error —
@@ -15085,6 +15312,41 @@ export class SessionManager {
 		}
 	}
 
+	private async dispatchSessionShutdownInterceptor(
+		src: Pick<SessionInfo, "id" | "projectId" | "cwd" | "goalId" | "teamGoalId" | "role">,
+		reason: "archived" | "quiesced" | "terminated",
+	): Promise<void> {
+		try {
+			if (this.hostInterceptors) {
+				const controller = new AbortController();
+				await this.hostInterceptors.dispatch("sessionShutdown", {
+					sessionId: src.id,
+					projectId: src.projectId,
+					reason,
+				}, {
+					projectId: src.projectId,
+					sessionId: src.id,
+					goalId: src.goalId ?? src.teamGoalId,
+					cwd: src.cwd,
+					signal: controller.signal,
+				});
+				return;
+			}
+			if (this.lifecycleHub) {
+				await this.lifecycleHub.dispatch("sessionShutdown", {
+					sessionId: src.id,
+					projectId: src.projectId,
+					scope: src.projectId ? "project" : "global",
+					cwd: src.cwd,
+					goalId: src.goalId ?? src.teamGoalId,
+					roleName: src.role,
+				}, lifecycleScopeInput(src));
+			}
+		} catch {
+			console.warn(`[session-manager] sessionShutdown interceptor failed code=dispatch_error session=${src.id}`);
+		}
+	}
+
 	/**
 	 * The single runtime archive seam (OrchestrationCore §6). EVERY runtime
 	 * archive entry point that can archive a PARENT session routes through here
@@ -15104,32 +15366,10 @@ export class SessionManager {
 		// goal archival has already made the canonical guard return undefined here.
 		this.assertPromotedSessionRecoveryAllowed(id, "archive its session record");
 		await this.cascadeReapOwner(id, options);
-		// Extension Platform G1.4: notify lifecycle providers the session is
-		// shutting down. Best-effort and bounded by the hub's per-provider
-		// timeouts; wrapped in try/catch so archival always completes even if a
-		// provider hangs or throws. Resolve context from the live session when
-		// present, else the persisted record (dormant sessions still archive).
-		if (this.lifecycleHub) {
-			const live = this.sessions.get(id);
-			const persisted = live ? undefined : this.getPersistedSession(id);
-			const src = live ?? persisted;
-			if (src) {
-				try {
-					await this.lifecycleHub.dispatch("sessionShutdown", {
-						sessionId: id,
-						projectId: src.projectId,
-						scope: src.projectId ? "project" : "global",
-						cwd: src.cwd,
-						// Effective goal (goalId ?? teamGoalId) so disabled-provider
-						// filtering applies to members/delegates/reviewers too.
-						goalId: src.goalId ?? src.teamGoalId,
-						roleName: src.role,
-					}, lifecycleScopeInput(src));
-				} catch (err) {
-					console.warn(`[session-manager] sessionShutdown dispatch failed for ${id}:`, err);
-				}
-			}
-		}
+		const live = this.sessions.get(id);
+		const persisted = live ? undefined : this.getPersistedSession(id);
+		const shutdownSource = live ?? persisted;
+		if (shutdownSource) await this.dispatchSessionShutdownInterceptor(shutdownSource, "archived");
 		const target = store ?? this.resolveStoreForId(id);
 		if (!target) return false;
 		try { return await target.archiveAsync(id); } catch { return false; }
@@ -15215,20 +15455,7 @@ export class SessionManager {
 		this.sessions.delete(id);
 		this._taskIdCache.delete(id);
 		try { await this.cleanupScopedMcpManagersForSessionScope(scope); } catch { /* runtime authority is already removed */ }
-		if (this.lifecycleHub) {
-			try {
-				await this.lifecycleHub.dispatch("sessionShutdown", {
-					sessionId: id,
-					projectId: session.projectId,
-					scope: session.projectId ? "project" : "global",
-					cwd: session.cwd,
-					goalId: session.goalId ?? session.teamGoalId,
-					roleName: session.role,
-				}, lifecycleScopeInput(session));
-			} catch (err) {
-				console.warn(`[session-manager] sessionShutdown dispatch failed for quiesced ${id}:`, err);
-			}
-		}
+		await this.dispatchSessionShutdownInterceptor(session, "quiesced");
 		if (bridgeStopError) {
 			throw new Error(`Session ${id} runtime was detached after its bridge stop failed: ${bridgeStopError instanceof Error ? bridgeStopError.message : String(bridgeStopError)}`, { cause: bridgeStopError });
 		}
@@ -15408,28 +15635,7 @@ export class SessionManager {
 		this.sessions.delete(id);
 		this._taskIdCache.delete(id);
 		await this.cleanupScopedMcpManagersForSessionScope(terminatedScope);
-		// Extension Platform G1.4: notify lifecycle providers the session is
-		// shutting down on the live DELETE/stop path too. terminateSession
-		// archives directly (bypassing archiveWithCascade), so the dispatch
-		// must also fire here. Best-effort and bounded by the hub's per-provider
-		// timeouts; wrapped in try/catch so termination always completes. Uses
-		// the live `session` context captured at the top of this method.
-		if (this.lifecycleHub) {
-			try {
-				await this.lifecycleHub.dispatch("sessionShutdown", {
-					sessionId: id,
-					projectId: session.projectId,
-					scope: session.projectId ? "project" : "global",
-					cwd: session.cwd,
-					// Effective goal (goalId ?? teamGoalId) so disabled-provider
-					// filtering applies to members/delegates/reviewers too.
-					goalId: session.goalId ?? session.teamGoalId,
-					roleName: session.role,
-				}, lifecycleScopeInput(session));
-			} catch (err) {
-				console.warn(`[session-manager] sessionShutdown dispatch failed for ${id}:`, err);
-			}
-		}
+		await this.dispatchSessionShutdownInterceptor(session, "terminated");
 		// Always archive — even without an agentSessionFile the metadata
 		// (title, goal association, timestamps) is valuable and the search
 		// index may reference this session.  Purge will clean it up later.
