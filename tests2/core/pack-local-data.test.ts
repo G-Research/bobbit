@@ -63,14 +63,26 @@ function fixtureRoot(): string {
 	return root;
 }
 
-function resolverFor(projectRoot: string, packs: PackContributions[]): PackLocalDataResolver {
+function resolverFor(
+	projectRoot: string,
+	packs: PackContributions[],
+	managedMarketplaceRoots: () => readonly string[] = () => [],
+): PackLocalDataResolver {
 	return new PackLocalDataResolver(
 		{ get: id => id === "project-1" ? ({ id, rootPath: projectRoot } as never) : undefined },
 		{
 			getPack: (projectId, packId) => projectId === "project-1" ? packs.find(pack => pack.packId === packId) : undefined,
 			list: projectId => projectId === "project-1" ? packs : [],
 		},
+		managedMarketplaceRoots,
 	);
+}
+
+function relativeDeclaration(projectRoot: string, target: string): PackLocalDataDeclaration {
+	return {
+		...declaration,
+		directory: path.relative(projectRoot, target).split(path.sep).join("/"),
+	};
 }
 
 describe("pack local-data manifest declaration", () => {
@@ -246,6 +258,124 @@ describe("PackLocalDataResolver", () => {
 			},
 		]);
 		expect(fs.existsSync(path.join(root, "undeclared"))).toBe(false);
+	});
+
+	describe("managed Marketplace overlap guard", () => {
+		it("rejects a parent project's candidate equal to or below Headquarters config/market-packs", () => {
+			const root = fixtureRoot();
+			const managedRoot = path.join(root, "simulated-headquarters", "config", "market-packs");
+			const descendant = path.join(managedRoot, "performance", "cache");
+			fs.mkdirSync(managedRoot, { recursive: true });
+			const resolver = resolverFor(root, [
+				contribution("equal", relativeDeclaration(root, managedRoot)),
+				contribution("descendant", relativeDeclaration(root, descendant)),
+			], () => [managedRoot]);
+
+			for (const packId of ["equal", "descendant"]) {
+				expect(() => resolver.resolveHostDirectory("project-1", packId))
+					.toThrowError(expect.objectContaining({ code: "unsafe_path" }));
+			}
+			expect(fs.existsSync(descendant)).toBe(false);
+		});
+
+		it("rejects global-user and another registered child project's managed roots", () => {
+			const parentRoot = fixtureRoot();
+			const registeredProjects = new Map([
+				["project-1", parentRoot],
+				["child-project", path.join(parentRoot, "registered-child")],
+			]);
+			const globalUserRoot = path.join(parentRoot, "simulated-global-user");
+			const globalMarketplaceRoot = path.join(globalUserRoot, ".bobbit", "config", "market-packs");
+			const childMarketplaceRoot = path.join(
+				registeredProjects.get("child-project")!,
+				".bobbit", "config", "market-packs",
+			);
+			const resolver = resolverFor(parentRoot, [
+				contribution("global", relativeDeclaration(parentRoot, path.join(globalMarketplaceRoot, "global-pack"))),
+				contribution("child", relativeDeclaration(parentRoot, path.join(childMarketplaceRoot, "child-pack"))),
+			], () => [
+				globalMarketplaceRoot,
+				...Array.from(registeredProjects.values(), projectRoot =>
+					path.join(projectRoot, ".bobbit", "config", "market-packs")),
+			]);
+
+			for (const packId of ["global", "child"]) {
+				expect(() => resolver.resolveHostDirectory("project-1", packId))
+					.toThrowError(expect.objectContaining({ code: "unsafe_path" }));
+			}
+			expect(fs.existsSync(globalUserRoot)).toBe(false);
+			expect(fs.existsSync(registeredProjects.get("child-project")!)).toBe(false);
+		});
+
+		it.each(["resolveHostDirectory", "resolveMounts"] as const)(
+			"%s rejects an absent managed root before creating its first component",
+			api => {
+				const root = fixtureRoot();
+				const firstComponent = path.join(root, "future-headquarters");
+				const managedRoot = path.join(firstComponent, "config", "market-packs");
+				const resolver = resolverFor(root, [
+					contribution("performance", relativeDeclaration(root, path.join(managedRoot, "performance"))),
+				], () => [managedRoot]);
+
+				const resolve = api === "resolveHostDirectory"
+					? () => resolver.resolveHostDirectory("project-1", "performance")
+					: () => resolver.resolveMounts("project-1");
+				expect(resolve).toThrowError(expect.objectContaining({ code: "unsafe_path" }));
+				expect(fs.existsSync(firstComponent)).toBe(false);
+			},
+		);
+
+		it("allows a nearby non-overlapping directory", () => {
+			const root = fixtureRoot();
+			const managedRoot = path.join(root, "simulated-headquarters", "config", "market-packs");
+			const nearby = path.join(root, "simulated-headquarters", "config", "market-packs-data", "cache");
+			const resolver = resolverFor(root, [
+				contribution("performance", relativeDeclaration(root, nearby)),
+			], () => [managedRoot]);
+
+			expect(resolver.resolveHostDirectory("project-1", "performance")).toBe(nearby);
+			expect(fs.statSync(nearby).isDirectory()).toBe(true);
+		});
+
+		it("normalizes path spellings and applies deterministic Windows case folding", () => {
+			const root = fixtureRoot();
+			const candidate = path.join(root, "Headquarters", "config", "market-packs", "cache");
+			const managedRoot = [
+				root,
+				"headquarters",
+				"config",
+				"ignored",
+				"..",
+				"market-packs",
+			].join(path.sep);
+			vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+			const resolver = resolverFor(root, [
+				contribution("performance", relativeDeclaration(root, candidate)),
+			], () => [managedRoot]);
+
+			expect(() => resolver.resolveHostDirectory("project-1", "performance"))
+				.toThrowError(expect.objectContaining({ code: "unsafe_path" }));
+			expect(fs.existsSync(path.join(root, "Headquarters"))).toBe(false);
+		});
+
+		it("reads the managed-roots provider on every resolution", () => {
+			const root = fixtureRoot();
+			const lateManagedRoot = path.join(root, "late-project", ".bobbit", "config", "market-packs");
+			let managedRoots: readonly string[] = [];
+			const provider = vi.fn(() => managedRoots);
+			const resolver = resolverFor(root, [
+				contribution("ordinary", { ...declaration, directory: "ordinary-data" }),
+				contribution("late", relativeDeclaration(root, path.join(lateManagedRoot, "late-pack"))),
+			], provider);
+
+			expect(resolver.resolveHostDirectory("project-1", "ordinary"))
+				.toBe(path.join(root, "ordinary-data"));
+			managedRoots = [lateManagedRoot];
+			expect(() => resolver.resolveHostDirectory("project-1", "late"))
+				.toThrowError(expect.objectContaining({ code: "unsafe_path" }));
+			expect(provider).toHaveBeenCalledTimes(2);
+			expect(fs.existsSync(path.join(root, "late-project"))).toBe(false);
+		});
 	});
 
 	it("fails closed for unknown projects, inactive packs, and undeclared packs", () => {
