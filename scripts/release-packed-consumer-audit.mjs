@@ -238,11 +238,6 @@ export function packedConsumerInstallArgs(tarballPath) {
 	return ["install", "--ignore-scripts", tarballPath];
 }
 
-/** Enable lifecycle scripts only for the one native dependency after isolated install. */
-export function packedConsumerNativeRebuildArgs() {
-	return ["rebuild", "better-sqlite3", "--foreground-scripts"];
-}
-
 function requireSuccess(label, result) {
 	if (result.code === 0) return;
 	throw new Error(
@@ -428,14 +423,6 @@ async function performPackedConsumerAudit(tempRoot, npmRunner, commandRunner) {
 	});
 	requireSuccess("clean consumer install", installed);
 	await stat(join(consumerDir, "package-lock.json"));
-
-	console.log("[audit:packed-consumer] Installing the packaged SQLite native binding...");
-	const rebuiltNative = await npmRunner(packedConsumerNativeRebuildArgs(), {
-		cwd: consumerDir,
-		env: { ...restrictedNpmEnv, npm_config_ignore_scripts: "false" },
-		timeoutMs: 5 * 60_000,
-	});
-	requireSuccess("packed SQLite native rebuild", rebuiltNative);
 
 	console.log("[audit:packed-consumer] Loading the packaged SQLite native binding...");
 	const sqliteSmoke = await commandRunner(process.execPath, ["-e", `

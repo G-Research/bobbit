@@ -33,7 +33,7 @@ The JSON adapter preserves the public API and whole-array fixture format. Produc
 
 ## Layout and schema
 
-The MVP pins `better-sqlite3` 12.11.1 and opens:
+The MVP pins `better-sqlite3` 13.0.3 and opens:
 
 ```text
 <project-root>/.bobbit/state/gates.sqlite
@@ -210,7 +210,7 @@ The memfs unit adapter continues to cover the public `GateStore` logic and JSON 
 - transient and persistent final-flush failures, shared concurrent-close outcomes, and handle release after persistent close and startup failures; and
 - the close mutation fence across every public mutator and reset variant, including durable pre-fence work, post-fence map/observer isolation, and strict-reset compensation.
 
-The packed-consumer test also rebuilds the installed native dependency with lifecycle scripts enabled only for `better-sqlite3`, then loads the binding and executes an in-memory create/insert/select/close smoke.
+Packed-consumer qualification deliberately does not run `npm rebuild`. Although `better-sqlite3` 13.0.3 declares `gypfile: false`, has no install lifecycle, and ships bundled prebuilds, npm omits `gypfile: false` from lockfile and hidden-lockfile package metadata. A targeted rebuild can therefore synthesize a `node-gyp rebuild` lifecycle and attempt an unintended local source build. Qualification instead loads the installed bundled prebuild directly, performs an in-memory native create/write/read/close smoke, and exercises the installed goal and task stores through a durable write/read/reopen/close round trip. This tests the artifact consumers receive without replacing its native binding with a locally compiled binary.
 
 ## MVP landing qualification
 
@@ -224,7 +224,7 @@ The final ordered qualification ran without source edits on the exact close-fenc
 | `npm run test:browser` | Passed (381 s; 717 passed, 9 skipped; browser budget passed) |
 | `npm run test:e2e` | Passed (379 s; groups A, B, C, and D passed) |
 | `npm run test:bundle` | Passed (7 s; 2 files, 4 tests) |
-| Packed-consumer native `better-sqlite3` rebuild and write/read smoke | Passed before the separate registry audit |
+| Historical packed-consumer native `better-sqlite3` rebuild and write/read smoke (pre-v13 rebuild-era baseline) | Passed before the separate registry audit |
 
 A read-only snapshot of representative production gate state was copied into an owned temporary directory, migrated, closed, reopened, queried directly, and removed. Source, post-migration, reopened, and SQLite counts were all 16. Sorted composite identities and every per-gate payload hash matched, and the retired JSON backup was byte-exact. The sorted-identity SHA-256 was `0f06c43d044c35b6d40d2fb5f8aeab2efd7c5540a77d7d907b6e1a65d745eb5e`; the identity-plus-payload-hash manifest SHA-256 was `d3a5b491925f4f7941756e226edf4fabff3a283facc670cf361b8dad9e27d3e1`. Before and after the exercise, the live source remained byte-for-byte unchanged at SHA-256 `c1a015d2f28cebe27ceff104f230f133a213fd6644e7b8607fe2638ab5504240`, 44,685 bytes, with modification time `2026-08-07T07:55:00.694Z`.
 

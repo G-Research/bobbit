@@ -9,7 +9,6 @@ import {
 	buildRestrictedNpmEnv,
 	evaluatePackedConsumerAudit,
 	packedConsumerInstallArgs,
-	packedConsumerNativeRebuildArgs,
 	packedConsumerPackArgs,
 	packedConsumerTempPrefix,
 	parseAuditJson,
@@ -773,7 +772,7 @@ describe("release skill pre-flight order", () => {
 });
 
 describe("packed-consumer audit subprocess isolation", () => {
-	it("disables lifecycle scripts for pack/install and enables only the targeted native rebuild", () => {
+	it("disables lifecycle scripts for pack and install", () => {
 		const packArgs = packedConsumerPackArgs("isolated-pack-dir");
 		assert.equal(packArgs[0], "pack");
 		assert.equal(packArgs.filter((arg: string) => arg === "--ignore-scripts").length, 1);
@@ -782,11 +781,6 @@ describe("packed-consumer audit subprocess isolation", () => {
 			"install",
 			"--ignore-scripts",
 			"bobbit.tgz",
-		]);
-		assert.deepEqual(packedConsumerNativeRebuildArgs(), [
-			"rebuild",
-			"better-sqlite3",
-			"--foreground-scripts",
 		]);
 	});
 
@@ -829,8 +823,6 @@ describe("packed-consumer audit subprocess isolation", () => {
 				result.stdout = "true\n";
 			} else if (args[0] === "install") {
 				writeFileSync(join(options.cwd, "package-lock.json"), "{}\n");
-			} else if (args[0] === "rebuild") {
-				assert.deepEqual(args, ["rebuild", "better-sqlite3", "--foreground-scripts"]);
 			} else if (args[0] === "audit") {
 				result.stdout = JSON.stringify({
 					auditReportVersion: 2,
@@ -858,7 +850,7 @@ describe("packed-consumer audit subprocess isolation", () => {
 			Object.assign(process.env, secretEnv);
 			await runPackedConsumerAudit({ npmRunner, commandRunner });
 
-			assert.deepEqual(calls.map(call => call.args[0]), ["pack", "config", "install", "rebuild", "audit"]);
+			assert.deepEqual(calls.map(call => call.args[0]), ["pack", "config", "install", "audit"]);
 			assert.equal(nativeCalls.length, 1);
 			assert.equal(nativeCalls[0].command, process.execPath);
 			assert.ok(nativeCalls[0].args.join(" ").includes("better-sqlite3"));
@@ -872,7 +864,7 @@ describe("packed-consumer audit subprocess isolation", () => {
 					assert.equal(childKeys.has(forbiddenKey), false, `${forbiddenKey} reached ${call.args[0]}`);
 				}
 				assert.equal(call.env.npm_config_registry, "https://registry.npmjs.org/");
-				assert.equal(call.env.npm_config_ignore_scripts, call.args[0] === "rebuild" ? "false" : "true");
+				assert.equal(call.env.npm_config_ignore_scripts, "true");
 				assert.notEqual(call.env.npm_config_userconfig, secretEnv.npm_config_userconfig);
 				assert.notEqual(call.env.npm_config_globalconfig, secretEnv.npm_config_globalconfig);
 				assert.match(call.env.npm_config_userconfig, /user\.npmrc$/);
