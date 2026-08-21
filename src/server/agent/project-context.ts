@@ -24,6 +24,14 @@ import { SecretsStore } from "./secrets-store.js";
 import { PlanMutationStore } from "./plan-mutation-store.js";
 import { realFs, type Clock, type CommandRunner, type FsLike } from "../gateway-deps.js";
 import type { RemoteGitPolicy } from "../skills/git.js";
+import type {
+  HostNotificationDispatcher,
+  HostNotificationPublication,
+} from "../extension-host/host-notification-dispatcher.js";
+import type {
+  HostNotification,
+  HostNotificationName,
+} from "../../shared/extension-host/host-hooks.js";
 
 /**
  * A container holding a complete set of stores scoped to one project.
@@ -67,6 +75,7 @@ export class ProjectContext {
    * that don't need the trigger surface.
    */
   private goalTriggerDispatcher: GoalTriggerDispatcher | null = null;
+  private hostNotificationDispatcher: HostNotificationDispatcher | null = null;
   private closePromise: Promise<void> | null = null;
 
   // Config stores
@@ -190,6 +199,22 @@ export class ProjectContext {
   setGoalTriggerDispatcher(dispatcher: GoalTriggerDispatcher | null): void {
     this.goalTriggerDispatcher = dispatcher;
     this.applyGoalTriggerDispatcher();
+  }
+
+  /** Late-bind the canonical post-authority notification publisher. */
+  setHostNotificationDispatcher(dispatcher: HostNotificationDispatcher | null): void {
+    this.hostNotificationDispatcher = dispatcher;
+  }
+
+  /** Narrow publisher callback for project-owned mutation boundaries. */
+  publishHostNotification<N extends HostNotificationName>(
+    name: N,
+    publication: Omit<HostNotificationPublication<N>, "projectId">,
+  ): HostNotification<N> | undefined {
+    return this.hostNotificationDispatcher?.publish(name, {
+      ...publication,
+      projectId: this.project.id,
+    } as HostNotificationPublication<N>);
   }
 
   /** Wire the authoritative post-archive cross-store reconciliation boundary. */
