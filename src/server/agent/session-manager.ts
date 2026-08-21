@@ -7,6 +7,13 @@ import {
 	isPiTranscriptEntryId,
 } from "../../shared/message-author.js";
 import type { PromptSource } from "../../shared/prompt-source.js";
+import type {
+	HostInterceptorName,
+	HostInterceptorRequest,
+	HostNotificationName,
+	HostNotificationPayload,
+	SessionNotificationName,
+} from "../../shared/extension-host/host-hooks.js";
 export type { PromptSource } from "../../shared/prompt-source.js";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -881,26 +888,19 @@ function sandboxWorktreeOwnerCoordinates(
 	return name ? { root, name } : undefined;
 }
 
-export type HostSessionNotificationName =
-	| "statusChanged"
-	| "turnStarted"
-	| "turnCompleted"
-	| "messageAppended"
-	| "toolCallStarted"
-	| "toolCallCompleted"
-	| "sessionStatusChanged";
+export type HostSessionNotificationName = SessionNotificationName | Extract<HostNotificationName, "sessionStatusChanged">;
 
-export interface HostSessionNotificationPublication {
+export interface HostSessionNotificationPublication<N extends HostSessionNotificationName> {
 	projectId: string;
 	sessionId: string;
 	aggregateId: string;
 	aggregateRevision?: string | number;
-	payload: Readonly<Record<string, unknown>>;
+	payload: Readonly<HostNotificationPayload<N>>;
 }
 
 /** Narrow post-authority port; the Extension Host dispatcher owns validation and fanout. */
 export interface HostSessionNotificationPublisher {
-	publish(name: HostSessionNotificationName, publication: HostSessionNotificationPublication): unknown;
+	publish<N extends HostSessionNotificationName>(name: N, publication: HostSessionNotificationPublication<N>): unknown;
 }
 
 export interface SessionHostInterceptorPort {
@@ -913,8 +913,8 @@ interface ToolCallLifecycleEntry {
 	toolName: string;
 	turnIndex: number;
 	startedAt: number;
-	status?: "succeeded" | "failed";
-	errorStatus?: "tool_error";
+	status?: "succeeded" | "errored";
+	errorStatus?: "handler_error";
 }
 
 export interface SessionInfo {
@@ -3833,11 +3833,15 @@ export class SessionManager {
 	}
 
 	/** Server route seam for prompt/compact/tool boundaries owned inside Pi. */
-	dispatchHostInterceptor(sessionId: string, name: string, input: Record<string, unknown>): Promise<any> | undefined {
+	dispatchHostInterceptor<N extends HostInterceptorName>(
+		sessionId: string,
+		name: N,
+		input: HostInterceptorRequest<N>,
+	): Promise<any> | undefined {
 		const session = this.sessions.get(sessionId);
 		if (!session || !this.hostInterceptors) return undefined;
 		const controller = new AbortController();
-		return this.hostInterceptors.dispatch(name, input, {
+		return this.hostInterceptors.dispatch(name, input as Record<string, unknown>, {
 			projectId: session.projectId,
 			sessionId,
 			goalId: session.goalId ?? session.teamGoalId,
@@ -3852,12 +3856,12 @@ export class SessionManager {
 		for (const session of this.sessions.values()) this.attachHostLifecycleObservers(session);
 	}
 
-	private publishSessionNotification(
+	private publishSessionNotification<N extends HostSessionNotificationName>(
 		session: SessionInfo,
-		name: HostSessionNotificationName,
+		name: N,
 		aggregateId: string,
 		aggregateRevision: string | number | undefined,
-		payload: Readonly<Record<string, unknown>>,
+		payload: Readonly<HostNotificationPayload<N>>,
 	): void {
 		if (!this.hostNotificationPublisher || !session.projectId) return;
 		try {
@@ -3875,7 +3879,7 @@ export class SessionManager {
 
 	private attachHostLifecycleObservers(session: SessionInfo): void {
 		session.onStatusChanged = (change) => {
-			if (change.status === "terminated" || change.status === "archived") {
+			if (change.status === "terminated") {
 				session.hostToolCallLifecycle?.clear();
 			}
 			this.publishSessionNotification(session, "statusChanged", session.id, change.statusVersion, {
@@ -3918,8 +3922,8 @@ export class SessionManager {
 		if (!toolCallId) return;
 		const tracked = session.hostToolCallLifecycle?.get(toolCallId);
 		if (!tracked) return;
-		tracked.status = event.isError === true ? "failed" : "succeeded";
-		tracked.errorStatus = event.isError === true ? "tool_error" : undefined;
+		tracked.status = event.isError === true ? "errored" : "succeeded";
+		tracked.errorStatus = event.isError === true ? "handler_error" : undefined;
 	}
 
 	private publishAcceptedSessionEvent(session: SessionInfo, accepted: unknown, cursor: number): void {
@@ -3927,12 +3931,20 @@ export class SessionManager {
 		const event = accepted as { type?: unknown; message?: any };
 		if (event.type !== "message_end" || !event.message || typeof event.message !== "object") return;
 		const message = event.message;
-		const role = typeof message.role === "string" ? message.role : "unknown";
+		const rawRole = typeof message.role === "string" ? message.role : "";
+		const role: "user" | "assistant" | "system" = rawRole === "user"
+			? "user"
+			: rawRole === "assistant" ? "assistant" : "system";
 		const content = Array.isArray(message.content) ? message.content : [];
-		const blockKinds = [...new Set(content
-			.map((block: unknown) => block && typeof block === "object" && typeof (block as { type?: unknown }).type === "string"
-				? (block as { type: string }).type
-				: "unknown"))].slice(0, 16);
+		const blockKinds = Array.from(new Set<"text" | "tool_use" | "tool_result">(
+			content.flatMap((block: unknown): Array<"text" | "tool_use" | "tool_result"> => {
+				const kind = block && typeof block === "object" ? (block as { type?: unknown }).type : undefined;
+				if (kind === "text") return ["text"];
+				if (kind === "toolCall" || kind === "tool_use") return ["tool_use"];
+				if (kind === "toolResult" || kind === "tool_result") return ["tool_result"];
+				return [];
+			}),
+		)).slice(0, 8);
 		const explicitMessageId = typeof message.id === "string" && message.id.length > 0 ? message.id : undefined;
 		const messageId = explicitMessageId ?? `${session.id}:${cursor}`;
 		this.publishSessionNotification(session, "messageAppended", messageId, cursor, {
@@ -3942,19 +3954,19 @@ export class SessionManager {
 			blockKinds,
 		});
 
-		if (role !== "toolResult") return;
+		if (rawRole !== "toolResult" && rawRole !== "tool_result" && rawRole !== "tool") return;
 		const toolCallId = typeof message.toolCallId === "string" ? message.toolCallId : undefined;
 		if (!toolCallId) return;
 		const tracked = session.hostToolCallLifecycle?.get(toolCallId);
 		if (!tracked) return;
 		session.hostToolCallLifecycle!.delete(toolCallId);
-		const failed = tracked.status === "failed" || message.isError === true;
+		const failed = tracked.status === "errored" || message.isError === true;
 		this.publishSessionNotification(session, "toolCallCompleted", toolCallId, cursor, {
 			toolCallId,
 			toolName: tracked.toolName,
-			status: failed ? "failed" : "succeeded",
+			status: failed ? "errored" : "succeeded",
 			durationMs: Math.max(0, Math.round(performance.now() - tracked.startedAt)),
-			...(failed ? { errorStatus: tracked.errorStatus ?? "tool_error" } : {}),
+			...(failed ? { errorStatus: tracked.errorStatus ?? "handler_error" } : {}),
 		});
 	}
 
