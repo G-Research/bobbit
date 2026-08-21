@@ -147,7 +147,7 @@ export function validateGoalCandidate(raw: RawGoalCandidate, context: GoalCandid
 		metadata = metadataSize.value;
 	}
 	if (raw.subgoalsAllowed !== undefined && typeof raw.subgoalsAllowed !== "boolean") return fail(400, "SUBGOALS_ALLOWED_INVALID", "subgoalsAllowed must be boolean");
-	if (raw.maxNestingDepth !== undefined && (typeof raw.maxNestingDepth !== "number" || !Number.isFinite(raw.maxNestingDepth))) return fail(400, "MAX_NESTING_DEPTH_INVALID", "maxNestingDepth must be a finite number");
+	if (raw.maxNestingDepth !== undefined && (typeof raw.maxNestingDepth !== "number" || !Number.isInteger(raw.maxNestingDepth) || raw.maxNestingDepth < 1)) return fail(400, "MAX_NESTING_DEPTH_INVALID", "maxNestingDepth must be an integer of at least 1");
 	const inherited = parent ? inheritedChildOverrides(parent, prefs, deps.getGoal) : undefined;
 	const subgoalsAllowed = raw.subgoalsAllowed === undefined ? inherited?.subgoalsAllowed : raw.subgoalsAllowed && (inherited?.subgoalsAllowed ?? prefs.subgoalsEnabled);
 	const maxNestingDepth = raw.maxNestingDepth === undefined ? inherited?.maxNestingDepth : Math.min(clampMaxDepth(raw.maxNestingDepth as number), inherited?.maxNestingDepth ?? prefs.maxNestingDepth);
