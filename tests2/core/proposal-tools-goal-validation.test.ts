@@ -65,10 +65,11 @@ describe("propose_goal — surfaces workflow validation rejection", () => {
 	const realFetch = globalThis.fetch;
 
 	beforeAll(() => {
-		for (const k of ["BOBBIT_SESSION_ID", "BOBBIT_GATEWAY_URL", "BOBBIT_TOKEN"]) {
+		for (const k of ["BOBBIT_SESSION_ID", "BOBBIT_SESSION_SECRET", "BOBBIT_GATEWAY_URL", "BOBBIT_TOKEN"]) {
 			saved[k] = process.env[k];
 		}
 		process.env.BOBBIT_SESSION_ID = "sess-1";
+		process.env.BOBBIT_SESSION_SECRET = "session-capability-secret";
 		process.env.BOBBIT_GATEWAY_URL = "http://gateway.invalid";
 		process.env.BOBBIT_TOKEN = "tok";
 		const { api, get } = makeStubApi();
@@ -138,6 +139,30 @@ describe("propose_goal — surfaces workflow validation rejection", () => {
 		assert.match(text, /cwd must be inside the selected project/i);
 		assert.doesNotMatch(text, /Proposal submitted/);
 		assert.doesNotMatch(text, /__proposal_rev_v1__/);
+	});
+
+	it("sends the calling session capability on seed, view, and edit gateway calls", async () => {
+		const calls: Array<{ url: string; headers: Headers }> = [];
+		globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = String(input);
+			calls.push({ url, headers: new Headers(init?.headers) });
+			if (url.endsWith("/edit")) return fakeResponse(200, { ok: true, rev: 9, newContent: "edited" });
+			if (init?.method === "GET") return fakeResponse(200, "proposal markdown");
+			return fakeResponse(200, { ok: true, rev: 8 });
+		}) as any;
+
+		await getExecute("propose_goal")("tu-secret-seed", { title: "G", spec: "s", workflow: "feature", projectId: "project-1" });
+		await getExecute("view_proposal")("tu-secret-view", { type: "goal" });
+		await getExecute("edit_proposal")("tu-secret-edit", { type: "goal", old_text: "old", new_text: "new" });
+
+		assert.equal(calls.length, 3);
+		for (const call of calls) {
+			assert.equal(
+				call.headers.get("X-Bobbit-Session-Secret"),
+				"session-capability-secret",
+				`session capability missing from ${call.url}`,
+			);
+		}
 	});
 
 	it("returns the normal ack with rev contract on success (200)", async () => {

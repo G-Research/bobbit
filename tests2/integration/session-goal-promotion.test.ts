@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 
 import { test, expect } from "./_e2e/in-process-harness.js";
 import { copyGitTemplate } from "../harness/git-template.js";
-import { apiFetch, createSession, registerProject, waitForSessionStatus } from "./_e2e/e2e-setup.js";
+import { apiFetch, createSession, rawApiFetch, registerProject, waitForSessionStatus } from "./_e2e/e2e-setup.js";
 import { SandboxSessionFilesystem } from "../harness/sandbox-session-filesystem.js";
 
 async function jsonResponse(response: Response): Promise<any> {
@@ -24,6 +24,18 @@ async function sessionRecord(id: string): Promise<any> {
 async function expectPromotionLifecycleConflict(response: Response): Promise<void> {
 	expect(response.status).toBe(409);
 	expect((await jsonResponse(response)).code).toBe("PROMOTED_SESSION_LIFECYCLE_CONFLICT");
+}
+
+function sessionCapabilityHeaders(gateway: any, sid: string): Record<string, string> {
+	return {
+		"X-Bobbit-Session-Secret": gateway.sessionManager.sessionSecretStore.getOrCreateSecret(sid),
+	};
+}
+
+async function expectProposalOwnerMismatch(response: Response, operation: string): Promise<void> {
+	const text = await response.text();
+	expect.soft(response.status, `${operation} must reject a foreign session capability: ${text}`).toBe(403);
+	expect.soft(text, `${operation} must return the stable structured ownership code`).toContain("PROPOSAL_OWNER_MISMATCH");
 }
 
 async function createPromotionCandidate(gateway: any, label: string): Promise<{
@@ -70,6 +82,119 @@ async function createPromotionCandidate(gateway: any, label: string): Promise<{
 }
 
 test.describe("current-session goal promotion API", () => {
+	test("foreign capability is denied before victim mode mutation or promotion reservation", async ({ gateway, scope }) => {
+		const projectRoot = path.join(gateway.bobbitDir, `promotion-owner-auth-${randomUUID()}`);
+		copyGitTemplate(projectRoot);
+		const project = await registerProject({
+			name: `promotion-owner-auth-${Date.now()}`,
+			rootPath: projectRoot,
+			components: [{ name: "app", repo: "." }],
+			workflows: {
+				"owner-flow": {
+					name: "Owner Flow",
+					description: "Proposal ownership security fixture",
+					gates: [{ id: "implementation", name: "Implementation", depends_on: [] }],
+				},
+			},
+		});
+		const victimId = await createSession({ projectId: project.id, cwd: projectRoot });
+		const attackerId = await createSession({ projectId: project.id, cwd: projectRoot });
+		await waitForSessionStatus(victimId, "idle", 30_000);
+		const victimHeaders = sessionCapabilityHeaders(gateway, victimId);
+		const attackerHeaders = sessionCapabilityHeaders(gateway, attackerId);
+		const manager = gateway.sessionManager as any;
+		const context = gateway.projectContextManager.getOrCreate(project.id);
+
+		const seeded = await rawApiFetch(`/api/sessions/${victimId}/proposal/goal/seed`, {
+			method: "POST",
+			headers: victimHeaders,
+			body: JSON.stringify({ args: {
+				title: "Promote owned victim",
+				spec: "Only the victim capability may adopt this exact session worktree.",
+				workflow: "owner-flow",
+				projectId: project.id,
+			} }),
+		});
+		expect(seeded.status, await seeded.clone().text()).toBe(200);
+		const selected = await rawApiFetch(`/api/sessions/${victimId}/proposal/goal/worktree-mode`, {
+			method: "PUT", headers: victimHeaders, body: JSON.stringify({ mode: "current-session" }),
+		});
+		expect(selected.status, await selected.clone().text()).toBe(200);
+		const selection = await jsonResponse(selected);
+		expect(selection.eligibility?.eligible, JSON.stringify(selection)).toBe(true);
+
+		const draftPath = path.join(gateway.bobbitDir, "state", "proposal-drafts", victimId, "goal.md");
+		const historyDir = path.join(gateway.bobbitDir, "state", "proposal-drafts", victimId, "goal.history");
+		const revision = () => fs.existsSync(historyDir)
+			? fs.readdirSync(historyDir).reduce((max, file) => Math.max(max, Number.parseInt(file.match(/^(\d+)\./)?.[1] ?? "0", 10)), 0)
+			: 0;
+		const draftBefore = fs.readFileSync(draftPath, "utf8");
+		const revisionBefore = revision();
+		const goalsBefore = structuredClone(context.goalStore.getAll());
+		const tasksBefore = structuredClone(context.taskStore.getAll());
+		const gatesBefore = (context.gateStore as any).gates?.size ?? 0;
+		const workflowLibraryBefore = structuredClone(context.workflowStore.getAll());
+		const workflowConfigBefore = structuredClone(context.projectConfigStore.getWorkflows());
+		const victimBefore = structuredClone(manager.getPersistedSession(victimId));
+		const worktree = victimBefore.worktreePath as string;
+		expect(fs.existsSync(worktree)).toBe(true);
+
+		const originalReserve = manager.reserveSessionGoalPromotion;
+		const originalCreateGoal = context.goalManager.createGoal;
+		const originalPromote = manager.promoteToGoalLead;
+		let reservationCalls = 0;
+		let createGoalCalls = 0;
+		let promoteCalls = 0;
+		manager.reserveSessionGoalPromotion = function (..._args: any[]) {
+			reservationCalls += 1;
+			throw new Error("PROPOSAL_OWNER_GUARD_RAN_TOO_LATE: promotion reservation was reached");
+		};
+		context.goalManager.createGoal = async function (...args: any[]) {
+			createGoalCalls += 1;
+			return originalCreateGoal.apply(this, args);
+		};
+		manager.promoteToGoalLead = async function (...args: any[]) {
+			promoteCalls += 1;
+			return originalPromote.apply(this, args);
+		};
+		try {
+			const modeAttack = await rawApiFetch(`/api/sessions/${victimId}/proposal/goal/worktree-mode`, {
+				method: "PUT", headers: attackerHeaders, body: JSON.stringify({ mode: "current-session" }),
+			});
+			await expectProposalOwnerMismatch(modeAttack, "current-session mode mutation");
+			const acceptanceAttack = await rawApiFetch(`/api/sessions/${victimId}/proposal/goal/accept`, {
+				method: "POST", headers: attackerHeaders, body: JSON.stringify({}),
+			});
+			await expectProposalOwnerMismatch(acceptanceAttack, "current-session acceptance");
+		} finally {
+			manager.reserveSessionGoalPromotion = originalReserve;
+			context.goalManager.createGoal = originalCreateGoal;
+			manager.promoteToGoalLead = originalPromote;
+		}
+
+		expect(reservationCalls, "ownership denial must precede promotion reservation").toBe(0);
+		expect(createGoalCalls, "ownership denial must precede goal/worktree creation").toBe(0);
+		expect(promoteCalls, "ownership denial must precede session role mutation").toBe(0);
+		expect(context.goalStore.getAll()).toEqual(goalsBefore);
+		expect(context.taskStore.getAll()).toEqual(tasksBefore);
+		expect((context.gateStore as any).gates?.size ?? 0).toBe(gatesBefore);
+		expect(context.workflowStore.getAll()).toEqual(workflowLibraryBefore);
+		expect(context.projectConfigStore.getWorkflows()).toEqual(workflowConfigBefore);
+		expect(manager.getPersistedSession(victimId)).toEqual(victimBefore);
+		expect(fs.existsSync(worktree)).toBe(true);
+		expect(fs.readFileSync(draftPath, "utf8"), "denied acceptance must retain the victim draft").toBe(draftBefore);
+		expect(revision(), "denied mode and acceptance must not advance proposal revision").toBe(revisionBefore);
+
+		const ownerAcceptance = await rawApiFetch(`/api/sessions/${victimId}/proposal/goal/accept`, {
+			method: "POST", headers: victimHeaders, body: JSON.stringify({}),
+		});
+		expect(ownerAcceptance.status, await ownerAcceptance.clone().text()).toBe(201);
+		const goal = await jsonResponse(ownerAcceptance);
+		scope.trackGoal(goal.id);
+		expect(goal.worktreeOwnerSessionId).toBe(victimId);
+		expect(manager.getPersistedSession(victimId)).toMatchObject({ role: "team-lead", goalId: goal.id, teamGoalId: goal.id });
+	});
+
 	test("promotes an omitted workflow selection with the first generated default", async ({ gateway }) => {
 		const projectRoot = path.join(gateway.bobbitDir, `promotion-default-${randomUUID()}`);
 		copyGitTemplate(projectRoot);
