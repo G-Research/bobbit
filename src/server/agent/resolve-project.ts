@@ -250,7 +250,12 @@ export function validateExecutionCwd(
 	}
 
 	if (isSameOrDescendant(project.rootPath, canonicalCwd)) return { ok: true, cwd: canonicalCwd };
-	if (sourceAllowsOwnedCwd(project, projectContextManager, canonicalCwd, source)) return { ok: true, cwd: canonicalCwd };
+	// Ownership roots and the requested coordinate live in the same server-owned
+	// realm. Keep their original path dialect for containment: on a Windows host,
+	// sandbox POSIX paths such as /workspace-wt/... must not be rewritten into a
+	// host drive path before comparing them. Native paths remain realpath-aware
+	// through isSameOrDescendant(), and user input never reaches this allowance.
+	if (sourceAllowsOwnedCwd(project, projectContextManager, cwd, source)) return { ok: true, cwd: canonicalCwd };
 
 	return {
 		ok: false,
