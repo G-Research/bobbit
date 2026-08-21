@@ -221,9 +221,11 @@ All four `localData` fields are required and their supported values are fixed:
 The portable path rules deliberately produce the same result on Windows and POSIX. Bobbit rejects
 empty or whitespace-padded values; absolute, drive-relative, UNC, or device paths; backslashes,
 colons/alternate data streams, control characters, and Windows-invalid punctuation; empty, `.`,
-or `..` components; Windows reserved device names; and components ending in a dot or space. An
-invalid declaration rejects the pack instead of silently removing the capability. Schema-1 packs
-do not activate `localData`; packs with no declaration retain their previous manifest/runtime shape.
+or `..` components; Windows reserved device names; components ending in a dot or space; and paths
+equal to or below Bobbit-managed marketplace roots (`.bobbit/config/market-packs` and Headquarters
+`config/market-packs`, compared case-insensitively). An invalid declaration rejects the pack instead
+of silently removing the capability. Schema-1 packs do not activate `localData`; packs with no
+declaration retain their previous manifest/runtime shape.
 
 #### Resolution and project identity
 

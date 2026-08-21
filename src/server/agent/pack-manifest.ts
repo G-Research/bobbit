@@ -71,6 +71,11 @@ const WINDOWS_RESERVED_LOCAL_DATA_NAMES = new Set([
 	...(["¹", "²", "³"] as const).flatMap(suffix => [`COM${suffix}`, `LPT${suffix}`]),
 ]);
 
+const MANAGED_MARKETPLACE_LOCAL_DATA_ROOTS = [
+	".bobbit/config/market-packs",
+	"config/market-packs",
+] as const;
+
 /** Normalize one portable local-data directory declaration. The accepted form
  * is already-trimmed, forward-slash-separated, and relative on every host. */
 export function normalizePackLocalDataDirectory(value: unknown): string | null {
@@ -86,7 +91,12 @@ export function normalizePackLocalDataDirectory(value: unknown): string | null {
 		const deviceStem = component.split(".", 1)[0]?.toUpperCase();
 		if (deviceStem && WINDOWS_RESERVED_LOCAL_DATA_NAMES.has(deviceStem)) return null;
 	}
-	return components.join("/");
+	const normalized = components.join("/");
+	const comparable = normalized.toLowerCase();
+	if (MANAGED_MARKETPLACE_LOCAL_DATA_ROOTS.some(root => comparable === root || comparable.startsWith(`${root}/`))) {
+		return null;
+	}
+	return normalized;
 }
 
 function parseLocalDataDeclaration(raw: unknown): PackLocalDataDeclaration | null {

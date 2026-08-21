@@ -104,6 +104,35 @@ describe("pack local-data manifest declaration", () => {
 		expect(problems.join("; ")).toMatch(/localData/);
 	});
 
+	it.each([
+		".bobbit/config/market-packs",
+		".bobbit/config/market-packs/performance",
+		"config/market-packs",
+		"config/market-packs/performance/cache",
+		".BOBBIT/CONFIG/MARKET-PACKS/Performance",
+		"Config/Market-Packs/performance",
+	])("rejects Bobbit-managed marketplace directory %j", directory => {
+		expect(validateManifest({
+			...baseManifest,
+			schema: 2,
+			localData: { ...declaration, directory },
+		})).toBeNull();
+	});
+
+	it.each([
+		".performance-optimisation",
+		".bobbit/config/market-pack",
+		".bobbit/config/market-packs-data",
+		"config/market-pack",
+		"data/config/market-packs/performance",
+	])("accepts external or near-miss directory %j", directory => {
+		expect(validateManifest({
+			...baseManifest,
+			schema: 2,
+			localData: { ...declaration, directory },
+		})?.localData?.directory).toBe(directory);
+	});
+
 	it("requires every fixed lifecycle/access field", () => {
 		for (const localData of [
 			{ ...declaration, scope: "user" },
