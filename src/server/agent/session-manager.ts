@@ -3990,7 +3990,16 @@ export class SessionManager {
 	 * creation listener shares the same authority boundary.
 	 */
 	private async notifySessionCreated(session: SessionInfo, store: SessionStore): Promise<void> {
-		await store.flushAsync();
+		if (store instanceof SessionStore) {
+			// Production stores must cross the atomic publication fence. Do not make
+			// this optional: a failed initial write must suppress the committed fact.
+			await store.flushAsync();
+		} else {
+			// Historical in-process harnesses inject small synchronous recording
+			// stores through the SessionStore seam. Their put/update calls are the
+			// committed boundary; richer doubles may still expose an async barrier.
+			await (store as unknown as { flushAsync?: () => void | Promise<void> }).flushAsync?.();
+		}
 		for (const fn of this._creationListeners) {
 			try { fn(session); } catch (err) {
 				console.error(`[session-manager] session creation listener failed for ${session.id}:`, err);
