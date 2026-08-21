@@ -79,12 +79,19 @@ async function sessionRecord(id: string): Promise<any> {
 	return responseJson(await apiFetch(`/api/sessions/${id}?include=archived`));
 }
 
-async function seedGoalProposal(sessionId: string, projectId: string, title: string): Promise<void> {
+function sessionCapabilityHeaders(gateway: GatewayInfo, sessionId: string): Record<string, string> {
+	const secret = gateway.sessionManager?.sessionSecretStore?.getOrCreateSecret(sessionId);
+	expect(secret, `session ${sessionId} needs its server-minted proposal capability`).toEqual(expect.any(String));
+	return { "X-Bobbit-Session-Secret": secret };
+}
+
+async function seedGoalProposal(gateway: GatewayInfo, sessionId: string, projectId: string, title: string): Promise<void> {
 	const workflowsBody = await responseJson(await apiFetch(`/api/workflows?projectId=${encodeURIComponent(projectId)}`));
 	const workflows = Array.isArray(workflowsBody) ? workflowsBody : workflowsBody.workflows;
 	expect(workflows?.length, "journey project needs a workflow").toBeGreaterThan(0);
 	await responseJson(await apiFetch(`/api/sessions/${sessionId}/proposal/goal/seed`, {
 		method: "POST",
+		headers: sessionCapabilityHeaders(gateway, sessionId),
 		body: JSON.stringify({
 			args: {
 				title,
@@ -157,7 +164,7 @@ test.describe("Journey: Current-session goal promotion", () => {
 			expect(before.branch).toBeTruthy();
 			expect(before.worktreePath).toBeTruthy();
 			const transcriptBefore = transcriptSnapshot(gateway, source.id);
-			await seedGoalProposal(source.id, source.projectId, `Promote browser session ${Date.now()}`);
+			await seedGoalProposal(gateway, source.id, source.projectId, `Promote browser session ${Date.now()}`);
 			await openSeededProposal(page, source.id);
 
 			const newMode = page.locator("[data-testid='goal-form-worktree-new']");
@@ -284,10 +291,10 @@ test.describe("Journey: Current-session goal promotion", () => {
 		}
 	});
 
-	test("shows the authoritative reason when Current session is unavailable", async ({ page }) => {
+	test("shows the authoritative reason when Current session is unavailable", async ({ page, gateway }) => {
 		const source = await createGitSession(false);
 		try {
-			await seedGoalProposal(source.id, source.projectId, `Unavailable promotion ${Date.now()}`);
+			await seedGoalProposal(gateway, source.id, source.projectId, `Unavailable promotion ${Date.now()}`);
 			await openSeededProposal(page, source.id);
 			const current = page.locator("[data-testid='goal-form-worktree-current-session']");
 			await expect(current).toBeDisabled({ timeout: 20_000 });
@@ -307,13 +314,13 @@ test.describe("Journey: Current-session goal promotion", () => {
 		}
 	});
 
-	test("keeps New worktree goal creation distinct from the proposal owner", async ({ page }) => {
+	test("keeps New worktree goal creation distinct from the proposal owner", async ({ page, gateway }) => {
 		test.setTimeout(120_000);
 		const source = await createGitSession(true);
 		let goalId: string | undefined;
 		try {
 			const before = await sessionRecord(source.id);
-			await seedGoalProposal(source.id, source.projectId, `New worktree control ${Date.now()}`);
+			await seedGoalProposal(gateway, source.id, source.projectId, `New worktree control ${Date.now()}`);
 			await openSeededProposal(page, source.id);
 			await expect(page.locator("[data-testid='goal-form-worktree-new']")).toBeChecked();
 			await page.locator("[data-testid='proposal-primary-submit'] button").click();
