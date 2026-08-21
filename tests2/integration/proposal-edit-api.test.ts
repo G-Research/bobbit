@@ -18,7 +18,15 @@
  * Design doc: docs/design/editable-proposals.md §6.4, §9.1.
  */
 import { test, expect } from "./_e2e/in-process-harness.js";
-import { apiFetch, createSession, deleteSession } from "./_e2e/e2e-setup.js";
+import {
+	apiFetch,
+	connectWs,
+	createGoal,
+	createSession,
+	deleteSession,
+	rawApiFetch,
+	seedTeamLeadHeader,
+} from "./_e2e/e2e-setup.js";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -52,6 +60,28 @@ function latestProposalRevision(bobbitDir: string, sid: string, type: string): n
 	}, 0);
 }
 
+function sessionCapabilityHeaders(gateway: any, sid: string): Record<string, string> {
+	return {
+		"X-Bobbit-Session-Secret": gateway.sessionManager.sessionSecretStore.getOrCreateSecret(sid),
+	};
+}
+
+async function expectProposalOwnerMismatch(response: Response, operation: string): Promise<void> {
+	const text = await response.text();
+	expect.soft(response.status, `${operation} must reject a foreign session capability: ${text}`).toBe(403);
+	expect.soft(text, `${operation} must return the stable structured ownership code`).toContain("PROPOSAL_OWNER_MISMATCH");
+}
+
+async function authenticatedOperatorCookie(): Promise<string> {
+	const response = await rawApiFetch("/api/goals", {
+		headers: { "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors" },
+	});
+	const setCookies = (response.headers as any).getSetCookie?.() as string[] | undefined
+		?? (response.headers.get("set-cookie") ? [response.headers.get("set-cookie") as string] : []);
+	return setCookies.map(cookie => cookie.split(";")[0])
+		.find(cookie => cookie.startsWith("bobbit_session=")) ?? "";
+}
+
 test.describe("editable proposals — REST API", () => {
 	test("edit-before-propose returns 404 FILE_NOT_FOUND naming propose_goal", async () => {
 		const sid = await createSession();
@@ -67,6 +97,139 @@ test.describe("editable proposals — REST API", () => {
 			expect(String(body.message)).toMatch(/propose_goal/);
 		} finally {
 			await deleteSession(sid);
+		}
+	});
+
+	test("foreign session capability cannot mutate a victim proposal or borrow its team-lead parent authority", async ({ gateway }) => {
+		const attackerId = await createSession();
+		const victimId = await createSession();
+		const parent = await createGoal({
+			title: `proposal owner parent ${Date.now()}`,
+			spec: "Parent goal for proposal-owner authorization regression coverage.",
+			workflowId: "feature",
+			worktree: false,
+			autoStartTeam: false,
+			subgoalsAllowed: true,
+		});
+		const victim = gateway.sessionManager.getSession(victimId) as any;
+		const previousRelation = { role: victim.role, goalId: victim.goalId, teamGoalId: victim.teamGoalId };
+		const victimHeaders = sessionCapabilityHeaders(gateway, victimId);
+		const attackerHeaders = sessionCapabilityHeaders(gateway, attackerId);
+		const victimDraft = proposalPath(gateway.bobbitDir, victimId, "goal");
+		const connection = await connectWs(victimId);
+		try {
+			seedTeamLeadHeader(gateway, parent.id, victimId);
+			Object.assign(victim, { role: "team-lead", goalId: parent.id, teamGoalId: parent.id });
+			for (const title of ["Victim draft v1", "Victim draft v2"]) {
+				const seeded = await rawApiFetch(`/api/sessions/${victimId}/proposal/goal/seed`, {
+					method: "POST",
+					headers: victimHeaders,
+					body: JSON.stringify({ args: {
+						title,
+						spec: "Security owner fixture.",
+						workflow: "feature",
+						projectId: victim.projectId,
+					} }),
+				});
+				expect(seeded.status, await seeded.clone().text()).toBe(200);
+			}
+			const beforeBytes = fs.readFileSync(victimDraft, "utf8");
+			expect(beforeBytes, "the victim's live team-lead relation should inject its parent only for an authenticated owner").toContain(parent.id);
+			const beforeRevision = latestProposalRevision(gateway.bobbitDir, victimId, "goal");
+			const eventCursor = connection.messageCount();
+
+			const attempts: Array<[string, () => Promise<Response>]> = [
+				["seed", () => rawApiFetch(`/api/sessions/${victimId}/proposal/goal/seed`, {
+					method: "POST",
+					headers: attackerHeaders,
+					body: JSON.stringify({ args: {
+						title: "Forged victim child",
+						spec: "Security owner fixture.",
+						workflow: "feature",
+						projectId: victim.projectId,
+					} }),
+				})],
+				["edit", () => rawApiFetch(`/api/sessions/${victimId}/proposal/goal/edit`, {
+					method: "POST",
+					headers: attackerHeaders,
+					body: JSON.stringify({ old_text: "Security owner fixture.", new_text: "Forged edit." }),
+				})],
+				["restore", () => rawApiFetch(`/api/sessions/${victimId}/proposal/goal/restore`, {
+					method: "POST",
+					headers: attackerHeaders,
+					body: JSON.stringify({ rev: 1 }),
+				})],
+				["worktree-mode", () => rawApiFetch(`/api/sessions/${victimId}/proposal/goal/worktree-mode`, {
+					method: "PUT",
+					headers: attackerHeaders,
+					body: JSON.stringify({ mode: "current-session" }),
+				})],
+				["delete", () => rawApiFetch(`/api/sessions/${victimId}/proposal/goal`, {
+					method: "DELETE",
+					headers: attackerHeaders,
+				})],
+			];
+			// Run sequentially: these routes share one draft and must never race.
+			for (const [operation, attempt] of attempts) {
+				await expectProposalOwnerMismatch(await attempt(), operation);
+			}
+			await new Promise(resolve => setTimeout(resolve, 50));
+
+			expect(fs.existsSync(victimDraft), "foreign mutations must retain the victim draft").toBe(true);
+			if (fs.existsSync(victimDraft)) expect(fs.readFileSync(victimDraft, "utf8")).toBe(beforeBytes);
+			expect(latestProposalRevision(gateway.bobbitDir, victimId, "goal")).toBe(beforeRevision);
+			const proposalEvents = connection.messages.slice(eventCursor)
+				.filter(message => message.type === "proposal_update" || message.type === "proposal_cleared");
+			expect(proposalEvents, "denied mutations must not emit victim proposal events").toEqual([]);
+		} finally {
+			connection.close();
+			Object.assign(victim, previousRelation);
+			gateway.teamManager.teams?.delete?.(parent.id);
+			await deleteSession(attackerId);
+			await deleteSession(victimId);
+		}
+	});
+
+	test("victim capability and explicit signed operator cookie permit equivalent proposal mutations", async ({ gateway }) => {
+		const victimId = await createSession();
+		const victim = gateway.sessionManager.getSession(victimId) as any;
+		const headers = sessionCapabilityHeaders(gateway, victimId);
+		try {
+			for (const title of ["Owner draft v1", "Owner draft v2"]) {
+				const seeded = await rawApiFetch(`/api/sessions/${victimId}/proposal/goal/seed`, {
+					method: "POST",
+					headers,
+					body: JSON.stringify({ args: { title, spec: "Owner control fixture.", workflow: "feature", projectId: victim.projectId } }),
+				});
+				expect(seeded.status, await seeded.clone().text()).toBe(200);
+			}
+			const edit = await rawApiFetch(`/api/sessions/${victimId}/proposal/goal/edit`, {
+				method: "POST", headers,
+				body: JSON.stringify({ old_text: "Owner draft v2", new_text: "Owner edited" }),
+			});
+			expect(edit.status, await edit.clone().text()).toBe(200);
+			const restore = await rawApiFetch(`/api/sessions/${victimId}/proposal/goal/restore`, {
+				method: "POST", headers, body: JSON.stringify({ rev: 1 }),
+			});
+			expect(restore.status, await restore.clone().text()).toBe(200);
+			const mode = await rawApiFetch(`/api/sessions/${victimId}/proposal/goal/worktree-mode`, {
+				method: "PUT", headers, body: JSON.stringify({ mode: "current-session" }),
+			});
+			expect(mode.status, await mode.clone().text()).toBe(200);
+
+			const operatorCookie = await authenticatedOperatorCookie();
+			expect(operatorCookie, "same-origin bearer bootstrap must mint the explicit signed operator credential").not.toBe("");
+			const operatorEdit = await rawApiFetch(`/api/sessions/${victimId}/proposal/goal/edit`, {
+				method: "POST",
+				headers: { Cookie: operatorCookie },
+				body: JSON.stringify({ old_text: "Owner draft v1", new_text: "Operator edited" }),
+			});
+			expect(operatorEdit.status, await operatorEdit.clone().text()).toBe(200);
+
+			const deleted = await rawApiFetch(`/api/sessions/${victimId}/proposal/goal`, { method: "DELETE", headers });
+			expect(deleted.status).toBe(204);
+		} finally {
+			await deleteSession(victimId);
 		}
 	});
 
