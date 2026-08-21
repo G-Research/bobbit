@@ -632,7 +632,7 @@ import { StaffManager } from "./agent/staff-manager.js";
 import { buildStaffSystemPrompt } from "./agent/role-prompt.js";
 import { TriggerEngine } from "./agent/staff-trigger-engine.js";
 import { GoalTriggerDispatcher } from "./agent/goal-trigger-dispatcher.js";
-import { InboxManager, type InboxEntry, type InboxLiveAddress, type InboxLiveEvent } from "./agent/inbox-manager.js";
+import { InboxManager, toInboxLiveEntry, type InboxEntry, type InboxLiveAddress, type InboxLiveEvent } from "./agent/inbox-manager.js";
 import { InboxNudger } from "./agent/inbox-nudger.js";
 import { NotificationStaffDispatcher } from "./agent/notification-staff-dispatcher.js";
 import { runWithStaffNotificationTurnContext } from "./agent/staff-notification-causation.js";
@@ -19253,6 +19253,27 @@ async function handleApiRoute(
 	// (see docs/design/staff-inbox.md §7.2). UI/external integrations now hit
 	// `POST /api/staff/:id/inbox` with `source.type = "manual_ui" | "manual_api"`.
 
+	/** Resolve the one live staff session that owns this inbox from its host-issued
+	 * capability secret. Public session ids, request bodies, bearer/cookie auth,
+	 * and client project claims never establish notification-inbox authority. */
+	const resolveExactInboxOwner = (staff: { id: string; projectId?: string; currentSessionId?: string }): SessionInfo | undefined => {
+		if (!staff.projectId || !staff.currentSessionId) return undefined;
+		const rawSecret = req.headers["x-bobbit-session-secret"];
+		const secret = Array.isArray(rawSecret) ? rawSecret[0] : rawSecret;
+		const callerSessionId = sessionManager.sessionSecretStore.resolveSessionIdBySecret(secret);
+		if (!callerSessionId || callerSessionId !== staff.currentSessionId) return undefined;
+		const live = sessionManager.getSession(callerSessionId);
+		const persisted = sessionManager.getPersistedSession(callerSessionId);
+		if (!live || live.dormant === true || live.status === "terminated" || !persisted) return undefined;
+		if (live.id !== callerSessionId
+			|| persisted.id !== callerSessionId
+			|| live.staffId !== staff.id
+			|| persisted.staffId !== staff.id
+			|| live.projectId !== staff.projectId
+			|| persisted.projectId !== staff.projectId) return undefined;
+		return live;
+	};
+
 	// GET /api/staff/:id/inbox?state=pending&limit=50
 	const staffInboxListMatch = url.pathname.match(/^\/api\/staff\/([^/]+)\/inbox$/);
 	if (staffInboxListMatch && req.method === "GET") {
@@ -19267,7 +19288,10 @@ async function handleApiRoute(
 			: undefined;
 		const limitRaw = url.searchParams.get("limit");
 		const limit = limitRaw != null ? Math.max(0, parseInt(limitRaw, 10) || 0) : undefined;
-		const entries = inboxManager.listForStaff(id, state, limit);
+		const storedEntries = inboxManager.listForStaff(id, state, limit);
+		const entries = resolveExactInboxOwner(staff)
+			? storedEntries
+			: storedEntries.map(toInboxLiveEntry);
 		json({ entries });
 		return;
 	}
@@ -19312,24 +19336,31 @@ async function handleApiRoute(
 		if (!inboxManager) { json({ error: "Inbox not initialised" }, 500); return; }
 		const staff = staffManager.getStaff(id);
 		if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
-		const body = await readBody(req);
-		if (!body || typeof body.sessionId !== "string" || !body.sessionId) {
-			json({ error: "Missing sessionId" }, 400);
-			return;
-		}
-		const session = sessionManager.getSession(body.sessionId);
-		if (!session || session.staffId !== id) {
-			json({ error: "Forbidden: session does not belong to this staff" }, 403);
-			return;
-		}
 		const existing = inboxManager.listForStaff(id).find(e => e.id === entryId);
 		if (!existing) { json({ error: "Inbox entry not found" }, 404); return; }
+		const body = await readBody(req);
+		if (existing.source.type === "notification") {
+			if (!resolveExactInboxOwner(staff)) {
+				json({ error: "Forbidden: exact owning staff session required" }, 403);
+				return;
+			}
+		} else {
+			if (!body || typeof body.sessionId !== "string" || !body.sessionId) {
+				json({ error: "Missing sessionId" }, 400);
+				return;
+			}
+			const session = sessionManager.getSession(body.sessionId);
+			if (!session || session.staffId !== id) {
+				json({ error: "Forbidden: session does not belong to this staff" }, 403);
+				return;
+			}
+		}
 		if (existing.state !== "pending") {
 			json({ error: `Inbox entry ${entryId} is ${existing.state}, expected pending` }, 409);
 			return;
 		}
 		try {
-			const entry = inboxManager.transitionToCompleted(id, entryId, typeof body.summary === "string" ? body.summary : undefined);
+			const entry = inboxManager.transitionToCompleted(id, entryId, typeof body?.summary === "string" ? body.summary : undefined);
 			json({ entry });
 		} catch (err) {
 			jsonError(400, err);
@@ -19344,17 +19375,26 @@ async function handleApiRoute(
 		if (!inboxManager) { json({ error: "Inbox not initialised" }, 500); return; }
 		const staff = staffManager.getStaff(id);
 		if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
+		const existing = inboxManager.listForStaff(id).find(e => e.id === entryId);
+		if (!existing) { json({ error: "Inbox entry not found" }, 404); return; }
 		const body = await readBody(req);
-		if (!body || typeof body.sessionId !== "string" || !body.sessionId) {
-			json({ error: "Missing sessionId" }, 400);
-			return;
+		if (existing.source.type === "notification") {
+			if (!resolveExactInboxOwner(staff)) {
+				json({ error: "Forbidden: exact owning staff session required" }, 403);
+				return;
+			}
+		} else {
+			if (!body || typeof body.sessionId !== "string" || !body.sessionId) {
+				json({ error: "Missing sessionId" }, 400);
+				return;
+			}
+			const session = sessionManager.getSession(body.sessionId);
+			if (!session || session.staffId !== id) {
+				json({ error: "Forbidden: session does not belong to this staff" }, 403);
+				return;
+			}
 		}
-		const session = sessionManager.getSession(body.sessionId);
-		if (!session || session.staffId !== id) {
-			json({ error: "Forbidden: session does not belong to this staff" }, 403);
-			return;
-		}
-		if (body.outcome !== "failed" && body.outcome !== "cancelled") {
+		if (body?.outcome !== "failed" && body?.outcome !== "cancelled") {
 			json({ error: "outcome must be 'failed' or 'cancelled'" }, 400);
 			return;
 		}
@@ -19362,8 +19402,6 @@ async function handleApiRoute(
 			json({ error: "Missing reason" }, 400);
 			return;
 		}
-		const existing = inboxManager.listForStaff(id).find(e => e.id === entryId);
-		if (!existing) { json({ error: "Inbox entry not found" }, 404); return; }
 		if (existing.state !== "pending") {
 			json({ error: `Inbox entry ${entryId} is ${existing.state}, expected pending` }, 409);
 			return;
@@ -19384,6 +19422,12 @@ async function handleApiRoute(
 		if (!inboxManager) { json({ error: "Inbox not initialised" }, 500); return; }
 		const staff = staffManager.getStaff(id);
 		if (!staff) { json({ error: "Staff agent not found" }, 404); return; }
+		const existing = inboxManager.listForStaff(id).find(e => e.id === entryId);
+		if (!existing) { json({ error: "Inbox entry not found" }, 404); return; }
+		if (existing.source.type === "notification" && !resolveExactInboxOwner(staff)) {
+			json({ error: "Forbidden: exact owning staff session required" }, 403);
+			return;
+		}
 		const ok = inboxManager.remove(id, entryId);
 		if (!ok) { json({ error: "Inbox entry not found" }, 404); return; }
 		json({ ok: true });

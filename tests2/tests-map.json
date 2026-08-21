@@ -21,6 +21,24 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/inbox-tool-credentials.test.ts",
+      "reason": "Core coverage that the first-party inbox tool forwards only the host-issued staff-session capability and no caller-controlled causation fields.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/integration/notification-staff-inbox-auth.test.ts",
+      "reason": "Integration coverage for exact owning staff-session authority, redacted operator reads, cross-project isolation, and protected notification entry mutations.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
       "path": "tests2/core/host-goal-notifications.test.ts",
       "reason": "Core coverage for authoritative goal notification transitions, revisions, ordering, and non-fatal publication.",
       "execution": {

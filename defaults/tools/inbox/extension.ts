@@ -18,10 +18,12 @@ import { homedir } from "node:os";
 export default function (pi: ExtensionAPI) {
 	// ── Config ────────────────────────────────────────────────────────
 	const sessionId = process.env.BOBBIT_SESSION_ID;
+	const sessionSecret = process.env.BOBBIT_SESSION_SECRET;
 	const staffId = process.env.BOBBIT_STAFF_ID;
-	if (!sessionId || !staffId) {
+	if (!sessionId || !sessionSecret || !staffId) {
 		return;
 	}
+	const exactSessionSecret = sessionSecret;
 
 	let token: string;
 	let baseUrl: string;
@@ -49,7 +51,11 @@ export default function (pi: ExtensionAPI) {
 	async function api(method: string, urlPath: string, body?: unknown): Promise<unknown> {
 		const resp = await fetch(`${baseUrl}${urlPath}`, {
 			method,
-			headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+			headers: {
+				Authorization: `Bearer ${token}`,
+				"Content-Type": "application/json",
+				"X-Bobbit-Session-Secret": exactSessionSecret,
+			},
 			body: body !== undefined ? JSON.stringify(body) : undefined,
 		});
 		const text = await resp.text();

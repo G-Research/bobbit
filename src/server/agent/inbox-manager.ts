@@ -28,8 +28,8 @@ function bounded(value: string | undefined, max: number): string | undefined {
 	return value === undefined ? undefined : value.slice(0, max);
 }
 
-/** Never return a source store object through WebSocket publication. */
-function liveEntry(entry: InboxEntry): InboxLiveEntry {
+/** Never return a source store object through WebSocket or operator publication. */
+export function toInboxLiveEntry(entry: InboxEntry): InboxLiveEntry {
 	const triggerId = bounded(entry.source.triggerId, 256);
 	const actorId = bounded(entry.source.actorId, 256);
 	const context = bounded(entry.context, 2_048);
@@ -145,7 +145,7 @@ export class InboxManager {
 			createdAt: Date.now(),
 		};
 		store.put(entry);
-		this.publishForStaff(staffId, { type: "inbox.entry.added", staffId, entry: liveEntry(entry) });
+		this.publishForStaff(staffId, { type: "inbox.entry.added", staffId, entry: toInboxLiveEntry(entry) });
 		try {
 			this.nudger?.poke(staffId);
 		} catch (err) {
@@ -188,7 +188,7 @@ export class InboxManager {
 		};
 		const accepted = store.putStrict(entry);
 		if (accepted.inserted) {
-			this.publishForStaff(staffId, { type: "inbox.entry.added", staffId, entry: liveEntry(accepted.entry) });
+			this.publishForStaff(staffId, { type: "inbox.entry.added", staffId, entry: toInboxLiveEntry(accepted.entry) });
 			try {
 				this.nudger?.poke(staffId);
 			} catch (err) {
@@ -226,7 +226,7 @@ export class InboxManager {
 			result: summary,
 		});
 		const entry = store.get(staffId, entryId)!;
-		this.publishForStaff(staffId, { type: "inbox.entry.updated", staffId, entry: liveEntry(entry) });
+		this.publishForStaff(staffId, { type: "inbox.entry.updated", staffId, entry: toInboxLiveEntry(entry) });
 		return entry;
 	}
 
@@ -255,7 +255,7 @@ export class InboxManager {
 			error: reason,
 		});
 		const entry = store.get(staffId, entryId)!;
-		this.publishForStaff(staffId, { type: "inbox.entry.updated", staffId, entry: liveEntry(entry) });
+		this.publishForStaff(staffId, { type: "inbox.entry.updated", staffId, entry: toInboxLiveEntry(entry) });
 		return entry;
 	}
 
