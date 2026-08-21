@@ -68,6 +68,7 @@ let sourceProjectFixture: { id: string; rootPath: string };
 let sourceProjectId: string;
 let sourceSessionId: string;
 let targetProjectId: string;
+let targetProjectRoot: string;
 let injectTargetProjectId: string;
 
 async function createSourceSession(): Promise<string> {
@@ -99,6 +100,7 @@ beforeAll(async () => {
 		workflows: TARGET_ONLY_WORKFLOWS,
 	});
 	targetProjectId = target.id;
+	targetProjectRoot = target.rootPath;
 	injectTargetProjectId = target.id;
 });
 
@@ -234,12 +236,17 @@ test.describe("cross-project proposal seed @smoke", () => {
 		});
 	});
 
-	// ── (c) explicit unknown → 422 UNKNOWN_PROJECT ─────────────────────
-	test("(c) explicit unknown projectId → 422 UNKNOWN_PROJECT for goal/role/tool/staff", async () => {
+	// ── (c) explicit unknown target ────────────────────────────────────
+	test("(c) goal uses canonical PROJECT_NOT_FOUND while other proposal types retain UNKNOWN_PROJECT", async () => {
 		await clearSourceProposals("goal", "role", "tool", "staff");
 		const s = await createSourceSession();
 		try {
-			for (const type of ["goal", "role", "tool", "staff"] as const) {
+			const goal = await seed(s, "goal", { ...VALID_ARGS.goal, projectId: "does-not-exist-project" });
+			expect(goal.status).toBe(404);
+			expect(await goal.json()).toMatchObject({ ok: false, code: "PROJECT_NOT_FOUND" });
+			expect(await seededFields(s, "goal")).toBeUndefined();
+
+			for (const type of ["role", "tool", "staff"] as const) {
 				const r = await seed(s, type, { ...VALID_ARGS[type], projectId: "does-not-exist-project" });
 				expect(r.status, `${type} unknown seed`).toBe(422);
 				const body = await r.json();
@@ -251,21 +258,37 @@ test.describe("cross-project proposal seed @smoke", () => {
 		}
 	});
 
-	// ── (c') explicit hidden/system target → 422 UNKNOWN_PROJECT ───────
+	test("goal seed rejects another project's checkout as user input", async () => {
+		await clearSourceProposals("goal");
+		const response = await seed(sourceSessionId, "goal", {
+			title: "Foreign cwd",
+			spec: "Another project's checkout cannot grant ambient proposal authority.",
+			workflow: "feature",
+			projectId: sourceProjectId,
+			cwd: targetProjectRoot,
+		});
+		expect(response.status, await response.clone().text()).toBe(422);
+		expect(await response.json()).toMatchObject({ ok: false, code: "CWD_OUTSIDE_PROJECT" });
+		expect(await seededFields(sourceSessionId, "goal")).toBeUndefined();
+	});
+
+	// ── (c') explicit hidden/system target → canonical visibility error ─
 	// The synthetic `system` project IS registered (hidden: true), but it is not
 	// a user-facing cross-project target. The system→headquarters mapping is for
 	// the OMITTED default only; an EXPLICIT `system` must be rejected.
-	test("(c') explicit hidden `system` projectId → 422 UNKNOWN_PROJECT for goal/role/tool/staff", async () => {
+	test("(c') explicit hidden `system` goal uses canonical PROJECT_NOT_VISIBLE", async () => {
 		await clearSourceProposals("goal", "role", "tool", "staff");
 		const s = await createSourceSession();
 		try {
-			for (const type of ["goal", "role", "tool", "staff"] as const) {
+			const goal = await seed(s, "goal", { ...VALID_ARGS.goal, projectId: SYSTEM_PROJECT_ID });
+			expect(goal.status).toBe(400);
+			expect(await goal.json()).toMatchObject({ ok: false, code: "PROJECT_NOT_VISIBLE" });
+			expect(await seededFields(s, "goal")).toBeUndefined();
+
+			for (const type of ["role", "tool", "staff"] as const) {
 				const r = await seed(s, type, { ...VALID_ARGS[type], projectId: SYSTEM_PROJECT_ID });
 				expect(r.status, `${type} explicit system seed`).toBe(422);
-				const body = await r.json();
-				expect(body.ok).toBe(false);
-				expect(body.code).toBe("UNKNOWN_PROJECT");
-				// No valid draft was persisted for the hidden target.
+				expect(await r.json()).toMatchObject({ ok: false, code: "UNKNOWN_PROJECT" });
 				expect(await seededFields(s, type)).toBeUndefined();
 			}
 		} finally {
@@ -301,6 +324,60 @@ test.describe("cross-project proposal seed @smoke", () => {
 	});
 
 	// ── (e) goal workflow validated against the TARGET project ─────────
+	test("ordinary goal acceptance revalidates a stale proposal without partial state", async () => {
+		await clearSourceProposals("goal");
+		const seeded = await seed(sourceSessionId, "goal", {
+			title: "Stale ordinary goal",
+			spec: "The selected workflow will disappear before acceptance.",
+			workflow: "target-only",
+			projectId: targetProjectId,
+		});
+		expect(seeded.status, await seeded.clone().text()).toBe(200);
+		const draftBefore = await (await apiFetch(`/api/sessions/${sourceSessionId}/proposal/goal`)).text();
+		const context = gateway.sessionManager.getProjectContextManager().getOrCreate(targetProjectId);
+		const workflowsBefore = context.projectConfigStore.getWorkflows();
+		const goalsBefore = structuredClone(context.goalStore.getAll());
+		const tasksBefore = structuredClone(context.taskStore.getAll());
+		const gatesBefore = (context.gateStore as any).gates?.size ?? 0;
+		const sessionsBefore = (await (await apiFetch("/api/sessions?include=archived")).json()).sessions.length;
+		const replacementWorkflows = {
+			replacement: {
+				name: "Replacement",
+				description: "Makes target-only stale.",
+				gates: [{ id: "implementation", name: "Implementation", depends_on: [] }],
+			},
+		};
+
+		let rejected: Response;
+		let workflowsAfterReject: Record<string, unknown> | undefined;
+		try {
+			context.projectConfigStore.setWorkflows(replacementWorkflows);
+			rejected = await apiFetch("/api/goals", {
+				method: "POST",
+				body: JSON.stringify({
+					title: "Stale ordinary goal",
+					spec: "The selected workflow will disappear before acceptance.",
+					workflowId: "target-only",
+					projectId: targetProjectId,
+					worktree: false,
+					autoStartTeam: false,
+				}),
+			});
+			workflowsAfterReject = context.projectConfigStore.getWorkflows();
+		} finally {
+			context.projectConfigStore.setWorkflows(workflowsBefore ?? {});
+		}
+
+		expect(rejected!.status, await rejected!.clone().text()).toBe(400);
+		expect(await rejected!.json()).toMatchObject({ ok: false, code: "UNKNOWN_WORKFLOW" });
+		expect(context.goalStore.getAll()).toEqual(goalsBefore);
+		expect(context.taskStore.getAll()).toEqual(tasksBefore);
+		expect((context.gateStore as any).gates?.size ?? 0).toBe(gatesBefore);
+		expect(workflowsAfterReject).toEqual(replacementWorkflows);
+		expect((await (await apiFetch("/api/sessions?include=archived")).json()).sessions).toHaveLength(sessionsBefore);
+		expect(await (await apiFetch(`/api/sessions/${sourceSessionId}/proposal/goal`)).text()).toBe(draftBefore);
+	});
+
 	test("(e) goal workflow is validated against the target project's workflows", async () => {
 		await clearSourceProposals("goal");
 		const s = await createSourceSession();

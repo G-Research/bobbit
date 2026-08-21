@@ -37,8 +37,8 @@ async function createPromotionCandidate(gateway: any, label: string): Promise<{
 		rootPath: projectRoot,
 		components: [{ name: "app", repo: "." }],
 		workflows: {
-			general: {
-				name: "General",
+			"promotion-flow": {
+				name: "Promotion Flow",
 				description: "Promotion compensation fixture",
 				gates: [{ id: "implementation", name: "Implementation", depends_on: [] }],
 			},
@@ -50,9 +50,9 @@ async function createPromotionCandidate(gateway: any, label: string): Promise<{
 		method: "POST",
 		body: JSON.stringify({
 			args: {
-				title: `Promote ${label}`,
+				title: `Promote ${label.slice(0, 18)}`,
 				spec: "Exercise promotion compensation.",
-				workflow: "general",
+				workflow: "promotion-flow",
 				projectId: project.id,
 			},
 		}),
@@ -70,6 +70,48 @@ async function createPromotionCandidate(gateway: any, label: string): Promise<{
 }
 
 test.describe("current-session goal promotion API", () => {
+	test("revalidates a stale workflow before promotion without partial state", async ({ gateway }) => {
+		const { ownerId, context } = await createPromotionCandidate(gateway, "stale-workflow");
+		const workflowBefore = context.projectConfigStore.getWorkflows();
+		const goalsBefore = structuredClone(context.goalStore.getAll());
+		const tasksBefore = structuredClone(context.taskStore.getAll());
+		const gatesBefore = (context.gateStore as any).gates?.size ?? 0;
+		const sessionBefore = structuredClone(gateway.sessionManager.getPersistedSession(ownerId));
+		const draftBefore = await (await apiFetch(`/api/sessions/${ownerId}/proposal/goal`)).text();
+		const worktree = sessionBefore.worktreePath as string;
+		expect(fs.existsSync(worktree)).toBe(true);
+
+		const replacementWorkflows = {
+			replacement: {
+				name: "Replacement",
+				description: "Makes the selected promotion workflow stale.",
+				gates: [{ id: "implementation", name: "Implementation", depends_on: [] }],
+			},
+		};
+		let rejected: Response;
+		let workflowsAfterReject: Record<string, unknown> | undefined;
+		try {
+			context.projectConfigStore.setWorkflows(replacementWorkflows);
+			rejected = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
+				method: "POST",
+				body: JSON.stringify({ title: "Promote stale workflow" }),
+			});
+			workflowsAfterReject = context.projectConfigStore.getWorkflows();
+		} finally {
+			context.projectConfigStore.setWorkflows(workflowBefore ?? {});
+		}
+
+		expect(rejected!.status, await rejected!.clone().text()).toBe(400);
+		expect(await jsonResponse(rejected!)).toMatchObject({ ok: false, code: "UNKNOWN_WORKFLOW" });
+		expect(context.goalStore.getAll()).toEqual(goalsBefore);
+		expect(context.taskStore.getAll()).toEqual(tasksBefore);
+		expect((context.gateStore as any).gates?.size ?? 0).toBe(gatesBefore);
+		expect(workflowsAfterReject).toEqual(replacementWorkflows);
+		expect(gateway.sessionManager.getPersistedSession(ownerId)).toEqual(sessionBefore);
+		expect(fs.existsSync(worktree)).toBe(true);
+		expect(await (await apiFetch(`/api/sessions/${ownerId}/proposal/goal`)).text()).toBe(draftBefore);
+	});
+
 	test("removes gates and goal after an exact reservation release, then permits a clean retry", async ({ gateway, scope }) => {
 		const { ownerId, context } = await createPromotionCandidate(gateway, "released-compensation");
 		const goalManager = context.goalManager as any;
@@ -90,7 +132,7 @@ test.describe("current-session goal promotion API", () => {
 		try {
 			failed = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
 				method: "POST",
-				body: JSON.stringify({ title: "Promote released compensation" }),
+				body: JSON.stringify({ title: "Promote released" }),
 			});
 		} finally {
 			goalManager.createGoal = originalCreateGoal;
@@ -104,7 +146,7 @@ test.describe("current-session goal promotion API", () => {
 
 		const retry = await apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
 			method: "POST",
-			body: JSON.stringify({ title: "Promote released compensation" }),
+			body: JSON.stringify({ title: "Promote released" }),
 		});
 		expect(retry.status, await retry.clone().text()).toBe(201);
 		const retriedGoal = await jsonResponse(retry);
@@ -139,7 +181,7 @@ test.describe("current-session goal promotion API", () => {
 
 		const acceptance = apiFetch(`/api/sessions/${ownerId}/proposal/goal/accept`, {
 			method: "POST",
-			body: JSON.stringify({ title: "Promote role race compensation" }),
+			body: JSON.stringify({ title: "Promote role race" }),
 		});
 		let failed: Response;
 		let pendingGoalId: string | undefined;
