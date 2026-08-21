@@ -172,3 +172,39 @@ describe("runSubgoalStep — stamp spawnedFromPlanId immediately after createGoa
 		assert.equal(fx.calls.find(c => c.kind === "createGoal"), undefined);
 	});
 });
+
+describe("runSubgoalStep — canonical candidate validation before child mutation", () => {
+	it("rejects a server-generated 257-character child title before createGoal, gates, scheduler, or setup", async () => {
+		const fx = await buildFixture();
+		afterAll(() => fx.cleanup());
+		let setupCalls = 0;
+		let schedulerCalls = 0;
+		let gateInitCalls = 0;
+		fx.setSetupHook(async () => { setupCalls += 1; });
+		(fx.harness as any).childScheduler.startNextEligible = () => { schedulerCalls += 1; };
+		const initGatesForGoal = fx.gateStore.initGatesForGoal.bind(fx.gateStore);
+		fx.gateStore.initGatesForGoal = (goalId, gateIds) => {
+			gateInitCalls += 1;
+			initGatesForGoal(goalId, gateIds);
+		};
+		const step = buildSubgoalStep({
+			planId: "oversized-server-generated-title",
+			title: "x".repeat(257),
+		});
+		const { signal, active, stepIndex } = buildActive(fx.parent.id);
+
+		const result = await fx.harness.runSubgoalStep(step, signal, active, stepIndex);
+
+		assert.deepEqual(result, {
+			passed: false,
+			output: "runSubgoalStep: candidate validation failed (TITLE_TOO_LONG): title exceeds the maximum length of 256 characters",
+		});
+		assert.equal(fx.calls.some(call => call.kind === "createGoal"), false,
+			"canonical validation must run before GoalManager.createGoal");
+		assert.equal(fx.goalStore.getAll().filter(goal => goal.parentGoalId === fx.parent.id).length, 0,
+			"invalid generated candidates must not persist a child");
+		assert.equal(gateInitCalls, 0, "invalid generated candidates must not initialize gates");
+		assert.equal(schedulerCalls, 0, "invalid generated candidates must not touch the child scheduler");
+		assert.equal(setupCalls, 0, "invalid generated candidates must not start worktree/team setup");
+	});
+});
