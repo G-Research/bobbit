@@ -51,9 +51,45 @@ interface TaskWriteMetrics {
 	durationMs: number;
 }
 
+export type TaskCommittedFact =
+	| {
+		kind: "taskCreated";
+		taskId: string;
+		goalId: string;
+		type: string;
+		state: TaskState;
+		parentTaskId?: string;
+		revision: number;
+	}
+	| {
+		kind: "taskUpdated";
+		taskId: string;
+		goalId: string;
+		state: TaskState;
+		changedFields: string[];
+		revision: number;
+	}
+	| {
+		kind: "taskStateChanged";
+		taskId: string;
+		goalId: string;
+		previousState: TaskState;
+		state: TaskState;
+		revision: number;
+	};
+
+interface TaskFactBatch {
+	facts: TaskCommittedFact[];
+	promise: Promise<void>;
+	resolve: () => void;
+	reject: (error: unknown) => void;
+	started: boolean;
+}
+
 interface TaskPersistence {
 	loadInto(tasks: Map<string, PersistedTask>): void;
 	schedule(ids: Iterable<string>): void;
+	publishStrict(ids: Iterable<string>): Promise<void>;
 	flush(): Promise<void>;
 	close(): Promise<void>;
 	dispose(): void;
@@ -97,6 +133,7 @@ class JsonTaskPersistence implements TaskPersistence {
 	}
 
 	schedule(_ids: Iterable<string>): void { this.writer.schedule(); }
+	publishStrict(_ids: Iterable<string>): Promise<void> { return this.writer.publishStrict(); }
 	flush(): Promise<void> { return this.writer.flush(); }
 	async close(): Promise<void> { await this.writer.flush(); }
 	dispose(): void { /* no persistent handle */ }
@@ -457,6 +494,12 @@ class SqliteTaskPersistence implements TaskPersistence {
 		return this.requestBarrier();
 	}
 
+	publishStrict(ids: Iterable<string>): Promise<void> {
+		this.assertOpen();
+		for (const id of ids) this.dirty.add(id);
+		return this.requestBarrier();
+	}
+
 	getLastWriteMetrics(): TaskWriteMetrics | null { return this.lastWriteMetrics; }
 
 	close(): Promise<void> {
@@ -595,6 +638,10 @@ export class TaskStore {
 	private generation = 0;
 	private acceptingMutations = true;
 	private closePromise: Promise<void> | null = null;
+	private committedFactBatch: TaskFactBatch | null = null;
+
+	/** Called only after a fact's task snapshot crosses a strict persistence fence. */
+	onCommittedFact?: (fact: TaskCommittedFact) => void;
 
 	constructor(stateDir: string, fsImpl: FsLike = realFs, options: TaskStoreOptions = {}) {
 		const persistence = options.persistence ?? (fsImpl === realFs ? "sqlite" : "json");
@@ -620,7 +667,14 @@ export class TaskStore {
 	}
 
 	/** Await all pending persistence, primarily for orderly shutdown/tests. */
-	flush(): Promise<void> { return this.persistence.flush(); }
+	flush(): Promise<void> {
+		const batch = this.committedFactBatch;
+		if (batch) {
+			this.startCommittedFactBatch(batch);
+			return batch.promise;
+		}
+		return this.persistence.flush();
+	}
 
 	/** Flush pending persistence and release the SQLite database handle. */
 	close(): Promise<void> {
@@ -647,6 +701,55 @@ export class TaskStore {
 		this.tasks.set(task.id, task);
 		this.save([task.id]);
 		this.generation++;
+	}
+
+	/**
+	 * Publish a task mutation through the fail-loud persistence barrier, then
+	 * report its already-bounded facts. Observer failures are isolated because
+	 * the authoritative task mutation has already committed.
+	 */
+	putCommitted(task: PersistedTask, facts: readonly TaskCommittedFact[]): Promise<void> {
+		this.assertAcceptingMutations();
+		this.tasks.set(task.id, task);
+		this.generation++;
+		this.save([task.id]);
+		// Preserve the historical coalesced hot path until a host observer is
+		// installed. There is no fact to fence in legacy-only contexts.
+		if (!this.onCommittedFact || facts.length === 0) return Promise.resolve();
+
+		let batch = this.committedFactBatch;
+		if (!batch) {
+			let resolve!: () => void;
+			let reject!: (error: unknown) => void;
+			const promise = new Promise<void>((batchResolve, batchReject) => {
+				resolve = batchResolve;
+				reject = batchReject;
+			});
+			batch = { facts: [], promise, resolve, reject, started: false };
+			this.committedFactBatch = batch;
+			queueMicrotask(() => this.startCommittedFactBatch(batch!));
+		}
+		batch.facts.push(...facts);
+		return batch.promise;
+	}
+
+	private startCommittedFactBatch(batch: TaskFactBatch): void {
+		if (batch.started) return;
+		batch.started = true;
+		if (this.committedFactBatch === batch) this.committedFactBatch = null;
+		void this.persistence.flush().then(() => {
+			for (const fact of batch.facts) {
+				try {
+					this.onCommittedFact?.(Object.freeze({
+						...fact,
+						...(fact.kind === "taskUpdated" ? { changedFields: Object.freeze([...fact.changedFields]) as unknown as string[] } : {}),
+					}));
+				} catch (error) {
+					console.error(`[task-store] Committed fact observer failed for ${fact.taskId}:`, error);
+				}
+			}
+			batch.resolve();
+		}, batch.reject);
 	}
 
 	get(id: string): PersistedTask | undefined { return this.tasks.get(id); }

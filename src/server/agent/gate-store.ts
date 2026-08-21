@@ -67,6 +67,8 @@ export interface GateState {
 	gateId: string;
 	goalId: string;
 	status: GateStatus;
+	/** Durable, per-gate revision incremented only when the persisted status changes. */
+	statusRevision?: number;
 	currentContent?: string;
 	currentContentVersion?: number;
 	currentMetadata?: Record<string, string>;
@@ -74,6 +76,14 @@ export interface GateState {
 	/** Signals at or before this timestamp are ineligible for verification-step cache reuse. */
 	verificationCacheInvalidatedAt?: number;
 	updatedAt: number;
+}
+
+export interface GateStatusCommit {
+	goalId: string;
+	gateId: string;
+	previousStatus: GateStatus;
+	status: GateStatus;
+	revision: number;
 }
 
 export interface GateResetResult {
@@ -232,6 +242,9 @@ function validateGateState(value: unknown, label: string, expectedIdentity?: { g
 		throw new Error(`[gate-store] SQLite row identity mismatch for ${expectedIdentity.goalId}/${expectedIdentity.gateId}`);
 	}
 	if (typeof value.status !== "string" || !GATE_STATUSES.has(value.status as GateStatus)) invalidGate(label, `unsupported status ${String(value.status)}`);
+	if (value.statusRevision !== undefined && (!Number.isSafeInteger(value.statusRevision) || (value.statusRevision as number) < 1)) {
+		invalidGate(label, "statusRevision must be a positive safe integer");
+	}
 	if (!Number.isFinite(value.updatedAt)) invalidGate(label, "updatedAt must be finite");
 	if (!Array.isArray(value.signals)) invalidGate(label, "signals must be an array");
 	if (value.currentContent !== undefined && typeof value.currentContent !== "string") invalidGate(label, "currentContent must be a string");
@@ -714,9 +727,16 @@ export class GateStore {
 	private gates: Map<string, GateState> = new Map();
 	private acceptingMutations = true;
 	private closePromise: Promise<void> | null = null;
+	private readonly pendingInMemoryStatusCommits = new Map<string, GateStatusCommit[]>();
+	private readonly detachedStatusKeys = new Set<string>();
+	private detachedStatusCommits: GateStatusCommit[] = [];
+	private detachedStatusFlush: Promise<void> | null = null;
+	private detachedStatusFlushScheduled = false;
 
-	/** Optional callback invoked when gate summary truth changes (for bumping goal generation). */
+	/** Optional legacy callback invoked when gate summary truth changes. */
 	onStatusChange?: (goalId: string, gateId: string) => void;
+	/** Optional canonical observer invoked only after the changed status is persisted. */
+	onStatusCommitted?: (commit: Readonly<GateStatusCommit>) => void;
 
 	constructor(stateDir: string, fsImpl: FsLike = realFs, options: GateStoreOptions = {}) {
 		const persistence = options.persistence ?? (fsImpl === realFs ? "sqlite" : "json");
@@ -741,6 +761,9 @@ export class GateStore {
 
 	/** Await all pending persistence, primarily for orderly shutdown/tests. */
 	flush(): Promise<void> {
+		if (this.detachedStatusCommits.length > 0 || this.detachedStatusFlush) {
+			return this.flushDetachedStatusCommits();
+		}
 		return this.persistence.flush();
 	}
 
@@ -768,6 +791,63 @@ export class GateStore {
 	/** Strict lifecycle writes share the coalesced persistence queue. */
 	private saveStrict(keys: Iterable<string>): Promise<void> {
 		return this.persistence.publishStrict(keys);
+	}
+
+	private nextStatusCommit(gate: GateState, status: GateStatus, now: number): GateStatusCommit | undefined {
+		if (gate.status === status) return undefined;
+		const previousStatus = gate.status;
+		gate.status = status;
+		gate.statusRevision = (gate.statusRevision ?? 0) + 1;
+		gate.updatedAt = Math.max(now, gate.updatedAt + 1);
+		return { goalId: gate.goalId, gateId: gate.gateId, previousStatus, status, revision: gate.statusRevision };
+	}
+
+	private reportStatusCommits(commits: readonly GateStatusCommit[]): void {
+		for (const commit of commits) {
+			try {
+				this.onStatusCommitted?.(Object.freeze({ ...commit }));
+			} catch (error) {
+				console.error(`[gate-store] Committed status observer failed for ${commit.goalId}/${commit.gateId}:`, error);
+			}
+		}
+	}
+
+	private publishStatusCommits(keys: Iterable<string>, commits: readonly GateStatusCommit[]): Promise<void> {
+		return this.saveStrict(keys).then(() => this.reportStatusCommits(commits));
+	}
+
+	private publishStatusCommitsDetached(keys: Iterable<string>, commits: readonly GateStatusCommit[]): void {
+		if (!this.onStatusCommitted || commits.length === 0) {
+			this.save(keys);
+			return;
+		}
+		for (const key of keys) this.detachedStatusKeys.add(key);
+		this.detachedStatusCommits.push(...commits);
+		this.save(this.detachedStatusKeys);
+		if (this.detachedStatusFlushScheduled || this.detachedStatusFlush) return;
+		this.detachedStatusFlushScheduled = true;
+		queueMicrotask(() => {
+			this.detachedStatusFlushScheduled = false;
+			void this.flushDetachedStatusCommits().catch(error => {
+				console.error("[gate-store] Failed to publish gate status change:", error);
+			});
+		});
+	}
+
+	private flushDetachedStatusCommits(): Promise<void> {
+		if (this.detachedStatusFlush) return this.detachedStatusFlush;
+		this.detachedStatusFlush = (async () => {
+			while (this.detachedStatusCommits.length > 0) {
+				const commits = this.detachedStatusCommits;
+				this.detachedStatusCommits = [];
+				this.detachedStatusKeys.clear();
+				await this.persistence.flush();
+				this.reportStatusCommits(commits);
+			}
+		})().finally(() => {
+			this.detachedStatusFlush = null;
+		});
+		return this.detachedStatusFlush;
 	}
 
 	/** Initialize pending gate states for a new goal. */
@@ -805,6 +885,7 @@ export class GateStore {
 		const modifiedIds = new Set(modifiedGateIds);
 		const now = Date.now();
 		const dirtyKeys: string[] = [];
+		const statusCommits: GateStatusCommit[] = [];
 
 		for (const [key, gate] of this.gates) {
 			if (gate.goalId !== goalId) continue;
@@ -817,9 +898,10 @@ export class GateStore {
 
 			remainingGateIds.delete(gate.gateId);
 			if (modifiedIds.has(gate.gateId)) {
-				gate.status = "pending";
+				const commit = this.nextStatusCommit(gate, "pending", now);
+				if (commit) statusCommits.push(commit);
 				gate.verificationCacheInvalidatedAt = now;
-				gate.updatedAt = now;
+				gate.updatedAt = Math.max(now, gate.updatedAt);
 				dirtyKeys.push(key);
 			}
 		}
@@ -836,7 +918,11 @@ export class GateStore {
 			dirtyKeys.push(key);
 		}
 
-		if (dirtyKeys.length > 0) this.save(dirtyKeys);
+		if (dirtyKeys.length > 0) {
+			if (statusCommits.length > 0) this.publishStatusCommitsDetached(dirtyKeys, statusCommits);
+			else this.save(dirtyKeys);
+		}
+		for (const commit of statusCommits) this.onStatusChange?.(commit.goalId, commit.gateId);
 	}
 
 	getGate(goalId: string, gateId: string): GateState | undefined {
@@ -896,9 +982,12 @@ export class GateStore {
 			verification: { status: "passed", steps: [] },
 		};
 		gate.signals.push(signal);
-		gate.status = "bypassed";
-		gate.updatedAt = now;
-		this.save([key]);
+		const commit = this.nextStatusCommit(gate, "bypassed", now);
+		if (commit) this.publishStatusCommitsDetached([key], [commit]);
+		else {
+			gate.updatedAt = Math.max(now, gate.updatedAt + 1);
+			this.save([key]);
+		}
 		this.onStatusChange?.(goalId, gateId);
 		return signal;
 	}
@@ -916,9 +1005,9 @@ export class GateStore {
 		const key = compositeKey(goalId, gateId);
 		const gate = this.gates.get(key);
 		if (!gate) return;
-		gate.status = status;
-		gate.updatedAt = Date.now();
-		this.save([key]);
+		const commit = this.nextStatusCommit(gate, status, Date.now());
+		if (!commit) return;
+		this.publishStatusCommitsDetached([key], [commit]);
 		this.onStatusChange?.(goalId, gateId);
 	}
 
@@ -1023,8 +1112,9 @@ export class GateStore {
 		const changedGateIds: string[] = [];
 		const unchangedGateIds: string[] = [];
 		const previousStatuses: Record<string, GateStatus> = {};
-		const snapshots = new Map<string, { status: GateStatus; updatedAt: number; cacheAt?: number; hadCacheAt: boolean }>();
+		const snapshots = new Map<string, { status: GateStatus; statusRevision?: number; hadStatusRevision: boolean; updatedAt: number; cacheAt?: number; hadCacheAt: boolean }>();
 		const affectedKeys: string[] = [];
+		const statusCommits: GateStatusCommit[] = [];
 		const now = Date.now();
 
 		for (const affectedGateId of affectedGateIds) {
@@ -1037,16 +1127,19 @@ export class GateStore {
 				affectedKeys.push(key);
 				snapshots.set(key, {
 					status: gate.status,
+					statusRevision: gate.statusRevision,
+					hadStatusRevision: Object.prototype.hasOwnProperty.call(gate, "statusRevision"),
 					updatedAt: gate.updatedAt,
 					cacheAt: gate.verificationCacheInvalidatedAt,
 					hadCacheAt: Object.prototype.hasOwnProperty.call(gate, "verificationCacheInvalidatedAt"),
 				});
 				gate.verificationCacheInvalidatedAt = now;
-				gate.updatedAt = now;
+				gate.updatedAt = Math.max(now, gate.updatedAt);
 			}
 
 			if (gate && gate.status !== "pending") {
-				gate.status = "pending";
+				const commit = this.nextStatusCommit(gate, "pending", now)!;
+				statusCommits.push(commit);
 				changedGateIds.push(affectedGateId);
 			} else {
 				unchangedGateIds.push(affectedGateId);
@@ -1054,9 +1147,23 @@ export class GateStore {
 		}
 
 		try {
-			if (affectedKeys.length > 0) {
-				if (strict) await this.saveStrict(affectedKeys);
-				else if (persist) this.save(affectedKeys);
+			if (!persist) {
+				for (const commit of statusCommits) {
+					const key = compositeKey(commit.goalId, commit.gateId);
+					const pending = this.pendingInMemoryStatusCommits.get(key) ?? [];
+					pending.push(commit);
+					this.pendingInMemoryStatusCommits.set(key, pending);
+				}
+			} else if (affectedKeys.length > 0) {
+				const pendingCommits = affectedKeys.flatMap(key => this.pendingInMemoryStatusCommits.get(key) ?? []);
+				if (strict) {
+					await this.publishStatusCommits(affectedKeys, [...pendingCommits, ...statusCommits]);
+				} else if (pendingCommits.length > 0 || statusCommits.length > 0) {
+					this.publishStatusCommitsDetached(affectedKeys, [...pendingCommits, ...statusCommits]);
+				} else {
+					this.save(affectedKeys);
+				}
+				for (const key of affectedKeys) this.pendingInMemoryStatusCommits.delete(key);
 			}
 		} catch (err) {
 			for (const [key, snapshot] of snapshots) {
@@ -1064,6 +1171,8 @@ export class GateStore {
 				if (!gate) continue;
 				gate.status = snapshot.status;
 				gate.updatedAt = snapshot.updatedAt;
+				if (snapshot.hadStatusRevision) gate.statusRevision = snapshot.statusRevision;
+				else delete gate.statusRevision;
 				if (snapshot.hadCacheAt) gate.verificationCacheInvalidatedAt = snapshot.cacheAt;
 				else delete gate.verificationCacheInvalidatedAt;
 			}
@@ -1101,19 +1210,20 @@ export class GateStore {
 		const dependents = this.getDependentGateIds(gateId, workflow, false);
 		const changedGateIds: string[] = [];
 		const dirtyKeys: string[] = [];
+		const commits: GateStatusCommit[] = [];
 		const now = Date.now();
 
 		for (const depId of dependents) {
 			const key = compositeKey(goalId, depId);
 			const gate = this.gates.get(key);
 			if (gate && gate.status !== "pending") {
-				gate.status = "pending";
-				gate.updatedAt = now;
+				commits.push(this.nextStatusCommit(gate, "pending", now)!);
 				changedGateIds.push(depId);
 				dirtyKeys.push(key);
 			}
 		}
-		if (dirtyKeys.length > 0) this.save(dirtyKeys);
+		if (dirtyKeys.length > 0) this.publishStatusCommitsDetached(dirtyKeys, commits);
+		for (const changedGateId of changedGateIds) this.onStatusChange?.(goalId, changedGateId);
 	}
 
 	/** Remove all gates for a goal (cleanup on goal deletion). */

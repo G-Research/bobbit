@@ -1,4 +1,4 @@
-import type { GateStatus, GateStore } from "./agent/gate-store.js";
+import type { GateStatus, GateStatusCommit, GateStore } from "./agent/gate-store.js";
 import type { GoalStore } from "./agent/goal-store.js";
 import type { ServerMessage } from "./ws/protocol.js";
 
@@ -29,4 +29,12 @@ export function wireGateStatusGenerationInvalidation(
 	gateStore.onStatusChange = () => {
 		goalStore.bumpGeneration();
 	};
+}
+
+/** Wire the canonical post-persistence gate transition observer independently of legacy broadcasts. */
+export function wireGateStatusCommittedObserver(
+	gateStore: Pick<GateStore, "onStatusCommitted">,
+	observer: (commit: Readonly<GateStatusCommit>) => void,
+): void {
+	gateStore.onStatusCommitted = observer;
 }
