@@ -547,7 +547,7 @@ export class MockAgentCore {
 		if (text.includes("GOAL_PROPOSAL_PARITY")) {
 			return {
 				tool: "propose_goal",
-				input: { title: "Parity Goal A", workflow: "general", spec: "Body A.", cwd: "/tmp/parity-goal" },
+				input: { title: "Parity Goal A", workflow: "general", spec: "Body A." },
 				output: "Goal proposal submitted.",
 			};
 		}
