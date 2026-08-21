@@ -787,6 +787,15 @@
       }
     },
     {
+      "path": "tests2/dom/command-history-edits.test.ts",
+      "reason": "Real MessageEditor DOM regression coverage for per-browse-session command-history edits: recalled edits survive bidirectional navigation, untouched entries stay pristine, live-draft edits survive a history round trip, successful sends reset retained edits, and browsing never mutates persisted history.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
       "path": "tests2/core/base-path-cli.test.ts",
       "reason": "Focused CLI coverage for standalone version-flag recognition without consuming option values, flag-over-environment base-path selection, unsafe input rejection, mounted startup URLs, persisted peers, and truthful authentication banners.",
       "execution": {

@@ -185,7 +185,8 @@ export class MessageEditor extends LitElement {
 	// Command history state
 	private _history: string[] = [];
 	private _historyIndex = -1; // -1 = not browsing history
-	private _savedDraft = ""; // draft saved when entering history mode
+	/** Text retained only for the current history-browsing session. `-1` is the live draft. */
+	private _historyEditBuffer = new Map<number, string>();
 
 	// Slash skill autocomplete state
 	@state() private _slashSkills: SlashSkillInfo[] = mergeBuiltInSlashCommands([]);
@@ -227,15 +228,33 @@ export class MessageEditor extends LitElement {
 
 	// Note: history loading is handled in the updated() override near connectedCallback
 
+	private _resetHistoryBrowsing(): void {
+		this._historyIndex = -1;
+		this._historyEditBuffer.clear();
+	}
+
+	private _stashHistoryEntry(): void {
+		this._historyEditBuffer.set(this._historyIndex, this.value);
+	}
+
 	private async _loadHistory() {
-		if (!this.sessionId) return;
+		const sessionId = this.sessionId;
+		this._resetHistoryBrowsing();
+		if (!sessionId) {
+			this._history = [];
+			return;
+		}
 		try {
 			const store = getAppStorage().commandHistory;
-			this._history = await store.getHistory(this.sessionId);
-			this._historyIndex = -1;
+			const history = await store.getHistory(sessionId);
+			if (this.sessionId !== sessionId) return;
+			this._history = history;
 		} catch {
 			// Storage not available — history won't work but that's fine
+			if (this.sessionId !== sessionId) return;
 			this._history = [];
+		} finally {
+			if (this.sessionId === sessionId) this._resetHistoryBrowsing();
 		}
 	}
 
@@ -244,6 +263,7 @@ export class MessageEditor extends LitElement {
 	 * Called externally after a message is sent.
 	 */
 	async addToHistory(text: string): Promise<void> {
+		this._resetHistoryBrowsing();
 		if (!this.sessionId || !text.trim()) return;
 		try {
 			const store = getAppStorage().commandHistory;
@@ -252,7 +272,6 @@ export class MessageEditor extends LitElement {
 		} catch {
 			// Best effort — don't break sending
 		}
-		this._historyIndex = -1;
 	}
 
 	private async _loadSlashSkills() {
@@ -1014,12 +1033,12 @@ export class MessageEditor extends LitElement {
 			e.preventDefault();
 			this.onAbort?.();
 		} else if (e.key === "ArrowUp" && !e.ctrlKey && !e.metaKey && !e.altKey && this._history.length > 0 && this._isCursorOnVisualTopRow()) {
-			// Enter history browsing or go further back
+			// Enter history browsing or go further back.
 			if (this._historyIndex === -1) {
-				// First press — save current draft and show newest history entry
-				this._savedDraft = this.value;
+				this._stashHistoryEntry();
 				this._historyIndex = this._history.length - 1;
 			} else if (this._historyIndex > 0) {
+				this._stashHistoryEntry();
 				this._historyIndex--;
 			} else {
 				return; // Already at oldest entry, let default behavior through
@@ -1028,23 +1047,22 @@ export class MessageEditor extends LitElement {
 			this._applyHistoryEntry();
 		} else if (e.key === "ArrowDown" && !e.ctrlKey && !e.metaKey && !e.altKey && this._historyIndex !== -1 && this._isCursorOnVisualBottomRow()) {
 			e.preventDefault();
+			this._stashHistoryEntry();
 			if (this._historyIndex < this._history.length - 1) {
 				this._historyIndex++;
-				this._applyHistoryEntry();
 			} else {
-				// Past newest entry — restore draft
+				// Past newest entry — restore the retained live draft.
 				this._historyIndex = -1;
-				this.value = this._savedDraft;
-				this.onInput?.(this.value);
 			}
+			this._applyHistoryEntry();
 		}
 	};
 
 	private _applyHistoryEntry() {
-		if (this._historyIndex >= 0 && this._historyIndex < this._history.length) {
-			this.value = this._history[this._historyIndex];
-			this.onInput?.(this.value);
-		}
+		const index = this._historyIndex;
+		if (index < -1 || index >= this._history.length) return;
+		this.value = this._historyEditBuffer.get(index) ?? (index === -1 ? "" : this._history[index]);
+		this.onInput?.(this.value);
 	}
 
 	private handlePaste = async (e: ClipboardEvent) => {
@@ -1137,8 +1155,7 @@ export class MessageEditor extends LitElement {
 				textarea.value = this.value;
 				textarea.focus();
 			}
-			this._historyIndex = -1;
-			this._savedDraft = "";
+			this._resetHistoryBrowsing();
 			void this.addToHistory(text);
 
 			this._showLauncherPending(`Starting ${packSlashLaunch.label}…`);
@@ -1155,8 +1172,7 @@ export class MessageEditor extends LitElement {
 		try {
 			this.dispatchEvent(new CustomEvent("message-send", { bubbles: true, composed: true }));
 			// Reset history browsing state after send
-			this._historyIndex = -1;
-			this._savedDraft = "";
+			this._resetHistoryBrowsing();
 			// Add to history (fire and forget)
 			void this.addToHistory(text);
 			await this.onSend?.(text, this.attachments);
@@ -1206,8 +1222,7 @@ export class MessageEditor extends LitElement {
 			const sent = await this.onSteerSend?.(text);
 			if (sent !== true) return;
 			// Confirmed sent: record the sent text in command history.
-			this._historyIndex = -1;
-			this._savedDraft = "";
+			this._resetHistoryBrowsing();
 			void this.addToHistory(text);
 			// Clear + tombstone the draft ONLY if the composer still holds exactly what we
 			// sent. A mid-flight text edit or a newly added attachment must be preserved.
@@ -1504,9 +1519,7 @@ export class MessageEditor extends LitElement {
 	protected override updated(changed: Map<string, unknown>) {
 		super.updated(changed);
 		if (changed.has("sessionId")) {
-			if (this.sessionId) {
-				this._loadHistory();
-			}
+			void this._loadHistory();
 		}
 		if (changed.has("blockedSendReason") && !this.blockedSendReason) {
 			this._blockedSendError = "";
