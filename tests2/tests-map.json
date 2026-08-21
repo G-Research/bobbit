@@ -21,6 +21,132 @@
   },
   "v2Native": [
     {
+      "path": "tests2/core/host-goal-notifications.test.ts",
+      "reason": "Core coverage for authoritative goal notification transitions, revisions, ordering, and non-fatal publication.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/host-hook-contributions.test.ts",
+      "reason": "Core coverage for declarative interceptor and notification contributions, activation, grants, ordering, and compatibility.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/host-hooks-catalogue.test.ts",
+      "reason": "Core contract coverage for the canonical host-hook catalogue, schemas, scopes, filters, versions, and privacy bounds.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/host-interceptor-router.test.ts",
+      "reason": "Core coverage for typed interceptor routing, deterministic folding, deadlines, authority rechecks, validation, and failure policy.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/host-notification-dispatcher.test.ts",
+      "reason": "Core coverage for canonical notification validation, immutable fanout, ordered queues, isolation, and diagnostics.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/host-pr-settings-notifications.test.ts",
+      "reason": "Core coverage for authoritative pull-request and settings notification publication with bounded value-free payloads.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/host-session-notifications.test.ts",
+      "reason": "Core coverage for canonical session and turn notification boundaries, retry suppression, revisions, and privacy.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/host-task-gate-notifications.test.ts",
+      "reason": "Core coverage for authoritative task and gate notification transitions, revisions, and publication ordering.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/core/host-tool-interceptor-order.test.ts",
+      "reason": "Core coverage for protected afterToolResult interception before persistence and safe toolCallCompleted publication.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "core"
+      }
+    },
+    {
+      "path": "tests2/dom/extension-host-notification-bus.test.ts",
+      "reason": "DOM coverage for scoped Host notification subscriptions, generation fencing, gaps, coalesced refresh, unsubscribe, and legacy isolation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "dom"
+      }
+    },
+    {
+      "path": "tests2/integration/host-hooks-server-boundaries.test.ts",
+      "reason": "Integration coverage for real server hook publication boundaries and canonical payload projection.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/host-notification-routing.test.ts",
+      "reason": "Integration coverage for exact session/project WebSocket notification routing, binding, ordering, and project isolation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/integration/notification-staff-dispatcher.test.ts",
+      "reason": "Integration coverage for notification staff filtering, canonical durable envelopes, deduplication, retry, cancellation, loop protection, and reconciliation.",
+      "execution": {
+        "runner": "vitest",
+        "tier": "unit",
+        "project": "integration"
+      }
+    },
+    {
+      "path": "tests2/browser/journeys/host-notifications.journey.spec.ts",
+      "reason": "Browser journey for scoped session/project Host notifications, authoritative refresh after load/reload/gaps, clean unsubscribe, and project isolation.",
+      "execution": {
+        "runner": "playwright",
+        "tier": "browser",
+        "project": "browser"
+      }
+    },
+    {
       "path": "tests2/core/github-trusted-host-resolver.test.ts",
       "reason": "Core security and caching coverage for token-free gh-config GitHub host discovery, environment stripping, normalization, failure fallback, and single-flight refreshes.",
       "execution": {
@@ -18418,6 +18544,13 @@
       "method": "relocate",
       "replacement": [],
       "rationale": "Opt-in real Pi/real-model context-pressure smoke for exact-once steer and follow-up delivery through automatic compaction; manual/daily only, with explicit credentials, no provider fallback, and bounded request/token/cost/time guards."
+    },
+    {
+      "file": "tests/e2e/host-notifications.spec.ts",
+      "bucket": "daily",
+      "method": "relocate",
+      "replacement": [],
+      "rationale": "Real WebSocket project routing and durable notification-to-staff delivery reconciliation across a real gateway crash/restart."
     }
   ]
 }

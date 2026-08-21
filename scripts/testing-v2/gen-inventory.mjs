@@ -272,6 +272,7 @@ export const DAILY_OVERRIDES = new Map([
 	["tests/e2e/worktree-root-override.spec.ts", "Real worktree-root override on disk."],
 	["tests/e2e/goal-archive-branch-cleanup.spec.ts", "Real bare-repo branch cleanup (realpush) fidelity."],
 	["tests/e2e/goal-task-sqlite-upgrade-restart.spec.ts", "Real per-project legacy GoalStore and TaskStore upgrade, collision-safe retirement, supported-API mutation/deletion, graceful gateway restart, native SQLite identity inspection, and Windows handle-release fidelity."],
+	["tests/e2e/host-notifications.spec.ts", "Real WebSocket project routing and durable notification-to-staff delivery reconciliation across a real gateway crash/restart."],
 	["tests/e2e/port-auto-increment.spec.ts", "Real port-binding race / auto-increment."],
 	["tests/e2e/remove-boot-respawn-restart.spec.ts", "Real boot-respawn across a real gateway restart."],
 	["tests/e2e/anthropic-oauth-restart-sandbox-lock.spec.ts", "Real gateway crash/restart preserves an isolated Anthropic OAuth credential and direct mock-model authentication; its companion sandbox and stale-lock checks retain the same secure credential fixture."],
